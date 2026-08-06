@@ -477,8 +477,8 @@ redact/purge 是 UPDATE，不会产生新的业务行版本。传播靠 `redacti
 | 摘要的触发时机与粒度 | 会话结束触发已定；主题级与时段级摘要的划分方式未定 |
 | 视频处理策略 | 抽帧频率、是否做场景切分，待第一版媒体 pipeline 落地后评估 |
 | `entity_merges` 的撤销 | 现为 first-writer-wins + 不可逆。引入 revoke 需把 `UNIQUE(from_entity)` 改 partial index，推迟到有真实需求时 |
-| 检索评测体系 | **P1 必做**：LongMemEval-S 回放 + 自建中英双语私有集 + retrieval_traces 遥测表，动检索代码前定，详见 docs/review-2026-08-07.md |
-| 记忆注入契约 | **P1 必做**：注入位置（缓存前缀 vs 回合块）、格式（带 fact id 的定界块）、框定语义（防记忆投毒）、预算双帽，写 agent loop 前定，详见 docs/review-2026-08-07.md |
+| 检索评测体系 | **P1 必做**：LongMemEval-S 回放 + 自建中英双语私有集 + retrieval_traces 遥测表，动检索代码前定，详见 roadmap.md |
+| 记忆注入契约 | **P1 必做**：注入位置（缓存前缀 vs 回合块）、格式（带 fact id 的定界块）、框定语义（防记忆投毒）、预算双帽，写 agent loop 前定，详见 roadmap.md |
 
 ---
 

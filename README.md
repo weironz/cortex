@@ -71,7 +71,12 @@ Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：
 
 ## 文档
 
-- [架构与技术选型](docs/architecture.md) —— 决策记录、否决的备选方案、已接受的代价
-- [记忆系统设计](docs/memory.md) —— 存储模型、双时间轴、检索策略与 schema
-- [参考项目](docs/references.md) —— 同类 Agent 调研、许可证边界与借鉴策略
-- [架构复审记录 2026-08-07](docs/review-2026-08-07.md) —— 对抗性复审结论、P1/P2 待办与风险清单
+| 文档 | 回答什么问题 |
+|---|---|
+| [roadmap.md](docs/roadmap.md) | **接下来做什么** |
+| [roadmap-done.md](docs/roadmap-done.md) | 已经做了什么 |
+| [architecture.md](docs/architecture.md) | 为什么这么设计（决策、否决的备选、代价、风险） |
+| [memory.md](docs/memory.md) | 记忆系统怎么工作（存储模型、双时间轴、检索、同步） |
+| [references.md](docs/references.md) | 同类项目调研与许可证边界 |
+
+schema 的权威版本是 [`migrations/`](migrations/)，文档中的 SQL 片段以它为准。
