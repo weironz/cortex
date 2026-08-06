@@ -1,0 +1,6 @@
+# `live` tests need a running cortexd on 127.0.0.1:8080. They skip themselves
+# when it is absent, so they are safe to run by default; the tag exists so CI
+# can exclude them explicitly with `--exclude-tags live`.
+tags:
+  live:
+    description: Requires a running cortexd daemon.

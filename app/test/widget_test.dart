@@ -51,6 +51,33 @@ void main() {
     expect(find.byIcon(Icons.menu_rounded), findsOneWidget);
   });
 
+  testWidgets('memory panel exposes the as_of time-travel control', (
+    tester,
+  ) async {
+    await boot(tester);
+
+    // Default state is "now".
+    expect(find.text('当前时刻的记忆'), findsOneWidget);
+
+    await tester.tap(find.text('当前时刻的记忆'));
+    await tester.pumpAndSettle();
+
+    // A date picker opens; pick whatever day is preselected and confirm.
+    expect(find.text('回放到哪一天为止已知的记忆'), findsOneWidget);
+    await tester.tap(find.text('OK'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+
+    // The bar switches to the replay state and offers a way back.
+    expect(find.textContaining('回放至'), findsOneWidget);
+    expect(find.byTooltip('回到现在'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('回到现在'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(find.text('当前时刻的记忆'), findsOneWidget);
+  });
+
   testWidgets('streams a reply and exposes the per-turn memory', (
     tester,
   ) async {
