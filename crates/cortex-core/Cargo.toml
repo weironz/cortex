@@ -1,0 +1,16 @@
+[package]
+name = "cortex-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cortex 的核心业务逻辑：记忆引擎、agent 循环、工具执行"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ulid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

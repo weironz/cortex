@@ -1,0 +1,63 @@
+name: cortex
+
+services:
+  # ─── Postgres + pgvector ──────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: cortex-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cortex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cortex_dev_only}
+      POSTGRES_DB: ${POSTGRES_DB:-cortex}
+      # 中文分词在 Rust 侧用 jieba-rs 完成，此处无需任何分词扩展
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cortex} -d ${POSTGRES_DB:-cortex}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ─── RustFS（S3 兼容对象存储）──────────────────────────
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: cortex-rustfs
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    environment:
+      # 四卷纠删码 —— 勿改为单卷，单卷无任何冗余
+      RUSTFS_VOLUMES: /data/rustfs{0...3}
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-cortexadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-cortex_dev_only}
+      # strict = 每次写入落盘后才确认。「永不丢失」的前提，勿调为 relaxed
+      RUSTFS_DURABILITY_MODE: strict
+      RUSTFS_OBS_LOGGER_LEVEL: info
+    ports:
+      - "${RUSTFS_API_PORT:-9000}:9000"      # S3 API
+      - "${RUSTFS_CONSOLE_PORT:-9001}:9001"  # 控制台
+    volumes:
+      - rustfs_0:/data/rustfs0
+      - rustfs_1:/data/rustfs1
+      - rustfs_2:/data/rustfs2
+      - rustfs_3:/data/rustfs3
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  pg_data:
+  rustfs_0:
+  rustfs_1:
+  rustfs_2:
+  rustfs_3:
