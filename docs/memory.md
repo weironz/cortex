@@ -21,7 +21,7 @@ Cortex 的核心。本文档定义记忆的存储模型、写入流程、检索�
 
 事实会过期。业界做法（Graphiti）是把旧边的 `invalid_at` 就地更新——**那是 `UPDATE`，会破坏本项目的无冲突性质。**
 
-Cortex 的做法：**失效本身也是一条追加记录**（`fact_invalidations`）。
+Cortex 的做法：**失效本身也是一条追加记录**（`fact_events`）。
 
 后果是两台设备可能各自独立地记录同一条事实的失效——这不是冲突，取最早的一条即可。查询有效事实时排除掉被失效记录指向的即可。
 
@@ -46,8 +46,8 @@ L0 只写不读，仅在需要精确回溯时（"上次我们说的那个"）按
 
 | 时间轴 | 含义 | 对应字段 |
 |---|---|---|
-| **事件时间**<br>（valid time） | 事情在**真实世界**中何时为真 | `facts.valid_at` → `fact_invalidations.invalid_at` |
-| **系统时间**<br>（transaction time） | Cortex **何时知道**这件事 | `facts.created_at` → `fact_invalidations.created_at` |
+| **事件时间**<br>（valid time） | 事情在**真实世界**中何时为真 | `facts.valid_at` → `fact_events.invalid_at` |
+| **系统时间**<br>（transaction time） | Cortex **何时知道**这件事 | `facts.created_at` → `fact_events.created_at` |
 
 ### 为什么必须两条
 
@@ -67,16 +67,16 @@ L0 只写不读，仅在需要精确回溯时（"上次我们说的那个"）按
 SELECT f.* FROM facts f
 WHERE f.created_at <= :T
   AND NOT EXISTS (
-      SELECT 1 FROM fact_invalidations i
-      WHERE i.fact_id = f.id AND i.created_at <= :T
+      SELECT 1 FROM fact_events e
+      WHERE e.fact_id = f.id AND e.op = 'invalidate' AND e.created_at <= :T
   );
 
 -- ② 就我们现在所知，真实世界在 T 时刻是什么样（史实重建）
 SELECT f.* FROM facts f
 WHERE (f.valid_at IS NULL OR f.valid_at <= :T)
   AND NOT EXISTS (
-      SELECT 1 FROM fact_invalidations i
-      WHERE i.fact_id = f.id AND i.invalid_at <= :T
+      SELECT 1 FROM fact_events e
+      WHERE e.fact_id = f.id AND e.op = 'invalidate' AND e.invalid_at <= :T
   );
 ```
 
@@ -131,13 +131,14 @@ CREATE TABLE episode_blobs (
 CREATE TABLE blob_transcripts (
     id          TEXT         PRIMARY KEY,
     blob_hash   TEXT         NOT NULL REFERENCES blobs(hash),
-    kind        TEXT         NOT NULL,        -- asr / vision_caption / ocr / frame_caption
-    text        TEXT         NOT NULL,
-    tsv         tsvector,
-    embedding   vector(1024),
-    model       TEXT         NOT NULL,        -- 记录模型，便于将来重跑升级
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    sync_seq    BIGSERIAL
+    kind            TEXT         NOT NULL,    -- asr / vision_caption / ocr / frame_caption
+    text            TEXT         NOT NULL,
+    tsv             tsvector,
+    embedding       vector(1024),
+    transcribed_by  TEXT         NOT NULL,    -- 转录模型（whisper / vision 等），便于将来重跑
+    embedding_model TEXT         NOT NULL,    -- 向量模型，与转录模型相互独立
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    sync_seq        BIGSERIAL
 );
 ```
 
@@ -147,14 +148,15 @@ CREATE TABLE blob_transcripts (
 
 ```sql
 CREATE TABLE entities (
-    id          TEXT         PRIMARY KEY,
-    kind        TEXT         NOT NULL,        -- person/project/file/org/concept/tool… 开放不枚举
-    name        TEXT         NOT NULL,
-    summary     TEXT,
-    embedding   vector(1024),
-    device_id   TEXT         NOT NULL,
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    sync_seq    BIGSERIAL
+    id              TEXT         PRIMARY KEY,
+    kind            TEXT         NOT NULL,    -- person/project/file/org/concept/tool… 开放不枚举
+    name            TEXT         NOT NULL,
+    summary         TEXT,
+    embedding       vector(1024),
+    embedding_model TEXT         NOT NULL,    -- 见 §七「换模型不停机」
+    device_id       TEXT         NOT NULL,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    sync_seq        BIGSERIAL
 );
 
 -- 别名消解：不修改 entities，追加一条合并记录
@@ -177,6 +179,7 @@ CREATE TABLE facts (
     statement         TEXT         NOT NULL,   -- 自然语言表述，用于向量化与展示
     tsv               tsvector,
     embedding         vector(1024),
+    embedding_model   TEXT         NOT NULL,   -- 见 §七「换模型不停机」
     domain            TEXT,                    -- 领域感知检索的依据
     confidence        REAL         NOT NULL DEFAULT 1.0,
 
@@ -189,20 +192,36 @@ CREATE TABLE facts (
     sync_seq          BIGSERIAL
 );
 
--- 失效：追加而非修改
-CREATE TABLE fact_invalidations (
+-- 事实的生命周期事件：一律追加，永不修改
+-- 系统的自动失效与用户的手工编辑，共用这一张表
+CREATE TABLE fact_events (
     id                TEXT         PRIMARY KEY,
     fact_id           TEXT         NOT NULL REFERENCES facts(id),
-    invalid_at        TIMESTAMPTZ  NOT NULL,   -- 【事件时间】何时停止为真
-    superseded_by     TEXT         REFERENCES facts(id),  -- 被哪条取代，NULL = 单纯失效
-    reason            TEXT,
+
+    op                TEXT         NOT NULL,   -- invalidate | revoke  （见下）
+    kind              TEXT,                    -- op=invalidate 时的原因分类：
+                                               --   superseded 被新事实取代（世界变了）
+                                               --   corrected  抽取错误（从未为真）
+                                               --   retracted  用户主动删除（不表态真值）
+                                               --   expired    到期自然失效
+
+    invalid_at        TIMESTAMPTZ,             -- 【事件时间】何时停止为真
+    superseded_by     TEXT         REFERENCES facts(id),  -- 被哪条取代，可空
+
+    actor             TEXT         NOT NULL,   -- system | user
+    reason            TEXT,                    -- 用户填写的理由，或系统判定依据
     source_episode_id TEXT         REFERENCES episodes(id),
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),  -- 【系统时间】何时发现
+    device_id         TEXT         NOT NULL,
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),  -- 【系统时间】何时发生
     sync_seq          BIGSERIAL
 );
 ```
 
 **图结构无需单独的关系表**——`facts` 中 `subject_id → object_entity_id` 的记录本身就是图的边。
+
+**关于 `op`**：`invalidate` 使事实失效，`revoke` 撤销最近一次失效（即"恢复"）。
+一条事实的当前状态 = 按 `created_at` 顺序回放其全部事件后的末态。
+这样"删了又恢复"的完整历史被保留下来，且**撤销本身也是追加**，不破坏 append-only。
 
 ### L2 摘要层
 
@@ -214,6 +233,7 @@ CREATE TABLE summaries (
     text         TEXT         NOT NULL,
     tsv          tsvector,
     embedding    vector(1024),
+    embedding_model TEXT      NOT NULL,        -- 见 §七「换模型不停机」
     covers_from  TIMESTAMPTZ,
     covers_to    TIMESTAMPTZ,
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -224,12 +244,20 @@ CREATE TABLE summaries (
 ### 常用视图
 
 ```sql
+-- 每条事实的最新一次生命周期事件
+CREATE VIEW fact_status AS
+SELECT DISTINCT ON (fact_id)
+       fact_id, op, kind, invalid_at, superseded_by, actor,
+       created_at AS decided_at
+FROM fact_events
+ORDER BY fact_id, created_at DESC;
+
+-- 当前有效的事实：从未失效，或最近一次事件是 revoke（已恢复）
 CREATE VIEW active_facts AS
 SELECT f.*
 FROM facts f
-WHERE NOT EXISTS (
-    SELECT 1 FROM fact_invalidations i WHERE i.fact_id = f.id
-);
+LEFT JOIN fact_status s ON s.fact_id = f.id
+WHERE s.op IS NULL OR s.op = 'revoke';
 
 -- 实体的最终归属（别名消解后）
 CREATE VIEW canonical_entities AS
@@ -281,10 +309,13 @@ SELECT id, canonical FROM resolve;
 2. 若无 → 直接写入，结束
 3. 若有 → 判定关系：
       补充   → 两条并存
-      取代   → 写入新 fact，并追加 fact_invalidations:
+      取代   → 写入新 fact，并追加 fact_events:
+                 op            = 'invalidate'
+                 kind          = 'superseded'
                  fact_id       = 旧事实
                  invalid_at    = 新事实的 valid_at
                  superseded_by = 新事实 id
+                 actor         = 'system'
                  created_at    = now()  ← 系统时间自动记录
       矛盾且无法判定 → 两条并存，降低 confidence，标记待人工确认
 ```
@@ -360,10 +391,33 @@ CREATE INDEX idx_facts_subject  ON facts (subject_id);           -- 图遍历
 CREATE INDEX idx_facts_object   ON facts (object_entity_id);
 CREATE INDEX idx_facts_sp       ON facts (subject_id, predicate); -- 矛盾检测
 CREATE INDEX idx_episodes_time  ON episodes (occurred_at DESC);
-CREATE INDEX idx_inval_fact     ON fact_invalidations (fact_id);
+CREATE INDEX idx_fact_events    ON fact_events (fact_id, created_at DESC);
+CREATE INDEX idx_facts_model    ON facts (embedding_model);          -- 分批回填用
 ```
 
 **冷迁移暂不实现。** L0 超过约十万条后，再考虑将老 episodes 的正文移入 RustFS，库中仅保留元数据与 `tsv`。
+
+### 换模型不停机
+
+不同 embedding 模型产生的向量**不在同一个语义空间**——坐标系不同，混在一起算距离毫无意义。所以更换模型意味着全部向量作废、索引重建。
+
+十万条记忆时这是数十分钟到数小时的停机。为避免这种局面，所有带 `embedding` 的表都必须记录 `embedding_model`：
+
+| 表 | 字段 |
+|---|---|
+| `facts` / `entities` / `summaries` / `blob_transcripts` | `embedding_model TEXT NOT NULL` |
+
+有了它，换模型可以渐进进行而无需停服：
+
+```
+1. 新写入的一律用新模型
+2. 后台任务按 embedding_model 分批回填旧记录
+3. 检索期间按模型分组，各自召回后再由 RRF 融合
+   （不同空间的分数不可直接比较，但 RRF 只用排名，天然兼容）
+4. 全部回填完成后，删除旧模型的向量与索引
+```
+
+**维度变化需额外处理**：`vector(1024)` 写死在列定义中，换成其他维度须新增一列（如 `embedding_v2 vector(1536)`），迁移完毕后再删除旧列。
 
 ---
 
@@ -414,15 +468,100 @@ PostgreSQL 默认不支持中文分词，`to_tsvector('simple', ...)` 对中文�
 
 ---
 
-## 十一、待决问题
+## 十一、记忆的可编辑性
+
+**"可审计"是 Cortex 的核心差异化。** 用户必须能看到记忆、追问出处、修正错误、删除不想要的——同时审计链保持完整。
+
+### 四类操作
+
+用户的编辑与系统的自动失效**共用 `fact_events` 表**，靠 `kind` 与 `actor` 区分：
+
+| 用户动作 | 落库 | 语义 |
+|---|---|---|
+| **修正**一条事实 | 追加新 `fact` + `op=invalidate, kind=corrected, superseded_by=新事实` | 抽取错了，旧的**从未为真** |
+| **删除**一条记忆 | `op=invalidate, kind=retracted` | 不表态真值，仅不再使用 |
+| **恢复**已删除的 | `op=revoke` | 撤销上一次失效 |
+| **抹除**原始内容 | 见下文「redact 与 purge」 | 真正销毁数据 |
+
+`actor` 一律记为 `user`，并要求填写 `reason`。
+
+### 为什么必须区分 corrected / retracted / superseded
+
+三者在时间轴上的语义完全不同，混为一谈会让认知回放出错：
+
+| kind | 旧事实曾经为真吗 | `invalid_at` 取值 |
+|---|---|---|
+| `superseded` | ✅ 曾经为真，世界变了 | 世界变化的时刻 |
+| `corrected` | ❌ **从未为真**，抽取错误 | 等于 `facts.valid_at`，即自始无效 |
+| `retracted` | 🤷 不表态 | 用户操作的时刻 |
+| `expired` | ✅ 曾经为真，到期了 | 到期时刻 |
+
+这个区分还有一个实际价值：**`corrected` 的比例直接反映抽取质量**，是优化抽取 prompt 的最佳反馈信号。
+
+### 删除后，历史回放里还看得见吗
+
+**看得见，而且这是正确行为。**
+
+认知回放查询（§三 查询①）的条件是 `e.created_at <= :T`。用户今天删除的记忆，其 `fact_events.created_at` 是今天——查询三个月前的认知状态时不会被排除。
+
+> 三个月前你**确实**是这么认为的。事后删除不能改变当时的事实。
+
+这正是双时间轴存在的意义。日常检索走 `active_facts` 视图，看不到已删除的；审计视图则完整可见。
+
+### redact 与 purge —— 唯一允许破坏 append-only 的操作
+
+有些内容必须真正销毁：误粘贴的 API key、他人隐私、法律要求删除的数据。对这些，"隐藏"是不够的。
+
+| 操作 | 行为 | 审计链 |
+|---|---|---|
+| **redact** | 清空 `episodes.text` / `content` 正文，保留元数据与全部时间戳 | ✅ 完整——知道此处曾有内容、何时被抹除、由谁 |
+| **purge** | 同上，并从 RustFS 删除关联 blob | ✅ 同上 |
+
+```sql
+CREATE TABLE redactions (
+    id            TEXT         PRIMARY KEY,
+    target_kind   TEXT         NOT NULL,      -- episode | blob
+    target_id     TEXT         NOT NULL,
+    mode          TEXT         NOT NULL,      -- redact | purge
+    reason        TEXT         NOT NULL,      -- 强制填写
+    actor         TEXT         NOT NULL,
+    device_id     TEXT         NOT NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    sync_seq      BIGSERIAL
+);
+```
+
+约束：
+
+- **必须显式触发**，需二次确认，绝不自动执行
+- **墓碑记录本身不可删除**——可以抹掉内容，但"这里发生过抹除"永远留存
+- 由 `redaction` 派生的 `facts` 需一并 `invalidate`（`kind=retracted`）
+- 内容寻址的 blob 需先确认无其他 episode 引用，方可 purge
+
+这是全系统唯一的例外。文档开头「不可协商的设计原则」中的 append-only，在此处让位于用户对自己数据的处置权——但**让位的是内容，不是审计链**。
+
+### 界面应提供的能力
+
+| 能力 | 说明 |
+|---|---|
+| **为什么记得这个** | 沿 `source_episode_id` 跳转到产生该记忆的原始对话 |
+| **它是怎么变的** | 展示该事实的完整 `fact_events` 时间线 |
+| **当时我以为什么** | 按系统时间回放任意历史时点的认知状态 |
+| 修正 / 删除 / 恢复 | 对应上表四类操作 |
+| 抹除 | 危险操作，独立入口 + 二次确认 |
+
+---
+
+## 十二、待决问题
 
 | 问题 | 现状 |
 |---|---|
-| Embedding 模型与维度 | 暂定 `bge-m3` / 1024。更换需重建全部向量索引，宜早定 |
+| Embedding 模型与维度 | **已定** `bge-m3` / 1024。所有向量表记录 `embedding_model`，支持不停机迁移（§七） |
+| 记忆的用户可编辑界面 | **已定** 见 §十一。编辑/删除均追加 `fact_events`，`redact`/`purge` 为唯一例外 |
 | cross-encoder 重排是否引入 | 提升质量但增加延迟。第一版先只用 RRF，实测不足再加 |
 | 摘要的触发时机与粒度 | 会话结束触发已定；主题级与时段级摘要的划分方式未定 |
 | 视频处理策略 | 抽帧频率、是否做场景切分，待第一版媒体 pipeline 落地后评估 |
-| 记忆的用户可编辑界面 | 可审计是核心卖点，但编辑动作本身如何 append-only 记录，待设计 |
+| `entity_merges` 的撤销 | 实体合并目前不可逆。是否比照 `fact_events` 引入 `revoke`，待评估 |
 
 ---
 
