@@ -171,7 +171,12 @@ TypeScript，Apache-2.0。`qwen-code` 即基于其 fork。
 
 crate 结构：`goose`(core) · `goose-cli` · `goose-providers` / `goose-provider-types` · `goose-mcp` · `goose-sdk` / `goose-sdk-types` · `goose-local-inference` · `goose-download-manager` · `goose-acp-macros` · `goose-test*`
 
-**注意：`goose-sdk` 的存在说明它设计上支持被当作库依赖。** 动手前应先评估其表面积 —— 若够用，则直接依赖 crate 优于 fork 整个仓库，可完全避免上游同步成本。
+**取件结论（2026-08-07 复审后更正）**：`goose-sdk` 是 uniffi FFI 绑定 crate（面向 Python/Kotlin），
+**不是 Rust SDK**，无评估价值。正确的依赖面是 `goose-provider-types` + `goose-providers`
+两个 crate（零 goose core 依赖，goose-cli 自身就是这样嵌入的）。以 git 依赖 pin rev 引入
+（alpha 版本语义，勿浮动跟随）。两个已知集成坑：
+① 依赖声明必须 `features = ["rustls-tls"]`——其默认 feature 为空，reqwest 无 TLS 后端，
+运行时 https 直接失败；② 残留的 `GOOSE_*` 环境变量要收编进 Cortex 配置层，不让用户面对。
 
 桌面端为 **Electron + React 19 + Radix**，非 Tauri。Cortex 若采用 Flutter，则该前端不复用。
 

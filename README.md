@@ -7,7 +7,7 @@
 Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：**记忆是它的核心，而不是附加功能。**
 
 - **永不丢失** —— 全链路 append-only，每一轮对话原样归档，无 UPDATE、无 DELETE
-- **全模态** —— 文本、图片、音频、视频统一入库并可检索
+- **对话全模态归档** —— 你发给 agent 的一切（文本、图片、语音、视频）永久留存并可检索（注意：是对话内容的归档，不是 Rewind 式的屏幕/环境全量捕获）
 - **云端同步** —— 记忆存于远端，任何设备连上即是完整的你
 - **可审计** —— 每条记忆可追溯出处，可查看、可修改、可删除
 - **事实演化** —— 记忆过期时标记取代而非抹除，可回答"三个月前为何如此决定"
@@ -20,19 +20,20 @@ Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：
 ## 架构
 
 ```
-                    cortex-core (Rust)
-                    唯一的业务逻辑实现
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-   cortex-cli          cortexd          flutter_rust_bridge
-     (Rust)         (Rust · axum)              │
-                          │              Flutter 单一 UI 代码库
-                      HTTP / WS                │
-                          └────────┬───────────┘
-                                   │
-                  桌面 Win/macOS/Linux · 移动 iOS/Android · Web
-                            —— 六个平台，一套 UI ——
+                 cortexd（远端，记忆权威）
+                 axum · Postgres+pgvector · RustFS
+                        ▲  HTTP / WS（同一套协议）
+        ┌───────────────┼───────────────┬──────────────┐
+        │               │               │              │
+    cortex-cli     Flutter 桌面    Flutter 移动    Flutter Web
+        │               │
+        └───┬───────────┘
+            ▼
+   本地执行代理：agent 循环 · 文件/shell 工具
+   本地 SQLite 仅作缓存与离线写队列
+
+   cortex-core (Rust) 是唯一的业务逻辑实现，
+   被服务端与全部客户端共同链接
 ```
 
 服务端存储：
@@ -46,7 +47,8 @@ Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：
 |---|---|
 | 全链路 append-only | 多端并发写天然无冲突，同时满足"永不丢失" |
 | ULID 主键 | 全局唯一、时间有序，多端无需协调即可生成 |
-| daemon-first | 单写者、共享 embedding 模型常驻、后台任务、跨端连续性 |
+| daemon-first | 单写者、共享 embedding 模型常驻、后台任务、跨端连续性；记忆权威唯远端 cortexd |
+| sync_log outbox | 同步的唯一事实序：单游标、不漏行、天然 FK 序，兼作实时推送事件源 |
 | 客户端本地 SQLite | 仅作缓存与离线写队列，**非**真相来源 |
 | 记忆 schema 领域无关 | entity / fact / relation 抽象，编码与办公通吃 |
 | 双时间轴 | 区分"事情何时变"与"我何时知道"，支撑可审计与历史回放 |
@@ -72,3 +74,4 @@ Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：
 - [架构与技术选型](docs/architecture.md) —— 决策记录、否决的备选方案、已接受的代价
 - [记忆系统设计](docs/memory.md) —— 存储模型、双时间轴、检索策略与 schema
 - [参考项目](docs/references.md) —— 同类 Agent 调研、许可证边界与借鉴策略
+- [架构复审记录 2026-08-07](docs/review-2026-08-07.md) —— 对抗性复审结论、P1/P2 待办与风险清单

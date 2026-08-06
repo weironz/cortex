@@ -9,31 +9,45 @@
 
 ## 一、总体架构
 
-```
-                    cortex-core (Rust)
-                    唯一的业务逻辑实现
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-   cortex-cli          cortexd          flutter_rust_bridge
-     (Rust)         (Rust · axum)              │
-                          │              Flutter 单一 UI 代码库
-                      HTTP / WS                │
-                          └────────┬───────────┘
-                                   │
-                  桌面 Win/macOS/Linux · 移动 iOS/Android · Web
-                            —— 六个平台，一套 UI ——
-```
-
-服务端：
+**运行时拓扑**（谁连谁）：
 
 ```
-cortexd
-  ├─ Postgres + pgvector    episodes / entities / facts / 向量索引
-  └─ RustFS（S3 兼容）       图片 / 音频 / 视频 / 大文本，SHA-256 内容寻址
+                 cortexd（远端，记忆权威）
+                 axum · Postgres+pgvector · RustFS
+                        ▲  HTTP / WS（同一套协议）
+        ┌───────────────┼───────────────┬──────────────┐
+        │               │               │              │
+    cortex-cli     Flutter 桌面    Flutter 移动    Flutter Web
+        │               │
+        └───┬───────────┘
+            ▼
+   本地执行代理（桌面/CLI 场景）
+   agent 循环 · 文件/shell 工具 · 流式中转
+   本地 SQLite（仅缓存 + 离线写队列）
 ```
 
-**桌面端额外运行一个本地 cortexd 实例**——本地 agent 需要文件系统与 shell 权限，这部分不能放在远端。本地实例与远端实例之间做同步。此形态与 goose（`goosed` 独立进程 + UI 壳）同构。
+**crate 依赖**（谁复用谁）：`cortex-core` 是唯一的业务逻辑实现，被 `cortexd`、
+`cortex-cli`、（经 flutter_rust_bridge）Flutter 客户端共同链接。
+
+**本地执行代理的定位（2026-08 复审裁决，方案 A）**：桌面端的本地进程是
+**执行代理，不是第二个记忆库**——
+
+- 有：agent 循环、文件系统/shell 工具、LLM 流式中转、客户端级 SQLite 缓存与离线写队列
+- 没有：记忆存储权威、`sync_log` 发号、抽取 pipeline
+
+记忆读写的权威**唯远端 cortexd**。这一裁决同时消解三个问题：本地存储引擎
+（schema 深度绑定 PG，SQLite 版等于第二套存储实现）、双序号权威冲突、
+派生数据双抽取（两端各跑抽取会产出 ULID 不同而内容近似的重复 facts）。
+代价是离线时检索降级为本地缓存命中。
+
+若将来要做「离线完整可用」（本地全量副本），那是**再造半个存储层**的预算，
+必须先补完整复制协议文档——此路线已知，不是现在的方案。
+
+与 goose 的关系：进程形态同构（`goosed` 独立进程 + UI 壳），但仅此而已——
+goose 的存储是单机 SQLite 且**没有任何实例间同步**，同步机制为 Cortex 独有，无先例可循。
+
+**CLI 是 cortexd 的瘦客户端**，与 Flutter 走同一套 HTTP/WS 协议；链接 `cortex-core`
+仅为复用客户端侧逻辑；本地 daemon 未运行时自动拉起（codex app-server 模式）。
 
 ---
 
@@ -43,7 +57,7 @@ cortexd
 
 **理由**
 
-- 同一份逻辑复用于 CLI、服务端、客户端三处
+- 同一份 `cortex-core` 被服务端与各客户端共同链接，业务逻辑只写一遍
 - 记忆检索（混合召回 + 融合排序）是每轮对话都要走的计算密集路径
 - cortexd 是常驻守护进程，这是 Rust 的主场
 
@@ -68,7 +82,7 @@ Tokio 官方出品，Rust 服务端生态最主流。搭配 `sqlx`（数据库�
 | 图遍历 | 递归 CTE / 邻接查询 |
 | 时间近因 | B-tree |
 
-加上事务、JSONB、`BIGSERIAL` 同步序号。**少一个组件就少一份运维与一致性问题**——对一个人做六端而言，这是决定性的。
+加上事务、JSONB、`sync_log` outbox（同步的唯一事实序，见 memory.md §四/§九）。**少一个组件就少一份运维与一致性问题**——对一个人做六端而言，这是决定性的。
 
 **否决的备选**
 
@@ -120,6 +134,8 @@ Tokio 官方出品，Rust 服务端生态最主流。搭配 `sqlx`（数据库�
   Flutter Web 走 presigned PUT 直传时需要放开
 - 不支持对象版本控制，但**无妨**——blob 以 SHA-256 为 key，对象天然不可变，永不被覆盖
 - 存储层封在 `BlobStore` trait 后，只用标准 S3 API，将来换 R2 / MinIO / AWS S3 零成本
+- **RustFS 处于 alpha**（社区已有 disk-full 元数据损坏不可恢复的实录）。配套要求：磁盘用量 85% 硬告警、
+  备份镜像先行（见下节）、trait 保留退路——接受它可能在 v1 周期内出事
 
 ---
 
@@ -165,6 +181,11 @@ Rust 在移动端**没有**成熟的原生 UI 框架，不应尝试用 Rust 写�
 **理由**：多语言（中英文均强）、8192 token 长文本、开源可本地运行（**记忆内容不出网**）、1024 维是表达力与内存占用的平衡点。
 
 所有向量表记录 `embedding_model` 字段，支持换模型时渐进回填、不停机迁移。详见 [memory.md §七](memory.md)。
+
+**部署预算**：默认 **int8 量化** ONNX（fp32 约 2.2 GB / int8 约 600 MB，8 GB 内存机器上 int8 是必选项）；
+交互 query 用 batch=1，后台回填用大 batch。低配 VPS（2 vCPU）单条 query 实测可达 ~700 ms，
+应在部署文档写明最低推荐配置；后台管道（转录+抽取+embedding）需带积压深度指标与「处理中」状态展示，
+静默滞后会毁掉移动端「随手拍照录音进记忆」的体验。
 
 ---
 
@@ -214,9 +235,9 @@ PostgreSQL 默认不支持中文分词，`to_tsvector('simple', ...)` 对中文�
 
 无 `UPDATE`、无 `DELETE`（唯一例外见 [memory.md §十一](memory.md) 的 `redact`/`purge`）。
 
-- **无冲突**：多端并发写天然无冲突，同步退化为按 `sync_seq` 的单向增量拉取，无需 diff、无需三方合并、无需 CRDT
+- **无冲突**：多端并发写天然无冲突，同步退化为面向 `sync_log` 的单游标增量拉取（memory.md §九），无需 diff、无需三方合并、无需 CRDT
 - **ULID 主键**：客户端可离线生成，全局唯一且时间有序，无需中心发号器
-- **兑现"永不丢失"**：系统中不存在销毁数据的常规路径
+- **消灭应用层删改路径**：系统中不存在销毁数据的常规路径。注意这不等于物理持久性——「永不丢失」由备份体系兑现（见下）
 
 ---
 
@@ -225,6 +246,20 @@ PostgreSQL 默认不支持中文分词，`to_tsvector('simple', ...)` 对中文�
 **不是真相来源。** 真相在远端 cortexd。
 
 本地 SQLite 的职责：检索缓存（避免每轮对话走网络带来 200–500 ms 延迟）、离线写队列。
+
+---
+
+### 备份与灾备 —— v1 发布门槛
+
+「永不丢失」的物理层兜底。append-only 防不了磁盘损坏、存储软件 bug、误 `DROP`、勒索、整机丢失；
+**本地同步副本不算备份**（purge 与损坏会随同步传播）。
+
+| 组件 | 方案 |
+|---|---|
+| Postgres | pgBackRest / WAL-G：每日全量 + 持续 WAL 归档（`archive_timeout=60s`，分钟级 RPO 的 PITR）；备份目标是**独立于主 RustFS 的第二存储**；每周额外 `pg_dump` 逻辑备份；`initdb` 即开 `data-checksums` |
+| RustFS | `rclone` **不带 `--delete`** 增量镜像到第二 S3；key 即 SHA-256 自带校验；purge 由 `redactions` 表驱动显式删除镜像对象 |
+| 对账 | 以 `blobs` 表为权威清单，定期对账主存储与镜像 |
+| 演练 | **每月脚本化恢复演练——没演练过的备份等于没有备份** |
 
 ---
 
@@ -253,4 +288,5 @@ PostgreSQL 默认不支持中文分词，`to_tsvector('simple', ...)` 对中文�
 | cross-encoder 重排 | 第一版只用 RRF，实测不足再加 |
 | 摘要粒度 | 会话级已定；主题级与时段级的划分方式未定 |
 | 视频处理策略 | 抽帧频率、场景切分，待媒体 pipeline 落地后评估 |
-| `entity_merges` 撤销 | 实体合并目前不可逆，是否比照 `fact_events` 引入 `revoke` 待评估 |
+| `entity_merges` 撤销 | **已定案**：first-writer-wins（`UNIQUE(from_entity)`）+ 不可逆；引入 revoke 需改 partial index，推迟到有真实需求 |
+| 检索评测 / 注入契约 / 上行协议细则 | **P1，动对应代码前必须定**，完整清单见 [review-2026-08-07.md](review-2026-08-07.md) |

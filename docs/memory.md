@@ -11,7 +11,7 @@ Cortex 的核心。本文档定义记忆的存储模型、写入流程、检索�
 
 | 原则 | 含义 | 为什么 |
 |---|---|---|
-| **全链路 append-only** | 任何表都不做 `UPDATE` / `DELETE` | 多端并发写的冲突从根本消失；同时兑现"永不丢失" |
+| **全链路 append-only** | 任何表都不做 `UPDATE` / `DELETE` | 多端并发写的冲突从根本消失。注意：它消灭的是**应用层删改路径**，物理持久性由备份体系兑现（见 architecture.md 备份章节） |
 | **双时间轴** | 区分"事情何时变"与"我何时知道" | 支持"三个月前我以为……"这类回溯 |
 | **出处可追溯** | 每条提炼的知识都能定位到原始对话 | 差异化据点：可审计，对抗黑盒记忆 |
 | **领域无关** | schema 中不出现任何编码专有字段 | 编码与办公必须共用一套底座 |
@@ -82,197 +82,73 @@ WHERE (f.valid_at IS NULL OR f.valid_at <= :T)
 
 ---
 
-## 四、Schema（PostgreSQL）
+## 四、Schema 设计要点
 
-所有主键为 **ULID**（26 字符，毫秒时间戳 + 随机位），客户端可离线生成，无需协调。
+> **权威版本是 [`migrations/20260807000001_init.sql`](../migrations/20260807000001_init.sql)。**
+> 本节只讲设计意图，不复制 SQL —— 两份拷贝必然漂移。
 
-向量维度按 `bge-m3` 取 **1024**，更换模型需重建索引。
+所有主键为 **ULID**（26 字符 Crockford base32 **大写**，`COLLATE "C"` + 正则 CHECK 强制），
+客户端可离线生成，无需协调。向量维度按 `bge-m3` 取 **1024**。
 
-### L0 原始层
+### sync_log —— 同步的唯一事实序
 
-```sql
-CREATE TABLE episodes (
-    id            TEXT        PRIMARY KEY,          -- ULID
-    session_id    TEXT        NOT NULL,
-    role          TEXT        NOT NULL,             -- user / assistant / tool / system
-    content       JSONB       NOT NULL,             -- 原始消息，含供应商特有的 thinking 等不透明块
-    text          TEXT,                             -- 从 content 提取的纯文本，供全文检索
-    tsv           tsvector,                         -- 应用层分词后写入（见 §八）
-    domain        TEXT,                             -- coding / work / personal / NULL
-    device_id     TEXT        NOT NULL,             -- 产生于哪台设备
-    occurred_at   TIMESTAMPTZ NOT NULL,             -- 事件发生时间（客户端时钟）
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(), -- 服务端入库时间
-    sync_seq      BIGSERIAL                         -- 服务端严格单调，供客户端增量拉取
-);
-```
+单独一张 outbox 表 `sync_log(seq BIGSERIAL PK, table_name, record_id)`。
+**每个业务写事务同时向它追加一行**，客户端增量拉取只面向本表（详见 §九）。
 
-> 不设 `seq` 列。会话内顺序按 `(occurred_at, id)` 排序——ULID 本身时间有序，无需协调点。
-> 跨设备时钟偏移可能导致毫秒级错序，同步一律以服务端 `sync_seq` 为准。
+为什么不用各表自带 sync_seq 列（曾经的设计，已废弃）：
 
-### 二进制内容（内容寻址）
+1. **九张表各自的 BIGSERIAL 互不可比**，单一游标在数学上不成立；
+2. **裸序列做游标必然漏行**：序列值在 INSERT 时分配，但行按提交顺序对读端可见。
+   T1 拿到 seq=100 未提交、T2 拿到 101 先提交，客户端把游标推进到 101 后，
+   T1 提交的 100 就永久不可见——静默丢数据，除全量重同步外不可修复。
 
-```sql
-CREATE TABLE blobs (
-    hash        TEXT        PRIMARY KEY,      -- SHA-256 hex —— 天然去重，天然不可变
-    mime        TEXT        NOT NULL,
-    size_bytes  BIGINT      NOT NULL,
-    storage_key TEXT        NOT NULL,         -- RustFS 对象 key
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+因此写入纪律是 schema 的一部分（migration 头部注释同款）：
+业务行 + sync_log 同事务；事务开头 `pg_advisory_xact_lock(4272)` 串行化提交序；
+取号事务短小纯写，LLM 与 embedding 计算一律在事务外。
 
-CREATE TABLE episode_blobs (
-    episode_id  TEXT NOT NULL REFERENCES episodes(id),
-    blob_hash   TEXT NOT NULL REFERENCES blobs(hash),
-    kind        TEXT,                          -- attachment / inline / screenshot ...
-    PRIMARY KEY (episode_id, blob_hash)
-);
+### 分层表
 
--- 异步 pipeline 产出：让媒体可被检索
-CREATE TABLE blob_transcripts (
-    id          TEXT         PRIMARY KEY,
-    blob_hash   TEXT         NOT NULL REFERENCES blobs(hash),
-    kind            TEXT         NOT NULL,    -- asr / vision_caption / ocr / frame_caption
-    text            TEXT         NOT NULL,
-    tsv             tsvector,
-    embedding       vector(1024),
-    transcribed_by  TEXT         NOT NULL,    -- 转录模型（whisper / vision 等），便于将来重跑
-    embedding_model TEXT         NOT NULL,    -- 向量模型，与转录模型相互独立
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    sync_seq        BIGSERIAL
-);
-```
+| 层 | 表 | 要点 |
+|---|---|---|
+| L0 | `episodes` | 原始消息 JSONB 无损保存（含 thinking 块）；`text`+`tsv` 供全文检索；`occurred_at`（客户端、经单调化）与 `created_at`（服务端）分离 |
+| L0 | `blobs` / `episode_blobs` | SHA-256 内容寻址，天然去重、天然不可变 |
+| L0 | `blob_transcripts` | 媒体转录（ASR/vision/OCR）；`span_start_ms/span_end_ms` 支撑「出处跳转到 31:40」；`transcribed_by` 与 `embedding_model` 相互独立 |
+| L1 | `entities` | kind 开放不枚举；向量仅用于抽取期实体消解，不参与召回 |
+| L1 | `entity_merges` | 别名消解，追加式；**`UNIQUE(from_entity)`** 使归属图成为函数图 |
+| L1 | `facts` | 主谓宾 + `statement` 自然语言表述；`source_episode_id NOT NULL` 是可审计的根基 |
+| L1 | `fact_events` | 生命周期事件（见下） |
+| L2 | `summaries` | 会话 / 主题 / 时段摘要 |
+| — | `redactions` | 抹除墓碑（见 §十一） |
 
-> blob 以内容哈希为主键，意味着对象**永不被覆盖**——这也是 RustFS 不支持对象版本控制却无妨的原因。
+### fact_events —— 事实的生命周期
 
-### L1 事实层
+三种 `op`：
 
-```sql
-CREATE TABLE entities (
-    id              TEXT         PRIMARY KEY,
-    kind            TEXT         NOT NULL,    -- person/project/file/org/concept/tool… 开放不枚举
-    name            TEXT         NOT NULL,
-    summary         TEXT,
-    embedding       vector(1024),
-    embedding_model TEXT         NOT NULL,    -- 见 §七「换模型不停机」
-    device_id       TEXT         NOT NULL,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    sync_seq        BIGSERIAL
-);
+| op | 语义 | 约束 |
+|---|---|---|
+| `invalidate` | 使事实失效 | 必须给 `kind` + `invalid_at`；`kind=superseded` 时 `superseded_by` 必填（否则演化链断裂） |
+| `revoke` | 撤销失效（恢复） | 不得携带 invalidate 专属字段 |
+| `flag` | 标记「矛盾待人工确认」 | **批注，不改变状态**，`active_facts` 不受影响 |
 
--- 别名消解：不修改 entities，追加一条合并记录
-CREATE TABLE entity_merges (
-    id                TEXT         PRIMARY KEY,
-    from_entity       TEXT         NOT NULL REFERENCES entities(id),
-    into_entity       TEXT         NOT NULL REFERENCES entities(id),
-    reason            TEXT,
-    source_episode_id TEXT         REFERENCES episodes(id),
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    sync_seq          BIGSERIAL
-);
+**revoke 取状态机语义**：一条事实的当前状态由**最后一条状态事件**（invalidate/revoke，
+flag 除外）决定，不是「撤销栈」——序列 `[invalidate(A), invalidate(B), revoke]` 之后事实**有效**。
 
-CREATE TABLE facts (
-    id                TEXT         PRIMARY KEY,
-    subject_id        TEXT         NOT NULL REFERENCES entities(id),
-    predicate         TEXT         NOT NULL,   -- prefers / decided / owns / blocked_by… 开放
-    object_text       TEXT,                    -- 值为字面量
-    object_entity_id  TEXT         REFERENCES entities(id),  -- 或值为另一实体（构成图的边）
-    statement         TEXT         NOT NULL,   -- 自然语言表述，用于向量化与展示
-    tsv               tsvector,
-    embedding         vector(1024),
-    embedding_model   TEXT         NOT NULL,   -- 见 §七「换模型不停机」
-    domain            TEXT,                    -- 领域感知检索的依据
-    confidence        REAL         NOT NULL DEFAULT 1.0,
+`confidence` 的定义：抽取器写入时对「该事实忠实反映原文」的一次性打分，**此后不可变**
+（append-only）；矛盾待确认不降 confidence，而是追加 `flag` 事件。
 
-    valid_at          TIMESTAMPTZ,             -- 【事件时间】何时开始为真，NULL = 未知/一直
+### entity_merges —— first-writer-wins
 
-    source_episode_id TEXT         NOT NULL REFERENCES episodes(id),  -- 出处
-    extracted_by      TEXT         NOT NULL,   -- 抽取所用模型
-    device_id         TEXT         NOT NULL,
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),  -- 【系统时间】
-    sync_seq          BIGSERIAL
-);
+并发分叉（两台设备把 A 分别并进 B 和 C）由 `UNIQUE(from_entity)` 在物理层拒绝后到者：
+**first-writer-wins**，服务端回执后到客户端转 no-op。
+环（A→B + B→A）由 cortexd 写入前沿 `into_entity` 链走到底做成环检测拒绝；
+视图中的 depth 上限只是兜底保险。
 
--- 事实的生命周期事件：一律追加，永不修改
--- 系统的自动失效与用户的手工编辑，共用这一张表
-CREATE TABLE fact_events (
-    id                TEXT         PRIMARY KEY,
-    fact_id           TEXT         NOT NULL REFERENCES facts(id),
+### 视图
 
-    op                TEXT         NOT NULL,   -- invalidate | revoke  （见下）
-    kind              TEXT,                    -- op=invalidate 时的原因分类：
-                                               --   superseded 被新事实取代（世界变了）
-                                               --   corrected  抽取错误（从未为真）
-                                               --   retracted  用户主动删除（不表态真值）
-                                               --   expired    到期自然失效
+- `fact_status`：每条事实最近一次**状态**事件（过滤掉 flag），排序 `(created_at DESC, id DESC)`
+- `active_facts`：从未失效或已恢复的事实——日常检索的入口
+- `canonical_entities`：沿函数图走到终点的归属解析（链式合并 A→B→C 正确解析为 A→C）
 
-    invalid_at        TIMESTAMPTZ,             -- 【事件时间】何时停止为真
-    superseded_by     TEXT         REFERENCES facts(id),  -- 被哪条取代，可空
-
-    actor             TEXT         NOT NULL,   -- system | user
-    reason            TEXT,                    -- 用户填写的理由，或系统判定依据
-    source_episode_id TEXT         REFERENCES episodes(id),
-    device_id         TEXT         NOT NULL,
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),  -- 【系统时间】何时发生
-    sync_seq          BIGSERIAL
-);
-```
-
-**图结构无需单独的关系表**——`facts` 中 `subject_id → object_entity_id` 的记录本身就是图的边。
-
-**关于 `op`**：`invalidate` 使事实失效，`revoke` 撤销最近一次失效（即"恢复"）。
-一条事实的当前状态 = 按 `created_at` 顺序回放其全部事件后的末态。
-这样"删了又恢复"的完整历史被保留下来，且**撤销本身也是追加**，不破坏 append-only。
-
-### L2 摘要层
-
-```sql
-CREATE TABLE summaries (
-    id           TEXT         PRIMARY KEY,
-    scope        TEXT         NOT NULL,        -- session / topic / period
-    scope_key    TEXT         NOT NULL,        -- session_id / 主题名 / "2026-08"
-    text         TEXT         NOT NULL,
-    tsv          tsvector,
-    embedding    vector(1024),
-    embedding_model TEXT      NOT NULL,        -- 见 §七「换模型不停机」
-    covers_from  TIMESTAMPTZ,
-    covers_to    TIMESTAMPTZ,
-    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    sync_seq     BIGSERIAL
-);
-```
-
-### 常用视图
-
-```sql
--- 每条事实的最新一次生命周期事件
-CREATE VIEW fact_status AS
-SELECT DISTINCT ON (fact_id)
-       fact_id, op, kind, invalid_at, superseded_by, actor,
-       created_at AS decided_at
-FROM fact_events
-ORDER BY fact_id, created_at DESC;
-
--- 当前有效的事实：从未失效，或最近一次事件是 revoke（已恢复）
-CREATE VIEW active_facts AS
-SELECT f.*
-FROM facts f
-LEFT JOIN fact_status s ON s.fact_id = f.id
-WHERE s.op IS NULL OR s.op = 'revoke';
-
--- 实体的最终归属（别名消解后）
-CREATE VIEW canonical_entities AS
-WITH RECURSIVE resolve(id, canonical) AS (
-    SELECT e.id, COALESCE(m.into_entity, e.id)
-    FROM entities e
-    LEFT JOIN entity_merges m ON m.from_entity = e.id
-  UNION
-    SELECT r.id, m.into_entity
-    FROM resolve r JOIN entity_merges m ON m.from_entity = r.canonical
-)
-SELECT id, canonical FROM resolve;
-```
-
----
 
 ## 五、写入流程
 
@@ -317,7 +193,8 @@ SELECT id, canonical FROM resolve;
                  superseded_by = 新事实 id
                  actor         = 'system'
                  created_at    = now()  ← 系统时间自动记录
-      矛盾且无法判定 → 两条并存，降低 confidence，标记待人工确认
+      矛盾且无法判定 → 两条并存，各追加一条 op='flag' 事件（批注，不改状态），
+                       进入 UI 的「待确认列表」。confidence 不可变，不存在「降低」操作
 ```
 
 时间区间不重叠的事实**不构成矛盾**（Graphiti 的 `resolve_edge_contradictions` 同此逻辑）。
@@ -379,21 +256,11 @@ score(d) = Σ  1 / (k + rank_i(d))      k 取 60
 
 此策略下向量索引规模约为 episodes 的 1/50，**十万级对话不会爆**。
 
-```sql
-CREATE INDEX idx_facts_vec      ON facts     USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX idx_summaries_vec  ON summaries USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX idx_transcripts_vec ON blob_transcripts USING hnsw (embedding vector_cosine_ops);
+完整索引清单见 [migration](../migrations/20260807000001_init.sql)。要点：
 
-CREATE INDEX idx_episodes_tsv   ON episodes  USING gin (tsv);
-CREATE INDEX idx_facts_tsv      ON facts     USING gin (tsv);
-
-CREATE INDEX idx_facts_subject  ON facts (subject_id);           -- 图遍历
-CREATE INDEX idx_facts_object   ON facts (object_entity_id);
-CREATE INDEX idx_facts_sp       ON facts (subject_id, predicate); -- 矛盾检测
-CREATE INDEX idx_episodes_time  ON episodes (occurred_at DESC);
-CREATE INDEX idx_fact_events    ON fact_events (fact_id, created_at DESC);
-CREATE INDEX idx_facts_model    ON facts (embedding_model);          -- 分批回填用
-```
+- `entities` 也建向量索引，但**仅用于抽取期实体消解**（同名/近义实体匹配），不参与四路召回
+- `idx_facts_sp (subject_id, predicate)` 的前缀即覆盖按主语查询，不另建单列索引
+- `idx_facts_source (source_episode_id)` 供 redact 级联按出处定位派生行
 
 **冷迁移暂不实现。** L0 超过约十万条后，再考虑将老 episodes 的正文移入 RustFS，库中仅保留元数据与 `tsv`。
 
@@ -439,21 +306,66 @@ PostgreSQL 默认不支持中文分词，`to_tsvector('simple', ...)` 对中文�
 
 ## 九、多端同步
 
-得益于全链路 append-only，同步退化为**单向增量拉取**，无需 diff、无需三方合并：
+### 下行：单游标增量拉取，面向 sync_log
 
 ```
-客户端持有 last_sync_seq
+客户端持有 last_seq（单一游标，跨全部表）
       │
-      ├─► GET /sync?since={last_sync_seq}
+      ├─► GET /sync?since={last_seq}
       │
-      └─◄ 服务端返回各表中 sync_seq > since 的记录，按 sync_seq 升序
+      └─◄ 服务端返回 sync_log 中 seq > since 的记录及对应业务行，按 seq 升序
 ```
 
-- `sync_seq` 由服务端 `BIGSERIAL` 生成，**严格单调**，不受客户端时钟偏移影响
-- 离线写入暂存本地 SQLite 队列，联网后按序上传
-- 唯一需要仲裁的是 `entity_merges` 的并发合并 → 服务端 last-writer-wins（发生概率极低）
+- 全序由 `sync_log` 提供（见 §四）；按 log 序回放天然满足 FK 顺序
+  （facts 永远在其 source episode 之后到达）
+- 服务端写入纪律（advisory lock 串行化提交）保证 **seq 顺序 == 可见顺序**，
+  游标推进永不漏行
+- `sync_log` + `LISTEN/NOTIFY` 即 WebSocket 实时推送的事件源——
+  「实时同步」不是轮询
 
----
+### 上行：本地 op-log 队列
+
+- 客户端离线写入记录到本地 SQLite 的**单一全局 op-log**（跨表按本地写入序），
+  按 log 序上传，不按表分批（否则 FK 必然违反）
+- 服务端批量 ingest：单事务应用、按 ULID 主键 `ON CONFLICT (id) DO NOTHING`、
+  逐条返回 ack；客户端收到 ack 才出队（at-least-once + 幂等 = exactly-once 效果）
+- blob 三步固定顺序：RustFS 上传 → `blobs` 行 → episode + `episode_blobs` 行；
+  中断按队列重放（内容寻址天然幂等）；孤儿 blob 由服务端周期 GC
+- 回声去重：自己上传的记录会随下行同步回流，按 ULID 幂等跳过
+- 队列出队与游标推进在本地 SQLite 同一事务持久化
+
+### 时钟
+
+- `occurred_at` 用客户端**单调化墙钟**：发号时取 `max(now, last_issued + 1ms)`
+  并持久化 `last_issued`——防时钟回跳，设备内事件序永不倒流（约 20 行代码，
+  拿走 HLC 九成收益）；ULID 时间戳位复用此值
+- 跨设备排序一律以服务端 `sync_log.seq` 为准
+
+### 冲突面
+
+append-only 下数据级冲突不存在，仅剩两类语义仲裁：
+
+| 冲突 | 仲裁 |
+|---|---|
+| `entity_merges` 并发分叉 | **first-writer-wins**（`UNIQUE(from_entity)` 物理拒绝后到者，服务端回执后客户端转 no-op） |
+| 同一 fact 并发 invalidate + revoke | 状态机语义：按 `sync_log` 全序回放，末态生效 |
+
+### redaction 的传播义务
+
+redact/purge 是 UPDATE，不会产生新的业务行版本。传播靠 `redactions` 墓碑行
+（本身走 sync_log 下发）：
+
+> **客户端收到 redaction 行后，必须幂等执行同等本地清除**——
+> 清 episode 正文与 tsv、删本地 blob 缓存、清关联派生行。
+> 这是同步协议的一等公民，列入验收测试。
+
+新设备全量同步天然拿到已清空版本，无需特殊处理。
+
+### 边界条件（写死，防无意识越界）
+
+当前全部同步简化（无 HLC、无 CRDT、服务端定序）的前提是**星型拓扑**
+（所有设备只与一个 hub 同步）。若未来引入设备间 P2P 或多 hub 部署，
+本节全部决策需要重评。
 
 ## 十、成本控制
 
@@ -496,7 +408,7 @@ PostgreSQL 默认不支持中文分词，`to_tsvector('simple', ...)` 对中文�
 | `retracted` | 🤷 不表态 | 用户操作的时刻 |
 | `expired` | ✅ 曾经为真，到期了 | 到期时刻 |
 
-这个区分还有一个实际价值：**`corrected` 的比例直接反映抽取质量**，是优化抽取 prompt 的最佳反馈信号。
+这个区分还有一个实际价值：`corrected` 占比是**抽取精确率的有偏滞后下界**——它依赖检索曝光与用户勤快度，测不到漏抽、未被检索的错误与实体挂错，不可当作抽取质量的直接度量，但仍是最便宜的一路信号。
 
 ### 删除后，历史回放里还看得见吗
 
@@ -514,28 +426,30 @@ PostgreSQL 默认不支持中文分词，`to_tsvector('simple', ...)` 对中文�
 
 | 操作 | 行为 | 审计链 |
 |---|---|---|
-| **redact** | 清空 `episodes.text` / `content` 正文，保留元数据与全部时间戳 | ✅ 完整——知道此处曾有内容、何时被抹除、由谁 |
-| **purge** | 同上，并从 RustFS 删除关联 blob | ✅ 同上 |
+| **redact** | 按 `source_episode_id` **级联清除全部派生落点**（见下） | ✅ 完整——知道此处曾有内容、何时被抹除、由谁 |
+| **purge** | 同上，并从 RustFS 删除关联 blob 及备份镜像中的对象 | ✅ 同上 |
 
-```sql
-CREATE TABLE redactions (
-    id            TEXT         PRIMARY KEY,
-    target_kind   TEXT         NOT NULL,      -- episode | blob
-    target_id     TEXT         NOT NULL,
-    mode          TEXT         NOT NULL,      -- redact | purge
-    reason        TEXT         NOT NULL,      -- 强制填写
-    actor         TEXT         NOT NULL,
-    device_id     TEXT         NOT NULL,
-    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    sync_seq      BIGSERIAL
-);
-```
+**级联清除范围**（秘密的所有落点，缺一个承诺就是假的）：
+
+| 落点 | 处理 |
+|---|---|
+| `episodes.content` / `text` / `tsv` | content 写占位 `{"redacted":true}`，text/tsv 置 NULL |
+| 派生 `facts.statement` / `tsv` / `embedding` | statement 写占位 `[redacted]`，tsv/embedding 置 NULL（向量可近似反演原文，必须一并清） |
+| 关联 `blob_transcripts.text` / `tsv` / `embedding` | 同上 |
+| 涉及的 `summaries` | **删除后排除被抹除 episode 重新生成**（整体清空会连带销毁无辜内容） |
+| 各设备本地缓存 | 靠 redaction 墓碑传播，客户端义务见 §九 |
+
+**在途任务防护**：抽取 / 转录 pipeline 在写入任何派生行之前必须查 `redactions` 表，
+防止 redact 执行时在途的异步任务事后把秘密回填。级联清除任务本身可重跑（幂等）。
+
+表结构见 [migration](../migrations/20260807000001_init.sql) 的 `redactions`
+（墓碑行本身走 `sync_log` 下发到所有设备）。
 
 约束：
 
 - **必须显式触发**，需二次确认，绝不自动执行
 - **墓碑记录本身不可删除**——可以抹掉内容，但"这里发生过抹除"永远留存
-- 由 `redaction` 派生的 `facts` 需一并 `invalidate`（`kind=retracted`）
+- 由被抹除 episode 派生的 `facts` 除内容被级联清空外，还需一并 `invalidate`（`kind=retracted`），使其退出检索
 - 内容寻址的 blob 需先确认无其他 episode 引用，方可 purge
 
 这是全系统唯一的例外。文档开头「不可协商的设计原则」中的 append-only，在此处让位于用户对自己数据的处置权——但**让位的是内容，不是审计链**。
@@ -557,11 +471,14 @@ CREATE TABLE redactions (
 | 问题 | 现状 |
 |---|---|
 | Embedding 模型与维度 | **已定** `bge-m3` / 1024。所有向量表记录 `embedding_model`，支持不停机迁移（§七） |
+| 同步协议 | **已定** sync_log outbox + advisory lock 串行化 + 上行 op-log（§九），2026-08 复审重造 |
 | 记忆的用户可编辑界面 | **已定** 见 §十一。编辑/删除均追加 `fact_events`，`redact`/`purge` 为唯一例外 |
 | cross-encoder 重排是否引入 | 提升质量但增加延迟。第一版先只用 RRF，实测不足再加 |
 | 摘要的触发时机与粒度 | 会话结束触发已定；主题级与时段级摘要的划分方式未定 |
 | 视频处理策略 | 抽帧频率、是否做场景切分，待第一版媒体 pipeline 落地后评估 |
-| `entity_merges` 的撤销 | 实体合并目前不可逆。是否比照 `fact_events` 引入 `revoke`，待评估 |
+| `entity_merges` 的撤销 | 现为 first-writer-wins + 不可逆。引入 revoke 需把 `UNIQUE(from_entity)` 改 partial index，推迟到有真实需求时 |
+| 检索评测体系 | **P1 必做**：LongMemEval-S 回放 + 自建中英双语私有集 + retrieval_traces 遥测表，动检索代码前定，详见 docs/review-2026-08-07.md |
+| 记忆注入契约 | **P1 必做**：注入位置（缓存前缀 vs 回合块）、格式（带 fact id 的定界块）、框定语义（防记忆投毒）、预算双帽，写 agent loop 前定，详见 docs/review-2026-08-07.md |
 
 ---
 
