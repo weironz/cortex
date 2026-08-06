@@ -50,6 +50,7 @@
 mod error;
 mod model;
 mod query;
+mod recall;
 mod store;
 mod sync;
 mod txn;
