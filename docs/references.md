@@ -22,6 +22,59 @@
 
 注：`opencode`（原 `sst/opencode`）与 `goose`（原 `block/goose`）均已转移归属，上表为最新地址。
 
+### 补充名单（2026 年 5–8 月新增，首轮调研遗漏）
+
+| 项目 | 仓库 | 主语言 | 星标 | 许可证 | 最后推送 |
+|---|---|---|---:|---|---|
+| **pi** | `earendil-works/pi` | — | 84,708 | MIT | 2026-08-06 |
+| **QwenPaw** | `agentscope-ai/QwenPaw` | Python | 33,997 | Apache-2.0 | 2026-08-06 |
+| **DeepSeek-Reasonix** | `esengine/DeepSeek-Reasonix` | TypeScript | 32,177 | MIT | 2026-08-06 |
+| **AionUi** | `iOfficeAI/AionUi` | — | 31,580 | Apache-2.0 | 2026-08-06 |
+| kimi-cli | `MoonshotAI/kimi-cli` | Python | 11,113 | Apache-2.0 | 2026-08-03 |
+| copilot-cli | `github/copilot-cli` | — | 11,065 | 专有 | 2026-08-06 |
+| kimi-code | `MoonshotAI/kimi-code` | — | 6,114 | MIT | 2026-08-06 |
+| google agents-cli | `google/agents-cli` | — | 5,493 | Apache-2.0 | 2026-08-04 |
+| mistral-vibe | `mistralai/mistral-vibe` | Python | 4,800 | Apache-2.0 | 2026-08-05 |
+| **moltis** | `moltis-org/moltis` | **Rust** | 2,809 | MIT | 2026-08-04 |
+
+#### pi — `earendil-works/pi` ⭐ 最大遗漏
+
+84.7k 星，MIT。自我定位：**"AI agent toolkit: unified LLM API, agent loop, TUI, coding agent CLI"**。
+
+这几乎是 Cortex 需要的底层能力清单的逐条对应——统一 LLM 接口、agent 循环、终端 UI。必须评估其抽象是否可直接复用。
+
+#### QwenPaw — `agentscope-ai/QwenPaw` ⭐⭐ 记忆理念最接近
+
+AgentScope 出品，Apache-2.0，通用个人助理（**非编码 Agent**）。v2.0.0 于 2026-07-10 基于 AgentScope 2.0 重写。
+
+**其记忆策略与 Cortex 高度重合：**
+
+> 每一轮对话都持久化；被移出上下文的轮次**建立索引供按需召回，而不是摘要掉**。
+
+这正是 Cortex "永不丢失 + 按需召回" 的同一思路。其他相关特性：自演化个人知识库、Scroll Context、Agent OS 架构、协议中立的 MCP/A2A/ACP 连接层、三支柱治理模型（Resources / Governance / Sandbox）。
+
+**这是目前发现的与 Cortex 定位最接近的项目，必须深入研究。**
+
+#### DeepSeek-Reasonix — `esengine/DeepSeek-Reasonix`
+
+MIT，第三方项目（**非 DeepSeek 官方**，但被 DeepSeek 官方文档列为支持的集成）。2026-05-25 登上 HN 前排。
+
+**核心设计围绕 prefix-cache 稳定性**——这印证了"prompt caching 是多供应商抽象中最贵的坑"这一判断。其 `reasonix.toml` 声明式配置 provider/tools/plugins、无硬编码模型的做法值得参考。
+
+#### moltis — `moltis-org/moltis` ⭐ Rust 同类
+
+**"A secure persistent personal agent server in Rust. One binary."**
+
+星标不高（2.8k）但定位与 `cortexd` 几乎一致：Rust 写的、持久化的、个人 agent 服务端、单二进制。规模小意味着可以快速读完。
+
+#### AionUi — `iOfficeAI/AionUi`
+
+Apache-2.0，31.6k。定位是**多 Agent 聚合的 GUI 客户端**（支持 Claude Code、Codex 等）。参考价值在于多后端聚合的客户端形态设计。
+
+#### 其余
+
+`kimi-cli` / `kimi-code`（Moonshot）、`mistral-vibe`（Mistral）、`google/agents-cli`——大厂各自的 CLI Agent，按需查阅。`github/copilot-cli` 为专有软件，仅作产品参考。
+
 ---
 
 ## ⚠️ 许可证合规 —— 动手抄代码前必读
@@ -144,12 +197,29 @@ Charmbracelet 出品，**TUI 视觉与交互是业内最佳**。仅作界面设�
 
 | 优先级 | 项目 | 看什么 |
 |---|---|---|
-| **1** | **goose** | 整体架构、`goose-providers` 多供应商抽象、`goose-sdk` 表面积、CLI+Desktop 形态 |
+| **1** | **goose** | 整体架构、`goose-providers` 多供应商抽象、CLI+Desktop 形态 —— **复刻对象** |
 | **2** | **codex** | `apply-patch`、沙箱系列 crate、daemon 架构、`memories` 的能力边界 |
-| **3** | **opencode** | 供应商中立的实现方式、竞争态势观察 |
-| **4** | claude-code | 产品设计与工具粒度（仅形态，无源码） |
-| **5** | crush | TUI 视觉（**代码禁止借鉴**） |
-| **6** | gemini-cli / qwen-code / aider | 按需查阅 |
+| **3** | **QwenPaw** | **记忆策略**（每轮持久化 + 索引召回而非摘要）、自演化知识库、治理模型 |
+| **4** | **pi** | 统一 LLM 接口、agent loop、TUI 的抽象设计 |
+| **5** | **moltis** | Rust 持久化个人 agent 服务端形态，规模小可快速读完 |
+| **6** | opencode | 供应商中立的实现方式、竞争态势观察 |
+| **7** | DeepSeek-Reasonix | prefix-cache 优化、声明式 provider 配置 |
+| **8** | claude-code | 产品设计与工具粒度（仅形态，无源码） |
+| **9** | crush | TUI 视觉（**代码禁止借鉴**） |
+| **10** | gemini-cli / qwen-code / aider / kimi-* / mistral-vibe | 按需查阅 |
+
+### 开发策略：硬分叉，不与上游对齐
+
+**决策：复刻 goose 后完全自主改造重写，不跟踪上游。**
+
+这意味着实际做法**不是 fork 仓库**（fork 的意义在于跟踪上游），而是：
+
+1. 读懂 goose 架构，理解其设计决策与取舍
+2. 在 Cortex 自有仓库中重写，按 Cortex 的需求重新设计
+3. 需要的具体实现从 goose / codex **按 crate 取件**（vendoring），保留版权声明并在 `NOTICE` 注明
+
+代价（已知并接受）：上游的新供应商支持、bug 修复、安全补丁均需自行跟进。
+收益：架构完全自主，不受 goose 既有假设约束；前端可直接用 Flutter 而非其 Electron 方案。
 
 ---
 
