@@ -1,0 +1,78 @@
+import 'json.dart';
+import 'memory_fact.dart';
+
+/// One decoded frame of the `POST /chat` SSE stream.
+///
+/// Wire contract (each SSE `data:` payload is one JSON object):
+/// * `{"type":"memory","facts":[{...}]}`
+/// * `{"type":"tool","name":"memory_search","summary":"..."}`
+/// * `{"type":"delta","text":"..."}`
+/// * `{"type":"done","episode_id":"01J..."}`
+/// * `{"type":"error","message":"..."}`
+///
+/// Observed order from `cortexd`: `memory` → `tool` → N×`delta` → `done`.
+/// Nothing in the client depends on that order, though — `memory` and `tool`
+/// may interleave with `delta` once the agent loop does multi-step tool use.
+///
+/// Unknown `type` values decode to [ChatUnknownEvent] rather than throwing, so
+/// a server that grows a new event type does not break older clients.
+sealed class ChatEvent {
+  const ChatEvent();
+
+  factory ChatEvent.fromJson(Map<String, dynamic> json) {
+    return switch (asString(json['type'])) {
+      'delta' => ChatDeltaEvent(asString(json['text'])),
+      'memory' => ChatMemoryEvent(
+        asObjectList(json['facts']).map(MemoryFact.fromJson).toList(),
+      ),
+      'tool' => ChatToolEvent(
+        name: asString(json['name'], 'tool'),
+        summary: asStringOrNull(json['summary']),
+      ),
+      'done' => ChatDoneEvent(asStringOrNull(json['episode_id'])),
+      'error' => ChatErrorEvent(
+        asStringOrNull(json['message']) ?? '服务端返回了一个未描述的错误',
+      ),
+      final other => ChatUnknownEvent(other, json),
+    };
+  }
+}
+
+/// Incremental assistant text. Append, never replace.
+final class ChatDeltaEvent extends ChatEvent {
+  const ChatDeltaEvent(this.text);
+  final String text;
+}
+
+/// The memory facts injected into this turn's prompt.
+final class ChatMemoryEvent extends ChatEvent {
+  const ChatMemoryEvent(this.facts);
+  final List<MemoryFact> facts;
+}
+
+/// The agent invoked a tool. Rendered as a collapsible one-liner in the
+/// conversation, not as message content.
+final class ChatToolEvent extends ChatEvent {
+  const ChatToolEvent({required this.name, this.summary});
+  final String name;
+  final String? summary;
+}
+
+/// Terminal frame. [episodeId] is the archived assistant episode.
+final class ChatDoneEvent extends ChatEvent {
+  const ChatDoneEvent(this.episodeId);
+  final String? episodeId;
+}
+
+/// Terminal frame carrying a server-side failure.
+final class ChatErrorEvent extends ChatEvent {
+  const ChatErrorEvent(this.message);
+  final String message;
+}
+
+/// Forward-compatibility escape hatch.
+final class ChatUnknownEvent extends ChatEvent {
+  const ChatUnknownEvent(this.type, this.raw);
+  final String type;
+  final Map<String, dynamic> raw;
+}
