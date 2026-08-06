@@ -25,8 +25,9 @@ cortex-memory = { path = "crates/cortex-memory" }
 cortex-agent = { path = "crates/cortex-agent" }
 
 # 供应商层：取件自 goose（Apache-2.0）。
-# 必须开 rustls-tls —— 其默认 feature 为空，reqwest 无 TLS 后端，运行时 https 直接失败。
-goose-provider-types = { version = "0.1.0-alpha", default-features = false, features = ["rustls-tls"] }
+# 只依赖 goose-providers —— 它已 pub use 了 goose-provider-types 的全部类型层，
+# 而 goose-provider-types 本身**没有 rustls-tls feature**（写了会导致依赖解析直接失败），
+# TLS 后端只由 goose-providers 转发给 reqwest。
 goose-providers = { version = "0.1.0-alpha", default-features = false, features = ["rustls-tls"] }
 
 # 异步运行时
@@ -50,7 +51,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # HTTP 客户端
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# 注意 reqwest 0.13 把 TLS feature 改名为 rustls（不再是 rustls-tls）
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "query", "rustls"] }
 eventsource-stream = "0.2"
 
 # 记忆引擎
