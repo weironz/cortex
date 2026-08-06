@@ -59,4 +59,5 @@ cortex-cli   flutter_rust_bridge   cortexd (Rust 服务端)
 
 ## 文档
 
+- [记忆系统设计](docs/memory.md) —— 存储模型、双时间轴、检索策略与 schema
 - [参考项目](docs/references.md) —— 同类 Agent 调研、许可证边界与借鉴策略
