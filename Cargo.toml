@@ -2,6 +2,10 @@
 resolver = "3"
 members = [
     "crates/cortex-core",
+    "crates/cortex-llm",
+    "crates/cortex-store",
+    "crates/cortex-memory",
+    "crates/cortex-agent",
     "crates/cortexd",
     "crates/cortex-cli",
 ]
@@ -15,22 +19,43 @@ repository = "https://github.com/weironz/cortex"
 
 [workspace.dependencies]
 cortex-core = { path = "crates/cortex-core" }
+cortex-llm = { path = "crates/cortex-llm" }
+cortex-store = { path = "crates/cortex-store" }
+cortex-memory = { path = "crates/cortex-memory" }
+cortex-agent = { path = "crates/cortex-agent" }
+
+# 供应商层：取件自 goose（Apache-2.0）。
+# 必须开 rustls-tls —— 其默认 feature 为空，reqwest 无 TLS 后端，运行时 https 直接失败。
+goose-provider-types = { version = "0.1.0-alpha", default-features = false, features = ["rustls-tls"] }
+goose-providers = { version = "0.1.0-alpha", default-features = false, features = ["rustls-tls"] }
 
 # 异步运行时
 tokio = { version = "1.53", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
 
 # 服务端
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
 # 数据库
 sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio", "tls-rustls", "postgres", "json", "chrono", "uuid", "macros", "migrate",
 ] }
+pgvector = { version = "0.4", features = ["sqlx"] }
 
 # 序列化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# HTTP 客户端
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-tls"] }
+eventsource-stream = "0.2"
+
+# 记忆引擎
+jieba-rs = "0.10"
+fastembed = "5"
 
 # 基础设施
 ulid = { version = "3", features = ["serde"] }
@@ -39,9 +64,8 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# CLI
 clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
 
 [profile.release]
 lto = "thin"
