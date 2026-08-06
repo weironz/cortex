@@ -1,0 +1,48 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Flutter / Dart
+.dart_tool/
+.packages
+build/
+*.iml
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Node / Web
+node_modules/
+dist/
+.next/
+*.tsbuildinfo
+
+# 环境与密钥 —— 绝不入库
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# 本地数据与缓存
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志
+*.log
+logs/
