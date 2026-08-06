@@ -111,8 +111,13 @@ Tokio 官方出品，Rust 服务端生态最主流。搭配 `sqlx`（数据库�
 **接入注意**
 
 - 必须设 `force_path_style(true)`——RustFS 默认仅支持 path-style 寻址，不设会解析 `bucket.host` 并 DNS 失败
-- 单机也要开纠删码：`RUSTFS_VOLUMES=/data/rustfs{0...3}`，勿改单卷
+- **纠删码要求四块独立物理盘**。`RUSTFS_VOLUMES=/data/rustfs{0...3}` 若落在同一块盘上是假冗余，
+  RustFS 会检测到共享设备并拒绝启动（已实测）。因此：
+  - 开发环境：单卷 `/data` + `RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true`
+  - 生产环境：四卷挂真实独立磁盘，`RUSTFS_UNSAFE_BYPASS_DISK_CHECK=false`
 - 保持 `RUSTFS_DURABILITY_MODE=strict`
+- RustFS 无按桶的 CORS 接口，允许来源是**服务级**配置（`RUSTFS_CORS_ALLOWED_ORIGINS`）。
+  Flutter Web 走 presigned PUT 直传时需要放开
 - 不支持对象版本控制，但**无妨**——blob 以 SHA-256 为 key，对象天然不可变，永不被覆盖
 - 存储层封在 `BlobStore` trait 后，只用标准 S3 API，将来换 R2 / MinIO / AWS S3 零成本
 

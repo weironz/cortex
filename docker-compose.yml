@@ -30,8 +30,11 @@ services:
     security_opt:
       - "no-new-privileges:true"
     environment:
-      # 四卷纠删码 —— 勿改为单卷，单卷无任何冗余
-      RUSTFS_VOLUMES: /data/rustfs{0...3}
+      # 开发环境单卷。四卷纠删码要求四块**独立物理盘**，
+      # 开发机只有一块盘时那是假冗余，RustFS 也会检测到共享设备并拒绝启动。
+      # 生产部署改为 /data/rustfs{0...3} 并挂到真实独立磁盘。
+      RUSTFS_VOLUMES: /data
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: ${RUSTFS_UNSAFE_BYPASS_DISK_CHECK:-true}
       RUSTFS_ADDRESS: 0.0.0.0:9000
       RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
       RUSTFS_CONSOLE_ENABLE: "true"
@@ -39,15 +42,16 @@ services:
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-cortex_dev_only}
       # strict = 每次写入落盘后才确认。「永不丢失」的前提，勿调为 relaxed
       RUSTFS_DURABILITY_MODE: strict
+      # RustFS 无按桶的 CORS 接口，允许来源是服务级配置。
+      # 开发环境放开，以便 Flutter Web 直接 presigned PUT。
+      RUSTFS_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
       RUSTFS_OBS_LOGGER_LEVEL: info
     ports:
       - "${RUSTFS_API_PORT:-9000}:9000"      # S3 API
       - "${RUSTFS_CONSOLE_PORT:-9001}:9001"  # 控制台
     volumes:
-      - rustfs_0:/data/rustfs0
-      - rustfs_1:/data/rustfs1
-      - rustfs_2:/data/rustfs2
-      - rustfs_3:/data/rustfs3
+      - rustfs_data:/data
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
       interval: 15s
@@ -57,7 +61,4 @@ services:
 
 volumes:
   pg_data:
-  rustfs_0:
-  rustfs_1:
-  rustfs_2:
-  rustfs_3:
+  rustfs_data:

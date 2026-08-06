@@ -24,7 +24,7 @@ CREATE TABLE episodes (
     domain      TEXT,
     device_id   TEXT        NOT NULL,
     occurred_at TIMESTAMPTZ NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     -- 服务端严格单调，多端同步以此为准，规避客户端时钟偏移
     sync_seq    BIGSERIAL
 );
@@ -39,7 +39,7 @@ CREATE TABLE blobs (
     mime        TEXT        NOT NULL,
     size_bytes  BIGINT      NOT NULL CHECK (size_bytes >= 0),
     storage_key TEXT        NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     sync_seq    BIGSERIAL
 );
 
@@ -61,7 +61,7 @@ CREATE TABLE blob_transcripts (
     embedding       VECTOR(1024),
     transcribed_by  TEXT         NOT NULL,
     embedding_model TEXT         NOT NULL,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT clock_timestamp(),
     sync_seq        BIGSERIAL
 );
 
@@ -78,7 +78,7 @@ CREATE TABLE entities (
     embedding       VECTOR(1024),
     embedding_model TEXT         NOT NULL,
     device_id       TEXT         NOT NULL,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT clock_timestamp(),
     sync_seq        BIGSERIAL
 );
 
@@ -89,7 +89,7 @@ CREATE TABLE entity_merges (
     into_entity       TEXT         NOT NULL REFERENCES entities(id),
     reason            TEXT,
     source_episode_id TEXT         REFERENCES episodes(id),
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT clock_timestamp(),
     sync_seq          BIGSERIAL,
     CHECK (from_entity <> into_entity)
 );
@@ -119,7 +119,7 @@ CREATE TABLE facts (
     extracted_by      TEXT         NOT NULL,
     device_id         TEXT         NOT NULL,
     -- 【系统时间】Cortex 何时知道这件事
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT clock_timestamp(),
     sync_seq          BIGSERIAL,
 
     CHECK (object_text IS NOT NULL OR object_entity_id IS NOT NULL)
@@ -148,7 +148,7 @@ CREATE TABLE fact_events (
     source_episode_id TEXT         REFERENCES episodes(id),
     device_id         TEXT         NOT NULL,
     -- 【系统时间】何时发现 / 何时操作
-    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT clock_timestamp(),
     sync_seq          BIGSERIAL,
 
     CHECK (op <> 'invalidate' OR (kind IS NOT NULL AND invalid_at IS NOT NULL))
@@ -168,7 +168,7 @@ CREATE TABLE summaries (
     embedding_model TEXT         NOT NULL,
     covers_from     TIMESTAMPTZ,
     covers_to       TIMESTAMPTZ,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT clock_timestamp(),
     sync_seq        BIGSERIAL
 );
 
@@ -186,7 +186,7 @@ CREATE TABLE redactions (
     reason      TEXT         NOT NULL,
     actor       TEXT         NOT NULL,
     device_id   TEXT         NOT NULL,
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT clock_timestamp(),
     sync_seq    BIGSERIAL
 );
 
@@ -194,13 +194,17 @@ CREATE TABLE redactions (
 --  视图
 -- ══════════════════════════════════════════════════════════
 
--- 每条事实的最新一次生命周期事件
+-- 每条事实的最新一次生命周期事件。
+--
+-- 排序必须带 sync_seq 兜底：created_at 用的是 clock_timestamp()，
+-- 同一事务内的多次插入虽已能区分，但仍可能落在同一微秒。
+-- sync_seq 是 BIGSERIAL，严格单调，是唯一可靠的先后判据。
 CREATE VIEW fact_status AS
 SELECT DISTINCT ON (fact_id)
        fact_id, op, kind, invalid_at, superseded_by, actor,
        created_at AS decided_at
 FROM fact_events
-ORDER BY fact_id, created_at DESC;
+ORDER BY fact_id, created_at DESC, sync_seq DESC;
 
 -- 当前有效的事实：从未失效，或最近一次事件是 revoke（已恢复）
 CREATE VIEW active_facts AS
