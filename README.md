@@ -15,15 +15,27 @@ Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：
 
 ## 状态
 
-**开发中，闭环已跑通，尚无发布版本。**
+**v0.1.0 —— 第一个可安装的版本。**
 
 现在能做的：CLI / 桌面 / Web 三端聊天，记忆自动抽取与召回，
-图片归档并可检索，会话绑定工作区后 agent 能读写文件。
-检索基线 R@5 0.923，恢复演练 RPO 46.9 s / RTO 43.6 s（[细节](docs/operations.md)）。
+图片归档并可检索，会话绑定工作区后 agent 能读写文件，
+bearer token 认证，Linux / macOS 上有 OS 级沙箱。
+检索基线 R@5 0.877（116 题，真实向量），
+恢复演练 RPO 46.9 s / RTO 43.6 s（[细节](docs/operations.md)）。
 
-还不能做的：认证（当前是单用户自托管，谁连上谁就是主人）、
-真沙箱（工具执行只有路径围栏 + 权限确认）、离线、移动端、语音转录。
-逐条见 [roadmap.md](docs/roadmap.md)。
+还不能做的：**离线**（瘦客户端，断网就用不了）、移动端、多用户、
+Windows 上执行命令（没有对等沙箱，默认拒绝）、语音转录、桌面安装包。
+逐条见 [CHANGELOG.md](CHANGELOG.md) 的「这一版**不能**干什么」。
+
+## 安装
+
+拿到的是二进制或镜像（不是这个仓库）→ **[docs/install.md](docs/install.md)**。
+要部署到一台服务器并接 traefik → [docs/deploy.md](docs/deploy.md)。
+要改代码 → `just setup && just bootstrap`，见 [operations.md](docs/operations.md)。
+
+> **第一步一定是 `cortexd --generate-token`。**
+> 没有配置凭据时 cortexd 会**拒绝启动** —— 这是刻意的：一个不认证的
+> cortexd 会把整个记忆库交给任何能连上这个端口的人，而这件事没有任何症状。
 
 ## 架构
 
@@ -90,6 +102,7 @@ Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：
 | [roadmap-done.md](docs/roadmap-done.md) | 已经做了什么 |
 | [architecture.md](docs/architecture.md) | 为什么这么设计（决策、否决的备选、代价、风险） |
 | [memory.md](docs/memory.md) | 记忆系统怎么工作（存储模型、双时间轴、检索、同步） |
+| [memory-content.md](docs/memory-content.md) | **记忆体存什么、不存什么**（五类输入 × 三种处理，含业界调研） |
 | [operations.md](docs/operations.md) | 怎么部署、备份、恢复（含实测 RPO/RTO） |
 | [references.md](docs/references.md) | 同类项目调研与许可证边界 |
 
