@@ -144,12 +144,16 @@ impl AppState {
 
     /// 服务端中转上传：对象存储 → `blobs` 行。§九 三步顺序的前两步。
     pub async fn upload_blob(&self, bytes: Bytes, declared_mime: Option<&str>) -> Result<BlobDto> {
+        // 留一份给转录用。内容寻址下这份字节就是最终内容，
+        // 不必等落库后再从对象存储取回来一遍
+        let for_transcribe = bytes.clone();
         let stored = self.inner.blobs.put(bytes, declared_mime).await?;
         self.register(
             &stored.hash,
             &stored.mime,
             stored.size_bytes,
             stored.deduplicated,
+            Some(for_transcribe),
         )
         .await
     }
@@ -206,15 +210,19 @@ impl AppState {
             .await?;
         // 这条路上服务端没经手字节，「有没有真的传」只有客户端知道 ——
         // 所以去重与否完全交给 `register` 按 blobs 行的存在性判定
-        self.register(&req.hash, &mime, req.size_bytes, false).await
+        self.register(&req.hash, &mime, req.size_bytes, false, None)
+            .await
     }
 
+    /// 登记 blob 行。`bytes` 只有直传那条路有 —— presign 直传时服务端
+    /// 根本没经手字节，转录要等将来的后台补扫（尚未实现，已记入 roadmap）。
     async fn register(
         &self,
         hash: &str,
         mime: &str,
         size_bytes: i64,
         deduplicated: bool,
+        bytes: Option<bytes::Bytes>,
     ) -> Result<BlobDto> {
         let seq = match &self.inner.backend {
             // mock 没有 blobs 表。伪造一次游标推进，让客户端的
@@ -225,13 +233,21 @@ impl AppState {
                 Some(cursor)
             }
             Backend::Live(l) => {
-                l.register_blob(cortex_store::NewBlob {
-                    hash: hash.to_owned(),
-                    mime: mime.to_owned(),
-                    size_bytes,
-                    storage_key: cortex_blob::hash::storage_key(hash)?,
-                })
-                .await?
+                let seq = l
+                    .register_blob(cortex_store::NewBlob {
+                        hash: hash.to_owned(),
+                        mime: mime.to_owned(),
+                        size_bytes,
+                        storage_key: cortex_blob::hash::storage_key(hash)?,
+                    })
+                    .await?;
+
+                // 只在**首次**登记时转录（seq.is_some()）：内容寻址下重复上传
+                // 是同一份字节，转录结果也会一模一样，重转纯属白烧模型钱
+                if let (Some(_), Some(b)) = (seq, bytes) {
+                    l.spawn_transcription(hash.to_owned(), b, mime.to_owned());
+                }
+                seq
             }
         };
 

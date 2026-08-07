@@ -99,8 +99,29 @@ pub struct Live {
     chat_turn: Turn,
     /// 现建带工作区的 [`Turn`] 时要用
     max_rounds: usize,
+    /// 媒体转录。未配置 vision 模型时为 None —— 图片照常归档，只是检索不到
+    transcribe: Option<Arc<cortex_memory::TranscribePipeline>>,
     device_id: String,
     context_window: usize,
+}
+
+/// 把 `store.is_redacted` 接到转录管线的 [`RedactionGuard`] 上。
+///
+/// 管线把这个约束做进了签名（要 trait 而非闭包），调用方没有办法漏掉它 ——
+/// 漏掉的后果是 redact 执行时正在途中的转录任务，事后把已抹除内容
+/// 又写回 `blob_transcripts`（memory.md §十一 的在途任务防护）。
+struct StoreRedactionGuard {
+    store: Store,
+}
+
+#[async_trait::async_trait]
+impl cortex_memory::transcribe::RedactionGuard for StoreRedactionGuard {
+    async fn is_redacted(&self, blob_hash: &str) -> Result<bool> {
+        self.store
+            .is_redacted(cortex_store::RedactionTarget::Blob, blob_hash)
+            .await
+            .map_err(store_err)
+    }
 }
 
 /// 纯聊天会话的工具目录。
@@ -140,6 +161,19 @@ impl Live {
             })?,
             Err(_) => cortex_agent::DEFAULT_MAX_ROUNDS,
         };
+        // 没配 CORTEX_VISION_PROVIDER 就整条关掉，而不是配了个假的转录器：
+        // 后者会往库里写垃圾 caption，而垃圾比空白更难发现
+        let transcribe = match cortex_memory::transcribe::VisionTranscriber::from_env()? {
+            Some(v) => {
+                tracing::info!("媒体转录已启用");
+                Some(Arc::new(
+                    cortex_memory::TranscribePipeline::new(embedder.clone())
+                        .with_transcriber(Arc::new(v)),
+                ))
+            }
+            None => None,
+        };
+
         let chat_turn = Turn::new(&workspace)?
             .with_max_rounds(max_rounds)
             .with_specs(chat_only_specs());
@@ -159,6 +193,7 @@ impl Live {
             )),
             chat_turn,
             max_rounds,
+            transcribe,
             store,
             llm,
             device_id: config.device_id.clone(),
@@ -546,6 +581,55 @@ impl Live {
                 }
             }
         }
+    }
+
+    /// 排一次媒体转录 —— **不阻塞上传响应**。
+    ///
+    /// 转录要调一次 vision 模型（实测十几秒），同步做会让「拖一张图进来」
+    /// 卡住十几秒，而转录结果对**这次上传**毫无用处：它是给将来的检索准备的。
+    /// 与事实抽取同一个理由，也同一个形态。
+    ///
+    /// 只在 blob **首次**登记时排队：内容寻址下重复上传是同一份字节，
+    /// 转录结果也会一模一样，重转纯属白烧模型钱。
+    pub fn spawn_transcription(self: &Arc<Self>, hash: String, bytes: bytes::Bytes, mime: String) {
+        let Some(pipeline) = self.transcribe.clone() else {
+            return; // 没配 vision 模型，图片仍然归档，只是检索不到
+        };
+        let live = Arc::clone(self);
+
+        tokio::spawn(async move {
+            let guard = StoreRedactionGuard {
+                store: live.store.clone(),
+            };
+            match pipeline.run(&hash, &bytes, &mime, &guard).await {
+                Ok(cortex_memory::transcribe::Outcome::Ready(rows)) => {
+                    let n = rows.len();
+                    // 一个事务写完全部段落：ASR 的分段之间没有独立意义，
+                    // 半截的时间轴比没有更糟
+                    let res = live
+                        .store
+                        .write_txn(async |t| {
+                            for r in &rows {
+                                t.insert_blob_transcript(r).await?;
+                            }
+                            Ok(())
+                        })
+                        .await;
+                    match res {
+                        Ok(()) => tracing::info!(hash, segments = n, "媒体转录已落库"),
+                        Err(e) => tracing::warn!(hash, error = %e, "转录结果落库失败"),
+                    }
+                }
+                Ok(cortex_memory::transcribe::Outcome::Redacted) => {
+                    tracing::info!(hash, "blob 在转录期间被抹除，结果已丢弃")
+                }
+                Ok(cortex_memory::transcribe::Outcome::Unsupported { mime }) => {
+                    tracing::debug!(hash, mime, "没有转录器认领这个类型")
+                }
+                // 转录失败不该影响已经成功的上传，记日志即可
+                Err(e) => tracing::warn!(hash, error = %e, "媒体转录失败"),
+            }
+        });
     }
 
     // ─────────────────────────── 同步 ───────────────────────────

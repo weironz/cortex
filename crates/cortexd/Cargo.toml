@@ -10,6 +10,7 @@ description = "Cortex 守护进程：记忆引擎与同步服务"
 [dependencies]
 cortex-core.workspace = true
 cortex-memory.workspace = true
+bytes = "1"
 cortex-llm.workspace = true
 cortex-store.workspace = true
 cortex-agent.workspace = true
