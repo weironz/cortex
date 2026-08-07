@@ -13,7 +13,8 @@
       "output_token_cost": null,
       "currency": null,
       "supports_cache_control": true,
-      "reasoning": true
+      "reasoning": true,
+      "vision": true
     },
     {
       "name": "claude-sonnet-4-5-20250929",
@@ -22,7 +23,8 @@
       "output_token_cost": null,
       "currency": null,
       "supports_cache_control": true,
-      "reasoning": true
+      "reasoning": true,
+      "vision": true
     },
     {
       "name": "claude-haiku-4-5-20251001",
@@ -30,7 +32,8 @@
       "input_token_cost": null,
       "output_token_cost": null,
       "currency": null,
-      "supports_cache_control": true
+      "supports_cache_control": true,
+      "vision": true
     }
   ],
   "headers": null,

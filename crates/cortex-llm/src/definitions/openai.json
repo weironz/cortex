@@ -13,7 +13,8 @@
       "output_token_cost": null,
       "currency": null,
       "supports_cache_control": null,
-      "reasoning": true
+      "reasoning": true,
+      "vision": true
     },
     {
       "name": "gpt-5-mini",
@@ -22,7 +23,8 @@
       "output_token_cost": null,
       "currency": null,
       "supports_cache_control": null,
-      "reasoning": true
+      "reasoning": true,
+      "vision": true
     }
   ],
   "headers": null,

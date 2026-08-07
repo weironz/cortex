@@ -1135,6 +1135,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "cortex-core",
  "dotenvy",
  "futures",
@@ -1206,6 +1207,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tower-http",

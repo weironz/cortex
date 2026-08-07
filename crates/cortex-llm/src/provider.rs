@@ -31,6 +31,7 @@ use goose_providers::declarative::{
 use goose_providers::model::ModelConfig;
 
 use crate::error::{LlmError, Result};
+use crate::vision::VisionSupport;
 
 /// 本 crate 内置的供应商定义。名字即配置里的 `provider` 取值。
 const BUILTIN: &[(&str, &str)] = &[
@@ -56,7 +57,7 @@ impl KeyResolver for StaticKey {
 }
 
 /// 查一个供应商的定义 JSON。内置优先，其次 goose 自带目录。
-fn definition(name: &str) -> Option<&'static str> {
+pub(crate) fn definition(name: &str) -> Option<&'static str> {
     if let Some((_, json)) = BUILTIN.iter().find(|(id, _)| *id == name) {
         return Some(json);
     }
@@ -143,6 +144,62 @@ pub fn model_config(provider: &str, model: &str) -> Result<ModelConfig> {
         .with_context_limit(limit))
 }
 
+// ───────────────────────────── vision 能力 ─────────────────────────────
+
+/// 只为读 `vision` 字段而存在的一份极简定义视图。
+///
+/// # 为什么要再解析一遍同一份 JSON
+///
+/// goose 的 `DeclarativeProviderConfig` / `ModelInfo` **没有 vision 字段**
+/// （alpha.1 里 `ModelInfo` 只有 name / context_limit / 价格 / cache_control /
+/// reasoning）。serde 默认忽略未知字段，所以我们可以把 `"vision": true`
+/// 写进同一份 JSON 而不影响 goose 解析 —— 但也就意味着 goose 那条路
+/// 拿不到这个值，只能自己再走一遍。
+///
+/// 代价是一次极小的 JSON 解析；收益是**加供应商仍然只需改一个 JSON 文件**，
+/// 不必回来改 Rust 代码。这与本模块「声明式，一条路走到黑」的取舍一致。
+#[derive(serde::Deserialize)]
+struct VisionView {
+    #[serde(default)]
+    models: Vec<VisionModel>,
+}
+
+#[derive(serde::Deserialize)]
+struct VisionModel {
+    name: String,
+    /// 缺省即 [`VisionSupport::Unknown`]：没声明不等于不支持。
+    #[serde(default)]
+    vision: Option<bool>,
+}
+
+/// 查某个 `provider/model` 能不能看图。
+///
+/// 判据只有定义 JSON 里的 `vision` 字段。查不到供应商、查不到模型、
+/// 或模型没声明该字段，一律 [`VisionSupport::Unknown`]（放行，让远端报错）。
+///
+/// Ollama 这类 `models: []` + `dynamic_models: true` 的供应商永远落在
+/// `Unknown` —— 本地装了哪些模型只有那台机器自己知道，在这里编一个答案
+/// 只会在用户装了 vision 模型时错误地拦下他。
+#[must_use]
+pub fn vision_support(provider: &str, model: &str) -> VisionSupport {
+    let Some(json) = definition(provider) else {
+        return VisionSupport::Unknown;
+    };
+    let Ok(view) = serde_json::from_str::<VisionView>(json) else {
+        return VisionSupport::Unknown;
+    };
+    match view
+        .models
+        .iter()
+        .find(|m| m.name == model)
+        .and_then(|m| m.vision)
+    {
+        Some(true) => VisionSupport::Supported,
+        Some(false) => VisionSupport::Unsupported,
+        None => VisionSupport::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +240,56 @@ mod tests {
     fn context_limit_comes_from_definition() {
         let config = model_config("deepseek", "deepseek-v4-flash").expect("应构造成功");
         assert_eq!(config.context_limit(), 128_000);
+    }
+
+    #[test]
+    fn vision_is_declared_per_model_not_guessed() {
+        // 这四条是「多模态到底能不能用」的唯一事实来源。DeepSeek 那条尤其重要：
+        // 它是当前默认供应商，而它一个 vision 模型都没有。
+        assert_eq!(
+            vision_support("deepseek", "deepseek-v4-pro"),
+            VisionSupport::Unsupported
+        );
+        assert_eq!(
+            vision_support("anthropic", "claude-opus-5"),
+            VisionSupport::Supported
+        );
+        assert_eq!(
+            vision_support("openai", "gpt-5.5"),
+            VisionSupport::Supported
+        );
+        // 定义里没有的模型名 → 未知，不是「不支持」
+        assert_eq!(
+            vision_support("deepseek", "deepseek-v9-omni"),
+            VisionSupport::Unknown
+        );
+    }
+
+    #[test]
+    fn dynamic_and_foreign_providers_stay_unknown() {
+        // Ollama 装了什么只有那台机器知道；goose 目录里的供应商我们没考据过。
+        // 两者都必须是 Unknown（放行），否则会误伤真能看图的模型。
+        assert_eq!(
+            vision_support("ollama", "gemma4:latest"),
+            VisionSupport::Unknown
+        );
+        assert_eq!(vision_support("groq", "whatever"), VisionSupport::Unknown);
+        assert_eq!(
+            vision_support("no-such-provider", "x"),
+            VisionSupport::Unknown,
+            "供应商都不存在时也不能崩，判定函数在热路径上"
+        );
+    }
+
+    #[test]
+    fn vision_field_does_not_break_goose_parsing() {
+        // 我们往 goose 的 JSON 里塞了它不认识的 `vision` 字段。
+        // serde 默认忽略未知字段——但这是**约定而非契约**，
+        // goose 哪天加上 deny_unknown_fields 就会在这里炸，而不是在生产上。
+        for (name, _) in BUILTIN {
+            let config = config_of(name).unwrap_or_else(|e| panic!("{name} 解析失败：{e}"));
+            assert!(!config.models.is_empty() || name == &"ollama");
+        }
     }
 
     #[test]

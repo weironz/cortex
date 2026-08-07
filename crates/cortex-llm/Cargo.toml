@@ -18,6 +18,9 @@ goose-providers.workspace = true
 # 只能自己引一份 —— 版本与 goose 一致，靠 cargo 的 feature 统一保证是同一个类型。
 # 根 Cargo.toml 里没有这条，按约定在本 crate 内写完整声明。
 rmcp = { version = "1.8", default-features = false }
+# 图像块要把 &[u8] 编成 base64。goose 内部已经用了 0.22，钉同一个大版本
+# 就不会多出一份 base64 实现。同上，根 Cargo.toml 不归本任务维护，写完整声明。
+base64 = "0.22"
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true

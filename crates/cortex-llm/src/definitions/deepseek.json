@@ -12,7 +12,8 @@
       "input_token_cost": null,
       "output_token_cost": null,
       "currency": null,
-      "supports_cache_control": null
+      "supports_cache_control": null,
+      "vision": false
     },
     {
       "name": "deepseek-v4-flash",
@@ -20,7 +21,8 @@
       "input_token_cost": null,
       "output_token_cost": null,
       "currency": null,
-      "supports_cache_control": null
+      "supports_cache_control": null,
+      "vision": false
     },
     {
       "name": "deepseek-chat",
@@ -28,7 +30,8 @@
       "input_token_cost": null,
       "output_token_cost": null,
       "currency": null,
-      "supports_cache_control": null
+      "supports_cache_control": null,
+      "vision": false
     },
     {
       "name": "deepseek-reasoner",
@@ -37,7 +40,8 @@
       "output_token_cost": null,
       "currency": null,
       "supports_cache_control": null,
-      "reasoning": true
+      "reasoning": true,
+      "vision": false
     }
   ],
   "headers": null,

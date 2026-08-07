@@ -19,6 +19,7 @@ use rmcp::model::Tool;
 
 use crate::error::{LlmError, Result};
 use crate::provider;
+use crate::vision::{VisionSupport, image_count};
 
 /// 纯文本增量流。每一项是模型新吐出的一段文本（不含 thinking、不含工具调用）。
 pub type TextStream = futures::stream::BoxStream<'static, Result<String>>;
@@ -115,6 +116,71 @@ impl LlmClient {
         self.provider.as_ref()
     }
 
+    /// 为本供应商下的任意模型组装 [`ModelConfig`]。
+    ///
+    /// 转录 pipeline 需要它：vision 模型未必是对话主模型
+    /// （DeepSeek 一个 vision 模型都没有，转录只能指到别家去）。
+    ///
+    /// # Errors
+    ///
+    /// 供应商定义解析失败。模型名不在定义里**不算错**——
+    /// 上下文上限会回落到 goose 的 canonical 表，这正是 Ollama 那类
+    /// 动态模型列表所需要的。
+    pub fn model_config(&self, model: &str) -> Result<ModelConfig> {
+        provider::model_config(&self.provider_id, model)
+    }
+
+    /// 某个模型能不能看图。见 [`VisionSupport`]。
+    #[must_use]
+    pub fn vision_support(&self, model: &ModelConfig) -> VisionSupport {
+        provider::vision_support(&self.provider_id, &model.model_name)
+    }
+
+    /// 主模型能不能看图。
+    #[must_use]
+    pub fn supports_vision(&self) -> bool {
+        self.vision_support(&self.model).allows_images()
+    }
+
+    /// 带图的请求发出去之前的最后一道闸。
+    ///
+    /// # 为什么要拦
+    ///
+    /// 不拦的结局不是报错，是**静默丢失**：goose 会照常把 image 块序列化
+    /// 出去，不支持 vision 的端点要么忽略它、要么回一个含糊的 400，
+    /// 而用户看到的是助手说「我没有看到你附上任何图片」。
+    /// 这类问题没有任何一处日志会指向真正的原因。
+    ///
+    /// 只在**显式声明**不支持时拒绝；未声明一律放行（见 [`VisionSupport`]）。
+    ///
+    /// # Errors
+    ///
+    /// [`LlmError::VisionUnsupported`]。
+    pub fn ensure_can_see(&self, model: &ModelConfig, messages: &[Message]) -> Result<()> {
+        let images = image_count(messages);
+        if images == 0 {
+            return Ok(());
+        }
+        let support = self.vision_support(model);
+        if support.allows_images() {
+            if support == VisionSupport::Unknown {
+                // 放行了，但要留痕：将来排查「图发过去没反应」时，
+                // 这一行是判断「我们放行 vs 我们拦下」的分界
+                tracing::debug!(
+                    provider = %self.provider_id,
+                    model = %model.model_name,
+                    images,
+                    "模型的 vision 能力未声明，按放行处理，由供应商自行报错"
+                );
+            }
+            return Ok(());
+        }
+        Err(LlmError::VisionUnsupported {
+            provider: self.provider_id.clone(),
+            model: model.model_name.clone(),
+        })
+    }
+
     /// 用主模型流式对话。
     ///
     /// 流里既有文本增量，也有**完整**的工具调用（goose 保证工具调用只在拼完后
@@ -140,6 +206,8 @@ impl LlmClient {
     }
 
     /// 指定模型流式对话。重试与限流退避由 goose 在内部处理。
+    ///
+    /// 带图的消息会先过 [`Self::ensure_can_see`]。
     pub async fn stream_with(
         &self,
         model: &ModelConfig,
@@ -147,6 +215,7 @@ impl LlmClient {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream> {
+        self.ensure_can_see(model, messages)?;
         Ok(self.provider.stream(model, system, messages, tools).await?)
     }
 
@@ -171,6 +240,8 @@ impl LlmClient {
     }
 
     /// 非流式：把整轮响应收完再返回，附带 token 用量。
+    ///
+    /// 带图的消息会先过 [`Self::ensure_can_see`]。
     pub async fn complete(
         &self,
         model: &ModelConfig,
@@ -178,6 +249,7 @@ impl LlmClient {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<(Message, ProviderUsage)> {
+        self.ensure_can_see(model, messages)?;
         Ok(self
             .provider
             .complete(model, system, messages, tools)
@@ -221,6 +293,90 @@ mod tests {
     fn debug_does_not_leak_the_key() {
         let client = LlmClient::from_config(&config(), "super-secret").expect("应构造成功");
         assert!(!format!("{client:?}").contains("super-secret"));
+    }
+
+    /// 最小合法 PNG：1×1 全透明。
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn with_image() -> Message {
+        use crate::vision::MessageImageExt;
+        Message::user()
+            .with_text("这张图里有什么")
+            .with_image_bytes(PNG_1X1, "image/png")
+            .expect("合法 PNG")
+    }
+
+    #[test]
+    fn deepseek_rejects_images_instead_of_dropping_them() {
+        let client = LlmClient::from_config(&config(), "k").unwrap();
+        assert!(
+            !client.supports_vision(),
+            "deepseek 定义里已明写 vision:false —— 这条断言在 DeepSeek 出 vision 模型时会失败，那正是该更新定义的时刻"
+        );
+        let err = client
+            .ensure_can_see(client.model(), &[with_image()])
+            .expect_err("带图必须被拦下");
+        assert!(matches!(err, LlmError::VisionUnsupported { .. }));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("deepseek-v4-pro") && msg.contains("CORTEX_VISION"),
+            "错误必须同时说清是哪个模型、以及怎么改；实际：{msg}"
+        );
+    }
+
+    #[test]
+    fn text_only_conversations_are_never_blocked() {
+        let client = LlmClient::from_config(&config(), "k").unwrap();
+        client
+            .ensure_can_see(client.model(), &[Message::user().with_text("纯文本")])
+            .expect("不带图就不该受 vision 能力影响");
+    }
+
+    #[test]
+    fn vision_capable_provider_passes_the_guard() {
+        let cfg = LlmConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-opus-5".to_string(),
+            cheap_model: "claude-haiku-4-5-20251001".to_string(),
+        };
+        let client = LlmClient::from_config(&cfg, "k").unwrap();
+        assert!(client.supports_vision());
+        client
+            .ensure_can_see(client.model(), &[with_image()])
+            .expect("Claude 全系支持图像");
+    }
+
+    #[test]
+    fn undeclared_capability_is_not_a_hard_stop() {
+        // Ollama 的模型列表由本机决定，定义里 models 为空 → Unknown → 放行。
+        // 在这里拦下等于「用户装了 llava 也用不了」。
+        let cfg = LlmConfig {
+            provider: "ollama".to_string(),
+            model: "gemma4:latest".to_string(),
+            cheap_model: "gemma4:latest".to_string(),
+        };
+        let client = LlmClient::from_config(&cfg, "").unwrap();
+        assert_eq!(
+            client.vision_support(client.model()),
+            VisionSupport::Unknown
+        );
+        client
+            .ensure_can_see(client.model(), &[with_image()])
+            .expect("未声明能力应放行，由 Ollama 自己报错");
+    }
+
+    #[test]
+    fn model_config_can_name_a_sibling_model() {
+        let client = LlmClient::from_config(&config(), "k").unwrap();
+        let cfg = client.model_config("deepseek-reasoner").unwrap();
+        assert_eq!(cfg.model_name, "deepseek-reasoner");
+        assert_eq!(cfg.context_limit(), 128_000);
     }
 
     #[test]
