@@ -11,10 +11,40 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cortex_dev_only}
       POSTGRES_DB: ${POSTGRES_DB:-cortex}
       # 中文分词在 Rust 侧用 jieba-rs 完成，此处无需任何分词扩展
+      #
+      # 【新库才生效】initdb 的额外参数。data-checksums 让每一页都带校验和，
+      # 是「静默位翻转能被发现」的前提 —— 没有它，损坏会一路复制进备份。
+      # 已经建好的库改不了这个开关，用 `just pg-enable-checksums` 离线补
+      # （见 docs/operations.md）。
+      POSTGRES_INITDB_ARGS: ${POSTGRES_INITDB_ARGS:---data-checksums}
+    # WAL 归档。archive_mode 只能在启动时设，所以写在 command 里而不是 SQL。
+    #   archive_timeout=60  即使没有写入也每 60s 强制切段 —— RPO 的上界由它决定
+    #   archive_command     文档标准写法：目标已存在就报错，绝不静默覆盖
+    #                       （同名不同内容的 WAL 段是灾难，宁可停下来让人看见）
+    #   summarize_wal=on    PG17 的 WAL 摘要器，pg_basebackup --incremental 的前提。
+    #                       现在用不上增量，但打开它才留得住这条升级路
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=mkdir -p /backup/wal && test ! -f /backup/wal/%f && cp %p /backup/wal/%f
+      - -c
+      - archive_timeout=60
+      - -c
+      - wal_level=replica
+      - -c
+      - wal_compression=on
+      - -c
+      - summarize_wal=on
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+      # 备份落在宿主机目录而不是 named volume：脚本要能直接读、能被 rclone
+      # 推到第二存储、能在容器全没了之后还翻得出来。默认 ./data/backup，
+      # 而仓库根的 data/ 已在 .gitignore 里。
+      - ${CORTEX_BACKUP_DIR:-./data/backup}:/backup
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cortex} -d ${POSTGRES_DB:-cortex}"]
       interval: 5s

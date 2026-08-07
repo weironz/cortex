@@ -34,6 +34,47 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features
 
+  # ── 运维脚本 ───────────────────────────────────────────
+  # 备份 / 恢复脚本最糟的失效方式是：平时没人跑，需要它的那天才发现
+  # 第 200 行有个语法错。这道门只花几秒，挡的正是这一类。
+  scripts:
+    name: 运维脚本静态检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: bash 语法检查
+        run: |
+          set -euo pipefail
+          for f in scripts/*.sh; do
+            echo "== $f"
+            bash -n "$f"
+          done
+
+      # shellcheck 在 ubuntu runner 上自带。SC1091 是「source 的文件解析不到」，
+      # lib.sh 是运行时按路径拼出来的，静态分析看不见，不是问题
+      - name: shellcheck
+        run: shellcheck --severity=warning --exclude=SC1091 scripts/*.sh
+
+      - name: python 语法检查
+        run: python3 -m py_compile scripts/*.py
+
+      # 基线文件是回归门的全部依据。它自己损坏 / 缺字段的话，门会静静地失效 ——
+      # 尤其是缺 embedding_model：那样换后端时就拦不住「拿 hash 的分去撞真实基线」
+      - name: 评测基线文件自检
+        run: python3 scripts/evals-gate.py verify-baseline scripts/evals-baseline.*.json
+
+      - name: docker compose 配置可解析
+        # 生产变体里 POSTGRES_PASSWORD / RUSTFS_SECRET_KEY 用了 `${VAR:?}`，
+        # 缺了就报错 —— 那正是它该有的行为（防止拿默认口令上生产）。
+        # 这里喂两个假值只为让 config 能解析，不代表可以用弱口令。
+        env:
+          POSTGRES_PASSWORD: ci-syntax-check-only
+          RUSTFS_SECRET_KEY: ci-syntax-check-only
+        run: |
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
+
   # ── 测试 ───────────────────────────────────────────────
   test:
     name: 测试

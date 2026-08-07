@@ -1195,6 +1195,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "bytes",
  "chrono",
  "clap",
  "cortex-agent",

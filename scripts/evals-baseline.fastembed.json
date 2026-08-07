@@ -1,0 +1,77 @@
+{
+  "_comment": "检索评测基线。由 scripts/evals-gate.py bless 生成。调参定案后才更新，且必须在 PR 里说明为什么这些数字动了。",
+  "run": {
+    "mode": "seed",
+    "embedding_model": "fastembed:gpahal/bge-m3-onnx-int8",
+    "rrf_k": 60.0,
+    "width_bm25": 40,
+    "width_vector": 40,
+    "width_graph": 30,
+    "width_recency": 20,
+    "width_episode": 20,
+    "graph_hops": 2,
+    "recent_days": 7,
+    "context_window": 128000,
+    "budget_tokens": 6000,
+    "domain_boost_off": false,
+    "abstain_below": 0.03,
+    "recency_mode": "off",
+    "episode_channel": false,
+    "peak_bonus": 0.04,
+    "semantic_floor": 0.5,
+    "replay_ranked": true,
+    "schema": "cortex_eval_1786072727967_36236"
+  },
+  "suite": {
+    "name": "cortex-zh-en-v1",
+    "version": "2026-08-07",
+    "scenarios": 20,
+    "turns": 30,
+    "seed_facts": 73,
+    "questions": 111,
+    "by_kind": {
+      "专名精确": 27,
+      "中文语义": 33,
+      "关系推理": 15,
+      "应召不到": 14,
+      "时间回放": 12,
+      "跨域检索": 10
+    },
+    "by_lang": {
+      "中文": 80,
+      "中英混排": 21,
+      "英文": 10
+    }
+  },
+  "scored": {
+    "kind.中文语义": 33,
+    "kind.专名精确": 27,
+    "kind.时间回放": 12,
+    "kind.关系推理": 15,
+    "kind.跨域检索": 10,
+    "kind.应召不到": 0,
+    "lang.中文": 69,
+    "lang.英文": 9,
+    "lang.中英混排": 19
+  },
+  "metrics": {
+    "overall.recall@1": 0.6726804123711341,
+    "overall.recall@5": 0.9226804123711341,
+    "overall.recall@10": 0.9690721649484536,
+    "overall.mrr": 0.8123261332024219,
+    "overall.recall_any": 0.9725085910652922,
+    "kind.中文语义.recall@5": 0.9393939393939394,
+    "kind.中文语义.forbidden@5": 0.0,
+    "kind.专名精确.recall@5": 0.9259259259259259,
+    "kind.专名精确.forbidden@5": 0.5,
+    "kind.时间回放.recall@5": 0.8333333333333334,
+    "kind.时间回放.forbidden@5": 0.0,
+    "kind.关系推理.recall@5": 0.9666666666666667,
+    "kind.关系推理.forbidden@5": 0.0,
+    "kind.跨域检索.recall@5": 0.9,
+    "kind.应召不到.forbidden@5": 0.5,
+    "lang.中文.recall@5": 0.9057971014492754,
+    "lang.英文.recall@5": 1.0,
+    "lang.中英混排.recall@5": 0.9473684210526315
+  }
+}

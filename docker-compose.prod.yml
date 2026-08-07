@@ -1,0 +1,121 @@
+# ══════════════════════════════════════════════════════════
+#  生产变体 —— 叠在 docker-compose.yml 之上，不替代它
+#
+#    docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#  或
+#    just prod-up
+#
+#  与开发环境的差别只有四处，每一处都有代价，不要「顺手」抄进开发环境：
+#
+#  1. **cortexd 进容器**。开发时它在宿主机上跑（改一行就重启，秒级），
+#     生产要的是「一条命令起完整环境」，那就必须进容器。
+#  2. **不对外暴露 Postgres / RustFS 端口**。它们只在 compose 网络里可达，
+#     只有 cortexd 的 8080 出来。少一个端口就少一个攻击面 ——
+#     数据库直连口开在公网上是自托管最常见的失手。
+#  3. **RustFS 四卷纠删码**。要求四块**独立物理盘**，
+#     RUSTFS_UNSAFE_BYPASS_DISK_CHECK 必须是 false。
+#     挂在同一块盘上是假冗余，RustFS 会拒绝启动 —— 那是正确行为。
+#  4. **资源上限**。embedding 推理会吃满 CPU，不限住会把数据库饿死。
+#
+#  ── 起之前必须确认的三件事 ────────────────────────────────
+#
+#  - `.env` 里 POSTGRES_PASSWORD / RUSTFS_SECRET_KEY **不是** 默认值
+#  - `CORTEX_BACKUP_DIR` 指向一块与数据盘**不同**的磁盘
+#  - `CORTEX_MIRROR_S3_ENDPOINT` 指向另一台机器
+#  见 docs/operations.md 的「首次部署」。
+# ══════════════════════════════════════════════════════════
+
+services:
+  postgres:
+    # 只监听宿主机回环，不进公网。要完全不暴露就把这三行删掉，
+    # 走 `docker compose exec postgres psql` 进去。
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    environment:
+      # 生产库必须带页校验和。这行只对**新建**的库生效；
+      # 已有的库用 `just pg-enable-checksums` 离线补。
+      POSTGRES_INITDB_ARGS: --data-checksums
+    shm_size: 256mb
+    deploy:
+      resources:
+        limits:
+          memory: ${POSTGRES_MEM_LIMIT:-2g}
+
+  rustfs:
+    ports:
+      - "127.0.0.1:${RUSTFS_API_PORT:-9000}:9000"
+      # 控制台默认不开。要开就临时 up 一次，别长期挂着
+      # - "127.0.0.1:${RUSTFS_CONSOLE_PORT:-9001}:9001"
+    environment:
+      # 四块独立物理盘。挂之前先确认它们真的是四个不同的块设备：
+      #   lsblk -o NAME,MOUNTPOINT,PKNAME
+      RUSTFS_VOLUMES: ${RUSTFS_VOLUMES:-/data/rustfs{0...3}}
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "false"
+      RUSTFS_CONSOLE_ENABLE: "false"
+      # 生产不该放开 *。填 Flutter Web 实际部署的来源。
+      RUSTFS_CORS_ALLOWED_ORIGINS: ${RUSTFS_CORS_ALLOWED_ORIGINS:-http://localhost}
+      RUSTFS_OBS_LOGGER_LEVEL: warn
+    volumes:
+      - ${RUSTFS_DISK0:-rustfs_data0}:/data/rustfs0
+      - ${RUSTFS_DISK1:-rustfs_data1}:/data/rustfs1
+      - ${RUSTFS_DISK2:-rustfs_data2}:/data/rustfs2
+      - ${RUSTFS_DISK3:-rustfs_data3}:/data/rustfs3
+
+  # ─── cortexd ──────────────────────────────────────────
+  cortexd:
+    build:
+      context: .
+      dockerfile: scripts/docker/Dockerfile.cortexd
+    image: ${CORTEXD_IMAGE:-cortex/cortexd:local}
+    container_name: cortex-cortexd
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+    environment:
+      # 容器内走服务名，不走 localhost —— 这是把 cortexd 搬进容器后
+      # 最容易忘的一处，症状是「连不上数据库」但配置看着都对
+      DATABASE_URL: postgres://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:?生产必须显式设 POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cortex}
+      S3_ENDPOINT: http://rustfs:9000
+      S3_BUCKET: ${S3_BUCKET:-cortex-blobs}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-cortexadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?生产必须显式设 RUSTFS_SECRET_KEY}
+
+      CORTEXD_BIND: 0.0.0.0:8080
+      RUST_LOG: ${RUST_LOG:-cortexd=info,cortex_memory=info,warn}
+
+      # 向量后端。生产用真实语义模型；模型落在 models 卷里，
+      # 第一次启动会下 ~590 MB，之后重启不再下载
+      CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-fast}
+      CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-bge-m3-int8}
+      FASTEMBED_CACHE_DIR: /var/lib/cortex/models
+
+      # LLM 供应商。密钥只从环境来，绝不写进任何被 git 跟踪的文件
+      CORTEX_LLM_PROVIDER: ${CORTEX_LLM_PROVIDER:-deepseek}
+      CORTEX_LLM_MODEL: ${CORTEX_LLM_MODEL:-}
+      CORTEX_LLM_CHEAP_MODEL: ${CORTEX_LLM_CHEAP_MODEL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "${CORTEXD_PUBLIC_BIND:-127.0.0.1:8080}:8080"
+    volumes:
+      - cortex_models:/var/lib/cortex/models
+      - ${CORTEX_WORKSPACE_DIR:-./data/workspace}:/var/lib/cortex/workspace
+    deploy:
+      resources:
+        limits:
+          # embedding 推理会吃满能拿到的核。不限住它，
+          # 一次批量回填就能把 Postgres 饿到超时
+          cpus: ${CORTEXD_CPU_LIMIT:-4}
+          memory: ${CORTEXD_MEM_LIMIT:-4g}
+
+volumes:
+  rustfs_data0:
+  rustfs_data1:
+  rustfs_data2:
+  rustfs_data3:
+  cortex_models:
