@@ -58,18 +58,21 @@ impl LlmClient {
     /// 服务端不该走这条路 —— `cortexd` 有完整的 [`cortex_core::Config`]，
     /// 用 [`Self::from_config`]。
     pub fn from_env() -> Result<Self> {
+        // 空串按「没设」处理。`env::var` 对空串返回 `Ok("")`，直接 `.ok()`
+        // 会让一个空串顶掉默认模型名 —— 详见 cortex_core::config 里
+        // `non_empty` 的注释（那是同一个 bug 的另一半，第一次上生产时
+        // 两处一起炸的）
+        let non_empty = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
+
         let provider_id =
-            std::env::var("CORTEX_LLM_PROVIDER").unwrap_or_else(|_| "deepseek".to_string());
+            non_empty("CORTEX_LLM_PROVIDER").unwrap_or_else(|| "deepseek".to_string());
         let (default_model, default_cheap) = provider::default_models(&provider_id)?;
 
         let pick = |key: &str, fallback: Option<String>| -> Result<String> {
-            std::env::var(key)
-                .ok()
-                .or(fallback)
-                .ok_or_else(|| LlmError::Build {
-                    name: provider_id.clone(),
-                    source: anyhow::anyhow!("未设置 {key}，且该供应商定义里没有默认模型"),
-                })
+            non_empty(key).or(fallback).ok_or_else(|| LlmError::Build {
+                name: provider_id.clone(),
+                source: anyhow::anyhow!("未设置 {key}，且该供应商定义里没有默认模型"),
+            })
         };
 
         let cfg = LlmConfig {

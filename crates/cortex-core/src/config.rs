@@ -37,12 +37,33 @@ pub struct LlmConfig {
     pub cheap_model: String,
 }
 
+/// 读环境变量，**空串按「没设」处理**。
+///
+/// `env::var` 对「设成空串」返回的是 `Ok("")` 而不是 `Err` —— 于是
+/// `env::var(k).unwrap_or(default)` 会被一个空串顶掉默认值。
+///
+/// 这不是理论问题，是**只在容器里显形**的一类：compose 里的
+/// `CORTEX_LLM_MODEL: ${CORTEX_LLM_MODEL:-}` 会在 `.env` 没写这一项时
+/// 把变量设成空串（而不是不设），于是进程拿到的 model 是 `""`。
+/// 本地开发用 `.env` 是压根不写这一行，所以从来撞不到。
+///
+/// 第一次上生产就是这么炸的：DeepSeek 回
+/// `The supported API model names are deepseek-v4-pro or deepseek-v4-flash,
+/// but you passed .`（注意句号前面那个空位）。而 cortexd 的启动日志一切正常，
+/// 健康检查也是 ok —— 要发一次真实对话才看得见。
+///
+/// 这里列的每一项（bind / bucket / region / model / device_id …）空串都无意义，
+/// 所以「空即未设」对全部调用点都成立。真需要「空是合法值」的配置项别用这个。
+fn non_empty(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
 fn required(key: &str) -> Result<String> {
-    env::var(key).map_err(|_| CortexError::Config(format!("缺少环境变量 {key}")))
+    non_empty(key).ok_or_else(|| CortexError::Config(format!("缺少环境变量 {key}")))
 }
 
 fn optional(key: &str, default: &str) -> String {
-    env::var(key).unwrap_or_else(|_| default.to_string())
+    non_empty(key).unwrap_or_else(|| default.to_string())
 }
 
 impl Config {
