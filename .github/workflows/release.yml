@@ -313,10 +313,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # pattern 是必需的，不是洁癖：不给 pattern 时它下载**全部**产物，
+      # 而 docker/build-push-action 会顺手上传两个 0 字节的
+      # `*.dockerbuild` 溯源记录 —— 那两个下不下来，
+      # 报的却是 `Artifact download failed after 5 retries`，
+      # 看上去像网络抖动（我们据此重跑了两次，两次都同样失败）。
+      #
+      # 发版产物应当是一份**显式清单**，而不是「把桶里的东西全拿走」——
+      # 后者会让任何一个 action 顺手上传的东西变成发版的一部分。
       - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
+          pattern: "{bin-*,web}"
 
       # 逐平台的 .sha256 是构建机上算的，这里汇总成一份。
       # 先删掉单份的再算，否则 SHA256SUMS 里会混进「校验和文件的校验和」
