@@ -37,6 +37,7 @@ use tokio::sync::RwLock;
 
 use crate::embed::SharedEmbedder;
 use crate::tokenize;
+use crate::trace::{self, TraceRules};
 
 // ══════════════════════════════════════════════════════════
 //  候选事实
@@ -773,6 +774,7 @@ pub struct Extractor {
     embedder: SharedEmbedder,
     index: Arc<dyn EntityIndex>,
     rules: PredicateRules,
+    trace_rules: TraceRules,
     device_id: String,
     entity_match_threshold: f32,
 }
@@ -784,6 +786,7 @@ impl Extractor {
             embedder,
             index: Arc::new(InProcessEntityIndex::new()),
             rules: PredicateRules::default(),
+            trace_rules: TraceRules::default(),
             device_id: device_id.into(),
             entity_match_threshold: DEFAULT_ENTITY_MATCH_THRESHOLD,
         }
@@ -792,6 +795,13 @@ impl Extractor {
     #[must_use]
     pub fn with_rules(mut self, rules: PredicateRules) -> Self {
         self.rules = rules;
+        self
+    }
+
+    /// 调整工具轨迹的判据参数（惯例阈值、每轮预算等）。
+    #[must_use]
+    pub fn with_trace_rules(mut self, rules: TraceRules) -> Self {
+        self.trace_rules = rules;
         self
     }
 
@@ -859,16 +869,61 @@ impl Extractor {
         self.write_candidates(store, candidates, ctx).await
     }
 
-    /// 把候选事实消解并落库。
+    /// 把候选事实消解并落库，**并把本轮工具轨迹派生的候选一并写进去**。
     ///
     /// 与 [`Self::extract`] 分开，是为了让确定性的那一半能脱离 LLM 单测，
     /// 也让「重跑落库」不必再花一次模型钱。
+    ///
+    /// # 为什么轨迹这一路挂在这里而不是挂在 [`Self::ingest`] 上
+    ///
+    /// 1. **它不需要模型。** 挂在 `ingest` 上就等于规定「必须先花一次
+    ///    LLM 调用，才轮得到看工具轨迹」，而轨迹抽取是纯确定性计算。
+    /// 2. **挂在 `ingest` 上就测不到。** 评测的 `seed` 模式只经过
+    ///    `write_candidates`（`evals/README.md`「两种模式」那一节），
+    ///    轨迹抽取放在 `ingest` 里，回归门里那一格会永远是零。
+    ///
+    /// 轨迹这一路只做两次**读**查询与一段纯计算，全部在 `write_txn` 之外，
+    /// 不违反约束 2。
     pub async fn write_candidates(
         &self,
         store: &Store,
         candidates: Vec<CandidateFact>,
         ctx: &ExtractContext,
     ) -> Result<IngestReport> {
+        // 在途任务防护：redact 执行时可能有抽取任务正在飞，
+        // 不查这一句就会把已抹除的内容重新写回来（docs/memory.md §十一）。
+        // 放在最前面：轨迹派生的候选同样出自这条 episode，同样要被它挡住。
+        let source = ctx.episode_id.to_string();
+        if store.is_redacted(RedactionTarget::Episode, &source).await? {
+            tracing::warn!(episode = %source, "出处已被抹除，放弃本轮抽取产物");
+            return Ok(IngestReport {
+                candidates: candidates.len(),
+                ..IngestReport::default()
+            });
+        }
+
+        // 来源通道随候选一起走，而不是事后按谓词猜：`CandidateFact` 里
+        // **没有**这个字段，加一个会打断调用方的结构体字面量构造
+        // （评测的题集转换就是那么写的）。内部配对是唯一不外溢的做法。
+        let mut candidates: Vec<(CandidateFact, FactSource)> = candidates
+            .into_iter()
+            .map(|c| (c, FactSource::Conversation))
+            .collect();
+        candidates.extend(
+            self.trace_candidates(store, ctx)
+                .await?
+                .into_iter()
+                // tier 3。比 Conversation（tier 2）低是对的：信任级量的不是
+                // 「这件事发生过没有」——退出码当然客观——而是**这段内容有多
+                // 容易被攻击者操纵**。决定跑哪条命令的是模型，而模型可能已经
+                // 被待抽取的内容诱导（MINJA / AgentPoison 都是写侧攻击）；
+                // 工具轨迹是「模型自己造出来又自己读回来」的闭环，正是 §4.4
+                // 点名的那个自我强化入口。客观的那一半我们已经另外兑现了：
+                // 候选**只由硬信号定位**（ok 的真假序列、出现次数），
+                // 那部分压根不经过信任级。
+                .map(|c| (c, FactSource::ToolOutput)),
+        );
+
         let mut report = IngestReport {
             candidates: candidates.len(),
             ..IngestReport::default()
@@ -877,17 +932,9 @@ impl Extractor {
             return Ok(report);
         }
 
-        // 在途任务防护：redact 执行时可能有抽取任务正在飞，
-        // 不查这一句就会把已抹除的内容重新写回来（docs/memory.md §十一）。
-        let source = ctx.episode_id.to_string();
-        if store.is_redacted(RedactionTarget::Episode, &source).await? {
-            tracing::warn!(episode = %source, "出处已被抹除，放弃本轮抽取产物");
-            return Ok(report);
-        }
-
         // ── ② 实体消解：全部读操作在 write_txn 之外完成 ──
         let mut resolver = EntityResolution::default();
-        for c in &candidates {
+        for (c, _) in &candidates {
             self.resolve_entity(store, &c.subject, &mut resolver)
                 .await?;
             if let ObjectRef::Entity(e) = &c.object {
@@ -896,7 +943,10 @@ impl Extractor {
         }
 
         // ── 向量化：同样必须在事务外算完 ──
-        let statements: Vec<String> = candidates.iter().map(|c| c.statement.clone()).collect();
+        let statements: Vec<String> = candidates
+            .iter()
+            .map(|(c, _)| c.statement.clone())
+            .collect();
         let vectors = self.embedder.embed(&statements).await?;
         if vectors.len() != candidates.len() {
             return Err(CortexError::Memory(format!(
@@ -912,7 +962,7 @@ impl Extractor {
         // 本批次内已计划的事实也要参与判定，否则同一轮里的两条互斥事实会双双生效
         let mut pending: HashMap<(Id, String), Vec<Rival>> = HashMap::new();
 
-        for (candidate, vector) in candidates.into_iter().zip(vectors) {
+        for ((candidate, source), vector) in candidates.into_iter().zip(vectors) {
             let subject_id = resolver.require(&candidate.subject)?;
             let object_entity_id = match &candidate.object {
                 ObjectRef::Entity(e) => Some(resolver.require(e)?),
@@ -980,7 +1030,7 @@ impl Extractor {
                     confidence: candidate.confidence,
                     valid_at: candidate.valid_at,
                     source_episode_id: ctx.episode_id,
-                    // 一律 Conversation（tier 2），**不区分「用户亲述」**。
+                    // 对话那一路一律 Conversation（tier 2），**不区分「用户亲述」**。
                     //
                     // 不是保守，是这条管线现在真的分辨不出来：送进模型的是
                     // 「用户：… / 助手：…」拼成的一整块（见 cortexd::live），
@@ -992,7 +1042,10 @@ impl Extractor {
                     // 「出自用户 / 出自助手」的字段，由模型逐条标注。
                     // 这符合 §8.3 的原则「必须由抽取器显式记录每条对应哪个
                     // 输入片段，不能事后重建」，也正是存量行栽跟头的地方。
-                    source: FactSource::Conversation,
+                    //
+                    // 工具轨迹那一路是 ToolOutput（tier 3），理由见上面
+                    // 配对的地方。
+                    source,
                     // 单源：出处就是 `source_episode_id` 那一条 episode
                     derived_from: Vec::new(),
                     extracted_by: extracted_by.clone(),
@@ -1056,6 +1109,50 @@ impl Extractor {
             .new_entities
             .extend(resolver.created.iter().map(|e| e.id));
         Ok(report)
+    }
+
+    /// 从本轮的工具轨迹产出候选事实。
+    ///
+    /// 两次读查询、一段纯计算，没有模型参与 —— 判据在
+    /// [`crate::trace`] 里，全部由 `ok` 的真假序列与出现次数算出来。
+    ///
+    /// 本轮没有任何工具调用时**只查一次**就返回：绝大多数对话轮次是纯聊天，
+    /// 让它们白背一次全库扫描不划算。
+    async fn trace_candidates(
+        &self,
+        store: &Store,
+        ctx: &ExtractContext,
+    ) -> Result<Vec<CandidateFact>> {
+        let calls = store
+            .episode_tool_calls(&ctx.episode_id.to_string())
+            .await?;
+        if calls.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 惯例这条判据在单轮内算不出来，必须越过本轮的视野。
+        // 范围是**整个记忆库**而不是当前项目 —— `episode_tool_calls` 上
+        // 没有工作区/项目列，收窄不了。等它有了再收。
+        let history = store
+            .recent_tool_calls(self.trace_rules.history_limit)
+            .await?;
+
+        let out = trace::candidates_from_trace(
+            &calls,
+            &history,
+            ctx.domain.as_deref(),
+            ctx.occurred_at,
+            &self.trace_rules,
+        );
+        if !out.is_empty() {
+            tracing::debug!(
+                episode = %ctx.episode_id,
+                calls = calls.len(),
+                candidates = out.len(),
+                "工具轨迹产出候选事实"
+            );
+        }
+        Ok(out)
     }
 
     /// 查同 `(subject_id, predicate)` 的现存有效事实，转成判定用的对手。

@@ -20,7 +20,7 @@
     "peak_bonus": 0.04,
     "semantic_floor": null,
     "replay_ranked": true,
-    "schema": "cortex_eval_1786106445791_44448"
+    "schema": "cortex_eval_1786109588024_12840"
   },
   "suite": {
     "name": "cortex-zh-en-v1",
@@ -55,20 +55,20 @@
     "total:kind.关系推理": 15,
     "kind.跨域检索": 15,
     "total:kind.跨域检索": 15,
-    "kind.工具经验": 0,
+    "kind.工具经验": 8,
     "total:kind.工具经验": 8,
     "kind.应召不到": 0,
     "total:kind.应召不到": 14,
-    "lang.中文": 74,
-    "lang.英文": 9,
-    "lang.中英混排": 19
+    "lang.中文": 79,
+    "lang.英文": 10,
+    "lang.中英混排": 21
   },
   "metrics": {
-    "overall.recall@1": 0.5906862745098039,
-    "overall.recall@5": 0.8529411764705882,
-    "overall.recall@10": 0.8872549019607843,
-    "overall.mrr": 0.7190665533499263,
-    "overall.recall_any": 0.9052287581699348,
+    "overall.recall@1": 0.5113636363636364,
+    "overall.recall@5": 0.8363636363636363,
+    "overall.recall@10": 0.8590909090909091,
+    "overall.mrr": 0.6678954963165491,
+    "overall.recall_any": 0.8848484848484849,
     "kind.中文语义.recall@5": 0.8787878787878788,
     "kind.中文语义.forbidden@5": 0.0,
     "kind.中文语义.gold_missing": 0.0,
@@ -83,12 +83,13 @@
     "kind.关系推理.gold_missing": 0.0,
     "kind.跨域检索.recall@5": 0.6,
     "kind.跨域检索.gold_missing": 0.0,
-    "kind.工具经验.gold_missing": 1.0,
+    "kind.工具经验.recall@5": 0.625,
+    "kind.工具经验.gold_missing": 0.0,
     "kind.工具经验.extraction_leak": 0.0,
-    "kind.应召不到.forbidden@5": 0.5,
+    "kind.应召不到.forbidden@5": 0.42857142857142855,
     "kind.应召不到.gold_missing": 0.0,
-    "lang.中文.recall@5": 0.8445945945945946,
-    "lang.英文.recall@5": 0.7777777777777778,
-    "lang.中英混排.recall@5": 0.9210526315789473
+    "lang.中文.recall@5": 0.8164556962025317,
+    "lang.英文.recall@5": 0.8,
+    "lang.中英混排.recall@5": 0.9285714285714286
   }
 }

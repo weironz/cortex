@@ -20,7 +20,7 @@
     "peak_bonus": 0.04,
     "semantic_floor": 0.5,
     "replay_ranked": true,
-    "schema": "cortex_eval_1786106472487_14012"
+    "schema": "cortex_eval_1786109590831_49896"
   },
   "suite": {
     "name": "cortex-zh-en-v1",
@@ -55,24 +55,24 @@
     "total:kind.关系推理": 15,
     "kind.跨域检索": 15,
     "total:kind.跨域检索": 15,
-    "kind.工具经验": 0,
+    "kind.工具经验": 8,
     "total:kind.工具经验": 8,
     "kind.应召不到": 0,
     "total:kind.应召不到": 14,
-    "lang.中文": 74,
-    "lang.英文": 9,
-    "lang.中英混排": 19
+    "lang.中文": 79,
+    "lang.英文": 10,
+    "lang.中英混排": 21
   },
   "metrics": {
-    "overall.recall@1": 0.6397058823529411,
-    "overall.recall@5": 0.8774509803921569,
-    "overall.recall@10": 0.9313725490196079,
-    "overall.mrr": 0.7709656084656085,
-    "overall.recall_any": 0.9346405228758171,
+    "overall.recall@1": 0.6204545454545455,
+    "overall.recall@5": 0.8454545454545455,
+    "overall.recall@10": 0.9272727272727272,
+    "overall.mrr": 0.7429079758625214,
+    "overall.recall_any": 0.9393939393939394,
     "kind.中文语义.recall@5": 0.9090909090909091,
     "kind.中文语义.forbidden@5": 0.0,
     "kind.中文语义.gold_missing": 0.0,
-    "kind.专名精确.recall@5": 0.9259259259259259,
+    "kind.专名精确.recall@5": 0.9074074074074074,
     "kind.专名精确.forbidden@5": 0.5,
     "kind.专名精确.gold_missing": 0.0,
     "kind.时间回放.recall@5": 0.8333333333333334,
@@ -81,14 +81,15 @@
     "kind.关系推理.recall@5": 0.9666666666666667,
     "kind.关系推理.forbidden@5": 0.0,
     "kind.关系推理.gold_missing": 0.0,
-    "kind.跨域检索.recall@5": 0.6666666666666666,
+    "kind.跨域检索.recall@5": 0.6,
     "kind.跨域检索.gold_missing": 0.0,
-    "kind.工具经验.gold_missing": 1.0,
+    "kind.工具经验.recall@5": 0.625,
+    "kind.工具经验.gold_missing": 0.0,
     "kind.工具经验.extraction_leak": 0.0,
-    "kind.应召不到.forbidden@5": 0.5,
+    "kind.应召不到.forbidden@5": 0.5714285714285714,
     "kind.应召不到.gold_missing": 0.0,
-    "lang.中文.recall@5": 0.8445945945945946,
+    "lang.中文.recall@5": 0.8164556962025317,
     "lang.英文.recall@5": 1.0,
-    "lang.中英混排.recall@5": 0.9473684210526315
+    "lang.中英混排.recall@5": 0.8809523809523809
   }
 }

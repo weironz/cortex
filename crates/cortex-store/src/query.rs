@@ -310,6 +310,25 @@ impl Store {
         Ok(rows)
     }
 
+    /// 最近的工具调用（跨 episode，最新的在前）。
+    ///
+    /// 轨迹抽取判「同一命令反复出现 = 这是这个项目的惯例」需要越过本轮的
+    /// 视野，而那条判据在单轮内是算不出来的。
+    ///
+    /// **按 `id` 倒序而不是 `created_at`**：`id` 是 ULID，字典序即时间序，
+    /// 而它是主键、天然有索引；`created_at` 上一个索引都没有，按它排序在
+    /// 这张只增不减的表上就是一次全表扫描 + 排序。
+    pub async fn recent_tool_calls(&self, limit: i64) -> Result<Vec<EpisodeToolCall>> {
+        let rows = sqlx::query_as::<_, EpisodeToolCall>(
+            "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, created_at
+               FROM episode_tool_calls ORDER BY id DESC LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
     // ── L1：entities ───────────────────────────────────────
 
     pub async fn entity(&self, id: &str) -> Result<Option<Entity>> {

@@ -17,7 +17,7 @@ use cortex_core::config::LlmConfig;
 use cortex_llm::LlmClient;
 use cortex_memory::embed::HashEmbedder;
 use cortex_memory::extract::{CandidateFact, EntityRef, ExtractContext, Extractor, ObjectRef};
-use cortex_store::{NewEpisode, Role, Store};
+use cortex_store::{NewEpisode, NewEpisodeToolCall, Role, Store};
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
@@ -176,6 +176,56 @@ pub async fn seed_episode(store: &Store, text: &str) -> Id {
         .write_txn(async |tx| tx.insert_episode(&episode).await)
         .await
         .expect("episode 应能落库");
+    id
+}
+
+/// 落一条 episode 并把 `(name, path, ok, summary)` 挂成工具轨迹。
+///
+/// 与生产的 `live.rs`、评测的 harness 一致：轨迹与 episode **同一个
+/// `write_txn`**。拆成两个事务会造出「episode 已提交、轨迹还没提交」这个
+/// 中间态，而抽取器正是在 episode 提交之后被触发的。
+pub async fn seed_episode_with_tools(
+    store: &Store,
+    text: &str,
+    calls: &[(&str, Option<&str>, bool, &str)],
+) -> Id {
+    let id = Id::new();
+    let episode = NewEpisode {
+        id,
+        session_id: "s1".to_owned(),
+        role: Role::User,
+        content: serde_json::json!({ "role": "user", "text": text }),
+        text: Some(text.to_owned()),
+        tsv_source: Some(text.to_owned()),
+        domain: Some("coding".to_owned()),
+        device_id: DEVICE.to_owned(),
+        occurred_at: Utc::now(),
+    };
+    let rows: Vec<NewEpisodeToolCall> = calls
+        .iter()
+        .enumerate()
+        .map(|(i, (name, path, ok, summary))| NewEpisodeToolCall {
+            id: Id::new(),
+            episode_id: id,
+            ordinal: i32::try_from(i).expect("测试里的调用数不会溢出"),
+            name: (*name).to_owned(),
+            path: path.map(str::to_owned),
+            summary: (*summary).to_owned(),
+            ok: *ok,
+            device_id: DEVICE.to_owned(),
+        })
+        .collect();
+
+    store
+        .write_txn(async |tx| {
+            tx.insert_episode(&episode).await?;
+            for row in &rows {
+                tx.insert_episode_tool_call(row).await?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("episode 与工具轨迹应能同事务落库");
     id
 }
 
