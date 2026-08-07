@@ -94,10 +94,17 @@ impl AppState {
         let live = Live::new(config, embedder).await?;
         let bus = SyncBus::spawn(live.store().clone());
         let blobs = MediaStore::connect(config).await;
+
+        let live = Arc::new(live);
+        // 预签名直传那条路上服务端从没经手字节，转录无从触发 —— 大文件成了
+        // 纯归档。回扫器以 blobs 表为权威清单把它们捡回来。
+        // 未配 vision 模型时它自己不会启动。
+        crate::backfill::spawn(Arc::clone(&live), blobs.clone());
+
         Ok(Self {
             inner: Arc::new(Inner {
                 config: config.clone(),
-                backend: Backend::Live(Arc::new(live)),
+                backend: Backend::Live(live),
                 bus,
                 blobs,
             }),
@@ -395,7 +402,7 @@ impl AppState {
         }
     }
 
-    pub async fn session_detail(&self, id: &str) -> Result<SessionDetail> {
+    pub async fn session_detail(&self, id: &str, q: &SessionDetailQuery) -> Result<SessionDetail> {
         match &self.inner.backend {
             Backend::Mock => {
                 let session = mock_sessions()
@@ -405,12 +412,20 @@ impl AppState {
                         kind: "session",
                         id: id.into(),
                     })?;
+                // mock 只有一条消息，翻不了页。但游标**照样校验** ——
+                // 客户端 CI 里「传了个坏游标会拿到 400」这条断言必须在 mock 上
+                // 也成立，否则它测的是一个比真实后端宽松的契约
+                if let Some(raw) = q.before.as_deref() {
+                    let _ = crate::cursor::decode(raw)?;
+                }
                 Ok(SessionDetail {
                     episodes: vec![mock_episode("01JEPISODE000000000000001")],
                     session,
+                    has_more: false,
+                    next_cursor: None,
                 })
             }
-            Backend::Live(l) => l.session_detail(id).await,
+            Backend::Live(l) => l.session_detail(id, q).await,
         }
     }
 
@@ -443,6 +458,18 @@ fn mock_episode(id: &str) -> EpisodeDto {
         text: Some("对象存储先用 RustFS，第一版单卷即可。".into()),
         occurred_at: Utc::now().to_rfc3339(),
         attachments: vec![],
+        // 伪造一条注入归因，让客户端能在离线开发时把「为什么记得这个」
+        // 抽屉真的画出来 —— 与 mock_chat_stream 伪造记忆事件同一个理由
+        memories: vec![InjectedMemoryDto {
+            fact_id: "01JFACT00000000000000001".into(),
+            statement: Some("Cortex 的对象存储使用 RustFS".into()),
+            domain: Some("coding".into()),
+            channels: vec!["bm25".into(), "vector".into()],
+            score: Some(0.032),
+            invalidated: false,
+            source_episode_id: Some("01JEPISODE000000000000000".into()),
+        }],
+        tool_calls: vec![],
     }
 }
 
@@ -537,6 +564,8 @@ fn mock_chat_stream(req: ChatRequest) -> impl Stream<Item = ChatEvent> + use<> {
         ChatEvent::Tool {
             name: "memory_search".into(),
             summary: format!("在会话 {session} 中检索了 3 条相关记忆"),
+            // memory_search 不碰文件 —— path 为 None 正是它必须可选的理由
+            path: None,
         },
     ]);
     let body = stream::iter(chunks.into_iter().map(|text| ChatEvent::Delta { text }))

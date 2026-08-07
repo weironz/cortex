@@ -25,8 +25,9 @@ use sqlx::{PgPool, Postgres, postgres::PgArguments, query::Query};
 
 use crate::error::Result;
 use crate::model::{
-    NewBlob, NewBlobTranscript, NewEntity, NewEntityMerge, NewEpisode, NewEpisodeBlob, NewFact,
-    NewFactEvent, NewRedaction, NewSessionEvent, NewSummary, table,
+    NewBlob, NewBlobTranscript, NewEntity, NewEntityMerge, NewEpisode, NewEpisodeBlob,
+    NewEpisodeMemory, NewEpisodeToolCall, NewFact, NewFactEvent, NewRedaction, NewSessionEvent,
+    NewSummary, table,
 };
 
 /// 同步取号锁的 advisory lock key。
@@ -165,17 +166,70 @@ impl WriteTxn {
     }
 
     /// 把 blob 挂到 episode 上。`sync_log.record_id` 用复合键 `episode_id:blob_hash`。
+    ///
+    /// `filename` 存在这里而不是 `blobs` 里：内容寻址下同一份字节可以有多个
+    /// 文件名，写进 blobs 就成了「谁先传谁定名」。见
+    /// `migrations/20260807000004_attachment_filename.sql`。
     pub async fn link_episode_blob(&mut self, new: &NewEpisodeBlob) -> Result<i64> {
         let record_id = new.record_id();
         let stmt = sqlx::query(
-            "INSERT INTO episode_blobs (episode_id, blob_hash, kind) VALUES ($1, $2, $3)",
+            "INSERT INTO episode_blobs (episode_id, blob_hash, kind, filename)
+             VALUES ($1, $2, $3, $4)",
         )
         .bind(new.episode_id.to_string())
         .bind(&new.blob_hash)
-        .bind(&new.kind);
+        .bind(&new.kind)
+        .bind(&new.filename);
 
         self.insert_row(table::EPISODE_BLOBS, &record_id, stmt)
             .await
+    }
+
+    // ── 回放抽屉 ───────────────────────────────────────────
+
+    /// 记下本轮注入了哪一条记忆。
+    ///
+    /// 只存 `fact_id`，不存注入当时的原文快照 —— 快照里的原文抹不掉，
+    /// 会让 redact 的销毁承诺变成假的（见 migration 20260807000005 的表头）。
+    pub async fn insert_episode_memory(&mut self, new: &NewEpisodeMemory) -> Result<i64> {
+        let id = new.id.to_string();
+        let stmt = sqlx::query(
+            "INSERT INTO episode_memories
+                 (id, episode_id, fact_id, ordinal, channels, score, device_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&id)
+        .bind(new.episode_id.to_string())
+        .bind(new.fact_id.to_string())
+        .bind(new.ordinal)
+        .bind(&new.channels)
+        .bind(new.score)
+        .bind(&new.device_id);
+
+        self.insert_row(table::EPISODE_MEMORIES, &id, stmt).await
+    }
+
+    /// 记下本轮的一次工具调用。
+    ///
+    /// `path` 是独立一列而不是塞在 `summary` 里：summary 是给人看的自然语言，
+    /// 措辞随时会改，客户端一旦用正则从里面抠路径，改一次措辞就是静默显示错文件。
+    pub async fn insert_episode_tool_call(&mut self, new: &NewEpisodeToolCall) -> Result<i64> {
+        let id = new.id.to_string();
+        let stmt = sqlx::query(
+            "INSERT INTO episode_tool_calls
+                 (id, episode_id, ordinal, name, path, summary, ok, device_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(&id)
+        .bind(new.episode_id.to_string())
+        .bind(new.ordinal)
+        .bind(&new.name)
+        .bind(&new.path)
+        .bind(&new.summary)
+        .bind(new.ok)
+        .bind(&new.device_id);
+
+        self.insert_row(table::EPISODE_TOOL_CALLS, &id, stmt).await
     }
 
     /// 写入媒体转录。

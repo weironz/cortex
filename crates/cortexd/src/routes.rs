@@ -121,11 +121,17 @@ async fn list_sessions(
     }))
 }
 
+/// 单个会话的详情：概览 + **一页**消息。
+///
+/// 默认给最新的一页，往回翻传 `?before=`（取上一次响应的 `next_cursor`）。
+/// 不带参数的老客户端拿到的是**最新** N 条 —— 在此之前它拿到的是最老的
+/// N 条，也就是一段没有结尾的对话，而且看不出被截断了。
 async fn get_session(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<SessionDetailQuery>,
 ) -> Result<Json<SessionDetail>, ApiError> {
-    Ok(Json(st.session_detail(&id).await?))
+    Ok(Json(st.session_detail(&id, &q).await?))
 }
 
 /// 改名 / 归档 / 绑定工作区。返回改完之后的会话概览。

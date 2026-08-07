@@ -81,9 +81,6 @@ const MAX_ROUNDS_ENV: &str = "CORTEX_AGENT_MAX_ROUNDS";
 /// 别的会话直接从列表里消失）。
 const SESSION_LIST_LIMIT: i64 = 200;
 
-/// 单个会话一次最多回多少条消息。
-const SESSION_EPISODE_LIMIT: i64 = 500;
-
 /// 会话标题取首条用户消息的前多少字。
 const TITLE_CHARS: usize = 24;
 
@@ -103,6 +100,35 @@ pub struct Live {
     transcribe: Option<Arc<cortex_memory::TranscribePipeline>>,
     device_id: String,
     context_window: usize,
+}
+
+/// 一次转录的结局。
+///
+/// 比 [`cortex_memory::transcribe::Outcome`] 多一个 `Disabled`，少了那一大坨
+/// 待写行 —— 调用方要的只是「成没成、要不要重试」。回扫器据此区分
+/// 「这次失败了」与「这个永远转不了」。
+#[derive(Debug)]
+pub enum TranscribeOutcome {
+    /// 转录完成并已落库
+    Stored { segments: usize },
+    /// 该 blob 已被抹除，结果整批丢弃。**不是失败，也永远不该重试**
+    Redacted,
+    /// 没有转录器认领这个 MIME（当前主要是音视频）。
+    /// 将来 ASR 落地后重跑即可，但在此之前重试多少次都是同一个结果
+    Unsupported { mime: String },
+    /// 没配 vision 模型，整条链路关闭
+    Disabled,
+}
+
+impl TranscribeOutcome {
+    fn log(&self, hash: &str) {
+        match self {
+            Self::Stored { segments } => tracing::info!(hash, segments, "媒体转录已落库"),
+            Self::Redacted => tracing::info!(hash, "blob 在转录期间被抹除，结果已丢弃"),
+            Self::Unsupported { mime } => tracing::debug!(hash, mime, "没有转录器认领这个类型"),
+            Self::Disabled => tracing::debug!(hash, "未配置 vision 模型，跳过转录"),
+        }
+    }
 }
 
 /// 把 `store.is_redacted` 接到转录管线的 [`RedactionGuard`] 上。
@@ -308,11 +334,33 @@ impl Live {
                 kind: "episode",
                 id: id.into(),
             })?;
-        let links = self.store.episode_blobs(id).await.map_err(store_err)?;
-        Ok(episode_dto(
-            e,
-            links.into_iter().map(attachment_of).collect(),
-        ))
+        let replay = Replay {
+            attachments: self
+                .store
+                .episode_attachments(id)
+                .await
+                .map_err(store_err)?
+                .into_iter()
+                .map(attachment_of)
+                .collect(),
+            memories: self
+                .store
+                .injected_memories(id)
+                .await
+                .map_err(store_err)?
+                .into_iter()
+                .map(memory_dto)
+                .collect(),
+            tool_calls: self
+                .store
+                .episode_tool_calls(id)
+                .await
+                .map_err(store_err)?
+                .into_iter()
+                .map(tool_call_dto)
+                .collect(),
+        };
+        Ok(episode_dto(e, replay))
     }
 
     pub async fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionDto>> {
@@ -454,73 +502,120 @@ impl Live {
         })
     }
 
-    /// 一个会话的全部消息，附件一并挂上。
+    /// 一个会话的一页消息，附件与回放抽屉一并挂上。
     ///
-    /// 概览在这里是**从取回的消息现算**的，而不是再查一次
-    /// `session_digests` —— 消息全都在手上了，为同一组数字再往返一次数据库
-    /// 只会多一个「两处口径可能对不上」的机会。
-    pub async fn session_detail(&self, session_id: &str) -> Result<SessionDetail> {
-        let episodes = self
+    /// # 概览为什么不再从取回的消息现算
+    ///
+    /// 以前是「消息全在手上了，顺手算一下」，分页之后这条路直接错了：
+    /// 手上只有**一页**，算出来的 `message_count` 是页大小、`created_at`
+    /// 是这一页最早那条、派生标题取的是这一页里的首条用户消息。
+    /// 这些数字在第一页上恰好都对，往回翻一页就全错 —— 而它们不报错。
+    ///
+    /// 现在概览一律来自 `session_digest` 那句聚合 SQL：它统计的是**全部**消息，
+    /// 与翻到第几页无关。多一次往返换掉一整类「翻页之后数字开始漂」的 bug。
+    /// 客户端拿 `message_count` 与本页条数比对来判断是否被截断的那套补丁，
+    /// 现在有 `has_more` 可用，但旧口径仍然成立（`message_count` 还是总数）。
+    pub async fn session_detail(
+        &self,
+        session_id: &str,
+        q: &SessionDetailQuery,
+    ) -> Result<SessionDetail> {
+        let digest = self
             .store
-            .episodes_by_session(session_id, SESSION_EPISODE_LIMIT)
+            .session_digest(session_id)
             .await
-            .map_err(store_err)?;
-        if episodes.is_empty() {
-            return Err(CortexError::NotFound {
+            .map_err(store_err)?
+            .ok_or_else(|| CortexError::NotFound {
                 kind: "session",
                 id: session_id.into(),
-            });
-        }
+            })?;
 
-        let ids: Vec<String> = episodes.iter().map(|e| e.id.clone()).collect();
-        let links = self
+        let limit = q
+            .limit
+            .unwrap_or(DEFAULT_EPISODE_PAGE)
+            .clamp(1, MAX_EPISODE_PAGE);
+        let before = q.before.as_deref().map(crate::cursor::decode).transpose()?;
+
+        // 多要一条来判断「还有没有更早的」。用 len == limit 推断会在恰好整除时
+        // 多骗客户端要一次空页，而客户端多半把空页当成「到头了」——
+        // 两种判断混在一起就是「有时候翻不到最早那几条」
+        let mut page = self
             .store
-            .episode_blobs_bulk(&ids)
+            .episodes_by_session_page(session_id, limit + 1, before.as_ref())
             .await
             .map_err(store_err)?;
-        let mut by_episode: std::collections::HashMap<String, Vec<AttachmentRef>> =
-            std::collections::HashMap::new();
-        for l in links {
-            by_episode
-                .entry(l.episode_id.clone())
-                .or_default()
-                .push(attachment_of(l));
-        }
+        let has_more = page.len() as i64 > limit;
+        page.truncate(limit as usize);
 
-        // 标题 / 归档 / 工作区算不出来，只能查 —— 它们不在消息里
-        let state = self
-            .store
-            .session_state(session_id)
-            .await
-            .map_err(store_err)?;
-        // episodes_by_session 是升序，因此首条用户消息就是派生标题的来源
-        let first_user_text = episodes
-            .iter()
-            .find(|e| e.role == Role::User)
-            .and_then(|e| e.text.clone());
-        let custom_title = state.as_ref().and_then(|s| s.title.clone());
-        let session = SessionDto {
-            id: session_id.to_string(),
-            title_is_custom: custom_title.is_some(),
-            title: custom_title.unwrap_or_else(|| session_title(first_user_text.as_deref())),
-            created_at: episodes[0].occurred_at.to_rfc3339(),
-            updated_at: episodes[episodes.len() - 1].occurred_at.to_rfc3339(),
-            message_count: episodes.len() as i64,
-            preview: episodes.iter().rev().find_map(|e| e.text.clone()),
-            archived: state.as_ref().is_some_and(|s| s.archived),
-            workspace: state.and_then(|s| s.workspace),
-        };
+        // 这里拿到的是降序（新 → 老）。反转成正序再下发，理由见
+        // `SessionDetail::episodes` 的文档：下发降序不会报错，只会让老客户端
+        // 把整段对话倒着画出来
+        let next_cursor = page
+            .last()
+            .filter(|_| has_more)
+            .map(|e| crate::cursor::encode(e.occurred_at, &e.id));
+        page.reverse();
+
+        let ids: Vec<String> = page.iter().map(|e| e.id.clone()).collect();
+        let mut by_episode = self.replay_bundle(&ids).await?;
 
         Ok(SessionDetail {
-            session,
-            episodes: episodes
+            session: session_dto(digest),
+            episodes: page
                 .into_iter()
                 .map(|e| {
-                    let attachments = by_episode.remove(&e.id).unwrap_or_default();
-                    episode_dto(e, attachments)
+                    let replay = by_episode.remove(&e.id).unwrap_or_default();
+                    episode_dto(e, replay)
                 })
                 .collect(),
+            has_more,
+            next_cursor,
         })
+    }
+
+    /// 一页消息的附件 + 回放抽屉，三次批量查询而不是逐条 N+1。
+    async fn replay_bundle(
+        &self,
+        episode_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Replay>> {
+        let mut out: std::collections::HashMap<String, Replay> =
+            std::collections::HashMap::with_capacity(episode_ids.len());
+
+        for a in self
+            .store
+            .episode_attachments_bulk(episode_ids)
+            .await
+            .map_err(store_err)?
+        {
+            out.entry(a.episode_id.clone())
+                .or_default()
+                .attachments
+                .push(attachment_of(a));
+        }
+        for m in self
+            .store
+            .injected_memories_bulk(episode_ids)
+            .await
+            .map_err(store_err)?
+        {
+            out.entry(m.episode_id.clone())
+                .or_default()
+                .memories
+                .push(memory_dto(m));
+        }
+        for t in self
+            .store
+            .episode_tool_calls_bulk(episode_ids)
+            .await
+            .map_err(store_err)?
+        {
+            out.entry(t.episode_id.clone())
+                .or_default()
+                .tool_calls
+                .push(tool_call_dto(t));
+        }
+
+        Ok(out)
     }
 
     // ─────────────────────────── 媒体 ───────────────────────────
@@ -592,44 +687,66 @@ impl Live {
     /// 只在 blob **首次**登记时排队：内容寻址下重复上传是同一份字节，
     /// 转录结果也会一模一样，重转纯属白烧模型钱。
     pub fn spawn_transcription(self: &Arc<Self>, hash: String, bytes: bytes::Bytes, mime: String) {
-        let Some(pipeline) = self.transcribe.clone() else {
+        if self.transcribe.is_none() {
             return; // 没配 vision 模型，图片仍然归档，只是检索不到
-        };
+        }
         let live = Arc::clone(self);
 
         tokio::spawn(async move {
-            let guard = StoreRedactionGuard {
-                store: live.store.clone(),
-            };
-            match pipeline.run(&hash, &bytes, &mime, &guard).await {
-                Ok(cortex_memory::transcribe::Outcome::Ready(rows)) => {
-                    let n = rows.len();
-                    // 一个事务写完全部段落：ASR 的分段之间没有独立意义，
-                    // 半截的时间轴比没有更糟
-                    let res = live
-                        .store
-                        .write_txn(async |t| {
-                            for r in &rows {
-                                t.insert_blob_transcript(r).await?;
-                            }
-                            Ok(())
-                        })
-                        .await;
-                    match res {
-                        Ok(()) => tracing::info!(hash, segments = n, "媒体转录已落库"),
-                        Err(e) => tracing::warn!(hash, error = %e, "转录结果落库失败"),
-                    }
-                }
-                Ok(cortex_memory::transcribe::Outcome::Redacted) => {
-                    tracing::info!(hash, "blob 在转录期间被抹除，结果已丢弃")
-                }
-                Ok(cortex_memory::transcribe::Outcome::Unsupported { mime }) => {
-                    tracing::debug!(hash, mime, "没有转录器认领这个类型")
-                }
+            match live.transcribe_and_store(&hash, &bytes, &mime).await {
+                Ok(outcome) => outcome.log(&hash),
                 // 转录失败不该影响已经成功的上传，记日志即可
                 Err(e) => tracing::warn!(hash, error = %e, "媒体转录失败"),
             }
         });
+    }
+
+    /// 媒体转录是否启用。后台回扫器据此决定要不要起来 ——
+    /// 没配 `CORTEX_VISION_PROVIDER` 时整条链路关闭，与上传路径的行为一致。
+    #[must_use]
+    pub fn transcription_enabled(&self) -> bool {
+        self.transcribe.is_some()
+    }
+
+    /// 跑一遍转录并落库。**同步等待结果** —— 上传路径把它丢进
+    /// [`Self::spawn_transcription`] 里 fire-and-forget，后台回扫器则要拿到
+    /// 结局才能决定「这个 blob 要不要重试」。
+    ///
+    /// 抹除防护走 [`StoreRedactionGuard`]，两条路都绕不开它：管线把
+    /// [`cortex_memory::transcribe::RedactionGuard`] 做进了 `run` 的签名。
+    pub async fn transcribe_and_store(
+        &self,
+        hash: &str,
+        bytes: &[u8],
+        mime: &str,
+    ) -> Result<TranscribeOutcome> {
+        let Some(pipeline) = self.transcribe.as_ref() else {
+            return Ok(TranscribeOutcome::Disabled);
+        };
+        let guard = StoreRedactionGuard {
+            store: self.store.clone(),
+        };
+        match pipeline.run(hash, bytes, mime, &guard).await? {
+            cortex_memory::transcribe::Outcome::Ready(rows) => {
+                let n = rows.len();
+                // 一个事务写完全部段落：ASR 的分段之间没有独立意义，
+                // 半截的时间轴比没有更糟
+                self.store
+                    .write_txn(async |t| {
+                        for r in &rows {
+                            t.insert_blob_transcript(r).await?;
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .map_err(store_err)?;
+                Ok(TranscribeOutcome::Stored { segments: n })
+            }
+            cortex_memory::transcribe::Outcome::Redacted => Ok(TranscribeOutcome::Redacted),
+            cortex_memory::transcribe::Outcome::Unsupported { mime } => {
+                Ok(TranscribeOutcome::Unsupported { mime })
+            }
+        }
     }
 
     // ─────────────────────────── 同步 ───────────────────────────
@@ -744,6 +861,15 @@ async fn run_turn(live: Arc<Live>, req: ChatRequest, tx: &mpsc::Sender<ChatEvent
                 episode_id: user_episode_id,
                 blob_hash: a.hash.clone(),
                 kind: a.kind.clone(),
+                // 客户端给的文件名要先截断：schema 的 CHECK 是 255 字符，
+                // 超了会让**整个写事务回滚**——连带丢掉这条消息本身，
+                // 而用户只是拖进来一个名字特别长的文件
+                filename: a
+                    .filename
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| clamp_chars(s, cortex_store::ATTACHMENT_FILENAME_MAX_CHARS)),
             })
             .collect();
 
@@ -784,6 +910,11 @@ async fn run_turn(live: Arc<Live>, req: ChatRequest, tx: &mpsc::Sender<ChatEvent
         })
         .await
         .ok();
+
+        // 归因落盘 —— 只在 SSE 里推是不够的：刷新一次抽屉就空了，
+        // 而「为什么记得这个」正是这个项目的核心卖点。
+        // 这里是一个短小纯写的事务，检索与向量化都已在事务外做完
+        record_injected_memories(store, user_episode_id, &retrieved, device_id).await;
     }
 
     // ── 3. 注入 ──
@@ -804,25 +935,64 @@ async fn run_turn(live: Arc<Live>, req: ChatRequest, tx: &mpsc::Sender<ChatEvent
     // send 也失败，循环立刻收工，不会继续烧 token。
     let (atx, mut arx) = mpsc::channel::<AgentEvent>(64);
     let bridge_tx = tx.clone();
+    let bridge_episode = user_episode_id;
+    let bridge_device = device_id.to_string();
     let bridge = tokio::spawn(async move {
+        // ToolCall 带参数、ToolResult 带成败，路径只在前者里。turn.rs 里两者
+        // 严格交替（发 ToolCall → dispatch → 发 ToolResult），所以按工具名记住
+        // 上一次的路径即可。按名而不是一个裸变量：将来若并发派发工具，
+        // 按名至少不会张冠李戴
+        let mut pending_path: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        let mut recorded: Vec<cortex_store::NewEpisodeToolCall> = Vec::new();
+
         while let Some(ev) = arx.recv().await {
             let out = match ev {
                 AgentEvent::Delta(text) => ChatEvent::Delta { text },
-                AgentEvent::ToolCall { name, arguments } => ChatEvent::Tool {
-                    summary: format!("调用 {name} {}", compact_args(&arguments)),
-                    name,
-                },
-                // ok 不单独进契约：summary 自己就说清了成败
-                //（「返回 12 行 / 340 字符」对「失败：路径 … 已拒绝」）
-                AgentEvent::ToolResult { name, summary, .. } => ChatEvent::Tool {
-                    summary: format!("{name} {summary}"),
-                    name,
-                },
+                AgentEvent::ToolCall { name, arguments } => {
+                    let path = tool_path(&arguments);
+                    pending_path.insert(name.clone(), path.clone());
+                    ChatEvent::Tool {
+                        summary: format!("调用 {name} {}", compact_args(&arguments)),
+                        name,
+                        path,
+                    }
+                }
+                // ok 不单独进 SSE 契约：summary 自己就说清了成败
+                //（「返回 12 行 / 340 字符」对「失败：路径 … 已拒绝」）。
+                // 但落库要留 ok —— 回放时「哪几次失败了」是一眼要看到的东西
+                AgentEvent::ToolResult { name, ok, summary } => {
+                    let path = pending_path.remove(&name).flatten();
+                    recorded.push(cortex_store::NewEpisodeToolCall {
+                        id: Id::new(),
+                        episode_id: bridge_episode,
+                        ordinal: recorded.len() as i32,
+                        name: clamp_chars(&name, cortex_store::TOOL_NAME_MAX_CHARS),
+                        path: path
+                            .as_deref()
+                            .map(|p| clamp_chars(p, cortex_store::TOOL_PATH_MAX_CHARS)),
+                        summary: clamp_chars(
+                            &format!("{name} {summary}"),
+                            cortex_store::TOOL_SUMMARY_MAX_CHARS,
+                        ),
+                        ok,
+                        device_id: bridge_device.clone(),
+                    });
+                    ChatEvent::Tool {
+                        summary: format!("{name} {summary}"),
+                        name,
+                        path,
+                    }
+                }
             };
+            // 下游断开（客户端关了页面）只该停止**转发**，不该丢掉已经记下的
+            // 工具调用 —— 那一轮的库里该有什么，与谁还在看着没有关系
             if bridge_tx.send(out).await.is_err() {
                 break;
             }
         }
+
+        recorded
     });
 
     // 工具目录按**会话**决定，不是按进程。未绑定工作区 = 纯聊天，
@@ -856,7 +1026,12 @@ async fn run_turn(live: Arc<Live>, req: ChatRequest, tx: &mpsc::Sender<ChatEvent
         .run(llm, SYSTEM_PROMPT, &mut messages, &*live, &atx)
         .await;
     drop(atx);
-    let _ = bridge.await;
+    let tool_calls = bridge.await.unwrap_or_else(|e| {
+        // 桥接任务 panic 了。本轮的工具归因就此丢失，但对话本身已经完成，
+        // 没有理由连回复一起丢掉
+        tracing::warn!(error = %e, "工具事件桥接任务异常结束，本轮工具归因未落库");
+        Vec::new()
+    });
 
     let reply = match outcome {
         Ok(o) => {
@@ -901,6 +1076,30 @@ async fn run_turn(live: Arc<Live>, req: ChatRequest, tx: &mpsc::Sender<ChatEvent
             .map_err(|e| CortexError::Store(e.to_string()))?;
     }
 
+    // ── 5b. 落工具归因 ──
+    //
+    // 与 assistant 那条 episode 分开一个事务：工具调用锚在 **user** 那条上
+    // （见 migration 20260807000005），而 assistant 那条在模型出错时根本不落库。
+    // 合并事务就得为「有回复」和「没回复」写两条不同的路径，收益是零。
+    if !tool_calls.is_empty() {
+        let n = tool_calls.len();
+        let res = store
+            .write_txn(async |t| {
+                let mut last = 0;
+                for c in &tool_calls {
+                    last = t.insert_episode_tool_call(c).await?;
+                }
+                Ok(last)
+            })
+            .await;
+        match res {
+            Ok(_) => tracing::debug!(calls = n, "本轮工具归因已落库"),
+            // 对话已经完成，用户也已经看到回复了。归因写不进去是可观测性的
+            // 损失，不该表现为一次失败的对话
+            Err(e) => tracing::warn!(error = %e, calls = n, "工具归因落库失败"),
+        }
+    }
+
     tx.send(ChatEvent::Done {
         episode_id: assistant_episode_id.to_string(),
     })
@@ -932,6 +1131,94 @@ async fn run_turn(live: Arc<Live>, req: ChatRequest, tx: &mpsc::Sender<ChatEvent
     Ok(())
 }
 
+/// 把本轮的检索归因写进 `episode_memories`。
+///
+/// 失败只记日志：对话已经在跑了，归因是可观测性，不该把一次成功的对话
+/// 拖成 500。但**必须记**，否则「抽屉为什么是空的」在生产上无从查起。
+async fn record_injected_memories(
+    store: &Store,
+    episode_id: Id,
+    retrieved: &Retrieved,
+    device_id: &str,
+) {
+    // attribution 与 items 等长且同序（见 cortex_memory::Retrieved 的文档），
+    // 但不假设它 —— 按 fact_id 建索引，少一条就少一条归因，不至于错位到
+    // 「A 的分数记在 B 头上」
+    let scores: std::collections::HashMap<&str, &cortex_memory::Attribution> = retrieved
+        .attribution
+        .iter()
+        .map(|a| (a.fact_id.as_str(), a))
+        .collect();
+
+    let mut rows: Vec<cortex_store::NewEpisodeMemory> = Vec::with_capacity(retrieved.items.len());
+    for (i, item) in retrieved.items.iter().enumerate() {
+        // fact id 形制不对就跳过这一条而不是整批放弃：episode_memories.fact_id
+        // 是 ulid 域，一个坏 id 会让整个事务回滚，连带丢掉其余全部归因
+        let Ok(fact_id) = item.id.parse::<Id>() else {
+            tracing::warn!(id = %item.id, "检索结果的 id 不是合法 ULID，跳过这一条归因");
+            continue;
+        };
+        let attribution = scores.get(item.id.as_str());
+        rows.push(cortex_store::NewEpisodeMemory {
+            id: Id::new(),
+            episode_id,
+            fact_id,
+            ordinal: i as i32,
+            channels: attribution.map_or_else(Vec::new, |a| {
+                a.channels.iter().map(|c| (*c).to_string()).collect()
+            }),
+            score: attribution.map(|a| a.score),
+            device_id: device_id.to_owned(),
+        });
+    }
+
+    if rows.is_empty() {
+        return;
+    }
+
+    let n = rows.len();
+    let res = store
+        .write_txn(async |t| {
+            let mut last = 0;
+            for r in &rows {
+                last = t.insert_episode_memory(r).await?;
+            }
+            Ok(last)
+        })
+        .await;
+    match res {
+        Ok(_) => tracing::debug!(injected = n, "本轮记忆归因已落库"),
+        Err(e) => tracing::warn!(error = %e, injected = n, "记忆归因落库失败，本轮抽屉将是空的"),
+    }
+}
+
+/// 从工具参数里取出文件路径。
+///
+/// 内置的三个文件工具（`read_file` / `write_file` / `list_dir`）用的都是
+/// `path` 这一个键（见 `cortex_agent::tools`）。不去猜别的键名：猜错了
+/// 就是把某个无关字符串当成路径发给客户端，而那比不给更糟 ——
+/// 界面会画出一个指向不存在文件的可点条目。
+fn tool_path(args: &serde_json::Value) -> Option<String> {
+    args.get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+}
+
+/// 按**字符**截断到上限。
+///
+/// 这些上限对应 schema 里的 CHECK。超限不是「这一行写不进去」而是
+/// **整个写事务回滚** —— 一个名字特别长的文件能把整轮对话的归因全带走。
+/// 按字符而非字节：Postgres 的 `length()` 数的是字符，按字节切还会把
+/// 汉字劈成半个。
+fn clamp_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    s.chars().take(max).collect()
+}
+
 // ─────────────────────── agent 的宿主能力 ──────────────────────
 
 /// `memory_search` 工具单次返回的条数上限。
@@ -961,21 +1248,58 @@ fn store_err(e: cortex_store::StoreError) -> CortexError {
     CortexError::Store(e.to_string())
 }
 
-fn episode_dto(e: cortex_store::Episode, attachments: Vec<AttachmentRef>) -> EpisodeDto {
+/// 一条消息的「附加物」：附件 + 回放抽屉。
+///
+/// 三个 `Vec` 打包成一个结构而不是给 [`episode_dto`] 三个参数：
+/// 三个同型参数排在一起，传错顺序编译器一声不吭。
+#[derive(Debug, Default)]
+struct Replay {
+    attachments: Vec<AttachmentDto>,
+    memories: Vec<InjectedMemoryDto>,
+    tool_calls: Vec<ToolCallDto>,
+}
+
+fn episode_dto(e: cortex_store::Episode, replay: Replay) -> EpisodeDto {
     EpisodeDto {
         id: e.id,
         session_id: e.session_id,
         role: e.role.as_str().to_string(),
         text: e.text,
         occurred_at: e.occurred_at.to_rfc3339(),
-        attachments,
+        attachments: replay.attachments,
+        memories: replay.memories,
+        tool_calls: replay.tool_calls,
     }
 }
 
-fn attachment_of(l: cortex_store::EpisodeBlob) -> AttachmentRef {
-    AttachmentRef {
-        hash: l.blob_hash,
-        kind: l.kind,
+fn attachment_of(a: cortex_store::EpisodeAttachment) -> AttachmentDto {
+    AttachmentDto {
+        hash: a.blob_hash,
+        kind: a.kind,
+        filename: a.filename,
+        mime: a.mime,
+        size_bytes: a.size_bytes,
+    }
+}
+
+fn memory_dto(m: cortex_store::InjectedMemory) -> InjectedMemoryDto {
+    InjectedMemoryDto {
+        fact_id: m.fact_id,
+        statement: m.statement,
+        domain: m.domain,
+        channels: m.channels.unwrap_or_default(),
+        score: m.score,
+        invalidated: m.invalidated,
+        source_episode_id: m.source_episode_id,
+    }
+}
+
+fn tool_call_dto(t: cortex_store::EpisodeToolCall) -> ToolCallDto {
+    ToolCallDto {
+        name: t.name,
+        path: t.path,
+        summary: t.summary,
+        ok: t.ok,
     }
 }
 
@@ -1085,10 +1409,12 @@ mod tests {
         let a = AttachmentRef {
             hash: "a".repeat(64),
             kind: Some("image".into()),
+            filename: Some("设计稿.png".into()),
         };
         let b = AttachmentRef {
             hash: "b".repeat(64),
             kind: None,
+            filename: None,
         };
         let got = dedup_attachments(&[a.clone(), b.clone(), a.clone()]);
         assert_eq!(

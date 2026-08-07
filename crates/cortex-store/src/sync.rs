@@ -19,8 +19,8 @@ use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
 
 use crate::error::{Result, StoreError};
 use crate::model::{
-    Blob, BlobTranscript, Entity, EntityMerge, Episode, EpisodeBlob, Fact, FactEvent, Redaction,
-    SessionEvent, Summary, table,
+    Blob, BlobTranscript, Entity, EntityMerge, Episode, EpisodeBlob, EpisodeMemory,
+    EpisodeToolCall, Fact, FactEvent, Redaction, SessionEvent, Summary, table,
 };
 use crate::store::Store;
 
@@ -42,6 +42,8 @@ pub enum SyncPayload {
     Episode(Episode),
     Blob(Blob),
     EpisodeBlob(EpisodeBlob),
+    EpisodeMemory(EpisodeMemory),
+    EpisodeToolCall(EpisodeToolCall),
     BlobTranscript(BlobTranscript),
     Entity(Entity),
     EntityMerge(EntityMerge),
@@ -60,6 +62,8 @@ impl SyncPayload {
             Self::Episode(_) => table::EPISODES,
             Self::Blob(_) => table::BLOBS,
             Self::EpisodeBlob(_) => table::EPISODE_BLOBS,
+            Self::EpisodeMemory(_) => table::EPISODE_MEMORIES,
+            Self::EpisodeToolCall(_) => table::EPISODE_TOOL_CALLS,
             Self::BlobTranscript(_) => table::BLOB_TRANSCRIPTS,
             Self::Entity(_) => table::ENTITIES,
             Self::EntityMerge(_) => table::ENTITY_MERGES,
@@ -183,11 +187,27 @@ impl Store {
                 SyncPayload::Blob
             ),
             table::EPISODE_BLOBS => collect!(
-                "SELECT episode_id, blob_hash, kind FROM episode_blobs
+                "SELECT episode_id, blob_hash, kind, filename FROM episode_blobs
                    WHERE episode_id || ':' || blob_hash = ANY($1)",
                 EpisodeBlob,
                 |row: &EpisodeBlob| format!("{}:{}", row.episode_id, row.blob_hash),
                 SyncPayload::EpisodeBlob
+            ),
+            // 回放抽屉的两张表。漏掉任一支的后果与 session_events 那条注释
+            // 说的一样：一条日志就让整批 /sync 拉取失败，客户端游标从此卡死
+            table::EPISODE_MEMORIES => collect!(
+                "SELECT id, episode_id, fact_id, ordinal, channels, score, device_id, created_at
+                   FROM episode_memories WHERE id = ANY($1)",
+                EpisodeMemory,
+                |row: &EpisodeMemory| row.id.clone(),
+                SyncPayload::EpisodeMemory
+            ),
+            table::EPISODE_TOOL_CALLS => collect!(
+                "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, created_at
+                   FROM episode_tool_calls WHERE id = ANY($1)",
+                EpisodeToolCall,
+                |row: &EpisodeToolCall| row.id.clone(),
+                SyncPayload::EpisodeToolCall
             ),
             table::BLOB_TRANSCRIPTS => collect!(
                 "SELECT id, blob_hash, kind, text, embedding, span_start_ms, span_end_ms,

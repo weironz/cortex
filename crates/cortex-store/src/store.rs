@@ -6,7 +6,7 @@ use sqlx::migrate::Migrator;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
 use crate::error::Result;
-use crate::model::{EpisodeBlob, SessionEvent, SessionState};
+use crate::model::{EpisodeAttachment, SessionEvent, SessionState};
 use crate::txn::WriteTxn;
 
 /// 编译期嵌入的 migration 集合。
@@ -267,17 +267,27 @@ impl Store {
         Ok(rows)
     }
 
-    /// 批量取一批 episode 的附件关联。
+    /// 批量取一批 episode 的附件，**连同 mime 与大小**。
     ///
     /// 会话详情要给每条消息挂上附件，逐条查就是 N+1 —— 一个两百条的会话
     /// 变成两百次往返，而这条路正是「打开一个带图的会话」的热路径。
-    pub async fn episode_blobs_bulk(&self, episode_ids: &[String]) -> Result<Vec<EpisodeBlob>> {
+    ///
+    /// 元信息随行返回而不是让客户端拿着 hash 再去 `GET /blobs/{hash}` 问一遍：
+    /// 那是每个附件一次往返，且在此之前客户端**没有任何东西可以显示** ——
+    /// 一个 PDF 只能画成「文档 · a1b2c3d4」。
+    pub async fn episode_attachments_bulk(
+        &self,
+        episode_ids: &[String],
+    ) -> Result<Vec<EpisodeAttachment>> {
         if episode_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query_as::<_, EpisodeBlob>(
-            "SELECT episode_id, blob_hash, kind FROM episode_blobs
-              WHERE episode_id = ANY($1) ORDER BY episode_id ASC, blob_hash ASC",
+        let rows = sqlx::query_as::<_, EpisodeAttachment>(
+            "SELECT eb.episode_id, eb.blob_hash, eb.kind, eb.filename, b.mime, b.size_bytes
+               FROM episode_blobs eb
+               JOIN blobs b ON b.hash = eb.blob_hash
+              WHERE eb.episode_id = ANY($1)
+              ORDER BY eb.episode_id ASC, eb.blob_hash ASC",
         )
         .bind(episode_ids)
         .fetch_all(self.pool())

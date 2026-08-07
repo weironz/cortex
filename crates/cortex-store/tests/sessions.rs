@@ -159,11 +159,16 @@ async fn attachments_come_back_in_one_round_trip() {
             .await
             .expect("写 blob 不该失败");
     }
-    for (hash, kind) in [(&hash_a, "image"), (&hash_b, "document")] {
+    for (hash, kind, filename) in [
+        (&hash_a, "image", Some("设计稿.png")),
+        // 文件名可空：老数据没有，回填不出来
+        (&hash_b, "document", None),
+    ] {
         let link = NewEpisodeBlob {
             episode_id: with_image,
             blob_hash: hash.clone(),
             kind: Some(kind.to_owned()),
+            filename: filename.map(str::to_owned),
         };
         s.write_txn(async |t| t.link_episode_blob(&link).await)
             .await
@@ -172,11 +177,11 @@ async fn attachments_come_back_in_one_round_trip() {
 
     let ids = vec![with_image.to_string(), plain.to_string()];
     let links = s
-        .episode_blobs_bulk(&ids)
+        .episode_attachments_bulk(&ids)
         .await
         .expect("批量查附件不该失败");
     let empty = s
-        .episode_blobs_bulk(&[])
+        .episode_attachments_bulk(&[])
         .await
         .expect("空入参不该发查询，更不该报错");
 
@@ -195,6 +200,20 @@ async fn attachments_come_back_in_one_round_trip() {
         links.iter().filter_map(|l| l.kind.as_deref()).count(),
         2,
         "kind 应当原样返回，它是客户端区分图片 / 文档的唯一依据：{links:?}"
+    );
+    // 这条是 R3 的要害：没有 mime / size 的话，重开会话时一个 PDF
+    // 只能显示成「文档 · a1b2c3d4」
+    assert!(
+        links
+            .iter()
+            .all(|l| l.mime == "image/png" && l.size_bytes == 1),
+        "mime 与 size 必须从 blobs JOIN 出来随行返回：{links:?}"
+    );
+    let named: Vec<_> = links.iter().filter_map(|l| l.filename.as_deref()).collect();
+    assert_eq!(
+        named,
+        vec!["设计稿.png"],
+        "文件名属于这一次引用，有就该原样带回、没有就是 None：{links:?}"
     );
     assert!(empty.is_empty(), "空入参应当直接返回空");
 }

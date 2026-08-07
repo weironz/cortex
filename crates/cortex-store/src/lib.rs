@@ -57,13 +57,16 @@ mod txn;
 
 pub use error::{Result, StoreError};
 pub use model::{
-    Actor, Blob, BlobTranscript, CanonicalEntity, Entity, EntityMerge, Episode, EpisodeBlob, Fact,
-    FactEvent, FactOp, FactStatus, InvalidationKind, NewBlob, NewBlobTranscript, NewEntity,
-    NewEntityMerge, NewEpisode, NewEpisodeBlob, NewFact, NewFactEvent, NewRedaction,
-    NewSessionEvent, NewSummary, Redaction, RedactionMode, RedactionTarget, Role,
-    SESSION_TITLE_MAX_CHARS, SessionEvent, SessionOp, SessionState, Summary, SummaryScope,
-    TranscriptKind, WORKSPACE_PATH_MAX_CHARS, table,
+    ATTACHMENT_FILENAME_MAX_CHARS, Actor, Blob, BlobTranscript, CanonicalEntity, Entity,
+    EntityMerge, Episode, EpisodeAttachment, EpisodeBlob, EpisodeMemory, EpisodeToolCall, Fact,
+    FactEvent, FactOp, FactStatus, InjectedMemory, InvalidationKind, NewBlob, NewBlobTranscript,
+    NewEntity, NewEntityMerge, NewEpisode, NewEpisodeBlob, NewEpisodeMemory, NewEpisodeToolCall,
+    NewFact, NewFactEvent, NewRedaction, NewSessionEvent, NewSummary, Redaction, RedactionMode,
+    RedactionTarget, Role, SESSION_TITLE_MAX_CHARS, SessionEvent, SessionOp, SessionState, Summary,
+    SummaryScope, TOOL_NAME_MAX_CHARS, TOOL_PATH_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS, TranscriptKind,
+    WORKSPACE_PATH_MAX_CHARS, table,
 };
+pub use query::EpisodeCursor;
 pub use store::{SessionDigest, Store};
 pub use sync::{SyncLogEntry, SyncNotifications, SyncPayload, SyncRecord, SyncSignal};
 pub use txn::{SYNC_ADVISORY_LOCK_KEY, WriteTxn};

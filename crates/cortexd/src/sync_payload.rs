@@ -43,6 +43,39 @@ pub fn to_json(p: &SyncPayload) -> Value {
             "episode_id": eb.episode_id,
             "blob_hash": eb.blob_hash,
             "kind": eb.kind,
+            // 文件名属于**引用**而非内容：同一份字节可以有多个文件名，
+            // 所以它在这里而不是在 blobs 那一支里
+            "filename": eb.filename,
+        }),
+
+        // 回放抽屉：这一轮注入了哪些记忆。
+        //
+        // 只下发 fact_id，不下发 statement —— 客户端本来就会同步到 facts 表，
+        // 在这里再抄一份正文既浪费带宽，又会在事实被 redact 后留下一个
+        // 抹不掉的副本（那正是这张表刻意只存 id 的理由）
+        SyncPayload::EpisodeMemory(m) => json!({
+            "id": m.id,
+            "episode_id": m.episode_id,
+            "fact_id": m.fact_id,
+            "ordinal": m.ordinal,
+            "channels": m.channels,
+            "score": m.score,
+            "device_id": m.device_id,
+            "created_at": m.created_at.to_rfc3339(),
+        }),
+
+        SyncPayload::EpisodeToolCall(t) => json!({
+            "id": t.id,
+            "episode_id": t.episode_id,
+            "ordinal": t.ordinal,
+            "name": t.name,
+            // 独立字段，客户端不必从 summary 的措辞里正则抠文件名 ——
+            // 那种抠法在措辞一改时会静默显示错文件
+            "path": t.path,
+            "summary": t.summary,
+            "ok": t.ok,
+            "device_id": t.device_id,
+            "created_at": t.created_at.to_rfc3339(),
         }),
 
         SyncPayload::BlobTranscript(t) => json!({

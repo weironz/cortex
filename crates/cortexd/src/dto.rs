@@ -32,7 +32,12 @@ pub struct ChatRequest {
     pub attachments: Vec<AttachmentRef>,
 }
 
-/// 一条 `episode_blobs` 关联。
+/// 一条 `episode_blobs` 关联 —— **上行**方向（客户端 → 服务端）。
+///
+/// 只带客户端知道而服务端不知道的东西。`mime` 与 `size_bytes` 刻意不在这里：
+/// 它们由字节唯一决定，登记 blob 时服务端已经嗅探/记下了，让客户端再报一遍
+/// 只会多出一条「客户端说的和字节里写的不一样」要处理的路。
+/// 下行方向见 [`AttachmentDto`]。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentRef {
     /// 已登记 blob 的 SHA-256（小写十六进制）
@@ -41,6 +46,34 @@ pub struct AttachmentRef {
     /// 与 `episode_blobs.kind` 一列直通，schema 里刻意不枚举，这里也就不枚举。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// 用户看到的文件名。
+    ///
+    /// 存在 `episode_blobs` 而不是 `blobs` 上：内容寻址下同一份字节可以有
+    /// 多个文件名（同一张图今天叫「设计稿.png」，下周转发过来叫「IMG_2043.png」），
+    /// 文件名是**这一次引用**的属性。
+    ///
+    /// 默认 `None`，因此老客户端不传也照常工作 —— 只是回放时显示不出名字。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+}
+
+/// 一条附件 —— **下行**方向（服务端 → 客户端）。
+///
+/// 比 [`AttachmentRef`] 多 `mime` 与 `size_bytes`。在此之前这两样不下发，
+/// 重开会话时一个 PDF 只能显示成「文档 · a1b2c3d4」：客户端手上只有哈希，
+/// 要知道这是什么就得对每个附件再发一次请求，而在那之前界面上没有任何
+/// 东西可画。字段是纯新增，老客户端忽略它们即可。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentDto {
+    pub hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// `null` = 未知（本次改动之前落库的老数据，原始文件名从未被记录过）。
+    /// 客户端应回落到「文档 · <hash 前 8 位>」那套显示。
+    pub filename: Option<String>,
+    /// 由字节头嗅探得出的类型，来自 `blobs.mime`
+    pub mime: String,
+    pub size_bytes: i64,
 }
 
 /// SSE 事件。`type` 字段做判别式，客户端按它分派。
@@ -53,7 +86,20 @@ pub enum ChatEvent {
     /// 让用户能看到 agent 凭什么这么答。
     Memory { facts: Vec<FactDto> },
     /// 工具调用（编码场景）
-    Tool { name: String, summary: String },
+    Tool {
+        name: String,
+        summary: String,
+        /// 这次调用碰的文件路径。
+        ///
+        /// **必须是可选的** —— 不是所有工具都碰文件（`memory_search` 就不碰），
+        /// 给一个空串会让客户端画出一个指向根目录的文件条目。
+        ///
+        /// 单独一个字段而不是让客户端从 `summary` 里正则抠：summary 是给人看的
+        /// 自然语言，措辞随时会改；客户端一旦依赖它的形状，改一次措辞就是
+        /// **静默显示错文件** —— 不报错、不崩溃，只是指向了另一个文件。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
     /// 结束，带上本轮 episode id 供追溯
     Done { episode_id: String },
     /// 出错。仍以 SSE 事件形式返回，避免流中断后客户端无从判断原因
@@ -117,7 +163,52 @@ pub struct EpisodeDto {
     /// 这条消息挂着的附件。空数组而非省略 —— 客户端不必区分「没有附件」
     /// 与「这个版本的服务端不给附件」。
     #[serde(default)]
-    pub attachments: Vec<AttachmentRef>,
+    pub attachments: Vec<AttachmentDto>,
+    /// 这一轮注入了哪些记忆 —— 「为什么记得这个」抽屉的内容。
+    ///
+    /// 挂在 **user** 那条消息上（一轮对话的锚点，assistant 那条在模型出错时
+    /// 不落库）。客户端把抽屉画在哪个气泡上由它自己决定。
+    ///
+    /// 绝大多数消息没有内容，因此空时整个字段省略而不是给个空数组：
+    /// 一个几百条消息的会话，多出几百个 `"memories":[]` 是纯浪费。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memories: Vec<InjectedMemoryDto>,
+    /// 这一轮调用了哪些工具。省略规则同上。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallDto>,
+}
+
+/// 回放时看到的一条注入记忆。
+///
+/// 服务端只存了 `fact_id`，这里的正文是查库查出来的**现状**：
+/// 一条事实被 redact 之后抽屉里跟着变成占位符，不需要另外再清一遍。
+/// 代价是失去逐字保真 —— 但事实的 statement 本身是 append-only 的，
+/// 「现状」与「当时」只在被 redact 时才不同，而那正是我们希望它不同的场合。
+#[derive(Debug, Clone, Serialize)]
+pub struct InjectedMemoryDto {
+    pub fact_id: String,
+    /// `null` = 这条事实的行已经不在了。界面应显示「引用了一条已不可见的
+    /// 记忆」，而不是把这一项整个藏掉 —— 藏掉就是篡改回放。
+    pub statement: Option<String>,
+    pub domain: Option<String>,
+    /// 命中它的召回路（bm25 / vector / graph / episode …）
+    pub channels: Vec<String>,
+    pub score: Option<f64>,
+    /// 注入之后这条事实已被失效。**照样返回** ——
+    /// 「当时依据的这条现在已经不成立了」是审计最想看到的信息。
+    pub invalidated: bool,
+    /// 出处 —— 点开可看到产生这条记忆的原始对话
+    pub source_episode_id: Option<String>,
+}
+
+/// 回放时看到的一次工具调用。
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCallDto {
+    pub name: String,
+    /// 见 [`ChatEvent::Tool`] 的 `path`
+    pub path: Option<String>,
+    pub summary: String,
+    pub ok: bool,
 }
 
 /// 会话概览。
@@ -208,12 +299,65 @@ where
     Option::deserialize(d).map(Some)
 }
 
-/// 单个会话的详情：概览 + 全部消息。
+/// `GET /sessions/{id}` 的查询参数 —— 游标分页。
+///
+/// # 为什么必须分页，以及为什么默认取**最新**
+///
+/// 之前是 `ORDER BY occurred_at ASC LIMIT 500`。超过 500 轮的会话，
+/// 丢掉的是**最新那些**：用户打开一个长会话，看到的是一段没有结尾的对话，
+/// 而且响应里没有任何字段说明它被截断了。
+/// 现在默认取最新一页，往回翻靠 `before`。
+#[derive(Debug, Default, Deserialize)]
+pub struct SessionDetailQuery {
+    /// 一页多少条。缺省 [`DEFAULT_EPISODE_PAGE`]，上限 [`MAX_EPISODE_PAGE`]。
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// 往更早翻：只返回严格早于这个游标的消息。
+    /// 取值来自上一次响应的 `next_cursor`，格式对客户端**不透明**。
+    #[serde(default)]
+    pub before: Option<String>,
+}
+
+/// 一页消息的默认条数。
+///
+/// **刻意等于改动前那个硬上限 500。** 不带参数的老客户端因此一条也不会少看：
+/// 它拿到的仍是 500 条，只不过从「最老的 500 条」变成了「最新的 500 条」。
+/// 顺手把默认调小（比如 200）会让老客户端在 200～500 条的会话上**少看到**
+/// 消息 —— 那是拿一个 bug 换另一个。想要更小的首屏就显式传 `limit`。
+pub const DEFAULT_EPISODE_PAGE: i64 = 500;
+
+/// 一页消息的上限。
+///
+/// 客户端可以要更少，不能要更多 —— 这个上限是服务端内存与 JSON 体积的
+/// 保险，不是给客户端调的旋钮。当前与 [`DEFAULT_EPISODE_PAGE`] 相等；
+/// 两个常量仍然分开，因为它们回答的是不同的问题（「不说要多少给多少」
+/// 与「最多能要多少」），将来调整默认值时不该顺手动了保险。
+pub const MAX_EPISODE_PAGE: i64 = 500;
+
+/// 单个会话的详情：概览 + 一页消息。
 #[derive(Debug, Serialize)]
 pub struct SessionDetail {
     #[serde(flatten)]
     pub session: SessionDto,
+    /// 这一页的消息，**按时间正序**（老 → 新）。
+    ///
+    /// # 反转在服务端做，不在客户端
+    ///
+    /// 分页天然是「从新往老取」，但渲染要正序，总得有一处反转。选服务端：
+    /// 这个字段在本次改动**之前**就是正序的，客户端按数组顺序直接渲染。
+    /// 若改成下发降序，老客户端不会报错、不会崩溃，只会把整段对话
+    /// **倒着画出来** —— 一个没有任何报错信号的破坏性变更。
+    /// 服务端反转一次的代价是一次 `reverse()`，买到的是老客户端原地可用。
     pub episodes: Vec<EpisodeDto>,
+    /// 这一页之前还有更早的消息。
+    ///
+    /// 不靠「`episodes.len()` 是否等于 limit」推断 —— 恰好整除时那个推断
+    /// 会多要一次空页，而客户端多半会把空页当成「到头了」，两种判断混在一起
+    /// 就成了「有时候翻不到最早那几条」。
+    pub has_more: bool,
+    /// 把它作为下一次请求的 `before` 即可取到更早的一页。
+    /// `has_more` 为 false 时为 `null`。
+    pub next_cursor: Option<String>,
 }
 
 // ──────────────────────────── /blobs ────────────────────────────

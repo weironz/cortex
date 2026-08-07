@@ -8,10 +8,26 @@ use chrono::{DateTime, Utc};
 
 use crate::error::Result;
 use crate::model::{
-    Blob, BlobTranscript, CanonicalEntity, Entity, EntityMerge, Episode, EpisodeBlob, Fact,
-    FactEvent, FactStatus, Redaction, RedactionTarget, Summary, SummaryScope,
+    Blob, BlobTranscript, CanonicalEntity, Entity, EntityMerge, Episode, EpisodeAttachment,
+    EpisodeToolCall, Fact, FactEvent, FactStatus, InjectedMemory, Redaction, RedactionTarget,
+    Summary, SummaryScope,
 };
 use crate::store::Store;
+
+/// 会话消息分页的游标：`(occurred_at, id)`。
+///
+/// # 为什么不能只用 `occurred_at`
+///
+/// `occurred_at` 来自客户端时钟，同一微秒落两行是常态（一次工具调用连着落
+/// user + tool 就够了）。单列游标在同刻的那几行上要么跳过、要么重复 ——
+/// 两种症状在界面上都只表现为「历史看着怪怪的」，没人会去怀疑分页。
+///
+/// `id` 是 ULID（`COLLATE "C"` 逐字节可比），做同刻的确定性 tiebreaker。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpisodeCursor {
+    pub occurred_at: DateTime<Utc>,
+    pub id: String,
+}
 
 impl Store {
     // ── L0：episodes ───────────────────────────────────────
@@ -28,6 +44,10 @@ impl Store {
     }
 
     /// 一次会话内的消息，按发生时间升序（走 `idx_episodes_sess`）。
+    ///
+    /// **只适合确定条数有限的场合**（测试、导出小会话）。会话详情那条路
+    /// 一律走 [`Self::episodes_by_session_page`] —— 升序 + LIMIT 在长会话上
+    /// 截掉的是**最新**那些消息，用户看到一段没有结尾的对话，而且看不出被截断了。
     pub async fn episodes_by_session(&self, session_id: &str, limit: i64) -> Result<Vec<Episode>> {
         let rows = sqlx::query_as::<_, Episode>(
             "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at
@@ -36,6 +56,44 @@ impl Store {
               LIMIT $2",
         )
         .bind(session_id)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 会话消息的一页，**从新到旧**（走 `idx_episodes_sess_desc`）。
+    ///
+    /// `before` 为 `None` 时取最新的一页；否则取严格早于该游标的一页。
+    /// 返回顺序是**降序**（最新在前）—— 这是分页的自然方向，调用方要正序
+    /// 渲染就自己反转（cortexd 就是这么做的，理由见那边的注释）。
+    ///
+    /// # 为什么游标要落在两列上
+    ///
+    /// 见 [`EpisodeCursor`]。这里的比较写成
+    /// `occurred_at < $2 OR (occurred_at = $2 AND id < $3)` 而不是行比较
+    /// `(occurred_at, id) < ($2, $3)`：后者要求两侧的排序规则可确定，而 `id`
+    /// 是 `COLLATE "C"` 的域、绑定参数却是默认排序规则，Postgres 会在
+    /// 某些版本上直接拒绝这个比较。拆开写让排序规则只由列那一侧决定。
+    pub async fn episodes_by_session_page(
+        &self,
+        session_id: &str,
+        limit: i64,
+        before: Option<&EpisodeCursor>,
+    ) -> Result<Vec<Episode>> {
+        let rows = sqlx::query_as::<_, Episode>(
+            "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at
+               FROM episodes
+              WHERE session_id = $1
+                AND ($2::timestamptz IS NULL
+                     OR occurred_at < $2::timestamptz
+                     OR (occurred_at = $2::timestamptz AND id < $3))
+              ORDER BY occurred_at DESC, id DESC
+              LIMIT $4",
+        )
+        .bind(session_id)
+        .bind(before.map(|c| c.occurred_at))
+        .bind(before.map(|c| c.id.as_str()))
         .bind(limit)
         .fetch_all(self.pool())
         .await?;
@@ -88,10 +146,17 @@ impl Store {
         Ok(row)
     }
 
-    pub async fn episode_blobs(&self, episode_id: &str) -> Result<Vec<EpisodeBlob>> {
-        let rows = sqlx::query_as::<_, EpisodeBlob>(
-            "SELECT episode_id, blob_hash, kind FROM episode_blobs
-              WHERE episode_id = $1 ORDER BY blob_hash ASC",
+    /// 一条消息的附件，**连同内容元信息**（mime / 大小）。
+    ///
+    /// 内连 `blobs` 而不是左连：`episode_blobs.blob_hash` 有外键指向
+    /// `blobs.hash`，缺行是不可能的；写成 LEFT JOIN 只会让调用方为一个
+    /// 永远不会出现的 `Option` 写分支。
+    pub async fn episode_attachments(&self, episode_id: &str) -> Result<Vec<EpisodeAttachment>> {
+        let rows = sqlx::query_as::<_, EpisodeAttachment>(
+            "SELECT eb.episode_id, eb.blob_hash, eb.kind, eb.filename, b.mime, b.size_bytes
+               FROM episode_blobs eb
+               JOIN blobs b ON b.hash = eb.blob_hash
+              WHERE eb.episode_id = $1 ORDER BY eb.blob_hash ASC",
         )
         .bind(episode_id)
         .fetch_all(self.pool())
@@ -118,6 +183,128 @@ impl Store {
               ORDER BY span_start_ms ASC NULLS LAST, id ASC",
         )
         .bind(blob_hash)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 待补转录的 blob：MIME 前缀匹配、且还没有任何 `blob_transcripts` 行。
+    ///
+    /// 预签名直传那条路上服务端从不经手字节，因此上传时无从触发转录 ——
+    /// 大文件成了纯归档，检索一条也命中不了。后台回扫器以 `blobs` 表为
+    /// 权威清单，把这批捡回来补跑。
+    ///
+    /// # 为什么已被抹除的必须在 SQL 里排掉
+    ///
+    /// 不排的话，回扫器会**周期性地**把已 redact 的 blob 从对象存储拉回内存、
+    /// 送进 vision 模型 —— 即使管线那侧的 [`crate::Store::is_redacted`] 复检
+    /// 最终会丢弃结果，秘密也已经出过一次进程、上过一次网。redact 的销毁承诺
+    /// 经不起这个。
+    ///
+    /// `mime_prefixes` 是 SQL `LIKE` 模式（如 `image/%`）。它只是**粗筛**，
+    /// 真正认领与否由转录管线决定 —— 粗筛存在的理由是不要把全表拉进内存。
+    pub async fn blobs_missing_transcript(
+        &self,
+        mime_prefixes: &[String],
+        limit: i64,
+    ) -> Result<Vec<Blob>> {
+        let rows = sqlx::query_as::<_, Blob>(
+            "SELECT b.hash, b.mime, b.size_bytes, b.storage_key, b.created_at
+               FROM blobs b
+              WHERE b.mime LIKE ANY($1)
+                AND NOT EXISTS (
+                    SELECT 1 FROM blob_transcripts t WHERE t.blob_hash = b.hash)
+                AND NOT EXISTS (
+                    SELECT 1 FROM redactions r
+                     WHERE r.target_kind = 'blob' AND r.target_id = b.hash)
+              ORDER BY b.created_at ASC, b.hash ASC
+              LIMIT $2",
+        )
+        .bind(mime_prefixes)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    // ── 回放抽屉 ───────────────────────────────────────────
+
+    /// 一轮对话注入过的记忆，按注入顺序。
+    ///
+    /// 表里只有 `fact_id`，`statement` 是这里 JOIN 出来的**现状** ——
+    /// 于是一条事实被 redact 之后抽屉里跟着变成占位符，不需要再清一遍这张表。
+    /// 代价是失去逐字保真，换来的是 redact 不必在多处清同一个秘密。
+    ///
+    /// 失效的事实**照样返回**，只是带上 `invalidated = true`：
+    /// 「当时依据的这条现在已经不成立了」正是审计最想看到的东西，
+    /// 把它藏起来等于篡改回放。
+    pub async fn injected_memories(&self, episode_id: &str) -> Result<Vec<InjectedMemory>> {
+        let rows = sqlx::query_as::<_, InjectedMemory>(
+            "SELECT m.episode_id, m.fact_id, m.ordinal, m.channels, m.score,
+                    f.statement, f.domain, f.source_episode_id,
+                    coalesce(s.op = 'invalidate', false) AS invalidated
+               FROM episode_memories m
+               LEFT JOIN facts f       ON f.id = m.fact_id
+               LEFT JOIN fact_status s ON s.fact_id = m.fact_id
+              WHERE m.episode_id = $1
+              ORDER BY m.ordinal ASC",
+        )
+        .bind(episode_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 批量版本。会话详情一次要给一整页消息挂抽屉，逐条查就是 N+1。
+    pub async fn injected_memories_bulk(
+        &self,
+        episode_ids: &[String],
+    ) -> Result<Vec<InjectedMemory>> {
+        if episode_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, InjectedMemory>(
+            "SELECT m.episode_id, m.fact_id, m.ordinal, m.channels, m.score,
+                    f.statement, f.domain, f.source_episode_id,
+                    coalesce(s.op = 'invalidate', false) AS invalidated
+               FROM episode_memories m
+               LEFT JOIN facts f       ON f.id = m.fact_id
+               LEFT JOIN fact_status s ON s.fact_id = m.fact_id
+              WHERE m.episode_id = ANY($1)
+              ORDER BY m.episode_id ASC, m.ordinal ASC",
+        )
+        .bind(episode_ids)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 一轮对话的工具调用，按调用顺序。
+    pub async fn episode_tool_calls(&self, episode_id: &str) -> Result<Vec<EpisodeToolCall>> {
+        let rows = sqlx::query_as::<_, EpisodeToolCall>(
+            "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, created_at
+               FROM episode_tool_calls WHERE episode_id = $1 ORDER BY ordinal ASC",
+        )
+        .bind(episode_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 批量版本，同 [`Self::injected_memories_bulk`] 的理由。
+    pub async fn episode_tool_calls_bulk(
+        &self,
+        episode_ids: &[String],
+    ) -> Result<Vec<EpisodeToolCall>> {
+        if episode_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, EpisodeToolCall>(
+            "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, created_at
+               FROM episode_tool_calls WHERE episode_id = ANY($1)
+              ORDER BY episode_id ASC, ordinal ASC",
+        )
+        .bind(episode_ids)
         .fetch_all(self.pool())
         .await?;
         Ok(rows)

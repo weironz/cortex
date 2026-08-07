@@ -397,6 +397,7 @@ async fn blobs_transcripts_and_vectors_round_trip() {
         episode_id: episode.id,
         blob_hash: blob.hash.clone(),
         kind: Some("attachment".to_owned()),
+        filename: Some("会议录音.mp3".to_owned()),
     };
     let embedding = Vector::from(vec![0.25_f32; cortex_store::EMBEDDING_DIM]);
     let transcript = NewBlobTranscript {
@@ -430,13 +431,21 @@ async fn blobs_transcripts_and_vectors_round_trip() {
             .expect("查询不应失败"),
         1
     );
+    let attachments = store
+        .episode_attachments(&episode.id.to_string())
+        .await
+        .expect("查询不应失败");
+    assert_eq!(attachments.len(), 1);
+    // mime 与 size 必须随行返回：只给 hash 的话，重开会话时客户端手上
+    // 除了一串哈希什么都没有，只能画成「文档 · b1b2b3b4」
     assert_eq!(
-        store
-            .episode_blobs(&episode.id.to_string())
-            .await
-            .expect("查询不应失败")
-            .len(),
-        1
+        (
+            attachments[0].mime.as_str(),
+            attachments[0].size_bytes,
+            attachments[0].filename.as_deref()
+        ),
+        ("audio/mpeg", 1024, Some("会议录音.mp3")),
+        "附件必须带上 mime / 大小 / 文件名，否则回放时只剩一串哈希：{attachments:?}"
     );
 
     let transcripts = store

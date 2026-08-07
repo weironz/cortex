@@ -26,6 +26,8 @@ pub mod table {
     pub const EPISODES: &str = "episodes";
     pub const BLOBS: &str = "blobs";
     pub const EPISODE_BLOBS: &str = "episode_blobs";
+    pub const EPISODE_MEMORIES: &str = "episode_memories";
+    pub const EPISODE_TOOL_CALLS: &str = "episode_tool_calls";
     pub const BLOB_TRANSCRIPTS: &str = "blob_transcripts";
     pub const ENTITIES: &str = "entities";
     pub const ENTITY_MERGES: &str = "entity_merges";
@@ -274,6 +276,12 @@ pub struct EpisodeBlob {
     pub episode_id: String,
     pub blob_hash: String,
     pub kind: Option<String>,
+    /// 这次引用时的原始文件名。
+    ///
+    /// 属于**引用**而非内容：内容寻址下同一份字节可以有多个文件名
+    /// （同一张图今天叫「设计稿.png」，下周转发过来叫「IMG_2043.png」）。
+    /// `None` = 未知（老数据，或客户端没提供）。
+    pub filename: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +289,8 @@ pub struct NewEpisodeBlob {
     pub episode_id: Id,
     pub blob_hash: String,
     pub kind: Option<String>,
+    /// 见 [`EpisodeBlob::filename`]
+    pub filename: Option<String>,
 }
 
 impl NewEpisodeBlob {
@@ -289,6 +299,23 @@ impl NewEpisodeBlob {
     pub fn record_id(&self) -> String {
         format!("{}:{}", self.episode_id, self.blob_hash)
     }
+}
+
+/// 一条附件引用**连同它的内容元信息**。
+///
+/// [`EpisodeBlob`] 是裸表行，只有 hash；客户端拿它渲染出来的是
+/// 「文档 · a1b2c3d4」。真正要显示的 `mime` 与 `size_bytes` 在 `blobs` 里，
+/// 于是读路径统一走这个 JOIN 出来的结构 —— 而不是让每个调用方
+/// 自己再查一次 `blobs`（那是 N+1，且各处会渲染出不一样的东西）。
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct EpisodeAttachment {
+    pub episode_id: String,
+    pub blob_hash: String,
+    pub kind: Option<String>,
+    pub filename: Option<String>,
+    /// 由字节头嗅探得出，来自 `blobs.mime`
+    pub mime: String,
+    pub size_bytes: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, FromRow)]
@@ -556,6 +583,107 @@ pub struct NewSummary {
 }
 
 // ══════════════════════════════════════════════════════════
+//  回放抽屉 —— 一轮对话「注入了什么、调用了什么」
+//
+//  只在内存里活着的归因等于没有：刷新一次抽屉就空了。
+//  设计取舍（存 id 而非快照、锚在 user episode 上）见
+//  migrations/20260807000005_episode_replay.sql 的表头注释。
+// ══════════════════════════════════════════════════════════
+
+/// `episode_memories` 的裸表行（同步下发用）。
+#[derive(Debug, Clone, PartialEq, FromRow)]
+pub struct EpisodeMemory {
+    pub id: String,
+    pub episode_id: String,
+    pub fact_id: String,
+    pub ordinal: i32,
+    pub channels: Option<Vec<String>>,
+    pub score: Option<f64>,
+    pub device_id: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewEpisodeMemory {
+    pub id: Id,
+    /// 本轮的锚点 —— **user 那条 episode**（assistant 那条在出错时不落库）
+    pub episode_id: Id,
+    pub fact_id: Id,
+    /// 注入顺序，0 起
+    pub ordinal: i32,
+    /// 命中的召回路（bm25 / vector / graph / episode …）
+    pub channels: Vec<String>,
+    pub score: Option<f64>,
+    pub device_id: String,
+}
+
+/// 回放一条注入记忆时**当下**看到的样子。
+///
+/// 不是裸表行：`statement` 与失效状态来自 `facts` / `fact_status` 的 JOIN。
+/// 存的是 id、渲染的是现状 —— 于是一条事实被 redact 之后，抽屉里跟着变成
+/// 占位符，不需要再去清一遍这张表。
+#[derive(Debug, Clone, PartialEq, FromRow)]
+pub struct InjectedMemory {
+    pub episode_id: String,
+    pub fact_id: String,
+    pub ordinal: i32,
+    pub channels: Option<Vec<String>>,
+    pub score: Option<f64>,
+    /// `None` = 这条事实的行已经不在了。理论上不该发生（append-only，
+    /// 且有外键），出现即说明有人绕过本层删了数据 —— 界面应显示
+    /// 「引用了一条已不可见的记忆」而不是把这一行整个藏起来
+    pub statement: Option<String>,
+    pub domain: Option<String>,
+    pub source_episode_id: Option<String>,
+    /// 注入之后这条事实**已被失效**。回放要如实说出来：
+    /// 「当时依据的这条，现在已经不成立了」正是审计最想看到的信息
+    pub invalidated: bool,
+}
+
+/// `episode_tool_calls` 的表行。写入侧与读出侧共用形状，
+/// 因此不像别的表那样拆 `New*`——它没有 tsv / embedding 这类只写不读的列。
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct EpisodeToolCall {
+    pub id: String,
+    pub episode_id: String,
+    pub ordinal: i32,
+    pub name: String,
+    /// 这次调用碰的文件路径；没碰文件的工具为 `None`
+    pub path: Option<String>,
+    pub summary: String,
+    pub ok: bool,
+    pub device_id: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewEpisodeToolCall {
+    pub id: Id,
+    pub episode_id: Id,
+    pub ordinal: i32,
+    pub name: String,
+    pub path: Option<String>,
+    pub summary: String,
+    pub ok: bool,
+    pub device_id: String,
+}
+
+/// `episode_tool_calls.summary` 的字符数上限，与 migration 里的 CHECK 一致。
+///
+/// 常量在这里而不是让上层写字面量：两处漂移的症状是「工具摘要一长，
+/// 整个写事务回滚」——而那个事务里还带着本轮的记忆归因。
+pub const TOOL_SUMMARY_MAX_CHARS: usize = 2048;
+
+/// `episode_tool_calls.name` 的字符数上限，与 migration 里的 CHECK 一致。
+pub const TOOL_NAME_MAX_CHARS: usize = 128;
+
+/// `episode_tool_calls.path` 与 `session_events.workspace` 共用的路径上限。
+pub const TOOL_PATH_MAX_CHARS: usize = 4096;
+
+/// `episode_blobs.filename` 的字符数上限，与 migration 里的 CHECK 一致。
+pub const ATTACHMENT_FILENAME_MAX_CHARS: usize = 255;
+
+// ══════════════════════════════════════════════════════════
 //  会话生命周期
 // ══════════════════════════════════════════════════════════
 
@@ -778,6 +906,7 @@ mod tests {
             episode_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("合法 ULID"),
             blob_hash: "a".repeat(64),
             kind: None,
+            filename: None,
         };
         assert_eq!(
             link.record_id(),

@@ -3,7 +3,9 @@
 //! 单写者、常驻。承载记忆引擎、后台任务与多端同步。
 //! CLI / 桌面 / 移动 / Web 全部是它的 HTTP + WebSocket 客户端 —— 走同一套协议。
 
+mod backfill;
 mod blobs;
+mod cursor;
 mod dto;
 mod live;
 mod routes;
