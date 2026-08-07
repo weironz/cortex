@@ -150,6 +150,25 @@ fi
 
 SIZE_BYTES="$(pg_sh "du -sb '$DEST_IN_PG' | cut -f1" | tr -d '[:space:]')"
 
+# ── 目录清单 —— 空目录不会自己活下来 ──────────────────────
+#
+# 【踩过的坑，代价是一次失败的异地恢复】
+# pg_basebackup 会建出 13 个**空目录**（pg_notify、pg_stat_tmp、
+# pg_wal/archive_status、PG17 新增的 pg_wal/summaries …）。
+# 对象存储里没有「目录」这个东西，rclone 默认也不搬空目录 ——
+# 于是从第二存储取回来的那份少了它们，而：
+#
+#   - pg_verifybackup **照样通过**（清单里只有文件，它看不见目录）
+#   - Postgres 起不来，只丢一句 `could not open directory "pg_notify"`
+#
+# 也就是说：备份验证是绿的，恢复是死的，中间没有任何提示。
+# 把目录清单写成一个**文件**，它就能跟着备份一起走到任何地方。
+# 现查而不是写死：PG 大版本会增删这些目录（summaries 就是 PG17 才有的），
+# 写死的清单会在升级之后悄悄过期。
+pg_sh "cd '$PGDATA_IN_PG' && find . -type d | sort" \
+    | tr -d '\r' | sed '/^$/d' > "$DEST_HOST/dirs.txt"
+log "目录清单：$(wc -l < "$DEST_HOST/dirs.txt" | tr -d ' ') 个目录 → dirs.txt"
+
 # ── 元数据 ────────────────────────────────────────────────
 # 值一律加引号：`SHOW server_version` 返回的是
 # `17.10 (Debian 17.10-1.pgdg12+1)`，裸着写进去会让 source 它的脚本

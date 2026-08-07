@@ -56,6 +56,20 @@ if mirror_is_local; then
      CORTEX_MIRROR_DIR 指到另一台机器的挂载点。"
 fi
 
+# 加密：只作用于「出本机的那一刻」，本机那份始终是明文可验证的 plain 备份。
+# 为什么这么选、密钥怎么管，见 lib.sh 顶部与 docs/operations.md。
+if backup_enc_on; then
+    log "备份加密：开（rclone crypt，指纹 $(backup_key_fingerprint)，世代 e$BACKUP_ENC_EPOCH）"
+    # 钥匙不对时 crypt 会**静默**把镜像列成空的，接着这一步就会
+    # 用新钥匙往上盖一层，最后两把钥匙各解一半。先验金丝雀。
+    ensure_crypt_key
+else
+    warn "备份加密：关。推到第二存储的是**明文** ——
+     异地存储不可信（云盘、别人的机房、寄存的硬盘）时，
+     拿到那份拷贝的人能读到全部对话、事实与二进制内容。
+     打开：scripts/backup-key.sh gen"
+fi
+
 DRY=()
 [ "$DRY_RUN" = "1" ] && DRY=(--dry-run)
 
@@ -75,10 +89,17 @@ ok "blobs 镜像完成"
 # 和数据本体死在同一块盘上。
 if [ "$WITH_PG" = "1" ]; then
     step "镜像 Postgres 备份：$BACKUP_DIR → $(mirror_remote pg)"
+    # --create-empty-src-dirs：pg_basebackup 会建出十几个空目录，
+    # 少了它们恢复出来的实例**起不来**（见 backup-fetch.sh 的「补空目录」）。
+    # 本地 / 支持目录标记的后端靠它就够；S3 上还要靠 dirs.txt 兜底。
     rclone_run copy /pgbackup "$(mirror_remote pg)" \
         --checksum \
+        --create-empty-src-dirs \
         --transfers 8 \
         --exclude 'reports/**' \
+        --exclude 'fetched/**' \
+        --exclude 'drill/**' \
+        --exclude 'state/roundtrip/**' \
         --stats-one-line --stats 5s \
         --log-level NOTICE \
         "${DRY[@]}" \
@@ -128,8 +149,11 @@ if [ "$APPLY_PURGES" = "1" ]; then
         ok "没有待传播的 purge"
     else
         ok "已传播 $n 条 purge"
-        warn "purge 只清了镜像。主存储侧由应用负责，历史 WAL / 全量备份里
-     仍可能残留 —— 真要彻底抹除必须连备份一起处理，见 docs/operations.md。"
+        warn "purge 只清了镜像。主存储侧由应用负责，而**历史 WAL、旧的全量备份、
+     以及刚做的那份全量里的死元组**都还带着原文。
+     真要彻底抹除必须连备份一起轮转：
+       scripts/purge-rotate.sh            # 先看它会销毁什么
+       scripts/purge-rotate.sh --apply    # 不可逆：会丢掉此前的 PITR 能力"
     fi
 fi
 
@@ -139,4 +163,8 @@ if mirror_is_local; then
     du -sh "$MIRROR_DIR" 2>/dev/null | sed 's/^/  占用      /'
 else
     printf '  镜像桶    %s\n' "$(mirror_remote blobs)"
+fi
+if backup_enc_on; then
+    printf '  加密      开，指纹 %s（世代 e%s）\n' "$(backup_key_fingerprint)" "$BACKUP_ENC_EPOCH"
+    printf '  验证      scripts/backup-key.sh check —— 只有真往返能证明解得开\n'
 fi

@@ -238,8 +238,46 @@ blob-restore *ARGS:
     bash scripts/blob-restore.sh {{ ARGS }}
 
 # ★ 恢复演练 —— 没演练过的备份等于没有备份。每月至少一次
+# --from-mirror 走「从异地取回并解密」那条路，那才是灾难当天的真实路径
 drill *ARGS:
     bash scripts/restore-drill.sh {{ ARGS }}
+
+# 从第二存储取回（并解密）备份。--list / --latest / --verify / --ask-key
+backup-fetch *ARGS:
+    bash scripts/backup-fetch.sh {{ ARGS }}
+
+# ══════════════════════════════════════════════════════════
+#  备份告警（R7）—— 光有退出码不算告警
+# ══════════════════════════════════════════════════════════
+
+# ★ 手动发一条测试通知。别等真出事那天才发现配错了
+notify-test:
+    bash scripts/notify.sh --test
+
+# 看通知配到哪一步了（脱敏），以及各环节最近一次成功是什么时候
+notify-status:
+    bash scripts/notify.sh --show
+
+# 死人开关：距上次成功备份太久就告警。**放进 cron 每小时跑**
+watchdog *ARGS:
+    bash scripts/backup-watchdog.sh {{ ARGS }}
+
+# ══════════════════════════════════════════════════════════
+#  备份加密（R6）—— 密钥丢了备份就等于没有
+# ══════════════════════════════════════════════════════════
+
+# 密钥管理：gen / fingerprint / status / check / card / rotate-plan
+backup-key *ARGS:
+    bash scripts/backup-key.sh {{ ARGS }}
+
+# ══════════════════════════════════════════════════════════
+#  彻底抹除（R8）—— 破坏性，会丢掉此前的 PITR 能力
+# ══════════════════════════════════════════════════════════
+
+# purge 之后轮转备份，把历史 WAL 与旧全量里的残留一并抹掉。
+# 不带参数是 dry-run；真做要 --apply 并手打确认串
+purge-rotate *ARGS:
+    bash scripts/purge-rotate.sh {{ ARGS }}
 
 # 给已存在的库补上 data-checksums（会停库，放维护窗口）
 pg-enable-checksums *ARGS:
@@ -258,6 +296,9 @@ backup-status:
     printf '  逻辑    %s 份\n' "$(ls -1 "$d/logical" 2>/dev/null | wc -l | tr -d ' ')"
     printf '  最近演练 %s\n' "$(ls -1 "$d/reports"/restore-drill-*.txt 2>/dev/null | sort | tail -1 || echo '从未演练 —— 这等于没有备份')"
     printf '  最近对账 %s\n' "$(ls -1 "$d/reports"/reconcile-*.txt 2>/dev/null | sort | tail -1 || echo 无)"
+    printf '  加密    %s\n' "$([ -n "${CORTEX_BACKUP_ENC_PASSPHRASE:-}" ] && echo "开（just backup-key status 看指纹）" || echo '关 —— 异地那份是明文')"
+    printf '  告警    %s\n' "$([ -n "${CORTEX_ALERT_WEBHOOK_URL:-}${CORTEX_ALERT_CMD:-}${CORTEX_HEARTBEAT_URL:-}" ] && echo '已配（just notify-test 自测）' || echo '未配 —— 备份失败不会有人知道')"
+    printf '  轮转记录 %s\n' "$(tail -1 "$d/reports/purge-rotation.log" 2>/dev/null || echo '无（从未做过 purge 轮转）')"
 
 # ══════════════════════════════════════════════════════════
 #  生产部署（cortexd 也进容器）

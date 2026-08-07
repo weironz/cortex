@@ -8,6 +8,10 @@
 
 > **一句话总结**：`just bootstrap` 起环境，`just backup-all` 保数据，
 > `just drill` 证明备份真能用 —— 最后一条是最重要的。
+>
+> 上线前还有三件必须做完的：`just notify-test`（备份坏了要有人知道）、
+> `just backup-key gen` + `card`（异地那份不能是明文，钥匙不能跟机器一起丢）、
+> 以及把 `just watchdog` 放进 cron（「该跑没跑」不会产生任何退出码）。
 
 ---
 
@@ -16,10 +20,14 @@
 - [一、首次使用](#一首次使用)
 - [二、备份与灾备](#二备份与灾备)
   - [Postgres：为什么是 pg_basebackup](#postgres为什么是-pg_basebackup-而不是-pgbackrest)
+  - [告警：光有退出码不算告警](#告警光有退出码不算告警)
+  - [加密：只加密出本机的那一份](#加密只加密出本机的那一份)
+  - [密钥管理](#密钥管理--r6-的成败全在这里)
   - [脚本速查表](#脚本速查表)
   - [定时任务](#定时任务)
   - [恢复演练](#恢复演练-—-最重要的一条)
   - [真的出事了怎么恢复](#真的出事了怎么恢复)
+  - [彻底抹除：purge 之后轮转备份](#彻底抹除purge-之后必须轮转备份)
 - [三、检索回归门](#三检索回归门)
 - [四、生产部署](#四生产部署)
 - [五、故障速查](#五故障速查)
@@ -236,38 +244,250 @@ just reconcile --deep   # 慢：下载重算每个对象的 SHA-256
 > 脚本现在带 `--download`，并且会把算出的哈希条数与对象数对一遍，
 > 数量不符直接判失败。
 
+### 告警：光有退出码不算告警
+
+`backup-all.sh` 失败时返回非零码，但**没人看退出码**。cron 把输出重定向进
+一个日志文件之后，「失败」和「从没跑过」在现象上完全一样：什么都没发生。
+
+所以告警分**三层**，盲区互补，三个都要配，不是三选一：
+
+| 层 | 谁触发 | 能发现什么 | 发现不了什么 |
+|---|---|---|---|
+| **失败告警** | `backup-all.sh` 跑完发现有环节非零 | 「跑了但挂了」 | 压根没跑 |
+| **本机看门狗** | `scripts/backup-watchdog.sh`（cron 每小时） | cron 被注释、脚本卡死、目录不可写、归档在失败 | 机器关机 |
+| **外部心跳** | 每次 `backup-all` 打点，由**机器之外**的服务判定超时 | 机器关机 / 掉电 / 被回收 | 内容细节 |
+
+第三层是唯一能覆盖「整机不在了」的 —— 前两层都住在这台机器上，机器没了它们
+一起沉默。而这恰恰是最该被发现的那一类。
+
+#### 配置
+
+全部在 `.env`（`.env.example` 里已列全）。**配完立刻自测**：
+
+```bash
+just notify-test      # 真发一条出去，别等真出事才发现配错了
+just notify-status    # 看配到哪一步了（URL 脱敏），以及各环节最近一次成功
+```
+
+| 变量 | 说明 |
+|---|---|
+| `CORTEX_ALERT_WEBHOOK_URL` | 通用 JSON POST |
+| `CORTEX_ALERT_WEBHOOK_FORMAT` | `raw`（默认）/ `slack` / `discord` / `wecom` / `dingtalk` |
+| `CORTEX_ALERT_KEYWORD` | 钉钉/企业微信的「关键词」安全策略。**不含关键词的消息会被静默丢弃且对端返回 200** |
+| `CORTEX_ALERT_MIN_LEVEL` | `ok`/`warn`/`fail`，默认 `warn` |
+| `CORTEX_ALERT_CMD` | 逃生口：任意命令，正文走 stdin |
+| `CORTEX_HEARTBEAT_URL` | healthchecks.io 风格：成功打 `<URL>`、失败 `<URL>/fail`、开始 `<URL>/start` |
+| `CORTEX_HEARTBEAT_STYLE` | `path`（默认）/ `query`（Uptime Kuma push） |
+
+**为什么只做 webhook 不做 SMTP。** 不是偷懒，是 SMTP 在灾难当天最不可靠：
+六个配置项（host/port/STARTTLS/认证/from/to）只在真出事那天第一次被走通，
+还要额外依赖 DNS、出站 25/587、对方反垃圾 —— 每一个都是新的静默失败点，
+而且这段代码平时**从不执行**。要邮件就用 `CORTEX_ALERT_CMD` 接一个你平时也在用的工具：
+
+```bash
+CORTEX_ALERT_CMD='mail -s "$CORTEX_ALERT_TITLE" ops@example.com'
+```
+
+正文从 stdin 进，标题等元信息在 `CORTEX_ALERT_*` 环境变量里，命令里不需要任何转义。
+
+**通知里有什么。** 主机、时间、失败环节、退出码、**上一次成功是多久之前**、
+备份根。最后一条决定了当前暴露窗口有多大，也决定了要不要半夜爬起来。
+
+**通知里没有什么。** 连接串、口令、API key 一律不出本机。脱敏是**按值匹配**的
+（从环境里捞出所有像密钥的变量的实际取值逐个替换），不是按关键词 ——
+密钥进正文的方式通常不是有人手写，而是某个工具把错误消息原样吐出来。
+
+> **踩过的坑**：payload 必须走 **stdin** 而不是 argv。Git Bash 里的 `curl` 是
+> 原生 Windows 二进制，MSYS 会把 argv 从 UTF-8 转成系统 ANSI 代码页（中文
+> Windows 上是 GBK）。于是中文正文到对端变成 GBK 冒充 UTF-8、emoji 变成
+> U+FFFD，而**本机怎么看都正常，只有收告警的那一端是乱码**。已实测并修好。
+
+#### 看门狗
+
+```bash
+just watchdog                       # 看一眼
+just watchdog --quiet               # cron 用，没问题就不出声
+just watchdog --max-age-h 12        # 改阈值
+```
+
+它查五件事：状态文件的时间、**备份产物本身**的时间（产物是 `pg_basebackup`
+写的，做不了假）、最近一次恢复演练、备份目录可写性、`pg_stat_archiver.failed_count`。
+
+「从未」和「刚跑完」措辞不同：前者是配置问题（cron 忘了配），后者是故障 ——
+混成一句话会让值班的人查错方向。
+
+### 加密：只加密出本机的那一份
+
+**选型：`rclone crypt`。** 也就是「加密是第二存储的属性，不是备份产物的属性」——
+本机那份始终是明文可验证的 plain 备份，加密只发生在推出本机的那一刻。
+
+打开它只要设一个口令，脚本一行都不用改：
+
+```bash
+just backup-key gen        # 生成密钥，按提示写进 .env
+just backup-all            # 之后推出去的一切自动加密
+just backup-key check      # 真往返，证明解得开
+```
+
+#### 为什么是 crypt，放弃了什么
+
+评过四条路，判据只有一个：**不能破坏已有的两个性质**。
+
+| 方案 | 保住 `pg_verifybackup`？ | 保住 rclone 增量？ | 防得住不可信的异地存储？ |
+|---|---|---|---|
+| **rclone crypt**（选它） | ✅ 本机验，取回后再验一次 | ✅ 逐文件加密逐文件增量 | ✅ |
+| 整包 `tar` + `age`/`gpg` | ❌ 备份重新变成黑盒 | ❌ 每次全量重推 | ✅ |
+| `openssl enc` 逐文件 | ⚠️ 要自己管 IV 与完整性 | ✅ | ✅ 但自己搓密码学 |
+| S3 服务端加密（SSE） | ✅ | ✅ | ❌ 密钥在对方手里 |
+
+上一轮特意选 plain 而不是 tar.gz，就是为了让 `pg_verifybackup` 能验
+（见[上文](#备份为什么是-plain-格式而不是-targz)）。整包加密会把这个性质原样还回去，
+那是倒退。crypt 逐文件加密、逐文件增量，两个性质都原样保住。
+
+选它还有一条与本项目气质一致的理由：**备份链路上不多一个构件**。rclone 已经在
+链路里了，加密只是给它加一层 remote，没有引入任何新的二进制、新的镜像、
+新的「灾难当天装不上的东西」。
+
+**放弃的（明写）：**
+
+- **本机备份目录仍是明文。** 威胁模型是「异地存储不可信」，本机磁盘加密是
+  LUKS / BitLocker 的活，不是备份脚本的活。
+- **crypt 的密码学没有 age 被审计得充分。** 它是 NaCl secretbox
+  （XSalsa20-Poly1305）逐 64 KiB 块 + scrypt 派生密钥，工程上部署量极大，
+  但正式审计不如 age。要更强的保证就换 age + 整包，代价是上表第二行。
+- **crypt 保证机密性与逐块完整性，不保证「整份备份没被人删掉几个文件」。**
+  那一层由 `backup_manifest` 的逐文件 SHA-256 覆盖 —— 取回后跑
+  `pg_verifybackup` 就是在验这件事。
+- **密钥经 `docker run -e` 传入，会在宿主机进程表里短暂可见。** 这台机器上
+  `.env` 本来就是明文的，威胁模型里没有「同机的其他用户」。多用户宿主机上
+  应改用 `--env-file`（本仓库不默认这么做：它在 Windows 的 Docker Desktop 上
+  解析不了 MSYS 风格路径，会让整条备份链路在最需要它的平台上直接不可用）。
+
+#### 加密之后，可验证性是怎么保住的
+
+三个环节，每一环都有独立的证据：
+
+1. **推之前**：本机 plain 备份跑 `pg_verifybackup`（逐文件 SHA-256 + WAL 区间）。
+2. **推之后**：`just backup-key check` 取回一个**真的备份文件**解密，与本机原件
+   逐字节比。它进了 `backup-all` 的日常链路 —— 密钥出问题当天就知道，
+   而不是灾难当天。
+3. **恢复时**：`just backup-fetch --latest --verify` 取回全部并解密后，
+   **再跑一次 `pg_verifybackup`**。manifest 本身也在加密件里，所以任何一个
+   字节在加密 / 传输 / 解密路上出问题，都会变成一条「哪个文件哈希不对」，
+   而不是几个月后的一句「起不来」。
+
+最后由 `just drill --from-mirror` 把三环串起来真跑一遍。
+
+> **rclone crypt 最危险的一个行为，脚本已经把它堵上了**：拿**错口令**去
+> `rclone lsf enc:` 时，它**不报错、退出码 0、列出 0 个对象**，只在 NOTICE
+> 级别嘀咕一句 "Skipping undecryptable file name"。于是对账会得出「镜像里
+> 一个对象都没有」，而值班的人会照着这个结论去重推一遍镜像，把好好躺在异地
+> 的备份又覆盖一层。
+>
+> 所以每次碰镜像之前先验一个**金丝雀文件** `.cortex-keycheck`（里面是密钥指纹）：
+> 底层是空的就写入、指纹一致就放行、**其它一切情况立刻停下**。已实测：拿错
+> 口令时 `blob-mirror.sh` 会带着「e1 底下有 6280 个加密对象但当前口令连金丝雀
+> 都读不出来」直接退出，而不是默默覆盖。
+
+### 密钥管理 —— R6 的成败全在这里
+
+**一份加了密但恢复时解不开的备份，比不加密更糟。** 不加密至少还能恢复，只是
+被人看了；解不开是彻底归零，而且**只在灾难当天才会被发现**。
+
+#### 密钥存哪
+
+| 副本 | 位置 | 说明 |
+|---|---|---|
+| 工作副本 | `.env` 的 `CORTEX_BACKUP_ENC_PASSPHRASE` / `_SALT` | 已 gitignore；**备份里没有 `.env`** |
+| **权威副本** | `just backup-key card` 打出来的纸 / 密码管理器条目 | **必须在这台机器之外** |
+| 指纹（非机密） | 跟着备份一起放在异地的 `.cortex-keycheck`，也印在恢复卡上 | 用来核对「手上这把是不是当初那把」 |
+
+**机器整机没了 → `.env` 没了 → 异地那份加密备份变成一堆随机字节。**
+这是最经典的死法，所以第二行不是建议而是要求。
+
+刻意**不做**「把密钥加密后放进备份」这类循环：解密需要密钥，而密钥在需要
+解密的东西里。
+
+密钥是 `od -N32 /dev/urandom` 出来的 256 bit 十六进制串，不是人想的口令。
+两个原因：`.env` 的解析器会被值里的 `#` 与引号绊倒，十六进制没有任何需要转义
+的字符；以及口令强度不够时**指纹是可暴破的**，而指纹要能放心公开。
+
+#### 指纹是干什么的
+
+`sha256("cortex-backup-key-v1" ‖ salt ‖ passphrase)` 截断到 16 hex。**非机密。**
+
+它回答一个问题：*我手上这把钥匙，是不是当初写这些备份的那把？*
+——**在花一小时拉回几十 GB 之前**回答。`backup-fetch.sh --ask-key` 在你敲完口令
+的下一行就打出指纹，对着恢复卡核一眼即可。
+
+#### 怎么轮转
+
+`just backup-key rotate-plan` 会打出完整步骤。核心是 **epoch**：
+
+轮转 = 世代加一后重新写一份完整的，旧世代原样留着直到旧备份自然过期。
+**不是**原地换钥匙 —— crypt 密文里没有密钥标识也没有 re-key 操作，原地换意味着
+把几十 GB 下载、解密、重加密、上传，期间任何一次中断都会留下一半新钥匙一半旧
+钥匙的混合体，而**它长得跟正常的一模一样**。换代是纯追加：任何时刻都有一份完整
+可解的备份。
+
+代价是过渡期两代并存、占盘翻倍。值得付。
+
+epoch 刻意放在**未加密的路径层**（`enc/e1/`、`enc/e2/`），所以不拿钥匙也能看出
+「这里有几代」。`just backup-key status` 会列出来。
+
+轮转时机：密钥可能泄露（笔记本丢了、误粘进聊天窗口、离职交接）、换了存储服务商、
+或者例行一年一次。**更频繁不会更安全** —— 它只会制造「旧钥匙找不到了」的风险。
+
+#### 恢复现场怎么拿到密钥
+
+那天你手上大概率只有一台空机器、仓库和一张纸，没有 `.env`：
+
+```bash
+scripts/backup-fetch.sh --ask-key --latest --verify
+# 口令不回显；敲完立刻打印指纹，与恢复卡核对
+```
+
 ### 脚本速查表
 
 | 命令 | 脚本 | 做什么 |
 |---|---|---|
-| `just backup` | `scripts/pg-backup.sh` | 全量 + `pg_verifybackup` + 保留策略 + WAL 清理 |
+| `just backup` | `scripts/pg-backup.sh` | 全量 + `pg_verifybackup` + 目录清单 + 保留策略 + WAL 清理 |
 | `just backup --logical` | 同上 | 另出一份 `pg_dump`（跨大版本的退路） |
-| `just mirror` | `scripts/blob-mirror.sh` | rclone 增量镜像（无 `--delete`） |
+| `just mirror` | `scripts/blob-mirror.sh` | rclone 增量镜像（无 `--delete`），配了口令就自动加密 |
 | `just reconcile` | `scripts/blob-reconcile.sh` | 以 `blobs` 表对账三方 |
 | `just blob-restore` | `scripts/blob-restore.sh` | 从镜像回填主存储 |
-| `just drill` | `scripts/restore-drill.sh` | **恢复演练**：实测 RPO / RTO |
+| `just backup-fetch` | `scripts/backup-fetch.sh` | **从第二存储取回并解密**；`--verify` 顺带验一遍 |
+| `just drill` | `scripts/restore-drill.sh` | **恢复演练**：实测 RPO / RTO；`--from-mirror` 走异地加密路径 |
+| `just backup-key` | `scripts/backup-key.sh` | 密钥：`gen` / `status` / `check` / `card` / `rotate-plan` |
+| `just notify-test` | `scripts/notify.sh` | **真发一条告警**，自测通知链路 |
+| `just watchdog` | `scripts/backup-watchdog.sh` | 死人开关：该跑没跑就告警 |
+| `just purge-rotate` | `scripts/purge-rotate.sh` | **破坏性**：purge 后轮转备份，抹掉历史残留 |
 | `just pg-enable-checksums` | `scripts/pg-enable-checksums.sh` | 给已有库补页校验和 |
 | `just backup-all` | `scripts/backup-all.sh` | 整条链路，给定时任务用 |
-| `just backup-status` | — | 现状一览 |
+| `just backup-status` | — | 现状一览（含加密与告警是否配了） |
 
 全部脚本都能在 **Windows 的 Git Bash** 下跑（`lib.sh` 里关掉了 MSYS 的路径改写）。
 
 ### 定时任务
 
 ```cron
-# 每天：全量 + 镜像 + 对账
+# 每天：全量 + 镜像 + 密钥往返 + 对账
 10 3 * * 1-6  cd /srv/cortex && scripts/backup-all.sh           >> data/backup/cron.log 2>&1
 # 每周日：加逻辑备份与深度对账
 10 3 * * 0    cd /srv/cortex && scripts/backup-all.sh --weekly  >> data/backup/cron.log 2>&1
-# 每月 1 号：加恢复演练
+# 每月 1 号：加恢复演练（配了加密就自动走 --from-mirror）
 10 4 1 * *    cd /srv/cortex && scripts/backup-all.sh --monthly >> data/backup/cron.log 2>&1
+
+# ★ 死人开关。**必须比备份本身跑得勤**，否则它自己也会跟着一起沉默
+17 *  * * *   cd /srv/cortex && scripts/backup-watchdog.sh --quiet >> data/backup/cron.log 2>&1
 ```
 
-顺序是**全量 → 镜像 → 对账 →（演练）**，不能倒过来：先镜像后全量的话，
-镜像里会缺最新那份全量，而对账又会说「一切正常」。
+顺序是**全量 → 镜像 →（密钥往返）→ 对账 →（演练）**，不能倒过来：先镜像后全量
+的话，镜像里会缺最新那份全量，而对账又会说「一切正常」。
 
-`backup-all.sh` 失败时返回非零码，**不做「失败了也返回 0，只在日志里写一行」** ——
-备份任务默默变红几个月没人发现，是这类系统最常见的死法。请把它接到告警上。
+`backup-all.sh` 失败时返回非零码，**不做「失败了也返回 0，只在日志里写一行」**，
+并且会主动发告警 + 打失败心跳。**任何提前中止**（备份目录建不出来、docker 没起
+来）也会经 `EXIT` trap 发出告警 —— 否则最严重的那几种失败反而是最安静的。
 
 ### 恢复演练 —— 最重要的一条
 
@@ -275,7 +495,18 @@ just reconcile --deep   # 慢：下载重算每个对象的 SHA-256
 just drill                      # 完整演练，约 2 分钟
 just drill --rpo-mode forced    # 不等 archive_timeout 自然触发，快一些
 just drill --keep               # 保留临时实例供手工排查
+just drill --from-mirror        # ★ 从第二存储取回并解密后再恢复
 ```
+
+**`--from-mirror` 不是可选的花活。** 默认演练读的是本机的 `data/backup`，
+它证明「备份能恢复」；但对真正的灾难（整机丢失）只证明了一半 —— 那天本机
+什么都没有，只有异地那份加密拷贝。中间隔着的东西一个都不小：口令还在不在、
+盐 / 世代对不对、异地那份 WAL 全不全、解密出来的字节有没有坏、
+**空目录还在不在**（见下）。配了加密时 `backup-all --monthly` 会自动走这条路。
+
+顺序上它插在写探针之后：先推再取，异地那份才包含刚写的探针。开头就取的话，
+演练会退化成「只验证全量能起」—— 而那正是这个脚本从第一天起就拒绝做的事。
+取回耗时**单独报，不计进 RTO**：它是纯网络时间，混进去会让 RTO 失去可比性。
 
 **没演练过的备份等于没有备份。** 备份脚本跑绿了只证明「写出去了」，
 证明不了「读得回来」。中间隔着一堆只在恢复那天才会暴露的东西：归档少一段、
@@ -339,6 +570,50 @@ just drill --keep               # 保留临时实例供手工排查
 「回放结束、已升主、可读可写」，不是「端口通了」。只等 `SELECT 1` 会把还在
 回放中的只读窗口算成已恢复，而那时业务其实还跑不了。
 
+#### 加密路径的实测结果（2026-08-07）
+
+同一台机器，打开 `rclone crypt` 后跑 `--from-mirror`：
+备份 → 加密 → 推到第二存储 → 取回 → 解密 → `pg_verifybackup` → PITR 恢复 → 全项检查。
+
+| 指标 | `--from-mirror --rpo-mode forced` | `backup-all --monthly`（natural） |
+|---|---:|---:|
+| **RPO 实测** | **1.85 s** | **50.90 s** |
+| **RTO 实测** | **72.84 s** | **67.74 s** |
+| 异地取回（不计入 RTO） | 40.15 s | 30.32 s |
+| 结论 | PASS | PASS |
+
+完整性检查全绿：探针回放通过、14/14 张业务表、全部表行数 ≥ 基线、`sync_log`
+游标追平、pgvector 正常、`episodes.tsv` 无缺失、`pg_amcheck --heapallindexed
+--parent-check` 通过、`pg_checksums --check` 扫 8605 页 **0 个坏页**。
+
+RTO 比明文那次（43.6 s）高，但**原因不是加密**：解密只发生在取回阶段（已单列），
+RTO 那一段是从「拷贝数据目录」开始算的。差值来自这次备份更大（86 MB vs 59 MB）
+以及机器上同时在跑别的东西 —— RTO 是负载敏感的，这一点上一轮已经写过。
+
+> ### ⚠ 这次演练抓到的一个真问题：空目录不会自己活下来
+>
+> 第一次跑 `--from-mirror` 时，`pg_verifybackup` 报
+> **`backup successfully verified`**，文件数一模一样（1740 = 1740），
+> 然后 Postgres 起不来，只留下一句：
+>
+> ```
+> FATAL: could not open directory "pg_notify": No such file or directory
+> ```
+>
+> 原因：`pg_basebackup` 会建出 13 个**空目录**（`pg_notify`、`pg_stat_tmp`、
+> `pg_replslot`、`pg_wal/archive_status`、PG17 新增的 `pg_wal/summaries` …）。
+> 对象存储里没有「目录」这个东西，rclone 默认也不搬空目录。而
+> `backup_manifest` **只列文件**，所以 `pg_verifybackup` 对此完全失明。
+>
+> 也就是说：一份**验证全绿但起不来**的异地备份 —— 比没有备份更危险，
+> 因为你以为你有。而它只在真的启动那一刻才暴露，
+> 也就是**只有真跑一次 `--from-mirror` 才会发现**。
+>
+> 两头都修了：`pg-backup.sh` 现在把目录清单写成 `base/<TS>/dirs.txt`（现查，
+> 不写死 —— PG 大版本会增删这些目录），`backup-fetch.sh` 取回后按它补齐；
+> 同时 mirror 与 fetch 都带上了 `--create-empty-src-dirs`。
+> 没有 `dirs.txt` 的老备份走一份写死的兜底清单，并明确警告「可能不全」。
+
 **行数比的是「基线快照」而不是「现在的源库」。** 生产库在演练期间仍在被写，
 等恢复完（几十秒后）再去读源库行数，那时源库早跑到前面了，副本必然「少几行」——
 于是演练会在一个完全健康的系统上稳定报红。**这个坑已经踩到并修好了**：
@@ -400,6 +675,103 @@ docker compose exec -T postgres pg_restore -U cortex -d cortex \
 > ⚠️ 全链路 append-only。往生产库里 restore 一张表**不是**常规操作，
 > 它会绕过 `sync_log`，对其他设备永久不可见。只在灾难恢复语境下做，
 > 做完必须确认 `sync_log` 与业务表的一致性。
+
+**场景四：整机丢了，手上只有一张恢复卡**
+
+```bash
+# 新机器上：装 docker、克隆仓库、配好第二存储的地址与凭据
+scripts/backup-key.sh status                     # 指纹对上 = 钥匙对了，此时才值得往下走
+scripts/backup-fetch.sh --ask-key --latest --verify
+# 然后按场景一把 data/backup/fetched/base/<TS>/pgdata 换上去
+```
+
+`--ask-key` 不回显地读口令，敲完立刻打印指纹 —— 对着卡核一眼再决定要不要
+花一小时拉数据。
+
+### 彻底抹除：purge 之后必须轮转备份
+
+```bash
+just purge-rotate               # dry-run：只报告会销毁什么（默认，安全）
+just purge-rotate --apply       # 真做，要手打确认串 PURGE-ROTATE
+```
+
+#### 为什么需要它
+
+`memory.md` §十一 承诺 purge 会「真正销毁数据」。此前的实现只做到了主存储与镜像：
+
+| 落点 | 之前 | 现在 |
+|---|---|---|
+| `episodes` / `facts` 的列 | ✅ 应用清空 | ✅ |
+| RustFS 主存储的 blob | ✅ 应用删除 | ✅ |
+| 镜像里的 blob | ✅ `mirror --apply-purges` | ✅ |
+| **归档 WAL** | ❌ 残留 | ✅ 按新起点清 |
+| **旧的全量备份** | ❌ 残留 | ✅ 全部销毁 |
+| **逻辑备份（pg_dump）** | ❌ 残留 | ✅ 全部销毁 |
+| **新全量里的死元组** | ❌ 残留 | ✅ `VACUUM FULL` |
+
+也就是说：**不轮转备份的 purge，是一个没有兑现的承诺。**
+
+#### 三个容易被漏掉的技术点
+
+1. **归档 WAL 里有原文。** 清空那几列走的是 `UPDATE`，而 UPDATE 的 WAL 记录会
+   带上整页镜像（full page write），旧页上就是原文。
+2. **紧接着做的新全量里也有原文。** MVCC 让 UPDATE 变成「插新版本 + 把旧版本
+   标记为死」，**旧版本的字节原样躺在堆页里**。普通 `VACUUM` 只把空间标记为
+   可复用，不擦内容 —— 于是 `pg_basebackup` 会把死元组完整拷走。
+   所以脚本默认跑 **`VACUUM FULL`**（把整张表重写进新 relfile，旧文件直接
+   unlink）。代价是 `ACCESS EXCLUSIVE` 锁 + 约一倍临时空间。
+   `--no-vacuum` 只为应急保留，用了它抹除就是**不完整**的，墓碑里会如实记
+   `complete_erasure: false`。
+3. **必须先切 WAL 段。** 脚本在新全量之前跑一次 `pg_switch_wal()`，让新全量的
+   起点落在一个全新的段上 —— 这样所有含有旧内容的段都**严格更老**，
+   `pg_archivecleanup` 才能保证一段不漏。
+
+#### 顺序与闸门
+
+```
+盘点 → 【硬拦截】purge 是否已传播到主存储 → 报告会销毁什么
+   → dry-run 到此为止；--apply 才继续
+   → 手打 PURGE-ROTATE → VACUUM FULL → 切段 → 新全量 → 验证
+   → 清本机（旧全量 / 旧 WAL / 旧 dump / .backup 标签 / drill / fetched）
+   → 把清理传播到第二存储 → 把新全量推上去 → 留墓碑 → 告警
+```
+
+**「purge 是否已传播」是硬拦截，不是提醒。** 轮转备份不可逆，而「blob 还躺在
+主存储里」可逆。顺序搞反 —— 先毁掉备份再发现主存储没清干净 —— 是最坏的组合：
+既丢了历史，又没抹掉秘密。
+
+**代价说在前面：轮转 = 丢掉这一刻之前的全部 PITR 能力。** 跑完之后能恢复到的
+最早时间点就是这次新建的那份全量，此前任何时刻都回不去 —— 包括「昨天误删的
+那张表」。所以永远先确认没有别的东西需要从历史里捞。
+
+没有任何 `redactions` 墓碑时脚本会直接拒绝跑（要 `--force` 才行）：
+它是抹除工具，**不是「清空我的备份」按钮**。
+
+#### 墓碑
+
+抹掉的是内容，不是「这里发生过抹除」。每次轮转落两份记录：
+
+- `data/backup/reports/purge-rotation-<TS>.json` —— 结构化，含
+  `pitr_floor_before/after`、销毁了几份、`vacuum_full`、`complete_erasure`
+- `data/backup/reports/purge-rotation.log` —— 一行一次，追加
+
+#### 它管不到的（必须人工处理）
+
+1. **第二存储的版本控制 / 对象锁 / 回收站。** S3 versioning、object lock、
+   各家网盘的历史版本 —— 删除只是加了个删除标记，旧版本还在。
+2. **文件系统层面。** `rm` 不擦盘。SSD 的 wear leveling、ZFS/Btrfs 快照、
+   LVM 快照都会留下旧块。有快照就一并删。
+3. **离线拷贝。** 拔下来的硬盘、刻的盘、别人下载过的一份 —— 脚本无从知晓，
+   只能靠台账。
+4. **各设备的本地缓存。** 靠 `redactions` 墓碑经 `sync_log` 传播，
+   客户端义务见 [memory.md §九、§十一](memory.md)。
+
+脚本每次跑完都会把这四条打出来，不让「已经抹干净了」这个印象凭空产生。
+
+> **`pg_archivecleanup` 按设计不删 `.backup` / `.history` 标签文件**
+> （`IsXLogFileName` 把它们过滤掉了）。它们里面只有 LSN、备份标签和时间，
+> 没有用户内容，但指向的备份已经不存在了。脚本按新起点单独清一遍 ——
+> 留一堆指向虚空的元数据只会让下一次排障多绕一圈。实测清掉 7 个。
 
 ---
 
@@ -585,6 +957,12 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 | `just drill` 报「探针没找到」 | 归档 WAL 没被回放 | 查 `restore_command` 路径、查归档目录是否缺段 |
 | `just drill` 卡在「回放结束并已升主」 | 归档里有断档，PG 在等一个永远不来的段 | `just prod-logs`/`docker logs cortex-drill-*` 看它在找哪个段 |
 | `reconcile --deep` 报「只校验了 0/N」 | rclone 没带 `--download`（脚本已修） | 若复发，确认 rclone 镜像版本 |
+| 镜像里「一个对象都没有」，但明明推过 | **口令 / 盐 / epoch 不对**。crypt 解不开文件名时是静默跳过 | `just backup-key status` 看金丝雀指纹。**别急着重推**，那会盖掉好的那份 |
+| `backup-key check` 说取回来是空的 | 同上 | 同上 |
+| 恢复出来的实例报 `could not open directory "pg_notify"` | 异地取回丢了空目录 | 用带 `dirs.txt` 的备份重取；老备份走兜底清单（见上文） |
+| 告警发出去了但群里是乱码 | payload 走了 argv 而不是 stdin（脚本已修） | 若复发，确认 `notify.sh` 的 `http_post` 用的是 `--data-binary @-` |
+| `just notify-test` 说「一个出口都没配」 | `.env` 里三个变量都空 | 见上文「告警」段 |
+| `purge-rotate` 说「还有 blob 在主存储里」 | purge 没传播完 | 先 `just mirror --apply-purges`，这是**故意的硬拦截** |
 | 镜像目录只涨不落，占盘飙升 | 正常行为（无 `--delete`） | 要清理只能走 `--apply-purges`，由 `redactions` 表驱动 |
 | Git Bash 下 docker 命令报 `C:/Program Files/...` | MSYS 路径改写 | 脚本里已 `export MSYS_NO_PATHCONV=1`；手工敲命令时自己加 |
 | CI 检索门红了但本地是绿的 | 后端不一致 | 本地跑 `just evals-gate`（hash）而不是默认的 fast |
@@ -598,10 +976,11 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 | 缺口 | 影响 | 后续 |
 |---|---|---|
-| **备份未加密** | 备份落到第二存储时是明文。异地存储不可信时是敞口 | 接 `age` / `gpg`，或用 S3 侧的 SSE |
-| **purge 只清主存储与镜像** | 历史 WAL 与旧全量里仍残留被 purge 的内容 | 彻底抹除必须同时轮转备份，见 memory.md §十一 |
-| **无告警接入** | `backup-all.sh` 返回非零码但没人看 | 接到值班告警上，光有退出码不够 |
-| **RTO 未在生产规模上验证** | 58 MiB 的库测出 39–83 s，几十 GB 时会是另一个量级 | 语料长到 GB 级后重测并更新承诺 |
+| **告警出口没有「送达确认」** | webhook 返回 200 不等于人看到了。钉钉/企业微信的关键词策略被拦下时也是 200 | 靠外部心跳服务反向兜底；`just notify-test` 至少能证明链路通 |
+| **本机备份目录仍是明文** | 加密只作用于出本机的那一份 | 本机磁盘加密交给 LUKS / BitLocker，不在备份脚本的职责内 |
+| **密钥托管全靠人** | 恢复卡没有真的存到机器外面的话，加密就是负资产 | 无法用脚本验证；`backup-key card` 只能提醒 |
+| **`--from-mirror` 只在本地镜像上验过** | 真正的第二个 S3 上目录标记行为可能不同 | `dirs.txt` 兜底已覆盖，但接上真 S3 后应再跑一次 |
+| **RTO 未在生产规模上验证** | 86 MiB 的库测出 43–83 s，几十 GB 时会是另一个量级 | 语料长到 GB 级后重测并更新承诺 |
 | **cortexd 无备份纳管** | 只备了 Postgres 与 blobs，配置与模型缓存没备 | 配置在 `.env`（本就不该入库），模型可重下，暂可接受 |
 | **单机自托管无高可用** | 恢复期间服务是停的，RTO 就是停机时间 | 需要 HA 时上流复制，那是另一套东西 |
 | **hash 后端的代理有效性会失效** | 语料上千条后 hash 与真实后端的差距会拉开 | 见 [第三节](#ci-里-embedding-后端的取舍) |

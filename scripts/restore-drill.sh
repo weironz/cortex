@@ -7,6 +7,18 @@
 #    scripts/restore-drill.sh --rpo-mode forced 用 pg_switch_wal 强制切段，不等 60s
 #    scripts/restore-drill.sh --backup <TS>     指定某一份全量
 #    scripts/restore-drill.sh --keep            演练结束保留临时实例供手工排查
+#    scripts/restore-drill.sh --from-mirror     **从第二存储取回并解密**后再恢复
+#
+#  ── --from-mirror 为什么必须单独存在 ──────────────────────
+#
+#  默认演练读的是**本机**的 data/backup。它证明「备份能恢复」，
+#  但对真正的灾难（整机丢失）只证明了一半：那天本机什么都没有，
+#  只有异地那份加密拷贝。
+#
+#  中间隔着的东西一个都不小：加密口令还在不在、rclone crypt 的
+#  盐 / 世代对不对、异地那份 WAL 全不全、解密出来的字节有没有坏。
+#  这些**只有真的走一遍取回 → 解密 → 恢复才能证明**。
+#  所以 --from-mirror 是加密方案的验收口，不是可选的花活。
 #
 #  ── 为什么这个脚本比其它三个加起来都重要 ─────────────────
 #
@@ -41,19 +53,27 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 RPO_MODE=natural
 PICK_BACKUP=""
 KEEP=0
+FROM_MIRROR=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --rpo-mode) RPO_MODE="${2:?}"; shift 2 ;;
-        --backup)   PICK_BACKUP="${2:?}"; shift 2 ;;
-        --keep)     KEEP=1; shift ;;
-        -h|--help)  sed -n '2,45p' "$0"; exit 0 ;;
-        *)          die "未知参数：$1" ;;
+        --rpo-mode)   RPO_MODE="${2:?}"; shift 2 ;;
+        --backup)     PICK_BACKUP="${2:?}"; shift 2 ;;
+        --keep)       KEEP=1; shift ;;
+        --from-mirror) FROM_MIRROR=1; shift ;;
+        -h|--help)    sed -n '2,55p' "$0"; exit 0 ;;
+        *)            die "未知参数：$1" ;;
     esac
 done
 
 need_pg_running
 ensure_backup_dirs
+
+# 备份的来源根。默认是本机备份目录；--from-mirror 换成「刚从异地取回并
+# 解密出来的那份」。后面所有路径都经这两个变量，不再出现写死的 base/wal。
+SRC_ROOT="$BACKUP_DIR"
+SRC_IN_PG="$BACKUP_DIR_IN_PG"
+SRC_LABEL="本机备份目录"
 
 TS="$(stamp)"
 DRILL_ID="drill-$TS"
@@ -85,16 +105,18 @@ trap cleanup EXIT
 #  第 0 步：选一份全量
 # ══════════════════════════════════════════════════════════
 step "0 / 选备份"
+
 if [ -n "$PICK_BACKUP" ]; then
     BASE="$PICK_BACKUP"
 else
-    BASE="$(ls -1 "$BACKUP_DIR/base" 2>/dev/null | sort | tail -1)"
+    BASE="$(ls -1 "$SRC_ROOT/base" 2>/dev/null | sort | tail -1)"
 fi
-[ -n "$BASE" ] || die "$BACKUP_DIR/base 下没有任何全量备份。先跑 scripts/pg-backup.sh。"
-[ -d "$BACKUP_DIR/base/$BASE/pgdata" ] || die "base/$BASE 里没有 pgdata 目录，这不是本脚本认识的备份布局。"
+[ -n "$BASE" ] || die "$SRC_ROOT/base 下没有任何全量备份。先跑 scripts/pg-backup.sh。"
+[ -d "$SRC_ROOT/base/$BASE/pgdata" ] || die "base/$BASE 里没有 pgdata 目录，这不是本脚本认识的备份布局。"
+log "备份来源：$SRC_LABEL"
 
 # shellcheck disable=SC1090
-source "$BACKUP_DIR/base/$BASE/meta.env"
+source "$SRC_ROOT/base/$BASE/meta.env"
 log "全量：base/$BASE（起点 WAL=$START_WAL，PG $PG_VERSION，checksums=$DATA_CHECKSUMS）"
 
 SRC_VERSION="$(psql_val 'SHOW server_version')"
@@ -175,6 +197,39 @@ BASELINE_SEQ="$(psql_val 'SELECT coalesce(max(seq),0) FROM sync_log')"
 log "基线快照：$n_src_tables 张表，sync_log max(seq)=$BASELINE_SEQ"
 
 # ══════════════════════════════════════════════════════════
+#  第 1.7 步：--from-mirror —— 走一遍真正的异地取回
+# ══════════════════════════════════════════════════════════
+#
+# 【为什么放在探针之后，而不是脚本一开头】
+# 探针刚刚才写进本机归档。要让异地那份也能把探针接回来，必须**先推**
+# 再取。开头就取的话，取到的是探针之前的状态，演练会退化成
+# 「只验证全量能起」—— 而那正是这个脚本从第一天起就拒绝做的事。
+#
+# 【取回耗时刻意不计进 RTO】
+# 它是纯网络时间，随带宽与备份大小线性变化，混进 RTO 会让这个数字
+# 失去可比性。单独报，见报告里的「异地取回」一行。
+FETCH_MS=0
+if [ "$FROM_MIRROR" = "1" ]; then
+    step "1.7 / 推到第二存储并取回$(backup_enc_on && echo "、解密" || echo "")"
+    t_fetch0="$(now_ms)"
+
+    bash "$SCRIPT_DIR/blob-mirror.sh" --with-pg \
+        || die "推送第二存储失败，异地那份不会包含刚写的探针，演练无法成立"
+
+    rm -rf "${BACKUP_DIR:?}/fetched"
+    bash "$SCRIPT_DIR/backup-fetch.sh" --base "$BASE" --verify \
+        || die "从第二存储取回失败 —— 异地那份现在不可用，这正是这次演练要查的东西"
+
+    FETCH_MS=$(( $(now_ms) - t_fetch0 ))
+    SRC_ROOT="$BACKUP_DIR/fetched"
+    SRC_IN_PG="$BACKUP_DIR_IN_PG/fetched"
+    SRC_LABEL="第二存储（$(backup_enc_on && echo "加密，指纹 $(backup_key_fingerprint)" || echo 明文)）"
+    [ -d "$SRC_ROOT/base/$BASE/pgdata" ] \
+        || die "取回来的目录里没有 base/$BASE/pgdata。异地那份不完整。"
+    ok "异地取回完成，耗时 $(( FETCH_MS / 1000 )) s，来源：$SRC_LABEL"
+fi
+
+# ══════════════════════════════════════════════════════════
 #  第 2 步：恢复（RTO 从这里开始计时）
 # ══════════════════════════════════════════════════════════
 step "2 / 从 base/$BASE 恢复到独立实例"
@@ -182,7 +237,7 @@ T_RESTORE_START="$(now_ms)"
 
 # 复制在容器内做：宿主机侧对 1400+ 个文件逐个走 bind mount 更慢，
 # 而且 cp -a 能原样保住 postgres(999) 的属主
-pg_sh "mkdir -p '$DRILL_IN_PG' && cp -a '$BACKUP_DIR_IN_PG/base/$BASE/pgdata' '$DRILL_IN_PG/pgdata'" \
+pg_sh "mkdir -p '$DRILL_IN_PG' && cp -a '$SRC_IN_PG/base/$BASE/pgdata' '$DRILL_IN_PG/pgdata'" \
     || die "复制备份失败"
 log "数据目录已就位：$DRILL_HOST/pgdata"
 
@@ -193,7 +248,7 @@ log "数据目录已就位：$DRILL_HOST/pgdata"
 pg_sh "cat >> '$DRILL_IN_PG/pgdata/postgresql.auto.conf' <<'CONF'
 
 # ── 由 scripts/restore-drill.sh 追加 ──
-restore_command = 'cp $BACKUP_DIR_IN_PG/wal/%f %p'
+restore_command = 'cp $SRC_IN_PG/wal/%f %p'
 recovery_target_timeline = 'latest'
 archive_mode = off
 CONF
@@ -366,12 +421,15 @@ fmt_s() { [ "$1" -lt 0 ] 2>/dev/null && { printf 'n/a'; return; }; printf '%d.%0
     printf '结论        %s\n' "$RESULT"
     printf '演练时间    %s\n' "$TS"
     printf '备份来源    base/%s（起点 WAL %s）\n' "$BASE" "$START_WAL"
+    printf '取自        %s\n' "$SRC_LABEL"
     printf 'PG 版本     备份 %s / 源库 %s\n' "$PG_VERSION" "$SRC_VERSION"
     printf 'data_checksums  %s（逐页校验：%s）\n' "$DATA_CHECKSUMS" "$CHECKSUM_RESULT"
     printf '\n## 实测指标\n'
     printf '  RPO（%s）  %s s   —— 从写入到该 WAL 段落进归档\n' "$RPO_MODE" "$(fmt_s "$RPO_MS")"
     printf '  RTO         %s s   —— 从开始恢复到实例可服务且数据可查\n' "$(fmt_s "$RTO_MS")"
     printf '  archive_timeout  %s s（RPO 的稳态上界）\n' "$timeout_s"
+    [ "$FROM_MIRROR" = "1" ] && \
+    printf '  异地取回    %s s   —— 推送 + 拉回 + 解密 + 验证（**不计入 RTO**，纯网络时间）\n' "$(fmt_s "$FETCH_MS")"
     printf '  备份耗时    %s s / %s KiB\n' "$(fmt_s "${ELAPSED_MS:-0}")" "$(( ${SIZE_BYTES:-0} / 1024 ))"
     printf '\n## 完整性检查\n'
     printf '  探针回放    %s\n' "$([ "${probe_found:-0}" = 1 ] && echo 通过 || echo 失败)"
