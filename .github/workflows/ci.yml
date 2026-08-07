@@ -119,15 +119,29 @@ jobs:
         run: python3 scripts/evals-gate.py verify-baseline scripts/evals-baseline.*.json
 
       - name: docker compose 配置可解析
-        # 生产变体里 POSTGRES_PASSWORD / RUSTFS_SECRET_KEY 用了 `${VAR:?}`，
-        # 缺了就报错 —— 那正是它该有的行为（防止拿默认口令上生产）。
-        # 这里喂两个假值只为让 config 能解析，不代表可以用弱口令。
+        # 生产变体里若干变量用了 `${VAR:?}`，缺了就报错 —— 那正是它该有的
+        # 行为（防止拿默认口令上生产）。这里喂假值只为让 config 能解析，
+        # 不代表可以用弱口令。
+        #
+        # ⚠️ 这一组必须与 compose 里所有 `${VAR:?}` 保持同步：
+        #     grep -ohE '\$\{[A-Z0-9_]+:\?' docker-compose*.yml deploy/*.yml
+        # 漏一个的症状是 CI 挂在这一步，而**本机跑同一条命令是过的** ——
+        # 因为本机 `.env` 里有那个值，docker compose 会自动读它。
+        # 也就是说这道门在本地被自己的 .env 掩盖，只有 CI 才看得见。
         env:
           POSTGRES_PASSWORD: ci-syntax-check-only
           RUSTFS_SECRET_KEY: ci-syntax-check-only
+          CORTEX_AUTH_TOKEN_SHA256: ci-syntax-check-only
+          CORTEX_VERSION: v0.0.0-ci
+          DOMAIN: ci.invalid
+          S3_DOMAIN: s3.ci.invalid
         run: |
           docker compose -f docker-compose.yml config -q
           docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
+          # 线上真正跑的是这一份（deploy.yml 按它的 sha256 校验节点）。
+          # 之前没检查它 —— 而一个语法坏掉的部署 compose，
+          # 要到 workflow_dispatch 之后才在节点上暴露
+          docker compose -f deploy/docker-compose.yml config -q
 
   # ── 测试 ───────────────────────────────────────────────
   test:
