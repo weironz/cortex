@@ -345,8 +345,12 @@ jobs:
           cd dist
           v="${{ needs.preflight.outputs.version }}"
           miss=0
+          # 这张清单必须与上面 build 矩阵的 target 一一对应。
+          # 删矩阵条目时忘了同步这里，症状是「产物清点」当场红 ——
+          # 那正是它该有的行为：**发版少一个产物必须响，不能静默发出去**。
+          # （v0.1.0 删掉 Intel Mac 时就漏改过这里，被它拦下了。）
           for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
-                   aarch64-apple-darwin x86_64-apple-darwin; do
+                   aarch64-apple-darwin; do
             [ -f "cortex-v$v-$t.tar.gz" ] || { echo "::error::缺少 $t"; miss=1; }
           done
           [ -f "cortex-v$v-x86_64-pc-windows-msvc.zip" ] || { echo "::error::缺少 Windows"; miss=1; }
