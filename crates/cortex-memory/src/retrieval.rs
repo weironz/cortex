@@ -773,6 +773,8 @@ mod tests {
             confidence: 1.0,
             valid_at: None,
             source_episode_id: "01JZZZZZZZZZZZZZZZZZZZZZZ3".into(),
+            source_channel: cortex_store::SourceChannel::Conversation,
+            trust_tier: Some(2),
             extracted_by: "test".into(),
             device_id: "test".into(),
             created_at: Utc::now(),

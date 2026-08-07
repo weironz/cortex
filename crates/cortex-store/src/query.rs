@@ -10,7 +10,7 @@ use crate::error::Result;
 use crate::model::{
     Blob, BlobTranscript, CanonicalEntity, Entity, EntityMerge, Episode, EpisodeAttachment,
     EpisodeToolCall, Fact, FactEvent, FactStatus, InjectedMemory, Redaction, RedactionTarget,
-    Summary, SummaryScope,
+    Summary, SummaryScope, fact_columns,
 };
 use crate::store::Store;
 
@@ -376,12 +376,11 @@ impl Store {
 
     /// 按主键取事实，**不过滤失效**（审计视图要看得见已删除的）。
     pub async fn fact(&self, id: &str) -> Result<Option<Fact>> {
-        let row = sqlx::query_as::<_, Fact>(
-            "SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
-                    embedding, embedding_model, domain, confidence, valid_at,
-                    source_episode_id, extracted_by, device_id, created_at
-               FROM facts WHERE id = $1",
-        )
+        let row = sqlx::query_as::<_, Fact>(concat!(
+            "SELECT ",
+            fact_columns!(),
+            "  FROM facts WHERE id = $1"
+        ))
         .bind(id)
         .fetch_optional(self.pool())
         .await?;
@@ -390,13 +389,12 @@ impl Store {
 
     /// 当前有效的事实 —— 日常检索的入口。
     pub async fn active_facts_by_subject(&self, subject_id: &str, limit: i64) -> Result<Vec<Fact>> {
-        let rows = sqlx::query_as::<_, Fact>(
-            "SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
-                    embedding, embedding_model, domain, confidence, valid_at,
-                    source_episode_id, extracted_by, device_id, created_at
-               FROM active_facts WHERE subject_id = $1
-              ORDER BY created_at DESC, id DESC LIMIT $2",
-        )
+        let rows = sqlx::query_as::<_, Fact>(concat!(
+            "SELECT ",
+            fact_columns!(),
+            "  FROM active_facts WHERE subject_id = $1
+              ORDER BY created_at DESC, id DESC LIMIT $2"
+        ))
         .bind(subject_id)
         .bind(limit)
         .fetch_all(self.pool())
@@ -410,13 +408,12 @@ impl Store {
         subject_id: &str,
         predicate: &str,
     ) -> Result<Vec<Fact>> {
-        let rows = sqlx::query_as::<_, Fact>(
-            "SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
-                    embedding, embedding_model, domain, confidence, valid_at,
-                    source_episode_id, extracted_by, device_id, created_at
-               FROM active_facts WHERE subject_id = $1 AND predicate = $2
-              ORDER BY created_at DESC, id DESC",
-        )
+        let rows = sqlx::query_as::<_, Fact>(concat!(
+            "SELECT ",
+            fact_columns!(),
+            "  FROM active_facts WHERE subject_id = $1 AND predicate = $2
+              ORDER BY created_at DESC, id DESC"
+        ))
         .bind(subject_id)
         .bind(predicate)
         .fetch_all(self.pool())
@@ -430,13 +427,12 @@ impl Store {
         object_entity_id: &str,
         limit: i64,
     ) -> Result<Vec<Fact>> {
-        let rows = sqlx::query_as::<_, Fact>(
-            "SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
-                    embedding, embedding_model, domain, confidence, valid_at,
-                    source_episode_id, extracted_by, device_id, created_at
-               FROM active_facts WHERE object_entity_id = $1
-              ORDER BY created_at DESC, id DESC LIMIT $2",
-        )
+        let rows = sqlx::query_as::<_, Fact>(concat!(
+            "SELECT ",
+            fact_columns!(),
+            "  FROM active_facts WHERE object_entity_id = $1
+              ORDER BY created_at DESC, id DESC LIMIT $2"
+        ))
         .bind(object_entity_id)
         .bind(limit)
         .fetch_all(self.pool())
@@ -446,12 +442,11 @@ impl Store {
 
     /// redact 级联：按出处定位派生事实（走 `idx_facts_source`）。
     pub async fn facts_by_source_episode(&self, episode_id: &str) -> Result<Vec<Fact>> {
-        let rows = sqlx::query_as::<_, Fact>(
-            "SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
-                    embedding, embedding_model, domain, confidence, valid_at,
-                    source_episode_id, extracted_by, device_id, created_at
-               FROM facts WHERE source_episode_id = $1 ORDER BY created_at ASC, id ASC",
-        )
+        let rows = sqlx::query_as::<_, Fact>(concat!(
+            "SELECT ",
+            fact_columns!(),
+            "  FROM facts WHERE source_episode_id = $1 ORDER BY created_at ASC, id ASC"
+        ))
         .bind(episode_id)
         .fetch_all(self.pool())
         .await?;

@@ -23,11 +23,13 @@
 
 use sqlx::{PgPool, Postgres, postgres::PgArguments, query::Query};
 
-use crate::error::Result;
+use cortex_core::Id;
+
+use crate::error::{Result, StoreError};
 use crate::model::{
-    NewBlob, NewBlobTranscript, NewEntity, NewEntityMerge, NewEpisode, NewEpisodeBlob,
+    DerivedKind, NewBlob, NewBlobTranscript, NewEntity, NewEntityMerge, NewEpisode, NewEpisodeBlob,
     NewEpisodeMemory, NewEpisodeToolCall, NewFact, NewFactEvent, NewRedaction, NewSessionEvent,
-    NewSummary, table,
+    NewSummary, ProvenanceRef, table,
 };
 
 /// 同步取号锁的 advisory lock key。
@@ -303,6 +305,16 @@ impl WriteTxn {
         self.insert_row(table::ENTITY_MERGES, &id, stmt).await
     }
 
+    /// 落一条事实。
+    ///
+    /// `source` 连带写出 `trust_tier`：两列的对应由 schema 的
+    /// `facts_trust_tier_matches_channel` 锁死，这里只是把它算出来 ——
+    /// 让调用方自己填两列，迟早会出现「通道说是网页、档位说是用户亲述」
+    /// 这种自相矛盾的行，而它只在真出安全事件、要按来源批量失效时才暴露。
+    ///
+    /// `derived_from` 里的每一条源都会在**同一事务**里追加一行 `derivations`
+    /// （各自带自己的 sync_log）。单源派生留空即可，`source_episode_id`
+    /// 就是它的血缘。
     pub async fn insert_fact(&mut self, new: &NewFact) -> Result<i64> {
         let id = new.id.to_string();
         let object_entity_id = new.object_entity_id.map(|v| v.to_string());
@@ -310,9 +322,9 @@ impl WriteTxn {
             "INSERT INTO facts
                  (id, subject_id, predicate, object_text, object_entity_id, statement, tsv,
                   embedding, embedding_model, domain, confidence, valid_at,
-                  source_episode_id, extracted_by, device_id)
+                  source_episode_id, source_channel, trust_tier, extracted_by, device_id)
              VALUES ($1, $2, $3, $4, $5, $6, to_tsvector('simple', $7),
-                     $8, $9, $10, $11, $12, $13, $14, $15)",
+                     $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
         )
         .bind(&id)
         .bind(new.subject_id.to_string())
@@ -327,10 +339,19 @@ impl WriteTxn {
         .bind(new.confidence)
         .bind(new.valid_at)
         .bind(new.source_episode_id.to_string())
+        .bind(new.source.channel())
+        .bind(new.source.trust_tier())
         .bind(&new.extracted_by)
         .bind(&new.device_id);
 
-        self.insert_row(table::FACTS, &id, stmt).await
+        let seq = self.insert_row(table::FACTS, &id, stmt).await?;
+
+        for source in &new.derived_from {
+            self.insert_derivation(DerivedKind::Fact, new.id, *source, &new.device_id)
+                .await?;
+        }
+
+        Ok(seq)
     }
 
     /// 追加一条生命周期事件（失效 / 恢复 / 标记）。
@@ -362,7 +383,29 @@ impl WriteTxn {
 
     // ── L2 摘要层 ──────────────────────────────────────────
 
+    /// 写一份摘要**连同它的血缘**。
+    ///
+    /// # 为什么两件事绑在一个方法里
+    ///
+    /// 与 [`Guarded::insert_row`](guarded) 把「业务行 + sync_log」绑死是同一个手法。
+    /// 摘要没有 `source_episode_id NOT NULL` 那样的兜底列，血缘全在
+    /// `derivations` 里；分成两次调用就意味着「先写摘要、再写边」中间可以断，
+    /// 而断掉的表现是一条**永远找不到源头**的摘要 —— 它在源被 redact 之后
+    /// 会继续泄露内容，且事后补不出来（谁摘的、摘了什么，只有生成它的那步知道）。
+    ///
+    /// 返回的是**摘要行**的 seq；它的血缘边紧随其后，seq 更大。
+    /// 客户端按 sync_log 序回放时先看到摘要再看到边，正好是 FK 方向。
+    ///
+    /// # Errors
+    /// `new.sources` 为空时返回 [`StoreError::MissingProvenance`]，且**不写任何行**。
     pub async fn insert_summary(&mut self, new: &NewSummary) -> Result<i64> {
+        if new.sources.is_empty() {
+            return Err(StoreError::MissingProvenance {
+                kind: table::SUMMARIES,
+                id: new.id.to_string(),
+            });
+        }
+
         let id = new.id.to_string();
         let stmt = sqlx::query(
             "INSERT INTO summaries
@@ -381,7 +424,44 @@ impl WriteTxn {
         .bind(new.covers_to)
         .bind(&new.device_id);
 
-        self.insert_row(table::SUMMARIES, &id, stmt).await
+        let seq = self.insert_row(table::SUMMARIES, &id, stmt).await?;
+
+        for source in &new.sources {
+            self.insert_derivation(DerivedKind::Summary, new.id, *source, &new.device_id)
+                .await?;
+        }
+
+        Ok(seq)
+    }
+
+    // ── 派生血缘 ───────────────────────────────────────────
+
+    /// 追加一条「派生物 ← 源」的血缘边。
+    ///
+    /// 私有：血缘边只应与它描述的那条派生行在同一个方法里写出去
+    /// （见 [`Self::insert_summary`]）。开成 public 就等于允许「先写派生物、
+    /// 回头再补边」，而那正是 §5.3 说的「事后补是不可能的」那种补法。
+    async fn insert_derivation(
+        &mut self,
+        derived_kind: DerivedKind,
+        derived_id: Id,
+        source: ProvenanceRef,
+        device_id: &str,
+    ) -> Result<i64> {
+        let id = Id::new().to_string();
+        let stmt = sqlx::query(
+            "INSERT INTO derivations
+                 (id, derived_kind, derived_id, source_kind, source_id, device_id)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(&id)
+        .bind(derived_kind)
+        .bind(derived_id.to_string())
+        .bind(source.kind)
+        .bind(source.id.to_string())
+        .bind(device_id);
+
+        self.insert_row(table::DERIVATIONS, &id, stmt).await
     }
 
     // ── 会话生命周期 ───────────────────────────────────────

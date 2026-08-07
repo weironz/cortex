@@ -31,7 +31,7 @@ use std::sync::Arc;
 use chrono::{DateTime, NaiveDate, Utc};
 use cortex_core::{CortexError, Id, Result};
 use cortex_llm::{LlmClient, Message};
-use cortex_store::{NewEntity, NewFact, NewFactEvent, RedactionTarget, Store, Vector};
+use cortex_store::{FactSource, NewEntity, NewFact, NewFactEvent, RedactionTarget, Store, Vector};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
@@ -980,6 +980,21 @@ impl Extractor {
                     confidence: candidate.confidence,
                     valid_at: candidate.valid_at,
                     source_episode_id: ctx.episode_id,
+                    // 一律 Conversation（tier 2），**不区分「用户亲述」**。
+                    //
+                    // 不是保守，是这条管线现在真的分辨不出来：送进模型的是
+                    // 「用户：… / 助手：…」拼成的一整块（见 cortexd::live），
+                    // 候选回来时也不带「这句出自哪一侧」。把其中一部分标成
+                    // tier 1 就是凭空拔高，而 tier 1 的用途恰恰是「最可信的
+                    // 那批不该被外部内容盖掉」——标错方向是有害的。
+                    //
+                    // 解锁 tier 1 要改的是抽取器本身：候选 schema 加一个
+                    // 「出自用户 / 出自助手」的字段，由模型逐条标注。
+                    // 这符合 §8.3 的原则「必须由抽取器显式记录每条对应哪个
+                    // 输入片段，不能事后重建」，也正是存量行栽跟头的地方。
+                    source: FactSource::Conversation,
+                    // 单源：出处就是 `source_episode_id` 那一条 episode
+                    derived_from: Vec::new(),
                     extracted_by: extracted_by.clone(),
                     device_id: self.device_id.clone(),
                 },

@@ -7,8 +7,8 @@ mod common;
 
 use cortex_store::{
     Actor, FactOp, InvalidationKind, NewBlob, NewBlobTranscript, NewEntityMerge, NewEpisodeBlob,
-    NewFactEvent, NewRedaction, NewSummary, RedactionMode, RedactionTarget, StoreError,
-    SummaryScope, TranscriptKind, Vector,
+    NewFactEvent, NewRedaction, NewSummary, ProvenanceRef, RedactionMode, RedactionTarget,
+    StoreError, SummaryScope, TranscriptKind, Vector,
 };
 
 #[tokio::test]
@@ -534,8 +534,10 @@ async fn summaries_and_episode_queries_work() {
     };
     let store = &db.store;
 
+    let mut covered = Vec::new();
     for i in 0..3 {
         let episode = common::new_episode("sess-a", &format!("第 {i} 轮"));
+        covered.push(episode.id);
         store
             .write_txn(async |tx| tx.insert_episode(&episode).await)
             .await
@@ -570,6 +572,13 @@ async fn summaries_and_episode_queries_work() {
         embedding_model: common::MODEL.to_owned(),
         covers_from: None,
         covers_to: None,
+        // 摘要必须说清楚自己是从哪几条 episode 摘出来的，否则源被 redact 后
+        // 没有任何办法找到它（docs/memory-content.md §5.3）
+        sources: covered
+            .iter()
+            .copied()
+            .map(ProvenanceRef::episode)
+            .collect(),
         device_id: common::DEVICE.to_owned(),
     };
     store

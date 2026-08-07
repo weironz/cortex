@@ -120,6 +120,11 @@ pub fn to_json(p: &SyncPayload) -> Value {
             "valid_at": f.valid_at.map(|t| t.to_rfc3339()),
             "created_at": f.created_at.to_rfc3339(),
             "source_episode_id": f.source_episode_id,
+            // 来源通道与信任级都要给：客户端要按来源解释「这条记忆凭什么可信」，
+            // 出安全事件时也要能在本地把同一批来源挑出来。
+            // trust_tier 为 null 只出现在加列之前的存量行上（= 不知道）
+            "source_channel": f.source_channel.as_str(),
+            "trust_tier": f.trust_tier,
             "extracted_by": f.extracted_by,
             "device_id": f.device_id,
         }),
@@ -147,6 +152,19 @@ pub fn to_json(p: &SyncPayload) -> Value {
             "covers_to": s.covers_to.map(|t| t.to_rfc3339()),
             "device_id": s.device_id,
             "created_at": s.created_at.to_rfc3339(),
+        }),
+
+        // 派生血缘边。必须下发，理由与 redaction 墓碑同源：客户端收到墓碑后
+        // 有义务执行同等的本地清除，而**派生物清不清得掉，取决于它知不知道
+        // 血缘**。只发墓碑不发边，客户端能清源、清不掉建立在源之上的摘要与图边
+        SyncPayload::Derivation(d) => json!({
+            "id": d.id,
+            "derived_kind": d.derived_kind.as_str(),
+            "derived_id": d.derived_id,
+            "source_kind": d.source_kind.as_str(),
+            "source_id": d.source_id,
+            "device_id": d.device_id,
+            "created_at": d.created_at.to_rfc3339(),
         }),
 
         // 会话生命周期事件。客户端按同一套状态机自己算末态（每个维度取

@@ -19,8 +19,8 @@ use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
 
 use crate::error::{Result, StoreError};
 use crate::model::{
-    Blob, BlobTranscript, Entity, EntityMerge, Episode, EpisodeBlob, EpisodeMemory,
-    EpisodeToolCall, Fact, FactEvent, Redaction, SessionEvent, Summary, table,
+    Blob, BlobTranscript, Derivation, Entity, EntityMerge, Episode, EpisodeBlob, EpisodeMemory,
+    EpisodeToolCall, Fact, FactEvent, Redaction, SessionEvent, Summary, fact_columns, table,
 };
 use crate::store::Store;
 
@@ -50,6 +50,7 @@ pub enum SyncPayload {
     Fact(Fact),
     FactEvent(FactEvent),
     Summary(Summary),
+    Derivation(Derivation),
     Redaction(Redaction),
     SessionEvent(SessionEvent),
 }
@@ -70,6 +71,7 @@ impl SyncPayload {
             Self::Fact(_) => table::FACTS,
             Self::FactEvent(_) => table::FACT_EVENTS,
             Self::Summary(_) => table::SUMMARIES,
+            Self::Derivation(_) => table::DERIVATIONS,
             Self::Redaction(_) => table::REDACTIONS,
             Self::SessionEvent(_) => table::SESSION_EVENTS,
         }
@@ -155,8 +157,10 @@ impl Store {
         ids: &[String],
         out: &mut HashMap<(String, String), SyncPayload>,
     ) -> Result<()> {
+        // `$sql` 收 `expr` 而不是 `literal`：facts 那一支用 `concat!` 拼列名，
+        // 而 `concat!(...)` 在展开前还是一个表达式，匹配不上 `literal`
         macro_rules! collect {
-            ($sql:literal, $ty:ty, $key:expr, $wrap:expr) => {{
+            ($sql:expr, $ty:ty, $key:expr, $wrap:expr) => {{
                 let rows = sqlx::query_as::<_, $ty>($sql)
                     .bind(ids)
                     .fetch_all(self.pool())
@@ -233,10 +237,11 @@ impl Store {
                 SyncPayload::EntityMerge
             ),
             table::FACTS => collect!(
-                "SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
-                        embedding, embedding_model, domain, confidence, valid_at,
-                        source_episode_id, extracted_by, device_id, created_at
-                   FROM facts WHERE id = ANY($1)",
+                concat!(
+                    "SELECT ",
+                    fact_columns!(),
+                    "  FROM facts WHERE id = ANY($1)"
+                ),
                 Fact,
                 |row: &Fact| row.id.clone(),
                 SyncPayload::Fact
@@ -256,6 +261,17 @@ impl Store {
                 Summary,
                 |row: &Summary| row.id.clone(),
                 SyncPayload::Summary
+            ),
+            // 派生血缘。客户端拿它做的事与服务端一样：收到 redaction 墓碑后
+            // 顺着边找到本地那些必须一并失效的摘要 / 图边（memory.md §九 的
+            // 传播义务）。不下发的话客户端只能清源、清不掉派生物
+            table::DERIVATIONS => collect!(
+                "SELECT id, derived_kind, derived_id, source_kind, source_id,
+                        device_id, created_at
+                   FROM derivations WHERE id = ANY($1)",
+                Derivation,
+                |row: &Derivation| row.id.clone(),
+                SyncPayload::Derivation
             ),
             table::REDACTIONS => collect!(
                 "SELECT id, target_kind, target_id, mode, reason, actor, device_id, created_at

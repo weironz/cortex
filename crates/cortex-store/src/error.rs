@@ -23,6 +23,14 @@ pub enum StoreError {
     #[error("sync_log 引用了未知的表：{0}")]
     UnknownTable(String),
 
+    /// 派生物没有声明它的源。
+    ///
+    /// 不是「校验没过」这么简单：源被 redact 之后，找不到血缘的派生物会
+    /// 继续泄露已被擦除的内容，而且**事后补不出来**（谁摘的、摘了什么，
+    /// 只有生成它的那一步知道）。所以宁可这条摘要写不进去。
+    #[error("{kind} {id} 没有声明任何源 —— 派生物必须带血缘（docs/memory-content.md §5.3）")]
+    MissingProvenance { kind: &'static str, id: String },
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

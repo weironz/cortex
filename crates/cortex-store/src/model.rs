@@ -57,10 +57,65 @@ pub mod table {
         FACTS             = "facts",
         FACT_EVENTS       = "fact_events",
         SUMMARIES         = "summaries",
+        DERIVATIONS       = "derivations",
         REDACTIONS        = "redactions",
         SESSION_EVENTS    = "session_events",
     }
 }
+
+/// `facts` 表的全部列。四路召回、三条回放召回、按主键 / 主语 / 宾语 / 出处
+/// 取事实，以及同步载荷，全都要原样取回。
+///
+/// 抄十几遍的下场是加一列时漏改其中一处 —— 而漏改的报错是运行时的
+/// 「`FromRow` 找不到列 x」，且只在恰好走到那一条查询时才响。
+/// 本次加 `source_channel` / `trust_tier` 两列时，query.rs 里那五份手抄
+/// 副本正好演示了这个风险，于是一并收编到这里。
+macro_rules! fact_columns {
+    () => {
+        fact_columns!("")
+    };
+    // 有 JOIN 的查询必须带表别名前缀，否则 `id` 会与被 JOIN 的一侧撞名
+    ($p:literal) => {
+        concat!(
+            $p,
+            "id, ",
+            $p,
+            "subject_id, ",
+            $p,
+            "predicate, ",
+            $p,
+            "object_text, ",
+            $p,
+            "object_entity_id, ",
+            $p,
+            "statement, ",
+            $p,
+            "embedding, ",
+            $p,
+            "embedding_model, ",
+            $p,
+            "domain, ",
+            $p,
+            "confidence, ",
+            $p,
+            "valid_at, ",
+            $p,
+            "source_episode_id, ",
+            $p,
+            "source_channel, ",
+            $p,
+            "trust_tier, ",
+            $p,
+            "extracted_by, ",
+            $p,
+            "device_id, ",
+            $p,
+            "created_at"
+        )
+    };
+}
+
+pub(crate) use fact_columns;
 
 // ══════════════════════════════════════════════════════════
 //  受 CHECK 约束的列 —— 以 TEXT 存储的枚举
@@ -212,6 +267,94 @@ text_enum! {
         Unarchive => "unarchive",
         BindWorkspace => "bind_workspace",
         UnbindWorkspace => "unbind_workspace",
+    }
+}
+
+text_enum! {
+    /// `facts.source_channel` —— 读出侧的完整取值集。
+    ///
+    /// 写入侧用的是 [`FactSource`]，它**不含** [`Self::UnknownLegacy`]：
+    /// 那个取值只属于加列之前的存量行，新写入必须说清楚自己从哪来。
+    pub enum SourceChannel {
+        /// 用户亲口说的
+        UserStated => "user_stated",
+        /// 模型从对话里推断出来的
+        Conversation => "conversation",
+        /// 模型从已有事实派生出来的（如 crosslink 的跨域边）
+        Derived => "derived",
+        /// 本地执行的工具输出
+        ToolOutput => "tool_output",
+        /// 外部内容：网页 / 他人文档 / MCP。默认不进抽取
+        External => "external",
+        /// 加列之前的存量行。真实来源无法事后重建 —— 标「不知道」，
+        /// 而不是伪造一个查询时会被当真的档位。见 migration 20260807000006
+        UnknownLegacy => "unknown_legacy",
+    }
+}
+
+/// 写入侧的来源通道。
+///
+/// 与 [`SourceChannel`] 分成两个类型，只为一件事：
+/// **让「新写入被标成 unknown_legacy」在编译期就不可能**。
+/// 存量行的「不知道」是一次性的历史债，不该成为新代码的懒惰出口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactSource {
+    UserStated,
+    Conversation,
+    Derived,
+    ToolOutput,
+    External,
+}
+
+impl FactSource {
+    /// 落库的通道名。
+    #[must_use]
+    pub const fn channel(self) -> SourceChannel {
+        match self {
+            Self::UserStated => SourceChannel::UserStated,
+            Self::Conversation => SourceChannel::Conversation,
+            Self::Derived => SourceChannel::Derived,
+            Self::ToolOutput => SourceChannel::ToolOutput,
+            Self::External => SourceChannel::External,
+        }
+    }
+
+    /// 信任级，1 最高。
+    ///
+    /// 映射在 Rust 与 SQL 里各写了一遍，由 migration 20260807000006 的
+    /// `facts_trust_tier_matches_channel` 做最终裁决：两处漂移会在插入时
+    /// 直接 23514，而不是悄悄写进一个自相矛盾的组合。
+    #[must_use]
+    pub const fn trust_tier(self) -> i16 {
+        match self {
+            Self::UserStated => 1,
+            // Derived 与 Conversation 同档：两者都是模型的推断，区别在输入。
+            // ⚠️ Derived 现在不继承输入事实的档位（信任洗白，见 migration
+            // 20260807000006 的注释）—— 那要等 derivations 被读侧用起来
+            Self::Conversation | Self::Derived => 2,
+            Self::ToolOutput => 3,
+            Self::External => 4,
+        }
+    }
+}
+
+text_enum! {
+    /// `derivations.derived_kind` —— 派生物一侧的种类。
+    pub enum DerivedKind {
+        Fact => "fact",
+        Summary => "summary",
+    }
+}
+
+text_enum! {
+    /// `derivations.source_kind` —— 源一侧的种类。
+    ///
+    /// 比 [`DerivedKind`] 多一个 `Episode`：L0 原文只会当源，不会是谁的派生物。
+    pub enum SourceKind {
+        Episode => "episode",
+        Fact => "fact",
+        Summary => "summary",
     }
 }
 
@@ -436,6 +579,13 @@ pub struct Fact {
     /// 【事件时间】何时开始为真。NULL = 未知或一直如此
     pub valid_at: Option<DateTime<Utc>>,
     pub source_episode_id: String,
+    /// 这条事实从哪个通道进来
+    pub source_channel: SourceChannel,
+    /// 来源信任级，1 最高。
+    ///
+    /// `None` **只可能**出现在加列之前的存量行上（`unknown_legacy`）——
+    /// 「不知道」不是信任标尺上的一个点，所以它是 NULL 而不是某个哨兵档位。
+    pub trust_tier: Option<i16>,
     pub extracted_by: String,
     pub device_id: String,
     /// 【系统时间】Cortex 何时知道这件事
@@ -459,8 +609,70 @@ pub struct NewFact {
     pub confidence: f32,
     pub valid_at: Option<DateTime<Utc>>,
     pub source_episode_id: Id,
+    /// 来源通道。落库时连带写出 `trust_tier`（[`FactSource::trust_tier`]）。
+    ///
+    /// 没有默认值是刻意的：给它一个默认值就等于让「忘记表态」静默变成
+    /// 「用户亲述」或「不知道」，而这一列存在的全部理由就是出事之后
+    /// 还能按来源把东西挑出来。
+    pub source: FactSource,
+    /// `source_episode_id` **之外**的源。
+    ///
+    /// 单源派生（抽取器：一条 episode → 若干事实）留空即可 ——
+    /// `source_episode_id NOT NULL` 已经是它的血缘。需要用到这里的是**多源**
+    /// 派生：crosslink 的跨域边由两条事实推出，只记左边那条的出处会让
+    /// 右边那条被 redact 时这行边悄悄活下来（见 `cortex_memory::crosslink`）。
+    pub derived_from: Vec<ProvenanceRef>,
     pub extracted_by: String,
     pub device_id: String,
+}
+
+/// 一条源引用：`derivations` 表里源那一侧的 (kind, id)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProvenanceRef {
+    pub kind: SourceKind,
+    pub id: Id,
+}
+
+impl ProvenanceRef {
+    /// 源是一条 L0 原始消息。
+    #[must_use]
+    pub const fn episode(id: Id) -> Self {
+        Self {
+            kind: SourceKind::Episode,
+            id,
+        }
+    }
+
+    /// 源是一条事实。
+    #[must_use]
+    pub const fn fact(id: Id) -> Self {
+        Self {
+            kind: SourceKind::Fact,
+            id,
+        }
+    }
+
+    /// 源是一条摘要（血缘可以多层：画像块 → 摘要 → episode）。
+    #[must_use]
+    pub const fn summary(id: Id) -> Self {
+        Self {
+            kind: SourceKind::Summary,
+            id,
+        }
+    }
+}
+
+/// `derivations` 的表行。写入侧不单独拆 `New*`：这张表没有 tsv / embedding
+/// 这类只写不读的列，而 `id` 与 `created_at` 由写入方法自己填。
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct Derivation {
+    pub id: String,
+    pub derived_kind: DerivedKind,
+    pub derived_id: String,
+    pub source_kind: SourceKind,
+    pub source_id: String,
+    pub device_id: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
@@ -603,6 +815,14 @@ pub struct NewSummary {
     pub embedding_model: String,
     pub covers_from: Option<DateTime<Utc>>,
     pub covers_to: Option<DateTime<Utc>>,
+    /// 这份摘要是从哪些东西摘出来的。**必须非空**
+    /// （[`crate::WriteTxn::insert_summary`] 会拒绝空列表）。
+    ///
+    /// 摘要不像事实那样有一列 `source_episode_id NOT NULL` 兜底，没有这份
+    /// 血缘就没有任何办法在源被 redact 之后找到它 —— 而 GDPR Art.17 的
+    /// 擦除义务及于派生数据。一条摘不出源头的摘要是无法追责的僵尸记忆，
+    /// 所以它宁可写不进去（见 docs/memory-content.md §5.3）。
+    pub sources: Vec<ProvenanceRef>,
     pub device_id: String,
 }
 

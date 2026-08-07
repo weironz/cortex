@@ -14,55 +14,12 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow as _, Row as _};
 
 use crate::error::Result;
-use crate::model::{Entity, Fact};
+use crate::model::{Entity, Fact, fact_columns};
 use crate::store::Store;
 
 /// 一次召回返回的条数上限的合理区间。
 /// 太少会让 RRF 没有融合空间，太多会拖慢图遍历那一路。
 const MAX_LIMIT: i64 = 200;
-
-/// `facts` 表的全部列。四路召回与三条回放召回都要原样取回，
-/// 抄七遍的下场是加一列时漏改其中一处，而且报错点离现场很远。
-macro_rules! fact_columns {
-    () => {
-        fact_columns!("")
-    };
-    // 有 JOIN 的查询必须带表别名前缀，否则 `id` 会与被 JOIN 的一侧撞名
-    ($p:literal) => {
-        concat!(
-            $p,
-            "id, ",
-            $p,
-            "subject_id, ",
-            $p,
-            "predicate, ",
-            $p,
-            "object_text, ",
-            $p,
-            "object_entity_id, ",
-            $p,
-            "statement, ",
-            $p,
-            "embedding, ",
-            $p,
-            "embedding_model, ",
-            $p,
-            "domain, ",
-            $p,
-            "confidence, ",
-            $p,
-            "valid_at, ",
-            $p,
-            "source_episode_id, ",
-            $p,
-            "extracted_by, ",
-            $p,
-            "device_id, ",
-            $p,
-            "created_at"
-        )
-    };
-}
 
 /// 「在 `$1` 那一刻 Cortex 认为仍然为真」的快照。
 ///
@@ -225,11 +182,9 @@ impl Store {
                     AND f.object_entity_id IS NOT NULL
              ),
              nearest AS (
-                 SELECT DISTINCT ON (f.id)
-                        f.id, f.subject_id, f.predicate, f.object_text, f.object_entity_id,
-                        f.statement, f.embedding, f.embedding_model, f.domain, f.confidence,
-                        f.valid_at, f.source_episode_id, f.extracted_by, f.device_id,
-                        f.created_at, r.hop
+                 SELECT DISTINCT ON (f.id) ",
+            fact_columns!("f."),
+            ", r.hop
                    FROM active_facts f
                    JOIN reach r
                      ON f.subject_id = r.entity_id OR f.object_entity_id = r.entity_id

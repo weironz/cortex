@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use cortex_core::Id;
-use cortex_store::{NewEntity, NewEpisode, NewFact, Role, Store};
+use cortex_store::{FactSource, NewEntity, NewEpisode, NewFact, Role, Store};
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
@@ -64,16 +64,40 @@ impl TestDb {
     /// 恰恰要求先有一条不该存在的行 —— 比如 `sync_log` 里一条 payload
     /// 加载器不认识的表名。测试之外没有任何地方该这么用。
     pub async fn exec_raw(&self, sql: impl Into<String>) {
+        self.try_exec_raw(sql)
+            .await
+            .expect("测试用 SQL 应当执行成功");
+    }
+
+    /// 同 [`Self::exec_raw`]，但把数据库的拒绝当作**结果**而不是 panic。
+    ///
+    /// 用在「这条坏数据应当写不进去」这类断言上：CHECK 约束报错正是期望，
+    /// 而 `exec_raw` 会把期望变成测试崩溃。
+    pub async fn try_exec_raw(&self, sql: impl Into<String>) -> Result<(), String> {
         let stmt = format!("SET search_path TO \"{}\"; {}", self.schema, sql.into());
         sqlx::raw_sql(AssertSqlSafe(stmt))
             .execute(&self.admin)
             .await
-            .expect("测试用 SQL 应当执行成功");
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
 
 /// 建一个隔离的测试库。拿不到数据库返回 `None`（测试应当 skip）。
 pub async fn setup() -> Option<TestDb> {
+    setup_upto(None).await
+}
+
+/// 只跑到某个 migration 版本为止，用于**造存量行**。
+///
+/// 存在的理由与 [`TestDb::exec_raw`] 同源：有些失效模式要求库先处于一个
+/// 旧形态。`ALTER TABLE ... ADD COLUMN ... DEFAULT` 给存量行留下的取值
+/// 此后永远改不了（改它要 UPDATE，而 UPDATE 只在 redact/purge 里被允许），
+/// 所以那个默认值必须被真的验一遍 —— 而全量跑完 migration 的库里
+/// **一条存量行都没有**，什么也验不到。
+///
+/// 之后调用 `db.store.migrate()` 把剩下的 migration 补上。
+pub async fn setup_upto(max_version: Option<i64>) -> Option<TestDb> {
     let url = database_url()?;
 
     let admin = match PgPoolOptions::new().max_connections(2).connect(&url).await {
@@ -108,17 +132,53 @@ pub async fn setup() -> Option<TestDb> {
         .await
         .expect("临时 schema 建好之后应当能连上");
 
+    // 先在池子上跑 migration 再交给 Store：`Store::pool()` 是 pub(crate)，
+    // 集成测试拿不到（那是有意的 —— 写只能走 write_txn）
+    if let Some(v) = max_version {
+        run_migrations_upto(&pool, v).await;
+    }
     let store = Store::from_pool(pool);
-    store
-        .migrate()
-        .await
-        .expect("migration 应当能在临时 schema 里跑通");
+    if max_version.is_none() {
+        store
+            .migrate()
+            .await
+            .expect("migration 应当能在临时 schema 里跑通");
+    }
 
     Some(TestDb {
         store,
         admin,
         schema,
     })
+}
+
+/// 只应用 `version <= max_version` 的 migration。
+///
+/// `Migrator` 的字段是 `#[doc(hidden)]` 的 semver 豁免字段，但这是唯一能
+/// 「跑一半」的入口 —— 另一条路是把 migration 的 SQL 在测试里再抄一遍，
+/// 而那样测的就不再是 `migrations/` 里的那一份了。
+async fn run_migrations_upto(pool: &PgPool, max_version: i64) {
+    static ALL: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
+
+    let subset: Vec<_> = ALL
+        .migrations
+        .iter()
+        .filter(|m| m.version <= max_version)
+        .cloned()
+        .collect();
+    assert!(
+        !subset.is_empty(),
+        "没有版本 <= {max_version} 的 migration —— 是不是版本号写错了？"
+    );
+
+    let partial = sqlx::migrate::Migrator {
+        migrations: subset.into(),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    partial
+        .run(pool)
+        .await
+        .expect("前半段 migration 应当能跑通");
 }
 
 fn database_url() -> Option<String> {
@@ -219,6 +279,9 @@ pub fn new_fact(subject: Id, predicate: &str, object: &str, source_episode: Id) 
         confidence: 0.9,
         valid_at: Some(Utc::now()),
         source_episode_id: source_episode,
+        // 与真实抽取管线同档：它现在分辨不出「用户亲述」，一律 Conversation
+        source: FactSource::Conversation,
+        derived_from: Vec::new(),
         extracted_by: "test-extractor".to_owned(),
         device_id: DEVICE.to_owned(),
     }

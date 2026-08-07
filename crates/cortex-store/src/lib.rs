@@ -57,14 +57,15 @@ mod txn;
 
 pub use error::{Result, StoreError};
 pub use model::{
-    ATTACHMENT_FILENAME_MAX_CHARS, Actor, Blob, BlobTranscript, CanonicalEntity, Entity,
-    EntityMerge, Episode, EpisodeAttachment, EpisodeBlob, EpisodeMemory, EpisodeToolCall, Fact,
-    FactEvent, FactOp, FactStatus, InjectedMemory, InvalidationKind, NewBlob, NewBlobTranscript,
-    NewEntity, NewEntityMerge, NewEpisode, NewEpisodeBlob, NewEpisodeMemory, NewEpisodeToolCall,
-    NewFact, NewFactEvent, NewRedaction, NewSessionEvent, NewSummary, Redaction, RedactionMode,
-    RedactionTarget, Role, SESSION_TITLE_MAX_CHARS, SessionEvent, SessionOp, SessionState, Summary,
-    SummaryScope, TOOL_NAME_MAX_CHARS, TOOL_PATH_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS, TranscriptKind,
-    WORKSPACE_PATH_MAX_CHARS, table,
+    ATTACHMENT_FILENAME_MAX_CHARS, Actor, Blob, BlobTranscript, CanonicalEntity, Derivation,
+    DerivedKind, Entity, EntityMerge, Episode, EpisodeAttachment, EpisodeBlob, EpisodeMemory,
+    EpisodeToolCall, Fact, FactEvent, FactOp, FactSource, FactStatus, InjectedMemory,
+    InvalidationKind, NewBlob, NewBlobTranscript, NewEntity, NewEntityMerge, NewEpisode,
+    NewEpisodeBlob, NewEpisodeMemory, NewEpisodeToolCall, NewFact, NewFactEvent, NewRedaction,
+    NewSessionEvent, NewSummary, ProvenanceRef, Redaction, RedactionMode, RedactionTarget, Role,
+    SESSION_TITLE_MAX_CHARS, SessionEvent, SessionOp, SessionState, SourceChannel, SourceKind,
+    Summary, SummaryScope, TOOL_NAME_MAX_CHARS, TOOL_PATH_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS,
+    TranscriptKind, WORKSPACE_PATH_MAX_CHARS, table,
 };
 pub use query::EpisodeCursor;
 pub use store::{SessionDigest, Store};

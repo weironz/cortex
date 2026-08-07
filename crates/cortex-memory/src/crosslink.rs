@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 
 use cortex_core::{CortexError, Id, Result};
 use cortex_llm::{LlmClient, Message};
-use cortex_store::{Fact, NewFact, RedactionTarget, Store, Vector};
+use cortex_store::{Fact, FactSource, NewFact, ProvenanceRef, RedactionTarget, Store, Vector};
 use serde_json::Value;
 
 use crate::embed::Embedder;
@@ -845,9 +845,22 @@ impl Linker {
             valid_at: None,
             // 出处指向**本方向左侧**那条事实的原始对话。它并没有陈述这条关联，
             // 但它是唯一真实存在的锚点，而且能让 redact 级联把这条边一起带走。
-            // 残留风险：只 redact 右侧时，本行仍然存活且带着右侧实体名 ——
-            // 已知未解，夜间重扫也不会清掉它
             source_episode_id: parse(&from.source_episode_id, "episode id")?,
+            // 这条边是模型从两条**已有事实**推出来的，不是从对话里读出来的
+            source: FactSource::Derived,
+            // 两端的源事实都记下来。
+            //
+            // 这补上了 `source_episode_id` 只能记左侧留下的那个洞：在此之前
+            // 只 redact 右侧时，本行会带着右侧实体名活下来，而且没有任何
+            // 查询能找到它。现在顺着 derivations 反查 (fact, 右侧 id) 就能
+            // 定位到这条边（源事实 → 其 source_episode_id 是第二跳）。
+            //
+            // ⚠️ 仍未解的是「信任洗白」：这条边固定 tier 2，不继承两端源事实
+            // 的档位。补法的前置正是这两行边（见 migration 20260807000006）
+            derived_from: vec![
+                ProvenanceRef::fact(parse(&from.fact_id, "事实 id")?),
+                ProvenanceRef::fact(parse(&to.fact_id, "事实 id")?),
+            ],
             extracted_by: format!("crosslink/{RELATES_TO}"),
             device_id: self.device_id.clone(),
         })
@@ -1005,9 +1018,32 @@ mod tests {
         s
     }
 
+    /// 把 `"F1"` 这种便于阅读的短标签补成形状合法的 ULID。
+    ///
+    /// 与 [`eid`] 同理，只是轮到 fact id 了：跨域边现在要把两端的**源事实**
+    /// 记进 `derived_from`（否则只 redact 右侧时这条边会带着右侧实体名活下来），
+    /// 于是 `Linker::plan` 也要解析 fact id。
+    fn fid(label: &str) -> String {
+        // Crockford base32 不含 I / L / O / U，短标签里出现就得换掉
+        let safe: String = label
+            .to_ascii_uppercase()
+            .chars()
+            .map(|c| match c {
+                'I' | 'L' => '1',
+                'O' => '0',
+                'U' => 'V',
+                c if c.is_ascii_alphanumeric() => c,
+                _ => '0',
+            })
+            .collect();
+        let s = format!("01JFFFFFFFFFFFFFFFFFF{safe:0>5}");
+        assert_eq!(s.len(), 26, "ULID 必须是 26 位：{s}");
+        s
+    }
+
     fn fact(id: &str, subject: &str, object: Option<&str>, domain: Option<&str>) -> Fact {
         Fact {
-            id: id.to_owned(),
+            id: fid(id),
             subject_id: subject.to_owned(),
             predicate: "uses".to_owned(),
             object_text: Some("x".to_owned()),
@@ -1019,6 +1055,8 @@ mod tests {
             confidence: 0.9,
             valid_at: None,
             source_episode_id: eid(999),
+            source_channel: cortex_store::SourceChannel::Conversation,
+            trust_tier: Some(2),
             extracted_by: "test".to_owned(),
             device_id: "test".to_owned(),
             created_at: Utc::now(),
@@ -1189,7 +1227,7 @@ mod tests {
             "应留下更近的那组证据，实际距离 {}",
             out[0].distance
         );
-        assert_eq!(out[0].right.fact_id, "F3");
+        assert_eq!(out[0].right.fact_id, fid("F3"));
     }
 
     #[tokio::test]
@@ -1221,7 +1259,7 @@ mod tests {
                 )
             })
             .collect();
-        let want: Vec<String> = (0..10).rev().map(|i| format!("F{i}")).collect();
+        let want: Vec<String> = (0..10).rev().map(|i| fid(&format!("F{i}"))).collect();
         let corpus = FakeCorpus::new(vec![left], neighbors);
         let (out, _) = linker().propose(&corpus).await.expect("预筛应当成功");
         assert_eq!(
