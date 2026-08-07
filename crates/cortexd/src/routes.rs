@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::StatusCode,
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{HeaderMap, StatusCode, header},
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive},
@@ -19,6 +20,7 @@ use axum::{
 use futures::stream::Stream;
 use tokio_stream::StreamExt as _;
 
+use crate::blobs::{DIRECT_UPLOAD_LIMIT, RangeSpec, parse_range};
 use crate::dto::*;
 use crate::state::AppState;
 
@@ -29,6 +31,18 @@ pub fn router(state: AppState) -> Router {
         .route("/memory/search", get(memory_search))
         .route("/episodes/{id}", get(get_episode))
         .route("/sessions", get(list_sessions))
+        .route("/sessions/{id}", get(get_session))
+        .route(
+            "/blobs",
+            // axum 默认体积上限是 2 MiB —— 对「直传小文件」这个用途太紧
+            // （随手一张手机照片就超了）。放宽到 DIRECT_UPLOAD_LIMIT，
+            // 再大的请走 /blobs/presign 直传对象存储，不经服务端中转
+            post(upload_blob).layer(DefaultBodyLimit::max(DIRECT_UPLOAD_LIMIT)),
+        )
+        .route("/blobs/presign", post(presign_blob))
+        .route("/blobs/commit", post(commit_blob))
+        .route("/blobs/{hash}", get(get_blob))
+        .route("/blobs/{hash}/url", get(get_blob_url))
         .route("/sync", get(sync))
         .route("/ws", get(crate::ws::handler))
         .with_state(state)
@@ -41,6 +55,7 @@ async fn health(State(st): State<AppState>) -> Json<Health> {
         status: "ok",
         version: cortex_core::VERSION,
         database: st.database_status().await,
+        blob_backend: st.blob_backend(),
     })
 }
 
@@ -98,6 +113,134 @@ async fn list_sessions(State(st): State<AppState>) -> Result<Json<SessionsRespon
     }))
 }
 
+async fn get_session(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionDetail>, ApiError> {
+    Ok(Json(st.session_detail(&id).await?))
+}
+
+// ──────────────────────────── /blobs ───────────────────────────
+
+/// 服务端中转上传。请求体就是裸字节，`Content-Type` 作为 MIME 的**后备**声明
+/// （能从字节头认出来时一律以字节头为准）。
+async fn upload_blob(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<BlobDto>, ApiError> {
+    let declared = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        // 去掉 `; charset=utf-8` 之类的参数：blobs.mime 存的是纯类型
+        .map(|v| v.split(';').next().unwrap_or(v).trim())
+        .filter(|v| !v.is_empty());
+    Ok(Json(st.upload_blob(body, declared).await?))
+}
+
+async fn presign_blob(
+    State(st): State<AppState>,
+    Json(req): Json<BlobPresignRequest>,
+) -> Result<Json<BlobPresignResponse>, ApiError> {
+    ensure_presign_supported(&st)?;
+    Ok(Json(st.presign_upload(&req.hash).await?))
+}
+
+/// 本地回落后端签不出 URL。**先判断再发请求**，回 501 而不是 500 ——
+/// 前者告诉客户端「本部署不支持直传，改走 POST /blobs 中转」，
+/// 后者会让它把这当成暂时故障，在一条永远走不通的路上反复重试。
+fn ensure_presign_supported(st: &AppState) -> Result<(), ApiError> {
+    if st.supports_presign() {
+        Ok(())
+    } else {
+        Err(ApiError::unsupported(format!(
+            "对象存储后端 {} 签不出 presigned URL；请改用 POST /blobs 中转上传、GET /blobs/{{hash}} 取回",
+            st.blob_backend()
+        )))
+    }
+}
+
+async fn commit_blob(
+    State(st): State<AppState>,
+    Json(req): Json<BlobCommitRequest>,
+) -> Result<Json<BlobDto>, ApiError> {
+    Ok(Json(st.commit_blob(req).await?))
+}
+
+async fn get_blob_url(
+    State(st): State<AppState>,
+    Path(hash): Path<String>,
+) -> Result<Json<BlobUrlResponse>, ApiError> {
+    ensure_presign_supported(&st)?;
+    Ok(Json(st.blob_download_url(&hash).await?))
+}
+
+/// 取回字节，支持 `Range`。
+///
+/// # 为什么中转而不是一律 302 到 presigned URL
+///
+/// 重定向省带宽，但它把两件事绑死了：客户端必须能直连对象存储，且
+/// `LocalFsBlobStore` 根本签不出 URL。中转这条路两个后端都通、内网部署也通，
+/// 是那条**总是能用**的底线。想省带宽的客户端走 `GET /blobs/{hash}/url`
+/// 自己拿 presigned URL —— 显式选择，而不是让服务端替它猜。
+///
+/// Range 必须支持：没有它，播放器要拖到 31:40 就得先把整段视频拉下来。
+async fn get_blob(
+    State(st): State<AppState>,
+    Path(hash): Path<String>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    let (mime, size) = st.blob_meta(&hash).await?;
+    let total = u64::try_from(size).unwrap_or(0);
+
+    let raw_range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    match parse_range(raw_range.as_deref(), total) {
+        RangeSpec::Full => {
+            let bytes = st.blob_bytes(&hash, None).await?;
+            Ok((
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, mime),
+                    // 没有这个头，播放器根本不会尝试发 Range —— 它会老实地
+                    // 从头拉整个文件，然后拖动进度条就是一场灾难
+                    (header::ACCEPT_RANGES, "bytes".to_string()),
+                ],
+                bytes,
+            )
+                .into_response())
+        }
+        RangeSpec::Partial(r) => {
+            // Content-Range 的右端是**闭**的，与 Rust 的开区间差一位
+            let (start, end) = (r.start, r.end - 1);
+            let bytes = st.blob_bytes(&hash, Some(r)).await?;
+            Ok((
+                StatusCode::PARTIAL_CONTENT,
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::ACCEPT_RANGES, "bytes".to_string()),
+                    (
+                        header::CONTENT_RANGE,
+                        format!("bytes {start}-{end}/{total}"),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response())
+        }
+        RangeSpec::Unsatisfiable => Ok((
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            // 416 必须带上 `bytes */总长` —— 客户端据此知道自己该要哪一段，
+            // 否则它只能盲目重试同一个越界区间
+            [(header::CONTENT_RANGE, format!("bytes */{total}"))],
+        )
+            .into_response()),
+    }
+}
+
 // ──────────────────────────── /sync ────────────────────────────
 
 async fn sync(
@@ -109,23 +252,46 @@ async fn sync(
 
 // ──────────────────────────── 错误 ─────────────────────────────
 
-pub struct ApiError(cortex_core::CortexError);
+pub struct ApiError {
+    inner: cortex_core::CortexError,
+    /// 覆盖 [`cortex_core::CortexError::http_status`] 的默认映射。
+    ///
+    /// 只在**领域错误分不出来**的那几处用。`CortexError` 刻意没有
+    /// 「本部署不支持」这个变体 —— 它是部署形态的属性，不是领域概念，
+    /// 为它污染全局错误类型不划算。
+    status: Option<StatusCode>,
+}
+
+impl ApiError {
+    /// 501：请求本身没错，是这个部署形态提供不了这个能力。
+    fn unsupported(message: impl Into<String>) -> Self {
+        Self {
+            inner: cortex_core::CortexError::Store(message.into()),
+            status: Some(StatusCode::NOT_IMPLEMENTED),
+        }
+    }
+}
 
 impl From<cortex_core::CortexError> for ApiError {
     fn from(e: cortex_core::CortexError) -> Self {
-        Self(e)
+        Self {
+            inner: e,
+            status: None,
+        }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let code =
-            StatusCode::from_u16(self.0.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        tracing::warn!(error = %self.0, status = code.as_u16(), "请求失败");
+        let code = self.status.unwrap_or_else(|| {
+            StatusCode::from_u16(self.inner.http_status())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+        });
+        tracing::warn!(error = %self.inner, status = code.as_u16(), "请求失败");
         (
             code,
             Json(ErrorBody {
-                error: self.0.to_string(),
+                error: self.inner.to_string(),
             }),
         )
             .into_response()

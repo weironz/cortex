@@ -1,9 +1,12 @@
 //! 连接池与写事务入口。
 
+use chrono::{DateTime, Utc};
+use sqlx::FromRow;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
 use crate::error::Result;
+use crate::model::EpisodeBlob;
 use crate::txn::WriteTxn;
 
 /// 编译期嵌入的 migration 集合。
@@ -105,5 +108,86 @@ impl Store {
                 Err(err)
             }
         }
+    }
+}
+
+/// 一个会话的概览。**从 `episodes` 归纳而来，没有对应的实体表。**
+///
+/// 会话目前不是一等公民：没有 `sessions` 表，也就没有可写的标题、没有
+/// 「已删除」这个状态。这个结构体是那条边界的具体形状 —— 凡是能从消息本身
+/// 算出来的（起止时间、条数、首条用户消息）都在这儿，凡是需要独立存一份的
+/// （用户自定义标题、归档标记）都不在，且**不该**靠往 `episodes` 里塞控制记录
+/// 来伪造（理由见 `Store::session_digests`）。
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct SessionDigest {
+    pub session_id: String,
+    pub message_count: i64,
+    /// 会话第一条消息的发生时间
+    pub started_at: DateTime<Utc>,
+    /// 最后一条消息的发生时间 —— 列表排序用它
+    pub updated_at: DateTime<Utc>,
+    /// 首条**用户**消息的正文。标题由它派生，截断长度是展示决策，留给上层。
+    pub first_user_text: Option<String>,
+    /// 最后一条有正文的消息，供列表做预览。
+    pub last_text: Option<String>,
+}
+
+impl Store {
+    /// 会话列表：按最后活动时间倒序。
+    ///
+    /// # 为什么是一句 SQL 聚合，而不是拉最近 N 条 episode 在内存里归纳
+    ///
+    /// 后者（曾经的实现）有个不会报错的缺陷：窗口之外的会话**直接消失**。
+    /// 拉 200 条最近消息，一个话痨会话就能把它占满，于是昨天的会话在列表里
+    /// 不见了 —— 用户看到的是「我的历史丢了」，而日志里一切正常。
+    /// 归纳交给数据库，`limit` 才真正作用在**会话**上而不是消息上。
+    ///
+    /// # 关于会话重命名与删除
+    ///
+    /// 都做不了，且刻意不绕。重命名要存一份用户给的标题，删除要存一个状态，
+    /// 两者都需要一张表；用「往 `episodes` 里塞一条特殊记录」来模拟，等于在
+    /// L0 原始层里开一条控制通道，而 L0 的契约是「原始消息无损保存」——
+    /// 此后抽取、四路召回、同步下发、三端 UI 每一处都要学会认出并跳过它，
+    /// 一次 migration 的代价被摊成了永久的复杂度。见 `docs/memory.md` §四。
+    pub async fn session_digests(&self, limit: i64) -> Result<Vec<SessionDigest>> {
+        let rows = sqlx::query_as::<_, SessionDigest>(
+            "SELECT e.session_id,
+                    count(*)            AS message_count,
+                    min(e.occurred_at)  AS started_at,
+                    max(e.occurred_at)  AS updated_at,
+                    (SELECT u.text FROM episodes u
+                      WHERE u.session_id = e.session_id
+                        AND u.role = 'user' AND u.text IS NOT NULL
+                      ORDER BY u.occurred_at ASC, u.id ASC LIMIT 1)  AS first_user_text,
+                    (SELECT l.text FROM episodes l
+                      WHERE l.session_id = e.session_id AND l.text IS NOT NULL
+                      ORDER BY l.occurred_at DESC, l.id DESC LIMIT 1) AS last_text
+               FROM episodes e
+              GROUP BY e.session_id
+              ORDER BY max(e.occurred_at) DESC, e.session_id DESC
+              LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 批量取一批 episode 的附件关联。
+    ///
+    /// 会话详情要给每条消息挂上附件，逐条查就是 N+1 —— 一个两百条的会话
+    /// 变成两百次往返，而这条路正是「打开一个带图的会话」的热路径。
+    pub async fn episode_blobs_bulk(&self, episode_ids: &[String]) -> Result<Vec<EpisodeBlob>> {
+        if episode_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, EpisodeBlob>(
+            "SELECT episode_id, blob_hash, kind FROM episode_blobs
+              WHERE episode_id = ANY($1) ORDER BY episode_id ASC, blob_hash ASC",
+        )
+        .bind(episode_ids)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
     }
 }

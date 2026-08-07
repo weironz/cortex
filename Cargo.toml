@@ -8,6 +8,8 @@ members = [
     "crates/cortex-agent",
     "crates/cortexd",
     "crates/cortex-cli",
+    "crates/cortex-blob",
+    "evals",
 ]
 
 [workspace.package]
@@ -23,6 +25,7 @@ cortex-llm = { path = "crates/cortex-llm" }
 cortex-store = { path = "crates/cortex-store" }
 cortex-memory = { path = "crates/cortex-memory" }
 cortex-agent = { path = "crates/cortex-agent" }
+cortex-blob = { path = "crates/cortex-blob" }
 
 # 供应商层：取件自 goose（Apache-2.0）。
 # 只依赖 goose-providers —— 它已 pub use 了 goose-provider-types 的全部类型层，

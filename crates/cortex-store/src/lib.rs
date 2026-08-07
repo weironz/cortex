@@ -62,8 +62,8 @@ pub use model::{
     NewEntityMerge, NewEpisode, NewEpisodeBlob, NewFact, NewFactEvent, NewRedaction, NewSummary,
     Redaction, RedactionMode, RedactionTarget, Role, Summary, SummaryScope, TranscriptKind, table,
 };
-pub use store::Store;
-pub use sync::{SyncLogEntry, SyncPayload, SyncRecord};
+pub use store::{SessionDigest, Store};
+pub use sync::{SyncLogEntry, SyncNotifications, SyncPayload, SyncRecord, SyncSignal};
 pub use txn::{SYNC_ADVISORY_LOCK_KEY, WriteTxn};
 
 /// 向量维度，对应 `bge-m3`。换模型见 docs/memory.md §七。

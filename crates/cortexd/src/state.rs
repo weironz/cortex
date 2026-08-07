@@ -7,12 +7,15 @@
 //! 界面还能不能看」这三件事都需要它，且它强制我们把契约的两个实现
 //! 对齐，避免真实实现悄悄偏离文档。
 
+use std::ops::Range;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use chrono::Utc;
-use cortex_core::{Config, Id, Result};
+use cortex_core::{Config, CortexError, Id, Result};
 use cortex_memory::embed::SharedEmbedder;
 
+use crate::blobs::{MediaStore, PRESIGN_TTL};
 use crate::live::Live;
 use crate::sync_notify::SyncBus;
 use futures::stream::{self, BoxStream, Stream};
@@ -34,6 +37,12 @@ struct Inner {
     config: Config,
     backend: Backend,
     bus: SyncBus,
+    /// 对象存储**两个后端共用**。
+    ///
+    /// 它与 Postgres 是各自独立的故障域：数据库没起来照样能把图存进 RustFS，
+    /// 反之亦然。把它塞进 `Backend::Live` 会让「mock 模式下传不了图」
+    /// 变成一条没有理由的限制 —— 而客户端 CI 恰恰要在 mock 上跑上传流程。
+    blobs: MediaStore,
 }
 
 enum Backend {
@@ -44,8 +53,8 @@ enum Backend {
 }
 
 impl AppState {
-    #[must_use]
-    pub fn new_mock(config: Config) -> Self {
+    pub async fn new_mock(config: Config) -> Self {
+        let blobs = MediaStore::connect(&config).await;
         let bus = SyncBus::inert();
 
         // 定期伪造一次游标推进。看着像多此一举，但没有它，Flutter/CLI 的
@@ -69,6 +78,7 @@ impl AppState {
                 config,
                 backend: Backend::Mock,
                 bus,
+                blobs,
             }),
         }
     }
@@ -82,12 +92,14 @@ impl AppState {
         // CI 与离线开发显式设 hash。
         let embedder: SharedEmbedder = cortex_memory::embed::shared_embedder().await?;
         let live = Live::new(config, embedder).await?;
-        let bus = SyncBus::spawn(&config.database_url, live.store().clone());
+        let bus = SyncBus::spawn(live.store().clone());
+        let blobs = MediaStore::connect(config).await;
         Ok(Self {
             inner: Arc::new(Inner {
                 config: config.clone(),
                 backend: Backend::Live(Arc::new(live)),
                 bus,
+                blobs,
             }),
         })
     }
@@ -115,6 +127,167 @@ impl AppState {
             Backend::Mock => "not_wired".into(),
             Backend::Live(l) => l.database_status().await,
         }
+    }
+
+    #[must_use]
+    pub fn blob_backend(&self) -> &'static str {
+        self.inner.blobs.backend()
+    }
+
+    /// 本部署能不能签 presigned URL。见 [`MediaStore::supports_presign`]。
+    #[must_use]
+    pub fn supports_presign(&self) -> bool {
+        self.inner.blobs.supports_presign()
+    }
+
+    // ───────────────────────── 媒体 ─────────────────────────
+
+    /// 服务端中转上传：对象存储 → `blobs` 行。§九 三步顺序的前两步。
+    pub async fn upload_blob(&self, bytes: Bytes, declared_mime: Option<&str>) -> Result<BlobDto> {
+        let stored = self.inner.blobs.put(bytes, declared_mime).await?;
+        self.register(
+            &stored.hash,
+            &stored.mime,
+            stored.size_bytes,
+            stored.deduplicated,
+        )
+        .await
+    }
+
+    /// 签一张直传 URL。客户端**先算好哈希**再来要 —— 内容寻址不存在
+    /// 「先传上去再定 key」。
+    pub async fn presign_upload(&self, hash: &str) -> Result<BlobPresignResponse> {
+        // 先探一次：这份内容可能早就在了（转发同一张图、跨设备重传）。
+        // 告诉客户端「不用传了」是内容寻址在移动端上最直接的一笔收益
+        let already_uploaded = self.inner.blobs.exists(hash).await?;
+        let url = self.inner.blobs.presign_put(hash).await?;
+        Ok(BlobPresignResponse {
+            url,
+            method: "PUT",
+            expires_in_secs: PRESIGN_TTL.as_secs(),
+            already_uploaded,
+        })
+    }
+
+    /// 直传完成后的登记。
+    ///
+    /// # 这里对客户端信到什么程度
+    ///
+    /// - **哈希**：不复核。复核要把整个对象拉下来重算一遍，那正好抵消掉
+    ///   直传省下的带宽 —— presign 这条路就白铺了。星型拓扑下上传者就是
+    ///   数据的主人，谎报哈希只会污染他自己的记忆库。
+    /// - **字节数**：不复核。`BlobStore` 没有 HEAD 能力，唯一的办法同样是整取。
+    ///   它只影响 `Content-Length` 与 range 的分母，报错了表现为播放器多要
+    ///   一次或少要一次，不会损坏内容。
+    /// - **MIME**：**不信**。只拉头几 KB 嗅探，与直传路径的规矩一致 ——
+    ///   把 `application/octet-stream` 写进 `blobs.mime`，这份内容对将来的
+    ///   转录 pipeline 就是黑洞，而那时它已经沉在库底了。
+    ///
+    /// 唯一硬性检查是**对象真的在**：不在就绝不写 `blobs` 行，否则会留下
+    /// 一条取不回内容的悬空引用，而那是无法自愈的。
+    pub async fn commit_blob(&self, req: BlobCommitRequest) -> Result<BlobDto> {
+        if req.size_bytes < 0 {
+            return Err(CortexError::Invalid(format!(
+                "size_bytes 不能为负：{}",
+                req.size_bytes
+            )));
+        }
+        if !self.inner.blobs.exists(&req.hash).await? {
+            return Err(CortexError::Invalid(format!(
+                "对象 {} 不在对象存储里；请先 PUT 到 presigned URL 再来登记",
+                req.hash
+            )));
+        }
+
+        let mime = self
+            .inner
+            .blobs
+            .sniff_mime(&req.hash, req.mime.as_deref())
+            .await?;
+        // 这条路上服务端没经手字节，「有没有真的传」只有客户端知道 ——
+        // 所以去重与否完全交给 `register` 按 blobs 行的存在性判定
+        self.register(&req.hash, &mime, req.size_bytes, false).await
+    }
+
+    async fn register(
+        &self,
+        hash: &str,
+        mime: &str,
+        size_bytes: i64,
+        deduplicated: bool,
+    ) -> Result<BlobDto> {
+        let seq = match &self.inner.backend {
+            // mock 没有 blobs 表。伪造一次游标推进，让客户端的
+            // 「收到 bump → 补拉」这条路径在离线开发时也走得到
+            Backend::Mock => {
+                let cursor = MOCK_CURSOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                self.inner.bus.publish(SyncEvent::Bump { cursor });
+                Some(cursor)
+            }
+            Backend::Live(l) => {
+                l.register_blob(cortex_store::NewBlob {
+                    hash: hash.to_owned(),
+                    mime: mime.to_owned(),
+                    size_bytes,
+                    storage_key: cortex_blob::hash::storage_key(hash)?,
+                })
+                .await?
+            }
+        };
+
+        Ok(BlobDto {
+            hash: hash.to_owned(),
+            mime: mime.to_owned(),
+            size_bytes,
+            // register_blob 返回 None 即「早就登记过」，那比对象存储那一侧的
+            // 去重判定更权威 —— 它看的是 blobs 表，而不是「这次有没有传字节」
+            deduplicated: deduplicated || seq.is_none(),
+            seq,
+        })
+    }
+
+    /// 取回时要用的元信息：MIME 与总长度。
+    ///
+    /// 总长度是 `Content-Range` 的分母 —— 没有它就没法回 206，
+    /// 而没有 206 播放器就只能从头拉整个文件。
+    pub async fn blob_meta(&self, hash: &str) -> Result<(String, i64)> {
+        // 先校验形制再查库。不校验也不会不安全（存储层自己会拦），但畸形的
+        // 哈希会先撞上「blobs 表里没有这一行」而变成 404 —— 报给客户端的是
+        // 「找不到」，而真相是「你传的根本不是一个哈希」。
+        cortex_blob::hash::validate_hash(hash)?;
+
+        match &self.inner.backend {
+            // mock 没有 blobs 表，只能从对象本身现算。整取一次是可以接受的：
+            // 这条路只在离线开发与客户端 CI 上跑
+            Backend::Mock => {
+                let bytes = self.inner.blobs.get(hash).await?;
+                let mime = cortex_blob::probe_media(&bytes).resolve_mime(None);
+                Ok((mime, bytes.len() as i64))
+            }
+            Backend::Live(l) => {
+                let b = l.blob_meta(hash).await?;
+                Ok((b.mime, b.size_bytes))
+            }
+        }
+    }
+
+    pub async fn blob_bytes(&self, hash: &str, range: Option<Range<u64>>) -> Result<Bytes> {
+        match range {
+            Some(r) => self.inner.blobs.get_range(hash, r).await,
+            None => self.inner.blobs.get(hash).await,
+        }
+    }
+
+    /// 直下 URL。手机播视频走它，省掉经 cortexd 中转的那一半带宽。
+    pub async fn blob_download_url(&self, hash: &str) -> Result<BlobUrlResponse> {
+        // 先确认这个 blob 是**登记过**的，再签 URL。
+        // 直接签会把「对象存储里恰好有这个 key」变成可探测的信息，
+        // 也会让客户端拿到一条数据库里根本不认识的内容
+        let _ = self.blob_meta(hash).await?;
+        Ok(BlobUrlResponse {
+            url: self.inner.blobs.presign_get(hash).await?,
+            expires_in_secs: PRESIGN_TTL.as_secs(),
+        })
     }
 
     // ───────────────────────── 对话 ─────────────────────────
@@ -159,32 +332,34 @@ impl AppState {
 
     pub async fn get_episode(&self, id: &str) -> Result<EpisodeDto> {
         match &self.inner.backend {
-            Backend::Mock => Ok(EpisodeDto {
-                id: id.to_string(),
-                session_id: "01JSESSION0000000000000001".into(),
-                role: "user".into(),
-                text: Some("对象存储先用 RustFS，第一版单卷即可。".into()),
-                occurred_at: Utc::now().to_rfc3339(),
-            }),
+            Backend::Mock => Ok(mock_episode(id)),
             Backend::Live(l) => l.get_episode(id).await,
         }
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionDto>> {
         match &self.inner.backend {
-            Backend::Mock => Ok(vec![
-                SessionDto {
-                    id: "01JSESSION0000000000000001".into(),
-                    title: "技术选型讨论".into(),
-                    updated_at: Utc::now().to_rfc3339(),
-                },
-                SessionDto {
-                    id: "01JSESSION0000000000000002".into(),
-                    title: "记忆 schema 设计".into(),
-                    updated_at: Utc::now().to_rfc3339(),
-                },
-            ]),
+            Backend::Mock => Ok(mock_sessions()),
             Backend::Live(l) => l.list_sessions().await,
+        }
+    }
+
+    pub async fn session_detail(&self, id: &str) -> Result<SessionDetail> {
+        match &self.inner.backend {
+            Backend::Mock => {
+                let session = mock_sessions()
+                    .into_iter()
+                    .find(|s| s.id == id)
+                    .ok_or_else(|| CortexError::NotFound {
+                        kind: "session",
+                        id: id.into(),
+                    })?;
+                Ok(SessionDetail {
+                    episodes: vec![mock_episode("01JEPISODE000000000000001")],
+                    session,
+                })
+            }
+            Backend::Live(l) => l.session_detail(id).await,
         }
     }
 
@@ -208,6 +383,39 @@ impl AppState {
 }
 
 // ─────────────────────── mock 数据源 ───────────────────────
+
+fn mock_episode(id: &str) -> EpisodeDto {
+    EpisodeDto {
+        id: id.to_string(),
+        session_id: "01JSESSION0000000000000001".into(),
+        role: "user".into(),
+        text: Some("对象存储先用 RustFS，第一版单卷即可。".into()),
+        occurred_at: Utc::now().to_rfc3339(),
+        attachments: vec![],
+    }
+}
+
+fn mock_sessions() -> Vec<SessionDto> {
+    let now = Utc::now().to_rfc3339();
+    vec![
+        SessionDto {
+            id: "01JSESSION0000000000000001".into(),
+            title: "技术选型讨论".into(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            message_count: 12,
+            preview: Some("那就先按 RustFS 单卷来。".into()),
+        },
+        SessionDto {
+            id: "01JSESSION0000000000000002".into(),
+            title: "记忆 schema 设计".into(),
+            created_at: now.clone(),
+            updated_at: now,
+            message_count: 34,
+            preview: Some("sync_log 用单游标，跨全部表。".into()),
+        },
+    ]
+}
 
 fn mock_facts() -> Vec<FactDto> {
     vec![

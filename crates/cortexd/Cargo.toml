@@ -14,10 +14,13 @@ cortex-llm.workspace = true
 cortex-store.workspace = true
 cortex-agent.workspace = true
 
-# 直接依赖 sqlx 只为一件事：LISTEN/NOTIFY 需要一条**专属**长连接
-# （PgListener），这是连接级能力，repository 抽象覆盖不到。
-# 除此之外 cortexd 不写任何 SQL —— 那条线仍然收敛在 cortex-store。
-sqlx.workspace = true
+cortex-blob.workspace = true
+
+# 这里**没有 sqlx**，而且不该再有。
+# 曾经为了 LISTEN/NOTIFY 的 PgListener 直接依赖过它，理由听着充分
+# （连接级能力，repository 抽象覆盖不到），但那个口子一开就会扩散：
+# 下一个「只需要一句 SQL」的功能会理所当然地跟着写在这里。
+# 现在它下沉成了 cortex_store::Store::listen_sync()。
 async-trait.workspace = true
 
 tokio.workspace = true

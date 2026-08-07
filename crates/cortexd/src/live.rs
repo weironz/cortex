@@ -56,6 +56,19 @@ const WORKSPACE_ENV: &str = "CORTEX_WORKSPACE";
 /// 这个数字直接决定单轮对话最多花几次模型调用。
 const MAX_ROUNDS_ENV: &str = "CORTEX_AGENT_MAX_ROUNDS";
 
+/// 会话列表一次给多少条。
+///
+/// 上限作用在**会话**上而不是消息上 —— 存储层用一句 SQL 聚合，
+/// 不再是「拉最近 N 条消息再归纳」（那样一个话痨会话就能把窗口占满，
+/// 别的会话直接从列表里消失）。
+const SESSION_LIST_LIMIT: i64 = 200;
+
+/// 单个会话一次最多回多少条消息。
+const SESSION_EPISODE_LIMIT: i64 = 500;
+
+/// 会话标题取首条用户消息的前多少字。
+const TITLE_CHARS: usize = 24;
+
 pub struct Live {
     store: Store,
     llm: LlmClient,
@@ -196,60 +209,144 @@ impl Live {
             .store
             .episode(id)
             .await
-            .map_err(|e| CortexError::Store(e.to_string()))?
+            .map_err(store_err)?
             .ok_or_else(|| CortexError::NotFound {
                 kind: "episode",
                 id: id.into(),
             })?;
-        Ok(EpisodeDto {
-            id: e.id,
-            session_id: e.session_id,
-            role: e.role.as_str().to_string(),
-            text: e.text,
-            occurred_at: e.occurred_at.to_rfc3339(),
-        })
+        let links = self.store.episode_blobs(id).await.map_err(store_err)?;
+        Ok(episode_dto(
+            e,
+            links.into_iter().map(attachment_of).collect(),
+        ))
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionDto>> {
-        // 会话尚无独立表，从最近的 episodes 归纳。
-        // 标题取该会话第一条用户消息的前若干字 —— 比「新会话 1」有用得多。
-        let recent = self
+        let digests = self
             .store
-            .recent_episodes(200)
+            .session_digests(SESSION_LIST_LIMIT)
             .await
-            .map_err(|e| CortexError::Store(e.to_string()))?;
+            .map_err(store_err)?;
+        Ok(digests.into_iter().map(session_dto).collect())
+    }
 
-        let mut seen: std::collections::BTreeMap<String, (String, chrono::DateTime<Utc>)> =
-            Default::default();
-        for e in recent {
-            let entry = seen
-                .entry(e.session_id.clone())
-                .or_insert_with(|| (String::new(), e.occurred_at));
-            if entry.1 < e.occurred_at {
-                entry.1 = e.occurred_at;
-            }
-            // recent_episodes 是倒序，因此后遍历到的更早，标题以它为准
-            if e.role == Role::User
-                && let Some(t) = &e.text
-            {
-                entry.0 = t.chars().take(24).collect();
-            }
+    /// 一个会话的全部消息，附件一并挂上。
+    ///
+    /// 概览在这里是**从取回的消息现算**的，而不是再查一次
+    /// `session_digests` —— 消息全都在手上了，为同一组数字再往返一次数据库
+    /// 只会多一个「两处口径可能对不上」的机会。
+    pub async fn session_detail(&self, session_id: &str) -> Result<SessionDetail> {
+        let episodes = self
+            .store
+            .episodes_by_session(session_id, SESSION_EPISODE_LIMIT)
+            .await
+            .map_err(store_err)?;
+        if episodes.is_empty() {
+            return Err(CortexError::NotFound {
+                kind: "session",
+                id: session_id.into(),
+            });
         }
 
-        let mut sessions: Vec<SessionDto> = seen
-            .into_iter()
-            .map(|(id, (title, updated))| SessionDto {
-                id,
-                title: if title.is_empty() {
-                    "新会话".into()
-                } else {
-                    title
-                },
-                updated_at: updated.to_rfc3339(),
+        let ids: Vec<String> = episodes.iter().map(|e| e.id.clone()).collect();
+        let links = self
+            .store
+            .episode_blobs_bulk(&ids)
+            .await
+            .map_err(store_err)?;
+        let mut by_episode: std::collections::HashMap<String, Vec<AttachmentRef>> =
+            std::collections::HashMap::new();
+        for l in links {
+            by_episode
+                .entry(l.episode_id.clone())
+                .or_default()
+                .push(attachment_of(l));
+        }
+
+        // episodes_by_session 是升序，因此首条用户消息就是标题的来源
+        let first_user_text = episodes
+            .iter()
+            .find(|e| e.role == Role::User)
+            .and_then(|e| e.text.clone());
+        let session = SessionDto {
+            id: session_id.to_string(),
+            title: session_title(first_user_text.as_deref()),
+            created_at: episodes[0].occurred_at.to_rfc3339(),
+            updated_at: episodes[episodes.len() - 1].occurred_at.to_rfc3339(),
+            message_count: episodes.len() as i64,
+            preview: episodes.iter().rev().find_map(|e| e.text.clone()),
+        };
+
+        Ok(SessionDetail {
+            session,
+            episodes: episodes
+                .into_iter()
+                .map(|e| {
+                    let attachments = by_episode.remove(&e.id).unwrap_or_default();
+                    episode_dto(e, attachments)
+                })
+                .collect(),
+        })
+    }
+
+    // ─────────────────────────── 媒体 ───────────────────────────
+
+    /// `blobs` 行的元信息。取回字节时要靠它拿 MIME 与总长度
+    /// （HTTP Range 的 `Content-Range` 分母就是这个长度）。
+    pub async fn blob_meta(&self, hash: &str) -> Result<cortex_store::Blob> {
+        self.store
+            .blob(hash)
+            .await
+            .map_err(store_err)?
+            .ok_or_else(|| CortexError::NotFound {
+                kind: "blob",
+                id: hash.into(),
             })
-            .collect();
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        Ok(sessions)
+    }
+
+    /// 登记一个已经落到对象存储里的 blob —— 三步顺序的第二步。
+    ///
+    /// 走 `write_txn` 而不是裸 INSERT：`blobs` 行必须与 `sync_log` 同事务，
+    /// 否则别的设备永远不知道这个对象存在，同步下来的 `episode_blobs`
+    /// 就会指向一条它没有的 blob 行。
+    ///
+    /// 返回 `None` 表示这份内容**早就登记过**，本次没有新增行。这不是错误：
+    /// 内容寻址下两条行会逐字节相同，重复登记既没有意义也没有害处。
+    pub async fn register_blob(&self, new: cortex_store::NewBlob) -> Result<Option<i64>> {
+        if self
+            .store
+            .blob(&new.hash)
+            .await
+            .map_err(store_err)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+
+        match self
+            .store
+            .write_txn(async |t| t.insert_blob(&new).await)
+            .await
+        {
+            Ok(seq) => Ok(Some(seq)),
+            Err(e) => {
+                // 上面那次存在性检查是 TOCTOU，两个设备同时传同一张图就会撞主键。
+                // 回查一次：已经在了就当成功。不去匹配 SQLSTATE ——
+                // 那要求 cortexd 认识 sqlx 的错误结构，而这一层不该再有 sqlx
+                if self
+                    .store
+                    .blob(&new.hash)
+                    .await
+                    .map_err(store_err)?
+                    .is_some()
+                {
+                    tracing::debug!(hash = %new.hash, "并发登记同一份内容，按幂等处理");
+                    Ok(None)
+                } else {
+                    Err(store_err(e))
+                }
+            }
+        }
     }
 
     // ─────────────────────────── 同步 ───────────────────────────
@@ -321,7 +418,29 @@ async fn run_turn(live: Arc<Live>, req: ChatRequest, tx: &mpsc::Sender<ChatEvent
     let context_window = live.context_window;
     let now = Utc::now();
 
+    // ── 0. 附件预检 ──
+    //
+    // 在事务**外**确认每个 blob 都已登记。`WriteTxn` 刻意不提供读方法，
+    // 而这里也确实不该在持锁事务里做判断（见 cortex-store::txn 的纪律三）。
+    // 不预检也能靠外键拦下来，但那时错误是一句 SQLSTATE 23503，
+    // 客户端只会看到 500 —— 预检换来的是一句说得清的 400。
+    let attachments = dedup_attachments(&req.attachments);
+    for a in &attachments {
+        let known = store.blob(&a.hash).await.map_err(store_err)?.is_some();
+        if !known {
+            return Err(CortexError::Invalid(format!(
+                "附件 {} 尚未登记；请先 POST /blobs 上传，或直传后 POST /blobs/commit",
+                a.hash
+            )));
+        }
+    }
+
     // ── 1. 落 L0（用户这一轮）──
+    //
+    // episode 与 episode_blobs 必须同事务：分开写会让别的设备先收到一条
+    // 没有附件的消息，界面上就是「图片过一会儿才冒出来」。
+    // 这也是 §九 三步顺序的第三步 —— 前两步（对象上传、blobs 行）已在
+    // /blobs 那条路上完成。
     let user_episode_id = Id::new();
     let tsv = cortex_memory::tokenize::to_tsvector_input(&req.message);
     {
@@ -336,10 +455,26 @@ async fn run_turn(live: Arc<Live>, req: ChatRequest, tx: &mpsc::Sender<ChatEvent
             device_id: device_id.to_string(),
             occurred_at: now,
         };
+        let links: Vec<cortex_store::NewEpisodeBlob> = attachments
+            .iter()
+            .map(|a| cortex_store::NewEpisodeBlob {
+                episode_id: user_episode_id,
+                blob_hash: a.hash.clone(),
+                kind: a.kind.clone(),
+            })
+            .collect();
+
         store
-            .write_txn(async |t| t.insert_episode(&ep).await)
+            .write_txn(async |t| {
+                let seq = t.insert_episode(&ep).await?;
+                let mut last = seq;
+                for link in &links {
+                    last = t.link_episode_blob(link).await?;
+                }
+                Ok(last)
+            })
             .await
-            .map_err(|e| CortexError::Store(e.to_string()))?;
+            .map_err(store_err)?;
     }
 
     // ── 2. 检索 ──
@@ -512,6 +647,67 @@ impl ToolHost for Live {
     }
 }
 
+// ───────────────────────── 领域 → DTO ──────────────────────────
+
+fn store_err(e: cortex_store::StoreError) -> CortexError {
+    CortexError::Store(e.to_string())
+}
+
+fn episode_dto(e: cortex_store::Episode, attachments: Vec<AttachmentRef>) -> EpisodeDto {
+    EpisodeDto {
+        id: e.id,
+        session_id: e.session_id,
+        role: e.role.as_str().to_string(),
+        text: e.text,
+        occurred_at: e.occurred_at.to_rfc3339(),
+        attachments,
+    }
+}
+
+fn attachment_of(l: cortex_store::EpisodeBlob) -> AttachmentRef {
+    AttachmentRef {
+        hash: l.blob_hash,
+        kind: l.kind,
+    }
+}
+
+fn session_dto(d: cortex_store::SessionDigest) -> SessionDto {
+    SessionDto {
+        id: d.session_id,
+        title: session_title(d.first_user_text.as_deref()),
+        created_at: d.started_at.to_rfc3339(),
+        updated_at: d.updated_at.to_rfc3339(),
+        message_count: d.message_count,
+        preview: d.last_text,
+    }
+}
+
+/// 标题由首条用户消息派生。
+///
+/// 截断放在这一层而不是 SQL 里：它是**展示决策**，存储层不该替 UI 决定
+/// 一个标题该有多长。按字符而非字节截断 —— 中文一刀切在字节上会切出乱码。
+fn session_title(first_user_text: Option<&str>) -> String {
+    let trimmed = first_user_text.map(str::trim).unwrap_or_default();
+    if trimmed.is_empty() {
+        return "新会话".into();
+    }
+    trimmed.chars().take(TITLE_CHARS).collect()
+}
+
+/// 去掉重复的附件哈希，保持客户端给的顺序。
+///
+/// `episode_blobs` 的主键是 `(episode_id, blob_hash)`，同一条消息里挂两次
+/// 同一张图会直接撞主键把整个写事务弄回滚 —— 而「同一张图被拖进来两次」
+/// 在界面上是再正常不过的操作。
+fn dedup_attachments(input: &[AttachmentRef]) -> Vec<AttachmentRef> {
+    let mut seen = std::collections::HashSet::new();
+    input
+        .iter()
+        .filter(|a| seen.insert(a.hash.clone()))
+        .cloned()
+        .collect()
+}
+
 /// 把工具参数压成一行给 UI 看。
 ///
 /// 只给键和短值：参数里可能是整个文件内容（`write_file.content`），
@@ -548,6 +744,47 @@ mod tests {
         assert!(
             s.chars().count() < 200,
             "工具事件必须压得住大参数，否则一次 write_file 就能把 SSE 流撑爆：{s}"
+        );
+    }
+
+    #[test]
+    fn session_title_falls_back_and_truncates_by_char() {
+        assert_eq!(session_title(None), "新会话");
+        assert_eq!(session_title(Some("   ")), "新会话", "全空白也该回落");
+
+        // 按字符截断。按字节切会把一个汉字劈成半个，JSON 序列化直接产出乱码
+        let long = "一二三四五六七八九十".repeat(4); // 40 个汉字
+        let title = session_title(Some(&long));
+        assert_eq!(
+            title.chars().count(),
+            TITLE_CHARS,
+            "标题应截到 {TITLE_CHARS} 个字符：{title}"
+        );
+        assert!(title.starts_with("一二三"), "截断后开头应保持原样：{title}");
+    }
+
+    #[test]
+    fn duplicate_attachments_are_collapsed_in_order() {
+        // episode_blobs 的主键是 (episode_id, blob_hash)，重复挂同一张图会
+        // 撞主键把整个写事务回滚 —— 而「同一张图被拖进来两次」是常规操作
+        let a = AttachmentRef {
+            hash: "a".repeat(64),
+            kind: Some("image".into()),
+        };
+        let b = AttachmentRef {
+            hash: "b".repeat(64),
+            kind: None,
+        };
+        let got = dedup_attachments(&[a.clone(), b.clone(), a.clone()]);
+        assert_eq!(
+            got.iter().map(|x| x.hash.clone()).collect::<Vec<_>>(),
+            vec![a.hash.clone(), b.hash.clone()],
+            "重复的哈希应被去掉，且保持客户端给的顺序"
+        );
+        assert_eq!(
+            got[0].kind.as_deref(),
+            Some("image"),
+            "保留的应当是第一次出现的那一条，连同它的 kind"
         );
     }
 
