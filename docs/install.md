@@ -34,6 +34,10 @@ Postgres 17（带 pgvector 扩展）与一个 S3 兼容存储。
 | [B. 二进制 + 自己的 Postgres](#b-二进制--自己已有的-postgres) | 已经有 Postgres 的 | 二进制 + pgvector |
 | [C. 从源码构建](#c-从源码构建) | 要改代码的 | Rust + Flutter + docker |
 
+上面三条装的都是 **cortexd 那一侧**。装完之后要一个图形界面的，
+见 [D. Windows 桌面端](#d-windows-桌面端安装程序) ——
+**它是客户端，单独装它没有用**。
+
 ---
 
 ## ★ 无论走哪条路，第一步都是生成凭据
@@ -147,8 +151,14 @@ curl -fsS http://127.0.0.1:8080/health
 | Linux x86_64 | `cortex-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux arm64 | `cortex-v0.1.0-aarch64-unknown-linux-gnu.tar.gz` |
 | macOS Apple Silicon | `cortex-v0.1.0-aarch64-apple-darwin.tar.gz` |
-| macOS Intel | `cortex-v0.1.0-x86_64-apple-darwin.tar.gz` |
 | Windows | `cortex-v0.1.0-x86_64-pc-windows-msvc.zip` |
+
+> **macOS Intel（x86_64）没有产物，而且不是漏了 —— 是编不出来。**
+> 见 [CHANGELOG](../CHANGELOG.md) 的「这一版不能干什么」。
+>
+> 另外：Windows 那个 `.zip` 里是 **cortexd + CLI**，
+> **不是桌面 GUI**。GUI 是另一个产物，见
+> [D. Windows 桌面端](#d-windows-桌面端安装程序)。
 
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS
@@ -224,11 +234,93 @@ just run          # 跑 cortexd
 
 细节与全部运维命令见 [operations.md](operations.md)。
 
-桌面 GUI（**不提供安装包**，自己构建）：
+桌面 GUI：
 
 ```bash
 cd app && flutter build windows   # 或 macos / linux
 ```
+
+产出的是一个**目录**（`build/windows/x64/runner/Release/`），不是单文件。
+要一个能双击的安装程序，跑 `bash scripts/release-desktop-windows.sh` ——
+它会补上 Flutter 不带的 MSVC 运行库、启动一次确认跑得动，再用
+Inno Setup 编出 `dist/cortex-desktop-*-setup.exe`。
+
+---
+
+## D. Windows 桌面端（安装程序）
+
+**只有 Windows 有安装程序。** macOS 与 Linux 这一版不发，
+自己 `flutter build`（理由见 [CHANGELOG](../CHANGELOG.md)）。
+
+从 [Releases](https://github.com/weironz/cortex/releases) 下载：
+
+```
+cortex-desktop-v<版本>-x86_64-pc-windows-msvc-setup.exe
+```
+
+> 别下成 `cortex-v<版本>-x86_64-pc-windows-msvc.zip` —— 那个是
+> **cortexd + CLI**（服务端与终端客户端），里面没有 GUI。
+> 两个名字很像，装的东西完全不重叠。
+
+### 1. 先对校验和（这一步别跳）
+
+```powershell
+certutil -hashfile cortex-desktop-v<版本>-x86_64-pc-windows-msvc-setup.exe SHA256
+```
+
+与发布页 `SHA256SUMS` 里对应那行比对。这是你**唯一**能确认「手上这份就是
+发布页那份」的手段 —— 下一步要跳过一个系统警告，而跳过它的前提是
+你自己已经确认过来源。
+
+### 2. Windows 会拦一次，这是预期的
+
+**这个安装程序没有代码签名证书。** 双击之后会看到一屏蓝底白字：
+
+```
+Windows 已保护你的电脑
+Microsoft Defender SmartScreen 阻止了无法识别的应用启动。
+运行此应用可能会导致你的电脑存在风险。
+                                    [更多信息]  [不运行]
+```
+
+点 **「更多信息」**，展开后会多出一个 **「仍要运行」** 按钮，点它即可继续。
+
+**为什么会看到这个**：SmartScreen 拦的不是「有病毒」，是
+「这个发布者我没见过、这个文件我没见过多少次」。代码签名证书（OV 按年
+付费，EV 更贵）能让它闭嘴，而这个项目现在没有。所以它会一直出现，
+直到这个安装程序被足够多的人下载并建立起信誉，或者我们买了证书。
+
+**为什么这不同于 macOS**：Gatekeeper 对没公证的应用是**硬拒绝** ——
+没有「仍要运行」这条路。SmartScreen 是警告，Gatekeeper 是拒绝。
+这就是为什么 Windows 发安装包而 macOS 不发。
+
+> 该不该点「仍要运行」，请你自己判断，而不是因为这份文档让你点。
+> 判断依据是上一步的校验和。对不上就别装。
+
+### 3. 装到哪
+
+- 装在 `%LOCALAPPDATA%\Programs\Cortex`，**全程不需要管理员权限、
+  不会有 UAC 弹窗**。它不注册服务、不写 `HKLM`、不装驱动
+- 快捷方式：开始菜单的 `Cortex` 分组 + 桌面（安装时可取消勾选）
+- 卸载：设置 → 应用 → `Cortex`，或安装目录里的 `unins000.exe`
+
+### 4. 装完第一次打开会**连接失败** —— 这是对的
+
+桌面端是**瘦客户端**：agent 循环、工具执行、记忆库全在 cortexd 那一侧。
+所以它开机就会去连 `http://127.0.0.1:8080`，而你本机多半没有 cortexd，
+于是停在「连接 cortexd」这一屏并报连不上。
+
+这一屏上就能把事情办完，不需要改配置文件：
+
+| 你的情况 | 在这一屏做什么 |
+|---|---|
+| 已经有一台 cortexd | 把「cortexd 地址」改成它（如 `https://cortex.example.com`），填 `CORTEXD_TOKEN`，点「连接」 |
+| 还没有 | 先按上面 [A. docker compose](#a-docker-compose最省事) 起一套，再回来 |
+| 只想看看界面 | 点最下面的「用 Mock 数据源」，那是内存夹具，不连任何服务端 |
+
+> 地址与凭据都存在客户端本地，**没有安装期配置** ——
+> 安装程序不问服务器地址，是因为它问了也没用：这个地址在
+> 登录屏上改一次就够了，而装的时候你多半还没有那台服务器。
 
 ---
 
@@ -256,4 +348,7 @@ cd app && flutter build windows   # 或 macos / linux
 | 容器很久不健康 | 在下 590 MB 模型，`docker compose logs -f cortexd` |
 | 客户端一直 401 | token 不是这台 cortexd 的那一份。重新 `--generate-token` 并两边同时换 |
 | macOS 说「无法打开，来自身份不明的开发者」 | 没有公证。见上文 `xattr -d` |
+| Windows 弹「已保护你的电脑」 | SmartScreen，没有代码签名。见 [D-2](#2-windows-会拦一次这是预期的)。先对校验和再决定 |
+| 桌面端装好了，一打开就说连不上 | 正常。它是客户端，你还需要一台 cortexd。见 [D-4](#4-装完第一次打开会连接失败--这是对的) |
+| 桌面端双击之后毫无反应，连窗口都没有 | 缺 MSVC 运行库。安装程序会把它随包带上 —— 如果你是自己 `flutter build` 出来直接跑的，用 `scripts/release-desktop-windows.sh` 打包 |
 | `shell` 工具在 Windows 上被拒 | 刻意的：没有对等的 OS 沙箱就默认拒绝执行 |

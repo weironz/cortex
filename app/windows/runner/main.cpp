@@ -1,4 +1,4 @@
-#include <flutter/dart_project.h>
+﻿#include <flutter/dart_project.h>
 #include <flutter/flutter_view_controller.h>
 #include <windows.h>
 
@@ -27,7 +27,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
-  if (!window.Create(L"cortex_app", origin, size)) {
+  // 这个文件必须保持 UTF-8 with BOM：runner 是用 /W4 /WX 编的，没有 BOM 时
+  // MSVC 按系统代码页读它，非 ASCII 字符触发 C4819，而 /WX 把它变成硬错误。
+  // 中文机器（936）与 CI 的英文机器（1252）都会挂，症状是编译失败而不是乱码。
+  //
+  // 窗口标题就是任务栏、Alt-Tab 与「未响应」对话框上显示的那个名字。
+  // 模板给的 "cortex_app" 是 pubspec 的包名，装完之后用户在任务栏上看到的
+  // 就是它 —— 一个带安装程序的产品不该用内部标识符自称
+  if (!window.Create(L"Cortex", origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

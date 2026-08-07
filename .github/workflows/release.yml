@@ -205,6 +205,61 @@ jobs:
           if-no-files-found: error
 
   # ══════════════════════════════════════════════════════════
+  #  Windows 桌面端安装程序
+  #
+  #  v0.1.0 只发了 cortexd + CLI 的 zip，而它的名字
+  #  （cortex-v0.1.0-x86_64-pc-windows-msvc.zip）看上去就像「Windows 版
+  #  Cortex」。桌面端 GUI 根本不在里面 —— 第一批用户会下错东西。
+  #
+  #  ── 为什么只有 Windows ────────────────────────────────────
+  #  不是偷懒，是三个平台的拦截强度根本不同：
+  #    * Windows 的 SmartScreen 是**警告**。不签名的安装程序照样装得上，
+  #      用户点「更多信息 → 仍要运行」就继续了。代价是要在安装说明里
+  #      把这一屏写清楚（docs/install.md 与包里的 README.txt 都写了）
+  #    * macOS 的 Gatekeeper 是**硬拒绝**。没有公证的 .dmg 打不开，
+  #      而公证要 Apple Developer 账号（99 USD/年）
+  #    * Linux 的 .deb/.rpm 不难，但要么自建 apt 源要么让人手动 dpkg -i，
+  #      而 Linux 用户本来就更接受 flutter build
+  #  所以「Windows 发、macOS/Linux 不发」不是半途而废，是按每个平台
+  #  实际的拦截强度做的取舍。CHANGELOG 的「为什么不发桌面安装包」写了同一件事。
+  #
+  #  打包（含补 MSVC 运行库、启动冒烟、ISCC 编译）全在
+  #  scripts/release-desktop-windows.sh 里，本机可以真跑。
+  # ══════════════════════════════════════════════════════════
+  desktop:
+    name: Windows 桌面安装程序
+    needs: preflight
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # InnoSetup 在当前 windows runner 镜像里是预装的（6.7.x）。
+      # 它曾经在 windows-2025 镜像里缺席过大半年（actions/runner-images#11349
+      # 与 #11644 都以 not planned 关闭，直到 #12947 才装回来），
+      # 所以脚本里留了 choco 兜底 —— 这里不预装任何东西
+      # 脚本会在打包前**真的启动一次那个 GUI**（缺 DLL 的产物是立刻退出，
+      # 这条断言抓的就是它）。这一步依赖 runner 有可用的桌面会话 ——
+      # 本机验证过，CI 上没有。真在这里挂了而产物本身没问题，
+      # 用 --no-exec 关掉它，但那意味着这份产物从没被运行过。
+      - name: 打包
+        shell: bash
+        run: |
+          bash scripts/release-desktop-windows.sh \
+            --version "${{ needs.preflight.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: |
+            dist/*-setup.exe
+            dist/*.sha256
+          if-no-files-found: error
+
+  # ══════════════════════════════════════════════════════════
   #  docker 镜像 —— cortexd 与 cortex-web，各推两个 registry
   #
   #  ACR 是生产实际拉取的那个（节点在国内，Docker Hub 在那里要么慢、
@@ -309,7 +364,7 @@ jobs:
   # ══════════════════════════════════════════════════════════
   release:
     name: 建 draft release
-    needs: [preflight, build, web, image]
+    needs: [preflight, build, web, desktop, image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -325,16 +380,20 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-          pattern: "{bin-*,web}"
+          pattern: "{bin-*,web,desktop-*}"
 
       # 逐平台的 .sha256 是构建机上算的，这里汇总成一份。
       # 先删掉单份的再算，否则 SHA256SUMS 里会混进「校验和文件的校验和」
+      #
+      # *.exe 是 Windows 桌面安装程序。它比别的产物更需要这份校验和：
+      # 它没有代码签名，用户只能靠对哈希确认手上这份就是发布页上那份 ——
+      # 安装说明里让人 `certutil -hashfile` 对的，就是这里生成的东西
       - name: 汇总校验和
         run: |
           set -euo pipefail
           cd dist
           rm -f ./*.sha256 SHA256SUMS
-          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          sha256sum -- *.tar.gz *.zip *.exe > SHA256SUMS
           cat SHA256SUMS
 
       # 少一个平台时 release 照样建得出来，只是那个平台的用户下载页上
@@ -355,15 +414,34 @@ jobs:
           done
           [ -f "cortex-v$v-x86_64-pc-windows-msvc.zip" ] || { echo "::error::缺少 Windows"; miss=1; }
           [ -f "cortex-web-v$v.tar.gz" ]                 || { echo "::error::缺少 Web"; miss=1; }
+          # 桌面安装程序。它与上面那个 Windows zip 是**两样东西**：
+          # zip 里是 cortexd + CLI（服务端与终端客户端），
+          # 这个 setup.exe 里是 Flutter 桌面 GUI。名字相近，内容不重叠 ——
+          # 少了它，下载页上就只剩那个看起来像 GUI 的 zip
+          [ -f "cortex-desktop-v$v-x86_64-pc-windows-msvc-setup.exe" ] \
+            || { echo "::error::缺少 Windows 桌面安装程序"; miss=1; }
           exit $miss
 
       - name: 取 CHANGELOG 里这一版的段落
         run: |
           set -euo pipefail
           v="${{ needs.preflight.outputs.version }}"
+          # 用 index() 逐字比对，**不用动态正则**。
+          #
+          # 原来这里是 `$0 ~ "^## +\\[?" ver "\\]?"`，它是坏的：awk 把字符串里的
+          # `\[` 当成普通 `[`（gawk 会明说 "escape sequence '\[' treated as plain
+          # '['"），于是那段正则退化成 `^## +[?0.1.0]?` —— 一个**字符组**，
+          # 结果是「任何 `## ` 开头的标题都算命中」。
+          #
+          # 这个 bug 在 v0.1.0 发版时不可见：那时 CHANGELOG 里 `## [0.1.0]`
+          # 恰好是第一个二级标题，抓错也抓到它。加了「未发布」一节之后
+          # 它立刻变成「把未发布的内容当成这一版的发布说明发出去」——
+          # 而 notes.md 非空，`[ -s notes.md ]` 那道检查照样绿。
           awk -v ver="$v" '
-            $0 ~ "^## +\\[?" ver "\\]?" { on = 1; print; next }
-            on && /^## / { exit }
+            !on && (index($0, "## [" ver "]") == 1 ||
+                    index($0, "## "  ver " ") == 1 ||
+                    $0 == "## " ver) { on = 1; print; next }
+            on && index($0, "## ") == 1 { exit }
             on { print }
           ' CHANGELOG.md > notes.md
           [ -s notes.md ] || { echo "::error::CHANGELOG.md 里取不到 $v"; exit 1; }
@@ -378,6 +456,17 @@ jobs:
             echo "docker pull registry.cn-shenzhen.aliyuncs.com/willspace/cortexd:v$v"
             echo "docker pull willdockerhub/cortexd:v$v"
             echo '```'
+            echo
+            echo '### Windows 桌面端'
+            echo
+            echo '`cortex-desktop-v'"$v"'-x86_64-pc-windows-msvc-setup.exe` 是**客户端 GUI**，'
+            echo '不是服务端 —— 它仍然需要一台 cortexd。'
+            echo '（同名的 `cortex-v'"$v"'-x86_64-pc-windows-msvc.zip` 里是 cortexd + CLI。）'
+            echo
+            echo '这个安装程序**没有代码签名**，Windows SmartScreen 会拦一次：'
+            echo '点「更多信息」→「仍要运行」。要不要点请自己判断 ——'
+            echo '判断依据是 `SHA256SUMS`，用 `certutil -hashfile <文件> SHA256` 对一遍。'
+            echo 'macOS / Linux 桌面端这一版不发，自己 `flutter build`，理由见 CHANGELOG。'
             echo
             echo '产物校验和见 `SHA256SUMS`。'
           } >> notes.md

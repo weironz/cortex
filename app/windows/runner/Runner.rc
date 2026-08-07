@@ -1,4 +1,4 @@
-// Microsoft Visual C++ generated resource script.
+﻿// Microsoft Visual C++ generated resource script.
 //
 #pragma code_page(65001)
 #include "resource.h"
@@ -89,13 +89,18 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "dev.cortex" "\0"
-            VALUE "FileDescription", "cortex_app" "\0"
+            // 这几个字段是「属性 → 详细信息」以及 SmartScreen 那一屏
+            // 「未知发布者」旁边显示的东西。模板给的是 pubspec 包名，
+            // 而这份产物是要带着安装程序发出去的 —— 用户看到的应当是产品名。
+            // 字符串留在 ASCII：本块声明的代码页是 0x409/1252，
+            // 中文放进来是未定义行为，不是「显示成中文」
+            VALUE "CompanyName", "Cortex" "\0"
+            VALUE "FileDescription", "Cortex desktop client" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "cortex_app" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 dev.cortex. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Cortex. Licensed under Apache-2.0." "\0"
             VALUE "OriginalFilename", "cortex_app.exe" "\0"
-            VALUE "ProductName", "cortex_app" "\0"
+            VALUE "ProductName", "Cortex" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
