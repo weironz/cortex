@@ -78,7 +78,18 @@ impl Store {
     /// 因此这里是普通的递归 CTE，不需要图数据库。
     ///
     /// 实体先经 `canonical_entities` 归并，否则别名会让同一实体的邻居分裂。
-    /// 结果按跳数升序 —— 近的比远的相关。
+    /// 结果**按跳数升序** —— 近的比远的相关。
+    ///
+    /// # 为什么要嵌一层子查询
+    ///
+    /// `DISTINCT ON (f.id)` 强制 `ORDER BY` 以 `f.id` 打头，于是外层排序
+    /// 只能是 `ORDER BY f.id, hop` —— 那是**按 fact id 排序**，而 id 是
+    /// ULID（创建顺序），跟相关性毫无关系。更糟的是 `LIMIT` 也会按 id 截断，
+    /// 语料一大，近跳的事实会被远跳的老事实挤掉。
+    ///
+    /// 所以先在内层用 `DISTINCT ON` 完成「每条事实只保留最小跳数」的去重，
+    /// 再在外层按跳数排序与截断。评测发现了这个 bug：某题的 gold 是全库
+    /// 最新的事实，却在 7 条图召回里排到第 6。
     pub async fn recall_graph(
         &self,
         seed_entity_ids: &[String],
@@ -103,14 +114,23 @@ impl Store {
                      ON f.subject_id = r.entity_id
                   WHERE r.hop < $2
                     AND f.object_entity_id IS NOT NULL
+             ),
+             nearest AS (
+                 SELECT DISTINCT ON (f.id)
+                        f.id, f.subject_id, f.predicate, f.object_text, f.object_entity_id,
+                        f.statement, f.embedding, f.embedding_model, f.domain, f.confidence,
+                        f.valid_at, f.source_episode_id, f.extracted_by, f.device_id,
+                        f.created_at, r.hop
+                   FROM active_facts f
+                   JOIN reach r
+                     ON f.subject_id = r.entity_id OR f.object_entity_id = r.entity_id
+                  ORDER BY f.id, r.hop
              )
-             SELECT DISTINCT ON (f.id) id, subject_id, predicate, object_text, object_entity_id, statement,
+             SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
                     embedding, embedding_model, domain, confidence, valid_at,
                     source_episode_id, extracted_by, device_id, created_at
-               FROM active_facts f
-               JOIN reach r
-                 ON f.subject_id = r.entity_id OR f.object_entity_id = r.entity_id
-              ORDER BY f.id, r.hop
+               FROM nearest
+              ORDER BY hop, created_at DESC
               LIMIT $3",
         )
         .bind(seed_entity_ids)

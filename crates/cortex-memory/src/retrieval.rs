@@ -78,6 +78,16 @@ pub struct Retriever<E: Embedder> {
     budget: Budget,
     /// 当前对话领域的加权系数。1.0 即不加权。
     domain_boost: f64,
+    /// 融合分低于此值即视为「没有真正相关的记忆」，一条都不注入。
+    ///
+    /// 没有这道闸门时，`recall_recent` 恒定返回最近 N 条**与查询无关**的
+    /// 事实，于是任何问题都会带回一堆记忆。评测实测：14 道「本就不该
+    /// 召回到」的题平均仍注入 57.6 条，误召率 0.571。
+    ///
+    /// 后果不只是噪声：无关记忆进了 prompt，既是幻觉的素材，也是记忆
+    /// 投毒的载体 —— 攻击者只要让一条恶意事实入库，它就会在**所有**
+    /// 对话里被注入。宁可不给记忆，也不要给错记忆。
+    abstain_below: f64,
 }
 
 impl<E: Embedder> Retriever<E> {
@@ -87,6 +97,10 @@ impl<E: Embedder> Retriever<E> {
             width: RecallWidth::default(),
             budget: Budget::default(),
             domain_boost: 1.3,
+            // 单路排名第一的贡献是 1/(60+1)≈0.0164。取略高于它，
+            // 意味着「只被一路捞到且排名靠后」不足以进入注入 ——
+            // 要么排名很前，要么有跨路共识。
+            abstain_below: 0.017,
         }
     }
 
@@ -99,6 +113,13 @@ impl<E: Embedder> Retriever<E> {
     #[must_use]
     pub fn with_budget(mut self, budget: Budget) -> Self {
         self.budget = budget;
+        self
+    }
+
+    /// 调整弃权阈值。设为 0 即关闭弃权（评测 A/B 用）。
+    #[must_use]
+    pub fn with_abstain_below(mut self, threshold: f64) -> Self {
+        self.abstain_below = threshold;
         self
     }
 
@@ -190,6 +211,21 @@ impl<E: Embedder> Retriever<E> {
     fn finish(&self, fused: Vec<Fused<Fact>>, context_window: usize) -> Retrieved {
         let max_tokens = self.budget.tokens_for(context_window);
 
+        // 弃权：没有任何一条够格就一条都不给。
+        // 注意是**整体弃权**而非逐条过滤 —— 逐条过滤会让「勉强够格的一条」
+        // 单独进注入块，而单独一条弱相关记忆比零条更容易误导模型。
+        let fused: Vec<Fused<Fact>> = if fused
+            .first()
+            .is_none_or(|top| top.score < self.abstain_below)
+        {
+            Vec::new()
+        } else {
+            fused
+                .into_iter()
+                .filter(|f| f.score >= self.abstain_below)
+                .collect()
+        };
+
         let attribution: Vec<Attribution> = fused
             .iter()
             .map(|f| Attribution {
@@ -233,6 +269,59 @@ mod tests {
         // 各路只给三五条时，「跨路共识」这个核心信号根本无从体现
         assert!(w.bm25 >= 20 && w.vector >= 20, "召回过窄会让 RRF 退化");
         assert!(w.graph_hops <= 3, "跳数过大会让图遍历吃掉整个延迟预算");
+    }
+
+    #[test]
+    fn abstains_when_nothing_is_relevant() {
+        // recency 一路恒定返回最近 N 条与查询无关的事实。
+        // 若不弃权，任何问题都会带回一堆记忆 —— 这是幻觉与记忆投毒的温床。
+        let r = Retriever::new(crate::embed::HashEmbedder::new());
+        // 单路排名第 40 名的贡献 ≈ 1/(60+41) ≈ 0.0099，低于阈值
+        let weak = vec![Fused {
+            item: dummy_fact(),
+            score: 0.0099,
+            hits: vec![(Channel::Recency, 40)],
+        }];
+        assert!(
+            r.finish(weak, 128_000).items.is_empty(),
+            "只被近因一路捞到且排名靠后，不应注入任何记忆"
+        );
+    }
+
+    #[test]
+    fn keeps_results_with_cross_channel_consensus() {
+        let r = Retriever::new(crate::embed::HashEmbedder::new());
+        // 两路都排第一：0.0164 × 2 ≈ 0.0328，远高于阈值
+        let strong = vec![Fused {
+            item: dummy_fact(),
+            score: 0.0328,
+            hits: vec![(Channel::Bm25, 0), (Channel::Vector, 0)],
+        }];
+        assert_eq!(
+            r.finish(strong, 128_000).items.len(),
+            1,
+            "跨路共识的强命中必须保留"
+        );
+    }
+
+    fn dummy_fact() -> Fact {
+        Fact {
+            id: "01JZZZZZZZZZZZZZZZZZZZZZZ1".into(),
+            subject_id: "01JZZZZZZZZZZZZZZZZZZZZZZ2".into(),
+            predicate: "uses".into(),
+            object_text: Some("x".into()),
+            object_entity_id: None,
+            statement: "测试事实".into(),
+            embedding: None,
+            embedding_model: "hash-stub-v1".into(),
+            domain: None,
+            confidence: 1.0,
+            valid_at: None,
+            source_episode_id: "01JZZZZZZZZZZZZZZZZZZZZZZ3".into(),
+            extracted_by: "test".into(),
+            device_id: "test".into(),
+            created_at: Utc::now(),
+        }
     }
 
     #[test]
