@@ -100,13 +100,28 @@ jobs:
           - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu  }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-latest,     target: aarch64-apple-darwin      }
-          # macos-13 已于 2025-12 完全退役。症状不是报错，是**任务永远排队** ——
-          # status 一直 queued、steps 为空，看上去像卡住而不是失败，
-          # 而 draft release 那步 needs 整个 build 矩阵，于是整条流水线跟着悬着。
-          # macos-15-intel 是 GitHub 给 Intel 的替代，但它**只活到 2027-08**：
-          # 那之后 Actions 不再有任何 x86_64 macOS 镜像（Apple 已停止支持该架构）。
-          # 到期时这一行只能删，Intel Mac 用户届时得自己从源码编。
-          - { os: macos-15-intel,   target: x86_64-apple-darwin       }
+          # ── x86_64-apple-darwin（Intel Mac）：不发，上游编不出来 ──
+          #
+          # 试过两轮，两轮都挂，原因不是我们的：
+          #
+          #   1. macos-13 已于 2025-12 完全退役。症状不是报错，是**任务永远排队**
+          #      （status 一直 queued、steps 为空），而 draft release 那步 needs
+          #      整个 build 矩阵，于是整条流水线跟着悬着，看上去像卡住而不是失败。
+          #   2. 换成 macos-15-intel 之后 runner 拿到了，构建仍然挂：
+          #      `ort-sys: no prebuilt binaries available for target x86_64-apple-darwin`
+          #      —— ONNX Runtime 不再为 Intel macOS 出预编译产物。
+          #
+          # 而 `fastembed` 在 cortex-memory 里是**硬依赖、没有 feature gate**，
+          # 所以这不是「没有现成二进制」，是 Intel Mac 上**根本编不出来** ——
+          # 连 CORTEX_EMBED_BACKEND=hash 也救不了，ort-sys 在构建期就失败。
+          #
+          # 要支持它得先把 fastembed 做成可选 feature，那是一块独立的工作，
+          # 而且 hash 后端「不是语义空间，检索质量明显下降」（见 evals/README）。
+          # 在 Apple 已停止支持 x86_64、GitHub 也将于 2027-08 撤掉最后一个
+          # Intel 镜像的前提下，投入产出不成立。
+          #
+          # 按本项目的纪律：宁可不发，也不发一个装不上的东西。
+          # CHANGELOG 的「这一版不能干什么」里有这一条。
           - { os: windows-latest,   target: x86_64-pc-windows-msvc    }
     steps:
       - uses: actions/checkout@v5

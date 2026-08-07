@@ -90,6 +90,7 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 | **桌面安装包** | 不发 `.msi` / `.dmg` / `.deb`。见下面「为什么不发安装包」 |
 | **高可用** | 单机自托管。恢复期间服务是停的，RTO 就是停机时间 |
 | **arm64 docker 镜像** | 生产镜像只有 `linux/amd64`。arm64 二进制有，镜像没有 |
+| **Intel Mac（x86_64 macOS）** | **完全不支持，而且不是「没出二进制」——是编不出来。** ONNX Runtime（`ort-sys`）不再为 Intel macOS 提供预编译产物，而 `fastembed` 在 `cortex-memory` 里是硬依赖、没有 feature gate，所以 `ort-sys` 在**构建期**就失败，`CORTEX_EMBED_BACKEND=hash` 也救不了。Apple 已停止支持 x86_64，GitHub 的最后一个 Intel 镜像也将于 2027-08 撤掉。要支持它得先把 fastembed 做成可选 feature —— 那是独立的一块工作，且 hash 后端不是语义空间、检索质量明显下降。**Apple Silicon 的 Mac 不受影响，`aarch64-apple-darwin` 正常发布。** |
 | **schema 兼容承诺** | migration 只前滚，没有 downgrade。0.x 期间 schema 会不兼容地变 |
 
 **检索上诚实的几个数**（同一份基线里最弱的几项，不藏着）：
