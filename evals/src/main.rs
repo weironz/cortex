@@ -16,6 +16,7 @@ use cortex_evals::harness::{ExtractMode, RetrievalConfig};
 use cortex_evals::report::render_text;
 use cortex_evals::runner::{RunOptions, run};
 use cortex_evals::suite::Suite;
+use cortex_memory::retrieval::RecencyMode;
 
 #[derive(Parser)]
 #[command(name = "cortex-evals", about = "Cortex 检索质量评测", version)]
@@ -72,6 +73,43 @@ struct RunArgs {
     #[arg(long)]
     ignore_domain: bool,
 
+    /// 弃权阈值。不给则用生产默认值。扫这条曲线找召回与噪声的平衡点
+    #[arg(long)]
+    abstain_below: Option<f64>,
+
+    /// 时间近因的形态：channel = 独立一路；decay = 只当融合分乘数；off = 不要。
+    /// 默认与生产一致（off，定案见 `RecencyMode` 的文档）
+    #[arg(long, value_enum, default_value_t = Recency::Off)]
+    recency: Recency,
+
+    /// `--recency decay` 时的强度与半衰期（天）
+    #[arg(long, default_value_t = 0.3)]
+    recency_strength: f64,
+    #[arg(long, default_value_t = 3.0)]
+    recency_half_life: f64,
+
+    /// 开 / 关 episodes 那一路（L0 原文倒查）。都不给则用生产默认值
+    #[arg(long)]
+    episodes: bool,
+    #[arg(long, conflicts_with = "episodes")]
+    no_episodes: bool,
+
+    /// 单路强命中的补偿权重。0 = 关。默认与生产一致
+    #[arg(long, default_value_t = 0.04)]
+    peak_bonus: f64,
+
+    /// 语义地板：全库最近的余弦距离超过它就整体弃权。不给则用生产默认值
+    #[arg(long, conflicts_with = "no_semantic_floor")]
+    semantic_floor: Option<f64>,
+
+    /// 强制关掉语义地板（A/B 用）
+    #[arg(long)]
+    no_semantic_floor: bool,
+
+    /// 时间回放退回「纯时间倒序的全貌」（改造前的行为）。A/B 用
+    #[arg(long)]
+    replay_chronological: bool,
+
     /// Recall@5 的最低门槛。跑出来低于它就以非零码退出 —— CI 回归门
     #[arg(long)]
     min_recall5: Option<f64>,
@@ -81,6 +119,13 @@ struct RunArgs {
 enum Mode {
     Seed,
     Llm,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum Recency {
+    Channel,
+    Decay,
+    Off,
 }
 
 impl From<Mode> for ExtractMode {
@@ -155,6 +200,27 @@ async fn run_command(args: RunArgs) -> Result<ExitCode> {
         entity_threshold: args.entity_threshold,
         retrieval: RetrievalConfig {
             context_window: args.context_window,
+            abstain_below: args.abstain_below,
+            recency: match args.recency {
+                Recency::Channel => RecencyMode::Channel,
+                Recency::Off => RecencyMode::Off,
+                Recency::Decay => RecencyMode::Decay {
+                    strength: args.recency_strength,
+                    half_life_days: args.recency_half_life,
+                },
+            },
+            // 三态：显式开 / 显式关 / 不给就跟着生产默认走。
+            // 用 `!no_episodes` 那种两态写法会让「不给参数」永远等于「开」，
+            // 于是默认一改，评测就悄悄跑的不是生产配置了 —— 踩过一次
+            episode_channel: match (args.episodes, args.no_episodes) {
+                (true, _) => true,
+                (_, true) => false,
+                _ => RetrievalConfig::default().episode_channel,
+            },
+            peak_bonus: args.peak_bonus,
+            semantic_floor: args.semantic_floor,
+            no_semantic_floor: args.no_semantic_floor,
+            replay_ranked: !args.replay_chronological,
             ..RetrievalConfig::default()
         },
         only: args.only,

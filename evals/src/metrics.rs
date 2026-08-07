@@ -25,8 +25,8 @@ pub const K_VALUES: [usize; 3] = [1, 5, 10];
 /// 逐路诊断时用的 k —— 与融合侧的主指标对齐。
 pub const CHANNEL_K: usize = 5;
 
-/// 四路的稳定顺序，报告与 JSON 都按它排。
-pub const CHANNELS: [&str; 4] = ["bm25", "vector", "graph", "recency"];
+/// 各路的稳定顺序，报告与 JSON 都按它排。
+pub const CHANNELS: [&str; 5] = ["bm25", "vector", "graph", "recency", "episode"];
 
 /// 一道题是否可计分。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

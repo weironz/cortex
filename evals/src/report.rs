@@ -59,12 +59,25 @@ pub struct RunInfo {
     pub width_vector: i64,
     pub width_graph: i64,
     pub width_recency: i64,
+    pub width_episode: i64,
     pub graph_hops: i32,
     pub recent_days: i64,
     pub context_window: usize,
     pub budget_tokens: usize,
     /// 是否关掉了域加权（`--ignore-domain`）
     pub domain_boost_off: bool,
+    /// 弃权阈值。扫描曲线全靠它区分各次运行
+    pub abstain_below: f64,
+    /// 时间近因的形态：`channel` / `decay(强度,半衰期)` / `off`
+    pub recency_mode: String,
+    /// episodes 那一路开没开
+    pub episode_channel: bool,
+    /// 单路强命中补偿权重
+    pub peak_bonus: f64,
+    /// 语义地板（余弦距离上限）；`None` = 没设
+    pub semantic_floor: Option<f64>,
+    /// 回放走排序版还是全貌版
+    pub replay_ranked: bool,
     pub schema: String,
 }
 
@@ -152,12 +165,29 @@ pub fn render_text(report: &Report) -> String {
     );
     let _ = writeln!(
         s,
-        "　　　图遍历 {} 跳　近因回看 {} 天　context {} token　注入预算 {} token　域加权 {}",
+        "　　　图遍历 {} 跳　近因回看 {} 天　episodes 宽度 {}　context {} token　注入预算 {} token　域加权 {}",
         r.graph_hops,
         r.recent_days,
+        r.width_episode,
         r.context_window,
         r.budget_tokens,
         if r.domain_boost_off { "关" } else { "开" }
+    );
+    // 这一行是 A/B 的身份证：不打出来，两份报告放在一起就分不清谁是谁
+    let _ = writeln!(
+        s,
+        "旋钮：弃权阈值 {:.4}　语义地板 {}　近因形态 {}　episodes 路 {}　强命中补偿 {}　回放 {}",
+        r.abstain_below,
+        r.semantic_floor
+            .map_or_else(|| "无".to_owned(), |v| format!("{v:.2}")),
+        r.recency_mode,
+        if r.episode_channel { "开" } else { "关" },
+        r.peak_bonus,
+        if r.replay_ranked {
+            "排序版"
+        } else {
+            "全貌版"
+        }
     );
     let c = &report.corpus;
     let _ = writeln!(
@@ -430,11 +460,18 @@ mod tests {
                 width_vector: 40,
                 width_graph: 30,
                 width_recency: 20,
+                width_episode: 20,
                 graph_hops: 2,
                 recent_days: 7,
                 context_window: 128_000,
                 budget_tokens: 6000,
                 domain_boost_off: false,
+                abstain_below: 0.017,
+                recency_mode: "off".into(),
+                episode_channel: true,
+                peak_bonus: 0.04,
+                semantic_floor: Some(0.5),
+                replay_ranked: true,
                 schema: "x".into(),
             },
             corpus: CorpusInfo {

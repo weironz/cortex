@@ -1453,6 +1453,37 @@
     { "id": "q105", "type": "unanswerable", "lang": "zh", "domain": "coding",
       "query": "我们给 embedding 换成 OpenAI 的 API 了吗？",
       "forbidden": [["不出网"], ["HashEmbedder"]],
-      "note": "答案是「没有」，但把隐私规则端出来并不等于回答了这个问题" }
+      "note": "答案是「没有」，但把隐私规则端出来并不等于回答了这个问题" },
+
+    { "id": "q106", "type": "chinese_semantic", "lang": "zh", "domain": "coding",
+      "query": "当初说 Postgres 会把中文整句切开，最后是怎么解决的？",
+      "gold": [["jieba-rs"]],
+      "note": "出处追问：「整句切开」只出现在当时的原话里，抽出来的 statement 一个字都没留。四路只查 facts 时这类问法无路可走 —— 这是 episodes 那一路存在的理由" },
+
+    { "id": "q107", "type": "chinese_semantic", "lang": "zh", "domain": "coding",
+      "query": "那次讨论里说九张表各自的序列互不可比，最后游标怎么定的？",
+      "gold": [["sync_log outbox"]],
+      "forbidden": [["各表自带一个 sync_seq 列"]],
+      "note": "出处追问：「九张表」「互不可比」只在 L0 原文里。同时验证倒查回来的是新值而不是被取代的旧值" },
+
+    { "id": "q108", "type": "exact_term", "lang": "mixed", "domain": "coding",
+      "query": "上次说踩过两个依赖的坑，分别是哪两个？",
+      "gold": [["rustls-tls"], ["sqlx-core"]],
+      "note": "出处追问：「两个坑」是原话的说法，两条 gold 出自同一段对话 —— 按 episode 倒查能一次带回一对，按 statement 检索则两条互不相关" },
+
+    { "id": "q109", "type": "chinese_semantic", "lang": "zh", "domain": "coding",
+      "query": "当时提到开发机只有一块盘，那 RustFS 要怎么才能起来？",
+      "gold": [["RUSTFS_UNSAFE_BYPASS_DISK_CHECK"]],
+      "note": "出处追问：「只有一块盘」是原话，statement 里写的是「磁盘独立性检查」" },
+
+    { "id": "q110", "type": "exact_term", "lang": "en", "domain": "coding",
+      "query": "In the discussion where we wrote the injection contract for the repo docs, what token cap did we set?",
+      "gold": [["6000 tokens"]],
+      "note": "出处追问的英文版：injection contract / repo docs 都只在 L0 原文里出现过" },
+
+    { "id": "q111", "type": "chinese_semantic", "lang": "zh", "domain": "coding",
+      "query": "关于记忆能不能改这件事，当时确认了哪几种失效方式？",
+      "gold": [["corrected", "retracted", "superseded"]],
+      "note": "出处追问：「可编辑性」是原话的提法。三种失效落在同一条 statement 里，所以是一组 gold 而不是三组" }
   ]
 }

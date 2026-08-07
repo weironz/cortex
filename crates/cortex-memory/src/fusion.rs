@@ -1,7 +1,7 @@
-//! 四路召回的融合排序。
+//! 多路召回的融合排序。
 //!
 //! 用 **RRF（Reciprocal Rank Fusion）**而非加权求和：
-//! 四路的分数量纲完全不同（BM25 是无上界的 tf-idf、向量是 [-1,1] 余弦、
+//! 各路的分数量纲完全不同（BM25 是无上界的 tf-idf、向量是 [-1,1] 余弦、
 //! 图遍历是跳数、时间近因是时间戳），加权求和的权重根本调不出来。
 //! RRF 只用**排名**不用分数，因此对量纲免疫、无需训练、无需调参。
 //!
@@ -12,6 +12,14 @@
 //!
 //! 附带好处：换 embedding 模型期间新旧向量不在同一语义空间、分数不可比，
 //! 但 RRF 只看各自路内的排名，**天然兼容混合状态**（见 memory.md §七）。
+//!
+//! # 它的两个代价，以及各自的解药
+//!
+//! 1. **弱共识压过强命中** —— 见 [`apply_peak_bonus`]。
+//! 2. **分数不含绝对相关性** —— RRF 分是排名的函数，库里根本没有答案时
+//!    各路照样各自返回最好的几条、照样互相印证、分照样很高。
+//!    这一条**在这个模块里解决不了**，必须由检索器拿余弦距离
+//!    （`retrieval::BGE_M3_SEMANTIC_FLOOR`）在融合之前判。
 
 use std::collections::HashMap;
 
@@ -29,6 +37,8 @@ pub enum Channel {
     Graph,
     /// 时间近因 —— 上下文连续性
     Recency,
+    /// L0 原文全文 —— 从 episode 倒查它抽出来的事实（出处追问）
+    Episode,
 }
 
 impl Channel {
@@ -39,6 +49,7 @@ impl Channel {
             Self::Vector => "vector",
             Self::Graph => "graph",
             Self::Recency => "recency",
+            Self::Episode => "episode",
         }
     }
 }
@@ -87,13 +98,85 @@ where
 
     let mut out: Vec<Fused<T>> = acc.into_values().collect();
     // 分数降序；同分时按命中路数多的优先（多路共识更可信）
-    out.sort_by(|a, b| {
+    sort_by_score(&mut out);
+    out
+}
+
+/// 单路强命中的补偿项 —— RRF 的已知代价的解药。
+///
+/// # 它修的是什么
+///
+/// RRF 只认排名，于是「两路都排第 10」（0.0141×2 ≈ 0.028）会压过
+/// 「一路排第 1」（0.0164）。多数时候这正是想要的 —— 跨路共识确实更可信 ——
+/// 但当某一路给出的是**强信号**时它就成了误伤：一条被 BM25 精确命中在
+/// 榜首的事实，会被几条「哪一路都排在十几名」的话题相邻项挤下去。
+///
+/// 解法不是给某一路加权（那要按题型调，调不出来），而是**再叠一个更陡的核**：
+///
+/// ```text
+/// score(d) += weight / (PEAK_K + min_i rank_i(d))
+/// ```
+///
+/// `PEAK_K` 取 2 而不是 60：排名 0 与排名 10 在 k=60 下只差 15%，
+/// 根本区分不出「强命中」；k=2 下差 6 倍，只有真正的头部才拿得到补偿。
+/// `weight` 为 0 即关闭。
+///
+/// 它**不是**「保底进 top-N」那种硬插队。硬插队要么改写排序、要么占死名额，
+/// 两者都会在「强命中其实是错的」时把错误顶到最前；而这里只是加一项，
+/// 真正的强共识（三路以上）仍然压得过它。权重取值见
+/// `retrieval::Retriever::new` 里的注释与那条扫描曲线。
+pub const PEAK_K: f64 = 2.0;
+
+/// 见 [`PEAK_K`]。`weight` 为 0 时直接返回，不重排。
+pub fn apply_peak_bonus<T>(fused: &mut [Fused<T>], weight: f64) {
+    if weight <= 0.0 {
+        return;
+    }
+    for f in fused.iter_mut() {
+        let best = f.hits.iter().map(|(_, r)| *r).min().unwrap_or(usize::MAX);
+        if best == usize::MAX {
+            continue;
+        }
+        f.score += weight / (PEAK_K + best as f64);
+    }
+    sort_by_score(fused);
+}
+
+/// 新鲜度衰减：越新的事实分越高。
+///
+/// 这是「时间近因」的**另一种形态** —— 不占一路召回，只当融合分的乘数。
+/// 两种形态互斥，孰优孰劣见 `retrieval::RecencyMode` 的注释与评测数字。
+///
+/// 系数是 `1 + strength · 0.5^(age / half_life)`：最新的事实拿满
+/// `1 + strength`，一个半衰期前的拿一半，很久以前的趋近 1（即不加权）。
+/// 用**乘数**而不是加数，是为了不改变「零分即弃权」这个语义 ——
+/// 加数会把所有事实的分抬到弃权阈值之上。
+pub fn apply_recency_decay<T, F>(
+    fused: &mut [Fused<T>],
+    now: chrono::DateTime<chrono::Utc>,
+    strength: f64,
+    half_life_days: f64,
+    created_at_of: F,
+) where
+    F: Fn(&T) -> chrono::DateTime<chrono::Utc>,
+{
+    if strength <= 0.0 || half_life_days <= 0.0 {
+        return;
+    }
+    for f in fused.iter_mut() {
+        let age_days = (now - created_at_of(&f.item)).num_seconds().max(0) as f64 / 86_400.0;
+        f.score *= 1.0 + strength * 0.5f64.powf(age_days / half_life_days);
+    }
+    sort_by_score(fused);
+}
+
+fn sort_by_score<T>(fused: &mut [Fused<T>]) {
+    fused.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| b.hits.len().cmp(&a.hits.len()))
     });
-    out
 }
 
 /// 领域加权：当前对话领域内的事实加分。
@@ -202,5 +285,100 @@ mod tests {
     fn empty_input_yields_empty() {
         let out = rrf::<Doc, _, _>(&[], |x| x.id);
         assert!(out.is_empty());
+    }
+
+    /// 两路都把 `consensus` 排在第 11 名（rank 10），一路把 `strong` 排第一。
+    /// 填充项各路互不相同，免得它们自己攒出共识来。
+    fn lone_strong_vs_deep_consensus() -> Vec<(Channel, Vec<Doc>)> {
+        let deep = |tag: &'static str| -> Vec<Doc> {
+            (0..10)
+                .map(|i| Doc {
+                    id: Box::leak(format!("{tag}{i}").into_boxed_str()),
+                    domain: None,
+                })
+                .chain(std::iter::once(d("consensus")))
+                .collect()
+        };
+        vec![
+            (Channel::Bm25, vec![d("strong")]),
+            (Channel::Vector, deep("v")),
+            (Channel::Episode, deep("e")),
+        ]
+    }
+
+    #[test]
+    fn peak_bonus_rescues_a_lone_strong_hit() {
+        // 只比这两条的相对位置：填充项自己也在各路排前面，会拿到同样的补偿，
+        // 把它们卷进断言只会测出「rank 0 的都涨了」这种废话
+        let rank_of = |out: &[Fused<Doc>], id: &str| {
+            out.iter()
+                .position(|f| f.item.id == id)
+                .expect("应当在列表里")
+        };
+
+        let mut out = rrf(&lone_strong_vs_deep_consensus(), |x| x.id);
+        assert!(
+            rank_of(&out, "consensus") < rank_of(&out, "strong"),
+            "没有补偿时两路的深共识（≈0.028）本就压过单路第一（≈0.016）—— 这正是要修的那个代价"
+        );
+
+        // 生产默认权重。0.04/2 = 0.02，约等于「白送它一路共识」
+        apply_peak_bonus(&mut out, 0.04);
+        assert!(
+            rank_of(&out, "strong") < rank_of(&out, "consensus"),
+            "某一路排第一的强命中应当被补偿项抬到深共识之上：{out:?}"
+        );
+    }
+
+    #[test]
+    fn peak_bonus_does_not_beat_real_consensus() {
+        // 它是**补偿**不是**保底**：三路都排前列的结果仍然该赢，
+        // 否则 RRF 的共识语义就名存实亡了
+        let channels = vec![
+            (Channel::Bm25, vec![d("strong")]),
+            (Channel::Vector, vec![d("agreed"), d("strong")]),
+            (Channel::Graph, vec![d("agreed")]),
+            (Channel::Episode, vec![d("agreed")]),
+        ];
+        let mut out = rrf(&channels, |x| x.id);
+        apply_peak_bonus(&mut out, 0.04);
+        assert_eq!(
+            out[0].item.id,
+            "agreed",
+            "三路共识不该被单路补偿掀翻：{:?}",
+            &out[..2]
+        );
+    }
+
+    #[test]
+    fn peak_bonus_of_zero_changes_nothing() {
+        let channels = vec![(Channel::Bm25, vec![d("a"), d("b")])];
+        let mut out = rrf(&channels, |x| x.id);
+        let before: Vec<f64> = out.iter().map(|f| f.score).collect();
+        apply_peak_bonus(&mut out, 0.0);
+        let after: Vec<f64> = out.iter().map(|f| f.score).collect();
+        assert_eq!(before, after, "权重为 0 必须是恒等操作，否则默认行为会漂");
+    }
+
+    #[test]
+    fn recency_decay_reorders_by_age() {
+        // 这条断言是 `RecencyMode::Decay` 唯一的正确性保证：评测题集的语料
+        // 是一次 ingest 写完的，created_at 没有跨度，衰减在那里量不出来
+        let now = chrono::Utc::now();
+        let channels = vec![(Channel::Bm25, vec![d("old"), d("new")])];
+        let mut out = rrf(&channels, |x| x.id);
+        assert_eq!(out[0].item.id, "old", "衰减前按 BM25 名次");
+
+        apply_recency_decay(&mut out, now, 0.5, 3.0, |x: &Doc| {
+            if x.id == "new" {
+                now
+            } else {
+                now - chrono::Duration::days(90)
+            }
+        });
+        assert_eq!(
+            out[0].item.id, "new",
+            "同为一路命中时，九十天前的那条不该压过刚发生的"
+        );
     }
 }

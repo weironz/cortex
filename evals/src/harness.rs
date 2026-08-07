@@ -27,7 +27,6 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -35,10 +34,10 @@ use chrono::{DateTime, Utc};
 use cortex_core::Id;
 use cortex_core::config::LlmConfig;
 use cortex_llm::LlmClient;
-use cortex_memory::embed::{Embedder, HashEmbedder, SharedEmbedder};
+use cortex_memory::embed::{Backend, Embedder, SharedEmbedder, build_embedder};
 use cortex_memory::extract::{CandidateFact, EntityRef, ExtractContext, Extractor, ObjectRef};
 use cortex_memory::injection::Budget;
-use cortex_memory::retrieval::{RecallWidth, Retriever};
+use cortex_memory::retrieval::{GRAPH_SEED_LIMIT, RecallWidth, RecencyMode, Retriever};
 use cortex_memory::tokenize;
 use cortex_store::{NewEpisode, Role, Store, Vector};
 use sqlx::AssertSqlSafe;
@@ -54,13 +53,6 @@ const SCHEMA_PREFIX: &str = "cortex_eval_";
 const STALE_SCHEMA_AGE_MS: u128 = 30 * 60 * 1000;
 
 pub const DEVICE: &str = "eval-harness";
-
-/// 图遍历取种子实体的条数。
-///
-/// 与 `cortex_memory::retrieval::Retriever::recall_all` 里的硬编码值保持一致。
-/// 那个值没有对外暴露，这里只能复刻 —— 若上游改了它，逐路诊断的 graph 一路
-/// 会与融合结果不一致（融合侧的数字仍然是对的，因为那是真跑出来的）。
-const GRAPH_SEED_LIMIT: i64 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractMode {
@@ -420,10 +412,23 @@ pub struct RetrievalConfig {
     pub context_window: usize,
     /// 时间回放取多少条。
     ///
-    /// 取存储层的上限 200：`facts_as_of` **没有任何相关性排序**（按 `created_at`
-    /// 降序），限得小了，测出来的就是「gold 够不够新」而不是「回放对不对」。
-    /// 把限制拉满，指标才落在排序上 —— 这也正是要被量出来的那笔债。
+    /// 取存储层的上限 200：回放的三路都在同一份快照上排序，限得小了，
+    /// 测出来的是「快照够不够大」而不是「排序对不对」。
     pub replay_limit: i64,
+    /// 回放走带查询的排序版还是纯时间倒序的全貌版。A/B 用。
+    pub replay_ranked: bool,
+    /// 弃权阈值。`None` 用生产默认值（阈值扫描用）
+    pub abstain_below: Option<f64>,
+    pub recency: RecencyMode,
+    pub episode_channel: bool,
+    pub peak_bonus: f64,
+    /// 语义地板（余弦距离上限）。`None` = 用生产默认值
+    pub semantic_floor: Option<f64>,
+    /// 强制关掉语义地板。
+    ///
+    /// 与 `semantic_floor: None` 不是一回事：`None` 是「按生产默认走」，
+    /// 这个是「明确不要」。A/B 里两种意图都得表达得出来
+    pub no_semantic_floor: bool,
 }
 
 impl Default for RetrievalConfig {
@@ -433,6 +438,13 @@ impl Default for RetrievalConfig {
             budget: Budget::default(),
             context_window: 128_000,
             replay_limit: 200,
+            replay_ranked: true,
+            abstain_below: None,
+            recency: RecencyMode::Off,
+            episode_channel: false,
+            peak_bonus: 0.04,
+            semantic_floor: None,
+            no_semantic_floor: false,
         }
     }
 }
@@ -446,10 +458,22 @@ pub struct EvalRetriever {
 impl EvalRetriever {
     #[must_use]
     pub fn new(embedder: SharedEmbedder, config: RetrievalConfig) -> Self {
+        let mut retriever = Retriever::new(embedder.clone())
+            .with_width(config.width)
+            .with_budget(config.budget)
+            .with_recency(config.recency)
+            .with_episode_channel(config.episode_channel)
+            .with_peak_bonus(config.peak_bonus);
+        if let Some(t) = config.abstain_below {
+            retriever = retriever.with_abstain_below(t);
+        }
+        if config.no_semantic_floor {
+            retriever = retriever.with_semantic_floor(None);
+        } else if config.semantic_floor.is_some() {
+            retriever = retriever.with_semantic_floor(config.semantic_floor);
+        }
         Self {
-            retriever: Retriever::new(embedder.clone())
-                .with_width(config.width)
-                .with_budget(config.budget),
+            retriever,
             embedder,
             config,
         }
@@ -458,6 +482,12 @@ impl EvalRetriever {
     #[must_use]
     pub fn embedding_model(&self) -> String {
         self.embedder.model_id().to_owned()
+    }
+
+    /// 实际生效的语义地板（默认值随 embedding 后端而变，得问出来）。
+    #[must_use]
+    pub fn semantic_floor(&self) -> Option<f64> {
+        self.retriever.semantic_floor()
     }
 
     /// 走生产路径的四路召回 + RRF + 域加权 + 预算截断。
@@ -476,17 +506,36 @@ impl EvalRetriever {
     }
 
     /// 按系统时间回放：在 `as_of` 那一刻，Cortex 认为哪些事实为真。
-    pub async fn replay(&self, store: &Store, as_of: DateTime<Utc>) -> Result<Vec<ScoredItem>> {
-        let out = self
-            .retriever
-            .retrieve_as_of(
-                store,
-                as_of,
-                self.config.replay_limit,
-                self.config.context_window,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("时间回放失败：{e}"))?;
+    ///
+    /// `replay_ranked` 决定走带查询的排序版还是纯时间倒序的全貌版 ——
+    /// 这个开关的存在本身就是那次 A/B 的证据。
+    pub async fn replay(
+        &self,
+        store: &Store,
+        query: &str,
+        as_of: DateTime<Utc>,
+    ) -> Result<Vec<ScoredItem>> {
+        let out = if self.config.replay_ranked {
+            self.retriever
+                .retrieve_as_of_ranked(
+                    store,
+                    query,
+                    as_of,
+                    self.config.replay_limit,
+                    self.config.context_window,
+                )
+                .await
+        } else {
+            self.retriever
+                .retrieve_as_of(
+                    store,
+                    as_of,
+                    self.config.replay_limit,
+                    self.config.context_window,
+                )
+                .await
+        }
+        .map_err(|e| anyhow::anyhow!("时间回放失败：{e}"))?;
         Ok(zip_items(out))
     }
 
@@ -512,13 +561,17 @@ impl EvalRetriever {
         let seeds = store.entities_matching(&terms, GRAPH_SEED_LIMIT).await?;
 
         let w = self.config.width;
-        let (bm25, vector, graph, recency) = tokio::join!(
+        let (bm25, vector, graph, recency, episode) = tokio::join!(
             store.recall_bm25(&tsquery, w.bm25),
             store.recall_vector(&embedding, self.embedder.model_id(), w.vector),
             store.recall_graph(&seeds, w.graph_hops, w.graph),
             store.recall_recent(w.recent_days, w.recent),
+            store.recall_via_episodes(&tsquery, w.episode_docs, w.episode),
         );
 
+        // 逐路诊断**永远发全部五路**，与融合侧是否启用它们无关：
+        // 「关掉这一路之后它本来能捞到什么」正是 A/B 时最想看的那个数字，
+        // 跟着开关一起关掉就只剩一列零，什么都判断不了
         Ok(vec![
             ChannelRun {
                 name: "bm25",
@@ -535,6 +588,10 @@ impl EvalRetriever {
             ChannelRun {
                 name: "recency",
                 statements: statements(recency?),
+            },
+            ChannelRun {
+                name: "episode",
+                statements: statements(episode?),
             },
         ])
     }
@@ -556,15 +613,23 @@ fn zip_items(out: cortex_memory::retrieval::Retrieved) -> Vec<ScoredItem> {
         .collect()
 }
 
-/// 默认的向量化后端。
+/// 默认的向量化后端 —— **跟生产同一条选择逻辑**。
 ///
-/// **当前工作区里没有任何真实 embedding 实现** —— `cortex-memory::embed`
-/// 只有 `HashEmbedder`（字符 bigram 散列），cortexd 的 `new_live` 也用的是它。
-/// 所以向量那一路在生产里同样没有语义能力，评测数字难看是**如实反映现状**，
-/// 不是评测环境的缺陷。
-#[must_use]
-pub fn default_embedder() -> SharedEmbedder {
-    Arc::new(HashEmbedder::new())
+/// 走 `Backend::from_env()`（`CORTEX_EMBED_BACKEND`，默认 `fast`），
+/// 而不是写死 `HashEmbedder`。写死过一版，代价是基线数字全都是在
+/// 「向量那一路只是第二条词法通道」的前提下测出来的 —— 换成真实语义模型后
+/// 逐路结论要整体推翻，白调了一轮参数。
+///
+/// 设 `CORTEX_EMBED_BACKEND=hash` 可切回散列桩做对照（也是无网 CI 的走法）。
+///
+/// # Errors
+///
+/// 环境变量非法，或模型加载/下载失败。
+pub async fn default_embedder() -> Result<SharedEmbedder> {
+    let backend = Backend::from_env().map_err(|e| anyhow::anyhow!("{e}"))?;
+    build_embedder(backend)
+        .await
+        .map_err(|e| anyhow::anyhow!("加载 embedding 后端失败：{e}"))
 }
 
 #[cfg(test)]

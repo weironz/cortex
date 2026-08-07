@@ -1,12 +1,14 @@
-//! 四路召回的查询侧。
+//! 多路召回的查询侧。
 //!
 //! 每一路各自返回**已按该路自身相关性排好序**的候选，融合交给
 //! `cortex-memory::fusion` 的 RRF 完成 —— 存储层不做排序策略，
-//! 只负责把各路的原始结果捞出来。
+//! 只负责把各路的原始结果捞出来。哪几路要、哪几路不要，
+//! 由 `cortex-memory::retrieval` 按评测数据裁决，不在这里判断。
 //!
-//! 全部只查 `active_facts` 视图（已失效的事实不该进日常检索）。
-//! 唯一例外是按系统时间回放的 [`Store::facts_as_of`]，
-//! 它要的正是「在那个时刻我以为什么是真的」。
+//! 日常召回全部只查 `active_facts` 视图（已失效的事实不该进日常检索）。
+//! 例外是 `facts_as_of*` 那一组：它们要的正是「在那个时刻我以为什么是真的」，
+//! 必须回到 `facts` + `fact_events` 重放。三条回放召回共用一份快照判定
+//! （`as_of_snapshot!`），差别只在**快照之上按什么排序**。
 
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow as _, Row as _};
@@ -19,6 +21,71 @@ use crate::store::Store;
 /// 太少会让 RRF 没有融合空间，太多会拖慢图遍历那一路。
 const MAX_LIMIT: i64 = 200;
 
+/// `facts` 表的全部列。四路召回与三条回放召回都要原样取回，
+/// 抄七遍的下场是加一列时漏改其中一处，而且报错点离现场很远。
+macro_rules! fact_columns {
+    () => {
+        fact_columns!("")
+    };
+    // 有 JOIN 的查询必须带表别名前缀，否则 `id` 会与被 JOIN 的一侧撞名
+    ($p:literal) => {
+        concat!(
+            $p,
+            "id, ",
+            $p,
+            "subject_id, ",
+            $p,
+            "predicate, ",
+            $p,
+            "object_text, ",
+            $p,
+            "object_entity_id, ",
+            $p,
+            "statement, ",
+            $p,
+            "embedding, ",
+            $p,
+            "embedding_model, ",
+            $p,
+            "domain, ",
+            $p,
+            "confidence, ",
+            $p,
+            "valid_at, ",
+            $p,
+            "source_episode_id, ",
+            $p,
+            "extracted_by, ",
+            $p,
+            "device_id, ",
+            $p,
+            "created_at"
+        )
+    };
+}
+
+/// 「在 `$1` 那一刻 Cortex 认为仍然为真」的快照。
+///
+/// 三条回放召回（近因 / BM25 / 向量）共用同一份判定。**必须查 `facts` 而非
+/// `active_facts`**：后者是**当前**的有效集，用它做回放会把「后来才被推翻的
+/// 结论」提前抹掉，那正好是回放要看的东西。
+macro_rules! as_of_snapshot {
+    () => {
+        concat!(
+            "SELECT ",
+            fact_columns!(),
+            " FROM facts f
+              WHERE f.created_at <= $1
+                AND NOT EXISTS (
+                    SELECT 1 FROM fact_events e
+                     WHERE e.fact_id = f.id
+                       AND e.op = 'invalidate'
+                       AND e.created_at <= $1
+                )"
+        )
+    };
+}
+
 impl Store {
     /// ① BM25 全文召回 —— 专有名词与精确匹配。
     ///
@@ -29,15 +96,14 @@ impl Store {
         if tsquery_input.trim().is_empty() {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query_as::<_, Fact>(
-            "SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
-                    embedding, embedding_model, domain, confidence, valid_at,
-                    source_episode_id, extracted_by, device_id, created_at
-               FROM active_facts
+        let rows = sqlx::query_as::<_, Fact>(concat!(
+            "SELECT ",
+            fact_columns!(),
+            "  FROM active_facts
               WHERE tsv @@ to_tsquery('simple', $1)
               ORDER BY ts_rank(tsv, to_tsquery('simple', $1)) DESC, created_at DESC
-              LIMIT $2",
-        )
+              LIMIT $2"
+        ))
         .bind(tsquery_input)
         .bind(limit.clamp(1, MAX_LIMIT))
         .fetch_all(self.pool())
@@ -55,21 +121,64 @@ impl Store {
         embedding_model: &str,
         limit: i64,
     ) -> Result<Vec<Fact>> {
-        let rows = sqlx::query_as::<_, Fact>(
-            "SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
-                    embedding, embedding_model, domain, confidence, valid_at,
-                    source_episode_id, extracted_by, device_id, created_at
-               FROM active_facts
+        let rows = sqlx::query_as::<_, Fact>(concat!(
+            "SELECT ",
+            fact_columns!(),
+            "  FROM active_facts
               WHERE embedding IS NOT NULL AND embedding_model = $2
               ORDER BY embedding <=> $1
-              LIMIT $3",
-        )
+              LIMIT $3"
+        ))
         .bind(embedding)
         .bind(embedding_model)
         .bind(limit.clamp(1, MAX_LIMIT))
         .fetch_all(self.pool())
         .await?;
         Ok(rows)
+    }
+
+    /// ② 的带分数版本 —— 除事实外一并返回**余弦距离**（不是相似度）。
+    ///
+    /// # 为什么要把分数捞出来
+    ///
+    /// RRF 只用排名，这是它的优点（量纲免疫），但也意味着融合分**完全不含
+    /// 绝对相关性信息**：一个库里根本没有答案的问题，四路照样各自返回自己
+    /// 最好的那几条，它们照样互相印证，融合分照样很高。评测实测：
+    /// 弃权阈值从 0 扫到 0.045，误召率纹丝不动地停在 0.370 ——
+    /// 那道闸门管的是**注入条数**，不是**相不相关**。
+    ///
+    /// 唯一还带绝对量纲的信号就是这里的余弦距离：它由模型定标，
+    /// 与语料规模无关。相似度 = 1 - 距离。
+    ///
+    /// 保留不带分数的 [`Store::recall_vector`] 是因为召回路本身不需要分数，
+    /// 而多返回一列会让那条热路径每次多搬一遍 f64。
+    pub async fn recall_vector_scored(
+        &self,
+        embedding: &pgvector::Vector,
+        embedding_model: &str,
+        limit: i64,
+    ) -> Result<Vec<(Fact, f64)>> {
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            fact_columns!(),
+            ", embedding <=> $1 AS distance
+               FROM active_facts
+              WHERE embedding IS NOT NULL AND embedding_model = $2
+              ORDER BY embedding <=> $1
+              LIMIT $3"
+        ))
+        .bind(embedding)
+        .bind(embedding_model)
+        .bind(limit.clamp(1, MAX_LIMIT))
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.into_iter()
+            .map(|r| {
+                let distance: f64 = r.try_get("distance")?;
+                Ok((Fact::from_row(&r)?, distance))
+            })
+            .collect()
     }
 
     /// ③ 图遍历召回 —— 从命中实体出发扩展 1–2 跳的关联事实。
@@ -99,7 +208,7 @@ impl Store {
         if seed_entity_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query_as::<_, Fact>(
+        let rows = sqlx::query_as::<_, Fact>(concat!(
             "WITH RECURSIVE seeds AS (
                  SELECT DISTINCT COALESCE(c.canonical, s.id) AS id
                    FROM unnest($1::text[]) AS s(id)
@@ -126,13 +235,12 @@ impl Store {
                      ON f.subject_id = r.entity_id OR f.object_entity_id = r.entity_id
                   ORDER BY f.id, r.hop
              )
-             SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
-                    embedding, embedding_model, domain, confidence, valid_at,
-                    source_episode_id, extracted_by, device_id, created_at
-               FROM nearest
+             SELECT ",
+            fact_columns!(),
+            "  FROM nearest
               ORDER BY hop, created_at DESC
-              LIMIT $3",
-        )
+              LIMIT $3"
+        ))
         .bind(seed_entity_ids)
         .bind(max_hops.clamp(1, 3))
         .bind(limit.clamp(1, MAX_LIMIT))
@@ -146,16 +254,57 @@ impl Store {
     /// 按**系统时间**（`created_at`，即 Cortex 何时知道）而非事件时间排序：
     /// 「最近聊过什么」问的是认知的新鲜度，不是世界的时间线。
     pub async fn recall_recent(&self, within_days: i64, limit: i64) -> Result<Vec<Fact>> {
-        let rows = sqlx::query_as::<_, Fact>(
-            "SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
-                    embedding, embedding_model, domain, confidence, valid_at,
-                    source_episode_id, extracted_by, device_id, created_at
-               FROM active_facts
+        let rows = sqlx::query_as::<_, Fact>(concat!(
+            "SELECT ",
+            fact_columns!(),
+            "  FROM active_facts
               WHERE created_at > now() - make_interval(days => $1::int)
               ORDER BY created_at DESC
-              LIMIT $2",
-        )
+              LIMIT $2"
+        ))
         .bind(within_days.clamp(1, 3650) as i32)
+        .bind(limit.clamp(1, MAX_LIMIT))
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// ⑤ episodes 全文召回 —— 从**原始对话**倒查它抽出来的事实。
+    ///
+    /// 前四路全部只看 `facts.statement`，也就是抽取器改写过的一句话。
+    /// 「上次我们说的那个」「你是从哪儿知道的」这类**出处追问**里，
+    /// 用户复述的是当时的原话，而原话的措辞往往一个字都没进 statement——
+    /// 于是 BM25 那一路查无此词，向量那一路也对不上。
+    /// `episodes.tsv` 的 GIN 索引建了却一直没人用，这一路就是补上它。
+    ///
+    /// 排序按 episode 的 `ts_rank`，同一 episode 内按事实新旧。
+    /// 返回的仍然是 `Fact` —— 注入契约只认事实，L0 原文不进 prompt。
+    pub async fn recall_via_episodes(
+        &self,
+        tsquery_input: &str,
+        episode_limit: i64,
+        limit: i64,
+    ) -> Result<Vec<Fact>> {
+        if tsquery_input.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, Fact>(concat!(
+            "WITH hit AS (
+                 SELECT e.id, ts_rank(e.tsv, to_tsquery('simple', $1)) AS ep_rank
+                   FROM episodes e
+                  WHERE e.tsv @@ to_tsquery('simple', $1)
+                  ORDER BY ep_rank DESC, e.occurred_at DESC
+                  LIMIT $2
+             )
+             SELECT ",
+            fact_columns!("f."),
+            "   FROM active_facts f
+                JOIN hit ON hit.id = f.source_episode_id
+               ORDER BY hit.ep_rank DESC, f.created_at DESC
+               LIMIT $3"
+        ))
+        .bind(tsquery_input)
+        .bind(episode_limit.clamp(1, MAX_LIMIT))
         .bind(limit.clamp(1, MAX_LIMIT))
         .fetch_all(self.pool())
         .await?;
@@ -167,23 +316,71 @@ impl Store {
     /// 这是双时间轴的核心能力，回答「三个月前我以为什么」。
     /// 注意它不能查 `active_facts` 视图——那是**当前**的有效集；
     /// 必须回到 `facts` + `fact_events` 按时间重放。
+    ///
+    /// 只按 `created_at` 降序 —— 这是「当时的全貌」。带查询词的回放走
+    /// [`Store::facts_as_of_bm25`] 与 [`Store::facts_as_of_vector`]，
+    /// 三者在 `cortex-memory` 侧再 RRF 到一起。
     pub async fn facts_as_of(&self, as_of: DateTime<Utc>, limit: i64) -> Result<Vec<Fact>> {
-        let rows = sqlx::query_as::<_, Fact>(
-            "SELECT id, subject_id, predicate, object_text, object_entity_id, statement,
-                    embedding, embedding_model, domain, confidence, valid_at,
-                    source_episode_id, extracted_by, device_id, created_at
-               FROM facts f
-              WHERE f.created_at <= $1
-                AND NOT EXISTS (
-                    SELECT 1 FROM fact_events e
-                     WHERE e.fact_id = f.id
-                       AND e.op = 'invalidate'
-                       AND e.created_at <= $1
-                )
-              ORDER BY f.created_at DESC
-              LIMIT $2",
-        )
+        let rows = sqlx::query_as::<_, Fact>(concat!(
+            as_of_snapshot!(),
+            " ORDER BY f.created_at DESC LIMIT $2"
+        ))
         .bind(as_of)
+        .bind(limit.clamp(1, MAX_LIMIT))
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 回放快照上的 BM25 排序。
+    ///
+    /// # 为什么不是「先取全貌再在内存里排」
+    ///
+    /// 全貌在十万条量级根本取不回来。回放的相关性排序必须**下推到 SQL**，
+    /// 让 `idx_facts_tsv` 那个 GIN 索引干活，否则这条路在语料变大后
+    /// 只会从「排序不对」退化成「查不动」。
+    pub async fn facts_as_of_bm25(
+        &self,
+        as_of: DateTime<Utc>,
+        tsquery_input: &str,
+        limit: i64,
+    ) -> Result<Vec<Fact>> {
+        if tsquery_input.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, Fact>(concat!(
+            as_of_snapshot!(),
+            "   AND f.tsv @@ to_tsquery('simple', $2)
+             ORDER BY ts_rank(f.tsv, to_tsquery('simple', $2)) DESC, f.created_at DESC
+             LIMIT $3"
+        ))
+        .bind(as_of)
+        .bind(tsquery_input)
+        .bind(limit.clamp(1, MAX_LIMIT))
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 回放快照上的向量排序。理由同 [`Store::facts_as_of_bm25`]。
+    ///
+    /// 同样按 `embedding_model` 过滤：跨模型的距离不可比，回放也不例外。
+    pub async fn facts_as_of_vector(
+        &self,
+        as_of: DateTime<Utc>,
+        embedding: &pgvector::Vector,
+        embedding_model: &str,
+        limit: i64,
+    ) -> Result<Vec<Fact>> {
+        let rows = sqlx::query_as::<_, Fact>(concat!(
+            as_of_snapshot!(),
+            "   AND f.embedding IS NOT NULL AND f.embedding_model = $3
+             ORDER BY f.embedding <=> $2
+             LIMIT $4"
+        ))
+        .bind(as_of)
+        .bind(embedding)
+        .bind(embedding_model)
         .bind(limit.clamp(1, MAX_LIMIT))
         .fetch_all(self.pool())
         .await?;

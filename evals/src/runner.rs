@@ -10,6 +10,19 @@ use crate::matcher::QuestionMatchers;
 use crate::metrics::{Aggregate, QuestionResult, Status, aggregate, score};
 use crate::report::{CorpusInfo, Report, RunInfo, SuiteInfo, kind_order, lang_order};
 use crate::suite::{Question, QuestionKind, Suite};
+use cortex_memory::retrieval::{DEFAULT_ABSTAIN_BELOW, RecencyMode};
+
+/// 把近因形态写成报告里那一行字。
+fn describe_recency(mode: RecencyMode) -> String {
+    match mode {
+        RecencyMode::Channel => "channel".to_owned(),
+        RecencyMode::Off => "off".to_owned(),
+        RecencyMode::Decay {
+            strength,
+            half_life_days,
+        } => format!("decay(强度 {strength}，半衰期 {half_life_days} 天)"),
+    }
+}
 
 pub struct RunOptions {
     pub database_url: String,
@@ -44,7 +57,7 @@ pub async fn run(suite: &Suite, opts: &RunOptions) -> Result<Report> {
 }
 
 async fn run_inner(db: &EvalDb, suite: &Suite, opts: &RunOptions) -> Result<Report> {
-    let embedder = default_embedder();
+    let embedder = default_embedder().await?;
     let extractor = build_extractor(embedder.clone(), opts.mode, opts.entity_threshold)?;
 
     let (ingest, checkpoints) = ingest_suite(db, suite, &extractor, opts.mode).await?;
@@ -96,11 +109,18 @@ async fn run_inner(db: &EvalDb, suite: &Suite, opts: &RunOptions) -> Result<Repo
             width_vector: cfg.width.vector,
             width_graph: cfg.width.graph,
             width_recency: cfg.width.recent,
+            width_episode: cfg.width.episode,
             graph_hops: cfg.width.graph_hops,
             recent_days: cfg.width.recent_days,
             context_window: cfg.context_window,
             budget_tokens: cfg.budget.tokens_for(cfg.context_window),
             domain_boost_off: opts.ignore_domain,
+            abstain_below: cfg.abstain_below.unwrap_or(DEFAULT_ABSTAIN_BELOW),
+            recency_mode: describe_recency(cfg.recency),
+            episode_channel: cfg.episode_channel,
+            peak_bonus: cfg.peak_bonus,
+            semantic_floor: retriever.semantic_floor(),
+            replay_ranked: cfg.replay_ranked,
             schema: String::new(),
         },
         corpus: CorpusInfo {
@@ -144,9 +164,14 @@ async fn evaluate_one(
                 .get(name)
                 .copied()
                 .with_context(|| format!("题目 {} 引用的 checkpoint「{name}」不存在", q.id))?;
-            // 回放不走四路召回：要的是「当时的全貌」而非「与查询最相关的」，
-            // 所以逐路诊断在这类题上没有意义，留空
-            (retriever.replay(&db.store, at).await?, Vec::new(), true)
+            // 回放走的是**快照内**的三路（同一份 as-of 集合上的 bm25/向量/时间倒序），
+            // 与日常四路查的不是同一批数据。把它塞进逐路诊断会让两套口径混在
+            // 一张表里，所以这里仍然留空 —— 回放的排序质量由主指标衡量
+            (
+                retriever.replay(&db.store, &q.query, at).await?,
+                Vec::new(),
+                true,
+            )
         }
         None => {
             let fused = retriever.retrieve(&db.store, &q.query, domain).await?;
