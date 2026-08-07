@@ -94,3 +94,10 @@ Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：
 | [references.md](docs/references.md) | 同类项目调研与许可证边界 |
 
 schema 的权威版本是 [`migrations/`](migrations/)，文档中的 SQL 片段以它为准。
+
+## 许可证
+
+[Apache License 2.0](LICENSE)。
+
+取件自 goose 与 codex 的部分见 [NOTICE](NOTICE) —— 两者同为 Apache-2.0，
+每处出处也写在对应源文件的头部注释里。

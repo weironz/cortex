@@ -1,6 +1,8 @@
 Cortex
 Copyright 2026 Cortex contributors
 
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
 ═══════════════════════════════════════════════════════════════════════
 本项目取件（vendor / 借鉴）了以下 Apache-2.0 项目的成果。
 每一处的具体出处也写在对应源文件的头部注释里 —— 这份文件是索引，
