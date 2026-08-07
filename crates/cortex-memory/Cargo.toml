@@ -9,6 +9,8 @@ description = "Cortex 记忆引擎：分词 / embedding / 抽取 / 四路召回"
 
 [dependencies]
 cortex-core.workspace = true
+cortex-store.workspace = true
+cortex-llm.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -21,3 +23,7 @@ chrono.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# 集成测试真连数据库：每个测试跑在自己的临时 schema 里（见 tests/common）
+sqlx.workspace = true
+dotenvy.workspace = true
+chrono.workspace = true

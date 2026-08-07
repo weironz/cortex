@@ -9,10 +9,10 @@
 //! 它要的正是「在那个时刻我以为什么是真的」。
 
 use chrono::{DateTime, Utc};
-use sqlx::Row as _;
+use sqlx::{FromRow as _, Row as _};
 
 use crate::error::Result;
-use crate::model::Fact;
+use crate::model::{Entity, Fact};
 use crate::store::Store;
 
 /// 一次召回返回的条数上限的合理区间。
@@ -194,5 +194,51 @@ impl Store {
         .fetch_all(self.pool())
         .await?;
         Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+}
+
+impl Store {
+    /// 按向量近邻查实体，供抽取期的**别名消解**使用。
+    ///
+    /// 与 [`Store::recall_vector`] 的区别在用途：那是检索召回，这是写入前
+    /// 判断「cortex」和「Cortex 项目」是不是同一个东西。
+    ///
+    /// 返回按余弦距离升序的候选及其**距离**（不是相似度）——
+    /// 阈值判断留给调用方，因为「多近算同一个」高度依赖 embedding 模型，
+    /// 存储层不该替它做决定。相似度 = 1 - 距离。
+    ///
+    /// 按 `kind` 过滤：人和项目即使同名也不该合并。
+    /// 按 `embedding_model` 过滤：跨模型的距离不可比。
+    pub async fn entities_near(
+        &self,
+        kind: &str,
+        embedding: &pgvector::Vector,
+        embedding_model: &str,
+        limit: i64,
+    ) -> Result<Vec<(Entity, f64)>> {
+        let rows = sqlx::query(
+            "SELECT id, kind, name, summary, embedding, embedding_model,
+                    device_id, created_at, embedding <=> $2 AS distance
+               FROM entities
+              WHERE kind = $1
+                AND embedding IS NOT NULL
+                AND embedding_model = $3
+              ORDER BY embedding <=> $2
+              LIMIT $4",
+        )
+        .bind(kind)
+        .bind(embedding)
+        .bind(embedding_model)
+        .bind(limit.clamp(1, MAX_LIMIT))
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.into_iter()
+            .map(|r| {
+                let distance: f64 = r.try_get("distance")?;
+                let entity = Entity::from_row(&r)?;
+                Ok((entity, distance))
+            })
+            .collect()
     }
 }

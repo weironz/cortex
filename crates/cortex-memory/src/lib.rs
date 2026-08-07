@@ -9,14 +9,20 @@
 //! |---|---|
 //! | [`tokenize`] | 入库：中文分词 → `tsvector`（BM25 那一路的前提） |
 //! | [`embed`]    | 入库：向量化（本地推理，记忆内容不出网） |
+//! | [`extract`]  | 入库：一轮对话 → 结构化事实 → 落库 |
 //! | [`fusion`]   | 检索：四路召回的 RRF 融合 |
 //! | [`injection`]| 出库：以什么形式进 prompt（决定 caching 成本结构） |
 
 pub mod embed;
+pub mod extract;
 pub mod fusion;
 pub mod injection;
 pub mod tokenize;
 
 pub use embed::{EMBEDDING_DIM, Embedder};
+pub use extract::{
+    CandidateFact, EntityIndex, EntityRef, ExtractContext, Extractor, InProcessEntityIndex,
+    IngestReport, ObjectRef, PredicateRules, Rival, Verdict,
+};
 pub use fusion::{Channel, Fused};
 pub use injection::{Budget, MemoryItem};
