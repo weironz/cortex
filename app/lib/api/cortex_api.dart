@@ -66,12 +66,16 @@ abstract interface class CortexApi {
   /// toggle is the only thing standing between the user and their history.
   Future<List<ChatSession>> sessions({bool includeArchived = false});
 
-  /// `GET /sessions/{id}` — overview plus its episodes, oldest first.
+  /// `GET /sessions/{id}?limit=&before=` — overview plus **one page** of
+  /// episodes, oldest first within the page.
   ///
-  /// Capped server-side at 500 with no cursor, so a longer session arrives
-  /// truncated *from the end*. Compare the episode count against
-  /// `session.messageCount` to detect it — see [SessionDetail].
-  Future<SessionDetail> sessionDetail(String id);
+  /// With no [before] the page is the *newest* one. To walk backwards, pass the
+  /// previous response's `nextCursor`; stop when `hasMore` is false. [limit] is
+  /// clamped server-side to 500.
+  ///
+  /// The cursor is opaque — constructing one locally earns a 400, which is the
+  /// point: it is validated before it reaches SQL.
+  Future<SessionDetail> sessionDetail(String id, {int? limit, String? before});
 
   /// `PATCH /sessions/{id}` — rename, archive, bind a workspace.
   ///

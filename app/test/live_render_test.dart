@@ -8,7 +8,7 @@ import 'package:cortex_app/core/theme.dart';
 import 'package:cortex_app/features/chat/widgets/memory_drawer.dart';
 import 'package:cortex_app/features/chat/widgets/message_bubble.dart';
 import 'package:cortex_app/models/chat_event.dart';
-import 'package:cortex_app/models/memory_fact.dart';
+import 'package:cortex_app/models/injected_memory.dart';
 import 'package:cortex_app/models/tool_call.dart';
 import 'package:cortex_app/widgets/markdown/code_block.dart';
 import 'package:flutter/material.dart';
@@ -62,7 +62,7 @@ void main() {
   // test would simply hang.
   var up = false;
   final deltas = <String>[];
-  var facts = <MemoryFact>[];
+  var facts = <InjectedMemory>[];
   var toolCalls = <ToolCall>[];
 
   setUpAll(() async {
@@ -81,9 +81,9 @@ void main() {
             case ChatDeltaEvent(:final text):
               deltas.add(text);
             case ChatMemoryEvent(facts: final f):
-              facts = f;
-            case ChatToolEvent(:final name, :final summary):
-              toolCalls = ToolCall.merge(toolCalls, name, summary);
+              facts = f.map(InjectedMemory.live).toList();
+            case ChatToolEvent(:final name, :final summary, :final path):
+              toolCalls = ToolCall.merge(toolCalls, name, summary, path: path);
             case ChatErrorEvent(:final message):
               fail('server error: $message');
             default:
@@ -161,7 +161,7 @@ void main() {
       // Abstention is a correct outcome and must read as one.
       expect(find.textContaining('主动弃权'), findsOneWidget);
     } else {
-      expect(find.text(facts.first.statement), findsOneWidget);
+      expect(find.text(facts.first.fact!.statement), findsOneWidget);
       expect(find.text('出处'), findsWidgets);
     }
   });

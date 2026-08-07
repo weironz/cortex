@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -65,6 +67,26 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
     });
   }
 
+  /// Pages older history in while keeping the reading position still.
+  ///
+  /// Prepending grows the list *above* the viewport, and a `ListView` measures
+  /// its offset from the top — so without compensation the content the user was
+  /// reading slides down by the height of the page that just arrived. Holding
+  /// the distance from the **bottom** constant across the fetch is what makes
+  /// the new messages appear above rather than shove the old ones away.
+  Future<void> _loadEarlier(String sessionId) async {
+    final before = _scroll.hasClients
+        ? _scroll.position.maxScrollExtent - _scroll.position.pixels
+        : null;
+    await ref.read(chatControllerProvider.notifier).loadEarlier(sessionId);
+    if (!mounted || before == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scroll.hasClients) return;
+      final target = _scroll.position.maxScrollExtent - before;
+      _scroll.jumpTo(target.clamp(0.0, _scroll.position.maxScrollExtent));
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     // `ref.listen` reacts without rebuilding — exactly what auto-scroll needs.
@@ -72,8 +94,13 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
       chatControllerProvider.select((s) => s.streaming?.text.length ?? 0),
       (_, _) => _scheduleScrollToBottom(),
     );
+    // Keyed on the *newest* message rather than on the list length: paging
+    // older history in also grows the list, and jumping to the bottom then
+    // would throw the user out of exactly the part they scrolled up to read.
     ref.listen(
-      chatControllerProvider.select((s) => s.activeTranscript.length),
+      chatControllerProvider.select(
+        (s) => s.activeTranscript.isEmpty ? null : s.activeTranscript.last.id,
+      ),
       (_, _) => _scheduleScrollToBottom(force: true),
     );
     ref.listen(
@@ -81,11 +108,10 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
       (_, _) => _scheduleScrollToBottom(force: true),
     );
 
-    // `visible` rather than the full list: history replay can drop hundreds of
-    // turns in at once, and each bubble costs a markdown parse. The identity of
+    // One page's worth, because that is all that was fetched. The identity of
     // this list is stable across deltas — see [Transcript].
     final messages = ref.watch(
-      chatControllerProvider.select((s) => s.activeVisibleMessages),
+      chatControllerProvider.select((s) => s.activeTranscript),
     );
     final streaming = ref.watch(
       chatControllerProvider.select((s) => s.isStreamingActive),
@@ -106,9 +132,9 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
         (s) => s.activeTranscriptState?.hasEarlier ?? false,
       ),
     );
-    final serverTruncated = ref.watch(
+    final loadingEarlier = ref.watch(
       chatControllerProvider.select(
-        (s) => s.activeTranscriptState?.serverTruncated ?? false,
+        (s) => s.activeTranscriptState?.loadingEarlier ?? false,
       ),
     );
 
@@ -144,9 +170,9 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
       return const _ConversationEmptyState();
     }
 
-    // Header slots sit above the first message: "load earlier" when the client
-    // is holding back history, and the truncation warning when the *server* is.
-    final headers = (hasEarlier ? 1 : 0) + (serverTruncated ? 1 : 0);
+    // One header slot above the first message: the button that fetches the
+    // page before this one.
+    final headers = hasEarlier ? 1 : 0;
 
     return Stack(
       children: [
@@ -161,18 +187,13 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
             itemCount: headers + messages.length + (streaming ? 1 : 0),
             itemBuilder: (context, index) {
               var i = index;
-              if (serverTruncated) {
-                if (i == 0) return const _ServerTruncatedNote();
-                i -= 1;
-              }
               if (hasEarlier) {
                 if (i == 0) {
                   return _LoadEarlier(
+                    loading: loadingEarlier,
                     onTap: sessionId == null
                         ? null
-                        : () => ref
-                              .read(chatControllerProvider.notifier)
-                              .revealEarlier(sessionId),
+                        : () => unawaited(_loadEarlier(sessionId)),
                   );
                 }
                 i -= 1;
@@ -226,11 +247,17 @@ class _StreamingBubble extends ConsumerWidget {
   }
 }
 
-/// Grows the render window. The messages are already in memory — this is a
-/// rendering budget, not a fetch.
+/// Fetches the page before this one.
+///
+/// This is a real request now, not a reveal: `GET /sessions/{id}` returns the
+/// newest page by default and walks backwards through `?before=`, so the
+/// messages above have genuinely not crossed the wire yet. It replaces both the
+/// old client-side window *and* the banner that used to warn that a long
+/// session's newest turns had been cut off — the server no longer drops them.
 class _LoadEarlier extends StatelessWidget {
-  const _LoadEarlier({this.onTap});
+  const _LoadEarlier({required this.loading, this.onTap});
 
+  final bool loading;
   final VoidCallback? onTap;
 
   @override
@@ -239,60 +266,17 @@ class _LoadEarlier extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(kMessageGutter, 4, kMessageGutter, 12),
       child: Center(
         child: TextButton.icon(
-          onPressed: onTap,
-          icon: const Icon(Icons.expand_less_rounded, size: 17),
-          label: Text('加载更早的 $kTranscriptWindow 条'),
-        ),
-      ),
-    );
-  }
-}
-
-/// The server, not the client, is holding history back.
-///
-/// `GET /sessions/{id}` is `LIMIT 500` over `ORDER BY occurred_at ASC` with no
-/// cursor, so what is missing from a long session is its **most recent** turns.
-/// Silently showing a conversation whose ending has been cut off is the kind of
-/// wrong that never gets reported as a bug, because it looks like data.
-class _ServerTruncatedNote extends StatelessWidget {
-  const _ServerTruncatedNote();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(kMessageGutter, 4, kMessageGutter, 12),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: kMessageMaxWidth),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-            decoration: BoxDecoration(
-              color: scheme.surfaceContainerHigh,
-              borderRadius: BorderRadius.circular(9),
-              border: Border.all(color: scheme.outlineVariant),
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  Icons.history_rounded,
-                  size: 15,
-                  color: scheme.onSurfaceVariant,
-                ),
-                const SizedBox(width: 9),
-                Expanded(
-                  child: Text(
-                    '这个会话的消息比服务端单次能返回的多。'
-                    'cortexd 目前一次最多回 500 条且没有游标，'
-                    '所以下面看到的是较早的部分，最新几轮可能不在其中。',
-                    style: theme.textTheme.labelSmall,
-                  ),
-                ),
-              ],
-            ),
-          ),
+          // Disabled while in flight rather than hidden: a button that vanishes
+          // under the cursor makes the tap feel like it missed.
+          onPressed: loading ? null : onTap,
+          icon: loading
+              ? const SizedBox(
+                  width: 13,
+                  height: 13,
+                  child: CircularProgressIndicator(strokeWidth: 1.8),
+                )
+              : const Icon(Icons.expand_less_rounded, size: 17),
+          label: Text(loading ? '正在加载…' : '加载更早的 $kEpisodePage 条'),
         ),
       ),
     );

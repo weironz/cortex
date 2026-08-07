@@ -1,12 +1,21 @@
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
-import '../models/memory_fact.dart';
+import '../models/injected_memory.dart';
 import '../models/tool_call.dart';
 
-/// How many messages a transcript reveals before the user asks for more.
+/// How many episodes one `GET /sessions/{id}` page holds.
 ///
-/// The number is about *rendering*, not transfer — see [Transcript].
-const int kTranscriptWindow = 40;
+/// This is now a *transfer* budget as well as a render one. It used to be
+/// neither: the server sent up to 500 episodes with no cursor and the client
+/// revealed them 40 at a time, so scrolling up cost nothing but the whole
+/// conversation had already crossed the wire — and anything past 500 never
+/// arrived at all. The server pages properly now, so asking for less actually
+/// means receiving less.
+///
+/// Kept at the old window size on purpose: it is a known-comfortable first
+/// paint (~20 turns), and each "load earlier" is one round trip for one screen
+/// of markdown rather than a spinner over hundreds of bubbles.
+const int kEpisodePage = 40;
 
 /// The assistant turn currently being streamed.
 ///
@@ -30,7 +39,7 @@ class StreamingTurn {
   final String text;
 
   /// Facts injected into this turn (from the `memory` event).
-  final List<MemoryFact> facts;
+  final List<InjectedMemory> facts;
 
   /// Tools the agent invoked (from `tool` events).
   final List<ToolCall> toolCalls;
@@ -40,7 +49,7 @@ class StreamingTurn {
 
   StreamingTurn copyWith({
     String? text,
-    List<MemoryFact>? facts,
+    List<InjectedMemory>? facts,
     List<ToolCall>? toolCalls,
     bool? awaitingFirstToken,
   }) => StreamingTurn(
@@ -54,71 +63,74 @@ class StreamingTurn {
   );
 }
 
-/// One session's messages plus the state of replaying them.
+/// One session's messages plus the state of paging them in.
 ///
-/// ## Why the window is materialised in the constructor
+/// ## [messages] must keep its identity between reads
 ///
-/// [visible] could just as well be a getter that slices [messages] on demand.
-/// It must not be. `ConversationView` watches the visible list through
-/// `ref.watch(select(...))`, and `select` compares with `==` — a getter that
-/// returns a fresh `sublist` every call yields a new object identity on every
-/// read, so the comparison always reports "changed" and the entire `ListView`
-/// rebuilds on every SSE delta. That is precisely the cost the streaming design
-/// goes out of its way to avoid.
+/// `ConversationView` watches it through `ref.watch(select(...))`, and `select`
+/// compares with `==`. A getter that computed a fresh list per read would
+/// therefore report "changed" on every read, and every SSE delta would rebuild
+/// the entire `ListView` — precisely the cost the streaming design exists to
+/// avoid. So it is a plain field on an immutable object, rebuilt only when the
+/// messages really change.
 ///
-/// Computing it once here, in an immutable object that is only rebuilt when the
-/// messages or the window actually change, keeps the identity stable for the
-/// whole duration of a stream.
+/// This used to be enforced on a separate `visible` window that materialised a
+/// `sublist` in the constructor. The window is gone — paging is real now, so
+/// the client holds only what it asked for — but the invariant it was
+/// protecting is the same one, and it moved onto [messages].
 class Transcript {
-  Transcript({
+  const Transcript({
     this.messages = const [],
-    this.visibleCount = kTranscriptWindow,
     this.loading = false,
+    this.loadingEarlier = false,
     this.error,
     this.loadedFromServer = false,
-    this.serverTruncated = false,
-  }) : visible = messages.length <= visibleCount
-           ? messages
-           : messages.sublist(messages.length - visibleCount);
+    this.hasEarlier = false,
+    this.cursor,
+  });
 
-  /// Everything we hold, oldest first.
+  /// Everything paged in so far, oldest first.
   final List<ChatMessage> messages;
 
-  /// The newest [visibleCount] of [messages]. Identity-stable — see class doc.
-  final List<ChatMessage> visible;
-
-  /// Size of the render window, grown by [ChatController.revealEarlier].
-  final int visibleCount;
-
+  /// The first page is in flight.
   final bool loading;
+
+  /// An older page is in flight. Separate from [loading] because the two
+  /// render differently: one is a blank screen with a spinner, the other is a
+  /// spinner above a conversation that stays readable.
+  final bool loadingEarlier;
+
   final String? error;
 
   /// `GET /sessions/{id}` completed for this session. Distinguishes "empty
   /// because it is new" from "empty because we never asked".
   final bool loadedFromServer;
 
-  /// The daemon returned fewer episodes than the session claims to have. Its
-  /// `LIMIT 500` has no cursor, so the *end* of a long conversation is what
-  /// goes missing — worth saying out loud.
-  final bool serverTruncated;
+  /// The server says older messages exist. Taken from the response's
+  /// `has_more` rather than inferred from the page size — the two disagree on
+  /// an exactly-divisible history, and the inference loses.
+  final bool hasEarlier;
 
-  /// There is older history held but not yet rendered.
-  bool get hasEarlier => messages.length > visible.length;
+  /// Opaque `before` value for the next page up. Null once [hasEarlier] is
+  /// false.
+  final String? cursor;
 
   Transcript copyWith({
     List<ChatMessage>? messages,
-    int? visibleCount,
     bool? loading,
+    bool? loadingEarlier,
     Object? error = _sentinel,
     bool? loadedFromServer,
-    bool? serverTruncated,
+    bool? hasEarlier,
+    Object? cursor = _sentinel,
   }) => Transcript(
     messages: messages ?? this.messages,
-    visibleCount: visibleCount ?? this.visibleCount,
     loading: loading ?? this.loading,
+    loadingEarlier: loadingEarlier ?? this.loadingEarlier,
     error: error == _sentinel ? this.error : error as String?,
     loadedFromServer: loadedFromServer ?? this.loadedFromServer,
-    serverTruncated: serverTruncated ?? this.serverTruncated,
+    hasEarlier: hasEarlier ?? this.hasEarlier,
+    cursor: cursor == _sentinel ? this.cursor : cursor as String?,
   );
 
   static const Object _sentinel = Object();
@@ -155,15 +167,10 @@ class ChatState {
 
   Transcript? get activeTranscriptState => transcripts[activeSessionId];
 
-  /// Every message we hold for the active session — used by `retryLast` and by
-  /// tests, which care about what happened rather than what is on screen.
+  /// What the conversation view renders. Identity-stable across streaming
+  /// deltas — see [Transcript].
   List<ChatMessage> get activeTranscript =>
       transcripts[activeSessionId]?.messages ?? _emptyTranscript;
-
-  /// What the conversation view renders. Stable across streaming deltas — see
-  /// [Transcript].
-  List<ChatMessage> get activeVisibleMessages =>
-      transcripts[activeSessionId]?.visible ?? _emptyTranscript;
 
   ChatSession? get activeSession {
     final id = activeSessionId;

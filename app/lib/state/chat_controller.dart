@@ -10,6 +10,7 @@ import '../models/chat_event.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../models/episode.dart';
+import '../models/injected_memory.dart';
 import '../models/tool_call.dart';
 import '../models/workspace.dart';
 import 'app_providers.dart';
@@ -164,7 +165,7 @@ class ChatController extends Notifier<ChatState> {
       // the daemon has never heard of and render a 404 as a failure.
       transcripts: {
         ...state.transcripts,
-        session.id: Transcript(loadedFromServer: true),
+        session.id: const Transcript(loadedFromServer: true),
       },
       sendError: null,
     );
@@ -282,24 +283,23 @@ class ChatController extends Notifier<ChatState> {
     await loadTranscript(id);
   }
 
+  /// Fetches the **newest** page of a session.
   Future<void> loadTranscript(String id) async {
     if (!ref.mounted) return;
-    final current = state.transcripts[id] ?? Transcript();
+    final current = state.transcripts[id] ?? const Transcript();
     if (current.loading) return;
     _putTranscript(id, current.copyWith(loading: true, error: null));
 
     try {
-      final detail = await _api.sessionDetail(id);
+      final detail = await _api.sessionDetail(id, limit: kEpisodePage);
       if (!ref.mounted) return;
       _putTranscript(
         id,
         Transcript(
-          messages: detail.episodes
-              .map(_messageFromEpisode)
-              .toList(growable: false),
-          loading: false,
+          messages: _messagesFromEpisodes(detail.episodes),
           loadedFromServer: true,
-          serverTruncated: detail.truncated,
+          hasEarlier: detail.hasMore,
+          cursor: detail.nextCursor,
         ),
       );
       // The detail response carries a fresher overview than the list did.
@@ -313,7 +313,7 @@ class ChatController extends Notifier<ChatState> {
       if (!ref.mounted) return;
       _putTranscript(
         id,
-        (state.transcripts[id] ?? Transcript()).copyWith(
+        (state.transcripts[id] ?? const Transcript()).copyWith(
           loading: false,
           // A session with no episodes yet is a 404 here, not a failure.
           error: e.statusCode == 404 ? null : e.message,
@@ -324,7 +324,7 @@ class ChatController extends Notifier<ChatState> {
       if (!ref.mounted) return;
       _putTranscript(
         id,
-        (state.transcripts[id] ?? Transcript()).copyWith(
+        (state.transcripts[id] ?? const Transcript()).copyWith(
           loading: false,
           error: '$e',
         ),
@@ -332,32 +332,114 @@ class ChatController extends Notifier<ChatState> {
     }
   }
 
-  /// Grows the render window by one page, oldest-ward.
-  void revealEarlier(String id) {
-    final transcript = state.transcripts[id];
-    if (transcript == null || !transcript.hasEarlier) return;
-    _putTranscript(
-      id,
-      transcript.copyWith(
-        visibleCount: transcript.visibleCount + kTranscriptWindow,
-      ),
-    );
+  /// Fetches the page **before** what is held and prepends it.
+  ///
+  /// A failure here deliberately does not touch [Transcript.error]: that field
+  /// drives a full-screen "拉不到这个会话" state, and blanking a conversation the
+  /// user is already reading because one page up failed is a worse outcome than
+  /// the button simply staying available to try again.
+  Future<void> loadEarlier(String id) async {
+    final current = state.transcripts[id];
+    final cursor = current?.cursor;
+    if (current == null || cursor == null) return;
+    if (current.loading || current.loadingEarlier) return;
+    _putTranscript(id, current.copyWith(loadingEarlier: true));
+
+    try {
+      final page = await _api.sessionDetail(
+        id,
+        limit: kEpisodePage,
+        before: cursor,
+      );
+      if (!ref.mounted) return;
+      final held = state.transcripts[id] ?? const Transcript();
+      _putTranscript(
+        id,
+        held.copyWith(
+          // Prepend: the page is older than everything already on screen, and
+          // each page is itself oldest-first.
+          messages: [..._messagesFromEpisodes(page.episodes), ...held.messages],
+          loadingEarlier: false,
+          hasEarlier: page.hasMore,
+          cursor: page.nextCursor,
+        ),
+      );
+    } on Object {
+      if (!ref.mounted) return;
+      _putTranscript(
+        id,
+        (state.transcripts[id] ?? const Transcript()).copyWith(
+          loadingEarlier: false,
+        ),
+      );
+    }
   }
 
-  /// An episode is the archival record; a [ChatMessage] is the view-model.
+  /// Turns one page of archival records into view-models.
   ///
-  /// Two things do not survive the round trip, both because the server does not
-  /// store them per-episode: the memory injected into that turn, and the tools
-  /// it called. A replayed assistant turn therefore shows no audit drawer —
-  /// visibly different from a live one, and honestly so.
-  static ChatMessage _messageFromEpisode(Episode e) => ChatMessage(
-    id: e.id,
-    role: e.role == 'assistant' ? MessageRole.assistant : MessageRole.user,
-    text: e.text,
-    createdAt: e.occurredAt ?? DateTime.now(),
-    attachments: e.attachments,
-    episodeId: e.id,
-  );
+  /// ## The audit drawer moves from the question to the answer
+  ///
+  /// Server-side, `episode_memories` and `episode_tool_calls` are anchored on
+  /// the **user** episode: that row is the turn's anchor and always exists,
+  /// whereas the assistant episode is never written when the model errors.
+  /// Drawing the drawer there would leave a replayed conversation looking
+  /// different from the live one it just was — the drawer under the question
+  /// instead of under the answer.
+  ///
+  /// So a user turn's attribution is carried onto the assistant turn that
+  /// follows it. When none follows (the failed-turn case the server's anchoring
+  /// exists for) it stays on the user message, where the drawer is still
+  /// rendered — that turn is the one an audit most wants to look at.
+  static List<ChatMessage> _messagesFromEpisodes(List<Episode> episodes) {
+    final out = <ChatMessage>[];
+    for (var i = 0; i < episodes.length; i++) {
+      final e = episodes[i];
+      final isUser = e.role != 'assistant';
+      final carriesAttribution =
+          e.memories.isNotEmpty || e.toolCalls.isNotEmpty;
+      // Only forward across a user → assistant boundary. Two user messages in a
+      // row are two turns, and the second one's assistant answer is not this
+      // one's.
+      final handOff =
+          isUser &&
+          carriesAttribution &&
+          i + 1 < episodes.length &&
+          episodes[i + 1].role == 'assistant';
+
+      out.add(
+        ChatMessage(
+          id: e.id,
+          role: isUser ? MessageRole.user : MessageRole.assistant,
+          text: e.text,
+          createdAt: e.occurredAt ?? DateTime.now(),
+          attachments: e.attachments,
+          facts: handOff ? const [] : e.memories,
+          toolCalls: handOff ? const [] : e.toolCalls,
+          episodeId: e.id,
+        ),
+      );
+
+      if (handOff) {
+        final answer = episodes[i + 1];
+        out.add(
+          ChatMessage(
+            id: answer.id,
+            role: MessageRole.assistant,
+            text: answer.text,
+            createdAt: answer.occurredAt ?? DateTime.now(),
+            attachments: answer.attachments,
+            // The assistant row may carry its own (it does not today, but the
+            // contract does not forbid it), so concatenate rather than replace.
+            facts: [...e.memories, ...answer.memories],
+            toolCalls: [...e.toolCalls, ...answer.toolCalls],
+            episodeId: answer.id,
+          ),
+        );
+        i++;
+      }
+    }
+    return out.toList(growable: false);
+  }
 
   void _putTranscript(String id, Transcript transcript) {
     state = state.copyWith(
@@ -422,11 +504,17 @@ class ChatController extends Notifier<ChatState> {
         _flushPending();
         state = state.copyWith(
           streaming: state.streaming?.copyWith(
-            facts: [...?state.streaming?.facts, ...facts],
+            facts: [
+              ...?state.streaming?.facts,
+              // The live event carries the whole fact but no attribution: the
+              // channels and the invalidation flag only exist on the replay
+              // path. Left empty rather than guessed.
+              ...facts.map(InjectedMemory.live),
+            ],
           ),
         );
 
-      case ChatToolEvent(:final name, :final summary):
+      case ChatToolEvent(:final name, :final summary, :final path):
         _flushPending();
         // Call and result arrive as two events; [ToolCall.merge] folds them
         // into a single row instead of printing the same tool twice.
@@ -434,7 +522,12 @@ class ChatController extends Notifier<ChatState> {
         if (current == null) return;
         state = state.copyWith(
           streaming: current.copyWith(
-            toolCalls: ToolCall.merge(current.toolCalls, name, summary),
+            toolCalls: ToolCall.merge(
+              current.toolCalls,
+              name,
+              summary,
+              path: path,
+            ),
           ),
         );
 
@@ -544,7 +637,7 @@ class ChatController extends Notifier<ChatState> {
 
     _putTranscript(
       sessionId,
-      (state.transcripts[sessionId] ?? Transcript()).copyWith(
+      (state.transcripts[sessionId] ?? const Transcript()).copyWith(
         messages: trimmed,
       ),
     );
@@ -557,14 +650,10 @@ class ChatController extends Notifier<ChatState> {
   // ----------------------------------------------------------------- helpers
 
   void _appendMessage(String sessionId, ChatMessage message) {
-    final existing = state.transcripts[sessionId] ?? Transcript();
+    final existing = state.transcripts[sessionId] ?? const Transcript();
     _putTranscript(
       sessionId,
-      existing.copyWith(
-        messages: [...existing.messages, message],
-        // Keep the newest turn inside the window when history was paged in.
-        visibleCount: existing.visibleCount + 1,
-      ),
+      existing.copyWith(messages: [...existing.messages, message]),
     );
   }
 

@@ -9,6 +9,7 @@ import 'package:cortex_app/api/blob_upload.dart';
 import 'package:cortex_app/api/http_cortex_api.dart';
 import 'package:cortex_app/core/hashing.dart';
 import 'package:cortex_app/models/chat_event.dart';
+import 'package:cortex_app/models/session_detail.dart';
 import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/tool_call.dart';
 import 'package:cortex_app/widgets/markdown/highlight_registry.dart';
@@ -154,8 +155,8 @@ void main() {
               reason: '注入的每条记忆都必须能追回原始对话，否则「可审计」是空话',
             );
           }
-        case ChatToolEvent(:final name, :final summary):
-          toolCalls = ToolCall.merge(toolCalls, name, summary);
+        case ChatToolEvent(:final name, :final summary, :final path):
+          toolCalls = ToolCall.merge(toolCalls, name, summary, path: path);
         case ChatDeltaEvent(:final text):
           deltaCount++;
           // The invariant that makes the UI flicker-free: each delta EXTENDS
@@ -280,31 +281,103 @@ void main() {
 
   // ─────────────────── 会话生命周期与工作区 ───────────────────
 
-  test('GET /sessions/{id} 回放整段会话，附件字段一定在', () async {
+  test('GET /sessions/{id} 默认给最新一页，附件带元信息', () async {
     if (!up) return markTestSkipped('cortexd not running');
     final api = HttpCortexApi(baseUrl: _baseUrl);
     addTearDown(api.dispose);
 
     final sessions = await api.sessions();
-    final detail = await api.sessionDetail(sessions.first.id);
+    final detail = await api.sessionDetail(sessions.first.id, limit: 5);
 
     expect(detail.session.id, sessions.first.id);
     expect(detail.episodes, isNotEmpty, reason: '列表里的会话至少有一条消息');
+    expect(
+      detail.episodes.length,
+      lessThanOrEqualTo(5),
+      reason: 'limit 是客户端说了算的上界，服务端只能给得更少',
+    );
     for (final e in detail.episodes) {
       // The server sends `[]` rather than omitting the key, so the client never
       // has to distinguish "no attachments" from "server too old to report".
       expect(e.attachments, isNotNull);
       expect(e.id, isNotEmpty);
+      for (final a in e.attachments) {
+        expect(a.mime, isNotNull, reason: '下行的 AttachmentDto 必须带嗅探出的 MIME');
+        expect(a.sizeBytes, isNotNull);
+      }
+    }
+    // Ascending within the page — a descending page would not error anywhere,
+    // it would just draw the whole conversation backwards.
+    for (var i = 1; i < detail.episodes.length; i++) {
+      final prev = detail.episodes[i - 1].occurredAt;
+      final cur = detail.episodes[i].occurredAt;
+      if (prev == null || cur == null) continue;
+      expect(
+        cur.isBefore(prev),
+        isFalse,
+        reason: '一页之内必须是正序（老 → 新）',
+      );
     }
     expect(
-      detail.episodes.length,
-      lessThanOrEqualTo(500),
-      reason: 'SESSION_EPISODE_LIMIT；超过就该被 truncated 标出来',
+      detail.nextCursor != null,
+      detail.hasMore,
+      reason: 'has_more 为真才有游标，为假就必须是 null',
     );
+  });
+
+  test('?before= 往回翻，翻出来的严格更早且不重复', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    // 找一个至少有两页（这里 1 条一页）的会话
+    final sessions = await api.sessions();
+    SessionDetail? first;
+    for (final s in sessions) {
+      final d = await api.sessionDetail(s.id, limit: 1);
+      if (d.hasMore) {
+        first = d;
+        break;
+      }
+    }
+    if (first == null) {
+      return markTestSkipped('没有超过一条消息的会话可供翻页');
+    }
+
+    final second = await api.sessionDetail(
+      first.session.id,
+      limit: 1,
+      before: first.nextCursor,
+    );
+    expect(second.episodes, isNotEmpty, reason: 'has_more 为真就必须真的翻得到');
     expect(
-      detail.truncated,
-      detail.session.messageCount > detail.episodes.length,
-      reason: '截断判定必须与 message_count 一致，否则界面会谎报完整',
+      second.episodes.map((e) => e.id),
+      isNot(contains(first.episodes.first.id)),
+      reason: 'before 是严格小于 —— 含等号的话每页都会重复一条',
+    );
+    final older = second.episodes.last.occurredAt;
+    final newer = first.episodes.first.occurredAt;
+    if (older != null && newer != null) {
+      expect(older.isAfter(newer), isFalse, reason: '往回翻必须真的更早');
+    }
+  });
+
+  test('畸形游标是 400，不是 500', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final sessions = await api.sessions();
+    await expectLater(
+      api.sessionDetail(sessions.first.id, before: '昨天|不是个ULID'),
+      throwsA(
+        isA<CortexApiException>().having(
+          (e) => e.statusCode,
+          'statusCode',
+          400,
+        ),
+      ),
+      reason: '游标进 SQL 之前就该被拦下 —— 撞上 ulid 域约束的话客户端只会看到「服务端挂了」',
     );
   });
 
@@ -511,14 +584,23 @@ void main() {
       contains(attachment.hash),
       reason: '附件必须挂在 episode 上，回放时才看得见',
     );
+    final replayed = userTurn.attachments.first;
     expect(
-      userTurn.attachments.first.filename,
-      isNull,
-      reason: 'AttachmentRef 只有 hash 与 kind —— 文件名不过夜，这是已知的契约缺口',
+      replayed.filename,
+      'live-attach.png',
+      reason:
+          '文件名现在往返了：AttachmentRef 收 filename，AttachmentDto 回带它。'
+          '拿到 null 就说明客户端又没把它发上去，回放会退回「文档 · a1b2c3d4」',
     );
+    expect(
+      replayed.mime,
+      'image/png',
+      reason: 'MIME 由字节头嗅探，不是客户端声明的那个',
+    );
+    expect(replayed.sizeBytes, greaterThan(0));
   });
 
-  test('绑定工作区后，文件工具的摘要能被解析出路径', () async {
+  test('绑定工作区后，文件工具事件带回结构化的 path', () async {
     if (!up) return markTestSkipped('cortexd not running');
     final api = HttpCortexApi(baseUrl: _baseUrl);
     addTearDown(api.dispose);
@@ -535,7 +617,12 @@ void main() {
       message: '用 list_dir 列一下工作区根目录，再用 read_file 读 pubspec.yaml。',
     )) {
       if (event is ChatToolEvent) {
-        calls = ToolCall.merge(calls, event.name, event.summary);
+        calls = ToolCall.merge(
+          calls,
+          event.name,
+          event.summary,
+          path: event.path,
+        );
       }
     }
 
@@ -547,11 +634,11 @@ void main() {
     );
     for (final call in fileCalls) {
       expect(
-        call.targetPath,
+        call.path,
         isNotNull,
         reason:
-            '${call.name} 的摘要里应能解析出 path —— 界面靠它说明动了哪个文件：'
-            '${call.arguments}',
+            '${call.name} 必须自带 path —— 界面靠它说明动了哪个文件，'
+            '从摘要里正则抠出来的那套已经删掉了：${call.arguments}',
       );
       expect(call.pending, isFalse, reason: '两条事件应配成一行');
     }
@@ -569,16 +656,31 @@ void main() {
       message: '读一下工作区里的 pubspec.yaml，告诉我 name 字段。',
     )) {
       if (event is ChatToolEvent) {
-        calls = ToolCall.merge(calls, event.name, event.summary);
+        calls = ToolCall.merge(
+          calls,
+          event.name,
+          event.summary,
+          path: event.path,
+        );
       }
     }
 
+    // 断言的是「一次文件操作都没有真的发生」，而不是「没有出现过文件工具名」。
+    // 模型完全可以凭空调一个不存在的工具（实测见过 `file_read`），而 daemon
+    // 照样会把这次尝试作为 tool 事件发出来 —— 带着它从参数里取到的 path。
+    // 那条事件是**失败**的（「未知工具：…。可用工具：memory_search」），
+    // 界面也按失败画。把「名字里带 read_file」当成红线，测的就成了模型今天
+    // 想怎么命名，而不是服务端到底给了什么工具。
+    final succeededFileCalls = calls
+        .where((c) => c.touchesFiles && !c.failed)
+        .toList();
     expect(
-      calls.where((c) => c.touchesFiles),
+      succeededFileCalls,
       isEmpty,
       reason:
           '纯聊天会话的工具目录里根本没有文件工具（WORKSPACE_FREE_TOOLS），'
-          '这正是「绑定与否」在产品上唯一的差别',
+          '这正是「绑定与否」在产品上唯一的差别；'
+          '实际拿到：${calls.map((c) => "${c.name}/${c.result}").toList()}',
     );
   });
 }

@@ -1,5 +1,5 @@
 import 'attachment.dart';
-import 'memory_fact.dart';
+import 'injected_memory.dart';
 import 'tool_call.dart';
 
 enum MessageRole { user, assistant }
@@ -28,10 +28,15 @@ class ChatMessage {
   final String text;
   final DateTime createdAt;
 
-  /// For assistant messages: the memory injected into this turn.
-  final List<MemoryFact> facts;
+  /// The memory injected into this turn.
+  ///
+  /// Normally carried by the assistant message, because that is where the
+  /// drawer is drawn. It lands on the *user* message only when the turn has no
+  /// answer to hang it on — a turn the model failed still injected memory, and
+  /// dropping the record of that would erase exactly the case worth auditing.
+  final List<InjectedMemory> facts;
 
-  /// For assistant messages: tools the agent invoked during this turn.
+  /// Tools the agent invoked during this turn. Same placement rule as [facts].
   final List<ToolCall> toolCalls;
 
   /// Blobs carried by this message. Only user messages have them today, but the
@@ -46,7 +51,7 @@ class ChatMessage {
 
   ChatMessage copyWith({
     String? text,
-    List<MemoryFact>? facts,
+    List<InjectedMemory>? facts,
     List<ToolCall>? toolCalls,
     List<Attachment>? attachments,
     String? episodeId,

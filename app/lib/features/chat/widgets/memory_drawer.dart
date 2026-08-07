@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../../../models/memory_fact.dart';
+import '../../../models/injected_memory.dart';
+import '../../../models/memory_search_result.dart';
 import '../../../models/tool_call.dart';
 import '../../memory/widgets/fact_card.dart';
 
@@ -21,6 +22,15 @@ import '../../memory/widgets/fact_card.dart';
 /// `facts` is legitimately empty on plenty of turns. That is a correct outcome,
 /// not a failure, and it is rendered as such — no error styling, no "加载失败",
 /// and no toggle at all when there is also no tool activity to show.
+///
+/// ## Replayed turns show the same drawer
+///
+/// `episode_memories` / `episode_tool_calls` mean a turn reopened tomorrow
+/// still answers "why do you remember that". Two things only a replay can say
+/// are surfaced rather than smoothed over: which retrieval channels matched,
+/// and whether a fact has since been **invalidated**. A superseded fact stays
+/// in the list, marked — the answer really was built on it, and hiding that
+/// would be rewriting history rather than recording it.
 class MemoryDrawer extends StatefulWidget {
   const MemoryDrawer({
     super.key,
@@ -30,7 +40,7 @@ class MemoryDrawer extends StatefulWidget {
     this.initiallyExpanded = false,
   });
 
-  final List<MemoryFact> facts;
+  final List<InjectedMemory> facts;
   final List<ToolCall> toolCalls;
 
   /// The turn is still in flight — surfaces tool activity instead of hiding it.
@@ -74,8 +84,8 @@ class _MemoryDrawerState extends State<MemoryDrawer> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const _InjectionNote(),
-                    for (final fact in widget.facts)
-                      FactCard(fact: fact, dense: true),
+                    for (final entry in widget.facts)
+                      _InjectedRow(entry: entry),
                   ],
                 ),
               ),
@@ -120,8 +130,8 @@ class _MemoryDrawerState extends State<MemoryDrawer> {
                         ],
                         if (hasFacts) ...[
                           const _InjectionNote(),
-                          for (final fact in widget.facts)
-                            FactCard(fact: fact, dense: true),
+                          for (final entry in widget.facts)
+                            _InjectedRow(entry: entry),
                         ] else
                           // Explicitly stated rather than left blank: an empty
                           // panel reads as a bug, and this outcome is neither
@@ -148,6 +158,79 @@ class _MemoryDrawerState extends State<MemoryDrawer> {
     if (facts > 0 && tools > 0) return '本轮用到的记忆 · $facts 条 · 工具 $tools 次';
     if (facts > 0) return '本轮用到的记忆 · $facts 条';
     return '本轮工具调用 · $tools 次';
+  }
+}
+
+/// One injected fact: the normal card, or a placeholder when the row is gone.
+class _InjectedRow extends StatelessWidget {
+  const _InjectedRow({required this.entry});
+
+  final InjectedMemory entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final fact = entry.fact;
+    if (fact == null) return _RedactedNote(factId: entry.factId);
+    return FactCard(
+      fact: fact,
+      dense: true,
+      invalidated: entry.invalidated,
+      // Live turns carry no attribution, and an empty channel list must render
+      // as *no* tags rather than as an empty row of them.
+      channels: entry.channels.isEmpty
+          ? null
+          : RetrievalChannels(
+              factId: entry.factId,
+              channels: entry.channels,
+              score: entry.score,
+            ),
+    );
+  }
+}
+
+/// The fact this turn used has since been redacted or purged.
+///
+/// Shown rather than dropped. Silently omitting the entry would make the turn
+/// look like it consulted fewer memories than it did — a replay that quietly
+/// disagrees with what happened is worse than one that admits a gap.
+class _RedactedNote extends StatelessWidget {
+  const _RedactedNote({required this.factId});
+
+  final String factId;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: scheme.outlineVariant,
+          style: BorderStyle.solid,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.visibility_off_outlined,
+            size: 13,
+            color: scheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Text(
+              '本轮引用了一条已不可见的记忆（$factId）—— 它在此之后被抹除了。',
+              style: theme.textTheme.labelSmall,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -257,7 +340,7 @@ class _ToolRow extends StatelessWidget {
       icon = scheme.onSurfaceVariant;
     }
 
-    final path = call.targetPath;
+    final path = call.path;
 
     return Padding(
       padding: const EdgeInsets.only(left: 7, bottom: 8),
@@ -292,12 +375,11 @@ class _ToolRow extends StatelessWidget {
                       color: scheme.onSurface,
                     ),
                   ),
-                  // The file a file-tool touched is pulled out of the argument
-                  // blob and given the emphasis the rest of the arguments do
-                  // not get. "write_file 改了哪个文件" is the one question a
-                  // reader always has about these rows, and leaving it buried
-                  // mid-string next to a truncated `content=` makes it
-                  // effectively invisible.
+                  // The file a file-tool touched gets the emphasis the rest of
+                  // the arguments do not. "write_file 改了哪个文件" is the one
+                  // question a reader always has about these rows, and leaving
+                  // it buried mid-string next to a truncated `content=` makes
+                  // it effectively invisible.
                   if (path != null)
                     TextSpan(
                       text: '  $path',

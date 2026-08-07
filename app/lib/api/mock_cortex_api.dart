@@ -9,11 +9,13 @@ import '../models/chat_event.dart';
 import '../models/chat_session.dart';
 import '../models/episode.dart';
 import '../models/health_status.dart';
+import '../models/injected_memory.dart';
 import '../models/memory_fact.dart';
 import '../models/memory_search_result.dart';
 import '../models/session_detail.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
+import '../models/tool_call.dart';
 import '../models/workspace.dart';
 import 'api_exception.dart';
 import 'blob_upload.dart';
@@ -92,22 +94,81 @@ class MockCortexApi implements CortexApi {
     );
   }
 
+  /// Pages the same way the daemon does, cursor and all.
+  ///
+  /// The fixtures are far too small to need paging — which is exactly why the
+  /// mechanism has to be here. If the mock always answered with everything and
+  /// `has_more: false`, the "load earlier" path would first execute in
+  /// production, and a client bug in it (a cursor never advancing, a page
+  /// appended instead of prepended) would be invisible until then.
+  ///
+  /// Cursor shape copies `cortexd::cursor` (`<RFC3339>|<id>`) so that a client
+  /// which accidentally started parsing it would break here too, not only
+  /// against a real daemon.
   @override
-  Future<SessionDetail> sessionDetail(String id) async {
+  Future<SessionDetail> sessionDetail(
+    String id, {
+    int? limit,
+    String? before,
+  }) async {
     await _latency(240);
     final index = _sessions.indexWhere((s) => s.id == id);
     if (index == -1) {
       throw CortexApiException('session $id 不存在', statusCode: 404);
     }
-    final episodes =
+    final all =
         _episodes.values.where((e) => e.sessionId == id).toList()
-          // Oldest first, matching `ORDER BY occurred_at ASC` server-side.
-          ..sort(
-            (a, b) => (a.occurredAt ?? DateTime(0)).compareTo(
-              b.occurredAt ?? DateTime(0),
-            ),
-          );
-    return SessionDetail(session: _sessions[index], episodes: episodes);
+          ..sort(_byOccurrence);
+
+    var upTo = all.length;
+    if (before != null) {
+      final cut = _decodeCursor(before);
+      upTo = all.indexWhere((e) => _compareCursor(e, cut) >= 0);
+      if (upTo < 0) upTo = all.length;
+    }
+
+    final size = (limit ?? 500).clamp(1, 500);
+    final start = upTo - size < 0 ? 0 : upTo - size;
+    final page = all.sublist(start, upTo);
+    final hasMore = start > 0;
+
+    return SessionDetail(
+      session: _sessions[index],
+      episodes: page,
+      hasMore: hasMore,
+      // Points at the first row of this page: the next request wants everything
+      // strictly older than it.
+      nextCursor: hasMore && page.isNotEmpty ? _encodeCursor(page.first) : null,
+    );
+  }
+
+  static int _byOccurrence(Episode a, Episode b) {
+    final t = (a.occurredAt ?? DateTime(0)).compareTo(
+      b.occurredAt ?? DateTime(0),
+    );
+    // Ties broken by id, same as the daemon: fixtures share a timestamp often
+    // enough that a timestamp-only order would not be stable.
+    return t != 0 ? t : a.id.compareTo(b.id);
+  }
+
+  static String _encodeCursor(Episode e) =>
+      '${(e.occurredAt ?? DateTime(0)).toUtc().toIso8601String()}|${e.id}';
+
+  static (DateTime, String) _decodeCursor(String raw) {
+    final sep = raw.lastIndexOf('|');
+    if (sep < 0) {
+      throw CortexApiException('游标格式不对，缺少 "|"：$raw', statusCode: 400);
+    }
+    final when = DateTime.tryParse(raw.substring(0, sep));
+    if (when == null) {
+      throw CortexApiException('游标里的时间不是合法 RFC3339', statusCode: 400);
+    }
+    return (when.toLocal(), raw.substring(sep + 1));
+  }
+
+  static int _compareCursor(Episode e, (DateTime, String) cut) {
+    final t = (e.occurredAt ?? DateTime(0)).compareTo(cut.$1);
+    return t != 0 ? t : e.id.compareTo(cut.$2);
   }
 
   /// Mirrors the daemon's tri-state and, importantly, its **validation**.
@@ -428,6 +489,9 @@ class MockCortexApi implements CortexApi {
     // Mirrors cortexd's order *and* its pairing: every tool emits twice, once
     // on dispatch and once on return, with the name inlined in both summaries.
     final query = message.length > 24 ? '${message.substring(0, 24)}…' : message;
+    // No `path`: `memory_search` touches no file, and the daemon omits the
+    // field entirely rather than sending "" — which the UI would draw as a file
+    // row pointing at the workspace root.
     yield ChatToolEvent(
       name: 'memory_search',
       summary: '调用 memory_search (query=$query)',
@@ -451,28 +515,35 @@ class MockCortexApi implements CortexApi {
       (s) => s.id == sessionId && s.workspace != null,
     );
     if (bound && _mentionsFiles(message)) {
-      // Argument rendering copies `compact_args`: keys sorted (so `content`
-      // precedes `path`), long values truncated with `…`. That shape is what
-      // `ToolCall.targetPath` parses, and it should be exercised here.
+      // `path` comes as its own field on both halves of the pair, exactly as
+      // the daemon sends it. The summary still renders the arguments the way
+      // `compact_args` does (sorted keys, so the truncated `content` precedes
+      // `path`) — but nothing parses that any more, and this fixture is here to
+      // keep it that way: if some future code started, this `content` would
+      // make it visibly wrong.
       yield const ChatToolEvent(
         name: 'read_file',
         summary: '调用 read_file (path=crates/cortex-agent/src/tools.rs)',
+        path: 'crates/cortex-agent/src/tools.rs',
       );
       await Future<void>.delayed(const Duration(milliseconds: 320));
       yield const ChatToolEvent(
         name: 'read_file',
         summary: 'read_file 返回 486 行 / 15204 字符',
+        path: 'crates/cortex-agent/src/tools.rs',
       );
       yield const ChatToolEvent(
         name: 'write_file',
         summary:
-            '调用 write_file (content=//! 路径围栏。\\n//!\\n//! 第一版只做…, '
+            '调用 write_file (content=//! 路径围栏。\\n//!\\n//! path=假的.rs 第一版只做…, '
             'path=crates/cortex-agent/src/notes.md)',
+        path: 'crates/cortex-agent/src/notes.md',
       );
       await Future<void>.delayed(const Duration(milliseconds: 260));
       yield const ChatToolEvent(
         name: 'write_file',
         summary: 'write_file 已写入 crates/cortex-agent/src/notes.md（412 字节）',
+        path: 'crates/cortex-agent/src/notes.md',
       );
     }
 
@@ -780,8 +851,77 @@ class MockCortexApi implements CortexApi {
       ),
     };
 
-    return entries.map(
-      (id, v) => MapEntry(
+    // Replay attribution, keyed by the **user** episode of the turn — the same
+    // anchoring the daemon uses (`episode_memories.episode_id` is the user
+    // turn, because the assistant one is not written when the model errors).
+    // Without these the "why do you remember that" drawer would be reachable
+    // only during a live stream, and its replayed form would first be seen in
+    // production.
+    final attribution =
+        <String, (List<InjectedMemory>, List<ToolCall>)>{
+          'epi_01JQZ8K3M9A1': (
+            const [
+              InjectedMemory(
+                factId: 'fact_pref_1',
+                fact: MemoryFact(
+                  id: 'fact_pref_1',
+                  statement: '偏好简洁直接的回答，先给结论再给理由，不要寒暄。',
+                  domain: 'general',
+                  sourceEpisodeId: 'epi_01JQY0AA00P1',
+                ),
+                channels: ['bm25', 'vector'],
+                score: 0.0324,
+              ),
+              // Superseded since the turn ran. Kept and marked — "the thing
+              // this answer leaned on no longer holds" is the whole point of
+              // keeping the record.
+              InjectedMemory(
+                factId: 'fact_office_4',
+                fact: MemoryFact(
+                  id: 'fact_office_4',
+                  statement:
+                      '（已被取代）Q3 OKR 第一目标原为把延迟降到 200ms —— 已于两周前调整。',
+                  domain: 'office',
+                  sourceEpisodeId: 'epi_01JQZ5V1C7F4',
+                ),
+                channels: ['graph'],
+                score: 0.0161,
+                invalidated: true,
+              ),
+              // The fact row is gone (redacted). The server sends
+              // `statement: null` and the drawer must say so rather than
+              // quietly showing one entry fewer than the turn really used.
+              InjectedMemory(factId: 'fact_gone_1', channels: ['episode']),
+            ],
+            const [
+              ToolCall(
+                name: 'memory_search',
+                result: '返回 3 行 / 96 字符',
+              ),
+            ],
+          ),
+          'epi_01JQZ2N8D1E3': (
+            const [],
+            const [
+              ToolCall(
+                name: 'read_file',
+                path: 'crates/cortex-agent/src/tools.rs',
+                result: '返回 486 行 / 15204 字符',
+              ),
+              ToolCall(
+                name: 'write_file',
+                path: 'crates/cortex-agent/src/notes.md',
+                result: '失败：路径 ../../etc/passwd 已被围栏拒绝',
+                failed: true,
+              ),
+            ],
+          ),
+        };
+
+    return entries.map((id, v) {
+      final (memories, toolCalls) =
+          attribution[id] ?? (const <InjectedMemory>[], const <ToolCall>[]);
+      return MapEntry(
         id,
         Episode(
           id: id,
@@ -789,9 +929,11 @@ class MockCortexApi implements CortexApi {
           role: v.$2,
           text: v.$3,
           occurredAt: now.subtract(Duration(days: v.$4)),
+          memories: memories,
+          toolCalls: toolCalls,
         ),
-      ),
-    );
+      );
+    });
   }
 
   // ------------------------------------------------------------ canned replies

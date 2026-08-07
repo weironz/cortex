@@ -1,154 +1,18 @@
-import 'dart:async';
-import 'dart:typed_data';
-
 import 'package:cortex_app/api/api_exception.dart';
-import 'package:cortex_app/api/cortex_api.dart';
+import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
-import 'package:cortex_app/models/attachment.dart';
-import 'package:cortex_app/models/blob.dart';
-import 'package:cortex_app/models/chat_event.dart';
 import 'package:cortex_app/models/chat_message.dart';
-import 'package:cortex_app/models/chat_session.dart';
 import 'package:cortex_app/models/episode.dart';
-import 'package:cortex_app/models/health_status.dart';
-import 'package:cortex_app/models/memory_search_result.dart';
-import 'package:cortex_app/models/session_detail.dart';
-import 'package:cortex_app/models/sync_event.dart';
-import 'package:cortex_app/models/sync_record.dart';
+import 'package:cortex_app/models/injected_memory.dart';
+import 'package:cortex_app/models/memory_fact.dart';
+import 'package:cortex_app/models/tool_call.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/chat_controller.dart';
 import 'package:cortex_app/state/chat_state.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// A daemon stand-in whose `GET /sessions/{id}` the test controls.
-///
-/// Not the mock source: these cases are about the *shape* of the replay —
-/// hundreds of episodes, a truncated response, a failing fetch — and the mock's
-/// fixtures deliberately look like a real, small conversation.
-class _ReplayApi implements CortexApi {
-  _ReplayApi({required this.episodeCount, this.messageCount, this.fail = false});
-
-  final int episodeCount;
-
-  /// What the session claims to hold. Larger than [episodeCount] simulates the
-  /// server's uncursored `LIMIT 500`.
-  final int? messageCount;
-  final bool fail;
-
-  /// Ids passed to `sessionDetail`, in order.
-  final List<String> detailCalls = [];
-
-  ChatSession get _session => ChatSession(
-    id: 's1',
-    title: '很长的会话',
-    messageCount: messageCount ?? episodeCount,
-    updatedAt: DateTime(2026, 1, 1),
-  );
-
-  @override
-  Future<List<ChatSession>> sessions({bool includeArchived = false}) async => [
-    _session,
-  ];
-
-  @override
-  Future<SessionDetail> sessionDetail(String id) async {
-    detailCalls.add(id);
-    if (fail) {
-      throw const CortexApiException('数据库炸了', statusCode: 500);
-    }
-    return SessionDetail(
-      session: _session,
-      episodes: [
-        for (var i = 0; i < episodeCount; i++)
-          Episode(
-            id: 'epi_$i',
-            sessionId: 's1',
-            role: i.isEven ? 'user' : 'assistant',
-            text: '第 $i 条',
-            occurredAt: DateTime(2026, 1, 1).add(Duration(minutes: i)),
-            attachments: i == 0
-                ? const [Attachment(hash: 'abc123def456', kind: 'image')]
-                : const [],
-          ),
-      ],
-    );
-  }
-
-  @override
-  String get label => 'replay';
-
-  @override
-  void dispose() {}
-
-  @override
-  Future<HealthStatus> health() async =>
-      const HealthStatus(status: 'ok', version: 't', database: 'ok');
-
-  @override
-  Stream<ChatEvent> chat({
-    required String sessionId,
-    required String message,
-    List<Attachment> attachments = const [],
-  }) async* {
-    yield const ChatDeltaEvent('好');
-    yield const ChatDoneEvent('epi_new');
-  }
-
-  @override
-  Future<MemorySearchResult> searchMemory(
-    String query, {
-    int limit = 20,
-    DateTime? asOf,
-  }) async => MemorySearchResult.empty;
-
-  @override
-  Future<Episode> episode(String id) => throw UnimplementedError();
-
-  @override
-  Future<ChatSession> updateSession(
-    String id, {
-    String? title,
-    bool? archived,
-    String? workspace,
-    bool clearWorkspace = false,
-  }) => throw UnimplementedError();
-
-  @override
-  Future<BlobRef> uploadBlob({
-    required Uint8List bytes,
-    String? mime,
-    UploadProgress? onProgress,
-  }) => throw UnimplementedError();
-
-  @override
-  Future<BlobPresign> presignBlob(String hash) => throw UnimplementedError();
-
-  @override
-  Future<void> putPresigned({
-    required String url,
-    required Uint8List bytes,
-    String? mime,
-    UploadProgress? onProgress,
-  }) => throw UnimplementedError();
-
-  @override
-  Future<BlobRef> commitBlob({
-    required String hash,
-    required int sizeBytes,
-    String? mime,
-  }) => throw UnimplementedError();
-
-  @override
-  Future<Uint8List> blobBytes(String hash) async => Uint8List(0);
-
-  @override
-  Stream<SyncEvent> watchSync() => const Stream.empty();
-
-  @override
-  Future<SyncPage> sync({required int since, int limit = 500}) async =>
-      SyncPage(cursor: since);
-}
+import 'support/replay_api.dart';
 
 class _Config extends AppConfigNotifier {
   @override
@@ -156,7 +20,7 @@ class _Config extends AppConfigNotifier {
       const AppConfig(useMock: false, baseUrl: 'http://127.0.0.1:8080');
 }
 
-ProviderContainer _boot(_ReplayApi api) {
+ProviderContainer _boot(ReplayApi api) {
   final container = ProviderContainer(
     overrides: [
       appConfigProvider.overrideWith(_Config.new),
@@ -186,108 +50,142 @@ Transcript? _peek(ProviderContainer c) =>
 
 Transcript _transcript(ProviderContainer c) => _peek(c)!;
 
+Future<ProviderContainer> _loaded(ReplayApi api) async {
+  final container = _boot(api);
+  await _until(
+    () => _peek(container)?.loadedFromServer ?? false,
+    reason: '首次加载',
+  );
+  return container;
+}
+
 void main() {
-  group('历史会话回放', () {
-    test('打开会话时拉取 GET /sessions/{id}，附件一并回来', () async {
-      final container = _boot(_ReplayApi(episodeCount: 4));
+  group('历史会话分页', () {
+    test('打开会话只拉最新一页，附件带着文件名与大小回来', () async {
+      final api = ReplayApi(episodeCount: 4);
+      final container = await _loaded(api);
       addTearDown(container.dispose);
 
-      await _until(
-        () => _peek(container)?.loadedFromServer ?? false,
-        reason: '首次加载',
+      expect(
+        api.detailCalls.single,
+        ('s1', kEpisodePage, null),
+        reason: '首屏必须带 limit 且不带游标 —— 不带 limit 就是把 500 条全拉下来',
       );
 
       final t = _transcript(container);
       expect(t.messages, hasLength(4));
       expect(t.messages.first.role, MessageRole.user);
       expect(t.messages[1].role, MessageRole.assistant);
+      expect(t.hasEarlier, isFalse);
+
+      final attachment = t.messages.first.attachments.single;
+      expect(attachment.hash, 'abc123def456');
       expect(
-        t.messages.first.attachments.single.hash,
-        'abc123def456',
-        reason: 'episode 上挂的附件必须跟着回放出来',
+        attachment.displayName,
+        '设计稿.png',
+        reason: 'filename 现在会随 episode 回来，不该再退回「图片 · abc123de」',
       );
-      expect(
-        t.messages.first.episodeId,
-        'epi_0',
-        reason: '回放出来的消息要能追溯到 episode',
-      );
+      expect(attachment.sizeBytes, 40960);
+      expect(t.messages.first.episodeId, 'epi_0');
     });
 
-    test('只渲染最新一屏，往上翻才展开更早的', () async {
-      final container = _boot(_ReplayApi(episodeCount: 130));
+    test('超过一页时只拿到最新的那一页，而且是结尾不是开头', () async {
+      final container = await _loaded(ReplayApi(episodeCount: 130));
       addTearDown(container.dispose);
-      await _until(
-        () => _peek(container)?.loadedFromServer ?? false,
-        reason: '首次加载',
-      );
 
-      var t = _transcript(container);
-      expect(t.messages, hasLength(130));
+      final t = _transcript(container);
       expect(
-        t.visible,
-        hasLength(kTranscriptWindow),
-        reason: '一次性渲染 130 条 markdown 气泡是没必要的开销',
+        t.messages,
+        hasLength(kEpisodePage),
+        reason: '分页是真的分页 —— 客户端不该再持有整段历史',
       );
       expect(
-        t.visible.last.text,
+        t.messages.last.text,
         '第 129 条',
-        reason: '窗口从最新的一端取 —— 打开会话应看到结尾而不是开头',
+        reason: '服务端默认给最新一页；拿到开头就说明它又变回升序截断了',
       );
       expect(t.hasEarlier, isTrue);
-
-      container.read(chatControllerProvider.notifier).revealEarlier('s1');
-      t = _transcript(container);
-      expect(t.visible, hasLength(kTranscriptWindow * 2));
-      expect(t.visible.last.text, '第 129 条', reason: '展开是往上长，不是换一页');
+      expect(t.cursor, isNotNull);
     });
 
-    test('可见列表的引用在没有变化时保持不变', () async {
-      final container = _boot(_ReplayApi(episodeCount: 130));
+    test('往上翻是真的发请求，取回的一页被前置而不是追加', () async {
+      final api = ReplayApi(episodeCount: 130);
+      final container = await _loaded(api);
       addTearDown(container.dispose);
-      await _until(
-        () => _peek(container)?.loadedFromServer ?? false,
-        reason: '首次加载',
+
+      final cursor = _transcript(container).cursor;
+      await container.read(chatControllerProvider.notifier).loadEarlier('s1');
+
+      expect(
+        api.detailCalls.last,
+        ('s1', kEpisodePage, cursor),
+        reason: '第二页必须带上第一页给的 next_cursor',
       );
 
-      // `select` 用 `==` 比较。如果 visible 是每次现算的 sublist，这里就会
-      // 拿到两个不同的对象，于是每个 SSE delta 都会重建整个 ListView ——
-      // 正是流式渲染千方百计要避免的那笔开销。
-      final a = container.read(chatControllerProvider).activeVisibleMessages;
-      final b = container.read(chatControllerProvider).activeVisibleMessages;
+      final t = _transcript(container);
+      expect(t.messages, hasLength(kEpisodePage * 2));
+      expect(
+        t.messages.last.text,
+        '第 129 条',
+        reason: '更早的一页要接在前面 —— 接在后面会把对话顺序整个搅乱',
+      );
+      expect(t.messages.first.text, '第 ${130 - kEpisodePage * 2} 条');
+      expect(t.loadingEarlier, isFalse);
+    });
+
+    test('翻到最早一条之后 hasEarlier 落下，按钮消失', () async {
+      final api = ReplayApi(episodeCount: 90);
+      final container = await _loaded(api);
+      addTearDown(container.dispose);
+
+      final controller = container.read(chatControllerProvider.notifier);
+      await controller.loadEarlier('s1');
+      await controller.loadEarlier('s1');
+
+      final t = _transcript(container);
+      expect(t.messages, hasLength(90));
+      expect(t.hasEarlier, isFalse, reason: 'has_more 由服务端说了算');
+      expect(t.cursor, isNull);
+
+      // 到头之后再点也不该再发请求
+      final before = api.detailCalls.length;
+      await controller.loadEarlier('s1');
+      expect(api.detailCalls, hasLength(before));
+    });
+
+    test('消息列表的引用在没有变化时保持不变', () async {
+      final container = await _loaded(ReplayApi(episodeCount: 130));
+      addTearDown(container.dispose);
+
+      // `select` 用 `==` 比较。列表若是每次现算的，这里就会拿到两个不同的
+      // 对象，于是每个 SSE delta 都会重建整个 ListView —— 正是流式渲染
+      // 千方百计要避免的那笔开销。
+      final a = container.read(chatControllerProvider).activeTranscript;
+      final b = container.read(chatControllerProvider).activeTranscript;
       expect(identical(a, b), isTrue, reason: '可见列表必须是同一个对象');
     });
 
-    test('服务端截断时明确告知，而不是默默少几条', () async {
-      final container = _boot(
-        // The server capped at 500 but the session holds 900.
-        _ReplayApi(episodeCount: 500, messageCount: 900),
+    test('翻页失败不会清空已经在屏幕上的对话', () async {
+      final container = await _loaded(
+        ReplayApi(episodeCount: 130, failEarlier: true),
       );
       addTearDown(container.dispose);
-      await _until(
-        () => _peek(container)?.loadedFromServer ?? false,
-        reason: '首次加载',
-      );
 
+      await container.read(chatControllerProvider.notifier).loadEarlier('s1');
+
+      final t = _transcript(container);
+      expect(t.messages, hasLength(kEpisodePage), reason: '已有的一页必须还在');
       expect(
-        _transcript(container).serverTruncated,
-        isTrue,
-        reason: 'LIMIT 500 是升序截断，缺的是最新几轮 —— 不说就等于展示了一段假历史',
+        t.error,
+        isNull,
+        reason: '整屏错误态是给「一条都拉不到」用的；一页翻失败把对话清空更糟',
       );
-    });
-
-    test('条数对得上时不报截断', () async {
-      final container = _boot(_ReplayApi(episodeCount: 12));
-      addTearDown(container.dispose);
-      await _until(
-        () => _peek(container)?.loadedFromServer ?? false,
-        reason: '首次加载',
-      );
-      expect(_transcript(container).serverTruncated, isFalse);
+      expect(t.loadingEarlier, isFalse, reason: '失败后必须解锁，否则按钮永久禁用');
+      expect(t.hasEarlier, isTrue, reason: '还能再试一次');
     });
 
     test('拉取失败可重试，且不会被当成空会话', () async {
-      final failing = _ReplayApi(episodeCount: 3, fail: true);
-      final container = _boot(failing);
+      final container = _boot(ReplayApi(episodeCount: 3, fail: true));
       addTearDown(container.dispose);
 
       await _until(
@@ -304,13 +202,9 @@ void main() {
     });
 
     test('已经打开过的会话不会被重复拉取', () async {
-      final api = _ReplayApi(episodeCount: 3);
-      final container = _boot(api);
+      final api = ReplayApi(episodeCount: 3);
+      final container = await _loaded(api);
       addTearDown(container.dispose);
-      await _until(
-        () => _peek(container)?.loadedFromServer ?? false,
-        reason: '首次加载',
-      );
 
       final controller = container.read(chatControllerProvider.notifier);
       controller.selectSession('other');
@@ -318,7 +212,7 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
       expect(
-        api.detailCalls.where((id) => id == 's1'),
+        api.detailCalls.where((c) => c.$1 == 's1'),
         hasLength(1),
         reason:
             '重复拉取会把本地已发出的用户消息复制一份 —— 客户端不知道自己那条 '
@@ -327,13 +221,9 @@ void main() {
     });
 
     test('本地新建的草稿不会去拉一个服务端没有的会话', () async {
-      final api = _ReplayApi(episodeCount: 3);
-      final container = _boot(api);
+      final api = ReplayApi(episodeCount: 3);
+      final container = await _loaded(api);
       addTearDown(container.dispose);
-      await _until(
-        () => _peek(container)?.loadedFromServer ?? false,
-        reason: '首次加载',
-      );
 
       final before = api.detailCalls.length;
       container.read(chatControllerProvider.notifier).createSession();
@@ -345,13 +235,9 @@ void main() {
       );
     });
 
-    test('新发的消息落在窗口内，不会被挤到窗口外面去', () async {
-      final container = _boot(_ReplayApi(episodeCount: 130));
+    test('新发的消息接在这一页后面', () async {
+      final container = await _loaded(ReplayApi(episodeCount: 130));
       addTearDown(container.dispose);
-      await _until(
-        () => _peek(container)?.loadedFromServer ?? false,
-        reason: '首次加载',
-      );
 
       await container.read(chatControllerProvider.notifier).send('新问题');
       await _until(
@@ -359,13 +245,169 @@ void main() {
         reason: '生成结束',
       );
 
-      final visible = _transcript(container).visible;
-      expect(
-        visible.any((m) => m.text == '新问题'),
-        isTrue,
-        reason: '刚发出去的消息必须看得见',
+      final messages = _transcript(container).messages;
+      expect(messages.any((m) => m.text == '新问题'), isTrue);
+      expect(messages.last.role, MessageRole.assistant);
+    });
+  });
+
+  group('回放的记忆与工具轨迹', () {
+    /// The server anchors both on the **user** episode.
+    List<Episode> turn({required bool withAnswer}) => [
+      Episode(
+        id: 'epi_u',
+        sessionId: 's1',
+        role: 'user',
+        text: '读一下 tools.rs',
+        occurredAt: DateTime(2026, 1, 1),
+        memories: const [
+          InjectedMemory(
+            factId: 'f_ok',
+            fact: MemoryFact(id: 'f_ok', statement: '偏好简洁的回答'),
+            channels: ['bm25', 'vector'],
+            score: 0.03,
+          ),
+          InjectedMemory(
+            factId: 'f_old',
+            fact: MemoryFact(id: 'f_old', statement: '延迟目标 200ms'),
+            channels: ['graph'],
+            invalidated: true,
+          ),
+          InjectedMemory(factId: 'f_gone'),
+        ],
+        toolCalls: const [
+          ToolCall(
+            name: 'read_file',
+            path: 'src/tools.rs',
+            result: '返回 486 行',
+          ),
+        ],
+      ),
+      if (withAnswer)
+        Episode(
+          id: 'epi_a',
+          sessionId: 's1',
+          role: 'assistant',
+          text: '读完了。',
+          occurredAt: DateTime(2026, 1, 1, 0, 1),
+        ),
+    ];
+
+    test('抽屉挂在回答上，而不是挂在提问上', () async {
+      final container = await _loaded(
+        ReplayApi(episodeCount: 2, episodes: turn(withAnswer: true)),
       );
-      expect(visible.last.role, MessageRole.assistant);
+      addTearDown(container.dispose);
+
+      final messages = _transcript(container).messages;
+      expect(messages, hasLength(2));
+      expect(
+        messages.first.facts,
+        isEmpty,
+        reason: '服务端锚在 user 那条上，但界面上抽屉属于回答 —— 否则刷新前后长得不一样',
+      );
+      expect(messages.first.toolCalls, isEmpty);
+      expect(messages.last.role, MessageRole.assistant);
+      expect(messages.last.facts, hasLength(3));
+      expect(messages.last.toolCalls.single.path, 'src/tools.rs');
+    });
+
+    test('模型出错那一轮没有回答，归因就留在提问上', () async {
+      final container = await _loaded(
+        ReplayApi(episodeCount: 1, episodes: turn(withAnswer: false)),
+      );
+      addTearDown(container.dispose);
+
+      final only = _transcript(container).messages.single;
+      expect(only.role, MessageRole.user);
+      expect(
+        only.facts,
+        hasLength(3),
+        reason:
+            'assistant episode 在模型出错时根本不落库 —— 归因跟着一起消失的话，'
+            '最该被审计的那一轮反而什么都没有',
+      );
+      expect(only.toolCalls, hasLength(1));
+    });
+
+    test('失效的事实照样列出并被标记，被抹除的显示占位', () async {
+      final container = await _loaded(
+        ReplayApi(episodeCount: 2, episodes: turn(withAnswer: true)),
+      );
+      addTearDown(container.dispose);
+
+      final facts = _transcript(container).messages.last.facts;
+      expect(
+        facts.where((f) => f.invalidated),
+        hasLength(1),
+        reason: '被取代的事实必须留着 —— 「当时依据的这条现在不成立了」正是审计要看的',
+      );
+      expect(
+        facts.where((f) => f.redacted).single.factId,
+        'f_gone',
+        reason: 'statement 为 null 表示行已不在，藏掉这一条就是篡改回放',
+      );
+      expect(facts.first.channels, ['bm25', 'vector']);
+    });
+  });
+
+  group('mock 数据源也真的分页', () {
+    // The fixtures are far too small to need paging, which is exactly why this
+    // is here: if the mock always answered with everything and `has_more:
+    // false`, the "load earlier" path would first run in production.
+    test('limit + before 走完两页，游标不重复也不漏', () async {
+      final api = MockCortexApi();
+      addTearDown(api.dispose);
+
+      final all = await api.sessionDetail('ses_01JQZ5V1C7');
+      expect(all.episodes.length, greaterThan(2), reason: '这个夹具要够翻页');
+      expect(all.hasMore, isFalse);
+      expect(all.nextCursor, isNull);
+
+      final first = await api.sessionDetail('ses_01JQZ5V1C7', limit: 2);
+      expect(first.episodes, hasLength(2));
+      expect(first.hasMore, isTrue);
+      expect(
+        first.episodes.map((e) => e.id),
+        all.episodes.skip(all.episodes.length - 2).map((e) => e.id),
+        reason: '不带游标时给的是**最新**两条',
+      );
+
+      final second = await api.sessionDetail(
+        'ses_01JQZ5V1C7',
+        limit: 2,
+        before: first.nextCursor,
+      );
+      expect(
+        second.episodes.map((e) => e.id),
+        isNot(contains(first.episodes.first.id)),
+        reason: 'before 是严格小于 —— 含等号的话每页都会重复一条',
+      );
+    });
+
+    test('畸形游标是 400，和真实 daemon 一样', () async {
+      final api = MockCortexApi();
+      addTearDown(api.dispose);
+      await expectLater(
+        api.sessionDetail('ses_01JQZ5V1C7', before: '不是个游标'),
+        throwsA(
+          isA<CortexApiException>().having((e) => e.statusCode, 'status', 400),
+        ),
+        reason: 'mock 比真实后端宽松的话，它测的就是另一份契约',
+      );
+    });
+
+    test('回放的记忆与工具调用在 mock 里也有', () async {
+      final api = MockCortexApi();
+      addTearDown(api.dispose);
+
+      final detail = await api.sessionDetail('ses_01JQZ8K3M9');
+      final anchored = detail.episodes.firstWhere(
+        (e) => e.memories.isNotEmpty,
+      );
+      expect(anchored.role, 'user', reason: '与 daemon 一样锚在 user 那条上');
+      expect(anchored.memories.any((m) => m.invalidated), isTrue);
+      expect(anchored.memories.any((m) => m.redacted), isTrue);
     });
   });
 }

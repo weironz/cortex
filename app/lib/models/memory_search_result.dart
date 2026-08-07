@@ -24,12 +24,7 @@ class RetrievalChannels {
   factory RetrievalChannels.fromJson(Map<String, dynamic> json) =>
       RetrievalChannels(
         factId: asString(json['fact_id']),
-        channels: (json['channels'] is List)
-            ? (json['channels'] as List)
-                  .map((e) => asString(e))
-                  .where((e) => e.isNotEmpty)
-                  .toList(growable: false)
-            : const [],
+        channels: asStringList(json['channels']),
         score: asDoubleOrNull(json['score']),
       );
 }

@@ -100,7 +100,7 @@ class _FakeApi implements CortexApi {
   // that reached for them on a bump should fail the test, not pass quietly.
 
   @override
-  Future<SessionDetail> sessionDetail(String id) =>
+  Future<SessionDetail> sessionDetail(String id, {int? limit, String? before}) =>
       throw UnimplementedError('同步链路不应拉会话详情');
 
   @override

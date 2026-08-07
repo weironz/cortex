@@ -2,43 +2,43 @@ import 'chat_session.dart';
 import 'episode.dart';
 import 'json.dart';
 
-/// `GET /sessions/{id}` — the session overview plus **every** episode in it.
+/// `GET /sessions/{id}` — the session overview plus **one page** of episodes.
 ///
-/// ## There is no cursor here, and that shapes the client
+/// ## The page is the newest one, and it pages backwards
 ///
-/// `SessionDetail` is flat: the server flattens `SessionDto` next to a single
-/// `episodes` array and offers no `before` / `limit` / `after` parameters. So
-/// the client cannot page the *request*; a 4000-turn session arrives as one
-/// JSON document or not at all.
+/// `?limit=N` picks the page size (server default and hard cap are both 500),
+/// `?before=<cursor>` walks towards older messages. With neither, the response
+/// is the *latest* N turns — which is what a user opening a conversation wants
+/// to see, and the opposite of what the uncursored `ORDER BY occurred_at ASC
+/// LIMIT 500` used to return.
 ///
-/// What the client can still do is page the *render*, which is what
-/// `ChatController.openSession` does: it keeps the whole decoded transcript in
-/// memory and reveals it from the newest end in windows, growing the window
-/// when the user scrolls to the top. That fixes the cost that actually hurts —
-/// markdown parsing and layout per bubble — while leaving the transfer cost
-/// where the contract put it.
+/// [episodes] is chronological (oldest first) *within* the page: the server
+/// reverses after slicing so a client can render the array in order. Paging up
+/// therefore means **prepending** the next response to what is already held.
 ///
-/// Worse, the server-side cap is `LIMIT 500` over `ORDER BY occurred_at ASC`,
-/// so a longer session comes back **oldest-first and truncated at the end** —
-/// the user would be shown the start of a conversation whose latest turns are
-/// missing, with nothing on screen saying so. [truncated] exists to say so.
-///
-/// The missing piece is server-side: a cursor
-/// (`GET /sessions/{id}?before=…&limit=N`, newest-first). Until it exists,
-/// "分页" on this screen is honestly only half a feature, and the README
-/// says which half.
+/// [hasMore] is authoritative and must not be re-derived from
+/// `episodes.length == limit` — the server over-fetches by one row precisely so
+/// that an exactly-divisible history does not produce a phantom empty page.
 class SessionDetail {
-  const SessionDetail({required this.session, required this.episodes});
+  const SessionDetail({
+    required this.session,
+    required this.episodes,
+    this.hasMore = false,
+    this.nextCursor,
+  });
 
   final ChatSession session;
 
-  /// Chronological, oldest first — the order the server returns.
+  /// This page, oldest first.
   final List<Episode> episodes;
 
-  /// The daemon returned fewer episodes than the session claims to hold, i.e.
-  /// the `LIMIT 500` bit. The transcript renders a banner instead of quietly
-  /// showing a conversation with its ending cut off.
-  bool get truncated => session.messageCount > episodes.length;
+  /// There are older messages before this page.
+  final bool hasMore;
+
+  /// Pass as `before` to fetch the page before this one. Null when [hasMore] is
+  /// false. Its format is **opaque** to the client — the server validates it and
+  /// answers 400 on a malformed one, so there is nothing to gain from parsing.
+  final String? nextCursor;
 
   factory SessionDetail.fromJson(Map<String, dynamic> json) => SessionDetail(
     // The session fields are flattened into the same object.
@@ -46,5 +46,7 @@ class SessionDetail {
     episodes: asObjectList(
       json['episodes'],
     ).map(Episode.fromJson).toList(growable: false),
+    hasMore: json['has_more'] == true,
+    nextCursor: asStringOrNull(json['next_cursor']),
   );
 }

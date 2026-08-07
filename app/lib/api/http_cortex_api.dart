@@ -86,8 +86,17 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
-  Future<SessionDetail> sessionDetail(String id) async => SessionDetail.fromJson(
-    await _getJson('/sessions/${Uri.encodeComponent(id)}'),
+  Future<SessionDetail> sessionDetail(
+    String id, {
+    int? limit,
+    String? before,
+  }) async => SessionDetail.fromJson(
+    await _getJson('/sessions/${Uri.encodeComponent(id)}', {
+      if (limit != null) 'limit': '$limit',
+      // Sent back verbatim. `Uri` percent-encodes it for us, and the daemon's
+      // `|` separator survives that round trip.
+      'before': ?before,
+    }),
   );
 
   @override

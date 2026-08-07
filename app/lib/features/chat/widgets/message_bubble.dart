@@ -5,7 +5,7 @@ import '../../../core/formatting.dart';
 import '../../../core/link_launcher.dart';
 import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
-import '../../../models/memory_fact.dart';
+import '../../../models/injected_memory.dart';
 import '../../../models/tool_call.dart';
 import '../../../widgets/markdown/cortex_markdown.dart';
 import 'attachment_views.dart';
@@ -107,6 +107,19 @@ class _UserBubble extends StatelessWidget {
                 formatRelative(message.createdAt),
                 style: theme.textTheme.labelSmall,
               ),
+              // Normally empty: `ChatController` carries a turn's attribution
+              // onto the answer, where the drawer belongs. It survives here for
+              // the one case that has no answer — a turn the model failed still
+              // injected memory and may have run tools, and that is precisely
+              // the turn somebody comes back to look at.
+              if (message.facts.isNotEmpty || message.toolCalls.isNotEmpty)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: MemoryDrawer(
+                    facts: message.facts,
+                    toolCalls: message.toolCalls,
+                  ),
+                ),
             ],
           ),
         ),
@@ -131,7 +144,7 @@ class AssistantBlock extends StatelessWidget {
   });
 
   final String text;
-  final List<MemoryFact> facts;
+  final List<InjectedMemory> facts;
   final List<ToolCall> toolCalls;
   final List<Attachment> attachments;
   final DateTime? createdAt;

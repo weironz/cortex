@@ -1,11 +1,24 @@
 import 'package:cortex_app/app.dart';
 import 'package:cortex_app/core/app_config.dart';
+import 'package:cortex_app/features/chat/widgets/conversation_view.dart';
 import 'package:cortex_app/features/chat/widgets/memory_drawer.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/chat_controller.dart';
+import 'package:cortex_app/state/chat_state.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'support/replay_api.dart';
+
+/// Points the app at a "live" backend so an injected fake is used instead of
+/// `MockCortexApi`. Nothing reaches the network — `cortexApiProvider` is
+/// overridden alongside it.
+class _LiveConfigNotifier extends AppConfigNotifier {
+  @override
+  AppConfig build() =>
+      const AppConfig(useMock: false, baseUrl: 'http://127.0.0.1:8080');
+}
 
 /// Pins the app to the mock source regardless of `--dart-define`, so tests are
 /// hermetic and never touch the network.
@@ -117,18 +130,16 @@ void main() {
     // Mock holds back ~420ms before the memory event, mirroring retrieval.
     await tester.pump(const Duration(milliseconds: 500));
 
-    // More than one `MemoryDrawer` is expected now that history replays: every
-    // settled assistant turn builds one too (it collapses to nothing when there
-    // is neither memory nor tool activity, which is the case for a replayed
-    // episode — the server does not store either per-episode).
     expect(find.byType(MemoryDrawer), findsAtLeastNWidgets(1));
 
-    // The assertion that carries the intent: the *live* turn shows its injected
-    // memory, labelled with a count.
+    // Two drawers, and both matter. The live turn has always had one; the
+    // replayed turn above it only got one when `episode_memories` /
+    // `episode_tool_calls` landed. Before that, the same answer looked
+    // different before and after a refresh.
     expect(
       find.textContaining('本轮用到的记忆'),
-      findsOneWidget,
-      reason: '流式回合的记忆抽屉应带条数标签',
+      findsNWidgets(2),
+      reason: '回放出来的历史轮次与流式中的当前轮次都应带记忆抽屉',
     );
 
     // Partway through the stream there must be text on screen but the turn is
@@ -157,5 +168,58 @@ void main() {
     for (var i = 0; i < 600; i++) {
       await tester.pump(const Duration(milliseconds: 30));
     }
+  });
+
+  testWidgets('滚到顶部的按钮真的会去拉上一页', (tester) async {
+    tester.view.physicalSize = const Size(900, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final api = ReplayApi(episodeCount: 130);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appConfigProvider.overrideWith(_LiveConfigNotifier.new),
+          cortexApiProvider.overrideWithValue(api),
+        ],
+        child: const MaterialApp(home: Scaffold(body: ConversationView())),
+      ),
+    );
+    // Not `await`ing the source: the futures resolve on microtask drain, and
+    // awaiting one from inside `testWidgets` is how this suite deadlocks.
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    // The view opens pinned to the newest message, so the header at index 0 is
+    // off-screen and therefore not built — scroll up to it the way a user does.
+    final loadMore = find.text('加载更早的 $kEpisodePage 条');
+    await tester.scrollUntilVisible(
+      loadMore,
+      -300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(
+      loadMore,
+      findsOneWidget,
+      reason: '服务端说了 has_more，入口就必须在',
+    );
+    expect(
+      find.textContaining('最新几轮可能不在其中'),
+      findsNothing,
+      reason: '升序截断的横幅是给旧服务端的止血措施，服务端修好后必须撤掉',
+    );
+
+    await tester.tap(loadMore);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      api.detailCalls,
+      hasLength(2),
+      reason: '这个按钮是一次真正的取数，不再是「展开已经在内存里的东西」',
+    );
+    expect(api.detailCalls.last.$3, isNotNull, reason: '第二次必须带游标');
   });
 }

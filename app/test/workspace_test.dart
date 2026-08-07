@@ -34,53 +34,66 @@ ProviderContainer _boot() {
 
 void main() {
   group('工具行认出操作了哪个文件', () {
-    // The daemon renders arguments through `compact_args`, which walks a
-    // `serde_json::Map` — a BTreeMap, so keys come out sorted. In `write_file`
-    // that puts the truncated `content` *before* `path`, which is the case this
-    // parser has to survive.
-    test('write_file 的 path 排在被截断的 content 之后，仍能取到', () {
+    // `ChatEvent::Tool` carries `path` as its own field now. The client used to
+    // regex it back out of the rendered `(k=v, k=v)` argument string; these
+    // cases exist to make sure nothing quietly starts doing that again, because
+    // that parse fails *silently* — a reworded summary points at another file
+    // rather than at none.
+    test('路径来自 path 字段，两条事件配对后仍在', () {
       var calls = ToolCall.merge(
         const [],
         'write_file',
         '调用 write_file (content=//! 路径围栏。第一版只做…, path=src/tools.rs)',
+        path: 'src/tools.rs',
       );
-      expect(calls.single.targetPath, 'src/tools.rs');
+      expect(calls.single.path, 'src/tools.rs');
 
-      calls = ToolCall.merge(calls, 'write_file', 'write_file 已写入 src/tools.rs（412 字节）');
+      calls = ToolCall.merge(
+        calls,
+        'write_file',
+        'write_file 已写入 src/tools.rs（412 字节）',
+        path: 'src/tools.rs',
+      );
       expect(calls.single.pending, isFalse);
-      expect(calls.single.targetPath, 'src/tools.rs', reason: '拿到结果后路径不该丢');
+      expect(calls.single.path, 'src/tools.rs', reason: '拿到结果后路径不该丢');
     });
 
-    test('content 里出现字面量 path= 不会被当成参数', () {
+    test('content 里出现字面量 path= 不会被当成路径', () {
       final calls = ToolCall.merge(
         const [],
         'write_file',
-        '调用 write_file (content=let path=x; // 注意这里, path=真的路径.rs)',
+        '调用 write_file (content=let path=x; // 注意这里, path=假的.rs)',
+        path: '真的路径.rs',
       );
       expect(
-        calls.single.targetPath,
+        calls.single.path,
         '真的路径.rs',
-        reason: '取最后一个由分隔符引出的 path=，否则 content 里的假路径会赢',
+        reason: '摘要里写什么都不影响 —— 路径只认服务端下发的那个字段',
       );
     });
 
-    test('被截断的值去掉省略号', () {
-      final calls = ToolCall.merge(
-        const [],
-        'read_file',
-        '调用 read_file (path=very/long/path/that/got/cut…)',
-      );
-      expect(calls.single.targetPath, 'very/long/path/that/got/cut');
-    });
-
-    test('没有 path 参数的工具返回 null，且不被当成文件工具', () {
+    test('服务端不给 path 时就是没有，不去摘要里找补', () {
       final calls = ToolCall.merge(
         const [],
         'memory_search',
         '调用 memory_search (query=pgvector 索引)',
       );
-      expect(calls.single.targetPath, isNull);
+      expect(calls.single.path, isNull);
       expect(calls.single.touchesFiles, isFalse);
+    });
+
+    test('一条 tool 事件不带 path，但配对的另一条带，路径仍然保留', () {
+      // The daemon repeats it on both halves, but a build that only sent it on
+      // dispatch must not make the path vanish when the result lands.
+      var calls = ToolCall.merge(
+        const [],
+        'read_file',
+        '调用 read_file (path=a.rs)',
+        path: 'a.rs',
+      );
+      calls = ToolCall.merge(calls, 'read_file', 'read_file 返回 3 行');
+      expect(calls.single.path, 'a.rs');
+      expect(calls.single.result, '返回 3 行');
     });
 
     test('三个文件工具都被标为触碰文件', () {
@@ -91,6 +104,23 @@ void main() {
           reason: '$name 应算作文件工具',
         );
       }
+    });
+
+    test('回放出来的一次调用直接就是终态', () {
+      final call = ToolCall.replayed(const {
+        'name': 'write_file',
+        'path': 'notes.md',
+        'summary': 'write_file 失败：路径 ../etc 已被围栏拒绝',
+        'ok': false,
+      });
+      expect(call.pending, isFalse, reason: '落库的行只在调用返回后才写，没有执行中态');
+      expect(call.path, 'notes.md');
+      expect(call.failed, isTrue, reason: 'ok 字段是权威的，不靠摘要文本猜');
+      expect(
+        call.result,
+        startsWith('失败'),
+        reason: '行首的工具名是给 CLI 逐行打印用的，配对成一行后应剥掉',
+      );
     });
   });
 
@@ -242,7 +272,7 @@ void main() {
       final fileCalls = calls.where((c) => c.touchesFiles).toList();
       expect(fileCalls, isNotEmpty);
       expect(
-        fileCalls.every((c) => c.targetPath != null),
+        fileCalls.every((c) => c.path != null),
         isTrue,
         reason: '每一条文件工具行都必须能说出操作了哪个文件',
       );

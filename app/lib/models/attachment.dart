@@ -2,20 +2,25 @@ import 'json.dart';
 
 /// A blob attached to one message.
 ///
-/// ## Only two of these fields exist on the wire
+/// ## The two directions carry different fields
 ///
-/// `cortexd`'s `AttachmentRef` is `{ hash, kind }` and nothing else. Everything
-/// below that — [filename], [mime], [sizeBytes] — is **client-side enrichment**
-/// that survives only as long as the app is running: it is known while the user
-/// is uploading, and lost the moment the transcript is replayed from
-/// `GET /sessions/{id}`.
+/// * **Up** (`AttachmentRef`, in `POST /chat`) is `{ hash, kind, filename }`.
+///   [mime] and [sizeBytes] are deliberately *not* sent: they are decided by
+///   the bytes, which the server already sniffed when the blob was registered.
+///   Reporting them again would only create a case where what the client says
+///   and what the bytes say disagree.
+/// * **Down** (`AttachmentDto`, on every replayed episode) adds [mime] and
+///   [sizeBytes] to those three.
 ///
-/// That is a real contract gap, not an oversight here. A replayed image renders
-/// fine (the bytes are addressed by [hash]), but a replayed PDF can only be
-/// labelled "文档 · a1b2c3d4…" because the original name was never stored.
-/// Fixing it means adding `filename` / `mime` / `size_bytes` to `AttachmentRef`
-/// server-side; until then the UI degrades honestly rather than inventing a
-/// name.
+/// [filename] therefore round-trips now. It lives on `episode_blobs` rather
+/// than on `blobs` because under content addressing one set of bytes can have
+/// many names — the same screenshot is "设计稿.png" today and "IMG_2043.png"
+/// when someone forwards it — so the name belongs to *this reference*, not to
+/// the content.
+///
+/// A null [filename] on a replayed attachment means the row predates that
+/// column; [displayName] falls back to "文档 · a1b2c3d4" for those rather than
+/// inventing a name.
 class Attachment {
   const Attachment({
     required this.hash,
@@ -34,13 +39,12 @@ class Attachment {
   final String? kind;
 
   /// Sniffed by the server from the byte header (not what the client claimed).
-  /// Null on a replayed attachment.
   final String? mime;
 
-  /// Null on a replayed attachment.
   final int? sizeBytes;
 
-  /// Local only — never sent, never returned. See the class doc.
+  /// The name the user saw when they attached it. Sent up, stored per
+  /// reference, and returned on replay — see the class doc.
   final String? filename;
 
   bool get isImage =>
@@ -63,18 +67,18 @@ class Attachment {
         filename: filename,
       );
 
-  /// Wire shape for `ChatRequest.attachments`. Only the two fields the server
-  /// accepts — sending more would be silently dropped and give a false
-  /// impression that filenames round-trip.
+  /// Wire shape for `ChatRequest.attachments` — the three fields `AttachmentRef`
+  /// accepts. [mime] and [sizeBytes] are omitted on purpose; the server derives
+  /// them from the bytes it already holds.
   Map<String, dynamic> toWireJson() => {
     'hash': hash,
     if (kind != null) 'kind': kind,
+    if (filename != null && filename!.isNotEmpty) 'filename': filename,
   };
 
   factory Attachment.fromJson(Map<String, dynamic> json) => Attachment(
     hash: asString(json['hash']),
     kind: asStringOrNull(json['kind']),
-    // Tolerated in case the server later grows these; harmless when absent.
     mime: asStringOrNull(json['mime']),
     sizeBytes: json['size_bytes'] == null ? null : asInt(json['size_bytes']),
     filename: asStringOrNull(json['filename']),

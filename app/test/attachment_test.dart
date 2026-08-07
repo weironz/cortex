@@ -123,7 +123,7 @@ class _BlobApi implements CortexApi {
       const [];
 
   @override
-  Future<SessionDetail> sessionDetail(String id) =>
+  Future<SessionDetail> sessionDetail(String id, {int? limit, String? before}) =>
       throw UnimplementedError();
 
   @override

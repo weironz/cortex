@@ -36,6 +36,15 @@ DateTime? asDateOrNull(Object? v) {
   return null;
 }
 
+/// Reads a list of non-empty strings, tolerating `null` and non-list values.
+List<String> asStringList(Object? v) {
+  if (v is! List) return const [];
+  return v
+      .map(asString)
+      .where((e) => e.isNotEmpty)
+      .toList(growable: false);
+}
+
 /// Reads `json[key]` as a list of objects, tolerating `null` and non-list
 /// values (returns an empty list rather than throwing).
 List<Map<String, dynamic>> asObjectList(Object? v) {

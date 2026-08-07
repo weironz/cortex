@@ -5,7 +5,7 @@ import 'memory_fact.dart';
 ///
 /// Wire contract (each SSE `data:` payload is one JSON object):
 /// * `{"type":"memory","facts":[{...}]}`
-/// * `{"type":"tool","name":"memory_search","summary":"..."}`
+/// * `{"type":"tool","name":"read_file","summary":"...","path":"src/main.rs"}`
 /// * `{"type":"delta","text":"..."}`
 /// * `{"type":"done","episode_id":"01J..."}`
 /// * `{"type":"error","message":"..."}`
@@ -28,6 +28,7 @@ sealed class ChatEvent {
       'tool' => ChatToolEvent(
         name: asString(json['name'], 'tool'),
         summary: asStringOrNull(json['summary']),
+        path: asStringOrNull(json['path']),
       ),
       'done' => ChatDoneEvent(asStringOrNull(json['episode_id'])),
       'error' => ChatErrorEvent(
@@ -53,9 +54,14 @@ final class ChatMemoryEvent extends ChatEvent {
 /// The agent invoked a tool. Rendered as a collapsible one-liner in the
 /// conversation, not as message content.
 final class ChatToolEvent extends ChatEvent {
-  const ChatToolEvent({required this.name, this.summary});
+  const ChatToolEvent({required this.name, this.summary, this.path});
   final String name;
   final String? summary;
+
+  /// The file this call touched, or null for a tool that touches none.
+  /// Optional in the contract precisely so that `memory_search` can omit it
+  /// rather than send an empty string the UI would render as a path.
+  final String? path;
 }
 
 /// Terminal frame. [episodeId] is the archived assistant episode.

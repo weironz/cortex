@@ -297,8 +297,8 @@ Mock 数据源下整个指示器隐藏：没有 daemon，说"已连接"或"已�
 线上每次工具调用会发**两条** `tool` 事件：
 
 ```
-{"type":"tool","name":"read_file","summary":"调用 read_file (path=app/pubspec.yaml)"}
-{"type":"tool","name":"read_file","summary":"read_file 返回 97 行 / 4124 字符"}
+{"type":"tool","name":"read_file","summary":"调用 read_file (path=app/pubspec.yaml)","path":"app/pubspec.yaml"}
+{"type":"tool","name":"read_file","summary":"read_file 返回 97 行 / 4124 字符","path":"app/pubspec.yaml"}
 ```
 
 拆成两条在协议上是对的（第一条正是"慢调用期间显示执行中"的依据），但照直渲染就是两行
@@ -317,15 +317,19 @@ agent 循环严格「派发 → 等待 → 出结果 → 下一个」，所以�
 read_file   crates/cortex-agent/src/tools.rs   · 返回 486 行 / 15204 字符
 ```
 
-路径是从 `summary` 那串渲染好的参数里解析出来的，这不好看，但契约里没有结构化字段
-（`ChatEvent::Tool` 只有 `{name, summary}`）。两个细节让它在实践中够可靠：
-`compact_args` 遍历的是 `serde_json::Map`（即 `BTreeMap`，键有序），所以 `write_file`
-里被截断的 `content` 一定排在 `path` 前面 —— 取**最后一个**由分隔符引出的 `path=`
-就绕开了 content 里恰好出现 `path=` 的情况；截断标记 `…` 会被剥掉，免得半截路径
-被当成真名字。`test/workspace_test.dart` 把这几条都钉住了。
+路径直接来自 `ChatEvent::Tool` 的 `path` 字段。**客户端从 `summary` 里正则抠路径的那段
+已经删掉了** —— 它靠的是 `compact_args` 恰好按 `BTreeMap` 顺序渲染成 `(k=v, k=v)`，
+而那是个渲染细节，不是契约。措辞一改，那段解析不会报错、不会崩溃，只会**指向另一个
+文件**：批准了一次 `write_file`，改的却是别处。没有任何信号能让人发现。
 
-真正的修法是后端加一个 `ChatEvent::Tool { path: Option<String> }`。在那之前，
-「`write_file` 到底改了哪个文件」不能只以一段和 `content=` 挤在一起的灰字存在。
+`path` 是 `Option` 而不是空串，这一点客户端照做：`memory_search` 不碰文件，没有 path
+就不画文件条目，而不是画一个指向工作区根的空路径。
+
+一条来自联调的观察：模型可以凭空调一个**不存在**的工具（实测见过 `file_read`），
+daemon 照样把这次尝试作为 `tool` 事件发出来，连同它从参数里取到的 `path`；那条事件是
+失败的（「未知工具：…。可用工具：memory_search」），界面按失败画。所以
+「未绑定的会话拿不到文件工具」这条断言看的是**有没有成功的文件调用**，不是
+「事件里有没有出现过 read_file 这个名字」—— 后者测的是模型今天想怎么命名。
 
 ### 工作区：一个会话属性，不是一个模式
 
@@ -423,10 +427,16 @@ agent 照常读写，只是浏览器看不到那台机器的磁盘 —— 而对
 - **统一入口**：一条对话流，会话可绑定工作区；绑定与否只改变工具目录，不改变界面结构
 - **工作区**：标题栏绑定入口、可折叠只读文件树（懒加载一层）、更换与解绑、
   服务端校验消息原样透出；Web 端改为填 daemon 可见的绝对路径并写明原因
-- **历史会话回放**：`GET /sessions/{id}` 接上了，切到旧会话不再是空白；
-  按窗口渲染（一屏 40 条，往上翻加载更早的）；服务端 `LIMIT 500` 截断时明确提示
+- **历史会话分页**：`GET /sessions/{id}?limit=&before=` 接上了。首屏拿**最新**一页
+  （40 条），滚到顶部点一次真的发一次请求往回翻，`has_more` 说了算。翻页时按
+  「距底部的距离」补偿滚动位置，新来的一页出现在上方而不是把正在读的内容推走
+- **回放带审计抽屉**：`episode_memories` / `episode_tool_calls` 让重开的会话也能展开
+  「为什么记得这个」。被取代的事实**照样列出**并标「已失效」，被抹除的显示占位
+  （藏掉就是篡改回放）；服务端把归因锚在 user 那条上，客户端把它挪到回答上显示，
+  只有「模型出错、没有回答」那一轮才留在提问上
 - **附件**：拖拽 + 按钮两个入口，≤32 MiB 走 `POST /blobs`、更大走 presign 直传，
-  上传进度与失败重试，图片缩略图 / 其他类型文件卡片，回放时也能看到
+  上传进度与失败重试，图片缩略图 / 其他类型文件卡片；文件名 / MIME / 大小随
+  `AttachmentRef`↔`AttachmentDto` 往返，回放时显示真名字而不是「文档 · a1b2c3d4」
 - **会话管理**：重命名（区分派生标题与自定标题）、归档 / 取消归档、显示已归档开关
 - 会话列表、新建会话、切换（切换不会掐掉在途生成）
 - 流式对话：打字机效果、思考中指示、停止生成、失败重试
@@ -449,17 +459,14 @@ agent 照常读写，只是浏览器看不到那台机器的磁盘 —— 而对
 
 | 位置 | 现状 |
 |---|---|
-| **单会话消息分页** | 客户端只能分页**渲染**，分不了**传输**：`GET /sessions/{id}` 没有游标，且服务端是 `ORDER BY occurred_at ASC LIMIT 500`，超过 500 条时缺的是**最新**那几轮。界面已经据 `message_count` 把这件事说出来了，但真正的修法在后端：加 `?before=<episode_id>&limit=N`、倒序返回 |
-| **回放丢失记忆与工具轨迹** | 回放出来的 assistant 消息没有「本轮用到的记忆」抽屉 —— `episodes` 表不按条存注入的 facts 与工具调用。现在的表现（回放的回合没有抽屉，实时的有）是诚实的，但同一条回答在刷新前后长得不一样 |
-| **附件文件名不过夜** | `AttachmentRef` 只有 `{hash, kind}`。上传时的文件名、MIME、大小只活在这次运行里，回放时一个 PDF 只能显示成「文档 · a1b2c3d4」。修法是给 `AttachmentRef` 加 `filename` / `mime` / `size_bytes` |
-| **工具事件没有结构化路径** | `ChatEvent::Tool` 只有 `{name, summary}`，路径靠解析渲染好的参数串拿到（见上文）。加一个 `path: Option<String>` 就能把这段解析删掉 |
 | **Web 端没有文件树** | 浏览器读不到 daemon 那台机器的磁盘。要补需要后端出 `GET /workspace/tree`（或复用 `list_dir` 开一个非 agent 的只读端点） |
 | 会话删除 | 没有，也不打算按「删除」做 —— 存储是 append-only，归档是唯一诚实的动词。真要销毁得走 redact / purge，那是另一条路、要二次确认 |
 | 会话列表分页 | 一次拉全量（服务端 `SESSION_LIST_LIMIT = 200`）。会话多了要加游标分页 |
 | 本地 SQLite 缓存与离线写队列 | 未做。**做这件事时必须同时改 `SyncController` 的首次连接游标**：现在以 `hello.cursor` 为基线，有了本地库之后就必须从持久化游标（新设备 0）起拉，否则会漏掉建库之前的全部历史 |
 | 附件的音视频播放 | 只做了图片缩略图与文件卡片。`GET /blobs/{hash}` 已支持 Range，播放器接得上，但还没接 |
 | 记忆的编辑 / 删除 / 标记取代 | 只读。UI 里没有写入口 |
-| `superseded` 事实的视觉区分 | 后端字段未定，目前只能靠 statement 文本看出来 |
+| 记忆面板里的失效标记 | 抽屉里有（`InjectedMemoryDto.invalidated`），但 `GET /memory/search` 的 `FactDto` 没有这个字段，所以**右栏检索结果里看不出哪条已被取代**。要么给 `FactDto` 也加一个，要么让检索默认就不返回失效的 |
+| 一页多大由客户端拍 | `kEpisodePage = 40`。服务端上限 500，没有「推荐值」的说法，40 是照着原来的渲染窗口定的，没有实测支撑 |
 | 对话流的自动重试 | WS 有指数退避自动重连，但 `POST /chat` 断了仍只有手动「重试」按钮 |
 | Web 端 WS 的运行时验证 | `flutter build web --release` 通过（说明 WS 这条路径没有漏进 `dart:io`），但**没有在真实浏览器里跑过一次连接**。`web_socket_channel` 在 web 上走浏览器 `WebSocket`，与 SSE 当年那个 `XMLHttpRequest` 坑不是同一类问题，不过在浏览器里点一次才算数 |
 | 工具调用的确认回路 | 后端 `ApprovalPolicy.enforce = false`，尚无 `ConfirmRequest` 事件，客户端也就没有确认弹层 |
@@ -480,22 +487,24 @@ flutter analyze
 | `test/sse_test.dart` | SSE 解析边界：chunk 切割、keep-alive、CRLF、跨 chunk 的多字节 UTF-8 |
 | `test/sync_controller_test.dart` | **游标语义**（附「用事件 cursor 会漏行」的反例断言）、bump/resync 分开计数、断线退避重连、服务端谎报 `has_more` 不死循环、按表分派刷新、mock 下不连接 |
 | `test/tool_pairing_test.dart` | 两条 `tool` 事件折成一行、同工具连调两次仍是两行、失败结果被标记、摘要换了措辞也不丢字 |
-| `test/chat_turn_test.dart` | 走 mock 打完整一轮：配对结果、弃权时记忆为空且不算失败；`MemoryDrawer` 的三种形态 |
+| `test/chat_turn_test.dart` | 走 mock 打完整一轮：配对结果、弃权时记忆为空且不算失败；`MemoryDrawer` 的形态：弃权说明、流式常驻工具行、失效事实带标记仍列出、被抹除的显示占位、文件行显示 `path` 而不是整串参数 |
 | `test/streaming_render_test.dart` | 固定夹具逐 token 重放：未闭合围栏从第一个 token 起就是代码块、元素不被重建、Rust 真的多色高亮 |
-| `test/widget_test.dart` | 三栏/窄屏布局切换、`as_of` 控件、流式「只增不减且是前缀延长」、检索无结果是中性空态 |
-| `test/workspace_test.dart` | 工具摘要里的路径解析（含「content 里有假的 `path=`」这个反例）、绑定 / 解绑三态、非法路径原样抛出且无本地副作用、绑定与否决定有没有文件工具 |
-| `test/history_replay_test.dart` | 回放拉取与附件、窗口只渲染最新一屏且往上长、**可见列表引用稳定**（回归防线，见下）、服务端截断被标出、失败可重试、已打开的会话不重复拉、草稿不去拉 404 |
+| `test/widget_test.dart` | 三栏/窄屏布局切换、`as_of` 控件、流式「只增不减且是前缀延长」、检索无结果是中性空态、**回放与流式两条轨迹都有记忆抽屉**、滚到顶部的按钮真的发起一次带游标的取数（且旧的截断横幅已不存在） |
+| `test/workspace_test.dart` | 路径只认 `path` 字段（含「摘要里写了假 `path=` 也不影响」这个反例）、只有一半事件带 path 时不丢、回放行直接是终态且 `ok` 权威、绑定 / 解绑三态、非法路径原样抛出且无本地副作用、绑定与否决定有没有文件工具 |
+| `test/support/replay_api.dart` | 共用的分页 daemon 替身（控制器用例与 widget 用例共用一份，免得两边漂移） |
+| `test/history_replay_test.dart` | 首屏带 `limit` 且不带游标、超过一页时拿到的是**结尾**、往上翻真的发请求且**前置**而不是追加、翻到头后 `has_more` 落下且不再发请求、**列表引用稳定**（回归防线，见下）、翻页失败不清空已有对话、附件带回文件名、**抽屉从提问挪到回答**、没有回答那一轮留在提问上、失效/被抹除的记忆都出现；`MockCortexApi` 自己也真分页（畸形游标同样 400） |
 | `test/attachment_test.dart` | 门槛与 `DIRECT_UPLOAD_LIMIT` 对齐、边界值仍走中转、直传三步、`already_uploaded` 跳过上传且进度补满、501 不回退、队列按会话隔离、失败留字节可重试、切数据源清空队列 |
 | `test/session_management_test.dart` | 归档默认不列出 / 开关打开才出现、归档不是删除、标题栏工作区入口的两种形态、改名后 `title_is_custom` 置位 |
-| `test/live_backend_test.dart` <sup>live</sup> | 真实 daemon：health / sessions / memory / episodes / `as_of` 回放、`/chat` 增量与工具成对、`/ws` 信号 + `/sync` 游标语义（含反例）、**会话回放与附件字段**、**PATCH 改名 / 归档 / 工作区三态**、**非法路径的错误原文**、**blob 中转上传与哈希两端一致**、**presign 的 `already_uploaded`**、**带附件的一轮对话**、**绑定后文件工具路径可解析 / 未绑定拿不到文件工具** |
+| `test/live_backend_test.dart` <sup>live</sup> | 真实 daemon：health / sessions / memory / episodes / `as_of` 回放、`/chat` 增量与工具成对、`/ws` 信号 + `/sync` 游标语义（含反例）、**默认给最新一页且页内正序**、**`?before=` 翻页严格更早且不重复**、**畸形游标是 400 不是 500**、**附件带回 filename / MIME / 大小**、PATCH 改名 / 归档 / 工作区三态、非法路径的错误原文、blob 中转上传与哈希两端一致、presign 的 `already_uploaded`、带附件的一轮对话、**工具事件自带 `path`** / 未绑定拿不到文件工具 |
 | `test/live_render_test.dart` <sup>live</sup> | 把**真实**回复逐块喂进真实 widget 树 |
 
 两条容易被后来的改动悄悄破坏、因此单独钉住的不变量：
 
-- **`Transcript.visible` 必须是同一个对象**。它在构造函数里算好而不是写成 getter：
-  `ConversationView` 用 `ref.watch(select(...))` 读它，而 `select` 用 `==` 比较 ——
-  每次现算一个 `sublist` 就等于每次都「变了」，于是每个 SSE delta 都会重建整个
-  `ListView`，正是流式渲染千方百计要避免的那笔开销。
+- **`Transcript.messages` 必须是同一个对象**。`ConversationView` 用
+  `ref.watch(select(...))` 读它，而 `select` 用 `==` 比较 —— 每次现算一个新列表就
+  等于每次都「变了」，于是每个 SSE delta 都会重建整个 `ListView`，正是流式渲染
+  千方百计要避免的那笔开销。（这条不变量原本钉在客户端窗口 `Transcript.visible`
+  上；窗口随真分页一起退役了，不变量本身没变，只是搬到了 `messages` 上。）
 - **`testWidgets` 里不能 `await` 数据源调用**。mock 的延迟是 `Future.delayed`，
   在 widget 测试里那个 timer 只在 `pump` 时才走。直接 await 会让测试**死锁**而不是失败
   （没有输出、没有栈，只是不结束）。正确写法是不 await 地发起，然后 `pump` 推进时钟。
@@ -540,8 +549,32 @@ daemon 重启后客户端在退避窗口内自行重连（日志里一条 `GET /
 | `POST /blobs` | 服务端算出的 SHA-256 与客户端 `sha256Hex` 逐字节一致；MIME 由字节头嗅探（传 `.png` 得 `image/png`）；`GET /blobs/{hash}` 取回的字节与上传的完全相同 |
 | `POST /blobs/presign` | 本部署是 S3 后端，签得出 URL；刚传过的内容 `already_uploaded: true`，直传路径因此只走 presign → commit 两步 |
 | 带附件的一轮对话 | blob 先登记再由 `/chat` 关联，回放时 `episode.attachments` 里能查到那个 hash |
-| 文件工具的路径 | 绑定工作区后真实摘要是 `调用 read_file (path=pubspec.yaml)` / `调用 list_dir (path=.)`，客户端解析出的路径与之相符 |
-| 未绑定的会话 | 真实 daemon 确实不给文件工具（日志：`未绑定工作区的会话只给这些工具 chat_only_tools=["memory_search"]`），整轮没有任何文件工具事件 |
+| 文件工具的路径 | 绑定工作区后真实摘要是 `调用 read_file (path=pubspec.yaml)` / `调用 list_dir (path=.)`（当时靠解析这串拿路径，现在改看 `path` 字段，见下） |
+| 未绑定的会话 | 真实 daemon 确实不给文件工具（日志：`未绑定工作区的会话只给这些工具 chat_only_tools=["memory_search"]`） |
+
+#### 分页 / 回放抽屉 / 附件元信息 / 工具 path 这一批的联调结果
+
+同一套真实 daemon（Postgres + DeepSeek + RustFS 的 S3 后端），`flutter test` 95 条全绿，
+其中 live 那 20 条是真联调：
+
+| 验证点 | 结果 |
+|---|---|
+| `GET /sessions/{id}?limit=` | 默认给**最新**一页，页内正序（老 → 新）；`limit` 是上界，服务端只会给得更少 |
+| `has_more` / `next_cursor` | 二者严格同进退：`has_more` 为假时 `next_cursor` 必为 `null` |
+| `?before=` | 翻出来的一页严格更早，且与上一页**不重叠**（游标是严格小于，不是小于等于） |
+| 畸形游标 | `?before=昨天\|不是个ULID` 回 `400` 而不是 `500` —— 形制校验在进 SQL 之前 |
+| `episode.memories` | 真跑一轮后 user 那条挂着 18 条注入归因，每条带 `channels`（`["bm25","vector","graph"]`）、`score`、`invalidated`、`source_episode_id` |
+| `episode.tool_calls` | 同一条 user episode 上一条 `{"name":"read_file","path":"pubspec.yaml","summary":"read_file 返回 101 行 / 4214 字符","ok":true}`；一次调用一行，回放不需要配对 |
+| 归因的锚点 | 确认锚在 **user** 那条上，assistant 那条是空的 —— 客户端把抽屉挪到回答上显示这件事是必须做的，不是可选的 |
+| `ChatEvent::Tool.path` | 调用与返回**两条都带** `path`；`memory_search` 那两条完全没有这个键 |
+| 附件元信息 | 上传 `live-attach.png` 再回放，`filename` 原样回来，`mime` 是嗅探出的 `image/png`，`size_bytes > 0` |
+
+一个联调时才看得到的行为，值得记下来：**模型会调不存在的工具**。未绑定工作区的会话里
+实测到 `{"type":"tool","name":"file_read","path":"pubspec.yaml"}`，紧跟着
+`file_read 失败：未知工具：file_read。可用工具：memory_search`。也就是说 daemon 会把
+一次**被拒绝**的尝试也作为 tool 事件发出来，连同它从参数里取到的 path。服务端行为是对的
+（工具目录里确实没有文件工具），但「未绑定拿不到文件工具」这条断言因此不能看工具名 ——
+现在看的是「有没有**成功的**文件调用」。
 
 只用 mock 验证、没有真联调的部分：
 

@@ -16,6 +16,7 @@ class FactCard extends StatefulWidget {
     required this.fact,
     this.channels,
     this.dense = false,
+    this.invalidated = false,
   });
 
   final MemoryFact fact;
@@ -23,6 +24,15 @@ class FactCard extends StatefulWidget {
 
   /// Compact variant used inside a chat message's "memory used" drawer.
   final bool dense;
+
+  /// The fact has been superseded since it was injected.
+  ///
+  /// Only the replay path knows this. Marked rather than filtered: the point of
+  /// the drawer is to show what the answer was actually built on, and "that is
+  /// no longer true" is the most useful thing it can tell you about an old
+  /// answer. The statement itself stays fully legible — greying it out would
+  /// make an audit record harder to read for no gain.
+  final bool invalidated;
 
   @override
   State<FactCard> createState() => _FactCardState();
@@ -38,6 +48,7 @@ class _FactCardState extends State<FactCard> {
     final fact = widget.fact;
     final episodeId = fact.sourceEpisodeId;
     final canOpen = episodeId != null && episodeId.isNotEmpty;
+    final hasTime = fact.validAt != null || fact.createdAt != null;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
@@ -76,6 +87,12 @@ class _FactCardState extends State<FactCard> {
                 runSpacing: 6,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
+                  if (widget.invalidated)
+                    _Tag(
+                      label: '已失效',
+                      color: scheme.error,
+                      filled: true,
+                    ),
                   if (fact.domain != null)
                     _Tag(
                       label: fact.domain!,
@@ -105,20 +122,27 @@ class _FactCardState extends State<FactCard> {
               SizedBox(height: widget.dense ? 6 : 8),
               Row(
                 children: [
-                  Icon(
-                    Icons.schedule_rounded,
-                    size: 12,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: 4),
-                  Flexible(
-                    child: Text(
-                      '生效 ${formatDate(fact.validAt)}'
-                      '${fact.createdAt != null ? ' · 记录 ${formatDate(fact.createdAt)}' : ''}',
-                      style: theme.textTheme.labelSmall,
-                      overflow: TextOverflow.ellipsis,
+                  // A replayed injection carries only the statement and the
+                  // domain — `InjectedMemoryDto` has no timestamps. Printing
+                  // "生效 —" for those would be noise dressed up as data, so the
+                  // whole clause drops out and only the provenance link stays.
+                  if (hasTime) ...[
+                    Icon(
+                      Icons.schedule_rounded,
+                      size: 12,
+                      color: scheme.onSurfaceVariant,
                     ),
-                  ),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        '生效 ${formatDate(fact.validAt)}'
+                        '${fact.createdAt != null ? ' · 记录 ${formatDate(fact.createdAt)}' : ''}',
+                        style: theme.textTheme.labelSmall,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ] else
+                    const Spacer(),
                   if (canOpen) ...[
                     const SizedBox(width: 8),
                     Text(
