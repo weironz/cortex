@@ -65,7 +65,7 @@ on_exit() {
     state_record_failure backup-all "异常中止，退出码 $rc" "$rc"
     bash "$HERE/notify.sh" --heartbeat fail >/dev/null 2>&1 || true
     bash "$HERE/notify.sh" --level fail \
-        --title "备份链路异常中止（退出码 $rc）" \
+        --title "备份链路异常中止（退出码 ${rc}）" \
         --stage "启动阶段（未进入任何环节）" --exit-code "$rc" \
         --body "脚本在跑完任何一个备份环节**之前**就退出了。
 常见原因：备份目录建不出来 / 磁盘满 / docker 没起来 / .env 配错。
@@ -92,11 +92,11 @@ run_stage() {
     else
         # $? 要在任何其它命令之前抓住 —— 原来的写法在 FAILED+=() 之后才读，
         # 读到的恒为 0，于是告警里的「退出码」永远是 0，帮不上任何忙
-        FAILED+=("$name（退出码 $rc）")
+        FAILED+=("${name}（退出码 ${rc}）")
         DETAIL="$DETAIL
   ✗ $name —— 退出码 $rc"
         state_record_failure "$key" "$name" "$rc"
-        warn "$name 失败（退出码 $rc），继续跑后面的环节以便一次看全"
+        warn "$name 失败（退出码 ${rc}），继续跑后面的环节以便一次看全"
     fi
 }
 
@@ -145,12 +145,12 @@ fi
 step "汇总"
 if [ "${#FAILED[@]}" -eq 0 ]; then
     NOTIFIED=1
-    ok "备份链路全绿（模式=$MODE）"
+    ok "备份链路全绿（模式=${MODE}）"
     state_record_success backup-all "$MODE"
     bash "$HERE/notify.sh" --heartbeat ok >/dev/null 2>&1 || true
     # ok 级别默认被 CORTEX_ALERT_MIN_LEVEL 过滤掉 —— 天天响的告警会被静音，
     # 那时它连真正的故障也拦不住。要每天收报平安就把 MIN_LEVEL 设成 ok。
-    notify_event ok "备份链路全绿（$MODE）" \
+    notify_event ok "备份链路全绿（${MODE}）" \
         "全部环节通过。备份根 $BACKUP_DIR" "backup-all"
     exit 0
 fi
@@ -162,7 +162,7 @@ for f in "${FAILED[@]}"; do printf '  - %s\n' "$f" >&2; done
 state_record_failure backup-all "${#FAILED[@]} 个环节失败：${FAILED[*]}" 1
 bash "$HERE/notify.sh" --heartbeat fail >/dev/null 2>&1 || true
 bash "$HERE/notify.sh" --level fail \
-    --title "备份链路失败（${#FAILED[@]} 个环节，模式 $MODE）" \
+    --title "备份链路失败（${#FAILED[@]} 个环节，模式 ${MODE}）" \
     --stage "${FAILED[0]}" --exit-code 1 \
     --body "失败环节：$DETAIL
 

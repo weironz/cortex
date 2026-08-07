@@ -65,7 +65,7 @@ fi
 # ── 挂着数据卷的名字。compose 的卷前缀是项目名 ─────────────
 PG_VOLUME="${PG_VOLUME:-${COMPOSE_PROJECT}_pg_data}"
 docker volume inspect "$PG_VOLUME" >/dev/null 2>&1 \
-    || die "找不到数据卷 $PG_VOLUME。用 PG_VOLUME=... 显式指定。"
+    || die "找不到数据卷 ${PG_VOLUME}。用 PG_VOLUME=... 显式指定。"
 
 # ── 安全闸：没有备份就不许动 ───────────────────────────────
 latest_backup="$(ls -1 "$BACKUP_DIR/base" 2>/dev/null | sort | tail -1)"
@@ -116,7 +116,7 @@ for _ in $(seq 1 60); do
 done
 
 if [ "$rc" -ne 0 ]; then
-    die "pg_checksums 退出码 $rc。数据库已重新启动且仍是 checksums=off（标记是最后一步才翻的），可以照常用。排查后重跑。"
+    die "pg_checksums 退出码 ${rc}。数据库已重新启动且仍是 checksums=off（标记是最后一步才翻的），可以照常用。排查后重跑。"
 fi
 
 after="$(psql_val 'SHOW data_checksums')"

@@ -57,7 +57,7 @@ printf '%s发版前置检查%s\n' "$_C_BLD" "$_C_OFF"
 # ── 1. 版本一致 ───────────────────────────────────────────
 if [ -n "$TAG" ]; then
     bash "$SCRIPT_DIR/check-version.sh" --tag "$TAG" >/dev/null 2>&1 \
-        && pass "版本号一致（含 tag $TAG）" \
+        && pass "版本号一致（含 tag ${TAG}）" \
         || { fail "版本号不一致 —— 跑 scripts/check-version.sh --tag $TAG 看细节"; }
 else
     bash "$SCRIPT_DIR/check-version.sh" >/dev/null 2>&1 \
@@ -70,7 +70,7 @@ VERSION="$(bash "$SCRIPT_DIR/check-version.sh" --print)"
 # Apache-2.0 第 4 条要求分发时附带 LICENSE 与 NOTICE。
 # 打包脚本会 die，但那时已经编译完了 —— 这里提前到编译之前
 for f in README.md LICENSE NOTICE CHANGELOG.md; do
-    [ -f "$f" ] && pass "$f 存在" || fail "缺少 $f（它必须随产物分发）"
+    [ -f "$f" ] && pass "$f 存在" || fail "缺少 ${f}（它必须随产物分发）"
 done
 
 # ── 3. CHANGELOG 里有这个版本 ─────────────────────────────

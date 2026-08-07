@@ -171,7 +171,7 @@ if docker inspect -f '{{.State.Running}}' "$PG_CONTAINER" >/dev/null 2>&1; then
     say "WAL 归档" "成功 $a_ok / 失败 $a_fail"
     if [[ "$a_fail" =~ ^[0-9]+$ ]] && [ "$a_fail" -gt 0 ]; then
         last_fail="$(psql_val "SELECT coalesce(last_failed_time::text,'-') FROM pg_stat_archiver" 2>/dev/null || echo -)"
-        PROBLEMS+=("pg_stat_archiver.failed_count=$a_fail（最近一次 $last_fail）。WAL 归档在失败，PITR 有洞且 pg_wal 会堆积。")
+        PROBLEMS+=("pg_stat_archiver.failed_count=${a_fail}（最近一次 ${last_fail}）。WAL 归档在失败，PITR 有洞且 pg_wal 会堆积。")
     fi
 else
     say "Postgres" "没在跑"

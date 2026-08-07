@@ -50,7 +50,7 @@ ensure_backup_dirs
 mkdir -p "$MIRROR_DIR"
 
 if mirror_is_local; then
-    warn "镜像目标是本机目录 $MIRROR_DIR。
+    warn "镜像目标是本机目录 ${MIRROR_DIR}。
      它防得住误删与误 DROP，防不住盘坏 / 整机丢失 / 勒索加密。
      生产请设 CORTEX_MIRROR_S3_ENDPOINT 指向第二个 S3，或把
      CORTEX_MIRROR_DIR 指到另一台机器的挂载点。"
@@ -59,7 +59,7 @@ fi
 # 加密：只作用于「出本机的那一刻」，本机那份始终是明文可验证的 plain 备份。
 # 为什么这么选、密钥怎么管，见 lib.sh 顶部与 docs/operations.md。
 if backup_enc_on; then
-    log "备份加密：开（rclone crypt，指纹 $(backup_key_fingerprint)，世代 e$BACKUP_ENC_EPOCH）"
+    log "备份加密：开（rclone crypt，指纹 $(backup_key_fingerprint)，世代 e${BACKUP_ENC_EPOCH}）"
     # 钥匙不对时 crypt 会**静默**把镜像列成空的，接着这一步就会
     # 用新钥匙往上盖一层，最后两把钥匙各解一半。先验金丝雀。
     ensure_crypt_key

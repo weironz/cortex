@@ -100,7 +100,13 @@ jobs:
           - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu  }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-latest,     target: aarch64-apple-darwin      }
-          - { os: macos-13,         target: x86_64-apple-darwin       }
+          # macos-13 已于 2025-12 完全退役。症状不是报错，是**任务永远排队** ——
+          # status 一直 queued、steps 为空，看上去像卡住而不是失败，
+          # 而 draft release 那步 needs 整个 build 矩阵，于是整条流水线跟着悬着。
+          # macos-15-intel 是 GitHub 给 Intel 的替代，但它**只活到 2027-08**：
+          # 那之后 Actions 不再有任何 x86_64 macOS 镜像（Apple 已停止支持该架构）。
+          # 到期时这一行只能删，Intel Mac 用户届时得自己从源码编。
+          - { os: macos-15-intel,   target: x86_64-apple-darwin       }
           - { os: windows-latest,   target: x86_64-pc-windows-msvc    }
     steps:
       - uses: actions/checkout@v5

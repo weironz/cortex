@@ -292,5 +292,5 @@ case "$CMD" in
     check)       cmd_check ;;
     rotate-plan) cmd_rotate_plan ;;
     -h|--help)   sed -n '2,50p' "$0" ;;
-    *)           die "不认识的子命令：$CMD。可选：gen fingerprint card status check rotate-plan" ;;
+    *)           die "不认识的子命令：${CMD}。可选：gen fingerprint card status check rotate-plan" ;;
 esac

@@ -109,7 +109,7 @@ smoke() {
     fi
     # clap 的输出形如 `cortexd 0.1.0`
     if ! printf '%s' "$out" | grep -qF -- "$VERSION"; then
-        die "$name 自称的版本里没有 $VERSION：$out"
+        die "$name 自称的版本里没有 ${VERSION}：$out"
     fi
     ok "$name --version → $out"
 }
@@ -197,7 +197,7 @@ elif command -v shasum >/dev/null 2>&1; then
 fi
 
 SIZE="$(du -h "$ARTIFACT" | cut -f1)"
-ok "产出 $ARTIFACT（$SIZE）"
+ok "产出 ${ARTIFACT}（${SIZE}）"
 rm -rf "$STAGE"
 
 # 让 workflow 能拿到文件名，不用在 YAML 里重新拼一遍

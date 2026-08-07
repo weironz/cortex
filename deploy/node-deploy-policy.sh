@@ -83,7 +83,7 @@ rollback() {
   local now
   now=$(sed -nE 's|^CORTEX_VERSION=(.*)$|\1|p' .env)
   if [ "$now" != "$prev" ]; then
-    echo "==> 失败（rc=$rc），还原 CORTEX_VERSION=$prev" >&2
+    echo "==> 失败（rc=${rc}），还原 CORTEX_VERSION=$prev" >&2
     sed -i -E "s|^CORTEX_VERSION=.*|CORTEX_VERSION=$prev|" .env
     # 尽力而为：把上一版拉回来。它的镜像本来就在本地，很快，且不需要 registry
     docker compose up -d --no-deps cortexd web >&2 || true

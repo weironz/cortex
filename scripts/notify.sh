@@ -245,7 +245,7 @@ fi
 # 级别过滤。默认 warn 起报：ok 每天都有，天天响的告警两周内就会被静音，
 # 那时它连真正的故障也拦不住了。
 if [ "$(level_rank "$LEVEL")" -lt "$(level_rank "$MIN_LEVEL")" ]; then
-    log "级别 $LEVEL 低于 CORTEX_ALERT_MIN_LEVEL=$MIN_LEVEL，不发"
+    log "级别 $LEVEL 低于 CORTEX_ALERT_MIN_LEVEL=${MIN_LEVEL}，不发"
     exit 0
 fi
 
@@ -302,7 +302,7 @@ if [ -n "$WEBHOOK_URL" ]; then
         *) die "CORTEX_ALERT_WEBHOOK_FORMAT=$WEBHOOK_FORMAT 不认识。可选：raw slack discord wecom dingtalk" ;;
     esac
     if http_post "$WEBHOOK_URL" "$PAYLOAD"; then
-        ok "webhook 已发出（格式 $WEBHOOK_FORMAT）"
+        ok "webhook 已发出（格式 ${WEBHOOK_FORMAT}）"
         SENT=$(( SENT + 1 ))
     else
         warn "webhook 发送失败。URL 对不对？出网通不通？"

@@ -187,7 +187,7 @@ if [ "$DO_VACUUM" = "1" ]; then
     for t in "${CASCADE_TABLES[@]}"; do
         exists="$(psql_val "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='$t'")"
         [ "${exists:-0}" = "1" ] || { log "表 $t 不存在，跳过"; continue; }
-        log "VACUUM FULL $t（持 ACCESS EXCLUSIVE 锁，期间该表不可用）"
+        log "VACUUM FULL ${t}（持 ACCESS EXCLUSIVE 锁，期间该表不可用）"
         psql_run "VACUUM (FULL, ANALYZE) \"$t\"" || die "VACUUM FULL $t 失败"
         VACUUMED="$VACUUMED $t"
     done
@@ -211,7 +211,7 @@ NEW_BASE="$(ls -1 "$BACKUP_DIR/base" 2>/dev/null | sort | tail -1)"
     || die "找不到刚建的全量，中止。什么都还没删。"
 NEW_START_WAL="$(grep '^START_WAL=' "$BACKUP_DIR/base/$NEW_BASE/meta.env" | cut -d= -f2 | tr -d "'")"
 [ -n "$NEW_START_WAL" ] || die "新全量的 meta.env 里没有 START_WAL，不敢按它清 WAL"
-ok "新的 PITR 起点：base/$NEW_BASE，起点段 $NEW_START_WAL"
+ok "新的 PITR 起点：base/${NEW_BASE}，起点段 $NEW_START_WAL"
 
 # ── 本机清理 ──────────────────────────────────────────────
 step "7 / 清理本机的历史备份"
@@ -358,9 +358,9 @@ EOF
 state_record_success purge-rotate "new_floor=$NEW_BASE"
 notify_event warn "备份已轮转（purge 彻底抹除）" \
 "在 $(hostname 2>/dev/null || echo unknown) 上执行了 purge-rotate。
-新的 PITR 起点：$NEW_BASE（此前的 ${#DESTROYED_BASES[@]} 份全量与 $(( wal_before - wal_after )) 段 WAL 已销毁）。
+新的 PITR 起点：${NEW_BASE}（此前的 ${#DESTROYED_BASES[@]} 份全量与 $(( wal_before - wal_after )) 段 WAL 已销毁）。
 VACUUM FULL：$([ "$DO_VACUUM" = 1 ] && echo 已做 || echo '**跳过，抹除不完整**')
 墓碑：$TOMBSTONE" "purge-rotate"
 
-warn "PITR 起点已前移到 $NEW_BASE。此前任何时间点都回不去了。"
+warn "PITR 起点已前移到 ${NEW_BASE}。此前任何时间点都回不去了。"
 ok "purge 轮转完成"

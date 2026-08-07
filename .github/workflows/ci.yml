@@ -54,7 +54,46 @@ jobs:
       # shellcheck 在 ubuntu runner 上自带。SC1091 是「source 的文件解析不到」，
       # lib.sh 是运行时按路径拼出来的，静态分析看不见，不是问题
       - name: shellcheck
-        run: shellcheck --severity=warning --exclude=SC1091 scripts/*.sh
+        run: shellcheck --severity=warning --exclude=SC1091 scripts/*.sh deploy/*.sh
+
+      # ── 变量名边界：`$VAR（` 这种写法在 macOS 上会炸 ──────────────
+      #
+      # 我们的脚本消息全是中文，于是「$ARTIFACT（$SIZE）」这类写法遍地都是。
+      # 变量名到哪里结束，取决于 locale 与 bash 版本：Linux 的 bash 5 在第一个
+      # 非 ASCII 字节处断开，**macOS 自带的 bash 3.2 会把那个字节吃进变量名**，
+      # 于是报 `ARTIFACT?: unbound variable`。
+      #
+      # v0.1.0 第一次发版就栽在这里：Linux 与 Windows 全绿，
+      # aarch64-apple-darwin 在打包那步挂掉，而**冒烟测试是通过的** ——
+      # 也就是说产物本身没问题，是脚本自己在 macOS 上跑不完。
+      # 当时全仓库有 36 处同款写法，一处都没被任何检查拦住。
+      #
+      # shellcheck 不报这个（它在语法上完全合法）。所以单开一条。
+      # 用 Python 而不是 grep -P：后者在非 UTF-8 locale 下直接报
+      # 「-P supports only unibyte and UTF-8 locales」并以非零码退出，
+      # 而 `if grep …` 会把那个错误当成「没匹配」—— **守卫静默失效，一路绿灯**。
+      # 这道检查本身就是为了防静默失效，它自己不能有静默失效。
+      - name: 变量名边界（$VAR 后面紧跟中文标点）
+        run: |
+          python3 - <<'PY'
+          import glob, io, re, sys
+          pat = re.compile(rb'\$[A-Za-z_][A-Za-z0-9_]*[\xc0-\xf7]')
+          bad = []
+          for f in sorted(glob.glob('scripts/*.sh') + glob.glob('deploy/*.sh')):
+              for n, line in enumerate(io.open(f, 'rb').read().split(b'\n'), 1):
+                  if pat.search(line):
+                      bad.append(f'{f}:{n}: {line.decode("utf-8", "replace").strip()}')
+          if bad:
+              for b in bad:
+                  print(f'::error file={b.split(":")[0]},line={b.split(":")[1]}::变量名边界不确定')
+                  print(b)
+              print(f'\n共 {len(bad)} 处。$VAR 后面紧跟非 ASCII 字符时，'
+                    '变量名到哪结束取决于 locale 与 bash 版本 —— '
+                    'macOS 自带的 bash 3.2 会把那个字节吃进变量名。')
+              print('改成 ${VAR} 即可：加一对花括号，不改语义。')
+              sys.exit(1)
+          print('✓ 没有边界不确定的变量展开')
+          PY
 
       - name: python 语法检查
         run: python3 -m py_compile scripts/*.py

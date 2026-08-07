@@ -69,7 +69,7 @@ if [ "$ASK_KEY" = "1" ]; then
 fi
 
 if backup_enc_on; then
-    log "备份加密：开（指纹 $(backup_key_fingerprint)，世代 e$BACKUP_ENC_EPOCH）"
+    log "备份加密：开（指纹 $(backup_key_fingerprint)，世代 e${BACKUP_ENC_EPOCH}）"
     ensure_crypt_key
 else
     warn "备份加密：关。异地那份是明文。"

@@ -81,7 +81,7 @@ archive_timeout="$(psql_val 'SHOW archive_timeout')"
 checksums="$(psql_val 'SHOW data_checksums')"
 
 [ "$archive_mode" = "on" ] || die \
-    "archive_mode=$archive_mode。没有 WAL 归档就只有「每天一个快照」，
+    "archive_mode=${archive_mode}。没有 WAL 归档就只有「每天一个快照」，
      RPO 是一整天而不是一分钟。docker-compose.yml 已经配好了，
      执行 'docker compose up -d postgres' 让它生效。"
 
@@ -94,7 +94,7 @@ fi
 # 归档到现在为止是通的吗？archiver 的失败计数比什么都直接
 arch_stats="$(psql_val "SELECT coalesce(archived_count,0) || '|' || coalesce(failed_count,0) || '|' || coalesce(last_failed_wal,'-') FROM pg_stat_archiver")"
 IFS='|' read -r arch_ok arch_fail arch_last_fail <<< "$arch_stats"
-log "归档统计：成功 $arch_ok 段 / 失败 $arch_fail 次（最近失败段：$arch_last_fail）"
+log "归档统计：成功 $arch_ok 段 / 失败 $arch_fail 次（最近失败段：${arch_last_fail}）"
 [ "$arch_fail" = "0" ] || warn "归档有失败记录。若 failed_count 还在涨，WAL 会在 pg_wal 里堆到撑爆磁盘。"
 
 # ── 备份 ──────────────────────────────────────────────────
@@ -222,7 +222,7 @@ if [ "$DO_PRUNE" = "1" ]; then
         oldest_wal="$(grep '^START_WAL=' "$BACKUP_DIR/base/${kept[0]}/meta.env" | cut -d= -f2)"
         if [ -n "$oldest_wal" ]; then
             before="$(ls -1 "$BACKUP_DIR/wal" 2>/dev/null | wc -l | tr -d ' ')"
-            log "pg_archivecleanup 基准段：$oldest_wal（来自最老的全量 ${kept[0]}）"
+            log "pg_archivecleanup 基准段：${oldest_wal}（来自最老的全量 ${kept[0]}）"
             pg_sh "pg_archivecleanup '$BACKUP_DIR_IN_PG/wal' '$oldest_wal'" || warn "pg_archivecleanup 报错，WAL 未清理"
             after="$(ls -1 "$BACKUP_DIR/wal" 2>/dev/null | wc -l | tr -d ' ')"
             log "WAL 段：$before → $after"

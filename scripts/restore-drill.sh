@@ -117,16 +117,16 @@ log "备份来源：$SRC_LABEL"
 
 # shellcheck disable=SC1090
 source "$SRC_ROOT/base/$BASE/meta.env"
-log "全量：base/$BASE（起点 WAL=$START_WAL，PG $PG_VERSION，checksums=$DATA_CHECKSUMS）"
+log "全量：base/${BASE}（起点 WAL=${START_WAL}，PG ${PG_VERSION}，checksums=${DATA_CHECKSUMS}）"
 
 SRC_VERSION="$(psql_val 'SHOW server_version')"
 [ "${SRC_VERSION%% *}" = "${PG_VERSION%% *}" ] \
-    || warn "备份是 PG $PG_VERSION，当前源库是 PG $SRC_VERSION —— 物理备份不能跨大版本恢复。"
+    || warn "备份是 PG ${PG_VERSION}，当前源库是 PG $SRC_VERSION —— 物理备份不能跨大版本恢复。"
 
 # ══════════════════════════════════════════════════════════
 #  第 1 步：探针 + RPO 实测
 # ══════════════════════════════════════════════════════════
-step "1 / 写探针并等它进归档（RPO 实测，模式=$RPO_MODE）"
+step "1 / 写探针并等它进归档（RPO 实测，模式=${RPO_MODE}）"
 
 # 探针放独立 schema。业务表全链路 append-only，演练不能往里塞垃圾行；
 # 而独立 schema 里的运营数据可以随手建随手删，走的却是同一条 WAL 归档路径。
@@ -140,7 +140,7 @@ t_write_ms="$(now_ms)"
 psql_run "INSERT INTO cortex_drill.probe(token) VALUES ('$PROBE_TOKEN')" >/dev/null
 PROBE_LSN="$(psql_val 'SELECT pg_current_wal_lsn()')"
 PROBE_WAL="$(psql_val 'SELECT pg_walfile_name(pg_current_wal_lsn())')"
-log "探针 $PROBE_TOKEN 写入，LSN=$PROBE_LSN，落在段 $PROBE_WAL"
+log "探针 $PROBE_TOKEN 写入，LSN=${PROBE_LSN}，落在段 $PROBE_WAL"
 
 if [ "$RPO_MODE" = "forced" ]; then
     # 强制切段：测的是「主动触发归档」的下限，不是稳态 RPO
@@ -255,7 +255,7 @@ CONF
 touch '$DRILL_IN_PG/pgdata/recovery.signal'
 chmod 0700 '$DRILL_IN_PG/pgdata'"
 
-log "启动临时实例 $DRILL_CONTAINER（不发布端口）"
+log "启动临时实例 ${DRILL_CONTAINER}（不发布端口）"
 docker run -d --name "$DRILL_CONTAINER" \
     -v "${BACKUP_DIR}:/backup" \
     -e PGDATA="$DRILL_IN_PG/pgdata" \
@@ -324,7 +324,7 @@ for t in "${SRC_TABLES[@]}"; do
         row_mismatch=1
     fi
 done
-[ "$row_mismatch" = "0" ] && pass_check "行数不少于基线快照（$ROWS_REPORT）"
+[ "$row_mismatch" = "0" ] && pass_check "行数不少于基线快照（${ROWS_REPORT}）"
 
 # 演练期间源库漂了多少 —— 纯参考值，不参与判定。
 # 打出来是为了让人一眼看出「差的那几行是演练期间新写的」而不是丢了。
@@ -333,7 +333,7 @@ src_drift="$(psql_val 'SELECT coalesce(max(seq),0) FROM sync_log')"
 # 3.4 sync_log 是同步的唯一游标，它的连续性最要紧
 dst_seq="$(drill_psql 'SELECT coalesce(max(seq),0) FROM sync_log')"
 if [ "${dst_seq:-0}" -ge "${BASELINE_SEQ:-0}" ]; then
-    pass_check "sync_log 游标追平基线：恢复 max(seq)=$dst_seq ≥ 基线 $BASELINE_SEQ（演练期间源库已跑到 $src_drift）"
+    pass_check "sync_log 游标追平基线：恢复 max(seq)=$dst_seq ≥ 基线 ${BASELINE_SEQ}（演练期间源库已跑到 ${src_drift}）"
 else
     fail_check "sync_log 游标落后：恢复 $dst_seq < 基线 $BASELINE_SEQ —— 客户端会漏拉"
 fi

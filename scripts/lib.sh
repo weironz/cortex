@@ -362,7 +362,7 @@ ensure_crypt_key() {
     if [ -n "$got" ]; then
         local got_fp; got_fp="$(printf '%s' "$got" | awk '{print $2}')"
         [ "$got_fp" = "$want" ] && return 0
-        die "镜像里的密钥指纹是 $got_fp，当前口令算出来是 $want。
+        die "镜像里的密钥指纹是 ${got_fp}，当前口令算出来是 ${want}。
      口令不对，或者这个 epoch 是用另一把钥匙写的。
      **不要继续** —— 继续下去会把异地那份用新钥匙覆盖，两把钥匙各解一半。
      核对 CORTEX_BACKUP_ENC_PASSPHRASE / _SALT / _EPOCH，或跑
@@ -380,7 +380,7 @@ ensure_crypt_key() {
      （见 'just backup-key rotate-plan'）。"
     fi
 
-    log "epoch e$BACKUP_ENC_EPOCH 是空的，写入密钥金丝雀（指纹 $want）"
+    log "epoch e$BACKUP_ENC_EPOCH 是空的，写入密钥金丝雀（指纹 ${want}）"
     local tmp; tmp="$STATE_DIR/.keycheck.tmp"
     mkdir -p "$STATE_DIR"
     printf 'cortex-backup-keycheck-v1 %s %s epoch=e%s\n' \
