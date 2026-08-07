@@ -10,6 +10,8 @@ description = "Cortex 守护进程：记忆引擎与同步服务"
 [dependencies]
 cortex-core.workspace = true
 cortex-memory.workspace = true
+cortex-llm.workspace = true
+cortex-store.workspace = true
 
 tokio.workspace = true
 tokio-stream = { workspace = true, features = ["time"] }

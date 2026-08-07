@@ -1,17 +1,20 @@
 //! 应用状态与业务分派。
 //!
-//! 存储层（cortex-store）与供应商层（cortex-llm）正由并行任务开发中。
-//! 本模块先按最终形态定义接口，未接线的部分走 [`Backend::Mock`] ——
-//! 这样 CLI 与 Flutter 可以立刻对着真实的 cortexd 联调，
-//! 而不是各自对着自己的假数据开发到最后才发现契约对不上。
+//! 两个后端共用同一套契约：[`Backend::Live`] 接真实的存储层、供应商层与
+//! 记忆引擎；[`Backend::Mock`] 是数据库或 API key 不可用时的降级数据源。
 //!
-//! 接线时只需把 `Backend::Mock` 换成 `Backend::Live`，路由与 DTO 不动。
+//! 保留 Mock 不是权宜之计 —— 客户端的 CI、离线开发、以及「后端挂了
+//! 界面还能不能看」这三件事都需要它，且它强制我们把契约的两个实现
+//! 对齐，避免真实实现悄悄偏离文档。
 
 use std::sync::Arc;
 
 use chrono::Utc;
-use cortex_core::{Config, CortexError, Id, Result};
-use futures::stream::{self, Stream};
+use cortex_core::{Config, Id, Result};
+use cortex_memory::embed::{HashEmbedder, SharedEmbedder};
+
+use crate::live::Live;
+use futures::stream::{self, BoxStream, Stream};
 use tokio_stream::StreamExt as _;
 
 use crate::dto::*;
@@ -28,11 +31,10 @@ struct Inner {
 }
 
 enum Backend {
-    /// 未接线时的演示数据源。契约与 Live 完全一致。
+    /// 降级数据源。契约与 Live 完全一致。
     Mock,
-    /// 真实后端。待 cortex-store / cortex-llm 就绪后启用。
-    #[allow(dead_code)]
-    Live,
+    /// 真实后端：Postgres + LLM + 记忆引擎
+    Live(Arc<Live>),
 }
 
 impl AppState {
@@ -46,26 +48,41 @@ impl AppState {
         }
     }
 
+    /// 接入真实后端。数据库连不上或缺 API key 都会失败，由调用方决定是否降级。
+    pub async fn new_live(config: &Config) -> Result<Self> {
+        // 第一版用确定性的 HashEmbedder：它无需下载模型、输出稳定，
+        // 足以把整条链路跑通。换成 fastembed 的真实语义向量时，
+        // 各表的 embedding_model 字段支持渐进回填（见 memory.md §七）。
+        let embedder: SharedEmbedder = Arc::new(HashEmbedder::new());
+        let live = Live::new(config, embedder).await?;
+        Ok(Self {
+            inner: Arc::new(Inner {
+                config: config.clone(),
+                backend: Backend::Live(Arc::new(live)),
+            }),
+        })
+    }
+
     pub async fn database_status(&self) -> String {
-        match self.inner.backend {
+        match &self.inner.backend {
             Backend::Mock => "not_wired".into(),
-            Backend::Live => "ok".into(),
+            Backend::Live(l) => l.database_status().await,
         }
     }
 
     // ───────────────────────── 对话 ─────────────────────────
 
-    pub async fn chat_stream(&self, req: ChatRequest) -> impl Stream<Item = ChatEvent> + use<> {
-        match self.inner.backend {
-            Backend::Mock => mock_chat_stream(req),
-            Backend::Live => mock_chat_stream(req), // TODO: 接 cortex-agent
+    pub async fn chat_stream(&self, req: ChatRequest) -> BoxStream<'static, ChatEvent> {
+        match &self.inner.backend {
+            Backend::Mock => Box::pin(mock_chat_stream(req)),
+            Backend::Live(l) => Box::pin(tokio_stream::wrappers::ReceiverStream::new(l.chat(req))),
         }
     }
 
     // ───────────────────────── 记忆 ─────────────────────────
 
     pub async fn memory_search(&self, q: MemorySearchQuery) -> Result<MemorySearchResponse> {
-        match self.inner.backend {
+        match &self.inner.backend {
             Backend::Mock => {
                 let facts = mock_facts()
                     .into_iter()
@@ -89,12 +106,12 @@ impl AppState {
                     .collect();
                 Ok(MemorySearchResponse { facts, channels })
             }
-            Backend::Live => Err(CortexError::Memory("检索尚未接线".into())),
+            Backend::Live(l) => l.memory_search(q).await,
         }
     }
 
     pub async fn get_episode(&self, id: &str) -> Result<EpisodeDto> {
-        match self.inner.backend {
+        match &self.inner.backend {
             Backend::Mock => Ok(EpisodeDto {
                 id: id.to_string(),
                 session_id: "01JSESSION0000000000000001".into(),
@@ -102,15 +119,12 @@ impl AppState {
                 text: Some("对象存储先用 RustFS，第一版单卷即可。".into()),
                 occurred_at: Utc::now().to_rfc3339(),
             }),
-            Backend::Live => Err(CortexError::NotFound {
-                kind: "episode",
-                id: id.into(),
-            }),
+            Backend::Live(l) => l.get_episode(id).await,
         }
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionDto>> {
-        match self.inner.backend {
+        match &self.inner.backend {
             Backend::Mock => Ok(vec![
                 SessionDto {
                     id: "01JSESSION0000000000000001".into(),
@@ -123,14 +137,14 @@ impl AppState {
                     updated_at: Utc::now().to_rfc3339(),
                 },
             ]),
-            Backend::Live => Ok(vec![]),
+            Backend::Live(l) => l.list_sessions().await,
         }
     }
 
     // ───────────────────────── 同步 ─────────────────────────
 
     pub async fn sync_since(&self, q: SyncQuery) -> Result<SyncResponse> {
-        match self.inner.backend {
+        match &self.inner.backend {
             Backend::Mock => {
                 // 尚无真实 sync_log，但游标语义先跑通：客户端能验证
                 // 「拉到空即已追平」的收敛逻辑，而不是等接线后才发现协议误解。
@@ -141,7 +155,7 @@ impl AppState {
                     has_more: false,
                 })
             }
-            Backend::Live => Err(CortexError::Store("同步尚未接线".into())),
+            Backend::Live(l) => l.sync_since(q).await,
         }
     }
 }

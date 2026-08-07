@@ -102,6 +102,26 @@ fn hash_vector(text: &str, dim: usize) -> Vec<f32> {
 /// 便于在配置里切换后端。
 pub type SharedEmbedder = Arc<dyn Embedder>;
 
+/// 让 `Arc<dyn Embedder>` 本身也是 `Embedder`。
+///
+/// 没有这个的话，凡是持有 embedder 的泛型结构（如 `Retriever<E: Embedder>`）
+/// 都无法用共享句柄实例化，调用方只能到处写 `&*arc` 或改成非泛型 ——
+/// 前者难看，后者丢掉静态分发。
+#[async_trait::async_trait]
+impl<T: Embedder + ?Sized> Embedder for Arc<T> {
+    fn model_id(&self) -> &str {
+        (**self).model_id()
+    }
+
+    fn dim(&self) -> usize {
+        (**self).dim()
+    }
+
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        (**self).embed(texts).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

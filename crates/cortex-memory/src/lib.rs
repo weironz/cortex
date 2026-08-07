@@ -17,6 +17,7 @@ pub mod embed;
 pub mod extract;
 pub mod fusion;
 pub mod injection;
+pub mod retrieval;
 pub mod tokenize;
 
 pub use embed::{EMBEDDING_DIM, Embedder};
@@ -26,3 +27,4 @@ pub use extract::{
 };
 pub use fusion::{Channel, Fused};
 pub use injection::{Budget, MemoryItem};
+pub use retrieval::{Attribution, RecallWidth, Retrieved, Retriever};
