@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/episodes/{id}", get(get_episode))
         .route("/sessions", get(list_sessions))
         .route("/sync", get(sync))
+        .route("/ws", get(crate::ws::handler))
         .with_state(state)
 }
 

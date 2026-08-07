@@ -7,7 +7,9 @@ mod dto;
 mod live;
 mod routes;
 mod state;
+mod sync_notify;
 mod sync_payload;
+mod ws;
 
 use anyhow::Context as _;
 use clap::Parser;

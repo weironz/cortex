@@ -11,8 +11,10 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use cortex_core::{CortexError, Result};
+use cortex_llm::Tool;
 use serde::{Deserialize, Serialize};
 
 /// 工具的风险等级，决定是否需要用户确认。
@@ -49,13 +51,13 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
-    fn ok(content: impl Into<String>) -> Self {
+    pub fn ok(content: impl Into<String>) -> Self {
         Self {
             ok: true,
             content: content.into(),
         }
     }
-    fn err(content: impl Into<String>) -> Self {
+    pub fn err(content: impl Into<String>) -> Self {
         Self {
             ok: false,
             content: content.into(),
@@ -204,6 +206,32 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             risk: Risk::Safe,
         },
     ]
+}
+
+/// 按名字查一个内置工具的声明。
+#[must_use]
+pub fn spec_for(name: &str) -> Option<ToolSpec> {
+    builtin_specs().into_iter().find(|s| s.name == name)
+}
+
+/// 把工具目录翻译成供应商层认识的 [`Tool`]（即 `rmcp::model::Tool`）。
+///
+/// 只在这里做一次转换，而不是让 [`ToolSpec`] 直接就是 `Tool`：
+/// `ToolSpec` 还带着 [`Risk`]，那是 Cortex 的权限概念，不该出现在发给
+/// 模型的 schema 里 —— 告诉模型「这个工具很危险」既没用，又给了它
+/// 一个可以被 prompt 注入操纵的旋钮。
+///
+/// `parameters` 不是 JSON object 的 spec 会被跳过而不是 panic：
+/// 工具目录将来可能来自 MCP 服务器，schema 由对端提供，不可信。
+#[must_use]
+pub fn to_llm_tools(specs: &[ToolSpec]) -> Vec<Tool> {
+    specs
+        .iter()
+        .filter_map(|s| {
+            let schema = s.parameters.as_object()?.clone();
+            Some(Tool::new(s.name, s.description, Arc::new(schema)))
+        })
+        .collect()
 }
 
 /// 执行一个内置工具。
@@ -421,6 +449,35 @@ mod tests {
         // 上层策略会写「Risk >= Write 时询问用户」，顺序必须正确
         assert!(Risk::Safe < Risk::Write);
         assert!(Risk::Write < Risk::Execute);
+    }
+
+    #[test]
+    fn llm_tools_cover_every_builtin_and_hide_risk() {
+        let specs = builtin_specs();
+        let tools = to_llm_tools(&specs);
+        assert_eq!(
+            tools.len(),
+            specs.len(),
+            "有工具在转换成 LLM schema 时被丢掉了，模型将看不见它"
+        );
+        for (spec, tool) in specs.iter().zip(&tools) {
+            assert_eq!(tool.name, spec.name);
+            let schema = serde_json::to_string(&tool.input_schema).unwrap();
+            assert!(
+                !schema.contains("risk"),
+                "{} 的 schema 泄露了风险等级 —— 那是 Cortex 的权限概念，不该给模型",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn spec_lookup_finds_builtins_and_rejects_others() {
+        assert_eq!(spec_for("write_file").map(|s| s.risk), Some(Risk::Write));
+        assert!(
+            spec_for("rm_rf").is_none(),
+            "不在目录里的名字必须查不到，否则权限闸门会被绕过"
+        );
     }
 
     #[test]

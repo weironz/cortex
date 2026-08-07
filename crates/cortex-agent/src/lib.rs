@@ -4,5 +4,10 @@
 //! 工具层若分裂，agent 循环就得写两套。
 
 pub mod tools;
+pub mod turn;
 
 pub use tools::{Risk, Sandbox, ToolCall, ToolResult, ToolSpec};
+pub use turn::{
+    AgentEvent, Approval, ApprovalPolicy, DEFAULT_MAX_ROUNDS, StopReason, ToolHost, Turn,
+    TurnOutcome,
+};

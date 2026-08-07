@@ -20,6 +20,12 @@ cortex-memory.workspace = true
 futures.workspace = true
 async-trait.workspace = true
 
+# 工具调用的规范类型（Tool / CallToolRequestParams / CallToolResult）。
+# cortex-llm 只 re-export 了 Tool，其余几个要直接取。版本必须与
+# goose-provider-types 依赖的那份一致（它写的是 "1.4"），否则会出现两份
+# rmcp 共存、类型名字一样却不兼容。
+rmcp = { version = "1.4", default-features = false }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"

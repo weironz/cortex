@@ -12,6 +12,13 @@ cortex-core.workspace = true
 cortex-memory.workspace = true
 cortex-llm.workspace = true
 cortex-store.workspace = true
+cortex-agent.workspace = true
+
+# 直接依赖 sqlx 只为一件事：LISTEN/NOTIFY 需要一条**专属**长连接
+# （PgListener），这是连接级能力，repository 抽象覆盖不到。
+# 除此之外 cortexd 不写任何 SQL —— 那条线仍然收敛在 cortex-store。
+sqlx.workspace = true
+async-trait.workspace = true
 
 tokio.workspace = true
 tokio-stream = { workspace = true, features = ["time"] }

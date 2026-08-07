@@ -11,13 +11,18 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use cortex_core::{Config, Id, Result};
-use cortex_memory::embed::{HashEmbedder, SharedEmbedder};
+use cortex_memory::embed::SharedEmbedder;
 
 use crate::live::Live;
+use crate::sync_notify::SyncBus;
 use futures::stream::{self, BoxStream, Stream};
+use tokio::sync::broadcast;
 use tokio_stream::StreamExt as _;
 
 use crate::dto::*;
+
+/// mock 后端的伪游标。见 [`AppState::new_mock`]。
+static MOCK_CURSOR: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -28,6 +33,7 @@ struct Inner {
     #[allow(dead_code)]
     config: Config,
     backend: Backend,
+    bus: SyncBus,
 }
 
 enum Backend {
@@ -40,27 +46,68 @@ enum Backend {
 impl AppState {
     #[must_use]
     pub fn new_mock(config: Config) -> Self {
+        let bus = SyncBus::inert();
+
+        // 定期伪造一次游标推进。看着像多此一举，但没有它，Flutter/CLI 的
+        // 「收到 bump → 去 /sync 补拉 → 推进本地游标」这条主路径在离线开发
+        // 与客户端 CI 里根本跑不到，只能等接上数据库才第一次被执行。
+        // 与 mock_chat_stream 伪造记忆和工具事件是同一个理由。
+        {
+            let bus = bus.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+                loop {
+                    tick.tick().await;
+                    let cursor = MOCK_CURSOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    bus.publish(SyncEvent::Bump { cursor });
+                }
+            });
+        }
+
         Self {
             inner: Arc::new(Inner {
                 config,
                 backend: Backend::Mock,
+                bus,
             }),
         }
     }
 
     /// 接入真实后端。数据库连不上或缺 API key 都会失败，由调用方决定是否降级。
     pub async fn new_live(config: &Config) -> Result<Self> {
-        // 第一版用确定性的 HashEmbedder：它无需下载模型、输出稳定，
-        // 足以把整条链路跑通。换成 fastembed 的真实语义向量时，
-        // 各表的 embedding_model 字段支持渐进回填（见 memory.md §七）。
-        let embedder: SharedEmbedder = Arc::new(HashEmbedder::new());
+        // 走进程内共享的那一份（`OnceCell`），而不是自己 new 一个：模型即使
+        // int8 也有近 600 MB，「daemon 而非嵌入式」这个架构决策的收益之一
+        // 就是模型常驻共享，各处各建一份等于把它退回去。
+        // 后端由 CORTEX_EMBED_BACKEND 决定，默认真实语义模型；
+        // CI 与离线开发显式设 hash。
+        let embedder: SharedEmbedder = cortex_memory::embed::shared_embedder().await?;
         let live = Live::new(config, embedder).await?;
+        let bus = SyncBus::spawn(&config.database_url, live.store().clone());
         Ok(Self {
             inner: Arc::new(Inner {
                 config: config.clone(),
                 backend: Backend::Live(Arc::new(live)),
+                bus,
             }),
         })
+    }
+
+    // ───────────────────── 实时同步（/ws）─────────────────────
+
+    #[must_use]
+    pub fn subscribe_sync(&self) -> broadcast::Receiver<SyncEvent> {
+        self.inner.bus.subscribe()
+    }
+
+    /// 服务端当前的同步游标末端。
+    ///
+    /// 读失败一律返回 0：客户端拿到偏小的游标只会多拉一次（无害），
+    /// 拿到偏大的才会永久漏行。
+    pub async fn latest_cursor(&self) -> i64 {
+        match &self.inner.backend {
+            Backend::Mock => MOCK_CURSOR.load(std::sync::atomic::Ordering::Relaxed),
+            Backend::Live(l) => l.latest_cursor().await,
+        }
     }
 
     pub async fn database_status(&self) -> String {
