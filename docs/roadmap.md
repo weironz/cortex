@@ -111,6 +111,7 @@ CLI / 桌面 / Web  ──►  cortexd  ──►  DeepSeek
 | cross-encoder | 先用 RRF。等评测集证明不足再上 |
 | `entity_merges` 撤销 | 现为 first-writer-wins + 不可逆 |
 | HA | 单机自托管，恢复期间服务是停的，RTO 就是停机时间 |
+| **离线** | 客户端是瘦客户端，断网就用不了。早期设计里的「本地 SQLite 缓存 + 离线写队列」没有实现，因为 agent 循环留在了服务端（理由见 README）。要补的话是一整套：本地缓存 + 写队列 + 冲突处理——append-only 让冲突处理简单，但工具执行在离线时无处可跑，那才是真障碍 |
 
 ---
 

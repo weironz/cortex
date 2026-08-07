@@ -15,26 +15,39 @@ Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：
 
 ## 状态
 
-**早期开发中，尚无可用版本。**
+**开发中，闭环已跑通，尚无发布版本。**
+
+现在能做的：CLI / 桌面 / Web 三端聊天，记忆自动抽取与召回，
+图片归档并可检索，会话绑定工作区后 agent 能读写文件。
+检索基线 R@5 0.923，恢复演练 RPO 46.9 s / RTO 43.6 s（[细节](docs/operations.md)）。
+
+还不能做的：认证（当前是单用户自托管，谁连上谁就是主人）、
+真沙箱（工具执行只有路径围栏 + 权限确认）、离线、移动端、语音转录。
+逐条见 [roadmap.md](docs/roadmap.md)。
 
 ## 架构
 
 ```
                  cortexd（远端，记忆权威）
-                 axum · Postgres+pgvector · RustFS
-                        ▲  HTTP / WS（同一套协议）
+      axum · Postgres+pgvector · RustFS · agent 循环 · 工具执行
+                        ▲  HTTP / SSE / WS（同一套协议）
         ┌───────────────┼───────────────┬──────────────┐
         │               │               │              │
     cortex-cli     Flutter 桌面    Flutter 移动    Flutter Web
-        │               │
-        └───┬───────────┘
-            ▼
-   本地执行代理：agent 循环 · 文件/shell 工具
-   本地 SQLite 仅作缓存与离线写队列
+                                      （未做）
 
-   cortex-core (Rust) 是唯一的业务逻辑实现，
-   被服务端与全部客户端共同链接
+   客户端一律是瘦客户端：只负责渲染与输入，不含业务逻辑。
+   agent 循环与工具执行都在 cortexd 里 —— 换设备接上就是完整的你。
 ```
+
+> **与早期设计的差别**：原计划用 `flutter_rust_bridge` 把 `cortex-core`
+> 链进客户端、并在本地 SQLite 里做缓存与离线写队列。实际没有这么做。
+>
+> 理由是工具执行必须和记忆在同一侧：文件工具跑在 cortexd 里，
+> 「工作区」才能是一个对服务端有意义的路径。真把 agent 循环放进客户端，
+> 就会变成六个平台各维护一份执行环境——而那正是 daemon-first 要避免的。
+>
+> **代价是没有离线能力**：断网就用不了。这是已知缺口，不是疏忽。
 
 服务端存储：
 
@@ -49,7 +62,7 @@ Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：
 | ULID 主键 | 全局唯一、时间有序，多端无需协调即可生成 |
 | daemon-first | 单写者、共享 embedding 模型常驻、后台任务、跨端连续性；记忆权威唯远端 cortexd |
 | sync_log outbox | 同步的唯一事实序：单游标、不漏行、天然 FK 序，兼作实时推送事件源 |
-| 客户端本地 SQLite | 仅作缓存与离线写队列，**非**真相来源 |
+| 客户端不含业务逻辑 | agent 循环与工具执行都在 cortexd —— 工具要和记忆在同一侧，「工作区」才是一个服务端认得的路径。代价是没有离线 |
 | 记忆 schema 领域无关 | entity / fact / relation 抽象，编码与办公通吃 |
 | 双时间轴 | 区分"事情何时变"与"我何时知道"，支撑可审计与历史回放 |
 
@@ -60,8 +73,8 @@ Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：
 | 核心逻辑 | Rust |
 | 服务端 | Rust · axum · sqlx |
 | CLI | Rust |
-| **全部图形界面** | **Flutter**（桌面 ×3 + 移动 ×2 + Web） |
-| Rust ↔ Flutter | flutter_rust_bridge |
+| **全部图形界面** | **Flutter**（桌面 ×3 + Web；移动 ×2 未做） |
+| 客户端 ↔ 服务端 | HTTP / SSE / WS —— 不用 flutter_rust_bridge，客户端不链 Rust |
 | 数据库 | Postgres + pgvector |
 | 对象存储 | RustFS（S3 兼容） |
 | Embedding | bge-m3 / 1024 维，本地 ONNX |
@@ -77,6 +90,7 @@ Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：
 | [roadmap-done.md](docs/roadmap-done.md) | 已经做了什么 |
 | [architecture.md](docs/architecture.md) | 为什么这么设计（决策、否决的备选、代价、风险） |
 | [memory.md](docs/memory.md) | 记忆系统怎么工作（存储模型、双时间轴、检索、同步） |
+| [operations.md](docs/operations.md) | 怎么部署、备份、恢复（含实测 RPO/RTO） |
 | [references.md](docs/references.md) | 同类项目调研与许可证边界 |
 
 schema 的权威版本是 [`migrations/`](migrations/)，文档中的 SQL 片段以它为准。
