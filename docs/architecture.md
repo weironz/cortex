@@ -124,7 +124,12 @@ Tokio 官方出品，Rust 服务端生态最主流。搭配 `sqlx`（数据库�
 
 **接入注意**
 
-- 必须设 `force_path_style(true)`——RustFS 默认仅支持 path-style 寻址，不设会解析 `bucket.host` 并 DNS 失败
+- 必须设 `force_path_style(true)`——RustFS 默认仅支持 path-style 寻址。
+  **不设时的症状与环境有关**（实测）：有的环境是 `bucket.host` DNS 解析失败；
+  Windows 上 `cortex-blobs.localhost` 会解析到 127.0.0.1，TCP 连上后被 RustFS
+  关闭，报 `connection closed before message completed`。
+  **两种报错都不含桶名、也不提寻址方式，看起来都只是普通网络故障**——
+  这正是它难查的原因。`cortex-blob` 里有不依赖网络的单测钉住这一行为
 - **纠删码要求四块独立物理盘**。`RUSTFS_VOLUMES=/data/rustfs{0...3}` 若落在同一块盘上是假冗余，
   RustFS 会检测到共享设备并拒绝启动（已实测）。因此：
   - 开发环境：单卷 `/data` + `RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true`
