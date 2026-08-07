@@ -89,6 +89,8 @@ pub struct CorpusInfo {
     /// 其中仍然有效的
     pub facts_active: usize,
     pub entities: i64,
+    /// 落进 `episode_tool_calls` 的行数
+    pub tool_calls: i64,
     /// 跨域连接扫描的结果。`None` = 这次没跑扫描。
     ///
     /// 边本身要落进报告，不能只留个条数：噪声边的危害是在图遍历里传染，
@@ -208,6 +210,15 @@ pub fn render_text(report: &Report) -> String {
         c.facts_total,
         c.facts_active
     );
+    if c.tool_calls > 0 {
+        // 轨迹落了多少行必须单独打出来。工具经验题全挂时有两种可能 ——
+        // 轨迹没进库，或者进了库但没人读 —— 只有这个数字能把它们分开
+        let _ = writeln!(
+            s,
+            "工具轨迹：`episode_tool_calls` 落库 {} 行（抽取器读没读它，看下面「工具经验」那一行的 gold 缺失数）",
+            c.tool_calls
+        );
+    }
     if let Some(cl) = &c.cross_links {
         let _ = writeln!(
             s,
@@ -264,6 +275,8 @@ pub fn render_text(report: &Report) -> String {
     let _ = writeln!(s);
     let _ = write!(s, "{}", render_channel_matrix(&report.by_kind));
     let _ = writeln!(s);
+
+    let _ = write!(s, "{}", render_extraction(&report.questions));
 
     let broken: Vec<&QuestionResult> = report
         .questions
@@ -341,6 +354,50 @@ pub fn render_text(report: &Report) -> String {
         }
     }
 
+    s
+}
+
+/// 抽取侧的断言。
+///
+/// 检索侧的十几项指标里没有一项能回答「这条该不该被抽出来」——
+/// 它们的分母全都是「已经在库里的事实」。抽取 prompt 里
+/// 「绝对不抽」与「纠正必抽」两节改完之后回归门十八项全部持平，
+/// 根本原因就是这套评测当时只有检索侧的尺子。这一段是另一把。
+fn render_extraction(questions: &[QuestionResult]) -> String {
+    let declared: Vec<&QuestionResult> = questions
+        .iter()
+        .filter(|q| q.never_extracted_total > 0)
+        .collect();
+    if declared.is_empty() {
+        return String::new();
+    }
+
+    let leaked: Vec<&&QuestionResult> = declared.iter().filter(|q| !q.leaked.is_empty()).collect();
+    let total: usize = declared.iter().map(|q| q.never_extracted_total).sum();
+    let hit: usize = declared.iter().map(|q| q.leaked.len()).sum();
+
+    let mut s = String::new();
+    let _ = writeln!(s, "## 抽取侧：不该被抽出来的东西");
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "比对的是**语料快照**而不是检索结果 —— 排第几名无关紧要，**存在**本身就是失败。"
+    );
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "{} 道题声明了 {total} 条断言，泄漏 {hit} 条。",
+        declared.len()
+    );
+    let _ = writeln!(s);
+    for q in &leaked {
+        for l in &q.leaked {
+            let _ = writeln!(s, "- ✗ `{}` 泄漏：{l}", q.id);
+        }
+    }
+    if !leaked.is_empty() {
+        let _ = writeln!(s);
+    }
     s
 }
 
@@ -440,7 +497,7 @@ fn render_channel_matrix(by_kind: &[Aggregate]) -> String {
 
 /// 题型 / 语种的稳定排序，保证两次跑出来的报告能直接 diff。
 #[must_use]
-pub fn kind_order() -> [QuestionKind; 6] {
+pub fn kind_order() -> [QuestionKind; 7] {
     QuestionKind::all()
 }
 
@@ -504,6 +561,7 @@ mod tests {
                 facts_total: 0,
                 facts_active: 0,
                 entities: 0,
+                tool_calls: 0,
                 cross_links: None,
             },
             overall: aggregate("全部", &[]),

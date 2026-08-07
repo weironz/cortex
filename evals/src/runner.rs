@@ -6,7 +6,7 @@ use crate::harness::{
     Checkpoints, CrossLinkOptions, EvalDb, EvalRetriever, ExtractMode, FactRow, RetrievalConfig,
     build_cross_links, build_extractor, default_embedder, ingest_suite,
 };
-use crate::matcher::QuestionMatchers;
+use crate::matcher::{Matcher, QuestionMatchers};
 use crate::metrics::{Aggregate, QuestionResult, Status, aggregate, score};
 use crate::report::{CorpusInfo, Report, RunInfo, SuiteInfo, kind_order, lang_order};
 use crate::suite::{Question, QuestionKind, Suite};
@@ -76,6 +76,17 @@ async fn run_inner(db: &EvalDb, suite: &Suite, opts: &RunOptions) -> Result<Repo
 
     let facts = db.snapshot_facts().await?;
     let entities = db.count_entities().await?;
+    let tool_calls_in_db = db.count_tool_calls().await?;
+
+    // 题集声明了多少条轨迹，库里就该有多少行。对不上说明轨迹在写入路径上丢了，
+    // 而丢了的表现（工具经验题全挂）与「抽取器还没接轨迹」一模一样 ——
+    // 不在这里断言，这两件事在报告里永远分不开
+    let declared = i64::try_from(suite.tool_call_count()).unwrap_or(i64::MAX);
+    anyhow::ensure!(
+        tool_calls_in_db == declared,
+        "题集声明 {declared} 次工具调用，库里只有 {tool_calls_in_db} 行 —— \
+         轨迹没落全，工具经验题的结果不可信"
+    );
 
     let retriever = EvalRetriever::new(embedder, opts.retrieval);
 
@@ -141,6 +152,7 @@ async fn run_inner(db: &EvalDb, suite: &Suite, opts: &RunOptions) -> Result<Repo
             facts_total: facts.len(),
             facts_active: facts.iter().filter(|f| f.active).count(),
             entities,
+            tool_calls: tool_calls_in_db,
             cross_links,
         },
         overall,
@@ -165,11 +177,20 @@ async fn evaluate_one(
     };
     let matchers = QuestionMatchers::of(q);
     let status = gold_status(q, &matchers, facts);
+    let leaked = leaks(&matchers, facts);
 
     // gold 根本没落库时，检索必然是 0 分，跑它只是浪费一次数据库往返。
     // 但仍然要产出一条结果 —— 报告里必须看得见「有几道题是坏的」。
     if status == Status::GoldMissing {
-        return Ok(score(q, &matchers, &[], &[], status, q.as_of.is_some()));
+        return Ok(score(
+            q,
+            &matchers,
+            &[],
+            &[],
+            status,
+            q.as_of.is_some(),
+            leaked,
+        ));
     }
 
     let (fused, channels, replay) = match &q.as_of {
@@ -194,7 +215,23 @@ async fn evaluate_one(
         }
     };
 
-    Ok(score(q, &matchers, &fused, &channels, status, replay))
+    Ok(score(
+        q, &matchers, &fused, &channels, status, replay, leaked,
+    ))
+}
+
+/// 「不该被抽出来」的断言里，有哪几条实际在语料快照里找到了。
+///
+/// 比对的是**全部**事实而不是有效事实：失效只是打了个墓碑，行还在、
+/// 向量还在（`docs/memory-content.md` §八.5 的 Ghost Vectors）。
+/// 「抽出来又失效掉」不等于「没抽」。
+fn leaks(matchers: &QuestionMatchers, facts: &[FactRow]) -> Vec<String> {
+    matchers
+        .never_extracted
+        .iter()
+        .filter(|m| facts.iter().any(|f| m.matches(&f.statement)))
+        .map(Matcher::describe)
+        .collect()
 }
 
 /// gold 是否真的落进了库。
@@ -249,6 +286,7 @@ mod tests {
             as_of: None,
             gold: vec![gold.iter().map(|s| (*s).to_owned()).collect()],
             forbidden: vec![],
+            never_extracted: vec![],
             note: String::new(),
         }
     }
@@ -283,6 +321,36 @@ mod tests {
             gold_status(&q, &m, &[fact("对象存储先用 MinIO", false)]),
             Status::Scored,
             "回放题的 gold 本来就该是被取代掉的旧事实"
+        );
+    }
+
+    #[test]
+    fn leak_is_measured_against_the_corpus_not_the_ranking() {
+        let mut q = question(QuestionKind::ToolExperience, &["--locked"]);
+        q.never_extracted = vec![vec!["failed to select a version".into()]];
+        let m = QuestionMatchers::of(&q);
+        // 这条事实排在第几名无关紧要 —— 它**存在**本身就是抽取侧的失败
+        let corpus = [fact(
+            "error: failed to select a version for `sqlx-core`",
+            true,
+        )];
+        assert_eq!(
+            leaks(&m, &corpus).len(),
+            1,
+            "命令原始输出被抽成了事实，必须能量到（docs/memory-content.md §二③）"
+        );
+    }
+
+    #[test]
+    fn invalidated_leak_still_counts_as_a_leak() {
+        let mut q = question(QuestionKind::ToolExperience, &["--locked"]);
+        q.never_extracted = vec![vec!["failed to select a version".into()]];
+        let m = QuestionMatchers::of(&q);
+        let corpus = [fact("error: failed to select a version for `x`", false)];
+        assert_eq!(
+            leaks(&m, &corpus).len(),
+            1,
+            "失效只是加了个墓碑，行和向量都还在 —— 抽出来又失效不等于没抽"
         );
     }
 

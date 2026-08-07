@@ -30,6 +30,42 @@ fn statements(suite: &Suite) -> Vec<String> {
         .collect()
 }
 
+/// 工具轨迹声明的「一个正确的抽取器应当得出的陈述」。
+///
+/// 它**不是**铺垫事实，一个字都不会落库。之所以要单独有这个池子：
+/// 工具经验题的 gold 按定义匹配不到任何 `SeedFact`（匹配得到就说明
+/// 这道题问的是对话里已经说过的事，与工具轨迹无关），
+/// 但也不能因此就允许它凭空发明 —— 得有个锚点。
+fn tool_expectations(suite: &Suite) -> Vec<String> {
+    suite.turns().flat_map(|t| t.tool_expect.clone()).collect()
+}
+
+/// 工具轨迹声明的「绝对不该被抽出来的东西」。
+fn tool_avoidances(suite: &Suite) -> Vec<String> {
+    suite.turns().flat_map(|t| t.tool_avoid.clone()).collect()
+}
+
+/// 每一轮的轨迹全文（工具名 + 路径 + 一行结论拼起来）。
+fn trace_texts(suite: &Suite) -> Vec<String> {
+    suite
+        .turns()
+        .map(|t| {
+            t.tool_calls
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{} {} {}",
+                        c.name,
+                        c.path.clone().unwrap_or_default(),
+                        c.summary
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect()
+}
+
 #[test]
 fn bundled_suite_loads_and_validates() {
     let suite = load();
@@ -49,6 +85,12 @@ fn every_gold_matcher_hits_at_least_one_seeded_fact() {
 
     let mut orphans = Vec::new();
     for q in &suite.questions {
+        // 工具经验题的 gold 按定义匹配不到任何铺垫事实 —— 它要的那条事实
+        // 还不存在，得由抽取器从轨迹里造出来。它的锚点检查在
+        // `tool_experience_gold_is_anchored_in_a_declared_expectation`
+        if q.kind == QuestionKind::ToolExperience {
+            continue;
+        }
         for group in &q.gold {
             let m = Matcher::new(group);
             if !stmts.iter().any(|s| m.matches(s)) {
@@ -212,6 +254,227 @@ fn unanswerable_questions_have_tempting_distractors() {
                 !q.forbidden.is_empty(),
                 "题目 {} 没有干扰项，测不出任何东西",
                 q.id
+            );
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════
+//  工具经验题的准入规程
+//
+//  这一类题最容易变成自证：自己写一条「应当抽出来的陈述」，再自己写一条
+//  匹配它的 gold，然后宣布评测覆盖了工具轨迹抽取。下面六条是防这个的，
+//  规程照 README 里 `relates_to` 那次的做法：先定形状再写字、gold 必须
+//  有语料侧的锚点、证伪先行、不许反向筛题。
+// ══════════════════════════════════════════════════════════
+
+fn tool_questions(suite: &Suite) -> Vec<&cortex_evals::suite::Question> {
+    suite
+        .questions
+        .iter()
+        .filter(|q| q.kind == QuestionKind::ToolExperience)
+        .collect()
+}
+
+#[test]
+fn tool_experience_gold_is_anchored_in_a_declared_expectation() {
+    // gold 必须命中某条 `tool_expect`。允许 gold 凭空发明，等于允许
+    // 「题目要一个语料里根本没有依据的答案」—— 那样这道题永远挂，
+    // 而挂的原因看报告与「抽取器没接轨迹」完全一样，分不出来
+    let suite = load();
+    let expectations = tool_expectations(&suite);
+
+    let mut orphans = Vec::new();
+    for q in tool_questions(&suite) {
+        for group in &q.gold {
+            let m = Matcher::new(group);
+            if !expectations.iter().any(|s| m.matches(s)) {
+                orphans.push(format!("{} → {}", q.id, m.describe()));
+            }
+        }
+    }
+    assert!(
+        orphans.is_empty(),
+        "以下工具经验题的 gold 没有对应的 tool_expect，等于凭空发明答案：\n{}",
+        orphans.join("\n")
+    );
+}
+
+#[test]
+fn tool_experience_gold_is_absent_from_the_seeded_corpus() {
+    // gold 若能命中某条铺垫事实，这道题在 seed 模式下就**已经能答对**了 ——
+    // 它量的是「一条手写事实能不能被召回」，而不是「轨迹能不能被抽成事实」。
+    // 这是这一类题最隐蔽的失效方式：它会安安静静地过，并且看起来像个好消息
+    let suite = load();
+    let stmts = statements(&suite);
+
+    for q in tool_questions(&suite) {
+        for group in &q.gold {
+            let m = Matcher::new(group);
+            let hit = stmts.iter().find(|s| m.matches(s));
+            assert!(
+                hit.is_none(),
+                "工具经验题 {} 的 gold「{}」命中了铺垫事实「{}」—— \
+                 这道题不用抽取器就能答，量到的不是工具轨迹",
+                q.id,
+                m.describe(),
+                hit.map_or("", String::as_str)
+            );
+        }
+    }
+}
+
+#[test]
+fn tool_experience_gold_is_absent_from_every_conversation_turn() {
+    // 第二条自证通路：结论写在了对话原文里。那样 llm 模式下抽取器读 text
+    // 就能得出 gold，轨迹一眼都不用看 —— 这道题就退化成了普通的抽取题。
+    // 工具轨迹这一格的全部价值就在于「对话里一个字都没说」
+    let suite = load();
+    let texts: Vec<&str> = suite.turns().map(|t| t.text.as_str()).collect();
+
+    for q in tool_questions(&suite) {
+        for group in &q.gold {
+            let m = Matcher::new(group);
+            let leak = texts.iter().find(|t| m.matches(t));
+            assert!(
+                leak.is_none(),
+                "工具经验题 {} 的 gold「{}」能直接从对话原文「{}」读出来 —— \
+                 那就不需要工具轨迹了",
+                q.id,
+                m.describe(),
+                leak.copied().unwrap_or("")
+            );
+        }
+    }
+}
+
+#[test]
+fn tool_experience_gold_is_copyable_from_the_trace() {
+    // 反过来的约束：gold 的每个片段都必须**逐字**出现在某一轮的轨迹里。
+    // 抽取器只能看见 name / path / summary 三样东西，要一个它无从得知的
+    // 词，这道题就永远挂 —— 而那是题目的错，不是实现的错。
+    //
+    // 这条同时解释了为什么工具经验题的 gold 全压在命令、参数、环境变量、
+    // 路径这类标识符上：statement 的措辞由模型决定，只有标识符是稳的
+    let suite = load();
+    let traces = trace_texts(&suite);
+
+    for q in tool_questions(&suite) {
+        for group in &q.gold {
+            for part in group {
+                let needle = part.to_lowercase();
+                assert!(
+                    traces.iter().any(|t| t.to_lowercase().contains(&needle)),
+                    "工具经验题 {} 的 gold 片段「{part}」在任何一段轨迹里都没有逐字出现 —— \
+                     抽取器无从得知这个词",
+                    q.id
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn tool_experience_query_never_leaks_its_gold() {
+    // 查询里直接出现 gold 的标识符，等于把答案写进了题面。
+    // 规程第 1 步「先定形状再写字」的落点
+    let suite = load();
+    for q in tool_questions(&suite) {
+        let query = q.query.to_lowercase();
+        for group in &q.gold {
+            for part in group {
+                assert!(
+                    !query.contains(&part.to_lowercase()),
+                    "工具经验题 {} 的查询里出现了 gold 片段「{part}」—— 答案写在题面上了",
+                    q.id
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn tool_traces_contain_failure_then_success_sequences() {
+    // 「差异即知识」这条判据要成立，语料里必须真有「先失败后成功」的序列。
+    // 全是单次成功的轨迹只能考「这条命令跑过」，那和普通召回没有区别
+    let suite = load();
+    let with_diff = suite
+        .turns()
+        .filter(|t| t.tool_calls.iter().any(|c| !c.ok) && t.tool_calls.last().is_some_and(|c| c.ok))
+        .count();
+    assert!(
+        with_diff >= 4,
+        "只有 {with_diff} 轮轨迹是「失败→成功」的序列。\
+         差异即知识是这一类题的核心判据，语料不给差异就无从考起"
+    );
+}
+
+#[test]
+fn never_extracted_is_anchored_and_not_self_contradictory() {
+    // 三条一起查，因为它们只有合在一起才挡得住「这条断言恒为真」：
+    //   ① 必须命中某条 `tool_avoid`     —— 否则是凭空写的
+    //   ② 不得命中任何铺垫事实           —— 否则 seed 模式下恒定判为泄漏
+    //   ③ 不得命中任何 `tool_expect`     —— 否则「必须抽」与「绝对不抽」自相矛盾
+    let suite = load();
+    let avoidances = tool_avoidances(&suite);
+    let stmts = statements(&suite);
+    let expectations = tool_expectations(&suite);
+
+    let mut any = 0usize;
+    for q in &suite.questions {
+        for group in &q.never_extracted {
+            any += 1;
+            let m = Matcher::new(group);
+            assert!(
+                avoidances.iter().any(|s| m.matches(s)),
+                "题目 {} 的 never_extracted「{}」没有对应的 tool_avoid —— 凭空写的断言",
+                q.id,
+                m.describe()
+            );
+            let clash = stmts.iter().find(|s| m.matches(s));
+            assert!(
+                clash.is_none(),
+                "题目 {} 的 never_extracted「{}」命中了铺垫事实「{}」—— 这条断言恒定失败",
+                q.id,
+                m.describe(),
+                clash.map_or("", String::as_str)
+            );
+            let contradiction = expectations.iter().find(|s| m.matches(s));
+            assert!(
+                contradiction.is_none(),
+                "题目 {} 的 never_extracted「{}」命中了 tool_expect「{}」—— \
+                 同一条东西既要求抽出来又要求别抽",
+                q.id,
+                m.describe(),
+                contradiction.map_or("", String::as_str)
+            );
+        }
+    }
+    assert!(
+        any >= 3,
+        "只写了 {any} 条「不该被抽出来」的断言。抽取 prompt 里「绝对不抽」那一节\
+         没有别的落点，这一列薄了那一节就等于没测"
+    );
+}
+
+#[test]
+fn tool_avoidance_quotes_the_trace_verbatim() {
+    // `tool_avoid` 是「抽取器可能会误抽的那段东西」，必须真的出现在轨迹里。
+    // 写一段轨迹里没有的话当 avoid，等于给自己发了一张永远通过的许可证
+    let suite = load();
+    for turn in suite.turns() {
+        let trace = turn
+            .tool_calls
+            .iter()
+            .map(|c| c.summary.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_lowercase();
+        for a in &turn.tool_avoid {
+            assert!(
+                trace.contains(&a.to_lowercase()),
+                "tool_avoid「{a}」在本轮的任何一条 summary 里都没有逐字出现，\
+                 抽取器根本不可能误抽出它"
             );
         }
     }

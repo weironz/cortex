@@ -81,6 +81,13 @@ pub struct QuestionResult {
     pub gold_total: usize,
     /// 这道题写了几条 forbidden。为 0 的题不计入误召率，否则分母被稀释
     pub forbidden_total: usize,
+    /// 这道题写了几条「不该被抽出来」的断言
+    pub never_extracted_total: usize,
+    /// 其中实际在语料快照里找到了的 —— **抽取侧的误抽**。
+    ///
+    /// 与 `forbidden_hit` 不是一回事：那个问「排没排进前 k」，这个问
+    /// 「它压根在不在库里」。抽取 prompt 的「绝对不抽」只在这一列上留痕
+    pub leaked: Vec<String>,
     /// 每条 gold 在融合结果里的名次
     pub gold_ranks: Vec<Option<usize>>,
     /// gold 的描述，与 `gold_ranks` 等长 —— 报告里要指出「哪一条没召回」
@@ -112,7 +119,8 @@ const TOP_SAMPLE: usize = 5;
 /// 给一道题打分。
 ///
 /// `fused` 是检索器的最终输出（已按预算截断）；`channels` 是四路的原始召回，
-/// 只用于诊断，不参与主指标。`status` 由调用方在 ingest 后根据语料快照判定。
+/// 只用于诊断，不参与主指标。`status` 与 `leaked` 由调用方在 ingest 后
+/// 根据语料快照判定 —— 它们都是**抽取侧**的读数，检索一步都还没跑就已经确定。
 #[must_use]
 pub fn score(
     q: &Question,
@@ -121,6 +129,7 @@ pub fn score(
     channels: &[ChannelRun],
     status: Status,
     replay: bool,
+    leaked: Vec<String>,
 ) -> QuestionResult {
     let statements: Vec<&str> = fused.iter().map(|i| i.statement.as_str()).collect();
 
@@ -201,6 +210,8 @@ pub fn score(
         replay,
         gold_total,
         forbidden_total: matchers.forbidden.len(),
+        never_extracted_total: matchers.never_extracted.len(),
+        leaked,
         gold_ranks,
         gold_labels: matchers.gold.iter().map(Matcher::describe).collect(),
         recall,
@@ -269,6 +280,14 @@ pub struct Aggregate {
     /// 有 forbidden 的题里，top-k 混入干扰项的比例
     pub forbidden_rate: BTreeMap<usize, f64>,
     pub forbidden_questions: usize,
+    /// 写了「不该被抽出来」断言的题数
+    pub leak_questions: usize,
+    /// 其中实际泄漏的条数 —— **抽取侧唯一的越少越好指标**。
+    ///
+    /// 它与 Recall 正交：Recall 只会奖励「抽得多」，而抽得多恰恰是
+    /// `docs/memory-content.md` §二③ 判定为有害的方向。没有这一列，
+    /// 「绝对不抽」这条判据在整套评测里没有任何落点
+    pub extraction_leaks: usize,
     pub channels: BTreeMap<String, ChannelAggregate>,
 }
 
@@ -381,6 +400,11 @@ pub fn aggregate(label: impl Into<String>, results: &[&QuestionResult]) -> Aggre
         avg_gold_rank,
         forbidden_rate,
         forbidden_questions: forbidden_pool.len(),
+        leak_questions: results
+            .iter()
+            .filter(|r| r.never_extracted_total > 0)
+            .count(),
+        extraction_leaks: results.iter().map(|r| r.leaked.len()).sum(),
         channels,
     }
 }
@@ -424,6 +448,7 @@ mod tests {
                 .iter()
                 .map(|g| g.iter().map(|s| (*s).to_owned()).collect())
                 .collect(),
+            never_extracted: vec![],
             note: String::new(),
         }
     }
@@ -443,7 +468,7 @@ mod tests {
             item("a", "别的事实", &["bm25"]),
             item("b", "对象存储用 RustFS", &["bm25", "vector"]),
         ];
-        let r = score(&q, &m, &fused, &[], Status::Scored, false);
+        let r = score(&q, &m, &fused, &[], Status::Scored, false, vec![]);
         assert_eq!(r.recall[&1], 0.0, "gold 排第二，Recall@1 应为 0");
         assert_eq!(r.recall[&5], 1.0);
         assert!(
@@ -458,7 +483,7 @@ mod tests {
         let q = question(&[&["甲"], &["乙"]], &[]);
         let m = QuestionMatchers::of(&q);
         let fused = vec![item("a", "只有甲", &["bm25"])];
-        let r = score(&q, &m, &fused, &[], Status::Scored, false);
+        let r = score(&q, &m, &fused, &[], Status::Scored, false, vec![]);
         assert!(
             (r.recall[&5] - 0.5).abs() < 1e-9,
             "两条 gold 命中一条应为 0.5，实际 {}",
@@ -478,7 +503,7 @@ mod tests {
             item("e", "f", &[]),
             item("f", "旧方案是 MinIO", &[]),
         ];
-        let r = score(&q, &m, &fused, &[], Status::Scored, false);
+        let r = score(&q, &m, &fused, &[], Status::Scored, false, vec![]);
         assert!(!r.forbidden_hit[&5], "干扰项排第 6，@5 不该算命中");
         assert!(r.forbidden_hit[&10], "干扰项在前 10 名内，@10 应当命中");
     }
@@ -493,7 +518,7 @@ mod tests {
             run("graph", &[]),
             run("recency", &["最近的一条"]),
         ];
-        let r = score(&q, &m, &[], &channels, Status::Scored, false);
+        let r = score(&q, &m, &[], &channels, Status::Scored, false, vec![]);
         assert_eq!(
             r.exclusive_channel.as_deref(),
             Some("bm25"),
@@ -506,7 +531,7 @@ mod tests {
         let q = question(&[&["RRF"]], &[]);
         let m = QuestionMatchers::of(&q);
         let channels = vec![run("bm25", &["RRF"]), run("vector", &["RRF"])];
-        let r = score(&q, &m, &[], &channels, Status::Scored, false);
+        let r = score(&q, &m, &[], &channels, Status::Scored, false, vec![]);
         assert_eq!(r.exclusive_channel, None);
     }
 
@@ -514,8 +539,16 @@ mod tests {
     fn aggregate_excludes_gold_missing_from_recall() {
         let q = question(&[&["甲"]], &[]);
         let m = QuestionMatchers::of(&q);
-        let good = score(&q, &m, &[item("a", "甲", &[])], &[], Status::Scored, false);
-        let broken = score(&q, &m, &[], &[], Status::GoldMissing, false);
+        let good = score(
+            &q,
+            &m,
+            &[item("a", "甲", &[])],
+            &[],
+            Status::Scored,
+            false,
+            vec![],
+        );
+        let broken = score(&q, &m, &[], &[], Status::GoldMissing, false, vec![]);
         let agg = aggregate("全部", &[&good, &broken]);
         assert_eq!(agg.total, 2);
         assert_eq!(agg.scored, 1, "gold 未落库的题不该拉低检索指标");

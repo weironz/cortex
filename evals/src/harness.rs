@@ -39,7 +39,7 @@ use cortex_memory::extract::{CandidateFact, EntityRef, ExtractContext, Extractor
 use cortex_memory::injection::Budget;
 use cortex_memory::retrieval::{GRAPH_SEED_LIMIT, RecallWidth, RecencyMode, Retriever};
 use cortex_memory::tokenize;
-use cortex_store::{NewEpisode, Role, Store, Vector};
+use cortex_store::{NewEpisode, NewEpisodeToolCall, Role, Store, Vector};
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
@@ -176,6 +176,18 @@ impl EvalDb {
         Ok(n)
     }
 
+    /// 真正落进 `episode_tool_calls` 的行数。
+    ///
+    /// 与题集里声明的条数对不上，就说明轨迹在写入路径上被吞了 ——
+    /// 而那会让工具经验题「因为语料没进去」而挂，与「抽取器没接」
+    /// 的表现一模一样。这个数字是把两者分开的唯一依据。
+    pub async fn count_tool_calls(&self) -> Result<i64> {
+        let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM episode_tool_calls")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(n)
+    }
+
     /// 删掉临时 schema。`keep` 为真时保留（便于事后手工查 bad case）。
     pub async fn cleanup(self, keep: bool) {
         self.store.close().await;
@@ -240,6 +252,11 @@ async fn sweep_stale_schemas(admin: &PgPool) {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct IngestStats {
     pub episodes: usize,
+    /// 落进 `episode_tool_calls` 的工具调用数。
+    ///
+    /// 它与 `candidates` 的落差就是**当前这条缺口的宽度**：轨迹全落库了，
+    /// 但一条候选事实都不是从轨迹来的（抽取器还不读那张表）
+    pub tool_calls: usize,
     pub candidates: usize,
     pub written: usize,
     pub duplicates: usize,
@@ -300,6 +317,7 @@ pub async fn ingest_suite(
             let occurred_at = parse_date(&turn.occurred_at)?;
             let episode_id = insert_episode(db, scenario, turn, occurred_at).await?;
             stats.episodes += 1;
+            stats.tool_calls += turn.tool_calls.len();
 
             let ctx = ExtractContext::new(episode_id, occurred_at)
                 .with_domain(scenario.domain.clone())
@@ -371,10 +389,36 @@ async fn insert_episode(
         device_id: DEVICE.to_owned(),
         occurred_at,
     };
+
+    // 工具轨迹与 episode **同事务**落库，与生产的 `live.rs` 一致。
+    // 拆成两个事务会让「episode 已提交、轨迹还没提交」成为一个可观测的中间态，
+    // 而抽取器将来正是在 episode 提交之后被触发的 —— 那时轨迹必须已经在
+    let calls: Vec<NewEpisodeToolCall> = turn
+        .tool_calls
+        .iter()
+        .enumerate()
+        .map(|(i, c)| NewEpisodeToolCall {
+            id: Id::new(),
+            episode_id: id,
+            ordinal: i32::try_from(i).unwrap_or(i32::MAX),
+            name: c.name.clone(),
+            path: c.path.clone(),
+            summary: c.summary.clone(),
+            ok: c.ok,
+            device_id: DEVICE.to_owned(),
+        })
+        .collect();
+
     db.store
-        .write_txn(async |tx| tx.insert_episode(&episode).await)
+        .write_txn(async |tx| {
+            tx.insert_episode(&episode).await?;
+            for call in &calls {
+                tx.insert_episode_tool_call(call).await?;
+            }
+            Ok(())
+        })
         .await
-        .context("episode 落库失败")?;
+        .context("episode / 工具轨迹落库失败")?;
     Ok(id)
 }
 

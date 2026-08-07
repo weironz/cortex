@@ -21,11 +21,23 @@
 //!     text           原文，落成 episode；llm 模式下就是抽取器的输入
 //!     facts[]        seed 模式下手写的候选事实，走真实的消解 + 落库
 //!     checkpoint     可选。记下本轮提交后的**系统时间**，供时间回放题引用
+//!     tool_calls[]   本轮的工具轨迹，落成 episode_tool_calls（两种模式都落）
+//!     tool_expect[]  一个正确的抽取器应当从轨迹里得出的陈述（**不落库**）
+//!     tool_avoid[]   绝对不该从轨迹里抽出来的东西（**不落库**）
 //! questions[]
 //!   gold[]           每个元素是一组子串，全部出现在某条事实的 statement 里才算命中
 //!   forbidden[]      同样的匹配规则，但**出现即扣分**
+//!   never_extracted[] 同样的匹配规则，但比对的是**语料快照**而非检索结果
 //!   as_of            引用某个 checkpoint，走系统时间回放而非四路召回
 //! ```
+//!
+//! # 为什么 tool_expect / tool_avoid 不落库
+//!
+//! 落了就是自问自答：题目声明「应当抽出来这句」，评测把这句写进库，
+//! 然后宣布检索能召回它。它们唯一的用途是给 gold 与 never_extracted
+//! 当**锚点** —— 工具经验题的 gold 按定义匹配不到任何 `SeedFact`
+//! （匹配得到就说明这道题不用抽取器也能答），但也不能因此就允许它
+//! 凭空发明。完整的准入规程见 `evals/README.md`。
 //!
 //! # gold 为什么按子串匹配而不是按 fact id
 //!
@@ -55,6 +67,17 @@ pub enum QuestionKind {
     Relational,
     /// 跨域：在 coding 里问 office 的事（或反之）
     CrossDomain,
+    /// **工具经验**：答案只存在于工具轨迹里，对话原文一个字都没说。
+    ///
+    /// 与上面五类的根本差别：前五类考的是**检索**（事实已经在库里，问能不能
+    /// 排到前面），这一类考的是**抽取**（那条事实压根还不存在，问抽取器
+    /// 能不能从「命令 + 路径 + 成败」里把它造出来）。
+    ///
+    /// 因此它是这套评测里唯一一个 `mode=seed` 下**必然全挂**的题型 ——
+    /// seed 喂的是手写的 `SeedFact`，而工具轨迹的题刻意不写任何 `facts`。
+    /// 挂法是 `Status::GoldMissing`（gold 没落库），不是「排太后」。
+    /// 见 `docs/memory-content.md` §二②。
+    ToolExperience,
     /// **应当召回不到**：库里根本没有答案。
     ///
     /// 这一类必须有。只测召回率会奖励「什么都召回」的退化策略：
@@ -72,18 +95,20 @@ impl QuestionKind {
             Self::TemporalReplay => "时间回放",
             Self::Relational => "关系推理",
             Self::CrossDomain => "跨域检索",
+            Self::ToolExperience => "工具经验",
             Self::Unanswerable => "应召不到",
         }
     }
 
     #[must_use]
-    pub fn all() -> [Self; 6] {
+    pub fn all() -> [Self; 7] {
         [
             Self::ChineseSemantic,
             Self::ExactTerm,
             Self::TemporalReplay,
             Self::Relational,
             Self::CrossDomain,
+            Self::ToolExperience,
             Self::Unanswerable,
         ]
     }
@@ -147,6 +172,44 @@ pub struct Turn {
     /// seed 模式下手写的候选事实
     #[serde(default)]
     pub facts: Vec<SeedFact>,
+    /// 本轮的工具轨迹，按数组顺序落成 `episode_tool_calls`（`ordinal` 就是下标）。
+    ///
+    /// 它是**语料**不是**候选事实**：无论 seed 还是 llm 模式都照样落库。
+    /// 抽取器现在还不读这张表（`docs/memory-content.md` §二② 那条缺口），
+    /// 所以这段 fixture 目前只是「摆在那里等着被读」—— 这正是工具经验题
+    /// 现在必然挂掉的原因，也是将来接上之后不用改题集就能量到收益的原因。
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
+    /// 一个正确的抽取器**应当**从上面这段轨迹里得出的陈述。
+    ///
+    /// 它不会被写进库（写了就成了自问自答）。它的唯一用途是给
+    /// `tool_experience` 题的 gold 当锚点：完整性检查要求每条 gold
+    /// 至少命中一条 `tool_expect`，否则那条 gold 就是凭空发明的。
+    #[serde(default)]
+    pub tool_expect: Vec<String>,
+    /// 从这段轨迹里**绝对不该**被抽出来的东西 —— 通常是命令的原始输出片段。
+    ///
+    /// 判据见 `docs/memory-content.md` §二③「工具输出原始字节明确不存」。
+    /// 同样只作锚点：题目的 `never_extracted` 必须命中其中一条。
+    #[serde(default)]
+    pub tool_avoid: Vec<String>,
+}
+
+/// 一次工具调用的 fixture，与 `cortex_store::NewEpisodeToolCall` 一一对应。
+///
+/// 只有「命令 + 路径 + 成败 + 一行结论」四样，**没有原始 stdout** ——
+/// 形状照抄生产的 `episode_tool_calls`，评测里能表达的东西不能比生产多，
+/// 否则测出来的收益是假的。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub name: String,
+    /// 这次调用碰的路径；没碰文件的工具留空
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// 这次调用成没成。**「失败→成功」的那个差值就是这一类题要考的知识**
+    pub ok: bool,
+    /// 一行结论。失败时按生产的做法带上工具输出的首行片段
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,6 +265,17 @@ pub struct Question {
     /// **不该**出现在结果里的事实。已被取代的旧值、话题相邻的干扰项
     #[serde(default)]
     pub forbidden: Vec<Vec<String>>,
+    /// **不该被抽出来**的东西 —— 与 `forbidden` 是两件事，别混。
+    ///
+    /// `forbidden` 判的是「检索有没有把它排进前 k」，前提是它**已经在库里**；
+    /// `never_extracted` 判的是「它根本就不该在库里」，比对的是**语料快照**
+    /// 而不是检索结果。
+    ///
+    /// 为什么必须分开：抽取 prompt 里「绝对不抽」那一节，改了之后
+    /// 检索侧的十八项指标一动不动 —— 因为该不该抽根本不是检索能看见的事。
+    /// 这一列是那一节唯一的尺子。
+    #[serde(default)]
+    pub never_extracted: Vec<Vec<String>>,
     #[serde(default)]
     pub note: String,
 }
@@ -244,6 +318,7 @@ impl Suite {
                 for f in &turn.facts {
                     validate_fact(&sc.id, i + 1, f)?;
                 }
+                validate_tool_trace(&sc.id, i + 1, turn)?;
             }
         }
 
@@ -263,7 +338,12 @@ impl Suite {
             {
                 bail!("题目 {} 引用了不存在的 checkpoint「{cp}」", q.id);
             }
-            for group in q.gold.iter().chain(q.forbidden.iter()) {
+            for group in q
+                .gold
+                .iter()
+                .chain(q.forbidden.iter())
+                .chain(q.never_extracted.iter())
+            {
                 if group.is_empty() || group.iter().any(|s| s.trim().is_empty()) {
                     bail!("题目 {} 的匹配组里有空串 —— 空串匹配一切，等于没写", q.id);
                 }
@@ -294,6 +374,13 @@ impl Suite {
                     q.id
                 );
             }
+            if q.kind == QuestionKind::ToolExperience && q.as_of.is_some() {
+                bail!(
+                    "题目 {} 是工具经验题却带了 as_of —— \
+                     回放走的是快照内三路，量到的是「当时库里有什么」而不是「抽取器能不能抽出来」",
+                    q.id
+                );
+            }
         }
 
         // 题型覆盖：少一类就是评测有盲区
@@ -302,6 +389,19 @@ impl Suite {
             if counts.get(&kind).copied().unwrap_or(0) == 0 {
                 bail!("题型「{}」一道题都没有，评测有盲区", kind.label());
             }
+        }
+
+        // 有工具经验题却一条轨迹都没有 = 这一类题目**注定**无解，
+        // 而它挂掉的样子（gold 没落库）与「抽取器还没接工具轨迹」一模一样，
+        // 从报告里根本分不出是缺 fixture 还是缺实现
+        if counts
+            .get(&QuestionKind::ToolExperience)
+            .copied()
+            .unwrap_or(0)
+            > 0
+            && self.tool_call_count() == 0
+        {
+            bail!("题集有工具经验题，却没有任何 tool_calls 语料 —— 这类题永远无解");
         }
 
         Ok(())
@@ -339,6 +439,64 @@ impl Suite {
     pub fn turn_count(&self) -> usize {
         self.scenarios.iter().map(|s| s.turns.len()).sum()
     }
+
+    /// 题集里一共写了多少次工具调用。
+    #[must_use]
+    pub fn tool_call_count(&self) -> usize {
+        self.turns().map(|t| t.tool_calls.len()).sum()
+    }
+
+    /// 全部轮次，按场景顺序。
+    pub fn turns(&self) -> impl Iterator<Item = &Turn> {
+        self.scenarios.iter().flat_map(|s| &s.turns)
+    }
+}
+
+/// 工具轨迹的结构校验。长度上限与 `cortex_store` 的 CHECK 对齐 ——
+/// 对不上的症状是灌语料灌到一半整个写事务回滚，而报错信息在 Postgres 那头。
+fn validate_tool_trace(scenario: &str, turn_idx: usize, turn: &Turn) -> Result<()> {
+    for (i, c) in turn.tool_calls.iter().enumerate() {
+        let at = format!("场景 {scenario} 第 {turn_idx} 轮第 {} 次调用", i + 1);
+        if c.name.trim().is_empty() {
+            bail!("{at} 没有工具名");
+        }
+        if c.name.chars().count() > cortex_store::TOOL_NAME_MAX_CHARS {
+            bail!(
+                "{at} 的工具名超过 {} 字符，落库会被 CHECK 打回",
+                cortex_store::TOOL_NAME_MAX_CHARS
+            );
+        }
+        if c.summary.trim().is_empty() {
+            bail!("{at} 没有 summary —— 只剩「跑了个命令」，一点知识都表达不出来");
+        }
+        if c.summary.chars().count() > cortex_store::TOOL_SUMMARY_MAX_CHARS {
+            bail!(
+                "{at} 的 summary 超过 {} 字符，落库会被 CHECK 打回",
+                cortex_store::TOOL_SUMMARY_MAX_CHARS
+            );
+        }
+        if let Some(p) = &c.path
+            && p.chars().count() > cortex_store::TOOL_PATH_MAX_CHARS
+        {
+            bail!(
+                "{at} 的 path 超过 {} 字符，落库会被 CHECK 打回",
+                cortex_store::TOOL_PATH_MAX_CHARS
+            );
+        }
+    }
+
+    if turn.tool_calls.is_empty() && !(turn.tool_expect.is_empty() && turn.tool_avoid.is_empty()) {
+        bail!(
+            "场景 {scenario} 第 {turn_idx} 轮声明了 tool_expect/tool_avoid 却没有 tool_calls —— \
+             那这个「应当抽出来」是凭空写的，不是从轨迹里来的"
+        );
+    }
+    for s in turn.tool_expect.iter().chain(turn.tool_avoid.iter()) {
+        if s.trim().is_empty() {
+            bail!("场景 {scenario} 第 {turn_idx} 轮的 tool_expect/tool_avoid 里有空串");
+        }
+    }
+    Ok(())
 }
 
 fn validate_fact(scenario: &str, turn: usize, f: &SeedFact) -> Result<()> {
@@ -399,6 +557,11 @@ mod tests {
                 } else {
                     vec![]
                 },
+                never_extracted: if *kind == QuestionKind::ToolExperience {
+                    vec![vec!["原始输出".into()]]
+                } else {
+                    vec![]
+                },
                 note: String::new(),
             })
             .collect();
@@ -427,6 +590,14 @@ mod tests {
                         confidence: 0.9,
                         domain: None,
                     }],
+                    tool_calls: vec![ToolCall {
+                        name: "bash".into(),
+                        path: Some("Cargo.lock".into()),
+                        ok: true,
+                        summary: "跑了个命令".into(),
+                    }],
+                    tool_expect: vec!["应当抽出来的一条".into()],
+                    tool_avoid: vec!["原始输出".into()],
                 }],
             }],
             questions,
@@ -501,6 +672,74 @@ mod tests {
         assert!(
             s.validate().is_err(),
             "字面量宾语与实体宾语同时给，落库时无法判定"
+        );
+    }
+
+    #[test]
+    fn tool_experience_question_without_any_trace_is_rejected() {
+        let mut s = minimal();
+        s.scenarios[0].turns[0].tool_calls.clear();
+        s.scenarios[0].turns[0].tool_expect.clear();
+        s.scenarios[0].turns[0].tool_avoid.clear();
+        let err = s
+            .validate()
+            .expect_err("没有轨迹语料时工具经验题应当被挡住");
+        assert!(
+            err.to_string().contains("tool_calls"),
+            "错误要点名缺的是轨迹语料，否则会被误读成「抽取器还没接」：{err}"
+        );
+    }
+
+    #[test]
+    fn tool_expectation_without_a_trace_is_rejected() {
+        let mut s = minimal();
+        s.scenarios[0].turns[0].tool_calls.clear();
+        let err = s
+            .validate()
+            .expect_err("声明了 tool_expect 却没有轨迹应当报错");
+        assert!(
+            err.to_string().contains("凭空写的"),
+            "「应当抽出来」必须有轨迹作依据：{err}"
+        );
+    }
+
+    #[test]
+    fn tool_call_without_summary_is_rejected() {
+        let mut s = minimal();
+        s.scenarios[0].turns[0].tool_calls[0].summary = "   ".into();
+        assert!(
+            s.validate().is_err(),
+            "只有命令名没有结论的轨迹，抽取器无从下手，等于没写这段语料"
+        );
+    }
+
+    #[test]
+    fn tool_experience_question_must_not_be_a_replay() {
+        let mut s = minimal();
+        let i = s
+            .questions
+            .iter()
+            .position(|q| q.kind == QuestionKind::ToolExperience)
+            .expect("应有工具经验题");
+        s.questions[i].as_of = Some("cp".into());
+        assert!(
+            s.validate().is_err(),
+            "带 as_of 的工具经验题量到的是快照内容，不是抽取能力"
+        );
+    }
+
+    #[test]
+    fn never_extracted_rejects_empty_parts() {
+        let mut s = minimal();
+        let i = s
+            .questions
+            .iter()
+            .position(|q| q.kind == QuestionKind::ToolExperience)
+            .expect("应有工具经验题");
+        s.questions[i].never_extracted = vec![vec!["  ".into()]];
+        assert!(
+            s.validate().is_err(),
+            "空串匹配一切 —— 这条「不该抽」会永远判定为泄漏"
         );
     }
 

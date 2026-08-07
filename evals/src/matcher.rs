@@ -64,6 +64,9 @@ impl Matcher {
 pub struct QuestionMatchers {
     pub gold: Vec<Matcher>,
     pub forbidden: Vec<Matcher>,
+    /// 「根本不该在库里」—— 比对的是语料快照而不是检索结果，见
+    /// [`crate::suite::Question::never_extracted`]
+    pub never_extracted: Vec<Matcher>,
 }
 
 impl QuestionMatchers {
@@ -72,6 +75,7 @@ impl QuestionMatchers {
         Self {
             gold: q.gold.iter().map(|g| Matcher::new(g)).collect(),
             forbidden: q.forbidden.iter().map(|g| Matcher::new(g)).collect(),
+            never_extracted: q.never_extracted.iter().map(|g| Matcher::new(g)).collect(),
         }
     }
 }

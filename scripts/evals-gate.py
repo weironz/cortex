@@ -95,6 +95,23 @@ def flatten(report: dict) -> dict[str, float]:
         fb = (agg.get("forbidden_rate") or {}).get("5")
         if fb is not None and agg.get("forbidden_questions", 0):
             out[f"kind.{label}.forbidden@5"] = float(fb)
+        # ── 抽取侧的两条，越低越好 ──
+        #
+        # 加它们的理由：Recall 这一族的分母是「已经在库里的事实」，**结构上**
+        # 回答不了「这条该不该被抽出来」。而 gold 缺失的题被排除在 Recall 之外
+        # （「抽取的锅不算检索头上」），于是抽取侧的退化在这道门里**一格都不占**。
+        #
+        # 工具经验那 8 道题就是活证：它们现在 gold_missing = 8/8，
+        # 但 scored == 0，所以 kind.工具经验.recall@5 压根不生成 ——
+        # 门看不见它们存在。
+        total = int(agg.get("total", 0) or 0)
+        if total > 0:
+            out[f"kind.{label}.gold_missing"] = float(agg.get("gold_missing", 0) or 0) / total
+        leak_q = int(agg.get("leak_questions", 0) or 0)
+        if leak_q > 0:
+            out[f"kind.{label}.extraction_leak"] = (
+                float(agg.get("extraction_leaks", 0) or 0) / leak_q
+            )
     for agg in report.get("by_lang", []):
         label = agg.get("label", "?")
         if int(agg.get("scored", 0) or 0) > 0:
@@ -103,10 +120,18 @@ def flatten(report: dict) -> dict[str, float]:
 
 
 def scored_counts(report: dict) -> dict[str, int]:
-    """每一组的计分题数 —— 容差按它算。"""
+    """每一组的计分题数 —— 容差按它算。
+
+    顺带以 `total:` 前缀记一份**总题数**：抽取侧指标（gold_missing /
+    extraction_leak）的分母是 total 而不是 scored ——
+    gold 缺失的题恰恰是被排除在 scored 之外的那些，用 scored 当分母
+    会在「全部缺失」时得到 0，容差算出来是 floor，等于没守。
+    """
     out: dict[str, int] = {}
     for agg in report.get("by_kind", []):
-        out[f"kind.{agg.get('label', '?')}"] = int(agg.get("scored", 0) or 0)
+        label = agg.get("label", "?")
+        out[f"kind.{label}"] = int(agg.get("scored", 0) or 0)
+        out[f"total:kind.{label}"] = int(agg.get("total", 0) or 0)
     for agg in report.get("by_lang", []):
         out[f"lang.{agg.get('label', '?')}"] = int(agg.get("scored", 0) or 0)
     return out
@@ -115,6 +140,11 @@ def scored_counts(report: dict) -> dict[str, int]:
 def tolerance_for(metric: str, counts: dict[str, int]) -> float:
     if metric.endswith(".forbidden@5"):
         return FORBIDDEN_TOLERANCE
+    if metric.endswith((".gold_missing", ".extraction_leak")):
+        # 与 recall 同一套「掉一道放过、掉两道变红」的算法，但分母是 total
+        # 而不是 scored —— gold 缺失的题恰恰是 scored 之外的那些。
+        n = counts.get("total:" + metric.rsplit(".", 1)[0], 0)
+        return PER_KIND_FLOOR if n <= 0 else max(PER_KIND_FLOOR, PER_KIND_QUESTIONS / n)
     if metric.startswith("overall."):
         return OVERALL_TOLERANCE
     # kind.中文语义.recall@5 → kind.中文语义
@@ -125,8 +155,12 @@ def tolerance_for(metric: str, counts: dict[str, int]) -> float:
     return max(PER_KIND_FLOOR, PER_KIND_QUESTIONS / n)
 
 
+# 越低越好的指标后缀。方向判错的后果是**门反着守** —— 退化被当成改进放行。
+LOWER_IS_BETTER = (".forbidden@5", ".gold_missing", ".extraction_leak")
+
+
 def higher_is_better(metric: str) -> bool:
-    return not metric.endswith(".forbidden@5")
+    return not metric.endswith(LOWER_IS_BETTER)
 
 
 def load(path: Path) -> dict:

@@ -924,6 +924,166 @@
           ]
         }
       ]
+    },
+
+    {
+      "id": "sc-tool-lock",
+      "domain": "coding",
+      "turns": [
+        {
+          "occurred_at": "2026-02-11",
+          "text": "工作区的测试先跑通再说，别的等会儿。",
+          "tool_calls": [
+            { "name": "bash", "path": "Cargo.toml", "ok": false,
+              "summary": "cargo test --workspace 失败：error: failed to select a version for sqlx-core，本地解析到的次版本与 CI 不同" },
+            { "name": "bash", "path": "Cargo.lock", "ok": false,
+              "summary": "cargo update -p sqlx-core --precise 0.9.1 之后重跑 cargo test --workspace，仍然失败：下一个依赖又把它顶了回去" },
+            { "name": "bash", "path": "Cargo.lock", "ok": true,
+              "summary": "cargo test --workspace --locked 通过：锁住 Cargo.lock 之后本地与 CI 解析一致" }
+          ],
+          "tool_expect": [
+            "工作区的测试要用 cargo test --workspace --locked 跑，不加 --locked 时本地与 CI 会解析到不同的次版本。",
+            "cargo update -p sqlx-core --precise 已经试过，解决不了本地与 CI 的版本漂移。"
+          ],
+          "tool_avoid": [
+            "error: failed to select a version for sqlx-core"
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "sc-tool-migrate",
+      "domain": "coding",
+      "turns": [
+        {
+          "occurred_at": "2026-04-09",
+          "text": "把 migration 在评测用的那个临时库上跑一遍。",
+          "tool_calls": [
+            { "name": "bash", "path": "migrations", "ok": false,
+              "summary": "sqlx migrate run 失败：relation _sqlx_migrations does not exist —— 建表落到了 public" },
+            { "name": "bash", "path": "migrations", "ok": false,
+              "summary": "先用 psql 执行 SET search_path TO cortex_eval_x 再跑 sqlx migrate run，仍然落到 public：两条命令不在同一个连接上" },
+            { "name": "bash", "path": "migrations", "ok": true,
+              "summary": "PGOPTIONS=--search_path=cortex_eval_x,public sqlx migrate run 通过" }
+          ],
+          "tool_expect": [
+            "在临时 schema 上跑 migration 必须用 PGOPTIONS=--search_path 指定，否则建表会落到 public。",
+            "psql 里 SET search_path 对随后单独执行的 sqlx migrate run 不生效，两条命令不在同一个连接上。"
+          ],
+          "tool_avoid": [
+            "relation _sqlx_migrations does not exist"
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "sc-tool-gate",
+      "domain": "coding",
+      "turns": [
+        {
+          "occurred_at": "2026-05-06",
+          "text": "回归门那个脚本在我这儿跑一遍看看。",
+          "tool_calls": [
+            { "name": "bash", "path": "scripts/evals-gate.py", "ok": false,
+              "summary": "python3 scripts/evals-gate.py check 失败：UnicodeEncodeError: gbk codec can not encode character" },
+            { "name": "bash", "path": "scripts/evals-gate.py", "ok": false,
+              "summary": "chcp 65001 之后重跑，仍然报同样的错：改的是控制台代码页，不是 Python 的 stdout 编码" },
+            { "name": "bash", "path": "scripts/evals-gate.py", "ok": true,
+              "summary": "PYTHONIOENCODING=utf-8 python3 scripts/evals-gate.py check 通过" }
+          ],
+          "tool_expect": [
+            "在 Windows 上跑 scripts/evals-gate.py 必须带 PYTHONIOENCODING=utf-8，否则中文题型标签会撞上 gbk 编码错误。",
+            "chcp 65001 解决不了这个问题，它改的是控制台代码页而不是 Python 的 stdout 编码。"
+          ],
+          "tool_avoid": [
+            "UnicodeEncodeError: gbk codec can not encode character"
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "sc-tool-compose",
+      "domain": "coding",
+      "turns": [
+        {
+          "occurred_at": "2026-05-27",
+          "text": "本地环境起一下。",
+          "tool_calls": [
+            { "name": "bash", "path": "docker-compose.yml", "ok": false,
+              "summary": "just up 失败：Bind for 0.0.0.0:5442 failed: port is already allocated" },
+            { "name": "bash", "path": "docker-compose.yml", "ok": true,
+              "summary": "docker compose down --remove-orphans 之后再 just up 通过：占端口的是上一版编排留下的孤儿容器" }
+          ],
+          "tool_expect": [
+            "just up 报端口被占时，先跑 docker compose down --remove-orphans 清掉上一版编排留下的孤儿容器。"
+          ],
+          "tool_avoid": [
+            "Bind for 0.0.0.0:5442 failed: port is already allocated"
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "sc-tool-habit",
+      "domain": "coding",
+      "turns": [
+        {
+          "occurred_at": "2026-06-10",
+          "text": "这块改完了，提交前先过一遍。",
+          "tool_calls": [
+            { "name": "read", "path": "crates/cortex-core/src/id.rs", "ok": true,
+              "summary": "读取 id.rs 确认标识符的构造方式" },
+            { "name": "bash", "path": ".", "ok": true,
+              "summary": "just ci 通过" }
+          ],
+          "tool_expect": [
+            "提交之前的固定动作是跑一遍 just ci，这是这个仓库的惯例。"
+          ],
+          "tool_avoid": [
+            "读取 id.rs 确认标识符的构造方式"
+          ]
+        },
+        {
+          "occurred_at": "2026-06-24",
+          "text": "准备提交。",
+          "tool_calls": [
+            { "name": "bash", "path": ".", "ok": true,
+              "summary": "just ci 通过" }
+          ]
+        },
+        {
+          "occurred_at": "2026-07-08",
+          "text": "收尾，准备推上去。",
+          "tool_calls": [
+            { "name": "bash", "path": ".", "ok": false,
+              "summary": "just ci 失败：clippy 在 -D warnings 下拦下了一处 needless_borrow" },
+            { "name": "bash", "path": ".", "ok": true,
+              "summary": "改完之后 just ci 通过" }
+          ]
+        }
+      ]
+    },
+
+    {
+      "id": "sc-tool-danger",
+      "domain": "coding",
+      "turns": [
+        {
+          "occurred_at": "2026-07-22",
+          "text": "上次评测崩了留下的那个临时库，删了吧，我确认。",
+          "tool_calls": [
+            { "name": "bash", "path": "cortex_eval_1749000000_4242", "ok": true,
+              "summary": "用户确认后执行 DROP SCHEMA cortex_eval_1749000000_4242 CASCADE，清掉评测崩溃残留的临时 schema" }
+          ],
+          "tool_expect": [
+            "用户曾显式确认执行 DROP SCHEMA CASCADE，删掉评测崩溃残留的临时 schema cortex_eval_1749000000_4242。"
+          ]
+        }
+      ]
     }
   ],
 
@@ -1509,6 +1669,51 @@
     { "id": "q116", "type": "cross_domain", "lang": "zh", "domain": "coding",
       "query": "客户端这条线在进度上惹了什么麻烦？",
       "gold": [["Markdown 渲染"]],
-      "note": "需要跨域桥：coding 选型 → office 排期后果。查询刻意不出现 延期 / 渲染 / Flutter / v1" }
+      "note": "需要跨域桥：coding 选型 → office 排期后果。查询刻意不出现 延期 / 渲染 / Flutter / v1" },
+
+    { "id": "qt01", "type": "tool_experience", "lang": "zh", "domain": "coding",
+      "query": "本地跑得过、CI 上跑不过那回，最后是靠加了什么把两边对齐的？",
+      "gold": [["--locked"]],
+      "never_extracted": [["failed to select a version"]],
+      "note": "差异即知识：三次调用只差一个参数，知识全在那个差值里。对话原文（「工作区的测试先跑通再说」）一个字都没提结论 —— 从 turn.text 抽不出来是这一类题成立的前提。never_extracted 那条量的是「命令原始输出不该变成事实」（memory-content §二③）" },
+
+    { "id": "qt02", "type": "tool_experience", "lang": "zh", "domain": "coding",
+      "query": "依赖版本对不齐的时候，直接把那个包钉到指定版本能不能解决？",
+      "gold": [["cargo update"]],
+      "note": "失败痕迹本身就是知识：问的是**已经被证伪的那条路**，不是正确解法。只抽成功路径的抽取器在这道题上必挂 —— 这正是 Manus「保留错误记录不清洗」那条判据的落点" },
+
+    { "id": "qt03", "type": "tool_experience", "lang": "mixed", "domain": "coding",
+      "query": "评测的临时库上跑数据库脚本老是建到 public 里去，后来是怎么让它落对地方的？",
+      "gold": [["PGOPTIONS"]],
+      "never_extracted": [["_sqlx_migrations"]],
+      "note": "差异即知识·环境变量那一档。gold 取的是环境变量名这种逐字出现在轨迹里的标识符 —— 措辞由模型决定，只有标识符是稳的" },
+
+    { "id": "qt04", "type": "tool_experience", "lang": "mixed", "domain": "coding",
+      "query": "Windows 上跑回归门脚本报编码错误，最后是加了什么环境变量才好的？",
+      "gold": [["PYTHONIOENCODING"]],
+      "never_extracted": [["UnicodeEncodeError"]],
+      "note": "同一段轨迹里既有正解（PYTHONIOENCODING）也有改错了层的做法（chcp 65001）。这道题只问正解，反面那半留在 tool_expect 里给人读 —— 一段轨迹出两道题会让同一份证据被数两次" },
+
+    { "id": "qt05", "type": "tool_experience", "lang": "zh", "domain": "coding",
+      "query": "我提交代码之前，有没有什么每次都要做一遍的动作？",
+      "gold": [["just ci"]],
+      "never_extracted": [["id.rs"]],
+      "note": "「同一命令反复出现 = 这是这个项目的惯例」那条判据：证据分散在三段轨迹里，单看任何一段都不足以下结论。never_extracted 同时守住反面 —— 同一轮里那次单次成功的读操作没有信息量，不该产出事实" },
+
+    { "id": "qt06", "type": "tool_experience", "lang": "zh", "domain": "coding",
+      "query": "我批准过哪一次不可逆的删除操作？",
+      "gold": [["DROP SCHEMA"]],
+      "note": "「用户显式确认的高风险操作」那条判据。它是唯一一道单次成功调用就该产出事实的题 —— 与 qt05 的 never_extracted 正好构成对照：判据不是「成功就不抽」，是「有没有风险与授权」" },
+
+    { "id": "qt07", "type": "tool_experience", "lang": "en", "domain": "coding",
+      "query": "What did we have to run to free the port before the local stack would come up?",
+      "gold": [["--remove-orphans"]],
+      "never_extracted": [["port is already allocated"]],
+      "note": "英文提问 + 中文轨迹：抽取器写出来的 statement 是中文的，gold 只能压在命令行参数这种语种无关的标识符上。这也顺带说明为什么 gold 不该压在措辞上" },
+
+    { "id": "qt08", "type": "tool_experience", "lang": "zh", "domain": "office",
+      "query": "上次工程那边卡在依赖上耽误了工时，他们后来是怎么收场的？",
+      "gold": [["--locked"]],
+      "note": "跨会话复用：与 qt01 同一条经验，但用 office 语境的词汇提问且 domain=office，域加权是逆风。评测没有会话维度，「跨会话」在这里操作化为「换一套词汇 + 换一个域」。gold 与 qt01 相同是有意的 —— 两道题量的是同一条知识在不同入口下的可达性" }
   ]
 }
