@@ -22,20 +22,44 @@ use pgvector::Vector;
 use sqlx::FromRow;
 
 /// 表名常量。`sync_log.table_name` 与 [`crate::SyncPayload`] 共用这一组字面量。
+///
+/// # 为什么用宏生成，而不是直接写十三个 `const`
+///
+/// 漏一支的后果不是「这张表同步不了」，是**整条 `/sync` 断掉**：
+/// `load_payloads` 撞上不认识的表名会返回 `UnknownTable`，那一批拉取整个
+/// 失败，客户端游标从此卡死在它前面 —— 而且只在那张表**第一次被写**时
+/// 才发作，可能是上线几周之后。
+///
+/// 宏顺带生成 [`table::ALL`]，`tests/sync_coverage.rs` 拿它逐个撞
+/// `load_payloads`。于是加表的人只要加了常量，忘记加 match 分支就会
+/// **当场红**，而不是等用户的游标卡死。（那条测试自己也做过故障注入验证：
+/// 塞一个假表名进列表，它确实变红。）
+///
+/// 单靠人写 `ALL` 不行 —— 那只是把「容易忘的地方」从一处挪到两处。
 pub mod table {
-    pub const EPISODES: &str = "episodes";
-    pub const BLOBS: &str = "blobs";
-    pub const EPISODE_BLOBS: &str = "episode_blobs";
-    pub const EPISODE_MEMORIES: &str = "episode_memories";
-    pub const EPISODE_TOOL_CALLS: &str = "episode_tool_calls";
-    pub const BLOB_TRANSCRIPTS: &str = "blob_transcripts";
-    pub const ENTITIES: &str = "entities";
-    pub const ENTITY_MERGES: &str = "entity_merges";
-    pub const FACTS: &str = "facts";
-    pub const FACT_EVENTS: &str = "fact_events";
-    pub const SUMMARIES: &str = "summaries";
-    pub const REDACTIONS: &str = "redactions";
-    pub const SESSION_EVENTS: &str = "session_events";
+    macro_rules! tables {
+        ($($name:ident = $lit:literal),+ $(,)?) => {
+            $(pub const $name: &str = $lit;)+
+            /// 全部会出现在 `sync_log.table_name` 里的表名。
+            pub const ALL: &[&str] = &[$($lit),+];
+        };
+    }
+
+    tables! {
+        EPISODES          = "episodes",
+        BLOBS             = "blobs",
+        EPISODE_BLOBS     = "episode_blobs",
+        EPISODE_MEMORIES  = "episode_memories",
+        EPISODE_TOOL_CALLS = "episode_tool_calls",
+        BLOB_TRANSCRIPTS  = "blob_transcripts",
+        ENTITIES          = "entities",
+        ENTITY_MERGES     = "entity_merges",
+        FACTS             = "facts",
+        FACT_EVENTS       = "fact_events",
+        SUMMARIES         = "summaries",
+        REDACTIONS        = "redactions",
+        SESSION_EVENTS    = "session_events",
+    }
 }
 
 // ══════════════════════════════════════════════════════════

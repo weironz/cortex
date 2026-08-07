@@ -56,6 +56,20 @@ impl TestDb {
     pub fn schema(&self) -> &str {
         &self.schema
     }
+
+    /// 在测试 schema 里执行一句 SQL。
+    ///
+    /// 存在的理由只有一个：**构造正常代码路径写不出来的坏数据**。
+    /// `Store` 刻意不提供裸写入口（写只能走 `write_txn`），但有些失效模式
+    /// 恰恰要求先有一条不该存在的行 —— 比如 `sync_log` 里一条 payload
+    /// 加载器不认识的表名。测试之外没有任何地方该这么用。
+    pub async fn exec_raw(&self, sql: impl Into<String>) {
+        let stmt = format!("SET search_path TO \"{}\"; {}", self.schema, sql.into());
+        sqlx::raw_sql(AssertSqlSafe(stmt))
+            .execute(&self.admin)
+            .await
+            .expect("测试用 SQL 应当执行成功");
+    }
 }
 
 /// 建一个隔离的测试库。拿不到数据库返回 `None`（测试应当 skip）。
