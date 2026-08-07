@@ -1,0 +1,188 @@
+//! `cortex-evals` 命令行。
+//!
+//! ```bash
+//! cargo run -p cortex-evals -- validate                      # 只校验题集，不需要数据库
+//! cargo run -p cortex-evals -- run                           # 跑默认题集，出基线数字
+//! cargo run -p cortex-evals -- run --json out.json --md out.md
+//! ```
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand, ValueEnum};
+use cortex_evals::DEFAULT_SUITE;
+use cortex_evals::harness::{ExtractMode, RetrievalConfig};
+use cortex_evals::report::render_text;
+use cortex_evals::runner::{RunOptions, run};
+use cortex_evals::suite::Suite;
+
+#[derive(Parser)]
+#[command(name = "cortex-evals", about = "Cortex 检索质量评测", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// 跑一遍评测，输出报告
+    Run(RunArgs),
+    /// 只做题集的静态校验（不连数据库）—— CI 的第一道门
+    Validate {
+        #[arg(long, default_value = DEFAULT_SUITE)]
+        suite: PathBuf,
+    },
+}
+
+#[derive(Parser)]
+struct RunArgs {
+    #[arg(long, default_value = DEFAULT_SUITE)]
+    suite: PathBuf,
+
+    /// 候选事实从哪来：seed = 题集手写（确定性，可进 CI）；llm = 真调模型抽取
+    #[arg(long, value_enum, default_value_t = Mode::Seed)]
+    mode: Mode,
+
+    /// 机器可读报告的落盘路径（供 CI 与基线比对）
+    #[arg(long)]
+    json: Option<PathBuf>,
+
+    /// 人类可读报告的落盘路径。不给则只打到 stdout
+    #[arg(long)]
+    md: Option<PathBuf>,
+
+    /// 只跑 id 里含此子串的题（调 bad case 用）
+    #[arg(long)]
+    only: Option<String>,
+
+    /// 算注入预算用的 context 窗口
+    #[arg(long, default_value_t = 128_000)]
+    context_window: usize,
+
+    /// 实体向量近似归并的阈值。不给则用生产默认值
+    #[arg(long)]
+    entity_threshold: Option<f32>,
+
+    /// 跑完保留临时 schema，便于手工查 bad case
+    #[arg(long)]
+    keep_schema: bool,
+
+    /// 关掉域加权（不把题目的 domain 传给检索器）。跑 A/B 用
+    #[arg(long)]
+    ignore_domain: bool,
+
+    /// Recall@5 的最低门槛。跑出来低于它就以非零码退出 —— CI 回归门
+    #[arg(long)]
+    min_recall5: Option<f64>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum Mode {
+    Seed,
+    Llm,
+}
+
+impl From<Mode> for ExtractMode {
+    fn from(m: Mode) -> Self {
+        match m {
+            Mode::Seed => Self::Seed,
+            Mode::Llm => Self::Llm,
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    match real_main().await {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("错误：{err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn real_main() -> Result<ExitCode> {
+    let _ = dotenvy::dotenv();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "cortex_evals=info,warn".into()),
+        )
+        .with_target(false)
+        .init();
+
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Validate { suite } => {
+            let s = Suite::load(&suite)?;
+            println!(
+                "题集 {} 校验通过：{} 场景 / {} 轮 / {} 条铺垫事实 / {} 道题",
+                s.name,
+                s.scenarios.len(),
+                s.turn_count(),
+                s.seed_fact_count(),
+                s.questions.len()
+            );
+            for (kind, n) in s.count_by_kind() {
+                println!("  {:<10} {n} 题", kind.label());
+            }
+            for (lang, n) in s.count_by_lang() {
+                println!("  {:<10} {n} 题", lang.label());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Run(args) => run_command(args).await,
+    }
+}
+
+async fn run_command(args: RunArgs) -> Result<ExitCode> {
+    let suite = Suite::load(&args.suite)?;
+
+    let database_url = std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .context(
+            "没有 DATABASE_URL。评测必须连真库 —— 四路召回里三路是 SQL，\
+             脱离 Postgres 测出来的不是这套检索",
+        )?;
+
+    let opts = RunOptions {
+        database_url,
+        mode: args.mode.into(),
+        keep_schema: args.keep_schema,
+        entity_threshold: args.entity_threshold,
+        retrieval: RetrievalConfig {
+            context_window: args.context_window,
+            ..RetrievalConfig::default()
+        },
+        only: args.only,
+        ignore_domain: args.ignore_domain,
+    };
+
+    let report = run(&suite, &opts).await?;
+    let text = render_text(&report);
+    println!("{text}");
+
+    if let Some(path) = &args.md {
+        std::fs::write(path, &text).with_context(|| format!("写不了 {}", path.display()))?;
+        eprintln!("人类可读报告：{}", path.display());
+    }
+    if let Some(path) = &args.json {
+        std::fs::write(path, report.to_json()?)
+            .with_context(|| format!("写不了 {}", path.display()))?;
+        eprintln!("机器可读报告：{}", path.display());
+    }
+
+    // 回归门。数字掉下去就红 —— 这是这套工具唯一能自动阻止倒退的地方
+    if let Some(min) = args.min_recall5 {
+        let actual = report.overall.recall.get(&5).copied().unwrap_or(0.0);
+        if actual < min {
+            eprintln!("回归门未过：整体 Recall@5 = {actual:.3}，低于门槛 {min:.3}");
+            return Ok(ExitCode::FAILURE);
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
