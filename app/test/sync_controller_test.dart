@@ -1,12 +1,16 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:cortex_app/api/cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
+import 'package:cortex_app/models/attachment.dart';
+import 'package:cortex_app/models/blob.dart';
 import 'package:cortex_app/models/chat_event.dart';
 import 'package:cortex_app/models/chat_session.dart';
 import 'package:cortex_app/models/episode.dart';
 import 'package:cortex_app/models/health_status.dart';
 import 'package:cortex_app/models/memory_search_result.dart';
+import 'package:cortex_app/models/session_detail.dart';
 import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/sync_record.dart';
 import 'package:cortex_app/state/app_providers.dart';
@@ -56,7 +60,7 @@ class _FakeApi implements CortexApi {
   int searchCount = 0;
 
   @override
-  Future<List<ChatSession>> sessions() async {
+  Future<List<ChatSession>> sessions({bool includeArchived = false}) async {
     sessionsCount++;
     return const [];
   }
@@ -85,10 +89,56 @@ class _FakeApi implements CortexApi {
   Stream<ChatEvent> chat({
     required String sessionId,
     required String message,
+    List<Attachment> attachments = const [],
   }) => throw UnimplementedError('同步链路不应发起对话');
 
   @override
   Future<Episode> episode(String id) => throw UnimplementedError();
+
+  // Everything below is outside the sync surface. They throw rather than
+  // returning a placeholder for the reason stated on the class: a controller
+  // that reached for them on a bump should fail the test, not pass quietly.
+
+  @override
+  Future<SessionDetail> sessionDetail(String id) =>
+      throw UnimplementedError('同步链路不应拉会话详情');
+
+  @override
+  Future<ChatSession> updateSession(
+    String id, {
+    String? title,
+    bool? archived,
+    String? workspace,
+    bool clearWorkspace = false,
+  }) => throw UnimplementedError('同步链路不应改会话');
+
+  @override
+  Future<BlobRef> uploadBlob({
+    required Uint8List bytes,
+    String? mime,
+    UploadProgress? onProgress,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<BlobPresign> presignBlob(String hash) => throw UnimplementedError();
+
+  @override
+  Future<void> putPresigned({
+    required String url,
+    required Uint8List bytes,
+    String? mime,
+    UploadProgress? onProgress,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<BlobRef> commitBlob({
+    required String hash,
+    required int sizeBytes,
+    String? mime,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<Uint8List> blobBytes(String hash) => throw UnimplementedError();
 }
 
 class _LiveConfig extends AppConfigNotifier {

@@ -5,6 +5,7 @@ import '../chat/chat_pane.dart';
 import '../memory/memory_panel.dart';
 import '../sessions/session_list.dart';
 import '../settings/settings_sheet.dart';
+import '../workspace/workspace_panel.dart';
 
 /// Responsive three-pane shell.
 ///
@@ -15,6 +16,16 @@ import '../settings/settings_sheet.dart';
 /// * `>= 1240` — sessions | chat | memory, all resident.
 /// * `900–1240` — sessions | chat; memory moves to an end drawer.
 /// * `< 900` — chat only; both side panes become drawers.
+///
+/// ## Why the file tree is not a fourth column
+///
+/// The workspace tree shares the left pane with the session list instead of
+/// getting a column of its own. A fourth column would say, structurally, that
+/// files are a peer of the conversation — a separate place you go. They are
+/// not: a workspace is a *property of the session*, like the model it uses, and
+/// the tree is there to answer "which directory is this pointed at". Putting it
+/// under the sessions it belongs to keeps that relationship visible, and keeps
+/// the widest layout at three columns instead of four.
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key});
 
@@ -54,7 +65,8 @@ class _AppShellState extends ConsumerState<AppShell> {
                   width: _sessionsWidth + 20,
                   backgroundColor: scheme.surfaceContainerLow,
                   child: SafeArea(
-                    child: SessionList(
+                    child: _LeftPane(
+                      availableHeight: constraints.maxHeight,
                       onSelected: () => Navigator.of(context).maybePop(),
                     ),
                   ),
@@ -78,7 +90,9 @@ class _AppShellState extends ConsumerState<AppShell> {
                     width: _sessionsWidth,
                     child: Container(
                       color: scheme.surfaceContainerLow,
-                      child: const SessionList(),
+                      child: _LeftPane(
+                        availableHeight: constraints.maxHeight,
+                      ),
                     ),
                   ),
                   VerticalDivider(width: 1, color: scheme.outlineVariant),
@@ -114,6 +128,31 @@ class _AppShellState extends ConsumerState<AppShell> {
           ),
         );
       },
+    );
+  }
+}
+
+/// Session list on top, workspace tree below.
+///
+/// The split is computed rather than flexed because both halves are scrollable:
+/// two `Expanded` children would each claim the leftover space and the tree
+/// would take half the pane even when the user has forty sessions and three
+/// files. Capping the tree at 40% of the pane (and at 320px) keeps the session
+/// list — the thing you navigate with — dominant.
+class _LeftPane extends StatelessWidget {
+  const _LeftPane({required this.availableHeight, this.onSelected});
+
+  final double availableHeight;
+  final VoidCallback? onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final treeHeight = (availableHeight * 0.4).clamp(160.0, 320.0);
+    return Column(
+      children: [
+        Expanded(child: SessionList(onSelected: onSelected)),
+        WorkspacePanel(maxTreeHeight: treeHeight),
+      ],
     );
   }
 }

@@ -3,10 +3,12 @@ import 'package:flutter/services.dart';
 
 import '../../../core/formatting.dart';
 import '../../../core/link_launcher.dart';
+import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
 import '../../../models/memory_fact.dart';
 import '../../../models/tool_call.dart';
 import '../../../widgets/markdown/cortex_markdown.dart';
+import 'attachment_views.dart';
 import 'memory_drawer.dart';
 
 /// Horizontal padding around the conversation column.
@@ -34,6 +36,7 @@ class MessageBubble extends StatelessWidget {
             text: message.text,
             facts: message.facts,
             toolCalls: message.toolCalls,
+            attachments: message.attachments,
             createdAt: message.createdAt,
             episodeId: message.episodeId,
             error: message.error,
@@ -65,29 +68,40 @@ class _UserBubble extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 15,
-                  vertical: 11,
-                ),
-                decoration: BoxDecoration(
-                  color: scheme.primary,
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(14),
-                    topRight: Radius.circular(14),
-                    bottomLeft: Radius.circular(14),
-                    bottomRight: Radius.circular(4),
+              // Above the bubble rather than inside it: an image tinted by the
+              // primary-coloured bubble reads as part of the UI instead of as
+              // content the user attached.
+              AttachmentStrip(
+                attachments: message.attachments,
+                alignEnd: true,
+              ),
+              // A message can legitimately be attachments only — "看这张图" with
+              // a screenshot and nothing else. An empty bubble next to the
+              // image would read as a failed send.
+              if (message.text.isNotEmpty)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 15,
+                    vertical: 11,
                   ),
-                ),
-                child: SelectionArea(
-                  child: Text(
-                    message.text,
-                    style: theme.textTheme.bodyLarge?.copyWith(
-                      color: scheme.onPrimary,
+                  decoration: BoxDecoration(
+                    color: scheme.primary,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(14),
+                      topRight: Radius.circular(14),
+                      bottomLeft: Radius.circular(14),
+                      bottomRight: Radius.circular(4),
+                    ),
+                  ),
+                  child: SelectionArea(
+                    child: Text(
+                      message.text,
+                      style: theme.textTheme.bodyLarge?.copyWith(
+                        color: scheme.onPrimary,
+                      ),
                     ),
                   ),
                 ),
-              ),
               const SizedBox(height: 4),
               Text(
                 formatRelative(message.createdAt),
@@ -109,6 +123,7 @@ class AssistantBlock extends StatelessWidget {
     required this.text,
     required this.facts,
     required this.toolCalls,
+    this.attachments = const [],
     this.createdAt,
     this.episodeId,
     this.error,
@@ -118,6 +133,7 @@ class AssistantBlock extends StatelessWidget {
   final String text;
   final List<MemoryFact> facts;
   final List<ToolCall> toolCalls;
+  final List<Attachment> attachments;
   final DateTime? createdAt;
   final String? episodeId;
   final String? error;
@@ -182,6 +198,7 @@ class AssistantBlock extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    AttachmentStrip(attachments: attachments),
                     if (text.isNotEmpty)
                       SelectionArea(
                         child: CortexMarkdown(

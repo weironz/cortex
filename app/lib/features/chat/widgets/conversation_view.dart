@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../state/chat_controller.dart';
+import '../../../state/chat_state.dart';
 import '../../../widgets/empty_state.dart';
 import 'message_bubble.dart';
 
@@ -80,16 +81,72 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
       (_, _) => _scheduleScrollToBottom(force: true),
     );
 
+    // `visible` rather than the full list: history replay can drop hundreds of
+    // turns in at once, and each bubble costs a markdown parse. The identity of
+    // this list is stable across deltas — see [Transcript].
     final messages = ref.watch(
-      chatControllerProvider.select((s) => s.activeTranscript),
+      chatControllerProvider.select((s) => s.activeVisibleMessages),
     );
     final streaming = ref.watch(
       chatControllerProvider.select((s) => s.isStreamingActive),
     );
+    final sessionId = ref.watch(
+      chatControllerProvider.select((s) => s.activeSessionId),
+    );
+    final loading = ref.watch(
+      chatControllerProvider.select(
+        (s) => s.activeTranscriptState?.loading ?? false,
+      ),
+    );
+    final error = ref.watch(
+      chatControllerProvider.select((s) => s.activeTranscriptState?.error),
+    );
+    final hasEarlier = ref.watch(
+      chatControllerProvider.select(
+        (s) => s.activeTranscriptState?.hasEarlier ?? false,
+      ),
+    );
+    final serverTruncated = ref.watch(
+      chatControllerProvider.select(
+        (s) => s.activeTranscriptState?.serverTruncated ?? false,
+      ),
+    );
+
+    if (error != null && messages.isEmpty) {
+      return EmptyState(
+        icon: Icons.history_toggle_off_rounded,
+        title: '拉不到这个会话的消息',
+        description: error,
+        tone: EmptyStateTone.error,
+        action: OutlinedButton.icon(
+          onPressed: sessionId == null
+              ? null
+              : () => ref
+                    .read(chatControllerProvider.notifier)
+                    .loadTranscript(sessionId),
+          icon: const Icon(Icons.refresh_rounded, size: 16),
+          label: const Text('重试'),
+        ),
+      );
+    }
+
+    if (loading && messages.isEmpty) {
+      return const Center(
+        child: SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
 
     if (messages.isEmpty && !streaming) {
       return const _ConversationEmptyState();
     }
+
+    // Header slots sit above the first message: "load earlier" when the client
+    // is holding back history, and the truncation warning when the *server* is.
+    final headers = (hasEarlier ? 1 : 0) + (serverTruncated ? 1 : 0);
 
     return Stack(
       children: [
@@ -101,10 +158,27 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
             // Keep the live bubble alive across scrolls so its animation
             // controllers are not torn down and rebuilt.
             addAutomaticKeepAlives: true,
-            itemCount: messages.length + (streaming ? 1 : 0),
+            itemCount: headers + messages.length + (streaming ? 1 : 0),
             itemBuilder: (context, index) {
-              if (index < messages.length) {
-                final message = messages[index];
+              var i = index;
+              if (serverTruncated) {
+                if (i == 0) return const _ServerTruncatedNote();
+                i -= 1;
+              }
+              if (hasEarlier) {
+                if (i == 0) {
+                  return _LoadEarlier(
+                    onTap: sessionId == null
+                        ? null
+                        : () => ref
+                              .read(chatControllerProvider.notifier)
+                              .revealEarlier(sessionId),
+                  );
+                }
+                i -= 1;
+              }
+              if (i < messages.length) {
+                final message = messages[i];
                 return MessageBubble(key: ValueKey(message.id), message: message);
               }
               return const _StreamingBubble();
@@ -148,6 +222,79 @@ class _StreamingBubble extends ConsumerWidget {
       facts: facts,
       toolCalls: tools,
       streaming: true,
+    );
+  }
+}
+
+/// Grows the render window. The messages are already in memory — this is a
+/// rendering budget, not a fetch.
+class _LoadEarlier extends StatelessWidget {
+  const _LoadEarlier({this.onTap});
+
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(kMessageGutter, 4, kMessageGutter, 12),
+      child: Center(
+        child: TextButton.icon(
+          onPressed: onTap,
+          icon: const Icon(Icons.expand_less_rounded, size: 17),
+          label: Text('加载更早的 $kTranscriptWindow 条'),
+        ),
+      ),
+    );
+  }
+}
+
+/// The server, not the client, is holding history back.
+///
+/// `GET /sessions/{id}` is `LIMIT 500` over `ORDER BY occurred_at ASC` with no
+/// cursor, so what is missing from a long session is its **most recent** turns.
+/// Silently showing a conversation whose ending has been cut off is the kind of
+/// wrong that never gets reported as a bug, because it looks like data.
+class _ServerTruncatedNote extends StatelessWidget {
+  const _ServerTruncatedNote();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(kMessageGutter, 4, kMessageGutter, 12),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: kMessageMaxWidth),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: scheme.outlineVariant),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.history_rounded,
+                  size: 15,
+                  color: scheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Text(
+                    '这个会话的消息比服务端单次能返回的多。'
+                    'cortexd 目前一次最多回 500 条且没有游标，'
+                    '所以下面看到的是较早的部分，最新几轮可能不在其中。',
+                    style: theme.textTheme.labelSmall,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

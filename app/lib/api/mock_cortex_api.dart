@@ -1,15 +1,22 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:typed_data';
 
+import '../core/hashing.dart';
+import '../models/attachment.dart';
+import '../models/blob.dart';
 import '../models/chat_event.dart';
 import '../models/chat_session.dart';
 import '../models/episode.dart';
 import '../models/health_status.dart';
 import '../models/memory_fact.dart';
 import '../models/memory_search_result.dart';
+import '../models/session_detail.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
+import '../models/workspace.dart';
 import 'api_exception.dart';
+import 'blob_upload.dart';
 import 'cortex_api.dart';
 
 /// In-memory stand-in for `cortexd`.
@@ -31,33 +38,145 @@ class MockCortexApi implements CortexApi {
 
   // ---------------------------------------------------------------- sessions
 
+  /// Mutable, because the mock has to honour `PATCH` — a fixture list that
+  /// ignored renames would make the rename dialog look broken in the one mode
+  /// that is meant to be demoable without a daemon.
   final List<ChatSession> _sessions = [
     ChatSession(
       id: 'ses_01JQZ8K3M9',
       title: 'Cortex 记忆注入预算怎么定',
       updatedAt: DateTime.now().subtract(const Duration(minutes: 14)),
+      messageCount: 2,
+      preview: '核心画像块跟着 system prompt 走，位置固定因此可进前缀缓存。',
     ),
     ChatSession(
       id: 'ses_01JQZ7B2H4',
       title: 'pgvector HNSW 参数调优',
       updatedAt: DateTime.now().subtract(const Duration(hours: 5)),
+      messageCount: 2,
+      preview: 'm 先给 16，ef_construction 64，上线后再按实测调 ef_search。',
     ),
     ChatSession(
       id: 'ses_01JQZ5V1C7',
       title: 'Q3 OKR 草稿与部门对齐',
       updatedAt: DateTime.now().subtract(const Duration(days: 1, hours: 3)),
+      messageCount: 4,
+      preview: '周报别写流水账。三段：本周结论、下周风险、需要谁拍板。',
     ),
     ChatSession(
       id: 'ses_01JQZ2N8D1',
+      // A bound session, so the workspace affordances (path chip, file tree,
+      // tool rows naming a file) have something to render without the user
+      // having to bind one first.
       title: 'Rust async trait 的取舍',
       updatedAt: DateTime.now().subtract(const Duration(days: 4)),
+      messageCount: 3,
+      preview: '只有确实需要 dyn 分发的地方才引入 async-trait 宏。',
+      workspace: const Workspace(root: 'D:/codes/cortex'),
+    ),
+    ChatSession(
+      id: 'ses_01JQY9ARCH1',
+      title: '（已归档）上个季度的迁移方案',
+      updatedAt: DateTime.now().subtract(const Duration(days: 96)),
+      messageCount: 1,
+      preview: '归档不是删除：消息、附件、已抽取的记忆一概没动。',
+      archived: true,
     ),
   ];
 
   @override
-  Future<List<ChatSession>> sessions() async {
+  Future<List<ChatSession>> sessions({bool includeArchived = false}) async {
     await _latency(180);
-    return List.unmodifiable(_sessions);
+    return List.unmodifiable(
+      includeArchived ? _sessions : _sessions.where((s) => !s.archived),
+    );
+  }
+
+  @override
+  Future<SessionDetail> sessionDetail(String id) async {
+    await _latency(240);
+    final index = _sessions.indexWhere((s) => s.id == id);
+    if (index == -1) {
+      throw CortexApiException('session $id 不存在', statusCode: 404);
+    }
+    final episodes =
+        _episodes.values.where((e) => e.sessionId == id).toList()
+          // Oldest first, matching `ORDER BY occurred_at ASC` server-side.
+          ..sort(
+            (a, b) => (a.occurredAt ?? DateTime(0)).compareTo(
+              b.occurredAt ?? DateTime(0),
+            ),
+          );
+    return SessionDetail(session: _sessions[index], episodes: episodes);
+  }
+
+  /// Mirrors the daemon's tri-state and, importantly, its **validation**.
+  ///
+  /// The mock rejects the same shapes for the same stated reasons (relative
+  /// path, filesystem root, home directory). It cannot check existence — there
+  /// is no filesystem behind it — but if it accepted everything, the error
+  /// surface would only ever be exercised in production, which is the exact
+  /// failure mode the mock exists to prevent.
+  @override
+  Future<ChatSession> updateSession(
+    String id, {
+    String? title,
+    bool? archived,
+    String? workspace,
+    bool clearWorkspace = false,
+  }) async {
+    await _latency(140);
+    final index = _sessions.indexWhere((s) => s.id == id);
+    if (index == -1) {
+      throw CortexApiException('session $id 不存在', statusCode: 404);
+    }
+    if (title != null && title.trim().isEmpty) {
+      throw const CortexApiException('标题不能为空白', statusCode: 400);
+    }
+    if (!clearWorkspace && workspace != null) {
+      _validateWorkspace(workspace);
+    }
+
+    final updated = _sessions[index].copyWith(
+      title: title?.trim(),
+      titleIsCustom: title != null ? true : null,
+      archived: archived,
+      workspace: clearWorkspace
+          ? null
+          : (workspace == null ? _sessions[index].workspace : Workspace(root: workspace)),
+      updatedAt: DateTime.now(),
+    );
+    _sessions[index] = updated;
+    return updated;
+  }
+
+  static void _validateWorkspace(String raw) {
+    final path = raw.trim();
+    final isAbsolute =
+        path.startsWith('/') || RegExp(r'^[A-Za-z]:[/\\]').hasMatch(path);
+    if (!isAbsolute) {
+      throw CortexApiException(
+        '工作区必须是绝对路径，收到的是 $path；'
+        '相对路径会相对于服务端进程的工作目录解析，那不是你以为的位置',
+        statusCode: 400,
+      );
+    }
+    final normalised = path.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '');
+    if (normalised.isEmpty || RegExp(r'^[A-Za-z]:$').hasMatch(normalised)) {
+      throw CortexApiException(
+        '$path 是文件系统根目录，不能作为工作区 —— 「整台机器」不是工作区',
+        statusCode: 400,
+      );
+    }
+    const systemRoots = ['/etc', '/usr', '/bin', '/sbin', '/boot', '/sys'];
+    final lower = normalised.toLowerCase();
+    if (lower.startsWith('c:/windows') ||
+        systemRoots.any((r) => lower == r || lower.startsWith('$r/'))) {
+      throw CortexApiException(
+        '$path 是系统目录，agent 在这里的写操作后果不可回滚',
+        statusCode: 400,
+      );
+    }
   }
 
   // ------------------------------------------------------------------ health
@@ -160,13 +279,138 @@ class MockCortexApi implements CortexApi {
 
   // -------------------------------------------------------------------- chat
 
+  // ------------------------------------------------------------------- blobs
+
+  /// Content-addressed, exactly like the real store: the same bytes uploaded
+  /// twice occupy one entry and the second call reports `deduplicated`.
+  final Map<String, Uint8List> _blobs = {};
+
+  @override
+  Future<BlobRef> uploadBlob({
+    required Uint8List bytes,
+    String? mime,
+    UploadProgress? onProgress,
+  }) async {
+    if (_disposed) throw const CortexApiException('Mock 数据源已关闭');
+    if (bytes.length > kRelayUploadLimit) {
+      // The daemon caps `POST /blobs` with `DefaultBodyLimit`; a mock that
+      // accepted anything would let a bug in the routing logic pass unnoticed
+      // right up until it hit a real server.
+      throw CortexApiException(
+        '请求体超过中转上限 ${formatBytes(kRelayUploadLimit)}',
+        statusCode: 413,
+      );
+    }
+
+    // Progress in a handful of steps over a realistic duration — an upload that
+    // completes instantly never exercises the progress bar or the cancel path.
+    const steps = 12;
+    for (var i = 1; i <= steps; i++) {
+      if (_disposed) throw const CortexApiException('Mock 数据源已关闭');
+      await Future<void>.delayed(const Duration(milliseconds: 45));
+      onProgress?.call((bytes.length * i / steps).round(), bytes.length);
+    }
+
+    final hash = await sha256Hex(bytes);
+    final existed = _blobs.containsKey(hash);
+    _blobs[hash] = bytes;
+    return BlobRef(
+      hash: hash,
+      // Sniffed, not declared — same asymmetry as the server, so a `.txt` that
+      // is really a PNG renders as an image here too.
+      mime: _sniff(bytes) ?? mime ?? 'application/octet-stream',
+      sizeBytes: bytes.length,
+      deduplicated: existed,
+      seq: existed ? null : _blobs.length,
+    );
+  }
+
+  /// The local-filesystem blob backend cannot sign URLs and answers 501; the
+  /// mock stands in for that deployment, which is the one this client is most
+  /// likely to meet during development.
+  @override
+  Future<BlobPresign> presignBlob(String hash) async {
+    await _latency(80);
+    throw const CortexApiException(
+      '对象存储后端 local_fs 签不出 presigned URL；'
+      '请改用 POST /blobs 中转上传、GET /blobs/{hash} 取回',
+      statusCode: 501,
+    );
+  }
+
+  @override
+  Future<void> putPresigned({
+    required String url,
+    required Uint8List bytes,
+    String? mime,
+    UploadProgress? onProgress,
+  }) async =>
+      throw const CortexApiException('Mock 数据源不支持直传', statusCode: 501);
+
+  @override
+  Future<BlobRef> commitBlob({
+    required String hash,
+    required int sizeBytes,
+    String? mime,
+  }) async =>
+      throw const CortexApiException('Mock 数据源不支持直传', statusCode: 501);
+
+  @override
+  Future<Uint8List> blobBytes(String hash) async {
+    await _latency(70);
+    final bytes = _blobs[hash];
+    if (bytes == null) {
+      throw CortexApiException('blob $hash 不存在', statusCode: 404);
+    }
+    return bytes;
+  }
+
+  /// Magic-number sniffing for the handful of types the UI branches on.
+  static String? _sniff(Uint8List b) {
+    bool starts(List<int> magic) {
+      if (b.length < magic.length) return false;
+      for (var i = 0; i < magic.length; i++) {
+        if (b[i] != magic[i]) return false;
+      }
+      return true;
+    }
+
+    if (starts([0x89, 0x50, 0x4E, 0x47])) return 'image/png';
+    if (starts([0xFF, 0xD8, 0xFF])) return 'image/jpeg';
+    if (starts([0x47, 0x49, 0x46, 0x38])) return 'image/gif';
+    if (starts([0x25, 0x50, 0x44, 0x46])) return 'application/pdf';
+    if (starts([0x52, 0x49, 0x46, 0x46]) &&
+        b.length > 11 &&
+        b[8] == 0x57 &&
+        b[9] == 0x45 &&
+        b[10] == 0x42 &&
+        b[11] == 0x50) {
+      return 'image/webp';
+    }
+    return null;
+  }
+
+  // -------------------------------------------------------------------- chat
+
   @override
   Stream<ChatEvent> chat({
     required String sessionId,
     required String message,
+    List<Attachment> attachments = const [],
   }) async* {
     if (_disposed) {
       throw const CortexApiException('Mock 数据源已关闭');
+    }
+
+    // The server rejects a hash it has never registered; mirroring that here is
+    // what makes "upload then send" a path the mock can actually validate.
+    for (final a in attachments) {
+      if (!_blobs.containsKey(a.hash)) {
+        throw CortexApiException(
+          '附件 ${a.hash} 未登记：请先走 POST /blobs',
+          statusCode: 400,
+        );
+      }
     }
 
     // Retrieval latency before the first token — the real pipeline does an
@@ -198,6 +442,39 @@ class MockCortexApi implements CortexApi {
           : 'memory_search 返回 ${injected.length} 行 / '
                 '${injected.fold<int>(0, (n, f) => n + f.statement.length)} 字符',
     );
+
+    // File tools only when the session is bound to a workspace — the daemon
+    // hands unbound sessions a tool catalogue that literally does not contain
+    // them (`WORKSPACE_FREE_TOOLS`), so a mock that offered them anyway would
+    // make the bound/unbound distinction invisible here.
+    final bound = _sessions.any(
+      (s) => s.id == sessionId && s.workspace != null,
+    );
+    if (bound && _mentionsFiles(message)) {
+      // Argument rendering copies `compact_args`: keys sorted (so `content`
+      // precedes `path`), long values truncated with `…`. That shape is what
+      // `ToolCall.targetPath` parses, and it should be exercised here.
+      yield const ChatToolEvent(
+        name: 'read_file',
+        summary: '调用 read_file (path=crates/cortex-agent/src/tools.rs)',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 320));
+      yield const ChatToolEvent(
+        name: 'read_file',
+        summary: 'read_file 返回 486 行 / 15204 字符',
+      );
+      yield const ChatToolEvent(
+        name: 'write_file',
+        summary:
+            '调用 write_file (content=//! 路径围栏。\\n//!\\n//! 第一版只做…, '
+            'path=crates/cortex-agent/src/notes.md)',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 260));
+      yield const ChatToolEvent(
+        name: 'write_file',
+        summary: 'write_file 已写入 crates/cortex-agent/src/notes.md（412 字节）',
+      );
+    }
 
     final reply = _composeReply(message, injected);
 
@@ -244,6 +521,23 @@ class MockCortexApi implements CortexApi {
     // padding the prompt with loosely-related facts, so the fallback here has
     // to be "no memory" — otherwise the empty state is unreachable in mock.
     return const [];
+  }
+
+  static bool _mentionsFiles(String message) {
+    final m = message.toLowerCase();
+    return const [
+      '文件',
+      '代码',
+      '目录',
+      '读一下',
+      '看看',
+      '改',
+      '写',
+      'rust',
+      'trait',
+      'file',
+      'src',
+    ].any(m.contains);
   }
 
   List<MemoryFact> _pick(List<String> ids) =>

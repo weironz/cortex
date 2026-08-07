@@ -116,7 +116,20 @@ void main() {
 
     // Mock holds back ~420ms before the memory event, mirroring retrieval.
     await tester.pump(const Duration(milliseconds: 500));
-    expect(find.byType(MemoryDrawer), findsOneWidget);
+
+    // More than one `MemoryDrawer` is expected now that history replays: every
+    // settled assistant turn builds one too (it collapses to nothing when there
+    // is neither memory nor tool activity, which is the case for a replayed
+    // episode — the server does not store either per-episode).
+    expect(find.byType(MemoryDrawer), findsAtLeastNWidgets(1));
+
+    // The assertion that carries the intent: the *live* turn shows its injected
+    // memory, labelled with a count.
+    expect(
+      find.textContaining('本轮用到的记忆'),
+      findsOneWidget,
+      reason: '流式回合的记忆抽屉应带条数标签',
+    );
 
     // Partway through the stream there must be text on screen but the turn is
     // still in flight — a client that awaited the whole body would show

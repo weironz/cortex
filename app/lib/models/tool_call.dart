@@ -44,6 +44,47 @@ class ToolCall {
 
   bool get pending => result == null;
 
+  /// A tool that reaches the filesystem, i.e. one that only works when the
+  /// session is bound to a workspace.
+  bool get touchesFiles =>
+      name == 'read_file' || name == 'write_file' || name == 'list_dir';
+
+  /// The workspace-relative path this call operated on, or null.
+  ///
+  /// Recovered from the compacted argument string rather than from a structured
+  /// field, because the wire contract has none — `ChatEvent::Tool` is
+  /// `{ name, summary }` and the daemon renders arguments through
+  /// `compact_args` into `(k=v, k=v)`. Parsing a rendered string is not lovely,
+  /// but the alternative is showing `write_file` with no indication of *which
+  /// file*, which is exactly the thing a user needs to see before the write
+  /// lands.
+  ///
+  /// Two details make this reliable enough in practice:
+  ///
+  /// * `compact_args` walks a `serde_json::Map`, which is a `BTreeMap` — keys
+  ///   come out **sorted**, so in `write_file` the huge `content` value always
+  ///   precedes `path`. Taking the *last* `path=` therefore skips a `content`
+  ///   that happens to contain the literal text `path=`.
+  /// * Long values are truncated by the daemon with a trailing `…`, which is
+  ///   stripped here so a shortened path is not mistaken for a real name.
+  ///
+  /// A structured `ChatEvent::Tool { path: Option<String> }` would retire this;
+  /// noted in the report as a proposed contract addition.
+  String? get targetPath {
+    final args = arguments;
+    if (args == null || args.isEmpty) return null;
+    final matches = _pathArg.allMatches(args);
+    if (matches.isEmpty) return null;
+    var value = matches.last.group(1)?.trim() ?? '';
+    if (value.endsWith('…')) value = value.substring(0, value.length - 1);
+    return value.isEmpty ? null : value;
+  }
+
+  /// `path=` at the start of the argument list or after a separator. Anchoring
+  /// on the separator is what stops a `content` value that mentions `path=`
+  /// from matching.
+  static final RegExp _pathArg = RegExp(r'(?:^|[(,]\s*)path=([^,)]*)');
+
   ToolCall copyWith({String? arguments, String? result, bool? failed}) =>
       ToolCall(
         name: name,

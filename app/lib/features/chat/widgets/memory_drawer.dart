@@ -257,6 +257,8 @@ class _ToolRow extends StatelessWidget {
       icon = scheme.onSurfaceVariant;
     }
 
+    final path = call.targetPath;
+
     return Padding(
       padding: const EdgeInsets.only(left: 7, bottom: 8),
       child: Row(
@@ -267,6 +269,10 @@ class _ToolRow extends StatelessWidget {
             child: Icon(
               call.failed
                   ? Icons.error_outline_rounded
+                  // A file tool gets a file icon: at a glance the row says
+                  // "this touched your disk" rather than "something ran".
+                  : call.touchesFiles
+                  ? Icons.description_outlined
                   : Icons.terminal_rounded,
               size: 13,
               color: icon,
@@ -286,7 +292,21 @@ class _ToolRow extends StatelessWidget {
                       color: scheme.onSurface,
                     ),
                   ),
-                  if (call.arguments != null)
+                  // The file a file-tool touched is pulled out of the argument
+                  // blob and given the emphasis the rest of the arguments do
+                  // not get. "write_file 改了哪个文件" is the one question a
+                  // reader always has about these rows, and leaving it buried
+                  // mid-string next to a truncated `content=` makes it
+                  // effectively invisible.
+                  if (path != null)
+                    TextSpan(
+                      text: '  $path',
+                      style: labelStyle.copyWith(
+                        fontFamily: 'monospace',
+                        color: scheme.secondary,
+                      ),
+                    )
+                  else if (call.arguments != null)
                     TextSpan(text: '  ${call.arguments}'),
                   if (call.result != null)
                     TextSpan(

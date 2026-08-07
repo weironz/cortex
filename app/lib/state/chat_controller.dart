@@ -5,10 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/api_exception.dart';
 import '../api/cortex_api.dart';
 import '../core/ulid.dart';
+import '../models/attachment.dart';
 import '../models/chat_event.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
+import '../models/episode.dart';
 import '../models/tool_call.dart';
+import '../models/workspace.dart';
 import 'app_providers.dart';
 import 'chat_state.dart';
 
@@ -47,7 +50,12 @@ class ChatController extends Notifier<ChatState> {
   Future<void> _reload() async {
     await _cancelStream();
     if (!ref.mounted) return;
-    state = const ChatState(sessionsLoading: true);
+    state = ChatState(
+      sessionsLoading: true,
+      // The toggle is a view preference, not backend data — a source swap
+      // should not silently re-hide what the user asked to see.
+      showArchived: state.showArchived,
+    );
     await loadSessions();
   }
 
@@ -63,7 +71,7 @@ class ChatController extends Notifier<ChatState> {
     if (!ref.mounted) return;
     state = state.copyWith(sessionsLoading: true, sessionsError: null);
     try {
-      final remote = await _api.sessions();
+      final remote = await _api.sessions(includeArchived: state.showArchived);
       if (!ref.mounted) return;
       final merged = _mergeSessions(remote);
       final active =
@@ -74,6 +82,7 @@ class ChatController extends Notifier<ChatState> {
         sessionsLoading: false,
         activeSessionId: active,
       );
+      if (active != null) unawaited(_ensureTranscript(active));
     } on CortexApiException catch (e) {
       if (!ref.mounted) return;
       state = state.copyWith(
@@ -91,7 +100,7 @@ class ChatController extends Notifier<ChatState> {
 
   /// Reconciles the daemon's list with what is on screen.
   ///
-  /// A plain replace loses two things:
+  /// A plain replace loses three things:
   ///
   /// * **Local drafts.** [createSession] mints a ULID client-side and shows the
   ///   session immediately; the daemon only learns of it when the first turn
@@ -101,12 +110,33 @@ class ChatController extends Notifier<ChatState> {
   /// * **The "未同步" flag.** When the draft's id does come back from the
   ///   server, that *is* the write receipt: the remote row carries
   ///   `isLocalDraft == false`, so the badge clears itself.
+  /// * **Local-only edits.** A rename against a daemon without
+  ///   `PATCH /sessions/{id}` lives only here. Letting the next refresh
+  ///   overwrite it would make the rename appear to work and then silently
+  ///   undo itself a second later — worse than refusing outright.
   List<ChatSession> _mergeSessions(List<ChatSession> remote) {
     final remoteIds = remote.map((s) => s.id).toSet();
     final unconfirmed = state.sessions.where(
       (s) => s.isLocalDraft && !remoteIds.contains(s.id),
     );
-    return [...unconfirmed, ...remote];
+    final overrides = {
+      for (final s in state.sessions)
+        if (s.hasLocalOverrides) s.id: s,
+    };
+    final reconciled = [
+      for (final s in remote)
+        if (overrides[s.id] case final local?)
+          s.copyWith(
+            title: local.title,
+            titleIsCustom: local.titleIsCustom,
+            archived: local.archived,
+            workspace: local.workspace,
+            hasLocalOverrides: true,
+          )
+        else
+          s,
+    ];
+    return [...unconfirmed, ...reconciled];
   }
 
   // ---------------------------------------------------------------- sessions
@@ -117,6 +147,7 @@ class ChatController extends Notifier<ChatState> {
     // running and just look away. Cancelling on every sidebar click would lose
     // work the user did not ask to discard.
     state = state.copyWith(activeSessionId: id, sendError: null);
+    unawaited(_ensureTranscript(id));
   }
 
   String createSession() {
@@ -129,16 +160,220 @@ class ChatController extends Notifier<ChatState> {
     state = state.copyWith(
       sessions: [session, ...state.sessions],
       activeSessionId: session.id,
+      // Marked loaded so the transcript view does not try to fetch a session
+      // the daemon has never heard of and render a 404 as a failure.
+      transcripts: {
+        ...state.transcripts,
+        session.id: Transcript(loadedFromServer: true),
+      },
       sendError: null,
     );
     return session.id;
   }
 
+  void setShowArchived(bool value) {
+    if (state.showArchived == value) return;
+    state = state.copyWith(showArchived: value);
+    // Refetch rather than filter locally: archived sessions were never sent,
+    // so there is nothing local to reveal.
+    unawaited(loadSessions());
+  }
+
+  /// Renames a session.
+  ///
+  /// Rethrows a genuine failure so the dialog can show it; an *unsupported*
+  /// endpoint is not a failure the user can act on, so the change is kept
+  /// locally and flagged instead.
+  Future<void> renameSession(String id, String title) async {
+    final trimmed = title.trim();
+    if (trimmed.isEmpty) return;
+    await _patch(
+      id,
+      call: () => _api.updateSession(id, title: trimmed),
+      local: (s) =>
+          s.copyWith(title: trimmed, titleIsCustom: true, hasLocalOverrides: true),
+    );
+  }
+
+  /// Archives or restores. **Not** deletion: episodes, attachments and the
+  /// memory extracted from them are untouched, which is why no confirmation
+  /// dialog threatens permanence.
+  Future<void> setArchived(String id, bool archived) async {
+    await _patch(
+      id,
+      call: () => _api.updateSession(id, archived: archived),
+      local: (s) => s.copyWith(archived: archived, hasLocalOverrides: true),
+    );
+    // An archived session that is still selected would leave the transcript on
+    // screen with no matching row in the list.
+    if (archived && !state.showArchived && state.activeSessionId == id) {
+      final next = state.visibleSessions.where((s) => s.id != id).firstOrNull;
+      state = state.copyWith(activeSessionId: next?.id);
+      if (next != null) unawaited(_ensureTranscript(next.id));
+    }
+  }
+
+  /// Binds a workspace. The daemon validates the path and its rejection message
+  /// is written to be read by the user, so it is allowed to propagate.
+  Future<void> bindWorkspace(String id, String root) async {
+    final trimmed = root.trim();
+    if (trimmed.isEmpty) return;
+    await _patch(
+      id,
+      call: () => _api.updateSession(id, workspace: trimmed),
+      local: (s) => s.copyWith(
+        workspace: Workspace(root: trimmed),
+        hasLocalOverrides: true,
+      ),
+    );
+  }
+
+  Future<void> unbindWorkspace(String id) async {
+    await _patch(
+      id,
+      call: () => _api.updateSession(id, clearWorkspace: true),
+      local: (s) => s.copyWith(workspace: null, hasLocalOverrides: true),
+    );
+  }
+
+  /// One shape for all four mutations: try the server, fall back to a flagged
+  /// local edit **only** when the endpoint does not exist.
+  ///
+  /// The distinction matters. A 400 from the workspace validator ("整台机器不是
+  /// 工作区") must reach the user unchanged — swallowing it and applying the
+  /// binding locally would show a workspace that the agent will never honour.
+  Future<void> _patch(
+    String id, {
+    required Future<ChatSession> Function() call,
+    required ChatSession Function(ChatSession) local,
+  }) async {
+    try {
+      final updated = await call();
+      if (!ref.mounted) return;
+      _replaceSession(id, (s) => updated.copyWith(isLocalDraft: s.isLocalDraft));
+    } on CortexApiException catch (e) {
+      if (!ref.mounted) return;
+      if (!e.isUnsupported) rethrow;
+      _replaceSession(id, local);
+    }
+  }
+
+  void _replaceSession(String id, ChatSession Function(ChatSession) update) {
+    final sessions = [...state.sessions];
+    final index = sessions.indexWhere((s) => s.id == id);
+    if (index == -1) return;
+    sessions[index] = update(sessions[index]);
+    state = state.copyWith(sessions: sessions);
+  }
+
+  // ------------------------------------------------------------ history replay
+
+  /// Fetches a session's messages the first time it is opened.
+  ///
+  /// Only ever runs when nothing is held for the session yet. A session the
+  /// user has already talked in this run has its turns in memory, and merging a
+  /// server replay into them would need identity for the *user* message too —
+  /// which the client does not have, because it never learns the episode id of
+  /// its own prompt. Refetching would therefore duplicate every user turn.
+  Future<void> _ensureTranscript(String id) async {
+    if (state.transcripts.containsKey(id)) return;
+    final session = state.sessions.firstWhereOrNull((s) => s.id == id);
+    if (session != null && session.isLocalDraft) return;
+    await loadTranscript(id);
+  }
+
+  Future<void> loadTranscript(String id) async {
+    if (!ref.mounted) return;
+    final current = state.transcripts[id] ?? Transcript();
+    if (current.loading) return;
+    _putTranscript(id, current.copyWith(loading: true, error: null));
+
+    try {
+      final detail = await _api.sessionDetail(id);
+      if (!ref.mounted) return;
+      _putTranscript(
+        id,
+        Transcript(
+          messages: detail.episodes
+              .map(_messageFromEpisode)
+              .toList(growable: false),
+          loading: false,
+          loadedFromServer: true,
+          serverTruncated: detail.truncated,
+        ),
+      );
+      // The detail response carries a fresher overview than the list did.
+      _replaceSession(
+        id,
+        (s) => s.hasLocalOverrides
+            ? s
+            : detail.session.copyWith(isLocalDraft: s.isLocalDraft),
+      );
+    } on CortexApiException catch (e) {
+      if (!ref.mounted) return;
+      _putTranscript(
+        id,
+        (state.transcripts[id] ?? Transcript()).copyWith(
+          loading: false,
+          // A session with no episodes yet is a 404 here, not a failure.
+          error: e.statusCode == 404 ? null : e.message,
+          loadedFromServer: e.statusCode == 404,
+        ),
+      );
+    } on Object catch (e) {
+      if (!ref.mounted) return;
+      _putTranscript(
+        id,
+        (state.transcripts[id] ?? Transcript()).copyWith(
+          loading: false,
+          error: '$e',
+        ),
+      );
+    }
+  }
+
+  /// Grows the render window by one page, oldest-ward.
+  void revealEarlier(String id) {
+    final transcript = state.transcripts[id];
+    if (transcript == null || !transcript.hasEarlier) return;
+    _putTranscript(
+      id,
+      transcript.copyWith(
+        visibleCount: transcript.visibleCount + kTranscriptWindow,
+      ),
+    );
+  }
+
+  /// An episode is the archival record; a [ChatMessage] is the view-model.
+  ///
+  /// Two things do not survive the round trip, both because the server does not
+  /// store them per-episode: the memory injected into that turn, and the tools
+  /// it called. A replayed assistant turn therefore shows no audit drawer —
+  /// visibly different from a live one, and honestly so.
+  static ChatMessage _messageFromEpisode(Episode e) => ChatMessage(
+    id: e.id,
+    role: e.role == 'assistant' ? MessageRole.assistant : MessageRole.user,
+    text: e.text,
+    createdAt: e.occurredAt ?? DateTime.now(),
+    attachments: e.attachments,
+    episodeId: e.id,
+  );
+
+  void _putTranscript(String id, Transcript transcript) {
+    state = state.copyWith(
+      transcripts: {...state.transcripts, id: transcript},
+    );
+  }
+
   // -------------------------------------------------------------------- send
 
-  Future<void> send(String rawText) async {
+  Future<void> send(
+    String rawText, {
+    List<Attachment> attachments = const [],
+  }) async {
     final text = rawText.trim();
-    if (text.isEmpty) return;
+    // An attachment with no words is a legitimate message ("看这张图")…
+    if (text.isEmpty && attachments.isEmpty) return;
     if (state.streaming != null) return; // one generation at a time
 
     final sessionId = state.activeSessionId ?? createSession();
@@ -148,9 +383,10 @@ class ChatController extends Notifier<ChatState> {
       role: MessageRole.user,
       text: text,
       createdAt: DateTime.now(),
+      attachments: attachments,
     );
     _appendMessage(sessionId, userMessage);
-    _touchSession(sessionId, titleFrom: text);
+    _touchSession(sessionId, titleFrom: text.isEmpty ? null : text);
 
     final turn = StreamingTurn(
       messageId: Ulid.generate(),
@@ -159,7 +395,11 @@ class ChatController extends Notifier<ChatState> {
     );
     state = state.copyWith(streaming: turn, sendError: null);
 
-    final stream = _api.chat(sessionId: sessionId, message: text);
+    final stream = _api.chat(
+      sessionId: sessionId,
+      message: text,
+      attachments: attachments,
+    );
     _subscription = stream.listen(
       _onEvent,
       onError: _onError,
@@ -300,24 +540,31 @@ class ChatController extends Notifier<ChatState> {
     final trimmed = [...transcript];
     if (trimmed.last.role == MessageRole.assistant) trimmed.removeLast();
     if (trimmed.isEmpty || trimmed.last.role != MessageRole.user) return;
-    final prompt = trimmed.removeLast().text;
+    final last = trimmed.removeLast();
 
-    state = state.copyWith(
-      transcripts: {...state.transcripts, sessionId: trimmed},
-      sendError: null,
+    _putTranscript(
+      sessionId,
+      (state.transcripts[sessionId] ?? Transcript()).copyWith(
+        messages: trimmed,
+      ),
     );
-    await send(prompt);
+    state = state.copyWith(sendError: null);
+    // Attachments ride along: they are already registered blobs, so resending
+    // costs nothing and dropping them would change the question being asked.
+    await send(last.text, attachments: last.attachments);
   }
 
   // ----------------------------------------------------------------- helpers
 
   void _appendMessage(String sessionId, ChatMessage message) {
-    final existing = state.transcripts[sessionId] ?? const <ChatMessage>[];
-    state = state.copyWith(
-      transcripts: {
-        ...state.transcripts,
-        sessionId: [...existing, message],
-      },
+    final existing = state.transcripts[sessionId] ?? Transcript();
+    _putTranscript(
+      sessionId,
+      existing.copyWith(
+        messages: [...existing.messages, message],
+        // Keep the newest turn inside the window when history was paged in.
+        visibleCount: existing.visibleCount + 1,
+      ),
     );
   }
 
@@ -329,8 +576,11 @@ class ChatController extends Notifier<ChatState> {
     if (index == -1) return;
 
     final current = sessions[index];
+    // A title the user set explicitly is never overwritten by a derived one.
     final shouldRename =
-        titleFrom != null && (current.isLocalDraft || current.title == '新会话');
+        titleFrom != null &&
+        !current.titleIsCustom &&
+        (current.isLocalDraft || current.title == '新会话');
 
     sessions[index] = current.copyWith(
       updatedAt: DateTime.now(),
@@ -344,6 +594,15 @@ class ChatController extends Notifier<ChatState> {
     final single = message.replaceAll(RegExp(r'\s+'), ' ').trim();
     if (single.length <= 24) return single;
     return '${single.substring(0, 24)}…';
+  }
+}
+
+extension _FirstWhereOrNull<E> on Iterable<E> {
+  E? firstWhereOrNull(bool Function(E) test) {
+    for (final e in this) {
+      if (test(e)) return e;
+    }
+    return null;
   }
 }
 

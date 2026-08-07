@@ -2,8 +2,12 @@
 library;
 
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:cortex_app/api/api_exception.dart';
+import 'package:cortex_app/api/blob_upload.dart';
 import 'package:cortex_app/api/http_cortex_api.dart';
+import 'package:cortex_app/core/hashing.dart';
 import 'package:cortex_app/models/chat_event.dart';
 import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/tool_call.dart';
@@ -273,7 +277,326 @@ void main() {
     );
     expect(span.children!.length, greaterThan(1));
   });
+
+  // ─────────────────── 会话生命周期与工作区 ───────────────────
+
+  test('GET /sessions/{id} 回放整段会话，附件字段一定在', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final sessions = await api.sessions();
+    final detail = await api.sessionDetail(sessions.first.id);
+
+    expect(detail.session.id, sessions.first.id);
+    expect(detail.episodes, isNotEmpty, reason: '列表里的会话至少有一条消息');
+    for (final e in detail.episodes) {
+      // The server sends `[]` rather than omitting the key, so the client never
+      // has to distinguish "no attachments" from "server too old to report".
+      expect(e.attachments, isNotNull);
+      expect(e.id, isNotEmpty);
+    }
+    expect(
+      detail.episodes.length,
+      lessThanOrEqualTo(500),
+      reason: 'SESSION_EPISODE_LIMIT；超过就该被 truncated 标出来',
+    );
+    expect(
+      detail.truncated,
+      detail.session.messageCount > detail.episodes.length,
+      reason: '截断判定必须与 message_count 一致，否则界面会谎报完整',
+    );
+  });
+
+  test('PATCH /sessions/{id} 改名并回写 title_is_custom', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final target = (await api.sessions()).first;
+    final restore = target.titleIsCustom ? target.title : null;
+
+    final renamed = await api.updateSession(
+      target.id,
+      title: '联调改名 ${DateTime.now().millisecondsSinceEpoch}',
+    );
+    expect(renamed.titleIsCustom, isTrue);
+    expect(renamed.title, startsWith('联调改名'));
+
+    if (restore != null) await api.updateSession(target.id, title: restore);
+  });
+
+  test('归档与取消归档，include_archived 决定它出不出现在列表里', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final target = (await api.sessions()).first;
+    addTearDown(() => api.updateSession(target.id, archived: false));
+
+    await api.updateSession(target.id, archived: true);
+
+    expect(
+      (await api.sessions()).any((s) => s.id == target.id),
+      isFalse,
+      reason: '默认列表不含已归档',
+    );
+
+    final found = (await api.sessions(
+      includeArchived: true,
+    )).firstWhere((s) => s.id == target.id);
+    expect(found.archived, isTrue);
+    expect(
+      found.messageCount,
+      greaterThan(0),
+      reason: '归档不是删除 —— 消息一条没少',
+    );
+  });
+
+  test('工作区三态：绑定 / 不动 / 解绑', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final target = (await api.sessions()).first;
+    addTearDown(() => api.updateSession(target.id, clearWorkspace: true));
+
+    final bound = await api.updateSession(
+      target.id,
+      workspace: Directory.current.path,
+    );
+    expect(bound.workspace, isNotNull);
+
+    // Field absent = leave it alone. This is the state a plain `Option<String>`
+    // on the server would collapse into "unbind".
+    final untouched = await api.updateSession(target.id, title: bound.title);
+    expect(
+      untouched.workspace?.root,
+      bound.workspace?.root,
+      reason: '不传 workspace 就该原样保留',
+    );
+
+    final unbound = await api.updateSession(target.id, clearWorkspace: true);
+    expect(
+      unbound.workspace,
+      isNull,
+      reason: '显式 null 才是解绑；两态混起来会让会话莫名其妙失去文件工具',
+    );
+  });
+
+  test('非法工作区路径带回可直接展示给用户的理由', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final target = (await api.sessions()).first;
+
+    await expectLater(
+      api.updateSession(target.id, workspace: 'relative/path'),
+      throwsA(
+        isA<CortexApiException>()
+            .having((e) => e.statusCode, 'statusCode', 400)
+            .having((e) => e.message, 'message', contains('绝对路径'))
+            // The client must unwrap `ErrorBody { error }`. Showing raw JSON
+            // would throw away wording that was written to be read.
+            .having((e) => e.message, 'message', isNot(contains('{"error"'))),
+      ),
+    );
+
+    await expectLater(
+      api.updateSession(target.id, workspace: '/definitely/not/here/xyzzy'),
+      throwsA(
+        isA<CortexApiException>().having(
+          (e) => e.isUnsupported,
+          'isUnsupported',
+          isFalse,
+        ),
+      ),
+    );
+  });
+
+  // ───────────────────────────── 附件 ─────────────────────────────
+
+  test('POST /blobs 中转上传，哈希由内容决定且可原样取回', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final bytes = _tinyPng();
+    final progress = <int>[];
+    final attachment = await uploadAttachment(
+      api,
+      bytes: bytes,
+      filename: 'live-test.png',
+      onProgress: (sent, _) => progress.add(sent),
+    );
+
+    expect(
+      attachment.hash,
+      await sha256Hex(bytes),
+      reason: '两端算的哈希必须一致，否则 presign 那条路根本对不上 key',
+    );
+    expect(
+      attachment.mime,
+      'image/png',
+      reason: 'MIME 由字节头嗅探得出，不是客户端声明的那个',
+    );
+    expect(attachment.kind, 'image');
+    expect(progress, isNotEmpty);
+    expect(progress.last, bytes.length);
+
+    expect(
+      await api.blobBytes(attachment.hash),
+      equals(bytes),
+      reason: '取回的字节必须与上传的一模一样',
+    );
+  });
+
+  test('presign 对已存在的内容直接说 already_uploaded', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final bytes = _tinyPng();
+    await api.uploadBlob(bytes: bytes, mime: 'image/png');
+    final hash = await sha256Hex(bytes);
+
+    try {
+      final presign = await api.presignBlob(hash);
+      expect(presign.method, 'PUT');
+      expect(presign.url, contains(hash));
+      expect(
+        presign.alreadyUploaded,
+        isTrue,
+        reason: '刚传过的内容不该被要求再传一遍 —— 这是内容寻址省下的那笔带宽',
+      );
+    } on CortexApiException catch (e) {
+      // A local_fs deployment answers 501 by design. That is a valid outcome;
+      // the client's job is to recognise it and not retry.
+      expect(
+        e.isUnsupported,
+        isTrue,
+        reason: '签不出 URL 只应表现为 501（本部署不支持），而不是别的失败',
+      );
+    }
+  });
+
+  test('带附件的一轮对话：blob 先登记，再由 /chat 关联到 episode', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final attachment = await uploadAttachment(
+      api,
+      bytes: _tinyPng(),
+      filename: 'live-attach.png',
+    );
+
+    final sessionId = 'live-attach-${DateTime.now().millisecondsSinceEpoch}';
+    var done = false;
+    await for (final event in api.chat(
+      sessionId: sessionId,
+      message: '这是一张测试图，收到请回复「收到」。',
+      attachments: [attachment],
+    )) {
+      if (event is ChatErrorEvent) fail('服务端拒绝了这一轮：${event.message}');
+      if (event is ChatDoneEvent) done = true;
+    }
+    expect(done, isTrue, reason: '未登记的 hash 会让整轮被拒，这里必须走通');
+
+    final detail = await api.sessionDetail(sessionId);
+    final userTurn = detail.episodes.firstWhere((e) => e.role == 'user');
+    expect(
+      userTurn.attachments.map((a) => a.hash),
+      contains(attachment.hash),
+      reason: '附件必须挂在 episode 上，回放时才看得见',
+    );
+    expect(
+      userTurn.attachments.first.filename,
+      isNull,
+      reason: 'AttachmentRef 只有 hash 与 kind —— 文件名不过夜，这是已知的契约缺口',
+    );
+  });
+
+  test('绑定工作区后，文件工具的摘要能被解析出路径', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final sessionId = 'live-ws-${DateTime.now().millisecondsSinceEpoch}';
+    // The session row only exists once it has a turn, so bind after the first
+    // message rather than before it.
+    await api.chat(sessionId: sessionId, message: '你好').drain<void>();
+    await api.updateSession(sessionId, workspace: Directory.current.path);
+
+    var calls = <ToolCall>[];
+    await for (final event in api.chat(
+      sessionId: sessionId,
+      message: '用 list_dir 列一下工作区根目录，再用 read_file 读 pubspec.yaml。',
+    )) {
+      if (event is ChatToolEvent) {
+        calls = ToolCall.merge(calls, event.name, event.summary);
+      }
+    }
+
+    final fileCalls = calls.where((c) => c.touchesFiles).toList();
+    expect(
+      fileCalls,
+      isNotEmpty,
+      reason: '绑定了工作区，文件工具就该出现在工具目录里',
+    );
+    for (final call in fileCalls) {
+      expect(
+        call.targetPath,
+        isNotNull,
+        reason:
+            '${call.name} 的摘要里应能解析出 path —— 界面靠它说明动了哪个文件：'
+            '${call.arguments}',
+      );
+      expect(call.pending, isFalse, reason: '两条事件应配成一行');
+    }
+  });
+
+  test('未绑定工作区的会话拿不到文件工具', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final sessionId = 'live-nows-${DateTime.now().millisecondsSinceEpoch}';
+    var calls = <ToolCall>[];
+    await for (final event in api.chat(
+      sessionId: sessionId,
+      message: '读一下工作区里的 pubspec.yaml，告诉我 name 字段。',
+    )) {
+      if (event is ChatToolEvent) {
+        calls = ToolCall.merge(calls, event.name, event.summary);
+      }
+    }
+
+    expect(
+      calls.where((c) => c.touchesFiles),
+      isEmpty,
+      reason:
+          '纯聊天会话的工具目录里根本没有文件工具（WORKSPACE_FREE_TOOLS），'
+          '这正是「绑定与否」在产品上唯一的差别',
+    );
+  });
 }
+
+/// A 2×2 PNG — small enough to upload in a test, real enough for the server to
+/// sniff `image/png` out of its header rather than trusting the declared type.
+Uint8List _tinyPng() => Uint8List.fromList(const [
+  0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
+  0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02,
+  0x08, 0x02, 0x00, 0x00, 0x00, 0xFD, 0xD4, 0x9A,
+  0x73, 0x00, 0x00, 0x00, 0x16, 0x49, 0x44, 0x41,
+  0x54, 0x78, 0x9C, 0x63, 0xFC, 0xCF, 0xC0, 0xF0,
+  0x9F, 0x01, 0x13, 0xFF, 0x19, 0x18, 0x00, 0x00,
+  0x2A, 0x0B, 0x03, 0x01, 0x6D, 0x0E, 0x2C, 0x8B,
+  0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+  0xAE, 0x42, 0x60, 0x82,
+]);
 
 Future<void> _until(bool Function() condition, String what) async {
   final deadline = DateTime.now().add(const Duration(seconds: 20));

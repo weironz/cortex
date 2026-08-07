@@ -1,3 +1,4 @@
+import 'attachment.dart';
 import 'memory_fact.dart';
 import 'tool_call.dart';
 
@@ -16,6 +17,7 @@ class ChatMessage {
     required this.createdAt,
     this.facts = const [],
     this.toolCalls = const [],
+    this.attachments = const [],
     this.episodeId,
     this.error,
   });
@@ -32,6 +34,10 @@ class ChatMessage {
   /// For assistant messages: tools the agent invoked during this turn.
   final List<ToolCall> toolCalls;
 
+  /// Blobs carried by this message. Only user messages have them today, but the
+  /// field is on the base type because `episode_blobs` is not role-scoped.
+  final List<Attachment> attachments;
+
   /// Server-assigned archival id, available once the turn completes.
   final String? episodeId;
 
@@ -42,6 +48,7 @@ class ChatMessage {
     String? text,
     List<MemoryFact>? facts,
     List<ToolCall>? toolCalls,
+    List<Attachment>? attachments,
     String? episodeId,
     String? error,
   }) => ChatMessage(
@@ -51,6 +58,7 @@ class ChatMessage {
     createdAt: createdAt,
     facts: facts ?? this.facts,
     toolCalls: toolCalls ?? this.toolCalls,
+    attachments: attachments ?? this.attachments,
     episodeId: episodeId ?? this.episodeId,
     error: error ?? this.error,
   );

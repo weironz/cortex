@@ -5,6 +5,7 @@ import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
 import '../shell/widgets/sync_indicator.dart';
+import '../workspace/workspace_panel.dart';
 import 'widgets/conversation_view.dart';
 import 'widgets/message_composer.dart';
 
@@ -24,9 +25,10 @@ class ChatPane extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = ref.read(chatControllerProvider.notifier);
-    final hasSession = ref.watch(
-      chatControllerProvider.select((s) => s.activeSessionId != null),
+    final sessionId = ref.watch(
+      chatControllerProvider.select((s) => s.activeSessionId),
     );
+    final hasSession = sessionId != null;
     final title = ref.watch(
       chatControllerProvider.select((s) => s.activeSession?.title),
     );
@@ -49,6 +51,13 @@ class ChatPane extends ConsumerWidget {
                   icon: const Icon(Icons.menu_rounded),
                 ),
           actions: [
+            // First in the row on purpose: whether the agent can touch files is
+            // the single most consequential property of a session, and it must
+            // be answerable without opening anything.
+            if (hasSession) ...[
+              const WorkspaceChip(),
+              const SizedBox(width: 8),
+            ],
             const SyncIndicator(),
             const _BackendBadge(),
             if (onOpenSettings != null)
@@ -87,8 +96,10 @@ class ChatPane extends ConsumerWidget {
         const _SendErrorBanner(),
         MessageComposer(
           enabled: hasSession,
+          sessionId: sessionId,
           streaming: streaming,
-          onSend: controller.send,
+          onSend: (text, attachments) =>
+              controller.send(text, attachments: attachments),
           onStop: controller.stopGeneration,
         ),
       ],
