@@ -62,6 +62,13 @@ eventsource-stream = "0.2"
 jieba-rs = "0.10"
 fastembed = "5"
 
+# OS 级沙箱（仅 Linux 目标启用）。
+# 取件自 codex（Apache-2.0）的选型：它的 linux-sandbox 就是这两个 crate 的编排。
+# codex 自身的 crate 未发布到 crates.io 且深度耦合 codex-protocol，只能取底座 + 取策略。
+landlock = "0.4"
+seccompiler = "0.5"
+libc = "0.2"
+
 # 基础设施
 ulid = { version = "3", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }

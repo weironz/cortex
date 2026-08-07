@@ -85,7 +85,7 @@ pub enum Approval {
 
 /// 权限策略 —— **将来接确认流程的唯一挂点**。
 ///
-/// 第一版对 [`Risk::Write`] 及以上只记日志、照常放行（`enforce = false`）。
+/// 第一版对 [`Risk::Write`] 只记日志、照常放行（`enforce = false`）。
 /// 这不是偷懒的默认值，是有意的：真正的拦截需要一条「服务端问、客户端答」
 /// 的回路（新增 `ChatEvent::ConfirmRequest` + 一个回执端点 + 在
 /// [`Turn::run`] 里挂起等待），那是独立一块工作。
@@ -94,12 +94,28 @@ pub enum Approval {
 /// [`Self::decide`]，见 [`Turn::dispatch`]。接确认流程时只需把这里改成
 /// 「返回 `Ask` 并 await 客户端回执」，调用点一行都不用动 ——
 /// 如果闸门散落在各个工具实现里，那才是将来真正改不动的地方。
+///
+/// # `Risk::Execute` 不走这个口子
+///
+/// 「只记日志」的默认值成立，靠的是一个前提：**最坏情况是往围栏内写一个文件**。
+/// 加了 `shell` 之后这个前提没了 —— 任意命令能删掉整个工作区、能把
+/// 目录打包外传，而路径围栏只管得住 `read_file`，管不住 `bash -c`。
+///
+/// 前提变了默认值就得跟着变，否则安全性靠的是「还没人用到那个工具」。
+/// 所以 [`Risk::Execute`] **恒拒**，除非显式设 `allow_unconfirmed_execute`。
+/// 等确认回路接上，这个字段和它的解释一起删掉。
 #[derive(Debug, Clone, Copy)]
 pub struct ApprovalPolicy {
     /// 达到或超过此风险等级的工具需要用户确认
     pub confirm_at: Risk,
     /// 是否真的拦截。false = 只记日志（第一版）
     pub enforce: bool,
+    /// 在没有确认回路的情况下，放行 [`Risk::Execute`]。
+    ///
+    /// **默认 false，正常部署不该改它。** 留这个口子只为两件事：
+    /// 集成测试要跑真命令，以及有人明知代价地在一次性环境里图方便。
+    /// 它不影响沙箱 —— OS 沙箱是独立的一层，那层由 `CORTEX_SANDBOX` 管。
+    pub allow_unconfirmed_execute: bool,
 }
 
 impl Default for ApprovalPolicy {
@@ -107,6 +123,7 @@ impl Default for ApprovalPolicy {
         Self {
             confirm_at: Risk::Write,
             enforce: false,
+            allow_unconfirmed_execute: false,
         }
     }
 }
@@ -116,6 +133,12 @@ impl ApprovalPolicy {
     pub fn decide(&self, tool: &str, risk: Risk) -> Approval {
         if risk < self.confirm_at {
             return Approval::Allow;
+        }
+        // Execute 先判，且不受 enforce 影响：enforce=false 的语义是
+        // 「写操作先放着，出事能从日志里查」，那套账在执行任意命令上算不平
+        if risk >= Risk::Execute && !self.allow_unconfirmed_execute {
+            tracing::warn!(tool, ?risk, "执行类工具在确认回路接上之前一律拒绝");
+            return Approval::Deny;
         }
         if self.enforce {
             Approval::Deny
@@ -574,6 +597,7 @@ mod tests {
         let t = t.with_policy(ApprovalPolicy {
             confirm_at: Risk::Write,
             enforce: true,
+            ..Default::default()
         });
         let r = t
             .dispatch(
@@ -599,6 +623,7 @@ mod tests {
         let t = t.with_policy(ApprovalPolicy {
             confirm_at: Risk::Write,
             enforce: true,
+            ..Default::default()
         });
         let r = t
             .dispatch(

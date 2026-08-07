@@ -67,12 +67,22 @@ impl ToolResult {
 
 /// 工具执行的沙箱边界。
 ///
-/// 第一版只做路径围栏 —— OS 级沙箱（seccomp / Seatbelt / Job Object）
-/// 计划从 codex 取件（`linux-sandbox` / `windows-sandbox-rs` / `execpolicy`），
-/// 自己写不划算。在那之前，路径围栏至少挡住最常见的越界。
+/// 三道闸，缺一不可，且**互不替代**：
+///
+/// 1. [`Risk`] 分级 + [`crate::turn::ApprovalPolicy`] 的权限确认 —— 挡住
+///    「这件事该不该做」
+/// 2. 本结构的路径围栏（[`Self::resolve`]）—— 挡住 `read_file` 越界
+/// 3. [`crate::sandbox`] 的 OS 级沙箱 —— 挡住**已获批准的进程**越界
+///
+/// 第三道是前两道管不到的地方：路径围栏解析的是工具参数，而
+/// `bash -c 'cat ~/.ssh/id_rsa'` 里那个路径根本不经过它。
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     root: PathBuf,
+    /// 交给内核的那份策略。与路径围栏的 `root` 同源 —— 会话绑定的工作区
+    /// 就是可写区，两道闸对「哪里算里面」的认识必须一致，否则用户会看到
+    /// 一个工具说能写、另一个说不能写。
+    exec: crate::sandbox::SandboxPolicy,
 }
 
 impl Sandbox {
@@ -81,7 +91,20 @@ impl Sandbox {
         let root = root
             .canonicalize()
             .map_err(|e| CortexError::Invalid(format!("工作区路径无效：{e}")))?;
-        Ok(Self { root })
+        let exec = crate::sandbox::SandboxPolicy::workspace(&root);
+        Ok(Self { root, exec })
+    }
+
+    /// 换掉 OS 级沙箱策略（例如为某次执行放开网络）。
+    #[must_use]
+    pub fn with_exec_policy(mut self, policy: crate::sandbox::SandboxPolicy) -> Self {
+        self.exec = policy;
+        self
+    }
+
+    #[must_use]
+    pub fn exec_policy(&self) -> &crate::sandbox::SandboxPolicy {
+        &self.exec
     }
 
     /// 把相对路径解析到工作区内，并拒绝任何逃逸。
@@ -188,6 +211,23 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                 "required": ["path"]
             }),
             risk: Risk::Safe,
+        },
+        ToolSpec {
+            name: "shell",
+            description: "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里：\
+                          只能读写工作区与构建缓存，默认不能联网",
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "要执行的 shell 命令" },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "可选。超时毫秒数，默认 120000，上限 600000"
+                    }
+                },
+                "required": ["command"]
+            }),
+            risk: Risk::Execute,
         },
         ToolSpec {
             name: "memory_search",
@@ -298,7 +338,121 @@ pub async fn execute(sandbox: &Sandbox, call: &ToolCall) -> ToolResult {
             },
         },
 
+        "shell" => match arg_str(&call.arguments, "command") {
+            Err(e) => ToolResult::err(e),
+            Ok(cmd) => {
+                let timeout = call
+                    .arguments
+                    .get("timeout_ms")
+                    .and_then(serde_json::Value::as_u64)
+                    .map_or(DEFAULT_SHELL_TIMEOUT_MS, |ms| ms.min(MAX_SHELL_TIMEOUT_MS));
+                run_shell(sandbox, &cmd, timeout).await
+            }
+        },
+
         other => ToolResult::err(format!("未知工具：{other}")),
+    }
+}
+
+/// shell 命令的默认超时。
+///
+/// 必须有一个：一条 `sleep 1d` 或者一个等着读 stdin 的交互式命令会把整轮
+/// 对话永远挂住，而用户那边看到的只是「没有反应」——最难排查的一种失败。
+const DEFAULT_SHELL_TIMEOUT_MS: u64 = 120_000;
+/// 上限。模型给的参数不可信，不封顶等于没有超时。
+const MAX_SHELL_TIMEOUT_MS: u64 = 600_000;
+
+/// 在 OS 沙箱里跑一条 shell 命令。
+async fn run_shell(sandbox: &Sandbox, command: &str, timeout_ms: u64) -> ToolResult {
+    let argv = match shell_argv(command) {
+        Ok(v) => v,
+        Err(e) => return ToolResult::err(e),
+    };
+
+    let prepared = match crate::sandbox::prepare(sandbox.exec_policy(), &argv, sandbox.root()) {
+        Ok(p) => p,
+        // 沙箱不可用且未显式降级 —— 这是设计上的主要出口。错误原文会原样
+        // 回给模型，让它知道「不是命令写错了，是这台机器上不许执行」
+        Err(e) => return ToolResult::err(e.to_string()),
+    };
+
+    let mut cmd = tokio::process::Command::from(prepared.command);
+    // 超时后 kill 掉；不设的话 Drop 只是丢掉句柄，进程会变孤儿继续跑
+    cmd.kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let fut = cmd.output();
+    let out = match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
+        Err(_) => {
+            return ToolResult::err(format!("命令超时（{timeout_ms} ms）已被终止：{command}"));
+        }
+        Ok(Err(e)) => {
+            return ToolResult::err(format!("启动命令失败：{e}"));
+        }
+        Ok(Ok(o)) => o,
+    };
+
+    let mut body = String::new();
+    if !prepared.enforced {
+        // 降级模式下这一行同时进模型上下文与用户可见的工具结果。
+        // 「有没有被保护」不该只有翻日志才知道
+        body.push_str("⚠ 本次执行没有 OS 沙箱保护\n");
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !stdout.is_empty() {
+        body.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !body.is_empty() && !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push_str("[stderr]\n");
+        body.push_str(&stderr);
+    }
+    let code = out.status.code();
+    if out.status.success() {
+        if body.is_empty() {
+            body.push_str("（无输出）");
+        }
+        ToolResult::ok(body)
+    } else {
+        // 失败也把输出带上：模型要靠 stderr 判断是命令写错了还是被沙箱拦了
+        ToolResult::err(format!(
+            "退出码 {}\n{body}",
+            code.map_or_else(|| "signal".to_string(), |c| c.to_string())
+        ))
+    }
+}
+
+/// 挑一个 shell 解释器。
+///
+/// 不写死 `bash`：精简容器镜像里常常只有 `sh`。也不查 PATH ——
+/// PATH 是被沙箱防着的那一侧能影响的东西。
+fn shell_argv(command: &str) -> std::result::Result<Vec<String>, String> {
+    #[cfg(unix)]
+    {
+        for sh in ["/bin/bash", "/bin/sh"] {
+            if Path::new(sh).exists() {
+                return Ok(vec![sh.to_string(), "-c".to_string(), command.to_string()]);
+            }
+        }
+        Err("本机既没有 /bin/bash 也没有 /bin/sh".to_string())
+    }
+    #[cfg(windows)]
+    {
+        Ok(vec![
+            "cmd.exe".to_string(),
+            "/C".to_string(),
+            command.to_string(),
+        ])
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = command;
+        Err(format!("{} 上没有可用的 shell", std::env::consts::OS))
     }
 }
 

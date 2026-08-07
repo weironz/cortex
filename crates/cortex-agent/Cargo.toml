@@ -26,6 +26,14 @@ async-trait.workspace = true
 # rmcp 共存、类型名字一样却不兼容。
 rmcp = { version = "1.4", default-features = false }
 
+# OS 级沙箱。只在 Linux 目标上编译 —— landlock/seccompiler 都是 Linux 专有，
+# 写进通用 [dependencies] 会让 Windows / macOS 构建直接失败。
+# macOS 走 /usr/bin/sandbox-exec，不需要额外 crate；Windows 没有对等物。
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+seccompiler.workspace = true
+libc.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
