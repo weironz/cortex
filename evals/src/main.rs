@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use cortex_evals::DEFAULT_SUITE;
-use cortex_evals::harness::{ExtractMode, RetrievalConfig};
+use cortex_evals::harness::{CrossLinkOptions, ExtractMode, JudgeKind, RetrievalConfig};
 use cortex_evals::report::render_text;
 use cortex_evals::runner::{RunOptions, run};
 use cortex_evals::suite::Suite;
@@ -27,8 +27,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 跑一遍评测，输出报告
-    Run(RunArgs),
+    /// 跑一遍评测，输出报告。
+    ///
+    /// `Box` 不是洁癖：`RunArgs` 已经攒到二十来个旋钮，比 `Validate`
+    /// 大一个数量级，不装箱的话整个 enum 都按它的大小分配
+    Run(Box<RunArgs>),
     /// 只做题集的静态校验（不连数据库）—— CI 的第一道门
     Validate {
         #[arg(long, default_value = DEFAULT_SUITE)]
@@ -113,6 +116,48 @@ struct RunArgs {
     /// Recall@5 的最低门槛。跑出来低于它就以非零码退出 —— CI 回归门
     #[arg(long)]
     min_recall5: Option<f64>,
+
+    /// 灌完语料后跑一遍跨域连接扫描（`relates_to`）。默认关
+    #[arg(long)]
+    cross_link: bool,
+
+    /// 谁来判「这一对值不值得连」：prefilter = 预筛全收（确定性，可进 CI）；
+    /// cheap = 真调廉价模型（随模型漂移，不进回归门）
+    #[arg(long, value_enum, default_value_t = Judge::Prefilter)]
+    cross_link_judge: Judge,
+
+    /// 候选的余弦距离带。默认与生产一致
+    #[arg(long)]
+    cross_link_min_distance: Option<f64>,
+    #[arg(long)]
+    cross_link_max_distance: Option<f64>,
+
+    /// 单个实体最多连出多少条边
+    #[arg(long)]
+    cross_link_degree_cap: Option<usize>,
+
+    /// 让边的 statement 也进 BM25/向量索引（改造前的行为）。A/B 用
+    #[arg(long)]
+    cross_link_indexed: bool,
+
+    /// 关掉「跨域桥带出来的那一侧免域惩罚」。A/B 用
+    #[arg(long)]
+    no_bridge_exemption: bool,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum Judge {
+    Prefilter,
+    Cheap,
+}
+
+impl From<Judge> for JudgeKind {
+    fn from(j: Judge) -> Self {
+        match j {
+            Judge::Prefilter => Self::Prefilter,
+            Judge::Cheap => Self::Cheap,
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -178,7 +223,7 @@ async fn real_main() -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Run(args) => run_command(args).await,
+        Command::Run(args) => run_command(*args).await,
     }
 }
 
@@ -221,10 +266,25 @@ async fn run_command(args: RunArgs) -> Result<ExitCode> {
             semantic_floor: args.semantic_floor,
             no_semantic_floor: args.no_semantic_floor,
             replay_ranked: !args.replay_chronological,
+            bridge_exemption: !args.no_bridge_exemption,
             ..RetrievalConfig::default()
         },
         only: args.only,
         ignore_domain: args.ignore_domain,
+        cross_link: CrossLinkOptions {
+            enabled: args.cross_link,
+            judge: args.cross_link_judge.into(),
+            min_distance: args
+                .cross_link_min_distance
+                .unwrap_or(CrossLinkOptions::default().min_distance),
+            max_distance: args
+                .cross_link_max_distance
+                .unwrap_or(CrossLinkOptions::default().max_distance),
+            degree_cap: args
+                .cross_link_degree_cap
+                .unwrap_or(CrossLinkOptions::default().degree_cap),
+            indexed: args.cross_link_indexed,
+        },
     };
 
     let report = run(&suite, &opts).await?;

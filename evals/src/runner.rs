@@ -3,8 +3,8 @@
 use anyhow::{Context, Result};
 
 use crate::harness::{
-    Checkpoints, EvalDb, EvalRetriever, ExtractMode, FactRow, RetrievalConfig, build_extractor,
-    default_embedder, ingest_suite,
+    Checkpoints, CrossLinkOptions, EvalDb, EvalRetriever, ExtractMode, FactRow, RetrievalConfig,
+    build_cross_links, build_extractor, default_embedder, ingest_suite,
 };
 use crate::matcher::QuestionMatchers;
 use crate::metrics::{Aggregate, QuestionResult, Status, aggregate, score};
@@ -39,6 +39,9 @@ pub struct RunOptions {
     /// `apply_domain_boost` 直接返回 —— 这就是现成的 A/B 开关，
     /// 用来回答「域加权到底帮了还是害了跨域题」。
     pub ignore_domain: bool,
+    /// 灌完语料后跑一遍跨域连接扫描。默认关 —— 它会往库里写额外的边，
+    /// 不显式要求就不该改变基线
+    pub cross_link: CrossLinkOptions,
 }
 
 pub async fn run(suite: &Suite, opts: &RunOptions) -> Result<Report> {
@@ -61,6 +64,16 @@ async fn run_inner(db: &EvalDb, suite: &Suite, opts: &RunOptions) -> Result<Repo
     let extractor = build_extractor(embedder.clone(), opts.mode, opts.entity_threshold)?;
 
     let (ingest, checkpoints) = ingest_suite(db, suite, &extractor, opts.mode).await?;
+
+    // 扫描必须在 ingest 之后、快照之前：写进去的 relates_to 也是 facts，
+    // gold 存在性核对要看得见它们（否则拿它们当 gold 的题会被判成 GoldMissing，
+    // 而那正好会把「桥没建起来」伪装成「题目坏了」）
+    let cross_links = if opts.cross_link.enabled {
+        Some(build_cross_links(db, &embedder, opts.cross_link).await?)
+    } else {
+        None
+    };
+
     let facts = db.snapshot_facts().await?;
     let entities = db.count_entities().await?;
 
@@ -128,6 +141,7 @@ async fn run_inner(db: &EvalDb, suite: &Suite, opts: &RunOptions) -> Result<Repo
             facts_total: facts.len(),
             facts_active: facts.iter().filter(|f| f.active).count(),
             entities,
+            cross_links,
         },
         overall,
         by_kind,

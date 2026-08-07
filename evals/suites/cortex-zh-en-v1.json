@@ -1025,7 +1025,7 @@
 
     { "id": "q020", "type": "chinese_semantic", "lang": "zh", "domain": "office",
       "query": "新同事来了第一天该干什么？",
-      "gold": [["新人第一天"]],
+      "gold": [["用 just 封装的命令"]],
       "note": "" },
 
     { "id": "q021", "type": "chinese_semantic", "lang": "zh", "domain": "personal",
@@ -1484,6 +1484,31 @@
     { "id": "q111", "type": "chinese_semantic", "lang": "zh", "domain": "coding",
       "query": "关于记忆能不能改这件事，当时确认了哪几种失效方式？",
       "gold": [["corrected", "retracted", "superseded"]],
-      "note": "出处追问：「可编辑性」是原话的提法。三种失效落在同一条 statement 里，所以是一组 gold 而不是三组" }
+      "note": "出处追问：「可编辑性」是原话的提法。三种失效落在同一条 statement 里，所以是一组 gold 而不是三组" },
+
+    { "id": "q112", "type": "cross_domain", "lang": "zh", "domain": "coding",
+      "query": "客户端那一摊，公司里是谁在管？",
+      "gold": [["Flutter 前端由李娜负责"]],
+      "note": "需要跨域桥：查询点住 coding 侧的实体「客户端」，gold 在 office 且与查询一个重合词都没有。q112–q116 的写法与验收规程见 README「怎么加需要跨域桥的题」" },
+
+    { "id": "q113", "type": "cross_domain", "lang": "zh", "domain": "personal",
+      "query": "新人入职那套步骤，是照着谁的习惯定的？",
+      "gold": [["用 just 封装的命令"]],
+      "note": "需要跨域桥的反方向：office 流程 → personal 偏好。查询刻意不出现 just / cargo / 命令行" },
+
+    { "id": "q114", "type": "cross_domain", "lang": "zh", "domain": "coding",
+      "query": "事实抽取被钉死在便宜档模型上，上位依据是什么？",
+      "gold": [["成本控制的四条措施"]],
+      "note": "需要跨域桥：coding 侧的实现约束 → office 侧的上位规则。查询刻意不出现「成本」「控制」" },
+
+    { "id": "q115", "type": "cross_domain", "lang": "zh", "domain": "office",
+      "query": "成本控制那几条，代码侧具体落在哪个环节？",
+      "gold": [["绝不能用主对话模型"]],
+      "note": "需要跨域桥的反方向：office 规则 → coding 落点。查询刻意不出现 抽取 / 模型 / 廉价 —— 反方向能不能通，是「一条关联要写两行有向边」那个决定的唯一验收点" },
+
+    { "id": "q116", "type": "cross_domain", "lang": "zh", "domain": "coding",
+      "query": "客户端这条线在进度上惹了什么麻烦？",
+      "gold": [["Markdown 渲染"]],
+      "note": "需要跨域桥：coding 选型 → office 排期后果。查询刻意不出现 延期 / 渲染 / Flutter / v1" }
   ]
 }

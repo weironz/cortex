@@ -233,7 +233,10 @@ fn build_user_prompt(episode_text: &str, ctx: &ExtractContext) -> String {
 /// 三种见过的脏输出都要能吃下：```json 围栏、JSON 前后的解释文字、
 /// 顶层直接是数组而非对象。做法是扫描出**第一个配平的** `{…}` 或 `[…]`，
 /// 而不是简单地取首尾字符 —— 后者遇到「解释文字里有个右花括号」就废了。
-fn extract_json_blob(raw: &str) -> Option<&str> {
+///
+/// `pub(crate)`：[`crate::crosslink`] 的判定结果是同一个模型吐的同一种脏
+/// JSON，抄第二份的下场是只在其中一份里修 bug。
+pub(crate) fn extract_json_blob(raw: &str) -> Option<&str> {
     let bytes = raw.as_bytes();
     let start = bytes.iter().position(|b| *b == b'{' || *b == b'[')?;
     let open = bytes[start];

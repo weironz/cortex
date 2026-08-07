@@ -11,9 +11,11 @@
 //! | [`embed`]    | 入库：向量化（本地推理，记忆内容不出网） |
 //! | [`extract`]  | 入库：一轮对话 → 结构化事实 → 落库 |
 //! | [`transcribe`]| 入库：媒体 → 文本（不转成文本的媒体是检索黑洞） |
+//! | [`crosslink`]| 离线：跨域 `relates_to` 边（让图遍历自己走通两个领域） |
 //! | [`fusion`]   | 检索：四路召回的 RRF 融合 |
 //! | [`injection`]| 出库：以什么形式进 prompt（决定 caching 成本结构） |
 
+pub mod crosslink;
 pub mod embed;
 pub mod extract;
 pub mod fusion;
@@ -22,6 +24,10 @@ pub mod retrieval;
 pub mod tokenize;
 pub mod transcribe;
 
+pub use crosslink::{
+    AcceptAll, Accepted, Candidate, CheapModelJudge, LinkCorpus, LinkJudge, LinkReport, Linker,
+    RELATES_TO, StoreCorpus,
+};
 pub use embed::{EMBEDDING_DIM, Embedder};
 pub use extract::{
     CandidateFact, EntityIndex, EntityRef, ExtractContext, Extractor, InProcessEntityIndex,

@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use crate::harness::IngestStats;
+use crate::harness::{CrossLinkStats, IngestStats};
 use crate::metrics::{Aggregate, K_VALUES, QuestionResult, Status};
 use crate::suite::{Lang, QuestionKind, Suite};
 
@@ -89,6 +89,12 @@ pub struct CorpusInfo {
     /// 其中仍然有效的
     pub facts_active: usize,
     pub entities: i64,
+    /// 跨域连接扫描的结果。`None` = 这次没跑扫描。
+    ///
+    /// 边本身要落进报告，不能只留个条数：噪声边的危害是在图遍历里传染，
+    /// 「写了 12 条」这个数字对判断噪声毫无帮助，得把 12 条读一遍。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_links: Option<CrossLinkStats>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,7 +208,26 @@ pub fn render_text(report: &Report) -> String {
         c.facts_total,
         c.facts_active
     );
+    if let Some(cl) = &c.cross_links {
+        let _ = writeln!(
+            s,
+            "跨域连接：判定 {}　扫描 {} 条事实 → 候选 {} 对 → 接受 {} 对（度数/批次截掉 {}）→ 写入 {} 行",
+            cl.judge, cl.scanned, cl.candidates, cl.accepted, cl.degree_capped, cl.written
+        );
+    }
     let _ = writeln!(s);
+
+    if let Some(cl) = &c.cross_links
+        && !cl.links.is_empty()
+    {
+        // 边本身必须打出来。「写了 N 条」判断不了噪声，读一遍才行
+        let _ = writeln!(s, "## 本次新增的跨域连接");
+        let _ = writeln!(s);
+        for l in &cl.links {
+            let _ = writeln!(s, "- {l}");
+        }
+        let _ = writeln!(s);
+    }
 
     let _ = writeln!(s, "## 总体");
     let _ = writeln!(s);
@@ -479,6 +504,7 @@ mod tests {
                 facts_total: 0,
                 facts_active: 0,
                 entities: 0,
+                cross_links: None,
             },
             overall: aggregate("全部", &[]),
             by_kind: vec![aggregate("中文语义", &[])],

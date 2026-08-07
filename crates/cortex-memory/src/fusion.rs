@@ -74,7 +74,7 @@ pub struct Fused<T> {
 pub fn rrf<T, K, F>(channels: &[(Channel, Vec<T>)], key: F) -> Vec<Fused<T>>
 where
     T: Clone,
-    K: std::hash::Hash + Eq,
+    K: std::hash::Hash + Eq + Ord,
     F: Fn(&T) -> K,
 {
     let mut acc: HashMap<K, Fused<T>> = HashMap::new();
@@ -96,10 +96,24 @@ where
         }
     }
 
-    let mut out: Vec<Fused<T>> = acc.into_values().collect();
-    // 分数降序；同分时按命中路数多的优先（多路共识更可信）
-    sort_by_score(&mut out);
-    out
+    // 分数降序；同分时按命中路数多的优先（多路共识更可信）；
+    // 再同则按 key 定序 —— **这一层不是洁癖**：
+    //
+    // `into_values()` 给出的是 `HashMap` 的迭代序，它随 hash 种子逐进程变化。
+    // 同分在这里是常态（只被一路捞到、名次又相同的条目一抓一大把），于是
+    // 同一份语料同一套参数跑两遍，top-1 会换人。实测评测跑三遍
+    // R@1 在 0.630/0.640/0.650 之间跳、MRR 跳 0.012 —— 也就是说
+    // **这套评测当时分辨不了小于 0.02 的改动**，而绝大多数调参改动都在这个量级。
+    // 后续的 `apply_*` 用的是稳定排序，只要这里定死，全链路就定死了。
+    let mut out: Vec<(K, Fused<T>)> = acc.into_iter().collect();
+    out.sort_by(|(ka, a), (kb, b)| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.hits.len().cmp(&a.hits.len()))
+            .then_with(|| ka.cmp(kb))
+    });
+    out.into_iter().map(|(_, f)| f).collect()
 }
 
 /// 单路强命中的补偿项 —— RRF 的已知代价的解药。
@@ -183,17 +197,30 @@ fn sort_by_score<T>(fused: &mut [Fused<T>]) {
 ///
 /// 这是**融合之后**的调整，不是第五路召回——领域是过滤维度不是相关性维度。
 /// `boost` 取 1.0 即不加权。
-pub fn apply_domain_boost<T, F>(
+///
+/// # `exempt` —— 为什么需要一个豁免口
+///
+/// 给「当前领域」加分等价于给跨域的减分。绝大多数时候这正是想要的：
+/// 聊代码时不该被上周的会议纪要打断。但有一类结果**按定义就是跨域的**，
+/// 对它们施加同一份惩罚等于把刚架好的桥又压回水里 ——
+/// 那就是 [`crate::crosslink`] 的 `relates_to` 边带出来的那一侧。
+///
+/// `exempt` 返回真的条目**不参与惩罚**（即也拿到 `boost`，与当前领域同权），
+/// 而不是「拿双倍」：豁免的语义是「别惩罚它」，不是「优待它」。
+/// 判定范围的取舍见 `retrieval::bridged_entities`。
+pub fn apply_domain_boost<T, F, X>(
     fused: &mut [Fused<T>],
     current_domain: Option<&str>,
     boost: f64,
     domain_of: F,
+    exempt: X,
 ) where
     F: Fn(&T) -> Option<&str>,
+    X: Fn(&T) -> bool,
 {
     let Some(cur) = current_domain else { return };
     for f in fused.iter_mut() {
-        if domain_of(&f.item) == Some(cur) {
+        if domain_of(&f.item) == Some(cur) || exempt(&f.item) {
             f.score *= boost;
         }
     }
@@ -277,8 +304,111 @@ mod tests {
             |x| x.id,
         );
         assert_eq!(fused[0].item.id, "work");
-        apply_domain_boost(&mut fused, Some("coding"), 2.0, |x| x.domain);
+        apply_domain_boost(&mut fused, Some("coding"), 2.0, |x| x.domain, |_| false);
         assert_eq!(fused[0].item.id, "code", "当前领域的事实应被提上来");
+    }
+
+    #[test]
+    fn domain_boost_exemption_spares_the_bridged_side() {
+        // 跨域连接带出来的那一侧按定义就是跨域的：不豁免就等于架了桥
+        // 又把它压回水里
+        let mut fused = rrf(
+            &[(
+                Channel::Bm25,
+                vec![
+                    Doc {
+                        id: "same-domain",
+                        domain: Some("coding"),
+                    },
+                    Doc {
+                        id: "bridged",
+                        domain: Some("office"),
+                    },
+                ],
+            )],
+            |x| x.id,
+        );
+        let before = fused
+            .iter()
+            .position(|f| f.item.id == "bridged")
+            .expect("应在列表里");
+
+        apply_domain_boost(
+            &mut fused,
+            Some("coding"),
+            1.3,
+            |x| x.domain,
+            |x| x.id == "bridged",
+        );
+        let after = fused
+            .iter()
+            .position(|f| f.item.id == "bridged")
+            .expect("应在列表里");
+        assert!(
+            fused[0].score / fused[1].score < 1.3,
+            "被豁免的一侧应当与当前领域同权，实际分差 {:.3}",
+            fused[0].score / fused[1].score
+        );
+        assert_eq!(before, after, "豁免只是免罚，不该把它顶到别人前面");
+    }
+
+    #[test]
+    fn exemption_is_not_a_double_boost() {
+        // 「免罚」与「优待」是两回事：豁免一条当前领域的事实必须是恒等操作，
+        // 否则同时命中两个条件的条目会拿到 boost²，排序悄悄跑偏
+        let build = || {
+            rrf(
+                &[(
+                    Channel::Bm25,
+                    vec![
+                        Doc {
+                            id: "a",
+                            domain: Some("coding"),
+                        },
+                        Doc {
+                            id: "b",
+                            domain: Some("coding"),
+                        },
+                    ],
+                )],
+                |x| x.id,
+            )
+        };
+        let mut plain = build();
+        apply_domain_boost(&mut plain, Some("coding"), 1.3, |x| x.domain, |_| false);
+        let mut exempted = build();
+        apply_domain_boost(
+            &mut exempted,
+            Some("coding"),
+            1.3,
+            |x| x.domain,
+            |x| x.id == "a",
+        );
+        assert_eq!(
+            plain[0].score, exempted[0].score,
+            "已在当前领域的条目再被豁免一次，分数不该变"
+        );
+    }
+
+    #[test]
+    fn ties_break_by_key_not_by_hash_order() {
+        // 每条各占一路、名次都是 0 ⇒ 分数与命中路数全相等，唯一还能定序的只有 key。
+        // 用十二条而不是三条：`HashMap` 的迭代序随 hash 种子逐进程变化，
+        // 三条时它有六分之一的概率碰巧就是升序，测试会变成偶尔才红的哑弹
+        let ids = [
+            "m4", "b7", "z1", "a9", "q3", "c8", "k2", "w5", "e6", "t0", "n1", "h4",
+        ];
+        let channels: Vec<(Channel, Vec<Doc>)> =
+            ids.iter().map(|id| (Channel::Bm25, vec![d(id)])).collect();
+        let out = rrf(&channels, |x| x.id);
+
+        let mut want = ids;
+        want.sort_unstable();
+        assert_eq!(
+            out.iter().map(|f| f.item.id).collect::<Vec<_>>(),
+            want.to_vec(),
+            "完全同分时必须按 key 升序 —— 否则顺序落回 HashMap 的桶序，             同一份语料跑两遍 top-1 就会换人（实测让评测的 R@1 在 0.630/0.640/0.650 之间跳）"
+        );
     }
 
     #[test]

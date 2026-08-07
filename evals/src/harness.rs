@@ -401,6 +401,127 @@ fn candidate_of(f: &SeedFact, scenario_domain: &str) -> Result<CandidateFact> {
 }
 
 // ══════════════════════════════════════════════════════════
+//  跨域连接（relates_to）
+// ══════════════════════════════════════════════════════════
+
+/// 谁来判「这一对值不值得连」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JudgeKind {
+    /// 不判，预筛过的全接受。**确定性**，可进 CI。
+    ///
+    /// 它不是「关掉判定」而是**对照组**：预筛已经做了跨域、未连通、距离带
+    /// 三道过滤，这一档量的正是那三道过滤单独的精度。没有它就没法回答
+    /// 「模型判定到底买到了什么」。
+    Prefilter,
+    /// 真调廉价模型。质量高但随模型漂移，不适合做回归门。
+    Cheap,
+}
+
+impl std::fmt::Display for JudgeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Prefilter => "prefilter",
+            Self::Cheap => "cheap",
+        })
+    }
+}
+
+/// 跨域连接扫描的配置。`enabled` 为假时整个环节跳过，报告里也不出现。
+#[derive(Debug, Clone, Copy)]
+pub struct CrossLinkOptions {
+    pub enabled: bool,
+    pub judge: JudgeKind,
+    pub min_distance: f64,
+    pub max_distance: f64,
+    pub degree_cap: usize,
+    /// 边的 statement 进不进 BM25/向量索引。默认与生产一致（不进）
+    pub indexed: bool,
+}
+
+impl Default for CrossLinkOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            judge: JudgeKind::Prefilter,
+            min_distance: cortex_memory::crosslink::DEFAULT_MIN_DISTANCE,
+            max_distance: cortex_memory::crosslink::DEFAULT_MAX_DISTANCE,
+            degree_cap: cortex_memory::crosslink::DEFAULT_DEGREE_CAP,
+            indexed: false,
+        }
+    }
+}
+
+/// 扫描的结果，连同每条边的 statement —— 光看条数判断不了噪声，
+/// 得把边本身打出来给人读。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CrossLinkStats {
+    pub judge: String,
+    pub scanned: usize,
+    pub candidates: usize,
+    pub accepted: usize,
+    pub degree_capped: usize,
+    /// 写入的行数（每对关联两行，见 `crosslink::Linker::plan`）
+    pub written: usize,
+    /// 正向那一条的 statement，按写入顺序
+    pub links: Vec<String>,
+}
+
+/// 在语料灌完之后跑一遍跨域连接扫描。
+///
+/// 时机很重要：必须在 ingest **之后**、检索**之前**。夜间扫描在生产里也是
+/// 这个位置 —— 它是离线批处理，不在写入路径上，也不在检索路径上。
+pub async fn build_cross_links(
+    db: &EvalDb,
+    embedder: &SharedEmbedder,
+    opts: CrossLinkOptions,
+) -> Result<CrossLinkStats> {
+    use cortex_memory::crosslink::{AcceptAll, CheapModelJudge, LinkJudge, Linker, StoreCorpus};
+
+    // 回看窗口开到十年：评测语料是刚灌进去的，但 `occurred_at` 跨了好几个月，
+    // 而 `recall_recent` 按 `created_at` 过滤 —— 窗口开大不会多捞到东西，
+    // 只是免得将来有人改了灌库方式之后这里静默扫不到任何事实
+    let corpus = StoreCorpus::new(&db.store).with_window(3650, 200);
+    let linker = Linker::new(DEVICE)
+        .with_distance_band(opts.min_distance, opts.max_distance)
+        .with_degree_cap(opts.degree_cap)
+        .with_indexed(opts.indexed);
+
+    let judge: Box<dyn LinkJudge> = match opts.judge {
+        JudgeKind::Prefilter => Box::new(AcceptAll),
+        JudgeKind::Cheap => Box::new(CheapModelJudge::new(LlmClient::from_env().map_err(
+            |e| anyhow::anyhow!("`--cross-link-judge cheap` 需要 .env 里的供应商 API key：{e}"),
+        )?)),
+    };
+
+    let report = linker
+        .run(&db.store, &corpus, judge.as_ref(), embedder)
+        .await
+        .map_err(|e| anyhow::anyhow!("跨域连接扫描失败：{e}"))?;
+
+    let mut links = Vec::new();
+    for id in &report.written {
+        if let Some(f) = db
+            .store
+            .fact(&id.to_string())
+            .await
+            .map_err(|e| anyhow::anyhow!("读不回刚写的连接：{e}"))?
+        {
+            links.push(f.statement);
+        }
+    }
+
+    Ok(CrossLinkStats {
+        judge: opts.judge.to_string(),
+        scanned: report.scanned,
+        candidates: report.candidates,
+        accepted: report.accepted,
+        degree_capped: report.degree_capped,
+        written: report.written.len(),
+        links,
+    })
+}
+
+// ══════════════════════════════════════════════════════════
 //  跑检索
 // ══════════════════════════════════════════════════════════
 
@@ -424,6 +545,8 @@ pub struct RetrievalConfig {
     pub peak_bonus: f64,
     /// 语义地板（余弦距离上限）。`None` = 用生产默认值
     pub semantic_floor: Option<f64>,
+    /// 跨域桥的域惩罚豁免。默认与生产一致（开）
+    pub bridge_exemption: bool,
     /// 强制关掉语义地板。
     ///
     /// 与 `semantic_floor: None` 不是一回事：`None` 是「按生产默认走」，
@@ -445,6 +568,7 @@ impl Default for RetrievalConfig {
             peak_bonus: 0.04,
             semantic_floor: None,
             no_semantic_floor: false,
+            bridge_exemption: true,
         }
     }
 }
@@ -463,7 +587,8 @@ impl EvalRetriever {
             .with_budget(config.budget)
             .with_recency(config.recency)
             .with_episode_channel(config.episode_channel)
-            .with_peak_bonus(config.peak_bonus);
+            .with_peak_bonus(config.peak_bonus)
+            .with_bridge_exemption(config.bridge_exemption);
         if let Some(t) = config.abstain_below {
             retriever = retriever.with_abstain_below(t);
         }

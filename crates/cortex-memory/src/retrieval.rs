@@ -104,6 +104,61 @@ fn chronological(facts: Vec<Fact>) -> Vec<Fused<Fact>> {
         .collect()
 }
 
+/// 图遍历这一路里，被 `relates_to` 边连上的实体。
+///
+/// # 豁免范围：为什么是「边的两个端点」而不是「整条通道」
+///
+/// [`crate::crosslink`] 架的桥要能真的起作用，域惩罚就得放它一马
+/// （roadmap 原话：「融合时该通道需豁免域惩罚」）。但「豁免整条图遍历通道」
+/// 太宽：图遍历本来就会带出一堆与桥无关的跨域事实（比如「张伟」这种
+/// 天然横跨两域的实体），把它们一并免罚等于借着这个改动顺手削掉了
+/// 域加权的一半作用域，而且没有任何评测依据。
+///
+/// 这里取的是最窄的那个能自洽的范围：**只有当这次召回里确实出现了一条
+/// `relates_to` 边时，才豁免它连着的那两个实体所锚定的事实。** 桥没被走到
+/// （查询压根没命中桥的任何一端）时，这个集合是空的，行为与改动前逐位相同。
+///
+/// 两个端点一起豁免而不是只豁免「远端」，是因为「哪端是远端」取决于当前
+/// 领域，而近端本来就在当前领域、免罚对它是恒等操作
+/// （见 `fusion::exemption_is_not_a_double_boost`）。不用算远端，也就不用
+/// 把种子实体一路传下来。
+///
+/// # 已知的粗糙处
+///
+/// 端点实体的**全部**事实都被免罚，不只是「因为这座桥才被带出来的那些」。
+/// 精确做法要重放一遍遍历路径，而 `recall_graph` 返回的是截断过的结果集，
+/// 重放出来的可达性本身就是错的。所以这里选了一个会略微过宽、但爆炸半径
+/// 不超过图遍历自身的近似 —— 度数上限（`crosslink::DEFAULT_DEGREE_CAP`）
+/// 才是真正把这个半径钉住的东西。
+fn bridged_entities(channels: &[(Channel, Vec<Fact>)]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for (channel, facts) in channels {
+        if *channel != Channel::Graph {
+            continue;
+        }
+        for f in facts {
+            if f.predicate != crate::crosslink::RELATES_TO {
+                continue;
+            }
+            out.insert(f.subject_id.clone());
+            if let Some(obj) = &f.object_entity_id {
+                out.insert(obj.clone());
+            }
+        }
+    }
+    out
+}
+
+fn is_bridged(f: &Fact, bridged: &std::collections::HashSet<String>) -> bool {
+    if bridged.is_empty() {
+        return false;
+    }
+    bridged.contains(&f.subject_id)
+        || f.object_entity_id
+            .as_deref()
+            .is_some_and(|id| bridged.contains(id))
+}
+
 /// 各路的召回宽度。
 ///
 /// 比最终注入条数大一个量级 —— RRF 要有融合空间才有意义，
@@ -278,6 +333,9 @@ pub struct Retriever<E: Embedder> {
     /// 库里没有答案时它照样很高；余弦距离才是模型定标的绝对量。
     /// `None` = 不设地板。
     semantic_floor: Option<f64>,
+    /// 被 `relates_to` 边带出来的那一侧，要不要免掉域惩罚。
+    /// 见 [`bridged_entities`]。留成开关是为了能 A/B。
+    bridge_exemption: bool,
 }
 
 impl<E: Embedder> Retriever<E> {
@@ -321,7 +379,17 @@ impl<E: Embedder> Retriever<E> {
             // RRF 的共识语义名存实亡，注入条数也从 33 涨到 41。
             // 曲线极值不等于对的默认值。
             peak_bonus: 0.04,
+            // roadmap 原话：「融合时该通道需豁免域惩罚」。豁免范围与它
+            // 为什么不是「整条图遍历通道」，见 `bridged_entities`
+            bridge_exemption: true,
         }
+    }
+
+    /// 关掉跨域桥的域惩罚豁免。评测 A/B 用。
+    #[must_use]
+    pub fn with_bridge_exemption(mut self, on: bool) -> Self {
+        self.bridge_exemption = on;
+        self
     }
 
     #[must_use]
@@ -401,11 +469,24 @@ impl<E: Embedder> Retriever<E> {
             });
         }
 
+        // 域惩罚的豁免名单必须在融合**之前**从图遍历那一路算出来：
+        // 融合会把逐路的原始列表揉成一张扁平表，`Fused::hits` 只留了通道名，
+        // 走到那一步就已经分不清「哪条是被桥带出来的」了
+        let bridged = if self.bridge_exemption {
+            bridged_entities(&channels)
+        } else {
+            std::collections::HashSet::new()
+        };
+
         let mut fused = fusion::rrf(&channels, |f: &Fact| f.id.clone());
         self.post_fuse(&mut fused);
-        fusion::apply_domain_boost(&mut fused, domain, self.domain_boost, |f| {
-            f.domain.as_deref()
-        });
+        fusion::apply_domain_boost(
+            &mut fused,
+            domain,
+            self.domain_boost,
+            |f| f.domain.as_deref(),
+            |f| is_bridged(f, &bridged),
+        );
 
         Ok(self.finish(fused, context_window))
     }
