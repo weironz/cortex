@@ -15,6 +15,7 @@ import '../models/tool_call.dart';
 import '../models/workspace.dart';
 import 'app_providers.dart';
 import 'chat_state.dart';
+import 'confirm_controller.dart';
 
 /// Owns sessions, transcripts and the in-flight generation.
 class ChatController extends Notifier<ChatState> {
@@ -530,6 +531,20 @@ class ChatController extends Notifier<ChatState> {
             ),
           ),
         );
+
+      case ChatConfirmEvent(:final request):
+        // Flushed first so any text produced before the agent reached the tool
+        // is on screen while the user decides — the prompt asks them to judge a
+        // command, and the model's own reasoning about it is part of the
+        // evidence.
+        _flushPending();
+        // **Not** terminal. The turn is suspended, not finished: deltas resume
+        // once a receipt lands (or the timeout fires and the agent is told
+        // nobody answered). Committing here would drop the live bubble and make
+        // the resumed output look like a second, unprompted reply.
+        ref
+            .read(confirmControllerProvider.notifier)
+            .offer(request, sessionId: turn.sessionId);
 
       case ChatDoneEvent(:final episodeId):
         _commit(episodeId: episodeId);

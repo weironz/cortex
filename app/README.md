@@ -115,8 +115,20 @@ Mock 不是"塞几条假数据"：它实现同一个 `CortexApi` 接口，按同
 启动 cortexd：
 
 ```bash
-cd .. && cargo run -p cortexd
+cd ..
+cargo run -p cortexd -- --generate-token   # 第一次：生成凭据
+# 摘要那行写进 .env，明文那行给客户端
+cargo run -p cortexd
 ```
+
+**注意认证。** `cortexd` 没配凭据会拒绝启动，所以客户端启动后会先落在登录屏。
+桌面端把明文 token 设成环境变量 `CORTEXD_TOKEN` 就能跳过它：
+
+```bash
+setx CORTEXD_TOKEN "<明文>"    # Windows，设一次，重开应用生效
+```
+
+细节见下面「认证」一节。
 
 ---
 
@@ -128,6 +140,8 @@ lib/
 ├── app.dart                  MaterialApp、主题、滚动行为
 ├── core/                     配置、主题 token、时间格式化、ULID
 ├── models/                   纯数据类，零 Flutter 依赖
+├── auth/
+│   └── token_store*          条件导入：平台分叉点之三（凭据放哪）
 ├── api/
 │   ├── cortex_api.dart       抽象接口 —— UI 只认识它
 │   ├── http_cortex_api.dart  真实实现（HTTP + SSE + WebSocket）
@@ -141,6 +155,7 @@ lib/
 │   ├── sync_controller.dart  /ws 连接管理、客户端游标、面板刷新扇出
 │   └── attachment_controller 附件上传队列（按会话隔离）
 ├── features/
+│   ├── auth/                 登录闸门：地址 + token，401 后回到这里
 │   ├── shell/                三栏自适应外壳
 │   ├── sessions/             左栏上：会话列表、改名、归档
 │   ├── workspace/            左栏下：工作区绑定与文件树
@@ -152,10 +167,11 @@ lib/
     └── ...                   跨 feature 复用的展示组件
 ```
 
-**平台差异只存在于两个条件导入文件里**：`api/http_client_factory*.dart`
-（SSE 的传输）与 `workspace/workspace_fs*.dart`（本机目录读取）。
+**平台差异只存在于三个条件导入文件里**：`api/http_client_factory*.dart`
+（SSE 的传输）、`workspace/workspace_fs*.dart`（本机目录读取）与
+`auth/token_store*.dart`（凭据放哪）。
 `features/` 与 `widgets/` 下没有任何 `kIsWeb` 判断 —— 这是刻意的约束，
-Web 上缺什么由 `kCanBrowseLocalFiles` 这一个常量决定。
+Web 上缺什么由 `kCanBrowseLocalFiles` / `kCanRememberToken` 这两个常量决定。
 
 ---
 
@@ -253,6 +269,120 @@ SSE 解析器 `api/sse.dart` 是自己写的，因为 Dart 生态里两个主流
 一帧内多条 `data:` 用 `\n` 拼接、空行触发派发、`\r\n` 与 `\n` 都认、
 跨 chunk 的半行和跨 chunk 的多字节 UTF-8 都能正确重组
 （网络决定 chunk 边界，不是发送方）。`test/sse_test.dart` 覆盖了这些情况。
+
+### 认证：凭据存在哪，以及为什么两端不一样
+
+`cortexd` **没配凭据就拒绝启动**，所以任何真实部署都开着认证。客户端因此必须有
+一个填地址与 token 的入口，否则它连不上任何真实服务端 —— 那是发版硬阻塞，不是体验问题。
+
+启动时先问一次不需要认证的 `GET /health`，它回一个 `auth: "token" | "disabled"`：
+
+| `/health` 说 | 客户端做什么 |
+|---|---|
+| `disabled` | 直接进主界面。开发机上显式关掉了认证，就不该再逼人填 token（设置里会显示一条醒目提示：这个端口谁连上谁就有全部记忆） |
+| `token` + 手上有凭据 | 拿它换一次 `POST /auth/ticket`，成功就进主界面 |
+| `token` + 手上没有 | 停在登录屏 |
+| 连不上 | 停在登录屏，但文案说的是「先确认地址」而不是「token 不对」—— 这两件事的解法完全相反 |
+
+字段缺失（老 daemon）按**需要凭据**处理。猜 `disabled` 会把用户送进一个每次调用都 401、
+且没有任何入口回到输入框的界面；猜 `token` 最坏只是多问一次。
+
+#### 凭据存在哪
+
+第三个（也是最后一个）平台分叉点：`auth/token_store*.dart`。两端的答案**真的不同**，
+不是「一边有 API 一边没有」：
+
+- **桌面**：读环境变量 `CORTEXD_TOKEN`，本机不留任何副本。这正是
+  `cortexd --generate-token` 打印出来的那一行，照它办就是遵守契约而不是另发明一套。
+  `setx CORTEXD_TOKEN "<token>"` 设一次，之后每次启动都自动带上，用户根本看不到登录屏。
+  **不写明文文件**：没有 OS keychain 绑定的话，那和环境变量同样暴露，还多一份用户
+  早就忘了自己创建过的东西。
+- **Web**：浏览器里**没有**安全的凭据存储 —— `localStorage`、`sessionStorage`、
+  IndexedDB、JS 可读的 cookie，全都会被同源脚本读到。所以能选的只是**暴露多久**。
+  这里只用 `sessionStorage` 且默认不勾：它随标签页关闭而消失，刷新页面还在（那才是
+  真正的痛点），但不跨标签页、不留到明天。开关旁边把这段话原样写出来 —— 一个把
+  「记住」读成「安全保存了」的人，会做出不一样的部署决定。
+
+**没有 `--dart-define=CORTEX_TOKEN`。** 编译期常量会被烤进产物，而 Web 的产物是
+`main.dart.js` —— token 会随页面发给每一个访客。这个口子对桌面也不开：一个在一端能用、
+在另一端泄露的构建开关，是在等下一个人跑 `flutter build web`。
+
+#### 401 自愈
+
+`HttpCortexApi` 上挂一个 `onUnauthorized` 回调，**所有**路由的 401 都经过同一个地方
+（`_failure`）触发它，把整个应用打回登录屏。不用「每个调用点自己判断 `isUnauthorized`」：
+过期可以在十几条路里任何一条上冒出来，而反应永远一样；逐点处理的结局就是有一条被漏掉，
+而它的症状是一个永远空着的面板或者一个不停转的圈。
+
+回调是延后一个 microtask 触发的 —— 它会丢掉凭据、重建 `cortexApiProvider`，
+从而 dispose 掉正握着响应的那个客户端。
+
+#### 票据：给加不了请求头的连接
+
+`EventSource` / `WebSocket` / `<img src>` 在浏览器里加不了 `Authorization`，这是硬限制。
+服务端给了 `POST /auth/ticket` 换一张 60 秒的票，用 `?ticket=` 传；**长期 token 永不进 URL**
+（它会进 access log、反代日志、浏览器历史）。
+
+客户端这边只有 WebSocket 真的需要它：附件走的是 `CortexApi.blobBytes` 取字节而不是
+`Image.network`（为了让 mock 数据源也答得上来），于是图片那条路顺带走了请求头。
+票在实例里缓存并留 10 秒余量：服务端的票在有效期内**可重复使用**（`TicketBook::valid`
+不消费它），正是为了不让一页图片和一次重连各换一张。并发调用共享同一个在途请求 ——
+daemon 重启时所有标签页会同时重连，而票据表只在签发时清理，浪费的那条路恰好也是让它变大的那条。
+
+> 联调时踩到的一个坑：`POST /auth/ticket` **不能带请求体**，连 `{}` 都不行。
+> 那个 handler 不读 body，hyper 于是关掉连接而不是放回 keep-alive 池；`IOClient`
+> 不知情，把死 socket 交给下一个请求，表现为「第一次换票成功、第二次 Write failed」。
+> 客户端改成不发 body 即可，服务端没有问题 —— 但任何往这个端点发 JSON 的客户端都会中招。
+
+### 工具确认弹层
+
+高风险工具（`Risk::Execute`，也就是 `shell`）执行前，服务端发一条 SSE `confirm` 事件
+并**把那一轮挂起**，等客户端回执。
+
+```
+{"type":"confirm","token":"<64 hex>","tool":"shell","risk":"execute",
+ "preview":"command: rm -rf …","timeout_secs":180}
+```
+
+三条路都会产出同一个 `PendingConfirmation`，按 token 去重：
+
+1. **SSE 事件** —— 正常情况
+2. **`GET /confirmations`（重连后）** —— SSE 流是一次性的、没有 `Last-Event-ID` 重放，
+   断线时在途的那条请求**再也不会重发**。没有这次轮询，那一轮会一直挂到超时，
+   而界面上没有任何东西解释为什么卡住了
+3. **`GET /confirmations`（第二台设备）** —— 待确认簿是共享的，不属于问出它的那条连接
+
+触发点是 `SyncController` 收到 `hello` 的那一刻：那是客户端唯一能可靠知道「刚建立/重建了
+连接」的时刻。确认请求刻意**不**走 `/ws` 广播 —— 那条通道的契约是「只推信号不推数据」。
+
+#### 预览：这个弹层的全部价值所在
+
+「agent 想执行一个工具」这种话没有信息量。用户要看到的是**那条命令本身**：
+
+- **等宽字**。`rm -rf /tmp/x` 与 `rm -rf /tmp /x` 差一个空格，比例字体下长得一样
+- **一个字都不截**。服务端 `preview_of` 已经在 8 KiB 处截过一次并留了显式标记；
+  客户端再截一刀，切掉的正好是 `| sh` 那一半，而用户批准的就是他没看见的那一半。
+  超长的**滚动**，不省略 —— 出现滚动条本身就是「下面还有」的信号
+- **可选中**。值得被问一次的命令，也值得粘出去好好读
+- **保留换行**。服务端逐行渲染 `键: 值` 而不是压成一行 JSON，同理：转义过的
+  `\"` 和 `\n` 会把一条命令读成另一条
+
+#### 几个具体决定
+
+| 决定 | 为什么 |
+|---|---|
+| 钉在输入框上方，**不做模态** | 要判断「这条命令该不该跑」，依据正是弹层背后的那段对话：用户提了什么、模型说它要干什么。模态遮住的恰好是这个。钉着一样躲不掉，还能继续滚动看上下文 |
+| **所有**待确认都显示，不按当前会话过滤 | 过滤掉的正好是恢复端点存在的那个场景 —— 别的设备问出来的、或者重连后捞回来的。它们稀少且自己会过期，全显示不花什么，漏一条却是一轮永久挂起。不属于当前会话的会标出它属于谁 |
+| 倒计时可见，并写明零点之后会发生什么 | 服务端超时是**静默**的：到点按拒绝处理然后继续。一个看起来还能点的框，会让用户在决定早已替他做完之后三十秒才点下去 |
+| 倒计时用**时长**算，不读 `asked_at` | 服务端发的是 `timeout_secs` / `expires_in_secs`，正是为了不必比较两端的时钟。读时间戳的话，一台快三分钟的机器上每条确认都是「已过期」 |
+| 恢复轮询**不覆盖**已有的截止时间 | 否则每次重连闪断都会把倒计时拨回满格，那个数字就不再有意义 |
+| 收到服务端确认之前**不**乐观撤掉提示 | 乐观撤掉会对一条其实输掉了竞争的回执显示「已允许」—— 而这个弹层存在的唯一理由，就是让用户对「将会发生什么」的认知与实际发生的一致 |
+| 404 **不是**错误 | 一次性凭据被消费掉有四种正常原因（别的设备先答、超时、那一轮结束、daemon 重启），服务端刻意不区分。画成红色错误等于把多端设计**期望**发生的事标成故障。这里说的是「你这次点击没有生效」，中性样式 |
+| `CortexApiException.isUnsupported` 在这条路上**不能用** | 它把 404 当成「这个 daemon 没有这条路由」。回执的 404 是最常见的正常情况，走那条分支会把它变成一个吓人的降级提示 |
+
+离线也走得到：`MockCortexApi` 认同一个触发口令 `#confirm`（抄自 `cortexd::state::
+MOCK_CONFIRM_TRIGGER`），登记、挂起、超时按拒绝、回执一次性——行为与 daemon 对齐。
+做成口令而不是每轮都问，理由和服务端一样：每轮都问会让 mock 上随便聊两句都先卡满一个超时。
 
 ### 实时同步：`GET /ws` 只推信号
 
@@ -423,6 +553,12 @@ agent 照常读写，只是浏览器看不到那台机器的磁盘 —— 而对
 
 ## 已实现
 
+- **认证**：`/health` 的 `auth` 字段驱动的登录闸门（关着认证就不问 token）、
+  桌面读 `CORTEXD_TOKEN` 环境变量 / Web 可选 `sessionStorage`、
+  任意路由上的 401 都回到登录态、`POST /auth/ticket` 换短命票据给 WebSocket 用
+- **工具确认弹层**：钉在输入框上方，命令预览等宽、可选中、一字不截，
+  可见倒计时并写明零点按拒绝处理；重连后从 `GET /confirmations` 捞回待办；
+  晚到回执的 404 按正常情况呈现
 - 三栏自适应布局：`≥1240px` 三栏常驻；`900–1240px` 记忆面板转抽屉；`<900px` 两侧都转抽屉
 - **统一入口**：一条对话流，会话可绑定工作区；绑定与否只改变工具目录，不改变界面结构
 - **工作区**：标题栏绑定入口、可折叠只读文件树（懒加载一层）、更换与解绑、
@@ -469,7 +605,8 @@ agent 照常读写，只是浏览器看不到那台机器的磁盘 —— 而对
 | 一页多大由客户端拍 | `kEpisodePage = 40`。服务端上限 500，没有「推荐值」的说法，40 是照着原来的渲染窗口定的，没有实测支撑 |
 | 对话流的自动重试 | WS 有指数退避自动重连，但 `POST /chat` 断了仍只有手动「重试」按钮 |
 | Web 端 WS 的运行时验证 | `flutter build web --release` 通过（说明 WS 这条路径没有漏进 `dart:io`），但**没有在真实浏览器里跑过一次连接**。`web_socket_channel` 在 web 上走浏览器 `WebSocket`，与 SSE 当年那个 `XMLHttpRequest` 坑不是同一类问题，不过在浏览器里点一次才算数 |
-| 工具调用的确认回路 | 后端 `ApprovalPolicy.enforce = false`，尚无 `ConfirmRequest` 事件，客户端也就没有确认弹层 |
+| 多租户 / 多用户 | 服务端明确不做（见 `cortexd::auth` 末尾那段），客户端因此也只有一份凭据、没有「切换用户」 |
+| 桌面端记住 token | 不做。见「凭据存在哪」——没有 OS keychain 绑定的明文文件比环境变量更差 |
 | 国际化 | 文案硬编码中文，未接 `flutter_localizations` |
 
 ---
@@ -480,12 +617,17 @@ agent 照常读写，只是浏览器看不到那台机器的磁盘 —— 而对
 flutter test                       # 全部（live 用例在 daemon 不在时自动跳过）
 flutter test --exclude-tags live   # CI：只跑不依赖 daemon 的
 flutter analyze
+
+# live 用例要凭据，否则会在一个开着认证的 daemon 上全 401
+CORTEXD_TOKEN=<明文> flutter test test/live_backend_test.dart
 ```
 
 | 文件 | 覆盖什么 |
 |---|---|
+| `test/auth_test.dart` | `/health` 的 `auth` 三态（含「老 daemon 缺字段按需要凭据处理」）、凭据只走请求头**绝不进查询串**、直传对象存储时**不带** token、票据缓存与「WS 连接前先换票」、任何一条路上的 401 都触发自愈、闸门状态机六条（含「环境变量里的 token 自动用掉」与「它被拒时落到登录屏」） |
+| `test/confirm_test.dart` | `confirm` 事件自足解码、倒计时来自**时长**不是时间戳、`expires_in_secs: 0` 不被当成缺字段、允许/拒绝各投一条真回执、**404 是正常结果不是错误**、传输故障才算错误且待办留着、不乐观撤销、重连恢复（去重 + 不重置倒计时 + 失败静默 + 过期不捞回）、超时自撤、弹层四条（预览一字不截且等宽、倒计时可见并写明零点行为、按钮真发回执、别的会话也显示） |
 | `test/sse_test.dart` | SSE 解析边界：chunk 切割、keep-alive、CRLF、跨 chunk 的多字节 UTF-8 |
-| `test/sync_controller_test.dart` | **游标语义**（附「用事件 cursor 会漏行」的反例断言）、bump/resync 分开计数、断线退避重连、服务端谎报 `has_more` 不死循环、按表分派刷新、mock 下不连接 |
+| `test/sync_controller_test.dart` | **游标语义**（附「用事件 cursor 会漏行」的反例断言）、bump/resync 分开计数、断线退避重连、服务端谎报 `has_more` 不死循环、按表分派刷新、mock 下不连接、**每次 `hello` 都去捞一遍待确认**（重连恢复的触发点） |
 | `test/tool_pairing_test.dart` | 两条 `tool` 事件折成一行、同工具连调两次仍是两行、失败结果被标记、摘要换了措辞也不丢字 |
 | `test/chat_turn_test.dart` | 走 mock 打完整一轮：配对结果、弃权时记忆为空且不算失败；`MemoryDrawer` 的形态：弃权说明、流式常驻工具行、失效事实带标记仍列出、被抹除的显示占位、文件行显示 `path` 而不是整串参数 |
 | `test/streaming_render_test.dart` | 固定夹具逐 token 重放：未闭合围栏从第一个 token 起就是代码块、元素不被重建、Rust 真的多色高亮 |
@@ -495,7 +637,7 @@ flutter analyze
 | `test/history_replay_test.dart` | 首屏带 `limit` 且不带游标、超过一页时拿到的是**结尾**、往上翻真的发请求且**前置**而不是追加、翻到头后 `has_more` 落下且不再发请求、**列表引用稳定**（回归防线，见下）、翻页失败不清空已有对话、附件带回文件名、**抽屉从提问挪到回答**、没有回答那一轮留在提问上、失效/被抹除的记忆都出现；`MockCortexApi` 自己也真分页（畸形游标同样 400） |
 | `test/attachment_test.dart` | 门槛与 `DIRECT_UPLOAD_LIMIT` 对齐、边界值仍走中转、直传三步、`already_uploaded` 跳过上传且进度补满、501 不回退、队列按会话隔离、失败留字节可重试、切数据源清空队列 |
 | `test/session_management_test.dart` | 归档默认不列出 / 开关打开才出现、归档不是删除、标题栏工作区入口的两种形态、改名后 `title_is_custom` 置位 |
-| `test/live_backend_test.dart` <sup>live</sup> | 真实 daemon：health / sessions / memory / episodes / `as_of` 回放、`/chat` 增量与工具成对、`/ws` 信号 + `/sync` 游标语义（含反例）、**默认给最新一页且页内正序**、**`?before=` 翻页严格更早且不重复**、**畸形游标是 400 不是 500**、**附件带回 filename / MIME / 大小**、PATCH 改名 / 归档 / 工作区三态、非法路径的错误原文、blob 中转上传与哈希两端一致、presign 的 `already_uploaded`、带附件的一轮对话、**工具事件自带 `path`** / 未绑定拿不到文件工具 |
+| `test/live_backend_test.dart` <sup>live</sup> | 真实 daemon：**`/health` 免认证且报出 `auth`**、**没凭据的受保护路由回 401 且客户端自愈**、**`POST /auth/ticket` 换到的票真能开 WebSocket**、**确认回路全程**（预览自带、待办可列出、回执被接受、重投拿 404、批准后继续吐字）、伪造 token 拿 404、空待办是空列表；health / sessions / memory / episodes / `as_of` 回放、`/chat` 增量与工具成对、`/ws` 信号 + `/sync` 游标语义（含反例）、**默认给最新一页且页内正序**、**`?before=` 翻页严格更早且不重复**、**畸形游标是 400 不是 500**、**附件带回 filename / MIME / 大小**、PATCH 改名 / 归档 / 工作区三态、非法路径的错误原文、blob 中转上传与哈希两端一致、presign 的 `already_uploaded`、带附件的一轮对话、**工具事件自带 `path`** / 未绑定拿不到文件工具 |
 | `test/live_render_test.dart` <sup>live</sup> | 把**真实**回复逐块喂进真实 widget 树 |
 
 两条容易被后来的改动悄悄破坏、因此单独钉住的不变量：
@@ -576,7 +718,51 @@ daemon 重启后客户端在退避窗口内自行重连（日志里一条 `GET /
 （工具目录里确实没有文件工具），但「未绑定拿不到文件工具」这条断言因此不能看工具名 ——
 现在看的是「有没有**成功的**文件调用」。
 
+#### 认证 / 工具确认这一批的联调结果
+
+对一个**开着认证**的真实 daemon 跑通。凭据用 `cortexd --generate-token` 现生成一份，
+摘要给服务端、明文给客户端。当时 `crates/` 正被另一个 agent 改到编译不过，
+所以 daemon 是在一个干净 commit 的 `git worktree` 上另起的（跑完已删）。
+
+对**真实后端**（Postgres + DeepSeek + RustFS 的 S3）：`live_backend_test.dart` 25 条全绿。
+
+| 验证点 | 结果 |
+|---|---|
+| `GET /health` 免认证 | 不带任何凭据也回 200，且带 `"auth":"token"` —— 一个还没有 token 的客户端确实问得出「要不要找一个」 |
+| 没凭据 / 错凭据 | 都回 `401` + `WWW-Authenticate`，正文是那句「请带上 Authorization…」。两种情况**不可区分**，客户端也就照样不区分 |
+| 401 自愈 | `onUnauthorized` 确实被触发了一次，应用回到登录屏 |
+| 正确凭据 | 全部 24 条既有 live 用例照常通过 —— 加了认证之后协议层没有别的变化 |
+| `POST /auth/ticket` → WS | 换到的票据以 `?ticket=` 连上 `/ws` 并收到 `hello`。**浏览器加不了头**那条路是真的通的 |
+
+对**mock 后端**（把 `DATABASE_URL` 指向死端口逼它回落，因为 `#confirm` 口令只在
+`Backend::Mock` 里）：
+
+| 验证点 | 结果 |
+|---|---|
+| SSE `confirm` 事件 | 自带 `token` / `tool` / `risk="execute"` / `preview` / `timeout_secs`，不依赖前面那条 `tool` 事件 |
+| `GET /confirmations` | 列得出刚才那条，且**带 `session_id`**（SSE 事件不带）——重连恢复这条路是真的 |
+| `POST /confirmations` | 回执被接受；**同一个 token 再投一次回 404** —— 「别的设备先答了」在晚到那一方看到的正是这个 |
+| 批准之后 | 那一轮真的解开并继续吐字。挂起不是错误、不该 commit 掉流式气泡，这一条得到了证实 |
+| 伪造 token | 404 而不是 500 或静默成功 |
+
+> 联调时发现并已修掉的一个客户端 bug：`POST /auth/ticket` 带 `{}` 请求体会毒化
+> `IOClient` 的连接池（第一次换票成功、第二次 `Write failed`）。原因是那个 handler
+> 不读 body，hyper 于是关连接而不放回池子。改成不发 body 即可 —— **服务端没有问题**，
+> 但任何往这个端点发 JSON 的客户端都会中招，值得写进契约。
+
 只用 mock 验证、没有真联调的部分：
+
+- **真实高风险工具触发的确认**。上面的确认回路是对 daemon 的 mock 后端跑通的
+  （`#confirm` 口令）。接真模型的那条路上没跑到 —— 当时那台机器的
+  `cortex_agent::sandbox` 报「windows 上没有可用的进程级沙箱，命令执行将被拒绝」，
+  也就是说 `shell` 工具本来就不会真的执行。事件形状、凭据形状、超时行为在两条路上
+  是同一份代码（`ConfirmRegistry`），但「真有一条 shell 命令在等着跑」这个场景没有验证过。
+- **确认的超时分支**。单测覆盖了（客户端本地倒计时归零后自撤并标为已超时），
+  但没有真的让一条服务端确认挂满 `CORTEX_CONFIRM_TIMEOUT_SECS` 再看两端是否一致。
+- **Web 端的登录流程**。`flutter build web --release` 通过，但浏览器里没点过：
+  `sessionStorage` 的读写、勾选「记住」之后刷新页面是否真的免登录、以及票据在
+  浏览器 `WebSocket` 上是否被接受，都还只是「编译得过」。桌面端那条（环境变量 →
+  自动登录）是真跑过的。
 
 - **> 32 MiB 的直传上传**（presign → PUT → commit 的完整三步）。`already_uploaded`
   与 501 两条分支联调过了，但真往对象存储 PUT 一个 32 MiB 以上的文件没做 ——

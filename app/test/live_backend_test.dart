@@ -1,6 +1,7 @@
 @Tags(['live'])
 library;
 
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -9,6 +10,7 @@ import 'package:cortex_app/api/blob_upload.dart';
 import 'package:cortex_app/api/http_cortex_api.dart';
 import 'package:cortex_app/core/hashing.dart';
 import 'package:cortex_app/models/chat_event.dart';
+import 'package:cortex_app/models/health_status.dart';
 import 'package:cortex_app/models/session_detail.dart';
 import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/tool_call.dart';
@@ -29,6 +31,29 @@ import 'package:flutter_test/flutter_test.dart';
 /// every request with 400, for the whole suite. The rendering counterpart lives
 /// in `live_render_test.dart`, which re-enables real HTTP inside a zone.
 const _baseUrl = 'http://127.0.0.1:8080';
+
+/// The credential every case here connects with.
+///
+/// Read from the environment rather than hard-coded, because a real `cortexd`
+/// **refuses to start** without credentials configured — so a suite that
+/// connected anonymously would 401 on every case against any daemon anyone
+/// actually runs. This is the same variable `cortexd --generate-token` prints.
+///
+///     CORTEXD_TOKEN=<明文> flutter test test/live_backend_test.dart
+///
+/// Null against a daemon started with `CORTEX_AUTH=disabled`, where it is not
+/// needed and sending one would be noise.
+final String? _token = () {
+  final raw = Platform.environment['CORTEXD_TOKEN']?.trim();
+  return (raw == null || raw.isEmpty) ? null : raw;
+}();
+
+HttpCortexApi _api({String? token, void Function()? onUnauthorized}) =>
+    HttpCortexApi(
+      baseUrl: _baseUrl,
+      token: token ?? _token,
+      onUnauthorized: onUnauthorized,
+    );
 
 Future<bool> _daemonUp() async {
   try {
@@ -51,7 +76,7 @@ void main() {
 
   test('GET /health', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final health = await api.health();
@@ -61,7 +86,7 @@ void main() {
 
   test('GET /sessions', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final sessions = await api.sessions();
@@ -72,7 +97,7 @@ void main() {
 
   test('GET /memory/search returns facts with retrieval channels', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final result = await api.searchMemory('Flutter', limit: 5);
@@ -89,7 +114,7 @@ void main() {
 
   test('as_of replays transaction time', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final now = await api.searchMemory('Flutter', limit: 5);
@@ -110,7 +135,7 @@ void main() {
 
   test('GET /episodes/{id} resolves a fact back to its source', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final result = await api.searchMemory('Flutter', limit: 1);
@@ -129,7 +154,7 @@ void main() {
   /// turn correct server behaviour into a red test.
   test('POST /chat：增量只增不减，工具事件成对，done 收尾', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final sessions = await api.sessions();
@@ -164,6 +189,15 @@ void main() {
           final next = accumulated + text;
           expect(next.startsWith(accumulated), isTrue);
           accumulated = next;
+        case ChatConfirmEvent(:final request):
+          // This prompt asks to read a file, so no `Risk::Execute` tool should
+          // be reached. If one is, the turn is now suspended waiting for a
+          // receipt that this test will never send — it would hang until the
+          // daemon's timeout. Failing immediately says what happened.
+          fail(
+            '这一轮不该触发高风险确认，但收到了 ${request.tool}（${request.risk}）：'
+            '${request.preview}',
+          );
         case ChatDoneEvent():
           break;
         case ChatErrorEvent(:final message):
@@ -196,7 +230,7 @@ void main() {
 
   test('GET /ws 只推信号，补拉一律用客户端自己的游标', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final events = <SyncEvent>[];
@@ -283,7 +317,7 @@ void main() {
 
   test('GET /sessions/{id} 默认给最新一页，附件带元信息', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final sessions = await api.sessions();
@@ -327,7 +361,7 @@ void main() {
 
   test('?before= 往回翻，翻出来的严格更早且不重复', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     // 找一个至少有两页（这里 1 条一页）的会话
@@ -364,7 +398,7 @@ void main() {
 
   test('畸形游标是 400，不是 500', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final sessions = await api.sessions();
@@ -383,7 +417,7 @@ void main() {
 
   test('PATCH /sessions/{id} 改名并回写 title_is_custom', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final target = (await api.sessions()).first;
@@ -401,7 +435,7 @@ void main() {
 
   test('归档与取消归档，include_archived 决定它出不出现在列表里', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final target = (await api.sessions()).first;
@@ -428,7 +462,7 @@ void main() {
 
   test('工作区三态：绑定 / 不动 / 解绑', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final target = (await api.sessions()).first;
@@ -459,7 +493,7 @@ void main() {
 
   test('非法工作区路径带回可直接展示给用户的理由', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final target = (await api.sessions()).first;
@@ -492,7 +526,7 @@ void main() {
 
   test('POST /blobs 中转上传，哈希由内容决定且可原样取回', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final bytes = _tinyPng();
@@ -527,7 +561,7 @@ void main() {
 
   test('presign 对已存在的内容直接说 already_uploaded', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final bytes = _tinyPng();
@@ -556,7 +590,7 @@ void main() {
 
   test('带附件的一轮对话：blob 先登记，再由 /chat 关联到 episode', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final attachment = await uploadAttachment(
@@ -602,7 +636,7 @@ void main() {
 
   test('绑定工作区后，文件工具事件带回结构化的 path', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final sessionId = 'live-ws-${DateTime.now().millisecondsSinceEpoch}';
@@ -646,7 +680,7 @@ void main() {
 
   test('未绑定工作区的会话拿不到文件工具', () async {
     if (!up) return markTestSkipped('cortexd not running');
-    final api = HttpCortexApi(baseUrl: _baseUrl);
+    final api = _api();
     addTearDown(api.dispose);
 
     final sessionId = 'live-nows-${DateTime.now().millisecondsSinceEpoch}';
@@ -681,6 +715,175 @@ void main() {
           '纯聊天会话的工具目录里根本没有文件工具（WORKSPACE_FREE_TOOLS），'
           '这正是「绑定与否」在产品上唯一的差别；'
           '实际拿到：${calls.map((c) => "${c.name}/${c.result}").toList()}',
+    );
+  });
+
+  // ───────────────────────────── 认证 ─────────────────────────────
+
+  test('GET /health 不需要认证，并说明本部署到底开没开', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    // 刻意不带任何凭据：这是唯一一条免认证的路由，而一个还没拿到 token 的
+    // 客户端只能靠它回答「我要不要去找一个 token」
+    final api = _api(token: '');
+    addTearDown(api.dispose);
+
+    final health = await api.health();
+    expect(
+      health.auth,
+      anyOf('token', 'disabled'),
+      reason: '没有这一行，「我到底有没有被保护」就只能去翻服务器上的环境变量',
+    );
+    expect(health.auth, isNot(HealthStatus.authUnknown));
+  });
+
+  test('没有凭据时受保护的路由回 401，且客户端能自愈', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final probe = _api(token: '');
+    addTearDown(probe.dispose);
+    if ((await probe.health()).authDisabled) {
+      return markTestSkipped('这个 daemon 关闭了认证，401 这条路走不到');
+    }
+
+    var fired = 0;
+    final api = _api(token: 'not-the-token', onUnauthorized: () => fired++);
+    addTearDown(api.dispose);
+
+    await expectLater(
+      api.sessions(),
+      throwsA(
+        isA<CortexApiException>().having(
+          (e) => e.isUnauthorized,
+          'isUnauthorized',
+          isTrue,
+        ),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(fired, 1, reason: '401 必须把客户端打回登录态，而不是留下一个空白面板');
+  });
+
+  test('POST /auth/ticket 换到的票据能开 WebSocket', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = _api();
+    addTearDown(api.dispose);
+
+    final ticket = await api.issueTicket();
+    expect(ticket.value, isNotEmpty);
+    expect(
+      ticket.isUsableAt(DateTime.now()),
+      isTrue,
+      reason: '刚签出来的票必须是可用的，否则 WS 永远连不上',
+    );
+
+    // 真连一次：`watchSync` 内部先换票再握手，这一条同时验证了
+    // 「票据确实被服务端接受」与「浏览器加不了头这条路真的走得通」
+    final first = await api.watchSync().first.timeout(
+      const Duration(seconds: 10),
+    );
+    expect(first, isA<SyncHello>());
+  });
+
+  // ─────────────────────── 工具确认（R11）───────────────────────
+
+  test('确认回路：请求自带预览，回执被接受，晚到的拿 404', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = _api();
+    addTearDown(api.dispose);
+
+    final sessionId = 'live-confirm-${DateTime.now().millisecondsSinceEpoch}';
+    ChatConfirmEvent? asked;
+    final texts = StringBuffer();
+
+    // `#confirm` 是 cortexd mock 后端的触发口令（`MOCK_CONFIRM_TRIGGER`）。
+    // 接了真模型的部署上这一条会拿不到确认事件而跳过 —— 那也是对的：
+    // 让一个真的 shell 命令挂起在 CI 上不是这条用例该做的事
+    final stream = api.chat(sessionId: sessionId, message: '#confirm 试一下确认回路');
+    late final StreamSubscription<ChatEvent> sub;
+    sub = stream.listen((event) {
+      if (event is ChatConfirmEvent) asked = event;
+      if (event is ChatDeltaEvent) texts.write(event.text);
+    });
+    addTearDown(sub.cancel);
+
+    // 等确认请求到达，最多几秒
+    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    while (asked == null && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    final request = asked;
+    if (request == null) {
+      return markTestSkipped('这个部署没有触发确认（多半接的是真模型，不是 mock 后端）');
+    }
+
+    expect(request.request.tool, isNotEmpty);
+    expect(
+      request.request.risk,
+      anyOf('execute', 'write'),
+      reason: '风险等级要能被画成一个标签，未知值必须原样透出而不是降级成最轻的那个',
+    );
+    expect(
+      request.request.preview,
+      isNotEmpty,
+      reason: '预览是用户据以判断的全部依据。「agent 想执行一个工具」这种话没有信息量',
+    );
+    expect(
+      request.request.remainingFrom(DateTime.now()).inSeconds,
+      greaterThan(0),
+      reason: '倒计时得有个正数可画 —— 超时是静默的，用户必须知道自己还有多久',
+    );
+
+    // 待办列表里必须能看到它 —— 这就是断线重连后捞回来的那条路
+    final pending = await api.pendingConfirmations(sessionId: sessionId);
+    expect(
+      pending.map((c) => c.token),
+      contains(request.request.token),
+      reason: 'SSE 断了不会重发；GET /confirmations 是重连后唯一的答案',
+    );
+    expect(
+      pending.first.sessionId,
+      sessionId,
+      reason: '恢复端点带 session_id（SSE 事件不带），客户端据此知道该跳去哪个会话',
+    );
+
+    // 回执被接受
+    expect(
+      await api.answerConfirmation(token: request.request.token, allow: true),
+      isTrue,
+    );
+
+    // 同一个 token 再投一次 —— 这正是「别的设备先答了」在晚到那一方看到的样子
+    expect(
+      await api.answerConfirmation(token: request.request.token, allow: true),
+      isFalse,
+      reason: '一次性凭据：先到的作数，晚到的拿 404。这是正常情况，不是错误',
+    );
+
+    // 答复真的解开了那一轮
+    await _until(() => texts.isNotEmpty, '批准之后继续吐字');
+  });
+
+  test('GET /confirmations 在没有待办时是空列表而不是 404', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = _api();
+    addTearDown(api.dispose);
+
+    expect(
+      await api.pendingConfirmations(
+        sessionId: 'no-such-session-${DateTime.now().microsecondsSinceEpoch}',
+      ),
+      isEmpty,
+    );
+  });
+
+  test('伪造的回执 token 拿到 404，而不是 500 或静默成功', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = _api();
+    addTearDown(api.dispose);
+
+    expect(
+      await api.answerConfirmation(token: 'deadbeef' * 8, allow: true),
+      isFalse,
+      reason: '伪造的、已被答过的、超时的、那一轮早结束的 —— 服务端刻意不区分这四种',
     );
   });
 }

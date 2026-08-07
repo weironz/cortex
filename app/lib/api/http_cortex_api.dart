@@ -14,6 +14,7 @@ import '../models/episode.dart';
 import '../models/health_status.dart';
 import '../models/json.dart';
 import '../models/memory_search_result.dart';
+import '../models/pending_confirmation.dart';
 import '../models/session_detail.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
@@ -24,12 +25,45 @@ import 'sse.dart';
 
 /// Talks to a real `cortexd` over HTTP + SSE.
 class HttpCortexApi implements CortexApi {
-  HttpCortexApi({required String baseUrl, http.Client? client})
-    : _base = _normalise(baseUrl),
-      _client = client ?? createHttpClient();
+  HttpCortexApi({
+    required String baseUrl,
+    String? token,
+    http.Client? client,
+    this.onUnauthorized,
+  }) : _base = _normalise(baseUrl),
+       _token = (token != null && token.trim().isEmpty) ? null : token?.trim(),
+       _client = client ?? createHttpClient();
 
   final Uri _base;
   final http.Client _client;
+
+  /// The long-lived bearer credential, or null against a daemon running with
+  /// `CORTEX_AUTH=disabled`.
+  ///
+  /// Immutable for the life of the instance: a token change means a *different*
+  /// identity, and `cortexApiProvider` rebuilds the whole client for it. Making
+  /// it settable would leave in-flight requests straddling two identities and
+  /// would keep a stale token alive inside closures.
+  final String? _token;
+
+  /// Called once whenever the daemon answers 401.
+  ///
+  /// A callback rather than "every caller checks `isUnauthorized`": expiry can
+  /// surface on *any* of a dozen routes, and the reaction is always the same
+  /// (fall back to the login gate). Handling it per call site is how you end up
+  /// with the one path that forgot — and its symptom is a permanently empty
+  /// pane or a spinner that never resolves, which is exactly what this must
+  /// prevent.
+  final void Function()? onUnauthorized;
+
+  /// Cached short-lived ticket for connections that cannot carry a header.
+  ///
+  /// Cached rather than minted per use because the daemon's tickets are
+  /// explicitly *reusable within their minute* — `TicketBook::valid` does not
+  /// consume them, precisely so a page of images and a reconnecting socket do
+  /// not each need their own round trip.
+  AuthTicket? _ticket;
+  Future<AuthTicket>? _ticketInFlight;
 
   static Uri _normalise(String raw) {
     var s = raw.trim();
@@ -50,11 +84,44 @@ class HttpCortexApi implements CortexApi {
 
   /// `http` → `ws`, `https` → `wss`. Same origin as everything else, so a
   /// deployment only ever has one host to configure.
-  Uri get _wsUri =>
-      _uri('/ws').replace(scheme: _base.scheme == 'https' ? 'wss' : 'ws');
+  ///
+  /// [ticket] rides in the query string, and **only** a ticket ever may. See
+  /// [issueTicket]: the long-lived token is barred from URLs because they are
+  /// logged in three places the body never reaches.
+  Uri _wsUri(String? ticket) =>
+      _uri('/ws', {'ticket': ?ticket})
+          .replace(scheme: _base.scheme == 'https' ? 'wss' : 'ws');
 
   @override
   String get label => '$_base · $kHttpClientKind';
+
+  /// Request headers with the bearer credential folded in.
+  ///
+  /// Never applied to [putPresigned]: those bytes go straight to the object
+  /// store, which is a different party. Sending cortexd's token there would
+  /// hand a third-party service a credential to the entire memory store, and
+  /// S3's signature covers the header set anyway — it would break the upload
+  /// while leaking the secret.
+  Map<String, String> _headers([Map<String, String> extra = const {}]) => {
+    ...extra,
+    if (_token case final token?) 'authorization': 'Bearer $token',
+  };
+
+  /// Builds the exception for a >= 400 response and, on 401, rings the bell.
+  ///
+  /// Centralised so no route can forget: the whole point of [onUnauthorized] is
+  /// that expiry is noticed wherever it happens, not only on the routes someone
+  /// remembered to annotate.
+  CortexApiException _failure(int status, String message) {
+    if (status == 401 && onUnauthorized != null) {
+      // Deferred: the listener drops the credential, which rebuilds
+      // `cortexApiProvider` and disposes *this* instance — including the HTTP
+      // client whose response we are still holding. Letting that happen a
+      // microtask later keeps the unwind on this call stack ordinary.
+      scheduleMicrotask(onUnauthorized!);
+    }
+    return CortexApiException(message, statusCode: status);
+  }
 
   @override
   Future<HealthStatus> health() async =>
@@ -121,10 +188,10 @@ class HttpCortexApi implements CortexApi {
     try {
       response = await _client.patch(
         _uri('/sessions/${Uri.encodeComponent(id)}'),
-        headers: const {
+        headers: _headers(const {
           'content-type': 'application/json',
           'accept': 'application/json',
-        },
+        }),
         body: jsonEncode(body),
       );
     } on Object catch (e) {
@@ -132,7 +199,8 @@ class HttpCortexApi implements CortexApi {
     }
 
     if (response.statusCode >= 400) {
-      throw CortexApiException(
+      throw _failure(
+        response.statusCode,
         // A daemon that predates the route answers 405 (the path exists, but
         // only for GET) with an empty body. Anything else — notably the
         // workspace validator's 400 — carries a message written for the user,
@@ -140,7 +208,6 @@ class HttpCortexApi implements CortexApi {
         response.statusCode == 405 || response.statusCode == 404
             ? 'cortexd 还没有 PATCH /sessions/{id}，改动只在本地生效。'
             : _errorMessage(response),
-        statusCode: response.statusCode,
       );
     }
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
@@ -178,13 +245,18 @@ class HttpCortexApi implements CortexApi {
     List<Attachment> attachments = const [],
   }) async* {
     final request = http.Request('POST', _uri('/chat'))
-      ..headers.addAll({
-        'content-type': 'application/json',
-        'accept': 'text/event-stream',
-        // Defeats any proxy that would otherwise buffer the whole response and
-        // collapse the stream into a single chunk.
-        'cache-control': 'no-cache',
-      })
+      // A header, not a ticket: `POST /chat` is issued by `package:http`, which
+      // can set one. The ticket exists for `WebSocket` and `<img>`, which
+      // cannot — using it here would put a credential in a URL for no reason.
+      ..headers.addAll(
+        _headers(const {
+          'content-type': 'application/json',
+          'accept': 'text/event-stream',
+          // Defeats any proxy that would otherwise buffer the whole response
+          // and collapse the stream into a single chunk.
+          'cache-control': 'no-cache',
+        }),
+      )
       ..body = jsonEncode({
         'session_id': sessionId,
         'message': message,
@@ -206,9 +278,9 @@ class HttpCortexApi implements CortexApi {
 
     if (response.statusCode != 200) {
       final body = await response.stream.bytesToString().catchError((_) => '');
-      throw CortexApiException(
+      throw _failure(
+        response.statusCode,
         body.isEmpty ? 'POST /chat 失败' : _trim(body),
-        statusCode: response.statusCode,
       );
     }
 
@@ -232,6 +304,48 @@ class HttpCortexApi implements CortexApi {
     }
   }
 
+  // ----------------------------------------------------------- confirmations
+
+  @override
+  Future<List<PendingConfirmation>> pendingConfirmations({
+    String? sessionId,
+  }) async {
+    final json = await _getJson('/confirmations', {'session_id': ?sessionId});
+    // One `now` for the whole page so every entry's countdown is anchored to
+    // the same instant; decoding entry-by-entry would skew a long list by the
+    // time it took to parse.
+    final now = DateTime.now();
+    return asObjectList(json['pending'])
+        .map((e) => PendingConfirmation.fromJson(e, now: now))
+        .toList(growable: false);
+  }
+
+  @override
+  Future<bool> answerConfirmation({
+    required String token,
+    required bool allow,
+  }) async {
+    try {
+      await _postJson('/confirmations', {
+        // In the body, never the path. `POST /confirmations/{token}` would be
+        // tidier REST and would write a credential that approves shell
+        // execution into every access log on the way.
+        'token': token,
+        // A two-value enum rather than a bool: `{"approve":"false"}` decodes as
+        // `true` in a surprising number of client libraries, and the direction
+        // that mistake fails in is "ran a command nobody approved".
+        'decision': allow ? 'allow' : 'deny',
+      });
+      return true;
+    } on CortexApiException catch (e) {
+      // The ordinary outcome of losing the race. Not routed through
+      // `isUnsupported` even though that getter also matches 404 — here the
+      // meaning is "this token is spent", not "this daemon lacks the route".
+      if (e.statusCode == 404) return false;
+      rethrow;
+    }
+  }
+
   @override
   Future<SyncPage> sync({required int since, int limit = 500}) async {
     final json = await _getJson('/sync', {
@@ -242,10 +356,69 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
+  Future<AuthTicket> issueTicket() async {
+    // **No request body**, not even `{}`.
+    //
+    // The handler takes no input, so axum never reads the body; hyper then
+    // closes the connection instead of returning it to the keep-alive pool.
+    // `IOClient` does not learn of that and hands the dead socket to the next
+    // request, which fails with a bare "Write failed" — observed as the *second*
+    // ticket request dying while the first succeeded. Sending nothing keeps the
+    // connection reusable, which matters here precisely because this endpoint is
+    // called again on every reconnect.
+    final json = await _postJson('/auth/ticket', null);
+    return AuthTicket(
+      value: asString(json['ticket']),
+      expiresAt: DateTime.now().add(
+        Duration(seconds: asInt(json['expires_in_secs'], 60)),
+      ),
+    );
+  }
+
+  /// A ticket that is valid now, minting one only when the cached one is not.
+  ///
+  /// Concurrent callers share one in-flight request. Without that, a reconnect
+  /// storm (daemon restart → every tab retries at once) would mint a fresh
+  /// ticket per attempt, and the daemon's ticket book only prunes on issue —
+  /// so the wasteful path is also the one that grows the table.
+  ///
+  /// Returns null when there is no token to trade: against a daemon with
+  /// `CORTEX_AUTH=disabled` the socket needs no credential at all, and asking
+  /// for one would fail a connection that would otherwise have worked.
+  Future<String?> _currentTicket() async {
+    if (_token == null) return null;
+    final cached = _ticket;
+    if (cached != null && cached.isUsableAt(DateTime.now())) return cached.value;
+
+    final pending = _ticketInFlight ??= issueTicket();
+    try {
+      final fresh = await pending;
+      _ticket = fresh;
+      return fresh.value;
+    } finally {
+      _ticketInFlight = null;
+    }
+  }
+
+  @override
   Stream<SyncEvent> watchSync() async* {
+    // Minted *before* the handshake rather than lazily on 401: a WebSocket
+    // rejected at the HTTP upgrade gives back a bare "connection failed" with
+    // no status code to inspect, so there would be nothing to retry *on*.
+    final String? ticket;
+    try {
+      ticket = await _currentTicket();
+    } on CortexApiException catch (e) {
+      // Includes the 401 that says the long-lived token itself is bad, which
+      // `_failure` has already reported upward. Surfaced as a link failure so
+      // `SyncController` backs off instead of hot-looping while the login gate
+      // takes over.
+      throw CortexApiException('换取实时同步票据失败：${e.message}', cause: e);
+    }
+
     final WebSocketChannel channel;
     try {
-      channel = WebSocketChannel.connect(_wsUri);
+      channel = WebSocketChannel.connect(_wsUri(ticket));
       // `connect` is lazy — without awaiting `ready` a failed handshake would
       // only surface later, as an error on the message stream, and the caller
       // could not tell "never connected" from "dropped after 3 hours".
@@ -291,11 +464,13 @@ class HttpCortexApi implements CortexApi {
       _uri('/blobs'),
       bytes,
       onProgress,
-    )..headers.addAll({
-      'accept': 'application/json',
-      // The server sniffs the byte header and only falls back to this.
-      'content-type': mime ?? 'application/octet-stream',
-    });
+    )..headers.addAll(
+      _headers({
+        'accept': 'application/json',
+        // The server sniffs the byte header and only falls back to this.
+        'content-type': mime ?? 'application/octet-stream',
+      }),
+    );
 
     final json = await _sendJson(request, 'POST /blobs');
     return BlobRef.fromJson(json);
@@ -358,43 +533,48 @@ class HttpCortexApi implements CortexApi {
   Future<Uint8List> blobBytes(String hash) async {
     final http.Response response;
     try {
-      response = await _client.get(_uri('/blobs/${Uri.encodeComponent(hash)}'));
+      // A plain authenticated GET: this client renders attachments from bytes
+      // it fetched itself, never from `Image.network`. That is why the ticket
+      // is not needed here even though the daemon's docs list `<img>` among the
+      // things it exists for — the widget layer already goes through
+      // `CortexApi.blobBytes` so the mock source has something to answer with,
+      // and the header path falls out of that for free.
+      response = await _client.get(
+        _uri('/blobs/${Uri.encodeComponent(hash)}'),
+        headers: _headers(),
+      );
     } on Object catch (e) {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw CortexApiException(
-        _trim(response.body),
-        statusCode: response.statusCode,
-      );
+      throw _failure(response.statusCode, _trim(response.body));
     }
     return response.bodyBytes;
   }
 
   // ----------------------------------------------------------------- plumbing
 
+  /// A JSON POST. [body] null means "send nothing at all" — see [issueTicket]
+  /// for why that is not the same as sending `{}`.
   Future<Map<String, dynamic>> _postJson(
     String path,
-    Map<String, dynamic> body,
+    Map<String, dynamic>? body,
   ) async {
     final http.Response response;
     try {
       response = await _client.post(
         _uri(path),
-        headers: const {
-          'content-type': 'application/json',
+        headers: _headers({
+          if (body != null) 'content-type': 'application/json',
           'accept': 'application/json',
-        },
-        body: jsonEncode(body),
+        }),
+        body: body == null ? null : jsonEncode(body),
       );
     } on Object catch (e) {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw CortexApiException(
-        _trim(response.body),
-        statusCode: response.statusCode,
-      );
+      throw _failure(response.statusCode, _errorMessage(response));
     }
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is! Map<String, dynamic>) {
@@ -415,9 +595,9 @@ class HttpCortexApi implements CortexApi {
     }
     final body = await response.stream.bytesToString().catchError((_) => '');
     if (response.statusCode >= 400) {
-      throw CortexApiException(
+      throw _failure(
+        response.statusCode,
         body.isEmpty ? '$what 失败' : _trim(body),
-        statusCode: response.statusCode,
       );
     }
     final decoded = jsonDecode(body);
@@ -435,17 +615,14 @@ class HttpCortexApi implements CortexApi {
     try {
       response = await _client.get(
         _uri(path, query),
-        headers: const {'accept': 'application/json'},
+        headers: _headers(const {'accept': 'application/json'}),
       );
     } on Object catch (e) {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
 
     if (response.statusCode >= 400) {
-      throw CortexApiException(
-        _trim(response.body),
-        statusCode: response.statusCode,
-      );
+      throw _failure(response.statusCode, _errorMessage(response));
     }
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is! Map<String, dynamic>) {
@@ -454,8 +631,11 @@ class HttpCortexApi implements CortexApi {
     return decoded;
   }
 
+  /// The ticket is stripped from the reported URL — this string reaches logs
+  /// and the status indicator's tooltip, and keeping a credential out of URLs
+  /// is pointless if the client then prints it.
   String _wsUnreachableMessage(Object e) =>
-      '连不上实时同步通道（$_wsUri）。$e';
+      '连不上实时同步通道（${_wsUri(null)}）。$e';
 
   String _unreachableMessage(Object e) =>
       '连不上 cortexd（$_base）。确认 daemon 已启动，'

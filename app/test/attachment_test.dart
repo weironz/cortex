@@ -13,6 +13,7 @@ import 'package:cortex_app/models/chat_session.dart';
 import 'package:cortex_app/models/episode.dart';
 import 'package:cortex_app/models/health_status.dart';
 import 'package:cortex_app/models/memory_search_result.dart';
+import 'package:cortex_app/models/pending_confirmation.dart';
 import 'package:cortex_app/models/session_detail.dart';
 import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/sync_record.dart';
@@ -151,6 +152,20 @@ class _BlobApi implements CortexApi {
   @override
   Future<SyncPage> sync({required int since, int limit = 500}) async =>
       SyncPage(cursor: since);
+
+  @override
+  Future<AuthTicket> issueTicket() => throw UnimplementedError();
+
+  @override
+  Future<List<PendingConfirmation>> pendingConfirmations({
+    String? sessionId,
+  }) async => const [];
+
+  @override
+  Future<bool> answerConfirmation({
+    required String token,
+    required bool allow,
+  }) => throw UnimplementedError();
 }
 
 class _Config extends AppConfigNotifier {

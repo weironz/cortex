@@ -1,5 +1,6 @@
 import 'json.dart';
 import 'memory_fact.dart';
+import 'pending_confirmation.dart';
 
 /// One decoded frame of the `POST /chat` SSE stream.
 ///
@@ -7,6 +8,8 @@ import 'memory_fact.dart';
 /// * `{"type":"memory","facts":[{...}]}`
 /// * `{"type":"tool","name":"read_file","summary":"...","path":"src/main.rs"}`
 /// * `{"type":"delta","text":"..."}`
+/// * `{"type":"confirm","token":"...","tool":"shell","risk":"execute",
+///    "preview":"command: rm -rf …","timeout_secs":180}`
 /// * `{"type":"done","episode_id":"01J..."}`
 /// * `{"type":"error","message":"..."}`
 ///
@@ -29,6 +32,25 @@ sealed class ChatEvent {
         name: asString(json['name'], 'tool'),
         summary: asStringOrNull(json['summary']),
         path: asStringOrNull(json['path']),
+      ),
+      'confirm' => ChatConfirmEvent(
+        PendingConfirmation(
+          token: asString(json['token']),
+          tool: asString(json['tool'], 'tool'),
+          risk: asString(json['risk'], 'execute'),
+          preview: asString(json['preview']),
+          // `timeout_secs` here, `expires_in_secs` on the recovery endpoint:
+          // the same quantity named for the two different questions it answers
+          // ("how long do they get" vs "how long is left"). Both are durations
+          // from *now*, which is why neither path has to trust a clock.
+          deadline: DateTime.now().add(
+            Duration(
+              seconds:
+                  asIntOrNull(json['timeout_secs']) ??
+                  PendingConfirmation.kDefaultTimeoutSecs,
+            ),
+          ),
+        ),
       ),
       'done' => ChatDoneEvent(asStringOrNull(json['episode_id'])),
       'error' => ChatErrorEvent(
@@ -62,6 +84,18 @@ final class ChatToolEvent extends ChatEvent {
   /// Optional in the contract precisely so that `memory_search` can omit it
   /// rather than send an empty string the UI would render as a path.
   final String? path;
+}
+
+/// The turn is **suspended** until this is answered.
+///
+/// Not a terminal frame and not an error: the stream stays open, deltas simply
+/// stop arriving until a receipt reaches the daemon (or its timeout fires, and
+/// silence counts as a refusal). The UI must therefore keep the streaming
+/// bubble alive while showing the prompt — treating this like an error would
+/// discard text the model already produced.
+final class ChatConfirmEvent extends ChatEvent {
+  const ChatConfirmEvent(this.request);
+  final PendingConfirmation request;
 }
 
 /// Terminal frame. [episodeId] is the archived assistant episode.

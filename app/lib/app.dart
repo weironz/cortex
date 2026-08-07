@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/theme.dart';
-import 'features/shell/app_shell.dart';
+import 'features/auth/login_gate.dart';
 import 'state/app_providers.dart';
 
 class CortexApp extends ConsumerWidget {
@@ -18,7 +18,10 @@ class CortexApp extends ConsumerWidget {
       darkTheme: CortexTheme.dark(),
       // Defaults to ThemeMode.system; the header button cycles the override.
       themeMode: ref.watch(themeModeProvider),
-      home: const AppShell(),
+      // The gate, not the shell: a real `cortexd` refuses to start without
+      // credentials configured, so "can we even talk to it" has to be answered
+      // before any pane is worth rendering.
+      home: const LoginGate(),
       scrollBehavior: const _DesktopScrollBehavior(),
     );
   }

@@ -16,6 +16,7 @@ import 'package:cortex_app/models/chat_session.dart';
 import 'package:cortex_app/models/episode.dart';
 import 'package:cortex_app/models/health_status.dart';
 import 'package:cortex_app/models/memory_search_result.dart';
+import 'package:cortex_app/models/pending_confirmation.dart';
 import 'package:cortex_app/models/session_detail.dart';
 import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/sync_record.dart';
@@ -181,6 +182,22 @@ class ReplayApi implements CortexApi {
 
   @override
   Future<Uint8List> blobBytes(String hash) async => Uint8List(0);
+
+  @override
+  Future<AuthTicket> issueTicket() => throw UnimplementedError();
+
+  /// Empty rather than throwing: `ConfirmController` polls this on start, and a
+  /// replay fixture with nothing pending is the honest answer.
+  @override
+  Future<List<PendingConfirmation>> pendingConfirmations({
+    String? sessionId,
+  }) async => const [];
+
+  @override
+  Future<bool> answerConfirmation({
+    required String token,
+    required bool allow,
+  }) => throw UnimplementedError();
 
   @override
   Stream<SyncEvent> watchSync() => const Stream.empty();

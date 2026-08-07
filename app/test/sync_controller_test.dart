@@ -10,6 +10,7 @@ import 'package:cortex_app/models/chat_session.dart';
 import 'package:cortex_app/models/episode.dart';
 import 'package:cortex_app/models/health_status.dart';
 import 'package:cortex_app/models/memory_search_result.dart';
+import 'package:cortex_app/models/pending_confirmation.dart';
 import 'package:cortex_app/models/session_detail.dart';
 import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/sync_record.dart';
@@ -95,6 +96,19 @@ class _FakeApi implements CortexApi {
   @override
   Future<Episode> episode(String id) => throw UnimplementedError();
 
+  /// Every `GET /confirmations` the controller made. Not a throwing stub: the
+  /// recovery poll on `hello` is part of the sync surface now, and the count is
+  /// what one of the cases below asserts on.
+  int confirmPolls = 0;
+
+  @override
+  Future<List<PendingConfirmation>> pendingConfirmations({
+    String? sessionId,
+  }) async {
+    confirmPolls++;
+    return const [];
+  }
+
   // Everything below is outside the sync surface. They throw rather than
   // returning a placeholder for the reason stated on the class: a controller
   // that reached for them on a bump should fail the test, not pass quietly.
@@ -139,6 +153,15 @@ class _FakeApi implements CortexApi {
 
   @override
   Future<Uint8List> blobBytes(String hash) => throw UnimplementedError();
+
+  @override
+  Future<AuthTicket> issueTicket() => throw UnimplementedError();
+
+  @override
+  Future<bool> answerConfirmation({
+    required String token,
+    required bool allow,
+  }) => throw UnimplementedError('同步链路不应投递回执');
 }
 
 class _LiveConfig extends AppConfigNotifier {
@@ -275,6 +298,37 @@ void main() {
     );
     expect(container.read(syncControllerProvider).attempt, 0);
     expect(container.read(syncControllerProvider).status, SyncLinkStatus.live);
+  });
+
+  test('每次 hello 都去捞一遍待确认的工具调用', () async {
+    // SSE 流是一次性的、没有 Last-Event-ID 重放：断线时在途的那条确认请求
+    // 再也不会重发。而确认事件刻意**不**走 /ws 广播（那条通道的契约是
+    // 「只推信号不推数据」），所以 hello 之后拉一次 GET /confirmations
+    // 是「有没有什么还等着我批」唯一的答案。
+    // 没有它，那一轮会一直挂到超时，而界面上没有任何东西解释为什么卡住了。
+    final api = _FakeApi();
+    final container = _boot(api);
+    addTearDown(container.dispose);
+
+    await _settle();
+    api.emit(const SyncHello(cursor: 10, version: '0.0.1'));
+    await _settle();
+    // 冷启动本身也会拉一次（对服务端来说，「刚打开」与「刚重连」没有区别），
+    // 所以这里钉的是**增量**而不是绝对次数
+    final afterFirstHello = api.confirmPolls;
+    expect(afterFirstHello, greaterThanOrEqualTo(1));
+
+    await api.drop();
+    await _settle();
+    await _until(() => api.connectCount == 2, reason: '退避到期后应自动重连');
+    api.emit(const SyncHello(cursor: 10, version: '0.0.1'));
+    await _settle();
+
+    expect(
+      api.confirmPolls,
+      afterFirstHello + 1,
+      reason: '重连本身就是那个「刚才断的时候有没有漏掉什么」的时刻',
+    );
   });
 
   test('服务端谎报 has_more 也不会把客户端转死', () async {

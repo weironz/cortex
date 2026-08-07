@@ -6,6 +6,7 @@ import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
 import '../shell/widgets/sync_indicator.dart';
 import '../workspace/workspace_panel.dart';
+import 'widgets/confirm_panel.dart';
 import 'widgets/conversation_view.dart';
 import 'widgets/message_composer.dart';
 
@@ -94,6 +95,11 @@ class ChatPane extends ConsumerWidget {
               : NoSessionState(onCreate: controller.createSession),
         ),
         const _SendErrorBanner(),
+        // Directly above the composer: the one place the user's eyes already
+        // are when a turn is running, and close enough to the send button that
+        // it cannot be scrolled past. See `ConfirmPanel` for why it is not a
+        // modal.
+        const ConfirmPanel(),
         MessageComposer(
           enabled: hasSession,
           sessionId: sessionId,

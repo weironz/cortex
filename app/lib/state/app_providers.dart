@@ -28,6 +28,7 @@ import '../api/http_cortex_api.dart';
 import '../api/mock_cortex_api.dart';
 import '../core/app_config.dart';
 import '../models/health_status.dart';
+import 'auth_controller.dart';
 
 /// Mutable runtime config. Seeded from `--dart-define`, editable in settings.
 class AppConfigNotifier extends Notifier<AppConfig> {
@@ -55,11 +56,35 @@ final appConfigProvider = NotifierProvider<AppConfigNotifier, AppConfig>(
 /// Rebuilt whenever [appConfigProvider] changes, which cascades an invalidation
 /// through every dependent provider — sessions, memory search, health — so the
 /// UI fully re-hydrates against the new backend without manual refresh calls.
+///
+/// ## Why the credential is watched here too
+///
+/// The token is baked into the client at construction rather than read per
+/// request, so it cannot drift mid-flight. Signing in or out is
+/// therefore the same kind of event as switching backends — a different
+/// identity is a different data source — and it re-hydrates by exactly the same
+/// mechanism instead of needing its own refresh path.
+///
+/// Only the *token* is watched, not the whole [AuthState]: `select` keeps a
+/// countdown tick or a busy flag from tearing down every in-flight request.
 final cortexApiProvider = Provider<CortexApi>((ref) {
   final config = ref.watch(appConfigProvider);
-  final api = config.useMock
-      ? MockCortexApi()
-      : HttpCortexApi(baseUrl: config.baseUrl);
+  if (config.useMock) {
+    final api = MockCortexApi();
+    ref.onDispose(api.dispose);
+    return api;
+  }
+
+  final token = ref.watch(authControllerProvider.select((s) => s.token));
+  final api = HttpCortexApi(
+    baseUrl: config.baseUrl,
+    token: token,
+    // `read`, not `watch`: this is an outbound edge. Watching the notifier
+    // would make every auth state change rebuild the client, including the one
+    // this very callback triggers.
+    onUnauthorized: () =>
+        ref.read(authControllerProvider.notifier).onUnauthorized(),
+  );
   ref.onDispose(api.dispose);
   return api;
 });

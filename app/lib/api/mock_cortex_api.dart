@@ -12,6 +12,7 @@ import '../models/health_status.dart';
 import '../models/injected_memory.dart';
 import '../models/memory_fact.dart';
 import '../models/memory_search_result.dart';
+import '../models/pending_confirmation.dart';
 import '../models/session_detail.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
@@ -249,7 +250,81 @@ class MockCortexApi implements CortexApi {
       status: 'ok',
       version: '0.0.1-mock',
       database: 'ok',
+      // There is no port to protect, so the mock reports the shape a daemon
+      // reports when its operator turned authentication off. The login gate
+      // therefore lets the mock straight through without a token prompt — which
+      // is the behaviour the "offline demo, no daemon" mode exists for.
+      auth: 'disabled',
     );
+  }
+
+  // ---------------------------------------------------------- confirmations
+
+  /// Live confirmations, keyed by the one-shot token.
+  ///
+  /// Mirrors `ConfirmRegistry` closely enough to be worth the lines: entries are
+  /// **removed** on answer (so a replayed receipt 404s exactly as it does
+  /// against the daemon), and they are listable (so the reconnect-recovery path
+  /// has something to recover).
+  final Map<String, PendingConfirmation> _pendingConfirms = {};
+  final Map<String, Completer<bool>> _confirmWaiters = {};
+
+  /// The word that makes the mock ask. Copied from
+  /// `cortexd::state::MOCK_CONFIRM_TRIGGER` so the same message exercises the
+  /// same path against either backend.
+  ///
+  /// A trigger word rather than every turn, for the reason the daemon gives:
+  /// asking every time would make each offline chat stall on a confirmation
+  /// timeout, ruining the mode's main use.
+  static const String kConfirmTrigger = '#confirm';
+
+  static const String _confirmPreview =
+      'command: rm -rf /tmp/cortex-build-cache && '
+      'curl -sSfL https://example.com/install.sh | sh -s -- --force\n'
+      'cwd: /home/you/projects/cortex';
+
+  /// Short enough to watch the countdown move in a demo, long enough to read
+  /// the command. The daemon's own default is 180s; matching it exactly would
+  /// make the timeout branch practically unreachable by hand.
+  static const Duration _confirmTimeout = Duration(seconds: 45);
+
+  @override
+  Future<AuthTicket> issueTicket() async {
+    await _latency(40);
+    return AuthTicket(
+      value: 'mock-ticket',
+      expiresAt: DateTime.now().add(const Duration(seconds: 60)),
+    );
+  }
+
+  @override
+  Future<List<PendingConfirmation>> pendingConfirmations({
+    String? sessionId,
+  }) async {
+    await _latency(60);
+    final now = DateTime.now();
+    return _pendingConfirms.values
+        .where((c) => sessionId == null || c.sessionId == sessionId)
+        // Expired entries are gone server-side (the waiter's `Drop` unregisters
+        // it); listing them here would let the UI show a prompt that no answer
+        // can reach.
+        .where((c) => !c.isExpiredAt(now))
+        .toList(growable: false)
+      ..sort((a, b) => a.deadline.compareTo(b.deadline));
+  }
+
+  @override
+  Future<bool> answerConfirmation({
+    required String token,
+    required bool allow,
+  }) async {
+    await _latency(50);
+    // `remove`, not `get` — one-shot, first answer wins, and a replay 404s.
+    final entry = _pendingConfirms.remove(token);
+    final waiter = _confirmWaiters.remove(token);
+    if (entry == null || waiter == null) return false;
+    if (!waiter.isCompleted) waiter.complete(allow);
+    return true;
   }
 
   // ------------------------------------------------------------------ memory
@@ -506,6 +581,45 @@ class MockCortexApi implements CortexApi {
           : 'memory_search 返回 ${injected.length} 行 / '
                 '${injected.fold<int>(0, (n, f) => n + f.statement.length)} 字符',
     );
+
+    // The confirmation round trip. Registered *before* the event is emitted,
+    // in that order for the reason the daemon spells out: a client on loopback
+    // can answer faster than the registration completes, and its receipt would
+    // then hit a token that does not exist yet.
+    if (message.contains(kConfirmTrigger)) {
+      final token = 'mock-confirm-${DateTime.now().microsecondsSinceEpoch}';
+      final request = PendingConfirmation(
+        token: token,
+        tool: 'shell',
+        risk: 'execute',
+        preview: _confirmPreview,
+        deadline: DateTime.now().add(_confirmTimeout),
+        sessionId: sessionId,
+      );
+      final waiter = Completer<bool>();
+      _pendingConfirms[token] = request;
+      _confirmWaiters[token] = waiter;
+
+      yield ChatConfirmEvent(request);
+
+      // Suspended exactly like the real turn: no deltas until an answer lands
+      // or the clock runs out. Silence is a refusal — a mock that eventually
+      // proceeded anyway would teach the UI a behaviour the daemon does not
+      // have.
+      final approved = await waiter.future
+          .timeout(_confirmTimeout, onTimeout: () => false)
+          .whenComplete(() {
+            _pendingConfirms.remove(token);
+            _confirmWaiters.remove(token);
+          });
+      if (_disposed) return;
+      yield ChatDeltaEvent(
+        approved
+            ? '（mock）你批准了。真实后端此刻会把那条命令交给 shell 工具执行。\n\n'
+            : '（mock）未获批准，按拒绝处理 —— 真实后端会把拒绝理由回传给模型，'
+                  '让它换一条路或者收口说明卡在哪。\n\n',
+      );
+    }
 
     // File tools only when the session is bound to a workspace — the daemon
     // hands unbound sessions a tool catalogue that literally does not contain

@@ -21,6 +21,18 @@ double? asDoubleOrNull(Object? v) => switch (v) {
   _ => null,
 };
 
+/// Like [asInt] but keeps "absent" distinct from "present and zero".
+///
+/// Needed wherever zero is a meaningful value rather than a stand-in for
+/// missing — `expires_in_secs: 0` says "about to be refused", which is the
+/// opposite of what a defaulted value should mean.
+int? asIntOrNull(Object? v) => switch (v) {
+  final int i => i,
+  final double d => d.toInt(),
+  final String s => int.tryParse(s),
+  _ => null,
+};
+
 int asInt(Object? v, [int fallback = 0]) => switch (v) {
   final int i => i,
   final double d => d.toInt(),

@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../auth/token_store.dart';
 import '../../core/app_config.dart';
 import '../../state/app_providers.dart';
+import '../../state/auth_controller.dart';
 
 Future<void> showSettingsSheet(BuildContext context) {
   return showDialog<void>(
@@ -41,6 +45,7 @@ class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
     final config = ref.watch(appConfigProvider);
     final notifier = ref.read(appConfigProvider.notifier);
     final health = ref.watch(healthProvider);
+    final auth = ref.watch(authControllerProvider);
 
     return AlertDialog(
       title: const Text('设置'),
@@ -108,9 +113,63 @@ class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
                     _kv(context, 'status', h.status),
                     _kv(context, 'version', h.version),
                     _kv(context, 'database', h.database),
+                    _kv(context, 'auth', h.auth),
+                    // Surfaced rather than quietly enjoyed. `cortexd` only
+                    // reaches this state when someone wrote
+                    // `CORTEX_AUTH=disabled` on purpose, and it warns on every
+                    // start; a client that said nothing would be the only part
+                    // of the system that failed to mention the memory store is
+                    // open to anyone who can reach the port.
+                    if (h.authDisabled && !config.useMock) ...[
+                      const SizedBox(height: 6),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.lock_open_rounded,
+                            size: 14,
+                            color: scheme.error,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              '这个 cortexd 关闭了认证：任何能连上 '
+                              '${config.baseUrl} 的人都拥有全部记忆。'
+                              '只有监听地址确实是回环时才可接受。',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: scheme.error,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                   ],
                 ),
               ),
+              if (!config.useMock && auth.token != null) ...[
+                const Divider(height: 24),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '已用 token 连接。凭据只存在于内存'
+                        '${kCanRememberToken ? '（以及你勾选的 sessionStorage）' : '与环境变量 $kTokenEnvVar'}。',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        unawaited(
+                          ref.read(authControllerProvider.notifier).signOut(),
+                        );
+                      },
+                      child: const Text('断开'),
+                    ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 12),
               Text(
                 '编译期默认值：USE_MOCK=${AppConfig.defaultUseMock}，'

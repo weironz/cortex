@@ -9,6 +9,7 @@ import '../models/sync_event.dart';
 import '../models/sync_record.dart';
 import 'app_providers.dart';
 import 'chat_controller.dart';
+import 'confirm_controller.dart';
 import 'memory_controller.dart';
 
 /// State of the realtime link to `cortexd`.
@@ -229,6 +230,15 @@ class SyncController extends Notifier<SyncState> {
         // A reconnect after downtime lands here already behind; drain the gap
         // instead of waiting for the next write to happen to produce a bump.
         if (cursor > _cursor) _drain(api, generation);
+
+        // `hello` is the one moment the client reliably knows it has just
+        // (re)established contact, which makes it the right trigger for
+        // recovering tool confirmations. They are deliberately **not** pushed
+        // over this socket — its contract is "signals, never data" — and the
+        // SSE stream that carried the original request does not replay. So a
+        // poll on reconnect is the only thing standing between a dropped
+        // connection and a turn that sits suspended until it times out.
+        unawaited(ref.read(confirmControllerProvider.notifier).recover());
 
       case SyncBump(:final cursor):
         state = state.copyWith(
