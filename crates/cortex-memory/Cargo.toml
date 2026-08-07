@@ -20,6 +20,7 @@ serde_json.workspace = true
 async-trait.workspace = true
 jieba-rs.workspace = true
 chrono.workspace = true
+fastembed.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
