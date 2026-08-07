@@ -78,7 +78,8 @@ impl ToolResult {
 /// `bash -c 'cat ~/.ssh/id_rsa'` 里那个路径根本不经过它。
 #[derive(Debug, Clone)]
 pub struct Sandbox {
-    root: PathBuf,
+    /// `None` = **封闭沙箱**，可访问集合是空集。见 [`Self::sealed`]。
+    root: Option<PathBuf>,
     /// 交给内核的那份策略。与路径围栏的 `root` 同源 —— 会话绑定的工作区
     /// 就是可写区，两道闸对「哪里算里面」的认识必须一致，否则用户会看到
     /// 一个工具说能写、另一个说不能写。
@@ -92,7 +93,35 @@ impl Sandbox {
             .canonicalize()
             .map_err(|e| CortexError::Invalid(format!("工作区路径无效：{e}")))?;
         let exec = crate::sandbox::SandboxPolicy::workspace(&root);
-        Ok(Self { root, exec })
+        Ok(Self {
+            root: Some(root),
+            exec,
+        })
+    }
+
+    /// 封闭沙箱：**没有任何路径在里面**。
+    ///
+    /// # 为什么需要一个「空集」而不是随便挑个目录当根
+    ///
+    /// 一个没有绑定工作区的会话，它的合法可访问范围就是空集 —— 用户从来
+    /// 没有指过任何目录，那么「哪个目录该给它」这个问题本身就没有正确答案。
+    /// 在此之前这里回落到进程工作目录（也就是 cortexd 被启动的地方，开发机上
+    /// 正是整个仓库），理由是「反正那种会话的工具目录里没有文件工具」。
+    ///
+    /// 那个理由把围栏的正确性**寄存在了另一处的白名单上**：漏掉一个新工具，
+    /// 它的围栏就是整个仓库，而漏掉的那一刻不会有任何症状。围栏本身就该是
+    /// 空的，这样白名单写错时最坏的结果是「工具报错说没有工作区」，
+    /// 而不是「工具成功读到了 ~/.ssh 之外的所有东西」。
+    ///
+    /// 也不用「专门造一个空目录当根」：那仍然是一个真实存在、会被写进去、
+    /// 会被别的进程放东西进去的位置，而且它在磁盘上的存在本身就是要维护的
+    /// 状态。空集不需要维护。
+    #[must_use]
+    pub fn sealed() -> Self {
+        Self {
+            root: None,
+            exec: crate::sandbox::SandboxPolicy::sealed(),
+        }
     }
 
     /// 换掉 OS 级沙箱策略（例如为某次执行放开网络）。
@@ -121,6 +150,17 @@ impl Sandbox {
     pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
         use std::path::Component;
 
+        // 封闭沙箱先于一切检查：空集里没有「合法的相对路径」这回事，
+        // 连 `"."` 也不行。放在最前面是为了让这一支不依赖下面任何一条
+        // 规则写得对 —— 它是围栏的兜底，不是围栏的一部分
+        let Some(root) = self.root.as_deref() else {
+            return Err(CortexError::Invalid(format!(
+                "本会话没有绑定工作区，访问 {rel} 被拒绝：\
+                 未绑定的会话可访问的文件范围是空集。\
+                 请先在界面上给这个会话绑定一个目录。"
+            )));
+        };
+
         let rel_path = Path::new(rel);
         for c in rel_path.components() {
             match c {
@@ -138,7 +178,7 @@ impl Sandbox {
             }
         }
 
-        let joined = self.root.join(rel_path);
+        let joined = root.join(rel_path);
 
         // 回溯到最近的已存在祖先做真实性校验
         let mut probe = joined.as_path();
@@ -159,7 +199,7 @@ impl Sandbox {
             }
         };
 
-        if !real.starts_with(&self.root) {
+        if !real.starts_with(root) {
             return Err(CortexError::Invalid(format!(
                 "路径 {rel} 越出工作区边界，已拒绝"
             )));
@@ -167,9 +207,11 @@ impl Sandbox {
         Ok(joined)
     }
 
+    /// 沙箱根。`None` = 封闭沙箱（见 [`Self::sealed`]），此时**没有**任何
+    /// 路径在围栏内 —— 调用方拿不到一个可以拼接的目录，这正是要的效果。
     #[must_use]
-    pub fn root(&self) -> &Path {
-        &self.root
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
     }
 }
 
@@ -369,7 +411,17 @@ async fn run_shell(sandbox: &Sandbox, command: &str, timeout_ms: u64) -> ToolRes
         Err(e) => return ToolResult::err(e),
     };
 
-    let prepared = match crate::sandbox::prepare(sandbox.exec_policy(), &argv, sandbox.root()) {
+    // 封闭沙箱里没有 cwd 可用，也不该有：一条命令总要在某个目录里跑，而
+    // 「随便挑一个」正是这一整套改动要消除的东西。在这里挡住而不是让
+    // `prepare` 拿个假路径去下内核规则 —— 后者会变成一个能跑但围栏是别处的进程
+    let Some(cwd) = sandbox.root() else {
+        return ToolResult::err(
+            "本会话没有绑定工作区，不能执行命令：\
+             未绑定的会话可访问的文件范围是空集，没有可用的工作目录。",
+        );
+    };
+
+    let prepared = match crate::sandbox::prepare(sandbox.exec_policy(), &argv, cwd) {
         Ok(p) => p,
         // 沙箱不可用且未显式降级 —— 这是设计上的主要出口。错误原文会原样
         // 回给模型，让它知道「不是命令写错了，是这台机器上不许执行」
@@ -473,6 +525,89 @@ mod tests {
         (dir, sb)
     }
 
+    /// 封闭沙箱里**每一个**文件工具都必须失败，包括那些看起来无害的形状。
+    ///
+    /// 逐个列出来而不是只测一条：这条围栏的价值全在于「白名单漏了一个新工具
+    /// 时它仍然挡得住」，而那种场合下漏进来的恰恰是没人特意测过的那个。
+    /// `"."` 与 `""` 单独列出，是因为它们是唯二不含 `..`、不是绝对路径、
+    /// 且必然存在的路径 —— 任何「先判形状再判根」的实现都会在这两个上漏。
+    #[tokio::test]
+    async fn a_sealed_sandbox_refuses_every_path_shape() {
+        let sb = Sandbox::sealed();
+        for p in [".", "", "a.txt", "sub/dir/x", "./x", "Cargo.toml"] {
+            let err = sb
+                .resolve(p)
+                .expect_err(&format!("封闭沙箱里 {p:?} 竟然解析成功了"));
+            assert!(
+                err.to_string().contains("没有绑定工作区"),
+                "拒绝理由必须说清是「没绑工作区」而不是别的巧合，实际：{err}"
+            );
+        }
+        assert!(
+            sb.root().is_none(),
+            "封闭沙箱不能交出一个可以拼接的根目录 —— 交出来就等于有了围栏内的位置"
+        );
+    }
+
+    /// 就算 `read_file` / `list_dir` 被错误地放进了纯聊天会话的工具目录，
+    /// 它们在封闭沙箱里也读不到东西。这是「安全性不依赖另一处白名单写得对」
+    /// 这句话的可执行版本。
+    #[tokio::test]
+    async fn file_tools_are_useless_inside_a_sealed_sandbox() {
+        let sb = Sandbox::sealed();
+        for (name, args) in [
+            ("read_file", serde_json::json!({"path": "Cargo.toml"})),
+            ("list_dir", serde_json::json!({"path": "."})),
+            (
+                "write_file",
+                serde_json::json!({"path": "x.txt", "content": "x"}),
+            ),
+        ] {
+            let r = execute(
+                &sb,
+                &ToolCall {
+                    name: name.into(),
+                    arguments: args,
+                },
+            )
+            .await;
+            assert!(!r.ok, "{name} 在封闭沙箱里竟然成功了：{}", r.content);
+        }
+    }
+
+    /// shell 在拿不到 cwd 的时候必须**在起进程之前**就拒绝。
+    ///
+    /// 这条与上面那条不是重复：文件工具走 `resolve`，shell 根本不走它 ——
+    /// 它只要一个工作目录。围栏上的这两个口子是分开的。
+    #[tokio::test]
+    async fn shell_refuses_before_spawning_when_sealed() {
+        let r = execute(
+            &Sandbox::sealed(),
+            &ToolCall {
+                name: "shell".into(),
+                arguments: serde_json::json!({"command": "echo hi"}),
+            },
+        )
+        .await;
+        assert!(!r.ok, "封闭沙箱里 shell 竟然跑起来了：{}", r.content);
+        assert!(
+            r.content.contains("没有绑定工作区"),
+            "拒绝理由必须是「没绑工作区」，而不是「沙箱不可用」之类的巧合，实际：{}",
+            r.content
+        );
+    }
+
+    /// 封闭策略不能顺手把系统只读目录放出去。
+    #[test]
+    fn the_sealed_exec_policy_grants_nothing() {
+        let p = crate::sandbox::SandboxPolicy::sealed();
+        assert!(p.writable_roots.is_empty(), "封闭策略不该有任何可写根");
+        assert!(
+            p.readable_roots.is_empty(),
+            "封闭策略不该有任何可读根 —— 有的话，读代码的人会以为纯聊天会话能读 /etc"
+        );
+    }
+
     #[tokio::test]
     async fn write_then_read_roundtrip() {
         let (_d, sb) = temp_sandbox();
@@ -532,7 +667,7 @@ mod tests {
     async fn list_dir_is_deterministic() {
         let (_d, sb) = temp_sandbox();
         for n in ["c.txt", "a.txt", "b.txt"] {
-            std::fs::write(sb.root().join(n), "x").unwrap();
+            std::fs::write(sb.root().expect("这个沙箱有根").join(n), "x").unwrap();
         }
         let r = execute(
             &sb,
@@ -580,7 +715,12 @@ mod tests {
         )
         .await;
         assert!(r.ok, "{}", r.content);
-        assert!(sb.root().join("x/y/z/deep.txt").exists());
+        assert!(
+            sb.root()
+                .expect("这个沙箱有根")
+                .join("x/y/z/deep.txt")
+                .exists()
+        );
     }
 
     #[tokio::test]

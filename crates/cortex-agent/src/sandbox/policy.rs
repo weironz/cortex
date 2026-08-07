@@ -146,6 +146,22 @@ impl SandboxPolicy {
         }
     }
 
+    /// 什么都不放行的策略 —— 配 [`crate::Sandbox::sealed`] 用。
+    ///
+    /// 连 `READABLE_SYSTEM_ROOTS` 都不给：那份只读清单存在的唯一理由是让
+    /// `sh` 起得来、让 TLS 找得到根证书，而封闭沙箱里根本不会有进程被启动
+    /// （[`crate::tools`] 的 shell 分支在拿 cwd 时就已经拒绝了）。
+    /// 给一份「用不上但看起来很宽」的清单，只会让下一个读代码的人以为
+    /// 未绑定工作区的会话能读 `/etc`。
+    #[must_use]
+    pub const fn sealed() -> Self {
+        Self {
+            writable_roots: Vec::new(),
+            readable_roots: Vec::new(),
+            network: NetworkPolicy::Denied,
+        }
+    }
+
     /// 追加一个可写根。
     #[must_use]
     pub fn with_writable(mut self, p: impl Into<PathBuf>) -> Self {

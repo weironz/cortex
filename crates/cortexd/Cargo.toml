@@ -55,6 +55,12 @@ dotenvy.workspace = true
 # 「什么目录配当工作区」是关于真实文件系统的判断，mock 不出来
 tempfile = "3"
 
+# `ServiceExt::oneshot`：不起监听端口，直接把请求喂给**真实的** `router()`。
+# 路由的认证覆盖只能这么测 —— 起一个真服务要先有数据库与 API key，
+# 而那正是「路由测试做不了」这个结论当初的由来。
+# tower 已经在依赖树里（tower-http 依赖它），这里只是把边加到 cortexd 上。
+tower = { version = "0.5", features = ["util"] }
+
 # `#[tokio::test(start_paused = true)]`：确认超时默认 180 秒，
 # 真等一遍的测试没人会跑。虚拟时钟让它变成微秒级，而且**测的是同一段代码**
 tokio = { workspace = true, features = ["test-util"] }

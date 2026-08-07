@@ -308,6 +308,25 @@ impl Turn {
         })
     }
 
+    /// 给**未绑定工作区**的会话用：沙箱是封闭的，一个路径也进不去。
+    ///
+    /// 工具目录仍然是完整的内置目录 —— 该给哪些工具由调用方按会话状态决定
+    /// （见 [`Self::with_specs`]）。两件事刻意分开：**目录决定模型看得见
+    /// 什么，沙箱决定实际能碰到什么**。合成一件的话，「目录里少列一个工具」
+    /// 就同时意味着「那个工具一旦被列上就是不受围栏约束的」。
+    /// 见 [`crate::Sandbox::sealed`]。
+    #[must_use]
+    pub fn sealed() -> Self {
+        let specs = tools::builtin_specs();
+        Self {
+            sandbox: Sandbox::sealed(),
+            tools: tools::to_llm_tools(&specs),
+            specs,
+            max_rounds: DEFAULT_MAX_ROUNDS,
+            policy: ApprovalPolicy::default(),
+        }
+    }
+
     /// 换掉工具目录。
     ///
     /// 存在的理由只有一个：**工具目录是随会话变的**。未绑定工作区的会话是
@@ -339,7 +358,7 @@ impl Turn {
     }
 
     #[must_use]
-    pub fn sandbox_root(&self) -> &std::path::Path {
+    pub fn sandbox_root(&self) -> Option<&std::path::Path> {
         self.sandbox.root()
     }
 
@@ -768,7 +787,10 @@ mod tests {
             r.content
         );
         assert!(
-            !t.sandbox_root().join("a.txt").exists(),
+            !t.sandbox_root()
+                .expect("这个 Turn 有沙箱根")
+                .join("a.txt")
+                .exists(),
             "被拒的写绝不能落到磁盘上"
         );
     }
@@ -780,7 +802,10 @@ mod tests {
         let r = t.dispatch_once(&write_call(), &host).await;
         assert!(r.ok, "用户批准后写工具应当真的执行，实际：{}", r.content);
         assert!(
-            t.sandbox_root().join("a.txt").exists(),
+            t.sandbox_root()
+                .expect("这个 Turn 有沙箱根")
+                .join("a.txt")
+                .exists(),
             "批准之后文件必须真的落盘，否则确认回路是个摆设"
         );
         assert_eq!(host.asked(), 1, "一次调用只该问一次");
@@ -882,7 +907,11 @@ mod tests {
     #[tokio::test]
     async fn safe_tools_never_reach_the_confirmation_channel() {
         let (_d, t) = turn();
-        std::fs::write(t.sandbox_root().join("a.txt"), "hi").unwrap();
+        std::fs::write(
+            t.sandbox_root().expect("这个 Turn 有沙箱根").join("a.txt"),
+            "hi",
+        )
+        .unwrap();
         // 这个宿主只要被问到就一律拒绝；只读工具跑通即证明它压根没被问
         let host = SpyHost::new(Approval::Denied);
         let r = t
@@ -978,7 +1007,13 @@ mod tests {
     async fn oversized_tool_output_is_truncated() {
         let (_d, t) = turn();
         let big = "x".repeat(MAX_TOOL_OUTPUT_CHARS * 2);
-        std::fs::write(t.sandbox_root().join("big.txt"), &big).unwrap();
+        std::fs::write(
+            t.sandbox_root()
+                .expect("这个 Turn 有沙箱根")
+                .join("big.txt"),
+            &big,
+        )
+        .unwrap();
         let r = t
             .dispatch_once(
                 &ToolCall {

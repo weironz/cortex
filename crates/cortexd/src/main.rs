@@ -7,6 +7,7 @@ mod auth;
 mod backfill;
 mod blobs;
 mod confirm;
+mod cors;
 mod cursor;
 mod dto;
 mod live;
@@ -20,7 +21,7 @@ mod ws;
 use anyhow::Context as _;
 use clap::Parser;
 use cortex_core::Config;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 
 #[derive(Parser, Debug)]
 #[command(name = "cortexd", version, about = "Cortex 守护进程")]
@@ -62,8 +63,11 @@ async fn main() -> anyhow::Result<()> {
     // 认证与确认回路的配置在这里定型。**配错就退出**，不降级：
     // 一个「以为开着认证其实关着」的 cortexd 不会有任何症状（见 auth.rs）
     let rt = state::Runtime::from_env().context("加载认证 / 确认回路配置失败")?;
+    // 同上：写错的允许列表在这里失败，而不是等浏览器报一句语焉不详的 CORS 错
+    let cors = cors::CorsPolicy::from_env().context("加载跨源策略失败")?;
 
     tracing::info!("{}", rt.auth.status_line());
+    tracing::info!("{}", cors.status_line());
     tracing::info!("{}", cortex_agent::status_line());
 
     // 优先真实后端；连不上就回落 mock 并明确告知 ——
@@ -80,8 +84,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = routes::router(state)
-        // Flutter Web 与本地开发需要跨域；生产部署应收紧到具体来源
-        .layer(CorsLayer::permissive())
+        // 默认一个跨源都不许：生产是单域名路径分流，Web 与 cortexd 同源。
+        // 开发机上的随机端口用 CORTEX_CORS_ALLOWED_ORIGINS=loopback 放开。
+        // 见 src/cors.rs —— 尤其是它与 ?ticket= 短命票据的关系
+        .layer(cors.layer())
         .layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&args.bind)

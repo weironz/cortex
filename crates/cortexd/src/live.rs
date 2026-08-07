@@ -45,20 +45,6 @@ const SYSTEM_PROMPT: &str = "你是 Cortex，一个具备长期记忆的助手�
 回答简洁准确。如果引用了检索到的记忆，请带上它的 [id]。\
 需要读写文件或查历史记忆时，直接调用相应工具，不要凭空猜测内容。";
 
-/// 缺省沙箱根目录的环境变量。
-///
-/// 只在会话**未绑定**工作区时兜底 —— 而那种会话的工具目录里根本没有文件
-/// 工具，这个根形同虚设。绑定了的会话用它自己那一个（见 [`Live::turn_for`]）。
-///
-/// # 注意这与「路径由客户端指定」并不矛盾
-///
-/// 沙箱**根**仍然绝不从模型参数里取 —— 那是模型每次调用工具时都能操纵的东西。
-/// 工作区路径来自用户在界面上的一次显式选择，且经过
-/// [`crate::workspace::validate`] 的实打实校验（存在、是目录、不是系统目录、
-/// 符号链接解析后再判定）。区别是「谁在什么时候说的」：一个是被围栏防着的人
-/// 在运行时说，一个是围栏的主人在绑定时说。
-const WORKSPACE_ENV: &str = "CORTEX_WORKSPACE";
-
 /// 与工作区无关的工具 —— 未绑定工作区的会话只给这些。
 ///
 /// # 为什么是白名单而不是「排除掉文件工具」
@@ -67,6 +53,15 @@ const WORKSPACE_ENV: &str = "CORTEX_WORKSPACE";
 /// 之类的工具。黑名单漏掉新工具 = 它悄悄出现在纯聊天会话里，
 /// 那是安全回退；白名单漏掉新工具 = 纯聊天会话少一个能力，
 /// 那是功能缺口。**失败方向不同，选会往安全那边倒的那个。**
+///
+/// # 这份白名单**不再**是围栏本身
+///
+/// 在此之前纯聊天会话的沙箱根回落到进程工作目录（开发机上就是整个仓库），
+/// 而「那没关系，因为这份白名单里没有文件工具」正是当时的理由 —— 也就是说
+/// 围栏的正确性押在这个常量写得对上。现在纯聊天会话用的是
+/// [`cortex_agent::Turn::sealed`]，可访问范围是**空集**：这份名单漏进一个
+/// 文件工具，最坏的结果是它调用时报「本会话没有绑定工作区」，
+/// 而不是它成功列出了仓库目录。两道闸各自独立成立才叫纵深防御。
 const WORKSPACE_FREE_TOOLS: &[&str] = &["memory_search"];
 
 /// 工具调用轮次上限的环境变量。缺省见 [`cortex_agent::DEFAULT_MAX_ROUNDS`]。
@@ -159,6 +154,24 @@ fn chat_only_specs() -> Vec<cortex_agent::ToolSpec> {
         .collect()
 }
 
+/// 未绑定工作区的会话用的 [`Turn`]：工具目录只有 [`WORKSPACE_FREE_TOOLS`]，
+/// **且**沙箱是封闭的（见那个常量下面关于「白名单不再是围栏」的说明）。
+///
+/// # 为什么是一个独立函数而不是 `Live::new` 里的三行
+///
+/// `Live::new` 要连数据库、要 API key，单测里造不出来 —— 也就是说写在它
+/// 里面的东西**没有任何测试打得到**。把这三行拎出来之后，
+/// `a_chat_only_session_has_no_sandbox_root_at_all` 打的就是生产用的那一份
+/// 装配，而不是测试自己现搭的一个同名东西（后者是一条永远不会红的测试）。
+///
+/// 有人绕过这个函数在 `Live::new` 里自己拼一个的话，它会变成死代码，
+/// 而 `-D warnings` 下死代码是构建失败。
+fn chat_only_turn(max_rounds: usize) -> Turn {
+    Turn::sealed()
+        .with_max_rounds(max_rounds)
+        .with_specs(chat_only_specs())
+}
+
 impl Live {
     pub async fn new(config: &Config, embedder: SharedEmbedder) -> Result<Self> {
         let store = Store::connect(&config.database_url)
@@ -173,13 +186,6 @@ impl Live {
 
         let context_window = llm.model().context_limit();
 
-        let workspace = std::env::var(WORKSPACE_ENV).map_or_else(
-            |_| {
-                std::env::current_dir()
-                    .map_err(|e| CortexError::Config(format!("取不到进程工作目录：{e}")))
-            },
-            |v| Ok(std::path::PathBuf::from(v)),
-        )?;
         // 取值非法（写了个负数或 abc）时报错而不是悄悄用默认值：
         // 配错了却照跑，等于成本上限失效而运维完全不知情
         let max_rounds = match std::env::var(MAX_ROUNDS_ENV) {
@@ -201,14 +207,11 @@ impl Live {
             None => None,
         };
 
-        let chat_turn = Turn::new(&workspace)?
-            .with_max_rounds(max_rounds)
-            .with_specs(chat_only_specs());
+        let chat_turn = chat_only_turn(max_rounds);
         tracing::info!(
-            fallback_root = %chat_turn.sandbox_root().display(),
             max_rounds,
             chat_only_tools = ?WORKSPACE_FREE_TOOLS,
-            "未绑定工作区的会话只给这些工具"
+            "未绑定工作区的会话：只给这些工具，且文件访问范围是空集"
         );
 
         Ok(Self {
@@ -295,14 +298,59 @@ impl Live {
         }
     }
 
+    /// 给一批检索结果补上「这条**此刻**还成不成立」。见 [`FactDto::invalidated`]。
+    ///
+    /// # 为什么只有回放路径要查库
+    ///
+    /// 不带 `as_of` 的四路召回全部走 `active_facts` 视图，按定义就查不到
+    /// 已失效的事实 —— 那条路上恒为 `false`，一次查询都不必发。
+    /// 只有 `as_of` 快照会返回「当时有效、现在已被推翻」的行，而
+    /// **那正是这个字段唯一有信息量的场合**。
+    ///
+    /// # 为什么是 N 次小查询而不是一次批量查询
+    ///
+    /// `cortex-store` 目前只有单条的 `fact_status`，而 cortexd 不写 SQL
+    /// （见 `Cargo.toml` 里那段「这里没有 sqlx 而且不该再有」）。加批量接口
+    /// 要动存储层，那是另一个 crate 的事。N 的上限是检索的 `limit`
+    /// （缺省 20），而回放是用户显式发起的低频操作 —— 这里的取舍是
+    /// 「多几次索引命中的点查」换「不在 cortexd 里开 SQL 的口子」。
+    ///
+    /// 顺序发而不是并发发：并发只会跟正在服务的对话抢同一个连接池，
+    /// 而省下的那点墙钟时间对一个用户自己点出来的回放没有意义。
+    async fn invalidation_flags(
+        &self,
+        items: &[cortex_memory::MemoryItem],
+        replaying: bool,
+    ) -> Vec<bool> {
+        if !replaying {
+            return vec![false; items.len()];
+        }
+        let mut out = Vec::with_capacity(items.len());
+        for m in items {
+            out.push(match self.store.fact_status(&m.id).await {
+                Ok(s) => s.is_some_and(|s| s.op == cortex_store::FactOp::Invalidate),
+                // 查不出来时报 false：把一条仍然有效的事实标成「已失效」
+                // 会让用户以为自己的现行结论被推翻了；反过来只是少一个角标。
+                // 两个方向的错误代价不对称，往少说的那边倒
+                Err(e) => {
+                    tracing::warn!(fact = %m.id, error = %e, "取事实状态失败，按未失效下发");
+                    false
+                }
+            });
+        }
+        out
+    }
+
     pub async fn memory_search(&self, q: MemorySearchQuery) -> Result<MemorySearchResponse> {
         let r = self.retrieve(&q.q, q.as_of.as_deref(), q.limit).await?;
+        let invalidated = self.invalidation_flags(&r.items, q.as_of.is_some()).await;
 
         Ok(MemorySearchResponse {
             facts: r
                 .items
                 .iter()
-                .map(|m| FactDto {
+                .zip(invalidated)
+                .map(|(m, invalidated)| FactDto {
                     id: m.id.clone(),
                     statement: m.statement.clone(),
                     predicate: None,
@@ -310,6 +358,7 @@ impl Live {
                     confidence: 1.0,
                     valid_at: m.valid_at.clone(),
                     created_at: m.known_since.clone(),
+                    invalidated,
                     source_episode_id: m.source_episode_id.clone(),
                 })
                 .collect(),
@@ -914,6 +963,9 @@ async fn run_turn(
                     confidence: 1.0,
                     valid_at: m.valid_at.clone(),
                     created_at: m.known_since.clone(),
+                    // 本轮注入走的是不带 as_of 的召回，只查 active_facts ——
+                    // 按定义拿不到已失效的事实。见 `Live::invalidation_flags`
+                    invalidated: false,
                     source_episode_id: m.source_episode_id.clone(),
                 })
                 .collect(),
@@ -1563,8 +1615,33 @@ mod tests {
         }
         assert_eq!(
             bound.sandbox_root(),
-            dir.path().canonicalize().expect("应能规范化"),
+            Some(dir.path().canonicalize().expect("应能规范化").as_path()),
             "沙箱根必须是绑定的那个目录，而不是进程工作目录"
+        );
+    }
+
+    /// 纯聊天会话的沙箱根必须是**空集**，不是进程工作目录。
+    ///
+    /// 钉住的是一个具体的退化：`Turn::sealed()` 被改回
+    /// `Turn::new(std::env::current_dir())`。那个改动编译得过、
+    /// 所有既有测试全绿，症状只有在 [`WORKSPACE_FREE_TOOLS`] 哪天漏进一个
+    /// 文件工具时才出现 —— 而那时围栏已经是整个仓库了。
+    ///
+    /// 打的是 [`chat_only_turn`]，也就是 `Live::new` 真正用的那一份装配。
+    /// 在测试里自己 `Turn::sealed()` 一个来断言是没有意义的：那只证明了
+    /// `sealed()` 的行为，证明不了生产代码用了它。
+    #[test]
+    fn a_chat_only_session_has_no_sandbox_root_at_all() {
+        let chat = chat_only_turn(4);
+        assert!(
+            chat.sandbox_root().is_none(),
+            "未绑定工作区的会话不能有沙箱根 —— 它的合法可访问范围是空集，\
+             回落到进程工作目录等于把整个仓库围进来"
+        );
+        assert_eq!(
+            chat.tool_names(),
+            WORKSPACE_FREE_TOOLS,
+            "纯聊天会话的工具目录必须就是白名单本身"
         );
     }
 

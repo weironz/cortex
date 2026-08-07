@@ -113,6 +113,24 @@ impl MediaStore {
         Ok(store)
     }
 
+    /// 一个**什么都不接**的媒体存储，专供 crate 内的 HTTP 测试。
+    ///
+    /// 存在的理由是 [`Self::connect`] 会真的去连 S3（`ensure_bucket` 是一次
+    /// 网络往返），连不上还会在进程工作目录下**建一个本地回落目录**。
+    /// 一条只想断言「没带凭据要拿 401」的测试不该为此等一次网络超时，
+    /// 更不该在仓库里留下文件。
+    ///
+    /// 用 `inner: None` 而不是接一个 tempdir：媒体端点在这种状态下会明确报错，
+    /// 而那正好让「测试里不小心真的走到了 blob 逻辑」变成一个响亮的失败，
+    /// 而不是一个悄悄成功的假象。
+    #[cfg(test)]
+    pub(crate) const fn unavailable_for_tests() -> Self {
+        Self {
+            inner: None,
+            backend: "unavailable",
+        }
+    }
+
     /// 报给 `/health` 的后端标识。`local_fs` 出现在生产日志里就是一条告警。
     #[must_use]
     pub const fn backend(&self) -> &'static str {

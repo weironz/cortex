@@ -142,6 +142,47 @@ impl AppState {
         })
     }
 
+    /// 不碰网络、不碰文件系统的最小状态，专供 crate 内的 HTTP 测试。
+    ///
+    /// # 为什么不复用 `new_mock`
+    ///
+    /// 它会 `MediaStore::connect`（一次真实的 S3 往返 + 失败后在工作目录里
+    /// 建回落目录），还会 spawn 一个每 10 秒推一次假游标的后台任务。
+    /// 一条「没带凭据要拿 401」的测试不该依赖这些东西 —— 这正是
+    /// 上一轮认为「路由测试做不了」的那个障碍，而它其实只是一个构造函数
+    /// 的问题，不是 bin crate 的问题。
+    ///
+    /// 契约与 mock 后端完全一致（`Backend::Mock`），所以测试打到的仍然是
+    /// **真实的** [`crate::routes::router`] 与真实的处理器。
+    #[cfg(test)]
+    pub fn for_tests(rt: Runtime) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                config: Config {
+                    database_url: "postgres://tests-never-connect".into(),
+                    bind: "127.0.0.1:0".into(),
+                    s3: cortex_core::config::S3Config {
+                        endpoint: String::new(),
+                        bucket: String::new(),
+                        region: String::new(),
+                        access_key: String::new(),
+                        secret_key: String::new(),
+                    },
+                    llm: cortex_core::config::LlmConfig {
+                        provider: "none".into(),
+                        model: String::new(),
+                        cheap_model: String::new(),
+                    },
+                    device_id: "test".into(),
+                },
+                backend: Backend::Mock,
+                bus: SyncBus::inert(),
+                blobs: crate::blobs::MediaStore::unavailable_for_tests(),
+                rt,
+            }),
+        }
+    }
+
     // ───────────────────────── 认证 ─────────────────────────
 
     #[must_use]
@@ -388,6 +429,12 @@ impl AppState {
                 let facts = mock_facts()
                     .into_iter()
                     .filter(|f| q.q.is_empty() || f.statement.contains(&q.q))
+                    // 日常检索**看不到失效事实**（真实后端的四路召回只查
+                    // active_facts）；回放照样给，只是带上 invalidated=true。
+                    // 这个区别必须在 mock 上也成立，否则客户端 CI 里
+                    // 「不带 as_of 时不该出现已失效的事实」这条断言在 mock 上
+                    // 是永远绿的，而它测的是一个比真实后端宽松的契约
+                    .filter(|f| q.as_of.is_some() || !f.invalidated)
                     // 时间回放：只返回在 as_of 时刻系统已经知道的事实。
                     // 这是双时间轴的系统时间轴，对应「三个月前我以为什么」。
                     .filter(|f| match (&q.as_of, &f.valid_at) {
@@ -572,6 +619,7 @@ fn mock_facts() -> Vec<FactDto> {
             confidence: 0.95,
             valid_at: Some("2026-08-06T00:00:00Z".into()),
             created_at: Utc::now().to_rfc3339(),
+            invalidated: false,
             source_episode_id: Some(Id::new().to_string()),
         },
         FactDto {
@@ -582,6 +630,22 @@ fn mock_facts() -> Vec<FactDto> {
             confidence: 0.9,
             valid_at: Some("2026-08-07T00:00:00Z".into()),
             created_at: Utc::now().to_rfc3339(),
+            invalidated: false,
+            source_episode_id: Some(Id::new().to_string()),
+        },
+        // 一条**已被推翻**的事实。与伪造记忆事件、伪造游标推进同一个理由：
+        // 「这条现在已经不成立了」那个角标是客户端要画的东西，
+        // 没有一条这样的样本，那段 UI 只能等接上真实后端并且真的
+        // redact / supersede 过一条事实之后才第一次被执行
+        FactDto {
+            id: Id::new().to_string(),
+            statement: "同步协议采用裸 BIGSERIAL 游标".into(),
+            predicate: Some("decided".into()),
+            domain: Some("coding".into()),
+            confidence: 1.0,
+            valid_at: Some("2026-08-05T00:00:00Z".into()),
+            created_at: Utc::now().to_rfc3339(),
+            invalidated: true,
             source_episode_id: Some(Id::new().to_string()),
         },
         FactDto {
@@ -592,6 +656,7 @@ fn mock_facts() -> Vec<FactDto> {
             confidence: 1.0,
             valid_at: Some("2026-08-07T00:00:00Z".into()),
             created_at: Utc::now().to_rfc3339(),
+            invalidated: false,
             source_episode_id: Some(Id::new().to_string()),
         },
     ]
@@ -614,7 +679,11 @@ fn mock_chat_stream(
     req: ChatRequest,
     confirms: Arc<ConfirmRegistry>,
 ) -> impl Stream<Item = ChatEvent> + use<> {
-    let facts = mock_facts();
+    // 注入走的是不带 as_of 的召回，失效事实进不来
+    let facts: Vec<FactDto> = mock_facts()
+        .into_iter()
+        .filter(|f| !f.invalidated)
+        .collect();
     let reply = format!(
         "收到「{}」。\n\n这是 **mock 回复** —— cortexd 的路由与事件契约已就绪，\
          但 agent 循环尚未接线。\n\n```rust\nfn hello() {{\n    println!(\"cortex\");\n}}\n```\n\n\

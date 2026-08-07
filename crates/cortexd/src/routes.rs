@@ -24,59 +24,102 @@ use crate::blobs::{DIRECT_UPLOAD_LIMIT, RangeSpec, parse_range};
 use crate::dto::*;
 use crate::state::AppState;
 
+/// 声明全部受保护路由 —— **注册与清单出自同一份声明**。
+///
+/// # 为什么必须是宏
+///
+/// 「哪些路由在认证中间件后面」在此之前没有任何测试拦得住它变坏，而想补
+/// 测试的第一反应（手写一张要断言的路径表）等于把「容易忘的地方」从一处
+/// 变成两处：加路由的人同样会忘记更新那张表，于是新路由既没被保护、
+/// 也没被测到，而编译、clippy、既有测试**全绿**。
+///
+/// 这里用与 `cortex-store` 的 `table::ALL` 同一个手法：宏在展开注册链的
+/// 同时生成 [`PROTECTED_ROUTES`]，`mod tests` 拿它逐条打真实的 `router()`。
+/// 加一条路由就必然进清单，忘不掉。
+///
+/// # 展开顺序是这条围栏的另一半，别动
+///
+/// 所有 `.route()` 在前、`.route_layer()` 在最后一句 —— axum 的
+/// `route_layer` **只覆盖它之前注册的路由**。真有人把它挪到中间，那之后的
+/// 路由会失去认证，但它们仍然在 [`PROTECTED_ROUTES`] 里，于是
+/// `every_protected_route_rejects_anonymous_requests` 当场变红。
+macro_rules! protected_routes {
+    ($( $path:literal [$($method:ident),+ $(,)?] => $handler:expr ),+ $(,)?) => {
+        /// 全部**应当**需要认证的路由，与上面的注册链同源。
+        ///
+        /// 路径里的 `{…}` 是 axum 的参数占位符，测试会替换成一个具体的探针值。
+        #[cfg(test)]
+        const PROTECTED_ROUTES: &[(&str, &[axum::http::Method])] = &[
+            $( ($path, &[$(axum::http::Method::$method),+]) ),+
+        ];
+
+        fn protected_router(state: AppState) -> Router<AppState> {
+            Router::new()
+                $( .route($path, $handler) )+
+                // route_layer：只对**匹配到的**路由生效。不匹配的路径照常 404，
+                // 不会先被判成 401 —— 后者会让「路径打错了」与「凭据不对」
+                // 在客户端看来是同一件事。
+                //
+                // 这一句必须是最后一句，理由见宏的文档
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state,
+                    crate::auth::require,
+                ))
+        }
+    };
+}
+
+protected_routes! {
+    "/auth/ticket" [POST] => post(issue_ticket),
+    "/chat" [POST] => post(chat),
+    // 工具确认的回执与待办列表。
+    //
+    // 回执是 POST 而不是 PATCH/PUT：它不是在改一个资源的状态，
+    // 而是在**投递一个一次性的答复** —— 同一个 token 投第二次不是幂等的
+    // 「结果一样」，而是明确的 404（凭据已被消费）。
+    "/confirmations" [GET, POST] => get(list_confirmations).post(answer_confirmation),
+    "/memory/search" [GET] => get(memory_search),
+    "/episodes/{id}" [GET] => get(get_episode),
+    "/sessions" [GET] => get(list_sessions),
+    // PATCH 而非 PUT：客户端只送要改的字段，没送的原样不动。
+    // PUT 的语义是整体替换，那会逼客户端先 GET 一遍再回传全量 ——
+    // 而两次请求之间别的设备改了什么，就被这次 PUT 悄悄回滚了
+    "/sessions/{id}" [GET, PATCH] => get(get_session).patch(patch_session),
+    // axum 默认体积上限是 2 MiB —— 对「直传小文件」这个用途太紧
+    // （随手一张手机照片就超了）。放宽到 DIRECT_UPLOAD_LIMIT，
+    // 再大的请走 /blobs/presign 直传对象存储，不经服务端中转
+    "/blobs" [POST] => post(upload_blob).layer(DefaultBodyLimit::max(DIRECT_UPLOAD_LIMIT)),
+    "/blobs/presign" [POST] => post(presign_blob),
+    "/blobs/commit" [POST] => post(commit_blob),
+    "/blobs/{hash}" [GET] => get(get_blob),
+    "/blobs/{hash}/url" [GET] => get(get_blob_url),
+    "/sync" [GET] => get(sync),
+    "/ws" [GET] => get(crate::ws::handler),
+}
+
 /// 路由表。
 ///
 /// # 认证的形状：豁免靠**不挂中间件**表达，不靠路径白名单
 ///
 /// 「中间件里判断 `path == "/health"` 就放行」是这类代码最经典的出事点：
 /// 加新路由的人不会想起去更新那张表，而漏掉的方向是**默认放行**。
-/// 这里把它拆成两个 `Router`：`public` 那个只有 `/health`，其余全部落在
-/// `protected` 上并整体套一层 [`crate::auth::require`]。新加的路由默认
-/// 落在受保护那一侧 —— 失败方向反过来了。
+/// 这里把它拆成两个 `Router`：`public` 那个只有 `/health`，其余全部由
+/// [`protected_router`] 生成并整体套一层 [`crate::auth::require`]。
+/// 新加的路由默认落在受保护那一侧 —— 失败方向反过来了。
+///
+/// # 这个函数体里只允许出现 `/health` 一条 `.route()`
+///
+/// 别的路由一律写进上面的 `protected_routes!`。写在这里的两种下场都很糟：
+/// 加进 `public` 就是**完全不认证**；加在 `protected_router(...)` 返回值
+/// 之后（也就是 `route_layer` 之后）同样不认证，而且更隐蔽。
+/// `router_registers_no_routes_outside_the_macro` 这条测试直接读本文件的
+/// 源码来守这一条 —— 它是唯一能拦住「在宏之外注册路由」的手段。
 pub fn router(state: AppState) -> Router {
     let public = Router::new().route("/health", get(health));
 
-    let protected = Router::new()
-        .route("/auth/ticket", post(issue_ticket))
-        .route("/chat", post(chat))
-        // 工具确认的回执与待办列表。
-        //
-        // 回执是 POST 而不是 PATCH/PUT：它不是在改一个资源的状态，
-        // 而是在**投递一个一次性的答复** —— 同一个 token 投第二次不是幂等的
-        // 「结果一样」，而是明确的 404（凭据已被消费）。
-        .route(
-            "/confirmations",
-            get(list_confirmations).post(answer_confirmation),
-        )
-        .route("/memory/search", get(memory_search))
-        .route("/episodes/{id}", get(get_episode))
-        .route("/sessions", get(list_sessions))
-        // PATCH 而非 PUT：客户端只送要改的字段，没送的原样不动。
-        // PUT 的语义是整体替换，那会逼客户端先 GET 一遍再回传全量 ——
-        // 而两次请求之间别的设备改了什么，就被这次 PUT 悄悄回滚了
-        .route("/sessions/{id}", get(get_session).patch(patch_session))
-        .route(
-            "/blobs",
-            // axum 默认体积上限是 2 MiB —— 对「直传小文件」这个用途太紧
-            // （随手一张手机照片就超了）。放宽到 DIRECT_UPLOAD_LIMIT，
-            // 再大的请走 /blobs/presign 直传对象存储，不经服务端中转
-            post(upload_blob).layer(DefaultBodyLimit::max(DIRECT_UPLOAD_LIMIT)),
-        )
-        .route("/blobs/presign", post(presign_blob))
-        .route("/blobs/commit", post(commit_blob))
-        .route("/blobs/{hash}", get(get_blob))
-        .route("/blobs/{hash}/url", get(get_blob_url))
-        .route("/sync", get(sync))
-        .route("/ws", get(crate::ws::handler))
-        // route_layer：只对**匹配到的**路由生效。不匹配的路径照常 404，
-        // 不会先被判成 401 —— 后者会让「路径打错了」与「凭据不对」
-        // 在客户端看来是同一件事
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::auth::require,
-        ));
-
-    public.merge(protected).with_state(state)
+    public
+        .merge(protected_router(state.clone()))
+        .with_state(state)
 }
 
 // ─────────────────────────── /health ───────────────────────────
@@ -406,5 +449,335 @@ impl IntoResponse for ApiError {
             }),
         )
             .into_response()
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  「哪些路由在认证中间件后面」
+// ══════════════════════════════════════════════════════════════
+//
+// 这一组测试守的是一件在此之前**完全没有防护**的事。两条真实的失效路径：
+//
+// 1. 新加路由的人手滑加进 `public`
+// 2. 在 `route_layer` **之后**再 `.route(...)` —— axum 的 `route_layer`
+//    只覆盖它之前注册的路由，之后那条就是裸的，而编译、clippy、
+//    既有测试全都是绿的
+//
+// 分两把锁对付这两条：
+//
+// - 宏里注册的路由 → `every_protected_route_rejects_anonymous_requests`
+//   遍历 [`PROTECTED_ROUTES`]（与注册链同源，不可能漏），对**真实的**
+//   `router()` 发请求。它同时覆盖了「有人把 route_layer 挪到宏展开的中间」。
+// - 宏**之外**注册的路由 → `router_registers_no_routes_outside_the_macro`
+//   直接读本文件源码。这是唯一能拦住它的手段：axum 不暴露路由表，
+//   运行时无从枚举「我不知道存在的那条路径」。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::AuthMode;
+    use crate::state::Runtime;
+    use axum::body::Body;
+    use axum::http::{Method, Request};
+    use tower::ServiceExt as _;
+
+    /// 参数占位符替换成的探针值。
+    ///
+    /// 从模式里**自动**推出探针路径，而不是让人在清单里再写一遍具体路径 ——
+    /// 那又会变成一份要手工维护的东西，也就又有了忘记更新的地方。
+    const PROBE: &str = "cortex-route-guard";
+
+    fn probe_path(pattern: &str) -> String {
+        pattern
+            .split('/')
+            .map(|seg| {
+                if seg.starts_with('{') && seg.ends_with('}') {
+                    PROBE
+                } else {
+                    seg
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// 一份开着认证的状态，外加那份 token 的明文。
+    fn app_with_token() -> (Router, String) {
+        let (token, digest_hex) = crate::auth::generate();
+        let raw = hex::decode(&digest_hex).expect("生成的摘要应当是合法十六进制");
+        let digest: [u8; 32] = raw.try_into().expect("SHA-256 应当是 32 字节");
+        let rt = Runtime {
+            auth: AuthMode::Token { digest },
+            confirms: std::sync::Arc::new(crate::confirm::ConfirmRegistry::new(
+                std::time::Duration::from_secs(30),
+            )),
+            tickets: std::sync::Arc::new(crate::auth::TicketBook::default()),
+        };
+        (router(crate::state::AppState::for_tests(rt)), token)
+    }
+
+    async fn status_of(
+        app: &Router,
+        method: &Method,
+        path: &str,
+        bearer: Option<&str>,
+    ) -> StatusCode {
+        let mut req = Request::builder().method(method.clone()).uri(path);
+        if let Some(t) = bearer {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        // 所有写方法都带一个合法的空 JSON 体：没有它，请求会在**处理器**里
+        // 因为解析失败而挂掉。那不影响 401 的断言（中间件在前），但会让
+        // 「带了凭据之后不再是 401」那半条断言变得没那么有说服力
+        let req = req
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .expect("构造请求不该失败");
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("router 的错误类型是 Infallible")
+            .status()
+    }
+
+    /// 清单里的每一条，无凭据时必须 401。
+    ///
+    /// # 为什么还要先证明探针真的打到了路由
+    ///
+    /// `route_layer` 只对**匹配到的**路由生效，所以一个拼错的探针路径拿到的
+    /// 是 404 —— 而 `404 != 401` 这件事会让「这条路由没被保护」和
+    /// 「这条路由压根不存在」变成同一个绿。也就是说，光断言 401 的测试
+    /// 有可能是**空的**。
+    ///
+    /// 证明的办法是拿一个这条路由**没有**声明的方法去打：路径匹配上了就是
+    /// 405，没匹配上才是 404。这个判据与处理器的业务返回无关 ——
+    /// `GET /sessions/{id}` 本来就会因为「mock 里没有这个会话」而正当地
+    /// 返回 404，用 404 做判据会把它误判成路由不存在。
+    #[tokio::test]
+    async fn every_protected_route_rejects_anonymous_requests() {
+        let (app, token) = app_with_token();
+        assert!(
+            !PROTECTED_ROUTES.is_empty(),
+            "清单是空的 —— 宏没有生成任何东西，这组测试等于没跑"
+        );
+
+        for (pattern, methods) in PROTECTED_ROUTES {
+            let path = probe_path(pattern);
+
+            // 先证明这条探针路径真的能匹配到路由，否则下面的断言是空的
+            let unsupported = [Method::DELETE, Method::PUT]
+                .into_iter()
+                .find(|m| !methods.contains(m))
+                .expect("DELETE 与 PUT 不该同时被某条路由占用");
+            let routed = status_of(&app, &unsupported, &path, Some(&token)).await;
+            assert_eq!(
+                routed,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "探针路径 {path}（来自 {pattern}）用未声明的 {unsupported} 打过去得到 {routed}，\
+                 预期 405。405 说明路径匹配上了、只是方法不对；404 说明这条探针根本没打到路由，\
+                 此时下面那条 401 断言是空的"
+            );
+
+            for method in *methods {
+                let anon = status_of(&app, method, &path, None).await;
+                assert_eq!(
+                    anon,
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {pattern} 在没有凭据时返回了 {anon}，而不是 401 —— \
+                     这条路由不在认证中间件后面。检查它是不是被加进了 public，\
+                     或者被加在了 route_layer 之后"
+                );
+
+                let authed = status_of(&app, method, &path, Some(&token)).await;
+                assert_ne!(
+                    authed,
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {pattern} 带上正确凭据仍然 401 —— 认证本身坏了"
+                );
+            }
+        }
+    }
+
+    /// 错误的凭据与没有凭据一样被拒。
+    #[tokio::test]
+    async fn a_wrong_token_is_rejected_on_every_protected_route() {
+        let (app, _) = app_with_token();
+        for (pattern, methods) in PROTECTED_ROUTES {
+            let path = probe_path(pattern);
+            for method in *methods {
+                let got = status_of(&app, method, &path, Some("not-the-token")).await;
+                assert_eq!(
+                    got,
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {pattern} 接受了一个错误的 token（返回 {got}）"
+                );
+            }
+        }
+    }
+
+    /// `/health` 是**唯一**不需要认证的端点。理由见 [`Health::auth`]。
+    #[tokio::test]
+    async fn health_is_the_only_endpoint_open_to_anonymous_callers() {
+        let (app, _) = app_with_token();
+        let got = status_of(&app, &Method::GET, "/health", None).await;
+        assert_eq!(
+            got,
+            StatusCode::OK,
+            "/health 必须免认证 —— 它的消费者是配不了凭据的容器探针"
+        );
+    }
+
+    /// 不存在的路径必须 404，不能被中间件抢先判成 401。
+    ///
+    /// 这是 `route_layer`（而不是 `layer`）的全部意义：否则「路径打错了」
+    /// 与「凭据不对」在客户端看来是同一件事。
+    #[tokio::test]
+    async fn an_unknown_path_is_a_404_not_a_401() {
+        let (app, _) = app_with_token();
+        let got = status_of(&app, &Method::GET, "/no/such/endpoint", None).await;
+        assert_eq!(
+            got,
+            StatusCode::NOT_FOUND,
+            "未知路径返回了 {got} —— route_layer 被换成 layer 了？"
+        );
+    }
+
+    /// `router()` 函数体里只允许注册 `/health` 一条路由。
+    ///
+    /// # 为什么只能读源码
+    ///
+    /// 前面那些测试遍历的是宏生成的清单，它们对「在宏之外注册的路由」
+    /// 天然是瞎的 —— 而那恰恰是最危险的一条：`.route_layer()` 之后再
+    /// `.route(...)`，那条路由没有认证，编译与 clippy 全绿。axum 不暴露
+    /// 已注册的路由表，运行时没有任何办法枚举出「我不知道存在的那条路径」。
+    ///
+    /// 于是退而求其次：直接看这个文件里 `pub fn router` 的函数体。
+    /// 它短、形状固定，且**任何**想绕过认证的新路由都必须先出现在这里。
+    /// 从本文件源码里切出一段，并去掉整行注释。
+    ///
+    /// 注释里出现 `.route(` 会误伤判断。这个文件里没有任何字符串字面量含
+    /// `//`，所以按行判断就够 —— 真有人往字符串里写了 `//`，这条测试会
+    /// 变红而不是变松，方向是对的。
+    fn code_between(src: &str, from: &str, to: &str) -> String {
+        // 先把 CRLF 归一。Windows 上一次 `core.autocrlf=true` 的检出就足以让
+        // 「找 `\n}\n`」全部落空，而那时这几条测试会以「找不到结尾」的形式
+        // 失败 —— 方向是安全的（红而不是绿），但那是一次纯噪声的红
+        let src = src.replace("\r\n", "\n");
+        let start = src
+            .find(from)
+            .unwrap_or_else(|| panic!("源码里找不到 {from:?} —— 它被改名了？这条测试要跟着改"));
+        let rest = &src[start..];
+        let end = rest
+            .find(to)
+            .unwrap_or_else(|| panic!("从 {from:?} 起找不到结尾 {to:?}"));
+        rest[..end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn router_registers_no_routes_outside_the_macro() {
+        const SRC: &str = include_str!("routes.rs");
+
+        let code = code_between(SRC, "\npub fn router(", "\n}\n");
+
+        let registrations = code.matches(".route(").count();
+        assert_eq!(
+            registrations, 1,
+            "router() 的函数体里出现了 {registrations} 处 `.route(`，应当只有 /health 那一处。\n\
+             新路由请写进 protected_routes! 宏里：\n\
+             · 加进 public 的那一侧 = 完全不需要认证；\n\
+             · 加在 protected_router(...) 之后 = 在 route_layer 之后注册，同样不认证，而且更隐蔽。\n\
+             实际的函数体：\n{code}"
+        );
+        assert!(
+            code.contains("\"/health\""),
+            "router() 里那一处 .route() 应当是 /health"
+        );
+    }
+
+    /// 宏展开里 `.route_layer()` 必须排在**所有** `.route()` 之后。
+    ///
+    /// axum 的 `route_layer` 只覆盖它之前注册的路由。把它挪到中间，之后那些
+    /// 路由就是裸的 —— [`PROTECTED_ROUTES`] 会照样列出它们，所以
+    /// `every_protected_route_rejects_anonymous_requests` 拦得住这一种；
+    /// 但**在宏里、在 route_layer 之后新写一条 `.route()` 并且不进清单**
+    /// 那一种，运行时没有任何办法发现（清单里没有它，也就没人去打它）。
+    /// 这条测试补的正是那个缺口。
+    #[test]
+    fn the_auth_layer_is_applied_after_every_route_in_the_macro() {
+        const SRC: &str = include_str!("routes.rs");
+
+        let code = code_between(SRC, "macro_rules! protected_routes", "\n}\n");
+        let last_route = code
+            .rfind(".route(")
+            .expect("宏里应当有 .route() 注册 —— 没有的话整个宏是空的");
+        let layer = code
+            .rfind(".route_layer(")
+            .expect("宏里应当有 .route_layer() —— 没有它，所有路由都不认证");
+        assert!(
+            layer > last_route,
+            "protected_routes! 宏里有 .route() 排在 .route_layer() 之后。\n\
+             axum 的 route_layer 只覆盖它之前注册的路由 —— 之后那条没有认证，\n\
+             而且编译、clippy、既有测试全绿。把 .route_layer() 移回最后一句。"
+        );
+    }
+
+    /// 清单里不该出现 `/health`。
+    ///
+    /// 守的是反方向：有人「顺手」把 /health 也搬进宏里，容器探针会集体 401，
+    /// 然后多半有人去把 HEALTHCHECK 删掉。
+    #[test]
+    fn health_is_not_in_the_protected_list() {
+        assert!(
+            !PROTECTED_ROUTES.iter().any(|(p, _)| *p == "/health"),
+            "/health 必须留在 public 一侧 —— 它的消费者配不了凭据"
+        );
+    }
+
+    // ─────────────── 失效事实在检索结果里看得出来 ───────────────
+
+    /// mock 后端上：日常检索不返回失效事实，回放返回但带 `invalidated`。
+    ///
+    /// 走真实路由而不是直接调 `AppState`：这条契约的消费者是客户端 CI，
+    /// 它看到的就是 HTTP 响应体。
+    #[tokio::test]
+    async fn replay_shows_invalidated_facts_and_plain_search_does_not() {
+        async fn facts(app: &Router, token: &str, query: &str) -> Vec<serde_json::Value> {
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri(query)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("构造请求不该失败");
+            let resp = app.clone().oneshot(req).await.expect("Infallible");
+            assert_eq!(resp.status(), StatusCode::OK, "检索端点应当返回 200");
+            let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .expect("应能读出响应体");
+            let v: serde_json::Value = serde_json::from_slice(&bytes).expect("应当是 JSON");
+            v["facts"].as_array().expect("facts 应当是数组").clone()
+        }
+
+        let (app, token) = app_with_token();
+
+        let plain = facts(&app, &token, "/memory/search?q=").await;
+        assert!(!plain.is_empty(), "mock 检索不该是空的");
+        assert!(
+            plain.iter().all(|f| f["invalidated"] == false),
+            "日常检索里不该出现已失效的事实 —— 四路召回只查 active_facts"
+        );
+
+        let replayed = facts(&app, &token, "/memory/search?q=&as_of=2026-08-31T00:00:00Z").await;
+        assert!(
+            replayed.iter().any(|f| f["invalidated"] == true),
+            "回放必须返回当时有效、现在已被推翻的事实，并且标出来 —— \
+             「三个月前我以为什么」正是这个项目的卖点，过滤掉它等于砍掉卖点"
+        );
+        assert!(
+            replayed.iter().all(|f| f.get("invalidated").is_some()),
+            "每条事实都必须带 invalidated 字段，客户端不该靠猜"
+        );
     }
 }
