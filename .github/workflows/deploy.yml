@@ -1,0 +1,130 @@
+name: Deploy
+
+# ══════════════════════════════════════════════════════════
+#  把某个**已发布**的版本放到线上。
+#
+#  刻意只有 workflow_dispatch，**没有 `on: push`**：
+#  哪个版本在线上，是人做的决定，不是合并的副作用。
+#
+#  安全模型（照抄 mica 那套，不简化）：
+#  用的不是 root 密钥。节点上 `~cortex-deploy/.ssh/authorized_keys` 用
+#      restrict,command="/usr/bin/sudo /usr/local/sbin/cortex-deploy"
+#  把它钉死，而 sshd 在**接受密钥之前**就套上这条命令。所以这把密钥
+#  即使泄露，也只能在已发布的版本之间切换：没有 shell、读不到 .env
+#  （里面有认证摘要、数据库口令、DeepSeek key）、碰不到数据库。
+#
+#  CI **只送 compose 的 sha256，不送文件本身**。送文件等于把「把宿主根
+#  挂进容器」的能力交给这把密钥；一个哈希只能拒绝，不能注入。
+# ══════════════════════════════════════════════════════════
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号，不带 v 前缀，例如 0.1.0'
+        required: true
+
+# 两次部署同时跑会在节点的 .env 上打架（都在改 CORTEX_VERSION）。
+# 排队而不是取消：**半应用的部署比慢的部署更糟**。
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # 留着是为了仓库上的部署历史 / 审计线索，**不是**当闸门用：
+    # 这个 environment 刻意不配 required reviewer。
+    # workflow_dispatch 且没有 on: push，本身就意味着有人决定要发；
+    # 再加一道审批只是对同一个决定的二次确认，对单维护者是摩擦不是安全。
+    # 哪天不再是单维护者，在 Settings → Environments 里加审批人即可。
+    environment:
+      name: production
+      url: https://cortex.cloudcele.com
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # 要用 tag 上那棵树来给 compose 取指纹
+          ref: v${{ inputs.version }}
+
+      - name: 拒绝一切不是 X.Y.Z 的东西
+        run: |
+          [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "version 必须是 X.Y.Z"; exit 1; }
+
+      - name: 部署
+        env:
+          # 这**不是** root 密钥。见文件头的安全模型。
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          # `ssh … | tee` 会把 ssh 的退出码藏在 tee 后面，而 runner 默认的
+          # shell 不带 pipefail。mica 上真实发生过：节点**拒绝**了部署
+          # （compose 指纹不匹配），这一步照样报成功，只有后面的健康检查
+          # 才抓住。**一个在部署被拒时还报成功的步骤，比没有这个步骤更糟。**
+          set -o pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # 钉死的，不在运行时 ssh-keyscan —— 现在扫等于信任任何应答的人，
+          # 那不是验证
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+          # **tag 上那份** compose 的指纹。节点自己那份不一致就拒绝，
+          # 于是一个版本永远不会被部署到它从没一起发布过的 compose 上
+          sha=$(sha256sum deploy/docker-compose.yml | cut -d' ' -f1)
+
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
+            cortex-deploy@cortex.cloudcele.com \
+            "deploy ${{ inputs.version }} $sha" | tee /tmp/deploy.log
+
+          # 节点会报出它跑的那份部署策略的构建指纹。CI 只能**读**这道
+          # 限制自己的围栏，绝不能安装它。
+          #
+          # 比的是**默认分支**，不是被部署的那个 tag：部署策略与应用版本
+          # 是两条独立的时间线。mica 上第一次跑这个检查时比的是 v0.12.8 ——
+          # 那个 tag 早于脚本本身，于是 sha256sum 出来是空的，报了一次
+          # 「与空哈希漂移」的假警报，而节点其实与 main 一模一样。
+          # **假警报会教人忽略警报。**
+          git fetch -q --depth 1 origin main 2>/dev/null || true
+          want=$(git show FETCH_HEAD:deploy/node-deploy-policy.sh 2>/dev/null | sha256sum | cut -c1-16)
+          got=$(grep -oP 'script_sha=\K\S+' /tmp/deploy.log || true)
+          if [ -z "$want" ]; then
+            echo "::warning::读不到默认分支的 deploy/node-deploy-policy.sh —— 漂移检查跳过"
+          elif [ -n "$got" ] && [ "$got" != "$want" ]; then
+            echo "::warning::节点跑的部署策略是 $got，默认分支是 $want —— 跑 'just deploy-sync' 同步"
+          fi
+
+      # 不信部署脚本自己的报喜。它说健康只代表容器的 HEALTHCHECK 绿了，
+      # 证明不了 traefik 的路由、StripPrefix、证书这一整条链路是通的，
+      # 更证明不了线上跑的真是这一版
+      - name: 验证线上真的在跑这一版
+        run: |
+          set -euo pipefail
+          got=$(curl -fsS https://cortex.cloudcele.com/api/health); echo "$got"
+
+          echo "$got" | grep -q '"version":"${{ inputs.version }}"' \
+            || { echo "版本不符 —— /api/health 报的不是 ${{ inputs.version }}"; exit 1; }
+
+          # 认证必须是开着的。一个 auth=disabled 的线上实例会把整个记忆库
+          # 交给任何能连上的人，而这件事没有任何别的症状
+          echo "$got" | grep -q '"auth":"token"' \
+            || { echo "线上认证没开 —— 拒绝认为这次部署成功"; exit 1; }
+
+          # ★ `"status":"ok"` 与 docker 的 HEALTHCHECK **都不代表接上了后端**。
+          # 本机实测过：少一个 DEEPSEEK_API_KEY，cortexd 就会整个回落到 mock
+          # 数据源继续启动 —— /health 报 status ok、docker 转 healthy，
+          # 而 database 是 "not_wired"，它在服务假数据。
+          # 同理 RUSTFS 凭据不对时 blob_backend 会变成 "local_fs"：
+          # 上传的媒体只存在于容器里，不进对象存储、不随备份走、签不出
+          # presigned URL —— 而这一切没有任何别的症状。
+          # 所以这两个字段是部署成功的**必要条件**，不是参考信息。
+          echo "$got" | grep -q '"database":"ok"' \
+            || { echo "数据库没接上 —— cortexd 回落到 mock 了，这不是一次成功的部署"; exit 1; }
+          echo "$got" | grep -q '"blob_backend":"s3"' \
+            || { echo "对象存储没接上（回落到本地文件系统）—— 媒体不会进备份"; exit 1; }
+
+          # Web 也要真的发得出来（traefik 的路径分流两条都得对）
+          curl -fsS https://cortex.cloudcele.com/ | grep -q '<html'

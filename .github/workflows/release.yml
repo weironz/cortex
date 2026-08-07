@@ -1,12 +1,39 @@
 name: Release
 
+# ══════════════════════════════════════════════════════════
+#  发布流水线 —— 打产物、推镜像、建 draft release。**不部署。**
+#  把某个版本放到线上是 deploy.yml 的事，而且只能由人手动触发。
+#
+#  触发：推 `v*` tag，或手动 workflow_dispatch（要填 tag）。
+#
+#  ── 这个文件被整个重写过，原因值得留着 ────────────────────
+#  上一版从建仓起就在，**一次都没被触发过**，里面有五个只会在
+#  「真的发版那天」才暴露的问题：
+#
+#  1. `tag="${GITHUB_REF_NAME:-${{ inputs.tag }}}"` —— GITHUB_REF_NAME
+#     **永远有值**，手动触发时它是分支名。于是 workflow_dispatch 会打出
+#     一堆叫 `cortex-main-…` 的包，而 inputs.tag 从来不生效。
+#     release 作业里的 `github.ref_name || inputs.tag` 是同一个毛病。
+#  2. 没有 `--locked`。Cargo.lock 在仓库里却允许构建时改它，
+#     五个平台可能各自解析出一套依赖。
+#  3. 从头到尾**没有运行过**它要发布的那个二进制。编译得过不等于跑得起来
+#     （这个项目在 Dockerfile 里已经踩过一次 libstdc++ 的坑），
+#     那种产物会一路通过打包上传，直到第一个用户下载才暴露。
+#  4. `cp README.md LICENSE … 2>/dev/null || true` —— 漏带 LICENSE
+#     （Apache-2.0 要求随分发附带）不会有任何提示。
+#  5. 完全没有 Flutter Web 与 docker 镜像，而这两样才是自托管实际会用的。
+#
+#  现在打包与校验都在 scripts/release-*.sh 里，**本机可以真跑**。
+#  YAML 里只剩「在哪台机器上编译」。
+# ══════════════════════════════════════════════════════════
+
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: 手动发布时使用的标签
+        description: 手动发布时使用的标签（形如 v0.1.0）
         required: true
 
 permissions:
@@ -14,76 +41,317 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Web 镜像里的 API 地址是**编译期**钉死的（见 Dockerfile.web）。
+  # 生产是同源路径分流，所以指到自己的 /api。
+  # 换域名 = 重新构建镜像，不是改 .env
+  CORTEX_WEB_API_BASE: https://cortex.cloudcele.com/api
 
 jobs:
+  # ══════════════════════════════════════════════════════════
+  #  前置闸门 —— 在编译任何东西之前
+  #
+  #  版本号对不上时最不该发生的事，是先花二十分钟在五个平台上
+  #  编译出一堆名字是错的产物。所有其它作业都 needs 它。
+  # ══════════════════════════════════════════════════════════
+  preflight:
+    name: 前置检查
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # tag 只在这里解析一次，后面全部作业引用这个 output。
+      # 刻意不用 `github.ref_name || inputs.tag`：ref_name 在
+      # workflow_dispatch 上是分支名，永远为真，`||` 那一侧取不到
+      - name: 解析 tag
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::tag '$tag' 不合法，必须是 vX.Y.Z"; exit 1; }
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: 版本一致性 + 凭据泄漏 + CHANGELOG
+        run: bash scripts/release-preflight.sh --tag "${{ steps.resolve.outputs.tag }}"
+
+  # ══════════════════════════════════════════════════════════
+  #  二进制 —— 五个平台，全部**本机编译**
+  #
+  #  没有交叉编译：每个 target 都跑在与它同架构的 runner 上。
+  #  这让 release-package.sh 能在打包前真的执行一次 `--version` ——
+  #  交叉编译出来的东西在构建机上跑不了，也就没法冒烟。
+  # ══════════════════════════════════════════════════════════
   build:
-    name: ${{ matrix.target }}
+    name: 二进制 ${{ matrix.target }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  ext: ""     }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, ext: ""   }
-          - { os: macos-latest,   target: aarch64-apple-darwin,      ext: ""     }
-          - { os: macos-13,       target: x86_64-apple-darwin,       ext: ""     }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,    ext: ".exe" }
-
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu  }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest,     target: aarch64-apple-darwin      }
+          - { os: macos-13,         target: x86_64-apple-darwin       }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc    }
     steps:
       - uses: actions/checkout@v5
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: release-${{ matrix.target }}
 
       - name: 构建
-        run: cargo build --release --target ${{ matrix.target }} -p cortexd -p cortex-cli
+        run: cargo build --release --locked --target ${{ matrix.target }} -p cortexd -p cortex-cli
 
+      # 打包脚本：跑 --version 冒烟并核对版本 → 组装目录（含 LICENSE /
+      # NOTICE / CHANGELOG / INSTALL.txt）→ 压缩 → 出 sha256
       - name: 打包
         shell: bash
         run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
-          dir="cortex-${tag}-${{ matrix.target }}"
-          mkdir -p "dist/${dir}"
-          cp "target/${{ matrix.target }}/release/cortexd${{ matrix.ext }}" "dist/${dir}/"
-          cp "target/${{ matrix.target }}/release/cortex${{ matrix.ext }}"  "dist/${dir}/"
-          cp README.md LICENSE "dist/${dir}/" 2>/dev/null || true
-          cd dist
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "${dir}.zip" "${dir}"
-          else
-            tar czf "${dir}.tar.gz" "${dir}"
-          fi
+          bash scripts/release-package.sh \
+            --target "${{ matrix.target }}" \
+            --version "${{ needs.preflight.outputs.version }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: bin-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.sha256
           if-no-files-found: error
 
-  release:
-    name: 发布
-    needs: build
+  # ══════════════════════════════════════════════════════════
+  #  Flutter Web 静态产物
+  #
+  #  不带 --dart-define：这一份是给「自己搭静态服务器」的人用的，
+  #  地址在设置面板里填。钉死域名的那一份在 cortex-web 镜像里。
+  # ══════════════════════════════════════════════════════════
+  web:
+    name: Flutter Web 产物
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: 构建
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter build web --release
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          name="cortex-web-v${{ needs.preflight.outputs.version }}"
+          mkdir -p dist
+          cp -r app/build/web "dist/$name"
+          cp LICENSE NOTICE "dist/$name/"
+          cat > "dist/$name/README.txt" <<EOF
+          Cortex Web v${{ needs.preflight.outputs.version }}
+
+          纯静态产物，丢进任何静态服务器即可：
+              python3 -m http.server 8081 --directory .
+
+          首次打开在设置面板里填 cortexd 地址（默认 http://127.0.0.1:8080）
+          与访问凭据。与 cortexd 不同源时，cortexd 侧要允许这个来源的跨域。
+          EOF
+          tar czf "dist/$name.tar.gz" -C dist "$name"
+          rm -rf "dist/$name"
+          sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  # ══════════════════════════════════════════════════════════
+  #  docker 镜像 —— cortexd 与 cortex-web，各推两个 registry
+  #
+  #  ACR 是生产实际拉取的那个（节点在国内，Docker Hub 在那里要么慢、
+  #  要么得经第三方镜像站，而那类站点缓存 tag→digest，是「拉到旧镜像
+  #  还看不出来」的陷阱）。Docker Hub 那份是异地副本。
+  #
+  #  只做 linux/amd64。arm64 得靠 QEMU 模拟构建，而这两个镜像一个要
+  #  编译整个 Rust 依赖树 + 链接预编译的 ONNX Runtime，一个要跑 dart2js ——
+  #  模拟构建按小时计，而且**没人在 arm64 上验证过 ONNX Runtime 这条路**。
+  #  发一个从没被启动过的 arm64 镜像，正是这条流水线要避免的事。
+  # ══════════════════════════════════════════════════════════
+  image:
+    name: 镜像 ${{ matrix.image }}
+    needs: preflight
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: cortexd
+            dockerfile: scripts/docker/Dockerfile.cortexd
+          - image: cortex-web
+            dockerfile: scripts/docker/Dockerfile.web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: registry.cn-shenzhen.aliyuncs.com
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      # cortex-web 要把 API 地址编译进去；cortexd 不需要这个 arg。
+      # 传给用不到它的 Dockerfile 是无害的（会有一条 UnusedBuildArgs 警告），
+      # 但显式区分能让「哪个镜像与域名绑定」这件事在文件里看得见
+      - name: 决定 build-args
+        id: args
+        run: |
+          if [ "${{ matrix.image }}" = "cortex-web" ]; then
+            echo "value=CORTEX_BASE_URL=${{ env.CORTEX_WEB_API_BASE }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          build-args: ${{ steps.args.outputs.value }}
+          # 只打具体版本，**不打 latest**。生产钉死版本，重启之后
+          # 必须回到同一个；一个会漂移的 tag 会让「线上跑的是哪一版」
+          # 变成一个查不清的问题
+          tags: |
+            willdockerhub/${{ matrix.image }}:v${{ needs.preflight.outputs.version }}
+            registry.cn-shenzhen.aliyuncs.com/willspace/${{ matrix.image }}:v${{ needs.preflight.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      # 镜像必须被真的启动一次。推上去之后才发现起不来，就只能靠发下一版
+      # 来修 —— 而那时它已经在 registry 里了
+      - name: 冒烟
+        run: |
+          set -euo pipefail
+          img="registry.cn-shenzhen.aliyuncs.com/willspace/${{ matrix.image }}:v${{ needs.preflight.outputs.version }}"
+          if [ "${{ matrix.image }}" = "cortexd" ]; then
+            # --version 与 --generate-token 都不需要数据库、不需要 API key，
+            # 是唯一能在 CI 里无依赖执行的真实代码路径。它们能证明动态链接
+            # 是通的 —— ONNX Runtime / libstdc++ 那一类问题会在这里当场炸
+            docker run --rm "$img" --version | tee /tmp/v.txt
+            grep -qF "${{ needs.preflight.outputs.version }}" /tmp/v.txt \
+              || { echo "::error::镜像里的版本不是 ${{ needs.preflight.outputs.version }}"; exit 1; }
+            docker run --rm "$img" --generate-token | grep -q CORTEX_AUTH_TOKEN_SHA256
+            # prod 的 migration 靠镜像里这份 sqlx
+            docker run --rm --entrypoint sqlx "$img" --version
+          else
+            cid=$(docker run -d -p 18080:80 "$img")
+            for _ in $(seq 1 30); do
+              curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1 && break
+              sleep 1
+            done
+            curl -fsS http://127.0.0.1:18080/healthz
+            # index.html 必须真的发得出来，而且 SPA 回落要生效
+            curl -fsS http://127.0.0.1:18080/ | grep -q '<html'
+            curl -fsS http://127.0.0.1:18080/some/deep/link | grep -q '<html'
+            docker rm -f "$cid" >/dev/null
+          fi
+
+  # ══════════════════════════════════════════════════════════
+  #  汇总并建 draft release
+  #
+  #  draft 而不是直接 publish：产物齐不齐、版本对不对，人看一眼再按发布。
+  #  发布是不可逆的 —— 撤回改变不了「已经有人拉走了」。
+  # ══════════════════════════════════════════════════════════
+  release:
+    name: 建 draft release
+    needs: [preflight, build, web, image]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
 
-      - name: 生成校验和
-        run: cd dist && sha256sum * > SHA256SUMS
+      # 逐平台的 .sha256 是构建机上算的，这里汇总成一份。
+      # 先删掉单份的再算，否则 SHA256SUMS 里会混进「校验和文件的校验和」
+      - name: 汇总校验和
+        run: |
+          set -euo pipefail
+          cd dist
+          rm -f ./*.sha256 SHA256SUMS
+          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      # 少一个平台时 release 照样建得出来，只是那个平台的用户下载页上
+      # 没有东西 —— 而没有任何红灯。所以在这里点名清点
+      - name: 产物清点
+        run: |
+          set -euo pipefail
+          cd dist
+          v="${{ needs.preflight.outputs.version }}"
+          miss=0
+          for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+                   aarch64-apple-darwin x86_64-apple-darwin; do
+            [ -f "cortex-v$v-$t.tar.gz" ] || { echo "::error::缺少 $t"; miss=1; }
+          done
+          [ -f "cortex-v$v-x86_64-pc-windows-msvc.zip" ] || { echo "::error::缺少 Windows"; miss=1; }
+          [ -f "cortex-web-v$v.tar.gz" ]                 || { echo "::error::缺少 Web"; miss=1; }
+          exit $miss
+
+      - name: 取 CHANGELOG 里这一版的段落
+        run: |
+          set -euo pipefail
+          v="${{ needs.preflight.outputs.version }}"
+          awk -v ver="$v" '
+            $0 ~ "^## +\\[?" ver "\\]?" { on = 1; print; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "::error::CHANGELOG.md 里取不到 $v"; exit 1; }
+          {
+            echo; echo "---"; echo
+            echo '### 安装'
+            echo
+            echo '二进制见下方产物；自托管完整步骤见 [docs/install.md](https://github.com/${{ github.repository }}/blob/v'"$v"'/docs/install.md)。'
+            echo '**第一步一定是 `cortexd --generate-token`** —— 没有凭据 cortexd 会拒绝启动。'
+            echo
+            echo '```'
+            echo "docker pull registry.cn-shenzhen.aliyuncs.com/willspace/cortexd:v$v"
+            echo "docker pull willdockerhub/cortexd:v$v"
+            echo '```'
+            echo
+            echo '产物校验和见 `SHA256SUMS`。'
+          } >> notes.md
 
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name || inputs.tag }}
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          name: Cortex ${{ needs.preflight.outputs.tag }}
           draft: true
-          generate_release_notes: true
+          body_path: notes.md
           files: dist/*

@@ -356,3 +356,68 @@ build:
 # 清理构建产物
 clean:
     cargo clean
+
+# ══════════════════════════════════════════════════════════
+#  发版 —— 细节见 docs/release.md
+# ══════════════════════════════════════════════════════════
+
+# 版本号一致性：Cargo.toml / pubspec.yaml /（可选）tag。CI 每次都跑
+version-check *ARGS:
+    bash scripts/check-version.sh {{ ARGS }}
+
+# 发版前置闸门：版本一致 + 随包文件齐全 + CHANGELOG 有条目
+#   + 没有未被忽略的凭据文件 + Cargo.lock 同步
+release-check *ARGS:
+    bash scripts/release-preflight.sh {{ ARGS }}
+
+# 本机打一份发布产物出来（跑 --version 冒烟 → 组装 → 压缩 → sha256）
+release-package *ARGS:
+    bash scripts/release-package.sh {{ ARGS }}
+
+# 本机构建两个生产镜像。CI 里由 release.yml 推到双 registry
+image-build version="dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export MSYS_NO_PATHCONV=1
+    docker build -f scripts/docker/Dockerfile.cortexd -t "cortex/cortexd:{{ version }}" .
+    docker build -f scripts/docker/Dockerfile.web \
+        --build-arg CORTEX_BASE_URL="${CORTEX_WEB_API_BASE:-}" \
+        -t "cortex/cortex-web:{{ version }}" .
+
+# ══════════════════════════════════════════════════════════
+#  部署 —— 细节见 docs/deploy.md
+#
+#  这里**只有同步与检查**，没有「一键上线」：上线是
+#  .github/workflows/deploy.yml 的手动触发，且节点侧只认
+#  /usr/local/sbin/cortex-deploy 这一条强制命令
+# ══════════════════════════════════════════════════════════
+
+# 部署编排文件的静态校验（不连节点、不需要 .env 真值）
+deploy-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export MSYS_NO_PATHCONV=1
+    bash -n deploy/node-deploy-policy.sh
+    # 喂假值只为让 config 能解析。真值在节点的 .env 里，绝不入库
+    DOMAIN=example.invalid S3_DOMAIN=s3.example.invalid \
+    POSTGRES_PASSWORD=x RUSTFS_SECRET_KEY=y \
+    CORTEX_AUTH_TOKEN_SHA256=z CORTEX_VERSION=v0.0.0 \
+        docker compose -f deploy/docker-compose.yml config -q
+    echo "deploy/ 编排可解析，节点脚本语法正常"
+
+# 打印节点上那份 compose 的期望指纹。节点与它不一致时部署会被拒
+deploy-fingerprint:
+    @sha256sum deploy/docker-compose.yml | cut -d' ' -f1
+
+# 把 compose 与部署策略同步到节点 —— **要 root，走带外通道，不经 CI**。
+# CI 只能读那道限制自己的围栏，永远不能安装它
+deploy-sync host="root@120.79.61.68":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "把下面两份传到节点（需要 root，CI 无权做这件事）："
+    echo "  scp deploy/docker-compose.yml {{ host }}:/data/cortex/docker-compose.yml"
+    echo "  scp deploy/node-deploy-policy.sh {{ host }}:/usr/local/sbin/cortex-deploy"
+    echo "  ssh {{ host }} 'chown root:root /usr/local/sbin/cortex-deploy && chmod 755 /usr/local/sbin/cortex-deploy'"
+    echo
+    echo "compose 指纹应为：$(sha256sum deploy/docker-compose.yml | cut -d' ' -f1)"
+    echo "策略脚本指纹应为：$(sha256sum deploy/node-deploy-policy.sh | cut -c1-16)"

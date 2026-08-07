@@ -1,0 +1,244 @@
+# ══════════════════════════════════════════════════════════
+#  Cortex 生产栈 —— 挂在**已存在的** traefik 后面
+#
+#  用法（在节点的 /data/cortex 下）：
+#      docker compose --env-file .env up -d
+#
+#  ── 为什么是独立文件，不叠在 docker-compose.yml 上 ────────
+#  compose 合并 `ports` 时是**追加**而不是替换。仓库里的
+#  docker-compose.prod.yml 叠在开发那份上之后，`docker compose config`
+#  实际吐出两条 5442 的映射：一条 0.0.0.0、一条 127.0.0.1 ——
+#  也就是说那句「生产只绑回环」的注释并没有兑现。
+#  这台机器上已经跑着 mica / neostor / headscale / rustdesk，
+#  还有两个 postgres 与两个 rustfs，**任何一个多余的宿主端口都是一次撞车**，
+#  所以这份文件从头写，一个 `ports:` 都没有。
+#
+#  数据面（postgres / rustfs 内网口）只在本 compose 网络里可达；
+#  对外只经 traefik 出去两个域名。
+#
+#  ── DNS 是前置条件 ────────────────────────────────────────
+#  ${DOMAIN} 与 ${S3_DOMAIN} 必须已经 A 记录指向本机，
+#  否则 Let's Encrypt 的 HTTP-01 挑战过不了，证书签不下来。
+#  验证：dig +short cortex.cloudcele.com
+# ══════════════════════════════════════════════════════════
+
+# 每个容器的日志都封顶。json-file 默认无上限，一个刷屏的服务
+# （或者一个崩溃重启循环）就能把盘写满，把整台机器一起带走 ——
+# 而这台机器上还有别人的四个服务。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ── Postgres + pgvector ───────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: cortex-postgres
+    restart: unless-stopped
+    logging: *default-logging
+    # 不发布任何端口。要进去排查就 `docker compose exec postgres psql`
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cortex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?在 .env 里设一个真口令}
+      POSTGRES_DB: ${POSTGRES_DB:-cortex}
+      # 只对**新建**的库生效。已有的库用 just pg-enable-checksums 离线补。
+      # 没有它时坏道翻的那一位 Postgres 读出来照样返回，不报错
+      POSTGRES_INITDB_ARGS: --data-checksums
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=mkdir -p /backup/wal && test ! -f /backup/wal/%f && cp %p /backup/wal/%f
+      - -c
+      - archive_timeout=60
+      - -c
+      - wal_level=replica
+      - -c
+      - wal_compression=on
+      - -c
+      - summarize_wal=on
+    shm_size: 256mb
+    volumes:
+      - cortex-prod-postgres:/var/lib/postgresql/data
+      # WAL 归档与全量备份的落点。**指到与数据盘不同的物理盘** ——
+      # 和数据同盘的备份防得住误删，防不住盘坏，而盘坏才是备份存在的理由
+      - ${CORTEX_BACKUP_DIR:-/data/cortex/backup}:/backup
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cortex} -d ${POSTGRES_DB:-cortex}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: ${POSTGRES_MEM_LIMIT:-2g}
+
+  # ── RustFS（S3 兼容对象存储）──────────────────────────
+  rustfs:
+    image: rustfs/rustfs:${RUSTFS_VERSION:-1.0.0-beta.6}
+    container_name: cortex-rustfs
+    restart: unless-stopped
+    logging: *default-logging
+    security_opt:
+      - "no-new-privileges:true"
+    networks: [default, traefik]
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      # 控制台不开。要开就临时改一次，别长期挂着 ——
+      # 它是这个栈里唯一带管理能力的界面
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-cortexadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?在 .env 里设一个真口令，这个口令是互联网可达的}
+      # ★ 精确到来源，**不能留 `*`**。
+      # Web 与 S3 是两个不同的域名，所以浏览器直传是**跨源**的；
+      # 而 `*` 意味着任何网站的 JS 都能拿着用户的浏览器读写这个桶
+      RUSTFS_CORS_ALLOWED_ORIGINS: "https://${DOMAIN:?在 .env 里设 DOMAIN}"
+      RUSTFS_OBS_LOGGER_LEVEL: warn
+      # 单卷。四卷纠删码要求四块独立物理盘，这台机器上没有 ——
+      # 假装有会让 RustFS 拒绝启动（那是正确行为）。
+      # 冗余由「镜像到第二存储」那条路提供，见 docs/operations.md
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true"
+    volumes:
+      - cortex-prod-rustfs:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/ >/dev/null 2>&1 || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik-network
+      traefik.http.routers.cortex-s3.rule: Host(`${S3_DOMAIN:?在 .env 里设 S3_DOMAIN}`)
+      traefik.http.routers.cortex-s3.entrypoints: websecure
+      traefik.http.routers.cortex-s3.tls: "true"
+      traefik.http.routers.cortex-s3.tls.certresolver: letsencrypt
+      traefik.http.services.cortex-s3.loadbalancer.server.port: "9000"
+
+  # ── cortexd ───────────────────────────────────────────
+  #
+  # 镜像默认走阿里云 ACR：这台机器在国内，从 Docker Hub 拉要么慢要么
+  # 要经第三方镜像站（那类站点缓存 tag→digest，是个「拉到旧镜像还看不出来」
+  # 的陷阱）。ACR 是第一方；Docker Hub 那份留作异地副本，
+  # 用 CORTEX_REGISTRY=willdockerhub 切过去。tag 永远是具体版本，绝不用 latest
+  cortexd:
+    image: ${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortexd:${CORTEX_VERSION:?由部署脚本写入，形如 v0.1.0}
+    container_name: cortex-cortexd
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [default, traefik]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_started
+    environment:
+      # 容器内走服务名，不走 localhost —— 这是把 cortexd 搬进容器后
+      # 最容易忘的一处，症状是「连不上数据库」但配置看着都对
+      DATABASE_URL: postgres://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cortex}
+      # 服务端自己访问对象存储走内网一跳，不绕 traefik。
+      # 浏览器那侧用的是 https://${S3_DOMAIN}，两者指向同一个桶
+      S3_ENDPOINT: http://rustfs:9000
+      S3_PUBLIC_ENDPOINT: https://${S3_DOMAIN}
+      S3_BUCKET: ${S3_BUCKET:-cortex-blobs}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-cortexadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+
+      CORTEXD_BIND: 0.0.0.0:8080
+      RUST_LOG: ${RUST_LOG:-cortexd=info,cortex_memory=info,warn}
+
+      # ★ 认证。**没有它 cortexd 会拒绝启动**，这是刻意的。
+      # 上面那行 0.0.0.0:8080 正是它要防的场景。
+      # 生成：docker compose run --rm --entrypoint cortexd cortexd --generate-token
+      # 服务端只放**摘要**；明文 token 给客户端，不要也留在这台机器上
+      CORTEX_AUTH_TOKEN_SHA256: ${CORTEX_AUTH_TOKEN_SHA256:?必填，用 cortexd --generate-token 生成}
+      # 高风险工具确认的超时（秒）。超时按**拒绝**处理 ——
+      # 没人回答意味着没人看见，而「关掉笔记本盖子等于把 shell 交出去」
+      # 是不可挽回的错误方向
+      CORTEX_CONFIRM_TIMEOUT_SECS: ${CORTEX_CONFIRM_TIMEOUT_SECS:-180}
+
+      # 向量后端。生产用真实语义模型；模型落在 models 卷里，
+      # 第一次启动会下 ~590 MB，之后重启不再下载
+      CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-fast}
+      CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-bge-m3-int8}
+      FASTEMBED_CACHE_DIR: /var/lib/cortex/models
+
+      # LLM 供应商。密钥只从环境来，绝不写进任何被 git 跟踪的文件。
+      #
+      # 这一段是显式**允许清单**：.env 里设了但没在这里列出来的变量
+      # 根本到不了进程。清单的陷阱正在于此 —— 没列的旋钮在生产上
+      # 「不存在」，而它暴露的方式是运维改了、重启了、什么都没变
+      CORTEX_LLM_PROVIDER: ${CORTEX_LLM_PROVIDER:-deepseek}
+      CORTEX_LLM_MODEL: ${CORTEX_LLM_MODEL:-}
+      CORTEX_LLM_CHEAP_MODEL: ${CORTEX_LLM_CHEAP_MODEL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - cortex-prod-models:/var/lib/cortex/models
+      - cortex-prod-workspace:/var/lib/cortex/workspace
+    deploy:
+      resources:
+        limits:
+          # embedding 推理会吃满能拿到的核。不限住它，一次批量回填
+          # 就能把 Postgres 饿到超时 —— 而这台机器还要养活别的四个服务
+          cpus: ${CORTEXD_CPU_LIMIT:-4}
+          memory: ${CORTEXD_MEM_LIMIT:-4g}
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik-network
+      # ── /api 分流 ──────────────────────────────────────
+      # cortexd 的路由是 /health /chat /sessions 这种**裸路径**，
+      # 所以要把 /api 剥掉再转进去。
+      #
+      # 与 web 同一个域名是刻意的：同源之后 cortexd 完全不需要 CORS。
+      # traefik 默认按规则长度算优先级，带 PathPrefix 的这条本来就比
+      # 只有 Host 的那条长；但优先级这种东西不该靠「本来就」——
+      # 显式写死，免得哪天 web 那条规则变长了就悄悄抢走 /api
+      traefik.http.routers.cortex-api.rule: Host(`${DOMAIN}`) && PathPrefix(`/api`)
+      traefik.http.routers.cortex-api.entrypoints: websecure
+      traefik.http.routers.cortex-api.tls: "true"
+      traefik.http.routers.cortex-api.tls.certresolver: letsencrypt
+      traefik.http.routers.cortex-api.priority: "100"
+      traefik.http.routers.cortex-api.middlewares: cortex-api-strip
+      traefik.http.middlewares.cortex-api-strip.stripprefix.prefixes: /api
+      traefik.http.services.cortex-api.loadbalancer.server.port: "8080"
+
+  # ── Flutter Web ───────────────────────────────────────
+  #
+  # 这个镜像里的 API 地址是**编译期钉死**的
+  # （见 scripts/docker/Dockerfile.web 里那段长注释：
+  #  客户端只接受绝对地址，相对路径 /api 会被拼成 http:///api）。
+  # 所以镜像与域名是绑定的 —— 换域名要重新构建镜像，不是改 .env
+  web:
+    image: ${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortex-web:${CORTEX_VERSION:?由部署脚本写入，形如 v0.1.0}
+    container_name: cortex-web
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [default, traefik]
+    depends_on:
+      - cortexd
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik-network
+      traefik.http.routers.cortex-web.rule: Host(`${DOMAIN}`)
+      traefik.http.routers.cortex-web.entrypoints: websecure
+      traefik.http.routers.cortex-web.tls: "true"
+      traefik.http.routers.cortex-web.tls.certresolver: letsencrypt
+      traefik.http.routers.cortex-web.priority: "1"
+      traefik.http.services.cortex-web.loadbalancer.server.port: "80"
+
+networks:
+  traefik:
+    external: true
+    name: traefik-network
+
+volumes:
+  cortex-prod-postgres:
+  cortex-prod-rustfs:
+  cortex-prod-models:
+  cortex-prod-workspace:

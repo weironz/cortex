@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# ══════════════════════════════════════════════════════════
+#  节点侧部署入口。装在 /usr/local/sbin/cortex-deploy，
+#  属主 root:root，权限 0755 —— **部署账号必须没有权限改写它**。
+#
+#  这是 CI 密钥**唯一**能执行的东西。
+#  `~cortex-deploy/.ssh/authorized_keys` 用
+#      restrict,command="/usr/bin/sudo /usr/local/sbin/cortex-deploy" ssh-ed25519 …
+#  把它钉死，而 sshd 在**接受这把密钥之前**就会套上这条 command：
+#  客户端请求的东西只会落进 SSH_ORIGINAL_COMMAND 交给这里校验，别的什么都跑不了。
+#
+#  所以一把泄露的 CI 密钥不能开 shell、读不到 .env（里面有
+#  CORTEX_AUTH_TOKEN_SHA256、数据库口令、DeepSeek key）、
+#  pg_dump 不了数据库、装不了任何东西 —— 它只能把线上换到一个
+#  **已经发布在 registry 里**的版本。
+#
+#  用法（CI 就是这么调的）：
+#      ssh cortex-deploy@<node> "deploy 0.1.0 <compose-sha256>"
+#  仍然可以用 root 手动跑：
+#      /usr/local/sbin/cortex-deploy deploy 0.1.0
+# ══════════════════════════════════════════════════════════
+set -euo pipefail
+
+NODE_DIR=/data/cortex
+
+fail() { printf 'cortex-deploy REFUSED: %s\n' "$*" >&2; exit 1; }
+
+# 优先取强制命令的载荷；手动 root 运行时回落到 argv
+raw="${SSH_ORIGINAL_COMMAND:-$*}"
+[[ "$raw" != *$'\n'* ]] || fail '命令必须是单行'
+
+read -r action version compose_sha extra <<<"$raw"
+[ -z "${extra:-}" ] || fail "多余的参数：$extra"
+[ "${action:-}" = deploy ] || fail "只允许 deploy（收到 '${action:-}'）"
+
+# 只认不可变的 X.Y.Z。这一条同时堵住经 SSH_ORIGINAL_COMMAND 的 tag 注入，
+# 也从原则上拒绝滚动 tag：生产钉死具体版本，重启之后必须回到同一个
+[[ "${version:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || fail "版本必须是 X.Y.Z（收到 '${version:-}'）"
+tag="v$version"
+
+cd "$NODE_DIR" || fail "$NODE_DIR 不存在"
+
+# 报出**这个脚本自己**的构建指纹。CI 拿它与默认分支里的
+# deploy/node-deploy-policy.sh 比对，不一致就发警告 ——
+# 把「节点上悄悄跑着比仓库描述更老的策略」变成一句响亮的话。
+#
+# CI 只能**读**它，绝不能安装它：这个文件正是限制 CI 密钥的那道围栏，
+# 而任何能改写围栏的东西都不受围栏限制。安装是 root 侧的带外动作。
+echo "script_sha=$(sha256sum "$0" | cut -c1-16)"
+
+# compose 指纹。CI 传的是 **tag 上那份** deploy/docker-compose.yml 的 sha256；
+# 与节点上这份不一致就拒绝，免得把某个版本部署到它从没一起发布过的 compose 上。
+#
+# 哈希本身**不授予任何权限** —— 拿着它最多只能传对（一次正常部署）
+# 或传错（一次被拒的部署）。这正是「校验指纹」而不是「让调用方把文件送上来」
+# 的理由：送文件等于送 `-v /:/host`，那是宿主 root，不是容器内的权限。
+if [ -n "${compose_sha:-}" ]; then
+  [[ "$compose_sha" =~ ^[0-9a-f]{64}$ ]] || fail 'compose sha 必须是 64 位十六进制'
+  actual=$(sha256sum docker-compose.yml | cut -d' ' -f1)
+  [ "$actual" = "$compose_sha" ] || fail \
+    "节点上的 compose 与 $tag 不匹配（node=${actual:0:16}… want=${compose_sha:0:16}…）—— 在能连上 GitHub 的机器上跑 'just deploy-sync' 同步"
+fi
+
+# ── 这个脚本不碰 docker-compose.yml ────────────────────────
+# 它只移动版本号。理由与 mica 那份相同，而且第二条是第一条的前提：
+#  1. 安全。强制命令的全部价值就在于「一把泄露的密钥只能选一个已发布的版本」。
+#     一旦让它送 compose，它就能把宿主根挂进容器 —— 而校验挡不住
+#     （pid: host、cap_add、devices、docker socket…… 黑名单必输）。
+#  2. compose 变得很少，版本每次发布都变。
+prev=$(sed -nE 's|^CORTEX_VERSION=(.*)$|\1|p' .env)
+[ -n "$prev" ] || fail '.env 里没有 CORTEX_VERSION，无处可回滚'
+
+# 任何非零退出都要把 CORTEX_VERSION 还原，不只是健康检查失败那一种。
+#
+# 没有这个 trap 的话，`docker compose pull` 一失败 `set -e` 就当场中止 ——
+# 而那时 .env 已经被改写了，底下的回滚永远不会执行。部署一个 registry 里
+# 根本不存在的版本，会留下一个指向它的 .env：容器还在跑旧的（所以看着一切正常），
+# 但持久化的期望状态已经坏了，下一次重启或重启机器就会去拉一个不存在的 tag。
+rollback() {
+  local rc=$?
+  [ $rc -eq 0 ] && return 0
+  local now
+  now=$(sed -nE 's|^CORTEX_VERSION=(.*)$|\1|p' .env)
+  if [ "$now" != "$prev" ]; then
+    echo "==> 失败（rc=$rc），还原 CORTEX_VERSION=$prev" >&2
+    sed -i -E "s|^CORTEX_VERSION=.*|CORTEX_VERSION=$prev|" .env
+    # 尽力而为：把上一版拉回来。它的镜像本来就在本地，很快，且不需要 registry
+    docker compose up -d --no-deps cortexd web >&2 || true
+  fi
+  return $rc
+}
+trap rollback EXIT
+
+sed -i -E "s|^CORTEX_VERSION=.*|CORTEX_VERSION=$tag|" .env
+
+echo "==> $prev -> $tag"
+docker compose pull cortexd web
+
+# ── migration ────────────────────────────────────────────
+# cortexd **不在启动时自动迁移**（在运行中的集群上自动执行 schema 变更
+# 是运维事故的常见起点）。部署本身是人发起的显式动作，所以在这里跑是合适的，
+# 但它必须在新版本起来**之前**跑完 —— 否则新代码会撞上老 schema。
+#
+# ⚠ sqlx 的 migration 只前滚。下面的 EXIT trap 能还原版本号，
+# **还原不了 schema**。任何带数据变更的发布，之前必须有一份 pg_dump 退路
+# （docs/operations.md 的「真的出事了怎么恢复」）。
+echo "==> 应用 migration（只前滚，回滚不撤销它）"
+docker compose run --rm --entrypoint sqlx cortexd \
+    migrate run --source /opt/cortex/migrations
+
+docker compose up -d --no-deps cortexd web
+
+# 注意：上面 `up -d --no-deps cortexd web` 点名了服务，所以一次部署
+# 碰不到 postgres / rustfs —— 这也意味着**往 compose 里新加的服务
+# 会安静地永远不被启动**，而输出里没有任何一句话提到它。
+# 加服务时记得同步改这两行。
+
+# ── 回收磁盘 ──────────────────────────────────────────────
+# 每次部署都拉新镜像、把被替换的那个变成孤儿，节点的盘只涨不落。
+# 保守地清：**不带 -a**，只清悬空（无 tag）的；上一版的镜像仍然带着 tag、
+# 仍然拉得到，这正是上面 EXIT trap 能把它拉回来的前提。
+docker image prune -f --filter "until=168h" || true
+
+# 但只清悬空的不够：每次发布留下两个新的**有 tag** 的镜像
+# （cortexd / cortex-web），而不带 -a 的 prune 永远不碰有 tag 的。
+# 所以保留最新 N 个**版本**，其余删掉。仍然不用 `prune -a` ——
+# 那会把上一版一起带走，而上一版正是回滚要用的那个。
+KEEP_VERSIONS=3
+# 按**版本**排序而不是按创建时间：镜像是按拉取顺序到的，
+# 一个被重新拉过的老版本会显得「最新」
+stale=$(docker images --format '{{.Repository}}:{{.Tag}}' \
+  | grep -E '/(cortexd|cortex-web):v[0-9]+(\.[0-9]+)+$' \
+  | sed -E 's/.*:(v[0-9.]+)$/\1/' \
+  | sort -uV \
+  | head -n "-$KEEP_VERSIONS" || true)
+for v in $stale; do
+  # 无论排序怎么说，都不能是这次刚切过去的那个
+  [ "$v" = "$tag" ] && continue
+  # `docker rmi` 会拒绝删一个正在被容器使用的镜像 ——
+  # 这就是让它可以无人值守跑的兜底：最坏情况只是打一行然后继续
+  docker images --format '{{.Repository}}:{{.Tag}}' \
+    | grep -E "/(cortexd|cortex-web):${v}\$" \
+    | xargs -r docker rmi >/dev/null 2>&1 || true
+done
+# 用 `if` 而不是 `[ … ] && echo`：后者在没有 stale 时返回 1，
+# 在 set -e 下会触发 EXIT trap，**把一次完全健康的部署回滚掉**。
+# 一个清磁盘的步骤绝不该有这种能力。
+if [ -n "$stale" ]; then
+  echo "已清理比最新 $KEEP_VERSIONS 个版本更旧的 cortex 镜像"
+fi
+
+# ── 等健康 ────────────────────────────────────────────────
+# cortexd 第一次起要下 ~590 MB 的 embedding 模型，所以窗口给得比
+# 一般服务宽。模型落在 cortex-prod-models 卷里，只下一次
+for _ in $(seq 1 150); do
+  state=$(docker inspect --format '{{.State.Health.Status}}' cortex-cortexd 2>/dev/null || true)
+  if [ "$state" = healthy ]; then
+    echo "deployed=$tag healthy=yes"
+    exit 0
+  fi
+  sleep 4
+done
+
+# 一直没健康。真正的还原由 EXIT trap 做，这里只报为什么。
+fail "cortexd 10 分钟内没有健康（schema 未回滚 —— 见 docs/deploy.md）"

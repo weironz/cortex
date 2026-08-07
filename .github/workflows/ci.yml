@@ -59,6 +59,21 @@ jobs:
       - name: python 语法检查
         run: python3 -m py_compile scripts/*.py
 
+      # 版本号在四个地方出现（Cargo.toml / pubspec.yaml / git tag / 镜像 tag），
+      # 语言不同、语法不同，没有任何一个工具会同时看到它们。漂移的失败方式是
+      # `cortexd --version` 说一个数、下载页写另一个数，而两边都编译得过。
+      #
+      # 放在**每个 PR** 上而不是只放在发布流水线里：发版当天才发现版本对不上，
+      # 意味着要么带着错的版本号发出去，要么临时改一版重来
+      - name: 版本号一致性
+        run: bash scripts/check-version.sh
+
+      # 发布产物必须随包带 LICENSE / NOTICE（Apache-2.0 的要求），
+      # CHANGELOG 必须有当前版本的条目，仓库里不能有没被忽略的凭据文件。
+      # 这几条在发布流水线里也会跑一遍，但那时已经太晚了
+      - name: 发版前置闸门
+        run: bash scripts/release-preflight.sh
+
       # 基线文件是回归门的全部依据。它自己损坏 / 缺字段的话，门会静静地失效 ——
       # 尤其是缺 embedding_model：那样换后端时就拦不住「拿 hash 的分去撞真实基线」
       - name: 评测基线文件自检
