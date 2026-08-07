@@ -242,15 +242,19 @@ class _Results extends StatelessWidget {
     }
 
     if (state.result.isEmpty) {
+      // Empty is a legitimate answer, not a failure: the retriever abstains
+      // when nothing stored is relevant. Styled as a neutral state on purpose —
+      // an error tone here would train the user to distrust a correct result.
       return EmptyState(
         icon: Icons.psychology_outlined,
-        title: state.query.isEmpty ? '还没有记忆' : '没有匹配的记忆',
+        title: state.query.isEmpty ? '还没有记忆' : '没有相关的记忆',
         description: state.query.isEmpty
             ? '聊几轮之后，抽取出的事实会出现在这里，'
                   '每条都能追溯到原始对话。'
             : state.isTimeTravelling
             ? '在 ${formatDate(state.asOf)} 这个时点，Cortex 还不知道相关的事。'
-            : '换个说法试试 —— 检索同时走 BM25 与向量两路。',
+            : '检索器判定与已存记忆无关时会主动弃权，返回空是正常结果。'
+                  '换个说法可能会命中 —— 检索同时走 BM25 与向量两路。',
       );
     }
 

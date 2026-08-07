@@ -91,9 +91,7 @@ class _FactCardState extends State<FactCard> {
                   ...?widget.channels?.channels.map(
                     (c) => _Tag(
                       label: c,
-                      color: c == 'bm25'
-                          ? const Color(0xFFB07219)
-                          : scheme.primary,
+                      color: _channelColor(c, scheme),
                       mono: true,
                     ),
                   ),
@@ -144,6 +142,22 @@ class _FactCardState extends State<FactCard> {
       ),
     );
   }
+
+  /// One colour per retrieval channel.
+  ///
+  /// The live daemon fuses four to five channels (`bm25`, `vector`, `graph`,
+  /// `recency`, `episode`), so painting them all the same made the row read as
+  /// undifferentiated noise. Unknown names fall back to the neutral tone rather
+  /// than being dropped — a new channel should show up, not disappear.
+  static Color _channelColor(String channel, ColorScheme scheme) =>
+      switch (channel) {
+        'bm25' => const Color(0xFFB07219),
+        'vector' => scheme.primary,
+        'graph' => const Color(0xFF7A5FBF),
+        'recency' => const Color(0xFF2E8B8B),
+        'episode' => const Color(0xFF3F7DBF),
+        _ => scheme.onSurfaceVariant,
+      };
 
   static Color _confidenceColor(double c, ColorScheme scheme) {
     if (c >= 0.9) return const Color(0xFF2E7D32);

@@ -77,8 +77,13 @@ class MemoryController extends Notifier<MemoryState> {
     search();
   }
 
+  /// [Ref.mounted] is checked alongside the sequence guard because the caller
+  /// is no longer only the user: `SyncController` re-runs this from a WebSocket
+  /// bump, at a moment that has nothing to do with this provider's lifetime.
+  /// Writing state after disposal throws out of an unawaited future.
   Future<void> search() async {
     _debounce?.cancel();
+    if (!ref.mounted) return;
     final seq = ++_requestSeq;
     final query = state.query.trim();
 
@@ -87,13 +92,13 @@ class MemoryController extends Notifier<MemoryState> {
       final result = await ref
           .read(cortexApiProvider)
           .searchMemory(query, limit: 30, asOf: state.asOf);
-      if (seq != _requestSeq) return; // superseded
+      if (seq != _requestSeq || !ref.mounted) return; // superseded
       state = state.copyWith(result: result, loading: false);
     } on CortexApiException catch (e) {
-      if (seq != _requestSeq) return;
+      if (seq != _requestSeq || !ref.mounted) return;
       state = state.copyWith(loading: false, error: e.message);
     } on Object catch (e) {
-      if (seq != _requestSeq) return;
+      if (seq != _requestSeq || !ref.mounted) return;
       state = state.copyWith(loading: false, error: '$e');
     }
   }

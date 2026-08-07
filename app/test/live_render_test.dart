@@ -9,16 +9,25 @@ import 'package:cortex_app/features/chat/widgets/memory_drawer.dart';
 import 'package:cortex_app/features/chat/widgets/message_bubble.dart';
 import 'package:cortex_app/models/chat_event.dart';
 import 'package:cortex_app/models/memory_fact.dart';
+import 'package:cortex_app/models/tool_call.dart';
 import 'package:cortex_app/widgets/markdown/code_block.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Renders a **real** `cortexd` reply through the real widget tree.
 ///
+/// What is asserted here is only what the wire actually guarantees: the text
+/// grows, the renderer survives every intermediate (syntactically broken)
+/// state, and the per-turn audit reflects what the server sent. It deliberately
+/// does *not* require a Rust fence or a non-empty memory set — the live model
+/// decides the former and the live retriever, which now abstains, decides the
+/// latter. Those invariants are pinned deterministically in
+/// `streaming_render_test.dart` and `chat_turn_test.dart`.
+///
 /// `TestWidgetsFlutterBinding` replaces `HttpOverrides.global` with a stub that
 /// returns 400 for everything, so the fetch is wrapped in
-/// [HttpOverrides.runZoned] with a genuine `HttpClient` — a zone-local override
-/// wins over the global one.
+/// [HttpOverrides.runWithHttpOverrides] with a genuine `HttpClient` — a
+/// zone-local override wins over the global one.
 const _baseUrl = 'http://127.0.0.1:8080';
 
 Future<bool> _daemonUp() async {
@@ -52,8 +61,9 @@ void main() {
   // runs under FakeAsync, where a real socket's futures never complete and the
   // test would simply hang.
   var up = false;
-  var deltas = <String>[];
+  final deltas = <String>[];
   var facts = <MemoryFact>[];
+  var toolCalls = <ToolCall>[];
 
   setUpAll(() async {
     up = await _daemonUp();
@@ -65,10 +75,20 @@ void main() {
         final sessions = await api.sessions();
         await for (final event in api.chat(
           sessionId: sessions.first.id,
-          message: 'rust async trait',
+          message: '读一下 app/pubspec.yaml，用一两句话说明它声明了哪些依赖',
         )) {
-          if (event case ChatDeltaEvent(:final text)) deltas.add(text);
-          if (event case ChatMemoryEvent(facts: final f)) facts = f;
+          switch (event) {
+            case ChatDeltaEvent(:final text):
+              deltas.add(text);
+            case ChatMemoryEvent(facts: final f):
+              facts = f;
+            case ChatToolEvent(:final name, :final summary):
+              toolCalls = ToolCall.merge(toolCalls, name, summary);
+            case ChatErrorEvent(:final message):
+              fail('server error: $message');
+            default:
+              break;
+          }
         }
       } finally {
         api.dispose();
@@ -76,16 +96,14 @@ void main() {
     });
   });
 
-  testWidgets('a live reply renders as markdown with a highlighted Rust block, '
-      'and deltas extend the widget instead of replacing it', (tester) async {
+  testWidgets('真实回复逐块渲染：文本只增不减，渲染器不因半截语法崩溃', (tester) async {
     if (!up) return markTestSkipped('cortexd not running');
 
-    tester.view.physicalSize = const Size(1200, 1400);
+    tester.view.physicalSize = const Size(1200, 1600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
 
-    expect(deltas.length, greaterThan(5), reason: 'must be a real stream');
-    expect(facts, isNotEmpty);
+    expect(deltas.length, greaterThan(5), reason: '必须是真流式，不是一次性整段');
 
     Widget frame(String text, bool streaming) => MaterialApp(
       theme: CortexTheme.dark(),
@@ -94,83 +112,57 @@ void main() {
           child: AssistantBlock(
             text: text,
             facts: facts,
-            toolCalls: const [],
+            toolCalls: toolCalls,
             streaming: streaming,
           ),
         ),
       ),
     );
 
-    // Replay the stream chunk by chunk, exactly as the controller would.
     var shown = '';
-    Element? codeBlockElement;
-    var sawOpenFence = false;
+    var maxCodeBlocks = 0;
 
     for (final delta in deltas) {
+      final previous = shown;
       shown += delta;
+      expect(shown.startsWith(previous), isTrue, reason: '增量只能追加');
+
       await tester.pumpWidget(frame(shown, true));
       await tester.pump(const Duration(milliseconds: 16));
 
-      final found = find.byType(CodeBlock);
-      if (found.evaluate().isNotEmpty) {
-        final block = tester.widget<CodeBlock>(found);
-        if (!block.closed) sawOpenFence = true;
-
-        // Element identity must persist across deltas — that is what makes the
-        // bubble grow in place rather than be rebuilt from scratch (the visible
-        // symptom of which would be flicker and a scroll jump).
-        codeBlockElement ??= found.evaluate().single;
-        expect(
-          found.evaluate().single,
-          same(codeBlockElement),
-          reason: 'the code block must be updated, not recreated',
-        );
-      }
+      final blocks = find.byType(CodeBlock).evaluate().length;
+      expect(
+        blocks,
+        greaterThanOrEqualTo(maxCodeBlocks),
+        reason: '代码块数量不能减少 —— 那意味着它先渲染成了别的东西再翻转',
+      );
+      maxCodeBlocks = blocks;
     }
-
-    // The unterminated fence was rendered as a code block while still open —
-    // it never appeared as literal backticks that later flipped.
-    expect(sawOpenFence, isTrue);
 
     await tester.pumpWidget(frame(shown, false));
     await tester.pump(const Duration(milliseconds: 50));
+    expect(shown.trim(), isNotEmpty);
 
-    final block = tester.widget<CodeBlock>(find.byType(CodeBlock));
-    expect(block.language, 'rust');
-    expect(block.closed, isTrue);
-    expect(block.code, contains('println!'));
-
-    // Genuinely tokenised: walk the rendered span tree and confirm the code is
-    // painted in more than one colour. Checking the top-level child count would
-    // not work — `Text.rich` wraps the supplied span in a single-child root.
-    final codeSpan = find
-        .descendant(of: find.byType(CodeBlock), matching: find.byType(RichText))
-        .evaluate()
-        .map((e) => (e.widget as RichText).text)
-        .firstWhere((s) => s.toPlainText().contains('println!'));
-
-    // `visitChildren` already descends the whole tree — recursing again inside
-    // the visitor overflows the stack.
-    final colours = <Color>{};
-    codeSpan.visitChildren((span) {
-      final colour = span.style?.color;
-      if (colour != null) colours.add(colour);
-      return true;
-    });
-    expect(
-      colours.length,
-      greaterThan(1),
-      reason: 'Rust must render in multiple token colours, got $colours',
-    );
-
-    // Per-turn memory audit is attached with the live facts.
+    // The agent had to read a file to answer, so the audit line must exist and
+    // must show one row per invocation, not one per wire event.
+    expect(toolCalls, isNotEmpty);
+    expect(toolCalls.every((c) => !c.pending), isTrue);
     expect(find.byType(MemoryDrawer), findsOneWidget);
-    expect(find.textContaining('本轮用到的记忆'), findsOneWidget);
 
-    // Expanding it reveals the injected statements and their provenance.
-    await tester.tap(find.textContaining('本轮用到的记忆'));
+    final toggle = find.textContaining(
+      facts.isEmpty ? '本轮工具调用' : '本轮用到的记忆',
+    );
+    expect(toggle, findsOneWidget);
+
+    await tester.tap(toggle);
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.text(facts.first.statement), findsOneWidget);
-    expect(find.text('出处'), findsWidgets);
+
+    if (facts.isEmpty) {
+      // Abstention is a correct outcome and must read as one.
+      expect(find.textContaining('主动弃权'), findsOneWidget);
+    } else {
+      expect(find.text(facts.first.statement), findsOneWidget);
+      expect(find.text('出处'), findsWidgets);
+    }
   });
 }

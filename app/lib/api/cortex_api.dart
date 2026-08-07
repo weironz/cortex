@@ -3,6 +3,8 @@ import '../models/chat_session.dart';
 import '../models/episode.dart';
 import '../models/health_status.dart';
 import '../models/memory_search_result.dart';
+import '../models/sync_event.dart';
+import '../models/sync_record.dart';
 
 /// The whole surface the UI is allowed to touch.
 ///
@@ -38,6 +40,21 @@ abstract interface class CortexApi {
 
   /// `GET /sessions`
   Future<List<ChatSession>> sessions();
+
+  /// `GET /ws` — **one** connection attempt.
+  ///
+  /// The returned stream ends when the socket closes and errors when it cannot
+  /// be opened. Reconnection is deliberately *not* handled here: backoff,
+  /// attempt counting and the cursor are policy, and policy belongs to
+  /// `SyncController` where it can be unit-tested against a fake socket.
+  Stream<SyncEvent> watchSync();
+
+  /// `GET /sync?since=&limit=`
+  ///
+  /// [since] must be the caller's **own** cursor. Passing a cursor taken from a
+  /// [SyncEvent] would skip everything between what we have and what the server
+  /// reached — see the contract note on [SyncEvent].
+  Future<SyncPage> sync({required int since, int limit = 500});
 
   void dispose();
 }

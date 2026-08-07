@@ -7,6 +7,8 @@ import '../models/episode.dart';
 import '../models/health_status.dart';
 import '../models/memory_fact.dart';
 import '../models/memory_search_result.dart';
+import '../models/sync_event.dart';
+import '../models/sync_record.dart';
 import 'api_exception.dart';
 import 'cortex_api.dart';
 
@@ -125,6 +127,37 @@ class MockCortexApi implements CortexApi {
     return ep;
   }
 
+  // -------------------------------------------------------------------- sync
+
+  /// The fixtures have no writer, so the link is permanently "connected and
+  /// caught up": one `hello`, then silence.
+  ///
+  /// `SyncController` short-circuits on the mock source and never calls this,
+  /// but the contract stays implemented — a stub that threw would make the
+  /// mock a *different* API, which is precisely what this class exists to
+  /// avoid.
+  @override
+  Stream<SyncEvent> watchSync() {
+    final controller = StreamController<SyncEvent>();
+    controller.onListen = () {
+      if (_disposed) {
+        controller.addError(const CortexApiException('Mock 数据源已关闭'));
+        return;
+      }
+      controller.add(const SyncHello(cursor: 0, version: '0.0.1-mock'));
+    };
+    return controller.stream;
+  }
+
+  @override
+  Future<SyncPage> sync({required int since, int limit = 500}) async {
+    await _latency(60);
+    // Already caught up by construction: echo the caller's cursor back so the
+    // convergence check ("pull until empty") terminates the same way it does
+    // against the real daemon.
+    return SyncPage(cursor: since, hasMore: false);
+  }
+
   // -------------------------------------------------------------------- chat
 
   @override
@@ -141,17 +174,30 @@ class MockCortexApi implements CortexApi {
     await Future<void>.delayed(const Duration(milliseconds: 420));
 
     final injected = _retrieveFor(message);
+    // No `memory` event at all when the retriever abstains — the real one does
+    // exactly this, and a mock that always produced facts would hide the empty
+    // state until it showed up in production.
     if (injected.isNotEmpty) {
       yield ChatMemoryEvent(injected);
     }
 
-    // Mirrors cortexd's observed order: memory → tool → deltas → done.
+    // Mirrors cortexd's order *and* its pairing: every tool emits twice, once
+    // on dispatch and once on return, with the name inlined in both summaries.
+    final query = message.length > 24 ? '${message.substring(0, 24)}…' : message;
     yield ChatToolEvent(
       name: 'memory_search',
-      summary: '在会话 $sessionId 中检索了 ${injected.length} 条相关记忆',
+      summary: '调用 memory_search (query=$query)',
     );
 
     await Future<void>.delayed(const Duration(milliseconds: 160));
+
+    yield ChatToolEvent(
+      name: 'memory_search',
+      summary: injected.isEmpty
+          ? 'memory_search 返回 0 行 / 0 字符'
+          : 'memory_search 返回 ${injected.length} 行 / '
+                '${injected.fold<int>(0, (n, f) => n + f.statement.length)} 字符',
+    );
 
     final reply = _composeReply(message, injected);
 
@@ -191,7 +237,13 @@ class MockCortexApi implements CortexApi {
     if (has(['记忆', 'memory', '注入', 'prompt', 'cache'])) {
       return _pick(['fact_code_1', 'fact_pref_1', 'fact_pref_3', 'fact_code_5']);
     }
-    return _pick(['fact_pref_1', 'fact_pref_2']);
+    if (has(['flutter', 'dart', '客户端', 'ui'])) {
+      return _pick(['fact_pref_1', 'fact_pref_2']);
+    }
+    // Nothing matched: abstain. The real retriever does the same rather than
+    // padding the prompt with loosely-related facts, so the fallback here has
+    // to be "no memory" — otherwise the empty state is unreachable in mock.
+    return const [];
   }
 
   List<MemoryFact> _pick(List<String> ids) =>
@@ -604,7 +656,8 @@ http.Client createHttpClient() => FetchClient(
     final quoted = message.trim();
     final shown = quoted.length > 60 ? '${quoted.substring(0, 60)}…' : quoted;
     final memoryLine = injected.isEmpty
-        ? '本轮没有命中任何历史记忆，我按通用方式回答。'
+        ? '本轮**没有注入任何记忆** —— 检索器判定这个问题与已存记忆无关，主动弃权了。'
+              '这是正常结果，不是检索失败。'
         : '本轮注入了 **${injected.length}** 条记忆，展开消息下方的"本轮用到的记忆"可以逐条看到出处。';
 
     return '''

@@ -5,6 +5,8 @@ import 'dart:io';
 
 import 'package:cortex_app/api/http_cortex_api.dart';
 import 'package:cortex_app/models/chat_event.dart';
+import 'package:cortex_app/models/sync_event.dart';
+import 'package:cortex_app/models/tool_call.dart';
 import 'package:cortex_app/widgets/markdown/highlight_registry.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -114,92 +116,169 @@ void main() {
     expect(episode.text, isNotEmpty);
   });
 
-  test('POST /chat streams memory -> tool -> delta* -> done', () async {
+  /// Note what this test does **not** assert: that a `memory` event arrives.
+  ///
+  /// The live retriever abstains when nothing stored is relevant, so a fixed
+  /// `['memory', 'tool', 'delta', 'done']` sequence is not a property of the
+  /// protocol — it was a property of the old mock backend. Pinning it would
+  /// turn correct server behaviour into a red test.
+  test('POST /chat：增量只增不减，工具事件成对，done 收尾', () async {
     if (!up) return markTestSkipped('cortexd not running');
     final api = HttpCortexApi(baseUrl: _baseUrl);
     addTearDown(api.dispose);
 
     final sessions = await api.sessions();
     final events = <ChatEvent>[];
-    final arrivalOrder = <String>[];
     var accumulated = '';
-    final snapshots = <String>[];
+    var deltaCount = 0;
+    var toolCalls = <ToolCall>[];
 
     await for (final event in api.chat(
       sessionId: sessions.first.id,
-      message: 'rust async trait',
+      // Phrased to make a tool call near-certain: the model cannot answer this
+      // without reading the file, which is what puts a real call/result pair on
+      // the wire.
+      message: '读一下 app/pubspec.yaml，只回答 flutter sdk 的版本约束是什么，不要写代码块',
     )) {
       events.add(event);
       switch (event) {
-        case ChatMemoryEvent():
-          arrivalOrder.add('memory');
-        case ChatToolEvent():
-          arrivalOrder.add('tool');
-        case ChatDeltaEvent(:final text):
-          if (arrivalOrder.isEmpty || arrivalOrder.last != 'delta') {
-            arrivalOrder.add('delta');
+        case ChatMemoryEvent(:final facts):
+          for (final fact in facts) {
+            expect(
+              fact.sourceEpisodeId,
+              isNotNull,
+              reason: '注入的每条记忆都必须能追回原始对话，否则「可审计」是空话',
+            );
           }
+        case ChatToolEvent(:final name, :final summary):
+          toolCalls = ToolCall.merge(toolCalls, name, summary);
+        case ChatDeltaEvent(:final text):
+          deltaCount++;
           // The invariant that makes the UI flicker-free: each delta EXTENDS
           // the previous text; it never replaces or rewrites it.
           final next = accumulated + text;
           expect(next.startsWith(accumulated), isTrue);
           accumulated = next;
-          snapshots.add(accumulated);
         case ChatDoneEvent():
-          arrivalOrder.add('done');
+          break;
         case ChatErrorEvent(:final message):
           fail('server error: $message');
         case ChatUnknownEvent(:final type):
-          arrivalOrder.add('unknown:$type');
+          fail('未知事件类型 $type —— 契约变了但客户端没跟上');
       }
     }
 
-    expect(arrivalOrder, ['memory', 'tool', 'delta', 'done']);
-
     // Genuinely incremental, not one buffered blob.
-    expect(snapshots.length, greaterThan(5));
+    expect(deltaCount, greaterThan(5));
     expect(accumulated, isNotEmpty);
 
-    final memory = events.whereType<ChatMemoryEvent>().single;
-    expect(memory.facts, isNotEmpty);
-    expect(memory.facts.first.sourceEpisodeId, isNotNull);
-
     final done = events.whereType<ChatDoneEvent>().single;
-    expect(done.episodeId, isNotNull);
+    expect(done.episodeId, isNotNull, reason: 'done 必须带回 episode id 供追溯');
 
-    // The reply contains a Rust fence; confirm the highlighter actually
-    // tokenises it rather than silently falling back to plain text.
-    expect(accumulated, contains('```rust'));
-    final code = RegExp(
-      r'```rust\n([\s\S]*?)```',
-    ).firstMatch(accumulated)?.group(1);
-    expect(code, isNotNull);
+    final rawToolEvents = events.whereType<ChatToolEvent>().length;
+    expect(toolCalls, isNotEmpty, reason: '这个问题必须触发一次 read_file');
+    expect(
+      rawToolEvents,
+      toolCalls.length * 2,
+      reason: '线上每次调用发两条事件（调用 + 返回），配对后行数应正好减半',
+    );
+    for (final call in toolCalls) {
+      expect(call.pending, isFalse, reason: '${call.name} 的返回事件没有配上');
+      expect(call.arguments, isNotNull, reason: '${call.name} 的参数摘要丢了');
+      expect(call.result, isNotNull);
+    }
+  });
 
+  test('GET /ws 只推信号，补拉一律用客户端自己的游标', () async {
+    if (!up) return markTestSkipped('cortexd not running');
+    final api = HttpCortexApi(baseUrl: _baseUrl);
+    addTearDown(api.dispose);
+
+    final events = <SyncEvent>[];
+    final subscription = api.watchSync().listen(events.add);
+    addTearDown(subscription.cancel);
+
+    await _until(() => events.isNotEmpty, 'hello');
+    final hello = events.first;
+    expect(hello, isA<SyncHello>());
+    expect(hello.cursor, greaterThan(0), reason: '库里已有数据，游标不该是 0');
+
+    // Provoke a real commit. `/chat` writes the user episode *before* it calls
+    // the model, so cancelling right after the first frame is enough to get a
+    // bump without paying for a whole completion.
+    final sessions = await api.sessions();
+    final chat = api
+        .chat(sessionId: sessions.first.id, message: 'ping：只是为了产生一次写入')
+        .listen((_) {});
+    await Future<void>.delayed(const Duration(seconds: 3));
+    await chat.cancel();
+
+    await _until(() => events.length > 1, 'bump');
+    final signal = events[1];
+    expect(
+      signal,
+      anyOf(isA<SyncBump>(), isA<SyncResync>()),
+      reason: 'hello 之后应当是 bump（或 resync）',
+    );
+    expect(signal.cursor, greaterThan(hello.cursor));
+
+    // The whole point: pull from **our** cursor, not the one the event carried.
+    final page = await api.sync(since: hello.cursor);
+    expect(page.records, isNotEmpty);
+    expect(
+      page.records.first.seq,
+      hello.cursor + 1,
+      reason: '第一条必须紧接自己的游标，中间不能有洞',
+    );
+    expect(page.records.any((r) => r.table == 'episodes'), isTrue);
+
+    // And the counterfactual, so the rule is not merely asserted but shown:
+    // starting from the event's cursor would have skipped those rows.
+    final skipped = await api.sync(since: signal.cursor);
+    expect(
+      skipped.records.length,
+      lessThan(page.records.length),
+      reason: '拿事件里的 cursor 当 since 会漏掉 ${hello.cursor}..${signal.cursor}',
+    );
+  });
+
+  test('rust 语法在半截围栏与完整代码上都能高亮', () async {
+    // Deterministic on purpose. This used to be asserted against whatever the
+    // model happened to emit, which made a highlighter regression and a chatty
+    // model indistinguishable.
+    const partial = 'fn hello() {\n    println!("cor';
+    expect(
+      HighlightRegistry.highlight(
+        code: partial,
+        language: 'rust',
+        baseStyle: const TextStyle(),
+        brightness: Brightness.dark,
+      ),
+      isNotNull,
+      reason: '收尾围栏还没到时不能抛异常',
+    );
+
+    const complete = 'fn hello() {\n    println!("cortex");\n}\n';
     final span = HighlightRegistry.highlight(
-      code: code!,
+      code: complete,
       language: 'rust',
       baseStyle: const TextStyle(),
       brightness: Brightness.dark,
     );
-    expect(span, isNotNull, reason: 'rust grammar must be registered');
+    expect(span, isNotNull, reason: 'rust 语法必须已注册');
     expect(
       span!.children,
       isNotNull,
-      reason: 'highlighted output must be multi-span, i.e. actually coloured',
+      reason: '高亮结果必须是多个 span —— 单个 span 说明降级成纯文本了',
     );
     expect(span.children!.length, greaterThan(1));
   });
+}
 
-  test('a half-arrived rust fence still resolves to the rust grammar', () async {
-    // Mid-stream the closing fence has not landed; the code block widget is
-    // handed the partial body and must not throw.
-    const partial = 'fn hello() {\n    println!("cor';
-    final span = HighlightRegistry.highlight(
-      code: partial,
-      language: 'rust',
-      baseStyle: const TextStyle(),
-      brightness: Brightness.dark,
-    );
-    expect(span, isNotNull);
-  });
+Future<void> _until(bool Function() condition, String what) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 20));
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) fail('等待 $what 超时');
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+  }
 }

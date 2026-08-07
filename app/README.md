@@ -66,9 +66,13 @@ flutter build web --release --dart-define=USE_MOCK=true
 flutter run -d chrome --dart-define=CORTEX_BASE_URL=http://192.168.1.20:8080
 ```
 
-Mock 不是"塞几条假数据"：它实现同一个 `CortexApi` 接口，按同样的事件顺序
-（`memory` → `tool` → N×`delta` → `done`）逐块吐字，延迟量级也贴近真实检索，
-因此流式渲染、Markdown、代码高亮、记忆出处这几条路径在 mock 下走的是**同一份代码**。
+Mock 不是"塞几条假数据"：它实现同一个 `CortexApi` 接口，按同样的事件顺序逐块吐字，
+延迟量级也贴近真实检索，因此流式渲染、Markdown、代码高亮、记忆出处这几条路径在 mock 下
+走的是**同一份代码**。两个刻意对齐真实后端的细节：
+
+- **工具事件成对**：一次调用发两条 `tool` 事件（调用时一条、返回时一条），摘要里都带工具名
+- **检索会弃权**：问题与夹具无关时**不发** `memory` 事件。若 mock 永远带回记忆，
+  空态就只能在生产环境第一次被看见
 
 启动 cortexd：
 
@@ -88,11 +92,12 @@ lib/
 ├── models/                   纯数据类，零 Flutter 依赖
 ├── api/
 │   ├── cortex_api.dart       抽象接口 —— UI 只认识它
-│   ├── http_cortex_api.dart  真实实现（HTTP + SSE）
+│   ├── http_cortex_api.dart  真实实现（HTTP + SSE + WebSocket）
 │   ├── mock_cortex_api.dart  内存夹具实现
 │   ├── sse.dart              自研 SSE 解析器（与传输层解耦）
 │   └── http_client_factory*  条件导入：全工程唯一的平台分叉点
 ├── state/                    Riverpod controller 与 provider
+│   └── sync_controller.dart  /ws 连接管理、客户端游标、面板刷新扇出
 ├── features/
 │   ├── shell/                三栏自适应外壳
 │   ├── sessions/             左栏：会话列表
@@ -204,6 +209,63 @@ SSE 解析器 `api/sse.dart` 是自己写的，因为 Dart 生态里两个主流
 跨 chunk 的半行和跨 chunk 的多字节 UTF-8 都能正确重组
 （网络决定 chunk 边界，不是发送方）。`test/sse_test.dart` 覆盖了这些情况。
 
+### 实时同步：`GET /ws` 只推信号
+
+`cortexd` 的 WS 下行只有三种事件，且**不带数据**：
+
+```json
+{"type":"hello",  "cursor": 13, "version":"0.0.1"}
+{"type":"bump",   "cursor": 14}
+{"type":"resync", "cursor": 14}
+```
+
+**事件里的 `cursor` 是滞后指示，不是拉取偏移。** 客户端维护自己的游标，收到 bump 后拿
+**自己的**游标去 `GET /sync?since=`，并且只从 `/sync` 响应的 `cursor` 推进。
+拿事件里的 cursor 当 `since`，会永久跳过「自己已有位置」到「服务端当前位置」之间那一段 ——
+这类漏行在 UI 上表现为"偶尔少一条记忆"，几乎不可能靠肉眼发现。
+`test/sync_controller_test.dart` 里第一条用例就是钉这一条，并附了反例断言。
+
+几个具体决定：
+
+| 决定 | 为什么 |
+|---|---|
+| 首次连接以 `hello.cursor` 为基线 | 客户端还没有本地存储，追平手段是重新拉 REST 而不是回放 log，所以没有"还没拉的区间"。**一旦加了 SQLite 缓存，这里必须改成读持久化游标（新设备为 0）** |
+| 重连后**不**采纳新的 `hello.cursor` | 断线期间提交的行正好落在自己游标与服务端之间，采纳就等于丢掉它们 |
+| 退避 0.5s 起、翻倍、20s 封顶、±25% 抖动 | 封顶是因为 daemon 重启只要几秒，等五分钟才发现它回来了更糟；抖动是因为 daemon 一挂，所有客户端（和所有浏览器标签）在**同一瞬间**断开，没有抖动就会齐步重连 |
+| `bump` 与 `resync` 分开计数 | `resync` 表示服务端可能漏推过。合并计数就看不出这个**运维信号**了；健康的部署里它应该长期为 0 |
+| 补拉循环在游标不推进时立刻退出 | 服务端若谎报 `has_more`（bug 或读到从库），信这个标志就会把客户端转死 |
+| 刷新按**变更的表**分派，并合并 300ms 静默期 | 一轮对话会提交好几次（user episode、assistant episode、抽取出的 facts），逐次刷新等于把记忆检索重跑三遍 |
+
+传输用 `web_socket_channel`，它内部已经按平台分到 `dart:io` 的 `WebSocket` 与浏览器的
+`WebSocket`，所以**这里不需要再加一处条件导入** —— 平台分叉点仍然只有
+`api/http_client_factory*.dart` 一个。`WebSocketChannel.connect` 是惰性的，
+必须 `await channel.ready`，否则握手失败只会在之后以消息流错误的形式冒出来，
+调用方就分不清"从没连上"和"连了三小时才断"。
+
+连接状态是标题栏里一个 7px 的点：连上是绿点，追平中是次色点，断开是一个 `sync_problem`
+图标（点它立即重试）。悬停能看到游标、bump/resync 计数与 daemon 版本。
+不做横幅、不做 toast —— 断线不是用户干的、也不需要用户处理，客户端自己会追平。
+Mock 数据源下整个指示器隐藏：没有 daemon，说"已连接"或"已断开"都是假话。
+
+### 工具调用：两条事件配成一行
+
+线上每次工具调用会发**两条** `tool` 事件：
+
+```
+{"type":"tool","name":"read_file","summary":"调用 read_file (path=app/pubspec.yaml)"}
+{"type":"tool","name":"read_file","summary":"read_file 返回 97 行 / 4124 字符"}
+```
+
+拆成两条在协议上是对的（第一条正是"慢调用期间显示执行中"的依据），但照直渲染就是两行
+几乎重复的灰字。`ToolCall.merge` 把它们折成一条：第一条给参数、第二条给结果，
+`result == null` 即"执行中"。配对规则是「与**最后一行**同名且尚未拿到结果的就是它的结果」——
+agent 循环严格「派发 → 等待 → 出结果 → 下一个」，所以不需要 correlation id；
+同一个工具连着调两次仍然是两行，因为第一行那时已经不 pending 了。
+两条摘要里都内联了工具名（CLI 是逐行打印的，那里需要），配对后行首已有工具名，所以剥掉。
+
+生成中，工具行**常驻可见**；生成结束后一起折进"本轮用到的记忆"那条细线。
+`read_file` 花两秒时，那一行就是"为什么还没动静"的答案，藏一层点击后面等于白发。
+
 ---
 
 ## 已实现
@@ -213,10 +275,16 @@ SSE 解析器 `api/sse.dart` 是自己写的，因为 Dart 生态里两个主流
 - 流式对话：打字机效果、思考中指示、停止生成、失败重试
 - Markdown：标题、有序/无序列表、表格（横向滚动 + 斑马纹）、引用、分隔线、
   行内代码、代码块（语法高亮 + 复制 + 未闭合围栏呼吸点）
-- 每条回答下方「本轮用到的记忆」可展开，列出注入的 facts 与工具调用，
-  点任一条打开出处 episode 弹层
-- 记忆面板：检索、BM25/vector 检索通道标注、置信度、双时间轴显示、
-  **`as_of` 时间回放**（选一个日期，只看那一刻之前已知的记忆）
+- 每条回答下方「本轮用到的记忆」可展开，列出注入的 facts 与**成对折叠**的工具调用，
+  点任一条 fact 打开出处 episode 弹层；生成中工具行常驻可见并显示执行状态
+- **记忆可以为空**：检索器弃权时不发 `memory` 事件，UI 明说"主动弃权，这是正常结果"，
+  不套用任何错误样式
+- 记忆面板：检索、五路检索通道分色标注（bm25 / vector / graph / recency / episode）、
+  置信度、双时间轴显示、**`as_of` 时间回放**（选一个日期，只看那一刻之前已知的记忆）
+- **WebSocket 实时同步**：断线指数退避重连、按自己的游标补拉 `/sync`、
+  按变更的表刷新会话列表与记忆面板、标题栏 7px 连接状态点
+- 会话草稿的落库回执：本地 ULID 乐观创建标「未同步」，服务端列表回带同一 id 后自动清除
+- Markdown 链接点击用系统浏览器打开（限 http / https / mailto）
 - 深色 / 浅色主题跟随系统，可手动切换
 - 后端状态徽章：MOCK / LIVE / DOWN，悬停显示版本与存储状态
 
@@ -226,13 +294,14 @@ SSE 解析器 `api/sse.dart` 是自己写的，因为 Dart 生态里两个主流
 |---|---|
 | 会话删除 / 重命名 | 无入口。等 cortexd 提供 `DELETE /sessions/{id}` 与 `PATCH` |
 | 会话列表分页 | 一次拉全量。会话多了要加游标分页 |
-| 本地 SQLite 缓存与离线写队列 | 未做。架构里规划了，当前刷新即丢 |
+| 本地 SQLite 缓存与离线写队列 | 未做。**做这件事时必须同时改 `SyncController` 的首次连接游标**：现在以 `hello.cursor` 为基线，有了本地库之后就必须从持久化游标（新设备 0）起拉，否则会漏掉建库之前的全部历史 |
+| 历史会话的消息回放 | 切到一个本次启动没聊过的会话时正文是空的 —— 后端还没有 `GET /sessions/{id}/messages`，`/sync` 里的 episodes 又没有本地库可落 |
 | 多模态（图片 / 音频 / 视频） | 未做。输入框只收文本，没有附件按钮 |
 | 记忆的编辑 / 删除 / 标记取代 | 只读。UI 里没有写入口 |
 | `superseded` 事实的视觉区分 | 后端字段未定，目前只能靠 statement 文本看出来 |
-| 链接点击 | `onLinkTap` 已接出，但没有接 `url_launcher`，点了不会打开浏览器 |
-| 会话本地草稿的服务端落库确认 | 客户端生成 ULID 乐观创建，标「未同步」，但没有回执校正逻辑 |
-| 错误重试的指数退避 | 只有手动重试按钮，没有自动重连 |
+| 对话流的自动重试 | WS 有指数退避自动重连，但 `POST /chat` 断了仍只有手动「重试」按钮 |
+| Web 端 WS 的运行时验证 | `flutter build web --release` 通过（说明 WS 这条路径没有漏进 `dart:io`），但**没有在真实浏览器里跑过一次连接**。`web_socket_channel` 在 web 上走浏览器 `WebSocket`，与 SSE 当年那个 `XMLHttpRequest` 坑不是同一类问题，不过在浏览器里点一次才算数 |
+| 工具调用的确认回路 | 后端 `ApprovalPolicy.enforce = false`，尚无 `ConfirmRequest` 事件，客户端也就没有确认弹层 |
 | 国际化 | 文案硬编码中文，未接 `flutter_localizations` |
 
 ---
@@ -240,9 +309,42 @@ SSE 解析器 `api/sse.dart` 是自己写的，因为 Dart 生态里两个主流
 ## 测试
 
 ```bash
-flutter test
+flutter test                       # 全部（live 用例在 daemon 不在时自动跳过）
+flutter test --exclude-tags live   # CI：只跑不依赖 daemon 的
 flutter analyze
 ```
 
-`test/sse_test.dart` 覆盖 SSE 解析的边界情况（chunk 切割、keep-alive、CRLF、多字节 UTF-8）。
-`test/widget_test.dart` 覆盖三栏/窄屏布局切换，以及流式过程中「文本只增不减且是前缀延长」这条不变式。
+| 文件 | 覆盖什么 |
+|---|---|
+| `test/sse_test.dart` | SSE 解析边界：chunk 切割、keep-alive、CRLF、跨 chunk 的多字节 UTF-8 |
+| `test/sync_controller_test.dart` | **游标语义**（附「用事件 cursor 会漏行」的反例断言）、bump/resync 分开计数、断线退避重连、服务端谎报 `has_more` 不死循环、按表分派刷新、mock 下不连接 |
+| `test/tool_pairing_test.dart` | 两条 `tool` 事件折成一行、同工具连调两次仍是两行、失败结果被标记、摘要换了措辞也不丢字 |
+| `test/chat_turn_test.dart` | 走 mock 打完整一轮：配对结果、弃权时记忆为空且不算失败；`MemoryDrawer` 的三种形态 |
+| `test/streaming_render_test.dart` | 固定夹具逐 token 重放：未闭合围栏从第一个 token 起就是代码块、元素不被重建、Rust 真的多色高亮 |
+| `test/widget_test.dart` | 三栏/窄屏布局切换、`as_of` 控件、流式「只增不减且是前缀延长」、检索无结果是中性空态 |
+| `test/live_backend_test.dart` <sup>live</sup> | 真实 daemon：health / sessions / memory / episodes / `as_of` 回放、`/chat` 增量与工具成对、`/ws` 信号 + `/sync` 游标语义（含反例） |
+| `test/live_render_test.dart` <sup>live</sup> | 把**真实**回复逐块喂进真实 widget 树 |
+
+live 用例只断言协议真正保证的东西。它们原先要求 `['memory','tool','delta','done']`
+这个固定顺序和一段 Rust 围栏 —— 那是**旧 mock 后端**的性质，不是协议的：
+真实检索器会弃权、真实模型爱写什么写什么。把这类断言留着，等于让正确的服务端行为变成红灯。
+需要确定性的那些不变式（围栏不翻转、高亮真的分色）已经移到固定夹具上跑。
+
+### 与真实后端的联调记录
+
+```bash
+docker compose up -d && cargo run -p cortexd      # 终端 A
+./build/windows/x64/runner/Debug/cortex_app.exe   # 终端 B
+cargo run -p cortex-cli -- chat "…"               # 终端 C
+```
+
+daemon 日志里能看到完整回路（CLI 发起 → 客户端自动补拉 → 面板刷新）：
+
+```
+02:08:43.042  POST /chat                      ← CLI
+02:08:43.542  GET  /sync?since=56&limit=500   ← Flutter，用的是它自己的游标
+02:08:43.883  GET  /sessions                  ← episodes 变了，会话列表自动刷新
+02:09:32.475  GET  /sync?since=57&limit=500   ← 助手 episode 落库，游标已推进
+```
+
+daemon 重启后客户端在退避窗口内自行重连（日志里一条 `GET /ws → 101`），无需任何操作。

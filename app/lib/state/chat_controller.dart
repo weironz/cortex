@@ -46,31 +46,67 @@ class ChatController extends Notifier<ChatState> {
 
   Future<void> _reload() async {
     await _cancelStream();
+    if (!ref.mounted) return;
     state = const ChatState(sessionsLoading: true);
     await loadSessions();
   }
 
+  /// Every `state =` below sits behind a [Ref.mounted] check.
+  ///
+  /// Not defensive noise: this runs after an `await`, and the provider can be
+  /// gone by then. Two ways in — the app shutting down while the first load is
+  /// still in flight, and (much more likely now) `SyncController` calling this
+  /// from a WebSocket bump at a moment it does not control. Writing to a
+  /// disposed `Ref` throws out of a future nobody awaits, which surfaces as an
+  /// unhandled async error rather than anything the UI can act on.
   Future<void> loadSessions() async {
+    if (!ref.mounted) return;
     state = state.copyWith(sessionsLoading: true, sessionsError: null);
     try {
-      final sessions = await _api.sessions();
+      final remote = await _api.sessions();
+      if (!ref.mounted) return;
+      final merged = _mergeSessions(remote);
       final active =
           state.activeSessionId ??
-          (sessions.isNotEmpty ? sessions.first.id : null);
+          (merged.isNotEmpty ? merged.first.id : null);
       state = state.copyWith(
-        sessions: sessions,
+        sessions: merged,
         sessionsLoading: false,
         activeSessionId: active,
       );
     } on CortexApiException catch (e) {
+      if (!ref.mounted) return;
       state = state.copyWith(
         sessionsLoading: false,
         sessionsError: e.message,
-        sessions: const [],
+        // Drafts only exist on this device; dropping them because the daemon
+        // is momentarily unreachable would destroy work the user can still see.
+        sessions: state.sessions.where((s) => s.isLocalDraft).toList(),
       );
     } on Object catch (e) {
+      if (!ref.mounted) return;
       state = state.copyWith(sessionsLoading: false, sessionsError: '$e');
     }
+  }
+
+  /// Reconciles the daemon's list with what is on screen.
+  ///
+  /// A plain replace loses two things:
+  ///
+  /// * **Local drafts.** [createSession] mints a ULID client-side and shows the
+  ///   session immediately; the daemon only learns of it when the first turn
+  ///   commits. Before that, a refresh — now triggered by any WebSocket bump,
+  ///   including one caused by somebody else's device — would make the session
+  ///   the user is typing in vanish.
+  /// * **The "未同步" flag.** When the draft's id does come back from the
+  ///   server, that *is* the write receipt: the remote row carries
+  ///   `isLocalDraft == false`, so the badge clears itself.
+  List<ChatSession> _mergeSessions(List<ChatSession> remote) {
+    final remoteIds = remote.map((s) => s.id).toSet();
+    final unconfirmed = state.sessions.where(
+      (s) => s.isLocalDraft && !remoteIds.contains(s.id),
+    );
+    return [...unconfirmed, ...remote];
   }
 
   // ---------------------------------------------------------------- sessions
@@ -152,12 +188,13 @@ class ChatController extends Notifier<ChatState> {
 
       case ChatToolEvent(:final name, :final summary):
         _flushPending();
+        // Call and result arrive as two events; [ToolCall.merge] folds them
+        // into a single row instead of printing the same tool twice.
+        final current = state.streaming;
+        if (current == null) return;
         state = state.copyWith(
-          streaming: state.streaming?.copyWith(
-            toolCalls: [
-              ...?state.streaming?.toolCalls,
-              ToolCall(name: name, summary: summary),
-            ],
+          streaming: current.copyWith(
+            toolCalls: ToolCall.merge(current.toolCalls, name, summary),
           ),
         );
 

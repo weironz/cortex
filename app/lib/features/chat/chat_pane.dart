@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
+import '../shell/widgets/sync_indicator.dart';
 import 'widgets/conversation_view.dart';
 import 'widgets/message_composer.dart';
 
@@ -48,6 +49,7 @@ class ChatPane extends ConsumerWidget {
                   icon: const Icon(Icons.menu_rounded),
                 ),
           actions: [
+            const SyncIndicator(),
             const _BackendBadge(),
             if (onOpenSettings != null)
               IconButton(

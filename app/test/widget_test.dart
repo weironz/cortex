@@ -78,6 +78,30 @@ void main() {
     expect(find.text('当前时刻的记忆'), findsOneWidget);
   });
 
+  testWidgets('检索无结果时是中性空态，不是错误', (tester) async {
+    await boot(tester);
+
+    await tester.enterText(
+      find.widgetWithText(TextField, '检索事实、实体、领域…'),
+      'zzz 不存在的东西 zzz',
+    );
+    // Debounce (260ms) plus the mock's simulated retrieval latency.
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 600));
+
+    expect(find.text('没有相关的记忆'), findsOneWidget);
+    expect(
+      find.textContaining('主动弃权'),
+      findsOneWidget,
+      reason: '空结果必须解释成检索器弃权，而不是让用户以为坏了',
+    );
+    expect(
+      find.text('检索失败'),
+      findsNothing,
+      reason: '空不是错，出现错误标题就是在训练用户不信任正确结果',
+    );
+  });
+
   testWidgets('streams a reply and exposes the per-turn memory', (
     tester,
   ) async {

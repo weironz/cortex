@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../models/chat_event.dart';
 import '../models/chat_session.dart';
@@ -9,6 +10,8 @@ import '../models/episode.dart';
 import '../models/health_status.dart';
 import '../models/json.dart';
 import '../models/memory_search_result.dart';
+import '../models/sync_event.dart';
+import '../models/sync_record.dart';
 import 'api_exception.dart';
 import 'cortex_api.dart';
 import 'http_client_factory.dart';
@@ -39,6 +42,11 @@ class HttpCortexApi implements CortexApi {
     path: '${_base.path}$path',
     queryParameters: (query == null || query.isEmpty) ? null : query,
   );
+
+  /// `http` → `ws`, `https` → `wss`. Same origin as everything else, so a
+  /// deployment only ever has one host to configure.
+  Uri get _wsUri =>
+      _uri('/ws').replace(scheme: _base.scheme == 'https' ? 'wss' : 'ws');
 
   @override
   String get label => '$_base · $kHttpClientKind';
@@ -124,6 +132,52 @@ class HttpCortexApi implements CortexApi {
     }
   }
 
+  @override
+  Future<SyncPage> sync({required int since, int limit = 500}) async {
+    final json = await _getJson('/sync', {
+      'since': '$since',
+      'limit': '$limit',
+    });
+    return SyncPage.fromJson(json);
+  }
+
+  @override
+  Stream<SyncEvent> watchSync() async* {
+    final WebSocketChannel channel;
+    try {
+      channel = WebSocketChannel.connect(_wsUri);
+      // `connect` is lazy — without awaiting `ready` a failed handshake would
+      // only surface later, as an error on the message stream, and the caller
+      // could not tell "never connected" from "dropped after 3 hours".
+      await channel.ready;
+    } on Object catch (e) {
+      throw CortexApiException(_wsUnreachableMessage(e), cause: e);
+    }
+
+    try {
+      await for (final frame in channel.stream) {
+        if (frame is! String) continue; // the daemon only sends text frames
+        final Object? decoded;
+        try {
+          decoded = jsonDecode(frame);
+        } on FormatException {
+          // One malformed frame must not tear down a healthy link; the next
+          // bump will carry us forward anyway.
+          continue;
+        }
+        if (decoded is Map<String, dynamic>) yield SyncEvent.fromJson(decoded);
+      }
+    } on Object catch (e) {
+      // An abnormal close arrives as an exception. Normalise it so the caller
+      // only ever has to handle one error type.
+      throw CortexApiException('实时同步通道断开：$e', cause: e);
+    } finally {
+      // Runs on consumer cancellation too, which is how the reconnect loop
+      // guarantees it never leaves a half-open socket behind.
+      await channel.sink.close();
+    }
+  }
+
   Future<Map<String, dynamic>> _getJson(
     String path, [
     Map<String, String>? query,
@@ -150,6 +204,9 @@ class HttpCortexApi implements CortexApi {
     }
     return decoded;
   }
+
+  String _wsUnreachableMessage(Object e) =>
+      '连不上实时同步通道（$_wsUri）。$e';
 
   String _unreachableMessage(Object e) =>
       '连不上 cortexd（$_base）。确认 daemon 已启动，'

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/formatting.dart';
+import '../../../core/link_launcher.dart';
 import '../../../models/chat_message.dart';
 import '../../../models/memory_fact.dart';
 import '../../../models/tool_call.dart';
@@ -182,7 +183,12 @@ class AssistantBlock extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     if (text.isNotEmpty)
-                      SelectionArea(child: CortexMarkdown(text)),
+                      SelectionArea(
+                        child: CortexMarkdown(
+                          text,
+                          onLinkTap: (url) => openExternalLink(context, url),
+                        ),
+                      ),
                     if (streaming) ...[
                       if (text.isEmpty)
                         const _ThinkingIndicator()
@@ -190,7 +196,11 @@ class AssistantBlock extends StatelessWidget {
                         const _Caret(),
                     ],
                     if (error != null) _ErrorNote(error: error!),
-                    MemoryDrawer(facts: facts, toolCalls: toolCalls),
+                    MemoryDrawer(
+                      facts: facts,
+                      toolCalls: toolCalls,
+                      streaming: streaming,
+                    ),
                     if (episodeId != null && !streaming)
                       Padding(
                         padding: const EdgeInsets.only(top: 6, left: 7),
