@@ -16,6 +16,17 @@ pub struct Health {
     /// 对象存储走的是哪一路后端："s3" / "local_fs" / "unavailable"。
     /// 生产环境上看到 `local_fs` 就是一条告警：媒体只落在本机。
     pub blob_backend: &'static str,
+    /// 认证形态："token" / "disabled"。
+    ///
+    /// **`/health` 本身不需要认证**，理由是它的消费者是 Docker HEALTHCHECK
+    /// 与负载均衡探针，那些东西配不了凭据；给它加认证的直接后果是容器
+    /// 一直是 unhealthy，然后有人会把 HEALTHCHECK 删掉。
+    ///
+    /// 代价是这几个字段对任何能连上端口的人可见。逐个看：版本号、数据库
+    /// 通不通、对象存储后端、以及这一行 —— 都是**部署形态**，不是用户数据。
+    /// 而这一行反过来是必需的：没有它，「我到底开没开认证」只能靠去翻服务器上
+    /// 的环境变量，而那正是最该能远程一眼看到的东西。
+    pub auth: &'static str,
 }
 
 // ──────────────────────────── /chat ────────────────────────────
@@ -100,10 +111,102 @@ pub enum ChatEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// **需要用户确认一次高风险工具调用。这一轮已经挂起，在等回执。**
+    ///
+    /// 客户端应当把 `preview` 原样展示给用户，然后
+    /// `POST /confirmations`（带上 `token` 与 `decision`）。
+    ///
+    /// # 这个事件与 [`Self::Tool`] 的先后顺序不保证
+    ///
+    /// 两者走的是不同的内部通道（`Tool` 经 agent 事件桥接，这条由宿主
+    /// 直接发），并发下可能互换。所以本事件**自带**做决定所需的全部信息
+    /// （工具名、风险等级、完整参数预览），不依赖前面那条 `Tool` 事件 ——
+    /// 客户端绝不能靠「上一条 Tool 事件说的是什么」来渲染这个确认框。
+    ///
+    /// # 收不到回执会怎样
+    ///
+    /// `timeout_secs` 秒后服务端按**拒绝**处理并继续那一轮（模型会收到一句
+    /// 「没人回答」）。此时客户端那个还开着的确认框已经作废，再打回执会拿到
+    /// 404。刻意不为此再发一条「已失效」事件：客户端手上有 `timeout_secs`，
+    /// 自己就能倒计时；而多一个事件就多一条要处理的时序。
+    Confirm {
+        /// 一次性凭据，回执时原样带回。256 位内核随机数，不可猜
+        token: String,
+        /// 要执行的工具名
+        tool: String,
+        /// 风险等级："write" / "execute"
+        risk: &'static str,
+        /// 给人看的完整参数。**不要截断后再显示** ——
+        /// 服务端已经截过一次并带了显式标记，客户端再截一刀，
+        /// 用户批准的就是他没看见的那一半
+        preview: String,
+        /// 多少秒后按拒绝处理
+        timeout_secs: u64,
+    },
     /// 结束，带上本轮 episode id 供追溯
     Done { episode_id: String },
     /// 出错。仍以 SSE 事件形式返回，避免流中断后客户端无从判断原因
     Error { message: String },
+}
+
+// ────────────────────── 工具确认（R11）──────────────────────
+
+/// `POST /confirmations` 的请求体 —— 上行的回执。
+///
+/// # 为什么 token 在**请求体**里而不是路径上
+///
+/// `POST /confirmations/{token}` 更 REST，但那个 token 是一次能批准 shell
+/// 执行的凭据，而路径会原样进 access log、进反代日志、进 `history`。
+/// 请求体不会。
+#[derive(Debug, Deserialize)]
+pub struct ConfirmReceipt {
+    pub token: String,
+    pub decision: ConfirmDecision,
+}
+
+/// 用户的答复。
+///
+/// 用枚举而不是 `approve: bool`：JSON 里 `{"approve": "false"}`（字符串）
+/// 在很多客户端库里会被宽松地解成 `true`，而这里猜错的方向是**批准一条
+/// 没人批准过的命令**。写死两个字面量，拼错就是 400。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmDecision {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfirmAck {
+    /// 恒为 true —— 没被接受的回执走 404，不会走到这里
+    pub accepted: bool,
+}
+
+/// `GET /confirmations` 的响应：当前还等着答复的确认项。
+#[derive(Debug, Serialize)]
+pub struct PendingConfirmations {
+    pub pending: Vec<crate::confirm::PendingInfo>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PendingQuery {
+    /// 只看某个会话的。不传则给全部 —— 一个刚重连上来的客户端还不知道
+    /// 该关心哪个会话，先看全景才能决定
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+// ──────────────────────── 认证（R9）────────────────────────
+
+/// `POST /auth/ticket` 的响应。
+///
+/// 见 [`crate::auth`]：浏览器的 `EventSource` / `WebSocket` / `<img>`
+/// 加不了请求头，只能把凭据放进 URL；放长期 token 会让它进日志，
+/// 所以先用长期 token 换一张短命票据，票才进 URL。
+#[derive(Debug, Serialize)]
+pub struct TicketResponse {
+    pub ticket: String,
+    pub expires_in_secs: u64,
 }
 
 // ─────────────────────────── 记忆相关 ───────────────────────────

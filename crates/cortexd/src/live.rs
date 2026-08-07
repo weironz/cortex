@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use cortex_agent::{AgentEvent, ToolHost, Turn};
+use cortex_agent::{AgentEvent, Approval, ConfirmRequest, ToolHost, Turn};
 use cortex_core::{Config, CortexError, Id, Result};
 use cortex_llm::LlmClient;
 use cortex_memory::{
@@ -33,6 +33,7 @@ use cortex_memory::{
 use cortex_store::{NewEpisode, Role, Store};
 use tokio::sync::mpsc;
 
+use crate::confirm::{ConfirmRegistry, PendingMeta, preview_of};
 use crate::dto::*;
 
 /// 系统提示词。
@@ -788,13 +789,17 @@ impl Live {
     ///
     /// 用 channel 而非直接返回 Stream：这一轮里要交错做落库、检索、
     /// 调模型、再落库四件事，写成一个 Stream 组合子会难以卒读。
-    pub fn chat(self: &Arc<Self>, req: ChatRequest) -> mpsc::Receiver<ChatEvent> {
+    pub fn chat(
+        self: &Arc<Self>,
+        req: ChatRequest,
+        confirms: Arc<ConfirmRegistry>,
+    ) -> mpsc::Receiver<ChatEvent> {
         let (tx, rx) = mpsc::channel(64);
 
         let this = self.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = run_turn(this, req, &tx).await {
+            if let Err(e) = run_turn(this, req, confirms, &tx).await {
                 // 错误也必须以事件形式送达：流静默中断的话，
                 // 客户端无从区分「服务端出错」与「网络断了」
                 let _ = tx
@@ -809,7 +814,12 @@ impl Live {
     }
 }
 
-async fn run_turn(live: Arc<Live>, req: ChatRequest, tx: &mpsc::Sender<ChatEvent>) -> Result<()> {
+async fn run_turn(
+    live: Arc<Live>,
+    req: ChatRequest,
+    confirms: Arc<ConfirmRegistry>,
+    tx: &mpsc::Sender<ChatEvent>,
+) -> Result<()> {
     let store = &live.store;
     let llm = &live.llm;
     let retriever = &live.retriever;
@@ -1022,8 +1032,14 @@ async fn run_turn(live: Arc<Live>, req: ChatRequest, tx: &mpsc::Sender<ChatEvent
     );
 
     let mut messages = vec![cortex_llm::Message::user().with_text(&user_content)];
+    let host = TurnHost {
+        live: Arc::clone(&live),
+        events: tx.clone(),
+        session_id: req.session_id.clone(),
+        confirms,
+    };
     let outcome = turn
-        .run(llm, SYSTEM_PROMPT, &mut messages, &*live, &atx)
+        .run(llm, SYSTEM_PROMPT, &mut messages, &host, &atx)
         .await;
     drop(atx);
     let tool_calls = bridge.await.unwrap_or_else(|e| {
@@ -1227,10 +1243,35 @@ fn clamp_chars(s: &str, max: usize) -> String {
 /// 具体的事，宁可多给几条让它自己筛。
 const TOOL_SEARCH_LIMIT: i64 = 20;
 
+/// **一轮**对话的宿主能力。
+///
+/// # 为什么不是 `impl ToolHost for Live`
+///
+/// 确认回路需要三样只有「这一轮」才知道的东西：往哪条 SSE 流上发确认请求、
+/// 这个请求属于哪个会话、以及「发起这一轮的客户端还在不在」。`Live` 是进程级
+/// 的，它一样都没有。
+///
+/// 更重要的是**如果两个 impl 同时存在**：`Live` 那个会因为没实现 `confirm`
+/// 而走 trait 的默认实现（一律不批准），于是「哪些工具能用」取决于调用方
+/// 随手传了哪个 host —— 而那两处代码长得一模一样。所以只留一个。
+struct TurnHost {
+    live: Arc<Live>,
+    /// 确认请求直接发到 SSE 流上。
+    ///
+    /// 没有走 agent 的事件通道再桥接一次：那样确实能保证与 `Tool` 事件的
+    /// 先后顺序，但要把「一次性凭据」这个纯粹的传输层概念塞进 `AgentEvent`，
+    /// 而 `cortex-agent` 将来还要服务 MCP 与本地执行器 —— 那两条路上根本
+    /// 没有 HTTP 回执。代价是这条事件与 `Tool` 事件的先后不保证，
+    /// 所以 [`ChatEvent::Confirm`] 自带做决定所需的全部信息（那条契约里写了）。
+    events: mpsc::Sender<ChatEvent>,
+    session_id: String,
+    confirms: Arc<ConfirmRegistry>,
+}
+
 #[async_trait::async_trait]
-impl ToolHost for Live {
+impl ToolHost for TurnHost {
     async fn memory_search(&self, query: &str, as_of: Option<&str>) -> Result<String> {
-        let r = self.retrieve(query, as_of, TOOL_SEARCH_LIMIT).await?;
+        let r = self.live.retrieve(query, as_of, TOOL_SEARCH_LIMIT).await?;
         if r.items.is_empty() {
             return Ok("没有检索到相关记忆。".into());
         }
@@ -1239,6 +1280,59 @@ impl ToolHost for Live {
         // 记忆里可能混着被抽取进来的恶意指令（MemoryGraft），从工具通道
         // 进来的和从注入通道进来的一样危险。
         Ok(injection::render_turn_block(&r.items))
+    }
+
+    async fn confirm(&self, req: &ConfirmRequest<'_>) -> Approval {
+        let preview = preview_of(req.arguments);
+        let risk = risk_str(req.risk);
+
+        // 顺序是**登记 → 发事件 → 挂起**，不能变。反过来的话，本机 loopback 上
+        // 一个手快的客户端可能在登记完成之前就把回执打回来，那条回执会撞上一个
+        // 还不存在的凭据被判为伪造，而这一轮继续傻等到超时 ——
+        // 一个只在极低延迟下才出现、在慢网络上永远复现不出来的竞态
+        let pending = self.confirms.open(PendingMeta {
+            session_id: self.session_id.clone(),
+            tool: req.tool.to_string(),
+            risk,
+            preview: preview.clone(),
+        });
+
+        let ask = ChatEvent::Confirm {
+            token: pending.token().to_string(),
+            tool: req.tool.to_string(),
+            risk,
+            preview,
+            timeout_secs: self.confirms.timeout().as_secs(),
+        };
+        if self.events.send(ask).await.is_err() {
+            // 请求都发不出去，等下去只会白等一个超时
+            tracing::info!(tool = req.tool, "客户端已断开，确认请求发不出去");
+            return Approval::Unanswered;
+        }
+
+        tracing::info!(
+            tool = req.tool,
+            session = %self.session_id,
+            timeout_secs = self.confirms.timeout().as_secs(),
+            "等待用户确认工具调用"
+        );
+        // `events.closed()` 是「发起这一轮的客户端走了」的信号。确认期间
+        // agent 循环不发任何事件，已有的那套「send 失败即断开」的探测在这段
+        // 时间里完全失灵 —— 没有它，关掉页面之后这一轮会原地挂满整个超时
+        pending.wait(self.events.closed()).await
+    }
+}
+
+/// [`cortex_agent::Risk`] 的线上表示。
+///
+/// 手写 match 而不是 serde：这是**下行契约**的一部分（客户端按它决定确认框
+/// 长什么样、要不要加一道二次确认），改 `Risk` 的人必须在这里被编译器拦一下，
+/// 而不是让它悄悄改掉三个客户端看到的字符串。
+fn risk_str(risk: cortex_agent::Risk) -> &'static str {
+    match risk {
+        cortex_agent::Risk::Safe => "safe",
+        cortex_agent::Risk::Write => "write",
+        cortex_agent::Risk::Execute => "execute",
     }
 }
 

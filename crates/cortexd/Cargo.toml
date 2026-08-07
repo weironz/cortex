@@ -34,6 +34,17 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
+
+# 认证与确认凭据。三个都已经在依赖树里（cortex-blob 的内容寻址用 sha2+hex，
+# getrandom 由 rustls / rand 一路带进来），这里只是把边加到 cortexd 上。
+#
+# 刻意**不**引入 argon2 / bcrypt：慢 KDF 防的是低熵口令被离线爆破，
+# 而这里的凭据是 256 位内核随机数，慢一百万倍也还是爆破不动。见 src/auth.rs。
+sha2 = "0.10"
+hex = "0.4"
+# 凭据必须直接来自内核 CSPRNG。不用 ULID 凑数：它高 48 位是时间戳，
+# 随机位只有 80，而「窗口很短」不该被算进熵里。见 src/confirm.rs。
+getrandom = "0.3"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
@@ -43,3 +54,7 @@ dotenvy.workspace = true
 # 工作区路径校验的测试要真的建目录、建文件、建符号链接 ——
 # 「什么目录配当工作区」是关于真实文件系统的判断，mock 不出来
 tempfile = "3"
+
+# `#[tokio::test(start_paused = true)]`：确认超时默认 180 秒，
+# 真等一遍的测试没人会跑。虚拟时钟让它变成微秒级，而且**测的是同一段代码**
+tokio = { workspace = true, features = ["test-util"] }

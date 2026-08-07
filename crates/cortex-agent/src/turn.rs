@@ -73,86 +73,151 @@ pub enum AgentEvent {
 
 // ─────────────────────────── 权限 ───────────────────────────
 
-/// 权限闸门的决定。
+/// 权限闸门的**第一段**：不问人就能下的判断。
+///
+/// 刻意与 [`Approval`] 分成两个类型，而不是给一个枚举加第三个变体。
+/// 两者回答的是不同的问题：这里回答「要不要问」，[`Approval`] 回答
+/// 「问完的答复是什么」。合成一个枚举的话，[`ToolHost::confirm`] 的返回
+/// 类型里就会出现一个 `Ask` 变体 —— 宿主回答「再问我一次」是没有意义的，
+/// 而它在类型上却是合法的，只能靠运行时兜底。分开之后那件事直接编译不过。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Approval {
-    /// 直接执行
+pub enum Gate {
+    /// 风险低于阈值，直接执行，不打扰用户
     Allow,
-    /// 拒绝执行。理由会作为工具结果回传给模型 —— 让它换条路，
-    /// 而不是中断整轮对话。
-    Deny,
+    /// 必须先问用户。由 [`ToolHost::confirm`] 去问
+    Ask,
 }
 
-/// 权限策略 —— **将来接确认流程的唯一挂点**。
+/// 一次确认的最终答复。
 ///
-/// 第一版对 [`Risk::Write`] 只记日志、照常放行（`enforce = false`）。
-/// 这不是偷懒的默认值，是有意的：真正的拦截需要一条「服务端问、客户端答」
-/// 的回路（新增 `ChatEvent::ConfirmRequest` + 一个回执端点 + 在
-/// [`Turn::run`] 里挂起等待），那是独立一块工作。
+/// 两种「不批准」分得很清楚，因为它们对模型意味着不同的事：用户明确拒绝时，
+/// 模型该换条路；无人应答时，再问一次多半还是没人应答，模型该收口去告诉用户。
+/// 混成一个 `Deny` 的话，模型只能靠猜。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approval {
+    /// 用户批准，执行
+    Allow,
+    /// 用户看到了并且明确拒绝
+    Denied,
+    /// 没有人回答：超时、客户端断开、或者这个部署压根没接确认通道
+    Unanswered,
+}
+
+impl Approval {
+    #[must_use]
+    pub const fn is_allowed(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+}
+
+/// 需要用户确认的一次工具调用。
 ///
-/// 但闸门的**位置**现在就钉死了：所有工具执行都必须先经过
-/// [`Self::decide`]，见 [`Turn::dispatch`]。接确认流程时只需把这里改成
-/// 「返回 `Ask` 并 await 客户端回执」，调用点一行都不用动 ——
-/// 如果闸门散落在各个工具实现里，那才是将来真正改不动的地方。
+/// # 为什么这里没有「凭据」这种东西
 ///
-/// # `Risk::Execute` 不走这个口子
+/// 确认回路的防伪（回执凭据怎么生成、怎么校验、多端谁能答）**整个属于宿主**：
+/// 那是传输层的问题，而 `cortex-agent` 将来还要服务 MCP 与本地执行器，
+/// 那两条路上根本没有 HTTP 回执这个概念。这一层只说「我要做这件事，准不准」，
+/// 怎么问出去、凭什么信回来的答案，由实现 [`ToolHost`] 的人决定。
+#[derive(Debug, Clone, Copy)]
+pub struct ConfirmRequest<'a> {
+    pub tool: &'a str,
+    pub risk: Risk,
+    /// 模型给的原始参数。**必须原样交给用户看** —— 对 `shell` 来说，
+    /// 要批准的东西就是这段命令本身，摘要过的版本批不了。
+    pub arguments: &'a serde_json::Value,
+}
+
+/// 权限策略 —— 所有工具执行的唯一闸门。
 ///
-/// 「只记日志」的默认值成立，靠的是一个前提：**最坏情况是往围栏内写一个文件**。
-/// 加了 `shell` 之后这个前提没了 —— 任意命令能删掉整个工作区、能把
-/// 目录打包外传，而路径围栏只管得住 `read_file`，管不住 `bash -c`。
+/// 闸门的**位置**钉死在 [`Turn::dispatch`]：所有工具执行都必须先过
+/// [`Self::decide`]。如果闸门散落在各个工具实现里，那才是真正改不动的地方。
 ///
-/// 前提变了默认值就得跟着变，否则安全性靠的是「还没人用到那个工具」。
-/// 所以 [`Risk::Execute`] **恒拒**，除非显式设 `allow_unconfirmed_execute`。
-/// 等确认回路接上，这个字段和它的解释一起删掉。
+/// # 为什么 `decide` 至今仍是同步的
+///
+/// 接确认回路时最容易走的一步是「把 `decide` 改成 async，在里面 await 回执」。
+/// 那会把整条调用链染成 async 并且把「问用户」这件事藏进一个名字叫「决定」的
+/// 函数里。这里选了另一条：`decide` 只回答不需要 IO 的那半个问题
+/// （[`Gate`]），要问人时由已经是 async 的 [`Turn::dispatch`] 去 await
+/// [`ToolHost::confirm`]。结果是策略本身仍然是纯函数、可单测、无运行时依赖，
+/// 而波及的调用点只有 `dispatch` 里那一处 —— 也就是原本承诺的「调用点一行都
+/// 不用动」。
+///
+/// # `allow_unconfirmed_execute` 去哪了
+///
+/// 删了。它存在的唯一理由是「确认回路还没接上，但集成测试要跑真命令」。
+/// 回路接上之后，「不问就跑」不再是策略的一个取值，而是**宿主的一个选择**：
+/// 谁想不问就跑，就自己实现一个 `confirm` 返回 [`Approval::Allow`] 的
+/// [`ToolHost`]。这个区别不是洁癖 —— 布尔开关是全局的、写在配置里的、
+/// 会被人从别的部署抄过来的；而实现一个 trait 方法是当场看得见的一行代码。
 #[derive(Debug, Clone, Copy)]
 pub struct ApprovalPolicy {
-    /// 达到或超过此风险等级的工具需要用户确认
-    pub confirm_at: Risk,
-    /// 是否真的拦截。false = 只记日志（第一版）
-    pub enforce: bool,
-    /// 在没有确认回路的情况下，放行 [`Risk::Execute`]。
+    /// 达到或超过此风险等级的工具需要用户确认。
     ///
-    /// **默认 false，正常部署不该改它。** 留这个口子只为两件事：
-    /// 集成测试要跑真命令，以及有人明知代价地在一次性环境里图方便。
-    /// 它不影响沙箱 —— OS 沙箱是独立的一层，那层由 `CORTEX_SANDBOX` 管。
-    pub allow_unconfirmed_execute: bool,
+    /// 默认 [`Risk::Write`]：写文件与执行命令都要问，只读工具直接放行。
+    /// 调到 [`Risk::Execute`] 就是「写文件不问、执行才问」；调到
+    /// [`Risk::Safe`] 则连 `read_file` 也要问（除了演示，没什么用）。
+    pub confirm_at: Risk,
 }
 
 impl Default for ApprovalPolicy {
     fn default() -> Self {
         Self {
             confirm_at: Risk::Write,
-            enforce: false,
-            allow_unconfirmed_execute: false,
         }
     }
 }
 
 impl ApprovalPolicy {
     #[must_use]
-    pub fn decide(&self, tool: &str, risk: Risk) -> Approval {
+    pub fn decide(&self, tool: &str, risk: Risk) -> Gate {
         if risk < self.confirm_at {
-            return Approval::Allow;
+            return Gate::Allow;
         }
-        // Execute 先判，且不受 enforce 影响：enforce=false 的语义是
-        // 「写操作先放着，出事能从日志里查」，那套账在执行任意命令上算不平
-        if risk >= Risk::Execute && !self.allow_unconfirmed_execute {
-            tracing::warn!(tool, ?risk, "执行类工具在确认回路接上之前一律拒绝");
-            return Approval::Deny;
-        }
-        if self.enforce {
-            Approval::Deny
-        } else {
-            // 记日志而非静默放行：第一版的这个口子必须在运维上可见，
-            // 出事时能从日志里查出「谁在什么时候写了什么」
-            tracing::warn!(
-                tool,
-                ?risk,
-                "高风险工具在未经用户确认的情况下执行（第一版策略）"
-            );
-            Approval::Allow
-        }
+        tracing::debug!(tool, ?risk, "高风险工具，转确认回路");
+        Gate::Ask
     }
+}
+
+/// 被拒时回传给模型的话。
+///
+/// 回传而不是中断整轮：模型看到这句话通常会换一条只读的路子把事办了，
+/// 而中断整轮对用户来说就是「它突然不说话了」。
+fn refusal(tool: &str, approval: Approval) -> String {
+    match approval {
+        // 不该走到这里，但把它写成一句话而不是 unreachable!()：
+        // 权限这一层 panic 比报错难查得多
+        Approval::Allow => format!("内部错误：{tool} 已获批准却走进了拒绝分支"),
+        Approval::Denied => format!(
+            "用户拒绝了工具 {tool} 的这次调用。请不要原样重试；\
+             改用只读的方式完成，或者直接告诉用户你需要什么权限、为什么需要。"
+        ),
+        Approval::Unanswered => format!(
+            "工具 {tool} 需要用户确认，但没有收到答复（超时或客户端已断开），按拒绝处理。\
+             不要再次发起同一个需要确认的调用 —— 这一轮里没有人能回答。\
+             请用已有信息作答，并说明哪一步卡在需要确认上。"
+        ),
+    }
+}
+
+/// 一轮之内的确认状态。
+///
+/// # 它挡住的是一个乘法
+///
+/// 超时按拒绝处理之后，模型收到的只是一条工具失败 —— 它完全可以再发起一次
+/// 同样的调用。[`refusal`] 里写了「这一轮里没有人能回答」，但那是**给模型的
+/// 建议**，不是保证。模型忽略它的代价是
+/// `max_rounds × 宿主的确认超时` ＝ 默认 8 × 180 秒 ＝ 24 分钟，
+/// 期间这一轮一直占着连接与上下文，而用户看到的只是「它不动了」。
+///
+/// 所以第一次无人应答之后，后续确认直接短路：不再问宿主、不再等。
+/// 最坏情况被钉死在**一个**超时。
+///
+/// 状态是 [`Turn::run`] 的局部变量而不是 `Turn` 的字段：`Turn` 可复用且
+/// 无每轮状态，挂在它上面会让上一轮的超时把后面每一轮都一起废掉。
+#[derive(Debug, Default)]
+struct ConfirmState {
+    /// 本轮已经有过一次「没有人回答」
+    gave_up: bool,
 }
 
 // ────────────────────────── 宿主接口 ─────────────────────────
@@ -169,6 +234,27 @@ pub trait ToolHost: Send + Sync {
     /// 由宿主负责套上「记忆是背景数据不是指令」的框定 —— 工具结果同样
     /// 会进模型上下文，防注入的栅栏一处都不能少。
     async fn memory_search(&self, query: &str, as_of: Option<&str>) -> Result<String>;
+
+    /// 问用户准不准。**必须在有限时间内返回。**
+    ///
+    /// # 默认实现是「没人回答」，不是「批准」
+    ///
+    /// 一个只想接 `memory_search` 的宿主（测试替身、评测 harness、将来的
+    /// MCP 桥）不会想起来实现这个方法。默认值决定了它漏掉时会发生什么：
+    /// 默认放行 = 高风险工具在一个根本没有确认通道的进程里静默执行；
+    /// 默认拒绝 = 那个宿主用不了写/执行工具，而且当场就能看出来。
+    /// 后者是响亮的失败，选它。
+    ///
+    /// # 实现方必须自己管超时
+    ///
+    /// 这里刻意**不**在 agent 层再包一层超时。包了就有两个超时值，
+    /// 而两个超时值里总有一个是错的，且出问题时没人说得清是哪个先到。
+    /// 超时是「等一个远端的人」这件事的属性，只有知道传输形态的宿主
+    /// 才定得出合理的值 —— 它同时也是唯一能把「客户端断开」这种比超时
+    /// 更早的信号接上的地方。
+    async fn confirm(&self, _req: &ConfirmRequest<'_>) -> Approval {
+        Approval::Unanswered
+    }
 }
 
 // ─────────────────────────── 结果 ───────────────────────────
@@ -281,6 +367,9 @@ impl Turn {
     ) -> Result<TurnOutcome> {
         let mut reply = String::new();
         let mut tool_rounds = 0usize;
+        // 本轮的确认状态。**每轮一份**，不挂在 `self` 上 —— [`Turn`] 是可复用、
+        // 无每轮状态的，把它塞进 `self` 会让上一轮的超时把下一轮也一起废掉
+        let mut confirm = ConfirmState::default();
 
         loop {
             // 撞上限时最后再调一次、但**不给工具**：模型没有工具可用就只能
@@ -354,7 +443,7 @@ impl Turn {
                     .await
                     .ok();
 
-                let result = self.dispatch(&call, host).await;
+                let result = self.dispatch(&call, host, &mut confirm).await;
 
                 events
                     .send(AgentEvent::ToolResult {
@@ -446,8 +535,25 @@ impl Turn {
         Ok(round)
     }
 
+    /// 测试用：跑一次分派，带一份**全新**的每轮确认状态。
+    ///
+    /// 存在的理由是让每个测试默认互不影响：跨调用的状态（`gave_up`）是
+    /// `Turn::run` 的局部量，测试若共用一份就会出现「第三个断言失败是因为
+    /// 第一个断言里那次超时」这种最难查的耦合。要测跨调用行为的那一个测试
+    /// 显式自己传一份共享状态。
+    #[cfg(test)]
+    async fn dispatch_once(&self, call: &ToolCall, host: &dyn ToolHost) -> ToolResult {
+        self.dispatch(call, host, &mut ConfirmState::default())
+            .await
+    }
+
     /// 分派一次工具调用：查目录 → 过权限闸门 → 执行。
-    async fn dispatch(&self, call: &ToolCall, host: &dyn ToolHost) -> ToolResult {
+    async fn dispatch(
+        &self,
+        call: &ToolCall,
+        host: &dyn ToolHost,
+        confirm: &mut ConfirmState,
+    ) -> ToolResult {
         let Some(spec) = self.specs.iter().find(|s| s.name == call.name) else {
             return ToolResult::err(format!(
                 "未知工具：{}。可用工具：{}",
@@ -461,11 +567,36 @@ impl Turn {
         };
 
         // ── 权限闸门。所有工具执行的唯一入口，见 ApprovalPolicy 的文档 ──
-        if self.policy.decide(spec.name, spec.risk) == Approval::Deny {
-            return ToolResult::err(format!(
-                "工具 {} 需要用户确认，本次未获批准。请改用只读方式完成，或向用户说明需要什么权限。",
-                spec.name
-            ));
+        //
+        // 两段：同步的策略判断决定「要不要问」，要问就在这里 await 宿主。
+        // 整个 await 期间这一轮是挂起的 —— 这正是想要的：确认没回来之前，
+        // 不该有任何副作用发生，也不该抢先去跑下一个工具
+        let approval = match self.policy.decide(spec.name, spec.risk) {
+            Gate::Allow => Approval::Allow,
+            // 本轮已经问过一次而没有人回答，不再问第二次。见 [`ConfirmState`]
+            Gate::Ask if confirm.gave_up => {
+                tracing::info!(tool = spec.name, "本轮此前已无人应答，直接拒绝，不再等待");
+                Approval::Unanswered
+            }
+            Gate::Ask => {
+                let answer = host
+                    .confirm(&ConfirmRequest {
+                        tool: spec.name,
+                        risk: spec.risk,
+                        arguments: &call.arguments,
+                    })
+                    .await;
+                // 只有「没人回答」置位；用户明确拒绝**不**置位 ——
+                // 那说明人就在屏幕前面，下一次问他多半答得出来
+                if answer == Approval::Unanswered {
+                    confirm.gave_up = true;
+                }
+                answer
+            }
+        };
+        if !approval.is_allowed() {
+            tracing::info!(tool = spec.name, ?approval, "工具调用未获批准");
+            return ToolResult::err(refusal(spec.name, approval));
         }
 
         let result = if call.name == "memory_search" {
@@ -541,12 +672,51 @@ fn first_line(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 什么都不实现的宿主 —— `confirm` 走 trait 的默认实现。
+    /// 它存在的意义就是钉住那个默认值：漏实现 = 拒绝，不是放行。
     struct NullHost;
 
     #[async_trait::async_trait]
     impl ToolHost for NullHost {
         async fn memory_search(&self, _q: &str, _as_of: Option<&str>) -> Result<String> {
             Ok(String::new())
+        }
+    }
+
+    /// 会回答的宿主，顺便数一数被问了几次。
+    struct SpyHost {
+        answer: Approval,
+        asked: AtomicUsize,
+        last_tool: std::sync::Mutex<Option<String>>,
+        last_args: std::sync::Mutex<Option<serde_json::Value>>,
+    }
+
+    impl SpyHost {
+        fn new(answer: Approval) -> Self {
+            Self {
+                answer,
+                asked: AtomicUsize::new(0),
+                last_tool: std::sync::Mutex::new(None),
+                last_args: std::sync::Mutex::new(None),
+            }
+        }
+        fn asked(&self) -> usize {
+            self.asked.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolHost for SpyHost {
+        async fn memory_search(&self, _q: &str, _as_of: Option<&str>) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn confirm(&self, req: &ConfirmRequest<'_>) -> Approval {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            *self.last_tool.lock().unwrap() = Some(req.tool.to_string());
+            *self.last_args.lock().unwrap() = Some(req.arguments.clone());
+            self.answer
         }
     }
 
@@ -560,7 +730,7 @@ mod tests {
     async fn unknown_tool_is_reported_to_the_model_not_fatal() {
         let (_d, t) = turn();
         let r = t
-            .dispatch(
+            .dispatch_once(
                 &ToolCall {
                     name: "rm_rf".into(),
                     arguments: serde_json::json!({}),
@@ -576,65 +746,208 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn write_is_allowed_but_logged_under_the_first_version_policy() {
-        let (_d, t) = turn();
-        let r = t
-            .dispatch(
-                &ToolCall {
-                    name: "write_file".into(),
-                    arguments: serde_json::json!({"path": "a.txt", "content": "x"}),
-                },
-                &NullHost,
-            )
-            .await;
-        assert!(r.ok, "第一版策略下写工具应放行，实际：{}", r.content);
+    fn write_call() -> ToolCall {
+        ToolCall {
+            name: "write_file".into(),
+            arguments: serde_json::json!({"path": "a.txt", "content": "x"}),
+        }
     }
 
+    /// 宿主没接确认通道时，写工具必须被挡下 —— 这是 trait 默认实现的语义。
+    ///
+    /// 反过来（默认放行）会让「忘了实现 confirm」表现为高风险工具静默执行，
+    /// 而那件事不会以任何方式表现出来，直到出事。
     #[tokio::test]
-    async fn enforcing_policy_blocks_write_and_tells_the_model_why() {
+    async fn a_host_without_a_confirmation_channel_cannot_write() {
         let (_d, t) = turn();
-        let t = t.with_policy(ApprovalPolicy {
-            confirm_at: Risk::Write,
-            enforce: true,
-            ..Default::default()
-        });
-        let r = t
-            .dispatch(
-                &ToolCall {
-                    name: "write_file".into(),
-                    arguments: serde_json::json!({"path": "a.txt", "content": "x"}),
-                },
-                &NullHost,
-            )
-            .await;
-        assert!(!r.ok, "开启拦截后写工具必须被挡下");
-        assert!(r.content.contains("需要用户确认"));
+        let r = t.dispatch_once(&write_call(), &NullHost).await;
+        assert!(!r.ok, "没有确认通道时写工具必须被拒，实际：{}", r.content);
+        assert!(
+            r.content.contains("没有收到答复"),
+            "拒绝理由要说清是「没人回答」而不是「用户拒绝」，实际：{}",
+            r.content
+        );
         assert!(
             !t.sandbox_root().join("a.txt").exists(),
-            "被拒的写不能落到磁盘上"
+            "被拒的写绝不能落到磁盘上"
         );
     }
 
     #[tokio::test]
-    async fn safe_tools_pass_the_gate_even_when_enforcing() {
+    async fn an_approving_host_lets_the_write_through() {
+        let (_d, t) = turn();
+        let host = SpyHost::new(Approval::Allow);
+        let r = t.dispatch_once(&write_call(), &host).await;
+        assert!(r.ok, "用户批准后写工具应当真的执行，实际：{}", r.content);
+        assert!(
+            t.sandbox_root().join("a.txt").exists(),
+            "批准之后文件必须真的落盘，否则确认回路是个摆设"
+        );
+        assert_eq!(host.asked(), 1, "一次调用只该问一次");
+        assert_eq!(
+            host.last_tool.lock().unwrap().as_deref(),
+            Some("write_file")
+        );
+    }
+
+    /// 用户明确拒绝与无人应答，回给模型的话必须不一样。
+    ///
+    /// 混成同一句的话，模型分不出「换条路」和「这一轮没人能批」，
+    /// 只能反复重试同一个调用直到撞上轮次上限。
+    #[tokio::test]
+    async fn refusal_tells_the_model_which_kind_of_no_it_was() {
+        let (_d, t) = turn();
+        let denied = t
+            .dispatch_once(&write_call(), &SpyHost::new(Approval::Denied))
+            .await;
+        let unanswered = t
+            .dispatch_once(&write_call(), &SpyHost::new(Approval::Unanswered))
+            .await;
+        assert!(!denied.ok && !unanswered.ok);
+        assert!(
+            denied.content.contains("用户拒绝"),
+            "明确拒绝的措辞不对：{}",
+            denied.content
+        );
+        assert_ne!(
+            denied.content, unanswered.content,
+            "两种「不批准」必须给模型不同的话"
+        );
+    }
+
+    /// 参数要原样交到确认那一侧 —— 对 shell 来说，要批的就是那条命令本身。
+    #[tokio::test]
+    async fn the_confirmation_sees_the_untouched_arguments() {
+        let (_d, t) = turn();
+        let host = SpyHost::new(Approval::Denied);
+        let args = serde_json::json!({"command": "rm -rf / --no-preserve-root"});
+        t.dispatch_once(
+            &ToolCall {
+                name: "shell".into(),
+                arguments: args.clone(),
+            },
+            &host,
+        )
+        .await;
+        assert_eq!(
+            host.last_args.lock().unwrap().as_ref(),
+            Some(&args),
+            "确认请求里的参数必须是模型原样给的，摘要过的版本批不了"
+        );
+    }
+
+    /// 一轮之内**只等一次**无人应答。
+    ///
+    /// 这条断言守的是一个乘法：不短路的话，最坏情况是
+    /// `max_rounds × 确认超时` ＝ 默认 8 × 180 秒 ＝ 24 分钟的静默挂起。
+    /// 见 [`ConfirmState`]。
+    #[tokio::test]
+    async fn a_turn_waits_for_an_unanswered_confirmation_only_once() {
+        let (_d, t) = turn();
+        let host = SpyHost::new(Approval::Unanswered);
+        let mut confirm = ConfirmState::default();
+
+        let first = t.dispatch(&write_call(), &host, &mut confirm).await;
+        let second = t.dispatch(&write_call(), &host, &mut confirm).await;
+
+        assert!(!first.ok && !second.ok, "两次都该被拒");
+        assert_eq!(
+            host.asked(),
+            1,
+            "第一次就没人回答了，第二次不该再问一遍 —— 那是又一个完整的超时"
+        );
+        assert!(
+            second.content.contains("没有收到答复"),
+            "短路返回的理由要和真等过一次的一样，模型不该看出区别：{}",
+            second.content
+        );
+    }
+
+    /// 用户**明确拒绝**不该让这一轮不再问 —— 人就在屏幕前面。
+    #[tokio::test]
+    async fn an_explicit_denial_does_not_stop_the_turn_from_asking_again() {
+        let (_d, t) = turn();
+        let host = SpyHost::new(Approval::Denied);
+        let mut confirm = ConfirmState::default();
+        t.dispatch(&write_call(), &host, &mut confirm).await;
+        t.dispatch(&write_call(), &host, &mut confirm).await;
+        assert_eq!(
+            host.asked(),
+            2,
+            "用户答得出来「不」，就答得出来下一个「行」；把拒绝也当成放弃，\
+             等于一次误点就废掉整轮"
+        );
+    }
+
+    #[tokio::test]
+    async fn safe_tools_never_reach_the_confirmation_channel() {
         let (_d, t) = turn();
         std::fs::write(t.sandbox_root().join("a.txt"), "hi").unwrap();
-        let t = t.with_policy(ApprovalPolicy {
-            confirm_at: Risk::Write,
-            enforce: true,
-            ..Default::default()
-        });
+        // 这个宿主只要被问到就一律拒绝；只读工具跑通即证明它压根没被问
+        let host = SpyHost::new(Approval::Denied);
         let r = t
-            .dispatch(
+            .dispatch_once(
                 &ToolCall {
                     name: "read_file".into(),
                     arguments: serde_json::json!({"path": "a.txt"}),
                 },
-                &NullHost,
+                &host,
             )
             .await;
         assert!(r.ok, "只读工具不该被权限闸门挡住，实际：{}", r.content);
+        assert_eq!(host.asked(), 0, "只读工具不该打扰用户");
+    }
+
+    /// 阈值调到 Execute 时，写文件不问、执行仍要问。
+    #[tokio::test]
+    async fn raising_the_threshold_stops_asking_about_writes() {
+        let (_d, t) = turn();
+        let t = t.with_policy(ApprovalPolicy {
+            confirm_at: Risk::Execute,
+        });
+        let host = SpyHost::new(Approval::Denied);
+        let r = t.dispatch_once(&write_call(), &host).await;
+        assert!(r.ok, "阈值提到 Execute 后写工具应直接放行：{}", r.content);
+        assert_eq!(host.asked(), 0);
+    }
+
+    /// **确认闸与 OS 沙箱是两层，批准了不等于能跑。**
+    ///
+    /// 这条断言守的是一个具体的退化：把两者搅在一起（「用户都批了就别管沙箱了」）
+    /// 会让确认对话框变成绕过沙箱的开关，而用户点「允许」时想的是
+    /// 「允许这条命令」，不是「允许无保护地执行任意代码」。
+    #[tokio::test]
+    async fn approval_does_not_substitute_for_the_os_sandbox() {
+        let (_d, t) = turn();
+        let host = SpyHost::new(Approval::Allow);
+        let r = t
+            .dispatch_once(
+                &ToolCall {
+                    name: "shell".into(),
+                    arguments: serde_json::json!({"command": "echo hi"}),
+                },
+                &host,
+            )
+            .await;
+        assert_eq!(host.asked(), 1, "执行类工具必须问过用户");
+
+        // 有沙箱的平台上命令会真的跑起来；没有的（Windows、未装 landlock 的
+        // 老内核）应当被沙箱那一层挡下，而且理由必须是沙箱的理由，不是权限的
+        if crate::sandbox::capability().is_available() || crate::sandbox::degraded_allowed() {
+            assert!(r.ok, "沙箱可用且已批准，命令应当执行：{}", r.content);
+        } else {
+            assert!(!r.ok);
+            assert!(
+                r.content.contains("沙箱"),
+                "被挡下的理由应当来自沙箱那一层，实际：{}",
+                r.content
+            );
+            assert!(
+                !r.content.contains("用户拒绝"),
+                "已获批准的调用不该报成权限问题：{}",
+                r.content
+            );
+        }
     }
 
     #[tokio::test]
@@ -649,7 +962,7 @@ mod tests {
         let t = t.with_specs(chat_only);
 
         let r = t
-            .dispatch(
+            .dispatch_once(
                 &ToolCall {
                     name: "read_file".into(),
                     arguments: serde_json::json!({"path": "a.txt"}),
@@ -667,7 +980,7 @@ mod tests {
         let big = "x".repeat(MAX_TOOL_OUTPUT_CHARS * 2);
         std::fs::write(t.sandbox_root().join("big.txt"), &big).unwrap();
         let r = t
-            .dispatch(
+            .dispatch_once(
                 &ToolCall {
                     name: "read_file".into(),
                     arguments: serde_json::json!({"path": "big.txt"}),
@@ -694,7 +1007,7 @@ mod tests {
         }
         let (_d, t) = turn();
         let r = t
-            .dispatch(
+            .dispatch_once(
                 &ToolCall {
                     name: "memory_search".into(),
                     arguments: serde_json::json!({"query": "对象存储", "as_of": "2026-01-01T00:00:00Z"}),

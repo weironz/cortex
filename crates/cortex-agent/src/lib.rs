@@ -10,6 +10,6 @@ pub mod turn;
 pub use sandbox::{Capability, NetworkPolicy, SandboxPolicy, capability, status_line};
 pub use tools::{Risk, Sandbox, ToolCall, ToolResult, ToolSpec};
 pub use turn::{
-    AgentEvent, Approval, ApprovalPolicy, DEFAULT_MAX_ROUNDS, StopReason, ToolHost, Turn,
-    TurnOutcome,
+    AgentEvent, Approval, ApprovalPolicy, ConfirmRequest, DEFAULT_MAX_ROUNDS, Gate, StopReason,
+    ToolHost, Turn, TurnOutcome,
 };

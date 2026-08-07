@@ -15,9 +15,12 @@ use chrono::Utc;
 use cortex_core::{Config, CortexError, Id, Result};
 use cortex_memory::embed::SharedEmbedder;
 
+use crate::auth::{AuthMode, TicketBook};
 use crate::blobs::{MediaStore, PRESIGN_TTL};
+use crate::confirm::{AnswerOutcome, ConfirmRegistry, PendingInfo, PendingMeta};
 use crate::live::Live;
 use crate::sync_notify::SyncBus;
+use cortex_agent::Approval;
 use futures::stream::{self, BoxStream, Stream};
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt as _;
@@ -43,6 +46,32 @@ struct Inner {
     /// 反之亦然。把它塞进 `Backend::Live` 会让「mock 模式下传不了图」
     /// 变成一条没有理由的限制 —— 而客户端 CI 恰恰要在 mock 上跑上传流程。
     blobs: MediaStore,
+    /// 进程级、与后端无关的东西。见 [`Runtime`]。
+    rt: Runtime,
+}
+
+/// 与后端选择无关的进程级设施。
+///
+/// 单独一个结构而不是三个字段散在 [`Inner`] 里：它们的共同点是
+/// **mock 与 live 必须共用同一份**。认证是全进程的形态，确认簿要能被
+/// 任何一条 HTTP 回执找到，票据本同理 —— 任何一个跟着 `Backend` 走，
+/// 都会变成「mock 模式下这条路测不了」，而客户端 CI 恰恰跑在 mock 上。
+#[derive(Clone)]
+pub struct Runtime {
+    pub auth: AuthMode,
+    pub confirms: Arc<ConfirmRegistry>,
+    pub tickets: Arc<TicketBook>,
+}
+
+impl Runtime {
+    /// 从环境变量装配。任何一项配错都在这里失败，而不是等到第一次请求。
+    pub fn from_env() -> Result<Self> {
+        Ok(Self {
+            auth: AuthMode::from_env()?,
+            confirms: Arc::new(ConfirmRegistry::from_env()?),
+            tickets: Arc::new(TicketBook::default()),
+        })
+    }
 }
 
 enum Backend {
@@ -53,7 +82,7 @@ enum Backend {
 }
 
 impl AppState {
-    pub async fn new_mock(config: Config) -> Self {
+    pub async fn new_mock(config: Config, rt: Runtime) -> Self {
         let blobs = MediaStore::connect(&config).await;
         let bus = SyncBus::inert();
 
@@ -79,12 +108,13 @@ impl AppState {
                 backend: Backend::Mock,
                 bus,
                 blobs,
+                rt,
             }),
         }
     }
 
     /// 接入真实后端。数据库连不上或缺 API key 都会失败，由调用方决定是否降级。
-    pub async fn new_live(config: &Config) -> Result<Self> {
+    pub async fn new_live(config: &Config, rt: Runtime) -> Result<Self> {
         // 走进程内共享的那一份（`OnceCell`），而不是自己 new 一个：模型即使
         // int8 也有近 600 MB，「daemon 而非嵌入式」这个架构决策的收益之一
         // 就是模型常驻共享，各处各建一份等于把它退回去。
@@ -107,8 +137,33 @@ impl AppState {
                 backend: Backend::Live(live),
                 bus,
                 blobs,
+                rt,
             }),
         })
+    }
+
+    // ───────────────────────── 认证 ─────────────────────────
+
+    #[must_use]
+    pub fn auth_mode(&self) -> &AuthMode {
+        &self.inner.rt.auth
+    }
+
+    #[must_use]
+    pub fn ticket_book(&self) -> &TicketBook {
+        &self.inner.rt.tickets
+    }
+
+    // ──────────────────── 工具确认（R11）────────────────────
+
+    /// 收下一条回执。见 [`ConfirmRegistry::answer`]。
+    pub fn answer_confirmation(&self, token: &str, approval: Approval) -> AnswerOutcome {
+        self.inner.rt.confirms.answer(token, approval)
+    }
+
+    /// 还等着答复的确认项。断线重连与第二台设备靠它发现待办。
+    pub fn pending_confirmations(&self, session_id: Option<&str>) -> Vec<PendingInfo> {
+        self.inner.rt.confirms.pending(session_id)
     }
 
     // ───────────────────── 实时同步（/ws）─────────────────────
@@ -316,9 +371,12 @@ impl AppState {
     // ───────────────────────── 对话 ─────────────────────────
 
     pub async fn chat_stream(&self, req: ChatRequest) -> BoxStream<'static, ChatEvent> {
+        let confirms = Arc::clone(&self.inner.rt.confirms);
         match &self.inner.backend {
-            Backend::Mock => Box::pin(mock_chat_stream(req)),
-            Backend::Live(l) => Box::pin(tokio_stream::wrappers::ReceiverStream::new(l.chat(req))),
+            Backend::Mock => Box::pin(mock_chat_stream(req, confirms)),
+            Backend::Live(l) => Box::pin(tokio_stream::wrappers::ReceiverStream::new(
+                l.chat(req, confirms),
+            )),
         }
     }
 
@@ -539,9 +597,23 @@ fn mock_facts() -> Vec<FactDto> {
     ]
 }
 
+/// mock 里触发一次工具确认的口令。
+///
+/// 与伪造记忆事件、伪造游标推进同一个理由：确认回路是三端都要实现的一条
+/// 交互，客户端 CI 与离线开发必须走得到它，否则那段 UI 只能等接上真实
+/// 后端与真实模型之后才第一次被执行。
+///
+/// 做成口令触发而不是每轮都问：每轮都问的话，mock 上的每一次对话都会先卡满
+/// 一个确认超时 —— 那会让 mock 后端在它最主要的用途（离线开发时随便聊两句）
+/// 上变得没法用。
+const MOCK_CONFIRM_TRIGGER: &str = "#confirm";
+
 /// 模拟一轮完整对话：先报本轮用到的记忆，再逐块吐字，最后收尾。
 /// 事件顺序与真实实现保持一致，客户端据此开发不会白做。
-fn mock_chat_stream(req: ChatRequest) -> impl Stream<Item = ChatEvent> + use<> {
+fn mock_chat_stream(
+    req: ChatRequest,
+    confirms: Arc<ConfirmRegistry>,
+) -> impl Stream<Item = ChatEvent> + use<> {
     let facts = mock_facts();
     let reply = format!(
         "收到「{}」。\n\n这是 **mock 回复** —— cortexd 的路由与事件契约已就绪，\
@@ -558,7 +630,7 @@ fn mock_chat_stream(req: ChatRequest) -> impl Stream<Item = ChatEvent> + use<> {
         .collect();
 
     let session = req.session_id.clone();
-    let head = stream::iter(vec![
+    let mut head_events = vec![
         ChatEvent::Memory { facts },
         // 演示工具调用事件，让客户端能提前把这一路 UI 做出来
         ChatEvent::Tool {
@@ -567,7 +639,43 @@ fn mock_chat_stream(req: ChatRequest) -> impl Stream<Item = ChatEvent> + use<> {
             // memory_search 不碰文件 —— path 为 None 正是它必须可选的理由
             path: None,
         },
-    ]);
+    ];
+
+    // 演示确认回路。事件的形状、凭据的形状、超时后的行为都与真实后端一致 ——
+    // 差别只在于这里没有一个真的命令在等着跑。
+    //
+    // **登记在建流的时候就做完了**，请求事件排在 head 的末尾，等待排在它之后
+    // 的一段里 —— 与真实后端「先登记、再发事件、最后挂起」的顺序一致。
+    const MOCK_PREVIEW: &str = "command: echo 这是 mock，什么也不会真的执行";
+    let pending = req.message.contains(MOCK_CONFIRM_TRIGGER).then(|| {
+        confirms.open(PendingMeta {
+            session_id: req.session_id.clone(),
+            tool: "shell".into(),
+            risk: "execute",
+            preview: MOCK_PREVIEW.into(),
+        })
+    });
+    if let Some(p) = &pending {
+        head_events.push(ChatEvent::Confirm {
+            token: p.token().to_string(),
+            tool: "shell".into(),
+            risk: "execute",
+            preview: MOCK_PREVIEW.into(),
+            timeout_secs: confirms.timeout().as_secs(),
+        });
+    }
+    let head = stream::iter(head_events);
+    // `stream::iter(Option)` 产出 0 或 1 个元素 —— 没触发口令时整段消失，
+    // 且两条路是同一个流类型，不必为此包一层 Box
+    let confirm = stream::iter(pending).then(|p| async move {
+        let text = match p.wait(std::future::pending()).await {
+            Approval::Allow => "（mock）你批准了，真实后端此刻会执行那条命令。\n",
+            Approval::Denied => "（mock）你拒绝了，真实后端会把拒绝理由回传给模型。\n",
+            Approval::Unanswered => "（mock）没人回答，按拒绝处理。\n",
+        };
+        ChatEvent::Delta { text: text.into() }
+    });
+
     let body = stream::iter(chunks.into_iter().map(|text| ChatEvent::Delta { text }))
         // 让客户端能观察到真实的流式行为，而不是一次性到达
         .throttle(std::time::Duration::from_millis(18));
@@ -577,5 +685,5 @@ fn mock_chat_stream(req: ChatRequest) -> impl Stream<Item = ChatEvent> + use<> {
         }
     });
 
-    head.chain(body).chain(tail)
+    head.chain(confirm).chain(body).chain(tail)
 }

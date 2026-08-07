@@ -76,6 +76,25 @@ pub fn memory_line(f: &Fact, color: bool) -> String {
     format!("  {} {}{}", dim("│", color), f.statement, tail)
 }
 
+/// 工具确认的抬头。
+///
+/// 用红色而不是与普通工具事件一样的暗黄：这是终端上唯一一处**要求用户
+/// 做安全判断**的地方，它必须和「agent 又读了个文件」在视觉上分得开。
+#[must_use]
+pub fn confirm_header(tool: &str, risk: &str, secs: u64, color: bool) -> String {
+    wrap(
+        &format!("⚠ 需要确认：{tool}［{risk}］—— {secs} 秒内不回答按拒绝处理"),
+        &format!("{BOLD}{RED}"),
+        color,
+    )
+}
+
+/// `[y/N]` 而不是 `[Y/n]`：默认必须是拒绝。见 `main::ask_user`。
+#[must_use]
+pub fn confirm_prompt(color: bool) -> String {
+    wrap("允许执行？[y/N]", BOLD, color)
+}
+
 #[must_use]
 pub fn tool_line(name: &str, summary: &str, color: bool) -> String {
     wrap(

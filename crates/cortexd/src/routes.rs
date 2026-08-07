@@ -24,10 +24,30 @@ use crate::blobs::{DIRECT_UPLOAD_LIMIT, RangeSpec, parse_range};
 use crate::dto::*;
 use crate::state::AppState;
 
+/// 路由表。
+///
+/// # 认证的形状：豁免靠**不挂中间件**表达，不靠路径白名单
+///
+/// 「中间件里判断 `path == "/health"` 就放行」是这类代码最经典的出事点：
+/// 加新路由的人不会想起去更新那张表，而漏掉的方向是**默认放行**。
+/// 这里把它拆成两个 `Router`：`public` 那个只有 `/health`，其余全部落在
+/// `protected` 上并整体套一层 [`crate::auth::require`]。新加的路由默认
+/// 落在受保护那一侧 —— 失败方向反过来了。
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    let public = Router::new().route("/health", get(health));
+
+    let protected = Router::new()
+        .route("/auth/ticket", post(issue_ticket))
         .route("/chat", post(chat))
+        // 工具确认的回执与待办列表。
+        //
+        // 回执是 POST 而不是 PATCH/PUT：它不是在改一个资源的状态，
+        // 而是在**投递一个一次性的答复** —— 同一个 token 投第二次不是幂等的
+        // 「结果一样」，而是明确的 404（凭据已被消费）。
+        .route(
+            "/confirmations",
+            get(list_confirmations).post(answer_confirmation),
+        )
         .route("/memory/search", get(memory_search))
         .route("/episodes/{id}", get(get_episode))
         .route("/sessions", get(list_sessions))
@@ -48,17 +68,81 @@ pub fn router(state: AppState) -> Router {
         .route("/blobs/{hash}/url", get(get_blob_url))
         .route("/sync", get(sync))
         .route("/ws", get(crate::ws::handler))
-        .with_state(state)
+        // route_layer：只对**匹配到的**路由生效。不匹配的路径照常 404，
+        // 不会先被判成 401 —— 后者会让「路径打错了」与「凭据不对」
+        // 在客户端看来是同一件事
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require,
+        ));
+
+    public.merge(protected).with_state(state)
 }
 
 // ─────────────────────────── /health ───────────────────────────
 
+/// 存活探针。**唯一不需要认证的端点**，理由见 [`Health::auth`]。
 async fn health(State(st): State<AppState>) -> Json<Health> {
     Json(Health {
         status: "ok",
         version: cortex_core::VERSION,
         database: st.database_status().await,
         blob_backend: st.blob_backend(),
+        auth: st.auth_mode().as_str(),
+    })
+}
+
+// ──────────────────── /auth/ticket（R9）────────────────────
+
+/// 用长期 token 换一张短命票据。
+///
+/// 给那些**加不了请求头**的连接用：浏览器的 `EventSource`、`WebSocket`、
+/// `<img src>`。票据以 `?ticket=` 传，60 秒过期。见 [`crate::auth`]。
+async fn issue_ticket(State(st): State<AppState>) -> Json<TicketResponse> {
+    Json(TicketResponse {
+        ticket: st.ticket_book().issue(),
+        expires_in_secs: crate::auth::TICKET_TTL.as_secs(),
+    })
+}
+
+// ─────────────────── /confirmations（R11）───────────────────
+
+/// 投递一条工具确认回执。
+///
+/// 404 覆盖四种情况且**不加区分**：凭据是伪造的、已经被别的设备答过了、
+/// 超时作废了、那一轮早就结束了。分开报会让「猜一个 token 试试」变成
+/// 一个可用的探测口 —— 能问出「刚才有没有人在批一条命令」。
+async fn answer_confirmation(
+    State(st): State<AppState>,
+    Json(receipt): Json<ConfirmReceipt>,
+) -> Result<Json<ConfirmAck>, ApiError> {
+    let approval = match receipt.decision {
+        ConfirmDecision::Allow => cortex_agent::Approval::Allow,
+        ConfirmDecision::Deny => cortex_agent::Approval::Denied,
+    };
+    match st.answer_confirmation(&receipt.token, approval) {
+        crate::confirm::AnswerOutcome::Accepted => Ok(Json(ConfirmAck { accepted: true })),
+        crate::confirm::AnswerOutcome::Unknown => {
+            Err(ApiError::from(cortex_core::CortexError::NotFound {
+                kind: "confirmation",
+                // 回显的是**请求里带的那个 token**，而它本来就是客户端自己
+                // 发上来的，不泄露任何它还不知道的东西
+                id: receipt.token,
+            }))
+        }
+    }
+}
+
+/// 当前还等着答复的确认项。
+///
+/// 断线重连之后靠它把「有没有什么还等着我批」问出来 —— SSE 流是一次性的，
+/// 断了就再也不会重发那条请求事件。第二台设备发现待办同样走这里。
+async fn list_confirmations(
+    State(st): State<AppState>,
+    Query(q): Query<PendingQuery>,
+) -> Json<PendingConfirmations> {
+    Json(PendingConfirmations {
+        pending: st.pending_confirmations(q.session_id.as_deref()),
     })
 }
 

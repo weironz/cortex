@@ -87,6 +87,16 @@ services:
       CORTEXD_BIND: 0.0.0.0:8080
       RUST_LOG: ${RUST_LOG:-cortexd=info,cortex_memory=info,warn}
 
+      # 认证。**必填** —— 没有它 cortexd 会拒绝启动（见 crates/cortexd/src/auth.rs）。
+      # 上面那行 `0.0.0.0:8080` 正是它要防的场景：容器里监听全网卡，
+      # 只靠 ports 那行的 127.0.0.1 挡着，谁改一下端口映射记忆库就上公网了。
+      #
+      # 生成：docker compose ... run --rm cortexd --generate-token
+      # 服务端只拿摘要；明文给客户端，**不要**也放进这台机器
+      CORTEX_AUTH_TOKEN_SHA256: ${CORTEX_AUTH_TOKEN_SHA256:?生产必须显式设 CORTEX_AUTH_TOKEN_SHA256（cortexd --generate-token 生成）}
+      # 高风险工具确认的超时（秒），超时按拒绝处理
+      CORTEX_CONFIRM_TIMEOUT_SECS: ${CORTEX_CONFIRM_TIMEOUT_SECS:-180}
+
       # 向量后端。生产用真实语义模型；模型落在 models 卷里，
       # 第一次启动会下 ~590 MB，之后重启不再下载
       CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-fast}
