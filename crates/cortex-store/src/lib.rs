@@ -59,8 +59,10 @@ pub use error::{Result, StoreError};
 pub use model::{
     Actor, Blob, BlobTranscript, CanonicalEntity, Entity, EntityMerge, Episode, EpisodeBlob, Fact,
     FactEvent, FactOp, FactStatus, InvalidationKind, NewBlob, NewBlobTranscript, NewEntity,
-    NewEntityMerge, NewEpisode, NewEpisodeBlob, NewFact, NewFactEvent, NewRedaction, NewSummary,
-    Redaction, RedactionMode, RedactionTarget, Role, Summary, SummaryScope, TranscriptKind, table,
+    NewEntityMerge, NewEpisode, NewEpisodeBlob, NewFact, NewFactEvent, NewRedaction,
+    NewSessionEvent, NewSummary, Redaction, RedactionMode, RedactionTarget, Role,
+    SESSION_TITLE_MAX_CHARS, SessionEvent, SessionOp, SessionState, Summary, SummaryScope,
+    TranscriptKind, WORKSPACE_PATH_MAX_CHARS, table,
 };
 pub use store::{SessionDigest, Store};
 pub use sync::{SyncLogEntry, SyncNotifications, SyncPayload, SyncRecord, SyncSignal};

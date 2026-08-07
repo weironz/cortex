@@ -31,7 +31,10 @@ pub fn router(state: AppState) -> Router {
         .route("/memory/search", get(memory_search))
         .route("/episodes/{id}", get(get_episode))
         .route("/sessions", get(list_sessions))
-        .route("/sessions/{id}", get(get_session))
+        // PATCH 而非 PUT：客户端只送要改的字段，没送的原样不动。
+        // PUT 的语义是整体替换，那会逼客户端先 GET 一遍再回传全量 ——
+        // 而两次请求之间别的设备改了什么，就被这次 PUT 悄悄回滚了
+        .route("/sessions/{id}", get(get_session).patch(patch_session))
         .route(
             "/blobs",
             // axum 默认体积上限是 2 MiB —— 对「直传小文件」这个用途太紧
@@ -107,9 +110,14 @@ async fn get_episode(
     Ok(Json(st.get_episode(&id).await?))
 }
 
-async fn list_sessions(State(st): State<AppState>) -> Result<Json<SessionsResponse>, ApiError> {
+/// 会话列表。**已归档的默认不返回** —— 归档的产品语义就是「从列表里消失」。
+/// 要看全部传 `?include_archived=true`。
+async fn list_sessions(
+    State(st): State<AppState>,
+    Query(q): Query<ListSessionsQuery>,
+) -> Result<Json<SessionsResponse>, ApiError> {
     Ok(Json(SessionsResponse {
-        sessions: st.list_sessions().await?,
+        sessions: st.list_sessions(&q).await?,
     }))
 }
 
@@ -118,6 +126,19 @@ async fn get_session(
     Path(id): Path<String>,
 ) -> Result<Json<SessionDetail>, ApiError> {
     Ok(Json(st.session_detail(&id).await?))
+}
+
+/// 改名 / 归档 / 绑定工作区。返回改完之后的会话概览。
+///
+/// 归档走这里而不是 `DELETE /sessions/{id}`：那个动词会让客户端（和读代码
+/// 的人）以为数据没了。在 append-only 体系里数据一条没少，只是不再出现在
+/// 默认列表里 —— 真要销毁内容是 redact / purge，另一条路、要二次确认。
+async fn patch_session(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(patch): Json<SessionPatch>,
+) -> Result<Json<SessionDto>, ApiError> {
+    Ok(Json(st.patch_session(&id, patch).await?))
 }
 
 // ──────────────────────────── /blobs ───────────────────────────

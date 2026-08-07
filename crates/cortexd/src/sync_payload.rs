@@ -116,6 +116,23 @@ pub fn to_json(p: &SyncPayload) -> Value {
             "created_at": s.created_at.to_rfc3339(),
         }),
 
+        // 会话生命周期事件。客户端按同一套状态机自己算末态（每个维度取
+        // 最后一条），而不是等服务端下发一个「当前标题」——后者要求服务端
+        // 在每次事件后再推一行状态，而那行状态本身没有全序可言
+        SyncPayload::SessionEvent(e) => json!({
+            "id": e.id,
+            "session_id": e.session_id,
+            "op": e.op.as_str(),
+            "title": e.title,
+            // workspace 是**本机**路径，下发出去多半在对端不存在。
+            // 仍然要发：不发的话对端连「这个会话在别的设备上是有工作区的」
+            // 都不知道，界面上没法解释为什么同一个会话在这台机器上没有文件工具
+            "workspace": e.workspace,
+            "actor": e.actor.as_str(),
+            "device_id": e.device_id,
+            "created_at": e.created_at.to_rfc3339(),
+        }),
+
         // 抹除墓碑必须下发：客户端收到后有义务执行同等的本地清除
         // （memory.md §九 的传播义务）
         SyncPayload::Redaction(r) => json!({

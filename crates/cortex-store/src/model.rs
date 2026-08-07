@@ -33,6 +33,7 @@ pub mod table {
     pub const FACT_EVENTS: &str = "fact_events";
     pub const SUMMARIES: &str = "summaries";
     pub const REDACTIONS: &str = "redactions";
+    pub const SESSION_EVENTS: &str = "session_events";
 }
 
 // ══════════════════════════════════════════════════════════
@@ -166,6 +167,25 @@ text_enum! {
     pub enum Actor {
         System => "system",
         User => "user",
+    }
+}
+
+text_enum! {
+    /// `session_events.op`
+    ///
+    /// 三个互相独立的维度，各自是一台「末态由最后一条决定」的状态机：
+    /// `Rename` 管标题，`Archive` / `Unarchive` 管归档，
+    /// `BindWorkspace` / `UnbindWorkspace` 管工作区。
+    ///
+    /// **归档不是删除**：归档只把会话从默认列表隐藏，消息与派生记忆一概不动，
+    /// 随时可 `Unarchive` 恢复。真正销毁内容的是 [`RedactionMode`]，
+    /// 它要显式触发、二次确认、留墓碑（docs/memory.md §十一）。
+    pub enum SessionOp {
+        Rename => "rename",
+        Archive => "archive",
+        Unarchive => "unarchive",
+        BindWorkspace => "bind_workspace",
+        UnbindWorkspace => "unbind_workspace",
     }
 }
 
@@ -536,6 +556,111 @@ pub struct NewSummary {
 }
 
 // ══════════════════════════════════════════════════════════
+//  会话生命周期
+// ══════════════════════════════════════════════════════════
+
+/// `session_events.title` 的字符数上限，与 migration 里的 CHECK 一致。
+///
+/// 常量放在这里而不是让上层各写一个字面量：两处一旦漂移，症状是
+/// 「客户端以为改名成功，服务端却回 500」——数据库 CHECK 的报错到不了用户眼前。
+pub const SESSION_TITLE_MAX_CHARS: usize = 200;
+
+/// `session_events.workspace` 的字符数上限，与 migration 里的 CHECK 一致。
+pub const WORKSPACE_PATH_MAX_CHARS: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct SessionEvent {
+    pub id: String,
+    pub session_id: String,
+    pub op: SessionOp,
+    /// `op = Rename` 时非空
+    pub title: Option<String>,
+    /// `op = BindWorkspace` 时非空。**本机绝对路径** ——
+    /// 同步到别的设备上可能根本不存在，客户端应把「不存在」当作未绑定。
+    pub workspace: Option<String>,
+    pub actor: Actor,
+    pub device_id: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewSessionEvent {
+    pub id: Id,
+    pub session_id: String,
+    pub op: SessionOp,
+    /// `op = Rename` 时必填，其余必须为 `None`（schema CHECK 强制）
+    pub title: Option<String>,
+    /// `op = BindWorkspace` 时必填，其余必须为 `None`（schema CHECK 强制）
+    pub workspace: Option<String>,
+    pub actor: Actor,
+    pub device_id: String,
+}
+
+impl NewSessionEvent {
+    fn bare(session_id: &str, op: SessionOp, actor: Actor, device_id: &str) -> Self {
+        Self {
+            id: Id::new(),
+            session_id: session_id.to_owned(),
+            op,
+            title: None,
+            workspace: None,
+            actor,
+            device_id: device_id.to_owned(),
+        }
+    }
+
+    /// 用户给会话起了个名字。末态由最后一条 `rename` 决定 ——
+    /// 不做「撤销栈」，`[rename A, rename B]` 之后就是 B。
+    #[must_use]
+    pub fn rename(session_id: &str, title: &str, actor: Actor, device_id: &str) -> Self {
+        Self {
+            title: Some(title.to_owned()),
+            ..Self::bare(session_id, SessionOp::Rename, actor, device_id)
+        }
+    }
+
+    /// 归档 —— 从默认列表隐藏，**不删除任何东西**。
+    ///
+    /// 用户口中的「删除会话」在 append-only 体系里就是这个操作：消息、附件、
+    /// 已抽取的事实全都原样留着，只是不再出现在列表里。真要销毁内容得走
+    /// `redactions` 的 redact / purge，语义不同、要二次确认（docs/memory.md §十一）。
+    #[must_use]
+    pub fn archive(session_id: &str, actor: Actor, device_id: &str) -> Self {
+        Self::bare(session_id, SessionOp::Archive, actor, device_id)
+    }
+
+    /// 撤销归档。
+    #[must_use]
+    pub fn unarchive(session_id: &str, actor: Actor, device_id: &str) -> Self {
+        Self::bare(session_id, SessionOp::Unarchive, actor, device_id)
+    }
+
+    /// 把会话绑到一个本机目录上。
+    ///
+    /// `workspace` 必须是**已由服务端校验过**的绝对路径（存在、是目录、
+    /// 不是系统目录）。存储层不做校验：它没有「什么算系统目录」这个概念，
+    /// 那是部署形态的知识，属于 cortexd。
+    #[must_use]
+    pub fn bind_workspace(
+        session_id: &str,
+        workspace: &str,
+        actor: Actor,
+        device_id: &str,
+    ) -> Self {
+        Self {
+            workspace: Some(workspace.to_owned()),
+            ..Self::bare(session_id, SessionOp::BindWorkspace, actor, device_id)
+        }
+    }
+
+    /// 解绑工作区 —— 会话退回纯聊天，文件工具从模型的工具目录里消失。
+    #[must_use]
+    pub fn unbind_workspace(session_id: &str, actor: Actor, device_id: &str) -> Self {
+        Self::bare(session_id, SessionOp::UnbindWorkspace, actor, device_id)
+    }
+}
+
+// ══════════════════════════════════════════════════════════
 //  抹除记录
 // ══════════════════════════════════════════════════════════
 
@@ -580,6 +705,23 @@ pub struct FactStatus {
     pub decided_at: DateTime<Utc>,
 }
 
+/// `session_state` 视图：一个会话三个维度各自的末态。
+///
+/// 三个维度**互相独立**地取各自最后一条事件 —— `[archive, rename]` 之后
+/// 会话既有了新标题，也仍然处于归档中。用「整表最后一条」判定会得出
+/// 「改个名就自动出档了」这种谁也没要求过的行为。
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct SessionState {
+    pub session_id: String,
+    /// 用户设置的标题。`None` = 从未改过名，上层应回落到「首条用户消息派生」。
+    pub title: Option<String>,
+    pub archived: bool,
+    /// 绑定的本机目录。`None` = 未绑定，该会话是纯聊天（没有文件工具）。
+    pub workspace: Option<String>,
+    /// 三个维度中最近一次事件的时间
+    pub decided_at: DateTime<Utc>,
+}
+
 /// `canonical_entities` 视图：实体经别名合并后的最终归属。
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct CanonicalEntity {
@@ -602,6 +744,32 @@ mod tests {
     fn unknown_variant_is_rejected() {
         let err = "nope".parse::<Role>().expect_err("未知取值应当报错");
         assert!(matches!(err, crate::StoreError::UnknownVariant { .. }));
+    }
+
+    #[test]
+    fn session_event_constructors_respect_the_schema_checks() {
+        // schema 的 CHECK 是两侧的：rename 必须有 title，且**只有** rename
+        // 能有 title。构造器写错会在集成测试里变成一句 SQLSTATE 23514，
+        // 这里先用单测把意图钉住
+        let r = NewSessionEvent::rename("s", "新标题", Actor::User, "dev");
+        assert_eq!(r.title.as_deref(), Some("新标题"));
+        assert!(r.workspace.is_none(), "rename 不该携带 workspace");
+
+        let b = NewSessionEvent::bind_workspace("s", "/tmp/x", Actor::User, "dev");
+        assert_eq!(b.workspace.as_deref(), Some("/tmp/x"));
+        assert!(b.title.is_none(), "bind_workspace 不该携带 title");
+
+        for e in [
+            NewSessionEvent::archive("s", Actor::User, "dev"),
+            NewSessionEvent::unarchive("s", Actor::User, "dev"),
+            NewSessionEvent::unbind_workspace("s", Actor::User, "dev"),
+        ] {
+            assert!(
+                e.title.is_none() && e.workspace.is_none(),
+                "{} 是纯状态事件，不该携带任何载荷",
+                e.op
+            );
+        }
     }
 
     #[test]

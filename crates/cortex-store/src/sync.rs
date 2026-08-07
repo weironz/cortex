@@ -20,7 +20,7 @@ use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
 use crate::error::{Result, StoreError};
 use crate::model::{
     Blob, BlobTranscript, Entity, EntityMerge, Episode, EpisodeBlob, Fact, FactEvent, Redaction,
-    Summary, table,
+    SessionEvent, Summary, table,
 };
 use crate::store::Store;
 
@@ -49,6 +49,7 @@ pub enum SyncPayload {
     FactEvent(FactEvent),
     Summary(Summary),
     Redaction(Redaction),
+    SessionEvent(SessionEvent),
 }
 
 impl SyncPayload {
@@ -66,6 +67,7 @@ impl SyncPayload {
             Self::FactEvent(_) => table::FACT_EVENTS,
             Self::Summary(_) => table::SUMMARIES,
             Self::Redaction(_) => table::REDACTIONS,
+            Self::SessionEvent(_) => table::SESSION_EVENTS,
         }
     }
 }
@@ -241,6 +243,16 @@ impl Store {
                 Redaction,
                 |row: &Redaction| row.id.clone(),
                 SyncPayload::Redaction
+            ),
+            // 漏掉这一支的后果不是「会话改名同步不了」，而是**整条 /sync 断掉**：
+            // 一条 session_events 日志会让 load_payloads 返回 UnknownTable，
+            // 那一批拉取整个失败，客户端的游标从此卡死在它前面
+            table::SESSION_EVENTS => collect!(
+                "SELECT id, session_id, op, title, workspace, actor, device_id, created_at
+                   FROM session_events WHERE id = ANY($1)",
+                SessionEvent,
+                |row: &SessionEvent| row.id.clone(),
+                SyncPayload::SessionEvent
             ),
             other => return Err(StoreError::UnknownTable(other.to_owned())),
         }

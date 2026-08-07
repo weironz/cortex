@@ -37,3 +37,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 dotenvy.workspace = true
+
+[dev-dependencies]
+# 工作区路径校验的测试要真的建目录、建文件、建符号链接 ——
+# 「什么目录配当工作区」是关于真实文件系统的判断，mock 不出来
+tempfile = "3"

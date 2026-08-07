@@ -122,14 +122,15 @@ pub struct EpisodeDto {
 
 /// 会话概览。
 ///
-/// **注意 `title` 是派生的，不是存下来的** —— 它取首条用户消息的前若干字。
-/// 会话目前没有独立的表，因此改名与删除都还没有端点（理由见
-/// `cortex_store::Store::session_digests` 的文档）。客户端不要做「本地改名后
-/// 上传」的设计，它无处可存。
-#[derive(Debug, Serialize)]
+/// `title` 可能来自两处：用户通过 `PATCH /sessions/{id}` 起的名字，
+/// 或者（从未改过名时）从首条用户消息派生。`title_is_custom` 把这条差别
+/// 显式化 —— 界面上「重命名」的输入框预填哪个值取决于它。
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionDto {
     pub id: String,
     pub title: String,
+    /// `title` 是用户设置的（true）还是从首条消息派生的（false）
+    pub title_is_custom: bool,
     /// 会话第一条消息的时间
     pub created_at: String,
     /// 最后一条消息的时间，列表按它倒序
@@ -137,11 +138,74 @@ pub struct SessionDto {
     pub message_count: i64,
     /// 最后一条消息的摘要，供列表做预览
     pub preview: Option<String>,
+    /// 已归档 —— 默认不出现在 `GET /sessions` 里。
+    ///
+    /// **归档不是删除**：消息、附件、已抽取的记忆一概没动，随时可恢复。
+    /// 界面上把它叫「删除」是可以的，但别在文案里承诺「已彻底删除」——
+    /// 真正的销毁是 redact / purge，那是另一条路、要二次确认。
+    pub archived: bool,
+    /// 绑定的本机目录绝对路径。
+    ///
+    /// `null` = 纯聊天会话：文件工具**不会**出现在给模型的工具目录里，
+    /// 模型会直接说自己读不了文件，而不是调用失败几轮再放弃。
+    ///
+    /// 注意这是**本机**路径。多端同步会把绑定下发到别的设备，而那台机器上
+    /// 同一个路径多半不存在 —— 客户端遇到不存在的路径应按未绑定显示。
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct SessionsResponse {
     pub sessions: Vec<SessionDto>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListSessionsQuery {
+    /// 是否把已归档的会话也列出来。默认 false。
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+/// `PATCH /sessions/{id}` 的请求体。
+///
+/// 三个字段互相独立，全部可选，只改传上来的那些。一次 PATCH 里的多个改动
+/// 写在**同一个写事务**里 —— 否则「改名 + 归档」在别的设备上会先看到
+/// 改完名的未归档态，列表闪一下。
+///
+/// # workspace 的三态
+///
+/// 这个字段是 `Option<Option<String>>`，三种取值语义各不相同：
+///
+/// | 请求体 | 含义 |
+/// |---|---|
+/// | 字段不出现 | 不动工作区 |
+/// | `"workspace": null` | **解绑**，会话退回纯聊天 |
+/// | `"workspace": "D:/codes/x"` | 绑定到该目录 |
+///
+/// 用 `null` 表达解绑而不是另加一个 `unbind: true` 布尔：两个字段就会有
+/// 「同时传了 workspace 和 unbind」这种要定义的组合，而它没有合理语义。
+#[derive(Debug, Default, Deserialize)]
+pub struct SessionPatch {
+    /// 新标题。空白字符串会被拒绝（想恢复派生标题，本版还不支持 —— 见下）。
+    #[serde(default)]
+    pub title: Option<String>,
+    /// true = 归档，false = 取消归档。
+    #[serde(default)]
+    pub archived: Option<bool>,
+    #[serde(default, deserialize_with = "explicit_option")]
+    pub workspace: Option<Option<String>>,
+}
+
+/// 把「字段出现且为 null」与「字段没出现」区分开。
+///
+/// serde 默认把两者都解成 `None`，而这里必须分得清：前者是「解绑」，
+/// 后者是「别动它」。多包一层 `Option` 是标准做法 —— `deserialize` 只在
+/// 字段真的出现时被调用，没出现时走 `#[serde(default)]` 拿到外层 `None`。
+fn explicit_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::deserialize(d).map(Some)
 }
 
 /// 单个会话的详情：概览 + 全部消息。
@@ -283,4 +347,51 @@ pub enum SyncEvent {
 #[derive(Debug, Serialize)]
 pub struct ErrorBody {
     pub error: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `workspace` 的三态必须分得清楚。
+    ///
+    /// serde 默认会把「字段没出现」与「字段是 null」都解成 `None`，
+    /// 而这两者在这里语义相反：前者是「别动工作区」，后者是「解绑」。
+    /// 混掉的话，客户端每次改个标题都会顺手把工作区解绑掉 ——
+    /// 而那个 bug 只在「用户既绑了工作区又改了名」时才现形。
+    #[test]
+    fn workspace_distinguishes_absent_from_null() {
+        let absent: SessionPatch = serde_json::from_str(r#"{"title":"改个名"}"#).expect("应能解析");
+        assert!(absent.workspace.is_none(), "字段没出现应当是「不动工作区」");
+
+        let unbind: SessionPatch = serde_json::from_str(r#"{"workspace":null}"#).expect("应能解析");
+        assert_eq!(
+            unbind.workspace,
+            Some(None),
+            "显式的 null 应当是「解绑」，不能与「字段没出现」混为一谈"
+        );
+
+        let bind: SessionPatch =
+            serde_json::from_str(r#"{"workspace":"D:/codes/x"}"#).expect("应能解析");
+        assert_eq!(bind.workspace, Some(Some("D:/codes/x".into())));
+    }
+
+    #[test]
+    fn an_empty_patch_parses_and_changes_nothing() {
+        // 空 body 不该解析失败 —— 失败会让「服务端不认识我发的字段」
+        // 与「我什么都没发」变成同一个 400，查起来全无线索
+        let p: SessionPatch = serde_json::from_str("{}").expect("空对象应能解析");
+        assert!(p.title.is_none() && p.archived.is_none() && p.workspace.is_none());
+    }
+
+    #[test]
+    fn list_query_defaults_to_hiding_archived() {
+        // 用 JSON 代替查询串：起作用的是 `#[serde(default)]`，
+        // 与具体的 Deserializer 无关，而 serde_urlencoded 不是本 crate 的依赖
+        let q: ListSessionsQuery = serde_json::from_str("{}").expect("缺参数应当走默认值");
+        assert!(
+            !q.include_archived,
+            "不传参数时必须隐藏归档会话 —— 归档的产品语义就是从列表消失"
+        );
+    }
 }

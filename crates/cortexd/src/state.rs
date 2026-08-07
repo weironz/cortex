@@ -337,10 +337,45 @@ impl AppState {
         }
     }
 
-    pub async fn list_sessions(&self) -> Result<Vec<SessionDto>> {
+    pub async fn list_sessions(&self, q: &ListSessionsQuery) -> Result<Vec<SessionDto>> {
         match &self.inner.backend {
+            // mock 里没有归档的会话，include_archived 因此不改变结果。
+            // 仍然把参数收下：客户端要能在离线开发时验证自己拼对了查询串
             Backend::Mock => Ok(mock_sessions()),
-            Backend::Live(l) => l.list_sessions().await,
+            Backend::Live(l) => l.list_sessions(q.include_archived).await,
+        }
+    }
+
+    pub async fn patch_session(&self, id: &str, patch: SessionPatch) -> Result<SessionDto> {
+        match &self.inner.backend {
+            // mock 不落库，但**照样跑一遍校验**：客户端 CI 里
+            // 「绑到 C:\Windows 会被拒」这条断言必须在 mock 上也成立，
+            // 否则它测的是一个比真实后端宽松的契约
+            Backend::Mock => {
+                let mut s = mock_sessions()
+                    .into_iter()
+                    .find(|s| s.id == id)
+                    .unwrap_or_else(|| mock_sessions().swap_remove(0));
+                s.id = id.to_string();
+                if let Some(t) = patch.title.as_deref() {
+                    if t.trim().is_empty() {
+                        return Err(CortexError::Invalid("标题不能为空白".into()));
+                    }
+                    s.title = t.trim().to_string();
+                    s.title_is_custom = true;
+                }
+                if let Some(a) = patch.archived {
+                    s.archived = a;
+                }
+                if let Some(ws) = &patch.workspace {
+                    s.workspace = match ws {
+                        Some(raw) => Some(crate::workspace::validate(raw)?),
+                        None => None,
+                    };
+                }
+                Ok(s)
+            }
+            Backend::Live(l) => l.patch_session(id, patch).await,
         }
     }
 
@@ -405,6 +440,9 @@ fn mock_sessions() -> Vec<SessionDto> {
             updated_at: now.clone(),
             message_count: 12,
             preview: Some("那就先按 RustFS 单卷来。".into()),
+            title_is_custom: false,
+            archived: false,
+            workspace: None,
         },
         SessionDto {
             id: "01JSESSION0000000000000002".into(),
@@ -413,6 +451,12 @@ fn mock_sessions() -> Vec<SessionDto> {
             updated_at: now,
             message_count: 34,
             preview: Some("sync_log 用单游标，跨全部表。".into()),
+            title_is_custom: false,
+            archived: false,
+            // 刻意不编一个假路径：mock 的消费者是客户端 CI，那台机器上
+            // 任何编出来的路径都不存在，界面按「不存在即未绑定」渲染的话
+            // 反而看不出区别。要试绑定态就 PATCH 一个真实目录上去
+            workspace: None,
         },
     ]
 }

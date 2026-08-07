@@ -52,7 +52,10 @@ async fn digests_summarise_each_session() {
     // 新会话：只有一条
     write(s, episode("sess-new", Role::User, "新会话唯一的一句", 5)).await;
 
-    let digests = s.session_digests(10).await.expect("查会话概览不该失败");
+    let digests = s
+        .session_digests(10, false)
+        .await
+        .expect("查会话概览不该失败");
     let outcome: Vec<_> = digests
         .iter()
         .map(|d| {
@@ -112,7 +115,10 @@ async fn a_chatty_session_cannot_crowd_out_a_quiet_one() {
         .await;
     }
 
-    let digests = s.session_digests(10).await.expect("查会话概览不该失败");
+    let digests = s
+        .session_digests(10, false)
+        .await
+        .expect("查会话概览不该失败");
     let ids: Vec<String> = digests.iter().map(|d| d.session_id.clone()).collect();
     let chatty_count = digests
         .iter()

@@ -199,6 +199,24 @@ impl Turn {
         })
     }
 
+    /// 换掉工具目录。
+    ///
+    /// 存在的理由只有一个：**工具目录是随会话变的**。未绑定工作区的会话是
+    /// 纯聊天，文件工具根本不该出现在发给模型的 schema 里 —— 不是「出现了
+    /// 但调用会失败」，那样模型会反复尝试、烧掉几轮才放弃，用户看到的是
+    /// 一串莫名其妙的工具调用事件。目录里没有，模型就直接说自己做不到。
+    ///
+    /// 具体给哪些工具由调用方（cortexd）按会话状态决定：只有它知道这个
+    /// 会话绑没绑工作区。`specs` 与 `tools` 必须一起换 —— 前者是执行时的
+    /// 分派表，后者是发给模型的 schema，两者漂移就会出现「模型看得见但
+    /// 分派不了」或者反过来的「藏起来了却仍能调用」。
+    #[must_use]
+    pub fn with_specs(mut self, specs: Vec<ToolSpec>) -> Self {
+        self.tools = tools::to_llm_tools(&specs);
+        self.specs = specs;
+        self
+    }
+
     #[must_use]
     pub fn with_max_rounds(mut self, n: usize) -> Self {
         self.max_rounds = n;
@@ -214,6 +232,16 @@ impl Turn {
     #[must_use]
     pub fn sandbox_root(&self) -> &std::path::Path {
         self.sandbox.root()
+    }
+
+    /// 本轮会发给模型的工具名。
+    ///
+    /// 存在的理由是**可观测**：工具目录现在随会话变（绑没绑工作区），
+    /// 而「模型说它读不了文件」既可能是目录里真没有，也可能是模型在偷懒。
+    /// 没有这个接口，那两种情况在日志里长得一模一样。测试也靠它断言。
+    #[must_use]
+    pub fn tool_names(&self) -> Vec<&'static str> {
+        self.specs.iter().map(|s| s.name).collect()
     }
 
     /// 跑完一轮完整对话（可能内含多次工具调用）。
@@ -582,6 +610,30 @@ mod tests {
             )
             .await;
         assert!(r.ok, "只读工具不该被权限闸门挡住，实际：{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn narrowing_the_catalog_hides_the_tool_from_dispatch_too() {
+        // 只把 schema 藏起来、分派表照旧，等于「模型看不见但仍能调用」——
+        // 而模型是能从对话历史里学会一个没在目录里的工具名的
+        let (_d, t) = turn();
+        let chat_only: Vec<ToolSpec> = tools::builtin_specs()
+            .into_iter()
+            .filter(|s| s.name == "memory_search")
+            .collect();
+        let t = t.with_specs(chat_only);
+
+        let r = t
+            .dispatch(
+                &ToolCall {
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": "a.txt"}),
+                },
+                &NullHost,
+            )
+            .await;
+        assert!(!r.ok, "已从目录里去掉的工具必须连分派都过不去");
+        assert!(r.content.contains("未知工具"), "实际：{}", r.content);
     }
 
     #[tokio::test]

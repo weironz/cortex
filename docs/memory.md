@@ -118,6 +118,7 @@ WHERE (f.valid_at IS NULL OR f.valid_at <= :T)
 | L1 | `facts` | 主谓宾 + `statement` 自然语言表述；`source_episode_id NOT NULL` 是可审计的根基 |
 | L1 | `fact_events` | 生命周期事件（见下） |
 | L2 | `summaries` | 会话 / 主题 / 时段摘要 |
+| — | `session_events` | 会话生命周期（改名 / 归档 / 绑定工作区），见下 |
 | — | `redactions` | 抹除墓碑（见 §十一） |
 
 ### fact_events —— 事实的生命周期
@@ -143,11 +144,33 @@ flag 除外）决定，不是「撤销栈」——序列 `[invalidate(A), invali
 环（A→B + B→A）由 cortexd 写入前沿 `into_entity` 链走到底做成环检测拒绝；
 视图中的 depth 上限只是兜底保险。
 
+### session_events —— 会话的生命周期
+
+会话本身没有实体表（`session_id` 由客户端生成，与 `episodes` 一致），
+状态全部由这张 append-only 的事件表推导。
+
+`op` 覆盖**三个互相独立的维度**：`rename` / `archive`+`unarchive` /
+`bind_workspace`+`unbind_workspace`。
+
+> **状态机是按维度的，不是按表的。** 用单个 `DISTINCT ON (session_id)`
+> 取「最后一条事件」是错的：序列 `[archive, rename]` 的末条是 rename，
+> 但会话仍然处于归档状态。`session_state` 视图因此取**三条各自的**
+> 末事件再 join，每条都按 `(created_at DESC, id DESC)` 排序（与 `fact_status`
+> 同一个 tiebreaker，两台设备在同一微秒改名才会收敛到同一结果而非各自分叉）。
+
+**归档 ≠ 删除。** 归档只是从列表隐藏，数据完好；真正的销毁是
+`redact`/`purge`（§十一），语义不同、要二次确认。
+
+CHECK 是双向的：`rename` 必须有 title，且**只有** `rename` 可以有。
+单向版本会让 `archive` 携带 title，在视图里表现为「归档顺便改了名」——
+无从追查。
+
 ### 视图
 
 - `fact_status`：每条事实最近一次**状态**事件（过滤掉 flag），排序 `(created_at DESC, id DESC)`
 - `active_facts`：从未失效或已恢复的事实——日常检索的入口
 - `canonical_entities`：沿函数图走到终点的归属解析（链式合并 A→B→C 正确解析为 A→C）
+- `session_state`：会话的当前标题 / 归档状态 / 绑定的工作区（三维度各取末事件后 join）
 
 
 ## 五、写入流程

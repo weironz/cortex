@@ -6,7 +6,7 @@ use sqlx::migrate::Migrator;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
 use crate::error::Result;
-use crate::model::EpisodeBlob;
+use crate::model::{EpisodeBlob, SessionEvent, SessionState};
 use crate::txn::WriteTxn;
 
 /// 编译期嵌入的 migration 集合。
@@ -111,13 +111,16 @@ impl Store {
     }
 }
 
-/// 一个会话的概览。**从 `episodes` 归纳而来，没有对应的实体表。**
+/// 一个会话的概览。
 ///
-/// 会话目前不是一等公民：没有 `sessions` 表，也就没有可写的标题、没有
-/// 「已删除」这个状态。这个结构体是那条边界的具体形状 —— 凡是能从消息本身
-/// 算出来的（起止时间、条数、首条用户消息）都在这儿，凡是需要独立存一份的
-/// （用户自定义标题、归档标记）都不在，且**不该**靠往 `episodes` 里塞控制记录
-/// 来伪造（理由见 `Store::session_digests`）。
+/// **两个来源拼起来**：能从消息本身算出来的（起止时间、条数、首条用户消息）
+/// 从 `episodes` 聚合；需要独立存一份的（用户自定义标题、归档、工作区）
+/// 来自 `session_events` 的末态视图 `session_state`。
+///
+/// 后半部分曾经不存在 —— 那时会话不是一等公民，改名与删除都做不了。
+/// 补上它的**不是**往 `episodes` 里塞控制记录（那等于在 L0 原始层开一条
+/// 控制通道，代价是抽取、召回、同步、三端 UI 每一处都要学会跳过它），
+/// 而是一张独立的事件表。见 `migrations/20260807000002_session_events.sql`。
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct SessionDigest {
     pub session_id: String,
@@ -126,10 +129,16 @@ pub struct SessionDigest {
     pub started_at: DateTime<Utc>,
     /// 最后一条消息的发生时间 —— 列表排序用它
     pub updated_at: DateTime<Utc>,
-    /// 首条**用户**消息的正文。标题由它派生，截断长度是展示决策，留给上层。
+    /// 首条**用户**消息的正文。派生标题由它来，截断长度是展示决策，留给上层。
     pub first_user_text: Option<String>,
     /// 最后一条有正文的消息，供列表做预览。
     pub last_text: Option<String>,
+    /// 用户设置的标题。`None` = 从未改名，上层回落到从 `first_user_text` 派生。
+    pub title: Option<String>,
+    /// 已归档 —— 从默认列表隐藏，但消息与派生记忆一概没动。
+    pub archived: bool,
+    /// 绑定的本机目录。`None` = 纯聊天会话，文件工具不进模型的工具目录。
+    pub workspace: Option<String>,
 }
 
 impl Store {
@@ -142,32 +151,117 @@ impl Store {
     /// 不见了 —— 用户看到的是「我的历史丢了」，而日志里一切正常。
     /// 归纳交给数据库，`limit` 才真正作用在**会话**上而不是消息上。
     ///
-    /// # 关于会话重命名与删除
+    /// # 为什么归档过滤在 SQL 里而不是取回来再 filter
     ///
-    /// 都做不了，且刻意不绕。重命名要存一份用户给的标题，删除要存一个状态，
-    /// 两者都需要一张表；用「往 `episodes` 里塞一条特殊记录」来模拟，等于在
-    /// L0 原始层里开一条控制通道，而 L0 的契约是「原始消息无损保存」——
-    /// 此后抽取、四路召回、同步下发、三端 UI 每一处都要学会认出并跳过它，
-    /// 一次 migration 的代价被摊成了永久的复杂度。见 `docs/memory.md` §四。
-    pub async fn session_digests(&self, limit: i64) -> Result<Vec<SessionDigest>> {
+    /// 和上面是同一个坑的另一面：先取 `limit` 条再在内存里丢掉归档的，
+    /// 归档会话就会**占用配额**——归档二十个会话，列表里能看见的就少二十个。
+    /// 过滤必须发生在 `LIMIT` 之前。
+    ///
+    /// # 只列出有消息的会话
+    ///
+    /// 聚合的起点是 `episodes`，所以一个「只写过 session_events、还没发过
+    /// 消息」的会话不会出现在这里。这是有意的：它没有时间、没有条数、没有预览，
+    /// 列出来只是一行空白。用户新建会话后先选工作区再发第一句，这段时间里
+    /// 那个会话由客户端本地持有 —— 第一条消息一落库它就自动出现，
+    /// 而此前写下的改名 / 绑定事件会原样生效（末态与写入顺序无关）。
+    pub async fn session_digests(
+        &self,
+        limit: i64,
+        include_archived: bool,
+    ) -> Result<Vec<SessionDigest>> {
         let rows = sqlx::query_as::<_, SessionDigest>(
-            "SELECT e.session_id,
-                    count(*)            AS message_count,
-                    min(e.occurred_at)  AS started_at,
-                    max(e.occurred_at)  AS updated_at,
-                    (SELECT u.text FROM episodes u
-                      WHERE u.session_id = e.session_id
-                        AND u.role = 'user' AND u.text IS NOT NULL
-                      ORDER BY u.occurred_at ASC, u.id ASC LIMIT 1)  AS first_user_text,
-                    (SELECT l.text FROM episodes l
-                      WHERE l.session_id = e.session_id AND l.text IS NOT NULL
-                      ORDER BY l.occurred_at DESC, l.id DESC LIMIT 1) AS last_text
-               FROM episodes e
-              GROUP BY e.session_id
-              ORDER BY max(e.occurred_at) DESC, e.session_id DESC
+            // 先聚合再 JOIN 视图：反过来的话 session_state 会被每一条 episode
+            // 拖着算一遍，而它自己内部已经有三次 DISTINCT ON 了
+            "SELECT d.session_id, d.message_count, d.started_at, d.updated_at,
+                    d.first_user_text, d.last_text,
+                    s.title,
+                    coalesce(s.archived, false) AS archived,
+                    s.workspace
+               FROM (
+                    SELECT e.session_id,
+                           count(*)            AS message_count,
+                           min(e.occurred_at)  AS started_at,
+                           max(e.occurred_at)  AS updated_at,
+                           (SELECT u.text FROM episodes u
+                             WHERE u.session_id = e.session_id
+                               AND u.role = 'user' AND u.text IS NOT NULL
+                             ORDER BY u.occurred_at ASC, u.id ASC LIMIT 1)  AS first_user_text,
+                           (SELECT l.text FROM episodes l
+                             WHERE l.session_id = e.session_id AND l.text IS NOT NULL
+                             ORDER BY l.occurred_at DESC, l.id DESC LIMIT 1) AS last_text
+                      FROM episodes e
+                     GROUP BY e.session_id
+               ) d
+               LEFT JOIN session_state s ON s.session_id = d.session_id
+              WHERE $2 OR NOT coalesce(s.archived, false)
+              ORDER BY d.updated_at DESC, d.session_id DESC
               LIMIT $1",
         )
         .bind(limit)
+        .bind(include_archived)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 单个会话的概览。**不过滤归档** —— 调用方是按 id 明确要这一个，
+    /// 归档与否是它要看的信息之一，而不是该被藏起来的理由。
+    ///
+    /// 返回 `None` 表示这个会话一条消息都没有（可能只写过生命周期事件）。
+    pub async fn session_digest(&self, session_id: &str) -> Result<Option<SessionDigest>> {
+        let row = sqlx::query_as::<_, SessionDigest>(
+            "SELECT d.session_id, d.message_count, d.started_at, d.updated_at,
+                    d.first_user_text, d.last_text,
+                    s.title,
+                    coalesce(s.archived, false) AS archived,
+                    s.workspace
+               FROM (
+                    SELECT e.session_id,
+                           count(*)            AS message_count,
+                           min(e.occurred_at)  AS started_at,
+                           max(e.occurred_at)  AS updated_at,
+                           (SELECT u.text FROM episodes u
+                             WHERE u.session_id = e.session_id
+                               AND u.role = 'user' AND u.text IS NOT NULL
+                             ORDER BY u.occurred_at ASC, u.id ASC LIMIT 1)  AS first_user_text,
+                           (SELECT l.text FROM episodes l
+                             WHERE l.session_id = e.session_id AND l.text IS NOT NULL
+                             ORDER BY l.occurred_at DESC, l.id DESC LIMIT 1) AS last_text
+                      FROM episodes e
+                     WHERE e.session_id = $1
+                     GROUP BY e.session_id
+               ) d
+               LEFT JOIN session_state s ON s.session_id = d.session_id",
+        )
+        .bind(session_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row)
+    }
+
+    /// 一个会话三个维度各自的末态。
+    ///
+    /// 返回 `None` 表示这个会话从未有过任何生命周期事件 —— 没改过名、
+    /// 没归档、没绑工作区。调用方按「全默认」处理即可，不是错误。
+    pub async fn session_state(&self, session_id: &str) -> Result<Option<SessionState>> {
+        let row = sqlx::query_as::<_, SessionState>(
+            "SELECT session_id, title, archived, workspace, decided_at
+               FROM session_state WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row)
+    }
+
+    /// 一个会话的全部生命周期事件，升序。界面的「它是怎么变的」。
+    pub async fn session_events(&self, session_id: &str) -> Result<Vec<SessionEvent>> {
+        let rows = sqlx::query_as::<_, SessionEvent>(
+            "SELECT id, session_id, op, title, workspace, actor, device_id, created_at
+               FROM session_events WHERE session_id = $1
+              ORDER BY created_at ASC, id ASC",
+        )
+        .bind(session_id)
         .fetch_all(self.pool())
         .await?;
         Ok(rows)

@@ -10,6 +10,7 @@ mod routes;
 mod state;
 mod sync_notify;
 mod sync_payload;
+mod workspace;
 mod ws;
 
 use anyhow::Context as _;

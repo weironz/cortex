@@ -44,11 +44,29 @@ const SYSTEM_PROMPT: &str = "你是 Cortex，一个具备长期记忆的助手�
 回答简洁准确。如果引用了检索到的记忆，请带上它的 [id]。\
 需要读写文件或查历史记忆时，直接调用相应工具，不要凭空猜测内容。";
 
-/// 沙箱根目录的环境变量。
+/// 缺省沙箱根目录的环境变量。
 ///
-/// 缺省用 cortexd 的进程工作目录。**绝不从请求体或模型参数里取** ——
-/// 那等于把路径围栏的钥匙交给被围栏防着的人。
+/// 只在会话**未绑定**工作区时兜底 —— 而那种会话的工具目录里根本没有文件
+/// 工具，这个根形同虚设。绑定了的会话用它自己那一个（见 [`Live::turn_for`]）。
+///
+/// # 注意这与「路径由客户端指定」并不矛盾
+///
+/// 沙箱**根**仍然绝不从模型参数里取 —— 那是模型每次调用工具时都能操纵的东西。
+/// 工作区路径来自用户在界面上的一次显式选择，且经过
+/// [`crate::workspace::validate`] 的实打实校验（存在、是目录、不是系统目录、
+/// 符号链接解析后再判定）。区别是「谁在什么时候说的」：一个是被围栏防着的人
+/// 在运行时说，一个是围栏的主人在绑定时说。
 const WORKSPACE_ENV: &str = "CORTEX_WORKSPACE";
+
+/// 与工作区无关的工具 —— 未绑定工作区的会话只给这些。
+///
+/// # 为什么是白名单而不是「排除掉文件工具」
+///
+/// 两种写法今天等价，明天不等价：`cortex-agent` 迟早会加 `shell_exec`
+/// 之类的工具。黑名单漏掉新工具 = 它悄悄出现在纯聊天会话里，
+/// 那是安全回退；白名单漏掉新工具 = 纯聊天会话少一个能力，
+/// 那是功能缺口。**失败方向不同，选会往安全那边倒的那个。**
+const WORKSPACE_FREE_TOOLS: &[&str] = &["memory_search"];
 
 /// 工具调用轮次上限的环境变量。缺省见 [`cortex_agent::DEFAULT_MAX_ROUNDS`]。
 ///
@@ -74,9 +92,23 @@ pub struct Live {
     llm: LlmClient,
     retriever: Retriever<SharedEmbedder>,
     extractor: Arc<Extractor>,
-    turn: Turn,
+    /// 未绑定工作区的会话用它 —— 工具目录里只有 [`WORKSPACE_FREE_TOOLS`]。
+    ///
+    /// 建一次留着复用：这是绝大多数会话走的路，没必要每轮重建。
+    /// 绑定了工作区的会话每轮现建一个（沙箱根是会话属性，不是进程属性）。
+    chat_turn: Turn,
+    /// 现建带工作区的 [`Turn`] 时要用
+    max_rounds: usize,
     device_id: String,
     context_window: usize,
+}
+
+/// 纯聊天会话的工具目录。
+fn chat_only_specs() -> Vec<cortex_agent::ToolSpec> {
+    cortex_agent::tools::builtin_specs()
+        .into_iter()
+        .filter(|s| WORKSPACE_FREE_TOOLS.contains(&s.name))
+        .collect()
 }
 
 impl Live {
@@ -108,11 +140,14 @@ impl Live {
             })?,
             Err(_) => cortex_agent::DEFAULT_MAX_ROUNDS,
         };
-        let turn = Turn::new(&workspace)?.with_max_rounds(max_rounds);
+        let chat_turn = Turn::new(&workspace)?
+            .with_max_rounds(max_rounds)
+            .with_specs(chat_only_specs());
         tracing::info!(
-            root = %turn.sandbox_root().display(),
+            fallback_root = %chat_turn.sandbox_root().display(),
             max_rounds,
-            "agent 沙箱根与轮次上限"
+            chat_only_tools = ?WORKSPACE_FREE_TOOLS,
+            "未绑定工作区的会话只给这些工具"
         );
 
         Ok(Self {
@@ -122,12 +157,19 @@ impl Live {
                 embedder,
                 config.device_id.clone(),
             )),
-            turn,
+            chat_turn,
+            max_rounds,
             store,
             llm,
             device_id: config.device_id.clone(),
             context_window,
         })
+    }
+
+    /// 给一个绑定了工作区的会话现建一个 [`Turn`]：沙箱根是该目录，
+    /// 工具目录是完整的内置目录（文件工具就是在这里出现的）。
+    fn workspace_turn(&self, workspace: &str) -> Result<Turn> {
+        Ok(Turn::new(workspace)?.with_max_rounds(self.max_rounds))
     }
 
     pub async fn database_status(&self) -> String {
@@ -238,13 +280,143 @@ impl Live {
         ))
     }
 
-    pub async fn list_sessions(&self) -> Result<Vec<SessionDto>> {
+    pub async fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionDto>> {
         let digests = self
             .store
-            .session_digests(SESSION_LIST_LIMIT)
+            .session_digests(SESSION_LIST_LIMIT, include_archived)
             .await
             .map_err(store_err)?;
         Ok(digests.into_iter().map(session_dto).collect())
+    }
+
+    /// 改名 / 归档 / 绑定工作区。
+    ///
+    /// # 为什么不要求会话已经有消息
+    ///
+    /// 用户新建会话 → 选工作区 → 发第一句，这是最自然的顺序。若在这里
+    /// 因为「查不到这个会话」返回 404，那个顺序就走不通，客户端只好倒过来
+    /// 强迫用户先说一句话。事件表本来就不依赖 episodes 存在，允许它即可 ——
+    /// 末态与写入顺序无关，消息一到会话就带着标题和工作区出现在列表里。
+    ///
+    /// # 为什么全部改动进同一个写事务
+    ///
+    /// 「改名 + 归档」若分两个事务，别的设备会先拉到「改完名但还没归档」
+    /// 那个中间态，列表上闪一下。同事务下它们在 `sync_log` 里连号到达。
+    pub async fn patch_session(&self, session_id: &str, patch: SessionPatch) -> Result<SessionDto> {
+        let mut events: Vec<cortex_store::NewSessionEvent> = Vec::new();
+
+        if let Some(raw) = patch.title.as_deref() {
+            let title = raw.trim();
+            if title.is_empty() {
+                return Err(CortexError::Invalid(
+                    "标题不能为空白；本版不支持「恢复自动标题」，请给一个非空标题".into(),
+                ));
+            }
+            if title.chars().count() > cortex_store::SESSION_TITLE_MAX_CHARS {
+                return Err(CortexError::Invalid(format!(
+                    "标题过长（上限 {} 字符）",
+                    cortex_store::SESSION_TITLE_MAX_CHARS
+                )));
+            }
+            events.push(cortex_store::NewSessionEvent::rename(
+                session_id,
+                title,
+                cortex_store::Actor::User,
+                &self.device_id,
+            ));
+        }
+
+        if let Some(archived) = patch.archived {
+            events.push(if archived {
+                cortex_store::NewSessionEvent::archive(
+                    session_id,
+                    cortex_store::Actor::User,
+                    &self.device_id,
+                )
+            } else {
+                cortex_store::NewSessionEvent::unarchive(
+                    session_id,
+                    cortex_store::Actor::User,
+                    &self.device_id,
+                )
+            });
+        }
+
+        // 校验必须在进事务**之前**：写事务持着 advisory lock，
+        // 而 canonicalize 要打文件系统的往返（网络盘上能到几十毫秒）。
+        // 取号事务短小纯写，这是 cortex-store::txn 的纪律三。
+        if let Some(ws) = &patch.workspace {
+            events.push(match ws {
+                Some(raw) => {
+                    let path = crate::workspace::validate(raw)?;
+                    cortex_store::NewSessionEvent::bind_workspace(
+                        session_id,
+                        &path,
+                        cortex_store::Actor::User,
+                        &self.device_id,
+                    )
+                }
+                None => cortex_store::NewSessionEvent::unbind_workspace(
+                    session_id,
+                    cortex_store::Actor::User,
+                    &self.device_id,
+                ),
+            });
+        }
+
+        if events.is_empty() {
+            return Err(CortexError::Invalid(
+                "请求体里没有任何要改的字段（title / archived / workspace）".into(),
+            ));
+        }
+
+        self.store
+            .write_txn(async |t| {
+                let mut last = 0;
+                for e in &events {
+                    last = t.insert_session_event(e).await?;
+                }
+                Ok(last)
+            })
+            .await
+            .map_err(store_err)?;
+
+        self.session_overview(session_id).await
+    }
+
+    /// 会话概览。没有消息时仍然返回一条 —— PATCH 之后客户端要拿回末态，
+    /// 而此刻会话很可能一条消息都还没有。
+    async fn session_overview(&self, session_id: &str) -> Result<SessionDto> {
+        // 有消息时聚合查询已经顺带把标题 / 归档 / 工作区一起带回来了
+        if let Some(d) = self
+            .store
+            .session_digest(session_id)
+            .await
+            .map_err(store_err)?
+        {
+            return Ok(session_dto(d));
+        }
+
+        // 没有消息 —— 用事件末态拼一条空壳。这条路正是「先选工作区、
+        // 再发第一句话」那个顺序要求的
+        let state = self
+            .store
+            .session_state(session_id)
+            .await
+            .map_err(store_err)?;
+        let now = Utc::now().to_rfc3339();
+        let title = state.as_ref().and_then(|s| s.title.clone());
+        Ok(SessionDto {
+            id: session_id.to_string(),
+            title_is_custom: title.is_some(),
+            title: title.unwrap_or_else(|| session_title(None)),
+            created_at: now.clone(),
+            updated_at: now,
+            message_count: 0,
+            preview: None,
+            archived: state.as_ref().is_some_and(|s| s.archived),
+            workspace: state.and_then(|s| s.workspace),
+        })
     }
 
     /// 一个会话的全部消息，附件一并挂上。
@@ -280,18 +452,28 @@ impl Live {
                 .push(attachment_of(l));
         }
 
-        // episodes_by_session 是升序，因此首条用户消息就是标题的来源
+        // 标题 / 归档 / 工作区算不出来，只能查 —— 它们不在消息里
+        let state = self
+            .store
+            .session_state(session_id)
+            .await
+            .map_err(store_err)?;
+        // episodes_by_session 是升序，因此首条用户消息就是派生标题的来源
         let first_user_text = episodes
             .iter()
             .find(|e| e.role == Role::User)
             .and_then(|e| e.text.clone());
+        let custom_title = state.as_ref().and_then(|s| s.title.clone());
         let session = SessionDto {
             id: session_id.to_string(),
-            title: session_title(first_user_text.as_deref()),
+            title_is_custom: custom_title.is_some(),
+            title: custom_title.unwrap_or_else(|| session_title(first_user_text.as_deref())),
             created_at: episodes[0].occurred_at.to_rfc3339(),
             updated_at: episodes[episodes.len() - 1].occurred_at.to_rfc3339(),
             message_count: episodes.len() as i64,
             preview: episodes.iter().rev().find_map(|e| e.text.clone()),
+            archived: state.as_ref().is_some_and(|s| s.archived),
+            workspace: state.and_then(|s| s.workspace),
         };
 
         Ok(SessionDetail {
@@ -559,9 +741,34 @@ async fn run_turn(live: Arc<Live>, req: ChatRequest, tx: &mpsc::Sender<ChatEvent
         }
     });
 
+    // 工具目录按**会话**决定，不是按进程。未绑定工作区 = 纯聊天，
+    // 文件工具压根不进发给模型的 schema
+    let bound = live
+        .store
+        .session_state(&req.session_id)
+        .await
+        .map_err(store_err)?
+        .and_then(|s| s.workspace);
+    let workspace_turn = bound.as_deref().and_then(|ws| {
+        // 绑定时校验过，但目录可能之后被删了 / 移了 / 换了外接盘。
+        // 此时降级成纯聊天而不是让整轮对话失败 —— 用户只是想说句话，
+        // 不该因为一个他早就忘了的绑定而收到 500
+        live.workspace_turn(ws)
+            .inspect_err(|e| {
+                tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
+            })
+            .ok()
+    });
+    let turn = workspace_turn.as_ref().unwrap_or(&live.chat_turn);
+    tracing::debug!(
+        session = %req.session_id,
+        workspace = ?bound,
+        tools = ?turn.tool_names(),
+        "本轮的工具目录"
+    );
+
     let mut messages = vec![cortex_llm::Message::user().with_text(&user_content)];
-    let outcome = live
-        .turn
+    let outcome = turn
         .run(llm, SYSTEM_PROMPT, &mut messages, &*live, &atx)
         .await;
     drop(atx);
@@ -691,11 +898,18 @@ fn attachment_of(l: cortex_store::EpisodeBlob) -> AttachmentRef {
 fn session_dto(d: cortex_store::SessionDigest) -> SessionDto {
     SessionDto {
         id: d.session_id,
-        title: session_title(d.first_user_text.as_deref()),
+        title_is_custom: d.title.is_some(),
+        // 用户起过名就用他起的，否则从首条用户消息派生。
+        // 顺序不能反 —— 反了就是「用户改了名，刷新一下又变回去了」
+        title: d
+            .title
+            .unwrap_or_else(|| session_title(d.first_user_text.as_deref())),
         created_at: d.started_at.to_rfc3339(),
         updated_at: d.updated_at.to_rfc3339(),
         message_count: d.message_count,
         preview: d.last_text,
+        archived: d.archived,
+        workspace: d.workspace,
     }
 }
 
@@ -803,6 +1017,75 @@ mod tests {
             Some("image"),
             "保留的应当是第一次出现的那一条，连同它的 kind"
         );
+    }
+
+    /// 未绑定工作区 = 文件工具**不出现在发给模型的目录里**。
+    ///
+    /// 「出现了但调用会失败」是不够的：模型会换着参数试上几轮才放弃，
+    /// 用户看到一串莫名其妙的工具调用事件，还白烧几次模型调用。
+    #[test]
+    fn an_unbound_session_gets_no_file_tools() {
+        let dir = tempfile::tempdir().expect("应能建临时目录");
+        let chat = Turn::new(dir.path())
+            .expect("临时目录应当是合法沙箱根")
+            .with_specs(chat_only_specs());
+
+        let names = chat.tool_names();
+        assert_eq!(
+            names,
+            vec!["memory_search"],
+            "纯聊天会话的工具目录里只该有与工作区无关的工具，实际：{names:?}"
+        );
+        for forbidden in ["read_file", "write_file", "list_dir"] {
+            assert!(
+                !names.contains(&forbidden),
+                "{forbidden} 不该出现在纯聊天会话里：{names:?}"
+            );
+        }
+    }
+
+    /// 绑定工作区后文件工具出现，且沙箱根就是那个目录。
+    #[test]
+    fn a_bound_session_gets_the_file_tools_rooted_at_the_workspace() {
+        let dir = tempfile::tempdir().expect("应能建临时目录");
+        let bound = Turn::new(dir.path()).expect("临时目录应当是合法沙箱根");
+
+        let names = bound.tool_names();
+        for expected in ["read_file", "write_file", "list_dir", "memory_search"] {
+            assert!(
+                names.contains(&expected),
+                "绑定工作区后 {expected} 应当出现在工具目录里：{names:?}"
+            );
+        }
+        assert_eq!(
+            bound.sandbox_root(),
+            dir.path().canonicalize().expect("应能规范化"),
+            "沙箱根必须是绑定的那个目录，而不是进程工作目录"
+        );
+    }
+
+    /// 白名单必须真的是白名单：新加的内置工具默认**不进**纯聊天会话。
+    ///
+    /// 反过来（黑名单）的失败方向是「新工具悄悄出现在纯聊天会话里」，
+    /// 那是安全回退；这个测试把方向钉死。
+    #[test]
+    fn the_chat_only_catalog_is_an_allowlist() {
+        let all: Vec<&str> = cortex_agent::tools::builtin_specs()
+            .iter()
+            .map(|s| s.name)
+            .collect();
+        let chat: Vec<&str> = chat_only_specs().iter().map(|s| s.name).collect();
+
+        assert!(
+            chat.len() < all.len(),
+            "纯聊天目录必须是内置目录的真子集，否则这层过滤等于没做"
+        );
+        for name in &chat {
+            assert!(
+                WORKSPACE_FREE_TOOLS.contains(name),
+                "{name} 不在白名单里却进了纯聊天目录"
+            );
+        }
     }
 
     #[test]

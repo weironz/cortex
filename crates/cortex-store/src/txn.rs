@@ -26,7 +26,7 @@ use sqlx::{PgPool, Postgres, postgres::PgArguments, query::Query};
 use crate::error::Result;
 use crate::model::{
     NewBlob, NewBlobTranscript, NewEntity, NewEntityMerge, NewEpisode, NewEpisodeBlob, NewFact,
-    NewFactEvent, NewRedaction, NewSummary, table,
+    NewFactEvent, NewRedaction, NewSessionEvent, NewSummary, table,
 };
 
 /// 同步取号锁的 advisory lock key。
@@ -328,6 +328,33 @@ impl WriteTxn {
         .bind(&new.device_id);
 
         self.insert_row(table::SUMMARIES, &id, stmt).await
+    }
+
+    // ── 会话生命周期 ───────────────────────────────────────
+
+    /// 追加一条会话生命周期事件（改名 / 归档 / 绑定工作区）。
+    ///
+    /// 和 [`Self::insert_fact_event`] 一样是追加而非就地改：会话的末态由
+    /// 每个维度最后一条事件决定（`session_state` 视图）。这不只是为了守
+    /// append-only —— 它让多端并发改名有确定结果：按 `sync_log` 全序回放，
+    /// 每台设备算出的标题都一样，而 UPDATE 语义下后到的写会盖掉先到的，
+    /// 两台设备各自「后到」，最终收敛到哪个取决于网络抖动。
+    pub async fn insert_session_event(&mut self, new: &NewSessionEvent) -> Result<i64> {
+        let id = new.id.to_string();
+        let stmt = sqlx::query(
+            "INSERT INTO session_events
+                 (id, session_id, op, title, workspace, actor, device_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&id)
+        .bind(&new.session_id)
+        .bind(new.op)
+        .bind(&new.title)
+        .bind(&new.workspace)
+        .bind(new.actor)
+        .bind(&new.device_id);
+
+        self.insert_row(table::SESSION_EVENTS, &id, stmt).await
     }
 
     // ── 抹除墓碑 ───────────────────────────────────────────
