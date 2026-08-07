@@ -36,6 +36,7 @@
 | google agents-cli | `google/agents-cli` | — | 5,493 | Apache-2.0 | 2026-08-04 |
 | mistral-vibe | `mistralai/mistral-vibe` | Python | 4,800 | Apache-2.0 | 2026-08-05 |
 | **moltis** | `moltis-org/moltis` | **Rust** | 2,809 | MIT | 2026-08-04 |
+| **Amp** | 闭源 SaaS（`ampcode.com`） | — | — | 专有 | — |
 
 #### pi — `earendil-works/pi` ⭐ 最大遗漏
 
@@ -54,6 +55,46 @@ AgentScope 出品，Apache-2.0，通用个人助理（**非编码 Agent**）。v
 这正是 Cortex "永不丢失 + 按需召回" 的同一思路。其他相关特性：自演化个人知识库、Scroll Context、Agent OS 架构、协议中立的 MCP/A2A/ACP 连接层、三支柱治理模型（Resources / Governance / Sandbox）。
 
 **这是目前发现的与 Cortex 定位最接近的项目，必须深入研究。**
+
+#### Amp — `ampcode.com`（闭源，无仓库）⭐⭐ 「会话是团队资产」的同路人
+
+Sourcegraph 出品，闭源 SaaS（无公开仓库，`ampcode.com`）。IDE 无关 ——
+刻意**不 fork VS Code**，以扩展形态跑在 VS Code / Cursor / Windsurf / VSCodium 上，
+另有 CLI。
+
+**它与 Cortex 在同一个判断上：会话不是消耗品。**
+
+> Thread 持久化到 `ampcode.com/threads`，跨设备续；可公开分享、可给团队、可私有。
+> 分享出去的是**完整推理链 + 工具调用 + 文件编辑**，队友能看到 agent 究竟怎么得出那个结论。
+>
+> Sourcegraph 员工的说法：与 Cursor 的 ephemeral chats 不同，Amp 的 thread 是**永久团队资产**。
+
+项目级上下文用 `AGENT.md`（等价于 `CLAUDE.md`）。检索靠**关键词 + 字段过滤**，
+不建向量索引 —— 与母公司 Sourcegraph **2024-02 公开弃用 embeddings** 那次复盘一脉相承
+（见 [memory-content.md §一.3](memory-content.md)）。
+
+**三处本质差别：**
+
+| | Amp | Cortex |
+|---|---|---|
+| 存什么 | thread 原样归档 | 抽取出的**事实** |
+| 何时提炼 | 引用旧 thread 时**现场**抽（lazy distillation） | 写入时就提炼，四路召回 + RRF |
+| 时间语义 | 无 | **双时间轴** |
+| 数据归属 | Sourcegraph 服务器 | **自托管** |
+
+第三行是那轮 58 个系统调研的共同结论：**没有任何一家编码 agent 能回答
+「这条事实在何时为真」**。
+
+第四行不是差别，是**定位**。对 Amp 最主要的公开批评正是这条 —— 有评论者主张改成
+local-first（thread 放进项目目录的 `.threads`），这样团队能像管代码一样版本化、
+丢弃、gitignore、审计，**对受监管或高信任要求的团队尤其要紧**。
+而其免费档的代价是非编码场景插广告 + 数据与 Sourcegraph 平台共享。
+
+**我们没有的能力**：多模型路由（按任务类型自动派给不同模型）。那不是记忆层的事，
+但值得记一笔。
+
+> 数字与路由细节来自独立博客（称 2026 年初超 4 万团队采用），**未经官方证实**，
+> 可信度低于本文档里的 GitHub 数据。
 
 #### DeepSeek-Reasonix — `esengine/DeepSeek-Reasonix`
 
@@ -108,6 +149,16 @@ FSL 明确禁止 **competing use**（竞品用途）。Cortex 属于同类 Agent
 产品本体以 npm 包 `@anthropic-ai/claude-code` 分发，运行于 Node.js 18+，产物为打包后的 JS。源码闭源。
 
 - 仅作**产品形态和交互设计**的参考。
+
+### ⛔ Amp —— 闭源 SaaS，没有仓库
+
+`ampcode.com`，Sourcegraph 出品。**没有公开源码仓库**，本文档里关于它的一切
+都来自官方页面、官方 examples 仓库与第三方评测。
+
+- 仅作**产品形态与记忆理念**的参考。
+- ⚠️ 别把它和母公司混：Sourcegraph **2024-02 公开弃用 embeddings** 那次复盘，
+  是我们「代码库不进记忆」判据的两根支柱之一（见 [memory-content.md](memory-content.md) §一.3）。
+  那条结论引的是 Sourcegraph 的**工程博客**，不是 Amp 的代码。
 
 ---
 
@@ -257,5 +308,12 @@ Cortex 的差异化据点：
 - aider —— 明显放缓
 
 **推论：做一个"更好的编码 Agent"没有生存空间，必须提供他人没有的能力。**
+
+Amp 是这条推论的一个**正面例证**：它没有比别人更会写代码，
+它卖的是「thread 是永久团队资产、可分享完整推理链」——
+也就是把**会话本身**当成产品。这与 Cortex 的判断同源。
+
+差别在于它把那份资产放在自己的服务器上，而这恰是它挨批评的地方。
+**同一个洞察，两种归属选择** —— 我们选的是自托管那一条。
 
 （收购、关停等信息来自二手媒体报道，可信度低于本文档中的 GitHub 数据，引用前请自行核实。）
