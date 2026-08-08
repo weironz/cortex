@@ -72,13 +72,24 @@ pub const BGE_M3_SEMANTIC_FLOOR: f64 = 0.50;
 
 /// 该不该给这个向量空间装语义地板。
 ///
-/// 散列桩（`hash-stub-v1`）**不是语义空间**：它的「距离」只反映字符 bigram
-/// 的重合度，与相关性无关。给它套上 0.50 会让离线开发与无网 CI 的召回
-/// 直接清零，而且是静默的 —— 检索照常返回、只是永远返回空。
+/// 这是一张**白名单**，方向是刻意的。两种错法的代价不对称：
+///
+/// - 该装不装 → 噪声多进来一些，看得见、可调
+/// - 不该装却装了 → 召回**静默清零**，检索照常返回、只是永远返回空
+///
+/// 散列桩（`hash-stub-v1`）正是后者：它的「距离」只反映字符 bigram
+/// 的重合度，与相关性无关，套上 0.50 会让离线开发与无网 CI 全线归零。
+///
+/// # `api:` 前缀的注意事项
+///
+/// 走远端 `/v1/embeddings` 的后端写进库的是 `api:<模型名>`。它是真实语义
+/// 空间，所以装地板；**但 0.50 这个数是在 bge-m3-int8 上扫出来的**，
+/// 换成别的模型（text-embedding-v3、jina-v3……）时它什么也不是 ——
+/// 距离由模型定标。换模型要重扫 `evals/` 里那条曲线，
+/// 或者用 [`Retriever::with_semantic_floor`] 显式给一个。
 fn default_semantic_floor(model_id: &str) -> Option<f64> {
-    model_id
-        .starts_with("fastembed:")
-        .then_some(BGE_M3_SEMANTIC_FLOOR)
+    let semantic = model_id.starts_with("fastembed:") || model_id.starts_with("api:");
+    semantic.then_some(BGE_M3_SEMANTIC_FLOOR)
 }
 
 /// 图遍历取多少个种子实体。

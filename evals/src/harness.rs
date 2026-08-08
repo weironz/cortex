@@ -784,12 +784,17 @@ fn zip_items(out: cortex_memory::retrieval::Retrieved) -> Vec<ScoredItem> {
 
 /// 默认的向量化后端 —— **跟生产同一条选择逻辑**。
 ///
-/// 走 `Backend::from_env()`（`CORTEX_EMBED_BACKEND`，默认 `fast`），
+/// 走 `Backend::from_env()`（`CORTEX_EMBED_BACKEND`，默认 `api`），
 /// 而不是写死 `HashEmbedder`。写死过一版，代价是基线数字全都是在
 /// 「向量那一路只是第二条词法通道」的前提下测出来的 —— 换成真实语义模型后
 /// 逐路结论要整体推翻，白调了一轮参数。
 ///
 /// 设 `CORTEX_EMBED_BACKEND=hash` 可切回散列桩做对照（也是无网 CI 的走法）。
+///
+/// ⚠️ **基线是按具体模型标定的。** `scripts/evals-baseline.*.json` 里记着
+/// `embedding_model`，回归门会核对它 —— 换后端（哪怕是「同一个 bge-m3、
+/// 只是从进程内换成远端」）之后拿旧基线撞新分数是没有意义的，
+/// 那道核对存在的理由正是这个。
 ///
 /// # Errors
 ///

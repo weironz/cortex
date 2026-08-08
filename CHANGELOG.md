@@ -12,6 +12,46 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ## [未发布]
 
+### 向量化改成调远端 API，自建的那个跑在独立容器里
+
+**默认后端从「进程内 ONNX 推理」换成「调 OpenAI 兼容的 `/v1/embeddings`」。**
+compose 里多了一个 `embeddings` 服务（HuggingFace TEI + bge-m3），
+`CORTEX_EMBED_ENDPOINT` 指向它；想用云服务就把这个变量指到别处，
+自建与云是**同一个协议**。
+
+这不只是「轻一点」。原来 `fastembed`（内部 ONNX Runtime）是硬依赖，
+代价是三条：
+
+1. **Intel Mac 根本编不出来** —— `ort-sys: no prebuilt binaries available`。
+   这是**构建期**失败，连 `CORTEX_EMBED_BACKEND=hash` 都救不了。
+   0.1.0 发版时为此把 Intel Mac 从产物矩阵里删掉了
+2. **每台机器都要能拿到那 590 MB 权重**。第一次上生产时那台节点
+   Hugging Face 完全不可达（DNS 被污染、`hf-mirror.com` 也不通），
+   cortexd 于是**照常启动、`/health` 返回 `ok`**，只在日志里留一行
+   「回落到 mock 数据源」—— 记忆检索是假的，而没有任何红灯
+3. 冷启动 12 秒、常驻 1.0 GiB
+
+`fastembed` 现在是可选 feature `local-embed`，默认不编。
+要「一个进程搞定、不依赖任何外部服务」时自己带上它重编。
+
+**要注意的三件事：**
+
+- **模型必须是 1024 维**（schema 写死 `VECTOR(1024)`）。
+  bge-m3、阿里百炼 `text-embedding-v3`、`jina-embeddings-v3` 都可以；
+  OpenAI 的 `text-embedding-3-small` 是 1536、`large` 是 3072，
+  直接接会被 cortexd 在**第一次响应**就拒掉 —— 而不是留给 Postgres 的
+  约束去报一条看不懂的写失败
+- **自建那个服务比 cortexd 本身重得多**：bge-m3 是 5.68 亿参数，
+  fp32 权重 2.2 GB，TEI 载入后常驻 2.5–3 GB。**2 核 4 GB 的机器跑不动**，
+  那种机器请 `docker compose stop embeddings` 并把 endpoint 指到云
+- **换后端等于换向量空间**，哪怕「还是那个 bge-m3、只是从进程内换到远端」——
+  量化与池化实现并不逐位一致。所以库里写的 `embedding_model` 变成了
+  `api:<模型名>`，与旧的 `fastembed:...` 可分辨；
+  评测基线也按模型标定，回归门会核对它
+
+开发机上那个服务放在 `embed` profile 里，**`just up` 默认不起**：
+`docker compose --profile embed up -d`。
+
 ### 不再发裸二进制 —— 服务端只发 docker 镜像
 
 0.1.1 的下载页上有四个 `cortex-v0.1.1-<平台>.tar.gz` / `.zip`

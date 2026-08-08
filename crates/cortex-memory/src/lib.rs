@@ -18,6 +18,10 @@
 
 pub mod crosslink;
 pub mod embed;
+pub mod embed_api;
+/// 进程内 ONNX 推理后端。**默认不编** —— 见 [`embed_api`] 的模块注释。
+#[cfg(feature = "local-embed")]
+pub mod embed_local;
 pub mod extract;
 pub mod fusion;
 pub mod injection;

@@ -34,7 +34,8 @@
 
 use std::time::Instant;
 
-use cortex_memory::embed::{Embedder, FastEmbedder, FastEmbedderConfig, HashEmbedder};
+use cortex_memory::embed::{Embedder, HashEmbedder};
+use cortex_memory::embed_local::{FastEmbedder, FastEmbedderConfig};
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
@@ -46,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     println!("模型：{}", cfg.model.model_id());
     println!(
         "缓存目录：{:?}\n",
-        cortex_memory::embed::default_cache_dir()
+        cortex_memory::embed_local::default_cache_dir()
     );
 
     let t0 = Instant::now();

@@ -216,7 +216,7 @@ GitHub → Actions → Deploy → Run workflow → version = 0.1.0
    - 改写 `.env` 的 `CORTEX_VERSION`，`docker compose pull`
    - **跑 migration**（cortexd 不自动迁移）
    - `up -d --no-deps cortexd web` —— 点名服务，一次部署碰不到 postgres / rustfs
-   - 等 `cortex-cortexd` 转 healthy（窗口给到 10 分钟：首次要下 590 MB 模型）
+   - 等 `cortex-cortexd` 转 healthy（窗口给到 10 分钟）
    - 任何非零退出都由 `EXIT` trap 把 `CORTEX_VERSION` 还原并把上一版拉回来
 4. CI 校验节点跑的策略脚本指纹（比**默认分支**，不是被部署的 tag ——
    两者是独立的时间线，比错了会产生假警报，而**假警报会教人忽略警报**）

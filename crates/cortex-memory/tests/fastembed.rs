@@ -15,7 +15,8 @@
 //! 而不是一句「应该更好」。
 
 use cortex_memory::EMBEDDING_DIM;
-use cortex_memory::embed::{Embedder, FastEmbedder, FastEmbedderConfig, HashEmbedder};
+use cortex_memory::embed::{Embedder, HashEmbedder};
+use cortex_memory::embed_local::{FastEmbedder, FastEmbedderConfig};
 
 /// 单位向量的余弦相似度就是点积。
 fn cosine(a: &[f32], b: &[f32]) -> f32 {

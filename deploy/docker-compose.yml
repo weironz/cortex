@@ -118,6 +118,61 @@ services:
       traefik.http.routers.cortex-s3.tls.certresolver: letsencrypt
       traefik.http.services.cortex-s3.loadbalancer.server.port: "9000"
 
+  # ── embedding 服务 ────────────────────────────────────
+  #
+  # 把向量化从 cortexd 进程里搬出来，讲 OpenAI 的 `/v1/embeddings`。
+  # 这样「自建」与「用云服务」是**同一个协议**，切换只是改
+  # CORTEX_EMBED_ENDPOINT 一行。
+  #
+  # ⚠️ **它比 cortexd 本身重得多。** bge-m3 是 5.68 亿参数、fp32 权重
+  # 约 2.2 GB，TEI 载入后常驻大致在 2.5–3 GB。**2 核 4 GB 的小机器跑不动**
+  # （这个项目自己那台深圳节点就跑不动，它上面还有别的十几个容器）。
+  # 那种机器请把 embeddings 这个服务停掉，改指一家云：
+  #
+  #     docker compose stop embeddings
+  #     # .env 里：
+  #     CORTEX_EMBED_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1
+  #     CORTEX_EMBED_MODEL=text-embedding-v3
+  #     CORTEX_EMBED_API_KEY=sk-...
+  #
+  # **模型必须是 1024 维** —— schema 写死 `VECTOR(1024)`。
+  # OpenAI 的 text-embedding-3-small 是 1536、large 是 3072，直接接会被
+  # cortexd 在第一次响应就拒掉（错误信息里写了怎么办）。
+  #
+  # 不暴露到 traefik：它没有鉴权，只在 compose 内网里被 cortexd 调用。
+  embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    container_name: cortex-embeddings
+    restart: unless-stopped
+    logging: *default-logging
+    # 只进默认网络。**别加 traefik** —— TEI 不带任何鉴权，
+    # 暴露出去等于把一个免费的推理端点挂到公网上
+    command: >-
+      --model-id ${CORTEX_EMBED_SERVED_MODEL:-BAAI/bge-m3}
+      --port 80
+      --auto-truncate
+    environment:
+      # 权重从 Hugging Face 拉。国内节点上 HF 常常完全不可达
+      # （DNS 被污染、hf-mirror 也不通），那种情况下要么挂载预先下好的
+      # 权重目录（TEI 支持 --model-id 直接给本地路径），要么就别自建，
+      # 用上面那段的云服务方案
+      HF_HOME: /data
+    volumes:
+      - cortex-prod-embed-models:/data
+    healthcheck:
+      # TEI 的 /health 在权重载入完成前不通，正好当就绪探针。
+      # start_period 给到 5 分钟：第一次要下 2.2 GB
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:80/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 300s
+    deploy:
+      resources:
+        limits:
+          cpus: ${CORTEX_EMBED_CPU_LIMIT:-2}
+          memory: ${CORTEX_EMBED_MEM_LIMIT:-3g}
+
   # ── cortexd ───────────────────────────────────────────
   #
   # 镜像默认走阿里云 ACR：这台机器在国内，从 Docker Hub 拉要么慢要么
@@ -161,11 +216,20 @@ services:
       # 是不可挽回的错误方向
       CORTEX_CONFIRM_TIMEOUT_SECS: ${CORTEX_CONFIRM_TIMEOUT_SECS:-180}
 
-      # 向量后端。生产用真实语义模型；模型落在 models 卷里，
-      # 第一次启动会下 ~590 MB，之后重启不再下载
-      CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-fast}
-      CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-bge-m3-int8}
-      FASTEMBED_CACHE_DIR: /var/lib/cortex/models
+      # 向量后端。默认走上面那个 embeddings 服务；
+      # 换成任何一家 OpenAI 兼容的云只需要改这三行（改 .env，不用改这个文件）：
+      #
+      #   CORTEX_EMBED_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1
+      #   CORTEX_EMBED_MODEL=text-embedding-v3
+      #   CORTEX_EMBED_API_KEY=sk-...
+      #
+      # **模型必须是 1024 维**（schema 写死 VECTOR(1024)）。维度不符时
+      # cortexd 在第一次响应就报错并说明怎么办，不会静默写坏数据
+      CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-api}
+      CORTEX_EMBED_ENDPOINT: ${CORTEX_EMBED_ENDPOINT:-http://embeddings/v1/embeddings}
+      CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-bge-m3}
+      CORTEX_EMBED_API_KEY: ${CORTEX_EMBED_API_KEY:-}
+      CORTEX_EMBED_BATCH: ${CORTEX_EMBED_BATCH:-}
 
       # LLM 供应商。密钥只从环境来，绝不写进任何被 git 跟踪的文件。
       #
@@ -179,6 +243,9 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
+      # models 卷只有 CORTEX_EMBED_BACKEND=fast（feature `local-embed` 的
+      # 那种构建）才用得上。留着是因为它不占空间，而删掉会让
+      # 「从旧版本回滚」的人丢掉已经下好的权重
       - cortex-prod-models:/var/lib/cortex/models
       - cortex-prod-workspace:/var/lib/cortex/workspace
     deploy:
@@ -242,3 +309,6 @@ volumes:
   cortex-prod-rustfs:
   cortex-prod-models:
   cortex-prod-workspace:
+  # TEI 的权重缓存（约 2.2 GB）。与 cortex-prod-models 是两回事：
+  # 那个是 cortexd 进程内推理用的 ONNX 缓存，这个是 embeddings 容器的
+  cortex-prod-embed-models:

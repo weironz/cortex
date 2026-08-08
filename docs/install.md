@@ -134,9 +134,22 @@ curl -fsS http://127.0.0.1:8080/health
 | `auth` | `token` | `disabled` = 记忆库对任何能连上的人敞开 |
 | `status` | `ok` | —— 它**不**涵盖上面几条 |
 
-> **第一次启动要下 ~590 MB 的 embedding 模型**（BGE-M3 int8），
-> 容器要好几分钟才会转成 healthy。`docker compose logs -f cortexd` 看进度。
-> 模型落在 `cortex-prod-models` 卷里，只下这一次。
+> **向量化跑在一个单独的容器里**（`embeddings`，HuggingFace TEI + bge-m3）。
+> 它第一次启动要下 **2.2 GB** 权重，几分钟起步，`/health` 在下完之前不通。
+> `docker compose logs -f embeddings` 看进度；权重落在
+> `cortex-prod-embed-models` 卷里，只下这一次。
+>
+> ⚠️ **它是这套栈里最重的一个：常驻 2.5–3 GB。2 核 4 GB 的机器跑不动。**
+> 那种机器请 `docker compose stop embeddings`，然后在 `.env` 里指到一家
+> OpenAI 兼容的云（**模型必须是 1024 维**）：
+>
+> ```
+> CORTEX_EMBED_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1
+> CORTEX_EMBED_MODEL=text-embedding-v3
+> CORTEX_EMBED_API_KEY=sk-...
+> ```
+>
+> 详见 [operations.md](operations.md#向量化embedding跑在哪)。
 
 ---
 
@@ -348,7 +361,7 @@ Microsoft Defender SmartScreen 阻止了无法识别的应用启动。
 | cortexd 启动就退出，说「没有配置任何凭据」 | 正常行为。回到本文开头生成凭据 |
 | `/health` 里 `database` 不是 `ok`，但服务还在跑 | 连不上库时会回落 mock。查 `DATABASE_URL` |
 | `/health` 里 `auth` 是 `disabled` | `.env` 里有 `CORTEX_AUTH=disabled`，或摘要没读到 |
-| 容器很久不健康 | 在下 590 MB 模型，`docker compose logs -f cortexd` |
+| `embeddings` 很久不健康 | 在下 2.2 GB 权重，`docker compose logs -f embeddings` |
 | 客户端一直 401 | token 不是这台 cortexd 的那一份。重新 `--generate-token` 并两边同时换 |
 | macOS 说「无法打开，来自身份不明的开发者」 | 没有公证。见上文 `xattr -d` |
 | Windows 弹「已保护你的电脑」 | SmartScreen，没有代码签名。见 [D-2](#2-windows-会拦一次这是预期的)。先对校验和再决定 |

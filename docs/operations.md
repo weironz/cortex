@@ -89,17 +89,49 @@ just doctor      # 任何时候想确认环境状态
 改 `CORTEX_BACKUP_DIR` 之后要 `docker compose up -d postgres` 让 bind mount 生效，
 否则 `archive_command` 还写在旧路径上。
 
-### embedding 模型怎么下
+### 向量化（embedding）跑在哪
 
-不用手工下。第一次需要向量时 `fastembed` 自动从 HuggingFace 拉
-（BGE-M3 int8，约 590 MB），落到：
+**cortexd 自己不跑模型**，它调一个 OpenAI 兼容的 `/v1/embeddings`。
+自建与用云是同一个协议，切换只改 `CORTEX_EMBED_ENDPOINT`。
 
-- 开发机：`$LOCALAPPDATA/cortex/models`（Windows）或 `~/.cache/cortex/models`
-- 生产容器：`cortex_models` 卷，`FASTEMBED_CACHE_DIR=/var/lib/cortex/models`
+| `CORTEX_EMBED_BACKEND` | 跑在哪 | 什么时候用 |
+|---|---|---|
+| `api`（默认） | compose 里的 `embeddings` 服务，或任何一家云 | 生产与日常开发 |
+| `hash` | 无 | 离线开发与无网 CI。**不是语义空间** |
+| `fast` | cortexd 进程内（ONNX） | 要「一个进程搞定」时。需要 feature `local-embed` 编的二进制 |
 
-想换位置就设 `FASTEMBED_CACHE_DIR`。**离线环境**设 `CORTEX_EMBED_BACKEND=hash`
-可以完全不用模型跑起来 —— 但那不是语义空间，检索质量会明显下降，
-只适合开发与 CI（见 [第三节](#三检索回归门)）。
+**自建那个服务是这套栈里最重的一个。** bge-m3 是 5.68 亿参数、
+fp32 权重 2.2 GB，TEI 载入后常驻 2.5–3 GB，第一次启动要从 HuggingFace
+下那 2.2 GB（`/health` 在下完之前不通，正好当就绪探针）。
+**2 核 4 GB 的机器跑不动**，那种机器请：
+
+```bash
+docker compose stop embeddings
+```
+
+然后在 `.env` 里指到一家云（填基地址即可，`/v1/embeddings` 会自动补全）：
+
+```
+CORTEX_EMBED_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1
+CORTEX_EMBED_MODEL=text-embedding-v3
+CORTEX_EMBED_API_KEY=sk-...
+```
+
+> ★ **模型必须是 1024 维** —— schema 写死 `VECTOR(1024)`。
+> OpenAI 的 `text-embedding-3-small` 是 1536、`large` 是 3072，
+> 直接接会被 cortexd 在**第一次响应**就拒掉（错误信息里写了怎么办），
+> 而不是留给 Postgres 的约束去报一条看不懂的写失败。
+>
+> ★ **换后端 = 换向量空间**，哪怕「还是那个 bge-m3、只是从进程内换到远端」——
+> 量化与池化实现并不逐位一致。库里的 `embedding_model` 会从
+> `fastembed:...` 变成 `api:<模型名>`，评测基线也按模型标定
+> （见 [第三节](#三检索回归门)）。
+
+**HuggingFace 不可达的节点**（国内很常见：DNS 被污染、`hf-mirror.com`
+也不通）有两条路：把预先下好的权重挂进 `embeddings` 容器
+（TEI 的 `--model-id` 直接收本地路径），或者干脆别自建、用云。
+**别用 `hash` 凑合上生产** —— 它检索照常返回、只是质量烂得毫无道理，
+这种错要几周才会被发现。
 
 ### 数据库怎么初始化
 
@@ -870,7 +902,7 @@ CI 里没有 `DEEPSEEK_API_KEY`（也不该有：fork 的 PR 能读到它能读�
 
 | 方案 | 代价 | 测得到什么 | 结论 |
 |---|---|---|---|
-| 每次真下模型 | 590 MB，高峰期几分钟，**外部依赖** | 全部 | ❌ 会变成与代码无关的红灯 |
+| 每次真拉起 embeddings 服务 | 2.2 GB 权重，高峰期几分钟，**外部依赖** | 全部 | ❌ 会变成与代码无关的红灯 |
 | `actions/cache` 缓存模型 | 缓存命中 30–60 s；未命中要现下 | 全部 | ⚠️ 适合 main / 定时，不适合每个 PR |
 | `CORTEX_EMBED_BACKEND=hash` | 秒级，零外部依赖 | 除语义那一路之外的全部 | ✅ 适合 PR 快门 |
 
@@ -968,7 +1000,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 | 镜像目录只涨不落，占盘飙升 | 正常行为（无 `--delete`） | 要清理只能走 `--apply-purges`，由 `redactions` 表驱动 |
 | Git Bash 下 docker 命令报 `C:/Program Files/...` | MSYS 路径改写 | 脚本里已 `export MSYS_NO_PATHCONV=1`；手工敲命令时自己加 |
 | CI 检索门红了但本地是绿的 | 后端不一致 | 本地跑 `just evals-gate`（hash）而不是默认的 fast |
-| cortexd 容器起来很久不健康 | 在下 590 MB 模型 | `just prod-logs cortexd`；模型落在 `cortex_models` 卷，只下一次 |
+| `embeddings` 容器起来很久不健康 | 在下 2.2 GB 权重 | `just prod-logs embeddings`；权重落在 `cortex-prod-embed-models` 卷，只下一次 |
 
 ---
 

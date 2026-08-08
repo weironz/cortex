@@ -89,6 +89,51 @@ services:
       retries: 5
       start_period: 30s
 
+  # ─── embedding 服务（OpenAI 兼容 /v1/embeddings）────────
+  #
+  # 放在 `embed` profile 里，**默认不起**。理由：它是这套栈里最重的一个
+  # （bge-m3 fp32 权重 2.2 GB，常驻 2.5–3 GB），而 `just up` 应该是
+  # 「起个数据库就能开工」，不该在开发机上默默吃掉 3 GB。
+  #
+  #   docker compose --profile embed up -d     # 想在本地自建
+  #
+  # 不想自建就把 .env 指到任何一家 OpenAI 兼容的服务：
+  #
+  #   CORTEX_EMBED_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1
+  #   CORTEX_EMBED_MODEL=text-embedding-v3
+  #   CORTEX_EMBED_API_KEY=sk-...
+  #
+  # 两条路都不走的话，离线开发用 CORTEX_EMBED_BACKEND=hash ——
+  # 但要记住**它不是语义空间**，检索质量的评测结果在它上面没有意义。
+  #
+  # **模型必须是 1024 维**：schema 写死 VECTOR(1024)。
+  embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    container_name: cortex-embeddings
+    profiles: [embed]
+    restart: unless-stopped
+    command: >-
+      --model-id ${CORTEX_EMBED_SERVED_MODEL:-BAAI/bge-m3}
+      --port 80
+      --auto-truncate
+    environment:
+      HF_HOME: /data
+    ports:
+      # 开发时 cortexd 跑在宿主机上（不在 compose 里），所以要映出来。
+      # 对应 .env：CORTEX_EMBED_ENDPOINT=http://127.0.0.1:8090/v1/embeddings
+      - "${CORTEX_EMBED_PORT:-8090}:80"
+    volumes:
+      - embed_models:/data
+    healthcheck:
+      # 权重载入完成前 /health 不通，正好当就绪探针。
+      # start_period 给 5 分钟：第一次要下 2.2 GB
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:80/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 300s
+
 volumes:
   pg_data:
   rustfs_data:
+  embed_models:
