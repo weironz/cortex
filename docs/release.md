@@ -99,22 +99,31 @@ git push origin vX.Y.Z
 | 作业 | 产出 |
 |---|---|
 | `preflight` | 解析 tag、跑前置闸门。**其它作业全部 needs 它** |
+| `build` | 裸二进制。**自 0.1.2 起只有 Windows**，包含 cortexd + CLI + `cortex-local` |
 | `desktop` | Windows 桌面安装程序（Inno Setup）。**只有 Windows** —— macOS 的 Gatekeeper 是硬拒绝，不是警告 |
-| `web` | Flutter Web 静态产物（地址在设置面板里填） |
 | `image` ×2 | `cortexd` 与 `cortex-web`，各推 Docker Hub 与阿里云 ACR。**推完必须真的启动一次** |
-| `release` | 汇总 `SHA256SUMS`、清点产物是否齐、从 CHANGELOG 取这一版的段落、建 **draft** release |
+| `release` | 汇总 `SHA256SUMS`、清点产物是否齐、从 CHANGELOG 取这一版的段落、**直接发布** |
 
-> **`build`（裸二进制，四平台）自 0.1.2 起被停掉了。** 它占掉整条流水线
-> 绝大部分时间，而镜像里 cortexd 与 CLI 都在，能力没少。
-> 恢复方式与要同步改的三个地方写在 `release.yml` 里被删位置的注释上。
+> **Linux / macOS 裸二进制与 Flutter Web 静态包自 0.1.2 起停发。**
+> 它们占掉整条流水线绝大部分时间，而镜像里 cortexd 与 CLI 都在、
+> `cortex-web` 镜像照常构建 —— 能力没少。恢复方式与要同步改的三个地方
+> 写在 `release.yml` 里那两个被停掉的 job 的注释上。
 
-**draft 而不是直接 publish**：产物齐不齐、版本对不对，人看一眼再按发布。
-发布是不可逆的 —— 撤回改变不了「已经有人拉走了」。
+**直接发布，不留 draft。** 0.1.2 之前这里是 draft，理由是「人看一眼再按发布」——
+但那道确认在实践中是空的：流水线跑完就去点发布，没有人真的逐个下载核对。
 
-### 6. 检查 draft，然后 publish
+发布仍然不可逆（撤回改变不了「已经有人拉走了」），所以那份把关下沉成了
+**会跑的检查**：
 
-清点作业已经点名验过五个平台 + Web 都在。再看一眼 release notes 里
-「不能干什么」那段有没有被截断。
+| 检查 | 在哪 | 拦什么 |
+|---|---|---|
+| 版本一致 / CHANGELOG 有条目 / 无疑似凭据文件 | `release-preflight.sh` | 名字是错的产物、忘写变更日志 |
+| 每个二进制真跑一次 `--version` 并核对版本号 | `release-package.sh` | 编得过但跑不起来；**打包到陈旧产物** |
+| 真启动一次 GUI，几秒内没自己退出才算过 | `release-desktop-windows.sh` | 缺 MSVC 运行库（症状是双击之后什么都不发生） |
+| 产物清点 | `release` job | 少一个包而下载页上看不出来 |
+
+一道会跑的检查胜过一道没人做的确认。要退回 draft：`release.yml` 最后那个
+`draft: false` 改回 `true`。
 
 ---
 

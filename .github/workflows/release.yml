@@ -1,7 +1,7 @@
 name: Release
 
 # ══════════════════════════════════════════════════════════
-#  发布流水线 —— 打产物、推镜像、建 draft release。**不部署。**
+#  发布流水线 —— 打产物、推镜像、**直接发布** release。**不部署。**
 #  把某个版本放到线上是 deploy.yml 的事，而且只能由人手动触发。
 #
 #  触发：推 `v*` tag，或手动 workflow_dispatch（要填 tag）。
@@ -132,7 +132,9 @@ jobs:
       - name: 打包
         shell: bash
         run: |
-          bash scripts/release-package.sh             --target "${{ matrix.target }}"             --version "${{ needs.preflight.outputs.version }}"
+          bash scripts/release-package.sh \
+            --target "${{ matrix.target }}" \
+            --version "${{ needs.preflight.outputs.version }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -143,12 +145,6 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
 
-  # ══════════════════════════════════════════════════════════
-  #  Flutter Web 静态产物
-  #
-  #  不带 --dart-define：这一份是给「自己搭静态服务器」的人用的，
-  #  地址在设置面板里填。钉死域名的那一份在 cortex-web 镜像里。
-  # ══════════════════════════════════════════════════════════
   # ══════════════════════════════════════════════════════════
   #  ⛔ Flutter Web 静态产物 —— 自 0.1.2 起**暂停发布**
   #
@@ -318,13 +314,24 @@ jobs:
           fi
 
   # ══════════════════════════════════════════════════════════
-  #  汇总并建 draft release
+  #  汇总并**直接发布** release
   #
-  #  draft 而不是直接 publish：产物齐不齐、版本对不对，人看一眼再按发布。
-  #  发布是不可逆的 —— 撤回改变不了「已经有人拉走了」。
+  #  0.1.2 之前这里建的是 draft，理由是「产物齐不齐、版本对不对，人看一眼
+  #  再按发布」。改成直接发布，因为那道人工确认在实践中是空的 ——
+  #  流水线跑完就去点发布，没有人真的逐个下载核对。
+  #
+  #  发布仍然是不可逆的（撤回改变不了「已经有人拉走了」），所以把那份把关
+  #  下沉成了**自动的**：
+  #    * `preflight` —— 版本一致、CHANGELOG 有条目、没有疑似凭据文件
+  #    * `release-package.sh` —— 每个二进制真跑一次 --version 并核对版本号
+  #    * `release-desktop-windows.sh` —— 真启动一次 GUI，几秒内没自己退出才算过
+  #    * 下面的产物清点 —— 少一个当场红
+  #
+  #  一道会跑的检查胜过一道没人做的确认。要退回 draft 只需把最后那行
+  #  `draft:` 改回 true。
   # ══════════════════════════════════════════════════════════
   release:
-    name: 建 draft release
+    name: 发布 release
     needs: [preflight, build, desktop, image]
     runs-on: ubuntu-latest
     steps:
@@ -448,6 +455,8 @@ jobs:
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
           name: Cortex ${{ needs.preflight.outputs.tag }}
-          draft: true
+          # 直接发布，不留 draft。理由见上面这个 job 的注释：
+          # 把关下沉成了流水线里那四道会跑的检查
+          draft: false
           body_path: notes.md
           files: dist/*
