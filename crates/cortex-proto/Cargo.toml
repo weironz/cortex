@@ -10,6 +10,10 @@ description = "Cortex 客户端 ↔ 服务端的线协议：DTO 与工具确认�
 [dependencies]
 cortex-core.workspace = true
 cortex-agent.workspace = true
+# `/llm/stream` 直传 goose 的原生 Message / Tool / ProviderUsage（见 src/llm.rs：
+# 翻译成 OpenAI 形状会丢掉 prompt caching 与 thinking 块）。
+# goose 本来就在依赖树里（cortex-agent → cortex-llm），这里只是把边加上。
+cortex-llm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

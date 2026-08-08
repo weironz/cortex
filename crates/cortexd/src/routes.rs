@@ -23,6 +23,7 @@ use tokio_stream::StreamExt as _;
 use crate::blobs::{DIRECT_UPLOAD_LIMIT, RangeSpec, parse_range};
 use crate::dto::*;
 use crate::state::AppState;
+use cortex_proto::llm::{LlmStreamChunk, LlmStreamError, LlmStreamRequest};
 
 /// 声明全部受保护路由 —— **注册与清单出自同一份声明**。
 ///
@@ -79,6 +80,9 @@ protected_routes! {
     // 「结果一样」，而是明确的 404（凭据已被消费）。
     "/confirmations" [GET, POST] => get(list_confirmations).post(answer_confirmation),
     "/memory/search" [GET] => get(memory_search),
+    // LLM 代理。本地 agent 默认走这条路 —— API key 只在服务端一处，
+    // 多设备不用每台配一遍。它**不碰记忆、不写库**，纯转发
+    "/llm/stream" [POST] => post(llm_stream),
     "/episodes/{id}" [GET] => get(get_episode),
     "/sessions" [GET] => get(list_sessions),
     // PATCH 而非 PUT：客户端只送要改的字段，没送的原样不动。
@@ -218,6 +222,62 @@ async fn chat(
             .interval(Duration::from_secs(15))
             .text("ping"),
     )
+}
+
+// ───────────────────────── /llm/stream ─────────────────────────
+
+/// LLM 代理 —— 把一次流式调用原样转给供应商。
+///
+/// 本地 agent 默认走这条路：API key 只在服务端一处，多设备不用每台配一遍。
+/// 想换模型 / 换供应商 / 走自己的中转而不碰服务器的人，把本地那侧配成直连即可。
+///
+/// # 两类错误走的是两条路，这不是不一致
+///
+/// **建流之前**失败（mock 后端没有供应商、鉴权错、模型名不合法）→ 普通
+/// HTTP 状态码。此时一个字都还没发出去，客户端该看到的就是一次失败的请求。
+///
+/// **建流之后**失败（限流、上下文超长、供应商中途 5xx）→ SSE 上的
+/// `event: error`。这时候 200 与响应头早就发出去了，改不了状态码；
+/// 而且前面可能已经有几百个 token 到了用户眼前，静默截断会让客户端
+/// 分不清「说完了」和「断了」。
+async fn llm_stream(
+    State(st): State<AppState>,
+    Json(req): Json<LlmStreamRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let upstream = st.llm_stream(req).await?;
+
+    let stream = upstream.map(|item| {
+        let ev = match item {
+            Ok((message, usage)) => {
+                let chunk = LlmStreamChunk { message, usage };
+                // 序列化失败也当成流内错误发出去，理由同上：这时候
+                // 已经不能改状态码了，静默丢一项等于让本地那侧收到
+                // 一段缺了中间的对话，而它没有任何办法察觉
+                match serde_json::to_string(&chunk) {
+                    Ok(json) => return Ok(Event::default().data(json)),
+                    Err(e) => LlmStreamError {
+                        kind: "execution_error".into(),
+                        message: format!("代理侧序列化失败：{e}"),
+                        retry_delay_ms: None,
+                        top_up_url: None,
+                        category: None,
+                    },
+                }
+            }
+            Err(e) => LlmStreamError::from_provider(&e),
+        };
+        let json = serde_json::to_string(&ev)
+            .unwrap_or_else(|_| r#"{"kind":"execution_error","message":"internal"}"#.to_string());
+        Ok(Event::default().event("error").data(json))
+    });
+
+    // keep-alive 与 /chat 同一个理由：模型「想」得久的时候，
+    // 中间代理会把一条没有字节流动的连接当成死连接掐掉
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    ))
 }
 
 // ─────────────────────────── 记忆检索 ──────────────────────────

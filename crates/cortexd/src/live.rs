@@ -23,7 +23,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use cortex_agent::{AgentEvent, Approval, ConfirmRequest, ToolHost, Turn};
 use cortex_core::{Config, CortexError, Id, Result};
-use cortex_llm::LlmClient;
+use cortex_llm::{LlmClient, MessageStream};
 use cortex_memory::{
     Retrieved, Retriever,
     embed::SharedEmbedder,
@@ -35,6 +35,7 @@ use tokio::sync::mpsc;
 
 use crate::confirm::{ConfirmRegistry, PendingMeta, preview_of};
 use crate::dto::*;
+use cortex_proto::llm::{LlmStreamRequest, ModelTier};
 
 /// 系统提示词。
 ///
@@ -258,6 +259,27 @@ impl Live {
     /// 工具目录是完整的内置目录（文件工具就是在这里出现的）。
     fn workspace_turn(&self, workspace: &str) -> Result<Turn> {
         Ok(Turn::new(workspace)?.with_max_rounds(self.max_rounds))
+    }
+
+    /// LLM 代理：把本地 agent 的一次流式调用原样转给供应商。
+    ///
+    /// **纯转发，不碰记忆、不写库。** 本地那侧走完这一趟拿到的是与直连
+    /// 完全相同的 `MessageStream`（见 `cortex_proto::llm` 的模块注释：
+    /// 线上传的就是 goose 的原生类型，没有中间格式）。
+    ///
+    /// # 模型由服务端选，不由客户端点名
+    ///
+    /// 请求里只有档位。让客户端指定模型名，等于让任何拿到 token 的人
+    /// **拿服务端的 key 跑任意模型** —— 而账单是服务端付。
+    pub async fn llm_stream(&self, req: LlmStreamRequest) -> Result<MessageStream> {
+        let model = match req.tier {
+            ModelTier::Main => self.llm.model(),
+            ModelTier::Cheap => self.llm.cheap_model(),
+        };
+        Ok(self
+            .llm
+            .stream_with(model, &req.system, &req.messages, &req.tools)
+            .await?)
     }
 
     pub async fn database_status(&self) -> String {

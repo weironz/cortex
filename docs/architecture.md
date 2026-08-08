@@ -171,7 +171,7 @@ CLI 自动拉起本地 daemon —— 四样都不存在），读的人会以为�
 | 「每次工具调用都要远程查记忆，RTT 会成瓶颈」 | 记忆检索是**每轮对话一次**（`live.rs` 的 `retriever.retrieve`），不是每次工具调用。一轮 = 「取记忆 + 写回」两次 RTT。**建议的「批量异步写回」刻意不做** —— append-only 的「写入不丢」要求写及时，攒着批量正是丢数据的形状 |
 | 「读了大文件会把大量文本传回服务端」 | 工具输出的**原始字节已定案不存**（[memory-content.md](memory-content.md) §三，`cortex_memory::trace::safe_text` 负责剪掉）。进记忆的只有 `name / path / ok / summary` |
 | 「Windows 缺沙箱，工具会裸奔」 | 方向反了。`Capability::Unavailable` 时**默认拒绝执行**，除非把 `CORTEX_SANDBOX=unsandboxed` 显式写进环境。真正的问题见下面「Windows 上跑不了命令」 |
-| 「`/llm/stream` 代理会泄露 API key，应当移除」 | **key 本来就必须在服务端** —— 抽取要调 LLM，这与代理无关。移除代理不会让 key 离开服务器。默认走本地直连（见上面 ①）的理由是**配置便利**（想换模型不必碰服务器），不是安全 |
+| 「`/llm/stream` 代理会泄露 API key，应当移除」 | **key 本来就必须在服务端** —— 抽取要调 LLM，这与代理无关。移除代理不会让 key 离开服务器。**默认就是走代理**（见上面 ①）；留一条本地直连的理由是**配置便利**（想换模型不必碰服务器），不是安全 |
 
 ### ⚠️ Windows 上跑不了命令 —— 两个决定的直接冲突
 

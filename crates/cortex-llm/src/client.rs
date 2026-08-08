@@ -95,6 +95,31 @@ impl LlmClient {
         Self::from_config(&cfg, &api_key)
     }
 
+    /// 用一个现成的 [`Provider`] 组装，不经供应商注册表。
+    ///
+    /// # 为什么需要这条路
+    ///
+    /// agent 循环搬到本地后，本地进程默认**不直连**任何供应商，而是把请求
+    /// 打到 cortexd 的 `/llm/stream`（key 只在服务端一处，多设备不用每台配一遍）。
+    /// 那条路上的「供应商」是一个讲 HTTP 的 `Provider` 实现，注册表里没有它。
+    ///
+    /// 走这条路进来的 `provider_id` 与两个 `ModelConfig` 由调用方负责 ——
+    /// 它们只用于展示与上下文窗口估算，不参与路由。
+    #[must_use]
+    pub fn from_provider(
+        provider: Arc<dyn Provider>,
+        provider_id: impl Into<String>,
+        model: ModelConfig,
+        cheap_model: ModelConfig,
+    ) -> Self {
+        Self {
+            provider,
+            provider_id: provider_id.into(),
+            model,
+            cheap_model,
+        }
+    }
+
     /// 供应商标识，如 `deepseek`。
     #[must_use]
     pub fn provider_id(&self) -> &str {

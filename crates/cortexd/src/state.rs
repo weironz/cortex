@@ -26,6 +26,8 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt as _;
 
 use crate::dto::*;
+use cortex_llm::MessageStream;
+use cortex_proto::llm::LlmStreamRequest;
 
 /// mock 后端的伪游标。见 [`AppState::new_mock`]。
 static MOCK_CURSOR: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
@@ -431,6 +433,22 @@ impl AppState {
             Backend::Live(l) => Box::pin(tokio_stream::wrappers::ReceiverStream::new(
                 l.chat(req, confirms),
             )),
+        }
+    }
+
+    /// LLM 代理 —— 把一次流式调用原样转给供应商。
+    ///
+    /// 本地 agent 默认走这条路：API key 只在服务端一处，多设备不用每台配一遍。
+    /// 它**不碰记忆、不写库**，纯转发。
+    ///
+    /// mock 后端下没有可转发的对象，返回 `Unavailable` 而不是伪造一段流：
+    /// 假的 token 流会让本地 agent 看着能跑，直到有人问它为什么答非所问。
+    pub async fn llm_stream(&self, req: LlmStreamRequest) -> Result<MessageStream> {
+        match &self.inner.backend {
+            Backend::Mock => Err(CortexError::Unavailable(
+                "本实例跑在 mock 后端上，没有可用的 LLM 供应商".into(),
+            )),
+            Backend::Live(l) => l.llm_stream(req).await,
         }
     }
 
