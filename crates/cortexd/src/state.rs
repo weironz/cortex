@@ -654,6 +654,12 @@ fn mock_sessions() -> Vec<SessionDto> {
     ]
 }
 
+/// 假数据里的**来源通道刻意各不相同**。
+///
+/// 理由与下面那条「已被推翻」的样本一样：来源角标是客户端要画的东西，
+/// 而四条都是 `user_stated` 的话，「亲述 / 推断 / 工具输出长得不一样」
+/// 这段 UI 在真实后端接上之前一次都不会被执行到。
+/// 最后一条给 `None`，覆盖加列之前的存量行（`unknown_legacy`）。
 fn mock_facts() -> Vec<FactDto> {
     vec![
         FactDto {
@@ -666,6 +672,8 @@ fn mock_facts() -> Vec<FactDto> {
             created_at: Utc::now().to_rfc3339(),
             invalidated: false,
             source_episode_id: Some(Id::new().to_string()),
+            source_channel: Some("user_stated".into()),
+            trust_tier: Some(1),
         },
         FactDto {
             id: Id::new().to_string(),
@@ -677,6 +685,8 @@ fn mock_facts() -> Vec<FactDto> {
             created_at: Utc::now().to_rfc3339(),
             invalidated: false,
             source_episode_id: Some(Id::new().to_string()),
+            source_channel: Some("conversation".into()),
+            trust_tier: Some(2),
         },
         // 一条**已被推翻**的事实。与伪造记忆事件、伪造游标推进同一个理由：
         // 「这条现在已经不成立了」那个角标是客户端要画的东西，
@@ -687,11 +697,13 @@ fn mock_facts() -> Vec<FactDto> {
             statement: "同步协议采用裸 BIGSERIAL 游标".into(),
             predicate: Some("decided".into()),
             domain: Some("coding".into()),
-            confidence: 1.0,
+            confidence: 0.72,
             valid_at: Some("2026-08-05T00:00:00Z".into()),
             created_at: Utc::now().to_rfc3339(),
             invalidated: true,
             source_episode_id: Some(Id::new().to_string()),
+            source_channel: Some("tool_output".into()),
+            trust_tier: Some(3),
         },
         FactDto {
             id: Id::new().to_string(),
@@ -703,6 +715,8 @@ fn mock_facts() -> Vec<FactDto> {
             created_at: Utc::now().to_rfc3339(),
             invalidated: false,
             source_episode_id: Some(Id::new().to_string()),
+            source_channel: None,
+            trust_tier: None,
         },
     ]
 }

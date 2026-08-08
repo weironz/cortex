@@ -16,6 +16,8 @@ class MemoryFact {
     this.validAt,
     this.createdAt,
     this.sourceEpisodeId,
+    this.sourceChannel,
+    this.trustTier,
   });
 
   /// ULID.
@@ -42,6 +44,26 @@ class MemoryFact {
   /// Provenance: the episode this fact was extracted from.
   final String? sourceEpisodeId;
 
+  /// Which channel this fact came in through: `user_stated`, `conversation`,
+  /// `derived`, `tool_output`, `external`, `unknown_legacy`.
+  ///
+  /// Not to be confused with [RetrievalChannels] — those are the *recall*
+  /// paths that found this fact (`bm25`, `vector`, …). Two different things
+  /// that the wire protocol unhelpfully both calls a channel. This one is
+  /// about where the knowledge came from; that one is about how we found it
+  /// again.
+  ///
+  /// Null on daemons older than the field, and on rows that predate the
+  /// column (`unknown_legacy` reaches us as a value, absence as null).
+  final String? sourceChannel;
+
+  /// Trust level, 1 being highest. Paired with [sourceChannel] by a database
+  /// CHECK constraint, and sent separately rather than derived client-side —
+  /// re-deriving it here would be a third copy of a mapping that already
+  /// exists in Rust and in SQL, and the third copy has nothing keeping it
+  /// honest.
+  final int? trustTier;
+
   factory MemoryFact.fromJson(Map<String, dynamic> json) => MemoryFact(
     id: asString(json['id']),
     statement: asString(json['statement']),
@@ -51,6 +73,8 @@ class MemoryFact {
     validAt: asDateOrNull(json['valid_at']),
     createdAt: asDateOrNull(json['created_at']),
     sourceEpisodeId: asStringOrNull(json['source_episode_id']),
+    sourceChannel: asStringOrNull(json['source_channel']),
+    trustTier: asIntOrNull(json['trust_tier']),
   );
 
   Map<String, dynamic> toJson() => {
@@ -62,6 +86,8 @@ class MemoryFact {
     if (validAt != null) 'valid_at': validAt!.toIso8601String(),
     if (createdAt != null) 'created_at': createdAt!.toIso8601String(),
     if (sourceEpisodeId != null) 'source_episode_id': sourceEpisodeId,
+    if (sourceChannel != null) 'source_channel': sourceChannel,
+    if (trustTier != null) 'trust_tier': trustTier,
   };
 
   @override

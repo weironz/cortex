@@ -709,20 +709,16 @@ impl Live {
         let invalidated = self.invalidation_flags(&r.items, q.as_of.is_some()).await;
 
         Ok(MemorySearchResponse {
+            // 走 `fact_dto_of` 而不是在这里再拼一遍。此前这里是它的手抄版，
+            // 于是「补一个字段」要改两处 —— 而漏改的表现是同一条记忆在
+            // 搜索结果里和在对话抽屉里长得不一样，没有任何报错
             facts: r
                 .items
                 .iter()
                 .zip(invalidated)
                 .map(|(m, invalidated)| FactDto {
-                    id: m.id.clone(),
-                    statement: m.statement.clone(),
-                    predicate: None,
-                    domain: m.domain.clone(),
-                    confidence: 1.0,
-                    valid_at: m.valid_at.clone(),
-                    created_at: m.known_since.clone(),
                     invalidated,
-                    source_episode_id: m.source_episode_id.clone(),
+                    ..fact_dto_of(m)
                 })
                 .collect(),
             channels: r
@@ -1750,15 +1746,20 @@ fn fact_dto_of(m: &cortex_memory::MemoryItem) -> FactDto {
     FactDto {
         id: m.id.clone(),
         statement: m.statement.clone(),
-        predicate: None,
+        predicate: m.predicate.clone(),
         domain: m.domain.clone(),
-        confidence: 1.0,
+        // `confidence` 曾经在这里写死成 1.0，于是抽屉上**每一条**记忆
+        // 都显示「100%」—— 一个看起来像数据、实际是常量的数字。
+        // 拿不到时给 0.0 而不是 1.0：客户端据此不显示这个角标
+        confidence: m.confidence.unwrap_or(0.0),
         valid_at: m.valid_at.clone(),
         created_at: m.known_since.clone(),
         // 本轮注入走的是不带 as_of 的召回，只查 active_facts ——
         // 按定义拿不到已失效的事实。见 `Live::invalidation_flags`
         invalidated: false,
         source_episode_id: m.source_episode_id.clone(),
+        source_channel: m.source_channel.clone(),
+        trust_tier: m.trust_tier,
     }
 }
 

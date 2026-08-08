@@ -93,6 +93,16 @@ class _FactCardState extends State<FactCard> {
                       color: scheme.error,
                       filled: true,
                     ),
+                  // Provenance sits first, right after the "superseded" badge:
+                  // "did I say this, or did the model infer it" changes how
+                  // much weight the statement above deserves, so it should be
+                  // read before anything else in this row.
+                  if (_sourceLabel(fact.sourceChannel) case final label?)
+                    _Tag(
+                      label: label,
+                      color: _trustColor(fact.trustTier, scheme),
+                      filled: true,
+                    ),
                   if (fact.domain != null)
                     _Tag(
                       label: fact.domain!,
@@ -188,6 +198,40 @@ class _FactCardState extends State<FactCard> {
     if (c >= 0.75) return scheme.onSurfaceVariant;
     return const Color(0xFFB26A00);
   }
+
+  /// Where the knowledge came from, in words rather than in wire vocabulary.
+  ///
+  /// Deliberately short — this tag shares a crowded row with the domain, the
+  /// predicate and the retrieval channels, and it is the one the eye should
+  /// land on first.
+  ///
+  /// Returns null for `unknown_legacy` and for absent values, which collapses
+  /// two cases on purpose: rows written before the column existed, and daemons
+  /// older than the field. Neither can tell the user anything true, and a tag
+  /// reading "未知" would be noise dressed up as provenance. An *unrecognised*
+  /// channel is shown verbatim instead of hidden — a new one added server-side
+  /// should be visible, not silently swallowed.
+  static String? _sourceLabel(String? channel) => switch (channel) {
+    'user_stated' => '你说的',
+    'conversation' => '推断',
+    'derived' => '派生',
+    'tool_output' => '工具',
+    'external' => '外部',
+    null || 'unknown_legacy' => null,
+    final other => other,
+  };
+
+  /// Coloured by trust tier rather than by channel name.
+  ///
+  /// The tier is what actually orders these — the name is just a label for it.
+  /// Going through the tier also means a channel added server-side gets a
+  /// sensible colour without a matching change here.
+  static Color _trustColor(int? tier, ColorScheme scheme) => switch (tier) {
+    1 => const Color(0xFF2E7D32), // 亲述：与高 confidence 同色，两者都是「最可信」
+    2 => scheme.primary,
+    3 => const Color(0xFF7A5FBF),
+    _ => const Color(0xFFB26A00), // 外部及更低：与低 confidence 同色
+  };
 }
 
 class _Tag extends StatelessWidget {

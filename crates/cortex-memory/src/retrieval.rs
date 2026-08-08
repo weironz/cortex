@@ -815,6 +815,13 @@ impl<E: Embedder> Retriever<E> {
                 known_since: f.item.created_at.to_rfc3339(),
                 source_episode_id: Some(f.item.source_episode_id),
                 domain: f.item.domain,
+                // 下面四个**不进注入块**，是给客户端记忆抽屉的（见 MemoryItem 文档）。
+                // 它们此前在这里被丢掉，于是抽屉上每条记忆都显示「100%」——
+                // 那个数字是 cortexd 写死的常量，不是这条事实的打分
+                predicate: Some(f.item.predicate),
+                confidence: Some(f.item.confidence),
+                source_channel: Some(f.item.source_channel.as_str().to_string()),
+                trust_tier: f.item.trust_tier,
             })
             .collect();
 

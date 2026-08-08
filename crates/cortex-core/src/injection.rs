@@ -55,7 +55,21 @@ impl Budget {
     }
 }
 
-/// 一条待注入的记忆。
+/// 一条召回出来的记忆。
+///
+/// # ⚠️ 加字段**不等于**让模型看见它
+///
+/// 这个类型有两个消费者，而它们要的东西不一样：
+///
+/// - `render_profile_block` / `render_turn_block` —— 拼进 prompt。
+///   它们**只用** `id` 与 `statement`（回合块另加时间与领域）。
+/// - 客户端的记忆抽屉（`FactDto`）—— 要出处、可信度、来源通道，
+///   也就是「为什么记得这个」那一屏。
+///
+/// 下面标了「不进注入块」的字段属于后者。想让某个字段进 prompt，
+/// 得去改 `render_*`，而那**会打穿前缀缓存**（核心画像块进的是可缓存前缀，
+/// 见 CLAUDE.md 不可违反的约束 #4）—— 那是一个要单独权衡的决定，
+/// 不是在这里加一行字段就顺带发生的事。
 #[derive(Debug, Clone)]
 pub struct MemoryItem {
     /// fact id —— 模型可在回答中引用它，这是「为什么记得这个」审计 UX 的前置依赖，
@@ -68,6 +82,25 @@ pub struct MemoryItem {
     pub known_since: String,
     pub source_episode_id: Option<String>,
     pub domain: Option<String>,
+    /// 谓词（`prefers` / `decided` / `owns` …）。**不进注入块** ——
+    /// `statement` 里已经含了同样的信息，再给一遍是浪费 token。
+    pub predicate: Option<String>,
+    /// 抽取器对「该事实忠实反映原文」的一次性打分，`[0,1]`。**不进注入块。**
+    ///
+    /// `None` = 拿不到（本地 agent 那条路上的老响应）。抽屉上不显示，
+    /// 而不是显示成 100% —— 后者正是这个字段此前的样子。
+    pub confidence: Option<f32>,
+    /// 来源通道（`user_stated` / `conversation` / `tool_output` …）。**不进注入块。**
+    ///
+    /// 用 `String` 而不是 `SourceChannel`：那个枚举在 `cortex-store` 里，
+    /// 带 sqlx 派生，而 `cortex-core` 不依赖任何东西 —— 为一个展示字段
+    /// 把存储层的类型拽进来，方向是反的。
+    pub source_channel: Option<String>,
+    /// 来源信任级，1 最高。**不进注入块。**
+    ///
+    /// `None` 只可能是加列之前的存量行（`unknown_legacy`）——
+    /// 「不知道」不是信任标尺上的一个点。
+    pub trust_tier: Option<i16>,
 }
 
 /// 块首的框定语句 —— 对记忆投毒的第一道栅栏。
@@ -179,6 +212,13 @@ mod tests {
             known_since: "2026-08-06".into(),
             source_episode_id: Some("01JEP".into()),
             domain: None,
+            // 刻意填上**看得出来**的值：下面
+            // `display_only_fields_never_reach_the_prompt` 断言它们
+            // 一个字都没进渲染结果，用 None 的话那条断言就是空的
+            predicate: Some("prefers".into()),
+            confidence: Some(0.42),
+            source_channel: Some("tool_output".into()),
+            trust_tier: Some(3),
         }
     }
 
@@ -199,6 +239,39 @@ mod tests {
     fn turn_block_uses_absolute_dates() {
         let s = render_turn_block(&[item("01JF1", "x")]);
         assert!(s.contains("2026-08-01"), "时间必须是绝对日期：{s}");
+    }
+
+    /// 展示用字段**一个字都不能进 prompt**。
+    ///
+    /// [`MemoryItem`] 有两个消费者：渲染进 prompt 的这两个函数，
+    /// 以及客户端的记忆抽屉。后者需要来源、可信度、谓词，前者不需要 ——
+    /// 而它们共用一个结构体，于是「顺手在渲染里也带上」是个随时可能发生的改动。
+    ///
+    /// 它一旦发生，**核心画像块的内容就不再稳定**：`confidence` 会随重新抽取
+    /// 变化，`trust_tier` 会随来源变化。而那个块进的是**可缓存前缀**
+    /// （CLAUDE.md 不可违反的约束 #4），前缀一变，缓存逐轮全失效 ——
+    /// 成本涨 5–10 倍，且只有几周后从账单上才看得出来。
+    ///
+    /// 所以这条测试守的不是格式，是**成本**。真要让模型知道来源，
+    /// 那是一个要单独权衡的决定，届时这条测试红了正是提醒的地方。
+    #[test]
+    fn display_only_fields_never_reach_the_prompt() {
+        let items = [item("01JF1", "对象存储用 RustFS")];
+        for block in [render_turn_block(&items), render_profile_block(&items)] {
+            assert!(
+                !block.contains("prefers"),
+                "谓词进了注入块 —— statement 里已经有同样的信息了：{block}"
+            );
+            assert!(
+                !block.contains("0.42"),
+                "confidence 进了注入块。它会随重新抽取而变，\
+                 而核心画像块进的是可缓存前缀：{block}"
+            );
+            assert!(
+                !block.contains("tool_output"),
+                "来源通道进了注入块：{block}"
+            );
+        }
     }
 
     #[test]

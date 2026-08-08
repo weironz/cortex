@@ -7,10 +7,52 @@ use serde::{Deserialize, Serialize};
 
 // ─────────────────────────── /health ───────────────────────────
 
+/// 从对端 `/health` 里**只取协议那两个数**。
+///
+/// # 为什么不直接反序列化 [`Health`]
+///
+/// 两个理由，第二个是硬的：
+///
+/// 1. `Health` 有一半字段是 `&'static str`，反序列化不了。
+/// 2. 更重要的是**耦合面**：协议检查只关心两个数字，而 `Health` 还带着
+///    数据库状态、对象存储后端、向量化健康度。用整个 `Health` 去解，
+///    等于让那些字段的任何变动都能把协议检查本身弄坏 ——
+///    而协议检查坏掉的表现，恰恰是「不兼容时没人拦」。
+///
+/// # 缺省值是 1，不是 0
+///
+/// **这是这个类型最容易写错的地方。** 这个检查上线之前的 cortexd
+/// （包括此刻正跑在生产上的那个）压根不报这两个字段。缺省取 0 的话，
+/// 检查生效当天所有桌面端都会拒绝启动 —— 而它们其实完全能用。
+///
+/// 字段缺席的正确含义是「这是个早于本检查的守护进程」，也就是协议 v1
+/// （本检查引入时的版本），不是「协议版本为零」。
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct PeerProtocol {
+    #[serde(default = "protocol_before_this_check")]
+    pub protocol: u32,
+    #[serde(default = "protocol_before_this_check")]
+    pub min_peer_protocol: u32,
+}
+
+const fn protocol_before_this_check() -> u32 {
+    1
+}
+
 #[derive(Debug, Serialize)]
 pub struct Health {
     pub status: &'static str,
     pub version: &'static str,
+    /// 线协议版本。见 [`crate::PROTOCOL_VERSION`]。
+    ///
+    /// 与 `version` 分开报：后者每发一版都变，而这个只在契约不兼容地
+    /// 变了时才动。本地 agent 据此决定要不要启动。
+    pub protocol: u32,
+    /// 本端还能对话的最老对端协议版本。见 [`crate::MIN_PEER_PROTOCOL`]。
+    ///
+    /// **必须报出来**：「服务端已经不再支持这么老的客户端」这件事只有
+    /// 服务端知道，不报的话客户端只能连上去之后在某个具体请求上莫名其妙地失败。
+    pub min_peer_protocol: u32,
     /// "ok" / "not_wired" / 具体错误
     pub database: String,
     /// 对象存储走的是哪一路后端："s3" / "local_fs" / "unavailable"。
@@ -270,6 +312,29 @@ pub struct FactDto {
     pub invalidated: bool,
     /// 出处 —— 点开可看到产生这条记忆的原始对话
     pub source_episode_id: Option<String>,
+    /// 来源通道：`user_stated` / `conversation` / `derived` / `tool_output` /
+    /// `external` / `unknown_legacy`。
+    ///
+    /// # 为什么这条要下发到客户端
+    ///
+    /// 「用户亲口说的」和「模型从对话里推断的」在抽屉上长得一模一样，
+    /// 是这个产品最不该有的含糊：**「为什么记得这个」正是它的卖点**，
+    /// 而一条推断出来的事实与一条亲述的事实，用户对它们的信任本就不同。
+    ///
+    /// 这一列从 migration 20260807000006 起就在写了，只是一直没人读得到。
+    ///
+    /// 老客户端忽略即可；`#[serde(default)]` 让它不构成破坏性变更。
+    #[serde(default)]
+    pub source_channel: Option<String>,
+    /// 来源信任级，1 最高。与 [`Self::source_channel`] 的对应关系由 schema 的
+    /// `facts_trust_tier_matches_channel` 锁死。
+    ///
+    /// 单独下发而不是让客户端按通道名自己算：那等于把映射抄第三遍
+    /// （Rust 一份、SQL 一份、Dart 一份），而第三份没有任何东西约束它。
+    ///
+    /// `None` 只可能是加列之前的存量行（`unknown_legacy`）。
+    #[serde(default)]
+    pub trust_tier: Option<i16>,
 }
 
 #[derive(Debug, Deserialize)]
