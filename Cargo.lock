@@ -1038,7 +1038,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cortex-agent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1059,7 +1059,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-blob"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1085,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1100,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-evals"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-llm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-local"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-memory"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "cortex-agent",
@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "cortexd"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",

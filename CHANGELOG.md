@@ -12,6 +12,42 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ## [未发布]
 
+## [0.1.2] - 2026-08-09
+
+**这一版的主题只有一个：编码那一半开始工作。**
+
+在此之前，桌面端装完只是一个填服务器地址的空壳 —— agent 读写的是
+**服务器**上的目录，你本地的代码它看不见。现在循环与工具跑在你的机器上。
+
+> ### ⚠️ 升级必读：服务端与桌面端要一起升
+>
+> 0.1.2 的桌面端依赖 cortexd 的 `POST /episodes` 与 `POST /llm/stream`，
+> 而这两个端点是这一版才加的。**接到 0.1.1 或更早的 cortexd 上，
+> 每一轮对话都会失败**（`/episodes` 返回 404，而 4xx 被判为不可重试，
+> 不进离线队列 —— 重试多少次都一样）。
+>
+> 先升 cortexd，再升桌面端。
+
+### 这一版的下载页上少了东西
+
+| | 0.1.1 | 0.1.2 |
+|---|---|---|
+| Windows 桌面安装程序 | ✅ | ✅ **现在带本地 agent** |
+| Windows 二进制包（cortexd + CLI） | ✅ | ✅ **现在带 cortex-local** |
+| Linux / macOS 二进制包 | ✅ ×3 | ❌ 暂停 |
+| Flutter Web 静态包 | ✅ | ❌ 暂停 |
+| docker 镜像 | ✅ | ✅ |
+
+停掉的两样都是**构建时间**的取舍，不是能力缺失：
+
+- **Linux / macOS 二进制** → 用 docker 镜像，里面 cortexd 与 `cortex` CLI
+  都在。只要 CLI 的话 `cargo install --git https://github.com/weironz/cortex cortex-cli`
+- **Flutter Web 静态包** → `cortex-web` **镜像照常构建**，自托管部署里的
+  Web 界面一点没少。停的只是「我自己搭静态服务器」那份 tar.gz，
+  要它的人 `cd app && flutter build web --release`
+
+恢复方式写在 `.github/workflows/release.yml` 里被停掉的那两个 job 的注释中。
+
 ### 新增 `cortex-local` —— agent 循环搬到本地，**编码那一半开始工作**
 
 在此之前，工具跑在 cortexd 进程内，agent 读写的是**服务器**上的目录 ——
@@ -165,31 +201,33 @@ compose 里也多了一个自建的 `embeddings` 服务（HuggingFace TEI + bge-
 开发机上那个服务放在 `embed` profile 里，**`just up` 默认不起**：
 `docker compose --profile embed up -d`。
 
-### 不再发裸二进制 —— 服务端只发 docker 镜像
+### 裸二进制收敛到只发 Windows
 
 0.1.1 的下载页上有四个 `cortex-v0.1.1-<平台>.tar.gz` / `.zip`
-（Linux x64 / Linux arm64 / macOS arm64 / Windows x64），里面是
-cortexd + `cortex` CLI。**从下一版起不发了。**
+（Linux x64 / Linux arm64 / macOS arm64 / Windows x64）。0.1.2 只剩
+Windows 那一个 —— 但它**多了一个二进制**：
+
+```
+cortexd.exe       守护进程（记忆权威）
+cortex.exe        命令行客户端
+cortex-local.exe  本地 agent  ← 新增
+```
 
 理由是构建时间：四个平台各自本机编译一遍，占掉整条发版流水线的绝大部分。
-前期迭代快，这个成本不值。
+前期迭代快，另外三个的成本不值。
 
-**能力没有减少** —— docker 镜像里 cortexd 与 CLI 两个二进制都在。
-减少的是「不想碰 docker，下个二进制就能跑」这条路。替代路径写进了
-[docs/install.md](docs/install.md) 的 B 节：从源码编、或者用
-`docker create` + `docker cp` 从镜像里把二进制抠出来（只对 linux/amd64
-有效，且是 glibc 动态链接）。只要 CLI 的话
+**Linux / macOS 的能力没有减少** —— docker 镜像里 cortexd 与 CLI 都在。
+减少的是「不想碰 docker，下个二进制就能跑」这条路。替代路径见
+[docs/install.md](docs/install.md) 的 B 节；只要 CLI 的话
 `cargo install --git … cortex-cli` 最短。
 
-发布产物现在只剩三样：**docker 镜像**、**Windows 桌面安装程序**、
-**Flutter Web 静态包**。
-
-> 这是**暂停**不是废弃。`scripts/release-package.sh` 原样留着，本机还能直接跑；
-> 被删掉的 `build` job 连同它的全部注释都在 git 历史里，
-> `release.yml` 里那段注释写了恢复时要同步改的三个地方
-> （`needs` / download-artifact 的 pattern / 产物清点）。
-> 恢复时会撞上一个旧障碍：Intel Mac 因为 `ort-sys` 没有预编译产物而编不出来，
-> 那要等 embedding 改成走远端 API 之后才会消失。
+> 中途有一版把四个全砍了。加回 Windows 是因为**这一版的重点就在 Windows**：
+> 本地 agent 让 CLI 用户第一次真的能改自己机器上的文件，
+> 而那正需要一个能下下来就跑的 `cortex-local.exe`。
+>
+> 恢复另外三个平台：`release.yml` 的 `build` job 里那个 matrix 加回条目即可，
+> 注释写了会撞上什么（Intel Mac 的 `ort-sys` 障碍在
+> fastembed 改成可选 feature 之后**理论上没了，但没验证过**）。
 
 ---
 

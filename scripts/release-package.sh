@@ -84,20 +84,46 @@ case "$TARGET" in
     *)         EXT="";     ARCHIVE="tar.gz" ;;
 esac
 
+# ── 要打进包的三个二进制 ──────────────────────────────────
+#
+# cortex-cli 这个 crate 产出的二进制叫 `cortex`（见 crates/cortex-cli/Cargo.toml
+# 的 [[bin]]）。照 crate 名去找会找不到，而 `cp` 的报错只说「没有那个文件」。
+#
+# cortex-local 是 0.1.2 加的：agent 循环与工具跑在**用户这台机器上**。
+# CLI 用户同样需要它 —— 没有它，`cortex` 连上远端 cortexd 之后工具动的是
+# 服务器的目录，而那正是这一版要解决的问题。桌面端那份由
+# release-desktop-windows.sh 单独放进安装包里。
+BINS=("cortexd$EXT" "cortex$EXT" "cortex-local$EXT")
+
+have_all() {
+    local dir="$1" b
+    for b in "${BINS[@]}"; do
+        [ -f "$dir/$b" ] || return 1
+    done
+}
+
 [ -n "$BIN_DIR" ] || BIN_DIR="target/$TARGET/release"
 # 本机构建（不带 --target）落在 target/release。CI 一律带 --target，
-# 但本地验证时经常不带 —— 自动兜一下，省得每次手写 --bin-dir
-if [ ! -f "$BIN_DIR/cortexd$EXT" ] && [ -f "target/release/cortexd$EXT" ]; then
-    log "$BIN_DIR 里没有产物，回落到 target/release"
+# 但本地验证时经常不带 —— 自动兜一下，省得每次手写 --bin-dir。
+#
+# **判断条件是「三个都在」而不是「cortexd 在」。** 只看一个的版本有过
+# 一次真实的失败：`target/<triple>/release/` 里躺着几天前的 cortexd 与
+# cortex（没有 cortex-local），于是脚本认定那个目录「有产物」并留在上面，
+# 报了一句「找不到 cortex-local」。
+#
+# 那次是良性的（缺文件所以停了）。真正危险的是另一半：那个陈旧目录如果
+# 三个都齐，脚本就会**把几天前的二进制当本次发版打包出去**。
+# 这次靠版本号冒烟能拦住，但同版本号重打包时它一点用都没有。
+if ! have_all "$BIN_DIR" && have_all "target/release"; then
+    log "$BIN_DIR 里产物不全，回落到 target/release"
     BIN_DIR="target/release"
 fi
 
-# ── 产物必须齐全 ──────────────────────────────────────────
-# cortex-cli 这个 crate 产出的二进制叫 `cortex`（见 crates/cortex-cli/Cargo.toml
-# 的 [[bin]]）。照 crate 名去找会找不到，而 `cp` 的报错只说「没有那个文件」
-BINS=("cortexd$EXT" "cortex$EXT")
 for b in "${BINS[@]}"; do
-    [ -f "$BIN_DIR/$b" ] || die "找不到 $BIN_DIR/$b —— 先 cargo build --release --target $TARGET -p cortexd -p cortex-cli"
+    [ -f "$BIN_DIR/$b" ] \
+        || die "找不到 $BIN_DIR/$b —— 先 cargo build --release --target $TARGET -p cortexd -p cortex-cli -p cortex-local
+   （若 $BIN_DIR 里只有一部分产物，那多半是上一次发版留下的陈旧目录，
+     `cargo clean -p cortexd -p cortex-cli -p cortex-local` 或整个删掉它）"
 done
 
 # ── 冒烟：真的运行一次，并核对它自称的版本 ────────────────
@@ -117,8 +143,9 @@ smoke() {
 if [ "$NO_EXEC" = 1 ]; then
     warn "--no-exec：跳过冒烟测试。这份产物从没被运行过"
 else
-    smoke "$BIN_DIR/cortexd$EXT" cortexd
-    smoke "$BIN_DIR/cortex$EXT"  cortex
+    smoke "$BIN_DIR/cortexd$EXT"      cortexd
+    smoke "$BIN_DIR/cortex$EXT"       cortex
+    smoke "$BIN_DIR/cortex-local$EXT" cortex-local
 fi
 
 # ── 组装目录 ──────────────────────────────────────────────
@@ -146,11 +173,12 @@ cat > "$STAGE/INSTALL.txt" <<EOF
 Cortex v${VERSION} — ${TARGET}
 
 包含：
-  cortexd${EXT}   守护进程（记忆权威，agent 循环与工具执行都在它这里）
-  cortex${EXT}    终端瘦客户端
+  cortexd${EXT}       守护进程 —— **记忆权威**。Postgres + 对象存储在它那侧
+  cortex${EXT}        命令行客户端
+  cortex-local${EXT}  本地 agent —— **agent 循环与工具跑在这台机器上**
 
 cortexd 需要 Postgres 17 + pgvector 与一个 S3 兼容对象存储才能工作。
-只有这两个二进制是跑不起来的，完整安装步骤见 docs/release.md 或
+光有这三个二进制是跑不起来的，完整安装步骤见
 https://github.com/weironz/cortex/blob/v${VERSION}/docs/install.md
 
 ★ 第一步一定是生成凭据 —— 没有它 cortexd 会拒绝启动（这是刻意的）：

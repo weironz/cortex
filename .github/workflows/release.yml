@@ -83,34 +83,65 @@ jobs:
         run: bash scripts/release-preflight.sh --tag "${{ steps.resolve.outputs.tag }}"
 
   # ══════════════════════════════════════════════════════════
-  #  ⛔ 裸二进制（cortexd + CLI 的 tar.gz / zip）—— 自 0.1.2 起**暂停发布**
+  #  裸二进制 —— **只发 Windows**（0.1.2 起）
   #
-  #  原来这里有一个四平台的 `build` 矩阵（linux-x64 / linux-arm64 /
-  #  macos-arm64 / windows-x64），每次发版编四份、占掉整条流水线里
-  #  绝大部分的时间。前期迭代快，这个成本不值。
+  #  0.1.1 那一版是四平台矩阵（linux-x64 / linux-arm64 / macos-arm64 /
+  #  windows-x64），每次发版编四份、占掉整条流水线里绝大部分时间。
+  #  0.1.2 收敛到一个平台：前期迭代快，另外三个的成本不值。
   #
-  #  ── 砍掉之后，自托管的人还剩什么 ──────────────────────────
-  #  只剩 docker 镜像 —— 而镜像里 cortexd 与 `cortex` CLI 都在
-  #  （见 scripts/docker/Dockerfile.cortexd 的 COPY），所以能力没少，
-  #  少的是「不想用 docker 的人下一个二进制就跑」这条路。
-  #  要 CLI 又不想要 docker，现在只能 `cargo install --git`。
-  #  **这一条必须写在发布说明与 docs/install.md 里** ——
-  #  0.1.1 的下载页上有那四个包，0.1.2 突然没有，不解释就是退化。
+  #  ── Linux / macOS 的人还剩什么 ──────────────────────────
+  #  docker 镜像 —— 里面 cortexd 与 `cortex` CLI 都在（见
+  #  scripts/docker/Dockerfile.cortexd 的 COPY）。少的是「不想用 docker
+  #  的人下个二进制就跑」这条路。只要 CLI 的话 `cargo install --git` 最短。
+  #  **这一条必须写进发布说明与 docs/install.md** —— 0.1.1 的下载页上有
+  #  四个包，0.1.2 只剩一个，不解释就是退化。
   #
-  #  ── 怎么恢复 ────────────────────────────────────────────
-  #  整个 job 连同它的注释都在 git 历史里，删除它的那个提交是权威版本：
-  #      git log --oneline -- .github/workflows/release.yml
-  #      git show <删除该 job 的提交>^:.github/workflows/release.yml
-  #  把 `build` job 贴回来，并在下面 `release` 的 needs、
-  #  download-artifact 的 pattern、产物清点三处加回 `bin-*`。
-  #  scripts/release-package.sh **没有删**，它还能本机直接跑：
-  #      bash scripts/release-package.sh --target <triple> --version <X.Y.Z>
-  #
-  #  顺带记一笔（恢复时会撞上）：Intel Mac（x86_64-apple-darwin）当时就
-  #  已经发不出来了 —— `ort-sys: no prebuilt binaries available`，
-  #  而 fastembed 在 cortex-memory 里是硬依赖、没有 feature gate。
-  #  把 embedding 改成走远端 API 之后这个障碍才会消失。
+  #  ── Intel Mac 顺带记一笔 ────────────────────────────────
+  #  它在 0.1.1 时就已经发不出来了（`ort-sys: no prebuilt binaries
+  #  available`）。0.1.2 把 fastembed 做成了可选 feature，所以这个障碍
+  #  理论上没了 —— 但没验证过，要恢复得先真编一次。
   # ══════════════════════════════════════════════════════════
+  build:
+    name: 二进制 ${{ matrix.target }}
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # cortex-local 是 0.1.2 加的第三个二进制：agent 循环与工具跑在
+      # **用户这台机器上**。CLI 用户同样需要它 —— 没有它，`cortex` 连上
+      # 远端之后工具动的是服务器的目录，而那正是这一版要解决的问题
+      - name: 构建
+        run: >-
+          cargo build --release --locked --target ${{ matrix.target }}
+          -p cortexd -p cortex-cli -p cortex-local
+
+      # 打包脚本：逐个跑 --version 冒烟并核对版本 → 组装目录（含 LICENSE /
+      # NOTICE / CHANGELOG / INSTALL.txt）→ 压缩 → 出 sha256
+      - name: 打包
+        shell: bash
+        run: |
+          bash scripts/release-package.sh             --target "${{ matrix.target }}"             --version "${{ needs.preflight.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
 
   # ══════════════════════════════════════════════════════════
   #  Flutter Web 静态产物
@@ -118,50 +149,21 @@ jobs:
   #  不带 --dart-define：这一份是给「自己搭静态服务器」的人用的，
   #  地址在设置面板里填。钉死域名的那一份在 cortex-web 镜像里。
   # ══════════════════════════════════════════════════════════
-  web:
-    name: Flutter Web 产物
-    needs: preflight
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-
-      - name: 构建
-        working-directory: app
-        run: |
-          flutter pub get
-          flutter build web --release
-
-      - name: 打包
-        run: |
-          set -euo pipefail
-          name="cortex-web-v${{ needs.preflight.outputs.version }}"
-          mkdir -p dist
-          cp -r app/build/web "dist/$name"
-          cp LICENSE NOTICE "dist/$name/"
-          cat > "dist/$name/README.txt" <<EOF
-          Cortex Web v${{ needs.preflight.outputs.version }}
-
-          纯静态产物，丢进任何静态服务器即可：
-              python3 -m http.server 8081 --directory .
-
-          首次打开在设置面板里填 cortexd 地址（默认 http://127.0.0.1:8080）
-          与访问凭据。与 cortexd 不同源时，cortexd 侧要允许这个来源的跨域。
-          EOF
-          tar czf "dist/$name.tar.gz" -C dist "$name"
-          rm -rf "dist/$name"
-          sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: web
-          path: |
-            dist/*.tar.gz
-            dist/*.sha256
-          if-no-files-found: error
+  # ══════════════════════════════════════════════════════════
+  #  ⛔ Flutter Web 静态产物 —— 自 0.1.2 起**暂停发布**
+  #
+  #  这一版把重心收到「Windows 桌面端 + CLI」两样上，Web 的静态包先停。
+  #
+  #  ── 停掉之后 Web 还剩什么 ──────────────────────────────
+  #  **cortex-web 镜像照常构建**（见下面的 image job），自托管部署里的
+  #  Web 界面一点没少。停的只是「我自己搭静态服务器」那份 tar.gz。
+  #  要它的人可以本机 `cd app && flutter build web --release`。
+  #
+  #  ── 怎么恢复 ────────────────────────────────────────────
+  #  这个 job 的完整内容在 git 历史里（`git log -- .github/workflows/release.yml`）。
+  #  贴回来之后要同步改三处：下面 `release` 的 `needs`、
+  #  download-artifact 的 `pattern`、以及产物清点里那一行。
+  # ══════════════════════════════════════════════════════════
 
   # ══════════════════════════════════════════════════════════
   #  Windows 桌面端安装程序
@@ -323,7 +325,7 @@ jobs:
   # ══════════════════════════════════════════════════════════
   release:
     name: 建 draft release
-    needs: [preflight, web, desktop, image]
+    needs: [preflight, build, desktop, image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -340,7 +342,9 @@ jobs:
           path: dist
           merge-multiple: true
           # `bin-*`（裸二进制）自 0.1.2 起不再产出，见上面被停掉的 build job
-          pattern: "{web,desktop-*}"
+          # `web` 自 0.1.2 起不再产出（见上面被停掉的 job）；
+          # `bin-*` 回来了，但只有 windows 一个平台
+          pattern: "{bin-*,desktop-*}"
 
       # 逐平台的 .sha256 是构建机上算的，这里汇总成一份。
       # 先删掉单份的再算，否则 SHA256SUMS 里会混进「校验和文件的校验和」
@@ -375,11 +379,13 @@ jobs:
           # 这张清单是发版产物的**唯一权威**：少一个必须当场红，
           # 不能静默发出去。（v0.1.0 删掉 Intel Mac 时漏改过这里，被它拦下了。）
           #
-          # 裸二进制（cortex-vX-<triple>.tar.gz / .zip）自 0.1.2 起不在清单里 ——
-          # build job 被停掉了，见文件上方。恢复它时**必须同步加回这里**，
-          # 否则清点会照常绿，而下载页上少四个包没有任何提示
-          [ -f "cortex-web-v$v.tar.gz" ]                 || { echo "::error::缺少 Web"; miss=1; }
-          # 桌面安装程序 —— 停掉裸二进制之后，这是下载页上**唯一**的可执行产物
+          # 0.1.2 的下载页上只有两样可执行产物，都在这里点名。
+          # Flutter Web 的 tar.gz 这一版停发了（见上方被停掉的 job）；
+          # Linux / macOS 裸二进制也只剩 docker 镜像那条路。
+          # 恢复其中任何一样时**必须同步加回这一段** ——
+          # 否则清点照常绿，而下载页上少了东西没有任何提示
+          [ -f "cortex-v$v-x86_64-pc-windows-msvc.zip" ] \
+            || { echo "::error::缺少 Windows 二进制包（cortexd + CLI + 本地 agent）"; miss=1; }
           [ -f "cortex-desktop-v$v-x86_64-pc-windows-msvc-setup.exe" ] \
             || { echo "::error::缺少 Windows 桌面安装程序"; miss=1; }
           exit $miss
