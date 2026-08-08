@@ -155,6 +155,19 @@ jobs:
 
     env:
       DATABASE_URL: postgres://cortex:cortex_ci@localhost:5432/cortex
+      # ── 这道门刻意仍然用**进程内**后端（feature `local-embed`）──
+      #
+      # 默认后端已经改成了 `api`（调远端 /v1/embeddings），但这里不能跟着换：
+      # `scripts/evals-baseline.*.json` 里的每一个数字都是在
+      # `fastembed:gpahal/bge-m3-onnx-int8` 这个空间里量出来的，
+      # 连语义地板 0.50 都是在它上面扫出来的曲线。
+      #
+      # 换成远端跑的 bge-m3 **不是同一个空间**（fp32 vs int8、池化实现不同），
+      # 拿旧基线去撞新分数没有意义 —— 基线文件里记着 embedding_model，
+      # 回归门会核对它，正是为了拦住这种事。
+      #
+      # 要把这道门换到 api 后端，得先重扫一遍曲线并换一份基线，
+      # 那是一件独立的工作，不该顺手塞进「换默认后端」这个改动里。
       CORTEX_EMBED_BACKEND: fast
       CORTEX_EMBED_MODEL: bge-m3-int8
       FASTEMBED_CACHE_DIR: ${{ github.workspace }}/.cache/cortex-models
@@ -173,9 +186,14 @@ jobs:
           path: ${{ github.workspace }}/.cache/cortex-models
           key: fastembed-bge-m3-int8-v1
 
+      # `--features cortex-memory/local-embed` 不能省：fastembed 默认已经
+      # 不编进来了。省掉的话不是编译失败，而是**运行期**报
+      # 「CORTEX_EMBED_BACKEND=fast 需要 feature local-embed」——
+      # 那条错误信息就是为这一刻写的（见 embed.rs 的 build_embedder）
       - name: 跑评测
         run: |
-          cargo run -p cortex-evals --release -- run \
+          cargo run -p cortex-evals --release \
+            --features cortex-memory/local-embed -- run \
             --mode seed \
             --json evals-report.json \
             --md   evals-report.md
