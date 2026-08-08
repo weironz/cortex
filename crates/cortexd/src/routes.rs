@@ -23,6 +23,7 @@ use tokio_stream::StreamExt as _;
 use crate::blobs::{DIRECT_UPLOAD_LIMIT, RangeSpec, parse_range};
 use crate::dto::*;
 use crate::state::AppState;
+use cortex_proto::episodes::{EpisodeAck, NewEpisodeRequest};
 use cortex_proto::llm::{LlmStreamChunk, LlmStreamError, LlmStreamRequest};
 
 /// 声明全部受保护路由 —— **注册与清单出自同一份声明**。
@@ -83,6 +84,9 @@ protected_routes! {
     // LLM 代理。本地 agent 默认走这条路 —— API key 只在服务端一处，
     // 多设备不用每台配一遍。它**不碰记忆、不写库**，纯转发
     "/llm/stream" [POST] => post(llm_stream),
+    // 本地 agent 把一轮对话写回来。GET 那条是回放，两者共用路径前缀但
+    // 方向相反 —— 写在同一行会让「哪个方法归哪个 handler」读起来靠位置
+    "/episodes" [POST] => post(write_episode),
     "/episodes/{id}" [GET] => get(get_episode),
     "/sessions" [GET] => get(list_sessions),
     // PATCH 而非 PUT：客户端只送要改的字段，没送的原样不动。
@@ -290,6 +294,22 @@ async fn memory_search(
 }
 
 // ────────────────────────── episodes ───────────────────────────
+
+/// 本地 agent 把一轮对话写回记忆库。
+///
+/// 一次请求做完「写 episode + 检索 + 归因」三件事，理由见
+/// [`cortex_proto::episodes`] 的模块注释（拆开会让归因变成客户端说了算）。
+///
+/// **幂等**：同一个 id 写第二次返回 200 且 `already_existed = true`，
+/// 不是 409。离线队列重放会重复投递，那是预期内的正常路径 ——
+/// 报错会逼客户端把正常结果当异常处理，而那段代码平时跑不到、
+/// 真出事时才第一次执行。
+async fn write_episode(
+    State(st): State<AppState>,
+    Json(req): Json<NewEpisodeRequest>,
+) -> Result<Json<EpisodeAck>, ApiError> {
+    Ok(Json(st.write_episode(req).await?))
+}
 
 async fn get_episode(
     State(st): State<AppState>,

@@ -27,6 +27,7 @@ use tokio_stream::StreamExt as _;
 
 use crate::dto::*;
 use cortex_llm::MessageStream;
+use cortex_proto::episodes::{EpisodeAck, NewEpisodeRequest};
 use cortex_proto::llm::LlmStreamRequest;
 
 /// mock 后端的伪游标。见 [`AppState::new_mock`]。
@@ -433,6 +434,19 @@ impl AppState {
             Backend::Live(l) => Box::pin(tokio_stream::wrappers::ReceiverStream::new(
                 l.chat(req, confirms),
             )),
+        }
+    }
+
+    /// 本地 agent 把一轮对话写回记忆库。见 [`Live::write_episode`]。
+    ///
+    /// mock 后端下**不假装写成功**：本地 agent 会据此以为记忆已经落库，
+    /// 于是把队列里那一条划掉 —— 那才是真的丢数据。
+    pub async fn write_episode(&self, req: NewEpisodeRequest) -> Result<EpisodeAck> {
+        match &self.inner.backend {
+            Backend::Mock => Err(CortexError::Unavailable(
+                "本实例跑在 mock 后端上，没有可写入的记忆库".into(),
+            )),
+            Backend::Live(l) => l.write_episode(req).await,
         }
     }
 

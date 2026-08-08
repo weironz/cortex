@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use cortex_agent::{AgentEvent, Approval, ConfirmRequest, ToolHost, Turn};
 use cortex_core::{Config, CortexError, Id, Result};
 use cortex_llm::{LlmClient, MessageStream};
@@ -35,6 +35,7 @@ use tokio::sync::mpsc;
 
 use crate::confirm::{ConfirmRegistry, PendingMeta, preview_of};
 use crate::dto::*;
+use cortex_proto::episodes::{EpisodeAck, NewEpisodeRequest};
 use cortex_proto::llm::{LlmStreamRequest, ModelTier};
 
 /// 系统提示词。
@@ -259,6 +260,245 @@ impl Live {
     /// 工具目录是完整的内置目录（文件工具就是在这里出现的）。
     fn workspace_turn(&self, workspace: &str) -> Result<Turn> {
         Ok(Turn::new(workspace)?.with_max_rounds(self.max_rounds))
+    }
+
+    /// 本地 agent 把一轮对话写回记忆库。
+    ///
+    /// 这是 [`run_turn`] 的「记忆那一半」被单独拎出来的形态：agent 循环搬到
+    /// 本地之后，循环在那边跑，落库与检索留在这边。两条路走的是**同一段**
+    /// 逻辑（写 episode → 检索 → 归因 → 工具归因 → 抽取），刻意没有分叉。
+    ///
+    /// # 幂等，且判重在事务外
+    ///
+    /// 离线队列重放必然重复投递。判重是先读一次 `episodes`，命中就直接返回 ——
+    /// **不能**改成 `INSERT ... ON CONFLICT DO NOTHING`：`Guarded::insert_row`
+    /// 无条件往 `sync_log` 追一行，空操作会留下一条指向早已同步的 episode
+    /// 的幽灵行，而 `sync_log` 是同步的唯一事实序。
+    ///
+    /// 读放在事务外还有第二个理由：`write_txn` 刻意不提供读方法
+    ///（见 `cortex-store::txn` 的纪律三，取号事务必须短小纯写）。
+    ///
+    /// 真并发下两个重放同时穿过判重，后一个会撞 PK 唯一约束 ——
+    /// 那条路由 [`Self::write_episode`] 的调用方映射成同样的「已存在」。
+    pub async fn write_episode(&self, req: NewEpisodeRequest) -> Result<EpisodeAck> {
+        let episode_id: Id = req
+            .id
+            .parse()
+            .map_err(|_| CortexError::Invalid(format!("episode id 不是合法 ULID：{}", req.id)))?;
+        let role = match req.role.as_str() {
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            other => {
+                return Err(CortexError::Invalid(format!(
+                    "role 只接受 user / assistant，收到 {other}；\
+                     tool 与 system 不是「一轮对话」，它们由工具归因与系统提示各自表达"
+                )));
+            }
+        };
+
+        // ── 幂等判重 ──
+        if self
+            .store
+            .episode(&req.id)
+            .await
+            .map_err(store_err)?
+            .is_some()
+        {
+            tracing::debug!(episode = %req.id, "这条 episode 已经写过，本次是空操作");
+            return Ok(EpisodeAck {
+                episode_id: req.id,
+                memories: Vec::new(),
+                already_existed: true,
+            });
+        }
+
+        let occurred_at = match req.occurred_at.as_deref() {
+            None => Utc::now(),
+            Some(raw) => chrono::DateTime::parse_from_rfc3339(raw)
+                .map(|t| t.with_timezone(&Utc))
+                .map_err(|e| {
+                    CortexError::Invalid(format!(
+                        "occurred_at 不是合法的 RFC 3339 时间：{raw}（{e}）"
+                    ))
+                })?,
+        };
+
+        // ── 附件预检（事务外，理由同 run_turn 步骤 0）──
+        let attachments = dedup_attachments(&req.attachments);
+        for a in &attachments {
+            if self.store.blob(&a.hash).await.map_err(store_err)?.is_none() {
+                return Err(CortexError::Invalid(format!(
+                    "附件 {} 尚未登记；请先 POST /blobs 上传，或直传后 POST /blobs/commit",
+                    a.hash
+                )));
+            }
+        }
+
+        // ── 写 L0。tsv **由服务端算** ──
+        //
+        // 不接受客户端算好的 tsv：它决定 BM25 那一路能不能召回，算错了
+        // 没有任何症状（只是搜不到），而客户端有很多个、版本各不相同。
+        // 「tsv 与主行同事务」那条约束也只有在这一侧才保证得了。
+        let tsv = cortex_memory::tokenize::to_tsvector_input(&req.text);
+        let ep = NewEpisode {
+            id: episode_id,
+            session_id: req.session_id.clone(),
+            role,
+            content: serde_json::json!({ "text": req.text }),
+            text: Some(req.text.clone()),
+            tsv_source: Some(tsv),
+            domain: None,
+            device_id: self.device_id.clone(),
+            occurred_at,
+        };
+        let links: Vec<cortex_store::NewEpisodeBlob> = attachments
+            .iter()
+            .map(|a| cortex_store::NewEpisodeBlob {
+                episode_id,
+                blob_hash: a.hash.clone(),
+                kind: a.kind.clone(),
+                filename: a
+                    .filename
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| clamp_chars(s, cortex_store::ATTACHMENT_FILENAME_MAX_CHARS)),
+            })
+            .collect();
+
+        match self
+            .store
+            .write_txn(async |t| {
+                let mut last = t.insert_episode(&ep).await?;
+                for link in &links {
+                    last = t.link_episode_blob(link).await?;
+                }
+                Ok(last)
+            })
+            .await
+        {
+            Ok(_) => {}
+            // 判重与写入之间挤进了另一个重放。这是**正常路径**，不是错误 ——
+            // 报 500 会让客户端把一次成功的重放当成失败，然后永远重试下去
+            Err(e) if e.is_duplicate_key() => {
+                tracing::debug!(episode = %req.id, "并发重放撞上唯一约束，按已存在处理");
+                return Ok(EpisodeAck {
+                    episode_id: req.id,
+                    memories: Vec::new(),
+                    already_existed: true,
+                });
+            }
+            Err(e) => return Err(store_err(e)),
+        }
+
+        // ── 检索 + 归因 ──
+        let mut memories = Vec::new();
+        if req.retrieve && role == Role::User {
+            let retrieved = self
+                .retriever
+                .retrieve(&self.store, &req.text, None, self.context_window)
+                .await?;
+            if !retrieved.items.is_empty() {
+                memories = retrieved.items.iter().map(fact_dto_of).collect();
+                record_injected_memories(&self.store, episode_id, &retrieved, &self.device_id)
+                    .await;
+            }
+        }
+
+        // ── 工具归因（单独事务，理由见 run_turn 步骤 5b）──
+        if !req.tool_calls.is_empty() {
+            let anchor = req.anchor_episode_id.as_deref().unwrap_or(&req.id);
+            let anchor: Id = anchor.parse().map_err(|_| {
+                CortexError::Invalid(format!("anchor_episode_id 不是合法 ULID：{anchor}"))
+            })?;
+            let rows: Vec<cortex_store::NewEpisodeToolCall> = req
+                .tool_calls
+                .iter()
+                .enumerate()
+                .map(|(i, c)| cortex_store::NewEpisodeToolCall {
+                    id: Id::new(),
+                    episode_id: anchor,
+                    ordinal: i as i32,
+                    name: clamp_chars(&c.name, cortex_store::TOOL_NAME_MAX_CHARS),
+                    path: c
+                        .path
+                        .as_deref()
+                        .map(|p| clamp_chars(p, cortex_store::TOOL_PATH_MAX_CHARS)),
+                    summary: clamp_chars(&c.summary, cortex_store::TOOL_SUMMARY_MAX_CHARS),
+                    ok: c.ok,
+                    device_id: self.device_id.clone(),
+                })
+                .collect();
+            let n = rows.len();
+            let res = self
+                .store
+                .write_txn(async |t| {
+                    let mut last = 0;
+                    for c in &rows {
+                        last = t.insert_episode_tool_call(c).await?;
+                    }
+                    Ok(last)
+                })
+                .await;
+            // 与 run_turn 同样的取舍：对话已经完成，归因写不进去是可观测性的
+            // 损失，不该表现为一次失败的写入
+            if let Err(e) = res {
+                tracing::warn!(error = %e, calls = n, "工具归因落库失败");
+            }
+        }
+
+        // ── 异步抽取。绝不阻塞调用方 ──
+        if role == Role::Assistant {
+            self.spawn_extraction(req.anchor_episode_id.clone(), req.text.clone(), occurred_at);
+        }
+
+        Ok(EpisodeAck {
+            episode_id: req.id,
+            memories,
+            already_existed: false,
+        })
+    }
+
+    /// 把这一轮送进抽取管线。
+    ///
+    /// user 那半从库里读回来而不是让客户端再传一遍：同一句话有两个来源，
+    /// 就有了「两边不一样」这条要处理的路，而库里那一份才是权威。
+    fn spawn_extraction(&self, anchor: Option<String>, reply: String, occurred_at: DateTime<Utc>) {
+        let Some(anchor) = anchor else {
+            tracing::debug!("assistant episode 没带 anchor_episode_id，跳过抽取");
+            return;
+        };
+        let Ok(anchor_id) = anchor.parse::<Id>() else {
+            tracing::warn!(anchor, "anchor_episode_id 不是合法 ULID，跳过抽取");
+            return;
+        };
+        let store = self.store.clone();
+        let extractor = Arc::clone(&self.extractor);
+        tokio::spawn(async move {
+            let user_text = match store.episode(&anchor).await {
+                Ok(Some(ep)) => ep.text.unwrap_or_default(),
+                Ok(None) => {
+                    tracing::warn!(anchor, "抽取找不到对应的 user episode，跳过");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, anchor, "抽取读 user episode 失败，跳过");
+                    return;
+                }
+            };
+            let text = format!("用户：{user_text}\n助手：{reply}");
+            let ctx = ExtractContext::new(anchor_id, occurred_at);
+            match extractor.ingest(&store, &text, &ctx).await {
+                Ok(report) => tracing::info!(
+                    candidates = report.candidates,
+                    written = report.written.len(),
+                    superseded = report.superseded.len(),
+                    duplicates = report.duplicates,
+                    "本轮抽取完成（本地 agent）"
+                ),
+                Err(e) => tracing::warn!(error = %e, "本轮抽取失败（本地 agent）"),
+            }
+        });
     }
 
     /// LLM 代理：把本地 agent 的一次流式调用原样转给供应商。
@@ -1075,23 +1315,7 @@ async fn run_turn(
 
     if !retrieved.items.is_empty() {
         tx.send(ChatEvent::Memory {
-            facts: retrieved
-                .items
-                .iter()
-                .map(|m| FactDto {
-                    id: m.id.clone(),
-                    statement: m.statement.clone(),
-                    predicate: None,
-                    domain: m.domain.clone(),
-                    confidence: 1.0,
-                    valid_at: m.valid_at.clone(),
-                    created_at: m.known_since.clone(),
-                    // 本轮注入走的是不带 as_of 的召回，只查 active_facts ——
-                    // 按定义拿不到已失效的事实。见 `Live::invalidation_flags`
-                    invalidated: false,
-                    source_episode_id: m.source_episode_id.clone(),
-                })
-                .collect(),
+            facts: retrieved.items.iter().map(fact_dto_of).collect(),
         })
         .await
         .ok();
@@ -1515,6 +1739,27 @@ fn risk_str(risk: cortex_agent::Risk) -> &'static str {
 
 fn store_err(e: cortex_store::StoreError) -> CortexError {
     CortexError::Store(e.to_string())
+}
+
+/// 检索结果 → 线上事实。
+///
+/// [`run_turn`]（Web 那条路，走 SSE）与 [`Live::write_episode`]
+///（本地 agent 那条路，走 HTTP 响应）共用这一个映射。两处各写一份的话，
+/// 漂移的表现是**同一条记忆在两个客户端上长得不一样**，而没有任何报错。
+fn fact_dto_of(m: &cortex_memory::MemoryItem) -> FactDto {
+    FactDto {
+        id: m.id.clone(),
+        statement: m.statement.clone(),
+        predicate: None,
+        domain: m.domain.clone(),
+        confidence: 1.0,
+        valid_at: m.valid_at.clone(),
+        created_at: m.known_since.clone(),
+        // 本轮注入走的是不带 as_of 的召回，只查 active_facts ——
+        // 按定义拿不到已失效的事实。见 `Live::invalidation_flags`
+        invalidated: false,
+        source_episode_id: m.source_episode_id.clone(),
+    }
 }
 
 /// 一条消息的「附加物」：附件 + 回放抽屉。
