@@ -118,22 +118,27 @@ services:
       traefik.http.routers.cortex-s3.tls.certresolver: letsencrypt
       traefik.http.services.cortex-s3.loadbalancer.server.port: "9000"
 
-  # ── embedding 服务 ────────────────────────────────────
+  # ── embedding 服务（可选，profile `selfhost-embed`）─────
   #
-  # 把向量化从 cortexd 进程里搬出来，讲 OpenAI 的 `/v1/embeddings`。
-  # 这样「自建」与「用云服务」是**同一个协议**，切换只是改
-  # CORTEX_EMBED_ENDPOINT 一行。
+  # 向量化有三条路，**默认走第一条**：
   #
-  # ⚠️ **它比 cortexd 本身重得多。** bge-m3 是 5.68 亿参数、fp32 权重
-  # 约 2.2 GB，TEI 载入后常驻大致在 2.5–3 GB。**2 核 4 GB 的小机器跑不动**
-  # （这个项目自己那台深圳节点就跑不动，它上面还有别的十几个容器）。
-  # 那种机器请把 embeddings 这个服务停掉，改指一家云：
+  #   1. `CORTEX_EMBED_BACKEND=fast` —— 镜像里编进了 fastembed/ONNX，
+  #      进程内算。零外部依赖、零成本。首次启动从 Hugging Face 下 ~560 MB
+  #      权重进 `models` 卷；HF 不可达的机器可以预先把权重塞进那个卷
+  #   2. `=api` + 云服务 —— 见下面 cortexd 的 environment 段
+  #   3. `=api` + 自建，就是这个服务
   #
-  #     docker compose stop embeddings
+  # ⚠️ **第三条比 cortexd 本身重得多，所以它默认不启动。**
+  # bge-m3 是 5.68 亿参数、fp32 权重约 2.2 GB，TEI 载入后常驻 2.5–3 GB。
+  # 2 核 4 GB 的机器跑不动（这个项目自己那台深圳节点就跑不动，它上面
+  # 还有十几个别的容器）—— 而那正是本项目的目标机型，所以让它默认起来
+  # 等于让参考部署在 `up` 那一刻就 OOM。要自建就显式开：
+  #
   #     # .env 里：
-  #     CORTEX_EMBED_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1
-  #     CORTEX_EMBED_MODEL=text-embedding-v3
-  #     CORTEX_EMBED_API_KEY=sk-...
+  #     COMPOSE_PROFILES=selfhost-embed
+  #     CORTEX_EMBED_BACKEND=api
+  #     CORTEX_EMBED_ENDPOINT=http://embeddings/v1/embeddings
+  #     CORTEX_EMBED_MODEL=bge-m3          # ← TEI 用这个名字，不是 bge-m3-int8
   #
   # **模型必须是 1024 维** —— schema 写死 `VECTOR(1024)`。
   # OpenAI 的 text-embedding-3-small 是 1536、large 是 3072，直接接会被
@@ -143,6 +148,7 @@ services:
   embeddings:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
     container_name: cortex-embeddings
+    profiles: [selfhost-embed]
     restart: unless-stopped
     logging: *default-logging
     # 只进默认网络。**别加 traefik** —— TEI 不带任何鉴权，
@@ -216,18 +222,23 @@ services:
       # 是不可挽回的错误方向
       CORTEX_CONFIRM_TIMEOUT_SECS: ${CORTEX_CONFIRM_TIMEOUT_SECS:-180}
 
-      # 向量后端。默认走上面那个 embeddings 服务；
-      # 换成任何一家 OpenAI 兼容的云只需要改这三行（改 .env，不用改这个文件）：
+      # 向量后端。默认 `fast` —— 镜像里编进了 fastembed，进程内算，
+      # 不依赖任何外部服务（见上面 embeddings 一段的三条路）。
+      # 换成任何一家 OpenAI 兼容的云只需要改这四行（改 .env，不用改这个文件）：
       #
+      #   CORTEX_EMBED_BACKEND=api
       #   CORTEX_EMBED_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1
       #   CORTEX_EMBED_MODEL=text-embedding-v3
       #   CORTEX_EMBED_API_KEY=sk-...
       #
       # **模型必须是 1024 维**（schema 写死 VECTOR(1024)）。维度不符时
-      # cortexd 在第一次响应就报错并说明怎么办，不会静默写坏数据
-      CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-api}
+      # cortexd 在第一次响应就报错并说明怎么办，不会静默写坏数据。
+      #
+      # ⚠️ 换后端 = 换 `model_id`，已有事实会退出向量召回。cortexd 启动时
+      # 会 WARN 报出数量、`/health` 有 `embedding.stale`，后台回填器自动补。
+      CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-fast}
       CORTEX_EMBED_ENDPOINT: ${CORTEX_EMBED_ENDPOINT:-http://embeddings/v1/embeddings}
-      CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-bge-m3}
+      CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-bge-m3-int8}
       CORTEX_EMBED_API_KEY: ${CORTEX_EMBED_API_KEY:-}
       CORTEX_EMBED_BATCH: ${CORTEX_EMBED_BATCH:-}
 
@@ -243,9 +254,9 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
-      # models 卷只有 CORTEX_EMBED_BACKEND=fast（feature `local-embed` 的
-      # 那种构建）才用得上。留着是因为它不占空间，而删掉会让
-      # 「从旧版本回滚」的人丢掉已经下好的权重
+      # 默认后端 `fast` 的权重落在这里（~560 MB，首次启动从 HF 下）。
+      # **卷必须持久**：删掉它等于每次重建容器都重下一遍，而在 HF
+      # 不可达的机器上是「重建一次就永远起不来」
       - cortex-prod-models:/var/lib/cortex/models
       - cortex-prod-workspace:/var/lib/cortex/workspace
     deploy:

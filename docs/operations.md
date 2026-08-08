@@ -91,27 +91,45 @@ just doctor      # 任何时候想确认环境状态
 
 ### 向量化（embedding）跑在哪
 
-**cortexd 自己不跑模型**，它调一个 OpenAI 兼容的 `/v1/embeddings`。
-自建与用云是同一个协议，切换只改 `CORTEX_EMBED_ENDPOINT`。
+三条路，**默认第一条**。二三两条讲的是同一个协议
+（OpenAI 兼容的 `/v1/embeddings`），互换只改 `CORTEX_EMBED_ENDPOINT`。
 
 | `CORTEX_EMBED_BACKEND` | 跑在哪 | 什么时候用 |
 |---|---|---|
-| `api`（默认） | compose 里的 `embeddings` 服务，或任何一家云 | 生产与日常开发 |
+| `fast`（默认） | cortexd 进程内（ONNX） | 单机自托管。零外部依赖、零成本 |
+| `api` | 任何一家云，或 compose 里的 `embeddings` 服务 | 想把推理搬出主进程时 |
 | `hash` | 无 | 离线开发与无网 CI。**不是语义空间** |
-| `fast` | cortexd 进程内（ONNX） | 要「一个进程搞定」时。需要 feature `local-embed` 编的二进制 |
 
-**自建那个服务是这套栈里最重的一个。** bge-m3 是 5.68 亿参数、
-fp32 权重 2.2 GB，TEI 载入后常驻 2.5–3 GB，第一次启动要从 HuggingFace
-下那 2.2 GB（`/health` 在下完之前不通，正好当就绪探针）。
-**2 核 4 GB 的机器跑不动**，那种机器请：
+`fast` 要求二进制带 feature `local-embed`。**官方 docker 镜像默认带**
+（`scripts/docker/Dockerfile.cortexd`），从源码编则要显式加。首次启动会从
+HuggingFace 下 ~560 MB 权重进 `models` 卷，只下一次。
 
-```bash
-docker compose stop embeddings
+> 曾经把默认设成 `api` + 自建服务，2026-08 改回 `fast`。原因见下面
+> 「为什么自建服务默认不启动」。把 fastembed 做成可选 feature 的**初衷是让
+> Intel Mac 能编出裸二进制**，而裸二进制在 0.1.2 已经不发了 ——
+> 那个理由在 docker 这条路上不成立，于是镜像里把它编回去。
+
+#### 为什么自建的 `embeddings` 服务默认不启动
+
+它是这套栈里最重的一个：bge-m3 是 5.68 亿参数、fp32 权重 2.2 GB，
+TEI 载入后常驻 2.5–3 GB，首次启动要从 HuggingFace 下那 2.2 GB。
+**2 核 4 GB 的机器跑不动** —— 而那正是本项目的目标机型
+（本项目自己那台深圳节点就跑不动，它上面还有十几个别的容器）。
+让它默认起来，等于让参考部署在 `docker compose up` 那一刻就 OOM。
+
+所以它挂在 profile `selfhost-embed` 上，要自建就在 `.env` 里显式开：
+
+```
+COMPOSE_PROFILES=selfhost-embed
+CORTEX_EMBED_BACKEND=api
+CORTEX_EMBED_ENDPOINT=http://embeddings/v1/embeddings
+CORTEX_EMBED_MODEL=bge-m3
 ```
 
-然后在 `.env` 里指到一家云（填基地址即可，`/v1/embeddings` 会自动补全）：
+要用云就不开 profile，直接指过去（填基地址即可，`/v1/embeddings` 会自动补全）：
 
 ```
+CORTEX_EMBED_BACKEND=api
 CORTEX_EMBED_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1
 CORTEX_EMBED_MODEL=text-embedding-v3
 CORTEX_EMBED_API_KEY=sk-...

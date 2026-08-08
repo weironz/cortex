@@ -45,7 +45,8 @@ RUN set -eux; \
         echo '' > "$d/src/lib.rs"; \
         echo 'fn main() {}' > "$d/src/main.rs"; \
     done; \
-    cargo build --release -p cortexd -p cortex-cli 2>/dev/null || true
+    cargo build --release -p cortexd -p cortex-cli \
+        --features cortex-memory/local-embed 2>/dev/null || true
 
 # 真正的源码。上面那层的产物在依赖没变时命中缓存
 COPY crates/ crates/
@@ -55,7 +56,8 @@ COPY migrations/ migrations/
 # 触碰一下自家 crate 的时间戳，否则 cargo 会拿上一步的空壳当成已构建
 RUN set -eux; \
     find crates evals -name '*.rs' -exec touch {} +; \
-    cargo build --release -p cortexd -p cortex-cli; \
+    cargo build --release -p cortexd -p cortex-cli \
+        --features cortex-memory/local-embed; \
     strip target/release/cortexd target/release/cortex || true
 
 # ── sqlx-cli ──────────────────────────────────────────────

@@ -74,27 +74,34 @@ Sort (Sort Key: f.embedding <=> …)
 这一版**没修**（两条候选修法都会改变召回语义，是独立的一件事），
 但记下来了。
 
-### 向量化改成调远端 API，自建的那个跑在独立容器里
+### 向量化多了两条路：调远端 API，或自建一个独立容器
 
-**默认后端从「进程内 ONNX 推理」换成「调 OpenAI 兼容的 `/v1/embeddings`」。**
-compose 里多了一个 `embeddings` 服务（HuggingFace TEI + bge-m3），
-`CORTEX_EMBED_ENDPOINT` 指向它；想用云服务就把这个变量指到别处，
-自建与云是**同一个协议**。
-
-这不只是「轻一点」。原来 `fastembed`（内部 ONNX Runtime）是硬依赖，
-代价是三条：
+原来只有一条路 —— `fastembed`（内部 ONNX Runtime）在 `cortex-memory` 里是
+**硬依赖、没有 feature gate**。代价是三条：
 
 1. **Intel Mac 根本编不出来** —— `ort-sys: no prebuilt binaries available`。
    这是**构建期**失败，连 `CORTEX_EMBED_BACKEND=hash` 都救不了。
    0.1.0 发版时为此把 Intel Mac 从产物矩阵里删掉了
-2. **每台机器都要能拿到那 590 MB 权重**。第一次上生产时那台节点
+2. **每台机器都要能拿到那 560 MB 权重**。第一次上生产时那台节点
    Hugging Face 完全不可达（DNS 被污染、`hf-mirror.com` 也不通），
    cortexd 于是**照常启动、`/health` 返回 `ok`**，只在日志里留一行
    「回落到 mock 数据源」—— 记忆检索是假的，而没有任何红灯
 3. 冷启动 12 秒、常驻 1.0 GiB
 
-`fastembed` 现在是可选 feature `local-embed`，默认不编。
-要「一个进程搞定、不依赖任何外部服务」时自己带上它重编。
+现在 `fastembed` 是可选 feature `local-embed`，而 `CORTEX_EMBED_BACKEND`
+有三个取值：`fast`（进程内 ONNX）、`api`（任何 OpenAI 兼容的
+`/v1/embeddings`）、`hash`（离线用，不是语义空间）。
+compose 里也多了一个自建的 `embeddings` 服务（HuggingFace TEI + bge-m3）——
+自建与用云是**同一个协议**，互换只改 `CORTEX_EMBED_ENDPOINT`。
+
+**但默认仍然是 `fast`，自建那个服务默认不启动**（挂在 profile
+`selfhost-embed` 上）。中途一度把默认改成 `api` + 自建，又改了回来：
+那个服务 bge-m3 fp32 权重 2.2 GB、TEI 载入后常驻 2.5–3 GB，
+**2 核 4 GB 的机器跑不动**，而那正是本项目的目标机型 ——
+让它默认起来等于让参考部署在 `docker compose up` 那一刻就 OOM。
+官方 docker 镜像因此带上了 `local-embed`：把它做成可选 feature 的初衷是
+让 Intel Mac 能编出**裸二进制**，而裸二进制这一版已经不发了（见下），
+那个理由在 docker 这条路上并不成立。
 
 **要注意的三件事：**
 
@@ -103,9 +110,9 @@ compose 里多了一个 `embeddings` 服务（HuggingFace TEI + bge-m3），
   OpenAI 的 `text-embedding-3-small` 是 1536、`large` 是 3072，
   直接接会被 cortexd 在**第一次响应**就拒掉 —— 而不是留给 Postgres 的
   约束去报一条看不懂的写失败
-- **自建那个服务比 cortexd 本身重得多**：bge-m3 是 5.68 亿参数，
-  fp32 权重 2.2 GB，TEI 载入后常驻 2.5–3 GB。**2 核 4 GB 的机器跑不动**，
-  那种机器请 `docker compose stop embeddings` 并把 endpoint 指到云
+- **从源码编要显式加 feature**：`cargo build -p cortexd
+  --features cortex-memory/local-embed`。不加而又设了 `=fast`，
+  启动时会报「需要 feature `local-embed`」，不会静默降级
 - **换后端等于换向量空间**，哪怕「还是那个 bge-m3、只是从进程内换到远端」——
   量化与池化实现并不逐位一致。所以库里写的 `embedding_model` 变成了
   `api:<模型名>`，与旧的 `fastembed:...` 可分辨；
