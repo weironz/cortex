@@ -134,6 +134,11 @@ async fn health(State(st): State<LocalState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "version": cortex_core::VERSION,
+        // 协议握手只在启动那一刻做过一次。之后远端可能被升级到一个
+        // 不再支持本端的版本 —— 那时**不该**把这个进程杀掉（用户正聊到一半），
+        // 但要能看出来。这两个数字就是排查时的第一现场
+        "protocol": cortex_proto::PROTOCOL_VERSION,
+        "min_peer_protocol": cortex_proto::MIN_PEER_PROTOCOL,
         "role": "local-agent",
         "sandbox": cortex_agent::status_line_for(cortex_agent::Attended::Yes),
         "memory": {

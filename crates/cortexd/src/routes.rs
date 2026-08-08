@@ -137,6 +137,8 @@ async fn health(State(st): State<AppState>) -> Json<Health> {
     Json(Health {
         status: "ok",
         version: cortex_core::VERSION,
+        protocol: cortex_proto::PROTOCOL_VERSION,
+        min_peer_protocol: cortex_proto::MIN_PEER_PROTOCOL,
         database: st.database_status().await,
         blob_backend: st.blob_backend(),
         auth: st.auth_mode().as_str(),

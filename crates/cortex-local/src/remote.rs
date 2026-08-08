@@ -144,6 +144,38 @@ impl Remote {
         checked(resp).await
     }
 
+    /// 远端讲的协议能不能对话。
+    ///
+    /// 三态，而**三态都不能合并**：
+    ///
+    /// - `Ok(Ok(()))` —— 兼容，正常启动。
+    /// - `Ok(Err(msg))` —— 连上了，但协议不兼容。**必须拒绝启动**：
+    ///   降级运行的表现是「某个功能悄悄不对」，比起不起来难查得多。
+    /// - `Err(_)` —— **连不上**。这不是不兼容，是离线，而离线是本地 agent
+    ///   明确支持的形态（对话照常、写入排进 outbox）。因为拿不到远端版本
+    ///   就拒绝启动，等于把「网络不好」变成「装了个用不了的东西」。
+    ///
+    /// # Errors
+    /// 远端不可达，或 `/health` 的响应不是能解析的 JSON。
+    pub async fn protocol_check(&self) -> Result<std::result::Result<(), String>> {
+        let resp = self
+            .auth(self.http.get(self.url("/health")))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(map_transport)?;
+        let peer: cortex_proto::dto::PeerProtocol = checked(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| CortexError::Unavailable(format!("解析远端 /health 失败：{e}")))?;
+        Ok(cortex_proto::check_peer(
+            peer.protocol,
+            peer.min_peer_protocol,
+            "远端 cortexd",
+        ))
+    }
+
     /// 远端活着吗。决定这一轮是走在线路径还是排进 outbox。
     pub async fn is_reachable(&self) -> bool {
         self.http

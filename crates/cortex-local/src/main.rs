@@ -108,6 +108,25 @@ async fn main() -> anyhow::Result<()> {
     let route = LlmRoute::from_env()?;
 
     let remote = Remote::new(&args.remote, args.token.clone())?;
+
+    // ── 协议握手：不兼容就**不启动** ──────────────────────────
+    //
+    // 从 0.1.4 起，桌面端里的这个进程与远端 cortexd 各自独立升级。
+    // 两侧对不上时降级运行的表现是「某个功能悄悄不对」，而那比
+    // 「起不来并说清原因」难查一个量级。
+    //
+    // 连不上**不算**不兼容：离线是本地 agent 明确支持的形态
+    // （对话照常、写入排进 outbox）。因为网络不好就拒绝启动，
+    // 等于把一次断网变成「装了个用不了的东西」。见 `Remote::protocol_check`
+    match remote.protocol_check().await {
+        Ok(Ok(())) => tracing::info!(protocol = cortex_proto::PROTOCOL_VERSION, "协议握手通过"),
+        Ok(Err(msg)) => anyhow::bail!("与远端 cortexd 的协议不兼容：{msg}"),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "握不上远端，跳过协议检查照常启动 —— 离线可用是刻意的"
+        ),
+    }
+
     let outbox = Outbox::new(&dir);
     let workspaces = Workspaces::load(&dir);
     let llm = llm::build(route, &remote)?;
