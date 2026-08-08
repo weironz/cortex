@@ -79,6 +79,47 @@ final appConfigProvider = NotifierProvider<AppConfigNotifier, AppConfig>(
 /// Signing out or switching backends disposes this provider, which stops the
 /// agent. That matters: it holds the token and can execute commands, so it must
 /// not outlive the session that authorised it.
+/// How many consecutive deaths before we stop trying.
+///
+/// Some failures never get better by retrying — a protocol mismatch with the
+/// remote, a corrupt binary, a port the OS refuses. Restarting those forever
+/// burns CPU and buries the real error under a wall of identical log lines.
+/// Give up, stay on the remote, and leave the reason in the log.
+const _maxConsecutiveRestarts = 5;
+
+/// Live this long and the run counts as healthy — the failure budget resets.
+///
+/// Without this, an agent that dies once a day would eventually exhaust a
+/// lifetime budget and stop being restarted, which is the opposite of what a
+/// supervisor is for. What we are actually trying to detect is a *crash loop*,
+/// and a crash loop is defined by dying **quickly**, not by dying often.
+const _healthyRunThreshold = Duration(seconds: 30);
+
+/// Survives [localAgentOriginProvider] being invalidated, which is exactly why
+/// it is separate: the restart counter has to outlive the thing it counts.
+///
+/// It does **not** survive signing in again or pointing at a different server.
+/// Both are the user actively changing the situation, and both are the actual
+/// fix for the failures that exhaust this budget — a protocol mismatch is
+/// resolved by aiming at a different daemon, and a stale token by signing in.
+/// Keeping a spent budget across either would mean the fix appears not to work.
+final _agentRestartBudgetProvider = Provider<_RestartBudget>((ref) {
+  ref.watch(authControllerProvider.select((s) => s.token));
+  ref.watch(appConfigProvider.select((c) => c.baseUrl));
+  return _RestartBudget();
+});
+
+class _RestartBudget {
+  int consecutive = 0;
+
+  bool get exhausted => consecutive >= _maxConsecutiveRestarts;
+
+  /// 1s, 2s, 4s, 8s, 16s. Backing off matters more than it looks: the common
+  /// cause of an instant re-death is something transient holding a resource,
+  /// and hammering it is how a transient failure becomes a permanent one.
+  Duration get delay => Duration(seconds: 1 << consecutive.clamp(0, 4));
+}
+
 final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   final config = ref.watch(appConfigProvider);
   final token = ref.watch(authControllerProvider.select((s) => s.token));
@@ -86,16 +127,83 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
 
   final agent = discoverLocalAgent();
   if (agent == null) return null;
-  ref.onDispose(() => unawaited(agent.stop()));
+
+  var disposed = false;
+  Timer? restartTimer;
+  ref.onDispose(() {
+    disposed = true;
+    restartTimer?.cancel();
+    unawaited(agent.stop());
+  });
+
+  final budget = ref.read(_agentRestartBudgetProvider);
+  if (budget.exhausted) {
+    debugPrint(
+      '本地 agent 连续 $_maxConsecutiveRestarts 次启动即退出，不再重试；'
+      '已回落到直连远端。重新登录可重置',
+    );
+    return null;
+  }
+
+  final startedAt = DateTime.now();
+
+  /// One policy for both ways this can fail.
+  ///
+  /// "It died after running" and "it never came up" look different but call for
+  /// the same response: back off, try again, and stop after enough tries. Two
+  /// separate policies would drift — and the one that got forgotten would be
+  /// the silent one.
+  void scheduleRestart(String why) {
+    if (disposed) return;
+
+    // A run that lasted counts as proof the thing works; whatever killed it was
+    // not a startup failure. Reset before incrementing so a long-lived agent
+    // that dies once starts over at a 1-second backoff.
+    if (DateTime.now().difference(startedAt) >= _healthyRunThreshold) {
+      budget.consecutive = 0;
+    }
+    budget.consecutive++;
+    debugPrint('本地 agent（第 ${budget.consecutive} 次）：$why');
+
+    if (budget.exhausted) {
+      debugPrint('不再重试本地 agent —— 上面那段是它最后说的话。已回落到直连远端');
+      // Still invalidate: the provider must re-run to hand the rest of the app
+      // a null origin, otherwise every request keeps going to a port nobody is
+      // listening on.
+      ref.invalidateSelf();
+      return;
+    }
+    restartTimer = Timer(budget.delay, () {
+      if (!disposed) ref.invalidateSelf();
+    });
+  }
 
   try {
-    final origin = await agent.start(remote: config.baseUrl, token: token);
+    final origin = await agent.start(
+      remote: config.baseUrl,
+      token: token,
+      // Unexpected death only — a deliberate `stop()` never lands here, so
+      // signing out cannot be mistaken for a crash.
+      //
+      // The tail is the only record of *why*: `cortex-local` refusing to start
+      // on a protocol mismatch prints one line, and without it the user sees
+      // nothing but "tools stopped working".
+      onExit: (code, logTail) => scheduleRestart(
+        '退出，code=$code${logTail.isEmpty ? '' : '\n$logTail'}',
+      ),
+    );
     debugPrint('本地 agent 已就绪：$origin（工具在本机执行）');
     return origin;
   } on LocalAgentException catch (e) {
     // Loud in the log, silent in the UI: the app still works, it just runs
     // tools on the server. Blocking here would be worse than degrading.
-    debugPrint('本地 agent 未启动，回落到直连远端：$e');
+    //
+    // Retried on the same budget rather than given up on: the usual cause of a
+    // one-off start failure is something transient holding the executable (a
+    // virus scanner sweeping a freshly-installed .exe is the common one), and
+    // that clears on its own within seconds. A permanent cause — a protocol
+    // mismatch, a missing binary — burns the budget instead and then stops.
+    scheduleRestart('$e');
     return null;
   }
 });

@@ -19,6 +19,7 @@ class LocalAgent {
     required String remote,
     required String token,
     Duration timeout = const Duration(seconds: 20),
+    void Function(int code, String logTail)? onExit,
   }) async =>
       throw const LocalAgentException('Web 构建不运行本地 agent');
 

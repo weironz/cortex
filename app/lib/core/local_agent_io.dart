@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 /// Desktop can run an agent. See `local_agent.dart` for the seam's rationale.
@@ -95,6 +96,19 @@ class LocalAgent {
   Process? _process;
   String? _origin;
   StreamSubscription<void>? _exitWatch;
+  final List<StreamSubscription<void>> _pipes = [];
+
+  /// Set by [stop] so the exit that follows is not reported as a crash.
+  bool _stopping = false;
+
+  /// Last lines the child printed, oldest first.
+  ///
+  /// Kept rather than discarded because this is the **only** place the reason
+  /// for a death survives. `cortex-local` refuses to start on a protocol
+  /// mismatch, and that refusal is one line on stderr — throw the pipe away
+  /// and the user gets "the agent is not running" with no way to learn why.
+  final List<String> _logTail = [];
+  static const _tailLines = 30;
 
   /// `http://127.0.0.1:<port>` once running, else null.
   String? get origin => _origin;
@@ -107,12 +121,21 @@ class LocalAgent {
   /// or never reports an address. **Callers should fall back to talking to the
   /// remote directly** rather than blocking sign-in: an agent that will not
   /// start costs you local tools, not the whole app.
+  /// [onExit] fires only for an exit **we did not ask for** — a crash, an OOM
+  /// kill, a refusal to start. A [stop] never triggers it, so the caller can
+  /// treat every call as "this needs handling" without tracking intent itself.
+  ///
+  /// It receives the exit code and the tail of what the child printed. The tail
+  /// is the whole point: without it, "the agent died" is unactionable.
   Future<String> start({
     required String remote,
     required String token,
     Duration timeout = const Duration(seconds: 20),
+    void Function(int code, String logTail)? onExit,
   }) async {
     if (_process != null) return _origin!;
+    _stopping = false;
+    _logTail.clear();
 
     final exe = File(executable);
     if (!exe.existsSync()) {
@@ -160,19 +183,29 @@ class LocalAgent {
     }
     _process = proc;
 
-    // Drain both pipes. Not draining them is a real hang on Windows: the child
-    // blocks once the OS buffer fills, which happens after a few hundred log
-    // lines — so the agent would work fine for a minute and then freeze.
-    proc.stdout.drain<void>();
-    proc.stderr.drain<void>();
+    // Both pipes must be consumed. Not consuming them is a real hang on
+    // Windows: the child blocks once the OS buffer fills, which happens after a
+    // few hundred log lines — so the agent works fine for a minute and then
+    // freezes.
+    //
+    // They used to be `drain()`ed straight to nothing, which satisfied that
+    // requirement and threw away the only record of *why* the child died.
+    // Now the last lines are kept; the rest still goes nowhere.
+    //
+    // Both streams into one buffer: Rust's tracing writes to stdout while a
+    // fatal `Error:` goes to stderr, and when diagnosing a death you want the
+    // last few log lines *and* the error, interleaved as they happened.
+    _pipes.addAll([_tail(proc.stdout), _tail(proc.stderr)]);
 
     _exitWatch = proc.exitCode.asStream().listen((code) {
+      final unexpected = !_stopping;
       _process = null;
       _origin = null;
-      if (code != 0) {
-        // ignore: avoid_print
-        print('cortex-local 退出，code=$code');
+      for (final p in _pipes) {
+        unawaited(p.cancel());
       }
+      _pipes.clear();
+      if (unexpected) onExit?.call(code, _logTail.join('\n'));
     });
 
     final addr = await _awaitAddress(addrFile, timeout);
@@ -184,9 +217,20 @@ class LocalAgent {
       // Swept on the next start.
     }
     if (addr == null) {
+      // Grab the tail **before** stop(), which clears the pipes.
+      //
+      // This is the branch a protocol mismatch takes: the child prints one line
+      // explaining itself and exits, so `_awaitAddress` returns null and we
+      // land here. Reporting only "no address in 20s" would throw away the one
+      // sentence that says what to do about it — and that sentence is the
+      // entire reason the child refuses to start rather than limping along.
+      final why = _logTail.isEmpty ? '' : '\n它最后说的是：\n${_logTail.join('\n')}';
+      final died = _process == null;
       await stop();
       throw LocalAgentException(
-        '本地 agent 在 ${timeout.inSeconds} 秒内没有报出监听地址',
+        died
+            ? '本地 agent 启动后立即退出$why'
+            : '本地 agent 在 ${timeout.inSeconds} 秒内没有报出监听地址$why',
       );
     }
     _origin = 'http://$addr';
@@ -212,6 +256,21 @@ class LocalAgent {
     return null;
   }
 
+  /// Consumes a pipe, keeping the last [_tailLines] lines.
+  ///
+  /// `allowMalformed` because this decodes whatever the child happened to
+  /// write. A stray non-UTF-8 byte — a Windows console codepage leaking through
+  /// a library's error string — would otherwise throw *inside the drain*, which
+  /// stops consuming the pipe and reintroduces the buffer-full hang. A garbled
+  /// character in a log tail is a non-event; a frozen agent is not.
+  StreamSubscription<void> _tail(Stream<List<int>> pipe) => pipe
+      .transform(const Utf8Decoder(allowMalformed: true))
+      .transform(const LineSplitter())
+      .listen((line) {
+        _logTail.add(line);
+        if (_logTail.length > _tailLines) _logTail.removeAt(0);
+      }, onError: (_) {});
+
   /// Removes handshake files left by runs that crashed before reading theirs.
   ///
   /// They are tiny, but an unbounded pile of them in the user's state
@@ -232,12 +291,21 @@ class LocalAgent {
   }
 
   /// Stops the agent. Safe to call when it is not running.
+  ///
+  /// Sets [_stopping] first so the exit this causes is not reported through
+  /// `onExit` — otherwise signing out would look like a crash and the
+  /// supervisor would helpfully restart the process we just killed.
   Future<void> stop() async {
+    _stopping = true;
     final proc = _process;
     _process = null;
     _origin = null;
     await _exitWatch?.cancel();
     _exitWatch = null;
+    for (final p in _pipes) {
+      await p.cancel();
+    }
+    _pipes.clear();
     if (proc == null) return;
     proc.kill();
     // Bounded wait: if it will not go, we are on our way out anyway and the

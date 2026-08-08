@@ -1,6 +1,7 @@
 @TestOn('vm')
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -98,6 +99,63 @@ void main() {
             reason: 'token 出现在了命令行上 —— 同机任意进程都读得到',
           );
         }
+      },
+      timeout: const Timeout(Duration(seconds: 60)),
+    );
+
+    test(
+      'a daemon that refuses to talk to us says so, in words',
+      skip: exe == null ? '找不到 cortex-local 二进制' : null,
+      () async {
+        // 装了桌面端之后，本地 agent 与远端 cortexd 就各自独立升级了。
+        // 两侧协议对不上时 agent **拒绝启动**（降级运行的表现是「某个功能
+        // 悄悄不对」，比起不起来难查一个量级）。
+        //
+        // 但拒绝启动只完成了一半：拒绝的**理由**必须一路传到调用方。
+        // 子进程的管道曾经是直接 drain 到空的，于是用户能看到的只有
+        // 「本地 agent 没起来」，而真正那句「请升级本机这一侧」被扔掉了。
+        final fake = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(fake.close);
+        unawaited(() async {
+          await for (final req in fake) {
+            req.response
+              ..headers.contentType = ContentType.json
+              // 一个「比我们新、且已经不再支持这么老的客户端」的 cortexd
+              ..write('{"status":"ok","protocol":999,"min_peer_protocol":999}');
+            await req.response.close();
+          }
+        }());
+
+        final stateDir = Directory.systemTemp.createTempSync('cortex-agent-');
+        addTearDown(() => stateDir.deleteSync(recursive: true));
+        final agent = LocalAgent(executable: exe!, stateDir: stateDir.path);
+        addTearDown(agent.stop);
+
+        final err = await agent
+            .start(
+              remote: 'http://127.0.0.1:${fake.port}',
+              token: 't',
+              timeout: const Duration(seconds: 15),
+            )
+            .then<Object?>((_) => null, onError: (Object e) => e);
+
+        expect(
+          err,
+          isA<LocalAgentException>(),
+          reason: '协议不兼容时必须启动失败，而不是带着一个对不上的契约跑起来',
+        );
+        final msg = err.toString();
+        expect(
+          msg,
+          contains('协议'),
+          reason: '错误里必须点明是协议问题。只说「没起来」等于让人去猜：\n$msg',
+        );
+        expect(
+          msg,
+          contains('本机'),
+          reason: '这个方向该让用户升**本机**这一侧，而这句话来自子进程的输出 ——'
+              '它证明管道确实被读了，没有被 drain 掉：\n$msg',
+        );
       },
       timeout: const Timeout(Duration(seconds: 60)),
     );
