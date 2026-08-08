@@ -80,8 +80,28 @@ fn is_alive(pid: u32) -> bool {
 
 #[cfg(unix)]
 fn is_alive(pid: u32) -> bool {
-    // kill(pid, 0)：不发信号，只做「进程存在且我有权给它发信号」的检查
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    // `pid_t` 是 i32。**不能直接 `as`**：一个装不下的 u32 会绕成负数，
+    // 而 `kill` 对非正数有完全不同的含义 ——
+    //   `kill(-1, …)` = 「我有权发信号的**所有**进程」
+    //   `kill(0,  …)` = 「我自己的进程组」
+    //   `kill(-n, …)` = 「进程组 n」
+    // 三种都会成功返回，于是任何越界的 pid 都被判成「活着」，
+    // 而那意味着孤儿永远不会被回收。CI 上是 `u32::MAX` 撞出来的。
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+
+    // 信号 0：不真的发，只做「进程存在且我有权给它发信号」的检查
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    // EPERM = **进程存在**，只是我没权限给它发信号（换了用户跑的 GUI）。
+    // 判成死的会让本地 agent 在监护人好好跑着的时候自杀，
+    // 而用户看到的是「聊天突然连不上了」，没有任何别的线索
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -105,18 +125,26 @@ mod tests {
         );
     }
 
-    /// 一个几乎不可能存在的 pid 必须判成死的。
+    /// 不存在的 pid 必须判成死的。
     ///
     /// 只判「活着」是不够的：一个恒返回 true 的实现能通过上一条，
     /// 而它意味着孤儿永远不会被回收。
+    ///
+    /// `u32::MAX` 这个取值是**特意**留着的：它在 unix 上 `as pid_t` 会绕成
+    /// `-1`，而 `kill(-1, 0)` 的语义是「我能发信号的所有进程」并且**成功返回**。
+    /// CI 上就是它把那个 bug 撞出来的（见 [`is_alive`] 的注释）。
     #[test]
     fn an_absent_pid_is_detected_as_dead() {
-        // Windows 的 pid 是 DWORD，Linux 默认上限 4194304。
-        // u32::MAX 在两边都不会是一个活着的进程
-        assert!(
-            !is_alive(u32::MAX),
-            "探测恒真 —— 那样父进程死了也不会有人收掉这个握着 token 的进程"
-        );
+        for pid in [u32::MAX, u32::MAX - 1, 0x8000_0000] {
+            assert!(
+                !is_alive(pid),
+                "pid {pid} 被判成活着 —— 那样父进程死了也不会有人收掉这个\
+                 握着 token 的进程。unix 上要当心 `as pid_t` 绕成负数"
+            );
+        }
+        // 一个大到不可能、但**没有**绕成负数的 pid。
+        // 上面几个是溢出路径，这个走的是「真的查了一遍，没有」
+        assert!(!is_alive(4_194_303), "Linux 默认 pid 上限附近，不该有进程");
     }
 
     /// 没传 pid 时不该起任何任务，也不该 panic。
