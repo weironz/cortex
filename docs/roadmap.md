@@ -74,24 +74,40 @@ CLI / 桌面 / Web  ──►  cortexd  ──►  DeepSeek
 |---|---|---|
 | D1 | cortexd 加 `GET /memory/context`（检索 + 渲染成注入块）、`POST /episodes`（写回 + 触发抽取）、`POST /llm/stream`（**可选**的 LLM 代理） | 本地进程能拿到记忆 |
 | D2 | 本地 agent 二进制：复用 `cortex-agent` 的循环、工具与沙箱，记忆访问换成上面三个端点 | 命令行里先跑通 |
-| D3 | 安装程序把它与 GUI 一起装、随 GUI 起、绑 `127.0.0.1`。**先解 D0** | **装完能用** |
+| D3 | 安装程序把它与 GUI 一起装、随 GUI 起、绑 `127.0.0.1` | **装完能用**（终端那半要等 D0） |
 | D4 | 会话绑定从「服务器上的目录」改成「本地某个目录」 | 编码那一半真的成立 |
 
-**D0 · Windows 沙箱 —— D3 的前置阻塞项**
+**D0 · Windows 上跑不了命令 —— 与 D3 并行，不挡它**
 
 两个各自都对的决定撞在一起了：
 
 - 桌面安装程序**只发 Windows**（0.1.1 的决定）
 - Windows **没有** landlock / seatbelt 的对应物 → `Capability::Unavailable`
-  → **默认拒绝执行工具**
 
-于是 D 落地后，Windows 用户装完会发现 **agent 一个文件都不肯写**，
-除非手动 `CORTEX_SANDBOX=unsandboxed` —— 那等于把安全兜底整个关掉。
-**这不是「以后再说」，它挡着 D3。**
+**影响范围要说准**（2026-08-08 在 Windows 上实测过，此前这里写错了）：
 
-候选方向（都没做，各自要评估）：Windows AppContainer / Job Object、
-把工具跑进受限子进程、或者对 `Risk::Read`/`Write` 分级放行而
-只对 `Risk::Execute` 保持硬拒。
+| | Windows 上 | 为什么 |
+|---|---|---|
+| 文件读 / 写 / 列目录 | ✅ 正常 | `ToolSandbox::resolve` 的围栏是纯路径逻辑（拒 `..`、拒绝对路径、`Component::Prefix(_)` 显式挡盘符），不依赖内核。`cargo test -p cortex-agent --lib tools` 16 条在 Windows 上全过 |
+| `shell` 执行命令 | ❌ 被拒 | `tools.rs` 里只有这一处调 `sandbox::prepare`。`without_a_sandbox_execution_is_refused_by_default` 在 Windows 上**真跑**（守卫是反的），断言拒绝理由里带着降级开关的名字 |
+
+所以 Windows 用户装完是「能改代码、不能跑测试」——
+大致是「没有终端的 Cursor」。**degraded 但可用**，因此 D3 不必等 D0，
+只需要在界面上把这件事说明白，别让人以为是自己配错了。
+
+候选方向（都没做，各自要评估）：
+
+1. **把 `Risk::Execute` 接到 R11 的确认回路**，而不是硬拒 ——
+   本地 agent 跑在用户自己的机器上、操作用户自己的文件，
+   威胁模型是「agent 犯错 / 被投毒」，而那正是确认回路防的东西。
+   Claude Code 在 Windows 上就是这么做的（它根本没有 OS 沙箱）。
+   **最便宜，且不需要新的内核知识**
+2. Windows AppContainer / Job Object —— 真沙箱，但工作量与不确定性都大
+3. 把工具跑进受限子进程（降权 token + 限制目录 ACL）
+
+注意 1 与 2/3 不是一回事：1 是**换一种保证**（人来确认），2/3 是
+**补上同一种保证**（内核隔离）。服务端那侧必须继续走 2/3 那条 ——
+远端触发的执行没有「人在场」这个前提。
 
 > 这条是外部评审提出来的，虽然他担心的是「裸奔」而实际问题正好相反
 > （装了用不了）—— 但没有那一问不会去撞这两条决定。

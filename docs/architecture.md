@@ -170,24 +170,30 @@ CLI 自动拉起本地 daemon —— 四样都不存在），读的人会以为�
 |---|---|
 | 「每次工具调用都要远程查记忆，RTT 会成瓶颈」 | 记忆检索是**每轮对话一次**（`live.rs` 的 `retriever.retrieve`），不是每次工具调用。一轮 = 「取记忆 + 写回」两次 RTT。**建议的「批量异步写回」刻意不做** —— append-only 的「写入不丢」要求写及时，攒着批量正是丢数据的形状 |
 | 「读了大文件会把大量文本传回服务端」 | 工具输出的**原始字节已定案不存**（[memory-content.md](memory-content.md) §三，`cortex_memory::trace::safe_text` 负责剪掉）。进记忆的只有 `name / path / ok / summary` |
-| 「Windows 缺沙箱，工具会裸奔」 | 方向反了。`Capability::Unavailable` 时**默认拒绝执行**，除非把 `CORTEX_SANDBOX=unsandboxed` 显式写进环境。真正的问题见下面「Windows 上装了却用不了」 |
+| 「Windows 缺沙箱，工具会裸奔」 | 方向反了。`Capability::Unavailable` 时**默认拒绝执行**，除非把 `CORTEX_SANDBOX=unsandboxed` 显式写进环境。真正的问题见下面「Windows 上跑不了命令」 |
 | 「`/llm/stream` 代理会泄露 API key，应当移除」 | **key 本来就必须在服务端** —— 抽取要调 LLM，这与代理无关。移除代理不会让 key 离开服务器。默认走本地直连（见上面 ①）的理由是**配置便利**（想换模型不必碰服务器），不是安全 |
 
-### ⚠️ Windows 上「装了却用不了」—— 两个决定的直接冲突
+### ⚠️ Windows 上跑不了命令 —— 两个决定的直接冲突
 
 - 桌面安装程序**只发 Windows**（0.1.1 的决定，理由是 SmartScreen 是警告而
   Gatekeeper 是硬拒绝）
 - 而 Windows **没有** landlock / seatbelt 的对应物，`Capability::Unavailable`
-  → **默认拒绝执行工具**
 
-两条各自都对，撞在一起就是：**D 落地后，Windows 用户装完桌面端，
-会发现 agent 一个文件都不肯写** —— 除非手动设 `CORTEX_SANDBOX=unsandboxed`，
-而那等于把安全兜底整个关掉。
+**影响范围**（2026-08-08 在 Windows 上实测；此前这一节把它写大了，
+说成「一个文件都不肯写」，那是错的）：
 
-这是 D3（把本地 agent 装进安装程序）的**前置阻塞项**，不是可以以后再说的事。
-候选方向（都没做，需要各自评估）：Windows AppContainer / Job Object、
-把工具跑进一个受限子进程、或者对 `Risk::Read` 与 `Risk::Write` 分级放行
-而只对 `Risk::Execute` 保持硬拒。见 [roadmap D](roadmap.md)。
+| | Windows 上 | 为什么 |
+|---|---|---|
+| 文件读 / 写 / 列目录 | ✅ 正常 | `ToolSandbox::resolve` 的围栏是纯路径逻辑，不依赖内核 |
+| `shell` 执行命令 | ❌ 被拒 | `tools.rs` 里只有这一处调 `sandbox::prepare` |
+
+所以 D 落地后，Windows 用户装完是「能改代码、不能跑测试」——
+**degraded 但可用**。因此它不挡 D3，只是要在界面上说清楚
+（否则用户会以为是自己配错了，而这种误解会以「差评」的形式回来）。
+
+候选方向与它们的取舍见 [roadmap D0](roadmap.md)。一句话：本地那侧可以
+把 `Risk::Execute` 接到已有的确认回路（换一种保证：人在场），
+服务端那侧不行 —— 远端触发的执行没有「人在场」这个前提。
 
 ### 本地 agent 带来的四类新问题（现在全在服务端时不存在）
 
