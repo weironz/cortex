@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Cortex 应用磁贴（PWA `purpose: any` / apple-touch-icon）
+
+  与 cortex-mark.svg 同一套几何，只是配色翻转：靛蓝当底，弧线用白 +
+  **深色主题那支强调色** `#4FD1C5`（theme.dart 的 memoryAccentDark）。
+  底色一深，`#0E7C86` 就沉下去了，所以这里换用亮的那支 —— 两支本来就是
+  同一个色相的明暗两端，换过来不算换色。
+
+  圆角 224 ≈ 22%，与 macOS / Windows 磁贴的观感一致。
+  **可遮罩（maskable）那一版不能圆角**，见 cortex-tile-maskable.svg。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect width="1024" height="1024" rx="224" ry="224" fill="#5B62F4"/>
+  <g transform="translate(512,512) scale(0.78) translate(-512,-512)"
+     fill="none" stroke-linecap="round">
+    <path d="M 786.3 742.1 A 358 358 0 1 1 786.3 281.9"
+          stroke="#FFFFFF" stroke-width="116"/>
+    <path d="M 609.3 636.5 A 158 158 0 1 1 609.3 387.5"
+          stroke="#4FD1C5" stroke-width="104"/>
+  </g>
+</svg>

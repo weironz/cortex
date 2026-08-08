@@ -23,13 +23,23 @@
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="cortex_app">
+  <meta name="apple-mobile-web-app-title" content="Cortex">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
-  <!-- Favicon -->
-  <link rel="icon" type="image/png" href="favicon.png"/>
+  <!--
+    Favicon —— .ico 放在前面是**有意的**。
 
-  <title>cortex_app</title>
+    它是多尺寸的（16/24/32/48），浏览器在标签页那一档会挑 16px 那张，
+    而那张画的是简化版标识（外环 + 实心点）。favicon.png 是单张 32px，
+    浏览器只能把它硬缩到 16 —— 母版的两道弧缩到 16px 会糊成一个灰点。
+
+    .png 那条留着是给只认 PNG 的抓取器（部分 RSS 阅读器、聊天软件的
+    链接预览）。两条都在，各取所需。
+  -->
+  <link rel="icon" type="image/x-icon" href="favicon.ico" sizes="16x16 24x24 32x32 48x48"/>
+  <link rel="icon" type="image/png" href="favicon.png" sizes="32x32"/>
+
+  <title>Cortex</title>
   <link rel="manifest" href="manifest.json">
 </head>
 <body>

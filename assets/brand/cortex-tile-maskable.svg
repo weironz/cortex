@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Cortex 应用磁贴 · 可遮罩版（PWA `purpose: maskable`）
+
+  与 cortex-tile.svg 的两处区别，都是规范要求的：
+
+  1. **不圆角、满幅出血。** 形状由系统裁（Android 会裁成圆形、圆角方形、
+     水滴等等）。自己先圆一次，被裁之后边上会露出一圈底色。
+
+  2. **图形缩到 62%。** 安全区是**直径 80% 的内接圆**，而母版的外环
+     直径已经占到 81%（外沿 r=416）—— 原尺寸放进来，四周会被裁掉一圈。
+     62% 留了余量，因为各家的裁法并不一致。
+
+  两个文件而不是一个带参数的：SVG 没有参数，而「圆角/不圆角」这种事
+  靠注释提醒人手改，迟早会漏。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect width="1024" height="1024" fill="#5B62F4"/>
+  <g transform="translate(512,512) scale(0.62) translate(-512,-512)"
+     fill="none" stroke-linecap="round">
+    <path d="M 786.3 742.1 A 358 358 0 1 1 786.3 281.9"
+          stroke="#FFFFFF" stroke-width="116"/>
+    <path d="M 609.3 636.5 A 158 158 0 1 1 609.3 387.5"
+          stroke="#4FD1C5" stroke-width="104"/>
+  </g>
+</svg>
