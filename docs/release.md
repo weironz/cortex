@@ -65,6 +65,17 @@ CHANGELOG 有这一版的条目、**没有既未被 git 跟踪又未被 gitignor
 
 ### 3. 本机打一份产物出来看看
 
+**桌面安装程序**（这是流水线唯一还在产出的可执行产物）：
+
+```bash
+bash scripts/release-desktop-windows.sh --version X.Y.Z
+```
+
+它在压包之前会**真的启动一次那个 GUI**：Flutter 的 windows 产物不带
+MSVC 运行库，缺了它的症状是装完双击什么都不发生 —— 只有真跑一次才抓得住。
+
+**裸二进制的打包脚本还在**，虽然流水线已经不发它了（见下面的表）：
+
 ```bash
 cargo build --release --locked -p cortexd -p cortex-cli
 just release-package --target x86_64-pc-windows-msvc
@@ -88,10 +99,14 @@ git push origin vX.Y.Z
 | 作业 | 产出 |
 |---|---|
 | `preflight` | 解析 tag、跑前置闸门。**其它作业全部 needs 它** |
-| `build` ×5 | Linux x86_64/arm64、macOS arm64/x86_64、Windows 的二进制。**全部本机编译，没有交叉编译**，所以每份都能在构建机上真的跑一次 `--version` |
+| `desktop` | Windows 桌面安装程序（Inno Setup）。**只有 Windows** —— macOS 的 Gatekeeper 是硬拒绝，不是警告 |
 | `web` | Flutter Web 静态产物（地址在设置面板里填） |
 | `image` ×2 | `cortexd` 与 `cortex-web`，各推 Docker Hub 与阿里云 ACR。**推完必须真的启动一次** |
 | `release` | 汇总 `SHA256SUMS`、清点产物是否齐、从 CHANGELOG 取这一版的段落、建 **draft** release |
+
+> **`build`（裸二进制，四平台）自 0.1.2 起被停掉了。** 它占掉整条流水线
+> 绝大部分时间，而镜像里 cortexd 与 CLI 都在，能力没少。
+> 恢复方式与要同步改的三个地方写在 `release.yml` 里被删位置的注释上。
 
 **draft 而不是直接 publish**：产物齐不齐、版本对不对，人看一眼再按发布。
 发布是不可逆的 —— 撤回改变不了「已经有人拉走了」。

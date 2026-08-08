@@ -83,75 +83,34 @@ jobs:
         run: bash scripts/release-preflight.sh --tag "${{ steps.resolve.outputs.tag }}"
 
   # ══════════════════════════════════════════════════════════
-  #  二进制 —— 五个平台，全部**本机编译**
+  #  ⛔ 裸二进制（cortexd + CLI 的 tar.gz / zip）—— 自 0.1.2 起**暂停发布**
   #
-  #  没有交叉编译：每个 target 都跑在与它同架构的 runner 上。
-  #  这让 release-package.sh 能在打包前真的执行一次 `--version` ——
-  #  交叉编译出来的东西在构建机上跑不了，也就没法冒烟。
+  #  原来这里有一个四平台的 `build` 矩阵（linux-x64 / linux-arm64 /
+  #  macos-arm64 / windows-x64），每次发版编四份、占掉整条流水线里
+  #  绝大部分的时间。前期迭代快，这个成本不值。
+  #
+  #  ── 砍掉之后，自托管的人还剩什么 ──────────────────────────
+  #  只剩 docker 镜像 —— 而镜像里 cortexd 与 `cortex` CLI 都在
+  #  （见 scripts/docker/Dockerfile.cortexd 的 COPY），所以能力没少，
+  #  少的是「不想用 docker 的人下一个二进制就跑」这条路。
+  #  要 CLI 又不想要 docker，现在只能 `cargo install --git`。
+  #  **这一条必须写在发布说明与 docs/install.md 里** ——
+  #  0.1.1 的下载页上有那四个包，0.1.2 突然没有，不解释就是退化。
+  #
+  #  ── 怎么恢复 ────────────────────────────────────────────
+  #  整个 job 连同它的注释都在 git 历史里，删除它的那个提交是权威版本：
+  #      git log --oneline -- .github/workflows/release.yml
+  #      git show <删除该 job 的提交>^:.github/workflows/release.yml
+  #  把 `build` job 贴回来，并在下面 `release` 的 needs、
+  #  download-artifact 的 pattern、产物清点三处加回 `bin-*`。
+  #  scripts/release-package.sh **没有删**，它还能本机直接跑：
+  #      bash scripts/release-package.sh --target <triple> --version <X.Y.Z>
+  #
+  #  顺带记一笔（恢复时会撞上）：Intel Mac（x86_64-apple-darwin）当时就
+  #  已经发不出来了 —— `ort-sys: no prebuilt binaries available`，
+  #  而 fastembed 在 cortex-memory 里是硬依赖、没有 feature gate。
+  #  把 embedding 改成走远端 API 之后这个障碍才会消失。
   # ══════════════════════════════════════════════════════════
-  build:
-    name: 二进制 ${{ matrix.target }}
-    needs: preflight
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu  }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-latest,     target: aarch64-apple-darwin      }
-          # ── x86_64-apple-darwin（Intel Mac）：不发，上游编不出来 ──
-          #
-          # 试过两轮，两轮都挂，原因不是我们的：
-          #
-          #   1. macos-13 已于 2025-12 完全退役。症状不是报错，是**任务永远排队**
-          #      （status 一直 queued、steps 为空），而 draft release 那步 needs
-          #      整个 build 矩阵，于是整条流水线跟着悬着，看上去像卡住而不是失败。
-          #   2. 换成 macos-15-intel 之后 runner 拿到了，构建仍然挂：
-          #      `ort-sys: no prebuilt binaries available for target x86_64-apple-darwin`
-          #      —— ONNX Runtime 不再为 Intel macOS 出预编译产物。
-          #
-          # 而 `fastembed` 在 cortex-memory 里是**硬依赖、没有 feature gate**，
-          # 所以这不是「没有现成二进制」，是 Intel Mac 上**根本编不出来** ——
-          # 连 CORTEX_EMBED_BACKEND=hash 也救不了，ort-sys 在构建期就失败。
-          #
-          # 要支持它得先把 fastembed 做成可选 feature，那是一块独立的工作，
-          # 而且 hash 后端「不是语义空间，检索质量明显下降」（见 evals/README）。
-          # 在 Apple 已停止支持 x86_64、GitHub 也将于 2027-08 撤掉最后一个
-          # Intel 镜像的前提下，投入产出不成立。
-          #
-          # 按本项目的纪律：宁可不发，也不发一个装不上的东西。
-          # CHANGELOG 的「这一版不能干什么」里有这一条。
-          - { os: windows-latest,   target: x86_64-pc-windows-msvc    }
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-${{ matrix.target }}
-
-      - name: 构建
-        run: cargo build --release --locked --target ${{ matrix.target }} -p cortexd -p cortex-cli
-
-      # 打包脚本：跑 --version 冒烟并核对版本 → 组装目录（含 LICENSE /
-      # NOTICE / CHANGELOG / INSTALL.txt）→ 压缩 → 出 sha256
-      - name: 打包
-        shell: bash
-        run: |
-          bash scripts/release-package.sh \
-            --target "${{ matrix.target }}" \
-            --version "${{ needs.preflight.outputs.version }}"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bin-${{ matrix.target }}
-          path: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/*.sha256
-          if-no-files-found: error
 
   # ══════════════════════════════════════════════════════════
   #  Flutter Web 静态产物
@@ -364,7 +323,7 @@ jobs:
   # ══════════════════════════════════════════════════════════
   release:
     name: 建 draft release
-    needs: [preflight, build, web, desktop, image]
+    needs: [preflight, web, desktop, image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -380,7 +339,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-          pattern: "{bin-*,web,desktop-*}"
+          # `bin-*`（裸二进制）自 0.1.2 起不再产出，见上面被停掉的 build job
+          pattern: "{web,desktop-*}"
 
       # 逐平台的 .sha256 是构建机上算的，这里汇总成一份。
       # 先删掉单份的再算，否则 SHA256SUMS 里会混进「校验和文件的校验和」
@@ -393,7 +353,15 @@ jobs:
           set -euo pipefail
           cd dist
           rm -f ./*.sha256 SHA256SUMS
-          sha256sum -- *.tar.gz *.zip *.exe > SHA256SUMS
+          # nullglob：停掉 build job 之后 *.zip 不再有任何匹配，而默认情况下
+          # 未匹配的 glob 会**原样保留**，于是 sha256sum 收到一个字面量
+          # `*.zip` 并以「文件不存在」失败 —— 一个纯粹由「少了一类产物」
+          # 引发的红灯，和校验和本身无关。
+          # 留着 *.zip 这一条是为了恢复 build job 时不用再想起来加回来
+          shopt -s nullglob
+          files=( *.tar.gz *.zip *.exe )
+          [ ${#files[@]} -gt 0 ] || { echo "::error::dist 里一个产物都没有"; exit 1; }
+          sha256sum -- "${files[@]}" > SHA256SUMS
           cat SHA256SUMS
 
       # 少一个平台时 release 照样建得出来，只是那个平台的用户下载页上
@@ -404,20 +372,14 @@ jobs:
           cd dist
           v="${{ needs.preflight.outputs.version }}"
           miss=0
-          # 这张清单必须与上面 build 矩阵的 target 一一对应。
-          # 删矩阵条目时忘了同步这里，症状是「产物清点」当场红 ——
-          # 那正是它该有的行为：**发版少一个产物必须响，不能静默发出去**。
-          # （v0.1.0 删掉 Intel Mac 时就漏改过这里，被它拦下了。）
-          for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
-                   aarch64-apple-darwin; do
-            [ -f "cortex-v$v-$t.tar.gz" ] || { echo "::error::缺少 $t"; miss=1; }
-          done
-          [ -f "cortex-v$v-x86_64-pc-windows-msvc.zip" ] || { echo "::error::缺少 Windows"; miss=1; }
+          # 这张清单是发版产物的**唯一权威**：少一个必须当场红，
+          # 不能静默发出去。（v0.1.0 删掉 Intel Mac 时漏改过这里，被它拦下了。）
+          #
+          # 裸二进制（cortex-vX-<triple>.tar.gz / .zip）自 0.1.2 起不在清单里 ——
+          # build job 被停掉了，见文件上方。恢复它时**必须同步加回这里**，
+          # 否则清点会照常绿，而下载页上少四个包没有任何提示
           [ -f "cortex-web-v$v.tar.gz" ]                 || { echo "::error::缺少 Web"; miss=1; }
-          # 桌面安装程序。它与上面那个 Windows zip 是**两样东西**：
-          # zip 里是 cortexd + CLI（服务端与终端客户端），
-          # 这个 setup.exe 里是 Flutter 桌面 GUI。名字相近，内容不重叠 ——
-          # 少了它，下载页上就只剩那个看起来像 GUI 的 zip
+          # 桌面安装程序 —— 停掉裸二进制之后，这是下载页上**唯一**的可执行产物
           [ -f "cortex-desktop-v$v-x86_64-pc-windows-msvc-setup.exe" ] \
             || { echo "::error::缺少 Windows 桌面安装程序"; miss=1; }
           exit $miss
@@ -447,21 +409,26 @@ jobs:
           [ -s notes.md ] || { echo "::error::CHANGELOG.md 里取不到 $v"; exit 1; }
           {
             echo; echo "---"; echo
-            echo '### 安装'
+            echo '### 服务端（cortexd）：这一版只发 docker 镜像'
             echo
-            echo '二进制见下方产物；自托管完整步骤见 [docs/install.md](https://github.com/${{ github.repository }}/blob/v'"$v"'/docs/install.md)。'
-            echo '**第一步一定是 `cortexd --generate-token`** —— 没有凭据 cortexd 会拒绝启动。'
+            echo '**从 0.1.2 起不再发裸二进制**（`cortex-vX-<平台>.tar.gz` / `.zip`）。'
+            echo '前期迭代快，四个平台各编一份占掉了整条发版流水线的绝大部分时间。'
+            echo '能力没少 —— 镜像里 cortexd 与 `cortex` CLI 都在；少的是'
+            echo '「不想用 docker 就下个二进制跑」这条路。要 CLI 又不想要 docker：'
+            echo '`cargo install --git https://github.com/${{ github.repository }} cortex-cli`。'
             echo
             echo '```'
             echo "docker pull registry.cn-shenzhen.aliyuncs.com/willspace/cortexd:v$v"
             echo "docker pull willdockerhub/cortexd:v$v"
             echo '```'
             echo
+            echo '自托管完整步骤见 [docs/install.md](https://github.com/${{ github.repository }}/blob/v'"$v"'/docs/install.md)。'
+            echo '**第一步一定是生成凭据** —— 没有 `CORTEX_AUTH_TOKEN_SHA256` 时 cortexd 拒绝启动。'
+            echo
             echo '### Windows 桌面端'
             echo
             echo '`cortex-desktop-v'"$v"'-x86_64-pc-windows-msvc-setup.exe` 是**客户端 GUI**，'
-            echo '不是服务端 —— 它仍然需要一台 cortexd。'
-            echo '（同名的 `cortex-v'"$v"'-x86_64-pc-windows-msvc.zip` 里是 cortexd + CLI。）'
+            echo '不是服务端 —— 它仍然需要一台 cortexd（地址在装完第一屏里填）。'
             echo
             echo '这个安装程序**没有代码签名**，Windows SmartScreen 会拦一次：'
             echo '点「更多信息」→「仍要运行」。要不要点请自己判断 ——'

@@ -31,7 +31,7 @@ Postgres 17（带 pgvector 扩展）与一个 S3 兼容存储。
 | 路 | 适合谁 | 要装什么 |
 |---|---|---|
 | [A. docker compose](#a-docker-compose最省事) | 绝大多数人 | 只要 docker |
-| [B. 二进制 + 自己的 Postgres](#b-二进制--自己已有的-postgres) | 已经有 Postgres 的 | 二进制 + pgvector |
+| [B. 自己已有的 Postgres](#b-自己已有的-postgres不想让-cortex-管数据库) | 已经有 Postgres 的 | 自己编或从镜像里取二进制 + pgvector |
 | [C. 从源码构建](#c-从源码构建) | 要改代码的 | Rust + Flutter + docker |
 
 上面三条装的都是 **cortexd 那一侧**。装完之后要一个图形界面的，
@@ -140,34 +140,34 @@ curl -fsS http://127.0.0.1:8080/health
 
 ---
 
-## B. 二进制 + 自己已有的 Postgres
+## B. 自己已有的 Postgres（不想让 Cortex 管数据库）
 
-### 1. 下载并校验
+### 1. 先有一个 cortexd 二进制
 
-从 [Releases](https://github.com/weironz/cortex/releases) 拿对应平台的包：
+> ⚠️ **0.1.2 起发布页上没有裸二进制了。**
+> 0.1.1 及更早的版本发过 `cortex-v<版本>-<平台>.tar.gz` / `.zip`，
+> 现在没有了 —— 前期迭代快，四个平台各编一份占掉了整条发版流水线
+> 绝大部分的时间。理由与恢复方式见 [CHANGELOG](../CHANGELOG.md)。
 
-| 平台 | 产物 |
-|---|---|
-| Linux x86_64 | `cortex-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64 | `cortex-v0.1.0-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS Apple Silicon | `cortex-v0.1.0-aarch64-apple-darwin.tar.gz` |
-| Windows | `cortex-v0.1.0-x86_64-pc-windows-msvc.zip` |
+所以这一节的第一步现在有两条路：
 
-> **macOS Intel（x86_64）没有产物，而且不是漏了 —— 是编不出来。**
-> 见 [CHANGELOG](../CHANGELOG.md) 的「这一版不能干什么」。
->
-> 另外：Windows 那个 `.zip` 里是 **cortexd + CLI**，
-> **不是桌面 GUI**。GUI 是另一个产物，见
-> [D. Windows 桌面端](#d-windows-桌面端安装程序)。
+- **从源码编译**（推荐）：见 [C. 从源码构建](#c-从源码构建)，
+  编出来的 `target/release/cortexd` 与 `target/release/cortex` 就是这里要用的
+- **从镜像里取**：镜像里两个二进制都在，不想装 Rust 工具链时可以抠出来
+  ```bash
+  cid=$(docker create registry.cn-shenzhen.aliyuncs.com/willspace/cortexd:v0.1.1)
+  docker cp "$cid:/usr/local/bin/cortexd" ./cortexd
+  docker cp "$cid:/usr/local/bin/cortex"  ./cortex
+  docker rm "$cid"
+  ```
+  只对 **linux/amd64** 有效（镜像就这一个架构），且这两个二进制是
+  glibc 动态链接的，宿主的 glibc 太老会跑不起来 —— 那种情况老实编译
+
+只要 CLI 不要服务端的话，最短的一条是：
 
 ```bash
-sha256sum -c --ignore-missing SHA256SUMS
-tar xzf cortex-v0.1.0-*.tar.gz && cd cortex-v0.1.0-*
+cargo install --git https://github.com/weironz/cortex cortex-cli
 ```
-
-> macOS 上二进制**没有签名也没有公证**（理由见 [CHANGELOG](../CHANGELOG.md)）。
-> Gatekeeper 会拦，需要 `xattr -d com.apple.quarantine cortexd cortex`。
-> 只对你自己校验过 SHA-256 的文件这么做。
 
 ### 2. 数据库
 
@@ -258,7 +258,10 @@ Inno Setup 编出 `dist/cortex-desktop-*-setup.exe`。
 cortex-desktop-v<版本>-x86_64-pc-windows-msvc-setup.exe
 ```
 
-> 别下成 `cortex-v<版本>-x86_64-pc-windows-msvc.zip` —— 那个是
+> 这是发布页上**唯一**的可执行产物（0.1.2 起不再发裸二进制）。
+>
+> 如果你手上是 0.1.1 或更早的版本：别下成
+> `cortex-v<版本>-x86_64-pc-windows-msvc.zip` —— 那个是
 > **cortexd + CLI**（服务端与终端客户端），里面没有 GUI。
 > 两个名字很像，装的东西完全不重叠。
 

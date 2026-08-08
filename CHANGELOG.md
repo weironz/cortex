@@ -10,6 +10,36 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ---
 
+## [未发布]
+
+### 不再发裸二进制 —— 服务端只发 docker 镜像
+
+0.1.1 的下载页上有四个 `cortex-v0.1.1-<平台>.tar.gz` / `.zip`
+（Linux x64 / Linux arm64 / macOS arm64 / Windows x64），里面是
+cortexd + `cortex` CLI。**从下一版起不发了。**
+
+理由是构建时间：四个平台各自本机编译一遍，占掉整条发版流水线的绝大部分。
+前期迭代快，这个成本不值。
+
+**能力没有减少** —— docker 镜像里 cortexd 与 CLI 两个二进制都在。
+减少的是「不想碰 docker，下个二进制就能跑」这条路。替代路径写进了
+[docs/install.md](docs/install.md) 的 B 节：从源码编、或者用
+`docker create` + `docker cp` 从镜像里把二进制抠出来（只对 linux/amd64
+有效，且是 glibc 动态链接）。只要 CLI 的话
+`cargo install --git … cortex-cli` 最短。
+
+发布产物现在只剩三样：**docker 镜像**、**Windows 桌面安装程序**、
+**Flutter Web 静态包**。
+
+> 这是**暂停**不是废弃。`scripts/release-package.sh` 原样留着，本机还能直接跑；
+> 被删掉的 `build` job 连同它的全部注释都在 git 历史里，
+> `release.yml` 里那段注释写了恢复时要同步改的三个地方
+> （`needs` / download-artifact 的 pattern / 产物清点）。
+> 恢复时会撞上一个旧障碍：Intel Mac 因为 `ort-sys` 没有预编译产物而编不出来，
+> 那要等 embedding 改成走远端 API 之后才会消失。
+
+---
+
 ## [0.1.1] - 2026-08-08
 
 这一版的由来：**0.1.0 发出去的那个
