@@ -87,13 +87,24 @@ CLI / 桌面 / Web  ──►  cortexd  ──►  DeepSeek
   写入不丢（本地 append-only 队列，联网后灌回去），**但不存第二份记忆库**
 - 这会**改 HTTP 契约**，所以要在 0.x 里做，不能等
 
-### E · remote control —— CLI / Web 挂到在线的本地 agent
+### E · remote control —— Web 挂到在线的本地 agent
+
+> **CLI 不走这条。** 它和你的文件在同一台机器上，D2 之后直接连
+> `127.0.0.1` 的本地 agent 即可（没起就拉起来，codex app-server 形态）。
+> 需要中继的只有 Web 与「另一台设备上的 GUI」。
 
 本地 agent 跑完整会话，cortexd 只当**中继**，Web/CLI 挂上去看和操作
 （形态像 VS Code Remote）。跨网络的是 **UI 事件流**，不是每一次工具调用 ——
 这是它与被否决的「工具外派」的全部差别，代价差一个量级。
 
-做完之后「Web 只能聊天」这句话就只在**一台在线桌面都没有**时成立。
+做完之后 Web 的限制就只在**一台在线桌面都没有**时成立。
+
+> 顺带纠正一个容易传开的误解：**CLI 与 Web 现在都不是「只能聊天」**。
+> CLI 会渲染工具事件、能答确认；Web 有附件上传下载、图片理解、
+> markdown + 代码高亮。**唯一由架构决定的限制是「不能操作你机器上的文件」**。
+> 与 ChatGPT / Claude 的真实差距在**生成侧**（生成图片、生成 Word/PPT/Excel —— 都没有），
+> 那是独立的产品缺口，不在 D/E 的范围里。逐项对照见
+> [architecture.md](architecture.md)「CLI 与 Web 现在到底能做什么」。
 
 依赖 D2（得先有本地 agent 可挂）。
 

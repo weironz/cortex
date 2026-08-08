@@ -47,14 +47,14 @@
           <mxGeometry x="650" y="215" width="230" height="130" as="geometry" />
         </mxCell>
 
-        <mxCell id="cli" value="CLI（cortex）&#xa;&lt;font style=&quot;font-size:11px;&quot; color=&quot;#7f7f7f&quot;&gt;已有 · 瘦客户端&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;" vertex="1" parent="L1">
+        <mxCell id="cli" value="CLI（cortex）&#xa;&lt;font style=&quot;font-size:11px;&quot; color=&quot;#7f7f7f&quot;&gt;已有 · 能渲染工具事件、答确认&#xa;★ D 之后直连 127.0.0.1 的本地 agent&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;" vertex="1" parent="L1">
           <mxGeometry x="920" y="65" width="250" height="80" as="geometry" />
         </mxCell>
         <mxCell id="web" value="Web（Flutter Web）&#xa;&lt;font style=&quot;font-size:11px;&quot; color=&quot;#7f7f7f&quot;&gt;已有 · 浏览器&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;verticalAlign=top;spacingTop=8;" vertex="1" parent="L1">
           <mxGeometry x="920" y="240" width="250" height="160" as="geometry" />
         </mxCell>
-        <mxCell id="webnote" value="没有在线桌面时&#xa;只能聊天，没有文件工具" style="text;html=1;align=center;verticalAlign=middle;fontSize=11;fontColor=#b85450;fontStyle=1;" vertex="1" parent="web">
-          <mxGeometry x="15" y="65" width="220" height="80" as="geometry" />
+        <mxCell id="webnote" value="附件上传下载 / 图片理解 /&#xa;代码高亮都有&#xa;&#xa;&lt;font color=&quot;#b85450&quot;&gt;没有在线桌面时，&lt;b&gt;不能操作&#xa;你机器上的文件&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;fontSize=11;fontColor=#2d5016;" vertex="1" parent="web">
+          <mxGeometry x="10" y="58" width="230" height="95" as="geometry" />
         </mxCell>
 
         <mxCell id="L2" value="② cortexd — 记忆服务" style="swimlane;html=1;startSize=34;fillColor=none;strokeColor=#9673a6;fontSize=15;fontStyle=1;fontColor=#6a4c93;verticalAlign=middle;align=left;spacingLeft=12;dashed=1;" vertex="1" parent="1">
@@ -175,7 +175,7 @@
               <mxPoint x="1295" y="215" />
               <mxPoint x="1295" y="775" />
             </Array>
-            <mxPoint x="-70" y="-22" as="offset" />
+            <mxPoint x="-40" y="-58" as="offset" />
           </mxGeometry>
         </mxCell>
 
