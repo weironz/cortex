@@ -63,6 +63,17 @@ serde_json = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "query", "rustls"] }
 eventsource-stream = "0.2"
 
+# WebSocket 客户端。本地 agent 反代 /ws 用（见 cortex-local/src/ws_proxy.rs）。
+#
+# **刻意不开任何 TLS feature**：连接不是它建的，是 reqwest 建好之后
+# 交给 `from_raw_socket` 的。开 `rustls-tls-*` 会拉进第二套 rustls 配置，
+# 于是「reqwest 认的证书」与「WS 认的证书」是两套 —— 自签名的自托管部署上，
+# HTTP 通了而 WS 连不上，且没有任何地方能看出这两件事有关系。
+#
+# 版本必须与 axum 内部那份一致（`cargo tree -i tokio-tungstenite` 核对）：
+# 两份共存会让 `bytes::Bytes` 之外的类型对不上，报错在转换处而不在依赖处。
+tokio-tungstenite = "0.29"
+
 # 记忆引擎
 jieba-rs = "0.10"
 fastembed = "5"

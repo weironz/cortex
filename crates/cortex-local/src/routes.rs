@@ -27,6 +27,7 @@ use tokio_stream::StreamExt as _;
 
 use crate::proxy;
 use crate::state::LocalState;
+use crate::ws_proxy;
 
 /// 路由表。
 ///
@@ -46,6 +47,9 @@ pub fn router(state: LocalState) -> Router {
         // 工作区绑定要**拦下来**：那个路径在本机上，而 cortexd 会拿它去
         // canonicalize 服务器的文件系统。见 handler 的注释
         .route("/sessions/{id}", any(patch_session))
+        // WebSocket 升级走不了普通反代（那条路把 `upgrade` 头当逐跳首部剥了）。
+        // 见 [`crate::ws_proxy`]
+        .route("/ws", get(ws_proxy::handler))
         .fallback(any(proxy::forward))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state)
@@ -62,6 +66,19 @@ pub fn router(state: LocalState) -> Router {
 /// 在多用户机器与容器上都不成立。
 ///
 /// `/health` 例外，理由与 cortexd 一致：它的消费者是探针，配不了凭据。
+///
+/// # `/ws` 的例外不一样，它是**转交**而不是豁免
+///
+/// WebSocket 握手只能把凭据放进查询串（`?ticket=`）：跨平台的
+/// `WebSocketChannel.connect` 没有 headers 参数，浏览器则是根本不允许
+/// 给握手加请求头。而那张票是**远端**签发的，本地 agent 手里没有那本簿子。
+///
+/// 所以带票的 `/ws` 在这里放行，由远端验票。这不构成豁免的关键在
+/// [`crate::ws_proxy::connect_upstream`]：**本地 agent 不给它补凭据**，
+/// 票是假的就在远端那里 401。
+///
+/// 一张票都不带则照样拦下 —— 那必然不是真客户端，没必要为它跟远端建一条
+/// 注定失败的连接。
 async fn require_auth(State(st): State<LocalState>, req: Request, next: Next) -> Response {
     if req.uri().path() == "/health" {
         return next.run(req).await;
@@ -74,12 +91,26 @@ async fn require_auth(State(st): State<LocalState>, req: Request, next: Next) ->
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|t| bytes_eq(t.as_bytes(), expected.as_bytes()));
+        .is_some_and(|t| bytes_eq(t.as_bytes(), expected.as_bytes()))
+        || (req.uri().path() == "/ws" && carries_ticket(req.uri().query()));
     if ok {
         next.run(req).await
     } else {
         (StatusCode::UNAUTHORIZED, "缺少或无效的凭据").into_response()
     }
+}
+
+/// 查询串里有没有 `ticket=`。**只看有没有，不看内容** —— 内容归远端管。
+///
+/// 逐参数比对而不是 `query.contains("ticket=")`：后者会被
+/// `?myticket=x` 与 `?x=ticket=y` 骗过去。
+fn carries_ticket(query: Option<&str>) -> bool {
+    query.is_some_and(|q| {
+        q.split('&').any(|kv| {
+            kv.split_once('=')
+                .is_some_and(|(k, v)| k == "ticket" && !v.is_empty())
+        })
+    })
 }
 
 /// 定长时间比较。
@@ -256,6 +287,32 @@ async fn patch_session(State(st): State<LocalState>, req: Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `?ticket=` 的识别必须逐参数比对，不能拿整串做子串匹配。
+    ///
+    /// 朴素的 `query.contains("ticket=")` 会把 `?myticket=x` 也放行。
+    /// 那不是理论问题：放行之后这条请求会去跟远端建一条注定 401 的连接，
+    /// 而客户端拿到的仍然是「连不上」—— 与真正的凭据错误无从区分。
+    #[test]
+    fn only_a_real_ticket_parameter_opens_the_ws_gate() {
+        assert!(carries_ticket(Some("ticket=abc")));
+        assert!(carries_ticket(Some("since=3&ticket=abc&limit=5")));
+
+        assert!(!carries_ticket(None), "没有查询串就是没带票");
+        assert!(!carries_ticket(Some("since=3")), "别的参数不算票");
+        assert!(
+            !carries_ticket(Some("myticket=abc")),
+            "`myticket` 不是 `ticket` —— 子串匹配会在这里放行"
+        );
+        assert!(
+            !carries_ticket(Some("x=ticket=y")),
+            "值里出现 `ticket=` 不算带票 —— 同样是子串匹配的坑"
+        );
+        assert!(
+            !carries_ticket(Some("ticket=")),
+            "空票等于没票，没必要为它跟远端建一条连接"
+        );
+    }
 
     /// 定长比较对「长度相同但内容不同」与「长度不同」都要判否。
     #[test]

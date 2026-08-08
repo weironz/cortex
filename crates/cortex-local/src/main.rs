@@ -29,6 +29,7 @@ mod state;
 mod supervise;
 mod turn;
 mod workspaces;
+mod ws_proxy;
 
 use std::sync::Arc;
 use std::time::Duration;
