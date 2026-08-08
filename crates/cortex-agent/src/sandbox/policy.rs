@@ -17,6 +17,8 @@
 
 use std::path::{Path, PathBuf};
 
+use super::Attended;
+
 /// 网络策略。
 ///
 /// # 为什么默认断网
@@ -46,6 +48,12 @@ pub struct SandboxPolicy {
     /// 只读（含执行）。系统目录、工具链。
     pub readable_roots: Vec<PathBuf>,
     pub network: NetworkPolicy,
+    /// 这一侧有没有人在场。见 [`Attended`] —— 只在「本机无沙箱」那一支起作用。
+    ///
+    /// 放在策略里而不是 `prepare` 的参数：它是**部署形态**的属性
+    /// （本地 agent 恒 Yes、cortexd 恒 No），不是每次调用现算的。
+    /// 做成参数的话每个调用点都要重新决定一次，而那正是会被写错的地方。
+    pub attended: Attended,
 }
 
 /// 只读放行的系统路径。
@@ -143,6 +151,7 @@ impl SandboxPolicy {
             writable_roots,
             readable_roots,
             network: NetworkPolicy::default(),
+            attended: Attended::No,
         }
     }
 
@@ -159,6 +168,7 @@ impl SandboxPolicy {
             writable_roots: Vec::new(),
             readable_roots: Vec::new(),
             network: NetworkPolicy::Denied,
+            attended: Attended::No,
         }
     }
 
@@ -172,6 +182,16 @@ impl SandboxPolicy {
     #[must_use]
     pub fn with_network(mut self, network: NetworkPolicy) -> Self {
         self.network = network;
+        self
+    }
+
+    /// 声明这一侧有人在场。见 [`Attended`]。
+    ///
+    /// **只有本地 agent 该调它。** 服务端调了就是「远端的人替一条跑在
+    /// 服务器上的命令背书」，而他看不见那台机器上有什么。
+    #[must_use]
+    pub fn attended(mut self) -> Self {
+        self.attended = Attended::Yes;
         self
     }
 
@@ -297,6 +317,7 @@ mod tests {
             writable_roots: vec![d.path().to_path_buf(), d.path().join("nope")],
             readable_roots: vec![],
             network: NetworkPolicy::Denied,
+            attended: Attended::No,
         };
         assert_eq!(
             p.existing_writable().len(),

@@ -97,7 +97,10 @@ async fn main() -> anyhow::Result<()> {
 
     // 未绑定工作区的会话：沙箱是**封闭**的（可访问文件范围是空集）。
     // 不是「用进程工作目录当沙箱根」—— 那会让 agent 默认能读写它被启动的
-    // 那个目录，而桌面端启动它的地方通常是用户主目录
+    // 那个目录，而桌面端启动它的地方通常是用户主目录。
+    //
+    // 不加 .attended()：封闭沙箱里本来就不会有进程被启动
+    // （tools.rs 的 shell 分支拿不到 cwd，更早一步就拒了）
     let chat_turn = Turn::sealed().with_max_rounds(DEFAULT_MAX_ROUNDS);
 
     let engine = Arc::new(Engine {
@@ -131,7 +134,12 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    tracing::info!("{}", cortex_agent::status_line());
+    // 用带 attended 的那一句：绑了工作区的会话走的是 attended 路径，
+    // 打通用版会说「命令执行将被拒绝」，而实际上用户点一下允许就跑
+    tracing::info!(
+        "{}",
+        cortex_agent::status_line_for(cortex_agent::Attended::Yes)
+    );
     tracing::info!(remote = remote.base(), ?route, "本地 agent 启动中");
 
     // 后台不断把队列灌回去。启动先跑一次 —— 上次退出时积压的那些该在

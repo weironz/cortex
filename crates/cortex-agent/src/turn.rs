@@ -357,9 +357,33 @@ impl Turn {
         self
     }
 
+    /// 声明这一轮**有人在场**：本机没有 OS 沙箱时，靠用户当场批准放行执行。
+    ///
+    /// 只有本地 agent 该调它，理由见 [`crate::sandbox::Attended`]。
+    ///
+    /// 「有人在场」这四个字要成立，前提是**每一次**执行都真的问过人。
+    /// 眼下这一条由类型保证：[`Risk::Execute`] 是最高档，而
+    /// [`ApprovalPolicy::decide`] 只在 `risk < confirm_at` 时放行 ——
+    /// 所以 Execute 永远走确认回路，没有哪个 `confirm_at` 能绕开它。
+    /// [`Self::run`] 里还有一道运行期检查，是给「以后加了更高档」留的后手。
+    #[must_use]
+    pub fn attended(mut self) -> Self {
+        let exec = self.sandbox.exec_policy().clone().attended();
+        self.sandbox = self.sandbox.with_exec_policy(exec);
+        self
+    }
+
     #[must_use]
     pub fn sandbox_root(&self) -> Option<&std::path::Path> {
         self.sandbox.root()
+    }
+
+    /// 本轮的执行策略。存在的理由与 [`Self::tool_names`] 一样是**可观测**：
+    /// 「有没有人在场」决定了 `shell` 在无沙箱机器上能不能跑，
+    /// 而那件事只有真去跑一条命令才看得出来 —— 除非能直接问。
+    #[must_use]
+    pub fn exec_policy(&self) -> &crate::sandbox::SandboxPolicy {
+        self.sandbox.exec_policy()
     }
 
     /// 本轮会发给模型的工具名。
@@ -384,6 +408,32 @@ impl Turn {
         host: &dyn ToolHost,
         events: &mpsc::Sender<AgentEvent>,
     ) -> Result<TurnOutcome> {
+        // ── 「有人在场」这四个字必须当真 ──
+        //
+        // 它的全部依据是「每一次执行都经用户当场批准」。两者之一不成立时，
+        // 后果是最坏的一种：本机没有沙箱、执行也不再问人，模型可以静默跑
+        // 任意命令，而日志里那行「有人在场」还在，看起来一切正常。
+        //
+        // **眼下这个分支进不来**，因为 `Risk::Execute` 是最高档而
+        // `decide` 只在 `risk < confirm_at` 时放行 —— 保证来自类型，不是来自
+        // 这道检查。留着它是给「以后有人加了比 Execute 更高的档」备的后手：
+        // 那一刻这里会当场拒绝，而不是悄悄开一个无人值守的执行口子。
+        // `execute_is_the_highest_risk` 那条测试守着同一件事，且会先红。
+        //
+        // 检查放在 run() 而不是构造期：builder 的调用顺序挡不住配置矛盾，
+        // 而这里是唯一绕不过去的关口。
+        if self.sandbox.exec_policy().attended.is_attended()
+            && self.policy.decide("shell", Risk::Execute) == Gate::Allow
+        {
+            return Err(CortexError::Invalid(
+                "配置矛盾：声明了「有人在场」却又让 Risk::Execute 自动放行。\
+                 前者的全部依据就是「每一次执行都经用户当场批准」——\
+                 两者同时成立意味着无沙箱且无人值守的任意命令执行。\
+                 请去掉 attended()，或把 ApprovalPolicy 的 confirm_at 调到 Execute 及以下。"
+                    .into(),
+            ));
+        }
+
         let mut reply = String::new();
         let mut tool_rounds = 0usize;
         // 本轮的确认状态。**每轮一份**，不挂在 `self` 上 —— [`Turn`] 是可复用、

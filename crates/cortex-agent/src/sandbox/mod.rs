@@ -104,6 +104,45 @@ fn prepare_backend(
     ))
 }
 
+/// 执行这一侧有没有**人在场**。
+///
+/// # 它替换的是哪一种保证
+///
+/// OS 沙箱与「问一句准不准」防的是同一件事（agent 犯错或被投毒后去动
+/// 它不该动的东西），但机制不同：前者靠内核隔离，后者靠人当场判断。
+/// 在**用户自己的机器上**，第二种是成立的 —— 人就坐在屏幕前，命令的
+/// 完整原文刚刚给他看过，是他点的「允许」。Claude Code 在 Windows 上
+/// 就只有这一种（它根本没有 OS 沙箱）。
+///
+/// 在**服务器上**不成立：批准的人可能在另一个城市、另一台设备上，
+/// 而命令跑在服务器的文件系统里。他看得到那条命令，但看不到它会碰到什么。
+/// 所以 cortexd 一律 [`Attended::No`]，Windows 上继续硬拒。
+///
+/// # 它不放宽任何**别的**东西
+///
+/// 只在「沙箱探测为不可用」这一个分支上起作用。沙箱可用时照常下内核规则 ——
+/// 有人在场不是「可以不要围栏」，是「这台机器上压根没有围栏可下」时
+/// 的另一种交代。路径围栏（[`crate::tools::Sandbox::resolve`]）与它无关，
+/// 一直都在。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Attended {
+    /// 没有人在场。默认，也是服务端唯一正确的取值。
+    #[default]
+    No,
+    /// 用户就在这台机器前，且**每一次**执行都经他当场批准。
+    ///
+    /// 设了它就必须真的做到后半句 —— [`crate::Turn::run`] 会在开跑前
+    /// 检查审批策略，不满足直接拒绝整轮。
+    Yes,
+}
+
+impl Attended {
+    #[must_use]
+    pub const fn is_attended(self) -> bool {
+        matches!(self, Self::Yes)
+    }
+}
+
 /// 控制降级行为的环境变量。
 pub const SANDBOX_ENV: &str = "CORTEX_SANDBOX";
 
@@ -197,20 +236,36 @@ pub fn degraded_allowed() -> bool {
     std::env::var(SANDBOX_ENV).is_ok_and(|v| v.trim() == UNSANDBOXED_VALUE)
 }
 
-/// 给运维/启动日志的一句话。
+/// 给运维/启动日志的一句话（没有人在场的那一侧）。
 ///
 /// 存在的理由就是「必须能回答我有没有被保护」——
 /// cortexd 与 CLI 应当在启动时把它打出来。
 #[must_use]
 pub fn status_line() -> String {
+    status_line_for(Attended::No)
+}
+
+/// 同上，但把「有没有人在场」算进去。
+///
+/// 分成两个函数而不是让调用方自己拼：这句话是**运维据以判断「我有没有
+/// 被保护」的唯一一句**，说错了比不说更糟。本地 agent 打 `status_line()`
+/// 的话，它会说「命令执行将被拒绝」，而实际上用户点一下允许就跑 ——
+/// 那正是这个项目被坑过好几次的那类陈旧断言。
+#[must_use]
+pub fn status_line_for(attended: Attended) -> String {
     let cap = capability();
-    match (cap.is_available(), degraded_allowed()) {
-        (true, _) => format!("工具沙箱：已启用 · {cap}"),
-        (false, true) => format!(
-            "工具沙箱：⚠ 已降级为**无沙箱**执行（{SANDBOX_ENV}={UNSANDBOXED_VALUE}）· {cap}"
-        ),
-        (false, false) => format!("工具沙箱：不可用，命令执行将被拒绝 · {cap}"),
+    if cap.is_available() {
+        return format!("工具沙箱：已启用 · {cap}");
     }
+    if attended.is_attended() {
+        return format!("工具沙箱：⚠ 本机无沙箱，命令执行改由**用户逐条确认**放行 · {cap}");
+    }
+    if degraded_allowed() {
+        return format!(
+            "工具沙箱：⚠ 已降级为**无沙箱**执行（{SANDBOX_ENV}={UNSANDBOXED_VALUE}）· {cap}"
+        );
+    }
+    format!("工具沙箱：不可用，命令执行将被拒绝 · {cap}")
 }
 
 /// 一次沙箱化执行的准备结果。
@@ -238,19 +293,26 @@ pub fn prepare(policy: &SandboxPolicy, argv: &[String], cwd: &Path) -> Result<Pr
 
     let cap = capability();
     if !cap.is_available() {
-        if !degraded_allowed() {
+        // 两条各自独立的放行理由。**不合并成一个 bool** —— 它们的日志
+        // 措辞不同，而「为什么这条命令没有被沙箱保护」是排障时要能一眼
+        // 读出来的东西：是运维显式关掉了，还是这台机器上人在场
+        let reason = if policy.attended.is_attended() {
+            "有人在场：本机无沙箱，本次执行由用户当场批准"
+        } else if degraded_allowed() {
+            "显式降级：本机无沙箱，已按环境变量放行"
+        } else {
             return Err(CortexError::Invalid(format!(
                 "拒绝执行：本机没有可用的进程级沙箱（{cap}）。\
                  要在无沙箱保护下运行，必须显式设置 {SANDBOX_ENV}={UNSANDBOXED_VALUE}，\
                  那意味着命令可以读取工作区以外的任何文件并自由联网。"
             )));
-        }
+        };
         // 每次执行都吼一声。只在启动时说一次是不够的：日志会被冲走，
         // 而「这条命令有没有被保护」是逐条都需要能回答的问题
         tracing::warn!(
             program = %program,
             capability = %cap,
-            "⚠ 无沙箱执行：本机沙箱不可用，已按 {SANDBOX_ENV}={UNSANDBOXED_VALUE} 放行"
+            "⚠ 无沙箱执行（{reason}）"
         );
         let mut command = std::process::Command::new(program);
         command.args(&argv[1..]).current_dir(cwd);

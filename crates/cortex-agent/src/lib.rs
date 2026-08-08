@@ -19,7 +19,9 @@ pub mod tools;
 pub mod turn;
 pub mod workspace;
 
-pub use sandbox::{Capability, NetworkPolicy, SandboxPolicy, capability, status_line};
+pub use sandbox::{
+    Attended, Capability, NetworkPolicy, SandboxPolicy, capability, status_line, status_line_for,
+};
 pub use tools::{Risk, Sandbox, ToolCall, ToolResult, ToolSpec};
 pub use turn::{
     AgentEvent, Approval, ApprovalPolicy, ConfirmRequest, DEFAULT_MAX_ROUNDS, Gate, StopReason,

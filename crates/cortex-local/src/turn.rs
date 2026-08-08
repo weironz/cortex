@@ -124,7 +124,12 @@ impl Engine {
             // 绑定时校验过，但目录可能之后被删了/移了/换了外接盘。
             // 此时降级成纯聊天而不是让整轮失败 —— 用户只是想说句话
             Turn::new(ws)
-                .map(|t| t.with_max_rounds(self.max_rounds))
+                // .attended()：这台机器上没有 OS 沙箱时（Windows），
+                // 靠「用户当场批准」替代内核隔离。**只有本地 agent 配这么做** ——
+                // 人就坐在屏幕前，命令原文刚给他看过，是他点的允许。
+                // cortexd 一律不开：那边批准的人可能在另一个城市，
+                // 而命令跑在服务器的文件系统里。见 sandbox::Attended
+                .map(|t| t.with_max_rounds(self.max_rounds).attended())
                 .inspect_err(|e| {
                     tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
                 })

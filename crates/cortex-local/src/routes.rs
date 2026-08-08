@@ -104,7 +104,7 @@ async fn health(State(st): State<LocalState>) -> Json<serde_json::Value> {
         "status": "ok",
         "version": cortex_core::VERSION,
         "role": "local-agent",
-        "sandbox": cortex_agent::status_line(),
+        "sandbox": cortex_agent::status_line_for(cortex_agent::Attended::Yes),
         "memory": {
             "remote": st.remote.base(),
             // 客户端据此显示「记忆未连接」。名字用 reachable 而不是 ok：
