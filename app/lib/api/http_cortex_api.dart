@@ -210,11 +210,9 @@ class HttpCortexApi implements CortexApi {
             : _errorMessage(response),
       );
     }
-    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-    if (decoded is! Map<String, dynamic>) {
-      throw const CortexApiException('PATCH /sessions 返回了非对象 JSON');
-    }
-    return ChatSession.fromJson(decoded);
+    return ChatSession.fromJson(
+      _decodeObject('PATCH /sessions', utf8.decode(response.bodyBytes)),
+    );
   }
 
   /// Unwraps `ErrorBody { error }` so the daemon's own wording reaches the user
@@ -576,11 +574,7 @@ class HttpCortexApi implements CortexApi {
     if (response.statusCode >= 400) {
       throw _failure(response.statusCode, _errorMessage(response));
     }
-    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-    if (decoded is! Map<String, dynamic>) {
-      throw CortexApiException('$path 返回了非对象 JSON');
-    }
-    return decoded;
+    return _decodeObject(path, utf8.decode(response.bodyBytes));
   }
 
   Future<Map<String, dynamic>> _sendJson(
@@ -600,11 +594,7 @@ class HttpCortexApi implements CortexApi {
         body.isEmpty ? '$what 失败' : _trim(body),
       );
     }
-    final decoded = jsonDecode(body);
-    if (decoded is! Map<String, dynamic>) {
-      throw CortexApiException('$what 返回了非对象 JSON');
-    }
-    return decoded;
+    return _decodeObject(what, body);
   }
 
   Future<Map<String, dynamic>> _getJson(
@@ -624,11 +614,7 @@ class HttpCortexApi implements CortexApi {
     if (response.statusCode >= 400) {
       throw _failure(response.statusCode, _errorMessage(response));
     }
-    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-    if (decoded is! Map<String, dynamic>) {
-      throw CortexApiException('$path 返回了非对象 JSON');
-    }
-    return decoded;
+    return _decodeObject(path, utf8.decode(response.bodyBytes));
   }
 
   /// The ticket is stripped from the reported URL — this string reaches logs
@@ -640,6 +626,49 @@ class HttpCortexApi implements CortexApi {
   String _unreachableMessage(Object e) =>
       '连不上 cortexd（$_base）。确认 daemon 已启动，'
       '或在设置里切到 Mock 数据源。\n$e';
+
+  /// Decodes a JSON object body, turning "this is not JSON at all" into a
+  /// message that names the likely cause.
+  ///
+  /// ## Why this exists
+  ///
+  /// `jsonDecode` on an HTML body throws a bare
+  /// `FormatException: Unexpected character (at character 1) <!DOCTYPE html>`.
+  /// That reached the login screen verbatim — and it is the **single most
+  /// likely first-run failure**, because the obvious thing to type is the
+  /// address you visit in a browser, while the API lives one path segment
+  /// deeper (`https://host` → the web UI, `https://host/api` → cortexd).
+  ///
+  /// The exception was technically accurate and told the user nothing about
+  /// what to do.
+  Map<String, dynamic> _decodeObject(String what, String body) {
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(body);
+    } on FormatException {
+      throw CortexApiException(_notJsonMessage(what, body));
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw CortexApiException('$what 返回了非对象 JSON');
+    }
+    return decoded;
+  }
+
+  String _notJsonMessage(String what, String body) {
+    final head = body.trimLeft();
+    if (head.startsWith('<')) {
+      // An origin with no path is the classic "I typed the browser URL" case;
+      // suggest the concrete address rather than describing the shape of the
+      // problem. With a path already present the guess would be worse than
+      // useless, so say what was observed and stop.
+      final bare = _base.path.replaceAll('/', '').isEmpty;
+      final hint = bare
+          ? '自托管部署通常把 cortexd 挂在 `/api` 下 —— 试试 $_base/api。'
+          : '确认这个地址指向 cortexd 本身，而不是 Web 界面或反代的默认站点。';
+      return '$what：这个地址返回的是**网页**，不是 API。$hint';
+    }
+    return '$what：返回的不是 JSON。\n${_trim(body)}';
+  }
 
   static String _trim(String s) =>
       s.length <= 400 ? s : '${s.substring(0, 400)}…';
