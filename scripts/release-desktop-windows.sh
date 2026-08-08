@@ -139,6 +139,38 @@ rm -rf "${STAGE}"
 mkdir -p "${STAGE}"
 cp -r "${BUNDLE}"/. "${STAGE}/"
 
+# ── 2b. 编本地 agent 并随包放进去 ─────────────────────────
+#
+# cortex-local 是**编码那一半能工作的全部前提**：agent 循环与工具跑在
+# 用户这台机器上，而不是服务器上。GUI 启动时把它作为子进程拉起来
+# （见 app/lib/core/local_agent_io.dart），所以它必须与 cortex_app.exe
+# 同一个目录 —— 那正是 Flutter 侧唯一去找它的地方。
+#
+# 它不在就不是「少个功能」而是**静默退化**：GUI 照常启动、照常聊天，
+# 只是所有工具都在服务器上执行，而用户以为它在读自己的代码。
+# 所以这里 die 而不是 warn。
+AGENT_EXE="target/release/cortex-local.exe"
+if [ "${SKIP_BUILD}" != "1" ]; then
+    log "cargo build --release -p cortex-local"
+    cargo build --release -p cortex-local         || die "编 cortex-local 失败（原因在上面 cargo 自己的输出里）"
+fi
+[ -f "${AGENT_EXE}" ]     || die "找不到 ${AGENT_EXE} —— 没有它，装完的桌面端会把工具跑在服务器上，
+   而界面上看不出任何区别。先跑 cargo build --release -p cortex-local"
+
+# 版本必须与 GUI 一致。两者独立发版时协议会漂移，而漂移的表现是
+# 「某个字段静默消失」，不是报错 —— 现在同一个 workspace 版本号编出来，
+# 这条断言守住它别在打包这一步被换成别处的旧产物
+AGENT_VER="$("${AGENT_EXE}" --version 2>/dev/null | tr -d '
+' | awk '{print $NF}' || true)"
+case "${AGENT_VER}" in
+    "${VERSION}") ok "cortex-local ${AGENT_VER}" ;;
+    "") warn "问不出 cortex-local 的版本，跳过这条断言" ;;
+    *) die "cortex-local 版本是 ${AGENT_VER}，与本次发版的 ${VERSION} 不一致 ——
+   多半是拿到了上一次构建的残留（--skip-build 时尤其容易）" ;;
+esac
+cp "${AGENT_EXE}" "${STAGE}/cortex-local.exe"
+ok "已随包放入 cortex-local.exe"
+
 # ── 3. 补 MSVC 运行库 ─────────────────────────────────────
 # 见文件头。这三个是实测的 import 闭包（msvcp140 只再依赖另外两个），
 # 不是「CMake 那一大包都抄过来」
@@ -202,13 +234,17 @@ printf '\xEF\xBB\xBF' > "${INFO}"
 cat >> "${INFO}" <<EOF
 Cortex 桌面端 v${VERSION}（Windows x86_64）
 
-这是**客户端**，不是完整的 Cortex。
+这个包里有两个程序：
 
-  Cortex = cortexd（守护进程）+ 客户端
-           agent 循环、工具执行、记忆库全都在 cortexd 那一侧
+  cortex_app.exe    界面
+  cortex-local.exe  本地 agent —— **agent 循环与工具跑在这台机器上**，
+                    由界面自动拉起、随界面退出，你不用管它
 
-所以装完打开它，会停在「连接 cortexd」这一屏，并提示连不上 ——
-这是预期行为，不是坏了。你需要先有一个 cortexd。
+记忆不在这里。它在 cortexd（守护进程）那一侧，是唯一的权威副本，
+所以换台设备连上去还是完整的你。
+
+装完打开它会停在「连接 cortexd」这一屏 —— 这是预期行为，不是坏了。
+你需要先有一个 cortexd。
 
 ── 三种情况 ────────────────────────────────────────────
   1. 已经有一台 cortexd：在登录屏把地址改成它，填 CORTEXD_TOKEN
@@ -229,8 +265,15 @@ Cortex 桌面端 v${VERSION}（Windows x86_64）
 
 对一遍。对得上，说明你手上这份就是发布页上那一份。
 
+── 连不上 cortexd 时会怎样 ─────────────────────────────
+不是「打不开」，是「变成一个没有记忆的编码 agent」：对话、工具、
+命令执行照常，只是这一轮没有记忆注入，界面上会明说「记忆未连接」。
+那几轮对话排进本地队列，恢复连接后自动补写 —— **不丢**。
+
 ── 这一版桌面端不能干什么 ──────────────────────────────
-  * 断网就用不了（瘦客户端，没有本地缓存、没有离线写队列）
+  * 执行命令要**逐条确认**。这台机器上没有 Linux/macOS 那样的
+    OS 级沙箱（Windows 没有对等物），所以换成由你当场批准放行 ——
+    每跑一条命令都会弹一次，参数原文完整给你看
   * 只发 Windows。macOS / Linux 桌面端自己 flutter build，理由见 CHANGELOG
 
 许可证：Apache-2.0，见 LICENSE 与 NOTICE。

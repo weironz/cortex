@@ -26,6 +26,7 @@ mod proxy;
 mod remote;
 mod routes;
 mod state;
+mod supervise;
 mod turn;
 mod workspaces;
 
@@ -74,6 +75,21 @@ struct Args {
     /// 本地 agent 本来就持有它，不引入第二个秘密
     #[arg(long, env = "CORTEX_TOKEN")]
     token: Option<String>,
+
+    /// 监护人的 pid。它一消失，本进程跟着退。见 [`supervise`]。
+    ///
+    /// 桌面端拉起本进程时会传。手工从命令行跑时不传 —— 那种场景下
+    /// 本进程就是最外层，没有监护人可看。
+    #[arg(long, env = "CORTEX_PARENT_PID")]
+    parent_pid: Option<u32>,
+
+    /// 把实际绑到的地址写进这个文件（先写临时文件再 rename，原子）。
+    ///
+    /// 端口可能是 0（让内核挑一个空闲的），那样调用方在启动前根本不知道
+    /// 该连哪儿。让子进程回报，比让父进程去猜一个「大概没被占」的端口可靠 ——
+    /// 后者在两个实例、或者别的软件占了同一个端口时会静默连错地方。
+    #[arg(long, env = "CORTEX_LOCAL_ADDR_FILE")]
+    addr_file: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -159,10 +175,32 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("绑定 {} 失败", args.bind))?;
-    tracing::info!(bind = %args.bind, "本地 agent 已就绪");
+    // 报**实际**地址而不是请求的那个：`--bind 127.0.0.1:0` 时两者不一样，
+    // 而调用方要连的是实际那个
+    let actual = listener.local_addr().context("拿不到实际绑定的地址")?;
+    if let Some(path) = &args.addr_file {
+        write_addr_file(path, &actual.to_string())
+            .with_context(|| format!("写地址文件 {} 失败", path.display()))?;
+    }
+    supervise::exit_with_parent(args.parent_pid);
+    tracing::info!(bind = %actual, "本地 agent 已就绪");
 
     axum::serve(listener, routes::router(state))
         .await
         .context("HTTP 服务异常退出")?;
     Ok(())
+}
+
+/// 先写临时文件再 rename —— rename 在同一文件系统内是原子的。
+///
+/// 直接覆写有一个「旧内容没了、新内容还没落」的窗口，而读这个文件的正是
+/// 一个**正在轮询等它出现**的父进程：它会在那个窗口里读到半截地址，
+/// 然后连到一个不存在的端口上。
+fn write_addr_file(path: &std::path::Path, addr: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("addr.tmp");
+    std::fs::write(&tmp, addr)?;
+    std::fs::rename(&tmp, path)
 }

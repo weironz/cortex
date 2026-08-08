@@ -33,6 +33,11 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 dotenvy.workspace = true
 
+# 父进程存活探测在 unix 上用 kill(pid, 0)。Windows 走 tasklist，不需要它 ——
+# 见 src/supervise.rs 里「为什么不直接调 Win32」
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }

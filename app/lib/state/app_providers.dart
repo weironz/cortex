@@ -20,6 +20,8 @@
 /// are one-time costs; the rebuild isolation is a per-frame benefit.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -27,6 +29,7 @@ import '../api/cortex_api.dart';
 import '../api/http_cortex_api.dart';
 import '../api/mock_cortex_api.dart';
 import '../core/app_config.dart';
+import '../core/local_agent.dart';
 import '../models/health_status.dart';
 import 'auth_controller.dart';
 
@@ -50,6 +53,52 @@ class AppConfigNotifier extends Notifier<AppConfig> {
 final appConfigProvider = NotifierProvider<AppConfigNotifier, AppConfig>(
   AppConfigNotifier.new,
 );
+
+/// The bundled agent's origin, or null when this build runs without one.
+///
+/// ## Why it starts only after sign-in
+///
+/// The agent needs the remote URL *and* the token — it proxies to `cortexd` on
+/// the app's behalf. Starting it earlier would mean holding a credential the
+/// user has not yet proven is valid.
+///
+/// The token check itself must hit the **remote**, which is why
+/// [AuthController.signIn] probes `config.baseUrl` rather than the agent: the
+/// agent validates inbound requests against the very token the app handed it,
+/// so asking it "is this token good?" proves nothing.
+///
+/// ## null is a normal outcome, not an error
+///
+/// No binary beside the app (a `flutter run` build), Web, or an agent that
+/// refuses to start — all fall back to talking to the remote directly. That
+/// costs local tools, not the app. Failing sign-in over it would turn a
+/// degraded feature into a total outage.
+///
+/// ## Disposal kills it
+///
+/// Signing out or switching backends disposes this provider, which stops the
+/// agent. That matters: it holds the token and can execute commands, so it must
+/// not outlive the session that authorised it.
+final localAgentOriginProvider = FutureProvider<String?>((ref) async {
+  final config = ref.watch(appConfigProvider);
+  final token = ref.watch(authControllerProvider.select((s) => s.token));
+  if (config.useMock || token == null || !kLocalAgentSupported) return null;
+
+  final agent = discoverLocalAgent();
+  if (agent == null) return null;
+  ref.onDispose(() => unawaited(agent.stop()));
+
+  try {
+    final origin = await agent.start(remote: config.baseUrl, token: token);
+    debugPrint('本地 agent 已就绪：$origin（工具在本机执行）');
+    return origin;
+  } on LocalAgentException catch (e) {
+    // Loud in the log, silent in the UI: the app still works, it just runs
+    // tools on the server. Blocking here would be worse than degrading.
+    debugPrint('本地 agent 未启动，回落到直连远端：$e');
+    return null;
+  }
+});
 
 /// The single place that knows whether we are on mock or live data.
 ///
@@ -76,8 +125,20 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
   }
 
   final token = ref.watch(authControllerProvider.select((s) => s.token));
+
+  // Point at the local agent once it is up; the remote until then, and forever
+  // if this build has none. Both speak the same protocol — the agent
+  // reverse-proxies everything it does not handle — so nothing downstream can
+  // tell the difference, and the swap is just another backend change.
+  //
+  // `config.baseUrl` stays the *remote* everywhere it is displayed. That is
+  // what the user configured and what they care about; showing them
+  // `127.0.0.1:51234` would be true and useless.
+  final origin =
+      ref.watch(localAgentOriginProvider).value ?? config.baseUrl;
+
   final api = HttpCortexApi(
-    baseUrl: config.baseUrl,
+    baseUrl: origin,
     token: token,
     // `read`, not `watch`: this is an outbound edge. Watching the notifier
     // would make every auth state change rebuild the client, including the one
