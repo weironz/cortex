@@ -12,6 +12,44 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ## [未发布]
 
+### 新增 `cortex-local` —— agent 循环搬到本地，**编码那一半开始工作**
+
+在此之前，工具跑在 cortexd 进程内，agent 读写的是**服务器**上的目录 ——
+你本地的代码它看不见。桌面安装程序装完只剩一个填服务器地址的空壳。
+
+现在多了一个二进制 `cortex-local`：循环、工具、沙箱在**你的机器上**跑，
+记忆仍然只有远端 cortexd 一个权威副本。
+
+**客户端一行不用改。** 它讲的是与 cortexd 完全相同的协议 ——
+`/chat`、`/confirmations`、`/health` 自己答，其余路径原样反代给远端。
+把 CLI 或桌面端的服务器地址从远端改成 `http://127.0.0.1:8090` 就完事。
+
+```bash
+CORTEX_REMOTE=https://你的-cortexd  CORTEX_TOKEN=…  cortex-local
+```
+
+**连不上 cortexd 时不是「打不开」，是「变成一个没有记忆的编码 agent」**：
+循环、工具照常，界面上明说「记忆未连接」，这一轮排进本地 append-only 队列
+（`%LOCALAPPDATA%\cortex\outbox.jsonl`），恢复连接后自动灌回。
+**不存第二份记忆库** —— 队列只是待发件箱。
+
+**工作区绑定改成设备本地的。** 你点的目录在这台机器上，而服务端的校验会
+拿它去 canonicalize 服务器的文件系统。更根本的是：一个本地路径在别的设备上
+要么是死路径，要么**指向别处而不报错**。所以绑定存在
+`%LOCALAPPDATA%\cortex\workspaces.json`，不进跨设备同步的会话记录。
+
+**Windows 上「能改代码、不能跑测试」**：文件读写正常，`shell` 被拒
+（这台机器上没有 landlock / Seatbelt 的对等物，默认拒绝执行）。
+大致是「没有终端的 Cursor」。要放开得显式设 `CORTEX_SANDBOX=unsandboxed`，
+那会把安全兜底整个关掉。
+
+**还没做的**：它还不随桌面安装程序一起装、不随 GUI 起、挂了不会自动拉起。
+本轮验收是在命令行里跑通，安装程序集成是下一轮。
+
+配套地 cortexd 加了两个端点：`POST /episodes`（写回 + 检索 + 归因，
+**幂等**，供离线队列重放）与 `POST /llm/stream`（LLM 代理，
+默认路径 —— API key 只在服务端一处，多设备不用每台配一遍）。
+
 ### 换 embedding 模型不再静默失忆
 
 上一条（默认后端换成远端 API）把 `embedding_model` 从
