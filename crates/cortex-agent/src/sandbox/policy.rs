@@ -315,9 +315,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = SandboxPolicy {
             writable_roots: vec![d.path().to_path_buf(), d.path().join("nope")],
-            readable_roots: vec![],
-            network: NetworkPolicy::Denied,
-            attended: Attended::No,
+            ..SandboxPolicy::sealed()
         };
         assert_eq!(
             p.existing_writable().len(),

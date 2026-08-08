@@ -317,10 +317,13 @@ mod tests {
 
     #[test]
     fn ruleset_refuses_a_policy_with_no_writable_root() {
+        // `..sealed()` 而不是逐字段写全：这是**平台专有**代码，
+        // 在别的平台上根本编不到 —— 给 SandboxPolicy 加一个字段时，
+        // 加字段的人（很可能在 Windows 上）看不见这里断了，
+        // 只有 CI 的 Linux job 会红
         let policy = SandboxPolicy {
             writable_roots: vec![std::path::PathBuf::from("/definitely/not/here")],
-            readable_roots: vec![],
-            network: NetworkPolicy::Denied,
+            ..SandboxPolicy::sealed()
         };
         let err = build_ruleset(&policy).unwrap_err();
         assert!(err.to_string().contains("可写目录"), "实际：{err}");
