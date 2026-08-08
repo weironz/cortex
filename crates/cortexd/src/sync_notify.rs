@@ -43,7 +43,7 @@ impl SyncBus {
             // recv 返回 None 只有一个原因：存储层连接池已关闭，即进程在退出
             while let Some(signal) = notifications.recv().await {
                 // 没有订阅者时 send 返回 Err，这不是错误
-                let _ = bus_tx.send(signal.into());
+                let _ = bus_tx.send(to_event(signal));
             }
             tracing::info!("存储层已关闭，同步信号转发任务收工");
         });
@@ -74,12 +74,20 @@ impl SyncBus {
 
 /// 存储层信号 → 线上事件。两边刻意一一对应，转换里**不做任何判断** ——
 /// 「这次缺不缺口」是事件源才知道的事，中间层擅自归并会把运维信号抹平。
-impl From<SyncSignal> for SyncEvent {
-    fn from(signal: SyncSignal) -> Self {
-        match signal {
-            SyncSignal::Bump { cursor } => Self::Bump { cursor },
-            SyncSignal::Resync { cursor } => Self::Resync { cursor },
-        }
+///
+/// # 为什么是自由函数而不是 `From`
+///
+/// `SyncSignal` 属于 `cortex-store`，`SyncEvent` 属于 `cortex-proto`，
+/// cortexd 两个都不拥有 —— 孤儿规则不允许在这里写 impl。而把 impl 塞进
+/// 那两个 crate 里的任何一个，都要给它加一条**反方向**的依赖边：
+/// 协议 crate 依赖数据库驱动，或者存储层依赖 HTTP 契约。两条都不能要。
+///
+/// 「谁拥有这个转换」的答案本来就是 cortexd —— 它是唯一同时看得见两侧的地方。
+#[must_use]
+pub fn to_event(signal: SyncSignal) -> SyncEvent {
+    match signal {
+        SyncSignal::Bump { cursor } => SyncEvent::Bump { cursor },
+        SyncSignal::Resync { cursor } => SyncEvent::Resync { cursor },
     }
 }
 
@@ -95,14 +103,14 @@ mod tests {
     fn each_signal_keeps_its_own_kind() {
         assert!(
             matches!(
-                SyncEvent::from(SyncSignal::Bump { cursor: 7 }),
+                to_event(SyncSignal::Bump { cursor: 7 }),
                 SyncEvent::Bump { cursor: 7 }
             ),
             "bump 必须映射为 bump 且保留游标"
         );
         assert!(
             matches!(
-                SyncEvent::from(SyncSignal::Resync { cursor: 9 }),
+                to_event(SyncSignal::Resync { cursor: 9 }),
                 SyncEvent::Resync { cursor: 9 }
             ),
             "resync 不能被归并成 bump，否则「可能有缺口」这个信号就丢了"

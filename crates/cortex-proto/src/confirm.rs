@@ -102,7 +102,8 @@ pub enum AnswerOutcome {
     Unknown,
 }
 
-/// 待确认项的簿子。整个进程一本，[`crate::state::AppState`] 持有。
+/// 待确认项的簿子。整个进程一本，由持有它的服务端状态（cortexd 的
+/// `AppState`、本地 agent 的对应物）拿着。
 pub struct ConfirmRegistry {
     inner: Mutex<HashMap<String, Pending>>,
     timeout: Duration,
@@ -328,7 +329,7 @@ fn mint_token() -> String {
 
 /// 把工具参数渲染成给人看的预览。
 ///
-/// 与 [`crate::live::compact_args`] 分开的两个函数，因为它们服务两件不同的事：
+/// 与 cortexd 的 `live::compact_args` 分开的两个函数，因为它们服务两件不同的事：
 /// 那个是给 UI 画一行「动了哪个文件」的摘要，逐值截到 60 字符；这个是用户
 /// 据以做安全判断的全部依据，**不能**逐值截断（截掉的正好是命令危险的那一半）。
 /// 合成一个函数就必然要在两种需求里选一个，而选哪个都会在另一处出问题。

@@ -1,0 +1,27 @@
+[package]
+name = "cortex-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cortex 客户端 ↔ 服务端的线协议：DTO 与工具确认回路"
+
+[dependencies]
+cortex-core.workspace = true
+cortex-agent.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# 确认凭据必须直接来自内核 CSPRNG。不用 ULID 凑数：它高 48 位是时间戳，
+# 随机位只有 80，而「窗口很短」不该被算进熵里。见 src/confirm.rs。
+# 版本与 cortexd 保持一致（那边原本就有这两条）。
+getrandom = "0.3"
+hex = "0.4"
+
+[dev-dependencies]
+# `#[tokio::test(start_paused = true)]`：确认超时默认 180 秒，
+# 真等一遍的测试没人会跑。虚拟时钟让它变成微秒级，而且**测的是同一段代码**
+tokio = { workspace = true, features = ["test-util"] }

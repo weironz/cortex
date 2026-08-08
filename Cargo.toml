@@ -6,6 +6,7 @@ members = [
     "crates/cortex-store",
     "crates/cortex-memory",
     "crates/cortex-agent",
+    "crates/cortex-proto",
     "crates/cortexd",
     "crates/cortex-cli",
     "crates/cortex-blob",
@@ -27,6 +28,7 @@ cortex-llm = { path = "crates/cortex-llm" }
 cortex-store = { path = "crates/cortex-store" }
 cortex-memory = { path = "crates/cortex-memory" }
 cortex-agent = { path = "crates/cortex-agent" }
+cortex-proto = { path = "crates/cortex-proto" }
 cortex-blob = { path = "crates/cortex-blob" }
 
 # 供应商层：取件自 goose（Apache-2.0）。

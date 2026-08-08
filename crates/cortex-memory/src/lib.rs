@@ -16,6 +16,13 @@
 //! | [`fusion`]   | 检索：四路召回的 RRF 融合 |
 //! | [`injection`]| 出库：以什么形式进 prompt（决定 caching 成本结构） |
 
+/// 出库：以什么形式进 prompt。
+///
+/// **实现已搬到 [`cortex_core::injection`]** —— 本地 agent 与 cortexd 要渲染出
+/// 逐字节相同的记忆块，而本地 agent 不该为了这 245 行把整个记忆引擎
+/// （连带 `cortex-store` → sqlx）拖进去。这里保留 re-export 让既有调用点不动。
+pub use cortex_core::injection;
+
 pub mod crosslink;
 pub mod embed;
 pub mod embed_api;
@@ -24,7 +31,6 @@ pub mod embed_api;
 pub mod embed_local;
 pub mod extract;
 pub mod fusion;
-pub mod injection;
 pub mod retrieval;
 pub mod tokenize;
 pub mod trace;

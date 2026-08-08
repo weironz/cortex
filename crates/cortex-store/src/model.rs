@@ -995,7 +995,13 @@ pub const ATTACHMENT_FILENAME_MAX_CHARS: usize = 255;
 pub const SESSION_TITLE_MAX_CHARS: usize = 200;
 
 /// `session_events.workspace` 的字符数上限，与 migration 里的 CHECK 一致。
-pub const WORKSPACE_PATH_MAX_CHARS: usize = 4096;
+///
+/// **定义在 [`cortex_core`]**，因为校验这个上限的
+/// [`cortex_agent::workspace::validate`] 跑在两侧：cortexd（服务端目录）与
+/// 本地 agent（用户自己机器上的目录），而后者不该为了一个数字依赖数据库层。
+/// 这里 re-export 保持 `cortex_store::WORKSPACE_PATH_MAX_CHARS` 可用 ——
+/// 它与 migration 的 CHECK 对齐，那件事仍然是存储层的责任。
+pub use cortex_core::WORKSPACE_PATH_MAX_CHARS;
 
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct SessionEvent {

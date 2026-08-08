@@ -6,18 +6,20 @@
 mod auth;
 mod backfill;
 mod blobs;
-mod confirm;
 mod cors;
 mod cursor;
-mod dto;
 mod live;
 mod reembed;
 mod routes;
 mod state;
 mod sync_notify;
 mod sync_payload;
-mod workspace;
 mod ws;
+
+// 线协议与确认回路住在 `cortex-proto`，因为本地 agent 要讲**同一套**协议
+// （见那个 crate 的模块注释）。这里 re-export 成 `crate::dto` / `crate::confirm`，
+// 既保持既有调用点不动，也让「协议不是 cortexd 私有的」这件事只体现在这两行上。
+pub use cortex_proto::{confirm, dto};
 
 use anyhow::Context as _;
 use clap::Parser;

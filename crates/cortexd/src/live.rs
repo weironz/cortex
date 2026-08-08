@@ -582,7 +582,7 @@ impl Live {
         if let Some(ws) = &patch.workspace {
             events.push(match ws {
                 Some(raw) => {
-                    let path = crate::workspace::validate(raw)?;
+                    let path = cortex_agent::workspace::validate(raw)?;
                     cortex_store::NewSessionEvent::bind_workspace(
                         session_id,
                         &path,

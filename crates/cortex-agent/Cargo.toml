@@ -16,7 +16,6 @@ tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 cortex-llm.workspace = true
-cortex-memory.workspace = true
 futures.workspace = true
 async-trait.workspace = true
 

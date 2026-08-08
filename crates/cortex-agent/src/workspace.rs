@@ -31,8 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cortex_core::{CortexError, Result};
-use cortex_store::WORKSPACE_PATH_MAX_CHARS;
+use cortex_core::{CortexError, Result, WORKSPACE_PATH_MAX_CHARS};
 
 /// 校验一个客户端给的工作区路径，返回可入库的规范化绝对路径。
 ///

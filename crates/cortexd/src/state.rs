@@ -510,7 +510,7 @@ impl AppState {
                 }
                 if let Some(ws) = &patch.workspace {
                     s.workspace = match ws {
-                        Some(raw) => Some(crate::workspace::validate(raw)?),
+                        Some(raw) => Some(cortex_agent::workspace::validate(raw)?),
                         None => None,
                     };
                 }

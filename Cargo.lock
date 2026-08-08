@@ -1044,7 +1044,6 @@ dependencies = [
  "async-trait",
  "cortex-core",
  "cortex-llm",
- "cortex-memory",
  "futures",
  "landlock",
  "libc",
@@ -1176,6 +1175,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortex-proto"
+version = "0.1.1"
+dependencies = [
+ "chrono",
+ "cortex-agent",
+ "cortex-core",
+ "getrandom 0.3.4",
+ "hex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cortex-store"
 version = "0.1.1"
 dependencies = [
@@ -1208,6 +1222,7 @@ dependencies = [
  "cortex-core",
  "cortex-llm",
  "cortex-memory",
+ "cortex-proto",
  "cortex-store",
  "dotenvy",
  "futures",
