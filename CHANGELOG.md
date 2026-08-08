@@ -10,7 +10,35 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ---
 
-## [未发布]
+## [0.1.1] - 2026-08-08
+
+这一版的由来：**0.1.0 发出去的那个
+`cortex-v0.1.0-x86_64-pc-windows-msvc.zip` 里没有桌面 GUI**，
+只有 cortexd 与 CLI —— 而它的名字看上去就像「Windows 版 Cortex」。
+0.1.1 把桌面安装程序补上，同时带上首次真实上线时挖出来的三个修复。
+
+> **桌面端是瘦客户端，它需要一台 cortexd。**
+> 安装程序里没有服务端 —— 装完第一屏就是让你填 cortexd 的地址与凭据。
+> 记忆的权威只有远端 cortexd 一处，桌面端与 Web、CLI 走完全相同的
+> HTTP/SSE 协议，不走任何私有捷径（见
+> [docs/architecture.md](docs/architecture.md)）。
+> 还没有服务端的话，先看 [docs/deploy.md](docs/deploy.md)。
+
+### 修复：CI 从 08-07 07:18 起一直是红的，没人看
+
+十几次 push 全红，期间照样发了 v0.1.0、照样合了六七个提交。
+**一个长期红着的 CI 等于没有 CI** —— 这条比下面两个具体原因严重。
+
+两个原因叠在一起，前一个把后一个挡住了：
+
+- `scripts/lib.sh` 的 `load_env()` 收一个可选参数而没有任何调用点传过它
+  （shellcheck SC2120）。改成在调用点显式写出路径，而不是加一行
+  `# shellcheck disable` —— 一个只走过默认路径的可选参数，
+  等于一段从没被执行过、但长得像能用的代码
+- `docker compose config` 那道门只喂了两个必填变量，而 compose 里
+  用 `${VAR:?}` 声明必填的一共六个。**这道门在本地是过的**：
+  docker compose 会自动读仓库根的 `.env`，于是本地跑它等于没跑。
+  顺带把 `deploy/docker-compose.yml`（线上真正跑的那份）也纳入检查
 
 ### 修复：环境变量设成空串时不再顶掉默认值
 
