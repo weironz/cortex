@@ -61,6 +61,24 @@ pub mod table {
         REDACTIONS        = "redactions",
         SESSION_EVENTS    = "session_events",
     }
+
+    // ── 刻意**不**在上面那个宏里的两张表 ──────────────────────
+    //
+    // `fact_embeddings` / `entity_embeddings` 是换模型时补出来的向量
+    // （见 migrations/20260808000001）。它们**永不进 sync_log**，
+    // 所以也不该出现在 `ALL` 里 —— `ALL` 的定义就是「全部会出现在
+    // sync_log.table_name 里的表名」。
+    //
+    // 为什么不同步：`sync_payload.rs` 的模块注释早就把理由写死了 ——
+    // 「tsv 与 embedding 是服务端派生列，不进同步 payload……
+    //  **换 embedding 模型时会全量变化，白白撑爆增量同步**」。
+    // 那句话说的正是这件事。十万条事实的一次回填会推出十万条 sync_log，
+    // 而每个客户端拿到的载荷里没有一个字段是它用得上的。
+    //
+    // 代价是它们不能走 `Guarded::insert_row`（那条通道强制写 sync_log），
+    // 必须走 `insert_derived_row`。那个方法的注释里写了它的适用边界。
+    pub const FACT_EMBEDDINGS: &str = "fact_embeddings";
+    pub const ENTITY_EMBEDDINGS: &str = "entity_embeddings";
 }
 
 /// `facts` 表的全部列。四路召回、三条回放召回、按主键 / 主语 / 宾语 / 出处
@@ -465,6 +483,45 @@ impl NewEpisodeBlob {
     #[must_use]
     pub fn record_id(&self) -> String {
         format!("{}:{}", self.episode_id, self.blob_hash)
+    }
+}
+
+/// 换 embedding 模型时给一条已有事实补出来的向量。
+///
+/// 不是就地改 `facts.embedding` —— CLAUDE.md 的 append-only 不给这条路，
+/// 而且「回填期间双模型召回」要求同一条事实**同时**持有两个空间的向量，
+/// 一个列装不下两个。见 `migrations/20260808000001_embedding_backfill.sql`。
+#[derive(Debug, Clone)]
+pub struct NewFactEmbedding {
+    pub fact_id: Id,
+    pub embedding_model: String,
+    pub embedding: Vector,
+}
+
+impl NewFactEmbedding {
+    /// `sync_log.record_id` 的复合键约定：`fact_id:embedding_model`。
+    ///
+    /// 模型名进 record_id 是必须的：同一条事实在不同模型下是**不同的行**，
+    /// 只用 fact_id 会让第二次回填看起来像是第一次的重复。
+    #[must_use]
+    pub fn record_id(&self) -> String {
+        format!("{}:{}", self.fact_id, self.embedding_model)
+    }
+}
+
+/// 同上，实体侧。
+#[derive(Debug, Clone)]
+pub struct NewEntityEmbedding {
+    pub entity_id: Id,
+    pub embedding_model: String,
+    pub embedding: Vector,
+}
+
+impl NewEntityEmbedding {
+    /// `sync_log.record_id` 的复合键约定：`entity_id:embedding_model`。
+    #[must_use]
+    pub fn record_id(&self) -> String {
+        format!("{}:{}", self.entity_id, self.embedding_model)
     }
 }
 

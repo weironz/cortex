@@ -232,6 +232,53 @@ impl ApiEmbedder {
         Self::new(ApiEmbedderConfig::from_env()?)
     }
 
+    /// 从 `CORTEX_EMBED_LEGACY_*` 构造**上一个模型**的 embedder。没配就是 `None`。
+    ///
+    /// # 它解决什么
+    ///
+    /// 回填期间旧事实的向量还只在旧空间里。要让它们仍然被检索到，就得把
+    /// **查询**也编到旧空间去 —— 而那需要旧模型本身还在手上。
+    /// 这就是 memory.md §七 第 3 步「检索期间按模型分组，各自召回」的前提。
+    ///
+    /// # ⚠️ 它救不了「从进程内 fastembed 换到远端 API」这一次
+    ///
+    /// 那种迁移里的旧模型是 fastembed，而它默认已经不编进二进制
+    /// （feature `local-embed`）。也就是说 docker 镜像里根本没有那个旧模型，
+    /// 配了这几个变量也构造不出它来。
+    ///
+    /// 这条路覆盖的是**将来的 api → api 换模型**（换云厂商 / 换模型名）。
+    /// 那一次迁移只能靠回填器把窗口熬过去，期间 BM25 / 图 / 近因三路兜着。
+    ///
+    /// # Errors
+    ///
+    /// 配了 endpoint 但别的取值非法。
+    pub fn legacy_from_env() -> Result<Option<Self>> {
+        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+
+        let Some(endpoint) = var("CORTEX_EMBED_LEGACY_ENDPOINT") else {
+            return Ok(None);
+        };
+        // 模型名必填：旧空间的 `model_id` 要写进查询的过滤条件，
+        // 猜错等于查了一个空集合 —— 而那与「没配」的表现一模一样，
+        // 分辨不出来。宁可当场报错
+        let model = var("CORTEX_EMBED_LEGACY_MODEL").ok_or_else(|| {
+            CortexError::Config(
+                "设了 CORTEX_EMBED_LEGACY_ENDPOINT 就必须设 CORTEX_EMBED_LEGACY_MODEL：\n\
+                 旧模型名会成为向量查询的过滤条件，猜错的表现是「查到 0 条」，\n\
+                 与「没开这个功能」一模一样，事后分辨不出来"
+                    .into(),
+            )
+        })?;
+
+        Self::new(ApiEmbedderConfig {
+            endpoint,
+            model,
+            api_key: var("CORTEX_EMBED_LEGACY_API_KEY"),
+            batch: DEFAULT_BATCH,
+        })
+        .map(Some)
+    }
+
     /// 发一批（已经切好，长度 <= batch）。
     async fn embed_chunk(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let body = EmbedRequest {

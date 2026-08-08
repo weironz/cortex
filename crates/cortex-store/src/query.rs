@@ -12,6 +12,7 @@ use crate::model::{
     EpisodeToolCall, Fact, FactEvent, FactStatus, InjectedMemory, Redaction, RedactionTarget,
     Summary, SummaryScope, fact_columns,
 };
+use crate::recall::MAX_LIMIT;
 use crate::store::Store;
 
 /// 会话消息分页的游标：`(occurred_at, id)`。
@@ -563,5 +564,142 @@ impl Store {
         .fetch_one(self.pool())
         .await?;
         Ok(exists)
+    }
+
+    // ─────────────── 换 embedding 模型：普查与待办 ───────────────
+
+    /// 库里现有哪些 embedding 模型、各覆盖多少条**有效**事实。
+    ///
+    /// # 为什么需要它
+    ///
+    /// 换模型之后旧向量还在，但四条向量查询全部按 `embedding_model` 过滤
+    /// （见 [`Store::recall_vector`]），于是旧事实**当天就退出向量召回**。
+    /// 而 BM25 / 图 / recency 三路照常，所以它看起来不像坏了，
+    /// 只像「语义召回好像变差了点」—— 没有任何人被告知。
+    ///
+    /// 这个查询是 cortexd 启动时那声告警的依据。**它只负责数数，
+    /// 不负责判断**：当前模型是哪个由调用方决定。
+    ///
+    /// 统计的是 `facts` 原列与 `fact_embeddings` 旁表的**并集**：
+    /// 同一条事实在两个模型下各算一次，这正是想要的 ——
+    /// 「模型 M 覆盖了多少条」问的就是这个。
+    ///
+    /// 按覆盖数降序，让最大的那一档排在最前面（告警只印得下几行）。
+    pub async fn embedding_census(&self) -> Result<Vec<(String, i64)>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT embedding_model, count(DISTINCT fact_id) AS n
+               FROM (
+                        SELECT id AS fact_id, embedding_model
+                          FROM active_facts
+                         WHERE embedding IS NOT NULL
+                        UNION ALL
+                        SELECT fe.fact_id, fe.embedding_model
+                          FROM fact_embeddings fe
+                          JOIN active_facts f ON f.id = fe.fact_id
+                    ) t
+              GROUP BY embedding_model
+              ORDER BY n DESC, embedding_model ASC",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 当前模型覆盖了多少条有效事实、还有多少条覆盖不到。
+    ///
+    /// # 为什么不能拿 [`Store::embedding_census`] 相减
+    ///
+    /// 回填期间一条事实**同时**在两个模型下有向量，普查里它被数了两次。
+    /// 用「总数 − 当前模型数」算出来的 stale 会偏小，而且偏小的幅度正好
+    /// 等于已回填的条数 —— 也就是说回填跑得越多，这个数字越接近 0，
+    /// 看起来「快好了」，实际与真实进度无关。
+    ///
+    /// `covered` 的判据与 [`Store::recall_vector`] 的并集**逐字一致**：
+    /// 原列在当前模型下且非空，**或**旁表里有当前模型的行。
+    /// 两处判据漂开的症状是 `/health` 报「全覆盖」而召回依然是空的。
+    pub async fn embedding_coverage(&self, model: &str) -> Result<(i64, i64)> {
+        let (covered, stale): (i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE ok), count(*) FILTER (WHERE NOT ok)
+               FROM (
+                 SELECT (f.embedding IS NOT NULL AND f.embedding_model = $1)
+                        OR EXISTS (
+                             SELECT 1 FROM fact_embeddings fe
+                              WHERE fe.fact_id = f.id AND fe.embedding_model = $1
+                           ) AS ok
+                   FROM active_facts f
+               ) t",
+        )
+        .bind(model)
+        .fetch_one(self.pool())
+        .await?;
+        Ok((covered, stale))
+    }
+
+    /// 还没有 `model` 这个空间下向量的**有效**事实，供回填器取一批。
+    ///
+    /// 按 `created_at DESC`：**新的先补**。近期记忆被检索到的概率高得多，
+    /// 从旧的补起意味着回填跑了一半时，用户最可能问到的那些反而还没回来。
+    ///
+    /// 返回 `(id, statement)` 而不是整行 [`Fact`]：回填只需要文本，
+    /// 把 1024 维向量与 tsv 一起搬回来是白费带宽 —— 而这条查询会被跑很多轮。
+    ///
+    /// # 判据是「没有可用向量」，不是「模型名不同」
+    ///
+    /// 写成 `embedding_model <> $1` 会漏掉一类：模型名**就是**当前这个、
+    /// 但 `embedding` 是 NULL 的行（写入时向量化失败过）。那种事实同样
+    /// 进不了向量召回，而且永远不会被回填器捡起来 —— 它在待办里不存在，
+    /// 却在 [`Store::embedding_coverage`] 的 stale 里算一条，
+    /// 于是 `/health` 上那个数字会**卡在一个下不去的值**，
+    /// 看起来像回填坏了。两处必须用同一个判据。
+    pub async fn facts_missing_embedding(
+        &self,
+        model: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT f.id, f.statement
+               FROM active_facts f
+              WHERE NOT (f.embedding IS NOT NULL AND f.embedding_model = $1)
+                AND NOT EXISTS (
+                        SELECT 1 FROM fact_embeddings fe
+                         WHERE fe.fact_id = f.id AND fe.embedding_model = $1
+                    )
+              ORDER BY f.created_at DESC, f.id DESC
+              LIMIT $2",
+        )
+        .bind(model)
+        .bind(limit.clamp(1, MAX_LIMIT))
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 同上，实体侧。实体向量不参与四路召回，只用于**抽取期的实体消解** ——
+    /// 但它失效的方式更隐蔽：消解不上就会给同一个人建出第二个实体，
+    /// 从此他的事实分裂在两个节点上，图遍历再也走不通。
+    pub async fn entities_missing_embedding(
+        &self,
+        model: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT e.id, e.name
+               FROM entities e
+              WHERE NOT (e.embedding IS NOT NULL AND e.embedding_model = $1)
+                -- 从没有过向量的实体不补：实体向量是抽取期消解用的，
+                -- 没有过就说明当初那条路没走到，补一个也没有对应的语义
+                AND e.embedding IS NOT NULL
+                AND NOT EXISTS (
+                        SELECT 1 FROM entity_embeddings ee
+                         WHERE ee.entity_id = e.id AND ee.embedding_model = $1
+                    )
+              ORDER BY e.created_at DESC, e.id DESC
+              LIMIT $2",
+        )
+        .bind(model)
+        .bind(limit.clamp(1, MAX_LIMIT))
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
     }
 }

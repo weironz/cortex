@@ -130,6 +130,11 @@ impl AppState {
         // 纯归档。回扫器以 blobs 表为权威清单把它们捡回来。
         // 未配 vision 模型时它自己不会启动。
         crate::backfill::spawn(Arc::clone(&live), blobs.clone());
+        // 换过 embedding 模型时把旧事实的向量补出来。默认开着 ——
+        // 关掉的代价（旧记忆永久退出向量召回）没有任何症状，
+        // 而开着的代价（一次全库 embedding 调用）是可见的，
+        // 且它会先把数字报出来再动手。见 reembed 的模块注释
+        crate::reembed::spawn(Arc::clone(&live));
 
         Ok(Self {
             inner: Arc::new(Inner {
@@ -235,6 +240,14 @@ impl AppState {
     #[must_use]
     pub fn blob_backend(&self) -> &'static str {
         self.inner.blobs.backend()
+    }
+
+    /// 向量化的覆盖情况，进 `/health`。mock 后端没有数据库可查，返回 `None`。
+    pub async fn embedding_health(&self) -> Option<crate::dto::EmbeddingHealth> {
+        match &self.inner.backend {
+            Backend::Mock => None,
+            Backend::Live(l) => Some(l.embedding_health().await),
+        }
     }
 
     /// 本部署能不能签 presigned URL。见 [`MediaStore::supports_presign`]。

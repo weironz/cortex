@@ -69,6 +69,38 @@ impl TestDb {
             .expect("测试用 SQL 应当执行成功");
     }
 
+    /// 在测试 schema 里跑一句查询，把**第一列**按文本取回来。
+    ///
+    /// 为 `EXPLAIN` 而存在：执行计划是一张多行文本表，而 `Store` 只暴露
+    /// 领域方法、`pool()` 是 `pub(crate)`。让测试自己开一条连接又会绕过
+    /// `search_path`，查到开发库而不是这个临时 schema 去。
+    ///
+    /// 不支持绑定参数 —— 调用方自己把字面量拼进去。
+    /// 这在测试里可以接受，在生产代码里不行。
+    ///
+    /// 必须走 `raw_sql`（simple query 协议）而不是 `query_as`：后者用
+    /// prepared statement，一次只能一条语句，而这里要先 `SET search_path`
+    /// 再查 —— 报的是 `cannot insert multiple commands into a prepared
+    /// statement`，一条完全不指向真正原因的错误。
+    pub async fn query_raw(&self, sql: impl Into<String>) -> Vec<String> {
+        use sqlx::Row as _;
+        // `public` 必须留在 search_path 里，否则 `::vector` 解析不到 —— 报的是
+        // `type "vector" does not exist`，一条看起来像「扩展没装」的错误。
+        // 与 setup() 里那条连接选项保持一致
+        let stmt = format!(
+            "SET search_path TO \"{}\", public; {}",
+            self.schema,
+            sql.into()
+        );
+        sqlx::raw_sql(AssertSqlSafe(stmt))
+            .fetch_all(&self.admin)
+            .await
+            .expect("测试用查询应当执行成功")
+            .into_iter()
+            .filter_map(|r| r.try_get::<String, _>(0).ok())
+            .collect()
+    }
+
     /// 同 [`Self::exec_raw`]，但把数据库的拒绝当作**结果**而不是 panic。
     ///
     /// 用在「这条坏数据应当写不进去」这类断言上：CHECK 约束报错正是期望，

@@ -60,14 +60,16 @@ pub use model::{
     ATTACHMENT_FILENAME_MAX_CHARS, Actor, Blob, BlobTranscript, CanonicalEntity, Derivation,
     DerivedKind, Entity, EntityMerge, Episode, EpisodeAttachment, EpisodeBlob, EpisodeMemory,
     EpisodeToolCall, Fact, FactEvent, FactOp, FactSource, FactStatus, InjectedMemory,
-    InvalidationKind, NewBlob, NewBlobTranscript, NewEntity, NewEntityMerge, NewEpisode,
-    NewEpisodeBlob, NewEpisodeMemory, NewEpisodeToolCall, NewFact, NewFactEvent, NewRedaction,
-    NewSessionEvent, NewSummary, ProvenanceRef, Redaction, RedactionMode, RedactionTarget, Role,
-    SESSION_TITLE_MAX_CHARS, SessionEvent, SessionOp, SessionState, SourceChannel, SourceKind,
-    Summary, SummaryScope, TOOL_NAME_MAX_CHARS, TOOL_PATH_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS,
-    TranscriptKind, WORKSPACE_PATH_MAX_CHARS, table,
+    InvalidationKind, NewBlob, NewBlobTranscript, NewEntity, NewEntityEmbedding, NewEntityMerge,
+    NewEpisode, NewEpisodeBlob, NewEpisodeMemory, NewEpisodeToolCall, NewFact, NewFactEmbedding,
+    NewFactEvent, NewRedaction, NewSessionEvent, NewSummary, ProvenanceRef, Redaction,
+    RedactionMode, RedactionTarget, Role, SESSION_TITLE_MAX_CHARS, SessionEvent, SessionOp,
+    SessionState, SourceChannel, SourceKind, Summary, SummaryScope, TOOL_NAME_MAX_CHARS,
+    TOOL_PATH_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS, TranscriptKind, WORKSPACE_PATH_MAX_CHARS, table,
 };
 pub use query::EpisodeCursor;
+#[doc(hidden)]
+pub use recall::RECALL_VECTOR_SQL;
 pub use store::{SessionDigest, Store};
 pub use sync::{SyncLogEntry, SyncNotifications, SyncPayload, SyncRecord, SyncSignal};
 pub use txn::{SYNC_ADVISORY_LOCK_KEY, WriteTxn};

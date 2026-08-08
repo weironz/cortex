@@ -160,6 +160,51 @@ fn bridged_entities(channels: &[(Channel, Vec<Fact>)]) -> std::collections::Hash
     out
 }
 
+/// 把当前空间与旧空间的向量召回合成**同一条** [`Channel::Vector`]。
+///
+/// # 为什么按名次交替，而不是当前空间全排前面
+///
+/// 回填期间旧空间里的事实**更多**（存量全在那边），当前空间只有新写的那些。
+/// 让当前空间整体排前面，等于给刚写的几条事实每人一个前排名次，
+/// 而把全部历史记忆压到 41 名之后 —— RRF 的核是 `1/(k+rank)`，
+/// 那基本等于没召回。
+///
+/// 交替取（新1、旧1、新2、旧2……）让两个空间在名次上平权。
+/// 这不是「更准」，是**在两边距离不可比的前提下唯一不引入偏置的合法做法**。
+///
+/// # 为什么不按距离归并
+///
+/// 两个模型的余弦距离不在同一个尺度上。看起来能比（都是 0~2 的实数），
+/// 排出来的序却没有意义 —— 而且它不会报错，只会让检索质量莫名其妙地差。
+///
+/// 没挂 legacy 时 `legacy` 是空的，函数退化成「原样返回当前空间」。
+fn merge_vector_spaces(current: Vec<(Fact, f64)>, legacy: Vec<(Fact, f64)>) -> Vec<Fact> {
+    if legacy.is_empty() {
+        return current.into_iter().map(|(f, _)| f).collect();
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(current.len() + legacy.len());
+    let mut a = current.into_iter();
+    let mut b = legacy.into_iter();
+    loop {
+        let mut progressed = false;
+        for it in [&mut a as &mut dyn Iterator<Item = (Fact, f64)>, &mut b] {
+            if let Some((f, _)) = it.next() {
+                progressed = true;
+                // 同一条事实两边都命中时只留先出现的那个 —— 也就是
+                // 名次更靠前的那个空间给它的位置
+                if seen.insert(f.id.clone()) {
+                    out.push(f);
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    out
+}
+
 fn is_bridged(f: &Fact, bridged: &std::collections::HashSet<String>) -> bool {
     if bridged.is_empty() {
         return false;
@@ -347,6 +392,10 @@ pub struct Retriever<E: Embedder> {
     /// 被 `relates_to` 边带出来的那一侧，要不要免掉域惩罚。
     /// 见 [`bridged_entities`]。留成开关是为了能 A/B。
     bridge_exemption: bool,
+    /// **上一个** embedding 模型。设了就在回填期间也从旧空间捞一遍。
+    ///
+    /// 见 [`Self::with_legacy`]。默认 `None` —— 绝大多数部署从没换过模型。
+    legacy: Option<crate::embed::SharedEmbedder>,
 }
 
 impl<E: Embedder> Retriever<E> {
@@ -393,6 +442,7 @@ impl<E: Embedder> Retriever<E> {
             // roadmap 原话：「融合时该通道需豁免域惩罚」。豁免范围与它
             // 为什么不是「整条图遍历通道」，见 `bridged_entities`
             bridge_exemption: true,
+            legacy: None,
         }
     }
 
@@ -440,6 +490,33 @@ impl<E: Embedder> Retriever<E> {
     #[must_use]
     pub fn with_peak_bonus(mut self, weight: f64) -> Self {
         self.peak_bonus = weight;
+        self
+    }
+
+    /// 挂上**上一个** embedding 模型，回填期间也从旧空间捞一遍。
+    ///
+    /// # 为什么需要它
+    ///
+    /// 换模型之后旧事实的向量只在旧空间里，而向量查询按 `embedding_model`
+    /// 过滤，于是它们**在回填补到它们之前**一直进不了向量召回。库大到
+    /// 回填要跑几天时，那是几天的部分失忆。
+    ///
+    /// 挂上之后查询会被**同时编到两个空间**，各捞一次，按 id 去重后
+    /// 合成同一条 [`Channel::Vector`]。
+    ///
+    /// # 为什么不新开一条 channel
+    ///
+    /// RRF 的输入结构一变，`scripts/evals-baseline.*.json` 里的每个数字就
+    /// 不可比了 —— 而那份基线是判断「这次改动有没有让检索变差」的**唯一**
+    /// 依据。一个只在回填期间存在的临时状态，不值得让基线作废。
+    ///
+    /// # ⚠️ 它救不了 fastembed → api 那一次迁移
+    ///
+    /// 旧模型是进程内的 fastembed，而它默认已经不编进二进制。见
+    /// [`crate::embed_api::ApiEmbedder::legacy_from_env`]。
+    #[must_use]
+    pub fn with_legacy(mut self, legacy: Option<crate::embed::SharedEmbedder>) -> Self {
+        self.legacy = legacy;
         self
     }
 
@@ -616,7 +693,30 @@ impl<E: Embedder> Retriever<E> {
         // 关掉的路仍然发查询会白白多一次往返，所以宽度直接置 0 是不行的
         // （存储层会 clamp 到 1），必须整条跳过。
         let want_recent = self.recency == RecencyMode::Channel;
-        let (bm25, vector, graph, recent, episode) = tokio::join!(
+        // 旧空间那一路也放进这个 join：它要先跑一次 embedding（一次 HTTP），
+        // 串在前面等于给每次检索白加一个往返。没挂 legacy 时是一个立刻
+        // 返回空的 future，代价为零
+        let legacy_vector = async {
+            let Some(legacy) = &self.legacy else {
+                return Vec::new();
+            };
+            let Ok(qvec) = legacy.embed_one(query).await else {
+                // 旧模型那侧连不上**不该让整次检索失败** —— 它是回填期间的
+                // 补充，主路径已经返回了当前空间的结果。降级成「只查新空间」，
+                // 也就是没挂 legacy 时的行为
+                tracing::warn!("旧模型 embedding 失败，本次只查当前空间");
+                return Vec::new();
+            };
+            let v = cortex_store::Vector::from(qvec);
+            store
+                .recall_vector_scored(&v, legacy.model_id(), self.width.vector)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "旧空间召回失败，本次只查当前空间");
+                    Vec::new()
+                })
+        };
+        let (bm25, vector, graph, recent, episode, legacy_vector) = tokio::join!(
             store.recall_bm25(&tsquery, self.width.bm25),
             store.recall_vector_scored(&embedding, self.embedder.model_id(), self.width.vector),
             store.recall_graph(&seeds, self.width.graph_hops, self.width.graph),
@@ -638,13 +738,19 @@ impl<E: Embedder> Retriever<E> {
                     Ok(Vec::new())
                 }
             },
+            legacy_vector,
         );
 
         let to_err = |e: cortex_store::StoreError| CortexError::Store(e.to_string());
         let scored = vector.map_err(to_err)?;
-        // 已按距离升序，第一条就是全库最近的
+        // 已按距离升序，第一条就是全库最近的。
+        //
+        // **只取当前空间的**：语义地板 0.50 是在 bge-m3 上标定的，
+        // 旧空间的距离由旧模型定标，两者不可比。拿旧空间的距离去撞这个阈值
+        // 得到的是一个没有含义的判断 —— 而它的表现是「弃权与否变得随机」，
+        // 没有任何报错。当前空间为空时 nearest 是 None，也就是不做弃权判断
         let nearest = scored.first().map(|(_, d)| *d);
-        let vector: Vec<Fact> = scored.into_iter().map(|(f, _)| f).collect();
+        let vector = merge_vector_spaces(scored, legacy_vector);
 
         Ok((
             vec![
@@ -767,6 +873,98 @@ mod tests {
             r.finish(strong, 128_000).items.len(),
             1,
             "跨路共识的强命中必须保留"
+        );
+    }
+
+    /// 造一条指定 id 的事实，用来断言合并顺序。
+    fn fact_with_id(id: &str) -> Fact {
+        let mut f = dummy_fact();
+        f.id = id.to_owned();
+        f
+    }
+
+    #[test]
+    fn merging_two_spaces_interleaves_by_rank() {
+        // 回填期间旧空间里的事实更多（存量全在那边），当前空间只有新写的。
+        // 让当前空间整体排前面，等于把全部历史记忆压到 41 名之后 ——
+        // RRF 的核是 1/(k+rank)，那基本等于没召回
+        let current = vec![
+            (fact_with_id("01AAAAAAAAAAAAAAAAAAAAAAA1"), 0.1),
+            (fact_with_id("01AAAAAAAAAAAAAAAAAAAAAAA2"), 0.2),
+        ];
+        let legacy = vec![
+            (fact_with_id("01BBBBBBBBBBBBBBBBBBBBBBB1"), 0.3),
+            (fact_with_id("01BBBBBBBBBBBBBBBBBBBBBBB2"), 0.4),
+        ];
+        let ids: Vec<String> = merge_vector_spaces(current, legacy)
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "01AAAAAAAAAAAAAAAAAAAAAAA1",
+                "01BBBBBBBBBBBBBBBBBBBBBBB1",
+                "01AAAAAAAAAAAAAAAAAAAAAAA2",
+                "01BBBBBBBBBBBBBBBBBBBBBBB2",
+            ],
+            "两个空间必须按名次交替，否则其中一边会被整体压到后面"
+        );
+    }
+
+    #[test]
+    fn merging_dedups_and_keeps_the_better_rank() {
+        // 同一条事实两边都命中：只留一次，且留在**先出现**的位置上。
+        // 留两次的后果是 RRF 给它双份排名 —— 一个悄悄放大的偏置，不是报错
+        let shared = "01CCCCCCCCCCCCCCCCCCCCCCC1";
+        let current = vec![
+            (fact_with_id("01AAAAAAAAAAAAAAAAAAAAAAA1"), 0.1),
+            (fact_with_id(shared), 0.2),
+        ];
+        let legacy = vec![(fact_with_id(shared), 0.05)];
+        let ids: Vec<String> = merge_vector_spaces(current, legacy)
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["01AAAAAAAAAAAAAAAAAAAAAAA1", shared],
+            "重复的事实只该出现一次，且在两边给它的更靠前的那个位置上"
+        );
+    }
+
+    #[test]
+    fn merging_without_legacy_is_the_identity() {
+        // 绝大多数部署从没换过模型 —— 那条路径必须与改动前逐位相同
+        let current = vec![
+            (fact_with_id("01AAAAAAAAAAAAAAAAAAAAAAA1"), 0.1),
+            (fact_with_id("01AAAAAAAAAAAAAAAAAAAAAAA2"), 0.2),
+        ];
+        let ids: Vec<String> = merge_vector_spaces(current, Vec::new())
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["01AAAAAAAAAAAAAAAAAAAAAAA1", "01AAAAAAAAAAAAAAAAAAAAAAA2"],
+            "没挂 legacy 时必须原样返回当前空间"
+        );
+    }
+
+    #[test]
+    fn merging_handles_uneven_lengths() {
+        // 一边先取完时另一边要继续取完，不能提前停 ——
+        // 提前停的表现是「旧记忆只回来一半」，而那一半是随机的
+        let current = vec![(fact_with_id("01AAAAAAAAAAAAAAAAAAAAAAA1"), 0.1)];
+        let legacy = vec![
+            (fact_with_id("01BBBBBBBBBBBBBBBBBBBBBBB1"), 0.2),
+            (fact_with_id("01BBBBBBBBBBBBBBBBBBBBBBB2"), 0.3),
+            (fact_with_id("01BBBBBBBBBBBBBBBBBBBBBBB3"), 0.4),
+        ];
+        assert_eq!(
+            merge_vector_spaces(current, legacy).len(),
+            4,
+            "长度不等时不能丢条目"
         );
     }
 

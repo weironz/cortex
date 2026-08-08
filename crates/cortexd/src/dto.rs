@@ -27,6 +27,31 @@ pub struct Health {
     /// 而这一行反过来是必需的：没有它，「我到底开没开认证」只能靠去翻服务器上
     /// 的环境变量，而那正是最该能远程一眼看到的东西。
     pub auth: &'static str,
+    /// 向量化的当前状态。**换模型之后这里是唯一能一眼看出问题的地方。**
+    ///
+    /// 换模型时四条向量查询会按新的 `embedding_model` 过滤，旧事实**当天就
+    /// 退出向量召回**；而 BM25 / 图遍历 / recency 三路照常工作，所以它
+    /// 看起来不像坏了，只像「语义召回好像变差了点」。`stale` 不为 0
+    /// 就是这件事正在发生。
+    ///
+    /// 老客户端忽略这个字段即可；`Option` 让 mock 后端（没有数据库可查）
+    /// 也能照常返回 `/health`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<EmbeddingHealth>,
+}
+
+/// `/health` 里的向量化一节。
+#[derive(Debug, Serialize)]
+pub struct EmbeddingHealth {
+    /// 当前配置的模型标识，形如 `api:bge-m3` / `fastembed:…` / `hash-stub-v1`。
+    pub model: String,
+    /// 在当前模型下**有**向量、因而进得了向量召回的有效事实数。
+    pub covered: i64,
+    /// 只有别的模型的向量、因而**进不了**向量召回的有效事实数。
+    ///
+    /// 回填器跑起来之后这个数会往下走。它长期不为 0 说明回填被关掉了
+    /// （`CORTEX_REEMBED=off`），或者一直在失败 —— 后者日志里会有。
+    pub stale: i64,
 }
 
 // ──────────────────────────── /chat ────────────────────────────

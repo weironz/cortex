@@ -19,7 +19,11 @@ use crate::store::Store;
 
 /// 一次召回返回的条数上限的合理区间。
 /// 太少会让 RRF 没有融合空间，太多会拖慢图遍历那一路。
-const MAX_LIMIT: i64 = 200;
+///
+/// `pub(crate)`：换模型的回填待办查询（`query.rs`）也用同一个上限。
+/// 复制一份常量的下场是两处慢慢漂开，而漂开的症状是「某条路径悄悄
+/// 返回得比别处多/少」，没有任何报错。
+pub(crate) const MAX_LIMIT: i64 = 200;
 
 /// 「在 `$1` 那一刻 Cortex 认为仍然为真」的快照。
 ///
@@ -42,6 +46,121 @@ macro_rules! as_of_snapshot {
         )
     };
 }
+
+/// 向量召回的**并集**：事实原列 ∪ `fact_embeddings` 旁表。
+///
+/// # 为什么是并集
+///
+/// 换模型之后，「模型 M 下的向量」分散在两处：写入时就用 M 的落在
+/// `facts.embedding`，后来被回填器补出来的落在 `fact_embeddings`。
+/// 只查一处的后果是**静默的部分失忆** —— 漏掉的那一半照常有 BM25 与
+/// 图遍历兜着，所以它看起来不像坏了（见 migrations/20260808000001 的注释）。
+///
+/// # 为什么写成两个各自 `ORDER BY … LIMIT` 的分支
+///
+/// 为了让每一侧都**有机会**走自己的向量索引。写成 `JOIN` 之后再统一
+/// `ORDER BY`，或者用 `LATERAL`，索引连机会都没有 —— 那种查询在小库上
+/// 跑得飞快，等库长大了才暴露，而那时它看起来像「数据库变慢了」
+/// 而不是「索引没被用上」。
+///
+/// ⚠️ **「有机会」不等于「用上了」**：分支一（`active_facts`）目前**用不上**
+/// `idx_facts_vec`，而这与本次改动无关 —— `active_facts` 是带 LEFT JOIN
+/// 的视图，planner 必须先把 join 做完才能按距离排序。改动前那条查询的
+/// 计划一模一样。也就是说主召回路上那个 HNSW 一直是摆设。
+/// 这是一件独立的事（见 roadmap），别以为并集查询带来了索引。
+/// 分支二是普通表，它是真的走 `idx_fact_embeddings_vec`。
+///
+/// # 为什么 `$base` 被写了两遍，而不是抽成 CTE
+///
+/// 写成 `WITH base AS (…)` 更好看，但**它会让分支一的 HNSW 失效**。
+/// PG 12 起只在 CTE 被引用**一次**时内联；这里两个分支各引用一次，
+/// 于是它被物化成临时结果，`ORDER BY embedding <=> $1` 只能对着
+/// 一堆已经落地的行做排序。
+///
+/// 这不是推测 —— 第一版就是 CTE，`EXPLAIN` 打出来是：
+///
+/// ```text
+///   ->  Sort  (Sort Key: b.embedding <=> …)
+///         ->  CTE Scan on base b          ← 分支一，没有索引
+///   ->  Index Scan using idx_fact_embeddings_vec on fact_embeddings  ← 分支二有
+/// ```
+///
+/// 去掉 CTE 之后两侧都是 `Index Scan`。重复那段 SQL 是它的代价。
+///
+/// # `DISTINCT ON` 是防御性的
+///
+/// 正常情况下两侧不会撞：回填器只挑 `embedding_model <> 当前` 的事实
+/// （见 `Store::facts_missing_embedding`），所以一条事实不会同时在两边。
+/// 但「换走再换回来」这种路径能造出重叠，而重叠的症状是同一条记忆
+/// 在召回里出现两次、RRF 给它双份排名 —— 一个悄悄放大的偏置。
+macro_rules! vector_union {
+    (base = $base:expr, vec = $v:literal, model = $m:literal, limit = $l:literal) => {
+        concat!(
+            "SELECT ",
+            fact_columns!("d."),
+            ", d.distance
+               FROM (
+                 SELECT DISTINCT ON (u.id) ",
+            fact_columns!("u."),
+            ", u.distance
+                   FROM (
+                     (SELECT ",
+            fact_columns!("b."),
+            ", b.embedding <=> ",
+            $v,
+            " AS distance
+                        FROM ",
+            $base,
+            " b
+                       WHERE b.embedding IS NOT NULL AND b.embedding_model = ",
+            $m,
+            "        ORDER BY b.embedding <=> ",
+            $v,
+            "
+                       LIMIT ",
+            $l,
+            ")
+                     UNION ALL
+                     (SELECT ",
+            fact_columns!("b."),
+            ", fe.distance
+                        FROM (SELECT fact_id, embedding <=> ",
+            $v,
+            " AS distance
+                                FROM fact_embeddings
+                               WHERE embedding_model = ",
+            $m,
+            "                ORDER BY embedding <=> ",
+            $v,
+            "
+                               LIMIT ",
+            $l,
+            ") fe
+                        JOIN ",
+            $base,
+            " b ON b.id = fe.fact_id)
+                   ) u
+                  ORDER BY u.id, u.distance
+               ) d
+              ORDER BY d.distance
+              LIMIT ",
+            $l
+        )
+    };
+}
+
+/// 实时向量召回用的那条 SQL。
+///
+/// 提成常量只为一件事：让 `tests/embedding_migration.rs` 能对**真正跑的那条
+/// 查询**做 `EXPLAIN`。测试里手抄一份 SQL 的下场是它慢慢漂开，
+/// 而漂开之后那条测试守的是一条已经不存在的查询 —— 它照样绿。
+#[doc(hidden)]
+pub const RECALL_VECTOR_SQL: &str = vector_union!(
+    base = "active_facts",
+    vec = "$1",
+    model = "$2",
+    limit = "$3"
+);
 
 impl Store {
     /// ① BM25 全文召回 —— 专有名词与精确匹配。
@@ -78,19 +197,16 @@ impl Store {
         embedding_model: &str,
         limit: i64,
     ) -> Result<Vec<Fact>> {
-        let rows = sqlx::query_as::<_, Fact>(concat!(
-            "SELECT ",
-            fact_columns!(),
-            "  FROM active_facts
-              WHERE embedding IS NOT NULL AND embedding_model = $2
-              ORDER BY embedding <=> $1
-              LIMIT $3"
-        ))
-        .bind(embedding)
-        .bind(embedding_model)
-        .bind(limit.clamp(1, MAX_LIMIT))
-        .fetch_all(self.pool())
-        .await?;
+        // 与 recall_vector_scored 共用同一条 SQL：多回来的 distance 列
+        // 被 `FromRow for Fact` 按名取列时直接忽略。
+        // 两份手抄的 SQL 迟早会漂开，而漂开的症状是「带分数的那条路和不带
+        // 分数的那条路召回结果不一样」—— 没有任何报错
+        let rows = sqlx::query_as::<_, Fact>(RECALL_VECTOR_SQL)
+            .bind(embedding)
+            .bind(embedding_model)
+            .bind(limit.clamp(1, MAX_LIMIT))
+            .fetch_all(self.pool())
+            .await?;
         Ok(rows)
     }
 
@@ -115,20 +231,12 @@ impl Store {
         embedding_model: &str,
         limit: i64,
     ) -> Result<Vec<(Fact, f64)>> {
-        let rows = sqlx::query(concat!(
-            "SELECT ",
-            fact_columns!(),
-            ", embedding <=> $1 AS distance
-               FROM active_facts
-              WHERE embedding IS NOT NULL AND embedding_model = $2
-              ORDER BY embedding <=> $1
-              LIMIT $3"
-        ))
-        .bind(embedding)
-        .bind(embedding_model)
-        .bind(limit.clamp(1, MAX_LIMIT))
-        .fetch_all(self.pool())
-        .await?;
+        let rows = sqlx::query(RECALL_VECTOR_SQL)
+            .bind(embedding)
+            .bind(embedding_model)
+            .bind(limit.clamp(1, MAX_LIMIT))
+            .fetch_all(self.pool())
+            .await?;
 
         rows.into_iter()
             .map(|r| {
@@ -327,11 +435,13 @@ impl Store {
         embedding_model: &str,
         limit: i64,
     ) -> Result<Vec<Fact>> {
-        let rows = sqlx::query_as::<_, Fact>(concat!(
-            as_of_snapshot!(),
-            "   AND f.embedding IS NOT NULL AND f.embedding_model = $3
-             ORDER BY f.embedding <=> $2
-             LIMIT $4"
+        // 回放的基准集是 as_of 快照（**必须查 facts 而非 active_facts**，
+        // 理由见 as_of_snapshot! 的注释），并集那一层的逻辑与实时召回相同
+        let rows = sqlx::query_as::<_, Fact>(vector_union!(
+            base = concat!("(", as_of_snapshot!(), ")"),
+            vec = "$2",
+            model = "$3",
+            limit = "$4"
         ))
         .bind(as_of)
         .bind(embedding)
@@ -388,14 +498,42 @@ impl Store {
         embedding_model: &str,
         limit: i64,
     ) -> Result<Vec<(Entity, f64)>> {
+        // 与事实侧同样的并集：写入时就用当前模型的落在 entities.embedding，
+        // 回填补出来的落在 entity_embeddings。只查一处会让消解在换模型后
+        // 静默失灵 —— 而失灵的表现是给同一个人建出第二个实体，
+        // 从此他的事实分裂在两个节点上，图遍历再也走不通
         let rows = sqlx::query(
+            // 三层：内层两个分支各自走自己的 HNSW → 中层 DISTINCT ON 去重
+            // （它强制按 id 排序）→ **外层必须重新按 distance 排**，
+            // 否则调用方拿到的是按 ULID 排的结果，而 ULID 有序意味着
+            // 「按创建时间排」—— 那看起来像一份合理的列表，只是和相关性无关
             "SELECT id, kind, name, summary, embedding, embedding_model,
-                    device_id, created_at, embedding <=> $2 AS distance
-               FROM entities
-              WHERE kind = $1
-                AND embedding IS NOT NULL
-                AND embedding_model = $3
-              ORDER BY embedding <=> $2
+                    device_id, created_at, distance
+               FROM (
+                 SELECT DISTINCT ON (u.id) u.*
+                   FROM (
+                     (SELECT id, kind, name, summary, embedding, embedding_model,
+                             device_id, created_at, embedding <=> $2 AS distance
+                        FROM entities
+                       WHERE kind = $1
+                         AND embedding IS NOT NULL
+                         AND embedding_model = $3
+                       ORDER BY embedding <=> $2
+                       LIMIT $4)
+                     UNION ALL
+                     (SELECT e.id, e.kind, e.name, e.summary, e.embedding, e.embedding_model,
+                             e.device_id, e.created_at, ee.distance
+                        FROM (SELECT entity_id, embedding <=> $2 AS distance
+                                FROM entity_embeddings
+                               WHERE embedding_model = $3
+                               ORDER BY embedding <=> $2
+                               LIMIT $4) ee
+                        JOIN entities e ON e.id = ee.entity_id
+                       WHERE e.kind = $1)
+                   ) u
+                  ORDER BY u.id, u.distance
+               ) d
+              ORDER BY distance
               LIMIT $4",
         )
         .bind(kind)

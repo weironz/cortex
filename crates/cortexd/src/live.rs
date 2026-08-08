@@ -96,6 +96,12 @@ pub struct Live {
     transcribe: Option<Arc<cortex_memory::TranscribePipeline>>,
     device_id: String,
     context_window: usize,
+    /// 当前的向量化后端。
+    ///
+    /// 单独留一份而不是从 `retriever` 里掏：换模型的回填器要用它算向量，
+    /// `/health` 的普查要用它的 `model_id()` 做比对。`SharedEmbedder` 是
+    /// `Arc`，多一个句柄不多一份模型。
+    embedder: SharedEmbedder,
 }
 
 /// 一次转录的结局。
@@ -214,13 +220,30 @@ impl Live {
             "未绑定工作区的会话：只给这些工具，且文件访问范围是空集"
         );
 
+        // 上一个模型。只在**回填期间**有用：让查询也被编到旧空间去，
+        // 于是还没被补上的旧事实仍然进得了向量召回。
+        //
+        // ⚠️ 它救不了「fastembed → api」那一次迁移 —— 旧模型是进程内的
+        // fastembed，而它默认不编进二进制。见 ApiEmbedder::legacy_from_env
+        let legacy: Option<SharedEmbedder> =
+            cortex_memory::embed_api::ApiEmbedder::legacy_from_env()?
+                .map(|e| Arc::new(e) as SharedEmbedder);
+        if let Some(l) = &legacy {
+            tracing::info!(
+                legacy = l.model_id(),
+                current = embedder.model_id(),
+                "挂上了上一个 embedding 模型：回填完成之前，查询会同时在两个空间里捞"
+            );
+        }
+
         Ok(Self {
-            retriever: Retriever::new(embedder.clone()),
+            retriever: Retriever::new(embedder.clone()).with_legacy(legacy),
             extractor: Arc::new(Extractor::new(
                 llm.clone(),
-                embedder,
+                embedder.clone(),
                 config.device_id.clone(),
             )),
+            embedder,
             chat_turn,
             max_rounds,
             transcribe,
@@ -248,6 +271,84 @@ impl Live {
     #[must_use]
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// 当前的向量化后端。回填器要用它算向量。
+    #[must_use]
+    pub fn embedder(&self) -> &SharedEmbedder {
+        &self.embedder
+    }
+
+    /// 向量化的覆盖情况：当前模型覆盖了多少条有效事实、还有多少条是旧模型的。
+    ///
+    /// # 为什么这个数字必须能被看见
+    ///
+    /// 换模型之后旧向量还在，但四条向量查询全部按 `embedding_model` 过滤
+    /// （见 `cortex_store::Store::recall_vector`），于是旧事实**当天就退出
+    /// 向量召回**。而 BM25 / 图遍历 / recency 三路照常，所以它看起来
+    /// 不像坏了，只像「语义召回好像变差了点」——
+    /// 没有这个数字，没有任何人会被告知。
+    pub async fn embedding_health(&self) -> crate::dto::EmbeddingHealth {
+        let model = self.embedder.model_id().to_owned();
+        let (covered, stale) = self
+            .store
+            .embedding_coverage(&model)
+            .await
+            .unwrap_or_else(|e| {
+                // 查不到就报 (0, 0) 而不是把整个 /health 打挂：这个端点的
+                // 消费者是 HEALTHCHECK 与探针，为一个诊断字段让容器转
+                // unhealthy 是本末倒置。错误进日志
+                tracing::warn!(error = %e, "统计 embedding 覆盖率失败");
+                (0, 0)
+            });
+        crate::dto::EmbeddingHealth {
+            model,
+            covered,
+            stale,
+        }
+    }
+
+    /// 启动时报一次向量化的覆盖情况。
+    ///
+    /// 全覆盖时是一行 INFO；有旧模型的存量时是 **WARN**，并逐档列出。
+    /// 这是「换模型导致静默失忆」这件事**唯一**会主动发声的地方 ——
+    /// 检索侧不会报错，界面上也看不出来。
+    pub async fn report_embedding_state(&self) {
+        let model = self.embedder.model_id();
+        let census = match self.store.embedding_census().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "embedding 普查失败，跳过启动比对");
+                return;
+            }
+        };
+
+        let others: Vec<String> = census
+            .iter()
+            .filter(|(m, _)| m != model)
+            .map(|(m, n)| format!("{m}={n}"))
+            .collect();
+
+        if others.is_empty() {
+            let covered = census
+                .iter()
+                .find(|(m, _)| m == model)
+                .map_or(0, |(_, n)| *n);
+            tracing::info!(model, covered, "向量化：全部事实都在当前模型下");
+            return;
+        }
+
+        let (covered, stale) = self.store.embedding_coverage(model).await.unwrap_or((0, 0));
+        tracing::warn!(
+            current = model,
+            covered,
+            stale,
+            others = others.join(" "),
+            "换过 embedding 模型：{stale} 条事实在当前模型下**没有向量**，\
+             它们进不了向量召回（BM25 / 图遍历 / 近因三路照常，所以界面上\
+             只表现为「语义召回变差了点」）。回填器会补上；\
+             要关掉它设 CORTEX_REEMBED=off"
+        );
     }
 
     pub async fn latest_cursor(&self) -> i64 {

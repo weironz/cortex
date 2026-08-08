@@ -132,6 +132,7 @@ async fn health(State(st): State<AppState>) -> Json<Health> {
         database: st.database_status().await,
         blob_backend: st.blob_backend(),
         auth: st.auth_mode().as_str(),
+        embedding: st.embedding_health().await,
     })
 }
 

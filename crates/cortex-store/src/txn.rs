@@ -27,9 +27,9 @@ use cortex_core::Id;
 
 use crate::error::{Result, StoreError};
 use crate::model::{
-    DerivedKind, NewBlob, NewBlobTranscript, NewEntity, NewEntityMerge, NewEpisode, NewEpisodeBlob,
-    NewEpisodeMemory, NewEpisodeToolCall, NewFact, NewFactEvent, NewRedaction, NewSessionEvent,
-    NewSummary, ProvenanceRef, table,
+    DerivedKind, NewBlob, NewBlobTranscript, NewEntity, NewEntityEmbedding, NewEntityMerge,
+    NewEpisode, NewEpisodeBlob, NewEpisodeMemory, NewEpisodeToolCall, NewFact, NewFactEmbedding,
+    NewFactEvent, NewRedaction, NewSessionEvent, NewSummary, ProvenanceRef, table,
 };
 
 /// 同步取号锁的 advisory lock key。
@@ -83,6 +83,36 @@ mod guarded {
             .await?;
 
             Ok(seq)
+        }
+
+        /// **派生行**专用通道：执行 INSERT，**不写 sync_log**。
+        ///
+        /// # 只有一类东西配走这条路
+        ///
+        /// 换 embedding 模型时补出来的向量（`fact_embeddings` /
+        /// `entity_embeddings`）。它们同时满足三条，缺一条都不行：
+        ///
+        /// 1. **纯派生**：由 `statement` + 模型唯一决定，丢了能重算
+        /// 2. **客户端根本收不到**：`sync_payload.rs` 明确规定
+        ///    「tsv 与 embedding 是服务端派生列，不进同步 payload」——
+        ///    走 sync_log 只会推出一堆载荷里没有任何有用字段的行
+        /// 3. **量级是全库级的**：十万条事实的一次回填就是十万条 sync_log。
+        ///    `sync_payload.rs` 的注释里那句「换 embedding 模型时会全量变化，
+        ///    **白白撑爆增量同步**」说的正是这件事
+        ///
+        /// # 加新表之前先想清楚
+        ///
+        /// 业务行走 [`Self::insert_row`]。把业务行放到这条路上，
+        /// 后果是**其它设备永远看不到它**，而且没有任何症状 ——
+        /// 那正是 sync_log 强制机制存在的理由。
+        /// 拿不准就用 `insert_row`：多一行 sync_log 是可见的浪费，
+        /// 少一行是不可见的丢失。
+        pub(super) async fn insert_derived_row<'q>(
+            &mut self,
+            stmt: Query<'q, Postgres, PgArguments>,
+        ) -> Result<()> {
+            stmt.execute(&mut *self.tx).await?;
+            Ok(())
         }
 
         pub(super) async fn commit(self) -> Result<()> {
@@ -352,6 +382,58 @@ impl WriteTxn {
         }
 
         Ok(seq)
+    }
+
+    /// 换模型时给一条已有事实补一个向量。
+    ///
+    /// # 为什么不是 `UPDATE facts SET embedding = …`
+    ///
+    /// 两条理由，第二条是硬的：
+    ///
+    /// 1. CLAUDE.md：「任何表都不做 UPDATE / DELETE」。这个 crate 里
+    ///    到目前为止零处 UPDATE，既有先例是 `blob_transcripts` ——
+    ///    派生数据往独立表插新行
+    /// 2. 「回填期间双模型召回」（memory.md §七 第 3 步）要求同一条事实
+    ///    **同时**持有两个空间的向量。一个列装不下两个
+    ///
+    /// # 幂等
+    ///
+    /// `ON CONFLICT DO NOTHING`：进程重启、两轮回填撞到同一条、
+    /// 两台设备同时回填，都会走到这里。让唯一约束兜底，
+    /// 而不是让回填器自己记账 —— 后者要么漏要么重，且错了没有报错。
+    ///
+    /// **不进 sync_log**（走 `insert_derived_row`）。理由见
+    /// `model.rs` 里 `table::FACT_EMBEDDINGS` 那段注释。
+    pub async fn insert_fact_embedding(&mut self, new: &NewFactEmbedding) -> Result<()> {
+        let stmt = sqlx::query(
+            "INSERT INTO fact_embeddings (fact_id, embedding_model, embedding)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (fact_id, embedding_model) DO NOTHING",
+        )
+        .bind(new.fact_id.to_string())
+        .bind(&new.embedding_model)
+        .bind(&new.embedding);
+
+        self.inner.insert_derived_row(stmt).await
+    }
+
+    /// 同上，实体侧。
+    ///
+    /// 实体向量不参与四路召回，只用于**抽取期的实体消解**。它失效的方式
+    /// 比事实更隐蔽：消解不上就会给同一个人建出第二个实体，
+    /// 从此他的事实分裂在两个节点上，图遍历再也走不通 ——
+    /// 而这一切在界面上只表现为「它好像忘了我说过的一些事」。
+    pub async fn insert_entity_embedding(&mut self, new: &NewEntityEmbedding) -> Result<()> {
+        let stmt = sqlx::query(
+            "INSERT INTO entity_embeddings (entity_id, embedding_model, embedding)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (entity_id, embedding_model) DO NOTHING",
+        )
+        .bind(new.entity_id.to_string())
+        .bind(&new.embedding_model)
+        .bind(&new.embedding);
+
+        self.inner.insert_derived_row(stmt).await
     }
 
     /// 追加一条生命周期事件（失效 / 恢复 / 标记）。

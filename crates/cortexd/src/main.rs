@@ -11,6 +11,7 @@ mod cors;
 mod cursor;
 mod dto;
 mod live;
+mod reembed;
 mod routes;
 mod state;
 mod sync_notify;
