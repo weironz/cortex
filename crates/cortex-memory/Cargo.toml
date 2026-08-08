@@ -64,3 +64,7 @@ required-features = ["local-embed"]
 [[test]]
 name = "fastembed"
 required-features = ["local-embed"]
+
+[[test]]
+name = "embed_env_empty"
+required-features = ["local-embed"]

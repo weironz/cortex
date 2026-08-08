@@ -12,6 +12,42 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ## [未发布]
 
+## [0.1.3] - 2026-08-09
+
+**只修部署，不改功能。** 0.1.2 的 `deploy/docker-compose.yml` 有两个会让
+自托管节点**当场坏掉**的问题，在给生产节点升级前一刻发现。
+
+如果你已经在跑 0.1.2 且**没有重新部署过**，那你没事 —— 问题只在
+`docker compose up` 那一刻才发生。**别用 0.1.2 的 compose 部署，直接上 0.1.3。**
+
+### ① 默认后端 `fast` 找不到模型 → 静默变成假记忆
+
+`FASTEMBED_CACHE_DIR: /var/lib/cortex/models` 这一行在 0.1.2 的 compose 里
+被删掉了。没有它，fastembed 回落到 `$HOME/.cache/…` —— 那个路径**不在**
+挂进容器的 `models` 卷里，于是它会去 Hugging Face 现下 560 MB。
+
+在够不到 HF 的机器上（国内节点常态：DNS 被污染、hf-mirror 也不通）后果是
+最坏的一种：**cortexd 照常启动、`/health` 返回 `ok`**，只在日志里留一行
+「回落到 mock 数据源」—— 记忆检索是假的，而没有任何红灯。
+
+这个坑 0.1.0 首次上线时踩过一次。
+
+### ② `CORTEX_EMBED_BATCH` 空串让 cortexd 拒绝启动
+
+compose 里写的是 `CORTEX_EMBED_BATCH: ${CORTEX_EMBED_BATCH:-}`。`.env` 里
+没这一项时，它把变量**设成空串**而不是不设，而 `env::var` 对空串返回
+`Ok("")`。`FastEmbedderConfig::from_env` 于是拿 `""` 去 parse，失败，
+**cortexd 拒绝启动** —— 而运维那侧根本没配过这个变量。
+
+这是同一个坑第二次出现（第一次是 0.1.1 修的 `CORTEX_LLM_MODEL`）。
+更难看的是同一个 crate 里 `embed_api::from_env` **有**这个处理、
+`embed_local` 没有 —— 两份实现对同一个坑给出了两种答案，只有一份是对的。
+
+现在 `embed_local` 与它对齐了，并且有一条 `embed_env_empty` 测试守着：
+三个 `CORTEX_EMBED_*` 变量设成空串时必须与「不设」逐字段一致，
+而真给了值仍要生效、给了非法值仍要响亮报错。
+（做过反向验证：把修复回退，这条测试当场变红。）
+
 ## [0.1.2] - 2026-08-09
 
 **这一版的主题只有一个：编码那一半开始工作。**

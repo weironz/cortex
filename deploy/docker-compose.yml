@@ -242,6 +242,21 @@ services:
       CORTEX_EMBED_API_KEY: ${CORTEX_EMBED_API_KEY:-}
       CORTEX_EMBED_BATCH: ${CORTEX_EMBED_BATCH:-}
 
+      # ★ **默认后端 `fast` 全靠这一行找到权重。别删。**
+      #
+      # `cortex_memory::embed_local::default_cache_dir()` 认这个变量
+      # （它是 fastembed 自己的变量名，故意沿用，方便与别的工具共用缓存）。
+      # 没有它就回落到 `$HOME/.cache/...` —— 而那个路径**不在下面挂的
+      # models 卷里**，于是 fastembed 会去 Hugging Face 现下 560 MB。
+      #
+      # 在 HF 可达的机器上那只是慢一次。在**够不到 HF 的机器上**
+      # （国内节点常态：DNS 被污染、hf-mirror 也不通）后果是：
+      # cortexd **照常启动、`/health` 返回 ok**，只在日志里留一行
+      # 「回落到 mock 数据源」—— 记忆检索是假的，而没有任何红灯。
+      # 这个坑第一次上线时踩过一次，0.1.2 的 compose 又把这行删掉了，
+      # 部署前才发现。
+      FASTEMBED_CACHE_DIR: /var/lib/cortex/models
+
       # LLM 供应商。密钥只从环境来，绝不写进任何被 git 跟踪的文件。
       #
       # 这一段是显式**允许清单**：.env 里设了但没在这里列出来的变量

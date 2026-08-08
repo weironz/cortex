@@ -167,14 +167,28 @@ impl FastEmbedderConfig {
     ///
     /// 模型名或批大小无法解析时报错。
     pub fn from_env() -> Result<Self> {
+        // 空串按「没设」处理。**这不是防御性编程，是一个已经发生过两次的
+        // 生产故障**：compose 里的 `${VAR:-}` 把没写进 .env 的变量设成
+        // 空串而不是不设，而 `env::var` 对空串返回 `Ok("")`。
+        //
+        // 具体到这里：`CORTEX_EMBED_BATCH: ${CORTEX_EMBED_BATCH:-}` 会让
+        // `"".parse::<usize>()` 失败，于是 **cortexd 拒绝启动** ——
+        // 而运维那侧根本没配过这个变量。
+        //
+        // `cortex-core` 的 `non_empty`、`embed_api::from_env` 各有一份同样的
+        // 处理，这里是第三处。刻意不抽公共函数：`cortex-core` 的那个是
+        // 私有的，为一个三行闭包在 crate 之间开一个公共 API，
+        // 换来的耦合比省下的重复更贵。
+        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+
         let mut cfg = Self::default();
-        if let Ok(v) = std::env::var("CORTEX_EMBED_MODEL") {
+        if let Some(v) = var("CORTEX_EMBED_MODEL") {
             cfg.model = FastModel::parse(&v)?;
         }
-        if let Ok(v) = std::env::var("CORTEX_MODEL_CACHE") {
+        if let Some(v) = var("CORTEX_MODEL_CACHE") {
             cfg.cache_dir = Some(PathBuf::from(v));
         }
-        if let Ok(v) = std::env::var("CORTEX_EMBED_BATCH") {
+        if let Some(v) = var("CORTEX_EMBED_BATCH") {
             cfg.backfill_batch = v.trim().parse().map_err(|_| {
                 CortexError::Config(format!("CORTEX_EMBED_BATCH 不是正整数：{v:?}"))
             })?;
