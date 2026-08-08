@@ -1,0 +1,38 @@
+[package]
+name = "cortex-local"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cortex 本地 agent —— 循环与工具跑在你的机器上，记忆仍在远端"
+
+[[bin]]
+name = "cortex-local"
+path = "src/main.rs"
+
+[dependencies]
+cortex-core.workspace = true
+cortex-agent.workspace = true
+cortex-llm.workspace = true
+cortex-proto.workspace = true
+
+axum.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

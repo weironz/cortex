@@ -14,9 +14,12 @@
 //! # 客户端不能点名模型
 //!
 //! 请求里只有 [`ModelTier`]（主 / 廉价），没有模型名。这不是懒 ——
-//! 让客户端指定模型等于让它**拿服务端的 key 花服务端的钱**跑任意模型。
-//! （顺带一提 goose 的 `ModelConfig` 只有 `Serialize` 没有 `Deserialize`，
-//! 想传也传不过来。）
+//! 让客户端指定模型等于让它**拿服务端的 key 花服务端的钱**跑任意模型，
+//! 而账单是服务端付。
+//!
+//! （goose 的 `ModelConfig` 其实是可反序列化的 —— derive 列表里只有
+//! `Serialize`，但下面另有一份手写的 `Deserialize`。所以这是一条**刻意的
+//! 限制**，不是「传不过来」。上一版注释把它写成了后者，是错的。）
 
 use cortex_llm::{Message, ProviderUsage, Tool};
 use serde::{Deserialize, Serialize};

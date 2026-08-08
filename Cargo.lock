@@ -1152,6 +1152,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortex-local"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "clap",
+ "cortex-agent",
+ "cortex-core",
+ "cortex-llm",
+ "cortex-proto",
+ "dotenvy",
+ "futures",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cortex-memory"
 version = "0.1.1"
 dependencies = [

@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use cortex_agent::Approval;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 /// 一次确认最多等多久，超时按拒绝处理。见 [`ConfirmRegistry::new`]。
@@ -70,12 +70,17 @@ pub struct PendingMeta {
 }
 
 /// 待确认项的对外形态（`GET /confirmations` 与 SSE 事件共用字段口径）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingInfo {
     pub token: String,
     pub session_id: String,
     pub tool: String,
-    pub risk: &'static str,
+    /// `"write"` / `"execute"`。
+    ///
+    /// 服务端那侧（[`PendingMeta`]）是 `&'static str`，因为它只可能来自
+    /// 两个字面量。这里必须是 `String`：本地 agent 要把这个响应**读回来**
+    /// （跨端确认那条路），而 `&'static str` 反序列化不了。
+    pub risk: String,
     pub preview: String,
     pub asked_at: String,
     /// 还剩多少秒会被按拒绝处理。客户端据此画倒计时，也据此知道
@@ -223,7 +228,7 @@ impl ConfirmRegistry {
                 token: token.clone(),
                 session_id: p.meta.session_id.clone(),
                 tool: p.meta.tool.clone(),
-                risk: p.meta.risk,
+                risk: p.meta.risk.to_string(),
                 preview: p.meta.preview.clone(),
                 asked_at: p.asked_at.to_rfc3339(),
                 expires_in_secs: p.deadline.saturating_duration_since(now).as_secs(),

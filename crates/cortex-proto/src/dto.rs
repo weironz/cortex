@@ -183,7 +183,7 @@ pub enum ChatEvent {
 /// `POST /confirmations/{token}` 更 REST，但那个 token 是一次能批准 shell
 /// 执行的凭据，而路径会原样进 access log、进反代日志、进 `history`。
 /// 请求体不会。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ConfirmReceipt {
     pub token: String,
     pub decision: ConfirmDecision,
@@ -194,7 +194,7 @@ pub struct ConfirmReceipt {
 /// 用枚举而不是 `approve: bool`：JSON 里 `{"approve": "false"}`（字符串）
 /// 在很多客户端库里会被宽松地解成 `true`，而这里猜错的方向是**批准一条
 /// 没人批准过的命令**。写死两个字面量，拼错就是 400。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfirmDecision {
     Allow,
@@ -208,7 +208,7 @@ pub struct ConfirmAck {
 }
 
 /// `GET /confirmations` 的响应：当前还等着答复的确认项。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PendingConfirmations {
     pub pending: Vec<crate::confirm::PendingInfo>,
 }
@@ -286,14 +286,14 @@ fn default_limit() -> i64 {
     20
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MemorySearchResponse {
     pub facts: Vec<FactDto>,
     /// 各条命中了哪几路召回，供调试与可观测
     pub channels: Vec<ChannelHit>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChannelHit {
     pub fact_id: String,
     pub channels: Vec<String>,
@@ -637,7 +637,7 @@ pub enum SyncEvent {
 
 // ──────────────────────────── 错误 ─────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub error: String,
 }
