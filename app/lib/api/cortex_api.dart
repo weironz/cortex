@@ -145,6 +145,25 @@ abstract interface class CortexApi {
   /// point: it is validated before it reaches SQL.
   Future<SessionDetail> sessionDetail(String id, {int? limit, String? before});
 
+  /// `PUT /local/workspaces/{id}` — bind or unbind on **this device**.
+  ///
+  /// Only the local agent answers this. It never touches the network, which is
+  /// the whole point: the path is on this machine, so binding must work with
+  /// the daemon unreachable. Going through `PATCH /sessions/{id}` instead had
+  /// two symptoms, both observed:
+  ///
+  /// - offline: the binding hit `workspaces.json`, then the forward 502'd and
+  ///   the user was told it failed;
+  /// - online: the daemon answered with `workspace: null` (the local agent
+  ///   nulls it on the way out, by design) and the UI went straight back to
+  ///   "unbound".
+  ///
+  /// Returns the **canonicalised** path, or `null` after an unbind. Throws
+  /// [CortexApiException] with `isUnsupported` when talking to a plain cortexd
+  /// or a local agent older than this route — callers fall back to
+  /// [updateSession].
+  Future<String?> bindLocalWorkspace(String id, String? path);
+
   /// `PATCH /sessions/{id}` — rename, archive, bind a workspace.
   ///
   /// The three fields are independent and all optional; only what is passed is

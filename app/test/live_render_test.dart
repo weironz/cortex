@@ -30,6 +30,16 @@ import 'package:flutter_test/flutter_test.dart';
 /// zone-local override wins over the global one.
 const _baseUrl = 'http://127.0.0.1:8080';
 
+/// 明文 token，与 `live_backend_test` 同一个来源：
+///
+///     CORTEXD_TOKEN=<明文> flutter test
+///
+/// 对 `CORTEX_AUTH=disabled` 起的守护进程是 null，那时带上反而是噪声。
+final String? _token = () {
+  final raw = Platform.environment['CORTEXD_TOKEN']?.trim();
+  return (raw == null || raw.isEmpty) ? null : raw;
+}();
+
 Future<bool> _daemonUp() async {
   try {
     final socket = await Socket.connect(
@@ -70,7 +80,10 @@ void main() {
     if (!up) return;
 
     await _withRealHttp(() async {
-      final api = HttpCortexApi(baseUrl: _baseUrl);
+      // 带上 token。少了它，一个开着认证的 cortexd 会让 setUpAll 直接 401，
+      // 而失败的表现是「整个文件一个用例都没跑」—— 看起来像渲染坏了，
+      // 其实是没进门。同 live_backend_test 的读法
+      final api = HttpCortexApi(baseUrl: _baseUrl, token: _token);
       try {
         final sessions = await api.sessions();
         await for (final event in api.chat(

@@ -167,6 +167,42 @@ class HttpCortexApi implements CortexApi {
   );
 
   @override
+  Future<String?> bindLocalWorkspace(String id, String? path) async {
+    final http.Response response;
+    try {
+      response = await _client.put(
+        _uri('/local/workspaces/${Uri.encodeComponent(id)}'),
+        headers: _headers(const {
+          'content-type': 'application/json',
+          'accept': 'application/json',
+        }),
+        body: jsonEncode({'path': path}),
+      );
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+
+    // A plain cortexd has no such route, and neither does a local agent from
+    // before it existed. Both answer 404/405 — the caller falls back to
+    // `PATCH /sessions/{id}`, which is what every client did until now.
+    if (response.statusCode == 404 || response.statusCode == 405) {
+      throw _failure(
+        response.statusCode,
+        '这个后端没有本地工作区端点，改走 PATCH /sessions/{id}。',
+      );
+    }
+    if (response.statusCode >= 400) {
+      // The validator's wording ("整台机器不是工作区") is written for the user.
+      throw _failure(response.statusCode, _errorMessage(response));
+    }
+    final body = _decodeObject(
+      'PUT /local/workspaces',
+      utf8.decode(response.bodyBytes),
+    );
+    return asStringOrNull(body['workspace']);
+  }
+
+  @override
   Future<ChatSession> updateSession(
     String id, {
     String? title,

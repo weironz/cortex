@@ -140,6 +140,11 @@ pub async fn forward_json(
             let status = StatusCode::from_u16(resp.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let bytes = resp.bytes().await.unwrap_or_default();
+            // 会话对象里的 workspace 权威在**这台机器**上，回来的路上换成本地的值。
+            // 不换的话，绑定成功之后界面立刻显示「未绑定」—— 因为 cortexd
+            // 那侧存的永远是 null（本地 agent 转发时就把它抹成 null 了）
+            let bytes = crate::local_workspace::inject(&st.engine.workspaces, &bytes)
+                .map_or(bytes, axum::body::Bytes::from);
             let mut out = Response::builder()
                 .status(status)
                 .header(header::CONTENT_TYPE, "application/json");

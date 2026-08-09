@@ -15,7 +15,7 @@ use axum::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{any, get, post},
+    routing::{any, get, post, put},
 };
 use cortex_proto::confirm::AnswerOutcome;
 use cortex_proto::dto::{
@@ -25,6 +25,7 @@ use cortex_proto::dto::{
 use futures::stream::Stream;
 use tokio_stream::StreamExt as _;
 
+use crate::local_workspace;
 use crate::proxy;
 use crate::state::LocalState;
 use crate::ws_proxy;
@@ -47,6 +48,10 @@ pub fn router(state: LocalState) -> Router {
         // 工作区绑定要**拦下来**：那个路径在本机上，而 cortexd 会拿它去
         // canonicalize 服务器的文件系统。见 handler 的注释
         .route("/sessions/{id}", any(patch_session))
+        .route("/sessions", get(list_sessions))
+        // 绑定的**权威在这台机器**，所以给它一条自己的路，完全不碰网络。
+        // 走 PATCH /sessions 的老路子有两个实测到的坏处，见 local_workspace
+        .route("/local/workspaces/{session_id}", put(local_workspace::bind))
         // WebSocket 升级走不了普通反代（那条路把 `upgrade` 头当逐跳首部剥了）。
         // 见 [`crate::ws_proxy`]
         .route("/ws", get(ws_proxy::handler))
@@ -223,6 +228,15 @@ async fn list_confirmations(
     Json(PendingConfirmations { pending })
 }
 
+/// `GET /sessions` —— 原样转发，但把每条的 `workspace` 换成本地绑定。
+///
+/// 不走兜底反代的唯一原因就是这个注入：那条路是流式的，改不了响应体。
+/// 见 [`crate::local_workspace`]。
+async fn list_sessions(State(st): State<LocalState>, req: Request) -> Response {
+    let (parts, _) = req.into_parts();
+    proxy::forward_json(&st, reqwest::Method::GET, &parts.uri, Vec::new()).await
+}
+
 /// `PATCH /sessions/{id}` —— 把 `workspace` 那一项**拦在本地**。
 ///
 /// # 为什么必须拦
@@ -237,7 +251,12 @@ async fn list_confirmations(
 async fn patch_session(State(st): State<LocalState>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     if parts.method != axum::http::Method::PATCH {
-        // GET /sessions/{id} 是回放，权威在远端
+        // GET /sessions/{id} 是回放，权威在远端 —— 但**除了 workspace**。
+        // 走带缓冲的那条转发，好在回来的路上把绑定换成本地的值
+        // （`proxy::forward` 是流式的，注入不了）
+        if parts.method == axum::http::Method::GET {
+            return proxy::forward_json(&st, reqwest::Method::GET, &parts.uri, Vec::new()).await;
+        }
         return proxy::forward(State(st), Request::from_parts(parts, body)).await;
     }
 

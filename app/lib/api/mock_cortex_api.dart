@@ -36,6 +36,17 @@ class MockCortexApi implements CortexApi {
   final Random _random;
   bool _disposed = false;
 
+  /// The mock stands in for a plain cortexd: no local agent, so no local
+  /// workspace route. Reporting it as unsupported is what makes the caller
+  /// exercise its `PATCH /sessions/{id}` fallback in tests.
+  @override
+  Future<String?> bindLocalWorkspace(String id, String? path) async {
+    throw const CortexApiException(
+      '模拟后端没有本地工作区端点，改走 PATCH /sessions/{id}。',
+      statusCode: 404,
+    );
+  }
+
   @override
   String get label => 'Mock 数据源（内存夹具）';
 

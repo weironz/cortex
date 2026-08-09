@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:cortex_app/api/api_exception.dart';
 import 'dart:typed_data';
 
 import 'package:cortex_app/api/cortex_api.dart';
@@ -37,6 +38,13 @@ class _FakeApi implements CortexApi {
 
   /// Answers `GET /sync`. Defaults to "you are already caught up".
   SyncPage Function(int since) respond = (since) => SyncPage(cursor: since);
+
+  /// 没有本地 agent 的替身：这条路由不存在，报「不支持」正是让调用方
+  /// 去走 `PATCH /sessions/{id}` 回落分支的那个信号。
+  @override
+  Future<String?> bindLocalWorkspace(String id, String? path) async {
+    throw const CortexApiException('测试替身没有本地工作区端点', statusCode: 404);
+  }
 
   @override
   Stream<SyncEvent> watchSync() {

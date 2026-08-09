@@ -220,21 +220,52 @@ class ChatController extends Notifier<ChatState> {
   Future<void> bindWorkspace(String id, String root) async {
     final trimmed = root.trim();
     if (trimmed.isEmpty) return;
-    await _patch(
-      id,
-      call: () => _api.updateSession(id, workspace: trimmed),
-      local: (s) => s.copyWith(
-        workspace: Workspace(root: trimmed),
-        hasLocalOverrides: true,
-      ),
-    );
+    await _bindWorkspace(id, trimmed);
   }
 
-  Future<void> unbindWorkspace(String id) async {
+  Future<void> unbindWorkspace(String id) async => _bindWorkspace(id, null);
+
+  /// The local agent owns this binding, so ask it first.
+  ///
+  /// `PUT /local/workspaces/{id}` never touches the network — which is exactly
+  /// why it exists. Binding used to ride `PATCH /sessions/{id}`, and that broke
+  /// twice over: offline the forward 502'd *after* the binding had already been
+  /// written to disk, and online the daemon answered `workspace: null` (the
+  /// local agent nulls it on the way out) so [_patch]'s wholesale session
+  /// replacement put the UI straight back to "unbound".
+  ///
+  /// Only the workspace field is merged here — everything else in the session
+  /// (title, message count) still comes from the daemon, and this route
+  /// deliberately does not return those.
+  ///
+  /// Against a plain cortexd — the Web build, where there is no local agent and
+  /// the workspace really is server-side — the route is absent, and the old
+  /// `PATCH` path takes over unchanged.
+  Future<void> _bindWorkspace(String id, String? path) async {
+    try {
+      final bound = await _api.bindLocalWorkspace(id, path);
+      if (!ref.mounted) return;
+      _replaceSession(
+        id,
+        // `copyWith` takes a sentinel default, so an explicit `null` here
+        // really does clear the binding rather than leaving it alone
+        (s) => s.copyWith(
+          workspace: bound == null ? null : Workspace(root: bound),
+        ),
+      );
+      return;
+    } on CortexApiException catch (e) {
+      if (!e.isUnsupported) rethrow;
+    }
     await _patch(
       id,
-      call: () => _api.updateSession(id, clearWorkspace: true),
-      local: (s) => s.copyWith(workspace: null, hasLocalOverrides: true),
+      call: () => path == null
+          ? _api.updateSession(id, clearWorkspace: true)
+          : _api.updateSession(id, workspace: path),
+      local: (s) => s.copyWith(
+        workspace: path == null ? null : Workspace(root: path),
+        hasLocalOverrides: true,
+      ),
     );
   }
 
