@@ -176,6 +176,50 @@ impl Remote {
         ))
     }
 
+    /// 取这个会话最近的若干轮，用来铺当前这一轮的上下文。
+    ///
+    /// # 为什么本地 agent 也要问远端
+    ///
+    /// 它没有数据库。会话的原文全在远端 —— 包括**别的设备上**发生的那些轮次，
+    /// 而「任何设备连上即是完整的你」正要求这台机器也看得见它们。
+    ///
+    /// `/sessions/{id}?limit=N` 给的是**最新 N 条、正序**，正是上下文要的
+    /// （见那个 DTO 的注释：分页天然从新往老取，反转在服务端做）。
+    ///
+    /// # 连不上就当没有历史
+    ///
+    /// 离线是明确支持的形态：这一轮照样能跑，只是模型看不到前几轮 ——
+    /// 与「记忆未连接」是同一类降级，不该让整轮对话失败。
+    pub async fn session_history(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(bool, String)>> {
+        let resp = self
+            .auth(self.http.get(self.url(&format!("/sessions/{session_id}"))))
+            .timeout(REQUEST_TIMEOUT)
+            .query(&[("limit", limit.to_string())])
+            .send()
+            .await
+            .map_err(map_transport)?;
+        let detail: cortex_proto::dto::SessionDetail = checked(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| CortexError::Invalid(format!("解析会话详情失败：{e}")))?;
+        Ok(detail
+            .episodes
+            .into_iter()
+            .filter_map(|e| match e.role.as_str() {
+                // tool / system 是内部记录，塞进上下文既占预算，
+                // 又让模型以为那是用户说的话
+                "user" => Some((true, e.text.unwrap_or_default())),
+                "assistant" => Some((false, e.text.unwrap_or_default())),
+                _ => None,
+            })
+            .collect())
+    }
+
     /// 远端活着吗。决定这一轮是走在线路径还是排进 outbox。
     pub async fn is_reachable(&self) -> bool {
         self.http

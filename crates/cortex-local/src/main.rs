@@ -138,6 +138,9 @@ async fn main() -> anyhow::Result<()> {
     // 不加 .attended()：封闭沙箱里本来就不会有进程被启动
     // （tools.rs 的 shell 分支拿不到 cwd，更早一步就拒了）
     let chat_turn = Turn::sealed().with_max_rounds(DEFAULT_MAX_ROUNDS);
+    // 取本机这个模型自己的窗口，而不是抄一个常量：本地 agent 用的模型
+    // 由用户机器上的配置决定，和服务端跑的可能根本不是同一个
+    let context_window = llm.model().context_limit();
 
     let engine = Arc::new(Engine {
         remote: remote.clone(),
@@ -147,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
         outbox: outbox.clone(),
         chat_turn: Arc::new(chat_turn),
         max_rounds: DEFAULT_MAX_ROUNDS,
+        context_window,
         system_prompt: SYSTEM_PROMPT,
     });
 

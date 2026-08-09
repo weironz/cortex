@@ -22,6 +22,7 @@
 
 pub mod config;
 pub mod error;
+pub mod history;
 pub mod id;
 pub mod injection;
 

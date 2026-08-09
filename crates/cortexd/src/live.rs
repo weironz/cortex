@@ -1529,7 +1529,35 @@ async fn run_turn(
         "本轮的工具目录"
     );
 
-    let mut messages = vec![cortex_llm::Message::user().with_text(&user_content)];
+    // ── 会话历史 ──
+    //
+    // 在此之前这里只有当前这一条消息，**历史一次都没被加载过**。症状是
+    // 「同一个会话里问它上一句说了什么，它说没看见」—— 实测过，不是假想。
+    //
+    // 记忆系统盖不住这件事：它捞回的是被抽取成**事实**的那部分，而且要等
+    // 异步抽取跑完。「刚才说了什么」「总结一下这段对话」压根不满足抽取判据。
+    let history = load_history(&live, &req.session_id, user_episode_id).await;
+    let mut messages: Vec<cortex_llm::Message> = history
+        .turns
+        .iter()
+        .map(|t| {
+            if t.is_user {
+                cortex_llm::Message::user().with_text(&t.text)
+            } else {
+                cortex_llm::Message::assistant().with_text(&t.text)
+            }
+        })
+        .collect();
+    if history.dropped > 0 {
+        tracing::info!(
+            session = %req.session_id,
+            dropped = history.dropped,
+            kept = messages.len(),
+            "会话太长，最早的若干轮没进上下文"
+        );
+    }
+    messages.push(cortex_llm::Message::user().with_text(&user_content));
+
     let host = TurnHost {
         live: Arc::clone(&live),
         events: tx.clone(),
@@ -2228,4 +2256,67 @@ mod extract_gate_tests {
             "峰值只有 {peak}，说明这些任务根本没重叠过，这条测试测了个寂寞"
         );
     }
+}
+
+/// 取这个会话最近的若干轮，用来铺当前这一轮的上下文。
+///
+/// # 为什么走**降序分页**那个查询，而不是 `episodes_by_session`
+///
+/// 后者是升序 + LIMIT，截掉的是**最新**那些 —— 那对显示是对的
+/// （用户从头往下读），对上下文正好相反：模型要接着最近几轮往下说。
+/// 同一个 LIMIT 用错方向，症状是「它记得三个月前，却忘了上一句」。
+///
+/// # 取不到就当没有历史，不让整轮对话失败
+///
+/// 用户只是想说句话。历史读不出来是降级（退回本次改动之前的行为），
+/// 不该表现为一次 500。
+async fn load_history(
+    live: &Live,
+    session_id: &str,
+    current: cortex_core::Id,
+) -> cortex_core::history::FittedHistory {
+    use cortex_core::history::{HistoryTurn, fit_history, history_budget};
+
+    let budget = history_budget(live.context_window);
+    // 先按条数粗筛一层再按 token 精算：一个几千轮的会话不该为了算预算
+    // 把全部原文都拉进内存。200 轮在任何合理预算下都绰绰有余
+    const MAX_TURNS: i64 = 200;
+
+    let page = match live
+        .store
+        .episodes_by_session_page(session_id, MAX_TURNS, None)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, session = session_id, "读会话历史失败，本轮按无历史处理");
+            return fit_history(Vec::new(), budget);
+        }
+    };
+
+    // 分页是从新到老给的，这里翻正
+    let current = current.to_string();
+    let turns: Vec<HistoryTurn> = page
+        .into_iter()
+        .rev()
+        // 本轮的 user episode 上面刚写进库（步骤 1），它就在这份历史的末尾。
+        // 按 id 精确剔除，而不是「末尾那条是 user 就弹掉」—— 后者在用户
+        // 连发两条消息时会吃掉一条真实发言，而那是**静默**的
+        .filter(|e| e.id != current)
+        .filter_map(|e| {
+            // 只要真正的对话双方。tool / system 是内部记录，
+            // 塞进上下文既占预算又让模型以为那是用户说的话
+            let is_user = match e.role {
+                cortex_store::Role::User => true,
+                cortex_store::Role::Assistant => false,
+                _ => return None,
+            };
+            Some(HistoryTurn {
+                is_user,
+                text: e.text.unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    fit_history(turns, budget)
 }

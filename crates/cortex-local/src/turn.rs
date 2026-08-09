@@ -45,6 +45,11 @@ pub struct Engine {
     /// 未绑定工作区的会话用它 —— 工具目录里没有文件工具
     pub chat_turn: Arc<Turn>,
     pub max_rounds: usize,
+    /// 模型的上下文窗口，决定历史能占多少 token（见 [`cortex_core::history`]）。
+    ///
+    /// 与 cortexd 各配各的：这一侧的模型由**用户本机**的配置决定，
+    /// 可能和服务端跑的根本不是同一个。
+    pub context_window: usize,
     pub system_prompt: &'static str,
 }
 
@@ -68,11 +73,51 @@ impl Engine {
         rx
     }
 
+    /// 取这个会话最近的若干轮，铺在本轮之前。
+    ///
+    /// # 取不到就当没有历史，不让整轮对话失败
+    ///
+    /// 用户只是想说句话。远端连不上（离线）或历史读不出来都是**降级**——
+    /// 退回本次改动之前的行为，不该表现为一次报错。
+    async fn load_history(&self, session_id: &str) -> cortex_core::history::FittedHistory {
+        use cortex_core::history::{HistoryTurn, fit_history, history_budget};
+
+        let budget = history_budget(self.context_window);
+        // 先按条数粗筛再按 token 精算：一个几千轮的会话不该为了算预算
+        // 把全部原文都拉过网络。200 轮在任何合理预算下都绰绰有余
+        const MAX_TURNS: i64 = 200;
+
+        let turns = match self.remote.session_history(session_id, MAX_TURNS).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, session = session_id, "读会话历史失败，本轮按无历史处理");
+                Vec::new()
+            }
+        };
+        fit_history(
+            turns
+                .into_iter()
+                .map(|(is_user, text)| HistoryTurn { is_user, text })
+                .collect(),
+            budget,
+        )
+    }
+
     async fn run_turn(
         self: &Arc<Self>,
         req: ChatRequest,
         tx: &mpsc::Sender<ChatEvent>,
     ) -> Result<()> {
+        // ── 0. 取会话历史 ──
+        //
+        // **在写本轮 user episode 之前取**，这样远端给回来的就是干净的
+        // 历史，不含刚发的这一句 —— 不必再靠「末尾那条是 user 就弹掉」
+        // 之类的启发式去猜，而那种猜法在用户连发两条消息时会静默吃掉一条。
+        //
+        // 本地 agent 没有数据库，这里必须问远端。代价是：**离线时没有历史**，
+        // 与「离线时没有记忆」是同一类降级，UI 上已有那句提示。
+        let history = self.load_history(&req.session_id).await;
+
         // ── 1. 写 user episode（顺带检索 + 归因）──
         //
         // id 在本地生成：离线时也要有 id 才排得进队列，而 ULID 本来就是
@@ -142,7 +187,27 @@ impl Engine {
         let bridge_tx = tx.clone();
         let bridge = tokio::spawn(async move { bridge_events(&mut arx, &bridge_tx).await });
 
-        let mut messages = vec![cortex_llm::Message::user().with_text(&user_content)];
+        let mut messages: Vec<cortex_llm::Message> = history
+            .turns
+            .iter()
+            .map(|t| {
+                if t.is_user {
+                    cortex_llm::Message::user().with_text(&t.text)
+                } else {
+                    cortex_llm::Message::assistant().with_text(&t.text)
+                }
+            })
+            .collect();
+        if history.dropped > 0 {
+            tracing::info!(
+                session = %req.session_id,
+                dropped = history.dropped,
+                kept = messages.len(),
+                "会话太长，最早的若干轮没进上下文"
+            );
+        }
+        messages.push(cortex_llm::Message::user().with_text(&user_content));
+
         let host = LocalHost {
             remote: self.remote.clone(),
             events: tx.clone(),

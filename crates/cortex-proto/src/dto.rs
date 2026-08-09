@@ -367,7 +367,7 @@ pub struct ChannelHit {
 
 // ────────────────────────── episodes ───────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EpisodeDto {
     pub id: String,
     pub session_id: String,
@@ -398,7 +398,7 @@ pub struct EpisodeDto {
 /// 一条事实被 redact 之后抽屉里跟着变成占位符，不需要另外再清一遍。
 /// 代价是失去逐字保真 —— 但事实的 statement 本身是 append-only 的，
 /// 「现状」与「当时」只在被 redact 时才不同，而那正是我们希望它不同的场合。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectedMemoryDto {
     pub fact_id: String,
     /// `null` = 这条事实的行已经不在了。界面应显示「引用了一条已不可见的
@@ -416,7 +416,7 @@ pub struct InjectedMemoryDto {
 }
 
 /// 回放时看到的一次工具调用。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallDto {
     pub name: String,
     /// 见 [`ChatEvent::Tool`] 的 `path`
@@ -430,7 +430,7 @@ pub struct ToolCallDto {
 /// `title` 可能来自两处：用户通过 `PATCH /sessions/{id}` 起的名字，
 /// 或者（从未改过名时）从首条用户消息派生。`title_is_custom` 把这条差别
 /// 显式化 —— 界面上「重命名」的输入框预填哪个值取决于它。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionDto {
     pub id: String,
     pub title: String,
@@ -549,7 +549,7 @@ pub const DEFAULT_EPISODE_PAGE: i64 = 500;
 pub const MAX_EPISODE_PAGE: i64 = 500;
 
 /// 单个会话的详情：概览 + 一页消息。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionDetail {
     #[serde(flatten)]
     pub session: SessionDto,
