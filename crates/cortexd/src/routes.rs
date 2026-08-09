@@ -135,7 +135,7 @@ pub fn router(state: AppState) -> Router {
 /// 存活探针。**唯一不需要认证的端点**，理由见 [`Health::auth`]。
 async fn health(State(st): State<AppState>) -> Json<Health> {
     Json(Health {
-        status: "ok",
+        status: st.status(),
         version: cortex_core::VERSION,
         protocol: cortex_proto::PROTOCOL_VERSION,
         min_peer_protocol: cortex_proto::MIN_PEER_PROTOCOL,

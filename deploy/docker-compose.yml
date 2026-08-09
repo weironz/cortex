@@ -191,6 +191,14 @@ services:
     restart: unless-stopped
     logging: *default-logging
     networks: [default, traefik]
+    # ⚠️ **数据库连不上时 cortexd 会退出**（0.1.4 起），于是这里会看到一个
+    # 重启循环。那是**预期行为**，不是故障 —— 别去加 `CORTEX_BACKEND=mock`
+    # 把它「修好」，那会让它带着一库假数据对外服务。
+    #
+    # 下面这个 depends_on 只在 `docker compose up` 那一刻管用；cortexd 自己
+    # 崩溃后的**自动重启不走它**。所以「Postgres 恢复期间 cortexd 重启」
+    # 这条路必须由 cortexd 自己挡住，而它现在挡住了。
+    # 完整理由见 crates/cortexd/src/state.rs 的 `BackendChoice`
     depends_on:
       postgres:
         condition: service_healthy

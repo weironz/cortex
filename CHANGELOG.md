@@ -38,6 +38,26 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 连接。后者会被重连逻辑当成网络抖动，于是无限重试而错误一个字都传不出来 ——
 截图里那 40 次就是这么来的。
 
+### ⚠️ 破坏性：cortexd 连不上数据库时**不再回落到假数据**
+
+以前它会照常起来、返回 HTTP 200、`status: "ok"`、对话正常、检索有结果 ——
+只有 `/health` 里 `database: "not_wired"` 一个字段能看出这一库记忆全是编的。
+而生产 compose 里 cortexd **根本没配 healthcheck**。
+
+生产上它是这样发作的：cortexd 因崩溃或 OOM **自动重启**时，compose 的
+`depends_on: condition: service_healthy` 是不生效的（那个条件只在
+`docker compose up` 那一刻管用）。于是 Postgres 恢复期间的一次自动重启，
+就足以让它带着假记忆对外服务。
+
+这与 0.1.2 那次「embeddings 找不到权重、静默变成假向量」是同一个失败形状。
+
+现在连不上就退出（退出码 1），docker 会反复重启直到数据库真的回来 ——
+**看到重启循环是预期行为，不是故障**。
+
+- 想不带数据库跑要明说 `CORTEX_BACKEND=mock`，那时 `/health` 报 `status: "mock"` 而不是 `ok`。
+- 打错的取值（`CORTEX_BACKEND=moc`）直接报错，不回落。
+- 启动失败的报错会写清连的是哪个地址，**密码已抹掉**。
+
 ### 本地 agent 崩了会自己起来
 
 以前它一挂，桌面端就成了空壳：所有对话都失败，只能重启整个应用。

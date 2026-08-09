@@ -1,11 +1,15 @@
 //! 应用状态与业务分派。
 //!
 //! 两个后端共用同一套契约：[`Backend::Live`] 接真实的存储层、供应商层与
-//! 记忆引擎；[`Backend::Mock`] 是数据库或 API key 不可用时的降级数据源。
+//! 记忆引擎；[`Backend::Mock`] 是一个**显式选择**的假数据源。
 //!
 //! 保留 Mock 不是权宜之计 —— 客户端的 CI、离线开发、以及「后端挂了
 //! 界面还能不能看」这三件事都需要它，且它强制我们把契约的两个实现
 //! 对齐，避免真实实现悄悄偏离文档。
+//!
+//! **但它不再是回落。** Mock 曾经是「数据库或 API key 不可用时」自动接管的
+//! 降级路径，而那让 cortexd 能带着一库假记忆对外服务且看起来完全正常。
+//! 现在它只在 `CORTEX_BACKEND=mock` 时出现 —— 完整理由见 [`BackendChoice`]。
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -78,10 +82,68 @@ impl Runtime {
 }
 
 enum Backend {
-    /// 降级数据源。契约与 Live 完全一致。
+    /// 假数据源。契约与 Live 完全一致。
     Mock,
     /// 真实后端：Postgres + LLM + 记忆引擎
     Live(Arc<Live>),
+}
+
+/// `CORTEX_BACKEND` —— 跑哪个后端。**默认 live，且不回落。**
+///
+/// # 为什么不能是「连不上就回落到 mock」
+///
+/// 那正是它此前的样子，而它在生产上是这样发作的：cortexd 因为崩溃或 OOM
+/// **自动重启**（`restart: unless-stopped`）时，compose 的
+/// `depends_on: condition: service_healthy` **不生效** —— 那个条件只在
+/// `docker compose up` 那一刻管用。于是 Postgres 恢复期间的一次自动重启，
+/// 会让 cortexd 带着一库假记忆起来并对外服务。
+///
+/// 而它看起来完全正常：HTTP 200、`status: "ok"`、对话照常、检索有结果。
+/// 只有 `/health` 里 `database: "not_wired"` 一个字段能看出区别，
+/// 而生产 compose 里 cortexd **根本没有配 healthcheck**。
+///
+/// 这与 0.1.2 那次「embeddings 找不到权重、静默变成假向量」是同一个失败
+/// 形状：**降级得太安静**。那次写进了 CHANGELOG，这次把它从形状上去掉 ——
+/// 起不来的容器会被 docker 反复重启，直到数据库真的回来，这正是想要的。
+///
+/// mock 仍然保留，但必须**明说**。开发时想不带数据库跑就设
+/// `CORTEX_BACKEND=mock`，而那时 `/health` 会如实报 `status: "mock"`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendChoice {
+    Live,
+    Mock,
+}
+
+impl BackendChoice {
+    /// # Errors
+    /// 取值不认识时报错。
+    pub fn from_env() -> cortex_core::Result<Self> {
+        // 空串按「没设」处理，与 `CORTEX_EMBED_BACKEND` 同一个理由：
+        // compose 的 `${VAR:-}` 会把没配的变量**设成空串**，而 `env::var`
+        // 对空串返回 `Ok("")`。这个坑在这个仓库里已经出现过三次
+        std::env::var("CORTEX_BACKEND")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map_or(Ok(Self::Live), Self::parse)
+    }
+
+    /// # Errors
+    /// 取值不认识时报错 —— **不回落到默认值**。
+    ///
+    /// 一个打错的 `CORTEX_BACKEND=moc` 悄悄跑成 live 还算幸运；
+    /// 反过来（`CORTEX_BACKEND=liv` 跑成 mock）就是这条修复本来要防的事
+    /// 又从另一个门进来了。
+    pub fn parse(s: &str) -> cortex_core::Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "live" | "real" => Ok(Self::Live),
+            "mock" | "fake" => Ok(Self::Mock),
+            other => Err(cortex_core::CortexError::Config(format!(
+                "未知的 CORTEX_BACKEND={other:?}，可选：live / mock"
+            ))),
+        }
+    }
 }
 
 impl AppState {
@@ -116,7 +178,8 @@ impl AppState {
         }
     }
 
-    /// 接入真实后端。数据库连不上或缺 API key 都会失败，由调用方决定是否降级。
+    /// 接入真实后端。数据库连不上或缺 API key 都会失败，而**调用方不再降级** ——
+    /// 它把错误一路带到 `main` 并退出。理由见 [`BackendChoice`]。
     pub async fn new_live(config: &Config, rt: Runtime) -> Result<Self> {
         // 走进程内共享的那一份（`OnceCell`），而不是自己 new 一个：模型即使
         // int8 也有近 600 MB，「daemon 而非嵌入式」这个架构决策的收益之一
@@ -230,6 +293,22 @@ impl AppState {
         match &self.inner.backend {
             Backend::Mock => MOCK_CURSOR.load(std::sync::atomic::Ordering::Relaxed),
             Backend::Live(l) => l.latest_cursor().await,
+        }
+    }
+
+    /// `/health` 顶上那一行。
+    ///
+    /// mock 后端**不报 `ok`**：那个词在探针眼里意味着「这个服务可以承接
+    /// 流量」，而一个返回假数据的进程不可以。此前它报 `ok`，
+    /// 与「数据是真的」唯一的区别是下面 `database` 那一行。
+    ///
+    /// 现在 mock 只能是显式选的（见 [`BackendChoice`]），所以这一行主要是
+    /// 给开发时一眼确认「我到底连没连上库」—— 但它值得如实说。
+    #[must_use]
+    pub fn status(&self) -> &'static str {
+        match &self.inner.backend {
+            Backend::Mock => "mock",
+            Backend::Live(_) => "ok",
         }
     }
 
@@ -814,4 +893,37 @@ fn mock_chat_stream(
     });
 
     head.chain(confirm).chain(body).chain(tail)
+}
+
+#[cfg(test)]
+mod backend_choice_tests {
+    use super::BackendChoice;
+
+    /// 默认必须是 live，而认不出的取值必须**报错而不是回落**。
+    ///
+    /// 这条守的是一次修复的完整性。原来的行为是「连不上数据库就悄悄跑
+    /// mock」，其后果是 cortexd 可以带着一库假记忆对外服务而看起来完全正常。
+    /// 修法是把 mock 变成显式选择 —— 但如果打错的取值会回落到某个默认值，
+    /// 那扇门就等于没关：一个 `CORTEX_BACKEND=moc` 会以「我配了 mock」的
+    /// 心情跑成别的东西，反之亦然。
+    #[test]
+    fn mock_must_be_asked_for_by_name() {
+        assert_eq!(BackendChoice::parse("live").unwrap(), BackendChoice::Live);
+        assert_eq!(BackendChoice::parse("mock").unwrap(), BackendChoice::Mock);
+        assert_eq!(BackendChoice::parse("MOCK").unwrap(), BackendChoice::Mock);
+        assert_eq!(
+            BackendChoice::parse("  mock  ").unwrap(),
+            BackendChoice::Mock
+        );
+
+        let err = BackendChoice::parse("moc").expect_err("打错的取值必须报错，不能回落");
+        assert!(
+            err.to_string().contains("CORTEX_BACKEND"),
+            "报错要点名是哪个变量，实际：{err}"
+        );
+
+        // 空串在 from_env 那侧按「没设」处理（compose 的 `${VAR:-}`），
+        // 但直接调 parse 传空串是调用方的错，该报错
+        assert!(BackendChoice::parse("").is_err());
+    }
 }
