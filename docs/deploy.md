@@ -3,9 +3,14 @@
 **这份文档讲的是「把某个已发布的版本放到那台服务器上」。**
 怎么在自己机器上装见 [install.md](install.md)；怎么备份见 [operations.md](operations.md)。
 
-> **一句话**：发布（`release.yml`，推 tag 触发）与部署（`deploy.yml`，
-> **只能手动触发**）是两件事。哪个版本在线上，是人做的决定，
-> 不是合并的副作用。
+> **一句话**：推一个 tag，流水线一路走完 —— 构建、发产物、**上生产**。
+> `release.yml` 的最后一个 job 会调 `deploy.yml`。
+>
+> 「哪个版本在线上是人做的决定」这条没变，只是那个决定的落点是
+> **`git tag`**，而不是事后再去点一次按钮。合并到 main 仍然什么都不部署。
+>
+> `deploy.yml` 的手动触发保留着，用途是**回退**（把线上换成某个更早的
+> 版本）—— 那与「发新版」是完全不同的一件事，不该只能靠再打一个 tag 来做。
 
 ---
 
@@ -199,9 +204,17 @@ scp deploy/docker-compose.yml root@120.79.61.68:/data/cortex/docker-compose.yml
 
 ## 五、部署一次
 
+**正常发版不用做任何事** —— 推 tag 之后 `release.yml` 的 `deploy` job
+自己会调到这里。下面这个入口是给**回退**用的（以及给「compose 同步完了
+补一次部署」这种情况）：
+
 ```
 GitHub → Actions → Deploy → Run workflow → version = 0.1.0
 ```
+
+> **改过 `deploy/docker-compose.yml` 就先同步再打 tag。** 顺序反了的话
+> 那次自动部署会被节点拒（指纹不匹配），tag 已经推出去了，只能同步完
+> 再从这个入口补一次。同步命令见第三节，`just deploy-sync` 会打印。
 
 流水线做的事，逐条都有理由：
 

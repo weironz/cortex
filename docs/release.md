@@ -103,6 +103,19 @@ git push origin vX.Y.Z
 | `desktop` | Windows 桌面安装程序（Inno Setup）。**只有 Windows** —— macOS 的 Gatekeeper 是硬拒绝，不是警告 |
 | `image` ×2 | `cortexd` 与 `cortex-web`，各推 Docker Hub 与阿里云 ACR。**推完必须真的启动一次** |
 | `release` | 汇总 `SHA256SUMS`、清点产物是否齐、从 CHANGELOG 取这一版的段落、**直接发布** |
+| `deploy` | **调 `deploy.yml` 把这一版放到生产**，然后验五条硬断言（见下） |
+
+**发版是一条龙：构建 → 发产物 → 上生产。** 人做的那次决定发生在 `git tag`，
+不该再要求他事后记得去点一次部署 —— 那种「还差最后一步」的流程，漏掉的
+表现是「发了，但线上还是旧版」，而它没有任何红灯。
+
+`deploy` 依赖的是 `release` 而不是 `image`：产物没发成功就不该上生产，
+「线上是新版、下载页是旧版」比两者都旧更难解释。
+
+> **⚠️ 改过 `deploy/docker-compose.yml` 的话，这一步会失败，而且是对的。**
+> 节点上那份得先由 root 带外同步（`just deploy-sync`）—— CI 不能碰
+> 那道限制它自己的围栏。节点的拒绝信息里写了该跑什么。
+> **顺序是：先同步 compose，再打 tag。**
 
 > **Linux / macOS 裸二进制与 Flutter Web 静态包自 0.1.2 起停发。**
 > 它们占掉整条流水线绝大部分时间，而镜像里 cortexd 与 CLI 都在、

@@ -3,8 +3,14 @@ name: Deploy
 # ══════════════════════════════════════════════════════════
 #  把某个**已发布**的版本放到线上。
 #
-#  刻意只有 workflow_dispatch，**没有 `on: push`**：
-#  哪个版本在线上，是人做的决定，不是合并的副作用。
+#  **没有 `on: push`**：哪个版本在线上，是人做的决定，不是合并的副作用。
+#
+#  但**打 tag 就是那个决定**，所以 Release 走完之后会自动调这里
+#  （`release.yml` 的 deploy job，走下面的 `workflow_call`）。
+#  发版是一条龙：构建 → 发产物 → 上生产。人做的那次决定发生在 `git tag`。
+#
+#  `workflow_dispatch` 保留着，用来把线上回退到某个更早的版本 ——
+#  那是与「发新版」完全不同的一件事，不该只能靠再打一个 tag 来做。
 #
 #  安全模型（照抄 mica 那套，不简化）：
 #  用的不是 root 密钥。节点上 `~cortex-deploy/.ssh/authorized_keys` 用
@@ -22,6 +28,14 @@ on:
     inputs:
       version:
         description: '版本号，不带 v 前缀，例如 0.1.0'
+        required: true
+  # 给 release.yml 调用。两个入口共用**同一份**实现 ——
+  # 抄一份到 release.yml 里的话，两边的健康检查迟早会长得不一样，
+  # 而那种不一致只有在某次部署出事时才会被发现
+  workflow_call:
+    inputs:
+      version:
+        type: string
         required: true
 
 # 两次部署同时跑会在节点的 .env 上打架（都在改 CORTEX_VERSION）。
