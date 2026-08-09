@@ -72,6 +72,69 @@ const WORKSPACE_FREE_TOOLS: &[&str] = &["memory_search"];
 /// 这个数字直接决定单轮对话最多花几次模型调用。
 const MAX_ROUNDS_ENV: &str = "CORTEX_AGENT_MAX_ROUNDS";
 
+/// 同时最多几路抽取。见 [`Live::extract_permit`]。
+const EXTRACT_CONCURRENCY_ENV: &str = "CORTEX_EXTRACT_CONCURRENCY";
+
+/// 默认 3。
+///
+/// 不按 CPU 核数算：抽取的瓶颈是**供应商那一端**，本地几乎不耗 CPU
+/// （等一次 HTTP 往返）。按核数算会在大机器上放出几十路并发，撞的是
+/// 供应商的速率限制，而那表现为一批 429 —— 每一个 429 都是一轮记忆丢了。
+///
+/// 3 是个保守值：正常聊天下永远排不上队（人打字比这慢得多），
+/// 而批量写入时它把峰值削平。不够用就调大，那是个明确的运维动作。
+const DEFAULT_EXTRACT_CONCURRENCY: usize = 3;
+
+/// 读并解析 [`EXTRACT_CONCURRENCY_ENV`]。
+fn extract_concurrency() -> Result<usize> {
+    parse_extract_concurrency(
+        std::env::var(EXTRACT_CONCURRENCY_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .as_deref(),
+    )
+}
+
+/// 与 `MAX_ROUNDS_ENV` 同样的纪律：取值非法就报错，不悄悄用默认值 ——
+/// 配错了却照跑，等于上限失效而运维完全不知情。
+///
+/// 0 也算非法：那不是「不限制」，是「一路都不许跑」，
+/// 而想关掉抽取该有它自己的开关。
+///
+/// 单独一个纯函数（而不是直接读环境变量）是为了能测：`env::set_var`
+/// 改的是进程全局状态，同二进制里的别的测试会跟着一起踩。
+fn parse_extract_concurrency(raw: Option<&str>) -> Result<usize> {
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_EXTRACT_CONCURRENCY);
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(0) | Err(_) => Err(CortexError::Config(format!(
+            "{EXTRACT_CONCURRENCY_ENV} 必须是正整数，实际是 {raw:?}"
+        ))),
+        Ok(n) => Ok(n),
+    }
+}
+
+/// 在闸门下跑一段抽取。**许可一直持有到它结束。**
+///
+/// 单独一个函数，是因为这里有一个很容易写错、且写错之后**一切照常绿**
+/// 的地方：
+///
+/// ```ignore
+/// let _ = gate.acquire_owned().await;   // ← 许可当场就被丢掉了，闸门失效
+/// let _permit = gate.acquire_owned().await;  // ← 才是对的
+/// ```
+///
+/// `_` 是「立刻丢弃」，`_permit` 是「绑定但不用」。两者只差几个字符，
+/// 而前者让整个信号量变成一句昂贵的空操作 —— 没有任何测试会因此变红，
+/// 除非有人专门去测并发度。收进这一个函数之后，那条测试只要写一次。
+async fn under_gate<F: Future>(gate: &Arc<tokio::sync::Semaphore>, fut: F) -> F::Output {
+    // acquire 只在信号量被 close 时失败，而我们从不 close 它。
+    // 真失败了也照跑：抽取不该因为闸门坏了就整个停摆
+    let _permit = Arc::clone(gate).acquire_owned().await.ok();
+    fut.await
+}
+
 /// 会话列表一次给多少条。
 ///
 /// 上限作用在**会话**上而不是消息上 —— 存储层用一句 SQL 聚合，
@@ -104,6 +167,8 @@ pub struct Live {
     /// `/health` 的普查要用它的 `model_id()` 做比对。`SharedEmbedder` 是
     /// `Arc`，多一个句柄不多一份模型。
     embedder: SharedEmbedder,
+    /// 同时最多几路抽取。见 [`Self::extract_gate`] 的文档。
+    extract_gate: Arc<tokio::sync::Semaphore>,
 }
 
 /// 一次转录的结局。
@@ -238,6 +303,12 @@ impl Live {
             );
         }
 
+        let extract_permits = extract_concurrency()?;
+        tracing::info!(
+            concurrent = extract_permits,
+            "抽取并发上限（{EXTRACT_CONCURRENCY_ENV} 可调）"
+        );
+
         Ok(Self {
             retriever: Retriever::new(embedder.clone()).with_legacy(legacy),
             extractor: Arc::new(Extractor::new(
@@ -253,7 +324,33 @@ impl Live {
             llm,
             device_id: config.device_id.clone(),
             context_window,
+            extract_gate: Arc::new(tokio::sync::Semaphore::new(extract_permits)),
         })
+    }
+
+    /// 排队等一张抽取许可。
+    ///
+    /// # 为什么必须有这个闸门
+    ///
+    /// 两处抽取都是**裸 `tokio::spawn`**：一次 `/episodes` 一个任务，
+    /// 一次对话一个任务，谁都不看别人。正常聊天下这没问题（人打字的速度
+    /// 就是天然的限流），但只要有一个客户端连续快速写入 —— 历史导入是
+    /// 最典型的那个 —— 瞬间就是几千个并发任务，每个都要调一次 LLM。
+    ///
+    /// 生产那台机器是 2 核 3.5 GB，上面已经跑着十几个容器。几千路并发
+    /// 抽取不是「慢一点」，是把整台机器连同别的服务一起拖死。
+    ///
+    /// # 为什么在 spawn **之后**才等许可
+    ///
+    /// 等在 spawn 之前的话，`/episodes` 与对话的响应会被抽取排队卡住 ——
+    /// 而抽取的全部设计前提就是「绝不阻塞调用方，它是给下一轮准备的」。
+    /// 现在排队的是那些后台任务自己，调用方照样立刻拿到响应。
+    ///
+    /// 代价说清楚：**这不是背压**。写得太快时队列会一直长，只是长在
+    /// 内存里的 parked task 上。真正的节流得由客户端自己做
+    /// （导入器就是这么做的），这个闸门保的是 CPU 与供应商配额。
+    async fn under_extract_gate<F: Future>(&self, fut: F) -> F::Output {
+        under_gate(&self.extract_gate, fut).await
     }
 
     /// 给一个绑定了工作区的会话现建一个 [`Turn`]：沙箱根是该目录，
@@ -474,30 +571,36 @@ impl Live {
         };
         let store = self.store.clone();
         let extractor = Arc::clone(&self.extractor);
+        let gate = Arc::clone(&self.extract_gate);
         tokio::spawn(async move {
-            let user_text = match store.episode(&anchor).await {
-                Ok(Some(ep)) => ep.text.unwrap_or_default(),
-                Ok(None) => {
-                    tracing::warn!(anchor, "抽取找不到对应的 user episode，跳过");
-                    return;
+            // 排队。**在 spawn 之后才等** —— 调用方早就拿到响应了，
+            // 排的是这个后台任务自己。见 `Live::under_extract_gate`
+            under_gate(&gate, async move {
+                let user_text = match store.episode(&anchor).await {
+                    Ok(Some(ep)) => ep.text.unwrap_or_default(),
+                    Ok(None) => {
+                        tracing::warn!(anchor, "抽取找不到对应的 user episode，跳过");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, anchor, "抽取读 user episode 失败，跳过");
+                        return;
+                    }
+                };
+                let text = format!("用户：{user_text}\n助手：{reply}");
+                let ctx = ExtractContext::new(anchor_id, occurred_at);
+                match extractor.ingest(&store, &text, &ctx).await {
+                    Ok(report) => tracing::info!(
+                        candidates = report.candidates,
+                        written = report.written.len(),
+                        superseded = report.superseded.len(),
+                        duplicates = report.duplicates,
+                        "本轮抽取完成（本地 agent）"
+                    ),
+                    Err(e) => tracing::warn!(error = %e, "本轮抽取失败（本地 agent）"),
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, anchor, "抽取读 user episode 失败，跳过");
-                    return;
-                }
-            };
-            let text = format!("用户：{user_text}\n助手：{reply}");
-            let ctx = ExtractContext::new(anchor_id, occurred_at);
-            match extractor.ingest(&store, &text, &ctx).await {
-                Ok(report) => tracing::info!(
-                    candidates = report.candidates,
-                    written = report.written.len(),
-                    superseded = report.superseded.len(),
-                    duplicates = report.duplicates,
-                    "本轮抽取完成（本地 agent）"
-                ),
-                Err(e) => tracing::warn!(error = %e, "本轮抽取失败（本地 agent）"),
-            }
+            })
+            .await;
         });
     }
 
@@ -1524,18 +1627,24 @@ async fn run_turn(
     {
         let text = format!("用户：{}\n助手：{}", req.message, reply);
         tokio::spawn(async move {
-            let ctx = ExtractContext::new(user_episode_id, now);
-            match live.extractor.ingest(&live.store, &text, &ctx).await {
-                Ok(report) => tracing::info!(
-                    candidates = report.candidates,
-                    written = report.written.len(),
-                    superseded = report.superseded.len(),
-                    duplicates = report.duplicates,
-                    "本轮抽取完成"
-                ),
-                // 抽取失败不该影响已经完成的对话，记日志即可
-                Err(e) => tracing::warn!(error = %e, "本轮抽取失败"),
-            }
+            // 与 `spawn_extraction` 共用同一个闸门 —— 两条路加起来才是这台
+            // 机器的真实负载，各限各的等于没限
+            let live = &live;
+            live.under_extract_gate(async {
+                let ctx = ExtractContext::new(user_episode_id, now);
+                match live.extractor.ingest(&live.store, &text, &ctx).await {
+                    Ok(report) => tracing::info!(
+                        candidates = report.candidates,
+                        written = report.written.len(),
+                        superseded = report.superseded.len(),
+                        duplicates = report.duplicates,
+                        "本轮抽取完成"
+                    ),
+                    // 抽取失败不该影响已经完成的对话，记日志即可
+                    Err(e) => tracing::warn!(error = %e, "本轮抽取失败"),
+                }
+            })
+            .await;
         });
     }
 
@@ -2043,5 +2152,80 @@ mod tests {
         // 参数来自模型，什么形状都可能出现，不能 panic
         assert_eq!(compact_args(&serde_json::Value::Null), "");
         assert_eq!(compact_args(&serde_json::json!([1, 2])), "");
+    }
+}
+
+#[cfg(test)]
+mod extract_gate_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 取值非法就报错，不悄悄用默认值。
+    #[test]
+    fn a_bad_concurrency_setting_is_an_error_not_a_fallback() {
+        assert_eq!(
+            parse_extract_concurrency(None).unwrap(),
+            DEFAULT_EXTRACT_CONCURRENCY
+        );
+        assert_eq!(parse_extract_concurrency(Some("8")).unwrap(), 8);
+        assert_eq!(parse_extract_concurrency(Some(" 8 ")).unwrap(), 8);
+
+        for bad in ["0", "abc", "-1", "3.5"] {
+            let err = parse_extract_concurrency(Some(bad))
+                .expect_err("非法取值必须报错，回落到默认值等于上限失效而运维不知情");
+            assert!(
+                err.to_string().contains(EXTRACT_CONCURRENCY_ENV),
+                "报错要点名是哪个变量，实际：{err}"
+            );
+        }
+    }
+
+    /// **闸门真的把并发压住了。**
+    ///
+    /// 这条测的不是信号量本身（那是 tokio 的事），而是 [`under_gate`]
+    /// 有没有把许可**持有到 future 结束**。写成 `let _ = acquire().await`
+    /// 的话许可当场就被丢掉，闸门变成一句昂贵的空操作 —— 而那种改动
+    /// 不会让任何别的测试变红，因为功能上一切正常，只是没有上限了。
+    ///
+    /// 失败的样子很具体：批量导入时几千路抽取一起打出去，把 2 核 3.5G 的
+    /// 生产节点连同上面别的服务一起拖死。
+    #[tokio::test]
+    async fn the_gate_actually_caps_concurrency() {
+        const PERMITS: usize = 3;
+        const TASKS: usize = 40;
+
+        let gate = Arc::new(tokio::sync::Semaphore::new(PERMITS));
+        let now = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::with_capacity(TASKS);
+        for _ in 0..TASKS {
+            let (gate, now, peak) = (Arc::clone(&gate), Arc::clone(&now), Arc::clone(&peak));
+            handles.push(tokio::spawn(async move {
+                under_gate(&gate, async {
+                    let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(n, Ordering::SeqCst);
+                    // 让出执行权，给别的任务挤进来的机会 —— 不 await 的话
+                    // 每个任务都会一口气跑完，峰值恒为 1，测试就没有意义了
+                    tokio::task::yield_now().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    now.fetch_sub(1, Ordering::SeqCst);
+                })
+                .await;
+            }));
+        }
+        for h in handles {
+            h.await.expect("任务不该 panic");
+        }
+
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(
+            peak <= PERMITS,
+            "同时有 {peak} 路在跑，而上限是 {PERMITS} —— 许可没被持有到结束"
+        );
+        assert!(
+            peak > 1,
+            "峰值只有 {peak}，说明这些任务根本没重叠过，这条测试测了个寂寞"
+        );
     }
 }

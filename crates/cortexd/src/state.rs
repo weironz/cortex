@@ -896,6 +896,7 @@ fn mock_chat_stream(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod backend_choice_tests {
     use super::BackendChoice;
 
