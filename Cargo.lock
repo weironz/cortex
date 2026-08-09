@@ -1088,14 +1088,17 @@ name = "cortex-cli"
 version = "0.1.3"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "cortex-core",
+ "cortex-proto",
  "dotenvy",
  "futures",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

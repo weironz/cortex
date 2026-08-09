@@ -13,6 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 cortex-core.workspace = true
+# 导入器要用的两个线上类型（NewEpisodeRequest / EpisodeAck）。
+#
+# **只用它提供的新类型，不改动 client.rs 里那份 DTO 副本。** 全量切过去
+# （任务 #38）要先给 cortex-proto 里一堆 Serialize-only 的类型加
+# Deserialize、并把 `&'static str` 字段改掉 —— 那是独立的一件事。
+# 这里的底线只有一条：**不再往那份副本里加新的**。
+cortex-proto.workspace = true
 
 tokio.workspace = true
 futures.workspace = true
@@ -20,5 +27,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
+tracing.workspace = true
 clap.workspace = true
 dotenvy.workspace = true

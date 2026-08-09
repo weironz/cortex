@@ -258,6 +258,40 @@ impl Client {
         self.checked(r).await.map(|_| ())
     }
 
+    /// 写一条 episode（导入用）。
+    ///
+    /// 类型直接用 `cortex_proto` 的，不在 client.rs 里再抄一份 ——
+    /// 这个文件里那十几个 DTO 副本已经是任务 #38 要还的债，不该再加。
+    ///
+    /// **幂等**：服务端按 id 判重，重复投递返回 `already_existed: true`
+    /// 而不是错误。导入的断点续传全靠这一条。
+    pub async fn write_episode(
+        &self,
+        req: &cortex_proto::episodes::NewEpisodeRequest,
+    ) -> Result<cortex_proto::episodes::EpisodeAck> {
+        let r = self
+            .post("/episodes")
+            .json(req)
+            .send()
+            .await
+            .map_err(Self::map_err)?;
+        self.checked(r).await?.json().await.map_err(Self::map_err)
+    }
+
+    /// 给会话改名。导入用它把「ChatGPT · 原标题」写上去。
+    pub async fn rename_session(&self, id: &str, title: &str) -> Result<()> {
+        let r = self
+            .auth(
+                self.http
+                    .patch(format!("{}/sessions/{id}", self.base))
+                    .json(&serde_json::json!({ "title": title })),
+            )
+            .send()
+            .await
+            .map_err(Self::map_err)?;
+        self.checked(r).await.map(|_| ())
+    }
+
     /// 还等着答复的确认项。断线重连之后靠它把待办捡回来。
     pub async fn pending_confirmations(&self) -> Result<Vec<PendingConfirmation>> {
         let r = self

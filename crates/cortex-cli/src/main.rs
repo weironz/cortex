@@ -4,10 +4,12 @@
 //! 与 Flutter 走同一套 HTTP/SSE 协议，不走私有捷径。
 
 mod client;
+mod import;
 mod render;
 
 use std::io::{IsTerminal as _, Write as _};
 
+use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use client::{ChatEvent, ChatRequest, Client};
 use cortex_core::Id;
@@ -87,6 +89,45 @@ enum Command {
 
     /// 查看某条原始对话（记忆的出处）
     Episode { id: String },
+
+    /// 把 ChatGPT / Claude 的导出历史灌进记忆库
+    ///
+    /// 导出方式：ChatGPT 在「设置 → 数据控制 → 导出数据」，
+    /// Claude 在「设置 → 隐私 → 导出数据」。两家都是邮件发下载链接，
+    /// 压缩包里的 conversations.json 就是这里要的文件。
+    ///
+    /// **默认只算账不动手。** 确认数字之后加 --confirm 才真跑。
+    Import {
+        /// 导出包里的 conversations.json
+        file: std::path::PathBuf,
+
+        /// 真的写入。不加就只打印账单然后退出
+        ///
+        /// 单独一个开关而不是 --dry-run 的反面：默认必须是安全的那一侧。
+        /// 每一对消息触发一次 LLM 调用，而记忆是 append-only ——
+        /// 灌错了要走 redact 才能撤，那是个显式、需要二次确认的操作
+        #[arg(long)]
+        confirm: bool,
+
+        /// 平台。默认按文件内容自动判断
+        #[arg(long, value_parser = ["chatgpt", "claude"])]
+        platform: Option<String>,
+
+        /// 只导入这个日期之后有消息的对话，例：--since 2025-01-01
+        #[arg(long)]
+        since: Option<String>,
+
+        /// 最多导入几段对话（**从最近的开始**）。先拿三五段试水
+        #[arg(long)]
+        max_conversations: Option<usize>,
+
+        /// 每百万 token 的单价，用来估费用。
+        ///
+        /// 不内置价格表：各家在变，而抽取走的是**服务端配的**廉价模型，
+        /// 客户端根本不知道那是哪个。硬编一个只会给出看起来精确的错数字
+        #[arg(long)]
+        price_per_1m: Option<f64>,
+    },
 }
 
 #[tokio::main]
@@ -161,6 +202,49 @@ async fn main() -> anyhow::Result<()> {
                     render::dim(&s.updated_at, color)
                 );
             }
+        }
+
+        Command::Import {
+            file,
+            confirm,
+            platform,
+            since,
+            max_conversations,
+            price_per_1m,
+        } => {
+            let platform = match platform.as_deref() {
+                Some("chatgpt") => Some(import::Platform::ChatGpt),
+                Some("claude") => Some(import::Platform::Claude),
+                // clap 的 value_parser 已经挡住了别的取值
+                _ => None,
+            };
+            let since = since
+                .as_deref()
+                .map(parse_since)
+                .transpose()
+                .context("--since 解析失败")?;
+
+            let plan = import::run::load(&file, platform, since, max_conversations)?;
+            import::run::report(&plan, price_per_1m);
+
+            if !confirm {
+                println!();
+                println!(
+                    "{}",
+                    render::dim(
+                        "以上只是估算，什么都还没写。确认没问题就加 --confirm 再跑一次",
+                        color
+                    )
+                );
+                return Ok(());
+            }
+
+            println!();
+            println!("开始导入。中断了直接重跑同一条命令 —— 已经写进去的不会重复。");
+            import::run::execute(&c, &plan).await?;
+            println!();
+            println!("原文已经全部落库。**事实抽取在服务端异步进行**，");
+            println!("要过一阵才陆续出现在 `cortex search` 里 —— 那一步才是记忆真正建立的时刻。");
         }
 
         Command::Episode { id } => {
@@ -384,4 +468,19 @@ async fn interactive(
         println!();
     }
     Ok(())
+}
+
+/// `--since` 接受纯日期或完整 RFC 3339。
+///
+/// 纯日期是绝大多数人会打的（`--since 2025-01-01`），而只支持完整格式
+/// 会让第一次用的人吃一个毫无必要的报错。
+fn parse_since(s: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeZone as _;
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(t.with_timezone(&chrono::Utc));
+    }
+    let d: chrono::NaiveDate = s
+        .parse()
+        .map_err(|_| anyhow::anyhow!("看不懂 {s:?}，要 2025-01-01 或完整的 RFC 3339"))?;
+    Ok(chrono::Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0).expect("00:00:00 一定合法")))
 }
