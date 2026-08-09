@@ -19,6 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 jieba-rs.workspace = true
+regex.workspace = true
 chrono.workspace = true
 reqwest.workspace = true
 # 进程内 ONNX 推理。**默认不编** —— 见下面 [features] 那段注释

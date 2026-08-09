@@ -31,6 +31,7 @@ pub mod embed_api;
 pub mod embed_local;
 pub mod extract;
 pub mod fusion;
+pub mod redaction;
 pub mod retrieval;
 pub mod tokenize;
 pub mod trace;

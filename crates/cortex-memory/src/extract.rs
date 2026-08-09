@@ -840,6 +840,26 @@ impl Extractor {
             return Ok(Vec::new());
         }
 
+        // ── 写入侧负过滤。**必须在这一行，不能更靠后** ──
+        //
+        // 下面紧接着就是一次 LLM 调用：过滤挪到 `write_candidates` 或者
+        // 交给 prompt 里那句「凭据不抽」，原文都已经完整过了一遍网络。
+        // 这正是 Mem0 的反面教训（memory-content.md §七 原则二）。
+        //
+        // 阻断的只是**派生层**：episode 早就落盘了，这里放弃的是本轮的
+        // 事实抽取、它的 embedding、以及它进检索索引。L0 不能有洞 ——
+        // 而密钥最常出现的地方恰恰就是对话正文。
+        //
+        // 日志只记规则名。记上下文等于把密钥从对话正文搬进容器日志
+        if let Some(rule) = crate::redaction::scan(episode_text) {
+            tracing::warn!(
+                episode = %ctx.episode_id,
+                rule = rule.name(),
+                "本轮含凭据，跳过抽取（原文照常保留在 episodes）"
+            );
+            return Ok(Vec::new());
+        }
+
         let messages = [Message::user().with_text(build_user_prompt(episode_text, ctx))];
         let (reply, usage) = self
             .llm
