@@ -62,7 +62,7 @@ for s in $ICO_SIZES; do
     ico_layers+=("$tmp/ico-$s.png")
 done
 magick "${ico_layers[@]}" app/windows/runner/resources/app_icon.ico
-echo "✓ app/windows/runner/resources/app_icon.ico（$ICO_SIZES）"
+echo "✓ app/windows/runner/resources/app_icon.ico（${ICO_SIZES}）"
 
 # ── Web 标签页 ────────────────────────────────────────────
 #
@@ -80,7 +80,7 @@ for s in $FAVICON_SIZES; do
 done
 magick "${fav_layers[@]}" app/web/favicon.ico
 render "$MARK" 32 app/web/favicon.png
-echo "✓ app/web/favicon.ico（$FAVICON_SIZES）+ favicon.png（32）"
+echo "✓ app/web/favicon.ico（${FAVICON_SIZES}）+ favicon.png（32）"
 
 # ── PWA / 安装图标 ────────────────────────────────────────
 for s in 192 512; do
