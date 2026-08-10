@@ -176,6 +176,25 @@ impl Remote {
         ))
     }
 
+    /// 给会话改名。导入用它给每段对话挂上「Claude · 原标题」。
+    ///
+    /// 只发 `title` 一个字段：这条路径**不碰 workspace** ——
+    /// 那是设备本地状态，走 `PUT /local/workspaces/{id}`（见
+    /// [`crate::local_workspace`]）。
+    pub async fn rename_session(&self, session_id: &str, title: &str) -> Result<()> {
+        let resp = self
+            .auth(
+                self.http
+                    .patch(self.url(&format!("/sessions/{session_id}"))),
+            )
+            .timeout(REQUEST_TIMEOUT)
+            .json(&serde_json::json!({ "title": title }))
+            .send()
+            .await
+            .map_err(map_transport)?;
+        checked(resp).await.map(|_| ())
+    }
+
     /// 取这个会话最近的若干轮，用来铺当前这一轮的上下文。
     ///
     /// # 为什么本地 agent 也要问远端

@@ -25,6 +25,7 @@ use cortex_proto::dto::{
 use futures::stream::Stream;
 use tokio_stream::StreamExt as _;
 
+use crate::local_import;
 use crate::local_workspace;
 use crate::proxy;
 use crate::state::LocalState;
@@ -52,6 +53,10 @@ pub fn router(state: LocalState) -> Router {
         // 绑定的**权威在这台机器**，所以给它一条自己的路，完全不碰网络。
         // 走 PATCH /sessions 的老路子有两个实测到的坏处，见 local_workspace
         .route("/local/workspaces/{session_id}", put(local_workspace::bind))
+        // 导入的文件在**这台机器**上，97MB 的字节一次都不该过网络。
+        // preview 只读、run 是 SSE，见 crate::local_import
+        .route("/local/import/preview", post(local_import::preview))
+        .route("/local/import/run", post(local_import::run))
         // WebSocket 升级走不了普通反代（那条路把 `upgrade` 头当逐跳首部剥了）。
         // 见 [`crate::ws_proxy`]
         .route("/ws", get(ws_proxy::handler))

@@ -34,6 +34,7 @@ use crate::{Conversation, Platform, requests_for};
 pub const PACE: Duration = Duration::from_millis(150);
 
 /// 一次导入要做什么。
+#[derive(Debug)]
 pub struct Plan {
     pub platform: Platform,
     pub conversations: Vec<Conversation>,
@@ -58,6 +59,25 @@ pub struct Estimate {
 }
 
 impl Estimate {
+    /// 转成下发给客户端的形状。
+    ///
+    /// 转换写在这一侧而不是 `cortex-proto` 里：那个 crate 是**纯契约**，
+    /// 不依赖任何实现。反过来让它 `use cortex_import` 会把依赖方向倒过来。
+    #[must_use]
+    pub fn to_wire(&self, platform: Platform) -> cortex_proto::import::ImportEstimate {
+        cortex_proto::import::ImportEstimate {
+            platform: platform.label().to_string(),
+            conversations: self.conversations,
+            messages: self.messages,
+            pairs: self.pairs,
+            tokens: self.tokens,
+            earliest: self.earliest.map(|t| t.to_rfc3339()),
+            latest: self.latest.map(|t| t.to_rfc3339()),
+            unpaired: self.unpaired,
+            minutes: self.minutes(),
+        }
+    }
+
     /// 按当前限速，至少要跑多少分钟。
     #[must_use]
     pub fn minutes(&self) -> f64 {

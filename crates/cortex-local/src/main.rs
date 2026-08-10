@@ -20,6 +20,7 @@
 
 mod config;
 mod llm;
+mod local_import;
 mod local_workspace;
 mod outbox;
 mod provider;
