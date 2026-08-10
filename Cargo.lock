@@ -1269,6 +1269,7 @@ dependencies = [
  "cortex-agent",
  "cortex-blob",
  "cortex-core",
+ "cortex-import",
  "cortex-llm",
  "cortex-memory",
  "cortex-proto",

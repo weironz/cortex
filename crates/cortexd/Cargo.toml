@@ -15,6 +15,8 @@ cortex-llm.workspace = true
 cortex-store.workspace = true
 cortex-agent.workspace = true
 cortex-proto.workspace = true
+# 导入的解析器三处共用，见 cortex-import 的 crate 文档
+cortex-import.workspace = true
 
 cortex-blob.workspace = true
 

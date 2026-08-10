@@ -97,6 +97,14 @@ protected_routes! {
     // （随手一张手机照片就超了）。放宽到 DIRECT_UPLOAD_LIMIT，
     // 再大的请走 /blobs/presign 直传对象存储，不经服务端中转
     "/blobs" [POST] => post(upload_blob).layer(DefaultBodyLimit::max(DIRECT_UPLOAD_LIMIT)),
+    // Web 端的导入：浏览器读不到磁盘，只能先把 conversations.json 传上来。
+    // 桌面端不走这条（文件在本机，本地 agent 直接读）。
+    // 体积上限由 crate::import 自己按流式计数管，所以这里把 axum 的
+    // 默认闸门整个撤掉 —— 留着它只会在读到一半时把连接掐了，
+    // 而那时暂存文件已经写了一半
+    "/import/upload" [POST] => post(crate::import::upload).layer(DefaultBodyLimit::disable()),
+    "/import/preview" [POST] => post(crate::import::preview),
+    "/import/run" [POST] => post(crate::import::run),
     "/blobs/presign" [POST] => post(presign_blob),
     "/blobs/commit" [POST] => post(commit_blob),
     "/blobs/{hash}" [GET] => get(get_blob),
@@ -489,6 +497,7 @@ async fn sync(
 
 // ──────────────────────────── 错误 ─────────────────────────────
 
+#[derive(Debug)]
 pub struct ApiError {
     inner: cortex_core::CortexError,
     /// 覆盖 [`cortex_core::CortexError::http_status`] 的默认映射。
@@ -500,6 +509,23 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// 400：客户端送来的东西不对。
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        cortex_core::CortexError::Invalid(message.into()).into()
+    }
+
+    /// 500：我们这边出了问题。
+    pub fn internal(message: impl Into<String>) -> Self {
+        cortex_core::CortexError::Store(message.into()).into()
+    }
+
+    /// 给人看的那句话。SSE 那条路要把它塞进事件里 ——
+    /// 那里没有 HTTP 状态码可用，只有一个 `error` 事件。
+    #[must_use]
+    pub fn message(&self) -> String {
+        self.inner.to_string()
+    }
+
     /// 501：请求本身没错，是这个部署形态提供不了这个能力。
     fn unsupported(message: impl Into<String>) -> Self {
         Self {
