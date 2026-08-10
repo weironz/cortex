@@ -117,6 +117,15 @@ impl SchemaName {
         Self::new(&format!("u_{}", user_id.to_ascii_lowercase()))
     }
 
+    /// 1 号用户 / 单用户部署的 schema。
+    ///
+    /// 是个常量而不是 `new("public").unwrap()`：后者在每个调用点都留下一个
+    /// 「这里可能 panic」的印象，而它其实永远不会。
+    #[must_use]
+    pub fn public() -> Self {
+        Self("public".to_owned())
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -149,8 +158,10 @@ impl SchemaName {
     /// 观察到「别人正在写」，而且规模一上来就是全员风暴。
     #[must_use]
     pub fn notify_channel(&self) -> String {
-        // 通道名同样进不了绑定参数，靠的是这个类型已经被白名单校验过
-        format!("cortex_sync_{}", self.0)
+        // 通道名同样进不了绑定参数，靠的是这个类型已经被白名单校验过。
+        // 前缀取自 sync 模块，那边是监听方 —— 两处各写一个字面量的话，
+        // 改了一处就是「触发器往 A 发、监听器听 B」，而那不报错，只是不刷新
+        format!("{}_{}", crate::sync::NOTIFY_CHANNEL_PREFIX, self.0)
     }
 }
 
@@ -239,7 +250,30 @@ impl TenantPools {
             .max_connections(PER_TENANT_CONNECTIONS)
             .connect_with(options)
             .await?;
-        Ok(Store::from_pool(pool))
+        Ok(Store::from_pool_in(pool, schema.clone()))
+    }
+
+    /// 建出这片 schema（幂等）。
+    ///
+    /// 用 admin 连接而不是租户池：租户池的 `search_path` 指向一个还不存在的
+    /// schema，而 Postgres 对此是**静默跳过**的 —— 那条连接会落到 `public`，
+    /// 于是「建 schema」这个动作本身看起来成了，实际什么都没发生在正确的地方。
+    ///
+    /// # Errors
+    /// 连不上，或者没有建 schema 的权限。
+    pub async fn create_schema(&self, schema: &SchemaName) -> Result<()> {
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&self.database_url)
+            .await?;
+        // AssertSqlSafe 背得起：`SchemaName` 的构造函数是白名单校验过的。
+        // 双引号是必需的 —— 不带引号的标识符会被折成小写，而我们铸的名字
+        // 本来就是小写，加引号只是让「建的」与「search_path 找的」逐字一致
+        let sql = format!(r#"CREATE SCHEMA IF NOT EXISTS "{}""#, schema.as_str());
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql)).execute(&admin).await;
+        admin.close().await;
+        result?;
+        Ok(())
     }
 
     /// 现在驻留着几个池。给 `/health` 与测试用。

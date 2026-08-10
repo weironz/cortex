@@ -36,7 +36,11 @@ use crate::model::{
 ///
 /// 取值 4272 无特殊含义，只需全库唯一且不与他人冲突；
 /// 与 `migrations/20260807000001_init.sql` 头部注释保持一致。
-pub const SYNC_ADVISORY_LOCK_KEY: i64 = 4272;
+///
+/// 多租户之后它是**两参数形式的 classid**，第二个参数由租户 schema 派生
+/// （见 `SchemaName::lock_key`）。类型因此是 `i32` 而不是 `i64`：
+/// `pg_advisory_xact_lock` 的双参数重载收两个 int4。
+pub const SYNC_ADVISORY_LOCK_KEY: i32 = 4272;
 
 mod guarded {
     use sqlx::{PgPool, Postgres, Transaction, postgres::PgArguments, query::Query};
@@ -54,10 +58,20 @@ mod guarded {
         ///
         /// 锁必须是事务里的第一条语句：它要早于任何 `nextval`，
         /// 才能让「取号顺序 == 提交顺序」成立。
-        pub(super) async fn begin(pool: &PgPool) -> Result<Self> {
+        pub(super) async fn begin(pool: &PgPool, tenant_key: i32) -> Result<Self> {
             let mut tx = pool.begin().await?;
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            // **两参数形式**，第二个由租户 schema 派生。
+            //
+            // 原来是单参数的全局键，那把**所有租户**的写事务串行化了 ——
+            // 一个人导入三年历史，别人一句话都写不进去。而这把锁保证的是
+            // 「`sync_log.seq` 的顺序 == 对读端可见的顺序」，
+            // 那件事本来就是每 schema 各论各的。
+            //
+            // classid 仍是 SYNC_ADVISORY_LOCK_KEY，好让 `pg_locks` 里
+            // 一眼认得出这是同步取号锁而不是别的什么
+            sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
                 .bind(SYNC_ADVISORY_LOCK_KEY)
+                .bind(tenant_key)
                 .execute(&mut *tx)
                 .await?;
             Ok(Self { tx })
@@ -136,9 +150,9 @@ pub struct WriteTxn {
 }
 
 impl WriteTxn {
-    pub(crate) async fn begin(pool: &PgPool) -> Result<Self> {
+    pub(crate) async fn begin(pool: &PgPool, tenant_key: i32) -> Result<Self> {
         Ok(Self {
-            inner: guarded::Guarded::begin(pool).await?,
+            inner: guarded::Guarded::begin(pool, tenant_key).await?,
         })
     }
 

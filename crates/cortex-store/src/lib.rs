@@ -47,6 +47,7 @@
 //! # }
 //! ```
 
+mod bootstrap;
 mod error;
 mod model;
 mod query;
@@ -56,6 +57,7 @@ mod sync;
 mod tenant;
 mod txn;
 
+pub use bootstrap::{TenantMigration, migrate_all, provision};
 pub use error::{Result, StoreError};
 pub use model::{
     ATTACHMENT_FILENAME_MAX_CHARS, Actor, Blob, BlobTranscript, CanonicalEntity, Derivation,

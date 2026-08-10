@@ -328,14 +328,20 @@ impl Store {
 // migration 是 schema 的权威版本、只增不改；这段 DDL 是**运行时组件**的一部分：
 // 幂等、可重复执行、换实现时不需要写反向 migration。
 
-/// NOTIFY 通道名。
+/// 通道名的**前缀**。真正的通道名是 `cortex_sync_<schema>`，
+/// 由 [`crate::SchemaName::notify_channel`] 拼出来。
 ///
 /// 改这里等于改服务端内部约定，客户端不需要知道它（客户端只连 `/ws`）。
 ///
-/// 注意通道名的作用域是**数据库**而非 schema：同一个 database 里跑多套
-/// Cortex（集成测试用临时 schema 就是这个形态）会互相收到对方的通知。
-/// 这无害 —— 信号只说「去拉一次」，游标是各自的，多拉一次即收敛。
-const NOTIFY_CHANNEL: &str = "cortex_sync";
+/// # 为什么必须带上 schema
+///
+/// 通道名的作用域是**数据库**而非 schema。单用户时这只是「同一个库里跑
+/// 两套 Cortex 会互相收到通知」，无害 —— 信号只说「去拉一次」，游标各自独立。
+///
+/// 多租户之后同一件事变成两个问题：一是**任何人写入都会唤醒所有人**，
+/// 一百个用户就是一百倍的空拉；二是每个用户都能观察到「别人正在写」，
+/// 那是个不该有的旁路信道。
+pub(crate) const NOTIFY_CHANNEL_PREFIX: &str = "cortex_sync";
 
 /// 安装触发器时用的 advisory lock key。
 ///
@@ -349,19 +355,28 @@ const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
 /// 通知函数的 DDL。
 ///
-/// 通道名在这里是字面量而不是拼进来的：sqlx 0.9 只接受 `&'static str`
-/// （防注入），且 DDL 拼字符串本身就是坏习惯。与 [`NOTIFY_CHANNEL`] 的一致性
-/// 由 `ddl_and_channel_name_agree` 这个测试守着。
-const CREATE_FUNCTION_SQL: &str = "\
-CREATE OR REPLACE FUNCTION cortex_notify_sync() RETURNS trigger
+/// 通道名现在要拼进来（每租户一个），所以它从常量变成了函数。
+///
+/// **拼字符串进 DDL 本来是坏习惯**，这里立得住的唯一理由是：`channel`
+/// 来自 [`crate::SchemaName::notify_channel`]，而那个类型的构造函数是
+/// 白名单校验过的（只可能是 `public` 或 `u_` + 26 位小写 ULID）。
+/// 安全性来自**类型**，不是来自这一行。
+///
+/// 函数本身也建在租户 schema 里（靠连接的 `search_path`），
+/// 所以不同租户的 `cortex_notify_sync()` 互不覆盖。
+fn create_function_sql(channel: &str) -> String {
+    format!(
+        "CREATE OR REPLACE FUNCTION cortex_notify_sync() RETURNS trigger
 LANGUAGE plpgsql AS $fn$
 BEGIN
     -- 载荷只带 seq。NOTIFY 载荷上限 8000 字节，塞业务行迟早会炸；
     -- 更要紧的是客户端本来就该按自己的游标去 /sync 拉
-    PERFORM pg_notify('cortex_sync', NEW.seq::text);
+    PERFORM pg_notify('{channel}', NEW.seq::text);
     RETURN NULL;
 END;
-$fn$";
+$fn$"
+    )
+}
 
 /// 触发器的 DDL。
 ///
@@ -439,11 +454,12 @@ impl SyncNotifications {
             }
 
             if self.listener.is_none() {
-                match subscribe(self.store.pool()).await {
+                let channel = self.store.schema().notify_channel();
+                match subscribe(self.store.pool(), &channel).await {
                     Ok(listener) => {
                         self.backoff = RECONNECT_MIN;
                         self.listener = Some(listener);
-                        tracing::info!(channel = NOTIFY_CHANNEL, "已订阅 Postgres 通知通道");
+                        tracing::info!(channel = %channel, "已订阅 Postgres 通知通道");
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -529,7 +545,7 @@ impl SyncNotifications {
 /// 复用 `connect_options` 意味着 TLS、`search_path` 等一切选项自动跟上。
 /// 拿连接串重拼是「监听连的库/schema 与写入的不是同一个」这类问题的来源，
 /// 而它的症状是「一切正常，就是不推送」。
-async fn subscribe(pool: &PgPool) -> Result<PgListener> {
+async fn subscribe(pool: &PgPool, channel: &str) -> Result<PgListener> {
     let options = pool.connect_options().as_ref().clone();
     let dedicated = PgPoolOptions::new()
         .max_connections(1)
@@ -543,7 +559,7 @@ async fn subscribe(pool: &PgPool) -> Result<PgListener> {
     let mut listener = PgListener::connect_with(&dedicated).await?;
     // 这个池子是监听专用的，除了它自己没人持有，也就没人会去 close 它
     listener.ignore_pool_close_event(true);
-    listener.listen(NOTIFY_CHANNEL).await?;
+    listener.listen(channel).await?;
     Ok(listener)
 }
 
@@ -563,11 +579,16 @@ impl Store {
             .execute(&mut *tx)
             .await?;
 
-        sqlx::query(CREATE_FUNCTION_SQL).execute(&mut *tx).await?;
+        let channel = self.schema().notify_channel();
+        // AssertSqlSafe 背得起：`channel` 由 `SchemaName::notify_channel`
+        // 拼出，而那个类型的构造函数是白名单校验过的。安全性来自类型
+        sqlx::query(sqlx::AssertSqlSafe(create_function_sql(&channel)))
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(CREATE_TRIGGER_SQL).execute(&mut *tx).await?;
 
         tx.commit().await?;
-        tracing::info!(channel = NOTIFY_CHANNEL, "sync_log 通知触发器就绪");
+        tracing::info!(channel = %channel, "sync_log 通知触发器就绪");
         Ok(())
     }
 
@@ -598,8 +619,8 @@ mod tests {
         // 通道名在 DDL 里是字面量、在 Rust 里是常量，两处必须一致，
         // 否则触发器往一个没人听的通道发消息 —— 症状是「静默不推送」
         assert!(
-            CREATE_FUNCTION_SQL.contains(&format!("'{NOTIFY_CHANNEL}'")),
-            "DDL 里的通道名与 NOTIFY_CHANNEL 常量对不上"
+            create_function_sql("cortex_sync_public").contains("'cortex_sync_public'"),
+            "DDL 里没有拼进通道名 —— 触发器会往一个没人监听的通道上发"
         );
     }
 
@@ -607,7 +628,7 @@ mod tests {
     fn ddl_lock_key_differs_from_the_sync_write_lock() {
         assert_ne!(
             DDL_LOCK_KEY,
-            crate::SYNC_ADVISORY_LOCK_KEY,
+            i64::from(crate::SYNC_ADVISORY_LOCK_KEY),
             "复用写事务那把锁会让建 DDL 与同步取号互相阻塞"
         );
     }

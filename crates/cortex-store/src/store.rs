@@ -31,6 +31,13 @@ const DEFAULT_MAX_CONNECTIONS: u32 = 16;
 #[derive(Clone, Debug)]
 pub struct Store {
     pool: PgPool,
+    /// 这个池连到哪个租户的 schema。
+    ///
+    /// 带着它是为了两样**原来是全局单例**的东西：写事务的 advisory lock 键，
+    /// 与 sync 的 NOTIFY 通道名。放在 `Store` 上而不是每次传参 ——
+    /// 传参意味着每个调用点都可能传错，而传错的后果是「两个租户共用一把锁」
+    /// 或者「订阅了别人的通道」。
+    schema: crate::tenant::SchemaName,
 }
 
 impl Store {
@@ -45,18 +52,40 @@ impl Store {
 
     /// 按自定义池参数连接。
     pub async fn connect_with(options: PgPoolOptions, database_url: &str) -> Result<Self> {
-        Ok(Self {
-            pool: options.connect(database_url).await?,
-        })
+        Ok(Self::from_pool(options.connect(database_url).await?))
     }
 
     /// 接管一个已建好的连接池。测试用独立 schema 时走这条路。
+    ///
+    /// schema 按 `public` 算 —— 单用户部署与测试 harness 都落在那儿。
+    /// 多租户走 [`Self::from_pool_in`]。
     #[must_use]
     pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            schema: crate::tenant::SchemaName::public(),
+        }
     }
 
-    /// 应用全部未执行的 migration。
+    /// 接管一个**已经把 `search_path` 焊好**的池，并记住它是谁的。
+    #[must_use]
+    pub fn from_pool_in(pool: PgPool, schema: crate::tenant::SchemaName) -> Self {
+        Self { pool, schema }
+    }
+
+    /// 这个池服务的租户。
+    #[must_use]
+    pub fn schema(&self) -> &crate::tenant::SchemaName {
+        &self.schema
+    }
+
+    /// 把这个租户的 schema 迁到最新。
+    ///
+    /// 只跑 [`MIGRATOR`]（`migrations/`，每租户一份的记忆表）。
+    /// 全局那套见 [`Self::migrate_global`]。
+    ///
+    /// # Errors
+    /// 哪条 migration 跑不过。
     pub async fn migrate(&self) -> Result<()> {
         MIGRATOR.run(&self.pool).await?;
         Ok(())
@@ -70,7 +99,7 @@ impl Store {
     /// 在 `public` 里的版本表撞在一起 —— 两套各有各的版本号，混在一张表里
     /// 的表现是「某一套被认为已经应用过」，也就是**表没建但以为建了**。
     ///
-    /// 而 `search_path` 是连接级的属性，改不了现成的池。
+    /// 而 `search_path` 是连接级属性，改不了现成的池。
     ///
     /// # Errors
     /// 连不上、建不出 `cortex_auth`，或者哪条 migration 跑不过。
@@ -90,7 +119,7 @@ impl Store {
 
         let options = sqlx::postgres::PgConnectOptions::from_str(database_url)
             .map_err(|e| crate::error::StoreError::Invalid(format!("DATABASE_URL 不合法：{e}")))?
-            // public 留在尾部：`ulid` / `sha256` 这两个 DOMAIN 装在那儿
+            // public 留在尾部：`ulid` / `sha256` 两个 DOMAIN 装在那儿
             .options([("search_path", "cortex_auth,public")]);
         let pool = PgPoolOptions::new()
             .max_connections(1)
@@ -146,7 +175,7 @@ impl Store {
     where
         F: AsyncFnOnce(&mut WriteTxn) -> Result<T>,
     {
-        let mut txn = WriteTxn::begin(&self.pool).await?;
+        let mut txn = WriteTxn::begin(&self.pool, self.schema.lock_key()).await?;
 
         match f(&mut txn).await {
             Ok(value) => {

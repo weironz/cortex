@@ -197,3 +197,62 @@ async fn asking_twice_for_the_same_tenant_reuses_one_pool() {
     );
     assert_eq!(pools.resident_count().await, 1);
 }
+
+/// **两个租户的写事务不该互相排队。**
+///
+/// 原来 `pg_advisory_xact_lock` 是全局单键，于是一个人导入三年历史时，
+/// 别人连一句话都写不进去。改成两参数形式（classid + 租户键）之后，
+/// 两个租户各拿各的锁。
+///
+/// 测法：甲开一个写事务并**按住不放**，同时让乙写。乙必须能写完 ——
+/// 全局锁的话它会一直等到甲提交。
+#[tokio::test]
+async fn one_tenants_long_write_does_not_block_another() {
+    let Some(url) = database_url() else {
+        eprintln!("跳过：没有 DATABASE_URL");
+        return;
+    };
+
+    let pools = TenantPools::new(&url);
+    let a = SchemaName::derive(&cortex_core::Id::new().to_string()).expect("派生得出");
+    let b = SchemaName::derive(&cortex_core::Id::new().to_string()).expect("派生得出");
+    let store_a = make_tenant(&url, &pools, &a).await;
+    let store_b = make_tenant(&url, &pools, &b).await;
+
+    assert_ne!(
+        a.lock_key(),
+        b.lock_key(),
+        "两个租户算出了同一把锁键 —— 那它们的写入仍然会互相排队"
+    );
+
+    // 甲开一个慢事务：拿到锁之后睡着不提交
+    let slow = {
+        let store_a = Arc::clone(&store_a);
+        tokio::spawn(async move {
+            store_a
+                .write_txn(async |_tx| {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    Ok(())
+                })
+                .await
+        })
+    };
+    // 让甲先拿到锁
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // 乙同时写。全局锁的话这里会一直等到甲那 1.5 秒结束
+    let started = std::time::Instant::now();
+    seed(&store_b, "乙").await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_millis(1000),
+        "乙等了 {elapsed:?} 才写完 —— 说明它在等甲那把锁，两个租户仍然互相排队"
+    );
+
+    slow.await.expect("甲那个事务跑完").expect("甲写得成");
+    drop(store_a);
+    drop(store_b);
+    drop_tenant(&url, &a).await;
+    drop_tenant(&url, &b).await;
+}

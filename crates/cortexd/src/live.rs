@@ -247,9 +247,27 @@ fn chat_only_turn(max_rounds: usize) -> Turn {
 
 impl Live {
     pub async fn new(config: &Config, embedder: SharedEmbedder) -> Result<Self> {
+        // 全局那套（cortex_auth）先跑：账号表要在任何人能登录之前就位。
+        //
+        // 它与租户那套是**两套独立的 migration**，版本表也各在各的 schema 里 ——
+        // 混成一套会让新租户建号时撞上 `relation "users" already exists`，
+        // 而失败点在建号中途。见 migrations-global/ 的文件头
+        Store::migrate_global(&config.database_url)
+            .await
+            .map_err(|e| CortexError::Store(format!("全局 schema 迁移失败：{e}")))?;
+
         let store = Store::connect(&config.database_url)
             .await
             .map_err(|e| CortexError::Store(format!("连接数据库失败：{e}")))?;
+
+        // 1 号用户的 schema 就是 public，所以这一句同时也是「给他迁移」。
+        //
+        // 多租户接线之后这里换成 `cortex_store::migrate_all`，逐个迁并把
+        // 坏掉的那几个单独标出来 —— 一个用户的库坏了不该让所有人下线
+        store
+            .migrate()
+            .await
+            .map_err(|e| CortexError::Store(format!("数据库迁移失败：{e}")))?;
 
         let api_key = std::env::var(cortex_llm::provider::api_key_env(&config.llm.provider)?)
             .map_err(|_| {
