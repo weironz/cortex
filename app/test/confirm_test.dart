@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'package:cortex_app/models/import_plan.dart';
+import 'package:cortex_app/import/import_source.dart';
 import 'dart:typed_data';
 
 import 'package:cortex_app/api/api_exception.dart';
@@ -490,6 +492,24 @@ class _ConfirmApi implements CortexApi {
 
   /// 没有本地 agent 的替身：这条路由不存在，报「不支持」正是让调用方
   /// 去走 `PATCH /sessions/{id}` 回落分支的那个信号。
+  /// 测试替身不做导入 —— 报「不支持」，让调用方走它的降级分支。
+  @override
+  Future<ImportTarget> prepareImport(ImportSource source) async {
+    throw const CortexApiException('测试替身不支持导入', statusCode: 501);
+  }
+
+  @override
+  Future<ImportEstimate> importPreview(
+    ImportTarget target, {
+    int? maxConversations,
+  }) async {
+    throw const CortexApiException('测试替身不支持导入', statusCode: 501);
+  }
+
+  @override
+  Stream<ImportEvent> runImport(ImportTarget target, {int? maxConversations}) =>
+      Stream.error(const CortexApiException('测试替身不支持导入', statusCode: 501));
+
   @override
   Future<String?> bindLocalWorkspace(String id, String? path) async {
     throw const CortexApiException('测试替身没有本地工作区端点', statusCode: 404);

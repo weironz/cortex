@@ -7,6 +7,7 @@ import '../../auth/token_store.dart';
 import '../../core/app_config.dart';
 import '../../state/app_providers.dart';
 import '../../state/auth_controller.dart';
+import '../import/import_sheet.dart';
 
 Future<void> showSettingsSheet(BuildContext context) {
   return showDialog<void>(
@@ -170,6 +171,29 @@ class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
                   ],
                 ),
               ],
+              const Divider(height: 28),
+              Text('数据', style: theme.textTheme.titleSmall),
+              const SizedBox(height: 8),
+              // Lives here, not in the toolbar: importing is something a person
+              // does once. A permanent button for a one-time action is clutter,
+              // and "数据" is where someone goes looking for it.
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.download_outlined),
+                title: const Text('导入 ChatGPT / Claude 历史'),
+                subtitle: Text(
+                  '选择导出包里的 conversations.json。会先把要花多少钱摊开，'
+                  '确认之后才开始写。',
+                  style: theme.textTheme.bodySmall,
+                ),
+                onTap: () {
+                  // Close this one first. Stacking a long-running dialog on top
+                  // of settings would leave the settings scrim behind a progress
+                  // bar that runs for a quarter of an hour.
+                  Navigator.of(context).pop();
+                  unawaited(showImportSheet(context));
+                },
+              ),
               const SizedBox(height: 12),
               Text(
                 '编译期默认值：USE_MOCK=${AppConfig.defaultUseMock}，'

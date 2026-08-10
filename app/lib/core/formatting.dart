@@ -37,3 +37,18 @@ String shortId(String? id, {int head = 8, int tail = 4}) {
   if (id.length <= head + tail + 1) return id;
   return '${id.substring(0, head)}…${id.substring(id.length - tail)}';
 }
+
+/// `4,086,793`.
+///
+/// The token count runs to seven digits, and an unseparated seven-digit number
+/// is not read — it is glanced at and misjudged by an order of magnitude. This
+/// one is part of a bill, so the magnitude is the whole point.
+String formatThousands(int n) {
+  final s = n.toString();
+  final out = StringBuffer();
+  for (var i = 0; i < s.length; i++) {
+    if (i > 0 && (s.length - i) % 3 == 0) out.write(',');
+    out.write(s[i]);
+  }
+  return out.toString();
+}

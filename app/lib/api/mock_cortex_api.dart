@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'package:cortex_app/models/import_plan.dart';
+import 'package:cortex_app/import/import_source.dart';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -39,6 +41,31 @@ class MockCortexApi implements CortexApi {
   /// The mock stands in for a plain cortexd: no local agent, so no local
   /// workspace route. Reporting it as unsupported is what makes the caller
   /// exercise its `PATCH /sessions/{id}` fallback in tests.
+  /// The mock has no file to parse, so import is reported as unavailable
+  /// rather than faked. A fake bill would be the one number in this screen
+  /// that must never be invented — it is what the user approves spending.
+  @override
+  Future<ImportTarget> prepareImport(ImportSource source) async {
+    throw const CortexApiException(
+      '模拟后端不支持导入 —— 切到真实后端再试。',
+      statusCode: 501,
+    );
+  }
+
+  @override
+  Future<ImportEstimate> importPreview(
+    ImportTarget target, {
+    int? maxConversations,
+  }) async {
+    throw const CortexApiException('模拟后端不支持导入。', statusCode: 501);
+  }
+
+  @override
+  Stream<ImportEvent> runImport(ImportTarget target, {int? maxConversations}) =>
+      Stream.error(
+        const CortexApiException('模拟后端不支持导入。', statusCode: 501),
+      );
+
   @override
   Future<String?> bindLocalWorkspace(String id, String? path) async {
     throw const CortexApiException(
