@@ -269,9 +269,9 @@ async fn census_and_backlog_agree_with_each_other() {
 ///           ->  Sort  ->  Seq Scan on fact_events
 /// ```
 ///
-/// 也就是说主召回路上那个 HNSW 一直是摆设。小库上看不出来，
-/// 十万条事实时它是每次向量检索一次全表扫描。这是一件独立的事
-/// （见 roadmap），修完再回来把索引断言加上。
+/// 也就是说主召回路上那个 HNSW 一直是摆设。**已修**：
+/// migrations/20260810000001 把视图换成两层反连接，5 万条事实上
+/// 289.7ms → 0.5ms。下面那条「不许出现外连接」的断言守的就是这个。
 #[tokio::test]
 async fn the_base_set_is_not_materialized() {
     let Some(ctx) = common::setup().await else {
@@ -329,6 +329,30 @@ async fn the_base_set_is_not_materialized() {
     assert!(
         text.contains("fact_embeddings"),
         "计划里没有 fact_embeddings —— 分支二不见了，回填等于白做：
+{text}"
+    );
+
+    // **ORDER BY 前面不能有外连接。**
+    //
+    // 这条守的是 active_facts 的形状。它原来是 `facts LEFT JOIN fact_status`，
+    // 而外连接必须**先做完**才能按距离排序 —— 于是 idx_facts_vec 从来没被
+    // 用上过，主召回路上那个 HNSW 一直是摆设。反连接（NOT EXISTS）不一样：
+    // planner 可以把它当成 facts 上的一个过滤条件，索引就够得着了。
+    //
+    // # 为什么不直接断言「计划里有 idx_facts_vec」
+    //
+    // 试过，测不出来。测试库里只有个位数行，那个规模下 planner 选顺序扫描
+    // 或者小 btree 永远更便宜 —— 连 `enable_seqscan = off` 都逼不出 HNSW，
+    // 它会改走 idx_facts_model 再排序。**4 行数据上「planner 选了什么」
+    // 证明不了任何事**，所以这里断言的是结构，不是选择。
+    //
+    // 定量证据在 migrations/20260810000001 里：5 万条事实上
+    // 289.7ms → 0.5ms，19.8 万次缓冲访问 → 531 次。
+    assert!(
+        !text.contains("Left Join"),
+        "计划里出现了外连接 —— active_facts 又变回「必须先 join 完」的形状了。
+这不会让结果变错，只会让每次向量召回都退化成全表扫描 + 几万次 1024 维距离计算，
+而且没有任何别的测试会为此变红。见 migrations/20260810000001：
 {text}"
     );
 
