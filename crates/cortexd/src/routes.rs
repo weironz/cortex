@@ -105,6 +105,8 @@ protected_routes! {
     // 「我是谁」必须先证明你是谁，所以它在受保护这一侧。
     // login / refresh / logout / register 在公开侧，理由见 `public_routes`
     "/auth/me" [GET] => get(crate::accounts::whoami),
+    // 「我还剩多少」。放在受保护侧 —— 它回答的是当前这个人的用量
+    "/auth/usage" [GET] => get(crate::accounts::usage),
     "/import/upload" [POST] => post(crate::import::upload).layer(DefaultBodyLimit::disable()),
     "/import/preview" [POST] => post(crate::import::preview),
     "/import/run" [POST] => post(crate::import::run),
@@ -252,8 +254,31 @@ async fn list_confirmations(
 /// 且在 Flutter Web 上比 WS 少一层坑。WS 留给多端同步推送。
 async fn chat(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ChatRequest>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> axum::response::Response {
+    // 超额要以 **SSE 事件**形式说，不是 HTTP 状态码：客户端已经把这条
+    // 当成流在读了，一个 429 会表现成「流刚建立就断了」，
+    // 而那与网络出问题长得一模一样
+    let user = crate::accounts::current_user(&st, &headers).await;
+    if let Err(e) = st.enforce_quota(&user).await {
+        let msg = e.message();
+        let once = futures::stream::once(async move {
+            let data = serde_json::to_string(&ChatEvent::Error { message: msg })
+                .unwrap_or_else(|_| r#"{"type":"error","message":"额度已用完"}"#.into());
+            Ok::<_, Infallible>(Event::default().data(data))
+        });
+        // 直接成型再返回：`keep_alive` 会把流类型换掉，于是两条返回路径
+        // 的具体类型对不上。转成 `Response` 是最省事的收敛点
+        return Sse::new(once)
+            .keep_alive(
+                KeepAlive::new()
+                    .interval(Duration::from_secs(15))
+                    .text("ping"),
+            )
+            .into_response();
+    }
+
     let stream = st.chat_stream(req).await.map(|ev| {
         // 序列化失败也必须以合法 SSE 事件返回：流一旦静默中断，
         // 客户端无从判断是网络断了还是服务端出错了。
@@ -263,15 +288,17 @@ async fn chat(
             })
             .unwrap_or_else(|_| r#"{"type":"error","message":"internal"}"#.to_string())
         });
-        Ok(Event::default().data(json))
+        Ok::<_, Infallible>(Event::default().data(json))
     });
 
     // keep-alive 防止中间代理在长思考期间掐断连接
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("ping"),
-    )
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("ping"),
+        )
+        .into_response()
 }
 
 // ───────────────────────── /llm/stream ─────────────────────────
@@ -292,19 +319,42 @@ async fn chat(
 /// 分不清「说完了」和「断了」。
 async fn llm_stream(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<LlmStreamRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    // 桌面端的每一次模型调用都走这条，所以它是配额最该守住的地方。
+    // 在**发起之前**查：事后扣意味着最后那一次一定会超，而那一次
+    // 可能是一场六千次调用的导入
+    let user = crate::accounts::current_user(&st, &headers).await;
+    st.enforce_quota(&user).await?;
+
     let upstream = st.llm_stream(req).await?;
 
-    let stream = upstream.map(|item| {
+    // 记账：流里每一帧都带着 `ProviderUsage`，而**最后一帧的累计值**
+    // 才是这次调用的总量。所以边转发边留最新的那个，流结束时写一行。
+    //
+    // 不在这里 await 写库：那会把一次数据库往返插进用户等回复的路径里。
+    // 用 `spawn` 在流结束后补记 —— 漏记的后果只是这一次不计入配额，
+    // 而卡住的后果是每次对话都慢一截
+    let usage_seen = std::sync::Arc::new(std::sync::Mutex::new((0_i64, 0_i64, String::new())));
+
+    let seen = std::sync::Arc::clone(&usage_seen);
+    let stream = upstream.map(move |item| {
         let ev = match item {
             Ok((message, usage)) => {
+                // 只有带用量的那些帧才更新。**取最新的那份而不是相加** ——
+                // 供应商报的是「到目前为止」的累计值，相加会把总量翻好几倍
+                if let (Some(pu), Ok(mut g)) = (usage.as_ref(), seen.lock()) {
+                    g.0 = i64::from(pu.usage.input_tokens.unwrap_or(0));
+                    g.1 = i64::from(pu.usage.output_tokens.unwrap_or(0));
+                    g.2 = pu.model.clone();
+                }
                 let chunk = LlmStreamChunk { message, usage };
                 // 序列化失败也当成流内错误发出去，理由同上：这时候
                 // 已经不能改状态码了，静默丢一项等于让本地那侧收到
                 // 一段缺了中间的对话，而它没有任何办法察觉
                 match serde_json::to_string(&chunk) {
-                    Ok(json) => return Ok(Event::default().data(json)),
+                    Ok(json) => return Some(Ok(Event::default().data(json))),
                     Err(e) => LlmStreamError {
                         kind: "execution_error".into(),
                         message: format!("代理侧序列化失败：{e}"),
@@ -318,8 +368,45 @@ async fn llm_stream(
         };
         let json = serde_json::to_string(&ev)
             .unwrap_or_else(|_| r#"{"kind":"execution_error","message":"internal"}"#.to_string());
-        Ok(Event::default().event("error").data(json))
+        Some(Ok(Event::default().event("error").data(json)))
     });
+
+    // 流走完之后把这次的用量记下来。
+    //
+    // 用 `chain` 挂一个空尾巴而不是 `spawn`：后者要把 stream 的所有权
+    // 交出去或者另开一条任务盯着它结束，而这里只需要「最后一帧之后再做一件事」。
+    // 记账失败只写日志（见 `record_usage`）—— 对话已经跑完了，
+    // 为了记不上账把结果丢掉是本末倒置
+    let st_for_usage = st.clone();
+    let user_for_usage = user.clone();
+    let tail = futures::stream::once(Box::pin(async move {
+        let (input, output, model) = usage_seen
+            .lock()
+            .map(|g| (g.0, g.1, g.2.clone()))
+            .unwrap_or_default();
+        st_for_usage
+            .record_usage(
+                &user_for_usage,
+                "llm",
+                crate::quota::Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    // 自带 key 还没接（roadmap R9 的后半段），先按服务端的记
+                    own_key: false,
+                },
+                &model,
+            )
+            .await;
+        // 这一帧不发给客户端：`filter_map` 之后它就消失了
+        Option::<Result<Event, Infallible>>::None
+    }));
+    // 显式指名 futures 的 trait： 也在作用域里，
+    // 而它的  是同步的（收 Option 不收 Future）——
+    // 让编译器自己挑会挑到那一个，报的错还指向 async 块
+    let stream = futures::StreamExt::filter_map(
+        futures::StreamExt::chain(stream, tail),
+        |x| async move { x },
+    );
 
     // keep-alive 与 /chat 同一个理由：模型「想」得久的时候，
     // 中间代理会把一条没有字节流动的连接当成死连接掐掉
@@ -352,8 +439,16 @@ async fn memory_search(
 /// 真出事时才第一次执行。
 async fn write_episode(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<NewEpisodeRequest>,
 ) -> Result<Json<EpisodeAck>, ApiError> {
+    // **只有带 anchor 的那一条会花钱**（它触发抽取）。不带的只是落原文，
+    // 拦下来毫无意义 —— 而那正是导入时占多数的那一半，
+    // 拦它会让「额度用完」变成「原文也存不进去」，白丢数据
+    if req.anchor_episode_id.is_some() {
+        let user = crate::accounts::current_user(&st, &headers).await;
+        st.enforce_quota(&user).await?;
+    }
     Ok(Json(st.write_episode(req).await?))
 }
 
@@ -563,6 +658,18 @@ impl ApiError {
             message: Some(message.into()),
             inner: cortex_core::CortexError::Store("unauthorized".into()),
             status: Some(StatusCode::UNAUTHORIZED),
+        }
+    }
+
+    /// 429：额度用完了。
+    ///
+    /// 与 403 分开：403 的意思是「这件事你永远不能做」，429 是
+    /// 「现在不行，等等就行」。客户端据此决定要不要显示重试。
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self {
+            message: Some(message.into()),
+            inner: cortex_core::CortexError::Store("quota".into()),
+            status: Some(StatusCode::TOO_MANY_REQUESTS),
         }
     }
 

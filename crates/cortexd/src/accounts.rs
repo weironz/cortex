@@ -379,6 +379,34 @@ pub async fn register(
     Ok(Json(st.issue(&user_id, None, None).await?))
 }
 
+/// `GET /auth/usage` —— 我这个窗口用了多少、还剩多少。
+///
+/// # Errors
+/// 没接账号体系，或者算不出用量。
+pub async fn usage(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<crate::quota::QuotaView>, ApiError> {
+    let user_id = current_user(&st, &headers).await;
+    Ok(Json(st.quota_status(&user_id).await?.into()))
+}
+
+/// 这个请求是谁发的。
+///
+/// access token 认不出时回落到 1 号用户 —— 那是老的预共享 token 那条路，
+/// 它已经过了入站那道门，否则这个 handler 根本不会被调到。
+pub async fn current_user(st: &AppState, headers: &axum::http::HeaderMap) -> String {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    match st.access_book().resolve(bearer) {
+        Some(id) => id,
+        None => owner_user_id(st).await.unwrap_or_else(|| "owner".into()),
+    }
+}
+
 /// `GET /auth/me`
 ///
 /// 用请求里那个 access token 反查是谁。**老的预共享 token 也认**，
