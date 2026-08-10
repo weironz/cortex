@@ -102,6 +102,9 @@ protected_routes! {
     // 体积上限由 crate::import 自己按流式计数管，所以这里把 axum 的
     // 默认闸门整个撤掉 —— 留着它只会在读到一半时把连接掐了，
     // 而那时暂存文件已经写了一半
+    // 「我是谁」必须先证明你是谁，所以它在受保护这一侧。
+    // login / refresh / logout / register 在公开侧，理由见 `public_routes`
+    "/auth/me" [GET] => get(crate::accounts::whoami),
     "/import/upload" [POST] => post(crate::import::upload).layer(DefaultBodyLimit::disable()),
     "/import/preview" [POST] => post(crate::import::preview),
     "/import/run" [POST] => post(crate::import::run),
@@ -131,11 +134,44 @@ protected_routes! {
 /// `router_registers_no_routes_outside_the_macro` 这条测试直接读本文件的
 /// 源码来守这一条 —— 它是唯一能拦住「在宏之外注册路由」的手段。
 pub fn router(state: AppState) -> Router {
-    let public = Router::new().route("/health", get(health));
+    let mut public = Router::new();
+    for (path, method_router) in public_routes() {
+        public = public.route(path, method_router);
+    }
 
     public
         .merge(protected_router(state.clone()))
         .with_state(state)
+}
+
+/// 不需要认证的那几条，**一处清单**。
+///
+/// # 为什么它们必须在公开侧
+///
+/// - `/health`：消费者是 Docker HEALTHCHECK 与负载均衡探针，那些东西配不了
+///   凭据。给它加认证的直接后果是容器一直 unhealthy，然后有人把 HEALTHCHECK
+///   删掉。回的内容全是**部署形态**，不是用户数据（见 `Health::auth`）。
+/// - `/auth/login`、`/auth/register`：登录是「还没有凭据」时做的事。
+///   要求带凭据才能登录是个死循环。
+/// - `/auth/refresh`、`/auth/logout`：它们带的是 **refresh token**，
+///   那本身就是凭据 —— 校验在 handler 里（摘要比对 + 重放检测）。
+///   要求同时带一个还没过期的 access token，等于让「过期后自动续期」
+///   这件事只在没过期时可用。
+///
+/// # 往里加一条之前
+///
+/// 这个函数是整个服务**唯一**的免认证入口。加东西的正确姿势是先在上面
+/// 补一段「为什么这一条不能要凭据」—— 补不出来就说明它该待在
+/// `protected_routes!` 里。`the_public_list_stays_short` 会在这份清单
+/// 变长时红，逼人回来看这段话。
+fn public_routes() -> Vec<(&'static str, axum::routing::MethodRouter<AppState>)> {
+    vec![
+        ("/health", get(health)),
+        ("/auth/login", post(crate::accounts::login)),
+        ("/auth/refresh", post(crate::accounts::refresh)),
+        ("/auth/logout", post(crate::accounts::logout)),
+        ("/auth/register", post(crate::accounts::register)),
+    ]
 }
 
 // ─────────────────────────── /health ───────────────────────────
@@ -500,6 +536,13 @@ async fn sync(
 #[derive(Debug)]
 pub struct ApiError {
     inner: cortex_core::CortexError,
+    /// 覆盖 `inner` 的文案。
+    ///
+    /// `CortexError` 的 `Display` 会给每个变体加前缀（「存储错误：」之类），
+    /// 那对内部日志有用，对用户是噪声 —— 一句「用户名或密码不对」前面挂
+    /// 「存储错误：」只会让人以为服务坏了。借用它的变体来携带状态码时，
+    /// 文案必须能单独给。
+    message: Option<String>,
     /// 覆盖 [`cortex_core::CortexError::http_status`] 的默认映射。
     ///
     /// 只在**领域错误分不出来**的那几处用。`CortexError` 刻意没有
@@ -514,6 +557,27 @@ impl ApiError {
         cortex_core::CortexError::Invalid(message.into()).into()
     }
 
+    /// 401：没有有效凭据。
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            message: Some(message.into()),
+            inner: cortex_core::CortexError::Store("unauthorized".into()),
+            status: Some(StatusCode::UNAUTHORIZED),
+        }
+    }
+
+    /// 403：认得出你是谁，但这件事不允许。
+    ///
+    /// 与 401 分开：401 的意思是「去登录」，403 是「登录了也不行」。
+    /// 注册关闭时回 403 而不是 401，否则客户端会去弹一个没用的登录框。
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            message: Some(message.into()),
+            inner: cortex_core::CortexError::Store("forbidden".into()),
+            status: Some(StatusCode::FORBIDDEN),
+        }
+    }
+
     /// 500：我们这边出了问题。
     pub fn internal(message: impl Into<String>) -> Self {
         cortex_core::CortexError::Store(message.into()).into()
@@ -523,13 +587,16 @@ impl ApiError {
     /// 那里没有 HTTP 状态码可用，只有一个 `error` 事件。
     #[must_use]
     pub fn message(&self) -> String {
-        self.inner.to_string()
+        self.message
+            .clone()
+            .unwrap_or_else(|| self.inner.to_string())
     }
 
     /// 501：请求本身没错，是这个部署形态提供不了这个能力。
-    fn unsupported(message: impl Into<String>) -> Self {
+    pub fn unsupported(message: impl Into<String>) -> Self {
         Self {
-            inner: cortex_core::CortexError::Store(message.into()),
+            message: Some(message.into()),
+            inner: cortex_core::CortexError::Store("unsupported".into()),
             status: Some(StatusCode::NOT_IMPLEMENTED),
         }
     }
@@ -540,6 +607,7 @@ impl From<cortex_core::CortexError> for ApiError {
         Self {
             inner: e,
             status: None,
+            message: None,
         }
     }
 }
@@ -554,7 +622,7 @@ impl IntoResponse for ApiError {
         (
             code,
             Json(ErrorBody {
-                error: self.inner.to_string(),
+                error: self.message(),
             }),
         )
             .into_response()
@@ -620,6 +688,10 @@ mod tests {
                 std::time::Duration::from_secs(30),
             )),
             tickets: std::sync::Arc::new(crate::auth::TicketBook::default()),
+            // 这几条路由测试不碰账号端点，所以不接数据库。
+            // 账号端点在没有它时会 panic，而那正是它们不该被路由到的信号
+            accounts: None,
+            access: std::sync::Arc::new(crate::accounts::AccessBook::default()),
         };
         (router(crate::state::AppState::for_tests(rt)), token)
     }
@@ -794,15 +866,37 @@ mod tests {
         let registrations = code.matches(".route(").count();
         assert_eq!(
             registrations, 1,
-            "router() 的函数体里出现了 {registrations} 处 `.route(`，应当只有 /health 那一处。\n\
-             新路由请写进 protected_routes! 宏里：\n\
-             · 加进 public 的那一侧 = 完全不需要认证；\n\
-             · 加在 protected_router(...) 之后 = 在 route_layer 之后注册，同样不认证，而且更隐蔽。\n\
-             实际的函数体：\n{code}"
+            "router() 的函数体里出现了 {registrations} 处 `.route(`，应当只有 public_routes() 那个循环。
+             新路由请写进 protected_routes! 宏里：
+             · 加进 public_routes() = 完全不需要认证（那里每一条都得写明理由）；
+             · 加在 protected_router(...) 之后 = 在 route_layer 之后注册，同样不认证，而且更隐蔽。
+             实际的函数体：
+{code}"
         );
         assert!(
-            code.contains("\"/health\""),
-            "router() 里那一处 .route() 应当是 /health"
+            code.contains("public_routes()"),
+            "router() 里那一处 .route() 应当来自 public_routes() 那份清单"
+        );
+    }
+
+    /// **免认证清单只该有这几条。**
+    ///
+    /// 它是整个服务唯一的免认证入口，而往里加一条的代价是无声的：
+    /// 那条路径从此对任何人开放，而没有任何运行时手段能发现它本不该如此。
+    /// 这条测试让「清单变长」这件事必须被显式确认一次。
+    #[test]
+    fn the_public_list_stays_short() {
+        let paths: Vec<&str> = super::public_routes().into_iter().map(|(p, _)| p).collect();
+        assert_eq!(
+            paths,
+            [
+                "/health",
+                "/auth/login",
+                "/auth/refresh",
+                "/auth/logout",
+                "/auth/register",
+            ],
+            "免认证清单变了。改它之前先回 public_routes() 的文档里补一句             「为什么这一条不能要凭据」—— 补不出来就说明它该进 protected_routes!"
         );
     }
 

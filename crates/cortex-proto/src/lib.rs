@@ -20,6 +20,7 @@
 //! 本地 agent 也需要它的**全部**：确认回路是「问用户准不准」，
 //! 而用户就在本地那一侧。
 
+pub mod auth;
 pub mod confirm;
 pub mod dto;
 pub mod episodes;

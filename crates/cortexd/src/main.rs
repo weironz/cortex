@@ -3,6 +3,7 @@
 //! 单写者、常驻。承载记忆引擎、后台任务与多端同步。
 //! CLI / 桌面 / 移动 / Web 全部是它的 HTTP + WebSocket 客户端 —— 走同一套协议。
 
+mod accounts;
 mod auth;
 mod backfill;
 mod blobs;
@@ -41,6 +42,14 @@ struct Args {
     /// 没有任何一处同时持有两者。见 `src/auth.rs`。
     #[arg(long)]
     generate_token: bool,
+
+    /// 建一个账号后退出，不启动服务。
+    ///
+    /// 注册默认是关的（见 `accounts::OPEN_REGISTRATION_ENV`），这是不开注册
+    /// 也能加人的那条路。密码从 stdin 读，**不走命令行参数** ——
+    /// 参数会进 shell history、进 `ps` 的输出、进容器的启动记录。
+    #[arg(long, value_name = "用户名")]
+    create_user: Option<String>,
 }
 
 #[tokio::main]
@@ -65,9 +74,27 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let config = Config::from_env().context("加载配置失败")?;
+
+    if let Some(username) = args.create_user.clone() {
+        return create_user(&config, &username).await;
+    }
     // 认证与确认回路的配置在这里定型。**配错就退出**，不降级：
     // 一个「以为开着认证其实关着」的 cortexd 不会有任何症状（见 auth.rs）
-    let rt = state::Runtime::from_env().context("加载认证 / 确认回路配置失败")?;
+    let mut rt = state::Runtime::from_env().context("加载认证 / 确认回路配置失败")?;
+    // 账号池要 await，所以在 from_env 之后补上。
+    //
+    // **连不上就没有账号功能，而不是启动失败**：老的预共享 token 那条路
+    // 不依赖它，而一个「因为账号表连不上所以整个服务不起来」的部署，
+    // 比一个「能对话但登录端点回 501」的部署糟得多
+    match state::Accounts::connect(&config.database_url).await {
+        Ok(accounts) => {
+            tracing::info!("账号体系已接入（cortex_auth）");
+            rt.accounts = Some(accounts);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "账号表连不上，/auth/* 将回 501（老的预共享 token 不受影响）");
+        }
+    }
     // 同上：写错的允许列表在这里失败，而不是等浏览器报一句语焉不详的 CORS 错
     let cors = cors::CorsPolicy::from_env().context("加载跨源策略失败")?;
 
@@ -167,6 +194,63 @@ fn redact_db_url(url: &str) -> String {
     } else {
         format!("{scheme}://{host}/{path}")
     }
+}
+
+/// `--create-user <用户名>`：建号后退出。
+///
+/// 密码从 stdin 读。走参数的话它会留在 shell history、`ps` 的输出、
+/// 以及容器的启动记录里 —— 而那是个**长期**凭据的明文。
+async fn create_user(config: &Config, username: &str) -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    print!("给 {username} 设个密码（不回显不了，注意旁边有没有人）：");
+    std::io::stdout().flush()?;
+    let mut password = String::new();
+    std::io::stdin().read_line(&mut password)?;
+    let password = password.trim_end();
+
+    cortex_store::Store::migrate_global(&config.database_url)
+        .await
+        .context("全局 schema 迁移失败")?;
+    let pools = std::sync::Arc::new(cortex_store::TenantPools::new(&config.database_url));
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&config.database_url)
+        .await
+        .context("连不上数据库")?;
+
+    let hash = credentials::hash_password(password)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("密码不合要求")?;
+    let user_id = cortex_core::Id::new().to_string();
+    let schema = cortex_store::SchemaName::derive(&user_id).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // schema 先行、users 行最后 —— 反过来会留下一个登不进去的账号。
+    // 与 AppState::create_account 同一条纪律
+    cortex_store::provision(&pools, &schema)
+        .await
+        .context("给新账号开库失败")?;
+    let inserted = sqlx::query(
+        "INSERT INTO cortex_auth.users (id, username, password_hash, schema_name)
+         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+    )
+    .bind(&user_id)
+    .bind(username)
+    .bind(&hash)
+    .bind(schema.as_str())
+    .execute(&pool)
+    .await
+    .context("写用户记录失败")?;
+
+    if inserted.rows_affected() == 0 {
+        let _ = pools.drop_schema(&schema).await;
+        anyhow::bail!("用户名 {username} 已经有人用了");
+    }
+    println!(
+        "已创建：{username}（id {user_id}，schema {}）",
+        schema.as_str()
+    );
+    Ok(())
 }
 
 #[cfg(test)]

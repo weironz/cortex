@@ -50,6 +50,10 @@ hex = "0.4"
 getrandom = "0.3"
 # 密码哈希。**不能沿用上面那个 sha2** —— auth.rs 里「慢 KDF 不是必需」
 # 那段论证有个前提：token 是高熵随机的。人选的密码不满足它。
+# 账号表住在 cortex_auth 里，而那不是记忆库的一部分 —— cortex-store 的
+# repository 层刻意不认识它（那一层的每个查询都假设自己在租户 schema 里）。
+# 所以这里直接用 sqlx，池子也是单独一个
+sqlx.workspace = true
 argon2 = "0.5"
 password-hash = { version = "0.5", features = ["alloc"] }
 tracing.workspace = true

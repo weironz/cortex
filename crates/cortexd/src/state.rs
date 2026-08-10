@@ -68,6 +68,62 @@ pub struct Runtime {
     pub auth: AuthMode,
     pub confirms: Arc<ConfirmRegistry>,
     pub tickets: Arc<TicketBook>,
+    /// 账号那几张表的连接池（`cortex_auth`），以及租户池注册表。
+    ///
+    /// **与记忆库的池分开**：`cortex-store` 的每条查询都假设自己在某个
+    /// 租户的 schema 里，而账号是跨租户的。混用一个池意味着
+    /// `search_path` 要来回改，而那正是 [`cortex_store::TenantPools`]
+    /// 的文档里说「漏一次就是跨用户泄露」的那种改法。
+    ///
+    /// `None` = 这个部署还没接数据库（mock 后端）。账号端点此时全部
+    /// 报 501 —— 假装能登录比明说不支持糟得多。
+    pub accounts: Option<Accounts>,
+    /// 已签发的 access token。见 [`crate::accounts::AccessBook`]。
+    pub access: Arc<crate::accounts::AccessBook>,
+}
+
+/// 账号相关的两个句柄。
+#[derive(Clone)]
+pub struct Accounts {
+    /// 直连 `cortex_auth` 的池
+    pub pool: sqlx::PgPool,
+    /// 按用户取记忆库
+    pub tenants: Arc<cortex_store::TenantPools>,
+}
+
+impl Accounts {
+    /// 连 `cortex_auth`，并把全局那套 migration 跑上。
+    ///
+    /// 池子只要两条连接：账号相关的查询都是「登录时一次、刷新时一次」，
+    /// 而记忆库那边的并发压力走的是租户池。
+    ///
+    /// # Errors
+    /// 连不上，或者全局 migration 跑不过。
+    pub async fn connect(database_url: &str) -> Result<Self> {
+        cortex_store::Store::migrate_global(database_url)
+            .await
+            .map_err(|e| cortex_core::CortexError::Store(format!("全局 schema 迁移失败：{e}")))?;
+
+        let options = std::str::FromStr::from_str(database_url)
+            .map(|o: sqlx::postgres::PgConnectOptions| {
+                // 账号表在 cortex_auth 里，而这个池**只**碰它们。
+                // 不带 public 的话 `ulid` / `sha256` 两个 DOMAIN 解析不到
+                o.options([("search_path", "cortex_auth,public")])
+            })
+            .map_err(|e: sqlx::Error| {
+                cortex_core::CortexError::Config(format!("DATABASE_URL 不合法：{e}"))
+            })?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .map_err(|e| cortex_core::CortexError::Store(format!("连 cortex_auth 失败：{e}")))?;
+
+        Ok(Self {
+            pool,
+            tenants: Arc::new(cortex_store::TenantPools::new(database_url)),
+        })
+    }
 }
 
 impl Runtime {
@@ -77,7 +133,34 @@ impl Runtime {
             auth: AuthMode::from_env()?,
             confirms: Arc::new(ConfirmRegistry::from_env()?),
             tickets: Arc::new(TicketBook::default()),
+            // 建池要 await，而 from_env 是同步的。由 main 在拿到配置之后
+            // 调 `with_accounts` 补上 —— 分两步是为了让「配置错了」
+            // 与「数据库连不上」在日志里是两条不同的失败
+            accounts: None,
+            access: Arc::new(crate::accounts::AccessBook::default()),
         })
+    }
+}
+
+impl AppState {
+    /// 账号相关的两个句柄。
+    ///
+    /// # Errors
+    /// 这个部署没接数据库（mock 后端）。回 501 而不是 panic ——
+    /// 我一开始写的是 `expect`，理由是「路由层会先挡住」，
+    /// 但那道闸门当时并不存在，于是一次匿名 `GET /auth/me` 就能让
+    /// 这个 handler panic。**「调用方会先检查」不是一种保护。**
+    pub fn accounts(&self) -> Result<&Accounts, crate::routes::ApiError> {
+        self.inner.rt.accounts.as_ref().ok_or_else(|| {
+            crate::routes::ApiError::unsupported(
+                "这个部署没有接数据库，账号功能不可用（当前跑在 mock 后端上）",
+            )
+        })
+    }
+
+    /// 已签发的 access token 簿子。
+    pub fn access_book(&self) -> &crate::accounts::AccessBook {
+        &self.inner.rt.access
     }
 }
 

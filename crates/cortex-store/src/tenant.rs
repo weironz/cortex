@@ -276,6 +276,26 @@ impl TenantPools {
         Ok(())
     }
 
+    /// 删掉这片 schema 与里面的一切。
+    ///
+    /// **只在建号中途失败时用**（schema 建了但账号没写成，那是个孤儿）。
+    /// 删一个真实用户的 schema 是不可逆的数据销毁，那条路要走 purge，
+    /// 而 purge 要显式触发、二次确认、留墓碑。
+    ///
+    /// # Errors
+    /// 连不上，或者没有 DROP 的权限。
+    pub async fn drop_schema(&self, schema: &SchemaName) -> Result<()> {
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&self.database_url)
+            .await?;
+        let sql = format!(r#"DROP SCHEMA IF EXISTS "{}" CASCADE"#, schema.as_str());
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql)).execute(&admin).await;
+        admin.close().await;
+        result?;
+        Ok(())
+    }
+
     /// 现在驻留着几个池。给 `/health` 与测试用。
     pub async fn resident_count(&self) -> usize {
         self.resident.lock().await.pools.len()

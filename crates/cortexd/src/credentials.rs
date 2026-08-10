@@ -51,7 +51,6 @@
 // 本该是更好的选择）：测试里这些项**全都被用到**，于是 `--all-targets`
 // 编译测试目标时这条 expect 是「未兑现」的，反过来触发
 // `unfulfilled_lint_expectations`。两个目标各要一种写法，只有 allow 两边都过。
-#![allow(dead_code)]
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use cortex_core::Id;
@@ -256,7 +255,7 @@ pub const REFRESH_BYTES: usize = 32;
 ///
 /// 明文只在这一刻存在，发给客户端；**落库的只有摘要**。所以数据库被拖走
 /// 之后，里面的 refresh token 一条都不能直接拿来换 access token —— 服务端
-/// 会先对收到的东西做一次 SHA-256 再比（见 [`verify_refresh`]）。
+/// 会先对收到的东西做一次 SHA-256，再按摘要去索引里查（见 [`refresh_digest`]）。
 ///
 /// 摘要用 SHA-256 而不是 argon2：见模块文档第一节那张表。这一条与上面
 /// [`hash_password`] 的选择相反，而它们出自同一条判据。
@@ -271,47 +270,17 @@ pub fn generate_refresh() -> (String, String) {
 
 /// 明文 refresh token 的落库形态。
 #[must_use]
+/// # 为什么这里没有 `verify_refresh` / 常数时间比较
+///
+/// 一度有过，写得也对，但接线时发现**用不上**：`auth_tokens.token_sha256`
+/// 是唯一索引，服务端拿明文算出摘要之后是**按摘要查行**，而不是「取一行
+/// 出来再逐字节比」。比较发生在 B 树里，攻击者对着它测时间学不到东西 ——
+/// 而「这个 token 存不存在」本来就写在响应码上。
+///
+/// 删掉而不是留着加 `#[allow(dead_code)]`：一段没人调用的安全代码会让
+/// 下一个读它的人以为那条路径被保护着。
 pub fn refresh_digest(plain: &str) -> String {
     hex::encode(Sha256::digest(plain.as_bytes()))
-}
-
-/// 校验明文 refresh token 是否对得上库里的摘要。
-///
-/// # 为什么必须常数时间
-///
-/// 这里被比较的两样东西**不是**「都已经哈希过所以泄露也无所谓」的关系：
-/// 攻击者提交明文、服务端算出摘要去比库里那条。如果比较提前返回，
-/// 他就能按响应时间一个字节一个字节地把库里的摘要问出来 —— 一次 256 位
-/// 的暴力破解被降级成 32 次 256 选一。而摘要一旦到手，他要的其实是原像，
-/// 但对一条**已知摘要**做爆破的难度与「一秒能试多少次 SHA-256」直接相关，
-/// 这已经是一条不该白送的路。
-///
-/// 库里那条摘要不是十六进制时返回 `false`（而不是 panic）：这个参数来自
-/// 数据库，一行坏数据不该让一次刷新变成 500。
-#[must_use]
-pub fn verify_refresh(plain: &str, stored_digest_hex: &str) -> bool {
-    let Ok(stored) = hex::decode(stored_digest_hex) else {
-        tracing::debug!("库里的 refresh 摘要不是合法十六进制 —— 该行已损坏");
-        return false;
-    };
-    let got = Sha256::digest(plain.as_bytes());
-    constant_time_eq(&got, &stored)
-}
-
-/// 逐字节全量比较，不提前返回。
-///
-/// 这是 `auth.rs` 里那个同名私有函数的副本。**没有把它提成公共工具**：
-/// 这个函数只有五行，而提公共意味着 `auth.rs` 与本模块之间多一条依赖边 ——
-/// 而这两个模块在多用户改造里正处在「谁将取代谁」的状态，此刻加边只会
-/// 让拆分更难。真要统一，该等到预共享 token 那条路彻底退休。
-///
-/// 不用 `subtle::ConstantTimeEq`：`subtle` 已经在依赖树里（`password-hash`
-/// 拖进来的），但**不是本 crate 的直接依赖**，用它要动 `Cargo.toml`。
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -321,7 +290,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// 一条 refresh token 在库里的状态 —— [`judge_refresh`] 需要知道的全部。
 ///
 /// 刻意**不含摘要、不含明文、不含用户**：判定与「这条 token 是不是真的」
-/// 无关，后者是 [`verify_refresh`] 的事，且必须先于判定发生。把两件事塞进
+/// 无关，后者靠按摘要查行完成，且必须先于判定发生。把两件事塞进
 /// 一个函数，就会出现「摘要对不上也去作废 family」这种可以被任何人白嫖的
 /// 拒绝服务 —— 攻击者只要瞎猜一个 token，就能把别人的会话踢下线。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -567,79 +536,6 @@ mod tests {
         );
         let (other, _) = generate_refresh();
         assert_ne!(plain, other, "两次签发不能撞上 —— 熵源坏了才会这样");
-    }
-
-    #[test]
-    fn only_the_right_refresh_token_verifies() {
-        let (plain, digest) = generate_refresh();
-        assert!(verify_refresh(&plain, &digest), "正确的 token 必须通过");
-        assert!(!verify_refresh("", &digest), "空 token 不能通过");
-        assert!(
-            !verify_refresh(&digest, &digest),
-            "摘要本身不能被当成凭据提交"
-        );
-
-        let mut tampered = plain.clone();
-        let last = tampered.pop().expect("token 非空");
-        tampered.push(if last == 'a' { 'b' } else { 'a' });
-        assert!(
-            !verify_refresh(&tampered, &digest),
-            "只差一个字符的 token 不能通过"
-        );
-    }
-
-    #[test]
-    fn a_corrupt_stored_digest_is_a_quiet_false() {
-        let (plain, _) = generate_refresh();
-        for bad in ["", "zzzz", "not-hex", "abc"] {
-            assert!(
-                !verify_refresh(&plain, bad),
-                "库里那条摘要坏成 {bad:?} 时必须判否而不是 panic"
-            );
-        }
-        // 长度对但内容不对
-        assert!(!verify_refresh(&plain, &"0".repeat(64)), "全零摘要不能通过");
-    }
-
-    /// 摘要**开头几个字节相同**的 token 必须被拒。
-    ///
-    /// 上面「改一个字符」那条其实拦不住把比较写成 `got.starts_with(&stored[..1])`
-    /// 这类退化：随便改一个字符，摘要首字节有 255/256 的概率也跟着变，
-    /// 于是那条测试照样绿。而这个退化是灾难性的 —— 只比一个字节意味着
-    /// 任意随机 token 有 1/256 的概率被放行。
-    ///
-    /// 所以这里现场爆破出一个首字节相同的 token 再去试。它是**确定性**的：
-    /// 只要比较不是全量的，就一定红。
-    #[test]
-    fn a_token_whose_digest_merely_starts_the_same_is_rejected() {
-        let (real, digest_hex) = generate_refresh();
-        let real_digest = Sha256::digest(real.as_bytes());
-
-        let mut collided = None;
-        // 首字节 1/256，两万次里撞不上的概率小到可以忽略
-        for _ in 0..20_000 {
-            let (cand, _) = generate_refresh();
-            if Sha256::digest(cand.as_bytes())[0] == real_digest[0] && cand != real {
-                collided = Some(cand);
-                break;
-            }
-        }
-        let collided = collided.expect("应当能爆破出一个首字节相同的 token");
-        assert!(
-            !verify_refresh(&collided, &digest_hex),
-            "摘要只是开头相同的 token 竟然通过了 —— 比较不是全量的，\
-             于是可以按响应时间一个字节一个字节地把库里的摘要问出来"
-        );
-    }
-
-    #[test]
-    fn constant_time_eq_agrees_with_normal_equality() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"), "只差最后一字节必须判否");
-        assert!(!constant_time_eq(b"abc", b"bbc"), "只差第一字节必须判否");
-        assert!(!constant_time_eq(b"abc", b"ab"), "长度不同必须判否");
-        assert!(!constant_time_eq(b"", b"a"), "空与非空必须判否");
-        assert!(constant_time_eq(b"", b""));
     }
 
     // ─────────────────────── 重放判定 ───────────────────────
