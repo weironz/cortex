@@ -213,8 +213,8 @@ async fn main() -> anyhow::Result<()> {
             price_per_1m,
         } => {
             let platform = match platform.as_deref() {
-                Some("chatgpt") => Some(import::Platform::ChatGpt),
-                Some("claude") => Some(import::Platform::Claude),
+                Some("chatgpt") => Some(cortex_import::Platform::ChatGpt),
+                Some("claude") => Some(cortex_import::Platform::Claude),
                 // clap 的 value_parser 已经挡住了别的取值
                 _ => None,
             };
@@ -224,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
                 .transpose()
                 .context("--since 解析失败")?;
 
-            let plan = import::run::load(&file, platform, since, max_conversations)?;
+            let plan = cortex_import::load(&file, platform, since, max_conversations)?;
             import::run::report(&plan, price_per_1m);
 
             if !confirm {

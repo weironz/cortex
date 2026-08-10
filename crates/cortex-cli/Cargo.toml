@@ -20,6 +20,8 @@ cortex-core.workspace = true
 # Deserialize、并把 `&'static str` 字段改掉 —— 那是独立的一件事。
 # 这里的底线只有一条：**不再往那份副本里加新的**。
 cortex-proto.workspace = true
+# 解析器与账单在这里，三处共用（CLI / 本地 agent / cortexd）
+cortex-import.workspace = true
 
 tokio.workspace = true
 futures.workspace = true

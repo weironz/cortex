@@ -7,6 +7,7 @@ members = [
     "crates/cortex-memory",
     "crates/cortex-agent",
     "crates/cortex-proto",
+    "crates/cortex-import",
     "crates/cortexd",
     "crates/cortex-local",
     "crates/cortex-cli",
@@ -25,6 +26,7 @@ repository = "https://github.com/weironz/cortex"
 
 [workspace.dependencies]
 cortex-core = { path = "crates/cortex-core" }
+cortex-import = { path = "crates/cortex-import" }
 cortex-llm = { path = "crates/cortex-llm" }
 cortex-store = { path = "crates/cortex-store" }
 cortex-memory = { path = "crates/cortex-memory" }

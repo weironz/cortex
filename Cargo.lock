@@ -1091,6 +1091,7 @@ dependencies = [
  "chrono",
  "clap",
  "cortex-core",
+ "cortex-import",
  "cortex-proto",
  "dotenvy",
  "futures",
@@ -1133,6 +1134,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "cortex-import"
+version = "0.1.4"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cortex-core",
+ "cortex-proto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
