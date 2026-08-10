@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import '../import/import_source.dart';
+import '../models/auth_tokens.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
 import '../models/chat_event.dart';
@@ -146,6 +147,24 @@ abstract interface class CortexApi {
   /// The cursor is opaque — constructing one locally earns a 400, which is the
   /// point: it is validated before it reaches SQL.
   Future<SessionDetail> sessionDetail(String id, {int? limit, String? before});
+
+  /// `POST /auth/login` —— 用户名 + 密码换一对令牌。
+  ///
+  /// 拿回来的 `refreshToken` 是**「下次打开不用再登录」的全部依据**，
+  /// 调用方必须把它存进平台的凭据库（见 `app/lib/auth/`）。
+  Future<AuthTokens> login(String username, String password);
+
+  /// `POST /auth/refresh` —— 用长效凭据换一对新的。
+  ///
+  /// 每次都会**轮转**：服务端把旧的作废并签一个新的。所以调用方必须
+  /// 存下新的那个 —— 继续用旧的会被判成重放，而重放会让整条链一起失效。
+  Future<AuthTokens> refreshSession(String refreshToken);
+
+  /// `POST /auth/logout` —— 让服务端作废这条链。
+  ///
+  /// 与「本地删掉副本」不是一回事：本地删除只让这台机器忘了，
+  /// 而已经泄露出去的那一份照样能用到 30 天后。
+  Future<void> logout(String refreshToken);
 
   /// Hands the daemon a file to parse, and gets back something cheap to refer
   /// to it by.

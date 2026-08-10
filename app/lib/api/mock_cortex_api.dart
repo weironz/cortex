@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../models/auth_tokens.dart';
 import 'package:cortex_app/models/import_plan.dart';
 import 'package:cortex_app/import/import_source.dart';
 import 'dart:math';
@@ -44,6 +45,19 @@ class MockCortexApi implements CortexApi {
   /// The mock has no file to parse, so import is reported as unavailable
   /// rather than faked. A fake bill would be the one number in this screen
   /// that must never be invented — it is what the user approves spending.
+  @override
+  Future<AuthTokens> login(String username, String password) async {
+    throw const CortexApiException('这个数据源不支持账号登录', statusCode: 501);
+  }
+
+  @override
+  Future<AuthTokens> refreshSession(String refreshToken) async {
+    throw const CortexApiException('这个数据源不支持账号登录', statusCode: 501);
+  }
+
+  @override
+  Future<void> logout(String refreshToken) async {}
+
   @override
   Future<ImportTarget> prepareImport(ImportSource source) async {
     throw const CortexApiException(

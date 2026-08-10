@@ -33,6 +33,13 @@ const String kTokenStorageNote =
 /// configured to block site data both raise on the *getter*, not on the value.
 /// Treated as "nothing stored", because the alternative is a white screen at
 /// launch caused by a privacy setting.
+/// 与桌面端同名的入口。
+///
+/// Web 上「记住」与「读种子」是同一件事（都只有 sessionStorage 这一处），
+/// 所以它就是 [`readSeedToken`] 的异步壳。留着这个名字是为了让上层
+/// **一行 `kIsWeb` 都不用写** —— 那正是这道 seam 存在的意义。
+Future<String?> readRememberedToken() async => readSeedToken();
+
 String? readSeedToken() {
   try {
     final raw = web.window.sessionStorage.getItem(_kKey)?.trim();

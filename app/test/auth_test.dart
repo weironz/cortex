@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:cortex_app/models/auth_tokens.dart';
 import 'package:cortex_app/models/import_plan.dart';
 import 'package:cortex_app/import/import_source.dart';
 import 'dart:convert';
@@ -57,6 +58,12 @@ const _health = {
 };
 
 void main() {
+  // flutter_secure_storage 走平台通道，而通道要 binding。没有这一句，
+  // 存凭据会抛「Binding has not yet been initialized」—— 那条异常被
+  // rememberToken 吞掉并打成一行日志（有意的），于是测试**看起来只是
+  // 断言不过**，真因藏在输出里
+  TestWidgetsFlutterBinding.ensureInitialized();
+  _sessionTests();
   group('/health 的 auth 字段', () {
     test('token 表示必须带凭据', () {
       final health = HealthStatus.fromJson(_health);
@@ -472,6 +479,19 @@ class _GateApi implements CortexApi {
   /// 去走 `PATCH /sessions/{id}` 回落分支的那个信号。
   /// 测试替身不做导入 —— 报「不支持」，让调用方走它的降级分支。
   @override
+  Future<AuthTokens> login(String username, String password) async {
+    throw const CortexApiException('这个数据源不支持账号登录', statusCode: 501);
+  }
+
+  @override
+  Future<AuthTokens> refreshSession(String refreshToken) async {
+    throw const CortexApiException('这个数据源不支持账号登录', statusCode: 501);
+  }
+
+  @override
+  Future<void> logout(String refreshToken) async {}
+
+  @override
   Future<ImportTarget> prepareImport(ImportSource source) async {
     throw const CortexApiException('测试替身不支持导入', statusCode: 501);
   }
@@ -606,4 +626,113 @@ class _GateApi implements CortexApi {
   @override
   Future<SyncPage> sync({required int since, int limit = 500}) =>
       throw UnimplementedError();
+}
+
+/// 记住 / 换回一对新令牌用的假后端。
+class _SessionApi extends _GateApi {
+  _SessionApi({this.refreshFails = false}) : super();
+
+  final bool refreshFails;
+  int loginCalls = 0;
+  int refreshCalls = 0;
+  int logoutCalls = 0;
+  String? lastRefreshSent;
+
+  AuthTokens _tokens(String suffix) => AuthTokens(
+    accessToken: 'access-$suffix',
+    accessExpiresInSecs: 900,
+    refreshToken: 'refresh-$suffix',
+    refreshExpiresInSecs: 2592000,
+    userId: 'u1',
+  );
+
+  @override
+  Future<AuthTokens> login(String username, String password) async {
+    loginCalls++;
+    return _tokens('1');
+  }
+
+  @override
+  Future<AuthTokens> refreshSession(String refreshToken) async {
+    refreshCalls++;
+    lastRefreshSent = refreshToken;
+    if (refreshFails) {
+      throw const CortexApiException('登录已过期，请重新登录', statusCode: 401);
+    }
+    return _tokens('2');
+  }
+
+  @override
+  Future<void> logout(String refreshToken) async {
+    logoutCalls++;
+    lastRefreshSent = refreshToken;
+  }
+}
+
+void _sessionTests() {
+  group('会话持久', () {
+    /// **续期必须存下新的那个。**
+    ///
+    /// 服务端每次刷新都轮转：旧的立刻作废。客户端存了旧的，下次启动就会
+    /// 拿一个已经作废的去换 —— 而那被判成**重放**，后果是整条链一起失效，
+    /// 用户看到的是「莫名其妙被登出，而且这次连密码都白输了」。
+    test('续期之后存下来的是新令牌，不是旧的', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      // 控制器 build 时会排一次探活，而那会递增 generation。不等它落定就
+      // 调用，我们这次的 generation 会被它作废，返回值变成「没续上」——
+      // 那是测试的时序问题，不是代码的
+      await Future<void>.delayed(Duration.zero);
+      final ok = await ctrl.restoreSession('refresh-old');
+
+      expect(ok, isTrue);
+      expect(api.lastRefreshSent, 'refresh-old', reason: '换的时候要用旧的');
+      expect(
+        c.read(authControllerProvider).refreshToken,
+        'refresh-2',
+        reason: '**存下来的必须是新的** —— 存旧的会在下次启动被判成重放，整条链一起废',
+      );
+      expect(c.read(authControllerProvider).token, 'access-2');
+    });
+
+    /// 凭据真的失效时落回登录页，而不是卡在半路。
+    test('续期失败就落回登录页', () async {
+      final api = _SessionApi(refreshFails: true);
+      final c = ProviderContainer(
+        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      final ok = await ctrl.restoreSession('refresh-dead');
+      expect(ok, isFalse);
+    });
+
+    /// **登出要让服务端作废，不能只删本地。**
+    ///
+    /// 只删本地是「这台机器忘了」，而已经泄露出去的那一份还能用到 30 天后。
+    test('登出会把作废请求发给服务端', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await ctrl.signInWithPassword('u', 'MySecretPass123');
+      expect(c.read(authControllerProvider).refreshToken, 'refresh-1');
+
+      await ctrl.signOut();
+      expect(api.logoutCalls, 1, reason: '只删本地副本不算登出');
+      expect(api.lastRefreshSent, 'refresh-1');
+      expect(c.read(authControllerProvider).refreshToken, isNull);
+    });
+  });
 }

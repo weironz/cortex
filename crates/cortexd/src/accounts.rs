@@ -109,6 +109,21 @@ impl AppState {
         Ok(user_id)
     }
 
+    /// 这个部署有几个账号。
+    ///
+    /// 只用来判断「是不是第一个」，所以不缓存 —— 它每次注册请求跑一次，
+    /// 而注册在这个产品里是极低频动作。
+    ///
+    /// # Errors
+    /// 没接数据库，或者查不动。
+    pub async fn user_count(&self) -> Result<i64, ApiError> {
+        let row = sqlx::query("SELECT count(*) AS n FROM cortex_auth.users")
+            .fetch_one(&self.accounts()?.pool)
+            .await
+            .map_err(|e| ApiError::internal(format!("数不出用户数：{e}")))?;
+        Ok(row.get("n"))
+    }
+
     /// 签一对新令牌。`family` 为 `None` 时开一条新链（登录）。
     async fn issue(
         &self,
@@ -341,11 +356,23 @@ pub async fn register(
     State(st): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<AuthTokens>, ApiError> {
-    if !open_registration() {
+    // **第一个账号永远放行。**
+    //
+    // 私有化部署的第一步是「把它跑起来」，而那时既没有邮箱通道、也可能
+    // 没有 shell（有人是点一个 compose 就部署完的）。要求先 SSH 上去跑
+    // `--create-user` 才能用，等于把一个纯运维的步骤塞进产品的第一分钟。
+    //
+    // 代价要说清楚：**一台刚部署好、还没建号、又直接暴露在公网上的机器，
+    // 第一个访问它的人会成为主人。** 这个窗口只在「部署完成」到「你注册」
+    // 之间，通常几秒，而且一旦关上就永远关上。不接受它的人应当先用
+    // `--create-user` 建号，再放通网络。
+    let bootstrapping = st.user_count().await? == 0;
+    if bootstrapping {
+        tracing::warn!("这是本部署的第一个账号，已跳过注册开关直接放行");
+    } else if !open_registration() {
         // 说清楚是「这个部署关着」而不是「你填错了」，否则对方会一直重试
         return Err(ApiError::forbidden(format!(
-            "这个部署没有开放注册。管理员可以设 {OPEN_REGISTRATION_ENV}={OPEN_REGISTRATION_ON} 打开，\
-             或者用 cortexd --create-user 直接建号"
+            "这个部署没有开放注册。管理员可以设 {OPEN_REGISTRATION_ENV}={OPEN_REGISTRATION_ON} 打开，             或者用 cortexd --create-user 直接建号"
         )));
     }
     let user_id = st.create_account(&req.username, &req.password).await?;

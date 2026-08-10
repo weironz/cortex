@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../import/import_source.dart';
+import '../models/auth_tokens.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
 import '../models/chat_event.dart';
@@ -167,6 +168,55 @@ class HttpCortexApi implements CortexApi {
       'before': ?before,
     }),
   );
+
+  @override
+  Future<AuthTokens> login(String username, String password) =>
+      _postAuth('/auth/login', {'username': username, 'password': password});
+
+  @override
+  Future<AuthTokens> refreshSession(String refreshToken) =>
+      _postAuth('/auth/refresh', {'refresh_token': refreshToken});
+
+  @override
+  Future<void> logout(String refreshToken) async {
+    try {
+      await _client.post(
+        _uri('/auth/logout'),
+        headers: _headers(const {'content-type': 'application/json'}),
+        body: jsonEncode({'refresh_token': refreshToken}),
+      );
+    } on Object catch (_) {
+      // 登出失败不该拦住用户离开。本地那份已经会被清掉，而服务端那条链
+      // 最多再活到过期 —— 把人卡在「退不出去」的界面上更糟
+    }
+  }
+
+  /// 三条账号端点形状一样：POST JSON，回 AuthTokens。
+  ///
+  /// **不带 Authorization 头**：它们在服务端是免认证的公开端点
+  /// （登录时本来就还没有凭据），带一个过期的 access token 反而会让
+  /// 请求被中间层拦下。
+  Future<AuthTokens> _postAuth(String path, Map<String, Object?> body) async {
+    final http.Response response;
+    try {
+      response = await _client.post(
+        _uri(path),
+        headers: const {
+          'content-type': 'application/json',
+          'accept': 'application/json',
+        },
+        body: jsonEncode(body),
+      );
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(response.statusCode, _errorMessage(response));
+    }
+    return AuthTokens.fromJson(
+      _decodeObject(path, utf8.decode(response.bodyBytes)),
+    );
+  }
 
   @override
   Future<ImportTarget> prepareImport(ImportSource source) async {

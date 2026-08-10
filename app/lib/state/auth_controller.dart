@@ -36,6 +36,7 @@ class AuthState {
     this.error,
     this.busy = false,
     this.remember = false,
+    this.refreshToken,
   });
 
   final AuthPhase phase;
@@ -61,6 +62,14 @@ class AuthState {
   /// where [kCanRememberToken] is true.
   final bool remember;
 
+  /// 长效凭据。**只有它值得存**，而且只存在系统凭据库里。
+  ///
+  /// 留在 state 里是为了两件事：续期时拿它去换，以及登出时告诉服务端
+  /// 「作废这条链」—— 后者是本地删掉一份副本做不到的。
+  ///
+  /// 同样被 [toString] 抹掉。
+  final String? refreshToken;
+
   bool get isReady => phase == AuthPhase.ready;
 
   /// True when the daemon told us it accepts anybody who can reach the port.
@@ -73,6 +82,7 @@ class AuthState {
     Object? error = _sentinel,
     bool? busy,
     bool? remember,
+    Object? refreshToken = _sentinel,
   }) => AuthState(
     phase: phase ?? this.phase,
     token: token == _sentinel ? this.token : token as String?,
@@ -80,6 +90,9 @@ class AuthState {
     error: error == _sentinel ? this.error : error as String?,
     busy: busy ?? this.busy,
     remember: remember ?? this.remember,
+    refreshToken: refreshToken == _sentinel
+        ? this.refreshToken
+        : refreshToken as String?,
   );
 
   static const Object _sentinel = Object();
@@ -204,6 +217,74 @@ class AuthController extends Notifier<AuthState> {
     }
   }
 
+  /// 用户名 + 密码登录。
+  ///
+  /// 拿回来的 refresh token 存进系统凭据库，于是**下次打开不用再登录**。
+  /// access token 留在内存里 —— 它 15 分钟就过期，存下来没有意义，
+  /// 而每多一处副本就多一处泄露面。
+  Future<void> signInWithPassword(String username, String password) async {
+    if (username.trim().isEmpty || password.isEmpty) return;
+    final generation = ++_generation;
+    state = state.copyWith(busy: true, error: null);
+
+    final api = _probeApi(token: null);
+    try {
+      final tokens = await api.login(username.trim(), password);
+      if (!_alive(generation)) return;
+      // 先存再进主界面：反过来的话，存储失败会发生在用户已经"看起来登录了"
+      // 之后，而他要到下次打开才发现自己没被记住
+      if (kCanRememberToken) await rememberToken(tokens.refreshToken);
+      if (!_alive(generation)) return;
+      state = state.copyWith(
+        phase: AuthPhase.ready,
+        token: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        busy: false,
+        error: null,
+        remember: true,
+      );
+    } on CortexApiException catch (e) {
+      if (!_alive(generation)) return;
+      state = state.copyWith(busy: false, error: e.message);
+    } finally {
+      api.dispose();
+    }
+  }
+
+  /// 拿存下来的 refresh token 换一对新的 —— **启动时走这条**。
+  ///
+  /// 成功就直接进主界面，用户什么都不用做；失败（过期 30 天、被登出、
+  /// 或者服务端检测到重放把整条链废了）就落回登录页，并把凭据清掉 ——
+  /// 留着一个已经作废的 token 只会让每次启动都白跑一次失败的请求。
+  ///
+  /// 返回是否续上了。
+  Future<bool> restoreSession(String refreshToken) async {
+    final generation = ++_generation;
+    final api = _probeApi(token: null);
+    try {
+      final tokens = await api.refreshSession(refreshToken);
+      if (!_alive(generation)) return false;
+      if (kCanRememberToken) await rememberToken(tokens.refreshToken);
+      state = state.copyWith(
+        phase: AuthPhase.ready,
+        token: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        busy: false,
+        error: null,
+        remember: true,
+      );
+      return true;
+    } on CortexApiException catch (e) {
+      if (!_alive(generation)) return false;
+      // 连不上**不算凭据失效**。清掉一个其实还有效的 token，
+      // 会让「服务端暂时没起来」变成「你被登出了」
+      if (!e.isUnreachable && kCanRememberToken) await forgetToken();
+      return false;
+    } finally {
+      api.dispose();
+    }
+  }
+
   /// Validates [rawToken] and, if the daemon accepts it, opens the app.
   ///
   /// ## Why `POST /auth/ticket` is the probe
@@ -287,11 +368,25 @@ class AuthController extends Notifier<AuthState> {
 
   /// Explicit sign-out. Drops the in-memory credential and any stored copy.
   Future<void> signOut() async {
+    // **先告诉服务端作废，再删本地那份。**
+    //
+    // 只删本地只是「这台机器忘了」——已经泄露出去的那一份照样能用到 30 天后。
+    // 顺序也不能反：先删本地就没有凭据去请求作废了。
+    final refresh = state.refreshToken;
+    if (refresh != null) {
+      final api = _probeApi(token: null);
+      try {
+        await api.logout(refresh);
+      } finally {
+        api.dispose();
+      }
+    }
     if (kCanRememberToken) await forgetToken();
     if (!ref.mounted) return;
     state = state.copyWith(
       phase: AuthPhase.needsToken,
       token: null,
+      refreshToken: null,
       error: null,
       remember: false,
     );
