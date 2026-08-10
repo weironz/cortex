@@ -52,6 +52,10 @@ RUN set -eux; \
 COPY crates/ crates/
 COPY evals/ evals/
 COPY migrations/ migrations/
+# 全局 schema（cortex_auth）的 migration。**漏了这行会在编译期就炸** ——
+# `sqlx::migrate!` 是宏，目录不在构建上下文里就没得编译，
+# 而本机构建照样是绿的（目录在那儿）。v0.1.5 发版时实际撞到过
+COPY migrations-global/ migrations-global/
 
 # 触碰一下自家 crate 的时间戳，否则 cargo 会拿上一步的空壳当成已构建
 RUN set -eux; \
@@ -101,6 +105,7 @@ COPY --from=sqlx    /usr/local/cargo/bin/sqlx     /usr/local/bin/sqlx
 # migration 随镜像走：`just prod-migrate` 直接在容器里跑，
 # 部署机上不需要另外弄一份仓库
 COPY --from=builder /build/migrations /opt/cortex/migrations
+COPY --from=builder /build/migrations-global /opt/cortex/migrations-global
 
 # embedding 模型缓存。挂成卷，避免每次重建镜像都重下 590 MB
 ENV FASTEMBED_CACHE_DIR=/var/lib/cortex/models
