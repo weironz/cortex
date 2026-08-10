@@ -436,7 +436,13 @@ impl AppState {
                         hash: hash.to_owned(),
                         mime: mime.to_owned(),
                         size_bytes,
-                        storage_key: cortex_blob::hash::storage_key(hash)?,
+                        // 与 blobs::MediaStore 用的是同一个前缀 —— 那边写对象，
+                        // 这边写指向它的那一行，两者必须一致
+                        storage_key: cortex_blob::hash::storage_key(
+                            &cortex_blob::TenantPrefix::new("public")
+                                .expect("public 是合法的租户前缀"),
+                            hash,
+                        )?,
                     })
                     .await?;
 

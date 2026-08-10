@@ -7,6 +7,7 @@ mod auth;
 mod backfill;
 mod blobs;
 mod cors;
+mod credentials;
 mod cursor;
 mod import;
 mod live;

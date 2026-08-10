@@ -1,0 +1,29 @@
+# 行尾必须稳定，否则 migration 的校验和会随平台变
+#
+# sqlx 的 checksum 是对**文件字节**算的。没有这个文件时，Windows 上
+# `core.autocrlf=true` 会把检出的 .sql 变成 CRLF，而 Linux 上是 LF ——
+# 同一个 migration 在两边算出两个校验和。
+#
+# 症状是 `migration … was previously applied but has been modified`，
+# 而 cortexd 启动时跑 migration，所以那条错误的实际表现是**服务起不来**。
+# 实测撞到过一次：一个 `git stash` 往返就足以把工作区文件换成 CRLF。
+*.sql text eol=lf
+
+# 同理：脚本在容器里跑，CRLF 会让 shebang 变成 `#!/bin/sh\r`，
+# 报的错是「没有那个文件或目录」，指着一个明明存在的解释器
+*.sh text eol=lf
+Justfile text eol=lf
+
+# Rust / Dart / 配置：统一 LF，免得 diff 里出现整文件变更
+*.rs text eol=lf
+*.dart text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+
+# 二进制别碰
+*.png binary
+*.jpg binary
+*.ico binary
+*.zst binary

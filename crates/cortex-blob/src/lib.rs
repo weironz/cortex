@@ -7,7 +7,9 @@
 //!
 //! key 由内容决定，于是：
 //!
-//! - **天然去重**：同一张图被十个 episode 引用，磁盘上只有一份
+//! - **天然去重**：同一张图被十个 episode 引用，磁盘上只有一份 ——
+//!   但**只在同一租户之内**。key 带租户前缀（见 [`hash::storage_key`]），
+//!   跨租户的去重是被刻意放弃的，换掉的是一整类跨 schema 的 GC bug
 //! - **天然幂等**：上传中断后整段重放即可，不需要断点续传协议 ——
 //!   这正是 `docs/memory.md` §九「blob 三步固定顺序、中断按队列重放」成立的前提
 //! - **天然不可变**：一个 key 的字节永远是同一份，「旧版本」这个概念
@@ -40,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 pub use error::{BlobError, Result};
+pub use hash::TenantPrefix;
 pub use local::LocalFsBlobStore;
 pub use media::{MediaMeta, probe as probe_media};
 pub use s3::{MULTIPART_PART_SIZE, MULTIPART_THRESHOLD, S3BlobStore, S3Options};
@@ -56,8 +59,8 @@ pub struct BlobRef {
     pub hash: String,
     pub mime: String,
     pub size_bytes: i64,
-    /// 对象 key。存进 `blobs.storage_key`，由 [`hash::storage_key`] 派生；
-    /// 两个后端共用同一套布局，因此换后端不必回写这一列。
+    /// 对象 key。存进 `blobs.storage_key`，由 [`hash::storage_key`] 从
+    /// 「租户前缀 + 哈希」派生；两个后端共用同一套布局，因此换后端不必回写这一列。
     pub storage_key: String,
     /// 本次写入是否命中了已有对象（即：没有真的上传字节）。
     ///

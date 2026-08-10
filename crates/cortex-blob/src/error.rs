@@ -16,6 +16,15 @@ pub enum BlobError {
     #[error("非法 blob 哈希：{0}")]
     InvalidHash(String),
 
+    /// 租户前缀不是合法的 Postgres 未加引号标识符。
+    ///
+    /// 与 [`InvalidHash`](Self::InvalidHash) 并列而不是合并成一个变体：
+    /// 二者的**来源**完全不同——坏哈希多半是客户端传错了，坏租户前缀只可能
+    /// 是服务端自己拼错了 schema 名（前缀从不来自请求体）。日志里混成一条，
+    /// 「用户传了脏数据」与「我们的租户注册表出了问题」就再也分不开。
+    #[error("非法租户前缀：{0}")]
+    InvalidTenant(String),
+
     #[error("blob 不存在：{0}")]
     NotFound(String),
 
@@ -56,6 +65,9 @@ impl From<BlobError> for cortex_core::CortexError {
                 id: hash,
             },
             BlobError::InvalidHash(_) | BlobError::InvalidRange(_) => Self::Invalid(e.to_string()),
+            // InvalidTenant 刻意**不**归到 Invalid：它落在 `other` 里变成 500。
+            // 租户前缀不来自请求体，它是服务端自己从租户注册表取出来的，
+            // 回 400 等于让客户端去改一个它根本没发过的字段。
             other => Self::Store(other.to_string()),
         }
     }
@@ -74,6 +86,8 @@ mod tests {
             (BlobError::NotFound("abc".into()), 404),
             (BlobError::InvalidHash("../x".into()), 400),
             (BlobError::InvalidRange("9..4".into()), 400),
+            // 500 而非 400：租户前缀是服务端自己拼的，客户端无从修正
+            (BlobError::InvalidTenant("../x".into()), 500),
             (BlobError::Backend("rustfs down".into()), 500),
             (BlobError::Unsupported("presign"), 500),
         ];

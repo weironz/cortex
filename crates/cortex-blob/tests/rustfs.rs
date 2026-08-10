@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cortex_blob::{
-    BlobError, BlobStore, MULTIPART_THRESHOLD, S3BlobStore, S3Options,
+    BlobError, BlobStore, MULTIPART_THRESHOLD, S3BlobStore, S3Options, TenantPrefix,
     hash::{self, sha256_hex},
 };
 
@@ -40,6 +40,9 @@ async fn store() -> Option<S3BlobStore> {
         access_key: std::env::var("RUSTFS_ACCESS_KEY").unwrap_or_else(|_| "cortexadmin".into()),
         secret_key: std::env::var("RUSTFS_SECRET_KEY").unwrap_or_else(|_| "cortex_dev_only".into()),
         force_path_style: true,
+        // 用固定租户而不是每次随机：随机前缀会在桶里留下一堆再也没人清理的空前缀，
+        // 而这些测试本就靠 unique_payload 做实例间隔离，不需要再靠租户隔离一次。
+        tenant: TenantPrefix::new("cortex_test").expect("测试租户前缀本身应合法"),
     };
 
     let s = S3BlobStore::new(&opts).expect("S3Options 本身不合法，这与 RustFS 是否在跑无关");
@@ -103,8 +106,8 @@ async fn image_round_trips_through_rustfs() {
     );
     assert_eq!(
         r.storage_key,
-        hash::storage_key(&r.hash).unwrap(),
-        "storage_key 必须由哈希派生 —— 它要写进 blobs.storage_key 并对两个后端通用"
+        hash::storage_key(s.tenant(), &r.hash).unwrap(),
+        "storage_key 必须由「租户前缀 + 哈希」派生 —— 它要写进 blobs.storage_key 并对两个后端通用"
     );
 
     let got = s.get(&r.hash).await.expect("按哈希取回失败");

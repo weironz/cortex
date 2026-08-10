@@ -16,6 +16,13 @@ use crate::txn::WriteTxn;
 /// 刻意不用 —— 见 crate 级文档）。
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
+/// **整个部署只跑一遍**的那一套：账号、令牌、邀请、用量。
+///
+/// 与 [`MIGRATOR`] 分开是多租户逼出来的：那一套每个租户各跑一遍，
+/// 而这一套是跨租户的。混在一起时，新租户建号会跑到 `cortex_auth.users`
+/// 那条上撞 `relation already exists` —— 而失败点在建号中途。
+static GLOBAL_MIGRATOR: Migrator = sqlx::migrate!("../../migrations-global");
+
 /// 默认连接池上限。写事务被 advisory lock 串行化，池子不需要很大；
 /// 富余的连接留给读路径（四路召回会并发发多条查询）。
 const DEFAULT_MAX_CONNECTIONS: u32 = 16;
@@ -55,6 +62,46 @@ impl Store {
         Ok(())
     }
 
+    /// 跑全局那一套（`cortex_auth`）。整个部署一次，不是每租户一次。
+    ///
+    /// # 为什么要单独连一次而不是用现成的池
+    ///
+    /// 它的 `_sqlx_migrations` 必须落在 `cortex_auth` 里，否则会与租户那套
+    /// 在 `public` 里的版本表撞在一起 —— 两套各有各的版本号，混在一张表里
+    /// 的表现是「某一套被认为已经应用过」，也就是**表没建但以为建了**。
+    ///
+    /// 而 `search_path` 是连接级的属性，改不了现成的池。
+    ///
+    /// # Errors
+    /// 连不上、建不出 `cortex_auth`，或者哪条 migration 跑不过。
+    pub async fn migrate_global(database_url: &str) -> Result<()> {
+        use std::str::FromStr as _;
+
+        // 先把 schema 建出来：`_sqlx_migrations` 要落在里面，而那发生在
+        // 第一条 migration 之前 —— 让 migration 自己建就晚了一步
+        let boot = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(database_url)
+            .await?;
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS cortex_auth")
+            .execute(&boot)
+            .await?;
+        boot.close().await;
+
+        let options = sqlx::postgres::PgConnectOptions::from_str(database_url)
+            .map_err(|e| crate::error::StoreError::Invalid(format!("DATABASE_URL 不合法：{e}")))?
+            // public 留在尾部：`ulid` / `sha256` 这两个 DOMAIN 装在那儿
+            .options([("search_path", "cortex_auth,public")]);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        let result = GLOBAL_MIGRATOR.run(&pool).await;
+        pool.close().await;
+        result?;
+        Ok(())
+    }
+
     /// 探活。
     pub async fn ping(&self) -> Result<()> {
         sqlx::query("SELECT 1").execute(&self.pool).await?;
@@ -64,6 +111,11 @@ impl Store {
     /// 关闭连接池，等待在途查询结束。
     pub async fn close(&self) {
         self.pool.close().await;
+    }
+
+    #[doc(hidden)]
+    pub fn debug_pool(&self) -> &PgPool {
+        &self.pool
     }
 
     pub(crate) fn pool(&self) -> &PgPool {

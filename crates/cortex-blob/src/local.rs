@@ -22,23 +22,38 @@ use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use url::Url;
 
-use crate::{BlobError, BlobRef, BlobStore, Result, hash, media, validate_range, validate_ttl};
+use crate::{
+    BlobError, BlobRef, BlobStore, Result, hash, hash::TenantPrefix, media, validate_range,
+    validate_ttl,
+};
 
-/// 按哈希前缀分目录的本地存储。
+/// 按哈希前缀分目录的本地存储。一个实例服务一个租户。
 #[derive(Debug, Clone)]
 pub struct LocalFsBlobStore {
     root: PathBuf,
+    tenant: TenantPrefix,
 }
 
 impl LocalFsBlobStore {
-    /// 以 `root` 为根建库。目录不存在则创建。
+    /// 以 `root` 为根、`tenant` 为租户建库。目录不存在则创建。
+    ///
+    /// # 为什么租户绑在构造期，而不是每个方法多带一个参数
+    ///
+    /// 「传错租户」在运行期是彻底静默的：写进去的对象取不回来，取回来的是
+    /// 别人的，两种都不报错。而这个 store 的实际调用方是 cortexd 的**每用户
+    /// 实例注册表**——租户在那里查一次就定下来了，之后每一次读写都用同一个。
+    /// 把它做成构造参数，等于把「每次调用都可能传错」压缩成「创建实例时错一次」，
+    /// 而那一处恰好是唯一能拿到用户身份、也唯一有条件校验的地方。
+    ///
+    /// 参数类型是 [`TenantPrefix`] 而非 `&str`：校验因此发生在**更外面**
+    /// （构造 `TenantPrefix` 那一刻），这里拿到的已是「被证明安全」的值。
     ///
     /// # Errors
     /// 根目录建不出来时返回 [`BlobError::Io`]。
-    pub async fn new(root: impl Into<PathBuf>) -> Result<Self> {
+    pub async fn new(root: impl Into<PathBuf>, tenant: TenantPrefix) -> Result<Self> {
         let root = root.into();
         tokio::fs::create_dir_all(&root).await?;
-        Ok(Self { root })
+        Ok(Self { root, tenant })
     }
 
     #[must_use]
@@ -46,12 +61,24 @@ impl LocalFsBlobStore {
         &self.root
     }
 
+    /// 本实例服务的租户。对象都落在 `root/<tenant>/` 之下。
+    #[must_use]
+    pub fn tenant(&self) -> &TenantPrefix {
+        &self.tenant
+    }
+
+    fn key_of(&self, hash: &str) -> Result<String> {
+        hash::storage_key(&self.tenant, hash)
+    }
+
     /// 哈希 → 绝对路径。
     ///
-    /// 安全性全靠 [`hash::storage_key`] 里那道校验：key 里只可能有
-    /// 十六进制字符与我们自己插的 `/`，因此 `root.join(key)` 绝无可能逃出 root。
+    /// 安全性全靠 [`hash::storage_key`] 那一侧的两道校验：租户前缀在构造
+    /// [`TenantPrefix`] 时已被限定为 Postgres 标识符字符集，哈希在此处逐次校验，
+    /// 于是 key 里只可能有小写字母数字下划线与我们自己插的 `/`，
+    /// `root.join(key)` 绝无可能逃出 root。
     fn path_of(&self, hash: &str) -> Result<PathBuf> {
-        Ok(self.root.join(hash::storage_key(hash)?))
+        Ok(self.root.join(self.key_of(hash)?))
     }
 }
 
@@ -59,7 +86,7 @@ impl LocalFsBlobStore {
 impl BlobStore for LocalFsBlobStore {
     async fn put(&self, bytes: Bytes, declared_mime: Option<&str>) -> Result<BlobRef> {
         let digest = hash::sha256_hex(&bytes);
-        let storage_key = hash::storage_key(&digest)?;
+        let storage_key = self.key_of(&digest)?;
         let path = self.root.join(&storage_key);
 
         let meta = media::probe(&bytes);
@@ -195,9 +222,16 @@ impl BlobStore for LocalFsBlobStore {
 mod tests {
     use super::*;
 
+    /// 测试统一用 `public` —— roadmap R9 定的 1 号用户 schema 名就是它。
+    const TEST_TENANT: &str = "public";
+
+    fn tenant(s: &str) -> TenantPrefix {
+        TenantPrefix::new(s).unwrap_or_else(|e| panic!("{s:?} 本该是合法租户前缀，却被拒了：{e}"))
+    }
+
     async fn store() -> (LocalFsBlobStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("建临时目录失败");
-        let s = LocalFsBlobStore::new(dir.path())
+        let s = LocalFsBlobStore::new(dir.path(), tenant(TEST_TENANT))
             .await
             .expect("建 LocalFsBlobStore 失败");
         (s, dir)
@@ -240,10 +274,53 @@ mod tests {
             on_disk.display()
         );
         assert!(
+            r.storage_key.starts_with(&format!(
+                "{TEST_TENANT}/blobs/{}/{}/",
+                &r.hash[0..2],
+                &r.hash[2..4]
+            )),
+            "storage_key 应是「租户 / blobs / 哈希两级前缀」，实际是 {}",
             r.storage_key
-                .starts_with(&format!("blobs/{}/{}/", &r.hash[0..2], &r.hash[2..4])),
-            "storage_key 应按哈希两级前缀分目录，实际是 {}",
-            r.storage_key
+        );
+    }
+
+    #[tokio::test]
+    async fn two_tenants_sharing_a_root_stay_separate() {
+        // 同一台机器上两个用户的 store 会共用一个 root。跨租户去重已被刻意放弃，
+        // 所以同一份字节必须在磁盘上留下两份、互不可见 —— 否则 A 的 purge
+        // 会删掉 B 还在引用的对象，而 A 的 schema 里根本看不到 B 的引用。
+        let dir = tempfile::tempdir().expect("建临时目录失败");
+        let a = LocalFsBlobStore::new(dir.path(), tenant("public"))
+            .await
+            .unwrap();
+        let b = LocalFsBlobStore::new(dir.path(), tenant("cortex_u2"))
+            .await
+            .unwrap();
+        let payload = Bytes::from_static(b"one file, two owners");
+
+        let ra = a.put(payload.clone(), None).await.expect("A 写入失败");
+        let rb = b.put(payload.clone(), None).await.expect("B 写入失败");
+
+        assert_eq!(ra.hash, rb.hash, "内容寻址下哈希本身仍应与租户无关");
+        assert_ne!(
+            ra.storage_key, rb.storage_key,
+            "两个租户的 storage_key 必须不同，否则 A 的 purge 会删掉 B 的字节"
+        );
+        assert!(
+            !rb.deduplicated,
+            "B 的写入不该命中 A 已经写下的对象 —— 跨租户去重正是这次要去掉的东西"
+        );
+
+        // 互不可见这一半更要紧：A 删干净之后 B 必须完好
+        a.delete(&ra.hash).await.expect("A 删除失败");
+        assert!(
+            !a.exists(&ra.hash).await.unwrap(),
+            "A 删除后自己这份不该还在"
+        );
+        assert_eq!(
+            b.get(&rb.hash).await.expect("A 的删除波及了 B 的对象"),
+            payload,
+            "A 的 purge 不得影响 B 的字节"
         );
     }
 

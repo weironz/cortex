@@ -53,6 +53,7 @@ mod query;
 mod recall;
 mod store;
 mod sync;
+mod tenant;
 mod txn;
 
 pub use error::{Result, StoreError};
@@ -72,6 +73,7 @@ pub use query::EpisodeCursor;
 pub use recall::RECALL_VECTOR_SQL;
 pub use store::{SessionDigest, Store};
 pub use sync::{SyncLogEntry, SyncNotifications, SyncPayload, SyncRecord, SyncSignal};
+pub use tenant::{MAX_RESIDENT_TENANTS, PER_TENANT_CONNECTIONS, SchemaName, TenantPools};
 pub use txn::{SYNC_ADVISORY_LOCK_KEY, WriteTxn};
 
 /// 向量维度，对应 `bge-m3`。换模型见 docs/memory.md §七。

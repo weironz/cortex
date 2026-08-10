@@ -20,7 +20,10 @@ use aws_sdk_s3::{
 use bytes::Bytes;
 use url::Url;
 
-use crate::{BlobError, BlobRef, BlobStore, Result, hash, media, validate_range, validate_ttl};
+use crate::{
+    BlobError, BlobRef, BlobStore, Result, hash, hash::TenantPrefix, media, validate_range,
+    validate_ttl,
+};
 
 /// 走 multipart 的体积门槛。
 ///
@@ -68,13 +71,24 @@ pub struct S3Options {
     ///
     /// **对 RustFS / MinIO 必须为 `true`**，理由见 [`S3BlobStore::new`]。
     pub force_path_style: bool,
+    /// 本实例服务的租户，会成为 object key 的首段。
+    ///
+    /// 与 endpoint / bucket 并列放进 `S3Options`，而不是给 [`S3BlobStore::new`]
+    /// 单开一个参数：这几样东西的生命周期是一样的（一个 store 实例一份，
+    /// 建完就不再变），拆成两处只会让「建 store 需要哪些东西」这件事有两个答案。
+    pub tenant: TenantPrefix,
 }
 
 impl S3Options {
-    /// 由 [`cortex_core::config::S3Config`] 构造。默认开 path-style ——
+    /// 由 [`cortex_core::config::S3Config`] 与租户构造。默认开 path-style ——
     /// 自建对象存储是本项目的默认部署形态，而它们清一色只认 path-style。
+    ///
+    /// 租户是独立参数而非取自 `S3Config`：endpoint / bucket / 密钥是**整个进程
+    /// 一份**的部署配置，租户却是**每用户一份**的运行期身份。塞进同一个配置
+    /// 结构体，就等于暗示它也能从环境变量里读一个全局值出来——而那恰好是
+    /// 多租户下最不该发生的事。
     #[must_use]
-    pub fn from_config(cfg: &cortex_core::config::S3Config) -> Self {
+    pub fn from_config(cfg: &cortex_core::config::S3Config, tenant: TenantPrefix) -> Self {
         Self {
             endpoint: cfg.endpoint.clone(),
             bucket: cfg.bucket.clone(),
@@ -82,6 +96,7 @@ impl S3Options {
             access_key: cfg.access_key.clone(),
             secret_key: cfg.secret_key.clone(),
             force_path_style: true,
+            tenant,
         }
     }
 }
@@ -91,6 +106,7 @@ impl S3Options {
 pub struct S3BlobStore {
     client: Client,
     bucket: String,
+    tenant: TenantPrefix,
 }
 
 /// 手写而非 derive：`Client` 的 `Debug` 会把整份 SDK 配置
@@ -100,6 +116,7 @@ impl std::fmt::Debug for S3BlobStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3BlobStore")
             .field("bucket", &self.bucket)
+            .field("tenant", &self.tenant)
             .finish_non_exhaustive()
     }
 }
@@ -171,12 +188,23 @@ impl S3BlobStore {
         Ok(Self {
             client: Client::from_conf(builder.build()),
             bucket: opts.bucket.clone(),
+            tenant: opts.tenant.clone(),
         })
     }
 
     #[must_use]
     pub fn bucket(&self) -> &str {
         &self.bucket
+    }
+
+    /// 本实例服务的租户。对象都落在 `<tenant>/` 这一前缀之下。
+    #[must_use]
+    pub fn tenant(&self) -> &TenantPrefix {
+        &self.tenant
+    }
+
+    fn key_of(&self, hash: &str) -> Result<String> {
+        hash::storage_key(&self.tenant, hash)
     }
 
     /// 桶不存在则创建。幂等，可在每次启动时无条件调用。
@@ -313,7 +341,7 @@ impl S3BlobStore {
 impl BlobStore for S3BlobStore {
     async fn put(&self, bytes: Bytes, declared_mime: Option<&str>) -> Result<BlobRef> {
         let digest = hash::sha256_hex(&bytes);
-        let storage_key = hash::storage_key(&digest)?;
+        let storage_key = self.key_of(&digest)?;
 
         let meta = media::probe(&bytes);
         let mime = meta.resolve_mime(declared_mime);
@@ -359,7 +387,7 @@ impl BlobStore for S3BlobStore {
     }
 
     async fn get(&self, hash: &str) -> Result<Bytes> {
-        let key = hash::storage_key(hash)?;
+        let key = self.key_of(hash)?;
         let out = self
             .client
             .get_object()
@@ -374,7 +402,7 @@ impl BlobStore for S3BlobStore {
 
     async fn get_range(&self, hash: &str, range: Range<u64>) -> Result<Bytes> {
         validate_range(&range)?;
-        let key = hash::storage_key(hash)?;
+        let key = self.key_of(hash)?;
 
         // HTTP Range 的两端都是闭的，Rust 的 Range 是左闭右开 —— 差一位错在这里
         // 最容易发生，而症状是「视频每段少最后一帧」这种没人会归因到存储层的问题。
@@ -394,7 +422,7 @@ impl BlobStore for S3BlobStore {
     }
 
     async fn presign_put(&self, hash: &str, ttl: Duration) -> Result<Url> {
-        let key = hash::storage_key(hash)?;
+        let key = self.key_of(hash)?;
         let cfg = Self::presign_cfg(ttl)?;
 
         // 刻意不设 content_type / content_length：presign 会把请求头一并签进
@@ -414,7 +442,7 @@ impl BlobStore for S3BlobStore {
     }
 
     async fn presign_get(&self, hash: &str, ttl: Duration) -> Result<Url> {
-        let key = hash::storage_key(hash)?;
+        let key = self.key_of(hash)?;
         let cfg = Self::presign_cfg(ttl)?;
 
         let req = self
@@ -430,7 +458,7 @@ impl BlobStore for S3BlobStore {
     }
 
     async fn exists(&self, hash: &str) -> Result<bool> {
-        let key = hash::storage_key(hash)?;
+        let key = self.key_of(hash)?;
         match self
             .client
             .head_object()
@@ -451,7 +479,7 @@ impl BlobStore for S3BlobStore {
     }
 
     async fn delete(&self, hash: &str) -> Result<()> {
-        let key = hash::storage_key(hash)?;
+        let key = self.key_of(hash)?;
         // S3 的 DeleteObject 对不存在的 key 也返回 204，天然幂等 ——
         // 正合 purge 级联清除任务「可重跑」的要求。
         self.client
@@ -531,6 +559,8 @@ async fn collect(body: ByteStream) -> Result<Bytes> {
 mod tests {
     use super::*;
 
+    const TEST_TENANT: &str = "public";
+
     fn opts() -> S3Options {
         S3Options {
             endpoint: "http://localhost:9010".into(),
@@ -539,6 +569,7 @@ mod tests {
             access_key: "k".into(),
             secret_key: "s".into(),
             force_path_style: true,
+            tenant: TenantPrefix::new(TEST_TENANT).expect("测试租户前缀本身应合法"),
         }
     }
 
@@ -634,8 +665,8 @@ mod tests {
             "开启 path-style 后 host 应保持为 endpoint 原样"
         );
         assert!(
-            url.path().starts_with("/cortex-blobs/blobs/"),
-            "开启 path-style 后桶名应在路径首段，实际是 {}",
+            url.path().starts_with("/cortex-blobs/public/blobs/"),
+            "开启 path-style 后路径应是「桶名 / 租户 / blobs」，实际是 {}",
             url.path()
         );
 
@@ -648,6 +679,37 @@ mod tests {
             Some("cortex-blobs.localhost"),
             "关掉 path-style 后桶名会被拼成子域名 —— 这正是 RustFS 上 DNS 解析失败的成因，\
              报出来的错误里既没有桶名也没有 addressing style 字样，极难归因"
+        );
+    }
+
+    /// 租户前缀必须真的进到**签名后的 URL** 里。
+    ///
+    /// 单独验这一处，是因为 presign 是唯一一条不经 `put`/`get` 就能把 key 送出去的
+    /// 路径：若哪天它绕开了 `key_of`，客户端就会拿着一个不带租户的 URL 直传，
+    /// 而那份字节会落在别人的前缀下 —— 服务端这边全程无错可报。
+    #[tokio::test]
+    async fn tenant_prefix_reaches_the_signed_url() {
+        let h = hash::sha256_hex(b"tenant in url");
+        let ttl = Duration::from_secs(60);
+
+        let mut other = opts();
+        other.tenant = TenantPrefix::new("cortex_u2").unwrap();
+
+        let a = S3BlobStore::new(&opts()).unwrap();
+        let b = S3BlobStore::new(&other).unwrap();
+
+        let ua = a.presign_get(&h, ttl).await.unwrap();
+        let ub = b.presign_get(&h, ttl).await.unwrap();
+
+        assert!(
+            ua.path().contains("/public/blobs/"),
+            "签出的 URL 里没有租户前缀，客户端直传会落到无租户的 key 上：{}",
+            ua.path()
+        );
+        assert_ne!(
+            ua.path(),
+            ub.path(),
+            "两个租户对同一份内容签出了同一个 key —— 直传会互相覆盖"
         );
     }
 

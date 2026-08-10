@@ -31,6 +31,13 @@ pub enum StoreError {
     #[error("{kind} {id} 没有声明任何源 —— 派生物必须带血缘（docs/memory-content.md §5.3）")]
     MissingProvenance { kind: &'static str, id: String },
 
+    /// 调用方给的东西不对（schema 名不合法、租户池满了）。
+    ///
+    /// 与 [`Self::Sql`] 分开是有用的：那些是「数据库那边出事了」，
+    /// 该重试或者告警；这一类是「你这么问不对」，重试多少次都一样。
+    #[error("{0}")]
+    Invalid(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

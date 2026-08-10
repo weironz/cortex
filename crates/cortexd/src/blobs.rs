@@ -85,7 +85,7 @@ impl MediaStore {
         }
 
         let root = std::env::var(LOCAL_ROOT_ENV).unwrap_or_else(|_| LOCAL_ROOT_DEFAULT.to_string());
-        match LocalFsBlobStore::new(&root).await {
+        match LocalFsBlobStore::new(&root, Self::current_tenant()).await {
             Ok(local) => {
                 tracing::warn!(root, "对象存储已回落到本地文件系统");
                 Self {
@@ -105,8 +105,20 @@ impl MediaStore {
         }
     }
 
+    /// 过渡期的租户前缀。
+    ///
+    /// 现在整个部署只有 1 号用户，而他的 schema 名就是 `public`
+    /// （见 `migrations-global/20260810000002` 的文件头：存量数据不搬家）。
+    /// 所以对象 key 的前缀也取 `public` —— **两者必须是同一个字符串**，
+    /// 不然「这个用户的对象」与「这个用户的行」会指向两个不同的命名空间。
+    ///
+    /// 多用户接线之后这里换成从请求里取出的租户，而不是加一个 env。
+    fn current_tenant() -> cortex_blob::TenantPrefix {
+        cortex_blob::TenantPrefix::new("public").expect("public 是合法的租户前缀")
+    }
+
     async fn try_s3(cfg: &cortex_core::config::S3Config) -> cortex_blob::Result<S3BlobStore> {
-        let store = S3BlobStore::new(&S3Options::from_config(cfg))?;
+        let store = S3BlobStore::new(&S3Options::from_config(cfg, Self::current_tenant()))?;
         // ensure_bucket 是第一次真实网络调用，兼作连通性探针 ——
         // 构造本身不访问网络，光构造成功证明不了对端活着
         store.ensure_bucket().await?;
