@@ -77,8 +77,18 @@ impl AppState {
     pub async fn create_account(&self, username: &str, password: &str) -> Result<String, ApiError> {
         let hash = hash_password(password).map_err(|e| ApiError::bad_request(e.to_string()))?;
         let user_id = cortex_core::Id::new().to_string();
-        let schema = cortex_store::SchemaName::derive(&user_id)
-            .map_err(|e| ApiError::internal(e.to_string()))?;
+
+        // **第一个账号落在 `public` 上，不另开 schema。**
+        //
+        // 那片库里已经有东西了 —— 一个自托管的人是先用了几个月、
+        // 后来才建账号的。给他也 derive 一个新 schema，等于他建完号
+        // 一登录，几个月的记忆全部消失（库还在，只是没有任何一条路
+        // 通向它了）。而这**不报错**：会话列表就是空的，看着像新装的。
+        //
+        // 端到端跑一次才发现：老 token 建号之后指向了 `u_01kz…`，
+        // 而存量数据在 `public`。设计里本来就写着「1 号用户的 schema 名
+        // 就叫 public，存量数据不搬家」，是实现漏了这一支。
+        let schema = schema_for_new_account(&user_id, self.user_count().await? == 0)?;
 
         // schema 先行。失败时还没有任何账号记录，重试即可 ——
         // 而反过来会留下一个登不进去的账号
@@ -276,11 +286,45 @@ impl AccessBook {
     }
 
     /// 这个 token 属于谁。过期或不认识都返回 `None`。
+    /// 只给测试用的签发口。
+    ///
+    /// `issue` 是私有的（签发要走完整的登录流程），但认证中间件那条不变式
+    /// 需要一张真的、簿子认得的票 —— 手搓一串十六进制测不到任何东西。
+    #[cfg(test)]
+    pub fn issue_for_test(&self, user_id: &str, ttl: std::time::Duration) -> String {
+        self.issue(user_id, ttl)
+    }
+
     pub fn resolve(&self, token: &str) -> Option<String> {
         let g = self.inner.lock().expect("access 簿子的锁不该中毒");
         let (user, exp) = g.get(token)?;
         (*exp > std::time::Instant::now()).then(|| user.clone())
     }
+}
+
+/// 新账号落在哪个 schema。
+///
+/// # 第一个账号必须是 `public`
+///
+/// 那片库里通常已经有东西 —— 自托管的人是先用了几个月、后来才建账号的。
+/// 给他也 derive 一个新 schema，等于建完号一登录，几个月的记忆全部消失：
+/// 库还在，只是没有任何一条路通向它了。而这**不报错**，会话列表就是空的，
+/// 看着像新装的。
+///
+/// 端到端跑一次才发现的（老 token 建号之后指向了 `u_01kz…`，
+/// 而存量数据在 `public`）。设计里本来就写着「1 号用户的 schema 名就叫
+/// public，存量数据不搬家」，是实现漏了这一支。
+///
+/// # Errors
+/// `user_id` 不是合法 ULID。
+fn schema_for_new_account(
+    user_id: &str,
+    is_first: bool,
+) -> Result<cortex_store::SchemaName, ApiError> {
+    if is_first {
+        return Ok(cortex_store::SchemaName::public());
+    }
+    cortex_store::SchemaName::derive(user_id).map_err(|e| ApiError::internal(e.to_string()))
 }
 
 /// `POST /auth/login`
@@ -496,5 +540,28 @@ mod tests {
             ACCESS_TTL < REFRESH_TTL,
             "access 必须比 refresh 短得多，否则短命令牌那一层就没意义了"
         );
+    }
+}
+
+#[cfg(test)]
+mod account_schema_tests {
+    use super::*;
+
+    /// 第一个账号接管 `public`，其余各自开一片。
+    #[test]
+    fn the_first_account_takes_over_public() {
+        let id = cortex_core::Id::new().to_string();
+        assert_eq!(
+            schema_for_new_account(&id, true).unwrap().as_str(),
+            "public",
+            "第一个账号必须落在 public 上。落在别处的话，一个用了几个月才建号的人             建完号一登录，全部记忆消失 —— 而且不报错，会话列表就是空的"
+        );
+        let second = schema_for_new_account(&id, false).unwrap();
+        assert!(
+            second.as_str().starts_with("u_"),
+            "第二个之后必须各自一片，实际拿到 {}",
+            second.as_str()
+        );
+        assert_ne!(second.as_str(), "public");
     }
 }

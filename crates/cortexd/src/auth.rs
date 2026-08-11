@@ -277,10 +277,21 @@ pub async fn require(State(st): State<AppState>, req: Request, next: Next) -> Re
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim);
-    if let Some(tok) = bearer
-        && mode.verify(tok)
-    {
-        return next.run(req).await;
+    if let Some(tok) = bearer {
+        // 预共享 token（老路，也是自托管的常态）
+        if mode.verify(tok) {
+            return next.run(req).await;
+        }
+        // 登录换来的 access token。
+        //
+        // **这一支曾经不存在**，而缺了它整个账号体系是不通的：注册、登录、
+        // 拿到 token，然后每一个请求 401 —— 因为这道门只认那把预共享的。
+        // 端到端跑一次才发现，而三类测试都没覆盖到：
+        // 服务端测试单独测 `/auth/login`，中间件测试只查公开路由表，
+        // 客户端测试打的是 mock。**没有一条从登录走到用它**。
+        if st.access_book().resolve(tok).is_some() {
+            return next.run(req).await;
+        }
     }
 
     // 2) 加不了请求头的那些客户端：短命票据
@@ -492,5 +503,35 @@ mod tests {
             );
         }
         assert_eq!("disabled".trim(), DISABLED_VALUE);
+    }
+
+    /// **登录换来的 access token 必须能过这道门。**
+    ///
+    /// 这条曾经是不成立的：`require` 只调 `mode.verify`，而那只认预共享
+    /// token 的摘要。于是账号体系整条链是断的 —— 注册成功、登录成功、
+    /// 拿到 token，然后**每一个请求 401**。
+    ///
+    /// 三类测试都没覆盖到：服务端测试单独测 `/auth/login` 的返回，
+    /// 中间件测试只查公开路由表，客户端测试打的是 mock。
+    /// 没有一条**从登录走到用它**，端到端跑一次才撞出来。
+    ///
+    /// 这里不起 axum，只钉住那个不变式：门要认的是两样东西的**并集**。
+    #[test]
+    fn a_logged_in_access_token_is_not_the_preshared_one() {
+        let book = crate::accounts::AccessBook::default();
+        let issued = book.issue_for_test("01ABCDEF", std::time::Duration::from_secs(60));
+
+        let mode = AuthMode::Token {
+            digest: Sha256::digest(b"the-preshared-one").into(),
+        };
+        assert!(
+            !mode.verify(&issued),
+            "刚签发的 access token 与预共享 token 无关，`verify` 当然认不出它 ——              所以 `require` 里**必须**另有一支去问 AccessBook。             这条断言本身不会红；它在这里是为了让下一条的意思清楚"
+        );
+        assert_eq!(
+            book.resolve(&issued).as_deref(),
+            Some("01ABCDEF"),
+            "簿子必须认得出自己签发的 token。这条红了，说明账号体系又断在同一个地方：             登录成功但每个后续请求 401"
+        );
     }
 }
