@@ -14,6 +14,7 @@ mod import;
 mod live;
 mod quota;
 mod reembed;
+mod request_tenant;
 mod routes;
 mod state;
 mod sync_notify;

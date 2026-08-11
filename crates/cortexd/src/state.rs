@@ -23,6 +23,7 @@ use crate::auth::{AuthMode, TicketBook};
 use crate::blobs::{MediaStore, PRESIGN_TTL};
 use crate::confirm::{AnswerOutcome, ConfirmRegistry, PendingInfo, PendingMeta};
 use crate::live::Live;
+use crate::request_tenant::Tenant;
 use crate::sync_notify::SyncBus;
 use cortex_agent::Approval;
 use futures::stream::{self, BoxStream, Stream};
@@ -361,6 +362,21 @@ impl AppState {
         self.inner.rt.confirms.pending(session_id)
     }
 
+    // ───────────────────────── 多租户 ─────────────────────────
+
+    /// `public` 那个池 —— 启动时建的那一个。mock 后端下没有。
+    ///
+    /// **不是「默认租户」**。它只在两种情况下被当作租户用：没接账号体系
+    /// （单用户自托管），以及 1 号用户（他的 schema 名就叫 `public`）。
+    /// 其余用户一律走 [`crate::request_tenant::Tenant`] 里那条查表的路。
+    #[must_use]
+    pub fn public_store(&self) -> Option<std::sync::Arc<cortex_store::Store>> {
+        match &self.inner.backend {
+            Backend::Mock => None,
+            Backend::Live(l) => Some(std::sync::Arc::new(l.store().clone())),
+        }
+    }
+
     // ───────────────────── 实时同步（/ws）─────────────────────
 
     #[must_use]
@@ -424,12 +440,18 @@ impl AppState {
     // ───────────────────────── 媒体 ─────────────────────────
 
     /// 服务端中转上传：对象存储 → `blobs` 行。§九 三步顺序的前两步。
-    pub async fn upload_blob(&self, bytes: Bytes, declared_mime: Option<&str>) -> Result<BlobDto> {
+    pub async fn upload_blob(
+        &self,
+        tenant: &Tenant,
+        bytes: Bytes,
+        declared_mime: Option<&str>,
+    ) -> Result<BlobDto> {
         // 留一份给转录用。内容寻址下这份字节就是最终内容，
         // 不必等落库后再从对象存储取回来一遍
         let for_transcribe = bytes.clone();
         let stored = self.inner.blobs.put(bytes, declared_mime).await?;
         self.register(
+            tenant,
             &stored.hash,
             &stored.mime,
             stored.size_bytes,
@@ -470,7 +492,7 @@ impl AppState {
     ///
     /// 唯一硬性检查是**对象真的在**：不在就绝不写 `blobs` 行，否则会留下
     /// 一条取不回内容的悬空引用，而那是无法自愈的。
-    pub async fn commit_blob(&self, req: BlobCommitRequest) -> Result<BlobDto> {
+    pub async fn commit_blob(&self, tenant: &Tenant, req: BlobCommitRequest) -> Result<BlobDto> {
         if req.size_bytes < 0 {
             return Err(CortexError::Invalid(format!(
                 "size_bytes 不能为负：{}",
@@ -491,7 +513,7 @@ impl AppState {
             .await?;
         // 这条路上服务端没经手字节，「有没有真的传」只有客户端知道 ——
         // 所以去重与否完全交给 `register` 按 blobs 行的存在性判定
-        self.register(&req.hash, &mime, req.size_bytes, false, None)
+        self.register(tenant, &req.hash, &mime, req.size_bytes, false, None)
             .await
     }
 
@@ -499,6 +521,7 @@ impl AppState {
     /// 根本没经手字节，转录要等将来的后台补扫（尚未实现，已记入 roadmap）。
     async fn register(
         &self,
+        tenant: &Tenant,
         hash: &str,
         mime: &str,
         size_bytes: i64,
@@ -515,15 +538,20 @@ impl AppState {
             }
             Backend::Live(l) => {
                 let seq = l
+                    .bind(tenant.store()?)
                     .register_blob(cortex_store::NewBlob {
                         hash: hash.to_owned(),
                         mime: mime.to_owned(),
                         size_bytes,
                         // 与 blobs::MediaStore 用的是同一个前缀 —— 那边写对象，
                         // 这边写指向它的那一行，两者必须一致
+                        // 前缀跟着租户走。写死 "public" 会让所有人的对象
+                        // 挤在同一个前缀下 —— 那正是「加前缀换掉一类 GC bug」
+                        // 想避免的：A 删掉最后一条引用时字节还被 B 引用着
                         storage_key: cortex_blob::hash::storage_key(
-                            &cortex_blob::TenantPrefix::new("public")
-                                .expect("public 是合法的租户前缀"),
+                            &cortex_blob::TenantPrefix::new(tenant.schema()).map_err(|e| {
+                                CortexError::Invalid(format!("租户前缀不合法：{e}"))
+                            })?,
                             hash,
                         )?,
                     })
@@ -553,7 +581,7 @@ impl AppState {
     ///
     /// 总长度是 `Content-Range` 的分母 —— 没有它就没法回 206，
     /// 而没有 206 播放器就只能从头拉整个文件。
-    pub async fn blob_meta(&self, hash: &str) -> Result<(String, i64)> {
+    pub async fn blob_meta(&self, tenant: &Tenant, hash: &str) -> Result<(String, i64)> {
         // 先校验形制再查库。不校验也不会不安全（存储层自己会拦），但畸形的
         // 哈希会先撞上「blobs 表里没有这一行」而变成 404 —— 报给客户端的是
         // 「找不到」，而真相是「你传的根本不是一个哈希」。
@@ -568,7 +596,7 @@ impl AppState {
                 Ok((mime, bytes.len() as i64))
             }
             Backend::Live(l) => {
-                let b = l.blob_meta(hash).await?;
+                let b = l.bind(tenant.store()?).blob_meta(hash).await?;
                 Ok((b.mime, b.size_bytes))
             }
         }
@@ -582,11 +610,11 @@ impl AppState {
     }
 
     /// 直下 URL。手机播视频走它，省掉经 cortexd 中转的那一半带宽。
-    pub async fn blob_download_url(&self, hash: &str) -> Result<BlobUrlResponse> {
+    pub async fn blob_download_url(&self, tenant: &Tenant, hash: &str) -> Result<BlobUrlResponse> {
         // 先确认这个 blob 是**登记过**的，再签 URL。
         // 直接签会把「对象存储里恰好有这个 key」变成可探测的信息，
         // 也会让客户端拿到一条数据库里根本不认识的内容
-        let _ = self.blob_meta(hash).await?;
+        let _ = self.blob_meta(tenant, hash).await?;
         Ok(BlobUrlResponse {
             url: self.inner.blobs.presign_get(hash).await?,
             expires_in_secs: PRESIGN_TTL.as_secs(),
@@ -595,13 +623,26 @@ impl AppState {
 
     // ───────────────────────── 对话 ─────────────────────────
 
-    pub async fn chat_stream(&self, req: ChatRequest) -> BoxStream<'static, ChatEvent> {
+    pub async fn chat_stream(
+        &self,
+        tenant: &Tenant,
+        req: ChatRequest,
+    ) -> BoxStream<'static, ChatEvent> {
         let confirms = Arc::clone(&self.inner.rt.confirms);
         match &self.inner.backend {
             Backend::Mock => Box::pin(mock_chat_stream(req, confirms)),
-            Backend::Live(l) => Box::pin(tokio_stream::wrappers::ReceiverStream::new(
-                l.chat(req, confirms),
-            )),
+            Backend::Live(l) => match tenant.store() {
+                Ok(store) => Box::pin(tokio_stream::wrappers::ReceiverStream::new(
+                    l.bind(store).chat(req, confirms),
+                )),
+                // 这条路不返回 Result，只能把失败说进流里。
+                // **不能回落到 public** —— 那正是这次改动要消灭的东西
+                Err(e) => Box::pin(stream::once(async move {
+                    ChatEvent::Error {
+                        message: format!("解析不出这次请求属于哪个账号：{e}"),
+                    }
+                })),
+            },
         }
     }
 
@@ -609,12 +650,16 @@ impl AppState {
     ///
     /// mock 后端下**不假装写成功**：本地 agent 会据此以为记忆已经落库，
     /// 于是把队列里那一条划掉 —— 那才是真的丢数据。
-    pub async fn write_episode(&self, req: NewEpisodeRequest) -> Result<EpisodeAck> {
+    pub async fn write_episode(
+        &self,
+        tenant: &Tenant,
+        req: NewEpisodeRequest,
+    ) -> Result<EpisodeAck> {
         match &self.inner.backend {
             Backend::Mock => Err(CortexError::Unavailable(
                 "本实例跑在 mock 后端上，没有可写入的记忆库".into(),
             )),
-            Backend::Live(l) => l.write_episode(req).await,
+            Backend::Live(l) => l.bind(tenant.store()?).write_episode(req).await,
         }
     }
 
@@ -636,7 +681,11 @@ impl AppState {
 
     // ───────────────────────── 记忆 ─────────────────────────
 
-    pub async fn memory_search(&self, q: MemorySearchQuery) -> Result<MemorySearchResponse> {
+    pub async fn memory_search(
+        &self,
+        tenant: &Tenant,
+        q: MemorySearchQuery,
+    ) -> Result<MemorySearchResponse> {
         match &self.inner.backend {
             Backend::Mock => {
                 let facts = mock_facts()
@@ -667,27 +716,40 @@ impl AppState {
                     .collect();
                 Ok(MemorySearchResponse { facts, channels })
             }
-            Backend::Live(l) => l.memory_search(q).await,
+            Backend::Live(l) => l.bind(tenant.store()?).memory_search(q).await,
         }
     }
 
-    pub async fn get_episode(&self, id: &str) -> Result<EpisodeDto> {
+    pub async fn get_episode(&self, tenant: &Tenant, id: &str) -> Result<EpisodeDto> {
         match &self.inner.backend {
             Backend::Mock => Ok(mock_episode(id)),
-            Backend::Live(l) => l.get_episode(id).await,
+            Backend::Live(l) => l.bind(tenant.store()?).get_episode(id).await,
         }
     }
 
-    pub async fn list_sessions(&self, q: &ListSessionsQuery) -> Result<Vec<SessionDto>> {
+    pub async fn list_sessions(
+        &self,
+        tenant: &Tenant,
+        q: &ListSessionsQuery,
+    ) -> Result<Vec<SessionDto>> {
         match &self.inner.backend {
             // mock 里没有归档的会话，include_archived 因此不改变结果。
             // 仍然把参数收下：客户端要能在离线开发时验证自己拼对了查询串
             Backend::Mock => Ok(mock_sessions()),
-            Backend::Live(l) => l.list_sessions(q.include_archived).await,
+            Backend::Live(l) => {
+                l.bind(tenant.store()?)
+                    .list_sessions(q.include_archived)
+                    .await
+            }
         }
     }
 
-    pub async fn patch_session(&self, id: &str, patch: SessionPatch) -> Result<SessionDto> {
+    pub async fn patch_session(
+        &self,
+        tenant: &Tenant,
+        id: &str,
+        patch: SessionPatch,
+    ) -> Result<SessionDto> {
         match &self.inner.backend {
             // mock 不落库，但**照样跑一遍校验**：客户端 CI 里
             // 「绑到 C:\Windows 会被拒」这条断言必须在 mock 上也成立，
@@ -716,11 +778,16 @@ impl AppState {
                 }
                 Ok(s)
             }
-            Backend::Live(l) => l.patch_session(id, patch).await,
+            Backend::Live(l) => l.bind(tenant.store()?).patch_session(id, patch).await,
         }
     }
 
-    pub async fn session_detail(&self, id: &str, q: &SessionDetailQuery) -> Result<SessionDetail> {
+    pub async fn session_detail(
+        &self,
+        tenant: &Tenant,
+        id: &str,
+        q: &SessionDetailQuery,
+    ) -> Result<SessionDetail> {
         match &self.inner.backend {
             Backend::Mock => {
                 let session = mock_sessions()
@@ -743,13 +810,13 @@ impl AppState {
                     next_cursor: None,
                 })
             }
-            Backend::Live(l) => l.session_detail(id, q).await,
+            Backend::Live(l) => l.bind(tenant.store()?).session_detail(id, q).await,
         }
     }
 
     // ───────────────────────── 同步 ─────────────────────────
 
-    pub async fn sync_since(&self, q: SyncQuery) -> Result<SyncResponse> {
+    pub async fn sync_since(&self, tenant: &Tenant, q: SyncQuery) -> Result<SyncResponse> {
         match &self.inner.backend {
             Backend::Mock => {
                 // 尚无真实 sync_log，但游标语义先跑通：客户端能验证
@@ -761,7 +828,7 @@ impl AppState {
                     has_more: false,
                 })
             }
-            Backend::Live(l) => l.sync_since(q).await,
+            Backend::Live(l) => l.bind(tenant.store()?).sync_since(q).await,
         }
     }
 }

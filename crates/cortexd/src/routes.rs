@@ -279,7 +279,11 @@ async fn chat(
             .into_response();
     }
 
-    let stream = st.chat_stream(req).await.map(|ev| {
+    let tenant = match st.tenant(&headers).await {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
+    let stream = st.chat_stream(&tenant, req).await.map(|ev| {
         // 序列化失败也必须以合法 SSE 事件返回：流一旦静默中断，
         // 客户端无从判断是网络断了还是服务端出错了。
         let json = serde_json::to_string(&ev).unwrap_or_else(|e| {
@@ -421,9 +425,11 @@ async fn llm_stream(
 
 async fn memory_search(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<MemorySearchQuery>,
 ) -> Result<Json<MemorySearchResponse>, ApiError> {
-    Ok(Json(st.memory_search(q).await?))
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(st.memory_search(&tenant, q).await?))
 }
 
 // ────────────────────────── episodes ───────────────────────────
@@ -449,24 +455,28 @@ async fn write_episode(
         let user = crate::accounts::current_user(&st, &headers).await;
         st.enforce_quota(&user).await?;
     }
-    Ok(Json(st.write_episode(req).await?))
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(st.write_episode(&tenant, req).await?))
 }
 
 async fn get_episode(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<EpisodeDto>, ApiError> {
-    Ok(Json(st.get_episode(&id).await?))
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(st.get_episode(&tenant, &id).await?))
 }
 
 /// 会话列表。**已归档的默认不返回** —— 归档的产品语义就是「从列表里消失」。
 /// 要看全部传 `?include_archived=true`。
 async fn list_sessions(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<ListSessionsQuery>,
 ) -> Result<Json<SessionsResponse>, ApiError> {
     Ok(Json(SessionsResponse {
-        sessions: st.list_sessions(&q).await?,
+        sessions: st.list_sessions(&st.tenant(&headers).await?, &q).await?,
     }))
 }
 
@@ -477,10 +487,12 @@ async fn list_sessions(
 /// N 条，也就是一段没有结尾的对话，而且看不出被截断了。
 async fn get_session(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<SessionDetailQuery>,
 ) -> Result<Json<SessionDetail>, ApiError> {
-    Ok(Json(st.session_detail(&id, &q).await?))
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(st.session_detail(&tenant, &id, &q).await?))
 }
 
 /// 改名 / 归档 / 绑定工作区。返回改完之后的会话概览。
@@ -490,10 +502,12 @@ async fn get_session(
 /// 默认列表里 —— 真要销毁内容是 redact / purge，另一条路、要二次确认。
 async fn patch_session(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(patch): Json<SessionPatch>,
 ) -> Result<Json<SessionDto>, ApiError> {
-    Ok(Json(st.patch_session(&id, patch).await?))
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(st.patch_session(&tenant, &id, patch).await?))
 }
 
 // ──────────────────────────── /blobs ───────────────────────────
@@ -511,7 +525,8 @@ async fn upload_blob(
         // 去掉 `; charset=utf-8` 之类的参数：blobs.mime 存的是纯类型
         .map(|v| v.split(';').next().unwrap_or(v).trim())
         .filter(|v| !v.is_empty());
-    Ok(Json(st.upload_blob(body, declared).await?))
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(st.upload_blob(&tenant, body, declared).await?))
 }
 
 async fn presign_blob(
@@ -538,17 +553,21 @@ fn ensure_presign_supported(st: &AppState) -> Result<(), ApiError> {
 
 async fn commit_blob(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<BlobCommitRequest>,
 ) -> Result<Json<BlobDto>, ApiError> {
-    Ok(Json(st.commit_blob(req).await?))
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(st.commit_blob(&tenant, req).await?))
 }
 
 async fn get_blob_url(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Path(hash): Path<String>,
 ) -> Result<Json<BlobUrlResponse>, ApiError> {
     ensure_presign_supported(&st)?;
-    Ok(Json(st.blob_download_url(&hash).await?))
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(st.blob_download_url(&tenant, &hash).await?))
 }
 
 /// 取回字节，支持 `Range`。
@@ -566,7 +585,8 @@ async fn get_blob(
     Path(hash): Path<String>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
-    let (mime, size) = st.blob_meta(&hash).await?;
+    let tenant = st.tenant(&headers).await?;
+    let (mime, size) = st.blob_meta(&tenant, &hash).await?;
     let total = u64::try_from(size).unwrap_or(0);
 
     let raw_range = headers
@@ -621,9 +641,11 @@ async fn get_blob(
 
 async fn sync(
     State(st): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<SyncQuery>,
 ) -> Result<Json<SyncResponse>, ApiError> {
-    Ok(Json(st.sync_since(q).await?))
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(st.sync_since(&tenant, q).await?))
 }
 
 // ──────────────────────────── 错误 ─────────────────────────────

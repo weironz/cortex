@@ -310,6 +310,9 @@ pub struct Attribution {
     pub channels: Vec<&'static str>,
 }
 
+/// 克隆是廉价的：`E` 是 `SharedEmbedder`（`Arc`），其余全是标量。
+/// 多租户接线要按请求换库，那一步会连带克隆检索器。
+#[derive(Clone)]
 pub struct Retriever<E: Embedder> {
     embedder: E,
     width: RecallWidth,

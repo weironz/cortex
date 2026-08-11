@@ -145,6 +145,9 @@ const SESSION_LIST_LIMIT: i64 = 200;
 /// 会话标题取首条用户消息的前多少字。
 const TITLE_CHARS: usize = 24;
 
+/// 克隆是廉价的 —— 每个字段要么是 `Arc`，要么是 `Arc` 语义的句柄
+/// （`Store` 内部是连接池），要么是标量。[`Live::bind`] 靠它按请求换库。
+#[derive(Clone)]
 pub struct Live {
     store: Store,
     llm: LlmClient,
@@ -154,7 +157,7 @@ pub struct Live {
     ///
     /// 建一次留着复用：这是绝大多数会话走的路，没必要每轮重建。
     /// 绑定了工作区的会话每轮现建一个（沙箱根是会话属性，不是进程属性）。
-    chat_turn: Turn,
+    chat_turn: std::sync::Arc<Turn>,
     /// 现建带工作区的 [`Turn`] 时要用
     max_rounds: usize,
     /// 媒体转录。未配置 vision 模型时为 None —— 图片照常归档，只是检索不到
@@ -169,6 +172,79 @@ pub struct Live {
     embedder: SharedEmbedder,
     /// 同时最多几路抽取。见 [`Self::extract_gate`] 的文档。
     extract_gate: Arc<tokio::sync::Semaphore>,
+}
+
+/// 已经绑定到某个租户的 [`Live`]。
+///
+/// # 它存在的全部意义：让「忘了绑定」编译不过
+///
+/// 读写数据的那十个方法在 `Live` 上是**模块私有**的，只有这里转发出去。
+/// 于是 `state.rs` 拿着 `Backend::Live(l)` 也调不到 `l.get_episode(…)` ——
+/// 必须先 `l.bind(tenant.store()?)`。
+///
+/// 这不是洁癖。上一版里 `TenantPools` 建好了、隔离测过了、故障注入过了，
+/// 唯独**没有一处调用它** —— 请求路径一直握着启动时那个连 `public` 的
+/// `Store`，两个登录的用户读写同一片库。而那个状态下所有测试都是绿的：
+/// 没有任何测试会自然覆盖到「这个方法用的是哪个连接池」。
+///
+/// 类型能覆盖到。
+pub struct BoundLive(Arc<Live>);
+
+impl BoundLive {
+    // 以下全是转发。签名与 `Live` 上那份逐字相同，只是多了一层。
+    //
+    // 想过用 `Deref<Target = Live>` 省掉这一坨 —— 不行：那样
+    // `Live` 上的方法就又能直接调了，而「不绑定就调不到」正是这个类型
+    // 唯一的产出。转发是这个保证的价格。
+
+    pub async fn write_episode(&self, req: NewEpisodeRequest) -> Result<EpisodeAck> {
+        self.0.write_episode(req).await
+    }
+
+    pub async fn register_blob(&self, new: cortex_store::NewBlob) -> Result<Option<i64>> {
+        self.0.register_blob(new).await
+    }
+
+    pub async fn blob_meta(&self, hash: &str) -> Result<cortex_store::Blob> {
+        self.0.blob_meta(hash).await
+    }
+
+    pub async fn memory_search(&self, q: MemorySearchQuery) -> Result<MemorySearchResponse> {
+        self.0.memory_search(q).await
+    }
+
+    pub async fn get_episode(&self, id: &str) -> Result<EpisodeDto> {
+        self.0.get_episode(id).await
+    }
+
+    pub async fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionDto>> {
+        self.0.list_sessions(include_archived).await
+    }
+
+    pub async fn patch_session(&self, session_id: &str, patch: SessionPatch) -> Result<SessionDto> {
+        self.0.patch_session(session_id, patch).await
+    }
+
+    pub async fn session_detail(
+        &self,
+        session_id: &str,
+        q: &SessionDetailQuery,
+    ) -> Result<SessionDetail> {
+        self.0.session_detail(session_id, q).await
+    }
+
+    pub async fn sync_since(&self, q: SyncQuery) -> Result<SyncResponse> {
+        self.0.sync_since(q).await
+    }
+
+    #[must_use]
+    pub fn chat(
+        &self,
+        req: ChatRequest,
+        confirms: Arc<ConfirmRegistry>,
+    ) -> mpsc::Receiver<ChatEvent> {
+        self.0.chat(req, confirms)
+    }
 }
 
 /// 一次转录的结局。
@@ -298,7 +374,7 @@ impl Live {
             None => None,
         };
 
-        let chat_turn = chat_only_turn(max_rounds);
+        let chat_turn = std::sync::Arc::new(chat_only_turn(max_rounds));
         tracing::info!(
             max_rounds,
             chat_only_tools = ?WORKSPACE_FREE_TOOLS,
@@ -395,7 +471,7 @@ impl Live {
     ///
     /// 真并发下两个重放同时穿过判重，后一个会撞 PK 唯一约束 ——
     /// 那条路由 [`Self::write_episode`] 的调用方映射成同样的「已存在」。
-    pub async fn write_episode(&self, req: NewEpisodeRequest) -> Result<EpisodeAck> {
+    async fn write_episode(&self, req: NewEpisodeRequest) -> Result<EpisodeAck> {
         let episode_id: Id = req
             .id
             .parse()
@@ -656,6 +732,28 @@ impl Live {
         &self.store
     }
 
+    /// 换到某个租户的库上，其余部件全部共享。
+    ///
+    /// # 为什么是「克隆一个 Live」而不是「给每个方法加一个 store 参数」
+    ///
+    /// 后者要改 38 处 `self.store` 与十几个方法签名，而每一处都是**手工**
+    /// 判断「这里该用租户的库还是 public 的库」—— 判断错了不报错，
+    /// 只是把一个人的记忆写进另一个人的 schema。
+    ///
+    /// 克隆则是整体替换：绑定之后，这个 `Live` 上**所有**方法都落在那个
+    /// schema 上，没有一处能例外。代价是每请求多克隆约十个 `Arc`
+    /// 与一个 `String`，比它随后要做的那次数据库往返便宜三个数量级。
+    ///
+    /// 返回 [`BoundLive`] 而不是 `Live`：数据方法只长在它上面，
+    /// **不绑定就调不到**（见 `state.rs` 里那条读源码的守卫测试）。
+    #[must_use]
+    pub fn bind(&self, store: &Store) -> BoundLive {
+        BoundLive(Arc::new(Self {
+            store: store.clone(),
+            ..self.clone()
+        }))
+    }
+
     /// 当前的向量化后端。回填器要用它算向量。
     #[must_use]
     pub fn embedder(&self) -> &SharedEmbedder {
@@ -825,7 +923,7 @@ impl Live {
         out
     }
 
-    pub async fn memory_search(&self, q: MemorySearchQuery) -> Result<MemorySearchResponse> {
+    async fn memory_search(&self, q: MemorySearchQuery) -> Result<MemorySearchResponse> {
         let r = self.retrieve(&q.q, q.as_of.as_deref(), q.limit).await?;
         let invalidated = self.invalidation_flags(&r.items, q.as_of.is_some()).await;
 
@@ -854,7 +952,7 @@ impl Live {
         })
     }
 
-    pub async fn get_episode(&self, id: &str) -> Result<EpisodeDto> {
+    async fn get_episode(&self, id: &str) -> Result<EpisodeDto> {
         let e = self
             .store
             .episode(id)
@@ -893,7 +991,7 @@ impl Live {
         Ok(episode_dto(e, replay))
     }
 
-    pub async fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionDto>> {
+    async fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionDto>> {
         let digests = self
             .store
             .session_digests(SESSION_LIST_LIMIT, include_archived)
@@ -915,7 +1013,7 @@ impl Live {
     ///
     /// 「改名 + 归档」若分两个事务，别的设备会先拉到「改完名但还没归档」
     /// 那个中间态，列表上闪一下。同事务下它们在 `sync_log` 里连号到达。
-    pub async fn patch_session(&self, session_id: &str, patch: SessionPatch) -> Result<SessionDto> {
+    async fn patch_session(&self, session_id: &str, patch: SessionPatch) -> Result<SessionDto> {
         let mut events: Vec<cortex_store::NewSessionEvent> = Vec::new();
 
         if let Some(raw) = patch.title.as_deref() {
@@ -1045,7 +1143,7 @@ impl Live {
     /// 与翻到第几页无关。多一次往返换掉一整类「翻页之后数字开始漂」的 bug。
     /// 客户端拿 `message_count` 与本页条数比对来判断是否被截断的那套补丁，
     /// 现在有 `has_more` 可用，但旧口径仍然成立（`message_count` 还是总数）。
-    pub async fn session_detail(
+    async fn session_detail(
         &self,
         session_id: &str,
         q: &SessionDetailQuery,
@@ -1152,7 +1250,7 @@ impl Live {
 
     /// `blobs` 行的元信息。取回字节时要靠它拿 MIME 与总长度
     /// （HTTP Range 的 `Content-Range` 分母就是这个长度）。
-    pub async fn blob_meta(&self, hash: &str) -> Result<cortex_store::Blob> {
+    async fn blob_meta(&self, hash: &str) -> Result<cortex_store::Blob> {
         self.store
             .blob(hash)
             .await
@@ -1171,7 +1269,7 @@ impl Live {
     ///
     /// 返回 `None` 表示这份内容**早就登记过**，本次没有新增行。这不是错误：
     /// 内容寻址下两条行会逐字节相同，重复登记既没有意义也没有害处。
-    pub async fn register_blob(&self, new: cortex_store::NewBlob) -> Result<Option<i64>> {
+    async fn register_blob(&self, new: cortex_store::NewBlob) -> Result<Option<i64>> {
         if self
             .store
             .blob(&new.hash)
@@ -1281,7 +1379,7 @@ impl Live {
 
     // ─────────────────────────── 同步 ───────────────────────────
 
-    pub async fn sync_since(&self, q: SyncQuery) -> Result<SyncResponse> {
+    async fn sync_since(&self, q: SyncQuery) -> Result<SyncResponse> {
         let limit = q.limit.clamp(1, 1000);
         let records = self
             .store
@@ -1318,7 +1416,7 @@ impl Live {
     ///
     /// 用 channel 而非直接返回 Stream：这一轮里要交错做落库、检索、
     /// 调模型、再落库四件事，写成一个 Stream 组合子会难以卒读。
-    pub fn chat(
+    fn chat(
         self: &Arc<Self>,
         req: ChatRequest,
         confirms: Arc<ConfirmRegistry>,

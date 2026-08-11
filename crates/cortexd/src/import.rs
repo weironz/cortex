@@ -205,11 +205,25 @@ pub async fn preview(
 /// `POST /import/run` —— SSE。
 pub async fn run(
     State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ImportRequest>,
 ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
     let (tx, rx) = mpsc::channel::<ImportEvent>(64);
 
     tokio::spawn(async move {
+        // 租户在**动工之前**解析。解析不出来就一条都不写 ——
+        // 写了一半才发现不知道该写给谁，是没法回滚的
+        let tenant = match st.tenant(&headers).await {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = tx
+                    .send(ImportEvent::Error {
+                        message: format!("解析不出这次导入属于哪个账号：{}", e.message()),
+                    })
+                    .await;
+                return;
+            }
+        };
         let plan = match plan_of(&req).await {
             Ok(p) => p,
             Err(e) => {
@@ -227,7 +241,7 @@ pub async fn run(
             })
             .await;
 
-        let sink = LocalSink(st);
+        let sink = LocalSink(st, tenant);
         let progress_tx = tx.clone();
         // 进度可丢：满了就跳过这一条，丢一条只是进度条跳一下，
         // 而阻塞在这里会让导入本身停下来等客户端
@@ -271,7 +285,10 @@ pub async fn run(
 /// 而这里已经在服务端进程里了。再打一次自己的 HTTP 只会白白多一次
 /// 序列化 + 认证 + TCP 往返，而且那条路上的失败模式（连接池耗尽）
 /// 与导入毫无关系。
-struct LocalSink(AppState);
+/// 带着租户 —— 导入是**某个人**的导入。
+///
+/// 少了它，一个人上传的三年历史会落进另一个人的库，而全过程没有任何报错。
+struct LocalSink(AppState, crate::request_tenant::Tenant);
 
 impl cortex_import::Sink for LocalSink {
     async fn write_episode(
@@ -279,7 +296,7 @@ impl cortex_import::Sink for LocalSink {
         req: &cortex_proto::episodes::NewEpisodeRequest,
     ) -> anyhow::Result<cortex_proto::episodes::EpisodeAck> {
         self.0
-            .write_episode(req.clone())
+            .write_episode(&self.1, req.clone())
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
@@ -287,6 +304,7 @@ impl cortex_import::Sink for LocalSink {
     async fn rename_session(&self, session_id: &str, title: &str) -> anyhow::Result<()> {
         self.0
             .patch_session(
+                &self.1,
                 session_id,
                 cortex_proto::dto::SessionPatch {
                     title: Some(title.to_string()),
