@@ -59,22 +59,38 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
     text: ref.read(appConfigProvider).baseUrl,
   );
   final TextEditingController _tokenController = TextEditingController();
+  final TextEditingController _userController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
   bool _revealToken = false;
+  bool _revealPassword = false;
+
+  /// 走旧的预共享 token 那条路吗。
+  ///
+  /// **默认否**。账号密码是现在的主路；token 留着是因为 CLI、现有安装与
+  /// 单用户自托管都还在用它，一次性切断会让它们当天全部失联。
+  ///
+  /// 但它不该是**第一眼**看到的东西：粘一串 64 位十六进制是这个应用里
+  /// 最糟的一步交互，而绝大多数人根本不需要它。
+  bool _useToken = false;
 
   @override
   void initState() {
     super.initState();
-    // Pre-fill from whatever the platform could supply unattended, so a desktop
-    // user who set `CORTEXD_TOKEN` and a web user who ticked "remember" both
-    // land here with the field already correct — they only ever see this screen
-    // when the seed was missing or rejected.
-    _tokenController.text = ref.read(authControllerProvider).token ?? '';
+    // 平台能无人值守拿到的凭据先填上（桌面端的 CORTEXD_TOKEN、
+    // Web 端勾了"记住"的那份）。会走到这个界面，说明它缺了或者被拒了。
+    final seeded = ref.read(authControllerProvider).token ?? '';
+    _tokenController.text = seeded;
+    // 环境里**确实有**一份 token 才默认落到那条路上 —— 那种情况下这个人
+    // 显然是老用户或自托管，让他先看账号密码框是白绕一圈
+    _useToken = seeded.isNotEmpty;
   }
 
   @override
   void dispose() {
     _urlController.dispose();
     _tokenController.dispose();
+    _userController.dispose();
+    _passwordController.dispose();
     super.dispose();
   }
 
@@ -91,9 +107,16 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
       // already opened the door and there is nothing to sign in with.
       if (ref.read(authControllerProvider).isReady) return;
     }
-    await auth.signIn(
-      _tokenController.text,
-      remember: ref.read(authControllerProvider).remember,
+    if (_useToken) {
+      await auth.signIn(
+        _tokenController.text,
+        remember: ref.read(authControllerProvider).remember,
+      );
+      return;
+    }
+    await auth.signInWithPassword(
+      _userController.text,
+      _passwordController.text,
     );
   }
 
@@ -120,7 +143,9 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                 Text(
                   unreachable
                       ? '还没连上 daemon。先确认地址，再填凭据。'
-                      : '这个 cortexd 开着认证，需要一份预共享 token 才能访问记忆库。',
+                      : _useToken
+                      ? '用这个部署的预共享 token 登录（旧方式）。'
+                      : '用你的账号登录。登录状态会记住 30 天，关掉再打开不用重来。',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: scheme.onSurfaceVariant,
                   ),
@@ -139,41 +164,78 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                 ),
                 const SizedBox(height: 14),
 
-                TextField(
-                  controller: _tokenController,
-                  // Obscured by default, revealable on demand: this is a
-                  // 64-character hex string that gets pasted, and a paste you
-                  // cannot verify is a paste you will get wrong once and never
-                  // work out why.
-                  obscureText: !_revealToken,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  autofocus: true,
-                  // Reaching the daemon is a prerequisite for the token
-                  // mattering; there is nothing useful to submit while it is
-                  // unreachable except the address above.
-                  enabled: !state.busy,
-                  decoration: InputDecoration(
-                    labelText: 'CORTEXD_TOKEN',
-                    hintText: '64 位十六进制',
-                    border: const OutlineInputBorder(),
-                    suffixIcon: IconButton(
-                      onPressed: () =>
-                          setState(() => _revealToken = !_revealToken),
-                      iconSize: 18,
-                      tooltip: _revealToken ? '隐藏' : '显示',
-                      icon: Icon(
-                        _revealToken
-                            ? Icons.visibility_off_outlined
-                            : Icons.visibility_outlined,
+                if (_useToken)
+                  TextField(
+                    controller: _tokenController,
+                    // 默认遮住、可点开：这是一串粘进来的 64 位十六进制，
+                    // 而一次看不见的粘贴迟早会错一次，且永远查不出为什么
+                    obscureText: !_revealToken,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    autofocus: true,
+                    enabled: !state.busy,
+                    decoration: InputDecoration(
+                      labelText: 'CORTEXD_TOKEN',
+                      hintText: '64 位十六进制',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        onPressed: () =>
+                            setState(() => _revealToken = !_revealToken),
+                        iconSize: 18,
+                        tooltip: _revealToken ? '隐藏' : '显示',
+                        icon: Icon(
+                          _revealToken
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                        ),
                       ),
                     ),
+                    onSubmitted: (_) => _submit(),
+                  )
+                else ...[
+                  TextField(
+                    controller: _userController,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    autofocus: true,
+                    enabled: !state.busy,
+                    // 密码管理器要认得出这是登录表单，否则它不会来填
+                    autofillHints: const [AutofillHints.username],
+                    decoration: const InputDecoration(
+                      labelText: '用户名',
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => _submit(),
                   ),
-                  onSubmitted: (_) => _submit(),
-                ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: _passwordController,
+                    obscureText: !_revealPassword,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    enabled: !state.busy,
+                    autofillHints: const [AutofillHints.password],
+                    decoration: InputDecoration(
+                      labelText: '密码',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        onPressed: () =>
+                            setState(() => _revealPassword = !_revealPassword),
+                        iconSize: 18,
+                        tooltip: _revealPassword ? '隐藏' : '显示',
+                        icon: Icon(
+                          _revealPassword
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                        ),
+                      ),
+                    ),
+                    onSubmitted: (_) => _submit(),
+                  ),
+                ],
 
                 const SizedBox(height: 10),
-                if (kCanRememberToken)
+                if (_useToken && kCanRememberToken)
                   CheckboxListTile(
                     contentPadding: EdgeInsets.zero,
                     dense: true,
@@ -188,6 +250,8 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                   )
                 else
                   Text(
+                    // 密码登录时这句话不是"要不要记住"的开关，而是在说明
+                    // 凭据存在哪儿 —— 用户凭它判断这台机器安不安全
                     kTokenStorageNote,
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: scheme.onSurfaceVariant,
@@ -227,10 +291,30 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                 const SizedBox(height: 18),
                 FilledButton(
                   onPressed: state.busy ? null : _submit,
-                  child: Text(state.busy ? '连接中…' : '连接'),
+                  child: Text(
+                    state.busy
+                        ? '连接中…'
+                        : _useToken
+                        ? '连接'
+                        : '登录',
+                  ),
                 ),
-                const SizedBox(height: 10),
-                const _GenerateTokenHint(),
+                const SizedBox(height: 6),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: state.busy
+                        ? null
+                        : () => setState(() => _useToken = !_useToken),
+                    child: Text(
+                      _useToken ? '改用账号密码登录' : '用预共享 token 登录（旧方式）',
+                    ),
+                  ),
+                ),
+                if (_useToken) ...[
+                  const SizedBox(height: 4),
+                  const _GenerateTokenHint(),
+                ],
 
                 const Divider(height: 34),
                 // The escape hatch. Without it, a first-time user with no
