@@ -358,10 +358,25 @@ impl Live {
             .await
             .map_err(|e| CortexError::Store(format!("数据库迁移失败：{e}")))?;
 
-        let api_key = std::env::var(cortex_llm::provider::api_key_env(&config.llm.provider)?)
-            .map_err(|_| {
-                CortexError::Config(format!("缺少 {} 的 API key 环境变量", config.llm.provider))
-            })?;
+        // `api_key_env` 为空 = 该供应商免鉴权（本机 Ollama、以及任何
+        // 不校验 key 的自建端点）。
+        //
+        // **原先这里没有这一支**，于是 `std::env::var("")` 必然失败，
+        // 报「缺少 ollama 的 API key 环境变量」—— 一条读起来像配置漏了、
+        // 实际上无论怎么配都过不去的错误。cortexd 因此根本起不来，
+        // 而 `cortex-llm::LlmClient::from_config` 那条路一直是对的：
+        // 同一个判断在两处，只写对了一处。
+        let key_var = cortex_llm::provider::api_key_env(&config.llm.provider)?;
+        let api_key = if key_var.is_empty() {
+            String::new()
+        } else {
+            std::env::var(&key_var).map_err(|_| {
+                CortexError::Config(format!(
+                    "缺少 {} 的 API key 环境变量 {key_var}",
+                    config.llm.provider
+                ))
+            })?
+        };
         let llm = LlmClient::from_config(&config.llm, &api_key)?;
 
         let context_window = llm.model().context_limit();

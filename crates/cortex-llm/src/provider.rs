@@ -260,6 +260,28 @@ mod base_url_tests {
         v
     }
 
+    /// 免鉴权的供应商，`api_key_env` 必须是**空串**。
+    ///
+    /// 调用方据此跳过「读环境变量」那一步。cortexd 一度没有这一支，
+    /// 于是 `std::env::var("")` 必然失败，报「缺少 ollama 的 API key
+    /// 环境变量」—— 一条读起来像配置漏了、实际上无论怎么配都过不去的错误，
+    /// 而它让 cortexd 用本地模型时**根本起不来**。
+    ///
+    /// 同一个判断在 `LlmClient::from_config` 与 `Live::new` 两处，
+    /// 当时只写对了一处。这条钉住这个约定本身。
+    #[test]
+    fn a_keyless_provider_declares_an_empty_key_env() {
+        assert_eq!(
+            api_key_env("ollama").expect("内置定义"),
+            "",
+            "免鉴权的供应商必须回空串。回一个假的变量名会让调用方去读它，             而那个变量永远不会被设"
+        );
+        assert!(
+            !api_key_env("deepseek").expect("内置定义").is_empty(),
+            "要鉴权的供应商必须给出变量名，否则调用方会以为它免鉴权、             用空 key 去调，然后拿一条 401"
+        );
+    }
+
     #[test]
     fn an_override_replaces_the_compiled_in_url() {
         let v = rewritten("openai", "http://127.0.0.1:9099");
