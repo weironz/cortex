@@ -97,6 +97,14 @@ protected_routes! {
     // PUT 的语义是整体替换，那会逼客户端先 GET 一遍再回传全量 ——
     // 而两次请求之间别的设备改了什么，就被这次 PUT 悄悄回滚了
     "/sessions/{id}" [GET, PATCH] => get(get_session).patch(patch_session),
+    // 项目 —— 会话的分组容器。
+    //
+    // DELETE 在这里是名副其实的：项目本身确实没了。它与
+    // 「归档会话」用不同动词是刻意的 —— 删项目**不删内容**，
+    // 里面的会话变回未分组，消息与记忆一条不少
+    "/projects" [GET, POST] => get(list_projects).post(create_project),
+    "/projects/{id}" [PATCH, DELETE] => axum::routing::patch(patch_project)
+        .delete(delete_project),
     // axum 默认体积上限是 2 MiB —— 对「直传小文件」这个用途太紧
     // （随手一张手机照片就超了）。放宽到 DIRECT_UPLOAD_LIMIT，
     // 再大的请走 /blobs/presign 直传对象存储，不经服务端中转
@@ -497,8 +505,60 @@ async fn get_episode(
     Ok(Json(st.get_episode(&tenant, &id).await?))
 }
 
+// ─────────────────────────── /projects ─────────────────────────
+
+/// 现存的项目。已删除的不返回 —— 删项目就是「从列表里消失」。
+async fn list_projects(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProjectsResponse>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(ProjectsResponse {
+        projects: st.list_projects(&tenant).await?,
+    }))
+}
+
+/// 建一个项目。id 由服务端生成并在响应里给出。
+async fn create_project(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<NewProjectRequest>,
+) -> Result<Json<ProjectDto>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(st.create_project(&tenant, &req.name).await?))
+}
+
+/// 改名。返回改完之后的项目。
+async fn patch_project(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(patch): Json<ProjectPatch>,
+) -> Result<Json<ProjectDto>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(st.patch_project(&tenant, &id, patch).await?))
+}
+
+/// 删项目 —— **解散分组，不动内容**。
+///
+/// 里面的会话变回未分组，消息、附件、已抽取的记忆一条不少。所以这个
+/// DELETE 与 `redact` / `purge` 完全不是一回事，界面文案上别把它说成
+/// 「彻底删除」。
+///
+/// 回一个空对象而不是 204：客户端那套 JSON 解码路径统一，
+/// 少一条「这个响应没有 body」的特例。
+async fn delete_project(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+    st.delete_project(&tenant, &id).await?;
+    Ok(Json(serde_json::json!({})))
+}
+
 /// 会话列表。**已归档的默认不返回** —— 归档的产品语义就是「从列表里消失」。
-/// 要看全部传 `?include_archived=true`。
+/// 要看全部传 `?include_archived=true`；只看某个项目传 `?project_id=`。
 async fn list_sessions(
     State(st): State<AppState>,
     headers: HeaderMap,

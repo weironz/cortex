@@ -219,12 +219,21 @@ async fn archived_sessions_are_hidden_by_default() {
     write_episode(s, episode("gone", "要归档的会话", 5)).await;
     emit(s, NewSessionEvent::archive("gone", Actor::User, DEV)).await;
 
-    let default = s.session_digests(10, false).await.expect("查列表不该失败");
-    let all = s.session_digests(10, true).await.expect("查列表不该失败");
+    let default = s
+        .session_digests(10, false, None)
+        .await
+        .expect("查列表不该失败");
+    let all = s
+        .session_digests(10, true, None)
+        .await
+        .expect("查列表不该失败");
 
     // 取消归档后必须重新出现 —— 归档不是删除
     emit(s, NewSessionEvent::unarchive("gone", Actor::User, DEV)).await;
-    let restored = s.session_digests(10, false).await.expect("查列表不该失败");
+    let restored = s
+        .session_digests(10, false, None)
+        .await
+        .expect("查列表不该失败");
 
     db.cleanup().await;
 
@@ -274,7 +283,10 @@ async fn archived_sessions_do_not_consume_the_limit() {
     write_episode(s, episode("visible", "唯一该被看见的", 100)).await;
 
     // limit=1：若过滤发生在 LIMIT 之后，这一条会被归档会话占掉，结果为空
-    let got = s.session_digests(1, false).await.expect("查列表不该失败");
+    let got = s
+        .session_digests(1, false, None)
+        .await
+        .expect("查列表不该失败");
 
     db.cleanup().await;
 

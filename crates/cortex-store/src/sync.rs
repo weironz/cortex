@@ -20,7 +20,8 @@ use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
 use crate::error::{Result, StoreError};
 use crate::model::{
     Blob, BlobTranscript, Derivation, Entity, EntityMerge, Episode, EpisodeBlob, EpisodeMemory,
-    EpisodeToolCall, Fact, FactEvent, Redaction, SessionEvent, Summary, fact_columns, table,
+    EpisodeToolCall, Fact, FactEvent, ProjectEvent, Redaction, SessionEvent, Summary, fact_columns,
+    table,
 };
 use crate::store::Store;
 
@@ -53,6 +54,7 @@ pub enum SyncPayload {
     Derivation(Derivation),
     Redaction(Redaction),
     SessionEvent(SessionEvent),
+    ProjectEvent(ProjectEvent),
 }
 
 impl SyncPayload {
@@ -74,6 +76,7 @@ impl SyncPayload {
             Self::Derivation(_) => table::DERIVATIONS,
             Self::Redaction(_) => table::REDACTIONS,
             Self::SessionEvent(_) => table::SESSION_EVENTS,
+            Self::ProjectEvent(_) => table::PROJECT_EVENTS,
         }
     }
 }
@@ -284,11 +287,21 @@ impl Store {
             // 一条 session_events 日志会让 load_payloads 返回 UnknownTable，
             // 那一批拉取整个失败，客户端的游标从此卡死在它前面
             table::SESSION_EVENTS => collect!(
-                "SELECT id, session_id, op, title, workspace, actor, device_id, created_at
+                "SELECT id, session_id, op, title, workspace, project_id,
+                        actor, device_id, created_at
                    FROM session_events WHERE id = ANY($1)",
                 SessionEvent,
                 |row: &SessionEvent| row.id.clone(),
                 SyncPayload::SessionEvent
+            ),
+            // 项目事件同理。客户端拿它按同一套状态机自己算末态 ——
+            // 服务端不下发「当前项目列表」，那种快照没有全序可言
+            table::PROJECT_EVENTS => collect!(
+                "SELECT id, project_id, op, name, actor, device_id, created_at
+                   FROM project_events WHERE id = ANY($1)",
+                ProjectEvent,
+                |row: &ProjectEvent| row.id.clone(),
+                SyncPayload::ProjectEvent
             ),
             other => return Err(StoreError::UnknownTable(other.to_owned())),
         }

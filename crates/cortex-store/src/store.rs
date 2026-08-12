@@ -6,7 +6,7 @@ use sqlx::migrate::Migrator;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
 use crate::error::Result;
-use crate::model::{EpisodeAttachment, SessionEvent, SessionState};
+use crate::model::{EpisodeAttachment, Project, ProjectEvent, SessionEvent, SessionState};
 use crate::txn::WriteTxn;
 
 /// 编译期嵌入的 migration 集合。
@@ -230,6 +230,9 @@ pub struct SessionDigest {
     pub archived: bool,
     /// 绑定的本机目录。`None` = 纯聊天会话，文件工具不进模型的工具目录。
     pub workspace: Option<String>,
+    /// 所属项目。`None` = 未分组，**也包括「原来那个项目已经被删了」** ——
+    /// 视图已经把悬挂的绑定收敛成 `None`，这里读到的就是最终口径。
+    pub project_id: Option<String>,
 }
 
 impl Store {
@@ -255,19 +258,30 @@ impl Store {
     /// 列出来只是一行空白。用户新建会话后先选工作区再发第一句，这段时间里
     /// 那个会话由客户端本地持有 —— 第一条消息一落库它就自动出现，
     /// 而此前写下的改名 / 绑定事件会原样生效（末态与写入顺序无关）。
+    ///
+    /// # 按项目过滤
+    ///
+    /// `project_id` 为 `None` 时**不过滤**，给全部会话（含未分组的）。
+    /// 与归档一样，过滤发生在 `LIMIT` 之前 —— 否则别的项目的会话会把配额
+    /// 吃掉，症状是「这个项目里明明有会话，列表却是空的」。
+    ///
+    /// 传一个**已删除项目**的 id 会得到空列表：视图已经把指向它的绑定
+    /// 收敛成 NULL。这正是想要的 —— 删掉的项目不该还能被翻出来。
     pub async fn session_digests(
         &self,
         limit: i64,
         include_archived: bool,
+        project_id: Option<&str>,
     ) -> Result<Vec<SessionDigest>> {
         let rows = sqlx::query_as::<_, SessionDigest>(
             // 先聚合再 JOIN 视图：反过来的话 session_state 会被每一条 episode
-            // 拖着算一遍，而它自己内部已经有三次 DISTINCT ON 了
+            // 拖着算一遍，而它自己内部已经有四次 DISTINCT ON 了
             "SELECT d.session_id, d.message_count, d.started_at, d.updated_at,
                     d.first_user_text, d.last_text,
                     s.title,
                     coalesce(s.archived, false) AS archived,
-                    s.workspace
+                    s.workspace,
+                    s.project_id
                FROM (
                     SELECT e.session_id,
                            count(*)            AS message_count,
@@ -284,12 +298,14 @@ impl Store {
                      GROUP BY e.session_id
                ) d
                LEFT JOIN session_state s ON s.session_id = d.session_id
-              WHERE $2 OR NOT coalesce(s.archived, false)
+              WHERE ($2 OR NOT coalesce(s.archived, false))
+                AND ($3::text IS NULL OR s.project_id = $3::text)
               ORDER BY d.updated_at DESC, d.session_id DESC
               LIMIT $1",
         )
         .bind(limit)
         .bind(include_archived)
+        .bind(project_id)
         .fetch_all(self.pool())
         .await?;
         Ok(rows)
@@ -305,7 +321,8 @@ impl Store {
                     d.first_user_text, d.last_text,
                     s.title,
                     coalesce(s.archived, false) AS archived,
-                    s.workspace
+                    s.workspace,
+                    s.project_id
                FROM (
                     SELECT e.session_id,
                            count(*)            AS message_count,
@@ -330,13 +347,13 @@ impl Store {
         Ok(row)
     }
 
-    /// 一个会话三个维度各自的末态。
+    /// 一个会话四个维度各自的末态。
     ///
     /// 返回 `None` 表示这个会话从未有过任何生命周期事件 —— 没改过名、
-    /// 没归档、没绑工作区。调用方按「全默认」处理即可，不是错误。
+    /// 没归档、没绑工作区、没进过项目。调用方按「全默认」处理即可，不是错误。
     pub async fn session_state(&self, session_id: &str) -> Result<Option<SessionState>> {
         let row = sqlx::query_as::<_, SessionState>(
-            "SELECT session_id, title, archived, workspace, decided_at
+            "SELECT session_id, title, archived, workspace, project_id, decided_at
                FROM session_state WHERE session_id = $1",
         )
         .bind(session_id)
@@ -348,11 +365,84 @@ impl Store {
     /// 一个会话的全部生命周期事件，升序。界面的「它是怎么变的」。
     pub async fn session_events(&self, session_id: &str) -> Result<Vec<SessionEvent>> {
         let rows = sqlx::query_as::<_, SessionEvent>(
-            "SELECT id, session_id, op, title, workspace, actor, device_id, created_at
+            "SELECT id, session_id, op, title, workspace, project_id,
+                    actor, device_id, created_at
                FROM session_events WHERE session_id = $1
               ORDER BY created_at ASC, id ASC",
         )
         .bind(session_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    // ── 项目 ───────────────────────────────────────────────
+
+    /// 现存的项目，新建的在前。
+    ///
+    /// # `session_count` 的口径
+    ///
+    /// 数的是「这个项目下**会出现在会话列表里**的会话」，所以两条过滤都要有：
+    ///
+    /// - 排除已归档：归档的产品语义就是从默认列表消失，计数里还算着它，
+    ///   用户会看到「3 个会话」点进去只有 2 个
+    /// - 要求至少有一条消息：会话列表的起点是 `episodes` 聚合，一个「建了
+    ///   但还没发过话」的会话本来就不在列表里（见 [`Self::session_digests`]）
+    ///
+    /// 两条都对齐 `GET /sessions?project_id=` 的默认口径 —— 计数与列表长度
+    /// 对不上是那种「看着就不对、但查起来毫无线索」的问题。
+    pub async fn projects(&self) -> Result<Vec<Project>> {
+        let rows = sqlx::query_as::<_, Project>(
+            "SELECT p.project_id, p.name, p.created_at,
+                    coalesce(c.n, 0) AS session_count
+               FROM project_state p
+               LEFT JOIN (
+                    SELECT s.project_id, count(*) AS n
+                      FROM session_state s
+                     WHERE s.project_id IS NOT NULL
+                       AND NOT s.archived
+                       AND EXISTS (SELECT 1 FROM episodes e
+                                    WHERE e.session_id = s.session_id)
+                     GROUP BY s.project_id
+               ) c ON c.project_id = p.project_id
+              ORDER BY p.created_at DESC, p.project_id DESC",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 单个项目。返回 `None` 表示它不存在或已被删 —— 两者对调用方是同一件事。
+    pub async fn project(&self, project_id: &str) -> Result<Option<Project>> {
+        let row = sqlx::query_as::<_, Project>(
+            "SELECT p.project_id, p.name, p.created_at,
+                    coalesce(c.n, 0) AS session_count
+               FROM project_state p
+               LEFT JOIN (
+                    SELECT s.project_id, count(*) AS n
+                      FROM session_state s
+                     WHERE s.project_id IS NOT NULL
+                       AND NOT s.archived
+                       AND EXISTS (SELECT 1 FROM episodes e
+                                    WHERE e.session_id = s.session_id)
+                     GROUP BY s.project_id
+               ) c ON c.project_id = p.project_id
+              WHERE p.project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row)
+    }
+
+    /// 一个项目的全部生命周期事件，升序。界面的「它是怎么变的」。
+    pub async fn project_events(&self, project_id: &str) -> Result<Vec<ProjectEvent>> {
+        let rows = sqlx::query_as::<_, ProjectEvent>(
+            "SELECT id, project_id, op, name, actor, device_id, created_at
+               FROM project_events WHERE project_id = $1
+              ORDER BY created_at ASC, id ASC",
+        )
+        .bind(project_id)
         .fetch_all(self.pool())
         .await?;
         Ok(rows)

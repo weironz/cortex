@@ -179,6 +179,23 @@ pub fn to_json(p: &SyncPayload) -> Value {
             // 仍然要发：不发的话对端连「这个会话在别的设备上是有工作区的」
             // 都不知道，界面上没法解释为什么同一个会话在这台机器上没有文件工具
             "workspace": e.workspace,
+            // 归属哪个项目。**可能指向一个已经被删的项目** —— 删项目刻意不
+            // 级联改写会话事件，客户端与服务端一样，算末态时把悬挂的归属
+            // 当作未分组即可
+            "project_id": e.project_id,
+            "actor": e.actor.as_str(),
+            "device_id": e.device_id,
+            "created_at": e.created_at.to_rfc3339(),
+        }),
+
+        // 项目生命周期事件。与会话那支同一套：客户端按状态机自己算末态
+        // （存在与否取最后一条 create/delete，名字取最后一条 create/rename），
+        // 而不是等服务端下发一份「当前项目列表」——后者没有全序可言
+        SyncPayload::ProjectEvent(e) => json!({
+            "id": e.id,
+            "project_id": e.project_id,
+            "op": e.op.as_str(),
+            "name": e.name,
             "actor": e.actor.as_str(),
             "device_id": e.device_id,
             "created_at": e.created_at.to_rfc3339(),

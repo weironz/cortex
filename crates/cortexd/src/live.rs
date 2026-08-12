@@ -102,6 +102,36 @@ fn workspace_patch(field: Option<Option<&str>>) -> Result<bool> {
     }
 }
 
+/// 校验一个项目名，返回 trim 之后的那份。
+///
+/// # 为什么是一个独立的纯函数
+///
+/// 与 [`workspace_patch`] 同一个理由：真正的项目路径要一个数据库才进得去，
+/// 于是这条判断在那里测不到。而它同时被 mock 后端复用 —— 客户端 CI 里
+/// 「空名字会被拒」这条断言必须在 mock 上也成立，否则它测的是一个比真实
+/// 后端宽松的契约。
+///
+/// # 为什么 trim 之后判空，而不是直接判空
+///
+/// 输入框里敲一个空格就能造出一个名字是空白的项目，而它在侧边栏上是一行
+/// 什么都没有的可点区域 —— 看起来像界面坏了。
+///
+/// 上限按**字符**而非字节数：数据库那道 CHECK 用的是 `length()`，
+/// 它数的也是字符。两处口径不同的症状是「明明没超，服务端却回 500」。
+pub(crate) fn validate_project_name(raw: &str) -> Result<String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(CortexError::Invalid("项目名不能为空白".into()));
+    }
+    if name.chars().count() > cortex_store::PROJECT_NAME_MAX_CHARS {
+        return Err(CortexError::Invalid(format!(
+            "项目名过长（上限 {} 字符）",
+            cortex_store::PROJECT_NAME_MAX_CHARS
+        )));
+    }
+    Ok(name.to_owned())
+}
+
 /// 工具调用轮次上限的环境变量。缺省见 [`cortex_agent::DEFAULT_MAX_ROUNDS`]。
 ///
 /// 做成可调不是为了「灵活」，是为了让**成本上限**在部署时可控：
@@ -267,8 +297,24 @@ impl BoundLive {
         self.0.get_episode(id).await
     }
 
-    pub async fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionDto>> {
-        self.0.list_sessions(include_archived).await
+    pub async fn list_sessions(&self, q: &ListSessionsQuery) -> Result<Vec<SessionDto>> {
+        self.0.list_sessions(q).await
+    }
+
+    pub async fn list_projects(&self) -> Result<Vec<ProjectDto>> {
+        self.0.list_projects().await
+    }
+
+    pub async fn create_project(&self, name: &str) -> Result<ProjectDto> {
+        self.0.create_project(name).await
+    }
+
+    pub async fn patch_project(&self, id: &str, patch: ProjectPatch) -> Result<ProjectDto> {
+        self.0.patch_project(id, patch).await
+    }
+
+    pub async fn delete_project(&self, id: &str) -> Result<()> {
+        self.0.delete_project(id).await
     }
 
     pub async fn patch_session(&self, session_id: &str, patch: SessionPatch) -> Result<SessionDto> {
@@ -1090,13 +1136,122 @@ impl Live {
         Ok(episode_dto(e, replay))
     }
 
-    async fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionDto>> {
+    async fn list_sessions(&self, q: &ListSessionsQuery) -> Result<Vec<SessionDto>> {
         let digests = self
             .store
-            .session_digests(SESSION_LIST_LIMIT, include_archived)
+            .session_digests(
+                SESSION_LIST_LIMIT,
+                q.include_archived,
+                q.project_id.as_deref(),
+            )
             .await
             .map_err(store_err)?;
         Ok(digests.into_iter().map(session_dto).collect())
+    }
+
+    // ── 项目 ───────────────────────────────────────────────
+
+    async fn list_projects(&self) -> Result<Vec<ProjectDto>> {
+        let rows = self.store.projects().await.map_err(store_err)?;
+        Ok(rows.into_iter().map(project_dto).collect())
+    }
+
+    /// 建一个项目。id 由**服务端**生成。
+    ///
+    /// 与会话相反（那边 id 由客户端生成，因为它要在离线时先建起来）：
+    /// 项目只在联网时能建 —— 它的全部意义是「服务端知道这个分组存在」，
+    /// 离线建一个本地项目再等着合并，会引出「两台设备各建了一个同名项目」
+    /// 这种要人工消歧的状态，而分组这件事不值得。
+    async fn create_project(&self, name: &str) -> Result<ProjectDto> {
+        let name = validate_project_name(name)?;
+        let id = Id::new().to_string();
+        let event = cortex_store::NewProjectEvent::create(
+            &id,
+            &name,
+            cortex_store::Actor::User,
+            &self.device_id,
+        );
+
+        self.store
+            .write_txn(async |t| t.insert_project_event(&event).await)
+            .await
+            .map_err(store_err)?;
+
+        // 不拿手上的 name 拼一个 DTO 回去，而是读回末态：并发下另一台设备
+        // 可能刚好改了名，此时回显本次请求的名字就是在告诉客户端一件
+        // 已经不成立的事。多一次读换掉一整类「界面显示的与库里存的不一样」
+        self.project_overview(&id).await
+    }
+
+    async fn patch_project(&self, id: &str, patch: ProjectPatch) -> Result<ProjectDto> {
+        let Some(raw) = patch.name.as_deref() else {
+            return Err(CortexError::Invalid(
+                "请求体里没有任何要改的字段（name）".into(),
+            ));
+        };
+        let name = validate_project_name(raw)?;
+
+        // 改名之前先确认它还在。少了这一句，给一个已删除项目改名会**静默成功**
+        // （事件照样落库），而列表里什么都不会出现 —— 用户看到的是「改完就没了」
+        self.require_project(id).await?;
+
+        let event = cortex_store::NewProjectEvent::rename(
+            id,
+            &name,
+            cortex_store::Actor::User,
+            &self.device_id,
+        );
+        self.store
+            .write_txn(async |t| t.insert_project_event(&event).await)
+            .await
+            .map_err(store_err)?;
+
+        self.project_overview(id).await
+    }
+
+    /// 删项目 —— **解散分组，不动内容**。
+    ///
+    /// 里面的会话变成未分组（`session_state` 把指向已删除项目的归属收敛成
+    /// NULL），消息、附件、已抽取的事实一条不少。刻意不级联写一批
+    /// `remove_from_project`：那是 N 条写入，而且会让「撤销误删」变成不可能 ——
+    /// 现在只要用同一个 id 再 create 一次，所有会话的归属原样回来。
+    ///
+    /// **重复删是 404 而不是 200**：客户端在两台设备上各删一次是常见的，
+    /// 但把「已经不在了」说成成功，会让「我删的是哪一个」这种错误永远查不出来。
+    async fn delete_project(&self, id: &str) -> Result<()> {
+        self.require_project(id).await?;
+
+        let event =
+            cortex_store::NewProjectEvent::delete(id, cortex_store::Actor::User, &self.device_id);
+        self.store
+            .write_txn(async |t| t.insert_project_event(&event).await)
+            .await
+            .map_err(store_err)?;
+        Ok(())
+    }
+
+    /// 项目此刻的末态。不存在（或已删）时 404。
+    async fn project_overview(&self, id: &str) -> Result<ProjectDto> {
+        Ok(project_dto(self.require_project(id).await?))
+    }
+
+    /// 「这个项目现在还在吗」—— 读一次末态，不在就 404。
+    ///
+    /// 单独抽出来是因为改名与删除都要它，而两处都必须在**进写事务之前**问：
+    /// 写事务持着 advisory lock，纪律要求它短小纯写
+    /// （`cortex-store::txn` 的第三条）。
+    ///
+    /// 把会话移进项目那一处**不**走这里：那条路上项目不存在是 400 不是 404，
+    /// 理由见 [`Self::patch_session`] 里那段注释。
+    async fn require_project(&self, id: &str) -> Result<cortex_store::Project> {
+        self.store
+            .project(id)
+            .await
+            .map_err(store_err)?
+            .ok_or_else(|| CortexError::NotFound {
+                kind: "project",
+                id: id.into(),
+            })
     }
 
     /// 改名 / 归档 / 绑定工作区。
@@ -1175,9 +1330,46 @@ impl Live {
             ));
         }
 
+        // ── 移进 / 移出项目 ──
+        //
+        // 目标项目的存在性在**进事务之前**查（同上：取号事务短小纯写）。
+        // 不查的话，移进一个已删除的项目会静默成功 —— 事件照样落库，而末态
+        // 视图把悬挂的归属当作未分组，于是用户看到的是「拖进去又弹回来了」，
+        // 且没有任何一处报错。
+        match patch.project_id.as_ref().map(Option::as_deref) {
+            Some(Some(project_id)) => {
+                // 目标项目不存在是 **400 而不是 404**：这条请求的资源是那个会话，
+                // 而它好好的。回 404 会让客户端分不清「会话没了」与「项目没了」，
+                // 而两者要做的事完全不同（一个是刷新列表，一个是重建分组）
+                if self
+                    .store
+                    .project(project_id)
+                    .await
+                    .map_err(store_err)?
+                    .is_none()
+                {
+                    return Err(CortexError::Invalid(format!(
+                        "目标项目不存在或已被删除：{project_id}"
+                    )));
+                }
+                events.push(cortex_store::NewSessionEvent::move_to_project(
+                    session_id,
+                    project_id,
+                    cortex_store::Actor::User,
+                    &self.device_id,
+                ));
+            }
+            Some(None) => events.push(cortex_store::NewSessionEvent::remove_from_project(
+                session_id,
+                cortex_store::Actor::User,
+                &self.device_id,
+            )),
+            None => {}
+        }
+
         if events.is_empty() {
             return Err(CortexError::Invalid(
-                "请求体里没有任何要改的字段（title / archived / workspace）".into(),
+                "请求体里没有任何要改的字段（title / archived / workspace / project_id）".into(),
             ));
         }
 
@@ -1226,7 +1418,8 @@ impl Live {
             message_count: 0,
             preview: None,
             archived: state.as_ref().is_some_and(|s| s.archived),
-            workspace: state.and_then(|s| s.workspace),
+            workspace: state.as_ref().and_then(|s| s.workspace.clone()),
+            project_id: state.and_then(|s| s.project_id),
         })
     }
 
@@ -2181,6 +2374,16 @@ fn session_dto(d: cortex_store::SessionDigest) -> SessionDto {
         preview: d.last_text,
         archived: d.archived,
         workspace: d.workspace,
+        project_id: d.project_id,
+    }
+}
+
+fn project_dto(p: cortex_store::Project) -> ProjectDto {
+    ProjectDto {
+        id: p.project_id,
+        name: p.name,
+        created_at: p.created_at.to_rfc3339(),
+        session_count: p.session_count,
     }
 }
 
@@ -2246,6 +2449,40 @@ mod tests {
         assert!(
             s.chars().count() < 200,
             "工具事件必须压得住大参数，否则一次 write_file 就能把 SSE 流撑爆：{s}"
+        );
+    }
+
+    #[test]
+    fn a_project_name_must_survive_trimming() {
+        assert_eq!(
+            validate_project_name("  记忆引擎  ").expect("两侧空白应当被去掉而不是拒绝"),
+            "记忆引擎"
+        );
+
+        for bad in ["", "   ", "\t\n"] {
+            assert!(
+                validate_project_name(bad).is_err(),
+                "{bad:?} 应当被拒 —— 一个名字全是空白的项目在侧边栏上是一行\
+                 什么都没有的可点区域，看起来像界面坏了"
+            );
+        }
+    }
+
+    #[test]
+    fn the_project_name_limit_counts_characters_not_bytes() {
+        let max = cortex_store::PROJECT_NAME_MAX_CHARS;
+
+        // 恰好顶格的中文名：按字节算的话它是 3 倍长度，会被误拒
+        let full = "记".repeat(max);
+        assert_eq!(
+            validate_project_name(&full)
+                .expect("恰好顶格应当通过 —— 上限按字符数，与数据库 length() 一致"),
+            full
+        );
+
+        assert!(
+            validate_project_name(&"记".repeat(max + 1)).is_err(),
+            "超一个字符就该在这里被拒，而不是让数据库的 CHECK 变成一句 500"
         );
     }
 

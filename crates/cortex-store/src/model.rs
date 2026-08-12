@@ -60,6 +60,7 @@ pub mod table {
         DERIVATIONS       = "derivations",
         REDACTIONS        = "redactions",
         SESSION_EVENTS    = "session_events",
+        PROJECT_EVENTS    = "project_events",
     }
 
     // ── 刻意**不**在上面那个宏里的两张表 ──────────────────────
@@ -272,9 +273,10 @@ text_enum! {
 text_enum! {
     /// `session_events.op`
     ///
-    /// 三个互相独立的维度，各自是一台「末态由最后一条决定」的状态机：
+    /// 四个互相独立的维度，各自是一台「末态由最后一条决定」的状态机：
     /// `Rename` 管标题，`Archive` / `Unarchive` 管归档，
-    /// `BindWorkspace` / `UnbindWorkspace` 管工作区。
+    /// `BindWorkspace` / `UnbindWorkspace` 管工作区，
+    /// `MoveToProject` / `RemoveFromProject` 管所属项目。
     ///
     /// **归档不是删除**：归档只把会话从默认列表隐藏，消息与派生记忆一概不动，
     /// 随时可 `Unarchive` 恢复。真正销毁内容的是 [`RedactionMode`]，
@@ -285,6 +287,27 @@ text_enum! {
         Unarchive => "unarchive",
         BindWorkspace => "bind_workspace",
         UnbindWorkspace => "unbind_workspace",
+        MoveToProject => "move_to_project",
+        RemoveFromProject => "remove_from_project",
+    }
+}
+
+text_enum! {
+    /// `project_events.op`
+    ///
+    /// 两台状态机共用一张表：`Create` / `Delete` 决定项目还在不在，
+    /// `Create` / `Rename` 决定它此刻叫什么。`Create` 同时是两台机的起点。
+    ///
+    /// **刻意没有 archive**：项目是个轻量分组，再加一层「已归档的项目」
+    /// 只会让界面多一个没人用的过滤器。理由见
+    /// `migrations/20260812000003_projects.sql` 的表头。
+    ///
+    /// **`Delete` 删的是分组，不是内容**：项目从列表消失，里面的会话变成
+    /// 未分组，消息与派生记忆一概不动。
+    pub enum ProjectOp {
+        Create => "create",
+        Rename => "rename",
+        Delete => "delete",
     }
 }
 
@@ -1013,6 +1036,9 @@ pub struct SessionEvent {
     /// `op = BindWorkspace` 时非空。**本机绝对路径** ——
     /// 同步到别的设备上可能根本不存在，客户端应把「不存在」当作未绑定。
     pub workspace: Option<String>,
+    /// `op = MoveToProject` 时非空。指向的项目**可能已经被删了** ——
+    /// 删项目刻意不级联改写会话事件，末态视图会把悬挂的绑定当作未分组。
+    pub project_id: Option<String>,
     pub actor: Actor,
     pub device_id: String,
     pub created_at: DateTime<Utc>,
@@ -1027,6 +1053,8 @@ pub struct NewSessionEvent {
     pub title: Option<String>,
     /// `op = BindWorkspace` 时必填，其余必须为 `None`（schema CHECK 强制）
     pub workspace: Option<String>,
+    /// `op = MoveToProject` 时必填，其余必须为 `None`（schema CHECK 强制）
+    pub project_id: Option<String>,
     pub actor: Actor,
     pub device_id: String,
 }
@@ -1039,6 +1067,7 @@ impl NewSessionEvent {
             op,
             title: None,
             workspace: None,
+            project_id: None,
             actor,
             device_id: device_id.to_owned(),
         }
@@ -1093,6 +1122,111 @@ impl NewSessionEvent {
     pub fn unbind_workspace(session_id: &str, actor: Actor, device_id: &str) -> Self {
         Self::bare(session_id, SessionOp::UnbindWorkspace, actor, device_id)
     }
+
+    /// 把会话移进某个项目。再移一次就是换项目 —— 一个会话同时只属于一个项目。
+    ///
+    /// 存储层**不校验项目存不存在**：那需要一次读，而写事务持着 advisory lock、
+    /// 纪律要求它短小纯写（见 [`crate::txn`]）。校验属于 cortexd，在进事务前做。
+    /// 即使漏了校验也不会脏掉视图：`session_state` 把指向已删除项目的绑定
+    /// 当作未分组。
+    #[must_use]
+    pub fn move_to_project(
+        session_id: &str,
+        project_id: &str,
+        actor: Actor,
+        device_id: &str,
+    ) -> Self {
+        Self {
+            project_id: Some(project_id.to_owned()),
+            ..Self::bare(session_id, SessionOp::MoveToProject, actor, device_id)
+        }
+    }
+
+    /// 把会话移出项目，退回未分组。
+    ///
+    /// 与「删项目」不是一回事：这一条只动这一个会话，而删项目是解散整个分组。
+    #[must_use]
+    pub fn remove_from_project(session_id: &str, actor: Actor, device_id: &str) -> Self {
+        Self::bare(session_id, SessionOp::RemoveFromProject, actor, device_id)
+    }
+}
+
+// ══════════════════════════════════════════════════════════
+//  项目生命周期
+// ══════════════════════════════════════════════════════════
+
+/// `project_events.name` 的字符数上限，与 migration 里的 CHECK 一致。
+///
+/// 常量在这里而不是让上层写字面量：两处漂移的症状是「客户端以为改名成功，
+/// 服务端却回 500」—— 数据库 CHECK 的报错到不了用户眼前。
+pub const PROJECT_NAME_MAX_CHARS: usize = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct ProjectEvent {
+    pub id: String,
+    pub project_id: String,
+    pub op: ProjectOp,
+    /// `op = Create | Rename` 时非空
+    pub name: Option<String>,
+    pub actor: Actor,
+    pub device_id: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewProjectEvent {
+    pub id: Id,
+    pub project_id: String,
+    pub op: ProjectOp,
+    /// `op = Create | Rename` 时必填，`Delete` 必须为 `None`（schema CHECK 强制）
+    pub name: Option<String>,
+    pub actor: Actor,
+    pub device_id: String,
+}
+
+impl NewProjectEvent {
+    fn bare(project_id: &str, op: ProjectOp, actor: Actor, device_id: &str) -> Self {
+        Self {
+            id: Id::new(),
+            project_id: project_id.to_owned(),
+            op,
+            name: None,
+            actor,
+            device_id: device_id.to_owned(),
+        }
+    }
+
+    /// 建一个项目。`project_id` 由调用方生成（通常是一个新 ULID）。
+    ///
+    /// **同一个 id 再 create 一次是「撤销删除」**，不是错误：末态由最后一条
+    /// 生命周期事件决定，于是重建之后原来那些会话的归属原样回来 ——
+    /// 这正是删项目刻意不级联改写会话事件换来的东西。
+    #[must_use]
+    pub fn create(project_id: &str, name: &str, actor: Actor, device_id: &str) -> Self {
+        Self {
+            name: Some(name.to_owned()),
+            ..Self::bare(project_id, ProjectOp::Create, actor, device_id)
+        }
+    }
+
+    /// 改名。末态由最后一条 `rename`（或 `create`）决定，不做撤销栈。
+    #[must_use]
+    pub fn rename(project_id: &str, name: &str, actor: Actor, device_id: &str) -> Self {
+        Self {
+            name: Some(name.to_owned()),
+            ..Self::bare(project_id, ProjectOp::Rename, actor, device_id)
+        }
+    }
+
+    /// 删项目 —— **解散分组，不动内容**。
+    ///
+    /// 里面的会话变成未分组，消息、附件、已抽取的事实一条不少。
+    /// 真要销毁内容得走 `redactions` 的 redact / purge，那是另一条路、
+    /// 要二次确认（docs/memory.md §十一）。
+    #[must_use]
+    pub fn delete(project_id: &str, actor: Actor, device_id: &str) -> Self {
+        Self::bare(project_id, ProjectOp::Delete, actor, device_id)
+    }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1140,9 +1274,9 @@ pub struct FactStatus {
     pub decided_at: DateTime<Utc>,
 }
 
-/// `session_state` 视图：一个会话三个维度各自的末态。
+/// `session_state` 视图：一个会话四个维度各自的末态。
 ///
-/// 三个维度**互相独立**地取各自最后一条事件 —— `[archive, rename]` 之后
+/// 四个维度**互相独立**地取各自最后一条事件 —— `[archive, rename]` 之后
 /// 会话既有了新标题，也仍然处于归档中。用「整表最后一条」判定会得出
 /// 「改个名就自动出档了」这种谁也没要求过的行为。
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
@@ -1153,8 +1287,27 @@ pub struct SessionState {
     pub archived: bool,
     /// 绑定的本机目录。`None` = 未绑定，该会话是纯聊天（没有文件工具）。
     pub workspace: Option<String>,
-    /// 三个维度中最近一次事件的时间
+    /// 所属项目。`None` = 未分组。
+    ///
+    /// **指向已删除项目的绑定在视图里就已经变成 `None`** —— 删项目不级联
+    /// 改写会话事件，悬挂的绑定是常态，判定收敛在 SQL 里一处。
+    pub project_id: Option<String>,
+    /// 四个维度中最近一次事件的时间
     pub decided_at: DateTime<Utc>,
+}
+
+/// `project_state` 视图 + 会话计数：项目列表的一行。
+///
+/// `session_count` 不是视图的一部分（视图只回答「这个项目此刻叫什么」），
+/// 而是列表查询顺手聚合出来的 —— 见 [`crate::Store::projects`]。
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct Project {
+    pub project_id: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    /// 这个项目下有多少个**会显示在列表里**的会话。口径见
+    /// [`crate::Store::projects`] 的文档。
+    pub session_count: i64,
 }
 
 /// `canonical_entities` 视图：实体经别名合并后的最终归属。
@@ -1194,17 +1347,44 @@ mod tests {
         assert_eq!(b.workspace.as_deref(), Some("/tmp/x"));
         assert!(b.title.is_none(), "bind_workspace 不该携带 title");
 
+        let m = NewSessionEvent::move_to_project("s", "proj", Actor::User, "dev");
+        assert_eq!(m.project_id.as_deref(), Some("proj"));
+        assert!(
+            m.title.is_none() && m.workspace.is_none(),
+            "move_to_project 不该携带 title / workspace"
+        );
+
         for e in [
             NewSessionEvent::archive("s", Actor::User, "dev"),
             NewSessionEvent::unarchive("s", Actor::User, "dev"),
             NewSessionEvent::unbind_workspace("s", Actor::User, "dev"),
+            NewSessionEvent::remove_from_project("s", Actor::User, "dev"),
         ] {
             assert!(
-                e.title.is_none() && e.workspace.is_none(),
+                e.title.is_none() && e.workspace.is_none() && e.project_id.is_none(),
                 "{} 是纯状态事件，不该携带任何载荷",
                 e.op
             );
         }
+    }
+
+    #[test]
+    fn project_event_constructors_respect_the_schema_checks() {
+        // 与 session_events 同一套两侧 CHECK：create / rename 必须有 name，
+        // 且**只有**它们能有 name。构造器写错会在集成测试里变成一句
+        // SQLSTATE 23514，这里先用单测把意图钉住
+        for e in [
+            NewProjectEvent::create("p", "新项目", Actor::User, "dev"),
+            NewProjectEvent::rename("p", "改过的名", Actor::User, "dev"),
+        ] {
+            assert!(e.name.is_some(), "{} 必须携带 name", e.op);
+        }
+
+        let d = NewProjectEvent::delete("p", Actor::User, "dev");
+        assert!(
+            d.name.is_none(),
+            "delete 是纯状态事件，带上 name 会让视图表现为「删一下名字就变了」"
+        );
     }
 
     #[test]

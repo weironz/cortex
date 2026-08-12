@@ -835,13 +835,69 @@ impl AppState {
     ) -> Result<Vec<SessionDto>> {
         match &self.inner.backend {
             // mock 里没有归档的会话，include_archived 因此不改变结果。
-            // 仍然把参数收下：客户端要能在离线开发时验证自己拼对了查询串
-            Backend::Mock => Ok(mock_sessions()),
-            Backend::Live(l) => {
-                l.bind(tenant.store()?)
-                    .list_sessions(q.include_archived)
-                    .await
+            // 仍然把参数收下：客户端要能在离线开发时验证自己拼对了查询串。
+            //
+            // project_id 则**照样过滤**：客户端 CI 里「点开项目只看得到
+            // 这个项目的会话」这条断言，在一个无视过滤器的 mock 上永远是绿的，
+            // 而它测的正是这个查询串有没有拼对
+            Backend::Mock => Ok(mock_sessions()
+                .into_iter()
+                .filter(|s| q.project_id.is_none() || s.project_id == q.project_id)
+                .collect()),
+            Backend::Live(l) => l.bind(tenant.store()?).list_sessions(q).await,
+        }
+    }
+
+    // ───────────────────────── 项目 ─────────────────────────
+
+    pub async fn list_projects(&self, tenant: &Tenant) -> Result<Vec<ProjectDto>> {
+        match &self.inner.backend {
+            Backend::Mock => Ok(mock_projects()),
+            Backend::Live(l) => l.bind(tenant.store()?).list_projects().await,
+        }
+    }
+
+    pub async fn create_project(&self, tenant: &Tenant, name: &str) -> Result<ProjectDto> {
+        match &self.inner.backend {
+            // mock 不落库，但**照样跑一遍校验**：客户端 CI 里「空名字会被拒」
+            // 这条断言必须在 mock 上也成立，否则它测的是一个比真实后端宽松的契约
+            Backend::Mock => Ok(ProjectDto {
+                id: Id::new().to_string(),
+                name: crate::live::validate_project_name(name)?,
+                created_at: Utc::now().to_rfc3339(),
+                session_count: 0,
+            }),
+            Backend::Live(l) => l.bind(tenant.store()?).create_project(name).await,
+        }
+    }
+
+    pub async fn patch_project(
+        &self,
+        tenant: &Tenant,
+        id: &str,
+        patch: ProjectPatch,
+    ) -> Result<ProjectDto> {
+        match &self.inner.backend {
+            Backend::Mock => {
+                let name = patch.name.as_deref().ok_or_else(|| {
+                    CortexError::Invalid("请求体里没有任何要改的字段（name）".into())
+                })?;
+                let mut p = mock_projects()
+                    .into_iter()
+                    .find(|p| p.id == id)
+                    .unwrap_or_else(|| mock_projects().swap_remove(0));
+                p.id = id.to_string();
+                p.name = crate::live::validate_project_name(name)?;
+                Ok(p)
             }
+            Backend::Live(l) => l.bind(tenant.store()?).patch_project(id, patch).await,
+        }
+    }
+
+    pub async fn delete_project(&self, tenant: &Tenant, id: &str) -> Result<()> {
+        match &self.inner.backend {
+            Backend::Mock => Ok(()),
+            Backend::Live(l) => l.bind(tenant.store()?).delete_project(id).await,
         }
     }
 
@@ -876,6 +932,12 @@ impl AppState {
                         Some(raw) => Some(cortex_agent::workspace::validate(raw)?),
                         None => None,
                     };
+                }
+                // 三态照搬：客户端 CI 要能验证「显式 null 是移出、字段缺席是
+                // 不动」这条契约，而那件事在一个不理会 project_id 的 mock 上
+                // 是测不出来的
+                if let Some(p) = &patch.project_id {
+                    s.project_id = p.clone();
                 }
                 Ok(s)
             }
@@ -959,6 +1021,22 @@ fn mock_episode(id: &str) -> EpisodeDto {
     }
 }
 
+/// 假项目。**刻意只有一个**，且 mock 的会话里恰好一个属于它、一个不属于 ——
+/// 客户端要能在离线开发时同时画出「项目里的会话」与「未分组」两种形态，
+/// 而两条样本都在同一个项目里的话，未分组那段 UI 一次都不会被执行到。
+fn mock_projects() -> Vec<ProjectDto> {
+    vec![ProjectDto {
+        id: MOCK_PROJECT.into(),
+        name: "Cortex 自研".into(),
+        created_at: Utc::now().to_rfc3339(),
+        session_count: 1,
+    }]
+}
+
+/// mock 里那个项目的 id。会话与项目两处都引它，写成字面量迟早对不上，
+/// 而对不上的表现是「mock 上项目永远是空的」。
+const MOCK_PROJECT: &str = "01JPROJECT0000000000000001";
+
 fn mock_sessions() -> Vec<SessionDto> {
     let now = Utc::now().to_rfc3339();
     vec![
@@ -972,6 +1050,7 @@ fn mock_sessions() -> Vec<SessionDto> {
             title_is_custom: false,
             archived: false,
             workspace: None,
+            project_id: Some(MOCK_PROJECT.into()),
         },
         SessionDto {
             id: "01JSESSION0000000000000002".into(),
@@ -986,6 +1065,8 @@ fn mock_sessions() -> Vec<SessionDto> {
             // 任何编出来的路径都不存在，界面按「不存在即未绑定」渲染的话
             // 反而看不出区别。要试绑定态就 PATCH 一个真实目录上去
             workspace: None,
+            // 未分组的那一条，理由见 [`mock_projects`]
+            project_id: None,
         },
     ]
 }

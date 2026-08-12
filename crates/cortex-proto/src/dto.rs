@@ -550,6 +550,15 @@ pub struct SessionDto {
     /// 注意这是**本机**路径。多端同步会把绑定下发到别的设备，而那台机器上
     /// 同一个路径多半不存在 —— 客户端遇到不存在的路径应按未绑定显示。
     pub workspace: Option<String>,
+    /// 所属项目的 id。`null` / 缺席 = 未分组。
+    ///
+    /// **不会指向一个已删除的项目**：删项目只是解散分组，服务端在算末态时
+    /// 就把悬挂的归属收敛成了未分组。客户端因此可以放心地拿这个 id 去
+    /// `GET /projects` 的结果里查名字，查不到就是自己的列表旧了。
+    ///
+    /// 老客户端忽略即可；空时整个字段省略，省得每条会话都多一个 `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -557,11 +566,19 @@ pub struct SessionsResponse {
     pub sessions: Vec<SessionDto>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct ListSessionsQuery {
     /// 是否把已归档的会话也列出来。默认 false。
     #[serde(default)]
     pub include_archived: bool,
+    /// 只看某个项目里的会话。不传 = 全部（含未分组的）。
+    ///
+    /// 刻意**没有**「只看未分组」那个取值：真要它得再定义一个魔法字符串
+    /// （`""`？`"none"`？），而那种取值一旦定下来就再也改不掉，
+    /// 且与「项目 id 恰好等于那个魔法值」永远存在歧义。客户端要这个视图的话，
+    /// 拿全量列表按 `project_id == null` 自己筛 —— 它本来就要渲染全量列表。
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 /// `PATCH /sessions/{id}` 的请求体。
@@ -592,6 +609,19 @@ pub struct SessionPatch {
     pub archived: Option<bool>,
     #[serde(default, deserialize_with = "explicit_option")]
     pub workspace: Option<Option<String>>,
+    /// 所属项目，三态与 `workspace` 完全一致：
+    ///
+    /// | 请求体 | 含义 |
+    /// |---|---|
+    /// | 字段不出现 | 不动归属 |
+    /// | `"project_id": null` | **移出项目**，退回未分组 |
+    /// | `"project_id": "01J…"` | 移进该项目 |
+    ///
+    /// 移进一个不存在或已删除的项目会得到 400 —— 静默接受的话，客户端会显示
+    /// 「已移入」，而列表里那个会话仍然是未分组的（末态视图把悬挂归属
+    /// 收敛成了 NULL），用户看到的是「拖进去又弹回来了」。
+    #[serde(default, deserialize_with = "explicit_option")]
+    pub project_id: Option<Option<String>>,
 }
 
 /// 把「字段出现且为 null」与「字段没出现」区分开。
@@ -665,6 +695,59 @@ pub struct SessionDetail {
     /// 把它作为下一次请求的 `before` 即可取到更早的一页。
     /// `has_more` 为 false 时为 `null`。
     pub next_cursor: Option<String>,
+}
+
+// ─────────────────────────── /projects ─────────────────────────
+
+/// 一个项目 —— 会话的分组容器。
+///
+/// # 它刻意没有的东西
+///
+/// 没有 `archived`：项目本身就是个轻量分组，再加一层「已归档的项目」
+/// 只会让界面多一个没人用的过滤器。想收起来就删掉它 —— 而删项目**不删内容**，
+/// 里面的会话只是变回未分组（见 [`ProjectsResponse`]）。
+///
+/// 没有 `description` / `instructions`：那是「项目级系统提示词」那一档功能，
+/// 与分组是两件事。现在留一个永远为空的字段，只会让三端都先写一遍它的
+/// 渲染与编辑，然后发现语义还没定下来。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDto {
+    pub id: String,
+    pub name: String,
+    /// 创建时间（RFC 3339）
+    pub created_at: String,
+    /// 这个项目下**会出现在会话列表里**的会话数：已归档的不算，
+    /// 一条消息都还没有的也不算。口径与 `GET /sessions?project_id=` 一致 ——
+    /// 对不上的话，用户会看到「3 个会话」点进去只有 2 个。
+    pub session_count: i64,
+}
+
+/// `GET /projects` 的响应。
+///
+/// **不含已删除的项目**。删项目是一条墓碑事件：项目从列表消失，
+/// 里面的会话变成未分组，而消息、附件、已抽取的记忆一条没少 ——
+/// 界面文案上别把它说成「彻底删除」，那是 redact / purge 的事。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectsResponse {
+    pub projects: Vec<ProjectDto>,
+}
+
+/// `POST /projects` 的请求体。
+#[derive(Debug, Deserialize)]
+pub struct NewProjectRequest {
+    /// trim 之后必须非空、不超过 100 字符。
+    pub name: String,
+}
+
+/// `PATCH /projects/{id}` 的请求体。
+///
+/// 目前只有改名一件事可做。仍然用 PATCH + 可选字段而不是
+/// `POST /projects/{id}/rename`：将来加第二个可改属性时，
+/// 前者是加一个字段，后者是再开一条路径、再写一遍鉴权与租户解析。
+#[derive(Debug, Default, Deserialize)]
+pub struct ProjectPatch {
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 // ──────────────────────────── /blobs ────────────────────────────
@@ -827,12 +910,53 @@ mod tests {
         assert_eq!(bind.workspace, Some(Some("D:/codes/x".into())));
     }
 
+    /// `project_id` 的三态与 `workspace` 同款，混掉的后果同样是静默的：
+    /// 用户每改一次标题，会话就被顺手踢出项目。
+    #[test]
+    fn project_id_distinguishes_absent_from_null() {
+        let absent: SessionPatch = serde_json::from_str(r#"{"title":"改个名"}"#).expect("应能解析");
+        assert!(
+            absent.project_id.is_none(),
+            "字段没出现应当是「不动归属」—— 解成「移出项目」的话，改标题会把会话踢出项目"
+        );
+
+        let out: SessionPatch = serde_json::from_str(r#"{"project_id":null}"#).expect("应能解析");
+        assert_eq!(
+            out.project_id,
+            Some(None),
+            "显式的 null 应当是「移出项目」，不能与「字段没出现」混为一谈"
+        );
+
+        let into: SessionPatch =
+            serde_json::from_str(r#"{"project_id":"01JPROJECT0000000000000001"}"#)
+                .expect("应能解析");
+        assert_eq!(
+            into.project_id,
+            Some(Some("01JPROJECT0000000000000001".into()))
+        );
+    }
+
     #[test]
     fn an_empty_patch_parses_and_changes_nothing() {
         // 空 body 不该解析失败 —— 失败会让「服务端不认识我发的字段」
         // 与「我什么都没发」变成同一个 400，查起来全无线索
         let p: SessionPatch = serde_json::from_str("{}").expect("空对象应能解析");
-        assert!(p.title.is_none() && p.archived.is_none() && p.workspace.is_none());
+        assert!(
+            p.title.is_none()
+                && p.archived.is_none()
+                && p.workspace.is_none()
+                && p.project_id.is_none()
+        );
+    }
+
+    #[test]
+    fn list_query_without_project_means_every_session() {
+        let q: ListSessionsQuery = serde_json::from_str("{}").expect("缺参数应当走默认值");
+        assert!(
+            q.project_id.is_none(),
+            "不传 project_id 必须是「全部会话」而不是「未分组」—— \
+             默认值一旦是后者，老客户端会突然只看得见未分组的会话"
+        );
     }
 
     #[test]

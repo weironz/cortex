@@ -306,10 +306,13 @@ impl cortex_import::Sink for LocalSink {
             .patch_session(
                 &self.1,
                 session_id,
+                // `..Default::default()` 而不是逐个填 None：这里只想改标题，
+                // 而 SessionPatch 每加一个维度（工作区、项目……）都会让
+                // 「全列一遍」的写法编译不过，然后有人顺手填一个 None ——
+                // 那正好是「不动它」的意思，但那是巧合，不是它该被写下来的理由
                 cortex_proto::dto::SessionPatch {
                     title: Some(title.to_string()),
-                    archived: None,
-                    workspace: None,
+                    ..Default::default()
                 },
             )
             .await

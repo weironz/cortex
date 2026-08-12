@@ -29,7 +29,7 @@ use crate::error::{Result, StoreError};
 use crate::model::{
     DerivedKind, NewBlob, NewBlobTranscript, NewEntity, NewEntityEmbedding, NewEntityMerge,
     NewEpisode, NewEpisodeBlob, NewEpisodeMemory, NewEpisodeToolCall, NewFact, NewFactEmbedding,
-    NewFactEvent, NewRedaction, NewSessionEvent, NewSummary, ProvenanceRef, table,
+    NewFactEvent, NewProjectEvent, NewRedaction, NewSessionEvent, NewSummary, ProvenanceRef, table,
 };
 
 /// 同步取号锁的 advisory lock key。
@@ -573,18 +573,43 @@ impl WriteTxn {
         let id = new.id.to_string();
         let stmt = sqlx::query(
             "INSERT INTO session_events
-                 (id, session_id, op, title, workspace, actor, device_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                 (id, session_id, op, title, workspace, project_id, actor, device_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&id)
         .bind(&new.session_id)
         .bind(new.op)
         .bind(&new.title)
         .bind(&new.workspace)
+        .bind(&new.project_id)
         .bind(new.actor)
         .bind(&new.device_id);
 
         self.insert_row(table::SESSION_EVENTS, &id, stmt).await
+    }
+
+    // ── 项目生命周期 ───────────────────────────────────────
+
+    /// 追加一条项目生命周期事件（建 / 改名 / 删）。
+    ///
+    /// 与 [`Self::insert_session_event`] 同款：末态由每台状态机最后一条事件
+    /// 决定（`project_state` 视图），而不是就地改一张 projects 表。
+    /// 删项目在这里只是**追加一条 delete**，里面的会话一条都不动 ——
+    /// 级联改写会让「撤销误删」变成不可能。
+    pub async fn insert_project_event(&mut self, new: &NewProjectEvent) -> Result<i64> {
+        let id = new.id.to_string();
+        let stmt = sqlx::query(
+            "INSERT INTO project_events (id, project_id, op, name, actor, device_id)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(&id)
+        .bind(&new.project_id)
+        .bind(new.op)
+        .bind(&new.name)
+        .bind(new.actor)
+        .bind(&new.device_id);
+
+        self.insert_row(table::PROJECT_EVENTS, &id, stmt).await
     }
 
     // ── 抹除墓碑 ───────────────────────────────────────────

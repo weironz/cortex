@@ -101,7 +101,7 @@ async fn one_users_memory_never_shows_up_in_anothers() {
 
     // 交叉读：列会话
     let a_sessions = store_a
-        .session_digests(100, true)
+        .session_digests(100, true, None)
         .await
         .expect("列 A 的会话");
     assert!(
@@ -110,7 +110,7 @@ async fn one_users_memory_never_shows_up_in_anothers() {
          是更坏的一种串档 —— 侧边栏上就直接显示出来了"
     );
     let b_sessions = store_b
-        .session_digests(100, true)
+        .session_digests(100, true, None)
         .await
         .expect("列 B 的会话");
     assert!(
