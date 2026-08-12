@@ -158,8 +158,9 @@ class LocalAgent {
     // heuristic: a leftover file from a previous run cannot collide with this
     // run's, so there is nothing to date-check.
     final stamp = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
-    final addrFile =
-        File('$stateDir${Platform.pathSeparator}agent-$pid-$stamp.addr');
+    final addrFile = File(
+      '$stateDir${Platform.pathSeparator}agent-$pid-$stamp.addr',
+    );
     _sweepStaleHandshakes(Directory(stateDir));
 
     // 环境先拼好再传：`if (x case final r?)` 在 map 字面量里会被 lint

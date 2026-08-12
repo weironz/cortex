@@ -112,7 +112,9 @@ class PendingConfirmation {
     // render as already-expired and hide a live request; the daemon's own
     // default is the least-wrong stand-in.
     deadline: now.add(
-      Duration(seconds: asIntOrNull(json['expires_in_secs']) ?? kDefaultTimeoutSecs),
+      Duration(
+        seconds: asIntOrNull(json['expires_in_secs']) ?? kDefaultTimeoutSecs,
+      ),
     ),
     sessionId: asStringOrNull(json['session_id']),
     scope: asStringOrNull(json['scope']),

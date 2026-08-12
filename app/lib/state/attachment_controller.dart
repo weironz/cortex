@@ -191,7 +191,8 @@ class AttachmentQueue extends Notifier<Map<String, List<PendingAttachment>>> {
         mime: entry.mime,
         // The entry may have been removed by the user mid-upload; `_update` is
         // a no-op then, so no state is resurrected.
-        onProgress: (sent, _) => _update(sessionId, id, (p) => p.copyWith(sent: sent)),
+        onProgress: (sent, _) =>
+            _update(sessionId, id, (p) => p.copyWith(sent: sent)),
       );
       _update(
         sessionId,

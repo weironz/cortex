@@ -22,8 +22,7 @@ Future<String?> pickWorkspaceDirectory() =>
 /// local path, and the same path almost certainly does not exist on the user's
 /// other machine. The contract says such a session should read as unbound
 /// rather than as broken.
-Future<bool> workspaceExists(String path) =>
-    Directory(path).exists();
+Future<bool> workspaceExists(String path) => Directory(path).exists();
 
 /// One level of [path], directories first then files, both alphabetical.
 ///
@@ -73,8 +72,7 @@ Future<List<FileNode>> listWorkspaceDirectory(String path) async {
   return [...directories, ...files];
 }
 
-int _compare(String a, String b) =>
-    a.toLowerCase().compareTo(b.toLowerCase());
+int _compare(String a, String b) => a.toLowerCase().compareTo(b.toLowerCase());
 
 String _basename(String path) {
   final i = path.lastIndexOf(RegExp(r'[/\\]'));

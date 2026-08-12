@@ -70,8 +70,7 @@ class AppConfig {
   /// （指向本地起的一个假 feed 就能把整条下载—校验—安装走通）。
   static const String updateFeed = String.fromEnvironment(
     'CORTEX_UPDATE_FEED',
-    defaultValue:
-        'https://api.github.com/repos/weironz/cortex/releases/latest',
+    defaultValue: 'https://api.github.com/repos/weironz/cortex/releases/latest',
   );
 
   static const AppConfig initial = AppConfig(

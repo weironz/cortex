@@ -35,7 +35,8 @@ void main() {
       expect(
         isNewer(current: '0.1.7', latest: 'v0.1.7'),
         isFalse,
-        reason: 'GitHub 的 tag 带 v 前缀，剥不掉的话每次都认为有新版本 —— '
+        reason:
+            'GitHub 的 tag 带 v 前缀，剥不掉的话每次都认为有新版本 —— '
             '一个装完还提示更新的死循环',
       );
     });
@@ -44,7 +45,8 @@ void main() {
       expect(
         isNewer(current: '0.1.7+8', latest: '0.1.7+9'),
         isFalse,
-        reason: '+N 是 Flutter 的 build number，同一版重打一次包也会变。'
+        reason:
+            '+N 是 Flutter 的 build number，同一版重打一次包也会变。'
             '让它参与比较等于「重新打个包就通知全体用户升级」',
       );
       expect(isNewer(current: '0.1.7-rc.1', latest: '0.1.7'), isFalse);
@@ -61,9 +63,13 @@ void main() {
     });
 
     test('解析不出来一律当成「没有更新」，而不是崩或者乱升', () {
-      expect(isNewer(current: '', latest: '0.1.8'), isFalse,
-          reason: '空的当前版本 = 这份构建没传 CORTEX_APP_VERSION。'
-              '此时提示更新，一点就把开发版覆盖成正式版');
+      expect(
+        isNewer(current: '', latest: '0.1.8'),
+        isFalse,
+        reason:
+            '空的当前版本 = 这份构建没传 CORTEX_APP_VERSION。'
+            '此时提示更新，一点就把开发版覆盖成正式版',
+      );
       expect(isNewer(current: '0.1.7', latest: 'nightly'), isFalse);
       expect(isNewer(current: '0.1.7', latest: ''), isFalse);
       expect(parseVersion('0.1.7.5'), isNull, reason: '四段不是我们的版本形状');
@@ -82,8 +88,7 @@ void main() {
           assets ??
           [
             {
-              'name':
-                  'cortex-desktop-v0.1.8-x86_64-pc-windows-msvc-setup.exe',
+              'name': 'cortex-desktop-v0.1.8-x86_64-pc-windows-msvc-setup.exe',
               'browser_download_url': 'https://example.invalid/setup.exe',
             },
             {
@@ -123,7 +128,8 @@ void main() {
       expect(
         r,
         isNull,
-        reason: '安装包没有代码签名，校验和是唯一能确认它没被换过的东西。'
+        reason:
+            '安装包没有代码签名，校验和是唯一能确认它没被换过的东西。'
             '拿不到就不该装，而不是「那就不校验了」',
       );
     });
@@ -143,11 +149,7 @@ void main() {
           ],
         ),
       );
-      expect(
-        r,
-        isNull,
-        reason: '提示一个下不到的版本正是 roadmap 里写的「比没有更糟」',
-      );
+      expect(r, isNull, reason: '提示一个下不到的版本正是 roadmap 里写的「比没有更糟」');
     });
 
     test('畸形 JSON 不崩', () {
@@ -166,7 +168,10 @@ aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899  cortex-desktop
 
     test('按文件名取对应那一行', () {
       expect(
-        sha256For(sums, 'cortex-desktop-v0.1.8-x86_64-pc-windows-msvc-setup.exe'),
+        sha256For(
+          sums,
+          'cortex-desktop-v0.1.8-x86_64-pc-windows-msvc-setup.exe',
+        ),
         'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899',
       );
     });
@@ -179,7 +184,8 @@ aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899  cortex-desktop
       expect(
         got,
         isNot(startsWith('2b1c')),
-        reason: '拿第一行去校验安装包，结果是「每次都校验失败」——'
+        reason:
+            '拿第一行去校验安装包，结果是「每次都校验失败」——'
             '而排查方向会全错，因为下载明明是好的',
       );
     });

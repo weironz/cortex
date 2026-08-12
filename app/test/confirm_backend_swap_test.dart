@@ -82,7 +82,8 @@ void main() {
     expect(
       container.read(confirmControllerProvider).pending,
       isEmpty,
-      reason: '这是旧后端的确认项。换的若是账号，用户会被问「要不要执行」—— '
+      reason:
+          '这是旧后端的确认项。换的若是账号，用户会被问「要不要执行」—— '
           '而那是别人的命令，token 在他这边根本对不上',
     );
   });

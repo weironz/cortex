@@ -61,9 +61,10 @@ void main() {
       tester.element(find.byType(CortexApp)),
     );
     final controller = container.read(chatControllerProvider.notifier);
-    final target = container.read(chatControllerProvider).sessions.firstWhere(
-      (s) => !s.archived,
-    );
+    final target = container
+        .read(chatControllerProvider)
+        .sessions
+        .firstWhere((s) => !s.archived);
 
     // Never `await` a data-source call inside `testWidgets`: the mock's latency
     // is a `Future.delayed`, and in a widget test that timer only fires when
@@ -104,11 +105,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 600));
 
-    expect(
-      find.text('绑定工作区'),
-      findsOneWidget,
-      reason: '未绑定时入口必须自己说清楚它是干什么的',
-    );
+    expect(find.text('绑定工作区'), findsOneWidget, reason: '未绑定时入口必须自己说清楚它是干什么的');
 
     await tester.tap(find.text('绑定工作区'));
     // Explicit pumps rather than `pumpAndSettle`: the shell keeps indeterminate
@@ -163,11 +160,7 @@ void main() {
         .sessions
         .firstWhere((s) => s.id == id);
     expect(session.title, '我自己起的名字');
-    expect(
-      session.titleIsCustom,
-      isTrue,
-      reason: '改过名之后就不该再被首条消息覆盖',
-    );
+    expect(session.titleIsCustom, isTrue, reason: '改过名之后就不该再被首条消息覆盖');
     expect(
       session.hasLocalOverrides,
       isFalse,

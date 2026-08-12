@@ -28,10 +28,7 @@ class SyncIndicator extends ConsumerWidget {
       ),
       SyncLinkStatus.live => (const Color(0xFF2E9E5B), null),
       SyncLinkStatus.connecting => (scheme.onSurfaceVariant, null),
-      SyncLinkStatus.reconnecting => (
-        scheme.error,
-        Icons.sync_problem_rounded,
-      ),
+      SyncLinkStatus.reconnecting => (scheme.error, Icons.sync_problem_rounded),
       SyncLinkStatus.disabled => (scheme.onSurfaceVariant, null),
     };
 
@@ -71,7 +68,8 @@ class SyncIndicator extends ConsumerWidget {
       SyncLinkStatus.connecting => '正在连接实时同步…',
       SyncLinkStatus.reconnecting => [
         '实时同步已断开${s.attempt > 1 ? '（已重试 ${s.attempt} 次）' : ''}',
-        if (s.nextRetryAt != null) '${_secondsUntil(s.nextRetryAt!)} 秒后自动重连，点击立即重试',
+        if (s.nextRetryAt != null)
+          '${_secondsUntil(s.nextRetryAt!)} 秒后自动重连，点击立即重试',
         if (s.error != null) s.error!,
       ].join('\n'),
       SyncLinkStatus.live => [

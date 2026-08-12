@@ -203,11 +203,7 @@ void main() {
 
       final s = c.read(importControllerProvider);
       expect(s.error, contains('foo, bar'), reason: '解析器列出的键是唯一的线索');
-      expect(
-        s.phase,
-        ImportPhase.idle,
-        reason: '看不到账就绝不能停在一个能按「开始」的状态',
-      );
+      expect(s.phase, ImportPhase.idle, reason: '看不到账就绝不能停在一个能按「开始」的状态');
     });
   });
 

@@ -22,15 +22,13 @@ import 'package:http/testing.dart';
 /// 这句话技术上完全正确，而且**一个字都没告诉用户该怎么办**。
 /// 它原样出现在了登录屏上（真实截图）。
 void main() {
-  const html = '<!DOCTYPE html>\n<html><head><title>Cortex</title></head></html>';
+  const html =
+      '<!DOCTYPE html>\n<html><head><title>Cortex</title></head></html>';
 
   MockClient serving(String body, {String contentType = 'text/html'}) =>
       MockClient(
-        (_) async => http.Response(
-          body,
-          200,
-          headers: {'content-type': contentType},
-        ),
+        (_) async =>
+            http.Response(body, 200, headers: {'content-type': contentType}),
       );
 
   group('填错地址', () {
@@ -52,13 +50,15 @@ void main() {
       expect(
         msg,
         contains('网页'),
-        reason: '必须点明拿到的是网页 —— 「Unexpected character」说的是同一件事，'
+        reason:
+            '必须点明拿到的是网页 —— 「Unexpected character」说的是同一件事，'
             '但用户读不出来',
       );
       expect(
         msg,
         contains('https://cortex.example.com/api'),
-        reason: '必须给出**具体**的地址，而不是描述问题的形状。'
+        reason:
+            '必须给出**具体**的地址，而不是描述问题的形状。'
             '这是用户下一步唯一要做的事',
       );
       expect(
@@ -86,7 +86,8 @@ void main() {
       expect(
         msg,
         isNot(contains('/api/api')),
-        reason: '已经有路径还建议再加一层 /api，比不给建议更糟 —— '
+        reason:
+            '已经有路径还建议再加一层 /api，比不给建议更糟 —— '
             '用户会照着改，然后错得更远',
       );
     });

@@ -94,9 +94,7 @@ class ChatSession {
         ? this.workspace
         : workspace as Workspace?,
     archived: archived ?? this.archived,
-    projectId: projectId == _sentinel
-        ? this.projectId
-        : projectId as String?,
+    projectId: projectId == _sentinel ? this.projectId : projectId as String?,
     isLocalDraft: isLocalDraft ?? this.isLocalDraft,
     hasLocalOverrides: hasLocalOverrides ?? this.hasLocalOverrides,
   );

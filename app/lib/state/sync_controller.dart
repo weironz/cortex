@@ -182,24 +182,22 @@ class SyncController extends Notifier<SyncState> {
 
   void _connect(CortexApi api, int generation) {
     _subscription?.cancel();
-    _subscription = api
-        .watchSync()
-        .listen(
-          (event) {
-            if (_alive(generation)) _onEvent(api, event, generation);
-          },
-          onError: (Object error, StackTrace _) {
-            if (_alive(generation)) {
-              _onDropped(api, generation, _describe(error));
-            }
-          },
-          // A clean close is still a disconnect: the daemon shutting down or a
-          // proxy trimming an idle connection both land here.
-          onDone: () {
-            if (_alive(generation)) _onDropped(api, generation, null);
-          },
-          cancelOnError: true,
-        );
+    _subscription = api.watchSync().listen(
+      (event) {
+        if (_alive(generation)) _onEvent(api, event, generation);
+      },
+      onError: (Object error, StackTrace _) {
+        if (_alive(generation)) {
+          _onDropped(api, generation, _describe(error));
+        }
+      },
+      // A clean close is still a disconnect: the daemon shutting down or a
+      // proxy trimming an idle connection both land here.
+      onDone: () {
+        if (_alive(generation)) _onDropped(api, generation, null);
+      },
+      cancelOnError: true,
+    );
   }
 
   void _onEvent(CortexApi api, SyncEvent event, int generation) {

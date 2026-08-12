@@ -30,11 +30,8 @@ import 'package:cortex_app/state/chat_controller.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-ChatSession _session(String id) => ChatSession(
-  id: id,
-  title: '会话 $id',
-  updatedAt: DateTime.utc(2026, 8, 12),
-);
+ChatSession _session(String id) =>
+    ChatSession(id: id, title: '会话 $id', updatedAt: DateTime.utc(2026, 8, 12));
 
 /// 一个「请求发出去之后就被掐断」的替身 —— 复现 `_client.close()`。
 class _Aborting extends MockCortexApi {
@@ -48,8 +45,11 @@ class _Aborting extends MockCortexApi {
   }) => sessions_.future;
 
   @override
-  Future<SessionDetail> sessionDetail(String id, {int? limit, String? before}) =>
-      detail.future;
+  Future<SessionDetail> sessionDetail(
+    String id, {
+    int? limit,
+    String? before,
+  }) => detail.future;
 }
 
 /// 换后端之后那个「好的」替身。
@@ -123,7 +123,8 @@ void main() {
     expect(
       container.read(chatControllerProvider).sessionsError,
       isNull,
-      reason: '那个请求是被我们自己掐断的，不是 cortexd 真的不可用。'
+      reason:
+          '那个请求是被我们自己掐断的，不是 cortexd 真的不可用。'
           '把它的异常写进界面，用户看到的是「连不上 cortexd」—— '
           '而 cortexd 好端端地活着',
     );
@@ -155,7 +156,8 @@ void main() {
     expect(
       container.read(chatControllerProvider).transcripts['s1']?.error,
       isNull,
-      reason: '这是用户实际看到的那一条：「拉不到这个会话的消息」。'
+      reason:
+          '这是用户实际看到的那一条：「拉不到这个会话的消息」。'
           '每次冷启动都命中，而唯一的出路是手点重试',
     );
     expect(notifier, isNotNull);

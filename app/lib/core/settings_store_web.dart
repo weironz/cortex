@@ -14,8 +14,9 @@ Future<Map<String, String>> readSettings() async {
   try {
     final raw = web.window.localStorage.getItem(_key);
     if (raw == null || raw.isEmpty) return const {};
-    return (jsonDecode(raw) as Map<String, dynamic>)
-        .map((k, v) => MapEntry(k, '$v'));
+    return (jsonDecode(raw) as Map<String, dynamic>).map(
+      (k, v) => MapEntry(k, '$v'),
+    );
   } on Object catch (_) {
     return const {};
   }

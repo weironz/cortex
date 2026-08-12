@@ -32,7 +32,8 @@ void main() {
     expect(
       container.read(appConfigProvider).useMock,
       isFalse,
-      reason: '进离线模式必须把 mock 关掉。两个都开着的话，'
+      reason:
+          '进离线模式必须把 mock 关掉。两个都开着的话，'
           '用户看到的是假数据却以为是自己的真文件',
     );
     expect(container.read(appConfigProvider).offline, isTrue);
@@ -68,13 +69,15 @@ void main() {
     expect(
       container.read(authControllerProvider).phase,
       AuthPhase.ready,
-      reason: '点了离线使用还停在探测/不可达上，用户就进不去 —— '
+      reason:
+          '点了离线使用还停在探测/不可达上，用户就进不去 —— '
           '而这个模式的全部意义就是「连不上也能用」',
     );
     expect(
       probes,
       before,
-      reason: '进了离线模式还在探 —— 那个地址本来就不存在，'
+      reason:
+          '进了离线模式还在探 —— 那个地址本来就不存在，'
           '每探一次就是让用户多等一个超时',
     );
   });
@@ -85,7 +88,8 @@ void main() {
     expect(
       a == b,
       isFalse,
-      reason: 'offline 不进 == 的话，切换模式不会触发 riverpod 重建 —— '
+      reason:
+          'offline 不进 == 的话，切换模式不会触发 riverpod 重建 —— '
           '表现是点了「离线使用」界面纹丝不动',
     );
     expect(a.hashCode == b.hashCode, isFalse);
@@ -96,7 +100,8 @@ void main() {
     expect(
       on.copyWith(baseUrl: 'http://y').offline,
       isTrue,
-      reason: '改地址把离线态顺手清了的话，用户会在毫无提示的情况下'
+      reason:
+          '改地址把离线态顺手清了的话，用户会在毫无提示的情况下'
           '回到「等一个连不上的服务器」',
     );
   });
@@ -109,6 +114,5 @@ void main() {
 /// 补过五个测试替身了）。
 class _Unreachable extends MockCortexApi {
   @override
-  Future<HealthStatus> health() async =>
-      throw CortexApiException('连不上');
+  Future<HealthStatus> health() async => throw CortexApiException('连不上');
 }

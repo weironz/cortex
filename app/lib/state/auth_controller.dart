@@ -470,8 +470,7 @@ class AuthController extends Notifier<AuthState> {
 
   bool _alive(int generation) => ref.mounted && generation == _generation;
 
-  CortexApi _probeApi({String? token}) =>
-      ref.read(authProbeApiProvider)(token);
+  CortexApi _probeApi({String? token}) => ref.read(authProbeApiProvider)(token);
 }
 
 /// The credential the platform can hand over with no user action.

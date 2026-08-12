@@ -115,9 +115,7 @@ abstract final class CortexTheme {
       ),
       iconButtonTheme: IconButtonThemeData(
         style: IconButton.styleFrom(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(9),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
         ),
       ),
       tooltipTheme: TooltipThemeData(

@@ -79,12 +79,7 @@ final class ChatMemoryEvent extends ChatEvent {
 /// The agent invoked a tool. Rendered as a collapsible one-liner in the
 /// conversation, not as message content.
 final class ChatToolEvent extends ChatEvent {
-  const ChatToolEvent({
-    required this.name,
-    this.summary,
-    this.path,
-    this.diff,
-  });
+  const ChatToolEvent({required this.name, this.summary, this.path, this.diff});
   final String name;
   final String? summary;
 

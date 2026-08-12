@@ -77,9 +77,7 @@ void main() {
         () => !container.read(chatControllerProvider).sessionsLoading,
         reason: '会话列表',
       );
-      await container
-          .read(chatControllerProvider.notifier)
-          .send('帮我看看窗外下没下雨');
+      await container.read(chatControllerProvider.notifier).send('帮我看看窗外下没下雨');
       await _until(
         () => container.read(chatControllerProvider).streaming == null,
         reason: '流式结束',
@@ -88,11 +86,7 @@ void main() {
       final state = container.read(chatControllerProvider);
       final message = state.activeTranscript.last;
       expect(message.facts, isEmpty, reason: '与已存记忆无关时不应发 memory 事件');
-      expect(
-        message.error,
-        isNull,
-        reason: '空记忆是正常结果，绝不能被当成一次失败',
-      );
+      expect(message.error, isNull, reason: '空记忆是正常结果，绝不能被当成一次失败');
       expect(state.sendError, isNull);
       expect(message.toolCalls.single.result, contains('0 行'));
       expect(message.text, isNotEmpty);
@@ -100,8 +94,9 @@ void main() {
   });
 
   group('MemoryDrawer', () {
-    Widget host(Widget child) =>
-        MaterialApp(home: Scaffold(body: SingleChildScrollView(child: child)));
+    Widget host(Widget child) => MaterialApp(
+      home: Scaffold(body: SingleChildScrollView(child: child)),
+    );
 
     testWidgets('无记忆但有工具调用时，展开说明弃权而非报错', (tester) async {
       await tester.pumpWidget(
@@ -124,10 +119,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.textContaining('主动弃权'), findsOneWidget);
-      expect(
-        find.textContaining('返回 0 行', findRichText: true),
-        findsOneWidget,
-      );
+      expect(find.textContaining('返回 0 行', findRichText: true), findsOneWidget);
       expect(
         find.byIcon(Icons.error_outline_rounded),
         findsNothing,

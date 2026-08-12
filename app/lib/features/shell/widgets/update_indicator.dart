@@ -54,7 +54,10 @@ class UpdateIndicator extends ConsumerWidget {
         icon = SizedBox(
           width: 15,
           height: 15,
-          child: CircularProgressIndicator(strokeWidth: 2, color: scheme.primary),
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: scheme.primary,
+          ),
         );
         onTap = null;
       case UpdatePhase.failed:
@@ -85,9 +88,8 @@ class UpdateIndicator extends ConsumerWidget {
       s.progress == null
           ? '正在下载 ${s.release?.version ?? ''}…'
           : '正在下载 ${s.release?.version ?? ''} ${(s.progress! * 100).round()}%',
-    UpdatePhase.ready => s.waitingForTurn
-        ? '已下载并校验通过 —— 这轮回答结束后自动安装'
-        : '正在安装，马上重启…',
+    UpdatePhase.ready =>
+      s.waitingForTurn ? '已下载并校验通过 —— 这轮回答结束后自动安装' : '正在安装，马上重启…',
     UpdatePhase.failed => '更新失败：${s.error ?? '原因不明'}\n点击重试',
   };
 }
@@ -137,10 +139,7 @@ Future<void> showAboutCortex(BuildContext context) async {
               style: Theme.of(ctx).textTheme.bodyMedium,
             ),
             const SizedBox(height: 12),
-            Text(
-              '记忆原生的通用 AI Agent',
-              style: Theme.of(ctx).textTheme.bodySmall,
-            ),
+            Text('记忆原生的通用 AI Agent', style: Theme.of(ctx).textTheme.bodySmall),
           ],
         ),
         actions: [

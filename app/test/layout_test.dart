@@ -18,11 +18,7 @@ import 'package:cortex_app/state/app_providers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-const _me = Account(
-  userId: 'u1',
-  username: 'willai',
-  schemaName: 'cortex_u1',
-);
+const _me = Account(userId: 'u1', username: 'willai', schemaName: 'cortex_u1');
 
 void main() {
   group('账号栏显示什么', () {
@@ -83,7 +79,8 @@ void main() {
           authDisabled: false,
         ),
         '已连接',
-        reason: '连是连上了，只是没有名字。这一条不该让账号栏消失 —— '
+        reason:
+            '连是连上了，只是没有名字。这一条不该让账号栏消失 —— '
             '它还挂着设置与退出登录',
       );
     });
@@ -97,7 +94,8 @@ void main() {
           authDisabled: false,
         ),
         '已连接',
-        reason: '空串顶掉默认值是这个仓库数了六次的形状。'
+        reason:
+            '空串顶掉默认值是这个仓库数了六次的形状。'
             '一个只有空格的用户名会让头像变成空白圆圈',
       );
     });
@@ -117,7 +115,9 @@ void main() {
       return ProviderContainer(
         overrides: [
           settingsReaderProvider.overrideWithValue(() async => Map.of(disk)),
-          settingsWriterProvider.overrideWithValue((v) async => disk = Map.of(v)),
+          settingsWriterProvider.overrideWithValue(
+            (v) async => disk = Map.of(v),
+          ),
         ],
       );
     }
@@ -136,11 +136,7 @@ void main() {
 
       final s = c.read(layoutProvider);
       expect(s.leftCollapsed, isFalse);
-      expect(
-        s.memoryVisible,
-        isTrue,
-        reason: '记忆是这个产品的主张。默认藏起来等于把它降级成一个可选功能',
-      );
+      expect(s.memoryVisible, isTrue, reason: '记忆是这个产品的主张。默认藏起来等于把它降级成一个可选功能');
     });
 
     test('没存过的时候记忆栏必须是开的 —— 别被「读不到」翻转成关', () async {

@@ -14,11 +14,7 @@ void main() {
     );
 
     expect(calls, hasLength(1));
-    expect(
-      calls.single.pending,
-      isTrue,
-      reason: '结果事件还没到，这一行必须显示为执行中',
-    );
+    expect(calls.single.pending, isTrue, reason: '结果事件还没到，这一行必须显示为执行中');
     expect(
       calls.single.arguments,
       '(path=src/main.rs)',
@@ -36,15 +32,23 @@ void main() {
 
   test('the same tool called twice yields two rows', () {
     var calls = <ToolCall>[];
-    calls = ToolCall.merge(calls, 'memory_search', '调用 memory_search (query=a)');
-    calls = ToolCall.merge(calls, 'memory_search', 'memory_search 返回 3 行 / 90 字符');
-    calls = ToolCall.merge(calls, 'memory_search', '调用 memory_search (query=b)');
-
-    expect(
+    calls = ToolCall.merge(
       calls,
-      hasLength(2),
-      reason: '第一行已经拿到结果，第三条事件只能是一次新的调用',
+      'memory_search',
+      '调用 memory_search (query=a)',
     );
+    calls = ToolCall.merge(
+      calls,
+      'memory_search',
+      'memory_search 返回 3 行 / 90 字符',
+    );
+    calls = ToolCall.merge(
+      calls,
+      'memory_search',
+      '调用 memory_search (query=b)',
+    );
+
+    expect(calls, hasLength(2), reason: '第一行已经拿到结果，第三条事件只能是一次新的调用');
     expect(calls.first.arguments, '(query=a)');
     expect(calls.first.pending, isFalse);
     expect(calls.last.arguments, '(query=b)');

@@ -306,9 +306,7 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                     onPressed: state.busy
                         ? null
                         : () => setState(() => _useToken = !_useToken),
-                    child: Text(
-                      _useToken ? '改用账号密码登录' : '用预共享 token 登录（旧方式）',
-                    ),
+                    child: Text(_useToken ? '改用账号密码登录' : '用预共享 token 登录（旧方式）'),
                   ),
                 ),
                 if (_useToken) ...[
@@ -365,7 +363,8 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                                 ),
                               ),
                               const TextSpan(
-                                text: ' —— 对话会排进本地队列，'
+                                text:
+                                    ' —— 对话会排进本地队列，'
                                     '以后接上服务器时自动补回去。\n'
                                     '需要先在设置里配好本机模型（也可以进去之后再配）。',
                               ),
@@ -451,9 +450,8 @@ class _GenerateTokenHint extends StatelessWidget {
                 ),
               ),
               IconButton(
-                onPressed: () => Clipboard.setData(
-                  const ClipboardData(text: _command),
-                ),
+                onPressed: () =>
+                    Clipboard.setData(const ClipboardData(text: _command)),
                 iconSize: 15,
                 visualDensity: VisualDensity.compact,
                 tooltip: '复制命令',

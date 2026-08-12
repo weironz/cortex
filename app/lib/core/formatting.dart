@@ -28,8 +28,7 @@ String formatAbsolute(DateTime? when) =>
 String formatDate(DateTime? when) =>
     when == null ? '—' : _dateOnly.format(when);
 
-String formatConfidence(double? c) =>
-    c == null ? '' : '${(c * 100).round()}%';
+String formatConfidence(double? c) => c == null ? '' : '${(c * 100).round()}%';
 
 /// Shortens a ULID for display: `01KZC66ZT7…R6C`.
 String shortId(String? id, {int head = 8, int tail = 4}) {

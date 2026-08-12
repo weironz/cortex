@@ -34,7 +34,10 @@ Widget _app() => ProviderScope(
 );
 
 void main() {
-  Future<void> boot(WidgetTester tester, {Size size = const Size(1600, 1000)}) async {
+  Future<void> boot(
+    WidgetTester tester, {
+    Size size = const Size(1600, 1000),
+  }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -199,11 +202,7 @@ void main() {
       -300,
       scrollable: find.byType(Scrollable).first,
     );
-    expect(
-      loadMore,
-      findsOneWidget,
-      reason: '服务端说了 has_more，入口就必须在',
-    );
+    expect(loadMore, findsOneWidget, reason: '服务端说了 has_more，入口就必须在');
     expect(
       find.textContaining('最新几轮可能不在其中'),
       findsNothing,

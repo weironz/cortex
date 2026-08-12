@@ -49,9 +49,9 @@ class MemorySearchResult {
       if (c.factId.isNotEmpty) channels[c.factId] = c;
     }
     return MemorySearchResult(
-      facts: asObjectList(json['facts'])
-          .map(MemoryFact.fromJson)
-          .toList(growable: false),
+      facts: asObjectList(
+        json['facts'],
+      ).map(MemoryFact.fromJson).toList(growable: false),
       channels: channels,
     );
   }

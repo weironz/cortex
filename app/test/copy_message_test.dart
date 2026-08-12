@@ -46,8 +46,9 @@ class _Clipboard {
   }
 }
 
-Widget _wrap(Widget child) =>
-    MaterialApp(home: Scaffold(body: SingleChildScrollView(child: child)));
+Widget _wrap(Widget child) => MaterialApp(
+  home: Scaffold(body: SingleChildScrollView(child: child)),
+);
 
 ChatMessage _msg({required MessageRole role, required String text}) =>
     ChatMessage(
@@ -73,7 +74,8 @@ void main() {
     expect(
       button,
       findsOneWidget,
-      reason: '复制原先只挂在 assistant 上。「把自己刚说的拿走」同样常见，'
+      reason:
+          '复制原先只挂在 assistant 上。「把自己刚说的拿走」同样常见，'
           '而长消息在气泡里划不干净，触屏上更是基本做不到',
     );
 
@@ -87,11 +89,14 @@ void main() {
 
   testWidgets('复制回答拿到的是原始 Markdown，不是渲染后的纯文本', (tester) async {
     final clip = _Clipboard()..install(tester);
-    const raw = '要点：\n\n- **加粗**的一条\n- 带 `代码` 的一条\n\n```rust\nfn main() {}\n```';
+    const raw =
+        '要点：\n\n- **加粗**的一条\n- 带 `代码` 的一条\n\n```rust\nfn main() {}\n```';
 
     await tester.pumpWidget(
       _wrap(
-        MessageBubble(message: _msg(role: MessageRole.assistant, text: raw)),
+        MessageBubble(
+          message: _msg(role: MessageRole.assistant, text: raw),
+        ),
       ),
     );
 
@@ -100,7 +105,8 @@ void main() {
     expect(
       clip.text,
       raw,
-      reason: '复制到的必须是原始 Markdown。拿到渲染后的纯文本的话，'
+      reason:
+          '复制到的必须是原始 Markdown。拿到渲染后的纯文本的话，'
           '代码块缩进、列表层级、链接地址全都没了 —— 而人复制一段回答'
           '十有八九正是要贴进别的 Markdown 里',
     );
@@ -109,12 +115,17 @@ void main() {
 
   testWidgets('空消息不显示复制按钮', (tester) async {
     await tester.pumpWidget(
-      _wrap(MessageBubble(message: _msg(role: MessageRole.user, text: ''))),
+      _wrap(
+        MessageBubble(
+          message: _msg(role: MessageRole.user, text: ''),
+        ),
+      ),
     );
     expect(
       find.byTooltip('复制这条'),
       findsNothing,
-      reason: '一条只有附件的消息（"看这张图" + 截图）复制出来是空串，'
+      reason:
+          '一条只有附件的消息（"看这张图" + 截图）复制出来是空串，'
           '按下去什么也没发生 —— 那比没有这个按钮更让人困惑',
     );
   });
@@ -122,7 +133,11 @@ void main() {
   testWidgets('点完给出「已复制」的回执', (tester) async {
     final clip = _Clipboard()..install(tester);
     await tester.pumpWidget(
-      _wrap(MessageBubble(message: _msg(role: MessageRole.user, text: 'x'))),
+      _wrap(
+        MessageBubble(
+          message: _msg(role: MessageRole.user, text: 'x'),
+        ),
+      ),
     );
 
     await tester.tap(find.byTooltip('复制这条'));

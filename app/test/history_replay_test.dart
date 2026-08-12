@@ -116,11 +116,11 @@ void main() {
       final cursor = _transcript(container).cursor;
       await container.read(chatControllerProvider.notifier).loadEarlier('s1');
 
-      expect(
-        api.detailCalls.last,
-        ('s1', kEpisodePage, cursor),
-        reason: '第二页必须带上第一页给的 next_cursor',
-      );
+      expect(api.detailCalls.last, (
+        's1',
+        kEpisodePage,
+        cursor,
+      ), reason: '第二页必须带上第一页给的 next_cursor');
 
       final t = _transcript(container);
       expect(t.messages, hasLength(kEpisodePage * 2));
@@ -175,11 +175,7 @@ void main() {
 
       final t = _transcript(container);
       expect(t.messages, hasLength(kEpisodePage), reason: '已有的一页必须还在');
-      expect(
-        t.error,
-        isNull,
-        reason: '整屏错误态是给「一条都拉不到」用的；一页翻失败把对话清空更糟',
-      );
+      expect(t.error, isNull, reason: '整屏错误态是给「一条都拉不到」用的；一页翻失败把对话清空更糟');
       expect(t.loadingEarlier, isFalse, reason: '失败后必须解锁，否则按钮永久禁用');
       expect(t.hasEarlier, isTrue, reason: '还能再试一次');
     });
@@ -194,11 +190,7 @@ void main() {
       );
       final t = _transcript(container);
       expect(t.error, contains('数据库炸了'));
-      expect(
-        t.loadedFromServer,
-        isFalse,
-        reason: '失败不等于「已加载且是空的」，否则重试入口就没了',
-      );
+      expect(t.loadedFromServer, isFalse, reason: '失败不等于「已加载且是空的」，否则重试入口就没了');
     });
 
     test('已经打开过的会话不会被重复拉取', () async {
@@ -276,11 +268,7 @@ void main() {
           InjectedMemory(factId: 'f_gone'),
         ],
         toolCalls: const [
-          ToolCall(
-            name: 'read_file',
-            path: 'src/tools.rs',
-            result: '返回 486 行',
-          ),
+          ToolCall(name: 'read_file', path: 'src/tools.rs', result: '返回 486 行'),
         ],
       ),
       if (withAnswer)
@@ -402,9 +390,7 @@ void main() {
       addTearDown(api.dispose);
 
       final detail = await api.sessionDetail('ses_01JQZ8K3M9');
-      final anchored = detail.episodes.firstWhere(
-        (e) => e.memories.isNotEmpty,
-      );
+      final anchored = detail.episodes.firstWhere((e) => e.memories.isNotEmpty);
       expect(anchored.role, 'user', reason: '与 daemon 一样锚在 user 那条上');
       expect(anchored.memories.any((m) => m.invalidated), isTrue);
       expect(anchored.memories.any((m) => m.redacted), isTrue);

@@ -74,7 +74,8 @@ void main() {
     expect(
       api.refreshCalls,
       greaterThan(0),
-      reason: '启动时没有人拿存下来的凭据去续 —— 这正是「每次重启都要重新登录」。'
+      reason:
+          '启动时没有人拿存下来的凭据去续 —— 这正是「每次重启都要重新登录」。'
           'rememberToken 存了、restoreSession 写了，中间那一步没人写',
     );
     expect(api.sawToken, 'stored-refresh');
@@ -105,7 +106,8 @@ void main() {
     expect(
       container.read(authControllerProvider).phase,
       isNot(AuthPhase.probing),
-      reason: '续不上就要落回去让人登录。停在 probing 的话界面一直转圈，'
+      reason:
+          '续不上就要落回去让人登录。停在 probing 的话界面一直转圈，'
           '而用户没有任何办法',
     );
   });
@@ -124,7 +126,9 @@ void main() {
     );
     addTearDown(container.dispose);
 
-    container.read(appConfigProvider.notifier).setBaseUrl('https://mine.example');
+    container
+        .read(appConfigProvider.notifier)
+        .setBaseUrl('https://mine.example');
     // 读—改—写有两次 await，一个 Duration.zero 跨不过去
     for (var i = 0; i < 4; i++) {
       await Future<void>.delayed(Duration.zero);
@@ -133,7 +137,8 @@ void main() {
     expect(
       saved['base_url'],
       'https://mine.example',
-      reason: '不存的话重启回到编译期默认地址 —— 一个把 cortexd 部署在别处的人，'
+      reason:
+          '不存的话重启回到编译期默认地址 —— 一个把 cortexd 部署在别处的人，'
           '每次打开都要重填一遍',
     );
   });
@@ -155,7 +160,8 @@ void main() {
     expect(
       container.read(appConfigProvider).baseUrl,
       'https://restored.example',
-      reason: '读不回来的话，「存下来」这一步等于没做 —— '
+      reason:
+          '读不回来的话，「存下来」这一步等于没做 —— '
           '这正是登录凭据那半犯过的错',
     );
   });

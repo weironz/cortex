@@ -76,10 +76,11 @@ class _FactCardState extends State<FactCard> {
             children: [
               Text(
                 fact.statement,
-                style: (widget.dense
-                        ? theme.textTheme.bodySmall
-                        : theme.textTheme.bodyMedium)
-                    ?.copyWith(color: scheme.onSurface, height: 1.55),
+                style:
+                    (widget.dense
+                            ? theme.textTheme.bodySmall
+                            : theme.textTheme.bodyMedium)
+                        ?.copyWith(color: scheme.onSurface, height: 1.55),
               ),
               SizedBox(height: widget.dense ? 7 : 9),
               Wrap(
@@ -88,11 +89,7 @@ class _FactCardState extends State<FactCard> {
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   if (widget.invalidated)
-                    _Tag(
-                      label: '已失效',
-                      color: scheme.error,
-                      filled: true,
-                    ),
+                    _Tag(label: '已失效', color: scheme.error, filled: true),
                   // Provenance sits first, right after the "superseded" badge:
                   // "did I say this, or did the model infer it" changes how
                   // much weight the statement above deserves, so it should be

@@ -180,9 +180,7 @@ class _AsOfBar extends StatelessWidget {
                     const SizedBox(width: 7),
                     Expanded(
                       child: Text(
-                        active
-                            ? '回放至 ${formatDate(state.asOf)}'
-                            : '当前时刻的记忆',
+                        active ? '回放至 ${formatDate(state.asOf)}' : '当前时刻的记忆',
                         style: theme.textTheme.labelSmall?.copyWith(
                           color: active
                               ? scheme.secondary

@@ -69,10 +69,7 @@ void main() {
     // '记' is 3 bytes; splitting it must not produce a replacement char.
     final bytes = utf8.encode('data: {"t":"记忆"}\n\n');
     final events = await decodeSse(
-      Stream.fromIterable([
-        bytes.sublist(0, 12),
-        bytes.sublist(12),
-      ]),
+      Stream.fromIterable([bytes.sublist(0, 12), bytes.sublist(12)]),
     ).toList();
 
     expect(events.single.data, '{"t":"记忆"}');

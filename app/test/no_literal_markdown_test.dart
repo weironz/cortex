@@ -42,7 +42,8 @@ void main() {
     expect(
       offenders,
       isEmpty,
-      reason: '这些地方的 `**` 会原样显示给用户看：\n${offenders.join('\n')}\n'
+      reason:
+          '这些地方的 `**` 会原样显示给用户看：\n${offenders.join('\n')}\n'
           'Text 不渲染 Markdown。要强调用 Text.rich + FontWeight.w700；'
           '要整段 Markdown 用 CortexMarkdown。\n'
           '注意：widget 测试抓不到这个 —— 它们断言「界面上有这段文字」，'

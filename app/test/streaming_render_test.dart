@@ -82,11 +82,7 @@ void main() {
       );
     }
 
-    expect(
-      sawOpenFence,
-      isTrue,
-      reason: '围栏没闭合时就该以代码块渲染，而不是先当字面反引号、之后突然翻转',
-    );
+    expect(sawOpenFence, isTrue, reason: '围栏没闭合时就该以代码块渲染，而不是先当字面反引号、之后突然翻转');
 
     await tester.pumpWidget(frame(shown, false));
     await tester.pump(const Duration(milliseconds: 50));

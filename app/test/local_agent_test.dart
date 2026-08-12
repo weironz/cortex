@@ -32,10 +32,7 @@ void main() {
         final stateDir = Directory.systemTemp.createTempSync('cortex-agent-');
         addTearDown(() => stateDir.deleteSync(recursive: true));
 
-        final agent = LocalAgent(
-          executable: exe!,
-          stateDir: stateDir.path,
-        );
+        final agent = LocalAgent(executable: exe!, stateDir: stateDir.path);
         addTearDown(agent.stop);
 
         // A remote that will never answer. The agent must still come up —
@@ -153,7 +150,8 @@ void main() {
         expect(
           msg,
           contains('本机'),
-          reason: '这个方向该让用户升**本机**这一侧，而这句话来自子进程的输出 ——'
+          reason:
+              '这个方向该让用户升**本机**这一侧，而这句话来自子进程的输出 ——'
               '它证明管道确实被读了，没有被 drain 掉：\n$msg',
         );
       },
@@ -183,7 +181,8 @@ String? _findAgent() {
   final name = Platform.isWindows ? 'cortex-local.exe' : 'cortex-local';
   for (final profile in ['debug', 'release']) {
     // Tests run with CWD = app/, so the workspace target/ is one level up.
-    final p = '..${Platform.pathSeparator}target'
+    final p =
+        '..${Platform.pathSeparator}target'
         '${Platform.pathSeparator}$profile${Platform.pathSeparator}$name';
     if (File(p).existsSync()) return File(p).absolute.path;
   }

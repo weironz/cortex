@@ -330,7 +330,9 @@ void main() {
       // 两台设备各删一次是常有的：桌面端删完，CLI 那边的列表还是旧的。
       // 服务端对第二次删回 404 —— 而 404 同时是「老服务端没有 /projects」的
       // 信号。两件事共用一个状态码，客户端不能只看数字。
-      final api = _GoneOnDelete(seed: [const Project(id: 'p1', name: 'A')]);
+      final api = _GoneOnDelete(
+        seed: [const Project(id: 'p1', name: 'A')],
+      );
       final container = _boot(api);
       addTearDown(container.dispose);
       final controller = container.read(projectControllerProvider.notifier);
@@ -353,11 +355,7 @@ void main() {
         isEmpty,
         reason: '它本来就该没了：服务端说不在，本地也不该留着',
       );
-      expect(
-        state.error,
-        isNull,
-        reason: '想要的结果已经达成了（那个项目不在了），没有可报的失败',
-      );
+      expect(state.error, isNull, reason: '想要的结果已经达成了（那个项目不在了），没有可报的失败');
     });
 
     test('重新拉到的列表里没有选中的那个项目，就把选中态放掉', () async {

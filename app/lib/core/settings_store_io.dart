@@ -14,8 +14,10 @@ File _file() {
             (Platform.environment['HOME'] == null
                 ? null
                 : '${Platform.environment['HOME']}/.local/share'));
-  final dir = Directory('${base ?? Directory.systemTemp.path}'
-      '${Platform.pathSeparator}cortex');
+  final dir = Directory(
+    '${base ?? Directory.systemTemp.path}'
+    '${Platform.pathSeparator}cortex',
+  );
   if (!dir.existsSync()) dir.createSync(recursive: true);
   return File('${dir.path}${Platform.pathSeparator}settings.json');
 }

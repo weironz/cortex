@@ -29,7 +29,8 @@ void main() {
     expect(
       env['DEEPSEEK_API_KEY'],
       'sk-abc',
-      reason: 'key 的变量名由供应商决定。拼错的话 agent 找不到 key，'
+      reason:
+          'key 的变量名由供应商决定。拼错的话 agent 找不到 key，'
           '报的却是「缺少环境变量」—— 而用户明明在界面上填过了',
     );
   });
@@ -42,7 +43,8 @@ void main() {
     expect(
       env.containsKey('CORTEX_LLM_MODEL'),
       isFalse,
-      reason: '`env::var` 对空串返回 Ok("")，会把供应商定义里的默认模型顶掉 —— '
+      reason:
+          '`env::var` 对空串返回 Ok("")，会把供应商定义里的默认模型顶掉 —— '
           '然后请求带着一个空模型名发出去。这个坑在这个仓库出现过四次',
     );
     expect(
@@ -53,7 +55,8 @@ void main() {
     expect(
       env.keys.any((k) => k.endsWith('_API_KEY')),
       isFalse,
-      reason: '免鉴权的端点（本机 ollama）不该被塞一个空 key —— '
+      reason:
+          '免鉴权的端点（本机 ollama）不该被塞一个空 key —— '
           'cortex-llm 用 api_key_env 是否为空来判断免不免鉴权',
     );
   });
@@ -62,7 +65,8 @@ void main() {
     expect(
       const LocalLlmConfig(provider: 'ollama').isUsable,
       isTrue,
-      reason: '本机 ollama 免 key。在客户端抄一份「哪些供应商要 key」的判断，'
+      reason:
+          '本机 ollama 免 key。在客户端抄一份「哪些供应商要 key」的判断，'
           '迟早与 cortex-llm 的 api_key_env 漂开',
     );
     expect(const LocalLlmConfig(apiKey: 'sk-only').isUsable, isFalse);
@@ -77,7 +81,8 @@ void main() {
     expect(
       env['MY_GATEWAY_API_KEY'],
       'k',
-      reason: '`MY-GATEWAY_API_KEY` 在多数 shell 与 Windows 上根本设不了，'
+      reason:
+          '`MY-GATEWAY_API_KEY` 在多数 shell 与 Windows 上根本设不了，'
           '而失败方式是「变量不存在」—— 与没填过一模一样',
     );
   });

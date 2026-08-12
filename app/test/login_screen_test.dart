@@ -84,14 +84,16 @@ void main() {
     expect(
       find.text('用户名'),
       findsOneWidget,
-      reason: '第一眼该看到的是用户名输入框。'
+      reason:
+          '第一眼该看到的是用户名输入框。'
           '这条红了通常意味着界面又退回了"粘一串 64 位十六进制"那一版',
     );
     expect(find.text('密码'), findsOneWidget);
     expect(
       find.text('CORTEXD_TOKEN'),
       findsNothing,
-      reason: 'token 是旧路，不该出现在默认视图里 —— '
+      reason:
+          'token 是旧路，不该出现在默认视图里 —— '
           '它应该藏在"用预共享 token 登录（旧方式）"后面',
     );
   });
@@ -112,7 +114,10 @@ void main() {
     );
 
     await tester.enterText(find.widgetWithText(TextField, '用户名'), '阿尔法');
-    await tester.enterText(find.widgetWithText(TextField, '密码'), 'hunter2-hunter2');
+    await tester.enterText(
+      find.widgetWithText(TextField, '密码'),
+      'hunter2-hunter2',
+    );
     await tester.tap(find.widgetWithText(FilledButton, '登录'));
     await tester.pumpAndSettle();
 
@@ -120,7 +125,8 @@ void main() {
     expect(
       login,
       hasLength(1),
-      reason: '按下"登录"必须真的打 /auth/login。'
+      reason:
+          '按下"登录"必须真的打 /auth/login。'
           '一次都没打，说明按钮接的还是老的 signIn(token)，'
           '而那正是这次改动之前的样子 —— 界面看着换了，走的还是旧路',
     );
@@ -143,7 +149,8 @@ void main() {
     expect(
       find.text('CORTEXD_TOKEN'),
       findsOneWidget,
-      reason: '旧路必须还在：CLI、现有安装与单用户自托管都还在用它，'
+      reason:
+          '旧路必须还在：CLI、现有安装与单用户自托管都还在用它，'
           '一次性切断会让它们当天全部失联',
     );
     expect(find.text('用户名'), findsNothing);

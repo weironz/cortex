@@ -52,7 +52,8 @@ void main() {
     expect(
       disk['base_url'],
       'http://box:9000',
-      reason: '把地址抹掉的话，用户重启后回到编译期默认地址 —— '
+      reason:
+          '把地址抹掉的话，用户重启后回到编译期默认地址 —— '
           '正是 0.1.7 刚修完的那个 bug，只是这次由「改权限档」触发',
     );
     expect(disk['permission_mode'], PermissionMode.bypass.wire);
@@ -70,7 +71,8 @@ void main() {
     expect(
       disk['permission_mode'],
       PermissionMode.bypass.wire,
-      reason: '权限档被悄悄退回「逐条确认」不会有人注意到 —— '
+      reason:
+          '权限档被悄悄退回「逐条确认」不会有人注意到 —— '
           '直到某天发现每条命令又开始问了',
     );
   });
@@ -81,14 +83,18 @@ void main() {
     final patch = container.read(settingsPatcherProvider);
 
     // 不 await，三个并发下去 —— 读—改—写之间那个窗口就是在这里暴露的
-    final all = Future.wait([patch('a', '1'), patch('b', '2'), patch('c', '3')]);
+    final all = Future.wait([
+      patch('a', '1'),
+      patch('b', '2'),
+      patch('c', '3'),
+    ]);
     await all;
     await settle();
 
-    expect(
-      disk,
-      {'a': '1', 'b': '2', 'c': '3'},
-      reason: '没有串行化的话，三个都读到空表，最后写的那个赢，前两个丢失',
-    );
+    expect(disk, {
+      'a': '1',
+      'b': '2',
+      'c': '3',
+    }, reason: '没有串行化的话，三个都读到空表，最后写的那个赢，前两个丢失');
   });
 }

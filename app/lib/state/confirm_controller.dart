@@ -157,7 +157,9 @@ class ConfirmController extends Notifier<ConfirmState> {
   /// session, but the recovery endpoint does report it and the two paths have
   /// to produce the same object.
   void offer(PendingConfirmation request, {String? sessionId}) {
-    final stamped = sessionId == null ? request : request.withSession(sessionId);
+    final stamped = sessionId == null
+        ? request
+        : request.withSession(sessionId);
     state = state.copyWith(pending: _merge(state.pending, [stamped]));
     _ensureTicking();
   }
@@ -213,13 +215,13 @@ class ConfirmController extends Notifier<ConfirmState> {
     final request = state.pending.where((c) => c.token == token).firstOrNull;
     if (request == null || state.answering.contains(token)) return;
 
-    state = state.copyWith(
-      answering: {...state.answering, token},
-      error: null,
-    );
+    state = state.copyWith(answering: {...state.answering, token}, error: null);
 
     try {
-      final accepted = await _api.answerConfirmation(token: token, allow: allow);
+      final accepted = await _api.answerConfirmation(
+        token: token,
+        allow: allow,
+      );
       if (!_alive(generation)) return;
       _retire(
         request,

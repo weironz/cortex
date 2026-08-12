@@ -92,9 +92,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                     width: _sessionsWidth,
                     child: Container(
                       color: scheme.surfaceContainerLow,
-                      child: _LeftPane(
-                        availableHeight: constraints.maxHeight,
-                      ),
+                      child: _LeftPane(availableHeight: constraints.maxHeight),
                     ),
                   ),
                   VerticalDivider(width: 1, color: scheme.outlineVariant),
@@ -120,9 +118,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                     width: _memoryWidth,
                     child: Container(
                       color: scheme.surfaceContainerLow,
-                      child: MemoryPanel(
-                        onClose: layoutNotifier.toggleMemory,
-                      ),
+                      child: MemoryPanel(onClose: layoutNotifier.toggleMemory),
                     ),
                   ),
                 ],

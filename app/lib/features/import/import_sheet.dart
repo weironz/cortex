@@ -105,34 +105,20 @@ class _ImportDialog extends ConsumerWidget {
           ),
         ];
       case ImportPhase.preparing:
-        return const [
-          TextButton(onPressed: null, child: Text('读取中…')),
-        ];
+        return const [TextButton(onPressed: null, child: Text('读取中…'))];
       case ImportPhase.estimated:
         return [
-          TextButton(
-            onPressed: controller.reset,
-            child: const Text('换一个文件'),
-          ),
+          TextButton(onPressed: controller.reset, child: const Text('换一个文件')),
           // Only here, and only after the numbers above are on screen.
-          FilledButton(
-            onPressed: controller.start,
-            child: const Text('开始导入'),
-          ),
+          FilledButton(onPressed: controller.start, child: const Text('开始导入')),
         ];
       case ImportPhase.running:
         return [
-          TextButton(
-            onPressed: controller.cancel,
-            child: const Text('停止跟踪'),
-          ),
+          TextButton(onPressed: controller.cancel, child: const Text('停止跟踪')),
         ];
       case ImportPhase.finished:
         return [
-          TextButton(
-            onPressed: controller.reset,
-            child: const Text('再导一个'),
-          ),
+          TextButton(onPressed: controller.reset, child: const Text('再导一个')),
           FilledButton(
             onPressed: () {
               controller.reset();
@@ -199,10 +185,7 @@ class _Bill extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '来源：${estimate.platform}',
-            style: theme.textTheme.titleSmall,
-          ),
+          Text('来源：${estimate.platform}', style: theme.textTheme.titleSmall),
           const SizedBox(height: 8),
           _row(theme, '对话', '${estimate.conversations} 段'),
           _row(theme, '消息', '${estimate.messages} 条'),
@@ -215,12 +198,7 @@ class _Bill extends StatelessWidget {
           const Divider(height: 20),
           // The line that matters. Bold because it is the one the user is
           // actually approving — everything above is context for it.
-          _row(
-            theme,
-            '会触发抽取',
-            '${estimate.pairs} 次',
-            emphasis: true,
-          ),
+          _row(theme, '会触发抽取', '${estimate.pairs} 次', emphasis: true),
           _row(theme, '送进抽取的文本', '约 ${formatThousands(estimate.tokens)} token'),
           _row(theme, '预计耗时', '至少 ${estimate.minutes.toStringAsFixed(0)} 分钟'),
           const SizedBox(height: 8),

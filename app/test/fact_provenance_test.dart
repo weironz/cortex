@@ -45,24 +45,17 @@ void main() {
 
       await pump(tester, fact(channel: 'conversation', tier: 2));
       expect(find.text('推断'), findsOneWidget);
-      expect(
-        find.text('你说的'),
-        findsNothing,
-        reason: '推断出来的事实被标成亲述，比不标更糟',
-      );
+      expect(find.text('你说的'), findsNothing, reason: '推断出来的事实被标成亲述，比不标更糟');
     });
 
     testWidgets('存量行不编一个「未知」出来', (tester) async {
       await pump(tester, fact(channel: 'unknown_legacy'));
-      expect(
-        find.text('unknown_legacy'),
-        findsNothing,
-        reason: '线上词汇不该出现在界面上',
-      );
+      expect(find.text('unknown_legacy'), findsNothing, reason: '线上词汇不该出现在界面上');
       expect(
         find.text('未知'),
         findsNothing,
-        reason: '加列之前的行确实无从得知来源。'
+        reason:
+            '加列之前的行确实无从得知来源。'
             '标「未知」是把噪声打扮成出处，不如不标',
       );
 
@@ -76,7 +69,8 @@ void main() {
       expect(
         find.text('imported_from_chatgpt'),
         findsOneWidget,
-        reason: '服务端新加一个来源通道时，它该在界面上出现。'
+        reason:
+            '服务端新加一个来源通道时，它该在界面上出现。'
             '吞掉的话，一整类记忆会静默地失去出处标记',
       );
     });
@@ -88,18 +82,18 @@ void main() {
       expect(
         find.textContaining('%'),
         findsNothing,
-        reason: 'confidence 缺失时画一个百分比，等于凭空造一个数字。'
+        reason:
+            'confidence 缺失时画一个百分比，等于凭空造一个数字。'
             'cortexd 此前正是写死 1.0，于是每条都显示 100%',
       );
     });
 
     testWidgets('拿得到就照实显示', (tester) async {
-      await pump(tester, fact(channel: 'conversation', tier: 2, confidence: 0.72));
-      expect(
-        find.textContaining('72'),
-        findsOneWidget,
-        reason: '真实打分必须原样呈现',
+      await pump(
+        tester,
+        fact(channel: 'conversation', tier: 2, confidence: 0.72),
       );
+      expect(find.textContaining('72'), findsOneWidget, reason: '真实打分必须原样呈现');
     });
   });
 

@@ -68,9 +68,7 @@ class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
                 onChanged: notifier.setUseMock,
                 title: const Text('使用 Mock 数据源'),
                 subtitle: Text(
-                  config.useMock
-                      ? '不发起任何网络请求，数据来自内存夹具。'
-                      : '直连 cortexd。',
+                  config.useMock ? '不发起任何网络请求，数据来自内存夹具。' : '直连 cortexd。',
                   style: theme.textTheme.bodySmall,
                 ),
               ),
@@ -272,7 +270,11 @@ class _OwnApiKeyTileState extends ConsumerState<_OwnApiKeyTile> {
   Future<void> _refresh() async {
     try {
       final s = await ref.read(cortexApiProvider).llmKeyStatus();
-      if (mounted) setState(() { _status = s; _error = null; });
+      if (mounted)
+        setState(() {
+          _status = s;
+          _error = null;
+        });
     } on Object catch (e) {
       // 读不出来不该让整个设置页出错 —— 其余每一项都还是好的
       if (mounted) setState(() => _error = e);
@@ -282,9 +284,9 @@ class _OwnApiKeyTileState extends ConsumerState<_OwnApiKeyTile> {
   Future<void> _edit() async {
     final entered =
         await showDialog<({String provider, String key, String baseUrl})>(
-      context: context,
-      builder: (_) => const _ApiKeyDialog(),
-    );
+          context: context,
+          builder: (_) => const _ApiKeyDialog(),
+        );
     if (entered == null || !mounted) return;
     setState(() => _busy = true);
     try {
@@ -295,7 +297,11 @@ class _OwnApiKeyTileState extends ConsumerState<_OwnApiKeyTile> {
             apiKey: entered.key,
             baseUrl: entered.baseUrl,
           );
-      if (mounted) setState(() { _status = s; _error = null; });
+      if (mounted)
+        setState(() {
+          _status = s;
+          _error = null;
+        });
     } on Object catch (e) {
       if (mounted) setState(() => _error = e);
     } finally {
@@ -307,7 +313,11 @@ class _OwnApiKeyTileState extends ConsumerState<_OwnApiKeyTile> {
     setState(() => _busy = true);
     try {
       final s = await ref.read(cortexApiProvider).clearLlmKey();
-      if (mounted) setState(() { _status = s; _error = null; });
+      if (mounted)
+        setState(() {
+          _status = s;
+          _error = null;
+        });
     } on Object catch (e) {
       if (mounted) setState(() => _error = e);
     } finally {
@@ -359,14 +369,17 @@ class _OwnApiKeyTileState extends ConsumerState<_OwnApiKeyTile> {
       subtitle: Text(
         st.configured
             ? '正在用你自己的 ${st.provider} key（…${st.keyTail}）'
-              '${st.baseUrl == null ? "" : " → ${st.baseUrl}"} —— 这部分调用不占配额。'
+                  '${st.baseUrl == null ? "" : " → ${st.baseUrl}"} —— 这部分调用不占配额。'
             : '填一把自己的 key，这之后的调用走你自己的账户，不占这里的配额。'
-              '明文只会在保存那一次发出去，服务端加密存储、之后只回后四位。',
+                  '明文只会在保存那一次发出去，服务端加密存储、之后只回后四位。',
         style: theme.textTheme.bodySmall,
       ),
       trailing: _busy
           ? const SizedBox(
-              width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
           : Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -521,8 +534,7 @@ class _LocalLlmTile extends ConsumerWidget {
         children: [
           if (cfg.isUsable)
             TextButton(
-              onPressed: () =>
-                  ref.read(localLlmProvider.notifier).clear(),
+              onPressed: () => ref.read(localLlmProvider.notifier).clear(),
               child: const Text('清除'),
             ),
           TextButton(
@@ -686,9 +698,7 @@ class _AboutTile extends ConsumerWidget {
     if (!notifier.enabled) {
       // 说清**为什么**没有更新功能，而不是干脆不显示这一行。
       // 「我的另一台机器上有这个按钮」是个会被问出来的问题
-      subtitle = version.isEmpty
-          ? '开发构建，不检查更新'
-          : '这个平台不自我更新（安装包只有 Windows）';
+      subtitle = version.isEmpty ? '开发构建，不检查更新' : '这个平台不自我更新（安装包只有 Windows）';
     } else {
       subtitle = switch (update.phase) {
         UpdatePhase.available => '有新版本 ${update.release?.version}',

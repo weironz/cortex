@@ -191,7 +191,8 @@ class ImportController extends Notifier<ImportState> {
             if (state.phase == ImportPhase.running) {
               state = state.copyWith(
                 phase: ImportPhase.finished,
-                error: '连接在导入过程中断开了。已经写进去的不会丢，'
+                error:
+                    '连接在导入过程中断开了。已经写进去的不会丢，'
                     '重新导入同一个文件即可续上 —— 服务端按 id 判重，不会重复计费。',
               );
             }
@@ -234,13 +235,13 @@ class ImportController extends Notifier<ImportState> {
     if (state.phase == ImportPhase.running) {
       state = state.copyWith(
         phase: ImportPhase.finished,
-        error: '已停止跟踪进度。**服务端那边还在继续跑** —— '
+        error:
+            '已停止跟踪进度。**服务端那边还在继续跑** —— '
             '想知道结果就重新导入同一个文件，已经写过的会被跳过。',
       );
     }
   }
 }
 
-final importControllerProvider = NotifierProvider<ImportController, ImportState>(
-  ImportController.new,
-);
+final importControllerProvider =
+    NotifierProvider<ImportController, ImportState>(ImportController.new);

@@ -64,9 +64,7 @@ void main() {
     swapped = false;
     return ProviderContainer(
       overrides: [
-        cortexApiProvider.overrideWith(
-          (ref) => swapped ? second : first,
-        ),
+        cortexApiProvider.overrideWith((ref) => swapped ? second : first),
       ],
     );
   }
@@ -96,7 +94,8 @@ void main() {
     expect(
       container.read(memoryControllerProvider).error,
       isNull,
-      reason: '那个请求是被我们自己掐断的，不是检索真的失败了。'
+      reason:
+          '那个请求是被我们自己掐断的，不是检索真的失败了。'
           '把它的异常写进界面，用户看到的是一个他无法理解、也无法处理的错误 —— '
           '而唯一的出路是手点刷新',
     );
@@ -119,7 +118,8 @@ void main() {
     expect(
       second.calls,
       greaterThan(0),
-      reason: '换到新后端之后要自己重跑一次。不重跑的话面板是空的，'
+      reason:
+          '换到新后端之后要自己重跑一次。不重跑的话面板是空的，'
           '而用户不知道那是「没有结果」还是「还没查」',
     );
   });
@@ -138,7 +138,8 @@ void main() {
     expect(
       second.calls,
       0,
-      reason: '面板可能根本没打开。为一个没人在看的面板发请求，'
+      reason:
+          '面板可能根本没打开。为一个没人在看的面板发请求，'
           '在按量计费的部署上就是白花钱',
     );
   });

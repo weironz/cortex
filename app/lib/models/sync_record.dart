@@ -58,9 +58,9 @@ class SyncPage {
 
   factory SyncPage.fromJson(Map<String, dynamic> json) => SyncPage(
     cursor: asInt(json['cursor']),
-    records: asObjectList(json['records'])
-        .map(SyncRecord.fromJson)
-        .toList(growable: false),
+    records: asObjectList(
+      json['records'],
+    ).map(SyncRecord.fromJson).toList(growable: false),
     hasMore: json['has_more'] == true,
   );
 }

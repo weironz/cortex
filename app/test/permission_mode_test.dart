@@ -15,7 +15,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 Widget _wrap(Widget child) => ProviderScope(
-  child: MaterialApp(home: Scaffold(body: Center(child: child))),
+  child: MaterialApp(
+    home: Scaffold(body: Center(child: child)),
+  ),
 );
 
 void main() {
@@ -24,7 +26,8 @@ void main() {
       expect(
         PermissionMode.values.first,
         PermissionMode.ask,
-        reason: '枚举的第一个值就是 Dart 侧的默认。倒向放行的话，'
+        reason:
+            '枚举的第一个值就是 Dart 侧的默认。倒向放行的话，'
             '任何忘了传档位的调用点都会静默拿到无人值守的执行权',
       );
     });
@@ -34,7 +37,8 @@ void main() {
       expect(
         PermissionMode.acceptEdits.wire,
         'accept_edits',
-        reason: 'Rust 那侧是 serde(rename_all = "snake_case")。写成 acceptEdits '
+        reason:
+            'Rust 那侧是 serde(rename_all = "snake_case")。写成 acceptEdits '
             '的话服务端认不出来，而它的处理是**回落到默认档** —— '
             '于是用户选了「自动改文件」却还在被逐条询问，且没有任何报错',
       );
@@ -46,7 +50,8 @@ void main() {
         expect(
           PermissionMode.fromWire(bad),
           PermissionMode.ask,
-          reason: '$bad 应当落回最谨慎的一档。老版本存下的值、手改坏的配置、'
+          reason:
+              '$bad 应当落回最谨慎的一档。老版本存下的值、手改坏的配置、'
               '将来删掉的档位都会走到这里，而回落方向错了就是一次静默提权',
         );
       }
@@ -56,7 +61,8 @@ void main() {
       expect(
         PermissionMode.acceptEdits.blurb.contains('执行命令'),
         isTrue,
-        reason: '「自动改文件」不等于「改哪里都不问」—— 它只关掉写文件那一半。'
+        reason:
+            '「自动改文件」不等于「改哪里都不问」—— 它只关掉写文件那一半。'
             '描述里不点明的话，用户以为自己只省了几次点击，'
             '实际上会以为工作区外也放开了',
       );
@@ -97,7 +103,8 @@ void main() {
       expect(
         container.read(permissionModeProvider),
         PermissionMode.acceptEdits,
-        reason: '选完档位没写进 provider 的话，chip 上显示变了但**请求还是老档位**'
+        reason:
+            '选完档位没写进 provider 的话，chip 上显示变了但**请求还是老档位**'
             '—— 而那个差异只有真去数弹窗次数才看得出来',
       );
     });
@@ -124,7 +131,8 @@ void main() {
       expect(
         find.text('关掉全部确认？'),
         findsOneWidget,
-        reason: '另外两档改的是打扰频率，选错了下一次弹窗就知道了；'
+        reason:
+            '另外两档改的是打扰频率，选错了下一次弹窗就知道了；'
             '这一档改的是**有没有人在把关**，而这件事在界面上没有别的症状',
       );
       await tester.tap(find.text('算了'));
@@ -152,7 +160,8 @@ void main() {
       expect(
         find.byIcon(Icons.lock_open_rounded),
         findsOneWidget,
-        reason: '开着的时候必须一直看得见。做成一个普通样式的 chip，'
+        reason:
+            '开着的时候必须一直看得见。做成一个普通样式的 chip，'
             '人三天后就忘了自己关过确认了',
       );
     });
