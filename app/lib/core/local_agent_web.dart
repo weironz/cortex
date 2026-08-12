@@ -18,6 +18,7 @@ class LocalAgent {
   Future<String> start({
     required String remote,
     required String token,
+    String? llmRoute,
     Duration timeout = const Duration(seconds: 20),
     void Function(int code, String logTail)? onExit,
   }) async =>

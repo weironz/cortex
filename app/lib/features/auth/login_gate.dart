@@ -321,11 +321,60 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                 // daemon at all is stuck on this screen with no way to see the
                 // app — and "run cortexd first" is a worse onboarding than
                 // "look around with fixtures".
+                // 离线使用：**不是**夹具，是真的能干活 —— 真模型、真工具、
+                // 真读写本机文件。唯一缺的是记忆。
+                //
+                // 放在 mock 上面且更醒目：一个连不上服务器的人想要的是
+                // 「那我先用着」，而不是「让我看看界面长什么样」
+                Card.filled(
+                  margin: EdgeInsets.zero,
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.cloud_off_outlined,
+                              size: 18,
+                              color: scheme.onSurfaceVariant,
+                            ),
+                            const SizedBox(width: 8),
+                            Text('先离线用着', style: theme.textTheme.titleSmall),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          '不连服务器也能对话、能读写你本机的文件。'
+                          '**这段时间不会有记忆** —— 对话会排进本地队列，'
+                          '以后接上服务器时自动补回去。'
+                          '需要在本机配好模型：CORTEX_LLM_PROVIDER 与对应的 key'
+                          '（或 CORTEX_LLM_BASE_URL 指向本地端点）。',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: FilledButton.tonal(
+                            onPressed: () => ref
+                                .read(appConfigProvider.notifier)
+                                .setOffline(true),
+                            child: const Text('离线使用'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(
                       child: Text(
-                        '没有 daemon？可以先用内存夹具离线看界面。',
+                        '只想看看界面长什么样？用内存夹具（**假数据**）。',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: scheme.onSurfaceVariant,
                         ),

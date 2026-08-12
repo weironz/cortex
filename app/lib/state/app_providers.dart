@@ -48,6 +48,15 @@ class AppConfigNotifier extends Notifier<AppConfig> {
     if (trimmed.isEmpty || state.baseUrl == trimmed) return;
     state = state.copyWith(baseUrl: trimmed);
   }
+
+  /// 进／出离线模式。
+  ///
+  /// 离开时把 mock 也一并关掉：两者都是「不连真后端」的形态，而同时开着
+  /// 会让人分不清眼前这条对话到底是真是假。
+  void setOffline(bool value) {
+    if (state.offline == value) return;
+    state = state.copyWith(offline: value, useMock: false);
+  }
 }
 
 final appConfigProvider = NotifierProvider<AppConfigNotifier, AppConfig>(
@@ -135,7 +144,10 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
     authControllerProvider.select((s) => s.health?.requiresToken ?? true),
   );
   if (config.useMock || !kLocalAgentSupported) return null;
-  if (needsToken && token == null) return null;
+  // 离线模式：**没有 cortexd**，本地 agent 就是全部 —— 必须起，
+  // 而且没有 token 可给（也没人会来校验它）。不放行的话这个模式
+  // 什么也不是：没有模型、没有工具、只有一个空界面
+  if (!config.offline && needsToken && token == null) return null;
 
   final agent = discoverLocalAgent();
   if (agent == null) return null;
@@ -196,6 +208,9 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
       // 关掉认证的部署没有 token。空串而不是抛错：本地 agent 那侧
       // 也只是把它塞进 Authorization 头，而一个不认证的 cortexd 根本不看
       token: token ?? '',
+      // 离线模式必须本地直连模型：代理那条路要经 cortexd，而它不存在。
+      // 传 null 表示「不干预」，让 agent 自己按环境变量决定
+      llmRoute: config.offline ? 'direct' : null,
       // Unexpected death only — a deliberate `stop()` never lands here, so
       // signing out cannot be mistaken for a crash.
       //

@@ -130,6 +130,7 @@ class LocalAgent {
   Future<String> start({
     required String remote,
     required String token,
+    String? llmRoute,
     Duration timeout = const Duration(seconds: 20),
     void Function(int code, String logTail)? onExit,
   }) async {
@@ -160,6 +161,20 @@ class LocalAgent {
         File('$stateDir${Platform.pathSeparator}agent-$pid-$stamp.addr');
     _sweepStaleHandshakes(Directory(stateDir));
 
+    // 环境先拼好再传：`if (x case final r?)` 在 map 字面量里会被 lint
+    // 要求换成 `?key: value`，而那个形式与 `Map<String, String>` 的值类型
+    // 对不上。拼一个局部变量两边都不别扭
+    final env = <String, String>{
+      // token 走环境变量，**永不进 argv**：命令行对同机所有进程可见
+      // （`tasklist /v`、`ps aux`），而且会被崩溃报告收走
+      'CORTEX_TOKEN': token,
+    };
+    if (llmRoute != null) {
+      // 离线模式要它本地直连模型 —— 代理那条路要经 cortexd，而它不在。
+      // 不给这一项就不干预，让 agent 按自己的环境变量决定（默认 proxy）
+      env['CORTEX_LOCAL_LLM'] = llmRoute;
+    }
+
     final Process proc;
     try {
       proc = await Process.start(executable, [
@@ -172,12 +187,7 @@ class LocalAgent {
         '$pid',
         '--addr-file',
         addrFile.path,
-      ], environment: {
-        // The token travels in the environment, never on argv: command lines
-        // are visible to every other process on the machine (`tasklist /v`,
-        // `ps aux`) and get captured by crash reporters.
-        'CORTEX_TOKEN': token,
-      });
+      ], environment: env);
     } on ProcessException catch (e) {
       throw LocalAgentException('启动本地 agent 失败：${e.message}');
     }

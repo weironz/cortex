@@ -94,6 +94,7 @@ class ChatPane extends ConsumerWidget {
               ? const ConversationView()
               : NoSessionState(onCreate: controller.createSession),
         ),
+        const _OfflineBanner(),
         const _SendErrorBanner(),
         // Directly above the composer: the one place the user's eyes already
         // are when a turn is running, and close enough to the send button that
@@ -180,6 +181,58 @@ class _BackendBadge extends ConsumerWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 离线模式期间**一直**挂着的一条提示。
+///
+/// # 为什么不是「入口说一次就够了」
+///
+/// 这个模式唯一的代价是「没有记忆」，而记忆恰恰是这个产品的全部卖点。
+/// 一个在入口点了「离线使用」的人，二十分钟后正在专心干活时，
+/// 完全可能忘了自己处在一个不记事的状态里 —— 然后对着一句
+/// 「我上次说的那个方案」发现它什么都不知道。
+///
+/// 所以这条不可关闭：它不是通知，是**当前状态**。
+class _OfflineBanner extends ConsumerWidget {
+  const _OfflineBanner();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final offline = ref.watch(appConfigProvider.select((c) => c.offline));
+    if (!offline) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Container(
+      width: double.infinity,
+      color: scheme.tertiaryContainer,
+      padding: const EdgeInsets.fromLTRB(20, 8, 10, 8),
+      child: Row(
+        children: [
+          Icon(
+            Icons.cloud_off_outlined,
+            size: 16,
+            color: scheme.onTertiaryContainer,
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              '离线模式：这些对话**没有在记忆里**。'
+              '它们排在本地队列，接上服务器后会自动补回去。',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onTertiaryContainer,
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: () =>
+                ref.read(appConfigProvider.notifier).setOffline(false),
+            child: const Text('去连接'),
+          ),
+        ],
       ),
     );
   }

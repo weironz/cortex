@@ -132,7 +132,9 @@ class AuthController extends Notifier<AuthState> {
     // is meaningless at the other, and silently carrying it over would produce
     // a 401 the user cannot connect to their own address change.
     ref.listen(appConfigProvider, (previous, next) {
-      if (previous?.baseUrl != next.baseUrl || previous?.useMock != next.useMock) {
+      if (previous?.baseUrl != next.baseUrl ||
+          previous?.useMock != next.useMock ||
+          previous?.offline != next.offline) {
         _reset();
       }
     });
@@ -161,6 +163,18 @@ class AuthController extends Notifier<AuthState> {
     // circuited here rather than by asking `cortexApiProvider` for the mock
     // instance, because that provider reads *this* controller for the token —
     // going the other way would close a dependency cycle.
+    // 离线模式：没有 cortexd 可探。直接放行 —— 停在这里探一个明知
+    // 不存在的地址，只会让用户对着一个转圈的界面等 20 秒超时
+    if (ref.read(appConfigProvider).offline) {
+      state = state.copyWith(
+        phase: AuthPhase.ready,
+        health: null,
+        busy: false,
+        error: null,
+      );
+      return;
+    }
+
     if (ref.read(appConfigProvider).useMock) {
       state = state.copyWith(
         phase: AuthPhase.ready,

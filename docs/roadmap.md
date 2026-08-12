@@ -328,6 +328,30 @@ session 事件）、以及 compose 里的 `cortex-prod-workspace` 卷。
 
 ---
 
+### 离线模式 —— 装了就能用，但明说没有记忆
+
+「本地记忆」调研过两条路，**都否了**：
+
+- **SQLite 第二实现**：sqlite-vec 的 ANN 至 2026-03 仍是 alpha；80 条 SQL
+  要养两份、116 题评测基线分叉；且与「桌面端不是第二个记忆库」相悖
+- **安装包内嵌 Postgres**：pgvector 在 Windows 上实测可行
+  （postgresql_embedded + portal-corp 预编译包，HNSW 真查过），
+  但**这只是把云端那套在本地部署一份** —— 真要这么干，`docker compose up`
+  已经在那儿了，我们多一层 295 MB 的安装目录、initdb、pg_ctl 生命周期与
+  将来的 PG 大版本升级，换不到任何新东西
+
+所以选了第三条：**离线模式**。没有 cortexd 时对话照常、本地工具照常、
+写入排进 outbox 等以后灌回，而界面上**一直**挂着「这些对话没有在记忆里」。
+
+下层本来就支持（cortex-local 断网时的全部行为），改的只是桌面端那道门：
+它此前必须探到一个可达的 cortexd 才过得了启动。
+
+需要用户自己在本机配好模型（`CORTEX_LLM_PROVIDER` + key，或
+`CORTEX_LLM_BASE_URL` 指向本地端点）—— 离线模式下 LLM 不可能经 cortexd 代理。
+
+**本机 ↔ 云端同步不在本期**：sync_log + 游标那套设计本来就是为它准备的，
+但那是一件独立的事。
+
 ### 多用户之后遗留的三件
 
 它们的共同点：**都不报错**，而且只在特定条件下才暴露。
