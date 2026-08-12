@@ -586,9 +586,12 @@ Web 端一直没有可执行的地方（工具目录只有 `memory_search`）。
 | A5 cortexd 反代 `/chat` | ✅ 照抄 `proxy.rs` 但四处必改，含「`Authorization` 从补改为剥」 |
 | A6 cortex-local 容器化改造 | ✅ 默认工作区、`/confirmations` 断路、容器里不读 `.env`、日志不说假话 |
 | B1 记忆写路径收窄 | ✅ 沙箱写的 fact 降到 tier 3；只能写自己那个会话。**检索侧那条改了**，见 sandbox.md |
-| B2 数据兜底（宿主侧快照 + 卷内 git）| 卷内 git 已在 entrypoint 里；宿主侧快照待做 |
-| B3 出网 allowlist | **上线前必须**，见 sandbox.md 第八节 |
+| B2 数据兜底 | ⚠️ **只做了一半**：卷内 git ✅（entrypoint 建仓 + 每轮 auto-commit）；宿主侧快照**未做** ⇒ 整卷删仍是永久损失。设计已定，卡在「后台任务用的 user-id → schema 查询还没有」 |
+| B3 出网 allowlist | ✅ 网段改 `internal` + 双宿 `cortex-egress`（新 crate）。**实测推翻了 B5 的原假设** |
 | B4 空闲回收 | ✅ 30 分钟停容器保留卷；活跃信号用「令牌多久没被用过」 |
+| B5 dev compose 端口改绑回环 | ✅ 改了，但**实测证明它挡不住沙箱**（见下）——真正的墙是 `internal` |
+| C3 Web 端入口（「云沙箱」开关）| ✅ 没有它这个功能在产品上不存在 |
+| C4 三处过期文案 | ✅ 都在对 Web 用户指一条已经不存在的路 |
 
 **真机跑通**：`sandbox: true` 的一轮对话 → 起容器 → 反代 SSE → 容器里
 `write_file` + `shell` → diff 带回来 → 文件真在卷里 → 第二轮复用同一个容器。
@@ -600,6 +603,32 @@ bind 端口；tini 与 `--init` 重复；**容器里的免确认不是自动的*
 
 顺带证实了调研的一个预测：**容器内 landlock 可用**（`landlock ABI 3`），
 所以容器边界之外还有一层内核围栏。
+
+#### 网络隔离：计划里那条「改绑 127.0.0.1」是错的，实测才发现
+
+原计划 B5 写的是「把 dev compose 的 published port 改绑回环，并真机实测」。
+测了，**原假设不成立**（Docker Desktop / Windows）：
+
+| 从沙箱容器里发起 | 结果 |
+|---|---|
+| `cortex-postgres:5432`（DNS 名）| 拒绝 ← 拓扑隔离本身是生效的 |
+| `host.docker.internal:15432`（宿主绑 `0.0.0.0`）| **可达** |
+| 同上，宿主**改绑 `127.0.0.1` 之后** | **仍然可达** |
+| `host.docker.internal:5432` / `:9000`（**另一个项目**的 pg 与对象存储）| **可达** |
+
+转发器跑在那台 Linux 虚拟机里，容器经 `host.docker.internal` 到的正是它
+那一侧。最后一行最难看：改这份 compose 根本管不到别的项目。
+
+唯一实测有效的是 `internal: true`（容器里连默认路由都没有，四条全部翻红）。
+代价同样实测过：**内部网段上已发布端口失效**，而 cortexd 正是靠它反代进容器 ——
+所以 B5 与 B3 合成一件事，双宿的 `cortex-egress` 两个方向都做。
+
+两个只有真机撞得见的坑：`extra_hosts: host-gateway` 必须显式写（自动注入的
+那条指向 IPv6，而网桥没开 IPv6）；`TcpStream::connect((host, port))` 只报
+**最后一个**地址的错，于是「端口上没人监听」被报成 `Network is unreachable`。
+
+**一个没解决的限制**：https 走 CONNECT，curl 会丢弃失败 CONNECT 的响应体 ——
+拒绝理由（该换哪个镜像源）到不了模型，只剩一个 403。403/502 的区分仍成立。
 
 ### 第 9 次「造好了但没人调用」：`allows_escape_prompt`
 
