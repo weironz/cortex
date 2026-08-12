@@ -1,0 +1,341 @@
+//! 沙箱令牌 —— 发给容器里那个 `cortex-local` 的凭据。
+//!
+//! # 为什么不能把用户的登录 token 塞进容器
+//!
+//! 容器里跑的是**不可信代码**：模型的输出、用户装的依赖、被 prompt 注入的
+//! 工具调用，全在里面。拿到用户的 bearer token 等于拿到那个人的全部记忆、
+//! 全部会话、全部附件。
+//!
+//! OpenHands 在这一点上走的是另一条路（把 LLM api key 直接发进容器，容器
+//! 自己连供应商）。我们不 —— key 留在 cortexd，容器经 `/llm/stream` 代理，
+//! 顺带天然有了配额与计费的位置。
+//!
+//! # 这个令牌的作用域**不只是一张路由白名单**
+//!
+//! 这是本设计里最不显然的一处。四家云 agent（Codex / Claude web / Devin /
+//! Manus）都可以只做路由级隔离，因为**它们的沙箱没有可写的长期记忆**：
+//! 沙箱能碰的只有一个 clone 出来的 git 工作副本，坏了丢掉重来。
+//!
+//! 我们不同。沙箱要调 `POST /episodes`（写对话）与 `GET /memory/search`
+//! （查记忆），这两条是**穿透容器边界的持久通道**：
+//!
+//! - `/episodes` 的 `role` 若由请求体自由决定，被注入的 agent 可以伪装成
+//!   「用户亲口说的」写进抽取管线 —— 那条 fact 会在**未来所有会话、所有
+//!   设备**上被召回并注入 system prompt。容器早就销毁了，记忆还在。
+//! - `/memory/search` 若按租户检索，沙箱能把该用户**其他会话**里的敏感记忆
+//!   捞出来，再经出网通道送走。
+//!
+//! 所以「爆炸半径已被容器限住」这句话对两家成立，对我们不成立。作用域必须
+//! 下沉到**语义**：见 [`SandboxScope`]。
+//!
+//! # 令牌与 session 绑定，不只与 owner 绑定
+//!
+//! 一个用户可能有多个会话。沙箱只该看得见自己那一个 —— 否则「隔离」只隔到
+//! 了用户这一层，而同一个用户的两段工作之间同样需要边界（一段在处理公司
+//! 合同、另一段在跑一个从网上抄来的脚本）。
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// 沙箱令牌的有效期。
+///
+/// 比票据（60 秒）长得多：这把是长连接用的，容器一活可能几小时。
+/// 但仍然有限 —— 容器被回收后令牌应当自然失效，而不是永远留在表里。
+/// 每次 [`SandboxTokens::touch`] 会续期，所以活跃的沙箱不会被误杀。
+const TTL: Duration = Duration::from_secs(6 * 3600);
+
+/// 沙箱能做什么。**按语义授权，不是按路由**。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxScope {
+    /// 令牌属于谁。租户隔离仍然由它决定 —— 这一层是既有的。
+    pub owner: String,
+    /// 绑定的会话。沙箱只能读写这一个会话的东西。
+    pub session_id: String,
+}
+
+impl SandboxScope {
+    /// 这条路径 + 方法允许吗。
+    ///
+    /// # 为什么是白名单而不是黑名单
+    ///
+    /// 与 `WORKSPACE_FREE_TOOLS` 同一个论证：黑名单漏掉一条新路由 = 沙箱
+    /// 悄悄多了一样能力（静默、危险）；白名单漏掉一条 = 沙箱少一样能力
+    /// （响亮、当场可见）。**失败方向不同，选会往安全那边倒的那个。**
+    ///
+    /// 清单是代码审计出来的**实际调用**，不是猜的。少一条的后果已经量化过：
+    /// 漏掉 `GET /sessions/{id}` 的话，`load_history` 会静默降级为空历史，
+    /// 云端会话**逐轮失忆且没有任何报错**。
+    #[must_use]
+    pub fn allows(&self, method: &axum::http::Method, path: &str) -> bool {
+        use axum::http::Method;
+        match (method, path) {
+            // 每轮一次到多次。LLM key 不进容器的代价与收益都在这条上
+            (&Method::POST, "/llm/stream") => true,
+            // 写 user / assistant episode，以及 outbox 重放
+            (&Method::POST, "/episodes") => true,
+            // memory_search 工具
+            (&Method::GET, "/memory/search") => true,
+            // 每轮拉会话历史。**漏掉这条 = 逐轮失忆且静默**
+            (&Method::GET, p) if is_session_path(p) => true,
+            // 启动时问「这把凭据属于谁」。漏掉的话状态目录永远落在 _pending
+            (&Method::GET, "/auth/me") => true,
+            _ => false,
+        }
+    }
+}
+
+/// `/sessions/{id}` 形状（不含 `/sessions` 本身 —— 那是列全部会话）。
+fn is_session_path(path: &str) -> bool {
+    match path.strip_prefix("/sessions/") {
+        // 只认一层：`/sessions/abc` 是，`/sessions/abc/xxx` 不是。
+        // 多一层就是另一个端点，而这里的清单是逐条审计出来的
+        Some(rest) => !rest.is_empty() && !rest.contains('/'),
+        None => false,
+    }
+}
+
+/// 已签发的沙箱令牌。
+///
+/// 与 `TicketBook` 同形（内存、随进程走）。cortexd 重启后所有沙箱令牌失效，
+/// 而那是**对的**：那些容器也需要被重新接管，让它们带着一把还能用的凭据
+/// 继续跑才是问题。
+#[derive(Default)]
+pub struct SandboxTokens {
+    inner: Mutex<HashMap<String, (SandboxScope, Instant)>>,
+}
+
+impl SandboxTokens {
+    /// 签一把。调用方必须**已经**确认了 owner 的身份。
+    pub fn issue(&self, scope: SandboxScope) -> String {
+        let mut buf = [0u8; 32];
+        getrandom::fill(&mut buf).expect("内核熵源不可用，拒绝签发可预测的令牌");
+        let token = hex::encode(buf);
+        let mut guard = self.inner.lock().expect("令牌表的锁不该中毒");
+        // 顺手清过期的。同 TicketBook：签发是唯一让这个表长大的动作，
+        // 在这里清就不可能「只涨不清」
+        let now = Instant::now();
+        guard.retain(|_, (_, at)| now.duration_since(*at) < TTL);
+        guard.insert(token.clone(), (scope, now));
+        token
+    }
+
+    /// 认这把令牌吗，认的话它的作用域是什么。顺带续期。
+    #[must_use]
+    pub fn resolve(&self, token: &str) -> Option<SandboxScope> {
+        let mut guard = self.inner.lock().ok()?;
+        let now = Instant::now();
+        let (scope, at) = guard.get_mut(token)?;
+        if now.duration_since(*at) >= TTL {
+            guard.remove(token);
+            return None;
+        }
+        *at = now;
+        Some(scope.clone())
+    }
+
+    /// 这个 owner 手上那把还有效的令牌（如果有）。
+    ///
+    /// # 为什么需要「复用」而不是每轮签一把新的
+    ///
+    /// 容器的**入站**认证用的是它启动时 env 里那把（`cortex-local` 的入站与
+    /// 出站共用一个 token，刻意不引入第二个秘密）。每轮换新的话，第二轮反代
+    /// 过去就是 401 —— 而那条错误读起来像「沙箱坏了」。
+    ///
+    /// 真机第一轮通、第二轮 401，就是这个。**令牌的生命周期跟着容器走**，
+    /// 不跟着轮次走。
+    #[must_use]
+    pub fn find_by_owner(&self, owner: &str) -> Option<String> {
+        let guard = self.inner.lock().ok()?;
+        let now = Instant::now();
+        guard.iter().find_map(|(tok, (scope, at))| {
+            (scope.owner == owner && now.duration_since(*at) < TTL).then(|| tok.clone())
+        })
+    }
+
+    /// 把一把已有的令牌改绑到另一个会话上。
+    ///
+    /// 同一个容器服务这个用户的下一个会话时用。**不是放宽作用域** ——
+    /// 改完之后它仍然只对得上一个会话，只是换了一个。
+    pub fn rebind(&self, token: &str, session_id: &str) {
+        if let Ok(mut g) = self.inner.lock()
+            && let Some((scope, at)) = g.get_mut(token)
+        {
+            scope.session_id = session_id.to_owned();
+            *at = Instant::now();
+        }
+    }
+
+    /// 作废（沙箱停掉时调）。
+    pub fn revoke(&self, token: &str) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.remove(token);
+        }
+    }
+
+    /// 作废某个 owner 的全部令牌。
+    pub fn revoke_owner(&self, owner: &str) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.retain(|_, (s, _)| s.owner != owner);
+        }
+    }
+
+    /// 空闲超过 `idle` 的 owner。空闲回收拿它决定停谁。
+    ///
+    /// # 为什么「最后一次用到令牌」就是正确的活跃信号
+    ///
+    /// 这把令牌是容器**唯一**的对外凭据：每一次 `/llm/stream`、每一条
+    /// `/episodes`、每一次拉历史都要出示它，而 [`Self::resolve`] 每次都续期。
+    /// 所以「令牌很久没被用过」等价于「那个容器很久没干活了」。
+    ///
+    /// 这顺带解决了一件本来要单独处理的事：SSE 断开之后容器里的 agent 会
+    /// **继续跑完当轮**（`turn.rs` 刻意如此），期间它仍在调 cortexd ——
+    /// 于是令牌继续被续期，那个还在产出的沙箱不会被误停。
+    /// 换成「按 SSE 连接断开计时」就会停掉正在干活的容器。
+    ///
+    /// 三家（Codespaces / Gitpod / Coder）的共同点也是这个：**以客户端 /
+    /// 请求活动为信号，不把容器内的 CPU 占用当续命依据**。
+    #[must_use]
+    pub fn idle_owners(&self, idle: Duration) -> Vec<String> {
+        let Ok(guard) = self.inner.lock() else {
+            return Vec::new();
+        };
+        let now = Instant::now();
+        // 一个 owner 可能有多把（换过会话又签了新的）。**最近那一把**说了算 ——
+        // 按最老的算会把活跃用户的沙箱停掉
+        let mut newest: HashMap<&str, Duration> = HashMap::new();
+        for (scope, at) in guard.values() {
+            let age = now.duration_since(*at);
+            newest
+                .entry(scope.owner.as_str())
+                .and_modify(|a| *a = (*a).min(age))
+                .or_insert(age);
+        }
+        newest
+            .into_iter()
+            .filter(|(_, age)| *age >= idle)
+            .map(|(o, _)| o.to_owned())
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.lock().map(|g| g.len()).unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Method;
+
+    fn scope() -> SandboxScope {
+        SandboxScope {
+            owner: "u1".into(),
+            session_id: "s1".into(),
+        }
+    }
+
+    /// 白名单**正好**是审计出来的那五条，一条不多。
+    ///
+    /// 每一条都有代价：多放一条就是沙箱多一样穿透容器边界的能力。
+    /// 尤其别把 `/confirmations` 加进来 —— 容器那侧对不认识的 token 会转发
+    /// 回 cortexd，而 cortexd 又把这条路由反代进容器，是一个**无界递归**。
+    /// 现在它被这张白名单挡在第二跳，但那是意外不是设计，
+    /// 容器侧另有显式断路（见 `cortex-local` 的 `answer_confirmation`）。
+    #[test]
+    fn the_allowlist_is_exactly_what_the_agent_actually_calls() {
+        let s = scope();
+        for (m, p) in [
+            (Method::POST, "/llm/stream"),
+            (Method::POST, "/episodes"),
+            (Method::GET, "/memory/search"),
+            (Method::GET, "/sessions/01ABC"),
+            (Method::GET, "/auth/me"),
+        ] {
+            assert!(
+                s.allows(&m, p),
+                "{m} {p} 是每轮都要打的，漏了整个沙箱不可用"
+            );
+        }
+
+        for (m, p) in [
+            // 确认回路：加进来会让那个回环复活
+            (Method::POST, "/confirmations"),
+            (Method::GET, "/confirmations"),
+            // 列全部会话 —— 沙箱只该看得见自己那一个
+            (Method::GET, "/sessions"),
+            // 改会话（含换工作区）不该由沙箱自己决定
+            (Method::PATCH, "/sessions/01ABC"),
+            // 项目、附件、同步：都不是 agent 循环需要的
+            (Method::GET, "/projects"),
+            (Method::POST, "/blobs"),
+            (Method::GET, "/sync"),
+            (Method::POST, "/auth/ticket"),
+            // 写 episode 是 POST；GET 那条是回放别人的对话
+            (Method::GET, "/episodes/01ABC"),
+            // 多一层路径就是另一个端点
+            (Method::GET, "/sessions/01ABC/messages"),
+        ] {
+            assert!(
+                !s.allows(&m, p),
+                "{m} {p} 不在审计出来的调用清单里，放行等于给沙箱一样它不需要的能力"
+            );
+        }
+    }
+
+    #[test]
+    fn a_token_resolves_to_its_scope_and_an_unknown_one_does_not() {
+        let book = SandboxTokens::default();
+        let t = book.issue(scope());
+        assert_eq!(book.resolve(&t).as_ref(), Some(&scope()));
+        assert!(
+            book.resolve("deadbeef").is_none(),
+            "没签发过的令牌必须认不出来"
+        );
+    }
+
+    #[test]
+    fn revoking_takes_effect_immediately() {
+        let book = SandboxTokens::default();
+        let t = book.issue(scope());
+        book.revoke(&t);
+        assert!(
+            book.resolve(&t).is_none(),
+            "沙箱停掉后它那把令牌必须当场失效 —— 容器可能还活着（stop 之前的\
+             最后一瞬），而它此刻已经不该再写记忆了"
+        );
+    }
+
+    #[test]
+    fn revoking_an_owner_leaves_other_owners_alone() {
+        let book = SandboxTokens::default();
+        let a = book.issue(scope());
+        let b = book.issue(SandboxScope {
+            owner: "u2".into(),
+            session_id: "s2".into(),
+        });
+        book.revoke_owner("u1");
+        assert!(book.resolve(&a).is_none());
+        assert!(
+            book.resolve(&b).is_some(),
+            "作废一个用户的沙箱不该殃及别人 —— 多租户下这是一次全站故障"
+        );
+    }
+
+    #[test]
+    fn expired_tokens_are_swept_when_a_new_one_is_issued() {
+        let book = SandboxTokens::default();
+        {
+            let mut g = book.inner.lock().unwrap();
+            g.insert(
+                "old".into(),
+                (scope(), Instant::now() - TTL - Duration::from_secs(1)),
+            );
+        }
+        assert_eq!(book.len(), 1);
+        let fresh = book.issue(scope());
+        assert_eq!(book.len(), 1, "过期令牌应当在签新令牌时被清掉");
+        assert!(book.resolve(&fresh).is_some());
+    }
+}

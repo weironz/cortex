@@ -17,6 +17,10 @@ mod quota;
 mod reembed;
 mod request_tenant;
 mod routes;
+mod sandbox_proxy;
+mod sandbox_reaper;
+mod sandbox_runner;
+mod sandbox_token;
 mod state;
 mod sync_notify;
 mod sync_payload;
@@ -102,6 +106,48 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!(error = %e, "账号表连不上，/auth/* 将回 501（老的预共享 token 不受影响）");
         }
     }
+    // ── 云沙箱（Web 端的执行环境，见 docs/sandbox.md）──────────
+    //
+    // **连不上 docker 不算启动失败**：绝大多数部署根本不开云沙箱，而一个
+    // 「因为没装 docker 所以整个记忆库起不来」的服务是荒唐的。
+    // 关掉的后果是 `sandbox: true` 的请求拿到一条说得清的 501，
+    // 不是静默退回纯聊天 —— 后者会让用户对着一个「开了沙箱却不动文件」
+    // 的 agent 束手无策。
+    //
+    // 用 `CORTEX_SANDBOX_ENABLED=1` 显式打开，与「沙箱是一个部署选择」
+    // 这件事保持一致：默认不连 docker，也就不需要 docker.sock。
+    if std::env::var("CORTEX_SANDBOX_ENABLED").as_deref() == Ok("1") {
+        // 容器回调 cortexd 的地址。cortexd 自己也在容器里时走服务名，
+        // 否则走 docker 给的宿主别名 —— 两者的差别同时决定了反代的方向，
+        // 所以由**一个**变量定，不留两处各配一次的机会
+        let same_net = std::env::var("CORTEX_SANDBOX_SAME_NETWORK").as_deref() == Ok("1");
+        let remote = std::env::var("CORTEX_SANDBOX_CALLBACK").unwrap_or_else(|_| {
+            if same_net {
+                "http://cortexd:8080".into()
+            } else {
+                "http://host.docker.internal:8080".into()
+            }
+        });
+        match sandbox_runner::DockerRunner::connect(&remote, same_net) {
+            Ok(runner) => match sandbox_proxy::client() {
+                Ok(http) => {
+                    tracing::info!(
+                        callback = %remote, same_network = same_net,
+                        "云沙箱已启用（Web 端可在容器里跑文件与命令）"
+                    );
+                    rt.sandbox = Some(state::SandboxLayer {
+                        runner: std::sync::Arc::new(runner),
+                        http,
+                    });
+                }
+                Err(e) => tracing::warn!(error = %e, "沙箱反代客户端建不起来，云沙箱关闭"),
+            },
+            Err(e) => tracing::warn!(error = %e, "连不上 docker，云沙箱关闭"),
+        }
+    } else {
+        tracing::info!("云沙箱：未启用（设 CORTEX_SANDBOX_ENABLED=1 打开）");
+    }
+
     // 同上：写错的允许列表在这里失败，而不是等浏览器报一句语焉不详的 CORS 错
     let cors = cors::CorsPolicy::from_env().context("加载跨源策略失败")?;
 
@@ -156,6 +202,11 @@ async fn main() -> anyhow::Result<()> {
             st
         }
     };
+
+    // 空闲沙箱回收。**在开始监听之前起**，理由与后台任务的一贯做法一致：
+    // 一个只在第一次请求之后才启动的清理任务，在「起了服务但没人用」的那段
+    // 时间里什么都不做，而那恰恰是上一批容器还挂着的时候
+    sandbox_reaper::spawn(state.clone());
 
     let app = routes::router(state)
         // 默认一个跨源都不许：生产是单域名路径分流，Web 与 cortexd 同源。

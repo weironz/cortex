@@ -212,6 +212,28 @@ async fn answer_confirmation(
     };
     match st.engine.confirms.answer(&receipt.token, approval) {
         AnswerOutcome::Accepted => Json(ConfirmAck { accepted: true }).into_response(),
+        // ── 容器里**不转发**，直接 404 ──
+        //
+        // 这条转发在桌面端是对的（本地簿子没有 = 多半是浏览器那条会话的，
+        // 挂在服务端）。在容器里它是一个**无界递归**：cortexd 把
+        // /confirmations 反代进容器 → 容器查不到 → 转发回 cortexd →
+        // cortexd 又反代进容器 …… 每一跳都是一次新的 HTTP 请求，
+        // 唯一的减速器是 20 秒超时。
+        //
+        // 眼下它碰巧不会发生，因为沙箱令牌不放行 /confirmations，第二跳就 403。
+        // **但那是意外，不是设计** —— 把这条路由加进放行清单是很自然的诱惑
+        //（确认本来就是对话的一部分），加进去回环立刻复活。所以在这里显式断路。
+        //
+        // 404 也是更诚实的答案：cortexd 侧对查不到的 token 就回 404
+        //（刻意不区分伪造 / 已答过 / 超时，防探测），容器照抄同一个语义。
+        AnswerOutcome::Unknown if st.engine.exec_env.is_container() => {
+            tracing::debug!("容器里答不认识的确认 token —— 不转发（那是一条回环），直接 404");
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "没有这条待确认项" })),
+            )
+                .into_response()
+        }
         AnswerOutcome::Unknown => {
             let body = serde_json::to_vec(&receipt).unwrap_or_else(|_| b"{}".to_vec());
             let uri = "/confirmations".parse().expect("常量路径可解析");
@@ -234,13 +256,19 @@ async fn list_confirmations(
     Query(q): Query<PendingQuery>,
 ) -> Json<PendingConfirmations> {
     let mut pending = st.engine.confirms.pending(q.session_id.as_deref());
-    match st
-        .remote
-        .pending_confirmations(q.session_id.as_deref())
-        .await
-    {
-        Ok(remote) => pending.extend(remote),
-        Err(e) => tracing::debug!(error = %e, "拉不到远端待确认项，只报本地的"),
+    // 容器里**不合并远端**：同 answer_confirmation，那是回环的另一半
+    //（cortexd 反代 GET 进容器 → 容器又 GET 回 cortexd → ……）。
+    // 而且合并本来就没有意义：容器里跑的只有它自己那一个会话，
+    // 「别的客户端发起的会话」在这里不存在。
+    if !st.engine.exec_env.is_container() {
+        match st
+            .remote
+            .pending_confirmations(q.session_id.as_deref())
+            .await
+        {
+            Ok(remote) => pending.extend(remote),
+            Err(e) => tracing::debug!(error = %e, "拉不到远端待确认项，只报本地的"),
+        }
     }
     // 先问的排前面。两个来源各自有序，合起来就不是了
     pending.sort_by(|a, b| a.asked_at.cmp(&b.asked_at));

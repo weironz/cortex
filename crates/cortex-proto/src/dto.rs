@@ -189,6 +189,25 @@ pub struct ChatRequest {
     /// 而那次同步失败时用户看到的是「我明明切了档」。
     #[serde(default)]
     pub permission_mode: PermissionMode,
+    /// 这一轮要不要在**云端沙箱**里跑（Web 端专用）。
+    ///
+    /// 老客户端不传 = `false` = 照旧走 cortexd 自己那个纯聊天 agent
+    /// （工具目录只有 `memory_search`）。为 `true` 时 cortexd 会确保这个
+    /// 用户的沙箱容器在跑，并把整条 SSE **反代**进去 —— 那边跑的是完整的
+    /// `cortex-local`，有文件与 shell 工具。见 `docs/sandbox.md`。
+    ///
+    /// # 为什么逐轮带而不是存在会话上
+    ///
+    /// 与 `permission_mode` 同一个理由：用户在界面上随手一切，**下一句**就该
+    /// 按新的来。存服务端要多一次同步，而那次同步失败时用户看到的是
+    /// 「我明明开了沙箱」。
+    ///
+    /// # 为什么桌面端不用它
+    ///
+    /// 桌面端的 agent 跑在用户自己的机器上（`cortex-local` 直连），压根不经
+    /// cortexd 的 `/chat`。这个字段只对「没有本地 agent 的客户端」有意义。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sandbox: bool,
 }
 
 /// 一条 `episode_blobs` 关联 —— **上行**方向（客户端 → 服务端）。

@@ -342,6 +342,44 @@ backup-status:
     printf '  轮转记录 %s\n' "$(tail -1 "$d/reports/purge-rotation.log" 2>/dev/null || echo '无（从未做过 purge 轮转）')"
 
 # ══════════════════════════════════════════════════════════
+#  Web 端沙箱（docs/sandbox.md）
+# ══════════════════════════════════════════════════════════
+
+# 构建沙箱镜像。**首次要编一遍 goose 那几百个 crate，按十分钟计。**
+sandbox-build:
+    docker build -f scripts/docker/Dockerfile.sandbox -t cortex/sandbox:dev .
+
+# 沙箱专用网段。postgres / rustfs **不接进来** —— 隔离靠拓扑，不靠规则判断
+sandbox-net:
+    -docker network create cortex-sandbox-net
+    @echo "把 cortexd 接进去：docker network connect cortex-sandbox-net <cortexd 容器>"
+
+# 手工起一个沙箱看看（cortexd 正式起沙箱走 DockerRunner，不走这条）。
+# 规格与 DockerRunner 里写死的那份保持一致 —— 两边漂开时以代码为准
+sandbox-try owner="try":
+    -docker rm -f cortex-sbx-{{ owner }}
+    docker run -d --name cortex-sbx-{{ owner }} \
+        --network cortex-sandbox-net \
+        -v cortex-ws-{{ owner }}:/workspace \
+        --read-only --tmpfs /tmp:size=128m,mode=1777 \
+        --init --cap-drop ALL --security-opt no-new-privileges \
+        --memory 512m --memory-swap 640m --cpus 1.5 --cpu-shares 256 \
+        --pids-limit 256 --oom-score-adj 500 --ulimit nofile=8192:65536 \
+        --restart no \
+        -e CORTEX_REMOTE=http://host.docker.internal:8080 \
+        -e CORTEX_TOKEN="${CORTEXD_TOKEN:-}" \
+        --add-host host.docker.internal:host-gateway \
+        cortex/sandbox:dev
+    @echo "健康检查：docker exec cortex-sbx-{{ owner }} curl -fsS http://127.0.0.1:8090/health"
+
+sandbox-logs owner="try":
+    docker logs -f cortex-sbx-{{ owner }}
+
+sandbox-rm owner="try":
+    -docker rm -f cortex-sbx-{{ owner }}
+    -docker volume rm cortex-ws-{{ owner }}
+
+# ══════════════════════════════════════════════════════════
 #  生产部署（cortexd 也进容器）
 # ══════════════════════════════════════════════════════════
 

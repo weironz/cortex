@@ -65,6 +65,21 @@ serde_json = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "query", "rustls"] }
 eventsource-stream = "0.2"
 
+# Docker API 客户端。cortexd 的 DockerRunner 起 / 停用户沙箱容器用
+# （见 docs/sandbox.md 第七节）。
+#
+# **不自己拿 hyper 撸 unix socket**：Docker 的 API 版本协商有坑，而这正是
+# CLAUDE.md 说的「繁琐但已被工业验证的部分」。
+#
+# 关掉默认 features 再逐个开：默认会拉 ssl（openssl）与 chrono，而我们既不
+# 连远程 daemon 也不需要它的时间类型 —— 多拉一套 TLS 实现会与 reqwest 那份
+# rustls 共存，正是 Cargo.lock 里已经踩过一次的形状
+# `pipe` 是 **Windows 必需**：`connect_with_local_defaults` 在 unix 上走
+# `/var/run/docker.sock`（无条件编译），在 Windows 上走 npipe，而后者藏在
+# 这个 feature 后面。少了它，开发机上编不过，且报错指向 bollard 内部 ——
+# 完全看不出是 feature 少了一个。开发机 Windows、生产 Linux，两边都要能编。
+bollard = { version = "0.21", default-features = false, features = ["pipe"] }
+
 # WebSocket 客户端。本地 agent 反代 /ws 用（见 cortex-local/src/ws_proxy.rs）。
 #
 # **刻意不开任何 TLS feature**：连接不是它建的，是 reqwest 建好之后

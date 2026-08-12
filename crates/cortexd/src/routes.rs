@@ -268,11 +268,105 @@ async fn list_confirmations(
 ///
 /// 用 SSE 而非 WebSocket：对话是单向流，SSE 自带重连与文本帧语义，
 /// 且在 Flutter Web 上比 WS 少一层坑。WS 留给多端同步推送。
+/// `/chat` 的入口。**两条完全不同的路**，由 `req.sandbox` 分。
+///
+/// 走沙箱那条时，这个 handler 一行业务都不做：起容器（幂等）、签一把作用域
+/// 令牌、把整条请求原样反代进去。对话、工具、确认全在容器里那个
+/// `cortex-local` 上跑 —— 那是同一个二进制，只是 `--exec-env=container`。
 async fn chat(
     State(st): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<ChatRequest>,
+    body: axum::body::Bytes,
 ) -> axum::response::Response {
+    let req: ChatRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return ApiError::bad_request(format!("请求体不是合法的 ChatRequest：{e}"))
+                .into_response();
+        }
+    };
+    if req.sandbox {
+        return chat_in_sandbox(&st, &headers, &req, body).await;
+    }
+    chat_here(st, headers, req).await
+}
+
+/// 反代进用户的云沙箱。
+///
+/// # 为什么起容器放在这里而不是「建会话时」
+///
+/// 会话可能几天不聊。容器起着不聊天，是白占 512 MiB —— 而生产节点的余量
+/// 只有 0.5~0.7 GiB。`ensure` 是幂等的，每轮调一次的代价是一次
+/// `docker inspect`（毫秒级），换来的是「不聊就不占」。
+async fn chat_in_sandbox(
+    st: &AppState,
+    headers: &HeaderMap,
+    req: &ChatRequest,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let Some(layer) = st.sandbox_layer() else {
+        // **明说，不静默退回纯聊天。** 退回去的话用户会看到一个「开了沙箱
+        // 却怎么都不动文件」的 agent，而那种失败没人查得出来
+        return ApiError::unsupported(
+            "这个部署没有开云沙箱（cortexd 连不上 docker）。\
+             要在自己的机器上跑文件与命令，请用桌面端。",
+        )
+        .into_response();
+    };
+
+    let user = crate::accounts::current_user(st, headers).await;
+    if let Err(e) = st.enforce_quota(&user).await {
+        return e.into_response();
+    }
+    let owner = user.clone();
+
+    // 令牌的生命周期**跟着容器**，不跟着轮次。
+    //
+    // 容器的入站认证用的是它启动时 env 里那把（`cortex-local` 的入站与出站
+    // 共用一个 token）。每轮签一把新的话，第二轮反代过去就是 401 ——
+    // 而那条错误读起来像「沙箱坏了」。真机第一轮通、第二轮 401，就是这个。
+    //
+    // 所以：有就复用，只把它改绑到这一轮的会话上；没有才签新的
+    //（首轮，或者上一把已经过了 TTL）。
+    let token = match st.sandbox_tokens().find_by_owner(&owner) {
+        Some(t) => {
+            st.sandbox_tokens().rebind(&t, &req.session_id);
+            t
+        }
+        None => st
+            .sandbox_tokens()
+            .issue(crate::sandbox_token::SandboxScope {
+                owner: owner.clone(),
+                session_id: req.session_id.clone(),
+            }),
+    };
+
+    let handle = match layer.runner.ensure(&owner, &token, "v1").await {
+        Ok(h) => h,
+        Err(e) => {
+            // 签出去的令牌要收回来：容器没起来，它就是一把没有主人的钥匙
+            st.sandbox_tokens().revoke(&token);
+            return ApiError::from(e).into_response();
+        }
+    };
+
+    tracing::debug!(owner = %owner, sandbox = %handle.name, "本轮走云沙箱");
+
+    // 重新组一个请求转进去。**只带 body 与必要的首部** ——
+    // `sandbox_proxy::forward` 会把一切凭据剥掉再换上沙箱令牌
+    let mut proxied = axum::extract::Request::new(axum::body::Body::from(body));
+    *proxied.method_mut() = axum::http::Method::POST;
+    *proxied.uri_mut() = "/chat".parse().expect("常量路径可解析");
+    proxied.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+
+    crate::sandbox_proxy::forward(&layer.http, &handle.base_url, &token, proxied).await
+}
+
+/// 在 cortexd 自己这儿跑一轮（纯聊天，工具目录只有 `memory_search`）。
+async fn chat_here(st: AppState, headers: HeaderMap, req: ChatRequest) -> axum::response::Response {
     // 超额要以 **SSE 事件**形式说，不是 HTTP 状态码：客户端已经把这条
     // 当成流在读了，一个 429 会表现成「流刚建立就断了」，
     // 而那与网络出问题长得一模一样
@@ -910,6 +1004,10 @@ mod tests {
             // 账号端点在没有它时会 panic，而那正是它们不该被路由到的信号
             accounts: None,
             access: std::sync::Arc::new(crate::accounts::AccessBook::default()),
+            sandboxes: std::sync::Arc::new(crate::sandbox_token::SandboxTokens::default()),
+            // 路由测试不碰 docker。`sandbox: true` 的请求在这里会拿到
+            // 「这个部署没有云沙箱」，而那正是它该拿到的
+            sandbox: None,
         };
         (router(crate::state::AppState::for_tests(rt)), token)
     }

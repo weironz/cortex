@@ -81,6 +81,26 @@ pub struct Runtime {
     pub accounts: Option<Accounts>,
     /// 已签发的 access token。见 [`crate::accounts::AccessBook`]。
     pub access: Arc<crate::accounts::AccessBook>,
+    /// 已签发的**沙箱**令牌。与上面两本簿子并列而不是合并：它是唯一一种
+    /// 带**语义作用域**的凭据（见 [`crate::sandbox_token::SandboxScope`]），
+    /// 合进 `AccessBook` 会让「这把 token 能干什么」变成一个要在调用点
+    /// 到处判断的问题。
+    pub sandboxes: Arc<crate::sandbox_token::SandboxTokens>,
+    /// 起 / 停用户沙箱容器的那一层，以及反代进去用的 HTTP 客户端。
+    ///
+    /// `None` = 这个部署没接 docker（开发机没起 daemon、或者刻意不开云沙箱）。
+    /// 此时 `sandbox: true` 的请求会拿到一条**说得清**的错误，而不是
+    /// 静默退回纯聊天 —— 后者会让用户以为「沙箱开了但 agent 就是不动文件」。
+    pub sandbox: Option<SandboxLayer>,
+}
+
+/// 云沙箱那一层的两个句柄。
+#[derive(Clone)]
+pub struct SandboxLayer {
+    pub runner: Arc<dyn crate::sandbox_runner::SandboxRunner>,
+    /// **专用**客户端：连接超时、读超时、禁连接池三件事都与别处不同，
+    /// 理由见 [`crate::sandbox_proxy::client`]。
+    pub http: reqwest::Client,
 }
 
 /// 账号相关的两个句柄。
@@ -139,6 +159,10 @@ impl Runtime {
             // 与「数据库连不上」在日志里是两条不同的失败
             accounts: None,
             access: Arc::new(crate::accounts::AccessBook::default()),
+            sandboxes: Arc::new(crate::sandbox_token::SandboxTokens::default()),
+            // 由 main 在拿到配置后调 `with_sandbox` 补上：连 docker 要
+            // 试探一次 daemon，而 from_env 是同步的且不该做 IO
+            sandbox: None,
         })
     }
 }
@@ -380,6 +404,17 @@ impl AppState {
     #[must_use]
     pub fn ticket_book(&self) -> &TicketBook {
         &self.inner.rt.tickets
+    }
+
+    #[must_use]
+    pub fn sandbox_tokens(&self) -> &crate::sandbox_token::SandboxTokens {
+        &self.inner.rt.sandboxes
+    }
+
+    /// 云沙箱那一层。`None` = 这个部署连不上 docker。
+    #[must_use]
+    pub fn sandbox_layer(&self) -> Option<&SandboxLayer> {
+        self.inner.rt.sandbox.as_ref()
     }
 
     // ──────────────────── 工具确认（R11）────────────────────

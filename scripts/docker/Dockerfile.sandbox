@@ -1,0 +1,139 @@
+# ══════════════════════════════════════════════════════════
+#  Web 端的一次性沙箱
+#
+#  里面跑的是**同一个** cortex-local 二进制，只是 --exec-env=container。
+#  完整设计见 docs/sandbox.md。
+#
+#  构建（在仓库根执行）：
+#    docker build -f scripts/docker/Dockerfile.sandbox -t cortex/sandbox .
+#  或：just sandbox-build
+#
+#  ── 这个镜像里**没有** agent 的配置 ────────────────────────
+#  远端地址、令牌、工作区、执行环境全部由 `docker run` 的 env 给。
+#  镜像里一个 .env 都不该有，cortex-local 在容器模式下也不读 .env
+#  （见 main.rs 那段注释：/workspace 是用户的仓库，一个它自己写出来的
+#  .env 就能在下次重启时把 LLM 路由改成 direct 并外发整段对话）。
+# ══════════════════════════════════════════════════════════
+
+# ── 构建阶段 ──────────────────────────────────────────────
+#
+# 与 Dockerfile.cortexd 同一个 base：glibc 版本必须与运行阶段对得上。
+# 但**不开** local-embed —— cortex-local 不依赖 cortex-memory，
+# 没有 fastembed / ONNX Runtime，所以这一侧比 cortexd 轻得多。
+FROM rust:1.97.1-trixie AS builder
+
+WORKDIR /build
+
+# 先只拷清单，让「依赖没变就复用上一层」真的发生。理由同 Dockerfile.cortexd：
+# 直接 COPY . . 会让任何一次源码改动都重编 goose 那几百个 crate。
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/cortex-core/Cargo.toml   crates/cortex-core/
+COPY crates/cortex-llm/Cargo.toml    crates/cortex-llm/
+COPY crates/cortex-store/Cargo.toml  crates/cortex-store/
+COPY crates/cortex-memory/Cargo.toml crates/cortex-memory/
+COPY crates/cortex-agent/Cargo.toml  crates/cortex-agent/
+COPY crates/cortex-blob/Cargo.toml   crates/cortex-blob/
+COPY crates/cortex-proto/Cargo.toml  crates/cortex-proto/
+COPY crates/cortex-import/Cargo.toml crates/cortex-import/
+COPY crates/cortex-local/Cargo.toml  crates/cortex-local/
+COPY crates/cortexd/Cargo.toml       crates/cortexd/
+COPY crates/cortex-cli/Cargo.toml    crates/cortex-cli/
+COPY evals/Cargo.toml                evals/
+
+RUN set -eux; \
+    for d in crates/*/ evals/; do \
+        mkdir -p "$d/src"; \
+        echo '' > "$d/src/lib.rs"; \
+        echo 'fn main() {}' > "$d/src/main.rs"; \
+    done; \
+    cargo build --release -p cortex-local 2>/dev/null || true
+
+COPY crates/ crates/
+COPY evals/ evals/
+COPY migrations/ migrations/
+COPY migrations-global/ migrations-global/
+
+RUN set -eux; \
+    find crates evals -name '*.rs' -exec touch {} +; \
+    cargo build --release -p cortex-local; \
+    strip target/release/cortex-local || true
+
+# ── 运行阶段 ──────────────────────────────────────────────
+FROM debian:trixie-slim AS runtime
+
+# 沙箱里的工具链。**镜像里有什么就是什么** —— v1 不做 setup.sh 快照缓存
+#（理由见 docs/sandbox.md 第五节：--read-only 与 docker commit 直接打架），
+# 所以大头要预装齐，对齐 codex-universal 的思路。
+#
+# 刻意**不装** build-essential：它让镜像大 ~200 MB，而在 512m 内存的沙箱里
+# 编译原生扩展本来就会 OOM。产品文案与工具白名单都按 shell / python / node
+# 轻任务圈定（见 docs/sandbox.md 第十节的容量账）。
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        jq \
+        less \
+        nodejs \
+        npm \
+        python3 \
+        python3-pip \
+        python3-venv \
+        ripgrep \
+        tini \
+        unzip; \
+    rm -rf /var/lib/apt/lists/*
+
+# 不用 root 跑。容器逃逸的门槛低得惊人，而 agent 完全不需要特权。
+# uid 与 cortexd 那个错开，两者的卷不会互相误认
+RUN useradd --system --uid 10002 --create-home --home-dir /home/sandbox sandbox
+
+COPY --from=builder /build/target/release/cortex-local /usr/local/bin/cortex-local
+COPY scripts/docker/sandbox-entrypoint.sh /usr/local/bin/sandbox-entrypoint
+
+# 卷的挂载点要**先在镜像里存在并归属 sandbox**：docker named volume 首次
+# 创建时会继承镜像里该路径的属主，路径不存在的话卷是 root:root 的，
+# 而容器里跑的是 uid 10002 —— 表现为「agent 写什么都 Permission denied」，
+# 且那条错误看起来像沙箱围栏拦的，不像属主问题
+RUN set -eux; \
+    mkdir -p /workspace; \
+    chown sandbox:sandbox /workspace; \
+    chmod +x /usr/local/bin/sandbox-entrypoint
+
+USER sandbox
+
+# **CWD 不能是 /workspace**。那是用户的目录，而 clap 的 env 参数会吃
+# 进程 CWD 下的 .env（见 main.rs）。这是那道防线的第一半，第二半是
+# 容器模式下 cortex-local 根本不读 .env —— 两道都要，因为第一道靠的是
+# 「这一行写对了」，而那没人看得出来
+WORKDIR /home/sandbox
+
+ENV CORTEX_EXEC_ENV=container \
+    CORTEX_DEFAULT_WORKSPACE=/workspace \
+    CORTEX_LOCAL_BIND=0.0.0.0:8090 \
+    XDG_DATA_HOME=/workspace/.cortex/state \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    RUST_LOG=cortex_local=info,cortex_agent=info,warn
+
+# XDG_DATA_HOME 指进卷里：outbox 与 workspaces.json 落在那儿，容器 rm 掉
+# 再重建时队列还在。**不能**改设 HOME=/workspace —— workspace::validate
+# 明确拒绝「主目录本身」，那样默认工作区在启动时就会被自己的校验拒掉
+
+EXPOSE 8090
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:8090/health" || exit 1
+
+# **不在这里放 tini。** 收僵尸进程这件事由 `docker run --init` 负责
+# （DockerRunner 里那个 `init: true`），它塞的 init 就是 PID 1。
+# 镜像里再套一层 tini 的话，tini 变成 PID 7 —— 它自己会警告
+# 「not running as PID 1, zombie reaping won't work」，也就是白套一层。
+# 真机第一次起容器时日志里就是这句。
+#
+# 代价是这个镜像**必须**配 `--init` 跑。规格写死在 DockerRunner 里，
+# 而 `just sandbox-try` 那条手工命令也带着它
+ENTRYPOINT ["/usr/local/bin/sandbox-entrypoint"]

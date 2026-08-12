@@ -292,6 +292,35 @@ pub async fn require(State(st): State<AppState>, req: Request, next: Next) -> Re
         if st.access_book().resolve(tok).is_some() {
             return next.run(req).await;
         }
+        // 沙箱令牌。**与上面两支的差别是它带作用域** —— 认出来还不够，
+        // 还要问一句「这条路由它够得着吗」。
+        //
+        // 为什么不能像另外两把那样认了就放行：容器里跑的是不可信代码，
+        // 而 `/episodes` 与 `/memory/search` 是**穿透容器边界的持久通道**
+        //（写进去的记忆会在未来所有会话、所有设备上被召回）。
+        // 完整论证见 `sandbox_token` 的模块文档。
+        if let Some(scope) = st.sandbox_tokens().resolve(tok) {
+            let (method, path) = (req.method().clone(), req.uri().path().to_owned());
+            if scope.allows(&method, &path) {
+                // 作用域塞进扩展，供 handler 做**会话级**收窄
+                //（认证只答「够不够得着这条路由」，答不了「够不够得着这条
+                // 会话的数据」—— 后者要 handler 拿到 body/参数才判断得了）
+                let mut req = req;
+                req.extensions_mut().insert(scope);
+                return next.run(req).await;
+            }
+            tracing::warn!(
+                owner = %scope.owner, session = %scope.session_id, %method, %path,
+                "沙箱令牌够不着这条路由"
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(crate::dto::ErrorBody {
+                    error: format!("沙箱不能访问 {method} {path}"),
+                }),
+            )
+                .into_response();
+        }
     }
 
     // 2) 加不了请求头的那些客户端：短命票据

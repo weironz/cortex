@@ -32,6 +32,19 @@ const FILE: &str = "workspaces.json";
 pub struct Workspaces {
     path: PathBuf,
     map: Arc<Mutex<HashMap<String, String>>>,
+    /// 没有显式绑定时的回落。**只在容器里设**（`--default-workspace`）。
+    ///
+    /// # 为什么容器需要它而桌面端不需要
+    ///
+    /// 桌面端「没绑工作区」是一个有意义的状态：用户还没选目录，那一轮就是
+    /// 纯聊天，界面上有个按钮让他去选。容器里没有这回事 —— 那个 `/workspace`
+    /// 卷是随容器一起造出来的，除了它也没有第二个目录可选。
+    ///
+    /// 不设它的后果很难看：容器起来了、镜像里 python/node 都装好了、
+    /// setup.sh 也跑过了，而 agent 走的是 [`cortex_agent::Turn::sealed`] ——
+    /// **一个文件工具都没有**，用户只会觉得「这个沙箱什么都干不了」，
+    /// 而日志里一句异常都不会有。
+    default_root: Option<String>,
 }
 
 impl std::fmt::Debug for Workspaces {
@@ -61,13 +74,36 @@ impl Workspaces {
         Self {
             path,
             map: Arc::new(Mutex::new(map)),
+            default_root: None,
         }
     }
 
-    /// 这个会话绑到哪儿了。
+    /// 设一个回落根（容器专用，见 [`Self::default_root`]）。
+    ///
+    /// **校验走与显式绑定同一份代码**，不给自己开后门：`/workspace` 恰好落在
+    /// 允许范围里（不是系统目录、不是主目录本身），而如果哪天有人把它配成
+    /// `/` 或 `/etc`，该拒的仍然拒 —— 一个「因为是我们自己配的所以不用校验」
+    /// 的入口，正是这类围栏最常见的破口。
+    ///
+    /// # Errors
+    /// 路径不合格时返回错误，调用方应当让进程**启动失败**而不是静默降级：
+    /// 沙箱里没有工作区等于没有能力，而那不该以「用起来发现什么都干不了」
+    /// 的方式暴露。
+    pub fn with_default_root(mut self, raw: &str) -> Result<Self> {
+        let root = cortex_agent::workspace::validate(raw)?;
+        tracing::info!(root = %root, "未绑定的会话将回落到这个工作区");
+        self.default_root = Some(root);
+        Ok(self)
+    }
+
+    /// 这个会话绑到哪儿了。没绑就用回落根（若配了）。
     #[must_use]
     pub fn get(&self, session_id: &str) -> Option<String> {
-        self.map.lock().ok()?.get(session_id).cloned()
+        self.map
+            .lock()
+            .ok()
+            .and_then(|m| m.get(session_id).cloned())
+            .or_else(|| self.default_root.clone())
     }
 
     /// 绑定一个目录。`raw` 是用户在界面上点的那个路径。

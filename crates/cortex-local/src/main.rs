@@ -109,11 +109,32 @@ struct Args {
     /// 且 `--exec-env=""` 会**报错**而不是回落，见 `ExecEnvironment::from_str`。
     #[arg(long, env = "CORTEX_EXEC_ENV", default_value = "local-machine")]
     exec_env: cortex_agent::ExecEnvironment,
+
+    /// 没有显式绑定时，会话回落到哪个目录。**容器专用**，桌面端不传。
+    ///
+    /// 容器里 `/workspace` 是随容器一起造出来的那个卷，除了它也没有第二个
+    /// 目录可选；不设的话 agent 走 `Turn::sealed`，一个文件工具都没有，
+    /// 而那不会有任何报错 —— 用户只会觉得「这个沙箱什么都干不了」。
+    /// 校验与显式绑定走同一份代码，不合格直接**启动失败**。
+    #[arg(long, env = "CORTEX_DEFAULT_WORKSPACE")]
+    default_workspace: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
+    // ── `.env` 只在**开发机**上读 ──
+    //
+    // 它从进程 CWD 读，而 clap 的 `env` 参数会吃它。容器里 CWD 若落在
+    // `/workspace`（用户的仓库！），一个 agent 自己写出来的 `.env` 就能在
+    // **下次容器重启时**把 `CORTEX_LOCAL_LLM` 改成 direct 并指一个任意的
+    // base_url —— 于是整段对话连同注入的记忆被发去别处，而没有任何日志异常。
+    //
+    // 容器的 entrypoint 已经把 CWD 挪出 `/workspace`，这里是第二道：
+    // 沙箱里的配置本来就该全部由 `docker run` 的 env 决定，读文件是多余的能力。
+    // 两道都在，是因为第一道靠的是「entrypoint 写对了」，而那没人看得出来。
+    if std::env::var("CORTEX_EXEC_ENV").as_deref() != Ok("container") {
+        let _ = dotenvy::dotenv();
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -173,7 +194,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let outbox = Outbox::new(&user_dir);
-    let workspaces = Workspaces::load(&user_dir);
+    let workspaces = match args.default_workspace.as_deref() {
+        // 不合格就**启动失败**，不静默降级：沙箱里没有工作区等于没有能力，
+        // 而那会以「用起来发现什么都干不了」的方式暴露 —— 最难查的一种
+        Some(raw) => Workspaces::load(&user_dir)
+            .with_default_root(raw)
+            .with_context(|| format!("默认工作区 {raw:?} 不合格"))?,
+        None => Workspaces::load(&user_dir),
+    };
     let llm = llm::build(route, &remote)?;
 
     // 未绑定工作区的会话：沙箱是**封闭**的（可访问文件范围是空集）。
