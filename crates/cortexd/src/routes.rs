@@ -846,6 +846,7 @@ mod tests {
             // 账号端点在没有它时会 panic，而那正是它们不该被路由到的信号
             accounts: None,
             access: std::sync::Arc::new(crate::accounts::AccessBook::default()),
+            bootstrap: std::sync::Arc::new("test-bootstrap".to_string()),
         };
         (router(crate::state::AppState::for_tests(rt)), token)
     }

@@ -56,6 +56,53 @@ const REFRESH_TTL: Duration = Duration::days(30);
 ///
 /// 取值刻意不是 `1` / `true` 而是这个字面量，与 `CORTEX_AUTH=disabled`
 /// 同款：一个手滑设成 `0` 的环境变量不该把门打开。
+/// 启动令牌的来源。配了就用配的，没配就现生成。
+const BOOTSTRAP_ENV: &str = "CORTEX_BOOTSTRAP_TOKEN";
+
+/// 取（或现生成）建第一个账号要出示的令牌。
+///
+/// # 它关掉的那个窗口
+///
+/// 在此之前，「本部署的第一个账号」是无条件放行的 —— 理由是私有化部署
+/// 的第一步是把它跑起来，那时既没有邮箱通道、也可能没有 shell。
+/// 代价当时就写在注释里：**一台刚部署好、还没建号、又直接暴露在公网上
+/// 的机器，第一个访问它的人会成为主人。**
+///
+/// 那个代价对「部署一次」是可以接受的（手快就行），对**反复部署**不行：
+/// 自动化流水线里这个窗口可能开着几小时而没有人在看。
+///
+/// 两条来源覆盖两种部署形态，都不需要 shell：
+///
+/// - `CORTEX_BOOTSTRAP_TOKEN` 写进 `.env` —— 自动化部署本来就要写
+///   `POSTGRES_PASSWORD` 之类，多一行是零成本
+/// - 没配就现生成并**打进启动日志**（`docker logs cortexd`）——
+///   给点一下 compose 就部署完的人
+///
+/// 重启换一把是刻意的：一把在日志里躺了三个月的令牌，与没有令牌的区别
+/// 只是多打了一行字。
+#[must_use]
+pub fn bootstrap_token() -> String {
+    bootstrap_token_from(std::env::var(BOOTSTRAP_ENV).ok().as_deref())
+}
+
+/// 同上，但配置值由调用方给。
+///
+/// 拆出来是为了**测试不必碰环境变量**：它是进程全局的，而 cargo 默认
+/// 并行跑测试 —— 几条各自 set_var 的测试会互相把对方的值换掉，
+/// 表现是随机失败。这个坑在本文件的加密那组测试里已经踩过一次。
+#[must_use]
+fn bootstrap_token_from(configured: Option<&str>) -> String {
+    // 空串按「没配」处理。**这是这个仓库第六次撞上它** ——
+    // compose 的 `${VAR:-}` 会把没配的变量设成空串，而一个空令牌意味着
+    // 任何人发一个空 bootstrap_token 就是主人
+    if let Some(v) = configured.map(str::trim).filter(|v| !v.is_empty()) {
+        return v.to_owned();
+    }
+    let mut buf = [0u8; 16];
+    getrandom::fill(&mut buf).expect("内核熵源不可用，拒绝生成可预测的启动令牌");
+    hex::encode(buf)
+}
+
 const OPEN_REGISTRATION_ENV: &str = "CORTEX_OPEN_REGISTRATION";
 const OPEN_REGISTRATION_ON: &str = "enabled";
 
@@ -412,7 +459,24 @@ pub async fn register(
     // `--create-user` 建号，再放通网络。
     let bootstrapping = st.user_count().await? == 0;
     if bootstrapping {
-        tracing::warn!("这是本部署的第一个账号，已跳过注册开关直接放行");
+        // **第一个账号要出示启动令牌。**
+        //
+        // 这一支曾经是无条件放行的，于是「部署完成」到「你注册」之间
+        // 任何人都能成为主人。令牌不需要 shell 就能拿到（.env 或启动日志），
+        // 所以它没有把「跑起来」这件事变难 —— 只是把它从公网上收回来。
+        let presented = req.bootstrap_token.as_deref().unwrap_or("").trim();
+        // 常数时间比较：这把令牌短且会被反复猜
+        if presented.is_empty()
+            || !constant_time_eq(presented.as_bytes(), st.bootstrap_token().as_bytes())
+        {
+            tracing::warn!("有人试图建第一个账号但没有出示正确的启动令牌");
+            return Err(ApiError::forbidden(format!(
+                "建第一个账号需要出示启动令牌（请求体里加 bootstrap_token）。                 它在 cortexd 的启动日志里（docker logs cortexd | grep 启动令牌），                 也可以在 .env 里用 {BOOTSTRAP_ENV} 自己指定。                 
+
+没有这一步的话，一台刚部署好还没建号的机器，                 第一个访问它的人就会成为主人。"
+            )));
+        }
+        tracing::warn!("这是本部署的第一个账号，令牌校验通过");
     } else if !open_registration() {
         // 说清楚是「这个部署关着」而不是「你填错了」，否则对方会一直重试
         return Err(ApiError::forbidden(format!(
@@ -505,8 +569,67 @@ async fn owner_user_id(st: &AppState) -> Option<String> {
         .map(|r| r.get("id"))
 }
 
+/// 逐字节全量比较，不提前返回。
+///
+/// 启动令牌短、会被反复猜，而 `==` 的提前返回会把「前几位对了」泄露成
+/// 时间差。与 `auth.rs` 里那个同一个理由 —— 那边有更长的论证。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 #[cfg(test)]
 mod tests {
+    /// 启动令牌：配了就用配的，没配就现生成一把够长的。
+    ///
+    /// # 它关掉的窗口
+    ///
+    /// 「第一个账号无条件放行」曾经是这里的行为，代价写在注释里：
+    /// 一台刚部署好、还没建号、又暴露在公网上的机器，**第一个访问它的人
+    /// 会成为主人**。部署一次能靠手快躲过去，反复部署躲不过去 ——
+    /// 自动化流水线里那个窗口可能开着几小时没人在看。
+    #[test]
+    fn a_generated_bootstrap_token_is_long_enough_to_not_be_guessed() {
+        let a = bootstrap_token_from(None);
+        let b = bootstrap_token_from(None);
+        assert_eq!(a.len(), 32, "16 字节的 hex —— 短于这个就值得被猜");
+        assert_ne!(a, b, "两次生成相同 = 熵源坏了，而那不会有任何症状");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// 配了就用配的 —— 自动化部署要能把它写死在 .env 里。
+    #[test]
+    fn a_configured_bootstrap_token_wins() {
+        assert_eq!(
+            bootstrap_token_from(Some("  my-deploy-secret  ")),
+            "my-deploy-secret",
+            "两侧的空白要削掉 —— .env 里一个尾随空格会让令牌永远对不上，             而错误信息只会说「令牌不对」"
+        );
+    }
+
+    /// 空串按「没配」处理 —— 这个仓库的第六次。
+    #[test]
+    fn an_empty_configured_token_falls_back_to_a_generated_one() {
+        for empty in [Some(""), Some("   "), None] {
+            assert_eq!(
+                bootstrap_token_from(empty).len(),
+                32,
+                "空串不能成为令牌本身 —— 那样任何人发一个空 bootstrap_token 就是主人。                 compose 的 `${{VAR:-}}` 会把没配的变量设成空串"
+            );
+        }
+    }
+
+    /// 比较是常数时间的，而且长度不同直接否。
+    #[test]
+    fn token_comparison_is_constant_time() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"), "长度不同必须否");
+        assert!(constant_time_eq(b"", b""));
+    }
+
     use super::*;
 
     /// **默认必须是关的。**

@@ -101,6 +101,26 @@ async fn main() -> anyhow::Result<()> {
     // 同上：写错的允许列表在这里失败，而不是等浏览器报一句语焉不详的 CORS 错
     let cors = cors::CorsPolicy::from_env().context("加载跨源策略失败")?;
 
+    // ── 还没有账号时，把启动令牌打出来 ──────────────────────
+    //
+    // **只在还没有账号时打。** 已经建过号的部署再打一遍等于把一把
+    // 无用的秘密撒进日志，而日志会被收集、会被翻。
+    //
+    // 打在这里而不是更早：要先连上账号表才数得出用户数。
+    if let Some(acc) = rt.accounts.as_ref() {
+        let empty = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM cortex_auth.users")
+            .fetch_one(&acc.pool)
+            .await
+            .map(|n| n == 0)
+            .unwrap_or(false);
+        if empty {
+            tracing::warn!(
+                token = %rt.bootstrap,
+                "这个部署还没有任何账号。建第一个账号需要在请求体里带上                  bootstrap_token（就是上面那个 token 字段的值）。                 重启会换一把；想固定就在 .env 里设 CORTEX_BOOTSTRAP_TOKEN。                 没有这一步的话，一台刚部署好还没建号的机器，                 第一个访问它的人就会成为主人"
+            );
+        }
+    }
+
     tracing::info!("{}", rt.auth.status_line());
     tracing::info!("{}", cors.status_line());
     tracing::info!("{}", cortex_agent::status_line());

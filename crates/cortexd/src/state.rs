@@ -81,6 +81,12 @@ pub struct Runtime {
     pub accounts: Option<Accounts>,
     /// 已签发的 access token。见 [`crate::accounts::AccessBook`]。
     pub access: Arc<crate::accounts::AccessBook>,
+    /// 建第一个账号要出示的令牌。见 [`crate::accounts::bootstrap_token`]。
+    ///
+    /// 进程内定死一次：要么来自 `CORTEX_BOOTSTRAP_TOKEN`，要么启动时现生成。
+    /// 重启会换一把（并重新打进日志）——**这是对的**：一把在日志里躺了
+    /// 三个月的令牌，与没有令牌的区别只是多打了一行字。
+    pub bootstrap: Arc<String>,
 }
 
 /// 账号相关的两个句柄。
@@ -139,6 +145,7 @@ impl Runtime {
             // 与「数据库连不上」在日志里是两条不同的失败
             accounts: None,
             access: Arc::new(crate::accounts::AccessBook::default()),
+            bootstrap: Arc::new(crate::accounts::bootstrap_token()),
         })
     }
 }
@@ -162,6 +169,12 @@ impl AppState {
     /// 已签发的 access token 簿子。
     pub fn access_book(&self) -> &crate::accounts::AccessBook {
         &self.inner.rt.access
+    }
+
+    /// 建第一个账号要出示的令牌。
+    #[must_use]
+    pub fn bootstrap_token(&self) -> &str {
+        &self.inner.rt.bootstrap
     }
 }
 
