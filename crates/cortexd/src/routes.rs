@@ -347,8 +347,13 @@ async fn llm_stream(
     let upstream = st
         .llm_stream(
             req,
-            own.as_ref()
-                .map(|k| (k.provider.as_str(), k.api_key.as_str())),
+            own.as_ref().map(|k| {
+                (
+                    k.provider.as_str(),
+                    k.api_key.as_str(),
+                    k.base_url.as_deref(),
+                )
+            }),
         )
         .await?;
     let used_own_key = own.is_some();

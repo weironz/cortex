@@ -283,6 +283,10 @@ pub fn build_extractor(
                 provider: "deepseek".to_owned(),
                 model: "deepseek-v4-pro".to_owned(),
                 cheap_model: "deepseek-v4-flash".to_owned(),
+                // 评测也要能打到自建端点：换模型评测常常就是换一个兼容服务
+                base_url: std::env::var("CORTEX_LLM_BASE_URL")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty()),
             };
             LlmClient::from_config(&cfg, "eval-offline-placeholder")
                 .map_err(|e| anyhow::anyhow!("离线构造 LlmClient 失败：{e}"))?

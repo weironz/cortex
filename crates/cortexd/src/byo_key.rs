@@ -102,6 +102,12 @@ fn open_with(key: &LessSafeKey, blob: &[u8]) -> Result<String, ApiError> {
 pub struct OwnKey {
     pub provider: String,
     pub api_key: String,
+    /// 自己的端点。`None` = 用内置定义里那个（官方）。
+    ///
+    /// 一个人「自己的 key」很少是官方那把 —— 更常见的是公司网关、
+    /// one-api / LiteLLM 中转、某个更便宜的兼容服务。存了 key 却不能存端点，
+    /// 那把 key 照样打不到他自己的地方
+    pub base_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -109,6 +115,9 @@ pub struct SetKeyRequest {
     /// 供应商 id，与 `cortex-llm` 的 provider 名一致
     pub provider: String,
     pub api_key: String,
+    /// 可选：自己的端点。留空就用内置定义里那个
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 /// 下发给界面的形状 —— **只有尾巴**，永远不回明文。
@@ -121,6 +130,8 @@ pub struct KeyStatus {
     pub provider: Option<String>,
     /// 明文 key 的后 4 位，用来认出「填的是哪一把」
     pub key_tail: Option<String>,
+    /// 填的自建端点。没填就是 `None`（走官方）
+    pub base_url: Option<String>,
     pub updated_at: Option<String>,
     /// 这个部署支持保存自带 key 吗（没配主密钥就是 false）
     pub supported: bool,
@@ -134,8 +145,9 @@ impl AppState {
     /// 而让整次对话失败不是。
     pub async fn own_key(&self, tenant: &crate::request_tenant::Tenant) -> Option<OwnKey> {
         let store = tenant.store().ok()?;
-        let row = sqlx::query_as::<_, (String, Option<Vec<u8>>, bool)>(
-            "SELECT provider, ciphertext, deleted FROM llm_keys ORDER BY created_at DESC LIMIT 1",
+        let row = sqlx::query_as::<_, (String, Option<Vec<u8>>, bool, Option<String>)>(
+            "SELECT provider, ciphertext, deleted, base_url
+               FROM llm_keys ORDER BY created_at DESC LIMIT 1",
         )
         .fetch_optional(store.pool())
         .await
@@ -144,12 +156,16 @@ impl AppState {
             None
         })?;
 
-        let (provider, ciphertext, deleted) = row;
+        let (provider, ciphertext, deleted, base_url) = row;
         if deleted {
             return None;
         }
         match open(&ciphertext?) {
-            Ok(api_key) => Some(OwnKey { provider, api_key }),
+            Ok(api_key) => Some(OwnKey {
+                provider,
+                api_key,
+                base_url,
+            }),
             Err(e) => {
                 tracing::warn!(error = ?e, "自带 key 解不开，这一轮走服务端的 key");
                 None
@@ -173,13 +189,23 @@ pub async fn get(
             configured: false,
             provider: None,
             key_tail: None,
+            base_url: None,
             updated_at: None,
             supported,
         }));
     };
 
-    let row = sqlx::query_as::<_, (String, Option<String>, bool, chrono::DateTime<chrono::Utc>)>(
-        "SELECT provider, key_tail, deleted, created_at
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            bool,
+            chrono::DateTime<chrono::Utc>,
+            Option<String>,
+        ),
+    >(
+        "SELECT provider, key_tail, deleted, created_at, base_url
            FROM llm_keys ORDER BY created_at DESC LIMIT 1",
     )
     .fetch_optional(store.pool())
@@ -187,10 +213,11 @@ pub async fn get(
     .map_err(|e| ApiError::internal(format!("查不出自带 key 的状态：{e}")))?;
 
     Ok(Json(match row {
-        Some((provider, key_tail, false, at)) => KeyStatus {
+        Some((provider, key_tail, false, at, base_url)) => KeyStatus {
             configured: true,
             provider: Some(provider),
             key_tail,
+            base_url,
             updated_at: Some(at.to_rfc3339()),
             supported,
         },
@@ -198,6 +225,7 @@ pub async fn get(
             configured: false,
             provider: None,
             key_tail: None,
+            base_url: None,
             updated_at: None,
             supported,
         },
@@ -246,13 +274,19 @@ pub async fn put(
         .map_err(|e| ApiError::unsupported(format!("这个部署存不了自带 key：{e}")))?;
 
     sqlx::query(
-        "INSERT INTO llm_keys (id, provider, ciphertext, key_tail, deleted)
-         VALUES ($1, $2, $3, $4, false)",
+        "INSERT INTO llm_keys (id, provider, ciphertext, key_tail, deleted, base_url)
+         VALUES ($1, $2, $3, $4, false, $5)",
     )
     .bind(cortex_core::Id::new().to_string())
     .bind(&req.provider)
     .bind(&ciphertext)
     .bind(&tail)
+    .bind(
+        req.base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty()),
+    )
     .execute(store.pool())
     .await
     .map_err(|e| ApiError::internal(format!("存不进去：{e}")))?;

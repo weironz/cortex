@@ -40,7 +40,7 @@ impl LlmClient {
     ///
     /// 免鉴权的供应商（Ollama）传空串即可。
     pub fn from_config(cfg: &LlmConfig, api_key: &str) -> Result<Self> {
-        let provider = provider::build(&cfg.provider, api_key)?;
+        let provider = provider::build_with(&cfg.provider, api_key, cfg.base_url.as_deref())?;
         Ok(Self {
             provider: Arc::from(provider),
             model: provider::model_config(&cfg.provider, &cfg.model)?,
@@ -79,6 +79,12 @@ impl LlmClient {
             model: pick("CORTEX_LLM_MODEL", default_model)?,
             cheap_model: pick("CORTEX_LLM_CHEAP_MODEL", default_cheap)?,
             provider: provider_id.clone(),
+            // 本地 agent 直连时也要能指向自建端点 —— 与服务端读的是同一个变量，
+            // 两侧配法一致，不必记两套名字
+            base_url: std::env::var("CORTEX_LLM_BASE_URL")
+                .ok()
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty()),
         };
 
         // api_key_env 为空 = 该供应商免鉴权。
@@ -306,6 +312,7 @@ mod tests {
             provider: "deepseek".to_string(),
             model: "deepseek-v4-pro".to_string(),
             cheap_model: "deepseek-v4-flash".to_string(),
+            base_url: None,
         }
     }
 
@@ -372,6 +379,7 @@ mod tests {
             provider: "anthropic".to_string(),
             model: "claude-opus-5".to_string(),
             cheap_model: "claude-haiku-4-5-20251001".to_string(),
+            base_url: None,
         };
         let client = LlmClient::from_config(&cfg, "k").unwrap();
         assert!(client.supports_vision());
@@ -388,6 +396,7 @@ mod tests {
             provider: "ollama".to_string(),
             model: "gemma4:latest".to_string(),
             cheap_model: "gemma4:latest".to_string(),
+            base_url: None,
         };
         let client = LlmClient::from_config(&cfg, "").unwrap();
         assert_eq!(

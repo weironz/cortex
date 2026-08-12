@@ -284,7 +284,8 @@ class _OwnApiKeyTileState extends ConsumerState<_OwnApiKeyTile> {
   }
 
   Future<void> _edit() async {
-    final entered = await showDialog<({String provider, String key})>(
+    final entered =
+        await showDialog<({String provider, String key, String baseUrl})>(
       context: context,
       builder: (_) => const _ApiKeyDialog(),
     );
@@ -293,7 +294,11 @@ class _OwnApiKeyTileState extends ConsumerState<_OwnApiKeyTile> {
     try {
       final s = await ref
           .read(cortexApiProvider)
-          .setLlmKey(provider: entered.provider, apiKey: entered.key);
+          .setLlmKey(
+            provider: entered.provider,
+            apiKey: entered.key,
+            baseUrl: entered.baseUrl,
+          );
       if (mounted) setState(() { _status = s; _error = null; });
     } on Object catch (e) {
       if (mounted) setState(() => _error = e);
@@ -357,7 +362,8 @@ class _OwnApiKeyTileState extends ConsumerState<_OwnApiKeyTile> {
       title: const Text('自己的 API key'),
       subtitle: Text(
         st.configured
-            ? '正在用你自己的 ${st.provider} key（…${st.keyTail}）—— 这部分调用不占配额。'
+            ? '正在用你自己的 ${st.provider} key（…${st.keyTail}）'
+              '${st.baseUrl == null ? "" : " → ${st.baseUrl}"} —— 这部分调用不占配额。'
             : '填一把自己的 key，这之后的调用走你自己的账户，不占这里的配额。'
               '明文只会在保存那一次发出去，服务端加密存储、之后只回后四位。',
         style: theme.textTheme.bodySmall,
@@ -391,12 +397,14 @@ class _ApiKeyDialog extends StatefulWidget {
 class _ApiKeyDialogState extends State<_ApiKeyDialog> {
   final _provider = TextEditingController(text: 'deepseek');
   final _key = TextEditingController();
+  final _baseUrl = TextEditingController();
   bool _reveal = false;
 
   @override
   void dispose() {
     _provider.dispose();
     _key.dispose();
+    _baseUrl.dispose();
     super.dispose();
   }
 
@@ -438,6 +446,18 @@ class _ApiKeyDialogState extends State<_ApiKeyDialog> {
             ),
           ),
         ),
+        const SizedBox(height: 14),
+        TextField(
+          controller: _baseUrl,
+          autocorrect: false,
+          enableSuggestions: false,
+          decoration: const InputDecoration(
+            labelText: '端点（可选）',
+            hintText: '留空 = 用官方的。自建 / 中转填这里',
+            helperText: '公司网关、one-api / LiteLLM、自建 vLLM 都填这里',
+            border: OutlineInputBorder(),
+          ),
+        ),
       ],
     ),
     actions: [
@@ -449,6 +469,7 @@ class _ApiKeyDialogState extends State<_ApiKeyDialog> {
         onPressed: () => Navigator.of(context).pop((
           provider: _provider.text.trim(),
           key: _key.text.trim(),
+          baseUrl: _baseUrl.text.trim(),
         )),
         child: const Text('保存'),
       ),

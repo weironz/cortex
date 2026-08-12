@@ -8,6 +8,7 @@ class LlmKeyStatus {
     required this.supported,
     this.provider,
     this.keyTail,
+    this.baseUrl,
     this.updatedAt,
   });
 
@@ -25,6 +26,12 @@ class LlmKeyStatus {
   /// 明文 key 的后 4 位，用来认出「填的是哪一把」
   final String? keyTail;
 
+  /// 自建端点。`null` = 走供应商官方的那个。
+  ///
+  /// 一个人「自己的 key」很少是官方那把 —— 更常见的是公司网关、
+  /// one-api / LiteLLM 中转、某个更便宜的兼容服务。
+  final String? baseUrl;
+
   final DateTime? updatedAt;
 
   factory LlmKeyStatus.fromJson(Map<String, dynamic> json) => LlmKeyStatus(
@@ -32,6 +39,7 @@ class LlmKeyStatus {
     supported: json['supported'] as bool? ?? false,
     provider: json['provider'] as String?,
     keyTail: json['key_tail'] as String?,
+    baseUrl: json['base_url'] as String?,
     updatedAt: switch (json['updated_at']) {
       final String s => DateTime.tryParse(s),
       _ => null,

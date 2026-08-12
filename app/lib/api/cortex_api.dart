@@ -176,6 +176,7 @@ abstract interface class CortexApi {
   Future<LlmKeyStatus> setLlmKey({
     required String provider,
     required String apiKey,
+    String? baseUrl,
   });
 
   /// `DELETE /settings/llm-key` —— 撤下，回到用服务端那把（重新占配额）。
@@ -328,6 +329,7 @@ mixin LlmKeyUnsupported {
   Future<LlmKeyStatus> setLlmKey({
     required String provider,
     required String apiKey,
+    String? baseUrl,
   }) async => LlmKeyStatus.empty;
 
   Future<LlmKeyStatus> clearLlmKey() async => LlmKeyStatus.empty;

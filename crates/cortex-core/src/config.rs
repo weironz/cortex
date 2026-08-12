@@ -35,6 +35,19 @@ pub struct LlmConfig {
     pub model: String,
     /// 抽取、摘要等后台任务用的廉价模型
     pub cheap_model: String,
+    /// 覆盖供应商定义里的 `base_url`。`None` = 用内置的那个。
+    ///
+    /// # 为什么需要它
+    ///
+    /// 供应商定义是编译进二进制的，`base_url` 也在里面。没有这一项，
+    /// 想把 `openai` 引擎指向别处 —— 自建的 vLLM / llama.cpp / LM Studio、
+    /// 公司内网网关、one-api / LiteLLM 中转、或者某个更便宜的兼容服务 ——
+    /// 都得改代码重编。
+    ///
+    /// 「OpenAI 兼容」几乎是事实标准，所以给一个 URL 覆盖比我们逐个把
+    /// 供应商加进内置清单可用得多，也免得「支持哪些供应商」变成我们
+    /// 要维护的一张表。
+    pub base_url: Option<String>,
 }
 
 /// 读环境变量，**空串按「没设」处理**。
@@ -84,6 +97,7 @@ impl Config {
             llm: LlmConfig {
                 model: optional("CORTEX_LLM_MODEL", default_model(&provider)),
                 cheap_model: optional("CORTEX_LLM_CHEAP_MODEL", default_cheap_model(&provider)),
+                base_url: non_empty("CORTEX_LLM_BASE_URL"),
                 provider,
             },
             device_id: optional("CORTEX_DEVICE_ID", "dev-local"),

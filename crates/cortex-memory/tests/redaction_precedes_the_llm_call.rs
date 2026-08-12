@@ -33,6 +33,7 @@ fn offline_extractor() -> Extractor {
         provider: "deepseek".to_string(),
         model: "deepseek-v4-pro".to_string(),
         cheap_model: "deepseek-v4-flash".to_string(),
+        base_url: None,
     };
     // 刻意是个假 key：这条测试的全部意义就是「被挡住的那条路根本不会用到它」
     let llm = LlmClient::from_config(&cfg, "not-a-real-key").expect("应能离线构造");

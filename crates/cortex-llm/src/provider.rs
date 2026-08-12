@@ -113,13 +113,56 @@ fn config_of(name: &str) -> Result<DeclarativeProviderConfig> {
 ///
 /// `api_key` 空串表示免鉴权（Ollama 这类本地服务），goose 会退回 `NoAuth`。
 pub fn build(name: &str, api_key: &str) -> Result<Box<dyn Provider>> {
+    build_with(name, api_key, None)
+}
+
+/// 同上，但可以把定义里那个 `base_url` 换掉。
+///
+/// # 为什么这一项必须能在运行期改
+///
+/// 供应商定义是 `include_str!` **编译进二进制**的，`base_url` 也在里面。
+/// 没有这个覆盖，想把 `openai` 这个引擎指向任何别的地方 —— 自建的
+/// vLLM / llama.cpp / LM Studio、公司内网网关、one-api / LiteLLM 这类中转、
+/// 或者某个更便宜的兼容服务 —— 都只能改代码重编。
+///
+/// 而「OpenAI 兼容」几乎是这个行业的事实标准：给一个 URL 覆盖，
+/// 比我们逐个把供应商加进内置清单可用得多，也免得把「支持哪些供应商」
+/// 变成我们要维护的东西。模型名本来就已经能配（`CORTEX_LLM_MODEL`），
+/// 而未知模型名不会被拒（退回 canonical 上下文上限），所以补上这一项之后
+/// 「指向任意兼容端点」就齐了。
+///
+/// # 为什么是改 JSON 而不是改结构体
+///
+/// goose 的公开入口是 `from_json`，它自己在内部反序列化。拿到
+/// `DeclarativeProviderConfig` 再塞回去需要它导出一个 `from_config`，
+/// 而那是上游的 API。改一个字段的 JSON 是完全等价的，且不动上游。
+///
+/// # Errors
+/// 供应商名不认识，或者 goose 建不起来。
+pub fn build_with(name: &str, api_key: &str, base_url: Option<&str>) -> Result<Box<dyn Provider>> {
     let json = definition(name).ok_or_else(|| LlmError::UnknownProvider {
         name: name.to_string(),
         available: available().join(", "),
     })?;
 
+    let json: std::borrow::Cow<'_, str> = match base_url.map(str::trim).filter(|u| !u.is_empty()) {
+        None => std::borrow::Cow::Borrowed(json),
+        Some(url) => {
+            let mut v: serde_json::Value =
+                serde_json::from_str(json).map_err(|e| LlmError::Build {
+                    name: name.to_string(),
+                    source: anyhow::anyhow!("内置的 {name} 定义不是合法 JSON：{e}"),
+                })?;
+            // 末尾的 `/` 会让 goose 拼出 `https://x//v1/...`。有的网关不在乎，
+            // 有的直接 404 —— 而那条 404 看起来像「模型不存在」
+            let url = url.trim_end_matches('/');
+            v["base_url"] = serde_json::Value::String(url.to_owned());
+            std::borrow::Cow::Owned(v.to_string())
+        }
+    };
+
     // TLS 配置传 None —— 走系统信任根即可，我们不需要客户端证书或自定义 CA。
-    from_json(json, None, StaticKey(api_key.to_string())).map_err(|source| LlmError::Build {
+    from_json(&json, None, StaticKey(api_key.to_string())).map_err(|source| LlmError::Build {
         name: name.to_string(),
         source,
     })
@@ -197,6 +240,73 @@ pub fn vision_support(provider: &str, model: &str) -> VisionSupport {
         Some(true) => VisionSupport::Supported,
         Some(false) => VisionSupport::Unsupported,
         None => VisionSupport::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod base_url_tests {
+    use super::*;
+
+    /// 覆盖之后，交给 goose 的那份 JSON 里 `base_url` 必须真的换了。
+    ///
+    /// 这条只验「改对了 JSON」。**它不足以证明这个功能是好的** ——
+    /// goose 完全可能忽略这个字段，而那样这条测试照样绿。真正的证明是
+    /// `examples/base_url_probe.rs`：它对着一个本机假端点发一次**真的 HTTP**，
+    /// 并把响应打出来。写下来是因为这个区别值得记住。
+    fn rewritten(name: &str, url: &str) -> serde_json::Value {
+        let json = definition(name).expect("内置定义");
+        let mut v: serde_json::Value = serde_json::from_str(json).unwrap();
+        v["base_url"] = serde_json::Value::String(url.trim_end_matches('/').to_owned());
+        v
+    }
+
+    #[test]
+    fn an_override_replaces_the_compiled_in_url() {
+        let v = rewritten("openai", "http://127.0.0.1:9099");
+        assert_eq!(v["base_url"], "http://127.0.0.1:9099");
+        assert_eq!(
+            v["engine"], "openai",
+            "只该换 URL —— 引擎、模型列表、鉴权方式都得原样留着"
+        );
+    }
+
+    /// 末尾的 `/` 要削掉。
+    ///
+    /// 留着的话拼出来是 `http://x//v1/chat/completions`。有的网关不在乎，
+    /// 有的直接 404 —— 而那条 404 读起来像「模型不存在」，
+    /// 没有人会想到是自己多打了一个斜杠。
+    #[test]
+    fn a_trailing_slash_is_trimmed() {
+        assert_eq!(
+            rewritten("openai", "http://gw.local/v1/")["base_url"],
+            "http://gw.local/v1"
+        );
+    }
+
+    /// 不给覆盖时，用的还是编译进去的那个。
+    #[test]
+    fn no_override_means_the_builtin_url() {
+        let json = definition("deepseek").expect("内置定义");
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            v["base_url"], "https://api.deepseek.com",
+            "没给覆盖就不该动它 —— 绝大多数部署走的是这条路"
+        );
+    }
+
+    /// 空串与纯空白按「没给」处理。
+    ///
+    /// compose 的 `${VAR:-}` 会把没配的变量**设成空串**，而那在这个仓库里
+    /// 已经炸过三次（见 `cortex_core::config` 的 `non_empty`）。
+    /// 这里把同一个坑堵死：空串绝不能变成 `base_url: ""`。
+    #[test]
+    fn an_empty_override_is_ignored() {
+        for empty in ["", "   ", "	"] {
+            assert!(
+                Some(str::trim(empty)).filter(|u| !u.is_empty()).is_none(),
+                "空串 {empty:?} 被当成了合法 URL —— 那会让 base_url 变成空，                 而请求会打到一个拼不出来的地址上"
+            );
+        }
     }
 }
 

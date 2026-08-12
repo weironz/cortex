@@ -738,9 +738,9 @@ impl Live {
     pub async fn llm_stream_with_key(
         &self,
         req: LlmStreamRequest,
-        own: Option<(&str, &str)>,
+        own: Option<(&str, &str, Option<&str>)>,
     ) -> Result<MessageStream> {
-        let Some((provider_name, api_key)) = own else {
+        let Some((provider_name, api_key, base_url)) = own else {
             let model = match req.tier {
                 ModelTier::Main => self.llm.model(),
                 ModelTier::Cheap => self.llm.cheap_model(),
@@ -752,7 +752,7 @@ impl Live {
         };
 
         let provider: std::sync::Arc<dyn cortex_llm::Provider> =
-            cortex_llm::provider::build(provider_name, api_key)
+            cortex_llm::provider::build_with(provider_name, api_key, base_url)
                 .map_err(|e| CortexError::Config(format!("自带 key 建不起供应商：{e}")))?
                 .into();
         // 模型配置沿用服务端那份 —— 用户填的是 key，不是模型。

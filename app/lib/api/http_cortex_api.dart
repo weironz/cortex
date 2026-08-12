@@ -226,7 +226,12 @@ class HttpCortexApi implements CortexApi {
   Future<LlmKeyStatus> setLlmKey({
     required String provider,
     required String apiKey,
-  }) => _llmKey('PUT', {'provider': provider, 'api_key': apiKey});
+    String? baseUrl,
+  }) => _llmKey('PUT', {
+    'provider': provider,
+    'api_key': apiKey,
+    if (baseUrl != null && baseUrl.trim().isNotEmpty) 'base_url': baseUrl.trim(),
+  });
 
   @override
   Future<LlmKeyStatus> clearLlmKey() => _llmKey('DELETE', null);

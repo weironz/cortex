@@ -358,6 +358,7 @@ impl AppState {
                         provider: "none".into(),
                         model: String::new(),
                         cheap_model: String::new(),
+                        base_url: None,
                     },
                     device_id: "test".into(),
                 },
@@ -769,7 +770,7 @@ impl AppState {
     pub async fn llm_stream(
         &self,
         req: LlmStreamRequest,
-        own: Option<(&str, &str)>,
+        own: Option<(&str, &str, Option<&str>)>,
     ) -> Result<MessageStream> {
         match &self.inner.backend {
             Backend::Mock => Err(CortexError::Unavailable(

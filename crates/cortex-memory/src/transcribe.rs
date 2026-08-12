@@ -537,6 +537,12 @@ impl VisionTranscriber {
                 provider,
                 model: model.clone(),
                 cheap_model: model.clone(),
+                // 转录用的 vision 模型可以指向另一个端点 —— 一个自建部署
+                // 常常是「对话走本地、看图走云上」的混合，两者不该被绑死
+                base_url: std::env::var("CORTEX_VISION_BASE_URL")
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty()),
             },
             &api_key,
         )
@@ -1011,6 +1017,7 @@ mod tests {
                 provider: "deepseek".into(),
                 model: "deepseek-v4-pro".into(),
                 cheap_model: "deepseek-v4-flash".into(),
+                base_url: None,
             },
             "test-key",
         )
@@ -1027,6 +1034,7 @@ mod tests {
                 provider: "anthropic".into(),
                 model: "claude-opus-5".into(),
                 cheap_model: "claude-haiku-4-5-20251001".into(),
+                base_url: None,
             },
             "test-key",
         )
