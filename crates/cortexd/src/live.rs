@@ -277,8 +277,12 @@ impl BoundLive {
     // `Live` 上的方法就又能直接调了，而「不绑定就调不到」正是这个类型
     // 唯一的产出。转发是这个保证的价格。
 
-    pub async fn write_episode(&self, req: NewEpisodeRequest) -> Result<EpisodeAck> {
-        self.0.write_episode(req).await
+    pub async fn write_episode(
+        &self,
+        req: NewEpisodeRequest,
+        from_sandbox: bool,
+    ) -> Result<EpisodeAck> {
+        self.0.write_episode(req, from_sandbox).await
     }
 
     pub async fn register_blob(&self, new: cortex_store::NewBlob) -> Result<Option<i64>> {
@@ -575,7 +579,11 @@ impl Live {
     ///
     /// 真并发下两个重放同时穿过判重，后一个会撞 PK 唯一约束 ——
     /// 那条路由 [`Self::write_episode`] 的调用方映射成同样的「已存在」。
-    async fn write_episode(&self, req: NewEpisodeRequest) -> Result<EpisodeAck> {
+    async fn write_episode(
+        &self,
+        req: NewEpisodeRequest,
+        from_sandbox: bool,
+    ) -> Result<EpisodeAck> {
         let episode_id: Id = req
             .id
             .parse()
@@ -751,7 +759,12 @@ impl Live {
 
         // ── 异步抽取。绝不阻塞调用方 ──
         if role == Role::Assistant {
-            self.spawn_extraction(req.anchor_episode_id.clone(), req.text.clone(), occurred_at);
+            self.spawn_extraction(
+                req.anchor_episode_id.clone(),
+                req.text.clone(),
+                occurred_at,
+                from_sandbox,
+            );
         }
 
         Ok(EpisodeAck {
@@ -765,7 +778,13 @@ impl Live {
     ///
     /// user 那半从库里读回来而不是让客户端再传一遍：同一句话有两个来源，
     /// 就有了「两边不一样」这条要处理的路，而库里那一份才是权威。
-    fn spawn_extraction(&self, anchor: Option<String>, reply: String, occurred_at: DateTime<Utc>) {
+    fn spawn_extraction(
+        &self,
+        anchor: Option<String>,
+        reply: String,
+        occurred_at: DateTime<Utc>,
+        from_sandbox: bool,
+    ) {
         let Some(anchor) = anchor else {
             tracing::debug!("assistant episode 没带 anchor_episode_id，跳过抽取");
             return;
@@ -793,7 +812,13 @@ impl Live {
                     }
                 };
                 let text = format!("用户：{user_text}\n助手：{reply}");
-                let ctx = ExtractContext::new(anchor_id, occurred_at);
+                // 沙箱写回来的那一轮降一档信任级（tier 3，与工具轨迹同级）：
+                // 它的「用户说」不是用户说的，是那个跑着不可信代码的容器说的
+                let ctx = if from_sandbox {
+                    ExtractContext::new(anchor_id, occurred_at).from_sandbox()
+                } else {
+                    ExtractContext::new(anchor_id, occurred_at)
+                };
                 match extractor.ingest(&store, &text, &ctx).await {
                     Ok(report) => tracing::info!(
                         candidates = report.candidates,

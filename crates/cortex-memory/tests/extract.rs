@@ -548,3 +548,75 @@ async fn real_llm_end_to_end_ingest() {
 
     db.cleanup().await;
 }
+
+/// 沙箱写回来的那一轮，抽出的事实**降一档**到 tier 3。
+///
+/// # 这一条守的是什么
+///
+/// 沙箱里跑的是不可信代码。它写回来的 `role: user` 不是用户说的，是那个
+/// 容器说的 —— 而容器可能已经被它自己读到的东西诱导（MINJA / AgentPoison
+/// 都是写侧攻击）。不降级的话，一条被注入的「事实」会以**用户亲口说的**
+/// 同等信任级，在未来所有会话、所有设备上被召回并注入 system prompt，
+/// 而那个容器早就销毁了。
+///
+/// 四家云 agent 没有这条通道（它们的沙箱没有可写的长期记忆），所以这一格
+/// 是 Cortex 特有的 —— 没有先例可抄，只能自己守。
+///
+/// **不是「不写」而是「降级」**：沙箱里干的活确实值得记住（那本来就是用户
+/// 让它干的），只是不该与用户亲口说的话平起平坐。
+#[tokio::test]
+async fn facts_written_from_a_sandbox_are_not_trusted_like_the_user_speaking() {
+    let Some(db) = setup().await else { return };
+    let store = db.store.clone();
+    let extractor = offline_extractor();
+
+    let ep_user = seed_episode(&store, "我们用 Postgres").await;
+    let ep_sbx = seed_episode(&store, "沙箱说我们用 MySQL").await;
+
+    let normal = extractor
+        .write_candidates(
+            &store,
+            vec![candidate("alpha", "project", "uses", "Postgres", None)],
+            &ctx(ep_user, ts(2026, 1, 1)),
+        )
+        .await
+        .expect("普通那轮应能落库");
+    let sandboxed = extractor
+        .write_candidates(
+            &store,
+            vec![candidate("beta", "project", "uses", "MySQL", None)],
+            &ctx(ep_sbx, ts(2026, 1, 2)).from_sandbox(),
+        )
+        .await
+        .expect("沙箱那轮同样应能落库");
+
+    let tier_of = |id: cortex_core::Id| {
+        let store = store.clone();
+        async move {
+            store
+                .fact(&id.to_string())
+                .await
+                .expect("查事实不该失败")
+                .expect("刚写进去的事实应当查得到")
+        }
+    };
+    let normal_fact = tier_of(normal.written[0]).await;
+    let sandbox_fact = tier_of(sandboxed.written[0]).await;
+
+    assert_eq!(
+        normal_fact.source_channel.as_str(),
+        "conversation",
+        "普通对话抽出来的仍是 conversation（tier 2），这一条不该被改动"
+    );
+    assert_eq!(
+        sandbox_fact.source_channel.as_str(),
+        "tool_output",
+        "沙箱写回来的必须降到 tool_output（tier 3）—— 与工具轨迹同级，         因为它们同属「模型自己造出来又自己读回来」的闭环"
+    );
+    assert!(
+        sandbox_fact.trust_tier > normal_fact.trust_tier,
+        "数字越大越不可信：沙箱那条的 tier（{:?}）必须严格高于普通那条（{:?}）",
+        sandbox_fact.trust_tier,
+        normal_fact.trust_tier
+    );
+}

@@ -296,7 +296,9 @@ impl cortex_import::Sink for LocalSink {
         req: &cortex_proto::episodes::NewEpisodeRequest,
     ) -> anyhow::Result<cortex_proto::episodes::EpisodeAck> {
         self.0
-            .write_episode(&self.1, req.clone())
+            // 导入不是沙箱写的：这条路上的字节来自用户上传的导出文件，
+            // 由 cortexd 自己解析，中间没有容器
+            .write_episode(&self.1, req.clone(), false)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     }

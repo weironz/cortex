@@ -574,14 +574,26 @@ Web 端一直没有可执行的地方（工具目录只有 `memory_search`）。
 | | 状态 |
 |---|---|
 | A1 `ExecEnvironment::Container` + `Turn::in_container` + `--exec-env` | ✅ 越界在容器里**直接拒绝**；顺带接上了 `allows_escape_prompt`（此前只有测试在读，见下） |
-| A2 沙箱镜像 | |
-| A3 `SandboxRunner` + `DockerRunner` | |
-| A4 沙箱令牌（五条路由 + 绑 session） | |
-| A5 cortexd 反代 `/chat` | |
-| A6 cortex-local 容器化改造（七条） | |
-| B1 记忆写路径收窄 | **与 A 同等优先** |
-| B2 数据兜底 | |
-| B3 出网 allowlist | |
+| A2 沙箱镜像 `Dockerfile.sandbox` | ✅ 预装 git / python / node，非 root，`/workspace` 是唯一挂载点 |
+| A3 `SandboxRunner` + `DockerRunner`（bollard）| ✅ 规格全部写死在实现里，入参塞不进第二个挂载 |
+| A4 沙箱令牌（五条路由 + 绑 session）| ✅ 带**语义作用域**，不只是路由白名单 |
+| A5 cortexd 反代 `/chat` | ✅ 照抄 `proxy.rs` 但四处必改，含「`Authorization` 从补改为剥」 |
+| A6 cortex-local 容器化改造 | ✅ 默认工作区、`/confirmations` 断路、容器里不读 `.env`、日志不说假话 |
+| B1 记忆写路径收窄 | ✅ 沙箱写的 fact 降到 tier 3；只能写自己那个会话。**检索侧那条改了**，见 sandbox.md |
+| B2 数据兜底（宿主侧快照 + 卷内 git）| 卷内 git 已在 entrypoint 里；宿主侧快照待做 |
+| B3 出网 allowlist | **上线前必须**，见 sandbox.md 第八节 |
+| B4 空闲回收 | ✅ 30 分钟停容器保留卷；活跃信号用「令牌多久没被用过」 |
+
+**真机跑通**：`sandbox: true` 的一轮对话 → 起容器 → 反代 SSE → 容器里
+`write_file` + `shell` → diff 带回来 → 文件真在卷里 → 第二轮复用同一个容器。
+
+四个只有真机才暴露的问题（都已修）：`ensure` 返回时容器 "Up" 但 agent 还没
+bind 端口；tini 与 `--init` 重复；**容器里的免确认不是自动的**（`PermissionMode`
+默认 `Ask`，于是每个沙箱会话都卡在一个没人会去答的确认上）；令牌每轮换新导致
+第二轮 401（容器的入站认证用的是启动时那把）。
+
+顺带证实了调研的一个预测：**容器内 landlock 可用**（`landlock ABI 3`），
+所以容器边界之外还有一层内核围栏。
 
 ### 第 9 次「造好了但没人调用」：`allows_escape_prompt`
 

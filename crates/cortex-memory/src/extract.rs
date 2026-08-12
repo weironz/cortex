@@ -101,6 +101,23 @@ pub struct ExtractContext {
     pub domain: Option<String>,
     /// 已知实体名。提示模型复用既有称呼，从源头压制别名爆炸
     pub known_entities: Vec<String>,
+    /// 这一轮是不是**云沙箱**写回来的。
+    ///
+    /// # 为什么它要影响信任级
+    ///
+    /// 沙箱里跑的是不可信代码：模型的输出、用户装的依赖、被 prompt 注入的
+    /// 工具调用。它写回来的 `role: user` 文本**不是用户说的**，是那个容器
+    /// 说的 —— 而容器可能已经被它自己读到的东西诱导。
+    ///
+    /// 这与下面轨迹候选降到 tier 3 是**同一个论证**：信任级量的不是
+    /// 「这件事发生过没有」，而是「这段内容有多容易被攻击者操纵」。
+    /// 沙箱写回的对话与工具轨迹在这一点上是同一类东西。
+    ///
+    /// 后果的严重性也一样：被投毒的 fact 会在**未来所有会话、所有设备**上
+    /// 被召回并注入 system prompt，而那个容器早就销毁了。
+    /// 四家云 agent 没有这条通道（它们的沙箱没有可写的长期记忆），
+    /// 所以这一格是 Cortex 特有的，得自己守。
+    pub from_sandbox: bool,
 }
 
 impl ExtractContext {
@@ -111,7 +128,15 @@ impl ExtractContext {
             occurred_at,
             domain: None,
             known_entities: Vec::new(),
+            from_sandbox: false,
         }
+    }
+
+    /// 标记这一轮来自云沙箱。见 [`Self::from_sandbox`]。
+    #[must_use]
+    pub fn from_sandbox(mut self) -> Self {
+        self.from_sandbox = true;
+        self
     }
 
     #[must_use]
@@ -925,9 +950,22 @@ impl Extractor {
         // 来源通道随候选一起走，而不是事后按谓词猜：`CandidateFact` 里
         // **没有**这个字段，加一个会打断调用方的结构体字面量构造
         // （评测的题集转换就是那么写的）。内部配对是唯一不外溢的做法。
+        // 沙箱写回来的对话**降一档**到 tier 3，与工具轨迹同级。
+        //
+        // 那一轮的 `role: user` 不是用户说的，是容器说的 —— 而容器里跑着
+        // 不可信代码，可能已经被它自己读到的东西诱导。降级的论证与下面轨迹
+        // 那段逐字相同：信任级量的是「这段内容有多容易被攻击者操纵」。
+        //
+        // 不是「不写」而是「降级」：沙箱里干的活确实值得记住（它就是用户
+        // 让它干的），只是不该与用户亲口说的话平起平坐。
+        let conversation_tier = if ctx.from_sandbox {
+            FactSource::ToolOutput
+        } else {
+            FactSource::Conversation
+        };
         let mut candidates: Vec<(CandidateFact, FactSource)> = candidates
             .into_iter()
-            .map(|c| (c, FactSource::Conversation))
+            .map(|c| (c, conversation_tier))
             .collect();
         candidates.extend(
             self.trace_candidates(store, ctx)

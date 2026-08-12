@@ -577,6 +577,10 @@ async fn memory_search(
 async fn write_episode(
     State(st): State<AppState>,
     headers: HeaderMap,
+    // 沙箱令牌带的作用域，由认证中间件塞进来。**来源由凭据决定，
+    // 不由请求体决定** —— 这一点是整条记忆写入路径的关键：
+    // 让客户端自报「我是沙箱」等于让被注入的 agent 自己选信任级。
+    sandbox: Option<axum::Extension<crate::sandbox_token::SandboxScope>>,
     Json(req): Json<NewEpisodeRequest>,
 ) -> Result<Json<EpisodeAck>, ApiError> {
     // **只有带 anchor 的那一条会花钱**（它触发抽取）。不带的只是落原文，
@@ -587,7 +591,21 @@ async fn write_episode(
         st.enforce_quota(&user).await?;
     }
     let tenant = st.tenant(&headers).await?;
-    Ok(Json(st.write_episode(&tenant, req).await?))
+    // 沙箱只能写**它自己那个会话**。没有这一条的话，一个被注入的 agent
+    // 可以把编造的「用户说过的话」写进这个人的**任意**会话里 ——
+    // 而作用域绑 session 的全部意义就在这儿
+    if let Some(axum::Extension(scope)) = &sandbox
+        && scope.session_id != req.session_id
+    {
+        tracing::warn!(
+            owner = %scope.owner, bound = %scope.session_id, attempted = %req.session_id,
+            "沙箱试图写别的会话"
+        );
+        return Err(ApiError::bad_request("沙箱只能写它自己那个会话的对话记录"));
+    }
+    Ok(Json(
+        st.write_episode(&tenant, req, sandbox.is_some()).await?,
+    ))
 }
 
 async fn get_episode(
