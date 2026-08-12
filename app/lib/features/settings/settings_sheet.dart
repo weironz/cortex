@@ -152,27 +152,15 @@ class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
                   ],
                 ),
               ),
+              // 「退出登录」搬去了左下角账号菜单。凭据存在哪这句话留着 ——
+              // 它回答的是「我关掉这个窗口，密码会留在哪」，属于知情，
+              // 不是一个操作
               if (!config.useMock && auth.token != null) ...[
                 const Divider(height: 24),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '已用 token 连接。凭据只存在于内存'
-                        '${kCanRememberToken ? '（以及你勾选的 sessionStorage）' : '与环境变量 $kTokenEnvVar'}。',
-                        style: theme.textTheme.bodySmall,
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: () {
-                        Navigator.of(context).pop();
-                        unawaited(
-                          ref.read(authControllerProvider.notifier).signOut(),
-                        );
-                      },
-                      child: const Text('断开'),
-                    ),
-                  ],
+                Text(
+                  '已用 token 连接。凭据只存在于内存'
+                  '${kCanRememberToken ? '（以及你勾选的 sessionStorage）' : '与环境变量 $kTokenEnvVar'}。',
+                  style: theme.textTheme.bodySmall,
                 ),
               ],
               const Divider(height: 28),

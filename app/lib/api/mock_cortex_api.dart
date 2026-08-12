@@ -1,5 +1,6 @@
 import '../core/permission_mode.dart';
 import 'dart:async';
+import '../models/account.dart';
 import '../models/auth_tokens.dart';
 import 'package:cortex_app/models/import_plan.dart';
 import 'package:cortex_app/import/import_source.dart';
@@ -51,6 +52,11 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
   Future<AuthTokens> login(String username, String password) async {
     throw const CortexApiException('这个数据源不支持账号登录', statusCode: 501);
   }
+
+  /// Mock 没有账号。返回 null 而不是编一个名字：账号栏会照实说
+  /// 「Mock 数据源」，而一个假名字会让人以为自己连着真后端。
+  @override
+  Future<Account?> whoAmI() async => null;
 
   @override
   Future<AuthTokens> refreshSession(String refreshToken) async {

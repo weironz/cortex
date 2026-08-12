@@ -2,6 +2,7 @@ import '../core/permission_mode.dart';
 import 'dart:typed_data';
 
 import '../import/import_source.dart';
+import '../models/account.dart';
 import '../models/auth_tokens.dart';
 import '../models/llm_key_status.dart';
 import '../models/attachment.dart';
@@ -198,6 +199,14 @@ abstract interface class CortexApi {
   /// 存下新的那个 —— 继续用旧的会被判成重放，而重放会让整条链一起失效。
   Future<AuthTokens> refreshSession(String refreshToken);
 
+  /// `GET /auth/me` —— 当前这把凭据对应的是谁。
+  ///
+  /// 返回 null 有两种意思，**对调用方是同一种**（没有名字可显示）：
+  /// 这个后端没有这个端点（老服务端），或者压根没有账号体系
+  /// （mock / 关掉认证的部署）。两种都不该让账号栏消失 ——
+  /// 它还挂着设置与退出登录。
+  Future<Account?> whoAmI();
+
   /// `POST /auth/logout` —— 让服务端作废这条链。
   ///
   /// 与「本地删掉副本」不是一回事：本地删除只让这台机器忘了，
@@ -360,6 +369,18 @@ abstract interface class CortexApi {
 /// 存不进去的输入框，用户填了、点保存、看起来成功了、下次打开又是空的。
 /// **不要用在真实客户端上**：那样删掉 `HttpCortexApi` 里任何一个方法都不会
 /// 编译报错，而是静默退化成「这个部署不支持」—— 用户看到的是入口消失了。
+/// 同上，给 [CortexApi.whoAmI] 用。
+///
+/// 单开一个而不是并进 [LlmKeyUnsupported]：那个名字说的是「存不了 API key」，
+/// 把「答不出我是谁」塞进去，下一个读到 `with LlmKeyUnsupported` 的人会
+/// 以为这个替身只是没有密钥存储。名字与它承诺的事对不上，是这一类 mixin
+/// 最容易积累的债。
+///
+/// 与那边同一条禁令：**不要用在真实客户端上**。
+mixin AccountUnsupported {
+  Future<Account?> whoAmI() async => null;
+}
+
 mixin LlmKeyUnsupported {
   Future<LlmKeyStatus> llmKeyStatus() async => LlmKeyStatus.empty;
 

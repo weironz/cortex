@@ -5,7 +5,6 @@ import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
 import '../shell/widgets/sync_indicator.dart';
-import '../shell/widgets/update_indicator.dart';
 import '../workspace/workspace_panel.dart';
 import 'widgets/confirm_panel.dart';
 import 'widgets/conversation_view.dart';
@@ -15,14 +14,21 @@ import 'widgets/message_composer.dart';
 class ChatPane extends ConsumerWidget {
   const ChatPane({
     super.key,
-    this.onOpenSessions,
-    this.onOpenMemory,
-    this.onOpenSettings,
+    this.onToggleSessions,
+    this.onToggleMemory,
+    this.sessionsVisible = false,
+    this.memoryVisible = false,
   });
 
-  final VoidCallback? onOpenSessions;
-  final VoidCallback? onOpenMemory;
-  final VoidCallback? onOpenSettings;
+  /// 收起 / 展开左栏。窄到放不下内联时，由 `AppShell` 换成「开抽屉」。
+  final VoidCallback? onToggleSessions;
+
+  /// 同上，右侧记忆栏。
+  final VoidCallback? onToggleMemory;
+
+  /// 左栏此刻是不是内联可见 —— 决定图标朝哪边、tooltip 说「显示」还是「隐藏」。
+  final bool sessionsVisible;
+  final bool memoryVisible;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -44,13 +50,19 @@ class ChatPane extends ConsumerWidget {
         PanelHeader(
           title: title ?? 'Cortex',
           subtitle: hasSession ? null : '记忆原生的通用 AI Agent',
-          leading: onOpenSessions == null
+          // 左栏伸缩，**任何宽度都在**。此前它只在窄屏出现（那时叫
+          // 「会话列表」），于是宽屏下根本没有收起侧栏这回事
+          leading: onToggleSessions == null
               ? null
               : IconButton(
-                  onPressed: onOpenSessions,
+                  onPressed: onToggleSessions,
                   iconSize: 19,
-                  tooltip: '会话列表',
-                  icon: const Icon(Icons.menu_rounded),
+                  tooltip: sessionsVisible ? '隐藏会话栏' : '显示会话栏',
+                  icon: Icon(
+                    sessionsVisible
+                        ? Icons.menu_open_rounded
+                        : Icons.menu_rounded,
+                  ),
                 ),
           actions: [
             // First in the row on purpose: whether the agent can touch files is
@@ -62,13 +74,8 @@ class ChatPane extends ConsumerWidget {
             ],
             const SyncIndicator(),
             const _BackendBadge(),
-            if (onOpenSettings != null)
-              IconButton(
-                onPressed: onOpenSettings,
-                iconSize: 18,
-                tooltip: '设置',
-                icon: const Icon(Icons.tune_rounded),
-              ),
+            // 设置搬去了左下角账号菜单（与 Codex 一致）：它与「我是谁」
+            // 是一组，而这一行剩下的都是应用级的显示开关
             IconButton(
               onPressed: () => ref.read(themeModeProvider.notifier).cycle(),
               iconSize: 18,
@@ -81,16 +88,18 @@ class ChatPane extends ConsumerWidget {
                 },
               ),
             ),
-            if (onOpenMemory != null)
+            // 右栏伸缩，放在最右 —— 它挨着的就是它控制的那一栏
+            if (onToggleMemory != null)
               IconButton(
-                onPressed: onOpenMemory,
+                onPressed: onToggleMemory,
                 iconSize: 19,
-                tooltip: '记忆面板',
-                icon: const Icon(Icons.psychology_outlined),
+                tooltip: memoryVisible ? '隐藏记忆栏' : '显示记忆栏',
+                icon: Icon(
+                  memoryVisible
+                      ? Icons.psychology_rounded
+                      : Icons.psychology_outlined,
+                ),
               ),
-            // 最后一个：平时是「关于」，有新版本时右上角多一个点。
-            // 放在末尾是因为它是这一行里唯一**多数时候没事**的那个
-            const UpdateIndicator(),
           ],
         ),
         Expanded(

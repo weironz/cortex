@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../import/import_source.dart';
+import '../models/account.dart';
 import '../models/auth_tokens.dart';
 import '../models/llm_key_status.dart';
 import '../models/attachment.dart';
@@ -234,6 +235,19 @@ class HttpCortexApi implements CortexApi {
   @override
   Future<AuthTokens> refreshSession(String refreshToken) =>
       _postAuth('/auth/refresh', {'refresh_token': refreshToken});
+
+  @override
+  Future<Account?> whoAmI() async {
+    try {
+      return Account.fromJson(await _getJson('/auth/me'));
+    } on CortexApiException catch (e) {
+      // 老服务端没有这个端点、或者这个部署压根没有账号体系。
+      // 两种都只意味着「没有名字可显示」—— 账号栏照常在，
+      // 它还挂着设置与退出登录。
+      if (e.isMissing || e.statusCode == 501) return null;
+      rethrow;
+    }
+  }
 
   @override
   Future<void> logout(String refreshToken) async {

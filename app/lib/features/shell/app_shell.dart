@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../state/app_providers.dart';
 import '../chat/chat_pane.dart';
 import '../memory/memory_panel.dart';
 import '../sessions/session_list.dart';
-import '../settings/settings_sheet.dart';
 import '../workspace/workspace_panel.dart';
+import 'widgets/account_bar.dart';
 
 /// Responsive three-pane shell.
 ///
@@ -36,9 +37,6 @@ class AppShell extends ConsumerStatefulWidget {
 class _AppShellState extends ConsumerState<AppShell> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
-  /// User-toggled visibility for the resident memory pane on wide layouts.
-  bool _memoryPaneVisible = true;
-
   static const _sessionsWidth = 264.0;
   static const _memoryWidth = 348.0;
   static const _wideBreakpoint = 1240.0;
@@ -47,6 +45,8 @@ class _AppShellState extends ConsumerState<AppShell> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final layout = ref.watch(layoutProvider);
+    final layoutNotifier = ref.read(layoutProvider.notifier);
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -54,8 +54,10 @@ class _AppShellState extends ConsumerState<AppShell> {
         final isWide = width >= _wideBreakpoint;
         final isMedium = width >= _mediumBreakpoint;
 
-        final showSessionsInline = isMedium;
-        final showMemoryInline = isWide && _memoryPaneVisible;
+        // 够宽**并且**没被收起来才内联。两个条件分工不同：断点说的是
+        // 「放得下吗」，收起说的是「想不想要」，谁也不该替对方回答
+        final showSessionsInline = isMedium && !layout.leftCollapsed;
+        final showMemoryInline = isWide && layout.memoryVisible;
 
         return Scaffold(
           key: _scaffoldKey,
@@ -99,15 +101,17 @@ class _AppShellState extends ConsumerState<AppShell> {
                 ],
                 Expanded(
                   child: ChatPane(
-                    onOpenSessions: showSessionsInline
-                        ? null
+                    // 同一个按钮、同一句话（「显示/隐藏会话」），但窄到放不下
+                    // 内联时它只能开抽屉 —— 那时「收起」这个状态无处安放。
+                    // 由这里按断点决定它具体做什么，ChatPane 只管画
+                    onToggleSessions: isMedium
+                        ? layoutNotifier.toggleLeft
                         : () => _scaffoldKey.currentState?.openDrawer(),
-                    onOpenSettings: () => showSettingsSheet(context),
-                    onOpenMemory: isWide
-                        ? () => setState(
-                            () => _memoryPaneVisible = !_memoryPaneVisible,
-                          )
+                    sessionsVisible: showSessionsInline,
+                    onToggleMemory: isWide
+                        ? layoutNotifier.toggleMemory
                         : () => _scaffoldKey.currentState?.openEndDrawer(),
+                    memoryVisible: showMemoryInline,
                   ),
                 ),
                 if (showMemoryInline) ...[
@@ -117,8 +121,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                     child: Container(
                       color: scheme.surfaceContainerLow,
                       child: MemoryPanel(
-                        onClose: () =>
-                            setState(() => _memoryPaneVisible = false),
+                        onClose: layoutNotifier.toggleMemory,
                       ),
                     ),
                   ),
@@ -152,6 +155,9 @@ class _LeftPane extends StatelessWidget {
       children: [
         Expanded(child: SessionList(onSelected: onSelected)),
         WorkspacePanel(maxTreeHeight: treeHeight),
+        // 内联与抽屉共用这棵树，所以账号栏两处都会有 —— 不必为抽屉
+        // 单独再摆一遍，也就不会有两份各自漂移的版本
+        const AccountBar(),
       ],
     );
   }

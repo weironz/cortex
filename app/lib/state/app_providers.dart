@@ -35,6 +35,7 @@ import '../core/app_config.dart';
 import '../core/local_llm.dart';
 import '../core/settings_store.dart';
 import '../core/local_agent.dart';
+import '../models/account.dart';
 import '../models/health_status.dart';
 import 'auth_controller.dart';
 
@@ -143,6 +144,91 @@ class AppConfigNotifier extends Notifier<AppConfig> {
 ///
 /// 读不出来就是 [PermissionMode.ask]，也就是最谨慎的一档。这个方向刻意选死：
 /// 一个读坏的配置文件不该静默把 agent 变成无人值守的。
+/// 当前登录的是谁。null = 没有名字可显示（见 [CortexApi.whoAmI]）。
+///
+/// 跟着 `cortexApiProvider` 走：换后端 / 换账号时自动重来。失败也回 null ——
+/// 账号栏不该因为一次查询失败就变成一条报错，它还挂着设置与退出登录。
+final accountProvider = FutureProvider<Account?>((ref) async {
+  final api = ref.watch(cortexApiProvider);
+  try {
+    return await api.whoAmI();
+  } on Object {
+    return null;
+  }
+});
+
+/// 两侧面板收起没有。
+class LayoutState {
+  const LayoutState({this.leftCollapsed = false, this.memoryVisible = true});
+
+  /// 会话 + 工作区那一栏。收起时账号栏也跟着不见 —— 与 Codex / Claude
+  /// 桌面端一致：收起就是整条侧栏都没了，要用就展开。
+  final bool leftCollapsed;
+
+  /// 记忆栏。默认**开着**：记忆是这个产品的主张，藏起来等于把它变成
+  /// 一个可选功能。
+  final bool memoryVisible;
+
+  LayoutState copyWith({bool? leftCollapsed, bool? memoryVisible}) =>
+      LayoutState(
+        leftCollapsed: leftCollapsed ?? this.leftCollapsed,
+        memoryVisible: memoryVisible ?? this.memoryVisible,
+      );
+}
+
+/// 两侧折叠状态，跨重启记住。
+///
+/// # 为什么是 provider 而不是 `_AppShellState` 的字段
+///
+/// 读它的地方分散在三处：伸缩按钮在中间栏的 header 里、账号栏在左栏底部、
+/// 真正的布局在 `AppShell`。用回调层层往下传，`AppShell` 会退化成一个
+/// 纯粹的参数中转站，而每加一个要读布局的组件就多穿一层。
+///
+/// # 为什么要持久化
+///
+/// 收起侧栏的人是**为了腾地方**，而不是为了这一次。每次打开都弹回来，
+/// 等于这个开关只在当前这个窗口有效 —— 两家参考产品都记住它。
+class LayoutNotifier extends Notifier<LayoutState> {
+  static const String _kLeft = 'left_pane_collapsed';
+  static const String _kMemory = 'memory_pane_visible';
+
+  @override
+  LayoutState build() {
+    Future.microtask(_restore);
+    return const LayoutState();
+  }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    state = LayoutState(
+      leftCollapsed: saved[_kLeft] == 'true',
+      // 缺省是**开着**，所以只有显式的 'false' 才关。写成
+      // `saved[_kMemory] == 'true'` 的话，第一次启动（没有这个键）
+      // 记忆栏就是关的 —— 一个由「还没存过」造成的默认值反转
+      memoryVisible: saved[_kMemory] != 'false',
+    );
+  }
+
+  void toggleLeft() {
+    state = state.copyWith(leftCollapsed: !state.leftCollapsed);
+    unawaited(
+      ref.read(settingsPatcherProvider)(_kLeft, '${state.leftCollapsed}'),
+    );
+  }
+
+  void toggleMemory() {
+    state = state.copyWith(memoryVisible: !state.memoryVisible);
+    unawaited(
+      ref.read(settingsPatcherProvider)(_kMemory, '${state.memoryVisible}'),
+    );
+  }
+}
+
+final layoutProvider = NotifierProvider<LayoutNotifier, LayoutState>(
+  LayoutNotifier.new,
+);
+
 class PermissionModeNotifier extends Notifier<PermissionMode> {
   static const String _key = 'permission_mode';
 

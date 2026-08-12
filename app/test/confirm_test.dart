@@ -468,7 +468,7 @@ class _LiveConfig extends AppConfigNotifier {
 }
 
 /// A daemon stand-in for the confirmation surface.
-class _ConfirmApi with LlmKeyUnsupported implements CortexApi {
+class _ConfirmApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
   _ConfirmApi({
     this.accept = true,
     this.throwTransport = false,
