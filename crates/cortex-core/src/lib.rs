@@ -25,10 +25,12 @@ pub mod error;
 pub mod history;
 pub mod id;
 pub mod injection;
+pub mod state_dir;
 
 pub use config::Config;
 pub use error::{CortexError, Result};
 pub use id::Id;
+pub use state_dir::{ADDR_FILE_EXT, state_dir};
 
 /// `session_events.workspace` 的字符数上限，与 migration 里的 CHECK 一致
 /// （`cortex_store` re-export 了它，那条对齐关系仍归存储层维护）。

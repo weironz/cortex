@@ -4,37 +4,12 @@ use std::path::{Path, PathBuf};
 
 use cortex_core::{CortexError, Result};
 
-/// 本地状态目录：outbox、工作区绑定都放这里。
+/// 本地状态目录 —— 转发 [`cortex_core::state_dir`]。
 ///
-/// Windows 用 `%LOCALAPPDATA%` 而不是 `%APPDATA%`：后者会被漫游配置文件同步到
-/// 域内其他机器上，而这里面全是**只对这台机器成立**的东西 ——
-/// `D:\codes\myproject` 同步到同事的笔记本上没有任何意义，
-/// 而一个跨机器同步的 outbox 会让同一条 episode 被两台机器各重放一次。
-///
-/// # Errors
-/// 目录建不出来（权限、磁盘满）时返回错误。**不回落到临时目录** ——
-/// 那会让 outbox 在重启后消失，也就是「断网期间的对话默默没了」，
-/// 而那正是这个队列存在的理由。
-pub fn state_dir() -> Result<PathBuf> {
-    let base = if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-    } else {
-        std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-    };
-    let base = base.ok_or_else(|| {
-        CortexError::Config(
-            "找不到本地状态目录：Windows 上需要 %LOCALAPPDATA%，\
-             其余平台需要 $XDG_DATA_HOME 或 $HOME"
-                .into(),
-        )
-    })?;
-    let dir = base.join("cortex");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| CortexError::Config(format!("建不出本地状态目录 {}：{e}", dir.display())))?;
-    Ok(dir)
-}
+/// **CLI 也要算这个路径**（去找桌面端已经起好的 agent 的地址文件），
+/// 所以实现搬去了 cortex-core。这里只保留一个转发，让本 crate 里的
+/// 调用点不用改。
+pub use cortex_core::state_dir;
 
 /// 记住「上一次是谁在用这台机器」的指针文件。
 ///

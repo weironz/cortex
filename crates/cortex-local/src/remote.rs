@@ -20,6 +20,22 @@ use cortex_proto::llm::LlmStreamRequest;
 /// 为「连不上」准备的，早点失败早点排队。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// 启动路径上那两次探测的超时。
+///
+/// `protocol_check` 与 `whoami` 都**只在启动时各调一次**，而且失败路径本来
+/// 就是优雅降级（跳过协议检查照常启动 / 用上一次那个账号的目录）。
+/// 让它们跟着 `REQUEST_TIMEOUT` 走的实测后果：远端是个**黑洞地址**
+/// （VPN 断了、防火墙 DROP 而不是 REJECT）时，两次各跑满 20 秒 ——
+/// **启动要 40 秒**，而这个 agent 其实第一秒就能干活。
+///
+/// 症状很难归因：桌面端与 CLI 都会以为「agent 起不来」然后回落，
+/// 而回落意味着工具跑到别人的机器上去。
+///
+/// 2 秒的取舍：一个 2 秒内握不上手的远端，对「启动时要不要检查协议」
+/// 这个问题而言就是不可达。真正的写入与检索另有 `REQUEST_TIMEOUT`，
+/// 不受这里影响；而协议不兼容那种情况远端是活着的，2 秒绰绰有余。
+const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// 远端 cortexd 的句柄。克隆代价低（内部 `Arc`）。
 #[derive(Clone)]
 pub struct Remote {
@@ -160,7 +176,7 @@ impl Remote {
     pub async fn protocol_check(&self) -> Result<std::result::Result<(), String>> {
         let resp = self
             .auth(self.http.get(self.url("/health")))
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(STARTUP_PROBE_TIMEOUT)
             .send()
             .await
             .map_err(map_transport)?;
@@ -188,7 +204,7 @@ impl Remote {
     pub async fn whoami(&self) -> Result<String> {
         let resp = self
             .auth(self.http.get(self.url("/auth/me")))
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(STARTUP_PROBE_TIMEOUT)
             .send()
             .await
             .map_err(map_transport)?;

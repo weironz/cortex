@@ -168,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
     let server = if cli.no_local_agent || !needs_agent(&cli.command) {
         cli.server.clone()
     } else {
-        agent::ensure_running(cli.local_port)
+        agent::ensure_running(cli.local_port, &cli.server, cli.token.as_deref())
             .await
             .unwrap_or_else(|| cli.server.clone())
     };

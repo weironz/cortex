@@ -57,16 +57,65 @@ const READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// 探活的轮询间隔。
 const POLL: Duration = Duration::from_millis(120);
 
+/// 本地 agent 读凭据的环境变量名。
+///
+/// **与 CLI 自己那个（`CORTEXD_TOKEN`）不是一个名字。** 写成常量是为了让
+/// 「两侧名字不同」这件事在代码里看得见 —— 靠继承环境的版本实测过：
+/// agent 拿不到 token，也连不上正确的远端。
+const TOKEN_ENV: &str = "CORTEX_TOKEN";
+
+/// 拉起本地 agent 的命令行参数。
+///
+/// 抽成纯函数只为**能测**：漏传 `--remote` 的后果是 agent 去连它自己的默认
+/// 地址（`127.0.0.1:8080`），于是 `cortex --server https://远端` 的记忆一条
+/// 都写不进去 —— 每轮排进本地队列，而用户看到的是「记忆未连接」，
+/// 读起来像网络抖动，不像配错了。实测撞过一次。
+///
+/// token **不在这里**：它走环境变量，命令行对同机所有进程可见。
+#[must_use]
+fn spawn_args(port: u16, remote: &str, parent_pid: u32) -> Vec<String> {
+    vec![
+        "--bind".into(),
+        format!("127.0.0.1:{port}"),
+        "--remote".into(),
+        remote.to_string(),
+        "--parent-pid".into(),
+        parent_pid.to_string(),
+    ]
+}
+
 /// 本地 agent 的地址，若它已经在跑或刚被拉起来。
 ///
 /// 返回 `None` 表示这一次用不上它 —— 调用方回落到用户给的 `--server`。
 ///
-/// # 为什么先探再拉
+/// # 先探再拉，但**探不到桌面端那个**
 ///
-/// 桌面端可能已经起了一个（它们共用同一个端口），此时再拉一个只会
-/// 因为端口占用而失败，而失败的样子是一句看不懂的报错。
+/// 探的是「上一次 `cortex` 拉起的那个还在不在」（同一个固定端口，
+/// 跟着上一个 CLI 进程退了就没了）。
+///
+/// **桌面端那个探不到**，而且这是本模块目前最大的一处缺口：它绑
+/// `127.0.0.1:0` 让内核挑端口，再经一个用完即删的 `.addr` 文件把地址交给
+/// GUI。于是同机装了两边的人会有**两个 agent 实例**，抢同一份
+/// `workspaces.json` 与 `outbox.mark` —— 那两个文件只有进程内 `Mutex`，
+/// 没有文件锁。对话与记忆不受影响（它们的权威在 cortexd），
+/// 受影响的是工作区绑定与离线队列的高水位。
+///
+/// 缓解的只有一条：CLI 拉起的那个跟着 CLI 进程退，所以重叠窗口只在一条命令
+/// 执行期间。**这不算解决**，见 roadmap。
+///
+/// # `remote` 与 `token` 必须显式传下去
+///
+/// 两侧的环境变量**名字不一样**：CLI 读 `CORTEXD_URL` / `CORTEXD_TOKEN`，
+/// 本地 agent 读 `CORTEX_REMOTE` / `CORTEX_TOKEN`。只靠继承环境的话，
+/// 一个 `cortex --server https://my-cortexd chat …` 拉起的 agent 会去连
+/// **`127.0.0.1:8080`** —— 实测过：记忆一条都写不进去，每轮排进本地队列，
+/// 而用户看到的是「记忆未连接」，读起来像网络抖动，不像配错了。
+///
+/// token 走**环境变量，不进 argv**：命令行对同机所有进程可见
+/// （`tasklist /v`、`ps aux`），而且会被崩溃报告收走。桌面端那侧
+/// （`local_agent_io.dart`）早有这条纪律，这里照做。
 #[must_use]
-pub async fn ensure_running(port: u16) -> Option<String> {
+pub async fn ensure_running(port: u16, remote: &str, token: Option<&str>) -> Option<String> {
     let base = format!("http://127.0.0.1:{port}");
     if probe(&base).await {
         return Some(base);
@@ -86,17 +135,18 @@ pub async fn ensure_running(port: u16) -> Option<String> {
         return None;
     };
     eprintln!("正在启动本地 agent（{}）…", exe.display());
-    let spawned = Command::new(&exe)
-        .arg("--bind")
-        .arg(format!("127.0.0.1:{port}"))
-        .arg("--parent-pid")
-        .arg(std::process::id().to_string())
+    let mut cmd = Command::new(&exe);
+    cmd.args(spawn_args(port, remote, std::process::id()))
         // 它的日志走 stderr，与 CLI 的输出混在一起会把对话冲得七零八落。
         // 丢掉而不是转存文件：手工排查时直接自己跑一次 `cortex-local` 就有了，
         // 而一个没人会去看的日志文件只是又一件要清理的东西
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+        .stderr(Stdio::null());
+    if let Some(t) = token {
+        // 环境变量而非 argv：见 `ensure_running` 的文档
+        cmd.env(TOKEN_ENV, t);
+    }
+    let spawned = cmd.spawn();
 
     match spawned {
         Ok(_) => {}
@@ -271,6 +321,44 @@ mod tests {
             !probe(&format!("http://127.0.0.1:{port}")).await,
             "把一个 cortexd 当成了本地 agent。它的 /health 是完全合法的 Health，\
              只有 role 分得开 —— 认错的后果是工具动到服务器的目录"
+        );
+    }
+
+    /// 拉起时**必须**把远端地址传下去。
+    ///
+    /// 漏了的话 agent 去连它自己的默认地址（127.0.0.1:8080），于是
+    /// `cortex --server https://远端` 的记忆一条都写不进去 —— 每轮排进本地
+    /// 队列，而用户看到的是「记忆未连接」，读起来像网络抖动。实测撞过一次。
+    #[test]
+    fn the_spawn_carries_the_remote_address() {
+        let args = spawn_args(8090, "https://cortex.example.com", 4242);
+        let i = args
+            .iter()
+            .position(|a| a == "--remote")
+            .expect("必须传 --remote —— 少了它 agent 会去连 127.0.0.1:8080");
+        assert_eq!(args[i + 1], "https://cortex.example.com");
+        assert!(args.contains(&"--bind".to_string()));
+        assert_eq!(
+            args[args.iter().position(|a| a == "--parent-pid").unwrap() + 1],
+            "4242",
+            "要跟着 CLI 一起退：留下的孤儿绑着端口、握着 token、还能执行命令"
+        );
+    }
+
+    /// token **绝不进命令行**。
+    ///
+    /// 命令行对同机所有进程可见（`tasklist /v`、`ps aux`），而且会被崩溃
+    /// 报告收走。桌面端那侧早有这条纪律，这里照做。
+    #[test]
+    fn the_token_never_appears_in_argv() {
+        let args = spawn_args(8090, "https://x", 1);
+        assert!(
+            !args.iter().any(|a| a.contains("token") || a == "--token"),
+            "凭据出现在 argv 里 —— 同机任意进程都读得到，实际：{args:?}"
+        );
+        assert_ne!(
+            TOKEN_ENV, "CORTEXD_TOKEN",
+            "这两个名字本来就不同（agent 读 CORTEX_TOKEN，CLI 读 CORTEXD_TOKEN）。             写成一样的话，靠继承环境就够了 —— 而实测证明不够"
         );
     }
 }
