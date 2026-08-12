@@ -30,7 +30,9 @@ pub mod state_dir;
 pub use config::Config;
 pub use error::{CortexError, Result};
 pub use id::Id;
-pub use state_dir::{ADDR_FILE_EXT, state_dir};
+pub use state_dir::{
+    ADDR_FILE_EXT, LIVE_FILE_EXT, LivePointer, live_file, state_dir, token_fingerprint,
+};
 
 /// `session_events.workspace` 的字符数上限，与 migration 里的 CHECK 一致
 /// （`cortex_store` re-export 了它，那条对齐关系仍归存储层维护）。

@@ -33,3 +33,8 @@ chrono.workspace = true
 tracing.workspace = true
 clap.workspace = true
 dotenvy.workspace = true
+
+[dev-dependencies]
+# 存活指针的发现逻辑要一个真目录：那段代码本身就是在跟文件系统打交道，
+# 用假路径测等于测了个寂寞
+tempfile = "3"

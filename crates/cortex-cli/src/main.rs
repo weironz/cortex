@@ -41,10 +41,6 @@ struct Cli {
     #[arg(long, env = "CORTEX_NO_LOCAL_AGENT")]
     no_local_agent: bool,
 
-    /// 本地 agent 的端口。桌面端已经起了一个时会直接复用。
-    #[arg(long, env = "CORTEX_LOCAL_PORT", default_value_t = agent::DEFAULT_PORT)]
-    local_port: u16,
-
     #[command(subcommand)]
     command: Command,
 }
@@ -168,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
     let server = if cli.no_local_agent || !needs_agent(&cli.command) {
         cli.server.clone()
     } else {
-        agent::ensure_running(cli.local_port, &cli.server, cli.token.as_deref())
+        agent::ensure_running(&cli.server, cli.token.as_deref())
             .await
             .unwrap_or_else(|| cli.server.clone())
     };

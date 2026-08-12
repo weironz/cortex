@@ -34,24 +34,20 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// 本地 agent 的默认端口。与 `cortex-local` 的 `--bind` 默认值一致。
-pub const DEFAULT_PORT: u16 = 8090;
-
 /// 拉起之后最多等它就绪多久。
 ///
 /// # 为什么是 10 秒而不是「绑个端口能要多久」
 ///
 /// 第一版取 3 秒，理由是「本机进程绑 loopback 是毫秒级的」。实测下来
-/// **离线时要 4.2 秒**：启动路径上有两次打远端的往返 —— 协议握手与
-/// `/auth/me`（问这把凭据属于谁，用来选用户目录），远端不可达时各自要等
-/// 约 2 秒才失败。
+/// **离线时要 4.2 秒**：启动路径上有两次打远端的往返（协议握手与
+/// `/auth/me`），远端不可达时各自要等一会儿才失败。那两次此后各自加了
+/// 2 秒的短超时，但慢盘冷启动与杀软扫描新进程仍要时间。
 ///
-/// 而离线**正是最需要本地 agent 的场景**。3 秒把它卡死，症状是
-/// 「回落到 cortexd」，也就是「工具动到别人的机器上」—— 最不该在这条路上
-/// 省时间。
+/// 而离线**正是最需要本地 agent 的场景**。卡死它的症状是「回落到 cortexd」，
+/// 也就是「工具动到别人的机器上」—— 最不该在这条路上省时间。
 ///
-/// 10 秒给足余量（慢盘冷启动、杀软扫描新进程）。不无限等：一个卡住的 agent
-/// 会让 `cortex chat` 看起来是死的，而用户分不清是模型慢还是别的。
+/// 不无限等：一个卡住的 agent 会让 `cortex chat` 看起来是死的，
+/// 而用户分不清是模型慢还是别的。
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 探活的轮询间隔。
@@ -71,54 +67,64 @@ const TOKEN_ENV: &str = "CORTEX_TOKEN";
 /// 都写不进去 —— 每轮排进本地队列，而用户看到的是「记忆未连接」，
 /// 读起来像网络抖动，不像配错了。实测撞过一次。
 ///
+/// **绑 `127.0.0.1:0`**：内核挑一个空闲端口，agent 把实际地址写进握手文件。
+/// 猜一个固定端口的失败方式是最坏的那种 —— 连到一个碰巧在听的别的东西上，
+/// 本轮实测撞到过（8090 上是另一个应用的 web 客户端，对 `/health` 回 200
+/// 加一段 HTML）。桌面端一直是这么做的，这里跟上。
+///
 /// token **不在这里**：它走环境变量，命令行对同机所有进程可见。
 #[must_use]
-fn spawn_args(port: u16, remote: &str, parent_pid: u32) -> Vec<String> {
+fn spawn_args(addr_file: &std::path::Path, remote: &str, parent_pid: u32) -> Vec<String> {
     vec![
         "--bind".into(),
-        format!("127.0.0.1:{port}"),
+        "127.0.0.1:0".into(),
         "--remote".into(),
         remote.to_string(),
         "--parent-pid".into(),
         parent_pid.to_string(),
+        "--addr-file".into(),
+        addr_file.display().to_string(),
     ]
 }
 
-/// 本地 agent 的地址，若它已经在跑或刚被拉起来。
+/// 找一个能用的本地 agent；没有就拉一个起来。
 ///
 /// 返回 `None` 表示这一次用不上它 —— 调用方回落到用户给的 `--server`。
 ///
-/// # 先探再拉，但**探不到桌面端那个**
+/// # 先找已经在跑的那个，找不到才拉
 ///
-/// 探的是「上一次 `cortex` 拉起的那个还在不在」（同一个固定端口，
-/// 跟着上一个 CLI 进程退了就没了）。
+/// **桌面端起的那个也算。** 它绑 `127.0.0.1:0` 让内核挑端口，所以猜不到；
+/// 但每个 agent 启动时会在状态目录写一个存活指针（`agent-<pid>.live`，
+/// 见 [`cortex_core::live_file`]），里面有实际地址、它连的 remote、
+/// 以及凭据指纹。
 ///
-/// **桌面端那个探不到**，而且这是本模块目前最大的一处缺口：它绑
-/// `127.0.0.1:0` 让内核挑端口，再经一个用完即删的 `.addr` 文件把地址交给
-/// GUI。于是同机装了两边的人会有**两个 agent 实例**，抢同一份
-/// `workspaces.json` 与 `outbox.mark` —— 那两个文件只有进程内 `Mutex`，
-/// 没有文件锁。对话与记忆不受影响（它们的权威在 cortexd），
-/// 受影响的是工作区绑定与离线队列的高水位。
+/// 不复用的后果不是「多一个进程」：同机两个实例会抢同一份 `workspaces.json`
+/// 与 `outbox.mark`，而那两个文件只有进程内 `Mutex`，**没有文件锁** ——
+/// 工作区绑定后写的赢，队列高水位互相覆盖会导致漏重放。
 ///
-/// 缓解的只有一条：CLI 拉起的那个跟着 CLI 进程退，所以重叠窗口只在一条命令
-/// 执行期间。**这不算解决**，见 roadmap。
+/// # 为什么复用前要比对 remote 与凭据指纹
+///
+/// 复用一个 agent 等于**把自己的请求交给它的身份**：它拿自己的 token 去连
+/// 自己的 remote。指向别的 cortexd、或登着另一个账号的 agent，会让这次
+/// `cortex` 静默读写**别人的**记忆 —— 而这件事没有任何症状。
+/// 本轮已经因为「remote 没传下去」吃过一次同类的亏。
 ///
 /// # `remote` 与 `token` 必须显式传下去
 ///
 /// 两侧的环境变量**名字不一样**：CLI 读 `CORTEXD_URL` / `CORTEXD_TOKEN`，
 /// 本地 agent 读 `CORTEX_REMOTE` / `CORTEX_TOKEN`。只靠继承环境的话，
 /// 一个 `cortex --server https://my-cortexd chat …` 拉起的 agent 会去连
-/// **`127.0.0.1:8080`** —— 实测过：记忆一条都写不进去，每轮排进本地队列，
-/// 而用户看到的是「记忆未连接」，读起来像网络抖动，不像配错了。
+/// **`127.0.0.1:8080`** —— 实测过：记忆一条都写不进去。
 ///
 /// token 走**环境变量，不进 argv**：命令行对同机所有进程可见
-/// （`tasklist /v`、`ps aux`），而且会被崩溃报告收走。桌面端那侧
-/// （`local_agent_io.dart`）早有这条纪律，这里照做。
+/// （`tasklist /v`、`ps aux`），而且会被崩溃报告收走。
 #[must_use]
-pub async fn ensure_running(port: u16, remote: &str, token: Option<&str>) -> Option<String> {
-    let base = format!("http://127.0.0.1:{port}");
-    if probe(&base).await {
-        return Some(base);
+pub async fn ensure_running(remote: &str, token: Option<&str>) -> Option<String> {
+    let want_fp = token.map(cortex_core::token_fingerprint);
+    let dir = cortex_core::state_dir().ok()?;
+
+    if let Some(addr) = find_live(&dir, remote, want_fp.as_deref()).await {
+        return Some(addr);
     }
 
     // 每一条回落都**必须说出来**，而且不看是不是 TTY。
@@ -135,40 +141,86 @@ pub async fn ensure_running(port: u16, remote: &str, token: Option<&str>) -> Opt
         return None;
     };
     eprintln!("正在启动本地 agent（{}）…", exe.display());
+
+    // 握手文件名带 pid：同机可能有好几个 CLI 在跑，共用一个名字会让它们
+    // 读到别人的地址
+    let addr_file = dir.join(format!(
+        "cli-{}.{}",
+        std::process::id(),
+        cortex_core::ADDR_FILE_EXT
+    ));
+    let _ = std::fs::remove_file(&addr_file);
+
     let mut cmd = Command::new(&exe);
-    cmd.args(spawn_args(port, remote, std::process::id()))
+    cmd.args(spawn_args(&addr_file, remote, std::process::id()))
         // 它的日志走 stderr，与 CLI 的输出混在一起会把对话冲得七零八落。
         // 丢掉而不是转存文件：手工排查时直接自己跑一次 `cortex-local` 就有了，
         // 而一个没人会去看的日志文件只是又一件要清理的东西
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Some(t) = token {
-        // 环境变量而非 argv：见 `ensure_running` 的文档
         cmd.env(TOKEN_ENV, t);
     }
-    let spawned = cmd.spawn();
-
-    match spawned {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("拉不起本地 agent（{e}）—— 这一次直连 cortexd，工具会动它那台机器的目录");
-            return None;
-        }
+    if let Err(e) = cmd.spawn() {
+        eprintln!("拉不起本地 agent（{e}）—— 这一次直连 cortexd，工具会动它那台机器的目录");
+        return None;
     }
 
     let deadline = Instant::now() + READY_TIMEOUT;
     while Instant::now() < deadline {
-        if probe(&base).await {
-            return Some(base);
+        if let Ok(text) = std::fs::read_to_string(&addr_file) {
+            let addr = text.trim();
+            if !addr.is_empty() {
+                let base = format!("http://{addr}");
+                if probe(&base).await {
+                    // 读完就删：它只回答「我刚拉起的那个绑到哪了」，
+                    // 留着只会制造陈旧。**跨进程发现走的是存活指针**，不是它
+                    let _ = std::fs::remove_file(&addr_file);
+                    return Some(base);
+                }
+            }
         }
         tokio::time::sleep(POLL).await;
     }
-    // 端口被别人占着是最常见的一种，而它的表现与「起得慢」一模一样。
-    // 实测撞到过：8090 上是另一个应用的 web 客户端。不点出来的话，
-    // 用户会去查一个不存在的启动问题
+    let _ = std::fs::remove_file(&addr_file);
     eprintln!(
-        "本地 agent {READY_TIMEOUT:?} 内没在 127.0.0.1:{port} 上就绪 —— 这一次直连 cortexd（工具会动它那台机器的目录）。端口可能被别的程序占着，可以 --local-port 换一个"
+        "本地 agent {READY_TIMEOUT:?} 内没就绪 —— 这一次直连 cortexd（工具会动它那台机器的目录）"
     );
+    None
+}
+
+/// 扫状态目录里的存活指针，返回第一个**能用且身份对得上**的地址。
+///
+/// 陈旧的指针（进程早没了、端口被别人占了）靠 [`probe`] 挡掉，不靠删文件 ——
+/// 当初地址握手文件选「读完即删」是因为那时没有探活；现在有了。
+async fn find_live(dir: &std::path::Path, remote: &str, want_fp: Option<&str>) -> Option<String> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.extension().and_then(|s| s.to_str()) != Some(cortex_core::LIVE_FILE_EXT) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(p) = serde_json::from_str::<cortex_core::LivePointer>(&text) else {
+            continue;
+        };
+        // 身份对不上就跳过 —— 复用它等于拿它的 token 去读它的 cortexd
+        if p.remote.trim_end_matches('/') != remote.trim_end_matches('/') {
+            continue;
+        }
+        if p.token_fp.as_deref() != want_fp {
+            continue;
+        }
+        let base = format!("http://{}", p.addr);
+        if probe(&base).await {
+            eprintln!("复用已在运行的本地 agent（{}）", p.addr);
+            return Some(base);
+        }
+        // 探不通 = 那个进程没了。顺手把陈旧指针清掉，省得每次都探一遍
+        let _ = std::fs::remove_file(&path);
+    }
     None
 }
 
@@ -331,17 +383,36 @@ mod tests {
     /// 队列，而用户看到的是「记忆未连接」，读起来像网络抖动。实测撞过一次。
     #[test]
     fn the_spawn_carries_the_remote_address() {
-        let args = spawn_args(8090, "https://cortex.example.com", 4242);
+        let f = std::path::Path::new("x.addr");
+        let args = spawn_args(f, "https://cortex.example.com", 4242);
         let i = args
             .iter()
             .position(|a| a == "--remote")
             .expect("必须传 --remote —— 少了它 agent 会去连 127.0.0.1:8080");
         assert_eq!(args[i + 1], "https://cortex.example.com");
-        assert!(args.contains(&"--bind".to_string()));
         assert_eq!(
             args[args.iter().position(|a| a == "--parent-pid").unwrap() + 1],
             "4242",
             "要跟着 CLI 一起退：留下的孤儿绑着端口、握着 token、还能执行命令"
+        );
+    }
+
+    /// 端口交给内核挑，不猜。
+    #[test]
+    fn the_kernel_picks_the_port() {
+        let args = spawn_args(std::path::Path::new("x.addr"), "https://x", 1);
+        let i = args
+            .iter()
+            .position(|a| a == "--bind")
+            .expect("要有 --bind");
+        assert_eq!(
+            args[i + 1],
+            "127.0.0.1:0",
+            "猜一个固定端口的失败方式是最坏的那种：连到一个碰巧在听的别的             东西上。实测撞到过 —— 8090 上是另一个应用的 web 客户端"
+        );
+        assert!(
+            args.iter().any(|a| a == "--addr-file"),
+            "内核挑了端口就必须有地方把它读回来"
         );
     }
 
@@ -351,7 +422,7 @@ mod tests {
     /// 报告收走。桌面端那侧早有这条纪律，这里照做。
     #[test]
     fn the_token_never_appears_in_argv() {
-        let args = spawn_args(8090, "https://x", 1);
+        let args = spawn_args(std::path::Path::new("x.addr"), "https://x", 1);
         assert!(
             !args.iter().any(|a| a.contains("token") || a == "--token"),
             "凭据出现在 argv 里 —— 同机任意进程都读得到，实际：{args:?}"
@@ -359,6 +430,83 @@ mod tests {
         assert_ne!(
             TOKEN_ENV, "CORTEXD_TOKEN",
             "这两个名字本来就不同（agent 读 CORTEX_TOKEN，CLI 读 CORTEXD_TOKEN）。             写成一样的话，靠继承环境就够了 —— 而实测证明不够"
+        );
+    }
+
+    /// 写一个存活指针，返回它所在的临时目录。
+    fn live_dir(addr: &str, remote: &str, fp: Option<&str>) -> tempfile::TempDir {
+        let d = tempfile::tempdir().expect("应能建临时目录");
+        let p = cortex_core::live_file(d.path(), 4242);
+        let ptr = cortex_core::LivePointer {
+            addr: addr.to_string(),
+            remote: remote.to_string(),
+            token_fp: fp.map(str::to_string),
+        };
+        std::fs::write(&p, serde_json::to_string(&ptr).unwrap()).unwrap();
+        d
+    }
+
+    /// 找得到一个身份对得上的活 agent，就复用它。
+    ///
+    /// 这条是「同机只留一个 agent」的正面证据。不复用的后果不是「多一个
+    /// 进程」：两个实例会抢同一份 workspaces.json 与 outbox.mark，
+    /// 而那两个文件只有进程内 Mutex，没有文件锁。
+    #[tokio::test]
+    async fn a_live_agent_with_matching_identity_is_reused() {
+        const REAL: &str = concat!(
+            r#"{"status":"ok","version":"0.1.6","role":"local-agent","#,
+            r#""protocol":1,"min_peer_protocol":1}"#
+        );
+        let port = fake_server("application/json", REAL).await;
+        let d = live_dir(&format!("127.0.0.1:{port}"), "https://x", Some("abc"));
+
+        assert_eq!(
+            find_live(d.path(), "https://x", Some("abc")).await,
+            Some(format!("http://127.0.0.1:{port}")),
+            "存活指针指向一个活着的、身份对得上的 agent，却没被复用"
+        );
+    }
+
+    /// **身份对不上就不许复用** —— 这是本模块最要紧的一条。
+    ///
+    /// 复用一个 agent 等于把自己的请求交给它的身份：它拿自己的 token 去连
+    /// 自己的 remote。指向别的 cortexd、或登着另一个账号的 agent，
+    /// 会让这次 `cortex` 静默读写**别人的**记忆，而这件事没有任何症状。
+    #[tokio::test]
+    async fn an_agent_with_a_different_identity_is_not_reused() {
+        const REAL: &str = concat!(
+            r#"{"status":"ok","version":"0.1.6","role":"local-agent","#,
+            r#""protocol":1,"min_peer_protocol":1}"#
+        );
+        let port = fake_server("application/json", REAL).await;
+        let addr = format!("127.0.0.1:{port}");
+
+        let d = live_dir(&addr, "https://other-cortexd", Some("abc"));
+        assert_eq!(
+            find_live(d.path(), "https://x", Some("abc")).await,
+            None,
+            "它连的是**另一台** cortexd。复用它 = 这次对话的记忆写进别人的库"
+        );
+
+        let d = live_dir(&addr, "https://x", Some("另一个人的指纹"));
+        assert_eq!(
+            find_live(d.path(), "https://x", Some("abc")).await,
+            None,
+            "同一台 cortexd，但那个 agent 握的是**另一个账号**的凭据 ——              复用它就是拿别人的身份读写"
+        );
+    }
+
+    /// 陈旧指针（进程早没了）被跳过，并顺手清掉。
+    #[tokio::test]
+    async fn a_stale_pointer_is_skipped_and_swept() {
+        let d = live_dir("127.0.0.1:1", "https://x", None);
+        let p = cortex_core::live_file(d.path(), 4242);
+        assert!(p.exists(), "前置条件：指针文件在");
+
+        assert_eq!(find_live(d.path(), "https://x", None).await, None);
+        assert!(
+            !p.exists(),
+            "探不通的指针要顺手删掉，否则每次 `cortex` 都要为一个早就死了的             进程等一次探活超时"
         );
     }
 }

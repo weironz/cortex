@@ -244,6 +244,29 @@ async fn main() -> anyhow::Result<()> {
         write_addr_file(path, &actual.to_string())
             .with_context(|| format!("写地址文件 {} 失败", path.display()))?;
     }
+    // 存活指针：让**不是拉起我的那些进程**也找得到我。
+    //
+    // 桌面端起了一个 agent，之后用户在终端敲 `cortex chat` —— CLI 得找到它，
+    // 否则同机两个实例抢同一份 workspaces.json 与 outbox.mark，
+    // 而那两个文件只有进程内 Mutex，没有文件锁。
+    //
+    // 写失败**不致命**：少一条发现路径而已，退化成「CLI 自己再拉一个」，
+    // 也就是这次改动之前的行为。为它让整个 agent 起不来是不成比例的。
+    let live_path = cortex_core::live_file(&dir, std::process::id());
+    let pointer = cortex_core::LivePointer {
+        addr: actual.to_string(),
+        remote: remote.base().to_string(),
+        token_fp: remote.token().map(cortex_core::token_fingerprint),
+    };
+    match serde_json::to_string(&pointer) {
+        Ok(json) => {
+            if let Err(e) = write_addr_file(&live_path, &json) {
+                tracing::warn!(path = %live_path.display(), error = %e, "写存活指针失败，别的进程发现不了我");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "存活指针序列化失败"),
+    }
+
     supervise::exit_with_parent(args.parent_pid);
     tracing::info!(bind = %actual, "本地 agent 已就绪");
 
