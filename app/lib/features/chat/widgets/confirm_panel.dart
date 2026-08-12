@@ -136,7 +136,7 @@ class _ConfirmCard extends ConsumerWidget {
             // irreversible in one direction only. The daemon refuses on
             // timeout precisely so that walking away is safe; saying so turns
             // the countdown from a threat into a fact.
-            '这一轮已经挂起，在等你的答复。${remaining.inSeconds} 秒后没有答复就按**拒绝**处理，'
+            '这一轮已经挂起，在等你的答复。${remaining.inSeconds} 秒后没有答复就按拒绝处理，'
             '模型会收到「没人回答」并换一条路。',
             style: theme.textTheme.bodySmall?.copyWith(
               color: scheme.onErrorContainer.withValues(alpha: 0.9),

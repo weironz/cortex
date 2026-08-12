@@ -345,14 +345,31 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                           ],
                         ),
                         const SizedBox(height: 6),
-                        Text(
-                          '不连服务器也能对话、能读写你本机的文件。'
-                          '**这段时间不会有记忆** —— 对话会排进本地队列，'
-                          '以后接上服务器时自动补回去。'
-                          '需要在本机配好模型：CORTEX_LLM_PROVIDER 与对应的 key'
-                          '（或 CORTEX_LLM_BASE_URL 指向本地端点）。',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: scheme.onSurfaceVariant,
+                        // 强调用真的粗体，**不要在 Text 里写 Markdown 星号** ——
+                        // 那是纯文本组件，星号会原样显示给用户看。
+                        // 这个错在 0.1.6 发版前的目视冒烟里被抓到，
+                        // 而所有 widget 测试都是绿的：它们断言的是文字内容，
+                        // 而字面星号恰恰**在**文字内容里
+                        Text.rich(
+                          TextSpan(
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                            children: [
+                              const TextSpan(text: '不连服务器也能对话、能读写你本机的文件。'),
+                              TextSpan(
+                                text: '这段时间不会有记忆',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  color: scheme.onSurface,
+                                ),
+                              ),
+                              const TextSpan(
+                                text: ' —— 对话会排进本地队列，'
+                                    '以后接上服务器时自动补回去。\n'
+                                    '需要先在设置里配好本机模型（也可以进去之后再配）。',
+                              ),
+                            ],
                           ),
                         ),
                         const SizedBox(height: 8),
@@ -374,7 +391,7 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                   children: [
                     Expanded(
                       child: Text(
-                        '只想看看界面长什么样？用内存夹具（**假数据**）。',
+                        '只想看看界面长什么样？用内存夹具（假数据）。',
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: scheme.onSurfaceVariant,
                         ),

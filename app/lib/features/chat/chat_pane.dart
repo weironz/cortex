@@ -219,11 +219,20 @@ class _OfflineBanner extends ConsumerWidget {
           ),
           const SizedBox(width: 9),
           Expanded(
-            child: Text(
-              '离线模式：这些对话**没有在记忆里**。'
-              '它们排在本地队列，接上服务器后会自动补回去。',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: scheme.onTertiaryContainer,
+            // 同上：Text 不渲染 Markdown，星号会原样显示
+            child: Text.rich(
+              TextSpan(
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onTertiaryContainer,
+                ),
+                children: const [
+                  TextSpan(text: '离线模式：这些对话'),
+                  TextSpan(
+                    text: '没有在记忆里',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  TextSpan(text: '。它们排在本地队列，接上服务器后会自动补回去。'),
+                ],
               ),
             ),
           ),

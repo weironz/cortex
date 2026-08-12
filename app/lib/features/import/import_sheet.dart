@@ -359,7 +359,7 @@ class _Summary extends StatelessWidget {
           ),
         if (done.failures > 0)
           Text(
-            '有 ${done.failures} 次写入失败。**重新导入同一个文件即可** —— '
+            '有 ${done.failures} 次写入失败。重新导入同一个文件即可 —— '
             '已经写进去的不会重复，只补没成的那些。',
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.error,

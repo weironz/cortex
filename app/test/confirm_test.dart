@@ -390,7 +390,7 @@ void main() {
 
       expect(find.textContaining('42s'), findsOneWidget);
       expect(
-        find.textContaining('按**拒绝**处理'),
+        find.textContaining('按拒绝处理'),
         findsOneWidget,
         reason: '沉默即拒绝这件事必须写出来 —— 它同时是「走开也是安全的」这个保证',
       );
