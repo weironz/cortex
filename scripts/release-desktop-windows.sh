@@ -116,7 +116,14 @@ else
     # 刻意不吞 flutter 的输出。它把编译错误打在 stdout 上，重定向掉的话
     # 失败时只剩这里这句「构建失败」，而真正的原因（比如 runner 的
     # /W4 /WX 把一个 C4819 编码警告变成硬错误）一个字都看不到
-    ( cd app && flutter pub get >/dev/null && flutter build windows --release ) \
+    # CORTEX_APP_VERSION 是**自动更新的地基**：应用靠它知道自己是哪一版，
+    # 才谈得上「有没有新版本」。没传到的话它是空串，而空串在客户端里的
+    # 意思是「这份构建不检查更新」—— 于是发出去的正式版没有更新功能，
+    # 且**没有任何报错**。下面 EXE_VER 那条断言看的是 VERSIONINFO，
+    # 与这个 dart-define 是两条独立的路，测不到它
+    ( cd app && flutter pub get >/dev/null \
+        && flutter build windows --release \
+            --dart-define=CORTEX_APP_VERSION="${VERSION}" ) \
         || die "flutter build windows 失败（原因在上面 flutter 自己的输出里）"
 fi
 
@@ -132,6 +139,28 @@ case "${EXE_VER}" in
     "") warn "读不到 cortex_app.exe 的版本信息，跳过这条断言" ;;
     *)  die "cortex_app.exe 自称 ${EXE_VER}，期望 ${VERSION} —— 这是一份旧构建" ;;
 esac
+
+# `--dart-define=CORTEX_APP_VERSION` 真的进了 Dart 快照吗。
+#
+# 上面那条查的是 Runner.rc 写的 VERSIONINFO，走的是**另一条路** ——
+# 它对不对与 dart-define 有没有生效毫无关系。少了这一条，一份
+# 「VERSIONINFO 完全正确、但客户端里版本号是空串」的产物能一路发出去，
+# 症状是发布版**没有更新功能**，而且不报任何错。
+#
+# 照抄 Dockerfile.web 里验 CORTEX_BASE_URL 那一招：去产物里找那个字符串。
+# 实测过负面对照：没传 define 的 0.1.6 产物里，app.so 中 `0.1.6` 零匹配 ——
+# 所以匹配到就说明是这个 define 放进去的，不是别处漏出来的。
+AOT="${BUNDLE}/data/app.so"
+if [ -f "${AOT}" ]; then
+    if grep -aqF "${VERSION}" "${AOT}"; then
+        ok "CORTEX_APP_VERSION=${VERSION} 已编进 Dart 快照"
+    else
+        die "app.so 里找不到 ${VERSION} —— --dart-define=CORTEX_APP_VERSION 没生效，
+这份产物装出去不会检查更新（且不会报错）"
+    fi
+else
+    warn "找不到 ${AOT}，跳过 dart-define 断言"
+fi
 
 # ── 2. 组装目录 ───────────────────────────────────────────
 STAGE="${OUT_DIR}/${NAME}"

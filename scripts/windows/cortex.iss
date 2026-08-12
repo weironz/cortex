@@ -94,6 +94,24 @@ Name: "{autodesktop}\Cortex"; Filename: "{app}\cortex_app.exe"; Tasks: desktopic
 Filename: "{app}\cortex_app.exe"; Description: "{cm:LaunchProgram,Cortex}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\README.txt"; Description: "看一眼「装的是什么」（它需要一台 cortexd）"; Flags: shellexec postinstall skipifsilent unchecked
 
+; ── 自动更新装完之后，谁负责把应用重新拉起来 ──────────────
+;
+; 上面那条带 `postinstall skipifsilent`：它是安装向导最后那个「立即运行」
+; 复选框，**静默安装时不执行**。而自动更新走的正是 `/VERYSILENT` ——
+; 只有上面那条的话，用户点一下「更新」，应用消失，再也不回来。
+;
+; 主路径其实是 Restart Manager：更新器传了 `/CLOSEAPPLICATIONS`
+; （RM 去关掉占着文件的 cortex_app.exe）与 `/RESTARTAPPLICATIONS`
+; （装完把它关掉的那些再拉起来）。
+;
+; 这一条是**兜底**：RM 只重启注册过的进程，拉不起来的情况是存在的，
+; 而那种情况没有任何提示 —— 用户只看到应用没了。
+;
+; `Check: WizardSilent` 保证它**只在静默安装时**生效，与上面那条
+; `skipifsilent` 正好互补，两条永远只有一条会跑。少了这个 Check，
+; 正常安装会把应用拉起来两次。
+Filename: "{app}\cortex_app.exe"; Flags: nowait; Check: WizardSilent
+
 [UninstallDelete]
 ; Inno 只删自己装过的文件。Flutter 的 data/ 下面 Dart 运行时会留下
 ; 一些安装清单里没有的东西（着色器缓存之类），不显式清掉的话

@@ -10,6 +10,7 @@ import '../../core/local_llm.dart';
 import '../../models/llm_key_status.dart';
 import '../../state/app_providers.dart';
 import '../../state/auth_controller.dart';
+import '../../state/update_controller.dart';
 import '../import/import_sheet.dart';
 
 Future<void> showSettingsSheet(BuildContext context) {
@@ -205,6 +206,10 @@ class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
               // 一个正被拦住的人会来这里找它，而在此之前他什么也找不到
               const _OwnApiKeyTile(),
               const _LocalLlmTile(),
+              const Divider(height: 28),
+              Text('关于', style: theme.textTheme.titleSmall),
+              const SizedBox(height: 8),
+              const _AboutTile(),
               const SizedBox(height: 12),
               Text(
                 '编译期默认值：USE_MOCK=${AppConfig.defaultUseMock}，'
@@ -670,6 +675,58 @@ class _LocalLlmDialogState extends State<_LocalLlmDialog> {
           child: const Text('保存'),
         ),
       ],
+    );
+  }
+}
+
+/// 版本号 + 手动检查更新的入口。
+///
+/// 顶栏那个小图标是常驻的、安静的那一半；这里是「我特地来找它」的那一半。
+/// 两个入口指向同一个 controller —— 一个功能有两个各自的状态是本仓库
+/// 已经吃过几次亏的形状。
+class _AboutTile extends ConsumerWidget {
+  const _AboutTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final version = AppConfig.appVersion.trim();
+    final update = ref.watch(updateControllerProvider);
+    final notifier = ref.read(updateControllerProvider.notifier);
+
+    final String subtitle;
+    if (!notifier.enabled) {
+      // 说清**为什么**没有更新功能，而不是干脆不显示这一行。
+      // 「我的另一台机器上有这个按钮」是个会被问出来的问题
+      subtitle = version.isEmpty
+          ? '开发构建，不检查更新'
+          : '这个平台不自我更新（安装包只有 Windows）';
+    } else {
+      subtitle = switch (update.phase) {
+        UpdatePhase.available => '有新版本 ${update.release?.version}',
+        UpdatePhase.downloading => '正在下载新版本…',
+        UpdatePhase.ready => '已下载，即将安装',
+        UpdatePhase.failed => '上次更新失败：${update.error}',
+        UpdatePhase.idle => '已是最新',
+      };
+    }
+
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(version.isEmpty ? 'Cortex（开发构建）' : 'Cortex $version'),
+      subtitle: Text(subtitle, style: theme.textTheme.bodySmall),
+      trailing: notifier.enabled
+          ? TextButton(
+              onPressed: update.phase == UpdatePhase.available
+                  ? notifier.install
+                  : update.phase == UpdatePhase.idle
+                  ? notifier.check
+                  : null,
+              child: Text(
+                update.phase == UpdatePhase.available ? '立即更新' : '检查更新',
+              ),
+            )
+          : null,
     );
   }
 }

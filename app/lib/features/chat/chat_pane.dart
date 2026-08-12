@@ -5,6 +5,7 @@ import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
 import '../shell/widgets/sync_indicator.dart';
+import '../shell/widgets/update_indicator.dart';
 import '../workspace/workspace_panel.dart';
 import 'widgets/confirm_panel.dart';
 import 'widgets/conversation_view.dart';
@@ -87,6 +88,9 @@ class ChatPane extends ConsumerWidget {
                 tooltip: '记忆面板',
                 icon: const Icon(Icons.psychology_outlined),
               ),
+            // 最后一个：平时是「关于」，有新版本时右上角多一个点。
+            // 放在末尾是因为它是这一行里唯一**多数时候没事**的那个
+            const UpdateIndicator(),
           ],
         ),
         Expanded(
