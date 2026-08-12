@@ -81,7 +81,11 @@ void main() {
 
     final health = await api.health();
     expect(health.status, 'ok');
-    expect(health.isHealthy, isTrue, reason: 'database=not_wired must not fail');
+    expect(
+      health.isHealthy,
+      isTrue,
+      reason: 'database=not_wired must not fail',
+    );
   });
 
   test('GET /sessions', () async {
@@ -121,9 +125,7 @@ void main() {
     expect(now.facts, isNotEmpty);
 
     // Anchor strictly before the fact was recorded; it must disappear.
-    final before = now.facts.first.createdAt!.subtract(
-      const Duration(days: 2),
-    );
+    final before = now.facts.first.createdAt!.subtract(const Duration(days: 2));
     final past = await api.searchMemory('Flutter', limit: 5, asOf: before);
 
     expect(
@@ -157,18 +159,22 @@ void main() {
     final api = _api();
     addTearDown(api.dispose);
 
-    final sessions = await api.sessions();
     final events = <ChatEvent>[];
     var accumulated = '';
     var deltaCount = 0;
     var toolCalls = <ToolCall>[];
 
     await for (final event in api.chat(
-      sessionId: sessions.first.id,
-      // Phrased to make a tool call near-certain: the model cannot answer this
-      // without reading the file, which is what puts a real call/result pair on
-      // the wire.
-      message: '读一下 app/pubspec.yaml，只回答 flutter sdk 的版本约束是什么，不要写代码块',
+      // **全新会话**，不是 `sessions.first`。整份文件跑下来，前面十几轮已经把
+      // 答案留在了那条会话的历史里 —— 模型于是直接答，一次工具都不调，
+      // 而这条用例要的正是那对「调用 + 返回」。单跑绿、整跑红，就是这个原因
+      sessionId: 'live-chat-${DateTime.now().millisecondsSinceEpoch}',
+      // 点名一个工具，好让那对事件必定上线。
+      //
+      // 从前这里点的是 `read_file`。cortexd 现在一个文件工具都不给
+      //（`WORKSPACE_FREE_TOOLS` 只有 `memory_search`），继续点它测的就成了
+      // 「模型面对一个不存在的工具会怎么办」—— 那是模型的事，不是契约的事
+      message: '用 memory_search 工具查一下 Cortex 这个项目，然后用一句话说说你查到了什么。',
     )) {
       events.add(event);
       switch (event) {
@@ -215,7 +221,7 @@ void main() {
     expect(done.episodeId, isNotNull, reason: 'done 必须带回 episode id 供追溯');
 
     final rawToolEvents = events.whereType<ChatToolEvent>().length;
-    expect(toolCalls, isNotEmpty, reason: '这个问题必须触发一次 read_file');
+    expect(toolCalls, isNotEmpty, reason: '这个问题必须触发一次 memory_search');
     expect(
       rawToolEvents,
       toolCalls.length * 2,
@@ -228,58 +234,86 @@ void main() {
     }
   });
 
-  test('GET /ws 只推信号，补拉一律用客户端自己的游标', () async {
-    if (!up) return markTestSkipped('cortexd not running');
-    final api = _api();
-    addTearDown(api.dispose);
+  // 默认 30s 不够：两次 `_until` 各留 20s，中间还夹着 3s 的等待，
+  // 于是框架的超时总是先到 —— 拿到的是一句光秃秃的 TimeoutException，
+  // 而**卡在等 hello 还是等 bump** 恰恰是唯一有用的那点信息。
+  // 给足预算，让 `_until` 自己的「等待 X 超时」先说话
+  test(
+    'GET /ws 只推信号，补拉一律用客户端自己的游标',
+    timeout: const Timeout(Duration(seconds: 60)),
+    () async {
+      if (!up) return markTestSkipped('cortexd not running');
+      final api = _api();
+      addTearDown(api.dispose);
 
-    final events = <SyncEvent>[];
-    final subscription = api.watchSync().listen(events.add);
-    addTearDown(subscription.cancel);
+      final events = <SyncEvent>[];
+      final subscription = api.watchSync().listen(events.add);
+      // 同样套超时，理由同下面那条 `chat.cancel`：收尾里挂住的话，测试框架
+      // 只会报「整条用例超时」，而**断言早就全过了** —— 那句话会把人送去查
+      // 一个根本没坏的东西。断开实时同步这条路，应用里正是切后端 / 退登录时走的
+      addTearDown(
+        () => subscription.cancel().timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => fail(
+            '取消 watchSync 订阅挂住了 —— 应用里切后端、退登录都要先断开它，'
+            '它挂住就是那两个动作卡死',
+          ),
+        ),
+      );
 
-    await _until(() => events.isNotEmpty, 'hello');
-    final hello = events.first;
-    expect(hello, isA<SyncHello>());
-    expect(hello.cursor, greaterThan(0), reason: '库里已有数据，游标不该是 0');
+      await _until(() => events.isNotEmpty, 'hello');
+      final hello = events.first;
+      expect(hello, isA<SyncHello>());
+      expect(hello.cursor, greaterThan(0), reason: '库里已有数据，游标不该是 0');
 
-    // Provoke a real commit. `/chat` writes the user episode *before* it calls
-    // the model, so cancelling right after the first frame is enough to get a
-    // bump without paying for a whole completion.
-    final sessions = await api.sessions();
-    final chat = api
-        .chat(sessionId: sessions.first.id, message: 'ping：只是为了产生一次写入')
-        .listen((_) {});
-    await Future<void>.delayed(const Duration(seconds: 3));
-    await chat.cancel();
+      // Provoke a real commit. `/chat` writes the user episode *before* it calls
+      // the model, so cancelling right after the first frame is enough to get a
+      // bump without paying for a whole completion.
+      final sessions = await api.sessions();
+      final chat = api
+          .chat(sessionId: sessions.first.id, message: 'ping：只是为了产生一次写入')
+          .listen((_) {});
+      await Future<void>.delayed(const Duration(seconds: 3));
+      // 套一层超时，说清是**谁**没回来。裸 `await` 挂住时，测试框架只会给一句
+      // 光秃秃的 TimeoutException —— 而「取消一条在飞的 SSE 订阅会不会挂」
+      // 与「bump 到底来没来」是两个完全不同的结论，光看那句话分不出来
+      await chat.cancel().timeout(
+        const Duration(seconds: 10),
+        onTimeout: () => fail(
+          '取消在飞的 /chat 订阅挂住了 —— 界面上「停止生成」走的正是这条路，'
+          '它挂住就是按钮按下去没反应',
+        ),
+      );
 
-    await _until(() => events.length > 1, 'bump');
-    final signal = events[1];
-    expect(
-      signal,
-      anyOf(isA<SyncBump>(), isA<SyncResync>()),
-      reason: 'hello 之后应当是 bump（或 resync）',
-    );
-    expect(signal.cursor, greaterThan(hello.cursor));
+      await _until(() => events.length > 1, 'bump');
+      final signal = events[1];
+      expect(
+        signal,
+        anyOf(isA<SyncBump>(), isA<SyncResync>()),
+        reason: 'hello 之后应当是 bump（或 resync）',
+      );
+      expect(signal.cursor, greaterThan(hello.cursor));
 
-    // The whole point: pull from **our** cursor, not the one the event carried.
-    final page = await api.sync(since: hello.cursor);
-    expect(page.records, isNotEmpty);
-    expect(
-      page.records.first.seq,
-      hello.cursor + 1,
-      reason: '第一条必须紧接自己的游标，中间不能有洞',
-    );
-    expect(page.records.any((r) => r.table == 'episodes'), isTrue);
+      // The whole point: pull from **our** cursor, not the one the event carried.
+      final page = await api.sync(since: hello.cursor);
+      expect(page.records, isNotEmpty);
+      expect(
+        page.records.first.seq,
+        hello.cursor + 1,
+        reason: '第一条必须紧接自己的游标，中间不能有洞',
+      );
+      expect(page.records.any((r) => r.table == 'episodes'), isTrue);
 
-    // And the counterfactual, so the rule is not merely asserted but shown:
-    // starting from the event's cursor would have skipped those rows.
-    final skipped = await api.sync(since: signal.cursor);
-    expect(
-      skipped.records.length,
-      lessThan(page.records.length),
-      reason: '拿事件里的 cursor 当 since 会漏掉 ${hello.cursor}..${signal.cursor}',
-    );
-  });
+      // And the counterfactual, so the rule is not merely asserted but shown:
+      // starting from the event's cursor would have skipped those rows.
+      final skipped = await api.sync(since: signal.cursor);
+      expect(
+        skipped.records.length,
+        lessThan(page.records.length),
+        reason: '拿事件里的 cursor 当 since 会漏掉 ${hello.cursor}..${signal.cursor}',
+      );
+    },
+  );
 
   test('rust 语法在半截围栏与完整代码上都能高亮', () async {
     // Deterministic on purpose. This used to be asserted against whatever the
@@ -346,11 +380,7 @@ void main() {
       final prev = detail.episodes[i - 1].occurredAt;
       final cur = detail.episodes[i].occurredAt;
       if (prev == null || cur == null) continue;
-      expect(
-        cur.isBefore(prev),
-        isFalse,
-        reason: '一页之内必须是正序（老 → 新）',
-      );
+      expect(cur.isBefore(prev), isFalse, reason: '一页之内必须是正序（老 → 新）');
     }
     expect(
       detail.nextCursor != null,
@@ -453,45 +483,26 @@ void main() {
       includeArchived: true,
     )).firstWhere((s) => s.id == target.id);
     expect(found.archived, isTrue);
-    expect(
-      found.messageCount,
-      greaterThan(0),
-      reason: '归档不是删除 —— 消息一条没少',
-    );
+    expect(found.messageCount, greaterThan(0), reason: '归档不是删除 —— 消息一条没少');
   });
 
-  test('工作区三态：绑定 / 不动 / 解绑', () async {
-    if (!up) return markTestSkipped('cortexd not running');
-    final api = _api();
-    addTearDown(api.dispose);
-
-    final target = (await api.sessions()).first;
-    addTearDown(() => api.updateSession(target.id, clearWorkspace: true));
-
-    final bound = await api.updateSession(
-      target.id,
-      workspace: Directory.current.path,
-    );
-    expect(bound.workspace, isNotNull);
-
-    // Field absent = leave it alone. This is the state a plain `Option<String>`
-    // on the server would collapse into "unbind".
-    final untouched = await api.updateSession(target.id, title: bound.title);
-    expect(
-      untouched.workspace?.root,
-      bound.workspace?.root,
-      reason: '不传 workspace 就该原样保留',
-    );
-
-    final unbound = await api.updateSession(target.id, clearWorkspace: true);
-    expect(
-      unbound.workspace,
-      isNull,
-      reason: '显式 null 才是解绑；两态混起来会让会话莫名其妙失去文件工具',
-    );
-  });
-
-  test('非法工作区路径带回可直接展示给用户的理由', () async {
+  /// cortexd **不提供**文件执行环境：绑定要被明确拒绝，而拒绝里要写清去哪跑。
+  ///
+  /// # 这条测试的前身
+  ///
+  /// 它原本断言「绑定 / 不动 / 解绑」三态都能在 cortexd 上走通。那是文件工具
+  /// 还长在服务端时的事 —— 那条路绑的是**服务器上**的一个目录，于是一个远端
+  /// 用户的 `read_file` 动的是生产机的文件系统。工具搬回本机之后三态只剩两态，
+  /// 而剩下那条「绑定」必须是拒绝。
+  ///
+  /// # 为什么盯着报错的**措辞**
+  ///
+  /// 这里唯一真正糟糕的结局不是报错，是静默忽略：客户端会显示
+  /// 「已绑定 D:\myproject」，然后每个文件操作都失败得莫名其妙 —— 用户明明
+  /// 看到绑定成功了。退一步，只说「不行」同样把人晾在原地：他手上有个目录、
+  /// 有个要改的文件，需要知道的是**下一步去哪**。所以两条走得通的路
+  ///（桌面端 / 本机跑 cortex-local）都必须出现在这一句里。
+  test('cortexd 拒绝在服务端绑工作区，并说清该去哪跑', () async {
     if (!up) return markTestSkipped('cortexd not running');
     final api = _api();
     addTearDown(api.dispose);
@@ -499,27 +510,37 @@ void main() {
     final target = (await api.sessions()).first;
 
     await expectLater(
-      api.updateSession(target.id, workspace: 'relative/path'),
+      api.updateSession(target.id, workspace: Directory.current.path),
       throwsA(
         isA<CortexApiException>()
             .having((e) => e.statusCode, 'statusCode', 400)
-            .having((e) => e.message, 'message', contains('绝对路径'))
+            // 400 而不是 501：这不是「本部署没开这个功能」，是「这件事在服务端
+            // 永远不成立」。`isUnsupported` 会把 501 读成前者并把整块界面收起来
+            .having((e) => e.isUnsupported, 'isUnsupported', isFalse)
+            .having(
+              (e) => e.message,
+              'message',
+              allOf(contains('桌面端'), contains('cortex-local')),
+            )
             // The client must unwrap `ErrorBody { error }`. Showing raw JSON
             // would throw away wording that was written to be read.
             .having((e) => e.message, 'message', isNot(contains('{"error"'))),
       ),
     );
 
-    await expectLater(
-      api.updateSession(target.id, workspace: '/definitely/not/here/xyzzy'),
-      throwsA(
-        isA<CortexApiException>().having(
-          (e) => e.isUnsupported,
-          'isUnsupported',
-          isFalse,
-        ),
-      ),
+    // 解绑**照旧放行**：老会话上可能还留着一条服务端绑定（这次改动之前存下的）。
+    // 一起拒掉等于把那条记录永远焊在那儿，而用户唯一能做的就是删掉整个会话
+    final unbound = await api.updateSession(target.id, clearWorkspace: true);
+    expect(
+      unbound.workspace,
+      isNull,
+      reason: '解绑不该被「服务端不给绑」这条规则连坐 —— 它是清理，不是绑定',
     );
+
+    // 不传这个字段 = 不动它。这正是服务端上一个裸 `Option<String>` 会塌成
+    // 「解绑」的那一态；这里顺带确认它没塌
+    final untouched = await api.updateSession(target.id, title: target.title);
+    expect(untouched.workspace, isNull);
   });
 
   // ───────────────────────────── 附件 ─────────────────────────────
@@ -543,11 +564,7 @@ void main() {
       await sha256Hex(bytes),
       reason: '两端算的哈希必须一致，否则 presign 那条路根本对不上 key',
     );
-    expect(
-      attachment.mime,
-      'image/png',
-      reason: 'MIME 由字节头嗅探得出，不是客户端声明的那个',
-    );
+    expect(attachment.mime, 'image/png', reason: 'MIME 由字节头嗅探得出，不是客户端声明的那个');
     expect(attachment.kind, 'image');
     expect(progress, isNotEmpty);
     expect(progress.last, bytes.length);
@@ -626,59 +643,18 @@ void main() {
           '文件名现在往返了：AttachmentRef 收 filename，AttachmentDto 回带它。'
           '拿到 null 就说明客户端又没把它发上去，回放会退回「文档 · a1b2c3d4」',
     );
-    expect(
-      replayed.mime,
-      'image/png',
-      reason: 'MIME 由字节头嗅探，不是客户端声明的那个',
-    );
+    expect(replayed.mime, 'image/png', reason: 'MIME 由字节头嗅探，不是客户端声明的那个');
     expect(replayed.sizeBytes, greaterThan(0));
   });
 
-  test('绑定工作区后，文件工具事件带回结构化的 path', () async {
-    if (!up) return markTestSkipped('cortexd not running');
-    final api = _api();
-    addTearDown(api.dispose);
-
-    final sessionId = 'live-ws-${DateTime.now().millisecondsSinceEpoch}';
-    // The session row only exists once it has a turn, so bind after the first
-    // message rather than before it.
-    await api.chat(sessionId: sessionId, message: '你好').drain<void>();
-    await api.updateSession(sessionId, workspace: Directory.current.path);
-
-    var calls = <ToolCall>[];
-    await for (final event in api.chat(
-      sessionId: sessionId,
-      message: '用 list_dir 列一下工作区根目录，再用 read_file 读 pubspec.yaml。',
-    )) {
-      if (event is ChatToolEvent) {
-        calls = ToolCall.merge(
-          calls,
-          event.name,
-          event.summary,
-          path: event.path,
-        );
-      }
-    }
-
-    final fileCalls = calls.where((c) => c.touchesFiles).toList();
-    expect(
-      fileCalls,
-      isNotEmpty,
-      reason: '绑定了工作区，文件工具就该出现在工具目录里',
-    );
-    for (final call in fileCalls) {
-      expect(
-        call.path,
-        isNotNull,
-        reason:
-            '${call.name} 必须自带 path —— 界面靠它说明动了哪个文件，'
-            '从摘要里正则抠出来的那套已经删掉了：${call.arguments}',
-      );
-      expect(call.pending, isFalse, reason: '两条事件应配成一行');
-    }
-  });
-
-  test('未绑定工作区的会话拿不到文件工具', () async {
+  // 这里原本还有一条「绑定工作区后，文件工具事件带回结构化的 path」。
+  // 它在 cortexd 上已经**无法成立** —— 绑不上工作区（见上面那条拒绝测试），
+  // 就永远拿不到文件工具。删掉而不是留着看它红：它测的
+  //「`path` 是独立一列、不从 summary 里正则抠」现在钉在两个够得着的地方 ——
+  // `cortex-store` 的 `tool_calls_replay_with_a_separate_path_column`（落库那半）
+  // 与本机 agent 自己的用例（在线那半）。下面这条留着，因为它测的正是
+  // cortexd 现在**唯一**的那一态。
+  test('cortexd 上的会话一律拿不到文件工具', () async {
     if (!up) return markTestSkipped('cortexd not running');
     final api = _api();
     addTearDown(api.dispose);

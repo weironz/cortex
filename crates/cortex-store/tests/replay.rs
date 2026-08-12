@@ -409,7 +409,27 @@ async fn tool_call_diff_survives_replay_and_the_length_guard_bites() {
         .await
         .expect("查工具归因不该失败");
 
+    // 第四条读路：`/sync` 下发给**别的设备**的那份。它在 `sync.rs` 里另有一句
+    // 手写的 SELECT，与上面三句各自独立 —— 补列时漏掉它不会有任何编译错误，
+    // 症状是整批 /sync 500，客户端游标从此卡死（比少显示一段 diff 严重得多）。
+    //
+    // `sync_coverage` 那条测试挡不住这个：它塞的是**不存在的行 id**，
+    // SELECT 永远返回空集，而 sqlx 只在真要解码一行时才发现少了列
+    let synced = s.fetch_since(0, 1000).await.expect("拉同步不该失败");
+
     db.cleanup().await;
+
+    let synced_diff = synced.iter().find_map(|r| match &r.payload {
+        Some(cortex_store::SyncPayload::EpisodeToolCall(c)) if c.name == "write_file" => {
+            Some(c.diff.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(
+        synced_diff,
+        Some(Some(diff.to_owned())),
+        "同步下发的那份也要带上 diff —— 否则这次改动在别的设备上「就没改过」：{synced:?}"
+    );
 
     assert!(
         rejected.is_err(),

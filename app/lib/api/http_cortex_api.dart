@@ -95,9 +95,9 @@ class HttpCortexApi implements CortexApi {
   /// [ticket] rides in the query string, and **only** a ticket ever may. See
   /// [issueTicket]: the long-lived token is barred from URLs because they are
   /// logged in three places the body never reaches.
-  Uri _wsUri(String? ticket) =>
-      _uri('/ws', {'ticket': ?ticket})
-          .replace(scheme: _base.scheme == 'https' ? 'wss' : 'ws');
+  Uri _wsUri(String? ticket) => _uri('/ws', {
+    'ticket': ?ticket,
+  }).replace(scheme: _base.scheme == 'https' ? 'wss' : 'ws');
 
   @override
   String get label => '$_base · $kHttpClientKind';
@@ -145,9 +145,9 @@ class HttpCortexApi implements CortexApi {
       // 结果是一个空列表 —— 而调用方要的是「不过滤」
       'project_id': ?projectId,
     });
-    return asObjectList(json['sessions'])
-        .map(ChatSession.fromJson)
-        .toList(growable: false);
+    return asObjectList(
+      json['sessions'],
+    ).map(ChatSession.fromJson).toList(growable: false);
   }
 
   // ---------------------------------------------------------------- projects
@@ -155,9 +155,9 @@ class HttpCortexApi implements CortexApi {
   @override
   Future<List<Project>> projects() async {
     final json = await _getJson('/projects');
-    return asObjectList(json['projects'])
-        .map(Project.fromJson)
-        .toList(growable: false);
+    return asObjectList(
+      json['projects'],
+    ).map(Project.fromJson).toList(growable: false);
   }
 
   @override
@@ -165,9 +165,12 @@ class HttpCortexApi implements CortexApi {
       Project.fromJson(await _postJson('/projects', {'name': name}));
 
   @override
-  Future<Project> renameProject(String id, String name) async => Project.fromJson(
-    await _patchJson('/projects/${Uri.encodeComponent(id)}', {'name': name}),
-  );
+  Future<Project> renameProject(String id, String name) async =>
+      Project.fromJson(
+        await _patchJson('/projects/${Uri.encodeComponent(id)}', {
+          'name': name,
+        }),
+      );
 
   @override
   Future<void> deleteProject(String id) async {
@@ -290,7 +293,7 @@ class HttpCortexApi implements CortexApi {
     );
   }
 
-    @override
+  @override
   Future<LlmKeyStatus> llmKeyStatus() => _llmKey('GET', null);
 
   @override
@@ -301,7 +304,8 @@ class HttpCortexApi implements CortexApi {
   }) => _llmKey('PUT', {
     'provider': provider,
     'api_key': apiKey,
-    if (baseUrl != null && baseUrl.trim().isNotEmpty) 'base_url': baseUrl.trim(),
+    if (baseUrl != null && baseUrl.trim().isNotEmpty)
+      'base_url': baseUrl.trim(),
   });
 
   @override
@@ -312,7 +316,10 @@ class HttpCortexApi implements CortexApi {
   /// 合成一个是因为**错误处理必须逐字相同**：三处各写一遍的话，
   /// 迟早有一处忘了检查状态码，然后把一段错误 JSON 当成状态解析，
   /// 界面上显示「未配置」—— 而实际是存失败了。
-  Future<LlmKeyStatus> _llmKey(String method, Map<String, Object?>? body) async {
+  Future<LlmKeyStatus> _llmKey(
+    String method,
+    Map<String, Object?>? body,
+  ) async {
     final uri = _uri('/settings/llm-key');
     final http.Response response;
     try {
@@ -754,7 +761,9 @@ class HttpCortexApi implements CortexApi {
   Future<String?> _currentTicket() async {
     if (_token == null) return null;
     final cached = _ticket;
-    if (cached != null && cached.isUsableAt(DateTime.now())) return cached.value;
+    if (cached != null && cached.isUsableAt(DateTime.now())) {
+      return cached.value;
+    }
 
     final pending = _ticketInFlight ??= issueTicket();
     try {
@@ -793,28 +802,47 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_wsUnreachableMessage(e), cause: e);
     }
 
-    try {
-      await for (final frame in channel.stream) {
-        if (frame is! String) continue; // the daemon only sends text frames
+    // 为什么不是一句 `await for (final frame in channel.stream)`
+    //
+    // 那样写，**取消这条订阅会挂死**。`await for` 在被取消时要先取消它对
+    // `channel.stream` 的内层订阅，而 WebSocket 的取消要走完关闭握手 ——
+    // 等服务端回一帧 close。可读侧此刻正在被撤掉，那一帧永远读不到：
+    // `cancel()` 等内层，内层等一帧永远不来的数据。
+    //
+    // 挂住的不是别的路径，正是**切后端与退登录**：两处都要先断开实时同步
+    // 再往下走。症状是点一下没反应，而且没有任何报错。
+    //
+    // 改成自己持有内层订阅、由 `onCancel` 决定怎么收尾：两件清理都发出去
+    // 但都不等 —— 关闭是纯清理，没有任何人需要它完成的那一刻。
+    final events = StreamController<SyncEvent>();
+    final frames = channel.stream.listen(
+      (frame) {
+        if (frame is! String) return; // the daemon only sends text frames
         final Object? decoded;
         try {
           decoded = jsonDecode(frame);
         } on FormatException {
           // One malformed frame must not tear down a healthy link; the next
           // bump will carry us forward anyway.
-          continue;
+          return;
         }
-        if (decoded is Map<String, dynamic>) yield SyncEvent.fromJson(decoded);
-      }
-    } on Object catch (e) {
-      // An abnormal close arrives as an exception. Normalise it so the caller
-      // only ever has to handle one error type.
-      throw CortexApiException('实时同步通道断开：$e', cause: e);
-    } finally {
-      // Runs on consumer cancellation too, which is how the reconnect loop
-      // guarantees it never leaves a half-open socket behind.
-      await channel.sink.close();
-    }
+        if (decoded is Map<String, dynamic>) {
+          events.add(SyncEvent.fromJson(decoded));
+        }
+      },
+      // An abnormal close arrives as an error. Normalise it so the caller only
+      // ever has to handle one error type.
+      onError: (Object e) =>
+          events.addError(CortexApiException('实时同步通道断开：$e', cause: e)),
+      onDone: events.close,
+      cancelOnError: true,
+    );
+    events.onCancel = () {
+      unawaited(frames.cancel());
+      unawaited(channel.sink.close());
+    };
+
+    yield* events.stream;
   }
 
   // ------------------------------------------------------------------- blobs
@@ -825,18 +853,14 @@ class HttpCortexApi implements CortexApi {
     String? mime,
     UploadProgress? onProgress,
   }) async {
-    final request = _ProgressRequest(
-      'POST',
-      _uri('/blobs'),
-      bytes,
-      onProgress,
-    )..headers.addAll(
-      _headers({
-        'accept': 'application/json',
-        // The server sniffs the byte header and only falls back to this.
-        'content-type': mime ?? 'application/octet-stream',
-      }),
-    );
+    final request = _ProgressRequest('POST', _uri('/blobs'), bytes, onProgress)
+      ..headers.addAll(
+        _headers({
+          'accept': 'application/json',
+          // The server sniffs the byte header and only falls back to this.
+          'content-type': mime ?? 'application/octet-stream',
+        }),
+      );
 
     final json = await _sendJson(request, 'POST /blobs');
     return BlobRef.fromJson(json);
@@ -872,12 +896,7 @@ class HttpCortexApi implements CortexApi {
     String? mime,
     UploadProgress? onProgress,
   }) async {
-    final request = _ProgressRequest(
-      'PUT',
-      Uri.parse(url),
-      bytes,
-      onProgress,
-    );
+    final request = _ProgressRequest('PUT', Uri.parse(url), bytes, onProgress);
     if (mime != null) request.headers['content-type'] = mime;
 
     final http.StreamedResponse response;
@@ -1017,8 +1036,7 @@ class HttpCortexApi implements CortexApi {
   /// The ticket is stripped from the reported URL — this string reaches logs
   /// and the status indicator's tooltip, and keeping a credential out of URLs
   /// is pointless if the client then prints it.
-  String _wsUnreachableMessage(Object e) =>
-      '连不上实时同步通道（${_wsUri(null)}）。$e';
+  String _wsUnreachableMessage(Object e) => '连不上实时同步通道（${_wsUri(null)}）。$e';
 
   String _unreachableMessage(Object e) =>
       '连不上 cortexd（$_base）。确认 daemon 已启动，'

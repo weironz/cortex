@@ -12,6 +12,16 @@
 //!
 //! 所以这条测试拿 [`table::ALL`]（由宏与常量一起生成，加常量必然进列表）
 //! 逐个撞一遍。忘记加 match 分支的人会**当场红**。
+//!
+//! # 它挡不住的：**给已有的表加一列**
+//!
+//! 下面塞的是不存在的行 id —— SELECT 每次都返回空集，而 sqlx 只在真要解码
+//! 一行时才发现少了列。于是「给 `episode_tool_calls` 加了 `diff`，
+//! 补了 `query.rs` 的三句 SELECT，漏了 `sync.rs` 的第四句」这类改动，
+//! 在这里是全绿的，出事仍然是整批 /sync 500、游标卡死（真发生过一次）。
+//!
+//! 加列时要钉的是**带真行**的往返：见 `replay.rs` 里
+//! `tool_call_diff_survives_replay_and_the_length_guard_bites`。
 
 mod common;
 

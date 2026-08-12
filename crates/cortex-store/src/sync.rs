@@ -210,7 +210,8 @@ impl Store {
                 SyncPayload::EpisodeMemory
             ),
             table::EPISODE_TOOL_CALLS => collect!(
-                "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, created_at
+                "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, diff,
+                        created_at
                    FROM episode_tool_calls WHERE id = ANY($1)",
                 EpisodeToolCall,
                 |row: &EpisodeToolCall| row.id.clone(),
