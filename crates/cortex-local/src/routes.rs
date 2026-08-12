@@ -352,4 +352,32 @@ mod tests {
         assert!(!bytes_eq(b"", b"x"));
         assert!(bytes_eq(b"", b""));
     }
+
+    /// 空串**不算**一把 token。
+    ///
+    /// # 这是这个仓库第五次撞上同一个坑
+    ///
+    /// clap 的 `env` 对一个设成空串的变量给出 `Some("")`。于是本地 agent
+    /// 认为自己有 token —— 「入站请求不做认证」那条警告一次都不打 ——
+    /// 而唯一能通过的凭据是空串本身。
+    ///
+    /// 桌面端离线模式一度传的正是 `token ?? ''`：结果是它被自己拉起的
+    /// agent 全程 401，而日志里没有任何一行说明为什么。实测过：
+    /// 带空 Bearer 401、不带 401、警告 0 行。
+    ///
+    /// 修法**不是**「空串放行」—— 那样这个能执行命令的进程就对同机所有
+    /// 进程敞开了。空串按「没配」处理让警告响起来，而离线模式改为由桌面端
+    /// 生成一把随机的一次性凭据。
+    #[test]
+    fn an_empty_token_is_not_a_token() {
+        let cleaned = |t: Option<&str>| t.map(str::to_owned).filter(|t| !t.trim().is_empty());
+        assert_eq!(cleaned(Some("")), None, "空串必须等同于没配");
+        assert_eq!(cleaned(Some("   ")), None, "纯空白同理");
+        assert_eq!(cleaned(None), None);
+        assert_eq!(
+            cleaned(Some("real-token")).as_deref(),
+            Some("real-token"),
+            "真凭据不能被这道清洗吃掉"
+        );
+    }
 }

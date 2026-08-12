@@ -193,7 +193,14 @@ async fn main() -> anyhow::Result<()> {
         remote: remote.clone(),
         outbox,
         http,
-        inbound_token: args.token,
+        // 空串按「没配」处理。**这是这个仓库第五次撞上它** ——
+        // clap 的 `env` 对一个设成空串的变量给出 `Some("")`，于是：
+        // agent 以为自己有 token（下面那条「不做认证」的警告因此一次都不打），
+        // 而实际上唯一能通过的凭据是空串本身。
+        //
+        // 桌面端离线模式传的正是 `token ?? ''` —— 结果是它被自己拉起的
+        // agent 全程 401，而日志里没有任何一行说明为什么
+        inbound_token: args.token.filter(|t| !t.trim().is_empty()),
     };
 
     if state.inbound_token.is_none() {

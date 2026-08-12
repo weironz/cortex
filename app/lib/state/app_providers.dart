@@ -21,6 +21,7 @@
 library;
 
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -159,6 +160,19 @@ class _RestartBudget {
   Duration get delay => Duration(seconds: 1 << consecutive.clamp(0, 4));
 }
 
+/// 离线模式下桌面端与本地 agent 之间的一次性凭据。
+///
+/// 进程内生成一次、只活到退出。它保护的是「同机其他进程别来指挥这个
+/// 能执行命令的 agent」——够不着的人猜不到，够得着的人（同一个用户）
+/// 本来就能读这个进程的内存。
+final String _sessionSecret = () {
+  final rng = Random.secure();
+  return List.generate(
+    32,
+    (_) => rng.nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
+}();
+
 final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   final config = ref.watch(appConfigProvider);
   final token = ref.watch(authControllerProvider.select((s) => s.token));
@@ -241,7 +255,14 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
       remote: config.baseUrl,
       // 关掉认证的部署没有 token。空串而不是抛错：本地 agent 那侧
       // 也只是把它塞进 Authorization 头，而一个不认证的 cortexd 根本不看
-      token: token ?? '',
+      // 离线模式没有 cortexd 的 token，但**不能传空串**：本地 agent 能执行
+      // 命令，而同机任意进程都够得着 127.0.0.1。现生成一把随机的、只活到
+      // 本次进程结束的凭据 —— 桌面端与它自己拉起的 agent 之间对上即可，
+      // 别人猜不到。
+      //
+      // （空串曾经是这里的写法，结果是 agent 拿到 `Some("")`、以为自己
+      // 有认证、把桌面端 401 挡在外面，而「不做认证」那条警告一次都不打）
+      token: token ?? _sessionSecret,
       // 离线模式必须本地直连模型：代理那条路要经 cortexd，而它不存在。
       // 传 null 表示「不干预」，让 agent 自己按环境变量决定
       llmRoute: config.offline ? 'direct' : null,
