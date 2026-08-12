@@ -1,3 +1,4 @@
+import '../core/permission_mode.dart';
 import 'dart:typed_data';
 
 import '../import/import_source.dart';
@@ -115,6 +116,7 @@ abstract interface class CortexApi {
     required String sessionId,
     required String message,
     List<Attachment> attachments,
+    PermissionMode permissionMode,
   });
 
   /// `GET /memory/search?q=&limit=&as_of=`

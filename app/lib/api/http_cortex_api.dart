@@ -1,3 +1,4 @@
+import '../core/permission_mode.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -533,6 +534,7 @@ class HttpCortexApi implements CortexApi {
     required String sessionId,
     required String message,
     List<Attachment> attachments = const [],
+    PermissionMode permissionMode = PermissionMode.ask,
   }) async* {
     final request = http.Request('POST', _uri('/chat'))
       // A header, not a ticket: `POST /chat` is issued by `package:http`, which
@@ -557,6 +559,10 @@ class HttpCortexApi implements CortexApi {
         // session row, so the fence's key never rides on the same request as
         // the message.
         'attachments': [for (final a in attachments) a.toWireJson()],
+        // 逐轮带，不存在会话上：用户在输入框底部随时能改，改完**下一句**
+        // 就该按新档位走。存服务端要多一次同步，而那次同步失败时用户看到的是
+        // 「我明明切了档」。老服务端不认识这个字段会忽略它（serde default）
+        'permission_mode': permissionMode.wire,
       });
 
     final http.StreamedResponse response;

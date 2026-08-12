@@ -551,6 +551,8 @@ class ChatController extends Notifier<ChatState> {
       sessionId: sessionId,
       message: text,
       attachments: attachments,
+      // 逐轮读，不缓存：用户在输入框底部随时能改，改完这一句就该按新档位走
+      permissionMode: ref.read(permissionModeProvider),
     );
     _subscription = stream.listen(
       _onEvent,

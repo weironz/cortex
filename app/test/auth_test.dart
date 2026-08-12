@@ -1,3 +1,4 @@
+import 'package:cortex_app/core/permission_mode.dart';
 import 'dart:async';
 import 'package:cortex_app/models/auth_tokens.dart';
 import 'package:cortex_app/models/import_plan.dart';
@@ -563,6 +564,7 @@ class _GateApi with LlmKeyUnsupported implements CortexApi {
     required String sessionId,
     required String message,
     List<Attachment> attachments = const [],
+    PermissionMode permissionMode = PermissionMode.ask,
   }) => throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
 
   @override

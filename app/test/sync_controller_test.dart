@@ -1,3 +1,4 @@
+import 'package:cortex_app/core/permission_mode.dart';
 import 'dart:async';
 import 'package:cortex_app/models/auth_tokens.dart';
 import 'package:cortex_app/models/import_plan.dart';
@@ -133,6 +134,7 @@ class _FakeApi with LlmKeyUnsupported implements CortexApi {
     required String sessionId,
     required String message,
     List<Attachment> attachments = const [],
+    PermissionMode permissionMode = PermissionMode.ask,
   }) => throw UnimplementedError('同步链路不应发起对话');
 
   @override

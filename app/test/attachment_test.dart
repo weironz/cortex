@@ -1,3 +1,4 @@
+import 'package:cortex_app/core/permission_mode.dart';
 import 'dart:async';
 import 'package:cortex_app/models/auth_tokens.dart';
 import 'package:cortex_app/models/import_plan.dart';
@@ -145,6 +146,7 @@ class _BlobApi with LlmKeyUnsupported implements CortexApi {
     required String sessionId,
     required String message,
     List<Attachment> attachments = const [],
+    PermissionMode permissionMode = PermissionMode.ask,
   }) async* {
     lastSentAttachments = attachments;
     yield const ChatDoneEvent('epi_1');

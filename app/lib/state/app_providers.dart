@@ -20,6 +20,7 @@
 /// are one-time costs; the rebuild isolation is a per-frame benefit.
 library;
 
+import '../core/permission_mode.dart';
 import 'dart:async';
 import 'dart:math';
 
@@ -99,6 +100,46 @@ class AppConfigNotifier extends Notifier<AppConfig> {
     state = state.copyWith(offline: value, useMock: false);
   }
 }
+
+/// 这台设备上选的权限档位。
+///
+/// # 为什么按设备持久化，而不是按会话
+///
+/// 它是**一个人的工作习惯**（「我信得过它，别老打断我」），不是某一次对话的
+/// 属性。每开一个会话都要重选一遍，人的反应是永远停在默认档 —— 那等于这个
+/// 开关不存在。Claude Code 的菜单里那个 "Default ✓" 就是同一个判断。
+///
+/// # 为什么默认档不持久化也没关系
+///
+/// 读不出来就是 [PermissionMode.ask]，也就是最谨慎的一档。这个方向刻意选死：
+/// 一个读坏的配置文件不该静默把 agent 变成无人值守的。
+class PermissionModeNotifier extends Notifier<PermissionMode> {
+  static const String _key = 'permission_mode';
+
+  @override
+  PermissionMode build() {
+    Future.microtask(_restore);
+    return PermissionMode.ask;
+  }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    final mode = PermissionMode.fromWire(saved[_key]);
+    if (mode != state) state = mode;
+  }
+
+  void set(PermissionMode mode) {
+    if (state == mode) return;
+    state = mode;
+    unawaited(ref.read(settingsWriterProvider)({_key: mode.wire}));
+  }
+}
+
+final permissionModeProvider =
+    NotifierProvider<PermissionModeNotifier, PermissionMode>(
+      PermissionModeNotifier.new,
+    );
 
 final appConfigProvider = NotifierProvider<AppConfigNotifier, AppConfig>(
   AppConfigNotifier.new,

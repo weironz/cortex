@@ -1,3 +1,4 @@
+import '../core/permission_mode.dart';
 import 'dart:async';
 import '../models/auth_tokens.dart';
 import 'package:cortex_app/models/import_plan.dart';
@@ -585,6 +586,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     required String sessionId,
     required String message,
     List<Attachment> attachments = const [],
+    PermissionMode permissionMode = PermissionMode.ask,
   }) async* {
     if (_disposed) {
       throw const CortexApiException('Mock 数据源已关闭');

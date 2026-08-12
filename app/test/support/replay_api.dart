@@ -5,6 +5,7 @@
 /// need the same paging behaviour, and two copies would drift.
 library;
 
+import 'package:cortex_app/core/permission_mode.dart';
 import 'dart:typed_data';
 import 'package:cortex_app/models/auth_tokens.dart';
 import 'package:cortex_app/models/import_plan.dart';
@@ -172,6 +173,7 @@ class ReplayApi with LlmKeyUnsupported implements CortexApi {
     required String sessionId,
     required String message,
     List<Attachment> attachments = const [],
+    PermissionMode permissionMode = PermissionMode.ask,
   }) async* {
     yield const ChatDeltaEvent('好');
     yield const ChatDoneEvent('epi_new');

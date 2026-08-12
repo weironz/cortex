@@ -1,3 +1,4 @@
+import 'permission_mode_chip.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -227,10 +228,24 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                   ),
                 ),
                 const SizedBox(height: 7),
-                Text(
-                  'Cortex 会把这轮对话归档，并从中抽取可追溯的记忆。',
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.labelSmall,
+                Row(
+                  children: [
+                    const PermissionModeChip(),
+                    Expanded(
+                      child: Text(
+                        'Cortex 会把这轮对话归档，并从中抽取可追溯的记忆。',
+                        textAlign: TextAlign.center,
+                        style: theme.textTheme.labelSmall,
+                      ),
+                    ),
+                    // 与 chip 等宽的占位，让中间那句话真的居中。
+                    // 不这么做的话它会被 chip 推得偏右，而那行字是**居中**
+                    // 才读得像一句说明、而不是某个控件的标签
+                    const Opacity(
+                      opacity: 0,
+                      child: IgnorePointer(child: PermissionModeChip()),
+                    ),
+                  ],
                 ),
               ],
             ),
