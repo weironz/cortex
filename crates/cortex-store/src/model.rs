@@ -977,6 +977,8 @@ pub struct EpisodeToolCall {
     pub summary: String,
     pub ok: bool,
     pub device_id: String,
+    /// 这次写入改了什么（统一 diff，已截断）。`None` = 没有可看的改动。
+    pub diff: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -990,6 +992,12 @@ pub struct NewEpisodeToolCall {
     pub summary: String,
     pub ok: bool,
     pub device_id: String,
+    /// 这次写入改了什么（统一 diff，**已截断**）。
+    ///
+    /// 截断在 agent 侧（`cortex_agent::diff`）就做完了，那里还能在末尾写明
+    /// 「其余未显示」。这一列会随 `sync_log` 下发到所有设备，
+    /// 所以 migration 上还有一条 8 KiB 的 CHECK 兜底。
+    pub diff: Option<String>,
 }
 
 /// `episode_tool_calls.summary` 的字符数上限，与 migration 里的 CHECK 一致。
@@ -997,6 +1005,18 @@ pub struct NewEpisodeToolCall {
 /// 常量在这里而不是让上层写字面量：两处漂移的症状是「工具摘要一长，
 /// 整个写事务回滚」——而那个事务里还带着本轮的记忆归因。
 pub const TOOL_SUMMARY_MAX_CHARS: usize = 2048;
+
+/// `episode_tool_calls.diff` 的字符数上限，与 migration 里的 CHECK 一致。
+///
+/// 比 summary 大一个量级：一份 diff 本来就是几十行起步。但仍然要有上限 ——
+/// 这一列会随 `sync_log` **下发到所有设备**，一次几百行的重构轻松几十 KB，
+/// 乘以设备数、乘以每轮多个 `write_file`，就是同步通道上一笔谁都没预算过
+/// 的流量。
+///
+/// 与 `cortex_agent::diff` 那边的上限**各管各的**：那边管「人读得完」，
+/// 这边管「入库与同步扛得住」。两个数将来完全可能各自变动，
+/// 所以不共用一个常量。
+pub const TOOL_DIFF_MAX_CHARS: usize = 8192;
 
 /// `episode_tool_calls.name` 的字符数上限，与 migration 里的 CHECK 一致。
 pub const TOOL_NAME_MAX_CHARS: usize = 128;

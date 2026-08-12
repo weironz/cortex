@@ -644,7 +644,7 @@ class ChatController extends Notifier<ChatState> {
           ),
         );
 
-      case ChatToolEvent(:final name, :final summary, :final path):
+      case ChatToolEvent(:final name, :final summary, :final path, :final diff):
         _flushPending();
         // Call and result arrive as two events; [ToolCall.merge] folds them
         // into a single row instead of printing the same tool twice.
@@ -657,6 +657,7 @@ class ChatController extends Notifier<ChatState> {
               name,
               summary,
               path: path,
+              diff: diff,
             ),
           ),
         );

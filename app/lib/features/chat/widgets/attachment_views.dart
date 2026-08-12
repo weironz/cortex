@@ -257,7 +257,9 @@ class _PendingCard extends StatelessWidget {
         // At 100% the bytes are handed over but the server has not answered.
         // Saying "已上传" here would be a lie on Web, where the browser has
         // only just started the actual transfer.
-        item.progress >= 1 ? '等待服务端登记…' : '上传中 ${(item.progress * 100).round()}%',
+        item.progress >= 1
+            ? '等待服务端登记…'
+            : '上传中 ${(item.progress * 100).round()}%',
       ),
       UploadStatus.ready => (
         const Color(0xFF2E9E5B),

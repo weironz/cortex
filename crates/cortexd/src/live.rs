@@ -722,6 +722,13 @@ impl Live {
                     summary: clamp_chars(&c.summary, cortex_store::TOOL_SUMMARY_MAX_CHARS),
                     ok: c.ok,
                     device_id: self.device_id.clone(),
+                    // 本地 agent 灌上来的那条路（POST /episodes）。diff 与
+                    // path 一样是客户端给的，同样要夹一次上限 —— 入库上限
+                    // 是这一层的责任，不能指望上游都夹好了
+                    diff: c
+                        .diff
+                        .as_deref()
+                        .map(|d| clamp_chars(d, cortex_store::TOOL_DIFF_MAX_CHARS)),
                 })
                 .collect();
             let n = rows.len();
@@ -1873,12 +1880,19 @@ async fn run_turn(
                         summary: format!("调用 {name} {}", compact_args(&arguments)),
                         name,
                         path,
+                        // 「即将调用」这一刻还没有结果，diff 随 ToolResult 到达
+                        diff: None,
                     }
                 }
                 // ok 不单独进 SSE 契约：summary 自己就说清了成败
                 //（「返回 12 行 / 340 字符」对「失败：路径 … 已拒绝」）。
                 // 但落库要留 ok —— 回放时「哪几次失败了」是一眼要看到的东西
-                AgentEvent::ToolResult { name, ok, summary } => {
+                AgentEvent::ToolResult {
+                    name,
+                    ok,
+                    summary,
+                    diff,
+                } => {
                     let path = pending_path.remove(&name).flatten();
                     recorded.push(cortex_store::NewEpisodeToolCall {
                         id: Id::new(),
@@ -1894,11 +1908,18 @@ async fn run_turn(
                         ),
                         ok,
                         device_id: bridge_device.clone(),
+                        // agent 侧已经按行数 + 字符数截断过；这里再夹一次是
+                        // 因为**入库上限是这一层的责任**，而 agent 那边的上限
+                        // 是为了「人读得完」，两个数将来完全可能各自变动
+                        diff: diff
+                            .as_deref()
+                            .map(|d| clamp_chars(d, cortex_store::TOOL_DIFF_MAX_CHARS)),
                     });
                     ChatEvent::Tool {
                         summary: format!("{name} {summary}"),
                         name,
                         path,
+                        diff,
                     }
                 }
             };
@@ -2243,6 +2264,9 @@ impl ToolHost for TurnHost {
             risk,
             preview: preview.clone(),
             scope: scope.clone(),
+            // 改动预览：确认框里先看见要写什么，再决定按不按允许。
+            // 这正是「盲签」被治掉的那一处
+            diff: req.diff.map(str::to_string),
         });
 
         let ask = ChatEvent::Confirm {
@@ -2252,6 +2276,9 @@ impl ToolHost for TurnHost {
             preview,
             timeout_secs: self.confirms.timeout().as_secs(),
             scope,
+            // 与 PendingMeta 那份同源：实时确认走这条 SSE 事件，
+            // 补拉走 GET /confirmations，两条都要带
+            diff: req.diff.map(str::to_string),
         };
         if self.events.send(ask).await.is_err() {
             // 请求都发不出去，等下去只会白等一个超时
@@ -2356,6 +2383,7 @@ fn tool_call_dto(t: cortex_store::EpisodeToolCall) -> ToolCallDto {
         path: t.path,
         summary: t.summary,
         ok: t.ok,
+        diff: t.diff,
     }
 }
 

@@ -545,6 +545,7 @@ mod tests {
             summary: summary.to_owned(),
             ok,
             device_id: "test".into(),
+            diff: None,
             created_at: at(),
         }
     }

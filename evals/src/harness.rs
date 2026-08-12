@@ -410,6 +410,7 @@ async fn insert_episode(
             summary: c.summary.clone(),
             ok: c.ok,
             device_id: DEVICE.to_owned(),
+            diff: None,
         })
         .collect();
 

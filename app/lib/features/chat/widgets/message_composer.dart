@@ -99,8 +99,7 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
     // An upload still in flight blocks send: the daemon rejects a hash it has
     // not registered, so sending now would fail the whole turn rather than just
     // drop the attachment.
-    final canSend =
-        widget.enabled && !uploading && (_hasText || hasReady);
+    final canSend = widget.enabled && !uploading && (_hasText || hasReady);
 
     return DropTarget(
       enable: widget.enabled && sessionId != null,

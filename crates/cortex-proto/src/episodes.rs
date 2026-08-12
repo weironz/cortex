@@ -39,6 +39,9 @@ pub struct ToolCallInput {
     pub path: Option<String>,
     pub summary: String,
     pub ok: bool,
+    /// 这次写入改了什么（统一 diff，已截断）。见 `dto::ChatEvent::Tool` 的 `diff`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 /// `POST /episodes` 的请求体。

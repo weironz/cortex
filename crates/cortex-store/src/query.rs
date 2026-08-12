@@ -283,7 +283,7 @@ impl Store {
     /// 一轮对话的工具调用，按调用顺序。
     pub async fn episode_tool_calls(&self, episode_id: &str) -> Result<Vec<EpisodeToolCall>> {
         let rows = sqlx::query_as::<_, EpisodeToolCall>(
-            "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, created_at
+            "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, diff, created_at
                FROM episode_tool_calls WHERE episode_id = $1 ORDER BY ordinal ASC",
         )
         .bind(episode_id)
@@ -301,7 +301,7 @@ impl Store {
             return Ok(Vec::new());
         }
         let rows = sqlx::query_as::<_, EpisodeToolCall>(
-            "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, created_at
+            "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, diff, created_at
                FROM episode_tool_calls WHERE episode_id = ANY($1)
               ORDER BY episode_id ASC, ordinal ASC",
         )
@@ -321,7 +321,7 @@ impl Store {
     /// 这张只增不减的表上就是一次全表扫描 + 排序。
     pub async fn recent_tool_calls(&self, limit: i64) -> Result<Vec<EpisodeToolCall>> {
         let rows = sqlx::query_as::<_, EpisodeToolCall>(
-            "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, created_at
+            "SELECT id, episode_id, ordinal, name, path, summary, ok, device_id, diff, created_at
                FROM episode_tool_calls ORDER BY id DESC LIMIT $1",
         )
         .bind(limit)

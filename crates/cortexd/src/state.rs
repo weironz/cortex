@@ -1183,6 +1183,9 @@ fn mock_chat_stream(
             summary: format!("在会话 {session} 中检索了 3 条相关记忆"),
             // memory_search 不碰文件 —— path 为 None 正是它必须可选的理由
             path: None,
+            // 也不改文件，所以没有 diff。演示数据不编一份假的：
+            // 那会让「有 diff」看起来像所有工具的常态
+            diff: None,
         },
     ];
 
@@ -1200,6 +1203,8 @@ fn mock_chat_stream(
             preview: MOCK_PREVIEW.into(),
             // mock 不越界：演示的是确认回路本身，不是越界那条支路
             scope: None,
+            // mock 演示的是 shell，没有 diff
+            diff: None,
         })
     });
     if let Some(p) = &pending {
@@ -1210,6 +1215,7 @@ fn mock_chat_stream(
             preview: MOCK_PREVIEW.into(),
             timeout_secs: confirms.timeout().as_secs(),
             scope: None,
+            diff: None,
         });
     }
     let head = stream::iter(head_events);

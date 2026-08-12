@@ -263,8 +263,8 @@ impl WriteTxn {
         let id = new.id.to_string();
         let stmt = sqlx::query(
             "INSERT INTO episode_tool_calls
-                 (id, episode_id, ordinal, name, path, summary, ok, device_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 (id, episode_id, ordinal, name, path, summary, ok, device_id, diff)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(&id)
         .bind(new.episode_id.to_string())
@@ -273,7 +273,8 @@ impl WriteTxn {
         .bind(&new.path)
         .bind(&new.summary)
         .bind(new.ok)
-        .bind(&new.device_id);
+        .bind(&new.device_id)
+        .bind(&new.diff);
 
         self.insert_row(table::EPISODE_TOOL_CALLS, &id, stmt).await
     }

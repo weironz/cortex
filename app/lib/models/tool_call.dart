@@ -31,6 +31,7 @@ class ToolCall {
     this.arguments,
     this.result,
     this.failed = false,
+    this.diff,
   });
 
   /// A call read back from `GET /sessions/{id}`. Already terminal — the row is
@@ -43,8 +44,15 @@ class ToolCall {
       path: asStringOrNull(json['path']),
       result: _stripPrefix(asStringOrNull(json['summary']), '$name ') ?? '已完成',
       failed: json['ok'] == false,
+      diff: asStringOrNull(json['diff']),
     );
   }
+
+  /// 这次写入改了什么（统一 diff，已截断）。null = 没有可看的改动。
+  ///
+  /// 只有 `write_file` 会有：只有它手上同时握着旧内容与新内容。shell 跑完
+  /// 之后文件变成什么样，agent 并不知道。
+  final String? diff;
 
   /// e.g. `memory_search`.
   final String name;
@@ -95,12 +103,14 @@ class ToolCall {
     String? arguments,
     String? result,
     bool? failed,
+    String? diff,
   }) => ToolCall(
     name: name,
     path: path ?? this.path,
     arguments: arguments ?? this.arguments,
     result: result ?? this.result,
     failed: failed ?? this.failed,
+    diff: diff ?? this.diff,
   );
 
   /// Folds one `tool` event into [calls], returning a new list.
@@ -116,6 +126,7 @@ class ToolCall {
     String name,
     String? summary, {
     String? path,
+    String? diff,
   }) {
     if (calls.isNotEmpty && calls.last.name == name && calls.last.pending) {
       final result = _stripPrefix(summary, '$name ');
@@ -126,6 +137,9 @@ class ToolCall {
           // only sent it on dispatch must not make the path disappear halfway
           // through the row's life.
           path: path,
+          // diff 只随**结果**那条事件到达（调用那一刻还没执行），
+          // 所以在这里合进去，而不是开行的时候
+          diff: diff,
           result: result ?? '已完成',
           failed: result != null && result.startsWith('失败'),
         ),

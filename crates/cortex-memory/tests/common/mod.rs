@@ -214,6 +214,7 @@ pub async fn seed_episode_with_tools(
             summary: (*summary).to_owned(),
             ok: *ok,
             device_id: DEVICE.to_owned(),
+            diff: None,
         })
         .collect();
 

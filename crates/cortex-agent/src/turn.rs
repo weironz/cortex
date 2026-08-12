@@ -68,6 +68,13 @@ pub enum AgentEvent {
         name: String,
         ok: bool,
         summary: String,
+        /// 这次写入改了什么，给界面看的。见 [`crate::tools::ToolResult::diff`]。
+        ///
+        /// 与 `summary` 并列而不是拼进它：summary 是一句自然语言，
+        /// 措辞随时会改；diff 是要被逐行着色渲染的结构化文本。
+        /// 拼在一起，客户端就得从措辞里把它切回来 —— 那正是 `path`
+        /// 当初从 summary 里拆出来的原因。
+        diff: Option<String>,
     },
 }
 
@@ -125,6 +132,12 @@ pub struct ConfirmRequest<'a> {
     /// 模型给的原始参数。**必须原样交给用户看** —— 对 `shell` 来说，
     /// 要批准的东西就是这段命令本身，摘要过的版本批不了。
     pub arguments: &'a serde_json::Value,
+    /// 这次写入会把文件改成什么样。`None` = 这个工具没有可看的改动。
+    ///
+    /// **治的是「盲签」**：只给工具名与参数，用户能看到的是
+    /// 「write_file 要写 config.toml」——他批准的其实是一个他没读过的内容。
+    /// 见 [`crate::diff`]。
+    pub diff: Option<&'a str>,
     /// 这次要碰的是**工作区外**的哪个位置。`None` = 没有越界。
     ///
     /// 批准一个越界访问和批准一次普通写入是两件不同的事，用户必须能分辨。
@@ -612,6 +625,7 @@ impl Turn {
                         name: call.name.clone(),
                         ok: result.ok,
                         summary: summarize(&result),
+                        diff: result.diff.clone(),
                     })
                     .await
                     .ok();
@@ -754,6 +768,33 @@ impl Turn {
             None => None,
         };
 
+        // ── 改动预览：必须在闸门**之前**算 ──
+        //
+        // 这是整件事最容易做错的一处。真正的写入在下面 `execute` 里，
+        // 而确认发生在它**之前** —— diff 若等到执行时才算，确认框里
+        // 永远是空的，而那恰恰是最需要它的时刻（上一轮把越界从「硬拒」
+        // 改成了「问一句」，问的时候答不出「要写什么进去」等于让人盲签）。
+        //
+        // 算完一路带着走：确认要用、事件要用、落库也要用。
+        //
+        // 只对 `write_file`：只有它手上同时有旧内容与新内容。shell 跑完
+        // 文件变成什么样，agent 并不知道，硬要显示就得每条命令前后扫一遍
+        // 工作区 —— 那是另一个数量级的事。
+        let preview = if call.name == "write_file" {
+            match (
+                call.arguments.get("path").and_then(|v| v.as_str()),
+                call.arguments.get("content").and_then(|v| v.as_str()),
+            ) {
+                (Some(raw), Some(content)) => sandbox
+                    .classify(raw)
+                    .ok()
+                    .and_then(|r| crate::diff::preview_write(r.path(), content)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         // ── 权限闸门。所有工具执行的唯一入口，见 ApprovalPolicy 的文档 ──
         //
         // 两段：同步的策略判断决定「要不要问」，要问就在这里 await 宿主。
@@ -781,6 +822,7 @@ impl Turn {
                         risk: spec.risk,
                         arguments: &call.arguments,
                         scope: outside.as_deref(),
+                        diff: preview.as_deref(),
                     })
                     .await;
                 // 只有「没人回答」置位；用户明确拒绝**不**置位 ——
@@ -831,6 +873,14 @@ impl Turn {
                 call,
             )
             .await
+        };
+
+        // 预览挂在**成功**的结果上：写失败了还画一份「改了什么」，
+        // 说的是一件没有发生的事。失败原因在 content 里，那才是要看的
+        let result = if result.ok {
+            result.with_diff(preview)
+        } else {
+            result
         };
 
         truncate(result)
@@ -1492,6 +1542,47 @@ mod tests {
         assert!(
             !attended_conflict(false, &ApprovalPolicy::default()),
             "没声明有人在场时这条检查与本轮无关 —— 那种部署靠的是内核沙箱"
+        );
+    }
+}
+
+#[cfg(test)]
+mod diff_side_channel_tests {
+    use super::*;
+
+    /// **diff 不许进模型上下文。**
+    ///
+    /// 模型刚刚才把完整的新内容发过来。把 diff 再喂回去是同一份信息付两次
+    /// token，还挤占本来就紧张的上下文 —— 而这个错误没有任何症状：
+    /// 功能照常，只是每次写文件都贵一倍，几周后从账单上才看得出来。
+    ///
+    /// 这条断言钉住的就是 `to_mcp_result` 只读 `content`。
+    #[test]
+    fn diff_不进模型上下文() {
+        let r = ToolResult::ok("已写入 a.txt（12 字节）")
+            .with_diff(Some("-old line\n+new line\n".into()));
+        let mcp = to_mcp_result(r);
+
+        let rendered = serde_json::to_string(&mcp).expect("序列化 MCP 结果");
+        assert!(
+            !rendered.contains("old line") && !rendered.contains("new line"),
+            "diff 的内容漏进了发给模型的工具响应里。\
+             它是一条纯界面旁路，模型不该收到第二份同样的信息。\n实际：{rendered}"
+        );
+        assert!(
+            rendered.contains("已写入"),
+            "content 本身还是要发给模型的 —— 那是它唯一能知道\
+             「写成功了没有」的途径。实际：{rendered}"
+        );
+    }
+
+    /// 失败的写入不带预览：说的是一件没有发生的事。
+    #[test]
+    fn 写失败时不给预览() {
+        let r = ToolResult::err("写入失败：权限不足");
+        assert!(
+            r.diff.is_none(),
+            "写失败了还画一份「改了什么」，用户会以为文件已经变了"
         );
     }
 }

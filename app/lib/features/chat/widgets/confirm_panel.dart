@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../models/pending_confirmation.dart';
 import '../../../state/chat_controller.dart';
 import '../../../state/confirm_controller.dart';
+import 'diff_view.dart';
 
 /// The tool-confirmation prompt, pinned directly above the composer.
 ///
@@ -42,7 +44,10 @@ class ConfirmPanel extends ConsumerWidget {
       children: [
         if (state.error != null) _ReceiptError(message: state.error!),
         for (final resolution in state.resolved)
-          _ResolvedNote(key: ValueKey(resolution.request.token), resolution: resolution),
+          _ResolvedNote(
+            key: ValueKey(resolution.request.token),
+            resolution: resolution,
+          ),
         for (final request in state.pending)
           _ConfirmCard(
             key: ValueKey(request.token),
@@ -130,6 +135,58 @@ class _ConfirmCard extends ConsumerWidget {
           ],
           const SizedBox(height: 9),
           _Preview(text: request.preview),
+
+          // ── 写到哪 ──────────────────────────────────────────
+          //
+          // 服务端从加上 `scope` 那天起就一直在发，而客户端整整一轮没读过
+          // —— 于是「批准一次越界写入」与「批准一次普通写入」在屏幕上
+          // 长得一模一样。用户看到的只是一个 path 参数，判断不出那是
+          // 工作区里的还是桌面上的，而这两件事的后果差得远。
+          if (request.scope case final scope?) ...[
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.warning_amber_rounded,
+                  size: 15,
+                  color: scheme.onErrorContainer,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: SelectionArea(
+                    child: Text(
+                      '这在当前工作区之外：$scope',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onErrorContainer,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+
+          // ── 写什么 ──────────────────────────────────────────
+          //
+          // 这一块就是「盲签」被治掉的地方：在此之前，用户能看到的只有
+          // 「write_file 要写 config.toml」，而他按下「允许」的是一段
+          // 他从没读过的内容。
+          if (request.diff case final diff?) ...[
+            const SizedBox(height: 8),
+            Text(
+              '这次会这样改：',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: scheme.onErrorContainer.withValues(alpha: 0.9),
+              ),
+            ),
+            const SizedBox(height: 4),
+            // 高度压得比别处紧：底下就是「允许 / 拒绝」两个按钮，
+            // 把它们顶出屏幕的话，这块 diff 反而挡住了它要服务的那个决定
+            DiffView(diff, maxHeight: 200),
+          ],
+
           const SizedBox(height: 6),
           Text(
             // States the default outcome, because the default is silent and

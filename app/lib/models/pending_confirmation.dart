@@ -23,6 +23,8 @@ class PendingConfirmation {
     required this.preview,
     required this.deadline,
     this.sessionId,
+    this.scope,
+    this.diff,
   });
 
   /// One-shot credential, echoed back verbatim in the receipt.
@@ -57,6 +59,25 @@ class PendingConfirmation {
   /// decoding an SSE event and the controller stamping it.
   final String? sessionId;
 
+  /// 这次要碰的**工作区外**的绝对路径。null = 在工作区内。
+  ///
+  /// # 这个字段在协议里躺了整整一轮没人读
+  ///
+  /// 服务端从加上它那天起就一直在发（`ChatEvent::Confirm.scope`，那边的
+  /// 文档甚至写明了「界面要据此把话说清楚」），而客户端的模型里根本没有
+  /// 它 —— 于是「批准一次越界写入」与「批准一次普通写入」在屏幕上长得
+  /// 一模一样，用户看到的只是一个 `path` 参数，判断不出那是工作区里的
+  /// 还是桌面上的。
+  ///
+  /// 这是本仓库第 8 次「造好了但没人调用」。
+  final String? scope;
+
+  /// 这次写入会把文件改成什么样。null = 没有可看的改动。
+  ///
+  /// 与 [scope] 治的是同一件事的两个轴：scope 回答「写到哪」，
+  /// diff 回答「写什么」。缺任何一个，「允许」这个按钮都是在盲签。
+  final String? diff;
+
   Duration remainingFrom(DateTime now) {
     final left = deadline.difference(now);
     return left.isNegative ? Duration.zero : left;
@@ -71,6 +92,8 @@ class PendingConfirmation {
     preview: preview,
     deadline: deadline,
     sessionId: id,
+    scope: scope,
+    diff: diff,
   );
 
   /// Decodes one entry of `GET /confirmations`.
@@ -92,6 +115,8 @@ class PendingConfirmation {
       Duration(seconds: asIntOrNull(json['expires_in_secs']) ?? kDefaultTimeoutSecs),
     ),
     sessionId: asStringOrNull(json['session_id']),
+    scope: asStringOrNull(json['scope']),
+    diff: asStringOrNull(json['diff']),
   );
 
   /// `cortexd::confirm::DEFAULT_TIMEOUT_SECS`. Only ever a fallback — every

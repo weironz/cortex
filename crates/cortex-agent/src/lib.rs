@@ -14,6 +14,7 @@
 //! 一个 `D:\codes\myproject` 在 Linux 服务端必然校验失败 —— 而那正是
 //! 用户唯一想绑的目录。
 
+pub mod diff;
 pub mod sandbox;
 pub mod tools;
 pub mod turn;

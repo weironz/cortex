@@ -314,6 +314,7 @@ async fn tool_calls_replay_with_a_separate_path_column() {
             summary: format!("{name} 完成"),
             ok,
             device_id: common::DEVICE.to_owned(),
+            diff: None,
         };
         s.write_txn(async |t| t.insert_episode_tool_call(&row).await)
             .await
@@ -345,6 +346,82 @@ async fn tool_calls_replay_with_a_separate_path_column() {
     assert!(
         !replay[3].ok,
         "失败的调用要如实标出来 —— 「哪几次失败了」是回放时一眼要看到的：{replay:?}"
+    );
+}
+
+/// diff 存进去之后回放时还在。
+///
+/// # 为什么单独测这一列
+///
+/// 「写进去了但读不出来」在这个仓库栽过一次（`FactDto` 少了两列，
+/// 落库正常、界面永远空着，隔了很久才发现）。diff 的形状一模一样：
+/// 三条读路各自手写 SELECT 列名，漏掉一列不会有任何报错 ——
+/// 只是重开会话后那次改动"就没改过"。
+///
+/// 顺带把 8192 那条 CHECK 也真踩一次。它是最后一道栅栏（agent 侧已经截断
+/// 过一次），而一道从没被踩过的栅栏和一条注释没有区别。
+#[tokio::test]
+async fn tool_call_diff_survives_replay_and_the_length_guard_bites() {
+    let Some(db) = common::setup().await else {
+        return;
+    };
+    let s = &db.store;
+
+    let turn = common::new_episode("diff", "把第二行改一下");
+    let turn_id = turn.id;
+    s.write_txn(async |t| t.insert_episode(&turn).await)
+        .await
+        .expect("写 episode 不该失败");
+
+    let diff = " line one\n-line two\n+line TWO\n line three\n";
+    let row = |ordinal: i32, name: &str, diff: Option<&str>| NewEpisodeToolCall {
+        id: Id::new(),
+        episode_id: turn_id,
+        ordinal,
+        name: name.to_owned(),
+        path: Some("note.txt".to_owned()),
+        summary: format!("{name} 完成"),
+        ok: true,
+        device_id: common::DEVICE.to_owned(),
+        diff: diff.map(str::to_owned),
+    };
+
+    for r in [row(0, "read_file", None), row(1, "write_file", Some(diff))] {
+        s.write_txn(async |t| t.insert_episode_tool_call(&r).await)
+            .await
+            .expect("写工具归因不该失败");
+    }
+
+    // 超一个字符就该被数据库挡下来。agent 侧已经截断过一次，走到这里说明
+    // 那次截断失效了 —— 这时宁可写入失败，也不要让一份没有上限的文本
+    // 顺着 sync_log 广播到每一台设备
+    let oversized = row(
+        2,
+        "write_file",
+        Some(&"x".repeat(cortex_store::TOOL_DIFF_MAX_CHARS + 1)),
+    );
+    let rejected = s
+        .write_txn(async |t| t.insert_episode_tool_call(&oversized).await)
+        .await;
+
+    let replay = s
+        .episode_tool_calls(&turn_id.to_string())
+        .await
+        .expect("查工具归因不该失败");
+
+    db.cleanup().await;
+
+    assert!(
+        rejected.is_err(),
+        "超过 {} 字符的 diff 必须被 CHECK 挡下 —— 这一列会随 sync_log 下发到所有设备，\
+         没有上限就是一条谁都没预算过的流量",
+        cortex_store::TOOL_DIFF_MAX_CHARS
+    );
+    assert_eq!(
+        replay.iter().map(|c| c.diff.as_deref()).collect::<Vec<_>>(),
+        vec![None, Some(diff)],
+        "diff 必须一字不差地回放，且不改文件的工具为 NULL（不是空串 —— \
+         空串会让界面画出一个空的 diff 框，看着像「改了但什么都没改」）：{replay:?}"
     );
 }
 

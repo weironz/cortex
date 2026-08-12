@@ -68,8 +68,9 @@ pub use model::{
     NewFactEvent, NewProjectEvent, NewRedaction, NewSessionEvent, NewSummary,
     PROJECT_NAME_MAX_CHARS, Project, ProjectEvent, ProjectOp, ProvenanceRef, Redaction,
     RedactionMode, RedactionTarget, Role, SESSION_TITLE_MAX_CHARS, SessionEvent, SessionOp,
-    SessionState, SourceChannel, SourceKind, Summary, SummaryScope, TOOL_NAME_MAX_CHARS,
-    TOOL_PATH_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS, TranscriptKind, WORKSPACE_PATH_MAX_CHARS, table,
+    SessionState, SourceChannel, SourceKind, Summary, SummaryScope, TOOL_DIFF_MAX_CHARS,
+    TOOL_NAME_MAX_CHARS, TOOL_PATH_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS, TranscriptKind,
+    WORKSPACE_PATH_MAX_CHARS, table,
 };
 pub use query::EpisodeCursor;
 #[doc(hidden)]

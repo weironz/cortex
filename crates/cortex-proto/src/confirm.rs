@@ -95,6 +95,11 @@ pub struct PendingMeta {
     /// 而只给工具名与 preview 是不够的：preview 里那个 path 可能是相对的，
     /// 「相对于哪儿」正是他此刻最需要知道、也最容易搞错的东西。
     pub scope: Option<String>,
+    /// 这次写入会把文件改成什么样。`None` = 没有可看的改动。
+    ///
+    /// **它治的是「盲签」**：只给工具名与 preview，用户看到的是
+    /// 「write_file 要写 config.toml」—— 他批准的是一个他没读过的内容。
+    pub diff: Option<String>,
 }
 
 /// 待确认项的对外形态（`GET /confirmations` 与 SSE 事件共用字段口径）。
@@ -121,6 +126,13 @@ pub struct PendingInfo {
     /// 那会让用户完全看不到弹窗，而不是看到一个信息少一点的弹窗。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// 这次写入会把文件改成什么样。见 [`PendingMeta::diff`]。
+    ///
+    /// `default` 的理由与 `scope` 逐字相同：后加的字段，少了它只是少一块
+    /// diff，不该让整条确认反序列化失败 —— 那会让用户**完全看不到弹窗**，
+    /// 比看到一个信息少一点的弹窗糟得多。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 struct Pending {
@@ -268,6 +280,7 @@ impl ConfirmRegistry {
                 asked_at: p.asked_at.to_rfc3339(),
                 expires_in_secs: p.deadline.saturating_duration_since(now).as_secs(),
                 scope: p.meta.scope.clone(),
+                diff: p.meta.diff.clone(),
             })
             .collect();
         // 稳定顺序：先问的排前面。HashMap 的迭代序每次都不一样，
@@ -413,6 +426,7 @@ mod tests {
             risk: "execute",
             preview: "command=echo hi".into(),
             scope: None,
+            diff: None,
         }
     }
 

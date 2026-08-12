@@ -90,6 +90,19 @@ landlock = "0.4"
 seccompiler = "0.5"
 libc = "0.2"
 
+# 文本 diff。Rust 里做这件事的事实标准（highlight.js 之于代码高亮的位置），
+# Apache-2.0。自己写 Myers 属于 CLAUDE.md 第一条明令禁止的那类活 ——
+# 繁琐、已被工业验证、且写错了只会得到一个「看起来对」的 diff。
+#
+# 只开 `text`（`TextDiff` 与 unified diff 就在这个 feature 后面），
+# 关掉默认的 unicode 分词：我们只按**行**比，用不上字素簇那套，
+# 而它会拖进一张几 MB 的 Unicode 表。
+#
+# 注意 `default-features = false` 会把 `text` 一起关掉 —— 那样 `TextDiff`
+# 就不在 crate root 里了，报的是「no TextDiff in the root」，
+# 看着像版本不对，实际是 feature 少了一个。
+similar = { version = "2", default-features = false, features = ["text"] }
+
 # 基础设施
 ulid = { version = "3", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }

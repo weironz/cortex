@@ -5,6 +5,7 @@ import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
 import '../shell/widgets/sync_indicator.dart';
+import 'session_changes_sheet.dart';
 import '../workspace/workspace_panel.dart';
 import 'widgets/confirm_panel.dart';
 import 'widgets/conversation_view.dart';
@@ -74,19 +75,26 @@ class ChatPane extends ConsumerWidget {
             ],
             const SyncIndicator(),
             const _BackendBadge(),
+            // 本会话改动。放在状态与显示开关之间：它既不是状态
+            //（不会自己变），也不是显示开关（点开是一个弹层）
+            if (hasSession)
+              IconButton(
+                onPressed: () => showSessionChanges(context),
+                iconSize: 18,
+                tooltip: '本会话改动',
+                icon: const Icon(Icons.difference_outlined),
+              ),
             // 设置搬去了左下角账号菜单（与 Codex 一致）：它与「我是谁」
             // 是一组，而这一行剩下的都是应用级的显示开关
             IconButton(
               onPressed: () => ref.read(themeModeProvider.notifier).cycle(),
               iconSize: 18,
               tooltip: '切换主题',
-              icon: Icon(
-                switch (ref.watch(themeModeProvider)) {
-                  ThemeMode.system => Icons.brightness_auto_rounded,
-                  ThemeMode.light => Icons.light_mode_rounded,
-                  ThemeMode.dark => Icons.dark_mode_rounded,
-                },
-              ),
+              icon: Icon(switch (ref.watch(themeModeProvider)) {
+                ThemeMode.system => Icons.brightness_auto_rounded,
+                ThemeMode.light => Icons.light_mode_rounded,
+                ThemeMode.dark => Icons.dark_mode_rounded,
+              }),
             ),
             // 右栏伸缩，放在最右 —— 它挨着的就是它控制的那一栏
             if (onToggleMemory != null)
@@ -142,11 +150,7 @@ class _BackendBadge extends ConsumerWidget {
       config.useMock,
       health,
     )) {
-      (true, _) => (
-        scheme.onSurfaceVariant,
-        'MOCK',
-        '数据来自内存夹具，未连接后端',
-      ),
+      (true, _) => (scheme.onSurfaceVariant, 'MOCK', '数据来自内存夹具，未连接后端'),
       (false, AsyncData(:final value)) when value.isHealthy => (
         const Color(0xFF2E9E5B),
         'LIVE',
@@ -156,11 +160,7 @@ class _BackendBadge extends ConsumerWidget {
           if (value.databaseNote != null) value.databaseNote!,
         ].join(' · '),
       ),
-      (false, AsyncError()) => (
-        scheme.error,
-        'DOWN',
-        '连不上 ${config.baseUrl}',
-      ),
+      (false, AsyncError()) => (scheme.error, 'DOWN', '连不上 ${config.baseUrl}'),
       _ => (scheme.onSurfaceVariant, '…', '正在检测 ${config.baseUrl}'),
     };
 
@@ -265,9 +265,7 @@ class _SendErrorBanner extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final error = ref.watch(
-      chatControllerProvider.select((s) => s.sendError),
-    );
+    final error = ref.watch(chatControllerProvider.select((s) => s.sendError));
     if (error == null) return const SizedBox.shrink();
 
     final theme = Theme.of(context);
@@ -292,10 +290,7 @@ class _SendErrorBanner extends ConsumerWidget {
               ),
             ),
           ),
-          TextButton(
-            onPressed: controller.retryLast,
-            child: const Text('重试'),
-          ),
+          TextButton(onPressed: controller.retryLast, child: const Text('重试')),
           IconButton(
             onPressed: controller.clearSendError,
             iconSize: 16,

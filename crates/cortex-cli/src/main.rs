@@ -446,6 +446,10 @@ async fn one_turn(
                 println!("{}", render::tool_line(&name, &summary, color));
             }
             Ok(ChatEvent::Confirm {
+                // CLI 暂不画 diff（终端里逐行着色是另一件事），
+                // 但必须**接住**这个字段：漏掉它，模式匹配编译不过 ——
+                // 这正是想要的，比静默忽略一个新字段好
+                diff: _,
                 token,
                 tool,
                 risk,

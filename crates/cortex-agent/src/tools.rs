@@ -56,6 +56,19 @@ pub struct ToolCall {
 pub struct ToolResult {
     pub ok: bool,
     pub content: String,
+
+    /// 给**界面**看的改动预览。`None` = 这个工具没有可看的改动。
+    ///
+    /// # 它不进模型上下文
+    ///
+    /// [`to_mcp_result`] 只读 [`content`]，刻意不碰这个字段。模型刚刚才把
+    /// 完整的新内容发过来，把 diff 再喂回去是同一份信息付两次 token，
+    /// 还挤占本来就紧张的上下文。
+    ///
+    /// 换句话说这是一条**纯旁路**：从工具执行处直达界面，中途不经过模型。
+    ///
+    /// [`content`]: ToolResult::content
+    pub diff: Option<String>,
 }
 
 impl ToolResult {
@@ -63,12 +76,22 @@ impl ToolResult {
         Self {
             ok: true,
             content: content.into(),
+            diff: None,
         }
     }
+
+    /// 带上给界面看的改动预览。见 [`ToolResult::diff`]。
+    #[must_use]
+    pub fn with_diff(mut self, diff: Option<String>) -> Self {
+        self.diff = diff;
+        self
+    }
+
     pub fn err(content: impl Into<String>) -> Self {
         Self {
             ok: false,
             content: content.into(),
+            diff: None,
         }
     }
 }

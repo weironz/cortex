@@ -258,6 +258,14 @@ pub enum ChatEvent {
         /// **静默显示错文件** —— 不报错、不崩溃，只是指向了另一个文件。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// 这次写入改了什么，逐行着色渲染用。`None` = 没有可看的改动
+        /// （不碰文件的工具、以及内容一字未变的写入）。
+        ///
+        /// 与 `path` 同一个理由单独成字段而不是拼进 `summary`：
+        /// summary 是给人看的一句话，措辞随时会改，客户端一旦从里面切
+        /// 结构化内容，改一次措辞就是**静默显示错东西**。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff: Option<String>,
     },
     /// **需要用户确认一次高风险工具调用。这一轮已经挂起，在等回执。**
     ///
@@ -302,6 +310,18 @@ pub enum ChatEvent {
         /// 而他判断不出那是工作区内的还是桌面上的 —— 这两件事的后果差得远。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<String>,
+        /// 这次写入会把文件改成什么样。`None` = 没有可看的改动。
+        ///
+        /// # 这个字段差点被漏在这里
+        ///
+        /// diff 一开始只加到了 `PendingMeta` / `PendingInfo`，也就是
+        /// `GET /confirmations` 那条**补拉**的路。而实时确认走的是这条 SSE
+        /// 事件 —— 于是确认框里永远没有 diff，只有断线重连后补拉的那次才有。
+        ///
+        /// 两条路必须都带：它们是同一件事的两个到达方式，缺一个的症状是
+        /// 「大部分时候没有，偶尔又有」，比彻底没有更难查。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff: Option<String>,
     },
     /// 结束，带上本轮 episode id 供追溯
     Done { episode_id: String },
@@ -516,6 +536,10 @@ pub struct ToolCallDto {
     pub path: Option<String>,
     pub summary: String,
     pub ok: bool,
+    /// 见 [`ChatEvent::Tool`] 的 `diff`。落库那一份是**截断过**的
+    /// （agent 侧就截好了，数据库那条 CHECK 是最后一道栅栏）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 /// 会话概览。

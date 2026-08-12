@@ -1,3 +1,4 @@
+import 'diff_view.dart';
 import 'package:flutter/material.dart';
 
 import '../../../models/injected_memory.dart';
@@ -320,13 +321,25 @@ class _Toggle extends StatelessWidget {
 }
 
 /// One invocation — call and result on a single line.
-class _ToolRow extends StatelessWidget {
+/// 一次工具调用。有 diff 的话可以展开看这次改了什么。
+///
+/// 默认**收着**：一轮里可能有五六次写入，全部摊开会把这一段变成一片
+/// 看不完的绿红，而抽屉本来是「扫一眼这轮干了什么」用的。
+class _ToolRow extends StatefulWidget {
   const _ToolRow({required this.call});
 
   final ToolCall call;
 
   @override
+  State<_ToolRow> createState() => _ToolRowState();
+}
+
+class _ToolRowState extends State<_ToolRow> {
+  bool _open = false;
+
+  @override
   Widget build(BuildContext context) {
+    final call = widget.call;
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final labelStyle = theme.textTheme.labelSmall ?? const TextStyle();
@@ -342,7 +355,7 @@ class _ToolRow extends StatelessWidget {
 
     final path = call.path;
 
-    return Padding(
+    final row = Padding(
       padding: const EdgeInsets.only(left: 7, bottom: 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -403,6 +416,23 @@ class _ToolRow extends StatelessWidget {
               ),
             ),
           ),
+          // 有改动才给展开箭头 —— 一个点下去什么都不展开的箭头，
+          // 比没有箭头更让人困惑
+          if (call.diff != null)
+            InkResponse(
+              onTap: () => setState(() => _open = !_open),
+              radius: 12,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Icon(
+                  _open
+                      ? Icons.keyboard_arrow_down_rounded
+                      : Icons.keyboard_arrow_right_rounded,
+                  size: 15,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
           if (call.pending) ...[
             const SizedBox(width: 8),
             Padding(
@@ -419,6 +449,19 @@ class _ToolRow extends StatelessWidget {
           ],
         ],
       ),
+    );
+
+    if (!_open || call.diff == null) return row;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        row,
+        Padding(
+          padding: const EdgeInsets.only(left: 27, bottom: 8, right: 4),
+          child: DiffView(call.diff!),
+        ),
+      ],
     );
   }
 }

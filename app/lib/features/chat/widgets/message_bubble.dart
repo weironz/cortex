@@ -71,10 +71,7 @@ class _UserBubble extends StatelessWidget {
               // Above the bubble rather than inside it: an image tinted by the
               // primary-coloured bubble reads as part of the UI instead of as
               // content the user attached.
-              AttachmentStrip(
-                attachments: message.attachments,
-                alignEnd: true,
-              ),
+              AttachmentStrip(attachments: message.attachments, alignEnd: true),
               // A message can legitimately be attachments only — "看这张图" with
               // a screenshot and nothing else. An empty bubble next to the
               // image would read as a failed send.
@@ -401,10 +398,7 @@ class _ThinkingIndicatorState extends State<_ThinkingIndicator>
               },
             ),
           const SizedBox(width: 4),
-          Text(
-            '正在检索记忆…',
-            style: Theme.of(context).textTheme.labelSmall,
-          ),
+          Text('正在检索记忆…', style: Theme.of(context).textTheme.labelSmall),
         ],
       ),
     );

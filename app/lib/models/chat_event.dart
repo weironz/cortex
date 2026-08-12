@@ -32,12 +32,15 @@ sealed class ChatEvent {
         name: asString(json['name'], 'tool'),
         summary: asStringOrNull(json['summary']),
         path: asStringOrNull(json['path']),
+        diff: asStringOrNull(json['diff']),
       ),
       'confirm' => ChatConfirmEvent(
         PendingConfirmation(
           token: asString(json['token']),
           tool: asString(json['tool'], 'tool'),
           risk: asString(json['risk'], 'execute'),
+          scope: asStringOrNull(json['scope']),
+          diff: asStringOrNull(json['diff']),
           preview: asString(json['preview']),
           // `timeout_secs` here, `expires_in_secs` on the recovery endpoint:
           // the same quantity named for the two different questions it answers
@@ -76,7 +79,12 @@ final class ChatMemoryEvent extends ChatEvent {
 /// The agent invoked a tool. Rendered as a collapsible one-liner in the
 /// conversation, not as message content.
 final class ChatToolEvent extends ChatEvent {
-  const ChatToolEvent({required this.name, this.summary, this.path});
+  const ChatToolEvent({
+    required this.name,
+    this.summary,
+    this.path,
+    this.diff,
+  });
   final String name;
   final String? summary;
 
@@ -84,6 +92,10 @@ final class ChatToolEvent extends ChatEvent {
   /// Optional in the contract precisely so that `memory_search` can omit it
   /// rather than send an empty string the UI would render as a path.
   final String? path;
+
+  /// 这次写入改了什么。只随**结果**那条事件到达 —— 调用那一刻还没执行，
+  /// 也就还没有改动可言。
+  final String? diff;
 }
 
 /// The turn is **suspended** until this is answered.

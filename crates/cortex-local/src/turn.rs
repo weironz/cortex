@@ -431,20 +431,30 @@ async fn bridge_events(
                     summary: format!("调用 {name}"),
                     name,
                     path,
+                    // 「即将调用」这一刻还没有结果，也就还没有 diff。
+                    // 它随 ToolResult 那一条到达
+                    diff: None,
                 }
             }
-            AgentEvent::ToolResult { name, ok, summary } => {
+            AgentEvent::ToolResult {
+                name,
+                ok,
+                summary,
+                diff,
+            } => {
                 let path = pending_path.remove(&name).flatten();
                 recorded.push(ToolCallInput {
                     name: name.clone(),
                     path: path.clone(),
                     summary: format!("{name} {summary}"),
                     ok,
+                    diff: diff.clone(),
                 });
                 ChatEvent::Tool {
                     summary: format!("{name} {summary}"),
                     name,
                     path,
+                    diff,
                 }
             }
         };
@@ -516,6 +526,9 @@ impl ToolHost for LocalHost {
             risk,
             preview: preview.clone(),
             scope: scope.clone(),
+            // 改动预览：确认框里先看见要写什么，再决定按不按允许。
+            // 这正是「盲签」被治掉的那一处
+            diff: req.diff.map(str::to_string),
         });
 
         let ask = ChatEvent::Confirm {
@@ -525,6 +538,9 @@ impl ToolHost for LocalHost {
             preview,
             timeout_secs: self.confirms.timeout().as_secs(),
             scope,
+            // 与 PendingMeta 那份同源：实时确认走这条 SSE 事件，
+            // 补拉走 GET /confirmations，两条都要带
+            diff: req.diff.map(str::to_string),
         };
         if self.events.send(ask).await.is_err() {
             tracing::info!(tool = req.tool, "客户端已断开，确认请求发不出去");

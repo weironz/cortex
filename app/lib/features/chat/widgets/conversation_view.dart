@@ -200,7 +200,10 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
               }
               if (i < messages.length) {
                 final message = messages[i];
-                return MessageBubble(key: ValueKey(message.id), message: message);
+                return MessageBubble(
+                  key: ValueKey(message.id),
+                  message: message,
+                );
               }
               return const _StreamingBubble();
             },
@@ -294,9 +297,7 @@ class _JumpToBottom extends StatelessWidget {
     return Material(
       elevation: 2,
       color: scheme.surfaceContainerHigh,
-      shape: CircleBorder(
-        side: BorderSide(color: scheme.outlineVariant),
-      ),
+      shape: CircleBorder(side: BorderSide(color: scheme.outlineVariant)),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
