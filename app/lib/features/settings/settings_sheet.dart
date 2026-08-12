@@ -270,11 +270,12 @@ class _OwnApiKeyTileState extends ConsumerState<_OwnApiKeyTile> {
   Future<void> _refresh() async {
     try {
       final s = await ref.read(cortexApiProvider).llmKeyStatus();
-      if (mounted)
+      if (mounted) {
         setState(() {
           _status = s;
           _error = null;
         });
+      }
     } on Object catch (e) {
       // 读不出来不该让整个设置页出错 —— 其余每一项都还是好的
       if (mounted) setState(() => _error = e);
@@ -297,11 +298,12 @@ class _OwnApiKeyTileState extends ConsumerState<_OwnApiKeyTile> {
             apiKey: entered.key,
             baseUrl: entered.baseUrl,
           );
-      if (mounted)
+      if (mounted) {
         setState(() {
           _status = s;
           _error = null;
         });
+      }
     } on Object catch (e) {
       if (mounted) setState(() => _error = e);
     } finally {
@@ -313,11 +315,12 @@ class _OwnApiKeyTileState extends ConsumerState<_OwnApiKeyTile> {
     setState(() => _busy = true);
     try {
       final s = await ref.read(cortexApiProvider).clearLlmKey();
-      if (mounted)
+      if (mounted) {
         setState(() {
           _status = s;
           _error = null;
         });
+      }
     } on Object catch (e) {
       if (mounted) setState(() => _error = e);
     } finally {
