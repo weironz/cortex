@@ -90,18 +90,46 @@ const MIME_PREFIXES: &[&str] = &["image/%"];
 ///
 /// 未配置 vision 模型时**什么都不做**（连任务都不起），与上传路径一致：
 /// 图片照常归档，只是检索不到。
-pub fn spawn(live: Arc<Live>, blobs: MediaStore) {
+pub fn spawn(st: crate::state::AppState, blobs: MediaStore) {
+    let Some(live) = st.live().cloned() else {
+        return; // mock 后端，没有库可回扫
+    };
     if !live.transcription_enabled() {
         tracing::info!("未配置 vision 模型，转录回扫器不启动");
         return;
     }
     tokio::spawn(async move {
         tokio::time::sleep(FIRST_SCAN_DELAY).await;
-        let mut ledger = Ledger::default();
+        // ledger（拉黑坏 blob）**每个租户一份**：hash 是内容寻址的，
+        // 两个租户可能各有一份同样字节的图，而其中一个转不了不代表
+        // 另一个也转不了（对象存储的键带租户前缀，可能只有一边缺文件）
+        let mut ledgers: std::collections::HashMap<String, Ledger> =
+            std::collections::HashMap::new();
         let mut tick = tokio::time::interval(SCAN_INTERVAL);
         loop {
             tick.tick().await;
-            scan_once(&live, &blobs, &mut ledger).await;
+
+            // 每轮重新列：刚注册的人也要被回扫覆盖到。
+            // 原先这里只有启动时那个连 public 的 store，于是新用户传的图
+            // **永远不会被补转录** —— 而那没有任何症状，只是搜不到
+            let schemas = match st.tenant_schemas().await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "列不出租户，本轮回扫跳过");
+                    continue;
+                }
+            };
+            for schema in &schemas {
+                let Ok(store) = st.tenant_store(schema).await else {
+                    tracing::warn!(schema = schema.as_str(), "连不上这个租户，跳过回扫");
+                    continue;
+                };
+                let bound = live.bind(&store);
+                let ledger = ledgers.entry(schema.as_str().to_owned()).or_default();
+                scan_once(bound.as_live(), &blobs, ledger).await;
+            }
+            // 已经不存在的租户不必再留着黑名单
+            ledgers.retain(|k, _| schemas.iter().any(|s| s.as_str() == k));
         }
     });
 }

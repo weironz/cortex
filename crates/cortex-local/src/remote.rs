@@ -176,6 +176,34 @@ impl Remote {
         ))
     }
 
+    /// 我这把凭据属于谁。
+    ///
+    /// 本地状态要按账号分目录（outbox、工作区绑定），而**只有远端知道
+    /// 这把 token 是谁的** —— 本地拿到的是一串会轮转的 access token，
+    /// 从它派生目录名会在下一次刷新时换一片新目录，把队列孤儿掉。
+    ///
+    /// # Errors
+    /// 远端不可达，或响应不是能解析的 JSON。离线是**正常情况**，
+    /// 调用方据此回落到上一次记住的账号（见 `config::user_dir`）。
+    pub async fn whoami(&self) -> Result<String> {
+        let resp = self
+            .auth(self.http.get(self.url("/auth/me")))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(map_transport)?;
+        #[derive(serde::Deserialize)]
+        struct Me {
+            user_id: String,
+        }
+        let me: Me = checked(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| CortexError::Unavailable(format!("解析 /auth/me 失败：{e}")))?;
+        Ok(me.user_id)
+    }
+
     /// 给会话改名。导入用它给每段对话挂上「Claude · 原标题」。
     ///
     /// 只发 `title` 一个字段：这条路径**不碰 workspace** ——

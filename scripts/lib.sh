@@ -175,6 +175,38 @@ psql_val() {
         psql -U "$POSTGRES_USER" -d "${2:-$POSTGRES_DB}" -Atqc "$1"
 }
 
+# 这个库里现在有哪些租户 schema（含 public）。
+#
+# 多用户之后，记忆表在**每个用户自己的 schema** 里。任何按表名查的运维
+# 脚本如果不带限定，只会落到 search_path 的第一段（public）——
+# 于是「没有需要抹除的东西」这句话对其他用户就是错的，而它读起来像一切正常。
+#
+# 没接账号体系（单用户自托管）时只回 public。
+tenant_schemas() {
+    psql_val "SELECT nspname FROM pg_namespace
+              WHERE nspname = 'public'
+                 OR nspname ~ '^u_[0-9a-hjkmnp-tv-z]{26}$'
+              ORDER BY (nspname <> 'public'), nspname"
+}
+
+# 在每个租户 schema 里跑同一条 SQL，把结果按行拼起来。
+#
+# 用 search_path 而不是把 schema 名拼进表名：脚本里那些 SQL 是照着单库
+# 写的（`FROM redactions`），逐条加限定要改的地方太多，而漏一处的表现
+# 又是「少报了一个用户」—— 同一个静默失败换个地方出现。
+psql_val_all_tenants() {
+    local sql="$1" sch
+    for sch in $(tenant_schemas); do
+        # 一个租户查不动**不能**让整轮失败：它可能是 migration 半路挂掉留下
+        # 的半成品 schema。但也不能安静跳过 —— 那等于把「这个用户没被覆盖到」
+        # 藏起来，而这个脚本的全部意义就是「说清楚抹掉了什么」
+        if ! psql_val "SET search_path TO \"$sch\", public; $sql" 2>/dev/null; then
+            echo "  ！ 租户 $sch 查不动（表缺失或权限不足），本轮**没有覆盖到它**" >&2
+        fi
+    done
+    return 0
+}
+
 # 跑一条 SQL，不要输出（DDL / 维护语句）
 psql_run() {
     docker exec -u postgres -e PGPASSWORD="$POSTGRES_PASSWORD" "$PG_CONTAINER" \

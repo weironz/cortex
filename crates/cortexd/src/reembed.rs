@@ -67,7 +67,7 @@ const FIRST_SCAN_DELAY: Duration = Duration::from_secs(45);
 const SLOW_AFTER_FAILURES: u32 = 3;
 
 /// 起一个后台回填任务。
-pub fn spawn(live: Arc<Live>) {
+pub fn spawn(st: crate::state::AppState) {
     if !enabled() {
         tracing::info!(
             "{ENV_ENABLED}=off：换模型后的向量回填**不会**运行。\
@@ -83,13 +83,17 @@ pub fn spawn(live: Arc<Live>) {
     tokio::spawn(async move {
         tokio::time::sleep(FIRST_SCAN_DELAY).await;
 
+        let Some(live) = st.live().cloned() else {
+            return; // mock 后端，没有库可回填
+        };
+
         // 先报数再动手。这是「默认开」这个选择的前提条件：
         // 自动花钱可以，但不能在用户不知道花了多少的情况下花
         live.report_embedding_state().await;
 
         let mut failures: u32 = 0;
         loop {
-            let outcome = scan_once(&live, batch).await;
+            let outcome = scan_all_tenants(&st, &live, batch).await;
             match outcome {
                 Outcome::Idle => failures = 0,
                 Outcome::Progressed => failures = 0,
@@ -113,6 +117,56 @@ enum Outcome {
     Progressed,
     /// 这一轮什么也没补成
     Failed,
+}
+
+/// 把一轮跑遍**所有**租户。
+///
+/// # 为什么这一层是必须的
+///
+/// 回填器原先只认启动时那个连 `public` 的 `Store`。多用户之后，
+/// 新注册的人的记忆**永远不会被回填** —— 而这没有任何症状：
+/// 他只是觉得「搜东西好像不太准」，因为向量召回那一路对他是空的。
+///
+/// 每轮重新列一次租户，不缓存：刚注册的人要在下一轮就被覆盖到。
+///
+/// 一个租户失败不影响其余的 —— 它们是各自独立的库。
+async fn scan_all_tenants(st: &crate::state::AppState, live: &Arc<Live>, batch: usize) -> Outcome {
+    let schemas = match st.tenant_schemas().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "列不出租户，这一轮跳过");
+            return Outcome::Failed;
+        }
+    };
+
+    let mut any_progress = false;
+    let mut any_failure = false;
+    for schema in &schemas {
+        let store = match st.tenant_store(schema).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(schema = schema.as_str(), error = %e, "连不上这个租户，跳过");
+                any_failure = true;
+                continue;
+            }
+        };
+        let bound = live.bind(&store);
+        match scan_once(bound.as_live(), batch).await {
+            Outcome::Progressed => any_progress = true,
+            Outcome::Failed => any_failure = true,
+            Outcome::Idle => {}
+        }
+    }
+
+    // 有进展就算有进展 —— 退避是为了「服务挂了别死磕」，
+    // 而只要还有一个租户在推进，服务就没挂
+    if any_progress {
+        Outcome::Progressed
+    } else if any_failure {
+        Outcome::Failed
+    } else {
+        Outcome::Idle
+    }
 }
 
 /// 一轮回填：取一批待办 → **在事务外**算向量 → 短事务批量插。

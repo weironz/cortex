@@ -191,6 +191,19 @@ pub struct Live {
 pub struct BoundLive(Arc<Live>);
 
 impl BoundLive {
+    /// 借出内层。
+    ///
+    /// 给**后台任务**用：它们要调 `store()` / `embedder()` /
+    /// `transcribe_and_store()` 这些与租户无关的公开方法，而那些方法长在
+    /// `Live` 上。绑定过的这一份，`store` 字段已经指向那个租户了。
+    ///
+    /// 请求路径**不要**用它绕过转发层 —— 那等于把「不绑定就调不到」
+    /// 这个保证还回去。`state.rs` 那条守卫测试盯着的就是这件事。
+    #[must_use]
+    pub fn as_live(&self) -> &Arc<Live> {
+        &self.0
+    }
+
     // 以下全是转发。签名与 `Live` 上那份逐字相同，只是多了一层。
     //
     // 想过用 `Deref<Target = Live>` 省掉这一坨 —— 不行：那样

@@ -276,25 +276,56 @@ impl AppState {
         let blobs = MediaStore::connect(config).await;
 
         let live = Arc::new(live);
-        // 预签名直传那条路上服务端从没经手字节，转录无从触发 —— 大文件成了
-        // 纯归档。回扫器以 blobs 表为权威清单把它们捡回来。
-        // 未配 vision 模型时它自己不会启动。
-        crate::backfill::spawn(Arc::clone(&live), blobs.clone());
-        // 换过 embedding 模型时把旧事实的向量补出来。默认开着 ——
-        // 关掉的代价（旧记忆永久退出向量召回）没有任何症状，
-        // 而开着的代价（一次全库 embedding 调用）是可见的，
-        // 且它会先把数字报出来再动手。见 reembed 的模块注释
-        crate::reembed::spawn(Arc::clone(&live));
 
-        Ok(Self {
+        let st = Self {
             inner: Arc::new(Inner {
                 config: config.clone(),
                 backend: Backend::Live(live),
                 bus,
-                blobs,
+                blobs: blobs.clone(),
                 rt,
             }),
-        })
+        };
+
+        // ── 已有租户的 migration ─────────────────────────────
+        //
+        // 新注册的用户由 `provision` 迁移，而**已经存在的**租户此前一次
+        // 都没被迁过：`migrate_all` 写好了、导出了，没有任何一处调用它。
+        // 后果是加一条新 migration 之后，老用户的库停在旧结构上 ——
+        // 表现是零散的 SQL 错误，不是一条能读的启动失败。
+        //
+        // 坏掉的单独标出来，不拖垮整个服务：一个用户的库坏了，
+        // 其他人照常。
+        if let Ok(schemas) = st.tenant_schemas().await
+            && let Ok(acc) = st.accounts()
+        {
+            let others: Vec<_> = schemas
+                .into_iter()
+                // public 上面刚迁过（`Live::new` 里那一句）
+                .filter(|s| s.as_str() != cortex_store::SchemaName::public().as_str())
+                .collect();
+            if !others.is_empty() {
+                let results = cortex_store::migrate_all(acc.tenants.as_ref(), &others).await;
+                let bad = results.iter().filter(|r| r.failure.is_some()).count();
+                tracing::info!(
+                    tenants = results.len(),
+                    failed = bad,
+                    "已有租户的 migration 跑完"
+                );
+            }
+        }
+
+        // 预签名直传那条路上服务端从没经手字节，转录无从触发 —— 大文件成了
+        // 纯归档。回扫器以 blobs 表为权威清单把它们捡回来。
+        // 未配 vision 模型时它自己不会启动。
+        crate::backfill::spawn(st.clone(), blobs);
+        // 换过 embedding 模型时把旧事实的向量补出来。默认开着 ——
+        // 关掉的代价（旧记忆永久退出向量召回）没有任何症状，
+        // 而开着的代价（一次全库 embedding 调用）是可见的，
+        // 且它会先把数字报出来再动手。见 reembed 的模块注释
+        crate::reembed::spawn(st.clone());
+
+        Ok(st)
     }
 
     /// 不碰网络、不碰文件系统的最小状态，专供 crate 内的 HTTP 测试。
@@ -363,6 +394,71 @@ impl AppState {
     }
 
     // ───────────────────────── 多租户 ─────────────────────────
+
+    /// 真实后端的句柄。后台任务用它按租户绑定。
+    #[must_use]
+    pub fn live(&self) -> Option<&Arc<Live>> {
+        match &self.inner.backend {
+            Backend::Mock => None,
+            Backend::Live(l) => Some(l),
+        }
+    }
+
+    /// 现在有哪些租户。**每次重新查**，不缓存。
+    ///
+    /// 后台任务靠它遍历。缓存一份的话，注册之后新用户要等到下次重启才被
+    /// 回填覆盖到 —— 而那是静默的：他只是觉得「语义召回好像差一点」。
+    ///
+    /// 没接账号体系时返回 `[public]` —— 单用户自托管的形态。
+    ///
+    /// # Errors
+    /// 查不动 `cortex_auth.users`。
+    pub async fn tenant_schemas(&self) -> Result<Vec<cortex_store::SchemaName>> {
+        let Ok(acc) = self.accounts() else {
+            return Ok(vec![cortex_store::SchemaName::public()]);
+        };
+        let names: Vec<String> = sqlx::query_scalar(
+            // disabled 的账号不迁、不回填 —— 他登不进来，花在他身上的
+            // embedding 钱是纯浪费
+            "SELECT schema_name FROM cortex_auth.users WHERE disabled_at IS NULL",
+        )
+        .fetch_all(&acc.pool)
+        .await
+        .map_err(|e| CortexError::Store(format!("列不出租户：{e}")))?;
+
+        Ok(names
+            .iter()
+            .filter_map(|n| match cortex_store::SchemaName::new(n) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    // 跳过而不是整批失败：一行坏数据不该让所有人的回填停摆
+                    tracing::error!(schema = n, error = %e, "跳过一个 schema 名不合法的租户");
+                    None
+                }
+            })
+            .collect())
+    }
+
+    /// 某个租户的 `Store`。后台任务用。
+    ///
+    /// # Errors
+    /// mock 后端，或者那个 schema 的池建不起来。
+    pub async fn tenant_store(
+        &self,
+        schema: &cortex_store::SchemaName,
+    ) -> Result<std::sync::Arc<cortex_store::Store>> {
+        if schema.as_str() == cortex_store::SchemaName::public().as_str() {
+            return self
+                .public_store()
+                .ok_or_else(|| CortexError::Unavailable("mock 后端没有库".into()));
+        }
+        self.accounts()
+            .map_err(|_| CortexError::Unavailable("没接账号体系".into()))?
+            .tenants
+            .get(schema)
+            .await
+            .map_err(|e| CortexError::Store(format!("连不上 {}：{e}", schema.as_str())))
+    }
 
     /// `public` 那个池 —— 启动时建的那一个。mock 后端下没有。
     ///

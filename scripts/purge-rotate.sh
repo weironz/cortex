@@ -88,8 +88,18 @@ CASCADE_TABLES=(episodes facts blob_transcripts summaries)
 # ══════════════════════════════════════════════════════════
 step "1 / 盘点"
 
-n_purge="$(psql_val "SELECT count(*) FROM redactions WHERE mode = 'purge'")"
-n_redact="$(psql_val "SELECT count(*) FROM redactions WHERE mode = 'redact'")"
+# 跨**所有**租户求和。只查 public 的话，「没有需要抹除的东西」这句话
+# 对其他用户就是错的 —— 而脚本会据此 exit 0，一个真实的删除请求就这样
+# 被安静地丢掉了
+n_purge=0; n_redact=0
+for c in $(psql_val_all_tenants "SELECT count(*) FROM redactions WHERE mode = 'purge'"); do
+    n_purge=$(( n_purge + c ))
+done
+for c in $(psql_val_all_tenants "SELECT count(*) FROM redactions WHERE mode = 'redact'"); do
+    n_redact=$(( n_redact + c ))
+done
+log "覆盖租户：$(tenant_schemas | tr '
+' ' ')"
 n_total=$(( n_purge + n_redact ))
 log "redactions 墓碑：purge $n_purge 条 / redact $n_redact 条"
 
@@ -102,7 +112,7 @@ fi
 
 if [ "$n_total" -gt 0 ]; then
     printf '\n最近的墓碑（最多 10 条）：\n'
-    psql_val "SELECT '  ' || to_char(created_at,'YYYY-MM-DD HH24:MI') || '  ' || mode
+    psql_val_all_tenants "SELECT '  ' || to_char(created_at,'YYYY-MM-DD HH24:MI') || '  ' || mode
                      || '  ' || target_kind || '  ' || left(target_id, 16)
                      || '  by ' || actor || '  reason=' || left(reason, 40)
               FROM redactions ORDER BY created_at DESC LIMIT 10"
@@ -114,11 +124,11 @@ fi
 # 顺序搞反 —— 先毁掉备份再发现主存储没清干净 —— 是最坏的组合：
 # 既丢了历史，又没抹掉秘密。所以这里是硬拦截，不是提醒。
 step "2 / 检查 purge 是否已传播到主存储与镜像"
-mapfile -t purge_blobs < <(psql_val "
+mapfile -t purge_blobs < <(psql_val_all_tenants "
     SELECT DISTINCT r.target_id
     FROM redactions r
     WHERE r.target_kind = 'blob' AND r.mode = 'purge'
-    ORDER BY 1")
+    ORDER BY 1" | sort -u)
 
 leftover=0
 for h in "${purge_blobs[@]}"; do
@@ -184,12 +194,16 @@ fi
 VACUUMED=""
 if [ "$DO_VACUUM" = "1" ]; then
     step "4 / VACUUM FULL —— 把死元组里的原文真的擦掉"
-    for t in "${CASCADE_TABLES[@]}"; do
-        exists="$(psql_val "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='$t'")"
-        [ "${exists:-0}" = "1" ] || { log "表 $t 不存在，跳过"; continue; }
-        log "VACUUM FULL ${t}（持 ACCESS EXCLUSIVE 锁，期间该表不可用）"
-        psql_run "VACUUM (FULL, ANALYZE) \"$t\"" || die "VACUUM FULL $t 失败"
-        VACUUMED="$VACUUMED $t"
+    # 逐租户逐表。写死 schemaname='public' 会让其他用户的死元组
+    # 原封不动地进新全量 —— 抹除报告说做完了，而原文还在
+    for sch in $(tenant_schemas); do
+        for t in "${CASCADE_TABLES[@]}"; do
+            exists="$(psql_val "SELECT count(*) FROM pg_tables WHERE schemaname='$sch' AND tablename='$t'")"
+            [ "${exists:-0}" = "1" ] || continue
+            log "VACUUM FULL ${sch}.${t}（持 ACCESS EXCLUSIVE 锁，期间该表不可用）"
+            psql_run "VACUUM (FULL, ANALYZE) \"$sch\".\"$t\""                 || die "VACUUM FULL $sch.$t 失败"
+            VACUUMED="$VACUUMED $sch.$t"
+        done
     done
     ok "已重写：$VACUUMED"
 else

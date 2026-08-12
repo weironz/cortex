@@ -129,8 +129,35 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
-    let outbox = Outbox::new(&dir);
-    let workspaces = Workspaces::load(&dir);
+    // ── 本地状态按账号分目录 ─────────────────────────────
+    //
+    // 原先是每设备一份。一台机器上换个账号，A 断网期间排的队会被 B
+    // 登录后冲进 B 的记忆库 —— 而重放时没有任何提示：那些 episode
+    // 长得和 B 自己写的一模一样。
+    //
+    // 只有远端知道这把 token 是谁的，所以要问一次。离线问不到就用
+    // 「上一次是谁」——一台机器上换账号本来就不频繁，而离线时那是唯一
+    // 能拿到的线索
+    let user_dir = match remote.whoami().await {
+        Ok(user_id) => {
+            config::adopt_pending(&dir, &user_id);
+            config::remember_user(&dir, &user_id);
+            let d = config::user_dir(&dir, &user_id)?;
+            tracing::info!(user = %user_id, dir = %d.display(), "本地状态目录");
+            d
+        }
+        Err(e) => {
+            let d = config::last_user_dir(&dir)?;
+            tracing::warn!(
+                error = %e, dir = %d.display(),
+                "问不到远端这把凭据属于谁，先用上一次那个账号的目录"
+            );
+            d
+        }
+    };
+
+    let outbox = Outbox::new(&user_dir);
+    let workspaces = Workspaces::load(&user_dir);
     let llm = llm::build(route, &remote)?;
 
     // 未绑定工作区的会话：沙箱是**封闭**的（可访问文件范围是空集）。
