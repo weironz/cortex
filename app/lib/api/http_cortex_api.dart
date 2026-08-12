@@ -8,6 +8,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../import/import_source.dart';
 import '../models/auth_tokens.dart';
+import '../models/llm_key_status.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
 import '../models/chat_event.dart';
@@ -215,6 +216,47 @@ class HttpCortexApi implements CortexApi {
     }
     return AuthTokens.fromJson(
       _decodeObject(path, utf8.decode(response.bodyBytes)),
+    );
+  }
+
+    @override
+  Future<LlmKeyStatus> llmKeyStatus() => _llmKey('GET', null);
+
+  @override
+  Future<LlmKeyStatus> setLlmKey({
+    required String provider,
+    required String apiKey,
+  }) => _llmKey('PUT', {'provider': provider, 'api_key': apiKey});
+
+  @override
+  Future<LlmKeyStatus> clearLlmKey() => _llmKey('DELETE', null);
+
+  /// 三个动作共用一条路径，只有方法与请求体不同。
+  ///
+  /// 合成一个是因为**错误处理必须逐字相同**：三处各写一遍的话，
+  /// 迟早有一处忘了检查状态码，然后把一段错误 JSON 当成状态解析，
+  /// 界面上显示「未配置」—— 而实际是存失败了。
+  Future<LlmKeyStatus> _llmKey(String method, Map<String, Object?>? body) async {
+    final uri = _uri('/settings/llm-key');
+    final http.Response response;
+    try {
+      final req = http.Request(method, uri)
+        ..headers.addAll(_headers(const {'accept': 'application/json'}));
+      if (body != null) {
+        req.headers['content-type'] = 'application/json';
+        // 明文只在这里出现一次。**绝不进 query string** —— 那会落进
+        // nginx 的访问日志，而访问日志通常比数据库更容易被人翻到
+        req.body = jsonEncode(body);
+      }
+      response = await http.Response.fromStream(await _client.send(req));
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(response.statusCode, _errorMessage(response));
+    }
+    return LlmKeyStatus.fromJson(
+      _decodeObject('settings/llm-key', utf8.decode(response.bodyBytes)),
     );
   }
 

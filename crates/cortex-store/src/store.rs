@@ -147,7 +147,17 @@ impl Store {
         &self.pool
     }
 
-    pub(crate) fn pool(&self) -> &PgPool {
+    /// 底层连接池。
+    ///
+    /// 给**这个 crate 之外**、但仍然属于同一个租户的表用（当前是 cortexd
+    /// 的 `llm_keys`）。那张表与记忆无关，不值得为它在 repository 层加
+    /// 一组方法，但它必须落在**同一个 schema** 里 —— 而这个池的
+    /// `search_path` 已经焊死在连接选项上了，拿它就对了。
+    ///
+    /// 不要拿它去写记忆表：那条路必须走 [`Self::write_txn`]
+    /// （advisory lock + 同事务 sync_log）。
+    #[must_use]
+    pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 

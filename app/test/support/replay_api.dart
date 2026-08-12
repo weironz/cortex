@@ -33,7 +33,7 @@ import 'package:cortex_app/models/sync_record.dart';
 /// The cursor here is an episode id rather than cortexd's `<time>|<ulid>`. The
 /// client treats it as opaque either way; using a different shape is a cheap
 /// check that it really does.
-class ReplayApi implements CortexApi {
+class ReplayApi with LlmKeyUnsupported implements CortexApi {
   ReplayApi({
     required this.episodeCount,
     this.fail = false,

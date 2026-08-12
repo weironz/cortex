@@ -7,6 +7,7 @@ mod accounts;
 mod auth;
 mod backfill;
 mod blobs;
+mod byo_key;
 mod cors;
 mod credentials;
 mod cursor;

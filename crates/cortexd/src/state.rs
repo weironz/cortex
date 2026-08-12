@@ -766,12 +766,16 @@ impl AppState {
     ///
     /// mock 后端下没有可转发的对象，返回 `Unavailable` 而不是伪造一段流：
     /// 假的 token 流会让本地 agent 看着能跑，直到有人问它为什么答非所问。
-    pub async fn llm_stream(&self, req: LlmStreamRequest) -> Result<MessageStream> {
+    pub async fn llm_stream(
+        &self,
+        req: LlmStreamRequest,
+        own: Option<(&str, &str)>,
+    ) -> Result<MessageStream> {
         match &self.inner.backend {
             Backend::Mock => Err(CortexError::Unavailable(
                 "本实例跑在 mock 后端上，没有可用的 LLM 供应商".into(),
             )),
-            Backend::Live(l) => l.llm_stream(req).await,
+            Backend::Live(l) => l.llm_stream_with_key(req, own).await,
         }
     }
 

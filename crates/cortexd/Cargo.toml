@@ -45,6 +45,8 @@ anyhow.workspace = true
 # 而这里的凭据是 256 位内核随机数，慢一百万倍也还是爆破不动。见 src/auth.rs。
 sha2 = "0.10"
 hex = "0.4"
+# 自带 key 的 AES-256-GCM。已经在依赖树里（rustls 拉的），这里显式声明
+ring = "0.17"
 # 凭据必须直接来自内核 CSPRNG。不用 ULID 凑数：它高 48 位是时间戳，
 # 随机位只有 80，而「窗口很短」不该被算进熵里。见 src/confirm.rs。
 getrandom = "0.3"

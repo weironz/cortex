@@ -721,13 +721,54 @@ impl Live {
     ///
     /// 请求里只有档位。让客户端指定模型名，等于让任何拿到 token 的人
     /// **拿服务端的 key 跑任意模型** —— 而账单是服务端付。
-    pub async fn llm_stream(&self, req: LlmStreamRequest) -> Result<MessageStream> {
-        let model = match req.tier {
-            ModelTier::Main => self.llm.model(),
-            ModelTier::Cheap => self.llm.cheap_model(),
+    /// 同上，但可以指定用**哪一把 key** 调。
+    ///
+    /// `own` 是用户自己填的那把。给了就现建一个 provider 用它，
+    /// 这次调用因此不占配额（也不花服务端的钱）。
+    ///
+    /// # 为什么每次现建而不是缓存
+    ///
+    /// 缓存要按 (用户, 供应商, key) 做键并处理失效 —— 而 key 是可以随时
+    /// 被换掉或撤下的，一个还活着的缓存项意味着「撤下之后还在用旧 key 扣钱」。
+    /// 建一个 provider 只是搭一个 reqwest 客户端，比它随后那次 HTTP
+    /// 便宜得多。
+    ///
+    /// # Errors
+    /// 供应商建不起来，或者上游拒绝。
+    pub async fn llm_stream_with_key(
+        &self,
+        req: LlmStreamRequest,
+        own: Option<(&str, &str)>,
+    ) -> Result<MessageStream> {
+        let Some((provider_name, api_key)) = own else {
+            let model = match req.tier {
+                ModelTier::Main => self.llm.model(),
+                ModelTier::Cheap => self.llm.cheap_model(),
+            };
+            return Ok(self
+                .llm
+                .stream_with(model, &req.system, &req.messages, &req.tools)
+                .await?);
         };
-        Ok(self
-            .llm
+
+        let provider: std::sync::Arc<dyn cortex_llm::Provider> =
+            cortex_llm::provider::build(provider_name, api_key)
+                .map_err(|e| CortexError::Config(format!("自带 key 建不起供应商：{e}")))?
+                .into();
+        // 模型配置沿用服务端那份 —— 用户填的是 key，不是模型。
+        // 让他连模型一起换需要一整套「这个供应商有哪些模型」的校验，
+        // 而填错模型名的表现是每次对话都失败
+        let client = cortex_llm::LlmClient::from_provider(
+            provider,
+            provider_name,
+            self.llm.model().clone(),
+            self.llm.cheap_model().clone(),
+        );
+        let model = match req.tier {
+            ModelTier::Main => client.model(),
+            ModelTier::Cheap => client.cheap_model(),
+        };
+        Ok(client
             .stream_with(model, &req.system, &req.messages, &req.tools)
             .await?)
     }

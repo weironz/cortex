@@ -158,7 +158,9 @@ fn every_data_path_goes_through_bind() {
         "latest_cursor",
         "database_status",
         "embedding_health",
-        "llm_stream", // 纯转发，不碰任何一张表
+        // 纯转发，不碰任何一张表。自带 key 那一支拿的是解密后的字符串，
+        // 而**取那把 key 的时候已经绑定过租户了**（handler 里 own_key(&tenant)）
+        "llm_stream_with_key",
         "bind",
     ];
     let mut offenders = Vec::new();

@@ -73,6 +73,10 @@ macro_rules! protected_routes {
 
 protected_routes! {
     "/auth/ticket" [POST] => post(issue_ticket),
+    // 自带 API key。三个动作一条路径：看状态 / 存 / 撤下
+    "/settings/llm-key" [GET, PUT, DELETE] => get(crate::byo_key::get)
+        .put(crate::byo_key::put)
+        .delete(crate::byo_key::delete),
     "/chat" [POST] => post(chat),
     // 工具确认的回执与待办列表。
     //
@@ -330,9 +334,24 @@ async fn llm_stream(
     // 在**发起之前**查：事后扣意味着最后那一次一定会超，而那一次
     // 可能是一场六千次调用的导入
     let user = crate::accounts::current_user(&st, &headers).await;
-    st.enforce_quota(&user).await?;
 
-    let upstream = st.llm_stream(req).await?;
+    // 自带 key 的人走自己的、不占配额，所以**先看有没有 key，再决定要不要查配额**。
+    // 顺序反过来会把一个填了自己 key 的人拦在他自己的额度外面 ——
+    // 而配额消息里恰恰写着「填自己的 key 就不占配额」
+    let tenant = st.tenant(&headers).await?;
+    let own = st.own_key(&tenant).await;
+    if own.is_none() {
+        st.enforce_quota(&user).await?;
+    }
+
+    let upstream = st
+        .llm_stream(
+            req,
+            own.as_ref()
+                .map(|k| (k.provider.as_str(), k.api_key.as_str())),
+        )
+        .await?;
+    let used_own_key = own.is_some();
 
     // 记账：流里每一帧都带着 `ProviderUsage`，而**最后一帧的累计值**
     // 才是这次调用的总量。所以边转发边留最新的那个，流结束时写一行。
@@ -395,8 +414,9 @@ async fn llm_stream(
                 crate::quota::Usage {
                     input_tokens: input,
                     output_tokens: output,
-                    // 自带 key 还没接（roadmap R9 的后半段），先按服务端的记
-                    own_key: false,
+                    // 自带 key 的用量照记，但不占配额 ——「我这个月花了多少」
+                    // 与「我还剩多少额度」是两个问题
+                    own_key: used_own_key,
                 },
                 &model,
             )
@@ -874,10 +894,16 @@ mod tests {
             let path = probe_path(pattern);
 
             // 先证明这条探针路径真的能匹配到路由，否则下面的断言是空的
-            let unsupported = [Method::DELETE, Method::PUT]
+            // 候选里要至少有一个是这条路由没声明的。三个是因为
+            // `/settings/llm-key` 一条路径上同时挂了 GET / PUT / DELETE ——
+            // 原先只有两个候选，加上那条路由之后这里直接 panic。
+            // 那不是坏事：它逼着人来看一眼探针还成不成立
+            let unsupported = [Method::DELETE, Method::PUT, Method::PATCH]
                 .into_iter()
                 .find(|m| !methods.contains(m))
-                .expect("DELETE 与 PUT 不该同时被某条路由占用");
+                .expect(
+                    "DELETE / PUT / PATCH 全被某条路由占了 ——                      换一个这条路由没声明的方法当探针，或者给它单独写一条测试",
+                );
             let routed = status_of(&app, &unsupported, &path, Some(&token)).await;
             assert_eq!(
                 routed,

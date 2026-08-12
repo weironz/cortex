@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import '../import/import_source.dart';
 import '../models/auth_tokens.dart';
+import '../models/llm_key_status.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
 import '../models/chat_event.dart';
@@ -166,6 +167,20 @@ abstract interface class CortexApi {
   /// 而已经泄露出去的那一份照样能用到 30 天后。
   Future<void> logout(String refreshToken);
 
+  /// `GET /settings/llm-key` —— 填没填过自带 key、填的是哪一把。
+  Future<LlmKeyStatus> llmKeyStatus();
+
+  /// `PUT /settings/llm-key` —— 存一把自己的 key。
+  ///
+  /// 明文只在这一次请求体里出现，之后再也拿不回来（服务端只回后 4 位）。
+  Future<LlmKeyStatus> setLlmKey({
+    required String provider,
+    required String apiKey,
+  });
+
+  /// `DELETE /settings/llm-key` —— 撤下，回到用服务端那把（重新占配额）。
+  Future<LlmKeyStatus> clearLlmKey();
+
   /// Hands the daemon a file to parse, and gets back something cheap to refer
   /// to it by.
   ///
@@ -295,4 +310,25 @@ abstract interface class CortexApi {
   Future<SyncPage> sync({required int since, int limit = 500});
 
   void dispose();
+}
+
+/// 「这个实现不支持自带 key」。
+///
+/// mock、回放替身、以及测试里那几个假 API 都是这样 —— 它们没有可以存
+/// 密钥的地方。写成 mixin 而不是让每个类各写三个方法：这个接口每加一个
+/// 方法，五个测试替身就要跟着补一遍，而漏掉的那个直到编译才发现。
+///
+/// **如实回 `supported: false`**，不假装支持：假装的结果是设置页给出一个
+/// 存不进去的输入框，用户填了、点保存、看起来成功了、下次打开又是空的。
+/// **不要用在真实客户端上**：那样删掉 `HttpCortexApi` 里任何一个方法都不会
+/// 编译报错，而是静默退化成「这个部署不支持」—— 用户看到的是入口消失了。
+mixin LlmKeyUnsupported {
+  Future<LlmKeyStatus> llmKeyStatus() async => LlmKeyStatus.empty;
+
+  Future<LlmKeyStatus> setLlmKey({
+    required String provider,
+    required String apiKey,
+  }) async => LlmKeyStatus.empty;
+
+  Future<LlmKeyStatus> clearLlmKey() async => LlmKeyStatus.empty;
 }

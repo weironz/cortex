@@ -190,7 +190,7 @@ impl AppState {
         Err(ApiError::too_many_requests(format!(
             "这个月的用量已经用完了（{} / {} token，按最近 {} 天滚动计算）。\
              等最早那批用量滑出窗口就会自动恢复；\
-             要立刻继续，可以在设置里填自己的 API key —— 自带 key 不占配额",
+             要立刻继续，可以在**设置 → 模型 → 自己的 API key**里填一把自己的 ——              自带 key 的调用不占这里的配额",
             status.used_tokens,
             status.limit_tokens.unwrap_or(0),
             status.window_days,
