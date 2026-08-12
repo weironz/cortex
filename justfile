@@ -155,77 +155,18 @@ watch:
 
 # 拉起本地构建的桌面端 —— 改完界面自己看一眼用
 #
-# 干三件事：把在跑的那个**强制关掉**、重新构建、再拉起来。
+# 把在跑的**强制关掉**、重新构建、再拉起来。细节与踩过的坑见脚本头部。
 #
-# ── 为什么一定要先关 ──────────────────────────────────────
-# 两个窗口长得一模一样。不关的话，最常见的事故是对着上一次构建的窗口
-# 找新加的东西，然后得出「没做上」的结论 —— 本轮真的发生过一次。
-# 连 cortex-local 一起关：它是桌面端的子进程，占着端口与状态文件。
-#
-# ── 版本号可选 ────────────────────────────────────────────
-# `just app` 不传：更新功能整个关闭（空串的含义，见 AppConfig.appVersion），
-# 顶栏那个图标只是「关于」。
-# `just app 0.1.0`：让它自认为是 0.1.0，于是对着真实的 GitHub release
+# `just app 0.1.0` 让它自认为是旧版本，于是对着真实的 GitHub release
 # 能看见「有新版本」那个小红点 —— 验证更新界面不必真发一版。
+# 不传则更新功能整个关闭（空串的含义，见 AppConfig.appVersion）。
 #
-# 调试构建：Flutter 的 debug 编译快得多，而 `debugShowCheckedModeBanner`
-# 本来就是关的，右上角不会被那条 DEBUG 缎带盖住（新图标正好在那儿）。
-app VERSION="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    case "$(uname -s)" in
-        MINGW*|MSYS*|CYGWIN*) ;;
-        *) echo "just app 目前只支持 Windows —— 这个仓库也只发 Windows 桌面产物。" >&2
-           echo "别的平台请用：cd app && flutter run -d <device>" >&2
-           exit 1 ;;
-    esac
-
-    echo "── 关掉在跑的桌面端"
-    taskkill //F //IM cortex_app.exe >/dev/null 2>&1 || true
-    taskkill //F //IM cortex-local.exe >/dev/null 2>&1 || true
-    # taskkill 是异步的：进程还要一小会儿才真的没了，而这期间
-    # cortex_app.exe 是被占用的，构建会以「拒绝访问 (os error 5)」失败
-    sleep 1
-
-    # 本地 agent 与桌面端是分开构建的两个东西。少了它，这份 dev 构建里
-    # 工具会**静默地**不可用（`discoverLocalAgent` 找不到就返回 null，
-    # 那是正常路径，不报错）—— 正是本仓库反复吃亏的「造好了没人调用」
-    echo "── 构建 cortex-local"
-    cargo build --bin cortex-local
-
-    echo "── 构建桌面端（debug）"
-    cd app
-    if [ -n "{{ VERSION }}" ]; then
-        flutter build windows --debug --dart-define=CORTEX_APP_VERSION="{{ VERSION }}"
-    else
-        flutter build windows --debug
-    fi
-    cd ..
-
-    EXE="app/build/windows/x64/runner/Debug/cortex_app.exe"
-    [ -f "${EXE}" ] || { echo "构建完了却找不到 ${EXE}" >&2; exit 1; }
-
-    # 把 agent 拷到 exe 旁边，**而不是**用 CORTEX_LOCAL_BIN 环境变量。
-    #
-    # 试过环境变量，不行：下面那个 Start-Process 默认走 ShellExecute，
-    # 子进程继承的是**桌面外壳**的环境，不是这个 shell 的。实测拿
-    # `cmd /c set CORTEX_LOCAL_BIN` 验过，传过去是空的。
-    #
-    # 而后果是静默的：`discoverLocalAgent()` 找不到就返回 null，那是一条
-    # 正常路径（开发机上本来就可能没有 agent），不报错 —— 于是这份 dev
-    # 构建会「一切正常，只是工具都不能用」。
-    #
-    # 拷过去反而更好：与安装包摆出来的布局一模一样，走的是
-    # `_besideTheApp()` 那条真实路径，不依赖只有开发机才有的口子。
-    cp -f target/debug/cortex-local.exe "$(dirname "${EXE}")/"
-
-    # 用 Start-Process 真正脱离，**不要** `nohup … &`：在 Git Bash 里那样
-    # 起的进程仍挂在这个 shell 的进程组上，`just app` 不会返回 ——
-    # 实测卡了十分钟，而应用其实早就起来了，看着就像构建卡死。
-    echo "── 启动（版本号：${VERSION:-未设置，更新功能关闭}）"
-    powershell -NoProfile -Command \
-        "Start-Process -FilePath '$(cygpath -w "${EXE}")'"
-    echo "已拉起。改完再跑一次 just app 即可。"
+# 刻意**不写成 shebang recipe**：那种 recipe 绕过顶部的 windows-shell，
+# 由 just 自己去翻译解释器路径，而那一步要 cygpath —— 它只在
+# Git 的 usr/bin 下，多数人 PATH 上只有 Git/bin（有 bash，没 cygpath）。
+# 于是从 PowerShell / Nushell 跑就会「program not found」。
+app *ARGS:
+    bash scripts/dev-app.sh {{ ARGS }}
 
 # ══════════════════════════════════════════════════════════
 #  质量
