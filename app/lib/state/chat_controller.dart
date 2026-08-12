@@ -33,6 +33,15 @@ class ChatController extends Notifier<ChatState> {
   Timer? _flushTimer;
   static const _flushInterval = Duration(milliseconds: 16);
 
+  /// 作废序号：换后端时 +1，让在飞的请求的结果（尤其是**尸体**）被丢掉。
+  int _requestSeq = 0;
+
+  /// 这个结果是不是已经过期了 —— 每个 `await` 之后、写 state 之前都要问一次。
+  ///
+  /// 与 [Ref.mounted] 一起判：整个应用退出与「只是换了后端」是两件事，
+  /// 而两者都不该让结果落地。
+  bool _stale(int seq) => seq != _requestSeq || !ref.mounted;
+
   @override
   ChatState build() {
     ref.onDispose(() {
@@ -40,7 +49,24 @@ class ChatController extends Notifier<ChatState> {
       _subscription?.cancel();
     });
     // Re-hydrate whenever the data source flips (mock ↔ live).
-    ref.listen(cortexApiProvider, (_, _) => _reload());
+    //
+    // # 为什么这里要先作废在飞的请求
+    //
+    // 换后端会 dispose 掉旧的 `HttpCortexApi`，而它的 dispose 是
+    // `_client.close()` —— **正在飞的请求当场被掐断**，抛出
+    // 「Connection closed before full header was received」。
+    //
+    // 那个异常在 `_reload()` 把 state 重置成干净的**之后**才落地，于是把
+    // `sessionsError` / `Transcript.error` 又写了回去。界面停在
+    // 「连不上 cortexd」，而 cortexd 好端端地活着 —— 用户唯一的出路是
+    // 手点重试。
+    //
+    // 这条路径比记忆面板那条命中得更早：会话列表与首个会话的消息是
+    // **开机就发**的，凭据一续上（或本地 agent 一就绪）就正好撞上。
+    ref.listen(cortexApiProvider, (_, _) {
+      _requestSeq++;
+      _reload();
+    });
     Future.microtask(_reload);
     return const ChatState();
   }
@@ -71,10 +97,11 @@ class ChatController extends Notifier<ChatState> {
   /// unhandled async error rather than anything the UI can act on.
   Future<void> loadSessions() async {
     if (!ref.mounted) return;
+    final seq = _requestSeq;
     state = state.copyWith(sessionsLoading: true, sessionsError: null);
     try {
       final remote = await _api.sessions(includeArchived: state.showArchived);
-      if (!ref.mounted) return;
+      if (_stale(seq)) return;
       final merged = _mergeSessions(remote);
       final active =
           state.activeSessionId ??
@@ -86,7 +113,7 @@ class ChatController extends Notifier<ChatState> {
       );
       if (active != null) unawaited(_ensureTranscript(active));
     } on CortexApiException catch (e) {
-      if (!ref.mounted) return;
+      if (_stale(seq)) return;
       state = state.copyWith(
         sessionsLoading: false,
         sessionsError: e.message,
@@ -95,7 +122,7 @@ class ChatController extends Notifier<ChatState> {
         sessions: state.sessions.where((s) => s.isLocalDraft).toList(),
       );
     } on Object catch (e) {
-      if (!ref.mounted) return;
+      if (_stale(seq)) return;
       state = state.copyWith(sessionsLoading: false, sessionsError: '$e');
     }
   }
@@ -320,11 +347,12 @@ class ChatController extends Notifier<ChatState> {
     if (!ref.mounted) return;
     final current = state.transcripts[id] ?? const Transcript();
     if (current.loading) return;
+    final seq = _requestSeq;
     _putTranscript(id, current.copyWith(loading: true, error: null));
 
     try {
       final detail = await _api.sessionDetail(id, limit: kEpisodePage);
-      if (!ref.mounted) return;
+      if (_stale(seq)) return;
       _putTranscript(
         id,
         Transcript(
@@ -342,7 +370,7 @@ class ChatController extends Notifier<ChatState> {
             : detail.session.copyWith(isLocalDraft: s.isLocalDraft),
       );
     } on CortexApiException catch (e) {
-      if (!ref.mounted) return;
+      if (_stale(seq)) return;
       _putTranscript(
         id,
         (state.transcripts[id] ?? const Transcript()).copyWith(
@@ -353,7 +381,7 @@ class ChatController extends Notifier<ChatState> {
         ),
       );
     } on Object catch (e) {
-      if (!ref.mounted) return;
+      if (_stale(seq)) return;
       _putTranscript(
         id,
         (state.transcripts[id] ?? const Transcript()).copyWith(
@@ -375,6 +403,7 @@ class ChatController extends Notifier<ChatState> {
     final cursor = current?.cursor;
     if (current == null || cursor == null) return;
     if (current.loading || current.loadingEarlier) return;
+    final seq = _requestSeq;
     _putTranscript(id, current.copyWith(loadingEarlier: true));
 
     try {
@@ -383,7 +412,10 @@ class ChatController extends Notifier<ChatState> {
         limit: kEpisodePage,
         before: cursor,
       );
-      if (!ref.mounted) return;
+      // 这里作废得比别处更要紧：这一页来自**旧后端**，而 prepend 是把它拼进
+      // 新后端的正文里。换的若是账号，那就是两个人的消息混在同一屏上 ——
+      // 比报一个错要糟得多。
+      if (_stale(seq)) return;
       final held = state.transcripts[id] ?? const Transcript();
       _putTranscript(
         id,
@@ -397,7 +429,7 @@ class ChatController extends Notifier<ChatState> {
         ),
       );
     } on Object {
-      if (!ref.mounted) return;
+      if (_stale(seq)) return;
       _putTranscript(
         id,
         (state.transcripts[id] ?? const Transcript()).copyWith(

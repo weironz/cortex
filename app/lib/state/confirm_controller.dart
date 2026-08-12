@@ -128,6 +128,11 @@ class ConfirmController extends Notifier<ConfirmState> {
     // Re-hydrate on a data-source swap: a queue belonging to the previous
     // daemon is meaningless against the new one, and its tokens would all 404.
     ref.listen(cortexApiProvider, (_, _) {
+      // 必须 +1，不能只清空。在飞的那个 `pendingConfirmations()` 是打给
+      // **旧后端**的；它之后才回来，而 `_alive()` 只比对 generation ——
+      // 不 +1 的话它会通过检查，把旧后端的确认项 merge 进这个刚清干净的
+      // state。换的若是账号，用户会被问「要不要执行」，而那是别人的命令。
+      _generation++;
       state = const ConfirmState();
       unawaited(recover());
     });
