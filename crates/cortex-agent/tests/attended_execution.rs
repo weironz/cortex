@@ -101,7 +101,10 @@ fn execute_is_the_highest_risk_which_is_what_makes_attended_safe() {
     // 穷举**全部**取值。加了新变体时这里不会自动覆盖到它，
     // 但上面那条断言会先失败，把人引到这段注释
     for confirm_at in [Risk::Safe, Risk::Write, Risk::Execute] {
-        let policy = ApprovalPolicy { confirm_at };
+        let policy = ApprovalPolicy {
+            confirm_at,
+            bypass: false,
+        };
         assert_eq!(
             policy.decide("shell", Risk::Execute),
             Gate::Ask,
@@ -122,14 +125,14 @@ fn execute_is_the_highest_risk_which_is_what_makes_attended_safe() {
 fn the_attended_flag_actually_reaches_the_sandbox_policy() {
     let dir = tempfile::tempdir().expect("临时目录");
 
-    let plain = Turn::new(dir.path()).expect("临时目录是合法沙箱根");
+    let plain = Turn::on_local_machine(dir.path()).expect("临时目录是合法沙箱根");
     assert_eq!(
         plain.exec_policy().attended,
         Attended::No,
         "默认必须是「没人在场」—— cortexd 走的就是这条路"
     );
 
-    let attended = Turn::new(dir.path())
+    let attended = Turn::on_local_machine(dir.path())
         .expect("临时目录是合法沙箱根")
         .attended();
     assert_eq!(
@@ -140,10 +143,11 @@ fn the_attended_flag_actually_reaches_the_sandbox_policy() {
     );
 
     // 顺序无关：先 with_policy 再 attended，或反过来，结果必须一样
-    let reordered = Turn::new(dir.path())
+    let reordered = Turn::on_local_machine(dir.path())
         .expect("临时目录是合法沙箱根")
         .with_policy(ApprovalPolicy {
             confirm_at: Risk::Write,
+            bypass: false,
         })
         .attended();
     assert_eq!(

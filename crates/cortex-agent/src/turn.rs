@@ -125,6 +125,14 @@ pub struct ConfirmRequest<'a> {
     /// 模型给的原始参数。**必须原样交给用户看** —— 对 `shell` 来说，
     /// 要批准的东西就是这段命令本身，摘要过的版本批不了。
     pub arguments: &'a serde_json::Value,
+    /// 这次要碰的是**工作区外**的哪个位置。`None` = 没有越界。
+    ///
+    /// 批准一个越界访问和批准一次普通写入是两件不同的事，用户必须能分辨。
+    /// 只给工具名与参数是不够的：参数里那个 `path` 可能是相对的，
+    /// 而「相对于哪儿」正是用户此刻最需要知道、也最容易搞错的东西。
+    /// 这里给的是**解析后的绝对路径** —— 符号链接已经跟到底，
+    /// 用户看到的就是真正会被改动的位置。
+    pub scope: Option<&'a std::path::Path>,
 }
 
 /// 权限策略 —— 所有工具执行的唯一闸门。
@@ -157,12 +165,26 @@ pub struct ApprovalPolicy {
     /// 调到 [`Risk::Execute`] 就是「写文件不问、执行才问」；调到
     /// [`Risk::Safe`] 则连 `read_file` 也要问（除了演示，没什么用）。
     pub confirm_at: Risk,
+    /// 一律不问 —— 对齐 Claude Code 的 "Bypass permissions"。
+    ///
+    /// # 为什么是独立一个字段，而不是把 `confirm_at` 抬到一个更高的档
+    ///
+    /// 「什么都不问」不是「阈值调得很高」。越界确认根本不看 [`Risk`]
+    /// （一个 `read_file` 是 `Safe`，读到工作区外照样要问），所以靠抬阈值
+    /// 关不掉它。真造一个 `Risk::Nothing` 之类的伪档位，则会污染一个
+    /// 本来干净的序关系 —— 而 [`Turn::run`] 那条「Execute 是最高档」的
+    /// 不变式正建立在这个序上。
+    ///
+    /// 分开之后还有一个好处：`decide` 仍是纯粹的风险判断，
+    /// 「用户选了完全放行」这件事在代码里是一个能被搜到的名字。
+    pub bypass: bool,
 }
 
 impl Default for ApprovalPolicy {
     fn default() -> Self {
         Self {
             confirm_at: Risk::Write,
+            bypass: false,
         }
     }
 }
@@ -170,11 +192,17 @@ impl Default for ApprovalPolicy {
 impl ApprovalPolicy {
     #[must_use]
     pub fn decide(&self, tool: &str, risk: Risk) -> Gate {
-        if risk < self.confirm_at {
+        if self.bypass || risk < self.confirm_at {
             return Gate::Allow;
         }
         tracing::debug!(tool, ?risk, "高风险工具，转确认回路");
         Gate::Ask
+    }
+
+    /// 连越界都不问。见 [`Self::bypass`]。
+    #[must_use]
+    pub const fn bypasses_everything(&self) -> bool {
+        self.bypass
     }
 }
 
@@ -197,6 +225,21 @@ fn refusal(tool: &str, approval: Approval) -> String {
              请用已有信息作答，并说明哪一步卡在需要确认上。"
         ),
     }
+}
+
+/// 「声明了有人在场，却又不问人」这个矛盾成不成立。
+///
+/// 抽成纯函数只为一件事：**能单测**。它原本长在 [`Turn::run`] 里，而那里
+/// 要一个真 `LlmClient` 才进得去 —— 于是这条判断在此前从来没有被直接测过，
+/// 只靠「Execute 是最高档」那条类型层面的间接保证。而这次恰恰要给它开一个
+/// 例外，例外最容易写错的就是范围。
+///
+/// `bypass` 为真时不算矛盾：见 [`Turn::run`] 里那段「谁做的决定」的论证。
+#[must_use]
+fn attended_conflict(attended: bool, policy: &ApprovalPolicy) -> bool {
+    attended
+        && !policy.bypasses_everything()
+        && policy.decide("shell", Risk::Execute) == Gate::Allow
 }
 
 /// 一轮之内的确认状态。
@@ -255,6 +298,26 @@ pub trait ToolHost: Send + Sync {
     async fn confirm(&self, _req: &ConfirmRequest<'_>) -> Approval {
         Approval::Unanswered
     }
+
+    /// 本会话已经批准过的工作区外目录。
+    ///
+    /// # 为什么放在宿主而不是 [`Turn`] 里
+    ///
+    /// 用户要的是「批准一次，这个会话内不再问」。而 `Turn` 是**可复用、
+    /// 无每轮状态**的（见 [`ConfirmState`] 的同款论证）——「会话」这个跨度
+    /// 只有宿主知道：cortex-local 按 `session_id` 存，评测 harness 根本
+    /// 没有会话这回事。攒在 `Turn` 上的话，上一个会话批准的目录会漏给下一个。
+    ///
+    /// # 默认空 = 每次都问
+    ///
+    /// 与 [`Self::confirm`] 的默认值同理：漏实现的后果是「问得比需要的多」，
+    /// 那是可见且无害的；反过来默认返回点什么，就是一个没人写过的放行。
+    fn granted_roots(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+
+    /// 记下一个刚被用户批准的目录。默认丢弃 —— 见 [`Self::granted_roots`]。
+    fn grant_root(&self, _dir: &std::path::Path) {}
 }
 
 // ─────────────────────────── 结果 ───────────────────────────
@@ -289,15 +352,23 @@ pub struct Turn {
     tools: Vec<Tool>,
     max_rounds: usize,
     policy: ApprovalPolicy,
+    env: crate::ExecEnvironment,
 }
 
 impl Turn {
-    /// 用内置工具目录构造。
+    /// 在**用户自己的机器**上执行，根是 `root`。
     ///
-    /// `root` 是沙箱根，**只能由服务端决定**：从配置或进程工作目录取，
-    /// 绝不接受模型或请求体里的路径 —— 那等于把路径围栏的钥匙交给
-    /// 被围栏防着的人。
-    pub fn new(root: impl Into<std::path::PathBuf>) -> Result<Self> {
+    /// `root` 只能由宿主决定：从配置或用户在界面上点的目录取，绝不接受模型
+    /// 吐出来的路径 —— 那等于把路径围栏的钥匙交给被围栏防着的人。
+    ///
+    /// # 名字里为什么写着 `local_machine`
+    ///
+    /// 它以前叫 `new`，而 `new` 不说明**这是谁的文件系统**。cortexd 曾照着
+    /// 同一个 `new` 给 Web 会话装配文件工具，于是一个远端用户绑的是
+    /// **服务器上**的目录，爆炸半径是整台生产机加上所有租户的数据 ——
+    /// 而代码读起来毫无异样。名字挑明之后，那种调用一眼就是错的。
+    /// 见 [`crate::ExecEnvironment`]。
+    pub fn on_local_machine(root: impl Into<std::path::PathBuf>) -> Result<Self> {
         let specs = tools::builtin_specs();
         Ok(Self {
             sandbox: Sandbox::new(root)?,
@@ -305,6 +376,7 @@ impl Turn {
             specs,
             max_rounds: DEFAULT_MAX_ROUNDS,
             policy: ApprovalPolicy::default(),
+            env: crate::ExecEnvironment::LocalMachine,
         })
     }
 
@@ -324,7 +396,14 @@ impl Turn {
             specs,
             max_rounds: DEFAULT_MAX_ROUNDS,
             policy: ApprovalPolicy::default(),
+            env: crate::ExecEnvironment::None,
         }
+    }
+
+    /// 这一轮的执行环境。与 [`Self::tool_names`] 同类：**可观测**。
+    #[must_use]
+    pub const fn env(&self) -> crate::ExecEnvironment {
+        self.env
     }
 
     /// 换掉工具目录。
@@ -414,17 +493,25 @@ impl Turn {
         // 后果是最坏的一种：本机没有沙箱、执行也不再问人，模型可以静默跑
         // 任意命令，而日志里那行「有人在场」还在，看起来一切正常。
         //
-        // **眼下这个分支进不来**，因为 `Risk::Execute` 是最高档而
-        // `decide` 只在 `risk < confirm_at` 时放行 —— 保证来自类型，不是来自
-        // 这道检查。留着它是给「以后有人加了比 Execute 更高的档」备的后手：
-        // 那一刻这里会当场拒绝，而不是悄悄开一个无人值守的执行口子。
+        // **完全放行档是这条规则的显式例外**，不是它的漏洞。区别在于
+        // 「谁做的决定、他知不知道自己在决定什么」：`bypass` 是用户在界面上
+        // 亲手选的一档，选的时候有一次单独的确认，chip 此后一直是警示色。
+        // 而这道检查防的是**配置上的意外组合** —— 没有人选择过、也没有人
+        // 知道它发生了。所以放行，但每轮吼一声，且状态行必须说出来
+        // （`sandbox::status_line_for` 那条「任何时候都必须能回答我有没有被
+        // 保护」的原则在这一档下同样成立）。
+        //
+        // 例外之外的部分一个字没松：`Risk::Execute` 仍是最高档，非 bypass 时
+        // `decide` 只在 `risk < confirm_at` 放行，所以那个分支照旧进不来。
+        // 留着它是给「以后有人加了比 Execute 更高的档」备的后手。
         // `execute_is_the_highest_risk` 那条测试守着同一件事，且会先红。
         //
         // 检查放在 run() 而不是构造期：builder 的调用顺序挡不住配置矛盾，
         // 而这里是唯一绕不过去的关口。
-        if self.sandbox.exec_policy().attended.is_attended()
-            && self.policy.decide("shell", Risk::Execute) == Gate::Allow
-        {
+        if attended_conflict(
+            self.sandbox.exec_policy().attended.is_attended(),
+            &self.policy,
+        ) {
             return Err(CortexError::Invalid(
                 "配置矛盾：声明了「有人在场」却又让 Risk::Execute 自动放行。\
                  前者的全部依据就是「每一次执行都经用户当场批准」——\
@@ -432,6 +519,12 @@ impl Turn {
                  请去掉 attended()，或把 ApprovalPolicy 的 confirm_at 调到 Execute 及以下。"
                     .into(),
             ));
+        }
+        if self.policy.bypasses_everything() {
+            tracing::warn!(
+                sandbox = %crate::sandbox::capability(),
+                "⚠ 完全放行档：本轮不会就任何工具调用询问用户，越界路径也不问"
+            );
         }
 
         let mut reply = String::new();
@@ -635,12 +728,46 @@ impl Turn {
             ));
         };
 
+        // ── 先把本会话已批准的目录挂上，再判越界 ──
+        //
+        // 顺序不能反：挂上之后，一个落在已批准目录里的路径就是 `Inside`，
+        // 于是「批准一次，本会话不再问」是**判定的自然结果**，
+        // 而不是另写一条「问之前先查一下清单」的分支。少一条分支，
+        // 少一处会与判定漂开的地方
+        let sandbox = self.sandbox.clone().with_grants(host.granted_roots());
+
+        // ── 越界？—— 这是 `Risk` 之外的第二个提问理由 ──
+        //
+        // 两者独立：`write_file` 写工作区内的文件是 Write 档要问一次；
+        // `read_file` 读工作区外的文件是 Safe 档、按风险根本不用问，
+        // 但它越界了，所以仍然要问。合并成一个判断会让后者漏掉。
+        let outside = match spec.path_arg {
+            Some(key) => match call.arguments.get(key).and_then(|v| v.as_str()) {
+                Some(raw) => match sandbox.classify(raw) {
+                    Ok(r) if r.is_outside() => Some(r.path().to_path_buf()),
+                    // 解析不出来（封闭沙箱等）不在这里报 —— 交给下面的
+                    // `execute`，它的错误消息是为这件事写的
+                    Ok(_) | Err(_) => None,
+                },
+                None => None,
+            },
+            None => None,
+        };
+
         // ── 权限闸门。所有工具执行的唯一入口，见 ApprovalPolicy 的文档 ──
         //
         // 两段：同步的策略判断决定「要不要问」，要问就在这里 await 宿主。
         // 整个 await 期间这一轮是挂起的 —— 这正是想要的：确认没回来之前，
         // 不该有任何副作用发生，也不该抢先去跑下一个工具
-        let approval = match self.policy.decide(spec.name, spec.risk) {
+        let gate = match self.policy.decide(spec.name, spec.risk) {
+            Gate::Ask => Gate::Ask,
+            // 风险档说不用问，但越界了 —— 越界必须问，除非**完全放行**档。
+            // 那一档的语义就是「什么都不问」，在这里给它开个例外等于
+            // 让开关名不副实
+            Gate::Allow if outside.is_some() && !self.policy.bypasses_everything() => Gate::Ask,
+            Gate::Allow => Gate::Allow,
+        };
+        let approval = match gate {
             Gate::Allow => Approval::Allow,
             // 本轮已经问过一次而没有人回答，不再问第二次。见 [`ConfirmState`]
             Gate::Ask if confirm.gave_up => {
@@ -653,6 +780,7 @@ impl Turn {
                         tool: spec.name,
                         risk: spec.risk,
                         arguments: &call.arguments,
+                        scope: outside.as_deref(),
                     })
                     .await;
                 // 只有「没人回答」置位；用户明确拒绝**不**置位 ——
@@ -668,6 +796,23 @@ impl Turn {
             return ToolResult::err(refusal(spec.name, approval));
         }
 
+        // ── 批准了越界 → 记下**父目录** ──
+        //
+        // 记父目录而不是文件本身：agent 改一个目录里的东西极少只改一个文件，
+        // 逐文件问的话十个文件弹十次，而人的反应是直接去开完全放行 ——
+        // 被关掉的闸门等于没有闸门。这也是 Claude Code 的粒度。
+        //
+        // 放在批准**之后**：拒绝的那次绝不能留下痕迹，否则下一次就不问了。
+        if let Some(p) = &outside {
+            let dir = if p.is_dir() {
+                p.as_path()
+            } else {
+                p.parent().unwrap_or(p)
+            };
+            tracing::info!(dir = %dir.display(), tool = spec.name, "用户批准了工作区外的目录，本会话内不再询问");
+            host.grant_root(dir);
+        }
+
         let result = if call.name == "memory_search" {
             let Some(query) = call.arguments.get("query").and_then(|v| v.as_str()) else {
                 return ToolResult::err("缺少参数 query");
@@ -678,7 +823,14 @@ impl Turn {
                 Err(e) => ToolResult::err(e.to_string()),
             }
         } else {
-            tools::execute(&self.sandbox, call).await
+            // **重新问一次宿主**，而不是复用上面那份 `sandbox`：刚才那次
+            // `grant_root` 之后清单变长了，用旧的一份去执行，症状恰好是
+            // 「用户点了允许，然后工具报越界」—— 而他刚亲手批准过
+            tools::execute(
+                &self.sandbox.clone().with_grants(host.granted_roots()),
+                call,
+            )
+            .await
         };
 
         truncate(result)
@@ -791,7 +943,7 @@ mod tests {
 
     fn turn() -> (tempfile::TempDir, Turn) {
         let dir = tempfile::tempdir().unwrap();
-        let t = Turn::new(dir.path()).unwrap();
+        let t = Turn::on_local_machine(dir.path()).unwrap();
         (dir, t)
     }
 
@@ -983,6 +1135,7 @@ mod tests {
         let (_d, t) = turn();
         let t = t.with_policy(ApprovalPolicy {
             confirm_at: Risk::Execute,
+            bypass: false,
         });
         let host = SpyHost::new(Approval::Denied);
         let r = t.dispatch_once(&write_call(), &host).await;
@@ -1111,5 +1264,234 @@ mod tests {
         // 模型必须能读到失败原因，否则它只会原样重试
         let text = serde_json::to_string(&out.content).unwrap();
         assert!(text.contains("文件不存在"));
+    }
+
+    /// 执行环境的默认值必须是「没有」。
+    ///
+    /// 这条守的是 `ExecEnvironment` 文档里那段论证：漏写一次 env 的后果
+    /// 应当是「这个宿主没有文件工具」（响亮、当场可见），而不是
+    /// 「某个不该有文件工具的宿主悄悄有了」（静默，出事才知道）。
+    #[test]
+    fn the_default_execution_environment_is_nothing() {
+        assert_eq!(
+            crate::ExecEnvironment::default(),
+            crate::ExecEnvironment::None,
+            "默认值一旦倒向 LocalMachine，任何漏写 env 的宿主都会静默拿到             整台机器的文件访问能力，而代码读起来毫无异样"
+        );
+        assert!(!crate::ExecEnvironment::None.has_filesystem());
+        assert!(!crate::ExecEnvironment::None.allows_escape_prompt());
+    }
+
+    /// 两个构造函数各自代表哪种环境，必须一眼可判。
+    #[test]
+    fn constructors_declare_their_environment() {
+        let dir = tempfile::tempdir().expect("应能建临时目录");
+        assert_eq!(
+            Turn::on_local_machine(dir.path())
+                .expect("临时目录是合法根")
+                .env(),
+            crate::ExecEnvironment::LocalMachine,
+            "名字里写着 local_machine 的构造函数必须真的声明这件事 ——              它就是为了让 cortexd 那种调用一眼看出是错的"
+        );
+        assert_eq!(
+            Turn::sealed().env(),
+            crate::ExecEnvironment::None,
+            "封闭沙箱没有任何可访问路径，它的执行环境就是「没有」"
+        );
+    }
+
+    // ─────────────── 越界确认 ───────────────
+
+    /// 一个会记账的宿主：答什么、被问了几次、批准了哪些目录。
+    struct GrantHost {
+        answer: Approval,
+        asked: AtomicUsize,
+        scopes: std::sync::Mutex<Vec<Option<std::path::PathBuf>>>,
+        granted: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    }
+
+    impl GrantHost {
+        fn new(answer: Approval) -> Self {
+            Self {
+                answer,
+                asked: AtomicUsize::new(0),
+                scopes: std::sync::Mutex::new(Vec::new()),
+                granted: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn asked(&self) -> usize {
+            self.asked.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolHost for GrantHost {
+        async fn memory_search(&self, _q: &str, _as_of: Option<&str>) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn confirm(&self, req: &ConfirmRequest<'_>) -> Approval {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            self.scopes
+                .lock()
+                .unwrap()
+                .push(req.scope.map(std::path::Path::to_path_buf));
+            self.answer
+        }
+        fn granted_roots(&self) -> Vec<std::path::PathBuf> {
+            self.granted.lock().unwrap().clone()
+        }
+        fn grant_root(&self, dir: &std::path::Path) {
+            self.granted.lock().unwrap().push(dir.to_path_buf());
+        }
+    }
+
+    /// 一个**只读**工具越界时也要问 —— 风险档说不用问，越界说要问。
+    ///
+    /// 这两个判断必须独立。合并成一个的话，`read_file` 这条就漏了：
+    /// 它是 `Risk::Safe`，按风险根本不进确认回路，可它读的是工作区外
+    /// 的文件 —— 那正是「桌面上那个文件」的形状。
+    #[tokio::test]
+    async fn a_read_outside_the_workspace_still_asks() {
+        let (_dir, t) = turn();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret.txt");
+        std::fs::write(&target, "s").unwrap();
+        let host = GrantHost::new(Approval::Allow);
+
+        let r = t
+            .dispatch_once(
+                &ToolCall {
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": target.to_string_lossy()}),
+                },
+                &host,
+            )
+            .await;
+
+        assert_eq!(
+            host.asked(),
+            1,
+            "只读工具越界必须问。风险档与越界是两个独立的提问理由，             合并判断会让这一条静默通过"
+        );
+        assert!(r.ok, "批准之后就该真的读到：{}", r.content);
+    }
+
+    /// 问的时候必须把**解析后的绝对路径**给用户看。
+    #[tokio::test]
+    async fn the_confirmation_names_the_real_absolute_path() {
+        let (_dir, t) = turn();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("x.txt");
+        std::fs::write(&target, "s").unwrap();
+        let host = GrantHost::new(Approval::Denied);
+
+        t.dispatch_once(
+            &ToolCall {
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": target.to_string_lossy()}),
+            },
+            &host,
+        )
+        .await;
+
+        let scope = host.scopes.lock().unwrap()[0]
+            .clone()
+            .expect("越界确认必须带上 scope —— 只给工具名和参数，用户没法判断                     那个 path 相对于哪儿，而那正是他此刻最需要知道的");
+        assert!(
+            scope.is_absolute(),
+            "给用户看的必须是绝对路径，实际：{}",
+            scope.display()
+        );
+    }
+
+    /// 拒绝的那次**不留痕迹** —— 下一次还要问。
+    #[tokio::test]
+    async fn a_refusal_grants_nothing() {
+        let (_dir, t) = turn();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("x.txt");
+        std::fs::write(&target, "s").unwrap();
+        let host = GrantHost::new(Approval::Denied);
+
+        t.dispatch_once(
+            &ToolCall {
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": target.to_string_lossy()}),
+            },
+            &host,
+        )
+        .await;
+
+        assert!(
+            host.granted.lock().unwrap().is_empty(),
+            "用户说了不准，却把那个目录记进了放行清单 —— 下一次就不问了，             而他从头到尾只表达过拒绝"
+        );
+    }
+
+    /// 完全放行档：越界也不问。开关名不副实是最糟的一种。
+    #[tokio::test]
+    async fn bypass_does_not_ask_even_when_escaping() {
+        let (dir, t) = turn();
+        let t = t.with_policy(ApprovalPolicy {
+            confirm_at: Risk::Write,
+            bypass: true,
+        });
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("x.txt");
+        std::fs::write(&target, "s").unwrap();
+        let host = GrantHost::new(Approval::Denied);
+
+        let r = t
+            .dispatch_once(
+                &ToolCall {
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": target.to_string_lossy()}),
+                },
+                &host,
+            )
+            .await;
+
+        assert_eq!(
+            host.asked(),
+            0,
+            "完全放行档还在问，那这个开关就是名不副实的 ——              用户以为自己关掉了所有打扰"
+        );
+        assert!(r.ok, "不问就该直接执行：{}", r.content);
+        drop(dir);
+    }
+
+    /// 「有人在场 + 不问人」这个矛盾的边界。
+    ///
+    /// # 前提：非 bypass 时这个矛盾**构造不出来**
+    ///
+    /// [`Risk::Execute`] 是最高档，而 `decide` 只在 `risk < confirm_at` 时
+    /// 放行 —— 任何 `confirm_at` 都拦不住 Execute 走确认回路。所以下面遍历
+    /// 全部三个档位断言「一个都触发不了」。保证来自类型，这条测试是那个
+    /// 保证的可执行版本：哪天有人加了比 Execute 更高的档，它会先红。
+    #[test]
+    fn the_attended_conflict_has_exactly_one_exception() {
+        for confirm_at in [Risk::Safe, Risk::Write, Risk::Execute] {
+            let p = ApprovalPolicy {
+                confirm_at,
+                bypass: false,
+            };
+            assert!(
+                !attended_conflict(true, &p),
+                "confirm_at={confirm_at:?} 竟然让 Execute 自动放行了 ——                  「Execute 是最高档」这条不变式被破坏，而整个「有人在场」的                 依据正建立在它上面"
+            );
+        }
+
+        let bypass = ApprovalPolicy {
+            confirm_at: Risk::Write,
+            bypass: true,
+        };
+        assert!(
+            !attended_conflict(true, &bypass),
+            "完全放行档是用户在界面上亲手选的一档，选的时候有过一次单独确认。             把它按「配置矛盾」拒掉，用户会看到一个自己刚刚明确选过的东西             报错说它自相矛盾"
+        );
+        assert!(
+            !attended_conflict(false, &ApprovalPolicy::default()),
+            "没声明有人在场时这条检查与本轮无关 —— 那种部署靠的是内核沙箱"
+        );
     }
 }
