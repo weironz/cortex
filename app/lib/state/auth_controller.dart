@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_exception.dart';
@@ -138,8 +139,58 @@ class AuthController extends Notifier<AuthState> {
         _reset();
       }
     });
-    Future.microtask(probe);
+    Future.microtask(_bootstrap);
     return _seeded();
+  }
+
+  /// 启动时先**把上次的登录续上**，续不上再走探测。
+  ///
+  /// # 这一步曾经完全不存在
+  ///
+  /// 登录时把 refresh token 存进了系统凭据库（`rememberToken`），
+  /// 而启动时**从来没有读回来** —— `restoreSession` 写好了、测过了，
+  /// 全项目零调用。于是「登录一次管 30 天」这件事在产品里是不存在的：
+  /// 每次重启都回到登录页，桌面端与 Web 都是。
+  ///
+  /// 读取是异步的（要跨进程问钥匙串），而 `build` 是同步的，
+  /// 所以只能排到微任务里 —— 这也是当初漏掉它的原因：`_seeded()` 是同步的，
+  /// 只拿得到环境变量那一份，看起来「已经在读了」。
+  Future<void> _bootstrap() async {
+    if (!ref.mounted) return;
+    // 记下开工时的代次。**中途有别人接手就整个让位** ——
+    // 这一段全是 await，而用户完全可能在它还没跑完时就手动登录了。
+    //
+    // 不让位的话，下面那次 `probe()` 会 `++_generation`，把那次**已经成功**
+    // 的登录判成「已被取代」，于是他看到登录成功、界面却退回登录页。
+    // 手快就会中招，而且一次都复现不出来。
+    var mine = _generation;
+    bool superseded() => !ref.mounted || _generation != mine;
+    // mock / 离线模式没有可续的会话，直接走各自的短路
+    final config = ref.read(appConfigProvider);
+    if (config.useMock || config.offline) {
+      if (!superseded()) await probe();
+      return;
+    }
+
+    final remembered = await ref.read(rememberedTokenProvider.future);
+    if (superseded()) return;
+
+    // 环境变量里那把预共享 token 不是 refresh token，续不了 —— 它走
+    // 探测那条路（`/health` 说要凭据，而我们手上正好有一把）
+    if (remembered != null && remembered != readSeedToken()) {
+      state = state.copyWith(busy: true);
+      // `restoreSession` **自己也会 `++_generation`**（它要防着自己被更新的
+      // 请求盖掉）。那一次是我们发起的，不该算成「有人接手了」——
+      // 算进去的话续期失败后这里直接返回，界面永远停在转圈上。
+      //
+      // 所以只认「除它之外还有人动过」：恰好多一次就是它自己。
+      final before = _generation;
+      if (await restoreSession(remembered)) return;
+      if (_generation != before + 1) return;
+      mine = _generation;
+    }
+    if (superseded()) return;
+    await probe();
   }
 
   /// Initial state, with whatever the platform can supply unattended.
@@ -431,6 +482,26 @@ class AuthController extends Notifier<AuthState> {
 /// would quietly change behaviour on a developer machine that has the variable
 /// set, which is precisely the machine we tell people to have.
 final authSeedTokenProvider = Provider<String?>((ref) => readSeedToken());
+
+/// 上一次登录留下的 refresh token（系统凭据库 / sessionStorage）。
+///
+/// 做成 provider 而不是直接调 `readRememberedToken()`：那一步要跨进程问
+/// 钥匙串，在测试里既跑不动也不该跑。而这条路径**曾经整个不存在**
+/// （存了不读），所以它尤其需要能被测到。
+final rememberedTokenProvider = FutureProvider<String?>((ref) async {
+  // **必须有超时。** 读凭据库是一次跨进程调用：钥匙串锁着、libsecret 没跑、
+  // 或者 D-Bus 卡住时，它可以**永远不返回** —— 而这一步挡在启动路径上，
+  // 表现是应用停在一片空白上，没有任何提示，也没有任何出路。
+  //
+  // 超时之后按「没有记住的凭据」处理：最坏的结果是让人重登一次，
+  // 而那远好过打不开。
+  try {
+    return await readRememberedToken().timeout(const Duration(seconds: 3));
+  } on Object catch (e) {
+    debugPrint('读不出记住的登录状态（$e），这次需要重新登录');
+    return null;
+  }
+});
 
 /// Builds the throwaway client the gate probes with.
 ///

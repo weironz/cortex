@@ -32,14 +32,51 @@ import '../api/mock_cortex_api.dart';
 import '../auth/local_llm_store.dart';
 import '../core/app_config.dart';
 import '../core/local_llm.dart';
+import '../core/settings_store.dart';
 import '../core/local_agent.dart';
 import '../models/health_status.dart';
 import 'auth_controller.dart';
 
 /// Mutable runtime config. Seeded from `--dart-define`, editable in settings.
+/// 读取跨重启的非密设置。做成 provider 是为了能在测试里换掉 ——
+/// 真实现要碰磁盘 / localStorage。
+final settingsReaderProvider = Provider<Future<Map<String, String>> Function()>(
+  (ref) => readSettings,
+);
+
+/// 同上，写入侧。
+final settingsWriterProvider =
+    Provider<Future<void> Function(Map<String, String>)>((ref) => writeSettings);
+
 class AppConfigNotifier extends Notifier<AppConfig> {
+  /// 上一次用的地址在**磁盘**上，读它要异步；而 `build` 是同步的。
+  ///
+  /// 所以先给编译期默认值，再排一个微任务把存下来的读回来。
+  /// 中间那一瞬间用默认地址不会造成可见的错误：认证控制器的探测
+  /// 也排在微任务里，且 baseUrl 变化会触发它重来。
+  ///
+  /// **在此之前这个类完全活在内存里** —— 重启之后地址回到编译期默认值，
+  /// 而一个把 cortexd 部署在别处的人每次打开都要重填一遍。
   @override
-  AppConfig build() => AppConfig.initial;
+  AppConfig build() {
+    Future.microtask(_restore);
+    return AppConfig.initial;
+  }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    final url = saved[_kBaseUrl]?.trim();
+    if (url == null || url.isEmpty || url == state.baseUrl) return;
+    state = state.copyWith(baseUrl: url);
+  }
+
+  static const String _kBaseUrl = 'base_url';
+
+  /// 落盘。失败只是「下次要重填」，不打断任何事（见 `writeSettings`）。
+  void _persist() {
+    unawaited(ref.read(settingsWriterProvider)({_kBaseUrl: state.baseUrl}));
+  }
 
   void setUseMock(bool value) {
     if (state.useMock == value) return;
@@ -50,6 +87,7 @@ class AppConfigNotifier extends Notifier<AppConfig> {
     final trimmed = value.trim();
     if (trimmed.isEmpty || state.baseUrl == trimmed) return;
     state = state.copyWith(baseUrl: trimmed);
+    _persist();
   }
 
   /// 进／出离线模式。
