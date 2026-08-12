@@ -321,16 +321,28 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
 
   final token = ref.watch(authControllerProvider.select((s) => s.token));
 
-  // Point at the local agent once it is up; the remote until then, and forever
-  // if this build has none. Both speak the same protocol — the agent
-  // reverse-proxies everything it does not handle — so nothing downstream can
-  // tell the difference, and the swap is just another backend change.
+  // 本地 agent 起好之后指向它，否则指向远端 —— 两侧说同一套协议
+  // （agent 把自己不处理的原样反代），所以下游分辨不出区别，
+  // 换过去只是又一次后端变更。
   //
-  // `config.baseUrl` stays the *remote* everywhere it is displayed. That is
-  // what the user configured and what they care about; showing them
-  // `127.0.0.1:51234` would be true and useless.
-  final origin =
-      ref.watch(localAgentOriginProvider).value ?? config.baseUrl;
+  // `config.baseUrl` 在**显示**的地方始终是远端：那是用户配的、
+  // 也是他关心的；给他看 `127.0.0.1:51234` 是真话但没有用。
+  //
+  // # 为什么 loading 期间也用远端，而不是等
+  //
+  // 这个 provider 是同步的，等不了。而「等」也不对：这台机器可能根本
+  // 没有 agent（Web、或者 flutter run 的构建），那时 loading 会一直挂着。
+  //
+  // 代价是冷启动那一两秒里发出的请求会打到远端，然后在 agent 就绪、
+  // 这个 provider 重建时被 `dispose`（`_client.close()`）**当场掐断** ——
+  // 于是「记忆检索」在每次冷启动都报一次
+  // 「Connection closed before full header was received」。
+  //
+  // 治法在消费侧而不是这里：换后端时把在飞的请求**作废**并自动重来
+  // （见 `MemoryController.build` 里那段）。在这里改成「等」会把一个
+  // 只影响头两秒的问题，换成一个在无 agent 平台上永远转圈的问题。
+  final agentOrigin = ref.watch(localAgentOriginProvider);
+  final origin = agentOrigin.value ?? config.baseUrl;
 
   final api = HttpCortexApi(
     baseUrl: origin,

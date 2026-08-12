@@ -57,9 +57,28 @@ class MemoryController extends Notifier<MemoryState> {
   @override
   MemoryState build() {
     ref.onDispose(() => _debounce?.cancel());
-    // Reset when the backend flips — mock and live results are unrelated.
+    // 后端换了就重来 —— mock 与 live 的结果没有可比性。
+    //
+    // # 这里为什么要**作废在飞的请求**，而不只是清空
+    //
+    // 换后端会 dispose 掉旧的 `HttpCortexApi`，而它的 `dispose` 是
+    // `_client.close()` —— **正在飞的请求会当场被掐断**，抛出
+    // 「Connection closed before full header was received」。
+    //
+    // 那个异常在清空之后才落地，于是它把 `error` 写了回去，界面停在
+    // 「检索失败」直到用户手点一次刷新。而这恰恰是最常见的一次：
+    // 应用刚起来时本地 agent 还没就绪，客户端先指向远端；一两秒后
+    // agent 起好、provider 重建 —— 每次冷启动都命中。
+    //
+    // 作废序号让那具尸体被当作「已被取代」丢掉（`search` 里那道
+    // `seq != _requestSeq` 的闸门），清空才真的是清空。
     ref.listen(cortexApiProvider, (_, _) {
+      _requestSeq++;
+      final searched = state.hasSearched;
       state = const MemoryState();
+      // 之前搜过就自动重来一次：用户没有做错任何事，不该由他来点刷新。
+      // 没搜过就什么也不做 —— 那时面板可能根本没打开
+      if (searched) unawaited(search());
     });
     return const MemoryState();
   }
