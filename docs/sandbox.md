@@ -272,10 +272,52 @@ trait SandboxRunner {
 
 - 沙箱网段 `cortex-sandbox-net`，postgres / rustfs **不接**。靠**拓扑**保证，
   不靠规则判断（这个仓库反复吃亏的正是「判断写对了没人看得出来」那种形状）。
-- **开发机上拓扑隔离会被打穿**：开发 `docker-compose.yml` 把 postgres `5432`、
-  rustfs `9000/9001` 映到宿主 `0.0.0.0`，沙箱经 `host.docker.internal` 够得着。
-  ⇒ 改绑 `127.0.0.1`，并真机实测。生产 `deploy/docker-compose.yml` 一个 `ports:`
-  都没有，这条路本来就不通。
+- **开发机上拓扑隔离会被打穿**：开发 `docker-compose.yml` 把 postgres、
+  rustfs 映到宿主 `0.0.0.0`，沙箱经 `host.docker.internal` 够得着。
+
+### 改绑 `127.0.0.1` 挡不住 —— 真机实测推翻的第四条
+
+计划里写的是「改绑回环并真机实测」。测了，**不成立**（Docker Desktop / Windows）：
+
+| 从沙箱容器里发起 | 结果 |
+|---|---|
+| `cortex-postgres:5432`（DNS 名） | 拒绝 ← 拓扑隔离本身是生效的 |
+| `host.docker.internal:15432`（宿主绑 `0.0.0.0`） | **可达** |
+| `host.docker.internal:15432`（宿主改绑 `127.0.0.1` 之后） | **仍然可达** |
+| `host.docker.internal:5432` / `:9000`（**另一个项目**的 pg 与对象存储） | **可达** |
+
+Docker Desktop 的端口转发跑在那台 Linux 虚拟机里，容器经
+`host.docker.internal` 到达的正是转发器这一侧 —— 绑不绑回环都一样。而最后
+一行是这次实测最难看的一条：**改这份 compose 根本管不到别的项目**，同一台
+开发机上任何一个用默认口令、绑 `0.0.0.0` 的服务，沙箱都够得着。
+
+唯一实测有效的是 `internal: true`：
+
+```
+$ docker run --rm --network <internal 网> --add-host host.docker.internal:host-gateway ...
+--- 解析: fdc4:f303:9324::254 host.docker.internal   ← 名字还在
+--- 默认路由: (没有默认路由)                          ← 路由没了
+--- 探测: 拒绝 / 拒绝                                 ← 上表全部翻红
+```
+
+**代价（同样实测）**：内部网段上**已发布端口失效** —— 宿主 `curl` 连不上一个
+`-p 127.0.0.1:12999:8000` 且在内部网上的容器。而 cortexd 现在正是靠已发布端口
+反代进容器的。所以 `internal: true` 不能单独上，必须连着一个**双宿中继**一起
+做（见下），两个方向都走它：
+
+```
+   [internal: cortex-sandbox-net]        [bridge]
+  沙箱容器 ──出网──► cortex-egress ──► 宿主 / 允许的外网
+      ▲                   │
+      └──── cortexd 反代进来（经中继的已发布端口）
+```
+
+于是 B5 与 B3 合成一件事：**回环改绑保留**（它收掉的是局域网那一面，而且
+在原生 Linux 上确实是一道边界 —— docker-proxy 绑宿主 netns 的 `127.0.0.1`，
+容器经网桥网关碰不到；这一条是推理，本机没有原生 Linux docker 可验），
+**但别把它当成挡沙箱的那道墙**。真正的墙是 `internal: true` + 中继。
+
+生产 `deploy/docker-compose.yml` 一个 `ports:` 都没有，本来就不暴露。
 - **出网 allowlist**：照抄 Anthropic `sandbox-runtime` 的语义 —— 沙箱网段
   `internal: true`（物理上无默认路由）+ 一个双宿 egress-proxy，容器 env 设
   `HTTP(S)_PROXY`。**env var 只是引导，网络拓扑才是边界。**
