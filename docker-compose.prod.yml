@@ -94,6 +94,14 @@ services:
       # 生成：docker compose ... run --rm cortexd --generate-token
       # 服务端只拿摘要；明文给客户端，**不要**也放进这台机器
       CORTEX_AUTH_TOKEN_SHA256: ${CORTEX_AUTH_TOKEN_SHA256:?生产必须显式设 CORTEX_AUTH_TOKEN_SHA256（cortexd --generate-token 生成）}
+      # 第一个管理员。库里已经有账号时这两项不起作用（只用一次，幂等）。
+      #
+      # 它替掉了「第一个访问 /auth/register 的人成为主人」那条特例 ——
+      # 账号在开始监听之前就建好，公网上那个窗口不存在。
+      #
+      # 用 `:-` 而不是 `:?`：一个已经在跑的部署不该因为没配这两项就起不来
+      CORTEX_ADMIN_USERNAME: ${CORTEX_ADMIN_USERNAME:-}
+      CORTEX_ADMIN_PASSWORD: ${CORTEX_ADMIN_PASSWORD:-}
       # 高风险工具确认的超时（秒），超时按拒绝处理
       CORTEX_CONFIRM_TIMEOUT_SECS: ${CORTEX_CONFIRM_TIMEOUT_SECS:-180}
 

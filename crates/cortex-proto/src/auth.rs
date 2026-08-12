@@ -31,17 +31,6 @@ pub struct RegisterRequest {
     /// 邀请码。开放注册关着时它是唯一的进门方式。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_code: Option<String>,
-    /// 启动令牌 —— **只有本部署的第一个账号需要它**。
-    ///
-    /// 它关掉的是这样一个窗口：一台刚部署好、还没建号、又直接暴露在公网上
-    /// 的机器，第一个访问它的人会成为主人。部署一次可以靠手快躲过去，
-    /// 反复部署躲不过去 —— 而自动化部署里这个窗口可能开着几小时没人注意。
-    ///
-    /// 来源二选一：`.env` 里的 `CORTEX_BOOTSTRAP_TOKEN`（适合自动化部署），
-    /// 或者 cortexd 启动时现生成、打在日志里那一把（适合点一下 compose
-    /// 就部署完的人）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bootstrap_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

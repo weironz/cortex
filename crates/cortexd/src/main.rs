@@ -55,6 +55,10 @@ struct Args {
     create_user: Option<String>,
 }
 
+/// `.env` 里的第一个管理员。见 [`ensure_admin`]。
+const ADMIN_USER_ENV: &str = "CORTEX_ADMIN_USERNAME";
+const ADMIN_PASSWORD_ENV: &str = "CORTEX_ADMIN_PASSWORD";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 开发期从 .env 注入；生产环境用真实环境变量，缺失不算错误
@@ -101,24 +105,18 @@ async fn main() -> anyhow::Result<()> {
     // 同上：写错的允许列表在这里失败，而不是等浏览器报一句语焉不详的 CORS 错
     let cors = cors::CorsPolicy::from_env().context("加载跨源策略失败")?;
 
-    // ── 还没有账号时，把启动令牌打出来 ──────────────────────
+    // ── 按 .env 建第一个账号 ────────────────────────────────
     //
-    // **只在还没有账号时打。** 已经建过号的部署再打一遍等于把一把
-    // 无用的秘密撒进日志，而日志会被收集、会被翻。
+    // 这一步替掉了原先那条「本部署的第一个账号无条件放行」的特例。
+    // 那条特例的代价是：一台刚部署好、还没建号、又暴露在公网上的机器，
+    // **第一个访问 /auth/register 的人会成为主人** —— 部署一次能靠手快
+    // 躲过去，反复部署躲不过去。
     //
-    // 打在这里而不是更早：要先连上账号表才数得出用户数。
+    // 换成这条之后那个窗口不存在了：账号在**开始监听之前**就建好了，
+    // 而凭据来自 .env（运维本来就要在那里写 POSTGRES_PASSWORD）。
+    // Grafana / Nextcloud / Keycloak / Portainer 都是这个形态。
     if let Some(acc) = rt.accounts.as_ref() {
-        let empty = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM cortex_auth.users")
-            .fetch_one(&acc.pool)
-            .await
-            .map(|n| n == 0)
-            .unwrap_or(false);
-        if empty {
-            tracing::warn!(
-                token = %rt.bootstrap,
-                "这个部署还没有任何账号。建第一个账号需要在请求体里带上                  bootstrap_token（就是上面那个 token 字段的值）。                 重启会换一把；想固定就在 .env 里设 CORTEX_BOOTSTRAP_TOKEN。                 没有这一步的话，一台刚部署好还没建号的机器，                 第一个访问它的人就会成为主人"
-            );
-        }
+        ensure_admin(acc).await;
     }
 
     tracing::info!("{}", rt.auth.status_line());
@@ -223,6 +221,86 @@ fn redact_db_url(url: &str) -> String {
 ///
 /// 密码从 stdin 读。走参数的话它会留在 shell history、`ps` 的输出、
 /// 以及容器的启动记录里 —— 而那是个**长期**凭据的明文。
+/// 按 `.env` 里的 `CORTEX_ADMIN_USERNAME` / `CORTEX_ADMIN_PASSWORD` 建管理员。
+///
+/// **只在库里一个账号都没有时动手**，所以它是幂等的：重启一百次也只建一次，
+/// 改了 .env 里的密码也不会覆盖已有账号（那是「改密码」，另一件事）。
+///
+/// # 为什么失败只记日志，不让进程退出
+///
+/// 建号失败的常见原因是密码太短这类配置问题。为它拒绝启动，会让一个
+/// **其余部分完全健康**的部署整个起不来 —— 而管理员本来还可以用
+/// `--create-user` 补上。日志里说清楚，然后继续。
+///
+/// 唯一不能接受的是**静默**：不打日志的话，运维会对着一个登录不进去的
+/// 系统查很久。
+async fn ensure_admin(acc: &state::Accounts) {
+    let username = std::env::var(ADMIN_USER_ENV)
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    let password = std::env::var(ADMIN_PASSWORD_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+
+    let (Some(username), Some(password)) = (username, password) else {
+        // 只配了一半是**配置错误**，不是「不想用这个功能」。
+        // 静默忽略会让人以为账号建好了，然后对着登录界面查半天
+        if std::env::var(ADMIN_USER_ENV).is_ok() || std::env::var(ADMIN_PASSWORD_ENV).is_ok() {
+            tracing::error!(
+                "{ADMIN_USER_ENV} 与 {ADMIN_PASSWORD_ENV} 必须成对配置，现在只有一半 ——                  没有建任何账号"
+            );
+        }
+        return;
+    };
+
+    let existing: Result<i64, _> = sqlx::query_scalar("SELECT count(*) FROM cortex_auth.users")
+        .fetch_one(&acc.pool)
+        .await;
+    match existing {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::debug!(users = n, "已经有账号了，跳过 .env 建号");
+            return;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "数不出用户数，跳过 .env 建号");
+            return;
+        }
+    }
+
+    // 第一个账号的 schema 就是 public —— 一个先用了几个月才建号的人，
+    // 建完号一登录不该发现记忆全空了。与 `AppState::create_account`
+    // 同一条规则，这里复用它而不是抄一遍
+    let st_hash = match credentials::hash_password(&password) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(error = %e, "{ADMIN_PASSWORD_ENV} 不合规，没有建账号");
+            return;
+        }
+    };
+    let user_id = cortex_core::Id::new().to_string();
+    let r = sqlx::query(
+        "INSERT INTO cortex_auth.users (id, username, password_hash, schema_name)
+         VALUES ($1, $2, $3, 'public')
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&user_id)
+    .bind(&username)
+    .bind(&st_hash)
+    .execute(&acc.pool)
+    .await;
+
+    match r {
+        Ok(res) if res.rows_affected() == 1 => tracing::info!(
+            user = %username,
+            "已按 {ADMIN_USER_ENV} / {ADMIN_PASSWORD_ENV} 建好管理员账号（schema=public）。             建议建完之后把 {ADMIN_PASSWORD_ENV} 从 .env 里删掉 ——              它只在第一次启动时被用到"
+        ),
+        Ok(_) => tracing::warn!(user = %username, "这个用户名已经存在，没有新建"),
+        Err(e) => tracing::error!(error = %e, "按 .env 建管理员失败"),
+    }
+}
+
 async fn create_user(config: &Config, username: &str) -> anyhow::Result<()> {
     use std::io::Write as _;
 
