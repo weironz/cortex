@@ -586,7 +586,7 @@ Web 端一直没有可执行的地方（工具目录只有 `memory_search`）。
 | A5 cortexd 反代 `/chat` | ✅ 照抄 `proxy.rs` 但四处必改，含「`Authorization` 从补改为剥」 |
 | A6 cortex-local 容器化改造 | ✅ 默认工作区、`/confirmations` 断路、容器里不读 `.env`、日志不说假话 |
 | B1 记忆写路径收窄 | ✅ 沙箱写的 fact 降到 tier 3；只能写自己那个会话。**检索侧那条改了**，见 sandbox.md |
-| B2 数据兜底 | ⚠️ **只做了一半**：卷内 git ✅（entrypoint 建仓 + 每轮 auto-commit）；宿主侧快照**未做** ⇒ 整卷删仍是永久损失。设计已定，卡在「后台任务用的 user-id → schema 查询还没有」 |
+| B2 数据兜底 | ✅ 两层都齐：卷内 git（每轮 auto-commit）+ 宿主侧快照（每 15 分钟 → 对象存储，RPO ≤ 15 分钟）。真机验过 `rm -rf` 之后恢复。**恢复那条路撞出一个只有真机才会遇到的坑**，见下 |
 | B3 出网 allowlist | ✅ 网段改 `internal` + 双宿 `cortex-egress`（新 crate）。**实测推翻了 B5 的原假设** |
 | B4 空闲回收 | ✅ 30 分钟停容器保留卷；活跃信号用「令牌多久没被用过」 |
 | B5 dev compose 端口改绑回环 | ✅ 改了，但**实测证明它挡不住沙箱**（见下）——真正的墙是 `internal` |
@@ -629,6 +629,21 @@ bind 端口；tini 与 `--init` 重复；**容器里的免确认不是自动的*
 
 **一个没解决的限制**：https 走 CONNECT，curl 会丢弃失败 CONNECT 的响应体 ——
 拒绝理由（该换哪个镜像源）到不了模型，只剩一个 403。403/502 的区分仍成立。
+
+#### 快照能拍不能写回 —— `--read-only` 的第二次咬人
+
+调研早就发现 `--read-only` 与 `docker commit` 打架（那条推翻了镜像快照方案）。
+这次是同一个东西的第二种形态：
+
+    PUT /containers/{id}/archive → 400 container rootfs is marked read-only
+
+**哪怕要写的目标是一个可写的卷。** 导出（GET）没有这个限制，所以症状是
+「快照拍得出来、恢复永远失败」—— 而那要到真的需要恢复的那一天才发现。
+
+绕法：造一个 rootfs 可写、挂同一个卷的临时容器，解进去，删掉。
+**create 完就不 start** —— archive API 对「已创建未启动」的容器照常工作，
+于是那个容器从头到尾没跑过一行代码，原先「辅助容器也在沙箱网段上」的顾虑
+自然消失。
 
 ### 第 9 次「造好了但没人调用」：`allows_escape_prompt`
 

@@ -128,6 +128,13 @@ protected_routes! {
     "/blobs/{hash}/url" [GET] => get(get_blob_url),
     "/sync" [GET] => get(sync),
     "/ws" [GET] => get(crate::ws::handler),
+    // 沙箱工作区的快照。**只列自己的、只恢复自己的** —— owner 从凭据来，
+    // 不从路径或请求体来（否则任何人都能把别人的工作区解进自己的容器）。
+    //
+    // 这几条**不在**沙箱令牌的白名单里，所以容器自己够不着它们：
+    // 「被攻陷的容器删不掉自己的备份」这条性质就落在这个差别上
+    "/sandbox/snapshots" [GET, POST] => get(list_snapshots).post(take_snapshot),
+    "/sandbox/snapshots/{id}/restore" [POST] => post(restore_snapshot),
 }
 
 /// 路由表。
@@ -568,6 +575,59 @@ async fn memory_search(
 ) -> Result<Json<MemorySearchResponse>, ApiError> {
     let tenant = st.tenant(&headers).await?;
     Ok(Json(st.memory_search(&tenant, q).await?))
+}
+
+// ───────────────────── 沙箱工作区快照 ─────────────────────
+//
+// 三条路由的 owner 一律来自 `current_user`，**不从路径或请求体来**。
+// 让调用方指定 owner 的话，任何登录用户都能列别人的快照、把别人的工作区
+// 解进自己的容器 —— 而对象存储是内容寻址的，哈希本身不带归属。
+
+/// 我的快照，新的在前。
+async fn list_snapshots(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::sandbox_snapshot::SnapshotRow>>, ApiError> {
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    Ok(Json(crate::sandbox_snapshot::list(&st, &owner).await?))
+}
+
+/// 立刻拍一份，不等下一个 15 分钟。
+///
+/// 存在的理由是「我要做一件危险的事，先备份一下」—— 那正是 RPO 最不该
+/// 由定时器决定的时刻。
+async fn take_snapshot(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    match crate::sandbox_snapshot::capture(&st, &owner).await? {
+        Some(row) => Ok(Json(serde_json::json!({ "snapshot": row }))),
+        // 容器不在**不是错误**：卷还在，也确实没什么可拍的（没人在动它）。
+        // 回 404 的话，界面上会显示成一次失败，而用户没做错任何事
+        None => Ok(Json(serde_json::json!({
+            "snapshot": null,
+            "note": "沙箱容器现在不在（可能已被回收）。卷还在，等下次对话把它拉起来就会自动拍。",
+        }))),
+    }
+}
+
+/// 把某一份快照写回工作区。**叠加，不是替换。**
+async fn restore_snapshot(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    crate::sandbox_snapshot::restore(&st, &owner, &id).await?;
+    Ok(Json(serde_json::json!({
+        "restored": id,
+        // 这句话要回给用户看。「恢复」在人脑子里通常是「回到那一刻的样子」，
+        // 而实际语义是叠加 —— 不说清楚，用户会以为快照之后新建的文件被删了
+        // （其实还在），或者以为已经删掉的文件回来了（其实没回来的那部分
+        // 是快照里本来就没有的）
+        "note": "已把快照里的文件写回工作区：同名文件被覆盖，快照之后新建的文件保持不动。",
+    })))
 }
 
 // ────────────────────────── episodes ───────────────────────────

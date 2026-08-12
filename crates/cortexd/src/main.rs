@@ -20,6 +20,7 @@ mod routes;
 mod sandbox_proxy;
 mod sandbox_reaper;
 mod sandbox_runner;
+mod sandbox_snapshot;
 mod sandbox_token;
 mod state;
 mod sync_notify;
@@ -213,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
     // 一个只在第一次请求之后才启动的清理任务，在「起了服务但没人用」的那段
     // 时间里什么都不做，而那恰恰是上一批容器还挂着的时候
     sandbox_reaper::spawn(state.clone());
+    sandbox_snapshot::spawn(state.clone());
 
     let app = routes::router(state)
         // 默认一个跨源都不许：生产是单域名路径分流，Web 与 cortexd 同源。

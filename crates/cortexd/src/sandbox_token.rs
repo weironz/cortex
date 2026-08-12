@@ -218,6 +218,32 @@ impl SandboxTokens {
             .collect()
     }
 
+    /// 现在有沙箱的所有 owner（去重）。
+    ///
+    /// 快照任务用它来决定给谁拍。**用这张表而不是 `docker ps`**：
+    /// 它本来就是「谁有沙箱」的权威（令牌与容器同生共死，见
+    /// [`crate::sandbox_reaper`] 里那段「顺序不能反」），而且省一次网络往返。
+    ///
+    /// 与 [`Self::idle_owners`] 的差别只有一处：那个筛「久没动的」，
+    /// 这个要全部 —— 快照恰恰不该跳过正在干活的那些。
+    ///
+    /// 容器可能已经被回收而令牌还在（回收失败那一支），所以调用方仍要
+    /// `status()` 确认一次：这里返回的是「该看一眼的 owner」，
+    /// 不是「一定有活容器的 owner」。
+    #[must_use]
+    pub fn owners(&self) -> Vec<String> {
+        let Ok(guard) = self.inner.lock() else {
+            return Vec::new();
+        };
+        let mut seen: Vec<String> = guard
+            .values()
+            .map(|(scope, _)| scope.owner.clone())
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.inner.lock().map(|g| g.len()).unwrap_or(0)
@@ -280,6 +306,33 @@ mod tests {
             assert!(
                 !s.allows(&m, p),
                 "{m} {p} 不在审计出来的调用清单里，放行等于给沙箱一样它不需要的能力"
+            );
+        }
+    }
+
+    /// **被攻陷的容器碰不到自己的备份。**
+    ///
+    /// 这条单独立出来，是因为它守的不是「少给一点权限」这种程度问题，
+    /// 而是数据兜底第一层**整层的前提**：快照由宿主驱动、写进容器够不着的
+    /// 地方，所以一个能在容器里执行任意命令的攻击者删不掉它。
+    ///
+    /// 那条性质完全来自这里的**拓扑**（令牌白名单里没有这几条路由），
+    /// 不来自任何运行期判断。谁哪天顺手把 `/sandbox/snapshots` 加进
+    /// `allows`，整层兜底就一起没了 —— 而那**不会有任何症状**，
+    /// 直到有人真的需要恢复的那一天。
+    #[test]
+    fn the_sandbox_cannot_reach_its_own_backups() {
+        let s = scope();
+        for (m, p) in [
+            (Method::GET, "/sandbox/snapshots"),
+            (Method::POST, "/sandbox/snapshots"),
+            (Method::POST, "/sandbox/snapshots/01ABC/restore"),
+        ] {
+            assert!(
+                !s.allows(&m, p),
+                "{m} {p} 被放行了 —— 数据兜底的第一层就此失效：\
+                 一个被攻陷的容器可以列出、覆盖、并（将来 purge 落地后）\
+                 删掉自己的全部备份，而这件事没有任何症状"
             );
         }
     }

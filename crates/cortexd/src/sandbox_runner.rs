@@ -104,6 +104,16 @@ const READY_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 /// `/tmp` 的 tmpfs 大小。**计入 memory 上限**，所以要算进 512m 里。
 const TMPFS_SIZE: &str = "size=128m,mode=1777";
 
+/// 卷在容器里的挂载点，也就是被快照的那个路径。
+const WORKSPACE_PATH: &str = "/workspace";
+
+/// 导出 tar 的大小上限。
+///
+/// 512 MiB：卷配额本身还没做（B4），在那之前这个上限同时兼任「别把一个
+/// 塞满的卷整个吸进内存」的护栏。**超限是拒绝，不是截断** ——
+/// 一份被截断的备份比没有备份更坏，因为它看起来是有的。
+const MAX_EXPORT_BYTES: usize = 512 * 1024 * 1024;
+
 /// 一个跑起来的沙箱。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxHandle {
@@ -138,6 +148,22 @@ pub trait SandboxRunner: Send + Sync {
 
     /// 在跑吗。
     async fn status(&self, owner: &str) -> Result<Option<SandboxHandle>>;
+
+    /// 把 `/workspace` 整个导出成一个 tar。**数据兜底的第一层。**
+    ///
+    /// 放在 trait 上而不是让调用方拿到 `bollard::Docker` 自己发请求：
+    /// 那样等于把「这个 runner 底下是 docker」漏给了每一个调用点，
+    /// 而这条 trait 存在的全部理由就是将来能换成 gVisor / Firecracker / E2B。
+    ///
+    /// 导出**由宿主执行**（docker daemon 直接读卷），容器里的进程既不参与
+    /// 也阻止不了 —— 正是这一层需要的性质。
+    async fn export_workspace(&self, owner: &str) -> Result<bytes::Bytes>;
+
+    /// 把一个 tar 写回 `/workspace`。
+    ///
+    /// **叠加，不是替换**：同名文件覆盖，快照里没有而现在有的文件不删。
+    /// 理由见 `sandbox_snapshot::restore` 的文档。
+    async fn import_workspace(&self, owner: &str, tar: bytes::Bytes) -> Result<()>;
 }
 
 /// 直连 docker.sock 的实现。
@@ -184,6 +210,36 @@ impl DockerRunner {
 
     fn volume_name(owner: &str) -> String {
         format!("{VOLUME_PREFIX}{}", sanitize(owner))
+    }
+
+    /// 删掉一个容器，**不存在也当成功**。
+    ///
+    /// 恢复用的临时容器要「先删再建」与「用完就删」两次，两次都不该因为
+    /// 「本来就没有」而失败 —— 而 bollard 的 404 与真失败长得一样，
+    /// 每个调用点各自 `let _ =` 一遍就会把真失败也一起吞了。这里至少留个
+    /// debug 日志。
+    async fn force_remove(&self, name: &str) {
+        if let Err(e) = self
+            .docker
+            .remove_container(
+                name,
+                Some(
+                    qp::RemoveContainerOptionsBuilder::default()
+                        .force(true)
+                        .build(),
+                ),
+            )
+            .await
+            && !matches!(
+                e,
+                bollard::errors::Error::DockerResponseServerError {
+                    status_code: 404,
+                    ..
+                }
+            )
+        {
+            tracing::debug!(container = %name, error = %e, "删临时容器失败");
+        }
     }
 
     /// 轮询容器里的 `/health`，直到它应答或超时。
@@ -448,6 +504,106 @@ impl SandboxRunner for DockerRunner {
             base_url,
             route_to,
         }))
+    }
+
+    async fn export_workspace(&self, owner: &str) -> Result<bytes::Bytes> {
+        use futures::StreamExt as _;
+
+        let name = Self::container_name(owner);
+        let opts = qp::DownloadFromContainerOptionsBuilder::default()
+            .path(WORKSPACE_PATH)
+            .build();
+
+        let mut stream = self.docker.download_from_container(&name, Some(opts));
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                CortexError::Store(format!("从 {name} 拉 {WORKSPACE_PATH} 失败：{e}"))
+            })?;
+            if buf.len() + chunk.len() > MAX_EXPORT_BYTES {
+                // **拒绝，不截断。** 一份被截断的备份比没有备份更坏：
+                // 它看起来是有的，而少了哪一半要到恢复那一刻才知道
+                return Err(CortexError::Invalid(format!(
+                    "{name} 的 {WORKSPACE_PATH} 超过 {} MiB，拒绝导出一份不完整的快照。\
+                     先清理工作区，或等卷配额那一格落地。",
+                    MAX_EXPORT_BYTES / 1024 / 1024
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(bytes::Bytes::from(buf))
+    }
+
+    async fn import_workspace(&self, owner: &str, tar: bytes::Bytes) -> Result<()> {
+        // ── 为什么要借一个临时容器 ──
+        //
+        // 真机上撞出来的：沙箱容器是 `--read-only` 的，而 docker 的
+        // `PUT /containers/{id}/archive` **对只读 rootfs 的容器一律 400**
+        // （`container rootfs is marked read-only`），哪怕要写的目标是一个
+        // 可写的**卷**。导出那一侧没有这个限制，所以只有恢复要绕。
+        //
+        // 于是造一个 rootfs 可写、挂同一个卷的容器，把 tar 解进去，再删掉。
+        //
+        // **它 create 完就不 start** —— archive API 对「已创建未启动」的容器
+        // 照常工作。所以这个容器从头到尾**没有跑过任何一行代码**，
+        // 也就无所谓它在哪个网段：`network_mode: none` 只是把这件事写死，
+        // 省得下一个人以为可以顺手在里面跑点什么。
+        let helper = format!("{}-restore", Self::container_name(owner));
+        // 上一次恢复中途崩了会留下它。先删再建，比「已存在就复用」安全：
+        // 复用等于信任一个来历不明的容器的挂载配置
+        self.force_remove(&helper).await;
+
+        let spec = ContainerCreateBody {
+            image: Some(IMAGE.to_owned()),
+            // 不会被执行（从不 start）。写一条明确的东西，是为了万一在
+            // `docker ps -a` 里看见它时一眼知道它是干什么的
+            cmd: Some(vec!["/bin/true".to_owned()]),
+            host_config: Some(HostConfig {
+                mounts: Some(vec![Mount {
+                    typ: Some(MountType::VOLUME),
+                    source: Some(Self::volume_name(owner)),
+                    target: Some(WORKSPACE_PATH.to_owned()),
+                    read_only: Some(false),
+                    ..Default::default()
+                }]),
+                // rootfs **可写** —— 这正是借它的全部理由
+                readonly_rootfs: Some(false),
+                network_mode: Some("none".to_owned()),
+                cap_drop: Some(vec!["ALL".to_owned()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        self.docker
+            .create_container(
+                Some(
+                    qp::CreateContainerOptionsBuilder::default()
+                        .name(&helper)
+                        .build(),
+                ),
+                spec,
+            )
+            .await
+            .map_err(|e| CortexError::Store(format!("建恢复用的临时容器失败：{e}")))?;
+
+        // **解到 `/` 而不是 `/workspace`。**
+        //
+        // archive API 导出的 tar，成员路径带 `workspace/` 这一级。解到
+        // `/workspace` 会得到 `/workspace/workspace/...` —— 而那**不报错**，
+        // 只是文件出现在错的地方，用户看到的是「恢复成功了但什么都没回来」。
+        let opts = qp::UploadToContainerOptionsBuilder::default()
+            .path("/")
+            .build();
+        let put = self
+            .docker
+            .upload_to_container(&helper, Some(opts), bollard::body_full(tar))
+            .await
+            .map_err(|e| CortexError::Store(format!("把快照写回 {owner} 的工作区失败：{e}")));
+
+        // 无论成败都要收拾：留下一个挂着用户卷的容器，下一次 ensure 看不见它，
+        // 而它会一直占着那个卷的引用
+        self.force_remove(&helper).await;
+        put
     }
 }
 

@@ -593,6 +593,54 @@ impl AppState {
         .await
     }
 
+    /// 只把字节写进对象存储，**不登记 blob 元数据**。
+    ///
+    /// 与 [`Self::upload_blob`] 的差别是「有没有主人」：那条路上的字节是
+    /// 用户的附件，要进 `blobs` 表、要能被检索、要走转录。这条路上的字节是
+    /// **运维产物**（工作区快照），没有会话、没有 mime 意义上的内容、
+    /// 也不该出现在任何「我的文件」列表里。
+    ///
+    /// 走 `blobs` 表的话，每 15 分钟一份的快照会把那张表淹掉，
+    /// 而且它们会以附件身份出现在检索结果里。
+    ///
+    /// # Errors
+    /// 对象存储没起来或写失败。
+    pub async fn put_blob(&self, bytes: Bytes, declared_mime: Option<&str>) -> Result<String> {
+        Ok(self.inner.blobs.put(bytes, declared_mime).await?.hash)
+    }
+
+    /// 按哈希取回字节。同上，不查 `blobs` 表。
+    ///
+    /// # Errors
+    /// 对象存储没起来，或那个哈希不存在。
+    pub async fn get_blob(&self, hash: &str) -> Result<Bytes> {
+        self.inner.blobs.get(hash).await
+    }
+
+    /// 一个用户的 `Store`，**入口是 user id 而不是请求头**。
+    ///
+    /// 后台任务（快照）手上只有沙箱令牌里记着的 owner，没有 access token，
+    /// 所以走不了 [`Self::tenant`] 那条路。详见
+    /// [`Self::tenant_for_user`]。
+    ///
+    /// # Errors
+    /// 租户解析失败，或 mock 后端下没有库。
+    pub async fn tenant_store_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<std::sync::Arc<cortex_store::Store>> {
+        match self
+            .tenant_for_user(user_id)
+            .await
+            .map_err(|e| CortexError::Store(format!("解析 {user_id} 的租户失败：{e:?}")))?
+        {
+            crate::request_tenant::Tenant::Live { store, .. } => Ok(store),
+            crate::request_tenant::Tenant::Mock => Err(CortexError::Unavailable(
+                "本实例跑在 mock 后端上，没有可写的库".into(),
+            )),
+        }
+    }
+
     /// 签一张直传 URL。客户端**先算好哈希**再来要 —— 内容寻址不存在
     /// 「先传上去再定 key」。
     pub async fn presign_upload(&self, hash: &str) -> Result<BlobPresignResponse> {

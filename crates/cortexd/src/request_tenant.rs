@@ -98,15 +98,57 @@ impl AppState {
 
         let user_id = crate::accounts::current_user(self, headers).await;
         let schema = resolve_schema(&acc.pool, &user_id).await?;
+        self.tenant_on(schema).await
+    }
 
-        // public 就是启动时那个池，不必再建一份
+    /// 同样的解析，但入口是**一个用户 id**而不是请求头。
+    ///
+    /// # 为什么单开一个而不是让后台任务伪造一份 header
+    ///
+    /// 伪造 header 要先造一个 access token，而后台任务手上没有 —— 它只有
+    /// 沙箱令牌里记着的那个 owner。真造一个的话，等于给后台任务开一条
+    /// 「凭空生成凭据」的能力，那比多一个方法贵得多。
+    ///
+    /// # 为什么不直接暴露 `resolve_schema`
+    ///
+    /// 光有 schema 名没用，调用方还要自己去建池、还要记得 `public` 那一个
+    /// 是启动时就有的、不该再建一份。把那三步留给调用方，就是把
+    /// [`Tenant`] 这个类型当初要消灭的「漏一步」重新放回来。
+    ///
+    /// # Errors
+    /// 查不动 `cortex_auth.users`，或者那个 schema 的池建不起来。
+    pub async fn tenant_for_user(&self, user_id: &str) -> Result<Tenant, ApiError> {
+        let Some(public_store) = self.public_store() else {
+            return Ok(Tenant::Mock);
+        };
+        let Ok(acc) = self.accounts() else {
+            return Ok(Tenant::Live {
+                schema: SchemaName::public(),
+                store: public_store,
+            });
+        };
+        let schema = resolve_schema(&acc.pool, user_id).await?;
+        self.tenant_on(schema).await
+    }
+
+    /// schema 名 → 真的连上去的 `Tenant`。两条解析路的共同尾巴。
+    ///
+    /// 抽出来是因为「`public` 复用启动时那个池」这一条**两边都要记得**，
+    /// 而漏掉它不报错 —— 只是给 1 号用户多开一个连着同一个 schema 的池，
+    /// 在 `max_connections` 只有 100 的机器上悄悄吃掉配额。
+    async fn tenant_on(&self, schema: SchemaName) -> Result<Tenant, ApiError> {
+        let Some(public_store) = self.public_store() else {
+            return Ok(Tenant::Mock);
+        };
         if schema.as_str() == SchemaName::public().as_str() {
             return Ok(Tenant::Live {
                 schema,
                 store: public_store,
             });
         }
-
+        let acc = self
+            .accounts()
+            .map_err(|_| ApiError::internal("没接账号体系却要解析非 public 租户"))?;
         let store = acc
             .tenants
             .get(&schema)
