@@ -97,13 +97,41 @@ Container => has_filesystem() = true, allows_escape_prompt() = false
 
 ### 于是改成三层，默认路径仍零弹窗零延迟
 
-1. **数据兜底 —— ⚠️ 还没做**：cortexd **宿主侧**定时 `tar /workspace` 推 RustFS
+1. **数据兜底 —— ⚠️ 还没做**：cortexd **宿主侧**定时快照推 RustFS
    （复用 R6 已有的加密备份闭环）+ restore 端点。快照由宿主驱动、写进沙箱网段
    够不到的地方 —— 沙箱令牌只有几条回调路由，正好保证**被攻陷的容器删不掉
    自己的备份**。把「永久损失」降级为「有界回滚，RPO = 快照间隔」。
 
    **在它落地之前，整卷删（`rm -rf /workspace`、`docker volume rm`）仍然是
    永久损失**，第 2 层救不回来。别把下面那条当成这一条也做完了。
+
+   **设计已定，缺的是接线**（写在这里，免得下次重新推一遍）：
+
+   - **用 docker 的 archive API，不起辅助容器。**
+     `GET /containers/{id}/archive?path=/workspace` 直接给回 tar 流，
+     `PUT` 同一个端点写回去（bollard: `download_from_container` /
+     `upload_to_container`）。两条都由 **daemon** 执行，容器里的进程既不参与
+     也阻止不了 —— 正是这一层需要的性质。起一个挂同一个卷的辅助容器也能做，
+     但那要多一个镜像、多一条生命周期，而且**辅助容器一样在沙箱网段上**，
+     等于把边界又铺宽一格。
+     代价：容器必须存在（停着也行）。容器已回收而卷还在时拍不了 ——
+     那种情况下卷本来也没人动，下次 `ensure` 之后的第一次定时快照补上。
+   - **解压要解到 `/` 而不是 `/workspace`。** archive API 拉出来的 tar，
+     成员路径带 `workspace/` 这一级；解到 `/workspace` 会得到
+     `/workspace/workspace/...`，而那**不报错**，只是文件出现在错的地方 ——
+     用户看到的是「恢复成功了但什么都没回来」。
+   - **恢复是叠加不是替换**（`PUT /archive` 同名覆盖，快照里没有的文件不删）。
+     刻意不先清空再解：清空是一次不可逆删除，而它跑在一条「用户正因为丢了
+     东西才来用」的路径上。这一条要写到用户看得见的地方。
+   - **超限要拒绝而不是截断**。一份被截断的备份比没有备份更坏 ——
+     它看起来是有的，到恢复那一刻才发现少了一半。
+   - **索引落 `sandbox_snapshots` 表**（owner / blob_hash / size / taken_at，
+     append-only）。内容寻址天然去重：两次快照之间没改过文件时哈希相同，
+     对象存储不会真存两份，但表里仍记两行 —— 「什么时候拍的」是这里唯一的信息。
+
+   **卡在哪**：后台任务要按 owner 写租户库，而 `owner` 是用户 id，
+   现有的 user-id → schema 只在 `request_tenant::Tenant` 那条**按请求头**的路上，
+   没有给后台任务用的那一份。先补那个查询，再接定时任务与 restore 端点。
 2. **卷内 git —— ✅ 已落地**：entrypoint 里 `git init /workspace`
    （`.cortex/` 走 `.git/info/exclude`，agent 自己的 outbox 不进历史），
    `cortex-local` 每轮结束在 `Done` **之前** auto-commit
