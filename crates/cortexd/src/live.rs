@@ -1707,6 +1707,13 @@ async fn run_turn(
             .ok()
     });
     let turn = workspace_turn.as_ref().unwrap_or(&live.chat_turn);
+    // 用 `workspace_turn` 而不是 `bound` 判断：绑过但目录已不可用时上面降级成了
+    // 纯聊天，此刻模型手里确实没有文件工具 —— 提示词必须跟着降级，
+    // 否则它会照着一个已经不存在的工作区去许诺
+    let system_prompt = cortex_agent::workspace::brief(
+        SYSTEM_PROMPT,
+        workspace_turn.as_ref().and(bound.as_deref()),
+    );
     tracing::debug!(
         session = %req.session_id,
         workspace = ?bound,
@@ -1750,7 +1757,7 @@ async fn run_turn(
         confirms,
     };
     let outcome = turn
-        .run(llm, SYSTEM_PROMPT, &mut messages, &host, &atx)
+        .run(llm, &system_prompt, &mut messages, &host, &atx)
         .await;
     drop(atx);
     let tool_calls = bridge.await.unwrap_or_else(|e| {

@@ -181,6 +181,13 @@ impl Engine {
                 .ok()
         });
         let turn = workspace_turn.as_ref().unwrap_or(&self.chat_turn);
+        // 用 `workspace_turn` 而不是 `bound` 判断：绑过但目录已不可用时上面
+        // 降级成了纯聊天，此刻模型手里确实没有文件工具 —— 提示词必须跟着降级，
+        // 否则它会照着一个已经不存在的工作区去许诺
+        let system_prompt = cortex_agent::workspace::brief(
+            self.system_prompt,
+            workspace_turn.as_ref().and(bound.as_deref()),
+        );
 
         // ── 4. agent 循环。工具在**这台机器**上执行 ──
         let (atx, mut arx) = mpsc::channel::<AgentEvent>(64);
@@ -215,7 +222,7 @@ impl Engine {
             confirms: Arc::clone(&self.confirms),
         };
         let outcome = turn
-            .run(&self.llm, self.system_prompt, &mut messages, &host, &atx)
+            .run(&self.llm, &system_prompt, &mut messages, &host, &atx)
             .await;
         drop(atx);
         let tool_calls = bridge.await.unwrap_or_else(|e| {
