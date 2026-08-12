@@ -94,6 +94,21 @@ struct Args {
     /// 后者在两个实例、或者别的软件占了同一个端口时会静默连错地方。
     #[arg(long, env = "CORTEX_LOCAL_ADDR_FILE")]
     addr_file: Option<std::path::PathBuf>,
+
+    /// 这个进程手上的执行环境：`local-machine`（默认，桌面端）或
+    /// `container`（Web 端的一次性沙箱）。
+    ///
+    /// **默认是 `local-machine` 而不是 `none`**，与
+    /// [`cortex_agent::ExecEnvironment`] 的默认值刻意不同：那个默认值防的是
+    /// 「某个宿主漏写 env 却悄悄拿到文件工具」，而这个二进制的存在理由**就是**
+    /// 执行文件与命令 —— 默认成 `none` 会让手工跑起来的 agent 一个工具都没有，
+    /// 而那种失败没人会往「默认值」上想。
+    ///
+    /// 反过来漏传 `container` 的后果是容器里的 agent 拿到本机语义
+    /// （越界会弹一个没人答得上来的确认框）—— 所以镜像的 entrypoint 必须显式传，
+    /// 且 `--exec-env=""` 会**报错**而不是回落，见 `ExecEnvironment::from_str`。
+    #[arg(long, env = "CORTEX_EXEC_ENV", default_value = "local-machine")]
+    exec_env: cortex_agent::ExecEnvironment,
 }
 
 #[tokio::main]
@@ -183,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
         max_rounds: DEFAULT_MAX_ROUNDS,
         context_window,
         system_prompt: SYSTEM_PROMPT,
+        exec_env: args.exec_env,
     });
 
     // 反代专用的客户端。与 Remote 内部那个分开，理由见 LocalState::http
@@ -212,13 +228,25 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // 用带 attended 的那一句：绑了工作区的会话走的是 attended 路径，
-    // 打通用版会说「命令执行将被拒绝」，而实际上用户点一下允许就跑
+    // 桌面端用带 attended 的那一句：绑了工作区的会话走的是 attended 路径，
+    // 打通用版会说「命令执行将被拒绝」，而实际上用户点一下允许就跑。
+    //
+    // 容器里必须用另一句。那边没有「当场」可言 —— 人在浏览器另一头，
+    // 而这一行是运维**唯一**能一眼看出「这个进程到底受什么保护」的地方，
+    // 印一句假话比不印更糟。真实答案在容器里是：边界是容器本身，
+    // 外加容器内仍然生效的 landlock（Docker ≥23.0 的默认 seccomp 放行它）。
+    let attended = if args.exec_env == cortex_agent::ExecEnvironment::LocalMachine {
+        cortex_agent::Attended::Yes
+    } else {
+        cortex_agent::Attended::No
+    };
+    tracing::info!("{}", cortex_agent::status_line_for(attended));
     tracing::info!(
-        "{}",
-        cortex_agent::status_line_for(cortex_agent::Attended::Yes)
+        remote = remote.base(),
+        ?route,
+        exec_env = args.exec_env.as_str(),
+        "本地 agent 启动中"
     );
-    tracing::info!(remote = remote.base(), ?route, "本地 agent 启动中");
 
     // 后台不断把队列灌回去。启动先跑一次 —— 上次退出时积压的那些该在
     // 用户开口之前就补上，而不是等下一轮对话才顺带触发

@@ -393,6 +393,31 @@ impl Turn {
         })
     }
 
+    /// 在**一次性容器**里执行，根是容器内的 `root`（约定为 `/workspace`）。
+    ///
+    /// 与 [`Self::on_local_machine`] 的差别只有一处，但那一处是定义性的：
+    /// 越界路径**直接拒绝、不问**（见 [`crate::ExecEnvironment::Container`]）。
+    /// 其余一切 —— 工具目录、沙箱围栏、确认档位 —— 完全相同，因为容器里跑的
+    /// 就是同一个二进制。
+    ///
+    /// # 为什么不是「`on_local_machine` 加个参数」
+    ///
+    /// 同 `on_local_machine` 当初改名的理由：构造函数的名字必须说明
+    /// **这是谁的文件系统**。一个布尔参数在调用点读起来是
+    /// `Turn::new(root, true)`，而漏写 / 传反不会有任何症状 ——
+    /// 直到某天一个 Web 会话拿到了本机语义。
+    pub fn in_container(root: impl Into<std::path::PathBuf>) -> Result<Self> {
+        let specs = tools::builtin_specs();
+        Ok(Self {
+            sandbox: Sandbox::new(root)?,
+            tools: tools::to_llm_tools(&specs),
+            specs,
+            max_rounds: DEFAULT_MAX_ROUNDS,
+            policy: ApprovalPolicy::default(),
+            env: crate::ExecEnvironment::Container,
+        })
+    }
+
     /// 给**未绑定工作区**的会话用：沙箱是封闭的，一个路径也进不去。
     ///
     /// 工具目录仍然是完整的内置目录 —— 该给哪些工具由调用方按会话状态决定
@@ -468,6 +493,17 @@ impl Turn {
     #[must_use]
     pub fn sandbox_root(&self) -> Option<&std::path::Path> {
         self.sandbox.root()
+    }
+
+    /// 这一轮到底有没有声明「有人在场」。与 [`Self::env`] 同类：**可观测**。
+    ///
+    /// 存在的理由是它会说谎而没人看得出来：`attended` 只影响两件不显眼的事 ——
+    /// 无 OS 沙箱时放不放行执行、以及日志里印哪一句。容器化之后
+    /// 「有人在场」在 Web 端是**假的**（人在浏览器另一头），而印出来的那句
+    /// 「本次执行由用户当场批准」会让运维照着一个不存在的保证去排查。
+    #[must_use]
+    pub fn is_attended(&self) -> bool {
+        self.sandbox.exec_policy().attended.is_attended()
     }
 
     /// 本轮的执行策略。存在的理由与 [`Self::tool_names`] 一样是**可观测**：
@@ -794,6 +830,36 @@ impl Turn {
         } else {
             None
         };
+
+        // ── 越界 + 「问了也没人答得上来」的环境 → 直接拒，不问 ──
+        //
+        // 这一条在闸门之前，因为它不是「要不要问」的答案，是「这个问题在这里
+        // 不成立」。容器里的用户看不到容器的文件系统全貌，把一条容器内的越界
+        // 路径摆给他，他只能凭感觉点 —— 而一个凭感觉点的确认框比没有确认框
+        // 更糟：它把责任转移了却没有转移信息。
+        //
+        // 也拦在**完全放行**档之前：那一档的语义是「你机器上的东西我都信」，
+        // 而这里根本不是他的机器。
+        //
+        // `ExecEnvironment::None`（封闭沙箱）走不到这里 —— 它的 `classify`
+        // 对任何路径都返回 Err，`outside` 恒为 None。那是刻意的：
+        // 空集里没有「在外面」这回事，归成 Outside 就意味着它能被一次确认放行。
+        if let Some(p) = &outside
+            && !self.env.allows_escape_prompt()
+        {
+            tracing::info!(
+                tool = spec.name,
+                path = %p.display(),
+                env = self.env.as_str(),
+                "越界路径在这个执行环境里直接拒绝 —— 没有人能为它负责"
+            );
+            return ToolResult::err(format!(
+                "{} 要访问的 {} 在工作区之外。这个会话跑在一次性容器里，\
+                 可访问范围就是工作区本身 —— 请改用工作区内的路径。",
+                spec.name,
+                p.display()
+            ));
+        }
 
         // ── 权限闸门。所有工具执行的唯一入口，见 ApprovalPolicy 的文档 ──
         //
@@ -1348,6 +1414,60 @@ mod tests {
             crate::ExecEnvironment::None,
             "封闭沙箱没有任何可访问路径，它的执行环境就是「没有」"
         );
+        assert_eq!(
+            Turn::in_container(dir.path())
+                .expect("临时目录是合法根")
+                .env(),
+            crate::ExecEnvironment::Container,
+            "容器那一格同理 —— 构造函数的名字必须说明这是谁的文件系统"
+        );
+    }
+
+    /// 两个谓词在 `Container` 上**分道扬镳** —— 这一格存在的全部理由。
+    ///
+    /// 它们当初就没合并，注释里写着「一次性容器进来时两者就会分开」。
+    /// 合并回去（或给 Container 也放开越界询问）会让容器里弹出一个
+    /// 用户答不上来的确认框：他看不到容器的文件系统全貌，只能凭感觉点，
+    /// 而那比没有确认框更糟 —— 责任转移了，信息没有。
+    #[test]
+    fn the_container_environment_has_files_but_no_one_to_ask() {
+        let c = crate::ExecEnvironment::Container;
+        assert!(
+            c.has_filesystem(),
+            "容器里有 /workspace，文件与 shell 工具都该装配"
+        );
+        assert!(
+            !c.allows_escape_prompt(),
+            "越界在容器里不是一个能问的问题 —— 问了也没人答得上来"
+        );
+    }
+
+    /// `--exec-env` 的解析：三个字面量之外一律报错，**空串也不例外**。
+    ///
+    /// 空串顶掉默认值在这个仓库里栽过六次。这里顶掉的后果最重：
+    /// 一个本该关在容器里的 agent 会拿到本机语义。
+    #[test]
+    fn the_exec_env_flag_refuses_to_guess() {
+        use std::str::FromStr as _;
+        for (s, want) in [
+            ("none", crate::ExecEnvironment::None),
+            ("local-machine", crate::ExecEnvironment::LocalMachine),
+            ("container", crate::ExecEnvironment::Container),
+            (" container ", crate::ExecEnvironment::Container),
+        ] {
+            assert_eq!(
+                crate::ExecEnvironment::from_str(s).expect("这是合法字面量"),
+                want,
+                "{s:?} 该解析成 {want:?}"
+            );
+        }
+        for bad in ["", "  ", "Container", "local", "docker"] {
+            assert!(
+                crate::ExecEnvironment::from_str(bad).is_err(),
+                "{bad:?} 必须报错而不是回落成某个默认值 —— \
+                 静默回落的后果是执行环境与实际不符，且没有任何症状"
+            );
+        }
     }
 
     // ─────────────── 越界确认 ───────────────
@@ -1424,6 +1544,57 @@ mod tests {
             "只读工具越界必须问。风险档与越界是两个独立的提问理由，             合并判断会让这一条静默通过"
         );
         assert!(r.ok, "批准之后就该真的读到：{}", r.content);
+    }
+
+    /// 同一次越界，在容器里是**直接拒绝**，一次都不问。
+    ///
+    /// 与上一条互为对照：同样的 `read_file`、同样的工作区外路径，
+    /// 只因执行环境不同，一个走确认回路、一个当场拒。
+    ///
+    /// 这条同时是 `allows_escape_prompt` 的**唯一生产用途**的守卫 ——
+    /// 那个谓词此前只有测试在读（第 9 次「造好了但没人调用」），
+    /// 是这一格落地时才接上的。断言 `asked() == 0` 正是在钉这件事：
+    /// 谓词一旦被绕开，越界会悄悄退回「问一句」，而容器里那一问无解。
+    #[tokio::test]
+    async fn in_a_container_an_out_of_bounds_path_is_refused_without_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = Turn::in_container(dir.path()).expect("临时目录是合法根");
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret.txt");
+        std::fs::write(&target, "s").unwrap();
+        // 就算宿主打算批准也没用 —— 它根本不会被问到
+        let host = GrantHost::new(Approval::Allow);
+
+        let r = t
+            .dispatch_once(
+                &ToolCall {
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": target.to_string_lossy()}),
+                },
+                &host,
+            )
+            .await;
+
+        assert_eq!(
+            host.asked(),
+            0,
+            "容器里越界不该问：用户看不到容器的文件系统全貌，\
+             那个确认框他只能凭感觉点"
+        );
+        assert!(!r.ok, "必须拒绝，实际却成功了：{}", r.content);
+        assert!(
+            r.content.contains("工作区之外"),
+            "拒绝理由要让模型自己改用工作区内的路径，实际：{}",
+            r.content
+        );
+        assert!(
+            host.granted.lock().unwrap().is_empty(),
+            "没批准过的东西不该留下放行记录 —— 留了下一次就不拦了"
+        );
+        assert!(
+            std::fs::read_to_string(&target).is_ok(),
+            "被拒的读不该有任何副作用"
+        );
     }
 
     /// 问的时候必须把**解析后的绝对路径**给用户看。

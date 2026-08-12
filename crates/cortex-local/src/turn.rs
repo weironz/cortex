@@ -62,6 +62,50 @@ fn policy_for(mode: PermissionMode) -> ApprovalPolicy {
     }
 }
 
+/// 给一个绑定了工作区的会话造 `Turn`。**同一个二进制，两种部署。**
+///
+/// # 为什么抽成函数
+///
+/// 它编码了「桌面端与容器里到底差在哪」这条规则，而这条规则错了不会报错：
+/// 少一个 `in_container` 分支，容器里的 agent 就拿到本机语义（越界弹一个
+/// 没人答得上来的确认框）；多开一次 `attended()`，日志就会印出
+/// 「本次执行由用户当场批准」这句假话。两者都只有在真机上盯着看才发现得了。
+/// 抽出来是为了让它**能被测**，也让规则有一个写得下的地方。
+///
+/// 差别正好两处，其余（工具目录、围栏、确认档位）完全相同：
+///
+/// | | 桌面端 `LocalMachine` | 容器 `Container` |
+/// |---|---|---|
+/// | 越界路径 | 问一句，批准后本会话放行 | **直接拒**（`allows_escape_prompt`）|
+/// | `attended()` | 开 —— 人就在屏幕前 | **不开** —— 人在浏览器另一头 |
+fn workspace_turn_for(
+    env: cortex_agent::ExecEnvironment,
+    root: &str,
+    max_rounds: usize,
+    mode: PermissionMode,
+) -> Result<Turn> {
+    let base = match env {
+        cortex_agent::ExecEnvironment::Container => Turn::in_container(root)?,
+        _ => Turn::on_local_machine(root)?,
+    };
+    let t = base
+        .with_max_rounds(max_rounds)
+        .with_policy(policy_for(mode));
+    // .attended()：这台机器上没有 OS 沙箱时（Windows），靠「用户当场批准」
+    // 替代内核隔离。**只有本地 agent 配这么做** —— 人就坐在屏幕前，命令原文
+    // 刚给他看过，是他点的允许。cortexd 一律不开：那边批准的人可能在另一个
+    // 城市，而命令跑在服务器的文件系统里。见 sandbox::Attended
+    //
+    // 容器里**同样不开**，理由更硬：那里根本没有「当场」。真正的边界是容器
+    // 本身，外加容器内仍然生效的 landlock（Docker ≥23.0 的默认 seccomp
+    // 放行了那三个 syscall）。
+    if env == cortex_agent::ExecEnvironment::LocalMachine {
+        Ok(t.attended())
+    } else {
+        Ok(t)
+    }
+}
+
 /// 一轮所需的全部依赖。
 #[derive(Clone)]
 pub struct Engine {
@@ -81,6 +125,14 @@ pub struct Engine {
     /// 可能和服务端跑的根本不是同一个。
     pub context_window: usize,
     pub system_prompt: &'static str,
+    /// 这个进程手上的执行环境。由 `--exec-env` 决定，见
+    /// [`cortex_agent::ExecEnvironment`]。
+    ///
+    /// **同一个二进制两种部署**：跑在用户桌面上是 `LocalMachine`，
+    /// 跑在 Web 端的一次性容器里是 `Container`。差别落在两处 ——
+    /// 越界路径问不问（容器里直接拒），以及 `.attended()` 该不该开
+    /// （容器里没人坐在屏幕前）。
+    pub exec_env: cortex_agent::ExecEnvironment,
 }
 
 impl Engine {
@@ -198,17 +250,7 @@ impl Engine {
         let workspace_turn = bound.as_deref().and_then(|ws| {
             // 绑定时校验过，但目录可能之后被删了/移了/换了外接盘。
             // 此时降级成纯聊天而不是让整轮失败 —— 用户只是想说句话
-            Turn::on_local_machine(ws)
-                // .attended()：这台机器上没有 OS 沙箱时（Windows），
-                // 靠「用户当场批准」替代内核隔离。**只有本地 agent 配这么做** ——
-                // 人就坐在屏幕前，命令原文刚给他看过，是他点的允许。
-                // cortexd 一律不开：那边批准的人可能在另一个城市，
-                // 而命令跑在服务器的文件系统里。见 sandbox::Attended
-                .map(|t| {
-                    t.with_max_rounds(self.max_rounds)
-                        .attended()
-                        .with_policy(policy_for(req.permission_mode))
-                })
+            workspace_turn_for(self.exec_env, ws, self.max_rounds, req.permission_mode)
                 .inspect_err(|e| {
                     tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
                 })
@@ -553,6 +595,61 @@ impl ToolHost for LocalHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 桌面端与容器只差两处，而且都是「错了不报错」的那种。
+    ///
+    /// 这条钉住的两件事，各自的失败形态：
+    /// - 少 `in_container` 分支 → 容器里越界会弹一个用户答不上来的确认框
+    /// - 多开 `attended()` → 日志印「本次执行由用户当场批准」，而没有那个人
+    #[test]
+    fn the_container_deployment_differs_in_exactly_two_places() {
+        let dir = tempfile::tempdir().expect("应能建临时目录");
+        let root = dir.path().to_string_lossy().into_owned();
+
+        let desktop = workspace_turn_for(
+            cortex_agent::ExecEnvironment::LocalMachine,
+            &root,
+            8,
+            PermissionMode::Ask,
+        )
+        .expect("临时目录是合法根");
+        let container = workspace_turn_for(
+            cortex_agent::ExecEnvironment::Container,
+            &root,
+            8,
+            PermissionMode::Ask,
+        )
+        .expect("临时目录是合法根");
+
+        assert_eq!(
+            desktop.env(),
+            cortex_agent::ExecEnvironment::LocalMachine,
+            "桌面端那条路必须声明自己动的是用户的机器"
+        );
+        assert_eq!(
+            container.env(),
+            cortex_agent::ExecEnvironment::Container,
+            "容器那条路漏了的话，越界会退回「问一句」—— 而容器里那一问无解"
+        );
+        assert!(desktop.is_attended(), "人就坐在屏幕前，这是本机模式的依据");
+        assert!(
+            !container.is_attended(),
+            "容器里没有「当场」可言 —— 人在浏览器另一头。\
+             开着它会让运维照着一个不存在的保证去排查"
+        );
+
+        // 其余必须相同：两种部署跑的是同一个 agent，差别只有上面两处
+        assert_eq!(
+            desktop.tool_names(),
+            container.tool_names(),
+            "工具目录不该因为部署形态而变 —— 变了就是两个 agent 了"
+        );
+        assert_eq!(
+            desktop.sandbox_root(),
+            container.sandbox_root(),
+            "围栏的根同样由工作区决定，与部署形态无关"
+        );
+    }
 
     /// 工具路径只从约定的键名里取，取不到就是 `None`。
     ///

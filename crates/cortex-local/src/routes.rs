@@ -155,7 +155,18 @@ async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health>
         blob_backend: None,
         auth: None,
         embedding: None,
-        sandbox: Some(cortex_agent::status_line_for(cortex_agent::Attended::Yes)),
+        // 这一行是「这个进程到底受什么保护」的**唯一观测点**，容器化之后
+        // 尤其如此：landlock 在容器里是否可用（Docker ≥23.0 的默认 seccomp
+        // 放行了它，但内核未必编了）只有跑起来才知道，而知道的方式就是这里。
+        // 所以 attended 必须跟着真实执行环境走，不能恒为 Yes —— 容器里没有
+        // 「用户当场批准」这回事，印出来就是假话。
+        sandbox: Some(cortex_agent::status_line_for(
+            if st.engine.exec_env == cortex_agent::ExecEnvironment::LocalMachine {
+                cortex_agent::Attended::Yes
+            } else {
+                cortex_agent::Attended::No
+            },
+        )),
         memory: Some(cortex_proto::dto::MemoryHealth {
             remote: st.remote.base().to_string(),
             reachable,

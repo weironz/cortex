@@ -61,24 +61,75 @@ pub enum ExecEnvironment {
     /// 只有 `cortex-local` 该用它：人就坐在屏幕前，路径与命令原文都刚给他
     /// 看过。允许越界询问、允许三档权限模式（含完全放行）。
     LocalMachine,
+    /// 工具动的是**一个一次性容器**里的文件系统。
+    ///
+    /// Web 端的形态：同一个 `cortex-local` 二进制跑在容器里，工作区是容器内
+    /// 的 `/workspace`。宿主的其余部分连「存在」都不存在，所以越界不是一个
+    /// 需要询问的事件，是一个**无意义的请求**。
+    ///
+    /// # 与 `LocalMachine` 真正的差别不是「更安全」
+    ///
+    /// 是**问了也没人答得上来**。本机模式下「要不要让它写 `D:\别的项目`」
+    /// 这句话有意义，因为屏幕前那个人认得那个路径；容器里的用户看不到
+    /// 容器的文件系统全貌，把一条容器内路径摆给他，他只能凭感觉点。
+    /// 一个凭感觉点的确认框比没有确认框更糟 —— 它把责任转移了却没有转移信息。
+    ///
+    /// # 这一格**没有**继承 Claude Code web 的「一律免确认」
+    ///
+    /// 那个结论的前提是「沙箱文件系统从不是 system of record」——
+    /// Codex / Claude / Devin 的权威副本都在 git 远端，容器丢了只是浪费一次
+    /// 任务。我们的 `/workspace` 是持久卷、常常是用户唯一一份副本，前提不
+    /// 成立，所以结论不能照搬：确认档位仍随 `PermissionMode` 逐轮可调，
+    /// 只是**默认**免确认。守住数据靠的是宿主侧快照，不是弹窗（见计划第五节）。
+    Container,
 }
 
 impl ExecEnvironment {
     /// 有没有一个能跑文件 / shell 工具的地方。
     #[must_use]
     pub const fn has_filesystem(self) -> bool {
-        matches!(self, Self::LocalMachine)
+        matches!(self, Self::LocalMachine | Self::Container)
     }
 
     /// 越界路径能不能靠「问用户一句」放行。
     ///
-    /// 与 [`Self::has_filesystem`] 眼下同值，但**不合并**：前者答的是
+    /// 与 [`Self::has_filesystem`] 曾经同值，但**当初就没合并**：前者答的是
     /// 「有没有地方跑」，后者答的是「越界这件事有没有人能负责」。
-    /// 一次性容器进来时两者就会分开 —— 那里有文件系统，而越界根本不是
-    /// 个概念（整个容器都是一次性的）。
+    /// [`Self::Container`] 落地时两者如期分开了 —— 那里有文件系统，
+    /// 而越界不是个能问的问题（见该变体的文档）。
     #[must_use]
     pub const fn allows_escape_prompt(self) -> bool {
         matches!(self, Self::LocalMachine)
+    }
+
+    /// 进日志与 `/health` 的名字。也是 `--exec-env` 接受的字面量。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::LocalMachine => "local-machine",
+            Self::Container => "container",
+        }
+    }
+}
+
+impl std::str::FromStr for ExecEnvironment {
+    type Err = cortex_core::CortexError;
+
+    /// 解析 `--exec-env` / `CORTEX_EXEC_ENV`。
+    ///
+    /// **不接受空串回落成默认值**：空串顶掉默认值在这个仓库里已经栽过六次，
+    /// 而这里顶掉的后果是「本该关在容器里的 agent 拿到了本机语义」。
+    /// 没写就别传这个参数，传了就得是三个字面量之一。
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "none" => Ok(Self::None),
+            "local-machine" => Ok(Self::LocalMachine),
+            "container" => Ok(Self::Container),
+            other => Err(cortex_core::CortexError::Config(format!(
+                "未知的执行环境 {other:?}，可选：none / local-machine / container"
+            ))),
+        }
     }
 }
 
