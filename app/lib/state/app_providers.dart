@@ -123,7 +123,19 @@ class _RestartBudget {
 final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   final config = ref.watch(appConfigProvider);
   final token = ref.watch(authControllerProvider.select((s) => s.token));
-  if (config.useMock || token == null || !kLocalAgentSupported) return null;
+  // 关掉认证的部署（`CORTEX_AUTH=disabled`，自托管跑在 127.0.0.1 上的
+  // 常见形态）根本没有 token 可拿。
+  //
+  // **原先这里只看 token 是否为 null**，于是那种部署会：跳过登录界面
+  // （对的）、然后**静默地不启动本地 agent** —— 用户看到的是「装了桌面端，
+  // 但它读不到我本机的文件」，而界面上没有任何一处说明为什么。
+  // 两件事本来就没有因果关系：本地 agent 要的是「能连上 cortexd」，
+  // 不是「有一把 token」。
+  final needsToken = ref.watch(
+    authControllerProvider.select((s) => s.health?.requiresToken ?? true),
+  );
+  if (config.useMock || !kLocalAgentSupported) return null;
+  if (needsToken && token == null) return null;
 
   final agent = discoverLocalAgent();
   if (agent == null) return null;
@@ -181,7 +193,9 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   try {
     final origin = await agent.start(
       remote: config.baseUrl,
-      token: token,
+      // 关掉认证的部署没有 token。空串而不是抛错：本地 agent 那侧
+      // 也只是把它塞进 Authorization 头，而一个不认证的 cortexd 根本不看
+      token: token ?? '',
       // Unexpected death only — a deliberate `stop()` never lands here, so
       // signing out cannot be mistaken for a crash.
       //
