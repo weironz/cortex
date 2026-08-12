@@ -242,6 +242,10 @@ class _RiskChip extends StatelessWidget {
     final label = switch (risk) {
       'execute' => '执行',
       'write' => '写入',
+      // 'safe' 会出现在**越界**确认上：一个 read_file 按风险根本不用问，
+      // 但它读的是工作区外的文件。少了这一条，那种确认框上会显示一个
+      // 生硬的 "safe"
+      'safe' => '读取',
       final other => other,
     };
     return Container(

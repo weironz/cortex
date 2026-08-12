@@ -502,10 +502,7 @@ impl ToolHost for LocalHost {
     /// [`ConfirmRegistry`]（它在 `cortex-proto` 里，两侧共用）。
     async fn confirm(&self, req: &ConfirmRequest<'_>) -> Approval {
         let preview = preview_of(req.arguments);
-        let risk = match req.risk {
-            cortex_agent::Risk::Execute => "execute",
-            _ => "write",
-        };
+        let risk = cortex_proto::confirm::risk_str(req.risk);
 
         // 登记 → 发事件 → 挂起。顺序不能变：反过来的话，本机 loopback 上
         // 一个手快的客户端可能在登记完成之前就把回执打回来 ——

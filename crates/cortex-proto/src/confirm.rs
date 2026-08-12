@@ -60,6 +60,28 @@ pub const TIMEOUT_ENV: &str = "CORTEX_CONFIRM_TIMEOUT_SECS";
 /// 结尾会有显式标记，用户至少知道自己没看全。
 const PREVIEW_MAX_CHARS: usize = 8_192;
 
+/// [`cortex_agent::Risk`] 的线上表示。
+///
+/// 手写 match 而不是 serde：这是**下行契约**的一部分（客户端按它决定确认框
+/// 长什么样、要不要加一道二次确认），改 `Risk` 的人必须在这里被编译器拦一下，
+/// 而不是让它悄悄改掉三个客户端看到的字符串。
+///
+/// # 为什么在这里而不在两个宿主各写一份
+///
+/// 此前就是各写一份，而它们**已经漂开了**：cortexd 那份是穷尽的三个分支，
+/// cortex-local 那份是 `Execute => "execute", _ => "write"`。压平在过去无害
+/// —— `Risk::Safe` 的工具从不进确认回路。越界确认改变了这个前提：一个
+/// `read_file` 现在会因为读到工作区外而弹窗，而桌面端会把它标成「写入」。
+/// 用户据以判断准不准的那个标签，是错的。
+#[must_use]
+pub fn risk_str(risk: cortex_agent::Risk) -> &'static str {
+    match risk {
+        cortex_agent::Risk::Safe => "safe",
+        cortex_agent::Risk::Write => "write",
+        cortex_agent::Risk::Execute => "execute",
+    }
+}
+
 /// 一条待确认项的元信息 —— 登记时给，列表与事件都用它。
 #[derive(Debug, Clone)]
 pub struct PendingMeta {

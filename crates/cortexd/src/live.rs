@@ -2008,7 +2008,7 @@ impl ToolHost for TurnHost {
 
     async fn confirm(&self, req: &ConfirmRequest<'_>) -> Approval {
         let preview = preview_of(req.arguments);
-        let risk = risk_str(req.risk);
+        let risk = cortex_proto::confirm::risk_str(req.risk);
 
         // 顺序是**登记 → 发事件 → 挂起**，不能变。反过来的话，本机 loopback 上
         // 一个手快的客户端可能在登记完成之前就把回执打回来，那条回执会撞上一个
@@ -2049,19 +2049,6 @@ impl ToolHost for TurnHost {
         // agent 循环不发任何事件，已有的那套「send 失败即断开」的探测在这段
         // 时间里完全失灵 —— 没有它，关掉页面之后这一轮会原地挂满整个超时
         pending.wait(self.events.closed()).await
-    }
-}
-
-/// [`cortex_agent::Risk`] 的线上表示。
-///
-/// 手写 match 而不是 serde：这是**下行契约**的一部分（客户端按它决定确认框
-/// 长什么样、要不要加一道二次确认），改 `Risk` 的人必须在这里被编译器拦一下，
-/// 而不是让它悄悄改掉三个客户端看到的字符串。
-fn risk_str(risk: cortex_agent::Risk) -> &'static str {
-    match risk {
-        cortex_agent::Risk::Safe => "safe",
-        cortex_agent::Risk::Write => "write",
-        cortex_agent::Risk::Execute => "execute",
     }
 }
 
