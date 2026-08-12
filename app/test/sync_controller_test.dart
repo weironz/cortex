@@ -149,8 +149,7 @@ class _FakeApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
   void dispose() {}
 
   @override
-  Future<HealthStatus> health() =>
-      throw UnimplementedError('同步链路不应触碰 /health');
+  Future<HealthStatus> health() => throw UnimplementedError('同步链路不应触碰 /health');
 
   @override
   Stream<ChatEvent> chat({
@@ -158,6 +157,7 @@ class _FakeApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    bool sandbox = false,
   }) => throw UnimplementedError('同步链路不应发起对话');
 
   @override
@@ -181,8 +181,11 @@ class _FakeApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
   // that reached for them on a bump should fail the test, not pass quietly.
 
   @override
-  Future<SessionDetail> sessionDetail(String id, {int? limit, String? before}) =>
-      throw UnimplementedError('同步链路不应拉会话详情');
+  Future<SessionDetail> sessionDetail(
+    String id, {
+    int? limit,
+    String? before,
+  }) => throw UnimplementedError('同步链路不应拉会话详情');
 
   @override
   Future<ChatSession> updateSession(
@@ -306,11 +309,10 @@ void main() {
     api.emit(const SyncBump(30));
     await _settle();
 
-    expect(
-      api.sinceCalls,
-      [10, 22],
-      reason: '第二次仍从自己的 22 拉；用 25 会永久跳过 22..25 这一段',
-    );
+    expect(api.sinceCalls, [
+      10,
+      22,
+    ], reason: '第二次仍从自己的 22 拉；用 25 会永久跳过 22..25 这一段');
   });
 
   test('resync 与 bump 分开计数', () async {
@@ -327,11 +329,7 @@ void main() {
 
     final state = container.read(syncControllerProvider);
     expect(state.bumps, 1);
-    expect(
-      state.resyncs,
-      2,
-      reason: 'resync 混进 bump 就看不出服务端漏推过 —— 那正是要盯的运维信号',
-    );
+    expect(state.resyncs, 2, reason: 'resync 混进 bump 就看不出服务端漏推过 —— 那正是要盯的运维信号');
   });
 
   test('断线后指数退避重连，且不吞掉自己的游标', () async {
@@ -358,11 +356,7 @@ void main() {
     api.emit(const SyncHello(cursor: 99, version: '0.0.1'));
     await _settle();
 
-    expect(
-      api.sinceCalls,
-      [40],
-      reason: '重连后补拉必须从断线前的 40 开始，而不是 hello 报的 99',
-    );
+    expect(api.sinceCalls, [40], reason: '重连后补拉必须从断线前的 40 开始，而不是 hello 报的 99');
     expect(container.read(syncControllerProvider).attempt, 0);
     expect(container.read(syncControllerProvider).status, SyncLinkStatus.live);
   });
@@ -456,11 +450,7 @@ void main() {
 
     // Long enough to clear the refresh debounce.
     await Future<void>.delayed(const Duration(milliseconds: 600));
-    expect(
-      api.searchCount,
-      0,
-      reason: '面板还没被打开过就自动填充，用户会看到自己没要过的结果',
-    );
+    expect(api.searchCount, 0, reason: '面板还没被打开过就自动填充，用户会看到自己没要过的结果');
   });
 
   test('mock 数据源不建立连接', () async {
@@ -469,7 +459,10 @@ void main() {
     addTearDown(container.dispose);
 
     await _settle();
-    expect(container.read(syncControllerProvider).status, SyncLinkStatus.disabled);
+    expect(
+      container.read(syncControllerProvider).status,
+      SyncLinkStatus.disabled,
+    );
     expect(api.connectCount, 0, reason: 'mock 没有 daemon，连接尝试只会产生噪音');
   });
 }

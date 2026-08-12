@@ -118,7 +118,8 @@ void main() {
       expect(
         request.url.toString(),
         isNot(contains('deadbeef')),
-        reason: '长期 token 进 URL 就会进 access log、反代日志与浏览器历史 —— '
+        reason:
+            '长期 token 进 URL 就会进 access log、反代日志与浏览器历史 —— '
             '短命票据存在的全部理由就是避免这件事',
       );
     });
@@ -129,10 +130,8 @@ void main() {
         baseUrl: 'http://127.0.0.1:8080',
         token: 'deadbeef',
         client: rec.client(
-          (_) async => http.Response(
-            'data: {"type":"done","episode_id":"e1"}\n\n',
-            200,
-          ),
+          (_) async =>
+              http.Response('data: {"type":"done","episode_id":"e1"}\n\n', 200),
         ),
       );
       addTearDown(api.dispose);
@@ -300,7 +299,10 @@ void main() {
       addTearDown(container.dispose);
 
       await _settle(container);
-      expect(container.read(authControllerProvider).phase, AuthPhase.needsToken);
+      expect(
+        container.read(authControllerProvider).phase,
+        AuthPhase.needsToken,
+      );
     });
 
     test('连不上时是 unreachable，不是「token 不对」', () async {
@@ -520,12 +522,7 @@ class _GateApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
     if (healthThrows) {
       throw const CortexApiException('连不上 cortexd');
     }
-    return HealthStatus(
-      status: 'ok',
-      version: 't',
-      database: 'ok',
-      auth: auth,
-    );
+    return HealthStatus(status: 'ok', version: 't', database: 'ok', auth: auth);
   }
 
   @override
@@ -566,6 +563,7 @@ class _GateApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    bool sandbox = false,
   }) => throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
 
   @override
@@ -595,8 +593,11 @@ class _GateApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
   ) => throw UnimplementedError();
 
   @override
-  Future<SessionDetail> sessionDetail(String id, {int? limit, String? before}) =>
-      throw UnimplementedError();
+  Future<SessionDetail> sessionDetail(
+    String id, {
+    int? limit,
+    String? before,
+  }) => throw UnimplementedError();
 
   @override
   Future<ChatSession> updateSession(

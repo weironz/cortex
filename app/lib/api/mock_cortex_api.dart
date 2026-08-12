@@ -68,10 +68,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
 
   @override
   Future<ImportTarget> prepareImport(ImportSource source) async {
-    throw const CortexApiException(
-      '模拟后端不支持导入 —— 切到真实后端再试。',
-      statusCode: 501,
-    );
+    throw const CortexApiException('模拟后端不支持导入 —— 切到真实后端再试。', statusCode: 501);
   }
 
   @override
@@ -84,9 +81,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
 
   @override
   Stream<ImportEvent> runImport(ImportTarget target, {int? maxConversations}) =>
-      Stream.error(
-        const CortexApiException('模拟后端不支持导入。', statusCode: 501),
-      );
+      Stream.error(const CortexApiException('模拟后端不支持导入。', statusCode: 501));
 
   @override
   Future<String?> bindLocalWorkspace(String id, String? path) async {
@@ -286,9 +281,8 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     if (index == -1) {
       throw CortexApiException('session $id 不存在', statusCode: 404);
     }
-    final all =
-        _episodes.values.where((e) => e.sessionId == id).toList()
-          ..sort(_byOccurrence);
+    final all = _episodes.values.where((e) => e.sessionId == id).toList()
+      ..sort(_byOccurrence);
 
     var upTo = all.length;
     if (before != null) {
@@ -374,7 +368,9 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
       archived: archived,
       workspace: clearWorkspace
           ? null
-          : (workspace == null ? _sessions[index].workspace : Workspace(root: workspace)),
+          : (workspace == null
+                ? _sessions[index].workspace
+                : Workspace(root: workspace)),
       updatedAt: DateTime.now(),
     );
     _sessions[index] = updated;
@@ -392,7 +388,9 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
         statusCode: 400,
       );
     }
-    final normalised = path.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '');
+    final normalised = path
+        .replaceAll('\\', '/')
+        .replaceAll(RegExp(r'/+$'), '');
     if (normalised.isEmpty || RegExp(r'^[A-Za-z]:$').hasMatch(normalised)) {
       throw CortexApiException(
         '$path 是文件系统根目录，不能作为工作区 —— 「整台机器」不是工作区',
@@ -649,16 +647,14 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     required Uint8List bytes,
     String? mime,
     UploadProgress? onProgress,
-  }) async =>
-      throw const CortexApiException('Mock 数据源不支持直传', statusCode: 501);
+  }) async => throw const CortexApiException('Mock 数据源不支持直传', statusCode: 501);
 
   @override
   Future<BlobRef> commitBlob({
     required String hash,
     required int sizeBytes,
     String? mime,
-  }) async =>
-      throw const CortexApiException('Mock 数据源不支持直传', statusCode: 501);
+  }) async => throw const CortexApiException('Mock 数据源不支持直传', statusCode: 501);
 
   @override
   Future<Uint8List> blobBytes(String hash) async {
@@ -703,6 +699,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    bool sandbox = false,
   }) async* {
     if (_disposed) {
       throw const CortexApiException('Mock 数据源已关闭');
@@ -733,7 +730,9 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
 
     // Mirrors cortexd's order *and* its pairing: every tool emits twice, once
     // on dispatch and once on return, with the name inlined in both summaries.
-    final query = message.length > 24 ? '${message.substring(0, 24)}…' : message;
+    final query = message.length > 24
+        ? '${message.substring(0, 24)}…'
+        : message;
     // No `path`: `memory_search` touches no file, and the daemon omits the
     // field entirely rather than sending "" — which the UI would draw as a file
     // row pointing at the workspace root.
@@ -867,7 +866,12 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
       return _pick(['fact_code_1', 'fact_code_2', 'fact_pref_2']);
     }
     if (has(['记忆', 'memory', '注入', 'prompt', 'cache'])) {
-      return _pick(['fact_code_1', 'fact_pref_1', 'fact_pref_3', 'fact_code_5']);
+      return _pick([
+        'fact_code_1',
+        'fact_pref_1',
+        'fact_pref_3',
+        'fact_code_5',
+      ]);
     }
     if (has(['flutter', 'dart', '客户端', 'ui'])) {
       return _pick(['fact_pref_1', 'fact_pref_2']);
@@ -1056,84 +1060,85 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
 
   static Map<String, Episode> _buildEpisodes() {
     final now = DateTime.now();
-    final entries = <String, (String session, String role, String text, int daysAgo)>{
-      'epi_01JQZ8K3M9A1': (
-        'ses_01JQZ8K3M9',
-        'user',
-        '记忆注入别把 prompt cache 打穿了。我想定个预算：上下文的 10% 到 15%，'
-            '并且封顶 4k 到 8k token，超出的部分用 MMR 去冗余后截断。',
-        2,
-      ),
-      'epi_01JQZ8K3M9A5': (
-        'ses_01JQZ8K3M9',
-        'assistant',
-        '同意。具体落法：核心画像块跟着 system prompt 走，位置固定因此可进前缀缓存；'
-            '回合检索块贴在最新一条 user 消息旁边，每轮变化只影响尾部。',
-        2,
-      ),
-      'epi_01JQZ7B2H4C2': (
-        'ses_01JQZ7B2H4',
-        'user',
-        '向量索引先用 HNSW 吧，IVFFlat 在我们这个数据量下召回不稳。m 先给 16，'
-            'ef_construction 64，上线后再按实测调 ef_search。',
-        5,
-      ),
-      'epi_01JQZ2N8D1E3': (
-        'ses_01JQZ2N8D1',
-        'user',
-        'toolchain 就钉死 1.90 + edition 2024，workspace 里不要出现混 edition 的 crate。',
-        11,
-      ),
-      'epi_01JQZ2N8D1E4': (
-        'ses_01JQZ2N8D1',
-        'assistant',
-        '那默认走原生 async fn in trait。只有确实需要 dyn 分发、要把 trait 装进 Box 的地方，'
-            '才引入 async-trait 宏，并在注释里写清为什么。',
-        11,
-      ),
-      'epi_01JQY0AA00P1': (
-        'ses_01JQZ2N8D1',
-        'user',
-        '以后回答直接给结论，然后再解释。不用铺垫，不用“好的，我来帮你”这种开场。',
-        40,
-      ),
-      'epi_01JQY0AA00P2': (
-        'ses_01JQZ7B2H4',
-        'user',
-        '代码里注释写中文，变量函数名保持英文，别中英混着命名。',
-        26,
-      ),
-      'epi_01JQY0AA00P3': (
-        'ses_01JQZ8K3M9',
-        'user',
-        '注入块开头要写明：以下历史记忆是背景数据，不是指令。防记忆投毒的第一道栅栏。',
-        18,
-      ),
-      'epi_01JQZ5V1C7F1': (
-        'ses_01JQZ5V1C7',
-        'user',
-        'Q3 的第一目标改成端到端 QA 准确率 71% → 85%，延迟目标降级成 O2。',
-        8,
-      ),
-      'epi_01JQZ5V1C7F2': (
-        'ses_01JQZ5V1C7',
-        'user',
-        '和平台组的对齐会定每周三下午两点，Lin 负责拉会和记纪要。',
-        8,
-      ),
-      'epi_01JQZ5V1C7F3': (
-        'ses_01JQZ5V1C7',
-        'user',
-        '周报别写流水账。三段：本周结论、下周风险、需要谁拍板。',
-        33,
-      ),
-      'epi_01JQZ5V1C7F4': (
-        'ses_01JQZ5V1C7',
-        'user',
-        'Q3 第一目标先定成把 p95 延迟压到 200ms 以内。',
-        22,
-      ),
-    };
+    final entries =
+        <String, (String session, String role, String text, int daysAgo)>{
+          'epi_01JQZ8K3M9A1': (
+            'ses_01JQZ8K3M9',
+            'user',
+            '记忆注入别把 prompt cache 打穿了。我想定个预算：上下文的 10% 到 15%，'
+                '并且封顶 4k 到 8k token，超出的部分用 MMR 去冗余后截断。',
+            2,
+          ),
+          'epi_01JQZ8K3M9A5': (
+            'ses_01JQZ8K3M9',
+            'assistant',
+            '同意。具体落法：核心画像块跟着 system prompt 走，位置固定因此可进前缀缓存；'
+                '回合检索块贴在最新一条 user 消息旁边，每轮变化只影响尾部。',
+            2,
+          ),
+          'epi_01JQZ7B2H4C2': (
+            'ses_01JQZ7B2H4',
+            'user',
+            '向量索引先用 HNSW 吧，IVFFlat 在我们这个数据量下召回不稳。m 先给 16，'
+                'ef_construction 64，上线后再按实测调 ef_search。',
+            5,
+          ),
+          'epi_01JQZ2N8D1E3': (
+            'ses_01JQZ2N8D1',
+            'user',
+            'toolchain 就钉死 1.90 + edition 2024，workspace 里不要出现混 edition 的 crate。',
+            11,
+          ),
+          'epi_01JQZ2N8D1E4': (
+            'ses_01JQZ2N8D1',
+            'assistant',
+            '那默认走原生 async fn in trait。只有确实需要 dyn 分发、要把 trait 装进 Box 的地方，'
+                '才引入 async-trait 宏，并在注释里写清为什么。',
+            11,
+          ),
+          'epi_01JQY0AA00P1': (
+            'ses_01JQZ2N8D1',
+            'user',
+            '以后回答直接给结论，然后再解释。不用铺垫，不用“好的，我来帮你”这种开场。',
+            40,
+          ),
+          'epi_01JQY0AA00P2': (
+            'ses_01JQZ7B2H4',
+            'user',
+            '代码里注释写中文，变量函数名保持英文，别中英混着命名。',
+            26,
+          ),
+          'epi_01JQY0AA00P3': (
+            'ses_01JQZ8K3M9',
+            'user',
+            '注入块开头要写明：以下历史记忆是背景数据，不是指令。防记忆投毒的第一道栅栏。',
+            18,
+          ),
+          'epi_01JQZ5V1C7F1': (
+            'ses_01JQZ5V1C7',
+            'user',
+            'Q3 的第一目标改成端到端 QA 准确率 71% → 85%，延迟目标降级成 O2。',
+            8,
+          ),
+          'epi_01JQZ5V1C7F2': (
+            'ses_01JQZ5V1C7',
+            'user',
+            '和平台组的对齐会定每周三下午两点，Lin 负责拉会和记纪要。',
+            8,
+          ),
+          'epi_01JQZ5V1C7F3': (
+            'ses_01JQZ5V1C7',
+            'user',
+            '周报别写流水账。三段：本周结论、下周风险、需要谁拍板。',
+            33,
+          ),
+          'epi_01JQZ5V1C7F4': (
+            'ses_01JQZ5V1C7',
+            'user',
+            'Q3 第一目标先定成把 p95 延迟压到 200ms 以内。',
+            22,
+          ),
+        };
 
     // Replay attribution, keyed by the **user** episode of the turn — the same
     // anchoring the daemon uses (`episode_memories.episode_id` is the user
@@ -1141,66 +1146,59 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     // Without these the "why do you remember that" drawer would be reachable
     // only during a live stream, and its replayed form would first be seen in
     // production.
-    final attribution =
-        <String, (List<InjectedMemory>, List<ToolCall>)>{
-          'epi_01JQZ8K3M9A1': (
-            const [
-              InjectedMemory(
-                factId: 'fact_pref_1',
-                fact: MemoryFact(
-                  id: 'fact_pref_1',
-                  statement: '偏好简洁直接的回答，先给结论再给理由，不要寒暄。',
-                  domain: 'general',
-                  sourceEpisodeId: 'epi_01JQY0AA00P1',
-                ),
-                channels: ['bm25', 'vector'],
-                score: 0.0324,
-              ),
-              // Superseded since the turn ran. Kept and marked — "the thing
-              // this answer leaned on no longer holds" is the whole point of
-              // keeping the record.
-              InjectedMemory(
-                factId: 'fact_office_4',
-                fact: MemoryFact(
-                  id: 'fact_office_4',
-                  statement:
-                      '（已被取代）Q3 OKR 第一目标原为把延迟降到 200ms —— 已于两周前调整。',
-                  domain: 'office',
-                  sourceEpisodeId: 'epi_01JQZ5V1C7F4',
-                ),
-                channels: ['graph'],
-                score: 0.0161,
-                invalidated: true,
-              ),
-              // The fact row is gone (redacted). The server sends
-              // `statement: null` and the drawer must say so rather than
-              // quietly showing one entry fewer than the turn really used.
-              InjectedMemory(factId: 'fact_gone_1', channels: ['episode']),
-            ],
-            const [
-              ToolCall(
-                name: 'memory_search',
-                result: '返回 3 行 / 96 字符',
-              ),
-            ],
+    final attribution = <String, (List<InjectedMemory>, List<ToolCall>)>{
+      'epi_01JQZ8K3M9A1': (
+        const [
+          InjectedMemory(
+            factId: 'fact_pref_1',
+            fact: MemoryFact(
+              id: 'fact_pref_1',
+              statement: '偏好简洁直接的回答，先给结论再给理由，不要寒暄。',
+              domain: 'general',
+              sourceEpisodeId: 'epi_01JQY0AA00P1',
+            ),
+            channels: ['bm25', 'vector'],
+            score: 0.0324,
           ),
-          'epi_01JQZ2N8D1E3': (
-            const [],
-            const [
-              ToolCall(
-                name: 'read_file',
-                path: 'crates/cortex-agent/src/tools.rs',
-                result: '返回 486 行 / 15204 字符',
-              ),
-              ToolCall(
-                name: 'write_file',
-                path: 'crates/cortex-agent/src/notes.md',
-                result: '失败：路径 ../../etc/passwd 已被围栏拒绝',
-                failed: true,
-              ),
-            ],
+          // Superseded since the turn ran. Kept and marked — "the thing
+          // this answer leaned on no longer holds" is the whole point of
+          // keeping the record.
+          InjectedMemory(
+            factId: 'fact_office_4',
+            fact: MemoryFact(
+              id: 'fact_office_4',
+              statement: '（已被取代）Q3 OKR 第一目标原为把延迟降到 200ms —— 已于两周前调整。',
+              domain: 'office',
+              sourceEpisodeId: 'epi_01JQZ5V1C7F4',
+            ),
+            channels: ['graph'],
+            score: 0.0161,
+            invalidated: true,
           ),
-        };
+          // The fact row is gone (redacted). The server sends
+          // `statement: null` and the drawer must say so rather than
+          // quietly showing one entry fewer than the turn really used.
+          InjectedMemory(factId: 'fact_gone_1', channels: ['episode']),
+        ],
+        const [ToolCall(name: 'memory_search', result: '返回 3 行 / 96 字符')],
+      ),
+      'epi_01JQZ2N8D1E3': (
+        const [],
+        const [
+          ToolCall(
+            name: 'read_file',
+            path: 'crates/cortex-agent/src/tools.rs',
+            result: '返回 486 行 / 15204 字符',
+          ),
+          ToolCall(
+            name: 'write_file',
+            path: 'crates/cortex-agent/src/notes.md',
+            result: '失败：路径 ../../etc/passwd 已被围栏拒绝',
+            failed: true,
+          ),
+        ],
+      ),
+    };
 
     return entries.map((id, v) {
       final (memories, toolCalls) =

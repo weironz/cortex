@@ -96,10 +96,7 @@ abstract interface class CortexApi {
   /// clock run out even though the agent treats both as refusal: a denial
   /// arrives immediately and frees the suspended turn, rather than parking a
   /// database connection and a model context for three minutes.
-  Future<bool> answerConfirmation({
-    required String token,
-    required bool allow,
-  });
+  Future<bool> answerConfirmation({required String token, required bool allow});
 
   /// `POST /chat` → SSE.
   ///
@@ -119,6 +116,7 @@ abstract interface class CortexApi {
     required String message,
     List<Attachment> attachments,
     PermissionMode permissionMode,
+    bool sandbox,
   });
 
   /// `GET /memory/search?q=&limit=&as_of=`

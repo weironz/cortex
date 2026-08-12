@@ -132,7 +132,8 @@ void main() {
       expect(
         state.pending.single.sessionId,
         's7',
-        reason: 'SSE 事件不带 session_id（流本身就属于一个会话），恢复端点带 —— '
+        reason:
+            'SSE 事件不带 session_id（流本身就属于一个会话），恢复端点带 —— '
             '两条路必须产出同一个对象',
       );
     });
@@ -162,11 +163,9 @@ void main() {
       controller.offer(_request());
       await controller.answer('tok-1', allow: false);
 
-      expect(
-        api.receipts,
-        [('tok-1', false)],
-        reason: '两者对 agent 都是拒绝，但立刻答复能马上放掉那一轮占着的连接与上下文',
-      );
+      expect(api.receipts, [
+        ('tok-1', false),
+      ], reason: '两者对 agent 都是拒绝，但立刻答复能马上放掉那一轮占着的连接与上下文');
       expect(
         container.read(confirmControllerProvider).resolved.single.outcome,
         ConfirmOutcome.denied,
@@ -208,7 +207,8 @@ void main() {
       final state = container.read(confirmControllerProvider);
       expect(state.error, isNotNull);
       expect(
-        state.pending, hasLength(1),
+        state.pending,
+        hasLength(1),
         reason: '回执没送到，那一轮还在等；把提示撤掉就等于替用户放弃了',
       );
       expect(state.answering, isEmpty, reason: '按钮必须重新可点');
@@ -429,7 +429,8 @@ void main() {
       expect(
         find.textContaining('来自另一个会话'),
         findsOneWidget,
-        reason: '按当前会话过滤会正好藏掉恢复端点存在的那个场景：'
+        reason:
+            '按当前会话过滤会正好藏掉恢复端点存在的那个场景：'
             '另一台设备问出来的、或者重连后捞回来的那条',
       );
       container.dispose();
@@ -468,7 +469,9 @@ class _LiveConfig extends AppConfigNotifier {
 }
 
 /// A daemon stand-in for the confirmation surface.
-class _ConfirmApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
+class _ConfirmApi
+    with LlmKeyUnsupported, AccountUnsupported
+    implements CortexApi {
   _ConfirmApi({
     this.accept = true,
     this.throwTransport = false,
@@ -603,11 +606,15 @@ class _ConfirmApi with LlmKeyUnsupported, AccountUnsupported implements CortexAp
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    bool sandbox = false,
   }) => const Stream.empty();
 
   @override
-  Future<SessionDetail> sessionDetail(String id, {int? limit, String? before}) =>
-      throw UnimplementedError();
+  Future<SessionDetail> sessionDetail(
+    String id, {
+    int? limit,
+    String? before,
+  }) => throw UnimplementedError();
 
   @override
   Future<ChatSession> updateSession(

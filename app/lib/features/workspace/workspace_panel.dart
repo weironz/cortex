@@ -210,13 +210,19 @@ class _TreeState extends State<_Tree> {
 
     // Web: no local filesystem, and the reason is a product statement rather
     // than an error, so it gets neutral styling.
+    //
+    // 这段话改过一次。原文说「工作区已绑定并对 agent 生效」—— 那是任务 #75
+    // 之前的事实：那时 cortexd 自己带文件工具。#75 把它们卸掉之后，Web 端绑
+    // 工作区会被 400 拒，而这行字还在说已经生效，把「功能不存在」说成了
+    // 「功能在，只是你看不见」。
     if (!kCanBrowseLocalFiles) {
       return _Notice(
         icon: Icons.public_rounded,
-        title: 'Web 端看不到文件树',
+        title: 'Web 端没有本机文件',
         detail:
-            '工作区已绑定并对 agent 生效 —— 只是浏览器读不到那台机器的磁盘。'
-            '对话流里的工具行仍会显示读写了哪个文件。',
+            '浏览器读不到你这台机器的磁盘，绑本机工作区在 Web 端也不生效。'
+            '要让 agent 读写文件，在输入框打开「云沙箱」—— '
+            '它的工作区是云端容器里的 /workspace，跨会话保留。',
       );
     }
 
@@ -285,9 +291,7 @@ class _TreeState extends State<_Tree> {
     walk(widget.root, 0);
 
     if (rows.isEmpty) {
-      return Center(
-        child: Text('目录是空的', style: theme.textTheme.labelSmall),
-      );
+      return Center(child: Text('目录是空的', style: theme.textTheme.labelSmall));
     }
 
     return Scrollbar(
@@ -323,7 +327,11 @@ class _TreeState extends State<_Tree> {
 }
 
 class _Row {
-  const _Row({required this.node, required this.depth, this.placeholder = false});
+  const _Row({
+    required this.node,
+    required this.depth,
+    this.placeholder = false,
+  });
 
   final FileNode node;
   final int depth;

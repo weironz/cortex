@@ -1,4 +1,3 @@
-import 'permission_mode_chip.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +6,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../models/attachment.dart';
 import '../../../state/attachment_controller.dart';
 import 'attachment_views.dart';
+import 'permission_mode_chip.dart';
+import 'sandbox_chip.dart';
 
 /// Input box.
 ///
@@ -230,6 +231,9 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                 Row(
                   children: [
                     const PermissionModeChip(),
+                    // Web 端才有（桌面端的 agent 就在你机器上，见 SandboxChip）。
+                    // 桌面端它渲染成零尺寸，不占位
+                    const SandboxChip(),
                     Expanded(
                       child: Text(
                         'Cortex 会把这轮对话归档，并从中抽取可追溯的记忆。',

@@ -92,9 +92,11 @@ const WORKSPACE_FREE_TOOLS: &[&str] = &["memory_search"];
 fn workspace_patch(field: Option<Option<&str>>) -> Result<bool> {
     match field {
         Some(Some(_)) => Err(CortexError::Invalid(
-            "服务端不提供文件执行环境，不能在这里绑定工作区。\
-             文件与命令要跑在**你自己的机器**上：用桌面端，\
-             或在本机运行 cortex-local（`cortex` 命令行会自己拉起它）。"
+            "cortexd 进程自己不提供文件执行环境，不能在这里绑定一个宿主机路径。\
+             文件与命令有两条路：跑在**你自己的机器**上（桌面端，\
+             或在本机运行 cortex-local —— `cortex` 命令行会自己拉起它），\
+             或者打开**云沙箱** —— 那一轮的工作区是容器里的 /workspace，\
+             由服务端自己管，不需要也不接受外部路径。"
                 .into(),
         )),
         Some(None) => Ok(true),
@@ -1966,13 +1968,15 @@ async fn run_turn(
     // 一个目录，爆炸半径是整台生产机加上所有租户的数据。
     //
     // 调研过：Claude.ai 与 ChatGPT 的云 agent 都没有这个形态。它们给模型的
-    // 是**一次性容器**（爆炸半径就是那个容器），产物在对话里下载。我们没有
-    // 容器，于是这一格既没有隔离、也没有「这是你自己的机器」那句依据 ——
-    // 两家都空着它。
+    // 是**一次性容器**（爆炸半径就是那个容器），产物在对话里下载。
     //
-    // 所以本期直接关掉，而不是给它加个开关：它本来就不该是一种执行环境。
-    // 要碰文件就用桌面端，或者在本机跑 `cortex-local`（CLI 会自己拉起它）。
-    // 容器那条路排进了 roadmap。
+    // 那条路后来做了（`sandbox_runner.rs`，`chat_in_sandbox()`）。但它**不是**
+    // 给这一格补上隔离 —— 它是另一格：容器里跑的是另一个进程（`cortex-local`
+    // `--exec-env=container`），文件系统是容器自己的 `/workspace`。
+    // **cortexd 进程内的这个 Turn 至今、且应当永远没有文件工具**：
+    // 一旦它有，动的就是生产机本身，爆炸半径是整台机器加上所有租户的数据。
+    //
+    // 所以下面这条 `debug_assert!` 不随沙箱落地而放宽。
     let turn = &live.chat_turn;
     debug_assert!(
         !turn.env().has_filesystem(),
@@ -2621,6 +2625,13 @@ mod tests {
             msg.contains("你自己的机器") && msg.contains("cortex-local"),
             "拒绝理由要给出走得通的路（桌面端 / 本机跑 cortex-local），而不只是说不行。实际：{msg}"
         );
+        // 沙箱落地之后**多了一条走得通的路**，而这条恰恰是 Web 用户唯一能走的
+        // —— 前两条都要求他先装个桌面端。漏掉它，报错就等于对 Web 用户说
+        // 「你想要的这件事在这里做不到」，而其实开一个开关就有
+        assert!(
+            msg.contains("云沙箱"),
+            "Web 用户走不了前两条路（都要装桌面端）。不提沙箱，这条报错对他就是死路。实际：{msg}"
+        );
 
         assert!(
             workspace_patch(Some(None)).expect("解绑必须放行"),
@@ -2641,8 +2652,12 @@ mod tests {
     /// 绑的正是服务器上的目录，爆炸半径是整台生产机加上所有租户的数据。
     ///
     /// 调研过：Claude.ai 与 ChatGPT 的云 agent 都没有这个形态，它们给模型的是
-    /// 一次性容器。我们没有容器，于是这一格既没有隔离、也没有「这是你自己的
-    /// 机器」那句依据 —— 两家都空着它。
+    /// 一次性容器。
+    ///
+    /// **沙箱落地之后这条测试不放宽，反而更要紧了。** 容器那条路走的是另一个
+    /// 进程（`chat_in_sandbox()` → 容器里的 `cortex-local`），与 cortexd 进程
+    /// 自己的这个 `Turn` 无关。把两件事混起来 —— 「反正现在有沙箱了」——
+    /// 就会有人顺手把文件工具加回这份目录，而那一份动的是生产机本身。
     #[test]
     fn cortexd_never_hands_out_file_tools() {
         let turn = chat_only_turn(4);

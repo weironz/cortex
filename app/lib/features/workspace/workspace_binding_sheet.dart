@@ -157,10 +157,7 @@ class _WorkspaceBindingDialogState
               ),
               const SizedBox(height: 12),
               if (!kCanBrowseLocalFiles)
-                _Note(
-                  icon: Icons.public_rounded,
-                  text: kNoLocalFilesReason,
-                )
+                _Note(icon: Icons.public_rounded, text: kNoLocalFilesReason)
               else
                 _Note(
                   icon: Icons.dns_outlined,
@@ -186,10 +183,7 @@ class _WorkspaceBindingDialogState
         if (bound)
           TextButton(
             onPressed: _busy ? null : _unbind,
-            child: Text(
-              '解除绑定',
-              style: TextStyle(color: scheme.error),
-            ),
+            child: Text('解除绑定', style: TextStyle(color: scheme.error)),
           ),
         TextButton(
           onPressed: _busy ? null : () => Navigator.of(context).pop(),
@@ -232,9 +226,7 @@ class _Note extends StatelessWidget {
         children: [
           Icon(icon, size: 15, color: scheme.secondary),
           const SizedBox(width: 9),
-          Expanded(
-            child: Text(text, style: theme.textTheme.labelSmall),
-          ),
+          Expanded(child: Text(text, style: theme.textTheme.labelSmall)),
         ],
       ),
     );

@@ -148,6 +148,7 @@ class _BlobApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    bool sandbox = false,
   }) async* {
     lastSentAttachments = attachments;
     yield const ChatDoneEvent('epi_1');
@@ -189,8 +190,11 @@ class _BlobApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
   ) => throw UnimplementedError();
 
   @override
-  Future<SessionDetail> sessionDetail(String id, {int? limit, String? before}) =>
-      throw UnimplementedError();
+  Future<SessionDetail> sessionDetail(
+    String id, {
+    int? limit,
+    String? before,
+  }) => throw UnimplementedError();
 
   @override
   Future<ChatSession> updateSession(
@@ -315,11 +319,10 @@ void main() {
         filename: 'again.mp4',
         onProgress: (sent, total) => reported = sent,
       );
-      expect(
-        api.route,
-        ['presign', 'commit'],
-        reason: '内容寻址的最大一笔收益：同一份字节不必再传一次',
-      );
+      expect(api.route, [
+        'presign',
+        'commit',
+      ], reason: '内容寻址的最大一笔收益：同一份字节不必再传一次');
       expect(
         reported,
         kRelayUploadLimit + 1,
@@ -341,11 +344,7 @@ void main() {
               .having((e) => e.message, 'message', contains('32.0 MB')),
         ),
       );
-      expect(
-        api.route,
-        ['presign'],
-        reason: '这个文件本来就超了中转上限，退回去只会把清楚的错误换成 413',
-      );
+      expect(api.route, ['presign'], reason: '这个文件本来就超了中转上限，退回去只会把清楚的错误换成 413');
     });
 
     test('嗅探出来的 MIME 决定 kind，而不是文件扩展名', () async {
@@ -435,10 +434,7 @@ void main() {
         filename: 'slow.bin',
         bytes: _bytes(64),
       );
-      await _until(
-        () => queue.forSession('s1').isNotEmpty,
-        reason: '条目入队',
-      );
+      await _until(() => queue.forSession('s1').isNotEmpty, reason: '条目入队');
       expect(queue.hasPending('s1'), isTrue);
 
       completer.complete();
@@ -452,7 +448,11 @@ void main() {
       );
       addTearDown(container.dispose);
       final queue = container.read(attachmentQueueProvider.notifier);
-      container.listen(attachmentQueueProvider, (_, _) {}, fireImmediately: true);
+      container.listen(
+        attachmentQueueProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
 
       await queue.addBytes('s1', filename: 'a.png', bytes: _bytes(16));
 

@@ -105,8 +105,7 @@ class ChatController extends Notifier<ChatState> {
       if (_stale(seq)) return;
       final merged = _mergeSessions(remote);
       final active =
-          state.activeSessionId ??
-          (merged.isNotEmpty ? merged.first.id : null);
+          state.activeSessionId ?? (merged.isNotEmpty ? merged.first.id : null);
       state = state.copyWith(
         sessions: merged,
         sessionsLoading: false,
@@ -233,8 +232,11 @@ class ChatController extends Notifier<ChatState> {
     await _patch(
       id,
       call: () => _api.updateSession(id, title: trimmed),
-      local: (s) =>
-          s.copyWith(title: trimmed, titleIsCustom: true, hasLocalOverrides: true),
+      local: (s) => s.copyWith(
+        title: trimmed,
+        titleIsCustom: true,
+        hasLocalOverrides: true,
+      ),
     );
   }
 
@@ -266,8 +268,7 @@ class ChatController extends Notifier<ChatState> {
     await _patch(
       id,
       call: () => _api.moveSessionToProject(id, projectId),
-      local: (s) =>
-          s.copyWith(projectId: projectId, hasLocalOverrides: true),
+      local: (s) => s.copyWith(projectId: projectId, hasLocalOverrides: true),
     );
     if (!ref.mounted) return;
     unawaited(ref.read(projectControllerProvider.notifier).load());
@@ -374,7 +375,10 @@ class ChatController extends Notifier<ChatState> {
     try {
       final updated = await call();
       if (!ref.mounted) return;
-      _replaceSession(id, (s) => updated.copyWith(isLocalDraft: s.isLocalDraft));
+      _replaceSession(
+        id,
+        (s) => updated.copyWith(isLocalDraft: s.isLocalDraft),
+      );
     } on CortexApiException catch (e) {
       if (!ref.mounted) return;
       if (!e.isUnsupported) rethrow;
@@ -570,9 +574,7 @@ class ChatController extends Notifier<ChatState> {
   }
 
   void _putTranscript(String id, Transcript transcript) {
-    state = state.copyWith(
-      transcripts: {...state.transcripts, id: transcript},
-    );
+    state = state.copyWith(transcripts: {...state.transcripts, id: transcript});
   }
 
   // -------------------------------------------------------------------- send
@@ -611,6 +613,9 @@ class ChatController extends Notifier<ChatState> {
       attachments: attachments,
       // 逐轮读，不缓存：用户在输入框底部随时能改，改完这一句就该按新档位走
       permissionMode: ref.read(permissionModeProvider),
+      // 同上。**桌面端恒为 false** —— 那边的 agent 跑在用户自己的机器上，
+      // 这条请求根本不会到 cortexd 的 /chat（见 sandboxProvider）
+      sandbox: ref.read(sandboxProvider),
     );
     _subscription = stream.listen(
       _onEvent,

@@ -189,7 +189,13 @@ CLI / 桌面 / Web  ──►  cortexd  ──►  DeepSeek
    会 canonicalize 到**服务器**的文件系统，`D:\codes\myproject` 必然失败。
    更根本的：一个本地路径在别的设备上要么是死路径，要么**指向别处而不报错**。
    所以绑定存在本地（`workspaces.json`），cortexd 侧的 `session.workspace`
-   保持不动（Web 那条路上工具确实跑在服务器上）。
+   保持不动。
+
+   > **这条括注后来作废了两次。** 原文写的是「Web 那条路上工具确实跑在服务器
+   > 上」—— 任务 #75 把文件与 shell 工具从 cortexd 卸掉，那句话当场变成假的
+   > （Web 端绑工作区从此被 400 拒）；沙箱落地之后它又以另一种形式成立了：
+   > Web 端的工具**确实**跑在服务端，但跑在一个一次性容器里，工作区是容器内
+   > 的 `/workspace`，**不接受也不需要外部路径**。见 `docs/sandbox.md`。
 
 **已在 Windows 上端到端验过**（真 Postgres + 真 DeepSeek）：绑本地目录 →
 `read_file` 读到本机文件 → `write_file` 触发确认 → 批准后文件真的改了 →
