@@ -369,6 +369,24 @@ impl Engine {
             }
         }
 
+        // ── 6. 容器模式：给这一轮的文件改动打一个 git 检查点 ──
+        //
+        // **在 Done 之前**：Done 一发出去，cortexd 那边就可能开始回收容器
+        // （空闲判定的起点是当轮结束）。放在之后的话，最后一轮的检查点
+        // 会在一部分情况下打不出来 —— 而那正是最想回退的那一轮。
+        //
+        // 只在容器里做。桌面端动的是用户自己的仓库，往里面塞提交是越权：
+        // 那份历史是他自己在维护的。
+        if self.exec_env.is_container()
+            && let Some(ws) = bound.as_deref()
+        {
+            crate::checkpoint::commit(
+                std::path::Path::new(ws),
+                &format!("会话 {}", req.session_id),
+            )
+            .await;
+        }
+
         tx.send(ChatEvent::Done {
             episode_id: assistant_id,
         })

@@ -97,13 +97,23 @@ Container => has_filesystem() = true, allows_escape_prompt() = false
 
 ### 于是改成三层，默认路径仍零弹窗零延迟
 
-1. **数据兜底**：cortexd **宿主侧**定时 `tar /workspace` 推 RustFS（复用 R6 已有
-   的加密备份闭环）+ restore 端点。快照由宿主驱动、写进沙箱网段够不到的地方 ——
-   沙箱令牌只有几条回调路由，正好保证**被攻陷的容器删不掉自己的备份**。
-   把「永久损失」降级为「有界回滚，RPO = 快照间隔」。
-2. **卷内 git**：建卷时 `git init /workspace` + 每轮 auto-commit（Claude Code
-   checkpoints 同思路），拿到覆盖写/误改的细粒度 undo。`.git` 同在卷上，防不了
-   整卷删 —— 那是第 1 层的职责，两层缺一不可。
+1. **数据兜底 —— ⚠️ 还没做**：cortexd **宿主侧**定时 `tar /workspace` 推 RustFS
+   （复用 R6 已有的加密备份闭环）+ restore 端点。快照由宿主驱动、写进沙箱网段
+   够不到的地方 —— 沙箱令牌只有几条回调路由，正好保证**被攻陷的容器删不掉
+   自己的备份**。把「永久损失」降级为「有界回滚，RPO = 快照间隔」。
+
+   **在它落地之前，整卷删（`rm -rf /workspace`、`docker volume rm`）仍然是
+   永久损失**，第 2 层救不回来。别把下面那条当成这一条也做完了。
+2. **卷内 git —— ✅ 已落地**：entrypoint 里 `git init /workspace`
+   （`.cortex/` 走 `.git/info/exclude`，agent 自己的 outbox 不进历史），
+   `cortex-local` 每轮结束在 `Done` **之前** auto-commit
+   （`checkpoint.rs`；放在 Done 之后的话，最后一轮 —— 也就是最想回退的那一轮 ——
+   会赶上容器回收）。拿到覆盖写 / 误改的细粒度 undo。
+
+   已在真机的只读 rootfs 容器里按 sandbox uid 验过：`add -A` + `commit` 成功，
+   无改动那次落到 `nothing to commit`（不留空提交，纯聊天占绝大多数）。
+
+   `.git` 同在卷上，防不了整卷删 —— 那是第 1 层的职责，两层缺一不可。
 3. **确认开关保留**：`PermissionMode` 三档本来就随 `ChatRequest` 进容器，
    `confirm_at: Execute` 也已存在。做成**会话级可选项**，默认免确认。
    砍掉它省不了工程量，只省一个默认值判断。

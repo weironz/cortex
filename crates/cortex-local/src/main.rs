@@ -18,6 +18,7 @@
 //! 对话排进本地队列（[`outbox`]），恢复连接后自动补写。
 //! 界面上会明说「记忆未连接」：不说的话，用户只会觉得它突然变笨了。
 
+mod checkpoint;
 mod config;
 mod grants;
 mod llm;
