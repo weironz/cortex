@@ -67,6 +67,12 @@ pub struct PendingMeta {
     pub tool: String,
     pub risk: &'static str,
     pub preview: String,
+    /// 这次要碰的**工作区外**的绝对路径。`None` = 没有越界。
+    ///
+    /// 越界批准与普通写入批准是两件不同的事，用户必须能分辨 ——
+    /// 而只给工具名与 preview 是不够的：preview 里那个 path 可能是相对的，
+    /// 「相对于哪儿」正是他此刻最需要知道、也最容易搞错的东西。
+    pub scope: Option<String>,
 }
 
 /// 待确认项的对外形态（`GET /confirmations` 与 SSE 事件共用字段口径）。
@@ -86,6 +92,13 @@ pub struct PendingInfo {
     /// 还剩多少秒会被按拒绝处理。客户端据此画倒计时，也据此知道
     /// 一个「看起来还在等」的提示其实早就作废了
     pub expires_in_secs: u64,
+    /// 越界访问的目标绝对路径。`None` = 没有越界。见 [`PendingMeta::scope`]。
+    ///
+    /// `default` 是为了老客户端与老服务端能互相读：这个字段是后加的，
+    /// 少了它只是少一行提示，不该让整条确认反序列化失败 ——
+    /// 那会让用户完全看不到弹窗，而不是看到一个信息少一点的弹窗。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 struct Pending {
@@ -232,6 +245,7 @@ impl ConfirmRegistry {
                 preview: p.meta.preview.clone(),
                 asked_at: p.asked_at.to_rfc3339(),
                 expires_in_secs: p.deadline.saturating_duration_since(now).as_secs(),
+                scope: p.meta.scope.clone(),
             })
             .collect();
         // 稳定顺序：先问的排前面。HashMap 的迭代序每次都不一样，
@@ -376,6 +390,7 @@ mod tests {
             tool: "shell".into(),
             risk: "execute",
             preview: "command=echo hi".into(),
+            scope: None,
         }
     }
 

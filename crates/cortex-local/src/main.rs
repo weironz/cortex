@@ -19,6 +19,7 @@
 //! 界面上会明说「记忆未连接」：不说的话，用户只会觉得它突然变笨了。
 
 mod config;
+mod grants;
 mod llm;
 mod local_import;
 mod local_workspace;
@@ -176,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
         llm: Arc::new(llm),
         confirms: Arc::new(ConfirmRegistry::from_env()?),
         workspaces,
+        grants: grants::Grants::new(),
         outbox: outbox.clone(),
         chat_turn: Arc::new(chat_turn),
         max_rounds: DEFAULT_MAX_ROUNDS,

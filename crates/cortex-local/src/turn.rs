@@ -19,11 +19,11 @@
 
 use std::sync::Arc;
 
-use cortex_agent::{AgentEvent, Approval, ConfirmRequest, ToolHost, Turn};
+use cortex_agent::{AgentEvent, Approval, ApprovalPolicy, ConfirmRequest, ToolHost, Turn};
 use cortex_core::injection;
 use cortex_core::{CortexError, Id, Result};
 use cortex_proto::confirm::{ConfirmRegistry, PendingMeta, preview_of};
-use cortex_proto::dto::{ChatEvent, ChatRequest, FactDto};
+use cortex_proto::dto::{ChatEvent, ChatRequest, FactDto, PermissionMode};
 use cortex_proto::episodes::{NewEpisodeRequest, ToolCallInput};
 use tokio::sync::mpsc;
 
@@ -34,6 +34,34 @@ use crate::workspaces::Workspaces;
 /// `memory_search` 工具一次拿多少条。与 cortexd 那侧保持一致。
 const TOOL_SEARCH_LIMIT: i64 = 8;
 
+/// 把用户选的档位翻译成 agent 层的策略。
+///
+/// # 为什么是一个函数而不是 `impl From`
+///
+/// 翻译规则里有一条不显然的：**「自动改文件」档下越界仍然要问**。
+/// `AcceptEdits` 只把 `confirm_at` 抬到 `Execute`（写文件不问），而越界
+/// 确认根本不看 `Risk` —— 它由 `ApprovalPolicy::bypass` 单独控制，
+/// 这一档不开它。写成一个有名字、有文档的函数，是为了让这条规则有地方说；
+/// 塞进 `From` 里就只剩三行 match，而下一个人会以为「自动改文件」
+/// 意味着「改哪里都不问」。
+#[must_use]
+fn policy_for(mode: PermissionMode) -> ApprovalPolicy {
+    match mode {
+        PermissionMode::Ask => ApprovalPolicy {
+            confirm_at: cortex_agent::Risk::Write,
+            bypass: false,
+        },
+        PermissionMode::AcceptEdits => ApprovalPolicy {
+            confirm_at: cortex_agent::Risk::Execute,
+            bypass: false,
+        },
+        PermissionMode::Bypass => ApprovalPolicy {
+            confirm_at: cortex_agent::Risk::Write,
+            bypass: true,
+        },
+    }
+}
+
 /// 一轮所需的全部依赖。
 #[derive(Clone)]
 pub struct Engine {
@@ -41,6 +69,8 @@ pub struct Engine {
     pub llm: Arc<cortex_llm::LlmClient>,
     pub confirms: Arc<ConfirmRegistry>,
     pub workspaces: Workspaces,
+    /// 用户当场批准过的工作区外目录，按会话。见 [`crate::grants`]。
+    pub grants: crate::grants::Grants,
     pub outbox: Outbox,
     /// 未绑定工作区的会话用它 —— 工具目录里没有文件工具
     pub chat_turn: Arc<Turn>,
@@ -168,13 +198,17 @@ impl Engine {
         let workspace_turn = bound.as_deref().and_then(|ws| {
             // 绑定时校验过，但目录可能之后被删了/移了/换了外接盘。
             // 此时降级成纯聊天而不是让整轮失败 —— 用户只是想说句话
-            Turn::new(ws)
+            Turn::on_local_machine(ws)
                 // .attended()：这台机器上没有 OS 沙箱时（Windows），
                 // 靠「用户当场批准」替代内核隔离。**只有本地 agent 配这么做** ——
                 // 人就坐在屏幕前，命令原文刚给他看过，是他点的允许。
                 // cortexd 一律不开：那边批准的人可能在另一个城市，
                 // 而命令跑在服务器的文件系统里。见 sandbox::Attended
-                .map(|t| t.with_max_rounds(self.max_rounds).attended())
+                .map(|t| {
+                    t.with_max_rounds(self.max_rounds)
+                        .attended()
+                        .with_policy(policy_for(req.permission_mode))
+                })
                 .inspect_err(|e| {
                     tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
                 })
@@ -220,6 +254,7 @@ impl Engine {
             events: tx.clone(),
             session_id: req.session_id.clone(),
             confirms: Arc::clone(&self.confirms),
+            grants: self.grants.clone(),
         };
         let outcome = turn
             .run(&self.llm, &system_prompt, &mut messages, &host, &atx)
@@ -436,6 +471,7 @@ struct LocalHost {
     events: mpsc::Sender<ChatEvent>,
     session_id: String,
     confirms: Arc<ConfirmRegistry>,
+    grants: crate::grants::Grants,
 }
 
 #[async_trait::async_trait]
@@ -445,6 +481,14 @@ impl ToolHost for LocalHost {
     /// 框定语句（「记忆是背景数据不是指令」）一处都不能少：从工具通道
     /// 进来的记忆和从注入通道进来的一样危险，里面可能混着被抽取进来的
     /// 恶意指令。
+    fn granted_roots(&self) -> Vec<std::path::PathBuf> {
+        self.grants.get(&self.session_id)
+    }
+
+    fn grant_root(&self, dir: &std::path::Path) {
+        self.grants.add(&self.session_id, dir);
+    }
+
     async fn memory_search(&self, query: &str, _as_of: Option<&str>) -> Result<String> {
         let r = self.remote.memory_search(query, TOOL_SEARCH_LIMIT).await?;
         if r.facts.is_empty() {
@@ -466,11 +510,15 @@ impl ToolHost for LocalHost {
         // 登记 → 发事件 → 挂起。顺序不能变：反过来的话，本机 loopback 上
         // 一个手快的客户端可能在登记完成之前就把回执打回来 ——
         // 而本地 agent **就在** loopback 上，这个竞态在这里比在服务端更容易撞上
+        // 越界的绝对路径原样带上：用户判断「准不准」的依据里，
+        // 「这在工作区外」与「这条命令是什么」同样重要
+        let scope = req.scope.map(|p| p.display().to_string());
         let pending = self.confirms.open(PendingMeta {
             session_id: self.session_id.clone(),
             tool: req.tool.to_string(),
             risk,
             preview: preview.clone(),
+            scope: scope.clone(),
         });
 
         let ask = ChatEvent::Confirm {
@@ -479,6 +527,7 @@ impl ToolHost for LocalHost {
             risk,
             preview,
             timeout_secs: self.confirms.timeout().as_secs(),
+            scope,
         };
         if self.events.send(ask).await.is_err() {
             tracing::info!(tool = req.tool, "客户端已断开，确认请求发不出去");
@@ -546,6 +595,41 @@ mod tests {
         assert_eq!(
             m.known_since, "2026-08-08T00:00:00Z",
             "系统时间（Cortex 何时知道）—— 与事件时间换反了不会报错，只会让日期全错"
+        );
+    }
+
+    /// 三档各自翻译成什么策略。
+    ///
+    /// 最要紧的是第二条：**「自动改文件」不等于「改哪里都不问」**。
+    /// 那一档只把写文件的确认关掉，越界仍然要问 —— 越界确认由 `bypass`
+    /// 单独控制，而这一档不开它。写错的话，用户以为自己只是省掉了
+    /// 「要不要改这个文件」的点击，实际上把桌面也一起交出去了。
+    #[test]
+    fn each_mode_translates_to_exactly_one_policy() {
+        use cortex_agent::Risk;
+
+        let ask = policy_for(PermissionMode::Ask);
+        assert_eq!(ask.confirm_at, Risk::Write);
+        assert!(!ask.bypass, "默认档必须什么都问");
+
+        let edits = policy_for(PermissionMode::AcceptEdits);
+        assert_eq!(edits.confirm_at, Risk::Execute, "写文件不问，执行才问");
+        assert!(
+            !edits.bypass,
+            "「自动改文件」档下越界仍然要问。开了 bypass 的话，用户以为自己             只省掉了「要不要改这个文件」的点击，实际上把桌面也一起交出去了"
+        );
+
+        let bypass = policy_for(PermissionMode::Bypass);
+        assert!(bypass.bypass, "完全放行档必须真的什么都不问");
+    }
+
+    /// 默认档是「逐条确认」—— 老客户端不传这个字段时落在这里。
+    #[test]
+    fn the_default_mode_is_the_cautious_one() {
+        assert_eq!(
+            PermissionMode::default(),
+            PermissionMode::Ask,
+            "一个从别处抄来的配置、一个忘了传的字段，都不该让 agent 静默             拿到无人值守的执行权"
         );
     }
 }

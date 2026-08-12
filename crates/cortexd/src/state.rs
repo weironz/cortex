@@ -1117,6 +1117,8 @@ fn mock_chat_stream(
             tool: "shell".into(),
             risk: "execute",
             preview: MOCK_PREVIEW.into(),
+            // mock 不越界：演示的是确认回路本身，不是越界那条支路
+            scope: None,
         })
     });
     if let Some(p) = &pending {
@@ -1126,6 +1128,7 @@ fn mock_chat_stream(
             risk: "execute",
             preview: MOCK_PREVIEW.into(),
             timeout_secs: confirms.timeout().as_secs(),
+            scope: None,
         });
     }
     let head = stream::iter(head_events);

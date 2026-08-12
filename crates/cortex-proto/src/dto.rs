@@ -98,6 +98,36 @@ pub struct EmbeddingHealth {
 
 // ──────────────────────────── /chat ────────────────────────────
 
+/// 这一轮要打扰用户到什么程度。对齐 Claude Code 的模式菜单。
+///
+/// # 为什么是三档，而不是照抄五档
+///
+/// Claude Code 的菜单里还有 Plan（先出方案再动手）与 Auto（模型自己判断）。
+/// 那两个各自是独立功能 —— 前者要一整套「计划-批准-执行」的流程，
+/// 后者要一个判定器 —— 与「问不问」这件事无关，塞进同一个枚举只会让
+/// 这里看起来做完了而实际上有两个空壳。
+///
+/// # 为什么放 cortex-proto
+///
+/// 它同时是 HTTP 契约（`ChatRequest` 的一个字段）与两个宿主共用的类型。
+/// 放 `cortex-agent` 的话，Flutter 那侧序列化出来的字符串要与 agent 层的
+/// 内部枚举对上，而那种「跨层字面量必须一致」的约定正是本仓库反复漂开的
+/// 地方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// 逐条确认：写文件与执行命令都问，越界也问。**默认**。
+    #[default]
+    Ask,
+    /// 自动改文件：写不问，执行才问。越界仍然问 —— 越界与风险是两件事。
+    AcceptEdits,
+    /// 完全放行：一律不问，越界也不问。对齐 "Bypass permissions"。
+    ///
+    /// 默认值刻意不是它：一个从别处抄来的配置、一个忘了传的字段，
+    /// 都不该让 agent 静默获得无人值守的执行权。要开就得有人明确选。
+    Bypass,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     pub session_id: String,
@@ -108,6 +138,13 @@ pub struct ChatRequest {
     /// 默认空，因此老客户端不传这个字段也照常工作。
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>,
+    /// 这一轮的权限档位。老客户端不传即 [`PermissionMode::Ask`]。
+    ///
+    /// 逐轮带而不是存在会话上：用户在对话框底部随时能改，而改完之后
+    /// **下一句**就该按新档位走。存服务端的话，客户端要多一次同步，
+    /// 而那次同步失败时用户看到的是「我明明切了档」。
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
 }
 
 /// 一条 `episode_blobs` 关联 —— **上行**方向（客户端 → 服务端）。
@@ -209,6 +246,13 @@ pub enum ChatEvent {
         preview: String,
         /// 多少秒后按拒绝处理
         timeout_secs: u64,
+        /// 越界访问的目标绝对路径。`None` = 在工作区内，没有越界。
+        ///
+        /// 界面要据此把话说清楚：「agent 想写 `C:\Users\x\Desktop\a.txt`，
+        /// 这在当前工作区之外」。少了它，用户看到的只是一个 `path` 参数，
+        /// 而他判断不出那是工作区内的还是桌面上的 —— 这两件事的后果差得远。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
     /// 结束，带上本轮 episode id 供追溯
     Done { episode_id: String },

@@ -478,7 +478,7 @@ impl Live {
     /// 给一个绑定了工作区的会话现建一个 [`Turn`]：沙箱根是该目录，
     /// 工具目录是完整的内置目录（文件工具就是在这里出现的）。
     fn workspace_turn(&self, workspace: &str) -> Result<Turn> {
-        Ok(Turn::new(workspace)?.with_max_rounds(self.max_rounds))
+        Ok(Turn::on_local_machine(workspace)?.with_max_rounds(self.max_rounds))
     }
 
     /// 本地 agent 把一轮对话写回记忆库。
@@ -2014,11 +2014,15 @@ impl ToolHost for TurnHost {
         // 一个手快的客户端可能在登记完成之前就把回执打回来，那条回执会撞上一个
         // 还不存在的凭据被判为伪造，而这一轮继续傻等到超时 ——
         // 一个只在极低延迟下才出现、在慢网络上永远复现不出来的竞态
+        // 越界的绝对路径原样带上：用户判断「准不准」的依据里，
+        // 「这在工作区外」与「这条命令是什么」同样重要
+        let scope = req.scope.map(|p| p.display().to_string());
         let pending = self.confirms.open(PendingMeta {
             session_id: self.session_id.clone(),
             tool: req.tool.to_string(),
             risk,
             preview: preview.clone(),
+            scope: scope.clone(),
         });
 
         let ask = ChatEvent::Confirm {
@@ -2027,6 +2031,7 @@ impl ToolHost for TurnHost {
             risk,
             preview,
             timeout_secs: self.confirms.timeout().as_secs(),
+            scope,
         };
         if self.events.send(ask).await.is_err() {
             // 请求都发不出去，等下去只会白等一个超时
@@ -2280,7 +2285,7 @@ mod tests {
     #[test]
     fn an_unbound_session_gets_no_file_tools() {
         let dir = tempfile::tempdir().expect("应能建临时目录");
-        let chat = Turn::new(dir.path())
+        let chat = Turn::on_local_machine(dir.path())
             .expect("临时目录应当是合法沙箱根")
             .with_specs(chat_only_specs());
 
@@ -2302,7 +2307,7 @@ mod tests {
     #[test]
     fn a_bound_session_gets_the_file_tools_rooted_at_the_workspace() {
         let dir = tempfile::tempdir().expect("应能建临时目录");
-        let bound = Turn::new(dir.path()).expect("临时目录应当是合法沙箱根");
+        let bound = Turn::on_local_machine(dir.path()).expect("临时目录应当是合法沙箱根");
 
         let names = bound.tool_names();
         for expected in ["read_file", "write_file", "list_dir", "memory_search"] {
@@ -2321,7 +2326,7 @@ mod tests {
     /// 纯聊天会话的沙箱根必须是**空集**，不是进程工作目录。
     ///
     /// 钉住的是一个具体的退化：`Turn::sealed()` 被改回
-    /// `Turn::new(std::env::current_dir())`。那个改动编译得过、
+    /// `Turn::on_local_machine(std::env::current_dir())`。那个改动编译得过、
     /// 所有既有测试全绿，症状只有在 [`WORKSPACE_FREE_TOOLS`] 哪天漏进一个
     /// 文件工具时才出现 —— 而那时围栏已经是整个仓库了。
     ///
