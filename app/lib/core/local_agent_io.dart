@@ -131,6 +131,7 @@ class LocalAgent {
     required String remote,
     required String token,
     String? llmRoute,
+    Map<String, String>? extraEnv,
     Duration timeout = const Duration(seconds: 20),
     void Function(int code, String logTail)? onExit,
   }) async {
@@ -169,6 +170,11 @@ class LocalAgent {
       // （`tasklist /v`、`ps aux`），而且会被崩溃报告收走
       'CORTEX_TOKEN': token,
     };
+    if (extraEnv != null) {
+      // 本机模型配置（离线模式）。放在 token 之后、route 之前 ——
+      // 顺序无所谓，但**不允许它覆盖 CORTEX_TOKEN**：那是另一件事的凭据
+      env.addAll(extraEnv..remove('CORTEX_TOKEN'));
+    }
     if (llmRoute != null) {
       // 离线模式要它本地直连模型 —— 代理那条路要经 cortexd，而它不在。
       // 不给这一项就不干预，让 agent 按自己的环境变量决定（默认 proxy）

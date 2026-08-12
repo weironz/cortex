@@ -28,7 +28,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/cortex_api.dart';
 import '../api/http_cortex_api.dart';
 import '../api/mock_cortex_api.dart';
+import '../auth/local_llm_store.dart';
 import '../core/app_config.dart';
+import '../core/local_llm.dart';
 import '../core/local_agent.dart';
 import '../models/health_status.dart';
 import 'auth_controller.dart';
@@ -62,6 +64,34 @@ class AppConfigNotifier extends Notifier<AppConfig> {
 final appConfigProvider = NotifierProvider<AppConfigNotifier, AppConfig>(
   AppConfigNotifier.new,
 );
+
+/// 本机 LLM 配置（离线模式用）。见 [`LocalLlmConfig`]。
+///
+/// 异步加载：读系统凭据库要跨进程。加载完成前是 `empty` —— 那期间
+/// 本地 agent 起不来是**对的**，不该拿一个残缺的配置去启动它然后失败。
+class LocalLlmNotifier extends AsyncNotifier<LocalLlmConfig> {
+  @override
+  Future<LocalLlmConfig> build() => readLocalLlm();
+
+  /// 存进凭据库并让本地 agent 用上新配置。
+  ///
+  /// # Errors
+  /// 存不进去时抛给调用方 —— 用户刚点了保存，静默失败会让他以为配好了
+  Future<void> save(LocalLlmConfig config) async {
+    await writeLocalLlm(config);
+    state = AsyncData(config);
+  }
+
+  Future<void> clear() async {
+    await clearLocalLlm();
+    state = const AsyncData(LocalLlmConfig.empty);
+  }
+}
+
+final localLlmProvider =
+    AsyncNotifierProvider<LocalLlmNotifier, LocalLlmConfig>(
+      LocalLlmNotifier.new,
+    );
 
 /// The bundled agent's origin, or null when this build runs without one.
 ///
@@ -132,6 +162,10 @@ class _RestartBudget {
 final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   final config = ref.watch(appConfigProvider);
   final token = ref.watch(authControllerProvider.select((s) => s.token));
+  // **watch 而不是 read**：改了本机模型配置要让 agent 带着新环境重启。
+  // read 的话用户会保存、看到成功、然后发现模型还是老的 —— 而那时
+  // 界面上没有任何东西提示他需要重启
+  final localLlm = ref.watch(localLlmProvider).value;
   // 关掉认证的部署（`CORTEX_AUTH=disabled`，自托管跑在 127.0.0.1 上的
   // 常见形态）根本没有 token 可拿。
   //
@@ -211,6 +245,9 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
       // 离线模式必须本地直连模型：代理那条路要经 cortexd，而它不存在。
       // 传 null 表示「不干预」，让 agent 自己按环境变量决定
       llmRoute: config.offline ? 'direct' : null,
+      // 只在离线模式下注入：连着服务器时模型是 cortexd 的事，
+      // 把本机那份塞进去只会让两处配置打架
+      extraEnv: config.offline ? localLlm?.toEnvironment() : null,
       // Unexpected death only — a deliberate `stop()` never lands here, so
       // signing out cannot be mistaken for a crash.
       //

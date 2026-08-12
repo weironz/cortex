@@ -19,6 +19,7 @@ class LocalAgent {
     required String remote,
     required String token,
     String? llmRoute,
+    Map<String, String>? extraEnv,
     Duration timeout = const Duration(seconds: 20),
     void Function(int code, String logTail)? onExit,
   }) async =>

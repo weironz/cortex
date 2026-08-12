@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../auth/token_store.dart';
+import '../../auth/local_llm_store.dart';
 import '../../core/app_config.dart';
+import '../../core/local_llm.dart';
 import '../../models/llm_key_status.dart';
 import '../../state/app_providers.dart';
 import '../../state/auth_controller.dart';
@@ -202,6 +204,7 @@ class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
               // 那句话在这个入口存在之前就已经发到用户眼前了 ——
               // 一个正被拦住的人会来这里找它，而在此之前他什么也找不到
               const _OwnApiKeyTile(),
+              const _LocalLlmTile(),
               const SizedBox(height: 12),
               Text(
                 '编译期默认值：USE_MOCK=${AppConfig.defaultUseMock}，'
@@ -475,4 +478,198 @@ class _ApiKeyDialogState extends State<_ApiKeyDialog> {
       ),
     ],
   );
+}
+
+/// 本机模型配置 —— 离线模式那一格。
+///
+/// # 为什么与上面那格并排，而不是合成一个
+///
+/// 它们回答的是两个不同的问题：
+///
+/// - 「自己的 API key」= **服务器**用哪把 key（存进 cortexd、跟着账号走）
+/// - 「本机模型」= **这台电脑离线时**打给谁（存进系统凭据库、不上传）
+///
+/// 合成一格会让「我明明填过 key 了怎么离线还是用不了」成为常态，
+/// 而那时用户找不到任何线索。并排且各自说清用途，是这里唯一诚实的做法。
+class _LocalLlmTile extends ConsumerWidget {
+  const _LocalLlmTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (!kCanStoreLocalLlm) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final offline = ref.watch(appConfigProvider.select((c) => c.offline));
+    final async = ref.watch(localLlmProvider);
+    final cfg = async.value ?? LocalLlmConfig.empty;
+
+    final subtitle = switch ((async.isLoading, cfg.isUsable)) {
+      (true, _) => '读取中…',
+      (_, true) =>
+        '离线时用 ${cfg.provider}'
+            '${cfg.model.isEmpty ? "" : " · ${cfg.model}"}'
+            '${cfg.baseUrl.isEmpty ? "" : " → ${cfg.baseUrl}"}',
+      _ =>
+        '离线模式要用它 —— 没有 cortexd 就没有可代理的对象，'
+            '本地 agent 必须自己知道打给谁。只存在这台电脑的系统凭据库里。',
+    };
+
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(
+        cfg.isUsable ? Icons.computer : Icons.computer_outlined,
+        // 离线模式下没配 = 用不了，这时候才需要把它标红
+        color: offline && !cfg.isUsable ? theme.colorScheme.error : null,
+      ),
+      title: const Text('本机模型（离线时用）'),
+      subtitle: Text(subtitle, style: theme.textTheme.bodySmall),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (cfg.isUsable)
+            TextButton(
+              onPressed: () =>
+                  ref.read(localLlmProvider.notifier).clear(),
+              child: const Text('清除'),
+            ),
+          TextButton(
+            onPressed: () async {
+              final entered = await showDialog<LocalLlmConfig>(
+                context: context,
+                builder: (_) => _LocalLlmDialog(initial: cfg),
+              );
+              if (entered == null) return;
+              await ref.read(localLlmProvider.notifier).save(entered);
+            },
+            child: Text(cfg.isUsable ? '修改' : '配置'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LocalLlmDialog extends StatefulWidget {
+  const _LocalLlmDialog({required this.initial});
+
+  final LocalLlmConfig initial;
+
+  @override
+  State<_LocalLlmDialog> createState() => _LocalLlmDialogState();
+}
+
+class _LocalLlmDialogState extends State<_LocalLlmDialog> {
+  late final _provider = TextEditingController(text: widget.initial.provider);
+  late final _model = TextEditingController(text: widget.initial.model);
+  late final _baseUrl = TextEditingController(text: widget.initial.baseUrl);
+  // key **不回填**：它存在凭据库里，读出来放进一个输入框等于把它又摊开
+  // 一次。想换就重填，想保持不动就留空
+  final _key = TextEditingController();
+  bool _reveal = false;
+
+  @override
+  void dispose() {
+    _provider.dispose();
+    _model.dispose();
+    _baseUrl.dispose();
+    _key.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      title: const Text('本机模型'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '离线模式下本地 agent 直连这个端点。配置只存在这台电脑上，'
+              '不会上传到任何地方。',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _provider,
+              autocorrect: false,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: '供应商',
+                hintText: 'ollama / deepseek / openai …',
+                helperText: '本机 ollama 免 key；其余按各家的 key 填下面',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _model,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: '模型（可选）',
+                hintText: '留空 = 用供应商的默认模型',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _baseUrl,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: '端点（可选）',
+                hintText: 'http://127.0.0.1:11434 …',
+                helperText: '留空 = 用供应商的官方地址',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _key,
+              obscureText: !_reveal,
+              autocorrect: false,
+              enableSuggestions: false,
+              decoration: InputDecoration(
+                labelText: 'API key（可选）',
+                hintText: widget.initial.apiKey.isEmpty
+                    ? '免鉴权的端点留空'
+                    : '留空 = 不改动已存的那把',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  onPressed: () => setState(() => _reveal = !_reveal),
+                  iconSize: 18,
+                  icon: Icon(
+                    _reveal
+                        ? Icons.visibility_off_outlined
+                        : Icons.visibility_outlined,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(
+            LocalLlmConfig(
+              provider: _provider.text.trim(),
+              model: _model.text.trim(),
+              baseUrl: _baseUrl.text.trim(),
+              // 留空 = 保留原来那把，不是清空。清空请用外面那个「清除」
+              apiKey: _key.text.trim().isEmpty
+                  ? widget.initial.apiKey
+                  : _key.text.trim(),
+            ),
+          ),
+          child: const Text('保存'),
+        ),
+      ],
+    );
+  }
 }
