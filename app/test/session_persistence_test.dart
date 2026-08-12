@@ -111,18 +111,24 @@ void main() {
   });
 
   test('地址会被存下来', () async {
-    final saved = <String, String>{};
+    var saved = <String, String>{};
     final container = ProviderContainer(
       overrides: [
+        // 读也要替掉：存一个键现在是**读—改—写**（见 settingsPatcherProvider），
+        // 不替的话这个单测会去碰真实的 %APPDATA%\cortex\settings.json
+        settingsReaderProvider.overrideWithValue(() async => Map.of(saved)),
         settingsWriterProvider.overrideWithValue((values) async {
-          saved.addAll(values);
+          saved = Map.of(values);
         }),
       ],
     );
     addTearDown(container.dispose);
 
     container.read(appConfigProvider.notifier).setBaseUrl('https://mine.example');
-    await Future<void>.delayed(Duration.zero);
+    // 读—改—写有两次 await，一个 Duration.zero 跨不过去
+    for (var i = 0; i < 4; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
 
     expect(
       saved['base_url'],

@@ -45,9 +45,39 @@ final settingsReaderProvider = Provider<Future<Map<String, String>> Function()>(
   (ref) => readSettings,
 );
 
-/// 同上，写入侧。
+/// 同上，写入侧。**整表覆盖** —— 想改一个键请用 [settingsPatcherProvider]。
 final settingsWriterProvider =
     Provider<Future<void> Function(Map<String, String>)>((ref) => writeSettings);
+
+/// 只改一个键，其余原样留着。
+///
+/// # 为什么必须有这个东西
+///
+/// [settingsWriterProvider] 是整表覆盖，而调用方各存各的一个键：
+/// `writeSettings({'base_url': …})` 与 `writeSettings({'permission_mode': …})`
+/// **互相抹掉**。症状是「改了权限档之后，重启回到默认服务器地址」——
+/// 而 0.1.7 刚刚才修完「重启要重填地址」，等于从另一扇门又放了回来。
+///
+/// 每加一个设置项，这种覆盖就多一对。所以合并这件事必须在一个地方做完，
+/// 而不是指望每个调用方都记得先读再写。
+///
+/// # 串行化
+///
+/// 读—改—写之间有个窗口：两个并发的 patch 会各自读到旧表，后写的赢，
+/// 先写的那个键丢失。用户手速达不到，但「切后端时批量恢复设置」这类代码
+/// 一次发好几个是很自然的。用一条 future 链排队，代价是零。
+final settingsPatcherProvider = Provider<Future<void> Function(String, String)>((
+  ref,
+) {
+  var queue = Future<void>.value();
+  return (key, value) {
+    queue = queue.then((_) async {
+      final current = await ref.read(settingsReaderProvider)();
+      await ref.read(settingsWriterProvider)({...current, key: value});
+    });
+    return queue;
+  };
+});
 
 class AppConfigNotifier extends Notifier<AppConfig> {
   /// 上一次用的地址在**磁盘**上，读它要异步；而 `build` 是同步的。
@@ -76,7 +106,7 @@ class AppConfigNotifier extends Notifier<AppConfig> {
 
   /// 落盘。失败只是「下次要重填」，不打断任何事（见 `writeSettings`）。
   void _persist() {
-    unawaited(ref.read(settingsWriterProvider)({_kBaseUrl: state.baseUrl}));
+    unawaited(ref.read(settingsPatcherProvider)(_kBaseUrl, state.baseUrl));
   }
 
   void setUseMock(bool value) {
@@ -132,7 +162,7 @@ class PermissionModeNotifier extends Notifier<PermissionMode> {
   void set(PermissionMode mode) {
     if (state == mode) return;
     state = mode;
-    unawaited(ref.read(settingsWriterProvider)({_key: mode.wire}));
+    unawaited(ref.read(settingsPatcherProvider)(_key, mode.wire));
   }
 }
 
@@ -239,6 +269,42 @@ class _RestartBudget {
   Duration get delay => Duration(seconds: 1 << consecutive.clamp(0, 4));
 }
 
+/// 指向此刻活着的那个本地 agent —— **只为了「装更新之前先把它停掉」**。
+///
+/// [localAgentOriginProvider] 把 agent 关在自己的闭包里，外面只有
+/// `ref.onDispose` 能碰到它，而那条路是「发出去就不管了」的：
+/// `unawaited(agent.stop())`。
+///
+/// 更新需要的是**能 await 的**停止。安装程序下一秒就要替换
+/// `cortex-local.exe`，而 Restart Manager 如果还看得见它在跑，
+/// `/RESTARTAPPLICATIONS` 可能把它当成一个独立程序重新拉起来 ——
+/// 那时它没有 `--remote` / `--addr-file` / `--parent-pid`，
+/// 起来就是个连不上远端、也没人管生死的孤儿。
+///
+/// 靠 `invalidate` 触发 onDispose 换不来这个保证：那只是排了一个停止动作，
+/// 我们不知道它什么时候真的停了。
+final localAgentHandleProvider = Provider<LocalAgentHandle>(
+  (ref) => LocalAgentHandle(),
+);
+
+class LocalAgentHandle {
+  LocalAgent? _current;
+
+  // ignore: use_setters_to_change_properties
+  void adopt(LocalAgent agent) => _current = agent;
+
+  void forget(LocalAgent agent) {
+    if (identical(_current, agent)) _current = null;
+  }
+
+  /// 停掉并**等它真的停了**。没有 agent 时是 no-op。
+  Future<void> stop() async {
+    final agent = _current;
+    _current = null;
+    if (agent != null) await agent.stop();
+  }
+}
+
 /// 离线模式下桌面端与本地 agent 之间的一次性凭据。
 ///
 /// 进程内生成一次、只活到退出。它保护的是「同机其他进程别来指挥这个
@@ -279,11 +345,14 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   final agent = discoverLocalAgent();
   if (agent == null) return null;
 
+  final handle = ref.read(localAgentHandleProvider)..adopt(agent);
+
   var disposed = false;
   Timer? restartTimer;
   ref.onDispose(() {
     disposed = true;
     restartTimer?.cancel();
+    handle.forget(agent);
     unawaited(agent.stop());
   });
 
