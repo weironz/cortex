@@ -103,9 +103,21 @@ class _UserBubble extends StatelessWidget {
                   ),
                 ),
               const SizedBox(height: 4),
-              Text(
-                formatRelative(message.createdAt),
-                style: theme.textTheme.labelSmall,
+              // 时间与复制并排，而不是给复制单开一行：这一行本来就在那儿，
+              // 塞进去不占额外高度。自己说过的话同样需要能整段拿走 ——
+              // 拿去重发、拿去贴进别处，都比在气泡里手动划选可靠
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (message.text.isNotEmpty) ...[
+                    _CopyButton(text: message.text, tooltip: '复制这条'),
+                    const SizedBox(width: 4),
+                  ],
+                  Text(
+                    formatRelative(message.createdAt),
+                    style: theme.textTheme.labelSmall,
+                  ),
+                ],
               ),
               // Normally empty: `ChatController` carries a turn's attribution
               // onto the answer, where the drawer belongs. It survives here for
@@ -253,8 +265,12 @@ class AssistantBlock extends StatelessWidget {
 }
 
 class _CopyButton extends StatefulWidget {
-  const _CopyButton({required this.text});
+  const _CopyButton({required this.text, this.tooltip = '复制回答'});
+
   final String text;
+
+  /// 悬停提示。assistant 那边是「复制回答」，用户自己那条是「复制这条」
+  final String tooltip;
 
   @override
   State<_CopyButton> createState() => _CopyButtonState();
@@ -271,7 +287,7 @@ class _CopyButtonState extends State<_CopyButton> {
       visualDensity: VisualDensity.compact,
       padding: const EdgeInsets.all(5),
       constraints: const BoxConstraints(),
-      tooltip: _done ? '已复制' : '复制回答',
+      tooltip: _done ? '已复制' : widget.tooltip,
       onPressed: () async {
         await Clipboard.setData(ClipboardData(text: widget.text));
         if (!mounted) return;
