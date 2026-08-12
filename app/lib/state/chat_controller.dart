@@ -265,9 +265,15 @@ class ChatController extends Notifier<ChatState> {
   /// (title, message count) still comes from the daemon, and this route
   /// deliberately does not return those.
   ///
-  /// Against a plain cortexd — the Web build, where there is no local agent and
-  /// the workspace really is server-side — the route is absent, and the old
-  /// `PATCH` path takes over unchanged.
+  /// Against a plain cortexd the route is absent and the old `PATCH` path takes
+  /// over — but **binding there is now refused**, deliberately. The server has
+  /// no execution environment: its file tools would touch the *server's* disk,
+  /// which is neither your machine nor a throwaway container. The daemon
+  /// answers 400 with a message naming the two paths that do work (desktop app,
+  /// or `cortex-local` on this machine), and that message is what the user sees.
+  ///
+  /// Unbinding still goes through: an old session may carry a server-side
+  /// binding from before this change, and refusing to clear it would weld it on.
   Future<void> _bindWorkspace(String id, String? path) async {
     try {
       final bound = await _api.bindLocalWorkspace(id, path);

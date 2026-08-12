@@ -66,6 +66,42 @@ const SYSTEM_PROMPT: &str = "你是 Cortex，一个具备长期记忆的助手�
 /// 而不是它成功列出了仓库目录。两道闸各自独立成立才叫纵深防御。
 const WORKSPACE_FREE_TOOLS: &[&str] = &["memory_search"];
 
+/// `PATCH /sessions` 里那个 `workspace` 字段该怎么处置。
+///
+/// 返回 `true` = 要解绑；`false` = 这次没提这个字段。绑定一律报错。
+///
+/// # 为什么绑定要**拒绝**而不是静默忽略
+///
+/// 这条路曾经是 Web 端绑工作区的回落（本地 agent 不在时），而它绑的是
+/// **服务器上**的一个目录 —— 于是一个远端用户的 `read_file` 动的是生产机的
+/// 文件系统，爆炸半径是整台机器加上所有租户的数据。
+///
+/// 静默忽略的话，客户端会显示「已绑定 D:\myproject」，然后每个文件操作都
+/// 失败得莫名其妙 —— 而用户明明看到绑定成功了。报错里直接给出两条走得通的路。
+///
+/// # 为什么解绑照旧放行
+///
+/// 老会话上可能还留着一条服务端绑定（这次改动之前存下的）。拒绝解绑等于让
+/// 那条记录永远焊在那儿，而用户唯一能做的就是删掉整个会话。
+///
+/// # 为什么抽成函数
+///
+/// `patch_session` 要一个真数据库才进得去，于是这条判断在那里是测不到的。
+/// 而它恰恰是本次改动里最该有测试的一条 —— 写反了就是**服务端又能绑了**，
+/// 且没有任何症状。
+fn workspace_patch(field: Option<Option<&str>>) -> Result<bool> {
+    match field {
+        Some(Some(_)) => Err(CortexError::Invalid(
+            "服务端不提供文件执行环境，不能在这里绑定工作区。\
+             文件与命令要跑在**你自己的机器**上：用桌面端，\
+             或在本机运行 cortex-local（`cortex` 命令行会自己拉起它）。"
+                .into(),
+        )),
+        Some(None) => Ok(true),
+        None => Ok(false),
+    }
+}
+
 /// 工具调用轮次上限的环境变量。缺省见 [`cortex_agent::DEFAULT_MAX_ROUNDS`]。
 ///
 /// 做成可调不是为了「灵活」，是为了让**成本上限**在部署时可控：
@@ -155,11 +191,12 @@ pub struct Live {
     extractor: Arc<Extractor>,
     /// 未绑定工作区的会话用它 —— 工具目录里只有 [`WORKSPACE_FREE_TOOLS`]。
     ///
-    /// 建一次留着复用：这是绝大多数会话走的路，没必要每轮重建。
-    /// 绑定了工作区的会话每轮现建一个（沙箱根是会话属性，不是进程属性）。
+    /// 建一次留着复用。
+    ///
+    /// **服务端只有这一份**：cortexd 不提供文件执行环境，所以不再有
+    /// 「按会话现建一个带工作区的 Turn」那条路。轮次上限在这里就烤进去了，
+    /// `Live` 不必再存一份。
     chat_turn: std::sync::Arc<Turn>,
-    /// 现建带工作区的 [`Turn`] 时要用
-    max_rounds: usize,
     /// 媒体转录。未配置 vision 模型时为 None —— 图片照常归档，只是检索不到
     transcribe: Option<Arc<cortex_memory::TranscribePipeline>>,
     device_id: String,
@@ -440,7 +477,6 @@ impl Live {
             )),
             embedder,
             chat_turn,
-            max_rounds,
             transcribe,
             store,
             llm,
@@ -473,12 +509,6 @@ impl Live {
     /// （导入器就是这么做的），这个闸门保的是 CPU 与供应商配额。
     async fn under_extract_gate<F: Future>(&self, fut: F) -> F::Output {
         under_gate(&self.extract_gate, fut).await
-    }
-
-    /// 给一个绑定了工作区的会话现建一个 [`Turn`]：沙箱根是该目录，
-    /// 工具目录是完整的内置目录（文件工具就是在这里出现的）。
-    fn workspace_turn(&self, workspace: &str) -> Result<Turn> {
-        Ok(Turn::on_local_machine(workspace)?.with_max_rounds(self.max_rounds))
     }
 
     /// 本地 agent 把一轮对话写回记忆库。
@@ -1125,23 +1155,24 @@ impl Live {
         // 校验必须在进事务**之前**：写事务持着 advisory lock，
         // 而 canonicalize 要打文件系统的往返（网络盘上能到几十毫秒）。
         // 取号事务短小纯写，这是 cortex-store::txn 的纪律三。
-        if let Some(ws) = &patch.workspace {
-            events.push(match ws {
-                Some(raw) => {
-                    let path = cortex_agent::workspace::validate(raw)?;
-                    cortex_store::NewSessionEvent::bind_workspace(
-                        session_id,
-                        &path,
-                        cortex_store::Actor::User,
-                        &self.device_id,
-                    )
-                }
-                None => cortex_store::NewSessionEvent::unbind_workspace(
-                    session_id,
-                    cortex_store::Actor::User,
-                    &self.device_id,
-                ),
-            });
+        // ── 绑定工作区：**服务端明确拒绝** ──
+        //
+        // 这条路曾经是 Web 端绑工作区的回落（本地 agent 不在时），而它绑的是
+        // **服务器上**的一个目录 —— 于是一个远端用户的 `read_file` 动的是
+        // 生产机的文件系统。爆炸半径是整台机器加上所有租户的数据。
+        //
+        // 拒绝而不是静默忽略：静默的话客户端会显示「已绑定 D:\myproject」，
+        // 然后每个文件操作都失败得莫名其妙 —— 而用户明明看到绑定成功了。
+        // 报错里直接给出两条能走通的路。
+        //
+        // 解绑（`Some(None)`）**照旧放行**：老会话上可能还留着一条服务端绑定，
+        // 用户要能清掉它。拒绝解绑等于让那条记录永远焊在那儿。
+        if workspace_patch(patch.workspace.as_ref().map(Option::as_deref))? {
+            events.push(cortex_store::NewSessionEvent::unbind_workspace(
+                session_id,
+                cortex_store::Actor::User,
+                &self.device_id,
+            ));
         }
 
         if events.is_empty() {
@@ -1688,35 +1719,31 @@ async fn run_turn(
         recorded
     });
 
-    // 工具目录按**会话**决定，不是按进程。未绑定工作区 = 纯聊天，
-    // 文件工具压根不进发给模型的 schema
-    let bound = live
-        .store
-        .session_state(&req.session_id)
-        .await
-        .map_err(store_err)?
-        .and_then(|s| s.workspace);
-    let workspace_turn = bound.as_deref().and_then(|ws| {
-        // 绑定时校验过，但目录可能之后被删了 / 移了 / 换了外接盘。
-        // 此时降级成纯聊天而不是让整轮对话失败 —— 用户只是想说句话，
-        // 不该因为一个他早就忘了的绑定而收到 500
-        live.workspace_turn(ws)
-            .inspect_err(|e| {
-                tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
-            })
-            .ok()
-    });
-    let turn = workspace_turn.as_ref().unwrap_or(&live.chat_turn);
-    // 用 `workspace_turn` 而不是 `bound` 判断：绑过但目录已不可用时上面降级成了
-    // 纯聊天，此刻模型手里确实没有文件工具 —— 提示词必须跟着降级，
-    // 否则它会照着一个已经不存在的工作区去许诺
-    let system_prompt = cortex_agent::workspace::brief(
-        SYSTEM_PROMPT,
-        workspace_turn.as_ref().and(bound.as_deref()),
+    // **服务端不提供文件执行环境。**
+    //
+    // cortexd 与本地 agent 跑的是同一个 `Turn::run`、同一套工具，差别只有
+    // 一个：工具动的是谁的文件系统。这一侧动的是**服务器**的 ——
+    // 而 Web 用户绑工作区时（回落到 `PATCH /sessions`）绑的正是服务器上的
+    // 一个目录，爆炸半径是整台生产机加上所有租户的数据。
+    //
+    // 调研过：Claude.ai 与 ChatGPT 的云 agent 都没有这个形态。它们给模型的
+    // 是**一次性容器**（爆炸半径就是那个容器），产物在对话里下载。我们没有
+    // 容器，于是这一格既没有隔离、也没有「这是你自己的机器」那句依据 ——
+    // 两家都空着它。
+    //
+    // 所以本期直接关掉，而不是给它加个开关：它本来就不该是一种执行环境。
+    // 要碰文件就用桌面端，或者在本机跑 `cortex-local`（CLI 会自己拉起它）。
+    // 容器那条路排进了 roadmap。
+    let turn = &live.chat_turn;
+    debug_assert!(
+        !turn.env().has_filesystem(),
+        "cortexd 的 Turn 竟然有文件系统 —— 这是本次改动要消灭的那一格"
     );
+    // 提示词跟着降级：模型手里确实没有文件工具，
+    // 照着「你的工作区是 X」去许诺只会让用户白等一场
+    let system_prompt = cortex_agent::workspace::brief(SYSTEM_PROMPT, None);
     tracing::debug!(
         session = %req.session_id,
-        workspace = ?bound,
         tools = ?turn.tool_names(),
         "本轮的工具目录"
     );
@@ -2290,23 +2317,60 @@ mod tests {
         }
     }
 
-    /// 绑定工作区后文件工具出现，且沙箱根就是那个目录。
+    /// 服务端**不能**绑工作区，但**能**解绑。
+    ///
+    /// 绑定那一半写反了的后果是「服务端又能绑了」，而它没有任何症状 ——
+    /// 直到某天一个远端用户的 `read_file` 读到了生产机上的 `.env`。
+    /// 解绑那一半写反了的后果是老会话上的绑定永远清不掉。
     #[test]
-    fn a_bound_session_gets_the_file_tools_rooted_at_the_workspace() {
-        let dir = tempfile::tempdir().expect("应能建临时目录");
-        let bound = Turn::on_local_machine(dir.path()).expect("临时目录应当是合法沙箱根");
+    fn the_server_refuses_to_bind_but_still_lets_you_unbind() {
+        let msg = workspace_patch(Some(Some("D:/anything")))
+            .expect_err("服务端绑定工作区必须被拒绝")
+            .to_string();
+        assert!(
+            msg.contains("你自己的机器") && msg.contains("cortex-local"),
+            "拒绝理由要给出走得通的路（桌面端 / 本机跑 cortex-local），而不只是说不行。实际：{msg}"
+        );
 
-        let names = bound.tool_names();
-        for expected in ["read_file", "write_file", "list_dir", "memory_search"] {
+        assert!(
+            workspace_patch(Some(None)).expect("解绑必须放行"),
+            "解绑要照旧能用 —— 老会话上可能还留着一条服务端绑定，拒绝解绑等于让它永远焊在那儿"
+        );
+        assert!(
+            !workspace_patch(None).expect("没提这个字段不该报错"),
+            "只改标题的请求不该被工作区这一条拦下来"
+        );
+    }
+
+    /// **cortexd 一个文件工具都不给** —— 无论会话上有没有绑过工作区。
+    ///
+    /// 这条测试原本是反的（「绑定工作区后 `read_file` 应当出现」）。反过来
+    /// 是因为服务端那一格根本不该存在：cortexd 与本地 agent 跑的是同一个
+    /// `Turn::run`、同一套工具，差别只有工具动的是谁的文件系统 ——
+    /// 而这一侧动的是**服务器**的。Web 用户绑工作区（回落到 `PATCH /sessions`）
+    /// 绑的正是服务器上的目录，爆炸半径是整台生产机加上所有租户的数据。
+    ///
+    /// 调研过：Claude.ai 与 ChatGPT 的云 agent 都没有这个形态，它们给模型的是
+    /// 一次性容器。我们没有容器，于是这一格既没有隔离、也没有「这是你自己的
+    /// 机器」那句依据 —— 两家都空着它。
+    #[test]
+    fn cortexd_never_hands_out_file_tools() {
+        let turn = chat_only_turn(4);
+        let names = turn.tool_names();
+        for forbidden in ["read_file", "write_file", "list_dir", "shell"] {
             assert!(
-                names.contains(&expected),
-                "绑定工作区后 {expected} 应当出现在工具目录里：{names:?}"
+                !names.contains(&forbidden),
+                "cortexd 的工具目录里出现了 {forbidden} —— 它动的是**服务器**的\
+                 文件系统，而批准的人可能在另一个城市。实际：{names:?}"
             );
         }
-        assert_eq!(
-            bound.sandbox_root(),
-            Some(dir.path().canonicalize().expect("应能规范化").as_path()),
-            "沙箱根必须是绑定的那个目录，而不是进程工作目录"
+        assert!(
+            names.contains(&"memory_search"),
+            "记忆检索必须还在 —— 那才是服务端该干的活。实际：{names:?}"
+        );
+        assert!(
+            !turn.env().has_filesystem(),
+            "执行环境必须是「没有」。这是 ExecEnvironment 存在的全部理由"
         );
     }
 
