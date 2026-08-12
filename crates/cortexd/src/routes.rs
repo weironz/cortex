@@ -362,7 +362,14 @@ async fn chat_in_sandbox(
         axum::http::HeaderValue::from_static("application/json"),
     );
 
-    crate::sandbox_proxy::forward(&layer.http, &handle.base_url, &token, proxied).await
+    crate::sandbox_proxy::forward(
+        &layer.http,
+        &handle.base_url,
+        &token,
+        handle.route_to.as_deref(),
+        proxied,
+    )
+    .await
 }
 
 /// 在 cortexd 自己这儿跑一轮（纯聊天，工具目录只有 `memory_search`）。

@@ -349,10 +349,21 @@ backup-status:
 sandbox-build:
     docker build -f scripts/docker/Dockerfile.sandbox -t cortex/sandbox:dev .
 
-# 沙箱专用网段。postgres / rustfs **不接进来** —— 隔离靠拓扑，不靠规则判断
-sandbox-net:
-    -docker network create cortex-sandbox-net
-    @echo "把 cortexd 接进去：docker network connect cortex-sandbox-net <cortexd 容器>"
+# 起沙箱那一套：双宿出口容器 + internal 网段（网段由 compose 建）
+#
+# **必须先跑这条再开沙箱会话。** 网段是 internal 的，容器里连默认路由都没有；
+# 没有这个出口容器，沙箱既出不了网，cortexd 也进不去（internal 网段上已发布
+# 端口不生效 —— 实测，见 docs/sandbox.md 第八节）
+sandbox-up:
+    docker compose --profile sandbox up -d --build egress
+    @echo "放行清单：docker exec cortex-egress env | grep EGRESS || true"
+
+sandbox-down:
+    -docker compose --profile sandbox stop egress
+
+# 验一遍拓扑：这几条**必须**是这个结果，看配置不算数
+sandbox-verify owner="try":
+    bash scripts/sandbox-verify.sh cortex-sbx-{{ owner }}
 
 # 手工起一个沙箱看看（cortexd 正式起沙箱走 DockerRunner，不走这条）。
 # 规格与 DockerRunner 里写死的那份保持一致 —— 两边漂开时以代码为准
@@ -368,7 +379,11 @@ sandbox-try owner="try":
         --restart no \
         -e CORTEX_REMOTE=http://host.docker.internal:8080 \
         -e CORTEX_TOKEN="${CORTEXD_TOKEN:-}" \
-        --add-host host.docker.internal:host-gateway \
+        -e HTTP_PROXY=http://cortex-egress:3128 \
+        -e HTTPS_PROXY=http://cortex-egress:3128 \
+        -e http_proxy=http://cortex-egress:3128 \
+        -e https_proxy=http://cortex-egress:3128 \
+        -e NO_PROXY=127.0.0.1,localhost,cortex-egress \
         cortex/sandbox:dev
     @echo "健康检查：docker exec cortex-sbx-{{ owner }} curl -fsS http://127.0.0.1:8090/health"
 

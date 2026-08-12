@@ -318,12 +318,62 @@ $ docker run --rm --network <internal 网> --add-host host.docker.internal:host-
 **但别把它当成挡沙箱的那道墙**。真正的墙是 `internal: true` + 中继。
 
 生产 `deploy/docker-compose.yml` 一个 `ports:` 都没有，本来就不暴露。
-- **出网 allowlist**：照抄 Anthropic `sandbox-runtime` 的语义 —— 沙箱网段
-  `internal: true`（物理上无默认路由）+ 一个双宿 egress-proxy，容器 env 设
-  `HTTP(S)_PROXY`。**env var 只是引导，网络拓扑才是边界。**
-  匹配语义：默认全拒、deny 优先、`*.domain` 与裸域互不隐含、`:port` 后缀、
-  拒绝响应带机器可读头，且**把「为什么被拦 + 该用什么替代」作为工具事件打回
-  agent 让模型自我纠正**。setup 阶段放行全网、agent 阶段收紧（Codex 两阶段模型）。
+### 落地形态：一个双宿容器，两个方向都由它做
+
+`crates/cortex-egress-proxy`（只依赖 tokio + tracing，刻意不碰 cortex-core）：
+
+- **出网**（:3128，**不 publish**，只在 internal 网段里可见）：`CONNECT` 与
+  绝对 URI 两种代理请求，判完白名单后纯字节双向拷贝，不解析内容。
+- **反向中继**（:3129，publish 到宿主 `127.0.0.1`）：cortexd 打它，
+  按 `X-Cortex-Sandbox` 头里的容器名在内部网段上转发。
+
+匹配语义照抄 Anthropic `sandbox-runtime`（代码是 Node，只搬语义），
+四条各有一条测试守着：默认全拒、deny 优先、`*.domain` 与裸域互不隐含、
+`:port` 可选收窄。**env var 只是引导，网络拓扑才是边界** —— 容器里把
+`HTTP_PROXY` 删掉也没有第二条路。
+
+### 真机实测（`just sandbox-verify`）
+
+```
+── 拓扑 ──                                    期望   实际
+  cortex-postgres:5432（DNS 名）              拒绝   拒绝(gaierror)
+  host.docker.internal:15432                  拒绝   拒绝(gaierror)
+  host.docker.internal:5432（别的项目）       拒绝   拒绝(gaierror)
+  cortex-egress:3128                          可达   可达
+── 经代理出网 ──
+  pypi.org（放行）                            2xx    HTTP 200
+  example.com（未放行）                       被拒   403
+── 反向中继 ──
+  带 X-Cortex-Sandbox 头                      200    200（/health 正常）
+  不带头                                      400    400 + 说明
+  指向不存在的容器                            502    502 + 说明
+── 回调 ──
+  沙箱 → host.docker.internal:8080            通     通（经代理）
+```
+
+### 两个只有真机才会撞见的坑
+
+1. **`extra_hosts: host.docker.internal:host-gateway` 必须显式写在
+   egress 上。** Docker Desktop 会自动注入一条同名记录，但那条指向
+   **IPv6**，而普通网桥没开 IPv6。症状是「在放行清单里，但连不上：
+   Network is unreachable」—— 指着一个完全无关的方向。
+2. **`TcpStream::connect((host, port))` 只报最后一个地址的错。**
+   上面那条 IPv6 记录排在后面，于是「宿主上服务没起」（IPv4 那条是
+   `Connection refused`）会被报成 `Network is unreachable`。
+   现在改成逐个试、**把每个地址的错都列出来**，并在文案里点明该看哪个。
+
+### 一个没解决的限制：https 的拒绝理由到不了模型
+
+明文 http 被拒时，那句「为什么被拦 + 该怎么办」原样进 curl 的 stdout，
+模型读得到。但 **https 走 `CONNECT`，curl 会丢弃失败 CONNECT 的响应体** ——
+模型只看得到 `curl: (56) CONNECT tunnel failed, response 403`。
+
+403（策略）与 502（网络）的区分仍然成立，够模型判断「不该重试」；
+但「该换成哪个镜像源」这半句丢了。要补的话有两条路：在容器内的 shell 工具
+里识别这个签名再把说明贴回去，或在容器模式的系统提示里先讲清有代理。
+**两条都还没做**，别当它已经解决了。
+
+setup 阶段放行全网、agent 阶段收紧（Codex 两阶段模型）留到 C1。
 
 ---
 

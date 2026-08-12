@@ -1,0 +1,85 @@
+# ══════════════════════════════════════════════════════════
+#  cortex-egress-proxy —— 沙箱网段唯一的双宿出口
+#
+#  沙箱网段是 internal（容器里连默认路由都没有），这个容器同时接
+#  internal 网段与普通网桥，两个方向都由它做：
+#
+#    沙箱 ──HTTP(S)_PROXY──► 这里 ──► 放行清单内的外网 / 宿主
+#      ▲                       │
+#      └── cortexd 反代进来 ───┘（这个容器的 publish 端口）
+#
+#  完整设计与那几条真机实测见 docs/sandbox.md 第八节。
+#
+#  构建（在仓库根执行）：
+#    docker build -f scripts/docker/Dockerfile.egress -t cortex/egress-proxy .
+# ══════════════════════════════════════════════════════════
+
+FROM rust:1.97.1-trixie AS builder
+
+WORKDIR /build
+
+# 与另外两个 Dockerfile 同一套「先拷清单再拷源码」的分层。
+# 这里的收益比那两个还大：这个 crate 只依赖 tokio + tracing，
+# 依赖层几乎永远命中。
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/cortex-core/Cargo.toml         crates/cortex-core/
+COPY crates/cortex-llm/Cargo.toml          crates/cortex-llm/
+COPY crates/cortex-store/Cargo.toml        crates/cortex-store/
+COPY crates/cortex-memory/Cargo.toml       crates/cortex-memory/
+COPY crates/cortex-agent/Cargo.toml        crates/cortex-agent/
+COPY crates/cortex-blob/Cargo.toml         crates/cortex-blob/
+COPY crates/cortex-proto/Cargo.toml        crates/cortex-proto/
+COPY crates/cortex-import/Cargo.toml       crates/cortex-import/
+COPY crates/cortex-local/Cargo.toml        crates/cortex-local/
+COPY crates/cortexd/Cargo.toml             crates/cortexd/
+COPY crates/cortex-cli/Cargo.toml          crates/cortex-cli/
+COPY crates/cortex-egress-proxy/Cargo.toml crates/cortex-egress-proxy/
+COPY evals/Cargo.toml                      evals/
+
+RUN set -eux; \
+    for d in crates/*/ evals/; do \
+        mkdir -p "$d/src"; \
+        echo '' > "$d/src/lib.rs"; \
+        echo 'fn main() {}' > "$d/src/main.rs"; \
+    done; \
+    cargo build --release -p cortex-egress-proxy 2>/dev/null || true
+
+COPY crates/ crates/
+COPY evals/ evals/
+COPY migrations/ migrations/
+COPY migrations-global/ migrations-global/
+
+RUN set -eux; \
+    find crates evals -name '*.rs' -exec touch {} +; \
+    cargo build --release -p cortex-egress-proxy; \
+    strip target/release/cortex-egress-proxy || true
+
+# ── 运行阶段 ──────────────────────────────────────────────
+#
+# 这一层刻意做到最小。它跑在信任边界上：沙箱里所有出网流量都经过它，
+# 而它自己有默认路由。**镜像里多一个可执行文件，就多一个被攻陷后能用的东西。**
+#
+# 用 debian:trixie-slim 而不是 distroless/scratch，只为了 ca-certificates ——
+# 虽然这个代理自己不发起 TLS（CONNECT 是纯字节转发），但装上它才让
+# 「将来要不要加健康检查 / 上报」这条路不必换基镜像。
+FROM debian:trixie-slim AS runtime
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates; \
+    rm -rf /var/lib/apt/lists/*
+
+# uid 与 cortexd（10001）、沙箱（10002）都错开
+RUN useradd --system --uid 10003 --no-create-home --home-dir /nonexistent egress
+
+COPY --from=builder /build/target/release/cortex-egress-proxy /usr/local/bin/cortex-egress-proxy
+
+USER egress
+
+# 3128 = 出网代理（沙箱侧，**不 publish**，只在 internal 网段里可见）
+# 3129 = 反向中继（cortexd 侧，publish 到宿主 127.0.0.1）
+EXPOSE 3128 3129
+
+ENV RUST_LOG=cortex_egress_proxy=info,warn
+
+ENTRYPOINT ["/usr/local/bin/cortex-egress-proxy"]

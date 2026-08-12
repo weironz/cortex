@@ -168,6 +168,78 @@ services:
       retries: 10
       start_period: 300s
 
+  # ─── 沙箱网段唯一的双宿出口 ─────────────────────────────
+  #
+  # 放在 `sandbox` profile 里，**默认不起**（同 embeddings 的理由：
+  # `just up` 该是「起个数据库就能开工」）。
+  #
+  #   docker compose --profile sandbox up -d      # 或 just sandbox-up
+  #
+  # 它同时接两张网：
+  #   cortex-sandbox-net  internal，沙箱在这儿，**没有默认路由**
+  #   default             普通网桥，它靠这张网出去
+  #
+  # 于是它是这张拓扑上唯一两边都够得着的点，两个方向都由它做：
+  # 出网（沙箱 → 放行的外网）与反向中继（cortexd → 指定的沙箱容器）。
+  egress:
+    build:
+      context: .
+      dockerfile: scripts/docker/Dockerfile.egress
+    image: cortex/egress-proxy:dev
+    container_name: cortex-egress
+    profiles: [sandbox]
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop: [ALL]
+    read_only: true
+    environment:
+      # **默认全拒**。空清单 = 什么都不放行，不是「不限制」。
+      #
+      # 默认这几条按「装依赖 + 拉代码」圈定。注意 `*.pypi.org` 与 `pypi.org`
+      # 互不隐含，两个都要写（见 allowlist.rs 的注释与测试）。
+      #
+      # `host.docker.internal:8080` 是**必须**的：沙箱回调 cortexd
+      # （写记忆、拉历史）走的也是这条路 —— internal 网段上它没有别的路。
+      CORTEX_EGRESS_ALLOW: >-
+        ${CORTEX_EGRESS_ALLOW:-host.docker.internal:8080,
+        pypi.org,*.pypi.org,files.pythonhosted.org,
+        registry.npmjs.org,*.npmjs.org,
+        github.com,*.github.com,codeload.github.com,
+        crates.io,*.crates.io,static.crates.io,
+        mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn}
+      CORTEX_EGRESS_DENY: ${CORTEX_EGRESS_DENY:-}
+      RUST_LOG: ${CORTEX_EGRESS_LOG:-cortex_egress_proxy=info,warn}
+    networks:
+      - default
+      - sandbox
+    # 开发时 cortexd 跑在宿主进程里，沙箱回调它的地址是
+    # `host.docker.internal:8080` —— 而现在**只有这个容器**够得着宿主，
+    # 所以要由它来解析。
+    #
+    # 必须显式写 `host-gateway`：Docker Desktop 会自动注入一条同名记录，
+    # 但那条指向一个 **IPv6** 地址，而普通网桥没开 IPv6 —— 实测的症状是
+    # 「在放行清单里，但连不上：Network is unreachable」。
+    # 原生 Linux 上则压根不会自动注入。两种情况这一行都补上了。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # 只 publish 反向中继那个口，出网代理（3128）**不 publish** ——
+      # 它只该在 internal 网段里可见。绑回环：cortexd 在宿主上。
+      - "127.0.0.1:${CORTEX_SANDBOX_RELAY_PORT:-3129}:3129"
+
+networks:
+  # 沙箱网段。`internal: true` 是这整套隔离的**唯一**有效手段 ——
+  # 详见文件开头那段实测记录，以及 docs/sandbox.md 第八节。
+  #
+  # 名字与 `sandbox_runner.rs::NETWORK` 写死的那个必须一致：那边用
+  # `network_mode` 直接按名字接，compose 的 `name:` 关掉了项目名前缀。
+  sandbox:
+    name: cortex-sandbox-net
+    internal: true
+  default:
+    name: cortex_default
+
 volumes:
   pg_data:
   rustfs_data:

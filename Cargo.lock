@@ -1183,6 +1183,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortex-egress-proxy"
+version = "0.1.7"
+dependencies = [
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cortex-evals"
 version = "0.1.7"
 dependencies = [

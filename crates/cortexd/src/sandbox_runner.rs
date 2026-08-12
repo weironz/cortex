@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 
 use bollard::Docker;
-use bollard::models::{ContainerCreateBody, HostConfig, Mount, MountType, PortBinding};
+use bollard::models::{ContainerCreateBody, HostConfig, Mount, MountType};
 use bollard::query_parameters as qp;
 use cortex_core::{CortexError, Result};
 
@@ -42,7 +42,18 @@ const NAME_PREFIX: &str = "cortex-sbx-";
 const VOLUME_PREFIX: &str = "cortex-ws-";
 
 /// 沙箱专用网段。postgres / rustfs **不接进来**，隔离靠拓扑不靠规则。
+///
+/// 这个网段必须是 `internal` 的。真机实测过（记在 `docs/sandbox.md` 第八节）：
+/// 只要容器有默认路由，它就能经 `host.docker.internal` 够到宿主上任何一个
+/// 已发布端口 —— **包括别的项目的数据库**，而且宿主那侧改绑 `127.0.0.1`
+/// 也拦不住（Docker Desktop 的转发器在虚拟机里，容器到的正是它那一侧）。
 const NETWORK: &str = "cortex-sandbox-net";
+
+/// 双宿出口容器在沙箱网段里的名字。沙箱的 `HTTP(S)_PROXY` 指向它。
+const EGRESS_HOST: &str = "cortex-egress";
+
+/// 出网代理端口（沙箱侧，只在 internal 网段里可见）。
+const EGRESS_PORT: u16 = 3128;
 
 /// 每沙箱内存上限。
 ///
@@ -98,9 +109,17 @@ const TMPFS_SIZE: &str = "size=128m,mode=1777";
 pub struct SandboxHandle {
     /// 容器名（= `cortex-sbx-{owner}`）。
     pub name: String,
-    /// cortexd 该往哪儿反代。容器与 cortexd 同在 `cortex-sandbox-net` 上时
-    /// 走服务名；宿主直连时走映射出来的端口。
+    /// cortexd 该往哪儿反代。
+    ///
+    /// 同网段（生产：cortexd 也在容器里）时是容器名；
+    /// 宿主直连（开发）时是**中继**的地址 —— 不再是容器自己的映射端口，
+    /// 因为 internal 网段上已发布端口不生效（实测）。
     pub base_url: String,
+    /// 走中继时要带的路由头，值是目标容器名。同网段直连时是 `None`。
+    ///
+    /// 单独一个字段而不是拼进 `base_url`：中继只有一个地址，
+    /// 「转给谁」是每次请求的参数，不是端点的一部分。
+    pub route_to: Option<String>,
 }
 
 /// 起 / 停 / 查一个用户的沙箱。
@@ -130,8 +149,11 @@ pub struct DockerRunner {
     ///
     /// 决定两件事：容器用什么地址回调 cortexd，以及 cortexd 用什么地址反代
     /// 回容器。开发机上 cortexd 跑在宿主进程里（不在容器里），所以是 false ——
-    /// 容器经 `host.docker.internal` 回调，cortexd 经映射端口反代。
+    /// 两个方向都经 `cortex-egress` 那个双宿容器。
     same_network: bool,
+    /// 反向中继的地址（`cortex-egress` publish 到宿主的那个端口）。
+    /// `same_network` 为真时用不上。
+    relay: String,
 }
 
 impl DockerRunner {
@@ -141,13 +163,18 @@ impl DockerRunner {
     /// 连不上（没装 / 没权限 / daemon 没起）。**不静默降级**：一个连不上
     /// docker 的 cortexd 起不了任何沙箱，而那该在启动时就说清楚，
     /// 不是等用户点了「新建沙箱会话」才报一句看不懂的错。
-    pub fn connect(remote: impl Into<String>, same_network: bool) -> Result<Self> {
+    pub fn connect(
+        remote: impl Into<String>,
+        same_network: bool,
+        relay: impl Into<String>,
+    ) -> Result<Self> {
         let docker = Docker::connect_with_local_defaults()
             .map_err(|e| CortexError::Config(format!("连不上 docker daemon：{e}")))?;
         Ok(Self {
             docker,
             remote: remote.into(),
             same_network,
+            relay: relay.into(),
         })
     }
 
@@ -177,12 +204,13 @@ impl DockerRunner {
 
         let mut attempt = 0u32;
         loop {
-            if probe
-                .get(&url)
-                .send()
-                .await
-                .is_ok_and(|r| r.status().is_success())
-            {
+            let mut req = probe.get(&url);
+            if let Some(name) = &handle.route_to {
+                // 走中继时这个头是必须的 —— 少了它中继回 400，而 400 也是
+                // 「没就绪」的一种，于是症状变成整整 30 秒的空等
+                req = req.header(crate::sandbox_proxy::ROUTE_HEADER, name);
+            }
+            if req.send().await.is_ok_and(|r| r.status().is_success()) {
                 tracing::debug!(sandbox = %handle.name, attempt, "沙箱就绪");
                 return Ok(());
             }
@@ -208,13 +236,26 @@ impl DockerRunner {
         let mut tmpfs = HashMap::new();
         tmpfs.insert("/tmp".to_owned(), TMPFS_SIZE.to_owned());
 
-        // 容器回调 cortexd 的地址。同网络时走服务名，否则走 docker 提供的
-        // 宿主别名（`extra_hosts` 里那条 host-gateway）
+        // 容器回调 cortexd 的地址。同网络时走服务名，否则走宿主别名 ——
+        // 而在 internal 网段上，后者**只有经出网代理才到得了**（容器自己没有
+        // 默认路由）。所以 `CORTEX_REMOTE` 里的地址必须也在放行清单里。
         let remote = self.remote.clone();
+        let proxy = format!("http://{EGRESS_HOST}:{EGRESS_PORT}");
 
         let env = vec![
             format!("CORTEX_REMOTE={remote}"),
             format!("CORTEX_TOKEN={token}"),
+            // 出网一律经双宿代理。**env var 只是引导，网络拓扑才是边界** ——
+            // 就算容器里的进程把这几个变量删了，internal 网段上也没有第二条
+            // 路可走。两者缺一不可：只有 env 的话一个 `curl --noproxy` 就绕开，
+            // 只有拓扑的话正常工具会以「网络不通」失败而不是拿到拒绝理由
+            format!("HTTP_PROXY={proxy}"),
+            format!("HTTPS_PROXY={proxy}"),
+            format!("http_proxy={proxy}"),
+            format!("https_proxy={proxy}"),
+            // 自己人不走代理：容器内回环，以及同网段的中继本身
+            format!("NO_PROXY=127.0.0.1,localhost,{EGRESS_HOST}"),
+            format!("no_proxy=127.0.0.1,localhost,{EGRESS_HOST}"),
             // 镜像里已经设了这三个，这里重申是为了让「一个容器到底以什么
             // 身份跑」在 `docker inspect` 里一处可见 —— 排查时不必再去翻
             // 镜像的 ENV
@@ -223,20 +264,15 @@ impl DockerRunner {
             format!("CORTEX_LOCAL_BIND=0.0.0.0:{AGENT_PORT}"),
         ];
 
-        let mut port_bindings = HashMap::new();
-        if !self.same_network {
-            // 宿主上的 cortexd 要够得着容器。端口交给 docker 挑（空串 =
-            // 随机高位端口），再从 inspect 里读回来 —— 自己猜一个「大概没被
-            // 占」的端口，在两个沙箱或别的软件占了它时会静默连错地方
-            port_bindings.insert(
-                format!("{AGENT_PORT}/tcp"),
-                Some(vec![PortBinding {
-                    // **只绑回环**：沙箱的 agent 端口不该对同网段其他机器开放
-                    host_ip: Some("127.0.0.1".to_owned()),
-                    host_port: Some(String::new()),
-                }]),
-            );
-        }
+        // **不再映射端口。**
+        //
+        // 原来这里给非同网段的情况映一个随机高位端口，让宿主上的 cortexd
+        // 直连。网段改成 `internal` 之后那条路物理上不存在了：实测过，
+        // 内部网段上的已发布端口宿主 `curl` 连不上（`docker ps` 里那一行
+        // 映射照常显示 —— 这正是它难查的地方）。
+        //
+        // 改由 `cortex-egress` 中继：它同时在内部网段与普通网桥上，
+        // 自己的端口 publish 到宿主。见 `status()` 里 `base_url` 的取法。
 
         ContainerCreateBody {
             image: Some(IMAGE.to_owned()),
@@ -275,9 +311,13 @@ impl DockerRunner {
                     maximum_retry_count: None,
                 }),
                 network_mode: Some(NETWORK.to_owned()),
-                port_bindings: (!port_bindings.is_empty()).then_some(port_bindings),
-                extra_hosts: (!self.same_network)
-                    .then(|| vec!["host.docker.internal:host-gateway".to_owned()]),
+                // `port_bindings` 与 `extra_hosts` 都刻意留空：
+                //
+                // - 端口：internal 网段上不生效（见上面那段）
+                // - host-gateway：没有默认路由，加了也只是让一个名字**解析
+                //   得出但连不上**。而「解析成功、连接失败」比「解析失败」
+                //   更难查 —— 它看起来像宿主服务挂了。
+                //   容器要够到宿主上的 cortexd，走的是出网代理那条路
                 ..Default::default()
             }),
             ..Default::default()
@@ -392,22 +432,22 @@ impl SandboxRunner for DockerRunner {
             return Ok(None);
         }
 
-        let base_url = if self.same_network {
-            format!("http://{name}:{AGENT_PORT}")
+        // 同网段（生产：cortexd 也在容器里、也接进这个网段）时直连容器名 ——
+        // `internal` 只切断出网，网段**内部**的容器之间照常互通。
+        //
+        // 否则走中继：它一个地址服务所有沙箱，转给谁由请求头带。
+        // 原来这里读的是容器映射出的宿主端口，那条路随 internal 网段一起没了。
+        let (base_url, route_to) = if self.same_network {
+            (format!("http://{name}:{AGENT_PORT}"), None)
         } else {
-            // 读**实际**映射到的宿主端口。`ensure` 里请求的是空串（让 docker
-            // 挑），所以这里不读回来就根本不知道该连哪儿
-            let port = info
-                .network_settings
-                .as_ref()
-                .and_then(|n| n.ports.as_ref())
-                .and_then(|p| p.get(&format!("{AGENT_PORT}/tcp")).cloned().flatten())
-                .and_then(|b| b.first().and_then(|x| x.host_port.clone()))
-                .ok_or_else(|| CortexError::Store("沙箱容器没有映射出 agent 端口".into()))?;
-            format!("http://127.0.0.1:{port}")
+            (self.relay.clone(), Some(name.clone()))
         };
 
-        Ok(Some(SandboxHandle { name, base_url }))
+        Ok(Some(SandboxHandle {
+            name,
+            base_url,
+            route_to,
+        }))
     }
 }
 
@@ -422,6 +462,7 @@ mod tests {
             docker: Docker::connect_with_local_defaults().expect("构造客户端不需要 daemon 真的在"),
             remote: "http://host.docker.internal:8080".into(),
             same_network: false,
+            relay: "http://127.0.0.1:3129".into(),
         }
     }
 
@@ -523,24 +564,54 @@ mod tests {
         assert!(DockerRunner::volume_name("u1").starts_with(VOLUME_PREFIX));
     }
 
-    /// 宿主直连模式下，agent 端口**只绑回环**。
+    /// 沙箱**一个端口都不往宿主映**。
+    ///
+    /// 这条测试原来是反的（「宿主直连模式必须映射端口」）。反过来是因为
+    /// 网段改成了 `internal`，而实测下来内部网段上的已发布端口根本不生效 ——
+    /// 宿主 `curl` 连不上，可 `docker ps` 里那一行映射照常显示。
+    /// **留着一个不生效的映射比没有更糟**：它让人以为那条路还在。
+    ///
+    /// 而假如哪天网段改回非 internal，这个映射就会真的生效 —— 那时它是一个
+    /// 「能执行命令的容器」对宿主敞开的端口。两头都不该有它。
     #[test]
-    fn the_agent_port_is_bound_to_loopback_only() {
+    fn the_sandbox_publishes_no_ports_at_all() {
         let r = runner();
         let spec = r.spec("u1", "tok", "hash");
-        let bindings = spec
-            .host_config
-            .expect("必须有 HostConfig")
-            .port_bindings
-            .expect("宿主直连模式必须映射端口，否则 cortexd 够不着容器");
-        let b = &bindings[&format!("{AGENT_PORT}/tcp")]
-            .as_ref()
-            .expect("必须有绑定")[0];
-        assert_eq!(
-            b.host_ip.as_deref(),
-            Some("127.0.0.1"),
-            "沙箱的 agent 端口绑 0.0.0.0 等于把同网段任何人放进这个容器 ——\
-             而它能执行命令"
+        let host = spec.host_config.expect("必须有 HostConfig");
+        assert!(
+            host.port_bindings.is_none(),
+            "沙箱不该往宿主映任何端口。cortexd 经 cortex-egress 的反向中继进来，\
+             那条路只有一个入口、且中继自己就在信任边界上。实际：{:?}",
+            host.port_bindings
+        );
+        assert!(
+            host.extra_hosts.is_none(),
+            "也不该加 host-gateway：internal 网段上它只会让一个名字**解析得出\
+             但连不上**，而「解析成功、连接失败」比「解析失败」更难查。实际：{:?}",
+            host.extra_hosts
+        );
+    }
+
+    /// 出网一律经代理，且**四个大小写形式都要设**。
+    ///
+    /// curl 认小写 `http_proxy`，多数语言的 SDK 认大写 —— 只设一半的症状是
+    /// 「shell 里 curl 能出去、python 脚本出不去」，或者反过来，
+    /// 而两者都不会说这是代理的事。
+    #[test]
+    fn every_egress_env_var_is_set() {
+        let r = runner();
+        let spec = r.spec("u1", "tok", "hash");
+        let env = spec.env.expect("必须有 env");
+        let want = format!("http://{EGRESS_HOST}:{EGRESS_PORT}");
+        for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            assert!(
+                env.contains(&format!("{key}={want}")),
+                "少了 {key} —— 出网会有一路绕开代理。实际 env：{env:?}"
+            );
+        }
+        assert!(
+            env.iter().any(|e| e.starts_with("NO_PROXY=")),
+            "回环与中继自己不该走代理，否则容器内自检会绕一圈甚至打成回环"
         );
     }
 }

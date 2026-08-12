@@ -1,0 +1,18 @@
+[package]
+name = "cortex-egress-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "沙箱网段唯一的双宿出口：出网 allowlist + 反向中继"
+
+[dependencies]
+# 刻意**不**依赖 cortex-core / axum / reqwest。
+#
+# 这个二进制要进一个尽量小的镜像，而且它跑在信任边界上 —— 依赖越少，
+# 要跟着 cortex 主线一起升级的东西越少。整个实现只用得到 tokio 的
+# TCP 与 io::copy_bidirectional：代理本来就不该解析它转发的东西。
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

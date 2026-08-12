@@ -128,11 +128,17 @@ async fn main() -> anyhow::Result<()> {
                 "http://host.docker.internal:8080".into()
             }
         });
-        match sandbox_runner::DockerRunner::connect(&remote, same_net) {
+        // 反向中继的地址。cortexd 与沙箱同网段时用不上（那时直连容器名），
+        // 否则它是**唯一**进得去 internal 网段的入口 —— 沙箱网段上的已发布
+        // 端口不生效，实测见 docs/sandbox.md 第八节
+        let relay = std::env::var("CORTEX_SANDBOX_RELAY")
+            .unwrap_or_else(|_| "http://127.0.0.1:3129".into());
+        match sandbox_runner::DockerRunner::connect(&remote, same_net, &relay) {
             Ok(runner) => match sandbox_proxy::client() {
                 Ok(http) => {
                     tracing::info!(
                         callback = %remote, same_network = same_net,
+                        relay = %if same_net { "(直连容器名)" } else { &relay },
                         "云沙箱已启用（Web 端可在容器里跑文件与命令）"
                     );
                     rt.sandbox = Some(state::SandboxLayer {

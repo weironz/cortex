@@ -97,14 +97,24 @@ fn is_credential(name: &str) -> bool {
     )
 }
 
+/// 走中继时告诉它转给哪个容器。值是容器名。
+///
+/// 与 `cortex-egress-proxy` 的 `inbound::TARGET_HEADER` 必须逐字相同 ——
+/// 两边是两个二进制、不共享 crate。写歪一个字母的症状是中继回 400
+/// 「缺少 X-Cortex-Sandbox 头」，还算看得见；所以这条不加测试守。
+pub const ROUTE_HEADER: &str = "x-cortex-sandbox";
+
 /// 把 `req` 转给 `base_url`，响应流式转回。
 ///
 /// `token` 是这个沙箱的令牌 —— 容器那侧用同一把做入站认证
 /// （`cortex-local` 的入站与出站共用一个 token，见它的 `require_auth`）。
+///
+/// `route_to` 有值时表示 `base_url` 指的是中继而不是容器本身。
 pub async fn forward(
     http: &reqwest::Client,
     base_url: &str,
     token: &str,
+    route_to: Option<&str>,
     req: Request,
 ) -> Response {
     let (parts, body) = req.into_parts();
@@ -124,6 +134,13 @@ pub async fn forward(
     // 换上沙箱自己那把。容器认的就是它 —— 用户的 token 到此为止
     if let Ok(v) = format!("Bearer {token}").parse() {
         headers.insert(header::AUTHORIZATION, v);
+    }
+    // 走中继时告诉它转给谁。注意这一句在剥头的循环**之后** ——
+    // 客户端要是自己带了一个同名头，会被这里覆盖掉，而不是反过来
+    if let Some(name) = route_to
+        && let Ok(v) = name.parse()
+    {
+        headers.insert(ROUTE_HEADER, v);
     }
 
     let stream = body
