@@ -1,5 +1,31 @@
 set dotenv-load := true
-set windows-shell := ["bash", "-uc"]
+
+# recipe 一律是 POSIX，跑在 bash 下。Windows 上那**必须**是 Git Bash。
+#
+# 裸写 `bash` 不行：PATH 上第一个 `bash` 是 `C:\WINDOWS\system32\bash.exe`
+# —— WSL 的启动器（System32 永远排在 `Git\bin` 前面）。WSL 里没有 Windows
+# 那套工具链（docker / flutter / cargo），文件系统视图也不一样
+# （`/mnt/d/...`）。实测确认过：那种情况下 `uname -s` 回的是 Linux。
+#
+# 这一条与 mica 仓库同源（那边先踩的），两处保持一致。
+#
+# 代价：Git 装在别处的人得改这一行。用 `bash` 让 PATH 去挑看着更宽容，
+# 但那个「宽容」的实际效果是**静默切到 WSL**，然后一路报 command not found
+# —— 一个改一行就能解决的问题，换成一个查半天的问题。
+#
+# ── 它**不**管 shebang recipe，别指望 ──────────────────────
+#
+# 带 `#!/usr/bin/env bash` 的 recipe 绕过这里，由 just 自己去翻译解释器
+# 路径，而那一步要 `cygpath` —— 且是在 **Windows PATH** 上找，不是在上面
+# 这个 shell 旁边找。实测：钉死之后 `just doctor` 仍然报
+# 「could not find cygpath ... program not found」。
+#
+# 所以从 PowerShell / Nushell 跑本文件里那些 shebang recipe，仍然需要把
+# `C:\Program Files\Git\usr\bin` 加进 PATH（或者干脆在 Git Bash 里跑）。
+# 想彻底摆脱，就得像 `app` 那样把 recipe 挪进 `scripts/*.sh`，
+# 一行 `bash scripts/xxx.sh` 调过去。
+set shell := ["bash", "-uc"]
+set windows-shell := ["C:/Program Files/Git/bin/bash.exe", "-uc"]
 
 # 列出所有可用命令
 default:
