@@ -212,9 +212,6 @@ class AssistantBlock extends StatelessWidget {
                       style: theme.textTheme.labelSmall,
                     ),
                   ],
-                  const Spacer(),
-                  if (!streaming && text.isNotEmpty)
-                    _CopyButton(text: text),
                 ],
               ),
               const SizedBox(height: 6),
@@ -243,14 +240,31 @@ class AssistantBlock extends StatelessWidget {
                       toolCalls: toolCalls,
                       streaming: streaming,
                     ),
-                    if (episodeId != null && !streaming)
+                    // 这一行动作 + 元信息，贴在回答**底部左侧**。
+                    //
+                    // 复制原来挂在头部那一行的最右端：离正文最远的那个角，
+                    // 而人读完一段回答时视线落在左下。Claude Code / ChatGPT
+                    // 都把它放这儿，不是审美偏好 —— 是「读完之后手往哪儿去」。
+                    //
+                    // 流式期间整行不出现：复制一段还在长的文本，拿到的是
+                    // 半句话，而按钮看不出这一点。
+                    if (!streaming && (text.isNotEmpty || episodeId != null))
                       Padding(
-                        padding: const EdgeInsets.only(top: 6, left: 7),
-                        child: Text(
-                          'episode ${shortId(episodeId)}',
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            fontFamily: 'monospace',
-                          ),
+                        padding: const EdgeInsets.only(top: 2, left: 2),
+                        child: Row(
+                          children: [
+                            if (text.isNotEmpty) _CopyButton(text: text),
+                            if (episodeId != null)
+                              Padding(
+                                padding: const EdgeInsets.only(left: 5),
+                                child: Text(
+                                  'episode ${shortId(episodeId)}',
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
                   ],
