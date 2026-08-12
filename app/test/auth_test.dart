@@ -18,6 +18,7 @@ import 'package:cortex_app/models/episode.dart';
 import 'package:cortex_app/models/health_status.dart';
 import 'package:cortex_app/models/memory_search_result.dart';
 import 'package:cortex_app/models/pending_confirmation.dart';
+import 'package:cortex_app/models/project.dart';
 import 'package:cortex_app/models/session_detail.dart';
 import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/sync_record.dart';
@@ -568,8 +569,30 @@ class _GateApi with LlmKeyUnsupported implements CortexApi {
   }) => throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
 
   @override
-  Future<List<ChatSession>> sessions({bool includeArchived = false}) =>
+  Future<List<ChatSession>> sessions({
+    bool includeArchived = false,
+    String? projectId,
+  }) => throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
+
+  @override
+  Future<List<Project>> projects() =>
       throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
+
+  @override
+  Future<Project> createProject(String name) => throw UnimplementedError();
+
+  @override
+  Future<Project> renameProject(String id, String name) =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> deleteProject(String id) => throw UnimplementedError();
+
+  @override
+  Future<ChatSession> moveSessionToProject(
+    String sessionId,
+    String? projectId,
+  ) => throw UnimplementedError();
 
   @override
   Future<SessionDetail> sessionDetail(String id, {int? limit, String? before}) =>

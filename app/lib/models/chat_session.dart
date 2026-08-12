@@ -13,6 +13,7 @@ class ChatSession {
     this.preview,
     this.workspace,
     this.archived = false,
+    this.projectId,
     this.isLocalDraft = false,
     this.hasLocalOverrides = false,
   });
@@ -44,6 +45,13 @@ class ChatSession {
   /// is append-only, so "归档" is the only honest verb.
   final bool archived;
 
+  /// 所属项目，null = 未分组。
+  ///
+  /// 指向一个**已经不存在**的项目也当作未分组处理（见
+  /// `groupSessionsByProject`）：删项目之后、下一次 `GET /sessions` 之前，
+  /// 手上这份数据正是这个形态。
+  final String? projectId;
+
   /// True for a session created client-side that the server has not yet
   /// acknowledged. The first `POST /chat` with this id materialises it, so we
   /// keep it in the list optimistically and just mark it.
@@ -69,6 +77,9 @@ class ChatSession {
     String? preview,
     Object? workspace = _sentinel,
     bool? archived,
+    // 哨兵而不是可空参数：`projectId: null` 的意思是「移出项目」，
+    // 与「这次不改分组」是两件事，而后者才是不传时该发生的
+    Object? projectId = _sentinel,
     bool? isLocalDraft,
     bool? hasLocalOverrides,
   }) => ChatSession(
@@ -83,6 +94,9 @@ class ChatSession {
         ? this.workspace
         : workspace as Workspace?,
     archived: archived ?? this.archived,
+    projectId: projectId == _sentinel
+        ? this.projectId
+        : projectId as String?,
     isLocalDraft: isLocalDraft ?? this.isLocalDraft,
     hasLocalOverrides: hasLocalOverrides ?? this.hasLocalOverrides,
   );
@@ -105,6 +119,9 @@ class ChatSession {
       preview: asStringOrNull(json['preview']),
       workspace: root == null ? null : Workspace(root: root),
       archived: json['archived'] == true,
+      // 老服务端不发这个字段，读成 null —— 也就是「未分组」，
+      // 而那正是一个没有项目功能的部署里每条会话的真实状态
+      projectId: asStringOrNull(json['project_id']),
     );
   }
 }

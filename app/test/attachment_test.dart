@@ -18,6 +18,7 @@ import 'package:cortex_app/models/episode.dart';
 import 'package:cortex_app/models/health_status.dart';
 import 'package:cortex_app/models/memory_search_result.dart';
 import 'package:cortex_app/models/pending_confirmation.dart';
+import 'package:cortex_app/models/project.dart';
 import 'package:cortex_app/models/session_detail.dart';
 import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/sync_record.dart';
@@ -163,8 +164,29 @@ class _BlobApi with LlmKeyUnsupported implements CortexApi {
       const HealthStatus(status: 'ok', version: 't', database: 'ok');
 
   @override
-  Future<List<ChatSession>> sessions({bool includeArchived = false}) async =>
-      const [];
+  Future<List<ChatSession>> sessions({
+    bool includeArchived = false,
+    String? projectId,
+  }) async => const [];
+
+  @override
+  Future<List<Project>> projects() async => const [];
+
+  @override
+  Future<Project> createProject(String name) => throw UnimplementedError();
+
+  @override
+  Future<Project> renameProject(String id, String name) =>
+      throw UnimplementedError();
+
+  @override
+  Future<void> deleteProject(String id) => throw UnimplementedError();
+
+  @override
+  Future<ChatSession> moveSessionToProject(
+    String sessionId,
+    String? projectId,
+  ) => throw UnimplementedError();
 
   @override
   Future<SessionDetail> sessionDetail(String id, {int? limit, String? before}) =>

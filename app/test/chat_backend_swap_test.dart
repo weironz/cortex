@@ -42,8 +42,10 @@ class _Aborting extends MockCortexApi {
   final detail = Completer<SessionDetail>();
 
   @override
-  Future<List<ChatSession>> sessions({bool includeArchived = false}) =>
-      sessions_.future;
+  Future<List<ChatSession>> sessions({
+    bool includeArchived = false,
+    String? projectId,
+  }) => sessions_.future;
 
   @override
   Future<SessionDetail> sessionDetail(String id, {int? limit, String? before}) =>
@@ -56,7 +58,10 @@ class _Working extends MockCortexApi {
   int detailCalls = 0;
 
   @override
-  Future<List<ChatSession>> sessions({bool includeArchived = false}) async {
+  Future<List<ChatSession>> sessions({
+    bool includeArchived = false,
+    String? projectId,
+  }) async {
     sessionCalls++;
     return [_session('s1')];
   }

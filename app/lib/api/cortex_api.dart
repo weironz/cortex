@@ -13,6 +13,7 @@ import '../models/health_status.dart';
 import '../models/import_plan.dart';
 import '../models/memory_search_result.dart';
 import '../models/pending_confirmation.dart';
+import '../models/project.dart';
 import '../models/session_detail.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
@@ -133,12 +134,46 @@ abstract interface class CortexApi {
   /// `GET /episodes/{id}`
   Future<Episode> episode(String id);
 
-  /// `GET /sessions?include_archived=`
+  /// `GET /sessions?include_archived=&project_id=`
   ///
   /// Archived sessions are omitted by default. Archiving is not deletion —
   /// episodes, attachments and extracted memory are all untouched — so the
   /// toggle is the only thing standing between the user and their history.
-  Future<List<ChatSession>> sessions({bool includeArchived = false});
+  ///
+  /// [projectId] 省略 = 全部会话（含未分组的）。侧边栏走的正是这一条：
+  /// 它要一次画出所有分组，按项目拉 N 次是 N 倍的往返，而且**拉不到未分组
+  /// 的那一组** —— 那一组没有 id 可以传。
+  Future<List<ChatSession>> sessions({
+    bool includeArchived = false,
+    String? projectId,
+  });
+
+  /// `GET /projects` —— 全部项目。
+  ///
+  /// 老服务端没有这条路由，答 404。调用方必须把它当作「这个部署没有项目
+  /// 功能」优雅降级（[CortexApiException.isUnsupported]），而不是让整个
+  /// 侧边栏变成一块错误提示 —— 会话列表本身与项目毫无关系，它照样能用。
+  Future<List<Project>> projects();
+
+  /// `POST /projects {"name": …}`
+  Future<Project> createProject(String name);
+
+  /// `PATCH /projects/{id} {"name": …}`
+  Future<Project> renameProject(String id, String name);
+
+  /// `DELETE /projects/{id}` —— **只删这层分组**。
+  ///
+  /// 里面的会话、消息、附件、抽出来的记忆一概不动，它们变成未分组。
+  /// 界面上的确认文案必须把这一条说清楚：用户在这里最怕的事情是
+  /// 「删项目把对话也删了」，而那是这个调用唯一**不会**发生的事。
+  Future<void> deleteProject(String id);
+
+  /// `PATCH /sessions/{id} {"project_id": …}` —— 移入 / 移出项目。
+  ///
+  /// [projectId] 为 null 时发的是显式的 `null`（移出，变未分组），
+  /// 与 [updateSession] 里 workspace 的三态是同一套道理：
+  /// 「字段不在」与「字段是 null」必须表达两件不同的事。
+  Future<ChatSession> moveSessionToProject(String sessionId, String? projectId);
 
   /// `GET /sessions/{id}?limit=&before=` — overview plus **one page** of
   /// episodes, oldest first within the page.

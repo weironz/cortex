@@ -33,6 +33,20 @@ class CortexApiException implements Exception {
   bool get isUnsupported =>
       statusCode == 501 || statusCode == 405 || statusCode == 404;
 
+  /// Plain 404 — "the thing you named is not there".
+  ///
+  /// Every endpoint that addresses a single resource by id has this second
+  /// reading of 404, and it collides with [isUnsupported]: `DELETE
+  /// /projects/{id}` answers 404 both when the daemon has no projects feature
+  /// at all and when that one project was already deleted from another device.
+  /// Callers on an item-scoped endpoint must tell the two apart — treating "it
+  /// is already gone" as "this feature does not exist" tears down a whole
+  /// section of the UI over a duplicate delete.
+  ///
+  /// `POST /confirmations` hit this first and checked [statusCode] inline; it
+  /// is a named test now so the next one does not have to rediscover it.
+  bool get isMissing => statusCode == 404;
+
   /// The daemon requires a credential we did not present, or rejected the one
   /// we did.
   ///

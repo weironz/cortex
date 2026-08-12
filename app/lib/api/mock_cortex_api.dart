@@ -17,6 +17,7 @@ import '../models/injected_memory.dart';
 import '../models/memory_fact.dart';
 import '../models/memory_search_result.dart';
 import '../models/pending_confirmation.dart';
+import '../models/project.dart';
 import '../models/session_detail.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
@@ -104,6 +105,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
       updatedAt: DateTime.now().subtract(const Duration(minutes: 14)),
       messageCount: 2,
       preview: '核心画像块跟着 system prompt 走，位置固定因此可进前缀缓存。',
+      projectId: 'prj_cortex',
     ),
     ChatSession(
       id: 'ses_01JQZ7B2H4',
@@ -111,6 +113,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
       updatedAt: DateTime.now().subtract(const Duration(hours: 5)),
       messageCount: 2,
       preview: 'm 先给 16，ef_construction 64，上线后再按实测调 ef_search。',
+      projectId: 'prj_cortex',
     ),
     ChatSession(
       id: 'ses_01JQZ5V1C7',
@@ -118,6 +121,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
       updatedAt: DateTime.now().subtract(const Duration(days: 1, hours: 3)),
       messageCount: 4,
       preview: '周报别写流水账。三段：本周结论、下周风险、需要谁拍板。',
+      projectId: 'prj_office',
     ),
     ChatSession(
       id: 'ses_01JQZ2N8D1',
@@ -141,11 +145,117 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
   ];
 
   @override
-  Future<List<ChatSession>> sessions({bool includeArchived = false}) async {
+  Future<List<ChatSession>> sessions({
+    bool includeArchived = false,
+    String? projectId,
+  }) async {
     await _latency(180);
     return List.unmodifiable(
-      includeArchived ? _sessions : _sessions.where((s) => !s.archived),
+      _sessions
+          .where((s) => includeArchived || !s.archived)
+          .where((s) => projectId == null || s.projectId == projectId),
     );
+  }
+
+  // ---------------------------------------------------------------- projects
+
+  /// 可变，与 [_sessions] 同理：一个忽略改名与删除的夹具，会让项目菜单
+  /// 在唯一「不用起 daemon 就能演示」的模式里看起来是坏的。
+  final List<Project> _projects = [
+    Project(
+      id: 'prj_cortex',
+      name: 'Cortex 客户端',
+      createdAt: DateTime.now().subtract(const Duration(days: 21)),
+      sessionCount: 2,
+    ),
+    Project(
+      id: 'prj_office',
+      name: '季度规划',
+      createdAt: DateTime.now().subtract(const Duration(days: 9)),
+      sessionCount: 1,
+    ),
+  ];
+
+  @override
+  Future<List<Project>> projects() async {
+    await _latency(120);
+    // 计数当场算，不存 —— 存的那份迟早会和 `_sessions` 对不上，
+    // 而对不上的表现是删除确认里写着「3 个会话」但只有 1 个
+    return List.unmodifiable(_projects.map(_withCount));
+  }
+
+  Project _withCount(Project p) => p.copyWith(
+    sessionCount: _sessions.where((s) => s.projectId == p.id).length,
+  );
+
+  @override
+  Future<Project> createProject(String name) async {
+    await _latency(110);
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) {
+      throw const CortexApiException('项目名不能为空白', statusCode: 400);
+    }
+    final project = Project(
+      id: 'prj_${DateTime.now().microsecondsSinceEpoch}',
+      name: trimmed,
+      createdAt: DateTime.now(),
+    );
+    _projects.add(project);
+    return project;
+  }
+
+  @override
+  Future<Project> renameProject(String id, String name) async {
+    await _latency(110);
+    final index = _projects.indexWhere((p) => p.id == id);
+    if (index == -1) {
+      throw CortexApiException('project $id 不存在', statusCode: 404);
+    }
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) {
+      throw const CortexApiException('项目名不能为空白', statusCode: 400);
+    }
+    final updated = _projects[index].copyWith(name: trimmed);
+    _projects[index] = updated;
+    return _withCount(updated);
+  }
+
+  /// 删的只有这一层分组。
+  ///
+  /// 会话**留在 [_sessions] 里**，只是 `projectId` 清空 —— 这正是服务端
+  /// 承诺的语义，而夹具如果顺手把会话也删了，界面上那句「会话不会丢」
+  /// 就会在唯一能离线演示的模式里当场被证伪。
+  @override
+  Future<void> deleteProject(String id) async {
+    await _latency(130);
+    final index = _projects.indexWhere((p) => p.id == id);
+    if (index == -1) {
+      throw CortexApiException('project $id 不存在', statusCode: 404);
+    }
+    _projects.removeAt(index);
+    for (var i = 0; i < _sessions.length; i++) {
+      if (_sessions[i].projectId == id) {
+        _sessions[i] = _sessions[i].copyWith(projectId: null);
+      }
+    }
+  }
+
+  @override
+  Future<ChatSession> moveSessionToProject(
+    String sessionId,
+    String? projectId,
+  ) async {
+    await _latency(110);
+    final index = _sessions.indexWhere((s) => s.id == sessionId);
+    if (index == -1) {
+      throw CortexApiException('session $sessionId 不存在', statusCode: 404);
+    }
+    if (projectId != null && !_projects.any((p) => p.id == projectId)) {
+      throw CortexApiException('project $projectId 不存在', statusCode: 404);
+    }
+    final updated = _sessions[index].copyWith(projectId: projectId);
+    _sessions[index] = updated;
+    return updated;
   }
 
   /// Pages the same way the daemon does, cursor and all.

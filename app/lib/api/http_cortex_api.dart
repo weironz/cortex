@@ -20,6 +20,7 @@ import '../models/import_plan.dart';
 import '../models/json.dart';
 import '../models/memory_search_result.dart';
 import '../models/pending_confirmation.dart';
+import '../models/project.dart';
 import '../models/session_detail.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
@@ -133,14 +134,69 @@ class HttpCortexApi implements CortexApi {
       HealthStatus.fromJson(await _getJson('/health'));
 
   @override
-  Future<List<ChatSession>> sessions({bool includeArchived = false}) async {
+  Future<List<ChatSession>> sessions({
+    bool includeArchived = false,
+    String? projectId,
+  }) async {
     final json = await _getJson('/sessions', {
       if (includeArchived) 'include_archived': 'true',
+      // 缺省即「全部」。传空串会被服务端当成一个叫 "" 的项目 id 去查，
+      // 结果是一个空列表 —— 而调用方要的是「不过滤」
+      'project_id': ?projectId,
     });
     return asObjectList(json['sessions'])
         .map(ChatSession.fromJson)
         .toList(growable: false);
   }
+
+  // ---------------------------------------------------------------- projects
+
+  @override
+  Future<List<Project>> projects() async {
+    final json = await _getJson('/projects');
+    return asObjectList(json['projects'])
+        .map(Project.fromJson)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<Project> createProject(String name) async =>
+      Project.fromJson(await _postJson('/projects', {'name': name}));
+
+  @override
+  Future<Project> renameProject(String id, String name) async => Project.fromJson(
+    await _patchJson('/projects/${Uri.encodeComponent(id)}', {'name': name}),
+  );
+
+  @override
+  Future<void> deleteProject(String id) async {
+    final http.Response response;
+    try {
+      response = await _client.delete(
+        _uri('/projects/${Uri.encodeComponent(id)}'),
+        headers: _headers(const {'accept': 'application/json'}),
+      );
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(response.statusCode, _errorMessage(response));
+    }
+    // 回的是 `{}`，没有可读的东西 —— 不解析，省得哪天服务端改成 204
+    // 就要在这里炸一次
+  }
+
+  @override
+  Future<ChatSession> moveSessionToProject(
+    String sessionId,
+    String? projectId,
+  ) async => ChatSession.fromJson(
+    // 显式的 `null` 就是「移出」。这里不能用 `?projectId` 的省略语法：
+    // 省略掉字段等于「别动分组」，而调用方明确要求了移出
+    await _patchJson('/sessions/${Uri.encodeComponent(sessionId)}', {
+      'project_id': projectId,
+    }),
+  );
 
   @override
   Future<MemorySearchResult> searchMemory(
@@ -865,6 +921,35 @@ class HttpCortexApi implements CortexApi {
           'accept': 'application/json',
         }),
         body: body == null ? null : jsonEncode(body),
+      );
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(response.statusCode, _errorMessage(response));
+    }
+    return _decodeObject(path, utf8.decode(response.bodyBytes));
+  }
+
+  /// A JSON PATCH.
+  ///
+  /// [updateSession] deliberately does **not** go through here: it rewrites the
+  /// message for 404/405 to name the missing route, and that wording is what the
+  /// session sidebar shows when it degrades to a local-only edit. Folding the two
+  /// together would either lose that message or force it onto every caller.
+  Future<Map<String, dynamic>> _patchJson(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    final http.Response response;
+    try {
+      response = await _client.patch(
+        _uri(path),
+        headers: _headers(const {
+          'content-type': 'application/json',
+          'accept': 'application/json',
+        }),
+        body: jsonEncode(body),
       );
     } on Object catch (e) {
       throw CortexApiException(_unreachableMessage(e), cause: e);

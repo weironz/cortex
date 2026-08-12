@@ -16,6 +16,7 @@ import '../models/workspace.dart';
 import 'app_providers.dart';
 import 'chat_state.dart';
 import 'confirm_controller.dart';
+import 'project_controller.dart';
 
 /// Owns sessions, transcripts and the in-flight generation.
 class ChatController extends Notifier<ChatState> {
@@ -160,6 +161,7 @@ class ChatController extends Notifier<ChatState> {
             titleIsCustom: local.titleIsCustom,
             archived: local.archived,
             workspace: local.workspace,
+            projectId: local.projectId,
             hasLocalOverrides: true,
           )
         else
@@ -179,13 +181,25 @@ class ChatController extends Notifier<ChatState> {
     unawaited(_ensureTranscript(id));
   }
 
-  String createSession() {
+  /// 新建一个本地草稿会话。[projectId] 非空时它属于那个项目。
+  ///
+  /// ## 分组是**在第一轮结束之后**才补到服务端的
+  ///
+  /// 草稿只活在这台设备上，服务端要到第一次 `POST /chat` 才知道有这个 id。
+  /// 而 `POST /chat` 的请求体里没有 `project_id`（也不该有：那是会话的属性，
+  /// 不是这一句话的属性）。所以这里只记下待办，等 [_commit] 看到这一轮真的
+  /// 落了地，再补一次 `PATCH /sessions/{id}`。
+  ///
+  /// 反过来先 PATCH 是不行的：那时服务端上还没有这一行，只会拿回 404。
+  String createSession({String? projectId}) {
     final session = ChatSession(
       id: Ulid.generate(),
       title: '新会话',
       updatedAt: DateTime.now(),
+      projectId: projectId,
       isLocalDraft: true,
     );
+    if (projectId != null) _pendingProjectAssignment[session.id] = projectId;
     state = state.copyWith(
       sessions: [session, ...state.sessions],
       activeSessionId: session.id,
@@ -240,6 +254,50 @@ class ChatController extends Notifier<ChatState> {
       state = state.copyWith(activeSessionId: next?.id);
       if (next != null) unawaited(_ensureTranscript(next.id));
     }
+  }
+
+  /// 移入项目，[projectId] 为 null 表示移出（变未分组）。
+  ///
+  /// 项目里的会话数变了，所以顺手让项目列表重拉一次 —— 那个数字会出现在
+  /// 删除确认里（「里面的 N 个会话不会被删除」），而一个说错数的确认框
+  /// 正好摧毁它唯一的作用。
+  Future<void> moveSessionToProject(String id, String? projectId) async {
+    _pendingProjectAssignment.remove(id);
+    await _patch(
+      id,
+      call: () => _api.moveSessionToProject(id, projectId),
+      local: (s) =>
+          s.copyWith(projectId: projectId, hasLocalOverrides: true),
+    );
+    if (!ref.mounted) return;
+    unawaited(ref.read(projectControllerProvider.notifier).load());
+  }
+
+  /// 建在项目里、但服务端还不知道的草稿：会话 id → 项目 id。
+  ///
+  /// 只在内存里，重启即忘 —— 一个从没发过消息的草稿本来也不会留下。
+  final Map<String, String> _pendingProjectAssignment = {};
+
+  /// 第一轮落地之后，把建会话时选的项目补给服务端。
+  ///
+  /// 失败**不打扰用户**：他刚看完一次回答，弹一句「分组没存上」既打断阅读
+  /// 又没有可执行的动作。本地那份分组照旧显示，而老服务端（没有 /projects）
+  /// 上整个分组界面本来就是隐藏的，看不见也就不会误导。
+  void _flushPendingProject(String sessionId) {
+    final projectId = _pendingProjectAssignment.remove(sessionId);
+    if (projectId == null) return;
+    unawaited(() async {
+      try {
+        final updated = await _api.moveSessionToProject(sessionId, projectId);
+        if (!ref.mounted) return;
+        _replaceSession(
+          sessionId,
+          (s) => updated.copyWith(isLocalDraft: s.isLocalDraft),
+        );
+      } on Object {
+        // 见上：本地状态已经是对的，这里没有别的可做
+      }
+    }());
   }
 
   /// Binds a workspace. The daemon validates the path and its rejection message
@@ -688,6 +746,9 @@ class ChatController extends Notifier<ChatState> {
     state = state.copyWith(streaming: null, sendError: error);
     _appendMessage(turn.sessionId, message);
     _touchSession(turn.sessionId);
+    // 这一轮跑通了，服务端现在才**确实**有这一行会话，PATCH 才有东西可打。
+    // 出错的那一轮不补：服务端可能根本没写下这个会话，补过去只是一个 404
+    if (error == null) _flushPendingProject(turn.sessionId);
   }
 
   /// User-initiated abort. Keeps whatever text already arrived.
