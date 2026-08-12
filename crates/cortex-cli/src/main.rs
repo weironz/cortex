@@ -3,6 +3,7 @@
 //! 瘦客户端：所有业务逻辑在 cortexd 中，此处只负责终端交互。
 //! 与 Flutter 走同一套 HTTP/SSE 协议，不走私有捷径。
 
+mod agent;
 mod client;
 mod import;
 mod render;
@@ -31,6 +32,18 @@ struct Cli {
     /// 服务端生成：`cortexd --generate-token`。
     #[arg(long, env = "CORTEXD_TOKEN", hide_env_values = true)]
     token: Option<String>,
+
+    /// 不要自动拉起本地 agent，直接连 `--server`。
+    ///
+    /// **这意味着工具动的是 cortexd 那台机器的目录。** cortexd 在远端时，
+    /// 那是别人的机器 —— 所以这个开关刻意是显式的、名字里带 no-。
+    /// 需要它的场景：cortexd 就跑在本机（单人部署），或者只做查询类操作。
+    #[arg(long, env = "CORTEX_NO_LOCAL_AGENT")]
+    no_local_agent: bool,
+
+    /// 本地 agent 的端口。桌面端已经起了一个时会直接复用。
+    #[arg(long, env = "CORTEX_LOCAL_PORT", default_value_t = agent::DEFAULT_PORT)]
+    local_port: u16,
 
     #[command(subcommand)]
     command: Command,
@@ -130,42 +143,97 @@ enum Command {
     },
 }
 
+/// 这条命令会不会真的用到工具。
+///
+/// `health` 也算：连着本地 agent 时它报的是那一侧的状态（沙箱、记忆积压），
+/// 而那正是用户跑 `health` 想知道的 —— 报 cortexd 的状态等于答非所问。
+fn needs_agent(cmd: &Command) -> bool {
+    matches!(
+        cmd,
+        Command::Chat { .. } | Command::Health | Command::Confirmations | Command::Confirm { .. }
+    )
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     let cli = Cli::parse();
-    let c = Client::new(&cli.server, cli.token);
     let color = std::io::stdout().is_terminal();
+
+    // 有本地 agent 就走它 —— 工具于是跑在**这台机器**上。
+    //
+    // 只对真的会用到工具的命令做这件事：`search` / `sessions` / `episode`
+    // 全是查询，为它们拉起一个能执行命令的进程是白花的代价，而那个进程
+    // 会一直活到 CLI 退出。
+    let server = if cli.no_local_agent || !needs_agent(&cli.command) {
+        cli.server.clone()
+    } else {
+        agent::ensure_running(cli.local_port)
+            .await
+            .unwrap_or_else(|| cli.server.clone())
+    };
+    let c = Client::new(&server, cli.token);
 
     match cli.command {
         Command::Health => {
             let h = c.health().await?;
-            println!(
-                "{}  cortexd {} · 数据库 {} · 认证 {}",
-                render::status_badge(&h.status, color),
-                h.version,
-                h.database,
-                h.auth.as_deref().unwrap_or("未知（服务端太老）")
-            );
-            if h.database == "not_wired" {
+            // 按角色说话。连着本地 agent 时「数据库 未报」不是故障，
+            // 它本来就没有数据库 —— 照着 cortexd 的模板念，用户会去查一个
+            // 根本不存在的问题
+            if h.role == "local-agent" {
                 println!(
-                    "{}",
-                    render::dim("（存储层尚未接线，当前为 mock 数据）", color)
+                    "{}  本地 agent {} · 协议 v{}",
+                    render::status_badge(&h.status, color),
+                    h.version,
+                    h.protocol
                 );
-            }
-            if h.auth.as_deref() == Some("disabled") {
-                // 这一行是刻意醒目的：一个不认证的 cortexd 把整个记忆库
-                // 交给任何能连上这个端口的人，而那件事没有别的症状
+                if let Some(m) = &h.memory {
+                    let state = if m.reachable {
+                        "已连接"
+                    } else {
+                        "未连接"
+                    };
+                    println!("   记忆：{state}（{}）", m.remote);
+                    if m.backlog > 0 {
+                        println!(
+                            "{}",
+                            render::dim(
+                                &format!("   还有 {} 条对话等着补写，联网后自动重放", m.backlog),
+                                color
+                            )
+                        );
+                    }
+                }
+                if let Some(sb) = &h.sandbox {
+                    println!("   {sb}");
+                }
+            } else {
                 println!(
-                    "{}",
-                    render::error(
-                        "这台 cortexd 没有开认证 —— 只有在它确实只听回环时才可接受",
-                        color
-                    )
+                    "{}  cortexd {} · 数据库 {} · 认证 {}",
+                    render::status_badge(&h.status, color),
+                    h.version,
+                    h.database.as_deref().unwrap_or("未报"),
+                    h.auth.as_deref().unwrap_or("未知（服务端太老）")
                 );
+                if h.database.as_deref() == Some("not_wired") {
+                    println!(
+                        "{}",
+                        render::dim("（存储层尚未接线，当前为 mock 数据）", color)
+                    );
+                }
+                if h.auth.as_deref() == Some("disabled") {
+                    // 这一行是刻意醒目的：一个不认证的 cortexd 把整个记忆库
+                    // 交给任何能连上这个端口的人，而那件事没有别的症状
+                    println!(
+                        "{}",
+                        render::error(
+                            "这台 cortexd 没有开认证 —— 只有在它确实只听回环时才可接受",
+                            color
+                        )
+                    );
+                }
             }
         }
-
         Command::Confirmations => {
             let pending = c.pending_confirmations().await?;
             if pending.is_empty() {
@@ -356,6 +424,11 @@ async fn one_turn(
         .chat(ChatRequest {
             session_id: session_id.to_string(),
             message: message.to_string(),
+            attachments: Vec::new(),
+            // CLI 暂时只走默认档。三档开关在桌面端的输入框底部；这里要加
+            // 就是一个 `--permission-mode` 参数，记 roadmap。
+            // 默认档是**问**，所以漏做的方向是安全的
+            permission_mode: Default::default(),
         })
         .await?;
 
@@ -373,7 +446,7 @@ async fn one_turn(
                     println!();
                 }
             }
-            Ok(ChatEvent::Tool { name, summary }) => {
+            Ok(ChatEvent::Tool { name, summary, .. }) => {
                 println!("{}", render::tool_line(&name, &summary, color));
             }
             Ok(ChatEvent::Confirm {
@@ -382,12 +455,22 @@ async fn one_turn(
                 risk,
                 preview,
                 timeout_secs,
+                scope,
             }) => {
                 if wrote_body {
                     // 模型可能刚吐了半句「我来跑一下这个命令」，确认框不该
                     // 接在那半句后面
                     println!();
                     wrote_body = false;
+                }
+                // 越界的绝对路径**单独一行**摆出来。混在 preview 里的话，
+                // 用户看到的只是一个 `path: ...` 参数，而他判断不出那是
+                // 工作区内的还是工作区外的 —— 这两件事的后果差得远
+                if let Some(p) = &scope {
+                    println!(
+                        "{}",
+                        render::error(&format!("⚠ 这是工作区之外的位置：{p}"), color)
+                    );
                 }
                 let allow = if interactive_confirm {
                     ask_user(&tool, &risk, &preview, timeout_secs, color).await

@@ -39,10 +39,29 @@ const fn protocol_before_this_check() -> u32 {
     1
 }
 
-#[derive(Debug, Serialize)]
+/// `/health` 的响应 —— **cortexd 与本地 agent 共用一份**。
+///
+/// # 为什么以前是三份
+///
+/// cortexd 有一个强类型的 `Health`，本地 agent 手拼一个 `serde_json::json!`，
+/// 而 CLI 自己又猜了第三份（`database` 还是必填）。结果：`cortex --server`
+/// 指向本地 agent 时，`health` 子命令直接报解码失败 —— 实测过。
+///
+/// 三份的根因是这个类型只有 `Serialize`：客户端读不回来，只好自己再写一个。
+/// 现在双向，且**两端形状不同的字段一律 `Option`** —— 本地 agent 没有数据库
+/// 与对象存储，cortexd 没有沙箱状态与 outbox 积压。用 `Option` 而不是各写
+/// 一个类型：调用方要处理的是「这一项这个后端有没有」，而不是「我连的是谁」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Health {
-    pub status: &'static str,
-    pub version: &'static str,
+    pub status: String,
+    pub version: String,
+    /// 本端是什么："cortexd" / "local-agent"。
+    ///
+    /// 客户端据此把话说对：连着本地 agent 时，「数据库未接」不是故障而是
+    /// 本来就没有。老服务端不报这个字段，按 cortexd 处理 —— 那时本地 agent
+    /// 还不存在，不会误判。
+    #[serde(default = "role_cortexd")]
+    pub role: String,
     /// 线协议版本。见 [`crate::PROTOCOL_VERSION`]。
     ///
     /// 与 `version` 分开报：后者每发一版都变，而这个只在契约不兼容地
@@ -53,11 +72,13 @@ pub struct Health {
     /// **必须报出来**：「服务端已经不再支持这么老的客户端」这件事只有
     /// 服务端知道，不报的话客户端只能连上去之后在某个具体请求上莫名其妙地失败。
     pub min_peer_protocol: u32,
-    /// "ok" / "not_wired" / 具体错误
-    pub database: String,
+    /// "ok" / "not_wired" / 具体错误。**本地 agent 没有这一项**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     /// 对象存储走的是哪一路后端："s3" / "local_fs" / "unavailable"。
     /// 生产环境上看到 `local_fs` 就是一条告警：媒体只落在本机。
-    pub blob_backend: &'static str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_backend: Option<String>,
     /// 认证形态："token" / "disabled"。
     ///
     /// **`/health` 本身不需要认证**，理由是它的消费者是 Docker HEALTHCHECK
@@ -68,7 +89,8 @@ pub struct Health {
     /// 通不通、对象存储后端、以及这一行 —— 都是**部署形态**，不是用户数据。
     /// 而这一行反过来是必需的：没有它，「我到底开没开认证」只能靠去翻服务器上
     /// 的环境变量，而那正是最该能远程一眼看到的东西。
-    pub auth: &'static str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
     /// 向量化的当前状态。**换模型之后这里是唯一能一眼看出问题的地方。**
     ///
     /// 换模型时四条向量查询会按新的 `embedding_model` 过滤，旧事实**当天就
@@ -78,12 +100,34 @@ pub struct Health {
     ///
     /// 老客户端忽略这个字段即可；`Option` 让 mock 后端（没有数据库可查）
     /// 也能照常返回 `/health`。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<EmbeddingHealth>,
+    /// 工具沙箱一句话。**只有本地 agent 有** —— 服务端那侧由启动日志承担。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<String>,
+    /// 记忆连不连得上、积压多少。**只有本地 agent 有**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryHealth>,
+}
+
+fn role_cortexd() -> String {
+    "cortexd".into()
+}
+
+/// 本地 agent 与远端记忆库的连接状态。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryHealth {
+    /// 远端 cortexd 的地址
+    pub remote: String,
+    /// 名字用 reachable 而不是 ok：后者会让人以为记忆库本身健康，
+    /// 而这里只探到了它活着
+    pub reachable: bool,
+    /// 还有多少条 episode 等着补写
+    pub backlog: u64,
 }
 
 /// `/health` 里的向量化一节。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingHealth {
     /// 当前配置的模型标识，形如 `api:bge-m3` / `fastembed:…` / `hash-stub-v1`。
     pub model: String,
@@ -128,7 +172,7 @@ pub enum PermissionMode {
     Bypass,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub session_id: String,
     pub message: String,
@@ -192,7 +236,7 @@ pub struct AttachmentDto {
 }
 
 /// SSE 事件。`type` 字段做判别式，客户端按它分派。
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
     /// 增量文本。客户端应追加而非替换，否则会闪烁重排。
@@ -238,8 +282,13 @@ pub enum ChatEvent {
         token: String,
         /// 要执行的工具名
         tool: String,
-        /// 风险等级："write" / "execute"
-        risk: &'static str,
+        /// 风险等级："safe" / "write" / "execute"。见
+        /// [`crate::confirm::risk_str`]。
+        ///
+        /// 服务端构造时是 `&'static str`，这里必须是 `String`：**CLI 要把这个
+        /// 事件读回来**，而 `&'static str` 反序列化不了。此前 CLI 因此自己
+        /// 又写了一份 `ChatEvent`，于是 `scope` 这个新字段它永远看不到。
+        risk: String,
         /// 给人看的完整参数。**不要截断后再显示** ——
         /// 服务端已经截过一次并带了显式标记，客户端再截一刀，
         /// 用户批准的就是他没看见的那一半
@@ -503,7 +552,7 @@ pub struct SessionDto {
     pub workspace: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionsResponse {
     pub sessions: Vec<SessionDto>,
 }

@@ -139,26 +139,29 @@ fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
 ///
 /// **不转发给远端** —— 那样报的是远端的状态，而客户端问的是
 /// 「我连着的这个东西还好吗」。`memory` 一节说的才是远端。
-async fn health(State(st): State<LocalState>) -> Json<serde_json::Value> {
+async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health> {
     let reachable = st.remote.is_reachable().await;
-    Json(serde_json::json!({
-        "status": "ok",
-        "version": cortex_core::VERSION,
+    Json(cortex_proto::dto::Health {
+        status: "ok".into(),
+        version: cortex_core::VERSION.into(),
+        role: "local-agent".into(),
         // 协议握手只在启动那一刻做过一次。之后远端可能被升级到一个
         // 不再支持本端的版本 —— 那时**不该**把这个进程杀掉（用户正聊到一半），
         // 但要能看出来。这两个数字就是排查时的第一现场
-        "protocol": cortex_proto::PROTOCOL_VERSION,
-        "min_peer_protocol": cortex_proto::MIN_PEER_PROTOCOL,
-        "role": "local-agent",
-        "sandbox": cortex_agent::status_line_for(cortex_agent::Attended::Yes),
-        "memory": {
-            "remote": st.remote.base(),
-            // 客户端据此显示「记忆未连接」。名字用 reachable 而不是 ok：
-            // 后者会让人以为记忆库本身健康，而这里只探到了它活着
-            "reachable": reachable,
-            "backlog": st.outbox.backlog(),
-        },
-    }))
+        protocol: cortex_proto::PROTOCOL_VERSION,
+        min_peer_protocol: cortex_proto::MIN_PEER_PROTOCOL,
+        // 本地 agent 没有数据库、没有对象存储、不管认证形态
+        database: None,
+        blob_backend: None,
+        auth: None,
+        embedding: None,
+        sandbox: Some(cortex_agent::status_line_for(cortex_agent::Attended::Yes)),
+        memory: Some(cortex_proto::dto::MemoryHealth {
+            remote: st.remote.base().to_string(),
+            reachable,
+            backlog: st.outbox.backlog(),
+        }),
+    })
 }
 
 /// 流式对话。**循环与工具跑在本机。**

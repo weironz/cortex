@@ -2028,7 +2028,7 @@ impl ToolHost for TurnHost {
         let ask = ChatEvent::Confirm {
             token: pending.token().to_string(),
             tool: req.tool.to_string(),
-            risk,
+            risk: risk.to_string(),
             preview,
             timeout_secs: self.confirms.timeout().as_secs(),
             scope,

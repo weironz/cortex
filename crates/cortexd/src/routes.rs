@@ -185,14 +185,18 @@ fn public_routes() -> Vec<(&'static str, axum::routing::MethodRouter<AppState>)>
 /// 存活探针。**唯一不需要认证的端点**，理由见 [`Health::auth`]。
 async fn health(State(st): State<AppState>) -> Json<Health> {
     Json(Health {
-        status: st.status(),
-        version: cortex_core::VERSION,
+        status: st.status().into(),
+        version: cortex_core::VERSION.into(),
+        role: "cortexd".into(),
         protocol: cortex_proto::PROTOCOL_VERSION,
         min_peer_protocol: cortex_proto::MIN_PEER_PROTOCOL,
-        database: st.database_status().await,
-        blob_backend: st.blob_backend(),
-        auth: st.auth_mode().as_str(),
+        database: Some(st.database_status().await),
+        blob_backend: Some(st.blob_backend().into()),
+        auth: Some(st.auth_mode().as_str().into()),
         embedding: st.embedding_health().await,
+        // 服务端没有这两项：沙箱状态由启动日志承担，记忆库就是它自己
+        sandbox: None,
+        memory: None,
     })
 }
 

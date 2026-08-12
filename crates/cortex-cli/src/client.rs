@@ -5,54 +5,21 @@
 
 use cortex_core::{CortexError, Result};
 use futures::{Stream, StreamExt as _};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct Health {
-    pub status: String,
-    pub version: String,
-    pub database: String,
-    /// "token" / "disabled"。老服务端没有这个字段，按 unknown 处理 ——
-    /// 不默认成 "disabled"：那会让「服务端太老还没有认证」显示成
-    /// 「服务端明确关掉了认证」，而这两件事该给用户的提示完全不同
-    #[serde(default)]
-    pub auth: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ChatRequest {
-    pub session_id: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChatEvent {
-    Delta {
-        text: String,
-    },
-    Memory {
-        facts: Vec<Fact>,
-    },
-    Tool {
-        name: String,
-        summary: String,
-    },
-    /// 服务端在等一次工具确认。这一轮已经挂起。
-    Confirm {
-        token: String,
-        tool: String,
-        risk: String,
-        preview: String,
-        timeout_secs: u64,
-    },
-    Done {
-        episode_id: String,
-    },
-    Error {
-        message: String,
-    },
-}
+/// 三端共用的契约一律从 [`cortex_proto`] 取，**这里不再自带一份**。
+///
+/// # 曾经自带的那三个是怎么咬人的
+///
+/// * `Health` 里 `database` 是必填 —— 于是 `cortex --server` 指向本地 agent
+///   （它没有数据库）时，`health` 子命令直接解码失败
+/// * `ChatRequest` 没有 `permission_mode` —— 三档权限对 CLI 用户完全不存在
+/// * `ChatEvent::Confirm` 没有 `scope` —— 越界确认在 CLI 上看不出越的是哪儿，
+///   而那正是用户此刻唯一需要知道的东西
+///
+/// 三条的共同点：**契约那边加了字段，这边不会有任何提示**。类型不同名、
+/// 不同 crate，编译器帮不上忙，只有真跑一次才发现。
+pub use cortex_proto::dto::{ChatEvent, ChatRequest, Health};
 
 /// 回执。`decision` 的两个字面量与 `cortexd` 的 `ConfirmDecision` 对齐。
 #[derive(Debug, Clone, Serialize)]
@@ -61,69 +28,15 @@ pub struct ConfirmReceipt {
     pub decision: &'static str,
 }
 
-/// `GET /confirmations` 的一项。
-#[derive(Debug, Clone, Deserialize)]
-pub struct PendingConfirmation {
-    pub token: String,
-    pub session_id: String,
-    pub tool: String,
-    pub risk: String,
-    pub preview: String,
-    pub expires_in_secs: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PendingConfirmations {
-    pub pending: Vec<PendingConfirmation>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Fact {
-    pub id: String,
-    pub statement: String,
-    #[serde(default)]
-    pub domain: Option<String>,
-    #[serde(default)]
-    pub valid_at: Option<String>,
-    #[serde(default)]
-    pub source_episode_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MemorySearchResponse {
-    pub facts: Vec<Fact>,
-    #[serde(default)]
-    pub channels: Vec<ChannelHit>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ChannelHit {
-    pub fact_id: String,
-    pub channels: Vec<String>,
-    pub score: f64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Session {
-    pub id: String,
-    pub title: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SessionsResponse {
-    pub sessions: Vec<Session>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Episode {
-    pub id: String,
-    pub session_id: String,
-    pub role: String,
-    #[serde(default)]
-    pub text: Option<String>,
-    pub occurred_at: String,
-}
+/// 确认与检索这几组同样从 [`cortex_proto`] 取。
+///
+/// `PendingInfo` 就是 `GET /confirmations` 那一项 —— CLI 此前那份漏了 `scope`，
+/// 而越界确认的全部信息就在那个字段里。
+pub use cortex_proto::confirm::PendingInfo;
+pub use cortex_proto::dto::{
+    ChannelHit, EpisodeDto, FactDto, MemorySearchResponse, PendingConfirmations, SessionDto,
+    SessionsResponse,
+};
 
 pub struct Client {
     base: String,
@@ -206,13 +119,13 @@ impl Client {
         self.checked(r).await?.json().await.map_err(Self::map_err)
     }
 
-    pub async fn sessions(&self) -> Result<Vec<Session>> {
+    pub async fn sessions(&self) -> Result<Vec<SessionDto>> {
         let r = self.get("/sessions").send().await.map_err(Self::map_err)?;
         let r: SessionsResponse = self.checked(r).await?.json().await.map_err(Self::map_err)?;
         Ok(r.sessions)
     }
 
-    pub async fn episode(&self, id: &str) -> Result<Episode> {
+    pub async fn episode(&self, id: &str) -> Result<EpisodeDto> {
         let r = self
             .get(&format!("/episodes/{id}"))
             .send()
@@ -293,7 +206,7 @@ impl Client {
     }
 
     /// 还等着答复的确认项。断线重连之后靠它把待办捡回来。
-    pub async fn pending_confirmations(&self) -> Result<Vec<PendingConfirmation>> {
+    pub async fn pending_confirmations(&self) -> Result<Vec<PendingInfo>> {
         let r = self
             .get("/confirmations")
             .send()

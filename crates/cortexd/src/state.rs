@@ -1125,7 +1125,7 @@ fn mock_chat_stream(
         head_events.push(ChatEvent::Confirm {
             token: p.token().to_string(),
             tool: "shell".into(),
-            risk: "execute",
+            risk: "execute".into(),
             preview: MOCK_PREVIEW.into(),
             timeout_secs: confirms.timeout().as_secs(),
             scope: None,

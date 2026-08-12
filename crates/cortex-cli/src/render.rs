@@ -5,7 +5,7 @@
 //! 因此只用最基本的 ANSI 转义，且在非 TTY 下自动关闭（`color = false`），
 //! 保证 `cortex search x > out.txt` 得到的是干净文本。
 
-use crate::client::{ChannelHit, Fact};
+use crate::client::{ChannelHit, FactDto};
 
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
@@ -62,7 +62,7 @@ pub fn memory_header(n: usize, color: bool) -> String {
 }
 
 #[must_use]
-pub fn memory_line(f: &Fact, color: bool) -> String {
+pub fn memory_line(f: &FactDto, color: bool) -> String {
     let time = f
         .valid_at
         .as_deref()
@@ -109,7 +109,7 @@ pub fn tool_line(name: &str, summary: &str, color: bool) -> String {
 /// 显示召回路不是为了炫技 —— 检索出 bad case 时，
 /// 「是哪一路把它捞上来的」是唯一能定位问题的信息。
 #[must_use]
-pub fn fact_line(f: &Fact, hit: Option<&ChannelHit>, color: bool) -> String {
+pub fn fact_line(f: &FactDto, hit: Option<&ChannelHit>, color: bool) -> String {
     let mut s = String::new();
     s.push_str(&f.statement);
 
