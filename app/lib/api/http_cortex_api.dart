@@ -613,7 +613,6 @@ class HttpCortexApi implements CortexApi {
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
-    bool sandbox = false,
   }) async* {
     final request = http.Request('POST', _uri('/chat'))
       // A header, not a ticket: `POST /chat` is issued by `package:http`, which
@@ -642,11 +641,6 @@ class HttpCortexApi implements CortexApi {
         // 就该按新档位走。存服务端要多一次同步，而那次同步失败时用户看到的是
         // 「我明明切了档」。老服务端不认识这个字段会忽略它（serde default）
         'permission_mode': permissionMode.wire,
-        // 这一轮要不要在云端沙箱里跑。**只有 Web 端会传 true** ——
-        // 桌面端的 agent 跑在用户自己的机器上，压根不经这条路。
-        // 老服务端不认识这个字段会忽略它（serde default），于是行为退回
-        // 「纯聊天」，而那正是它在那些部署上唯一能做的事
-        'sandbox': sandbox,
       });
 
     final http.StreamedResponse response;

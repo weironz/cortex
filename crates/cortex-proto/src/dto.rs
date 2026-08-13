@@ -172,6 +172,17 @@ pub enum PermissionMode {
     Bypass,
 }
 
+/// 一轮对话的请求体。
+///
+/// # 这里曾经有一个 `sandbox: bool`，**别再加回来**
+///
+/// 它让客户端逐轮声明「这轮要不要在云沙箱里跑」。真机上的后果是：用户看着
+/// 一个自己不理解的开关（「云沙箱」是什么？关着会怎样？），关着发一句
+/// 「帮我看看这个文件」就得到一个没有文件工具的 agent —— 而那个失败读起来
+/// 像 agent 坏了，不像开关没开。
+///
+/// 现在由**服务端**决定：cortexd 接得上 docker 就在沙箱里跑，接不上就在
+/// 自己这儿跑纯聊天。用户只跟会话打交道，后面有没有容器对他透明。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub session_id: String,
@@ -189,25 +200,6 @@ pub struct ChatRequest {
     /// 而那次同步失败时用户看到的是「我明明切了档」。
     #[serde(default)]
     pub permission_mode: PermissionMode,
-    /// 这一轮要不要在**云端沙箱**里跑（Web 端专用）。
-    ///
-    /// 老客户端不传 = `false` = 照旧走 cortexd 自己那个纯聊天 agent
-    /// （工具目录只有 `memory_search`）。为 `true` 时 cortexd 会确保这个
-    /// 用户的沙箱容器在跑，并把整条 SSE **反代**进去 —— 那边跑的是完整的
-    /// `cortex-local`，有文件与 shell 工具。见 `docs/sandbox.md`。
-    ///
-    /// # 为什么逐轮带而不是存在会话上
-    ///
-    /// 与 `permission_mode` 同一个理由：用户在界面上随手一切，**下一句**就该
-    /// 按新的来。存服务端要多一次同步，而那次同步失败时用户看到的是
-    /// 「我明明开了沙箱」。
-    ///
-    /// # 为什么桌面端不用它
-    ///
-    /// 桌面端的 agent 跑在用户自己的机器上（`cortex-local` 直连），压根不经
-    /// cortexd 的 `/chat`。这个字段只对「没有本地 agent 的客户端」有意义。
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub sandbox: bool,
 }
 
 /// 一条 `episode_blobs` 关联 —— **上行**方向（客户端 → 服务端）。

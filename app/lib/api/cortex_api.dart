@@ -127,7 +127,6 @@ abstract interface class CortexApi {
     required String message,
     List<Attachment> attachments,
     PermissionMode permissionMode,
-    bool sandbox,
   });
 
   /// `GET /memory/search?q=&limit=&as_of=`

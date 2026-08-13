@@ -259,36 +259,6 @@ final permissionModeProvider =
       PermissionModeNotifier.new,
     );
 
-/// 这一轮要不要在**云端沙箱**里跑。
-///
-/// # 为什么它是一个开关而不是自动的
-///
-/// 起一个沙箱容器要占几百 MB 内存。绝大多数对话不需要文件与命令 ——
-/// 「帮我想一下这段话怎么写」不该顺手拉起一个容器。
-///
-/// # 为什么只在 Web 端有意义
-///
-/// 桌面端的 agent 跑在**用户自己的机器上**（`cortex-local` 直连），压根不经
-/// cortexd 的 `/chat`。给桌面端也放一个开关，等于给一个不存在的东西做界面。
-/// 见 [kLocalAgentSupported] 与 `docs/sandbox.md`。
-///
-/// **不持久化**：与权限档不同，这一条的代价（一个容器）是即时可感的，
-/// 而「上次开着这次也开着」会让人在完全不需要文件的对话里白拉一个容器。
-class SandboxNotifier extends Notifier<bool> {
-  @override
-  bool build() => false;
-
-  void set(bool on) {
-    if (state != on) state = on;
-  }
-
-  void toggle() => set(!state);
-}
-
-final sandboxProvider = NotifierProvider<SandboxNotifier, bool>(
-  SandboxNotifier.new,
-);
-
 final appConfigProvider = NotifierProvider<AppConfigNotifier, AppConfig>(
   AppConfigNotifier.new,
 );

@@ -2,10 +2,9 @@
 ///
 /// # 这几条各自盯着什么
 ///
-/// 1. **「容器不在」那句话原样透出**。服务端对容器被回收写了一句专门的话
-///    （文件还在卷里，先发条消息把它拉起来）。把它改写成「加载失败」，
-///    用户的下一步就从「发条消息」变成「去查网络和后端」—— 而文件其实
-///    一个字节都没少。
+/// 1. **服务端那句话原样透出**。它是唯一说清了「为什么」的东西；界面在前面
+///    拼一句自己编的「加载失败」，用户的下一步就从「照那句话做」变成
+///    「去查网络和后端」。
 ///
 /// 2. **树是懒加载的**。每展开一层是一次网络往返；急切递归的话，一个装着
 ///    `node_modules` 的工作区会打出上千个请求。这条断了不会报错，只会
@@ -14,6 +13,12 @@
 /// 3. **服务端的中文能活着到界面上**。`package:http` 的 `Response.body`
 ///    在没有 charset 的 `application/json` 上回退到 **latin1** —— 第 1 条
 ///    那句话会变成乱码，恰好是最需要看清的那一句。
+///
+/// # 这里曾经有一组「容器不在」
+///
+/// 它验的是 409 与 501 两条路的措辞不能混（一个发条消息就好、一个发一万条
+/// 也没用）。409 那条今天不存在了：列目录自己会把容器拉起来。留下的只有
+/// 501 ——「这个部署压根没开云沙箱」，那是真正的永久缺失。
 library;
 
 import 'dart:convert';
@@ -33,9 +38,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
-/// 服务端在容器被回收时给的那句话。测试里逐字比对，所以它长什么样就写什么样。
-const String _kContainerGone = '沙箱容器已经被回收了 —— 文件还在卷里，先发条消息把它拉起来。';
-
 FileNode _dir(String path) =>
     FileNode(name: basenameOf(path), path: path, isDirectory: true);
 
@@ -45,6 +47,10 @@ FileNode _file(String path, int size) => FileNode(
   isDirectory: false,
   sizeBytes: size,
 );
+
+/// 服务端在没开云沙箱时给的那句话。测试里逐字比对，所以它长什么样就写什么样。
+const String _kNoSandbox = '这个部署没有开云沙箱（cortexd 连不上 docker）。'
+    '要在自己的机器上跑文件与命令，请用桌面端。';
 
 /// 记下每一次列目录的请求 —— 「只要了这一层」这件事只能这样断言。
 class _TreeApi extends MockCortexApi {
@@ -74,17 +80,10 @@ class _TreeApi extends MockCortexApi {
   }
 }
 
-class _GoneApi extends MockCortexApi {
-  @override
-  Future<List<FileNode>> sandboxListFiles(String path) async =>
-      throw const CortexApiException(_kContainerGone, statusCode: 409);
-}
-
 /// 沙箱**整个没开**的部署 —— 服务端回 501。
 ///
-/// 与 [_GoneApi] 的差别不在措辞而在**下一步**：那个发条消息就好了，
-/// 这个发一万条也没用。两者共用一个状态码时，界面会对着后者说
-/// 「沙箱容器不在了」并给一个永远按不出结果的「重试」。
+/// 这是文件树唯一还会失败到「一句话 + 重试」的路：501 是永久缺失，
+/// 重试永远不会成功，所以那句话必须自己把原因说清楚。
 class _NoSandboxApi extends MockCortexApi {
   @override
   Future<List<FileNode>> sandboxListFiles(String path) async =>
@@ -110,56 +109,22 @@ Map<String, List<FileNode>> _threeLevels() => {
 };
 
 void main() {
-  group('容器不在时', () {
+  group('打不开的时候', () {
     testWidgets('服务端那句话原样透出，不被改写成「加载失败」', (tester) async {
-      await tester.pumpWidget(_wrap(const SandboxBrowser(), _GoneApi()));
-      await tester.pumpAndSettle();
-
-      expect(
-        find.text(_kContainerGone),
-        findsOneWidget,
-        reason:
-            '这句话是服务端专门写给用户的，它告诉用户下一步该干什么（发条消息）。'
-            '换成任何一句自己编的话，用户就会去查网络、查后端、以为文件没了 —— '
-            '而文件一个字节都没少',
-      );
-      expect(
-        find.textContaining('加载失败'),
-        findsNothing,
-        reason: '「容器不在」不是失败：卷还在，发条消息就回来了。用失败的措辞会把用户引到错的方向',
-      );
-      expect(
-        find.text('沙箱容器不在了'),
-        findsOneWidget,
-        reason: '标题要说清是哪一类情况，正文才是服务端的原话 —— 两者不能互相顶替',
-      );
-      expect(
-        find.text('拉起来了，刷新'),
-        findsOneWidget,
-        reason:
-            '用户按提示把容器拉起来之后，得有个地方点一下重新列目录。'
-            '但这个按钮**自己拉不起容器** —— 叫「重试」会让人一直按、一直失败，'
-            '而真正要做的那件事（开开关、发消息）反倒像是背景说明',
-      );
-    });
-
-    testWidgets('沙箱整个没开时不能说成「容器不在」', (tester) async {
       await tester.pumpWidget(_wrap(const SandboxBrowser(), _NoSandboxApi()));
       await tester.pumpAndSettle();
 
       expect(
-        find.text('沙箱容器不在了'),
-        findsNothing,
-        reason:
-            '这个部署压根没开云沙箱（501），不是容器被回收了（409）。'
-            '说成「容器不在了」等于让用户去发消息把它拉起来 —— 发一万条也没用。'
-            '两种情况曾经共用 501，客户端只看数字，于是标题与正文互相矛盾；'
-            'deploy/ 的默认值是 CORTEX_SANDBOX_ENABLED=0，这条路是生产默认',
-      );
-      expect(
         find.text('这个部署没有开云沙箱'),
         findsOneWidget,
-        reason: '服务端那句话仍然要原样透出 —— 它说清了「为什么」',
+        reason:
+            '这句话是服务端专门写给用户的，它说清了「为什么」。换成任何一句'
+            '自己编的话，用户就会去查网络、查后端、以为文件没了',
+      );
+      expect(
+        find.textContaining('加载失败'),
+        findsNothing,
+        reason: '标题已经说了打不开，正文该是服务端的原话 —— 两者不能互相顶替',
       );
     });
   });
@@ -549,7 +514,7 @@ void main() {
     test('501 那句中文原样到达调用方，没有变成乱码', () async {
       final api = apiServing(
         (_) async => http.Response.bytes(
-          utf8.encode(jsonEncode({'error': _kContainerGone})),
+          utf8.encode(jsonEncode({'error': _kNoSandbox})),
           501,
           // axum 的 Json 就是这么发的：**没有 charset**。
           // `package:http` 的 Response.body 于是按 latin1 解，中文全废
@@ -561,12 +526,12 @@ void main() {
         api.sandboxListFiles(kSandboxRoot),
         throwsA(
           isA<CortexApiException>()
-              .having((e) => e.message, 'message', _kContainerGone)
+              .having((e) => e.message, 'message', _kNoSandbox)
               .having((e) => e.statusCode, 'statusCode', 501),
         ),
         reason:
             '这句话要一路活到界面上。走 Response.body（latin1）的话，'
-            '用户看到的是「æ²™ç®±å®¹å™¨…」—— 而这恰好是唯一一句他必须读懂的提示。'
+            '用户看到的是「è¿™ä¸ªéƒ¨ç½²â€¦」—— 而这恰好是唯一一句他必须读懂的提示。'
             '外面那层 {"error": …} 也要剥掉，用户不该读到 JSON',
       );
     });

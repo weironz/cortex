@@ -425,10 +425,6 @@ async fn one_turn(
             // 就是一个 `--permission-mode` 参数，记 roadmap。
             // 默认档是**问**，所以漏做的方向是安全的
             permission_mode: Default::default(),
-            // CLI 从不用云端沙箱：它和你的文件在同一台机器上，直接连
-            // 本机的 `cortex-local` 就有全套工具（见 roadmap 的 D2）。
-            // 把它跑到云端容器里，等于让它够不着你想改的那些文件
-            sandbox: false,
         })
         .await?;
 

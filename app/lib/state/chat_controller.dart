@@ -613,9 +613,6 @@ class ChatController extends Notifier<ChatState> {
       attachments: attachments,
       // 逐轮读，不缓存：用户在输入框底部随时能改，改完这一句就该按新档位走
       permissionMode: ref.read(permissionModeProvider),
-      // 同上。**桌面端恒为 false** —— 那边的 agent 跑在用户自己的机器上，
-      // 这条请求根本不会到 cortexd 的 /chat（见 sandboxProvider）
-      sandbox: ref.read(sandboxProvider),
     );
     _subscription = stream.listen(
       _onEvent,

@@ -797,7 +797,6 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
-    bool sandbox = false,
   }) async* {
     if (_disposed) {
       throw const CortexApiException('Mock 数据源已关闭');

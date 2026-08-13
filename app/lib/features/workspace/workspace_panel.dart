@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../api/cortex_api.dart' show kSandboxRoot;
 import '../../core/local_agent.dart';
 import '../../models/attachment.dart' show formatBytes;
 import '../../models/workspace.dart';
@@ -68,9 +67,12 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
         children: [
           if (sandboxOnly)
             _Header(
-              icon: Icons.cloud_queue_rounded,
-              title: '云沙箱',
-              tooltip: '云端容器里的 $kSandboxRoot，跨会话保留',
+              icon: Icons.folder_rounded,
+              // 不叫「云沙箱」。用户这里要的是「我的文件在哪」，
+              // 而「沙箱」是一个实现细节的名字 —— 它既不告诉他里面有什么，
+              // 也让他以为需要先做点什么才能用
+              title: '文件',
+              tooltip: 'agent 读写的就是这些文件，跨会话保留',
               expanded: _expanded,
               onToggle: () => setState(() => _expanded = !_expanded),
             )
@@ -103,7 +105,7 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
   }
 }
 
-/// 一个可选的头部按钮。云沙箱那一支没有「更换工作区」可点 —— 那里的根是
+/// 一个可选的头部按钮。Web 那一支没有「更换工作区」可点 —— 那里的根是
 /// 服务端定的，换不了。
 class _HeaderAction {
   const _HeaderAction({

@@ -173,10 +173,11 @@ pub async fn restore(st: &AppState, owner: &str, snapshot_id: &str) -> Result<()
         return Err(CortexError::Unavailable("这个部署没有开云沙箱".into()));
     };
     if layer.runner.status(owner).await?.is_none() {
+        // 调用方（`routes::restore_snapshot`）刚 ensure 过，走到这里说明容器
+        // 在这一瞬没了。这是罕见竞态，不是用户要处理的事 —— 所以话说给他听，
+        // 但不要求他做任何动作
         return Err(CortexError::Unavailable(
-            "沙箱容器不在（可能已被回收）。打开输入框底部的「云沙箱」开关、\
-             随便发一条消息把容器拉起来，然后再恢复 —— 开关关着发是不会起容器的。"
-                .into(),
+            "工作区这一刻拿不到，稍等再试一次。文件都在，一个字节没少。".into(),
         ));
     }
 

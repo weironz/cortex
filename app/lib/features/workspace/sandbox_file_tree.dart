@@ -53,8 +53,10 @@ class SandboxWorkspaceView extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
           child: Text(
-            '浏览器读不到你这台机器的磁盘。下面是云端容器里的 '
-            '$kSandboxRoot —— agent 读写的就是它，跨会话保留。',
+            // 不提「容器」「沙箱」。用户要知道的只有两件事：
+            // 这些文件不是他本机的，以及 agent 动的就是它们
+            '浏览器读不到你这台机器的磁盘，所以 agent 有一份自己的工作区。'
+            '下面就是它，跨会话保留。',
             style: theme.textTheme.labelSmall,
           ),
         ),
@@ -343,27 +345,23 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
   }
 }
 
-/// 一次失败的两个面：给用户看的那句话，以及「这是不是容器不在」。
+/// 一次失败：给用户看的那句话。
 ///
-/// 服务端对容器被回收有一句专门的话（文件还在卷里，先发条消息把它拉起来）。
-/// [message] **原样**存着它，界面绝不在前面拼「加载失败：」—— 那两件事在
-/// 用户那儿的下一步完全不同：一个是发条消息，一个是去查后端。
+/// [message] **原样**存着服务端说的，界面绝不在前面拼「加载失败：」——
+/// 服务端已经把话说完整了，再包一层只会把它挤成一行灰字。
+///
+/// # 这里曾经有一个 `containerGone`
+///
+/// 容器被回收时服务端回 409，界面显示「沙箱容器不在了 / 拉起来了，刷新」。
+/// 那条路今天不存在了：列目录自己就会把容器拉起来（服务端的
+/// `ensure_for_files`）。用户不该知道有个容器，更不该被要求去把它弄回来。
 class _Failure {
-  const _Failure(this.message, {this.containerGone = false});
+  const _Failure(this.message);
 
-  factory _Failure.from(Object error) {
-    if (error is CortexApiException) {
-      // 409 而不是 501。两者服务端都用过：501 是「这个部署没开云沙箱」
-      // （永久，重试没意义），409 是「容器被回收了」（发条消息就回来）。
-      // 只看 501 的话，沙箱关掉的部署上会显示「沙箱容器不在了 + 重试」——
-      // 标题与正文互相矛盾，而那个重试按钮永远按不出结果。
-      return _Failure(error.message, containerGone: error.statusCode == 409);
-    }
-    return _Failure('$error');
-  }
+  factory _Failure.from(Object error) =>
+      _Failure(error is CortexApiException ? error.message : '$error');
 
   final String message;
-  final bool containerGone;
 }
 
 class _RootFailure extends StatelessWidget {
@@ -376,11 +374,6 @@ class _RootFailure extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    // 容器不在**不是错误**：文件好好地待在卷里，用户发条消息就回来了。
-    // 所以它拿的是中性色和一个「云」的图标，而不是红色的感叹号
-    final color = failure.containerGone
-        ? scheme.onSurfaceVariant
-        : scheme.error;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
@@ -389,18 +382,14 @@ class _RootFailure extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(
-                failure.containerGone
-                    ? Icons.cloud_off_rounded
-                    : Icons.error_outline_rounded,
-                size: 15,
-                color: color,
-              ),
+              Icon(Icons.error_outline_rounded, size: 15, color: scheme.error),
               const SizedBox(width: 7),
               Expanded(
                 child: Text(
-                  failure.containerGone ? '沙箱容器不在了' : '列目录失败',
-                  style: theme.textTheme.labelMedium?.copyWith(color: color),
+                  '打不开文件',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: scheme.error,
+                  ),
                 ),
               ),
             ],
@@ -414,10 +403,7 @@ class _RootFailure extends StatelessWidget {
             child: TextButton.icon(
               onPressed: onRetry,
               icon: const Icon(Icons.refresh_rounded, size: 15),
-              // 容器不在时**先说清按之前要干什么**。这个按钮只是重列目录，
-              // 它自己拉不起容器 —— 叫「重试」会让人一直按、一直失败，
-              // 而真正要做的那件事（开开关、发消息）在正文里被当成了背景说明。
-              label: Text(failure.containerGone ? '拉起来了，刷新' : '重试'),
+              label: const Text('重试'),
             ),
           ),
         ],

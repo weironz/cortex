@@ -291,7 +291,17 @@ async fn list_confirmations(
 ///
 /// 用 SSE 而非 WebSocket：对话是单向流，SSE 自带重连与文本帧语义，
 /// 且在 Flutter Web 上比 WS 少一层坑。WS 留给多端同步推送。
-/// `/chat` 的入口。**两条完全不同的路**，由 `req.sandbox` 分。
+/// `/chat` 的入口。**两条完全不同的路**，由「这个部署接不接得上 docker」分。
+///
+/// # 为什么不是客户端说了算
+///
+/// 上一版由请求体里的 `sandbox: bool` 分，界面上对应一个「云沙箱」开关。
+/// 那个开关把一件纯粹的实现细节推到了用户面前：他要先知道「沙箱」是什么、
+/// 再知道关着就没有文件工具，才能理解为什么「帮我改下这个文件」会失败。
+/// 而那条失败路径长得像 agent 坏了，不像开关没开。
+///
+/// 现在服务端自己定：接得上 docker 就进沙箱，接不上就在自己这儿跑纯聊天。
+/// 用户只跟会话打交道。
 ///
 /// 走沙箱那条时，这个 handler 一行业务都不做：起容器（幂等）、签一把作用域
 /// 令牌、把整条请求原样反代进去。对话、工具、确认全在容器里那个
@@ -308,41 +318,30 @@ async fn chat(
                 .into_response();
         }
     };
-    if req.sandbox {
+    if st.sandbox_layer().is_some() {
         return chat_in_sandbox(&st, &headers, &req, body).await;
     }
     chat_here(st, headers, req).await
 }
 
-/// 反代进用户的云沙箱。
+/// 确保这个 owner 的沙箱在跑，回一把能进去的令牌。
 ///
-/// # 为什么起容器放在这里而不是「建会话时」
+/// # 为什么起容器放在请求路径上而不是「建会话时」
 ///
-/// 会话可能几天不聊。容器起着不聊天，是白占 512 MiB —— 而生产节点的余量
-/// 只有 0.5~0.7 GiB。`ensure` 是幂等的，每轮调一次的代价是一次
-/// `docker inspect`（毫秒级），换来的是「不聊就不占」。
-async fn chat_in_sandbox(
+/// 会话可能几天不聊。`ensure` 是幂等的，每次调的代价是一次 `docker inspect`
+/// （毫秒级），冷启动实测 913 ms —— 换来的是「不聊就不占」。
+///
+/// # 为什么每一条要摸容器的路由都得走它
+///
+/// 上一版只有 `/chat` 会拉容器，文件那几条是「容器不在就报错」。于是用户从
+/// 侧栏点开文件树，看到的是一句「沙箱容器不在了，去发条消息把它拉起来」——
+/// 一件他既不该知道也无法理解的事。现在谁先来谁负责拉起。
+async fn ensure_sandbox(
     st: &AppState,
-    headers: &HeaderMap,
-    req: &ChatRequest,
-    body: axum::body::Bytes,
-) -> axum::response::Response {
-    let Some(layer) = st.sandbox_layer() else {
-        // **明说，不静默退回纯聊天。** 退回去的话用户会看到一个「开了沙箱
-        // 却怎么都不动文件」的 agent，而那种失败没人查得出来
-        return ApiError::unsupported(
-            "这个部署没有开云沙箱（cortexd 连不上 docker）。\
-             要在自己的机器上跑文件与命令，请用桌面端。",
-        )
-        .into_response();
-    };
-
-    let user = crate::accounts::current_user(st, headers).await;
-    if let Err(e) = st.enforce_quota(&user).await {
-        return e.into_response();
-    }
-    let owner = user.clone();
-
+    layer: &crate::state::SandboxLayer,
+    owner: &str,
+    session_id: &str,
+) -> Result<(crate::sandbox_runner::SandboxHandle, String), ApiError> {
     // 令牌的生命周期**跟着容器**，不跟着轮次。
     //
     // 容器的入站认证用的是它启动时 env 里那把（`cortex-local` 的入站与出站
@@ -351,26 +350,54 @@ async fn chat_in_sandbox(
     //
     // 所以：有就复用，只把它改绑到这一轮的会话上；没有才签新的
     //（首轮，或者上一把已经过了 TTL）。
-    let token = match st.sandbox_tokens().find_by_owner(&owner) {
+    let token = match st.sandbox_tokens().find_by_owner(owner) {
         Some(t) => {
-            st.sandbox_tokens().rebind(&t, &req.session_id);
+            st.sandbox_tokens().rebind(&t, session_id);
             t
         }
         None => st
             .sandbox_tokens()
             .issue(crate::sandbox_token::SandboxScope {
-                owner: owner.clone(),
-                session_id: req.session_id.clone(),
+                owner: owner.to_owned(),
+                session_id: session_id.to_owned(),
             }),
     };
 
-    let handle = match layer.runner.ensure(&owner, &token, "v1").await {
-        Ok(h) => h,
+    match layer.runner.ensure(owner, &token, "v1").await {
+        Ok(h) => Ok((h, token)),
         Err(e) => {
             // 签出去的令牌要收回来：容器没起来，它就是一把没有主人的钥匙
             st.sandbox_tokens().revoke(&token);
-            return ApiError::from(e).into_response();
+            Err(ApiError::from(e))
         }
+    }
+}
+
+/// 反代进用户的云沙箱。
+async fn chat_in_sandbox(
+    st: &AppState,
+    headers: &HeaderMap,
+    req: &ChatRequest,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let Some(layer) = st.sandbox_layer() else {
+        // **明说，不静默退回纯聊天。** 退回去的话用户会看到一个「有文件工具
+        // 却怎么都不动文件」的 agent，而那种失败没人查得出来
+        return ApiError::unsupported(
+            "这个部署没有开云沙箱（cortexd 连不上 docker）。\
+             要在自己的机器上跑文件与命令，请用桌面端。",
+        )
+        .into_response();
+    };
+
+    let owner = crate::accounts::current_user(st, headers).await;
+    if let Err(e) = st.enforce_quota(&owner).await {
+        return e.into_response();
+    }
+
+    let (handle, token) = match ensure_sandbox(st, layer, &owner, &req.session_id).await {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
     };
 
     tracing::debug!(owner = %owner, sandbox = %handle.name, "本轮走云沙箱");
@@ -615,15 +642,22 @@ async fn list_snapshots(
 async fn take_snapshot(
     State(st): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<FilePathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
+    // 用户点了「立刻备份」就一定要拍到一份。容器不在就拉起来 ——
+    // 导出走的是 docker 的 archive API，那个 API 要有容器才能读到卷。
+    //
+    // **只有这条路会拉**：后台那个 15 分钟的定时任务仍然拿 `capture` 的
+    // `Ok(None)`，否则每一轮扫描都会把刚回收掉的沙箱全部复活，回收就等于没做。
+    ensure_for_files(&st, &owner, q.session()).await?;
     match crate::sandbox_snapshot::capture(&st, &owner).await? {
         Some(row) => Ok(Json(serde_json::json!({ "snapshot": row }))),
-        // 容器不在**不是错误**：卷还在，也确实没什么可拍的（没人在动它）。
-        // 回 404 的话，界面上会显示成一次失败，而用户没做错任何事
+        // 刚 ensure 过还是没有，只能是这一瞬被别的东西停掉了。不当失败报：
+        // 卷还在，用户也没做错任何事
         None => Ok(Json(serde_json::json!({
             "snapshot": null,
-            "note": "沙箱容器现在不在（可能已被回收）。卷还在，等下次对话把它拉起来就会自动拍。",
+            "note": "工作区这一刻拿不到，稍后会自动重试。文件都在，一个字节没少。",
         }))),
     }
 }
@@ -643,20 +677,10 @@ async fn take_snapshot(
 async fn download_workspace(
     State(st): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<FilePathQuery>,
 ) -> Result<axum::response::Response, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
-    let layer = st
-        .sandbox_layer()
-        .ok_or_else(|| ApiError::unsupported("这个部署没有开云沙箱"))?;
-    if layer.runner.status(&owner).await?.is_none() {
-        // 409 不是 501：能力在，只是容器被回收了 —— 发条消息就回来。
-        // 501 会让客户端把整个功能降级掉、并且不再重试
-        return Err(ApiError::conflict(
-            "沙箱容器不在（可能已被回收）。文件还在卷里，一个字节都没少。\
-             **打开输入框底部的「云沙箱」开关**，随便发一条消息把容器拉起来，\
-             然后再下载 —— 开关关着发是不会起容器的。",
-        ));
-    }
+    let layer = ensure_for_files(&st, &owner, q.session()).await?;
     let tar = layer.runner.export_workspace(&owner).await?;
     Ok((
         [
@@ -671,10 +695,15 @@ async fn download_workspace(
         .into_response())
 }
 
-/// `?path=` 的形状。三条文件端点共用。
+/// `?path=` 与 `?session=` 的形状。三条文件端点共用。
 #[derive(serde::Deserialize)]
 struct FilePathQuery {
     path: Option<String>,
+    /// 用户当前在看哪个会话。用来给这次拉起的容器**签一把带会话的令牌**。
+    ///
+    /// 不给也能用（拿一把空会话的令牌，容器写不了 episode —— 而它这时也没有
+    /// 什么可写的，聊天那条路一来就会把它改绑过去）。
+    session: Option<String>,
 }
 
 impl FilePathQuery {
@@ -682,28 +711,27 @@ impl FilePathQuery {
     fn or_root(&self) -> &str {
         self.path.as_deref().unwrap_or("/workspace")
     }
+
+    fn session(&self) -> &str {
+        self.session.as_deref().unwrap_or_default()
+    }
 }
 
-/// 容器必须在。三条文件端点共用这句话。
+/// 文件端点用的「拿到能干活的沙箱」。**不在就拉起来，不是报错**。
 ///
-/// **不是「加载失败」**：文件还在卷里，用户的下一步是发条消息把容器拉起来，
-/// 而不是重试或者担心数据没了。这两件事在界面上必须分得开。
-async fn require_sandbox<'a>(
+/// 上一版这里是 `require_sandbox`：容器不在就回 409，界面上显示
+/// 「沙箱容器不在了，去发一条消息把它拉起来」。那句话要求用户理解三件事
+/// （有个容器、它会被回收、聊天能把它拉回来），而这三件事本来就不该露出来。
+/// 冷启动 913 ms，比解释它便宜得多。
+async fn ensure_for_files<'a>(
     st: &'a AppState,
     owner: &str,
+    session_id: &str,
 ) -> Result<&'a crate::state::SandboxLayer, ApiError> {
     let layer = st
         .sandbox_layer()
         .ok_or_else(|| ApiError::unsupported("这个部署没有开云沙箱"))?;
-    if layer.runner.status(owner).await?.is_none() {
-        // 409 不是 501：能力在，只是容器被回收了 —— 发条消息就回来。
-        // 501 会让客户端把整个功能降级掉、并且不再重试
-        return Err(ApiError::conflict(
-            "沙箱容器不在（可能已被回收）。文件还在卷里，一个字节都没少。\
-             **打开输入框底部的「云沙箱」开关**，随便发一条消息把容器拉起来 —— \
-             开关关着发是不会起容器的。",
-        ));
-    }
+    ensure_sandbox(st, layer, owner, session_id).await?;
     Ok(layer)
 }
 
@@ -714,7 +742,7 @@ async fn list_sandbox_files(
     Query(q): Query<FilePathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
-    let layer = require_sandbox(&st, &owner).await?;
+    let layer = ensure_for_files(&st, &owner, q.session()).await?;
     let path = q.or_root();
     let entries = layer.runner.list_dir(&owner, path).await?;
     Ok(Json(
@@ -729,7 +757,7 @@ async fn read_sandbox_file(
     Query(q): Query<FilePathQuery>,
 ) -> Result<axum::response::Response, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
-    let layer = require_sandbox(&st, &owner).await?;
+    let layer = ensure_for_files(&st, &owner, q.session()).await?;
     let path = q
         .path
         .as_deref()
@@ -764,7 +792,7 @@ async fn put_sandbox_file(
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
-    let layer = require_sandbox(&st, &owner).await?;
+    let layer = ensure_for_files(&st, &owner, q.session()).await?;
     let path = q
         .path
         .as_deref()
@@ -779,8 +807,11 @@ async fn restore_snapshot(
     State(st): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(q): Query<FilePathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
+    // 恢复是用户「刚丢了东西」才走的路，最不该在这里让他先去把容器拉起来
+    ensure_for_files(&st, &owner, q.session()).await?;
     crate::sandbox_snapshot::restore(&st, &owner, &id).await?;
     Ok(Json(serde_json::json!({
         "restored": id,
@@ -1156,29 +1187,19 @@ impl ApiError {
     /// 客户端把 501 当成「这条路不会开」，据此把功能降级掉并且**不重试**
     /// （`api_exception.dart` 的 `isUnsupported`，注释里写着「retrying a 501
     /// is a loop on a road that will never open」）。所以只有真正的永久缺失
-    /// 才配用它 —— 「现在没有、待会儿会有」要用 [`Self::conflict`]。
+    /// 才配用它。
+    ///
+    /// # 这里曾经有一个配套的 `conflict`（409），已经删掉
+    ///
+    /// 它是给「沙箱容器被回收了，发条消息就回来」用的。那个状态今天不再
+    /// 暴露给客户端：谁要摸容器谁负责把它拉起来（`ensure_for_files`），
+    /// 于是没有任何一条路会回「你去做件事」。要是哪天又出现一个真正的
+    /// 「能力在、当下状态不满足」，再加回来 —— 但别用它复活容器那条路。
     pub fn unsupported(message: impl Into<String>) -> Self {
         Self {
             message: Some(message.into()),
             inner: cortex_core::CortexError::Store("unsupported".into()),
             status: Some(StatusCode::NOT_IMPLEMENTED),
-        }
-    }
-
-    /// 409：能力在，但当下的状态不满足；用户做件事就好了。
-    ///
-    /// 与 [`Self::unsupported`] 分开是有代价换来的：沙箱那几条文件端点
-    /// 原先两种情况都回 501 —— 「这个部署没开云沙箱」（永久）和「容器被回收了」
-    /// （发条消息就回来）。客户端只看数字，于是在**沙箱关掉的部署**上
-    /// 界面显示的是「沙箱容器不在了 / 重试」，而重试永远不会成功。
-    ///
-    /// 那条路今天才变得可达：`deploy/` 的默认值是 `CORTEX_SANDBOX_ENABLED=0`。
-    /// 「一个状态码身兼两职，客户端只看数字」在这个仓库里是第二次了。
-    pub fn conflict(message: impl Into<String>) -> Self {
-        Self {
-            message: Some(message.into()),
-            inner: cortex_core::CortexError::Store("conflict".into()),
-            status: Some(StatusCode::CONFLICT),
         }
     }
 }
@@ -1572,6 +1593,132 @@ mod tests {
         assert!(
             replayed.iter().all(|f| f.get("invalidated").is_some()),
             "每条事实都必须带 invalidated 字段，客户端不该靠猜"
+        );
+    }
+}
+
+/// 「文件那几条自己会把容器拉起来」的守卫。
+///
+/// # 它盯的是什么
+///
+/// 上一版这几条是「容器不在就回 409 + 一句『去发条消息把它拉起来』」。
+/// 那句话要求用户理解有个容器、它会被回收、聊天能把它拉回来 —— 三件本来
+/// 就不该露出来的事。改成按需拉起之后，**回退的形状是「又变回只查不拉」**：
+/// 界面上会重新出现那句话，而代码读起来一切正常。
+///
+/// 所以这里用一个 runner 假替身，断言 `ensure` 真的被调过。
+#[cfg(test)]
+mod lazy_ensure_tests {
+    use super::*;
+    use crate::sandbox_runner::{DirEntry, SandboxAddr, SandboxHandle, SandboxRunner};
+    use axum::body::Body;
+    use axum::http::Request;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::ServiceExt as _;
+
+    /// 一个**永远说自己没在跑**的沙箱。
+    ///
+    /// `status` 恒为 `None` 是刻意的：只查不拉的实现在它面前必然失败，
+    /// 而按需拉起的实现照样能列出目录。
+    #[derive(Default)]
+    struct NeverRunning {
+        ensured: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl SandboxRunner for NeverRunning {
+        async fn ensure(
+            &self,
+            owner: &str,
+            _t: &str,
+            _h: &str,
+        ) -> cortex_core::Result<SandboxHandle> {
+            self.ensured.fetch_add(1, Ordering::SeqCst);
+            Ok(SandboxHandle {
+                name: format!("fake-{owner}"),
+                addr: SandboxAddr::Direct("http://127.0.0.1:1".into()),
+            })
+        }
+        async fn stop(&self, _owner: &str) -> cortex_core::Result<()> {
+            Ok(())
+        }
+        async fn status(&self, _owner: &str) -> cortex_core::Result<Option<SandboxHandle>> {
+            Ok(None)
+        }
+        async fn export_workspace(&self, _owner: &str) -> cortex_core::Result<bytes::Bytes> {
+            Ok(bytes::Bytes::new())
+        }
+        async fn import_workspace(&self, _o: &str, _t: bytes::Bytes) -> cortex_core::Result<()> {
+            Ok(())
+        }
+        async fn list_dir(&self, _owner: &str, _path: &str) -> cortex_core::Result<Vec<DirEntry>> {
+            Ok(vec![DirEntry {
+                name: "note.md".into(),
+                is_dir: false,
+                size: 3,
+                mtime: None,
+            }])
+        }
+        async fn read_file(&self, _owner: &str, _path: &str) -> cortex_core::Result<bytes::Bytes> {
+            Ok(bytes::Bytes::new())
+        }
+        async fn write_file(
+            &self,
+            _owner: &str,
+            _path: &str,
+            _b: bytes::Bytes,
+        ) -> cortex_core::Result<()> {
+            Ok(())
+        }
+        fn watch_oom(&self) -> Option<futures::stream::BoxStream<'static, String>> {
+            None
+        }
+        async fn workspace_bytes(&self, _owner: &str) -> cortex_core::Result<Option<u64>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn 列目录时容器不在就自己拉起来() {
+        let runner = Arc::new(NeverRunning::default());
+        let rt = crate::state::Runtime {
+            auth: crate::auth::AuthMode::Disabled,
+            confirms: Arc::new(crate::confirm::ConfirmRegistry::new(
+                std::time::Duration::from_secs(30),
+            )),
+            tickets: Arc::new(crate::auth::TicketBook::default()),
+            accounts: None,
+            access: Arc::new(crate::accounts::AccessBook::default()),
+            sandboxes: Arc::new(crate::sandbox_token::SandboxTokens::default()),
+            sandbox: Some(crate::state::SandboxLayer {
+                runner: runner.clone(),
+                http: reqwest::Client::new(),
+            }),
+        };
+        let app = router(crate::state::AppState::for_tests(rt));
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sandbox/files?path=/workspace")
+                    .body(Body::empty())
+                    .expect("构造请求不该失败"),
+            )
+            .await
+            .expect("router 的错误类型是 Infallible");
+
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "容器不在时列目录必须自己把它拉起来。回 4xx 就意味着界面上又要\
+             出现「沙箱容器不在了，去发条消息」——那正是这次要删掉的东西"
+        );
+        assert_eq!(
+            runner.ensured.load(Ordering::SeqCst),
+            1,
+            "必须真的调过 ensure。只查 status 的实现在真机上会静默退化成\
+             「文件树打不开，直到用户碰巧发了条消息」"
         );
     }
 }
