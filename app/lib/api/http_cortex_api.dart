@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -73,9 +74,42 @@ class HttpCortexApi implements CortexApi {
   AuthTicket? _ticket;
   Future<AuthTicket>? _ticketInFlight;
 
-  static Uri _normalise(String raw) {
+  /// 空地址 = **同源**（浏览器里），不是「没配」。
+  ///
+  /// # 这里踩过一次
+  ///
+  /// 上一版是 `if (s.isEmpty) s = 'http://127.0.0.1:8080'`。于是
+  /// `just dev` 那套拓扑（浏览器 → nginx:5173 → cortexd，同源反代）整个
+  /// 走不通：`--dart-define=CORTEX_BASE_URL=` 传的空串**是有意义的配置**，
+  /// 却在这里被换成了另一个源，浏览器随即因为 CORS 把响应丢掉，报的是
+  /// 「Failed to fetch」—— 一句看起来像 daemon 没起来的错。
+  ///
+  /// 这是本仓库第 7 次「空串顶掉默认值」，但方向反过来：前六次是空串被当成
+  /// 「配过了」，这次是一个**刻意的空串**被当成「没配过」。
+  ///
+  /// # 判据是「有没有页面源」，不是 `kIsWeb`
+  ///
+  /// `Uri.base` 在浏览器里是当前页面的 URL，在桌面端是进程工作目录
+  /// （`file:` 协议）。桌面端确实没有同源可言，那儿的空串才真是「没配」，
+  /// 回落到本机 daemon 的默认端口是对的。用协议判**正好**分开这两件事，
+  /// 而且不用把平台判断散到 API 层（见 `core/local_agent.dart` 的同一立场）。
+  static Uri _normalise(String raw) => resolveBase(raw, Uri.base);
+
+  /// [_normalise] 的纯函数版。`page` 就是 `Uri.base`。
+  ///
+  /// 提出来只为一件事：**能测同源那一支**。`Uri.base` 在测试进程里恒为
+  /// `file:`，直接测 `_normalise` 只能验到桌面端的回落 —— 而出问题的
+  /// 恰恰是另一支。
+  @visibleForTesting
+  static Uri resolveBase(String raw, Uri page) {
     var s = raw.trim();
-    if (s.isEmpty) s = 'http://127.0.0.1:8080';
+    if (s.isEmpty) {
+      if (page.scheme == 'http' || page.scheme == 'https') {
+        // 只保留 scheme + host + port。页面路径与查询串不属于 API 根
+        return page.replace(path: '', query: null, fragment: null);
+      }
+      s = 'http://127.0.0.1:8080';
+    }
     if (!s.startsWith('http://') && !s.startsWith('https://')) {
       s = 'http://$s';
     }
