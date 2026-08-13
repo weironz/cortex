@@ -223,4 +223,37 @@ mod tests {
             "解绑必须落盘，否则重启之后那个目录又回来了"
         );
     }
+
+    /// **`get()` 是「这一轮在哪儿跑」的判据**，不只是「工作区在哪」。
+    ///
+    /// `routes::chat` 拿它分流：`Some` 就在本机跑，`None` 就把这一轮送回
+    /// cortexd（那个会话的执行现场在云端）。所以这个函数的返回值多一个
+    /// 或少一个 `Some`，后果不是「工作区不对」，是**整轮跑错了地方**。
+    ///
+    /// 这两条钉的正是那两个方向：
+    #[test]
+    fn 没绑定就是没绑定_不许凭空变出一个根() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let ws = Workspaces::load(dir.path());
+        assert!(
+            ws.get("从没见过的会话").is_none(),
+            "桌面端没配回落根。这里一旦回 Some，那些本该送回云端的会话\
+             就会在本机跑一个封闭沙箱 —— 一个文件工具都没有，而且不报错"
+        );
+    }
+
+    #[test]
+    fn 容器里的回落根让每个会话都在本地跑() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let root = dir.path().join("workspace");
+        std::fs::create_dir_all(&root).expect("建目录");
+        let ws = Workspaces::load(dir.path())
+            .with_default_root(&root.to_string_lossy())
+            .expect("回落根应当合格");
+        assert!(
+            ws.get("从没见过的会话").is_some(),
+            "容器里 get() 必须恒为 Some —— 它就是执行现场，把自己的轮次\
+             再转发给 cortexd 是一个无界回环"
+        );
+    }
 }

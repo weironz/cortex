@@ -1452,6 +1452,9 @@ impl Live {
             preview: None,
             archived: state.as_ref().is_some_and(|s| s.archived),
             workspace: state.as_ref().and_then(|s| s.workspace.clone()),
+            runtime: state
+                .as_ref()
+                .map_or(SessionRuntimeDto::Cloud, |s| runtime_dto(s.runtime)),
             project_id: state.and_then(|s| s.project_id),
         })
     }
@@ -2431,6 +2434,19 @@ fn session_dto(d: cortex_store::SessionDigest) -> SessionDto {
         archived: d.archived,
         workspace: d.workspace,
         project_id: d.project_id,
+        runtime: runtime_dto(d.runtime),
+    }
+}
+
+/// 存储层的枚举 → 线协议的枚举。
+///
+/// 两个枚举而不是一个：`cortex-store` 不依赖 `cortex-proto`（依赖方向是
+/// `core ← store ← … ← cortexd`），而线协议的取值一旦定下就不能跟着存储层
+/// 的重构走。多一个 match 的代价，换的是「改数据库表示不会静默改线协议」。
+fn runtime_dto(r: cortex_store::SessionRuntime) -> SessionRuntimeDto {
+    match r {
+        cortex_store::SessionRuntime::Local => SessionRuntimeDto::Local,
+        cortex_store::SessionRuntime::Cloud => SessionRuntimeDto::Cloud,
     }
 }
 

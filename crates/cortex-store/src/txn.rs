@@ -574,8 +574,8 @@ impl WriteTxn {
         let id = new.id.to_string();
         let stmt = sqlx::query(
             "INSERT INTO session_events
-                 (id, session_id, op, title, workspace, project_id, actor, device_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 (id, session_id, op, title, workspace, project_id, runtime, actor, device_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(&id)
         .bind(&new.session_id)
@@ -583,6 +583,7 @@ impl WriteTxn {
         .bind(&new.title)
         .bind(&new.workspace)
         .bind(&new.project_id)
+        .bind(new.runtime)
         .bind(new.actor)
         .bind(&new.device_id);
 

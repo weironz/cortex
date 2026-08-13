@@ -176,9 +176,64 @@ async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health>
 }
 
 /// 流式对话。**循环与工具跑在本机。**
-async fn chat(
-    State(st): State<LocalState>,
-    Json(req): Json<ChatRequest>,
+/// 一轮对话。**先决定它该在哪儿跑。**
+///
+/// # 判据是「这台机器有没有这个会话的绑定」
+///
+/// 绑定存在 `workspaces.json`，天然只在那一台机器上 —— 于是它同时回答了
+/// 两件事：这个会话钉在本机吗、钉的是不是**这一台**。用一个设备 id 反而更弱：
+/// id 在重装 / 克隆之后会骗人，而绑定不会。
+///
+/// 容器里 `--default-workspace=/workspace` 让 `get()` 恒为 `Some`，
+/// 所以沙箱里这条判断恒真、永远本地跑 —— 那正是对的：它就是执行现场。
+///
+/// # 没绑定就转发给 cortexd，而不是本地跑一个封闭沙箱
+///
+/// 这是这次改动的全部意义。上一版在这里走 `Turn::sealed()`：一个文件工具
+/// 都没有，而且**不报错**。于是在 Web 端写了文件的会话，换到桌面端接着聊，
+/// agent 说「我没有文件工具」——用户看到的是它突然变笨了。
+///
+/// 现在这种会话的执行现场在云端，就把这一轮**送回云端**：同一个会话始终
+/// 只有一个文件系统。代价是桌面端一次纯聊天也要过一趟网络 —— 那是这条
+/// 不变式的价格，而它换掉的是一整类「同一个会话在两端各跑各的」。
+async fn chat(State(st): State<LocalState>, req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, MAX_CHAT_BODY).await {
+        Ok(b) => b,
+        Err(e) => return bad_request(format!("读请求体失败：{e}")),
+    };
+    let parsed: ChatRequest = match serde_json::from_slice(&bytes) {
+        Ok(r) => r,
+        Err(e) => return bad_request(format!("请求体不是合法的 ChatRequest：{e}")),
+    };
+
+    if st.engine.workspaces.get(&parsed.session_id).is_none() {
+        // 这个会话不在这台机器上。把原样的请求送回 cortexd —— 它那边知道
+        // 该进哪个沙箱（或者告诉我们这个会话钉在别处）
+        let mut fwd = Request::from_parts(parts, axum::body::Body::from(bytes));
+        *fwd.uri_mut() = "/chat".parse().expect("常量路径可解析");
+        return proxy::forward(State(st), fwd).await;
+    }
+
+    chat_here(st, parsed).await.into_response()
+}
+
+/// 请求体上限。**与 cortexd 那侧无关**：这里挡的是「本地 agent 被同机某个
+/// 进程灌爆内存」，而一轮对话的正常体量是几十 KB。
+const MAX_CHAT_BODY: usize = 4 * 1024 * 1024;
+
+fn bad_request(message: String) -> Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": message })),
+    )
+        .into_response()
+}
+
+/// 在这台机器上跑这一轮。
+async fn chat_here(
+    st: LocalState,
+    req: ChatRequest,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = st.engine.chat(req);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(|ev| {

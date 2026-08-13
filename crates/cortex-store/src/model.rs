@@ -289,6 +289,33 @@ text_enum! {
         UnbindWorkspace => "unbind_workspace",
         MoveToProject => "move_to_project",
         RemoveFromProject => "remove_from_project",
+        SetRuntime => "set_runtime",
+    }
+}
+
+text_enum! {
+    /// 这个会话在**哪儿**跑。
+    ///
+    /// # 为什么它必须写在会话上
+    ///
+    /// 同一个会话在两端各自跑，而两端指着完全不同的文件系统 —— Web 是云端
+    /// 容器的 `/workspace`，桌面端是本机某个目录。不记下来的话，用户在 A 端
+    /// 让 agent 写的文件，到 B 端就「不存在」，而 agent 说的是实话。
+    ///
+    /// 调研过的四家（Claude Code / Codex / Cursor / OpenHands）没有一家允许
+    /// 同一个会话在两端各跑各的：**执行环境是会话身份的一部分**。
+    ///
+    /// # 为什么 Local 不带「哪一台设备」
+    ///
+    /// 链路上没有客户端设备身份（`device_id` 盖的是 cortexd 自己的章）。
+    /// 但那个身份不必引入：本地绑定存在 `workspaces.json`，天然只在那一台
+    /// 机器上，于是「这台机器有没有这个会话的绑定」本身就是设备检查 ——
+    /// 而且比一个 id 更硬，id 在重装 / 克隆之后会骗人。
+    pub enum SessionRuntime {
+        /// 云端容器工作区。**默认**，也是唯一处处可续的那个。
+        Cloud => "cloud",
+        /// 钉在某台机器的本机目录上。别的设备打开它只能看，不能续。
+        Local => "local",
     }
 }
 
@@ -1059,6 +1086,8 @@ pub struct SessionEvent {
     /// `op = MoveToProject` 时非空。指向的项目**可能已经被删了** ——
     /// 删项目刻意不级联改写会话事件，末态视图会把悬挂的绑定当作未分组。
     pub project_id: Option<String>,
+    /// `op = SetRuntime` 时非空。
+    pub runtime: Option<SessionRuntime>,
     pub actor: Actor,
     pub device_id: String,
     pub created_at: DateTime<Utc>,
@@ -1075,6 +1104,8 @@ pub struct NewSessionEvent {
     pub workspace: Option<String>,
     /// `op = MoveToProject` 时必填，其余必须为 `None`（schema CHECK 强制）
     pub project_id: Option<String>,
+    /// `op = SetRuntime` 时必填，其余必须为 `None`（schema CHECK 强制）
+    pub runtime: Option<SessionRuntime>,
     pub actor: Actor,
     pub device_id: String,
 }
@@ -1088,6 +1119,7 @@ impl NewSessionEvent {
             title: None,
             workspace: None,
             project_id: None,
+            runtime: None,
             actor,
             device_id: device_id.to_owned(),
         }
@@ -1141,6 +1173,25 @@ impl NewSessionEvent {
     #[must_use]
     pub fn unbind_workspace(session_id: &str, actor: Actor, device_id: &str) -> Self {
         Self::bare(session_id, SessionOp::UnbindWorkspace, actor, device_id)
+    }
+
+    /// 声明这个会话在哪儿跑。见 [`SessionRuntime`]。
+    ///
+    /// **与 `bind_workspace` 是两件事**，虽然它们常常一起发生：前者说的是
+    /// 「哪个目录」，这个说的是「哪一侧的执行环境」。绑本机目录的会话必然是
+    /// `Local`，但反过来不成立 —— 一个 `Local` 会话可以此刻还没绑目录
+    /// （用户刚在这台机器上新建了它，还没选）。
+    #[must_use]
+    pub fn set_runtime(
+        session_id: &str,
+        runtime: SessionRuntime,
+        actor: Actor,
+        device_id: &str,
+    ) -> Self {
+        Self {
+            runtime: Some(runtime),
+            ..Self::bare(session_id, SessionOp::SetRuntime, actor, device_id)
+        }
     }
 
     /// 把会话移进某个项目。再移一次就是换项目 —— 一个会话同时只属于一个项目。
@@ -1312,7 +1363,10 @@ pub struct SessionState {
     /// **指向已删除项目的绑定在视图里就已经变成 `None`** —— 删项目不级联
     /// 改写会话事件，悬挂的绑定是常态，判定收敛在 SQL 里一处。
     pub project_id: Option<String>,
-    /// 四个维度中最近一次事件的时间
+    /// 这个会话在哪儿跑。**视图里已经把 NULL 折成 `Cloud`** ——
+    /// 缺省定在 SQL 一处，而不是让每个调用方各判一遍「没有事件算什么」。
+    pub runtime: SessionRuntime,
+    /// 五个维度中最近一次事件的时间
     pub decided_at: DateTime<Utc>,
 }
 

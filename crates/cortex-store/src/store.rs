@@ -233,6 +233,9 @@ pub struct SessionDigest {
     /// 所属项目。`None` = 未分组，**也包括「原来那个项目已经被删了」** ——
     /// 视图已经把悬挂的绑定收敛成 `None`，这里读到的就是最终口径。
     pub project_id: Option<String>,
+    /// 这个会话在哪儿跑。**没有 session_state 行时（纯新会话）也要有值** ——
+    /// 视图里 coalesce 成 'cloud'，LEFT JOIN 出来的 NULL 在这里再兜一次。
+    pub runtime: crate::model::SessionRuntime,
 }
 
 impl Store {
@@ -281,7 +284,11 @@ impl Store {
                     s.title,
                     coalesce(s.archived, false) AS archived,
                     s.workspace,
-                    s.project_id
+                    s.project_id,
+                    -- LEFT JOIN 可能整行为空（会话还没有任何生命周期事件），
+                    -- 那时 runtime 也是 NULL。视图里已经 coalesce 过一次，
+                    -- 这里兜的是「压根没 join 上」那一种
+                    coalesce(s.runtime, 'cloud') AS runtime
                FROM (
                     SELECT e.session_id,
                            count(*)            AS message_count,
@@ -322,7 +329,11 @@ impl Store {
                     s.title,
                     coalesce(s.archived, false) AS archived,
                     s.workspace,
-                    s.project_id
+                    s.project_id,
+                    -- LEFT JOIN 可能整行为空（会话还没有任何生命周期事件），
+                    -- 那时 runtime 也是 NULL。视图里已经 coalesce 过一次，
+                    -- 这里兜的是「压根没 join 上」那一种
+                    coalesce(s.runtime, 'cloud') AS runtime
                FROM (
                     SELECT e.session_id,
                            count(*)            AS message_count,
@@ -353,7 +364,7 @@ impl Store {
     /// 没归档、没绑工作区、没进过项目。调用方按「全默认」处理即可，不是错误。
     pub async fn session_state(&self, session_id: &str) -> Result<Option<SessionState>> {
         let row = sqlx::query_as::<_, SessionState>(
-            "SELECT session_id, title, archived, workspace, project_id, decided_at
+            "SELECT session_id, title, archived, workspace, project_id, runtime, decided_at
                FROM session_state WHERE session_id = $1",
         )
         .bind(session_id)
@@ -365,7 +376,7 @@ impl Store {
     /// 一个会话的全部生命周期事件，升序。界面的「它是怎么变的」。
     pub async fn session_events(&self, session_id: &str) -> Result<Vec<SessionEvent>> {
         let rows = sqlx::query_as::<_, SessionEvent>(
-            "SELECT id, session_id, op, title, workspace, project_id,
+            "SELECT id, session_id, op, title, workspace, project_id, runtime,
                     actor, device_id, created_at
                FROM session_events WHERE session_id = $1
               ORDER BY created_at ASC, id ASC",

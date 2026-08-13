@@ -1140,6 +1140,7 @@ fn mock_sessions() -> Vec<SessionDto> {
             title_is_custom: false,
             archived: false,
             workspace: None,
+            runtime: cortex_proto::dto::SessionRuntimeDto::Cloud,
             project_id: Some(MOCK_PROJECT.into()),
         },
         SessionDto {
@@ -1155,6 +1156,7 @@ fn mock_sessions() -> Vec<SessionDto> {
             // 任何编出来的路径都不存在，界面按「不存在即未绑定」渲染的话
             // 反而看不出区别。要试绑定态就 PATCH 一个真实目录上去
             workspace: None,
+            runtime: cortex_proto::dto::SessionRuntimeDto::Cloud,
             // 未分组的那一条，理由见 [`mock_projects`]
             project_id: None,
         },

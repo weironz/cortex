@@ -594,6 +594,41 @@ pub struct SessionDto {
     /// 老客户端忽略即可；空时整个字段省略，省得每条会话都多一个 `null`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// 这段对话在**哪儿**跑。
+    ///
+    /// # 为什么会话要带着它跨设备
+    ///
+    /// 不带的话，同一个会话在两端各自静默跑，而两端指着完全不同的文件系统：
+    /// Web 是云端容器的 `/workspace`，桌面端是本机某个目录。用户在 A 端让
+    /// agent 写了个文件，到 B 端接着聊，agent 说「没有这个文件」—— 它说的是
+    /// 实话，只是换了个世界。而界面上没有任何东西说明这件事。
+    ///
+    /// 调研过的四家（Claude Code / Codex / Cursor / OpenHands）没有一家允许
+    /// 同一个会话在两端各跑各的：**执行环境是会话身份的一部分**。
+    ///
+    /// 老客户端不认识这个字段会忽略它，行为退回今天的样子。
+    #[serde(default)]
+    pub runtime: SessionRuntimeDto,
+}
+
+/// [`SessionDto::runtime`] 的取值。
+///
+/// # 为什么 `Local` 不说「哪一台设备」
+///
+/// 链路上没有客户端设备身份（会话事件里的 `device_id` 盖的是 cortexd 自己的
+/// 章）。但那个身份**不必引入**：本地绑定存在客户机的 `workspaces.json` 里，
+/// 天然只在那一台机器上，于是「这台机器有没有这个会话的绑定」本身就是设备
+/// 检查 —— 而且比一个 id 更硬，id 在重装 / 克隆之后会骗人。
+///
+/// 代价是说不出「在哪一台」，只能说「绑的是另一台机器上的目录」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRuntimeDto {
+    /// 云端容器工作区。**默认**，也是唯一处处可续的那个。
+    #[default]
+    Cloud,
+    /// 钉在某台机器的本机目录上。别的设备打开它只能看，不能续。
+    Local,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -288,7 +288,7 @@ impl Store {
             // 一条 session_events 日志会让 load_payloads 返回 UnknownTable，
             // 那一批拉取整个失败，客户端的游标从此卡死在它前面
             table::SESSION_EVENTS => collect!(
-                "SELECT id, session_id, op, title, workspace, project_id,
+                "SELECT id, session_id, op, title, workspace, project_id, runtime,
                         actor, device_id, created_at
                    FROM session_events WHERE id = ANY($1)",
                 SessionEvent,
