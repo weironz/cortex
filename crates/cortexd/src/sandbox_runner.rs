@@ -159,6 +159,79 @@ impl SandboxAddr {
     }
 }
 
+/// 目录里的一项。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    /// 目录恒为 0 —— 算目录大小要递归，而这条路径上没人愿意等。
+    pub size: i64,
+}
+
+/// 把一个用户给的路径校验成工作区内的绝对路径。
+///
+/// # 这是这一组端点唯一的栅栏
+///
+/// 「列目录 / 读文件 / 写文件」三条都由**宿主**执行（docker daemon 直接读写
+/// 卷），所以容器内的 landlock 与只读 rootfs **在这条路上一点忙都帮不上** ——
+/// 挡住 `../../etc/passwd` 的只有这个函数。
+///
+/// # 为什么不用 `Path::canonicalize`
+///
+/// 那会去问**宿主**的文件系统，而这些路径是**容器里**的。宿主上根本没有
+/// `/workspace`，canonicalize 直接失败；就算它成功了，得到的也是一个
+/// 与要问的那个文件系统无关的答案。
+///
+/// 所以这里做的是**纯字符串上的路径规范化**：逐段走，`.` 丢掉，`..` 弹栈，
+/// 弹到根就是越界。这与 `cortex-agent` 的 `ToolSandbox::resolve` 是同一套
+/// 论证（它那边也不依赖内核）。
+///
+/// # Errors
+/// 不是绝对路径、含有 `..` 且弹出了工作区、或者压根不在工作区下。
+pub fn validate_ws_path(path: &str) -> Result<String> {
+    if !path.starts_with('/') {
+        return Err(CortexError::Invalid(format!(
+            "路径要用绝对路径（以 {WORKSPACE_PATH} 开头），收到的是：{path}"
+        )));
+    }
+    // Windows 上的调用方可能传 `\` —— 容器里那是合法文件名的一部分，不是分隔符。
+    // 不做转换，但要拒掉：静默当成分隔符会让「文件名里带反斜杠」变成越界
+    if path.contains('\\') {
+        return Err(CortexError::Invalid(
+            "路径里不该出现反斜杠 —— 容器是 Linux，`\\` 是文件名的一部分而不是分隔符".into(),
+        ));
+    }
+
+    let mut stack: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if stack.pop().is_none() {
+                    return Err(CortexError::Invalid(format!(
+                        "路径跑出了工作区：{path}（`..` 弹过了根）"
+                    )));
+                }
+            }
+            s => stack.push(s),
+        }
+    }
+    let normalized = format!("/{}", stack.join("/"));
+
+    // 规范化之后再判前缀。**顺序不能反** —— 先判前缀的话，
+    // `/workspace/../etc/passwd` 会因为以 `/workspace` 开头而通过
+    let root = WORKSPACE_PATH.trim_end_matches('/');
+    if normalized == root {
+        return Ok(normalized);
+    }
+    if !normalized.starts_with(&format!("{root}/")) {
+        return Err(CortexError::Invalid(format!(
+            "{normalized} 不在工作区 {root} 之内"
+        )));
+    }
+    Ok(normalized)
+}
+
 /// 一个跑起来的沙箱。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxHandle {
@@ -235,6 +308,17 @@ pub trait SandboxRunner: Send + Sync {
     /// **叠加，不是替换**：同名文件覆盖，快照里没有而现在有的文件不删。
     /// 理由见 `sandbox_snapshot::restore` 的文档。
     async fn import_workspace(&self, owner: &str, tar: bytes::Bytes) -> Result<()>;
+
+    /// 列一层目录。**只列一层** —— 递归会在 `node_modules` 上卡好几秒。
+    ///
+    /// `path` 必须在工作区之内，由实现校验（[`validate_ws_path`]）。
+    async fn list_dir(&self, owner: &str, path: &str) -> Result<Vec<DirEntry>>;
+
+    /// 读一个文件的字节。
+    async fn read_file(&self, owner: &str, path: &str) -> Result<bytes::Bytes>;
+
+    /// 写一个文件。父目录不存在时一并建。
+    async fn write_file(&self, owner: &str, path: &str, bytes: bytes::Bytes) -> Result<()>;
 }
 
 /// 直连 docker.sock 的实现。
@@ -311,6 +395,138 @@ impl DockerRunner {
         {
             tracing::debug!(container = %name, error = %e, "删临时容器失败");
         }
+    }
+
+    /// `GET /containers/{id}/archive?path=…` 的字节。
+    ///
+    /// 导出、列目录、读文件三条都走它 —— 都是「让 daemon 去读那个卷」，
+    /// 容器里的进程既不参与也阻止不了。
+    ///
+    /// 上限**拒绝而不是截断**：一份被截断的 tar 解出来是一份看起来完整的
+    /// 文件列表 / 一个看起来完整的备份，而少了什么要到用它的那一刻才知道。
+    async fn archive(&self, container: &str, path: &str) -> Result<Vec<u8>> {
+        use futures::StreamExt as _;
+
+        let opts = qp::DownloadFromContainerOptionsBuilder::default()
+            .path(path)
+            .build();
+        let mut stream = self.docker.download_from_container(container, Some(opts));
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|e| CortexError::Store(format!("从 {container} 拉 {path} 失败：{e}")))?;
+            if buf.len() + chunk.len() > MAX_EXPORT_BYTES {
+                return Err(CortexError::Invalid(format!(
+                    "{container} 的 {path} 超过 {} MiB，拒绝给出一份不完整的结果。",
+                    MAX_EXPORT_BYTES / 1024 / 1024
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(buf)
+    }
+
+    /// `PUT /containers/{id}/archive?path=…`，**借一个临时容器**。
+    ///
+    /// 真机上撞出来的：沙箱容器是 `--read-only` 的，而这条端点对只读 rootfs
+    /// 的容器**一律 400**（`container rootfs is marked read-only`），
+    /// 哪怕要写的目标是一个可写的**卷**。导出那一侧没有这个限制。
+    ///
+    /// 于是造一个 rootfs 可写、挂同一个卷的容器，解进去，删掉。
+    /// **create 完就不 start** —— archive API 对「已创建未启动」的容器照常
+    /// 工作，所以那个容器从头到尾没跑过一行代码，无所谓它在哪个网段
+    /// （`network_mode: none` 只是把这件事写死）。
+    async fn put_archive(
+        &self,
+        owner: &str,
+        dest_dir: &str,
+        tar: bytes::Bytes,
+        make_parents: bool,
+    ) -> Result<()> {
+        let helper = format!("{}-restore", Self::container_name(owner));
+        // 上一次中途崩了会留下它。先删再建，比「已存在就复用」安全：
+        // 复用等于信任一个来历不明的容器的挂载配置
+        self.force_remove(&helper).await;
+
+        let spec = ContainerCreateBody {
+            image: Some(IMAGE.to_owned()),
+            // 不会被执行（从不 start）。写一条明确的东西，是为了万一在
+            // `docker ps -a` 里看见它时一眼知道它是干什么的
+            cmd: Some(vec!["/bin/true".to_owned()]),
+            host_config: Some(HostConfig {
+                mounts: Some(vec![Mount {
+                    typ: Some(MountType::VOLUME),
+                    source: Some(Self::volume_name(owner)),
+                    target: Some(WORKSPACE_PATH.to_owned()),
+                    read_only: Some(false),
+                    ..Default::default()
+                }]),
+                // rootfs **可写** —— 这正是借它的全部理由
+                readonly_rootfs: Some(false),
+                network_mode: Some("none".to_owned()),
+                cap_drop: Some(vec!["ALL".to_owned()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        self.docker
+            .create_container(
+                Some(
+                    qp::CreateContainerOptionsBuilder::default()
+                        .name(&helper)
+                        .build(),
+                ),
+                spec,
+            )
+            .await
+            .map_err(|e| CortexError::Store(format!("建临时容器失败：{e}")))?;
+
+        // 目标目录可能还不存在（用户往一个新子目录里传文件）。
+        // archive API 对不存在的目标回 404，而那条错误读起来像「文件没找到」,
+        // 与真相（是**父目录**没找到）差得远。所以先 mkdir 一层。
+        //
+        // 用一个空目录项的 tar 解到根来建 —— 容器从不 start，跑不了 mkdir
+        let mut result = Ok(());
+        if make_parents && dest_dir != WORKSPACE_PATH.trim_end_matches('/') {
+            let rel = dest_dir.trim_start_matches('/');
+            let mut b = tar::Builder::new(Vec::new());
+            let mut h = tar::Header::new_gnu();
+            h.set_size(0);
+            h.set_mode(0o755);
+            h.set_mtime(0);
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_cksum();
+            if b.append_data(&mut h, format!("{rel}/"), std::io::empty())
+                .is_ok()
+                && let Ok(bytes) = b.into_inner()
+            {
+                let opts = qp::UploadToContainerOptionsBuilder::default()
+                    .path("/")
+                    .build();
+                // 建目录失败不当作致命：目录可能本来就在，而真正的判据是
+                // 下面那次写入成不成
+                let _ = self
+                    .docker
+                    .upload_to_container(&helper, Some(opts), bollard::body_full(bytes.into()))
+                    .await;
+            }
+        }
+
+        if result.is_ok() {
+            let opts = qp::UploadToContainerOptionsBuilder::default()
+                .path(dest_dir)
+                .build();
+            result = self
+                .docker
+                .upload_to_container(&helper, Some(opts), bollard::body_full(tar))
+                .await
+                .map_err(|e| CortexError::Store(format!("写进 {dest_dir} 失败：{e}")));
+        }
+
+        // 无论成败都要收拾：留下一个挂着用户卷的容器，下一次 ensure 看不见它，
+        // 而它会一直占着那个卷的引用
+        self.force_remove(&helper).await;
+        result
     }
 
     /// 轮询容器里的 `/health`，直到它应答或超时。
@@ -577,103 +793,125 @@ impl SandboxRunner for DockerRunner {
     }
 
     async fn export_workspace(&self, owner: &str) -> Result<bytes::Bytes> {
-        use futures::StreamExt as _;
-
-        let name = Self::container_name(owner);
-        let opts = qp::DownloadFromContainerOptionsBuilder::default()
-            .path(WORKSPACE_PATH)
-            .build();
-
-        let mut stream = self.docker.download_from_container(&name, Some(opts));
-        let mut buf: Vec<u8> = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| {
-                CortexError::Store(format!("从 {name} 拉 {WORKSPACE_PATH} 失败：{e}"))
-            })?;
-            if buf.len() + chunk.len() > MAX_EXPORT_BYTES {
-                // **拒绝，不截断。** 一份被截断的备份比没有备份更坏：
-                // 它看起来是有的，而少了哪一半要到恢复那一刻才知道
-                return Err(CortexError::Invalid(format!(
-                    "{name} 的 {WORKSPACE_PATH} 超过 {} MiB，拒绝导出一份不完整的快照。\
-                     先清理工作区，或等卷配额那一格落地。",
-                    MAX_EXPORT_BYTES / 1024 / 1024
-                )));
-            }
-            buf.extend_from_slice(&chunk);
-        }
-        Ok(bytes::Bytes::from(buf))
+        let tar = self
+            .archive(&Self::container_name(owner), WORKSPACE_PATH)
+            .await?;
+        Ok(bytes::Bytes::from(tar))
     }
 
     async fn import_workspace(&self, owner: &str, tar: bytes::Bytes) -> Result<()> {
-        // ── 为什么要借一个临时容器 ──
-        //
-        // 真机上撞出来的：沙箱容器是 `--read-only` 的，而 docker 的
-        // `PUT /containers/{id}/archive` **对只读 rootfs 的容器一律 400**
-        // （`container rootfs is marked read-only`），哪怕要写的目标是一个
-        // 可写的**卷**。导出那一侧没有这个限制，所以只有恢复要绕。
-        //
-        // 于是造一个 rootfs 可写、挂同一个卷的容器，把 tar 解进去，再删掉。
-        //
-        // **它 create 完就不 start** —— archive API 对「已创建未启动」的容器
-        // 照常工作。所以这个容器从头到尾**没有跑过任何一行代码**，
-        // 也就无所谓它在哪个网段：`network_mode: none` 只是把这件事写死，
-        // 省得下一个人以为可以顺手在里面跑点什么。
-        let helper = format!("{}-restore", Self::container_name(owner));
-        // 上一次恢复中途崩了会留下它。先删再建，比「已存在就复用」安全：
-        // 复用等于信任一个来历不明的容器的挂载配置
-        self.force_remove(&helper).await;
-
-        let spec = ContainerCreateBody {
-            image: Some(IMAGE.to_owned()),
-            // 不会被执行（从不 start）。写一条明确的东西，是为了万一在
-            // `docker ps -a` 里看见它时一眼知道它是干什么的
-            cmd: Some(vec!["/bin/true".to_owned()]),
-            host_config: Some(HostConfig {
-                mounts: Some(vec![Mount {
-                    typ: Some(MountType::VOLUME),
-                    source: Some(Self::volume_name(owner)),
-                    target: Some(WORKSPACE_PATH.to_owned()),
-                    read_only: Some(false),
-                    ..Default::default()
-                }]),
-                // rootfs **可写** —— 这正是借它的全部理由
-                readonly_rootfs: Some(false),
-                network_mode: Some("none".to_owned()),
-                cap_drop: Some(vec!["ALL".to_owned()]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        self.docker
-            .create_container(
-                Some(
-                    qp::CreateContainerOptionsBuilder::default()
-                        .name(&helper)
-                        .build(),
-                ),
-                spec,
-            )
-            .await
-            .map_err(|e| CortexError::Store(format!("建恢复用的临时容器失败：{e}")))?;
-
         // **解到 `/` 而不是 `/workspace`。**
         //
         // archive API 导出的 tar，成员路径带 `workspace/` 这一级。解到
         // `/workspace` 会得到 `/workspace/workspace/...` —— 而那**不报错**，
         // 只是文件出现在错的地方，用户看到的是「恢复成功了但什么都没回来」。
-        let opts = qp::UploadToContainerOptionsBuilder::default()
-            .path("/")
-            .build();
-        let put = self
-            .docker
-            .upload_to_container(&helper, Some(opts), bollard::body_full(tar))
-            .await
-            .map_err(|e| CortexError::Store(format!("把快照写回 {owner} 的工作区失败：{e}")));
+        self.put_archive(owner, "/", tar, false).await
+    }
 
-        // 无论成败都要收拾：留下一个挂着用户卷的容器，下一次 ensure 看不见它，
-        // 而它会一直占着那个卷的引用
-        self.force_remove(&helper).await;
-        put
+    async fn list_dir(&self, owner: &str, path: &str) -> Result<Vec<DirEntry>> {
+        let path = validate_ws_path(path)?;
+        let tar = self.archive(&Self::container_name(owner), &path).await?;
+
+        // archive API 给的是**整个子树**的 tar，而我们只要一层。
+        //
+        // 为什么不换个 API：docker 没有「列目录」这条。要么这样，要么在容器里
+        // 跑一次 `ls` —— 而那是**不可信侧**，它想报什么就报什么
+        // （一个被注入的 agent 可以把 `secrets.env` 从列表里藏掉）。
+        // 宁可多解一次 tar。
+        //
+        // 代价：一个巨大的目录会把整棵子树拉过来。上限由 `MAX_EXPORT_BYTES`
+        // 兜着，超了报错而不是截断 —— 截断出来的是一份**看起来完整的**
+        // 文件列表，那比报错糟得多。
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut ar = tar::Archive::new(std::io::Cursor::new(&tar[..]));
+        let entries = ar
+            .entries()
+            .map_err(|e| CortexError::Store(format!("解 tar 失败：{e}")))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| CortexError::Store(format!("读 tar 项失败：{e}")))?;
+            let ep = entry
+                .path()
+                .map_err(|e| CortexError::Store(format!("tar 里的路径不合法：{e}")))?;
+            // tar 里的路径形如 `basename/子路径...`，第一段是被导出的那个目录
+            // 自己。要的是**紧邻的下一段**
+            let mut segs = ep.components();
+            let _root = segs.next();
+            let Some(first) = segs.next() else { continue };
+            let name = first.as_os_str().to_string_lossy().into_owned();
+            if name.is_empty() || !seen.insert(name.clone()) {
+                continue;
+            }
+            // 还有第三段 = 这一项是个目录（它自己那条记录可能排在后面，
+            // 也可能因为 tar 的组织方式而先出现子项）
+            let deeper = segs.next().is_some();
+            let is_dir = deeper || entry.header().entry_type().is_dir();
+            out.push(DirEntry {
+                name,
+                is_dir,
+                size: if is_dir {
+                    0
+                } else {
+                    i64::try_from(entry.header().size().unwrap_or(0)).unwrap_or(i64::MAX)
+                },
+            });
+        }
+        // 目录在前、同类按名字 —— 与桌面端那棵树的顺序一致
+        out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+        Ok(out)
+    }
+
+    async fn read_file(&self, owner: &str, path: &str) -> Result<bytes::Bytes> {
+        let path = validate_ws_path(path)?;
+        let tar = self.archive(&Self::container_name(owner), &path).await?;
+
+        let mut ar = tar::Archive::new(std::io::Cursor::new(&tar[..]));
+        let mut entries = ar
+            .entries()
+            .map_err(|e| CortexError::Store(format!("解 tar 失败：{e}")))?;
+        let Some(entry) = entries.next() else {
+            return Err(CortexError::Invalid(format!("{path} 是空的或者不是文件")));
+        };
+        let mut entry = entry.map_err(|e| CortexError::Store(format!("读 tar 项失败：{e}")))?;
+        if entry.header().entry_type().is_dir() {
+            return Err(CortexError::Invalid(format!(
+                "{path} 是目录，不是文件。整包拿走用 /sandbox/workspace.tar"
+            )));
+        }
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut buf)
+            .map_err(|e| CortexError::Store(format!("读 {path} 的内容失败：{e}")))?;
+        Ok(bytes::Bytes::from(buf))
+    }
+
+    async fn write_file(&self, owner: &str, path: &str, bytes: bytes::Bytes) -> Result<()> {
+        let path = validate_ws_path(path)?;
+        let (dir, name) = path
+            .rsplit_once('/')
+            .filter(|(_, n)| !n.is_empty())
+            .ok_or_else(|| CortexError::Invalid(format!("{path} 没有文件名")))?;
+
+        // 造一个只含这一个文件的 tar，解到它的父目录。
+        //
+        // 与 `import_workspace` 走同一条「临时容器」的路，理由也一样：
+        // 沙箱容器是只读 rootfs，而 `PUT /archive` 对它一律 400。
+        let mut ar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        // 0644：用户传进来的是数据不是程序。给可执行位是在给一个
+        // **不可信来源的文件**加上「能被 shell 工具直接跑起来」这条性质
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_cksum();
+        ar.append_data(&mut header, name, &bytes[..])
+            .map_err(|e| CortexError::Store(format!("造 tar 失败：{e}")))?;
+        let tar = ar
+            .into_inner()
+            .map_err(|e| CortexError::Store(format!("造 tar 失败：{e}")))?;
+
+        self.put_archive(owner, dir, bytes::Bytes::from(tar), true)
+            .await
     }
 }
 
@@ -774,6 +1012,64 @@ mod tests {
         // 这一条由 `MEMORY_SWAP_BYTES` 的定义式保证，编译期就成立 ——
         // 写成运行期断言会被 clippy 判成常量断言，且它也确实测不到什么
         const _: () = assert!(MEMORY_SWAP_BYTES > MEMORY_BYTES);
+    }
+
+    /// **路径校验是这一组文件端点唯一的栅栏。**
+    ///
+    /// 列 / 读 / 写三条都由宿主执行（docker daemon 直接读写卷），
+    /// 所以容器内的 landlock 与只读 rootfs 在这条路上一点忙都帮不上。
+    #[test]
+    fn a_path_cannot_escape_the_workspace() {
+        for good in [
+            "/workspace",
+            "/workspace/",
+            "/workspace/a.txt",
+            "/workspace/sub/deep/x",
+            "/workspace/./a.txt",
+            "/workspace/sub/../a.txt",
+        ] {
+            assert!(
+                validate_ws_path(good).is_ok(),
+                "{good} 是工作区内的合法路径，却被拒了 —— 用户会看到「路径不合法」\
+                 而完全不知道哪里不合法"
+            );
+        }
+
+        for bad in [
+            "/etc/passwd",
+            "/workspace/../etc/passwd",
+            "/workspace/../../root/.ssh/id_rsa",
+            "/workspace/a/../../etc/shadow",
+            "..",
+            "a.txt",               // 相对路径
+            "/workspace\\..\\etc", // 反斜杠
+            "/",
+        ] {
+            assert!(
+                validate_ws_path(bad).is_err(),
+                "{bad} 跑出了工作区却被放行 —— 这条路上没有第二道栅栏：\
+                 请求是 cortexd 用宿主身份执行的，容器的 landlock 与只读 rootfs \
+                 一个都不参与"
+            );
+        }
+    }
+
+    /// 规范化必须在判前缀**之前**。
+    #[test]
+    fn normalisation_happens_before_the_prefix_check() {
+        // 这一条单独立出来，是因为反过来写**看起来完全正确**：
+        // 「先确认它以 /workspace 开头，再规范化」—— 而
+        // `/workspace/../etc/passwd` 正是以 /workspace 开头的
+        assert!(
+            validate_ws_path("/workspace/../etc/passwd").is_err(),
+            "先判前缀再规范化的话这条会通过 —— 它确实以 /workspace 开头"
+        );
+        assert_eq!(
+            validate_ws_path("/workspace/sub/../a.txt").expect("弹回工作区内应当放行"),
+            "/workspace/a.txt",
+            "返回的必须是**规范化之后**的路径：把原样的字符串交给 docker 的话，\
+             同一个文件会有多种写法，而缓存与日志按字符串区分"
+        );
     }
 
     /// 寻址方式与「要不要带路由头」**是同一件事的两面**。

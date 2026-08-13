@@ -11,6 +11,9 @@ description = "Cortex 守护进程：记忆引擎与同步服务"
 cortex-core.workspace = true
 cortex-memory.workspace = true
 bytes = "1"
+# 解 / 造 tar：沙箱的文件端点全部经 docker 的 archive API，而那条端点
+# 的载荷就是 tar。**不开默认 feature** —— 我们不需要它碰宿主文件系统
+tar = { version = "0.4", default-features = false }
 cortex-llm.workspace = true
 cortex-store.workspace = true
 cortex-agent.workspace = true

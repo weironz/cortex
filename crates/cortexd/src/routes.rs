@@ -142,6 +142,15 @@ protected_routes! {
     // 四家云 agent 各有各的出口（Codex/Devin push 回 git 远端，
     // Claude web 在对话里给下载），我们至少得有一个。
     "/sandbox/workspace.tar" [GET] => get(download_workspace),
+    // 浏览 / 取单个文件 / 传单个文件进去。
+    //
+    // 与 `/sandbox/workspace.tar` 的分工：那条是「把这次的产物整个拿走」，
+    // 这三条是「我想看看里面有什么 / 只要那一个文件 / 把这份材料放进去」。
+    //
+    // **路径校验是这一组唯一的栅栏**：请求由 cortexd 用宿主身份经 docker
+    // 执行，容器的 landlock 与只读 rootfs 一个都不参与。见 `validate_ws_path`
+    "/sandbox/files" [GET, PUT] => get(list_sandbox_files).put(put_sandbox_file),
+    "/sandbox/files/raw" [GET] => get(read_sandbox_file),
 }
 
 /// 路由表。
@@ -657,6 +666,106 @@ async fn download_workspace(
         tar,
     )
         .into_response())
+}
+
+/// `?path=` 的形状。三条文件端点共用。
+#[derive(serde::Deserialize)]
+struct FilePathQuery {
+    path: Option<String>,
+}
+
+impl FilePathQuery {
+    /// 不给 `path` 时默认工作区根 —— 界面第一次展开树就是这样调的。
+    fn or_root(&self) -> &str {
+        self.path.as_deref().unwrap_or("/workspace")
+    }
+}
+
+/// 容器必须在。三条文件端点共用这句话。
+///
+/// **不是「加载失败」**：文件还在卷里，用户的下一步是发条消息把容器拉起来，
+/// 而不是重试或者担心数据没了。这两件事在界面上必须分得开。
+async fn require_sandbox<'a>(
+    st: &'a AppState,
+    owner: &str,
+) -> Result<&'a crate::state::SandboxLayer, ApiError> {
+    let layer = st
+        .sandbox_layer()
+        .ok_or_else(|| ApiError::unsupported("这个部署没有开云沙箱"))?;
+    if layer.runner.status(owner).await?.is_none() {
+        return Err(ApiError::unsupported(
+            "沙箱容器不在（可能已被回收）。文件还在卷里 —— \
+             先发一条消息把它拉起来，再试。",
+        ));
+    }
+    Ok(layer)
+}
+
+/// 列一层目录。
+async fn list_sandbox_files(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<FilePathQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    let layer = require_sandbox(&st, &owner).await?;
+    let path = q.or_root();
+    let entries = layer.runner.list_dir(&owner, path).await?;
+    Ok(Json(
+        serde_json::json!({ "path": path, "entries": entries }),
+    ))
+}
+
+/// 取一个文件的字节。
+async fn read_sandbox_file(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<FilePathQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    let layer = require_sandbox(&st, &owner).await?;
+    let path = q
+        .path
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("要取哪个文件 —— 缺 ?path="))?;
+    let bytes = layer.runner.read_file(&owner, path).await?;
+    Ok((
+        // **一律 octet-stream，不按扩展名猜 mime。**
+        //
+        // 这些字节是**沙箱里那个不可信 agent 写出来的**。回一个
+        // `text/html` 就等于给了它一条「在 cortexd 的源上执行任意脚本」的路
+        // （用户点开预览 = 一次 XSS）。同理不给 inline，一律 attachment。
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"{}\"",
+                    path.rsplit('/').next().unwrap_or("file")
+                ),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// 传一个文件进去。请求体就是原始字节。
+async fn put_sandbox_file(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<FilePathQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    let layer = require_sandbox(&st, &owner).await?;
+    let path = q
+        .path
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("要写到哪儿 —— 缺 ?path="))?;
+    let size = body.len();
+    layer.runner.write_file(&owner, path, body).await?;
+    Ok(Json(serde_json::json!({ "path": path, "size": size })))
 }
 
 /// 把某一份快照写回工作区。**叠加，不是替换。**
