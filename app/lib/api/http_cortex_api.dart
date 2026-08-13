@@ -25,6 +25,7 @@ import '../models/project.dart';
 import '../models/session_detail.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
+import '../models/workspace.dart';
 import 'api_exception.dart';
 import 'cortex_api.dart';
 import 'http_client_factory.dart';
@@ -944,20 +945,87 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
-  Future<Uint8List> sandboxWorkspaceTar() async {
+  Future<Uint8List> sandboxWorkspaceTar() =>
+      _sandboxBytes('/sandbox/workspace.tar');
+
+  @override
+  Future<Uint8List> sandboxReadFile(String path) =>
+      _sandboxBytes('/sandbox/files/raw', {'path': path});
+
+  /// 两条「回字节」的沙箱路由共用一份错误处理。
+  ///
+  /// 关键在 [_errorMessage] 而不是 `_trim(response.body)`：后者按
+  /// content-type 的 charset 解码，而 axum 的 `Json` 不带 charset，
+  /// `package:http` 于是回退到 **latin1** —— 服务端那句「文件还在卷里，
+  /// 先发条消息把它拉起来」会变成一串乱码，恰好是最需要看清的那一句。
+  /// 顺带把 `{"error": …}` 的外壳剥掉，用户不该读到 JSON。
+  Future<Uint8List> _sandboxBytes(
+    String path, [
+    Map<String, String>? query,
+  ]) async {
     final http.Response response;
     try {
-      response = await _client.get(
-        _uri('/sandbox/workspace.tar'),
-        headers: _headers(),
+      response = await _client.get(_uri(path, query), headers: _headers());
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(response.statusCode, _errorMessage(response));
+    }
+    return response.bodyBytes;
+  }
+
+  @override
+  Future<List<FileNode>> sandboxListFiles(String path) async {
+    final json = await _getJson('/sandbox/files', {'path': path});
+    // 子节点的绝对路径拿**服务端回的** path 去拼，不是请求里那个：服务端会
+    // 规范化（消掉多余的斜杠、结尾的 `/`），用请求里那份拼出来的路径，
+    // 下一次展开送回去的就是一条服务端没见过的字符串
+    final dir = asString(json['path'], path);
+    return asObjectList(json['entries'])
+        .map((e) {
+          final name = asString(e['name']);
+          final isDir = e['is_dir'] == true;
+          return FileNode(
+            name: name,
+            path: posixJoin(dir, name),
+            isDirectory: isDir,
+            // 目录的 size 服务端固定给 0，那不是「空目录」的意思 —— 传 null，
+            // 界面因此不会在目录行后面画一个 0 B
+            sizeBytes: isDir ? null : asInt(e['size']),
+          );
+        })
+        .toList(growable: false);
+  }
+
+  @override
+  Future<SandboxWriteReceipt> sandboxWriteFile({
+    required String path,
+    required Uint8List bytes,
+  }) async {
+    final http.Response response;
+    try {
+      response = await _client.put(
+        _uri('/sandbox/files', {'path': path}),
+        headers: _headers(const {
+          'content-type': 'application/octet-stream',
+          'accept': 'application/json',
+        }),
+        // 路径在 query，字节在 body。反过来（多段表单）要额外一层编码，
+        // 而这条路由两边都只认原始字节
+        body: bytes,
       );
     } on Object catch (e) {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _trim(response.body));
+      throw _failure(response.statusCode, _errorMessage(response));
     }
-    return response.bodyBytes;
+    final json = _decodeObject(
+      'PUT /sandbox/files',
+      utf8.decode(response.bodyBytes),
+    );
+    return (path: asString(json['path'], path), size: asInt(json['size']));
   }
 
   // ----------------------------------------------------------------- plumbing

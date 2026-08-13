@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../api/cortex_api.dart' show kSandboxRoot;
+import '../../core/local_agent.dart';
 import '../../models/attachment.dart' show formatBytes;
 import '../../models/workspace.dart';
 import '../../state/chat_controller.dart';
 import '../../workspace/workspace_fs.dart';
-import 'sandbox_download_button.dart';
+import 'sandbox_file_tree.dart';
 import 'workspace_binding_sheet.dart';
 
 /// The collapsible file tree that appears once a session is bound.
@@ -41,10 +43,20 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
     final session = ref.watch(
       chatControllerProvider.select((s) => s.activeSession),
     );
-    final workspace = session?.workspace;
-    if (session == null || workspace == null) return const SizedBox.shrink();
+    if (session == null) return const SizedBox.shrink();
 
+    final workspace = session.workspace;
     final scheme = Theme.of(context).colorScheme;
+
+    // 没有本地 agent 的构建（Web）：这块面板回答的是「我的文件在哪」，
+    // 而在那儿答案与本机绑定**无关** —— 文件在云端容器的卷里。
+    //
+    // 所以它不能跟着 `workspace != null` 走。跟着走的后果实测过：Web 端绑
+    // 工作区会被服务端 400 拒（任务 #75 卸掉了 cortexd 自己的文件工具），
+    // 于是 workspace 恒为 null，整块面板连同**唯一的文件出入口**在 Web 上
+    // 永远不出现 —— 而 Web 恰恰是唯一需要它的地方。
+    final sandboxOnly = !kLocalAgentSupported;
+    if (!sandboxOnly && workspace == null) return const SizedBox.shrink();
 
     return Container(
       decoration: BoxDecoration(
@@ -54,19 +66,36 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _Header(
-            workspace: workspace,
-            expanded: _expanded,
-            onToggle: () => setState(() => _expanded = !_expanded),
-            onRebind: () => showWorkspaceBindingSheet(context, session),
-          ),
+          if (sandboxOnly)
+            _Header(
+              icon: Icons.cloud_queue_rounded,
+              title: '云沙箱',
+              tooltip: '云端容器里的 $kSandboxRoot，跨会话保留',
+              expanded: _expanded,
+              onToggle: () => setState(() => _expanded = !_expanded),
+            )
+          else
+            _Header(
+              icon: Icons.folder_rounded,
+              title: workspace!.displayName,
+              tooltip: workspace.root,
+              expanded: _expanded,
+              onToggle: () => setState(() => _expanded = !_expanded),
+              action: _HeaderAction(
+                icon: Icons.swap_horiz_rounded,
+                tooltip: '更换工作区',
+                onPressed: () => showWorkspaceBindingSheet(context, session),
+              ),
+            ),
           if (_expanded)
             SizedBox(
               height: widget.maxTreeHeight,
-              // Keyed by root so switching sessions to a differently-bound one
-              // discards the expansion set and cached listings of the old tree
-              // instead of showing them under the new root.
-              child: _Tree(key: ValueKey(workspace.root), root: workspace.root),
+              child: sandboxOnly
+                  ? const SandboxWorkspaceView()
+                  // Keyed by root so switching sessions to a differently-bound
+                  // one discards the expansion set and cached listings of the
+                  // old tree instead of showing them under the new root.
+                  : _Tree(key: ValueKey(workspace!.root), root: workspace.root),
             ),
         ],
       ),
@@ -74,18 +103,36 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
   }
 }
 
-class _Header extends StatelessWidget {
-  const _Header({
-    required this.workspace,
-    required this.expanded,
-    required this.onToggle,
-    required this.onRebind,
+/// 一个可选的头部按钮。云沙箱那一支没有「更换工作区」可点 —— 那里的根是
+/// 服务端定的，换不了。
+class _HeaderAction {
+  const _HeaderAction({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
   });
 
-  final Workspace workspace;
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+}
+
+class _Header extends StatelessWidget {
+  const _Header({
+    required this.icon,
+    required this.title,
+    required this.tooltip,
+    required this.expanded,
+    required this.onToggle,
+    this.action,
+  });
+
+  final IconData icon;
+  final String title;
+  final String tooltip;
   final bool expanded;
   final VoidCallback onToggle;
-  final VoidCallback onRebind;
+  final _HeaderAction? action;
 
   @override
   Widget build(BuildContext context) {
@@ -108,13 +155,13 @@ class _Header extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 4),
-            Icon(Icons.folder_rounded, size: 14, color: scheme.secondary),
+            Icon(icon, size: 14, color: scheme.secondary),
             const SizedBox(width: 7),
             Expanded(
               child: Tooltip(
-                message: workspace.root,
+                message: tooltip,
                 child: Text(
-                  workspace.displayName,
+                  title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.labelMedium?.copyWith(
@@ -123,13 +170,14 @@ class _Header extends StatelessWidget {
                 ),
               ),
             ),
-            IconButton(
-              onPressed: onRebind,
-              iconSize: 15,
-              visualDensity: VisualDensity.compact,
-              tooltip: '更换工作区',
-              icon: const Icon(Icons.swap_horiz_rounded),
-            ),
+            if (action case final action?)
+              IconButton(
+                onPressed: action.onPressed,
+                iconSize: 15,
+                visualDensity: VisualDensity.compact,
+                tooltip: action.tooltip,
+                icon: Icon(action.icon),
+              ),
           ],
         ),
       ),
@@ -165,10 +213,6 @@ class _TreeState extends State<_Tree> {
   }
 
   Future<void> _checkRoot() async {
-    if (!kCanBrowseLocalFiles) {
-      setState(() => _rootExists = true);
-      return;
-    }
     final exists = await workspaceExists(widget.root);
     if (!mounted) return;
     setState(() => _rootExists = exists);
@@ -209,28 +253,10 @@ class _TreeState extends State<_Tree> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
 
-    // Web: no local filesystem, and the reason is a product statement rather
-    // than an error, so it gets neutral styling.
-    //
-    // 这段话改过一次。原文说「工作区已绑定并对 agent 生效」—— 那是任务 #75
-    // 之前的事实：那时 cortexd 自己带文件工具。#75 把它们卸掉之后，Web 端绑
-    // 工作区会被 400 拒，而这行字还在说已经生效，把「功能不存在」说成了
-    // 「功能在，只是你看不见」。
-    if (!kCanBrowseLocalFiles) {
-      return _Notice(
-        icon: Icons.public_rounded,
-        title: 'Web 端没有本机文件',
-        detail:
-            '浏览器读不到你这台机器的磁盘，绑本机工作区在 Web 端也不生效。'
-            '要让 agent 读写文件，在输入框打开「云沙箱」—— '
-            '它的工作区是云端容器里的 /workspace，跨会话保留。',
-        // 云沙箱唯一的文件出口。放在这里是因为这块面板本来就是用户
-        // 「我的文件在哪」的落点 —— 而在 Web 上那个答案是「在容器里，
-        // 从这儿拿出来」
-        trailing: const SandboxDownloadButton(),
-      );
-    }
-
+    // 这里不再有 Web 分支：没有本地 agent 的构建根本不会构造 `_Tree`
+    // （见 `_WorkspacePanelState.build` 的 `sandboxOnly`），它拿到的是
+    // 云沙箱那棵树。留一个永远画不出来的说明块，只会让下一个人以为
+    // Web 端还停在「只有一段文字」那一版。
     if (_rootExists == null) {
       return const Center(
         child: SizedBox(
@@ -417,14 +443,12 @@ class _Notice extends StatelessWidget {
     required this.title,
     required this.detail,
     this.tone,
-    this.trailing,
   });
 
   final IconData icon;
   final String title;
   final String detail;
   final Color? tone;
-  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -451,10 +475,6 @@ class _Notice extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(detail, style: theme.textTheme.labelSmall),
-          if (trailing != null) ...[
-            const SizedBox(height: 12),
-            Align(alignment: Alignment.centerLeft, child: trailing),
-          ],
         ],
       ),
     );

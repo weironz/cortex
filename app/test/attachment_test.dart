@@ -8,6 +8,7 @@ import 'dart:typed_data';
 import 'package:cortex_app/api/api_exception.dart';
 import 'package:cortex_app/api/blob_upload.dart';
 import 'package:cortex_app/api/cortex_api.dart';
+import 'package:cortex_app/models/workspace.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/core/hashing.dart';
 import 'package:cortex_app/models/attachment.dart';
@@ -142,6 +143,20 @@ class _BlobApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
   @override
   Future<Uint8List> sandboxWorkspaceTar() async =>
       throw UnimplementedError('这个替身不测云沙箱下载');
+
+  @override
+  Future<List<FileNode>> sandboxListFiles(String path) async =>
+      throw UnimplementedError('这个替身不测云沙箱文件树');
+
+  @override
+  Future<Uint8List> sandboxReadFile(String path) async =>
+      throw UnimplementedError('这个替身不测云沙箱文件树');
+
+  @override
+  Future<SandboxWriteReceipt> sandboxWriteFile({
+    required String path,
+    required Uint8List bytes,
+  }) async => throw UnimplementedError('这个替身不测云沙箱文件树');
 
   @override
   Future<Uint8List> blobBytes(String hash) async => Uint8List(0);

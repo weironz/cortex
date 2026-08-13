@@ -111,6 +111,35 @@ fn policy_for(mode: PermissionMode, env: cortex_agent::ExecEnvironment) -> Appro
 /// |---|---|---|
 /// | 越界路径 | 问一句，批准后本会话放行 | **直接拒**（`allows_escape_prompt`）|
 /// | `attended()` | 开 —— 人就在屏幕前 | **不开** —— 人在浏览器另一头 |
+/// 拼这一轮的系统提示词：base + 「你站在哪」+ 「这里的联网规矩」。
+///
+/// # 为什么抽成函数
+///
+/// 同 [`workspace_turn_for`]：它编码的是「桌面端与容器差在哪」，而差错了
+/// **不会报错**。少一段出网说明，容器里的模型撞上 403 只会原样重试；
+/// 多一段，桌面端的模型会把一次真实的网络故障当成策略拦截而放弃重试。
+/// 两种都得跑真机才看得见，所以要有个能被测的地方。
+///
+/// # 为什么接在 `brief` 后面而不是塞进 base
+///
+/// `brief` 那段「工作区在哪」两侧必须一字不差（它自己的文档解释了原因），
+/// 从 base 那一端插进去会把它推到一个与 cortexd 不同的位置上。接在后面则
+/// 两段各自完整，且**都是整会话稳定的**，一起进可缓存前缀，
+/// 不逐轮打穿它（CLAUDE.md 约束 4）。
+#[must_use]
+fn system_prompt_for(
+    base: &str,
+    env: cortex_agent::ExecEnvironment,
+    workspace: Option<&str>,
+) -> String {
+    let mut prompt = cortex_agent::workspace::brief(base, workspace);
+    if let Some(note) = cortex_agent::prompt::egress_note(env) {
+        prompt.push_str("\n\n");
+        prompt.push_str(note);
+    }
+    prompt
+}
+
 fn workspace_turn_for(
     env: cortex_agent::ExecEnvironment,
     root: &str,
@@ -318,8 +347,9 @@ impl Engine {
         // 用 `workspace_turn` 而不是 `bound` 判断：绑过但目录已不可用时上面
         // 降级成了纯聊天，此刻模型手里确实没有文件工具 —— 提示词必须跟着降级，
         // 否则它会照着一个已经不存在的工作区去许诺
-        let system_prompt = cortex_agent::workspace::brief(
+        let system_prompt = system_prompt_for(
             self.system_prompt,
+            self.exec_env,
             workspace_turn.as_ref().and(bound.as_deref()),
         );
 
@@ -724,6 +754,72 @@ mod tests {
             desktop.sandbox_root(),
             container.sandbox_root(),
             "围栏的根同样由工作区决定，与部署形态无关"
+        );
+    }
+
+    /// 出网说明只能出现在容器模式，且不能挤掉 `brief` 那两段。
+    ///
+    /// 两个方向的失败都不报错：
+    /// - 容器里少了它 → 模型撞上 `CONNECT tunnel failed, response 403`
+    ///   只会原样重试，白白烧掉一轮
+    /// - 桌面端多了它 → 那边根本没有代理，模型会把一次**真实**的网络故障
+    ///   解释成「被策略拦了、不该重试」，反而把能好的事变成死结
+    #[test]
+    fn only_the_container_prompt_mentions_the_egress_proxy() {
+        let container = system_prompt_for(
+            "底座",
+            cortex_agent::ExecEnvironment::Container,
+            Some("/workspace"),
+        );
+        assert!(
+            container.contains("CONNECT tunnel failed, response 403"),
+            "容器提示词里没有那个签名，模型就没法把眼前那一行和「被策略拦了」对上：{container}"
+        );
+        assert!(
+            container.contains("CORTEX_EGRESS_ALLOW"),
+            "得给模型一条出路（让用户放行域名），否则它只会反复试：{container}"
+        );
+
+        for env in [
+            cortex_agent::ExecEnvironment::LocalMachine,
+            cortex_agent::ExecEnvironment::None,
+        ] {
+            let desktop = system_prompt_for("底座", env, Some("/workspace"));
+            assert!(
+                !desktop.contains("CORTEX_EGRESS_ALLOW"),
+                "{} 上没有出网代理，这段话就是假话 —— \
+                 模型会照着它放弃重试一次真实的网络故障：{desktop}",
+                env.as_str()
+            );
+        }
+    }
+
+    /// 加出网说明不能动到 `brief` 那两段。
+    ///
+    /// `brief` 的「工作区在哪」两侧必须一字不差（见它自己的文档：同一个问题
+    /// 在桌面端与 Web 上答得不一样，是最难归因的一类差异）。所以这段只能
+    /// **接在后面**，不能插进 base 把它推到另一个位置上。
+    #[test]
+    fn the_egress_note_is_appended_and_leaves_the_workspace_brief_intact() {
+        let base = "底座";
+        let plain = cortex_agent::workspace::brief(base, Some("/workspace"));
+        let with_note = system_prompt_for(
+            base,
+            cortex_agent::ExecEnvironment::Container,
+            Some("/workspace"),
+        );
+        assert!(
+            with_note.starts_with(&plain),
+            "出网说明必须原样接在 brief 之后。插进 base 会把「工作区在哪」\
+             推到与 cortexd 不同的位置上，而那一段两侧必须一字不差。\n\
+             brief：{plain}\n实际：{with_note}"
+        );
+
+        // 未绑定工作区时，降级过的那段（「可访问的文件范围是空集」）同样要保住
+        let unbound = system_prompt_for(base, cortex_agent::ExecEnvironment::Container, None);
+        assert!(
+            unbound.contains("只有那个目录本身"),
+            "没绑工作区时 brief 那句「绑完也只有那个目录」不能被这次改动挤掉：{unbound}"
         );
     }
 

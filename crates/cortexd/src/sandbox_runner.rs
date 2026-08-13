@@ -319,6 +319,21 @@ pub trait SandboxRunner: Send + Sync {
 
     /// 写一个文件。父目录不存在时一并建。
     async fn write_file(&self, owner: &str, path: &str, bytes: bytes::Bytes) -> Result<()>;
+
+    /// 一条「哪个沙箱刚刚有东西被 OOM 杀了」的流。
+    ///
+    /// 返回 `None` = 这个实现没有这种信号（守望就不启动，而不是空转重试）。
+    ///
+    /// **必须能报出子进程被杀**，不能只报容器主进程死亡：沙箱里最常见的形态
+    /// 是 `python train.py` 吃爆内存被杀，而容器本身还好好活着 ——
+    /// 那种情况下 `inspect` 的 `OOMKilled` 一直是 false。
+    fn watch_oom(&self) -> Option<futures::stream::BoxStream<'static, String>>;
+
+    /// 这个 owner 的工作区占了多少字节。容器不在时 `None`。
+    ///
+    /// 用来告警，不用来限制 —— named volume 不受 `--storage-opt` 管
+    /// （那个只管容器可写层，而沙箱是只读 rootfs，可写层恒空）。
+    async fn workspace_bytes(&self, owner: &str) -> Result<Option<u64>>;
 }
 
 /// 直连 docker.sock 的实现。
@@ -529,6 +544,362 @@ impl DockerRunner {
         result
     }
 
+    /// 这次该用哪个镜像 —— 需要的话先跑一遍 setup 并缓存。
+    ///
+    /// **永不失败**：任何一步出问题都回落到基镜像并 warn。一个装不上依赖的
+    /// 沙箱仍然是一个能聊天、能读写文件的沙箱，而「因为 setup 挂了所以整个
+    /// 会话起不来」是明显更坏的取舍。
+    async fn prepare_image(&self, owner: &str) -> String {
+        let setup = self.read_setup_script(owner).await;
+        let hash = crate::sandbox_env::spec_hash(setup.as_deref(), IMAGE);
+        let tag = crate::sandbox_env::cache_tag(&hash);
+
+        // 命中就直接用。**这里就是全部的「缓存失效」逻辑** ——
+        // 改了脚本就是另一个 hash、另一个 tag，查不到，于是重跑。
+        // 没有一段「要不要失效」的判断，也就没有它写错的可能
+        if self.image_exists(&tag).await {
+            tracing::debug!(owner = %owner, %tag, "命中环境缓存");
+            return tag;
+        }
+
+        let Some(script) = setup else {
+            // 没有 setup.sh —— 绝大多数会话就是这样，不该有任何噪声
+            return IMAGE.to_owned();
+        };
+
+        tracing::info!(
+            owner = %owner, %tag, bytes = script.len(),
+            "第一次见到这份 setup.sh，跑一遍并缓存（最多 {} 分钟）",
+            crate::sandbox_env::SETUP_TIMEOUT.as_secs() / 60
+        );
+        match self.run_setup_and_commit(owner, &tag).await {
+            Ok(()) => {
+                self.gc_cache().await;
+                tag
+            }
+            Err(e) => {
+                tracing::warn!(
+                    owner = %owner, error = %e,
+                    "setup.sh 没跑成，这次用基镜像。已经写下的文件都还在，\
+                     修好脚本之后下一轮会自动重试"
+                );
+                IMAGE.to_owned()
+            }
+        }
+    }
+
+    /// 从卷里读 `setup.sh`。没有就是 `None`。
+    ///
+    /// 借一个 create 但不 start 的容器来读 —— 与写文件走同一条路，
+    /// 理由也一样：这一刻正式容器还没起来，而卷是先于容器存在的。
+    async fn read_setup_script(&self, owner: &str) -> Option<Vec<u8>> {
+        let probe = format!("{}-setup-probe", Self::container_name(owner));
+        self.force_remove(&probe).await;
+
+        let spec = ContainerCreateBody {
+            image: Some(IMAGE.to_owned()),
+            cmd: Some(vec!["/bin/true".to_owned()]),
+            host_config: Some(HostConfig {
+                mounts: Some(vec![Mount {
+                    typ: Some(MountType::VOLUME),
+                    source: Some(Self::volume_name(owner)),
+                    target: Some(WORKSPACE_PATH.to_owned()),
+                    read_only: Some(true),
+                    ..Default::default()
+                }]),
+                network_mode: Some("none".to_owned()),
+                cap_drop: Some(vec!["ALL".to_owned()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        if self
+            .docker
+            .create_container(
+                Some(
+                    qp::CreateContainerOptionsBuilder::default()
+                        .name(&probe)
+                        .build(),
+                ),
+                spec,
+            )
+            .await
+            .is_err()
+        {
+            return None;
+        }
+
+        let got = self.archive(&probe, crate::sandbox_env::SETUP_PATH).await;
+        self.force_remove(&probe).await;
+
+        let tar = got.ok()?;
+        if tar.len() > crate::sandbox_env::MAX_SETUP_BYTES * 2 {
+            tracing::warn!(owner = %owner, "setup.sh 太大，忽略");
+            return None;
+        }
+        let mut ar = tar::Archive::new(std::io::Cursor::new(&tar[..]));
+        let mut entry = ar.entries().ok()?.next()?.ok()?;
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut buf).ok()?;
+        (!buf.is_empty() || !tar.is_empty()).then_some(buf)
+    }
+
+    async fn image_exists(&self, tag: &str) -> bool {
+        self.docker.inspect_image(tag).await.is_ok()
+    }
+
+    /// setup 阶段：**可写 rootfs、有网、不发沙箱令牌**，跑完 commit 成 tag。
+    ///
+    /// 三个「不」各有理由：
+    ///
+    /// - **可写 rootfs**：只读的话 `apt` / `pip` 根本装不上，而 commit 出来的
+    ///   镜像会恒等于基镜像加一个空层（`docker commit` 不含卷数据）——
+    ///   那正是调研推翻原方案的第三条。
+    /// - **有网**：装依赖当然要联网。这一阶段**不**接沙箱网段，走默认网桥；
+    ///   出网 allowlist 是给 agent 阶段的（Codex 的两阶段模型同此）。
+    /// - **不发沙箱令牌**：这个容器不跑 agent，不需要任何 cortexd 凭据。
+    ///   给了就是白送一把。
+    async fn run_setup_and_commit(&self, owner: &str, tag: &str) -> Result<()> {
+        let name = format!("{}-setup", Self::container_name(owner));
+        self.force_remove(&name).await;
+
+        let spec = ContainerCreateBody {
+            image: Some(IMAGE.to_owned()),
+            // **必须覆盖 ENTRYPOINT。**
+            //
+            // 镜像的 ENTRYPOINT 是 `sandbox-entrypoint`，它最后
+            // `exec cortex-local "$@"` —— 于是只给 `cmd` 的话，真正跑起来的是
+            // `cortex-local /bin/sh -ec "..."`，clap 认不出这些参数，退出码 2。
+            //
+            // 真机第一次跑就是这个，而**回落逻辑让它看起来只是「这次没装上」**：
+            // 日志里一句 WARN，用户看到的是「缓存好像没什么用」，
+            // 而 setup 其实一次都没成功过。
+            entrypoint: Some(vec!["/bin/sh".to_owned(), "-ec".to_owned()]),
+            // `-e`：任何一步失败就整体失败，别把一个半装好的环境 commit 下来。
+            // 半装好的环境比装不上更坏 —— 它会命中缓存，然后在用的时候才炸
+            cmd: Some(vec![format!(
+                "cd {WORKSPACE_PATH} && sh {}",
+                crate::sandbox_env::SETUP_PATH
+            )]),
+            // ── setup 阶段以 root 跑，运行阶段仍然是 uid 10002 ──
+            //
+            // 装依赖就是要写 `/usr/lib`、`/opt`、apt 的缓存 —— 镜像里那个
+            // uid 10002 一个都写不了。第一版没改 user，脚本一碰 `/opt` 就
+            // permission denied，而**回落逻辑让它看起来只是「这次没装上」**。
+            //
+            // 这是不是把口子开大了：**没有**。三条各自成立：
+            //
+            // - `cap_drop ALL` + `no-new-privileges` 照旧 —— 这里的 root 是
+            //   一个没有任何 capability 的 root，出不了容器
+            // - 这个容器**不发沙箱令牌**，碰不到 cortexd 的任何一条路由
+            // - 它 commit 出来的镜像，运行阶段仍以 uid 10002 起
+            //
+            // 要承认的一点：`setup.sh` 来自工作区，而工作区是**那个不可信
+            // agent 能写的**。所以这条等价于「agent 能在一个一次性的、无网
+            // 凭据的、无 capability 的容器里以 root 跑一段脚本」——
+            // 而它本来就能在那个容器里跑任意命令。提权的是**容器内的身份**，
+            // 不是**容器的边界**，而边界才是这一层的防线。
+            user: Some("0:0".to_owned()),
+            host_config: Some(HostConfig {
+                mounts: Some(vec![Mount {
+                    typ: Some(MountType::VOLUME),
+                    source: Some(Self::volume_name(owner)),
+                    target: Some(WORKSPACE_PATH.to_owned()),
+                    read_only: Some(false),
+                    ..Default::default()
+                }]),
+                // **可写** —— 这一阶段的全部意义
+                readonly_rootfs: Some(false),
+                memory: Some(MEMORY_BYTES),
+                memory_swap: Some(MEMORY_SWAP_BYTES),
+                pids_limit: Some(PIDS_LIMIT),
+                cap_drop: Some(vec!["ALL".to_owned()]),
+                security_opt: Some(vec!["no-new-privileges".to_owned()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        self.docker
+            .create_container(
+                Some(
+                    qp::CreateContainerOptionsBuilder::default()
+                        .name(&name)
+                        .build(),
+                ),
+                spec,
+            )
+            .await
+            .map_err(|e| CortexError::Store(format!("建 setup 容器失败：{e}")))?;
+
+        let outcome = self.wait_setup(&name).await;
+        if outcome.is_ok() {
+            // `pause` 再 commit：跑完了进程其实已经退出，这一步是照 Daytona
+            // 的形状留着 —— 将来若改成「跑到一半就快照」，没有它会 commit 到
+            // 一个写了一半的文件系统
+            let _ = self.docker.pause_container(&name).await;
+            let (repo, t) = tag.split_once(':').unwrap_or((tag, "latest"));
+            let opts = qp::CommitContainerOptionsBuilder::default()
+                .container(&name)
+                .repo(repo)
+                .tag(t)
+                .build();
+            // ── commit 会**继承被 commit 那个容器的配置** ──
+            //
+            // 于是不管的话，缓存镜像的 entrypoint 是 `/bin/sh -ec`、cmd 是那句
+            // setup 命令、user 是 `0:0` —— 用它起出来的「沙箱」会把 setup 再跑
+            // 一遍然后退出，**里面根本没有 agent**，而且是 root。
+            //
+            // 真机第二次跑就是这样：setup 成功、commit 成功、下一步
+            // 「沙箱起来了但查不到地址」。这正是调研里那条「缓存命中但内容不对」
+            // 的另一种形态 —— 内容装对了，**入口点错了**。
+            //
+            // 从基镜像读回这三样再写进 commit 配置，而不是照抄一份常量：
+            // 抄的那份会在改 Dockerfile 的那天变成谎话。
+            let restored = self.base_runtime_config().await;
+            let committed = self
+                .docker
+                .commit_container(opts, restored)
+                .await
+                .map_err(|e| CortexError::Store(format!("commit 失败：{e}")));
+            let _ = self.docker.unpause_container(&name).await;
+            self.force_remove(&name).await;
+            committed?;
+            return Ok(());
+        }
+        self.force_remove(&name).await;
+        outcome
+    }
+
+    /// 起 setup 容器并等它跑完。非 0 退出码算失败。
+    async fn wait_setup(&self, name: &str) -> Result<()> {
+        use futures::StreamExt as _;
+
+        self.docker
+            .start_container(name, None::<qp::StartContainerOptions>)
+            .await
+            .map_err(|e| CortexError::Store(format!("起 setup 容器失败：{e}")))?;
+
+        let mut wait = self
+            .docker
+            .wait_container(name, None::<qp::WaitContainerOptions>);
+        let waited = tokio::time::timeout(crate::sandbox_env::SETUP_TIMEOUT, wait.next()).await;
+
+        match waited {
+            Err(_) => Err(CortexError::Unavailable(format!(
+                "setup.sh 跑了超过 {} 分钟还没结束，已中止",
+                crate::sandbox_env::SETUP_TIMEOUT.as_secs() / 60
+            ))),
+            Ok(None) => Err(CortexError::Store("setup 容器的等待流意外结束".into())),
+            // **bollard 把「非 0 退出」变成一个 Err，不是 Ok(status_code != 0)。**
+            //
+            // 第一版按后者写，于是脚本失败时落进了下面那个通用分支，日志里只有
+            // 一句 `Docker container wait error:` —— 连退出码都没有（docker 的
+            // `error` 字段常常是空的）。真机第一次跑就是这样，而那条消息对
+            // 「为什么没装上」一个字都没说。
+            Ok(Some(Err(bollard::errors::Error::DockerContainerWaitError { code, .. }))) => {
+                Err(CortexError::Invalid(format!(
+                    "setup.sh 以退出码 {code} 结束。最后几行输出：\n{}",
+                    self.tail_logs(name).await
+                )))
+            }
+            Ok(Some(Err(e))) => Err(CortexError::Store(format!("等 setup 容器失败：{e}"))),
+            Ok(Some(Ok(_))) => Ok(()),
+        }
+    }
+
+    /// 基镜像的 entrypoint / cmd / user，用来在 commit 时**盖回去**。
+    ///
+    /// 读回来而不是写一份常量：常量会在改 `Dockerfile.sandbox` 的那天变成
+    /// 谎话，而症状是「缓存镜像起出来的容器行为与基镜像不一样」——
+    /// 那个差别没有任何一处会报错。
+    async fn base_runtime_config(&self) -> bollard::models::ContainerConfig {
+        let mut cfg = bollard::models::ContainerConfig::default();
+        if let Ok(img) = self.docker.inspect_image(IMAGE).await
+            && let Some(c) = img.config
+        {
+            cfg.entrypoint = c.entrypoint;
+            cfg.cmd = c.cmd;
+            cfg.user = c.user;
+            cfg.working_dir = c.working_dir;
+            // env 不盖：沙箱的 env 由 `docker run` 那侧逐条给（令牌、远端地址、
+            // 代理），而 setup 阶段的 env 里没有它们。留空即用基镜像那份
+        }
+        cfg
+    }
+
+    /// setup 容器的最后几行输出。**失败时唯一有用的东西。**
+    ///
+    /// 不给的话，用户看到的是一个退出码和「自己去 docker logs」——
+    /// 而那个容器下一秒就被删了，他去不了。
+    async fn tail_logs(&self, name: &str) -> String {
+        use futures::StreamExt as _;
+
+        let opts = qp::LogsOptionsBuilder::default()
+            .stdout(true)
+            .stderr(true)
+            .tail("20")
+            .build();
+        let mut stream = self.docker.logs(name, Some(opts));
+        let mut out = String::new();
+        while let Some(Ok(chunk)) = stream.next().await {
+            out.push_str(&chunk.to_string());
+            if out.len() > 4096 {
+                break;
+            }
+        }
+        if out.trim().is_empty() {
+            "（没有输出）".to_owned()
+        } else {
+            out
+        }
+    }
+
+    /// 缓存镜像的 LRU 回收。
+    ///
+    /// **必须自己写**：`docker image prune` 只清 dangling（没有 tag 的），
+    /// 而我们的每一个都有 tag —— 不写的话它们只涨不减，几周后磁盘满，
+    /// 且看不出是谁占的。
+    async fn gc_cache(&self) {
+        let mut filters = HashMap::new();
+        filters.insert(
+            "reference".to_owned(),
+            vec![format!("{}:*", crate::sandbox_env::CACHE_REPO)],
+        );
+        let opts = qp::ListImagesOptionsBuilder::default()
+            .filters(&filters)
+            .build();
+        let Ok(images) = self.docker.list_images(Some(opts)).await else {
+            return;
+        };
+
+        let mut catalog = Vec::new();
+        for img in images {
+            let Some(tag) = img.repo_tags.first().cloned() else {
+                continue;
+            };
+            // docker 不给「最后使用时间」，只给创建时间。用它当近似 ——
+            // 每次命中缓存都不会更新 created，所以一个天天在用的老镜像仍然
+            // 排在前面。**这是这条 GC 已知的不足**，代价是偶尔多跑一次 setup，
+            // 而不是删掉正在用的东西（正在用的那个有容器引用着，删不掉）
+            catalog.push((tag, img.size, img.created));
+        }
+
+        for tag in
+            crate::sandbox_env::pick_evictions(catalog, crate::sandbox_env::CACHE_BUDGET_BYTES)
+        {
+            match self
+                .docker
+                .remove_image(&tag, None::<qp::RemoveImageOptions>, None)
+                .await
+            {
+                Ok(_) => tracing::info!(%tag, "缓存镜像超预算，已回收"),
+                // 正在被容器用着就删不掉 —— 那是**对的**，跳过
+                Err(e) => tracing::debug!(%tag, error = %e, "缓存镜像没删掉（可能正在用）"),
+            }
+        }
+    }
+
     /// 轮询容器里的 `/health`，直到它应答或超时。
     ///
     /// 用 `/health` 而不是 docker 的 healthcheck 状态：后者最快也要一个
@@ -571,7 +942,17 @@ impl DockerRunner {
 
     /// 容器规格。**纯函数，好测** —— 这份规格是安全边界本身，
     /// 而它写对了没人看得出来，写错了也没人看得出来。
-    fn spec(&self, owner: &str, token: &str, spec_hash: &str) -> ContainerCreateBody {
+    ///
+    /// **镜像是唯一的自由度**，而且只让 setup 缓存那条路用（命中时传缓存
+    /// tag）。挂载点、内存 / CPU / PID 上限、网络、capability 全部照旧写死：
+    /// 缓存镜像换掉的是「里面装了什么」，不是「它被允许做什么」。
+    fn spec_with_image(
+        &self,
+        owner: &str,
+        token: &str,
+        spec_hash: &str,
+        image: &str,
+    ) -> ContainerCreateBody {
         let mut labels = HashMap::new();
         labels.insert("cortex.sandbox.owner".to_owned(), owner.to_owned());
         labels.insert("cortex.sandbox.spec".to_owned(), spec_hash.to_owned());
@@ -618,7 +999,7 @@ impl DockerRunner {
         // 自己的端口 publish 到宿主。见 `status()` 里 `base_url` 的取法。
 
         ContainerCreateBody {
-            image: Some(IMAGE.to_owned()),
+            image: Some(image.to_owned()),
             env: Some(env),
             labels: Some(labels),
             host_config: Some(HostConfig {
@@ -709,13 +1090,20 @@ impl SandboxRunner for DockerRunner {
             )
             .await;
 
+        // ── 环境准备：需要的话先跑一遍 setup.sh 并缓存成镜像 ──
+        //
+        // 返回的是这次要用的镜像 —— 有缓存就是缓存镜像，没有 setup.sh
+        // 或者 setup 失败就是基镜像。**失败回落而不是让会话起不来**：
+        // 一个装不上依赖的沙箱仍然是一个能聊天、能读写文件的沙箱。
+        let image = self.prepare_image(owner).await;
+
         self.docker
             .create_container(
                 Some(qp::CreateContainerOptions {
                     name: Some(name.clone()),
                     ..Default::default()
                 }),
-                self.spec(owner, token, spec_hash),
+                self.spec_with_image(owner, token, spec_hash, &image),
             )
             .await
             .map_err(|e| CortexError::Store(format!("建沙箱容器失败：{e}")))?;
@@ -885,6 +1273,55 @@ impl SandboxRunner for DockerRunner {
         Ok(bytes::Bytes::from(buf))
     }
 
+    fn watch_oom(&self) -> Option<futures::stream::BoxStream<'static, String>> {
+        use futures::StreamExt as _;
+
+        let mut filters = HashMap::new();
+        // 只要 `oom` 这一种事件。不过滤的话这条流会把这台机器上**每个**容器的
+        // 每一次 start / stop / health_status 都送过来
+        filters.insert("event".to_owned(), vec!["oom".to_owned()]);
+        // 只要容器类的。docker 的 events 还包含 image / volume / network
+        filters.insert("type".to_owned(), vec!["container".to_owned()]);
+
+        let opts = qp::EventsOptionsBuilder::default()
+            .filters(&filters)
+            .build();
+        let stream = self.docker.events(Some(opts)).filter_map(|ev| async move {
+            let ev = ev.ok()?;
+            let name = ev.actor?.attributes?.get("name")?.clone();
+            // 只报我们自己的沙箱。这台机器上别的项目的容器 OOM 与我们无关，
+            // 而混进日志里会让人以为是沙箱在爆
+            name.starts_with(NAME_PREFIX).then_some(name)
+        });
+        Some(stream.boxed())
+    }
+
+    async fn workspace_bytes(&self, owner: &str) -> Result<Option<u64>> {
+        let name = Self::container_name(owner);
+        if self.status(owner).await?.is_none() {
+            return Ok(None);
+        }
+
+        // 为什么不 `docker system df -v`：那个报的是**卷的**大小，而它把
+        // 每个卷都算一遍，在一台跑着几十个容器的机器上要好几秒；
+        // 而且它给的是整卷，我们要的正好也是整卷 —— 但代价不成比例。
+        //
+        // 为什么不在容器里跑 `du`：那是不可信侧，它想报什么就报什么。
+        // 这条告警的全部意义是「在快照静默失败之前说一声」，
+        // 让被监视的一方自己报数就没有意义了。
+        //
+        // 于是用与快照同一条路：让 daemon 导出 tar，数字节。代价是要把整个卷
+        // 拉一遍 —— 所以这条 30 分钟才跑一次，而且**超上限时的错误正是我们
+        // 想知道的那件事**（卷已经大到快照做不了了）。
+        match self.archive(&name, WORKSPACE_PATH).await {
+            Ok(tar) => Ok(Some(tar.len() as u64)),
+            // 超过 MAX_EXPORT_BYTES 时 `archive` 报 Invalid —— 那不是失败，
+            // 那正是「已经超了」这个答案本身。回一个大于任何软限的数
+            Err(CortexError::Invalid(_)) => Ok(Some(u64::MAX)),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn write_file(&self, owner: &str, path: &str, bytes: bytes::Bytes) -> Result<()> {
         let path = validate_ws_path(path)?;
         let (dir, name) = path
@@ -939,7 +1376,7 @@ mod tests {
     #[test]
     fn the_spec_is_not_negotiable() {
         let r = runner();
-        let spec = r.spec("u1", "tok", "hash");
+        let spec = r.spec_with_image("u1", "tok", "hash", IMAGE);
         let host = spec.host_config.expect("必须有 HostConfig");
 
         assert_eq!(
@@ -1129,7 +1566,7 @@ mod tests {
     #[test]
     fn the_sandbox_publishes_no_ports_at_all() {
         let r = runner();
-        let spec = r.spec("u1", "tok", "hash");
+        let spec = r.spec_with_image("u1", "tok", "hash", IMAGE);
         let host = spec.host_config.expect("必须有 HostConfig");
         assert!(
             host.port_bindings.is_none(),
@@ -1153,7 +1590,7 @@ mod tests {
     #[test]
     fn every_egress_env_var_is_set() {
         let r = runner();
-        let spec = r.spec("u1", "tok", "hash");
+        let spec = r.spec_with_image("u1", "tok", "hash", IMAGE);
         let env = spec.env.expect("必须有 env");
         let want = format!("http://{EGRESS_HOST}:{EGRESS_PORT}");
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {

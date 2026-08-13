@@ -603,10 +603,168 @@ async fn run_shell(sandbox: &Sandbox, command: &str, timeout_ms: u64) -> ToolRes
         ToolResult::ok(body)
     } else {
         // 失败也把输出带上：模型要靠 stderr 判断是命令写错了还是被沙箱拦了
-        ToolResult::err(format!(
-            "退出码 {}\n{body}",
-            code.map_or_else(|| "signal".to_string(), |c| c.to_string())
-        ))
+        let signal = killing_signal(&out.status);
+        // 标注拼在**第一行**，理由见 `sigkill_note` 的文档
+        let note = sigkill_note(code, signal, memory_ceiling_bytes())
+            .map(|n| format!(" —— {n}"))
+            .unwrap_or_default();
+        ToolResult::err(format!("{}{note}\n{body}", failure_head(code, signal)))
+    }
+}
+
+/// 失败那一行的开头。**被信号杀掉时要把信号号说出来。**
+///
+/// 原先这里对「没有退出码」一律印 `退出码 signal`，而那是个死胡同：模型
+/// 既不知道是几号信号，也就无从判断该不该重试。而这条路径远不是边角 ——
+/// 见 [`killing_signal`] 里那段实测。
+fn failure_head(code: Option<i32>, signal: Option<i32>) -> String {
+    match (code, signal) {
+        (Some(c), _) => format!("退出码 {c}"),
+        (None, Some(s)) => format!("被信号 {s} 杀掉"),
+        // Unix 上两者必有其一，Windows 上 `code()` 恒为 `Some` —— 这一支
+        // 理论上到不了，但宁可印一句实话，也不要在这里 unwrap
+        (None, None) => "异常终止（既没有退出码也没有信号）".to_string(),
+    }
+}
+
+/// 把它杀掉的那个信号（若有）。非 Unix 一律 `None`。
+///
+/// # 为什么必须看这个，而不是只看退出码 137
+///
+/// 直觉上「被 OOM killer 杀掉 = 退出码 137」，**实测不成立**。
+/// `shell_argv` 起的是 `sh -c '<命令>'`，而 shell 对最后一条命令会直接
+/// `exec` 掉自己 —— 于是被杀的就是 shell 这个进程本身，父进程（也就是这里）
+/// 看到的是 `WIFSIGNALED`，`ExitStatus::code()` 返回 **`None`**。
+///
+/// 在一个 `--memory=80m` 的容器里逐个试过：
+///
+/// | 命令形状 | `/bin/bash` | `/bin/sh`（dash / busybox） |
+/// |---|---|---|
+/// | 单条命令（会被 exec 掉） | 信号 9 | 信号 9 |
+/// | 两条命令（shell 存活） | **信号 9**（bash 会把信号转发给自己） | 137 |
+///
+/// 四格里三格根本没有 137，而 `shell_argv` **优先挑的正是 bash**。
+/// 只认 137 的话，这个标注在最常见的形状上一次都不会触发 ——
+/// 而它不触发的样子和「本来就没有内存问题」完全一样。
+#[cfg(unix)]
+fn killing_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt as _;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn killing_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
+}
+
+/// `SIGKILL` 的信号号。
+///
+/// 写死 9 而不是取 `libc::SIGKILL`：`libc` 只在 Linux 目标上是依赖
+/// （见 Cargo.toml，macOS 走 `sandbox-exec`，不引 libc），为一个常量把它
+/// 提升成全平台依赖不划算。而 9 是 POSIX 最早钉死、至今没有任何 Unix
+/// 敢动的那三个号之一（1/9/15）。
+const SIGKILL: i32 = 9;
+
+/// shell **代为转述**同一件事时用的退出码：128 + 信号号。
+const EXIT_CODE_SIGKILL: i32 = 128 + SIGKILL;
+
+/// cgroup v2 里「当前这个 cgroup 的内存上限」。
+const CGROUP_V2_MEMORY_MAX: &str = "/sys/fs/cgroup/memory.max";
+
+/// 把「进程被 SIGKILL 了」翻译成模型能据以**换个做法**的信息。
+/// 返回的串**拼在第一行**（`退出码 137 —— …` / `被信号 9 杀掉 —— …`）。
+///
+/// # 这一条修的是什么
+///
+/// 子进程被 OOM killer 杀掉时，工具结果里只有一个 `137`（或者更糟：一句
+/// `退出码 signal`）。模型看不出这是内存问题 —— 沙箱的上限是宿主给的，
+/// 容器自己不声张 —— 于是**原样重试**，再被杀一次，一整轮就这么没了。
+/// 这段话只要做成一件事：让下一步换成「减小批量」而不是「再来一遍」。
+///
+/// # 为什么两个入口都要认
+///
+/// `code == 137` 与 `signal == 9` 是**同一件事的两种转述**，取决于 shell
+/// 有没有把自己 exec 掉。实测四格里三格走的是信号那一路，
+/// 见 [`killing_signal`] 的表 —— 只认 137 等于这个标注基本不会触发。
+///
+/// # 为什么措辞是「疑似」而不是断言
+///
+/// OOM killer 只是 `SIGKILL` **最常见**的来源，一条 `kill -9` 同样是它。
+/// 退出状态本身分不出这两者（真要分得靠宿主侧的 Docker `/events` 流，
+/// 而那在另一个进程里）。把猜测写成断言的代价是模型照着一个错误的原因去
+/// 改代码 —— 比不给标注更糟。
+///
+/// `SIGTERM`（信号 15 / 退出码 143）刻意**不在此列**：那是「有人礼貌地
+/// 要求它退出」，在这条路径上最可能的来源就是我们自己（超时那一支其实
+/// 更早就返回了，见上面 `timeout` 那一处），套一句内存猜测纯属误导。
+///
+/// # 为什么拼在第一行而不是追加在末尾
+///
+/// [`crate::turn`] 的 `truncate` 保头截尾，而一条被 OOM 杀掉的命令往往
+/// 恰好吐了一屏输出 —— 追加在末尾的标注会被截掉，正好在最需要它的那次。
+/// 同一行还顺带解决第二件事：界面的一行摘要取的是 `content` 的**首行**，
+/// 拼在这里，用户在界面上也一眼看到「疑似内存超限」。
+///
+/// # 为什么不区分容器与桌面端
+///
+/// 想过只在容器里加。但**决定要不要重试的是模型，不是用户**：桌面端用户
+/// 确实看得见系统监视器，可等他看见的时候模型已经重试完了。而
+/// 「这个进程是被 SIGKILL 掉的」在两边同样为真、同样值得换个做法。
+///
+/// 真正只属于容器的是那个**数字**，所以它单独由 `ceiling` 带进来：有上限
+/// 就报出来，没有就只说形状。这样桌面端不会读到一个凭空捏造的内存上限。
+fn sigkill_note(code: Option<i32>, signal: Option<i32>, ceiling: Option<u64>) -> Option<String> {
+    if code != Some(EXIT_CODE_SIGKILL) && signal != Some(SIGKILL) {
+        return None;
+    }
+    let cap = ceiling.map_or_else(String::new, |b| {
+        format!("（本进程的内存上限是 {}）", mib(b))
+    });
+    Some(format!(
+        "疑似内存超限被杀{cap}。\n\
+         SIGKILL（信号 9，shell 转述时报成退出码 137）最常见的原因是内存耗尽触发 \
+         OOM killer，但一条 `kill -9` 也是它，所以只是疑似。\n\
+         若确是内存问题，原样重试还会被杀一次 —— 请减小批量、改成分批或流式处理，\
+         或者换一个更省内存的做法（例如逐行读而不是整个读进内存）。"
+    ))
+}
+
+/// 本进程实际受哪个内存上限约束。拿不到就是 `None` —— **不猜**。
+///
+/// # 为什么不硬编码 512 MiB
+///
+/// 那个数字的权威在 `cortexd` 的 `sandbox_runner`（`--memory`），而
+/// cortex-agent 依赖不到它（依赖方向是 agent ← cortexd），照抄一份的下场是
+/// 哪天它改了、这边还在报旧数。而报错的上限比不报更坏：模型会照着它去分批。
+///
+/// # 为什么只读这一个路径，不去解析 `/proc/self/cgroup` 拼出真正的那个
+///
+/// 因为这条路径的「不准」恰好准在需要的地方：容器里 cgroupns 是 private，
+/// `/sys/fs/cgroup` 就是这个容器自己的根，`memory.max` 正是 `docker run
+/// --memory` 那个值（实测 `--memory=512m` → `536870912`）。而在桌面上，
+/// 这个文件要么不存在（Windows / macOS），要么是宿主根 cgroup 的字面量
+/// `max`（实测），两种都 parse 不出数 —— 于是**自动**退化成「不报数字」，
+/// 正是桌面端该有的行为：那边我们本来就不知道这个数。
+///
+/// 换句话说，多写的那段 `/proc/self/cgroup` 解析只会让桌面端开始报一个
+/// systemd slice 的上限，而那个数与「这条命令为什么被杀」基本无关。
+fn memory_ceiling_bytes() -> Option<u64> {
+    // 无上限时文件内容是字面量 `max` 而不是一个大数 —— parse 失败即 None，
+    // 这不是巧合，是这里唯一要处理的特殊值
+    std::fs::read_to_string(CGROUP_V2_MEMORY_MAX)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// 字节数说成人话。上限本来就是按整 MiB 配出来的，不必要小数。
+fn mib(bytes: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= MIB {
+        format!("{} MiB", bytes / MIB)
+    } else {
+        format!("{bytes} 字节")
     }
 }
 
@@ -1026,5 +1184,153 @@ mod tests {
             "shell 要碰的路径藏在命令文本里。声明一个 path_arg 会让越界确认             只覆盖到那一个参数，而命令里其余路径静默通过 —— 比不覆盖更糟，             因为它看起来是覆盖了的"
         );
         assert_eq!(by("memory_search").path_arg, None);
+    }
+
+    /// 137 必须被翻译成一句模型能据以**换做法**的话，而不只是个数字。
+    ///
+    /// 这条同时钉住措辞里的三件事，少任何一件这个标注就白加了：
+    /// 「疑似」（不能把猜测说成结论）、内存上限那个数、以及「别原样重试」
+    /// 之后的替代动作。
+    #[test]
+    fn exit_code_137_is_translated_into_something_actionable() {
+        let note = sigkill_note(Some(137), None, Some(512 * 1024 * 1024))
+            .expect("137 = 128+9(SIGKILL)，必须给出标注 —— 光一个数字模型只会原样重试");
+
+        assert!(
+            note.contains("疑似"),
+            "137 也可能来自一条 kill -9，退出码本身分不出来。\
+             把猜测写成断言会让模型照着一个错误的原因去改代码。实际：{note}"
+        );
+        assert!(
+            note.contains("512 MiB"),
+            "拿得到上限就必须报出来 —— 「省点内存」是空话，\
+             「上限 512 MiB」才决定得了批量该切多大。实际：{note}"
+        );
+        assert!(
+            note.contains("重试"),
+            "整段话要改掉的行为就是原样重试，不明说这一条等于没说。实际：{note}"
+        );
+        assert!(
+            note.contains("分批") || note.contains("流式"),
+            "只说「别重试」会把模型堵死在原地，得给出下一步。实际：{note}"
+        );
+    }
+
+    /// **被信号杀掉这一路同样要认。** 这条守的是实测出来的那个反直觉事实。
+    ///
+    /// `sh -c '<命令>'` 会把自己 exec 掉，于是被 OOM killer 杀掉的就是 shell
+    /// 本身，父进程看到的是 `WIFSIGNALED`、`code()` 返回 `None`。在
+    /// `--memory=80m` 的容器里实测：bash 单条命令、bash 两条命令、
+    /// sh 单条命令三种形状都走信号那一路，只有 sh + 两条命令才报 137。
+    /// 而 `shell_argv` 优先挑的正是 bash —— 只认 137 的话这个标注几乎不触发，
+    /// 且**不触发的样子和「本来就没有内存问题」一模一样**。
+    #[test]
+    fn a_signalled_process_gets_the_same_note_as_exit_code_137() {
+        let by_signal = sigkill_note(None, Some(9), Some(512 * 1024 * 1024))
+            .expect("被 SIGKILL 直接杀掉时也必须给标注 —— 这恰恰是最常见的那一路");
+        assert!(
+            by_signal.contains("疑似内存超限"),
+            "两条路必须给出同一句结论，否则模型在 bash 那一路上什么都得不到。实际：{by_signal}"
+        );
+        assert_eq!(
+            by_signal,
+            sigkill_note(Some(137), None, Some(512 * 1024 * 1024)).unwrap(),
+            "137 与信号 9 是同一件事的两种转述，措辞不该因为哪个 shell 而变"
+        );
+
+        // 头一行也得说清楚。原先这里印的是「退出码 signal」——
+        // 模型既不知道几号信号，也就无从判断该不该重试
+        let head = failure_head(None, Some(9));
+        assert!(
+            head.contains('9'),
+            "被信号杀掉时必须把信号号说出来，「signal」三个字等于没说。实际：{head}"
+        );
+        assert_eq!(failure_head(Some(2), None), "退出码 2");
+    }
+
+    /// 只认 SIGKILL 那两种转述，且拿不到上限时**绝不**编一个数字出来。
+    ///
+    /// 143 / 信号 15（SIGTERM）单列：它是「有人礼貌地要求退出」，
+    /// 在这条路径上最可能就是我们自己的超时 —— 给它套一句内存猜测是误导。
+    #[test]
+    fn other_exit_codes_get_no_memory_guess() {
+        for code in [0, 1, 2, 126, 127, 130, 139, 143] {
+            assert!(
+                sigkill_note(Some(code), None, Some(512 * 1024 * 1024)).is_none(),
+                "退出码 {code} 与内存无关，却拿到了内存标注 —— \
+                 尤其 143(SIGTERM) 通常是超时/停容器，把它说成 OOM 会让模型\
+                 去优化一段根本不占内存的代码"
+            );
+        }
+        for sig in [1, 2, 11, 15] {
+            assert!(
+                sigkill_note(None, Some(sig), Some(512 * 1024 * 1024)).is_none(),
+                "信号 {sig} 不是 SIGKILL。尤其 11(SIGSEGV) 是崩溃、15(SIGTERM) 是\
+                 被要求退出，两者都会被「疑似内存超限」带偏排查方向"
+            );
+        }
+        let no_cap = sigkill_note(Some(137), None, None).expect("没有上限也该说清 137 是怎么回事");
+        assert!(
+            !no_cap.contains("上限"),
+            "桌面端读不到 cgroup 上限，此时报任何数字都是编的 —— \
+             模型会照着它去切批量。实际：{no_cap}"
+        );
+        assert!(
+            no_cap.contains("疑似"),
+            "没有数字时那句「疑似被 SIGKILL 了」仍然成立且仍然有用。实际：{no_cap}"
+        );
+    }
+
+    /// 上限只认 cgroup v2 那个文件里的**数字**，`max` 与读不到都算没有。
+    ///
+    /// 这一条守的是「宁可不报，也不报错的数」：无上限时文件里是字面量 `max`
+    /// （已在容器里实测），把它当成 0 或某个默认值都会让模型收到一个假上限。
+    #[test]
+    fn the_memory_ceiling_is_never_invented() {
+        // 本机（Windows 开发机 / 无 cgroup 的 CI）读不到就该是 None；
+        // 在有限额的容器里跑同一条测试则应拿到一个正数。两种都合法，
+        // 不合法的只有「读不到却给出了一个数」
+        match memory_ceiling_bytes() {
+            None => {} // 桌面端 / 无限额容器：正确的答案就是「不知道」
+            Some(b) => assert!(
+                b > 0,
+                "cgroup 报了 0 字节上限，这不可能 —— 多半是把 `max` 之类的\
+                 非数字当成了 0，而 0 会让模型以为自己一个字节都不能用"
+            ),
+        }
+        assert_eq!(mib(512 * 1024 * 1024), "512 MiB");
+        assert_eq!(
+            mib(1024),
+            "1024 字节",
+            "不足 1 MiB 时按字节说，别四舍五入成 0 MiB"
+        );
+    }
+
+    /// 标注必须落在**第一行**。
+    ///
+    /// 两个理由都只有在真出事那次才暴露：`turn::truncate` 保头截尾，
+    /// 而被 OOM 杀掉的命令往往正好吐满一屏；界面的一行摘要取的也是首行。
+    #[test]
+    fn the_note_rides_on_the_first_line_where_truncation_cannot_reach_it() {
+        // 与 `run_shell` 的失败分支同一套拼法
+        let (code, signal) = (Some(137), None);
+        let note = sigkill_note(code, signal, Some(512 * 1024 * 1024)).expect("137 必须有标注");
+        let rendered = format!(
+            "{} —— {note}\n{}",
+            failure_head(code, signal),
+            "输出".repeat(10_000)
+        );
+        let first = rendered.lines().next().expect("总有第一行");
+        assert!(
+            first.contains("疑似内存超限"),
+            "标注被挤出了首行。追加在末尾会被 truncate 截掉，\
+             而那恰好发生在输出很长、也就是最需要这句话的那一次。首行是：{first}"
+        );
+        assert!(
+            first.chars().count() <= 120,
+            "首行还要当界面那句一行摘要（`turn::first_line` 只取 120 字符），\
+             太长的话「疑似内存超限」会被切掉。首行有 {} 字符：{first}",
+            first.chars().count()
+        );
     }
 }

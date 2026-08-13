@@ -17,11 +17,13 @@ mod quota;
 mod reembed;
 mod request_tenant;
 mod routes;
+mod sandbox_env;
 mod sandbox_proxy;
 mod sandbox_reaper;
 mod sandbox_runner;
 mod sandbox_snapshot;
 mod sandbox_token;
+mod sandbox_watch;
 mod state;
 mod sync_notify;
 mod sync_payload;
@@ -215,6 +217,8 @@ async fn main() -> anyhow::Result<()> {
     // 时间里什么都不做，而那恰恰是上一批容器还挂着的时候
     sandbox_reaper::spawn(state.clone());
     sandbox_snapshot::spawn(state.clone());
+    sandbox_watch::spawn_oom_watch(state.clone());
+    sandbox_watch::spawn_quota_watch(state.clone());
 
     let app = routes::router(state)
         // 默认一个跨源都不许：生产是单域名路径分流，Web 与 cortexd 同源。

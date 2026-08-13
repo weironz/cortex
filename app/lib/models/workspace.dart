@@ -64,6 +64,14 @@ String basenameOf(String path) {
   return p.substring(i + 1);
 }
 
+/// Joins a directory and a single entry name with `/`.
+///
+/// 只用于云沙箱那一侧的路径 —— 容器里是 Linux，分隔符恒为 `/`，不该跟着
+/// **客户端**所在的平台走。用 `dart:io` 的 `path.join` 会在 Windows 上拼出
+/// `\`，而那条路径是要发回给容器的。
+String posixJoin(String dir, String name) =>
+    dir.endsWith('/') ? '$dir$name' : '$dir/$name';
+
 /// Makes [path] relative to [root] for display, keeping forward slashes.
 ///
 /// Falls back to the input when it is not under [root] — which happens whenever
