@@ -135,6 +135,13 @@ protected_routes! {
     // 「被攻陷的容器删不掉自己的备份」这条性质就落在这个差别上
     "/sandbox/snapshots" [GET, POST] => get(list_snapshots).post(take_snapshot),
     "/sandbox/snapshots/{id}/restore" [POST] => post(restore_snapshot),
+    // 把整个工作区打包下载。
+    //
+    // 没有它的话，agent 在容器卷里写出来的东西**用户永远拿不到** ——
+    // 看得见工具行说「写了 report.md」，然后就没有然后了。
+    // 四家云 agent 各有各的出口（Codex/Devin push 回 git 远端，
+    // Claude web 在对话里给下载），我们至少得有一个。
+    "/sandbox/workspace.tar" [GET] => get(download_workspace),
 }
 
 /// 路由表。
@@ -610,6 +617,46 @@ async fn take_snapshot(
             "note": "沙箱容器现在不在（可能已被回收）。卷还在，等下次对话把它拉起来就会自动拍。",
         }))),
     }
+}
+
+/// 把整个 `/workspace` 打成 tar 下载。
+///
+/// # 为什么是整包而不是一个文件树 + 逐个下载
+///
+/// 文件树要么在容器里跑一次 `ls`（那是不可信侧），要么在宿主侧把整个卷导出
+/// 再解 tar 头 —— 后者与直接给整包的代价一样。而用户真正要的通常是
+/// 「把这次的产物拿走」，不是「浏览」。先把出口打通，浏览留给以后。
+///
+/// # 为什么不复用快照
+///
+/// 快照最旧可能是 15 分钟前的。用户点下载的那一刻要的是**现在**的样子 ——
+/// 给一份 15 分钟前的会让人以为 agent 刚才那一步没生效。
+async fn download_workspace(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    let layer = st
+        .sandbox_layer()
+        .ok_or_else(|| ApiError::unsupported("这个部署没有开云沙箱"))?;
+    if layer.runner.status(&owner).await?.is_none() {
+        return Err(ApiError::unsupported(
+            "沙箱容器不在（可能已被回收）。文件还在卷里 —— \
+             先发一条消息把它拉起来，再下载。",
+        ));
+    }
+    let tar = layer.runner.export_workspace(&owner).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-tar"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"workspace.tar\"",
+            ),
+        ],
+        tar,
+    )
+        .into_response())
 }
 
 /// 把某一份快照写回工作区。**叠加，不是替换。**

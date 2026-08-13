@@ -339,6 +339,15 @@ abstract interface class CortexApi {
   /// having to know which backend they are on.
   Future<Uint8List> blobBytes(String hash);
 
+  /// `GET /sandbox/workspace.tar` — 把云沙箱的整个工作区打包取回来。
+  ///
+  /// 没有这条的话，agent 在容器卷里写出来的东西**用户永远拿不到**：
+  /// 工具行上写着「写了 report.md」，然后就没有然后了。
+  ///
+  /// 容器已被回收时服务端回 4xx 并说清「文件还在卷里，先发条消息把它拉起来」
+  /// —— 那不是数据丢了，而两者在界面上必须分得开。
+  Future<Uint8List> sandboxWorkspaceTar();
+
   /// `GET /ws` — **one** connection attempt.
   ///
   /// The returned stream ends when the socket closes and errors when it cannot

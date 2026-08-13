@@ -943,6 +943,23 @@ class HttpCortexApi implements CortexApi {
     return response.bodyBytes;
   }
 
+  @override
+  Future<Uint8List> sandboxWorkspaceTar() async {
+    final http.Response response;
+    try {
+      response = await _client.get(
+        _uri('/sandbox/workspace.tar'),
+        headers: _headers(),
+      );
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(response.statusCode, _trim(response.body));
+    }
+    return response.bodyBytes;
+  }
+
   // ----------------------------------------------------------------- plumbing
 
   /// A JSON POST. [body] null means "send nothing at all" — see [issueTicket]

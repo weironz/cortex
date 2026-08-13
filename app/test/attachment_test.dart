@@ -140,6 +140,10 @@ class _BlobApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
   }
 
   @override
+  Future<Uint8List> sandboxWorkspaceTar() async =>
+      throw UnimplementedError('这个替身不测云沙箱下载');
+
+  @override
   Future<Uint8List> blobBytes(String hash) async => Uint8List(0);
 
   @override

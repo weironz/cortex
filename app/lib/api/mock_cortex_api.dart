@@ -657,6 +657,10 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
   }) async => throw const CortexApiException('Mock 数据源不支持直传', statusCode: 501);
 
   @override
+  Future<Uint8List> sandboxWorkspaceTar() async =>
+      throw const CortexApiException('Mock 数据源没有云沙箱', statusCode: 501);
+
+  @override
   Future<Uint8List> blobBytes(String hash) async {
     await _latency(70);
     final bytes = _blobs[hash];

@@ -5,6 +5,7 @@ import '../../models/attachment.dart' show formatBytes;
 import '../../models/workspace.dart';
 import '../../state/chat_controller.dart';
 import '../../workspace/workspace_fs.dart';
+import 'sandbox_download_button.dart';
 import 'workspace_binding_sheet.dart';
 
 /// The collapsible file tree that appears once a session is bound.
@@ -223,6 +224,10 @@ class _TreeState extends State<_Tree> {
             '浏览器读不到你这台机器的磁盘，绑本机工作区在 Web 端也不生效。'
             '要让 agent 读写文件，在输入框打开「云沙箱」—— '
             '它的工作区是云端容器里的 /workspace，跨会话保留。',
+        // 云沙箱唯一的文件出口。放在这里是因为这块面板本来就是用户
+        // 「我的文件在哪」的落点 —— 而在 Web 上那个答案是「在容器里，
+        // 从这儿拿出来」
+        trailing: const SandboxDownloadButton(),
       );
     }
 
@@ -412,12 +417,14 @@ class _Notice extends StatelessWidget {
     required this.title,
     required this.detail,
     this.tone,
+    this.trailing,
   });
 
   final IconData icon;
   final String title;
   final String detail;
   final Color? tone;
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -444,6 +451,10 @@ class _Notice extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(detail, style: theme.textTheme.labelSmall),
+          if (trailing != null) ...[
+            const SizedBox(height: 12),
+            Align(alignment: Alignment.centerLeft, child: trailing),
+          ],
         ],
       ),
     );

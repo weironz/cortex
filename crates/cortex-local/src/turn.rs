@@ -34,6 +34,16 @@ use crate::workspaces::Workspaces;
 /// `memory_search` 工具一次拿多少条。与 cortexd 那侧保持一致。
 const TOOL_SEARCH_LIMIT: i64 = 8;
 
+/// 容器里单轮的 wall-clock 上限。**只在容器模式生效。**
+///
+/// 30 分钟：比任何正当的单轮都长（`max_rounds` 本来就限了轮数，这一条防的是
+/// 「每一轮都很慢」或者工具卡死），又短到不会让一个死循环占着容器过夜。
+///
+/// 与空闲回收的 30 分钟**是同一个数字但不是同一件事**：那个数的起点是
+/// 「令牌最后一次被用」，而正在死循环的 agent 一直在用令牌 ——
+/// 两条各堵一头，缺了这条，那条就形同虚设。
+const MAX_TURN_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 /// 把用户选的档位翻译成 agent 层的策略。
 ///
 /// # 为什么是一个函数而不是 `impl From`
@@ -167,7 +177,32 @@ impl Engine {
         let (tx, rx) = mpsc::channel(64);
         let engine = Arc::clone(self);
         tokio::spawn(async move {
-            if let Err(e) = engine.run_turn(req, &tx).await {
+            let run = engine.run_turn(req, &tx);
+            // ── 容器里给单轮一个 wall-clock 上限 ──
+            //
+            // 空闲回收（cortexd 侧，30 分钟）的活跃信号是「令牌多久没被用过」，
+            // 而**一个在死循环里反复调 LLM 的 agent 一直在用令牌** ——
+            // 于是「在跑 turn」变成永续续命，那个容器再也不会被回收。
+            // 上限把这条路堵死。
+            //
+            // 桌面端不设：那是用户自己的机器，他看得见、随时能停，而一个
+            // 正当的长任务（跑一整套测试）被 30 分钟砍掉才是真的坏。
+            // 容器里没有「他看得见」这个前提。
+            let outcome = if engine.exec_env.is_container() {
+                match tokio::time::timeout(MAX_TURN_WALL_CLOCK, run).await {
+                    Ok(r) => r,
+                    Err(_) => Err(CortexError::Unavailable(format!(
+                        "这一轮跑了超过 {} 分钟，已经中止。\
+                         沙箱里的单轮有时间上限，防止 agent 陷进死循环之后\
+                         一直续命占着容器。已经写下的文件都还在，\
+                         再发一条消息可以接着干。",
+                        MAX_TURN_WALL_CLOCK.as_secs() / 60
+                    ))),
+                }
+            } else {
+                run.await
+            };
+            if let Err(e) = outcome {
                 tx.send(ChatEvent::Error {
                     message: e.to_string(),
                 })

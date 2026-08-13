@@ -661,6 +661,10 @@ class _ConfirmApi
   }) => throw UnimplementedError();
 
   @override
+  Future<Uint8List> sandboxWorkspaceTar() async =>
+      throw UnimplementedError('这个替身不测云沙箱下载');
+
+  @override
   Future<Uint8List> blobBytes(String hash) => throw UnimplementedError();
 
   @override
