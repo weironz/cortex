@@ -330,13 +330,88 @@ async fn checked(resp: reqwest::Response) -> Result<reqwest::Response> {
     let body = resp.text().await.unwrap_or_default();
     let detail =
         serde_json::from_str::<cortex_proto::dto::ErrorBody>(&body).map_or(body, |e| e.error);
-    // 5xx 与 408/429 是「等会儿再来」，其余是「你发的东西不对」。
-    // 前者进队列重试，后者不该重试
+    Err(classify(status, detail))
+}
+
+/// HTTP 状态码 → 错误种类。**调用方按种类决定下一步，所以这个映射是契约。**
+///
+/// 单独拎出来是为了能测：`checked` 要一个真的 `reqwest::Response`，而这里
+/// 有判断的只是这三档。
+fn classify(status: reqwest::StatusCode, detail: String) -> CortexError {
+    // 5xx 与 408/429 是「等会儿再来」—— 唯一会让调用方排队重试的一档
     if status.is_server_error() || status.as_u16() == 408 || status.as_u16() == 429 {
-        Err(CortexError::Unavailable(format!(
-            "cortexd {status}：{detail}"
-        )))
-    } else {
-        Err(CortexError::Invalid(format!("cortexd {status}：{detail}")))
+        return CortexError::Unavailable(format!("cortexd {status}：{detail}"));
+    }
+    // **404 从 Invalid 里单拎出来。**
+    //
+    // 它与 400/401/403 在调用方那儿是两回事：那几个是「你发的东西不对」，
+    // 404 常常只是「这东西还不存在」—— 而**新会话的第一轮必然撞到它**
+    // （会话行是随第一条 episode 建的，而拉历史发生在写 episode 之前）。
+    //
+    // 混在一起的后果不是崩，是**噪声**：每开一个新会话，日志里就有一条
+    // 「读会话历史失败」。看多了没人当回事，而真正读丢历史的那次长得一模一样。
+    // 2026-08-13 生产上第一次跑云沙箱就撞见了。
+    //
+    // 重试行为不受影响：`NotFound` 与 `Invalid` 在每一处判定里都不是
+    // `Unavailable`，所以两者一样「不重试」。
+    if status.as_u16() == 404 {
+        return CortexError::NotFound {
+            kind: "会话",
+            id: detail,
+        };
+    }
+    CortexError::Invalid(format!("cortexd {status}：{detail}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    /// 三档的分界。**这是契约**：调用方按种类决定排队重试还是当场放弃。
+    #[test]
+    fn 状态码分成该重试_不存在_与你发错了三档() {
+        let retryable = [500, 502, 503, 408, 429];
+        for code in retryable {
+            let e = classify(StatusCode::from_u16(code).unwrap(), "x".into());
+            assert!(
+                matches!(e, CortexError::Unavailable(_)),
+                "{code} 该是 Unavailable（唯一会被排进 outbox 重试的一档），实际 {e:?}"
+            );
+        }
+
+        let e = classify(StatusCode::NOT_FOUND, "找不到 session：abc".into());
+        assert!(
+            matches!(e, CortexError::NotFound { .. }),
+            "404 必须与 400/401/403 分开：新会话的第一轮必然撞到它，\
+             而那时候空历史是正确答案、不是失败。实际 {e:?}"
+        );
+
+        for code in [400, 401, 403, 409, 422] {
+            let e = classify(StatusCode::from_u16(code).unwrap(), "x".into());
+            assert!(
+                matches!(e, CortexError::Invalid(_)),
+                "{code} 该是 Invalid（你发的东西不对，重试没用），实际 {e:?}"
+            );
+        }
+    }
+
+    /// 挪走 404 **不能**改变「要不要重试」。
+    ///
+    /// 每一处重试判定写的都是 `matches!(e, Unavailable(_))`，`NotFound` 与
+    /// `Invalid` 在那儿都是 false。这条把它钉住 —— 谁哪天把 NotFound 也归进
+    /// 可重试，outbox 会对着一个永远不存在的东西重试到天荒地老。
+    #[test]
+    fn 挪走_404_没有把它变成可重试() {
+        let before_and_after = [
+            classify(StatusCode::NOT_FOUND, "x".into()),
+            classify(StatusCode::BAD_REQUEST, "x".into()),
+        ];
+        for e in before_and_after {
+            assert!(
+                !matches!(e, CortexError::Unavailable(_)),
+                "{e:?} 不该被判成可重试 —— 重试它只会一直失败下去"
+            );
+        }
     }
 }

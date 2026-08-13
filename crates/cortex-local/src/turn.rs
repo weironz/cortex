@@ -248,6 +248,16 @@ impl Engine {
     ///
     /// 用户只是想说句话。远端连不上（离线）或历史读不出来都是**降级**——
     /// 退回本次改动之前的行为，不该表现为一次报错。
+    ///
+    /// # 但「还没有历史」不是降级
+    ///
+    /// 新会话的第一轮**必然**拿到 404：会话行是随第一条 episode 建的，而这里
+    /// 发生在写 episode **之前**（那个顺序是刻意的，见 `run_turn` 的注释）。
+    /// 那时候空历史是**正确答案**，不是「读失败了只好当空的」。
+    ///
+    /// 两者共用一条 WARN 的代价不是崩，是**噪声**：每开一个新会话就有一条
+    /// 「读会话历史失败」，看多了没人当回事 —— 而真正读丢历史的那次
+    /// 长得一模一样。2026-08-13 生产上第一次跑云沙箱时撞见的就是这个。
     async fn load_history(&self, session_id: &str) -> cortex_core::history::FittedHistory {
         use cortex_core::history::{HistoryTurn, fit_history, history_budget};
 
@@ -258,6 +268,11 @@ impl Engine {
 
         let turns = match self.remote.session_history(session_id, MAX_TURNS).await {
             Ok(t) => t,
+            // 会话还不存在 —— 这是新会话第一轮的正常形态，不是失败
+            Err(CortexError::NotFound { .. }) => {
+                tracing::debug!(session = session_id, "会话还没有历史（新会话的第一轮）");
+                Vec::new()
+            }
             Err(e) => {
                 tracing::warn!(error = %e, session = session_id, "读会话历史失败，本轮按无历史处理");
                 Vec::new()
