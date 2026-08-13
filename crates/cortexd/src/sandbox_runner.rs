@@ -114,25 +114,96 @@ const WORKSPACE_PATH: &str = "/workspace";
 /// 一份被截断的备份比没有备份更坏，因为它看起来是有的。
 const MAX_EXPORT_BYTES: usize = 512 * 1024 * 1024;
 
+/// cortexd 怎么够到一个沙箱。
+///
+/// # 为什么是枚举而不是「一个 url + 一个可选的头」
+///
+/// 原本是 `base_url: String` 加 `route_to: Option<String>`，那两个字段**是
+/// 耦合的**：`route_to` 有值时 `base_url` 指的是中继而不是沙箱本身。
+/// 于是「容器自己的地址 + 一个路由头」这种非法组合是**表达得出来的**，
+/// 而它错了不会报错 —— 只是把头发给一个不认识它的对端，然后被忽略。
+///
+/// 换成枚举之后那个状态构造不出来。这一条对第二个实现尤其要紧：
+/// **k8s 那一版只会产出 [`Self::Direct`]**（cortexd 直连 Pod IP 或 Service，
+/// 中继那一整层随之消失），它不该被迫去理解一个只属于 Docker Desktop 的机制。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxAddr {
+    /// 直连：这个地址就是沙箱自己。
+    ///
+    /// cortexd 与沙箱同在一个网段时（生产：cortexd 也在容器里；将来 k8s）走这条。
+    Direct(String),
+    /// 经中继：`url` 一个地址服务所有沙箱，转给谁由 `target` 说。
+    ///
+    /// 只在「cortexd 是宿主进程 + 沙箱网段是 internal」这个组合下需要 ——
+    /// 那种拓扑里**已发布端口不生效**（实测，见 `docs/sandbox.md` 第八节），
+    /// 于是宿主够不到容器，得有一个双宿的容器代为转发。
+    Relay { url: String, target: String },
+}
+
+impl SandboxAddr {
+    /// 请求该发到哪个地址。
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        match self {
+            Self::Direct(url) | Self::Relay { url, .. } => url,
+        }
+    }
+
+    /// 走中继时要带的路由头的值。直连时没有。
+    #[must_use]
+    pub fn route_target(&self) -> Option<&str> {
+        match self {
+            Self::Direct(_) => None,
+            Self::Relay { target, .. } => Some(target),
+        }
+    }
+}
+
 /// 一个跑起来的沙箱。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxHandle {
-    /// 容器名（= `cortex-sbx-{owner}`）。
+    /// 这个沙箱的名字。
+    ///
+    /// Docker 下是容器名（`cortex-sbx-{owner}`），k8s 下会是 Pod 名 ——
+    /// **调用方只拿它做日志与诊断**，不该拿它去拼任何地址。
     pub name: String,
-    /// cortexd 该往哪儿反代。
-    ///
-    /// 同网段（生产：cortexd 也在容器里）时是容器名；
-    /// 宿主直连（开发）时是**中继**的地址 —— 不再是容器自己的映射端口，
-    /// 因为 internal 网段上已发布端口不生效（实测）。
-    pub base_url: String,
-    /// 走中继时要带的路由头，值是目标容器名。同网段直连时是 `None`。
-    ///
-    /// 单独一个字段而不是拼进 `base_url`：中继只有一个地址，
-    /// 「转给谁」是每次请求的参数，不是端点的一部分。
-    pub route_to: Option<String>,
+    /// 怎么够到它。
+    pub addr: SandboxAddr,
 }
 
 /// 起 / 停 / 查一个用户的沙箱。
+///
+/// # 实现者契约（第二个实现照这个来）
+///
+/// 这几条不是「建议」——上面每一层（反代、空闲回收、快照、出网围栏）都建立在
+/// 它们之上，而违反其中任何一条**都不会当场报错**：
+///
+/// 1. **`ensure` 幂等**。cortexd 每一轮对话都调它，重建一次就丢一次容器内的
+///    进程状态。已经在跑就原样返回。
+/// 2. **`ensure` 返回时里面的 agent 必须已经能应答**，不只是「实例已创建」。
+///    Docker 那版为此轮询 `/health`；k8s 那版该等 Pod 的 readiness。
+///    差别是几百毫秒的 `connection refused`，而它读起来像「沙箱坏了」。
+/// 3. **`stop` 保留工作区**。停的是算力不是数据 —— 那个卷常常是用户唯一一份。
+/// 4. **规格不从入参来**。镜像、挂载点、内存 / CPU / PID 上限、网络、
+///    capability 全部由实现自己定死。调用方只给 owner 与 spec hash，
+///    **说不出「把宿主的 `/` 挂进去」**。这是防「cortexd 被攻破之后能做什么」，
+///    不是防「cortexd 会写错」。
+/// 5. **出网必须靠拓扑挡住，不能只靠 env**。`HTTP_PROXY` 是引导；真正的边界是
+///    「那个网络没有默认路由」。只设 env 的话一个 `curl --noproxy` 就绕开了。
+/// 6. **导出 / 写回用 tar**。这一条跨运行时是通的（k8s 的 `cp` 也是 tar 流），
+///    所以它留在契约里而不是实现里。
+///
+/// # 换运行时要动多少
+///
+/// | | 代价 |
+/// |---|---|
+/// | Podman | **零代码**：它提供 Docker 兼容 API，`DOCKER_HOST` 指过去即可（bollard 读它） |
+/// | containerd / CRI-O | 新实现：两者都没有 Docker API |
+/// | Kubernetes | 新实现，而且**几个概念要换**：卷→PVC、internal 网段→NetworkPolicy、archive API→`exec` + tar 流、中继→直连 Pod IP（[`SandboxAddr::Relay`] 那一整层消失） |
+///
+/// 现在只有 Docker 一个实现，**刻意不预先造第二个** —— 没有真实的第二个部署
+/// 目标时，抽象只会把当前这一个的形状焊进契约里。这份文档存在的意义是：
+/// 那天来的时候，要保住什么是写下来的。
 #[async_trait::async_trait]
 pub trait SandboxRunner: Send + Sync {
     /// 确保 owner 的沙箱在跑，返回怎么够得着它。**幂等。**
@@ -251,7 +322,7 @@ impl DockerRunner {
     /// 超时报错而不是硬着头皮转发：转过去拿到的是 `connection refused`，
     /// 而那条错误在用户那儿读起来是「沙箱坏了」，与真相（起得慢）差很远。
     async fn wait_ready(&self, handle: &SandboxHandle) -> Result<()> {
-        let url = format!("{}/health", handle.base_url);
+        let url = format!("{}/health", handle.addr.endpoint());
         let deadline = std::time::Instant::now() + READY_TIMEOUT;
         let probe = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(2))
@@ -261,7 +332,7 @@ impl DockerRunner {
         let mut attempt = 0u32;
         loop {
             let mut req = probe.get(&url);
-            if let Some(name) = &handle.route_to {
+            if let Some(name) = handle.addr.route_target() {
                 // 走中继时这个头是必须的 —— 少了它中继回 400，而 400 也是
                 // 「没就绪」的一种，于是症状变成整整 30 秒的空等
                 req = req.header(crate::sandbox_proxy::ROUTE_HEADER, name);
@@ -493,17 +564,16 @@ impl SandboxRunner for DockerRunner {
         //
         // 否则走中继：它一个地址服务所有沙箱，转给谁由请求头带。
         // 原来这里读的是容器映射出的宿主端口，那条路随 internal 网段一起没了。
-        let (base_url, route_to) = if self.same_network {
-            (format!("http://{name}:{AGENT_PORT}"), None)
+        let addr = if self.same_network {
+            SandboxAddr::Direct(format!("http://{name}:{AGENT_PORT}"))
         } else {
-            (self.relay.clone(), Some(name.clone()))
+            SandboxAddr::Relay {
+                url: self.relay.clone(),
+                target: name.clone(),
+            }
         };
 
-        Ok(Some(SandboxHandle {
-            name,
-            base_url,
-            route_to,
-        }))
+        Ok(Some(SandboxHandle { name, addr }))
     }
 
     async fn export_workspace(&self, owner: &str) -> Result<bytes::Bytes> {
@@ -704,6 +774,37 @@ mod tests {
         // 这一条由 `MEMORY_SWAP_BYTES` 的定义式保证，编译期就成立 ——
         // 写成运行期断言会被 clippy 判成常量断言，且它也确实测不到什么
         const _: () = assert!(MEMORY_SWAP_BYTES > MEMORY_BYTES);
+    }
+
+    /// 寻址方式与「要不要带路由头」**是同一件事的两面**。
+    ///
+    /// 这条守的是那次重构本身：原先是 `base_url` + `Option<route_to>` 两个
+    /// 字段，能表达出「容器自己的地址 + 一个路由头」这种非法组合 ——
+    /// 而它错了不报错，只是把头发给一个不认识它的对端然后被忽略。
+    ///
+    /// 谁哪天为了图方便把它拆回两个字段，这条会红。
+    #[test]
+    fn addressing_and_routing_cannot_disagree() {
+        let direct = SandboxAddr::Direct("http://cortex-sbx-u1:8090".into());
+        assert_eq!(direct.endpoint(), "http://cortex-sbx-u1:8090");
+        assert_eq!(
+            direct.route_target(),
+            None,
+            "直连时带路由头是没有意义的 —— 对端是沙箱自己，它不认这个头"
+        );
+
+        let relay = SandboxAddr::Relay {
+            url: "http://127.0.0.1:3129".into(),
+            target: "cortex-sbx-u1".into(),
+        };
+        assert_eq!(relay.endpoint(), "http://127.0.0.1:3129");
+        assert_eq!(
+            relay.route_target(),
+            Some("cortex-sbx-u1"),
+            "走中继时**必须**带头：中继一个地址服务所有沙箱，\
+             少了它只会收到 400，而 400 在探活那条路上会被当成「还没就绪」，\
+             症状是整整 30 秒的空等"
+        );
     }
 
     /// 容器名与卷名只含安全字符。

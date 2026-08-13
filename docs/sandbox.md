@@ -278,6 +278,38 @@ runsc 默认开 rootfs overlay，**`docker commit` 在它下面拿不到容器�
 
 ---
 
+
+### 与容器运行时的耦合有多深（实测数字）
+
+`bollard` 在整个仓库里只出现在**一个文件**（`sandbox_runner.rs`，11 处）。
+反代、空闲回收、快照、路由、Flutter 一侧都不知道底下是 docker。
+
+| 目标 | 代价 |
+|---|---|
+| **Podman** | **零代码**。它提供 Docker 兼容 API，`DOCKER_HOST` 指过去即可 —— bollard 的 `connect_with_local_defaults` 在 Unix 上会读这个变量（读源码确认过，`docker.rs:924`）。Windows 走命名管道，不读 |
+| **containerd / CRI-O** | 新实现。两者都没有 Docker API（containerd 是自己的 gRPC，CRI-O 只有 CRI） |
+| **Kubernetes** | 新实现，而且**几个概念要换**：卷 → PVC、`internal` 网段 → NetworkPolicy、archive API → `exec` + tar 流、中继 → 直连 Pod IP |
+
+### 收掉的一处契约泄漏
+
+`SandboxHandle` 原本是 `base_url: String` + `route_to: Option<String>`。
+那两个字段**是耦合的**（`route_to` 有值时 `base_url` 指的是中继而不是沙箱），
+于是「容器自己的地址 + 一个路由头」这种非法组合表达得出来 —— 而它错了不报错，
+只是把头发给一个不认识它的对端然后被忽略。
+
+换成 `SandboxAddr::{Direct, Relay{url,target}}` 之后那个状态构造不出来。
+对第二个实现尤其要紧：**k8s 那版只会产出 `Direct`**（中继那一整层随之消失），
+它不该被迫去理解一个只属于 Docker Desktop 的机制。
+
+### 为什么现在不预先造第二个实现
+
+没有真实的第二个部署目标时，抽象只会把当前这一个的形状焊进契约里 ——
+而那恰恰是「换运行时」那天最贵的东西。取而代之的是把**实现者契约**写进
+trait 的文档（六条，每条都注明「违反了不会当场报错」），
+那天来的时候要保住什么是写下来的。
+
+---
+
 ## 七、编排：一条 trait，不拆进程
 
 ```rust

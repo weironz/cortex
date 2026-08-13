@@ -378,9 +378,9 @@ async fn chat_in_sandbox(
 
     crate::sandbox_proxy::forward(
         &layer.http,
-        &handle.base_url,
+        handle.addr.endpoint(),
         &token,
-        handle.route_to.as_deref(),
+        handle.addr.route_target(),
         proxied,
     )
     .await
