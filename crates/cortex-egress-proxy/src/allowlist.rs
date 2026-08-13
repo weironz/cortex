@@ -11,6 +11,11 @@
 //!    悄悄放行 `example.com` 本身。
 //! 4. **`:port` 后缀是可选的收窄**。`github.com` 放行任意端口，
 //!    `github.com:443` 只放行 443。
+//! 5. **`*` 是整张公网，不含内网**。裸 `*` 匹配任何域名，但**只是「域名这一关
+//!    过了」** —— 目标解析到私有地址时仍会被拒（见 `outbound.rs` 的私有段
+//!    防护）。要让沙箱够到某个内网地址，必须**指名道姓**写进清单：
+//!    通配放行不覆盖内网，这是把「我要能上网」和「我要能连数据库」分开的
+//!    唯一办法。
 //!
 //! # 为什么不做正则
 //!
@@ -23,9 +28,15 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Rule {
     /// 通配时这里存的是**去掉 `*.` 之后**的部分（即父域）。
+    /// `catch_all` 为真时无意义。
     host: String,
     /// `true` 表示 `*.foo.com` 这种形式。
     wildcard: bool,
+    /// 裸 `*` —— 匹配任何域名。
+    ///
+    /// 与 `wildcard` 分开而不是复用它：`*.foo.com` 与 `*` 在**私有段防护**
+    /// 那儿的待遇不同（前者是指名道姓，后者不是），合并之后就分不出来了。
+    catch_all: bool,
     /// `None` = 任意端口。
     port: Option<u16>,
 }
@@ -48,6 +59,16 @@ impl Rule {
             },
             None => (s, None),
         };
+        // 裸 `*`：整张公网。放在 `*.` 之前判 —— 否则 `*` 会走到下面
+        // 被当成一个叫 `*` 的域名，谁都匹配不上，而配置看着像是全放行了
+        if host == "*" {
+            return Some(Self {
+                host: String::new(),
+                wildcard: false,
+                catch_all: true,
+                port,
+            });
+        }
         let (host, wildcard) = match host.strip_prefix("*.") {
             Some(rest) => (rest, true),
             None => (host, false),
@@ -58,6 +79,7 @@ impl Rule {
         Some(Self {
             host: host.to_ascii_lowercase(),
             wildcard,
+            catch_all: false,
             port,
         })
     }
@@ -67,6 +89,9 @@ impl Rule {
             && p != port
         {
             return false;
+        }
+        if self.catch_all {
+            return true;
         }
         if self.wildcard {
             // 严格的子域：`*.foo.com` 匹配 `a.foo.com`，**不匹配** `foo.com`
@@ -156,6 +181,21 @@ impl Allowlist {
         }
         Verdict::NotAllowed
     }
+
+    /// 这个目标是被**指名道姓**放行的吗（而不是被 `*` 顺带捎上的）。
+    ///
+    /// 私有段防护用它开口子：`*` 的意思是「整张公网」，不该顺手把
+    /// postgres、rustfs、云厂商的 metadata 端点一起放进来。要让沙箱够到某个
+    /// 内网地址，就得把那个地址写进清单 —— 那是一次**有意的**配置动作。
+    ///
+    /// `*.foo.com` 算指名道姓：写它的人知道自己在放行哪一片。
+    #[must_use]
+    pub fn names_explicitly(&self, host: &str, port: u16) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        self.allow
+            .iter()
+            .any(|r| !r.catch_all && r.matches(&host, port))
+    }
 }
 
 #[cfg(test)]
@@ -170,6 +210,47 @@ mod tests {
             Verdict::NotAllowed,
             "空清单必须是「什么都不放行」。反过来（空 = 不限制）的话，\
              一个漏配的部署就是完全没有出网限制，而它**看起来一切正常**"
+        );
+    }
+
+    /// 裸 `*` 必须真的匹配任何域名 —— 这是「让沙箱能上网」的唯一写法。
+    #[test]
+    fn 星号是整张网() {
+        let l = Allowlist::new("*", "");
+        for h in ["baidu.com", "a.b.c.example.org", "postgres", "172.18.0.5"] {
+            assert_eq!(
+                l.judge(h, 443),
+                Verdict::Allow,
+                "`*` 该匹配 {h}。写成 `*.` 那套后缀逻辑的话，裸 `*` 会被当成一个                 叫 `*` 的域名，谁都匹配不上 —— 而配置看着像是全放行了"
+            );
+        }
+        assert_eq!(
+            Allowlist::new("*:443", "").judge("baidu.com", 80),
+            Verdict::NotAllowed,
+            "`*:443` 仍然只该放行 443 —— 端口收窄对通配同样有效"
+        );
+    }
+
+    /// `*` 顺带捎上的**不算**指名道姓 —— 私有段防护靠这条开口子。
+    #[test]
+    fn 通配不算指名道姓() {
+        let l = Allowlist::new("*, host.docker.internal:8080, *.corp.example", "");
+
+        assert!(
+            !l.names_explicitly("postgres", 5432),
+            "postgres 只是被 `*` 捎上的。算成指名道姓的话，一份 ALLOW=*              就把数据库对沙箱敞开了 —— 而那正是这条防护要拦的东西"
+        );
+        assert!(
+            l.names_explicitly("host.docker.internal", 8080),
+            "写进清单的内网地址必须放行：那是一次**有意的**配置动作，             开发机上沙箱回调 cortexd 就靠它"
+        );
+        assert!(
+            l.names_explicitly("a.corp.example", 443),
+            "`*.corp.example` 也算指名道姓 —— 写它的人知道自己在放行哪一片"
+        );
+        assert!(
+            !l.names_explicitly("corp.example", 443),
+            "但 `*.corp.example` 不含裸域，这条与 judge 的语义必须一致 ——              两处对同一个域名给出不同答案是最难查的一类不一致"
         );
     }
 

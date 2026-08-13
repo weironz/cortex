@@ -34,6 +34,7 @@ mod allowlist;
 mod denials;
 mod inbound;
 mod outbound;
+mod private_net;
 
 use std::sync::Arc;
 

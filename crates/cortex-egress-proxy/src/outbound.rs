@@ -16,6 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::allowlist::Allowlist;
 use crate::denials::Denials;
+use crate::private_net::is_private;
 
 /// 沙箱回来问「我刚才被拦了什么」的路径。
 ///
@@ -130,7 +131,41 @@ async fn handle(
         return refuse(reader.into_inner(), 403, &why).await;
     }
 
-    let upstream = match connect_upstream(&host, port).await {
+    // ── 私有段防护 ────────────────────────────────────────
+    //
+    // 域名这一关过了不等于可以连：`*` 的含义是「整张**公网**」。
+    // 代理与 postgres / rustfs / cortexd 同在 `cortex_default` 上，
+    // 不判这一下，一份 `ALLOW=*` 就把沙箱与内网之间的拓扑隔离整个作废。
+    //
+    // **指名道姓写进清单的除外** —— 那是一次有意的配置动作
+    // （开发机上 `host.docker.internal:8080` 就靠这条走通）。
+    let addrs = match resolve_upstream(&host, port).await {
+        Ok(a) => a,
+        Err(why) => {
+            return refuse(
+                reader.into_inner(),
+                502,
+                &format!("{host}:{port} 在放行清单里，但{why}"),
+            )
+            .await;
+        }
+    };
+    if !list.names_explicitly(&host, port)
+        && let Some(bad) = addrs.iter().find(|a| is_private(a.ip()))
+    {
+        let why = format!(
+            "{host}:{port} 解析到内网地址 {bad}，通配放行（`*`）只覆盖公网。
+             沙箱够不到内网是这套隔离的要点：代理与数据库、对象存储在同一张网上，             放开它等于给沙箱一条通往数据库的路。
+             确实要访问这个地址的话，请让用户把 `{host}` **指名道姓**写进              CORTEX_EGRESS_ALLOW（通配不算）。"
+        );
+        tracing::info!(%host, port, %bad, "拒绝出网：解析到内网地址");
+        denials.record(peer, why.clone());
+        return refuse(reader.into_inner(), 403, &why).await;
+    }
+
+    // **拿判过的那批地址去连，不要把域名再交给 connect 一次** ——
+    // 后者会重新解析，中间那点时间足够 DNS 换一个答案（rebinding）
+    let upstream = match connect_resolved(&addrs).await {
         Ok(s) => s,
         Err(why) => {
             return refuse(
@@ -185,7 +220,7 @@ async fn handle(
 /// `Network is unreachable`（IPv6 那条的错），指着一个完全无关的方向。
 ///
 /// 这个坑当场就咬了一次：查了好几分钟网络配置，真相是端口上没人监听。
-async fn connect_upstream(host: &str, port: u16) -> Result<TcpStream, String> {
+async fn resolve_upstream(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>, String> {
     let addrs: Vec<_> = match tokio::net::lookup_host((host, port)).await {
         Ok(it) => it.collect(),
         Err(e) => return Err(format!("域名解析失败：{e}")),
@@ -193,9 +228,16 @@ async fn connect_upstream(host: &str, port: u16) -> Result<TcpStream, String> {
     if addrs.is_empty() {
         return Err("域名解析没有返回任何地址".into());
     }
+    Ok(addrs)
+}
 
+/// 连**已经判过**的那批地址。
+///
+/// 与「把域名交给 connect」的差别不是风格：那样会再解析一次，而两次解析之间
+/// DNS 可以换答案（rebinding），私有段防护就成了摆设。
+async fn connect_resolved(addrs: &[std::net::SocketAddr]) -> Result<TcpStream, String> {
     let mut errs = Vec::new();
-    for addr in &addrs {
+    for addr in addrs {
         match TcpStream::connect(addr).await {
             Ok(s) => return Ok(s),
             Err(e) => errs.push(format!("{addr} → {e}")),

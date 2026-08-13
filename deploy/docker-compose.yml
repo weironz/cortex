@@ -208,20 +208,24 @@ services:
     cap_drop: [ALL]
     read_only: true
     environment:
-      # **默认全拒**。空清单 = 什么都不放行，不是「不限制」。
+      # ── 出网放行清单 ──
       #
-      # 这几条按「装依赖 + 拉代码」圈定。注意 `*.pypi.org` 与 `pypi.org`
-      # 互不隐含，两个都要写（见 allowlist.rs 的注释与测试）。
+      # 默认 `*` = **整张公网**。不是「不限制」：目标解析到内网地址时代理
+      # 仍会拒（`private_net.rs`）。这一条是必须的 —— 代理与 postgres /
+      # rustfs / cortexd 同在一张网上，是这张拓扑里唯一两边都通的点，
+      # 放开域名不判 IP 等于给沙箱一条通往数据库的路。
       #
-      # 节点在国内：官方源时通时不通，所以清单里一并放行两个镜像站，
-      # 让 agent 自己能换（拒绝理由会作为工具事件回到模型）
-      CORTEX_EGRESS_ALLOW: >-
-        ${CORTEX_EGRESS_ALLOW:-pypi.org,*.pypi.org,files.pythonhosted.org,
-        registry.npmjs.org,*.npmjs.org,
-        github.com,*.github.com,codeload.github.com,
-        crates.io,*.crates.io,static.crates.io,
-        mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,
-        registry.npmmirror.com}
+      # 早先默认是「只放行几个包管理源」。那份清单是**装依赖用的**，不是
+      # **干活用的** —— 读一份文档、调一个 API、访问用户自己的服务全部被拒，
+      # 而一个 curl 都不能用的 agent 会被直接弃用，那比稍微漏一点更糟。
+      #
+      # 要让沙箱够到某个**内网**地址，把它**指名道姓**写进来（通配不算）：
+      #   CORTEX_EGRESS_ALLOW=*,my-internal-api.lan:8080
+      #
+      # 收紧回去也只要改这一行，比如只放包管理源：
+      #   CORTEX_EGRESS_ALLOW=pypi.org,*.pypi.org,registry.npmjs.org,...
+      CORTEX_EGRESS_ALLOW: ${CORTEX_EGRESS_ALLOW:-*}
+      # 明确列黑的，deny 压过 allow
       CORTEX_EGRESS_DENY: ${CORTEX_EGRESS_DENY:-}
       RUST_LOG: ${CORTEX_EGRESS_LOG:-cortex_egress_proxy=info,warn}
     networks:
