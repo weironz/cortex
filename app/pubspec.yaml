@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # 必须与根 Cargo.toml 的 [workspace.package] version 一致（`+N` 是 Flutter 的
 # build number，不参与比较）。由 scripts/check-version.sh 在 CI 里把关 ——
 # 这里原本是 Flutter 模板给的 1.0.0，比服务端整整高了一个大版本。
-version: 0.1.7+8
+version: 0.1.8+9
 
 environment:
   sdk: ^3.12.1
