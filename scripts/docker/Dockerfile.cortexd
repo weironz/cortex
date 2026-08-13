@@ -7,19 +7,30 @@
 #    just prod-build
 #
 #  ── 两阶段的分法 ──────────────────────────────────────────
-#  第一阶段编译，第二阶段只带运行时。cortexd 是纯 Rust 静态度较高的
-#  二进制，但 fastembed 背后是 ONNX Runtime（动态库 + 需要 libstdc++），
-#  所以运行阶段用 debian-slim 而不是 scratch/distroless-static。
+#  第一阶段编译，第二阶段只带运行时。
+#
+#  ── 【这个镜像不编 local-embed】 ─────────────────────────
+#
+#  以前编。去掉的理由不是那 22 MB（52.6 → 30.5 MB），是**进程常驻内存**：
+#  载入 bge-m3 后 cortexd 常驻 1.03 GiB，而生产节点 2C/3.5G 上已经跑着
+#  19 个容器，余量 0.5~0.7 GiB —— 也就是「API 服务器顺手把推理也做了」
+#  这一个选择，单独吃掉了整台机器能跑的沙箱数量。
+#
+#  embedding 有独立容器（`docker-compose.yml` 的 `embeddings`，TEI），
+#  也有走云 API 的一档。两条路都不需要 cortexd 自己链 ONNX Runtime。
+#
+#  **谁想加回来先读这段**：加回 `--features cortex-memory/local-embed`
+#  会连带要求构建/运行底座都是 trixie —— ort 那份预编译 ONNX Runtime 是
+#  GCC 13+ 编的，引用 `std::__cxx11::basic_string<wchar_t>::_M_replace_cold`
+#  这类符号，bookworm 的 GCC 12.2 libstdc++ 没有，链接期会以一串
+#  `rust-lld: error: undefined symbol` 失败，报错里完全看不出「是发行版太老」。
+#  已实测。现在没有这个约束了，但两个底座仍保持 trixie 对齐（见下）。
 # ══════════════════════════════════════════════════════════
 
 # ── 构建阶段 ──────────────────────────────────────────────
 #
-# 【必须是 trixie，不能是 bookworm】
-# cortex-memory 依赖 fastembed → ort → 预编译的 ONNX Runtime。那份二进制是用
-# GCC 13+ 编的，引用了 `std::__cxx11::basic_string<wchar_t>::_M_replace_cold`
-# 这类 GCC 13 才引入的符号。bookworm 只有 GCC 12.2 的 libstdc++，
-# 链接期会以一串 `rust-lld: error: undefined symbol: std::__cxx11::...` 失败 ——
-# 报错里完全看不出「是发行版太老」，非常难查。已实测。
+# 构建与运行底座**必须同一个 debian 代号**：二进制动态链 glibc，
+# 新 glibc 编的东西放进老底座会在启动时报 `GLIBC_2.xx not found`。
 FROM rust:1.97.1-trixie AS builder
 
 WORKDIR /build
@@ -45,8 +56,7 @@ RUN set -eux; \
         echo '' > "$d/src/lib.rs"; \
         echo 'fn main() {}' > "$d/src/main.rs"; \
     done; \
-    cargo build --release -p cortexd -p cortex-cli \
-        --features cortex-memory/local-embed 2>/dev/null || true
+    cargo build --release -p cortexd -p cortex-cli 2>/dev/null || true
 
 # 真正的源码。上面那层的产物在依赖没变时命中缓存
 COPY crates/ crates/
@@ -60,8 +70,7 @@ COPY migrations-global/ migrations-global/
 # 触碰一下自家 crate 的时间戳，否则 cargo 会拿上一步的空壳当成已构建
 RUN set -eux; \
     find crates evals -name '*.rs' -exec touch {} +; \
-    cargo build --release -p cortexd -p cortex-cli \
-        --features cortex-memory/local-embed; \
+    cargo build --release -p cortexd -p cortex-cli; \
     strip target/release/cortexd target/release/cortex || true
 
 # ── sqlx-cli ──────────────────────────────────────────────
@@ -82,17 +91,21 @@ RUN cargo install sqlx-cli --version '^0.9' \
         --no-default-features --features rustls,postgres --locked
 
 # ── 运行阶段 ──────────────────────────────────────────────
-# 同样必须是 trixie：运行期 libstdc++ 也得够新（同一个 ONNX Runtime）。
-# 用 bookworm-slim 的话构建能过、启动时才 `symbol lookup error` ——
-# 比构建期失败还难查。
+# 与 builder 同代号（trixie）。用 bookworm-slim 的话构建能过、
+# 启动时才 `GLIBC_2.xx not found` —— 比构建期失败还难查。
 FROM debian:trixie-slim AS runtime
 
+# 三个二进制实测只链 libgcc/libm/libc（`ldd` 验过），底座自带。
+# 这里装的两样都不是给链接器的：
+#   ca-certificates  rustls-native-certs 从 /etc/ssl/certs 读信任根，
+#                    少了它 **编译和启动都正常**，只有对外 TLS 全部失败
+#   curl             HEALTHCHECK 用
+#
+# 曾经还有 libssl3 与 libgomp1 —— 那是 ONNX Runtime 的，随 local-embed 一起删了。
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         ca-certificates \
-        libssl3 \
-        libgomp1 \
         curl; \
     rm -rf /var/lib/apt/lists/*
 
@@ -107,9 +120,7 @@ COPY --from=sqlx    /usr/local/cargo/bin/sqlx     /usr/local/bin/sqlx
 COPY --from=builder /build/migrations /opt/cortex/migrations
 COPY --from=builder /build/migrations-global /opt/cortex/migrations-global
 
-# embedding 模型缓存。挂成卷，避免每次重建镜像都重下 590 MB
-ENV FASTEMBED_CACHE_DIR=/var/lib/cortex/models
-RUN mkdir -p /var/lib/cortex/models /var/lib/cortex/workspace \
+RUN mkdir -p /var/lib/cortex/workspace \
     && chown -R cortex:cortex /var/lib/cortex
 
 USER cortex

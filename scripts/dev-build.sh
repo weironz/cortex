@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════
-#  把 cortexd / cortex-egress-proxy 编成 **Linux** 二进制，
+#  把 cortexd 编成 **Linux** 二进制，
 #  放进 named volume，供 `docker-compose.dev.yml` 的容器挂载。
 #
 #    bash scripts/dev-build.sh          # 增量
@@ -58,14 +58,20 @@ docker run --rm \
     -e CARGO_TARGET_DIR=/target \
     rust:1.97.1-trixie \
     bash -ec '
-        cargo build -p cortexd -p cortex-egress-proxy
+        # **只编 cortexd。**
+        #
+        # 以前这里还编 cortex-egress-proxy，但那个卷只挂进 cortexd 一个服务，
+        # egress 走的是镜像（compose 里它有 build: 段）—— 编出来的那份从来
+        # 没人读过，只是让每次 `just dev-restart` 多等一会儿。
+        # 又一次「造好了但没人调用」，这回代价只是时间。
+        cargo build -p cortexd
         # **先写临时名再 rename，不能直接 cp 覆盖。**
         #
         # 容器正跑着那个二进制时，`cp` 会以 ETXTBSY（Text file busy）失败 ——
         # 而 `just dev-restart` 正是「容器还在跑的时候重编」这条路，
         # 也就是最常走的那条。rename 换的是目录项，正在运行的那个 inode
         # 不受影响，容器重启时自然拿到新的
-        for b in cortexd cortex-egress-proxy; do
+        for b in cortexd; do
             cp "/target/debug/$b" "/out/$b.new"
             mv -f "/out/$b.new" "/out/$b"
         done

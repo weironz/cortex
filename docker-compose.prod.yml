@@ -15,7 +15,8 @@
 #  3. **RustFS 四卷纠删码**。要求四块**独立物理盘**，
 #     RUSTFS_UNSAFE_BYPASS_DISK_CHECK 必须是 false。
 #     挂在同一块盘上是假冗余，RustFS 会拒绝启动 —— 那是正确行为。
-#  4. **资源上限**。embedding 推理会吃满 CPU，不限住会把数据库饿死。
+#  4. **资源上限**。节点是 2C/3.5G 且已跑着别的东西，任何一个容器不封顶
+#     都能把 Postgres 饿到超时。
 #
 #  ── 起之前必须确认的三件事 ────────────────────────────────
 #
@@ -105,11 +106,23 @@ services:
       # 高风险工具确认的超时（秒），超时按拒绝处理
       CORTEX_CONFIRM_TIMEOUT_SECS: ${CORTEX_CONFIRM_TIMEOUT_SECS:-180}
 
-      # 向量后端。生产用真实语义模型；模型落在 models 卷里，
-      # 第一次启动会下 ~590 MB，之后重启不再下载
-      CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-fast}
-      CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-bge-m3-int8}
-      FASTEMBED_CACHE_DIR: /var/lib/cortex/models
+      # ── 向量后端 ──
+      #
+      # **`fast`（进程内 ONNX）已经不在镜像里了。** 见 Dockerfile.cortexd
+      # 顶部那段：它常驻 1.03 GiB，而这台机器总共 3.5 G 且已跑着 19 个容器 ——
+      # 一个「API 服务器顺手把推理也做了」的选择，单独决定了能跑几个沙箱。
+      #
+      # 两条替代都是**独立容器/独立服务**，cortexd 只发 HTTP：
+      #   api（默认）  远端 OpenAI 兼容 /v1/embeddings（阿里云等）
+      #   自托管       `--profile embed` 起 TEI 容器，endpoint 指
+      #                http://embeddings:80/v1/embeddings（服务名，不是 127.0.0.1）
+      #
+      # 真要 `fast`，得自己带 feature 重编镜像；cortexd 会在启动时明确
+      # 报「这个二进制没编进来」而不是静默降级（embed.rs 有这一支）。
+      CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-api}
+      CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-}
+      CORTEX_EMBED_ENDPOINT: ${CORTEX_EMBED_ENDPOINT:-}
+      CORTEX_EMBED_API_KEY: ${CORTEX_EMBED_API_KEY:-}
 
       # LLM 供应商。密钥只从环境来，绝不写进任何被 git 跟踪的文件
       CORTEX_LLM_PROVIDER: ${CORTEX_LLM_PROVIDER:-deepseek}
@@ -121,19 +134,20 @@ services:
     ports:
       - "${CORTEXD_PUBLIC_BIND:-127.0.0.1:8080}:8080"
     volumes:
-      - cortex_models:/var/lib/cortex/models
       - ${CORTEX_WORKSPACE_DIR:-./data/workspace}:/var/lib/cortex/workspace
     deploy:
       resources:
         limits:
-          # embedding 推理会吃满能拿到的核。不限住它，
-          # 一次批量回填就能把 Postgres 饿到超时
-          cpus: ${CORTEXD_CPU_LIMIT:-4}
-          memory: ${CORTEXD_MEM_LIMIT:-4g}
+          # embedding 挪出去之后 cortexd 只剩 I/O 与 SQL，常驻从 1.03 GiB
+          # 降到 ~120 MiB。上限跟着降 —— 留 4g 不会更安全，只会让真正的
+          # 泄漏拖到把整台机器压垮才被看见。
+          #
+          # cpus 不得 > 节点核数：这台是 2 核，原来那个 4 生产上被 daemon 拒过
+          cpus: ${CORTEXD_CPU_LIMIT:-1.5}
+          memory: ${CORTEXD_MEM_LIMIT:-768m}
 
 volumes:
   rustfs_data0:
   rustfs_data1:
   rustfs_data2:
   rustfs_data3:
-  cortex_models:

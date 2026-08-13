@@ -96,18 +96,23 @@ just doctor      # 任何时候想确认环境状态
 
 | `CORTEX_EMBED_BACKEND` | 跑在哪 | 什么时候用 |
 |---|---|---|
-| `fast`（默认） | cortexd 进程内（ONNX） | 单机自托管。零外部依赖、零成本 |
-| `api` | 任何一家云，或 compose 里的 `embeddings` 服务 | 想把推理搬出主进程时 |
+| `api`（默认） | 任何一家云，或 compose 里的 `embeddings` 容器 | 绝大多数情况 |
 | `hash` | 无 | 离线开发与无网 CI。**不是语义空间** |
+| `fast` | cortexd 进程内（ONNX） | 只在自己重编镜像时 |
 
-`fast` 要求二进制带 feature `local-embed`。**官方 docker 镜像默认带**
-（`scripts/docker/Dockerfile.cortexd`），从源码编则要显式加。首次启动会从
-HuggingFace 下 ~560 MB 权重进 `models` 卷，只下一次。
+`fast` 要求二进制带 feature `local-embed`，**官方 docker 镜像不带**。
+填了它 cortexd 会在启动时直接报错退出并说清两条替代 —— 不会静默降级。
 
-> 曾经把默认设成 `api` + 自建服务，2026-08 改回 `fast`。原因见下面
-> 「为什么自建服务默认不启动」。把 fastembed 做成可选 feature 的**初衷是让
-> Intel Mac 能编出裸二进制**，而裸二进制在 0.1.2 已经不发了 ——
-> 那个理由在 docker 这条路上不成立，于是镜像里把它编回去。
+> **这条默认反复过两次，两次的理由都对，只是量纲变了。**
+>
+> 最早默认 `api`；2026-08 改成 `fast`，理由是「零外部依赖、零成本」——
+> 那时候 cortexd 是这台机器上唯一要紧的进程，多吃点内存没人看得见。
+>
+> 现在改回 `api`。变的不是 embedding 本身，是它旁边多了沙箱容器：
+> 载入 bge-m3 后 cortexd 常驻 **1.03 GiB**，而节点是 2C/3.5G 且已跑着
+> 19 个容器，余量 0.5~0.7 GiB —— 也就是「API 服务器顺手把推理也做了」
+> 这一个选择，单独决定了整台机器能跑几个沙箱（答案是 1 个）。
+> 顺带把镜像从 237 MB 降到 207 MB，但那 30 MB 不是理由，那 1 GiB 才是。
 
 #### 为什么自建的 `embeddings` 服务默认不启动
 
@@ -117,14 +122,18 @@ TEI 载入后常驻 2.5–3 GB，首次启动要从 HuggingFace 下那 2.2 GB。
 （本项目自己那台深圳节点就跑不动，它上面还有十几个别的容器）。
 让它默认起来，等于让参考部署在 `docker compose up` 那一刻就 OOM。
 
-所以它挂在 profile `selfhost-embed` 上，要自建就在 `.env` 里显式开：
+所以它挂在 profile `embed` 上，要自建就在 `.env` 里显式开：
 
 ```
-COMPOSE_PROFILES=selfhost-embed
+COMPOSE_PROFILES=embed
 CORTEX_EMBED_BACKEND=api
 CORTEX_EMBED_ENDPOINT=http://embeddings/v1/embeddings
 CORTEX_EMBED_MODEL=bge-m3
 ```
+
+> endpoint 里那个 `embeddings` 是 **compose 服务名**，只有 cortexd 也在
+> 容器里（`just prod-up` / `just dev`）时才解析得到。cortexd 跑在宿主上
+> （`just run`）要走映出来的端口：`http://127.0.0.1:8090/v1/embeddings`。
 
 要用云就不开 profile，直接指过去（填基地址即可，`/v1/embeddings` 会自动补全）：
 
@@ -976,25 +985,74 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
    四卷必须落在**四块独立物理盘**上 —— 挂在同一块盘上是假冗余，
    RustFS 会检测到共享设备并拒绝启动，那是正确行为。挂之前先确认：
    `lsblk -o NAME,MOUNTPOINT,PKNAME`
-4. **资源上限**。embedding 推理会吃满能拿到的核，不限住它，一次批量回填就能
-   把 Postgres 饿到超时。
+4. **资源上限**。节点是 2C/3.5G 且上面跑着别的东西，任何一个容器不封顶
+   都能把 Postgres 饿到超时。
 
-镜像（237 MB）用多阶段构建，以 uid 10001 非 root 运行，健康检查打 `/health`。
-`sqlx` 一起塞进镜像，所以部署机上跑 migration 不需要 Rust 工具链。
+### 四个镜像各有多大，以及为什么
 
-> **基础镜像必须是 Debian trixie，不能是 bookworm。** cortex-memory 依赖
-> fastembed → ort → 预编译的 ONNX Runtime，那份二进制是用 GCC 13+ 编的，
-> 引用了 `std::__cxx11::basic_string<wchar_t>::_M_replace_cold` 这类 GCC 13
-> 才引入的符号。bookworm 只有 GCC 12.2 的 libstdc++，链接期会以一串
-> `rust-lld: error: undefined symbol: std::__cxx11::...` 失败 ——
-> **报错里完全看不出「是发行版太老」**，非常难查。已实测。
-> 运行阶段同理：用 `bookworm-slim` 的话构建能过、启动时才 `symbol lookup error`，
-> 比构建期失败还难查。
+全部多阶段构建，全部非 root。
 
-**已验证**：镜像内 `cortexd 0.0.1` / `cortex 0.0.1` / `sqlx-cli 0.9.0` 均可执行；
+| 镜像 | 大小 | 里面是什么 | 还能不能更小 |
+|---|---|---|---|
+| `cortex/egress-proxy` | **2.44 MB** | 一个静态二进制，`FROM scratch` | 不能，已经只剩它 |
+| `cortex/cortexd` | 207 MB | debian-slim + cortexd/cortex/sqlx | 能，但每一刀都有代价，见下 |
+| `cortex/cortex-web` | 153 MB | nginx:alpine(93) + Flutter 产物(46) | 基本没有，见下 |
+| `cortex/sandbox` | 720 MB | **开发环境**：git/node/python/ripgrep… | **不该更小**，见下 |
+
+**egress-proxy 是 scratch**，因为它跑在信任边界上：镜像里多一个可执行文件，
+就多一个被攻陷后能用的东西，而 scratch 里连 `sh` 都没有。musl 静态链接，
+DNS 靠 docker 注入的 `/etc/resolv.conf`，uid 用数字写（没有 `/etc/passwd` 可查）。
+上一版是 debian-slim + ca-certificates，125 MB —— 而这个代理**不发起 TLS**
+（CONNECT 是纯字节转发，TLS 在沙箱与目标之间端到端），那些信任根一张没用过。
+
+**cortexd 的 207 MB 里有三样看着可以砍、但砍了会疼的**：
+
+- `sqlx` CLI（8 MB）：cortexd **刻意不在启动时自动迁移**（在跑着的集群上
+  自动改 schema 是运维事故的常见起点），所以 migration 要在部署机上手动跑。
+  砍掉它就得在部署机装 Rust 工具链。
+- `cortex` CLI（7 MB）：`docker exec` 进去查记忆用的，出事时的第一现场工具。
+- debian-slim 底座（87 MB）：换 distroless 能省 ~60 MB，代价是出事时
+  连 `sh` 都进不去。cortexd 不在信任边界上，这笔买卖不划算 —— egress 划算。
+
+**web 镜像的 46 MB 里有 37 MB 是 CanvasKit**（Flutter 的 WASM 渲染器）。
+它可以改成运行时从 gstatic 拉，镜像立刻小 37 MB —— 但那台节点在国内，
+gstatic 时通时不通，换来的是「界面偶尔白屏且看不出原因」。打进镜像是对的。
+底座已经是 `nginx:1.29-alpine`。
+
+**沙箱那 720 MB 是特性不是缺陷**。489 MB 装出来的包里，最大的几样是
+`libnode115`(54M) / `git`(49M) / `libicu`(37M) / `perl`(49M，git 拉的)，
+npm 那棵树在 Debian 上被拆成 341 个包共 87 MB。能省的只有两条，都不划算：
+
+- 换 Node 官方 tarball 省 ~50 MB，代价是构建期多一个外网下载
+  （而这台节点的网络本来就要挑镜像站）
+- 摘掉 `libssl-dev`（16 MB，`npm → libnode-dev` 拉进来的）会让所有带
+  native addon 的 `npm install` 失败
+
+用户要在这个容器里 `npm install`、`pip install`、`git clone`。
+把它减到 300 MB 的唯一办法是拿掉用户要用的东西。
+
+> **cortexd 的底座必须与构建镜像同一个 debian 代号**（现在都是 trixie）。
+> 二进制动态链 glibc，新 glibc 编的东西放进老底座会在**启动时**报
+> `GLIBC_2.xx not found` —— 构建期是绿的，比构建期失败难查。
+>
+> 历史上还有一条更毒的：镜像曾经编 `local-embed`，那条路要求 trixie 是因为
+> ort 那份预编译 ONNX Runtime 用 GCC 13+ 编，bookworm 的 libstdc++ 12.2
+> 缺 `std::__cxx11::basic_string<wchar_t>::_M_replace_cold` 一类符号，
+> 链接期报一串 `rust-lld: error: undefined symbol`，**报错里完全看不出
+> 「是发行版太老」**。已实测。现在镜像不编它了，这条约束不再成立 ——
+> 谁要加回来，先读 `Dockerfile.cortexd` 顶部那段。
+
+**已验证**（2026-08-13，去掉 local-embed 之后重跑）：镜像内
+`cortexd 0.1.7` / `cortex` / `sqlx` 均可执行，`ldd` 无缺失动态库；
+`CORTEX_EMBED_BACKEND=fast` 会在启动时明确报错退出而不是静默降级；
 容器接上 Postgres + RustFS 后 `/health` 返回
 `{"status":"ok","database":"ok","blob_backend":"s3"}`，Docker HEALTHCHECK 转
 `healthy`；`sqlx migrate run --source /opt/cortex/migrations` 在容器内跑通。
+
+egress-proxy 换 scratch 之后也真机验过：沙箱容器经它访问放行域名
+（`https://pypi.org`）得 200、未放行域名（`https://example.com`）被拒、
+同网段回调 `http://cortexd:8080/health` 得 200 —— 三条路都通，
+证明 musl 的解析器在没有 `/etc/nsswitch.conf` 的 scratch 上工作正常。
 
 ---
 

@@ -167,7 +167,15 @@ db-prepare:
 #  开发
 # ══════════════════════════════════════════════════════════
 
-# 运行 cortexd 服务端
+# 在**宿主进程**里跑 cortexd。日常开发请用 `just dev`（见下面那一节）。
+#
+# 留着它只为两件 `just dev` 做不到的事，别的场合都该用 dev：
+#
+#   1. 调试器 / 改一行就重跑。dev 那条路要先把二进制编进卷再重启容器，
+#      多十几秒，且 gdb 之类的东西要钻进容器
+#   2. **`SandboxAddr::Relay` 只有这条路能真机跑到**。cortexd 在宿主上时
+#      它不在沙箱网段里，反代必须经 egress 容器中继；而 `just dev` 与生产
+#      都是 same_network=true 走 Direct。改沙箱反代那块代码时用它验一遍
 run:
     cargo run -p cortexd
 

@@ -316,6 +316,11 @@ trait 的文档（六条，每条都注明「违反了不会当场报错」）�
 在这之前的开发方式是 `just run`：cortexd 跑在**宿主进程**里，只有 postgres /
 rustfs 在容器里。快，但它测的是一条**生产上不存在**的拓扑。
 
+`just run` 留着没删，但只该在两种时候用：要挂调试器，或者**要真机跑到
+`SandboxAddr::Relay`** —— 那一支只在 cortexd 不在沙箱网段里时才走到，
+而 `just dev` 与生产都是 `same_network=true` 走 `Direct`。改沙箱反代那块
+代码时，两条路都得过一遍。
+
 | | `just run` | `just dev` | 生产 |
 |---|---|---|---|
 | cortexd 位置 | 宿主进程 | 容器 | 容器 |
@@ -461,6 +466,15 @@ $ docker run --rm --network <internal 网> --add-host host.docker.internal:host-
 四条各有一条测试守着：默认全拒、deny 优先、`*.domain` 与裸域互不隐含、
 `:port` 可选收窄。**env var 只是引导，网络拓扑才是边界** —— 容器里把
 `HTTP_PROXY` 删掉也没有第二条路。
+
+镜像是 **`FROM scratch`，2.44 MB，里面只有那一个静态二进制**。它跑在信任
+边界上，而它自己是整个沙箱网段里唯一有默认路由的东西 —— 镜像里多一个可
+执行文件，就多一个被攻陷后能用的东西，scratch 里连 `sh` 都没有。
+上一版是 debian-slim + ca-certificates（125 MB），理由写的是「将来要加健康
+检查就不必换基镜像」；实际上这个代理**从不发起 TLS**（CONNECT 是纯字节
+转发，TLS 在沙箱与目标之间端到端），那些信任根一张都没用过。
+musl 静态链接，DNS 靠 docker 注入的 `/etc/resolv.conf`（musl 不需要
+`/etc/nsswitch.conf`），uid 写成数字 `10003:10003`（没有 `/etc/passwd` 可查）。
 
 ### 真机实测（`just sandbox-verify`）
 
