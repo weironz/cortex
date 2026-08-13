@@ -486,11 +486,27 @@ class _Notice extends StatelessWidget {
 /// Shown in the chat header. Bound or not, this is where the workspace is
 /// visible and changeable — the requirement being that a user never has to
 /// wonder whether the agent can touch files.
+///
+/// # 只在有本地 agent 的构建里出现
+///
+/// 「绑定工作区」是**设备本地**的概念（任务 #37）：它说的是「agent 动你这台
+/// 机器上的哪个目录」。Web 端没有本地 agent，那儿的 agent 在云端容器里，
+/// 工作区是它自己的 `/workspace` —— 绑定这件事无从谈起，服务端也会 400 拒
+/// （任务 #75 把文件与 shell 工具从 cortexd 卸掉了）。
+///
+/// 上一版没有这道判据，于是 Web 端顶栏一直挂着一个「绑定工作区」，
+/// 提示语写着「这是一个纯聊天会话，助手拿不到文件工具」—— **两句都是错的**：
+/// Web 端的 agent 有全套文件工具，而点下去只会得到一个 400。
+///
+/// 判据是**能力**而不是 `kIsWeb`，与 `WorkspacePanel`、`SandboxWorkspaceView`
+/// 用的是同一个（见 `core/local_agent.dart`）。
 class WorkspaceChip extends ConsumerWidget {
   const WorkspaceChip({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (!kLocalAgentSupported) return const SizedBox.shrink();
+
     final session = ref.watch(
       chatControllerProvider.select((s) => s.activeSession),
     );

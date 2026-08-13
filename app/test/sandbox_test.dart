@@ -12,7 +12,9 @@
 library;
 
 import 'package:cortex_app/api/mock_cortex_api.dart';
+import 'package:cortex_app/core/local_agent.dart';
 import 'package:cortex_app/features/chat/widgets/message_composer.dart';
+import 'package:cortex_app/features/workspace/workspace_panel.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -42,5 +44,26 @@ void main() {
             '拿掉的东西。要加开关之前先问：用户关掉它能得到什么好处？',
       );
     }
+  });
+
+  /// 「绑定工作区」是**设备本地**的概念，Web 端没有它可绑。
+  ///
+  /// 上一版顶栏那个 chip 没有平台判据，于是 Web 用户看到的是
+  /// 「未绑定工作区 —— 这是一个纯聊天会话，助手拿不到文件工具。点击绑定。」
+  /// 两句都是错的：Web 端的 agent 有全套文件工具（云端容器里的 /workspace），
+  /// 而点下去只会得到服务端的 400。
+  testWidgets('顶栏的「绑定工作区」只在有本地 agent 时出现', (tester) async {
+    await tester.pumpWidget(_wrap(const WorkspaceChip()));
+    await tester.pump();
+
+    expect(
+      find.byType(SizedBox),
+      kLocalAgentSupported ? findsNothing : findsOneWidget,
+      reason: kLocalAgentSupported
+          ? '桌面端要有它 —— 那儿「agent 动哪个目录」是用户真的要决定的事'
+          : 'Web 端不该画它：没有本地 agent 可绑，点下去是 400，'
+                '而它的提示语还会告诉用户「助手拿不到文件工具」——'
+                '恰好与事实相反',
+    );
   });
 }
