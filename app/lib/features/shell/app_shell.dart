@@ -14,19 +14,29 @@ import 'widgets/account_bar.dart';
 /// mobile" check anywhere, which is what lets the same tree serve a Windows
 /// window being dragged narrow and a browser tab at any size.
 ///
-/// * `>= 1240` — sessions | chat | memory, all resident.
-/// * `900–1240` — sessions | chat; memory moves to an end drawer.
+/// * `>= 1240` — sessions | chat | 右栏, all resident.
+/// * `900–1240` — sessions | chat; 右栏 moves to an end drawer.
 /// * `< 900` — chat only; both side panes become drawers.
 ///
-/// ## Why the file tree is not a fourth column
+/// ## 右侧只有一列，记忆与文件轮流住
 ///
-/// The workspace tree shares the left pane with the session list instead of
-/// getting a column of its own. A fourth column would say, structurally, that
-/// files are a peer of the conversation — a separate place you go. They are
-/// not: a workspace is a *property of the session*, like the model it uses, and
-/// the tree is there to answer "which directory is this pointed at". Putting it
-/// under the sessions it belongs to keeps that relationship visible, and keeps
-/// the widest layout at three columns instead of four.
+/// 两者互斥不是妥协，是**它们回答的是同一类问题**：「除了这段对话，
+/// 还有什么是属于我的」。同时摆两列会把最宽的布局推到四列，而第四列
+/// 挤掉的正是对话本身。
+///
+/// 互斥由 [RightPanel] 这个可空枚举在**类型上**保证，不靠这里的判断 ——
+/// 见它的文档。
+///
+/// ## 文件树曾经在左栏底下，为什么搬走了
+///
+/// 原来的论证是「工作区是**会话的一个属性**，像它用哪个模型一样，
+/// 那棵树只是回答『这个会话指着哪个目录』」——所以它跟着会话列表放。
+///
+/// **那个前提已经不成立**：云端工作区改成按项目分、常驻、与会话绑定无关
+/// （容器与卷按 `SandboxScope::key` 走），Web 端更是既绑不了也不需要绑。
+/// 文件从「会话的一个属性」变成了「一个持续存在的地方」，而右栏正是
+/// 放「地方」的位置。左栏底下那个限高 320px 的框也随之取消 ——
+/// 整列之后，文件多的时候不再被那个高度卡住。
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key});
 
@@ -38,7 +48,7 @@ class _AppShellState extends ConsumerState<AppShell> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   static const _sessionsWidth = 264.0;
-  static const _memoryWidth = 348.0;
+  static const _rightWidth = 348.0;
   static const _wideBreakpoint = 1240.0;
   static const _mediumBreakpoint = 900.0;
 
@@ -57,7 +67,18 @@ class _AppShellState extends ConsumerState<AppShell> {
         // 够宽**并且**没被收起来才内联。两个条件分工不同：断点说的是
         // 「放得下吗」，收起说的是「想不想要」，谁也不该替对方回答
         final showSessionsInline = isMedium && !layout.leftCollapsed;
-        final showMemoryInline = isWide && layout.memoryVisible;
+        final showRightInline = isWide && layout.rightPanel != null;
+
+        // 右栏画谁。内联与抽屉共用它 —— 两处各写一遍 switch 的话，
+        // 加第三个面板时漏改一处不会报错，只是抽屉里画的是另一个
+        Widget rightPane(VoidCallback onClose) => switch (layout.rightPanel) {
+          RightPanel.files => WorkspacePanel(onClose: onClose),
+          // `null` 只会在抽屉那条路上出现：内联那条已被 `showRightInline`
+          // 挡住，而点图标进来的走 `showRight`（它必定先设好再开抽屉）。
+          // 剩下的唯一入口是**从屏幕右缘划开**抽屉 —— 那时用户没说要看哪个，
+          // 而记忆是默认那个。画空白比画记忆更像「坏了」
+          RightPanel.memory || null => MemoryPanel(onClose: onClose),
+        };
 
         return Scaffold(
           key: _scaffoldKey,
@@ -68,20 +89,17 @@ class _AppShellState extends ConsumerState<AppShell> {
                   backgroundColor: scheme.surfaceContainerLow,
                   child: SafeArea(
                     child: _LeftPane(
-                      availableHeight: constraints.maxHeight,
                       onSelected: () => Navigator.of(context).maybePop(),
                     ),
                   ),
                 ),
-          endDrawer: showMemoryInline
+          endDrawer: showRightInline
               ? null
               : Drawer(
-                  width: _memoryWidth + 20,
+                  width: _rightWidth + 20,
                   backgroundColor: scheme.surfaceContainerLow,
                   child: SafeArea(
-                    child: MemoryPanel(
-                      onClose: () => Navigator.of(context).maybePop(),
-                    ),
+                    child: rightPane(() => Navigator.of(context).maybePop()),
                   ),
                 ),
           body: SafeArea(
@@ -92,7 +110,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                     width: _sessionsWidth,
                     child: Container(
                       color: scheme.surfaceContainerLow,
-                      child: _LeftPane(availableHeight: constraints.maxHeight),
+                      child: const _LeftPane(),
                     ),
                   ),
                   VerticalDivider(width: 1, color: scheme.outlineVariant),
@@ -106,19 +124,31 @@ class _AppShellState extends ConsumerState<AppShell> {
                         ? layoutNotifier.toggleLeft
                         : () => _scaffoldKey.currentState?.openDrawer(),
                     sessionsVisible: showSessionsInline,
-                    onToggleMemory: isWide
-                        ? layoutNotifier.toggleMemory
-                        : () => _scaffoldKey.currentState?.openEndDrawer(),
-                    memoryVisible: showMemoryInline,
+                    // 两条路的语义不同，所以显式分开写：
+                    //
+                    // 宽屏：右栏就是 `rightPanel`，点同一个 = 收起。
+                    // 窄屏：右栏是抽屉，开合归 `Scaffold` 管 —— 这里只能
+                    //   「选中」。用 selectRight 的话，连点两次「文件」的
+                    //   第二次会把它置空，而抽屉照样开，里面画的是记忆。
+                    //   顺序也不能反：抽屉的内容取自 `layout.rightPanel`
+                    onSelectPanel: (panel) {
+                      if (isWide) {
+                        layoutNotifier.selectRight(panel);
+                      } else {
+                        layoutNotifier.showRight(panel);
+                        _scaffoldKey.currentState?.openEndDrawer();
+                      }
+                    },
+                    activePanel: showRightInline ? layout.rightPanel : null,
                   ),
                 ),
-                if (showMemoryInline) ...[
+                if (showRightInline) ...[
                   VerticalDivider(width: 1, color: scheme.outlineVariant),
                   SizedBox(
-                    width: _memoryWidth,
+                    width: _rightWidth,
                     child: Container(
                       color: scheme.surfaceContainerLow,
-                      child: MemoryPanel(onClose: layoutNotifier.toggleMemory),
+                      child: rightPane(layoutNotifier.closeRight),
                     ),
                   ),
                 ],
@@ -131,27 +161,22 @@ class _AppShellState extends ConsumerState<AppShell> {
   }
 }
 
-/// Session list on top, workspace tree below.
+/// 会话列表 + 底部账号栏。
 ///
-/// The split is computed rather than flexed because both halves are scrollable:
-/// two `Expanded` children would each claim the leftover space and the tree
-/// would take half the pane even when the user has forty sessions and three
-/// files. Capping the tree at 40% of the pane (and at 320px) keeps the session
-/// list — the thing you navigate with — dominant.
+/// 文件树原来夹在这两者之间，占着一个「40% 高、最多 320px」的框。搬到右栏
+/// 之后这里只剩一件事，`Expanded` 就够了 —— 原来那套计算高度的理由
+/// （两个可滚动的孩子不能都 `Expanded`）随之消失。
 class _LeftPane extends StatelessWidget {
-  const _LeftPane({required this.availableHeight, this.onSelected});
+  const _LeftPane({this.onSelected});
 
-  final double availableHeight;
   final VoidCallback? onSelected;
 
   @override
   Widget build(BuildContext context) {
-    final treeHeight = (availableHeight * 0.4).clamp(160.0, 320.0);
     return Column(
       children: [
         Expanded(child: SessionList(onSelected: onSelected)),
-        WorkspacePanel(maxTreeHeight: treeHeight),
-        // 内联与抽屉共用这棵树，所以账号栏两处都会有 —— 不必为抽屉
+        // 内联与抽屉共用这一棵，所以账号栏两处都会有 —— 不必为抽屉
         // 单独再摆一遍，也就不会有两份各自漂移的版本
         const AccountBar(),
       ],

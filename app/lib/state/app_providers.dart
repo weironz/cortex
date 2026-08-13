@@ -159,23 +159,44 @@ final accountProvider = FutureProvider<Account?>((ref) async {
   }
 });
 
-/// 两侧面板收起没有。
-class LayoutState {
-  const LayoutState({this.leftCollapsed = false, this.memoryVisible = true});
+/// 右侧那一列此刻显示谁。
+///
+/// # 为什么是一个枚举而不是两个 bool
+///
+/// 右侧只有一列，所以「记忆」与「文件」天然互斥。用两个 bool 的话，
+/// 「两个都 true」是一个**类型上合法但界面上没有定义**的状态 —— 而它迟早
+/// 会出现（某次只改了一处的开关），表现是右侧画了谁全看代码里哪个 if 在前。
+///
+/// 一个可空枚举把互斥变成**类型上不可能违反**，与这个仓库在别处的立场一致：
+/// 能靠结构保证的，就不要靠每个读点各写一遍判断。
+enum RightPanel {
+  /// 记忆。默认就是它 —— 记忆是这个产品的主张，默认藏起来等于把它降级成
+  /// 一个可选功能。
+  memory,
 
-  /// 会话 + 工作区那一栏。收起时账号栏也跟着不见 —— 与 Codex / Claude
+  /// 文件。云端是那个项目的工作区，桌面端是会话绑定的目录。
+  files,
+}
+
+/// 两侧面板的显示状态。
+class LayoutState {
+  const LayoutState({
+    this.leftCollapsed = false,
+    this.rightPanel = RightPanel.memory,
+  });
+
+  /// 会话那一栏。收起时账号栏也跟着不见 —— 与 Codex / Claude
   /// 桌面端一致：收起就是整条侧栏都没了，要用就展开。
   final bool leftCollapsed;
 
-  /// 记忆栏。默认**开着**：记忆是这个产品的主张，藏起来等于把它变成
-  /// 一个可选功能。
-  final bool memoryVisible;
+  /// 右侧显示谁，`null` = 右侧整个收起。
+  final RightPanel? rightPanel;
 
-  LayoutState copyWith({bool? leftCollapsed, bool? memoryVisible}) =>
-      LayoutState(
-        leftCollapsed: leftCollapsed ?? this.leftCollapsed,
-        memoryVisible: memoryVisible ?? this.memoryVisible,
-      );
+  /// `rightPanel` 要能被显式置 `null`，所以它**不能**用
+  /// `rightPanel ?? this.rightPanel` 那套 —— 那样「收起」永远写不进去。
+  /// 于是这个 copyWith 只管左栏，右侧由调用方直接造新的。
+  LayoutState collapseLeft(bool collapsed) =>
+      LayoutState(leftCollapsed: collapsed, rightPanel: rightPanel);
 }
 
 /// 两侧折叠状态，跨重启记住。
@@ -192,7 +213,15 @@ class LayoutState {
 /// 等于这个开关只在当前这个窗口有效 —— 两家参考产品都记住它。
 class LayoutNotifier extends Notifier<LayoutState> {
   static const String _kLeft = 'left_pane_collapsed';
-  static const String _kMemory = 'memory_pane_visible';
+  static const String _kRight = 'right_panel';
+
+  /// 上一版的键，只读不写。
+  ///
+  /// 右侧从「记忆开/关」变成「显示哪一个」之后，老用户的设置里只有这个。
+  /// 不读它的话，所有升级上来的人第一次打开都会看到一个**收起的右栏** ——
+  /// 而记忆是这个产品的主张。同一个形状这个文件里已经栽过一次
+  /// （见下面那句「一个由『还没存过』造成的默认值反转」）。
+  static const String _kMemoryLegacy = 'memory_pane_visible';
 
   @override
   LayoutState build() {
@@ -205,25 +234,62 @@ class LayoutNotifier extends Notifier<LayoutState> {
     if (!ref.mounted) return;
     state = LayoutState(
       leftCollapsed: saved[_kLeft] == 'true',
-      // 缺省是**开着**，所以只有显式的 'false' 才关。写成
-      // `saved[_kMemory] == 'true'` 的话，第一次启动（没有这个键）
-      // 记忆栏就是关的 —— 一个由「还没存过」造成的默认值反转
-      memoryVisible: saved[_kMemory] != 'false',
+      rightPanel: _readRight(saved),
     );
   }
 
+  /// 新键优先；没有新键就按老键推。
+  static RightPanel? _readRight(Map<String, String> saved) {
+    switch (saved[_kRight]) {
+      case 'memory':
+        return RightPanel.memory;
+      case 'files':
+        return RightPanel.files;
+      case 'none':
+        return null;
+      // 没存过新键 —— 可能是老用户，也可能是全新安装。
+      //
+      // 缺省是**开着记忆**，所以只有显式的 'false' 才收起。写成
+      // `== 'true'` 的话，全新安装（两个键都没有）右栏就是收起的 ——
+      // 一个由「还没存过」造成的默认值反转
+      default:
+        return saved[_kMemoryLegacy] == 'false' ? null : RightPanel.memory;
+    }
+  }
+
   void toggleLeft() {
-    state = state.copyWith(leftCollapsed: !state.leftCollapsed);
+    state = state.collapseLeft(!state.leftCollapsed);
     unawaited(
       ref.read(settingsPatcherProvider)(_kLeft, '${state.leftCollapsed}'),
     );
   }
 
-  void toggleMemory() {
-    state = state.copyWith(memoryVisible: !state.memoryVisible);
-    unawaited(
-      ref.read(settingsPatcherProvider)(_kMemory, '${state.memoryVisible}'),
-    );
+  /// 点顶栏某个面板的图标。
+  ///
+  /// **点已经开着的那个 = 收起**，与两家参考产品一致：同一个按钮既是
+  /// 「给我看这个」也是「不看了」，用户不用去找第二个关闭入口
+  /// （面板自己那个 × 仍然在，两条路都通）。
+  void selectRight(RightPanel panel) {
+    final next = state.rightPanel == panel ? null : panel;
+    state = LayoutState(leftCollapsed: state.leftCollapsed, rightPanel: next);
+    unawaited(ref.read(settingsPatcherProvider)(_kRight, next?.name ?? 'none'));
+  }
+
+  /// 只选中，**不切换**。窄屏那条路用它。
+  ///
+  /// 那儿右栏是个抽屉，开合由 `Scaffold` 管，不由 `rightPanel` 管。用
+  /// [selectRight] 的话，连点两次「文件」的第二次会把 `rightPanel` 置空 ——
+  /// 而抽屉照样打开，里面画的是记忆。用户点的是文件。
+  void showRight(RightPanel panel) {
+    if (state.rightPanel == panel) return;
+    state = LayoutState(leftCollapsed: state.leftCollapsed, rightPanel: panel);
+    unawaited(ref.read(settingsPatcherProvider)(_kRight, panel.name));
+  }
+
+  /// 面板自己那个关闭按钮。
+  void closeRight() {
+    state = LayoutState(leftCollapsed: state.leftCollapsed, rightPanel: null);
+    unawaited(ref.read(settingsPatcherProvider)(_kRight, 'none'));
   }
 }
 

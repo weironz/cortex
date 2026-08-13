@@ -16,20 +16,23 @@ class ChatPane extends ConsumerWidget {
   const ChatPane({
     super.key,
     this.onToggleSessions,
-    this.onToggleMemory,
+    this.onSelectPanel,
     this.sessionsVisible = false,
-    this.memoryVisible = false,
+    this.activePanel,
   });
 
   /// 收起 / 展开左栏。窄到放不下内联时，由 `AppShell` 换成「开抽屉」。
   final VoidCallback? onToggleSessions;
 
-  /// 同上，右侧记忆栏。
-  final VoidCallback? onToggleMemory;
+  /// 点右侧某个面板的图标。窄屏时 `AppShell` 会顺手把抽屉打开。
+  final void Function(RightPanel panel)? onSelectPanel;
 
   /// 左栏此刻是不是内联可见 —— 决定图标朝哪边、tooltip 说「显示」还是「隐藏」。
   final bool sessionsVisible;
-  final bool memoryVisible;
+
+  /// 右侧此刻内联显示着谁（`null` = 收起，或者当前宽度只能开抽屉）。
+  /// 决定两个图标里哪一个是实心的。
+  final RightPanel? activePanel;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -96,18 +99,28 @@ class ChatPane extends ConsumerWidget {
                 ThemeMode.dark => Icons.dark_mode_rounded,
               }),
             ),
-            // 右栏伸缩，放在最右 —— 它挨着的就是它控制的那一栏
-            if (onToggleMemory != null)
-              IconButton(
-                onPressed: onToggleMemory,
-                iconSize: 19,
-                tooltip: memoryVisible ? '隐藏记忆栏' : '显示记忆栏',
-                icon: Icon(
-                  memoryVisible
-                      ? Icons.psychology_rounded
-                      : Icons.psychology_outlined,
-                ),
+            // 右栏那两个，放在最右 —— 它们挨着的就是它们控制的那一栏。
+            //
+            // **文件在前、记忆在后**：记忆紧贴右栏边缘，与它此前独占这个
+            // 位置时一致；对已经形成肌肉记忆的人，那个图标没有挪窝
+            if (onSelectPanel != null) ...[
+              _PanelButton(
+                panel: RightPanel.files,
+                active: activePanel == RightPanel.files,
+                tooltip: '文件',
+                filled: Icons.folder_rounded,
+                outlined: Icons.folder_outlined,
+                onSelect: onSelectPanel!,
               ),
+              _PanelButton(
+                panel: RightPanel.memory,
+                active: activePanel == RightPanel.memory,
+                tooltip: '记忆',
+                filled: Icons.psychology_rounded,
+                outlined: Icons.psychology_outlined,
+                onSelect: onSelectPanel!,
+              ),
+            ],
           ],
         ),
         Expanded(
@@ -298,6 +311,41 @@ class _SendErrorBanner extends ConsumerWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// 右栏那两个图标共用的一个。
+///
+/// 提出来是因为它们除了图标与文案**完全一样** —— 而两份复制粘贴的
+/// IconButton 里，迟早有一份会漏掉「选中态实心」或者 tooltip 忘了改。
+class _PanelButton extends StatelessWidget {
+  const _PanelButton({
+    required this.panel,
+    required this.active,
+    required this.tooltip,
+    required this.filled,
+    required this.outlined,
+    required this.onSelect,
+  });
+
+  final RightPanel panel;
+  final bool active;
+  final String tooltip;
+  final IconData filled;
+  final IconData outlined;
+  final void Function(RightPanel) onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      onPressed: () => onSelect(panel),
+      iconSize: 19,
+      // 开着的时候说「隐藏」：同一个按钮既是「给我看」也是「不看了」，
+      // 用户不用去找第二个关闭入口
+      tooltip: active ? '隐藏$tooltip栏' : tooltip,
+      color: active ? Theme.of(context).colorScheme.secondary : null,
+      icon: Icon(active ? filled : outlined),
     );
   }
 }

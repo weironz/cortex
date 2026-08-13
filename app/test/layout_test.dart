@@ -128,7 +128,7 @@ void main() {
       }
     }
 
-    test('默认：左栏展开、记忆栏开着', () async {
+    test('默认：左栏展开、右栏是记忆', () async {
       final c = boot();
       addTearDown(c.dispose);
       c.read(layoutProvider);
@@ -136,23 +136,27 @@ void main() {
 
       final s = c.read(layoutProvider);
       expect(s.leftCollapsed, isFalse);
-      expect(s.memoryVisible, isTrue, reason: '记忆是这个产品的主张。默认藏起来等于把它降级成一个可选功能');
+      expect(
+        s.rightPanel,
+        RightPanel.memory,
+        reason: '记忆是这个产品的主张。默认藏起来等于把它降级成一个可选功能',
+      );
     });
 
-    test('没存过的时候记忆栏必须是开的 —— 别被「读不到」翻转成关', () async {
-      // `saved['memory_pane_visible'] == 'true'` 写法的下场：第一次启动
-      // （表里没有这个键）记忆栏就是关的，而没有人动过那个开关
+    test('没存过的时候右栏必须是记忆 —— 别被「读不到」翻转成收起', () async {
+      // `saved[…] == 'true'` 那种写法的下场：第一次启动（表里两个键都没有）
+      // 右栏就是收起的，而没有人动过任何开关
       final c = boot();
       addTearDown(c.dispose);
       c.read(layoutProvider);
       await settle();
-      expect(c.read(layoutProvider).memoryVisible, isTrue);
+      expect(c.read(layoutProvider).rightPanel, RightPanel.memory);
     });
 
     test('存下来的状态在启动时被读回来', () async {
       final c = boot({
         'left_pane_collapsed': 'true',
-        'memory_pane_visible': 'false',
+        'right_panel': 'files',
       });
       addTearDown(c.dispose);
       // **先读一次把 provider 造出来**，再 settle。provider 是懒的：
@@ -162,7 +166,53 @@ void main() {
       await settle();
 
       expect(c.read(layoutProvider).leftCollapsed, isTrue);
-      expect(c.read(layoutProvider).memoryVisible, isFalse);
+      expect(c.read(layoutProvider).rightPanel, RightPanel.files);
+    });
+
+    /// 老用户的设置里只有 `memory_pane_visible`。
+    ///
+    /// 不读它的话，所有升级上来的人第一次打开都会看到一个收起的右栏 ——
+    /// 而记忆是这个产品的主张。这是「默认值反转」的第二种形态：
+    /// 前一次是读错了判据，这次是**换了键之后忘了老的那把**。
+    test('老键还认：升级上来的人不该突然丢掉右栏', () async {
+      final c = boot({'memory_pane_visible': 'true'});
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+      expect(
+        c.read(layoutProvider).rightPanel,
+        RightPanel.memory,
+        reason: '只认新键的话，老用户升级后右栏是空的，而他没动过任何开关',
+      );
+    });
+
+    test('老键说关着，那就还是关着', () async {
+      final c = boot({'memory_pane_visible': 'false'});
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+      expect(c.read(layoutProvider).rightPanel, isNull);
+    });
+
+    /// 右侧只有一列，所以两个面板互斥 —— 而这条由类型保证，不由判断保证。
+    test('选另一个就换过去，再选同一个就收起', () async {
+      final c = boot();
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+
+      c.read(layoutProvider.notifier).selectRight(RightPanel.files);
+      expect(c.read(layoutProvider).rightPanel, RightPanel.files);
+
+      c.read(layoutProvider.notifier).selectRight(RightPanel.memory);
+      expect(c.read(layoutProvider).rightPanel, RightPanel.memory);
+
+      c.read(layoutProvider.notifier).selectRight(RightPanel.memory);
+      expect(
+        c.read(layoutProvider).rightPanel,
+        isNull,
+        reason: '点已经开着的那个 = 收起 —— 用户不用去找第二个关闭入口',
+      );
     });
 
     test('切一下就落盘，且不抹掉别的设置', () async {
@@ -189,11 +239,11 @@ void main() {
 
       c.read(permissionModeProvider.notifier).set(PermissionMode.bypass);
       await settle();
-      c.read(layoutProvider.notifier).toggleMemory();
+      c.read(layoutProvider.notifier).selectRight(RightPanel.files);
       await settle();
 
       expect(disk['permission_mode'], PermissionMode.bypass.wire);
-      expect(disk['memory_pane_visible'], 'false');
+      expect(disk['right_panel'], 'files');
     });
   });
 }

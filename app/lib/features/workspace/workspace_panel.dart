@@ -5,6 +5,7 @@ import '../../core/local_agent.dart';
 import '../../models/attachment.dart' show formatBytes;
 import '../../models/workspace.dart';
 import '../../state/chat_controller.dart';
+import '../../widgets/panel_header.dart';
 import '../../workspace/workspace_fs.dart';
 import 'sandbox_file_tree.dart';
 import 'workspace_binding_sheet.dart';
@@ -20,31 +21,21 @@ import 'workspace_binding_sheet.dart';
 /// The tree is lazy: one directory level per expand. Eagerly walking a
 /// repository root would stall on `node_modules` or `target` for seconds, and
 /// the first thing the user wants to see is the top level anyway.
-class WorkspacePanel extends ConsumerStatefulWidget {
-  const WorkspacePanel({super.key, this.maxTreeHeight = 300});
+class WorkspacePanel extends ConsumerWidget {
+  const WorkspacePanel({super.key, this.onClose});
 
-  /// Height given to the tree when open.
-  ///
-  /// Passed in rather than taken with an `Expanded`: this panel is the bottom
-  /// half of a `Column` whose top half is the session list, and both cannot
-  /// claim the remaining space. The parent measures once and splits.
-  final double maxTreeHeight;
+  /// 关闭这一栏。与 `MemoryPanel({this.onClose})` 同形 —— 右栏里两个面板
+  /// 轮流住，它们对外的形状必须一样，否则 `AppShell` 那个 `switch`
+  /// 要为每一支写不同的接线。
+  final VoidCallback? onClose;
 
   @override
-  ConsumerState<WorkspacePanel> createState() => _WorkspacePanelState();
-}
-
-class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
-  bool _expanded = true;
-
-  @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final session = ref.watch(
       chatControllerProvider.select((s) => s.activeSession),
     );
-    if (session == null) return const SizedBox.shrink();
 
-    final workspace = session.workspace;
+    final workspace = session?.workspace;
     final scheme = Theme.of(context).colorScheme;
 
     // 没有本地 agent 的构建（Web）：这块面板回答的是「我的文件在哪」，
@@ -55,134 +46,74 @@ class _WorkspacePanelState extends ConsumerState<WorkspacePanel> {
     // 于是 workspace 恒为 null，整块面板连同**唯一的文件出入口**在 Web 上
     // 永远不出现 —— 而 Web 恰恰是唯一需要它的地方。
     final sandboxOnly = !kLocalAgentSupported;
-    if (!sandboxOnly && workspace == null) return const SizedBox.shrink();
 
-    return Container(
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: scheme.outlineVariant)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (sandboxOnly)
-            _Header(
-              icon: Icons.folder_rounded,
-              // 不叫「云沙箱」。用户这里要的是「我的文件在哪」，
-              // 而「沙箱」是一个实现细节的名字 —— 它既不告诉他里面有什么，
-              // 也让他以为需要先做点什么才能用
-              title: '文件',
-              tooltip: 'agent 读写的就是这些文件，跨会话保留',
-              expanded: _expanded,
-              onToggle: () => setState(() => _expanded = !_expanded),
-            )
-          else
-            _Header(
-              icon: Icons.folder_rounded,
-              title: workspace!.displayName,
-              tooltip: workspace.root,
-              expanded: _expanded,
-              onToggle: () => setState(() => _expanded = !_expanded),
-              action: _HeaderAction(
-                icon: Icons.swap_horiz_rounded,
-                tooltip: '更换工作区',
-                onPressed: () => showWorkspaceBindingSheet(context, session),
-              ),
-            ),
-          if (_expanded)
-            SizedBox(
-              height: widget.maxTreeHeight,
-              child: sandboxOnly
-                  ? const SandboxWorkspaceView()
-                  // Keyed by root so switching sessions to a differently-bound
-                  // one discards the expansion set and cached listings of the
-                  // old tree instead of showing them under the new root.
-                  : _Tree(key: ValueKey(workspace!.root), root: workspace.root),
-            ),
-        ],
-      ),
-    );
-  }
-}
+    // 没有会话、或者桌面端这个会话还没绑目录 —— **没东西可画，但栏还得在**。
+    //
+    // 搬到右栏之前这两处是 `SizedBox.shrink()`：那时它只是左栏底下的一块，
+    // 消失就消失了。现在它是**整整一列**，画不出东西就等于一片空白，
+    // 而且连关闭按钮都没有 —— 用户打开一个关不掉的空栏。
+    final empty = session == null
+        ? '还没选中会话。'
+        : (!sandboxOnly && workspace == null
+              ? '这个会话还没绑定目录 —— 点上面那个换向箭头选一个。'
+              : null);
 
-/// 一个可选的头部按钮。Web 那一支没有「更换工作区」可点 —— 那里的根是
-/// 服务端定的，换不了。
-class _HeaderAction {
-  const _HeaderAction({
-    required this.icon,
-    required this.tooltip,
-    required this.onPressed,
-  });
-
-  final IconData icon;
-  final String tooltip;
-  final VoidCallback onPressed;
-}
-
-class _Header extends StatelessWidget {
-  const _Header({
-    required this.icon,
-    required this.title,
-    required this.tooltip,
-    required this.expanded,
-    required this.onToggle,
-    this.action,
-  });
-
-  final IconData icon;
-  final String title;
-  final String tooltip;
-  final bool expanded;
-  final VoidCallback onToggle;
-  final _HeaderAction? action;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-
-    return InkWell(
-      onTap: onToggle,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
-        child: Row(
-          children: [
-            AnimatedRotation(
-              turns: expanded ? 0 : -0.25,
-              duration: const Duration(milliseconds: 150),
-              child: Icon(
-                Icons.expand_more_rounded,
-                size: 17,
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(width: 4),
-            Icon(icon, size: 14, color: scheme.secondary),
-            const SizedBox(width: 7),
-            Expanded(
-              child: Tooltip(
-                message: tooltip,
-                child: Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.labelMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-            if (action case final action?)
+    // 面板自己那层折叠没了：右栏整个由顶栏那个图标控制，再套一层
+    // 就是两个开关管同一件事 —— 而用户永远说不清该点哪个
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        PanelHeader(
+          // 不叫「云沙箱」。用户这里要的是「我的文件在哪」，而「沙箱」
+          // 是一个实现细节的名字 —— 它既不告诉他里面有什么，也让他以为
+          // 需要先做点什么才能用
+          title: sandboxOnly ? '文件' : (workspace?.displayName ?? '文件'),
+          subtitle: sandboxOnly
+              ? 'agent 读写的就是这些，跨会话保留'
+              : workspace?.root,
+          leading: Icon(Icons.folder_rounded, size: 15, color: scheme.secondary),
+          actions: [
+            // 云端那一支没有「更换工作区」可点 —— 那儿的根是服务端定的
+            if (!sandboxOnly && session != null)
               IconButton(
-                onPressed: action.onPressed,
-                iconSize: 15,
-                visualDensity: VisualDensity.compact,
-                tooltip: action.tooltip,
-                icon: Icon(action.icon),
+                onPressed: () => showWorkspaceBindingSheet(context, session),
+                iconSize: 17,
+                tooltip: '更换工作区',
+                icon: const Icon(Icons.swap_horiz_rounded),
+              ),
+            if (onClose != null)
+              IconButton(
+                onPressed: onClose,
+                iconSize: 17,
+                tooltip: '关闭',
+                icon: const Icon(Icons.close_rounded),
               ),
           ],
         ),
-      ),
+        // 整列之后从 `SizedBox(height:)` 改成 `Expanded` —— 这是搬家唯一的
+        // 真收益：文件多的时候不再被那个 320px 的框卡住
+        Expanded(
+          child: empty != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(
+                      empty,
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                )
+              : sandboxOnly
+              ? const SandboxWorkspaceView()
+              // Keyed by root so switching sessions to a differently-bound
+              // one discards the expansion set and cached listings of the
+              // old tree instead of showing them under the new root.
+              : _Tree(key: ValueKey(workspace!.root), root: workspace.root),
+        ),
+      ],
     );
   }
 }
