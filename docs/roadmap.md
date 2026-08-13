@@ -721,8 +721,28 @@ bind 端口；tini 与 `--init` 重复；**容器里的免确认不是自动的*
 
 顺带清掉的两样：`dev-build.sh` 一直在编 `cortex-egress-proxy`，但那个卷只挂
 进 cortexd，egress 走的是镜像 —— 编出来的从没人读过（第 11 次，这回只费时间）；
-`operations.md` 里自建 embedding 的 profile 名写的是 `selfhost-embed`，
-compose 里实际叫 `embed`，照着文档做只会得到一个不存在的服务。
+自建 embedding 的 profile 名在两份 compose 里不一样（根仓库 `embed`、
+`deploy/` 里 `selfhost-embed`），各自内部自洽所以一直没暴露，但照着
+`operations.md` 在节点上敲就会得到一个不存在的服务。统一成 `embed`。
+
+#### 「配置有两份」这个形状第一次咬人
+
+改完根仓库的 `docker-compose.prod.yml` 就以为完事了，**漏了 `deploy/`** ——
+那才是真正上节点的那份（独立文件，不是 overlay，因为 compose 合并 `ports`
+是追加不是替换）。它仍然默认 `CORTEX_EMBED_BACKEND=fast`、仍然挂着
+`FASTEMBED_CACHE_DIR` 与 `cortex-prod-models` 卷。照那样推上去，新镜像会
+**拒绝启动**（好在是响的失败，不是静默降级）。
+
+是用户问「参数同步到云的 compose 和 env.example 了吗」才发现的。
+这个形状与「造好了没人调用」是一对：那个是**代码有了没人用**，
+这个是**改了一处另一处没跟上**，而后者在配置文件上比在代码里更常见 ——
+编译器不看 YAML。
+
+另外记一笔根 `.env.example` 里的：默认 endpoint 写的是
+`http://127.0.0.1:8090/v1/embeddings`，那在 `just run`（cortexd 在宿主进程）
+是对的，在 `just dev` / 生产（cortexd 在容器里）指的是**容器自己的回环**。
+与当初 `DATABASE_URL` 从 localhost 改服务名是同一个坑，只是这个还没被踩到 ——
+默认改成云 endpoint，自建那条注释里写清「地址取决于 cortexd 跑在哪」。
 
 **没动沙箱镜像的 720 MB**，那是特性不是缺陷：能省的只有「Node 换官方 tarball」
 （省 50 MB，代价是构建期多一个外网下载，而这台节点的网络本来就要挑镜像站）

@@ -118,24 +118,26 @@ services:
       traefik.http.routers.cortex-s3.tls.certresolver: letsencrypt
       traefik.http.services.cortex-s3.loadbalancer.server.port: "9000"
 
-  # ── embedding 服务（可选，profile `selfhost-embed`）─────
+  # ── embedding 服务（可选，profile `embed`）─────
   #
   # 向量化有三条路，**默认走第一条**：
   #
-  #   1. `CORTEX_EMBED_BACKEND=fast` —— 镜像里编进了 fastembed/ONNX，
-  #      进程内算。零外部依赖、零成本。首次启动从 Hugging Face 下 ~560 MB
-  #      权重进 `models` 卷；HF 不可达的机器可以预先把权重塞进那个卷
-  #   2. `=api` + 云服务 —— 见下面 cortexd 的 environment 段
-  #   3. `=api` + 自建，就是这个服务
+  #   1. `=api` + 云服务（默认）—— 见下面 cortexd 的 environment 段。
+  #      零容器、零常驻内存，代价是每次向量化要出网
+  #   2. `=api` + 自建，就是这个服务
+  #   3. `=fast` 进程内 ONNX —— **官方镜像不带**，要自己重编。
+  #      2026-08-13 从镜像里去掉的：它常驻 1.03 GiB，而这台节点 2C/3.5G
+  #      上已跑着 19 个容器 —— 那一个选择单独决定了能跑几个沙箱（1 个）。
+  #      填了它 cortexd 会在启动时直接报错退出，不会静默降级
   #
-  # ⚠️ **第三条比 cortexd 本身重得多，所以它默认不启动。**
+  # ⚠️ **第二条比 cortexd 本身重得多，所以它默认不启动。**
   # bge-m3 是 5.68 亿参数、fp32 权重约 2.2 GB，TEI 载入后常驻 2.5–3 GB。
   # 2 核 4 GB 的机器跑不动（这个项目自己那台深圳节点就跑不动，它上面
   # 还有十几个别的容器）—— 而那正是本项目的目标机型，所以让它默认起来
   # 等于让参考部署在 `up` 那一刻就 OOM。要自建就显式开：
   #
   #     # .env 里：
-  #     COMPOSE_PROFILES=selfhost-embed
+  #     COMPOSE_PROFILES=embed
   #     CORTEX_EMBED_BACKEND=api
   #     CORTEX_EMBED_ENDPOINT=http://embeddings/v1/embeddings
   #     CORTEX_EMBED_MODEL=bge-m3          # ← TEI 用这个名字，不是 bge-m3-int8
@@ -148,7 +150,7 @@ services:
   embeddings:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
     container_name: cortex-embeddings
-    profiles: [selfhost-embed]
+    profiles: [embed]
     restart: unless-stopped
     logging: *default-logging
     # 只进默认网络。**别加 traefik** —— TEI 不带任何鉴权，
@@ -230,9 +232,12 @@ services:
       # 是不可挽回的错误方向
       CORTEX_CONFIRM_TIMEOUT_SECS: ${CORTEX_CONFIRM_TIMEOUT_SECS:-180}
 
-      # 向量后端。默认 `fast` —— 镜像里编进了 fastembed，进程内算，
-      # 不依赖任何外部服务（见上面 embeddings 一段的三条路）。
-      # 换成任何一家 OpenAI 兼容的云只需要改这四行（改 .env，不用改这个文件）：
+      # 向量后端。默认 `api` —— cortexd 只发一个 HTTP POST 到 endpoint，
+      # 对面是云还是自建的 TEI 容器它不关心（见上面 embeddings 一段）。
+      #
+      # **这四项没有可用的默认值，必须在 .env 里填。** 空 endpoint 会在
+      # 第一次向量化时失败，不是在启动时 —— 所以部署后先看 `/health` 的
+      # `embedding.model`，它应该是 `api:<你填的模型名>`。
       #
       #   CORTEX_EMBED_BACKEND=api
       #   CORTEX_EMBED_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -244,26 +249,13 @@ services:
       #
       # ⚠️ 换后端 = 换 `model_id`，已有事实会退出向量召回。cortexd 启动时
       # 会 WARN 报出数量、`/health` 有 `embedding.stale`，后台回填器自动补。
-      CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-fast}
-      CORTEX_EMBED_ENDPOINT: ${CORTEX_EMBED_ENDPOINT:-http://embeddings/v1/embeddings}
-      CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-bge-m3-int8}
+      CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-api}
+      CORTEX_EMBED_ENDPOINT: ${CORTEX_EMBED_ENDPOINT:-}
+      CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-}
       CORTEX_EMBED_API_KEY: ${CORTEX_EMBED_API_KEY:-}
+      # 单次请求最多几条。默认 10 不是性能调优，是兼容性下限 ——
+      # TEI 允许 32，阿里百炼 text-embedding-v3/v4 只到 10
       CORTEX_EMBED_BATCH: ${CORTEX_EMBED_BATCH:-}
-
-      # ★ **默认后端 `fast` 全靠这一行找到权重。别删。**
-      #
-      # `cortex_memory::embed_local::default_cache_dir()` 认这个变量
-      # （它是 fastembed 自己的变量名，故意沿用，方便与别的工具共用缓存）。
-      # 没有它就回落到 `$HOME/.cache/...` —— 而那个路径**不在下面挂的
-      # models 卷里**，于是 fastembed 会去 Hugging Face 现下 560 MB。
-      #
-      # 在 HF 可达的机器上那只是慢一次。在**够不到 HF 的机器上**
-      # （国内节点常态：DNS 被污染、hf-mirror 也不通）后果是：
-      # cortexd **照常启动、`/health` 返回 ok**，只在日志里留一行
-      # 「回落到 mock 数据源」—— 记忆检索是假的，而没有任何红灯。
-      # 这个坑第一次上线时踩过一次，0.1.2 的 compose 又把这行删掉了，
-      # 部署前才发现。
-      FASTEMBED_CACHE_DIR: /var/lib/cortex/models
 
       # LLM 供应商。密钥只从环境来，绝不写进任何被 git 跟踪的文件。
       #
@@ -277,18 +269,17 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
-      # 默认后端 `fast` 的权重落在这里（~560 MB，首次启动从 HF 下）。
-      # **卷必须持久**：删掉它等于每次重建容器都重下一遍，而在 HF
-      # 不可达的机器上是「重建一次就永远起不来」
-      - cortex-prod-models:/var/lib/cortex/models
       - cortex-prod-workspace:/var/lib/cortex/workspace
     deploy:
       resources:
         limits:
-          # embedding 推理会吃满能拿到的核。不限住它，一次批量回填
-          # 就能把 Postgres 饿到超时 —— 而这台机器还要养活别的四个服务
-          cpus: ${CORTEXD_CPU_LIMIT:-4}
-          memory: ${CORTEXD_MEM_LIMIT:-4g}
+          # embedding 挪出进程之后 cortexd 只剩 I/O 与 SQL，常驻从 1.03 GiB
+          # 降到 ~120 MiB。上限跟着降 —— 留 4g 不会更安全，只会让真正的
+          # 泄漏拖到把整台机器压垮才被看见。
+          #
+          # cpus 不得超过节点核数：这台是 2 核，原先那个 4 被 daemon 拒过
+          cpus: ${CORTEXD_CPU_LIMIT:-1.5}
+          memory: ${CORTEXD_MEM_LIMIT:-768m}
     labels:
       traefik.enable: "true"
       traefik.docker.network: traefik-network
@@ -341,8 +332,10 @@ networks:
 volumes:
   cortex-prod-postgres:
   cortex-prod-rustfs:
-  cortex-prod-models:
   cortex-prod-workspace:
-  # TEI 的权重缓存（约 2.2 GB）。与 cortex-prod-models 是两回事：
-  # 那个是 cortexd 进程内推理用的 ONNX 缓存，这个是 embeddings 容器的
+  # TEI 的权重缓存（约 2.2 GB），只在 `--profile embed` 时用到。
+  #
+  # 这里以前还有一个 `cortex-prod-models`，装 cortexd 进程内推理的 ONNX
+  # 权重 —— 随 `local-embed` 一起去掉了。**已部署的机器上那个卷不会自动删**，
+  # 确认没在用之后手工清：docker volume rm cortex_cortex-prod-models
   cortex-prod-embed-models:
