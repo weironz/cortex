@@ -322,7 +322,11 @@ class _Failure {
 
   factory _Failure.from(Object error) {
     if (error is CortexApiException) {
-      return _Failure(error.message, containerGone: error.statusCode == 501);
+      // 409 而不是 501。两者服务端都用过：501 是「这个部署没开云沙箱」
+      // （永久，重试没意义），409 是「容器被回收了」（发条消息就回来）。
+      // 只看 501 的话，沙箱关掉的部署上会显示「沙箱容器不在了 + 重试」——
+      // 标题与正文互相矛盾，而那个重试按钮永远按不出结果。
+      return _Failure(error.message, containerGone: error.statusCode == 409);
     }
     return _Failure('$error');
   }

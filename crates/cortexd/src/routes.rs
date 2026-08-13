@@ -649,7 +649,9 @@ async fn download_workspace(
         .sandbox_layer()
         .ok_or_else(|| ApiError::unsupported("这个部署没有开云沙箱"))?;
     if layer.runner.status(&owner).await?.is_none() {
-        return Err(ApiError::unsupported(
+        // 409 不是 501：能力在，只是容器被回收了 —— 发条消息就回来。
+        // 501 会让客户端把整个功能降级掉、并且不再重试
+        return Err(ApiError::conflict(
             "沙箱容器不在（可能已被回收）。文件还在卷里 —— \
              先发一条消息把它拉起来，再下载。",
         ));
@@ -693,7 +695,9 @@ async fn require_sandbox<'a>(
         .sandbox_layer()
         .ok_or_else(|| ApiError::unsupported("这个部署没有开云沙箱"))?;
     if layer.runner.status(owner).await?.is_none() {
-        return Err(ApiError::unsupported(
+        // 409 不是 501：能力在，只是容器被回收了 —— 发条消息就回来。
+        // 501 会让客户端把整个功能降级掉、并且不再重试
+        return Err(ApiError::conflict(
             "沙箱容器不在（可能已被回收）。文件还在卷里 —— \
              先发一条消息把它拉起来，再试。",
         ));
@@ -1145,12 +1149,34 @@ impl ApiError {
             .unwrap_or_else(|| self.inner.to_string())
     }
 
-    /// 501：请求本身没错，是这个部署形态提供不了这个能力。
+    /// 501：请求本身没错，是这个部署形态**永远**提供不了这个能力。
+    ///
+    /// 客户端把 501 当成「这条路不会开」，据此把功能降级掉并且**不重试**
+    /// （`api_exception.dart` 的 `isUnsupported`，注释里写着「retrying a 501
+    /// is a loop on a road that will never open」）。所以只有真正的永久缺失
+    /// 才配用它 —— 「现在没有、待会儿会有」要用 [`Self::conflict`]。
     pub fn unsupported(message: impl Into<String>) -> Self {
         Self {
             message: Some(message.into()),
             inner: cortex_core::CortexError::Store("unsupported".into()),
             status: Some(StatusCode::NOT_IMPLEMENTED),
+        }
+    }
+
+    /// 409：能力在，但当下的状态不满足；用户做件事就好了。
+    ///
+    /// 与 [`Self::unsupported`] 分开是有代价换来的：沙箱那几条文件端点
+    /// 原先两种情况都回 501 —— 「这个部署没开云沙箱」（永久）和「容器被回收了」
+    /// （发条消息就回来）。客户端只看数字，于是在**沙箱关掉的部署**上
+    /// 界面显示的是「沙箱容器不在了 / 重试」，而重试永远不会成功。
+    ///
+    /// 那条路今天才变得可达：`deploy/` 的默认值是 `CORTEX_SANDBOX_ENABLED=0`。
+    /// 「一个状态码身兼两职，客户端只看数字」在这个仓库里是第二次了。
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            message: Some(message.into()),
+            inner: cortex_core::CortexError::Store("conflict".into()),
+            status: Some(StatusCode::CONFLICT),
         }
     }
 }

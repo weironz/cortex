@@ -77,7 +77,18 @@ class _TreeApi extends MockCortexApi {
 class _GoneApi extends MockCortexApi {
   @override
   Future<List<FileNode>> sandboxListFiles(String path) async =>
-      throw const CortexApiException(_kContainerGone, statusCode: 501);
+      throw const CortexApiException(_kContainerGone, statusCode: 409);
+}
+
+/// 沙箱**整个没开**的部署 —— 服务端回 501。
+///
+/// 与 [_GoneApi] 的差别不在措辞而在**下一步**：那个发条消息就好了，
+/// 这个发一万条也没用。两者共用一个状态码时，界面会对着后者说
+/// 「沙箱容器不在了」并给一个永远按不出结果的「重试」。
+class _NoSandboxApi extends MockCortexApi {
+  @override
+  Future<List<FileNode>> sandboxListFiles(String path) async =>
+      throw const CortexApiException('这个部署没有开云沙箱', statusCode: 501);
 }
 
 Widget _wrap(Widget child, CortexApi api) => ProviderScope(
@@ -126,6 +137,26 @@ void main() {
         find.text('重试'),
         findsOneWidget,
         reason: '用户按提示发完消息把容器拉起来之后，得有个地方点一下重新列目录',
+      );
+    });
+
+    testWidgets('沙箱整个没开时不能说成「容器不在」', (tester) async {
+      await tester.pumpWidget(_wrap(const SandboxBrowser(), _NoSandboxApi()));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('沙箱容器不在了'),
+        findsNothing,
+        reason:
+            '这个部署压根没开云沙箱（501），不是容器被回收了（409）。'
+            '说成「容器不在了」等于让用户去发消息把它拉起来 —— 发一万条也没用。'
+            '两种情况曾经共用 501，客户端只看数字，于是标题与正文互相矛盾；'
+            'deploy/ 的默认值是 CORTEX_SANDBOX_ENABLED=0，这条路是生产默认',
+      );
+      expect(
+        find.text('这个部署没有开云沙箱'),
+        findsOneWidget,
+        reason: '服务端那句话仍然要原样透出 —— 它说清了「为什么」',
       );
     });
   });
