@@ -310,6 +310,57 @@ trait 的文档（六条，每条都注明「违反了不会当场报错」）�
 
 ---
 
+
+### 本地把云端环境整套跑起来（`just dev`）
+
+在这之前的开发方式是 `just run`：cortexd 跑在**宿主进程**里，只有 postgres /
+rustfs 在容器里。快，但它测的是一条**生产上不存在**的拓扑。
+
+| | `just run` | `just dev` | 生产 |
+|---|---|---|---|
+| cortexd 位置 | 宿主进程 | 容器 | 容器 |
+| `same_network` | false | **true** | true |
+| 反代进沙箱 | 经 `cortex-egress` 中继 | **直连容器名** | 直连容器名 |
+| 浏览器 → API | 直连 :8080（要开 CORS）| **nginx 同源** | traefik 同源 |
+| 工具沙箱 | 不可用（Windows 没有 landlock）| **landlock ABI 3** | landlock |
+| 对象存储 | 常回落本地 FS | 真 RustFS | 真 RustFS |
+
+**二进制是挂进来的，不烧进镜像**：`scripts/dev-build.sh` 在
+`rust:1.97.1-trixie` 里编（宿主是 Windows，`cargo build` 出的 `.exe` 在
+Linux 容器里跑不了），产物落进 named volume，运行容器只读挂。
+增量编译实测 7.4 秒，改一行 Rust 走 `just dev-restart` 即可。
+
+#### 第一轮就找出一个只在生产拓扑下出现的 bug
+
+沙箱的 `NO_PROXY` 里没有**回调地址的主机名**。同网段部署时
+`CORTEX_REMOTE=http://cortexd:8080`，于是回调走了出网代理，被自己的放行
+清单 403：
+
+```
+cortexd 403 Forbidden：cortexd:8080 不在放行清单里，出网代理拒绝了这次连接
+```
+
+宿主部署那侧**碰不到** —— 它的回调地址 `host.docker.internal:8080` 恰好在
+默认放行清单里。所以这个 bug 只在生产拓扑下出现，而那正是
+「宿主上跑 cortexd」那种开发方式测不到的东西。
+
+回调本来就该直连（沙箱与 cortexd 同网段，中间放代理既没意义，也让「出网
+清单」的语义变浑 —— 那是给**外网**的）。已修，并加了断言守着。
+
+#### 另外三个踩到的
+
+- **compose 会给卷加项目名前缀**。声明的 `cortex_dev_bin` 实际叫
+  `cortex_cortex_dev_bin`，而构建脚本用的是裸名 —— 两个不同的卷。
+  症状是容器起不来说找不到二进制，而 `docker volume ls` 里明明有那个名字。
+  要显式写 `name:`。
+- **docker.sock 是 `root:root` 660**，而 cortexd 跑在 uid 10001 上，
+  不给组就是 `client error (Connect)`（读起来像 docker 没起来）。
+  加 `group_add: ["0"]` —— 拿的是**组**不是 root 身份。
+- **`cp` 覆盖正在运行的二进制会 ETXTBSY**，而那正是 `dev-restart` 这条最常
+  走的路。改成写临时名再 `mv`：rename 换的是目录项，运行中的 inode 不受影响。
+
+---
+
 ## 七、编排：一条 trait，不拆进程
 
 ```rust

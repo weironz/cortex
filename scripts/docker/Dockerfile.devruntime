@@ -1,0 +1,46 @@
+# ══════════════════════════════════════════════════════════
+#  开发环境的运行底座 —— 只有运行时依赖，**不含任何 cortex 二进制**
+#
+#  二进制由 `just dev-build` 编进一个 named volume，运行时挂进来。
+#  于是改一行 Rust 只要重编 + 重启容器（秒级），不用重建镜像（分钟级）。
+#
+#  构建（在仓库根执行，只需一次）：
+#    docker build -f scripts/docker/Dockerfile.devruntime -t cortex/devruntime .
+#  或：just dev-build（会顺带带上）
+#
+#  ── 为什么不直接用 debian:trixie-slim ────────────────────
+#
+#  差的就是 `ca-certificates`：cortexd 要连 aliyun 的 embedding、
+#  连 LLM 供应商，全是 TLS。没有它的症状是「invalid peer certificate:
+#  UnknownIssuer」，而那条错误读起来像对端的问题。
+#
+#  ── 为什么 base 必须是 trixie ────────────────────────────
+#
+#  与 `Dockerfile.cortexd` / `Dockerfile.sandbox` 同一个理由：编译用的是
+#  `rust:1.97.1-trixie`，glibc 版本必须对得上。用 bookworm 的话，
+#  挂进来的二进制会在启动时报
+#  `GLIBC_2.38' not found` —— 而那看起来完全不像「基镜像挑错了」。
+# ══════════════════════════════════════════════════════════
+FROM debian:trixie-slim
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl; \
+    rm -rf /var/lib/apt/lists/*
+
+# `curl` 是给 healthcheck 用的。生产镜像里没有它（少一个能被利用的工具），
+# 开发环境里留着 —— 排查时能 `docker exec ... curl` 打自己一发。
+
+# 与 `Dockerfile.cortexd` 同一个 uid，这样两边写出来的数据文件属主一致，
+# 在 named volume 上来回切换不会撞权限
+RUN useradd --system --uid 10001 --create-home --home-dir /home/cortex cortex
+
+# 二进制挂在这儿（由 compose 的 volumes 给），状态目录归 cortex 所有
+RUN mkdir -p /var/lib/cortex && chown cortex:cortex /var/lib/cortex
+
+USER cortex
+WORKDIR /home/cortex
+
+# 刻意不设 ENTRYPOINT：这个底座要跑 cortexd、也要跑 cortex-egress-proxy，
+# 由 compose 的 `command` 指定。写死一个 entrypoint 只会让第二个用途
+# 需要一次 `--entrypoint` 覆盖 —— 而那正是 setup 缓存那次踩的坑

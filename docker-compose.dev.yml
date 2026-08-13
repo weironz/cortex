@@ -1,0 +1,152 @@
+# ══════════════════════════════════════════════════════════
+#  本地开发环境 —— **完整的云端形态**，跑在这一台机器上
+#
+#    just dev          # 编 Linux 二进制 + 起全部
+#    just dev-restart  # 改完 Rust：重编 + 重启 cortexd（不重建镜像）
+#    just dev-down
+#
+#  叠在 docker-compose.yml 之上：
+#    docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#                   --profile dev --profile sandbox up -d
+#
+#  ── 与「宿主上跑 cortexd」那种开发方式的差别 ──────────────
+#
+#  以前的开发方式是 `just run`：cortexd 跑在宿主进程里，只有 postgres /
+#  rustfs 在容器里。快，但它测的是一条**生产上不存在**的拓扑：
+#
+#  | | 宿主跑 cortexd（just run）| 这里（just dev）| 生产 |
+#  |---|---|---|---|
+#  | cortexd 位置 | 宿主进程 | 容器 | 容器 |
+#  | `same_network` | false | **true** | true |
+#  | 反代进沙箱 | 经 cortex-egress 中继 | **直连容器名** | 直连容器名 |
+#  | 浏览器→API | 直连 :8080（要开 CORS）| **nginx 同源** | traefik 同源 |
+#
+#  中间那一列至今**没有任何真机覆盖** —— `SandboxAddr::Direct` 那条路
+#  只有单测。这套环境的第一价值就是把它跑起来。
+#
+#  ── 为什么二进制是挂进来的，不是烧进镜像 ──────────────────
+#
+#  烧进镜像意味着改一行 Rust 就要重建一次镜像（分钟级，且每次都要把
+#  整个源码送进 build context）。挂进来的话，`cargo build` 增量编译
+#  （秒级）+ `docker restart` 就够了。
+#
+#  代价是**宿主编出来的东西用不了**：这台机器是 Windows，`cargo build`
+#  产出的是 PE 格式的 `.exe`，Linux 容器里跑不了。所以 `just dev-build`
+#  在一个 `rust:1.97.1-trixie` 容器里编，产物落进 named volume
+#  `cortex_dev_bin`，运行容器再挂那个卷。
+#
+#  target 目录用 named volume 而不是 bind mount：Windows 的 bind mount
+#  在几万个小文件上慢到不可用（增量编译会从秒级退化到分钟级）。
+# ══════════════════════════════════════════════════════════
+
+services:
+  # ─── cortexd ──────────────────────────────────────────
+  cortexd:
+    image: cortex/devruntime:latest
+    container_name: cortex-cortexd-dev
+    profiles: [dev]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # 二进制来自挂进来的卷，不是镜像
+    command: ["/opt/cortex/bin/cortexd"]
+    environment:
+      # 容器内走服务名。**这是把 cortexd 搬进容器后最容易忘的一处**，
+      # 症状是「连不上数据库」而配置看着都对
+      DATABASE_URL: postgres://${POSTGRES_USER:-cortex}:${POSTGRES_PASSWORD:-cortex_dev_only}@postgres:5432/${POSTGRES_DB:-cortex}
+      S3_ENDPOINT: http://rustfs:9000
+      S3_BUCKET: ${S3_BUCKET:-cortex-blobs}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-cortexadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-cortex_dev_only}
+
+      CORTEXD_BIND: 0.0.0.0:8080
+      RUST_LOG: ${RUST_LOG:-cortexd=debug,cortex_memory=info,warn}
+
+      # ── 认证：关掉 ──
+      #
+      # 这是开发环境唯一一处**故意比生产弱**的地方，所以写在这里而不是
+      # 藏在 .env 里。cortexd 对此有专门的一支（auth.rs 的 `AuthMode::
+      # Disabled`）：不配任何凭据时它**拒绝启动**，要关就得显式说。
+      #
+      # 前提是它只听得见回环 —— 下面 ports 那行绑的是 127.0.0.1。
+      # 谁把那行改成 0.0.0.0，整个记忆库就在局域网上裸奔了。
+      CORTEX_AUTH: disabled
+
+      # ── 沙箱：同网段 ──
+      #
+      # cortexd 与沙箱容器在同一个 docker 网络里（见下面 networks），
+      # 于是它直连容器名，**中继那一整层不参与** —— 与生产一致。
+      CORTEX_SANDBOX_ENABLED: "1"
+      CORTEX_SANDBOX_SAME_NETWORK: "1"
+      CORTEX_SANDBOX_CALLBACK: http://cortexd:8080
+
+      CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-api}
+      CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-}
+      CORTEX_EMBED_ENDPOINT: ${CORTEX_EMBED_ENDPOINT:-}
+      CORTEX_EMBED_API_KEY: ${CORTEX_EMBED_API_KEY:-}
+
+      CORTEX_LLM_PROVIDER: ${CORTEX_LLM_PROVIDER:-deepseek}
+      CORTEX_LLM_MODEL: ${CORTEX_LLM_MODEL:-}
+      CORTEX_LLM_CHEAP_MODEL: ${CORTEX_LLM_CHEAP_MODEL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CORTEX_SECRET_KEY: ${CORTEX_SECRET_KEY:-}
+    volumes:
+      # 二进制（只读）—— `just dev-build` 往这个卷里编
+      - cortex_dev_bin:/opt/cortex/bin:ro
+      # 起沙箱要 docker API。**这是把宿主 root 交给 cortexd** ——
+      # 开发机上可以接受（信任边界就是你自己），生产上 cortexd 也是这么做的，
+      # 而那正是「cortexd 被攻破之后能做什么」那段论证要防的东西：
+      # 容器规格全部写死在 DockerRunner 里，调用方说不出第二个挂载
+      - /var/run/docker.sock:/var/run/docker.sock
+    # 那个 socket 是 `root:root` 模式 660（Docker Desktop 上实测），而这个
+    # 容器跑在 uid 10001 上 —— 不给组就是 `client error (Connect)`，
+    # 而那条错误读起来像「docker 没起来」。
+    #
+    # 加的是**组**不是用户：进程仍然不是 root，只是拿到 660 的 group rw。
+    # 比 `user: root` 小一格，而效果一样。
+    group_add: ["0"]
+    ports:
+      # **只绑回环**。上面关了认证，这一行就是唯一挡着的东西
+      - "127.0.0.1:${CORTEXD_DEV_PORT:-8080}:8080"
+    networks:
+      - default
+      # 接进沙箱网段 ⇒ same_network=1 ⇒ 直连容器名。
+      # 注意这个网段是 internal 的：接进去**不会**让 cortexd 失去出网，
+      # 因为它同时还在 default 上（多网络时默认路由来自非 internal 那张）
+      - sandbox
+
+  # ─── Web ──────────────────────────────────────────────
+  web:
+    image: nginx:alpine
+    container_name: cortex-web-dev
+    profiles: [dev]
+    restart: unless-stopped
+    depends_on: [cortexd]
+    volumes:
+      # Flutter 的构建产物，宿主 bind mount。改完 `flutter build web`
+      # 刷新浏览器就生效，不用碰容器
+      - ./app/build/web:/usr/share/nginx/html:ro
+      - ./scripts/docker/nginx.dev.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "127.0.0.1:${CORTEX_WEB_DEV_PORT:-5173}:80"
+    networks:
+      - default
+
+volumes:
+  # 容器里编出来的 Linux 二进制。宿主看不见它，也不该看见 ——
+  # 宿主那份 `target/` 是 Windows 的，两者混在一起只会互相覆盖。
+  #
+  # **`name:` 必须显式写。** compose 默认给卷加项目名前缀，于是这里声明的
+  # `cortex_dev_bin` 实际叫 `cortex_cortex_dev_bin`，而 `scripts/dev-build.sh`
+  # 里那个 `docker run -v cortex_dev_bin:/out` 用的是裸名 —— 两个不同的卷。
+  # 症状是容器起不来、报 `stat /opt/cortex/bin/cortexd: no such file`，
+  # 而 `docker volume ls` 里明明看得见一个叫 cortex_dev_bin 的卷。实测撞过。
+  #
+  # target 与 cargo 缓存**不在这里声明**：它们只属于构建脚本，
+  # compose 不该知道它们存在
+  cortex_dev_bin:
+    name: cortex_dev_bin

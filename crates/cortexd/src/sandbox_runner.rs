@@ -374,6 +374,30 @@ impl DockerRunner {
         })
     }
 
+    /// 不该经出网代理的目的地。
+    ///
+    /// 除了回环与中继，还必须含**回调地址的主机名** —— 那是容器与 cortexd
+    /// 之间的内部流量，不是出网。漏掉它的症状是回调被自己的出网清单 403，
+    /// 而错误信息说的是「不在放行清单里」，读起来像配置漏了一条。
+    fn no_proxy_list(&self) -> String {
+        let host = self
+            .remote
+            .split("://")
+            .nth(1)
+            .unwrap_or(&self.remote)
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .split(':')
+            .next()
+            .unwrap_or("");
+        if host.is_empty() {
+            format!("127.0.0.1,localhost,{EGRESS_HOST}")
+        } else {
+            format!("127.0.0.1,localhost,{EGRESS_HOST},{host}")
+        }
+    }
+
     fn container_name(owner: &str) -> String {
         format!("{NAME_PREFIX}{}", sanitize(owner))
     }
@@ -977,9 +1001,22 @@ impl DockerRunner {
             format!("HTTPS_PROXY={proxy}"),
             format!("http_proxy={proxy}"),
             format!("https_proxy={proxy}"),
-            // 自己人不走代理：容器内回环，以及同网段的中继本身
-            format!("NO_PROXY=127.0.0.1,localhost,{EGRESS_HOST}"),
-            format!("no_proxy=127.0.0.1,localhost,{EGRESS_HOST}"),
+            // 自己人不走代理：容器内回环、中继本身，以及 **cortexd 自己**。
+            //
+            // 最后那一条是真机撞出来的。同网段部署（生产形态）下
+            // `CORTEX_REMOTE=http://cortexd:8080`，而 `cortexd` 不在
+            // `NO_PROXY` 里 ⇒ 回调走出网代理 ⇒ 代理按放行清单 403：
+            //
+            //   cortexd:8080 不在放行清单里，出网代理拒绝了这次连接
+            //
+            // 宿主部署那侧碰不到，因为它的回调地址 `host.docker.internal:8080`
+            // 恰好在默认放行清单里 —— 于是这个 bug **只在生产拓扑下出现**，
+            // 而那正是「宿主上跑 cortexd」那种开发方式测不到的东西。
+            //
+            // 回调本来就该直连：沙箱与 cortexd 在同一个网段，中间放一个代理
+            // 既没有意义，也让「出网清单」这件事的语义变浑（那是给**外网**的）。
+            format!("NO_PROXY={}", self.no_proxy_list()),
+            format!("no_proxy={}", self.no_proxy_list()),
             // 镜像里已经设了这三个，这里重申是为了让「一个容器到底以什么
             // 身份跑」在 `docker inspect` 里一处可见 —— 排查时不必再去翻
             // 镜像的 ENV
@@ -1599,9 +1636,19 @@ mod tests {
                 "少了 {key} —— 出网会有一路绕开代理。实际 env：{env:?}"
             );
         }
+        let no_proxy = env
+            .iter()
+            .find(|e| e.starts_with("NO_PROXY="))
+            .expect("回环与中继自己不该走代理，否则容器内自检会绕一圈甚至打成回环");
+        // **回调地址的主机名必须在里面。** 少了它，同网段部署下容器回调
+        // cortexd 会被自己的出网清单 403，而错误信息说的是「不在放行清单里」——
+        // 读起来像配置漏了一条，其实是把内部流量当成了出网。
+        //
+        // 宿主部署那侧碰不到（`host.docker.internal:8080` 恰好在默认清单里），
+        // 所以这条只在生产拓扑下才会咬人。真机撞过。
         assert!(
-            env.iter().any(|e| e.starts_with("NO_PROXY=")),
-            "回环与中继自己不该走代理，否则容器内自检会绕一圈甚至打成回环"
+            no_proxy.contains("host.docker.internal"),
+            "回调地址的主机名不在 NO_PROXY 里：{no_proxy}"
         );
     }
 }

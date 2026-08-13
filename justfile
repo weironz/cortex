@@ -195,6 +195,78 @@ app *ARGS:
     bash scripts/dev-app.sh {{ ARGS }}
 
 # ══════════════════════════════════════════════════════════
+#  本地云端环境（just dev）—— 完整形态，跑在这一台机器上
+#
+#  与 `just run` 的差别一句话：那个把 cortexd 跑在**宿主进程**里（快，
+#  但拓扑与生产不同），这个把它跑进**容器**并接进沙箱网段 ——
+#  于是 `same_network=true`、中继不参与、浏览器同源，与生产一致。
+#
+#  设计与那张对照表见 docker-compose.dev.yml 的文件头。
+# ══════════════════════════════════════════════════════════
+
+_dev := "-f docker-compose.yml -f docker-compose.dev.yml --profile dev --profile sandbox"
+
+# 编 **Linux** 二进制进 named volume。
+#
+# 为什么不能用宿主编好的：这台机器是 Windows，`cargo build` 产出 PE 格式的
+# `.exe`，Linux 容器跑不了。所以在 rust:1.97.1-trixie 里编（glibc 与运行
+# 底座对得上），产物落进 cortex_dev_bin 卷。
+#
+# 三个卷各有理由：
+#   cortex_dev_target  增量编译的 target。**必须是 named volume** ——
+#                      Windows bind mount 在几万个小文件上会把增量编译
+#                      从秒级拖成分钟级
+#   cortex_dev_cargo   crates.io 的下载缓存，不然每次重编都重下
+#   cortex_dev_bin     只放最终产物，运行容器只读挂这一个
+dev-build *ARGS:
+    bash scripts/dev-build.sh {{ ARGS }}
+
+# 起完整环境。第一次会编一遍（几分钟），之后是增量
+dev: dev-build
+    docker compose {{ _dev }} up -d
+    @echo ""
+    @echo "  Web    http://127.0.0.1:${CORTEX_WEB_DEV_PORT:-5173}"
+    @echo "  API    http://127.0.0.1:${CORTEXD_DEV_PORT:-8080}  （认证已关，只听回环）"
+    @echo ""
+    @echo "  改 Rust  → just dev-restart"
+    @echo "  改界面   → just dev-web"
+    @echo "  看日志   → just dev-logs cortexd"
+
+# 改完 Rust：重编 + 重启，不重建镜像
+dev-restart: dev-build
+    docker compose {{ _dev }} restart cortexd
+    @echo "cortexd 已重启（用的是刚编出来的二进制）"
+
+# 改完界面：重新构建 Flutter Web。
+#
+# nginx 那侧是 bind mount + 一律不缓存，所以构建完刷新浏览器就生效，
+# 容器一个都不用动
+dev-web:
+    cd app && flutter build web --dart-define=CORTEX_BASE_URL=
+    @echo "构建完了，刷新浏览器即可（nginx 直接读 app/build/web）"
+
+dev-logs *ARGS:
+    docker compose {{ _dev }} logs -f {{ ARGS }}
+
+dev-ps:
+    docker compose {{ _dev }} ps
+
+dev-down:
+    docker compose {{ _dev }} down
+
+# 连数据一起清掉，从零来一遍。**会删库**，要输 yes
+dev-reset:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    read -r -p "这会删掉开发库、对象存储、以及所有沙箱工作区卷。输 yes 继续：" a
+    [ "$a" = yes ] || { echo "取消"; exit 1; }
+    docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile dev --profile sandbox down -v
+    docker rm -f $(docker ps -aq --filter "name=cortex-sbx-") 2>/dev/null || true
+    docker volume rm $(docker volume ls -q --filter "name=cortex-ws-") 2>/dev/null || true
+    docker rmi -f $(docker images -q cortex-sandbox-cache) 2>/dev/null || true
+    echo "清干净了。just dev 重新来。"
+
+# ══════════════════════════════════════════════════════════
 #  质量
 # ══════════════════════════════════════════════════════════
 
