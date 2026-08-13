@@ -15,8 +15,13 @@
 /// 「配过了」，这次是一个**刻意的空串**被当成「没配过」。
 library;
 
+import 'dart:convert';
+
+import 'package:cortex_app/api/api_exception.dart';
 import 'package:cortex_app/api/http_cortex_api.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 void main() {
   group('空地址', () {
@@ -79,6 +84,65 @@ void main() {
         reason:
             'just run 那条拓扑（cortexd 跑在宿主、浏览器直连、开 CORS）'
             '仍然要能用 —— 用户在登录框里填了什么就打什么',
+      );
+    });
+  });
+
+  group('没有 body 的失败', () {
+    HttpCortexApi apiServing(int status, String body) => HttpCortexApi(
+      baseUrl: 'http://127.0.0.1:8080/api',
+      client: MockClient(
+        (_) async => http.Response.bytes(
+          utf8.encode(body),
+          status,
+          headers: {'content-type': 'application/json'},
+        ),
+      ),
+    );
+
+    test('空 body 的 404 也要说人话，不能给一个没字的错误', () async {
+      await expectLater(
+        apiServing(404, '').health(),
+        throwsA(
+          isA<CortexApiException>().having(
+            (e) => e.message.trim(),
+            'message',
+            isNotEmpty,
+          ),
+        ),
+        reason:
+            'axum 的路由 fallback 回的 404 是 content-length: 0。回空串的话，'
+            '界面画出一个只有图标、一个字都没有的红框 —— 用户知道出错了，'
+            '但没有任何线索。真机上就是这么撞到的（地址填成了 …:8080/api）',
+      );
+    });
+
+    test('那句话要带上路径，好让人看出是地址填错了', () async {
+      try {
+        await apiServing(404, '').health();
+        fail('404 必须抛');
+      } on CortexApiException catch (e) {
+        expect(
+          e.message,
+          contains('/api/health'),
+          reason:
+              '「哪个路径 404 了」正是「地址填错」与「服务端挂了」之间'
+              '唯一的区别 —— 不写出来，两种情况在用户眼里一模一样',
+        );
+      }
+    });
+
+    test('服务端自己说了原因就用它的，别覆盖', () async {
+      await expectLater(
+        apiServing(404, '{"error":"找不到 session：abc"}').health(),
+        throwsA(
+          isA<CortexApiException>().having(
+            (e) => e.message,
+            'message',
+            '找不到 session：abc',
+          ),
+        ),
+        reason: '真正的资源 404 由服务端带 {"error": …}，那句话比我们编的准确得多',
       );
     });
   });

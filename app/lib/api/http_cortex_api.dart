@@ -624,17 +624,40 @@ class HttpCortexApi implements CortexApi {
   /// instead of a JSON blob. The workspace validator in particular writes its
   /// rejections to be read ("整台机器不是工作区"), and re-phrasing them here
   /// would throw that away.
+  /// 一次失败该给用户看的话。
+  ///
+  /// # 空 body 必须自己编一句，不能就这么回空串
+  ///
+  /// 有些失败**根本没有 body**：axum 的路由 fallback 回的 404 就是
+  /// `content-length: 0`。回空串的后果是界面画出一个**只有图标、没有一个字**
+  /// 的红框 —— 用户知道出错了，但没有任何线索。真机上撞到过：地址填成
+  /// `http://127.0.0.1:8080/api`（cortexd 的路由在根上，没有 `/api` 前缀），
+  /// 于是 `/api/health` 404、body 为空、红框全空。
+  ///
+  /// 编的那句话要**带上状态码与路径**：这两样正好是「地址填错了」与
+  /// 「服务端挂了」之间唯一的区别。
   String _errorMessage(http.Response response) {
     try {
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
       if (decoded is Map<String, dynamic>) {
         final message = asStringOrNull(decoded['error']);
-        if (message != null) return message;
+        if (message != null && message.trim().isNotEmpty) return message;
       }
     } on Object {
       // Not JSON. Fall through to the raw body.
     }
-    return _trim(response.body);
+    final body = _trim(response.body);
+    if (body.isNotEmpty) return body;
+
+    final path = response.request?.url.path ?? '';
+    return switch (response.statusCode) {
+      // 404 且没有 body，几乎总是「这个地址上没有 cortexd」而不是
+      // 「这个资源不存在」—— 真正的资源 404 由服务端带上 {"error": …}
+      404 =>
+        '$path 在这个地址上不存在（HTTP 404）。'
+            'cortexd 的路由挂在根上，地址里不要带 /api 之类的前缀。',
+      final s => '服务端回了 HTTP $s，而且没有说明原因（$path）。',
+    };
   }
 
   @override
