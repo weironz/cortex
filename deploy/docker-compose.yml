@@ -361,12 +361,24 @@ services:
       #   PID 上限、cap-drop、网段）**全部写死在实现里**，trait 入参只有
       #   owner 与 spec hash，调用方说不出第二个挂载，有测试守着。
       - ${CORTEX_DOCKER_SOCK:-/dev/null}:/var/run/docker.sock
-    # docker.sock 是 root:root 模式 660。cortexd 跑在 uid 10001 上，
-    # 不给组就是 `client error (Connect)` —— 而那条错误读起来像
+    # docker.sock 是模式 660，属主 root、组 **docker**。cortexd 跑在 uid 10001
+    # 上，不在那个组里就是 `client error (Connect)` —— 而那条错误读起来像
     # 「docker 没起来」。加的是**组**不是用户：进程仍然不是 root。
     #
+    # ★ **那个组的 gid 因发行版而异，必须自己查**：
+    #
+    #       stat -c %g /var/run/docker.sock
+    #
+    #   这台节点是 126，Docker Desktop 上是 0（socket 在那儿属 root:root），
+    #   Ubuntu 常见 999。默认值取 0 只是为了让开发机上开箱即用 ——
+    #   **在真 Linux 节点上它一定是错的**。
+    #
+    #   写错不会静默：cortexd 启动时的 preflight 会真的握一次手，
+    #   报「docker daemon 握不上手」并关掉云沙箱，然后照常提供别的服务。
+    #   这一条就是这么被抓出来的（2026-08-13，node72）。
+    #
     # 沙箱没开时这一行是无害的：/dev/null 不需要任何组
-    group_add: ["0"]
+    group_add: ["${CORTEX_DOCKER_GID:-0}"]
     deploy:
       resources:
         limits:
