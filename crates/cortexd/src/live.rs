@@ -1024,34 +1024,33 @@ impl Live {
     /// 两条路要是各写一份，「工具查到的」与「界面上看到的」迟早会对不上，
     /// 而那正是最难解释给用户听的一类不一致。
     async fn retrieve(&self, query: &str, as_of: Option<&str>, limit: i64) -> Result<Retrieved> {
-        match as_of {
-            Some(t) => {
-                let as_of = chrono::DateTime::parse_from_rfc3339(t)
+        let at = match as_of {
+            Some(t) => Some(
+                chrono::DateTime::parse_from_rfc3339(t)
                     .map_err(|e| CortexError::Invalid(format!("as_of 不是合法的 RFC3339：{e}")))?
-                    .with_timezone(&Utc);
+                    .with_timezone(&Utc),
+            ),
+            None => None,
+        };
 
-                if query.trim().is_empty() {
-                    // 没有查询词时要的就是「当时的全貌」，按时间倒序给
-                    self.retriever
-                        .retrieve_as_of(&self.store, as_of, limit, self.context_window)
-                        .await
-                } else {
-                    // 有查询词就该在**同一份 as-of 快照上**做相关性排序。
-                    // 快照才是回放的本质，「按时间倒序」只是个跟问题无关的排序 ——
-                    // 评测实测：换成快照上的三路 RRF 后，时间回放 R@5
-                    // 0.417 → 0.833，gold 平均名次 11.5 → 2.8。
-                    self.retriever
-                        .retrieve_as_of_ranked(
-                            &self.store,
-                            query,
-                            as_of,
-                            limit,
-                            self.context_window,
-                        )
-                        .await
-                }
+        match retrieval_plan(query, at) {
+            // 没有查询词时要的就是「那一刻的全貌」，按时间倒序给。
+            // `at` 为 None 时那一刻就是现在
+            RetrievalPlan::Snapshot(at) => {
+                self.retriever
+                    .retrieve_as_of(&self.store, at, limit, self.context_window)
+                    .await
             }
-            None => {
+            // 有查询词就该在**同一份 as-of 快照上**做相关性排序。
+            // 快照才是回放的本质，「按时间倒序」只是个跟问题无关的排序 ——
+            // 评测实测：换成快照上的三路 RRF 后，时间回放 R@5
+            // 0.417 → 0.833，gold 平均名次 11.5 → 2.8。
+            RetrievalPlan::SnapshotRanked(at) => {
+                self.retriever
+                    .retrieve_as_of_ranked(&self.store, query, at, limit, self.context_window)
+                    .await
+            }
+            RetrievalPlan::Ranked => {
                 self.retriever
                     .retrieve(&self.store, query, None, self.context_window)
                     .await
@@ -2498,6 +2497,41 @@ fn compact_args(args: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
+    /// 四格摆齐。**少一格的后果是记忆面板打开就是空的，且不报任何错。**
+    #[test]
+    fn 检索的四格里没有一格是空手而归() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("常量时间可解析")
+            .with_timezone(&Utc);
+
+        assert_eq!(
+            retrieval_plan("", Some(at)),
+            RetrievalPlan::Snapshot(at),
+            "回放 + 没有词 = 当时的全貌"
+        );
+        assert_eq!(
+            retrieval_plan("对象存储", Some(at)),
+            RetrievalPlan::SnapshotRanked(at),
+            "回放 + 有词 = 在那份快照上排序，而不是退化成按时间倒序"
+        );
+        assert_eq!(
+            retrieval_plan("对象存储", None),
+            RetrievalPlan::Ranked,
+            "此刻 + 有词 = 四路召回"
+        );
+
+        // **这一格曾经是 Ranked。** 而四路召回全都要查询词，于是它恒回 0 条。
+        // 界面上的表现是「还没有记忆」——对着一个有 159 条事实的库
+        match retrieval_plan("   ", None) {
+            RetrievalPlan::Snapshot(_) => {}
+            other => panic!(
+                "此刻 + 没有词必须给「最近的全貌」，实际是 {other:?}。\
+                 走四路召回的话空查询恒回 0 条：记忆面板打开就是空的，\
+                 而它会说「还没有记忆」——用户据此认为这个功能没用"
+            ),
+        }
+    }
+
     #[test]
     fn compact_args_keeps_events_small() {
         let long = "x".repeat(500);
@@ -2733,6 +2767,38 @@ mod tests {
         // 参数来自模型，什么形状都可能出现，不能 panic
         assert_eq!(compact_args(&serde_json::Value::Null), "");
         assert_eq!(compact_args(&serde_json::json!([1, 2])), "");
+    }
+}
+
+/// 一次检索该走哪条路。**四路召回全都要查询词**，所以「有没有词」与
+/// 「回不回放」是两个独立维度，共四格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetrievalPlan {
+    /// 那一刻的全貌，按时间倒序。没有查询词时走它。
+    Snapshot(chrono::DateTime<Utc>),
+    /// 在那一刻的快照**之上**做相关性排序。
+    SnapshotRanked(chrono::DateTime<Utc>),
+    /// 此刻的四路召回 + RRF。
+    Ranked,
+}
+
+/// [`Live::retrieve`] 的决策部分，抽成纯函数只为**能把那四格摆出来测**。
+///
+/// # 这里少过一格
+///
+/// 「没有词 + 不回放」原来落在 `Ranked` 上。而四路召回全都要词：BM25 没有词、
+/// 向量嵌不出方向、图遍历没有种子 —— 于是它恒回 0 条，连 `channels` 都是空的
+/// （一路都没跑）。症状是记忆面板**打开就是空的**，配一句「还没有记忆」，
+/// 而真机那个库里有 159 条。用户据此得出的结论是「这功能没什么用」。
+///
+/// 正确答案代码里本来就有（`as_of` + 没有词 → 全貌），缺的只是
+/// 「**此刻**也是一个合法的 as_of」。四格摆成一张表，就没有地方藏这种缺口。
+fn retrieval_plan(query: &str, as_of: Option<chrono::DateTime<Utc>>) -> RetrievalPlan {
+    match (query.trim().is_empty(), as_of) {
+        (true, Some(at)) => RetrievalPlan::Snapshot(at),
+        (true, None) => RetrievalPlan::Snapshot(Utc::now()),
+        (false, Some(at)) => RetrievalPlan::SnapshotRanked(at),
+        (false, None) => RetrievalPlan::Ranked,
     }
 }
 
