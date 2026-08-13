@@ -356,7 +356,7 @@ abstract interface class CortexApi {
   ///
   /// 容器已被回收时服务端回 4xx 并说清「文件还在卷里，先发条消息把它拉起来」
   /// —— 那不是数据丢了，而两者在界面上必须分得开。
-  Future<Uint8List> sandboxWorkspaceTar();
+  Future<Uint8List> sandboxWorkspaceTar({String? sessionId});
 
   /// `GET /sandbox/files?path=` —— 云沙箱工作区的**一层**目录。
   ///
@@ -375,14 +375,14 @@ abstract interface class CortexApi {
   /// 后者要去查网络或后端。
   ///
   /// 返回的 [FileNode.path] 是绝对路径，因此一个节点不必回溯祖先就能展开。
-  Future<List<FileNode>> sandboxListFiles(String path);
+  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId});
 
   /// `GET /sandbox/files/raw?path=` —— 取一个文件的原始字节。
   ///
   /// 与 [sandboxWorkspaceTar] 并存而不是取代它：整包是「把这次的产物全拿走」，
   /// 这条是「就要那一个 report.md」。让用户为了一个文件下载整个卷，
   /// 与让他为了看一眼目录先解一次 tar，是同一种不体面。
-  Future<Uint8List> sandboxReadFile(String path);
+  Future<Uint8List> sandboxReadFile(String path, {String? sessionId});
 
   /// `PUT /sandbox/files?path=` —— 把字节写进云沙箱工作区。
   ///
@@ -393,6 +393,7 @@ abstract interface class CortexApi {
   /// [path] 含文件名，服务端按同样的围栏判越界。同名覆盖由服务端决定，
   /// 客户端不先探测再写：探测与写之间那一小段时间里 agent 也在写同一个卷。
   Future<SandboxWriteReceipt> sandboxWriteFile({
+    String? sessionId,
     required String path,
     required Uint8List bytes,
     UploadProgress? onProgress,

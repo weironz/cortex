@@ -658,7 +658,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
   }) async => throw const CortexApiException('Mock 数据源不支持直传', statusCode: 501);
 
   @override
-  Future<Uint8List> sandboxWorkspaceTar() async =>
+  Future<Uint8List> sandboxWorkspaceTar({String? sessionId}) async =>
       throw const CortexApiException('Mock 数据源没有云沙箱', statusCode: 501);
 
   // ----------------------------------------------------------- sandbox files
@@ -680,7 +680,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
   static Uint8List _text(String s) => Uint8List.fromList(utf8.encode(s));
 
   @override
-  Future<List<FileNode>> sandboxListFiles(String path) async {
+  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async {
     await _latency(140);
     final dir = path.endsWith('/') && path.length > 1
         ? path.substring(0, path.length - 1)
@@ -728,7 +728,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
   }
 
   @override
-  Future<Uint8List> sandboxReadFile(String path) async {
+  Future<Uint8List> sandboxReadFile(String path, {String? sessionId}) async {
     await _latency(90);
     final bytes = _sandboxFiles[path];
     if (bytes == null) {
@@ -742,6 +742,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     required String path,
     required Uint8List bytes,
     UploadProgress? onProgress,
+    String? sessionId,
   }) async {
     // 一次报完。夹具没有真实的分块，假装分块只会让界面在离线模式里
     // 演一段与真实后端对不上的动画

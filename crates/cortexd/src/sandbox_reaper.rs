@@ -88,20 +88,24 @@ async fn sweep_once(st: &AppState) {
     let Some(layer) = st.sandbox_layer() else {
         return;
     };
-    for owner in st.sandbox_tokens().idle_owners(IDLE) {
-        match layer.runner.stop(&owner).await {
+    for scope in st.sandbox_tokens().idle_scopes(IDLE) {
+        let key = scope.key();
+        match layer.runner.stop(&key).await {
             Ok(()) => {
                 // 令牌跟着容器一起作废。
                 //
                 // **顺序不能反**：先作废再停的话，中间那一瞬容器还活着却已经
                 // 没有凭据 —— 它正在写的那条 episode 会拿到 403，而
                 // `remote.rs` 把 4xx 归为不可重试，那条记录就被永久丢弃了。
-                st.sandbox_tokens().revoke_owner(&owner);
-                tracing::info!(owner = %owner, "沙箱空闲，已停（工作区卷保留）");
+                //
+                // 按作用域键作废而不是按 owner：这个用户在**别的项目**里可能
+                // 还有一个正在干活的沙箱，把它的令牌一起收掉就是上面那条。
+                st.sandbox_tokens().revoke_scope(&key);
+                tracing::info!(sandbox = %key, "沙箱空闲，已停（工作区卷保留）");
             }
             // 停不掉不作废令牌：容器可能还活着，而一个活着却没有凭据的
             // 容器比一个活着的容器糟 —— 它会把正在写的东西丢掉
-            Err(e) => tracing::warn!(owner = %owner, error = %e, "停空闲沙箱失败，下一轮再试"),
+            Err(e) => tracing::warn!(sandbox = %key, error = %e, "停空闲沙箱失败，下一轮再试"),
         }
     }
 }

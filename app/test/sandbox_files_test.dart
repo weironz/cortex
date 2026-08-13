@@ -61,7 +61,7 @@ class _TreeApi extends MockCortexApi {
   final List<String> read = [];
 
   @override
-  Future<List<FileNode>> sandboxListFiles(String path) async {
+  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async {
     listed.add(path);
     final nodes = tree[path];
     if (nodes == null) {
@@ -71,7 +71,7 @@ class _TreeApi extends MockCortexApi {
   }
 
   @override
-  Future<Uint8List> sandboxReadFile(String path) async {
+  Future<Uint8List> sandboxReadFile(String path, {String? sessionId}) async {
     read.add(path);
     // 刻意抛：真去下载会走到 `saveBytesAs`，而它在桌面端**真的会往
     // ~/Downloads 写文件**。这里要验的是「点文件去读的是哪条路径」，
@@ -86,7 +86,7 @@ class _TreeApi extends MockCortexApi {
 /// 重试永远不会成功，所以那句话必须自己把原因说清楚。
 class _NoSandboxApi extends MockCortexApi {
   @override
-  Future<List<FileNode>> sandboxListFiles(String path) async =>
+  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async =>
       throw const CortexApiException('这个部署没有开云沙箱', statusCode: 501);
 }
 
@@ -475,6 +475,66 @@ void main() {
       token: 't',
       client: MockClient(handler),
     );
+
+    /// **每一条文件请求都要带上 `session`。**
+    ///
+    /// 服务端拿它查这个会话属于哪个项目，据此决定读写哪个卷
+    /// （`SandboxScope::key`）。漏传不会报错 —— 服务端按「未分组」算，
+    /// 于是用户在 A 项目里点开文件树，看到的是另一个（通常是空的）工作区。
+    /// 这正是这仓库记了十来次的「造好了但没人调用」，且这一次连错误都没有。
+    test('四条文件路由都把当前会话带上了', () async {
+      final seen = <Uri>[];
+      final api = apiServing((req) async {
+        seen.add(req.url);
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({'path': kSandboxRoot, 'entries': []})),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      await api.sandboxListFiles(kSandboxRoot, sessionId: 'ses_1');
+      await api.sandboxReadFile('$kSandboxRoot/a.txt', sessionId: 'ses_1');
+      await api.sandboxWorkspaceTar(sessionId: 'ses_1');
+      await api.sandboxWriteFile(
+        path: '$kSandboxRoot/a.txt',
+        bytes: Uint8List.fromList([1]),
+        sessionId: 'ses_1',
+      );
+
+      expect(seen, hasLength(4), reason: '四条都该真的发出去了');
+      for (final uri in seen) {
+        expect(
+          uri.queryParameters['session'],
+          'ses_1',
+          reason:
+              '${uri.path} 没带 session。服务端会当成「未分组」，'
+              '于是这条请求读写的是另一个卷 —— 而两边都回 200',
+        );
+      }
+    });
+
+    test('不给会话时就不带这个参数，让服务端用默认工作区', () async {
+      late Uri seen;
+      final api = apiServing((req) async {
+        seen = req.url;
+        return http.Response.bytes(
+          utf8.encode(jsonEncode({'path': kSandboxRoot, 'entries': []})),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      await api.sandboxListFiles(kSandboxRoot);
+
+      expect(
+        seen.queryParameters.containsKey('session'),
+        isFalse,
+        reason:
+            '别发一个空串。服务端那侧 `?session=` 与不传是同一个含义，'
+            '但空串会让「有没有传」在日志里读不出来',
+      );
+    });
 
     test('entries 变成绝对路径，用的是服务端回的 path', () async {
       late Uri seen;

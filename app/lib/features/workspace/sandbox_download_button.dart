@@ -22,6 +22,7 @@ import '../../api/api_exception.dart';
 import '../../core/local_agent.dart';
 import '../../core/save_file.dart';
 import '../../state/app_providers.dart';
+import '../../state/chat_controller.dart';
 
 class SandboxDownloadButton extends ConsumerStatefulWidget {
   const SandboxDownloadButton({super.key});
@@ -39,7 +40,14 @@ class _SandboxDownloadButtonState extends ConsumerState<SandboxDownloadButton> {
     String? error;
     Uint8List? bytes;
     try {
-      bytes = await ref.read(cortexApiProvider).sandboxWorkspaceTar();
+      bytes = await ref
+          .read(cortexApiProvider)
+          // 带上当前会话：服务端据此决定打包哪个项目的工作区。
+          // 漏传的话下载到的是未分组那个卷，而文件名一样、体积不同，
+          // 用户要打开 tar 才发现拿错了
+          .sandboxWorkspaceTar(
+            sessionId: ref.read(chatControllerProvider).activeSession?.id,
+          );
     } on CortexApiException catch (e) {
       // 服务端对「容器被回收了」有一句专门的话（文件还在卷里，发条消息把它
       // 拉起来）。**原样透出**，不要在这里改写成「下载失败」—— 那两件事

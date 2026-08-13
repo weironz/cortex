@@ -28,6 +28,7 @@ import '../../core/save_file.dart';
 import '../../models/attachment.dart' show formatBytes;
 import '../../models/workspace.dart';
 import '../../state/app_providers.dart';
+import '../../state/chat_controller.dart';
 import 'sandbox_download_button.dart';
 
 /// 挂在 `WorkspacePanel` 的 Web 那一支：一句说明 + 文件树 + 两个出入口。
@@ -93,6 +94,14 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
 
   String? _downloading;
 
+  /// 当前在看哪个会话。**每一次文件请求都要带上它。**
+  ///
+  /// 服务端拿它查这个会话属于哪个项目，再决定读写哪个卷
+  /// （`SandboxScope::key`）。漏传的后果不是报错，是**打开的是另一个
+  /// 工作区** —— 未分组那个，通常是空的。而界面上看起来一切正常。
+  String? get _session =>
+      ref.read(chatControllerProvider).activeSession?.id;
+
   /// 上传进行到哪一个。`null` = 没在传。
   ///
   /// 只做**逐文件**进度，不做逐字节：Web 上 `package:http` 的 `BrowserClient`
@@ -119,7 +128,9 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
       _errors.remove(path);
     });
     try {
-      final nodes = await ref.read(cortexApiProvider).sandboxListFiles(path);
+      final nodes = await ref
+          .read(cortexApiProvider)
+          .sandboxListFiles(path, sessionId: _session);
       if (!mounted) return;
       setState(() {
         _loading.remove(path);
@@ -147,7 +158,7 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
     try {
       final bytes = await ref
           .read(cortexApiProvider)
-          .sandboxReadFile(node.path);
+          .sandboxReadFile(node.path, sessionId: _session);
       if (!mounted) return;
       await saveBytesAs(bytes, node.name);
     } on Object catch (e) {
@@ -168,6 +179,9 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
 
     final api = ref.read(cortexApiProvider);
     final target = _target;
+    // 循环开始前取一次：中途用户切了会话的话，剩下的文件也该落在
+    // 他点「上传」时看的那个工作区里，而不是分散到两个卷
+    final session = _session;
     final queue = picked.files.where((f) => f.bytes != null).toList();
     var done = 0;
     String? failure;
@@ -190,6 +204,7 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
         await api.sandboxWriteFile(
           path: posixJoin(target, name),
           bytes: bytes,
+          sessionId: session,
           onProgress: (sent, total) {
             if (!mounted) return;
             setState(

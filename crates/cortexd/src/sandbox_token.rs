@@ -52,9 +52,70 @@ pub struct SandboxScope {
     pub owner: String,
     /// 绑定的会话。沙箱只能读写这一个会话的东西。
     pub session_id: String,
+    /// 这个会话属于哪个项目。`None` = 未分组。
+    ///
+    /// **它决定容器与卷**（见 [`Self::key`]），不参与 [`Self::allows`] ——
+    /// 令牌能干什么仍然只看会话。
+    pub project: Option<String>,
 }
 
 impl SandboxScope {
+    /// 容器与卷按这个键分。
+    ///
+    /// # 为什么按项目而不是按用户
+    ///
+    /// 上一版一个用户只有一个 `/workspace`。于是「客户合同」与「从网上抄来的
+    /// 脚本」两段工作的文件混在同一个目录里 —— 装依赖互相踩、`ls` 一屏全是
+    /// 别的项目的东西，而这两件事用户自己是分开的（他建了两个项目）。
+    ///
+    /// 按项目分之后，切项目会重建容器（冷启动 913 ms，用户感知不到），
+    /// 同一个项目的多个会话共用一个容器。
+    ///
+    /// # 为什么未分组仍然用裸 owner
+    ///
+    /// 恒等映射 = **生产上不用做数据迁移**。现有那些卷叫 `cortex-ws-<owner>`，
+    /// 它们的会话都还没有项目，所以照旧命中；一旦被移进项目才会拿到新卷，
+    /// 而那时用户是明确在「新建一个项目」，空工作区是他预期的。
+    ///
+    /// # 项目那一段为什么是哈希而不是 id 本身
+    ///
+    /// **容器名会当 DNS 名用**（cortexd 与沙箱同网段时直连 `http://<容器名>`），
+    /// 而 DNS 标签的硬上限是 **63 字节**。两个 ULID 直接拼起来：
+    ///
+    /// ```text
+    /// cortex-sbx- + 26 + --p- + 26 = 67  ✗
+    /// ```
+    ///
+    /// 真机上撞到过，症状很误导：容器 `Up (healthy)`、里面的 agent 日志写着
+    /// 「已就绪」，而 cortexd 报「30 秒没应答」—— 因为它连名字都解析不出来。
+    ///
+    /// 12 位十六进制（48 bit）之后是 11+26+4+12 = **53**，留足余量。
+    /// 碰撞概率在「一个用户的项目数」这个量级上可以忽略。
+    ///
+    /// 代价是容器名读不出项目 id。反查的路子是 cortexd 每轮那条日志
+    /// （`本轮走云沙箱 owner=… project=… sandbox=…`）—— 它把三者印在一行。
+    /// **不给 runner 加一个 project 入参**：那条 trait 只收作用域与 spec hash
+    /// 是刻意的（有测试守着「调用方塞不进第二个挂载」），为了一行日志
+    /// 松掉它不划算。
+    ///
+    /// # 分隔符为什么不用管注入
+    ///
+    /// owner 由服务端从凭据解析（`current_user`），永远在最前；
+    /// project 由客户端给，但它只能改变**自己名下**的后半段 ——
+    /// 拼出的键无论如何都以自己的 owner 开头，够不到别人的键。
+    /// 哈希顺带把「客户端能塞多长的 id 进来」这件事也钉死了。
+    #[must_use]
+    pub fn key(&self) -> String {
+        match &self.project {
+            None => self.owner.clone(),
+            Some(p) => {
+                use sha2::{Digest as _, Sha256};
+                let digest = Sha256::digest(p.as_bytes());
+                format!("{}--p-{}", self.owner, hex::encode(&digest[..6]))
+            }
+        }
+    }
+
     /// 这条路径 + 方法允许吗。
     ///
     /// # 为什么是白名单而不是黑名单
@@ -134,7 +195,7 @@ impl SandboxTokens {
         Some(scope.clone())
     }
 
-    /// 这个 owner 手上那把还有效的令牌（如果有）。
+    /// 这个作用域（用户 + 项目）手上那把还有效的令牌（如果有）。
     ///
     /// # 为什么需要「复用」而不是每轮签一把新的
     ///
@@ -144,12 +205,16 @@ impl SandboxTokens {
     ///
     /// 真机第一轮通、第二轮 401，就是这个。**令牌的生命周期跟着容器走**，
     /// 不跟着轮次走。
+    ///
+    /// 按 [`SandboxScope::key`] 而不是按 owner 找：一个用户可以同时有几个
+    /// 项目的沙箱活着，拿错那把的后果是**把 A 项目的令牌塞给 B 项目的容器**
+    /// —— 而容器起来之后照常应答，只是它认的是另一把，第二轮才 401。
     #[must_use]
-    pub fn find_by_owner(&self, owner: &str) -> Option<String> {
+    pub fn find_by_key(&self, key: &str) -> Option<String> {
         let guard = self.inner.lock().ok()?;
         let now = Instant::now();
         guard.iter().find_map(|(tok, (scope, at))| {
-            (scope.owner == owner && now.duration_since(*at) < TTL).then(|| tok.clone())
+            (scope.key() == key && now.duration_since(*at) < TTL).then(|| tok.clone())
         })
     }
 
@@ -173,14 +238,18 @@ impl SandboxTokens {
         }
     }
 
-    /// 作废某个 owner 的全部令牌。
-    pub fn revoke_owner(&self, owner: &str) {
+    /// 作废某个作用域的全部令牌。
+    ///
+    /// 按 key 而不是按 owner：停掉「A 项目的容器」时不该把这个用户在
+    /// B 项目里那个正在干活的沙箱一起弄瘸 —— 它的令牌一没，
+    /// 它正在写的那条 episode 就是 403，而 `remote.rs` 把 4xx 归为不可重试。
+    pub fn revoke_scope(&self, key: &str) {
         if let Ok(mut g) = self.inner.lock() {
-            g.retain(|_, (s, _)| s.owner != owner);
+            g.retain(|_, (s, _)| s.key() != key);
         }
     }
 
-    /// 空闲超过 `idle` 的 owner。空闲回收拿它决定停谁。
+    /// 空闲超过 `idle` 的作用域。空闲回收拿它决定停谁。
     ///
     /// # 为什么「最后一次用到令牌」就是正确的活跃信号
     ///
@@ -196,51 +265,55 @@ impl SandboxTokens {
     /// 三家（Codespaces / Gitpod / Coder）的共同点也是这个：**以客户端 /
     /// 请求活动为信号，不把容器内的 CPU 占用当续命依据**。
     #[must_use]
-    pub fn idle_owners(&self, idle: Duration) -> Vec<String> {
+    pub fn idle_scopes(&self, idle: Duration) -> Vec<SandboxScope> {
         let Ok(guard) = self.inner.lock() else {
             return Vec::new();
         };
         let now = Instant::now();
-        // 一个 owner 可能有多把（换过会话又签了新的）。**最近那一把**说了算 ——
-        // 按最老的算会把活跃用户的沙箱停掉
-        let mut newest: HashMap<&str, Duration> = HashMap::new();
+        // 一个作用域可能有多把（换过会话又签了新的）。**最近那一把**说了算 ——
+        // 按最老的算会把还在干活的沙箱停掉
+        let mut newest: HashMap<String, (SandboxScope, Duration)> = HashMap::new();
         for (scope, at) in guard.values() {
             let age = now.duration_since(*at);
             newest
-                .entry(scope.owner.as_str())
-                .and_modify(|a| *a = (*a).min(age))
-                .or_insert(age);
+                .entry(scope.key())
+                .and_modify(|(_, a)| *a = (*a).min(age))
+                .or_insert_with(|| (scope.clone(), age));
         }
         newest
-            .into_iter()
+            .into_values()
             .filter(|(_, age)| *age >= idle)
-            .map(|(o, _)| o.to_owned())
+            .map(|(s, _)| s)
             .collect()
     }
 
-    /// 现在有沙箱的所有 owner（去重）。
+    /// 现在有沙箱的所有作用域（按 [`SandboxScope::key`] 去重）。
     ///
     /// 快照任务用它来决定给谁拍。**用这张表而不是 `docker ps`**：
     /// 它本来就是「谁有沙箱」的权威（令牌与容器同生共死，见
     /// [`crate::sandbox_reaper`] 里那段「顺序不能反」），而且省一次网络往返。
     ///
-    /// 与 [`Self::idle_owners`] 的差别只有一处：那个筛「久没动的」，
+    /// 与 [`Self::idle_scopes`] 的差别只有一处：那个筛「久没动的」，
     /// 这个要全部 —— 快照恰恰不该跳过正在干活的那些。
     ///
     /// 容器可能已经被回收而令牌还在（回收失败那一支），所以调用方仍要
-    /// `status()` 确认一次：这里返回的是「该看一眼的 owner」，
-    /// 不是「一定有活容器的 owner」。
+    /// `status()` 确认一次：这里返回的是「该看一眼的作用域」，
+    /// 不是「一定有活容器的作用域」。
+    ///
+    /// 返回整个 [`SandboxScope`] 而不只是键：快照那条路两样都要 ——
+    /// 用 `key()` 去找容器，用 `owner` 去找他的租户库。
     #[must_use]
-    pub fn owners(&self) -> Vec<String> {
+    pub fn scopes(&self) -> Vec<SandboxScope> {
         let Ok(guard) = self.inner.lock() else {
             return Vec::new();
         };
-        let mut seen: Vec<String> = guard
-            .values()
-            .map(|(scope, _)| scope.owner.clone())
-            .collect();
-        seen.sort_unstable();
-        seen.dedup();
+        let mut by_key: HashMap<String, SandboxScope> = HashMap::new();
+        for (scope, _) in guard.values() {
+            by_key.entry(scope.key()).or_insert_with(|| scope.clone());
+        }
+        let mut seen: Vec<SandboxScope> = by_key.into_values().collect();
+        // 排序只为让日志与测试有确定的顺序
+        seen.sort_unstable_by_key(SandboxScope::key);
         seen
     }
 
@@ -259,6 +332,15 @@ mod tests {
         SandboxScope {
             owner: "u1".into(),
             session_id: "s1".into(),
+            project: None,
+        }
+    }
+
+    fn in_project(owner: &str, project: &str) -> SandboxScope {
+        SandboxScope {
+            owner: owner.into(),
+            session_id: "s1".into(),
+            project: Some(project.into()),
         }
     }
 
@@ -361,18 +443,117 @@ mod tests {
     }
 
     #[test]
-    fn revoking_an_owner_leaves_other_owners_alone() {
+    fn revoking_one_scope_leaves_other_scopes_alone() {
         let book = SandboxTokens::default();
         let a = book.issue(scope());
         let b = book.issue(SandboxScope {
             owner: "u2".into(),
             session_id: "s2".into(),
+            project: None,
         });
-        book.revoke_owner("u1");
+        book.revoke_scope("u1");
         assert!(book.resolve(&a).is_none());
         assert!(
             book.resolve(&b).is_some(),
             "作废一个用户的沙箱不该殃及别人 —— 多租户下这是一次全站故障"
+        );
+    }
+
+    /// 停掉一个项目的沙箱，**不能**弄瘸同一个用户在别的项目里那个。
+    ///
+    /// 上一版这里按 owner 作废，那时一个用户只有一个沙箱所以看不出问题。
+    /// 现在按 owner 作废的后果很具体：A 项目空闲被回收，B 项目正在跑的那个
+    /// agent 手里的令牌当场失效 —— 它正在写的那条 episode 拿到 403，
+    /// 而 `remote.rs` 把 4xx 归为不可重试，那条记录被永久丢弃且只留一行 warn。
+    #[test]
+    fn 停一个项目的沙箱不影响同一用户的另一个项目() {
+        let book = SandboxTokens::default();
+        let unfiled = book.issue(scope());
+        let alpha = book.issue(in_project("u1", "p-alpha"));
+        let beta = book.issue(in_project("u1", "p-beta"));
+
+        book.revoke_scope(&in_project("u1", "p-alpha").key());
+
+        assert!(book.resolve(&alpha).is_none(), "被停的那个项目的令牌该没了");
+        assert!(
+            book.resolve(&beta).is_some(),
+            "同一个用户的另一个项目还在干活，它的令牌不该被殃及"
+        );
+        assert!(
+            book.resolve(&unfiled).is_some(),
+            "未分组那个也是独立的一份，同样不该被殃及"
+        );
+    }
+
+    /// 未分组的键**恒等于 owner** —— 生产上那些卷靠这条不用迁移。
+    #[test]
+    fn 未分组的作用域键就是裸的_owner() {
+        assert_eq!(
+            scope().key(),
+            "u1",
+            "改掉这条等于让生产上每个用户的 cortex-ws-<owner> 卷当场失联：\
+             容器会挂一个空卷起来，而用户看到的是「我的文件全没了」"
+        );
+        assert_ne!(
+            in_project("u1", "p1").key(),
+            scope().key(),
+            "项目里的沙箱必须是另一个卷，否则这次改动等于没做"
+        );
+        assert_ne!(
+            in_project("u1", "p1").key(),
+            in_project("u1", "p2").key(),
+            "两个项目之间也要分开 —— 这才是用户真正抱怨的那件事"
+        );
+    }
+
+    /// 容器名会当 **DNS 名**用，所以它必须 ≤ 63 字节。
+    ///
+    /// 这条是补写的：第一版把两个 ULID 直接拼起来，得到 67 字节的容器名。
+    /// 真机上的症状极具误导性 —— 容器 `Up (healthy)`、里面的 agent 日志写着
+    /// 「本地 agent 已就绪」，而 cortexd 报「30 秒没应答，可能是崩了」。
+    /// 实际是 `getent hosts <容器名>` 直接解析失败。
+    ///
+    /// 上限写死 63 而不是引用某个常量：这是 DNS 标签的**协议**上限
+    /// （RFC 1035），不是我们选的。
+    #[test]
+    fn 作用域键拼出来的容器名不超过_dns_标签上限() {
+        // 最长的现实输入：两个 26 字符的 ULID
+        let worst = SandboxScope {
+            owner: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            session_id: "s".into(),
+            project: Some("01BX5ZZKBKACTAV9WEVGEMMVRZ".into()),
+        };
+        // 与 `sandbox_runner` 的前缀对齐。两处写歪的后果不同：那边加长了
+        // 才会真的炸，所以这里取更长的那个（容器名）算
+        let name_len = "cortex-sbx-".len() + worst.key().len();
+        assert!(
+            name_len <= 63,
+            "容器名 {name_len} 字节，超过 DNS 标签上限 63。\
+             症状不是「建容器失败」，而是容器起来了、健康检查也过了，\
+             cortexd 却连它的名字都解析不出来 —— 报出来的是「30 秒没应答」"
+        );
+    }
+
+    /// 同一个项目 id 每次都要算出**同一个**键。
+    #[test]
+    fn 项目哈希是确定的() {
+        assert_eq!(
+            in_project("u1", "p1").key(),
+            in_project("u1", "p1").key(),
+            "键不稳定的话，每一轮对话都会去找一个不存在的容器 —— \
+             于是每轮建一个新的，旧的那些带着文件留在原地"
+        );
+    }
+
+    /// 项目 id 由客户端给，但它**改不动别人的键**。
+    #[test]
+    fn 客户端给的项目_id_够不到别人的沙箱() {
+        // 一个想撞到 u2 名下去的项目 id
+        let evil = in_project("u1", "--p-x/../u2");
+        assert!(
+            evil.key().starts_with("u1"),
+            "键必然以服务端解析出来的 owner 开头（current_user，不来自请求体），\
+             所以无论项目 id 长成什么样都只能改动自己名下那一段"
         );
     }
 

@@ -370,14 +370,46 @@ cortexd 403 Forbidden：cortexd:8080 不在放行清单里，出网代理拒绝�
 
 ```rust
 trait SandboxRunner {
-    async fn ensure(&self, owner: &UserId, spec_hash: &str) -> Result<SandboxHandle>;
-    async fn stop(&self, owner: &UserId) -> Result<()>;      // 保留卷
-    async fn status(&self, owner: &UserId) -> Result<Option<SandboxHandle>>;
+    async fn ensure(&self, scope: &str, token: &str, spec_hash: &str) -> Result<SandboxHandle>;
+    async fn stop(&self, scope: &str) -> Result<()>;      // 保留卷
+    async fn status(&self, scope: &str) -> Result<Option<SandboxHandle>>;
 }
 ```
 
 唯一实现 `DockerRunner`（`bollard`）。**容器规格全部写死在实现里**，trait 入参
-只有 owner 与 spec hash —— 调用方说不出「把宿主的 `/` 挂进去」。
+只有作用域、令牌与 spec hash —— 调用方说不出「把宿主的 `/` 挂进去」。
+
+### 作用域 = 用户 + 项目，不是用户
+
+`scope` 是 `SandboxScope::key()`：
+
+| 会话所在 | 键 | 容器 / 卷 |
+|---|---|---|
+| 未分组 | `<user_id>` | `cortex-sbx-<user_id>` / `cortex-ws-<user_id>` |
+| 项目 P | `<user_id>--p-<sha256(P) 前 12 位>` | 同上，名字带项目后缀 |
+
+**为什么不按用户**：按用户时一个人只有一个 `/workspace`，于是「客户合同」与
+「从网上抄来的脚本」的文件混在同一个目录 —— 装依赖互相踩，`ls` 一屏全是别的
+项目的东西。而这两件事用户自己**已经分开了**（他建了两个项目）。
+
+**为什么不按会话**：会话是一次对话，而工作是跨对话的。按会话分的话，
+「昨天让你生成的那份报告呢」会得到一个空目录。
+
+**为什么未分组仍用裸 owner**：恒等映射 ⇒ 生产上现有的 `cortex-ws-<owner>` 卷
+照旧命中，**不用做数据迁移**。有一条测试钉着这个等式，改掉它等于让每个用户的
+文件当场失联（容器挂一个空卷起来，用户看到的是「我的文件全没了」）。
+
+**为什么项目那一段是哈希**：容器名会当 **DNS 名**用，而 DNS 标签硬上限是
+**63 字节** —— 两个 ULID 直接拼是 67，真机上撞过。症状极具误导性：容器
+`Up (healthy)`、里面的 agent 日志写着「已就绪」，cortexd 却报「30 秒没应答」，
+因为它连名字都解析不出来。12 位十六进制之后是 53，有测试钉着这个上限。
+
+切项目时容器重建，实测冷启动 **913 ms** —— 用户感知不到。同一个项目的多个
+会话共用一个容器。
+
+**每一条摸容器的路由都要能算出这个键**，所以 `/sandbox/files`、
+`workspace.tar`、`snapshots` 都收 `?session=`：服务端拿它查会话属于哪个项目。
+漏传不报错，只是读写了未分组那个卷 —— 客户端侧有测试钉着四条路由都带上它。
 
 > **一条要说清的**：公开材料只讲**隔离原语**（Firecracker / gVisor），
 > 两家的**控制面**怎么搭是黑盒。所以「谁来起容器」是工程判断，不是查到的事实。
@@ -390,7 +422,7 @@ trait SandboxRunner {
 --security-opt no-new-privileges --memory 512m --memory-swap 640m
 --cpus 1.5 --cpu-shares 256 --pids-limit 256 --oom-score-adj 500
 --ulimit nofile=8192:65536 --restart no
--v cortex-ws-{owner}:/workspace
+-v cortex-ws-{scope}:/workspace
 ```
 
 三处不显然的：
@@ -552,6 +584,33 @@ cortexd。
 ---
 
 ## 十、生命周期与资源
+
+### 沙箱对用户不可见 —— 一条产品约束，不是实现细节
+
+**用户只跟会话打交道。后面有没有容器、它在不在、什么时候被回收，一概不该
+出现在界面上。**
+
+曾经不是这样：输入框底部有一个「云沙箱」开关，关着时 agent 没有文件工具；
+容器被回收后文件面板会说「沙箱容器不在了，去发条消息把它拉起来」。用户的
+反应是一句话：**「发什么消息把它拉起来？」**
+
+那个开关的理由是「一个容器占几百 MB」——**又是 `--memory 512m` 那个上限**
+（实测闲置 9.7 MiB）。同一个错误数字在这份文档里制造过三样东西：30 分钟的
+回收阈值、这个开关、以及围绕开关写的一整套提示。
+
+现在的规则：
+
+- `/chat` 由**服务端**分路：接得上 docker 就进沙箱，接不上就纯聊天。
+  `ChatRequest` 里没有 `sandbox` 字段，别加回来。
+- 每一条要摸容器的路由都**自己负责把它拉起来**（`routes::ensure_for_files`）。
+  冷启动 913 ms，比向用户解释容器便宜得多。
+- **唯一的例外是后台那个 15 分钟的快照任务**：它仍然拿 `capture()` 的
+  `Ok(None)`。让它也 ensure 的话，每轮扫描会把刚回收的沙箱全部复活 ——
+  回收就等于没做。
+
+于是「容器不在」不再是一个用户可见的状态，那一整类提示与那个 409
+（`ApiError::conflict`）一起删掉了。
+
 
 - **空闲判定起点 = max(当轮 turn 结束时间, 最后一次客户端请求时间)**。因为 SSE
   断开后容器内 agent 会继续跑完当轮（`turn.rs` 刻意设计），按连接断开计时会停掉

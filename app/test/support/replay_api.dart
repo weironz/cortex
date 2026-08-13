@@ -249,15 +249,15 @@ class ReplayApi
   }) => throw UnimplementedError();
 
   @override
-  Future<Uint8List> sandboxWorkspaceTar() async =>
+  Future<Uint8List> sandboxWorkspaceTar({String? sessionId}) async =>
       throw UnimplementedError('这个替身不测云沙箱下载');
 
   @override
-  Future<List<FileNode>> sandboxListFiles(String path) async =>
+  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async =>
       throw UnimplementedError('这个替身不测云沙箱文件树');
 
   @override
-  Future<Uint8List> sandboxReadFile(String path) async =>
+  Future<Uint8List> sandboxReadFile(String path, {String? sessionId}) async =>
       throw UnimplementedError('这个替身不测云沙箱文件树');
 
   @override
@@ -265,6 +265,7 @@ class ReplayApi
     required String path,
     required Uint8List bytes,
     UploadProgress? onProgress,
+    String? sessionId,
   }) async => throw UnimplementedError('这个替身不测云沙箱文件树');
 
   @override

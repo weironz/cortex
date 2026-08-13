@@ -71,38 +71,46 @@ pub fn spawn(st: AppState) {
 
 /// 拍一轮。**单独一个函数**，这样它的失败处理读得出来。
 async fn sweep_once(st: &AppState) {
-    // 有令牌 = 这个 owner 有一个（可能停着的）沙箱。用令牌表而不是
-    // `docker ps`：那张表本来就是「谁有沙箱」的权威，而且省一次网络往返
-    for owner in st.sandbox_tokens().owners() {
-        match capture(st, &owner).await {
+    // 有令牌 = 这个作用域有一个（可能停着的）沙箱。用令牌表而不是
+    // `docker ps`：那张表本来就是「谁有沙箱」的权威，而且省一次网络往返。
+    //
+    // 一个用户可能同时有几个（几个项目各一个），所以这里遍历的是**作用域**
+    // 而不是用户 —— 按用户遍历会漏掉除第一个之外的全部项目
+    for scope in st.sandbox_tokens().scopes() {
+        let key = scope.key();
+        match capture(st, &scope.owner, &key).await {
             Ok(Some(row)) => tracing::info!(
-                owner = %owner, hash = %row.blob_hash, bytes = row.size_bytes,
+                sandbox = %key, hash = %row.blob_hash, bytes = row.size_bytes,
                 "工作区快照已存"
             ),
             Ok(None) => {} // 容器已回收，卷没人动，等下次 ensure
             // 拍不上不致命，下一轮再来。但**必须出现在日志里**：
             // 一个从来没成功过的备份等于没有备份，而那要到恢复那一刻才发现
-            Err(e) => tracing::warn!(owner = %owner, error = %e, "工作区快照失败，下一轮再试"),
+            Err(e) => tracing::warn!(sandbox = %key, error = %e, "工作区快照失败，下一轮再试"),
         }
     }
 }
 
-/// 给一个 owner 拍一份，字节进对象存储，索引进**他自己的** schema。
+/// 给一个沙箱拍一份，字节进对象存储，索引进**它主人的** schema。
 ///
-/// 返回 `None` 表示这个 owner 现在没有容器（已被回收，卷还在）——
+/// `owner` 与 `scope` 是两件事：前者决定进哪个租户库（一个用户一个 schema），
+/// 后者决定拍哪个卷（一个项目一个）。混用的后果是 A 项目的快照被记在
+/// B 项目名下，而恢复时会把它解进错的工作区 —— 两步都不报错。
+///
+/// 返回 `None` 表示这个沙箱现在没有容器（已被回收，卷还在）——
 /// 那不是失败，所以不该走 `Err`：调用方对两者的反应完全不同。
 ///
 /// # Errors
 /// 导出失败、对象存储写失败、租户解析失败、落库失败。
-pub async fn capture(st: &AppState, owner: &str) -> Result<Option<SnapshotRow>> {
+pub async fn capture(st: &AppState, owner: &str, scope: &str) -> Result<Option<SnapshotRow>> {
     let Some(layer) = st.sandbox_layer() else {
         return Ok(None);
     };
-    if layer.runner.status(owner).await?.is_none() {
+    if layer.runner.status(scope).await?.is_none() {
         return Ok(None);
     }
 
-    let tar = layer.runner.export_workspace(owner).await?;
+    let tar = layer.runner.export_workspace(scope).await?;
     let size_bytes = i64::try_from(tar.len()).unwrap_or(i64::MAX);
 
     // 内容寻址天然去重：两次快照之间没改过文件时哈希相同，对象存储不会
@@ -118,11 +126,12 @@ pub async fn capture(st: &AppState, owner: &str) -> Result<Option<SnapshotRow>> 
 
     let store = st.tenant_store_for_user(owner).await?;
     sqlx::query(
-        "INSERT INTO sandbox_snapshots (id, owner, blob_hash, size_bytes, taken_at) \
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO sandbox_snapshots (id, owner, scope, blob_hash, size_bytes, taken_at) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&row.id)
     .bind(owner)
+    .bind(scope)
     .bind(&row.blob_hash)
     .bind(row.size_bytes)
     .bind(row.taken_at)
@@ -133,17 +142,20 @@ pub async fn capture(st: &AppState, owner: &str) -> Result<Option<SnapshotRow>> 
     Ok(Some(row))
 }
 
-/// 这个 owner 的快照，新的在前。
+/// 这个沙箱的快照，新的在前。
+///
+/// 按 `scope` 过滤而不是按 owner：混在一起的话，用户在 A 项目里看到的是
+/// 三个项目的快照，而点「恢复」会把别的项目的 tar 解进这个工作区。
 ///
 /// # Errors
 /// 租户解析或查询失败。
-pub async fn list(st: &AppState, owner: &str) -> Result<Vec<SnapshotRow>> {
+pub async fn list(st: &AppState, owner: &str, scope: &str) -> Result<Vec<SnapshotRow>> {
     let store = st.tenant_store_for_user(owner).await?;
     sqlx::query_as::<_, SnapshotRow>(
         "SELECT id, blob_hash, size_bytes, taken_at FROM sandbox_snapshots \
-         WHERE owner = $1 ORDER BY taken_at DESC LIMIT $2",
+         WHERE scope = $1 ORDER BY taken_at DESC LIMIT $2",
     )
-    .bind(owner)
+    .bind(scope)
     .bind(LIST_LIMIT)
     .fetch_all(store.pool())
     .await
@@ -162,17 +174,18 @@ pub async fn list(st: &AppState, owner: &str) -> Result<Vec<SnapshotRow>> {
 ///
 /// # 只认自己名下的快照
 ///
-/// `snapshot_id` 先在**这个 owner 的 schema 里**查一遍再用。直接拿
-/// 请求体里的 `blob_hash` 去 `get` 的话，任何人都能把别人的工作区
-/// 解进自己的容器 —— 而对象存储是内容寻址的，哈希本身不带归属。
+/// `snapshot_id` 先在**这个 owner 的 schema 里**、并且**限定这个作用域**
+/// 查一遍再用。直接拿请求体里的 `blob_hash` 去 `get` 的话，任何人都能把
+/// 别人的工作区解进自己的容器 —— 而对象存储是内容寻址的，哈希本身不带归属。
+/// 只按 owner 过滤则弱一档：跨项目还是能把 A 的文件解进 B。
 ///
 /// # Errors
-/// 没有容器、快照不属于这个 owner、取字节失败、写回失败。
-pub async fn restore(st: &AppState, owner: &str, snapshot_id: &str) -> Result<()> {
+/// 没有容器、快照不属于这个作用域、取字节失败、写回失败。
+pub async fn restore(st: &AppState, owner: &str, scope: &str, snapshot_id: &str) -> Result<()> {
     let Some(layer) = st.sandbox_layer() else {
         return Err(CortexError::Unavailable("这个部署没有开云沙箱".into()));
     };
-    if layer.runner.status(owner).await?.is_none() {
+    if layer.runner.status(scope).await?.is_none() {
         // 调用方（`routes::restore_snapshot`）刚 ensure 过，走到这里说明容器
         // 在这一瞬没了。这是罕见竞态，不是用户要处理的事 —— 所以话说给他听，
         // 但不要求他做任何动作
@@ -183,9 +196,9 @@ pub async fn restore(st: &AppState, owner: &str, snapshot_id: &str) -> Result<()
 
     let store = st.tenant_store_for_user(owner).await?;
     let hash: Option<String> =
-        sqlx::query_scalar("SELECT blob_hash FROM sandbox_snapshots WHERE id = $1 AND owner = $2")
+        sqlx::query_scalar("SELECT blob_hash FROM sandbox_snapshots WHERE id = $1 AND scope = $2")
             .bind(snapshot_id)
-            .bind(owner)
+            .bind(scope)
             .fetch_optional(store.pool())
             .await
             .map_err(|e| CortexError::Store(format!("查快照失败：{e}")))?;
@@ -200,7 +213,7 @@ pub async fn restore(st: &AppState, owner: &str, snapshot_id: &str) -> Result<()
     })?;
 
     let tar = st.get_blob(&hash).await?;
-    layer.runner.import_workspace(owner, tar).await
+    layer.runner.import_workspace(scope, tar).await
 }
 
 #[cfg(test)]

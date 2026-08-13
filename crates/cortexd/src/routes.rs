@@ -324,7 +324,42 @@ async fn chat(
     chat_here(st, headers, req).await
 }
 
-/// 确保这个 owner 的沙箱在跑，回一把能进去的令牌。
+/// 这个会话的沙箱作用域：谁的、哪个项目的。
+///
+/// # 查不到项目时按未分组处理，而不是报错
+///
+/// 会话行是随第一条 episode 建的，所以**新会话第一轮必然查不到**
+/// （同一件事在 `cortex-local` 那边表现为 404，见 roadmap 的「新会话第一轮的
+/// 404」）。新会话本来就还没被移进任何项目，未分组就是正确答案。
+///
+/// 租户库连不上时同样按未分组：那时该报错的是紧接着的那次真正的读写，
+/// 而不是「决定用哪个容器」这一步 —— 在这里报，错误信息会指向一件
+/// 与病因完全无关的事。
+async fn sandbox_scope(
+    st: &AppState,
+    owner: &str,
+    session_id: &str,
+) -> crate::sandbox_token::SandboxScope {
+    let project = match st.tenant_store_for_user(owner).await {
+        Ok(store) => store
+            .session_state(session_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.project_id),
+        Err(e) => {
+            tracing::debug!(owner = %owner, error = %e, "取不到租户库，沙箱按未分组算");
+            None
+        }
+    };
+    crate::sandbox_token::SandboxScope {
+        owner: owner.to_owned(),
+        session_id: session_id.to_owned(),
+        project,
+    }
+}
+
+/// 确保这个作用域的沙箱在跑，回一把能进去的令牌。
 ///
 /// # 为什么起容器放在请求路径上而不是「建会话时」
 ///
@@ -339,9 +374,10 @@ async fn chat(
 async fn ensure_sandbox(
     st: &AppState,
     layer: &crate::state::SandboxLayer,
-    owner: &str,
-    session_id: &str,
+    scope: crate::sandbox_token::SandboxScope,
 ) -> Result<(crate::sandbox_runner::SandboxHandle, String), ApiError> {
+    let key = scope.key();
+
     // 令牌的生命周期**跟着容器**，不跟着轮次。
     //
     // 容器的入站认证用的是它启动时 env 里那把（`cortex-local` 的入站与出站
@@ -350,20 +386,19 @@ async fn ensure_sandbox(
     //
     // 所以：有就复用，只把它改绑到这一轮的会话上；没有才签新的
     //（首轮，或者上一把已经过了 TTL）。
-    let token = match st.sandbox_tokens().find_by_owner(owner) {
+    //
+    // 复用的判据是**作用域键**而不是 owner：同一个用户切到另一个项目时，
+    // 那是另一个容器、另一把令牌。按 owner 找会把 A 项目的令牌交给
+    // B 项目的容器，而它起来之后照常应答，第二轮才 401。
+    let token = match st.sandbox_tokens().find_by_key(&key) {
         Some(t) => {
-            st.sandbox_tokens().rebind(&t, session_id);
+            st.sandbox_tokens().rebind(&t, &scope.session_id);
             t
         }
-        None => st
-            .sandbox_tokens()
-            .issue(crate::sandbox_token::SandboxScope {
-                owner: owner.to_owned(),
-                session_id: session_id.to_owned(),
-            }),
+        None => st.sandbox_tokens().issue(scope),
     };
 
-    match layer.runner.ensure(owner, &token, "v1").await {
+    match layer.runner.ensure(&key, &token, "v1").await {
         Ok(h) => Ok((h, token)),
         Err(e) => {
             // 签出去的令牌要收回来：容器没起来，它就是一把没有主人的钥匙
@@ -395,12 +430,17 @@ async fn chat_in_sandbox(
         return e.into_response();
     }
 
-    let (handle, token) = match ensure_sandbox(st, layer, &owner, &req.session_id).await {
+    let scope = sandbox_scope(st, &owner, &req.session_id).await;
+    let project = scope.project.clone();
+    let (handle, token) = match ensure_sandbox(st, layer, scope).await {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
 
-    tracing::debug!(owner = %owner, sandbox = %handle.name, "本轮走云沙箱");
+    tracing::debug!(
+        owner = %owner, project = ?project, sandbox = %handle.name,
+        "本轮走云沙箱"
+    );
 
     // 重新组一个请求转进去。**只带 body 与必要的首部** ——
     // `sandbox_proxy::forward` 会把一切凭据剥掉再换上沙箱令牌
@@ -630,9 +670,15 @@ async fn memory_search(
 async fn list_snapshots(
     State(st): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<FilePathQuery>,
 ) -> Result<Json<Vec<crate::sandbox_snapshot::SnapshotRow>>, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
-    Ok(Json(crate::sandbox_snapshot::list(&st, &owner).await?))
+    // 列快照**不拉容器**：这条只读表，不碰卷。它是这几条里唯一一条
+    // 容器不在也能给出正确答案的
+    let scope = sandbox_scope(&st, &owner, q.session()).await.key();
+    Ok(Json(
+        crate::sandbox_snapshot::list(&st, &owner, &scope).await?,
+    ))
 }
 
 /// 立刻拍一份，不等下一个 15 分钟。
@@ -650,8 +696,8 @@ async fn take_snapshot(
     //
     // **只有这条路会拉**：后台那个 15 分钟的定时任务仍然拿 `capture` 的
     // `Ok(None)`，否则每一轮扫描都会把刚回收掉的沙箱全部复活，回收就等于没做。
-    ensure_for_files(&st, &owner, q.session()).await?;
-    match crate::sandbox_snapshot::capture(&st, &owner).await? {
+    let (_, scope) = ensure_for_files(&st, &owner, q.session()).await?;
+    match crate::sandbox_snapshot::capture(&st, &owner, &scope).await? {
         Some(row) => Ok(Json(serde_json::json!({ "snapshot": row }))),
         // 刚 ensure 过还是没有，只能是这一瞬被别的东西停掉了。不当失败报：
         // 卷还在，用户也没做错任何事
@@ -680,8 +726,8 @@ async fn download_workspace(
     Query(q): Query<FilePathQuery>,
 ) -> Result<axum::response::Response, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
-    let layer = ensure_for_files(&st, &owner, q.session()).await?;
-    let tar = layer.runner.export_workspace(&owner).await?;
+    let (layer, scope) = ensure_for_files(&st, &owner, q.session()).await?;
+    let tar = layer.runner.export_workspace(&scope).await?;
     Ok((
         [
             (header::CONTENT_TYPE, "application/x-tar"),
@@ -723,16 +769,24 @@ impl FilePathQuery {
 /// 「沙箱容器不在了，去发一条消息把它拉起来」。那句话要求用户理解三件事
 /// （有个容器、它会被回收、聊天能把它拉回来），而这三件事本来就不该露出来。
 /// 冷启动 913 ms，比解释它便宜得多。
+///
+/// # 为什么把作用域键一起还回去
+///
+/// 因为**下一行就要用它**去 `list_dir` / `read_file` / `write_file`。只回
+/// layer 的话，调用方手边最顺手的变量是 `owner` —— 于是拉起的是这个项目的
+/// 容器，读的却是未分组那个卷。而两边都成功，只是文件不对。
 async fn ensure_for_files<'a>(
     st: &'a AppState,
     owner: &str,
     session_id: &str,
-) -> Result<&'a crate::state::SandboxLayer, ApiError> {
+) -> Result<(&'a crate::state::SandboxLayer, String), ApiError> {
     let layer = st
         .sandbox_layer()
         .ok_or_else(|| ApiError::unsupported("这个部署没有开云沙箱"))?;
-    ensure_sandbox(st, layer, owner, session_id).await?;
-    Ok(layer)
+    let scope = sandbox_scope(st, owner, session_id).await;
+    let key = scope.key();
+    ensure_sandbox(st, layer, scope).await?;
+    Ok((layer, key))
 }
 
 /// 列一层目录。
@@ -742,9 +796,9 @@ async fn list_sandbox_files(
     Query(q): Query<FilePathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
-    let layer = ensure_for_files(&st, &owner, q.session()).await?;
+    let (layer, scope) = ensure_for_files(&st, &owner, q.session()).await?;
     let path = q.or_root();
-    let entries = layer.runner.list_dir(&owner, path).await?;
+    let entries = layer.runner.list_dir(&scope, path).await?;
     Ok(Json(
         serde_json::json!({ "path": path, "entries": entries }),
     ))
@@ -757,12 +811,12 @@ async fn read_sandbox_file(
     Query(q): Query<FilePathQuery>,
 ) -> Result<axum::response::Response, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
-    let layer = ensure_for_files(&st, &owner, q.session()).await?;
+    let (layer, scope) = ensure_for_files(&st, &owner, q.session()).await?;
     let path = q
         .path
         .as_deref()
         .ok_or_else(|| ApiError::bad_request("要取哪个文件 —— 缺 ?path="))?;
-    let bytes = layer.runner.read_file(&owner, path).await?;
+    let bytes = layer.runner.read_file(&scope, path).await?;
     Ok((
         // **一律 octet-stream，不按扩展名猜 mime。**
         //
@@ -792,13 +846,13 @@ async fn put_sandbox_file(
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
-    let layer = ensure_for_files(&st, &owner, q.session()).await?;
+    let (layer, scope) = ensure_for_files(&st, &owner, q.session()).await?;
     let path = q
         .path
         .as_deref()
         .ok_or_else(|| ApiError::bad_request("要写到哪儿 —— 缺 ?path="))?;
     let size = body.len();
-    layer.runner.write_file(&owner, path, body).await?;
+    layer.runner.write_file(&scope, path, body).await?;
     Ok(Json(serde_json::json!({ "path": path, "size": size })))
 }
 
@@ -811,8 +865,8 @@ async fn restore_snapshot(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let owner = crate::accounts::current_user(&st, &headers).await;
     // 恢复是用户「刚丢了东西」才走的路，最不该在这里让他先去把容器拉起来
-    ensure_for_files(&st, &owner, q.session()).await?;
-    crate::sandbox_snapshot::restore(&st, &owner, &id).await?;
+    let (_, scope) = ensure_for_files(&st, &owner, q.session()).await?;
+    crate::sandbox_snapshot::restore(&st, &owner, &scope, &id).await?;
     Ok(Json(serde_json::json!({
         "restored": id,
         // 这句话要回给用户看。「恢复」在人脑子里通常是「回到那一刻的样子」，
@@ -1624,19 +1678,25 @@ mod lazy_ensure_tests {
     #[derive(Default)]
     struct NeverRunning {
         ensured: AtomicUsize,
+        /// `ensure` 与 `list_dir` 各自被要求的作用域键。**必须一致。**
+        seen: std::sync::Mutex<Vec<(&'static str, String)>>,
     }
 
     #[async_trait::async_trait]
     impl SandboxRunner for NeverRunning {
         async fn ensure(
             &self,
-            owner: &str,
+            scope: &str,
             _t: &str,
             _h: &str,
         ) -> cortex_core::Result<SandboxHandle> {
             self.ensured.fetch_add(1, Ordering::SeqCst);
+            self.seen
+                .lock()
+                .expect("测试里的锁不该中毒")
+                .push(("ensure", scope.to_owned()));
             Ok(SandboxHandle {
-                name: format!("fake-{owner}"),
+                name: format!("fake-{scope}"),
                 addr: SandboxAddr::Direct("http://127.0.0.1:1".into()),
             })
         }
@@ -1652,7 +1712,11 @@ mod lazy_ensure_tests {
         async fn import_workspace(&self, _o: &str, _t: bytes::Bytes) -> cortex_core::Result<()> {
             Ok(())
         }
-        async fn list_dir(&self, _owner: &str, _path: &str) -> cortex_core::Result<Vec<DirEntry>> {
+        async fn list_dir(&self, scope: &str, _path: &str) -> cortex_core::Result<Vec<DirEntry>> {
+            self.seen
+                .lock()
+                .expect("测试里的锁不该中毒")
+                .push(("list_dir", scope.to_owned()));
             Ok(vec![DirEntry {
                 name: "note.md".into(),
                 is_dir: false,
@@ -1719,6 +1783,19 @@ mod lazy_ensure_tests {
             1,
             "必须真的调过 ensure。只查 status 的实现在真机上会静默退化成\
              「文件树打不开，直到用户碰巧发了条消息」"
+        );
+
+        // 拉起来的那个容器，和读文件读的那个卷，**必须是同一个作用域**。
+        //
+        // 这是容器改成按项目分之后新出现的失败形状：`ensure` 拿作用域键、
+        // 而调用方手边最顺手的变量是 `owner`，于是拉起 A 项目的容器、
+        // 从未分组那个卷里读文件。两步都成功，只是文件不对。
+        let seen = runner.seen.lock().expect("测试里的锁不该中毒").clone();
+        let keys: Vec<&str> = seen.iter().map(|(_, k)| k.as_str()).collect();
+        assert!(
+            keys.windows(2).all(|w| w[0] == w[1]),
+            "ensure 与 list_dir 用了不同的作用域键：{seen:?}。\
+             真机上的症状是「容器起来了，但里面是空的」"
         );
     }
 }

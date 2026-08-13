@@ -14,7 +14,7 @@
 //!
 //! # 规格写死在实现里，不从入参来
 //!
-//! [`SandboxRunner::ensure`] 的入参只有 owner 与 spec hash。镜像名、挂载点、
+//! [`SandboxRunner::ensure`] 的入参只有 scope 与 spec hash。镜像名、挂载点、
 //! 内存 / CPU / PID 上限、网络、capability 全部是 [`DockerRunner`] 里的常量 ——
 //! **调用方说不出「把宿主的 `/` 挂进去」**。这一条有测试守着
 //! （[`tests::the_spec_is_not_negotiable`]）。
@@ -42,6 +42,13 @@ const DEFAULT_IMAGE: &str = "cortex/sandbox:dev";
 /// `docker images` 里已经存在（节点上由 `cortex-deploy` 脚本拉）。
 /// 拉不到的表现是起沙箱时报 `No such image`，不是静默回落。
 const IMAGE_ENV: &str = "CORTEX_SANDBOX_IMAGE";
+
+/// 容器 env 里放沙箱令牌的那个变量名。
+///
+/// 提成常量只为一件事：`spec_with_image` 写它、`token_matches` 读它，
+/// 两处必须是同一个名字。写歪了不报错 —— `token_matches` 恒为 false，
+/// 于是**每一轮对话都重建一次容器**，而那只表现为「有点慢」。
+const TOKEN_ENV: &str = "CORTEX_TOKEN";
 
 /// 容器内 agent 的端口。与 `Dockerfile.sandbox` 的 `EXPOSE` 一致。
 const AGENT_PORT: u16 = 8090;
@@ -346,7 +353,7 @@ pub fn validate_ws_path(path: &str) -> Result<String> {
 pub struct SandboxHandle {
     /// 这个沙箱的名字。
     ///
-    /// Docker 下是容器名（`cortex-sbx-{owner}`），k8s 下会是 Pod 名 ——
+    /// Docker 下是容器名（`cortex-sbx-{scope}`），k8s 下会是 Pod 名 ——
     /// **调用方只拿它做日志与诊断**，不该拿它去拼任何地址。
     pub name: String,
     /// 怎么够到它。
@@ -367,7 +374,7 @@ pub struct SandboxHandle {
 ///    差别是几百毫秒的 `connection refused`，而它读起来像「沙箱坏了」。
 /// 3. **`stop` 保留工作区**。停的是算力不是数据 —— 那个卷常常是用户唯一一份。
 /// 4. **规格不从入参来**。镜像、挂载点、内存 / CPU / PID 上限、网络、
-///    capability 全部由实现自己定死。调用方只给 owner 与 spec hash，
+///    capability 全部由实现自己定死。调用方只给 scope 与 spec hash，
 ///    **说不出「把宿主的 `/` 挂进去」**。这是防「cortexd 被攻破之后能做什么」，
 ///    不是防「cortexd 会写错」。
 /// 5. **出网必须靠拓扑挡住，不能只靠 env**。`HTTP_PROXY` 是引导；真正的边界是
@@ -388,19 +395,19 @@ pub struct SandboxHandle {
 /// 那天来的时候，要保住什么是写下来的。
 #[async_trait::async_trait]
 pub trait SandboxRunner: Send + Sync {
-    /// 确保 owner 的沙箱在跑，返回怎么够得着它。**幂等。**
+    /// 确保 scope 的沙箱在跑，返回怎么够得着它。**幂等。**
     ///
     /// `spec_hash` 是环境定义的内容哈希（setup.sh + env + 基镜像 digest）。
     /// v1 不做快照缓存，这个参数只进容器标签供排查用；二期 `snapshot()`
     /// 落地时它就是缓存 tag 的那一半。**现在就留着**是因为加参数会波及
     /// 每一个调用点，而那时正是最不想动调用点的时候。
-    async fn ensure(&self, owner: &str, token: &str, spec_hash: &str) -> Result<SandboxHandle>;
+    async fn ensure(&self, scope: &str, token: &str, spec_hash: &str) -> Result<SandboxHandle>;
 
     /// 停掉容器，**保留卷**。空闲回收走这条。
-    async fn stop(&self, owner: &str) -> Result<()>;
+    async fn stop(&self, scope: &str) -> Result<()>;
 
     /// 在跑吗。
-    async fn status(&self, owner: &str) -> Result<Option<SandboxHandle>>;
+    async fn status(&self, scope: &str) -> Result<Option<SandboxHandle>>;
 
     /// 把 `/workspace` 整个导出成一个 tar。**数据兜底的第一层。**
     ///
@@ -410,24 +417,24 @@ pub trait SandboxRunner: Send + Sync {
     ///
     /// 导出**由宿主执行**（docker daemon 直接读卷），容器里的进程既不参与
     /// 也阻止不了 —— 正是这一层需要的性质。
-    async fn export_workspace(&self, owner: &str) -> Result<bytes::Bytes>;
+    async fn export_workspace(&self, scope: &str) -> Result<bytes::Bytes>;
 
     /// 把一个 tar 写回 `/workspace`。
     ///
     /// **叠加，不是替换**：同名文件覆盖，快照里没有而现在有的文件不删。
     /// 理由见 `sandbox_snapshot::restore` 的文档。
-    async fn import_workspace(&self, owner: &str, tar: bytes::Bytes) -> Result<()>;
+    async fn import_workspace(&self, scope: &str, tar: bytes::Bytes) -> Result<()>;
 
     /// 列一层目录。**只列一层** —— 递归会在 `node_modules` 上卡好几秒。
     ///
     /// `path` 必须在工作区之内，由实现校验（[`validate_ws_path`]）。
-    async fn list_dir(&self, owner: &str, path: &str) -> Result<Vec<DirEntry>>;
+    async fn list_dir(&self, scope: &str, path: &str) -> Result<Vec<DirEntry>>;
 
     /// 读一个文件的字节。
-    async fn read_file(&self, owner: &str, path: &str) -> Result<bytes::Bytes>;
+    async fn read_file(&self, scope: &str, path: &str) -> Result<bytes::Bytes>;
 
     /// 写一个文件。父目录不存在时一并建。
-    async fn write_file(&self, owner: &str, path: &str, bytes: bytes::Bytes) -> Result<()>;
+    async fn write_file(&self, scope: &str, path: &str, bytes: bytes::Bytes) -> Result<()>;
 
     /// 一条「哪个沙箱刚刚有东西被 OOM 杀了」的流。
     ///
@@ -438,11 +445,11 @@ pub trait SandboxRunner: Send + Sync {
     /// 那种情况下 `inspect` 的 `OOMKilled` 一直是 false。
     fn watch_oom(&self) -> Option<futures::stream::BoxStream<'static, String>>;
 
-    /// 这个 owner 的工作区占了多少字节。容器不在时 `None`。
+    /// 这个 scope 的工作区占了多少字节。容器不在时 `None`。
     ///
     /// 用来告警，不用来限制 —— named volume 不受 `--storage-opt` 管
     /// （那个只管容器可写层，而沙箱是只读 rootfs，可写层恒空）。
-    async fn workspace_bytes(&self, owner: &str) -> Result<Option<u64>>;
+    async fn workspace_bytes(&self, scope: &str) -> Result<Option<u64>>;
 }
 
 /// 直连 docker.sock 的实现。
@@ -555,12 +562,34 @@ impl DockerRunner {
         }
     }
 
-    fn container_name(owner: &str) -> String {
-        format!("{NAME_PREFIX}{}", sanitize(owner))
+    fn container_name(scope: &str) -> String {
+        format!("{NAME_PREFIX}{}", sanitize(scope))
     }
 
-    fn volume_name(owner: &str) -> String {
-        format!("{VOLUME_PREFIX}{}", sanitize(owner))
+    /// 这个正在跑的容器，认的是不是这把令牌。
+    ///
+    /// 从它 env 里读回来比对。**不是新增的暴露面**：那把令牌本来就是 cortexd
+    /// 自己塞进去的，`docker inspect` 能看见它的人也就能直接控制 daemon。
+    ///
+    /// 读不到（inspect 失败、env 里没这一条）时回 `false` —— 往「重建」那边
+    /// 倒。反过来的话，一个我们说不清认哪把令牌的容器会被当成好的留下来，
+    /// 而症状是每一条请求 401。
+    async fn token_matches(&self, name: &str, token: &str) -> bool {
+        let Ok(info) = self
+            .docker
+            .inspect_container(name, None::<qp::InspectContainerOptions>)
+            .await
+        else {
+            return false;
+        };
+        let want = format!("{TOKEN_ENV}={token}");
+        info.config
+            .and_then(|c| c.env)
+            .is_some_and(|env| env.contains(&want))
+    }
+
+    fn volume_name(scope: &str) -> String {
+        format!("{VOLUME_PREFIX}{}", sanitize(scope))
     }
 
     /// 删掉一个容器，**不存在也当成功**。
@@ -634,12 +663,12 @@ impl DockerRunner {
     /// （`network_mode: none` 只是把这件事写死）。
     async fn put_archive(
         &self,
-        owner: &str,
+        scope: &str,
         dest_dir: &str,
         tar: bytes::Bytes,
         make_parents: bool,
     ) -> Result<()> {
-        let helper = format!("{}-restore", Self::container_name(owner));
+        let helper = format!("{}-restore", Self::container_name(scope));
         // 上一次中途崩了会留下它。先删再建，比「已存在就复用」安全：
         // 复用等于信任一个来历不明的容器的挂载配置
         self.force_remove(&helper).await;
@@ -652,7 +681,7 @@ impl DockerRunner {
             host_config: Some(HostConfig {
                 mounts: Some(vec![Mount {
                     typ: Some(MountType::VOLUME),
-                    source: Some(Self::volume_name(owner)),
+                    source: Some(Self::volume_name(scope)),
                     target: Some(WORKSPACE_PATH.to_owned()),
                     read_only: Some(false),
                     ..Default::default()
@@ -730,8 +759,8 @@ impl DockerRunner {
     /// **永不失败**：任何一步出问题都回落到基镜像并 warn。一个装不上依赖的
     /// 沙箱仍然是一个能聊天、能读写文件的沙箱，而「因为 setup 挂了所以整个
     /// 会话起不来」是明显更坏的取舍。
-    async fn prepare_image(&self, owner: &str) -> String {
-        let setup = self.read_setup_script(owner).await;
+    async fn prepare_image(&self, scope: &str) -> String {
+        let setup = self.read_setup_script(scope).await;
         let hash = crate::sandbox_env::spec_hash(setup.as_deref(), &self.image);
         let tag = crate::sandbox_env::cache_tag(&hash);
 
@@ -739,7 +768,7 @@ impl DockerRunner {
         // 改了脚本就是另一个 hash、另一个 tag，查不到，于是重跑。
         // 没有一段「要不要失效」的判断，也就没有它写错的可能
         if self.image_exists(&tag).await {
-            tracing::debug!(owner = %owner, %tag, "命中环境缓存");
+            tracing::debug!(scope = %scope, %tag, "命中环境缓存");
             return tag;
         }
 
@@ -749,18 +778,18 @@ impl DockerRunner {
         };
 
         tracing::info!(
-            owner = %owner, %tag, bytes = script.len(),
+            scope = %scope, %tag, bytes = script.len(),
             "第一次见到这份 setup.sh，跑一遍并缓存（最多 {} 分钟）",
             crate::sandbox_env::SETUP_TIMEOUT.as_secs() / 60
         );
-        match self.run_setup_and_commit(owner, &tag).await {
+        match self.run_setup_and_commit(scope, &tag).await {
             Ok(()) => {
                 self.gc_cache().await;
                 tag
             }
             Err(e) => {
                 tracing::warn!(
-                    owner = %owner, error = %e,
+                    scope = %scope, error = %e,
                     "setup.sh 没跑成，这次用基镜像。已经写下的文件都还在，\
                      修好脚本之后下一轮会自动重试"
                 );
@@ -773,8 +802,8 @@ impl DockerRunner {
     ///
     /// 借一个 create 但不 start 的容器来读 —— 与写文件走同一条路，
     /// 理由也一样：这一刻正式容器还没起来，而卷是先于容器存在的。
-    async fn read_setup_script(&self, owner: &str) -> Option<Vec<u8>> {
-        let probe = format!("{}-setup-probe", Self::container_name(owner));
+    async fn read_setup_script(&self, scope: &str) -> Option<Vec<u8>> {
+        let probe = format!("{}-setup-probe", Self::container_name(scope));
         self.force_remove(&probe).await;
 
         let spec = ContainerCreateBody {
@@ -783,7 +812,7 @@ impl DockerRunner {
             host_config: Some(HostConfig {
                 mounts: Some(vec![Mount {
                     typ: Some(MountType::VOLUME),
-                    source: Some(Self::volume_name(owner)),
+                    source: Some(Self::volume_name(scope)),
                     target: Some(WORKSPACE_PATH.to_owned()),
                     read_only: Some(true),
                     ..Default::default()
@@ -815,7 +844,7 @@ impl DockerRunner {
 
         let tar = got.ok()?;
         if tar.len() > crate::sandbox_env::MAX_SETUP_BYTES * 2 {
-            tracing::warn!(owner = %owner, "setup.sh 太大，忽略");
+            tracing::warn!(scope = %scope, "setup.sh 太大，忽略");
             return None;
         }
         let mut ar = tar::Archive::new(std::io::Cursor::new(&tar[..]));
@@ -840,8 +869,8 @@ impl DockerRunner {
     ///   出网 allowlist 是给 agent 阶段的（Codex 的两阶段模型同此）。
     /// - **不发沙箱令牌**：这个容器不跑 agent，不需要任何 cortexd 凭据。
     ///   给了就是白送一把。
-    async fn run_setup_and_commit(&self, owner: &str, tag: &str) -> Result<()> {
-        let name = format!("{}-setup", Self::container_name(owner));
+    async fn run_setup_and_commit(&self, scope: &str, tag: &str) -> Result<()> {
+        let name = format!("{}-setup", Self::container_name(scope));
         self.force_remove(&name).await;
 
         let spec = ContainerCreateBody {
@@ -884,7 +913,7 @@ impl DockerRunner {
             host_config: Some(HostConfig {
                 mounts: Some(vec![Mount {
                     typ: Some(MountType::VOLUME),
-                    source: Some(Self::volume_name(owner)),
+                    source: Some(Self::volume_name(scope)),
                     target: Some(WORKSPACE_PATH.to_owned()),
                     read_only: Some(false),
                     ..Default::default()
@@ -1153,13 +1182,13 @@ impl DockerRunner {
     /// 缓存镜像换掉的是「里面装了什么」，不是「它被允许做什么」。
     fn spec_with_image(
         &self,
-        owner: &str,
+        scope: &str,
         token: &str,
         spec_hash: &str,
         image: &str,
     ) -> ContainerCreateBody {
         let mut labels = HashMap::new();
-        labels.insert("cortex.sandbox.owner".to_owned(), owner.to_owned());
+        labels.insert("cortex.sandbox.scope".to_owned(), scope.to_owned());
         labels.insert("cortex.sandbox.spec".to_owned(), spec_hash.to_owned());
 
         let mut tmpfs = HashMap::new();
@@ -1173,7 +1202,7 @@ impl DockerRunner {
 
         let env = vec![
             format!("CORTEX_REMOTE={remote}"),
-            format!("CORTEX_TOKEN={token}"),
+            format!("{TOKEN_ENV}={token}"),
             // 出网一律经双宿代理。**env var 只是引导，网络拓扑才是边界** ——
             // 就算容器里的进程把这几个变量删了，internal 网段上也没有第二条
             // 路可走。两者缺一不可：只有 env 的话一个 `curl --noproxy` 就绕开，
@@ -1225,7 +1254,7 @@ impl DockerRunner {
                 // 那句话的兑现处** —— 这个 Vec 是常量结构，入参进不来
                 mounts: Some(vec![Mount {
                     typ: Some(MountType::VOLUME),
-                    source: Some(Self::volume_name(owner)),
+                    source: Some(Self::volume_name(scope)),
                     target: Some("/workspace".to_owned()),
                     read_only: Some(false),
                     ..Default::default()
@@ -1269,9 +1298,10 @@ impl DockerRunner {
 
 /// 容器 / 卷名只允许一小撮字符。
 ///
-/// owner 来自 `cortex_auth`（ULID 形状），但**不假设**它一定是：一个能把
-/// 别的字符带进容器名的调用方，就能造出撞名或带 docker 特殊语义的名字。
-/// 不合法的一律换成 `-`。
+/// scope 是 `SandboxScope::key()` 拼出来的（用户 id + 可选的项目 id，
+/// 两截都是 ULID 形状），但**不假设**它一定是：项目 id 由客户端生成，
+/// 而一个能把别的字符带进容器名的调用方，就能造出撞名或带 docker 特殊
+/// 语义的名字。不合法的一律换成 `-`。
 fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -1286,13 +1316,35 @@ fn sanitize(s: &str) -> String {
 
 #[async_trait::async_trait]
 impl SandboxRunner for DockerRunner {
-    async fn ensure(&self, owner: &str, token: &str, spec_hash: &str) -> Result<SandboxHandle> {
-        let name = Self::container_name(owner);
+    async fn ensure(&self, scope: &str, token: &str, spec_hash: &str) -> Result<SandboxHandle> {
+        let name = Self::container_name(scope);
 
-        // 已经在跑就直接回。**幂等**：cortexd 每一轮对话都会调这个，
-        // 而每轮重建容器等于每轮丢掉一次内存里的会话状态
-        if let Some(h) = self.status(owner).await? {
-            return Ok(h);
+        // 已经在跑、**而且认的就是这把令牌**，就直接回。
+        //
+        // **幂等**：cortexd 每一轮对话都会调这个，每轮重建等于每轮丢掉一次
+        // 容器里的进程状态。
+        //
+        // 但「在跑」不够。容器的入站认证认的是它**启动时** env 里那把令牌，
+        // 而令牌表在内存里 —— cortexd 一重启就空了，下一轮会签一把新的。
+        // 那时容器照常 Up、反代照常连上、然后每一条请求都 401，
+        // 而错误信息是「缺少或无效的凭据」，读起来像用户没登录。
+        //
+        // 真机上撞到过：`just dev-restart` 之后第一句话就是 401，
+        // 而它会一直 401 到空闲回收把容器停掉为止 —— 现在那是 **12 小时**。
+        if let Some(h) = self.status(scope).await? {
+            if self.token_matches(&name, token).await {
+                return Ok(h);
+            }
+            // 不匹配就重建。**不试图把旧令牌捡回来用**：cortexd 重启之后
+            // 那些容器本来就该被重新接管，让一个带着旧凭据的容器继续跑
+            // 才是问题（见 `sandbox_token` 的模块文档）。
+            //
+            // 重建是安全的：工作区在卷上，rootfs 是 `--read-only`，
+            // 需要持久的东西**全都**在卷里。
+            tracing::info!(
+                sandbox = %name,
+                "容器还在但令牌对不上（多半是 cortexd 重启过），重建它"
+            );
         }
 
         // 停着的同名容器要先删掉：它的 env 里带着**上一把**沙箱令牌，
@@ -1313,7 +1365,7 @@ impl SandboxRunner for DockerRunner {
         // 返回的是这次要用的镜像 —— 有缓存就是缓存镜像，没有 setup.sh
         // 或者 setup 失败就是基镜像。**失败回落而不是让会话起不来**：
         // 一个装不上依赖的沙箱仍然是一个能聊天、能读写文件的沙箱。
-        let image = self.prepare_image(owner).await;
+        let image = self.prepare_image(scope).await;
 
         self.docker
             .create_container(
@@ -1321,7 +1373,7 @@ impl SandboxRunner for DockerRunner {
                     name: Some(name.clone()),
                     ..Default::default()
                 }),
-                self.spec_with_image(owner, token, spec_hash, &image),
+                self.spec_with_image(scope, token, spec_hash, &image),
             )
             .await
             .map_err(|e| CortexError::Store(format!("建沙箱容器失败：{e}")))?;
@@ -1332,7 +1384,7 @@ impl SandboxRunner for DockerRunner {
             .map_err(|e| CortexError::Store(format!("起沙箱容器失败：{e}")))?;
 
         let handle = self
-            .status(owner)
+            .status(scope)
             .await?
             .ok_or_else(|| CortexError::Store("沙箱起来了但查不到地址".into()))?;
 
@@ -1350,8 +1402,8 @@ impl SandboxRunner for DockerRunner {
         Ok(handle)
     }
 
-    async fn stop(&self, owner: &str) -> Result<()> {
-        let name = Self::container_name(owner);
+    async fn stop(&self, scope: &str) -> Result<()> {
+        let name = Self::container_name(scope);
         // **只 stop 不 rm 卷**：卷是用户的工作区，删它是另一个动作，
         // 且要走确认。docker stop 默认给 10 秒优雅退出
         self.docker
@@ -1361,8 +1413,8 @@ impl SandboxRunner for DockerRunner {
         Ok(())
     }
 
-    async fn status(&self, owner: &str) -> Result<Option<SandboxHandle>> {
-        let name = Self::container_name(owner);
+    async fn status(&self, scope: &str) -> Result<Option<SandboxHandle>> {
+        let name = Self::container_name(scope);
         let info = match self
             .docker
             .inspect_container(&name, None::<qp::InspectContainerOptions>)
@@ -1398,31 +1450,31 @@ impl SandboxRunner for DockerRunner {
         Ok(Some(SandboxHandle { name, addr }))
     }
 
-    async fn export_workspace(&self, owner: &str) -> Result<bytes::Bytes> {
+    async fn export_workspace(&self, scope: &str) -> Result<bytes::Bytes> {
         let tar = self
-            .archive(&Self::container_name(owner), WORKSPACE_PATH)
+            .archive(&Self::container_name(scope), WORKSPACE_PATH)
             .await?;
         Ok(bytes::Bytes::from(tar))
     }
 
-    async fn import_workspace(&self, owner: &str, tar: bytes::Bytes) -> Result<()> {
+    async fn import_workspace(&self, scope: &str, tar: bytes::Bytes) -> Result<()> {
         // **解到 `/` 而不是 `/workspace`。**
         //
         // archive API 导出的 tar，成员路径带 `workspace/` 这一级。解到
         // `/workspace` 会得到 `/workspace/workspace/...` —— 而那**不报错**，
         // 只是文件出现在错的地方，用户看到的是「恢复成功了但什么都没回来」。
-        self.put_archive(owner, "/", tar, false).await
+        self.put_archive(scope, "/", tar, false).await
     }
 
-    async fn list_dir(&self, owner: &str, path: &str) -> Result<Vec<DirEntry>> {
+    async fn list_dir(&self, scope: &str, path: &str) -> Result<Vec<DirEntry>> {
         let path = validate_ws_path(path)?;
-        let tar = self.archive(&Self::container_name(owner), &path).await?;
+        let tar = self.archive(&Self::container_name(scope), &path).await?;
         one_level_from_tar(&tar)
     }
 
-    async fn read_file(&self, owner: &str, path: &str) -> Result<bytes::Bytes> {
+    async fn read_file(&self, scope: &str, path: &str) -> Result<bytes::Bytes> {
         let path = validate_ws_path(path)?;
-        let tar = self.archive(&Self::container_name(owner), &path).await?;
+        let tar = self.archive(&Self::container_name(scope), &path).await?;
 
         let mut ar = tar::Archive::new(std::io::Cursor::new(&tar[..]));
         let mut entries = ar
@@ -1466,9 +1518,9 @@ impl SandboxRunner for DockerRunner {
         Some(stream.boxed())
     }
 
-    async fn workspace_bytes(&self, owner: &str) -> Result<Option<u64>> {
-        let name = Self::container_name(owner);
-        if self.status(owner).await?.is_none() {
+    async fn workspace_bytes(&self, scope: &str) -> Result<Option<u64>> {
+        let name = Self::container_name(scope);
+        if self.status(scope).await?.is_none() {
             return Ok(None);
         }
 
@@ -1492,7 +1544,7 @@ impl SandboxRunner for DockerRunner {
         }
     }
 
-    async fn write_file(&self, owner: &str, path: &str, bytes: bytes::Bytes) -> Result<()> {
+    async fn write_file(&self, scope: &str, path: &str, bytes: bytes::Bytes) -> Result<()> {
         let path = validate_ws_path(path)?;
         let (dir, name) = path
             .rsplit_once('/')
@@ -1517,7 +1569,7 @@ impl SandboxRunner for DockerRunner {
             .into_inner()
             .map_err(|e| CortexError::Store(format!("造 tar 失败：{e}")))?;
 
-        self.put_archive(owner, dir, bytes::Bytes::from(tar), true)
+        self.put_archive(scope, dir, bytes::Bytes::from(tar), true)
             .await
     }
 }
@@ -1655,6 +1707,26 @@ mod tests {
     ///
     /// 这条同时守住空串：compose 里 `${CORTEX_SANDBOX_IMAGE:-}` 展开出来是
     /// 空串而不是「未设置」，直接用会让 create 报一句语焉不详的 400。
+    /// 写令牌的那个变量名，和读回来比对的那个，**必须是同一个**。
+    ///
+    /// 写歪了不报错：`token_matches` 恒为 false，于是**每一轮对话都重建一次
+    /// 容器**（每轮丢一次容器内状态、每轮多花 913 ms），而症状只是「有点慢」。
+    ///
+    /// 反过来漏掉这条比对的症状更难查：cortexd 一重启，还在跑的那些容器
+    /// 认的仍是旧令牌，于是每一条请求 401 —— 而错误文案是
+    /// 「缺少或无效的凭据」，读起来像用户没登录。真机上撞到过，
+    /// 而且空闲回收从 30 分钟改到 12 小时之后，它会一直 401 半天。
+    #[test]
+    fn 令牌写进容器与读回比对用的是同一个变量名() {
+        let spec = runner().spec_with_image("u1", "tok-abc", "v1", DEFAULT_IMAGE);
+        let env = spec.env.expect("规格必须带 env");
+        assert!(
+            env.iter().any(|e| e == &format!("{TOKEN_ENV}=tok-abc")),
+            "容器 env 里必须有 {TOKEN_ENV}=<令牌>，否则 token_matches 永远对不上：\
+             症状是每一轮对话都重建一次容器。实际 env：{env:?}"
+        );
+    }
+
     #[test]
     fn the_image_comes_from_config_never_from_a_request() {
         for (env, want) in [
@@ -1685,7 +1757,7 @@ mod tests {
         );
     }
 
-    /// **规格不可协商。** 入参只有 owner / token / hash，塞不进第二个挂载。
+    /// **规格不可协商。** 入参只有 scope / token / hash，塞不进第二个挂载。
     ///
     /// 这条守的不是「cortexd 会不会写错」，是「cortexd 被攻破之后能做什么」——
     /// 它是直接处理模型输出的那个进程。如果哪天有人给 `ensure` 加一个
@@ -1865,7 +1937,7 @@ mod tests {
         assert_eq!(
             sanitize("../../etc"),
             "------etc",
-            "owner 里的路径字符必须被拍平 —— 带进容器名就能造出撞名或\
+            "scope 里的路径字符必须被拍平 —— 带进容器名就能造出撞名或\
              带 docker 特殊语义的名字"
         );
         assert!(DockerRunner::container_name("u1").starts_with(NAME_PREFIX));

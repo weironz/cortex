@@ -939,12 +939,22 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
-  Future<Uint8List> sandboxWorkspaceTar() =>
-      _sandboxBytes('/sandbox/workspace.tar');
+  Future<Uint8List> sandboxWorkspaceTar({String? sessionId}) =>
+      _sandboxBytes('/sandbox/workspace.tar', _scoped(null, sessionId));
 
   @override
-  Future<Uint8List> sandboxReadFile(String path) =>
-      _sandboxBytes('/sandbox/files/raw', {'path': path});
+  Future<Uint8List> sandboxReadFile(String path, {String? sessionId}) =>
+      _sandboxBytes('/sandbox/files/raw', _scoped(path, sessionId));
+
+  /// 文件端点的查询串。**`session` 决定读写的是哪个项目的工作区。**
+  ///
+  /// 服务端拿它查这个会话属于哪个项目，再据此选容器与卷（见
+  /// `SandboxScope::key`）。不传的话服务端按「未分组」算 —— 那是一个
+  /// 合法但通常不是用户想看的工作区，症状是「文件树里空空如也」。
+  Map<String, String> _scoped(String? path, String? sessionId) => {
+    'path': ?path,
+    'session': ?sessionId,
+  };
 
   /// 两条「回字节」的沙箱路由共用一份错误处理。
   ///
@@ -970,8 +980,8 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
-  Future<List<FileNode>> sandboxListFiles(String path) async {
-    final json = await _getJson('/sandbox/files', {'path': path});
+  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async {
+    final json = await _getJson('/sandbox/files', _scoped(path, sessionId));
     // 子节点的绝对路径拿**服务端回的** path 去拼，不是请求里那个：服务端会
     // 规范化（消掉多余的斜杠、结尾的 `/`），用请求里那份拼出来的路径，
     // 下一次展开送回去的就是一条服务端没见过的字符串
@@ -1006,6 +1016,7 @@ class HttpCortexApi implements CortexApi {
     required String path,
     required Uint8List bytes,
     UploadProgress? onProgress,
+    String? sessionId,
   }) async {
     // 复用 `uploadBlob` 那套分块请求：一个 `http.Request` 只有 0% 与 done
     // 两个状态，而工作区里塞进来的常常是几十 MB 的数据集。
@@ -1014,7 +1025,7 @@ class HttpCortexApi implements CortexApi {
       'PUT',
       // 路径在 query，字节在 body。反过来（多段表单）要额外一层编码，
       // 而这条路由两边都只认原始字节
-      _uri('/sandbox/files', {'path': path}),
+      _uri('/sandbox/files', _scoped(path, sessionId)),
       bytes,
       onProgress,
     )..headers.addAll(

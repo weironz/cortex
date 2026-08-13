@@ -111,12 +111,14 @@ async fn sweep_quota(st: &AppState) {
     let Some(layer) = st.sandbox_layer() else {
         return;
     };
-    for owner in st.sandbox_tokens().owners() {
-        match layer.runner.workspace_bytes(&owner).await {
+    // 遍历作用域而不是用户：一个用户的几个项目各有一个卷，配额也各算各的
+    for scope in st.sandbox_tokens().scopes() {
+        let key = scope.key();
+        match layer.runner.workspace_bytes(&key).await {
             Ok(Some(bytes)) => {
                 if bytes > SOFT_LIMIT_BYTES {
                     tracing::warn!(
-                        owner = %owner,
+                        sandbox = %key,
                         mib = bytes / 1024 / 1024,
                         soft_limit_mib = SOFT_LIMIT_BYTES / 1024 / 1024,
                         "沙箱工作区超过软限。**没有自动删任何东西**（那是用户唯一一份副本），\
@@ -124,11 +126,11 @@ async fn sweep_quota(st: &AppState) {
                          再涨下去备份会静默停掉。"
                     );
                 } else {
-                    tracing::debug!(owner = %owner, mib = bytes / 1024 / 1024, "工作区占用");
+                    tracing::debug!(sandbox = %key, mib = bytes / 1024 / 1024, "工作区占用");
                 }
             }
             Ok(None) => {} // 容器不在，没什么可数的
-            Err(e) => tracing::debug!(owner = %owner, error = %e, "数工作区占用失败"),
+            Err(e) => tracing::debug!(sandbox = %key, error = %e, "数工作区占用失败"),
         }
     }
 }
