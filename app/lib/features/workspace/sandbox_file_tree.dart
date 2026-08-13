@@ -414,7 +414,10 @@ class _RootFailure extends StatelessWidget {
             child: TextButton.icon(
               onPressed: onRetry,
               icon: const Icon(Icons.refresh_rounded, size: 15),
-              label: const Text('重试'),
+              // 容器不在时**先说清按之前要干什么**。这个按钮只是重列目录，
+              // 它自己拉不起容器 —— 叫「重试」会让人一直按、一直失败，
+              // 而真正要做的那件事（开开关、发消息）在正文里被当成了背景说明。
+              label: Text(failure.containerGone ? '拉起来了，刷新' : '重试'),
             ),
           ),
         ],

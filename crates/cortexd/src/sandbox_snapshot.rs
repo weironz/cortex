@@ -174,7 +174,9 @@ pub async fn restore(st: &AppState, owner: &str, snapshot_id: &str) -> Result<()
     };
     if layer.runner.status(owner).await?.is_none() {
         return Err(CortexError::Unavailable(
-            "沙箱容器不在（可能已被回收）。先发一条消息把它拉起来，再恢复。".into(),
+            "沙箱容器不在（可能已被回收）。打开输入框底部的「云沙箱」开关、\
+             随便发一条消息把容器拉起来，然后再恢复 —— 开关关着发是不会起容器的。"
+                .into(),
         ));
     }
 
