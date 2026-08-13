@@ -241,6 +241,13 @@ jobs:
             dockerfile: scripts/docker/Dockerfile.cortexd
           - image: cortex-web
             dockerfile: scripts/docker/Dockerfile.web
+          # 云沙箱那两个。挂在 compose 的 `sandbox` profile 上、默认不启用，
+          # 但**镜像必须照常发** —— 节点上要开沙箱时得拉得到对应版本，
+          # 而「用户想开的时候现发一版」不是一条能用的路。
+          - image: cortex-sandbox
+            dockerfile: scripts/docker/Dockerfile.sandbox
+          - image: cortex-egress-proxy
+            dockerfile: scripts/docker/Dockerfile.egress
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
@@ -301,6 +308,25 @@ jobs:
             docker run --rm "$img" --generate-token | grep -q CORTEX_AUTH_TOKEN_SHA256
             # prod 的 migration 靠镜像里这份 sqlx
             docker run --rm --entrypoint sqlx "$img" --version
+          elif [ "${{ matrix.image }}" = "cortex-sandbox" ]; then
+            # 容器里跑的是 cortex-local。ENTRYPOINT 是 sandbox-entrypoint，
+            # 它最后 `exec cortex-local "$@"` —— 所以 --version 直接透传进去。
+            #
+            # 这一条真机上咬过：入口脚本没被覆盖时 `cortex-local /bin/sh -ec ...`
+            # 退出码 2，而那次失败被回落逻辑吞成一句 WARN
+            docker run --rm "$img" --version
+            # agent 要用的三样，缺一个都是「沙箱起来了但干不了活」
+            docker run --rm --entrypoint /bin/sh "$img" -c 'git --version && python3 -V && node -v'
+          elif [ "${{ matrix.image }}" = "cortex-egress-proxy" ]; then
+            # scratch 镜像：没有 shell，`docker run ... sh -c` 这类招数全部不可用。
+            # 唯一能做的就是真的把它跑起来，看它有没有开始监听。
+            cid=$(docker run -d "$img")
+            for _ in $(seq 1 20); do
+              docker logs "$cid" 2>&1 | grep -q '反向中继就绪' && break
+              sleep 1
+            done
+            docker logs "$cid" 2>&1 | grep -q '出网代理就绪'               || { echo "::error::egress 没有在监听"; docker logs "$cid"; exit 1; }
+            docker rm -f "$cid" >/dev/null
           else
             cid=$(docker run -d -p 18080:80 "$img")
             for _ in $(seq 1 30); do

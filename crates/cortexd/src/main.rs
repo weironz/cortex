@@ -136,8 +136,27 @@ async fn main() -> anyhow::Result<()> {
         // 端口不生效，实测见 docs/sandbox.md 第八节
         let relay = std::env::var("CORTEX_SANDBOX_RELAY")
             .unwrap_or_else(|_| "http://127.0.0.1:3129".into());
-        match sandbox_runner::DockerRunner::connect(&remote, same_net, &relay) {
-            Ok(runner) => match sandbox_proxy::client() {
+        // 三步都得过，任一步失败就是「沙箱关闭」而不是启动失败。
+        //
+        // 中间那步（`preflight`）是后补的：`connect` 只造客户端、**不发任何
+        // 请求** —— socket 挂的是 /dev/null、没权限、daemon 没起，它一样返回
+        // Ok。没有它的话「云沙箱已启用」这行会在一个根本起不了沙箱的部署上
+        // 照常打出来，而用户点下去才发现，错误信息还在日志深处。
+        let layer = sandbox_runner::DockerRunner::connect(&remote, same_net, &relay)
+            .inspect_err(|e| tracing::warn!(error = %e, "连不上 docker，云沙箱关闭"))
+            .ok();
+        let layer = match layer {
+            Some(runner) => match runner.preflight().await {
+                Ok(()) => Some(runner),
+                Err(e) => {
+                    tracing::warn!(error = %e, "云沙箱关闭");
+                    None
+                }
+            },
+            None => None,
+        };
+        if let Some(runner) = layer {
+            match sandbox_proxy::client() {
                 Ok(http) => {
                     tracing::info!(
                         callback = %remote, same_network = same_net,
@@ -150,8 +169,7 @@ async fn main() -> anyhow::Result<()> {
                     });
                 }
                 Err(e) => tracing::warn!(error = %e, "沙箱反代客户端建不起来，云沙箱关闭"),
-            },
-            Err(e) => tracing::warn!(error = %e, "连不上 docker，云沙箱关闭"),
+            }
         }
     } else {
         tracing::info!("云沙箱：未启用（设 CORTEX_SANDBOX_ENABLED=1 打开）");

@@ -85,8 +85,13 @@ rollback() {
   if [ "$now" != "$prev" ]; then
     echo "==> 失败（rc=${rc}），还原 CORTEX_VERSION=$prev" >&2
     sed -i -E "s|^CORTEX_VERSION=.*|CORTEX_VERSION=$prev|" .env
-    # 尽力而为：把上一版拉回来。它的镜像本来就在本地，很快，且不需要 registry
-    docker compose up -d --no-deps cortexd web >&2 || true
+    # 尽力而为：把上一版拉回来。它的镜像本来就在本地，很快，且不需要 registry。
+    #
+    # `${services:-...}` 不能省：trap 可能在 services 赋值**之前**就触发
+    # （比如 compose 指纹不匹配那一支），而 `set -u` 下引用未赋值的变量
+    # 会让回滚本身炸掉 —— 那正是最需要它工作的时刻
+    # shellcheck disable=SC2086  # 故意分词
+    docker compose up -d --no-deps ${services:-cortexd web} >&2 || true
   fi
   return $rc
 }
@@ -95,7 +100,36 @@ trap rollback EXIT
 sed -i -E "s|^CORTEX_VERSION=.*|CORTEX_VERSION=$tag|" .env
 
 echo "==> $prev -> $tag"
-docker compose pull cortexd web
+
+# ── 这次要动哪些服务 ──────────────────────────────────────
+#
+# 沙箱那套挂在 profile `sandbox` 上，默认不启用。**profile 没激活时
+# `docker compose pull egress` 会报「no such service」**，所以要先看
+# .env 里开没开，不能无脑列上去。
+#
+# 沙箱镜像（cortex-sandbox）不在这里 —— 它不是一个服务，是 cortexd
+# 经 docker API 起容器时用的模板，compose 没有对应的概念。单独 pull，见下。
+services="cortexd web"
+if grep -qE '^[[:space:]]*CORTEX_SANDBOX_ENABLED[[:space:]]*=[[:space:]]*1[[:space:]]*$' .env; then
+    services="$services egress"
+    echo "==> 云沙箱已开：一并更新 egress 与沙箱镜像"
+fi
+
+# shellcheck disable=SC2086  # 故意分词：$services 是一份服务清单
+docker compose pull $services
+
+# ── 沙箱镜像 ──────────────────────────────────────────────
+#
+# cortexd **不会自己 pull**（它没有 registry 凭据，也不该有）。
+# 拉不到的表现是启动时 preflight 直说「镜像不在本地」并关掉沙箱 ——
+# 不是等用户点下去才发现。所以这里拉失败只警告，不中止整次部署：
+# 一个「能对话、沙箱暂时关着」的部署，比一个回滚掉的部署好。
+if [ "$services" != "${services%egress}" ]; then
+    reg="$(grep -E '^CORTEX_REGISTRY=' .env | cut -d= -f2-)"
+    reg="${reg:-registry.cn-shenzhen.aliyuncs.com/willspace}"
+    docker pull "$reg/cortex-sandbox:$tag" \
+        || echo "==> ⚠ 沙箱镜像没拉下来，云沙箱会在启动时自己关掉" >&2
+fi
 
 # ── migration ────────────────────────────────────────────
 # cortexd **不在启动时自动迁移**（在运行中的集群上自动执行 schema 变更
@@ -109,12 +143,15 @@ echo "==> 应用 migration（只前滚，回滚不撤销它）"
 docker compose run --rm --entrypoint sqlx cortexd \
     migrate run --source /opt/cortex/migrations
 
-docker compose up -d --no-deps cortexd web
+# shellcheck disable=SC2086  # 同上，故意分词
+docker compose up -d --no-deps $services
 
-# 注意：上面 `up -d --no-deps cortexd web` 点名了服务，所以一次部署
-# 碰不到 postgres / rustfs —— 这也意味着**往 compose 里新加的服务
-# 会安静地永远不被启动**，而输出里没有任何一句话提到它。
-# 加服务时记得同步改这两行。
+# 注意：上面点名了服务，所以一次部署碰不到 postgres / rustfs ——
+# 这也意味着**往 compose 里新加的服务会安静地永远不被启动**，
+# 而输出里没有任何一句话提到它。加服务时记得同步改 $services。
+#
+# 2026-08-13 这条警告第一次兑现：加 egress 时差点漏掉，
+# 症状会是「沙箱起来了但一出网就超时」，而部署输出全绿。
 
 # ── 回收磁盘 ──────────────────────────────────────────────
 # 每次部署都拉新镜像、把被替换的那个变成孤儿，节点的盘只涨不落。

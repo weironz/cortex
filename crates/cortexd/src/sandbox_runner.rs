@@ -29,8 +29,19 @@ use bollard::models::{ContainerCreateBody, HostConfig, Mount, MountType};
 use bollard::query_parameters as qp;
 use cortex_core::{CortexError, Result};
 
-/// 沙箱镜像。**不可由调用方指定。**
-const IMAGE: &str = "cortex/sandbox:dev";
+/// 沙箱镜像的默认值 —— 开发机上 `just dev` 本地构建出来的那个 tag。
+///
+/// **仍然不可由调用方指定。** 部署时可以用 `CORTEX_SANDBOX_IMAGE` 换掉
+/// （生产节点的镜像来自 ACR，形如
+/// `registry.cn-shenzhen.aliyuncs.com/willspace/cortex-sandbox:v0.1.8`），
+/// 但那是**进程启动时读一次**的部署配置，与「某个 HTTP 请求能不能挑镜像」
+/// 是两回事 —— 后者永远不行，有测试守着。
+const DEFAULT_IMAGE: &str = "cortex/sandbox:dev";
+
+/// 换镜像的环境变量。cortexd **不会自己去 pull** —— 镜像必须在
+/// `docker images` 里已经存在（节点上由 `cortex-deploy` 脚本拉）。
+/// 拉不到的表现是起沙箱时报 `No such image`，不是静默回落。
+const IMAGE_ENV: &str = "CORTEX_SANDBOX_IMAGE";
 
 /// 容器内 agent 的端口。与 `Dockerfile.sandbox` 的 `EXPOSE` 一致。
 const AGENT_PORT: u16 = 8090;
@@ -350,6 +361,21 @@ pub struct DockerRunner {
     /// 反向中继的地址（`cortex-egress` publish 到宿主的那个端口）。
     /// `same_network` 为真时用不上。
     relay: String,
+    /// 沙箱镜像。启动时从 [`IMAGE_ENV`] 读一次，之后不变 ——
+    /// **请求改不了它**（`spec_*` 全部只读这个字段）。
+    image: String,
+}
+
+/// 把 [`IMAGE_ENV`] 的原始值解析成镜像名。
+///
+/// **空串当没设。** `docker run -e CORTEX_SANDBOX_IMAGE=` 与 compose 里
+/// `${CORTEX_SANDBOX_IMAGE:-}` 展开出来的都是空串而不是「未设置」，
+/// 直接拿去用会让 create 报一句语焉不详的 400。
+/// 「空串顶掉默认值」在这个仓库里已经是第三次了，所以单独拎出来给测试打。
+fn resolve_image(raw: Option<&str>) -> String {
+    raw.filter(|v| !v.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| DEFAULT_IMAGE.to_owned())
 }
 
 impl DockerRunner {
@@ -366,12 +392,45 @@ impl DockerRunner {
     ) -> Result<Self> {
         let docker = Docker::connect_with_local_defaults()
             .map_err(|e| CortexError::Config(format!("连不上 docker daemon：{e}")))?;
+        let image = resolve_image(std::env::var(IMAGE_ENV).ok().as_deref());
+        tracing::info!(%image, "沙箱镜像");
         Ok(Self {
             docker,
             remote: remote.into(),
             same_network,
             relay: relay.into(),
+            image,
         })
+    }
+
+    /// 真的握一次手，并确认沙箱镜像在本地。
+    ///
+    /// [`Self::connect`] 只是造客户端，**不发任何请求** —— socket 是 `/dev/null`、
+    /// 没权限、daemon 没起，它一样返回 `Ok`。不 ping 的话这些全部要等到用户
+    /// 第一次点「云沙箱」才暴露，而那时的错误信息在日志深处。
+    ///
+    /// 镜像也一并查：cortexd **不会自己 pull**（节点上的镜像由部署脚本拉），
+    /// 少了它的表现是每次起沙箱报 `No such image`，同样只有用户才碰得到。
+    ///
+    /// 两者都只**报告**不阻断：返回 `Err` 的调用方决定要不要关掉沙箱。
+    ///
+    /// # Errors
+    /// daemon 握手失败，或镜像不在本地。
+    pub async fn preflight(&self) -> Result<()> {
+        self.docker.version().await.map_err(|e| {
+            CortexError::Config(format!(
+                "docker daemon 握不上手：{e}。\
+                 cortexd 在容器里时要挂 /var/run/docker.sock 并给它那个 socket 的组"
+            ))
+        })?;
+        if !self.image_exists(&self.image).await {
+            return Err(CortexError::Config(format!(
+                "沙箱镜像 {} 不在本地，而 cortexd 不会自己去 pull。\
+                 先 docker pull，或用 {IMAGE_ENV} 指到已经拉下来的那个 tag",
+                self.image
+            )));
+        }
+        Ok(())
     }
 
     /// 不该经出网代理的目的地。
@@ -488,7 +547,7 @@ impl DockerRunner {
         self.force_remove(&helper).await;
 
         let spec = ContainerCreateBody {
-            image: Some(IMAGE.to_owned()),
+            image: Some(self.image.clone()),
             // 不会被执行（从不 start）。写一条明确的东西，是为了万一在
             // `docker ps -a` 里看见它时一眼知道它是干什么的
             cmd: Some(vec!["/bin/true".to_owned()]),
@@ -575,7 +634,7 @@ impl DockerRunner {
     /// 会话起不来」是明显更坏的取舍。
     async fn prepare_image(&self, owner: &str) -> String {
         let setup = self.read_setup_script(owner).await;
-        let hash = crate::sandbox_env::spec_hash(setup.as_deref(), IMAGE);
+        let hash = crate::sandbox_env::spec_hash(setup.as_deref(), &self.image);
         let tag = crate::sandbox_env::cache_tag(&hash);
 
         // 命中就直接用。**这里就是全部的「缓存失效」逻辑** ——
@@ -588,7 +647,7 @@ impl DockerRunner {
 
         let Some(script) = setup else {
             // 没有 setup.sh —— 绝大多数会话就是这样，不该有任何噪声
-            return IMAGE.to_owned();
+            return self.image.clone();
         };
 
         tracing::info!(
@@ -607,7 +666,7 @@ impl DockerRunner {
                     "setup.sh 没跑成，这次用基镜像。已经写下的文件都还在，\
                      修好脚本之后下一轮会自动重试"
                 );
-                IMAGE.to_owned()
+                self.image.clone()
             }
         }
     }
@@ -621,7 +680,7 @@ impl DockerRunner {
         self.force_remove(&probe).await;
 
         let spec = ContainerCreateBody {
-            image: Some(IMAGE.to_owned()),
+            image: Some(self.image.clone()),
             cmd: Some(vec!["/bin/true".to_owned()]),
             host_config: Some(HostConfig {
                 mounts: Some(vec![Mount {
@@ -688,7 +747,7 @@ impl DockerRunner {
         self.force_remove(&name).await;
 
         let spec = ContainerCreateBody {
-            image: Some(IMAGE.to_owned()),
+            image: Some(self.image.clone()),
             // **必须覆盖 ENTRYPOINT。**
             //
             // 镜像的 ENTRYPOINT 是 `sandbox-entrypoint`，它最后
@@ -839,7 +898,7 @@ impl DockerRunner {
     /// 那个差别没有任何一处会报错。
     async fn base_runtime_config(&self) -> bollard::models::ContainerConfig {
         let mut cfg = bollard::models::ContainerConfig::default();
-        if let Ok(img) = self.docker.inspect_image(IMAGE).await
+        if let Ok(img) = self.docker.inspect_image(&self.image).await
             && let Some(c) = img.config
         {
             cfg.entrypoint = c.entrypoint;
@@ -1401,7 +1460,46 @@ mod tests {
             remote: "http://host.docker.internal:8080".into(),
             same_network: false,
             relay: "http://127.0.0.1:3129".into(),
+            image: DEFAULT_IMAGE.to_owned(),
         }
+    }
+
+    /// 镜像来自**进程配置**，不来自请求。
+    ///
+    /// `CORTEX_SANDBOX_IMAGE` 是给部署换 registry 路径用的（节点上的镜像
+    /// 来自 ACR），而 `ensure` 的入参里没有、也不该有镜像这一项 ——
+    /// 谁哪天给它加一个 `image` 参数，等于把「跑什么代码」的决定权交给调用方。
+    ///
+    /// 这条同时守住空串：compose 里 `${CORTEX_SANDBOX_IMAGE:-}` 展开出来是
+    /// 空串而不是「未设置」，直接用会让 create 报一句语焉不详的 400。
+    #[test]
+    fn the_image_comes_from_config_never_from_a_request() {
+        for (env, want) in [
+            (None, DEFAULT_IMAGE),
+            (Some(""), DEFAULT_IMAGE),
+            (Some("   "), DEFAULT_IMAGE),
+            (
+                Some("acr.example.com/ns/cortex-sandbox:v1"),
+                "acr.example.com/ns/cortex-sandbox:v1",
+            ),
+        ] {
+            assert_eq!(
+                resolve_image(env),
+                want,
+                "CORTEX_SANDBOX_IMAGE={env:?} 应解析成 {want}，空串必须退回默认值而不是原样用"
+            );
+        }
+
+        // 规格只读 self.image：换掉字段，spec 就跟着换 —— 也就是说
+        // 没有第二处硬编码的镜像名藏在别处
+        let mut r = runner();
+        r.image = "acr.example.com/ns/cortex-sandbox:v1".into();
+        let spec = r.spec_with_image("u1", "tok", "hash", &r.image);
+        assert_eq!(
+            spec.image.as_deref(),
+            Some("acr.example.com/ns/cortex-sandbox:v1"),
+            "spec 的镜像必须跟着 runner 的配置走"
+        );
     }
 
     /// **规格不可协商。** 入参只有 owner / token / hash，塞不进第二个挂载。
@@ -1413,13 +1511,13 @@ mod tests {
     #[test]
     fn the_spec_is_not_negotiable() {
         let r = runner();
-        let spec = r.spec_with_image("u1", "tok", "hash", IMAGE);
+        let spec = r.spec_with_image("u1", "tok", "hash", DEFAULT_IMAGE);
         let host = spec.host_config.expect("必须有 HostConfig");
 
         assert_eq!(
             spec.image.as_deref(),
-            Some(IMAGE),
-            "镜像名写死在实现里，调用方指定不了"
+            Some(DEFAULT_IMAGE),
+            "镜像名来自 runner 的配置，调用方指定不了"
         );
 
         let mounts = host.mounts.expect("必须有挂载");
@@ -1603,7 +1701,7 @@ mod tests {
     #[test]
     fn the_sandbox_publishes_no_ports_at_all() {
         let r = runner();
-        let spec = r.spec_with_image("u1", "tok", "hash", IMAGE);
+        let spec = r.spec_with_image("u1", "tok", "hash", DEFAULT_IMAGE);
         let host = spec.host_config.expect("必须有 HostConfig");
         assert!(
             host.port_bindings.is_none(),
@@ -1627,7 +1725,7 @@ mod tests {
     #[test]
     fn every_egress_env_var_is_set() {
         let r = runner();
-        let spec = r.spec_with_image("u1", "tok", "hash", IMAGE);
+        let spec = r.spec_with_image("u1", "tok", "hash", DEFAULT_IMAGE);
         let env = spec.env.expect("必须有 env");
         let want = format!("http://{EGRESS_HOST}:{EGRESS_PORT}");
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {

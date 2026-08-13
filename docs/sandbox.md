@@ -565,15 +565,74 @@ cortexd。
 - 卷配额：`--storage-opt` 只管 rootfs 且要 xfs+pquota，named volume 完全不受管。
   本期用定时 `du` + 超软限 `docker pause` 兜底。
 
-### 生产机的容量账（这是本期不上生产的原因）
+### 生产机的容量账
 
-cortexd 载入 bge-m3 后常驻 **1.03 GiB**，节点（2C/3.5G，已跑 19 容器）余量仅
-**0.5~0.7 GiB** ⇒ 不动现状只能稳跑 **1 个 512m 沙箱**。
+原先这一节的标题是「这是本期不上生产的原因」：cortexd 载入 bge-m3 后常驻
+**1.03 GiB**，节点（2C/3.5G，已跑 19 容器）余量仅 **0.5~0.7 GiB**
+⇒ 只能稳跑 1 个 512m 沙箱。
 
-**最大单点杠杆是把 embedding 挪出 cortexd 进程**（改走 API 后端），一举释放约
-1 GiB，沙箱并发直接翻倍。
+那个杠杆 2026-08-13 拉了：embedding 挪出 cortexd 进程（镜像不再编
+`local-embed`，改走 API 后端），常驻降到约 120 MiB，compose 上限从 4g 收到
+768m。现在大约能同时开 **1~2 个** 沙箱 —— 不是「随便开」，但够用了。
 
 **不向用户承诺 `cargo build` 级任务**：2 核 + 512m 跑 rustc 必 OOM。
+
+### 上生产：三个开关，缺一不可
+
+`deploy/docker-compose.yml` 里沙箱那套**默认全关**。开它要在节点的 `.env`
+里同时设三项，任何一项漏了都不会有沙箱：
+
+```
+CORTEX_SANDBOX_ENABLED=1
+COMPOSE_PROFILES=sandbox                  # 少了它 egress 容器不起
+CORTEX_DOCKER_SOCK=/var/run/docker.sock   # 默认是 /dev/null，等于没挂
+```
+
+为什么是三个而不是一个：**第三项是把这台机器的 root 交给 cortexd**。能访问
+`docker.sock` 就能起一个挂着宿主 `/` 的特权容器，而这台机器上还跑着
+mica / neostor / headscale / rustdesk —— cortexd 被攻破的爆炸半径会从
+「一个记忆库」变成「整台机器加别人四个服务」，而 cortexd 正是直接处理模型
+输出的那个进程。默认值必须是「没挂」，不能是「挂了但功能关着」。
+
+缓解不在 compose 里，在 `sandbox_runner.rs`：容器规格（挂载点、内存、PID
+上限、cap-drop、网段）**全部写死在实现里**，trait 入参只有 owner 与 spec
+hash，调用方说不出第二个挂载，有测试守着。
+
+#### 漏配的表现：启动时说清，不是点下去才发现
+
+`DockerRunner::connect` 只造客户端、**不发任何请求** —— socket 是
+`/dev/null`、没权限、daemon 没起，它一样返回 `Ok`。所以另有一步 `preflight`
+真的握手 + 查镜像，三条路真机验过：
+
+| | 启动日志 |
+|---|---|
+| socket 是 `/dev/null` | `云沙箱关闭 error=docker daemon 握不上手…要挂 /var/run/docker.sock 并给它那个 socket 的组` |
+| 镜像不在本地 | `云沙箱关闭 error=沙箱镜像 X 不在本地，而 cortexd 不会自己去 pull` |
+| 都对 | `云沙箱已启用` |
+
+没有 `preflight` 的话前两种都会照常打出「云沙箱已启用」。
+
+#### 与开发机的四处差别
+
+| | 开发机（`just dev`）| 节点（`deploy/`）|
+|---|---|---|
+| 沙箱镜像 | `cortex/sandbox:dev`，本地构建 | ACR 的 `cortex-sandbox:v0.1.x`，`CORTEX_SANDBOX_IMAGE` 指过去 |
+| 谁 pull 镜像 | `just dev` 构建 | `cortex-deploy` 脚本（cortexd **不会**自己 pull，它也不该有 registry 凭据）|
+| egress publish 3129 | 是（cortexd 在宿主进程时要走中继）| **否**（cortexd 也在容器里，直连容器名）|
+| 放行清单含 `host.docker.internal:8080` | 是（沙箱回调宿主上的 cortexd）| **否**（回调走 `cortexd:8080`，在 NO_PROXY 里，压根不经代理）|
+
+最后一行不是可选的：节点上留着它等于白送沙箱一条打向宿主的路。
+
+#### 部署脚本必须同步改
+
+`node-deploy-policy.sh` 里 `up -d --no-deps` 是**点名**服务的，所以
+「往 compose 里新加的服务会安静地永远不被启动」。那句警告本来就写在脚本里，
+这次是它第一次兑现 —— 加 egress 时差点漏掉，症状会是「沙箱起来了但一出网
+就超时」而部署输出全绿。
+
+沙箱镜像不是服务（它是 cortexd 经 docker API 起容器用的模板，compose 没有
+对应概念），所以单独 `docker pull`，失败只警告不中止：一个「能对话、沙箱
+暂时关着」的部署，比一个被回滚掉的部署好。
 
 ---
 

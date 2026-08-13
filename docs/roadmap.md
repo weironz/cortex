@@ -725,6 +725,32 @@ bind 端口；tini 与 `--init` 重复；**容器里的免确认不是自动的*
 `deploy/` 里 `selfhost-embed`），各自内部自洽所以一直没暴露，但照着
 `operations.md` 在节点上敲就会得到一个不存在的服务。统一成 `embed`。
 
+#### 沙箱那套接进 deploy/ —— 一处代码改动，三处配置
+
+`deploy/` 里 sandbox 与 egress 的出现次数原本是 **0**：整套云端沙箱 agent
+在生产部署里根本没接线。补上之后：egress 容器（profile `sandbox`）、
+`cortex-sandbox-net`（`internal: true`）、cortexd 接进那张网 + docker.sock
++ 四个 `CORTEX_SANDBOX_*`，发布流水线加两个镜像。
+
+唯一的代码改动是 `IMAGE` 从常量变成 `CORTEX_SANDBOX_IMAGE` ——
+节点上的镜像来自 ACR，写死 `cortex/sandbox:dev` 在那儿不存在。
+「不可由**调用方**指定」这条不变式没动：请求里没有、也不该有镜像这一项。
+
+**顺手补了 `preflight`，因为写 compose 时才看清一个洞**：
+`DockerRunner::connect` 只造客户端、不发任何请求 —— socket 挂的是
+`/dev/null`、没权限、daemon 没起，它一律返回 `Ok`。也就是说漏配的部署会
+照常打出「云沙箱已启用」，等用户点下去才发现，而错误信息在日志深处。
+现在启动时真的握一次手 + 查一次镜像，三条路都真机验过。
+
+这个洞不是写代码时能看出来的 —— 是**写部署配置时**看出来的：
+一想到「运维忘了改 CORTEX_DOCKER_SOCK 会怎样」，答案就浮出来了。
+
+docker.sock 做成三个开关而不是一个（`CORTEX_SANDBOX_ENABLED` +
+`COMPOSE_PROFILES` + `CORTEX_DOCKER_SOCK`），默认值是 `/dev/null` 也就是
+「没挂」。理由：能访问它就能起一个挂着宿主 `/` 的特权容器，而这台机器上还
+跑着别人四个服务。默认必须是「没挂」，不能是「挂了但功能关着」——
+后者在 cortexd 被攻破时没有任何区别。
+
 #### 「配置有两份」这个形状第一次咬人
 
 改完根仓库的 `docker-compose.prod.yml` 就以为完事了，**漏了 `deploy/`** ——

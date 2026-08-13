@@ -181,6 +181,60 @@ services:
           cpus: ${CORTEX_EMBED_CPU_LIMIT:-2}
           memory: ${CORTEX_EMBED_MEM_LIMIT:-3g}
 
+  # ── 沙箱网段唯一的双宿出口（可选，profile `sandbox`）────
+  #
+  # 沙箱网段是 internal（容器里连默认路由都没有），这个容器同时接
+  # internal 网段与默认网桥，是那张拓扑上唯一两边都够得着的点：
+  #
+  #     沙箱 ──HTTP(S)_PROXY──► 这里 ──► 放行清单内的外网
+  #
+  # 镜像是 `FROM scratch`，2.4 MB，里面只有一个静态二进制，连 sh 都没有 ——
+  # 它跑在信任边界上，多一个可执行文件就多一个被攻陷后能用的东西。
+  #
+  # ⚠️ 与开发机的**两处**差别，别照抄回去：
+  #   1. 不 publish 3129（反向中继）。节点上 cortexd 也在容器里、也接了
+  #      沙箱网段，反代直连容器名，中继那一整层不参与
+  #   2. 放行清单里**没有** host.docker.internal:8080。开发机上沙箱要靠它
+  #      回调跑在宿主进程里的 cortexd；这里回调走 `cortexd:8080`（同网段，
+  #      在 NO_PROXY 里，压根不经代理）。留着它等于白送一条打向宿主的路
+  egress:
+    image: ${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortex-egress-proxy:${CORTEX_VERSION:?由部署脚本写入，形如 v0.1.0}
+    container_name: cortex-egress
+    profiles: [sandbox]
+    restart: unless-stopped
+    logging: *default-logging
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop: [ALL]
+    read_only: true
+    environment:
+      # **默认全拒**。空清单 = 什么都不放行，不是「不限制」。
+      #
+      # 这几条按「装依赖 + 拉代码」圈定。注意 `*.pypi.org` 与 `pypi.org`
+      # 互不隐含，两个都要写（见 allowlist.rs 的注释与测试）。
+      #
+      # 节点在国内：官方源时通时不通，所以清单里一并放行两个镜像站，
+      # 让 agent 自己能换（拒绝理由会作为工具事件回到模型）
+      CORTEX_EGRESS_ALLOW: >-
+        ${CORTEX_EGRESS_ALLOW:-pypi.org,*.pypi.org,files.pythonhosted.org,
+        registry.npmjs.org,*.npmjs.org,
+        github.com,*.github.com,codeload.github.com,
+        crates.io,*.crates.io,static.crates.io,
+        mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,
+        registry.npmmirror.com}
+      CORTEX_EGRESS_DENY: ${CORTEX_EGRESS_DENY:-}
+      RUST_LOG: ${CORTEX_EGRESS_LOG:-cortex_egress_proxy=info,warn}
+    networks:
+      - default
+      - sandbox
+    deploy:
+      resources:
+        limits:
+          # 它只做字节转发，常驻是个位数 MB。封顶是为了「一个连接泄漏
+          # 不会拖垮别人」，不是为了省内存
+          cpus: ${CORTEX_EGRESS_CPU_LIMIT:-0.5}
+          memory: ${CORTEX_EGRESS_MEM_LIMIT:-128m}
+
   # ── cortexd ───────────────────────────────────────────
   #
   # 镜像默认走阿里云 ACR：这台机器在国内，从 Docker Hub 拉要么慢要么
@@ -192,7 +246,15 @@ services:
     container_name: cortex-cortexd
     restart: unless-stopped
     logging: *default-logging
-    networks: [default, traefik]
+    # 接进 sandbox 网段 ⇒ same_network=1 ⇒ 反代直连容器名。
+    #
+    # 接一张 internal 网**不会**让 cortexd 失去出网：多网络时默认路由来自
+    # 非 internal 的那张（这里是 default）。沙箱容器只接 sandbox 一张，
+    # 所以它没有默认路由 —— 那才是隔离本身。
+    #
+    # 沙箱没开时这一张网是空的，代价为零，所以不跟着 profile 走 ——
+    # 让 compose 里「cortexd 接哪几张网」是一个常量，少一处条件分支
+    networks: [default, traefik, sandbox]
     # ⚠️ **数据库连不上时 cortexd 会退出**（0.1.4 起），于是这里会看到一个
     # 重启循环。那是**预期行为**，不是故障 —— 别去加 `CORTEX_BACKEND=mock`
     # 把它「修好」，那会让它带着一库假数据对外服务。
@@ -268,8 +330,43 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+      # ── 云沙箱（Web 端的执行环境，见 docs/sandbox.md）──
+      #
+      # **默认关**。开它要同时改三处（.env 里都写着）：这一项、
+      # COMPOSE_PROFILES 加 sandbox、CORTEX_DOCKER_SOCK 指到真 socket。
+      # 三处缺一，cortexd 会在启动时把原因说清楚然后关掉沙箱继续跑 ——
+      # 不是启动失败，也不是「看起来开着但点下去才发现」。
+      CORTEX_SANDBOX_ENABLED: ${CORTEX_SANDBOX_ENABLED:-0}
+      # cortexd 自己也在容器里、也接了沙箱网段 ⇒ 直连容器名，
+      # 中继那一层不参与。**这一个变量同时决定两个方向**，
+      # 所以别在别处再配一次回调地址
+      CORTEX_SANDBOX_SAME_NETWORK: "1"
+      CORTEX_SANDBOX_CALLBACK: http://cortexd:8080
+      # 镜像来自 ACR，不是开发机上那个 `cortex/sandbox:dev`。
+      # cortexd **不会自己 pull** —— 由 cortex-deploy 脚本拉，
+      # 拉不到时启动日志里直说，不会等到用户点下去
+      CORTEX_SANDBOX_IMAGE: ${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortex-sandbox:${CORTEX_VERSION}
     volumes:
       - cortex-prod-workspace:/var/lib/cortex/workspace
+      # ★ **把这台机器的 root 交给 cortexd。** 默认指向 /dev/null，
+      #   也就是「没挂」—— 起沙箱要显式在 .env 里改成真 socket。
+      #
+      #   为什么这么绕：能访问 docker.sock 就能起一个挂着宿主 / 的特权容器。
+      #   这台机器上还跑着 mica / neostor / headscale / rustdesk，
+      #   cortexd 被攻破的爆炸半径会从「一个记忆库」变成「整台机器和
+      #   别人的四个服务」。而 cortexd 正是直接处理模型输出的那个进程。
+      #
+      #   缓解不在这一行，在 sandbox_runner.rs：容器规格（挂载点、内存、
+      #   PID 上限、cap-drop、网段）**全部写死在实现里**，trait 入参只有
+      #   owner 与 spec hash，调用方说不出第二个挂载，有测试守着。
+      - ${CORTEX_DOCKER_SOCK:-/dev/null}:/var/run/docker.sock
+    # docker.sock 是 root:root 模式 660。cortexd 跑在 uid 10001 上，
+    # 不给组就是 `client error (Connect)` —— 而那条错误读起来像
+    # 「docker 没起来」。加的是**组**不是用户：进程仍然不是 root。
+    #
+    # 沙箱没开时这一行是无害的：/dev/null 不需要任何组
+    group_add: ["0"]
     deploy:
       resources:
         limits:
@@ -328,6 +425,20 @@ networks:
   traefik:
     external: true
     name: traefik-network
+
+  # 沙箱网段。`internal: true` 是这整套隔离**唯一**有效的手段 ——
+  # 真机实测过（docs/sandbox.md 第八节）：只要容器有默认路由，它就能经
+  # host-gateway 够到宿主上任何一个已发布端口，**包括别的项目的数据库**，
+  # 而宿主那侧改绑 127.0.0.1 也拦不住。
+  #
+  # 这台机器上还跑着 mica / neostor / headscale / rustdesk —— 也就是说
+  # 少了 internal 这一行，沙箱里的模型生成的代码能直接连它们。
+  #
+  # 名字必须与 `sandbox_runner.rs::NETWORK` 写死的那个一致：那边按名字
+  # 直接接，所以 `name:` 关掉 compose 的项目名前缀。
+  sandbox:
+    name: cortex-sandbox-net
+    internal: true
 
 volumes:
   cortex-prod-postgres:
