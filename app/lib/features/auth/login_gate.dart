@@ -363,9 +363,26 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                                 ),
                               ),
                               const TextSpan(
+                                text: ' —— 对话会排进本地队列，以后接上服务器时自动补回去。\n',
+                              ),
+                              // 云端工作区那一条**必须在这儿说**，而不是等用户
+                              // 发现 agent 找不到文件。
+                              //
+                              // 离线时那些会话的执行现场在服务器上，够不到；
+                              // 本地 agent 照旧跑，但手上只有这台机器
+                              // （没绑目录就是一个文件工具都没有）。不说的话，
+                              // 用户看到的是「它昨天还能读那个文件，今天说没有」
+                              TextSpan(
+                                text: '云端工作区也够不到',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  color: scheme.onSurface,
+                                ),
+                              ),
+                              const TextSpan(
                                 text:
-                                    ' —— 对话会排进本地队列，'
-                                    '以后接上服务器时自动补回去。\n'
+                                    ' —— 那些会话的文件在服务器上，'
+                                    '离线期间只有绑了本机目录的会话动得了文件。\n'
                                     '需要先在设置里配好本机模型（也可以进去之后再配）。',
                               ),
                             ],
