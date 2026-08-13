@@ -209,13 +209,16 @@ mod tests {
     /// 快照必须**比空闲回收更频繁**。
     #[test]
     fn 快照间隔短于空闲回收() {
-        // 与 sandbox_reaper::IDLE 对齐。两个常量分处两个模块，写歪了不会
-        // 报错 —— 只会让「开了 20 分钟、一次都没拍到、然后容器停了」
-        // 变成一条真实路径，而那时用户丢的是整段会话的产出
-        const REAPER_IDLE: Duration = Duration::from_secs(30 * 60);
+        // **直接引用，不手抄。** 上一版这里是一份 30 分钟的副本，而它自己的
+        // 注释就警告着「两个常量分处两个模块，写歪了不会报错」—— 然后回收
+        // 阈值一改，它当场就歪了，而测试照样绿。
+        //
+        // 写歪的后果是「开了 20 分钟、一次都没拍到、然后容器停了」变成一条
+        // 真实路径，而那时用户丢的是整段会话的产出
+        let reaper_idle = crate::sandbox_reaper::IDLE;
         assert!(
-            INTERVAL < REAPER_IDLE,
-            "快照间隔（{INTERVAL:?}）必须短于空闲回收（{REAPER_IDLE:?}），\
+            INTERVAL < reaper_idle,
+            "快照间隔（{INTERVAL:?}）必须短于空闲回收（{reaper_idle:?}），\
              否则存在「整段会话一次都没被快照过就被回收」的窗口"
         );
     }
