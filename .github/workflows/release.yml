@@ -283,6 +283,16 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: ${{ steps.args.outputs.value }}
+          # ★ **必须关掉。** buildx 默认给镜像挂一份 provenance 证明，
+          # 那会把结果变成一个 OCI index，里面带一个
+          # `application/vnd.oci.empty.v1+json` 的空描述符 ——
+          # 而阿里云 ACR 不认这个 media type，push 时直接
+          # `denied: unknown manifest class`。
+          #
+          # 这条是**环境漂移**咬的：0.1.7 发的时候还没事，中间 runner 上的
+          # buildx 升了一版。四个镜像会一起挂，看起来像我们改坏了什么 ——
+          # 实际上本地 `docker build` 一路绿灯，因为它根本不 push。
+          provenance: false
           # 只打具体版本，**不打 latest**。生产钉死版本，重启之后
           # 必须回到同一个；一个会漂移的 tag 会让「线上跑的是哪一版」
           # 变成一个查不清的问题
