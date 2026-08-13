@@ -41,6 +41,7 @@ class FileNode {
     required this.path,
     required this.isDirectory,
     this.sizeBytes,
+    this.modifiedAt,
   });
 
   final String name;
@@ -50,6 +51,15 @@ class FileNode {
   final String path;
   final bool isDirectory;
   final int? sizeBytes;
+
+  /// 最后修改时间。**可空，而且空是常态** —— 桌面端那棵本机树目前不填它。
+  ///
+  /// 它回答的是「这是 agent 刚写的那个吗」：一个几十个文件的工作区里，
+  /// 光看名字和大小分不出哪些是这一轮的产物。
+  ///
+  /// 用 `null` 而不是 epoch 表示未知：0 会被渲染成 1970-01-01，
+  /// 一个煞有介事的假日期比一个空格误导得多。
+  final DateTime? modifiedAt;
 }
 
 /// Last path segment, tolerant of both separators (a Windows daemon path can be

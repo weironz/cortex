@@ -31,6 +31,7 @@
 //! 这条性质亲手拆掉。宁可粒度粗一点。
 
 mod allowlist;
+mod denials;
 mod inbound;
 mod outbound;
 
@@ -67,7 +68,8 @@ async fn main() {
         );
     }
 
-    let forward = tokio::spawn(outbound::serve(FORWARD_PORT, Arc::clone(&list)));
+    let denials = Arc::new(denials::Denials::new());
+    let forward = tokio::spawn(outbound::serve(FORWARD_PORT, Arc::clone(&list), denials));
     let relay = tokio::spawn(inbound::serve(RELAY_PORT));
 
     // 任何一半退出都让整个进程退出：只剩一半活着的代理，症状是

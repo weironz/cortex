@@ -993,6 +993,15 @@ class HttpCortexApi implements CortexApi {
             // 目录的 size 服务端固定给 0，那不是「空目录」的意思 —— 传 null，
             // 界面因此不会在目录行后面画一个 0 B
             sizeBytes: isDir ? null : asInt(e['size']),
+            // Unix 秒。服务端给 null 表示 tar 里没有这个字段 ——
+            // **不要**回落到 0，那会显示成 1970 年
+            modifiedAt: switch (e['mtime']) {
+              final int s when s > 0 => DateTime.fromMillisecondsSinceEpoch(
+                s * 1000,
+                isUtc: true,
+              ).toLocal(),
+              _ => null,
+            },
           );
         })
         .toList(growable: false);
@@ -1002,19 +1011,28 @@ class HttpCortexApi implements CortexApi {
   Future<SandboxWriteReceipt> sandboxWriteFile({
     required String path,
     required Uint8List bytes,
+    UploadProgress? onProgress,
   }) async {
+    // 复用 `uploadBlob` 那套分块请求：一个 `http.Request` 只有 0% 与 done
+    // 两个状态，而工作区里塞进来的常常是几十 MB 的数据集。
+    // Web 上进度的语义见 `_ProgressRequest` 的文档（会先冲到 100% 再等）
+    final request = _ProgressRequest(
+      'PUT',
+      // 路径在 query，字节在 body。反过来（多段表单）要额外一层编码，
+      // 而这条路由两边都只认原始字节
+      _uri('/sandbox/files', {'path': path}),
+      bytes,
+      onProgress,
+    )..headers.addAll(
+      _headers(const {
+        'content-type': 'application/octet-stream',
+        'accept': 'application/json',
+      }),
+    );
+
     final http.Response response;
     try {
-      response = await _client.put(
-        _uri('/sandbox/files', {'path': path}),
-        headers: _headers(const {
-          'content-type': 'application/octet-stream',
-          'accept': 'application/json',
-        }),
-        // 路径在 query，字节在 body。反过来（多段表单）要额外一层编码，
-        // 而这条路由两边都只认原始字节
-        body: bytes,
-      );
+      response = await http.Response.fromStream(await _client.send(request));
     } on Object catch (e) {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }

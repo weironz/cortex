@@ -741,7 +741,11 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
   Future<SandboxWriteReceipt> sandboxWriteFile({
     required String path,
     required Uint8List bytes,
+    UploadProgress? onProgress,
   }) async {
+    // 一次报完。夹具没有真实的分块，假装分块只会让界面在离线模式里
+    // 演一段与真实后端对不上的动画
+    onProgress?.call(bytes.length, bytes.length);
     await _latency(160);
     if (!path.startsWith('$kSandboxRoot/')) {
       throw CortexApiException('$path 不在 $kSandboxRoot 之内', statusCode: 400);

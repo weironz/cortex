@@ -96,6 +96,38 @@ pub fn cache_tag(hash: &str) -> String {
     format!("{CACHE_REPO}:{hash}")
 }
 
+/// 把「镜像清单 + 容器清单」合成 `pick_evictions` 要的那份目录。
+///
+/// - `images`：`(tag, 大小, 创建时间)`
+/// - `containers`：`(镜像名, 容器创建时间)`，**包括已停止的**
+///
+/// # 为什么用容器当「最后使用时间」
+///
+/// docker 的镜像对象上没有这个字段。而**容器本身就是使用记录**：一个缓存
+/// tag 最近一次被用，就是最近一次有容器从它建出来。于是不必额外存一份 LRU
+/// —— 也就没有那份记录写漏、写错、或者在 cortexd 重启后丢掉的可能。
+///
+/// 一个 tag 的容器全被回收之后信号就没了，那时退回镜像的创建时间：
+/// 与不做这件事时的行为一致，所以这条路只会更准，不会更差。
+#[must_use]
+pub fn catalog_with_last_use(
+    images: Vec<(String, i64, i64)>,
+    containers: &[(String, i64)],
+) -> Vec<(String, i64, i64)> {
+    let mut newest: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+    for (image, created) in containers {
+        let slot = newest.entry(image.as_str()).or_insert(*created);
+        *slot = (*slot).max(*created);
+    }
+    images
+        .into_iter()
+        .map(|(tag, size, created)| {
+            let last_used = newest.get(tag.as_str()).copied().unwrap_or(created);
+            (tag, size, last_used)
+        })
+        .collect()
+}
+
 /// 按 LRU 挑出该删哪些缓存镜像。
 ///
 /// 入参是 `(tag, 大小, 最后使用时间)`，返回该删的 tag。
@@ -192,6 +224,42 @@ mod tests {
             vec!["最久没用".to_owned()],
             "只该删到刚好不超预算，且从最久没用的开始。\
              按创建时间排的话，一个天天在用的老环境会第一个被删掉"
+        );
+    }
+
+    /// 老但天天在用的镜像不该被删 —— 这条是这段 GC 存在的**理由**。
+    ///
+    /// 反过来说：按 `created` 排的话，它恰好第一个被删，然后下一轮对话
+    /// 要重跑一次十分钟的 setup。这个错**不报任何错**，只表现为
+    /// 「缓存好像不太管用」。
+    #[test]
+    fn 老而常用的不该被当成最久没用的() {
+        // 半年前建的老镜像，但昨天还有容器从它起来
+        let images = vec![
+            ("老而常用".into(), 300, 100),
+            ("新但没人碰过".into(), 300, 9_000),
+        ];
+        let containers = [("老而常用".to_owned(), 10_000)];
+
+        let catalog = catalog_with_last_use(images, &containers);
+        let doomed = pick_evictions(catalog, 400);
+
+        assert_eq!(
+            doomed,
+            vec!["新但没人碰过".to_owned()],
+            "该删的是没人用的那个。只看 created 的话会反过来 ——              删掉天天在用的，留下一个没人碰的"
+        );
+    }
+
+    /// 没有任何容器用过时退回创建时间 —— 与不做这件事时的行为一致。
+    #[test]
+    fn 没有容器可参考时退回创建时间() {
+        let images = vec![("a".into(), 300, 1), ("b".into(), 300, 2)];
+        let got = catalog_with_last_use(images, &[]);
+        assert_eq!(
+            got,
+            vec![("a".to_owned(), 300, 1), ("b".to_owned(), 300, 2)],
+            "容器全被回收之后这个信号就没了。那时退回 created 是**已知的退化**，             不是 bug —— 重要的是它不会比不做这件事更差"
         );
     }
 

@@ -15,8 +15,17 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::allowlist::Allowlist;
+use crate::denials::Denials;
 
-pub async fn serve(port: u16, list: Arc<Allowlist>) {
+/// 沙箱回来问「我刚才被拦了什么」的路径。
+///
+/// 走 origin-form（`GET /_cortex/denials?since=…`）而不是新开一个监听口：
+/// 这个容器坐在信任边界上，多一个端口就多一处要论证的暴露面。
+/// 而这条路径本来就落在「不是 CONNECT 也不是绝对 URI」那个 400 分支里，
+/// 截在它前面不影响任何真实的代理请求。
+const DENIALS_PATH: &str = "/_cortex/denials";
+
+pub async fn serve(port: u16, list: Arc<Allowlist>, denials: Arc<Denials>) {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
         Err(e) => {
@@ -30,8 +39,9 @@ pub async fn serve(port: u16, list: Arc<Allowlist>) {
         match listener.accept().await {
             Ok((sock, peer)) => {
                 let list = Arc::clone(&list);
+                let denials = Arc::clone(&denials);
                 tokio::spawn(async move {
-                    if let Err(e) = handle(sock, &list).await {
+                    if let Err(e) = handle(sock, &list, &denials, peer.ip()).await {
                         tracing::debug!(%e, %peer, "出网连接结束");
                     }
                 });
@@ -45,7 +55,12 @@ pub async fn serve(port: u16, list: Arc<Allowlist>) {
 }
 
 /// 一次代理请求。
-async fn handle(sock: TcpStream, list: &Allowlist) -> std::io::Result<()> {
+async fn handle(
+    sock: TcpStream,
+    list: &Allowlist,
+    denials: &Denials,
+    peer: std::net::IpAddr,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(sock);
     let mut line = String::new();
     // 请求行长度设上限：不设的话，一个不断发字节不发换行的客户端能把代理的
@@ -73,6 +88,21 @@ async fn handle(sock: TcpStream, list: &Allowlist) -> std::io::Result<()> {
         headers.push_str(&h);
     }
 
+    // 沙箱回来问自己刚被拦了什么。截在 `target_host_port` 之前 ——
+    // origin-form 的路径在它那儿本来就是 400
+    if method == "GET" && target.starts_with(DENIALS_PATH) {
+        let since = target
+            .split_once("since=")
+            .and_then(|(_, v)| v.split('&').next())
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        let body = denials.since(peer, since).join(
+            "
+",
+        );
+        return answer(reader.into_inner(), &body).await;
+    }
+
     let (host, port) = match target_host_port(&method, &target) {
         Some(hp) => hp,
         None => {
@@ -92,7 +122,12 @@ async fn handle(sock: TcpStream, list: &Allowlist) -> std::io::Result<()> {
         // 403 而不是 502：让 agent 分得清「被策略拦了」与「网络坏了」。
         // 两者的下一步完全不同 —— 前者该换地址，后者该重试
         tracing::info!(%host, port, ?verdict, "拒绝出网");
-        return refuse(reader.into_inner(), 403, &verdict.explain(&host, port)).await;
+        let why = verdict.explain(&host, port);
+        // 记一份，供沙箱回来问。**https 的这句话走不到模型那儿** ——
+        // curl 会丢弃失败 CONNECT 的响应体，模型只看到
+        // `CONNECT tunnel failed, response 403`。见 denials.rs 顶部
+        denials.record(peer, why.clone());
+        return refuse(reader.into_inner(), 403, &why).await;
     }
 
     let upstream = match connect_upstream(&host, port).await {
@@ -227,6 +262,21 @@ async fn refuse(mut sock: TcpStream, code: u16, why: &str) -> std::io::Result<()
          Content-Length: {}\r\n\
          X-Cortex-Egress: blocked\r\n\
          Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    sock.write_all(resp.as_bytes()).await?;
+    sock.flush().await
+}
+
+/// 200 + 纯文本。给 `DENIALS_PATH` 用。
+async fn answer(mut sock: TcpStream, body: &str) -> std::io::Result<()> {
+    let resp = format!(
+        "HTTP/1.1 200 OK
+         Content-Type: text/plain; charset=utf-8
+         Content-Length: {}
+         Connection: close
+
+{body}",
         body.len()
     );
     sock.write_all(resp.as_bytes()).await?;

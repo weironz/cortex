@@ -238,6 +238,7 @@ class _FakeApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
   Future<SandboxWriteReceipt> sandboxWriteFile({
     required String path,
     required Uint8List bytes,
+    UploadProgress? onProgress,
   }) async => throw UnimplementedError('这个替身不测云沙箱文件树');
 
   @override

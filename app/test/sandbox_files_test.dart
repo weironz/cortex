@@ -161,6 +161,46 @@ void main() {
     });
   });
 
+  group('修改时间', () {
+    testWidgets('有 mtime 就显示相对时间，没有就整行不画时间', (tester) async {
+      final now = DateTime.now();
+      final api = _TreeApi({
+        kSandboxRoot: [
+          FileNode(
+            name: 'fresh.txt',
+            path: '$kSandboxRoot/fresh.txt',
+            isDirectory: false,
+            sizeBytes: 12,
+            modifiedAt: now.subtract(const Duration(seconds: 5)),
+          ),
+          FileNode(
+            name: 'unknown.txt',
+            path: '$kSandboxRoot/unknown.txt',
+            isDirectory: false,
+            sizeBytes: 12,
+          ),
+        ],
+      });
+      await tester.pumpWidget(_wrap(const SandboxBrowser(), api));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('刚刚'),
+        findsOneWidget,
+        reason:
+            '「这是 agent 刚写的那个吗」是用户扫这棵树时最常问的问题，'
+            '而名字和大小都回答不了它',
+      );
+      expect(
+        find.textContaining('1970'),
+        findsNothing,
+        reason:
+            'mtime 缺失时必须整个不画。回落成 epoch 会渲染出一个煞有介事的假日期，'
+            '比留空误导得多 —— 用户没法把它和「真的是 1970 年」区分开',
+      );
+    });
+  });
+
   group('文件树是懒加载的', () {
     testWidgets('第一次只要根这一层', (tester) async {
       final api = _TreeApi(_threeLevels());
@@ -315,6 +355,64 @@ void main() {
         find.text('传文件到 src/'),
         findsOneWidget,
         reason: '落点跟着用户刚点开的目录走，按钮上的字必须同步 —— 否则文件会静悄悄落到别处',
+      );
+    });
+  });
+
+  group('上传进度', () {
+    test('一个文件时只报名字，多个文件时报第几个', () {
+      expect(
+        const SandboxUpload(done: 0, total: 1, name: 'data.csv').label,
+        '正在传 data.csv',
+        reason: '只有一个文件时「1/1」是一句废话，用户想知道的是卡在哪个文件上',
+      );
+      expect(
+        const SandboxUpload(done: 2, total: 7, name: 'big.zip').label,
+        '正在传 3/7：big.zip',
+        reason:
+            'done 是**已经传完**的个数，正在传的是第 done+1 个。'
+            '直接显示 done 的话，传第一个文件时会写「正在传 0/7」',
+      );
+    });
+
+    test('小文件不报百分比，大文件报，满了之后说「收尾中」', () {
+      expect(
+        const SandboxUpload(
+          done: 0,
+          total: 1,
+          name: 'tiny.txt',
+          sent: 900,
+          bytes: 1000,
+        ).label,
+        '正在传 tiny.txt',
+        reason:
+            '分块是 64 KiB，比它小的文件只会有一次回调 —— '
+            '闪一下「90%」只是噪声',
+      );
+      expect(
+        const SandboxUpload(
+          done: 0,
+          total: 1,
+          name: 'big.zip',
+          sent: 300 * 1024,
+          bytes: 1024 * 1024,
+        ).label,
+        '正在传 big.zip 29%',
+        reason: '大文件上这个数就是「不是卡死了」的全部证据',
+      );
+      expect(
+        const SandboxUpload(
+          done: 0,
+          total: 1,
+          name: 'big.zip',
+          sent: 1024 * 1024,
+          bytes: 1024 * 1024,
+        ).label,
+        '正在传 big.zip 收尾中',
+        reason:
+            'Web 上进度会先冲到 100% 再干等（浏览器不支持流式请求体，'
+            'FetchClient 先把流抽干再上传）。那时显示 100% 是在撒谎 —— '
+            '真正的上传还一个字节都没走',
       );
     });
   });

@@ -396,6 +396,7 @@ abstract interface class CortexApi {
   Future<SandboxWriteReceipt> sandboxWriteFile({
     required String path,
     required Uint8List bytes,
+    UploadProgress? onProgress,
   });
 
   /// `GET /ws` — **one** connection attempt.

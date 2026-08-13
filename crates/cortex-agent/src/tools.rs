@@ -566,6 +566,10 @@ async fn run_shell(sandbox: &Sandbox, command: &str, timeout_ms: u64) -> ToolRes
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
+    // 命令**开始之前**取时间，用来把这一条与之前的拒绝记录切开。
+    // 取晚了（比如失败之后再取）会把这条命令自己的拒绝也滤掉
+    let started = crate::egress::now_secs();
+
     let fut = cmd.output();
     let out = match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
         Err(_) => {
@@ -595,6 +599,23 @@ async fn run_shell(sandbox: &Sandbox, command: &str, timeout_ms: u64) -> ToolRes
         body.push_str("[stderr]\n");
         body.push_str(&stderr);
     }
+    // ── 被出网代理拦了的话，把理由拼进来 ──────────────────
+    //
+    // 只在**非零退出**时问，且只在配了代理时才真的发请求（桌面端两条都不成立，
+    // 整段不介入）。要解决的是：https 走 CONNECT，而 curl 丢弃失败 CONNECT
+    // 的响应体 —— 代理写好的那几句「换哪个源」到不了模型，它看到的只有
+    // `CONNECT tunnel failed, response 403`。详见 egress.rs 顶部。
+    if !out.status.success()
+        && let Some(why) = crate::egress::denials_since(started).await
+    {
+        if !body.is_empty() && !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push_str("[出网被拦]\n");
+        body.push_str(&why);
+        body.push('\n');
+    }
+
     let code = out.status.code();
     if out.status.success() {
         if body.is_empty() {

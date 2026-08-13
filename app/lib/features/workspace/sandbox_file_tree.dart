@@ -22,6 +22,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_exception.dart';
 import '../../api/cortex_api.dart';
+import '../../core/formatting.dart';
 import '../../core/local_agent.dart';
 import '../../core/save_file.dart';
 import '../../models/attachment.dart' show formatBytes;
@@ -89,7 +90,15 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
   late String _target = widget.root;
 
   String? _downloading;
-  bool _uploading = false;
+
+  /// 上传进行到哪一个。`null` = 没在传。
+  ///
+  /// 只做**逐文件**进度，不做逐字节：Web 上 `package:http` 的 `BrowserClient`
+  /// 根本不暴露上传进度（fetch/XHR 的流式上传它没接出来），做出来只能在桌面端
+  /// 生效 —— 而一个「有时候有进度条」的界面比没有更让人困惑。
+  ///
+  /// 逐文件已经足够消掉「界面只是卡着」：用户看得见在传第几个、传的是哪个。
+  SandboxUpload? _upload_;
 
   @override
   void initState() {
@@ -155,20 +164,42 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
     );
     if (picked == null || !mounted) return;
 
-    setState(() => _uploading = true);
     final api = ref.read(cortexApiProvider);
     final target = _target;
+    final queue = picked.files.where((f) => f.bytes != null).toList();
     var done = 0;
     String? failure;
-    for (final file in picked.files) {
+    for (final file in queue) {
       final bytes = file.bytes;
       if (bytes == null) continue;
+      final name = basenameOf(file.name);
+      // 每一个都刷一次：这一行就是「不是卡死了」的全部证据
+      setState(
+        () => _upload_ = SandboxUpload(
+          done: done,
+          total: queue.length,
+          name: name,
+          bytes: bytes.length,
+        ),
+      );
       try {
         // `basenameOf` 挡掉选择器偶尔带出来的目录前缀。真正的越界围栏在
         // 服务端 —— 客户端这一道只是别把明显不对的东西发出去
         await api.sandboxWriteFile(
-          path: posixJoin(target, basenameOf(file.name)),
+          path: posixJoin(target, name),
           bytes: bytes,
+          onProgress: (sent, total) {
+            if (!mounted) return;
+            setState(
+              () => _upload_ = SandboxUpload(
+                done: done,
+                total: queue.length,
+                name: name,
+                sent: sent,
+                bytes: total,
+              ),
+            );
+          },
         );
         done++;
       } on Object catch (e) {
@@ -179,7 +210,7 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
       }
     }
     if (!mounted) return;
-    setState(() => _uploading = false);
+    setState(() => _upload_ = null);
 
     // 成功了几个就刷新几个 —— 哪怕后面失败了，已经进去的那些也该出现在树上
     if (done > 0) {
@@ -208,7 +239,7 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
         Expanded(child: _body(context)),
         _Actions(
           targetName: basenameOf(_target),
-          busy: _uploading,
+          progress: _upload_,
           onUpload: _upload,
         ),
       ],
@@ -392,15 +423,63 @@ class _RootFailure extends StatelessWidget {
   }
 }
 
+/// 上传进行到哪一个。逐文件，不逐字节 —— 理由见 `_SandboxBrowserState._upload_`。
+///
+/// 公开只为了测 [label]：整条上传链路要过 `FilePicker` 的平台通道，
+/// widget 测试驱不动；而这里唯一有判断的就是那一句文案。
+@visibleForTesting
+class SandboxUpload {
+  const SandboxUpload({
+    required this.done,
+    required this.total,
+    required this.name,
+    this.sent = 0,
+    this.bytes = 0,
+  });
+
+  /// 已经**传完**的个数。当前这个不算在内，所以显示时要 +1。
+  final int done;
+  final int total;
+
+  /// 正在传的那个文件名。只传一个文件时它比「1/1」有用得多 ——
+  /// 用户想知道的是「卡在哪个文件上」。
+  final String name;
+
+  /// 当前这个文件已交出去的字节数 / 它的总字节数。
+  ///
+  /// **Web 上这个数会先冲到 100% 然后停在那儿等。** 浏览器不支持流式请求体
+  /// （要 HTTP/2，Firefox 与 Safari 都没有），所以 `FetchClient` 是先把整个流
+  /// 抽干再上传 —— 详见 `http_cortex_api.dart` 的 `_ProgressRequest`。
+  /// 所以满了之后显示「收尾中」而不是一个撒谎的 100%。
+  final int sent;
+  final int bytes;
+
+  /// 只在**大到值得报**的时候才报百分比。
+  ///
+  /// 64 KiB 正是分块大小：比它小的文件只会有一次回调，闪一下百分比
+  /// 只是噪声。
+  String? get _pct {
+    if (bytes < 64 * 1024) return null;
+    return sent >= bytes ? '收尾中' : '${(sent * 100 / bytes).floor()}%';
+  }
+
+  /// 单个文件时只报名字：「1/1」是一句废话。
+  String get label {
+    final head = total == 1 ? '正在传 $name' : '正在传 ${done + 1}/$total：$name';
+    final pct = _pct;
+    return pct == null ? head : '$head $pct';
+  }
+}
+
 class _Actions extends StatelessWidget {
   const _Actions({
     required this.targetName,
-    required this.busy,
+    required this.progress,
     required this.onUpload,
   });
 
   final String targetName;
-  final bool busy;
+  final SandboxUpload? progress;
   final VoidCallback onUpload;
 
   @override
@@ -413,16 +492,17 @@ class _Actions extends StatelessWidget {
         runSpacing: 6,
         children: [
           OutlinedButton.icon(
-            onPressed: busy ? null : onUpload,
-            icon: busy
+            onPressed: progress == null ? onUpload : null,
+            icon: progress != null
                 ? const SizedBox(
                     width: 13,
                     height: 13,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.upload_file_rounded, size: 15),
-            // 落点写在按钮上：用户点之前就该知道文件会去哪儿
-            label: Text(busy ? '上传中…' : '传文件到 $targetName/'),
+            // 落点写在按钮上：用户点之前就该知道文件会去哪儿。
+            // 传的时候换成进度 —— 「上传中…」在传十个文件时与卡死没有区别
+            label: Text(progress?.label ?? '传文件到 $targetName/'),
           ),
           const SandboxDownloadButton(),
         ],
@@ -524,6 +604,22 @@ class _NodeRow extends StatelessWidget {
                 ),
               ),
             ),
+            // 修改时间在前、大小在后。它回答的是「这是 agent 刚写的那个吗」，
+            // 而那是用户扫这棵树时最常问的问题 —— 比大小更值钱。
+            //
+            // 目录也显示：一个「刚刚」的目录说明这一轮往里面写过东西。
+            // 服务端给不出时（tar 里没这个字段）就整个不画，**不画 1970 年**。
+            if (node.modifiedAt != null)
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: Text(
+                  formatRelative(node.modifiedAt),
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    fontSize: 9,
+                    color: scheme.onSurfaceVariant.withValues(alpha: 0.75),
+                  ),
+                ),
+              ),
             if (!node.isDirectory && node.sizeBytes != null)
               Text(
                 formatBytes(node.sizeBytes),

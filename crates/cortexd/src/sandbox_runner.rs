@@ -177,6 +177,104 @@ pub struct DirEntry {
     pub is_dir: bool,
     /// 目录恒为 0 —— 算目录大小要递归，而这条路径上没人愿意等。
     pub size: i64,
+    /// 最后修改时间，Unix 秒。
+    ///
+    /// 这一项的用处是回答**「这是 agent 刚写的那个吗」** —— 一个几十个文件的
+    /// 工作区里，光看名字和大小分不出哪些是这一轮的产物。
+    ///
+    /// `Option` 而不是 0：tar 里确实可能没有这个字段（`header().mtime()` 返回
+    /// `Result`），而 0 是 1970 年，会在界面上显示成一个煞有介事的假日期。
+    /// 「不知道」必须能表达成「不知道」。
+    pub mtime: Option<i64>,
+}
+
+/// 把 docker archive API 给的 tar 解成**一层**目录项。
+///
+/// 单独拎出来是为了能测：`list_dir` 要连 daemon，而这段解析是纯计算，
+/// 而且它有一处**只有构造出特定顺序的 tar 才看得见**的微妙 —— 见函数体里
+/// 关于目录自身记录与子项记录的那段。
+///
+/// # Errors
+/// tar 解不开，或者里面的路径不合法。
+fn one_level_from_tar(tar: &[u8]) -> Result<Vec<DirEntry>> {
+    // archive API 给的是**整个子树**的 tar，而我们只要一层。
+    //
+    // 为什么不换个 API：docker 没有「列目录」这条。要么这样，要么在容器里
+    // 跑一次 `ls` —— 而那是**不可信侧**，它想报什么就报什么
+    // （一个被注入的 agent 可以把 `secrets.env` 从列表里藏掉）。
+    // 宁可多解一次 tar。
+    //
+    // 代价：一个巨大的目录会把整棵子树拉过来。上限由 `MAX_EXPORT_BYTES`
+    // 兜着，超了报错而不是截断 —— 截断出来的是一份**看起来完整的**
+    // 文件列表，那比报错糟得多。
+    let mut out: Vec<DirEntry> = Vec::new();
+    // name → (在 out 里的下标, 这一项自己那条 tar 记录是否已经见过)
+    //
+    // 第二个字段是为了 **mtime**：一个目录在 tar 里既有自己那条记录，
+    // 也有它每个子项的记录，而两者的 mtime 是不同的东西。谁先出现取决于
+    // tar 的组织方式，所以不能「第一条见到的就算」—— 那样同一个目录的
+    // 修改时间会随目录内容变化而在两个值之间跳，而且没有任何规律可循。
+    // 自己那条记录一旦出现就**覆盖**，且只覆盖一次。
+    let mut seen: std::collections::HashMap<String, (usize, bool)> =
+        std::collections::HashMap::new();
+    let mut ar = tar::Archive::new(std::io::Cursor::new(tar));
+    let entries = ar
+        .entries()
+        .map_err(|e| CortexError::Store(format!("解 tar 失败：{e}")))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| CortexError::Store(format!("读 tar 项失败：{e}")))?;
+        let ep = entry
+            .path()
+            .map_err(|e| CortexError::Store(format!("tar 里的路径不合法：{e}")))?;
+        // tar 里的路径形如 `basename/子路径...`，第一段是被导出的那个目录
+        // 自己。要的是**紧邻的下一段**
+        let mut segs = ep.components();
+        let _root = segs.next();
+        let Some(first) = segs.next() else { continue };
+        let name = first.as_os_str().to_string_lossy().into_owned();
+        if name.is_empty() {
+            continue;
+        }
+        // 还有第三段 = 这条记录是**子项**，不是这一项自己
+        // （目录自己那条记录可能排在后面，也可能先出现）
+        let deeper = segs.next().is_some();
+        let is_dir = deeper || entry.header().entry_type().is_dir();
+        let mtime = entry
+            .header()
+            .mtime()
+            .ok()
+            .and_then(|m| i64::try_from(m).ok());
+        let size = if is_dir {
+            0
+        } else {
+            i64::try_from(entry.header().size().unwrap_or(0)).unwrap_or(i64::MAX)
+        };
+
+        match seen.get_mut(&name) {
+            // 已经收过，而这条是它自己那条记录 —— 用它把之前从子项那儿
+            // 猜来的 mtime 换掉
+            Some((idx, exact @ false)) if !deeper => {
+                *exact = true;
+                out[*idx].is_dir = is_dir;
+                out[*idx].size = size;
+                out[*idx].mtime = mtime;
+            }
+            Some(_) => {}
+            None => {
+                seen.insert(name.clone(), (out.len(), !deeper));
+                out.push(DirEntry {
+                    name,
+                    is_dir,
+                    size,
+                    mtime,
+                });
+            }
+        }
+    }
+    // 目录在前、同类按名字 —— 与桌面端那棵树的顺序一致
+    out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+    Ok(out)
 }
 
 /// 把一个用户给的路径校验成工作区内的绝对路径。
@@ -956,17 +1054,41 @@ impl DockerRunner {
             return;
         };
 
-        let mut catalog = Vec::new();
-        for img in images {
-            let Some(tag) = img.repo_tags.first().cloned() else {
-                continue;
-            };
-            // docker 不给「最后使用时间」，只给创建时间。用它当近似 ——
-            // 每次命中缓存都不会更新 created，所以一个天天在用的老镜像仍然
-            // 排在前面。**这是这条 GC 已知的不足**，代价是偶尔多跑一次 setup，
-            // 而不是删掉正在用的东西（正在用的那个有容器引用着，删不掉）
-            catalog.push((tag, img.size, img.created));
+        // ── 「最后使用时间」从哪来 ──────────────────────────
+        //
+        // docker 的镜像对象上**没有**这个字段，只有 `created`。按 created 排
+        // 的话，一个半年前建好、天天在用的环境镜像会第一个被删，然后下一轮
+        // 对话要重跑一次十分钟的 setup。
+        //
+        // 容器就是使用记录 —— 合成的逻辑与理由见
+        // `sandbox_env::catalog_with_last_use`。这里只负责问 docker 要数据。
+        let mut containers = Vec::new();
+        if let Ok(list) = self
+            .docker
+            .list_containers(Some(
+                qp::ListContainersOptionsBuilder::default()
+                    .all(true)
+                    .build(),
+            ))
+            .await
+        {
+            for c in list {
+                if let (Some(image), Some(created)) = (c.image, c.created) {
+                    containers.push((image, created));
+                }
+            }
         }
+
+        let catalog = crate::sandbox_env::catalog_with_last_use(
+            images
+                .into_iter()
+                .filter_map(|img| {
+                    let tag = img.repo_tags.first().cloned()?;
+                    Some((tag, img.size, img.created))
+                })
+                .collect(),
+            &containers,
+        );
 
         for tag in
             crate::sandbox_env::pick_evictions(catalog, crate::sandbox_env::CACHE_BUDGET_BYTES)
@@ -1295,55 +1417,7 @@ impl SandboxRunner for DockerRunner {
     async fn list_dir(&self, owner: &str, path: &str) -> Result<Vec<DirEntry>> {
         let path = validate_ws_path(path)?;
         let tar = self.archive(&Self::container_name(owner), &path).await?;
-
-        // archive API 给的是**整个子树**的 tar，而我们只要一层。
-        //
-        // 为什么不换个 API：docker 没有「列目录」这条。要么这样，要么在容器里
-        // 跑一次 `ls` —— 而那是**不可信侧**，它想报什么就报什么
-        // （一个被注入的 agent 可以把 `secrets.env` 从列表里藏掉）。
-        // 宁可多解一次 tar。
-        //
-        // 代价：一个巨大的目录会把整棵子树拉过来。上限由 `MAX_EXPORT_BYTES`
-        // 兜着，超了报错而不是截断 —— 截断出来的是一份**看起来完整的**
-        // 文件列表，那比报错糟得多。
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut ar = tar::Archive::new(std::io::Cursor::new(&tar[..]));
-        let entries = ar
-            .entries()
-            .map_err(|e| CortexError::Store(format!("解 tar 失败：{e}")))?;
-
-        for entry in entries {
-            let entry = entry.map_err(|e| CortexError::Store(format!("读 tar 项失败：{e}")))?;
-            let ep = entry
-                .path()
-                .map_err(|e| CortexError::Store(format!("tar 里的路径不合法：{e}")))?;
-            // tar 里的路径形如 `basename/子路径...`，第一段是被导出的那个目录
-            // 自己。要的是**紧邻的下一段**
-            let mut segs = ep.components();
-            let _root = segs.next();
-            let Some(first) = segs.next() else { continue };
-            let name = first.as_os_str().to_string_lossy().into_owned();
-            if name.is_empty() || !seen.insert(name.clone()) {
-                continue;
-            }
-            // 还有第三段 = 这一项是个目录（它自己那条记录可能排在后面，
-            // 也可能因为 tar 的组织方式而先出现子项）
-            let deeper = segs.next().is_some();
-            let is_dir = deeper || entry.header().entry_type().is_dir();
-            out.push(DirEntry {
-                name,
-                is_dir,
-                size: if is_dir {
-                    0
-                } else {
-                    i64::try_from(entry.header().size().unwrap_or(0)).unwrap_or(i64::MAX)
-                },
-            });
-        }
-        // 目录在前、同类按名字 —— 与桌面端那棵树的顺序一致
-        out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
-        Ok(out)
+        one_level_from_tar(&tar)
     }
 
     async fn read_file(&self, owner: &str, path: &str) -> Result<bytes::Bytes> {
@@ -1462,6 +1536,115 @@ mod tests {
             relay: "http://127.0.0.1:3129".into(),
             image: DEFAULT_IMAGE.to_owned(),
         }
+    }
+
+    /// 造一份 tar：`(路径, 是否目录, 大小, mtime)`。
+    ///
+    /// 顺序**照给的来** —— 这一组测试要验的正是「记录以什么顺序出现」。
+    fn tar_of(items: &[(&str, bool, u64, u64)]) -> Vec<u8> {
+        use std::io::Read as _;
+        let mut b = tar::Builder::new(Vec::new());
+        for (path, is_dir, size, mtime) in items {
+            let mut h = tar::Header::new_gnu();
+            h.set_path(path).expect("路径能写进 tar header");
+            h.set_size(if *is_dir { 0 } else { *size });
+            h.set_mtime(*mtime);
+            h.set_mode(0o644);
+            h.set_entry_type(if *is_dir {
+                tar::EntryType::Directory
+            } else {
+                tar::EntryType::Regular
+            });
+            h.set_cksum();
+            // **数据长度必须与 header 里的 size 对得上。**
+            // 声明 11 字节却 append 空数据，读的时候会从数据起点往前跳 11 字节，
+            // 落进下一条 header 中间 —— 流被读坏，而症状是「第二条记录没生效」，
+            // 看起来完全像被测代码的 bug。第一版夹具就是这么写的，
+            // 差点让我去改一段本来正确的实现。
+            let data = std::io::repeat(b'x').take(if *is_dir { 0 } else { *size });
+            b.append(&h, data).expect("追加 tar 项");
+        }
+        b.into_inner().expect("收尾 tar")
+    }
+
+    fn by_name<'a>(v: &'a [DirEntry], name: &str) -> &'a DirEntry {
+        v.iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("列表里应该有 {name}，实际有：{v:?}"))
+    }
+
+    /// 目录的 mtime 要取**它自己**那条记录，不是碰巧先出现的某个子项。
+    ///
+    /// docker 的 archive API 不保证顺序。按「第一条见到的就算」写，同一个目录
+    /// 的修改时间会随内容变化在两个值之间跳，而这种错**只在特定顺序下出现**
+    /// —— 手上真机的那个 tar 恰好是目录在前，测不出来。
+    #[test]
+    fn a_directorys_mtime_comes_from_its_own_record() {
+        let dir_mtime = 1_700_000_000;
+        let child_mtime = 1_800_000_000;
+
+        for (label, items) in [
+            (
+                "目录记录在前",
+                vec![
+                    ("ws/sub", true, 0, dir_mtime),
+                    ("ws/sub/a.txt", false, 11, child_mtime),
+                ],
+            ),
+            (
+                "子项记录在前",
+                vec![
+                    ("ws/sub/a.txt", false, 11, child_mtime),
+                    ("ws/sub", true, 0, dir_mtime),
+                ],
+            ),
+        ] {
+            let got = one_level_from_tar(&tar_of(&items)).expect("解得开");
+            let sub = by_name(&got, "sub");
+            assert!(sub.is_dir, "[{label}] sub 是目录");
+            assert_eq!(
+                sub.mtime,
+                Some(dir_mtime.cast_signed()),
+                "[{label}] 目录的 mtime 必须来自它自己那条记录（{dir_mtime}），                 不是子项的（{child_mtime}）—— 否则同一个目录的时间会随内容变化乱跳"
+            );
+            assert_eq!(got.len(), 1, "[{label}] 只列一层，子项不该冒出来");
+        }
+    }
+
+    /// 目录的 size 恒为 0，普通文件取 tar 里的真实大小。
+    #[test]
+    fn sizes_and_kinds_survive_either_ordering() {
+        let got = one_level_from_tar(&tar_of(&[
+            ("ws/a.txt", false, 42, 100),
+            ("ws/sub/deep.bin", false, 999, 200),
+            ("ws/sub", true, 0, 300),
+        ]))
+        .expect("解得开");
+
+        assert_eq!(got.len(), 2, "一层里只有 a.txt 与 sub，实际：{got:?}");
+        // 目录在前、同类按名字 —— 与桌面端那棵树一致
+        assert_eq!(got[0].name, "sub", "目录排在前面");
+        assert_eq!(by_name(&got, "a.txt").size, 42);
+        assert_eq!(
+            by_name(&got, "sub").size,
+            0,
+            "目录不报大小 —— 算它要递归整棵子树，这条路径上没人愿意等"
+        );
+    }
+
+    /// mtime 缺失时是 `None`，**不是 0**。
+    ///
+    /// 0 是 1970-01-01，界面会把它显示成一个煞有介事的假日期，
+    /// 而用户没法把它和「真的是 1970 年」区分开。
+    #[test]
+    fn a_missing_mtime_stays_unknown() {
+        // set_mtime(0) 就是 tar 里「没有有意义的时间」那种情况
+        let got = one_level_from_tar(&tar_of(&[("ws/x.txt", false, 1, 0)])).expect("解得开");
+        assert_eq!(
+            by_name(&got, "x.txt").mtime,
+            Some(0),
+            "0 原样透出 —— 界面那侧负责把它当成「未知」而不是 1970 年，             这里不做任何加工，因为 tar 里 0 与「字段缺失」本来就分不开"
+        );
     }
 
     /// 镜像来自**进程配置**，不来自请求。

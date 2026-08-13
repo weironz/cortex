@@ -15,6 +15,7 @@
 //! 用户唯一想绑的目录。
 
 pub mod diff;
+pub mod egress;
 pub mod prompt;
 pub mod sandbox;
 pub mod tools;
