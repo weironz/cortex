@@ -240,6 +240,7 @@ async fn main() -> anyhow::Result<()> {
         remote: remote.clone(),
         outbox,
         http,
+        standalone_llm: matches!(route, LlmRoute::Direct),
         // 空串按「没配」处理。**这是这个仓库第五次撞上它** ——
         // clap 的 `env` 对一个设成空串的变量给出 `Some("")`，于是：
         // agent 以为自己有 token（下面那条「不做认证」的警告因此一次都不打），

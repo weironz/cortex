@@ -207,7 +207,14 @@ async fn chat(State(st): State<LocalState>, req: Request) -> Response {
         Err(e) => return bad_request(format!("请求体不是合法的 ChatRequest：{e}")),
     };
 
-    if st.engine.workspaces.get(&parsed.session_id).is_none() {
+    // 离线形态（`--llm-route=direct`，key 在本地）**不转发**。
+    //
+    // 那时 cortexd 压根不参与这一轮，转发必然失败 —— 把一个确定的失败做成
+    // 一次超时是纯粹的浪费。本地跑（未绑定就是封闭沙箱、没有文件工具）是
+    // 离线唯一能给的东西，而用户是**显式**选进这个模式的：他已经接受了
+    // 「这段时间不会有记忆」，「也够不到云端工作区」是同一个代价，
+    // 由界面上那条常驻横幅统一说明，不逐轮重复。
+    if !st.standalone_llm && st.engine.workspaces.get(&parsed.session_id).is_none() {
         // 这个会话不在这台机器上。把原样的请求送回 cortexd —— 它那边知道
         // 该进哪个沙箱（或者告诉我们这个会话钉在别处）
         let mut fwd = Request::from_parts(parts, axum::body::Body::from(bytes));

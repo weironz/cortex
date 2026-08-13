@@ -339,24 +339,30 @@ async fn sandbox_scope(
     st: &AppState,
     owner: &str,
     session_id: &str,
-) -> crate::sandbox_token::SandboxScope {
-    let project = match st.tenant_store_for_user(owner).await {
-        Ok(store) => store
-            .session_state(session_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| s.project_id),
+) -> (
+    crate::sandbox_token::SandboxScope,
+    cortex_store::SessionRuntime,
+) {
+    // 项目与执行归属来自**同一行**。分两次查的话，两个判断会在并发改动下
+    // 看到不同的快照，而症状是「偶尔进错容器」—— 没有比这更难复现的
+    let state = match st.tenant_store_for_user(owner).await {
+        Ok(store) => store.session_state(session_id).await.ok().flatten(),
         Err(e) => {
             tracing::debug!(owner = %owner, error = %e, "取不到租户库，沙箱按未分组算");
             None
         }
     };
-    crate::sandbox_token::SandboxScope {
-        owner: owner.to_owned(),
-        session_id: session_id.to_owned(),
-        project,
-    }
+    let runtime = state
+        .as_ref()
+        .map_or(cortex_store::SessionRuntime::Cloud, |s| s.runtime);
+    (
+        crate::sandbox_token::SandboxScope {
+            owner: owner.to_owned(),
+            session_id: session_id.to_owned(),
+            project: state.and_then(|s| s.project_id),
+        },
+        runtime,
+    )
 }
 
 /// 确保这个作用域的沙箱在跑，回一把能进去的令牌。
@@ -430,7 +436,23 @@ async fn chat_in_sandbox(
         return e.into_response();
     }
 
-    let scope = sandbox_scope(st, &owner, &req.session_id).await;
+    let (scope, runtime) = sandbox_scope(st, &owner, &req.session_id).await;
+
+    // ── 钉在某台机器上的会话，这儿跑不了 ──
+    //
+    // 它的文件在那台机器的一个本机目录里，而这里只有云端那个卷。硬跑的话
+    // agent 会拿到一个**完全不同的文件系统**：历史里那些路径全都不存在，
+    // 而它读不到时说的是「没有这个文件」—— 一句听起来像它失忆了的实话。
+    //
+    // 这正是这一整套改动要消灭的东西：同一个会话只能有一个文件系统。
+    if matches!(runtime, cortex_store::SessionRuntime::Local) {
+        return ApiError::conflict(
+            "这个会话绑在某台机器上的一个目录里，它的文件只在那儿。\
+             在这里继续聊的话 agent 看不到那些文件 —— 请到那台机器上打开它。",
+        )
+        .into_response();
+    }
+
     let project = scope.project.clone();
     let (handle, token) = match ensure_sandbox(st, layer, scope).await {
         Ok(v) => v,
@@ -675,7 +697,7 @@ async fn list_snapshots(
     let owner = crate::accounts::current_user(&st, &headers).await;
     // 列快照**不拉容器**：这条只读表，不碰卷。它是这几条里唯一一条
     // 容器不在也能给出正确答案的
-    let scope = sandbox_scope(&st, &owner, q.session()).await.key();
+    let scope = sandbox_scope(&st, &owner, q.session()).await.0.key();
     Ok(Json(
         crate::sandbox_snapshot::list(&st, &owner, &scope).await?,
     ))
@@ -783,7 +805,7 @@ async fn ensure_for_files<'a>(
     let layer = st
         .sandbox_layer()
         .ok_or_else(|| ApiError::unsupported("这个部署没有开云沙箱"))?;
-    let scope = sandbox_scope(st, owner, session_id).await;
+    let (scope, _runtime) = sandbox_scope(st, owner, session_id).await;
     let key = scope.key();
     ensure_sandbox(st, layer, scope).await?;
     Ok((layer, key))
@@ -1243,17 +1265,34 @@ impl ApiError {
     /// is a loop on a road that will never open」）。所以只有真正的永久缺失
     /// 才配用它。
     ///
-    /// # 这里曾经有一个配套的 `conflict`（409），已经删掉
-    ///
-    /// 它是给「沙箱容器被回收了，发条消息就回来」用的。那个状态今天不再
-    /// 暴露给客户端：谁要摸容器谁负责把它拉起来（`ensure_for_files`），
-    /// 于是没有任何一条路会回「你去做件事」。要是哪天又出现一个真正的
-    /// 「能力在、当下状态不满足」，再加回来 —— 但别用它复活容器那条路。
+    /// 与 [`Self::conflict`] 的分界：那个说的是「能力在，只是**这个会话**
+    /// 不在这儿」，用户做件事就好了；这个说的是「这条路永远不会开」。
     pub fn unsupported(message: impl Into<String>) -> Self {
         Self {
             message: Some(message.into()),
             inner: cortex_core::CortexError::Store("unsupported".into()),
             status: Some(StatusCode::NOT_IMPLEMENTED),
+        }
+    }
+
+    /// 409：能力在，但**这个会话**不在这儿。
+    ///
+    /// # 它删过一次，又加回来了
+    ///
+    /// 上一版它服务的是「沙箱容器被回收了，发条消息就回来」，而那条路后来
+    /// 整个删了 —— 容器由谁碰谁拉起，用户不该知道有容器。删它时写明了
+    /// 「哪天又出现一个真正的『能力在、当下状态不满足』再加回来」。
+    ///
+    /// 这就是那一天：会话钉在某台机器上，而请求打到了云端。**这个状态不是
+    /// 实现细节**，它是用户自己造成的、也只有他能解开的 —— 去那台机器上打开它。
+    ///
+    /// 与 501 分开的理由没变：客户端把 501 当成「这条路不会开」，
+    /// 据此把功能降级掉并且**不再重试**。
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            message: Some(message.into()),
+            inner: cortex_core::CortexError::Store("conflict".into()),
+            status: Some(StatusCode::CONFLICT),
         }
     }
 }

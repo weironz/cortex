@@ -692,6 +692,16 @@ pub struct SessionPatch {
     /// 收敛成了 NULL），用户看到的是「拖进去又弹回来了」。
     #[serde(default, deserialize_with = "explicit_option")]
     pub project_id: Option<Option<String>>,
+    /// 声明这个会话在哪儿跑。见 [`SessionRuntimeDto`]。
+    ///
+    /// 字段不出现 = 不动。**没有 `null` 那一档** —— 「没有执行归属」不是一个
+    /// 合法状态：会话总要在某个地方跑，缺省是云端。
+    ///
+    /// 写它的人通常是**本地 agent**而不是界面：绑定发生在
+    /// `PUT /local/workspaces/{id}`（那条完全不碰网络），紧接着由它把
+    /// 「这个会话归属本机了」同步上来 —— 那是唯一同时知道这两件事的地方。
+    #[serde(default)]
+    pub runtime: Option<SessionRuntimeDto>,
 }
 
 /// 把「字段出现且为 null」与「字段没出现」区分开。

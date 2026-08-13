@@ -18,6 +18,12 @@ pub struct LocalState {
     /// （写入与检索该秒级返回），而反代要过 `/blobs/{hash}` 这种几十兆的
     /// 下载与 `/ws` 这种长连接 —— 用同一个客户端会让大文件在 20 秒处被切断。
     pub http: reqwest::Client,
+    /// 这台 agent 自己直连模型供应商（`--llm-route=direct`），也就是
+    /// **离线形态**：key 在本地，cortexd 压根不参与这一轮。
+    ///
+    /// 它决定 `routes::chat` 要不要把云端会话送回 cortexd —— 离线时那条路
+    /// 必然失败，把一个确定的失败做成一次超时是纯粹的浪费。见那个 handler。
+    pub standalone_llm: bool,
     /// 入站认证要比对的 token。`None` = 不认证。
     ///
     /// **不认证只该出现在没有远端 token 的开发场景**。它绑在 loopback 上

@@ -91,11 +91,39 @@ pub async fn bind(
         // 校验器的拒绝话术是写给人看的（「整台机器不是工作区」），
         // 原样往上带，别在这里改写成一句通用的 400
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        Ok(ws) => Json(BindAck {
-            session_id,
-            workspace: ws,
-        })
-        .into_response(),
+        Ok(ws) => {
+            announce_runtime(&st, &session_id, ws.is_some()).await;
+            Json(BindAck {
+                session_id,
+                workspace: ws,
+            })
+            .into_response()
+        }
+    }
+}
+
+/// 把「这个会话归属本机了 / 不再归属了」同步给 cortexd。
+///
+/// # 为什么由这里说，而不是界面
+///
+/// 绑定发生在这条完全不碰网络的路上（那正是它存在的理由），于是**只有这里
+/// 同时知道两件事**：路径合格了，以及它在这一台机器上。让客户端在别处
+/// 再发一次的话，两个事实会各自失败、各自重试，然后漂开。
+///
+/// # 为什么失败只记一行日志
+///
+/// 本机这一侧已经写完了 —— `workspaces.json` 是绑定的权威，而
+/// `routes::chat` 的分流judgement 只看它。同步失败的后果仅仅是**别的设备
+/// 不知道**这个会话钉在这儿：它们那边会照旧当成云端会话。
+///
+/// 那是一个可恢复的、且不影响本机使用的降级，不值得让绑定本身失败 ——
+/// 尤其考虑到最常见的失败原因就是「此刻没网」，而那时用户往往正想离线干活。
+async fn announce_runtime(st: &LocalState, session_id: &str, bound: bool) {
+    if let Err(e) = st.remote.set_session_runtime(session_id, bound).await {
+        tracing::warn!(
+            session = %session_id, error = %e,
+            "执行归属没同步上去：别的设备会把这个会话当成云端会话。             本机这侧不受影响 —— 绑定的权威是 workspaces.json"
+        );
     }
 }
 

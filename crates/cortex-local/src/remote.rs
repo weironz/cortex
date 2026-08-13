@@ -239,6 +239,27 @@ impl Remote {
         checked(resp).await.map(|_| ())
     }
 
+    /// 声明这个会话的**执行归属**。
+    ///
+    /// 与 [`Self::rename_session`] 同一条路径，但语义完全不同：改名是内容，
+    /// 这个是「这段对话在哪儿跑」。本地 agent 在绑定 / 解绑本机目录之后调它
+    /// —— 那是唯一同时知道「路径合格」与「它在这一台机器上」的地方。
+    pub async fn set_session_runtime(&self, session_id: &str, local: bool) -> Result<()> {
+        let resp = self
+            .auth(
+                self.http
+                    .patch(self.url(&format!("/sessions/{session_id}"))),
+            )
+            .timeout(REQUEST_TIMEOUT)
+            .json(&serde_json::json!({
+                "runtime": if local { "local" } else { "cloud" },
+            }))
+            .send()
+            .await
+            .map_err(map_transport)?;
+        checked(resp).await.map(|_| ())
+    }
+
     /// 取这个会话最近的若干轮，用来铺当前这一轮的上下文。
     ///
     /// # 为什么本地 agent 也要问远端

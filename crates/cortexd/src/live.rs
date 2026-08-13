@@ -1400,6 +1400,23 @@ impl Live {
             None => {}
         }
 
+        // ── 执行归属 ──
+        //
+        // 不校验「这台机器上真有那个绑定」：服务端**看不到**客户机的
+        // `workspaces.json`，那是这套设计的前提而不是疏漏（见
+        // `cortex-local::workspaces` 的模块头）。声明它的是唯一知情的一方。
+        if let Some(runtime) = patch.runtime {
+            events.push(cortex_store::NewSessionEvent::set_runtime(
+                session_id,
+                match runtime {
+                    SessionRuntimeDto::Local => cortex_store::SessionRuntime::Local,
+                    SessionRuntimeDto::Cloud => cortex_store::SessionRuntime::Cloud,
+                },
+                cortex_store::Actor::User,
+                &self.device_id,
+            ));
+        }
+
         if events.is_empty() {
             return Err(CortexError::Invalid(
                 "请求体里没有任何要改的字段（title / archived / workspace / project_id）".into(),
