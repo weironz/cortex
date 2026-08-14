@@ -78,6 +78,9 @@ services:
       #
       # cortexd 与沙箱容器在同一个 docker 网络里（见下面 networks），
       # 于是它直连容器名，**中继那一整层不参与** —— 与生产一致。
+      #
+      # 编排正在搬去 `agentd`（见下面那个服务）。这三行还留着是因为
+      # cortexd 那份副本还没删 —— 删除是紧接着的一个提交。
       CORTEX_SANDBOX_ENABLED: "1"
       CORTEX_SANDBOX_SAME_NETWORK: "1"
       CORTEX_SANDBOX_CALLBACK: http://cortexd:8080
@@ -117,6 +120,42 @@ services:
       # 接进沙箱网段 ⇒ same_network=1 ⇒ 直连容器名。
       # 注意这个网段是 internal 的：接进去**不会**让 cortexd 失去出网，
       # 因为它同时还在 default 上（多网络时默认路由来自非 internal 那张）
+      - sandbox
+
+  # ─── agent 编排 ───────────────────────────────────────
+  #
+  # 它是**唯一**碰 docker.sock 的服务（cortexd 那份副本删掉之后）。
+  # 分流在 nginx 那一层：`/chat` 与 `/sandbox/*` 到这儿，其余到 cortexd。
+  #
+  # 与 cortexd 的关系只有 HTTP —— 没有数据库、没有对象存储凭据，
+  # 要钥匙走 `POST /delegated-tokens`，带的是用户自己那把 bearer。
+  agentd:
+    image: cortex/devruntime:latest
+    container_name: cortex-agentd-dev
+    profiles: [dev]
+    restart: unless-stopped
+    depends_on:
+      # 只是启动顺序：agentd 连不上 cortexd 时照常起来，第一条请求才失败
+      # （而那条失败说得清）。硬等的话，cortexd 挂了会把 agentd 一起拖住
+      - cortexd
+    command: ["/opt/cortex/bin/cortex-agentd"]
+    environment:
+      CORTEX_AGENTD_BIND: 0.0.0.0:8081
+      # 这个进程怎么找到记忆服务
+      CORTEX_MEMORY_URL: http://cortexd:8080
+      # **容器**怎么找到记忆服务。与上面那条在「不同网段」时不一样
+      CORTEX_SANDBOX_CALLBACK: http://cortexd:8080
+      CORTEX_SANDBOX_SAME_NETWORK: "1"
+      RUST_LOG: ${RUST_LOG:-cortex_agentd=debug,warn}
+    volumes:
+      - cortex_dev_bin:/opt/cortex/bin:ro
+      # 起沙箱要 docker API。**这是把宿主 root 交给它** —— 容器规格全部写死
+      # 在 DockerRunner 里，调用方说不出第二个挂载，那是这条论证的另一半
+      - /var/run/docker.sock:/var/run/docker.sock
+    # 同 cortexd：socket 是 root:root 660，而这个容器不跑 root
+    group_add: ["0"]
+    networks:
+      - default
       - sandbox
 
   # ─── Web ──────────────────────────────────────────────

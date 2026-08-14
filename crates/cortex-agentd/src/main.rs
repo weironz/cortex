@@ -69,8 +69,16 @@ struct Args {
     ///
     /// 同网段就直连容器名，否则一切都得穿反向中继 —— 沙箱网段上已发布的
     /// 端口不生效，实测见 docs/sandbox.md 第八节。
-    #[arg(long, env = "CORTEX_SANDBOX_SAME_NETWORK", default_value_t = false)]
-    same_network: bool,
+    ///
+    /// # 为什么是 `String` 而不是 `bool`
+    ///
+    /// 全仓库的开关型环境变量都写 `"1"`（cortexd 那侧是
+    /// `env::var(..) == Ok("1")`），而 clap 的 `bool` 只认 `true`/`false`。
+    /// 声明成 `bool` 的话，同一份 compose 里 cortexd 认得的值会让 agentd
+    /// **启动失败** —— 真机上撞到过，而报错（`invalid value '1'`）看着像
+    /// 配置写错了，不像两个进程对同一个变量的约定不一样。
+    #[arg(long, env = "CORTEX_SANDBOX_SAME_NETWORK", default_value = "0")]
+    same_network: String,
 
     /// 反向中继的地址。同网段时用不上。
     #[arg(
@@ -101,14 +109,15 @@ async fn main() -> anyhow::Result<()> {
     //
     // `preflight` 不能省：`connect` 只造客户端、**不发任何请求** —— socket
     // 挂的是 /dev/null、没权限、daemon 没起，它一样返回 Ok。
+    let same_network = matches!(args.same_network.trim(), "1" | "true" | "yes");
     let callback = args.callback.clone().unwrap_or_else(|| {
-        if args.same_network {
+        if same_network {
             "http://cortexd:8080".into()
         } else {
             "http://host.docker.internal:8080".into()
         }
     });
-    let runner = runner::DockerRunner::connect(&callback, args.same_network, &args.relay)
+    let runner = runner::DockerRunner::connect(&callback, same_network, &args.relay)
         .context("连不上 docker")?;
     runner.preflight().await.context("docker 预检没过")?;
     tracing::info!(memory = %args.memory, callback = %callback, "docker 就绪");

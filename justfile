@@ -242,8 +242,8 @@ dev: dev-build
 
 # 改完 Rust：重编 + 重启，不重建镜像
 dev-restart: dev-build
-    docker compose {{ _dev }} restart cortexd
-    @echo "cortexd 已重启（用的是刚编出来的二进制）"
+    docker compose {{ _dev }} restart cortexd agentd
+    @echo "cortexd 与 agentd 已重启（用的是刚编出来的二进制）"
 
 # 改完界面：重新构建 Flutter Web。
 #
