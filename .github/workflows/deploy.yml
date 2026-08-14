@@ -117,15 +117,21 @@ jobs:
       - name: 验证线上真的在跑这一版
         run: |
           set -euo pipefail
-          got=$(curl -fsS https://cortex.cloudcele.com/api/health); echo "$got"
 
-          echo "$got" | grep -q '"version":"${{ inputs.version }}"' \
-            || { echo "版本不符 —— /api/health 报的不是 ${{ inputs.version }}"; exit 1; }
+          # ── 记忆服务（cortexd）───────────────────────────
+          #
+          # 它由**另一个仓库**（github.com/weironz/cormex）发版，所以这里
+          # **不断言它的版本号** —— 两条时间线各走各的，拿这次部署的版本去
+          # 比它，第一次错开就会报一个与病因无关的假警报。
+          #
+          # 但仍然要查它的三个字段：整套东西离开记忆服务什么都不是，
+          # 而这三条各自对应一种「看起来正常、其实在服务假数据」的失败。
+          mem=$(curl -fsS https://cortex.cloudcele.com/api/health); echo "$mem"
 
           # 认证必须是开着的。一个 auth=disabled 的线上实例会把整个记忆库
           # 交给任何能连上的人，而这件事没有任何别的症状
-          echo "$got" | grep -q '"auth":"token"' \
-            || { echo "线上认证没开 —— 拒绝认为这次部署成功"; exit 1; }
+          echo "$mem" | grep -q '"auth":"token"' \
+            || { echo "记忆服务的认证没开 —— 拒绝认为这次部署成功"; exit 1; }
 
           # ★ `"status":"ok"` 与 docker 的 HEALTHCHECK **都不代表接上了后端**。
           # 本机实测过：少一个 DEEPSEEK_API_KEY，cortexd 就会整个回落到 mock
@@ -134,11 +140,28 @@ jobs:
           # 同理 RUSTFS 凭据不对时 blob_backend 会变成 "local_fs"：
           # 上传的媒体只存在于容器里，不进对象存储、不随备份走、签不出
           # presigned URL —— 而这一切没有任何别的症状。
-          # 所以这两个字段是部署成功的**必要条件**，不是参考信息。
-          echo "$got" | grep -q '"database":"ok"' \
-            || { echo "数据库没接上 —— cortexd 回落到 mock 了，这不是一次成功的部署"; exit 1; }
-          echo "$got" | grep -q '"blob_backend":"s3"' \
+          echo "$mem" | grep -q '"database":"ok"' \
+            || { echo "数据库没接上 —— 记忆服务回落到 mock 了"; exit 1; }
+          echo "$mem" | grep -q '"blob_backend":"s3"' \
             || { echo "对象存储没接上（回落到本地文件系统）—— 媒体不会进备份"; exit 1; }
 
-          # Web 也要真的发得出来（traefik 的路径分流两条都得对）
+          # ── agent 编排（agentd）─────────────────────────
+          #
+          # **这个才是这次部署的版本。** 打的是 `/api/sandbox/health` 而不是
+          # `/api/health`：后者按路径分流归了记忆服务，从公网永远问不到
+          # 这个进程。见 agentd `routes.rs` 里那条路由上的注释。
+          agent=$(curl -fsS https://cortex.cloudcele.com/api/sandbox/health); echo "$agent"
+
+          echo "$agent" | grep -q '"version":"${{ inputs.version }}"' \
+            || { echo "版本不符 —— agentd 报的不是 ${{ inputs.version }}"; exit 1; }
+          echo "$agent" | grep -q '"role":"agent-orchestrator"' \
+            || { echo "/api/sandbox/health 答话的不是 agentd —— traefik 的分流配错了"; exit 1; }
+
+          # **拆成两个服务之后，「两边各自都起来了」不等于「它们连得上」。**
+          # 而后者才是用户感受到的那件事：连不上记忆服务的 agentd 要不到
+          # 委托凭据，于是一条对话都开不了 —— 但它自己的容器是 healthy 的。
+          echo "$agent" | grep -q '"memory_reachable":true' \
+            || { echo "agentd 连不上记忆服务 —— 对话一条都开不了"; exit 1; }
+
+          # Web 也要真的发得出来（traefik 的路径分流三条都得对）
           curl -fsS https://cortex.cloudcele.com/ | grep -q '<html'

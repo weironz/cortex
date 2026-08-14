@@ -16,7 +16,7 @@
 #      git tag  vX.Y.Z                          ← 发布的触发器与产物文件名
 #      docker 镜像 tag                          ← 从 git tag 派生（见 release.yml）
 #
-#  漂移的失败方式极其难查：`cortexd --version` 说 0.1.0，而下载页面上写着
+#  漂移的失败方式极其难查：`cortex --version` 说 0.1.0，而下载页面上写着
 #  0.2.0，二进制里的 `cortex_core::VERSION` 会跟着进日志、进 bug 报告、
 #  进 `/health`。等有人拿着「0.2.0 有这个 bug」来找的时候，谁也说不清他手上
 #  那份到底是什么。

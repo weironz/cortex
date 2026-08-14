@@ -91,9 +91,11 @@ jobs:
   #  0.1.2 收敛到一个平台：前期迭代快，另外三个的成本不值。
   #
   #  ── Linux / macOS 的人还剩什么 ──────────────────────────
-  #  docker 镜像 —— 里面 cortexd 与 `cortex` CLI 都在（见
-  #  scripts/docker/Dockerfile.cortexd 的 COPY）。少的是「不想用 docker
-  #  的人下个二进制就跑」这条路。只要 CLI 的话 `cargo install --git` 最短。
+  #  docker 镜像 —— agent 编排、Web、沙箱、出网代理四个。
+  #  **记忆服务的镜像不在这里**：它是另一个产品，在 Cormex 仓库
+  #  （github.com/weironz/cormex）发它自己的。
+  #  少的是「不想用 docker 的人下个二进制就跑」这条路。
+  #  只要 CLI 的话 `cargo install --git` 最短。
   #  **这一条必须写进发布说明与 docs/install.md** —— 0.1.1 的下载页上有
   #  四个包，0.1.2 只剩一个，不解释就是退化。
   #
@@ -165,7 +167,7 @@ jobs:
   # ══════════════════════════════════════════════════════════
   #  Windows 桌面端安装程序
   #
-  #  v0.1.0 只发了 cortexd + CLI 的 zip，而它的名字
+  #  v0.1.0 只发了服务端 + CLI 的 zip，而它的名字
   #  （cortex-v0.1.0-x86_64-pc-windows-msvc.zip）看上去就像「Windows 版
   #  Cortex」。桌面端 GUI 根本不在里面 —— 第一批用户会下错东西。
   #
@@ -218,7 +220,7 @@ jobs:
           if-no-files-found: error
 
   # ══════════════════════════════════════════════════════════
-  #  docker 镜像 —— cortexd 与 cortex-web，各推两个 registry
+  #  docker 镜像 —— agentd / web / sandbox / egress，各推两个 registry
   #
   #  ACR 是生产实际拉取的那个（节点在国内，Docker Hub 在那里要么慢、
   #  要么得经第三方镜像站，而那类站点缓存 tag→digest，是「拉到旧镜像
@@ -237,6 +239,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # **这里没有 cortexd。** 记忆服务是另一个产品，在另一个仓库
+          # （github.com/weironz/cormex）发它自己的镜像。节点上那份 compose
+          # 仍然拉它 —— 那是部署把两者放在一台机器上，不是代码上的依赖。
+          - image: cortex-agentd
+            dockerfile: scripts/docker/Dockerfile.agentd
+          - image: cortex-web
+            dockerfile: scripts/docker/Dockerfile.web
+          # 云沙箱那两个。挂在 compose 的 `sandbox` profile 上、默认不启用，
+          # 但**镜像必须照常发** —— 节点上要开沙箱时得拉得到对应版本，
+          # 而「用户想开的时候现发一版」不是一条能用的路。
+          - image: cortex-sandbox
+            dockerfile: scripts/docker/Dockerfile.sandbox
+          - image: cortex-egress-proxy
+            dockerfile: scripts/docker/Dockerfile.egress
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
@@ -252,7 +268,7 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      # cortex-web 要把 API 地址编译进去；cortexd 不需要这个 arg。
+      # cortex-web 要把 API 地址编译进去；别的镜像不需要这个 arg。
       # 传给用不到它的 Dockerfile 是无害的（会有一条 UnusedBuildArgs 警告），
       # 但显式区分能让「哪个镜像与域名绑定」这件事在文件里看得见
       - name: 决定 build-args
@@ -297,16 +313,14 @@ jobs:
         run: |
           set -euo pipefail
           img="registry.cn-shenzhen.aliyuncs.com/willspace/${{ matrix.image }}:v${{ needs.preflight.outputs.version }}"
-          if [ "${{ matrix.image }}" = "cortexd" ]; then
-            # --version 与 --generate-token 都不需要数据库、不需要 API key，
-            # 是唯一能在 CI 里无依赖执行的真实代码路径。它们能证明动态链接
-            # 是通的 —— ONNX Runtime / libstdc++ 那一类问题会在这里当场炸
+          if [ "${{ matrix.image }}" = "cortex-agentd" ]; then
+            # `--version` 不需要 docker、不需要记忆服务，是唯一能在 CI 里
+            # 无依赖执行的真实代码路径。它证明的是**动态链接通的**——
+            # glibc 版本对不上那一类问题会在这里当场炸，而不是等到线上
+            # 起容器时报一句 `GLIBC_2.xx not found`。
             docker run --rm "$img" --version | tee /tmp/v.txt
             grep -qF "${{ needs.preflight.outputs.version }}" /tmp/v.txt \
               || { echo "::error::镜像里的版本不是 ${{ needs.preflight.outputs.version }}"; exit 1; }
-            docker run --rm "$img" --generate-token | grep -q CORTEX_AUTH_TOKEN_SHA256
-            # prod 的 migration 靠镜像里这份 sqlx
-            docker run --rm --entrypoint sqlx "$img" --version
           elif [ "${{ matrix.image }}" = "cortex-sandbox" ]; then
             # 容器里跑的是 cortex-local。ENTRYPOINT 是 sandbox-entrypoint，
             # 它最后 `exec cortex-local "$@"` —— 所以 --version 直接透传进去。
@@ -418,7 +432,7 @@ jobs:
           # 恢复其中任何一样时**必须同步加回这一段** ——
           # 否则清点照常绿，而下载页上少了东西没有任何提示
           [ -f "cortex-v$v-x86_64-pc-windows-msvc.zip" ] \
-            || { echo "::error::缺少 Windows 二进制包（cortexd + CLI + 本地 agent）"; miss=1; }
+            || { echo "::error::缺少 Windows 二进制包（CLI + 本地 agent + 编排器）"; miss=1; }
           [ -f "cortex-desktop-v$v-x86_64-pc-windows-msvc-setup.exe" ] \
             || { echo "::error::缺少 Windows 桌面安装程序"; miss=1; }
           exit $miss
@@ -448,26 +462,30 @@ jobs:
           [ -s notes.md ] || { echo "::error::CHANGELOG.md 里取不到 $v"; exit 1; }
           {
             echo; echo "---"; echo
-            echo '### 服务端（cortexd）：这一版只发 docker 镜像'
+            echo '### 服务端（agent 编排）：这一版只发 docker 镜像'
             echo
             echo '**从 0.1.2 起不再发裸二进制**（`cortex-vX-<平台>.tar.gz` / `.zip`）。'
             echo '前期迭代快，四个平台各编一份占掉了整条发版流水线的绝大部分时间。'
-            echo '能力没少 —— 镜像里 cortexd 与 `cortex` CLI 都在；少的是'
+            echo '能力没少 —— 镜像里该有的都在；少的是'
             echo '「不想用 docker 就下个二进制跑」这条路。要 CLI 又不想要 docker：'
             echo '`cargo install --git https://github.com/${{ github.repository }} cortex-cli`。'
             echo
             echo '```'
-            echo "docker pull registry.cn-shenzhen.aliyuncs.com/willspace/cortexd:v$v"
-            echo "docker pull willdockerhub/cortexd:v$v"
+            echo "docker pull registry.cn-shenzhen.aliyuncs.com/willspace/cortex-agentd:v$v"
+            echo "docker pull willdockerhub/cortex-agentd:v$v"
             echo '```'
             echo
+            echo '**记忆服务是单独一个产品**，在 [Cormex](https://github.com/weironz/cormex)：'
+            echo '它管存储、检索与 MCP 门面，独立发版、也能单独用。自托管要两个都起 ——'
+            echo '先记忆后 agent（agent 连不上记忆服务时一条对话都开不了）。'
+            echo
             echo '自托管完整步骤见 [docs/install.md](https://github.com/${{ github.repository }}/blob/v'"$v"'/docs/install.md)。'
-            echo '**第一步一定是生成凭据** —— 没有 `CORTEX_AUTH_TOKEN_SHA256` 时 cortexd 拒绝启动。'
+            echo '**第一步一定是生成凭据** —— 没有 `CORTEX_AUTH_TOKEN_SHA256` 时记忆服务拒绝启动。'
             echo
             echo '### Windows 桌面端'
             echo
             echo '`cortex-desktop-v'"$v"'-x86_64-pc-windows-msvc-setup.exe` 是**客户端 GUI**，'
-            echo '不是服务端 —— 它仍然需要一台 cortexd（地址在装完第一屏里填）。'
+            echo '不是服务端 —— 它仍然需要一台记忆服务（地址在装完第一屏里填）。'
             echo
             echo '这个安装程序**没有代码签名**，Windows SmartScreen 会拦一次：'
             echo '点「更多信息」→「仍要运行」。要不要点请自己判断 ——'

@@ -36,6 +36,17 @@ const MAX_CHAT_BODY: usize = 4 * 1024 * 1024;
 pub fn router(state: AgentState) -> Router {
     Router::new()
         .route("/health", get(health))
+        // **同一个 handler 挂两条路，不是复制粘贴。**
+        //
+        // `/health` 给容器的 HEALTHCHECK（同网段直连，不过边缘）。
+        // `/sandbox/health` 给**外部**探针：边缘按路径分流，而 `/health`
+        // 那条被分给了记忆服务 —— 于是从公网打 `/api/health` 问到的是
+        // cortexd，永远问不到这个进程。
+        //
+        // 这不是「多给一条别名」：部署验证要能证明**这一版的 agentd** 真的
+        // 在线上，而它此前从外面根本够不着。真机撞到过 —— deploy.yml 的
+        // 版本断言比的是记忆服务的版本号。
+        .route("/sandbox/health", get(health))
         .route("/chat", post(chat))
         .route("/sandbox/files", get(list_files).put(put_file))
         .route("/sandbox/files/raw", get(read_file))
@@ -51,13 +62,27 @@ pub fn router(state: AgentState) -> Router {
         .with_state(state)
 }
 
-/// 这个进程的状态。**不问 cortexd** —— 客户端问的是「我连着的这个还好吗」。
+/// 这个进程的状态。
+///
+/// # `memory_reachable` 为什么要真的去打一次
+///
+/// 这个进程离开记忆服务什么都干不了：要不到委托凭据，就起不了容器。
+/// 只报「我自己还活着」是**误报**——它会在记忆服务已经挂了的时候说 ok，
+/// 而那正是最需要它说实话的时刻。
+///
+/// 于是部署验证有了一条硬断言：拆成两个服务之后，「两边各自都起来了」
+/// 不等于「它们连得上」，而后者才是用户感受到的那件事。
+///
+/// 打不通**不算 status 不 ok**：容器照常活着、文件端点里已经拉起的沙箱
+/// 照常能用。它是一个要能被看见的事实，不是一次崩溃。
 async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
+    let reachable = st.remote().is_reachable().await;
     Json(serde_json::json!({
         "status": "ok",
         "version": cortex_core::VERSION,
         "role": "agent-orchestrator",
         "memory": st.remote().base(),
+        "memory_reachable": reachable,
         "live_scopes": st.scopes().len(),
     }))
 }

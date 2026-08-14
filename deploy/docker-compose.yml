@@ -413,6 +413,63 @@ services:
       traefik.http.middlewares.cortex-api-strip.stripprefix.prefixes: /api
       traefik.http.services.cortex-api.loadbalancer.server.port: "8080"
 
+  # ── agent 编排 ────────────────────────────────────────
+  #
+  # 按需拉起沙箱容器、把请求逐字节反代进去、闲了回收。**对话循环不在这儿**
+  # —— 那在容器里那个 cortex-local 上（同一个二进制，--exec-env=container）。
+  #
+  # 它与 cortexd 是**两个产品**：cortexd 是记忆服务，在另一个仓库
+  # （github.com/weironz/cormex）独立发版。这份 compose 把两个镜像放在同
+  # 一台机器上，那是**部署的选择**，不是代码上的依赖 —— 两边只有 HTTP。
+  agentd:
+    image: ${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortex-agentd:${CORTEX_VERSION:?由部署脚本写入，形如 v0.1.0}
+    container_name: cortex-agentd
+    restart: unless-stopped
+    logging: *default-logging
+    # 与 cortexd 同样接三张网：traefik 进得来、sandbox 直连容器名、
+    # default 提供出网（多网络时默认路由来自非 internal 的那张）
+    networks: [default, traefik, sandbox]
+    environment:
+      CORTEX_AGENTD_BIND: 0.0.0.0:8081
+      # 这个进程怎么找到记忆服务。同一台机器上走 compose 网络里的服务名。
+      #
+      # **有默认值是因为这份 compose 就把两者放在一起。** 换成外部记忆服务
+      # 时在 .env 里覆盖它 —— 而 agentd 的 /health 会报 memory_reachable，
+      # 配错了看得见（部署验证也断言它）。
+      CORTEX_MEMORY_URL: ${CORTEX_MEMORY_URL:-http://cortexd:8080}
+      # **容器**怎么找到记忆服务。沙箱网段是 internal 的，与 agentd 同网段，
+      # 所以这里直连服务名，中继那一整层不参与
+      CORTEX_SANDBOX_CALLBACK: ${CORTEX_SANDBOX_CALLBACK:-http://cortexd:8080}
+      CORTEX_SANDBOX_SAME_NETWORK: "1"
+      RUST_LOG: ${AGENTD_LOG:-cortex_agentd=info,warn}
+    volumes:
+      # 起沙箱要 docker API。**这是把宿主 root 交给它** —— 论证的另一半是
+      # 容器规格全部写死在 DockerRunner 里，调用方说不出第二个挂载。
+      # 这个能力现在**只在这一个容器上**（cortexd 已经不碰 docker 了）
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add: ["0"]
+    deploy:
+      resources:
+        limits:
+          cpus: "${AGENTD_CPU_LIMIT:-1.0}"
+          memory: ${AGENTD_MEM_LIMIT:-512m}
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik-network
+      # ── /api 里分给 agent 的那两条 ─────────────────────
+      #
+      # 与 cortex-api 同一个 `/api` 前缀、同一次 StripPrefix，只是按第二段
+      # 再分一次。**优先级必须高于 cortex-api**（那条是 100）：两条规则都
+      # 匹配 `/api/chat`，traefik 按优先级选，写死免得靠「规则更长」这种
+      # 会随改动漂移的东西。
+      traefik.http.routers.cortex-agent.rule: Host(`${DOMAIN}`) && (PathPrefix(`/api/chat`) || PathPrefix(`/api/sandbox`))
+      traefik.http.routers.cortex-agent.entrypoints: websecure
+      traefik.http.routers.cortex-agent.tls: "true"
+      traefik.http.routers.cortex-agent.tls.certresolver: letsencrypt
+      traefik.http.routers.cortex-agent.priority: "200"
+      traefik.http.routers.cortex-agent.middlewares: cortex-api-strip
+      traefik.http.services.cortex-agent.loadbalancer.server.port: "8081"
+
   # ── Flutter Web ───────────────────────────────────────
   #
   # 这个镜像里的 API 地址是**编译期钉死**的
