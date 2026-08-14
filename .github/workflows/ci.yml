@@ -148,24 +148,15 @@ jobs:
     name: 测试
     runs-on: ubuntu-latest
 
-    services:
-      postgres:
-        image: pgvector/pgvector:pg17
-        env:
-          POSTGRES_USER: cortex
-          POSTGRES_PASSWORD: cortex_ci
-          POSTGRES_DB: cortex
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U cortex"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-    env:
-      DATABASE_URL: postgres://cortex:cortex_ci@localhost:5432/cortex
-
+    # **这里没有 Postgres，也没有 migration。**
+    #
+    # 记忆那一半在 2026-08 搬去了 Cormex，连同 `migrations/`。此前这个作业
+    # 还在起 pgvector 容器、跑 `sqlx migrate run` —— 而目录已经不在了，
+    # 于是第一次真推上去就红：`error canonicalizing path migrations`。
+    #
+    # 值得记一笔的是**它为什么拖到今天才红**：拆分那几个提交都在本地验证
+    # （`cargo test` 不碰这一段），而 CI 的这一段只有推上去才跑。
+    # 「本地全绿」与「CI 全绿」是两件事，这一次差在一个已经不存在的目录上。
     steps:
       - uses: actions/checkout@v5
 
@@ -173,17 +164,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: 安装 sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features rustls,postgres --locked
-
-      - name: 应用 migration
-        run: sqlx migrate run
-
-      - name: 校验 migration 记录一致（重跑应为空操作）
-        run: sqlx migrate run
-
       - name: cargo test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --locked
 
   # ── 构建 ───────────────────────────────────────────────
   build:
