@@ -6,6 +6,7 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
+use crate::confirm::AnswerOutcome;
 use axum::{
     Json, Router,
     extract::{Query, Request, State},
@@ -17,7 +18,6 @@ use axum::{
     },
     routing::{any, get, post, put},
 };
-use cortex_proto::confirm::AnswerOutcome;
 use cortex_proto::dto::{
     ChatEvent, ChatRequest, ConfirmAck, ConfirmDecision, ConfirmReceipt, PendingConfirmations,
     PendingQuery, SessionPatch,

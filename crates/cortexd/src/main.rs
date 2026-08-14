@@ -31,10 +31,14 @@ mod sync_notify;
 mod sync_payload;
 mod ws;
 
-// 线协议与确认回路住在 `cortex-proto`，因为本地 agent 要讲**同一套**协议
-// （见那个 crate 的模块注释）。这里 re-export 成 `crate::dto` / `crate::confirm`，
-// 既保持既有调用点不动，也让「协议不是 cortexd 私有的」这件事只体现在这两行上。
-pub use cortex_proto::{confirm, dto};
+// 线协议住在 `cortex-proto`，因为 agent 那一侧要讲**同一套**协议
+// （见那个 crate 的模块注释）。这里 re-export 成 `crate::dto`，
+// 既保持既有调用点不动，也让「协议不是 cortexd 私有的」这件事只体现在这一行上。
+//
+// `confirm` 不再 re-export：那本簿子搬去 `cortex-local` 了，cortexd 不跑
+// agent，也就没有确认回路。留一个指不到任何调用点的 re-export，
+// 只会让下一个人以为这儿还有一份。
+pub use cortex_proto::dto;
 
 use anyhow::Context as _;
 use clap::Parser;

@@ -9,23 +9,18 @@ description = "Cortex 客户端 ↔ 服务端的线协议：DTO 与工具确认�
 
 [dependencies]
 cortex-core.workspace = true
-cortex-agent.workspace = true
+# **这里没有 `cortex-agent`，而且不许加回来。**
+#
+# 曾经有过，为的是 `confirm::risk_str` 要 `cortex_agent::Risk`。代价是这个
+# **线协议** crate 反过来把整个 agent（循环 + 工具 + 沙箱）拖进依赖树 ——
+# 于是只想用记忆那一层的人也得连 agent 一起编，而记忆那一层要独立开源。
+# 那个转换现在是 `Risk::as_wire`，住在枚举自己旁边。
+#
 # `/llm/stream` 直传 goose 的原生 Message / Tool / ProviderUsage（见 src/llm.rs：
 # 翻译成 OpenAI 形状会丢掉 prompt caching 与 thinking 块）。
-# goose 本来就在依赖树里（cortex-agent → cortex-llm），这里只是把边加上。
 cortex-llm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-# 确认凭据必须直接来自内核 CSPRNG。不用 ULID 凑数：它高 48 位是时间戳，
-# 随机位只有 80，而「窗口很短」不该被算进熵里。见 src/confirm.rs。
-# 版本与 cortexd 保持一致（那边原本就有这两条）。
-getrandom = "0.3"
-hex = "0.4"
-
-[dev-dependencies]
-# `#[tokio::test(start_paused = true)]`：确认超时默认 180 秒，
-# 真等一遍的测试没人会跑。虚拟时钟让它变成微秒级，而且**测的是同一段代码**
-tokio = { workspace = true, features = ["test-util"] }

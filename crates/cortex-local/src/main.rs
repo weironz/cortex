@@ -20,6 +20,9 @@
 
 mod checkpoint;
 mod config;
+/// 工具确认的那本簿子。**唯一的宿主是这里** —— cortexd 不跑 agent，
+/// 容器里那个不问确认（越界路径直接拒绝）。见模块头。
+mod confirm;
 mod grants;
 mod llm;
 mod local_import;
@@ -42,10 +45,10 @@ mod local_workspace_routes_test;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::confirm::ConfirmRegistry;
 use anyhow::Context as _;
 use clap::Parser;
 use cortex_agent::Turn;
-use cortex_proto::confirm::ConfirmRegistry;
 
 use crate::config::LlmRoute;
 use crate::outbox::Outbox;

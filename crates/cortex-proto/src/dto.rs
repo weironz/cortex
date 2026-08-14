@@ -302,8 +302,10 @@ pub enum ChatEvent {
         token: String,
         /// 要执行的工具名
         tool: String,
-        /// 风险等级："safe" / "write" / "execute"。见
-        /// [`crate::confirm::risk_str`]。
+        /// 风险等级："safe" / "write" / "execute"。取值由
+        /// `cortex_agent::Risk::as_wire` 定死 —— 与
+        /// [`crate::confirm::PendingInfo::risk`] 是同一套字面量，
+        /// 两条路（实时 SSE 与补拉列表）说的必须是同一件事。
         ///
         /// 服务端构造时是 `&'static str`，这里必须是 `String`：**CLI 要把这个
         /// 事件读回来**，而 `&'static str` 反序列化不了。此前 CLI 因此自己

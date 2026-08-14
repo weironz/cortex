@@ -16,9 +16,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::confirm::ConfirmRegistry;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use cortex_proto::confirm::ConfirmRegistry;
 use tower::ServiceExt as _;
 
 use crate::config::LlmRoute;

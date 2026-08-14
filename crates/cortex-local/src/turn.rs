@@ -19,10 +19,10 @@
 
 use std::sync::Arc;
 
+use crate::confirm::{ConfirmRegistry, PendingMeta, preview_of};
 use cortex_agent::{AgentEvent, Approval, ApprovalPolicy, ConfirmRequest, ToolHost, Turn};
 use cortex_core::injection;
 use cortex_core::{CortexError, Id, Result};
-use cortex_proto::confirm::{ConfirmRegistry, PendingMeta, preview_of};
 use cortex_proto::dto::{ChatEvent, ChatRequest, FactDto, PermissionMode};
 use cortex_proto::episodes::{NewEpisodeRequest, ToolCallInput};
 use tokio::sync::mpsc;
@@ -667,7 +667,7 @@ impl ToolHost for LocalHost {
     /// [`ConfirmRegistry`]（它在 `cortex-proto` 里，两侧共用）。
     async fn confirm(&self, req: &ConfirmRequest<'_>) -> Approval {
         let preview = preview_of(req.arguments);
-        let risk = cortex_proto::confirm::risk_str(req.risk);
+        let risk = req.risk.as_wire();
 
         // 登记 → 发事件 → 挂起。顺序不能变：反过来的话，本机 loopback 上
         // 一个手快的客户端可能在登记完成之前就把回执打回来 ——

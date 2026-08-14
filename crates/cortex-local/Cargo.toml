@@ -35,6 +35,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 dotenvy.workspace = true
+# 确认凭据必须直接来自内核 CSPRNG。不用 ULID 凑数：它高 48 位是时间戳，
+# 随机位只有 80，而「窗口很短」不该被算进熵里。见 src/confirm.rs。
+getrandom = "0.3"
+hex = "0.4"
 
 # 父进程存活探测在 unix 上用 kill(pid, 0)。Windows 走 tasklist，不需要它 ——
 # 见 src/supervise.rs 里「为什么不直接调 Win32」

@@ -29,6 +29,38 @@ pub enum Risk {
     Execute,
 }
 
+impl Risk {
+    /// 这一档在**线上**长什么样 —— 确认事件与 `GET /confirmations` 都用它。
+    ///
+    /// # 为什么手写 match 而不是靠上面那个 `Serialize`
+    ///
+    /// 这是**下行契约**的一部分：客户端按它决定确认框长什么样、要不要加一道
+    /// 二次确认。手写之后，改 `Risk` 的人会被编译器在这里拦一下，
+    /// 而不是让 `rename_all` 悄悄改掉三个客户端看到的字符串。
+    ///
+    /// # 为什么住在枚举旁边，而不是在宿主那一侧
+    ///
+    /// 此前它叫 `cortex_proto::confirm::risk_str`，而在那之前是**每个宿主各写
+    /// 一份**，且它们已经漂开了：一份是穷尽的三个分支，另一份是
+    /// `Execute => "execute", _ => "write"`。压平在过去无害（`Risk::Safe` 的
+    /// 工具从不进确认回路），越界确认改变了这个前提 —— 一个 `read_file` 现在
+    /// 会因为读到工作区外而弹窗，而那一份会把它标成「写入」。用户据以判断
+    /// 准不准的那个标签，是错的。
+    ///
+    /// 放进 `cortex-proto` 治住了漂移，但代价是**线协议 crate 反过来依赖
+    /// 整个 agent**（循环 + 工具 + 沙箱）—— 于是只想用记忆那一层的人也得
+    /// 连 agent 一起编。搬到枚举自己身上两头都占：任何拿得到 `Risk` 的宿主
+    /// 都拿得到这个转换，而 `cortex-proto` 不必知道 agent 存在。
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Safe => "safe",
+            Self::Write => "write",
+            Self::Execute => "execute",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolSpec {
     pub name: &'static str,

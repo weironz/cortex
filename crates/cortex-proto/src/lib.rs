@@ -10,15 +10,20 @@
 //! 少一个 `path` 只会让 UI 少画一行，不会有任何红灯。放进一个共享 crate 之后，
 //! 这类不一致在**编译期**就没了 —— 两侧引用的是同一个类型。
 //!
-//! # 为什么 [`confirm`] 也在这里
+//! # 为什么 [`confirm`] 里只剩一个类型
 //!
-//! 它看着像运行时组件（一本簿子、一堆 oneshot、`Drop` 清理），不像协议。
-//! 但 `GET /confirmations` 的响应体就是它的 [`confirm::PendingInfo`]，
-//! 而 [`dto::ChatEvent::Confirm`] 的字段口径必须与它逐字对齐 ——
-//! 把两者分到不同 crate，等于把一个契约的两半交给两个地方维护。
+//! `GET /confirmations` 的响应体就是 [`confirm::PendingInfo`]，而
+//! [`dto::ChatEvent::Confirm`] 的字段口径必须与它逐字对齐 —— 把两者分到不同
+//! crate，等于把一个契约的两半交给两个地方维护。所以它留在这里。
 //!
-//! 本地 agent 也需要它的**全部**：确认回路是「问用户准不准」，
-//! 而用户就在本地那一侧。
+//! 那本**簿子**（`ConfirmRegistry` 与它的 oneshot、TTL、`Drop` 清理）曾经也
+//! 在这里，靠的是同一句话。但那句话覆盖不了它：簿子不是契约，它是运行时。
+//! 而它把整个 `cortex-agent` 拖进了这个线协议 crate，于是**只想用记忆那一层
+//! 的人也得连 agent 一起编** —— 记忆那一层要独立开源，这条依赖是拦路的。
+//!
+//! 簿子现在在 `cortex-local`：它是唯一的宿主（cortexd 不跑 agent，容器里那个
+//! 不问确认）。风险等级的线上写法则是 `cortex_agent::Risk::as_wire`，
+//! 住在枚举自己旁边 —— 任何拿得到 `Risk` 的宿主都拿得到它。
 
 pub mod auth;
 pub mod confirm;
