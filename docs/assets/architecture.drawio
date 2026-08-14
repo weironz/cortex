@@ -1,201 +1,150 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mxfile host="drawio" version="31.1.5">
-  <diagram name="Cortex 目标架构">
-    <mxGraphModel dx="1800" dy="1300" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1300" math="0" shadow="0">
+  <diagram name="Cortex 架构">
+    <mxGraphModel dx="1800" dy="1300" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1760" pageHeight="1180" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
 
-        <mxCell id="title" value="Cortex 目标架构" style="text;html=1;align=left;verticalAlign=middle;fontSize=26;fontStyle=1;fontColor=#1a1a1a;" vertex="1" parent="1">
-          <mxGeometry x="60" y="20" width="600" height="40" as="geometry" />
+        <mxCell id="title" value="Cortex 架构（实况）" style="text;html=1;align=left;verticalAlign=middle;fontSize=22;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="10" width="600" height="34" as="geometry" />
         </mxCell>
-        <mxCell id="subtitle" value="agent 循环跟着「文件」走（本地）　·　记忆权威跟着「持久与多端」走（远端）" style="text;html=1;align=left;verticalAlign=top;fontSize=14;fontColor=#666666;" vertex="1" parent="1">
-          <mxGeometry x="60" y="62" width="900" height="24" as="geometry" />
-        </mxCell>
-
-        <mxCell id="L1" value="① 客户端层" style="swimlane;html=1;startSize=34;fillColor=none;strokeColor=#9673a6;fontSize=15;fontStyle=1;fontColor=#6a4c93;verticalAlign=middle;align=left;spacingLeft=12;dashed=1;" vertex="1" parent="1">
-          <mxGeometry x="60" y="110" width="1200" height="420" as="geometry" />
+        <mxCell id="subtitle" value="agent 循环跟着「文件」走，记忆权威跟着「持久与多端」走。两者之间只有 HTTP。" style="text;html=1;align=left;verticalAlign=middle;fontSize=13;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="900" height="20" as="geometry" />
         </mxCell>
 
-        <mxCell id="desk" value="桌面端（Windows 安装程序）" style="swimlane;html=1;startSize=32;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;verticalAlign=middle;align=center;" vertex="1" parent="L1">
-          <mxGeometry x="20" y="60" width="600" height="340" as="geometry" />
+        <mxCell id="laneA" value="你的机器" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#666666;dashed=1;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="80" width="620" height="440" as="geometry" />
         </mxCell>
-        <mxCell id="gui" value="Flutter GUI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="desk">
-          <mxGeometry x="20" y="45" width="250" height="55" as="geometry" />
+        <mxCell id="gui" value="Flutter 桌面端" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="laneA">
+          <mxGeometry x="30" y="60" width="240" height="60" as="geometry" />
         </mxCell>
-        <mxCell id="guinote" value="已有" style="text;html=1;align=left;verticalAlign=middle;fontSize=11;fontColor=#7f7f7f;" vertex="1" parent="desk">
-          <mxGeometry x="285" y="45" width="120" height="55" as="geometry" />
+        <mxCell id="cli" value="cortex CLI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="laneA">
+          <mxGeometry x="30" y="150" width="240" height="60" as="geometry" />
         </mxCell>
-
-        <mxCell id="lagent" value="★ 本地 agent 进程（要新建）&#xa;&lt;font style=&quot;font-size:11px;&quot; color=&quot;#7a5200&quot;&gt;= 现在的 cortexd 去掉数据库&lt;/font&gt;" style="swimlane;html=1;startSize=44;fillColor=#ffe6cc;strokeColor=#d79b00;strokeWidth=3;fontSize=13;fontStyle=1;fontColor=#7a5200;verticalAlign=middle;align=center;" vertex="1" parent="desk">
-          <mxGeometry x="20" y="120" width="560" height="200" as="geometry" />
+        <mxCell id="web" value="浏览器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="laneA">
+          <mxGeometry x="330" y="60" width="250" height="60" as="geometry" />
         </mxCell>
-        <mxCell id="loop" value="agent 循环" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="lagent">
-          <mxGeometry x="15" y="55" width="165" height="50" as="geometry" />
-        </mxCell>
-        <mxCell id="tools" value="工具执行&#xa;&lt;font style=&quot;font-size:10px;&quot;&gt;read/write/list/shell&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="lagent">
-          <mxGeometry x="195" y="55" width="175" height="50" as="geometry" />
-        </mxCell>
-        <mxCell id="sbx" value="OS 沙箱&#xa;&lt;font style=&quot;font-size:10px;&quot;&gt;landlock / seatbelt&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="lagent">
-          <mxGeometry x="385" y="55" width="160" height="50" as="geometry" />
-        </mxCell>
-        <mxCell id="lanote" value="LLM 调用、工具执行、注入编排都在这里。&#xa;它不含数据库、不含记忆引擎 —— 记忆一律问远端。" style="text;html=1;align=center;verticalAlign=middle;fontSize=11;fontColor=#7a5200;" vertex="1" parent="lagent">
-          <mxGeometry x="15" y="120" width="530" height="60" as="geometry" />
+        <mxCell id="local" value="&lt;b&gt;cortex-local&lt;/b&gt;&#xa;agent 循环 · 文件/shell 工具 · OS 沙箱（landlock / seatbelt）&#xa;工具确认回路 · 断网 outbox&#xa;&lt;i&gt;没有数据库，也没有记忆引擎&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;spacingLeft=12;verticalAlign=middle;" vertex="1" parent="laneA">
+          <mxGeometry x="30" y="270" width="550" height="130" as="geometry" />
         </mxCell>
 
-        <mxCell id="fs" value="本机文件系统&#xa;&lt;font style=&quot;font-size:11px;&quot; color=&quot;#7f7f7f&quot;&gt;你的代码 / 文档&lt;/font&gt;" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=15;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;fontStyle=1;" vertex="1" parent="L1">
-          <mxGeometry x="650" y="215" width="230" height="130" as="geometry" />
+        <mxCell id="third" value="第三方 agent&#xa;Claude Code / goose" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="560" width="280" height="90" as="geometry" />
         </mxCell>
 
-        <mxCell id="cli" value="CLI（cortex）&#xa;&lt;font style=&quot;font-size:11px;&quot; color=&quot;#7f7f7f&quot;&gt;已有 · 能渲染工具事件、答确认&#xa;★ D 之后直连 127.0.0.1 的本地 agent&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;" vertex="1" parent="L1">
-          <mxGeometry x="920" y="65" width="250" height="80" as="geometry" />
+        <mxCell id="laneB" value="云端节点（同一台机器上跑着两个产品）" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#666666;dashed=1;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="780" y="80" width="900" height="1060" as="geometry" />
         </mxCell>
-        <mxCell id="web" value="Web（Flutter Web）&#xa;&lt;font style=&quot;font-size:11px;&quot; color=&quot;#7f7f7f&quot;&gt;已有 · 浏览器&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;fontStyle=1;verticalAlign=top;spacingTop=8;" vertex="1" parent="L1">
-          <mxGeometry x="920" y="240" width="250" height="160" as="geometry" />
+        <mxCell id="edge0" value="&lt;b&gt;traefik（边缘）&lt;/b&gt;&#xa;分流在这里，&lt;b&gt;不在任何一个服务里&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="laneB">
+          <mxGeometry x="60" y="60" width="340" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="webnote" value="附件上传下载 / 图片理解 /&#xa;代码高亮都有&#xa;&#xa;&lt;font color=&quot;#b85450&quot;&gt;没有在线桌面时，&lt;b&gt;不能操作&#xa;你机器上的文件&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;fontSize=11;fontColor=#2d5016;" vertex="1" parent="web">
-          <mxGeometry x="10" y="58" width="230" height="95" as="geometry" />
+        <mxCell id="agentd" value="&lt;b&gt;cortex-agentd&lt;/b&gt;&#xa;按需拉起沙箱容器 · 逐字节反代 · 闲了回收&#xa;&lt;i&gt;唯一碰 docker 的进程&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;spacingLeft=12;" vertex="1" parent="laneB">
+          <mxGeometry x="60" y="200" width="340" height="110" as="geometry" />
         </mxCell>
-
-        <mxCell id="L2" value="② cortexd — 记忆服务" style="swimlane;html=1;startSize=34;fillColor=none;strokeColor=#9673a6;fontSize=15;fontStyle=1;fontColor=#6a4c93;verticalAlign=middle;align=left;spacingLeft=12;dashed=1;" vertex="1" parent="1">
-          <mxGeometry x="60" y="670" width="1200" height="300" as="geometry" />
+        <mxCell id="box" value="沙箱容器&#xa;&lt;b&gt;cortex-local --exec-env=container&lt;/b&gt;&#xa;&lt;i&gt;与你机器上那个是同一个二进制&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;dashed=1;align=left;spacingLeft=12;" vertex="1" parent="laneB">
+          <mxGeometry x="60" y="370" width="340" height="130" as="geometry" />
         </mxCell>
-        <mxCell id="deploynote" value="★ 它在哪是&lt;b&gt;部署选择&lt;/b&gt;，不是架构选择：localhost（单机，今天就能跑） / 局域网 / 云（多设备才需要）" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontColor=#6a4c93;" vertex="1" parent="L2">
-          <mxGeometry x="330" y="4" width="860" height="26" as="geometry" />
+        <mxCell id="egress" value="&lt;b&gt;cortex-egress-proxy&lt;/b&gt;&#xa;沙箱网段是 internal，&lt;b&gt;这是唯一出网口&lt;/b&gt;&#xa;CONNECT allowlist" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=12;" vertex="1" parent="laneB">
+          <mxGeometry x="470" y="370" width="330" height="130" as="geometry" />
         </mxCell>
-        <mxCell id="ep_old" value="已有端点" style="swimlane;html=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;fontStyle=1;" vertex="1" parent="L2">
-          <mxGeometry x="20" y="60" width="330" height="200" as="geometry" />
+        <mxCell id="cormex" value="&lt;b&gt;Cormex · 记忆服务&lt;/b&gt;&#xa;（二进制仍叫 cortexd）&#xa;&#xa;HTTP / SSE / WS ／ &lt;b&gt;MCP 门面&lt;/b&gt;　·　抽取 · 四路召回 + RRF · 双时间轴回放&#xa;委托凭据签发（POST /delegated-tokens）&#xa;&lt;i&gt;不跑对话，也不碰 docker&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=14;verticalAlign=middle;" vertex="1" parent="laneB">
+          <mxGeometry x="60" y="570" width="740" height="160" as="geometry" />
         </mxCell>
-        <mxCell id="ep_old_t" value="/chat&#xa;/memory/search&#xa;/sessions　/sync　/ws&#xa;/blobs　/confirmations" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontFamily=Courier New;spacingLeft=16;" vertex="1" parent="ep_old">
-          <mxGeometry x="10" y="35" width="310" height="155" as="geometry" />
+        <mxCell id="pg" value="PostgreSQL + pgvector&#xa;按 schema 分租户" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;boundedLbl=1;backgroundOutline=1;size=12;" vertex="1" parent="laneB">
+          <mxGeometry x="60" y="800" width="340" height="100" as="geometry" />
         </mxCell>
-
-        <mxCell id="ep_new" value="★ 要新建的端点" style="swimlane;html=1;startSize=30;fillColor=#ffe6cc;strokeColor=#d79b00;strokeWidth=3;fontSize=12;fontStyle=1;fontColor=#7a5200;" vertex="1" parent="L2">
-          <mxGeometry x="380" y="60" width="400" height="200" as="geometry" />
+        <mxCell id="rustfs" value="RustFS（S3 兼容）&#xa;附件与快照" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;boundedLbl=1;backgroundOutline=1;size=12;" vertex="1" parent="laneB">
+          <mxGeometry x="460" y="800" width="340" height="100" as="geometry" />
         </mxCell>
-        <mxCell id="ep_new_t" value="GET  /memory/context&#xa;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#7a5200&quot;&gt;　　　检索 + 渲染成注入块&lt;/font&gt;&#xa;POST /episodes&#xa;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#7a5200&quot;&gt;　　　写回对话、触发抽取&lt;/font&gt;&#xa;POST /llm/stream　&lt;font color=&quot;#b85450&quot;&gt;（可选）&lt;/font&gt;&#xa;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#7a5200&quot;&gt;　　　代理 LLM；不用它就本地直连&lt;/font&gt;&#xa;中继通道　&lt;font color=&quot;#b85450&quot;&gt;（remote control 用）&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontFamily=Courier New;spacingLeft=14;" vertex="1" parent="ep_new">
-          <mxGeometry x="10" y="33" width="380" height="160" as="geometry" />
+        <mxCell id="repoNote" value="绿色那一块（Cormex）是&lt;b&gt;另一个仓库、另一条版本线&lt;/b&gt;：github.com/weironz/cormex&#xa;它出现在这里只是因为部署把两者放在同一台机器上 —— 代码上没有任何相互依赖。" style="text;html=1;align=left;verticalAlign=top;fontSize=12;fontColor=#666666;" vertex="1" parent="laneB">
+          <mxGeometry x="60" y="930" width="740" height="60" as="geometry" />
         </mxCell>
 
-        <mxCell id="engine" value="内部组件" style="swimlane;html=1;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="L2">
-          <mxGeometry x="810" y="60" width="360" height="200" as="geometry" />
+        <mxCell id="e1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="laneA" source="gui" target="local">
+          <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="eng1" value="记忆引擎：四路召回 + RRF" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=12;" vertex="1" parent="engine">
-          <mxGeometry x="15" y="42" width="330" height="38" as="geometry" />
-        </mxCell>
-        <mxCell id="eng2" value="抽取管线" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=12;" vertex="1" parent="engine">
-          <mxGeometry x="15" y="90" width="160" height="38" as="geometry" />
-        </mxCell>
-        <mxCell id="eng3" value="embedding 回填器" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=12;" vertex="1" parent="engine">
-          <mxGeometry x="185" y="90" width="160" height="38" as="geometry" />
-        </mxCell>
-        <mxCell id="eng4" value="注入编排：稳定块进可缓存前缀" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=12;" vertex="1" parent="engine">
-          <mxGeometry x="15" y="138" width="330" height="38" as="geometry" />
-        </mxCell>
-
-        <mxCell id="L3" value="③ 数据与外部依赖" style="swimlane;html=1;startSize=34;fillColor=none;strokeColor=#9673a6;fontSize=15;fontStyle=1;fontColor=#6a4c93;verticalAlign=middle;align=left;spacingLeft=12;dashed=1;" vertex="1" parent="1">
-          <mxGeometry x="60" y="1050" width="1200" height="190" as="geometry" />
-        </mxCell>
-        <mxCell id="pg" value="Postgres 17 + pgvector&#xa;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#7f7f7f&quot;&gt;事实 / episodes / 向量 / sync_log&lt;/font&gt;" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=13;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="L3">
-          <mxGeometry x="30" y="55" width="260" height="115" as="geometry" />
-        </mxCell>
-        <mxCell id="rustfs" value="RustFS&#xa;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#7f7f7f&quot;&gt;S3 兼容对象存储 · 媒体&lt;/font&gt;" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=13;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="L3">
-          <mxGeometry x="320" y="55" width="260" height="115" as="geometry" />
-        </mxCell>
-        <mxCell id="emb" value="embeddings 服务&#xa;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#7f7f7f&quot;&gt;TEI，OpenAI 兼容 /v1/embeddings&#xa;或指向云（百炼 / Jina …）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="L3">
-          <mxGeometry x="610" y="60" width="260" height="105" as="geometry" />
-        </mxCell>
-        <mxCell id="llm" value="LLM 供应商&#xa;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#7f7f7f&quot;&gt;DeepSeek API&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="L3">
-          <mxGeometry x="900" y="60" width="260" height="105" as="geometry" />
-        </mxCell>
-
-        <mxCell id="note_bad" value="❌ 被否掉的方案：循环在服务端、工具外派到本地" style="swimlane;html=1;startSize=34;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;fontStyle=1;fontColor=#7d2f2c;verticalAlign=middle;align=left;spacingLeft=10;" vertex="1" parent="1">
-          <mxGeometry x="1330" y="110" width="440" height="190" as="geometry" />
-        </mxCell>
-        <mxCell id="note_bad_t" value="· 一轮 20 次文件操作 = 20 个跨国往返，&#xa;　而本地是微秒级&#xa;&#xa;· 服务端从此能让你的机器跑 shell ——&#xa;　服务器被攻破 = 所有连着的桌面被攻破&#xa;&#xa;· 要新造一套工具外派协议" style="text;html=1;align=left;verticalAlign=top;fontSize=12;fontColor=#7d2f2c;spacingLeft=8;" vertex="1" parent="note_bad">
-          <mxGeometry x="10" y="40" width="420" height="145" as="geometry" />
-        </mxCell>
-
-        <mxCell id="note_good" value="✅ 选中的方案" style="swimlane;html=1;startSize=34;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;fontColor=#2d5016;verticalAlign=middle;align=left;spacingLeft=10;" vertex="1" parent="1">
-          <mxGeometry x="1330" y="330" width="440" height="190" as="geometry" />
-        </mxCell>
-        <mxCell id="note_good_t" value="服务端只提供记忆，&#xa;&lt;b&gt;没有任何能力让你的机器做事&lt;/b&gt;。&#xa;&#xa;· 工具在本地跑，文件「就是能读到」&#xa;· 新概念数量为零 —— 本地那个进程就是&#xa;　现在的 cortexd，换个拿记忆的方式&#xa;· 同时留下了「记忆层可插拔」这个选项" style="text;html=1;align=left;verticalAlign=top;fontSize=12;fontColor=#2d5016;spacingLeft=8;" vertex="1" parent="note_good">
-          <mxGeometry x="10" y="40" width="420" height="145" as="geometry" />
-        </mxCell>
-
-        <mxCell id="note_deg" value="⚠️ 连不上 cortexd 时：能干活，没记忆" style="swimlane;html=1;startSize=34;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;fontStyle=1;fontColor=#7a5200;verticalAlign=middle;align=left;spacingLeft=10;" vertex="1" parent="1">
-          <mxGeometry x="1330" y="550" width="440" height="215" as="geometry" />
-        </mxCell>
-        <mxCell id="note_deg_t" value="&lt;b&gt;不是「打不开」，是「变成 Claude Code」&lt;/b&gt;：&#xa;循环、工具、shell、LLM 照常，&#xa;失去的恰好只有记忆 —— 界面上明说。&#xa;&#xa;· 写入不丢：对话进本地 append-only 队列，&#xa;　联网后灌给 cortexd 抽取 + 索引&#xa;· &lt;b&gt;不在本地存第二份记忆库&lt;/b&gt; —— 那要把整个&#xa;　检索引擎写第二遍（pgvector / tsvector /&#xa;　advisory lock 都没有对应物），而且更弱" style="text;html=1;align=left;verticalAlign=top;fontSize=12;fontColor=#7a5200;spacingLeft=8;" vertex="1" parent="note_deg">
-          <mxGeometry x="10" y="38" width="420" height="172" as="geometry" />
-        </mxCell>
-
-        <mxCell id="legend" value="图例" style="swimlane;html=1;startSize=30;fillColor=none;strokeColor=#999999;fontSize=12;fontStyle=1;verticalAlign=middle;align=left;spacingLeft=10;" vertex="1" parent="1">
-          <mxGeometry x="1330" y="800" width="440" height="130" as="geometry" />
-        </mxCell>
-        <mxCell id="lg1" value="" style="rounded=1;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;strokeWidth=3;" vertex="1" parent="legend">
-          <mxGeometry x="15" y="42" width="36" height="20" as="geometry" />
-        </mxCell>
-        <mxCell id="lg1t" value="★ 要新建的（本次架构决定的产物）" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;" vertex="1" parent="legend">
-          <mxGeometry x="60" y="40" width="360" height="24" as="geometry" />
-        </mxCell>
-        <mxCell id="lg2" value="" style="rounded=1;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="legend">
-          <mxGeometry x="15" y="76" width="36" height="20" as="geometry" />
-        </mxCell>
-        <mxCell id="lg2t" value="已有的（今天就在跑）" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;" vertex="1" parent="legend">
-          <mxGeometry x="60" y="74" width="360" height="24" as="geometry" />
-        </mxCell>
-
-        <mxCell id="e_fs" value="工具在这里执行，微秒级" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#d79b00;fontSize=12;fontColor=#7a5200;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;startArrow=classic;startFill=1;" edge="1" parent="1" source="lagent" target="fs">
+        <mxCell id="e2" value="127.0.0.1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.6;entryY=0;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="laneA" source="cli" target="local">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
-        <mxCell id="e_mem" value="记忆检索 · 写回&#xa;（这是唯一必需的远程依赖）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=4;strokeColor=#d79b00;fontSize=13;fontStyle=1;fontColor=#7a5200;labelBackgroundColor=#ffffff;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.15;entryY=0;entryDx=0;entryDy=0;startArrow=classic;startFill=1;" edge="1" parent="1" source="desk" target="L2">
+        <mxCell id="e3" value="/llm/stream · /episodes · /memory/search&#xa;其余路径原样反代" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="1" source="local" target="cormex">
+          <mxGeometry x="-0.5" relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="https" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="1" source="web" target="edge0">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e_llm_direct" value="★ 或本地直连（key 在本地）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeWidth=2;strokeColor=#d6b656;fontSize=12;fontColor=#7a5200;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="lagent" target="llm">
-          <mxGeometry x="-0.72" relative="1" as="geometry">
+        <mxCell id="e5" value="/api/chat · /api/sandbox" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.3;exitY=1;exitDx=0;exitDy=0;entryX=0.3;entryY=0;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="laneB" source="edge0" target="agentd">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="其余 /api" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.2;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="laneB" source="edge0" target="cormex">
+          <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="26" y="400" />
-              <mxPoint x="26" y="1280" />
-              <mxPoint x="1090" y="1280" />
+              <mxPoint x="860" y="100" />
+              <mxPoint x="860" y="602" />
             </Array>
-            <mxPoint x="90" y="0" as="offset" />
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="e_remote" value="★ remote control&#xa;（经 cortexd 中继，挂到在线的本地 agent）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeWidth=3;strokeColor=#9673a6;fontSize=12;fontStyle=1;fontColor=#6a4c93;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.18;entryDx=0;entryDy=0;endArrow=classic;endFill=1;" edge="1" parent="1" source="cli" target="desk">
+        <mxCell id="e7" value="docker API&#xa;逐字节反代进去" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="laneB" source="agentd" target="box">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="e_cli" value="/chat（没有在线桌面时，服务端跑循环）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#6c8ebf;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.35;entryDx=0;entryDy=0;" edge="1" parent="1" source="cli" target="L2">
-          <mxGeometry x="-0.88" relative="1" as="geometry">
+        <mxCell id="e8" value="POST /delegated-tokens&#xa;（带用户自己那把 bearer）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.55;entryDx=0;entryDy=0;fontSize=11;dashed=1;" edge="1" parent="laneB" source="agentd" target="cormex">
+          <mxGeometry x="-0.25" relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="1295" y="215" />
-              <mxPoint x="1295" y="775" />
+              <mxPoint x="30" y="255" />
+              <mxPoint x="30" y="658" />
             </Array>
-            <mxPoint x="-40" y="-58" as="offset" />
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="e_web" value="/chat" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#6c8ebf;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="web" target="L2">
+        <mxCell id="e9" value="持委托凭据（作用域绑一个会话）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.35;entryY=0;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="laneB" source="box" target="cormex">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="唯一出网口" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="laneB" source="box" target="egress">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.2;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="laneB" source="cormex" target="pg">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="laneB" source="cormex" target="rustfs">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" value="/mcp&#xa;&lt;i&gt;与自己人同一个 API&lt;/i&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.8;entryDx=0;entryDy=0;fontSize=11;" edge="1" parent="1" source="third" target="cormex">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
 
-        <mxCell id="e_pg" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82b366;exitX=0.12;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="L2" target="pg">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="legend" value="图例" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#666666;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="700" width="330" height="150" as="geometry" />
         </mxCell>
-        <mxCell id="e_rustfs" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#82b366;exitX=0.36;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="L2" target="rustfs">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="lg1" value="" style="rounded=0;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="legend">
+          <mxGeometry x="14" y="34" width="30" height="16" as="geometry" />
         </mxCell>
-        <mxCell id="e_emb" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#d6b656;exitX=0.62;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="L2" target="emb">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="lg1t" value="Cortex 的进程" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;" vertex="1" parent="legend">
+          <mxGeometry x="54" y="32" width="260" height="20" as="geometry" />
         </mxCell>
-        <mxCell id="e_llm" value="代理时" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#d6b656;fontSize=11;labelBackgroundColor=#ffffff;exitX=0.86;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="L2" target="llm">
-          <mxGeometry relative="1" as="geometry" />
+        <mxCell id="lg2" value="" style="rounded=0;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="legend">
+          <mxGeometry x="14" y="58" width="30" height="16" as="geometry" />
         </mxCell>
-
+        <mxCell id="lg2t" value="Cormex（另一个仓库）" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;" vertex="1" parent="legend">
+          <mxGeometry x="54" y="56" width="260" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="lg3" value="" style="rounded=0;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="legend">
+          <mxGeometry x="14" y="82" width="30" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="lg3t" value="边缘 / 路由分流" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;" vertex="1" parent="legend">
+          <mxGeometry x="54" y="80" width="260" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="lg4" value="" style="rounded=0;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="legend">
+          <mxGeometry x="14" y="106" width="30" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="lg4t" value="隔离 / 凭据" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;" vertex="1" parent="legend">
+          <mxGeometry x="54" y="104" width="260" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="lg5" value="" style="rounded=0;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="legend">
+          <mxGeometry x="14" y="130" width="30" height="16" as="geometry" />
+        </mxCell>
+        <mxCell id="lg5t" value="客户端 / 存储" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;" vertex="1" parent="legend">
+          <mxGeometry x="54" y="128" width="260" height="20" as="geometry" />
+        </mxCell>
       </root>
     </mxGraphModel>
   </diagram>

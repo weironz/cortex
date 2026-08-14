@@ -18,90 +18,86 @@ goose 与 codex 都是 Apache-2.0。**供应商适配、apply-patch、沙箱这�
 
 参考源码在 `D:/codes/_ref/goose`（完整克隆，只读）。
 
-自己写的只有别人没有的东西：**记忆引擎**（`cortex-memory`）。
+自己写的只有别人没有的东西：**记忆引擎** —— 而它现在是另一个产品，
+在 [weironz/cormex](https://github.com/weironz/cormex)。
 在这里花时间是值得的；在供应商适配上花时间是浪费。
 
 ## 架构
 
-```
-cortex-core     类型 / Id / 配置 / 错误        ← 无外部依赖，人人依赖它
-cortex-llm      供应商层（封装 goose-providers）
-cortex-store    sqlx repository + sync_log 写入器
-cortex-memory   分词 / embedding / 抽取 / 四路召回 + RRF
-cortex-agent    agent loop + 工具
-cortexd         记忆服务：axum HTTP + SSE + WS + MCP。**不碰 docker**
-cortex-agentd   云端 agent 编排：按需拉起沙箱容器，把请求反代进去
-cortex-local    agent 本体：同一个二进制，跑在本机或容器里
-cortex-cli      终端瘦客户端
-app/            Flutter（桌面 + Web 一套代码）
-```
-
-依赖方向严格单向，**三支**：
+**本仓库是 agent 那一支。记忆那一支在另一个仓库。**
 
 ```
-core ← {llm, store} ← memory ← cortexd          记忆
+cortex-core          类型 / Id / 配置 / 错误 / 注入渲染   ← 无外部依赖，人人依赖它
+cortex-llm           供应商层（封装 goose-providers）
+cortex-proto         线协议 DTO
+cortex-agent         agent loop + 工具 + OS 沙箱
+cortex-local         agent 本体：同一个二进制，跑在本机或容器里
+cortex-agentd        云端编排：按需拉起沙箱容器，把请求反代进去
+cortex-egress-proxy  沙箱的唯一出网口（CONNECT allowlist）
+cortex-blob          对象存储客户端
+cortex-import        导入 ChatGPT / Claude 的导出文件
+cortex-cli           终端瘦客户端
+app/                 Flutter（桌面 + Web 一套代码）
+```
+
+**记忆服务（Cormex）不在这个仓库里** —— 存储、抽取、四路召回、双时间轴回放、
+MCP 门面全在 [github.com/weironz/cormex](https://github.com/weironz/cormex)，
+独立发版、独立版本线。两边**没有任何代码依赖**，只有 HTTP。
+它在本仓库的 `deploy/docker-compose.yml` 里出现过，那是部署把两者放在同一台
+机器上，不是依赖。
+
+依赖方向严格单向，**两支**：
+
+```
 core ← cortex-agent ← cortex-local              agent
-core ← proto ← cortex-agentd                    编排（无 store / memory / agent）
+core ← proto ← cortex-agentd                    编排（无 agent 循环）
 ```
 
 `cortex-proto` **不许依赖 `cortex-agent`**：那会让线协议 crate 拖进整个
-agent 循环，于是只想用记忆那一层的人也得连 agent 一起编。确认回路的簿子
+agent 循环，于是只想读线协议的人也得连 agent 一起编。确认回路的簿子
 因此住在 `cortex-local`（唯一的宿主），风险等级的线上写法是
 `Risk::as_wire`（住在枚举旁边）。
 
-**两支之间只有 HTTP，没有共享的库。** `cortex-local` 的依赖里没有
-`cortex-store` 也没有 `cortex-memory` —— 它借模型走 `/llm/stream`，写记忆走
-`/episodes`，查记忆走 `/memory/search` 或 `/mcp`。这不是洁癖：那正是第三方
-agent（Claude Code / goose）走的同一条路，**自己人和外人用同一个 API，
-那个 API 才不会烂**。
+**与记忆服务之间只有 HTTP，没有共享的库。** `cortex-local` 借模型走
+`/llm/stream`，写记忆走 `/episodes`，查记忆走 `/memory/search` 或 `/mcp`。
+这不是洁癖：那正是第三方 agent（Claude Code / goose）走的同一条路，
+**自己人和外人用同一个 API，那个 API 才不会烂**。
 
-推论：**cortexd 里不许有 agent 循环，也不许碰 docker**。两样都曾经有过：
-循环是第二份实现（漏改的那一份不会有测试红），编排是 3600 行只有云端 Web
-用得上的东西，而它挡着记忆那一半独立开源。现在 `/chat` 与 `/sandbox/*` 在
-cortexd 上**根本不存在**（`routes::cortexd_serves_no_agent_shaped_route`
-钉着这条，断的是 404 不是 501 —— 「这条路不归我」才是实情）。
+**agent 循环只有一份实现。** 本机跑的和沙箱容器里跑的是同一个
+`cortex-local`，差别只有 `--exec-env=container`。记忆服务里曾经有过第二份
+（在部署接不上 docker 时走到），删掉的理由不是它有 bug，而是同一个
+`Turn::run` 有两处装配，漏改的那一份不会有任何测试红。
 
 **分流在边缘**（dev 的 nginx、prod 的 traefik），不在任何一个服务里：
-让 cortexd 知道 agentd 在哪，等于给要独立开源的那一半留一条「agent 服务
+让记忆服务知道 agentd 在哪，等于给要独立开源的那一半留一条「agent 服务
 地址」的配置，而独立部署它的人根本没有 agentd。
 
 agentd 要钥匙走 `POST /delegated-tokens`，带的是**用户自己那把 bearer** ——
-所以它也没有一份自己的认证逻辑，cortexd 的回答就是认证结果。
+所以它也没有一份自己的认证逻辑，记忆服务的回答就是认证结果。
 
-**记忆权威唯远端 cortexd**，桌面端的本地进程是执行代理，不是第二个记忆库。
-CLI 与 Flutter 走**完全相同**的 HTTP/SSE 协议，不走私有捷径。而 cortexd
-现在对**任何** agent 开放：`/mcp` 是它的对外门面，凭据决定信任级
-（外部写入落 `external` / tier 4，见约束 4）。
+**记忆权威唯远端**，桌面端的本地进程是执行代理，不是第二个记忆库。
+CLI 与 Flutter 走**完全相同**的 HTTP/SSE 协议，不走私有捷径。
+
+⚠️ **`cortex-core/src/injection.rs` 在两个仓库各有一份**（这边给 agent，
+那边给 MCP），彼此没有编译期联系。2026-08-15 核对过两份渲染实现逐 token
+相同，但没有机制保证它继续如此 —— 漂移的症状是同一条记忆经 agent 看到的
+和经 MCP 看到的长得不一样，不报错。改这个文件时**两边一起改**。
 
 ## 不可违反的约束
 
 违反下面任何一条都会造成静默的数据损坏或成本失控，且极难在测试中发现。
 
-### 1. 全链路 append-only
+### 1. 存储那三条纪律现在由 Cormex 执行 —— 但你仍然要知道
 
-任何表都不做 `UPDATE` / `DELETE`。唯一例外是 `redact`/`purge`
-（见 [memory.md §十一](docs/memory.md)），它必须显式触发、二次确认、留墓碑。
+全链路 append-only、写事务必须走 `store.write_txn`（`pg_advisory_xact_lock`
+串行化提交顺序，否则裸 `BIGSERIAL` 游标会永久漏行 —— 实测 32 个并发写稳定
+漏 12 条以上）、`tsv` 与主行同事务写入。
 
-事实失效靠**追加** `fact_events` 表达，不是就地改 `invalid_at`。
+**那些代码不在这个仓库里**（在 Cormex 的 `cortex-store`），所以这里没有可违反
+的地方。留着这一条是因为**你会在这一侧碰到它的后果**：`/episodes` 的写入是
+同步的、有序的，「攒着批量写回」看着像优化，实际是在破坏那套顺序保证。
 
-### 2. 写事务必须走 `store.write_txn`
-
-它做了三件不能省的事：
-
-- 事务第一条语句执行 `pg_advisory_xact_lock(4272)`，**串行化提交顺序**
-- 每写一行业务数据，同事务追加一行 `sync_log`
-- 不提供任何读方法（强制「取号事务短小、纯写」）
-
-**为什么必须**：裸 `BIGSERIAL` 做游标会永久漏行——序列值在 INSERT 时分配，
-但行按提交顺序可见。已有反向验证：去掉这把锁，32 个并发写会稳定漏掉 12 条以上。
-
-推论：**LLM 调用与 embedding 计算一律在事务外完成**，绝不在持锁事务里跨网络。
-
-### 3. `tsv` 与主行同事务写入，永不异步补写
-
-补写是 `UPDATE`，且不进 `sync_log` 就对其他设备永久不可见。
-
-### 4. 记忆注入必须走 `cortex-memory::injection`
+### 2. 记忆注入必须走 `cortex_core::injection`
 
 朴素实现（每轮把检索结果拼进 system prompt）会**逐轮打穿前缀缓存**，
 成本涨 5–10 倍，且只有几周后从账单上才看得出来。
@@ -120,7 +116,7 @@ CLI 与 Flutter 走**完全相同**的 HTTP/SSE 协议，不走私有捷径。�
 一套「MCP 结果格式」**：那道框定一处都不能少 —— 从工具通道回来的记忆和从
 注入通道进去的一样可能混着被抽取进来的恶意指令。
 
-### 5. 不做最小公倍数式的供应商抽象
+### 3. 不做最小公倍数式的供应商抽象
 
 会丢掉 prompt caching 与 thinking 块，这是最贵的两样东西。
 内部消息格式直接用 goose 的 `Message`，不再包一层有损转换。
@@ -128,14 +124,13 @@ CLI 与 Flutter 走**完全相同**的 HTTP/SSE 协议，不走私有捷径。�
 ## 开发
 
 ```bash
-just up          # 启动 Postgres + RustFS
-just db-migrate  # 应用 migration
-just run         # 跑 cortexd
+just dev         # 本机拉起完整云端环境（agentd + web + 沙箱）
 just ci          # 本地跑一遍 CI 的全部检查
 ```
 
-数据库连接串在 `.env`（已被 gitignore 排除）。schema 的**权威版本是
-`migrations/`**，文档里的 SQL 片段以它为准。
+**这个仓库没有数据库，也没有 migration。** 要一个能连的记忆服务，
+去 Cormex 那边 `just up && just db-migrate && just run`，
+然后把地址给 `cortex-local --remote`（或 `.env` 里的 `CORTEX_MEMORY_URL`）。
 
 ### 依赖上的两个已知雷
 
@@ -147,7 +142,7 @@ just ci          # 本地跑一遍 CI 的全部检查
 ## 代码风格
 
 - **注释与文档用中文**，与现有代码一致。参考 `crates/cortex-core/src/id.rs`
-  与 `crates/cortex-memory/src/injection.rs` 的密度与语气
+  与 `crates/cortex-core/src/injection.rs` 的密度与语气
 - 注释解释**为什么**，不解释**是什么**。尤其要写清「为什么不是那个显然的做法」
 - 测试的断言消息要能独立读懂失败原因，别只写 `assert!(x)`
 - 提交前必须过 `cargo fmt --all`、`cargo clippy --workspace --all-targets -- -D warnings`
@@ -156,5 +151,7 @@ just ci          # 本地跑一遍 CI 的全部检查
 ## 边界
 
 - **绝不把 API key 写进任何被 git 跟踪的文件**。只放 `.env`
-- 不改 `migrations/` 里已应用的 migration，schema 变更加新文件
 - 多 agent 并行时各自只动自己的 crate 目录；根 `Cargo.toml` 由主线统一维护
+- **改动跨到 Cormex 时，两个仓库分别提交**。它们版本线独立，一次提交跨两仓
+  是做不到的，而「一边改了另一边忘了」的症状是部署时才炸 —— 生产 compose 里
+  `CORMEX_VERSION` 与 `CORTEX_VERSION` 是两个变量，正是为此
