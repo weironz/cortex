@@ -112,4 +112,60 @@ void main() {
     expect(old.sourceChannel, isNull);
     expect(old.trustTier, isNull);
   });
+
+  /// 同一个形状的第三次：**服务端一直在发，客户端从来没读**。
+  ///
+  /// `FactDto.invalidated` 早就在协议里，而 `MemoryFact.fromJson` 直到现在
+  /// 都没解析它。后果恰好落在最不该出问题的地方：**时间回放**。
+  /// 回放到过去时，「当时成立、此后已被推翻」的事实与现行事实长得一模一样 ——
+  /// 而那正是回放唯一有信息量的场合，也是这个产品对标 mem0 / zep 的差异点。
+  /// 没有这一位，时间轴只是把同一份列表换了个好看的画法。
+  ///
+  /// 前两次是 `source_channel` / `trust_tier`（上面那条测试）与
+  /// `confidence` 写死 1.0。三次都是同一句话：**加了字段不等于用上了字段**。
+  group('invalidated —— 回放里唯一有信息量的那一位', () {
+    test('从 JSON 读出来，且老 daemon 不发时按「没被推翻」算', () {
+      final replayed = MemoryFact.fromJson(const {
+        'id': '01JF1',
+        'statement': 'x',
+        'invalidated': true,
+      });
+      expect(replayed.invalidated, isTrue);
+
+      final live = MemoryFact.fromJson(const {'id': '01JF1', 'statement': 'x'});
+      expect(
+        live.invalidated,
+        isFalse,
+        reason:
+            '字段缺失要降级成「没有东西被推翻」。反过来（默认 true）会让整屏'
+            '划掉的文字出现在一个只是 daemon 版本旧的部署上',
+      );
+    });
+
+    testWidgets('这一位要真的到得了卡片', (tester) async {
+      await pump(tester, fact(channel: 'user_stated', tier: 1));
+      expect(
+        tester.widget<FactCard>(find.byType(FactCard)).invalidated,
+        isFalse,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: CortexTheme.light(),
+          home: Scaffold(
+            body: FactCard(
+              fact: fact(channel: 'user_stated', tier: 1),
+              invalidated: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<FactCard>(find.byType(FactCard)).invalidated,
+        isTrue,
+        reason: '解析出来却不往下传，与不解析等价 —— 这个 bug 正是断在传递那一段',
+      );
+    });
+  });
 }

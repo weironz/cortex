@@ -329,6 +329,7 @@ class _Grid extends StatelessWidget {
                 child: FactCard(
                   fact: facts[i],
                   channels: state.result.channels[facts[i].id],
+                  invalidated: facts[i].invalidated,
                 ),
               ),
             ),

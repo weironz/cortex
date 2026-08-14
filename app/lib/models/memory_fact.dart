@@ -18,6 +18,7 @@ class MemoryFact {
     this.sourceEpisodeId,
     this.sourceChannel,
     this.trustTier,
+    this.invalidated = false,
   });
 
   /// ULID.
@@ -64,6 +65,21 @@ class MemoryFact {
   /// honest.
   final int? trustTier;
 
+  /// Held at the queried moment, but has since been overturned.
+  ///
+  /// Only ever true when replaying with `as_of` — a plain search returns the
+  /// currently-valid set, where nothing is invalidated. Which is exactly why
+  /// this matters: **replay is the one place where it carries information**,
+  /// and it is the reason to replay at all. Without it a fact that was true
+  /// then and is false now renders identically to one still standing, and the
+  /// timeline becomes a prettier way of showing the same list.
+  ///
+  /// The server has been sending it all along (`FactDto::invalidated`); this
+  /// side simply never read it. Defaults to false so an older daemon that
+  /// omits the field degrades to "nothing overturned" rather than to a screen
+  /// full of struck-through text.
+  final bool invalidated;
+
   factory MemoryFact.fromJson(Map<String, dynamic> json) => MemoryFact(
     id: asString(json['id']),
     statement: asString(json['statement']),
@@ -75,6 +91,7 @@ class MemoryFact {
     sourceEpisodeId: asStringOrNull(json['source_episode_id']),
     sourceChannel: asStringOrNull(json['source_channel']),
     trustTier: asIntOrNull(json['trust_tier']),
+    invalidated: json['invalidated'] == true,
   );
 
   Map<String, dynamic> toJson() => {
@@ -88,6 +105,7 @@ class MemoryFact {
     if (sourceEpisodeId != null) 'source_episode_id': sourceEpisodeId,
     if (sourceChannel != null) 'source_channel': sourceChannel,
     if (trustTier != null) 'trust_tier': trustTier,
+    if (invalidated) 'invalidated': true,
   };
 
   @override
