@@ -461,11 +461,14 @@ class LocalAgentHandle {
   }
 }
 
-/// 离线模式下桌面端与本地 agent 之间的一次性凭据。
+/// 远端不要凭据时，桌面端与本地 agent 之间的一次性凭据。
 ///
 /// 进程内生成一次、只活到退出。它保护的是「同机其他进程别来指挥这个
 /// 能执行命令的 agent」——够不着的人猜不到，够得着的人（同一个用户）
 /// 本来就能读这个进程的内存。
+///
+/// 两种部署会走到它：离线模式（压根没有 cortexd），以及
+/// `CORTEX_AUTH=disabled` 的自托管（有 cortexd，但它不认证）。
 final String _sessionSecret = () {
   final rng = Random.secure();
   return List.generate(
@@ -473,6 +476,27 @@ final String _sessionSecret = () {
     (_) => rng.nextInt(256).toRadixString(16).padLeft(2, '0'),
   ).join();
 }();
+
+/// 桌面端拿什么去认证**本地 agent**。
+///
+/// # 为什么必须是一个函数，而不是在两处各写一遍
+///
+/// 交给 agent 的（`agent.start(token:)`）与发出去的（`HttpCortexApi(token:)`）
+/// 必须是同一个值。写成两处的后果实测过：`CORTEX_AUTH=disabled` 的部署里
+/// 用户的 token 是 `null`，于是 agent 拿到 `_sessionSecret` 并据此认证，
+/// 而客户端一个 Authorization 头都不发 —— **agent 把桌面端 401 挡在门外**，
+/// 界面回到登录页说「凭据已失效，请重新填写 token」，而那个部署根本
+/// 没有 token 这回事，怎么填都没用。
+@visibleForTesting
+String localAgentToken(String? userToken) => userToken ?? _sessionSecret;
+
+/// 客户端这一次要发的凭据。[onLocalAgent] 决定它打的是 agent 还是远端。
+///
+/// 只在指向 agent 时替换：把这把本机凭据发给一个真的要认证的 cortexd，
+/// 换回来的是一个内容完全不同的 401 —— 而两种 401 在界面上长得一样。
+@visibleForTesting
+String? apiToken({required String? userToken, required bool onLocalAgent}) =>
+    onLocalAgent ? localAgentToken(userToken) : userToken;
 
 final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   final config = ref.watch(appConfigProvider);
@@ -557,16 +581,13 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   try {
     final origin = await agent.start(
       remote: config.baseUrl,
-      // 关掉认证的部署没有 token。空串而不是抛错：本地 agent 那侧
-      // 也只是把它塞进 Authorization 头，而一个不认证的 cortexd 根本不看
-      // 离线模式没有 cortexd 的 token，但**不能传空串**：本地 agent 能执行
-      // 命令，而同机任意进程都够得着 127.0.0.1。现生成一把随机的、只活到
-      // 本次进程结束的凭据 —— 桌面端与它自己拉起的 agent 之间对上即可，
-      // 别人猜不到。
+      // 没有用户 token 时（离线、或 `CORTEX_AUTH=disabled`）用那把一次性
+      // 凭据。**不能传空串**：agent 会拿到 `Some("")`、以为自己有认证、
+      // 把桌面端 401 挡在外面，而「不做认证」那条警告一次都不打。
       //
-      // （空串曾经是这里的写法，结果是 agent 拿到 `Some("")`、以为自己
-      // 有认证、把桌面端 401 挡在外面，而「不做认证」那条警告一次都不打）
-      token: token ?? _sessionSecret,
+      // 走 `_localAgentToken` 而不是在这里写 `token ?? _sessionSecret`：
+      // `cortexApiProvider` 那侧必须发同一个值，见那个函数的文档
+      token: localAgentToken(token),
       // 离线模式必须本地直连模型：代理那条路要经 cortexd，而它不存在。
       // 传 null 表示「不干预」，让 agent 自己按环境变量决定
       llmRoute: config.offline ? 'direct' : null,
@@ -650,7 +671,11 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
 
   final api = HttpCortexApi(
     baseUrl: origin,
-    token: token,
+    // 打到 agent 时用**它认的那把**，见 `apiToken`
+    token: apiToken(
+      userToken: token,
+      onLocalAgent: agentOrigin.value != null,
+    ),
     // `read`, not `watch`: this is an outbound edge. Watching the notifier
     // would make every auth state change rebuild the client, including the one
     // this very callback triggers.

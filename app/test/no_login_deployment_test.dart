@@ -15,6 +15,7 @@
 library;
 
 import 'package:cortex_app/models/health_status.dart';
+import 'package:cortex_app/state/app_providers.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -57,6 +58,49 @@ void main() {
       reason:
           '不认识的取值必须往严的方向倒。反过来的话，服务端将来加一种'
           '认证形态，老客户端会当成「不用认证」直接放行',
+    );
+  });
+
+  /// 这条盯的是同一个缺陷的**下一半**。
+  ///
+  /// 上一半修完之后 agent 会起了，但桌面端连不上它：`CORTEX_AUTH=disabled`
+  /// 时用户的 token 是 `null`，启动 agent 那一处写的是
+  /// `token ?? _sessionSecret`（对的 —— agent 能执行命令，同机任意进程都
+  /// 够得着 127.0.0.1，必须认证），而建 HTTP 客户端那一处只写了 `token`。
+  ///
+  /// 于是 agent 拿着一把凭据守门，桌面端一个 Authorization 头都不发，
+  /// **自己把自己 401 挡在外面**。界面回到登录页说「凭据已失效，请重新
+  /// 填写 token」，而那种部署根本没有 token 这回事，怎么填都没用。
+  test('远端不认证时，发给本地 agent 的凭据必须与启动它时给的那把是同一个', () {
+    const noUser = null;
+    final given = localAgentToken(noUser);
+    final sent = apiToken(userToken: noUser, onLocalAgent: true);
+
+    expect(
+      sent,
+      isNotNull,
+      reason: '不发凭据的话，守着门的 agent 会把桌面端自己挡在外面',
+    );
+    expect(
+      sent,
+      given,
+      reason:
+          '两处必须是同一个值。它们漂开的症状是「登录页反复弹出、'
+          '而这个部署根本没有账号」——从界面上完全看不出根因在本地 agent',
+    );
+  });
+
+  /// 反过来：这把本机凭据**不能**发给一个真的要认证的 cortexd。
+  ///
+  /// 发过去换回来的是一个内容完全不同的 401（「这串东西不是有效凭据」，
+  /// 而不是「你还没登录」），而两种 401 在界面上长得一模一样。
+  test('指向远端时原样用用户的 token，不掺本机那把', () {
+    expect(apiToken(userToken: null, onLocalAgent: false), isNull);
+    expect(apiToken(userToken: 'real', onLocalAgent: false), 'real');
+    expect(
+      apiToken(userToken: 'real', onLocalAgent: true),
+      'real',
+      reason: '有用户 token 时两条路一致 —— 本机那把只是没有 token 时的替补',
     );
   });
 }

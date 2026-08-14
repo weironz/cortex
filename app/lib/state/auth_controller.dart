@@ -288,7 +288,12 @@ class AuthController extends Notifier<AuthState> {
   /// access token 留在内存里 —— 它 15 分钟就过期，存下来没有意义，
   /// 而每多一处副本就多一处泄露面。
   Future<void> signInWithPassword(String username, String password) async {
-    if (username.trim().isEmpty || password.isEmpty) return;
+    // 说一句，而不是静默 return。**静默 return 的症状是「点登录没一点反应」**，
+    // 而用户没法从一个什么都不做的按钮上看出自己漏了什么
+    if (username.trim().isEmpty || password.isEmpty) {
+      state = state.copyWith(error: '请填写用户名和密码。');
+      return;
+    }
     final generation = ++_generation;
     state = state.copyWith(busy: true, error: null);
 
@@ -362,7 +367,10 @@ class AuthController extends Notifier<AuthState> {
   /// to the user as "wrong token".
   Future<void> signIn(String rawToken, {bool remember = false}) async {
     final token = rawToken.trim();
-    if (token.isEmpty) return;
+    if (token.isEmpty) {
+      state = state.copyWith(error: '请填写 token。');
+      return;
+    }
     final generation = ++_generation;
     state = state.copyWith(busy: true, error: null);
 
@@ -427,7 +435,10 @@ class AuthController extends Notifier<AuthState> {
     state = state.copyWith(
       phase: AuthPhase.needsToken,
       token: null,
-      error: '凭据已失效或被拒绝（HTTP 401）。请重新填写 token。',
+      // **不说「请重新填写 token」**：默认的表单是账号密码，而这句话在
+      // 那张表单前面是一条走不通的指路。这一层不知道用户会用哪种方式登录，
+      // 就别替他选
+      error: '凭据已失效或被拒绝（HTTP 401）。请重新登录。',
     );
   }
 
