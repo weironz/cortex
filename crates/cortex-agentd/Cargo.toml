@@ -1,0 +1,57 @@
+[package]
+name = "cortex-agentd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cortex 云端 agent 编排：按需拉起沙箱容器，并把请求反代进去"
+
+[dependencies]
+cortex-core.workspace = true
+cortex-proto.workspace = true
+
+# **这里没有 `cortex-store`，也没有 `cortex-memory`，且不许加。**
+#
+# 与 `cortex-local` 同一条纪律：agent 那一侧通过 HTTP 用记忆，没有 store
+# 句柄。这不是洁癖 —— 那正是第三方 agent（Claude Code / goose）走的同一条路，
+# **自己人和外人用同一个 API，那个 API 才不会烂**。
+#
+# 也没有 `cortex-agent`：这个进程不跑 agent 循环。循环在容器里那个
+# `cortex-local` 上（`--exec-env=container`），这里只负责把它拉起来、
+# 把请求原样送进去。
+
+# 容器与卷的编排
+bollard.workspace = true
+# 反代进容器，以及向 cortexd 要委托凭据
+reqwest.workspace = true
+# 解 / 造 tar：文件端点全部经 docker 的 archive API，而那条端点的载荷就是
+# tar。**不开默认 feature** —— 我们不需要它碰宿主文件系统
+tar = { version = "0.4", default-features = false }
+bytes = "1"
+# 缓存标签与 spec hash（见 env.rs）
+sha2 = "0.10"
+hex = "0.4"
+
+axum.workspace = true
+# runner 的 trait 是 async trait
+async-trait.workspace = true
+tokio.workspace = true
+tokio-stream = { workspace = true, features = ["time"] }
+futures.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+# `ServiceExt::oneshot`：不起监听端口，直接把请求喂给**真实的** `router()`。
+# 这台开发机上新编出来的 exe 入站会被静默丢弃，绑端口的测试跑不了
+tower = { version = "0.5", features = ["util"] }
+tokio = { workspace = true, features = ["test-util"] }

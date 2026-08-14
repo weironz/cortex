@@ -409,6 +409,7 @@ async fn delegate(
     let quota_exhausted = st.enforce_quota(&owner).await.is_err();
     Ok(Json(cortex_proto::delegate::Delegation {
         token: delegate_token(&st, scope),
+        owner,
         scope_key,
         runtime: match runtime {
             cortex_store::SessionRuntime::Local => cortex_proto::dto::SessionRuntimeDto::Local,

@@ -9,6 +9,7 @@ members = [
     "crates/cortex-proto",
     "crates/cortex-import",
     "crates/cortexd",
+    "crates/cortex-agentd",
     "crates/cortex-local",
     "crates/cortex-egress-proxy",
     "crates/cortex-cli",

@@ -1123,6 +1123,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "cortex-agentd"
+version = "0.1.8"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bollard",
+ "bytes",
+ "chrono",
+ "clap",
+ "cortex-core",
+ "cortex-proto",
+ "dotenvy",
+ "futures",
+ "hex",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cortex-blob"
 version = "0.1.8"
 dependencies = [
