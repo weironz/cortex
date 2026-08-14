@@ -81,24 +81,6 @@ pub struct Runtime {
     /// 合进 `AccessBook` 会让「这把 token 能干什么」变成一个要在调用点
     /// 到处判断的问题。
     pub sandboxes: Arc<crate::sandbox_token::SandboxTokens>,
-    /// 起 / 停用户沙箱容器的那一层，以及反代进去用的 HTTP 客户端。
-    ///
-    /// `None` = 这个部署没接 docker（开发机没起 daemon、或者刻意不开云沙箱）。
-    ///
-    /// 此时 `/chat` 拿到的是一条**说得清**的 501，指向两条走得通的路
-    /// （给服务器装 docker，或用桌面端）。此前它会退回 cortexd 自己那份
-    /// 进程内 agent 跑纯聊天 —— 用户看到的是一个「有文件工具却怎么都不动
-    /// 文件」的 agent，那种失败没人查得出来。那份 agent 已经删了。
-    pub sandbox: Option<SandboxLayer>,
-}
-
-/// 云沙箱那一层的两个句柄。
-#[derive(Clone)]
-pub struct SandboxLayer {
-    pub runner: Arc<dyn crate::sandbox_runner::SandboxRunner>,
-    /// **专用**客户端：连接超时、读超时、禁连接池三件事都与别处不同，
-    /// 理由见 [`crate::sandbox_proxy::client`]。
-    pub http: reqwest::Client,
 }
 
 /// 账号相关的两个句柄。
@@ -159,7 +141,6 @@ impl Runtime {
             sandboxes: Arc::new(crate::sandbox_token::SandboxTokens::default()),
             // 由 main 在拿到配置后调 `with_sandbox` 补上：连 docker 要
             // 试探一次 daemon，而 from_env 是同步的且不该做 IO
-            sandbox: None,
         })
     }
 }
@@ -408,12 +389,6 @@ impl AppState {
         &self.inner.rt.sandboxes
     }
 
-    /// 云沙箱那一层。`None` = 这个部署连不上 docker。
-    #[must_use]
-    pub fn sandbox_layer(&self) -> Option<&SandboxLayer> {
-        self.inner.rt.sandbox.as_ref()
-    }
-
     // ───────────────────────── 多租户 ─────────────────────────
 
     /// 真实后端的句柄。后台任务用它按租户绑定。
@@ -576,30 +551,6 @@ impl AppState {
             Some(for_transcribe),
         )
         .await
-    }
-
-    /// 只把字节写进对象存储，**不登记 blob 元数据**。
-    ///
-    /// 与 [`Self::upload_blob`] 的差别是「有没有主人」：那条路上的字节是
-    /// 用户的附件，要进 `blobs` 表、要能被检索、要走转录。这条路上的字节是
-    /// **运维产物**（工作区快照），没有会话、没有 mime 意义上的内容、
-    /// 也不该出现在任何「我的文件」列表里。
-    ///
-    /// 走 `blobs` 表的话，每 15 分钟一份的快照会把那张表淹掉，
-    /// 而且它们会以附件身份出现在检索结果里。
-    ///
-    /// # Errors
-    /// 对象存储没起来或写失败。
-    pub async fn put_blob(&self, bytes: Bytes, declared_mime: Option<&str>) -> Result<String> {
-        Ok(self.inner.blobs.put(bytes, declared_mime).await?.hash)
-    }
-
-    /// 按哈希取回字节。同上，不查 `blobs` 表。
-    ///
-    /// # Errors
-    /// 对象存储没起来，或那个哈希不存在。
-    pub async fn get_blob(&self, hash: &str) -> Result<Bytes> {
-        self.inner.blobs.get(hash).await
     }
 
     /// 一个用户的 `Store`，**入口是 user id 而不是请求头**。

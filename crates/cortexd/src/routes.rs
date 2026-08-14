@@ -84,7 +84,10 @@ protected_routes! {
     "/settings/llm-key" [GET, PUT, DELETE] => get(crate::byo_key::get)
         .put(crate::byo_key::put)
         .delete(crate::byo_key::delete),
-    "/chat" [POST] => post(chat),
+    // 这里**没有** `/chat`，也没有 `/sandbox/*`。它们归 `cortex-agentd`
+    // ——那个进程有 docker，这个没有。分流在边缘（dev 的 nginx、prod 的
+    // traefik），不在任何一个服务里：让 cortexd 知道 agentd 在哪，等于给
+    // 这一半留一条「agent 服务地址」的配置，而独立部署它的人根本没有 agentd。
     // 这里**没有** `/confirmations`。工具确认属于 agent，而 agent 在别的
     // 进程里：桌面端问的是本机 `cortex-local`，容器里那一轮压根不问
     //（越界路径直接拒绝，见 `cortex_agent::ExecEnvironment::Container`）。
@@ -165,29 +168,12 @@ protected_routes! {
     "/blobs/{hash}/url" [GET] => get(get_blob_url),
     "/sync" [GET] => get(sync),
     "/ws" [GET] => get(crate::ws::handler),
-    // 沙箱工作区的快照。**只列自己的、只恢复自己的** —— owner 从凭据来，
-    // 不从路径或请求体来（否则任何人都能把别人的工作区解进自己的容器）。
+    // 沙箱工作区快照的**索引**。字节走已有的 `/blobs`。
     //
-    // 这几条**不在**沙箱令牌的白名单里，所以容器自己够不着它们：
-    // 「被攻陷的容器删不掉自己的备份」这条性质就落在这个差别上
-    "/sandbox/snapshots" [GET, POST] => get(list_snapshots).post(take_snapshot),
-    "/sandbox/snapshots/{id}/restore" [POST] => post(restore_snapshot),
-    // 把整个工作区打包下载。
-    //
-    // 没有它的话，agent 在容器卷里写出来的东西**用户永远拿不到** ——
-    // 看得见工具行说「写了 report.md」，然后就没有然后了。
-    // 四家云 agent 各有各的出口（Codex/Devin push 回 git 远端，
-    // Claude web 在对话里给下载），我们至少得有一个。
-    "/sandbox/workspace.tar" [GET] => get(download_workspace),
-    // 浏览 / 取单个文件 / 传单个文件进去。
-    //
-    // 与 `/sandbox/workspace.tar` 的分工：那条是「把这次的产物整个拿走」，
-    // 这三条是「我想看看里面有什么 / 只要那一个文件 / 把这份材料放进去」。
-    //
-    // **路径校验是这一组唯一的栅栏**：请求由 cortexd 用宿主身份经 docker
-    // 执行，容器的 landlock 与只读 rootfs 一个都不参与。见 `validate_ws_path`
-    "/sandbox/files" [GET, PUT] => get(list_sandbox_files).put(put_sandbox_file),
-    "/sandbox/files/raw" [GET] => get(read_sandbox_file),
+    // 拍快照要 docker（导出 tar），存快照要库与对象存储 —— 前者只有
+    // agentd 有，后者只有这里有。所以切在中间：agentd 出 tar 交上来，
+    // 这里只记一行。见 `crate::snapshots` 的模块头。
+    "/sandbox-snapshots" [GET, POST] => get(crate::snapshots::list).post(crate::snapshots::record),
 }
 
 /// 路由表。
@@ -287,41 +273,6 @@ async fn issue_ticket(State(st): State<AppState>) -> Json<TicketResponse> {
 ///
 /// 用 SSE 而非 WebSocket：对话是单向流，SSE 自带重连与文本帧语义，
 /// 且在 Flutter Web 上比 WS 少一层坑。WS 留给多端同步推送。
-/// `/chat` 的入口。**这个 handler 一行对话业务都不做。**
-///
-/// 起容器（幂等）、签一把作用域令牌、把整条请求原样反代进去。对话、工具、
-/// 确认全在容器里那个 `cortex-local` 上跑 —— 那是同一个二进制，
-/// 只是 `--exec-env=container`。
-///
-/// # 为什么没有「在 cortexd 自己这儿跑」那条回落
-///
-/// 有过。它是**第二份 agent 实现**：同一个 `Turn::run` 两处装配，工具目录
-/// 只有 `memory_search`，只在部署接不上 docker 时走到。删掉它的理由不是它
-/// 坏了，而是没人能同时维护两份 —— 漏改的那一份不会有测试红，因为两条路
-/// 的用户是不同的人群。
-///
-/// 现在 cortexd 是纯记忆服务。它给 agent 的是 `/llm/stream`（借模型）、
-/// `/episodes`（写记忆）、`/mcp`（查记忆），而**我们自己的 agent 走的就是
-/// 第三方走的那条路**。那个 API 才不会烂。
-///
-/// 代价说在明处：没接 docker 的部署，Web 端问不了话。这不是降级到「纯聊天」
-/// ——那正是本仓库反复栽的形状（功能静默变残，界面上一个字都不说）。
-/// 报错里给两条走得通的路。
-async fn chat(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> axum::response::Response {
-    let req: ChatRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            return ApiError::bad_request(format!("请求体不是合法的 ChatRequest：{e}"))
-                .into_response();
-        }
-    };
-    chat_in_sandbox(&st, &headers, &req, body).await
-}
-
 /// 这个会话的沙箱作用域：谁的、哪个项目的。
 ///
 /// # 查不到项目时按未分组处理，而不是报错
@@ -429,111 +380,6 @@ async fn revoke_delegation(
 ) -> StatusCode {
     st.sandbox_tokens().revoke(&req.token);
     StatusCode::NO_CONTENT
-}
-
-/// 确保这个作用域的沙箱在跑，回一把能进去的令牌。
-///
-/// # 为什么起容器放在请求路径上而不是「建会话时」
-///
-/// 会话可能几天不聊。`ensure` 是幂等的，每次调的代价是一次 `docker inspect`
-/// （毫秒级），冷启动实测 913 ms —— 换来的是「不聊就不占」。
-///
-/// # 为什么每一条要摸容器的路由都得走它
-///
-/// 上一版只有 `/chat` 会拉容器，文件那几条是「容器不在就报错」。于是用户从
-/// 侧栏点开文件树，看到的是一句「沙箱容器不在了，去发条消息把它拉起来」——
-/// 一件他既不该知道也无法理解的事。现在谁先来谁负责拉起。
-async fn ensure_sandbox(
-    st: &AppState,
-    layer: &crate::state::SandboxLayer,
-    scope: crate::sandbox_token::SandboxScope,
-) -> Result<(crate::sandbox_runner::SandboxHandle, String), ApiError> {
-    let key = scope.key();
-    // 签发规则见 [`delegate_token`] —— 与 `POST /delegated-tokens` 共用一份
-    let token = delegate_token(st, scope);
-
-    match layer.runner.ensure(&key, &token, "v1").await {
-        Ok(h) => Ok((h, token)),
-        Err(e) => {
-            // 签出去的令牌要收回来：容器没起来，它就是一把没有主人的钥匙
-            st.sandbox_tokens().revoke(&token);
-            Err(ApiError::from(e))
-        }
-    }
-}
-
-/// 反代进用户的云沙箱。
-async fn chat_in_sandbox(
-    st: &AppState,
-    headers: &HeaderMap,
-    req: &ChatRequest,
-    body: axum::body::Bytes,
-) -> axum::response::Response {
-    let Some(layer) = st.sandbox_layer() else {
-        // **明说，不静默退回纯聊天。** 曾经真有过那条回落，它给出的是一个
-        // 「有文件工具却怎么都不动文件」的 agent —— 那种失败没人查得出来。
-        //
-        // 现在连纯聊天也没有：cortexd 不跑 agent 循环了（见 [`chat`] 的文档）。
-        // 所以报错要把**两条走得通的路**都说出来，而不只是说这里不行
-        return ApiError::unsupported(
-            "这个部署跑不了对话：cortexd 是记忆服务，agent 在容器里跑，\
-             而它连不上 docker。给服务器装上 docker，或者用桌面端\
-             （桌面端自带 agent，对话在你自己的机器上跑，记忆照旧存在这里）。",
-        )
-        .into_response();
-    };
-
-    let owner = crate::accounts::current_user(st, headers).await;
-    if let Err(e) = st.enforce_quota(&owner).await {
-        return e.into_response();
-    }
-
-    let (scope, runtime) = sandbox_scope(st, &owner, &req.session_id).await;
-
-    // ── 钉在某台机器上的会话，这儿跑不了 ──
-    //
-    // 它的文件在那台机器的一个本机目录里，而这里只有云端那个卷。硬跑的话
-    // agent 会拿到一个**完全不同的文件系统**：历史里那些路径全都不存在，
-    // 而它读不到时说的是「没有这个文件」—— 一句听起来像它失忆了的实话。
-    //
-    // 这正是这一整套改动要消灭的东西：同一个会话只能有一个文件系统。
-    if matches!(runtime, cortex_store::SessionRuntime::Local) {
-        return ApiError::conflict(
-            "这个会话绑在某台机器上的一个目录里，它的文件只在那儿。\
-             在这里继续聊的话 agent 看不到那些文件 —— 请到那台机器上打开它。",
-        )
-        .into_response();
-    }
-
-    let project = scope.project.clone();
-    let (handle, token) = match ensure_sandbox(st, layer, scope).await {
-        Ok(v) => v,
-        Err(e) => return e.into_response(),
-    };
-
-    tracing::debug!(
-        owner = %owner, project = ?project, sandbox = %handle.name,
-        "本轮走云沙箱"
-    );
-
-    // 重新组一个请求转进去。**只带 body 与必要的首部** ——
-    // `sandbox_proxy::forward` 会把一切凭据剥掉再换上沙箱令牌
-    let mut proxied = axum::extract::Request::new(axum::body::Body::from(body));
-    *proxied.method_mut() = axum::http::Method::POST;
-    *proxied.uri_mut() = "/chat".parse().expect("常量路径可解析");
-    proxied.headers_mut().insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/json"),
-    );
-
-    crate::sandbox_proxy::forward(
-        &layer.http,
-        handle.addr.endpoint(),
-        &token,
-        handle.addr.route_target(),
-        proxied,
-    )
-    .await
 }
 
 // ───────────────────────── /llm/stream ─────────────────────────
@@ -682,223 +528,6 @@ async fn memory_search(
 ) -> Result<Json<MemorySearchResponse>, ApiError> {
     let tenant = st.tenant(&headers).await?;
     Ok(Json(st.memory_search(&tenant, q).await?))
-}
-
-// ───────────────────── 沙箱工作区快照 ─────────────────────
-//
-// 三条路由的 owner 一律来自 `current_user`，**不从路径或请求体来**。
-// 让调用方指定 owner 的话，任何登录用户都能列别人的快照、把别人的工作区
-// 解进自己的容器 —— 而对象存储是内容寻址的，哈希本身不带归属。
-
-/// 我的快照，新的在前。
-async fn list_snapshots(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<FilePathQuery>,
-) -> Result<Json<Vec<crate::sandbox_snapshot::SnapshotRow>>, ApiError> {
-    let owner = crate::accounts::current_user(&st, &headers).await;
-    // 列快照**不拉容器**：这条只读表，不碰卷。它是这几条里唯一一条
-    // 容器不在也能给出正确答案的
-    let scope = sandbox_scope(&st, &owner, q.session()).await.0.key();
-    Ok(Json(
-        crate::sandbox_snapshot::list(&st, &owner, &scope).await?,
-    ))
-}
-
-/// 立刻拍一份，不等下一个 15 分钟。
-///
-/// 存在的理由是「我要做一件危险的事，先备份一下」—— 那正是 RPO 最不该
-/// 由定时器决定的时刻。
-async fn take_snapshot(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<FilePathQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let owner = crate::accounts::current_user(&st, &headers).await;
-    // 用户点了「立刻备份」就一定要拍到一份。容器不在就拉起来 ——
-    // 导出走的是 docker 的 archive API，那个 API 要有容器才能读到卷。
-    //
-    // **只有这条路会拉**：后台那个 15 分钟的定时任务仍然拿 `capture` 的
-    // `Ok(None)`，否则每一轮扫描都会把刚回收掉的沙箱全部复活，回收就等于没做。
-    let (_, scope) = ensure_for_files(&st, &owner, q.session()).await?;
-    match crate::sandbox_snapshot::capture(&st, &owner, &scope).await? {
-        Some(row) => Ok(Json(serde_json::json!({ "snapshot": row }))),
-        // 刚 ensure 过还是没有，只能是这一瞬被别的东西停掉了。不当失败报：
-        // 卷还在，用户也没做错任何事
-        None => Ok(Json(serde_json::json!({
-            "snapshot": null,
-            "note": "工作区这一刻拿不到，稍后会自动重试。文件都在，一个字节没少。",
-        }))),
-    }
-}
-
-/// 把整个 `/workspace` 打成 tar 下载。
-///
-/// # 为什么是整包而不是一个文件树 + 逐个下载
-///
-/// 文件树要么在容器里跑一次 `ls`（那是不可信侧），要么在宿主侧把整个卷导出
-/// 再解 tar 头 —— 后者与直接给整包的代价一样。而用户真正要的通常是
-/// 「把这次的产物拿走」，不是「浏览」。先把出口打通，浏览留给以后。
-///
-/// # 为什么不复用快照
-///
-/// 快照最旧可能是 15 分钟前的。用户点下载的那一刻要的是**现在**的样子 ——
-/// 给一份 15 分钟前的会让人以为 agent 刚才那一步没生效。
-async fn download_workspace(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<FilePathQuery>,
-) -> Result<axum::response::Response, ApiError> {
-    let owner = crate::accounts::current_user(&st, &headers).await;
-    let (layer, scope) = ensure_for_files(&st, &owner, q.session()).await?;
-    let tar = layer.runner.export_workspace(&scope).await?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/x-tar"),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"workspace.tar\"",
-            ),
-        ],
-        tar,
-    )
-        .into_response())
-}
-
-/// `?path=` 与 `?session=` 的形状。三条文件端点共用。
-#[derive(serde::Deserialize)]
-struct FilePathQuery {
-    path: Option<String>,
-    /// 用户当前在看哪个会话。用来给这次拉起的容器**签一把带会话的令牌**。
-    ///
-    /// 不给也能用（拿一把空会话的令牌，容器写不了 episode —— 而它这时也没有
-    /// 什么可写的，聊天那条路一来就会把它改绑过去）。
-    session: Option<String>,
-}
-
-impl FilePathQuery {
-    /// 不给 `path` 时默认工作区根 —— 界面第一次展开树就是这样调的。
-    fn or_root(&self) -> &str {
-        self.path.as_deref().unwrap_or("/workspace")
-    }
-
-    fn session(&self) -> &str {
-        self.session.as_deref().unwrap_or_default()
-    }
-}
-
-/// 文件端点用的「拿到能干活的沙箱」。**不在就拉起来，不是报错**。
-///
-/// 上一版这里是 `require_sandbox`：容器不在就回 409，界面上显示
-/// 「沙箱容器不在了，去发一条消息把它拉起来」。那句话要求用户理解三件事
-/// （有个容器、它会被回收、聊天能把它拉回来），而这三件事本来就不该露出来。
-/// 冷启动 913 ms，比解释它便宜得多。
-///
-/// # 为什么把作用域键一起还回去
-///
-/// 因为**下一行就要用它**去 `list_dir` / `read_file` / `write_file`。只回
-/// layer 的话，调用方手边最顺手的变量是 `owner` —— 于是拉起的是这个项目的
-/// 容器，读的却是未分组那个卷。而两边都成功，只是文件不对。
-async fn ensure_for_files<'a>(
-    st: &'a AppState,
-    owner: &str,
-    session_id: &str,
-) -> Result<(&'a crate::state::SandboxLayer, String), ApiError> {
-    let layer = st
-        .sandbox_layer()
-        .ok_or_else(|| ApiError::unsupported("这个部署没有开云沙箱"))?;
-    let (scope, _runtime) = sandbox_scope(st, owner, session_id).await;
-    let key = scope.key();
-    ensure_sandbox(st, layer, scope).await?;
-    Ok((layer, key))
-}
-
-/// 列一层目录。
-async fn list_sandbox_files(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<FilePathQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let owner = crate::accounts::current_user(&st, &headers).await;
-    let (layer, scope) = ensure_for_files(&st, &owner, q.session()).await?;
-    let path = q.or_root();
-    let entries = layer.runner.list_dir(&scope, path).await?;
-    Ok(Json(
-        serde_json::json!({ "path": path, "entries": entries }),
-    ))
-}
-
-/// 取一个文件的字节。
-async fn read_sandbox_file(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<FilePathQuery>,
-) -> Result<axum::response::Response, ApiError> {
-    let owner = crate::accounts::current_user(&st, &headers).await;
-    let (layer, scope) = ensure_for_files(&st, &owner, q.session()).await?;
-    let path = q
-        .path
-        .as_deref()
-        .ok_or_else(|| ApiError::bad_request("要取哪个文件 —— 缺 ?path="))?;
-    let bytes = layer.runner.read_file(&scope, path).await?;
-    Ok((
-        // **一律 octet-stream，不按扩展名猜 mime。**
-        //
-        // 这些字节是**沙箱里那个不可信 agent 写出来的**。回一个
-        // `text/html` 就等于给了它一条「在 cortexd 的源上执行任意脚本」的路
-        // （用户点开预览 = 一次 XSS）。同理不给 inline，一律 attachment。
-        [
-            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!(
-                    "attachment; filename=\"{}\"",
-                    path.rsplit('/').next().unwrap_or("file")
-                ),
-            ),
-        ],
-        bytes,
-    )
-        .into_response())
-}
-
-/// 传一个文件进去。请求体就是原始字节。
-async fn put_sandbox_file(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<FilePathQuery>,
-    body: axum::body::Bytes,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let owner = crate::accounts::current_user(&st, &headers).await;
-    let (layer, scope) = ensure_for_files(&st, &owner, q.session()).await?;
-    let path = q
-        .path
-        .as_deref()
-        .ok_or_else(|| ApiError::bad_request("要写到哪儿 —— 缺 ?path="))?;
-    let size = body.len();
-    layer.runner.write_file(&scope, path, body).await?;
-    Ok(Json(serde_json::json!({ "path": path, "size": size })))
-}
-
-/// 把某一份快照写回工作区。**叠加，不是替换。**
-async fn restore_snapshot(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Query(q): Query<FilePathQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let owner = crate::accounts::current_user(&st, &headers).await;
-    // 恢复是用户「刚丢了东西」才走的路，最不该在这里让他先去把容器拉起来
-    let (_, scope) = ensure_for_files(&st, &owner, q.session()).await?;
-    crate::sandbox_snapshot::restore(&st, &owner, &scope, &id).await?;
-    Ok(Json(serde_json::json!({
-        "restored": id,
-        // 这句话要回给用户看。「恢复」在人脑子里通常是「回到那一刻的样子」，
-        // 而实际语义是叠加 —— 不说清楚，用户会以为快照之后新建的文件被删了
-        // （其实还在），或者以为已经删掉的文件回来了（其实没回来的那部分
-        // 是快照里本来就没有的）
-        "note": "已把快照里的文件写回工作区：同名文件被覆盖，快照之后新建的文件保持不动。",
-    })))
 }
 
 // ────────────────────────── episodes ───────────────────────────
@@ -1288,27 +917,6 @@ impl ApiError {
             status: Some(StatusCode::NOT_IMPLEMENTED),
         }
     }
-
-    /// 409：能力在，但**这个会话**不在这儿。
-    ///
-    /// # 它删过一次，又加回来了
-    ///
-    /// 上一版它服务的是「沙箱容器被回收了，发条消息就回来」，而那条路后来
-    /// 整个删了 —— 容器由谁碰谁拉起，用户不该知道有容器。删它时写明了
-    /// 「哪天又出现一个真正的『能力在、当下状态不满足』再加回来」。
-    ///
-    /// 这就是那一天：会话钉在某台机器上，而请求打到了云端。**这个状态不是
-    /// 实现细节**，它是用户自己造成的、也只有他能解开的 —— 去那台机器上打开它。
-    ///
-    /// 与 501 分开的理由没变：客户端把 501 当成「这条路不会开」，
-    /// 据此把功能降级掉并且**不再重试**。
-    pub fn conflict(message: impl Into<String>) -> Self {
-        Self {
-            message: Some(message.into()),
-            inner: cortex_core::CortexError::Store("conflict".into()),
-            status: Some(StatusCode::CONFLICT),
-        }
-    }
 }
 
 impl From<cortex_core::CortexError> for ApiError {
@@ -1401,7 +1009,6 @@ mod tests {
             sandboxes: std::sync::Arc::new(crate::sandbox_token::SandboxTokens::default()),
             // 路由测试不碰 docker。`sandbox: true` 的请求在这里会拿到
             // 「这个部署没有云沙箱」，而那正是它该拿到的
-            sandbox: None,
         };
         (router(crate::state::AppState::for_tests(rt)), token)
     }
@@ -1511,54 +1118,55 @@ mod tests {
         }
     }
 
-    /// **cortexd 不跑 agent。** 接不上 docker 时 `/chat` 明说，不自己跑一轮。
+    /// **cortexd 不跑 agent，也不编排容器。** 这几条路径压根不在它身上。
     ///
-    /// # 这条测的是一个已经被拆掉的东西不会长回来
+    /// # 这条不变量分两次变强，别把它改回去
     ///
-    /// 此前 cortexd 里有一份进程内的 agent 循环（`chat_here` + `run_turn`），
-    /// 工具目录只有 `memory_search`，只在这个分支上走到。它是**第二份实现**：
-    /// 同一个 `Turn::run` 两处装配，每加一个工具、每改一次注入纪律都得改两遍，
-    /// 而漏掉的那一遍不会有任何测试红 —— 两条路的用户是不同的人群。
+    /// 第一次：cortexd 里曾有一份进程内的 agent 循环（`chat_here` +
+    /// `run_turn`），工具目录只有 `memory_search`，只在「接不上 docker」时
+    /// 走到。它是**第二份实现** —— 同一个 `Turn::run` 两处装配，每加一个
+    /// 工具、每改一次注入纪律都得改两遍，而漏掉的那一遍不会有任何测试红。
+    /// 删掉它之后，这里断的是「明说要 docker」的 501。
     ///
-    /// 把它加回来在别处不会有任何症状：编译过、既有测试全绿、有 docker 的
-    /// 部署照常走容器。**只有这条会红。**
+    /// 第二次（现在）：容器编排也搬去 `cortex-agentd` 了，于是 `/chat` 与
+    /// `/sandbox/*` **在这个进程上根本不存在**。断言从 501 变成 404 是
+    /// 变强而不是放松 —— 501 说的是「这条路我有但不支持」，404 说的是
+    /// 「这条路不归我」，而后者才是实情。
     ///
-    /// 断言的是 501 **加上**报错正文里给了走得通的路。只断状态码的话，
-    /// 一句「不支持」也能让它变绿，而那对用户等于「点了没反应」——
-    /// 那正是本仓库反复栽的形状。
+    /// 独立部署 cortexd 的人（Cormex 的用户）拿到的正是这一份：它是记忆
+    /// 服务，没有 agent、没有 docker、也不假装有。
+    ///
+    /// 把任何一条加回来在别处不会有症状：编译过、别的测试全绿、我们自己的
+    /// 部署因为边缘分流照常工作。**只有这条会红。**
     #[tokio::test]
-    async fn cortexd_refuses_to_run_a_turn_itself() {
+    async fn cortexd_serves_no_agent_shaped_route() {
         let (app, token) = app_with_token();
-        let req = Request::builder()
-            .method(Method::POST)
-            .uri("/chat")
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"session_id":"s1","message":"在吗"}"#))
-            .expect("构造请求不该失败");
-        let resp = app
-            .oneshot(req)
-            .await
-            .expect("router 的错误类型是 Infallible");
-
-        assert_eq!(
-            resp.status(),
-            StatusCode::NOT_IMPLEMENTED,
-            "没接 docker 的 cortexd 必须拒绝跑对话，而不是自己跑一轮纯聊天"
-        );
-
-        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
-            .await
-            .expect("读响应体不该失败");
-        let msg = String::from_utf8_lossy(&body);
-        assert!(
-            msg.contains("docker"),
-            "要说清楚缺的是什么，否则运维不知道该装什么。实际：{msg}"
-        );
-        assert!(
-            msg.contains("桌面端"),
-            "只说「装 docker」对装不了 docker 的人是死路。实际：{msg}"
-        );
+        for (method, path) in [
+            (Method::POST, "/chat"),
+            (Method::GET, "/sandbox/files"),
+            (Method::GET, "/sandbox/workspace.tar"),
+            (Method::POST, "/sandbox/snapshots"),
+        ] {
+            let req = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .expect("构造请求不该失败");
+            let got = app
+                .clone()
+                .oneshot(req)
+                .await
+                .expect("router 的错误类型是 Infallible")
+                .status();
+            assert_eq!(
+                got,
+                StatusCode::NOT_FOUND,
+                "{method} {path} 归 cortex-agentd —— 它有 docker，这个进程没有。\
+                 实际回了 {got}"
+            );
+        }
     }
 
     /// `/health` 是**唯一**不需要认证的端点。理由见 [`Health::auth`]。
@@ -1747,152 +1355,6 @@ mod tests {
         assert!(
             replayed.iter().all(|f| f.get("invalidated").is_some()),
             "每条事实都必须带 invalidated 字段，客户端不该靠猜"
-        );
-    }
-}
-
-/// 「文件那几条自己会把容器拉起来」的守卫。
-///
-/// # 它盯的是什么
-///
-/// 上一版这几条是「容器不在就回 409 + 一句『去发条消息把它拉起来』」。
-/// 那句话要求用户理解有个容器、它会被回收、聊天能把它拉回来 —— 三件本来
-/// 就不该露出来的事。改成按需拉起之后，**回退的形状是「又变回只查不拉」**：
-/// 界面上会重新出现那句话，而代码读起来一切正常。
-///
-/// 所以这里用一个 runner 假替身，断言 `ensure` 真的被调过。
-#[cfg(test)]
-mod lazy_ensure_tests {
-    use super::*;
-    use crate::sandbox_runner::{DirEntry, SandboxAddr, SandboxHandle, SandboxRunner};
-    use axum::body::Body;
-    use axum::http::Request;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tower::ServiceExt as _;
-
-    /// 一个**永远说自己没在跑**的沙箱。
-    ///
-    /// `status` 恒为 `None` 是刻意的：只查不拉的实现在它面前必然失败，
-    /// 而按需拉起的实现照样能列出目录。
-    #[derive(Default)]
-    struct NeverRunning {
-        ensured: AtomicUsize,
-        /// `ensure` 与 `list_dir` 各自被要求的作用域键。**必须一致。**
-        seen: std::sync::Mutex<Vec<(&'static str, String)>>,
-    }
-
-    #[async_trait::async_trait]
-    impl SandboxRunner for NeverRunning {
-        async fn ensure(
-            &self,
-            scope: &str,
-            _t: &str,
-            _h: &str,
-        ) -> cortex_core::Result<SandboxHandle> {
-            self.ensured.fetch_add(1, Ordering::SeqCst);
-            self.seen
-                .lock()
-                .expect("测试里的锁不该中毒")
-                .push(("ensure", scope.to_owned()));
-            Ok(SandboxHandle {
-                name: format!("fake-{scope}"),
-                addr: SandboxAddr::Direct("http://127.0.0.1:1".into()),
-            })
-        }
-        async fn stop(&self, _owner: &str) -> cortex_core::Result<()> {
-            Ok(())
-        }
-        async fn status(&self, _owner: &str) -> cortex_core::Result<Option<SandboxHandle>> {
-            Ok(None)
-        }
-        async fn export_workspace(&self, _owner: &str) -> cortex_core::Result<bytes::Bytes> {
-            Ok(bytes::Bytes::new())
-        }
-        async fn import_workspace(&self, _o: &str, _t: bytes::Bytes) -> cortex_core::Result<()> {
-            Ok(())
-        }
-        async fn list_dir(&self, scope: &str, _path: &str) -> cortex_core::Result<Vec<DirEntry>> {
-            self.seen
-                .lock()
-                .expect("测试里的锁不该中毒")
-                .push(("list_dir", scope.to_owned()));
-            Ok(vec![DirEntry {
-                name: "note.md".into(),
-                is_dir: false,
-                size: 3,
-                mtime: None,
-            }])
-        }
-        async fn read_file(&self, _owner: &str, _path: &str) -> cortex_core::Result<bytes::Bytes> {
-            Ok(bytes::Bytes::new())
-        }
-        async fn write_file(
-            &self,
-            _owner: &str,
-            _path: &str,
-            _b: bytes::Bytes,
-        ) -> cortex_core::Result<()> {
-            Ok(())
-        }
-        fn watch_oom(&self) -> Option<futures::stream::BoxStream<'static, String>> {
-            None
-        }
-        async fn workspace_bytes(&self, _owner: &str) -> cortex_core::Result<Option<u64>> {
-            Ok(None)
-        }
-    }
-
-    #[tokio::test]
-    async fn 列目录时容器不在就自己拉起来() {
-        let runner = Arc::new(NeverRunning::default());
-        let rt = crate::state::Runtime {
-            auth: crate::auth::AuthMode::Disabled,
-            tickets: Arc::new(crate::auth::TicketBook::default()),
-            accounts: None,
-            access: Arc::new(crate::accounts::AccessBook::default()),
-            sandboxes: Arc::new(crate::sandbox_token::SandboxTokens::default()),
-            sandbox: Some(crate::state::SandboxLayer {
-                runner: runner.clone(),
-                http: reqwest::Client::new(),
-            }),
-        };
-        let app = router(crate::state::AppState::for_tests(rt));
-
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .uri("/sandbox/files?path=/workspace")
-                    .body(Body::empty())
-                    .expect("构造请求不该失败"),
-            )
-            .await
-            .expect("router 的错误类型是 Infallible");
-
-        assert_eq!(
-            res.status(),
-            StatusCode::OK,
-            "容器不在时列目录必须自己把它拉起来。回 4xx 就意味着界面上又要\
-             出现「沙箱容器不在了，去发条消息」——那正是这次要删掉的东西"
-        );
-        assert_eq!(
-            runner.ensured.load(Ordering::SeqCst),
-            1,
-            "必须真的调过 ensure。只查 status 的实现在真机上会静默退化成\
-             「文件树打不开，直到用户碰巧发了条消息」"
-        );
-
-        // 拉起来的那个容器，和读文件读的那个卷，**必须是同一个作用域**。
-        //
-        // 这是容器改成按项目分之后新出现的失败形状：`ensure` 拿作用域键、
-        // 而调用方手边最顺手的变量是 `owner`，于是拉起 A 项目的容器、
-        // 从未分组那个卷里读文件。两步都成功，只是文件不对。
-        let seen = runner.seen.lock().expect("测试里的锁不该中毒").clone();
-        let keys: Vec<&str> = seen.iter().map(|(_, k)| k.as_str()).collect();
-        assert!(
-            keys.windows(2).all(|w| w[0] == w[1]),
-            "ensure 与 list_dir 用了不同的作用域键：{seen:?}。\
-             真机上的症状是「容器起来了，但里面是空的」"
         );
     }
 }

@@ -238,85 +238,6 @@ impl SandboxTokens {
         }
     }
 
-    /// 作废某个作用域的全部令牌。
-    ///
-    /// 按 key 而不是按 owner：停掉「A 项目的容器」时不该把这个用户在
-    /// B 项目里那个正在干活的沙箱一起弄瘸 —— 它的令牌一没，
-    /// 它正在写的那条 episode 就是 403，而 `remote.rs` 把 4xx 归为不可重试。
-    pub fn revoke_scope(&self, key: &str) {
-        if let Ok(mut g) = self.inner.lock() {
-            g.retain(|_, (s, _)| s.key() != key);
-        }
-    }
-
-    /// 空闲超过 `idle` 的作用域。空闲回收拿它决定停谁。
-    ///
-    /// # 为什么「最后一次用到令牌」就是正确的活跃信号
-    ///
-    /// 这把令牌是容器**唯一**的对外凭据：每一次 `/llm/stream`、每一条
-    /// `/episodes`、每一次拉历史都要出示它，而 [`Self::resolve`] 每次都续期。
-    /// 所以「令牌很久没被用过」等价于「那个容器很久没干活了」。
-    ///
-    /// 这顺带解决了一件本来要单独处理的事：SSE 断开之后容器里的 agent 会
-    /// **继续跑完当轮**（`turn.rs` 刻意如此），期间它仍在调 cortexd ——
-    /// 于是令牌继续被续期，那个还在产出的沙箱不会被误停。
-    /// 换成「按 SSE 连接断开计时」就会停掉正在干活的容器。
-    ///
-    /// 三家（Codespaces / Gitpod / Coder）的共同点也是这个：**以客户端 /
-    /// 请求活动为信号，不把容器内的 CPU 占用当续命依据**。
-    #[must_use]
-    pub fn idle_scopes(&self, idle: Duration) -> Vec<SandboxScope> {
-        let Ok(guard) = self.inner.lock() else {
-            return Vec::new();
-        };
-        let now = Instant::now();
-        // 一个作用域可能有多把（换过会话又签了新的）。**最近那一把**说了算 ——
-        // 按最老的算会把还在干活的沙箱停掉
-        let mut newest: HashMap<String, (SandboxScope, Duration)> = HashMap::new();
-        for (scope, at) in guard.values() {
-            let age = now.duration_since(*at);
-            newest
-                .entry(scope.key())
-                .and_modify(|(_, a)| *a = (*a).min(age))
-                .or_insert_with(|| (scope.clone(), age));
-        }
-        newest
-            .into_values()
-            .filter(|(_, age)| *age >= idle)
-            .map(|(s, _)| s)
-            .collect()
-    }
-
-    /// 现在有沙箱的所有作用域（按 [`SandboxScope::key`] 去重）。
-    ///
-    /// 快照任务用它来决定给谁拍。**用这张表而不是 `docker ps`**：
-    /// 它本来就是「谁有沙箱」的权威（令牌与容器同生共死，见
-    /// [`crate::sandbox_reaper`] 里那段「顺序不能反」），而且省一次网络往返。
-    ///
-    /// 与 [`Self::idle_scopes`] 的差别只有一处：那个筛「久没动的」，
-    /// 这个要全部 —— 快照恰恰不该跳过正在干活的那些。
-    ///
-    /// 容器可能已经被回收而令牌还在（回收失败那一支），所以调用方仍要
-    /// `status()` 确认一次：这里返回的是「该看一眼的作用域」，
-    /// 不是「一定有活容器的作用域」。
-    ///
-    /// 返回整个 [`SandboxScope`] 而不只是键：快照那条路两样都要 ——
-    /// 用 `key()` 去找容器，用 `owner` 去找他的租户库。
-    #[must_use]
-    pub fn scopes(&self) -> Vec<SandboxScope> {
-        let Ok(guard) = self.inner.lock() else {
-            return Vec::new();
-        };
-        let mut by_key: HashMap<String, SandboxScope> = HashMap::new();
-        for (scope, _) in guard.values() {
-            by_key.entry(scope.key()).or_insert_with(|| scope.clone());
-        }
-        let mut seen: Vec<SandboxScope> = by_key.into_values().collect();
-        // 排序只为让日志与测试有确定的顺序
-        seen.sort_unstable_by_key(SandboxScope::key);
-        seen
-    }
-
     #[cfg(test)]
     fn len(&self) -> usize {
         self.inner.lock().map(|g| g.len()).unwrap_or(0)
@@ -440,49 +361,6 @@ mod tests {
             book.resolve(&t).is_none(),
             "沙箱停掉后它那把令牌必须当场失效 —— 容器可能还活着（stop 之前的\
              最后一瞬），而它此刻已经不该再写记忆了"
-        );
-    }
-
-    #[test]
-    fn revoking_one_scope_leaves_other_scopes_alone() {
-        let book = SandboxTokens::default();
-        let a = book.issue(scope());
-        let b = book.issue(SandboxScope {
-            owner: "u2".into(),
-            session_id: "s2".into(),
-            project: None,
-        });
-        book.revoke_scope("u1");
-        assert!(book.resolve(&a).is_none());
-        assert!(
-            book.resolve(&b).is_some(),
-            "作废一个用户的沙箱不该殃及别人 —— 多租户下这是一次全站故障"
-        );
-    }
-
-    /// 停掉一个项目的沙箱，**不能**弄瘸同一个用户在别的项目里那个。
-    ///
-    /// 上一版这里按 owner 作废，那时一个用户只有一个沙箱所以看不出问题。
-    /// 现在按 owner 作废的后果很具体：A 项目空闲被回收，B 项目正在跑的那个
-    /// agent 手里的令牌当场失效 —— 它正在写的那条 episode 拿到 403，
-    /// 而 `remote.rs` 把 4xx 归为不可重试，那条记录被永久丢弃且只留一行 warn。
-    #[test]
-    fn 停一个项目的沙箱不影响同一用户的另一个项目() {
-        let book = SandboxTokens::default();
-        let unfiled = book.issue(scope());
-        let alpha = book.issue(in_project("u1", "p-alpha"));
-        let beta = book.issue(in_project("u1", "p-beta"));
-
-        book.revoke_scope(&in_project("u1", "p-alpha").key());
-
-        assert!(book.resolve(&alpha).is_none(), "被停的那个项目的令牌该没了");
-        assert!(
-            book.resolve(&beta).is_some(),
-            "同一个用户的另一个项目还在干活，它的令牌不该被殃及"
-        );
-        assert!(
-            book.resolve(&unfiled).is_some(),
-            "未分组那个也是独立的一份，同样不该被殃及"
         );
     }
 

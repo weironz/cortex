@@ -79,11 +79,8 @@ services:
       # cortexd 与沙箱容器在同一个 docker 网络里（见下面 networks），
       # 于是它直连容器名，**中继那一整层不参与** —— 与生产一致。
       #
-      # 编排正在搬去 `agentd`（见下面那个服务）。这三行还留着是因为
-      # cortexd 那份副本还没删 —— 删除是紧接着的一个提交。
-      CORTEX_SANDBOX_ENABLED: "1"
-      CORTEX_SANDBOX_SAME_NETWORK: "1"
-      CORTEX_SANDBOX_CALLBACK: http://cortexd:8080
+      # 编排已经在 `agentd`（见下面那个服务）。这里三个沙箱变量都没了，
+      # docker.sock 也不再挂给这个容器 —— 它是纯记忆服务。
 
       CORTEX_EMBED_BACKEND: ${CORTEX_EMBED_BACKEND:-api}
       CORTEX_EMBED_MODEL: ${CORTEX_EMBED_MODEL:-}
@@ -100,18 +97,8 @@ services:
     volumes:
       # 二进制（只读）—— `just dev-build` 往这个卷里编
       - cortex_dev_bin:/opt/cortex/bin:ro
-      # 起沙箱要 docker API。**这是把宿主 root 交给 cortexd** ——
-      # 开发机上可以接受（信任边界就是你自己），生产上 cortexd 也是这么做的，
-      # 而那正是「cortexd 被攻破之后能做什么」那段论证要防的东西：
-      # 容器规格全部写死在 DockerRunner 里，调用方说不出第二个挂载
-      - /var/run/docker.sock:/var/run/docker.sock
-    # 那个 socket 是 `root:root` 模式 660（Docker Desktop 上实测），而这个
-    # 容器跑在 uid 10001 上 —— 不给组就是 `client error (Connect)`，
-    # 而那条错误读起来像「docker 没起来」。
-    #
-    # 加的是**组**不是用户：进程仍然不是 root，只是拿到 660 的 group rw。
-    # 比 `user: root` 小一格，而效果一样。
-    group_add: ["0"]
+      # **这里不再挂 docker.sock。** 那是「cortexd 被攻破之后能做什么」
+      # 那段论证里最贵的一项，而它现在只在 agentd 上。
     ports:
       # **只绑回环**。上面关了认证，这一行就是唯一挡着的东西
       - "127.0.0.1:${CORTEXD_DEV_PORT:-8080}:8080"
