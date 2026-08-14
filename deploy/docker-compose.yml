@@ -254,8 +254,19 @@ services:
   # 要经第三方镜像站（那类站点缓存 tag→digest，是个「拉到旧镜像还看不出来」
   # 的陷阱）。ACR 是第一方；Docker Hub 那份留作异地副本，
   # 用 CORMEX_REGISTRY=willdockerhub 切过去。tag 永远是具体版本，绝不用 latest
+  #
+  # ★ `CORMEX_IMAGE` 是整条镜像引用的覆盖口，为**过渡期**留的：
+  #   Cormex 刚拆出来，它自己的流水线还没发过第一个镜像，而记忆服务的旧镜像
+  #   （`willspace/cortexd:v0.1.8`）就在 registry 里 —— 那**就是**同一个东西，
+  #   只是当时还叫另一个名字。于是这台机器可以先
+  #
+  #       CORMEX_IMAGE=registry.cn-shenzhen.aliyuncs.com/willspace/cortexd:v0.1.8
+  #
+  #   把 Cortex 这一版发上去，等 Cormex 发了自己的第一个镜像再改回
+  #   `CORMEX_VERSION`。**没有这条口子，两个仓库就必须同一天发第一版** ——
+  #   而那正是拆分要消灭的耦合。
   cormex:
-    image: ${CORMEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cormex:${CORMEX_VERSION:?记忆服务的版本，与 CORTEX_VERSION 独立。先部署 Cormex 再部署 Cortex}
+    image: ${CORMEX_IMAGE:-${CORMEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cormex:${CORMEX_VERSION:?记忆服务的版本，与 CORTEX_VERSION 独立。过渡期可改用 CORMEX_IMAGE 指向旧的 cortexd 镜像}}
     container_name: cormex
     restart: unless-stopped
     logging: *default-logging

@@ -803,7 +803,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cortex-agent"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-agentd"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -854,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-blob"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-cli"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -900,7 +900,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-egress-proxy"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "tokio",
  "tracing",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-import"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-llm"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-local"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-proto"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "chrono",
  "cortex-core",
