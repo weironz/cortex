@@ -969,7 +969,19 @@ async fn write_episode(
         return Err(ApiError::bad_request("沙箱只能写它自己那个会话的对话记录"));
     }
     Ok(Json(
-        st.write_episode(&tenant, req, sandbox.is_some()).await?,
+        st.write_episode(
+            &tenant,
+            req,
+            // **来源由凭据决定**（见上面那段）。沙箱令牌 → tier 3；
+            // 别的已认证凭据 → tier 2。第三方经 MCP 写进来的那一档
+            // （tier 4）不走这条路由，走 `crate::mcp` 的 remember 工具
+            if sandbox.is_some() {
+                cortex_memory::extract::TurnOrigin::Sandbox
+            } else {
+                cortex_memory::extract::TurnOrigin::Trusted
+            },
+        )
+        .await?,
     ))
 }
 

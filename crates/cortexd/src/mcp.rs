@@ -74,6 +74,12 @@ pub struct SearchParams {
     pub as_of: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RememberParams {
+    /// 要记住的事，一句完整的陈述。
+    pub text: String,
+}
+
 /// MCP 那一侧的服务实现。
 ///
 /// 每个连接一个（`StreamableHttpService` 的工厂每次调用都造一个新的），
@@ -112,6 +118,102 @@ impl MemoryMcp {
             .await
             .map_err(to_mcp_error)?;
         Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(
+        name = "remember",
+        description = "把一件值得长期记住的事写进这个人的记忆。\
+                       用完整的一句话陈述，不要写成关键词 —— 抽取是按句子做的。\
+                       写进去的东西会被标成「外部来源」，在召回时权重低于\
+                       这个人自己说过的话。"
+    )]
+    async fn remember(
+        &self,
+        Parameters(p): Parameters<RememberParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let text = p.text.trim();
+        if text.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "要记住的内容不能为空".to_string(),
+                None,
+            ));
+        }
+        let tenant = self.tenant(&ctx)?;
+
+        // **走与所有人相同的那条写入路径**（`POST /episodes` 背后那个），
+        // 不自己拼 `NewFact`。
+        //
+        // 不是图省事：fact 是三元组，要实体解析、去重、失效判定，那一整套
+        // 只在抽取管线里有。绕过它自己插一条，插进去的是一条**谁也关联不上**
+        // 的孤立记录 —— 图上没有边，跨域连接看不见它，而它照样占召回名额。
+        //
+        // 代价是这里会花一次模型钱。`enforce_quota` 因此照常适用（那条路由
+        // 里对带 anchor 的请求收费，这里两条都带）。
+        let session_id = format!("mcp-{}", cortex_core::Id::new());
+        let user_id = cortex_core::Id::new().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // 两条 episode：一条「说了什么」，一条锚点。抽取挂在 anchor 上，
+        // 与对话那条路逐字相同 —— 少一条的话这段话只会被原样归档，
+        // 一条 fact 都抽不出来
+        self.write(&tenant, &user_id, &session_id, "user", text, &now, None)
+            .await?;
+        self.write(
+            &tenant,
+            &cortex_core::Id::new().to_string(),
+            &session_id,
+            "assistant",
+            "（外部 agent 通过 MCP 记下的）",
+            &now,
+            Some(&user_id),
+        )
+        .await?;
+
+        Ok(CallToolResult::success(vec![Content::text(
+            "已记住。它会以「外部来源」的信任级参与之后的召回。",
+        )]))
+    }
+
+    /// 一条 episode 的写入。两次调用之间只有角色与锚点不同。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "全是 NewEpisodeRequest 的字段，收成一个结构体只是把参数列表\
+                  搬了个位置 —— 而它只有这一个调用方"
+    )]
+    async fn write(
+        &self,
+        tenant: &crate::request_tenant::Tenant,
+        id: &str,
+        session_id: &str,
+        role: &str,
+        text: &str,
+        occurred_at: &str,
+        anchor: Option<&str>,
+    ) -> Result<(), ErrorData> {
+        self.state
+            .write_episode(
+                tenant,
+                cortex_proto::episodes::NewEpisodeRequest {
+                    id: id.to_string(),
+                    session_id: session_id.to_string(),
+                    role: role.to_string(),
+                    text: text.to_string(),
+                    occurred_at: Some(occurred_at.to_string()),
+                    attachments: Vec::new(),
+                    // 不检索：这不是一轮对话，没有「本轮该注入什么」可言。
+                    // 设 true 会凭空造出一条假的归因
+                    retrieve: false,
+                    anchor_episode_id: anchor.map(str::to_string),
+                    tool_calls: Vec::new(),
+                },
+                // **写死 External，不从请求体来。** 让调用方自报来源，
+                // 等于让一个被注入的 agent 自己挑落哪一档信任级
+                cortex_memory::extract::TurnOrigin::External,
+            )
+            .await
+            .map(|_| ())
+            .map_err(to_mcp_error)
     }
 
     /// 从这次 MCP 请求背后那个 HTTP 请求里解出租户。

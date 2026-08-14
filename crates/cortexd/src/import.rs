@@ -298,7 +298,13 @@ impl cortex_import::Sink for LocalSink {
         self.0
             // 导入不是沙箱写的：这条路上的字节来自用户上传的导出文件，
             // 由 cortexd 自己解析，中间没有容器
-            .write_episode(&self.1, req.clone(), false)
+            .write_episode(
+                &self.1,
+                req.clone(),
+                // 导入的是**用户自己**的历史对话（ChatGPT / Claude 导出包），
+                // 与他在我们这儿说的话同一档
+                cortex_memory::extract::TurnOrigin::Trusted,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     }

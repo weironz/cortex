@@ -830,23 +830,19 @@ impl AppState {
     ///
     /// mock 后端下**不假装写成功**：本地 agent 会据此以为记忆已经落库，
     /// 于是把队列里那一条划掉 —— 那才是真的丢数据。
-    /// `from_sandbox` 决定抽出来的 fact 落在哪个信任级 ——
-    /// 见 [`cortex_memory::extract::ExtractContext::from_sandbox`]。
+    /// `origin` 决定抽出来的 fact 落在哪个信任级 ——
+    /// 见 [`cortex_memory::extract::TurnOrigin`]。
     pub async fn write_episode(
         &self,
         tenant: &Tenant,
         req: NewEpisodeRequest,
-        from_sandbox: bool,
+        origin: cortex_memory::extract::TurnOrigin,
     ) -> Result<EpisodeAck> {
         match &self.inner.backend {
             Backend::Mock => Err(CortexError::Unavailable(
                 "本实例跑在 mock 后端上，没有可写入的记忆库".into(),
             )),
-            Backend::Live(l) => {
-                l.bind(tenant.store()?)
-                    .write_episode(req, from_sandbox)
-                    .await
-            }
+            Backend::Live(l) => l.bind(tenant.store()?).write_episode(req, origin).await,
         }
     }
 

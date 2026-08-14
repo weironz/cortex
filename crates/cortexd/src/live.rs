@@ -27,7 +27,7 @@ use cortex_llm::{LlmClient, MessageStream};
 use cortex_memory::{
     Retrieved, Retriever,
     embed::SharedEmbedder,
-    extract::{ExtractContext, Extractor},
+    extract::{ExtractContext, Extractor, TurnOrigin},
     injection,
 };
 use cortex_store::{NewEpisode, Role, Store};
@@ -282,9 +282,9 @@ impl BoundLive {
     pub async fn write_episode(
         &self,
         req: NewEpisodeRequest,
-        from_sandbox: bool,
+        origin: TurnOrigin,
     ) -> Result<EpisodeAck> {
-        self.0.write_episode(req, from_sandbox).await
+        self.0.write_episode(req, origin).await
     }
 
     pub async fn register_blob(&self, new: cortex_store::NewBlob) -> Result<Option<i64>> {
@@ -597,7 +597,7 @@ impl Live {
     async fn write_episode(
         &self,
         req: NewEpisodeRequest,
-        from_sandbox: bool,
+        origin: TurnOrigin,
     ) -> Result<EpisodeAck> {
         let episode_id: Id = req
             .id
@@ -778,7 +778,7 @@ impl Live {
                 req.anchor_episode_id.clone(),
                 req.text.clone(),
                 occurred_at,
-                from_sandbox,
+                origin,
             );
         }
 
@@ -798,7 +798,7 @@ impl Live {
         anchor: Option<String>,
         reply: String,
         occurred_at: DateTime<Utc>,
-        from_sandbox: bool,
+        origin: TurnOrigin,
     ) {
         let Some(anchor) = anchor else {
             tracing::debug!("assistant episode 没带 anchor_episode_id，跳过抽取");
@@ -827,13 +827,10 @@ impl Live {
                     }
                 };
                 let text = format!("用户：{user_text}\n助手：{reply}");
-                // 沙箱写回来的那一轮降一档信任级（tier 3，与工具轨迹同级）：
-                // 它的「用户说」不是用户说的，是那个跑着不可信代码的容器说的
-                let ctx = if from_sandbox {
-                    ExtractContext::new(anchor_id, occurred_at).from_sandbox()
-                } else {
-                    ExtractContext::new(anchor_id, occurred_at)
-                };
+                // 信任级**只由来源决定**，而来源只由凭据决定（见
+                // `routes::write_episode` 那段）。让请求体说了算，等于让一个
+                // 被注入的 agent 自己挑落哪一档
+                let ctx = ExtractContext::new(anchor_id, occurred_at).from(origin);
                 match extractor.ingest(&store, &text, &ctx).await {
                     Ok(report) => tracing::info!(
                         candidates = report.candidates,

@@ -101,23 +101,70 @@ pub struct ExtractContext {
     pub domain: Option<String>,
     /// 已知实体名。提示模型复用既有称呼，从源头压制别名爆炸
     pub known_entities: Vec<String>,
-    /// 这一轮是不是**云沙箱**写回来的。
+    /// 这一轮**是谁写回来的**。决定抽出来的事实落在哪一档信任级。
+    pub origin: TurnOrigin,
+}
+
+/// 一轮对话的来源。**这是信任级的唯一入口。**
+///
+/// # 信任级量的是什么
+///
+/// 不是「这件事发生过没有」，而是**「这段内容有多容易被攻击者操纵」**。
+/// 三档就是这条尺子上的三个位置：
+///
+/// | | 谁在说 | 落到 |
+/// |---|---|---|
+/// | [`Self::Trusted`] | 用户自己，经我们的客户端 | tier 2 `conversation` |
+/// | [`Self::Sandbox`] | 云沙箱容器 | tier 3 `tool_output` |
+/// | [`Self::External`] | 第三方 agent（MCP） | tier 4 `external` |
+///
+/// # 为什么沙箱要降一档
+///
+/// 沙箱里跑的是不可信代码：模型的输出、用户装的依赖、被 prompt 注入的
+/// 工具调用。它写回来的 `role: user` 文本**不是用户说的**，是那个容器
+/// 说的 —— 而容器可能已经被它自己读到的东西诱导。这与工具轨迹降到 tier 3
+/// 是同一个论证。
+///
+/// # 为什么外部还要再降一档
+///
+/// 沙箱至少是**我们起的**容器，跑的是用户让它干的活。第三方 agent 连这个
+/// 都不成立：那一头是谁、被喂了什么、有没有人在看，我们一概不知道。
+///
+/// # 为什么这一格是我们特有的
+///
+/// 被投毒的 fact 会在**未来所有会话、所有设备**上被召回并注入 system
+/// prompt，而写它的那个容器 / 那个第三方早就不在了。四家云 agent 没有这条
+/// 通道（它们的沙箱没有可写的长期记忆），所以没人替我们守。
+///
+/// # 为什么是枚举而不是几个 bool
+///
+/// 它此前是 `from_sandbox: bool`。加第二个来源时如果再加一个 bool，
+/// 「两个都为 true」就成了一个类型上合法、语义上没定义的状态 —— 而它迟早
+/// 会出现，那时落哪一档全看代码里哪个 `if` 在前面。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TurnOrigin {
+    /// 用户自己，经我们的客户端。**默认**。
+    #[default]
+    Trusted,
+    /// 云沙箱容器写回来的。
+    Sandbox,
+    /// 第三方 agent 经 MCP 写进来的。
+    External,
+}
+
+impl TurnOrigin {
+    /// 这一档的对话文本抽出来的事实落在哪个通道。
     ///
-    /// # 为什么它要影响信任级
-    ///
-    /// 沙箱里跑的是不可信代码：模型的输出、用户装的依赖、被 prompt 注入的
-    /// 工具调用。它写回来的 `role: user` 文本**不是用户说的**，是那个容器
-    /// 说的 —— 而容器可能已经被它自己读到的东西诱导。
-    ///
-    /// 这与下面轨迹候选降到 tier 3 是**同一个论证**：信任级量的不是
-    /// 「这件事发生过没有」，而是「这段内容有多容易被攻击者操纵」。
-    /// 沙箱写回的对话与工具轨迹在这一点上是同一类东西。
-    ///
-    /// 后果的严重性也一样：被投毒的 fact 会在**未来所有会话、所有设备**上
-    /// 被召回并注入 system prompt，而那个容器早就销毁了。
-    /// 四家云 agent 没有这条通道（它们的沙箱没有可写的长期记忆），
-    /// 所以这一格是 Cortex 特有的，得自己守。
-    pub from_sandbox: bool,
+    /// 工具轨迹那一路**不看这个** —— 它恒为 `ToolOutput`，理由见
+    /// `trace_candidates` 调用处那段注释。
+    #[must_use]
+    pub const fn conversation_channel(self) -> FactSource {
+        match self {
+            Self::Trusted => FactSource::Conversation,
+            Self::Sandbox => FactSource::ToolOutput,
+            Self::External => FactSource::External,
+        }
+    }
 }
 
 impl ExtractContext {
@@ -128,14 +175,14 @@ impl ExtractContext {
             occurred_at,
             domain: None,
             known_entities: Vec::new(),
-            from_sandbox: false,
+            origin: TurnOrigin::default(),
         }
     }
 
-    /// 标记这一轮来自云沙箱。见 [`Self::from_sandbox`]。
+    /// 这一轮是谁写回来的。见 [`TurnOrigin`]。
     #[must_use]
-    pub fn from_sandbox(mut self) -> Self {
-        self.from_sandbox = true;
+    pub fn from(mut self, origin: TurnOrigin) -> Self {
+        self.origin = origin;
         self
     }
 
@@ -958,11 +1005,7 @@ impl Extractor {
         //
         // 不是「不写」而是「降级」：沙箱里干的活确实值得记住（它就是用户
         // 让它干的），只是不该与用户亲口说的话平起平坐。
-        let conversation_tier = if ctx.from_sandbox {
-            FactSource::ToolOutput
-        } else {
-            FactSource::Conversation
-        };
+        let conversation_tier = ctx.origin.conversation_channel();
         let mut candidates: Vec<(CandidateFact, FactSource)> = candidates
             .into_iter()
             .map(|c| (c, conversation_tier))
