@@ -92,7 +92,16 @@ void main() {
     );
   });
 
-  testWidgets('标题栏的工作区入口：未绑定时是一个可点的绑定按钮', (tester) async {
+  /// 入口从标题栏搬到了输入框底下（与权限档并排）：那两件事是同一类 ——
+  /// 发出去**之前**要定的。标题栏那一排剩下的都是应用级的显示开关。
+  ///
+  /// 文案也跟着变了。夹具里这条会话已经聊过、又没有本机绑定，那它就是
+  /// **跑在云端**的 —— chip 照实说「云端」。上一版在这里写「绑定工作区」，
+  /// 那既没说清它现在在哪儿跑，也没说清点下去会得到什么。
+  ///
+  /// （「新建工作区」是**草稿**才有的那一档：只有还没开口的会话，才谈得上
+  /// 「发出第一句话时给你开一个」。）
+  testWidgets('输入框底下的工作区入口：没绑本机的会话照实说它在云端', (tester) async {
     await boot(tester);
 
     final container = ProviderScope.containerOf(
@@ -105,20 +114,28 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 600));
 
-    expect(find.text('绑定工作区'), findsOneWidget, reason: '未绑定时入口必须自己说清楚它是干什么的');
+    expect(
+      find.text('云端'),
+      findsOneWidget,
+      reason:
+          '这条会话没有本机绑定，那它的每一轮就是在云端容器里跑的。'
+          '入口要照实说它现在在哪儿 —— 说「未绑定」只描述了缺什么，'
+          '没回答用户真正要问的「我的文件在哪」',
+    );
 
-    await tester.tap(find.text('绑定工作区'));
+    await tester.tap(find.text('云端'));
     // Explicit pumps rather than `pumpAndSettle`: the shell keeps indeterminate
     // progress indicators alive (the workspace tree spins while it lists a
     // directory), and those never let the frame queue drain.
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.text('绑定工作区'), findsWidgets);
+    // 点开的是选择器，不再是直接弹绑定框：「云端」与「本机某个目录」
+    // 现在是同一个清单上的两项
     expect(
-      find.textContaining('cortexd 所在机器上的绝对路径'),
+      find.text('选择其他文件夹…'),
       findsOneWidget,
-      reason: '路径属于 daemon 那台机器，这一点必须写在输入框上',
+      reason: '默认工作空间之外的任意目录仍然要有一条路进得去',
     );
   });
 

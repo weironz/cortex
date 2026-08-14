@@ -38,10 +38,27 @@ import 'cortex_api.dart';
 /// milliseconds, not all at once) — so switching to the real backend is a
 /// one-line provider change, not a rewrite.
 class MockCortexApi with LlmKeyUnsupported implements CortexApi {
-  MockCortexApi({int? seed}) : _random = Random(seed ?? 7);
+  MockCortexApi({int? seed, this.instant = false})
+    : _random = Random(seed ?? 7);
 
   final Random _random;
   bool _disposed = false;
+
+  /// 去掉假延迟。**给 widget 测试用**，别在 demo 形态里开。
+  ///
+  /// # 它治的是一类读不出根因的红
+  ///
+  /// 假延迟是 `Future.delayed`，在测试里就是一个**不排帧的 `Timer`**。
+  /// `pumpAndSettle` 只等到「没有新帧可画」，等不到它 —— 于是它活过整个
+  /// 测试，在树销毁时被判成「A Timer is still pending even after the widget
+  /// tree was disposed」，而报错里一个字都没提是哪个请求。
+  ///
+  /// 更糟的是它**跟着被测组件的依赖漂**：某个组件哪天多读一个 provider，
+  /// 就多牵出一次带延迟的请求，几条毫不相干的测试一起变红。已经这样栽过
+  /// 两回（文件树、输入框），两回都花了很久才找到那个延迟。
+  ///
+  /// 治在源头而不是在测试里追着 pump：追 pump 只是让这一次赶上。
+  final bool instant;
 
   /// The mock stands in for a plain cortexd: no local agent, so no local
   /// workspace route. Reporting it as unsupported is what makes the caller
@@ -1036,8 +1053,9 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     return _replyDefault(message, injected);
   }
 
-  Future<void> _latency(int ms) =>
-      Future<void>.delayed(Duration(milliseconds: ms + _random.nextInt(120)));
+  Future<void> _latency(int ms) => instant
+      ? Future<void>.value()
+      : Future<void>.delayed(Duration(milliseconds: ms + _random.nextInt(120)));
 
   @override
   void dispose() => _disposed = true;

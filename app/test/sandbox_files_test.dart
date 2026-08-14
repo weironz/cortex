@@ -49,19 +49,23 @@ FileNode _file(String path, int size) => FileNode(
 );
 
 /// 服务端在没开云沙箱时给的那句话。测试里逐字比对，所以它长什么样就写什么样。
-const String _kNoSandbox = '这个部署没有开云沙箱（cortexd 连不上 docker）。'
+const String _kNoSandbox =
+    '这个部署没有开云沙箱（cortexd 连不上 docker）。'
     '要在自己的机器上跑文件与命令，请用桌面端。';
 
 /// 记下每一次列目录的请求 —— 「只要了这一层」这件事只能这样断言。
 class _TreeApi extends MockCortexApi {
-  _TreeApi(this.tree);
+  _TreeApi(this.tree) : super(instant: true);
 
   final Map<String, List<FileNode>> tree;
   final List<String> listed = [];
   final List<String> read = [];
 
   @override
-  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async {
+  Future<List<FileNode>> sandboxListFiles(
+    String path, {
+    String? sessionId,
+  }) async {
     listed.add(path);
     final nodes = tree[path];
     if (nodes == null) {
@@ -85,9 +89,13 @@ class _TreeApi extends MockCortexApi {
 /// 这是文件树唯一还会失败到「一句话 + 重试」的路：501 是永久缺失，
 /// 重试永远不会成功，所以那句话必须自己把原因说清楚。
 class _NoSandboxApi extends MockCortexApi {
+  _NoSandboxApi() : super(instant: true);
+
   @override
-  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async =>
-      throw const CortexApiException('这个部署没有开云沙箱', statusCode: 501);
+  Future<List<FileNode>> sandboxListFiles(
+    String path, {
+    String? sessionId,
+  }) async => throw const CortexApiException('这个部署没有开云沙箱', statusCode: 501);
 }
 
 Widget _wrap(Widget child, CortexApi api) => ProviderScope(
@@ -107,6 +115,16 @@ Map<String, List<FileNode>> _threeLevels() => {
   ],
   '$kSandboxRoot/src/util': [_file('$kSandboxRoot/src/util/io.py', 9)],
 };
+
+/// 挂上去、等它安定。九处一模一样的启动收成一个函数。
+///
+/// 那个「树都销毁了还有定时器没停」治在 `MockCortexApi(instant: true)`，不在这儿 ——
+/// 在这里多 pump 几下只是让这一次赶上，下次谁在链上多接一个异步请求，
+/// 同样的红会原样回来。
+Future<void> _boot(WidgetTester tester, CortexApi api) async {
+  await tester.pumpWidget(_wrap(const SandboxBrowser(), api));
+  await tester.pumpAndSettle();
+}
 
 void main() {
   group('打不开的时候', () {
@@ -149,8 +167,7 @@ void main() {
           ),
         ],
       });
-      await tester.pumpWidget(_wrap(const SandboxBrowser(), api));
-      await tester.pumpAndSettle();
+      await _boot(tester, api);
 
       expect(
         find.text('刚刚'),
@@ -172,8 +189,7 @@ void main() {
   group('文件树是懒加载的', () {
     testWidgets('第一次只要根这一层', (tester) async {
       final api = _TreeApi(_threeLevels());
-      await tester.pumpWidget(_wrap(const SandboxBrowser(), api));
-      await tester.pumpAndSettle();
+      await _boot(tester, api);
 
       expect(
         api.listed,
@@ -192,8 +208,7 @@ void main() {
 
     testWidgets('展开一层只请求这一层，孙子那层原地不动', (tester) async {
       final api = _TreeApi(_threeLevels());
-      await tester.pumpWidget(_wrap(const SandboxBrowser(), api));
-      await tester.pumpAndSettle();
+      await _boot(tester, api);
 
       await tester.tap(find.text('src'));
       await tester.pumpAndSettle();
@@ -228,8 +243,7 @@ void main() {
 
     testWidgets('折叠再展开不重新拉一遍', (tester) async {
       final api = _TreeApi(_threeLevels());
-      await tester.pumpWidget(_wrap(const SandboxBrowser(), api));
-      await tester.pumpAndSettle();
+      await _boot(tester, api);
 
       await tester.tap(find.text('src'));
       await tester.pumpAndSettle();
@@ -255,8 +269,7 @@ void main() {
           _file('$kSandboxRoot/README.md', 12),
         ],
       });
-      await tester.pumpWidget(_wrap(const SandboxBrowser(), api));
-      await tester.pumpAndSettle();
+      await _boot(tester, api);
 
       await tester.tap(find.text('src'));
       await tester.pumpAndSettle();
@@ -273,8 +286,7 @@ void main() {
   group('点文件就下载', () {
     testWidgets('取的是这个节点的绝对路径，失败时原样说原因', (tester) async {
       final api = _TreeApi(_threeLevels());
-      await tester.pumpWidget(_wrap(const SandboxBrowser(), api));
-      await tester.pumpAndSettle();
+      await _boot(tester, api);
 
       await tester.tap(find.text('README.md'));
       await tester.pumpAndSettle();
@@ -295,8 +307,7 @@ void main() {
 
     testWidgets('点目录不会去读文件', (tester) async {
       final api = _TreeApi(_threeLevels());
-      await tester.pumpWidget(_wrap(const SandboxBrowser(), api));
-      await tester.pumpAndSettle();
+      await _boot(tester, api);
 
       await tester.tap(find.text('src'));
       await tester.pumpAndSettle();
@@ -308,8 +319,7 @@ void main() {
   group('上传落点', () {
     testWidgets('默认是根，点开哪个目录就跟到哪个目录', (tester) async {
       final api = _TreeApi(_threeLevels());
-      await tester.pumpWidget(_wrap(const SandboxBrowser(), api));
-      await tester.pumpAndSettle();
+      await _boot(tester, api);
 
       expect(
         find.text('传文件到 workspace/'),

@@ -648,22 +648,36 @@ void main() {
   });
 
   // 这里原本还有一条「绑定工作区后，文件工具事件带回结构化的 path」。
-  // 它在 cortexd 上已经**无法成立** —— 绑不上工作区（见上面那条拒绝测试），
-  // 就永远拿不到文件工具。删掉而不是留着看它红：它测的
-  //「`path` 是独立一列、不从 summary 里正则抠」现在钉在两个够得着的地方 ——
-  // `cortex-store` 的 `tool_calls_replay_with_a_separate_path_column`（落库那半）
-  // 与本机 agent 自己的用例（在线那半）。下面这条留着，因为它测的正是
-  // cortexd 现在**唯一**的那一态。
-  test('cortexd 上的会话一律拿不到文件工具', () async {
+  // 它在 cortexd 上已经**无法成立** —— 绑不上工作区（见上面那条拒绝测试）。
+  // 删掉而不是留着看它红：它测的「`path` 是独立一列、不从 summary 里正则抠」
+  // 现在钉在两个够得着的地方 —— `cortex-store` 的
+  // `tool_calls_replay_with_a_separate_path_column`（落库那半）与本机 agent
+  // 自己的用例（在线那半）。
+  //
+  // 这里也曾有一条「cortexd 上的会话一律拿不到文件工具」。**它的前提在沙箱
+  // 透明化（任务 #105）那天就没了**：云端会话现在按需拉起一个容器，每一个都
+  // 有全套文件工具，「纯聊天会话」在 cortexd 上不再是一种状态。
+  //
+  // 换成钉它的**反面**，也就是 #105 真正交付的那件事 —— 而在此之前，那件事
+  // 一条客户端断言都没有：唯一相关的那条断言的是它的对立面。
+  //
+  // # 为什么不在这里钉「只够得着 /workspace」
+  //
+  // 试过，钉不了：`ToolCall.path` 带的是**模型传进去的那个参数原样**
+  //（实测拿到 `write_file@hello.txt`、`list_dir@.`），不是沙箱解析之后的绝对
+  // 路径。围栏在服务端的 `cortex_agent::Sandbox` 里，客户端看不见它的输入，
+  // 也看不见它的判断 —— 那条红线由那一侧的用例守，这里守的是「云端这条路
+  // 真的接上了容器」。
+  test('云端会话按需拉起容器，文件工具真的能用', () async {
     if (!up) return markTestSkipped('cortexd not running');
     final api = _api();
     addTearDown(api.dispose);
 
-    final sessionId = 'live-nows-${DateTime.now().millisecondsSinceEpoch}';
+    final sessionId = 'live-sbx-${DateTime.now().millisecondsSinceEpoch}';
     var calls = <ToolCall>[];
     await for (final event in api.chat(
       sessionId: sessionId,
-      message: '读一下工作区里的 pubspec.yaml，告诉我 name 字段。',
+      message: '在工作区里建一个 hello.txt（内容随便），然后列一下工作区根目录。',
     )) {
       if (event is ChatToolEvent) {
         calls = ToolCall.merge(
@@ -675,22 +689,19 @@ void main() {
       }
     }
 
-    // 断言的是「一次文件操作都没有真的发生」，而不是「没有出现过文件工具名」。
-    // 模型完全可以凭空调一个不存在的工具（实测见过 `file_read`），而 daemon
-    // 照样会把这次尝试作为 tool 事件发出来 —— 带着它从参数里取到的 path。
-    // 那条事件是**失败**的（「未知工具：…。可用工具：memory_search」），
-    // 界面也按失败画。把「名字里带 read_file」当成红线，测的就成了模型今天
-    // 想怎么命名，而不是服务端到底给了什么工具。
-    final succeededFileCalls = calls
-        .where((c) => c.touchesFiles && !c.failed)
-        .toList();
+    // 只看**成功**的那些。模型完全可以凭空调一个不存在的工具（实测见过
+    // `file_read`），daemon 照样会把这次尝试作为 tool 事件发出来 —— 而那条
+    // 事件是失败的，界面也按失败画。把「出现过文件工具名」当成通过，
+    // 测的就成了模型今天想怎么命名，而不是服务端到底给了什么工具。
+    final succeeded = calls.where((c) => c.touchesFiles && !c.failed).toList();
     expect(
-      succeededFileCalls,
-      isEmpty,
+      succeeded,
+      isNotEmpty,
       reason:
-          '纯聊天会话的工具目录里根本没有文件工具（WORKSPACE_FREE_TOOLS），'
-          '这正是「绑定与否」在产品上唯一的差别；'
-          '实际拿到：${calls.map((c) => "${c.name}/${c.result}").toList()}',
+          '沙箱透明化之后，云端会话本来就该有能用的文件工具 —— 容器由第一次'
+          '需要它的那一刻拉起。这条红了先看容器起没起来（docker ps）：'
+          '在此之前的症状是「agent 说它没有文件工具」，而日志里一句异常都没有。'
+          '这一轮实际拿到：${calls.map((c) => "${c.name}/${c.result}").toList()}',
     );
   });
 

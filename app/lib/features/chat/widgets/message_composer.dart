@@ -254,19 +254,19 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                     // 挂在顶栏 —— 顶栏那一排是应用级的显示开关，混在一起
                     // 会让人以为工作区也是「看不看」而不是「跑在哪」
                     const _BeforeSendChips(),
+                    // 居中于**剩下的那段**，而不是整行。
+                    //
+                    // 这里原本在右边挂一个透明的等宽占位，好让那句话相对整行
+                    // 严格居中。两个 chip 之后那个代价变实了：占位是一份**真的
+                    // widget**，于是每个标签在树里都有两份 —— 读屏会念两遍，
+                    // chip 的构建白做一次，而 `find.text` 一律数到 2。
+                    // 换来的只是几十像素的偏移。
                     Expanded(
                       child: Text(
                         'Cortex 会把这轮对话归档，并从中抽取可追溯的记忆。',
                         textAlign: TextAlign.center,
                         style: theme.textTheme.labelSmall,
                       ),
-                    ),
-                    // 与左边那组等宽的占位，让中间那句话真的居中。
-                    // 不这么做的话它会被推得偏右，而那行字是**居中**
-                    // 才读得像一句说明、而不是某个控件的标签
-                    const Opacity(
-                      opacity: 0,
-                      child: IgnorePointer(child: _BeforeSendChips()),
                     ),
                   ],
                 ),
