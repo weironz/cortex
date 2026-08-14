@@ -90,7 +90,7 @@ protected_routes! {
     // 这一半留一条「agent 服务地址」的配置，而独立部署它的人根本没有 agentd。
     // 这里**没有** `/confirmations`。工具确认属于 agent，而 agent 在别的
     // 进程里：桌面端问的是本机 `cortex-local`，容器里那一轮压根不问
-    //（越界路径直接拒绝，见 `cortex_agent::ExecEnvironment::Container`）。
+    //（越界路径直接拒绝，那是 agent 那一侧 `ExecEnvironment::Container` 的语义）。
     //
     // cortexd 曾经也有一份，服务的是它自己那个进程内 agent。那个 agent 删了
     // 之后这份簿子就再没有生产者 —— 留着它等于留一个永远回空列表、永远 404

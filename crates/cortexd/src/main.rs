@@ -130,7 +130,9 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("{}", rt.auth.status_line());
     tracing::info!("{}", cors.status_line());
-    tracing::info!("{}", cortex_agent::status_line());
+    // 这里曾经印 `cortex_agent::status_line()`（landlock / seccomp 装没装）。
+    // 那一行说的是**执行环境**的能力，而这个进程不执行任何东西了 ——
+    // 印出来只会让人以为 cortexd 还管着沙箱。它现在在 `cortex-agentd` 上。
 
     // 后端由 CORTEX_BACKEND 决定，**连不上不回落**。
     //

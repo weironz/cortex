@@ -28,7 +28,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// returns 400 for everything, so the fetch is wrapped in
 /// [HttpOverrides.runWithHttpOverrides] with a genuine `HttpClient` — a
 /// zone-local override wins over the global one.
-const _baseUrl = 'http://127.0.0.1:8080';
+// 同 live_backend_test：打边缘那个口，不是任何单个服务。理由见那边
+const _baseUrl = 'http://127.0.0.1:5173';
 
 /// 明文 token，与 `live_backend_test` 同一个来源：
 ///
@@ -44,7 +45,7 @@ Future<bool> _daemonUp() async {
   try {
     final socket = await Socket.connect(
       '127.0.0.1',
-      8080,
+      5173,
       timeout: const Duration(milliseconds: 600),
     );
     socket.destroy();

@@ -68,7 +68,7 @@ use cortex_proto::llm::{LlmStreamRequest, ModelTier};
 /// `patch_session` 要一个真数据库才进得去，于是这条判断在那里是测不到的。
 /// 而它恰恰是本次改动里最该有测试的一条 —— 写反了就是**服务端又能绑了**，
 /// 且没有任何症状。
-fn workspace_patch(field: Option<Option<&str>>) -> Result<bool> {
+pub(crate) fn workspace_patch(field: Option<Option<&str>>) -> Result<bool> {
     match field {
         Some(Some(_)) => Err(CortexError::Invalid(
             "cortexd 进程自己不提供文件执行环境，不能在这里绑定一个宿主机路径。\

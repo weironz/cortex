@@ -16,7 +16,14 @@ bytes = "1"
 tar = { version = "0.4", default-features = false }
 cortex-llm.workspace = true
 cortex-store.workspace = true
-cortex-agent.workspace = true
+# **这里没有 `cortex-agent`，而且不许加回来。**
+#
+# 它曾经为三样东西在这儿：进程内的 agent 循环（删了）、容器编排（搬去
+# cortex-agentd 了）、以及两个小工具（`status_line` 与 `workspace::validate`，
+# 一个不再有意义、一个改走 `live::workspace_patch`）。
+#
+# 加回来的代价是：只想用记忆那一层的人要连 agent 循环 + 工具 + 沙箱一起编。
+# 记忆这一半要独立开源（Cormex），这条边是必须断的那一条。
 cortex-proto.workspace = true
 # 导入的解析器三处共用，见 cortex-import 的 crate 文档
 cortex-import.workspace = true

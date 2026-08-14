@@ -241,8 +241,11 @@ dev: dev-build
     @echo "  看日志   → just dev-logs cortexd"
 
 # 改完 Rust：重编 + 重启，不重建镜像
+# **web 也要重启。** nginx 的 `upstream` 在启动时把服务名解析一次就永久
+# 缓存；compose 重建过 cortexd 或 agentd（改了它们的配置就会重建）之后
+# 容器换了 IP，而 nginx 还指着旧的 —— 症状是 502，且直接打 :8080 完全正常。
 dev-restart: dev-build
-    docker compose {{ _dev }} restart cortexd agentd
+    docker compose {{ _dev }} restart cortexd agentd web
     @echo "cortexd 与 agentd 已重启（用的是刚编出来的二进制）"
 
 # 改完界面：重新构建 Flutter Web。

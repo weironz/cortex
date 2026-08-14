@@ -1372,7 +1372,6 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
- "cortex-agent",
  "cortex-blob",
  "cortex-core",
  "cortex-import",

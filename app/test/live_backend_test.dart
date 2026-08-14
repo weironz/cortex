@@ -17,19 +17,29 @@ import 'package:cortex_app/widgets/markdown/highlight_registry.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// End-to-end checks against a running `cortexd`.
+/// End-to-end checks against a running deployment.
 ///
-///   cd .. && cargo run -p cortexd
+///   just dev
 ///   flutter test test/live_backend_test.dart
 ///
-/// Skipped automatically when the daemon is not listening, so `flutter test`
-/// stays green on a machine without a backend.
+/// # 打的是**边缘**那个口，不是任何单个服务
+///
+/// 从前这里写的是 `cortexd` 的 :8080。容器编排搬去 `cortex-agentd` 之后，
+/// `/chat` 与 `/sandbox/*` 归它（:8081），其余仍归 cortexd —— 也就是说
+/// **没有任何一个服务能独自应答这一整套用例了**。
+///
+/// 指向 nginx（:5173）不是权宜：那才是客户端真正看到的形状。直接打某个
+/// 服务的端口验的是一条生产上不存在的拓扑，而分流本身（哪条路归谁）
+/// 恰恰是这次拆分最容易配错的一环 —— 绕过它就等于不测它。
+///
+/// Skipped automatically when the deployment is not listening, so
+/// `flutter test` stays green on a machine without a backend.
 ///
 /// This file must contain **no** `testWidgets`: initialising
 /// `TestWidgetsFlutterBinding` installs a global `HttpOverrides` that answers
 /// every request with 400, for the whole suite. The rendering counterpart lives
 /// in `live_render_test.dart`, which re-enables real HTTP inside a zone.
-const _baseUrl = 'http://127.0.0.1:8080';
+const _baseUrl = 'http://127.0.0.1:5173';
 
 /// The credential every case here connects with.
 ///
@@ -58,7 +68,7 @@ Future<bool> _daemonUp() async {
   try {
     final socket = await Socket.connect(
       '127.0.0.1',
-      8080,
+      5173,
       timeout: const Duration(milliseconds: 600),
     );
     socket.destroy();

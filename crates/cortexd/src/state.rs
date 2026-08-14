@@ -978,11 +978,15 @@ impl AppState {
                 if let Some(a) = patch.archived {
                     s.archived = a;
                 }
-                if let Some(ws) = &patch.workspace {
-                    s.workspace = match ws {
-                        Some(raw) => Some(cortex_agent::workspace::validate(raw)?),
-                        None => None,
-                    };
+                // **走 live 那一份判断，不是自己写一遍。**
+                //
+                // 原先这里是 `cortex_agent::workspace::validate` —— 也就是
+                // mock **接受**绑定，而 live 一律拒绝（见
+                // `live::workspace_patch` 的那段理由）。契约的两个实现就此
+                // 分岔：客户端 CI 跑在 mock 上，于是「服务端不接受绑定」这条
+                // 在 CI 里从来没被验证过，反而验证了它的反面。
+                if crate::live::workspace_patch(patch.workspace.as_ref().map(Option::as_deref))? {
+                    s.workspace = None;
                 }
                 // 三态照搬：客户端 CI 要能验证「显式 null 是移出、字段缺席是
                 // 不动」这条契约，而那件事在一个不理会 project_id 的 mock 上
