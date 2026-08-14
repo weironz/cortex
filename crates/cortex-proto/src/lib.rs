@@ -27,6 +27,7 @@
 
 pub mod auth;
 pub mod confirm;
+pub mod delegate;
 pub mod dto;
 pub mod episodes;
 pub mod import;

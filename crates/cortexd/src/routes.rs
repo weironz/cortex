@@ -92,6 +92,13 @@ protected_routes! {
     // cortexd 曾经也有一份，服务的是它自己那个进程内 agent。那个 agent 删了
     // 之后这份簿子就再没有生产者 —— 留着它等于留一个永远回空列表、永远 404
     // 的端点，而那是本仓库列在第一条的老毛病：**造好了没人调用**。
+    // 委托凭据：给一个**不受信调用方**签一把绑在某个会话上的短期钥匙。
+    // 见 `cortex_proto::delegate` 的模块头 —— 这是 cortexd 自己的入站授权
+    // 策略，不是沙箱编排；至于拿到钥匙的是容器还是别的什么，它不关心。
+    //
+    // 签发用的是**调用者自己那把 bearer**，所以它只能为「把 token 交给它的
+    // 那个用户」签发，不产生任何新特权。
+    "/delegated-tokens" [POST, DELETE] => post(delegate).delete(revoke_delegation),
     "/memory/search" [GET] => get(memory_search),
     // 记忆对外的 MCP 门面。见 `crate::mcp` 的模块头。
     //
@@ -356,6 +363,73 @@ async fn sandbox_scope(
     )
 }
 
+/// 给这个作用域签一把委托凭据 —— **有就复用，没有才签新的**。
+///
+/// # 为什么复用而不是每轮签一把
+///
+/// 令牌的生命周期**跟着容器**，不跟着轮次。容器的入站认证用的是它启动时
+/// env 里那把（`cortex-local` 的入站与出站共用一个 token）。每轮签新的话，
+/// 第二轮反代过去就是 401 —— 而那条错误读起来像「沙箱坏了」。
+/// 真机第一轮通、第二轮 401，就是这个。
+///
+/// 复用的判据是**作用域键**而不是 owner：同一个用户切到另一个项目时，
+/// 那是另一个容器、另一把令牌。按 owner 找会把 A 项目的令牌交给 B 项目的
+/// 容器，而它起来之后照常应答，第二轮才 401。
+///
+/// # 为什么单独一个函数
+///
+/// 两个调用方：cortexd 自己那几条要摸容器的路由，以及 `POST /delegated-tokens`
+/// （agent 编排器走的那条）。**必须是同一份** —— 签发规则漂开的表现是
+/// 「换一条路进来的容器第二轮 401」，而那两条路的用户是不同的人群。
+fn delegate_token(st: &AppState, scope: crate::sandbox_token::SandboxScope) -> String {
+    let key = scope.key();
+    match st.sandbox_tokens().find_by_key(&key) {
+        Some(t) => {
+            st.sandbox_tokens().rebind(&t, &scope.session_id);
+            t
+        }
+        None => st.sandbox_tokens().issue(scope),
+    }
+}
+
+/// `POST /delegated-tokens` —— 给调用方签一把绑在某个会话上的钥匙。
+///
+/// 见 [`cortex_proto::delegate`] 的模块头：这是**记忆服务的入站授权**，
+/// 不是沙箱编排。owner 从凭据来，项目与执行归属从会话行来，三样一次给全。
+async fn delegate(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<cortex_proto::delegate::DelegateRequest>,
+) -> Result<Json<cortex_proto::delegate::Delegation>, ApiError> {
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    let (scope, runtime) = sandbox_scope(&st, &owner, &req.session_id).await;
+    let scope_key = scope.key();
+    // 额度只**报告**不拦：这把钥匙不只用于对话，拿它列文件、下载工作区
+    // 一个 token 都不花。见 `Delegation::quota_exhausted`
+    let quota_exhausted = st.enforce_quota(&owner).await.is_err();
+    Ok(Json(cortex_proto::delegate::Delegation {
+        token: delegate_token(&st, scope),
+        scope_key,
+        runtime: match runtime {
+            cortex_store::SessionRuntime::Local => cortex_proto::dto::SessionRuntimeDto::Local,
+            cortex_store::SessionRuntime::Cloud => cortex_proto::dto::SessionRuntimeDto::Cloud,
+        },
+        quota_exhausted,
+    }))
+}
+
+/// `DELETE /delegated-tokens` —— 收回一把没派上用场的钥匙。
+///
+/// 幂等：收回一把不存在的（伪造的、已经过期的、别人的）同样回 204。
+/// 分开报会让「猜一个 token 试试」变成一个可用的探测口。
+async fn revoke_delegation(
+    State(st): State<AppState>,
+    Json(req): Json<cortex_proto::delegate::RevokeRequest>,
+) -> StatusCode {
+    st.sandbox_tokens().revoke(&req.token);
+    StatusCode::NO_CONTENT
+}
+
 /// 确保这个作用域的沙箱在跑，回一把能进去的令牌。
 ///
 /// # 为什么起容器放在请求路径上而不是「建会话时」
@@ -374,26 +448,8 @@ async fn ensure_sandbox(
     scope: crate::sandbox_token::SandboxScope,
 ) -> Result<(crate::sandbox_runner::SandboxHandle, String), ApiError> {
     let key = scope.key();
-
-    // 令牌的生命周期**跟着容器**，不跟着轮次。
-    //
-    // 容器的入站认证用的是它启动时 env 里那把（`cortex-local` 的入站与出站
-    // 共用一个 token）。每轮签一把新的话，第二轮反代过去就是 401 ——
-    // 而那条错误读起来像「沙箱坏了」。真机第一轮通、第二轮 401，就是这个。
-    //
-    // 所以：有就复用，只把它改绑到这一轮的会话上；没有才签新的
-    //（首轮，或者上一把已经过了 TTL）。
-    //
-    // 复用的判据是**作用域键**而不是 owner：同一个用户切到另一个项目时，
-    // 那是另一个容器、另一把令牌。按 owner 找会把 A 项目的令牌交给
-    // B 项目的容器，而它起来之后照常应答，第二轮才 401。
-    let token = match st.sandbox_tokens().find_by_key(&key) {
-        Some(t) => {
-            st.sandbox_tokens().rebind(&t, &scope.session_id);
-            t
-        }
-        None => st.sandbox_tokens().issue(scope),
-    };
+    // 签发规则见 [`delegate_token`] —— 与 `POST /delegated-tokens` 共用一份
+    let token = delegate_token(st, scope);
 
     match layer.runner.ensure(&key, &token, "v1").await {
         Ok(h) => Ok((h, token)),
