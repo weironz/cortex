@@ -126,7 +126,7 @@ jobs:
       - name: 构建
         run: >-
           cargo build --release --locked --target ${{ matrix.target }}
-          -p cortexd -p cortex-cli -p cortex-local
+          -p cortexd -p cortex-agentd -p cortex-cli -p cortex-local
 
       # 打包脚本：逐个跑 --version 冒烟并核对版本 → 组装目录（含 LICENSE /
       # NOTICE / CHANGELOG / INSTALL.txt）→ 压缩 → 出 sha256

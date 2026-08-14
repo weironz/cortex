@@ -29,14 +29,25 @@ cortex-llm      供应商层（封装 goose-providers）
 cortex-store    sqlx repository + sync_log 写入器
 cortex-memory   分词 / embedding / 抽取 / 四路召回 + RRF
 cortex-agent    agent loop + 工具
-cortexd         记忆服务：axum HTTP + SSE + WS + MCP
-cortex-local    agent 服务：同一个二进制，跑在本机或容器里
+cortexd         记忆服务：axum HTTP + SSE + WS + MCP。**不碰 docker**
+cortex-agentd   云端 agent 编排：按需拉起沙箱容器，把请求反代进去
+cortex-local    agent 本体：同一个二进制，跑在本机或容器里
 cortex-cli      终端瘦客户端
 app/            Flutter（桌面 + Web 一套代码）
 ```
 
-依赖方向严格单向：`core ← {llm, store} ← memory ← cortexd`，
-另一支 `core ← cortex-agent ← cortex-local`。
+依赖方向严格单向，**三支**：
+
+```
+core ← {llm, store} ← memory ← cortexd          记忆
+core ← cortex-agent ← cortex-local              agent
+core ← proto ← cortex-agentd                    编排（无 store / memory / agent）
+```
+
+`cortex-proto` **不许依赖 `cortex-agent`**：那会让线协议 crate 拖进整个
+agent 循环，于是只想用记忆那一层的人也得连 agent 一起编。确认回路的簿子
+因此住在 `cortex-local`（唯一的宿主），风险等级的线上写法是
+`Risk::as_wire`（住在枚举旁边）。
 
 **两支之间只有 HTTP，没有共享的库。** `cortex-local` 的依赖里没有
 `cortex-store` 也没有 `cortex-memory` —— 它借模型走 `/llm/stream`，写记忆走
@@ -44,10 +55,18 @@ app/            Flutter（桌面 + Web 一套代码）
 agent（Claude Code / goose）走的同一条路，**自己人和外人用同一个 API，
 那个 API 才不会烂**。
 
-推论：**cortexd 里不许有 agent 循环**。曾经有过一份，只在部署接不上 docker
-时走到；它是第二份实现，而漏改的那一份不会有测试红。删掉它之后，没接 docker
-的部署 `/chat` 明说要 docker 或用桌面端（`routes::cortexd_refuses_to_run_a_turn_itself`
-钉着这条）。
+推论：**cortexd 里不许有 agent 循环，也不许碰 docker**。两样都曾经有过：
+循环是第二份实现（漏改的那一份不会有测试红），编排是 3600 行只有云端 Web
+用得上的东西，而它挡着记忆那一半独立开源。现在 `/chat` 与 `/sandbox/*` 在
+cortexd 上**根本不存在**（`routes::cortexd_serves_no_agent_shaped_route`
+钉着这条，断的是 404 不是 501 —— 「这条路不归我」才是实情）。
+
+**分流在边缘**（dev 的 nginx、prod 的 traefik），不在任何一个服务里：
+让 cortexd 知道 agentd 在哪，等于给要独立开源的那一半留一条「agent 服务
+地址」的配置，而独立部署它的人根本没有 agentd。
+
+agentd 要钥匙走 `POST /delegated-tokens`，带的是**用户自己那把 bearer** ——
+所以它也没有一份自己的认证逻辑，cortexd 的回答就是认证结果。
 
 **记忆权威唯远端 cortexd**，桌面端的本地进程是执行代理，不是第二个记忆库。
 CLI 与 Flutter 走**完全相同**的 HTTP/SSE 协议，不走私有捷径。而 cortexd
