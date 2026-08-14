@@ -13,6 +13,8 @@ mod credentials;
 mod cursor;
 mod import;
 mod live;
+/// 记忆对外的 MCP 门面。见那个模块的头注释
+mod mcp;
 mod quota;
 mod reembed;
 mod request_tenant;

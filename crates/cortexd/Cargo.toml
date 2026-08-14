@@ -70,6 +70,23 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 dotenvy.workspace = true
 
+# 记忆对外的 MCP 门面（`src/mcp.rs`）。
+#
+# **钉在 1.8，与 cortex-llm / cortex-agent 同一份** —— 那两处是为了 goose 的
+# `Tool` 类型引进来的。让它们分叉的后果与 pgvector 那次一样：两份 rmcp 共存、
+# 类型名字一样却不兼容。goose 上游已经在 3.0，我们不跟。
+# 工具参数的 JSON Schema。**必须与 rmcp 用的是同一份**（1.0）：
+# `#[derive(JsonSchema)]` 展开出来的代码引用的是裸 `schemars::`，
+# 而 rmcp 只把它 re-export 出来、不负责让 derive 找得到
+schemars = { version = "1.0", features = ["chrono04"] }
+
+rmcp = { version = "1.8", default-features = false, features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-streamable-http-server",
+] }
+
 [dev-dependencies]
 # 工作区路径校验的测试要真的建目录、建文件、建符号链接 ——
 # 「什么目录配当工作区」是关于真实文件系统的判断，mock 不出来

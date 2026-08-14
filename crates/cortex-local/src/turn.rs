@@ -551,25 +551,13 @@ impl Engine {
 
 /// `FactDto` → 注入用的 `MemoryItem`。
 ///
-/// 两个类型分开是对的：前者是线上契约（多一个 `invalidated`），
-/// 后者是渲染与展示的输入。合成一个会让线协议的任何变动都牵动注入块的格式。
+/// 搬运本身在 [`cortex_proto::dto::FactDto::to_memory_item`] —— 同一段字段
+/// 搬运此前这里一份、cortexd 的 mock 后端要再一份，而漏一个字段不报错：
+/// 编译照过、测试照绿，症状是「同一条事实经过不同的路长得不一样」。
 ///
-/// 这里补齐展示字段只是**顺手**：本地 agent 这条路上没有记忆抽屉
-/// （抽屉查的是远端 `/memory/search`）。填上是为了让「同一条事实经过
-/// 哪条路都是同一个样子」成立 —— 哪天本地也要显示，不用回来再补一次。
+/// 留这个薄封装是为了 `.map(memory_item_of)` 读起来仍然像一句话。
 fn memory_item_of(f: &FactDto) -> injection::MemoryItem {
-    injection::MemoryItem {
-        id: f.id.clone(),
-        statement: f.statement.clone(),
-        valid_at: f.valid_at.clone(),
-        known_since: f.created_at.clone(),
-        source_episode_id: f.source_episode_id.clone(),
-        domain: f.domain.clone(),
-        predicate: f.predicate.clone(),
-        confidence: Some(f.confidence),
-        source_channel: f.source_channel.clone(),
-        trust_tier: f.trust_tier,
-    }
+    f.to_memory_item()
 }
 
 /// agent 事件 → SSE 事件，顺带攒出工具归因。

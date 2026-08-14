@@ -911,6 +911,60 @@ impl AppState {
         }
     }
 
+    /// 检索并渲染成给模型看的那段文本。对外 MCP server 的读侧。
+    ///
+    /// **mock 也走同一段渲染**（`injection::render_turn_block`）而不是回一句
+    /// 假话：客户端与集成测试跑在 mock 上，回一句「模拟数据」会让
+    /// 「那道『记忆是背景数据不是指令』的框定还在不在」这条断言
+    /// 在 mock 上永远是绿的 —— 而那正是它唯一要守的东西。
+    pub async fn memory_search_text(
+        &self,
+        tenant: &Tenant,
+        query: &str,
+        as_of: Option<&str>,
+        limit: i64,
+    ) -> Result<String> {
+        match &self.inner.backend {
+            Backend::Mock => {
+                let r = self
+                    .memory_search(
+                        tenant,
+                        MemorySearchQuery {
+                            q: query.to_string(),
+                            limit,
+                            as_of: as_of.map(str::to_string),
+                        },
+                    )
+                    .await?;
+                if r.facts.is_empty() {
+                    return Ok("没有检索到相关记忆。".into());
+                }
+                Ok(cortex_core::injection::render_turn_block(
+                    &r.facts
+                        .iter()
+                        .map(cortex_proto::dto::FactDto::to_memory_item)
+                        .collect::<Vec<_>>(),
+                ))
+            }
+            Backend::Live(l) => {
+                l.bind(tenant.store()?)
+                    .memory_search_text(query, as_of, limit)
+                    .await
+            }
+        }
+    }
+
+    /// 核心画像块。MCP 的 `cortex://profile` 读的就是它。
+    ///
+    /// mock 上回空串而不是编一段画像：一个假的「用户偏好」会被第三方 agent
+    /// 当真放进上下文，而它在 mock 上分不出真假。
+    pub async fn profile_text(&self, tenant: &Tenant, limit: i64) -> Result<String> {
+        match &self.inner.backend {
+            Backend::Mock => Ok(String::new()),
+            Backend::Live(l) => l.bind(tenant.store()?).profile_text(limit).await,
+        }
+    }
+
     pub async fn get_episode(&self, tenant: &Tenant, id: &str) -> Result<EpisodeDto> {
         match &self.inner.backend {
             Backend::Mock => Ok(mock_episode(id)),

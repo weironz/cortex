@@ -45,8 +45,14 @@ use cortex_proto::llm::{LlmStreamChunk, LlmStreamError, LlmStreamRequest};
 /// `route_layer` **只覆盖它之前注册的路由**。真有人把它挪到中间，那之后的
 /// 路由会失去认证，但它们仍然在 [`PROTECTED_ROUTES`] 里，于是
 /// `every_protected_route_rejects_anonymous_requests` 当场变红。
+/// `$state` 是**调用方给那个 `AppState` 绑定起的名字**。
+///
+/// 必须由调用方命名，不能在宏里硬写一个：macro_rules 的卫生规则让宏内部
+/// 造出来的标识符在调用点根本不可见，于是 handler 表达式里写 `state`
+/// 会是「找不到这个变量」。`/mcp` 那条要拿它构造 tower service，
+/// 是第一条真的需要它的路由。
 macro_rules! protected_routes {
-    ($( $path:literal [$($method:ident),+ $(,)?] => $handler:expr ),+ $(,)?) => {
+    ($state:ident; $( $path:literal [$($method:ident),+ $(,)?] => $handler:expr ),+ $(,)?) => {
         /// 全部**应当**需要认证的路由，与上面的注册链同源。
         ///
         /// 路径里的 `{…}` 是 axum 的参数占位符，测试会替换成一个具体的探针值。
@@ -55,7 +61,7 @@ macro_rules! protected_routes {
             $( ($path, &[$(axum::http::Method::$method),+]) ),+
         ];
 
-        fn protected_router(state: AppState) -> Router<AppState> {
+        fn protected_router($state: AppState) -> Router<AppState> {
             Router::new()
                 $( .route($path, $handler) )+
                 // route_layer：只对**匹配到的**路由生效。不匹配的路径照常 404，
@@ -64,7 +70,7 @@ macro_rules! protected_routes {
                 //
                 // 这一句必须是最后一句，理由见宏的文档
                 .route_layer(axum::middleware::from_fn_with_state(
-                    state,
+                    $state,
                     crate::auth::require,
                 ))
         }
@@ -72,6 +78,7 @@ macro_rules! protected_routes {
 }
 
 protected_routes! {
+    state;
     "/auth/ticket" [POST] => post(issue_ticket),
     // 自带 API key。三个动作一条路径：看状态 / 存 / 撤下
     "/settings/llm-key" [GET, PUT, DELETE] => get(crate::byo_key::get)
@@ -85,6 +92,28 @@ protected_routes! {
     // 「结果一样」，而是明确的 404（凭据已被消费）。
     "/confirmations" [GET, POST] => get(list_confirmations).post(answer_confirmation),
     "/memory/search" [GET] => get(memory_search),
+    // 记忆对外的 MCP 门面。见 `crate::mcp` 的模块头。
+    //
+    // **它必须在这份清单里**：这条路能读一个人的全部记忆，落到公开侧就是
+    // 一个无认证的记忆读写口，而它不会以任何方式表现出来 —— 没有报错、
+    // 没有告警，只有「谁都能读你的记忆」。下面那条
+    // `every_protected_route_rejects_anonymous_requests` 是唯一能拦住它的东西。
+    //
+    // 三个方法是 streamable-http 传输要的：POST 发消息、GET 开 SSE 回程、
+    // DELETE 结束会话。`on_service` 把 rmcp 那个 tower Service 变成
+    // `MethodRouter`，于是这条路与其余路由的注册形状**完全一样** ——
+    // 用 `route_service` 就绕开了这个宏，也就绕开了那条覆盖测试。
+    //
+    // **必须是 `on_service` 而不是 `any_service`**：后者对所有方法开门，
+    // 于是覆盖测试那根「用未声明的方法打过去应当 405」的探针会一路走到
+    // MCP 服务里、拿回一个 400。那条探针存在的意义是证明「路径真的匹配上了」，
+    // 被 400 顶掉之后，紧跟着那条 401 断言就成了空的 —— 而它才是重点。
+    "/mcp" [POST, GET, DELETE] => axum::routing::on_service(
+        axum::routing::MethodFilter::POST
+            .or(axum::routing::MethodFilter::GET)
+            .or(axum::routing::MethodFilter::DELETE),
+        crate::mcp::service(state.clone()),
+    ),
     // LLM 代理。本地 agent 默认走这条路 —— API key 只在服务端一处，
     // 多设备不用每台配一遍。它**不碰记忆、不写库**，纯转发
     "/llm/stream" [POST] => post(llm_stream),

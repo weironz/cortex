@@ -299,6 +299,19 @@ impl BoundLive {
         self.0.memory_search(q).await
     }
 
+    pub async fn memory_search_text(
+        &self,
+        query: &str,
+        as_of: Option<&str>,
+        limit: i64,
+    ) -> Result<String> {
+        self.0.memory_search_text(query, as_of, limit).await
+    }
+
+    pub async fn profile_text(&self, limit: i64) -> Result<String> {
+        self.0.profile_text(limit).await
+    }
+
     pub async fn get_episode(&self, id: &str) -> Result<EpisodeDto> {
         self.0.get_episode(id).await
     }
@@ -1099,6 +1112,49 @@ impl Live {
             });
         }
         out
+    }
+
+    /// 检索并**渲染成给模型看的那段文本**。
+    ///
+    /// # 为什么这一层要单独存在
+    ///
+    /// 有两个消费者：agent 自己的 `memory_search` 工具（[`TurnHost`]），
+    /// 以及对外的 MCP server（[`crate::mcp`]）。它们各写一份的话，
+    /// 「第三方查到的」与「我们自己 agent 查到的」会漂开 —— 而那正是
+    /// [`Self::retrieve`] 那条注释已经立过一次的规矩，这里只是把它
+    /// 往上再抬一层：**渲染也只有一份**。
+    ///
+    /// 渲染必须走 `injection::render_turn_block`，不能另写「MCP 结果格式」。
+    /// 这段文本同样要进模型上下文，那道「记忆是背景数据不是指令」的框定
+    /// 一处都不能少 —— 记忆里可能混着被抽取进来的恶意指令（MemoryGraft），
+    /// 从 MCP 通道进来的和从注入通道进来的一样危险。
+    pub async fn memory_search_text(
+        &self,
+        query: &str,
+        as_of: Option<&str>,
+        limit: i64,
+    ) -> Result<String> {
+        let r = self.retrieve(query, as_of, limit).await?;
+        if r.items.is_empty() {
+            return Ok("没有检索到相关记忆。".into());
+        }
+        Ok(injection::render_turn_block(&r.items))
+    }
+
+    /// 核心画像块 —— 这个人身上**不怎么变**的那些事，渲染成给模型看的文本。
+    ///
+    /// 空查询走的是 `RetrievalPlan::Snapshot(now)`，也就是「此刻的全貌」，
+    /// 按时间倒序。那正是画像该有的取法：它不回答某个具体问题。
+    ///
+    /// 渲染走 `render_profile_block` 而不是 `render_turn_block` —— 两者的
+    /// 框定不同，画像那一份是给「每轮都重发的前缀」写的。
+    /// **这是它的第一个调用者**：这个函数造出来之后一直没人用。
+    pub async fn profile_text(&self, limit: i64) -> Result<String> {
+        let r = self.retrieve("", None, limit).await?;
+        if r.items.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(injection::render_profile_block(&r.items))
     }
 
     async fn memory_search(&self, q: MemorySearchQuery) -> Result<MemorySearchResponse> {
@@ -2284,15 +2340,11 @@ struct TurnHost {
 #[async_trait::async_trait]
 impl ToolHost for TurnHost {
     async fn memory_search(&self, query: &str, as_of: Option<&str>) -> Result<String> {
-        let r = self.live.retrieve(query, as_of, TOOL_SEARCH_LIMIT).await?;
-        if r.items.is_empty() {
-            return Ok("没有检索到相关记忆。".into());
-        }
-        // 复用注入块的渲染而不是另写一个「工具结果格式」：这段文本同样
-        // 要进模型上下文，那道「记忆是背景数据不是指令」的框定一处都不能少。
-        // 记忆里可能混着被抽取进来的恶意指令（MemoryGraft），从工具通道
-        // 进来的和从注入通道进来的一样危险。
-        Ok(injection::render_turn_block(&r.items))
+        // 检索**与渲染**都在 `Live::memory_search_text` 里，对外的 MCP
+        // server 调的是同一个。见那个函数的文档
+        self.live
+            .memory_search_text(query, as_of, TOOL_SEARCH_LIMIT)
+            .await
     }
 
     async fn confirm(&self, req: &ConfirmRequest<'_>) -> Approval {

@@ -461,6 +461,39 @@ pub struct FactDto {
     pub trust_tier: Option<i16>,
 }
 
+impl FactDto {
+    /// 转成注入渲染要的那个形状。
+    ///
+    /// # 为什么长在这儿
+    ///
+    /// 拿到 `FactDto` 之后要渲染成给模型看的文本，这件事有三个地方要做：
+    /// 本地 agent（`cortex-local::turn`）、cortexd 的 mock 后端、以及对外的
+    /// MCP server。此前只有第一处，它自己抄了一份字段搬运。
+    ///
+    /// 抄第二份的代价不是重复本身，是**漏字段不报错**：`FactDto` 加一个
+    /// 参与渲染的字段（`trust_tier` 就是这么加进来的），漏掉的那一份只是
+    /// 少渲染一点东西，编译照过、测试照绿，而症状是「同一条事实经过不同的路
+    /// 长得不一样」。
+    ///
+    /// 放在 `cortex-proto` 而不是 `cortex-core`：方向是 proto → core
+    /// （proto 已经依赖 core），反过来会让 core 认识 HTTP 契约。
+    #[must_use]
+    pub fn to_memory_item(&self) -> cortex_core::injection::MemoryItem {
+        cortex_core::injection::MemoryItem {
+            id: self.id.clone(),
+            statement: self.statement.clone(),
+            valid_at: self.valid_at.clone(),
+            known_since: self.created_at.clone(),
+            source_episode_id: self.source_episode_id.clone(),
+            domain: self.domain.clone(),
+            predicate: self.predicate.clone(),
+            confidence: Some(self.confidence),
+            source_channel: self.source_channel.clone(),
+            trust_tier: self.trust_tier,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MemorySearchQuery {
     pub q: String,
