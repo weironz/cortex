@@ -10,10 +10,10 @@ description = "Cortex 守护进程：记忆引擎与同步服务"
 [dependencies]
 cortex-core.workspace = true
 cortex-memory.workspace = true
+# **这里没有 bollard / tar / reqwest**，它们跟着容器编排一起去了
+# `cortex-agentd`。这个进程不起容器、不解 tar、也不主动发 HTTP
+#（LLM 那侧的请求由 goose 的供应商层自己发）。
 bytes = "1"
-# 解 / 造 tar：沙箱的文件端点全部经 docker 的 archive API，而那条端点
-# 的载荷就是 tar。**不开默认 feature** —— 我们不需要它碰宿主文件系统
-tar = { version = "0.4", default-features = false }
 cortex-llm.workspace = true
 cortex-store.workspace = true
 # **这里没有 `cortex-agent`，而且不许加回来。**
@@ -41,10 +41,6 @@ tokio.workspace = true
 tokio-stream = { workspace = true, features = ["time"] }
 futures.workspace = true
 axum.workspace = true
-bollard.workspace = true
-# 沙箱反代（见 sandbox_proxy）。cortexd 此前不直接发 HTTP —— LLM 那侧的
-# 请求由 goose 的供应商层自己发
-reqwest.workspace = true
 tower-http.workspace = true
 
 serde.workspace = true
