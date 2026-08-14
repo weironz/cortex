@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../models/attachment.dart';
 import '../../../state/attachment_controller.dart';
+import '../../workspace/workspace_panel.dart';
 import 'attachment_views.dart';
 import 'permission_mode_chip.dart';
 
@@ -28,6 +29,7 @@ class MessageComposer extends ConsumerStatefulWidget {
     required this.streaming,
     this.sessionId,
     this.enabled = true,
+    this.centred = false,
   });
 
   final void Function(String text, List<Attachment> attachments) onSend;
@@ -37,6 +39,13 @@ class MessageComposer extends ConsumerStatefulWidget {
   /// Attachments are per-session, so the tray needs to know which one.
   final String? sessionId;
   final bool enabled;
+
+  /// 会话还是空的 —— 输入框此刻**站在页面中央**，不是钉在底边。
+  ///
+  /// 差别不只是位置：一个还没开口的会话里，输入框就是整个页面的主体，
+  /// 所以它更高、更大，而且不该画那条把它与「上面的对话」隔开的分隔线 ——
+  /// 上面根本没有对话。开口之后它退回底边，让位给正文。
+  final bool centred;
 
   @override
   ConsumerState<MessageComposer> createState() => _MessageComposerState();
@@ -114,10 +123,15 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
       },
       child: Container(
         decoration: BoxDecoration(
-          color: scheme.surface,
-          border: Border(top: BorderSide(color: scheme.outlineVariant)),
+          color: widget.centred ? Colors.transparent : scheme.surface,
+          // 居中形态没有分隔线：它隔开的是「上面的对话」，而此刻上面没有对话
+          border: widget.centred
+              ? null
+              : Border(top: BorderSide(color: scheme.outlineVariant)),
         ),
-        padding: const EdgeInsets.fromLTRB(20, 14, 20, 16),
+        padding: widget.centred
+            ? const EdgeInsets.fromLTRB(20, 4, 20, 4)
+            : const EdgeInsets.fromLTRB(20, 14, 20, 16),
         child: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 820),
@@ -132,7 +146,9 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                     color: _dragging
                         ? scheme.primary.withValues(alpha: 0.06)
                         : scheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(14),
+                    borderRadius: BorderRadius.circular(
+                      widget.centred ? 18 : 14,
+                    ),
                     border: Border.all(
                       color: _dragging || _focusNode.hasFocus
                           ? scheme.primary
@@ -140,7 +156,9 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                       width: _dragging ? 1.5 : 1,
                     ),
                   ),
-                  padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
+                  padding: widget.centred
+                      ? const EdgeInsets.fromLTRB(8, 8, 8, 8)
+                      : const EdgeInsets.fromLTRB(6, 4, 6, 4),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
@@ -177,7 +195,9 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                               focusNode: _focusNode,
                               enabled: widget.enabled,
                               maxLines: 8,
-                              minLines: 1,
+                              // 居中形态给三行的高度：这时它是页面的主体，
+                              // 一行高的输入框在一整屏留白里像个搜索框
+                              minLines: widget.centred ? 3 : 1,
                               keyboardType: TextInputType.multiline,
                               textInputAction: TextInputAction.newline,
                               style: theme.textTheme.bodyLarge,
@@ -229,7 +249,11 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                 const SizedBox(height: 7),
                 Row(
                   children: [
-                    const PermissionModeChip(),
+                    // 「这轮的文件去哪儿」与「谁来把关」是同一类东西：
+                    // 发出去**之前**要定的事。所以它们贴着输入框，而不是
+                    // 挂在顶栏 —— 顶栏那一排是应用级的显示开关，混在一起
+                    // 会让人以为工作区也是「看不看」而不是「跑在哪」
+                    const _BeforeSendChips(),
                     Expanded(
                       child: Text(
                         'Cortex 会把这轮对话归档，并从中抽取可追溯的记忆。',
@@ -237,12 +261,12 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                         style: theme.textTheme.labelSmall,
                       ),
                     ),
-                    // 与 chip 等宽的占位，让中间那句话真的居中。
-                    // 不这么做的话它会被 chip 推得偏右，而那行字是**居中**
+                    // 与左边那组等宽的占位，让中间那句话真的居中。
+                    // 不这么做的话它会被推得偏右，而那行字是**居中**
                     // 才读得像一句说明、而不是某个控件的标签
                     const Opacity(
                       opacity: 0,
-                      child: IgnorePointer(child: PermissionModeChip()),
+                      child: IgnorePointer(child: _BeforeSendChips()),
                     ),
                   ],
                 ),
@@ -253,6 +277,26 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
       ),
     );
   }
+}
+
+/// 发送**之前**要定的两件事：这轮跑在哪个目录、谁来把关。
+///
+/// 单开一个 widget 是因为它要被画两遍 —— 一遍真的，一遍透明的占位，
+/// 好让中间那句说明居中。两处必须**同宽**，所以必须是同一个东西。
+class _BeforeSendChips extends StatelessWidget {
+  const _BeforeSendChips();
+
+  @override
+  Widget build(BuildContext context) => const Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      // 工作区在前：它决定文件落在哪，是两者里更容易选错、
+      // 也更难在事后发现选错了的那一个
+      WorkspaceChip(),
+      SizedBox(width: 6),
+      PermissionModeChip(),
+    ],
+  );
 }
 
 class _SendIntent extends Intent {

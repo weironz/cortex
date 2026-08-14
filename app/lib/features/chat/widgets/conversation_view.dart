@@ -166,10 +166,9 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
       );
     }
 
-    if (messages.isEmpty && !streaming) {
-      return const _ConversationEmptyState();
-    }
-
+    // 「还没开口」那一版由 `ChatPane` 整个接管了（招呼 + 居中的输入框 +
+    // 起手式是一体的）。判据只留在它那一处 —— 这里再判一遍的话，两边差一个
+    // 条件就是同一块招呼语出现两次，或者一次都不出现
     // One header slot above the first message: the button that fetches the
     // page before this one.
     final headers = hasEarlier ? 1 : 0;
@@ -315,8 +314,57 @@ class _JumpToBottom extends StatelessWidget {
   }
 }
 
-class _ConversationEmptyState extends ConsumerWidget {
-  const _ConversationEmptyState();
+/// 空会话页上方那块招呼。
+///
+/// **只画自己，不摆位置** —— 摆在哪由 `ChatPane` 决定，因为居中那一版里
+/// 它与输入框、起手式是同一根 `Column` 上的三段。此前它自带 `Center` +
+/// 滚动容器，于是输入框只能钉在它下面的底边上。
+class ConversationHero extends StatelessWidget {
+  const ConversationHero({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 520),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 52,
+            height: 52,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [scheme.primary, scheme.secondary],
+              ),
+              borderRadius: BorderRadius.circular(15),
+            ),
+            child: const Icon(
+              Icons.auto_awesome,
+              color: Colors.white,
+              size: 25,
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text('记忆原生的 AI Agent', style: theme.textTheme.titleLarge),
+          const SizedBox(height: 7),
+          Text(
+            '每一轮对话都会被原样归档，抽取出的事实可追溯、可审计、可回放。',
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodySmall,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 几个起手式。放在输入框**下面** —— 它们是「不知道说什么时点一个」，
+/// 而不是「先读完再开始打字」。
+class ConversationPrompts extends ConsumerWidget {
+  const ConversationPrompts({super.key});
 
   static const _prompts = [
     'Rust async trait 该怎么选？',
@@ -326,62 +374,22 @@ class _ConversationEmptyState extends ConsumerWidget {
   ];
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(28),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [scheme.primary, scheme.secondary],
-                  ),
-                  borderRadius: BorderRadius.circular(15),
-                ),
-                child: const Icon(
-                  Icons.auto_awesome,
-                  color: Colors.white,
-                  size: 25,
-                ),
-              ),
-              const SizedBox(height: 18),
-              Text('记忆原生的 AI Agent', style: theme.textTheme.titleLarge),
-              const SizedBox(height: 7),
-              Text(
-                '每一轮对话都会被原样归档，抽取出的事实可追溯、可审计、可回放。',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodySmall,
-              ),
-              const SizedBox(height: 24),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                alignment: WrapAlignment.center,
-                children: [
-                  for (final prompt in _prompts)
-                    ActionChip(
-                      label: Text(prompt),
-                      onPressed: () => ref
-                          .read(chatControllerProvider.notifier)
-                          .send(prompt),
-                    ),
-                ],
-              ),
-            ],
+  Widget build(BuildContext context, WidgetRef ref) => ConstrainedBox(
+    constraints: const BoxConstraints(maxWidth: 620),
+    child: Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      alignment: WrapAlignment.center,
+      children: [
+        for (final prompt in _prompts)
+          ActionChip(
+            label: Text(prompt),
+            onPressed: () =>
+                ref.read(chatControllerProvider.notifier).send(prompt),
           ),
-        ),
-      ),
-    );
-  }
+      ],
+    ),
+  );
 }
 
 /// Shown when nothing is selected at all.

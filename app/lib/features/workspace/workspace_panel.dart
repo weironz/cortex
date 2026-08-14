@@ -462,10 +462,10 @@ class WorkspaceChip extends ConsumerWidget {
             scheme.secondary,
           ),
           // 还没定：草稿会在第一句话之前自动开一个按日期时间命名的文件夹，
-          // 而**已经开过口**的会话不会 —— 那时说「自动新建」就是句空话
+          // 而**已经开过口**的会话不会 —— 那时说「新建工作区」就是句空话
           (null, false) when session.isLocalDraft => (
             Icons.auto_awesome_outlined,
-            '自动新建',
+            '新建工作区',
             '发出第一句话时，会在默认工作空间下建一个以当前时间命名的文件夹。\n点击改成别的。',
             scheme.onSurfaceVariant,
           ),
@@ -537,7 +537,7 @@ class WorkspaceChip extends ConsumerWidget {
         case _Cloud():
           await controller.chooseCloud(session.id);
         case _Auto():
-          // 「自动新建」= 清掉现在这个绑定，让首轮那一步重新决定。
+          // 「新建工作区」= 清掉现在这个绑定，让首轮那一步重新决定。
           // 它只对草稿有意义，所以清单里也只对草稿显示
           await controller.unbindWorkspace(session.id);
         // 已有的和新建的走同一条：那个端点本来就是「给我这个名字的工作空间
@@ -620,7 +620,7 @@ class _WorkspaceSheet extends StatelessWidget {
             if (session.isLocalDraft)
               ListTile(
                 leading: const Icon(Icons.auto_awesome_outlined),
-                title: const Text('自动新建'),
+                title: const Text('新建工作区'),
                 subtitle: Text(
                   root.root == null
                       ? '在默认工作空间下建一个以当前时间命名的文件夹'

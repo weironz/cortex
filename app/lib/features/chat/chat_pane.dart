@@ -6,7 +6,6 @@ import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
 import '../shell/widgets/sync_indicator.dart';
 import 'session_changes_sheet.dart';
-import '../workspace/workspace_panel.dart';
 import 'widgets/confirm_panel.dart';
 import 'widgets/conversation_view.dart';
 import 'widgets/message_composer.dart';
@@ -47,6 +46,43 @@ class ChatPane extends ConsumerWidget {
     final streaming = ref.watch(
       chatControllerProvider.select((s) => s.isStreamingActive),
     );
+    // 「还没开口」——**判据只此一处**。放在 `ConversationView` 里各判一遍的话，
+    // 两边差一个条件就是「招呼语和输入框同时出现在两个地方」，
+    // 而那种错位只有真跑起来才看得见
+    final empty = ref.watch(
+      chatControllerProvider.select(
+        (s) =>
+            s.activeTranscript.isEmpty &&
+            !s.isStreamingActive &&
+            !(s.activeTranscriptState?.loading ?? false),
+      ),
+    );
+
+    /// 横幅 + 确认面板 + 输入框，**一整摞**。
+    ///
+    /// 两种形态（居中 / 钉底）共用它：把横幅只接在其中一条路上，另一条上
+    /// 的发送失败就没人报 —— 而「开不出这次对话的工作目录」正是从那条
+    /// 空会话路上冒出来的。
+    Widget composer({required bool centred}) => Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const _OfflineBanner(),
+        const _SendErrorBanner(),
+        // 紧挨着输入框：一轮正在跑时用户的眼睛就在这儿，而且离发送键近到
+        // 划不过去。为什么不是模态，见 `ConfirmPanel`
+        const ConfirmPanel(),
+        MessageComposer(
+          enabled: hasSession,
+          sessionId: sessionId,
+          streaming: streaming,
+          centred: centred,
+          onSend: (text, attachments) =>
+              controller.send(text, attachments: attachments),
+          onStop: controller.stopGeneration,
+        ),
+      ],
+    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -69,13 +105,10 @@ class ChatPane extends ConsumerWidget {
                   ),
                 ),
           actions: [
-            // First in the row on purpose: whether the agent can touch files is
-            // the single most consequential property of a session, and it must
-            // be answerable without opening anything.
-            if (hasSession) ...[
-              const WorkspaceChip(),
-              const SizedBox(width: 8),
-            ],
+            // 工作区那个 chip 搬去了输入框底下（见 `MessageComposer` 里的
+            // `_BeforeSendChips`）：它与权限档是同一类东西 —— 发出去**之前**
+            // 要定的事。这一排剩下的都是应用级的显示开关，混在一起会让人
+            // 以为工作区也是「看不看」而不是「跑在哪」
             const SyncIndicator(),
             const _BackendBadge(),
             // 本会话改动。放在状态与显示开关之间：它既不是状态
@@ -123,26 +156,36 @@ class ChatPane extends ConsumerWidget {
             ],
           ],
         ),
-        Expanded(
-          child: hasSession
-              ? const ConversationView()
-              : NoSessionState(onCreate: controller.createSession),
-        ),
-        const _OfflineBanner(),
-        const _SendErrorBanner(),
-        // Directly above the composer: the one place the user's eyes already
-        // are when a turn is running, and close enough to the send button that
-        // it cannot be scrolled past. See `ConfirmPanel` for why it is not a
-        // modal.
-        const ConfirmPanel(),
-        MessageComposer(
-          enabled: hasSession,
-          sessionId: sessionId,
-          streaming: streaming,
-          onSend: (text, attachments) =>
-              controller.send(text, attachments: attachments),
-          onStop: controller.stopGeneration,
-        ),
+        if (!hasSession)
+          Expanded(child: NoSessionState(onCreate: controller.createSession))
+        // 还没开口的会话：输入框站在页面中央，上面是那块招呼，下面是几个
+        // 起手式。这是 WorkBuddy / ChatGPT / Claude 都在用的形状，理由是
+        // 同一个 —— 空会话里输入框就是全部内容，把它钉在底边等于让用户
+        // 隔着一整屏留白去够它
+        else if (empty)
+          Expanded(
+            child: SingleChildScrollView(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 32),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const ConversationHero(),
+                      const SizedBox(height: 22),
+                      composer(centred: true),
+                      const SizedBox(height: 18),
+                      const ConversationPrompts(),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          )
+        else ...[
+          const Expanded(child: ConversationView()),
+          composer(centred: false),
+        ],
       ],
     );
   }
