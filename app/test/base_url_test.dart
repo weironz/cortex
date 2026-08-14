@@ -89,12 +89,20 @@ void main() {
   });
 
   group('没有 body 的失败', () {
+    // `request: req` 不是可有可无的装饰。
+    //
+    // `MockClient` **原样回传 handler 给的那个 `request`**（见它的
+    // `StreamedResponse(..., request: response.request)`），而真正的
+    // `IOClient` 一律填上自己发出去的那一个。不回传的话这个替身就在一个
+    // 真实客户端从不会有的状态下跑 —— 于是「404 那句话要带上路径」这条
+    // 断言测的其实是替身的缺陷，而不是被测代码。
     HttpCortexApi apiServing(int status, String body) => HttpCortexApi(
       baseUrl: 'http://127.0.0.1:8080/api',
       client: MockClient(
-        (_) async => http.Response.bytes(
+        (req) async => http.Response.bytes(
           utf8.encode(body),
           status,
+          request: req,
           headers: {'content-type': 'application/json'},
         ),
       ),

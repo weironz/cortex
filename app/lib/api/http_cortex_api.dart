@@ -105,8 +105,17 @@ class HttpCortexApi implements CortexApi {
     var s = raw.trim();
     if (s.isEmpty) {
       if (page.scheme == 'http' || page.scheme == 'https') {
-        // 只保留 scheme + host + port。页面路径与查询串不属于 API 根
-        return page.replace(path: '', query: null, fragment: null);
+        // 只保留 scheme + host + port。页面路径与查询串不属于 API 根。
+        //
+        // **重新构造，不能用 `replace(query: null, fragment: null)`** ——
+        // `Uri.replace` 里的 null 是「这一项不动」而不是「清空」，于是
+        // `…/app/?x=1#frag` 的查询串与锚点会原样留在 API 根上，
+        // 之后每个请求都带着它们。
+        return Uri(
+          scheme: page.scheme,
+          host: page.host,
+          port: page.hasPort ? page.port : null,
+        );
       }
       s = 'http://127.0.0.1:8080';
     }

@@ -76,7 +76,13 @@ final settingsPatcherProvider = Provider<Future<void> Function(String, String)>(
     var queue = Future<void>.value();
     return (key, value) {
       queue = queue.then((_) async {
+        // 排在队里的那次写**可能等到容器已经销毁**（换后端、或者测试收尾）。
+        // 那时 `ref.read` 直接抛「Cannot use the Ref after it has been
+        // disposed」，而它抛在一条没人 await 的 future 上 —— 症状是控制台
+        // 里一段没有上下文的异常，以及这一次设置没落盘。
+        if (!ref.mounted) return;
         final current = await ref.read(settingsReaderProvider)();
+        if (!ref.mounted) return;
         await ref.read(settingsWriterProvider)({...current, key: value});
       });
       return queue;
