@@ -91,7 +91,7 @@ rollback() {
     # （比如 compose 指纹不匹配那一支），而 `set -u` 下引用未赋值的变量
     # 会让回滚本身炸掉 —— 那正是最需要它工作的时刻
     # shellcheck disable=SC2086  # 故意分词
-    docker compose up -d --no-deps ${services:-cortexd web} >&2 || true
+    docker compose up -d --no-deps ${services:-agentd web} >&2 || true
   fi
   return $rc
 }
@@ -107,9 +107,18 @@ echo "==> $prev -> $tag"
 # `docker compose pull egress` 会报「no such service」**，所以要先看
 # .env 里开没开，不能无脑列上去。
 #
-# 沙箱镜像（cortex-sandbox）不在这里 —— 它不是一个服务，是 cortexd
+# 沙箱镜像（cortex-sandbox）不在这里 —— 它不是一个服务，是 agentd
 # 经 docker API 起容器时用的模板，compose 没有对应的概念。单独 pull，见下。
-services="cortexd web"
+#
+# ★ **记忆服务（cormex）刻意不在这份清单里。** 它是另一个产品、另一个仓库、
+#   另一条版本线，由 CORMEX_VERSION 决定，而这个脚本只移动 CORTEX_VERSION。
+#   把它列进来等于每次发 Cortex 都顺手重启一次记忆库 —— 那是一次没人要求过
+#   的联动，而它的 schema 迁移只前滚。
+#
+# ⚠️ agentd 是 0.1.9 补上的。它在 compose 里存在了整整一次发布而**不在这个
+#   清单里**，也就是永远不会被拉起——正是本文件末尾那条警告说的形状，
+#   而那条警告是 2026-08-13 加 egress 时写的。第二次兑现了。
+services="agentd web"
 if grep -qE '^[[:space:]]*CORTEX_SANDBOX_ENABLED[[:space:]]*=[[:space:]]*1[[:space:]]*$' .env; then
     services="$services egress"
     echo "==> 云沙箱已开：一并更新 egress 与沙箱镜像"
@@ -120,7 +129,7 @@ docker compose pull $services
 
 # ── 沙箱镜像 ──────────────────────────────────────────────
 #
-# cortexd **不会自己 pull**（它没有 registry 凭据，也不该有）。
+# agentd **不会自己 pull**（它没有 registry 凭据，也不该有）。
 # 拉不到的表现是启动时 preflight 直说「镜像不在本地」并关掉沙箱 ——
 # 不是等用户点下去才发现。所以这里拉失败只警告，不中止整次部署：
 # 一个「能对话、沙箱暂时关着」的部署，比一个回滚掉的部署好。
@@ -132,15 +141,21 @@ if [ "$services" != "${services%egress}" ]; then
 fi
 
 # ── migration ────────────────────────────────────────────
-# cortexd **不在启动时自动迁移**（在运行中的集群上自动执行 schema 变更
+# 记忆服务**不在启动时自动迁移**（在运行中的集群上自动执行 schema 变更
 # 是运维事故的常见起点）。部署本身是人发起的显式动作，所以在这里跑是合适的，
 # 但它必须在新版本起来**之前**跑完 —— 否则新代码会撞上老 schema。
 #
 # ⚠ sqlx 的 migration 只前滚。下面的 EXIT trap 能还原版本号，
 # **还原不了 schema**。任何带数据变更的发布，之前必须有一份 pg_dump 退路
 # （docs/operations.md 的「真的出事了怎么恢复」）。
-echo "==> 应用 migration（只前滚，回滚不撤销它）"
-docker compose run --rm --entrypoint sqlx cortexd \
+#
+# ★ **这一步严格来说不该由 Cortex 的部署来跑**：migration 与镜像都属于
+#   Cormex，本该跟着它自己的部署走。留在这里是因为 Cormex 还没有部署路径，
+#   而删掉它会留下一个「谁也不迁移」的洞 —— 那比放错地方更糟。
+#   CORMEX_VERSION 没变时它是幂等的空操作，所以代价只是概念上的不整齐。
+#   Cormex 有自己的部署脚本之后，把这几行搬过去。
+echo "==> 应用记忆服务的 migration（只前滚，回滚不撤销它）"
+docker compose run --rm --entrypoint sqlx cormex \
     migrate run --source /opt/cortex/migrations
 
 # shellcheck disable=SC2086  # 同上，故意分词
@@ -160,14 +175,18 @@ docker compose up -d --no-deps $services
 docker image prune -f --filter "until=168h" || true
 
 # 但只清悬空的不够：每次发布留下两个新的**有 tag** 的镜像
-# （cortexd / cortex-web），而不带 -a 的 prune 永远不碰有 tag 的。
+# （cortex-agentd / cortex-web），而不带 -a 的 prune 永远不碰有 tag 的。
+#
+# **记忆服务的镜像（cormex）刻意不在这个正则里**：它按自己的版本线发布，
+# 而这里的「保留最新 3 个版本」是按 CORTEX_VERSION 数的 —— 两条线混在一起，
+# 会按 Cortex 的节奏删掉一个仍然是当前版的记忆服务镜像。
 # 所以保留最新 N 个**版本**，其余删掉。仍然不用 `prune -a` ——
 # 那会把上一版一起带走，而上一版正是回滚要用的那个。
 KEEP_VERSIONS=3
 # 按**版本**排序而不是按创建时间：镜像是按拉取顺序到的，
 # 一个被重新拉过的老版本会显得「最新」
 stale=$(docker images --format '{{.Repository}}:{{.Tag}}' \
-  | grep -E '/(cortexd|cortex-web):v[0-9]+(\.[0-9]+)+$' \
+  | grep -E '/(cortex-agentd|cortex-web):v[0-9]+(\.[0-9]+)+$' \
   | sed -E 's/.*:(v[0-9.]+)$/\1/' \
   | sort -uV \
   | head -n "-$KEEP_VERSIONS" || true)
@@ -177,7 +196,7 @@ for v in $stale; do
   # `docker rmi` 会拒绝删一个正在被容器使用的镜像 ——
   # 这就是让它可以无人值守跑的兜底：最坏情况只是打一行然后继续
   docker images --format '{{.Repository}}:{{.Tag}}' \
-    | grep -E "/(cortexd|cortex-web):${v}\$" \
+    | grep -E "/(cortex-agentd|cortex-web):${v}\$" \
     | xargs -r docker rmi >/dev/null 2>&1 || true
 done
 # 用 `if` 而不是 `[ … ] && echo`：后者在没有 stale 时返回 1，
@@ -188,10 +207,16 @@ if [ -n "$stale" ]; then
 fi
 
 # ── 等健康 ────────────────────────────────────────────────
-# cortexd 第一次起要下 ~590 MB 的 embedding 模型，所以窗口给得比
-# 一般服务宽。模型落在 cortex-prod-models 卷里，只下一次
+#
+# 等的是 **agentd**，因为这次部署换的就是它。此前这里 inspect 的是
+# `cortex-cortexd` —— 那个容器现在叫 `cormex`，而且它这次根本没被重启过。
+# 名字对不上时 `docker inspect` 只是返回空串，于是循环会安静地跑满 150 轮，
+# 最后报「10 分钟内没有健康」并回滚一次其实完全正常的部署。
+#
+# 窗口仍然给到 10 分钟：agentd 启动时会做 docker preflight，
+# daemon 忙的时候那一下可以很慢。
 for _ in $(seq 1 150); do
-  state=$(docker inspect --format '{{.State.Health.Status}}' cortex-cortexd 2>/dev/null || true)
+  state=$(docker inspect --format '{{.State.Health.Status}}' cortex-agentd 2>/dev/null || true)
   if [ "$state" = healthy ]; then
     echo "deployed=$tag healthy=yes"
     exit 0
@@ -200,4 +225,8 @@ for _ in $(seq 1 150); do
 done
 
 # 一直没健康。真正的还原由 EXIT trap 做，这里只报为什么。
-fail "cortexd 10 分钟内没有健康（schema 未回滚 —— 见 docs/deploy.md）"
+#
+# 最常见的一种：agentd 连不上记忆服务（CORMEX_VERSION 没配、或者 cormex
+# 那个容器压根没起）。它的 /health 会报 memory_reachable=false，
+# 而部署验证那一步断言的正是这个字段。
+fail "agentd 10 分钟内没有健康（schema 未回滚 —— 见 docs/deploy.md）"

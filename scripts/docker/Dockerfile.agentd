@@ -70,9 +70,10 @@ RUN find crates -name '*.rs' -exec touch {} + && \
 FROM debian:trixie-slim
 
 # ca-certificates：agentd 要连记忆服务（可能是 https）。
-# 缺了它的症状是「所有请求都失败」而日志只说 tls 握手错。
+#   缺了它的症状是「所有请求都失败」而日志只说 tls 握手错。
+# curl：下面的 HEALTHCHECK 用。
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
 # 与 Cormex 的 cortexd 镜像同一个 uid：两边写出来的数据文件属主一致，
@@ -83,4 +84,30 @@ COPY --from=builder /build/target/release/cortex-agentd /usr/local/bin/cortex-ag
 
 USER 10001
 EXPOSE 8081
+
+# ★ **没有这一条，每一次部署都会失败。** 节点上的部署脚本靠
+# `docker inspect --format '{{.State.Health.Status}}'` 判断新版本起没起来，
+# 而一个没有 HEALTHCHECK 的容器在那里永远返回 `<no value>` —— 不是
+# unhealthy（那还能看出问题），是**一个读起来像「还没就绪」的空值**。
+# 于是循环跑满 10 分钟，报「agentd 没有健康」，回滚掉一次完全正常的部署。
+#
+# 打 `/health` 而不是 `/sandbox/health`：两条路由是同一个 handler，
+# 但容器内探针走 127.0.0.1、不经边缘，用哪条都行 —— 取短的那条。
+#
+# 端口从 `CORTEX_AGENTD_BIND` 里剥出来，**不硬编码 8081**：那个变量是
+# compose 配的，两处各写一个数字迟早会分家，而分家的症状是「服务好好的、
+# 探针永远红」。`##*:` 砍掉 host 那一半，默认值兜住没配的情况。
+#
+# ★ 它**不检查记忆服务连不连得上**（`/health` 里那个 `memory_reachable`
+#   字段为 false 时这条仍然算过）。刻意的：容器探针答的是「这个进程活着
+#   吗」，答「否」会让 docker 反复重启它 —— 而记忆服务掉线时重启 agentd
+#   什么也解决不了，只会把日志冲掉。那一条由部署验证断言，见 deploy.yml。
+#
+# start-period 给 30 秒：启动时要跟 docker daemon 握一次手（握不上就直接
+# 退出），daemon 忙时那一下不快。比记忆服务的 90 秒短 —— 它不连数据库，
+# 也不跑 migration。
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
+    CMD p="${CORTEX_AGENTD_BIND:-0.0.0.0:8081}"; \
+        curl -fsS "http://127.0.0.1:${p##*:}/health" || exit 1
+
 ENTRYPOINT ["/usr/local/bin/cortex-agentd"]

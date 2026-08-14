@@ -195,7 +195,7 @@ services:
   #   1. 不 publish 3129（反向中继）。节点上 cortexd 也在容器里、也接了
   #      沙箱网段，反代直连容器名，中继那一整层不参与
   #   2. 放行清单里**没有** host.docker.internal:8080。开发机上沙箱要靠它
-  #      回调跑在宿主进程里的 cortexd；这里回调走 `cortexd:8080`（同网段，
+  #      回调跑在宿主进程里的记忆服务；这里回调走 `cormex:8080`（同网段，
   #      在 NO_PROXY 里，压根不经代理）。留着它等于白送一条打向宿主的路
   egress:
     image: ${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortex-egress-proxy:${CORTEX_VERSION:?由部署脚本写入，形如 v0.1.0}
@@ -239,15 +239,24 @@ services:
           cpus: ${CORTEX_EGRESS_CPU_LIMIT:-0.5}
           memory: ${CORTEX_EGRESS_MEM_LIMIT:-128m}
 
-  # ── cortexd ───────────────────────────────────────────
+  # ── 记忆服务（Cormex）─────────────────────────────────
+  #
+  # **这是另一个产品**，仓库在 github.com/weironz/cormex，镜像也由它自己
+  # 发。它出现在这份 compose 里，只是因为这台机器同时跑着两样东西 ——
+  # 那是部署的选择，不是代码上的依赖：agentd 与它之间只有 HTTP。
+  #
+  # ★ 版本号是 `CORMEX_VERSION`，**不是** `CORTEX_VERSION`。两条时间线各走
+  #   各的，这正是拆分的目的。写在一起会让「发 Cortex 顺手把记忆服务也换了」
+  #   变成一次静默的联动升级 —— 而它的 schema 迁移只前滚。
+  #   部署脚本只移动 CORTEX_VERSION，绝不碰这一个。
   #
   # 镜像默认走阿里云 ACR：这台机器在国内，从 Docker Hub 拉要么慢要么
   # 要经第三方镜像站（那类站点缓存 tag→digest，是个「拉到旧镜像还看不出来」
   # 的陷阱）。ACR 是第一方；Docker Hub 那份留作异地副本，
-  # 用 CORTEX_REGISTRY=willdockerhub 切过去。tag 永远是具体版本，绝不用 latest
-  cortexd:
-    image: ${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortexd:${CORTEX_VERSION:?由部署脚本写入，形如 v0.1.0}
-    container_name: cortex-cortexd
+  # 用 CORMEX_REGISTRY=willdockerhub 切过去。tag 永远是具体版本，绝不用 latest
+  cormex:
+    image: ${CORMEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cormex:${CORMEX_VERSION:?记忆服务的版本，与 CORTEX_VERSION 独立。先部署 Cormex 再部署 Cortex}
+    container_name: cormex
     restart: unless-stopped
     logging: *default-logging
     # 接进 sandbox 网段 ⇒ same_network=1 ⇒ 反代直连容器名。
@@ -290,7 +299,8 @@ services:
 
       # ★ 认证。**没有它 cortexd 会拒绝启动**，这是刻意的。
       # 上面那行 0.0.0.0:8080 正是它要防的场景。
-      # 生成：docker compose run --rm --entrypoint cortexd cortexd --generate-token
+      # 生成：docker compose run --rm --entrypoint cortexd cormex --generate-token
+      # （服务叫 cormex，镜像里的二进制仍叫 cortexd —— 这两个名字还没统一）
       # 服务端只放**摘要**；明文 token 给客户端，不要也留在这台机器上
       CORTEX_AUTH_TOKEN_SHA256: ${CORTEX_AUTH_TOKEN_SHA256:?必填，用 cortexd --generate-token 生成}
       # 高风险工具确认的超时（秒）。超时按**拒绝**处理 ——
@@ -335,54 +345,8 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
 
-      # ── 云沙箱（Web 端的执行环境，见 docs/sandbox.md）──
-      #
-      # **默认关**。开它要同时改三处（.env 里都写着）：这一项、
-      # COMPOSE_PROFILES 加 sandbox、CORTEX_DOCKER_SOCK 指到真 socket。
-      # 三处缺一，cortexd 会在启动时把原因说清楚然后关掉沙箱继续跑 ——
-      # 不是启动失败，也不是「看起来开着但点下去才发现」。
-      CORTEX_SANDBOX_ENABLED: ${CORTEX_SANDBOX_ENABLED:-0}
-      # cortexd 自己也在容器里、也接了沙箱网段 ⇒ 直连容器名，
-      # 中继那一层不参与。**这一个变量同时决定两个方向**，
-      # 所以别在别处再配一次回调地址
-      CORTEX_SANDBOX_SAME_NETWORK: "1"
-      CORTEX_SANDBOX_CALLBACK: http://cortexd:8080
-      # 镜像来自 ACR，不是开发机上那个 `cortex/sandbox:dev`。
-      # cortexd **不会自己 pull** —— 由 cortex-deploy 脚本拉，
-      # 拉不到时启动日志里直说，不会等到用户点下去
-      CORTEX_SANDBOX_IMAGE: ${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortex-sandbox:${CORTEX_VERSION}
     volumes:
       - cortex-prod-workspace:/var/lib/cortex/workspace
-      # ★ **把这台机器的 root 交给 cortexd。** 默认指向 /dev/null，
-      #   也就是「没挂」—— 起沙箱要显式在 .env 里改成真 socket。
-      #
-      #   为什么这么绕：能访问 docker.sock 就能起一个挂着宿主 / 的特权容器。
-      #   这台机器上还跑着 mica / neostor / headscale / rustdesk，
-      #   cortexd 被攻破的爆炸半径会从「一个记忆库」变成「整台机器和
-      #   别人的四个服务」。而 cortexd 正是直接处理模型输出的那个进程。
-      #
-      #   缓解不在这一行，在 sandbox_runner.rs：容器规格（挂载点、内存、
-      #   PID 上限、cap-drop、网段）**全部写死在实现里**，trait 入参只有
-      #   owner 与 spec hash，调用方说不出第二个挂载，有测试守着。
-      - ${CORTEX_DOCKER_SOCK:-/dev/null}:/var/run/docker.sock
-    # docker.sock 是模式 660，属主 root、组 **docker**。cortexd 跑在 uid 10001
-    # 上，不在那个组里就是 `client error (Connect)` —— 而那条错误读起来像
-    # 「docker 没起来」。加的是**组**不是用户：进程仍然不是 root。
-    #
-    # ★ **那个组的 gid 因发行版而异，必须自己查**：
-    #
-    #       stat -c %g /var/run/docker.sock
-    #
-    #   这台节点是 126，Docker Desktop 上是 0（socket 在那儿属 root:root），
-    #   Ubuntu 常见 999。默认值取 0 只是为了让开发机上开箱即用 ——
-    #   **在真 Linux 节点上它一定是错的**。
-    #
-    #   写错不会静默：cortexd 启动时的 preflight 会真的握一次手，
-    #   报「docker daemon 握不上手」并关掉云沙箱，然后照常提供别的服务。
-    #   这一条就是这么被抓出来的（2026-08-13，node72）。
-    #
-    # 沙箱没开时这一行是无害的：/dev/null 不需要任何组
-    group_add: ["${CORTEX_DOCKER_GID:-0}"]
     deploy:
       resources:
         limits:
@@ -418,7 +382,7 @@ services:
   # 按需拉起沙箱容器、把请求逐字节反代进去、闲了回收。**对话循环不在这儿**
   # —— 那在容器里那个 cortex-local 上（同一个二进制，--exec-env=container）。
   #
-  # 它与 cortexd 是**两个产品**：cortexd 是记忆服务，在另一个仓库
+  # 它与 cormex 是**两个产品**：cormex 是记忆服务，在另一个仓库
   # （github.com/weironz/cormex）独立发版。这份 compose 把两个镜像放在同
   # 一台机器上，那是**部署的选择**，不是代码上的依赖 —— 两边只有 HTTP。
   agentd:
@@ -436,16 +400,17 @@ services:
       # **有默认值是因为这份 compose 就把两者放在一起。** 换成外部记忆服务
       # 时在 .env 里覆盖它 —— 而 agentd 的 /health 会报 memory_reachable，
       # 配错了看得见（部署验证也断言它）。
-      CORTEX_MEMORY_URL: ${CORTEX_MEMORY_URL:-http://cortexd:8080}
+      CORTEX_MEMORY_URL: ${CORTEX_MEMORY_URL:-http://cormex:8080}
       # **容器**怎么找到记忆服务。沙箱网段是 internal 的，与 agentd 同网段，
       # 所以这里直连服务名，中继那一整层不参与
-      CORTEX_SANDBOX_CALLBACK: ${CORTEX_SANDBOX_CALLBACK:-http://cortexd:8080}
+      CORTEX_SANDBOX_CALLBACK: ${CORTEX_SANDBOX_CALLBACK:-http://cormex:8080}
       CORTEX_SANDBOX_SAME_NETWORK: "1"
       RUST_LOG: ${AGENTD_LOG:-cortex_agentd=info,warn}
     volumes:
       # 起沙箱要 docker API。**这是把宿主 root 交给它** —— 论证的另一半是
       # 容器规格全部写死在 DockerRunner 里，调用方说不出第二个挂载。
-      # 这个能力现在**只在这一个容器上**（cortexd 已经不碰 docker 了）
+      # 这个能力现在**只在这一个容器上** —— 记忆服务那边的 docker.sock
+      # 与整套沙箱配置已经一并撤掉了（它早就不读那些变量，权限却还留着）
       - /var/run/docker.sock:/var/run/docker.sock
     group_add: ["0"]
     deploy:
@@ -483,7 +448,7 @@ services:
     logging: *default-logging
     networks: [default, traefik]
     depends_on:
-      - cortexd
+      - cormex
     labels:
       traefik.enable: "true"
       traefik.docker.network: traefik-network
