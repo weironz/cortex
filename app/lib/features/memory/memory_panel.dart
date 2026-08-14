@@ -5,6 +5,7 @@ import '../../core/formatting.dart';
 import '../../state/memory_controller.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/panel_header.dart';
+import 'memory_browser.dart';
 import 'widgets/fact_card.dart';
 
 /// Right-hand pane: search the memory graph, inspect provenance, and replay
@@ -58,6 +59,14 @@ class _MemoryPanelState extends ConsumerState<MemoryPanel> {
               ? '${state.result.facts.length} 条结果'
               : null,
           actions: [
+            // 整页入口挂在这儿，不再往顶栏加一个图标：想看记忆的人已经
+            // 打开了这一栏，而顶栏那一排是应用级的显示开关
+            IconButton(
+              onPressed: () => MemoryBrowser.open(context),
+              iconSize: 17,
+              tooltip: '在整页中打开',
+              icon: const Icon(Icons.open_in_full_rounded),
+            ),
             IconButton(
               onPressed: state.loading ? null : notifier.search,
               iconSize: 17,
