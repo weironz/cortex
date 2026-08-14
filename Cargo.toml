@@ -3,18 +3,14 @@ resolver = "3"
 members = [
     "crates/cortex-core",
     "crates/cortex-llm",
-    "crates/cortex-store",
-    "crates/cortex-memory",
     "crates/cortex-agent",
     "crates/cortex-proto",
     "crates/cortex-import",
-    "crates/cortexd",
     "crates/cortex-agentd",
     "crates/cortex-local",
     "crates/cortex-egress-proxy",
     "crates/cortex-cli",
     "crates/cortex-blob",
-    "evals",
 ]
 
 [workspace.package]
@@ -26,12 +22,19 @@ rust-version = "1.90"
 license = "Apache-2.0"
 repository = "https://github.com/weironz/cortex"
 
+# **这里没有 sqlx / pgvector / jieba / fastembed。**
+#
+# 记忆那一半（存储、检索、抽取）在另一个仓库：github.com/weironz/cormex。
+# 两边**完全切开，没有相互依赖** —— Cortex 通过 HTTP 用它，与第三方 agent
+# 走的是同一条路。契约由 `cortex_proto::PROTOCOL_VERSION` 的握手守着。
+#
+# 代价是明知的：core / llm / proto / import 两边各留一份，会各自演化。
+# 换来的是两个产品可以独立发版，而开源那一半不被私有这一半的节奏绑住。
+
 [workspace.dependencies]
 cortex-core = { path = "crates/cortex-core" }
 cortex-import = { path = "crates/cortex-import" }
 cortex-llm = { path = "crates/cortex-llm" }
-cortex-store = { path = "crates/cortex-store" }
-cortex-memory = { path = "crates/cortex-memory" }
 cortex-agent = { path = "crates/cortex-agent" }
 cortex-proto = { path = "crates/cortex-proto" }
 cortex-blob = { path = "crates/cortex-blob" }
@@ -52,11 +55,6 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["macros", "ws"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
-# 数据库
-sqlx = { version = "0.9", default-features = false, features = [
-    "runtime-tokio", "tls-rustls", "postgres", "json", "chrono", "uuid", "macros", "migrate",
-] }
-pgvector = { version = "0.4", features = ["sqlx"] }
 
 # 序列化
 serde = { version = "1", features = ["derive"] }
@@ -93,12 +91,6 @@ bollard = { version = "0.21", default-features = false, features = ["pipe"] }
 # 两份共存会让 `bytes::Bytes` 之外的类型对不上，报错在转换处而不在依赖处。
 tokio-tungstenite = "0.29"
 
-# 记忆引擎
-jieba-rs = "0.10"
-fastembed = "5"
-# 写入侧凭据过滤（cortex-memory/src/redaction.rs）。
-# 版本跟着 jieba-rs 已经拉进来的那一份走，加成直接依赖不增加任何编译量
-regex = "1"
 
 # OS 级沙箱（仅 Linux 目标启用）。
 # 取件自 codex（Apache-2.0）的选型：它的 linux-sandbox 就是这两个 crate 的编排。

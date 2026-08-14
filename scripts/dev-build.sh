@@ -58,20 +58,20 @@ docker run --rm \
     -e CARGO_TARGET_DIR=/target \
     rust:1.97.1-trixie \
     bash -ec '
-        # **编这两个，且只编这两个。**
+        # **只编 agentd。**
         #
-        # `cortex_dev_bin` 这个卷挂进 cortexd 与 agentd 两个服务，编出来的
-        # 都有人读。以前这里还编 cortex-egress-proxy，但 egress 走的是镜像
+        # cortexd 不在这个仓库里了（见 github.com/weironz/cormex），
+        # 它由 Cormex 自己的 compose 起。以前这里还编 cortex-egress-proxy，但 egress 走的是镜像
         #（compose 里它有 build: 段）—— 编出来的那份从来没人读过，只是让每次
         # `just dev-restart` 多等一会儿。又一次「造好了但没人调用」。
-        cargo build -p cortexd -p cortex-agentd
+        cargo build -p cortex-agentd
         # **先写临时名再 rename，不能直接 cp 覆盖。**
         #
         # 容器正跑着那个二进制时，`cp` 会以 ETXTBSY（Text file busy）失败 ——
         # 而 `just dev-restart` 正是「容器还在跑的时候重编」这条路，
         # 也就是最常走的那条。rename 换的是目录项，正在运行的那个 inode
         # 不受影响，容器重启时自然拿到新的
-        for b in cortexd cortex-agentd; do
+        for b in cortex-agentd; do
             cp "/target/debug/$b" "/out/$b.new"
             mv -f "/out/$b.new" "/out/$b"
         done

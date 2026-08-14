@@ -1,0 +1,86 @@
+# ══════════════════════════════════════════════════════════
+#  cortex-agentd 生产镜像
+#
+#  构建（在仓库根执行）：
+#    docker build -f scripts/docker/Dockerfile.agentd -t cortex/agentd .
+#  或直接：
+#    just prod-build
+#
+#  ── 它是什么 ─────────────────────────────────────────────
+#
+#  云端 agent 的**编排器**：按需拉起沙箱容器、把请求逐字节反代进去、
+#  在容器闲下来时回收。对话循环不在这儿 —— 那在容器里那个 cortex-local
+#  上（同一个二进制，`--exec-env=container`）。
+#
+#  ── 它需要 docker.sock ───────────────────────────────────
+#
+#  **这是把宿主 root 交给它。** 论证的另一半是容器规格全部写死在
+#  `DockerRunner` 里：调用方说不出第二个挂载、改不了网络、加不了能力。
+#  compose 里给的是 group_add 而不是 user: root —— 进程仍然不是 root，
+#  只是拿到那个 socket 的 660 group rw，比 root 小一格而效果一样。
+#
+#  ── 它**不**需要数据库 ───────────────────────────────────
+#
+#  没有 DATABASE_URL、没有对象存储凭据。记忆走 HTTP
+#  （`POST /delegated-tokens` 要钥匙、`/blobs` 存快照字节），
+#  而记忆服务在另一个仓库：github.com/weironz/cormex。
+# ══════════════════════════════════════════════════════════
+
+# ── 构建阶段 ──────────────────────────────────────────────
+#
+# 构建与运行底座**必须同一个 debian 代号**：二进制动态链 glibc，
+# 新 glibc 编的东西放进老底座会在启动时报 `GLIBC_2.xx not found`。
+FROM rust:1.97.1-trixie AS builder
+
+WORKDIR /build
+
+# 先只拷清单，让「依赖没变就复用上一层」这件事真的发生。
+# 直接 COPY . . 会让任何一次源码改动都重编全部依赖树（goose 供应商层是
+# 几百个 crate，冷编按十分钟计）。
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/cortex-core/Cargo.toml    crates/cortex-core/
+COPY crates/cortex-llm/Cargo.toml     crates/cortex-llm/
+COPY crates/cortex-agent/Cargo.toml   crates/cortex-agent/
+COPY crates/cortex-proto/Cargo.toml   crates/cortex-proto/
+COPY crates/cortex-import/Cargo.toml  crates/cortex-import/
+COPY crates/cortex-blob/Cargo.toml    crates/cortex-blob/
+COPY crates/cortex-agentd/Cargo.toml  crates/cortex-agentd/
+COPY crates/cortex-local/Cargo.toml   crates/cortex-local/
+COPY crates/cortex-cli/Cargo.toml     crates/cortex-cli/
+COPY crates/cortex-egress-proxy/Cargo.toml crates/cortex-egress-proxy/
+
+# 占位 src，让依赖层能单独编出来再被缓存
+RUN for d in crates/*/; do \
+        mkdir -p "$d/src"; \
+        if grep -q '\[\[bin\]\]\|name = "cortex' "$d/Cargo.toml"; then \
+            echo 'fn main() {}' > "$d/src/main.rs"; \
+        fi; \
+        echo '' > "$d/src/lib.rs"; \
+    done && \
+    cargo build --release -p cortex-agentd 2>/dev/null || true
+
+# 真正的源码
+COPY crates/ crates/
+
+# 占位留下的时间戳会让 cargo 以为没变。touch 一遍强制重编真源码
+RUN find crates -name '*.rs' -exec touch {} + && \
+    cargo build --release -p cortex-agentd
+
+# ── 运行阶段 ──────────────────────────────────────────────
+FROM debian:trixie-slim
+
+# ca-certificates：agentd 要连记忆服务（可能是 https）。
+# 缺了它的症状是「所有请求都失败」而日志只说 tls 握手错。
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# 与 Cormex 的 cortexd 镜像同一个 uid：两边写出来的数据文件属主一致，
+# 出问题时不必猜是谁写的
+RUN useradd -u 10001 -m -s /usr/sbin/nologin cortex
+
+COPY --from=builder /build/target/release/cortex-agentd /usr/local/bin/cortex-agentd
+
+USER 10001
+EXPOSE 8081
+ENTRYPOINT ["/usr/local/bin/cortex-agentd"]

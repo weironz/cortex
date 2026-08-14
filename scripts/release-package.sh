@@ -93,7 +93,7 @@ esac
 # CLI 用户同样需要它 —— 没有它，`cortex` 连上远端 cortexd 之后工具动的是
 # 服务器的目录，而那正是这一版要解决的问题。桌面端那份由
 # release-desktop-windows.sh 单独放进安装包里。
-BINS=("cortexd$EXT" "cortex$EXT" "cortex-local$EXT")
+BINS=("cortex$EXT" "cortex-local$EXT" "cortex-agentd$EXT")
 
 have_all() {
     local dir="$1" b
@@ -106,8 +106,8 @@ have_all() {
 # 本机构建（不带 --target）落在 target/release。CI 一律带 --target，
 # 但本地验证时经常不带 —— 自动兜一下，省得每次手写 --bin-dir。
 #
-# **判断条件是「三个都在」而不是「cortexd 在」。** 只看一个的版本有过
-# 一次真实的失败：`target/<triple>/release/` 里躺着几天前的 cortexd 与
+# **判断条件是「三个都在」而不是只看一个。** 只看一个的版本有过
+# 一次真实的失败：`target/<triple>/release/` 里躺着几天前的二进制与
 # cortex（没有 cortex-local），于是脚本认定那个目录「有产物」并留在上面，
 # 报了一句「找不到 cortex-local」。
 #
@@ -121,9 +121,9 @@ fi
 
 for b in "${BINS[@]}"; do
     [ -f "$BIN_DIR/$b" ] \
-        || die "找不到 $BIN_DIR/$b —— 先 cargo build --release --target $TARGET -p cortexd -p cortex-cli -p cortex-local
+        || die "找不到 $BIN_DIR/$b —— 先 cargo build --release --target $TARGET -p cortex-cli -p cortex-local -p cortex-agentd
    （若 $BIN_DIR 里只有一部分产物，那多半是上一次发版留下的陈旧目录，
-     `cargo clean -p cortexd -p cortex-cli -p cortex-local` 或整个删掉它）"
+     `cargo clean -p cortex-cli -p cortex-local -p cortex-agentd` 或整个删掉它）"
 done
 
 # ── 冒烟：真的运行一次，并核对它自称的版本 ────────────────

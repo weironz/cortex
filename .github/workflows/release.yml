@@ -126,7 +126,7 @@ jobs:
       - name: 构建
         run: >-
           cargo build --release --locked --target ${{ matrix.target }}
-          -p cortexd -p cortex-agentd -p cortex-cli -p cortex-local
+          -p cortex-agentd -p cortex-cli -p cortex-local
 
       # 打包脚本：逐个跑 --version 冒烟并核对版本 → 组装目录（含 LICENSE /
       # NOTICE / CHANGELOG / INSTALL.txt）→ 压缩 → 出 sha256
@@ -237,17 +237,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: cortexd
-            dockerfile: scripts/docker/Dockerfile.cortexd
-          - image: cortex-web
-            dockerfile: scripts/docker/Dockerfile.web
-          # 云沙箱那两个。挂在 compose 的 `sandbox` profile 上、默认不启用，
-          # 但**镜像必须照常发** —— 节点上要开沙箱时得拉得到对应版本，
-          # 而「用户想开的时候现发一版」不是一条能用的路。
-          - image: cortex-sandbox
-            dockerfile: scripts/docker/Dockerfile.sandbox
-          - image: cortex-egress-proxy
-            dockerfile: scripts/docker/Dockerfile.egress
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3

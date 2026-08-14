@@ -104,10 +104,6 @@ _ensure-bucket:
     echo "桶 ${S3_BUCKET:-cortex-blobs} 就绪"
 
 # 启动 Postgres 与 RustFS
-up:
-    docker compose up -d
-    @just _wait-healthy
-
 # 停止服务（保留数据）
 down:
     docker compose down
@@ -142,9 +138,6 @@ _wait-healthy:
 # ══════════════════════════════════════════════════════════
 
 # 应用全部未执行的 migration
-db-migrate:
-    sqlx migrate run
-
 # 回滚最近一次 migration
 db-revert:
     sqlx migrate revert
@@ -167,25 +160,15 @@ db-prepare:
 #  开发
 # ══════════════════════════════════════════════════════════
 
-# 在**宿主进程**里跑 cortexd。日常开发请用 `just dev`（见下面那一节）。
+# 记忆服务**不在这个仓库里**。它是 Cormex：github.com/weironz/cormex
 #
-# 留着它只为两件 `just dev` 做不到的事，别的场合都该用 dev：
+#   cd ../cormex && just serve     # Postgres + 对象存储 + cortexd
+#   cd ../cortex  && just dev      # agentd + web，连上去
 #
-#   1. 调试器 / 改一行就重跑。dev 那条路要先把二进制编进卷再重启容器，
-#      多十几秒，且 gdb 之类的东西要钻进容器
-#   2. **`SandboxAddr::Relay` 只有这条路能真机跑到**。cortexd 在宿主上时
-#      它不在沙箱网段里，反代必须经 egress 容器中继；而 `just dev` 与生产
-#      都是 same_network=true 走 Direct。改沙箱反代那块代码时用它验一遍
-run:
-    cargo run -p cortexd
-
-# 运行 CLI，参数透传：just cli -- --help
-cli *ARGS:
-    cargo run -p cortex-cli -- {{ ARGS }}
-
-# 文件变更时自动重启 cortexd（需 cargo-watch）
-watch:
-    cargo watch -x 'run -p cortexd'
+# 两个仓库完全切开、没有相互依赖 —— Cortex 通过 HTTP 用记忆，
+# 与第三方 agent 走的是同一条路。
+memory-hint:
+    @echo "记忆服务在 Cormex 仓库：cd ../cormex && just serve"
 
 # 拉起本地构建的桌面端 —— 改完界面自己看一眼用
 #
@@ -205,7 +188,7 @@ app *ARGS:
 # ══════════════════════════════════════════════════════════
 #  本地云端环境（just dev）—— 完整形态，跑在这一台机器上
 #
-#  与 `just run` 的差别一句话：那个把 cortexd 跑在**宿主进程**里（快，
+#  与直接跑 agentd 的差别一句话：那个在**宿主进程**里（快，
 #  但拓扑与生产不同），这个把它跑进**容器**并接进沙箱网段 ——
 #  于是 `same_network=true`、中继不参与、浏览器同源，与生产一致。
 #
@@ -234,19 +217,19 @@ dev: dev-build
     docker compose {{ _dev }} up -d
     @echo ""
     @echo "  Web    http://127.0.0.1:${CORTEX_WEB_DEV_PORT:-5173}"
-    @echo "  API    http://127.0.0.1:${CORTEXD_DEV_PORT:-8080}  （认证已关，只听回环）"
+    @echo "  记忆   http://127.0.0.1:8080  （由 ../cormex 的 compose 提供）"
     @echo ""
     @echo "  改 Rust  → just dev-restart"
     @echo "  改界面   → just dev-web"
-    @echo "  看日志   → just dev-logs cortexd"
+    @echo "  看日志   → just dev-logs agentd"
 
 # 改完 Rust：重编 + 重启，不重建镜像
 # **web 也要重启。** nginx 的 `upstream` 在启动时把服务名解析一次就永久
-# 缓存；compose 重建过 cortexd 或 agentd（改了它们的配置就会重建）之后
+# 缓存；compose 重建过 agentd（改了它的配置就会重建）之后
 # 容器换了 IP，而 nginx 还指着旧的 —— 症状是 502，且直接打 :8080 完全正常。
 dev-restart: dev-build
-    docker compose {{ _dev }} restart cortexd agentd web
-    @echo "cortexd 与 agentd 已重启（用的是刚编出来的二进制）"
+    docker compose {{ _dev }} restart agentd web
+    @echo "agentd 已重启（用的是刚编出来的二进制）"
 
 # 改完界面：重新构建 Flutter Web。
 #
@@ -435,7 +418,7 @@ sandbox-build:
 # 起沙箱那一套：双宿出口容器 + internal 网段（网段由 compose 建）
 #
 # **必须先跑这条再开沙箱会话。** 网段是 internal 的，容器里连默认路由都没有；
-# 没有这个出口容器，沙箱既出不了网，cortexd 也进不去（internal 网段上已发布
+# 没有这个出口容器，沙箱既出不了网，agentd 也进不去（internal 网段上已发布
 # 端口不生效 —— 实测，见 docs/sandbox.md 第八节）
 sandbox-up:
     docker compose --profile sandbox up -d --build egress
@@ -448,7 +431,7 @@ sandbox-down:
 sandbox-verify owner="try":
     bash scripts/sandbox-verify.sh cortex-sbx-{{ owner }}
 
-# 手工起一个沙箱看看（cortexd 正式起沙箱走 DockerRunner，不走这条）。
+# 手工起一个沙箱看看（agentd 正式起沙箱走 DockerRunner，不走这条）。
 # 规格与 DockerRunner 里写死的那份保持一致 —— 两边漂开时以代码为准
 sandbox-try owner="try":
     -docker rm -f cortex-sbx-{{ owner }}
@@ -478,19 +461,26 @@ sandbox-rm owner="try":
     -docker volume rm cortex-ws-{{ owner }}
 
 # ══════════════════════════════════════════════════════════
-#  生产部署（cortexd 也进容器）
+#  生产部署（agentd + web；记忆服务由 Cormex 那边部署）
 # ══════════════════════════════════════════════════════════
 
 _prod := "-f docker-compose.yml -f docker-compose.prod.yml"
 
-# 构建 cortexd 生产镜像
+# 构建 agentd 生产镜像
 prod-build:
-    docker compose {{ _prod }} build cortexd
+    docker compose {{ _prod }} build agentd
 
-# 起完整生产环境（Postgres + RustFS + cortexd）
+# 起生产环境。
+#
+# **这里没有 Postgres、没有对象存储、也没有 migration。** 那一整套跟着记忆
+# 服务去了 Cormex（github.com/weironz/cormex）：它自己的 compose 管数据库、
+# 迁移、bucket 与 embedding 模型下载。
+#
+# 部署顺序因此是**先记忆后 agent**：agentd 连不上记忆服务时不会崩（第一条
+# 请求才失败，且那条失败说得清），但用户会先撞上它。
 prod-up:
     docker compose {{ _prod }} up -d
-    @echo "cortexd 首次启动会下载 embedding 模型（~590 MB），用 'just prod-logs cortexd' 看进度"
+    @echo "agentd + web 已起。记忆服务要单独部署 —— 见 Cormex 仓库的 just serve"
 
 prod-down:
     docker compose {{ _prod }} down
@@ -501,26 +491,18 @@ prod-ps:
 prod-logs service="":
     docker compose {{ _prod }} logs -f {{ service }}
 
-# 在容器里应用 migration（部署机上不需要 Rust 工具链，也不需要仓库副本）
-prod-migrate:
-    docker compose {{ _prod }} run --rm --entrypoint sqlx cortexd \
-        migrate run --source /opt/cortex/migrations
-
-# 生产环境一条命令从零到能用
+# 生产环境一条命令从零到能用。
+#
+# 前提：**记忆服务已经在跑**，且 .env 里的 CORTEX_MEMORY_URL 指得到它。
 prod-bootstrap:
     #!/usr/bin/env bash
     set -euo pipefail
-    : "${POSTGRES_PASSWORD:?生产必须在 .env 里显式设 POSTGRES_PASSWORD，不能用默认值}"
-    : "${RUSTFS_SECRET_KEY:?生产必须在 .env 里显式设 RUSTFS_SECRET_KEY，不能用默认值}"
-    mkdir -p data/backup/{wal,base,logical,reports} data/mirror data/workspace
+    : "${CORTEX_MEMORY_URL:?先部署记忆服务（Cormex），再把它的地址写进 .env 的 CORTEX_MEMORY_URL}"
+    mkdir -p data/workspace
     just prod-build
-    docker compose {{ _prod }} up -d postgres rustfs
-    just _wait-healthy
-    just prod-migrate
-    just _ensure-bucket
-    docker compose {{ _prod }} up -d cortexd
-    echo "起完了。cortexd 首次启动要下 ~590 MB embedding 模型，"
-    echo "用 'just prod-logs cortexd' 看进度；健康后 curl http://127.0.0.1:8080/health"
+    docker compose {{ _prod }} up -d
+    echo "起完了。核对两条：\"$CORTEX_MEMORY_URL/health\" 是记忆服务，"
+    echo "http://127.0.0.1/health 走边缘。"
 
 # ══════════════════════════════════════════════════════════
 #  构建
@@ -551,12 +533,13 @@ release-check *ARGS:
 release-package *ARGS:
     bash scripts/release-package.sh {{ ARGS }}
 
-# 本机构建两个生产镜像。CI 里由 release.yml 推到双 registry
+# 本机构建生产镜像。CI 里由 release.yml 推到双 registry。
+#
+# **cortexd 的镜像不在这里** —— 记忆服务在 Cormex 仓库，由它自己发布。
 image-build version="dev":
     #!/usr/bin/env bash
     set -euo pipefail
     export MSYS_NO_PATHCONV=1
-    docker build -f scripts/docker/Dockerfile.cortexd -t "cortex/cortexd:{{ version }}" .
     docker build -f scripts/docker/Dockerfile.web \
         --build-arg CORTEX_BASE_URL="${CORTEX_WEB_API_BASE:-}" \
         -t "cortex/cortex-web:{{ version }}" .

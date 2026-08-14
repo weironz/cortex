@@ -15,9 +15,16 @@
 #  与部署形态一致。
 # ══════════════════════════════════════════════════════════
 
-# cortexd 在 compose 网络里的名字。
+# 记忆服务在哪儿。**它不在这个仓库里** —— 见 github.com/weironz/cormex。
+#
+# 从此是一个**部署参数**，不是一个 compose 服务名：Cortex 只部署 agent
+# 那一半（agentd + web），记忆服务由 Cormex 自己的 compose 起。
+# 用 nginx 官方镜像的 templates 机制注入（`${VAR}` 在容器启动时 envsubst）。
+#
+# 开发机默认走 `host.docker.internal` —— Cormex 的 compose 把 8080 发布在
+# 宿主上，而这个容器要跨出自己的网络才够得着它。
 upstream cortexd {
-    server cortexd:8080;
+    server ${CORTEX_MEMORY_UPSTREAM};
     keepalive 32;
 }
 
