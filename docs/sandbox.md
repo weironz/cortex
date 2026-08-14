@@ -575,8 +575,10 @@ setup 阶段放行全网、agent 阶段收紧（Codex 两阶段模型）留到 C
 - **keep-alive 不会双注** —— 只要纯字节透传不重组 SSE，客户端只收到容器那一路
   15s ping，且这路 ping 顺带保活全链三段。**绝不**在代理里解析/重组 SSE。
 - 不给这条路由挂 `CompressionLayer` 或 Traefik `compress` middleware。
-- 代理路由**必须是显式路径清单**（仅 `/chat`、`/confirmations`），绝不按用户兜底
+- 代理路由**必须是显式路径清单**（现在只有 `/chat`），绝不按用户兜底
   —— 容器的 `fallback` 会把不认识的路径弹回 cortexd，兜底规则造成无限乒乓。
+  （`/confirmations` 曾经也在这份清单里；cortexd 不再跑 agent 之后那条路由
+  连同它服务的那本确认簿一起删了，见 CLAUDE.md「架构」一节。）
 
 **WS 升级走不了这个骨架**（`reqwest` 透传做不了 101）。Web 端 `/ws` 仍直连
 cortexd。
@@ -600,8 +602,10 @@ cortexd。
 
 现在的规则：
 
-- `/chat` 由**服务端**分路：接得上 docker 就进沙箱，接不上就纯聊天。
-  `ChatRequest` 里没有 `sandbox` 字段，别加回来。
+- `/chat` **只有沙箱这一条路**：接得上 docker 就进沙箱，接不上就回 501 并
+  指出两条走得通的路（装 docker，或用桌面端）。`ChatRequest` 里没有
+  `sandbox` 字段，别加回来；cortexd 里也别再加回那份进程内的 agent 循环
+  —— `routes::cortexd_refuses_to_run_a_turn_itself` 钉着这一条。
 - 每一条要摸容器的路由都**自己负责把它拉起来**（`routes::ensure_for_files`）。
   冷启动 913 ms，比向用户解释容器便宜得多。
 - **唯一的例外是后台那个 15 分钟的快照任务**：它仍然拿 `capture()` 的
@@ -714,7 +718,7 @@ hash，调用方说不出第二个挂载，有测试守着。
 | 必须 | 默认绑定 `/workspace` | 不绑就是 `Turn::sealed`，**一个文件工具都没有** |
 | 必须 | 令牌放行 `GET /sessions/{id}` | 每轮拉历史被 403，`load_history` **静默降级为空历史** ⇒ 云端会话逐轮失忆且无报错 |
 | 必须 | 令牌放行 `GET /auth/me` | 状态目录永远落在 `users/_pending` |
-| 必须 | 容器模式断路：`/confirmations` 的 GET 不合并远端、POST 对 Unknown 回 404 | 存在 cortexd→容器→cortexd 的**无界递归**（现在只是碰巧被 403 斩断在第二跳）|
+| ~~必须~~ | ~~容器模式断路：`/confirmations` 的 GET 不合并远端、POST 对 Unknown 回 404~~ | 那条无界递归（cortexd→容器→cortexd）现在从形状上不存在了：cortexd 没有 `/confirmations` 这条路由。断路代码已随之删掉 |
 | 必须 | 去掉 `.attended()` | 日志印「本次执行由用户当场批准」这句假话 |
 | 强烈建议 | 容器 CWD 不放 `/workspace`，或去掉 `dotenvy` | 用户仓库里一个 `.env` 就能在下次重启时把 `CORTEX_LOCAL_LLM` 改成 direct，**把整段对话连同注入的记忆发去任意 base_url** |
 | 建议 | 容器模式把 401/403 归入可重试 | 令牌轮转期间 outbox 积压被**逐条永久丢弃**且只留 warn |

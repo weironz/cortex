@@ -2,8 +2,9 @@
 //!
 //! # 这一层此前根本不存在
 //!
-//! 两条对话路径（cortexd 的 `run_turn`、本地 agent 的 `Engine::run_turn`）
-//! 都是这么开头的：
+//! 当时的两条对话路径（cortexd 的 `run_turn`、本地 agent 的
+//! `Engine::run_turn`）都是这么开头的 —— cortexd 那一条后来连同它那份
+//! 重复的 agent 循环一起删了，现在只剩本地 agent 这一条：
 //!
 //! ```ignore
 //! let mut messages = vec![Message::user().with_text(&user_content)];

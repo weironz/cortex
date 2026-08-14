@@ -21,14 +21,10 @@ use cortex_memory::embed::SharedEmbedder;
 
 use crate::auth::{AuthMode, TicketBook};
 use crate::blobs::{MediaStore, PRESIGN_TTL};
-use crate::confirm::{AnswerOutcome, ConfirmRegistry, PendingInfo, PendingMeta};
 use crate::live::Live;
 use crate::request_tenant::Tenant;
 use crate::sync_notify::SyncBus;
-use cortex_agent::Approval;
-use futures::stream::{self, BoxStream, Stream};
 use tokio::sync::broadcast;
-use tokio_stream::StreamExt as _;
 
 use crate::dto::*;
 use cortex_llm::MessageStream;
@@ -67,7 +63,6 @@ struct Inner {
 #[derive(Clone)]
 pub struct Runtime {
     pub auth: AuthMode,
-    pub confirms: Arc<ConfirmRegistry>,
     pub tickets: Arc<TicketBook>,
     /// 账号那几张表的连接池（`cortex_auth`），以及租户池注册表。
     ///
@@ -89,8 +84,11 @@ pub struct Runtime {
     /// 起 / 停用户沙箱容器的那一层，以及反代进去用的 HTTP 客户端。
     ///
     /// `None` = 这个部署没接 docker（开发机没起 daemon、或者刻意不开云沙箱）。
-    /// 此时 `sandbox: true` 的请求会拿到一条**说得清**的错误，而不是
-    /// 静默退回纯聊天 —— 后者会让用户以为「沙箱开了但 agent 就是不动文件」。
+    ///
+    /// 此时 `/chat` 拿到的是一条**说得清**的 501，指向两条走得通的路
+    /// （给服务器装 docker，或用桌面端）。此前它会退回 cortexd 自己那份
+    /// 进程内 agent 跑纯聊天 —— 用户看到的是一个「有文件工具却怎么都不动
+    /// 文件」的 agent，那种失败没人查得出来。那份 agent 已经删了。
     pub sandbox: Option<SandboxLayer>,
 }
 
@@ -152,7 +150,6 @@ impl Runtime {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             auth: AuthMode::from_env()?,
-            confirms: Arc::new(ConfirmRegistry::from_env()?),
             tickets: Arc::new(TicketBook::default()),
             // 建池要 await，而 from_env 是同步的。由 main 在拿到配置之后
             // 调 `with_accounts` 补上 —— 分两步是为了让「配置错了」
@@ -415,18 +412,6 @@ impl AppState {
     #[must_use]
     pub fn sandbox_layer(&self) -> Option<&SandboxLayer> {
         self.inner.rt.sandbox.as_ref()
-    }
-
-    // ──────────────────── 工具确认（R11）────────────────────
-
-    /// 收下一条回执。见 [`ConfirmRegistry::answer`]。
-    pub fn answer_confirmation(&self, token: &str, approval: Approval) -> AnswerOutcome {
-        self.inner.rt.confirms.answer(token, approval)
-    }
-
-    /// 还等着答复的确认项。断线重连与第二台设备靠它发现待办。
-    pub fn pending_confirmations(&self, session_id: Option<&str>) -> Vec<PendingInfo> {
-        self.inner.rt.confirms.pending(session_id)
     }
 
     // ───────────────────────── 多租户 ─────────────────────────
@@ -799,31 +784,6 @@ impl AppState {
             url: self.inner.blobs.presign_get(hash).await?,
             expires_in_secs: PRESIGN_TTL.as_secs(),
         })
-    }
-
-    // ───────────────────────── 对话 ─────────────────────────
-
-    pub async fn chat_stream(
-        &self,
-        tenant: &Tenant,
-        req: ChatRequest,
-    ) -> BoxStream<'static, ChatEvent> {
-        let confirms = Arc::clone(&self.inner.rt.confirms);
-        match &self.inner.backend {
-            Backend::Mock => Box::pin(mock_chat_stream(req, confirms)),
-            Backend::Live(l) => match tenant.store() {
-                Ok(store) => Box::pin(tokio_stream::wrappers::ReceiverStream::new(
-                    l.bind(store).chat(req, confirms),
-                )),
-                // 这条路不返回 Result，只能把失败说进流里。
-                // **不能回落到 public** —— 那正是这次改动要消灭的东西
-                Err(e) => Box::pin(stream::once(async move {
-                    ChatEvent::Error {
-                        message: format!("解析不出这次请求属于哪个账号：{e}"),
-                    }
-                })),
-            },
-        }
     }
 
     /// 本地 agent 把一轮对话写回记忆库。见 [`Live::write_episode`]。
@@ -1278,110 +1238,6 @@ fn mock_facts() -> Vec<FactDto> {
             trust_tier: None,
         },
     ]
-}
-
-/// mock 里触发一次工具确认的口令。
-///
-/// 与伪造记忆事件、伪造游标推进同一个理由：确认回路是三端都要实现的一条
-/// 交互，客户端 CI 与离线开发必须走得到它，否则那段 UI 只能等接上真实
-/// 后端与真实模型之后才第一次被执行。
-///
-/// 做成口令触发而不是每轮都问：每轮都问的话，mock 上的每一次对话都会先卡满
-/// 一个确认超时 —— 那会让 mock 后端在它最主要的用途（离线开发时随便聊两句）
-/// 上变得没法用。
-const MOCK_CONFIRM_TRIGGER: &str = "#confirm";
-
-/// 模拟一轮完整对话：先报本轮用到的记忆，再逐块吐字，最后收尾。
-/// 事件顺序与真实实现保持一致，客户端据此开发不会白做。
-fn mock_chat_stream(
-    req: ChatRequest,
-    confirms: Arc<ConfirmRegistry>,
-) -> impl Stream<Item = ChatEvent> + use<> {
-    // 注入走的是不带 as_of 的召回，失效事实进不来
-    let facts: Vec<FactDto> = mock_facts()
-        .into_iter()
-        .filter(|f| !f.invalidated)
-        .collect();
-    let reply = format!(
-        "收到「{}」。\n\n这是 **mock 回复** —— cortexd 的路由与事件契约已就绪，\
-         但 agent 循环尚未接线。\n\n```rust\nfn hello() {{\n    println!(\"cortex\");\n}}\n```\n\n\
-         真实实现接上后，这里会是流式的模型输出。",
-        req.message
-    );
-
-    let chunks: Vec<String> = reply
-        .chars()
-        .collect::<Vec<_>>()
-        .chunks(6)
-        .map(|c| c.iter().collect())
-        .collect();
-
-    let session = req.session_id.clone();
-    let mut head_events = vec![
-        ChatEvent::Memory { facts },
-        // 演示工具调用事件，让客户端能提前把这一路 UI 做出来
-        ChatEvent::Tool {
-            name: "memory_search".into(),
-            summary: format!("在会话 {session} 中检索了 3 条相关记忆"),
-            // memory_search 不碰文件 —— path 为 None 正是它必须可选的理由
-            path: None,
-            // 也不改文件，所以没有 diff。演示数据不编一份假的：
-            // 那会让「有 diff」看起来像所有工具的常态
-            diff: None,
-        },
-    ];
-
-    // 演示确认回路。事件的形状、凭据的形状、超时后的行为都与真实后端一致 ——
-    // 差别只在于这里没有一个真的命令在等着跑。
-    //
-    // **登记在建流的时候就做完了**，请求事件排在 head 的末尾，等待排在它之后
-    // 的一段里 —— 与真实后端「先登记、再发事件、最后挂起」的顺序一致。
-    const MOCK_PREVIEW: &str = "command: echo 这是 mock，什么也不会真的执行";
-    let pending = req.message.contains(MOCK_CONFIRM_TRIGGER).then(|| {
-        confirms.open(PendingMeta {
-            session_id: req.session_id.clone(),
-            tool: "shell".into(),
-            risk: "execute",
-            preview: MOCK_PREVIEW.into(),
-            // mock 不越界：演示的是确认回路本身，不是越界那条支路
-            scope: None,
-            // mock 演示的是 shell，没有 diff
-            diff: None,
-        })
-    });
-    if let Some(p) = &pending {
-        head_events.push(ChatEvent::Confirm {
-            token: p.token().to_string(),
-            tool: "shell".into(),
-            risk: "execute".into(),
-            preview: MOCK_PREVIEW.into(),
-            timeout_secs: confirms.timeout().as_secs(),
-            scope: None,
-            diff: None,
-        });
-    }
-    let head = stream::iter(head_events);
-    // `stream::iter(Option)` 产出 0 或 1 个元素 —— 没触发口令时整段消失，
-    // 且两条路是同一个流类型，不必为此包一层 Box
-    let confirm = stream::iter(pending).then(|p| async move {
-        let text = match p.wait(std::future::pending()).await {
-            Approval::Allow => "（mock）你批准了，真实后端此刻会执行那条命令。\n",
-            Approval::Denied => "（mock）你拒绝了，真实后端会把拒绝理由回传给模型。\n",
-            Approval::Unanswered => "（mock）没人回答，按拒绝处理。\n",
-        };
-        ChatEvent::Delta { text: text.into() }
-    });
-
-    let body = stream::iter(chunks.into_iter().map(|text| ChatEvent::Delta { text }))
-        // 让客户端能观察到真实的流式行为，而不是一次性到达
-        .throttle(std::time::Duration::from_millis(18));
-    let tail = stream::once(async move {
-        ChatEvent::Done {
-            episode_id: Id::new().to_string(),
-        }
-    });
-
-    head.chain(confirm).chain(body).chain(tail)
 }
 
 #[cfg(test)]

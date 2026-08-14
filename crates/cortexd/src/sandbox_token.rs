@@ -347,10 +347,11 @@ mod tests {
     /// 白名单**正好**是审计出来的那五条，一条不多。
     ///
     /// 每一条都有代价：多放一条就是沙箱多一样穿透容器边界的能力。
-    /// 尤其别把 `/confirmations` 加进来 —— 容器那侧对不认识的 token 会转发
-    /// 回 cortexd，而 cortexd 又把这条路由反代进容器，是一个**无界递归**。
-    /// 现在它被这张白名单挡在第二跳，但那是意外不是设计，
-    /// 容器侧另有显式断路（见 `cortex-local` 的 `answer_confirmation`）。
+    ///
+    /// `/confirmations` 那条从来没进过这张单子，而现在它连**存不存在**都
+    /// 不成立了：cortexd 不跑 agent，也就没有那本簿子（见 `routes.rs` 里
+    /// 路由清单上那段注释）。这条否定用例因此从「防一个无界递归」变成
+    /// 「防有人把一个已经不存在的端点当成还在」—— 两者都该让它红。
     #[test]
     fn the_allowlist_is_exactly_what_the_agent_actually_calls() {
         let s = scope();

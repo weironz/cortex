@@ -31,7 +31,11 @@ use crate::outbox::Outbox;
 use crate::remote::Remote;
 use crate::workspaces::Workspaces;
 
-/// `memory_search` 工具一次拿多少条。与 cortexd 那侧保持一致。
+/// `memory_search` 工具一次拿多少条。
+///
+/// 曾经这里写着「与 cortexd 那侧保持一致」，而那句话是假的：cortexd 那侧
+/// 一直是 20。**两个数不一样是对的** —— 这些结果要塞进本地这一轮的上下文
+/// 预算，而 MCP 那一侧给的是别人的宿主，宿主自己知道该留多少。
 const TOOL_SEARCH_LIMIT: i64 = 8;
 
 /// 容器里单轮的 wall-clock 上限。**只在容器模式生效。**

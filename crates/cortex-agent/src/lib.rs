@@ -107,8 +107,8 @@ impl ExecEnvironment {
     /// 跑在一次性容器里吗。
     ///
     /// 与两个谓词不同，这一条问的是**部署形态**而不是能力：容器里有几处
-    /// 行为要断路（`/confirmations` 不转发回 cortexd，否则是无界递归），
-    /// 而那与「有没有文件系统」「越界能不能问」都不是同一个问题。
+    /// 行为不一样（比如快照与出网都由宿主管），而那与「有没有文件系统」
+    /// 「越界能不能问」都不是同一个问题。
     #[must_use]
     pub const fn is_container(self) -> bool {
         matches!(self, Self::Container)

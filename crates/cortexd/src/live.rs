@@ -2,26 +2,35 @@
 //!
 //! 与 [`crate::state::mock`] 的契约完全一致：路由与 DTO 不因后端切换而变。
 //!
-//! # 一轮对话的完整链路
+//! # 这里**没有** agent 循环
+//!
+//! cortexd 是记忆服务，不跑对话。agent 一律是另一个进程里的 `cortex-local`
+//! ——桌面端上是本机那个，云端上是容器里那个（`--exec-env=container`，
+//! 由 [`crate::sandbox_proxy`] 逐字节反代过去）。
+//!
+//! 此前这里还留着一份进程内的循环，只在部署接不上 docker 时走到。删掉它的
+//! 理由不是它有 bug，而是**它是第二份实现**：同一个 `Turn::run` 有两处装配，
+//! 于是每加一个工具、每改一次注入纪律都要记得改两遍，而漏掉的那一遍没有
+//! 任何测试会红——两条路的用户是不同的人群。更要紧的是，把 agent 赶出去
+//! 之后，我们自己的 agent 走的就是第三方走的那条路（`/llm/stream` 借模型、
+//! `/episodes` 写记忆、`/mcp` 查记忆），那个 API 才不会烂。
+//!
+//! # 一轮对话落到这里是什么
 //!
 //! ```text
-//! 用户输入
-//!   │
+//! agent 跑完一轮 → POST /episodes
 //!   ├─ 1. 落 L0：episodes + sync_log 同事务（advisory lock 串行化）
 //!   ├─ 2. 四路召回 + RRF + 预算截断
-//!   ├─ 3. 渲染注入块（记忆是数据不是指令）
-//!   ├─ 4. 跑 agent 循环：流式输出 + 工具调用
-//!   ├─ 5. 落 assistant 的 episode
-//!   └─ 6. 异步抽取事实（不阻塞对话）
+//!   ├─ 3. 渲染注入块回给 agent（记忆是数据不是指令）
+//!   └─ 4. 异步抽取事实（不阻塞回执）
 //! ```
 //!
-//! 第 6 步必须异步：抽取要调一次 LLM，同步做会让每轮对话多等几秒，
+//! 第 4 步必须异步：抽取要调一次 LLM，同步做会让每轮对话多等几秒，
 //! 而抽取结果对**本轮**毫无用处——它是给下一轮准备的。
 
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use cortex_agent::{AgentEvent, Approval, ConfirmRequest, ToolHost, Turn};
 use cortex_core::{Config, CortexError, Id, Result};
 use cortex_llm::{LlmClient, MessageStream};
 use cortex_memory::{
@@ -31,40 +40,10 @@ use cortex_memory::{
     injection,
 };
 use cortex_store::{NewEpisode, Role, Store};
-use tokio::sync::mpsc;
 
-use crate::confirm::{ConfirmRegistry, PendingMeta, preview_of};
 use crate::dto::*;
 use cortex_proto::episodes::{EpisodeAck, NewEpisodeRequest};
 use cortex_proto::llm::{LlmStreamRequest, ModelTier};
-
-/// 系统提示词。
-///
-/// 刻意不提「你有记忆」——记忆块自带框定语句，重复强调只会让模型
-/// 把注意力放在机制上而不是内容上。工具也不在这里罗列：schema 已经
-/// 随请求发过去了，正文里再抄一遍只是让可缓存前缀白白变长。
-const SYSTEM_PROMPT: &str = "你是 Cortex，一个具备长期记忆的助手。\
-回答简洁准确。如果引用了检索到的记忆，请带上它的 [id]。\
-需要读写文件或查历史记忆时，直接调用相应工具，不要凭空猜测内容。";
-
-/// 与工作区无关的工具 —— 未绑定工作区的会话只给这些。
-///
-/// # 为什么是白名单而不是「排除掉文件工具」
-///
-/// 两种写法今天等价，明天不等价：`cortex-agent` 迟早会加 `shell_exec`
-/// 之类的工具。黑名单漏掉新工具 = 它悄悄出现在纯聊天会话里，
-/// 那是安全回退；白名单漏掉新工具 = 纯聊天会话少一个能力，
-/// 那是功能缺口。**失败方向不同，选会往安全那边倒的那个。**
-///
-/// # 这份白名单**不再**是围栏本身
-///
-/// 在此之前纯聊天会话的沙箱根回落到进程工作目录（开发机上就是整个仓库），
-/// 而「那没关系，因为这份白名单里没有文件工具」正是当时的理由 —— 也就是说
-/// 围栏的正确性押在这个常量写得对上。现在纯聊天会话用的是
-/// [`cortex_agent::Turn::sealed`]，可访问范围是**空集**：这份名单漏进一个
-/// 文件工具，最坏的结果是它调用时报「本会话没有绑定工作区」，
-/// 而不是它成功列出了仓库目录。两道闸各自独立成立才叫纵深防御。
-const WORKSPACE_FREE_TOOLS: &[&str] = &["memory_search"];
 
 /// `PATCH /sessions` 里那个 `workspace` 字段该怎么处置。
 ///
@@ -133,12 +112,6 @@ pub(crate) fn validate_project_name(raw: &str) -> Result<String> {
     }
     Ok(name.to_owned())
 }
-
-/// 工具调用轮次上限的环境变量。缺省见 [`cortex_agent::DEFAULT_MAX_ROUNDS`]。
-///
-/// 做成可调不是为了「灵活」，是为了让**成本上限**在部署时可控：
-/// 这个数字直接决定单轮对话最多花几次模型调用。
-const MAX_ROUNDS_ENV: &str = "CORTEX_AGENT_MAX_ROUNDS";
 
 /// 同时最多几路抽取。见 [`Live::extract_permit`]。
 const EXTRACT_CONCURRENCY_ENV: &str = "CORTEX_EXTRACT_CONCURRENCY";
@@ -221,14 +194,6 @@ pub struct Live {
     llm: LlmClient,
     retriever: Retriever<SharedEmbedder>,
     extractor: Arc<Extractor>,
-    /// 未绑定工作区的会话用它 —— 工具目录里只有 [`WORKSPACE_FREE_TOOLS`]。
-    ///
-    /// 建一次留着复用。
-    ///
-    /// **服务端只有这一份**：cortexd 不提供文件执行环境，所以不再有
-    /// 「按会话现建一个带工作区的 Turn」那条路。轮次上限在这里就烤进去了，
-    /// `Live` 不必再存一份。
-    chat_turn: std::sync::Arc<Turn>,
     /// 媒体转录。未配置 vision 模型时为 None —— 图片照常归档，只是检索不到
     transcribe: Option<Arc<cortex_memory::TranscribePipeline>>,
     device_id: String,
@@ -239,7 +204,27 @@ pub struct Live {
     /// `/health` 的普查要用它的 `model_id()` 做比对。`SharedEmbedder` 是
     /// `Arc`，多一个句柄不多一份模型。
     embedder: SharedEmbedder,
-    /// 同时最多几路抽取。见 [`Self::extract_gate`] 的文档。
+    /// 同时最多几路抽取。用法见 [`under_gate`]。
+    ///
+    /// # 为什么必须有这个闸门
+    ///
+    /// 抽取是**裸 `tokio::spawn`**：一次 `/episodes` 一个任务，谁都不看别人。
+    /// 正常聊天下这没问题（人打字的速度就是天然的限流），但只要有一个客户端
+    /// 连续快速写入 —— 历史导入是最典型的那个 —— 瞬间就是几千个并发任务，
+    /// 每个都要调一次 LLM。
+    ///
+    /// 生产那台机器是 2 核 3.5 GB，上面已经跑着十几个容器。几千路并发抽取
+    /// 不是「慢一点」，是把整台机器连同别的服务一起拖死。
+    ///
+    /// # 为什么在 spawn **之后**才等许可
+    ///
+    /// 等在 spawn 之前的话，`/episodes` 的响应会被抽取排队卡住 —— 而抽取的
+    /// 全部设计前提就是「绝不阻塞调用方，它是给下一轮准备的」。现在排队的是
+    /// 那些后台任务自己，调用方照样立刻拿到响应。
+    ///
+    /// 代价说清楚：**这不是背压**。写得太快时队列会一直长，只是长在内存里的
+    /// parked task 上。真正的节流得由客户端自己做（导入器就是这么做的），
+    /// 这个闸门保的是 CPU 与供应商配额。
     extract_gate: Arc<tokio::sync::Semaphore>,
 }
 
@@ -351,15 +336,6 @@ impl BoundLive {
     pub async fn sync_since(&self, q: SyncQuery) -> Result<SyncResponse> {
         self.0.sync_since(q).await
     }
-
-    #[must_use]
-    pub fn chat(
-        &self,
-        req: ChatRequest,
-        confirms: Arc<ConfirmRegistry>,
-    ) -> mpsc::Receiver<ChatEvent> {
-        self.0.chat(req, confirms)
-    }
 }
 
 /// 一次转录的结局。
@@ -410,32 +386,6 @@ impl cortex_memory::transcribe::RedactionGuard for StoreRedactionGuard {
     }
 }
 
-/// 纯聊天会话的工具目录。
-fn chat_only_specs() -> Vec<cortex_agent::ToolSpec> {
-    cortex_agent::tools::builtin_specs()
-        .into_iter()
-        .filter(|s| WORKSPACE_FREE_TOOLS.contains(&s.name))
-        .collect()
-}
-
-/// 未绑定工作区的会话用的 [`Turn`]：工具目录只有 [`WORKSPACE_FREE_TOOLS`]，
-/// **且**沙箱是封闭的（见那个常量下面关于「白名单不再是围栏」的说明）。
-///
-/// # 为什么是一个独立函数而不是 `Live::new` 里的三行
-///
-/// `Live::new` 要连数据库、要 API key，单测里造不出来 —— 也就是说写在它
-/// 里面的东西**没有任何测试打得到**。把这三行拎出来之后，
-/// `a_chat_only_session_has_no_sandbox_root_at_all` 打的就是生产用的那一份
-/// 装配，而不是测试自己现搭的一个同名东西（后者是一条永远不会红的测试）。
-///
-/// 有人绕过这个函数在 `Live::new` 里自己拼一个的话，它会变成死代码，
-/// 而 `-D warnings` 下死代码是构建失败。
-fn chat_only_turn(max_rounds: usize) -> Turn {
-    Turn::sealed()
-        .with_max_rounds(max_rounds)
-        .with_specs(chat_only_specs())
-}
-
 impl Live {
     pub async fn new(config: &Config, embedder: SharedEmbedder) -> Result<Self> {
         // 全局那套（cortex_auth）先跑：账号表要在任何人能登录之前就位。
@@ -483,14 +433,6 @@ impl Live {
 
         let context_window = llm.model().context_limit();
 
-        // 取值非法（写了个负数或 abc）时报错而不是悄悄用默认值：
-        // 配错了却照跑，等于成本上限失效而运维完全不知情
-        let max_rounds = match std::env::var(MAX_ROUNDS_ENV) {
-            Ok(v) => v.trim().parse::<usize>().map_err(|_| {
-                CortexError::Config(format!("{MAX_ROUNDS_ENV} 必须是非负整数，实际是 {v:?}"))
-            })?,
-            Err(_) => cortex_agent::DEFAULT_MAX_ROUNDS,
-        };
         // 没配 CORTEX_VISION_PROVIDER 就整条关掉，而不是配了个假的转录器：
         // 后者会往库里写垃圾 caption，而垃圾比空白更难发现
         let transcribe = match cortex_memory::transcribe::VisionTranscriber::from_env()? {
@@ -503,13 +445,6 @@ impl Live {
             }
             None => None,
         };
-
-        let chat_turn = std::sync::Arc::new(chat_only_turn(max_rounds));
-        tracing::info!(
-            max_rounds,
-            chat_only_tools = ?WORKSPACE_FREE_TOOLS,
-            "未绑定工作区的会话：只给这些工具，且文件访问范围是空集"
-        );
 
         // 上一个模型。只在**回填期间**有用：让查询也被编到旧空间去，
         // 于是还没被补上的旧事实仍然进得了向量召回。
@@ -541,7 +476,6 @@ impl Live {
                 config.device_id.clone(),
             )),
             embedder,
-            chat_turn,
             transcribe,
             store,
             llm,
@@ -549,31 +483,6 @@ impl Live {
             context_window,
             extract_gate: Arc::new(tokio::sync::Semaphore::new(extract_permits)),
         })
-    }
-
-    /// 排队等一张抽取许可。
-    ///
-    /// # 为什么必须有这个闸门
-    ///
-    /// 两处抽取都是**裸 `tokio::spawn`**：一次 `/episodes` 一个任务，
-    /// 一次对话一个任务，谁都不看别人。正常聊天下这没问题（人打字的速度
-    /// 就是天然的限流），但只要有一个客户端连续快速写入 —— 历史导入是
-    /// 最典型的那个 —— 瞬间就是几千个并发任务，每个都要调一次 LLM。
-    ///
-    /// 生产那台机器是 2 核 3.5 GB，上面已经跑着十几个容器。几千路并发
-    /// 抽取不是「慢一点」，是把整台机器连同别的服务一起拖死。
-    ///
-    /// # 为什么在 spawn **之后**才等许可
-    ///
-    /// 等在 spawn 之前的话，`/episodes` 与对话的响应会被抽取排队卡住 ——
-    /// 而抽取的全部设计前提就是「绝不阻塞调用方，它是给下一轮准备的」。
-    /// 现在排队的是那些后台任务自己，调用方照样立刻拿到响应。
-    ///
-    /// 代价说清楚：**这不是背压**。写得太快时队列会一直长，只是长在
-    /// 内存里的 parked task 上。真正的节流得由客户端自己做
-    /// （导入器就是这么做的），这个闸门保的是 CPU 与供应商配额。
-    async fn under_extract_gate<F: Future>(&self, fut: F) -> F::Output {
-        under_gate(&self.extract_gate, fut).await
     }
 
     /// 本地 agent 把一轮对话写回记忆库。
@@ -813,7 +722,7 @@ impl Live {
         let gate = Arc::clone(&self.extract_gate);
         tokio::spawn(async move {
             // 排队。**在 spawn 之后才等** —— 调用方早就拿到响应了，
-            // 排的是这个后台任务自己。见 `Live::under_extract_gate`
+            // 排的是这个后台任务自己。见 `Live::extract_gate` 那个字段的文档
             under_gate(&gate, async move {
                 let user_text = match store.episode(&anchor).await {
                     Ok(Some(ep)) => ep.text.unwrap_or_default(),
@@ -1808,409 +1717,6 @@ impl Live {
                 .collect(),
         })
     }
-
-    // ─────────────────────────── 对话 ───────────────────────────
-
-    /// 跑一轮对话，事件通过 channel 流出。
-    ///
-    /// 用 channel 而非直接返回 Stream：这一轮里要交错做落库、检索、
-    /// 调模型、再落库四件事，写成一个 Stream 组合子会难以卒读。
-    fn chat(
-        self: &Arc<Self>,
-        req: ChatRequest,
-        confirms: Arc<ConfirmRegistry>,
-    ) -> mpsc::Receiver<ChatEvent> {
-        let (tx, rx) = mpsc::channel(64);
-
-        let this = self.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = run_turn(this, req, confirms, &tx).await {
-                // 错误也必须以事件形式送达：流静默中断的话，
-                // 客户端无从区分「服务端出错」与「网络断了」
-                let _ = tx
-                    .send(ChatEvent::Error {
-                        message: e.to_string(),
-                    })
-                    .await;
-            }
-        });
-
-        rx
-    }
-}
-
-async fn run_turn(
-    live: Arc<Live>,
-    req: ChatRequest,
-    confirms: Arc<ConfirmRegistry>,
-    tx: &mpsc::Sender<ChatEvent>,
-) -> Result<()> {
-    let store = &live.store;
-    let llm = &live.llm;
-    let retriever = &live.retriever;
-    let device_id = live.device_id.clone();
-    let device_id = device_id.as_str();
-    let context_window = live.context_window;
-    let now = Utc::now();
-
-    // ── 0. 附件预检 ──
-    //
-    // 在事务**外**确认每个 blob 都已登记。`WriteTxn` 刻意不提供读方法，
-    // 而这里也确实不该在持锁事务里做判断（见 cortex-store::txn 的纪律三）。
-    // 不预检也能靠外键拦下来，但那时错误是一句 SQLSTATE 23503，
-    // 客户端只会看到 500 —— 预检换来的是一句说得清的 400。
-    let attachments = dedup_attachments(&req.attachments);
-    for a in &attachments {
-        let known = store.blob(&a.hash).await.map_err(store_err)?.is_some();
-        if !known {
-            return Err(CortexError::Invalid(format!(
-                "附件 {} 尚未登记；请先 POST /blobs 上传，或直传后 POST /blobs/commit",
-                a.hash
-            )));
-        }
-    }
-
-    // ── 1. 落 L0（用户这一轮）──
-    //
-    // episode 与 episode_blobs 必须同事务：分开写会让别的设备先收到一条
-    // 没有附件的消息，界面上就是「图片过一会儿才冒出来」。
-    // 这也是 §九 三步顺序的第三步 —— 前两步（对象上传、blobs 行）已在
-    // /blobs 那条路上完成。
-    let user_episode_id = Id::new();
-    let tsv = cortex_memory::tokenize::to_tsvector_input(&req.message);
-    {
-        let ep = NewEpisode {
-            id: user_episode_id,
-            session_id: req.session_id.clone(),
-            role: Role::User,
-            content: serde_json::json!({ "text": req.message }),
-            text: Some(req.message.clone()),
-            tsv_source: Some(tsv),
-            domain: None,
-            device_id: device_id.to_string(),
-            occurred_at: now,
-        };
-        let links: Vec<cortex_store::NewEpisodeBlob> = attachments
-            .iter()
-            .map(|a| cortex_store::NewEpisodeBlob {
-                episode_id: user_episode_id,
-                blob_hash: a.hash.clone(),
-                kind: a.kind.clone(),
-                // 客户端给的文件名要先截断：schema 的 CHECK 是 255 字符，
-                // 超了会让**整个写事务回滚**——连带丢掉这条消息本身，
-                // 而用户只是拖进来一个名字特别长的文件
-                filename: a
-                    .filename
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| clamp_chars(s, cortex_store::ATTACHMENT_FILENAME_MAX_CHARS)),
-            })
-            .collect();
-
-        store
-            .write_txn(async |t| {
-                let seq = t.insert_episode(&ep).await?;
-                let mut last = seq;
-                for link in &links {
-                    last = t.link_episode_blob(link).await?;
-                }
-                Ok(last)
-            })
-            .await
-            .map_err(store_err)?;
-    }
-
-    // ── 2. 检索 ──
-    let retrieved = retriever
-        .retrieve(store, &req.message, None, context_window)
-        .await?;
-
-    if !retrieved.items.is_empty() {
-        tx.send(ChatEvent::Memory {
-            facts: retrieved.items.iter().map(fact_dto_of).collect(),
-        })
-        .await
-        .ok();
-
-        // 归因落盘 —— 只在 SSE 里推是不够的：刷新一次抽屉就空了，
-        // 而「为什么记得这个」正是这个项目的核心卖点。
-        // 这里是一个短小纯写的事务，检索与向量化都已在事务外做完
-        record_injected_memories(store, user_episode_id, &retrieved, device_id).await;
-    }
-
-    // ── 3. 注入 ──
-    let memory_block = injection::render_turn_block(&retrieved.items);
-    let user_content = if memory_block.is_empty() {
-        req.message.clone()
-    } else {
-        // 记忆块贴在 user 消息一侧而非塞进 system prompt：
-        // system 要保持稳定才能进可缓存前缀
-        format!("{memory_block}\n\n{}", req.message)
-    };
-
-    // ── 4. agent 循环 ──
-    //
-    // 事件先进 agent 自己的 channel 再桥接成 ChatEvent：cortex-agent 不该
-    // 认识 HTTP 契约（它将来也要服务 MCP 与本地执行器）。桥接顺带把
-    // 「客户端断开」传导回去 —— 下游 tx 一关，转发失败，agent 那边
-    // send 也失败，循环立刻收工，不会继续烧 token。
-    let (atx, mut arx) = mpsc::channel::<AgentEvent>(64);
-    let bridge_tx = tx.clone();
-    let bridge_episode = user_episode_id;
-    let bridge_device = device_id.to_string();
-    let bridge = tokio::spawn(async move {
-        // ToolCall 带参数、ToolResult 带成败，路径只在前者里。turn.rs 里两者
-        // 严格交替（发 ToolCall → dispatch → 发 ToolResult），所以按工具名记住
-        // 上一次的路径即可。按名而不是一个裸变量：将来若并发派发工具，
-        // 按名至少不会张冠李戴
-        let mut pending_path: std::collections::HashMap<String, Option<String>> =
-            std::collections::HashMap::new();
-        let mut recorded: Vec<cortex_store::NewEpisodeToolCall> = Vec::new();
-
-        while let Some(ev) = arx.recv().await {
-            let out = match ev {
-                AgentEvent::Delta(text) => ChatEvent::Delta { text },
-                AgentEvent::ToolCall { name, arguments } => {
-                    let path = tool_path(&arguments);
-                    pending_path.insert(name.clone(), path.clone());
-                    ChatEvent::Tool {
-                        summary: format!("调用 {name} {}", compact_args(&arguments)),
-                        name,
-                        path,
-                        // 「即将调用」这一刻还没有结果，diff 随 ToolResult 到达
-                        diff: None,
-                    }
-                }
-                // ok 不单独进 SSE 契约：summary 自己就说清了成败
-                //（「返回 12 行 / 340 字符」对「失败：路径 … 已拒绝」）。
-                // 但落库要留 ok —— 回放时「哪几次失败了」是一眼要看到的东西
-                AgentEvent::ToolResult {
-                    name,
-                    ok,
-                    summary,
-                    diff,
-                } => {
-                    let path = pending_path.remove(&name).flatten();
-                    recorded.push(cortex_store::NewEpisodeToolCall {
-                        id: Id::new(),
-                        episode_id: bridge_episode,
-                        ordinal: recorded.len() as i32,
-                        name: clamp_chars(&name, cortex_store::TOOL_NAME_MAX_CHARS),
-                        path: path
-                            .as_deref()
-                            .map(|p| clamp_chars(p, cortex_store::TOOL_PATH_MAX_CHARS)),
-                        summary: clamp_chars(
-                            &format!("{name} {summary}"),
-                            cortex_store::TOOL_SUMMARY_MAX_CHARS,
-                        ),
-                        ok,
-                        device_id: bridge_device.clone(),
-                        // agent 侧已经按行数 + 字符数截断过；这里再夹一次是
-                        // 因为**入库上限是这一层的责任**，而 agent 那边的上限
-                        // 是为了「人读得完」，两个数将来完全可能各自变动
-                        diff: diff
-                            .as_deref()
-                            .map(|d| clamp_chars(d, cortex_store::TOOL_DIFF_MAX_CHARS)),
-                    });
-                    ChatEvent::Tool {
-                        summary: format!("{name} {summary}"),
-                        name,
-                        path,
-                        diff,
-                    }
-                }
-            };
-            // 下游断开（客户端关了页面）只该停止**转发**，不该丢掉已经记下的
-            // 工具调用 —— 那一轮的库里该有什么，与谁还在看着没有关系
-            if bridge_tx.send(out).await.is_err() {
-                break;
-            }
-        }
-
-        recorded
-    });
-
-    // **服务端不提供文件执行环境。**
-    //
-    // cortexd 与本地 agent 跑的是同一个 `Turn::run`、同一套工具，差别只有
-    // 一个：工具动的是谁的文件系统。这一侧动的是**服务器**的 ——
-    // 而 Web 用户绑工作区时（回落到 `PATCH /sessions`）绑的正是服务器上的
-    // 一个目录，爆炸半径是整台生产机加上所有租户的数据。
-    //
-    // 调研过：Claude.ai 与 ChatGPT 的云 agent 都没有这个形态。它们给模型的
-    // 是**一次性容器**（爆炸半径就是那个容器），产物在对话里下载。
-    //
-    // 那条路后来做了（`sandbox_runner.rs`，`chat_in_sandbox()`）。但它**不是**
-    // 给这一格补上隔离 —— 它是另一格：容器里跑的是另一个进程（`cortex-local`
-    // `--exec-env=container`），文件系统是容器自己的 `/workspace`。
-    // **cortexd 进程内的这个 Turn 至今、且应当永远没有文件工具**：
-    // 一旦它有，动的就是生产机本身，爆炸半径是整台机器加上所有租户的数据。
-    //
-    // 所以下面这条 `debug_assert!` 不随沙箱落地而放宽。
-    let turn = &live.chat_turn;
-    debug_assert!(
-        !turn.env().has_filesystem(),
-        "cortexd 的 Turn 竟然有文件系统 —— 这是本次改动要消灭的那一格"
-    );
-    // 提示词跟着降级：模型手里确实没有文件工具，
-    // 照着「你的工作区是 X」去许诺只会让用户白等一场
-    let system_prompt = cortex_agent::workspace::brief(SYSTEM_PROMPT, None);
-    tracing::debug!(
-        session = %req.session_id,
-        tools = ?turn.tool_names(),
-        "本轮的工具目录"
-    );
-
-    // ── 会话历史 ──
-    //
-    // 在此之前这里只有当前这一条消息，**历史一次都没被加载过**。症状是
-    // 「同一个会话里问它上一句说了什么，它说没看见」—— 实测过，不是假想。
-    //
-    // 记忆系统盖不住这件事：它捞回的是被抽取成**事实**的那部分，而且要等
-    // 异步抽取跑完。「刚才说了什么」「总结一下这段对话」压根不满足抽取判据。
-    let history = load_history(&live, &req.session_id, user_episode_id).await;
-    let mut messages: Vec<cortex_llm::Message> = history
-        .turns
-        .iter()
-        .map(|t| {
-            if t.is_user {
-                cortex_llm::Message::user().with_text(&t.text)
-            } else {
-                cortex_llm::Message::assistant().with_text(&t.text)
-            }
-        })
-        .collect();
-    if history.dropped > 0 {
-        tracing::info!(
-            session = %req.session_id,
-            dropped = history.dropped,
-            kept = messages.len(),
-            "会话太长，最早的若干轮没进上下文"
-        );
-    }
-    messages.push(cortex_llm::Message::user().with_text(&user_content));
-
-    let host = TurnHost {
-        live: Arc::clone(&live),
-        events: tx.clone(),
-        session_id: req.session_id.clone(),
-        confirms,
-    };
-    let outcome = turn
-        .run(llm, &system_prompt, &mut messages, &host, &atx)
-        .await;
-    drop(atx);
-    let tool_calls = bridge.await.unwrap_or_else(|e| {
-        // 桥接任务 panic 了。本轮的工具归因就此丢失，但对话本身已经完成，
-        // 没有理由连回复一起丢掉
-        tracing::warn!(error = %e, "工具事件桥接任务异常结束，本轮工具归因未落库");
-        Vec::new()
-    });
-
-    let reply = match outcome {
-        Ok(o) => {
-            tracing::info!(
-                tool_rounds = o.tool_rounds,
-                stop = ?o.stop,
-                chars = o.reply.chars().count(),
-                "本轮 agent 循环结束"
-            );
-            o.reply
-        }
-        Err(e) => {
-            tx.send(ChatEvent::Error {
-                message: format!("模型返回出错：{e}"),
-            })
-            .await
-            .ok();
-            // 已经吐给用户的字拿不回来了，但这一轮没有可信的完整回复，
-            // 不落库 —— 半截回答进了记忆，下一轮会被当成事实抽取
-            String::new()
-        }
-    };
-
-    // ── 5. 落 L0（助手这一轮）──
-    let assistant_episode_id = Id::new();
-    if !reply.is_empty() {
-        let tsv = cortex_memory::tokenize::to_tsvector_input(&reply);
-        let ep = NewEpisode {
-            id: assistant_episode_id,
-            session_id: req.session_id.clone(),
-            role: Role::Assistant,
-            content: serde_json::json!({ "text": reply }),
-            text: Some(reply.clone()),
-            tsv_source: Some(tsv),
-            domain: None,
-            device_id: device_id.to_string(),
-            occurred_at: Utc::now(),
-        };
-        store
-            .write_txn(async |t| t.insert_episode(&ep).await)
-            .await
-            .map_err(|e| CortexError::Store(e.to_string()))?;
-    }
-
-    // ── 5b. 落工具归因 ──
-    //
-    // 与 assistant 那条 episode 分开一个事务：工具调用锚在 **user** 那条上
-    // （见 migration 20260807000005），而 assistant 那条在模型出错时根本不落库。
-    // 合并事务就得为「有回复」和「没回复」写两条不同的路径，收益是零。
-    if !tool_calls.is_empty() {
-        let n = tool_calls.len();
-        let res = store
-            .write_txn(async |t| {
-                let mut last = 0;
-                for c in &tool_calls {
-                    last = t.insert_episode_tool_call(c).await?;
-                }
-                Ok(last)
-            })
-            .await;
-        match res {
-            Ok(_) => tracing::debug!(calls = n, "本轮工具归因已落库"),
-            // 对话已经完成，用户也已经看到回复了。归因写不进去是可观测性的
-            // 损失，不该表现为一次失败的对话
-            Err(e) => tracing::warn!(error = %e, calls = n, "工具归因落库失败"),
-        }
-    }
-
-    tx.send(ChatEvent::Done {
-        episode_id: assistant_episode_id.to_string(),
-    })
-    .await
-    .ok();
-
-    // ── 6. 异步抽取 —— 绝不阻塞对话 ──
-    //
-    // 抽取要再调一次 LLM，同步做会让每轮多等几秒，而结果对**本轮**
-    // 毫无用处：它是给下一轮准备的。
-    {
-        let text = format!("用户：{}\n助手：{}", req.message, reply);
-        tokio::spawn(async move {
-            // 与 `spawn_extraction` 共用同一个闸门 —— 两条路加起来才是这台
-            // 机器的真实负载，各限各的等于没限
-            let live = &live;
-            live.under_extract_gate(async {
-                let ctx = ExtractContext::new(user_episode_id, now);
-                match live.extractor.ingest(&live.store, &text, &ctx).await {
-                    Ok(report) => tracing::info!(
-                        candidates = report.candidates,
-                        written = report.written.len(),
-                        superseded = report.superseded.len(),
-                        duplicates = report.duplicates,
-                        "本轮抽取完成"
-                    ),
-                    // 抽取失败不该影响已经完成的对话，记日志即可
-                    Err(e) => tracing::warn!(error = %e, "本轮抽取失败"),
-                }
-            })
-            .await;
-        });
-    }
-
-    Ok(())
 }
 
 /// 把本轮的检索归因写进 `episode_memories`。
@@ -2274,20 +1780,6 @@ async fn record_injected_memories(
     }
 }
 
-/// 从工具参数里取出文件路径。
-///
-/// 内置的三个文件工具（`read_file` / `write_file` / `list_dir`）用的都是
-/// `path` 这一个键（见 `cortex_agent::tools`）。不去猜别的键名：猜错了
-/// 就是把某个无关字符串当成路径发给客户端，而那比不给更糟 ——
-/// 界面会画出一个指向不存在文件的可点条目。
-fn tool_path(args: &serde_json::Value) -> Option<String> {
-    args.get("path")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(str::to_owned)
-}
-
 /// 按**字符**截断到上限。
 ///
 /// 这些上限对应 schema 里的 CHECK。超限不是「这一行写不进去」而是
@@ -2299,101 +1791,6 @@ fn clamp_chars(s: &str, max: usize) -> String {
         return s.to_owned();
     }
     s.chars().take(max).collect()
-}
-
-// ─────────────────────── agent 的宿主能力 ──────────────────────
-
-/// `memory_search` 工具单次返回的条数上限。
-///
-/// 比自动注入的那一路给得多一点：模型主动调这个工具时，通常是在找一件
-/// 具体的事，宁可多给几条让它自己筛。
-const TOOL_SEARCH_LIMIT: i64 = 20;
-
-/// **一轮**对话的宿主能力。
-///
-/// # 为什么不是 `impl ToolHost for Live`
-///
-/// 确认回路需要三样只有「这一轮」才知道的东西：往哪条 SSE 流上发确认请求、
-/// 这个请求属于哪个会话、以及「发起这一轮的客户端还在不在」。`Live` 是进程级
-/// 的，它一样都没有。
-///
-/// 更重要的是**如果两个 impl 同时存在**：`Live` 那个会因为没实现 `confirm`
-/// 而走 trait 的默认实现（一律不批准），于是「哪些工具能用」取决于调用方
-/// 随手传了哪个 host —— 而那两处代码长得一模一样。所以只留一个。
-struct TurnHost {
-    live: Arc<Live>,
-    /// 确认请求直接发到 SSE 流上。
-    ///
-    /// 没有走 agent 的事件通道再桥接一次：那样确实能保证与 `Tool` 事件的
-    /// 先后顺序，但要把「一次性凭据」这个纯粹的传输层概念塞进 `AgentEvent`，
-    /// 而 `cortex-agent` 将来还要服务 MCP 与本地执行器 —— 那两条路上根本
-    /// 没有 HTTP 回执。代价是这条事件与 `Tool` 事件的先后不保证，
-    /// 所以 [`ChatEvent::Confirm`] 自带做决定所需的全部信息（那条契约里写了）。
-    events: mpsc::Sender<ChatEvent>,
-    session_id: String,
-    confirms: Arc<ConfirmRegistry>,
-}
-
-#[async_trait::async_trait]
-impl ToolHost for TurnHost {
-    async fn memory_search(&self, query: &str, as_of: Option<&str>) -> Result<String> {
-        // 检索**与渲染**都在 `Live::memory_search_text` 里，对外的 MCP
-        // server 调的是同一个。见那个函数的文档
-        self.live
-            .memory_search_text(query, as_of, TOOL_SEARCH_LIMIT)
-            .await
-    }
-
-    async fn confirm(&self, req: &ConfirmRequest<'_>) -> Approval {
-        let preview = preview_of(req.arguments);
-        let risk = cortex_proto::confirm::risk_str(req.risk);
-
-        // 顺序是**登记 → 发事件 → 挂起**，不能变。反过来的话，本机 loopback 上
-        // 一个手快的客户端可能在登记完成之前就把回执打回来，那条回执会撞上一个
-        // 还不存在的凭据被判为伪造，而这一轮继续傻等到超时 ——
-        // 一个只在极低延迟下才出现、在慢网络上永远复现不出来的竞态
-        // 越界的绝对路径原样带上：用户判断「准不准」的依据里，
-        // 「这在工作区外」与「这条命令是什么」同样重要
-        let scope = req.scope.map(|p| p.display().to_string());
-        let pending = self.confirms.open(PendingMeta {
-            session_id: self.session_id.clone(),
-            tool: req.tool.to_string(),
-            risk,
-            preview: preview.clone(),
-            scope: scope.clone(),
-            // 改动预览：确认框里先看见要写什么，再决定按不按允许。
-            // 这正是「盲签」被治掉的那一处
-            diff: req.diff.map(str::to_string),
-        });
-
-        let ask = ChatEvent::Confirm {
-            token: pending.token().to_string(),
-            tool: req.tool.to_string(),
-            risk: risk.to_string(),
-            preview,
-            timeout_secs: self.confirms.timeout().as_secs(),
-            scope,
-            // 与 PendingMeta 那份同源：实时确认走这条 SSE 事件，
-            // 补拉走 GET /confirmations，两条都要带
-            diff: req.diff.map(str::to_string),
-        };
-        if self.events.send(ask).await.is_err() {
-            // 请求都发不出去，等下去只会白等一个超时
-            tracing::info!(tool = req.tool, "客户端已断开，确认请求发不出去");
-            return Approval::Unanswered;
-        }
-
-        tracing::info!(
-            tool = req.tool,
-            session = %self.session_id,
-            timeout_secs = self.confirms.timeout().as_secs(),
-            "等待用户确认工具调用"
-        );
-        // `events.closed()` 是「发起这一轮的客户端走了」的信号。确认期间
-        // agent 循环不发任何事件，已有的那套「send 失败即断开」的探测在这段
-        // 时间里完全失灵 —— 没有它，关掉页面之后这一轮会原地挂满整个超时
-        pending.wait(self.events.closed()).await
-    }
 }
 
 // ───────────────────────── 领域 → DTO ──────────────────────────
@@ -2551,30 +1948,6 @@ fn dedup_attachments(input: &[AttachmentRef]) -> Vec<AttachmentRef> {
         .collect()
 }
 
-/// 把工具参数压成一行给 UI 看。
-///
-/// 只给键和短值：参数里可能是整个文件内容（`write_file.content`），
-/// 原样塞进事件会把 SSE 流撑爆，而用户想知道的只是「动了哪个文件」。
-fn compact_args(args: &serde_json::Value) -> String {
-    const MAX_VALUE: usize = 60;
-    let Some(obj) = args.as_object() else {
-        return String::new();
-    };
-    let parts: Vec<String> = obj
-        .iter()
-        .map(|(k, v)| {
-            let raw = v.as_str().map_or_else(|| v.to_string(), str::to_string);
-            if raw.chars().count() > MAX_VALUE {
-                let head: String = raw.chars().take(MAX_VALUE).collect();
-                format!("{k}={head}…")
-            } else {
-                format!("{k}={raw}")
-            }
-        })
-        .collect();
-    format!("({})", parts.join(", "))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2612,17 +1985,6 @@ mod tests {
                  而它会说「还没有记忆」——用户据此认为这个功能没用"
             ),
         }
-    }
-
-    #[test]
-    fn compact_args_keeps_events_small() {
-        let long = "x".repeat(500);
-        let s = compact_args(&serde_json::json!({ "path": "a.txt", "content": long }));
-        assert!(s.contains("path=a.txt"));
-        assert!(
-            s.chars().count() < 200,
-            "工具事件必须压得住大参数，否则一次 write_file 就能把 SSE 流撑爆：{s}"
-        );
     }
 
     #[test]
@@ -2702,31 +2064,6 @@ mod tests {
         );
     }
 
-    /// 未绑定工作区 = 文件工具**不出现在发给模型的目录里**。
-    ///
-    /// 「出现了但调用会失败」是不够的：模型会换着参数试上几轮才放弃，
-    /// 用户看到一串莫名其妙的工具调用事件，还白烧几次模型调用。
-    #[test]
-    fn an_unbound_session_gets_no_file_tools() {
-        let dir = tempfile::tempdir().expect("应能建临时目录");
-        let chat = Turn::on_local_machine(dir.path())
-            .expect("临时目录应当是合法沙箱根")
-            .with_specs(chat_only_specs());
-
-        let names = chat.tool_names();
-        assert_eq!(
-            names,
-            vec!["memory_search"],
-            "纯聊天会话的工具目录里只该有与工作区无关的工具，实际：{names:?}"
-        );
-        for forbidden in ["read_file", "write_file", "list_dir"] {
-            assert!(
-                !names.contains(&forbidden),
-                "{forbidden} 不该出现在纯聊天会话里：{names:?}"
-            );
-        }
-    }
-
     /// 服务端**不能**绑工作区，但**能**解绑。
     ///
     /// 绑定那一半写反了的后果是「服务端又能绑了」，而它没有任何症状 ——
@@ -2757,98 +2094,6 @@ mod tests {
             !workspace_patch(None).expect("没提这个字段不该报错"),
             "只改标题的请求不该被工作区这一条拦下来"
         );
-    }
-
-    /// **cortexd 一个文件工具都不给** —— 无论会话上有没有绑过工作区。
-    ///
-    /// 这条测试原本是反的（「绑定工作区后 `read_file` 应当出现」）。反过来
-    /// 是因为服务端那一格根本不该存在：cortexd 与本地 agent 跑的是同一个
-    /// `Turn::run`、同一套工具，差别只有工具动的是谁的文件系统 ——
-    /// 而这一侧动的是**服务器**的。Web 用户绑工作区（回落到 `PATCH /sessions`）
-    /// 绑的正是服务器上的目录，爆炸半径是整台生产机加上所有租户的数据。
-    ///
-    /// 调研过：Claude.ai 与 ChatGPT 的云 agent 都没有这个形态，它们给模型的是
-    /// 一次性容器。
-    ///
-    /// **沙箱落地之后这条测试不放宽，反而更要紧了。** 容器那条路走的是另一个
-    /// 进程（`chat_in_sandbox()` → 容器里的 `cortex-local`），与 cortexd 进程
-    /// 自己的这个 `Turn` 无关。把两件事混起来 —— 「反正现在有沙箱了」——
-    /// 就会有人顺手把文件工具加回这份目录，而那一份动的是生产机本身。
-    #[test]
-    fn cortexd_never_hands_out_file_tools() {
-        let turn = chat_only_turn(4);
-        let names = turn.tool_names();
-        for forbidden in ["read_file", "write_file", "list_dir", "shell"] {
-            assert!(
-                !names.contains(&forbidden),
-                "cortexd 的工具目录里出现了 {forbidden} —— 它动的是**服务器**的\
-                 文件系统，而批准的人可能在另一个城市。实际：{names:?}"
-            );
-        }
-        assert!(
-            names.contains(&"memory_search"),
-            "记忆检索必须还在 —— 那才是服务端该干的活。实际：{names:?}"
-        );
-        assert!(
-            !turn.env().has_filesystem(),
-            "执行环境必须是「没有」。这是 ExecEnvironment 存在的全部理由"
-        );
-    }
-
-    /// 纯聊天会话的沙箱根必须是**空集**，不是进程工作目录。
-    ///
-    /// 钉住的是一个具体的退化：`Turn::sealed()` 被改回
-    /// `Turn::on_local_machine(std::env::current_dir())`。那个改动编译得过、
-    /// 所有既有测试全绿，症状只有在 [`WORKSPACE_FREE_TOOLS`] 哪天漏进一个
-    /// 文件工具时才出现 —— 而那时围栏已经是整个仓库了。
-    ///
-    /// 打的是 [`chat_only_turn`]，也就是 `Live::new` 真正用的那一份装配。
-    /// 在测试里自己 `Turn::sealed()` 一个来断言是没有意义的：那只证明了
-    /// `sealed()` 的行为，证明不了生产代码用了它。
-    #[test]
-    fn a_chat_only_session_has_no_sandbox_root_at_all() {
-        let chat = chat_only_turn(4);
-        assert!(
-            chat.sandbox_root().is_none(),
-            "未绑定工作区的会话不能有沙箱根 —— 它的合法可访问范围是空集，\
-             回落到进程工作目录等于把整个仓库围进来"
-        );
-        assert_eq!(
-            chat.tool_names(),
-            WORKSPACE_FREE_TOOLS,
-            "纯聊天会话的工具目录必须就是白名单本身"
-        );
-    }
-
-    /// 白名单必须真的是白名单：新加的内置工具默认**不进**纯聊天会话。
-    ///
-    /// 反过来（黑名单）的失败方向是「新工具悄悄出现在纯聊天会话里」，
-    /// 那是安全回退；这个测试把方向钉死。
-    #[test]
-    fn the_chat_only_catalog_is_an_allowlist() {
-        let all: Vec<&str> = cortex_agent::tools::builtin_specs()
-            .iter()
-            .map(|s| s.name)
-            .collect();
-        let chat: Vec<&str> = chat_only_specs().iter().map(|s| s.name).collect();
-
-        assert!(
-            chat.len() < all.len(),
-            "纯聊天目录必须是内置目录的真子集，否则这层过滤等于没做"
-        );
-        for name in &chat {
-            assert!(
-                WORKSPACE_FREE_TOOLS.contains(name),
-                "{name} 不在白名单里却进了纯聊天目录"
-            );
-        }
-    }
-
-    #[test]
-    fn compact_args_tolerates_non_objects() {
-        // 参数来自模型，什么形状都可能出现，不能 panic
-        assert_eq!(compact_args(&serde_json::Value::Null), "");
-        assert_eq!(compact_args(&serde_json::json!([1, 2])), "");
     }
 }
 
@@ -2957,67 +2202,4 @@ mod extract_gate_tests {
             "峰值只有 {peak}，说明这些任务根本没重叠过，这条测试测了个寂寞"
         );
     }
-}
-
-/// 取这个会话最近的若干轮，用来铺当前这一轮的上下文。
-///
-/// # 为什么走**降序分页**那个查询，而不是 `episodes_by_session`
-///
-/// 后者是升序 + LIMIT，截掉的是**最新**那些 —— 那对显示是对的
-/// （用户从头往下读），对上下文正好相反：模型要接着最近几轮往下说。
-/// 同一个 LIMIT 用错方向，症状是「它记得三个月前，却忘了上一句」。
-///
-/// # 取不到就当没有历史，不让整轮对话失败
-///
-/// 用户只是想说句话。历史读不出来是降级（退回本次改动之前的行为），
-/// 不该表现为一次 500。
-async fn load_history(
-    live: &Live,
-    session_id: &str,
-    current: cortex_core::Id,
-) -> cortex_core::history::FittedHistory {
-    use cortex_core::history::{HistoryTurn, fit_history, history_budget};
-
-    let budget = history_budget(live.context_window);
-    // 先按条数粗筛一层再按 token 精算：一个几千轮的会话不该为了算预算
-    // 把全部原文都拉进内存。200 轮在任何合理预算下都绰绰有余
-    const MAX_TURNS: i64 = 200;
-
-    let page = match live
-        .store
-        .episodes_by_session_page(session_id, MAX_TURNS, None)
-        .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, session = session_id, "读会话历史失败，本轮按无历史处理");
-            return fit_history(Vec::new(), budget);
-        }
-    };
-
-    // 分页是从新到老给的，这里翻正
-    let current = current.to_string();
-    let turns: Vec<HistoryTurn> = page
-        .into_iter()
-        .rev()
-        // 本轮的 user episode 上面刚写进库（步骤 1），它就在这份历史的末尾。
-        // 按 id 精确剔除，而不是「末尾那条是 user 就弹掉」—— 后者在用户
-        // 连发两条消息时会吃掉一条真实发言，而那是**静默**的
-        .filter(|e| e.id != current)
-        .filter_map(|e| {
-            // 只要真正的对话双方。tool / system 是内部记录，
-            // 塞进上下文既占预算又让模型以为那是用户说的话
-            let is_user = match e.role {
-                cortex_store::Role::User => true,
-                cortex_store::Role::Assistant => false,
-                _ => return None,
-            };
-            Some(HistoryTurn {
-                is_user,
-                text: e.text.unwrap_or_default(),
-            })
-        })
-        .collect();
-
-    fit_history(turns, budget)
 }

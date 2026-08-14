@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use cortex_core::{CortexError, Result};
-use cortex_proto::confirm::PendingInfo;
 use cortex_proto::dto::MemorySearchResponse;
 use cortex_proto::episodes::{EpisodeAck, NewEpisodeRequest};
 use cortex_proto::llm::LlmStreamRequest;
@@ -123,27 +122,10 @@ impl Remote {
             .map_err(|e| CortexError::Invalid(format!("解析 /memory/search 响应失败：{e}")))
     }
 
-    /// 远端还等着答复的确认项。
-    ///
-    /// 本地 agent 自己有一本簿子，这条是给**跨端**用的：在手机上批一条
-    /// 桌面端发起的确认。本轮先留着接口，UI 那一半在 D3。
-    pub async fn pending_confirmations(
-        &self,
-        session_id: Option<&str>,
-    ) -> Result<Vec<PendingInfo>> {
-        let mut rb = self
-            .auth(self.http.get(self.url("/confirmations")))
-            .timeout(REQUEST_TIMEOUT);
-        if let Some(s) = session_id {
-            rb = rb.query(&[("session_id", s)]);
-        }
-        let resp = checked(rb.send().await.map_err(map_transport)?).await?;
-        let body: cortex_proto::dto::PendingConfirmations = resp
-            .json()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("解析 /confirmations 响应失败：{e}")))?;
-        Ok(body.pending)
-    }
+    // 这里**没有** `pending_confirmations`。cortexd 不跑 agent，也就不再有
+    // 「远端那本确认簿」可问 —— 那个端点连同它服务的那个进程内 agent 一起
+    // 删掉了。跨端批确认要回来的话，得先有一个「确认属于哪台机器」的答案，
+    // 而不是再挂一次 HTTP。
 
     /// 起一次 LLM 代理调用，返回**原始字节流**。SSE 的解析在
     /// [`crate::provider`] 里做 —— 那边才知道要还原成什么类型。

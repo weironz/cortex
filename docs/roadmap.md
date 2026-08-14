@@ -1209,17 +1209,19 @@ docker.sock 做成三个开关而不是一个（`CORTEX_SANDBOX_ENABLED` +
 产品拿不走自己的数据是自相矛盾的，而且 [memory-content.md](memory-content.md)
 已经写了 GDPR 的数据可携带权。工作量小，**该早做**。
 
-**③ MCP 接入：让别的 agent 用我们的记忆**。一个 MCP server 暴露
-`memory_search` / `memory_add`，端点基本都有了，是包装工作。
+**③ MCP 接入：让别的 agent 用我们的记忆** —— **已落地**（`/mcp`，
+`crates/cortexd/src/mcp.rs`）。工具 `memory_search` / `remember`，
+resource `cortex://profile`。
 
-但要写清一处落差：**作为插件交出去的是内容，控制不了位置**。
-注入契约（稳定块进可缓存前缀，见 [CLAUDE.md](../CLAUDE.md) 不可违反的约束 #4）
-在 MCP 形态下拿不到 —— 宿主 agent 决定把工具返回值放哪。
-接进 Claude Code 的用户得到「能检索到你的记忆」，得不到「前缀缓存不被打穿」。
+当初写在这里的那处落差**比预想的小**：「作为插件交出去的是内容，控制不了
+位置」只对工具那一半成立。核心画像块做成 **resource** 之后，位置由宿主
+按 resource 的语义决定（贴进上下文、不随轮次变），而那正好就是可缓存前缀
+想要的位置。剩下的落差是我们保证不了宿主真那么做。
 
-③ 同时是一条**战略岔路**：做完它，「Cortex 是记忆层」这条路就基本免费拿到了，
-而它与「Cortex 是完整的 agent」是两个不同的对手（mem0 / Zep vs Claude Code）。
-不必现在拍板 —— D1 那三个端点在两条路上都要建。
+③ 同时是一条**战略岔路**，而它现在已经走通并往下走了一步：cortexd 里那份
+进程内 agent 也删了（见 CLAUDE.md「架构」），于是**我们自己的 agent 与
+第三方 agent 走的是同一个 API**。「不能发布一个自己都不吃的 API」这条，
+现在是从形状上成立，不是靠自律。
 
 ---
 

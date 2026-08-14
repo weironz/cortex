@@ -85,12 +85,13 @@ protected_routes! {
         .put(crate::byo_key::put)
         .delete(crate::byo_key::delete),
     "/chat" [POST] => post(chat),
-    // 工具确认的回执与待办列表。
+    // 这里**没有** `/confirmations`。工具确认属于 agent，而 agent 在别的
+    // 进程里：桌面端问的是本机 `cortex-local`，容器里那一轮压根不问
+    //（越界路径直接拒绝，见 `cortex_agent::ExecEnvironment::Container`）。
     //
-    // 回执是 POST 而不是 PATCH/PUT：它不是在改一个资源的状态，
-    // 而是在**投递一个一次性的答复** —— 同一个 token 投第二次不是幂等的
-    // 「结果一样」，而是明确的 404（凭据已被消费）。
-    "/confirmations" [GET, POST] => get(list_confirmations).post(answer_confirmation),
+    // cortexd 曾经也有一份，服务的是它自己那个进程内 agent。那个 agent 删了
+    // 之后这份簿子就再没有生产者 —— 留着它等于留一个永远回空列表、永远 404
+    // 的端点，而那是本仓库列在第一条的老毛病：**造好了没人调用**。
     "/memory/search" [GET] => get(memory_search),
     // 记忆对外的 MCP 门面。见 `crate::mcp` 的模块头。
     //
@@ -273,68 +274,32 @@ async fn issue_ticket(State(st): State<AppState>) -> Json<TicketResponse> {
     })
 }
 
-// ─────────────────── /confirmations（R11）───────────────────
-
-/// 投递一条工具确认回执。
-///
-/// 404 覆盖四种情况且**不加区分**：凭据是伪造的、已经被别的设备答过了、
-/// 超时作废了、那一轮早就结束了。分开报会让「猜一个 token 试试」变成
-/// 一个可用的探测口 —— 能问出「刚才有没有人在批一条命令」。
-async fn answer_confirmation(
-    State(st): State<AppState>,
-    Json(receipt): Json<ConfirmReceipt>,
-) -> Result<Json<ConfirmAck>, ApiError> {
-    let approval = match receipt.decision {
-        ConfirmDecision::Allow => cortex_agent::Approval::Allow,
-        ConfirmDecision::Deny => cortex_agent::Approval::Denied,
-    };
-    match st.answer_confirmation(&receipt.token, approval) {
-        crate::confirm::AnswerOutcome::Accepted => Ok(Json(ConfirmAck { accepted: true })),
-        crate::confirm::AnswerOutcome::Unknown => {
-            Err(ApiError::from(cortex_core::CortexError::NotFound {
-                kind: "confirmation",
-                // 回显的是**请求里带的那个 token**，而它本来就是客户端自己
-                // 发上来的，不泄露任何它还不知道的东西
-                id: receipt.token,
-            }))
-        }
-    }
-}
-
-/// 当前还等着答复的确认项。
-///
-/// 断线重连之后靠它把「有没有什么还等着我批」问出来 —— SSE 流是一次性的，
-/// 断了就再也不会重发那条请求事件。第二台设备发现待办同样走这里。
-async fn list_confirmations(
-    State(st): State<AppState>,
-    Query(q): Query<PendingQuery>,
-) -> Json<PendingConfirmations> {
-    Json(PendingConfirmations {
-        pending: st.pending_confirmations(q.session_id.as_deref()),
-    })
-}
-
 // ──────────────────────────── /chat ────────────────────────────
 
 /// 流式对话。
 ///
 /// 用 SSE 而非 WebSocket：对话是单向流，SSE 自带重连与文本帧语义，
 /// 且在 Flutter Web 上比 WS 少一层坑。WS 留给多端同步推送。
-/// `/chat` 的入口。**两条完全不同的路**，由「这个部署接不接得上 docker」分。
+/// `/chat` 的入口。**这个 handler 一行对话业务都不做。**
 ///
-/// # 为什么不是客户端说了算
+/// 起容器（幂等）、签一把作用域令牌、把整条请求原样反代进去。对话、工具、
+/// 确认全在容器里那个 `cortex-local` 上跑 —— 那是同一个二进制，
+/// 只是 `--exec-env=container`。
 ///
-/// 上一版由请求体里的 `sandbox: bool` 分，界面上对应一个「云沙箱」开关。
-/// 那个开关把一件纯粹的实现细节推到了用户面前：他要先知道「沙箱」是什么、
-/// 再知道关着就没有文件工具，才能理解为什么「帮我改下这个文件」会失败。
-/// 而那条失败路径长得像 agent 坏了，不像开关没开。
+/// # 为什么没有「在 cortexd 自己这儿跑」那条回落
 ///
-/// 现在服务端自己定：接得上 docker 就进沙箱，接不上就在自己这儿跑纯聊天。
-/// 用户只跟会话打交道。
+/// 有过。它是**第二份 agent 实现**：同一个 `Turn::run` 两处装配，工具目录
+/// 只有 `memory_search`，只在部署接不上 docker 时走到。删掉它的理由不是它
+/// 坏了，而是没人能同时维护两份 —— 漏改的那一份不会有测试红，因为两条路
+/// 的用户是不同的人群。
 ///
-/// 走沙箱那条时，这个 handler 一行业务都不做：起容器（幂等）、签一把作用域
-/// 令牌、把整条请求原样反代进去。对话、工具、确认全在容器里那个
-/// `cortex-local` 上跑 —— 那是同一个二进制，只是 `--exec-env=container`。
+/// 现在 cortexd 是纯记忆服务。它给 agent 的是 `/llm/stream`（借模型）、
+/// `/episodes`（写记忆）、`/mcp`（查记忆），而**我们自己的 agent 走的就是
+/// 第三方走的那条路**。那个 API 才不会烂。
+///
+/// 代价说在明处：没接 docker 的部署，Web 端问不了话。这不是降级到「纯聊天」
+/// ——那正是本仓库反复栽的形状（功能静默变残，界面上一个字都不说）。
+/// 报错里给两条走得通的路。
 async fn chat(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -347,10 +312,7 @@ async fn chat(
                 .into_response();
         }
     };
-    if st.sandbox_layer().is_some() {
-        return chat_in_sandbox(&st, &headers, &req, body).await;
-    }
-    chat_here(st, headers, req).await
+    chat_in_sandbox(&st, &headers, &req, body).await
 }
 
 /// 这个会话的沙箱作用域：谁的、哪个项目的。
@@ -451,11 +413,15 @@ async fn chat_in_sandbox(
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     let Some(layer) = st.sandbox_layer() else {
-        // **明说，不静默退回纯聊天。** 退回去的话用户会看到一个「有文件工具
-        // 却怎么都不动文件」的 agent，而那种失败没人查得出来
+        // **明说，不静默退回纯聊天。** 曾经真有过那条回落，它给出的是一个
+        // 「有文件工具却怎么都不动文件」的 agent —— 那种失败没人查得出来。
+        //
+        // 现在连纯聊天也没有：cortexd 不跑 agent 循环了（见 [`chat`] 的文档）。
+        // 所以报错要把**两条走得通的路**都说出来，而不只是说这里不行
         return ApiError::unsupported(
-            "这个部署没有开云沙箱（cortexd 连不上 docker）。\
-             要在自己的机器上跑文件与命令，请用桌面端。",
+            "这个部署跑不了对话：cortexd 是记忆服务，agent 在容器里跑，\
+             而它连不上 docker。给服务器装上 docker，或者用桌面端\
+             （桌面端自带 agent，对话在你自己的机器上跑，记忆照旧存在这里）。",
         )
         .into_response();
     };
@@ -511,56 +477,6 @@ async fn chat_in_sandbox(
         proxied,
     )
     .await
-}
-
-/// 在 cortexd 自己这儿跑一轮（纯聊天，工具目录只有 `memory_search`）。
-async fn chat_here(st: AppState, headers: HeaderMap, req: ChatRequest) -> axum::response::Response {
-    // 超额要以 **SSE 事件**形式说，不是 HTTP 状态码：客户端已经把这条
-    // 当成流在读了，一个 429 会表现成「流刚建立就断了」，
-    // 而那与网络出问题长得一模一样
-    let user = crate::accounts::current_user(&st, &headers).await;
-    if let Err(e) = st.enforce_quota(&user).await {
-        let msg = e.message();
-        let once = futures::stream::once(async move {
-            let data = serde_json::to_string(&ChatEvent::Error { message: msg })
-                .unwrap_or_else(|_| r#"{"type":"error","message":"额度已用完"}"#.into());
-            Ok::<_, Infallible>(Event::default().data(data))
-        });
-        // 直接成型再返回：`keep_alive` 会把流类型换掉，于是两条返回路径
-        // 的具体类型对不上。转成 `Response` 是最省事的收敛点
-        return Sse::new(once)
-            .keep_alive(
-                KeepAlive::new()
-                    .interval(Duration::from_secs(15))
-                    .text("ping"),
-            )
-            .into_response();
-    }
-
-    let tenant = match st.tenant(&headers).await {
-        Ok(t) => t,
-        Err(e) => return e.into_response(),
-    };
-    let stream = st.chat_stream(&tenant, req).await.map(|ev| {
-        // 序列化失败也必须以合法 SSE 事件返回：流一旦静默中断，
-        // 客户端无从判断是网络断了还是服务端出错了。
-        let json = serde_json::to_string(&ev).unwrap_or_else(|e| {
-            serde_json::to_string(&ChatEvent::Error {
-                message: format!("事件序列化失败：{e}"),
-            })
-            .unwrap_or_else(|_| r#"{"type":"error","message":"internal"}"#.to_string())
-        });
-        Ok::<_, Infallible>(Event::default().data(json))
-    });
-
-    // keep-alive 防止中间代理在长思考期间掐断连接
-    Sse::new(stream)
-        .keep_alive(
-            KeepAlive::new()
-                .interval(Duration::from_secs(15))
-                .text("ping"),
-        )
-        .into_response()
 }
 
 // ───────────────────────── /llm/stream ─────────────────────────
@@ -1420,9 +1336,6 @@ mod tests {
         let digest: [u8; 32] = raw.try_into().expect("SHA-256 应当是 32 字节");
         let rt = Runtime {
             auth: AuthMode::Token { digest },
-            confirms: std::sync::Arc::new(crate::confirm::ConfirmRegistry::new(
-                std::time::Duration::from_secs(30),
-            )),
             tickets: std::sync::Arc::new(crate::auth::TicketBook::default()),
             // 这几条路由测试不碰账号端点，所以不接数据库。
             // 账号端点在没有它时会 panic，而那正是它们不该被路由到的信号
@@ -1539,6 +1452,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **cortexd 不跑 agent。** 接不上 docker 时 `/chat` 明说，不自己跑一轮。
+    ///
+    /// # 这条测的是一个已经被拆掉的东西不会长回来
+    ///
+    /// 此前 cortexd 里有一份进程内的 agent 循环（`chat_here` + `run_turn`），
+    /// 工具目录只有 `memory_search`，只在这个分支上走到。它是**第二份实现**：
+    /// 同一个 `Turn::run` 两处装配，每加一个工具、每改一次注入纪律都得改两遍，
+    /// 而漏掉的那一遍不会有任何测试红 —— 两条路的用户是不同的人群。
+    ///
+    /// 把它加回来在别处不会有任何症状：编译过、既有测试全绿、有 docker 的
+    /// 部署照常走容器。**只有这条会红。**
+    ///
+    /// 断言的是 501 **加上**报错正文里给了走得通的路。只断状态码的话，
+    /// 一句「不支持」也能让它变绿，而那对用户等于「点了没反应」——
+    /// 那正是本仓库反复栽的形状。
+    #[tokio::test]
+    async fn cortexd_refuses_to_run_a_turn_itself() {
+        let (app, token) = app_with_token();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/chat")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"session_id":"s1","message":"在吗"}"#))
+            .expect("构造请求不该失败");
+        let resp = app
+            .oneshot(req)
+            .await
+            .expect("router 的错误类型是 Infallible");
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "没接 docker 的 cortexd 必须拒绝跑对话，而不是自己跑一轮纯聊天"
+        );
+
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("读响应体不该失败");
+        let msg = String::from_utf8_lossy(&body);
+        assert!(
+            msg.contains("docker"),
+            "要说清楚缺的是什么，否则运维不知道该装什么。实际：{msg}"
+        );
+        assert!(
+            msg.contains("桌面端"),
+            "只说「装 docker」对装不了 docker 的人是死路。实际：{msg}"
+        );
     }
 
     /// `/health` 是**唯一**不需要认证的端点。理由见 [`Health::auth`]。
@@ -1828,9 +1791,6 @@ mod lazy_ensure_tests {
         let runner = Arc::new(NeverRunning::default());
         let rt = crate::state::Runtime {
             auth: crate::auth::AuthMode::Disabled,
-            confirms: Arc::new(crate::confirm::ConfirmRegistry::new(
-                std::time::Duration::from_secs(30),
-            )),
             tickets: Arc::new(crate::auth::TicketBook::default()),
             accounts: None,
             access: Arc::new(crate::accounts::AccessBook::default()),

@@ -1,7 +1,6 @@
 @Tags(['live'])
 library;
 
-import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -770,107 +769,31 @@ void main() {
     expect(first, isA<SyncHello>());
   });
 
-  // ─────────────────────── 工具确认（R11）───────────────────────
+  // ─────────────── 工具确认已经不在 cortexd 这一侧 ───────────────
 
-  test('确认回路：请求自带预览，回执被接受，晚到的拿 404', () async {
+  test('cortexd 不再有 /confirmations —— 确认属于 agent，而 agent 在别处', () async {
     if (!up) return markTestSkipped('cortexd not running');
     final api = _api();
     addTearDown(api.dispose);
 
-    final sessionId = 'live-confirm-${DateTime.now().millisecondsSinceEpoch}';
-    ChatConfirmEvent? asked;
-    final texts = StringBuffer();
-
-    // `#confirm` 是 cortexd mock 后端的触发口令（`MOCK_CONFIRM_TRIGGER`）。
-    // 接了真模型的部署上这一条会拿不到确认事件而跳过 —— 那也是对的：
-    // 让一个真的 shell 命令挂起在 CI 上不是这条用例该做的事
-    final stream = api.chat(sessionId: sessionId, message: '#confirm 试一下确认回路');
-    late final StreamSubscription<ChatEvent> sub;
-    sub = stream.listen((event) {
-      if (event is ChatConfirmEvent) asked = event;
-      if (event is ChatDeltaEvent) texts.write(event.text);
-    });
-    addTearDown(sub.cancel);
-
-    // 等确认请求到达，最多几秒
-    final deadline = DateTime.now().add(const Duration(seconds: 8));
-    while (asked == null && DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-    }
-    final request = asked;
-    if (request == null) {
-      return markTestSkipped('这个部署没有触发确认（多半接的是真模型，不是 mock 后端）');
-    }
-
-    expect(request.request.tool, isNotEmpty);
-    expect(
-      request.request.risk,
-      anyOf('execute', 'write'),
-      reason: '风险等级要能被画成一个标签，未知值必须原样透出而不是降级成最轻的那个',
-    );
-    expect(
-      request.request.preview,
-      isNotEmpty,
-      reason: '预览是用户据以判断的全部依据。「agent 想执行一个工具」这种话没有信息量',
-    );
-    expect(
-      request.request.remainingFrom(DateTime.now()).inSeconds,
-      greaterThan(0),
-      reason: '倒计时得有个正数可画 —— 超时是静默的，用户必须知道自己还有多久',
-    );
-
-    // 待办列表里必须能看到它 —— 这就是断线重连后捞回来的那条路
-    final pending = await api.pendingConfirmations(sessionId: sessionId);
-    expect(
-      pending.map((c) => c.token),
-      contains(request.request.token),
-      reason: 'SSE 断了不会重发；GET /confirmations 是重连后唯一的答案',
-    );
-    expect(
-      pending.first.sessionId,
-      sessionId,
-      reason: '恢复端点带 session_id（SSE 事件不带），客户端据此知道该跳去哪个会话',
-    );
-
-    // 回执被接受
-    expect(
-      await api.answerConfirmation(token: request.request.token, allow: true),
-      isTrue,
-    );
-
-    // 同一个 token 再投一次 —— 这正是「别的设备先答了」在晚到那一方看到的样子
-    expect(
-      await api.answerConfirmation(token: request.request.token, allow: true),
-      isFalse,
-      reason: '一次性凭据：先到的作数，晚到的拿 404。这是正常情况，不是错误',
-    );
-
-    // 答复真的解开了那一轮
-    await _until(() => texts.isNotEmpty, '批准之后继续吐字');
-  });
-
-  test('GET /confirmations 在没有待办时是空列表而不是 404', () async {
-    if (!up) return markTestSkipped('cortexd not running');
-    final api = _api();
-    addTearDown(api.dispose);
-
-    expect(
-      await api.pendingConfirmations(
-        sessionId: 'no-such-session-${DateTime.now().microsecondsSinceEpoch}',
+    // 这里原本有三条用例：mock 后端用 `#confirm` 口令触发一次确认、
+    // 从待办列表里捞回来、同一个 token 投两次。它们打的都是 cortexd 自己
+    // 那个进程内 agent，而那个 agent 删掉了（见 cortexd `routes::chat`）。
+    //
+    // 换成钉住新契约的一条：**这个端点没了**。留着旧用例更糟 ——
+    // `answerConfirmation` 对 404 返回 false，于是那条断言在路由被删之后
+    // 照样是绿的，只是理由完全变了，而没人会发现。
+    await expectLater(
+      api.pendingConfirmations(),
+      throwsA(
+        isA<CortexApiException>().having(
+          (e) => e.isMissing,
+          'isMissing',
+          isTrue,
+        ),
       ),
-      isEmpty,
-    );
-  });
-
-  test('伪造的回执 token 拿到 404，而不是 500 或静默成功', () async {
-    if (!up) return markTestSkipped('cortexd not running');
-    final api = _api();
-    addTearDown(api.dispose);
-
-    expect(
-      await api.answerConfirmation(token: 'deadbeef' * 8, allow: true),
-      isFalse,
-      reason: '伪造的、已被答过的、超时的、那一轮早结束的 —— 服务端刻意不区分这四种',
+      reason: '确认回路在 agent 那一侧：桌面端问本机 cortex-local，'
+          '云端那一轮跑在容器里而容器里的 agent 压根不问',
     );
   });
 }

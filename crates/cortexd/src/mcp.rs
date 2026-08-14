@@ -57,9 +57,17 @@ use crate::state::AppState;
 /// 这个数是照那个量级取的。
 const PROFILE_LIMIT: i64 = 12;
 
-/// `memory_search` 单次上限。与 agent 自己那个工具同一个数
-/// （`live.rs` 的 `TOOL_SEARCH_LIMIT`）—— 两处给的条数不一样的话，
-/// 「第三方查到的」与「我们自己查到的」会不一样多，而没人说得清为什么。
+/// `memory_search` 单次上限。
+///
+/// 比自动注入那一路给得多：模型主动调这个工具时通常在找一件具体的事，
+/// 宁可多给几条让它自己筛。
+///
+/// **不与 `cortex-local` 那个 8 对齐，是故意的。** 那一侧的结果要塞进它
+/// 自己那一轮的上下文预算里；这一侧的宿主（Claude Code / goose）预算多大
+/// 我们不知道，由它自己截断比我们替它猜一个小数字好。
+///
+/// 此前 `live.rs` 里还有第三个同名常量，给 cortexd 那个进程内 agent 用 ——
+/// 它跟着那个 agent 一起删了。
 const SEARCH_LIMIT: i64 = 20;
 
 /// 核心画像的 resource URI。

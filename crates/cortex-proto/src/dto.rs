@@ -181,8 +181,9 @@ pub enum PermissionMode {
 /// 「帮我看看这个文件」就得到一个没有文件工具的 agent —— 而那个失败读起来
 /// 像 agent 坏了，不像开关没开。
 ///
-/// 现在由**服务端**决定：cortexd 接得上 docker 就在沙箱里跑，接不上就在
-/// 自己这儿跑纯聊天。用户只跟会话打交道，后面有没有容器对他透明。
+/// 现在由**服务端**决定：cortexd 接得上 docker 就在沙箱里跑。接不上就明说
+/// 这个部署跑不了对话（cortexd 是记忆服务，自己不跑 agent），并指出两条走得
+/// 通的路。用户只跟会话打交道，后面有没有容器对他透明。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub session_id: String,

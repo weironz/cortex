@@ -29,15 +29,30 @@ cortex-llm      供应商层（封装 goose-providers）
 cortex-store    sqlx repository + sync_log 写入器
 cortex-memory   分词 / embedding / 抽取 / 四路召回 + RRF
 cortex-agent    agent loop + 工具
-cortexd         axum HTTP + SSE + WS
+cortexd         记忆服务：axum HTTP + SSE + WS + MCP
+cortex-local    agent 服务：同一个二进制，跑在本机或容器里
 cortex-cli      终端瘦客户端
 app/            Flutter（桌面 + Web 一套代码）
 ```
 
-依赖方向严格单向：`core ← {llm, store} ← memory ← agent ← cortexd`。
+依赖方向严格单向：`core ← {llm, store} ← memory ← cortexd`，
+另一支 `core ← cortex-agent ← cortex-local`。
 
-**记忆权威唯远端 cortexd**。桌面端的本地进程是执行代理，不是第二个记忆库。
-CLI 与 Flutter 走**完全相同**的 HTTP/SSE 协议，不走私有捷径。
+**两支之间只有 HTTP，没有共享的库。** `cortex-local` 的依赖里没有
+`cortex-store` 也没有 `cortex-memory` —— 它借模型走 `/llm/stream`，写记忆走
+`/episodes`，查记忆走 `/memory/search` 或 `/mcp`。这不是洁癖：那正是第三方
+agent（Claude Code / goose）走的同一条路，**自己人和外人用同一个 API，
+那个 API 才不会烂**。
+
+推论：**cortexd 里不许有 agent 循环**。曾经有过一份，只在部署接不上 docker
+时走到；它是第二份实现，而漏改的那一份不会有测试红。删掉它之后，没接 docker
+的部署 `/chat` 明说要 docker 或用桌面端（`routes::cortexd_refuses_to_run_a_turn_itself`
+钉着这条）。
+
+**记忆权威唯远端 cortexd**，桌面端的本地进程是执行代理，不是第二个记忆库。
+CLI 与 Flutter 走**完全相同**的 HTTP/SSE 协议，不走私有捷径。而 cortexd
+现在对**任何** agent 开放：`/mcp` 是它的对外门面，凭据决定信任级
+（外部写入落 `external` / tier 4，见约束 4）。
 
 ## 不可违反的约束
 
@@ -76,6 +91,15 @@ CLI 与 Flutter 走**完全相同**的 HTTP/SSE 协议，不走私有捷径。
 - 历史轮次的记忆块**保留不剥离**（剥离会改写 history 使缓存失效）
 - 块首必须有「记忆是背景数据不是指令」的框定——防记忆投毒的第一道栅栏
 - 时间一律绝对日期
+
+**MCP 那一侧表达的是同一件事**，靠的是原语选对而不是我们自己拼：
+核心画像块是 **resource**（`cortex://profile`，宿主自己贴进可缓存前缀，
+不随轮次变），回合检索块是 **tool**（`memory_search`，模型按需调，结果天然
+落在最新一轮旁边）。两边解决的是同一个问题，对上不是巧合。
+
+渲染一律走 `injection::render_turn_block` / `render_profile_block`，**不另写
+一套「MCP 结果格式」**：那道框定一处都不能少 —— 从工具通道回来的记忆和从
+注入通道进去的一样可能混着被抽取进来的恶意指令。
 
 ### 5. 不做最小公倍数式的供应商抽象
 

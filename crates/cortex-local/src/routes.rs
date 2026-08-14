@@ -274,11 +274,16 @@ async fn chat_here(
     )
 }
 
-/// 确认回执。**先问本地这本簿子**，本地没有就转给远端。
+/// 确认回执。**只问本地这本簿子** —— 现在没有第二本了。
 ///
-/// 顺序不能反：挂起的那一轮绝大多数时候就在这个进程里，先打一次网络
-/// 是白等。而「本地没有」除了「不是本地发起的」之外，还覆盖伪造、
-/// 已被答过、超时作废三种 —— 转给远端之后由它给出同样不加区分的 404。
+/// 曾经本地查不到时会转给 cortexd，因为那时 cortexd 自己也跑 agent，
+/// 浏览器发起的那条会话的确认挂在服务端。cortexd 不再跑 agent 之后，
+/// 确认要么在这个进程里（桌面端自己发起的），要么在某个容器里
+/// （云端那条，而容器里的 agent 压根不问 —— 越界路径直接拒绝）。
+/// 转发只会变成一次每轮都白打、每次都 404 的网络往返。
+///
+/// 查不到一律 404，且**不加区分**：伪造、已被答过、超时作废三种混在一起。
+/// 分开报会让「猜一个 token 试试」变成一个可用的探测口。
 async fn answer_confirmation(
     State(st): State<LocalState>,
     Json(receipt): Json<ConfirmReceipt>,
@@ -289,65 +294,28 @@ async fn answer_confirmation(
     };
     match st.engine.confirms.answer(&receipt.token, approval) {
         AnswerOutcome::Accepted => Json(ConfirmAck { accepted: true }).into_response(),
-        // ── 容器里**不转发**，直接 404 ──
-        //
-        // 这条转发在桌面端是对的（本地簿子没有 = 多半是浏览器那条会话的，
-        // 挂在服务端）。在容器里它是一个**无界递归**：cortexd 把
-        // /confirmations 反代进容器 → 容器查不到 → 转发回 cortexd →
-        // cortexd 又反代进容器 …… 每一跳都是一次新的 HTTP 请求，
-        // 唯一的减速器是 20 秒超时。
-        //
-        // 眼下它碰巧不会发生，因为沙箱令牌不放行 /confirmations，第二跳就 403。
-        // **但那是意外，不是设计** —— 把这条路由加进放行清单是很自然的诱惑
-        //（确认本来就是对话的一部分），加进去回环立刻复活。所以在这里显式断路。
-        //
-        // 404 也是更诚实的答案：cortexd 侧对查不到的 token 就回 404
-        //（刻意不区分伪造 / 已答过 / 超时，防探测），容器照抄同一个语义。
-        AnswerOutcome::Unknown if st.engine.exec_env.is_container() => {
-            tracing::debug!("容器里答不认识的确认 token —— 不转发（那是一条回环），直接 404");
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": "没有这条待确认项" })),
-            )
-                .into_response()
-        }
-        AnswerOutcome::Unknown => {
-            let body = serde_json::to_vec(&receipt).unwrap_or_else(|_| b"{}".to_vec());
-            let uri = "/confirmations".parse().expect("常量路径可解析");
-            proxy::forward_json(&st, reqwest::Method::POST, &uri, body).await
-        }
+        AnswerOutcome::Unknown => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "没有这条待确认项" })),
+        )
+            .into_response(),
     }
 }
 
-/// 待确认项 = **本地的 + 远端的**。
+/// 待确认项 —— **只有本地这一份**。
 ///
-/// 远端那些来自别的客户端发起的会话（比如浏览器直连 cortexd 的那一条），
-/// 它们的 agent 循环挂在服务端。「任何设备连上即是完整的你」要求在这台
-/// 机器上也能看见并答复它们。
+/// 曾经还合并一份远端的，理由是「别的客户端发起的会话，agent 循环挂在
+/// 服务端」。cortexd 不再跑 agent 之后那一份就不存在了：确认只会由这个
+/// 进程里的 agent 提出。云端那条会话跑在容器里，而容器里的 agent 不问
+///（越界路径直接拒绝，见 `cortex_agent::ExecEnvironment::Container`）。
 ///
-/// 远端拉不到时**只报本地的，不报错**：一个连不上记忆库的本地 agent
-/// 仍然能正常执行工具、仍然会问「准不准」，而那些确认必须能答 ——
-/// 让整个列表因为远端不可达而 502，等于断网时高风险工具全部卡死。
+/// 于是这里也不再需要「远端拉不到就只报本地的」那条降级 —— 没有远端了。
 async fn list_confirmations(
     State(st): State<LocalState>,
     Query(q): Query<PendingQuery>,
 ) -> Json<PendingConfirmations> {
     let mut pending = st.engine.confirms.pending(q.session_id.as_deref());
-    // 容器里**不合并远端**：同 answer_confirmation，那是回环的另一半
-    //（cortexd 反代 GET 进容器 → 容器又 GET 回 cortexd → ……）。
-    // 而且合并本来就没有意义：容器里跑的只有它自己那一个会话，
-    // 「别的客户端发起的会话」在这里不存在。
-    if !st.engine.exec_env.is_container() {
-        match st
-            .remote
-            .pending_confirmations(q.session_id.as_deref())
-            .await
-        {
-            Ok(remote) => pending.extend(remote),
-            Err(e) => tracing::debug!(error = %e, "拉不到远端待确认项，只报本地的"),
-        }
-    }
-    // 先问的排前面。两个来源各自有序，合起来就不是了
+    // 先问的排前面
     pending.sort_by(|a, b| a.asked_at.cmp(&b.asked_at));
     Json(PendingConfirmations { pending })
 }
