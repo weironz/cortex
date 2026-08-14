@@ -135,6 +135,12 @@ jobs:
           CORTEX_VERSION: v0.0.0-ci
           DOMAIN: ci.invalid
           S3_DOMAIN: s3.ci.invalid
+          # 拆分之后新增的两个。上面那条「必须与所有 `${VAR:?}` 同步」的提醒
+          # 在 0.1.9 兑现了一次：加了 CORMEX_VERSION 与 CORTEX_MEMORY_URL，
+          # 却没加到这里，于是本机 `docker compose config` 是过的（.env 里有值），
+          # CI 一推上去就红。这道门本来就是为「只有 CI 看得见」而设的
+          CORMEX_VERSION: v0.0.0-ci
+          CORTEX_MEMORY_URL: http://memory.ci.invalid:8080
         run: |
           docker compose -f docker-compose.yml config -q
           docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
