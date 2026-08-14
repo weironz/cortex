@@ -33,7 +33,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// (`/sessions`, `/memory/search`) are counted. Everything else throws, so a
 /// controller that started a completion on a bump would fail loudly instead of
 /// silently burning tokens.
-class _FakeApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
+class _FakeApi with LlmKeyUnsupported, AccountUnsupported, LocalWorkspaceUnsupported
+    implements CortexApi {
   int connectCount = 0;
 
   /// Every `since` the controller has asked for, in order. This list is the

@@ -92,6 +92,29 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     );
   }
 
+  /// 三条本地工作空间路由一律「这个后端没有」。
+  ///
+  /// 模拟后端没有文件系统，凭空回一个路径会让界面显示一个磁盘上不存在的
+  /// 目录 —— 而调用方对 404 已经有正确的处理（当成「这台机器上没有本机」）。
+  @override
+  Future<LocalWorkspaceRoot> localWorkspaceRoot() async =>
+      throw const CortexApiException('模拟后端没有本地工作空间。', statusCode: 404);
+
+  @override
+  Future<LocalWorkspaceRoot> setLocalWorkspaceRoot(String path) async =>
+      throw const CortexApiException('模拟后端没有本地工作空间。', statusCode: 404);
+
+  @override
+  Future<String> createLocalWorkspace({
+    required String name,
+    String? projectId,
+  }) async =>
+      throw const CortexApiException('模拟后端没有本地工作空间。', statusCode: 404);
+
+  @override
+  Future<String?> autoBindLocalWorkspace(String id) async =>
+      throw const CortexApiException('模拟后端没有本地工作空间。', statusCode: 404);
+
   @override
   String get label => 'Mock 数据源（内存夹具）';
 

@@ -35,6 +35,10 @@ mod turn;
 mod workspaces;
 mod ws_proxy;
 
+/// 四条本地工作空间路由的端到端断言（不开端口，见文件头）。
+#[cfg(test)]
+mod local_workspace_routes_test;
+
 use std::sync::Arc;
 use std::time::Duration;
 

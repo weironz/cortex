@@ -1,6 +1,7 @@
 import '../core/permission_mode.dart';
 import 'dart:typed_data';
 
+import 'api_exception.dart';
 import '../import/import_source.dart';
 import '../models/account.dart';
 import '../models/auth_tokens.dart';
@@ -284,6 +285,28 @@ abstract interface class CortexApi {
   /// [updateSession].
   Future<String?> bindLocalWorkspace(String id, String? path);
 
+  /// `GET /local/workspace-root` — 默认工作空间根目录 + 它下面已有的文件夹。
+  ///
+  /// 只有本地 agent 答得了：那个目录在这台机器上。对着一个纯 cortexd
+  /// （Web 端）调会抛 `isUnsupported`，调用方按「没有本机」处理。
+  Future<LocalWorkspaceRoot> localWorkspaceRoot();
+
+  /// `PUT /local/workspace-root` — 改默认根目录。只校验、不搬迁已有数据。
+  Future<LocalWorkspaceRoot> setLocalWorkspaceRoot(String path);
+
+  /// `POST /local/workspaces` — 在根目录下开一个工作空间目录，回它的绝对路径。
+  ///
+  /// 带 [projectId] 就顺便记账，于是**项目改名之后不会再建第二个文件夹**。
+  /// 建目录与绑会话刻意分成两步：绑定那条路上还有清放行清单、同步执行归属
+  /// 这些必须发生的事，不该复制一份到这里。
+  Future<String> createLocalWorkspace({required String name, String? projectId});
+
+  /// `POST /local/workspaces/{id}/auto` — 按日期时间开一个文件夹并绑上。
+  ///
+  /// 给「新建会话时没选工作区」那一档用。时间戳的格式在 agent 那一侧 ——
+  /// 客户端有两个（这个和 CLI），写两遍就会漂成两种。
+  Future<String?> autoBindLocalWorkspace(String id);
+
   /// `PATCH /sessions/{id}` — rename, archive, bind a workspace.
   ///
   /// The three fields are independent and all optional; only what is passed is
@@ -437,6 +460,32 @@ abstract interface class CortexApi {
 /// 与那边同一条禁令：**不要用在真实客户端上**。
 mixin AccountUnsupported {
   Future<Account?> whoAmI() async => null;
+}
+
+/// 同上，给四条本地工作空间路由用。
+///
+/// 抛 404 而不是回一个空值：调用方对 404 已经有正确的处理（当成「这台机器上
+/// 没有本机工作空间」），而回 `LocalWorkspaceRoot.empty` 会让界面显示一个
+/// 「根目录：无」的设置项，看起来像功能坏了。
+///
+/// 与那边同一条禁令：**不要用在真实客户端上**。
+mixin LocalWorkspaceUnsupported {
+  static const _absent = CortexApiException(
+    '这个后端没有本地工作空间。',
+    statusCode: 404,
+  );
+
+  Future<LocalWorkspaceRoot> localWorkspaceRoot() async => throw _absent;
+
+  Future<LocalWorkspaceRoot> setLocalWorkspaceRoot(String path) async =>
+      throw _absent;
+
+  Future<String> createLocalWorkspace({
+    required String name,
+    String? projectId,
+  }) async => throw _absent;
+
+  Future<String?> autoBindLocalWorkspace(String id) async => throw _absent;
 }
 
 mixin LlmKeyUnsupported {

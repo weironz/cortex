@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../api/api_exception.dart';
 import '../../core/local_agent.dart';
 import '../../models/attachment.dart' show formatBytes;
+import '../../models/chat_session.dart';
 import '../../models/workspace.dart';
+import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
 import '../../workspace/workspace_fs.dart';
@@ -446,20 +449,42 @@ class WorkspaceChip extends ConsumerWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final workspace = session.workspace;
-    final bound = workspace != null;
+    final cloud = ref
+        .read(chatControllerProvider.notifier)
+        .isCloudByChoice(session.id);
 
-    final color = bound ? scheme.secondary : scheme.onSurfaceVariant;
+    final (IconData icon, String label, String tip, Color color) =
+        switch ((workspace, cloud)) {
+          (final w?, _) => (
+            Icons.folder_rounded,
+            w.displayName,
+            '这次对话的文件都在 ${w.root}\n点击更换',
+            scheme.secondary,
+          ),
+          // 还没定：草稿会在第一句话之前自动开一个按日期时间命名的文件夹，
+          // 而**已经开过口**的会话不会 —— 那时说「自动新建」就是句空话
+          (null, false) when session.isLocalDraft => (
+            Icons.auto_awesome_outlined,
+            '自动新建',
+            '发出第一句话时，会在默认工作空间下建一个以当前时间命名的文件夹。\n点击改成别的。',
+            scheme.onSurfaceVariant,
+          ),
+          (null, _) => (
+            Icons.cloud_outlined,
+            '云端',
+            '这次对话跑在远端 agent 的容器里，任何设备上都能接着聊。\n点击改成本机目录。',
+            scheme.onSurfaceVariant,
+          ),
+        };
 
     return Tooltip(
-      message: bound
-          ? '工作区：${workspace.root}\n点击更换或解除绑定'
-          : '未绑定工作区 —— 这是一个纯聊天会话，助手拿不到文件工具。点击绑定。',
+      message: tip,
       child: Material(
         color: color.withValues(alpha: 0.10),
         borderRadius: BorderRadius.circular(7),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: () => showWorkspaceBindingSheet(context, session),
+          onTap: () => _pick(context, ref, session),
           child: Container(
             constraints: const BoxConstraints(maxWidth: 200),
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -470,17 +495,11 @@ class WorkspaceChip extends ConsumerWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  bound
-                      ? Icons.folder_rounded
-                      : Icons.create_new_folder_outlined,
-                  size: 13,
-                  color: color,
-                ),
+                Icon(icon, size: 13, color: color),
                 const SizedBox(width: 6),
                 Flexible(
                   child: Text(
-                    bound ? workspace.displayName : '绑定工作区',
+                    label,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.labelSmall?.copyWith(
@@ -489,11 +508,211 @@ class WorkspaceChip extends ConsumerWidget {
                     ),
                   ),
                 ),
+                Icon(Icons.arrow_drop_down_rounded, size: 15, color: color),
               ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  Future<void> _pick(
+    BuildContext context,
+    WidgetRef ref,
+    ChatSession session,
+  ) async {
+    final root = await ref.read(localWorkspaceRootProvider.future);
+    if (!context.mounted) return;
+    final choice = await showModalBottomSheet<_WorkspaceChoice>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => _WorkspaceSheet(session: session, root: root),
+    );
+    if (choice == null || !context.mounted) return;
+
+    final controller = ref.read(chatControllerProvider.notifier);
+    try {
+      switch (choice) {
+        case _Cloud():
+          await controller.chooseCloud(session.id);
+        case _Auto():
+          // 「自动新建」= 清掉现在这个绑定，让首轮那一步重新决定。
+          // 它只对草稿有意义，所以清单里也只对草稿显示
+          await controller.unbindWorkspace(session.id);
+        // 已有的和新建的走同一条：那个端点本来就是「给我这个名字的工作空间
+        // 目录，没有就建一个」，分成两条只会多一处能漂开的语义
+        case _Folder(:final name) || _NewFolder(:final name):
+          await controller.createLocalWorkspace(session.id, name);
+        case _Browse():
+          if (context.mounted) {
+            await showWorkspaceBindingSheet(context, session);
+          }
+      }
+    } on CortexApiException catch (e) {
+      if (!context.mounted) return;
+      // 校验器的话是写给人看的（「工作空间名里不能有路径分隔符」），原样显示
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
+    }
+    // 刚建出来的文件夹要出现在下一次的清单里
+    ref.invalidate(localWorkspaceRootProvider);
+  }
+}
+
+/// 选择器的结果。
+///
+/// 用 sealed 而不是「一个 String 标签 + 一个可空 payload」：后者会让消费点
+/// 判一次「这个标签下 payload 该不该有值」，而判漏的那一支是运行时才炸。
+sealed class _WorkspaceChoice {
+  const _WorkspaceChoice();
+}
+
+class _Auto extends _WorkspaceChoice {
+  const _Auto();
+}
+
+class _Cloud extends _WorkspaceChoice {
+  const _Cloud();
+}
+
+/// 默认根目录下已有的一个文件夹。
+class _Folder extends _WorkspaceChoice {
+  const _Folder(this.name);
+  final String name;
+}
+
+class _NewFolder extends _WorkspaceChoice {
+  const _NewFolder(this.name);
+  final String name;
+}
+
+/// 去选任意一个目录（默认根目录之外的也行）。
+class _Browse extends _WorkspaceChoice {
+  const _Browse();
+}
+
+/// 按日期时间自动建出来的那种文件夹名。
+///
+/// 它们**不进选择清单**：每聊一次就多一个，一周之后清单里九成是它们，
+/// 而它们是某一次对话的落地目录，不是用户会特意回去的工作空间。
+/// 真要回去的话，「选择其他文件夹」那条路照样选得到。
+final _autoNamed = RegExp(r'^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$');
+
+class _WorkspaceSheet extends StatelessWidget {
+  const _WorkspaceSheet({required this.session, required this.root});
+
+  final ChatSession session;
+  final LocalWorkspaceRoot root;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final named = root.folders.where((f) => !_autoNamed.hasMatch(f)).toList();
+    final current = session.workspace?.root;
+
+    return SafeArea(
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (session.isLocalDraft)
+              ListTile(
+                leading: const Icon(Icons.auto_awesome_outlined),
+                title: const Text('自动新建'),
+                subtitle: Text(
+                  root.root == null
+                      ? '在默认工作空间下建一个以当前时间命名的文件夹'
+                      : '在 ${root.root} 下建一个以当前时间命名的文件夹',
+                ),
+                trailing: current == null
+                    ? const Icon(Icons.check_rounded)
+                    : null,
+                onTap: () => Navigator.of(context).pop(const _Auto()),
+              ),
+            ListTile(
+              leading: const Icon(Icons.cloud_outlined),
+              title: const Text('云端'),
+              subtitle: const Text(
+                '跑在远端 agent 的容器里，任何设备上都能接着聊',
+              ),
+              onTap: () => Navigator.of(context).pop(const _Cloud()),
+            ),
+            if (named.isNotEmpty) ...[
+              const Divider(height: 1),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    '默认工作空间下已有的',
+                    style: theme.textTheme.labelSmall,
+                  ),
+                ),
+              ),
+              for (final name in named)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.folder_outlined),
+                  title: Text(name),
+                  trailing: current != null && basenameOf(current) == name
+                      ? const Icon(Icons.check_rounded)
+                      : null,
+                  onTap: () => Navigator.of(context).pop(_Folder(name)),
+                ),
+            ],
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.create_new_folder_outlined),
+              title: const Text('新建工作空间…'),
+              onTap: () async {
+                final name = await _askName(context);
+                if (name != null && context.mounted) {
+                  Navigator.of(context).pop(_NewFolder(name));
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.folder_open_outlined),
+              title: const Text('选择其他文件夹…'),
+              subtitle: const Text('默认工作空间之外的任意目录'),
+              onTap: () => Navigator.of(context).pop(const _Browse()),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 只问名字，不问路径 —— 工作空间就是默认根目录下的一个同名文件夹，
+  /// 让用户再填一次父目录等于把那个设置项的意义抵消掉。
+  static Future<String?> _askName(BuildContext context) {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('新建工作空间'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: '名称',
+            hintText: '比如：季度汇报',
+          ),
+          onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('创建'),
+          ),
+        ],
+      ),
+    ).then((v) => (v == null || v.isEmpty) ? null : v);
   }
 }

@@ -572,6 +572,108 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
+  Future<LocalWorkspaceRoot> localWorkspaceRoot() async =>
+      _rootCall(() => _client.get(
+            _uri('/local/workspace-root'),
+            headers: _headers(const {'accept': 'application/json'}),
+          ));
+
+  @override
+  Future<LocalWorkspaceRoot> setLocalWorkspaceRoot(String path) async =>
+      _rootCall(() => _client.put(
+            _uri('/local/workspace-root'),
+            headers: _headers(const {
+              'content-type': 'application/json',
+              'accept': 'application/json',
+            }),
+            body: jsonEncode({'path': path}),
+          ));
+
+  /// 两条根目录路由的共同外壳：读、写回的是同一个形状。
+  Future<LocalWorkspaceRoot> _rootCall(
+    Future<http.Response> Function() send,
+  ) async {
+    final http.Response response;
+    try {
+      response = await send();
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    // 纯 cortexd 没有这条路由（Web 端就是这种情况），也包括比它旧的本地
+    // agent。调用方按「这台机器上没有本机工作区」处理，而不是当成故障
+    if (response.statusCode == 404 || response.statusCode == 405) {
+      throw _failure(response.statusCode, '这个后端没有本地工作空间根目录。');
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(response.statusCode, _errorMessage(response));
+    }
+    final body = _decodeObject(
+      '/local/workspace-root',
+      utf8.decode(response.bodyBytes),
+    );
+    return LocalWorkspaceRoot(
+      root: asStringOrNull(body['root']),
+      folders: asStringList(body['folders']),
+    );
+  }
+
+  @override
+  Future<String> createLocalWorkspace({
+    required String name,
+    String? projectId,
+  }) async {
+    final http.Response response;
+    try {
+      response = await _client.post(
+        _uri('/local/workspaces'),
+        headers: _headers(const {
+          'content-type': 'application/json',
+          'accept': 'application/json',
+        }),
+        body: jsonEncode({'name': name, 'project_id': ?projectId}),
+      );
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode == 404 || response.statusCode == 405) {
+      throw _failure(response.statusCode, '这个后端建不了本地工作空间。');
+    }
+    if (response.statusCode >= 400) {
+      // 校验器的拒绝话术是写给人看的（「工作空间名里不能有 '/'」），原样上带
+      throw _failure(response.statusCode, _errorMessage(response));
+    }
+    final body = _decodeObject(
+      'POST /local/workspaces',
+      utf8.decode(response.bodyBytes),
+    );
+    return asString(body['path']);
+  }
+
+  @override
+  Future<String?> autoBindLocalWorkspace(String id) async {
+    final http.Response response;
+    try {
+      response = await _client.post(
+        _uri('/local/workspaces/${Uri.encodeComponent(id)}/auto'),
+        headers: _headers(const {'accept': 'application/json'}),
+      );
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode == 404 || response.statusCode == 405) {
+      throw _failure(response.statusCode, '这个后端不会自动开工作空间目录。');
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(response.statusCode, _errorMessage(response));
+    }
+    final body = _decodeObject(
+      'POST /local/workspaces/{id}/auto',
+      utf8.decode(response.bodyBytes),
+    );
+    return asStringOrNull(body['workspace']);
+  }
+
+  @override
   Future<ChatSession> updateSession(
     String id, {
     String? title,

@@ -44,3 +44,7 @@ libc.workspace = true
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
+# 让路由测试能**不开端口**地驱动 Router（`ServiceExt::oneshot`）。
+# 这台开发机上新编出来的 exe 入站会被静默丢弃，绑端口的测试跑不了；
+# 而路由拼错、字段名写错这类事恰恰只有过一遍 Router 才看得出来
+tower = { version = "0.5", features = ["util"] }

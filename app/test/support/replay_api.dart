@@ -37,7 +37,7 @@ import 'package:cortex_app/models/sync_record.dart';
 /// client treats it as opaque either way; using a different shape is a cheap
 /// check that it really does.
 class ReplayApi
-    with LlmKeyUnsupported, AccountUnsupported
+    with LlmKeyUnsupported, AccountUnsupported, LocalWorkspaceUnsupported
     implements CortexApi {
   ReplayApi({
     required this.episodeCount,

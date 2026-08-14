@@ -53,6 +53,21 @@ pub fn router(state: LocalState) -> Router {
         // 绑定的**权威在这台机器**，所以给它一条自己的路，完全不碰网络。
         // 走 PATCH /sessions 的老路子有两个实测到的坏处，见 local_workspace
         .route("/local/workspaces/{session_id}", put(local_workspace::bind))
+        // 默认工作空间根目录：**设备本地设置**，与绑定同一族。
+        //
+        // 放 agent 侧而不是客户端设置里，因为真正建目录、校验路径的是它 ——
+        // 放客户端的话 CLI 走不到同一个设置，而同机只有这一个 agent 进程
+        .route(
+            "/local/workspace-root",
+            get(local_workspace::get_root).put(local_workspace::set_root),
+        )
+        .route("/local/workspaces", post(local_workspace::create))
+        // 「新建会话时没选工作区」那一档：按日期时间开一个文件夹并绑上。
+        // 为什么由客户端来要而不是 agent 自己看着办，见 handler
+        .route(
+            "/local/workspaces/{session_id}/auto",
+            post(local_workspace::auto_bind),
+        )
         // 导入的文件在**这台机器**上，97MB 的字节一次都不该过网络。
         // preview 只读、run 是 SSE，见 crate::local_import
         .route("/local/import/preview", post(local_import::preview))

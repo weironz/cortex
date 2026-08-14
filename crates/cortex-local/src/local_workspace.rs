@@ -87,18 +87,119 @@ pub async fn bind(
     if result.is_ok() {
         st.engine.grants.forget(&session_id);
     }
+    settle(&st, session_id, result).await
+}
+
+/// `POST /local/workspaces/{session_id}/auto` —— 在根目录下开一个按日期时间
+/// 命名的文件夹并绑上。给「新建会话时没选工作区」那一档用。
+///
+/// # 为什么是客户端来要，而不是 agent 自己在首轮看着办
+///
+/// [`crate::routes::chat`] 的分流判据就是「这个会话有没有本地绑定」：没绑
+/// 就把这一轮送回 cortexd。agent 若在那之后自作主张地绑一个目录，等于
+/// **把一个正在云端跑的会话劫持到本机** —— 用户在浏览器里建的会话，
+/// 只要在桌面端打开过一次就换了执行现场，而两边指着完全不同的文件系统。
+///
+/// 客户端知道一件 agent 不知道的事：这个会话是刚在本机新建的。
+/// 那个知识不该靠猜。
+///
+/// # 为什么时间戳的格式在这一侧
+///
+/// 客户端有两个（Flutter 与 CLI），格式写两遍就会漂成两种。
+pub async fn auto_bind(State(st): State<LocalState>, Path(session_id): Path<String>) -> Response {
+    let result = st.engine.workspaces.auto_bind(&session_id).map(Some);
+    settle(&st, session_id, result).await
+}
+
+/// 绑定结果的共同收尾：同步执行归属，回一个只带 `workspace` 的回执。
+async fn settle(
+    st: &LocalState,
+    session_id: String,
+    result: cortex_core::Result<Option<String>>,
+) -> Response {
     match result {
         // 校验器的拒绝话术是写给人看的（「整台机器不是工作区」），
         // 原样往上带，别在这里改写成一句通用的 400
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Ok(ws) => {
-            announce_runtime(&st, &session_id, ws.is_some()).await;
+            announce_runtime(st, &session_id, ws.is_some()).await;
             Json(BindAck {
                 session_id,
                 workspace: ws,
             })
             .into_response()
         }
+    }
+}
+
+/// `GET /local/workspace-root` 的回执。
+#[derive(Debug, Serialize)]
+pub struct RootInfo {
+    /// 默认工作空间根目录。**可能还不存在** —— 用户没设过时这是建议值，
+    /// 磁盘上要到第一次真用到才落地。
+    pub root: Option<String>,
+    /// 它下面已有的文件夹，界面拿去列可选的工作空间。
+    pub folders: Vec<String>,
+}
+
+/// `GET /local/workspace-root`
+pub async fn get_root(State(st): State<LocalState>) -> Response {
+    Json(RootInfo {
+        root: st.engine.workspaces.root(),
+        folders: st.engine.workspaces.list_folders(),
+    })
+    .into_response()
+}
+
+/// `PUT /local/workspace-root` 的请求体。
+#[derive(Debug, Deserialize)]
+pub struct SetRootRequest {
+    pub path: String,
+}
+
+/// `PUT /local/workspace-root` —— 改默认根目录。只校验、不搬迁。
+pub async fn set_root(State(st): State<LocalState>, Json(req): Json<SetRootRequest>) -> Response {
+    match st.engine.workspaces.set_root(&req.path) {
+        Ok(root) => Json(RootInfo {
+            root: Some(root),
+            folders: st.engine.workspaces.list_folders(),
+        })
+        .into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+/// `POST /local/workspaces` 的请求体。
+#[derive(Debug, Deserialize)]
+pub struct CreateRequest {
+    /// 工作空间名。实际就是根目录下那个文件夹的名字。
+    pub name: String,
+    /// 带上就顺便把 `project_id → 这个目录` 记进账。
+    ///
+    /// 记了账之后**项目改名不会再建第二个文件夹**：下次带同一个 id 过来
+    /// 会拿回原来那个目录（见 `Workspaces::ensure_project_dir`）。
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// 回执。刻意只回路径 —— 建目录与绑会话是两件事，绑定仍走
+/// `PUT /local/workspaces/{session_id}`（那条路上还有清放行清单、
+/// 同步执行归属这些必须发生的事，不该在这里复制一份）。
+#[derive(Debug, Serialize)]
+pub struct CreateAck {
+    pub path: String,
+}
+
+/// `POST /local/workspaces` —— 在根目录下开一个工作空间目录。
+pub async fn create(State(st): State<LocalState>, Json(req): Json<CreateRequest>) -> Response {
+    let ws = &st.engine.workspaces;
+    let made = match req.project_id.as_deref() {
+        Some(pid) => ws.ensure_project_dir(pid, &req.name),
+        None => ws.create_folder(&req.name),
+    };
+    match made {
+        Ok(path) => Json(CreateAck { path }).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
 

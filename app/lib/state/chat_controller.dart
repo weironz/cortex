@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_exception.dart';
 import '../api/cortex_api.dart';
+import '../core/local_agent.dart';
 import '../core/ulid.dart';
 import '../models/attachment.dart';
 import '../models/chat_event.dart';
@@ -11,6 +12,7 @@ import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../models/episode.dart';
 import '../models/injected_memory.dart';
+import '../models/project.dart';
 import '../models/tool_call.dart';
 import '../models/workspace.dart';
 import 'app_providers.dart';
@@ -311,6 +313,102 @@ class ChatController extends Notifier<ChatState> {
 
   Future<void> unbindWorkspace(String id) async => _bindWorkspace(id, null);
 
+  /// 用户对这个会话显式选了「云端」。见 [_ensureLocalWorkspace]。
+  final Set<String> _cloudByChoice = {};
+
+  bool isCloudByChoice(String id) => _cloudByChoice.contains(id);
+
+  /// 「云端」：这一轮交给远端 agent 跑，本机不落地任何目录。
+  Future<void> chooseCloud(String id) async {
+    _cloudByChoice.add(id);
+    await unbindWorkspace(id);
+  }
+
+  /// 绑一个本机目录。会**取消**之前选的「云端」——两者互斥，
+  /// 而让一个会话同时带着「用户要云端」和「绑着本机目录」两个事实，
+  /// 下一次读到的人必然要在某处再判一遍谁赢。
+  Future<void> chooseLocalWorkspace(String id, String path) async {
+    _cloudByChoice.remove(id);
+    await bindWorkspace(id, path);
+  }
+
+  /// 在默认根目录下开一个命名工作空间并绑上。
+  ///
+  /// [projectId] 给「这个工作空间就是那个项目在本机的落地目录」用：带上它，
+  /// 项目改名之后不会再建第二个文件夹。
+  Future<void> createLocalWorkspace(
+    String id,
+    String name, {
+    String? projectId,
+  }) async {
+    final path = await _api.createLocalWorkspace(
+      name: name,
+      projectId: projectId,
+    );
+    await chooseLocalWorkspace(id, path);
+  }
+
+  /// 首轮之前，为没选工作区的**新建**会话在默认根目录下开一个按日期时间
+  /// 命名的文件夹。
+  ///
+  /// # 三个前提缺一不可
+  ///
+  /// - `kLocalAgentSupported` —— Web 上没有本机可落。
+  /// - `isLocalDraft` —— **这个会话是刚在这台机器上新建的**。少了它，一个在
+  ///   浏览器里建、正在云端跑的会话只要在桌面端发过一句话，就被劫持到本机，
+  ///   而两边指着完全不同的文件系统（那正是 `session.runtime` 要防的事）。
+  /// - 没绑过、也没选过云端。
+  ///
+  /// # 为什么失败要挡住这一轮
+  ///
+  /// 桌面端的默认是「跑在本机」。落不下来还照发的话，这一轮会静默跑到云端 ——
+  /// 文件写去了另一个文件系统，而界面上什么都没说。唯一的例外是**后端根本
+  /// 没有这条路由**（对着一个纯 cortexd）：那种情况下「没有本机」是事实，
+  /// 不是故障。
+  Future<bool> _ensureLocalWorkspace(String id) async {
+    if (!kLocalAgentSupported || _cloudByChoice.contains(id)) return true;
+    final session = state.sessions.firstWhereOrNull((s) => s.id == id);
+    if (session == null || !session.isLocalDraft) return true;
+    if (session.workspace != null) return true;
+    try {
+      // 归属了项目就落在**那个项目的本机目录**里，而不是一个按时间命名的
+      // 新文件夹 —— 「工作空间就是项目在本机的落地目录」，一个概念两个身体：
+      // 项目 P 在云端是卷 cortex-ws-<owner>--p-<hash>，在这台机器上是 <根>/P。
+      //
+      // 带上 project_id，于是项目改名之后不会再建第二个文件夹（agent 那侧
+      // 按 id 记账、按名字建）
+      final project = _projectOf(session.projectId);
+      final bound = project == null
+          ? await _api.autoBindLocalWorkspace(id)
+          : await _bindProjectDir(id, project);
+      if (!ref.mounted) return false;
+      if (bound != null) {
+        _replaceSession(id, (s) => s.copyWith(workspace: Workspace(root: bound)));
+      }
+      return true;
+    } on CortexApiException catch (e) {
+      if (e.isUnsupported) return true;
+      state = state.copyWith(sendError: '开不出这次对话的工作目录：${e.message}');
+      return false;
+    }
+  }
+
+  Project? _projectOf(String? id) => id == null
+      ? null
+      : ref
+            .read(projectControllerProvider)
+            .projects
+            .firstWhereOrNull((p) => p.id == id);
+
+  /// 建（或找回）项目的本机目录并绑上，回绑定后的规范化路径。
+  Future<String?> _bindProjectDir(String sessionId, Project project) async {
+    final dir = await _api.createLocalWorkspace(
+      name: project.name,
+      projectId: project.id,
+    );
+    return _api.bindLocalWorkspace(sessionId, dir);
+  }
+
   /// The local agent owns this binding, so ask it first.
   ///
   /// `PUT /local/workspaces/{id}` never touches the network — which is exactly
@@ -589,6 +687,11 @@ class ChatController extends Notifier<ChatState> {
     if (state.streaming != null) return; // one generation at a time
 
     final sessionId = state.activeSessionId ?? createSession();
+
+    // 工作目录要在**这一轮开始之前**定下来：`routes::chat` 拿「有没有本地
+    // 绑定」分流，等 turn 造好再绑就晚了，那一轮已经送去云端了
+    if (!await _ensureLocalWorkspace(sessionId)) return;
+    if (!ref.mounted) return;
 
     final userMessage = ChatMessage(
       id: Ulid.generate(),

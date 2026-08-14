@@ -3,14 +3,17 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../api/api_exception.dart';
 import '../../auth/token_store.dart';
 import '../../auth/local_llm_store.dart';
 import '../../core/app_config.dart';
+import '../../core/local_agent.dart';
 import '../../core/local_llm.dart';
 import '../../models/llm_key_status.dart';
 import '../../state/app_providers.dart';
 import '../../state/auth_controller.dart';
 import '../../state/update_controller.dart';
+import '../../workspace/workspace_fs.dart';
 import '../import/import_sheet.dart';
 
 Future<void> showSettingsSheet(BuildContext context) {
@@ -164,6 +167,7 @@ class _SettingsDialogState extends ConsumerState<_SettingsDialog> {
               const Divider(height: 28),
               Text('数据', style: theme.textTheme.titleSmall),
               const SizedBox(height: 8),
+              const _WorkspaceRootTile(),
               // Lives here, not in the toolbar: importing is something a person
               // does once. A permanent button for a one-time action is clutter,
               // and "数据" is where someone goes looking for it.
@@ -500,6 +504,62 @@ class _ApiKeyDialogState extends State<_ApiKeyDialog> {
 ///
 /// 合成一格会让「我明明填过 key 了怎么离线还是用不了」成为常态，
 /// 而那时用户找不到任何线索。并排且各自说清用途，是这里唯一诚实的做法。
+/// 默认工作空间存储路径。
+///
+/// # 为什么它显示的路径**可能还不存在**
+///
+/// 没设过时 agent 回的是建议值（`~/Cortex`），磁盘上要到第一次真用到才落地。
+/// 照样显示它，因为这一栏回答的问题是「我的文件会去哪儿」——「还没建」不是
+/// 这个问题的答案。
+class _WorkspaceRootTile extends ConsumerWidget {
+  const _WorkspaceRootTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Web 上没有本机目录可言：那边的 agent 在云端容器里，工作区是它自己的
+    // `/workspace`。判据用能力而不是 kIsWeb，与 WorkspaceChip 同一个
+    if (!kLocalAgentSupported) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final async = ref.watch(localWorkspaceRootProvider);
+    final root = async.value?.root;
+
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: const Icon(Icons.folder_special_outlined),
+      title: const Text('默认工作空间'),
+      subtitle: Text(
+        async.isLoading
+            ? '读取中…'
+            : root == null
+            ? '本地 agent 没在跑，读不到这台机器上的设置。'
+            : '$root\n新建对话时会在这里建文件夹；改了不影响已有数据。',
+        style: theme.textTheme.bodySmall,
+      ),
+      isThreeLine: root != null,
+      trailing: TextButton(
+        onPressed: root == null ? null : () => _change(context, ref),
+        child: const Text('更改'),
+      ),
+    );
+  }
+
+  Future<void> _change(BuildContext context, WidgetRef ref) async {
+    final picked = await pickWorkspaceDirectory();
+    if (picked == null || !context.mounted) return;
+    try {
+      await ref.read(cortexApiProvider).setLocalWorkspaceRoot(picked);
+      ref.invalidate(localWorkspaceRootProvider);
+    } on CortexApiException catch (e) {
+      if (!context.mounted) return;
+      // 校验器会拒掉主目录本身与系统目录，理由是写给人看的，原样显示
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.message)));
+    }
+  }
+}
+
 class _LocalLlmTile extends ConsumerWidget {
   const _LocalLlmTile();
 

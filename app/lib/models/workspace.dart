@@ -2,13 +2,14 @@
 ///
 /// ## Whose filesystem is this?
 ///
-/// **cortexd's.** The file tools (`read_file` / `write_file` / `list_dir`) run
-/// inside the daemon, fenced by `cortex_agent::Sandbox`. A workspace is
-/// therefore an absolute path *on the machine running cortexd* — not on the
-/// machine running this UI. On a desktop install those are the same machine, so
-/// a native directory picker produces a usable path. On Web they are usually
-/// not, which is why the Web binding flow asks for a path instead of opening a
-/// picker (see `features/workspace/workspace_binding_sheet.dart`).
+/// **Whichever side runs the turn** — and that is what `session.runtime`
+/// records. On desktop the local agent runs it, so this is a path on *this*
+/// machine and a native directory picker produces a usable value. On Web the
+/// turn runs in a cloud container, so this is a path inside that container
+/// (`/workspace`), never a path the browser's machine could reach.
+///
+/// The two never mix: cortexd refuses a turn for a session pinned to a local
+/// runtime rather than silently running it against the server's disk.
 class Workspace {
   const Workspace({required this.root, this.label});
 
@@ -32,6 +33,25 @@ class Workspace {
 
   @override
   int get hashCode => Object.hash(root, label);
+}
+
+/// 默认工作空间根目录，以及它下面已有的文件夹。
+///
+/// 这是**设备本地设置**，权威在本地 agent（`GET /local/workspace-root`）——
+/// 真正建目录、校验路径的是它，而同机 CLI 与桌面端共用同一个进程，所以
+/// 把它放进客户端的偏好设置会让两边各有一份。
+class LocalWorkspaceRoot {
+  const LocalWorkspaceRoot({required this.root, required this.folders});
+
+  /// **可能还不存在**：用户没设过时这是建议值（`~/Cortex`），磁盘上要到
+  /// 第一次真用到才落地。界面照常显示它 —— 那正是它要回答的问题
+  /// 「我的文件会去哪儿」。
+  final String? root;
+
+  /// 根目录下已有的文件夹名（不含隐藏目录），用作可选工作空间。
+  final List<String> folders;
+
+  static const empty = LocalWorkspaceRoot(root: null, folders: []);
 }
 
 /// One entry in the workspace file tree.

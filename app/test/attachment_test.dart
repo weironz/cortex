@@ -32,7 +32,8 @@ import 'package:flutter_test/flutter_test.dart';
 ///
 /// The whole point of these cases is the *routing decision* — relay versus
 /// presign — so the fake reports the path rather than the payload.
-class _BlobApi with LlmKeyUnsupported, AccountUnsupported implements CortexApi {
+class _BlobApi with LlmKeyUnsupported, AccountUnsupported, LocalWorkspaceUnsupported
+    implements CortexApi {
   _BlobApi({this.presignSupported = true, this.alreadyUploaded = false});
 
   final bool presignSupported;

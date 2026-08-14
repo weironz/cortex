@@ -27,6 +27,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../api/api_exception.dart';
 import '../api/cortex_api.dart';
 import '../api/http_cortex_api.dart';
 import '../api/mock_cortex_api.dart';
@@ -37,6 +38,7 @@ import '../core/settings_store.dart';
 import '../core/local_agent.dart';
 import '../models/account.dart';
 import '../models/health_status.dart';
+import '../models/workspace.dart';
 import 'auth_controller.dart';
 
 /// Mutable runtime config. Seeded from `--dart-define`, editable in settings.
@@ -663,6 +665,26 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
 final healthProvider = FutureProvider<HealthStatus>((ref) async {
   final api = ref.watch(cortexApiProvider);
   return api.health();
+});
+
+/// 默认工作空间根目录 + 它下面已有的文件夹。
+///
+/// # 为什么失败要落成「没有」而不是抛出去
+///
+/// Web 端**必然**拿不到它（那条路由只有本地 agent 有），而那不是故障 ——
+/// 浏览器里本来就没有本机目录可选。让它抛的话，每个读这个 provider 的界面
+/// 都得自己判一次「这个错是不是其实正常」，而其中一处判漏就会在 Web 上
+/// 弹一个红框说本机工作空间取不到。
+final localWorkspaceRootProvider = FutureProvider<LocalWorkspaceRoot>((
+  ref,
+) async {
+  if (!kLocalAgentSupported) return LocalWorkspaceRoot.empty;
+  final api = ref.watch(cortexApiProvider);
+  try {
+    return await api.localWorkspaceRoot();
+  } on CortexApiException {
+    return LocalWorkspaceRoot.empty;
+  }
 });
 
 /// System-following theme mode with a manual override.
