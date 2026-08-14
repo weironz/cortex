@@ -16,10 +16,19 @@ enum AuthPhase {
   /// credential will be wanted.
   probing,
 
-  /// The daemon could not be reached at all. Distinct from [needsToken]
-  /// because the remedy is different — start the daemon or fix the address,
-  /// not find a token — and because showing a password field to someone whose
-  /// server is down is a small cruelty.
+  /// 连不上 —— **而且是用户主动去连的那一次**。
+  ///
+  /// 与 [needsToken] 分开，因为要做的事不一样：去起服务、去改地址，而不是
+  /// 去找一把 token。给一个服务器根本没起的人看密码框是一种小小的残忍。
+  ///
+  /// # 它不再包括「开机探测发现连不上」
+  ///
+  /// 那一档现在落进离线模式（`AuthController._fallBackToOffline`）。首次运行
+  /// 时地址是编译期默认值，那儿多半什么都没有 —— 拦一张「登录一个不存在的
+  /// 服务器」的表单，等于让新用户在见到产品之前先卡住。
+  ///
+  /// 于是这一档剩下的含义很窄，也更准：**你填了地址、按了登录，没通上。**
+  /// 那时停在表单上是对的 —— 他正要改的就是那两个输入框。
   unreachable,
 
   /// The daemon checks credentials and we do not have an accepted one.
@@ -190,7 +199,7 @@ class AuthController extends Notifier<AuthState> {
       mine = _generation;
     }
     if (superseded()) return;
-    await probe();
+    await probe(fallBackToOffline: true);
   }
 
   /// Initial state, with whatever the platform can supply unattended.
@@ -205,7 +214,11 @@ class AuthController extends Notifier<AuthState> {
   }
 
   /// Asks the unauthenticated `/health`, then decides.
-  Future<void> probe() async {
+  ///
+  /// [fallBackToOffline] 只有**开机那一次**该传 true。用户主动点「去连接」
+  /// 之后再掉回离线，那个按钮就成了「点了没反应」—— 他要的正是看见失败原因。
+  /// 见 [_fallBackToOffline]。
+  Future<void> probe({bool fallBackToOffline = false}) async {
     final generation = ++_generation;
     if (!ref.mounted) return;
 
@@ -265,21 +278,65 @@ class AuthController extends Notifier<AuthState> {
       }
     } on CortexApiException catch (e) {
       if (!_alive(generation)) return;
-      state = state.copyWith(
-        phase: AuthPhase.unreachable,
-        busy: false,
-        error: e.message,
-      );
+      _unreachable(e.message, fallBackToOffline);
     } on Object catch (e) {
       if (!_alive(generation)) return;
-      state = state.copyWith(
-        phase: AuthPhase.unreachable,
-        busy: false,
-        error: '$e',
-      );
+      _unreachable('$e', fallBackToOffline);
     } finally {
       probeApi.dispose();
     }
+  }
+
+  /// 连不上 cortexd —— **落进离线模式，而不是拦一张登录表单**。
+  ///
+  /// # 为什么不再拦
+  ///
+  /// 首次运行时地址是编译期默认值（`127.0.0.1:8080`），那儿多半什么都没有。
+  /// 于是新用户第一眼看到的是「登录一个不存在的服务器」的表单 —— 他没有
+  /// 账号、没有地址、也不知道自己该填什么，而产品本身一眼都没见着。
+  ///
+  /// 落进离线模式之后他至少能用：本地 agent 起得来、能对话、能读写他自己
+  /// 机器上的文件。
+  ///
+  /// # 为什么必须同时把 `offline` 打开
+  ///
+  /// 不打开的话进去的是一个**坏掉的**界面：`localAgentOriginProvider` 那条
+  /// 判据是「没有 token 且服务端要 token 就不起 agent」，而连不上时
+  /// `health` 是 null、`requiresToken` 缺省为 true —— 于是本地 agent 根本
+  /// 不启动，用户面对的是一个既没有记忆也没有工具的空壳。
+  ///
+  /// # 「这段时间没有记忆」谁来说
+  ///
+  /// `chat_pane` 里那条**常驻**横幅（`_OfflineBanner`）：「这些对话没有在
+  /// 记忆里，它们排在本地队列，接上服务器后会自动补回去」，右边就是「去连接」。
+  /// 那句话必须一直挂着而不是弹一次 —— 记忆是这个产品的主张，它关着的时候
+  /// 界面上不能一个字都不说。
+  ///
+  /// # 那句失败原因去哪了
+  ///
+  /// **它在这里留不住，而这是对的。** `setOffline(true)` 会触发
+  /// `ref.listen(appConfigProvider)` → `_reset()` → 重探，而重探的离线短路
+  /// 那一支把 `error` 清成 null。
+  ///
+  /// 想过给它单开一个字段绕过去，但那是在解一个不该解的问题：此刻那句
+  /// 「Connection refused」对用户没有可做的事 —— 他还没说他想连。等他点了
+  /// 横幅上的「去连接」，`offline` 关掉、探测重来、这一次失败落进
+  /// [AuthPhase.unreachable]，那句话就出现在他正要改的那两个输入框上面。
+  ///
+  /// 消息在它有用的那一刻出现，而不是一直挂着。
+  void _unreachable(String why, bool fallBackToOffline) {
+    if (!fallBackToOffline) {
+      // 用户主动去连的那一次。停在表单上，把原因摆在他正要改的输入框上面
+      state = state.copyWith(
+        phase: AuthPhase.unreachable,
+        busy: false,
+        error: why,
+      );
+      return;
+    }
+    debugPrint('连不上 cortexd，落进离线模式：$why');
+    ref.read(appConfigProvider.notifier).setOffline(true);
+    state = state.copyWith(phase: AuthPhase.ready, busy: false);
   }
 
   /// 用户名 + 密码登录。

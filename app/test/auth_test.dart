@@ -306,15 +306,57 @@ void main() {
       );
     });
 
-    test('连不上时是 unreachable，不是「token 不对」', () async {
+    test('开机连不上就落进离线模式，不拦一张登录表单', () async {
       final container = _boot(_GateApi(healthThrows: true));
       addTearDown(container.dispose);
 
       await _settle(container);
+      final state = container.read(authControllerProvider);
+
+      expect(
+        state.phase,
+        AuthPhase.ready,
+        reason:
+            '首次运行时地址是编译期默认值，那儿多半什么都没有。拦一张'
+            '「登录一个不存在的服务器」的表单，等于让新用户在见到产品之前'
+            '先卡住 —— 他没有账号、没有地址，也不知道该填什么',
+      );
+      expect(
+        container.read(appConfigProvider).offline,
+        isTrue,
+        reason:
+            '**必须同时开离线**。不开的话进去的是个坏掉的界面：'
+            'localAgentOriginProvider 那条判据是「没 token 且服务端要 token 就'
+            '不起 agent」，而连不上时 requiresToken 缺省为 true —— 本地 agent '
+            '根本不启动，用户面对一个既没记忆也没工具的空壳',
+      );
+      expect(
+        state.error,
+        isNull,
+        reason:
+            '此刻那句「Connection refused」对用户没有可做的事 —— 他还没说'
+            '他想连。等他点了横幅上的「去连接」，探测重来、失败落进 '
+            'unreachable，那句话才出现在他正要改的那两个输入框上面。'
+            '消息要在它有用的那一刻出现，而不是一直挂着',
+      );
+    });
+
+    test('主动去连却连不上，仍然停在表单上', () async {
+      final container = _boot(_GateApi(healthThrows: true));
+      addTearDown(container.dispose);
+      await _settle(container);
+
+      // 用户在设置里改回在线，然后填了个连不上的地址按登录
+      container.read(appConfigProvider.notifier).setOffline(false);
+      await _settle(container);
+
       expect(
         container.read(authControllerProvider).phase,
         AuthPhase.unreachable,
-        reason: 'daemon 没起的时候让人反复重打 token 是纯粹的折磨 —— 要解决的根本不是凭据',
+        reason:
+            '这一档剩下的含义很窄也更准：**你填了地址、按了登录、没通上**。'
+            '那时停在表单上是对的 —— 他正要改的就是那两个输入框。'
+            '开机探测那一档已经不走这里了',
       );
     });
 
