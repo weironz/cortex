@@ -530,6 +530,8 @@ class WorkspaceChip extends ConsumerWidget {
       builder: (ctx) => _WorkspaceSheet(session: session, root: root),
     );
     if (choice == null || !context.mounted) return;
+    if (!await _confirmSwitch(context, ref, session, choice)) return;
+    if (!context.mounted) return;
 
     final controller = ref.read(chatControllerProvider.notifier);
     try {
@@ -558,6 +560,70 @@ class WorkspaceChip extends ConsumerWidget {
     }
     // 刚建出来的文件夹要出现在下一次的清单里
     ref.invalidate(localWorkspaceRootProvider);
+  }
+
+  /// 已经开过口的会话换工作区，问一次。
+  ///
+  /// # 为什么是「问一次」而不是「不许换」
+  ///
+  /// 调研过的四家都把工作区钉死在会话开始那一刻（Claude Code / Codex 靠
+  /// 启动参数，只能 `/add-dir` **追加**；Cursor 的工作区就是窗口；
+  /// OpenHands 的 runtime 绑在 conversation 上）。理由成立，但一刀切会
+  /// 挡住一件正当的事：绑错了、还没干正事，逼人重开一个会话。
+  ///
+  /// 所以分界线不是「开没开聊」，是**有没有东西依赖旧工作区**。没有轮次
+  /// 就没有依赖，零阻力；有轮次就把后果摆出来让人自己判断。
+  ///
+  /// # 换过去之后仍然留着的那个坑
+  ///
+  /// 模型上下文里那些「我读过 / 写过 X」的印象**不会**被告知已经换了世界。
+  /// 这一层做不到，它得由服务端把「工作区变更」也写进那一轮的上下文。
+  /// 这句话因此写进了弹层正文 —— 说不出口的限制，至少要说得出口。
+  static Future<bool> _confirmSwitch(
+    BuildContext context,
+    WidgetRef ref,
+    ChatSession session,
+    _WorkspaceChoice choice,
+  ) async {
+    // 草稿的 messageCount 还是 0（服务端没听说过它），所以两边都看：
+    // 只认一边的话，「刚聊完第一句就换」会静默滑过去
+    final turns = ref.read(chatControllerProvider).activeTranscript.length;
+    if (turns == 0 && session.messageCount == 0) return true;
+
+    final from = session.workspace?.root ?? '云端容器';
+    final to = switch (choice) {
+      _Cloud() => '云端容器',
+      _Auto() => '一个新建的工作区',
+      _Folder(:final name) || _NewFolder(:final name) => name,
+      _Browse() => '你接下来选的那个目录',
+    };
+    if (from == to) return true;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.swap_horiz_rounded),
+        title: const Text('换掉这个会话的工作区？'),
+        content: Text(
+          '这个会话已经聊过了，之前那些轮次跑在 $from。\n\n'
+          '换到 $to 之后，模型上下文里还记着旧那边的文件 —— '
+          '它会照着旧印象去动新目录里的同名文件，而它不会知道换过。\n\n'
+          '历史里那些路径也跟着变了意思：同一个 src/foo.rs '
+          '指的已经是另一个文件。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('算了'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('换过去'),
+          ),
+        ],
+      ),
+    );
+    return ok ?? false;
   }
 }
 

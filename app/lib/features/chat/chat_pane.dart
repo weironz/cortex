@@ -156,13 +156,16 @@ class ChatPane extends ConsumerWidget {
             ],
           ],
         ),
-        if (!hasSession)
-          Expanded(child: NoSessionState(onCreate: controller.createSession))
         // 还没开口的会话：输入框站在页面中央，上面是那块招呼，下面是几个
         // 起手式。这是 WorkBuddy / ChatGPT / Claude 都在用的形状，理由是
         // 同一个 —— 空会话里输入框就是全部内容，把它钉在底边等于让用户
-        // 隔着一整屏留白去够它
-        else if (empty)
+        // 隔着一整屏留白去够它。
+        //
+        // **只有选中了会话才走这一支**。没选中时照旧「提示 + 底部输入框」：
+        // 那一版里输入框是禁用的，但 `ConfirmPanel` 跟着它一起挂在树上，
+        // 而它一挂上就去捞待办确认。不渲染的话那次捞晚发生，
+        // 测试里表现为「树都销毁了还有定时器没停」
+        if (hasSession && empty)
           Expanded(
             child: SingleChildScrollView(
               child: Center(
@@ -183,7 +186,11 @@ class ChatPane extends ConsumerWidget {
             ),
           )
         else ...[
-          const Expanded(child: ConversationView()),
+          Expanded(
+            child: hasSession
+                ? const ConversationView()
+                : NoSessionState(onCreate: controller.createSession),
+          ),
           composer(centred: false),
         ],
       ],
