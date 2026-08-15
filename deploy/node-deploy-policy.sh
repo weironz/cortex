@@ -140,23 +140,23 @@ if [ "$services" != "${services%egress}" ]; then
         || echo "==> ⚠ 沙箱镜像没拉下来，云沙箱会在启动时自己关掉" >&2
 fi
 
-# ── migration ────────────────────────────────────────────
-# 记忆服务**不在启动时自动迁移**（在运行中的集群上自动执行 schema 变更
-# 是运维事故的常见起点）。部署本身是人发起的显式动作，所以在这里跑是合适的，
-# 但它必须在新版本起来**之前**跑完 —— 否则新代码会撞上老 schema。
+# ── 记忆服务的 migration 不在这里跑 ──────────────────────
 #
-# ⚠ sqlx 的 migration 只前滚。下面的 EXIT trap 能还原版本号，
-# **还原不了 schema**。任何带数据变更的发布，之前必须有一份 pg_dump 退路
+# 记忆服务已经是 **/data/cormex 下的独立 compose 栈**，
+# `docker compose run cormex` 在这一栈里会报「no such service」。
+#
+# 这不是偷懒搬走：发一次 Cortex 不该碰记忆库的 schema。sqlx 的 migration
+# 只前滚，下面那个 EXIT trap 还原得了版本号、**还原不了 schema** ——
+# 把两件事绑在一次部署里，等于让 agent 的一次回滚变成一次不可逆的数据变更。
+#
+# 那一侧要迁移时（由它自己的部署做，或人手动）：
+#
+#     cd /data/cormex
+#     docker compose run --rm --entrypoint sqlx cormex \
+#         migrate run --source /opt/cortex/migrations
+#
+# 带数据变更的发布之前仍然要有一份 pg_dump 退路
 # （docs/operations.md 的「真的出事了怎么恢复」）。
-#
-# ★ **这一步严格来说不该由 Cortex 的部署来跑**：migration 与镜像都属于
-#   Cormex，本该跟着它自己的部署走。留在这里是因为 Cormex 还没有部署路径，
-#   而删掉它会留下一个「谁也不迁移」的洞 —— 那比放错地方更糟。
-#   CORMEX_VERSION 没变时它是幂等的空操作，所以代价只是概念上的不整齐。
-#   Cormex 有自己的部署脚本之后，把这几行搬过去。
-echo "==> 应用记忆服务的 migration（只前滚，回滚不撤销它）"
-docker compose run --rm --entrypoint sqlx cormex \
-    migrate run --source /opt/cortex/migrations
 
 # shellcheck disable=SC2086  # 同上，故意分词
 docker compose up -d --no-deps $services
