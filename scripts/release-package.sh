@@ -143,9 +143,12 @@ smoke() {
 if [ "$NO_EXEC" = 1 ]; then
     warn "--no-exec：跳过冒烟测试。这份产物从没被运行过"
 else
-    smoke "$BIN_DIR/cortexd$EXT"      cortexd
-    smoke "$BIN_DIR/cortex$EXT"       cortex
-    smoke "$BIN_DIR/cortex-local$EXT" cortex-local
+    # 遍历 BINS，**不另写一份清单**。此前这里硬编码着三个名字，于是
+    # `cortexd` 随记忆服务搬走之后它还在找 `cortexd.exe`，而 BINS 已经改对了
+    # —— 同一件事写两处，拆分时只改了一处。发版当天在这里红。
+    for b in "${BINS[@]}"; do
+        smoke "$BIN_DIR/$b" "${b%$EXT}"
+    done
 fi
 
 # ── 组装目录 ──────────────────────────────────────────────
@@ -168,24 +171,28 @@ for f in README.md LICENSE NOTICE CHANGELOG.md; do
 done
 
 # 安装说明就放在包里。下载二进制的人手上没有这个仓库，
-# 而没有凭据的 cortexd 会拒绝启动 —— 不写清楚就是保证第一次启动失败
+# 而没有凭据的记忆服务会拒绝启动 —— 不写清楚就是保证第一次启动失败
 cat > "$STAGE/INSTALL.txt" <<EOF
 Cortex v${VERSION} — ${TARGET}
 
 包含：
-  cortexd${EXT}       守护进程 —— **记忆权威**。Postgres + 对象存储在它那侧
-  cortex${EXT}        命令行客户端
-  cortex-local${EXT}  本地 agent —— **agent 循环与工具跑在这台机器上**
+  cortex${EXT}         命令行客户端
+  cortex-local${EXT}   本地 agent —— **agent 循环与工具跑在这台机器上**
+  cortex-agentd${EXT}  云端编排 —— 按需拉起沙箱容器（自托管才用得上）
 
-cortexd 需要 Postgres 17 + pgvector 与一个 S3 兼容对象存储才能工作。
-光有这三个二进制是跑不起来的，完整安装步骤见
+★ **记忆服务不在这个包里。** 它是另一个产品，在
+  https://github.com/weironz/cormex —— 存储、检索、MCP 门面都在那边，
+  独立发版。这三个二进制都要连上一台记忆服务才有记忆；连不上时
+  仍然能对话与动文件，只是不产生记忆（界面上会明说）。
+
+完整安装步骤见
 https://github.com/weironz/cortex/blob/v${VERSION}/docs/install.md
 
-★ 第一步一定是生成凭据 —— 没有它 cortexd 会拒绝启动（这是刻意的）：
+★ 记忆服务那一侧的第一步一定是生成凭据 —— 没有它它会拒绝启动（刻意的）：
 
-    ./cortexd${EXT} --generate-token
+    docker run --rm <cormex 镜像> --generate-token
 
-把输出里的 CORTEX_AUTH_TOKEN_SHA256 给服务端（.env / 环境变量），
+把输出里的 CORTEX_AUTH_TOKEN_SHA256 给记忆服务（.env / 环境变量），
 把 CORTEXD_TOKEN 给客户端。明文只显示这一次。
 
 许可证：Apache-2.0，见 LICENSE 与 NOTICE。

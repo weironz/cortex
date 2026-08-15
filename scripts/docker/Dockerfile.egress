@@ -32,17 +32,14 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/cortex-core/Cargo.toml         crates/cortex-core/
 COPY crates/cortex-llm/Cargo.toml          crates/cortex-llm/
-COPY crates/cortex-store/Cargo.toml        crates/cortex-store/
-COPY crates/cortex-memory/Cargo.toml       crates/cortex-memory/
 COPY crates/cortex-agent/Cargo.toml        crates/cortex-agent/
 COPY crates/cortex-blob/Cargo.toml         crates/cortex-blob/
 COPY crates/cortex-proto/Cargo.toml        crates/cortex-proto/
 COPY crates/cortex-import/Cargo.toml       crates/cortex-import/
 COPY crates/cortex-local/Cargo.toml        crates/cortex-local/
-COPY crates/cortexd/Cargo.toml             crates/cortexd/
 COPY crates/cortex-cli/Cargo.toml          crates/cortex-cli/
 COPY crates/cortex-egress-proxy/Cargo.toml crates/cortex-egress-proxy/
-COPY evals/Cargo.toml                      evals/
+COPY crates/cortex-agentd/Cargo.toml      crates/cortex-agentd/
 
 RUN set -eux; \
     for d in crates/*/ evals/; do \
@@ -54,9 +51,6 @@ RUN set -eux; \
         -p cortex-egress-proxy 2>/dev/null || true
 
 COPY crates/ crates/
-COPY evals/ evals/
-COPY migrations/ migrations/
-COPY migrations-global/ migrations-global/
 
 RUN set -eux; \
     find crates evals -name '*.rs' -exec touch {} +; \
