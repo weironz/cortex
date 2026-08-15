@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/local_agent.dart';
 import '../../auth/token_store.dart';
 import '../../state/app_providers.dart';
 import '../../state/auth_controller.dart';
@@ -328,84 +329,96 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                 //
                 // 放在 mock 上面且更醒目：一个连不上服务器的人想要的是
                 // 「那我先用着」，而不是「让我看看界面长什么样」
-                Card.filled(
-                  margin: EdgeInsets.zero,
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(
-                              Icons.cloud_off_outlined,
-                              size: 18,
-                              color: scheme.onSurfaceVariant,
-                            ),
-                            const SizedBox(width: 8),
-                            Text('先离线用着', style: theme.textTheme.titleSmall),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        // 强调用真的粗体，**不要在 Text 里写 Markdown 星号** ——
-                        // 那是纯文本组件，星号会原样显示给用户看。
-                        // 这个错在 0.1.6 发版前的目视冒烟里被抓到，
-                        // 而所有 widget 测试都是绿的：它们断言的是文字内容，
-                        // 而字面星号恰恰**在**文字内容里
-                        Text.rich(
-                          TextSpan(
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                            ),
+                //
+                // ── 只在有本机 agent 的平台上给 ──
+                //
+                // 这一整块**此前没有平台判断**，于是 Web 上也画了出来 ——
+                // 而那里 `kLocalAgentSupported` 是 false：没有进程可起、没有
+                // 文件系统、没有本机凭据库。卡片上「能读写你本机的文件」
+                // 这句话在浏览器里是**假的**，点下去只会进一个什么都干不了的
+                // 模式。2026-08-15 发现。
+                //
+                // 一个给不出承诺的入口比没有入口更糟：没有的话用户去想别的办法，
+                // 有的话他会以为自己已经解决了。
+                if (kLocalAgentSupported)
+                  Card.filled(
+                    margin: EdgeInsets.zero,
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
                             children: [
-                              const TextSpan(text: '不连服务器也能对话、能读写你本机的文件。'),
-                              TextSpan(
-                                text: '这段时间不会有记忆',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  color: scheme.onSurface,
-                                ),
+                              Icon(
+                                Icons.cloud_off_outlined,
+                                size: 18,
+                                color: scheme.onSurfaceVariant,
                               ),
-                              const TextSpan(
-                                text: ' —— 对话会排进本地队列，以后接上服务器时自动补回去。\n',
-                              ),
-                              // 云端工作区那一条**必须在这儿说**，而不是等用户
-                              // 发现 agent 找不到文件。
-                              //
-                              // 离线时那些会话的执行现场在服务器上，够不到；
-                              // 本地 agent 照旧跑，但手上只有这台机器
-                              // （没绑目录就是一个文件工具都没有）。不说的话，
-                              // 用户看到的是「它昨天还能读那个文件，今天说没有」
-                              TextSpan(
-                                text: '云端工作区也够不到',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  color: scheme.onSurface,
-                                ),
-                              ),
-                              const TextSpan(
-                                text:
-                                    ' —— 那些会话的文件在服务器上，'
-                                    '离线期间只有绑了本机目录的会话动得了文件。\n'
-                                    '需要先在设置里配好本机模型（也可以进去之后再配）。',
-                              ),
+                              const SizedBox(width: 8),
+                              Text('先离线用着', style: theme.textTheme.titleSmall),
                             ],
                           ),
-                        ),
-                        const SizedBox(height: 8),
-                        Align(
-                          alignment: Alignment.centerRight,
-                          child: FilledButton.tonal(
-                            onPressed: () => ref
-                                .read(appConfigProvider.notifier)
-                                .setOffline(true),
-                            child: const Text('离线使用'),
+                          const SizedBox(height: 6),
+                          // 强调用真的粗体，**不要在 Text 里写 Markdown 星号** ——
+                          // 那是纯文本组件，星号会原样显示给用户看。
+                          // 这个错在 0.1.6 发版前的目视冒烟里被抓到，
+                          // 而所有 widget 测试都是绿的：它们断言的是文字内容，
+                          // 而字面星号恰恰**在**文字内容里
+                          Text.rich(
+                            TextSpan(
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: scheme.onSurfaceVariant,
+                              ),
+                              children: [
+                                const TextSpan(text: '不连服务器也能对话、能读写你本机的文件。'),
+                                TextSpan(
+                                  text: '这段时间不会有记忆',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    color: scheme.onSurface,
+                                  ),
+                                ),
+                                const TextSpan(
+                                  text: ' —— 对话会排进本地队列，以后接上服务器时自动补回去。\n',
+                                ),
+                                // 云端工作区那一条**必须在这儿说**，而不是等用户
+                                // 发现 agent 找不到文件。
+                                //
+                                // 离线时那些会话的执行现场在服务器上，够不到；
+                                // 本地 agent 照旧跑，但手上只有这台机器
+                                // （没绑目录就是一个文件工具都没有）。不说的话，
+                                // 用户看到的是「它昨天还能读那个文件，今天说没有」
+                                TextSpan(
+                                  text: '云端工作区也够不到',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    color: scheme.onSurface,
+                                  ),
+                                ),
+                                const TextSpan(
+                                  text:
+                                      ' —— 那些会话的文件在服务器上，'
+                                      '离线期间只有绑了本机目录的会话动得了文件。\n'
+                                      '需要先在设置里配好本机模型（也可以进去之后再配）。',
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                      ],
+                          const SizedBox(height: 8),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: FilledButton.tonal(
+                              onPressed: () => ref
+                                  .read(appConfigProvider.notifier)
+                                  .setOffline(true),
+                              child: const Text('离线使用'),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
                 const SizedBox(height: 12),
                 Row(
                   children: [
