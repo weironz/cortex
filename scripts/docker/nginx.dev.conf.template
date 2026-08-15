@@ -49,11 +49,23 @@ server {
     # ── API 反代 ─────────────────────────────────────────
     #
     # **白名单而不是「文件不存在就转发」。** 后者写起来短，但漏掉一条的
-    # 症状是「深链接刷新后拿到一个 JSON」；白名单漏掉一条的症状是
-    # 浏览器控制台里一个响亮的 404。失败方向不同，选响亮的那个。
+    # 症状是「深链接刷新后拿到一个 JSON」。
     #
     # 这份清单要与 `crates/cortexd/src/routes.rs` 的 `protected_routes!`
     # 对得上。加了新的顶层路由记得加这里 —— 不加的话它在 Web 上不存在。
+    #
+    # ⚠️ 这条注释以前写着「漏掉一条的症状是一个响亮的 404」。**那是错的**，
+    # 2026-08-15 被 `/settings/llm-key` 证伪：漏掉的路径落到下面的 SPA
+    # 回落上，回的是 **200 + 一整个 index.html**。调用方看到的是「JSON 解析
+    # 失败」，离真正的原因隔着两层，于是那个界面显示「读不出状态」，
+    # 而错误提示还把人往 `/api` 指（dev 根本没有 /api）。
+    # 光靠「记得加这里」防不住，所以回落那段现在会对明说要 JSON 的请求
+    # 拒发网页 —— 见文件末尾的 `@spa`。
+    #
+    # **生产没有这个问题**：traefik 那侧是单一 `/api` 前缀（只按第二段把
+    # `/api/chat`、`/api/sandbox` 分给 agentd），加新路由不需要动任何配置。
+    # 会漂移的只有这份手工清单 —— 也就是说这类 bug 只会在开发机上出现，
+    # 且只在开发机上被发现，正是最容易被当成「本地环境的问题」放过的那种。
     #
     # ── `/chat` 与 `/sandbox/*` 不在这一段，它们去 agentd ──
     #
@@ -61,7 +73,7 @@ server {
     # 「哪条路归谁」，而让 cortexd 知道 agentd 在哪，等于给要独立开源的那一半
     # 留一条「agent 服务地址」的配置 —— 那正是这次拆分要消灭的耦合。
     # 边缘本来就在做路径分流，这件事放它这儿一行配置都不多。
-    location ~ ^/(health|confirmations|memory|llm|episodes|sessions|projects|blobs|sync|auth|import|sandbox-snapshots|delegated-tokens|mcp)(/|$) {
+    location ~ ^/(health|confirmations|memory|llm|episodes|sessions|projects|blobs|sync|auth|import|settings|sandbox-snapshots|delegated-tokens|mcp)(/|$) {
         proxy_pass http://cortexd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
@@ -130,7 +142,35 @@ server {
     #
     # Flutter Web 是单页应用：深链接在磁盘上没有对应文件，回落 index.html。
     location / {
-        try_files $uri $uri/ /index.html;
+        try_files $uri $uri/ @spa;
+    }
+
+    # ── SPA 回落：对 API 调用要响亮地失败 ────────────────────
+    #
+    # 上面的白名单漏一条时，请求会走到这里拿到 200 + 一整个网页。**那是
+    # 这个部署里最贵的一类假信号**：调用方报的是「JSON 解析失败」或
+    # 「这个地址返回的是网页」，而真正的原因（nginx 少一行）在两层之外。
+    # `/settings/llm-key` 就这么静默坏了一整个版本 —— 界面上那一格永远
+    # 显示「读不出状态」，没人会想到去看反代配置。
+    #
+    # 所以：**明说要 JSON 的请求一律不给 index.html。** 客户端每个
+    # `_getJson` 都带 `accept: application/json`（http_cortex_api.dart），
+    # 浏览器导航带的是 `text/html`，两者分得干净。
+    #
+    # 为什么是**独立的命名 location** 而不是在 `location /` 里判断：
+    # 那样 `if` 会先于 `try_files` 执行，于是磁盘上真实存在的
+    # `AssetManifest.json` 之类也会被拒掉。放在回落里，只有「文件不存在」
+    # 时才判断，真实文件照常发。
+    location @spa {
+        # `default_type` 只在**扩展名认不出类型**时才生效，所以放在 location
+        # 层不会影响下面那个 index.html（`.html` 在 mime.types 里有）。
+        # 写在 `if` 里 nginx 直接拒绝启动（"not allowed here"）
+        default_type application/json;
+
+        if ($http_accept ~* application/json) {
+            return 404 '{"error":"no such API route — 这个路径没有落在 nginx 的反代白名单里，检查 scripts/docker/nginx.dev.conf.template"}';
+        }
+        try_files /index.html =404;
     }
 
     # 开发环境**一律不缓存**。生产那份有精细的缓存策略，这里反过来 ——
