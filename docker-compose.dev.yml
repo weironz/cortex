@@ -40,13 +40,52 @@
 # ══════════════════════════════════════════════════════════
 
 services:
+  # ─── Cortex 自己的库 ──────────────────────────────────
+  #
+  # **与记忆服务那个 postgres 是两回事。** 那边存 facts / entities，
+  # 这边存会话、消息、附件、同步流水。会话曾经也在那边，后果是
+  # 「记忆服务挂了就没有产品」—— 见 crates/cortex-store 的文档。
+  #
+  # 端口 5452：这台机器上 5432 被别的项目占着、5442 是 Cormex 的。
+  # 只绑回环。
+  #
+  # ⚠️ 服务名是 `cortexdb` 而**不是 `postgres`**，这一点不能改回去。
+  #
+  # Cormex 的 compose 里也有一个叫 `postgres` 的服务，而两个仓库的
+  # `docker-compose.yml` 第一行都写着 `name: cortex`。同项目 + 同服务名的
+  # 后果不是「两个容器」，是 **compose 认为它们是同一个，直接替换** ——
+  # 2026-08-15 实测：在这边 `up -d postgres`，Cormex 的 postgres 容器当场
+  # 消失（数据卷幸存，容器要从那边重起）。反过来也一样。
+  #
+  # 真正的修法在 Cormex 那侧（改成 `name: cormex`，它的容器全是 cormex-*
+  # 前缀，本来就该那样）。在它改之前，这一侧靠**不重名**自保。
+  cortexdb:
+    image: postgres:17-alpine
+    container_name: cortex-postgres-dev
+    profiles: [dev]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CORTEX_PG_USER:-cortex}
+      POSTGRES_PASSWORD: ${CORTEX_PG_PASSWORD:-cortex}
+      POSTGRES_DB: ${CORTEX_PG_DB:-cortex}
+    ports:
+      - "127.0.0.1:${CORTEX_PG_PORT:-5452}:5432"
+    volumes:
+      - cortex_dev_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CORTEX_PG_USER:-cortex}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   # ─── agent 编排 ───────────────────────────────────────
   #
-  # 它是**唯一**碰 docker.sock 的服务（cortexd 那份副本删掉之后）。
-  # 分流在 nginx 那一层：`/chat` 与 `/sandbox/*` 到这儿，其余到 cortexd。
+  # 它是**唯一**碰 docker.sock 的服务。
+  # 分流在 nginx 那一层：`/chat` 与 `/sandbox/*` 到这儿，其余到记忆服务。
   #
-  # 与 cortexd 的关系只有 HTTP —— 没有数据库、没有对象存储凭据，
+  # 与记忆服务的关系只有 HTTP —— 没有它的数据库、没有它的对象存储凭据，
   # 要钥匙走 `POST /delegated-tokens`，带的是用户自己那把 bearer。
+  # 上面那个 `cortexdb` 是**自己的**库，两件事不要混。
   agentd:
     image: cortex/devruntime:latest
     container_name: cortex-agentd-dev
@@ -78,6 +117,9 @@ services:
       CORTEX_SANDBOX_CALLBACK: ${CORTEX_SANDBOX_CALLBACK:-http://cormex-cortexd:8080}
       # 同网段直连，回调不经出网代理（它本来就该拒绝内网地址）
       CORTEX_SANDBOX_SAME_NETWORK: "1"
+      # Cortex 自己的库。服务名直连 —— 与上面那个记忆服务的地址无关
+      CORTEX_DATABASE_URL: >-
+        postgres://${CORTEX_PG_USER:-cortex}:${CORTEX_PG_PASSWORD:-cortex}@cortexdb:5432/${CORTEX_PG_DB:-cortex}
       RUST_LOG: ${RUST_LOG:-cortex_agentd=debug,warn}
     volumes:
       - cortex_dev_bin:/opt/cortex/bin:ro
@@ -86,6 +128,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     # 同 cortexd：socket 是 root:root 660，而这个容器不跑 root
     group_add: ["0"]
+    depends_on:
+      cortexdb:
+        condition: service_healthy
     networks:
       - default
       - sandbox
@@ -125,3 +170,8 @@ volumes:
   # compose 不该知道它们存在
   cortex_dev_bin:
     name: cortex_dev_bin
+
+  # Cortex 自己那个库的数据。同样显式写 `name:`，理由同上 ——
+  # 换个项目名就换一个卷，等于开发数据莫名其妙没了
+  cortex_dev_pg:
+    name: cortex_dev_pg

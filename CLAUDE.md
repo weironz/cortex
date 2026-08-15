@@ -35,6 +35,7 @@ cortex-proto         线协议 DTO
 cortex-agent         agent loop + 工具 + OS 沙箱
 cortex-local         agent 本体：同一个二进制，跑在本机或容器里
 cortex-agentd        云端编排：按需拉起沙箱容器，把请求反代进去
+cortex-store         Cortex 自己的持久层：会话 / 消息 / 附件 / 同步流水
 cortex-egress-proxy  沙箱的唯一出网口（CONNECT allowlist）
 cortex-blob          对象存储客户端
 cortex-import        导入 ChatGPT / Claude 的导出文件
@@ -146,7 +147,16 @@ Web 在 `http://127.0.0.1:5173`。**dev 是同源根路径分流**（`CORTEX_BAS
 8080 上又活了十几个小时，`/health` 照答 `status: ok`，只有 `database: error`
 藏在后面 —— 一个「记忆服务在跑」的假信号。起环境时带 `--remove-orphans`。
 
-**这个仓库没有数据库，也没有 migration。** 要一个能连的记忆服务，去 Cormex
+**这个仓库有自己的数据库**（`crates/cortex-store` + `migrations/`），
+装的是**会话**：消息、附件、项目、同步流水、沙箱快照、自带 API key。
+2026-08-15 之前这些住在记忆服务的库里，后果是停掉它之后 agent
+**连上一句话都读不到** —— 判据从此只有一句：
+**这张表离开记忆能力还有没有意义**。有，就是 Cortex 的。
+
+它**不装记忆**：facts / entities / 向量 / 召回 / 回放全在 Cormex，
+这边一列向量都没有（所以也没有 pgvector）。
+
+要一个能连的记忆服务，去 Cormex
 那边起，然后把地址给 `cortex-local --remote`（或 `.env` 里的
 `CORTEX_MEMORY_URL`）。⚠️ 那边的 `just db-migrate` 目前是坏的（两套 migration
 共用一张版本表），第二套要带

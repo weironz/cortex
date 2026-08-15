@@ -214,12 +214,23 @@ dev-build *ARGS:
 
 # 起完整环境。第一次会编一遍（几分钟），之后是增量
 #
-# ★ `--remove-orphans` 不是洁癖。拆分之后 `cortex-cortexd-dev` 在 8080 上
-#   又活了十几个小时，`/health` 照答 `status: ok`、`role: cortexd`，只有
-#   `database: error` 藏在后面 —— 一个「记忆服务在跑」的假信号，而这条
-#   命令的全部意义就是给出真信号。compose 默认**不删**孤儿。
+# ★ **这里没有 `--remove-orphans`，而且不许加回来。**
+#
+#   加它的初衷是对的：拆分之后 `cortex-cortexd-dev` 在 8080 上又活了十几个
+#   小时，`/health` 照答 `status: ok`、`role: cortexd`，只有 `database: error`
+#   藏在后面 —— 一个「记忆服务在跑」的假信号。
+#
+#   但它的杀伤范围是**整个 compose 项目**，而 Cortex 与 Cormex 两个仓库的
+#   `docker-compose.yml` 第一行都写着 `name: cortex`。于是这条命令会把
+#   Cormex 的容器当成孤儿删掉 —— 2026-08-15 一天之内干了两次，第二次连
+#   `cormex-postgres` 一起没了（数据卷幸存，容器要从那边重起）。
+#
+#   真正的修法是 Cormex 那侧改成 `name: cormex`（它的容器全是 cormex-* 前缀，
+#   本来就该那样）。**那是另一个仓库的一行**，在这里改不了。
+#   在它改之前，这一侧的自保就是：只点名删自己知道的那个孤儿。
 dev: dev-build dev-web-if-stale
-    docker compose {{ _dev }} up -d --remove-orphans
+    -docker rm -f cortex-cortexd-dev 2>/dev/null
+    docker compose {{ _dev }} up -d
     @just _dev-join-memory
     @echo ""
     @echo "  Web    http://127.0.0.1:${CORTEX_WEB_DEV_PORT:-5173}"
