@@ -520,8 +520,8 @@ impl Turn {
     /// 而「模型说它读不了文件」既可能是目录里真没有，也可能是模型在偷懒。
     /// 没有这个接口，那两种情况在日志里长得一模一样。测试也靠它断言。
     #[must_use]
-    pub fn tool_names(&self) -> Vec<&'static str> {
-        self.specs.iter().map(|s| s.name).collect()
+    pub fn tool_names(&self) -> Vec<&str> {
+        self.specs.iter().map(|s| s.name.as_ref()).collect()
     }
 
     /// 跑完一轮完整对话（可能内含多次工具调用）。
@@ -772,7 +772,7 @@ impl Turn {
                 call.name,
                 self.specs
                     .iter()
-                    .map(|s| s.name)
+                    .map(|s| s.name.as_ref())
                     .collect::<Vec<_>>()
                     .join("、")
             ));
@@ -848,7 +848,7 @@ impl Turn {
             && !self.env.allows_escape_prompt()
         {
             tracing::info!(
-                tool = spec.name,
+                tool = %spec.name,
                 path = %p.display(),
                 env = self.env.as_str(),
                 "越界路径在这个执行环境里直接拒绝 —— 没有人能为它负责"
@@ -866,7 +866,7 @@ impl Turn {
         // 两段：同步的策略判断决定「要不要问」，要问就在这里 await 宿主。
         // 整个 await 期间这一轮是挂起的 —— 这正是想要的：确认没回来之前，
         // 不该有任何副作用发生，也不该抢先去跑下一个工具
-        let gate = match self.policy.decide(spec.name, spec.risk) {
+        let gate = match self.policy.decide(&spec.name, spec.risk) {
             Gate::Ask => Gate::Ask,
             // 风险档说不用问，但越界了 —— 越界必须问，除非**完全放行**档。
             // 那一档的语义就是「什么都不问」，在这里给它开个例外等于
@@ -878,13 +878,13 @@ impl Turn {
             Gate::Allow => Approval::Allow,
             // 本轮已经问过一次而没有人回答，不再问第二次。见 [`ConfirmState`]
             Gate::Ask if confirm.gave_up => {
-                tracing::info!(tool = spec.name, "本轮此前已无人应答，直接拒绝，不再等待");
+                tracing::info!(tool = %spec.name, "本轮此前已无人应答，直接拒绝，不再等待");
                 Approval::Unanswered
             }
             Gate::Ask => {
                 let answer = host
                     .confirm(&ConfirmRequest {
-                        tool: spec.name,
+                        tool: &spec.name,
                         risk: spec.risk,
                         arguments: &call.arguments,
                         scope: outside.as_deref(),
@@ -900,8 +900,8 @@ impl Turn {
             }
         };
         if !approval.is_allowed() {
-            tracing::info!(tool = spec.name, ?approval, "工具调用未获批准");
-            return ToolResult::err(refusal(spec.name, approval));
+            tracing::info!(tool = %spec.name, ?approval, "工具调用未获批准");
+            return ToolResult::err(refusal(&spec.name, approval));
         }
 
         // ── 批准了越界 → 记下**父目录** ──
@@ -917,7 +917,7 @@ impl Turn {
             } else {
                 p.parent().unwrap_or(p)
             };
-            tracing::info!(dir = %dir.display(), tool = spec.name, "用户批准了工作区外的目录，本会话内不再询问");
+            tracing::info!(dir = %dir.display(), tool = %spec.name, "用户批准了工作区外的目录，本会话内不再询问");
             host.grant_root(dir);
         }
 

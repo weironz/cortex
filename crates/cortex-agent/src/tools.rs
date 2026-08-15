@@ -9,6 +9,7 @@
 //! 不在工具内部弹确认 —— CLI、桌面、Web 的确认方式完全不同，
 //! 决策权必须留给调用方。
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -63,8 +64,22 @@ impl Risk {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolSpec {
-    pub name: &'static str,
-    pub description: &'static str,
+    /// 工具名。
+    ///
+    /// # 为什么是 `Cow` 而不是 `&'static str` 或 `String`
+    ///
+    /// 从前是 `&'static str`，因为工具只有内置那几个，名字都是字面量。
+    /// 接 MCP 之后**名字来自运行期**（对端 `list_tools` 回来的），
+    /// `&'static str` 塞不进去。
+    ///
+    /// 但也不该一律 `String`：内置那六个每轮都要重建一次目录，
+    /// 换成 `String` 就是每轮六次没有必要的堆分配 —— 而它们的名字
+    /// 从编译期到进程结束一个字都不会变。
+    ///
+    /// `Cow` 让两种来源用同一个类型：内置走 `Borrowed`（零分配），
+    /// 外来走 `Owned`。
+    pub name: Cow<'static, str>,
+    pub description: Cow<'static, str>,
     /// JSON Schema，直接交给模型
     pub parameters: serde_json::Value,
     pub risk: Risk,
@@ -378,8 +393,8 @@ impl Sandbox {
 pub fn builtin_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
-            name: "read_file",
-            description: "读取文件内容。工作区外的路径用绝对路径，会请用户当场批准",
+            name: "read_file".into(),
+            description: "读取文件内容。工作区外的路径用绝对路径，会请用户当场批准".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -391,8 +406,9 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             path_arg: Some("path"),
         },
         ToolSpec {
-            name: "write_file",
-            description: "把内容写入文件，覆盖已有内容。工作区外的路径用绝对路径，会请用户当场批准",
+            name: "write_file".into(),
+            description: "把内容写入文件，覆盖已有内容。工作区外的路径用绝对路径，会请用户当场批准"
+                .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -405,8 +421,8 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             path_arg: Some("path"),
         },
         ToolSpec {
-            name: "list_dir",
-            description: "列出目录条目。工作区外的路径用绝对路径，会请用户当场批准",
+            name: "list_dir".into(),
+            description: "列出目录条目。工作区外的路径用绝对路径，会请用户当场批准".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -416,9 +432,10 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             path_arg: Some("path"),
         },
         ToolSpec {
-            name: "shell",
+            name: "shell".into(),
             description: "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里：\
-                          只能读写工作区与构建缓存，默认不能联网",
+                          只能读写工作区与构建缓存，默认不能联网"
+                .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -434,8 +451,8 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             path_arg: None,
         },
         ToolSpec {
-            name: "memory_search",
-            description: "在长期记忆中检索。当用户提到过去的决定、偏好或对话时使用",
+            name: "memory_search".into(),
+            description: "在长期记忆中检索。当用户提到过去的决定、偏好或对话时使用".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -474,7 +491,11 @@ pub fn to_llm_tools(specs: &[ToolSpec]) -> Vec<Tool> {
         .iter()
         .filter_map(|s| {
             let schema = s.parameters.as_object()?.clone();
-            Some(Tool::new(s.name, s.description, Arc::new(schema)))
+            Some(Tool::new(
+                s.name.clone(),
+                s.description.clone(),
+                Arc::new(schema),
+            ))
         })
         .collect()
 }
@@ -860,6 +881,37 @@ fn arg_str(v: &serde_json::Value, key: &str) -> std::result::Result<String, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 运行期名字塞得进 [`ToolSpec`]，而内置的仍然不分配。
+    ///
+    /// 这条钉的是 `Cow` 这个选择本身。两个方向都要断言，因为它们各自
+    /// 对应一种退回去的写法，而两种退法**都能编译**：
+    ///
+    /// - 退回 `&'static str`：MCP 那条路直接没了（名字来自对端 `list_tools`）
+    /// - 退成 `String`：能跑，只是每轮为六个恒定不变的字面量各堆分配一次，
+    ///   而这件事在任何测试里都不会红，只会在 profile 上多一根小刺
+    #[test]
+    fn tool_names_take_both_a_runtime_string_and_a_literal() {
+        let external = ToolSpec {
+            name: format!("{}__{}", "weather", "forecast").into(),
+            description: String::from("来自某个 MCP server").into(),
+            parameters: serde_json::json!({"type": "object"}),
+            risk: Risk::Execute,
+            path_arg: None,
+        };
+        assert!(
+            matches!(external.name, Cow::Owned(_)),
+            "运行期拼出来的名字必须存得下 —— 这正是接 MCP 的前提"
+        );
+
+        for s in builtin_specs() {
+            assert!(
+                matches!(s.name, Cow::Borrowed(_)),
+                "内置工具 {} 的名字是编译期字面量，不该每轮堆分配一次",
+                s.name
+            );
+        }
+    }
 
     fn temp_sandbox() -> (tempfile::TempDir, Sandbox) {
         let dir = tempfile::tempdir().unwrap();
