@@ -505,7 +505,8 @@ class _MockConfig extends AppConfigNotifier {
 }
 
 /// A daemon stand-in for the gate: only `/health` and `/auth/ticket` matter.
-class _GateApi with
+class _GateApi
+    with
         LlmKeyUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
@@ -688,8 +689,10 @@ class _GateApi with
       throw UnimplementedError('这个替身不测云沙箱下载');
 
   @override
-  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async =>
-      throw UnimplementedError('这个替身不测云沙箱文件树');
+  Future<List<FileNode>> sandboxListFiles(
+    String path, {
+    String? sessionId,
+  }) async => throw UnimplementedError('这个替身不测云沙箱文件树');
 
   @override
   Future<Uint8List> sandboxReadFile(String path, {String? sessionId}) async =>

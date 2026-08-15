@@ -31,7 +31,8 @@ import 'package:flutter_test/flutter_test.dart';
 ///
 /// The whole point of these cases is the *routing decision* — relay versus
 /// presign — so the fake reports the path rather than the payload.
-class _BlobApi with
+class _BlobApi
+    with
         LlmKeyUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
@@ -149,8 +150,10 @@ class _BlobApi with
       throw UnimplementedError('这个替身不测云沙箱下载');
 
   @override
-  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async =>
-      throw UnimplementedError('这个替身不测云沙箱文件树');
+  Future<List<FileNode>> sandboxListFiles(
+    String path, {
+    String? sessionId,
+  }) async => throw UnimplementedError('这个替身不测云沙箱文件树');
 
   @override
   Future<Uint8List> sandboxReadFile(String path, {String? sessionId}) async =>

@@ -190,10 +190,7 @@ enum RightPanel {
 
 /// 两侧面板的显示状态。
 class LayoutState {
-  const LayoutState({
-    this.leftCollapsed = false,
-    this.rightPanel,
-  });
+  const LayoutState({this.leftCollapsed = false, this.rightPanel});
 
   /// 会话那一栏。收起时账号栏也跟着不见 —— 与 Codex / Claude
   /// 桌面端一致：收起就是整条侧栏都没了，要用就展开。
@@ -676,10 +673,7 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
   final api = HttpCortexApi(
     baseUrl: origin,
     // 打到 agent 时用**它认的那把**，见 `apiToken`
-    token: apiToken(
-      userToken: token,
-      onLocalAgent: agentOrigin.value != null,
-    ),
+    token: apiToken(userToken: token, onLocalAgent: agentOrigin.value != null),
     // `read`, not `watch`: this is an outbound edge. Watching the notifier
     // would make every auth state change rebuild the client, including the one
     // this very callback triggers.

@@ -288,7 +288,10 @@ abstract interface class CortexApi {
   /// 带 [projectId] 就顺便记账，于是**项目改名之后不会再建第二个文件夹**。
   /// 建目录与绑会话刻意分成两步：绑定那条路上还有清放行清单、同步执行归属
   /// 这些必须发生的事，不该复制一份到这里。
-  Future<String> createLocalWorkspace({required String name, String? projectId});
+  Future<String> createLocalWorkspace({
+    required String name,
+    String? projectId,
+  });
 
   /// `POST /local/workspaces/{id}/auto` — 按日期时间开一个文件夹并绑上。
   ///
@@ -499,10 +502,7 @@ mixin AccountUnsupported {
 ///
 /// 与那边同一条禁令：**不要用在真实客户端上**。
 mixin LocalWorkspaceUnsupported {
-  static const _absent = CortexApiException(
-    '这个后端没有本地工作空间。',
-    statusCode: 404,
-  );
+  static const _absent = CortexApiException('这个后端没有本地工作空间。', statusCode: 404);
 
   Future<LocalWorkspaceRoot> localWorkspaceRoot() async => throw _absent;
 
@@ -526,10 +526,7 @@ mixin LocalWorkspaceUnsupported {
 ///
 /// 与那边同一条禁令：**不要用在真实客户端上**。
 mixin LocalMcpUnsupported {
-  static const _absent = CortexApiException(
-    '这个后端没有本机 MCP。',
-    statusCode: 404,
-  );
+  static const _absent = CortexApiException('这个后端没有本机 MCP。', statusCode: 404);
 
   Future<McpConfigView> mcpConfig() async => throw _absent;
 

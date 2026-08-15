@@ -238,10 +238,7 @@ class _ServerListState extends ConsumerState<_ServerList> {
                 ),
         ),
         const SizedBox(height: 8),
-        SelectableText(
-          '配置文件：${cfg.path}',
-          style: theme.textTheme.labelSmall,
-        ),
+        SelectableText('配置文件：${cfg.path}', style: theme.textTheme.labelSmall),
       ],
     );
   }
@@ -527,15 +524,10 @@ class _ServerDetailState extends ConsumerState<_ServerDetail> {
                 Wrap(
                   spacing: 6,
                   runSpacing: 4,
-                  children: [
-                    for (final n in s.envNames) _Chip(text: n),
-                  ],
+                  children: [for (final n in s.envNames) _Chip(text: n)],
                 ),
                 const SizedBox(height: 4),
-                Text(
-                  '值不会回传到界面。要改就重新填一遍。',
-                  style: theme.textTheme.labelSmall,
-                ),
+                Text('值不会回传到界面。要改就重新填一遍。', style: theme.textTheme.labelSmall),
               ],
               const SizedBox(height: 16),
               Text('信任档位', style: theme.textTheme.labelMedium),
@@ -568,10 +560,7 @@ class _ServerDetailState extends ConsumerState<_ServerDetail> {
                 style: theme.textTheme.labelSmall,
               ),
               const SizedBox(height: 20),
-              Text(
-                '工具（${s.tools.length}）',
-                style: theme.textTheme.labelMedium,
-              ),
+              Text('工具（${s.tools.length}）', style: theme.textTheme.labelMedium),
               const SizedBox(height: 6),
               if (s.tools.isEmpty)
                 Text(
@@ -591,10 +580,7 @@ class _ServerDetailState extends ConsumerState<_ServerDetail> {
                             fontFamily: 'monospace',
                           ),
                         ),
-                        Text(
-                          t.description,
-                          style: theme.textTheme.labelSmall,
-                        ),
+                        Text(t.description, style: theme.textTheme.labelSmall),
                       ],
                     ),
                   ),
@@ -662,7 +648,7 @@ Future<bool> _confirmDelete(BuildContext context, String name) async {
 }
 
 void _toast(BuildContext context, String message) {
-  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-    SnackBar(content: Text(message)),
-  );
+  ScaffoldMessenger.maybeOf(
+    context,
+  )?.showSnackBar(SnackBar(content: Text(message)));
 }

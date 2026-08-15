@@ -173,6 +173,53 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-features --locked
 
+  # ── 客户端 ─────────────────────────────────────────────
+  #
+  # 到 0.1.9 为止，这条流水线**只跑 Rust** —— 而客户端有 300 条测试、
+  # 一个类型检查器，一次都没在 CI 上跑过。也就是说：改 Dart 的 PR 在
+  # 这里是全绿的，绿得和没改一样。
+  #
+  # 实际后果不是假想的。删记忆界面那次（2600 行）与这次接 MCP，Flutter
+  # 侧的每一次 analyze / test 都是人在本机手跑的；漏跑一次的症状是
+  # 「合进去了，下一个人 checkout 出来编不过」。
+  #
+  # 单开一个 job 而不是挂在 `test` 后面：Rust 与 Flutter 各装各的工具链，
+  # 串起来会让一个纯 Rust 的改动多等三四分钟装 Flutter SDK。
+  flutter:
+    name: 客户端（analyze + test）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # `channel: stable` 而不是钉死版本号，**与 release.yml 保持一致**。
+      #
+      # 钉版本能让 CI 不受上游发版影响，代价更大：这道门就会在一个与打包
+      # 用的 SDK 不同的版本上跑 —— 于是它能全绿，而 release 那边编不过。
+      # 一道拦不住发布失败的门没有意义。
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      # 等价于 Rust 那边的 clippy。`analysis_options.yaml` 里开了额外的 lint，
+      # 所以这一步不只是类型检查
+      - name: flutter analyze
+        run: flutter analyze
+
+      # `live_backend_test.dart` / `live_render_test.dart` **自己会跳过**：
+      # 它们先探一次 127.0.0.1:5173（600ms 超时），连不上就 `markTestSkipped`。
+      # CI 上没有那个部署，于是它们静静跳过 —— 不必在这里排除文件名，
+      # 而「排除文件名」那种做法迟早会把一个新加的用例一起排除掉。
+      - name: flutter test
+        run: flutter test
+
   # ── 构建 ───────────────────────────────────────────────
   build:
     name: 构建 (${{ matrix.os }})

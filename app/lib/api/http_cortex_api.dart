@@ -566,22 +566,25 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
-  Future<LocalWorkspaceRoot> localWorkspaceRoot() async =>
-      _rootCall(() => _client.get(
-            _uri('/local/workspace-root'),
-            headers: _headers(const {'accept': 'application/json'}),
-          ));
+  Future<LocalWorkspaceRoot> localWorkspaceRoot() async => _rootCall(
+    () => _client.get(
+      _uri('/local/workspace-root'),
+      headers: _headers(const {'accept': 'application/json'}),
+    ),
+  );
 
   @override
   Future<LocalWorkspaceRoot> setLocalWorkspaceRoot(String path) async =>
-      _rootCall(() => _client.put(
-            _uri('/local/workspace-root'),
-            headers: _headers(const {
-              'content-type': 'application/json',
-              'accept': 'application/json',
-            }),
-            body: jsonEncode({'path': path}),
-          ));
+      _rootCall(
+        () => _client.put(
+          _uri('/local/workspace-root'),
+          headers: _headers(const {
+            'content-type': 'application/json',
+            'accept': 'application/json',
+          }),
+          body: jsonEncode({'path': path}),
+        ),
+      );
 
   /// 两条根目录路由的共同外壳：读、写回的是同一个形状。
   Future<LocalWorkspaceRoot> _rootCall(
@@ -1257,7 +1260,10 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
-  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async {
+  Future<List<FileNode>> sandboxListFiles(
+    String path, {
+    String? sessionId,
+  }) async {
     final json = await _getJson('/sandbox/files', _scoped(path, sessionId));
     // 子节点的绝对路径拿**服务端回的** path 去拼，不是请求里那个：服务端会
     // 规范化（消掉多余的斜杠、结尾的 `/`），用请求里那份拼出来的路径，
@@ -1298,19 +1304,21 @@ class HttpCortexApi implements CortexApi {
     // 复用 `uploadBlob` 那套分块请求：一个 `http.Request` 只有 0% 与 done
     // 两个状态，而工作区里塞进来的常常是几十 MB 的数据集。
     // Web 上进度的语义见 `_ProgressRequest` 的文档（会先冲到 100% 再等）
-    final request = _ProgressRequest(
-      'PUT',
-      // 路径在 query，字节在 body。反过来（多段表单）要额外一层编码，
-      // 而这条路由两边都只认原始字节
-      _uri('/sandbox/files', _scoped(path, sessionId)),
-      bytes,
-      onProgress,
-    )..headers.addAll(
-      _headers(const {
-        'content-type': 'application/octet-stream',
-        'accept': 'application/json',
-      }),
-    );
+    final request =
+        _ProgressRequest(
+            'PUT',
+            // 路径在 query，字节在 body。反过来（多段表单）要额外一层编码，
+            // 而这条路由两边都只认原始字节
+            _uri('/sandbox/files', _scoped(path, sessionId)),
+            bytes,
+            onProgress,
+          )
+          ..headers.addAll(
+            _headers(const {
+              'content-type': 'application/octet-stream',
+              'accept': 'application/json',
+            }),
+          );
 
     final http.Response response;
     try {

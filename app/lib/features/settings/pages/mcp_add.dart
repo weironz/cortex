@@ -137,10 +137,7 @@ class _McpAddPanelState extends ConsumerState<McpAddPanel> {
                       'npx -y @modelcontextprotocol/server-filesystem C:/work\n'
                       '或 https://example.com/mcp\n'
                       '或 {"mcpServers": {…}}',
-                  hintStyle: TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                  ),
+                  hintStyle: TextStyle(fontFamily: 'monospace', fontSize: 12),
                 ),
                 onChanged: (_) {
                   // 改了文本就作废上一次的预览：留着的话用户会对着

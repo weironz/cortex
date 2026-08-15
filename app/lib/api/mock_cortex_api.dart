@@ -123,8 +123,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
   Future<String> createLocalWorkspace({
     required String name,
     String? projectId,
-  }) async =>
-      throw const CortexApiException('模拟后端没有本地工作空间。', statusCode: 404);
+  }) async => throw const CortexApiException('模拟后端没有本地工作空间。', statusCode: 404);
 
   @override
   Future<String?> autoBindLocalWorkspace(String id) async =>
@@ -180,28 +179,27 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     final rest = _mcp.servers.where((s) => s.name != name).toList();
     _mcp = McpConfigView(
       path: _mcp.path,
-      servers:
-          [
-            ...rest,
-            McpServer(
-              name: name,
-              transport: config.containsKey('url') ? 'http' : 'stdio',
-              commandLine: switch (config) {
-                {'url': final String u} => u,
-                {'command': final String c, 'args': final List<dynamic> a} =>
-                  '$c ${a.join(' ')}',
-                {'command': final String c} => c,
-                _ => name,
-              },
-              envNames:
-                  (config['env'] as Map?)?.keys.map((k) => '$k').toList() ??
-                  const [],
-              trust: trust,
-              disabled: disabled,
-              connected: true,
-              tools: const [],
-            ),
-          ]..sort((a, b) => a.name.compareTo(b.name)),
+      servers: [
+        ...rest,
+        McpServer(
+          name: name,
+          transport: config.containsKey('url') ? 'http' : 'stdio',
+          commandLine: switch (config) {
+            {'url': final String u} => u,
+            {'command': final String c, 'args': final List<dynamic> a} =>
+              '$c ${a.join(' ')}',
+            {'command': final String c} => c,
+            _ => name,
+          },
+          envNames:
+              (config['env'] as Map?)?.keys.map((k) => '$k').toList() ??
+              const [],
+          trust: trust,
+          disabled: disabled,
+          connected: true,
+          tools: const [],
+        ),
+      ]..sort((a, b) => a.name.compareTo(b.name)),
     );
     return _mcp;
   }
@@ -819,7 +817,10 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
   static Uint8List _text(String s) => Uint8List.fromList(utf8.encode(s));
 
   @override
-  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async {
+  Future<List<FileNode>> sandboxListFiles(
+    String path, {
+    String? sessionId,
+  }) async {
     await _latency(140);
     final dir = path.endsWith('/') && path.length > 1
         ? path.substring(0, path.length - 1)

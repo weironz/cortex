@@ -99,8 +99,7 @@ class McpConfigView {
   int get brokenCount =>
       servers.where((s) => !s.connected && !s.disabled).length;
 
-  int get toolCount =>
-      servers.fold(0, (sum, s) => sum + s.tools.length);
+  int get toolCount => servers.fold(0, (sum, s) => sum + s.tools.length);
 
   factory McpConfigView.fromJson(Map<String, dynamic> json) => McpConfigView(
     path: json['path'] as String? ?? '',

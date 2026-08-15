@@ -31,7 +31,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// (`/sessions`, `/memory/search`) are counted. Everything else throws, so a
 /// controller that started a completion on a bump would fail loudly instead of
 /// silently burning tokens.
-class _FakeApi with
+class _FakeApi
+    with
         LlmKeyUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
@@ -219,8 +220,10 @@ class _FakeApi with
       throw UnimplementedError('这个替身不测云沙箱下载');
 
   @override
-  Future<List<FileNode>> sandboxListFiles(String path, {String? sessionId}) async =>
-      throw UnimplementedError('这个替身不测云沙箱文件树');
+  Future<List<FileNode>> sandboxListFiles(
+    String path, {
+    String? sessionId,
+  }) async => throw UnimplementedError('这个替身不测云沙箱文件树');
 
   @override
   Future<Uint8List> sandboxReadFile(String path, {String? sessionId}) async =>
