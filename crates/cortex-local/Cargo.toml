@@ -14,6 +14,9 @@ path = "src/main.rs"
 [dependencies]
 cortex-core.workspace = true
 cortex-agent.workspace = true
+# 第三方 MCP server 接进来的工具。**依赖方向是 local -> mcp -> agent**：
+# agent 循环不知道 MCP 存在，那条线不能反过来。
+cortex-mcp.workspace = true
 cortex-llm.workspace = true
 cortex-proto.workspace = true
 # 解析器三处共用，见 cortex-import 的 crate 文档

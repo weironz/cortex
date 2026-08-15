@@ -11,6 +11,7 @@ members = [
     "crates/cortex-egress-proxy",
     "crates/cortex-cli",
     "crates/cortex-blob",
+    "crates/cortex-mcp",
 ]
 
 [workspace.package]
@@ -36,6 +37,7 @@ cortex-core = { path = "crates/cortex-core" }
 cortex-import = { path = "crates/cortex-import" }
 cortex-llm = { path = "crates/cortex-llm" }
 cortex-agent = { path = "crates/cortex-agent" }
+cortex-mcp = { path = "crates/cortex-mcp" }
 cortex-proto = { path = "crates/cortex-proto" }
 cortex-blob = { path = "crates/cortex-blob" }
 

@@ -223,7 +223,27 @@ async fn main() -> anyhow::Result<()> {
     // 由用户机器上的配置决定，和服务端跑的可能根本不是同一个
     let context_window = llm.model().context_limit();
 
+    // ── 第三方 MCP server ──────────────────────────────
+    //
+    // 连不上一台不会拦住启动（见 `McpHub` 的文档）：MCP server 多半是别人
+    // 写的、跑在别人网络上的东西，把自己的可用性绑在它们全部可用上，
+    // 是把控制权交出去。
+    //
+    // 配置在 `<数据目录>/mcp.json`，形状与 Claude Code 的一致 ——
+    // 用户手上已经有那些文件了。
+    let mcp_path = user_dir.join("mcp.json");
+    let mcp = cortex_mcp::McpConfig::load(&mcp_path)?;
+    let mcp = Arc::new(cortex_mcp::McpHub::connect(&mcp).await);
+    for st in mcp.status() {
+        if st.connected {
+            tracing::info!(server = %st.name, tools = st.tools, "MCP 已接入");
+        } else {
+            tracing::warn!(server = %st.name, error = ?st.error, "MCP 未接入");
+        }
+    }
+
     let engine = Arc::new(Engine {
+        mcp,
         remote: remote.clone(),
         llm: Arc::new(llm),
         confirms: Arc::new(ConfirmRegistry::from_env()?),

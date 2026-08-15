@@ -149,10 +149,23 @@ fn workspace_turn_for(
     root: &str,
     max_rounds: usize,
     mode: PermissionMode,
+    external: &[cortex_agent::ToolSpec],
 ) -> Result<Turn> {
     let base = match env {
         cortex_agent::ExecEnvironment::Container => Turn::in_container(root)?,
         _ => Turn::on_local_machine(root)?,
+    };
+    // 内置 + 外来，**一起交给 with_specs**。
+    //
+    // 目录与执行必须同源：塞进目录的每一个工具，都得有人能执行它。
+    // 这里并的是 `Engine.mcp` 那份，而执行走的是同一个 `LocalHost` 的
+    // `call_external` —— 两边看的是同一个 hub。
+    let base = if external.is_empty() {
+        base
+    } else {
+        let mut specs = cortex_agent::tools::builtin_specs();
+        specs.extend(external.iter().cloned());
+        base.with_specs(specs)
     };
     let t = base
         .with_max_rounds(max_rounds)
@@ -184,6 +197,12 @@ pub struct Engine {
     pub outbox: Outbox,
     /// 未绑定工作区的会话用它 —— 工具目录里没有文件工具
     pub chat_turn: Arc<Turn>,
+    /// 连着的那些第三方 MCP server。没配就是空的。
+    ///
+    /// **持有它的是 Engine 而不是 Turn**：连接是有状态的（子进程、重连），
+    /// 而 `Turn` 刻意无每轮状态、可复用 —— 那条纪律是同一个循环能被三个
+    /// 宿主共用的原因。
+    pub mcp: Arc<cortex_mcp::McpHub>,
     pub max_rounds: usize,
     /// 模型的上下文窗口，决定历史能占多少 token（见 [`cortex_core::history`]）。
     ///
@@ -356,11 +375,17 @@ impl Engine {
         let workspace_turn = bound.as_deref().and_then(|ws| {
             // 绑定时校验过，但目录可能之后被删了/移了/换了外接盘。
             // 此时降级成纯聊天而不是让整轮失败 —— 用户只是想说句话
-            workspace_turn_for(self.exec_env, ws, self.max_rounds, req.permission_mode)
-                .inspect_err(|e| {
-                    tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
-                })
-                .ok()
+            workspace_turn_for(
+                self.exec_env,
+                ws,
+                self.max_rounds,
+                req.permission_mode,
+                &self.mcp.specs(),
+            )
+            .inspect_err(|e| {
+                tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
+            })
+            .ok()
         });
         let turn = workspace_turn.as_ref().unwrap_or(&self.chat_turn);
         // 用 `workspace_turn` 而不是 `bound` 判断：绑过但目录已不可用时上面
@@ -403,6 +428,7 @@ impl Engine {
             events: tx.clone(),
             session_id: req.session_id.clone(),
             confirms: Arc::clone(&self.confirms),
+            mcp: Arc::clone(&self.mcp),
             grants: self.grants.clone(),
         };
         let outcome = turn
@@ -637,6 +663,8 @@ struct LocalHost {
     session_id: String,
     confirms: Arc<ConfirmRegistry>,
     grants: crate::grants::Grants,
+    /// 与 `Engine` 里那份是同一个 —— 目录从它来，执行也回到它。
+    mcp: Arc<cortex_mcp::McpHub>,
 }
 
 #[async_trait::async_trait]
@@ -648,6 +676,18 @@ impl ToolHost for LocalHost {
     /// 恶意指令。
     fn granted_roots(&self) -> Vec<std::path::PathBuf> {
         self.grants.get(&self.session_id)
+    }
+
+    /// 派给那台 MCP server。
+    ///
+    /// 到这里时**闸门已经过了** —— 外来工具一律 `Risk::Execute`，所以除非
+    /// 用户在配置里对那台 server 显式降过档，这一步之前必然问过他一次。
+    async fn call_external(
+        &self,
+        spec: &cortex_agent::ToolSpec,
+        arguments: &serde_json::Value,
+    ) -> cortex_agent::ToolResult {
+        self.mcp.call(spec, arguments).await
     }
 
     fn grant_root(&self, dir: &std::path::Path) {
@@ -724,6 +764,7 @@ mod tests {
             &root,
             8,
             PermissionMode::Ask,
+            &[],
         )
         .expect("临时目录是合法根");
         let container = workspace_turn_for(
@@ -731,6 +772,7 @@ mod tests {
             &root,
             8,
             PermissionMode::Ask,
+            &[],
         )
         .expect("临时目录是合法根");
 

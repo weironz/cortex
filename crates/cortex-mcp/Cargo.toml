@@ -1,0 +1,39 @@
+[package]
+name = "cortex-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cortex-core = { path = "../cortex-core" }
+# 只为了 `ToolSpec` / `ToolResult` / `ToolSpec::external`。
+#
+# **方向是对的**：`cortex-agent` 不知道 MCP 存在，是这一侧依赖它 ——
+# 反过来会让 agent 循环拖上一个子进程管理器与两套 HTTP 传输，而一个跑评测
+# 的人一条 MCP 连接都不会开。
+cortex-agent = { path = "../cortex-agent" }
+
+# 版本与 `cortex-agent` 保持一致，让 cargo 把两处解析成同一个 rmcp。
+#
+# ⚠️ 两份 rmcp 共存时**类型名字一样却不兼容**，而错误信息读起来像是你把
+# 一个 `Tool` 传给了要 `Tool` 的函数 —— 见 `cortex-agent/Cargo.toml` 那段注释。
+#
+# feature 三选：
+#   client                                  —— `serve_client`
+#   transport-child-process                 —— stdio 子进程（客户端侧）
+#   transport-streamable-http-client-reqwest —— HTTP，带 reqwest 后端
+rmcp = { version = "1.4", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+] }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
