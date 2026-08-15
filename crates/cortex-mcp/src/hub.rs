@@ -80,10 +80,14 @@ impl Inner {
     /// 第一次运行会去下载包。五个一起下，五个都慢，而且日志会交织成
     /// 一团谁也看不懂的东西。串行的代价是首次启动慢几秒，
     /// 换的是「卡在哪一台」一眼可见。
+    ///
+    /// 串行成立的**前提**是每一台都有上界，见 [`connect_with_deadline`] ——
+    /// 没有那道超时的话，一台挂死的 server 就把后面所有台连同整个启动
+    /// 一起拖住。
     async fn build(cfg: &McpConfig) -> Self {
         let mut inner = Self::default();
         for (name, sc) in cfg.enabled() {
-            match connect_one(name, sc).await {
+            match connect_with_deadline(name, sc).await {
                 Ok(server) => {
                     tracing::info!(
                         server = name,
@@ -315,6 +319,51 @@ fn flatten(res: &rmcp::model::CallToolResult) -> String {
     }
 }
 
+/// 一台 server 最多花多久连上。
+///
+/// 60 秒不是随手写的：**首次 `npx -y …` 要去 npm 下载整个包**，慢网上
+/// 三四十秒是常态。短了的话，用户第一次加 server 必然超时，而重试一次
+/// （包已缓存）又立刻成功 —— 那种「第一次总失败」最难归因。
+///
+/// 可以用 `CORTEX_MCP_TIMEOUT_SECS` 调，因为「多慢算慢」取决于用户的网络，
+/// 而我们猜不了。
+fn connect_timeout() -> std::time::Duration {
+    const DEFAULT: u64 = 60;
+    let secs = std::env::var("CORTEX_MCP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT);
+    std::time::Duration::from_secs(secs)
+}
+
+/// [`connect_one`] 加一道**必须存在**的超时。
+///
+/// # 没有它的时候会怎样
+///
+/// `serve()` 与 `list_all_tools()` 都可能永远不返回：子进程起来了但从不
+/// 说话（配置写错了在等 stdin）、HTTP 端点接了连接就沉默、公司代理把
+/// 请求黑洞掉。而 [`Inner::build`] 是**串行**的，于是：
+///
+/// - 启动时 → `McpHub::connect` 永不返回，桌面端卡在「正在启动 agent」，
+///   而日志里最后一行是「正在连接 xxx」，看起来像那台 server 的问题，
+///   实际是整个 agent 起不来
+/// - 设置页里加一台 → 那个 PUT 请求永不返回，界面转圈转到用户杀进程
+///
+/// 也就是说，[`McpHub`] 文档里「一台起不来其余照常工作」那句承诺，
+/// **没有这道超时就是假的** —— 连不上会失败，而连上了不说话会挂死。
+async fn connect_with_deadline(name: &str, sc: &ServerConfig) -> Result<Server, String> {
+    let limit = connect_timeout();
+    match tokio::time::timeout(limit, connect_one(name, sc)).await {
+        Ok(r) => r,
+        Err(_) => Err(format!(
+            "{limit:?} 内没连上。它可能起来了但不说话（配置写错、在等输入），\
+             也可能是网太慢 —— 首次 npx 要下载整个包。\
+             可用 CORTEX_MCP_TIMEOUT_SECS 放宽"
+        )),
+    }
+}
+
 async fn connect_one(name: &str, sc: &ServerConfig) -> Result<Server, String> {
     let service = match &sc.transport {
         Transport::Stdio { command, args, env } => {
@@ -422,6 +471,55 @@ mod tests {
         assert!(
             st[0].error.is_some(),
             "要带上原因，否则用户只知道『少了点什么』"
+        );
+    }
+
+    /// 一台不说话的 server **不会**把整个进程拖住。
+    ///
+    /// 用一个「接了连接就沉默」的 TCP 监听器扮演它 —— 那正是最坏的情况：
+    /// 连得上，握手却永远不回。没有 [`connect_with_deadline`] 的话这条会
+    /// 永远跑不完，而线上的表现是桌面端卡在「正在启动 agent」。
+    ///
+    /// 超时压到 1 秒，否则这条测试自己要等一分钟。
+    #[tokio::test]
+    async fn a_server_that_accepts_and_then_says_nothing_does_not_hang_the_process() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("应能监听");
+        let addr = listener.local_addr().expect("拿得到地址");
+        // 接了就攥着不放 —— 一个字节都不回
+        let _accepting = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+
+        // SAFETY: 单线程测试内设一次环境变量。放在这里而不是全局，是为了
+        // 让这条测试自己决定等多久 —— 默认的 60 秒对测试没有意义
+        unsafe { std::env::set_var("CORTEX_MCP_TIMEOUT_SECS", "1") };
+
+        let cfg = McpConfig::parse(&format!(
+            r#"{{"mcpServers":{{"mute":{{"type":"http","url":"http://{addr}/mcp"}}}}}}"#
+        ))
+        .expect("配置可解析");
+
+        let started = tokio::time::Instant::now();
+        let hub = McpHub::connect(&cfg).await;
+        let waited = started.elapsed();
+
+        unsafe { std::env::remove_var("CORTEX_MCP_TIMEOUT_SECS") };
+
+        assert!(
+            waited < std::time::Duration::from_secs(20),
+            "连接必须有上界，实际等了 {waited:?} —— 没有上界的话整个 agent 起不来"
+        );
+        let st = hub.status().await;
+        assert_eq!(st.len(), 1);
+        assert!(!st[0].connected, "它本来就不该连上");
+        assert!(
+            st[0].error.is_some(),
+            "超时也要落成一条能给用户看的原因，不是空着"
         );
     }
 

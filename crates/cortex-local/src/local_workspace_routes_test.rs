@@ -38,6 +38,7 @@ fn state(dir: &Path) -> LocalState {
     let llm = crate::llm::build(LlmRoute::Proxy, &remote).expect("Proxy 路由不需要任何 key");
     let engine = Engine {
         mcp: Arc::new(cortex_mcp::McpHub::empty()),
+        mcp_path: Arc::from(dir.join("mcp.json").as_path()),
         remote: remote.clone(),
         llm: Arc::new(llm),
         confirms: Arc::new(ConfirmRegistry::from_env().expect("默认超时可用")),

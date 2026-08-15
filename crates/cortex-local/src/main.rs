@@ -26,6 +26,7 @@ mod confirm;
 mod grants;
 mod llm;
 mod local_import;
+mod local_mcp;
 mod local_workspace;
 mod outbox;
 mod provider;
@@ -41,6 +42,10 @@ mod ws_proxy;
 /// 四条本地工作空间路由的端到端断言（不开端口，见文件头）。
 #[cfg(test)]
 mod local_workspace_routes_test;
+
+/// `/local/mcp` 那几条的端到端断言（同上，不开端口）。
+#[cfg(test)]
+mod local_mcp_routes_test;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -243,6 +248,7 @@ async fn main() -> anyhow::Result<()> {
 
     let engine = Arc::new(Engine {
         mcp,
+        mcp_path: Arc::from(mcp_path.as_path()),
         remote: remote.clone(),
         llm: Arc::new(llm),
         confirms: Arc::new(ConfirmRegistry::from_env()?),

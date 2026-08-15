@@ -26,6 +26,7 @@ use futures::stream::Stream;
 use tokio_stream::StreamExt as _;
 
 use crate::local_import;
+use crate::local_mcp;
 use crate::local_workspace;
 use crate::proxy;
 use crate::state::LocalState;
@@ -72,6 +73,19 @@ pub fn router(state: LocalState) -> Router {
         // preview 只读、run 是 SSE，见 crate::local_import
         .route("/local/import/preview", post(local_import::preview))
         .route("/local/import/run", post(local_import::run))
+        // MCP server 也是**设备本地**的：配置文件在这台机器上，子进程也在
+        // 这台机器上跑。cortexd 那侧两样都没有，所以 Web 端调到的是 404，
+        // 而客户端按「这个后端没有本机 MCP」处理 —— 与 workspace-root 同路数
+        .route("/local/mcp", get(local_mcp::list))
+        .route(
+            "/local/mcp/servers/{name}",
+            put(local_mcp::upsert).delete(local_mcp::remove),
+        )
+        .route("/local/mcp/reload", post(local_mcp::reload))
+        // 解析与落盘刻意分成两条：加一台 server = 在这台机器上跑任意进程，
+        // 中间必须有一屏让用户看到那条命令行原文。见 local_mcp::parse
+        .route("/local/mcp/parse", post(local_mcp::parse))
+        .route("/local/mcp/registry", get(local_mcp::registry))
         // WebSocket 升级走不了普通反代（那条路把 `upgrade` 头当逐跳首部剥了）。
         // 见 [`crate::ws_proxy`]
         .route("/ws", get(ws_proxy::handler))

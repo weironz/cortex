@@ -222,6 +222,12 @@ pub struct Engine {
     /// 而 `Turn` 刻意无每轮状态、可复用 —— 那条纪律是同一个循环能被三个
     /// 宿主共用的原因。
     pub mcp: Arc<cortex_mcp::McpHub>,
+    /// 那份配置在哪。设置页读它、写它、然后让 `mcp` 重连。
+    ///
+    /// **存路径而不是存那份配置**：文件是唯一真相（用户会手编它，
+    /// 而且 Claude Code 也可能在改同一个文件）。在内存里留一份副本就会
+    /// 有「界面显示的和文件里的不是一回事」的窗口。
+    pub mcp_path: Arc<std::path::Path>,
     pub max_rounds: usize,
     /// 模型的上下文窗口，决定历史能占多少 token（见 [`cortex_core::history`]）。
     ///
