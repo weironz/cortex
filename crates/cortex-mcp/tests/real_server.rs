@@ -32,17 +32,21 @@ async fn tools_from_a_real_server_land_in_the_catalog() {
 
     let hub = McpHub::connect(&cfg).await;
 
-    let st = hub.status();
+    let st = hub.status().await;
     assert_eq!(st.len(), 1);
     assert!(
         st[0].connected,
         "连不上就没什么可验的了，原因：{:?}。npx 拉包失败的话先手动跑一次那条命令",
         st[0].error
     );
-    assert!(st[0].tools > 0, "对端至少该报几个工具出来");
+    assert!(!st[0].tools.is_empty(), "对端至少该报几个工具出来");
 
-    let specs = hub.specs();
-    assert_eq!(specs.len(), st[0].tools, "status 报的数与实际目录必须一致");
+    let specs = hub.specs().await;
+    assert_eq!(
+        specs.len(),
+        st[0].tools.len(),
+        "status 报的数与实际目录必须一致"
+    );
 
     for s in &specs {
         assert!(

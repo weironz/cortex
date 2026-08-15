@@ -44,7 +44,6 @@ fn state(dir: &Path) -> LocalState {
         workspaces: Workspaces::load(dir),
         grants: crate::grants::Grants::new(),
         outbox: Outbox::new(dir),
-        chat_turn: Arc::new(cortex_agent::Turn::sealed()),
         max_rounds: 4,
         context_window: 8192,
         system_prompt: "",

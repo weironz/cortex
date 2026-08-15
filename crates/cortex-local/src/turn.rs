@@ -144,6 +144,39 @@ fn system_prompt_for(
     prompt
 }
 
+/// 把外来工具并进目录：**内置 + 外来，一起交给 `with_specs`**。
+///
+/// 目录与执行必须同源：塞进目录的每一个工具，都得有人能执行它。
+/// 这里并的是 `Engine.mcp` 那份，而执行走的是同一个 `LocalHost` 的
+/// `call_external` —— 两边看的是同一个 hub。
+///
+/// 抽出来是因为**两条路都要用**：绑了工作区的和没绑的。曾经只有前者并了
+/// 外来工具，症状见 [`chat_turn_for`]。
+fn with_external(base: Turn, external: &[cortex_agent::ToolSpec]) -> Turn {
+    if external.is_empty() {
+        return base;
+    }
+    let mut specs = cortex_agent::tools::builtin_specs();
+    specs.extend(external.iter().cloned());
+    base.with_specs(specs)
+}
+
+/// 没绑工作区那条会话的 `Turn`：沙箱封闭，但**外来工具照给**。
+///
+/// # 为什么必须现搭，而不是启动时建一份存进 `Engine`
+///
+/// 此前它是 `Engine.chat_turn`（启动时的 `Turn::sealed()`），于是有两个
+/// 一起犯的错：外来工具**从来没并进去过**，而且就算并了，设置页之后加的
+/// server 也进不去那一份。
+///
+/// 两者的症状是同一个、且都不报错：模型手上没有那个工具，表现为
+/// 「配了 MCP 但它不会用」。现搭的成本是每轮拼一次 `Vec<ToolSpec>`，
+/// 与「和绑了工作区那条同一个形状」比起来不值一提 —— **同形状才是这次
+/// 修得掉、下次不再漏的原因**。
+fn chat_turn_for(max_rounds: usize, external: &[cortex_agent::ToolSpec]) -> Turn {
+    with_external(Turn::sealed(), external).with_max_rounds(max_rounds)
+}
+
 fn workspace_turn_for(
     env: cortex_agent::ExecEnvironment,
     root: &str,
@@ -155,19 +188,7 @@ fn workspace_turn_for(
         cortex_agent::ExecEnvironment::Container => Turn::in_container(root)?,
         _ => Turn::on_local_machine(root)?,
     };
-    // 内置 + 外来，**一起交给 with_specs**。
-    //
-    // 目录与执行必须同源：塞进目录的每一个工具，都得有人能执行它。
-    // 这里并的是 `Engine.mcp` 那份，而执行走的是同一个 `LocalHost` 的
-    // `call_external` —— 两边看的是同一个 hub。
-    let base = if external.is_empty() {
-        base
-    } else {
-        let mut specs = cortex_agent::tools::builtin_specs();
-        specs.extend(external.iter().cloned());
-        base.with_specs(specs)
-    };
-    let t = base
+    let t = with_external(base, external)
         .with_max_rounds(max_rounds)
         .with_policy(policy_for(mode, env));
     // .attended()：这台机器上没有 OS 沙箱时（Windows），靠「用户当场批准」
@@ -195,8 +216,6 @@ pub struct Engine {
     /// 用户当场批准过的工作区外目录，按会话。见 [`crate::grants`]。
     pub grants: crate::grants::Grants,
     pub outbox: Outbox,
-    /// 未绑定工作区的会话用它 —— 工具目录里没有文件工具
-    pub chat_turn: Arc<Turn>,
     /// 连着的那些第三方 MCP server。没配就是空的。
     ///
     /// **持有它的是 Engine 而不是 Turn**：连接是有状态的（子进程、重连），
@@ -371,6 +390,11 @@ impl Engine {
         };
 
         // ── 3. 工具目录按**会话**决定 ──
+        //
+        // 外来工具**取一次，两条路共用**。曾经只有绑了工作区那条并了它，
+        // 于是「配好 MCP、开个没绑工作区的会话」拿到的外来工具是零 ——
+        // 不报错，只是模型不会用那个功能。见 `chat_turn_for`。
+        let external = self.mcp.specs().await;
         let bound = self.workspaces.get(&req.session_id);
         let workspace_turn = bound.as_deref().and_then(|ws| {
             // 绑定时校验过，但目录可能之后被删了/移了/换了外接盘。
@@ -380,14 +404,17 @@ impl Engine {
                 ws,
                 self.max_rounds,
                 req.permission_mode,
-                &self.mcp.specs(),
+                &external,
             )
             .inspect_err(|e| {
                 tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
             })
             .ok()
         });
-        let turn = workspace_turn.as_ref().unwrap_or(&self.chat_turn);
+        // 没绑工作区那条也要现搭：外来工具是**运行时可变**的（设置页能增删），
+        // 而 `Engine.chat_turn` 是启动时那一份，装不下之后加的 server
+        let chat_turn = chat_turn_for(self.max_rounds, &external);
+        let turn = workspace_turn.as_ref().unwrap_or(&chat_turn);
         // 用 `workspace_turn` 而不是 `bound` 判断：绑过但目录已不可用时上面
         // 降级成了纯聊天，此刻模型手里确实没有文件工具 —— 提示词必须跟着降级，
         // 否则它会照着一个已经不存在的工作区去许诺
@@ -748,6 +775,64 @@ impl ToolHost for LocalHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 造一个假的外来工具。名字与 `ToolSpec::external` 出来的同形。
+    fn fake_external(server: &str, tool: &str) -> cortex_agent::ToolSpec {
+        cortex_agent::ToolSpec::external(
+            &std::sync::Arc::from(server),
+            tool,
+            "测试用",
+            serde_json::json!({"type": "object"}),
+        )
+    }
+
+    /// **没绑工作区的会话一样拿得到外来工具。**
+    ///
+    /// 这条是回归测试，不是新功能演示。此前未绑定那条走的是启动时建好的
+    /// `Engine.chat_turn`（一个裸 `Turn::sealed()`），外来工具从来没并进去
+    /// 过 —— 症状是「配了 MCP 但模型不会用」，而且**不报错**。
+    ///
+    /// 两条路都断言，是因为只测一条的话，把 `with_external` 写成对某一条
+    /// 恒空也能过。
+    #[test]
+    fn a_session_without_a_workspace_still_gets_the_external_tools() {
+        let dir = tempfile::tempdir().expect("应能建临时目录");
+        let root = dir.path().to_string_lossy().into_owned();
+        let external = vec![fake_external("docs", "search")];
+
+        let unbound = chat_turn_for(8, &external);
+        assert!(
+            unbound.tool_names().contains(&"mcp__docs__search"),
+            "没绑工作区不等于没有外来工具 —— 那台 server 与工作区毫无关系。\
+             实际目录：{:?}",
+            unbound.tool_names()
+        );
+
+        let bound = workspace_turn_for(
+            cortex_agent::ExecEnvironment::LocalMachine,
+            &root,
+            8,
+            PermissionMode::Ask,
+            &external,
+        )
+        .expect("临时目录是合法根");
+        assert!(
+            bound.tool_names().contains(&"mcp__docs__search"),
+            "绑了工作区那条也得有，实际目录：{:?}",
+            bound.tool_names()
+        );
+    }
+
+    /// 一台 server 都没有时，目录里就只有内置的 —— 不多出空壳。
+    #[test]
+    fn no_mcp_server_means_the_catalog_is_exactly_the_builtin_one() {
+        let plain = chat_turn_for(8, &[]);
+        let names = plain.tool_names();
+        assert!(
+            !names.iter().any(|n| n.starts_with("mcp__")),
+            "没配 MCP 时不该有任何 mcp__ 前缀的工具：{names:?}"
+        );
+    }
 
     /// 桌面端与容器只差两处，而且都是「错了不报错」的那种。
     ///

@@ -18,10 +18,26 @@ pub struct ServerStatus {
     pub name: String,
     /// 连上了没有。
     pub connected: bool,
-    /// 它提供了几个工具。连不上时是 0。
-    pub tools: usize,
+    /// 它提供的工具。连不上时是空的。
+    ///
+    /// **不另存一个 `count` 字段**：两个必须一致的字段迟早会不一致，
+    /// 而那种不一致的症状是界面说「27 个工具」、展开却只有 3 个。
+    /// 要数量就 `.len()`。
+    pub tools: Vec<ToolInfo>,
     /// 连不上的原因。**连上时为 None** —— 留着旧的错误会让人以为它还坏着。
     pub error: Option<String>,
+}
+
+/// 一个外来工具在界面上长什么样。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolInfo {
+    /// **加过前缀的全名**（`mcp__server__tool`），不是对端的原名。
+    ///
+    /// 显示全名而不是剥掉前缀：这一栏回答的是「模型手上有什么」，
+    /// 而模型看到的就是这个名字。剥掉之后用户在日志里看到
+    /// `mcp__docs__search` 会对不上界面里的 `search`。
+    pub name: String,
+    pub description: String,
 }
 
 /// 一条连接，外加它提供的工具。
@@ -47,28 +63,25 @@ struct Server {
 /// 代价必须可见：[`Self::status`] 逐台报，界面要显示出来 ——
 /// 否则「少了几个工具」在用户那儿的表现是「模型今天有点笨」。
 pub struct McpHub {
+    inner: tokio::sync::RwLock<Inner>,
+}
+
+/// 锁里面那份。连接与失败必须一起换，所以它们在同一个结构里。
+#[derive(Default)]
+struct Inner {
     servers: BTreeMap<String, Server>,
     failures: BTreeMap<String, String>,
 }
 
-impl McpHub {
-    /// 空的。没有配置文件、或者配置里一台都没开时就是它。
-    #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            servers: BTreeMap::new(),
-            failures: BTreeMap::new(),
-        }
-    }
-
+impl Inner {
     /// 按配置逐台连。
     ///
     /// **串行连而不是并发**：MCP server 多半是 `npx` / `uvx` 拉起来的，
     /// 第一次运行会去下载包。五个一起下，五个都慢，而且日志会交织成
     /// 一团谁也看不懂的东西。串行的代价是首次启动慢几秒，
     /// 换的是「卡在哪一台」一眼可见。
-    pub async fn connect(cfg: &McpConfig) -> Self {
-        let mut hub = Self::empty();
+    async fn build(cfg: &McpConfig) -> Self {
+        let mut inner = Self::default();
         for (name, sc) in cfg.enabled() {
             match connect_one(name, sc).await {
                 Ok(server) => {
@@ -77,44 +90,97 @@ impl McpHub {
                         tools = server.specs.len(),
                         "MCP server 已连接"
                     );
-                    hub.servers.insert(name.clone(), server);
+                    inner.servers.insert(name.clone(), server);
                 }
                 Err(e) => {
                     // warn 不是 error：这是**预期内**的降级，不是故障。
                     tracing::warn!(server = name, error = %e, "MCP server 连不上，跳过它继续");
-                    hub.failures.insert(name.clone(), e);
+                    inner.failures.insert(name.clone(), e);
                 }
             }
         }
-        hub
+        inner
+    }
+}
+
+impl McpHub {
+    /// 空的。没有配置文件、或者配置里一台都没开时就是它。
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            inner: tokio::sync::RwLock::new(Inner::default()),
+        }
+    }
+
+    /// 按配置逐台连。见 [`Inner::build`]。
+    pub async fn connect(cfg: &McpConfig) -> Self {
+        Self {
+            inner: tokio::sync::RwLock::new(Inner::build(cfg).await),
+        }
+    }
+
+    /// 按新配置**整体**重连，回新的逐台状态。
+    ///
+    /// # 为什么不做增量 diff
+    ///
+    /// 「只重连改动的那台」看着省事，代价是内存里出现第二份账本：谁在连、
+    /// 连的是哪一版配置。两份账本分叉的症状是**界面显示已连接、模型手上
+    /// 却没有那个工具** —— 不报错，只是模型「不会用那个功能」。
+    ///
+    /// 配置文件是唯一真相，整体重建就不可能分叉。代价是改一台会重连全部
+    /// （首次拉包时几秒），而这是用户主动点的操作，等得起。
+    ///
+    /// # 先连新的，再放旧的
+    ///
+    /// 旧连接一 drop，stdio 那些子进程就被收掉。所以顺序是：**不持锁**
+    /// 建好新的（慢的那一步），拿写锁换进去，出锁之后旧的才析构。
+    /// 反过来做的话，整个重连期间读锁全被挡住 —— 而正在跑的一轮对话
+    /// 恰好要读 `specs()`。
+    pub async fn reload(&self, cfg: &McpConfig) -> Vec<ServerStatus> {
+        let fresh = Inner::build(cfg).await;
+        let old = {
+            let mut guard = self.inner.write().await;
+            std::mem::replace(&mut *guard, fresh)
+        };
+        drop(old);
+        self.status().await
     }
 
     /// 所有 server 提供的工具，可以直接并进 `Turn::with_specs`。
-    #[must_use]
-    pub fn specs(&self) -> Vec<ToolSpec> {
-        self.servers
+    pub async fn specs(&self) -> Vec<ToolSpec> {
+        self.inner
+            .read()
+            .await
+            .servers
             .values()
             .flat_map(|s| s.specs.iter().cloned())
             .collect()
     }
 
     /// 逐台的状态。**连不上的也要在里面** —— 那正是要给用户看的。
-    #[must_use]
-    pub fn status(&self) -> Vec<ServerStatus> {
-        let mut out: Vec<ServerStatus> = self
+    pub async fn status(&self) -> Vec<ServerStatus> {
+        let inner = self.inner.read().await;
+        let mut out: Vec<ServerStatus> = inner
             .servers
             .iter()
             .map(|(name, s)| ServerStatus {
                 name: name.clone(),
                 connected: true,
-                tools: s.specs.len(),
+                tools: s
+                    .specs
+                    .iter()
+                    .map(|sp| ToolInfo {
+                        name: sp.name.to_string(),
+                        description: sp.description.to_string(),
+                    })
+                    .collect(),
                 error: None,
             })
             .collect();
-        out.extend(self.failures.iter().map(|(name, e)| ServerStatus {
+        out.extend(inner.failures.iter().map(|(name, e)| ServerStatus {
             name: name.clone(),
             connected: false,
-            tools: 0,
+            tools: Vec::new(),
             error: Some(e.clone()),
         }));
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -135,7 +201,8 @@ impl McpHub {
                 spec.name
             ));
         };
-        let Some(server) = self.servers.get(server_name) else {
+        let inner = self.inner.read().await;
+        let Some(server) = inner.servers.get(server_name) else {
             return ToolResult::err(format!(
                 "MCP server {server_name} 现在没有连接。它可能在启动时就连不上，\
                  也可能中途断了 —— 请用户检查 MCP 配置，或者换一个工具。"
@@ -328,11 +395,11 @@ mod tests {
     /// 空 hub 什么都没有，而且**不报错**。
     ///
     /// 绝大多数人不配 MCP，那条路必须是安静的。
-    #[test]
-    fn an_empty_hub_offers_nothing_and_complains_about_nothing() {
+    #[tokio::test]
+    async fn an_empty_hub_offers_nothing_and_complains_about_nothing() {
         let h = McpHub::empty();
-        assert!(h.specs().is_empty());
-        assert!(h.status().is_empty());
+        assert!(h.specs().await.is_empty());
+        assert!(h.status().await.is_empty());
     }
 
     /// 连不上的 server 出现在状态里，且带着原因。
@@ -347,14 +414,39 @@ mod tests {
         .unwrap();
         let hub = McpHub::connect(&cfg).await;
 
-        assert!(hub.specs().is_empty(), "连不上就不该有工具");
-        let st = hub.status();
+        assert!(hub.specs().await.is_empty(), "连不上就不该有工具");
+        let st = hub.status().await;
         assert_eq!(st.len(), 1, "连不上的 server 必须出现在状态里");
         assert_eq!(st[0].name, "ghost");
         assert!(!st[0].connected);
         assert!(
             st[0].error.is_some(),
             "要带上原因，否则用户只知道『少了点什么』"
+        );
+    }
+
+    /// `reload` 换掉的是**整份**，包括把上一次的失败清掉。
+    ///
+    /// 钉这条是因为失败是单独一张表：只换 servers 不换 failures 的话，
+    /// 用户删掉那台连不上的 server、点重连，界面上它**还在报错** ——
+    /// 而配置里已经没有它了。
+    #[tokio::test]
+    async fn reload_replaces_everything_including_the_old_failures() {
+        let broken = McpConfig::parse(
+            r#"{"mcpServers":{"ghost":{"command":"definitely-not-a-real-binary-xyz"}}}"#,
+        )
+        .unwrap();
+        let hub = McpHub::connect(&broken).await;
+        assert_eq!(hub.status().await.len(), 1);
+
+        let after = hub.reload(&McpConfig::default()).await;
+        assert!(
+            after.is_empty(),
+            "配置里已经没有它了，界面就不该继续报它的错"
+        );
+        assert!(
+            hub.status().await.is_empty(),
+            "reload 的返回值与后续查询必须一致"
         );
     }
 
