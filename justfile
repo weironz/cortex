@@ -213,15 +213,51 @@ dev-build *ARGS:
     bash scripts/dev-build.sh {{ ARGS }}
 
 # 起完整环境。第一次会编一遍（几分钟），之后是增量
-dev: dev-build
-    docker compose {{ _dev }} up -d
+#
+# ★ `--remove-orphans` 不是洁癖。拆分之后 `cortex-cortexd-dev` 在 8080 上
+#   又活了十几个小时，`/health` 照答 `status: ok`、`role: cortexd`，只有
+#   `database: error` 藏在后面 —— 一个「记忆服务在跑」的假信号，而这条
+#   命令的全部意义就是给出真信号。compose 默认**不删**孤儿。
+dev: dev-build dev-web-if-stale
+    docker compose {{ _dev }} up -d --remove-orphans
     @echo ""
     @echo "  Web    http://127.0.0.1:${CORTEX_WEB_DEV_PORT:-5173}"
     @echo "  记忆   http://127.0.0.1:8080  （由 ../cormex 的 compose 提供）"
     @echo ""
+    @echo "  ★ dev 是同源**根路径**：/health、/sandbox/health —— 没有 /api 前缀"
+    @echo "    （拿 /api/… 去测会落到 nginx 的 SPA 回落上，回 200 + index.html）"
+    @echo ""
     @echo "  改 Rust  → just dev-restart"
     @echo "  改界面   → just dev-web"
     @echo "  看日志   → just dev-logs agentd"
+
+# 界面产物比源码旧就重建一次。
+#
+# **这条是补一次真实的误判**：`just dev` 从不构建 Flutter，而 nginx 直接
+# bind mount `app/build/web`。于是浏览器里那份可能比代码旧十个小时 ——
+# 当时的症状是「空会话的输入框又跑到底部去了」，看起来像一次回归，
+# 实际是那次修复压根不在手上这份产物里。**没有任何东西会提示你**：
+# 页面能开、功能能用，只是不是你写的那一版。
+#
+# 判据是 mtime 而不是「每次都建」：整建要一分钟，而 `just dev` 也用来
+# 把容器拉回来，那时候多等一分钟纯属浪费。
+dev-web-if-stale:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    out=app/build/web/main.dart.js
+    if [ ! -f "$out" ]; then
+        echo "界面产物不存在，构建一次…"
+        just dev-web
+        exit 0
+    fi
+    # 源码里有比产物新的东西吗。`-newer` 逐个比 mtime，找到一个就够
+    newer=$(find app/lib app/pubspec.yaml app/web -newer "$out" -type f -print -quit 2>/dev/null)
+    if [ -n "$newer" ]; then
+        echo "界面产物比源码旧（$newer 更新），重建一次…"
+        just dev-web
+    else
+        echo "界面产物是新的，跳过构建"
+    fi
 
 # 改完 Rust：重编 + 重启，不重建镜像
 # **web 也要重启。** nginx 的 `upstream` 在启动时把服务名解析一次就永久
