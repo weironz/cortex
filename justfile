@@ -220,6 +220,7 @@ dev-build *ARGS:
 #   命令的全部意义就是给出真信号。compose 默认**不删**孤儿。
 dev: dev-build dev-web-if-stale
     docker compose {{ _dev }} up -d --remove-orphans
+    @just _dev-join-memory
     @echo ""
     @echo "  Web    http://127.0.0.1:${CORTEX_WEB_DEV_PORT:-5173}"
     @echo "  记忆   http://127.0.0.1:8080  （由 ../cormex 的 compose 提供）"
@@ -230,6 +231,41 @@ dev: dev-build dev-web-if-stale
     @echo "  改 Rust  → just dev-restart"
     @echo "  改界面   → just dev-web"
     @echo "  看日志   → just dev-logs agentd"
+
+# 把记忆服务接进沙箱那张 internal 网。
+#
+# # 为什么必须有这一步
+#
+# 沙箱网段是 `internal: true`：容器**没有默认路由**，够不着宿主，于是
+# `host.docker.internal` 既解析不了也连不上；而唯一的出网口 cortex-egress
+# 会拒绝任何解析到内网的地址（SSRF 防护，不该放宽）。
+#
+# 生产没有这个问题：那份 compose 把记忆服务与沙箱放在同一张网上，回调走
+# 服务名。dev 的差别只有一个 —— 记忆服务在**另一个仓库的 compose** 里，
+# 所以要在这里把它接过来，让拓扑与生产一致。
+#
+# # 它治的是一个所有健康检查都说好的坏
+#
+# 不接的话：容器起得来、agentd 一切正常、`/sandbox/health` 还报
+# `memory_reachable: true`（那是 **agentd** 够得着，它不在 internal 网上）,
+# 只有真发一轮对话才炸在 `/llm/stream`。这正是 live 那几条测试长期红、
+# 而没人看出根因的原因。
+#
+# 幂等：已经接上了 `docker network connect` 回非零，吞掉即可。
+_dev-join-memory:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    name="${CORMEX_CONTAINER:-cormex-cortexd}"
+    if ! docker inspect "$name" >/dev/null 2>&1; then
+        echo "  ⚠ 找不到记忆服务容器 $name —— 去 ../cormex 跑 docker compose up -d"
+        echo "    （不接的话云端会话发消息会炸在 /llm/stream，而 health 全是绿的）"
+        exit 0
+    fi
+    if docker network connect cortex-sandbox-net "$name" 2>/dev/null; then
+        echo "  ✓ $name 已接入 cortex-sandbox-net（沙箱靠它回调记忆服务）"
+    else
+        echo "  ✓ $name 已在 cortex-sandbox-net 上"
+    fi
 
 # 界面产物比源码旧就重建一次。
 #

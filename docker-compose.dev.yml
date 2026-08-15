@@ -59,10 +59,24 @@ services:
       # 记忆服务**不在这个 compose 里**（它在 Cormex 仓库）。
       # 走宿主：Cormex 的 compose 把 8080 发布在宿主上
       CORTEX_MEMORY_URL: ${CORTEX_MEMORY_URL:-http://host.docker.internal:8080}
-      # **容器**怎么找到记忆服务。与上面那条在「不同网段」时不一样
-      # **容器**怎么找到记忆服务。沙箱网段是 internal 的，出不去宿主，
-      # 所以这条与上面那条不一样 —— 它走中继
-      CORTEX_SANDBOX_CALLBACK: ${CORTEX_SANDBOX_CALLBACK:-http://host.docker.internal:8080}
+      # **容器**怎么找到记忆服务。与上面那条不是一回事，而这里曾经写错。
+      #
+      # 沙箱网段是 `internal: true`：容器**没有默认路由**，够不着宿主，
+      # 于是 `host.docker.internal` 既解析不了也连不上。而唯一的出网口
+      # （cortex-egress）会拒绝任何解析到内网的地址 —— 那是它该做的
+      # （SSRF 防护），不是可以放宽的东西。
+      #
+      # 所以走生产那条路：**记忆服务上同一张 internal 网，按服务名直连**
+      # （生产是 `http://cormex:8080` + 同网段，见 deploy/docker-compose.yml）。
+      # dev 的差别只有名字：记忆服务在 Cormex 仓库那个 compose 里，
+      # 容器名是 `cormex-cortexd`，由 `just dev` 把它接进这张网。
+      #
+      # 症状记一笔：写成 host.docker.internal 时，容器起得来、agentd 一切
+      # 正常、`/sandbox/health` 报 memory_reachable=true（那是 **agentd**
+      # 够得着，它不在 internal 网上），只有真发一轮对话才炸在
+      # `/llm/stream` 上 —— 一个所有健康检查都说好的坏。
+      CORTEX_SANDBOX_CALLBACK: ${CORTEX_SANDBOX_CALLBACK:-http://cormex-cortexd:8080}
+      # 同网段直连，回调不经出网代理（它本来就该拒绝内网地址）
       CORTEX_SANDBOX_SAME_NETWORK: "1"
       RUST_LOG: ${RUST_LOG:-cortex_agentd=debug,warn}
     volumes:
