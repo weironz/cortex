@@ -460,7 +460,8 @@ class HttpCortexApi implements CortexApi {
       final body = await response.stream.bytesToString().catchError((_) => '');
       throw _failure(
         response.statusCode,
-        _unwrapError(body) ?? 'import/run 失败（HTTP ${response.statusCode}）',
+        _unwrapError(body) ??
+            _statusFallback(response.statusCode, 'import/run'),
       );
     }
 
@@ -863,19 +864,35 @@ class HttpCortexApi implements CortexApi {
     final unwrapped = _unwrapError(utf8.decode(response.bodyBytes));
     if (unwrapped != null) return unwrapped;
 
-    final path = response.request?.url.path ?? '';
-    return switch (response.statusCode) {
-      // 404 且没有 body，几乎总是「这个地址上没有 cortexd」而不是
+    return _statusFallback(response.statusCode, response.request?.url.path);
+  }
+
+  /// 没有可用 body 时，按状态码编一句**给人看**的话。
+  ///
+  /// 只有状态码和路径可用时，这两样正好能分开几种完全不同的处境 ——
+  /// 而把它们并成一句「请求失败」，用户就只能来问我们。
+  static String _statusFallback(int status, String? path) {
+    final where = (path == null || path.isEmpty) ? '' : '（$path）';
+    return switch (status) {
+      // 404 且没有 body，几乎总是「这个地址上没有服务」而不是
       // 「这个资源不存在」—— 真正的资源 404 由服务端带上 {"error": …}
       404 =>
         '$path 在这个地址上不存在（HTTP 404）。'
-            'cortexd 的路由挂在根上，地址里不要带 /api 之类的前缀。',
-      final s => '服务端回了 HTTP $s，而且没有说明原因（$path）。',
+            '服务端的路由挂在根上，地址里不要带 /api 之类的前缀。',
+      // 502/503/504 是**网关**在说话：它自己活着，但它要转发的那个上游没起来。
+      // 这三个码到不了应用层，所以永远不会有 {"error": …} —— 由这里兜底。
+      //
+      // 点名说「上游」而不是笼统的「服务端错误」：真机上这一条对应的
+      // 就是记忆服务没起，而那时用户能做的事很具体（去把它起起来）
+      502 || 503 || 504 =>
+        '网关连不上它要转发的服务（HTTP $status$where）。'
+            '多半是那个上游没起来 —— 部署入口本身是通的，否则这里会是连接被拒。',
+      final s => '服务端回了 HTTP $s，而且没有说明原因$where。',
     };
   }
 
   /// 从响应体里取出**给人看的那句话**：`{"error": "…"}` 就剥掉信封，
-  /// 不是 JSON 就用原文；两者都拿不到时回 `null`（调用方去编一句）。
+  /// 是纯文本就用原文；拿不到时回 `null`（调用方去编一句）。
   ///
   /// # 为什么非要有这一步
   ///
@@ -889,6 +906,21 @@ class HttpCortexApi implements CortexApi {
   /// —— 一句本来写得清清楚楚的提示，因为多了一层信封就变成了「报错很不友好」。
   /// 2026-08-15 真机上撞到的。非流式那条一直是对的，这个函数把两条并回一处，
   /// 免得下一个人只修其中一条。
+  ///
+  /// # HTML 一律扔掉
+  ///
+  /// 这里原先写着「非 JSON 的 body 原样保留 —— nginx 的 502 页面之类，
+  /// 那些原文同样是线索」。**那句话是错的**，同一天就被打脸：记忆服务停掉
+  /// 之后，会话列表那一栏里画出来的是一整张
+  ///
+  /// ```
+  /// <html><head><title>502 Bad Gateway</title></head><body>…
+  /// <!-- a padding to disable MSIE and Chrome friendly error page -->
+  /// ```
+  ///
+  /// —— 连那几行给 IE 凑字数的注释都照单全收。**一个网关的 HTML 错误页对
+  /// 用户不是线索，是噪音**：它唯一有用的信息（502）已经在状态码里了，
+  /// 而调用方按状态码编的那句话比它清楚得多。
   String? _unwrapError(String body) {
     try {
       final decoded = jsonDecode(body);
@@ -897,8 +929,13 @@ class HttpCortexApi implements CortexApi {
         if (message != null && message.trim().isNotEmpty) return message;
       }
     } on Object {
-      // 不是 JSON。原文往往就是给人看的，继续往下走
+      // 不是 JSON。可能是纯文本（那往往就是给人看的），也可能是一张 HTML
+      // 错误页 —— 下面那一行把后者挡掉
     }
+    // 判 `<` 而不判 content-type：反代与网关在这条路上未必给对头部，
+    // 而「body 以尖括号开头」对 HTML / XML 错误页是够用且不会误伤的判据
+    // （真正给人看的错误文案不会以 `<` 开头）
+    if (body.trimLeft().startsWith('<')) return null;
     final trimmed = _trim(body);
     return trimmed.isEmpty ? null : trimmed;
   }
@@ -993,7 +1030,7 @@ class HttpCortexApi implements CortexApi {
       // 剥掉 `{"error": …}` 的信封再给人看 —— 见 [_unwrapError]
       throw _failure(
         response.statusCode,
-        _unwrapError(body) ?? '$label 失败（HTTP ${response.statusCode}）',
+        _unwrapError(body) ?? _statusFallback(response.statusCode, label),
       );
     }
 

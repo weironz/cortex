@@ -74,7 +74,8 @@ void main() {
 
   /// 不是 JSON 的 body **照原样给**：反代与网关回的常是纯文本
   /// （nginx 的 `502 Bad Gateway` 页面之类），那些原文同样是线索。
-  test('非 JSON 的 body 原样保留', () async {
+  /// 纯文本的 body 照原样给 —— 那往往就是给人看的一句话。
+  test('非 JSON 的纯文本 body 原样保留', () async {
     final api = HttpCortexApi(
       baseUrl: 'http://127.0.0.1:1',
       client: _rejecting(502, 'upstream connect error'),
@@ -89,6 +90,40 @@ void main() {
           '消息',
           contains('upstream connect error'),
         ),
+      ),
+    );
+  });
+
+  /// **HTML 错误页要扔掉，不能倒进界面。**
+  ///
+  /// 这一条是被打脸打出来的：上一版的注释写着「nginx 的 502 页面之类，
+  /// 那些原文同样是线索」，而同一天记忆服务一停，会话列表那一栏里就画出了
+  /// 一整张 `<html><head><title>502 Bad Gateway</title>…`，
+  /// 连给 IE 凑字数的那几行注释都在里面。
+  ///
+  /// 网关的 HTML 错误页对用户不是线索是噪音：它唯一有用的信息（状态码）
+  /// 已经在别处了，而按状态码编的那句话比它清楚得多。
+  test('网关的 HTML 错误页不进界面，换成按状态码编的话', () async {
+    final api = HttpCortexApi(
+      baseUrl: 'http://127.0.0.1:1',
+      client: _rejecting(
+        502,
+        '<html><head><title>502 Bad Gateway</title></head><body>'
+        '<center><h1>502 Bad Gateway</h1></center>'
+        '<hr><center>nginx/1.31.2</center></body></html>'
+        '<!-- a padding to disable MSIE and Chrome friendly error page -->',
+      ),
+    );
+    addTearDown(api.dispose);
+
+    await expectLater(
+      api.chat(sessionId: 'S1', message: 'hi').toList(),
+      throwsA(
+        isA<CortexApiException>()
+            .having((e) => e.message, '不含标签', isNot(contains('<html')))
+            .having((e) => e.message, '不含 nginx 版本', isNot(contains('nginx/')))
+            .having((e) => e.message, '说清是上游没起来', contains('上游'))
+            .having((e) => e.message, '带上状态码', contains('502')),
       ),
     );
   });
