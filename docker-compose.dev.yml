@@ -120,6 +120,21 @@ services:
       # Cortex 自己的库。服务名直连 —— 与上面那个记忆服务的地址无关
       CORTEX_DATABASE_URL: >-
         postgres://${CORTEX_PG_USER:-cortex}:${CORTEX_PG_PASSWORD:-cortex}@cortexdb:5432/${CORTEX_PG_DB:-cortex}
+      # ── 认证 ──
+      #
+      # 身份搬过来之后，**这个进程自己校验凭据**（以前是把 bearer 原样带给
+      # 记忆服务，让它的回答当认证结果）。两边必须配同一把，否则症状是
+      # 「登录成功但一发消息就 401」。
+      #
+      # 没配任何一项时 `AuthMode::from_env` **拒绝启动**，那是有意的：
+      # 一个不认证的 agentd 会把所有人的会话交给任何连得上这个端口的人，
+      # 而那件事没有任何症状。想关掉要显式写 CORTEX_AUTH=disabled。
+      CORTEX_AUTH_TOKEN_SHA256: ${CORTEX_AUTH_TOKEN_SHA256:-}
+      CORTEX_AUTH: ${CORTEX_AUTH:-}
+      # 注册默认是**关**的（见 accounts.rs）。开放注册意味着任何人都能拿
+      # 服务端那把 key 烧钱，而生产是一台 2 核 3.5G 的机器。
+      # 取值必须正好是 `enabled`，手滑写成 1 不会把门打开。
+      CORTEX_OPEN_REGISTRATION: ${CORTEX_OPEN_REGISTRATION:-}
       RUST_LOG: ${RUST_LOG:-cortex_agentd=debug,warn}
     volumes:
       - cortex_dev_bin:/opt/cortex/bin:ro

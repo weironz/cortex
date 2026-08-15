@@ -15,9 +15,16 @@
 //!
 //! # 认证在哪儿
 //!
-//! **不在这里。** 每条路由都把调用方的 bearer 原样带给 cortexd 去换委托
-//! 凭据，cortexd 的回答就是认证结果 —— 401 原样透出去。自己再实现一遍的
-//! 后果是两份判断会漂开，而漂开的那天表现为「某条路能进、另一条不能」。
+//! 这一段以前写着「**不在这里**」—— 每条路由把 bearer 原样带给记忆服务去
+//! 换委托凭据，它的回答就是认证结果。那在「身份住在记忆服务」的时候是对的。
+//!
+//! 2026-08-15 身份搬过来了（用户是 agent 产品的用户，不是记忆库的用户），
+//! 于是这里有了自己的一道门：[`crate::auth::require`]。
+//!
+//! 形状上唯一要守住的是**豁免靠「不挂中间件」表达，不靠路径白名单**。
+//! 「中间件里判断 `path == "/health"` 就放行」是这类代码最经典的出事点：
+//! 加新路由的人不会想起去更新那张表，而漏掉的方向是**默认放行**。
+//! 这里拆成三个 `Router`，新加的路由默认落在受保护那一侧。
 
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -29,40 +36,164 @@ use cortex_proto::dto::{ChatRequest, SessionRuntimeDto};
 
 use crate::state::AgentState;
 
-/// 一轮对话的请求体上限。与 cortexd 那侧同一个数量级 —— 附件走 `/blobs`，
+/// 一轮对话的请求体上限。与记忆服务那侧同一个数量级 —— 附件走 `/blobs`，
 /// 这条路上只有文字与哈希。
 const MAX_CHAT_BODY: usize = 4 * 1024 * 1024;
 
+/// 要认证的路由，**一处清单**。
+///
+/// 加一条路由就必然进清单，忘不掉。
+///
+/// # 展开顺序是这条围栏的另一半，别动
+///
+/// 所有 `.route()` 在前、`.route_layer()` 在最后一句 —— axum 的
+/// `route_layer` **只覆盖它之前注册的路由**。真有人把它挪到中间，那之后的
+/// 路由会失去认证，而它们仍然在 `PROTECTED_ROUTES` 里，于是
+/// `every_protected_route_rejects_anonymous_requests` 当场变红。
+macro_rules! protected_routes {
+    ($state:ident; $( $path:literal [$($method:ident),+ $(,)?] => $handler:expr ),+ $(,)?) => {
+        /// 全部**应当**需要认证的路由，与上面的注册链同源。
+        #[cfg(test)]
+        const PROTECTED_ROUTES: &[(&str, &[axum::http::Method])] = &[
+            $( ($path, &[$(axum::http::Method::$method),+]) ),+
+        ];
+
+        fn protected_router($state: AgentState) -> Router<AgentState> {
+            Router::new()
+                $( .route($path, $handler) )+
+                // route_layer：只对**匹配到的**路由生效。不匹配的路径照常
+                // 404，不会先被判成 401 —— 后者会让「路径打错了」与
+                // 「凭据不对」在客户端看来是同一件事。
+                //
+                // 这一句必须是最后一句，理由见宏的文档
+                .route_layer(axum::middleware::from_fn_with_state(
+                    $state,
+                    crate::auth::require,
+                ))
+        }
+    };
+}
+
+protected_routes! {
+    state;
+    // ── 身份 ──
+    //
+    // 登录 / 注册 / 刷新 / 登出**不在这儿**，它们在 `public_routes()`：
+    // 要求带着凭据才能登录是个死循环。
+    "/auth/me" [GET] => get(crate::accounts::whoami),
+    "/auth/usage" [GET] => get(crate::accounts::usage),
+    // 加不了请求头的连接（WebSocket、<img src>）拿它换一个 60 秒的 `?ticket=`
+    "/auth/ticket" [POST] => post(issue_ticket),
+}
+
+/// 路由表。
+///
+/// # 这个函数体里只允许出现来自那三份清单的 `.route()`
+///
+/// 别的一律写进 `protected_routes!`。写在这里的两种下场都很糟：加进
+/// `public` 就是完全不认证；加在 `protected_router(...)` 返回值之后
+/// （也就是 `route_layer` 之后）同样不认证，而且更隐蔽。
+/// `router_registers_no_routes_outside_the_lists` 直接读本文件的源码来守
+/// 这一条 —— 它是唯一能拦住「在清单之外注册路由」的手段。
 pub fn router(state: AgentState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    let mut open = Router::new();
+    for (path, method_router) in public_routes() {
+        open = open.route(path, method_router);
+    }
+    for (path, method_router) in pending_cutover_routes() {
+        open = open.route(path, method_router);
+    }
+
+    open.merge(protected_router(state.clone()))
+        .with_state(state)
+}
+
+/// 不需要认证的那几条，**一处清单**。
+///
+/// # 为什么它们必须在公开侧
+///
+/// - `/health` 与 `/sandbox/health`：消费者是 Docker HEALTHCHECK 与负载
+///   均衡探针，那些东西配不了凭据。给它加认证的直接后果是容器一直
+///   unhealthy，然后有人把 HEALTHCHECK 删掉。
+/// - `/auth/login`、`/auth/register`：登录是「还没有凭据」时做的事。
+/// - `/auth/refresh`、`/auth/logout`：它们带的是 **refresh token**，
+///   那本身就是凭据 —— 校验在 handler 里（摘要比对 + 重放检测）。
+///   要求同时带一个还没过期的 access token，等于让「过期后自动续期」
+///   这件事只在没过期时可用。
+///
+/// # 往里加一条之前
+///
+/// 这是整个服务**真正**的免认证入口。加东西的正确姿势是先在上面补一段
+/// 「为什么这一条不能要凭据」—— 补不出来就说明它该待在
+/// `protected_routes!` 里。`the_public_list_stays_short` 会在这份清单
+/// 变长时红，逼人回来看这段话。
+fn public_routes() -> Vec<(&'static str, axum::routing::MethodRouter<AgentState>)> {
+    vec![
+        ("/health", get(health)),
         // **同一个 handler 挂两条路，不是复制粘贴。**
         //
         // `/health` 给容器的 HEALTHCHECK（同网段直连，不过边缘）。
         // `/sandbox/health` 给**外部**探针：边缘按路径分流，而 `/health`
         // 那条被分给了记忆服务 —— 于是从公网打 `/api/health` 问到的是
-        // cortexd，永远问不到这个进程。
-        //
-        // 这不是「多给一条别名」：部署验证要能证明**这一版的 agentd** 真的
-        // 在线上，而它此前从外面根本够不着。真机撞到过 —— deploy.yml 的
-        // 版本断言比的是记忆服务的版本号。
-        .route("/sandbox/health", get(health))
-        .route("/chat", post(chat))
+        // 记忆服务，永远问不到这个进程。真机撞到过：deploy.yml 的版本断言
+        // 比的是记忆服务的版本号。
+        ("/sandbox/health", get(health)),
+        ("/auth/login", post(crate::accounts::login)),
+        ("/auth/refresh", post(crate::accounts::refresh)),
+        ("/auth/logout", post(crate::accounts::logout)),
+        ("/auth/register", post(crate::accounts::register)),
+    ]
+}
+
+/// **临时**：还没切过来的那几条，暂时不挂这个进程的认证。
+///
+/// # 为什么不能现在就挂上
+///
+/// access token 是**进程内存**里的一本簿子（[`crate::accounts::AccessBook`]），
+/// 两个进程不共享。眼下 `/auth/login` 在边缘上仍然指向记忆服务，于是客户端
+/// 手里那把 access token 是**记忆服务签的**，这个进程认不出来。现在把
+/// `/chat` 挂上 `require`，效果是所有已登录的用户当场全部 401。
+///
+/// 它们此刻并非无保护：每一条都要先向记忆服务换一把委托凭据，bearer 不对
+/// 那一步就 401，原样透出去。**保护在，只是判断在别人家里。**
+///
+/// # 这份清单必须缩到零
+///
+/// 边缘把 `/auth/*` 切到这个进程的那一刻（持久层阶段三），这里的每一条都
+/// 搬进 `protected_routes!`，这个函数与 `pending_cutover_is_shrinking`
+/// 一起删掉。`the_cutover_list_never_grows` 守住「只减不增」——
+/// 一份临时清单最常见的下场是变成永久清单。
+fn pending_cutover_routes() -> Vec<(&'static str, axum::routing::MethodRouter<AgentState>)> {
+    vec![
+        ("/chat", post(chat)),
         // 重挂：与桌面端那条 `/runs/{id}` 是同一件事，只是要多穿一层容器。
         // **不走 `ensure`**，理由见 handler
-        .route("/sandbox/runs/{session_id}", get(attach_run))
-        .route("/sandbox/files", get(list_files).put(put_file))
-        .route("/sandbox/files/raw", get(read_file))
-        .route("/sandbox/workspace.tar", get(download_workspace))
-        .route(
+        ("/sandbox/runs/{session_id}", get(attach_run)),
+        ("/sandbox/files", get(list_files).put(put_file)),
+        ("/sandbox/files/raw", get(read_file)),
+        ("/sandbox/workspace.tar", get(download_workspace)),
+        (
             "/sandbox/snapshots",
             get(list_snapshots).post(take_snapshot),
-        )
-        .route(
+        ),
+        (
             "/sandbox/snapshots/{id}/restore",
             post(restore_snapshot).layer(axum::extract::DefaultBodyLimit::max(1024)),
-        )
-        .with_state(state)
+        ),
+    ]
+}
+
+/// 换一张短命票据。
+///
+/// 消费者是**加不了请求头**的连接：WebSocket 的浏览器 API 不允许自定义
+/// 首部，`<img src>` 同理。它们只能把凭据放进查询串，而把长效 token 放进
+/// URL 会进代理日志、进浏览器历史 —— 所以给一张 60 秒、一次性的。
+async fn issue_ticket(State(st): State<AgentState>) -> Json<serde_json::Value> {
+    let ticket = st.ticket_book().issue();
+    Json(serde_json::json!({
+        "ticket": ticket,
+        "expires_in": crate::auth::TICKET_TTL.as_secs(),
+    }))
 }
 
 /// 这个进程的状态。
@@ -117,6 +248,13 @@ async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
         "callback": st.runner().callback(),
         "callback_visible_to_sandbox": callback_visible,
         "database": database,
+        // 这台机器要不要凭据。**只报形态，不报那把摘要** —— 前者是运维要
+        // 核对的事实（「我以为线上开着认证」），后者是凭据本身的一半。
+        //
+        // 它出现在这里是身份搬过来的直接后果：以前这个进程没有认证形态
+        // 可言，探针问到的 `auth` 是记忆服务的。两边配得不一样时，那个
+        // 回答会让人以为已经核对过了
+        "auth": st.auth_mode().as_str(),
         "live_scopes": st.scopes().len(),
     }))
 }
@@ -529,7 +667,195 @@ async fn restore_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Method, Request};
     use tower::ServiceExt as _;
+
+    /// 参数占位符替换成它。随便一个不会撞上真实 id 的值即可。
+    const PROBE: &str = "probe";
+
+    /// `"/a/{id}"` → `"/a/probe"`。
+    fn probe_path(pattern: &str) -> String {
+        pattern
+            .split('/')
+            .map(|seg| {
+                if seg.starts_with('{') && seg.ends_with('}') {
+                    PROBE
+                } else {
+                    seg
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// 一个真的开着认证的 router，外加那把能进去的 token。
+    fn app_with_token() -> (Router, String) {
+        let (token, digest_hex) = crate::auth::generate();
+        let raw = hex::decode(&digest_hex).expect("生成的摘要应当是合法十六进制");
+        let digest: [u8; 32] = raw.try_into().expect("SHA-256 应当是 32 字节");
+        let st = AgentState::new(
+            std::sync::Arc::new(NeverRunning),
+            reqwest::Client::new(),
+            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
+            // 不接库。账号端点在没有它时回 501 —— 而这一组断言只问
+            // 「是不是 401」，501 与 401 不是一回事，断言照样成立
+            None,
+            None,
+            crate::auth::AuthMode::Token { digest },
+        );
+        (router(st), token)
+    }
+
+    async fn status_of(
+        app: &Router,
+        method: &Method,
+        path: &str,
+        bearer: Option<&str>,
+    ) -> StatusCode {
+        let mut req = Request::builder().method(method.clone()).uri(path);
+        if let Some(t) = bearer {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        // 写方法都带一个合法的空 JSON 体：没有它，请求会在**处理器**里因为
+        // 解析失败而挂掉。那不影响 401 的断言（中间件在前），但会让
+        // 「带了凭据之后不再是 401」那半条变得没那么有说服力
+        let req = req
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .expect("构造请求不该失败");
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("router 的错误类型是 Infallible")
+            .status()
+    }
+
+    /// **清单里的每一条，匿名访问都必须 401。**
+    ///
+    /// 这条测试守的是「认证靠不挂中间件表达」那个形状：一条路由要么在
+    /// `protected_routes!` 里、被 `route_layer` 罩着，要么它就在公开侧。
+    /// 被加到 `route_layer` 之后是最隐蔽的那种失手 —— 编译过、clippy 绿、
+    /// 人眼几乎看不出来，而这里会当场红。
+    #[tokio::test]
+    async fn every_protected_route_rejects_anonymous_requests() {
+        let (app, token) = app_with_token();
+        assert!(
+            !PROTECTED_ROUTES.is_empty(),
+            "清单是空的 —— 宏没有生成任何东西，这组测试等于没跑"
+        );
+
+        for (pattern, methods) in PROTECTED_ROUTES {
+            let path = probe_path(pattern);
+
+            // 先证明这条探针路径真的匹配得到路由，否则下面的断言是空的：
+            // 一条根本没注册的路径当然会 404，而 404 不是 401
+            let unsupported = [Method::DELETE, Method::PUT, Method::PATCH]
+                .into_iter()
+                .find(|m| !methods.contains(m))
+                .expect(
+                    "DELETE / PUT / PATCH 全被这条路由占了 ——                      换一个它没声明的方法当探针，或给它单独写一条测试",
+                );
+            let routed = status_of(&app, &unsupported, &path, Some(&token)).await;
+            assert_eq!(
+                routed,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "探针路径 {path}（来自 {pattern}）用未声明的 {unsupported} 打过去得到 {routed}，                 预期 405。405 说明路径匹配上了、只是方法不对；404 说明这条探针根本没打到路由，                 此时下面那条 401 断言是空的"
+            );
+
+            for method in *methods {
+                let anon = status_of(&app, method, &path, None).await;
+                assert_eq!(
+                    anon,
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {pattern} 在没有凭据时返回了 {anon} 而不是 401 ——                      这条路由不在认证中间件后面。检查它是不是被加进了公开清单，                     或者被加在了 route_layer 之后"
+                );
+
+                let authed = status_of(&app, method, &path, Some(&token)).await;
+                assert_ne!(
+                    authed,
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {pattern} 带上正确凭据仍然 401 —— 认证本身坏了"
+                );
+            }
+        }
+    }
+
+    /// 免认证的入口只该有那几条，而且加一条要先说清理由。
+    ///
+    /// 数字写死是故意的：它一变就红，逼人回到 `public_routes` 的文档上
+    /// 补一段「为什么这一条不能要凭据」。补不出来，就说明它该在受保护那侧。
+    #[test]
+    fn the_public_list_stays_short() {
+        let paths: Vec<&str> = public_routes().into_iter().map(|(p, _)| p).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/health",
+                "/sandbox/health",
+                "/auth/login",
+                "/auth/refresh",
+                "/auth/logout",
+                "/auth/register",
+            ],
+            "免认证清单变了。**每一条都要能单独说出「为什么它不能要凭据」** ——              探针配不了首部、登录时还没有凭据，就这两类。             说不出来的那一条，属于 protected_routes!"
+        );
+    }
+
+    /// 过渡清单**只减不增**。
+    ///
+    /// 一份临时清单最常见的下场是变成永久清单：后来的人看见「这里有一组
+    /// 不认证的路由」，就顺手往里加。数字写死之后，往里加会红。
+    #[test]
+    fn the_cutover_list_never_grows() {
+        let paths: Vec<&str> = pending_cutover_routes()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "/chat",
+                "/sandbox/runs/{session_id}",
+                "/sandbox/files",
+                "/sandbox/files/raw",
+                "/sandbox/workspace.tar",
+                "/sandbox/snapshots",
+                "/sandbox/snapshots/{id}/restore",
+            ],
+            "过渡清单变了。**只允许变短** —— 边缘把 /auth/* 切过来之后，             这些逐条搬进 protected_routes!，最后连同这个函数一起删掉。             往里加新路由是把临时状态变成永久状态"
+        );
+    }
+
+    /// **不许在那三份清单之外注册路由。**
+    ///
+    /// 直接读本文件的源码 —— 这是唯一能拦住它的手段：axum 不暴露
+    /// 「这条路由挂没挂中间件」，所以类型系统帮不上忙。
+    ///
+    /// 判据是 `router()` 函数体里只允许出现 `.route(` 两次（两个 for 循环
+    /// 各一次）。多出来的那一次，无论加在哪，都是不认证的。
+    #[test]
+    fn router_registers_no_routes_outside_the_lists() {
+        let code = include_str!("routes.rs");
+        let start = code
+            .find("pub fn router(state: AgentState) -> Router {")
+            .expect("找不到 router() —— 它被改名了？那这条测试要跟着改");
+        let body = &code[start..];
+        let end = body
+            .find(
+                "
+}
+",
+            )
+            .expect("router() 的函数体没有闭合");
+        let body = &body[..end];
+
+        let registrations = body.matches(".route(").count();
+        assert_eq!(
+            registrations, 2,
+            "router() 的函数体里出现了 {registrations} 处 `.route(`，应当只有两处             （public_routes 与 pending_cutover_routes 各一个循环）。             多出来的那条**没有认证** —— 写在这里的路由要么进了公开侧，             要么排在 route_layer 之后，两种都不认证。             正确的位置是 protected_routes! 那份清单。"
+        );
+    }
 
     /// 永远起不来的 runner。这一组测试只关心路由表，碰不到 docker。
     #[derive(Default)]
@@ -601,8 +927,13 @@ mod tests {
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
-            // 这一组用例不碰库
+            // 这一组用例不碰库，也就没有账号体系
             None,
+            None,
+            // **认证显式关掉**，不是「没配」。测的是路由拓扑，不是那道门；
+            // 而 `AuthMode::from_env` 在没配任何凭据时会拒绝启动，正是为了
+            // 不让「忘了配」与「决定不要」长得一样
+            crate::auth::AuthMode::Disabled,
         );
         let app = router(st);
         for path in ["/sessions", "/memory/search", "/episodes", "/sync", "/ws"] {
@@ -639,8 +970,13 @@ mod tests {
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
-            // 这一组用例不碰库
+            // 这一组用例不碰库，也就没有账号体系
             None,
+            None,
+            // **认证显式关掉**，不是「没配」。测的是路由拓扑，不是那道门；
+            // 而 `AuthMode::from_env` 在没配任何凭据时会拒绝启动，正是为了
+            // 不让「忘了配」与「决定不要」长得一样
+            crate::auth::AuthMode::Disabled,
         );
         let resp = router(st)
             .oneshot(
@@ -689,8 +1025,13 @@ mod tests {
             // 远端指向一个没人监听的端口：`delegate` 必然失败，于是这条
             // 会在要钥匙那一步就 502 —— 而那**同样证明**它没去起容器
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
-            // 这一组用例不碰库
+            // 这一组用例不碰库，也就没有账号体系
             None,
+            None,
+            // **认证显式关掉**，不是「没配」。测的是路由拓扑，不是那道门；
+            // 而 `AuthMode::from_env` 在没配任何凭据时会拒绝启动，正是为了
+            // 不让「忘了配」与「决定不要」长得一样
+            crate::auth::AuthMode::Disabled,
         );
         let resp = router(st)
             .oneshot(
@@ -719,8 +1060,13 @@ mod tests {
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
-            // 这一组用例不碰库
+            // 这一组用例不碰库，也就没有账号体系
             None,
+            None,
+            // **认证显式关掉**，不是「没配」。测的是路由拓扑，不是那道门；
+            // 而 `AuthMode::from_env` 在没配任何凭据时会拒绝启动，正是为了
+            // 不让「忘了配」与「决定不要」长得一样
+            crate::auth::AuthMode::Disabled,
         );
         let resp = router(st)
             .oneshot(

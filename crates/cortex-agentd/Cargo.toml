@@ -54,6 +54,19 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
+
+# ── 身份 ──
+# 账号那几张表在 cortex_auth 里，与租户库分开一个池（见 state.rs::Accounts）
+sqlx.workspace = true
+# 密码哈希。**必须是 argon2id，不能是 SHA-256** —— 理由在 credentials.rs
+# 的模块文档第一节：那把 SHA-256 是给「一台机器一把预共享 token」用的，
+# 而密码是人选的，熵低，需要的是慢
+argon2 = "0.5"
+password-hash = { version = "0.5", features = ["alloc"] }
+# 盐与 refresh token 的熵。用 getrandom 而不是 rand：这里要的是内核熵源，
+# 取不到时必须 panic 而不是回落到可预测的种子
+getrandom = "0.3"
+
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true

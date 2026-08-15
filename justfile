@@ -234,6 +234,19 @@ dev-build *ARGS:
 dev: dev-build dev-web-if-stale
     -docker rm -f cortex-cortexd-dev 2>/dev/null
     docker compose {{ _dev }} up -d
+    # **nginx 必须跟着重启一次。**
+    #
+    # 上面那句 `up -d` 只重建**变了的**服务，而 nginx 容器照旧活着 ——
+    # 它启动时把 `server agentd:8081` 解析成了一个具体 IP 并一直用着，
+    # 而重建过的 agentd 拿到的是新 IP。
+    #
+    # 症状是 `/sandbox/health` 回 **502 + 一张 nginx 的 HTML 错误页**，
+    # 与「agentd 真的挂了」长得一模一样 —— 而 `docker ps` 里它 Up、
+    # 直连容器名一切正常。2026-08-15 在这上面查了一轮才想起来。
+    #
+    # restart 而不是 `up -d --force-recreate web`：只要重新解析一次 DNS，
+    # 不需要换容器。
+    docker compose {{ _dev }} restart web
     @just _dev-join-memory
     @echo ""
     @echo "  Web    http://127.0.0.1:${CORTEX_WEB_DEV_PORT:-5173}"

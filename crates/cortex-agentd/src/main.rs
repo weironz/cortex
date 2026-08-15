@@ -25,7 +25,12 @@
 //! `/chat` 与 `/sandbox/*` 到这儿，其余到 cortexd —— 由 nginx（dev）与
 //! traefik（prod）决定。见 [`routes`] 的模块头。
 
+mod accounts;
+mod auth;
+mod credentials;
 mod env;
+mod error;
+mod quota;
 mod reaper;
 mod remote;
 mod routes;
@@ -99,6 +104,16 @@ struct Args {
         default_value = "http://127.0.0.1:3129"
     )]
     relay: String,
+
+    /// 生成一对「明文 token + SHA-256 摘要」然后退出。
+    ///
+    /// 两者必须一次生成：摘要是要写进服务端 `.env` 的，明文是要给客户端的，
+    /// 而分两次做的人十有八九会把明文当摘要填进去 —— 症状是所有请求 401，
+    /// 而配置看着完全正确。
+    ///
+    /// 这个开关跟着身份一起搬过来：认证权威在哪儿，发钥匙的那把工具就该在哪儿。
+    #[arg(long)]
+    generate_token: bool,
 }
 
 #[tokio::main]
@@ -112,6 +127,16 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+
+    if args.generate_token {
+        let (plain, digest) = auth::generate();
+        println!("# 服务端：写进 .env");
+        println!("{}={digest}", auth::TOKEN_SHA256_ENV);
+        println!();
+        println!("# 客户端：这一串就是要填的 token（服务端不保存它）");
+        println!("{plain}");
+        return Ok(());
+    }
 
     // 连不上 docker 就**不启动**，不降级。
     //
@@ -148,29 +173,44 @@ async fn main() -> anyhow::Result<()> {
     //
     // migration 在这儿跑而不是靠外部脚本：二进制自带 schema，部署时不必
     // 带上 `migrations/`，也就不会出现「镜像是新的、schema 是旧的」。
-    let store = match args.database_url.as_deref() {
+    let (store, accounts) = match args.database_url.as_deref() {
         Some(url) => {
             let s = cortex_store::Store::connect(url)
                 .await
                 .context("连不上 Cortex 自己的数据库")?;
             s.migrate().await.context("跑 migration 失败")?;
-            tracing::info!("Cortex 数据库就绪（migration 已跑）");
-            Some(s)
+            // 账号那几张表在 `cortex_auth` 里，另开一个池 —— 与租户池分开的
+            // 理由见 `state::Accounts` 的文档。`connect` 会顺手把全局那套
+            // migration 跑上，所以两件事的顺序不能反：租户 schema 里的表
+            // 引用了全局那两个 DOMAIN
+            let a = state::Accounts::connect(url)
+                .await
+                .context("连不上 cortex_auth")?;
+            tracing::info!("Cortex 数据库就绪（migration 已跑，账号池已建）");
+            (Some(s), Some(a))
         }
         None => {
             tracing::warn!(
                 "没有 CORTEX_DATABASE_URL —— 以无状态形态启动。\
-                 会话仍然存在记忆服务那边，记忆服务挂了就读不到历史。"
+                 会话仍然存在记忆服务那边，记忆服务挂了就读不到历史；\
+                 账号那一批端点会回 501。"
             );
-            None
+            (None, None)
         }
     };
+
+    // 认证形态在这里定，而不是在第一次请求时 —— 配错了要当场起不来，
+    // 不要等到某个人登录失败才发现这台机器根本没设 token
+    let auth = auth::AuthMode::from_env().context("认证配置不合法")?;
+    tracing::info!("{}", auth.status_line());
 
     let state = AgentState::new(
         Arc::new(runner),
         http,
         Remote::new(&args.memory, to_memory),
         store,
+        accounts,
+        auth,
     );
 
     // 后台三件：回收闲置容器、盯 OOM、盯卷配额。
