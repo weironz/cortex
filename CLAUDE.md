@@ -134,9 +134,24 @@ just dev         # 本机拉起完整云端环境（agentd + web + 沙箱）
 just ci          # 本地跑一遍 CI 的全部检查
 ```
 
-**这个仓库没有数据库，也没有 migration。** 要一个能连的记忆服务，
-去 Cormex 那边 `just up && just db-migrate && just run`，
-然后把地址给 `cortex-local --remote`（或 `.env` 里的 `CORTEX_MEMORY_URL`）。
+**改动一律先在本机拉起来看一眼，再谈发版。** 云上验证的每一次失败都要重跑
+整条流水线（二十多分钟），而同样的问题本机三分钟就看得见。
+
+Web 在 `http://127.0.0.1:5173`。**dev 是同源根路径分流**（`CORTEX_BASE_URL=`
+空串），所以是 `/health`、`/sandbox/health` —— **没有 `/api` 前缀**，那是生产
+才有的。拿 `/api/...` 去测会落到 nginx 的 SPA 回落上，**回 200 + index.html**，
+看起来像成功。
+
+**`docker compose up` 默认不删孤儿容器。** 拆分之后 `cortex-cortexd-dev` 在
+8080 上又活了十几个小时，`/health` 照答 `status: ok`，只有 `database: error`
+藏在后面 —— 一个「记忆服务在跑」的假信号。起环境时带 `--remove-orphans`。
+
+**这个仓库没有数据库，也没有 migration。** 要一个能连的记忆服务，去 Cormex
+那边起，然后把地址给 `cortex-local --remote`（或 `.env` 里的
+`CORTEX_MEMORY_URL`）。⚠️ 那边的 `just db-migrate` 目前是坏的（两套 migration
+共用一张版本表），第二套要带
+`?options=-csearch_path%3Dcortex_auth%2Cpublic` —— 那是 Cormex 侧的问题，
+**在这个仓库不修**。
 
 ### 依赖上的两个已知雷
 
