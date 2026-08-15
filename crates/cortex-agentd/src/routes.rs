@@ -48,6 +48,9 @@ pub fn router(state: AgentState) -> Router {
         // 版本断言比的是记忆服务的版本号。
         .route("/sandbox/health", get(health))
         .route("/chat", post(chat))
+        // 重挂：与桌面端那条 `/runs/{id}` 是同一件事，只是要多穿一层容器。
+        // **不走 `ensure`**，理由见 handler
+        .route("/sandbox/runs/{session_id}", get(attach_run))
         .route("/sandbox/files", get(list_files).put(put_file))
         .route("/sandbox/files/raw", get(read_file))
         .route("/sandbox/workspace.tar", get(download_workspace))
@@ -210,6 +213,69 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
         header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/json"),
     );
+
+    crate::sandbox_proxy::forward(
+        st.http(),
+        handle.addr.endpoint(),
+        &d.token,
+        handle.addr.route_target(),
+        proxied,
+    )
+    .await
+}
+
+/// `GET /sandbox/runs/{session_id}` —— 挂上容器里那一轮。
+///
+/// # 为什么用 `status` 而不是 `ensure`
+///
+/// 其余每条路由都走 [`ensure_sandbox`]（谁先来谁负责拉起，见它的文档），
+/// **这一条刻意相反**：重挂问的是「刚才那件事还在跑吗」，而容器都没了
+/// 就说明它不在跑了。`ensure` 会为了回答「没有」而先花 900ms 起一个空容器，
+/// 然后立刻被空闲回收 —— 用户每打开一个旧会话就白起一次。
+///
+/// 所以这条不拉起、不签新钥匙，容器不在就直接 404。
+///
+/// # 404 不是错误
+///
+/// 绝大多数会话此刻都没在跑。客户端按「照常拉历史」处理 —— 与桌面端
+/// 那条 `/runs/{id}` 回的是同一个状态码，两端的判断因此是同一份。
+async fn attach_run(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    req: Request,
+) -> Response {
+    let bearer = bearer_of(&headers);
+    // 钥匙还是要要一次：`scope_key` 只有 cortexd 算得出（它由 owner 与项目
+    // 派生），而这条路由要拿它去问「那个容器在不在」
+    let d = match st.remote().delegate(bearer, &session_id).await {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, &e.to_string()),
+    };
+
+    let handle = match st.runner().status(&d.scope_key).await {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            // 容器不在 = 那一轮不在跑。签出去的钥匙没派上用场，收回来 ——
+            // 否则它在 TTL 内是一把没有主人的钥匙
+            st.remote().revoke(bearer, &d.token).await;
+            return err(StatusCode::NOT_FOUND, "这个会话现在没有正在跑的轮次。");
+        }
+        Err(e) => {
+            st.remote().revoke(bearer, &d.token).await;
+            return err(StatusCode::BAD_GATEWAY, &e.to_string());
+        }
+    };
+    st.touch(&d.scope_key);
+
+    // 重组一个只带必要首部的请求。`sandbox_proxy::forward` 会把一切凭据
+    // 剥掉再换上沙箱令牌 —— 用户的 bearer 绝不进容器
+    let (parts, _) = req.into_parts();
+    let mut proxied = Request::from_parts(parts, axum::body::Body::empty());
+    *proxied.method_mut() = axum::http::Method::GET;
+    *proxied.uri_mut() = format!("/runs/{session_id}")
+        .parse()
+        .unwrap_or_else(|_| "/runs".parse().expect("常量路径可解析"));
 
     crate::sandbox_proxy::forward(
         st.http(),
@@ -514,5 +580,67 @@ mod tests {
                 "{path} 不该由 agentd 应答 —— 它是记忆服务的路由，由边缘直转"
             );
         }
+    }
+
+    /// **重挂那条不 `ensure`。**
+    ///
+    /// `NeverRunning::ensure` 一定失败、`status` 一定回 `None`。所以：
+    /// 走 `ensure` 的路由会以 502 结束，而重挂该以 404 结束 ——
+    /// 状态码就是「它到底走了哪一条」的证据。
+    ///
+    /// 这条测得的东西看着小，实际拦的是一次真金白银的浪费：走 ensure 的话，
+    /// 用户每打开一个旧会话都会白起一个容器（900ms + 一次卷挂载），
+    /// 然后它立刻被空闲回收 —— 而界面上什么异常都看不到。
+    #[tokio::test]
+    async fn attaching_never_starts_a_container() {
+        let st = AgentState::new(
+            std::sync::Arc::new(NeverRunning),
+            reqwest::Client::new(),
+            // 远端指向一个没人监听的端口：`delegate` 必然失败，于是这条
+            // 会在要钥匙那一步就 502 —— 而那**同样证明**它没去起容器
+            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
+        );
+        let resp = router(st)
+            .oneshot(
+                Request::builder()
+                    .uri("/sandbox/runs/S1")
+                    .body(axum::body::Body::empty())
+                    .expect("构造请求不该失败"),
+            )
+            .await
+            .expect("router 的错误类型是 Infallible");
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "要不到钥匙就该 502，而不是把请求当成一次「先起个容器再说」"
+        );
+    }
+
+    /// 路由**挂上去了**（不是 404 那种「压根没这条路」）。
+    ///
+    /// 与上面那条一起看：一个是「走对了分支」，一个是「路径拼对了」。
+    /// 少了这条的话，把 `{session_id}` 写成 `:session_id`（axum 0.7 的老写法）
+    /// 会让这条路由永远 404，而上面那条测试**照样绿**。
+    #[tokio::test]
+    async fn the_attach_route_is_actually_mounted() {
+        let st = AgentState::new(
+            std::sync::Arc::new(NeverRunning),
+            reqwest::Client::new(),
+            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
+        );
+        let resp = router(st)
+            .oneshot(
+                Request::builder()
+                    .uri("/sandbox/runs/S1")
+                    .body(axum::body::Body::empty())
+                    .expect("构造请求不该失败"),
+            )
+            .await
+            .expect("router 的错误类型是 Infallible");
+        assert_ne!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "路径没挂上 —— 客户端会看到「这个会话没在跑」，而它其实在跑"
+        );
     }
 }
