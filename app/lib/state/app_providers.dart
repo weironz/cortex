@@ -38,6 +38,7 @@ import '../core/settings_store.dart';
 import '../core/local_agent.dart';
 import '../models/account.dart';
 import '../models/health_status.dart';
+import '../models/mcp.dart';
 import '../models/workspace.dart';
 import 'auth_controller.dart';
 
@@ -712,6 +713,26 @@ final localWorkspaceRootProvider = FutureProvider<LocalWorkspaceRoot>((
     return await api.localWorkspaceRoot();
   } on CortexApiException {
     return LocalWorkspaceRoot.empty;
+  }
+});
+
+/// 这台机器上接着的那些 MCP server。
+///
+/// # 取不到时**回「没有」而不是抛**
+///
+/// 与 [localWorkspaceRootProvider] 同一条理由：Web 端与旧版本的本地 agent
+/// 必然拿不到这几条路由，而那不是故障。让它抛的话，MCP 那一页得自己判一次
+/// 「这个错是不是其实正常」，而判漏就会在 Web 上弹一个红框说 MCP 取不到。
+///
+/// 「没有」与「有但一台都没配」用 `path` 区分：前者是空串（这个后端答不了），
+/// 后者有真实路径（答得了，只是列表空）—— 界面上那是两句完全不同的话。
+final mcpConfigProvider = FutureProvider<McpConfigView>((ref) async {
+  if (!kLocalAgentSupported) return McpConfigView.empty;
+  final api = ref.watch(cortexApiProvider);
+  try {
+    return await api.mcpConfig();
+  } on CortexApiException {
+    return McpConfigView.empty;
   }
 });
 

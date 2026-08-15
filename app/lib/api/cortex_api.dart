@@ -6,6 +6,7 @@ import '../import/import_source.dart';
 import '../models/account.dart';
 import '../models/auth_tokens.dart';
 import '../models/llm_key_status.dart';
+import '../models/mcp.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
 import '../models/chat_event.dart';
@@ -295,6 +296,46 @@ abstract interface class CortexApi {
   /// 客户端有两个（这个和 CLI），写两遍就会漂成两种。
   Future<String?> autoBindLocalWorkspace(String id);
 
+  // ── MCP ────────────────────────────────────────────
+  //
+  // 这一族与上面的工作空间同类：**设备本地**。配置文件在这台机器上、
+  // 子进程也在这台机器上跑，cortexd 两样都没有 —— 所以 Web 端会拿到 404，
+  // 调用方按「这个后端没有本机 MCP」处理。
+
+  /// `GET /local/mcp` — 配置 + 逐台状态 + 每台的工具。
+  Future<McpConfigView> mcpConfig();
+
+  /// `PUT /local/mcp/servers/{name}` — 加一台或改一台，落盘后立刻重连。
+  ///
+  /// [config] 是原样的传输配置（`command`/`args`/`env` 或 `url`/`headers`）。
+  /// **env 是合并的**：没给的保持原样，要删的列进 [removeEnv] —— 客户端手上
+  /// 从来没有过旧的值（服务端只回名字），所以做不了替换。
+  Future<McpConfigView> saveMcpServer({
+    required String name,
+    required Map<String, dynamic> config,
+    String trust = 'ask',
+    bool disabled = false,
+    List<String> removeEnv = const [],
+  });
+
+  /// `DELETE /local/mcp/servers/{name}`
+  Future<McpConfigView> deleteMcpServer(String name);
+
+  /// `POST /local/mcp/reload` — 重读文件、重新连。
+  ///
+  /// 用户手编过配置之后要有一条路能生效，否则「配置文件在这里」那句话
+  /// 就是假的：告诉了位置，却要重启才算数。
+  Future<McpConfigView> reloadMcp();
+
+  /// `POST /local/mcp/parse` — 粘一段进来，看看会变成什么。**不落盘**。
+  ///
+  /// 与落盘分成两步是刻意的：加一台 MCP server = 在这台机器上跑任意进程，
+  /// 中间必须有一屏让用户看到那条命令行原文。
+  Future<List<McpParsedServer>> parseMcpPaste(String text);
+
+  /// `GET /local/mcp/registry?q=` — 代查官方 MCP 注册表。
+  Future<List<McpRegistryEntry>> searchMcpRegistry(String query);
+
   /// `PATCH /sessions/{id}` — rename, archive, bind a workspace.
   ///
   /// The three fields are independent and all optional; only what is passed is
@@ -474,6 +515,41 @@ mixin LocalWorkspaceUnsupported {
   }) async => throw _absent;
 
   Future<String?> autoBindLocalWorkspace(String id) async => throw _absent;
+}
+
+/// 同上，给 MCP 那几条用。
+///
+/// 与 [LocalWorkspaceUnsupported] 分开而不是并进去：那个名字说的是
+/// 「没有本地工作空间」，把 MCP 塞进去之后，下一个读到 `with` 那一行的人
+/// 会以为这个替身只是不能绑目录。名字与它承诺的事对不上，是这一类 mixin
+/// 最容易积累的债。
+///
+/// 与那边同一条禁令：**不要用在真实客户端上**。
+mixin LocalMcpUnsupported {
+  static const _absent = CortexApiException(
+    '这个后端没有本机 MCP。',
+    statusCode: 404,
+  );
+
+  Future<McpConfigView> mcpConfig() async => throw _absent;
+
+  Future<McpConfigView> saveMcpServer({
+    required String name,
+    required Map<String, dynamic> config,
+    String trust = 'ask',
+    bool disabled = false,
+    List<String> removeEnv = const [],
+  }) async => throw _absent;
+
+  Future<McpConfigView> deleteMcpServer(String name) async => throw _absent;
+
+  Future<McpConfigView> reloadMcp() async => throw _absent;
+
+  Future<List<McpParsedServer>> parseMcpPaste(String text) async =>
+      throw _absent;
+
+  Future<List<McpRegistryEntry>> searchMcpRegistry(String query) async =>
+      throw _absent;
 }
 
 mixin LlmKeyUnsupported {

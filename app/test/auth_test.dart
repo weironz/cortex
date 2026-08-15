@@ -505,7 +505,11 @@ class _MockConfig extends AppConfigNotifier {
 }
 
 /// A daemon stand-in for the gate: only `/health` and `/auth/ticket` matter.
-class _GateApi with LlmKeyUnsupported, AccountUnsupported, LocalWorkspaceUnsupported
+class _GateApi with
+        LlmKeyUnsupported,
+        AccountUnsupported,
+        LocalWorkspaceUnsupported,
+        LocalMcpUnsupported
     implements CortexApi {
   _GateApi({
     this.auth = 'token',

@@ -470,7 +470,11 @@ class _LiveConfig extends AppConfigNotifier {
 
 /// A daemon stand-in for the confirmation surface.
 class _ConfirmApi
-    with LlmKeyUnsupported, AccountUnsupported, LocalWorkspaceUnsupported
+    with
+        LlmKeyUnsupported,
+        AccountUnsupported,
+        LocalWorkspaceUnsupported,
+        LocalMcpUnsupported
     implements CortexApi {
   _ConfirmApi({
     this.accept = true,
