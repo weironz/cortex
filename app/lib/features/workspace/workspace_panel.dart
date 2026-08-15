@@ -71,10 +71,12 @@ class WorkspacePanel extends ConsumerWidget {
           // 是一个实现细节的名字 —— 它既不告诉他里面有什么，也让他以为
           // 需要先做点什么才能用
           title: sandboxOnly ? '文件' : (workspace?.displayName ?? '文件'),
-          subtitle: sandboxOnly
-              ? 'agent 读写的就是这些，跨会话保留'
-              : workspace?.root,
-          leading: Icon(Icons.folder_rounded, size: 15, color: scheme.secondary),
+          subtitle: sandboxOnly ? 'agent 读写的就是这些，跨会话保留' : workspace?.root,
+          leading: Icon(
+            Icons.folder_rounded,
+            size: 15,
+            color: scheme.secondary,
+          ),
           actions: [
             // 云端那一支没有「更换工作区」可点 —— 那儿的根是服务端定的
             if (!sandboxOnly && session != null)
@@ -453,29 +455,31 @@ class WorkspaceChip extends ConsumerWidget {
         .read(chatControllerProvider.notifier)
         .isCloudByChoice(session.id);
 
-    final (IconData icon, String label, String tip, Color color) =
-        switch ((workspace, cloud)) {
-          (final w?, _) => (
-            Icons.folder_rounded,
-            w.displayName,
-            '这次对话的文件都在 ${w.root}\n点击更换',
-            scheme.secondary,
-          ),
-          // 还没定：草稿会在第一句话之前自动开一个按日期时间命名的文件夹，
-          // 而**已经开过口**的会话不会 —— 那时说「新建工作区」就是句空话
-          (null, false) when session.isLocalDraft => (
-            Icons.auto_awesome_outlined,
-            '新建工作区',
-            '发出第一句话时，会在默认工作空间下建一个以当前时间命名的文件夹。\n点击改成别的。',
-            scheme.onSurfaceVariant,
-          ),
-          (null, _) => (
-            Icons.cloud_outlined,
-            '云端',
-            '这次对话跑在远端 agent 的容器里，任何设备上都能接着聊。\n点击改成本机目录。',
-            scheme.onSurfaceVariant,
-          ),
-        };
+    final (IconData icon, String label, String tip, Color color) = switch ((
+      workspace,
+      cloud,
+    )) {
+      (final w?, _) => (
+        Icons.folder_rounded,
+        w.displayName,
+        '这次对话的文件都在 ${w.root}\n点击更换',
+        scheme.secondary,
+      ),
+      // 还没定：草稿会在第一句话之前自动开一个按日期时间命名的文件夹，
+      // 而**已经开过口**的会话不会 —— 那时说「新建工作区」就是句空话
+      (null, false) when session.isLocalDraft => (
+        Icons.auto_awesome_outlined,
+        '新建工作区',
+        '发出第一句话时，会在默认工作空间下建一个以当前时间命名的文件夹。\n点击改成别的。',
+        scheme.onSurfaceVariant,
+      ),
+      (null, _) => (
+        Icons.cloud_outlined,
+        '云端',
+        '这次对话跑在远端 agent 的容器里，任何设备上都能接着聊。\n点击改成本机目录。',
+        scheme.onSurfaceVariant,
+      ),
+    };
 
     return Tooltip(
       message: tip,
@@ -700,9 +704,7 @@ class _WorkspaceSheet extends StatelessWidget {
             ListTile(
               leading: const Icon(Icons.cloud_outlined),
               title: const Text('云端'),
-              subtitle: const Text(
-                '跑在远端 agent 的容器里，任何设备上都能接着聊',
-              ),
+              subtitle: const Text('跑在远端 agent 的容器里，任何设备上都能接着聊'),
               onTap: () => Navigator.of(context).pop(const _Cloud()),
             ),
             if (named.isNotEmpty) ...[
@@ -711,10 +713,7 @@ class _WorkspaceSheet extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Text(
-                    '默认工作空间下已有的',
-                    style: theme.textTheme.labelSmall,
-                  ),
+                  child: Text('默认工作空间下已有的', style: theme.textTheme.labelSmall),
                 ),
               ),
               for (final name in named)

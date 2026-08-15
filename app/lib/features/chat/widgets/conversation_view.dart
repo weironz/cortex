@@ -237,11 +237,7 @@ class _StreamingBubble extends ConsumerWidget {
       chatControllerProvider.select((s) => s.streaming?.toolCalls ?? const []),
     );
 
-    return AssistantBlock(
-      text: text,
-      toolCalls: tools,
-      streaming: true,
-    );
+    return AssistantBlock(text: text, toolCalls: tools, streaming: true);
   }
 }
 

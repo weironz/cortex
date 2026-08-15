@@ -144,10 +144,7 @@ void main() {
     });
 
     test('存下来的状态在启动时被读回来', () async {
-      final c = boot({
-        'left_pane_collapsed': 'true',
-        'right_panel': 'files',
-      });
+      final c = boot({'left_pane_collapsed': 'true', 'right_panel': 'files'});
       addTearDown(c.dispose);
       // **先读一次把 provider 造出来**，再 settle。provider 是懒的：
       // 不碰它，`build()` 就没跑，那个排 `_restore` 的微任务也就不存在，

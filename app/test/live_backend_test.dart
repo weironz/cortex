@@ -749,7 +749,8 @@ void main() {
           isTrue,
         ),
       ),
-      reason: '确认回路在 agent 那一侧：桌面端问本机 cortex-local，'
+      reason:
+          '确认回路在 agent 那一侧：桌面端问本机 cortex-local，'
           '云端那一轮跑在容器里而容器里的 agent 压根不问',
     );
   });

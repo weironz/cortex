@@ -122,9 +122,7 @@ class _UserBubble extends StatelessWidget {
               if (message.toolCalls.isNotEmpty)
                 Align(
                   alignment: Alignment.centerLeft,
-                  child: TurnDrawer(
-                    toolCalls: message.toolCalls,
-                  ),
+                  child: TurnDrawer(toolCalls: message.toolCalls),
                 ),
             ],
           ),
@@ -227,10 +225,7 @@ class AssistantBlock extends StatelessWidget {
                         const _Caret(),
                     ],
                     if (error != null) _ErrorNote(error: error!),
-                    TurnDrawer(
-                      toolCalls: toolCalls,
-                      streaming: streaming,
-                    ),
+                    TurnDrawer(toolCalls: toolCalls, streaming: streaming),
                     // 这一行动作 + 元信息，贴在回答**底部左侧**。
                     //
                     // 复制原来挂在头部那一行的最右端：离正文最远的那个角，

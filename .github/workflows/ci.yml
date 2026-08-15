@@ -208,6 +208,17 @@ jobs:
       - name: flutter pub get
         run: flutter pub get
 
+      # 等价于 Rust 那边的 `cargo fmt --check`。
+      #
+      # 加它的直接原因：上一个提交里有几处断行是脚本改出来的
+      # （`class _GateApi with` 那种），人看 diff 不会注意，而它会在下一次
+      # 有人跑 `dart format` 时变成一堆与那次改动无关的噪音行。
+      #
+      # 放在 analyze **之前**：格式问题一眼能改，让它先报，省得人先去读
+      # 一屏 analyze 输出才发现真正要改的只是排版
+      - name: dart format
+        run: dart format --output=none --set-exit-if-changed lib test
+
       # 等价于 Rust 那边的 clippy。`analysis_options.yaml` 里开了额外的 lint，
       # 所以这一步不只是类型检查
       - name: flutter analyze

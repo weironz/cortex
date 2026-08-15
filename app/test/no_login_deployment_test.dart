@@ -76,11 +76,7 @@ void main() {
     final given = localAgentToken(noUser);
     final sent = apiToken(userToken: noUser, onLocalAgent: true);
 
-    expect(
-      sent,
-      isNotNull,
-      reason: '不发凭据的话，守着门的 agent 会把桌面端自己挡在外面',
-    );
+    expect(sent, isNotNull, reason: '不发凭据的话，守着门的 agent 会把桌面端自己挡在外面');
     expect(
       sent,
       given,

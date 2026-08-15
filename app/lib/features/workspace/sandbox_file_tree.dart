@@ -99,8 +99,7 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
   /// 服务端拿它查这个会话属于哪个项目，再决定读写哪个卷
   /// （`SandboxScope::key`）。漏传的后果不是报错，是**打开的是另一个
   /// 工作区** —— 未分组那个，通常是空的。而界面上看起来一切正常。
-  String? get _session =>
-      ref.read(chatControllerProvider).activeSession?.id;
+  String? get _session => ref.read(chatControllerProvider).activeSession?.id;
 
   /// 上传进行到哪一个。`null` = 没在传。
   ///

@@ -320,8 +320,9 @@ check:
 test:
     cargo test --workspace --all-features
 
-# 客户端：analyze + test，与 CI 的 `flutter` 作业同一组命令
+# 客户端：format + analyze + test，与 CI 的 `flutter` 作业同一组命令
 flutter-check:
+    cd app && dart format --output=none --set-exit-if-changed lib test
     # `live_backend_test.dart` 会去探 127.0.0.1:5173：**本机起着 `just dev`
     # 的话它就不跳过了**，而那几条要的是一个完整可用的部署。它们红了先看
     # 那个环境 —— CI 上没有那个部署，所以只有本机会撞到这一条

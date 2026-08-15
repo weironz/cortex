@@ -382,7 +382,10 @@ class ChatController extends Notifier<ChatState> {
           : await _bindProjectDir(id, project);
       if (!ref.mounted) return false;
       if (bound != null) {
-        _replaceSession(id, (s) => s.copyWith(workspace: Workspace(root: bound)));
+        _replaceSession(
+          id,
+          (s) => s.copyWith(workspace: Workspace(root: bound)),
+        );
       }
       return true;
     } on CortexApiException catch (e) {
