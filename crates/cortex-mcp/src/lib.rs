@@ -24,5 +24,5 @@
 pub mod config;
 mod hub;
 
-pub use config::{McpConfig, ServerConfig, Transport, Trust};
+pub use config::{McpConfig, ServerConfig, Transport, Trust, config_path};
 pub use hub::{McpHub, ServerStatus};

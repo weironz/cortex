@@ -128,6 +128,19 @@ impl Workspaces {
         Ok(self)
     }
 
+    /// 那个回落根本身（容器里是 `/workspace`，桌面端通常没有）。
+    ///
+    /// 只有一个用途：容器里的东西要**找持久卷在哪**。今天是
+    /// `cortex_mcp::config_path` 拿它定位 `mcp.json`。
+    ///
+    /// 返回的是[校验并规范化过][Self::with_default_root]的那份，不是命令行
+    /// 原样 —— 两处各自去读 `--default-workspace` 就会在「结尾有没有斜杠」
+    /// 这种地方分叉，而那种分叉只在部署时才现形。
+    #[must_use]
+    pub fn default_root(&self) -> Option<&str> {
+        self.default_root.as_deref()
+    }
+
     /// 这个会话绑到哪儿了。没绑就用回落根（若配了）。
     ///
     /// **不会回落到 [`Disk::root`]**：那是「在它下面建新的」的父目录，

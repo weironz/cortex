@@ -132,6 +132,78 @@ pub enum Transport {
     },
 }
 
+/// 桌面端读的用户级配置文件名。
+///
+/// 与 Claude Code 的用户作用域同义：**这台机器上我接哪些 server**。
+pub const USER_FILE: &str = "mcp.json";
+
+/// 容器里读的项目级配置文件名 —— 工作区根目录下的 `.mcp.json`。
+///
+/// 名字跟 Claude Code 的项目作用域**一模一样**，这是有意的：那个文件
+/// 本来就躺在很多人的仓库根上、且已经被提交进版本库了。同名意味着
+/// 「把项目搬进云沙箱」这件事**不需要用户再配一遍**。
+pub const PROJECT_FILE: &str = ".mcp.json";
+
+/// 这个进程的 MCP 配置该从哪儿读。
+///
+/// # 桌面端读用户目录，容器里读工作区根
+///
+/// 直觉上「容器里也读用户目录」是能工作的 —— 沙箱镜像把
+/// `XDG_DATA_HOME` 指进了 `/workspace/.cortex/state`，那个文件确实能
+/// 持久下来。**但没人写得进去**：那条路径长这样
+///
+/// ```text
+/// /workspace/.cortex/state/cortex/users/usr_01JQZ.../mcp.json
+/// ```
+///
+/// 里头嵌着一个用户事先不知道的 ULID，而且那是**进程自己管的状态目录**
+/// （outbox、工作区绑定都在里面），不是给人手写配置的地方。
+///
+/// 工作区根则相反：路径就是项目根，能提交进版本库，跟着项目走。
+/// 同一个人的两个项目想接不同的 server 是常态，而容器与卷本来就按项目分。
+///
+/// # 判据是 `ExecEnvironment`，不是「哪个文件存在」
+///
+/// 「存在就读」看着更宽容，实际是把两种部署形态的差别藏进一次文件系统
+/// 探测：桌面端哪天在工作区里出现一个 `.mcp.json`（clone 下来的仓库自带
+/// 一个，很常见），它就会**悄悄顶掉**用户自己那份。
+///
+/// 同一条教训在客户端的 `resolveBase` 上吃过一次：两处各判各的，就会
+/// 出现「以为配上了但读的是另一个文件」，而那不报错。
+///
+/// # 桌面端**也不合并**读项目那份 —— 这条比上面那条更硬
+///
+/// Claude Code 是两个作用域都读的，但它在用项目那份之前**会问一次**。
+/// 我们还没有那个询问界面，于是合并等于：clone 一个陌生仓库、绑上工作区，
+/// 它自带的 `.mcp.json` 就在用户的真机上拉起了子进程 —— 没人点过同意。
+///
+/// 容器里没有这个问题：那本来就是隔离出来跑不受信代码的地方。
+/// 等有了询问界面（见 roadmap 的 MCP 设置页），桌面端再合并也不迟。
+///
+/// # 工作区是用户可写的 —— 这不扩大攻击面
+///
+/// 也就是说 agent 能改自己下一轮加载哪些 server。但沙箱里本来就有
+/// `shell`，`npx` 想跑现在就能跑 —— 配置文件只是把「谁决定」从即兴改成
+/// 显式。而且外来工具一律 [`Risk::Execute`]（见
+/// `cortex_agent::ToolSpec::external`），本来就每次都要过闸门。
+///
+/// # 容器里没有工作区时回落到用户目录
+///
+/// 那是装配错误（agentd 一定会传 `CORTEX_DEFAULT_WORKSPACE=/workspace`），
+/// 回落的结果是读一个不存在的文件 = 没有 MCP。**这正是想要的降级**：
+/// 一个装配不全的容器不该因为读不到配置而起不来。
+#[must_use]
+pub fn config_path(
+    env: cortex_agent::ExecEnvironment,
+    user_dir: &Path,
+    workspace: Option<&Path>,
+) -> std::path::PathBuf {
+    match (env, workspace) {
+        (cortex_agent::ExecEnvironment::Container, Some(ws)) => ws.join(PROJECT_FILE),
+        _ => user_dir.join(USER_FILE),
+    }
+}
+
 impl McpConfig {
     /// 从一个文件读。文件不存在 = 空配置，**不是错误**。
     ///
@@ -240,6 +312,47 @@ mod tests {
         assert!(
             e.to_string().contains("解析失败"),
             "错误信息要说清是解析问题：{e}"
+        );
+    }
+
+    /// 容器读工作区，桌面端读用户目录 —— **两个方向都要断言**。
+    ///
+    /// 只测容器那一支的话，把整个函数写成「永远返回工作区」也能过，
+    /// 而那会让桌面端用户自己那份 `mcp.json` 静默失效。
+    #[test]
+    fn a_container_reads_the_workspace_and_a_desktop_reads_the_user_dir() {
+        use cortex_agent::ExecEnvironment::{Container, LocalMachine, None as NoEnv};
+        let user = Path::new("/home/u/.cortex/01J");
+        let ws = Path::new("/workspace");
+
+        assert_eq!(
+            config_path(Container, user, Some(ws)),
+            ws.join(".mcp.json"),
+            "云端会话的配置必须落在项目根上 —— 用户目录那条路径里嵌着 \
+             他不知道的 ULID，写不进去"
+        );
+        for env in [LocalMachine, NoEnv] {
+            assert_eq!(
+                config_path(env, user, Some(ws)),
+                user.join("mcp.json"),
+                "桌面端即便绑了工作区也读用户目录 —— 否则 clone 下来的仓库 \
+                 自带一个 .mcp.json 就会悄悄顶掉用户自己那份"
+            );
+        }
+    }
+
+    /// 容器里没有工作区 = 配置错误，回落成「没有 MCP」而不是起不来。
+    #[test]
+    fn a_container_without_a_workspace_degrades_instead_of_failing() {
+        use cortex_agent::ExecEnvironment::Container;
+        let user = Path::new("/tmp/ephemeral");
+        assert_eq!(config_path(Container, user, None), user.join(USER_FILE));
+        // 那个路径在容器里不存在，而不存在 = 空配置（见 load 的文档）
+        assert!(
+            McpConfig::load(&config_path(Container, user, None))
+                .expect("读不到就是没配，不该是错误")
+                .servers
+                .is_empty()
         );
     }
 

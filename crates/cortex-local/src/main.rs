@@ -229,9 +229,16 @@ async fn main() -> anyhow::Result<()> {
     // 写的、跑在别人网络上的东西，把自己的可用性绑在它们全部可用上，
     // 是把控制权交出去。
     //
-    // 配置在 `<数据目录>/mcp.json`，形状与 Claude Code 的一致 ——
-    // 用户手上已经有那些文件了。
-    let mcp_path = user_dir.join("mcp.json");
+    // 配置文件的形状与 Claude Code 一致 —— 用户手上已经有那些文件了。
+    // **读哪一个**由执行环境决定，见 `cortex_mcp::config_path`：桌面端读
+    // 用户目录下的 `mcp.json`，容器里读工作区根上的 `.mcp.json`（连文件名
+    // 都跟 Claude Code 的项目作用域一样，仓库里那份直接就生效）。
+    let mcp_path = cortex_mcp::config_path(
+        args.exec_env,
+        &user_dir,
+        workspaces.default_root().map(std::path::Path::new),
+    );
+    tracing::debug!(path = %mcp_path.display(), "MCP 配置");
     let mcp = cortex_mcp::McpConfig::load(&mcp_path)?;
     let mcp = Arc::new(cortex_mcp::McpHub::connect(&mcp).await);
     for st in mcp.status() {
