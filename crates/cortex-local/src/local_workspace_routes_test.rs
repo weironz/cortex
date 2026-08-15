@@ -39,6 +39,7 @@ fn state(dir: &Path) -> LocalState {
     let engine = Engine {
         mcp: Arc::new(cortex_mcp::McpHub::empty()),
         mcp_path: Arc::from(dir.join("mcp.json").as_path()),
+        runs: crate::runs::Runs::new(),
         remote: remote.clone(),
         llm: Arc::new(llm),
         confirms: Arc::new(ConfirmRegistry::from_env().expect("默认超时可用")),

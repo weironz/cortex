@@ -29,6 +29,7 @@ fn state(dir: &Path) -> LocalState {
     let engine = Engine {
         mcp: Arc::new(cortex_mcp::McpHub::empty()),
         mcp_path: Arc::from(dir.join("mcp.json").as_path()),
+        runs: crate::runs::Runs::new(),
         remote: remote.clone(),
         llm: Arc::new(llm),
         confirms: Arc::new(ConfirmRegistry::from_env().expect("默认超时可用")),
@@ -307,5 +308,83 @@ async fn 解析会指出这个名字已经被占了() {
     assert_eq!(
         body[0]["conflicts"], true,
         "同名要标成冲突，界面据此提示「会覆盖」：{body}"
+    );
+}
+
+// ── 轮次那两条 ────────────────────────────────────────
+//
+// 与上面同一套手法（不开端口，见文件头）。`runs.rs` 的单测覆盖的是登记簿
+// 的逻辑，而路由仍可能是死的 —— 路径拼错、方法挂反、字段名与客户端读的
+// 那个不一致，症状都是「界面上什么也没发生」。
+
+/// 没有轮次在跑时：列表是空的，挂一个不存在的回 404。
+///
+/// 404 **不是错误**：绝大多数会话此刻都没在跑。客户端按「照常拉历史」
+/// 处理，所以这个状态码必须是它认得的那个。
+#[tokio::test]
+async fn 没有轮次时列表为空且重挂回_404() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let st = state(dir.path());
+
+    let (status, body) = call(&st, "GET", "/runs", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["runs"].as_array().is_some_and(Vec::is_empty),
+        "没跑就是空列表，不是错误：{body}"
+    );
+
+    let (status, _) = call(&st, "GET", "/runs/nope", None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "挂一个没在跑的会话该是 404 —— 客户端据此回退到照常拉历史"
+    );
+}
+
+/// 跑着的那条**列得出来**，而且挂得上。
+///
+/// 直接往登记簿里放一轮（不真跑 agent —— 那要 LLM）：这条验的是
+/// 登记簿到 HTTP 这一段接对了没有。
+#[tokio::test]
+async fn 跑着的轮次列得出来也挂得上() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let st = state(dir.path());
+
+    let run = st.engine.runs.begin("S9").await.expect("开一轮");
+    crate::runs::RunSink::new(run)
+        .send(cortex_proto::dto::ChatEvent::Delta {
+            text: "在写了".into(),
+        })
+        .await;
+
+    let (status, body) = call(&st, "GET", "/runs", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = body["runs"].as_array().expect("runs 得是数组");
+    assert_eq!(runs.len(), 1, "刚开的那一轮要列出来：{body}");
+    assert_eq!(runs[0]["session_id"], "S9");
+    assert!(
+        runs[0]["started_at"].is_string(),
+        "得带开始时间 —— 界面要显示「已经跑了多久」：{body}"
+    );
+
+    // 重挂那条是 SSE，`call` 会把整个 body 读完（流没结束就读不完），
+    // 所以这里只验状态码与内容类型
+    let resp = crate::routes::router(st.clone())
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/runs/S9")
+                .body(Body::empty())
+                .expect("构造请求"),
+        )
+        .await
+        .expect("Infallible");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("text/event-stream")),
+        "重挂必须是 SSE —— 客户端拿它当流读，回成 JSON 的话它会一直等"
     );
 }

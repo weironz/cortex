@@ -33,6 +33,7 @@ mod provider;
 mod proxy;
 mod remote;
 mod routes;
+mod runs;
 mod state;
 mod supervise;
 mod turn;
@@ -249,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
     let engine = Arc::new(Engine {
         mcp,
         mcp_path: Arc::from(mcp_path.as_path()),
+        runs: runs::Runs::new(),
         remote: remote.clone(),
         llm: Arc::new(llm),
         confirms: Arc::new(ConfirmRegistry::from_env()?),

@@ -228,6 +228,11 @@ pub struct Engine {
     /// 而且 Claude Code 也可能在改同一个文件）。在内存里留一份副本就会
     /// 有「界面显示的和文件里的不是一回事」的窗口。
     pub mcp_path: Arc<std::path::Path>,
+    /// 正在跑（与刚跑完）的那些轮次。见 [`crate::runs`]。
+    ///
+    /// 放 `Engine` 而不是 `LocalState`：它与一轮的生命周期同生共死，
+    /// 而 `Engine` 正是「跑一轮所需的全部依赖」。
+    pub runs: crate::runs::Runs,
     pub max_rounds: usize,
     /// 模型的上下文窗口，决定历史能占多少 token（见 [`cortex_core::history`]）。
     ///
@@ -246,12 +251,33 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// 跑一轮，事件从返回的 channel 出来。
+    /// 跑一轮。事件同时进重放缓冲与广播，见 [`crate::runs`]。
     ///
-    /// 与 cortexd 的形状刻意一致（`mpsc::Receiver<ChatEvent>`），
-    /// 这样 `/chat` 那个 handler 两边可以长得一模一样。
-    pub fn chat(self: &Arc<Self>, req: ChatRequest) -> mpsc::Receiver<ChatEvent> {
-        let (tx, rx) = mpsc::channel(64);
+    /// # 为什么不再直接回一个 `mpsc::Receiver`
+    ///
+    /// 那样发起的那条连接拿到的是**唯一**一份事件流：它一断，事件就发往
+    /// 一个被丢弃的 channel，谁也接不回去。改成登记 + 广播之后，
+    /// 发起方与后来重挂的人订阅的是同一份 —— 于是不存在「实时那条看得见、
+    /// 重挂那条看不见」的字段。
+    ///
+    /// # Errors
+    /// 这个会话已经有一轮在跑。见 [`crate::runs::Runs::begin`]。
+    pub async fn chat(
+        self: &Arc<Self>,
+        req: ChatRequest,
+    ) -> Result<
+        (Vec<ChatEvent>, tokio::sync::broadcast::Receiver<ChatEvent>),
+        crate::runs::AlreadyRunning,
+    > {
+        let session_id = req.session_id.clone();
+        let run = self.runs.begin(&session_id).await?;
+        // 先订阅再起 task：反过来的话，任务开头那几条事件会发在订阅之前
+        let (replay, rx, _) = self
+            .runs
+            .attach(&session_id)
+            .await
+            .expect("刚 begin 出来的这一条必然还在");
+        let tx = Arc::new(crate::runs::RunSink::new(run));
         let engine = Arc::clone(self);
         tokio::spawn(async move {
             let run = engine.run_turn(req, &tx);
@@ -283,11 +309,10 @@ impl Engine {
                 tx.send(ChatEvent::Error {
                     message: e.to_string(),
                 })
-                .await
-                .ok();
+                .await;
             }
         });
-        rx
+        Ok((replay, rx))
     }
 
     /// 取这个会话最近的若干轮，铺在本轮之前。
@@ -338,7 +363,7 @@ impl Engine {
     async fn run_turn(
         self: &Arc<Self>,
         req: ChatRequest,
-        tx: &mpsc::Sender<ChatEvent>,
+        tx: &Arc<crate::runs::RunSink>,
     ) -> Result<()> {
         // ── 0. 取会话历史 ──
         //
@@ -382,8 +407,7 @@ impl Engine {
             tx.send(ChatEvent::Memory {
                 facts: memories.clone(),
             })
-            .await
-            .ok();
+            .await;
         }
 
         // ── 2. 渲染注入块 —— 用与 cortexd **同一个**函数 ──
@@ -458,7 +482,7 @@ impl Engine {
 
         let host = LocalHost {
             remote: self.remote.clone(),
-            events: tx.clone(),
+            events: Arc::clone(tx),
             session_id: req.session_id.clone(),
             confirms: Arc::clone(&self.confirms),
             mcp: Arc::clone(&self.mcp),
@@ -482,8 +506,7 @@ impl Engine {
                 tx.send(ChatEvent::Error {
                     message: format!("模型返回出错：{e}"),
                 })
-                .await
-                .ok();
+                .await;
                 // 半截回答不落库：它下一轮会被当成事实抽取
                 String::new()
             }
@@ -533,8 +556,7 @@ impl Engine {
         tx.send(ChatEvent::Done {
             episode_id: assistant_id,
         })
-        .await
-        .ok();
+        .await;
         Ok(())
     }
 
@@ -545,7 +567,7 @@ impl Engine {
     async fn queue_offline(
         &self,
         ep: &NewEpisodeRequest,
-        tx: &mpsc::Sender<ChatEvent>,
+        tx: &crate::runs::RunSink,
         cause: &CortexError,
     ) -> Result<()> {
         self.outbox.push(ep)?;
@@ -556,8 +578,7 @@ impl Engine {
                 self.outbox.backlog()
             ),
         })
-        .await
-        .ok();
+        .await;
         Ok(())
     }
 
@@ -629,7 +650,7 @@ fn memory_item_of(f: &FactDto) -> injection::MemoryItem {
 /// `ToolResult` 带成败，两者严格交替，所以按工具名记住上一次的路径即可。
 async fn bridge_events(
     arx: &mut mpsc::Receiver<AgentEvent>,
-    tx: &mpsc::Sender<ChatEvent>,
+    tx: &crate::runs::RunSink,
 ) -> Vec<ToolCallInput> {
     let mut pending_path: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
@@ -672,11 +693,11 @@ async fn bridge_events(
                 }
             }
         };
-        // 下游断开只该停止**转发**，不该丢掉已记下的工具调用 ——
-        // 那一轮该记什么，与谁还看着无关
-        if tx.send(out).await.is_err() {
-            break;
-        }
+        // **不再有「下游断开」这回事。** 事件进的是这一轮的重放缓冲
+        // （见 `crate::runs`），谁在看是另一回事 —— 上一版在这里 `break`，
+        // 也就是说没人看的时候连工具调用都不再记，而注释写的恰恰是
+        // 「那一轮该记什么，与谁还看着无关」
+        tx.send(out).await;
     }
     recorded
 }
@@ -692,7 +713,7 @@ fn tool_path(args: &serde_json::Value) -> Option<String> {
 /// agent 循环要的宿主能力。
 struct LocalHost {
     remote: Remote,
-    events: mpsc::Sender<ChatEvent>,
+    events: Arc<crate::runs::RunSink>,
     session_id: String,
     confirms: Arc<ConfirmRegistry>,
     grants: crate::grants::Grants,
@@ -770,11 +791,21 @@ impl ToolHost for LocalHost {
             // 补拉走 GET /confirmations，两条都要带
             diff: req.diff.map(str::to_string),
         };
-        if self.events.send(ask).await.is_err() {
-            tracing::info!(tool = req.tool, "客户端已断开，确认请求发不出去");
-            return Approval::Unanswered;
-        }
-        pending.wait(self.events.closed()).await
+        self.events.send(ask).await;
+
+        // ── 不再因为「此刻没人连着」就放弃 ──
+        //
+        // 上一版这里做两件事：发不出去就当没人答，以及等待期间客户端一断开
+        // 就取消。两条的前提都是「事件流断了 = 人走了 = 不会有人回答」。
+        //
+        // 重挂做完之后那个前提不成立了：人关掉标签页去开会，回来重新挂上
+        // 这一轮，从 `GET /confirmations` 拉到这条待确认，照样能答。
+        // 提前放弃等于把一个本来能被答复的确认改成「按拒绝处理」——
+        // 而那一步之后 agent 会绕路或者放弃，用户回来看到的是一轮白跑。
+        //
+        // 剩下的保护是超时（`ConfirmRegistry::timeout`），它本来就在，
+        // 且不依赖任何关于「谁还看着」的猜测。
+        pending.wait(std::future::pending()).await
     }
 }
 

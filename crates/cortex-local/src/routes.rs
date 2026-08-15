@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::confirm::AnswerOutcome;
 use axum::{
     Json, Router,
-    extract::{Query, Request, State},
+    extract::{Path, Query, Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{
@@ -86,6 +86,11 @@ pub fn router(state: LocalState) -> Router {
         // 中间必须有一屏让用户看到那条命令行原文。见 local_mcp::parse
         .route("/local/mcp/parse", post(local_mcp::parse))
         .route("/local/mcp/registry", get(local_mcp::registry))
+        // 正在跑的轮次。**不带 `/local` 前缀**：容器里的这个进程也要答它，
+        // 而那一侧对外的名字是 `/sandbox/runs/...`（agentd 转进来）——
+        // 两处指的是同一件事，路径前缀由各自的宿主决定
+        .route("/runs", get(list_runs))
+        .route("/runs/{session_id}", get(attach_run))
         // WebSocket 升级走不了普通反代（那条路把 `upgrade` 头当逐跳首部剥了）。
         // 见 [`crate::ws_proxy`]
         .route("/ws", get(ws_proxy::handler))
@@ -267,12 +272,44 @@ fn bad_request(message: String) -> Response {
 }
 
 /// 在这台机器上跑这一轮。
-async fn chat_here(
-    st: LocalState,
-    req: ChatRequest,
+async fn chat_here(st: LocalState, req: ChatRequest) -> Response {
+    match st.engine.chat(req).await {
+        Ok((replay, rx)) => sse(replay, rx).into_response(),
+        // 409 而不是 400：请求本身没问题，是**这个会话此刻的状态**不允许。
+        // 客户端据此说「这个会话正在跑」并去重挂，而不是说「请求有误」
+        Err(crate::runs::AlreadyRunning) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "这个会话已经有一轮在跑了。等它跑完，或者挂上去看它跑到哪儿了。"
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// 把「重放 + 后续」拼成一条 SSE。
+///
+/// **两段拼接而不是两个端点**：客户端只处理一种流，重挂与新发一模一样 ——
+/// 两条路各写一遍解析的话，其中一条必然少处理一种事件。
+fn sse(
+    replay: Vec<ChatEvent>,
+    rx: tokio::sync::broadcast::Receiver<ChatEvent>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let rx = st.engine.chat(req);
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(|ev| {
+    use tokio_stream::wrappers::BroadcastStream;
+
+    let live = BroadcastStream::new(rx).filter_map(|r| match r {
+        Ok(ev) => Some(ev),
+        // 这个订阅者太慢，中间那段被覆盖了。**照实说** —— 客户端据此
+        // 重新 attach（重放缓冲是完整的），而静默跳过会让它显示一段
+        // 缺了中间的回答，且看不出缺了
+        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+            Some(ChatEvent::Error {
+                message: format!("跟不上这一轮的输出，漏了 {n} 条事件。重新打开这个会话可以补齐。"),
+            })
+        }
+    });
+
+    let stream = futures::stream::iter(replay).chain(live).map(|ev| {
         let json = serde_json::to_string(&ev).unwrap_or_else(|e| {
             serde_json::to_string(&ChatEvent::Error {
                 message: format!("事件序列化失败：{e}"),
@@ -286,6 +323,31 @@ async fn chat_here(
             .interval(Duration::from_secs(15))
             .text("ping"),
     )
+}
+
+/// `GET /runs` —— 这个进程上还在跑的那些轮次。
+async fn list_runs(State(st): State<LocalState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "runs": st.engine.runs.running().await }))
+}
+
+/// `GET /runs/{session_id}` —— 挂上一个正在跑（或刚跑完）的轮次。
+///
+/// # 这条路是「关掉浏览器活还在干」唯一看得见的出口
+///
+/// 轮次本来就跑在一个独立的 task 里，客户端断开不影响它。缺的一直是
+/// **回来的路**：事件发往一个被丢弃的 channel，人回来只能等 episode 落库。
+///
+/// 404 = 这个会话此刻没有轮次（没跑、或者跑完超过保留期）。那不是错误，
+/// 客户端按「照常拉历史」处理。
+async fn attach_run(State(st): State<LocalState>, Path(session_id): Path<String>) -> Response {
+    match st.engine.runs.attach(&session_id).await {
+        Some((replay, rx, _running)) => sse(replay, rx).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "这个会话现在没有正在跑的轮次。" })),
+        )
+            .into_response(),
+    }
 }
 
 /// 确认回执。**只问本地这本簿子** —— 现在没有第二本了。
