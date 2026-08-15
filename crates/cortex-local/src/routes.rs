@@ -249,11 +249,44 @@ async fn chat(State(st): State<LocalState>, req: Request) -> Response {
     // 「这段时间不会有记忆」，「也够不到云端工作区」是同一个代价，
     // 由界面上那条常驻横幅统一说明，不逐轮重复。
     if !st.standalone_llm && st.engine.workspaces.get(&parsed.session_id).is_none() {
-        // 这个会话不在这台机器上。把原样的请求送回 cortexd —— 它那边知道
-        // 该进哪个沙箱（或者告诉我们这个会话钉在别处）
+        // 这个会话不在这台机器上。把原样的请求送回**部署入口** —— 那边知道
+        // 该进哪个沙箱（或者告诉我们这个会话钉在别处）。
+        //
+        // ⚠️ 「那边」是**边缘**（dev 的 nginx / prod 的 traefik），不是记忆服务。
+        // 拆成 cortexd + agentd 之后 `/chat` 归 agentd，而只有边缘知道这件事。
         let mut fwd = Request::from_parts(parts, axum::body::Body::from(bytes));
         *fwd.uri_mut() = "/chat".parse().expect("常量路径可解析");
-        return proxy::forward(State(st), fwd).await;
+        let resp = proxy::forward(State(st.clone()), fwd).await;
+
+        // ── 404 = 数据源指错了地方，不是「会话不存在」──
+        //
+        // 真机上撞到过一次，症状极难归因：在浏览器里聊过的会话，切到桌面端
+        // 一发消息就失败，界面只有一句「POST /chat 失败」，本地 agent 的日志
+        // 里**一行都没有**（请求根本没进 handler，是转发出去之后回来的）。
+        //
+        // 原因是数据源填成了记忆服务本身（`http://…:8080`）。它拆分前确实
+        // 提供 `/chat`，拆分后不再提供，于是回一个**空 body 的 404** ——
+        // 一个不含任何线索的状态码，原样透给客户端就成了那句没用的提示。
+        //
+        // 这里把它翻译成人话。判据只用状态码：body 是空的，没有别的可依据；
+        // 而 `/chat` 这条路上，404 除了「对端没有这条路由」没有第二种含义
+        // （会话不存在时那边回的是 4xx 带正文，或者干脆新建）。
+        if resp.status() == StatusCode::NOT_FOUND {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "这一轮要在云端跑，但数据源 {} 上没有 /chat。\
+                         多半是它指向了记忆服务本身 —— 云端对话由 agent 编排服务提供，\
+                         只有部署入口知道该转给谁。请把数据源改成部署入口\
+                         （本机开发是 http://127.0.0.1:5173，线上是 https://<域名>/api）。",
+                        st.remote.base()
+                    )
+                })),
+            )
+                .into_response();
+        }
+        return resp;
     }
 
     chat_here(st, parsed).await.into_response()
