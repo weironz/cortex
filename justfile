@@ -301,6 +301,10 @@ dev-web-if-stale:
 # 容器换了 IP，而 nginx 还指着旧的 —— 症状是 502，且直接打 :8080 完全正常。
 dev-restart: dev-build
     docker compose {{ _dev }} restart agentd web
+    # 顺手重接一次：`docker compose up -d cortexd` 那样**重建**记忆服务容器
+    # 会把它从沙箱那张网上摘掉，而症状要到发消息时才现（每一轮都说
+    # 「连不上 cortexd」）。这条是幂等的，接着的时候什么也不做
+    @just _dev-join-memory
     @echo "agentd 已重启（用的是刚编出来的二进制）"
 
 # 改完界面：重新构建 Flutter Web。

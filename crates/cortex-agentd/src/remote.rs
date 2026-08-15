@@ -94,8 +94,26 @@ impl Remote {
     /// 实测过：5 秒超时让 `/health` 每次要 2 秒（连接被拒也要等），
     /// 于是 CLI 那侧 800 毫秒的探活永远超时，表现成「agent 起不来」。
     pub async fn is_reachable(&self) -> bool {
+        self.probe(&self.url("/health")).await
+    }
+
+    /// 探**另一个**地址的 `/health`，共用同一个连接池。
+    ///
+    /// # 为什么需要「另一个」
+    ///
+    /// agentd 与沙箱容器看记忆服务用的是**两个不同的地址**：前者走
+    /// `CORTEX_MEMORY_URL`（开发机上是 `host.docker.internal`），后者走
+    /// `CORTEX_SANDBOX_CALLBACK`（那张 internal 网上的容器名）。
+    ///
+    /// 只探自己那条的后果 2026-08-15 撞到了：记忆服务的容器被重建、从沙箱
+    /// 那张网上掉了下去，`memory_reachable` **照样是 true**，而每一轮对话都
+    /// 报「连不上 cortexd」。健康检查在最该说实话的时刻说了不相干的实话。
+    ///
+    /// agentd 自己就接在沙箱那张网上，所以它的 DNS 视角与沙箱相同 ——
+    /// 这里探到的通与不通，就是沙箱会遇到的通与不通。
+    pub async fn probe(&self, url: &str) -> bool {
         self.http
-            .get(self.url("/health"))
+            .get(url)
             .timeout(std::time::Duration::from_millis(600))
             .send()
             .await

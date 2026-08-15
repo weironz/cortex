@@ -78,14 +78,29 @@ pub fn router(state: AgentState) -> Router {
 ///
 /// 打不通**不算 status 不 ok**：容器照常活着、文件端点里已经拉起的沙箱
 /// 照常能用。它是一个要能被看见的事实，不是一次崩溃。
+///
+/// # 为什么是**两个**，且第二个不是「再打一次 HTTP」
+///
+/// `memory_reachable` 只答「我够不够得着」，而用户感受到的是「**沙箱**够不够
+/// 得着」—— 那是另一个地址、另一张网。2026-08-15 撞到过一次：记忆服务的容器
+/// 被重建、从沙箱那张 internal 网上掉了下去，这里照样报 true，而每一轮对话都
+/// 说「连不上 cortexd」。
+///
+/// 第一版把第二个字段写成「agentd 去打那个回调地址」，**当场被证伪**：
+/// agentd 多宿在两张网上，从另一张照样打通。见
+/// [`crate::runner::SandboxRunner::callback_visible`] —— 现在问的是 docker
+/// 「那个容器在不在沙箱那张网上」，也就是故障本身，而不是它的相关量。
 async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
-    let reachable = st.remote().is_reachable().await;
+    let (reachable, callback_visible) =
+        tokio::join!(st.remote().is_reachable(), st.runner().callback_visible());
     Json(serde_json::json!({
         "status": "ok",
         "version": cortex_core::VERSION,
         "role": "agent-orchestrator",
         "memory": st.remote().base(),
         "memory_reachable": reachable,
+        "callback": st.runner().callback(),
+        "callback_visible_to_sandbox": callback_visible,
         "live_scopes": st.scopes().len(),
     }))
 }
@@ -506,6 +521,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::runner::SandboxRunner for NeverRunning {
+        fn callback(&self) -> &str {
+            "http://sandbox-callback.invalid:8080"
+        }
+
+        /// 这些用例里没有 docker，也不该有：`/health` 该报「看不见」。
+        async fn callback_visible(&self) -> bool {
+            false
+        }
+
         async fn ensure(
             &self,
             _: &str,
@@ -580,6 +604,52 @@ mod tests {
                 "{path} 不该由 agentd 应答 —— 它是记忆服务的路由，由边缘直转"
             );
         }
+    }
+
+    /// **健康检查要分开报两条路。**
+    ///
+    /// `memory_reachable` 是「agentd 够不够得着」，`callback_reachable` 是
+    /// 「**沙箱**够不够得着」—— 两个地址、两张网。2026-08-15 真机上撞过一次：
+    /// 记忆服务的容器被重建、从沙箱那张 internal 网上掉下去，前者照样 true，
+    /// 而每一轮对话都报「连不上 cortexd」。
+    ///
+    /// 这条只钉「两个字段都在、且 callback 那个真的去打了一次」。合成一个
+    /// 字段的话，那次故障在健康检查上依旧是全绿。
+    #[tokio::test]
+    async fn health_reports_the_sandbox_side_reachability_too() {
+        let st = AgentState::new(
+            std::sync::Arc::new(NeverRunning),
+            reqwest::Client::new(),
+            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
+        );
+        let resp = router(st)
+            .oneshot(
+                Request::builder()
+                    .uri("/sandbox/health")
+                    .body(axum::body::Body::empty())
+                    .expect("构造请求不该失败"),
+            )
+            .await
+            .expect("router 的错误类型是 Infallible");
+        assert_eq!(resp.status(), StatusCode::OK, "打不通不算 status 不 ok");
+
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("读 body");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("health 回 JSON");
+
+        assert_eq!(
+            v["callback"], "http://sandbox-callback.invalid:8080",
+            "要把沙箱用的那个地址原样报出来 —— 排查时第一个要看的就是它到底是什么"
+        );
+        assert_eq!(
+            v["callback_visible_to_sandbox"], false,
+            "替身明说看不见 —— 报 true 说明这个字段根本没问 runner"
+        );
+        assert!(
+            v.get("memory_reachable").is_some(),
+            "agentd 自己那条也得留着 —— 两条路坏的原因不同，合并会让排查从两步变成猜"
+        );
     }
 
     /// **重挂那条不 `ensure`。**

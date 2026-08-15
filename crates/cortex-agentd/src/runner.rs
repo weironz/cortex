@@ -450,6 +450,30 @@ pub trait SandboxRunner: Send + Sync {
     /// 用来告警，不用来限制 —— named volume 不受 `--storage-opt` 管
     /// （那个只管容器可写层，而沙箱是只读 rootfs，可写层恒空）。
     async fn workspace_bytes(&self, scope: &str) -> Result<Option<u64>>;
+
+    /// 沙箱容器**回调记忆服务用的那个地址**。
+    ///
+    /// 与 agentd 自己用的 `CORTEX_MEMORY_URL` 不是一回事，也不该是：前者是
+    /// 容器在那张 internal 网上看到的名字，后者是 agentd 从自己这边过去的路。
+    ///
+    /// 在 trait 上而不是只在 `DockerRunner` 上：换成 gVisor / E2B 之后，
+    /// 「容器怎么回来找记忆服务」这个问题照样存在，且照样是它答。
+    fn callback(&self) -> &str;
+
+    /// 沙箱**能不能看见** [`Self::callback`] 那个地址。
+    ///
+    /// # 为什么不是「agentd 去打一下那个地址」
+    ///
+    /// 第一版就是那么写的，**它是错的**，2026-08-15 用 `docker network
+    /// disconnect` 当场证伪：agentd 同时接在 `cortex-sandbox-net` 与
+    /// `cortex_default` 两张网上，记忆服务从前者掉下去之后，agentd 走后者
+    /// 照样 200，而沙箱（只在前者）已经完全连不上。**多宿主机的 DNS 视角
+    /// 不等于单宿容器的视角** —— 一个从错误的位置发出的探测，比没有探测更糟，
+    /// 因为它会在故障时给出绿灯。
+    ///
+    /// 所以这里不打 HTTP，直接问 docker：那个容器到底在不在沙箱那张网上。
+    /// 这正是故障本身的定义，不是它的某个相关量。
+    async fn callback_visible(&self) -> bool;
 }
 
 /// 直连 docker.sock 的实现。
@@ -469,6 +493,20 @@ pub struct DockerRunner {
     /// 沙箱镜像。启动时从 [`IMAGE_ENV`] 读一次，之后不变 ——
     /// **请求改不了它**（`spec_*` 全部只读这个字段）。
     image: String,
+}
+
+/// 从回调地址里取出主机名 —— 在这套拓扑里它就是记忆服务的**容器名**。
+///
+/// 不用 `url::Url`：为了一个主机名拖一个依赖不值，而这里的输入形态只有
+/// `http://name:port` 一种（compose 写死的）。宁可在遇到别的形态时回 `None`
+/// —— 那时健康检查报「看不见」，而那本来就是那种配置下的实情。
+///
+/// 带端口要去掉，否则永远匹配不上容器名，症状是健康检查恒红。
+fn callback_host(url: &str) -> Option<&str> {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?']).next()?;
+    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    (!host.is_empty()).then_some(host)
 }
 
 /// 把 [`IMAGE_ENV`] 的原始值解析成镜像名。
@@ -1314,6 +1352,23 @@ fn sanitize(s: &str) -> String {
 
 #[async_trait::async_trait]
 impl SandboxRunner for DockerRunner {
+    fn callback(&self) -> &str {
+        &self.remote
+    }
+
+    async fn callback_visible(&self) -> bool {
+        let Some(host) = callback_host(&self.remote) else {
+            return false;
+        };
+        let Ok(net) = self.docker.inspect_network(NETWORK, None).await else {
+            return false;
+        };
+        net.containers
+            .unwrap_or_default()
+            .values()
+            .any(|c| c.name.as_deref() == Some(host))
+    }
+
     async fn ensure(&self, scope: &str, token: &str, spec_hash: &str) -> Result<SandboxHandle> {
         let name = Self::container_name(scope);
 
@@ -1951,6 +2006,31 @@ mod tests {
     ///
     /// 而假如哪天网段改回非 internal，这个映射就会真的生效 —— 那时它是一个
     /// 「能执行命令的容器」对宿主敞开的端口。两头都不该有它。
+    /// 回调地址 → 容器名。**端口必须去掉** —— 留着的话永远匹配不上，
+    /// 而症状是健康检查恒红，看起来像网真的断了。
+    #[test]
+    fn callback_host_strips_scheme_and_port() {
+        assert_eq!(
+            callback_host("http://cormex-cortexd:8080"),
+            Some("cormex-cortexd")
+        );
+        assert_eq!(
+            callback_host("http://cormex-cortexd"),
+            Some("cormex-cortexd")
+        );
+        assert_eq!(
+            callback_host("https://mem:8080/some/path"),
+            Some("mem"),
+            "路径要切掉，否则容器名里会混进 /some"
+        );
+        assert_eq!(callback_host(""), None, "空串不该被当成一个叫「」的容器");
+        assert_eq!(
+            callback_host("http://"),
+            None,
+            "只有 scheme 时回 None —— 让健康检查报「看不见」，那是实情"
+        );
+    }
+
     #[test]
     fn the_sandbox_publishes_no_ports_at_all() {
         let r = runner();
