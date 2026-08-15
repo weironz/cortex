@@ -152,12 +152,16 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                 ),
                 const SizedBox(height: 22),
 
+                // 要的是**部署入口**，不是记忆服务本身 —— 理由见设置页
+                // 「连接」那一格上方那段注释。这里与那里必须说同一件事：
+                // 一个人只会在其中一处第一次填地址，说法不一致等于漏掉一半
                 TextField(
                   controller: _urlController,
                   autocorrect: false,
                   decoration: const InputDecoration(
-                    labelText: 'cortexd 地址',
-                    hintText: 'http://127.0.0.1:8080',
+                    labelText: '部署入口地址',
+                    hintText: 'https://<域名>/api',
+                    helperText: '本机开发是 http://127.0.0.1:5173',
                     border: OutlineInputBorder(),
                   ),
                   onSubmitted: (_) => _submit(),

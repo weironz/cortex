@@ -39,6 +39,19 @@ class AppConfig {
   static const bool defaultUseMock = bool.fromEnvironment('USE_MOCK');
 
   /// `--dart-define=CORTEX_BASE_URL=http://host:port`
+  ///
+  /// # ⚠️ 这个默认值只够「纯自托管记忆服务」用
+  ///
+  /// `127.0.0.1:8080` 是**记忆服务本身**。填它的话会话、历史、实时同步全都
+  /// 正常，**只有云端对话不通** —— 拆成 cortexd + agentd 之后 `/chat` 归
+  /// agentd，而知道该转给谁的只有边缘（dev 的 nginx / prod 的 traefik）。
+  ///
+  /// 那种形态下（本机跑一个 cortexd、没有 agentd）这个默认值是对的：所有
+  /// 对话本来就跑在本机 agent 上，不需要云端那条路。但只要环境里有 agentd，
+  /// 地址就得指向入口 —— dev 是 `http://127.0.0.1:5173`。
+  ///
+  /// **Web 构建不受影响**：它由 nginx 同源发出，`CORTEX_BASE_URL` 传空串，
+  /// 于是一切走根路径、天然经过边缘。
   static const String defaultBaseUrl = String.fromEnvironment(
     'CORTEX_BASE_URL',
     defaultValue: 'http://127.0.0.1:8080',

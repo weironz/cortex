@@ -47,12 +47,26 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
           ),
         ),
         const SizedBox(height: 8),
+        // ── 这里要的是**部署入口**，不是记忆服务本身 ──
+        //
+        // 原本写的是「cortexd 地址」，提示词给的是 `http://127.0.0.1:8080`
+        // —— 那正是记忆服务自己。填了它，会话、历史、实时同步全都正常，
+        // **只有云端对话不通**：拆成 cortexd + agentd 之后 `/chat` 归 agentd，
+        // 而知道该转给谁的只有边缘（dev 的 nginx / prod 的 traefik）。
+        //
+        // 2026-08-15 真机上把人卡了半天：症状是「桌面端发不出消息」，
+        // 而所有健康检查都是绿的 —— `/health` 两个地址都答 `role: cortexd`，
+        // 光看它分不出来。**一个默认值把用户领到了唯一走不通的那条路上。**
         TextField(
           controller: _urlController,
           enabled: !config.useMock,
           decoration: const InputDecoration(
-            labelText: 'cortexd 地址',
-            hintText: 'http://127.0.0.1:8080',
+            labelText: '部署入口地址',
+            hintText: 'https://<域名>/api',
+            helperText:
+                '填部署入口，不是记忆服务本身 —— 云端对话由它转给 agent 编排服务。'
+                '本机开发是 http://127.0.0.1:5173。',
+            helperMaxLines: 3,
           ),
           onSubmitted: notifier.setBaseUrl,
         ),
