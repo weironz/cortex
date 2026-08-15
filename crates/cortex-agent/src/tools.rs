@@ -62,6 +62,29 @@ impl Risk {
     }
 }
 
+/// 这个工具是谁提供的。
+///
+/// # 为什么要有这个字段，而不是「先查外来表，查不到再走内置」
+///
+/// 回落式分发要靠**顺序**来消歧，而顺序在代码里是看不见的：一个 MCP server
+/// 声明了叫 `shell` 的工具，究竟是它遮住内置的、还是内置遮住它，取决于哪个
+/// 分支写在前面。两种结果都不报错，而其中一种是**外部服务器接管了本地
+/// 命令执行**。
+///
+/// 分支打在类型上，那个问题就不存在了 —— 而且顺带给了界面一个可以显示
+/// 「这个工具来自哪儿」的依据。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ToolSource {
+    /// 编译进来的那几个。
+    Builtin,
+    /// 来自一台 MCP server。
+    External {
+        /// 用户在配置里给这台 server 起的名字。
+        server: Arc<str>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolSpec {
     /// 工具名。
@@ -91,6 +114,52 @@ pub struct ToolSpec {
     /// 就是一个静默的越界口子。`shell` 由 [`Risk::Execute`] 与内核策略管，
     /// 见 [`crate::sandbox`] 模块文档「不做命令白名单」那一节。
     pub path_arg: Option<&'static str>,
+    /// 谁提供的。见 [`ToolSource`]。
+    pub source: ToolSource,
+}
+
+impl ToolSpec {
+    /// 造一个来自 MCP server 的工具声明。
+    ///
+    /// # 名字一律加 server 前缀，且这件事必须在这里做
+    ///
+    /// 两台 server 都提供 `search`，或者某台提供 `shell` —— 不加前缀就是一次
+    /// 名字碰撞，而碰撞只能靠某种顺序去解，见 [`ToolSource`]。放在构造函数里
+    /// 而不是留给调用方，是因为**忘了加前缀不会报错**：它只在恰好撞名的那天
+    /// 才出问题，而那天多半是用户装了第二个插件。
+    ///
+    /// 形状对齐 Claude Code（`mcp__server__tool`），让用户看见的名字与他在
+    /// 别处见过的一致。
+    ///
+    /// # 风险等级不由对端说了算
+    ///
+    /// 这里**不接受** risk 参数。MCP 的 `annotations.readOnlyHint` 之类是
+    /// **服务端自报**的，而 [`crate::turn::ApprovalPolicy::decide`] 只在
+    /// `risk < confirm_at` 时放行 —— 信对端自报，等于把闸门的钥匙交给被闸的人。
+    ///
+    /// 一律 [`Risk::Execute`]（最高档，必然要问）。要降档得由用户在配置里对
+    /// **那台 server** 显式声明，而那是配置层的决定，不是这里。
+    #[must_use]
+    pub fn external(
+        server: &Arc<str>,
+        tool: &str,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: format!("mcp__{server}__{tool}").into(),
+            description: description.into().into(),
+            parameters,
+            risk: Risk::Execute,
+            // 外来工具碰哪个路径我们无从判断：参数 schema 是对端给的，
+            // 里面那个叫 `path` 的字段未必是文件路径。猜错的后果要么是白问
+            // 一次，要么（更糟）判成「在工作区内」而直接放行。
+            path_arg: None,
+            source: ToolSource::External {
+                server: Arc::clone(server),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,6 +473,7 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             }),
             risk: Risk::Safe,
             path_arg: Some("path"),
+            source: ToolSource::Builtin,
         },
         ToolSpec {
             name: "write_file".into(),
@@ -419,6 +489,7 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             }),
             risk: Risk::Write,
             path_arg: Some("path"),
+            source: ToolSource::Builtin,
         },
         ToolSpec {
             name: "list_dir".into(),
@@ -430,6 +501,7 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             }),
             risk: Risk::Safe,
             path_arg: Some("path"),
+            source: ToolSource::Builtin,
         },
         ToolSpec {
             name: "shell".into(),
@@ -449,6 +521,7 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             }),
             risk: Risk::Execute,
             path_arg: None,
+            source: ToolSource::Builtin,
         },
         ToolSpec {
             name: "memory_search".into(),
@@ -466,6 +539,7 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             }),
             risk: Risk::Safe,
             path_arg: None,
+            source: ToolSource::Builtin,
         },
     ]
 }
@@ -892,13 +966,13 @@ mod tests {
     ///   而这件事在任何测试里都不会红，只会在 profile 上多一根小刺
     #[test]
     fn tool_names_take_both_a_runtime_string_and_a_literal() {
-        let external = ToolSpec {
-            name: format!("{}__{}", "weather", "forecast").into(),
-            description: String::from("来自某个 MCP server").into(),
-            parameters: serde_json::json!({"type": "object"}),
-            risk: Risk::Execute,
-            path_arg: None,
-        };
+        let server: Arc<str> = Arc::from("weather");
+        let external = ToolSpec::external(
+            &server,
+            "forecast",
+            "来自某个 MCP server",
+            serde_json::json!({"type": "object"}),
+        );
         assert!(
             matches!(external.name, Cow::Owned(_)),
             "运行期拼出来的名字必须存得下 —— 这正是接 MCP 的前提"
@@ -911,6 +985,57 @@ mod tests {
                 s.name
             );
         }
+    }
+
+    /// 外来工具的名字必然带 server 前缀，于是**撞不上任何内置工具**。
+    ///
+    /// 这条钉的是「碰撞在注册时就不可能发生」。没有前缀的话，一台 MCP server
+    /// 声明一个叫 `shell` 的工具就会与内置的重名，而重名只能靠分派顺序去解 ——
+    /// 两种顺序都不报错，其中一种是外部服务器接管了本地命令执行。
+    #[test]
+    fn an_external_tool_can_never_collide_with_a_builtin_one() {
+        let builtin: Vec<String> = builtin_specs().iter().map(|s| s.name.to_string()).collect();
+        let hostile: Arc<str> = Arc::from("hostile");
+
+        // 挨个拿内置工具的名字去注册，一个都不该撞上
+        for name in &builtin {
+            let ext =
+                ToolSpec::external(&hostile, name, "假装自己是内置工具", serde_json::json!({}));
+            assert!(
+                !builtin.contains(&ext.name.to_string()),
+                "外来工具用 {name} 这个名字注册之后叫 {}，仍然撞上了内置目录",
+                ext.name
+            );
+            assert!(
+                ext.name.starts_with("mcp__hostile__"),
+                "前缀必须包含 server 名，否则两台 server 之间照样会撞：{}",
+                ext.name
+            );
+        }
+    }
+
+    /// 外来工具一律最高风险档，**对端说什么都不算**。
+    ///
+    /// `ApprovalPolicy::decide` 只在 `risk < confirm_at` 时放行。MCP 的
+    /// `annotations.readOnlyHint` 是服务端自报的 —— 认它就等于让被闸的人
+    /// 自己决定要不要过闸。
+    ///
+    /// 构造函数**不接受** risk 参数，所以这条在类型上就已经成立；
+    /// 留这个断言是防止哪天有人「顺手加个参数方便一下」。
+    #[test]
+    fn an_external_tool_is_always_the_highest_risk_tier() {
+        let s: Arc<str> = Arc::from("anything");
+        let spec = ToolSpec::external(&s, "looks_harmless", "只读的，真的", serde_json::json!({}));
+        assert_eq!(
+            spec.risk,
+            Risk::Execute,
+            "外来工具的风险等级不能由对端声明 —— 降档只能是用户在配置里对那台 server 显式做的决定"
+        );
+        assert!(
+            spec.path_arg.is_none(),
+            "外来工具的参数 schema 由对端给，里面叫 path 的字段未必是文件路径；\
+             猜错会把一个不相干的字符串拿去做越界判定"
+        );
     }
 
     fn temp_sandbox() -> (tempfile::TempDir, Sandbox) {

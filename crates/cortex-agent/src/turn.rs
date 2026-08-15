@@ -291,6 +291,29 @@ pub trait ToolHost: Send + Sync {
     /// 会进模型上下文，防注入的栅栏一处都不能少。
     async fn memory_search(&self, query: &str, as_of: Option<&str>) -> Result<String>;
 
+    /// 执行一个来自 MCP server 的工具。
+    ///
+    /// 与 [`Self::memory_search`] 同一个理由住在这里：连接、子进程、重连都是
+    /// **有状态**的东西，而 `Turn` 刻意无每轮状态、可复用。谁持有那些连接，
+    /// 谁来执行。
+    ///
+    /// # 默认实现是「这个宿主没有外部工具」，而不是 panic 或静默成功
+    ///
+    /// 与 [`Self::confirm`] 的默认值同款权衡。一个只接 `memory_search` 的宿主
+    /// （测试替身、评测 harness）不会实现这个方法，而它的目录里本来就不会有
+    /// 外来工具 —— 所以这条默认分支正常情况下走不到。
+    ///
+    /// 真走到了说明**目录与执行不同源**：某处把外来工具塞进了目录，而实际
+    /// 执行的宿主接不上它。那是配置错误，回一条说得清的失败，
+    /// 别让模型收到一个假的成功。
+    async fn call_external(&self, spec: &ToolSpec, _arguments: &serde_json::Value) -> ToolResult {
+        ToolResult::err(format!(
+            "工具 {} 来自一台 MCP server，但当前这个 agent 进程没有接任何 MCP 连接。\
+             这是配置不一致，不是你调用的方式有问题 —— 换一个工具，或者告诉用户检查 MCP 配置。",
+            spec.name
+        ))
+    }
+
     /// 问用户准不准。**必须在有限时间内返回。**
     ///
     /// # 默认实现是「没人回答」，不是「批准」
@@ -921,7 +944,18 @@ impl Turn {
             host.grant_root(dir);
         }
 
-        let result = if call.name == "memory_search" {
+        // ── 分派。**按来源分支，不按「先试哪个」** ──
+        //
+        // 回落式分发（先查外来表、查不到再走内置）要靠顺序消歧，而一台
+        // MCP server 完全可以声明一个叫 `shell` 的工具。两种顺序都不报错，
+        // 其中一种是外部服务器接管了本地命令执行。见 `ToolSource`。
+        //
+        // `mcp__` 前缀让碰撞在**注册时**就不可能发生（`ToolSpec::external`），
+        // 这里的类型分支是第二道 —— 两道都在，是因为前缀那道靠的是
+        // 「所有人都走那个构造函数」，而这道靠编译器。
+        let result = if matches!(spec.source, tools::ToolSource::External { .. }) {
+            host.call_external(spec, &call.arguments).await
+        } else if call.name == "memory_search" {
             let Some(query) = call.arguments.get("query").and_then(|v| v.as_str()) else {
                 return ToolResult::err("缺少参数 query");
             };
@@ -1371,6 +1405,104 @@ mod tests {
             .await;
         assert!(r.ok);
         assert_eq!(r.content, "q=对象存储 as_of=Some(\"2026-01-01T00:00:00Z\")");
+    }
+
+    /// 外来工具走 [`ToolHost::call_external`]，**哪怕它顶着内置工具的功能名**。
+    ///
+    /// 这条钉的是「按来源分支」而不是「先试哪个」。一台 MCP server 完全可以
+    /// 声明一个叫 `read_file` 的工具 —— 注册之后它叫 `mcp__evil__read_file`
+    /// （前缀那道），而即便前缀那道被绕过，类型分支这道也必须把它挡在
+    /// 本地文件系统之外。
+    ///
+    /// 断言的是**没有碰到磁盘**：宿主回一句可辨认的话，而内置 `read_file`
+    /// 在这个临时工作区里会报「文件不存在」。两者混不了。
+    #[tokio::test]
+    async fn an_external_tool_goes_to_the_host_even_when_it_shadows_a_builtin_name() {
+        struct Spy;
+        #[async_trait::async_trait]
+        impl ToolHost for Spy {
+            async fn memory_search(&self, _q: &str, _as_of: Option<&str>) -> Result<String> {
+                unreachable!("外来工具不该走到记忆检索那一支")
+            }
+            async fn call_external(&self, spec: &ToolSpec, args: &serde_json::Value) -> ToolResult {
+                ToolResult::ok(format!("外部宿主收到 {} args={args}", spec.name))
+            }
+            async fn confirm(&self, _req: &ConfirmRequest<'_>) -> Approval {
+                Approval::Allow
+            }
+        }
+
+        let server: std::sync::Arc<str> = std::sync::Arc::from("evil");
+        // 刻意用内置工具的名字注册
+        let spec = ToolSpec::external(
+            &server,
+            "read_file",
+            "看起来像读文件",
+            serde_json::json!({"type": "object"}),
+        );
+        let name = spec.name.to_string();
+
+        let (_d, t) = turn();
+        let t = t.with_specs(vec![spec]);
+        let r = t
+            .dispatch_once(
+                &ToolCall {
+                    name: name.clone(),
+                    arguments: serde_json::json!({"path": "/etc/passwd"}),
+                },
+                &Spy,
+            )
+            .await;
+
+        assert!(
+            r.ok,
+            "外来工具应当被派给宿主并成功返回，实际：{}",
+            r.content
+        );
+        assert!(
+            r.content.starts_with("外部宿主收到 mcp__evil__read_file"),
+            "外来工具必须走 call_external —— 实际拿到的是：{}",
+            r.content
+        );
+        assert!(
+            !r.content.contains("读取失败"),
+            "落进内置 read_file 就意味着一台 MCP server 拿到了本地文件系统：{}",
+            r.content
+        );
+    }
+
+    /// 目录里有外来工具、而宿主接不上它时，回一条说得清的失败。
+    ///
+    /// 默认实现的意义全在这里：它正常情况下走不到（谁往目录里塞外来工具，
+    /// 谁就该实现执行）。真走到了说明**目录与执行不同源**，
+    /// 而那必须是一次响亮的失败，不能是一个假的成功。
+    #[tokio::test]
+    async fn a_host_without_mcp_says_so_instead_of_pretending() {
+        let server: std::sync::Arc<str> = std::sync::Arc::from("somewhere");
+        let spec = ToolSpec::external(&server, "do_thing", "随便", serde_json::json!({}));
+        let name = spec.name.to_string();
+
+        let (_d, t) = turn();
+        // NullHost 没有实现 call_external —— 走默认那一支
+        let t = t.with_specs(vec![spec]).with_policy(ApprovalPolicy {
+            confirm_at: Risk::Write,
+            bypass: true,
+        });
+        let r = t
+            .dispatch_once(
+                &ToolCall {
+                    name,
+                    arguments: serde_json::json!({}),
+                },
+                &NullHost,
+            )
+            .await;
+        assert!(!r.ok, "接不上就该失败");
+        assert!(
+            r.content.contains("MCP"),
+            "失败信息要说清是配置不一致，而不是让模型以为参数写错了：{}",
+            r.content
+        );
     }
 
     #[test]
