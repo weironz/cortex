@@ -375,7 +375,28 @@ class SyncController extends Notifier<SyncState> {
     if (touched.isEmpty) return;
 
     if (touched.any(SyncTables.conversation.contains)) {
-      unawaited(ref.read(chatControllerProvider.notifier).loadSessions());
+      final chat = ref.read(chatControllerProvider.notifier);
+      unawaited(chat.loadSessions());
+
+      // ── 正在看的那一段也要重载 ──
+      //
+      // `loadSessions` 里**有**一个 `_ensureTranscript(active)`，看起来这件事
+      // 已经办了。它没有：那个函数的语义是「没加载过才加载」，而打开着的会话
+      // 必然已经在 transcripts 里，于是它每次都提前 return。
+      //
+      // 症状是「同步只同步了一半」：在浏览器里聊完切到桌面端，侧栏那条已经
+      // 变成「刚刚」、排到了最前面，对话却停在几分钟前的最后一句。用户看到的
+      // 结论是「不是实时同步的吧」—— 而链路（WS bump → /sync）其实全程是通的，
+      // 只差最后这一步没人做。2026-08-15 真机上确认。
+      //
+      // **本机正在流的那一轮不重载**：那条流是此刻最新的来源，中途拿服务端
+      // 的快照去覆盖只会闪一下（而且助手那条 episode 还没提交，覆盖等于把
+      // 刚打出来的字抹掉）。它跑完自然会有下一次 bump。
+      final snapshot = ref.read(chatControllerProvider);
+      final active = snapshot.activeSessionId;
+      if (active != null && snapshot.streaming?.sessionId != active) {
+        unawaited(chat.loadTranscript(active));
+      }
     }
     // 记忆那几张表**不再触发任何客户端刷新** —— 这一侧没有记忆界面了。
     // `SyncTables.memory` 留着：它描述的是服务端会下发哪些表，

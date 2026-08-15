@@ -13,6 +13,7 @@ import 'package:cortex_app/models/attachment.dart';
 import 'package:cortex_app/models/blob.dart';
 import 'package:cortex_app/models/chat_event.dart';
 import 'package:cortex_app/models/chat_session.dart';
+import 'package:cortex_app/state/chat_controller.dart';
 import 'package:cortex_app/models/episode.dart';
 import 'package:cortex_app/models/health_status.dart';
 import 'package:cortex_app/models/pending_confirmation.dart';
@@ -171,16 +172,35 @@ class _FakeApi
     return const [];
   }
 
-  // Everything below is outside the sync surface. They throw rather than
-  // returning a placeholder for the reason stated on the class: a controller
-  // that reached for them on a bump should fail the test, not pass quietly.
+  /// 拉过详情的会话 id，按顺序。
+  ///
+  /// 这里**曾经是一个 throw**，注释写着「同步链路不应拉会话详情」——
+  /// 2026-08-15 真机把那条假设证伪了：只刷列表不刷正在看的那一段，
+  /// 表现就是「侧栏变成刚刚了，对话停在几分钟前」。
+  final List<String> detailCalls = [];
 
   @override
   Future<SessionDetail> sessionDetail(
     String id, {
     int? limit,
     String? before,
-  }) => throw UnimplementedError('同步链路不应拉会话详情');
+  }) async {
+    detailCalls.add(id);
+    return SessionDetail(
+      session: ChatSession(
+        id: id,
+        title: '',
+        messageCount: 0,
+        updatedAt: DateTime(2026),
+      ),
+      episodes: const [],
+      hasMore: false,
+    );
+  }
+
+  // Everything below is outside the sync surface. They throw rather than
+  // returning a placeholder for the reason stated on the class: a controller
+  // that reached for them on a bump should fail the test, not pass quietly.
 
   @override
   Future<ChatSession> updateSession(
@@ -443,6 +463,48 @@ void main() {
     api.emit(const SyncBump(6));
 
     await _until(() => api.sessionsCount > 0, reason: 'episodes 应刷新会话列表');
+  });
+
+  /// **列表刷新了不等于对话刷新了。**
+  ///
+  /// 真机症状（2026-08-15）：在浏览器里聊完切到桌面端，侧栏那条已经变成
+  /// 「刚刚」并排到最前，对话却停在几分钟前的最后一句 —— 用户的结论是
+  /// 「不是实时同步的吧」，而 WS bump → /sync 那条链路全程是通的。
+  ///
+  /// 漏的是最后一步：`loadSessions` 里那个 `_ensureTranscript` 的语义是
+  /// 「没加载过才加载」，打开着的会话必然已经在 map 里，于是每次都提前
+  /// return。**看起来处理了**，这正是它活了这么久的原因。
+  test('打开着的会话也要重载，不只是列表', () async {
+    final api = _FakeApi()
+      ..respond = (since) => SyncPage(
+        cursor: since + 1,
+        records: [SyncRecord(seq: since + 1, table: 'episodes', id: 'e1')],
+      );
+    final container = _boot(api);
+    addTearDown(container.dispose);
+
+    // 先把 ChatController 建出来，让它 build 里那个 `Future.microtask(_reload)`
+    // 跑完 —— `_reload` 会把 state 整个重置，在它之前选中会被抹掉。
+    // 真实应用里这一步在开机时就完成了，这里只是把顺序摆对。
+    container.read(chatControllerProvider);
+    await _settle();
+    container.read(chatControllerProvider.notifier).selectSession('S-open');
+    await _settle();
+    expect(
+      container.read(chatControllerProvider).activeSessionId,
+      'S-open',
+      reason: '前提：这个会话此刻是打开着的',
+    );
+    expect(api.detailCalls, contains('S-open'), reason: '前提：选中时已拉过一次详情');
+    api.detailCalls.clear();
+
+    api.emit(const SyncHello(cursor: 5, version: '0.0.1'));
+    api.emit(const SyncBump(6));
+
+    await _until(
+      () => api.detailCalls.contains('S-open'),
+      reason: '正在看的那一段必须跟着重载，否则新消息要等到切走再切回来才出现',
+    );
   });
 
   /// `facts` 那几张表**照旧下发，但这一侧不再因此刷新任何东西** ——
