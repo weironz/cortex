@@ -510,7 +510,8 @@ class _GateApi
         LlmKeyUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
-        LocalMcpUnsupported
+        LocalMcpUnsupported,
+        RunAttachUnsupported
     implements CortexApi {
   _GateApi({
     this.auth = 'token',

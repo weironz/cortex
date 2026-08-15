@@ -36,7 +36,8 @@ class _BlobApi
         LlmKeyUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
-        LocalMcpUnsupported
+        LocalMcpUnsupported,
+        RunAttachUnsupported
     implements CortexApi {
   _BlobApi({this.presignSupported = true, this.alreadyUploaded = false});
 

@@ -130,6 +130,23 @@ abstract interface class CortexApi {
     PermissionMode permissionMode,
   });
 
+  /// `GET /runs/{session_id}` → SSE —— 挂上一个**已经在跑**的轮次。
+  ///
+  /// # 这条路存在的理由
+  ///
+  /// 轮次跑在服务端一个独立的 task 里，客户端断开不会中止它。缺的一直是
+  /// 回来的路：关掉标签页再打开，那一轮还在干活，而界面上什么也看不到，
+  /// 只能等 episode 落库。
+  ///
+  /// 拿到的流与 [chat] **完全同形**（重放 + 后续拼成一条），所以调用方
+  /// 那套事件处理一行都不用改。
+  ///
+  /// # 抛 404 是正常路径
+  ///
+  /// 绝大多数会话此刻都没在跑。调用方应当把 `statusCode == 404` 当成
+  /// 「没在跑」而不是故障 —— 与 `localWorkspaceRoot` 那条同一个路数。
+  Stream<ChatEvent> attachChat(String sessionId);
+
   /// `GET /episodes/{id}`
   Future<Episode> episode(String id);
 
@@ -525,6 +542,19 @@ mixin LocalWorkspaceUnsupported {
 /// 最容易积累的债。
 ///
 /// 与那边同一条禁令：**不要用在真实客户端上**。
+/// 给答不了 `GET /runs/{id}` 的后端用：**一律「没在跑」**。
+///
+/// 旧版本的 agent、以及每一个测试替身都属于这一类。抛 404 而不是回一个
+/// 空流：调用方对 404 已经有正确的处理（当成没在跑），而一个立刻结束的
+/// 空流会被当成「挂上了但那一轮瞬间结束」——于是界面上闪一下「正在生成」。
+///
+/// 与那边同一条禁令：**不要用在真实客户端上**。
+mixin RunAttachUnsupported {
+  Stream<ChatEvent> attachChat(String sessionId) => Stream<ChatEvent>.error(
+    const CortexApiException('这个后端没有可重挂的轮次。', statusCode: 404),
+  );
+}
+
 mixin LocalMcpUnsupported {
   static const _absent = CortexApiException('这个后端没有本机 MCP。', statusCode: 404);
 

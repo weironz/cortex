@@ -40,7 +40,8 @@ class ReplayApi
         LlmKeyUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
-        LocalMcpUnsupported
+        LocalMcpUnsupported,
+        RunAttachUnsupported
     implements CortexApi {
   ReplayApi({
     required this.episodeCount,

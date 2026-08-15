@@ -930,11 +930,49 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
 
+    yield* _events(response, 'POST /chat');
+  }
+
+  @override
+  Stream<ChatEvent> attachChat(String sessionId) async* {
+    // GET，没有 body。**与 `chat` 走同一个解析**（`_events`）：重挂拿到的
+    // 是「重放 + 后续」拼成的一条流，形状与新发那条一模一样 ——
+    // 两边各写一份解析的话，其中一份必然少处理一种事件
+    final request =
+        http.Request('GET', _uri('/runs/${Uri.encodeComponent(sessionId)}'))
+          ..headers.addAll(
+            _headers(const {
+              'accept': 'text/event-stream',
+              'cache-control': 'no-cache',
+            }),
+          );
+
+    final http.StreamedResponse response;
+    try {
+      response = await _client.send(request);
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+
+    // 404 = 这个会话此刻没有轮次在跑。**不是错误** —— 绝大多数会话都是
+    // 这样。调用方按「照常拉历史」处理，所以这里给它一个认得出来的状态码
+    if (response.statusCode == 404 || response.statusCode == 405) {
+      await response.stream.drain<void>().catchError((_) {});
+      throw _failure(404, '这个会话现在没有正在跑的轮次。');
+    }
+    yield* _events(response, 'GET /runs/{id}');
+  }
+
+  /// 把一条 SSE 响应解析成事件流。`chat` 与 `attachChat` 共用。
+  Stream<ChatEvent> _events(
+    http.StreamedResponse response,
+    String label,
+  ) async* {
     if (response.statusCode != 200) {
       final body = await response.stream.bytesToString().catchError((_) => '');
       throw _failure(
         response.statusCode,
-        body.isEmpty ? 'POST /chat 失败' : _trim(body),
+        body.isEmpty ? '$label 失败' : _trim(body),
       );
     }
 

@@ -179,6 +179,64 @@ class ChatController extends Notifier<ChatState> {
     // work the user did not ask to discard.
     state = state.copyWith(activeSessionId: id, sendError: null);
     unawaited(_ensureTranscript(id));
+    unawaited(_tryAttach(id));
+  }
+
+  /// 打开一个会话时，看看它是不是还有一轮在跑；在就挂上去接着看。
+  ///
+  /// # 这是「关掉浏览器活还在干」唯一看得见的出口
+  ///
+  /// 轮次跑在服务端一个独立的 task 里，客户端断开不会中止它。缺的一直是
+  /// 回来的路 —— 在这条之前，人回来只能等 episode 落库。
+  ///
+  /// # 三种「不挂」都要静悄悄
+  ///
+  /// 没在跑（404）、这个后端答不了这条路由（旧 agent）、网络不好 —— 三种
+  /// 都是常态而非故障。任何一种弹出错误框，代价是**每打开一个旧会话都弹
+  /// 一次**，而它本来什么都不该发生。
+  Future<void> _tryAttach(String sessionId) async {
+    // 本地已经有一条流在跑（就是这个会话发起的那条）就别再挂一次 ——
+    // 会收到两份同样的事件
+    if (state.streaming != null) return;
+
+    final Stream<ChatEvent> stream;
+    try {
+      stream = _api.attachChat(sessionId);
+    } on CortexApiException {
+      return;
+    }
+
+    // 先挂上再建 streaming 状态：反过来的话，挂失败会在界面上留下一个
+    // 永远转圈的「正在生成」
+    late final StreamSubscription<ChatEvent> sub;
+    var started = false;
+    sub = stream.listen(
+      (event) {
+        if (!started) {
+          started = true;
+          // 重挂拿到的第一条事件就意味着「它确实在跑」。这时才建 streaming
+          // 状态，`_onEvent` 后面那一串才有东西可改
+          state = state.copyWith(
+            streaming: StreamingTurn(
+              messageId: Ulid.generate(),
+              sessionId: sessionId,
+              startedAt: DateTime.now(),
+            ),
+            sendError: null,
+          );
+          _subscription = sub;
+        }
+        _onEvent(event);
+      },
+      // 挂不上（404 / 旧后端 / 断网）一律当成「没在跑」，见方法文档
+      onError: (Object e, StackTrace st) {
+        if (started) _onError(e, st);
+      },
+      onDone: () {
+        if (started) _onDone();
+      },
+      cancelOnError: true,
+    );
   }
 
   /// 新建一个本地草稿会话。[projectId] 非空时它属于那个项目。
@@ -705,7 +763,13 @@ class ChatController extends Notifier<ChatState> {
       sessionId: sessionId,
       startedAt: DateTime.now(),
     );
-    state = state.copyWith(streaming: turn, sendError: null);
+    // 记下「我发出去了，还没见到收尾」。用于侧栏徽章 —— 用户关掉这个会话
+    // 去别处逛的时候，那一格是他唯一的线索。见 `ChatState.unfinished`
+    state = state.copyWith(
+      streaming: turn,
+      sendError: null,
+      unfinished: {...state.unfinished, sessionId},
+    );
 
     final stream = _api.chat(
       sessionId: sessionId,
@@ -831,7 +895,13 @@ class ChatController extends Notifier<ChatState> {
       error: error,
     );
 
-    state = state.copyWith(streaming: null, sendError: error);
+    state = state.copyWith(
+      streaming: null,
+      sendError: error,
+      // 见到收尾了就把徽章撤掉。**出错那一轮也撤** —— 它同样不再跑了，
+      // 而一个撤不掉的「正在跑」比没有徽章更糟
+      unfinished: {...state.unfinished}..remove(turn.sessionId),
+    );
     _appendMessage(turn.sessionId, message);
     _touchSession(turn.sessionId);
     // 这一轮跑通了，服务端现在才**确实**有这一行会话，PATCH 才有东西可打。

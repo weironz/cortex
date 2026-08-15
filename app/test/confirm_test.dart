@@ -474,7 +474,8 @@ class _ConfirmApi
         LlmKeyUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
-        LocalMcpUnsupported
+        LocalMcpUnsupported,
+        RunAttachUnsupported
     implements CortexApi {
   _ConfirmApi({
     this.accept = true,

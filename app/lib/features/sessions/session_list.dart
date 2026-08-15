@@ -143,7 +143,15 @@ class SessionList extends ConsumerWidget {
           key: ValueKey(session.id),
           session: session,
           selected: session.id == state.activeSessionId,
-          streaming: state.streaming?.sessionId == session.id,
+          // 「这个会话正在跑」有两个来源，**两个都要认**：
+          //
+          // 1. `state.streaming` —— 此刻这个客户端正连着的那一轮
+          // 2. `state.unfinished` —— 发出去了、还没见到收尾的（用户切走了、
+          //    甚至关掉过页面）。第 2 条正是「派出去干活」那个场景的落点，
+          //    只认第 1 条的话，人一切走徽章就没了，而活还在干
+          streaming:
+              state.streaming?.sessionId == session.id ||
+              state.unfinished.contains(session.id),
           canMove: projects.showGrouping,
           onTap: () {
             controller.selectSession(session.id);

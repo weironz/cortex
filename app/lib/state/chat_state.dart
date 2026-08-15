@@ -141,6 +141,7 @@ class ChatState {
     this.streaming,
     this.sendError,
     this.showArchived = false,
+    this.unfinished = const {},
   });
 
   final List<ChatSession> sessions;
@@ -157,6 +158,21 @@ class ChatState {
   /// Whether archived sessions appear in the sidebar. Also decides the
   /// `include_archived` query parameter, so flipping it refetches.
   final bool showArchived;
+
+  /// **这个客户端发出去、还没见到收尾的**那些会话 id。
+  ///
+  /// # 为什么是客户端自己记，而不是问服务端
+  ///
+  /// 「哪些会话在跑」这个列表，云端那侧算不出来：会话表在记忆服务，
+  /// 而 agentd 枚举不出某个用户有哪些容器（`scope_key` 由 owner 与项目
+  /// 派生，只有记忆服务算得出）。要一份完整的列表就得动另一个仓库。
+  ///
+  /// 而这一份**恰好覆盖真实场景**：「我发完就走了，回来看看」。发起的那个
+  /// 客户端自己知道它发过什么，不需要任何后端。桌面端与云端同一份代码。
+  ///
+  /// 已知的局限，写在这里免得下一个人以为它坏了：**别的设备起的轮次看不到**。
+  /// 补它需要记忆服务那边给一条「我的会话谁在跑」，那是另一个仓库的事。
+  final Set<String> unfinished;
 
   static const _emptyTranscript = <ChatMessage>[];
 
@@ -200,6 +216,7 @@ class ChatState {
     Object? streaming = _sentinel,
     Object? sendError = _sentinel,
     bool? showArchived,
+    Set<String>? unfinished,
   }) => ChatState(
     sessions: sessions ?? this.sessions,
     sessionsLoading: sessionsLoading ?? this.sessionsLoading,
@@ -215,6 +232,7 @@ class ChatState {
         : streaming as StreamingTurn?,
     sendError: sendError == _sentinel ? this.sendError : sendError as String?,
     showArchived: showArchived ?? this.showArchived,
+    unfinished: unfinished ?? this.unfinished,
   );
 
   /// Distinguishes "not passed" from "explicitly set to null" in [copyWith].

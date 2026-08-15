@@ -35,7 +35,9 @@ import 'cortex_api.dart';
 /// error type, same async timing characteristics (deltas arrive over tens of
 /// milliseconds, not all at once) — so switching to the real backend is a
 /// one-line provider change, not a rewrite.
-class MockCortexApi with LlmKeyUnsupported implements CortexApi {
+class MockCortexApi
+    with RunAttachUnsupported, LlmKeyUnsupported
+    implements CortexApi {
   MockCortexApi({int? seed, this.instant = false})
     : _random = Random(seed ?? 7);
 
