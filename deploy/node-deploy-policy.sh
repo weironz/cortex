@@ -134,7 +134,17 @@ docker compose pull $services
 # 不是等用户点下去才发现。所以这里拉失败只警告，不中止整次部署：
 # 一个「能对话、沙箱暂时关着」的部署，比一个回滚掉的部署好。
 if [ "$services" != "${services%egress}" ]; then
-    reg="$(grep -E '^CORTEX_REGISTRY=' .env | cut -d= -f2-)"
+    # ★ `|| true` 不能省。`.env` 里**没有** CORTEX_REGISTRY 是正常情况 ——
+    #   compose 那边有默认值，所以从来没人往 .env 里写它。而
+    #   `reg="$(...)"` 这种赋值的退出码**就是命令替换的退出码**，于是
+    #   grep 找不到（退出 1）在 `set -e` 下当场中止整个脚本，
+    #   接着 EXIT trap 把一次完全正常的部署回滚掉。
+    #
+    #   2026-08-15 v0.1.9 上线时撞到：CI 里看到的是「pull 完了就 exit 1」，
+    #   没有任何错误信息 —— 因为根本没有命令失败，是 set -e 自己动的手。
+    #   本机手动跑同一条 `docker compose pull` 却是通的，于是第一反应
+    #   还以为是 registry 抖动。
+    reg="$(grep -E '^CORTEX_REGISTRY=' .env | cut -d= -f2- || true)"
     reg="${reg:-registry.cn-shenzhen.aliyuncs.com/willspace}"
     docker pull "$reg/cortex-sandbox:$tag" \
         || echo "==> ⚠ 沙箱镜像没拉下来，云沙箱会在启动时自己关掉" >&2
