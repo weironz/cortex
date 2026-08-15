@@ -74,32 +74,70 @@ services:
           cpus: ${CORTEX_EGRESS_CPU_LIMIT:-0.5}
           memory: ${CORTEX_EGRESS_MEM_LIMIT:-128m}
 
-  # ── 记忆服务（Cormex）─────────────────────────────────
+  # ── 记忆服务（Cormex）**不在这份文件里** ────────────────
   #
-  # **这是另一个产品**，仓库在 github.com/weironz/cormex，镜像也由它自己
-  # 发。它出现在这份 compose 里，只是因为这台机器同时跑着两样东西 ——
-  # 那是部署的选择，不是代码上的依赖：agentd 与它之间只有 HTTP。
+  # 它是另一个产品（github.com/weironz/cormex），有自己的仓库、自己的镜像、
+  # 自己的版本线，部署在这台机器的 `/data/cormex` 那一栈里。
   #
-  # ★ 版本号是 `CORMEX_VERSION`，**不是** `CORTEX_VERSION`。两条时间线各走
-  #   各的，这正是拆分的目的。写在一起会让「发 Cortex 顺手把记忆服务也换了」
-  #   变成一次静默的联动升级 —— 而它的 schema 迁移只前滚。
-  #   部署脚本只移动 CORTEX_VERSION，绝不碰这一个。
+  # 这里以前有过一段它的服务定义与 `CORMEX_VERSION` / `CORMEX_IMAGE` 的说明。
+  # 服务搬走了，那段注释留在了原地 —— 于是它描述的东西整份文件里一个都没有，
+  # 而下一个人会照着它去 .env 里配那两个变量，然后发现毫无作用。删掉。
   #
-  # 镜像默认走阿里云 ACR：这台机器在国内，从 Docker Hub 拉要么慢要么
-  # 要经第三方镜像站（那类站点缓存 tag→digest，是个「拉到旧镜像还看不出来」
-  # 的陷阱）。ACR 是第一方；Docker Hub 那份留作异地副本，
-  # 用 CORMEX_REGISTRY=willdockerhub 切过去。tag 永远是具体版本，绝不用 latest
+  # 现在两者之间只有下面 agentd 环境里的两个地址：
+  #   CORTEX_MEMORY_URL       这个进程怎么找到它
+  #   CORTEX_SANDBOX_CALLBACK 沙箱容器怎么找到它
+  # 默认值 `http://cormex:8080` 成立的前提是**那一栈与这一栈接在同一张网上**
+  # （部署脚本负责），不成立就在 .env 里覆盖成能通的地址。
+
+  # ─── Cortex 自己的库 ──────────────────────────────────
   #
-  # ★ `CORMEX_IMAGE` 是整条镜像引用的覆盖口，为**过渡期**留的：
-  #   Cormex 刚拆出来，它自己的流水线还没发过第一个镜像，而记忆服务的旧镜像
-  #   （`willspace/cortexd:v0.1.8`）就在 registry 里 —— 那**就是**同一个东西，
-  #   只是当时还叫另一个名字。于是这台机器可以先
+  # 装的是**会话**：消息、附件、项目、同步流水、沙箱快照、自带 API key。
+  # 这些曾经住在记忆服务的库里，后果是停掉它之后 agent 连上一句话都读不到
+  # （2026-08-15 实测）。判据一句话：**这张表离开记忆能力还有没有意义**。
   #
-  #       CORMEX_IMAGE=registry.cn-shenzhen.aliyuncs.com/willspace/cortexd:v0.1.8
+  # 与记忆服务那个 postgres 是**两套**。它在 /data/cormex 那一栈，带 pgvector；
+  # 这一套一列向量都没有，用官方镜像即可。
   #
-  #   把 Cortex 这一版发上去，等 Cormex 发了自己的第一个镜像再改回
-  #   `CORMEX_VERSION`。**没有这条口子，两个仓库就必须同一天发第一版** ——
-  #   而那正是拆分要消灭的耦合。
+  # ⚠️ 服务名是 `cortexdb` 而不是 `postgres`：两个仓库的 compose 第一行都写着
+  # `name: cortex`，同项目 + 同服务名会让 compose 认为是同一个服务并**直接替换
+  # 对方的容器**。开发机上实测撞过，生产上撞一次就是记忆库容器没了。
+  cortexdb:
+    image: postgres:17-alpine
+    container_name: cortex-db
+    restart: unless-stopped
+    logging: *default-logging
+    # **只上 default**：agentd 从那儿连它。不上 traefik（不该有对外入口），
+    # 也不上 sandbox（沙箱永远不该看见数据库 —— 那张网 internal 的全部意义）
+    networks: [default]
+    environment:
+      POSTGRES_USER: ${CORTEX_PG_USER:-cortex}
+      POSTGRES_PASSWORD: ${CORTEX_PG_PASSWORD:?部署脚本必须写入，不许留默认口令}
+      POSTGRES_DB: ${CORTEX_PG_DB:-cortex}
+    # 这台节点 2 核 3.5G，上面还跑着 mica / neostor / headscale / rustdesk
+    # 与记忆服务那一栈（含它自己的 postgres）。默认参数是按独占机器调的，
+    # 照搬会让两个 postgres 各自申请一大块共享内存。
+    #
+    # 128MB shared_buffers + 40 连接是按「单机自托管、几个人用」定的；
+    # 真到了要调的时候，先量 `pg_stat_activity` 再动，别凭感觉加。
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - max_connections=40
+    volumes:
+      - cortex-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CORTEX_PG_USER:-cortex}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          cpus: "${CORTEX_PG_CPU_LIMIT:-0.5}"
+          memory: ${CORTEX_PG_MEM_LIMIT:-384m}
+
   agentd:
     image: ${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortex-agentd:${CORTEX_VERSION:?由部署脚本写入，形如 v0.1.0}
     container_name: cortex-agentd
@@ -130,6 +168,13 @@ services:
       # 指回上一个可用的 tag 就能先恢复服务。
       CORTEX_SANDBOX_IMAGE: ${CORTEX_SANDBOX_IMAGE:-${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortex-sandbox:${CORTEX_VERSION}}
       CORTEX_SANDBOX_ENABLED: ${CORTEX_SANDBOX_ENABLED:-0}
+      # Cortex 自己的库。与上面那两条记忆服务的地址**没有关系** ——
+      # 那边是「问它记忆」，这边是「我自己的会话存哪」。
+      #
+      # 连不上就拒绝启动（不静默降级）：cortexd 曾经在连不上数据库时悄悄
+      # 回落到 mock 并照报 status: ok，症状是「服务活着但数据全是假的」。
+      CORTEX_DATABASE_URL: >-
+        postgres://${CORTEX_PG_USER:-cortex}:${CORTEX_PG_PASSWORD:?部署脚本必须写入}@cortexdb:5432/${CORTEX_PG_DB:-cortex}
       RUST_LOG: ${AGENTD_LOG:-cortex_agentd=info,warn}
     volumes:
       # 起沙箱要 docker API。**这是把宿主 root 交给它** —— 论证的另一半是
@@ -145,6 +190,11 @@ services:
     #   像「docker 没起来」，实际是「进程不在那个组里」。
     #   加的是**组**不是用户：进程仍然不是 root。
     group_add: ["${CORTEX_DOCKER_GID:-0}"]
+    # 库先起来再起 agentd：agentd 连不上就退出，而 restart: unless-stopped
+    # 会让它在 postgres 还在初始化的那十几秒里反复重启刷日志
+    depends_on:
+      cortexdb:
+        condition: service_healthy
     deploy:
       resources:
         limits:
@@ -225,4 +275,8 @@ volumes:
   # 这里以前还有 `cortex-prod-models`（进程内 ONNX 权重，随 local-embed
   # 一起去掉）。**已部署的机器上那个卷不会自动删**，确认没在用之后手工清：
   #     docker volume rm cortex_cortex-prod-models
-  {}
+
+  # Cortex 自己那个库的数据。**显式写 `name:`** —— compose 默认加项目名
+  # 前缀，而备份脚本与手工运维都按裸名找卷，前缀会让两边指不同的东西。
+  cortex-db-data:
+    name: cortex-db-data

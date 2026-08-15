@@ -148,9 +148,12 @@ db-reset:
     sqlx database create
     sqlx migrate run
 
-# 打开 psql 交互终端
+# 打开 psql 交互终端。
+#
+# 服务名是 `cortexdb` 而不是 `postgres` —— 见 docker-compose.dev.yml 里那段：
+# 两个仓库的 compose 项目名都叫 cortex，重名会让 compose 互删对方的容器。
 db-shell:
-    docker compose exec postgres psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}"
+    docker compose {{ _dev }} exec cortexdb psql -U "${CORTEX_PG_USER:-cortex}" -d "${CORTEX_PG_DB:-cortex}"
 
 # 生成 sqlx 离线查询缓存（.sqlx/），供 CI 在无数据库时编译
 db-prepare:
