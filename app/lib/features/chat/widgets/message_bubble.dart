@@ -5,11 +5,10 @@ import '../../../core/formatting.dart';
 import '../../../core/link_launcher.dart';
 import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
-import '../../../models/injected_memory.dart';
 import '../../../models/tool_call.dart';
 import '../../../widgets/markdown/cortex_markdown.dart';
 import 'attachment_views.dart';
-import 'memory_drawer.dart';
+import 'turn_drawer.dart';
 
 /// Horizontal padding around the conversation column.
 const kMessageGutter = 28.0;
@@ -34,7 +33,6 @@ class MessageBubble extends StatelessWidget {
         ? _UserBubble(message: message)
         : AssistantBlock(
             text: message.text,
-            facts: message.facts,
             toolCalls: message.toolCalls,
             attachments: message.attachments,
             createdAt: message.createdAt,
@@ -121,11 +119,10 @@ class _UserBubble extends StatelessWidget {
               // the one case that has no answer — a turn the model failed still
               // injected memory and may have run tools, and that is precisely
               // the turn somebody comes back to look at.
-              if (message.facts.isNotEmpty || message.toolCalls.isNotEmpty)
+              if (message.toolCalls.isNotEmpty)
                 Align(
                   alignment: Alignment.centerLeft,
-                  child: MemoryDrawer(
-                    facts: message.facts,
+                  child: TurnDrawer(
                     toolCalls: message.toolCalls,
                   ),
                 ),
@@ -143,7 +140,6 @@ class AssistantBlock extends StatelessWidget {
   const AssistantBlock({
     super.key,
     required this.text,
-    required this.facts,
     required this.toolCalls,
     this.attachments = const [],
     this.createdAt,
@@ -153,7 +149,6 @@ class AssistantBlock extends StatelessWidget {
   });
 
   final String text;
-  final List<InjectedMemory> facts;
   final List<ToolCall> toolCalls;
   final List<Attachment> attachments;
   final DateTime? createdAt;
@@ -232,8 +227,7 @@ class AssistantBlock extends StatelessWidget {
                         const _Caret(),
                     ],
                     if (error != null) _ErrorNote(error: error!),
-                    MemoryDrawer(
-                      facts: facts,
+                    TurnDrawer(
                       toolCalls: toolCalls,
                       streaming: streaming,
                     ),

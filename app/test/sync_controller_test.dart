@@ -15,14 +15,12 @@ import 'package:cortex_app/models/chat_event.dart';
 import 'package:cortex_app/models/chat_session.dart';
 import 'package:cortex_app/models/episode.dart';
 import 'package:cortex_app/models/health_status.dart';
-import 'package:cortex_app/models/memory_search_result.dart';
 import 'package:cortex_app/models/pending_confirmation.dart';
 import 'package:cortex_app/models/project.dart';
 import 'package:cortex_app/models/session_detail.dart';
 import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/sync_record.dart';
 import 'package:cortex_app/state/app_providers.dart';
-import 'package:cortex_app/state/memory_controller.dart';
 import 'package:cortex_app/state/sync_controller.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -104,7 +102,6 @@ class _FakeApi with LlmKeyUnsupported, AccountUnsupported, LocalWorkspaceUnsuppo
   }
 
   int sessionsCount = 0;
-  int searchCount = 0;
 
   @override
   Future<List<ChatSession>> sessions({
@@ -133,16 +130,6 @@ class _FakeApi with LlmKeyUnsupported, AccountUnsupported, LocalWorkspaceUnsuppo
     String sessionId,
     String? projectId,
   ) => throw UnimplementedError();
-
-  @override
-  Future<MemorySearchResult> searchMemory(
-    String query, {
-    int limit = 20,
-    DateTime? asOf,
-  }) async {
-    searchCount++;
-    return MemorySearchResult.empty;
-  }
 
   @override
   String get label => 'fake';
@@ -443,21 +430,20 @@ void main() {
     final container = _boot(api);
     addTearDown(container.dispose);
 
-    // The memory pane has run a query, so it has something to refresh.
-    await container.read(memoryControllerProvider.notifier).search();
-    final searchesBefore = api.searchCount;
-
     await _settle();
     api.emit(const SyncHello(cursor: 5, version: '0.0.1'));
     api.emit(const SyncBump(6));
 
-    await _until(
-      () => api.sessionsCount > 0 && api.searchCount > searchesBefore,
-      reason: 'episodes 应刷新会话列表，facts 应刷新记忆面板',
-    );
+    await _until(() => api.sessionsCount > 0, reason: 'episodes 应刷新会话列表');
   });
 
-  test('记忆面板没检索过就不替它发起检索', () async {
+  /// `facts` 那几张表**照旧下发，但这一侧不再因此刷新任何东西** ——
+  /// 记忆界面去了 Cormex。
+  ///
+  /// 这条钉的是「不该有反应」而不是「有反应」：删界面时顺手把
+  /// `SyncTables.memory` 也删掉，症状是服务端下发的表清单与客户端认得的
+  /// 对不上，而那是一条到部署才炸的错。
+  test('facts 变更不再触发这一侧的任何请求', () async {
     final api = _FakeApi()
       ..respond = (since) => SyncPage(
         cursor: since + 1,
@@ -472,7 +458,7 @@ void main() {
 
     // Long enough to clear the refresh debounce.
     await Future<void>.delayed(const Duration(milliseconds: 600));
-    expect(api.searchCount, 0, reason: '面板还没被打开过就自动填充，用户会看到自己没要过的结果');
+    expect(api.sessionsCount, 0, reason: 'facts 与会话列表无关，不该顺带把它也拉一遍');
   });
 
   test('mock 数据源不建立连接', () async {

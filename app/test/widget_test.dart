@@ -1,7 +1,7 @@
 import 'package:cortex_app/app.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/chat/widgets/conversation_view.dart';
-import 'package:cortex_app/features/chat/widgets/memory_drawer.dart';
+import 'package:cortex_app/features/chat/widgets/turn_drawer.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/chat_controller.dart';
 import 'package:cortex_app/state/chat_state.dart';
@@ -47,11 +47,14 @@ void main() {
     await tester.pump(const Duration(milliseconds: 800));
   }
 
-  testWidgets('wide layout shows all three panes', (tester) async {
+  testWidgets('wide layout shows the session pane and the chat pane', (
+    tester,
+  ) async {
     await boot(tester);
 
+    // 右栏默认收起 —— 记忆那一格去了 Cormex，剩下的文件面板在没绑工作区时
+    // 是空的，默认展开一个空面板只是白占三分之一屏。
     expect(find.text('会话'), findsOneWidget);
-    expect(find.text('记忆'), findsOneWidget);
     // Appears twice by design: the sidebar tile and the chat pane header, since
     // the first session is auto-selected on load.
     expect(find.text('Cortex 记忆注入预算怎么定'), findsNWidgets(2));
@@ -67,56 +70,11 @@ void main() {
     expect(find.byIcon(Icons.menu_rounded), findsOneWidget);
   });
 
-  testWidgets('memory panel exposes the as_of time-travel control', (
-    tester,
-  ) async {
-    await boot(tester);
-
-    // Default state is "now".
-    expect(find.text('当前时刻的记忆'), findsOneWidget);
-
-    await tester.tap(find.text('当前时刻的记忆'));
-    await tester.pumpAndSettle();
-
-    // A date picker opens; pick whatever day is preselected and confirm.
-    expect(find.text('回放到哪一天为止已知的记忆'), findsOneWidget);
-    await tester.tap(find.text('OK'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 600));
-
-    // The bar switches to the replay state and offers a way back.
-    expect(find.textContaining('回放至'), findsOneWidget);
-    expect(find.byTooltip('回到现在'), findsOneWidget);
-
-    await tester.tap(find.byTooltip('回到现在'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 600));
-    expect(find.text('当前时刻的记忆'), findsOneWidget);
-  });
-
-  testWidgets('检索无结果时是中性空态，不是错误', (tester) async {
-    await boot(tester);
-
-    await tester.enterText(
-      find.widgetWithText(TextField, '检索事实、实体、领域…'),
-      'zzz 不存在的东西 zzz',
-    );
-    // Debounce (260ms) plus the mock's simulated retrieval latency.
-    await tester.pump(const Duration(milliseconds: 400));
-    await tester.pump(const Duration(milliseconds: 600));
-
-    expect(find.text('没有相关的记忆'), findsOneWidget);
-    expect(
-      find.textContaining('主动弃权'),
-      findsOneWidget,
-      reason: '空结果必须解释成检索器弃权，而不是让用户以为坏了',
-    );
-    expect(
-      find.text('检索失败'),
-      findsNothing,
-      reason: '空不是错，出现错误标题就是在训练用户不信任正确结果',
-    );
-  });
+  // 「记忆面板的 as_of 时间回放」与「检索空态」两条用例随记忆界面一起去了
+  // Cormex —— 它们测的是那个面板，而这个客户端不再有它。
+  //
+  // 那两条都是好测试（时间回放是这套东西的差异点，空态不能读成错误），
+  // 所以它们不是被删掉，是**跟着被测对象搬走了**：Cormex 的 app/ 里有对应覆盖。
 
   testWidgets('streams a reply and exposes the per-turn memory', (
     tester,
@@ -130,20 +88,10 @@ void main() {
     controller.send('Rust async trait 怎么选');
     await tester.pump();
 
-    // Mock holds back ~420ms before the memory event, mirroring retrieval.
+    // Mock holds back ~420ms before the first tool event, mirroring retrieval.
     await tester.pump(const Duration(milliseconds: 500));
 
-    expect(find.byType(MemoryDrawer), findsAtLeastNWidgets(1));
-
-    // Two drawers, and both matter. The live turn has always had one; the
-    // replayed turn above it only got one when `episode_memories` /
-    // `episode_tool_calls` landed. Before that, the same answer looked
-    // different before and after a refresh.
-    expect(
-      find.textContaining('本轮用到的记忆'),
-      findsNWidgets(2),
-      reason: '回放出来的历史轮次与流式中的当前轮次都应带记忆抽屉',
-    );
+    expect(find.byType(TurnDrawer), findsAtLeastNWidgets(1));
 
     // Partway through the stream there must be text on screen but the turn is
     // still in flight — a client that awaited the whole body would show
@@ -155,7 +103,6 @@ void main() {
     final mid = container.read(chatControllerProvider);
     expect(mid.streaming, isNotNull);
     expect(mid.streaming!.text.isNotEmpty, isTrue);
-    expect(mid.streaming!.facts, isNotEmpty);
 
     final midLength = mid.streaming!.text.length;
 

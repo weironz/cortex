@@ -128,7 +128,11 @@ void main() {
       }
     }
 
-    test('默认：左栏展开、右栏是记忆', () async {
+    /// 记忆那一格随记忆界面一起去了 Cormex，右栏现在只剩文件。
+    ///
+    /// **默认改成收起**，而不是默认开着文件面板：一个刚打开应用、还没绑工作区
+    /// 的人，那一栏里什么都没有 —— 默认展开一个空面板只是白占三分之一屏。
+    test('默认：左栏展开、右栏收起', () async {
       final c = boot();
       addTearDown(c.dispose);
       c.read(layoutProvider);
@@ -136,21 +140,7 @@ void main() {
 
       final s = c.read(layoutProvider);
       expect(s.leftCollapsed, isFalse);
-      expect(
-        s.rightPanel,
-        RightPanel.memory,
-        reason: '记忆是这个产品的主张。默认藏起来等于把它降级成一个可选功能',
-      );
-    });
-
-    test('没存过的时候右栏必须是记忆 —— 别被「读不到」翻转成收起', () async {
-      // `saved[…] == 'true'` 那种写法的下场：第一次启动（表里两个键都没有）
-      // 右栏就是收起的，而没有人动过任何开关
-      final c = boot();
-      addTearDown(c.dispose);
-      c.read(layoutProvider);
-      await settle();
-      expect(c.read(layoutProvider).rightPanel, RightPanel.memory);
+      expect(s.rightPanel, isNull);
     });
 
     test('存下来的状态在启动时被读回来', () async {
@@ -169,33 +159,32 @@ void main() {
       expect(c.read(layoutProvider).rightPanel, RightPanel.files);
     });
 
-    /// 老用户的设置里只有 `memory_pane_visible`。
+    /// 存过 `memory` 的老用户 —— 那一格已经不存在了。
     ///
-    /// 不读它的话，所有升级上来的人第一次打开都会看到一个收起的右栏 ——
-    /// 而记忆是这个产品的主张。这是「默认值反转」的第二种形态：
-    /// 前一次是读错了判据，这次是**换了键之后忘了老的那把**。
-    test('老键还认：升级上来的人不该突然丢掉右栏', () async {
-      final c = boot({'memory_pane_visible': 'true'});
-      addTearDown(c.dispose);
-      c.read(layoutProvider);
-      await settle();
-      expect(
-        c.read(layoutProvider).rightPanel,
-        RightPanel.memory,
-        reason: '只认新键的话，老用户升级后右栏是空的，而他没动过任何开关',
-      );
-    });
-
-    test('老键说关着，那就还是关着', () async {
-      final c = boot({'memory_pane_visible': 'false'});
+    /// **落到「收起」，而不是崩、也不是硬塞文件面板给他**：他上次选的是记忆，
+    /// 而记忆现在在 Cormex 的 Web 端。给他一个空的右栏，要看文件他自己点。
+    ///
+    /// 这条比看起来重要：`_readRight` 里少写一个 case，`switch` 在一个已经
+    /// 不存在的枚举值上会走 default —— 而 default 里随便返回什么都能编译。
+    test('存过 memory 的老用户落到收起，不是崩也不是换成文件', () async {
+      final c = boot({'right_panel': 'memory'});
       addTearDown(c.dispose);
       c.read(layoutProvider);
       await settle();
       expect(c.read(layoutProvider).rightPanel, isNull);
     });
 
-    /// 右侧只有一列，所以两个面板互斥 —— 而这条由类型保证，不由判断保证。
-    test('选另一个就换过去，再选同一个就收起', () async {
+    /// 更老的那把键（`memory_pane_visible`）同理不再参与判断：它表达的是
+    /// 「记忆栏开没开」，而那个问题已经没有意义了。
+    test('更老的 memory_pane_visible 也不再顶出一个面板', () async {
+      final c = boot({'memory_pane_visible': 'true'});
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+      expect(c.read(layoutProvider).rightPanel, isNull);
+    });
+
+    test('点已经开着的那个就收起', () async {
       final c = boot();
       addTearDown(c.dispose);
       c.read(layoutProvider);
@@ -204,10 +193,7 @@ void main() {
       c.read(layoutProvider.notifier).selectRight(RightPanel.files);
       expect(c.read(layoutProvider).rightPanel, RightPanel.files);
 
-      c.read(layoutProvider.notifier).selectRight(RightPanel.memory);
-      expect(c.read(layoutProvider).rightPanel, RightPanel.memory);
-
-      c.read(layoutProvider.notifier).selectRight(RightPanel.memory);
+      c.read(layoutProvider.notifier).selectRight(RightPanel.files);
       expect(
         c.read(layoutProvider).rightPanel,
         isNull,

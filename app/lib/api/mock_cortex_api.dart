@@ -15,9 +15,6 @@ import '../models/chat_event.dart';
 import '../models/chat_session.dart';
 import '../models/episode.dart';
 import '../models/health_status.dart';
-import '../models/injected_memory.dart';
-import '../models/memory_fact.dart';
-import '../models/memory_search_result.dart';
 import '../models/pending_confirmation.dart';
 import '../models/project.dart';
 import '../models/session_detail.dart';
@@ -535,50 +532,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     return true;
   }
 
-  // ------------------------------------------------------------------ memory
-
-  static final List<MemoryFact> _facts = _buildFacts();
-
-  @override
-  Future<MemorySearchResult> searchMemory(
-    String query, {
-    int limit = 20,
-    DateTime? asOf,
-  }) async {
-    await _latency(220);
-    final q = query.trim().toLowerCase();
-    var hits = q.isEmpty
-        ? _facts
-        : _facts.where((f) {
-            return f.statement.toLowerCase().contains(q) ||
-                (f.domain ?? '').toLowerCase().contains(q) ||
-                (f.predicate ?? '').toLowerCase().contains(q);
-          }).toList();
-
-    // Transaction-time replay: a fact only exists once Cortex learned it.
-    // Filtering on createdAt (not validAt) is the whole point of `as_of`.
-    if (asOf != null) {
-      hits = hits
-          .where((f) => f.createdAt == null || !f.createdAt!.isAfter(asOf))
-          .toList();
-    }
-
-    hits = hits.take(limit).toList(growable: false);
-
-    // Fabricate plausible channel attribution so the UI's "why did this come
-    // back" affordance has something to render before the real fusion lands.
-    final channels = <String, RetrievalChannels>{};
-    for (var i = 0; i < hits.length; i++) {
-      final f = hits[i];
-      final lexical = q.isNotEmpty && f.statement.toLowerCase().contains(q);
-      channels[f.id] = RetrievalChannels(
-        factId: f.id,
-        channels: [if (lexical) 'bm25', 'vector'],
-        score: (0.94 - i * 0.05).clamp(0.1, 1.0),
-      );
-    }
-    return MemorySearchResult(facts: hits, channels: channels);
-  }
+  // ---------------------------------------------------------------- episodes
 
   @override
   Future<Episode> episode(String id) async {
@@ -856,15 +810,12 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
 
     // Retrieval latency before the first token — the real pipeline does an
     // embedding lookup + rerank here, and the UI should show that pause.
+    //
+    // 保留这段停顿，尽管这一侧不再模拟检索：真实链路上它仍然会发生
+    // （记忆服务那次调用没有消失，只是它的结果不再进这个客户端的界面）。
+    // 去掉它会让 mock 下的首字延迟比真实情况短一截，而那正是「本地看着挺快、
+    // 上线就顿一下」这类误判的来源。
     await Future<void>.delayed(const Duration(milliseconds: 420));
-
-    final injected = _retrieveFor(message);
-    // No `memory` event at all when the retriever abstains — the real one does
-    // exactly this, and a mock that always produced facts would hide the empty
-    // state until it showed up in production.
-    if (injected.isNotEmpty) {
-      yield ChatMemoryEvent(injected);
-    }
 
     // Mirrors cortexd's order *and* its pairing: every tool emits twice, once
     // on dispatch and once on return, with the name inlined in both summaries.
@@ -881,12 +832,11 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
 
     await Future<void>.delayed(const Duration(milliseconds: 160));
 
-    yield ChatToolEvent(
+    // `memory_search` 仍然是一个真实的工具（agent 那侧调记忆服务），
+    // 所以这条工具行留着 —— 去掉的只是「界面渲染那些事实」那一半。
+    yield const ChatToolEvent(
       name: 'memory_search',
-      summary: injected.isEmpty
-          ? 'memory_search 返回 0 行 / 0 字符'
-          : 'memory_search 返回 ${injected.length} 行 / '
-                '${injected.fold<int>(0, (n, f) => n + f.statement.length)} 字符',
+      summary: 'memory_search 返回 3 行 / 214 字符',
     );
 
     // The confirmation round trip. Registered *before* the event is emitted,
@@ -968,7 +918,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
       );
     }
 
-    final reply = _composeReply(message, injected);
+    final reply = _composeReply(message);
 
     // Chunk over runes, not code units: slicing a surrogate pair would emit a
     // lone half and render as a replacement glyph mid-stream.
@@ -988,38 +938,6 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     yield ChatDoneEvent('epi_${DateTime.now().millisecondsSinceEpoch}');
   }
 
-  /// Crude keyword retrieval — enough to make the "which memories were used"
-  /// panel show *different* facts per question rather than a constant list.
-  List<MemoryFact> _retrieveFor(String message) {
-    final m = message.toLowerCase();
-    bool has(List<String> keys) => keys.any(m.contains);
-
-    if (has(['okr', '会议', '汇报', 'meeting', '周报', '对齐'])) {
-      return _pick(['fact_office_1', 'fact_office_2', 'fact_office_3']);
-    }
-    if (has(['rust', 'async', 'trait', 'tokio', '并发'])) {
-      return _pick(['fact_code_3', 'fact_code_4', 'fact_pref_1']);
-    }
-    if (has(['向量', 'pgvector', 'hnsw', 'embedding', '检索', 'index'])) {
-      return _pick(['fact_code_1', 'fact_code_2', 'fact_pref_2']);
-    }
-    if (has(['记忆', 'memory', '注入', 'prompt', 'cache'])) {
-      return _pick([
-        'fact_code_1',
-        'fact_pref_1',
-        'fact_pref_3',
-        'fact_code_5',
-      ]);
-    }
-    if (has(['flutter', 'dart', '客户端', 'ui'])) {
-      return _pick(['fact_pref_1', 'fact_pref_2']);
-    }
-    // Nothing matched: abstain. The real retriever does the same rather than
-    // padding the prompt with loosely-related facts, so the fallback here has
-    // to be "no memory" — otherwise the empty state is unreachable in mock.
-    return const [];
-  }
-
   static bool _mentionsFiles(String message) {
     final m = message.toLowerCase();
     return const [
@@ -1037,10 +955,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     ].any(m.contains);
   }
 
-  List<MemoryFact> _pick(List<String> ids) =>
-      _facts.where((f) => ids.contains(f.id)).toList(growable: false);
-
-  String _composeReply(String message, List<MemoryFact> injected) {
+  String _composeReply(String message) {
     final m = message.toLowerCase();
     bool has(List<String> keys) => keys.any(m.contains);
 
@@ -1050,7 +965,7 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
     }
     if (has(['okr', '会议', '汇报', '周报'])) return _replyOffice;
     if (has(['dart', 'flutter', '客户端', 'ui'])) return _replyFlutter;
-    return _replyDefault(message, injected);
+    return _replyDefault(message);
   }
 
   Future<void> _latency(int ms) => instant
@@ -1061,139 +976,6 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
   void dispose() => _disposed = true;
 
   // ---------------------------------------------------------------- fixtures
-
-  static List<MemoryFact> _buildFacts() {
-    final now = DateTime.now();
-    MemoryFact f(
-      String id,
-      String statement, {
-      required String predicate,
-      required String domain,
-      required double confidence,
-      required Duration validAgo,
-      required String episodeId,
-    }) => MemoryFact(
-      id: id,
-      statement: statement,
-      predicate: predicate,
-      domain: domain,
-      confidence: confidence,
-      validAt: now.subtract(validAgo),
-      createdAt: now.subtract(validAgo - const Duration(minutes: 3)),
-      sourceEpisodeId: episodeId,
-    );
-
-    return [
-      f(
-        'fact_code_1',
-        '记忆注入采用双帽预算：min(上下文 10–15%, 4–8k token)，并用 MMR 去冗余。',
-        predicate: 'decided',
-        domain: 'coding',
-        confidence: 0.94,
-        validAgo: const Duration(days: 2),
-        episodeId: 'epi_01JQZ8K3M9A1',
-      ),
-      f(
-        'fact_code_2',
-        'pgvector 索引选 HNSW 而非 IVFFlat，m=16、ef_construction=64 起步。',
-        predicate: 'decided',
-        domain: 'coding',
-        confidence: 0.88,
-        validAgo: const Duration(days: 5),
-        episodeId: 'epi_01JQZ7B2H4C2',
-      ),
-      f(
-        'fact_code_3',
-        '项目 Rust 版本锁定 1.90，edition 2024，禁止在 workspace 内混用 edition。',
-        predicate: 'constraint',
-        domain: 'coding',
-        confidence: 0.97,
-        validAgo: const Duration(days: 11),
-        episodeId: 'epi_01JQZ2N8D1E3',
-      ),
-      f(
-        'fact_code_4',
-        '倾向用原生 async fn in trait，只在需要对象安全时才引入 async-trait 宏。',
-        predicate: 'prefers',
-        domain: 'coding',
-        confidence: 0.81,
-        validAgo: const Duration(days: 11),
-        episodeId: 'epi_01JQZ2N8D1E4',
-      ),
-      f(
-        'fact_code_5',
-        '稳定的“核心画像块”随 system prompt 进可缓存前缀，回合检索块贴最新 user 消息一侧。',
-        predicate: 'decided',
-        domain: 'coding',
-        confidence: 0.91,
-        validAgo: const Duration(days: 2),
-        episodeId: 'epi_01JQZ8K3M9A5',
-      ),
-      f(
-        'fact_pref_1',
-        '偏好简洁直接的回答，先给结论再给理由，不要寒暄。',
-        predicate: 'prefers',
-        domain: 'general',
-        confidence: 0.96,
-        validAgo: const Duration(days: 40),
-        episodeId: 'epi_01JQY0AA00P1',
-      ),
-      f(
-        'fact_pref_2',
-        '代码示例默认用中文注释，标识符保持英文。',
-        predicate: 'prefers',
-        domain: 'general',
-        confidence: 0.89,
-        validAgo: const Duration(days: 26),
-        episodeId: 'epi_01JQY0AA00P2',
-      ),
-      f(
-        'fact_pref_3',
-        '不接受“记忆是指令”的框定——历史记忆一律当作背景数据处理。',
-        predicate: 'constraint',
-        domain: 'general',
-        confidence: 0.99,
-        validAgo: const Duration(days: 18),
-        episodeId: 'epi_01JQY0AA00P3',
-      ),
-      f(
-        'fact_office_1',
-        'Q3 OKR 的第一目标是把端到端 QA 准确率从 71% 提到 85%。',
-        predicate: 'goal',
-        domain: 'office',
-        confidence: 0.9,
-        validAgo: const Duration(days: 8),
-        episodeId: 'epi_01JQZ5V1C7F1',
-      ),
-      f(
-        'fact_office_2',
-        '与平台组的对齐会固定在每周三 14:00，负责人是 Lin。',
-        predicate: 'schedule',
-        domain: 'office',
-        confidence: 0.93,
-        validAgo: const Duration(days: 8),
-        episodeId: 'epi_01JQZ5V1C7F2',
-      ),
-      f(
-        'fact_office_3',
-        '周报只写三段：本周结论、下周风险、需要的决策。',
-        predicate: 'prefers',
-        domain: 'office',
-        confidence: 0.87,
-        validAgo: const Duration(days: 33),
-        episodeId: 'epi_01JQZ5V1C7F3',
-      ),
-      f(
-        'fact_office_4',
-        '（已被取代）Q3 OKR 第一目标原为把延迟降到 200ms —— 已于两周前调整。',
-        predicate: 'superseded',
-        domain: 'office',
-        confidence: 0.72,
-        validAgo: const Duration(days: 22),
-        episodeId: 'epi_01JQZ5V1C7F4',
-      ),
-    ];
-  }
 
   static final Map<String, Episode> _episodes = _buildEpisodes();
 
@@ -1279,69 +1061,28 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
           ),
         };
 
-    // Replay attribution, keyed by the **user** episode of the turn — the same
-    // anchoring the daemon uses (`episode_memories.episode_id` is the user
-    // turn, because the assistant one is not written when the model errors).
-    // Without these the "why do you remember that" drawer would be reachable
-    // only during a live stream, and its replayed form would first be seen in
-    // production.
-    final attribution = <String, (List<InjectedMemory>, List<ToolCall>)>{
-      'epi_01JQZ8K3M9A1': (
-        const [
-          InjectedMemory(
-            factId: 'fact_pref_1',
-            fact: MemoryFact(
-              id: 'fact_pref_1',
-              statement: '偏好简洁直接的回答，先给结论再给理由，不要寒暄。',
-              domain: 'general',
-              sourceEpisodeId: 'epi_01JQY0AA00P1',
-            ),
-            channels: ['bm25', 'vector'],
-            score: 0.0324,
-          ),
-          // Superseded since the turn ran. Kept and marked — "the thing
-          // this answer leaned on no longer holds" is the whole point of
-          // keeping the record.
-          InjectedMemory(
-            factId: 'fact_office_4',
-            fact: MemoryFact(
-              id: 'fact_office_4',
-              statement: '（已被取代）Q3 OKR 第一目标原为把延迟降到 200ms —— 已于两周前调整。',
-              domain: 'office',
-              sourceEpisodeId: 'epi_01JQZ5V1C7F4',
-            ),
-            channels: ['graph'],
-            score: 0.0161,
-            invalidated: true,
-          ),
-          // The fact row is gone (redacted). The server sends
-          // `statement: null` and the drawer must say so rather than
-          // quietly showing one entry fewer than the turn really used.
-          InjectedMemory(factId: 'fact_gone_1', channels: ['episode']),
-        ],
-        const [ToolCall(name: 'memory_search', result: '返回 3 行 / 96 字符')],
-      ),
-      'epi_01JQZ2N8D1E3': (
-        const [],
-        const [
-          ToolCall(
-            name: 'read_file',
-            path: 'crates/cortex-agent/src/tools.rs',
-            result: '返回 486 行 / 15204 字符',
-          ),
-          ToolCall(
-            name: 'write_file',
-            path: 'crates/cortex-agent/src/notes.md',
-            result: '失败：路径 ../../etc/passwd 已被围栏拒绝',
-            failed: true,
-          ),
-        ],
-      ),
+    // 回放时的工具轨迹，按**用户**那条 episode 索引 —— 与 daemon 的锚定一致
+    //（assistant 那条在模型出错时压根不会写，所以不能锚在它上面）。
+    //
+    // 这张表此前是 `(List<InjectedMemory>, List<ToolCall>)` 的元组，同时带着
+    // 记忆归因。记忆界面去了 Cormex 之后元组降成单值 —— 留着一个恒为空的
+    // 第一元，只会让下一个读的人去找它为什么总是空的。
+    final attribution = <String, List<ToolCall>>{
+      // 锚在**那条 user episode** 上，与 daemon 一致（assistant 那条在模型
+      // 出错时压根不会写）。id 必须是 `entries` 里真有的那个 —— 编一个不存在的
+      // 键，这张表就恒为空，而「没有工具轨迹」在界面上和「这一轮没调工具」
+      // 长得一模一样。刚才就是这么红的。
+      'epi_01JQZ2N8D1E3': [
+        const ToolCall(
+          name: 'read_file',
+          path: 'crates/cortex-agent/src/tools.rs',
+          result: 'read_file crates/cortex-agent/src/tools.rs（3.2 KB）',
+        ),
+      ],
     };
 
     return entries.map((id, v) {
-      final (memories, toolCalls) =
-          attribution[id] ?? (const <InjectedMemory>[], const <ToolCall>[]);
+      final toolCalls = attribution[id] ?? const <ToolCall>[];
       return MapEntry(
         id,
         Episode(
@@ -1350,7 +1091,6 @@ class MockCortexApi with LlmKeyUnsupported implements CortexApi {
           role: v.$2,
           text: v.$3,
           occurredAt: now.subtract(Duration(days: v.$4)),
-          memories: memories,
           toolCalls: toolCalls,
         ),
       );
@@ -1509,21 +1249,15 @@ http.Client createHttpClient() => FetchClient(
 剩下的代码完全不知道自己跑在哪儿 —— 这正是目标。
 ''';
 
-  static String _replyDefault(String message, List<MemoryFact> injected) {
+  static String _replyDefault(String message) {
     final quoted = message.trim();
     final shown = quoted.length > 60 ? '${quoted.substring(0, 60)}…' : quoted;
-    final memoryLine = injected.isEmpty
-        ? '本轮**没有注入任何记忆** —— 检索器判定这个问题与已存记忆无关，主动弃权了。'
-              '这是正常结果，不是检索失败。'
-        : '本轮注入了 **${injected.length}** 条记忆，展开消息下方的"本轮用到的记忆"可以逐条看到出处。';
 
     return '''
 你问的是「$shown」。
 
-$memoryLine
-
 > 这是 **Mock 数据源**产生的回答 —— `cortexd` 还没接上。
-> 界面上的一切（流式增量、Markdown、代码高亮、记忆出处）都走的是与真实后端
+> 界面上的一切（流式增量、Markdown、代码高亮、工具轨迹）都走的是与真实后端
 > 完全相同的代码路径，只是数据来自内存夹具。
 
 试试这几句，会走到不同的演示分支：

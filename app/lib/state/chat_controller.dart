@@ -11,7 +11,6 @@ import '../models/chat_event.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../models/episode.dart';
-import '../models/injected_memory.dart';
 import '../models/project.dart';
 import '../models/tool_call.dart';
 import '../models/workspace.dart';
@@ -625,8 +624,7 @@ class ChatController extends Notifier<ChatState> {
     for (var i = 0; i < episodes.length; i++) {
       final e = episodes[i];
       final isUser = e.role != 'assistant';
-      final carriesAttribution =
-          e.memories.isNotEmpty || e.toolCalls.isNotEmpty;
+      final carriesAttribution = e.toolCalls.isNotEmpty;
       // Only forward across a user → assistant boundary. Two user messages in a
       // row are two turns, and the second one's assistant answer is not this
       // one's.
@@ -643,7 +641,6 @@ class ChatController extends Notifier<ChatState> {
           text: e.text,
           createdAt: e.occurredAt ?? DateTime.now(),
           attachments: e.attachments,
-          facts: handOff ? const [] : e.memories,
           toolCalls: handOff ? const [] : e.toolCalls,
           episodeId: e.id,
         ),
@@ -658,9 +655,6 @@ class ChatController extends Notifier<ChatState> {
             text: answer.text,
             createdAt: answer.occurredAt ?? DateTime.now(),
             attachments: answer.attachments,
-            // The assistant row may carry its own (it does not today, but the
-            // contract does not forbid it), so concatenate rather than replace.
-            facts: [...e.memories, ...answer.memories],
             toolCalls: [...e.toolCalls, ...answer.toolCalls],
             episodeId: answer.id,
           ),
@@ -734,20 +728,6 @@ class ChatController extends Notifier<ChatState> {
         if (text.isEmpty) return;
         _pending.write(text);
         _scheduleFlush();
-
-      case ChatMemoryEvent(:final facts):
-        _flushPending();
-        state = state.copyWith(
-          streaming: state.streaming?.copyWith(
-            facts: [
-              ...?state.streaming?.facts,
-              // The live event carries the whole fact but no attribution: the
-              // channels and the invalidation flag only exist on the replay
-              // path. Left empty rather than guessed.
-              ...facts.map(InjectedMemory.live),
-            ],
-          ),
-        );
 
       case ChatToolEvent(:final name, :final summary, :final path, :final diff):
         _flushPending();
@@ -843,7 +823,6 @@ class ChatController extends Notifier<ChatState> {
       role: MessageRole.assistant,
       text: turn.text,
       createdAt: turn.startedAt,
-      facts: turn.facts,
       toolCalls: turn.toolCalls,
       episodeId: episodeId,
       error: error,

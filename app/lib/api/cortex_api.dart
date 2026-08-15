@@ -13,7 +13,6 @@ import '../models/chat_session.dart';
 import '../models/episode.dart';
 import '../models/health_status.dart';
 import '../models/import_plan.dart';
-import '../models/memory_search_result.dart';
 import '../models/pending_confirmation.dart';
 import '../models/project.dart';
 import '../models/session_detail.dart';
@@ -128,17 +127,6 @@ abstract interface class CortexApi {
     required String message,
     List<Attachment> attachments,
     PermissionMode permissionMode,
-  });
-
-  /// `GET /memory/search?q=&limit=&as_of=`
-  ///
-  /// [asOf] replays the memory as it was *known* at that instant (transaction
-  /// time), not as it was *true* — this is the "what did I believe three
-  /// months ago" axis of the bitemporal model. Null means "now".
-  Future<MemorySearchResult> searchMemory(
-    String query, {
-    int limit = 20,
-    DateTime? asOf,
   });
 
   /// `GET /episodes/{id}`

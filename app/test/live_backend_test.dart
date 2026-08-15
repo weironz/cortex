@@ -108,61 +108,13 @@ void main() {
     expect(sessions.first.title, isNotEmpty);
   });
 
-  test('GET /memory/search returns facts with retrieval channels', () async {
-    if (!up) return markTestSkipped('cortexd not running');
-    final api = _api();
-    addTearDown(api.dispose);
+  // 三条记忆用例（/memory/search、as_of 回放、episode 溯源）随记忆界面一起
+  // 去了 Cormex —— 那三条测的是**记忆服务的契约**，而这个客户端不再有任何
+  // 记忆界面。它们在 Cormex 那个仓库里有对应的覆盖。
+  //
+  // 留在这儿只会变成一批「测一个我们不再使用的端点」的用例：它们红了
+  // 说明记忆服务改了，而这一侧没有任何人需要知道。
 
-    final result = await api.searchMemory('Flutter', limit: 5);
-    expect(result.facts, isNotEmpty);
-
-    final fact = result.facts.first;
-    expect(fact.sourceEpisodeId, isNotNull, reason: 'provenance is mandatory');
-    expect(fact.createdAt, isNotNull);
-
-    final channels = result.channels[fact.id];
-    expect(channels, isNotNull, reason: 'channel attribution must decode');
-    expect(channels!.channels, isNotEmpty);
-  });
-
-  test('as_of replays transaction time', () async {
-    if (!up) return markTestSkipped('cortexd not running');
-    final api = _api();
-    addTearDown(api.dispose);
-
-    final now = await api.searchMemory('Flutter', limit: 5);
-    expect(now.facts, isNotEmpty);
-
-    // Anchor strictly before the fact was recorded; it must disappear.
-    final before = now.facts.first.createdAt!.subtract(const Duration(days: 2));
-    final past = await api.searchMemory('Flutter', limit: 5, asOf: before);
-
-    expect(
-      past.facts.map((f) => f.id),
-      isNot(contains(now.facts.first.id)),
-      reason: 'a fact must not exist before Cortex learned it',
-    );
-  });
-
-  test('GET /episodes/{id} resolves a fact back to its source', () async {
-    if (!up) return markTestSkipped('cortexd not running');
-    final api = _api();
-    addTearDown(api.dispose);
-
-    final result = await api.searchMemory('Flutter', limit: 1);
-    final episodeId = result.facts.first.sourceEpisodeId!;
-
-    final episode = await api.episode(episodeId);
-    expect(episode.id, episodeId);
-    expect(episode.text, isNotEmpty);
-  });
-
-  /// Note what this test does **not** assert: that a `memory` event arrives.
-  ///
-  /// The live retriever abstains when nothing stored is relevant, so a fixed
-  /// `['memory', 'tool', 'delta', 'done']` sequence is not a property of the
-  /// protocol — it was a property of the old mock backend. Pinning it would
-  /// turn correct server behaviour into a red test.
   test('POST /chat：增量只增不减，工具事件成对，done 收尾', () async {
     if (!up) return markTestSkipped('cortexd not running');
     final api = _api();
@@ -187,14 +139,9 @@ void main() {
     )) {
       events.add(event);
       switch (event) {
-        case ChatMemoryEvent(:final facts):
-          for (final fact in facts) {
-            expect(
-              fact.sourceEpisodeId,
-              isNotNull,
-              reason: '注入的每条记忆都必须能追回原始对话，否则「可审计」是空话',
-            );
-          }
+        // 服务端仍然会发 `type: "memory"` —— 它落到 `ChatUnknownEvent`
+        // 那条回落上，被安静忽略。**不为它写分支是有意的**：这一侧不再有
+        // 记忆界面，接住它只会引出一个没人渲染的字段。
         case ChatToolEvent(:final name, :final summary, :final path):
           toolCalls = ToolCall.merge(toolCalls, name, summary, path: path);
         case ChatDeltaEvent(:final text):

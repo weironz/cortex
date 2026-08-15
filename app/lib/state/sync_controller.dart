@@ -10,7 +10,6 @@ import '../models/sync_record.dart';
 import 'app_providers.dart';
 import 'chat_controller.dart';
 import 'confirm_controller.dart';
-import 'memory_controller.dart';
 
 /// State of the realtime link to `cortexd`.
 enum SyncLinkStatus {
@@ -378,15 +377,9 @@ class SyncController extends Notifier<SyncState> {
     if (touched.any(SyncTables.conversation.contains)) {
       unawaited(ref.read(chatControllerProvider.notifier).loadSessions());
     }
-    if (touched.any(SyncTables.memory.contains)) {
-      final memory = ref.read(memoryControllerProvider);
-      // Nothing to refresh until the pane has run its first query — and firing
-      // one here would make the pane populate itself while the user is looking
-      // at something else.
-      if (memory.hasSearched) {
-        unawaited(ref.read(memoryControllerProvider.notifier).search());
-      }
-    }
+    // 记忆那几张表**不再触发任何客户端刷新** —— 这一侧没有记忆界面了。
+    // `SyncTables.memory` 留着：它描述的是服务端会下发哪些表，
+    // 与这个客户端渲不渲染它们无关。
   }
 
   // ------------------------------------------------------------------ teardown

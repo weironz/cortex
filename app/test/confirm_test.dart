@@ -16,7 +16,6 @@ import 'package:cortex_app/models/chat_event.dart';
 import 'package:cortex_app/models/chat_session.dart';
 import 'package:cortex_app/models/episode.dart';
 import 'package:cortex_app/models/health_status.dart';
-import 'package:cortex_app/models/memory_search_result.dart';
 import 'package:cortex_app/models/pending_confirmation.dart';
 import 'package:cortex_app/models/project.dart';
 import 'package:cortex_app/models/session_detail.dart';
@@ -625,13 +624,6 @@ class _ConfirmApi
     String? workspace,
     bool clearWorkspace = false,
   }) => throw UnimplementedError();
-
-  @override
-  Future<MemorySearchResult> searchMemory(
-    String query, {
-    int limit = 20,
-    DateTime? asOf,
-  }) async => MemorySearchResult.empty;
 
   @override
   Future<Episode> episode(String id) => throw UnimplementedError();

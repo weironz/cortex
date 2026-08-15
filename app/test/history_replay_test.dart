@@ -3,8 +3,6 @@ import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/models/chat_message.dart';
 import 'package:cortex_app/models/episode.dart';
-import 'package:cortex_app/models/injected_memory.dart';
-import 'package:cortex_app/models/memory_fact.dart';
 import 'package:cortex_app/models/tool_call.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/chat_controller.dart';
@@ -243,8 +241,8 @@ void main() {
     });
   });
 
-  group('回放的记忆与工具轨迹', () {
-    /// The server anchors both on the **user** episode.
+  group('回放的工具轨迹', () {
+    /// The server anchors it on the **user** episode.
     List<Episode> turn({required bool withAnswer}) => [
       Episode(
         id: 'epi_u',
@@ -252,21 +250,6 @@ void main() {
         role: 'user',
         text: '读一下 tools.rs',
         occurredAt: DateTime(2026, 1, 1),
-        memories: const [
-          InjectedMemory(
-            factId: 'f_ok',
-            fact: MemoryFact(id: 'f_ok', statement: '偏好简洁的回答'),
-            channels: ['bm25', 'vector'],
-            score: 0.03,
-          ),
-          InjectedMemory(
-            factId: 'f_old',
-            fact: MemoryFact(id: 'f_old', statement: '延迟目标 200ms'),
-            channels: ['graph'],
-            invalidated: true,
-          ),
-          InjectedMemory(factId: 'f_gone'),
-        ],
         toolCalls: const [
           ToolCall(name: 'read_file', path: 'src/tools.rs', result: '返回 486 行'),
         ],
@@ -290,13 +273,11 @@ void main() {
       final messages = _transcript(container).messages;
       expect(messages, hasLength(2));
       expect(
-        messages.first.facts,
+        messages.first.toolCalls,
         isEmpty,
         reason: '服务端锚在 user 那条上，但界面上抽屉属于回答 —— 否则刷新前后长得不一样',
       );
-      expect(messages.first.toolCalls, isEmpty);
       expect(messages.last.role, MessageRole.assistant);
-      expect(messages.last.facts, hasLength(3));
       expect(messages.last.toolCalls.single.path, 'src/tools.rs');
     });
 
@@ -309,33 +290,12 @@ void main() {
       final only = _transcript(container).messages.single;
       expect(only.role, MessageRole.user);
       expect(
-        only.facts,
-        hasLength(3),
+        only.toolCalls,
+        hasLength(1),
         reason:
-            'assistant episode 在模型出错时根本不落库 —— 归因跟着一起消失的话，'
+            'assistant episode 在模型出错时根本不落库 —— 工具轨迹跟着一起消失的话，'
             '最该被审计的那一轮反而什么都没有',
       );
-      expect(only.toolCalls, hasLength(1));
-    });
-
-    test('失效的事实照样列出并被标记，被抹除的显示占位', () async {
-      final container = await _loaded(
-        ReplayApi(episodeCount: 2, episodes: turn(withAnswer: true)),
-      );
-      addTearDown(container.dispose);
-
-      final facts = _transcript(container).messages.last.facts;
-      expect(
-        facts.where((f) => f.invalidated),
-        hasLength(1),
-        reason: '被取代的事实必须留着 —— 「当时依据的这条现在不成立了」正是审计要看的',
-      );
-      expect(
-        facts.where((f) => f.redacted).single.factId,
-        'f_gone',
-        reason: 'statement 为 null 表示行已不在，藏掉这一条就是篡改回放',
-      );
-      expect(facts.first.channels, ['bm25', 'vector']);
     });
   });
 
@@ -385,15 +345,16 @@ void main() {
       );
     });
 
-    test('回放的记忆与工具调用在 mock 里也有', () async {
+    test('回放的工具调用在 mock 里也有', () async {
       final api = MockCortexApi();
       addTearDown(api.dispose);
 
-      final detail = await api.sessionDetail('ses_01JQZ8K3M9');
-      final anchored = detail.episodes.firstWhere((e) => e.memories.isNotEmpty);
+      final detail = await api.sessionDetail('ses_01JQZ2N8D1');
+      final anchored = detail.episodes.firstWhere(
+        (e) => e.toolCalls.isNotEmpty,
+      );
       expect(anchored.role, 'user', reason: '与 daemon 一样锚在 user 那条上');
-      expect(anchored.memories.any((m) => m.invalidated), isTrue);
-      expect(anchored.memories.any((m) => m.redacted), isTrue);
+      expect(anchored.toolCalls.single.path, isNotNull);
     });
   });
 }

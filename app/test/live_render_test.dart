@@ -5,10 +5,9 @@ import 'dart:io';
 
 import 'package:cortex_app/api/http_cortex_api.dart';
 import 'package:cortex_app/core/theme.dart';
-import 'package:cortex_app/features/chat/widgets/memory_drawer.dart';
+import 'package:cortex_app/features/chat/widgets/turn_drawer.dart';
 import 'package:cortex_app/features/chat/widgets/message_bubble.dart';
 import 'package:cortex_app/models/chat_event.dart';
-import 'package:cortex_app/models/injected_memory.dart';
 import 'package:cortex_app/models/tool_call.dart';
 import 'package:cortex_app/widgets/markdown/code_block.dart';
 import 'package:flutter/material.dart';
@@ -73,7 +72,6 @@ void main() {
   // test would simply hang.
   var up = false;
   final deltas = <String>[];
-  var facts = <InjectedMemory>[];
   var toolCalls = <ToolCall>[];
 
   setUpAll(() async {
@@ -109,8 +107,6 @@ void main() {
             switch (event) {
               case ChatDeltaEvent(:final text):
                 deltas.add(text);
-              case ChatMemoryEvent(facts: final f):
-                facts = f.map(InjectedMemory.live).toList();
               case ChatToolEvent(:final name, :final summary, :final path):
                 toolCalls = ToolCall.merge(
                   toolCalls,
@@ -147,7 +143,6 @@ void main() {
         body: SingleChildScrollView(
           child: AssistantBlock(
             text: text,
-            facts: facts,
             toolCalls: toolCalls,
             streaming: streaming,
           ),
@@ -183,20 +178,18 @@ void main() {
     // （不是每条线上事件一行 —— 一次调用发两条）。
     expect(toolCalls, isNotEmpty);
     expect(toolCalls.every((c) => !c.pending), isTrue);
-    expect(find.byType(MemoryDrawer), findsOneWidget);
+    expect(find.byType(TurnDrawer), findsOneWidget);
 
-    final toggle = find.textContaining(facts.isEmpty ? '本轮工具调用' : '本轮用到的记忆');
+    final toggle = find.textContaining('本轮工具调用');
     expect(toggle, findsOneWidget);
 
     await tester.tap(toggle);
     await tester.pump(const Duration(milliseconds: 250));
 
-    if (facts.isEmpty) {
-      // Abstention is a correct outcome and must read as one.
-      expect(find.textContaining('主动弃权'), findsOneWidget);
-    } else {
-      expect(find.text(facts.first.fact!.statement), findsOneWidget);
-      expect(find.text('出处'), findsWidgets);
-    }
+    // 展开之后那次调用的名字必须看得见 —— 抽屉的全部用处就是这个。
+    expect(
+      find.textContaining(toolCalls.first.name, findRichText: true),
+      findsWidgets,
+    );
   });
 }

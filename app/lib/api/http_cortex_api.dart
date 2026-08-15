@@ -20,7 +20,6 @@ import '../models/episode.dart';
 import '../models/health_status.dart';
 import '../models/import_plan.dart';
 import '../models/json.dart';
-import '../models/memory_search_result.dart';
 import '../models/pending_confirmation.dart';
 import '../models/project.dart';
 import '../models/session_detail.dart';
@@ -245,21 +244,6 @@ class HttpCortexApi implements CortexApi {
       'project_id': projectId,
     }),
   );
-
-  @override
-  Future<MemorySearchResult> searchMemory(
-    String query, {
-    int limit = 20,
-    DateTime? asOf,
-  }) async {
-    final json = await _getJson('/memory/search', {
-      'q': query,
-      'limit': '$limit',
-      // RFC 3339 in UTC — the server compares against transaction time.
-      if (asOf != null) 'as_of': asOf.toUtc().toIso8601String(),
-    });
-    return MemorySearchResult.fromJson(json);
-  }
 
   @override
   Future<SessionDetail> sessionDetail(

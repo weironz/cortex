@@ -48,7 +48,6 @@ void main() {
         body: SingleChildScrollView(
           child: AssistantBlock(
             text: text,
-            facts: const [],
             toolCalls: const [],
             streaming: streaming,
           ),

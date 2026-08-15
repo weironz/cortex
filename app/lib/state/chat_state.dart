@@ -1,6 +1,5 @@
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
-import '../models/injected_memory.dart';
 import '../models/tool_call.dart';
 
 /// How many episodes one `GET /sessions/{id}` page holds.
@@ -28,7 +27,6 @@ class StreamingTurn {
     required this.sessionId,
     required this.startedAt,
     this.text = '',
-    this.facts = const [],
     this.toolCalls = const [],
     this.awaitingFirstToken = true,
   });
@@ -39,7 +37,6 @@ class StreamingTurn {
   final String text;
 
   /// Facts injected into this turn (from the `memory` event).
-  final List<InjectedMemory> facts;
 
   /// Tools the agent invoked (from `tool` events).
   final List<ToolCall> toolCalls;
@@ -49,7 +46,6 @@ class StreamingTurn {
 
   StreamingTurn copyWith({
     String? text,
-    List<InjectedMemory>? facts,
     List<ToolCall>? toolCalls,
     bool? awaitingFirstToken,
   }) => StreamingTurn(
@@ -57,7 +53,6 @@ class StreamingTurn {
     sessionId: sessionId,
     startedAt: startedAt,
     text: text ?? this.text,
-    facts: facts ?? this.facts,
     toolCalls: toolCalls ?? this.toolCalls,
     awaitingFirstToken: awaitingFirstToken ?? this.awaitingFirstToken,
   );

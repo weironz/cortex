@@ -1,5 +1,4 @@
 import 'attachment.dart';
-import 'injected_memory.dart';
 import 'tool_call.dart';
 
 enum MessageRole { user, assistant }
@@ -15,7 +14,6 @@ class ChatMessage {
     required this.role,
     required this.text,
     required this.createdAt,
-    this.facts = const [],
     this.toolCalls = const [],
     this.attachments = const [],
     this.episodeId,
@@ -34,7 +32,6 @@ class ChatMessage {
   /// drawer is drawn. It lands on the *user* message only when the turn has no
   /// answer to hang it on — a turn the model failed still injected memory, and
   /// dropping the record of that would erase exactly the case worth auditing.
-  final List<InjectedMemory> facts;
 
   /// Tools the agent invoked during this turn. Same placement rule as [facts].
   final List<ToolCall> toolCalls;
@@ -51,7 +48,6 @@ class ChatMessage {
 
   ChatMessage copyWith({
     String? text,
-    List<InjectedMemory>? facts,
     List<ToolCall>? toolCalls,
     List<Attachment>? attachments,
     String? episodeId,
@@ -61,7 +57,6 @@ class ChatMessage {
     role: role,
     text: text ?? this.text,
     createdAt: createdAt,
-    facts: facts ?? this.facts,
     toolCalls: toolCalls ?? this.toolCalls,
     attachments: attachments ?? this.attachments,
     episodeId: episodeId ?? this.episodeId,

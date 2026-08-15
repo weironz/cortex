@@ -1,96 +1,52 @@
 import 'diff_view.dart';
 import 'package:flutter/material.dart';
 
-import '../../../models/injected_memory.dart';
-import '../../../models/memory_search_result.dart';
 import '../../../models/tool_call.dart';
-import '../../memory/widgets/fact_card.dart';
 
-/// The per-turn audit affordance: what was injected, and what the agent did.
+/// 一轮里 agent **做了什么** —— 工具调用与它们改动的内容。
 ///
-/// ## Two different jobs, two different treatments
+/// * **这一轮还在跑时**，工具行直接铺开。一个跑了两秒的 `read_file` 正是
+///   「怎么半天没动静」的答案，藏进一次点击后面等于白做。
+/// * **结束后**收进一行细字：审计轨迹要在每个回答上都拿得到，
+///   但不该和回答本身抢注意力。
 ///
-/// * **While the turn is streaming**, tool rows are shown inline and
-///   unconditionally. A `read_file` that takes two seconds is the answer to
-///   "why is nothing happening", and burying it one click deep would waste it.
-/// * **Once the turn is committed**, everything collapses behind one thin line.
-///   The audit trail must be available on every answer without competing with
-///   the answer itself.
+/// ## 它曾经还渲染「本轮用到的记忆」
 ///
-/// ## Nothing here assumes memory exists
-///
-/// The retriever abstains when a question is unrelated to anything stored, so
-/// `facts` is legitimately empty on plenty of turns. That is a correct outcome,
-/// not a failure, and it is rendered as such — no error styling, no "加载失败",
-/// and no toggle at all when there is also no tool activity to show.
-///
-/// ## Replayed turns show the same drawer
-///
-/// `episode_memories` / `episode_tool_calls` mean a turn reopened tomorrow
-/// still answers "why do you remember that". Two things only a replay can say
-/// are surfaced rather than smoothed over: which retrieval channels matched,
-/// and whether a fact has since been **invalidated**. A superseded fact stays
-/// in the list, marked — the answer really was built on it, and hiding that
-/// would be rewriting history rather than recording it.
-class MemoryDrawer extends StatefulWidget {
-  const MemoryDrawer({
+/// 那一半随记忆界面一起去了 Cormex —— 客户端这一侧不再有任何记忆界面。
+/// **改名是这次改动的一部分**：它此前叫 `MemoryDrawer`，剥掉记忆之后那个
+/// 名字会指着一件它不再做的事，下一个来读的人会去找记忆在哪儿。
+class TurnDrawer extends StatefulWidget {
+  const TurnDrawer({
     super.key,
-    required this.facts,
     this.toolCalls = const [],
     this.streaming = false,
     this.initiallyExpanded = false,
   });
 
-  final List<InjectedMemory> facts;
   final List<ToolCall> toolCalls;
 
-  /// The turn is still in flight — surfaces tool activity instead of hiding it.
+  /// 这一轮还在飞 —— 工具活动摊开，不收起来。
   final bool streaming;
 
   final bool initiallyExpanded;
 
   @override
-  State<MemoryDrawer> createState() => _MemoryDrawerState();
+  State<TurnDrawer> createState() => _TurnDrawerState();
 }
 
-class _MemoryDrawerState extends State<MemoryDrawer> {
+class _TurnDrawerState extends State<TurnDrawer> {
   late bool _expanded = widget.initiallyExpanded;
 
   @override
   Widget build(BuildContext context) {
-    final hasFacts = widget.facts.isNotEmpty;
-    final hasTools = widget.toolCalls.isNotEmpty;
-    if (!hasFacts && !hasTools) return const SizedBox.shrink();
+    if (widget.toolCalls.isEmpty) return const SizedBox.shrink();
 
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-
-    // Live turn: tools stay visible, facts stay one click away.
     if (widget.streaming) {
       return Padding(
         padding: const EdgeInsets.only(top: 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            for (final call in widget.toolCalls) _ToolRow(call: call),
-            if (hasFacts)
-              _Toggle(
-                expanded: _expanded,
-                label: '本轮用到的记忆 · ${widget.facts.length} 条',
-                onTap: () => setState(() => _expanded = !_expanded),
-              ),
-            if (hasFacts && _expanded)
-              _Panel(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const _InjectionNote(),
-                    for (final entry in widget.facts)
-                      _InjectedRow(entry: entry),
-                  ],
-                ),
-              ),
-          ],
+          children: [for (final call in widget.toolCalls) _ToolRow(call: call)],
         ),
       );
     }
@@ -102,7 +58,7 @@ class _MemoryDrawerState extends State<MemoryDrawer> {
         children: [
           _Toggle(
             expanded: _expanded,
-            label: _label(widget.facts.length, widget.toolCalls.length),
+            label: '本轮工具调用 · ${widget.toolCalls.length} 次',
             onTap: () => setState(() => _expanded = !_expanded),
           ),
           AnimatedSize(
@@ -114,120 +70,12 @@ class _MemoryDrawerState extends State<MemoryDrawer> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        if (hasTools) ...[
-                          for (final call in widget.toolCalls)
-                            _ToolRow(call: call),
-                          if (hasFacts)
-                            Padding(
-                              padding: const EdgeInsets.only(
-                                top: 4,
-                                bottom: 10,
-                              ),
-                              child: Divider(
-                                height: 1,
-                                color: scheme.outlineVariant,
-                              ),
-                            ),
-                        ],
-                        if (hasFacts) ...[
-                          const _InjectionNote(),
-                          for (final entry in widget.facts)
-                            _InjectedRow(entry: entry),
-                        ] else
-                          // Explicitly stated rather than left blank: an empty
-                          // panel reads as a bug, and this outcome is neither
-                          // rare nor wrong.
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 6),
-                            child: Text(
-                              '本轮没有注入任何记忆 —— 检索器判断这个问题与已存记忆无关，'
-                              '于是主动弃权。这是正常结果。',
-                              style: theme.textTheme.labelSmall,
-                            ),
-                          ),
+                        for (final call in widget.toolCalls)
+                          _ToolRow(call: call),
                       ],
                     ),
                   )
-                : const SizedBox(width: double.infinity),
-          ),
-        ],
-      ),
-    );
-  }
-
-  static String _label(int facts, int tools) {
-    if (facts > 0 && tools > 0) return '本轮用到的记忆 · $facts 条 · 工具 $tools 次';
-    if (facts > 0) return '本轮用到的记忆 · $facts 条';
-    return '本轮工具调用 · $tools 次';
-  }
-}
-
-/// One injected fact: the normal card, or a placeholder when the row is gone.
-class _InjectedRow extends StatelessWidget {
-  const _InjectedRow({required this.entry});
-
-  final InjectedMemory entry;
-
-  @override
-  Widget build(BuildContext context) {
-    final fact = entry.fact;
-    if (fact == null) return _RedactedNote(factId: entry.factId);
-    return FactCard(
-      fact: fact,
-      dense: true,
-      invalidated: entry.invalidated,
-      // Live turns carry no attribution, and an empty channel list must render
-      // as *no* tags rather than as an empty row of them.
-      channels: entry.channels.isEmpty
-          ? null
-          : RetrievalChannels(
-              factId: entry.factId,
-              channels: entry.channels,
-              score: entry.score,
-            ),
-    );
-  }
-}
-
-/// The fact this turn used has since been redacted or purged.
-///
-/// Shown rather than dropped. Silently omitting the entry would make the turn
-/// look like it consulted fewer memories than it did — a replay that quietly
-/// disagrees with what happened is worse than one that admits a gap.
-class _RedactedNote extends StatelessWidget {
-  const _RedactedNote({required this.factId});
-
-  final String factId;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: scheme.outlineVariant,
-          style: BorderStyle.solid,
-        ),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.visibility_off_outlined,
-            size: 13,
-            color: scheme.onSurfaceVariant,
-          ),
-          const SizedBox(width: 7),
-          Expanded(
-            child: Text(
-              '本轮引用了一条已不可见的记忆（$factId）—— 它在此之后被抹除了。',
-              style: theme.textTheme.labelSmall,
-            ),
+                : const SizedBox.shrink(),
           ),
         ],
       ),
@@ -255,19 +103,6 @@ class _Panel extends StatelessWidget {
       child: child,
     );
   }
-}
-
-class _InjectionNote extends StatelessWidget {
-  const _InjectionNote();
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: 8),
-    child: Text(
-      '以下事实作为背景数据注入了本轮提示词，点任意一条可查看原始出处。',
-      style: Theme.of(context).textTheme.labelSmall,
-    ),
-  );
 }
 
 class _Toggle extends StatelessWidget {

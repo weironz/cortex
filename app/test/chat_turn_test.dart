@@ -1,7 +1,5 @@
 import 'package:cortex_app/core/app_config.dart';
-import 'package:cortex_app/features/chat/widgets/memory_drawer.dart';
-import 'package:cortex_app/models/injected_memory.dart';
-import 'package:cortex_app/models/memory_fact.dart';
+import 'package:cortex_app/features/chat/widgets/turn_drawer.dart';
 import 'package:cortex_app/models/tool_call.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/chat_controller.dart';
@@ -36,7 +34,7 @@ ProviderContainer _boot() {
 }
 
 void main() {
-  group('一轮对话的工具与记忆', () {
+  group('一轮对话的工具轨迹', () {
     test('两条 tool 事件折叠成一次调用', () async {
       final container = _boot();
       addTearDown(container.dispose);
@@ -65,11 +63,15 @@ void main() {
       expect(message.toolCalls.single.arguments, startsWith('(query='));
       expect(message.toolCalls.single.result, startsWith('返回 '));
       expect(message.toolCalls.single.pending, isFalse);
-      expect(message.facts, isNotEmpty);
       expect(message.error, isNull);
     });
 
-    test('检索器弃权时记忆为空，且不算失败', () async {
+    /// `memory_search` **仍然是一条真实的工具调用** —— agent 那侧照旧去问记忆
+    /// 服务。删掉的只是「把召回的事实画在界面上」那一半，工具行没有跟着走。
+    ///
+    /// 这条钉的就是这个区分：删界面的时候顺手把工具行也删掉，症状是用户再也
+    /// 看不出那一轮到底查没查记忆。
+    test('memory_search 的工具行照旧出现', () async {
       final container = _boot();
       addTearDown(container.dispose);
 
@@ -85,24 +87,22 @@ void main() {
 
       final state = container.read(chatControllerProvider);
       final message = state.activeTranscript.last;
-      expect(message.facts, isEmpty, reason: '与已存记忆无关时不应发 memory 事件');
-      expect(message.error, isNull, reason: '空记忆是正常结果，绝不能被当成一次失败');
+      expect(message.toolCalls.single.name, 'memory_search');
+      expect(message.error, isNull);
       expect(state.sendError, isNull);
-      expect(message.toolCalls.single.result, contains('0 行'));
       expect(message.text, isNotEmpty);
     });
   });
 
-  group('MemoryDrawer', () {
+  group('TurnDrawer', () {
     Widget host(Widget child) => MaterialApp(
       home: Scaffold(body: SingleChildScrollView(child: child)),
     );
 
-    testWidgets('无记忆但有工具调用时，展开说明弃权而非报错', (tester) async {
+    testWidgets('收起时只给一行，展开后才是工具明细', (tester) async {
       await tester.pumpWidget(
         host(
-          const MemoryDrawer(
-            facts: [],
+          const TurnDrawer(
             toolCalls: [
               ToolCall(
                 name: 'memory_search',
@@ -118,20 +118,18 @@ void main() {
       await tester.tap(find.text('本轮工具调用 · 1 次'));
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('主动弃权'), findsOneWidget);
       expect(find.textContaining('返回 0 行', findRichText: true), findsOneWidget);
       expect(
         find.byIcon(Icons.error_outline_rounded),
         findsNothing,
-        reason: '弃权不是错误，不能出现错误图标',
+        reason: '返回 0 行不是失败 —— 检索器弃权是正常结果，不该出现错误图标',
       );
     });
 
     testWidgets('流式期间工具行常驻可见，不必展开', (tester) async {
       await tester.pumpWidget(
         host(
-          const MemoryDrawer(
-            facts: [],
+          const TurnDrawer(
             streaming: true,
             toolCalls: [ToolCall(name: 'read_file', arguments: '(path=a.rs)')],
           ),
@@ -146,17 +144,11 @@ void main() {
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
     });
 
-    testWidgets('记忆与工具都有时，标题同时给出两个数量', (tester) async {
+    testWidgets('标题给出工具次数', (tester) async {
       await tester.pumpWidget(
         host(
-          MemoryDrawer(
-            facts: const [
-              InjectedMemory(
-                factId: 'f1',
-                fact: MemoryFact(id: 'f1', statement: '偏好简洁的回答'),
-              ),
-            ],
-            toolCalls: const [
+          const TurnDrawer(
+            toolCalls: [
               ToolCall(name: 'read_file', result: '返回 3 行 / 12 字符'),
               ToolCall(name: 'list_dir', result: '返回 9 行 / 88 字符'),
             ],
@@ -164,67 +156,24 @@ void main() {
         ),
       );
 
-      expect(find.text('本轮用到的记忆 · 1 条 · 工具 2 次'), findsOneWidget);
+      expect(find.text('本轮工具调用 · 2 次'), findsOneWidget);
     });
 
-    testWidgets('失效的事实仍然列出，只是被标记', (tester) async {
-      await tester.pumpWidget(
-        host(
-          const MemoryDrawer(
-            initiallyExpanded: true,
-            facts: [
-              InjectedMemory(
-                factId: 'f1',
-                fact: MemoryFact(id: 'f1', statement: '延迟目标是 200ms'),
-                channels: ['graph'],
-                invalidated: true,
-              ),
-            ],
-          ),
-        ),
-      );
-
-      expect(
-        find.text('延迟目标是 200ms'),
-        findsOneWidget,
-        reason: '被取代的事实不能被过滤掉 —— 那一轮真的是靠它答的',
-      );
-      expect(
-        find.text('已失效'),
-        findsOneWidget,
-        reason: '照原样显示而不标出来，等于说这条现在仍然成立',
-      );
-      expect(
-        find.text('graph'),
-        findsOneWidget,
-        reason: '回放带回了命中的召回路，这是实时事件给不了的信息',
-      );
-    });
-
-    testWidgets('被抹除的记忆显示占位，而不是整条消失', (tester) async {
-      await tester.pumpWidget(
-        host(
-          const MemoryDrawer(
-            initiallyExpanded: true,
-            facts: [InjectedMemory(factId: '01JFACTGONE')],
-          ),
-        ),
-      );
-
-      expect(
-        find.textContaining('已不可见的记忆'),
-        findsOneWidget,
-        reason: '藏掉一条就是让这一轮看起来比实际少用了一条记忆 —— 那是篡改回放',
-      );
-      expect(find.textContaining('01JFACTGONE'), findsOneWidget);
+    /// 一轮里一次工具都没调时，这个抽屉**整个不出现**。
+    ///
+    /// 此前它在「没有记忆但有工具」和「有记忆没有工具」之间都要显示，
+    /// 所以空态是有意义的。现在只剩工具这一个维度，空态就该是不占位 ——
+    /// 留一行「本轮工具调用 · 0 次」是给每条纯聊天的回答都挂一个没用的把手。
+    testWidgets('一次工具都没有时整个不渲染', (tester) async {
+      await tester.pumpWidget(host(const TurnDrawer()));
+      expect(find.textContaining('本轮工具调用'), findsNothing);
     });
 
     testWidgets('文件工具行显示服务端给的 path，而不是整串参数', (tester) async {
       await tester.pumpWidget(
         host(
-          const MemoryDrawer(
+          const TurnDrawer(
             initiallyExpanded: true,
-            facts: [],
             toolCalls: [
               ToolCall(
                 name: 'write_file',

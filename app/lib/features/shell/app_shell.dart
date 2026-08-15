@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../state/app_providers.dart';
 import '../chat/chat_pane.dart';
-import '../memory/memory_panel.dart';
 import '../sessions/session_list.dart';
 import '../workspace/workspace_panel.dart';
 import 'widgets/account_bar.dart';
@@ -72,12 +71,11 @@ class _AppShellState extends ConsumerState<AppShell> {
         // 右栏画谁。内联与抽屉共用它 —— 两处各写一遍 switch 的话，
         // 加第三个面板时漏改一处不会报错，只是抽屉里画的是另一个
         Widget rightPane(VoidCallback onClose) => switch (layout.rightPanel) {
-          RightPanel.files => WorkspacePanel(onClose: onClose),
+          RightPanel.files || null => WorkspacePanel(onClose: onClose),
           // `null` 只会在抽屉那条路上出现：内联那条已被 `showRightInline`
           // 挡住，而点图标进来的走 `showRight`（它必定先设好再开抽屉）。
           // 剩下的唯一入口是**从屏幕右缘划开**抽屉 —— 那时用户没说要看哪个，
           // 而记忆是默认那个。画空白比画记忆更像「坏了」
-          RightPanel.memory || null => MemoryPanel(onClose: onClose),
         };
 
         return Scaffold(

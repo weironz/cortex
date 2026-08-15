@@ -1,5 +1,4 @@
 import 'attachment.dart';
-import 'injected_memory.dart';
 import 'json.dart';
 import 'tool_call.dart';
 
@@ -14,7 +13,6 @@ class Episode {
     required this.text,
     this.occurredAt,
     this.attachments = const [],
-    this.memories = const [],
     this.toolCalls = const [],
   });
 
@@ -43,10 +41,9 @@ class Episode {
   ///
   /// Omitted entirely rather than sent as `[]` when empty: most messages have
   /// none, and a few hundred `"memories":[]` per session is pure waste.
-  final List<InjectedMemory> memories;
 
   /// Tools invoked during this turn. Same anchoring and same omission rule as
-  /// [memories]. One entry per invocation — unlike the SSE path, replay does
+  /// [attachments]. One entry per invocation — unlike the SSE path, replay does
   /// not need pairing.
   final List<ToolCall> toolCalls;
 
@@ -59,9 +56,6 @@ class Episode {
     attachments: asObjectList(
       json['attachments'],
     ).map(Attachment.fromJson).toList(growable: false),
-    memories: asObjectList(
-      json['memories'],
-    ).map(InjectedMemory.fromJson).toList(growable: false),
     toolCalls: asObjectList(
       json['tool_calls'],
     ).map(ToolCall.replayed).toList(growable: false),

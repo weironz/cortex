@@ -1,5 +1,4 @@
 import 'json.dart';
-import 'memory_fact.dart';
 import 'pending_confirmation.dart';
 
 /// One decoded frame of the `POST /chat` SSE stream.
@@ -25,9 +24,6 @@ sealed class ChatEvent {
   factory ChatEvent.fromJson(Map<String, dynamic> json) {
     return switch (asString(json['type'])) {
       'delta' => ChatDeltaEvent(asString(json['text'])),
-      'memory' => ChatMemoryEvent(
-        asObjectList(json['facts']).map(MemoryFact.fromJson).toList(),
-      ),
       'tool' => ChatToolEvent(
         name: asString(json['name'], 'tool'),
         summary: asStringOrNull(json['summary']),
@@ -71,11 +67,6 @@ final class ChatDeltaEvent extends ChatEvent {
 }
 
 /// The memory facts injected into this turn's prompt.
-final class ChatMemoryEvent extends ChatEvent {
-  const ChatMemoryEvent(this.facts);
-  final List<MemoryFact> facts;
-}
-
 /// The agent invoked a tool. Rendered as a collapsible one-liner in the
 /// conversation, not as message content.
 final class ChatToolEvent extends ChatEvent {

@@ -233,16 +233,12 @@ class _StreamingBubble extends ConsumerWidget {
     final text = ref.watch(
       chatControllerProvider.select((s) => s.streaming?.text ?? ''),
     );
-    final facts = ref.watch(
-      chatControllerProvider.select((s) => s.streaming?.facts ?? const []),
-    );
     final tools = ref.watch(
       chatControllerProvider.select((s) => s.streaming?.toolCalls ?? const []),
     );
 
     return AssistantBlock(
       text: text,
-      facts: facts,
       toolCalls: tools,
       streaming: true,
     );

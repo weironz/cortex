@@ -177,11 +177,12 @@ final accountProvider = FutureProvider<Account?>((ref) async {
 ///
 /// 一个可空枚举把互斥变成**类型上不可能违反**，与这个仓库在别处的立场一致：
 /// 能靠结构保证的，就不要靠每个读点各写一遍判断。
+/// # 现在只剩一格，为什么还留着枚举
+///
+/// 记忆那一格随记忆界面一起去了 Cormex。剩一个变体时它读起来像个多余的
+/// `bool`，但**下一格已经排上了**（MCP 服务器面板，见 roadmap 的 H 节）——
+/// 现在退回 bool，那天要把三处调用点再改回来。
 enum RightPanel {
-  /// 记忆。默认就是它 —— 记忆是这个产品的主张，默认藏起来等于把它降级成
-  /// 一个可选功能。
-  memory,
-
   /// 文件。云端是那个项目的工作区，桌面端是会话绑定的目录。
   files,
 }
@@ -190,7 +191,7 @@ enum RightPanel {
 class LayoutState {
   const LayoutState({
     this.leftCollapsed = false,
-    this.rightPanel = RightPanel.memory,
+    this.rightPanel,
   });
 
   /// 会话那一栏。收起时账号栏也跟着不见 —— 与 Codex / Claude
@@ -225,11 +226,9 @@ class LayoutNotifier extends Notifier<LayoutState> {
 
   /// 上一版的键，只读不写。
   ///
-  /// 右侧从「记忆开/关」变成「显示哪一个」之后，老用户的设置里只有这个。
-  /// 不读它的话，所有升级上来的人第一次打开都会看到一个**收起的右栏** ——
-  /// 而记忆是这个产品的主张。同一个形状这个文件里已经栽过一次
-  /// （见下面那句「一个由『还没存过』造成的默认值反转」）。
-  static const String _kMemoryLegacy = 'memory_pane_visible';
+  /// 老键 `memory_pane_visible` **刻意不再读**。它表达的是「记忆栏开没开」，
+  /// 而记忆界面已经去了 Cormex —— 那个问题没有答案了。读它的唯一后果是把
+  /// 一个存过 `true` 的老用户顶到文件面板上，而他从来没要过文件面板。
 
   @override
   LayoutState build() {
@@ -249,19 +248,17 @@ class LayoutNotifier extends Notifier<LayoutState> {
   /// 新键优先；没有新键就按老键推。
   static RightPanel? _readRight(Map<String, String> saved) {
     switch (saved[_kRight]) {
-      case 'memory':
-        return RightPanel.memory;
       case 'files':
         return RightPanel.files;
-      case 'none':
-        return null;
-      // 没存过新键 —— 可能是老用户，也可能是全新安装。
+      // ★ 存过 `memory` 的老用户落到这里 —— 那一格已经不存在了。
+      //   **收起**，而不是崩，也不是硬塞给他文件面板：他上次选的是记忆，
+      //   而记忆现在在 Cormex 的 Web 端。给他一个空的右栏，
+      //   要看文件他自己点那个图标。
       //
-      // 缺省是**开着记忆**，所以只有显式的 'false' 才收起。写成
-      // `== 'true'` 的话，全新安装（两个键都没有）右栏就是收起的 ——
-      // 一个由「还没存过」造成的默认值反转
+      //   老的 `_kMemoryLegacy` 同理不再参与判断：它表达的是「记忆栏开没开」，
+      //   而那个问题已经没有意义了。
       default:
-        return saved[_kMemoryLegacy] == 'false' ? null : RightPanel.memory;
+        return null;
     }
   }
 
