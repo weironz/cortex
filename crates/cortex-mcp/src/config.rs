@@ -24,10 +24,10 @@ use std::path::Path;
 
 use cortex_agent::Risk;
 use cortex_core::{CortexError, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// 一整份配置文件。
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct McpConfig {
     /// key 就是 server 名，会成为工具名前缀的一部分（`mcp__{key}__{tool}`）。
     ///
@@ -40,7 +40,7 @@ pub struct McpConfig {
 }
 
 /// 一台 server 怎么连、以及它的工具算多高风险。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
     #[serde(flatten)]
     pub transport: Transport,
@@ -58,16 +58,20 @@ pub struct ServerConfig {
     ///
     /// 字段名刻意叫 `trust` 而不是 `risk`：配置里要表达的是「我多信它」，
     /// 不是「它有多危险」—— 后者我们判断不了。
-    #[serde(default)]
+    ///
+    /// 写文件时**默认值不写出去**：这是给人手编的文件，每一条都挂着
+    /// `"trust":"ask","disabled":false` 只是噪音，而且 Claude Code 也不认
+    /// 这两个字段。
+    #[serde(default, skip_serializing_if = "Trust::is_default")]
     pub trust: Trust,
 
     /// 关掉但不删掉。调试时比注释掉一整段 JSON 方便，而 JSON 没有注释。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
 }
 
 /// 用户对一台 server 的信任程度，决定它的工具落在哪一档 [`Risk`]。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Trust {
     /// 默认：每次调用都问。
@@ -87,6 +91,14 @@ pub enum Trust {
 }
 
 impl Trust {
+    /// 是不是那个默认档（写文件时用来省略它）。
+    ///
+    /// 收 `&self` 是给 serde 的 `skip_serializing_if` 用的 —— 它按引用传。
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Ask)
+    }
+
     /// 这一档对应的 [`Risk`]。
     #[must_use]
     pub const fn risk(self) -> Risk {
@@ -110,6 +122,9 @@ impl Trust {
 /// `untagged` 按顺序试，两个变体的必填字段不相交（`command` vs `url`），
 /// 所以判别是确定的。代价是错误信息会退化成「data did not match any
 /// variant」—— 用一条测试把两种形状都钉住，换那份兼容性。
+///
+/// **写出去时不走这条路**：`Serialize` 是手写的，总带上 `type`。
+/// 读宽写严，理由见那段 impl。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum Transport {
@@ -130,6 +145,67 @@ pub enum Transport {
         #[serde(default)]
         headers: BTreeMap<String, String>,
     },
+}
+
+/// 写出去时**总是带上 `type`**，即便读进来时可以没有。
+///
+/// # 为什么不能直接 `derive(Serialize)`
+///
+/// 那会跟着 `untagged` 走，把 HTTP 那条写成 `{"url": …}` —— 没有 `type`。
+/// 而 Claude Code 读到一个没有 `type` 的条目会当它是 stdio，然后报
+/// 「缺 command」。于是我们写出来的文件**它读不了**，而这个 crate 存在的
+/// 一半理由就是两边通用。
+///
+/// 读宽写严：读别人的文件要宽容（对方怎么写的我们管不着），写自己的文件
+/// 要显式（多一个字段不花钱，少一个字段是兼容性事故）。
+impl Serialize for Transport {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        match self {
+            Self::Stdio { command, args, env } => {
+                let mut m = s.serialize_map(None)?;
+                m.serialize_entry("type", "stdio")?;
+                m.serialize_entry("command", command)?;
+                if !args.is_empty() {
+                    m.serialize_entry("args", args)?;
+                }
+                if !env.is_empty() {
+                    m.serialize_entry("env", env)?;
+                }
+                m.end()
+            }
+            Self::Http { url, headers } => {
+                let mut m = s.serialize_map(None)?;
+                m.serialize_entry("type", "http")?;
+                m.serialize_entry("url", url)?;
+                if !headers.is_empty() {
+                    m.serialize_entry("headers", headers)?;
+                }
+                m.end()
+            }
+        }
+    }
+}
+
+/// server 名能不能用。
+///
+/// # 为什么名字里不能有 `__`
+///
+/// 工具全名是 `mcp__{server}__{tool}`，而拆回去用的
+/// [`crate::hub`]`::split_prefixed` 找的是**第一个** `__`。那个选择是对的
+/// —— 它让工具名可以含 `__`（对端起的名字我们管不着）。代价是**server 名
+/// 不行**：一台叫 `a__b` 的 server 提供的 `c`，全名 `mcp__a__b__c` 会被拆成
+/// server=`a`、tool=`b__c`，于是查不到那台 server，报的是「没有连接」，
+/// 而它连得好好的。
+///
+/// 所以这条不是风格检查，是**在写入口把不可能查到的名字挡掉**。
+#[must_use]
+pub fn valid_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains("__")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 /// 桌面端读的用户级配置文件名。
@@ -232,6 +308,34 @@ impl McpConfig {
     /// 实际要连的那些（去掉 `disabled`）。
     pub fn enabled(&self) -> impl Iterator<Item = (&String, &ServerConfig)> {
         self.servers.iter().filter(|(_, c)| !c.disabled)
+    }
+
+    /// 写回文件。**先写临时文件再 rename**。
+    ///
+    /// 这是**用户手上唯一那份 MCP 配置**：直接覆写的话，进程在写到一半时
+    /// 被杀（关机、崩溃）会留下一个截断的 JSON，下次启动读它会报解析失败
+    /// —— 于是他所有的 server 一起消失，而文件里那半截东西他也修不回来。
+    ///
+    /// 同一个 tmp+rename 的形状在 `workspaces.rs`、`outbox.rs`、
+    /// `config.rs` 各有一份。没有抽公共函数是因为它们分属不同 crate，
+    /// 而为四行代码开一个共享 crate 不划算。
+    ///
+    /// # Errors
+    /// 建目录、写、rename 任一步失败。
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                CortexError::Invalid(format!("建不出 MCP 配置目录 {}：{e}", dir.display()))
+            })?;
+        }
+        // 缩进两格：这个文件用户会手编，紧凑格式等于逼他去找一个格式化工具
+        let text = serde_json::to_string_pretty(self)
+            .map_err(|e| CortexError::Invalid(format!("MCP 配置序列化失败：{e}")))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, text.as_bytes())
+            .map_err(|e| CortexError::Invalid(format!("写不了 {}：{e}", tmp.display())))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| CortexError::Invalid(format!("落不了盘 {}：{e}", path.display())))
     }
 }
 
@@ -354,6 +458,72 @@ mod tests {
                 .servers
                 .is_empty()
         );
+    }
+
+    /// 写出去的文件 **Claude Code 读得回来**，而且我们自己也读得回来。
+    ///
+    /// 关键那条是 `type`：`untagged` 的 derive 会把 HTTP 写成 `{"url": …}`，
+    /// 而 Claude Code 见到没有 `type` 的条目会当它是 stdio、然后报缺
+    /// `command` —— 于是我们写的配置在它那儿是坏的，而这个 crate 存在的
+    /// 一半理由就是两边通用。
+    #[test]
+    fn what_we_write_carries_the_type_and_reads_back_the_same() {
+        let src = r#"{"mcpServers":{
+             "docs":{"type":"http","url":"https://x.example/mcp"},
+             "fs":{"command":"npx","args":["-y","p"]}
+           }}"#;
+        let cfg = McpConfig::parse(src).expect("样例配置可解析");
+        let text = serde_json::to_string(&cfg).expect("应能序列化");
+
+        assert!(
+            text.contains(r#""type":"http""#),
+            "HTTP 那条必须写出 type，否则 Claude Code 读不了：{text}"
+        );
+        assert!(
+            !text.contains(r#""trust""#) && !text.contains(r#""disabled""#),
+            "默认值不该写进这份给人手编的文件：{text}"
+        );
+
+        let back = McpConfig::parse(&text).expect("自己写的自己要读得回来");
+        assert_eq!(back.servers.len(), 2);
+        assert!(matches!(
+            &back.servers["docs"].transport,
+            Transport::Http { url, .. } if url == "https://x.example/mcp"
+        ));
+        assert!(matches!(
+            &back.servers["fs"].transport,
+            Transport::Stdio { command, .. } if command == "npx"
+        ));
+    }
+
+    /// 落盘走的是 tmp+rename，且**不留下那个临时文件**。
+    #[test]
+    fn saving_lands_atomically_and_leaves_no_debris() {
+        let dir = tempfile::tempdir().expect("应能建临时目录");
+        let path = dir.path().join("sub").join("mcp.json");
+
+        let cfg = McpConfig::parse(r#"{"mcpServers":{"a":{"command":"x"}}}"#).unwrap();
+        cfg.save(&path).expect("父目录不存在时应当自己建出来");
+
+        assert!(path.exists(), "写完文件必须在");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "rename 之后不该留下 .tmp —— 留着的话下次看目录像是上次写崩了"
+        );
+        assert_eq!(McpConfig::load(&path).unwrap().servers.len(), 1);
+    }
+
+    #[test]
+    fn a_server_name_containing_the_separator_is_invalid() {
+        assert!(valid_server_name("docs"));
+        assert!(valid_server_name("my-server_1.2"));
+        assert!(
+            !valid_server_name("a__b"),
+            "含 __ 的名字会被 split_prefixed 拆错，症状是那台 server 的每次\
+             调用都说『没有连接』，而它连得好好的"
+        );
+        assert!(!valid_server_name(""), "空名字会拼出 mcp____tool");
+        assert!(!valid_server_name("有中文"), "名字进的是工具名，只收 ASCII");
     }
 
     #[test]

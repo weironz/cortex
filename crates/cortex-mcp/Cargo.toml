@@ -28,6 +28,10 @@ rmcp = { version = "1.4", default-features = false, features = [
     "transport-streamable-http-client-reqwest",
 ] }
 
+# 只为注册表那条（`registry.rs`）。rmcp 的 HTTP 传输本来就把它拖进来了，
+# 显式写出来是为了别在别人换 rmcp feature 时无声地编不过。
+reqwest = { workspace = true }
+
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

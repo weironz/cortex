@@ -995,6 +995,7 @@ dependencies = [
  "cortex-agent",
  "cortex-core",
  "futures",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",

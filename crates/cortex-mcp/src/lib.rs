@@ -23,6 +23,10 @@
 
 pub mod config;
 mod hub;
+mod paste;
+pub mod registry;
 
-pub use config::{McpConfig, ServerConfig, Transport, Trust, config_path};
-pub use hub::{McpHub, ServerStatus};
+pub use config::{McpConfig, ServerConfig, Transport, Trust, config_path, valid_server_name};
+pub use hub::{McpHub, ServerStatus, ToolInfo};
+pub use paste::parse_pasted;
+pub use registry::RegistryEntry;
