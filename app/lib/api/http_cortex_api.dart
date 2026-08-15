@@ -460,7 +460,7 @@ class HttpCortexApi implements CortexApi {
       final body = await response.stream.bytesToString().catchError((_) => '');
       throw _failure(
         response.statusCode,
-        body.isEmpty ? 'import/run 失败' : _trim(body),
+        _unwrapError(body) ?? 'import/run 失败（HTTP ${response.statusCode}）',
       );
     }
 
@@ -860,17 +860,8 @@ class HttpCortexApi implements CortexApi {
   /// 编的那句话要**带上状态码与路径**：这两样正好是「地址填错了」与
   /// 「服务端挂了」之间唯一的区别。
   String _errorMessage(http.Response response) {
-    try {
-      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-      if (decoded is Map<String, dynamic>) {
-        final message = asStringOrNull(decoded['error']);
-        if (message != null && message.trim().isNotEmpty) return message;
-      }
-    } on Object {
-      // Not JSON. Fall through to the raw body.
-    }
-    final body = _trim(response.body);
-    if (body.isNotEmpty) return body;
+    final unwrapped = _unwrapError(utf8.decode(response.bodyBytes));
+    if (unwrapped != null) return unwrapped;
 
     final path = response.request?.url.path ?? '';
     return switch (response.statusCode) {
@@ -881,6 +872,35 @@ class HttpCortexApi implements CortexApi {
             'cortexd 的路由挂在根上，地址里不要带 /api 之类的前缀。',
       final s => '服务端回了 HTTP $s，而且没有说明原因（$path）。',
     };
+  }
+
+  /// 从响应体里取出**给人看的那句话**：`{"error": "…"}` 就剥掉信封，
+  /// 不是 JSON 就用原文；两者都拿不到时回 `null`（调用方去编一句）。
+  ///
+  /// # 为什么非要有这一步
+  ///
+  /// 服务端一律用 `{"error": …}` 包一层。流式那条路上原先直接把整个 body
+  /// 当成消息，于是聊天气泡里画出来的是
+  ///
+  /// ```
+  /// {"error":"这一轮要在云端跑，但数据源 … 请把数据源改成部署入口。"}
+  /// ```
+  ///
+  /// —— 一句本来写得清清楚楚的提示，因为多了一层信封就变成了「报错很不友好」。
+  /// 2026-08-15 真机上撞到的。非流式那条一直是对的，这个函数把两条并回一处，
+  /// 免得下一个人只修其中一条。
+  String? _unwrapError(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        final message = asStringOrNull(decoded['error']);
+        if (message != null && message.trim().isNotEmpty) return message;
+      }
+    } on Object {
+      // 不是 JSON。原文往往就是给人看的，继续往下走
+    }
+    final trimmed = _trim(body);
+    return trimmed.isEmpty ? null : trimmed;
   }
 
   @override
@@ -970,9 +990,10 @@ class HttpCortexApi implements CortexApi {
   ) async* {
     if (response.statusCode != 200) {
       final body = await response.stream.bytesToString().catchError((_) => '');
+      // 剥掉 `{"error": …}` 的信封再给人看 —— 见 [_unwrapError]
       throw _failure(
         response.statusCode,
-        body.isEmpty ? '$label 失败' : _trim(body),
+        _unwrapError(body) ?? '$label 失败（HTTP ${response.statusCode}）',
       );
     }
 
