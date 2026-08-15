@@ -7,6 +7,7 @@ members = [
     "crates/cortex-proto",
     "crates/cortex-import",
     "crates/cortex-agentd",
+    "crates/cortex-store",
     "crates/cortex-local",
     "crates/cortex-egress-proxy",
     "crates/cortex-cli",
@@ -23,11 +24,16 @@ rust-version = "1.90"
 license = "Apache-2.0"
 repository = "https://github.com/weironz/cortex"
 
-# **这里没有 sqlx / pgvector / jieba / fastembed。**
+# **有 sqlx，没有 pgvector / jieba / fastembed。**
 #
-# 记忆那一半（存储、检索、抽取）在另一个仓库：github.com/weironz/cormex。
+# 记忆那一半（抽取、向量、四路召回）在另一个仓库：github.com/weironz/cormex。
 # 两边**完全切开，没有相互依赖** —— Cortex 通过 HTTP 用它，与第三方 agent
 # 走的是同一条路。契约由 `cortex_proto::PROTOCOL_VERSION` 的握手守着。
+#
+# 但**会话不是记忆**。2026-08-15 之前这一句没有被当真：会话、消息、附件、
+# 同步流水，连沙箱快照与自带 API key 都住在记忆服务的库里，于是停掉它之后
+# agent 连上一句话都读不到。会话从此归 Cortex 自己（`crates/cortex-store`），
+# 这也是 sqlx 回来的原因。
 #
 # 代价是明知的：core / llm / proto / import 两边各留一份，会各自演化。
 # 换来的是两个产品可以独立发版，而开源那一半不被私有这一半的节奏绑住。
@@ -39,6 +45,7 @@ cortex-llm = { path = "crates/cortex-llm" }
 cortex-agent = { path = "crates/cortex-agent" }
 cortex-mcp = { path = "crates/cortex-mcp" }
 cortex-proto = { path = "crates/cortex-proto" }
+cortex-store = { path = "crates/cortex-store" }
 cortex-blob = { path = "crates/cortex-blob" }
 
 # 供应商层：取件自 goose（Apache-2.0）。
@@ -115,6 +122,18 @@ libc = "0.2"
 # 就不在 crate root 里了，报的是「no TextDiff in the root」，
 # 看着像版本不对，实际是 feature 少了一个。
 similar = { version = "2", default-features = false, features = ["text"] }
+
+# 存储
+#
+# **有 sqlx，没有 pgvector。** 这两样在拆分前是一起的，因为那时会话与
+# 事实同住一个库。现在向量只属于记忆服务（另一个仓库），这边一列都没有。
+#
+# 不装 pgvector 是净赚：它的 sqlx 依赖范围跨 semver 组，会把 sqlx 拉回 0.8，
+# 于是两份 `sqlx-core` 共存、51 个编译错误 —— 那是 `Cargo.lock` 里专门钉过
+# 一次的坑，这一侧从此不必再钉。
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio", "tls-rustls", "postgres", "json", "chrono", "uuid", "macros", "migrate",
+] }
 
 # 基础设施
 ulid = { version = "3", features = ["serde"] }

@@ -1,0 +1,23 @@
+[package]
+name = "cortex-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cortex 存储层：会话、附件、同步流水的 sqlx repository"
+
+[dependencies]
+cortex-core.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+dotenvy.workspace = true
+futures.workspace = true

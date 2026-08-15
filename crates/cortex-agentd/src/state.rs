@@ -18,6 +18,15 @@ struct Inner {
     /// （同网段、短超时），那条打的是 cortexd（可能跨机房）。
     http: reqwest::Client,
     remote: Remote,
+    /// **Cortex 自己的持久层**：会话、消息、附件、同步流水。
+    ///
+    /// 与 [`Remote`] 分工分明：那条打的是**记忆服务**（抽取与召回），
+    /// 这个是自己的库。会话曾经也在那边，而后果是「记忆服务挂了就没有产品」
+    /// —— 见 `cortex-store` 的 crate 文档。
+    ///
+    /// `None` = 这个部署还没给 `CORTEX_DATABASE_URL`。阶段一先让它站住，
+    /// 一条路由都还没搬过来。
+    store: Option<cortex_store::Store>,
     /// 每个作用域最后一次真的被用是什么时候。
     ///
     /// # 为什么这份表在这儿，而不是继续读 cortexd 的令牌注册表
@@ -34,15 +43,30 @@ struct Inner {
 
 impl AgentState {
     #[must_use]
-    pub fn new(runner: Arc<dyn SandboxRunner>, http: reqwest::Client, remote: Remote) -> Self {
+    pub fn new(
+        runner: Arc<dyn SandboxRunner>,
+        http: reqwest::Client,
+        remote: Remote,
+        store: Option<cortex_store::Store>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 runner,
                 http,
                 remote,
+                store,
                 last_use: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// Cortex 自己的库。**现在还没有任何路由用它** —— 它先站住，
+    /// 会话那一批路由分阶段搬过来（见 plan 的阶段三）。
+    ///
+    /// `None` = 这个部署还没给 `CORTEX_DATABASE_URL`，退回无状态形态。
+    #[must_use]
+    pub fn store(&self) -> Option<&cortex_store::Store> {
+        self.inner.store.as_ref()
     }
 
     #[must_use]

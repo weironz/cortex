@@ -93,6 +93,21 @@ pub fn router(state: AgentState) -> Router {
 async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
     let (reachable, callback_visible) =
         tokio::join!(st.remote().is_reachable(), st.runner().callback_visible());
+
+    // ── 自己那个库 ────────────────────────────────────────
+    //
+    // 三档而不是布尔：`disabled` 与 `error` 完全不是一回事。前者是「这个
+    // 部署还没配 `CORTEX_DATABASE_URL`」（阶段一的常态），后者是「配了但
+    // 连不上」——把它们并成一个 false，运维看到的是同一个红点，
+    // 而该做的动作截然相反。
+    let database = match st.store() {
+        None => "disabled".to_owned(),
+        Some(store) => match store.ping().await {
+            Ok(()) => "ok".to_owned(),
+            Err(e) => format!("error: {e}"),
+        },
+    };
+
     Json(serde_json::json!({
         "status": "ok",
         "version": cortex_core::VERSION,
@@ -101,6 +116,7 @@ async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
         "memory_reachable": reachable,
         "callback": st.runner().callback(),
         "callback_visible_to_sandbox": callback_visible,
+        "database": database,
         "live_scopes": st.scopes().len(),
     }))
 }
@@ -585,6 +601,8 @@ mod tests {
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
+            // 这一组用例不碰库
+            None,
         );
         let app = router(st);
         for path in ["/sessions", "/memory/search", "/episodes", "/sync", "/ws"] {
@@ -621,6 +639,8 @@ mod tests {
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
+            // 这一组用例不碰库
+            None,
         );
         let resp = router(st)
             .oneshot(
@@ -669,6 +689,8 @@ mod tests {
             // 远端指向一个没人监听的端口：`delegate` 必然失败，于是这条
             // 会在要钥匙那一步就 502 —— 而那**同样证明**它没去起容器
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
+            // 这一组用例不碰库
+            None,
         );
         let resp = router(st)
             .oneshot(
@@ -697,6 +719,8 @@ mod tests {
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
+            // 这一组用例不碰库
+            None,
         );
         let resp = router(st)
             .oneshot(

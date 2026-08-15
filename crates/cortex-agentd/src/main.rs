@@ -58,6 +58,18 @@ struct Args {
     #[arg(long, env = "CORTEX_MEMORY_URL", default_value = "http://cortexd:8080")]
     memory: String,
 
+    /// **Cortex 自己的库**。会话、消息、附件、同步流水都在这儿。
+    ///
+    /// # 为什么它是 Option 而不是必填
+    ///
+    /// 这个进程此前完全无状态，而库是分阶段接进来的：现在只建连接、跑
+    /// migration，一条路由都还没搬过来。不给地址就退回原来那个形态照常起 ——
+    /// 让「有库」这件事先在真机上站住，再谈把会话搬过来。
+    ///
+    /// 阶段三之后它会变成必填：那时没有库就没有会话，起来也没有意义。
+    #[arg(long, env = "CORTEX_DATABASE_URL")]
+    database_url: Option<String>,
+
     /// 容器回调记忆服务的地址。
     ///
     /// 与 `--memory` 分开：那个是**这个进程**怎么找到 cortexd，这个是
@@ -128,7 +140,38 @@ async fn main() -> anyhow::Result<()> {
     let to_memory = reqwest::Client::builder()
         .build()
         .context("建记忆服务客户端失败")?;
-    let state = AgentState::new(Arc::new(runner), http, Remote::new(&args.memory, to_memory));
+    // ── Cortex 自己的库 ────────────────────────────────────
+    //
+    // **连不上就退出，不静默降级。** cortexd 曾经在连不上数据库时悄悄回落
+    // 到 mock 并照报 `status: ok`，症状是「服务活着但数据全是假的」，
+    // 而那是最难归因的一类故障。同一个坑不踩第二次。
+    //
+    // migration 在这儿跑而不是靠外部脚本：二进制自带 schema，部署时不必
+    // 带上 `migrations/`，也就不会出现「镜像是新的、schema 是旧的」。
+    let store = match args.database_url.as_deref() {
+        Some(url) => {
+            let s = cortex_store::Store::connect(url)
+                .await
+                .context("连不上 Cortex 自己的数据库")?;
+            s.migrate().await.context("跑 migration 失败")?;
+            tracing::info!("Cortex 数据库就绪（migration 已跑）");
+            Some(s)
+        }
+        None => {
+            tracing::warn!(
+                "没有 CORTEX_DATABASE_URL —— 以无状态形态启动。\
+                 会话仍然存在记忆服务那边，记忆服务挂了就读不到历史。"
+            );
+            None
+        }
+    };
+
+    let state = AgentState::new(
+        Arc::new(runner),
+        http,
+        Remote::new(&args.memory, to_memory),
+        store,
+    );
 
     // 后台三件：回收闲置容器、盯 OOM、盯卷配额。
     // 快照那条定时任务**没有跟过来** —— 见下面那段

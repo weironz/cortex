@@ -11,12 +11,22 @@ description = "Cortex 云端 agent 编排：按需拉起沙箱容器，并把请
 cortex-core.workspace = true
 cortex-proto.workspace = true
 
-# **这里没有 `cortex-store`，也没有 `cortex-memory`，且不许加。**
+# **`cortex-store` 在这儿，但它只装会话，不装记忆。**
 #
-# 与 `cortex-local` 同一条纪律：agent 那一侧通过 HTTP 用记忆，没有 store
-# 句柄。这不是洁癖 —— 那正是第三方 agent（Claude Code / goose）走的同一条路，
-# **自己人和外人用同一个 API，那个 API 才不会烂**。
+# 这条以前写的是「这里没有 cortex-store，且不许加」。那句话现在只对了一半，
+# 而错的那一半 2026-08-15 咬了一口：停掉记忆服务之后 agent **连上一句话都
+# 读不到** —— 会话、消息、附件、同步流水全在记忆服务的库里，Cortex 离开它
+# 什么都不是。边界当初不是设计出来的，是漂过去的（沙箱快照与自带 API key
+# 都躺在那边，而它们跟记忆毫无关系）。
 #
+# 现在的划分：**会话是 Cortex 的，记忆是 Cormex 的**。判据一句话 ——
+# 这张表离开记忆能力还有没有意义。
+#
+# 没变的那一半仍然成立、且仍然不许破：**记忆只通过 HTTP 用，没有记忆的
+# store 句柄**。那正是第三方 agent（Claude Code / goose）走的同一条路，
+# 自己人和外人用同一个 API，那个 API 才不会烂。
+cortex-store.workspace = true
+
 # 也没有 `cortex-agent`：这个进程不跑 agent 循环。循环在容器里那个
 # `cortex-local` 上（`--exec-env=container`），这里只负责把它拉起来、
 # 把请求原样送进去。
