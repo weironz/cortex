@@ -69,3 +69,8 @@ app/.idea/
 
 # 本地回落的对象存储（RustFS 连不上时 blobs.rs 写在这里）—— 是数据，不是源码
 .cortex/
+
+# agent 的临时 worktree（EnterWorktree / isolation: worktree 建的）。
+# 它们是**另一个 git 仓库**，被 `git add -A` 卷进来会变成 embedded repo：
+# 克隆外层仓库的人拿到一个空目录，且不知道去哪儿取内容。
+.claude/worktrees/

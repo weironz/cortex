@@ -31,6 +31,7 @@ mod credentials;
 mod cursor;
 mod env;
 mod error;
+mod projects;
 mod quota;
 mod reaper;
 mod remote;

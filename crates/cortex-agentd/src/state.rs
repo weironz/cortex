@@ -24,6 +24,19 @@ use crate::auth::{AuthMode, TicketBook};
 use crate::remote::Remote;
 use crate::runner::SandboxRunner;
 
+/// 这个进程写会话 / 项目事件时盖的那个章（`device_id`）。
+///
+/// # 为什么是常量，而不是一个 `CORTEX_DEVICE_ID`
+///
+/// 这一列记的**不是「用户那台设备」** —— 链路上根本没有客户端设备身份
+/// （见 `cortex_store::SessionRuntime` 的文档）。一次 PATCH 只有一个 HTTP
+/// 请求，没有任何一处能证明它来自哪台机器，能诚实说出的只有「这条事件是
+/// 编排器写的」。
+///
+/// 给它一个环境变量，等于放一个**配错了也没人看得出来**的旋钮：运维会以为
+/// 自己在标注设备，而所有租户的所有会话事件仍然只由这一个进程写入。
+pub const DEVICE_ID: &str = "cortex-agentd";
+
 #[derive(Clone)]
 pub struct AgentState {
     inner: Arc<Inner>,

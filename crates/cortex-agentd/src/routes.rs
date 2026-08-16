@@ -29,7 +29,7 @@
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use cortex_proto::delegate::Delegation;
 use cortex_proto::dto::{ChatRequest, SessionRuntimeDto};
@@ -86,14 +86,19 @@ protected_routes! {
     "/auth/ticket" [POST] => post(issue_ticket),
     // ── 会话 ──
     //
-    // 列会话与翻历史。**这两条是「记忆服务挂了历史照样在」的第一块** ——
-    // 它们此前住在记忆服务里，把它停掉之后 agent 连上一句话都读不到。
-    //
-    // 改名 / 归档 / 绑工作区那个 PATCH **还没搬**，所以这里只声明 GET：
-    // 路径整条会被边缘转过来，PATCH 打过来会拿到 405 而不是 404 ——
-    // 405 说的是「这条路在，只是这个动作还没有」，正是实情。
+    // 列会话、翻历史、改元数据。**这几条是「记忆服务挂了历史照样在」的
+    // 第一块** —— 它们此前住在记忆服务里，把它停掉之后 agent 连上一句话
+    // 都读不到。
     "/sessions" [GET] => get(crate::sessions::list),
-    "/sessions/{id}" [GET] => get(crate::sessions::detail),
+    "/sessions/{id}" [GET, PATCH] => get(crate::sessions::detail).patch(crate::sessions::patch),
+    // ── 项目 ──
+    //
+    // 与会话**同一批**搬，不是顺手多搬一个：`PATCH /sessions/{id}` 的
+    // `project_id` 要先确认目标项目存在，拆成两批的话，中间那一版会向一个
+    // 自己读不到的库问「这个项目在不在」，而答案恒为「不在」。
+    "/projects" [GET, POST] => get(crate::projects::list).post(crate::projects::create),
+    "/projects/{id}" [PATCH, DELETE] => patch(crate::projects::patch)
+        .delete(crate::projects::delete),
 }
 
 /// 路由表。

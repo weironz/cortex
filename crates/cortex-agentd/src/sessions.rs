@@ -1,4 +1,4 @@
-//! 会话：列出来，以及翻开一段历史。
+//! 会话：列出来、翻开一段历史，以及改它的元数据。
 //!
 //! # 这是「记忆服务挂了历史照样在」的第一块
 //!
@@ -20,15 +20,17 @@
 
 use axum::extract::{Path, Query, State};
 use axum::{Json, http::HeaderMap};
+use chrono::Utc;
+use cortex_core::CortexError;
 use cortex_proto::dto::{
     AttachmentDto, DEFAULT_EPISODE_PAGE, EpisodeDto, ListSessionsQuery, MAX_EPISODE_PAGE,
-    SessionDetail, SessionDetailQuery, SessionDto, SessionRuntimeDto, ToolCallDto,
+    SessionDetail, SessionDetailQuery, SessionDto, SessionPatch, SessionRuntimeDto, ToolCallDto,
 };
 use cortex_store::Store;
 
 use crate::error::ApiError;
 
-use crate::state::AgentState;
+use crate::state::{AgentState, DEVICE_ID};
 
 /// 列表一次最多给多少条。
 ///
@@ -59,6 +61,21 @@ pub async fn detail(
 ) -> Result<Json<SessionDetail>, ApiError> {
     let tenant = st.tenant(&headers).await?;
     Ok(Json(session_detail(tenant.store()?, &id, &q).await?))
+}
+
+/// `PATCH /sessions/{id}` —— 改名 / 归档 / 解绑工作区 / 移进项目 / 设 runtime。
+///
+/// 归档走这条而不是 `DELETE /sessions/{id}`：那个动词会让客户端（以及读代码
+/// 的人）以为数据没了。append-only 之下一行都没少，它只是不再出现在默认列表
+/// 里 —— 真要销毁内容是 redact / purge，另一条路、要二次确认。
+pub async fn patch(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(patch): Json<SessionPatch>,
+) -> Result<Json<SessionDto>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+    Ok(Json(patch_session(tenant.store()?, &id, patch).await?))
 }
 
 // ─────────────────────────── 数据 ───────────────────────────
@@ -134,6 +151,214 @@ async fn session_detail(
     })
 }
 
+/// 改名 / 归档 / 解绑工作区 / 移进项目 / 声明执行归属。
+///
+/// # 为什么不要求会话已经有消息
+///
+/// 用户新建会话 → 选工作区 → 发第一句，这是最自然的顺序。若在这里
+/// 因为「查不到这个会话」返回 404，那个顺序就走不通，客户端只好倒过来
+/// 强迫用户先说一句话。事件表本来就不依赖 episodes 存在，允许它即可 ——
+/// 末态与写入顺序无关，消息一到会话就带着标题和工作区出现在列表里。
+///
+/// # 为什么全部改动进同一个写事务
+///
+/// 「改名 + 归档」若分两个事务，别的设备会先拉到「改完名但还没归档」
+/// 那个中间态，列表上闪一下。同事务下它们在 `sync_log` 里连号到达。
+async fn patch_session(
+    store: &Store,
+    session_id: &str,
+    patch: SessionPatch,
+) -> cortex_core::Result<SessionDto> {
+    let mut events: Vec<cortex_store::NewSessionEvent> = Vec::new();
+
+    if let Some(raw) = patch.title.as_deref() {
+        let title = raw.trim();
+        if title.is_empty() {
+            return Err(CortexError::Invalid(
+                "标题不能为空白；本版不支持「恢复自动标题」，请给一个非空标题".into(),
+            ));
+        }
+        if title.chars().count() > cortex_store::SESSION_TITLE_MAX_CHARS {
+            return Err(CortexError::Invalid(format!(
+                "标题过长（上限 {} 字符）",
+                cortex_store::SESSION_TITLE_MAX_CHARS
+            )));
+        }
+        events.push(cortex_store::NewSessionEvent::rename(
+            session_id,
+            title,
+            cortex_store::Actor::User,
+            DEVICE_ID,
+        ));
+    }
+
+    if let Some(archived) = patch.archived {
+        events.push(if archived {
+            cortex_store::NewSessionEvent::archive(session_id, cortex_store::Actor::User, DEVICE_ID)
+        } else {
+            cortex_store::NewSessionEvent::unarchive(
+                session_id,
+                cortex_store::Actor::User,
+                DEVICE_ID,
+            )
+        });
+    }
+
+    // ── 绑定工作区：**服务端明确拒绝** ──
+    //
+    // 判断本身在 `workspace_patch` 里，理由见它的文档。这里只把「要解绑」
+    // 那一档翻成事件
+    if workspace_patch(patch.workspace.as_ref().map(Option::as_deref))? {
+        events.push(cortex_store::NewSessionEvent::unbind_workspace(
+            session_id,
+            cortex_store::Actor::User,
+            DEVICE_ID,
+        ));
+    }
+
+    // ── 移进 / 移出项目 ──
+    //
+    // 目标项目的存在性在**进事务之前**查：写事务持着 advisory lock，纪律
+    // 要求它短小纯写（`cortex-store::txn` 的第三条）。
+    //
+    // 不查的话，移进一个已删除的项目会静默成功 —— 事件照样落库，而末态
+    // 视图把悬挂的归属当作未分组，于是用户看到的是「拖进去又弹回来了」，
+    // 且没有任何一处报错。
+    match patch.project_id.as_ref().map(Option::as_deref) {
+        Some(Some(project_id)) => {
+            // 目标项目不存在是 **400 而不是 404**：这条请求的资源是那个会话，
+            // 而它好好的。回 404 会让客户端分不清「会话没了」与「项目没了」，
+            // 而两者要做的事完全不同（一个是刷新列表，一个是重建分组）
+            if store
+                .project(project_id)
+                .await
+                .map_err(store_err)?
+                .is_none()
+            {
+                return Err(CortexError::Invalid(format!(
+                    "目标项目不存在或已被删除：{project_id}"
+                )));
+            }
+            events.push(cortex_store::NewSessionEvent::move_to_project(
+                session_id,
+                project_id,
+                cortex_store::Actor::User,
+                DEVICE_ID,
+            ));
+        }
+        Some(None) => events.push(cortex_store::NewSessionEvent::remove_from_project(
+            session_id,
+            cortex_store::Actor::User,
+            DEVICE_ID,
+        )),
+        None => {}
+    }
+
+    // ── 执行归属 ──
+    //
+    // 不校验「这台机器上真有那个绑定」：服务端**看不到**客户机的
+    // `workspaces.json`，那是这套设计的前提而不是疏漏（见
+    // `cortex-local::workspaces` 的模块头）。声明它的是唯一知情的一方。
+    if let Some(runtime) = patch.runtime {
+        events.push(cortex_store::NewSessionEvent::set_runtime(
+            session_id,
+            match runtime {
+                SessionRuntimeDto::Local => cortex_store::SessionRuntime::Local,
+                SessionRuntimeDto::Cloud => cortex_store::SessionRuntime::Cloud,
+            },
+            cortex_store::Actor::User,
+            DEVICE_ID,
+        ));
+    }
+
+    if events.is_empty() {
+        return Err(CortexError::Invalid(
+            "请求体里没有任何要改的字段（title / archived / workspace / project_id）".into(),
+        ));
+    }
+
+    store
+        .write_txn(async |t| {
+            let mut last = 0;
+            for e in &events {
+                last = t.insert_session_event(e).await?;
+            }
+            Ok(last)
+        })
+        .await
+        .map_err(store_err)?;
+
+    session_overview(store, session_id).await
+}
+
+/// `PATCH /sessions/{id}` 里那个 `workspace` 字段该怎么处置。
+///
+/// 返回 `true` = 要解绑；`false` = 这次没提这个字段。绑定一律报错。
+///
+/// # 为什么绑定要**拒绝**而不是静默忽略
+///
+/// 这条路曾经是 Web 端绑工作区的回落（本地 agent 不在时），而它绑的是
+/// **服务器上**的一个目录 —— 于是一个远端用户的 `read_file` 动的是生产机的
+/// 文件系统，爆炸半径是整台机器加上所有租户的数据。
+///
+/// 静默忽略的话，客户端会显示「已绑定 D:\myproject」，然后每个文件操作都
+/// 失败得莫名其妙 —— 而用户明明看到绑定成功了。报错里直接给出两条走得通的路。
+///
+/// # 为什么解绑照旧放行
+///
+/// 老会话上可能还留着一条服务端绑定（这次改动之前存下的）。拒绝解绑等于让
+/// 那条记录永远焊在那儿，而用户唯一能做的就是删掉整个会话。
+///
+/// # 为什么抽成函数
+///
+/// [`patch_session`] 要一个真数据库才进得去，于是这条判断在那里是测不到的。
+/// 而它恰恰是这一批里最该有测试的一条 —— 写反了就是**服务端又能绑了**，
+/// 且没有任何症状。
+fn workspace_patch(field: Option<Option<&str>>) -> cortex_core::Result<bool> {
+    match field {
+        Some(Some(_)) => Err(CortexError::Invalid(
+            "服务端进程自己不提供文件执行环境，不能在这里绑定一个宿主机路径。\
+             文件与命令有两条路：跑在**你自己的机器**上（桌面端，\
+             或在本机运行 cortex-local —— `cortex` 命令行会自己拉起它），\
+             或者打开**云沙箱** —— 那一轮的工作区是容器里的 /workspace，\
+             由服务端自己管，不需要也不接受外部路径。"
+                .into(),
+        )),
+        Some(None) => Ok(true),
+        None => Ok(false),
+    }
+}
+
+/// 会话概览。没有消息时仍然返回一条 —— PATCH 之后客户端要拿回末态，
+/// 而此刻会话很可能一条消息都还没有。
+async fn session_overview(store: &Store, session_id: &str) -> cortex_core::Result<SessionDto> {
+    // 有消息时聚合查询已经顺带把标题 / 归档 / 工作区一起带回来了
+    if let Some(d) = store.session_digest(session_id).await.map_err(store_err)? {
+        return Ok(session_dto(d));
+    }
+
+    // 没有消息 —— 用事件末态拼一条空壳。这条路正是「先选工作区、
+    // 再发第一句话」那个顺序要求的
+    let state = store.session_state(session_id).await.map_err(store_err)?;
+    let now = Utc::now().to_rfc3339();
+    let title = state.as_ref().and_then(|s| s.title.clone());
+    Ok(SessionDto {
+        id: session_id.to_string(),
+        title_is_custom: title.is_some(),
+        title: title.unwrap_or_else(|| session_title(None)),
+        created_at: now.clone(),
+        updated_at: now,
+        message_count: 0,
+        preview: None,
+        archived: state.as_ref().is_some_and(|s| s.archived),
+        workspace: state.as_ref().and_then(|s| s.workspace.clone()),
+        runtime: state
+            .as_ref()
+            .map_or(SessionRuntimeDto::Cloud, |s| runtime_dto(s.runtime)),
+        project_id: state.and_then(|s| s.project_id),
+    })
+}
+
 /// 一页消息的附件与工具轨迹，**两次批量查询而不是逐条 N+1**。
 ///
 /// 原先是三次 —— 第三次拉「这一轮注入了哪些记忆」。那一次留在了记忆服务，
@@ -171,8 +396,13 @@ async fn replay_bundle(
 
 // ─────────────────────────── 映射 ───────────────────────────
 
-fn store_err(e: cortex_store::StoreError) -> cortex_core::CortexError {
-    cortex_core::CortexError::Store(e.to_string())
+/// 存储层的错误 → 全局错误类型。
+///
+/// [`crate::projects`] 也用它。三行的适配器复制一份看着无害，但它决定了
+/// 一整类失败最终映射成哪个状态码 —— 两处各写一份，漂开的那天表现为
+/// 「同一个数据库故障，会话那条回 500、项目那条回 400」。
+pub fn store_err(e: cortex_store::StoreError) -> CortexError {
+    CortexError::Store(e.to_string())
 }
 
 /// 一条消息的「附加物」。
@@ -319,6 +549,38 @@ mod tests {
         assert!(
             dto.title_is_custom,
             "起过名要标出来，客户端据此决定要不要显示「重命名」的默认值"
+        );
+    }
+
+    /// 服务端**不能**绑工作区，但**能**解绑。
+    ///
+    /// 绑定那一半写反了的后果是「服务端又能绑了」，而它没有任何症状 ——
+    /// 直到某天一个远端用户的 `read_file` 读到了生产机上的 `.env`。
+    /// 解绑那一半写反了的后果是老会话上的绑定永远清不掉。
+    #[test]
+    fn the_server_refuses_to_bind_but_still_lets_you_unbind() {
+        let msg = workspace_patch(Some(Some("D:/anything")))
+            .expect_err("服务端绑定工作区必须被拒绝")
+            .to_string();
+        assert!(
+            msg.contains("你自己的机器") && msg.contains("cortex-local"),
+            "拒绝理由要给出走得通的路（桌面端 / 本机跑 cortex-local），而不只是说不行。实际：{msg}"
+        );
+        // 沙箱落地之后**多了一条走得通的路**，而这条恰恰是 Web 用户唯一能走的
+        // —— 前两条都要求他先装个桌面端。漏掉它，报错就等于对 Web 用户说
+        // 「你想要的这件事在这里做不到」，而其实开一个开关就有
+        assert!(
+            msg.contains("云沙箱"),
+            "Web 用户走不了前两条路（都要装桌面端）。不提沙箱，这条报错对他就是死路。实际：{msg}"
+        );
+
+        assert!(
+            workspace_patch(Some(None)).expect("解绑必须放行"),
+            "解绑要照旧能用 —— 老会话上可能还留着一条服务端绑定，拒绝解绑等于让它永远焊在那儿"
+        );
+        assert!(
+            !workspace_patch(None).expect("没提这个字段不该报错"),
+            "只改标题的请求不该被工作区这一条拦下来"
         );
     }
 }
