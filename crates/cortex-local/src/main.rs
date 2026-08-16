@@ -35,6 +35,9 @@ mod proxy;
 mod remote;
 mod routes;
 mod runs;
+/// 「agent 真跑命令时能不能出网」——**走 agent 那条路**的自检。
+/// 存在的理由见模块头：`docker exec` 那条路答不了这个问题。
+mod self_check;
 mod state;
 mod supervise;
 mod turn;
@@ -132,6 +135,24 @@ struct Args {
     /// 校验与显式绑定走同一份代码，不合格直接**启动失败**。
     #[arg(long, env = "CORTEX_DEFAULT_WORKSPACE")]
     default_workspace: Option<String>,
+
+    /// 验一次「agent 真跑命令时能不能出网」，然后退出。
+    ///
+    /// # 它与 `just sandbox-verify` 不是一回事
+    ///
+    /// 那个脚本全程用 `docker exec` 发命令，而 `docker exec` 起的进程
+    /// **不经过 `sandbox::prepare`** —— 也就是不经过 landlock 与 seccomp。
+    /// 2026-08-16 之前那个脚本一路绿，而 agent 自己跑 `git clone` 却报
+    /// 「Could not resolve proxy」：`socket()` 被 seccomp 关着，两条路的
+    /// 结论相反且没有任何东西报错。
+    ///
+    /// 这一条走的是 agent 那条路，所以它答得了那个问题。见 [`self_check`]。
+    #[arg(long)]
+    self_check: bool,
+
+    /// 隐藏：`--self-check` 起的探针子进程用它。**不是给人敲的。**
+    #[arg(long = "sandbox-probe", hide = true)]
+    sandbox_probe: bool,
 }
 
 #[tokio::main]
@@ -157,6 +178,32 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+
+    // ── 探针模式：不建任何东西，做完就退 ──────────────────────
+    //
+    // **必须排在最前面**，比 `--self-check` 还前：它是被 `sandbox::prepare`
+    // 起在沙箱里的子进程，landlock 那会儿已经生效了。往下走一步就要碰
+    // 状态目录、连远端 —— 全部会因为围栏而失败，而那些失败与它要测的事情
+    // 毫无关系，只会把结论搅浑
+    if args.sandbox_probe {
+        self_check::probe();
+    }
+
+    // ── 自检：装配沙箱、起探针、报结论，然后退 ────────────────
+    //
+    // 排在协议握手与状态目录之前：这条命令要能在一台**还没配好**的机器上
+    // 跑得出结论。要求它先握上远端，等于把「沙箱能不能出网」这个问题
+    // 挡在「远端配好了没有」后面，而运维正是在前者出问题时才来敲它
+    if args.self_check {
+        let root = args.default_workspace.clone().unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| ".".to_owned())
+        });
+        self_check::run(args.exec_env, &root)?;
+        return Ok(());
+    }
+
     let dir = config::state_dir()?;
     let route = LlmRoute::from_env()?;
 

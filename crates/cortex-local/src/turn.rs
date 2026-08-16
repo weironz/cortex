@@ -177,20 +177,26 @@ fn chat_turn_for(max_rounds: usize, external: &[cortex_agent::ToolSpec]) -> Turn
     with_external(Turn::sealed(), external).with_max_rounds(max_rounds)
 }
 
-fn workspace_turn_for(
-    env: cortex_agent::ExecEnvironment,
-    root: &str,
-    max_rounds: usize,
-    mode: PermissionMode,
-    external: &[cortex_agent::ToolSpec],
-) -> Result<Turn> {
+/// 按执行环境挑构造函数 —— **这是「agent 的沙箱长什么样」的唯一出处**。
+///
+/// 单拎出来是给 [`crate::self_check`] 用的：那条自检要验的正是「agent 真跑
+/// 命令时能不能出网」，而它**必须问同一份装配**。各建一次的话，自检绿而
+/// agent 红（或者反过来）都不会有任何东西报错 —— 那正是这条自检存在的
+/// 那个 bug 的形状：`sandbox-verify.sh` 验了一条不是用户走的路。
+/// **凡是影响「命令跑出来受什么约束」的，都在这里定完**，
+/// 上层只再叠工具目录、轮数与确认档位。
+///
+/// 边界这么划的理由是 [`crate::self_check`]：那条自检要验「agent 真跑命令时
+/// 能不能出网」，而它**必须问同一份装配**。少带一样都会让结论失真 ——
+/// 第一版就漏了下面那个 `.attended()`，于是自检在 Windows 上报「拒绝执行」，
+/// 而真 agent 在同一台机器上跑得好好的。各建一次的话，自检绿而 agent 红
+/// （或者反过来）都不会有任何东西报错 —— 那正是这条自检存在的那个 bug 的
+/// 形状：`sandbox-verify.sh` 验了一条不是用户走的路。
+pub(crate) fn turn_for_env(env: cortex_agent::ExecEnvironment, root: &str) -> Result<Turn> {
     let base = match env {
         cortex_agent::ExecEnvironment::Container => Turn::in_container(root)?,
         _ => Turn::on_local_machine(root)?,
     };
-    let t = with_external(base, external)
-        .with_max_rounds(max_rounds)
-        .with_policy(policy_for(mode, env));
     // .attended()：这台机器上没有 OS 沙箱时（Windows），靠「用户当场批准」
     // 替代内核隔离。**只有本地 agent 配这么做** —— 人就坐在屏幕前，命令原文
     // 刚给他看过，是他点的允许。cortexd 一律不开：那边批准的人可能在另一个
@@ -200,10 +206,22 @@ fn workspace_turn_for(
     // 本身，外加容器内仍然生效的 landlock（Docker ≥23.0 的默认 seccomp
     // 放行了那三个 syscall）。
     if env == cortex_agent::ExecEnvironment::LocalMachine {
-        Ok(t.attended())
+        Ok(base.attended())
     } else {
-        Ok(t)
+        Ok(base)
     }
+}
+
+fn workspace_turn_for(
+    env: cortex_agent::ExecEnvironment,
+    root: &str,
+    max_rounds: usize,
+    mode: PermissionMode,
+    external: &[cortex_agent::ToolSpec],
+) -> Result<Turn> {
+    Ok(with_external(turn_for_env(env, root)?, external)
+        .with_max_rounds(max_rounds)
+        .with_policy(policy_for(mode, env)))
 }
 
 /// 一轮所需的全部依赖。

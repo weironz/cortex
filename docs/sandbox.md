@@ -515,16 +515,22 @@ musl 静态链接，DNS 靠 docker 注入的 `/etc/resolv.conf`（musl 不需要
 
 ### 真机实测（`just sandbox-verify`）
 
-> ⚠️ **这一整张表验的是容器拓扑，不是 agent 那条路。** 脚本全程用
-> `docker exec` 发命令，而那**绕过了工具沙箱的 seccomp**。
+> ⚠️ **前三节验的是容器拓扑，不是 agent 那条路。** 它们全程用 `docker exec`
+> 发命令，而那**绕过了工具沙箱的 landlock 与 seccomp**。
 >
 > 2026-08-16 因此漏掉了一个从第一个沙箱提交起就存在的 bug：`NetworkPolicy`
 > 默认 `Denied` 且从没有调用方抬起来，于是 agent 自己跑的每一条命令
-> `socket()` 都被 EPERM —— 下面每一行照样是绿的，而用户让 agent
+> `socket()` 都被 EPERM —— 前三节每一行照样是绿的，而用户让 agent
 > `git clone` 拿到的是「Could not resolve proxy」。
 >
-> **在 `sandbox-verify.sh` 补上一条走 `cortex-local` HTTP 接口的用例之前，
-> 这张表全绿不代表 agent 能出网。** 见 roadmap 那一节。
+> **最后一节就是为这件事加的**：`cortex-local --self-check` 在容器**内部**
+> 自己装配沙箱（与真跑对话时同一份，见 `turn_for_env`），经
+> `sandbox::prepare` 起一个探针子进程去开 socket、连代理。哪怕那一行仍然
+> 由 `docker exec` 触发，被测的事情发生在沙箱**里面**。
+>
+> 反向验过：把 `network_policy` 改回 `Denied` 重编一个镜像，前三节照样全绿，
+> 而最后一节红，退出码 1，报的正是用户那两句
+> （`Operation not permitted` / `Temporary failure in name resolution`）。
 
 ```
 ── 拓扑 ──                                    期望   实际
