@@ -276,8 +276,6 @@ pub fn new_episode(session_id: &str, text: &str) -> NewEpisode {
         role: Role::User,
         content: serde_json::json!({ "role": "user", "text": text }),
         text: Some(text.to_owned()),
-        // 真实链路上这里是 jieba 分词后的空格串；测试里用原文足够
-        tsv_source: Some(text.to_owned()),
         domain: Some("test".to_owned()),
         device_id: DEVICE.to_owned(),
         occurred_at: Utc::now(),

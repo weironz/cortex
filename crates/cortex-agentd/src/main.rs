@@ -31,6 +31,7 @@ mod byo_key;
 mod credentials;
 mod cursor;
 mod env;
+mod episodes;
 mod error;
 mod llm;
 mod projects;

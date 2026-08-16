@@ -17,6 +17,8 @@
 
 use cortex_core::{CortexError, Result};
 use cortex_proto::delegate::{DelegateRequest, Delegation, RevokeRequest};
+use cortex_proto::dto::FactDto;
+use cortex_proto::episodes::{EpisodeAck, NewEpisodeRequest};
 
 /// 打 cortexd 的超时。
 ///
@@ -25,6 +27,17 @@ use cortex_proto::delegate::{DelegateRequest, Delegation, RevokeRequest};
 ///
 /// blob 那两条不设这个超时：快照可能是几十兆。
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// 把一轮对话转给记忆服务的超时。**比 [`TIMEOUT`] 短得多。**
+///
+/// 那一条是「要不到钥匙这轮就没法跑」，等 15 秒是值得的；这一条不是 ——
+/// 转发失败的后果只是**这一轮没有记忆命中**，而对话照样进行。让用户为一个
+/// 可降级的功能多等十几秒，是把「记忆是加分项」的失败模式做成了「记忆是
+/// 单点」。
+///
+/// 5 秒而不是 600 毫秒（[`Self::probe`] 那个）：这条路那边要跑一次召回，
+/// 含一次 embedding 的外部调用，亚秒级会把**正常**的成功也判成失败。
+const EPISODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct Remote {
@@ -165,6 +178,67 @@ impl Remote {
         );
         if let Err(e) = rb.send().await {
             tracing::debug!(error = %e, "收回委托凭据失败，等它自己过期");
+        }
+    }
+
+    /// 把这一轮转给记忆服务：由它做抽取，并把该注入的记忆回给我们。
+    ///
+    /// # 为什么是「尽力」，且失败只是空列表
+    ///
+    /// 这一轮**已经落进 Cortex 自己的库了**（调用方先写的库，见
+    /// [`crate::episodes`]）。到这里已经不存在丢数据的可能，剩下的只是
+    /// 「这一轮有没有记忆命中」—— 而记忆服务不在时，正确答案就是「没有」。
+    ///
+    /// 所以这个方法不返回 `Result`：给了 `Result` 就会有人在调用点写
+    /// `?`，而那一个问号会把「记忆服务连不上」变成「这一轮对话失败」，
+    /// 也就是这次搬迁要根除的那件事本身。打不通记一条 `warn`，回空。
+    ///
+    /// # 为什么把整个请求体原样转过去，而不是只转文本
+    ///
+    /// 那边的 `/episodes` 要用 `role` 决定做召回还是做抽取、要用
+    /// `anchor_episode_id` 把 user 与 assistant 配成一轮、要用 `retrieve`
+    /// 区分「正常一轮」与「离线重放」。挑几个字段转等于在这里重写一遍
+    /// 那些判断，而漏掉哪一条都不报错 —— 症状是记忆莫名其妙地少。
+    ///
+    /// 附件那几个哈希也照转：那边认不认得它们是那边的事，认不出来它自己
+    /// 会拒绝，而那次拒绝同样只让本轮没有记忆命中。
+    pub async fn forward_episode(
+        &self,
+        bearer: Option<&str>,
+        req: &NewEpisodeRequest,
+    ) -> Vec<FactDto> {
+        let rb = Self::auth(
+            self.http
+                .post(self.url("/episodes"))
+                .timeout(EPISODE_TIMEOUT)
+                .json(req),
+            bearer,
+        );
+        let resp = match rb.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e, episode = %req.id, memory = %self.base,
+                    "转发这一轮给记忆服务失败（连不上或超时）；本轮不注入记忆，对话照常"
+                );
+                return Vec::new();
+            }
+        };
+        let resp = match Self::ok_or_err(resp, "转发一轮对话").await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, episode = %req.id, "记忆服务拒绝了这一轮；本轮不注入记忆");
+                return Vec::new();
+            }
+        };
+        match resp.json::<EpisodeAck>().await {
+            Ok(ack) => ack.memories,
+            Err(e) => {
+                // 回执解析不了 = 两侧的线协议漂开了。这条日志是唯一的症状，
+                // 别把它降成 debug —— 它对应的用户可见现象是「记忆突然不灵了」
+                tracing::warn!(error = %e, episode = %req.id, "记忆服务的回执解析不了；本轮不注入记忆");
+                Vec::new()
+            }
         }
     }
 

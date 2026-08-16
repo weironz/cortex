@@ -98,6 +98,15 @@ protected_routes! {
     // 都读不到。
     "/sessions" [GET] => get(crate::sessions::list),
     "/sessions/{id}" [GET, PATCH] => get(crate::sessions::detail).patch(crate::sessions::patch),
+    // ── 一轮对话 ──
+    //
+    // **这一条是「记忆服务挂了对话照样继续」的最后一块，也是整件事的验收
+    // 点**：停掉那边之后，同一个会话连发两轮，第二轮要记得第一轮。
+    //
+    // 它先写自己的库、再**尽力**转发给记忆服务换一次召回；转发失败只是
+    // 「这一轮没有记忆命中」，不是一次失败的请求。见 `crate::episodes`。
+    "/episodes" [POST] => post(crate::episodes::write),
+    "/episodes/{id}" [GET] => get(crate::episodes::get),
     // ── 项目 ──
     //
     // 与会话**同一批**搬，不是顺手多搬一个：`PATCH /sessions/{id}` 的
@@ -307,7 +316,7 @@ async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
 // ─────────────────────────── 凭据与容器 ───────────────────────────
 
 /// 从请求里取出调用方的 bearer。**只取，不验。**
-fn bearer_of(headers: &HeaderMap) -> Option<&str> {
+pub fn bearer_of(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -1033,12 +1042,12 @@ mod tests {
         // **`/sessions` 已经不在这份名单里了。**
         //
         // 它 2026-08-16 搬了过来 —— 会话不是记忆能力，判据见
-        // `crate::sessions` 的模块头。剩下的这几条是真正属于记忆那一侧的：
-        // 召回、MCP 门面、以及记忆浏览器的回放。
+        // `crate::sessions` 的模块头。`/sync`、`/ws` 与 `/episodes` 同日。
         //
-        // `/sync` 与 `/ws` 2026-08-16 也搬过来了，从名单里删掉。
-        // `/episodes` 还没 —— 到那时同样是删掉它，而不是给它加豁免
-        for path in ["/memory/search", "/mcp", "/episodes"] {
+        // 剩下的这两条是真正属于记忆那一侧的：召回与 MCP 门面。它们**不会**
+        // 搬过来 —— 名单缩到这里就该停了，再短一条就说明有人把记忆引擎
+        // 也搬进了这个仓库
+        for path in ["/memory/search", "/mcp"] {
             let resp = app
                 .clone()
                 .oneshot(

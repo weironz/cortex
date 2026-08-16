@@ -2,10 +2,10 @@
 //!
 //! 三条约定：
 //!
-//! 1. **`tsv` 不出现在任何结构体里。** 它是纯派生的检索产物，Rust 侧没有对应
-//!    类型，读回来也无用。写入侧改为传 `tsv_source`（已分词、空格分隔的词串），
-//!    由 SQL 里的 `to_tsvector('simple', $n)` 与主行同事务落库 ——
-//!    docs/memory.md §八、§九 要求 tsv 永不异步补写。
+//! 1. **没有 `tsv`。** 它是 BM25 召回的派生列，而召回在 Cormex ——
+//!    连查询侧的分词器都在那边。这一侧曾经照旧写它（`tsv_source`），
+//!    结果是一列只写不读的数据，外加一个「这儿有全文搜索」的假信号。
+//!    列与字段一起删了，见 `migrations/20260816000001_drop_episode_tsv.sql`。
 //! 2. **没有 `embedding`。** 向量只属于记忆服务（另一个仓库），
 //!    这一侧一列都没有 —— 连带地也不需要 pgvector。
 //! 3. **有 CHECK 约束的列用枚举，开放的列用 `String`。**
@@ -246,8 +246,6 @@ pub struct NewEpisode {
     pub content: serde_json::Value,
     /// 从 `content` 提取的纯文本
     pub text: Option<String>,
-    /// jieba 分词后、空格分隔的词串；落库时转成 `tsv`。`None` 则 `tsv` 为 NULL。
-    pub tsv_source: Option<String>,
     pub domain: Option<String>,
     pub device_id: String,
     pub occurred_at: DateTime<Utc>,
@@ -335,7 +333,7 @@ pub struct EpisodeAttachment {
 // ══════════════════════════════════════════════════════════
 
 /// `episode_tool_calls` 的表行。写入侧与读出侧共用形状，
-/// 因此不像别的表那样拆 `New*`——它没有 tsv / embedding 这类只写不读的列。
+/// 因此不像别的表那样拆 `New*`——它没有只写不读的派生列。
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct EpisodeToolCall {
     pub id: String,
