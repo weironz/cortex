@@ -10,6 +10,27 @@ mod render;
 
 use std::io::{IsTerminal as _, Write as _};
 
+/// `--permission-mode` 的解析。**`bypass` 在 CLI 上被显式拒绝。**
+///
+/// 理由写在 `Chat::permission_mode` 的文档里：它等价于那条被拒绝过的
+/// `--yes`。这里单独报一条消息而不是笼统的「认不出」，是因为两种错的
+/// 下一步完全不同 —— 打错字的人要改拼写，而想要 `bypass` 的人需要知道
+/// **这不是拼写问题，是这条路不开**，否则他会继续找别的写法。
+fn parse_cli_permission_mode(s: &str) -> Result<cortex_proto::dto::PermissionMode, String> {
+    use std::str::FromStr as _;
+    let mode = cortex_proto::dto::PermissionMode::from_str(s)?;
+    if mode == cortex_proto::dto::PermissionMode::Bypass {
+        return Err("CLI 不接受 bypass（一律不问，越界也不问）。\n\
+             它等于给「无人值守地自动批准任意 shell 命令」开一个命令行开关，\n\
+             而那正是这个 CLI 刻意没有 --yes 的原因：这种参数会躺在某个 CI \n\
+             脚本的第 200 行，被一个从别处抄来的人复制走。\n\
+             要免掉写文件的确认用 --permission-mode accept-edits（执行仍然问）；\n\
+             真要完全放行，去桌面端选 —— 那里它是一次显式选择，屏幕前有人。"
+            .to_owned());
+    }
+    Ok(mode)
+}
+
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use client::{ChatEvent, ChatRequest, Client};
@@ -70,8 +91,27 @@ enum Command {
         /// （去读 stdin）在管道里会立刻读到 EOF，表现得像卡住一样。
         /// **刻意没有对应的 `--yes`** —— 「无人值守地自动批准任意 shell
         /// 命令」不该是一个命令行开关就能打开的东西
-        #[arg(long)]
+        #[arg(long, conflicts_with = "permission_mode")]
         deny_all: bool,
+
+        /// 权限档：`ask`（默认，逐条问）或 `accept-edits`（写不问，执行仍问）。
+        ///
+        /// # 为什么这里收不到 `bypass`
+        ///
+        /// 三档里的 `bypass` 是「一律不问，越界也不问」。把它做成一个命令行
+        /// 参数，就等于给了上面那条注释拒绝过的 `--yes` 一个别名 ——
+        /// 而拒绝的理由一个字都没变：**一个开关不该让 agent 无人值守地
+        /// 批准任意 shell 命令**。
+        ///
+        /// 桌面端有这一档，因为那里它是一次显式的、带持续警示色的选择，
+        /// 而且屏幕前有人；命令行里它会躺在某个 CI 脚本的第 200 行，
+        /// 被一个从别处抄来的人复制走。
+        ///
+        /// `accept-edits` 不在此列：它只免掉**写文件**的确认，执行照问 ——
+        /// 那正是「批量改一批文件」这类 CLI 场景要的，也是漏了这一档时
+        /// 用户唯一真正卡住的地方。
+        #[arg(long, value_name = "MODE", value_parser = parse_cli_permission_mode)]
+        permission_mode: Option<cortex_proto::dto::PermissionMode>,
     },
 
     /// 列出还等着答复的工具确认（断线重连后用它把待办捡回来）
@@ -357,17 +397,31 @@ async fn main() -> anyhow::Result<()> {
             session,
             no_memory,
             deny_all,
+            permission_mode,
         } => {
             let session_id = session.unwrap_or_else(|| Id::new().to_string());
+            let mode = permission_mode.unwrap_or_default();
             // 非 TTY（管道、CI）下没有人能回答确认，只能一律拒绝。
             // 不这么判的话，`echo hi | cortex chat` 会在第一次确认时
             // 从一个已经 EOF 的 stdin 上读到空行，然后表现得像卡住了
+            //
+            // `accept-edits` 不改这个判断：它免掉的是**写文件**的确认，
+            // 而执行照问 —— 在管道里那一问同样没人能答，仍然只能拒
             let interactive_confirm = !deny_all && std::io::stdin().is_terminal();
             match message {
                 Some(m) => {
-                    one_turn(&c, &session_id, &m, !no_memory, color, interactive_confirm).await?;
+                    one_turn(
+                        &c,
+                        &session_id,
+                        &m,
+                        !no_memory,
+                        color,
+                        interactive_confirm,
+                        mode,
+                    )
+                    .await?;
                 }
-                None => interactive(&c, &session_id, !no_memory, color).await?,
+                None => interactive(&c, &session_id, !no_memory, color, mode).await?,
             }
         }
     }
@@ -419,16 +473,16 @@ async fn one_turn(
     show_memory: bool,
     color: bool,
     interactive_confirm: bool,
+    permission_mode: cortex_proto::dto::PermissionMode,
 ) -> anyhow::Result<()> {
     let mut stream = c
         .chat(ChatRequest {
             session_id: session_id.to_string(),
             message: message.to_string(),
             attachments: Vec::new(),
-            // CLI 暂时只走默认档。三档开关在桌面端的输入框底部；这里要加
-            // 就是一个 `--permission-mode` 参数，记 roadmap。
-            // 默认档是**问**，所以漏做的方向是安全的
-            permission_mode: Default::default(),
+            // `--permission-mode`（2026-08-17 补）。收得到 ask 与
+            // accept-edits；bypass 被显式拒绝，见 `parse_cli_permission_mode`
+            permission_mode,
         })
         .await?;
 
@@ -524,6 +578,7 @@ async fn interactive(
     session_id: &str,
     show_memory: bool,
     color: bool,
+    permission_mode: cortex_proto::dto::PermissionMode,
 ) -> anyhow::Result<()> {
     println!(
         "{}",
@@ -551,7 +606,16 @@ async fn interactive(
 
         println!();
         // 交互模式下人就在终端前面，确认当然逐条问
-        one_turn(c, session_id, line, show_memory, color, true).await?;
+        one_turn(
+            c,
+            session_id,
+            line,
+            show_memory,
+            color,
+            true,
+            permission_mode,
+        )
+        .await?;
         println!();
     }
     Ok(())

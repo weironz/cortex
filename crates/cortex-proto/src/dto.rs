@@ -172,6 +172,45 @@ pub enum PermissionMode {
     Bypass,
 }
 
+impl PermissionMode {
+    /// 进日志与命令行帮助的名字。也是 `--permission-mode` 接受的字面量。
+    ///
+    /// 与 `#[serde(rename_all = "snake_case")]` 出自同一套写法 —— 线上格式
+    /// 与命令行字面量**必须是同一个**，否则用户照着 `--help` 敲出来的东西
+    /// 与他在别处看到的 JSON 对不上。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AcceptEdits => "accept_edits",
+            Self::Bypass => "bypass",
+        }
+    }
+}
+
+impl std::str::FromStr for PermissionMode {
+    type Err = String;
+
+    /// **认不出就报错，不回落默认档。**
+    ///
+    /// 回落看着更friendly，实际是把一个手滑（`--permission-mode bypas`）
+    /// 变成「我以为开了完全放行，它却每条都问」—— 或者反过来，取决于默认
+    /// 是哪一档。空串同样拒：本仓库数到第六次的「空串顶掉默认值」。
+    ///
+    /// `accept-edits` 这种连字符写法也收：命令行里连字符更顺手，而拒绝它
+    /// 只会让人对着一个「看起来完全正确」的参数发呆。
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().replace('-', "_").as_str() {
+            "ask" => Ok(Self::Ask),
+            "accept_edits" => Ok(Self::AcceptEdits),
+            "bypass" => Ok(Self::Bypass),
+            other => Err(format!(
+                "认不出的权限档 {other:?}，可选：ask / accept-edits / bypass"
+            )),
+        }
+    }
+}
+
 /// 一轮对话的请求体。
 ///
 /// # 这里曾经有一个 `sandbox: bool`，**别再加回来**
@@ -1084,5 +1123,68 @@ mod tests {
             !q.include_archived,
             "不传参数时必须隐藏归档会话 —— 归档的产品语义就是从列表消失"
         );
+    }
+}
+
+#[cfg(test)]
+mod permission_mode_tests {
+    use super::PermissionMode;
+    use std::str::FromStr as _;
+
+    /// **认不出的档要报错，不能回落成默认。**
+    ///
+    /// 回落的后果取决于默认是哪一档，而两个方向都很难看：要么用户以为开了
+    /// 免确认却每条都被问，要么反过来。空串同样拒 —— 这是本仓库数到第六次的
+    /// 「空串顶掉默认值」。
+    #[test]
+    fn an_unknown_mode_is_refused_rather_than_defaulted() {
+        for bad in ["", "  ", "yes", "bypas", "ASK", "accept_edit"] {
+            assert!(
+                PermissionMode::from_str(bad).is_err(),
+                "{bad:?} 应当被拒，而不是悄悄变成默认档"
+            );
+        }
+    }
+
+    /// 连字符与下划线两种写法都收：命令行里连字符更顺手，而线上格式是
+    /// snake_case（serde）。拒绝任一种，都会让人对着一个「看起来完全正确」
+    /// 的参数发呆。
+    #[test]
+    fn both_spellings_parse_to_the_same_mode() {
+        assert_eq!(
+            PermissionMode::from_str("accept-edits").unwrap(),
+            PermissionMode::AcceptEdits
+        );
+        assert_eq!(
+            PermissionMode::from_str("accept_edits").unwrap(),
+            PermissionMode::AcceptEdits
+        );
+        assert_eq!(
+            PermissionMode::from_str(" ask ").unwrap(),
+            PermissionMode::Ask
+        );
+    }
+
+    /// `as_str` 与 serde 的 snake_case 必须是**同一批字面量**。
+    ///
+    /// 两处各写一份的话，`--help` 里印的名字与线上 JSON 里的值会漂开，
+    /// 而那种不一致没有任何东西会报错 —— 用户照着帮助敲，服务端说认不出。
+    #[test]
+    fn the_wire_format_and_the_cli_spelling_are_the_same_words() {
+        for m in [
+            PermissionMode::Ask,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Bypass,
+        ] {
+            let wire = serde_json::to_string(&m).expect("序列化");
+            let wire = wire.trim_matches('"');
+            assert_eq!(
+                wire,
+                m.as_str(),
+                "线上格式与命令行字面量漂开了：serde 给 {wire:?}，as_str 给 {:?}",
+                m.as_str()
+            );
+            assert_eq!(PermissionMode::from_str(m.as_str()).unwrap(), m);
+        }
     }
 }

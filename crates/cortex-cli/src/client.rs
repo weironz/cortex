@@ -13,7 +13,8 @@ use serde::Serialize;
 ///
 /// * `Health` 里 `database` 是必填 —— 于是 `cortex --server` 指向本地 agent
 ///   （它没有数据库）时，`health` 子命令直接解码失败
-/// * `ChatRequest` 没有 `permission_mode` —— 三档权限对 CLI 用户完全不存在
+/// * ~~`ChatRequest` 没有 `permission_mode`~~ —— 2026-08-17 补上了
+///   （`--permission-mode`，收 ask / accept-edits；bypass 显式拒绝）
 /// * `ChatEvent::Confirm` 没有 `scope` —— 越界确认在 CLI 上看不出越的是哪儿，
 ///   而那正是用户此刻唯一需要知道的东西
 ///
