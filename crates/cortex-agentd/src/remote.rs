@@ -45,15 +45,6 @@ pub struct Remote {
     http: reqwest::Client,
 }
 
-/// 一行快照索引。字段口径与 cortexd 的 `snapshots::SnapshotRow` 对齐。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SnapshotRow {
-    pub id: String,
-    pub blob_hash: String,
-    pub size_bytes: i64,
-    pub taken_at: chrono::DateTime<chrono::Utc>,
-}
-
 impl Remote {
     #[must_use]
     pub fn new(base: &str, http: reqwest::Client) -> Self {
@@ -290,65 +281,13 @@ impl Remote {
             .map_err(|e| CortexError::Invalid(format!("读快照字节失败：{e}")))
     }
 
-    /// 记一行快照索引。字节要**先**走 [`Self::put_blob`]。
-    ///
-    /// # Errors
-    /// 连不上或被拒。
-    pub async fn record_snapshot(
-        &self,
-        bearer: Option<&str>,
-        scope: &str,
-        blob_hash: &str,
-        size_bytes: i64,
-    ) -> Result<SnapshotRow> {
-        let rb = Self::auth(
-            self.http
-                .post(self.url("/sandbox-snapshots"))
-                .timeout(TIMEOUT)
-                .json(&serde_json::json!({
-                    "scope": scope, "blob_hash": blob_hash, "size_bytes": size_bytes,
-                })),
-            bearer,
-        );
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("记快照索引失败：{e}")))?;
-        Self::ok_or_err(resp, "记快照索引")
-            .await?
-            .json()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("解析快照回执失败：{e}")))
-    }
-
-    /// 这个作用域的快照，新的在前。
-    ///
-    /// **按作用域过滤是在服务端做的** —— 这一点是恢复那条路的授权依据：
-    /// 调用方只能从这个列表里挑 id，而列表本身就已经限定在
-    /// 「这把凭据的租户 + 这个作用域」之内。
-    ///
-    /// # Errors
-    /// 连不上或被拒。
-    pub async fn list_snapshots(
-        &self,
-        bearer: Option<&str>,
-        scope: &str,
-    ) -> Result<Vec<SnapshotRow>> {
-        let rb = Self::auth(
-            self.http
-                .get(self.url("/sandbox-snapshots"))
-                .timeout(TIMEOUT)
-                .query(&[("scope", scope)]),
-            bearer,
-        );
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("列快照失败：{e}")))?;
-        Self::ok_or_err(resp, "列快照")
-            .await?
-            .json()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("解析快照列表失败：{e}")))
-    }
+    // 快照**索引**那两条（`POST` / `GET /sandbox-snapshots`）不在这儿了。
+    //
+    // 2026-08-16 那张表跟着库搬进了本进程（`crate::snapshot_index`），于是
+    // 那两次 HTTP 变成了两次函数调用。留着这两个方法的话它们没有调用方 ——
+    // 而一个没人调的远端客户端方法是会被人「顺手用起来」的：下一个人看见
+    // 它，就以为索引仍然在那边，然后写出一条读远端、写本地的路。
+    //
+    // 剩下的 [`Self::put_blob`] / [`Self::get_blob`] 是快照的**字节**，
+    // 那一半还在记忆服务那边（对象存储没搬），见 `crate::snapshot` 的模块头。
 }
