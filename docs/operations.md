@@ -1,7 +1,11 @@
 # 运维手册
 
-这份文档管三件事：**怎么把 Cortex 跑起来**、**怎么让数据丢不了**、
-**怎么知道检索没有偷偷变差**。
+这份文档管两件事：**怎么把 Cortex 跑起来**、**怎么让数据丢不了**。
+
+> 这里曾经还管第三件「怎么知道检索没有偷偷变差」。检索评测那一整套
+> （题集、`cortex-evals`、三道门）跟着记忆那一半去了
+> [Cormex](https://github.com/weironz/cormex)，**在这个仓库里跑不了也评不出来** ——
+> 这边没有抽取、没有向量、没有四路召回。要看回归门去那边。
 
 架构上的「为什么」在 [architecture.md](architecture.md)，这里只讲「怎么做」与
 「出错怎么办」。
@@ -28,10 +32,9 @@
   - [恢复演练](#恢复演练-—-最重要的一条)
   - [真的出事了怎么恢复](#真的出事了怎么恢复)
   - [彻底抹除：purge 之后轮转备份](#彻底抹除purge-之后必须轮转备份)
-- [三、检索回归门](#三检索回归门)
-- [四、生产部署](#四生产部署)
-- [五、故障速查](#五故障速查)
-- [六、已知缺口](#六已知缺口)
+- [三、生产部署](#三生产部署)
+- [四、故障速查](#四故障速查)
+- [五、已知缺口](#五已知缺口)
 
 ---
 
@@ -44,7 +47,7 @@
 | Docker（含 compose v2） | Postgres / RustFS / rclone / 恢复演练全部走容器 | 什么都跑不起来 |
 | Rust 1.97.1（`rust-toolchain.toml` 已钉） | 编译 | 只跑生产镜像的话不需要 |
 | `just` | 全部命令的入口 | 可以手工照着 justfile 敲 |
-| Python 3.9+ | 只有检索回归门用 | 只影响 `just evals-gate` |
+| Python 3.9+ | **只有 CI 用**：`scripts/evals-gate.py verify-baseline` 校验两份基线 JSON 的格式 | 本机什么都不影响，`just ci` 不碰它 |
 
 宿主机**不需要**装 `psql`、`pg_basebackup`、`rclone` —— 备份脚本一律经容器调用。
 这是刻意的：备份链路上每多一个宿主机依赖，就多一个在灾难当天装不上的东西。
@@ -53,11 +56,16 @@
 
 ```bash
 just setup       # 生成 .env、装 sqlx-cli 与 rustfmt/clippy
-just bootstrap   # 起服务 → 建库 → migration → 建桶 → 自检
+just bootstrap   # 备好 .env 与目录 → 起完整环境（= just dev）→ 等健康 → 自检
 just doctor      # 任何时候想确认环境状态
 ```
 
 `bootstrap` 是幂等的，重复跑没有副作用。
+
+> **它现在比以前短。** 原先那三步「建库 / 迁移 / 建桶」已经没有人需要手动做：
+> migration 由 agentd（与 `cortex-local`）启动时自己跑，桶由
+> `MediaStore::from_env` 自己建。justfile 里对应的三条 recipe 因此删了 ——
+> 留着就是同一件事的第二处装配，而漏跑的那一边不会有任何测试红。
 
 ### 必须自己填的环境变量
 
@@ -90,6 +98,13 @@ just doctor      # 任何时候想确认环境状态
 否则 `archive_command` 还写在旧路径上。
 
 ### 向量化（embedding）跑在哪
+
+> ⚠️ **这一整节讲的是记忆服务（[Cormex](https://github.com/weironz/cormex)）的
+> 配置，不是这一侧的。** 这个仓库里没有任何代码读 `CORTEX_EMBED_*`
+> （`grep -rn CORTEX_EMBED crates/` 是空的），compose 里也没有 `embeddings`
+> 服务 —— 抽取、向量与四路召回全在那边。留着是因为部署常把两者放在同一台
+> 机器上、`.env` 也共用一份，删掉会让在这台机器上配 embedding 的人无处可查；
+> 但**下面提到的服务与命令都要去 Cormex 那边敲**。
 
 三条路，**默认第一条**。二三两条讲的是同一个协议
 （OpenAI 兼容的 `/v1/embeddings`），互换只改 `CORTEX_EMBED_ENDPOINT`。
@@ -131,9 +146,10 @@ CORTEX_EMBED_ENDPOINT=http://embeddings/v1/embeddings
 CORTEX_EMBED_MODEL=bge-m3
 ```
 
-> endpoint 里那个 `embeddings` 是 **compose 服务名**，只有 cortexd 也在
-> 容器里（`just prod-up` / `just dev`）时才解析得到。cortexd 跑在宿主上
-> （`just run`）要走映出来的端口：`http://127.0.0.1:8090/v1/embeddings`。
+> endpoint 里那个 `embeddings` 是 **Cormex 那份 compose 的服务名**，只有
+> cortexd 也在容器里时才解析得到；cortexd 跑在宿主进程上要走映出来的端口
+> （`http://127.0.0.1:8090/v1/embeddings`）。**这一侧的 `just dev` 与
+> `just prod-up` 都起不出 `embeddings`**，别照着这里在本仓库敲。
 
 要用云就不开 profile，直接指过去（填基地址即可，`/v1/embeddings` 会自动补全）：
 
@@ -152,7 +168,7 @@ CORTEX_EMBED_API_KEY=sk-...
 > ★ **换后端 = 换向量空间**，哪怕「还是那个 bge-m3、只是从进程内换到远端」——
 > 量化与池化实现并不逐位一致。库里的 `embedding_model` 会从
 > `fastembed:...` 变成 `api:<模型名>`，评测基线也按模型标定
-> （见 [第三节](#三检索回归门)）。
+> （基线与回归门在 [Cormex](https://github.com/weironz/cormex)）。
 
 **HuggingFace 不可达的节点**（国内很常见：DNS 被污染、`hf-mirror.com`
 也不通）有两条路：把预先下好的权重挂进 `embeddings` 容器
@@ -162,13 +178,19 @@ CORTEX_EMBED_API_KEY=sk-...
 
 ### 数据库怎么初始化
 
-```bash
-just db-migrate      # 开发：从宿主机跑 sqlx migrate
-just prod-migrate    # 生产：在容器里跑，部署机不需要 Rust 工具链
-```
+**不用初始化，也没有对应的命令。** `just db-migrate` / `just prod-migrate`
+两条都删了：schema 由 `sqlx::migrate!` 编进二进制，agentd 与 `cortex-local`
+启动时自己跑 `cortex_store::Store::migrate` —— 部署时连 `migrations/` 都不必带。
 
-**cortexd 不会在启动时自动迁移**。在运行中的集群上自动执行 schema 变更
-是运维事故的常见起点，所以它是一个显式动作。
+这与本节早先版本写的「**不会**在启动时自动迁移，因为在运行中的集群上自动
+执行 schema 变更是运维事故的常见起点」**正好相反**，所以理由要写清楚：
+这个库是单机自托管的会话库，一个二进制独占，没有「运行中的集群」这个前提；
+而留一条从宿主跑 sqlx CLI 的 recipe 意味着同一件事有两处装配，
+漏跑的那一边不会有任何测试红。
+
+要回到干净状态用 `just db-reset`（**会删数据**）。没有 `db-revert`：
+`migrations/` 下是单文件 `.sql`，sqlx 认作 non-reversible，
+`migrate revert` 直接报错。
 
 ---
 
@@ -834,140 +856,21 @@ just purge-rotate --apply       # 真做，要手打确认串 PURGE-ROTATE
 
 ---
 
-## 三、检索回归门
-
-检索质量是这个项目的差异化卖点，而它**可以在没人察觉的情况下退化** ——
-编译过、测试过、接口没变，只是召回悄悄变差了。
-
-### 三道门
-
-| 门 | 什么时候跑 | 要什么 | 多久 |
-|---|---|---|---|
-| 题集静态校验 + 完整性测试 | 每个 PR | 无 | 秒级 |
-| 逐题型回归（**hash** 后端） | 每个 PR | Postgres service | 分钟级 |
-| 逐题型回归（**真实语义**后端） | push to main / 每日定时 / 手动 | Postgres + 模型缓存 | 分钟级 + 缓存恢复 |
-
-配置在 [`.github/workflows/evals.yml`](../.github/workflows/evals.yml)。
-本地复现：
+## 三、生产部署
 
 ```bash
-just evals-validate         # 第一道门
-just evals-gate             # 第二道门（hash 后端）
-just evals-gate fast        # 第三道门（真实语义后端）
-```
-
-### 为什么不能只比总分
-
-`evals/README.md` 已经把这件事说透了：第一份基线的「整体 R@5 = 0.78」是
-「专名精确 0.92 + 中文语义 0.69 + 时间回放 0.42」平均出来的。**某一类塌掉而
-总分只微跌，只看总分的门会放它过去** —— 而「中文语义」正是这个项目的卖点。
-
-`scripts/evals-gate.py` 把报告摊平成 `kind.中文语义.recall@5` 这样的扁平 map
-（规则与 Rust 侧 `Report::gate_metrics()` 一致），逐项与基线 diff。
-
-已经验证过它确实拦得住（构造的回归样本）：
-
-| 构造的场景 | 总分变化 | 门的判定 |
-|---|---|---|
-| 中文语义 33 题里掉 4 题 | 仅 −0.012 | ✅ **红**（`kind.中文语义.recall@5: 0.939 → 0.818`） |
-| 任意一类掉 1 题 | ≈ −0.01 | ✅ 绿（当作有意的调参取舍） |
-| 「应召不到」误召率 0.50 → 0.85 | 总分不变 | ✅ **红** |
-| 拿 hash 的结果去撞真实后端的基线 | — | ✅ **红**（后端不匹配，分数不可比） |
-
-### 阈值取多少，依据是什么
-
-不用固定小数，按「几道题」定：
-
-```
-每一类的容差 = max(0.05, 1.5 / 该类计分题数)
-总分容差     = 0.02
-误召率容差   = 0.08
-```
-
-`1.5` 这个系数是算出来的不是拍的：它让「掉一道题」恒在容差内、「掉两道题」
-恒在容差外，对本题集全部题型规模（9 ~ 33 题）都成立。用 `2.0` 会让 n=33 时
-「掉两道」正好等于容差而被放行 —— 差一点点的那种漏。
-
-`0.05` 的下限只在大类（27+ 题）上起作用：`1.5/33 = 0.045` 太紧，一次无害的
-排序抖动就能踩到。
-
-总分 0.02：97 道计分题里掉一道 ≈ 0.010、掉两道 ≈ 0.021 —— 与逐题型同一套口径。
-
-**为什么不用 `--min-recall5` 那种绝对门槛**：绝对门槛要么卡太死（正常调参也
-变红），要么形同虚设（0.75 对着 0.877 的基线等于没门）。与基线 diff 才能同时
-做到「掉两道就红」和「涨了不误伤」。`--min-recall5` 仍然可用，作为
-「绝对不能跌破」的兜底。
-
-### 当前基线
-
-两份，分别对应两个 embedding 后端。**互相不可比**，gate 脚本会在后端
-与基线不匹配时直接拦下。
-
-| 后端 | 基线文件 | 整体 R@5 | R@1 | MRR |
-|---|---|---:|---:|---:|
-| `fastembed:gpahal/bge-m3-onnx-int8`（生产） | `scripts/evals-baseline.fastembed.json` | **0.8775** | 0.6397 | 0.771 |
-| `hash-stub-v1`（CI 快门） | `scripts/evals-baseline.hash.json` | **0.8529** | 0.5907 | — |
-
-上一轮题集加了 5 道跨域题（默认配置下本来就该挂），两份基线都重跑过 ——
-所以这里的数字比更早的文档里那个 0.923 低，**不是退化，是尺子变长了**。
-逐题型里最弱的是 `跨域检索` R@5 0.667。
-
-抬基线：
-
-```bash
-just evals-bless        # hash
-just evals-bless fast   # 真实后端
-```
-
-**只在调参定案后执行，且必须在 PR 里说明数字为什么变了。** 基线长期停在旧
-数字上，门会慢慢失去意义 —— 所以 gate 在发现指标上涨时会显式提醒该 bless 了。
-
-### CI 里 embedding 后端的取舍
-
-CI 里没有 `DEEPSEEK_API_KEY`（也不该有：fork 的 PR 能读到它能读到的 secret），
-所以评测一律 `--mode seed`。真正需要权衡的是向量后端：
-
-| 方案 | 代价 | 测得到什么 | 结论 |
-|---|---|---|---|
-| 每次真拉起 embeddings 服务 | 2.2 GB 权重，高峰期几分钟，**外部依赖** | 全部 | ❌ 会变成与代码无关的红灯 |
-| `actions/cache` 缓存模型 | 缓存命中 30–60 s；未命中要现下 | 全部 | ⚠️ 适合 main / 定时，不适合每个 PR |
-| `CORTEX_EMBED_BACKEND=hash` | 秒级，零外部依赖 | 除语义那一路之外的全部 | ✅ 适合 PR 快门 |
-
-**取的是「两条都要」**：PR 上跑 hash（快、稳、零外部依赖），
-main 与每日定时跑真实后端（守语义那一路）。
-
-必须说清 hash 后端**测不到什么**：`hash-stub-v1` 不是语义空间，它的「距离」
-只反映字符 bigram 重叠，所以在 hash 模式下 —
-
-- 语义地板（`BGE_M3_SEMANTIC_FLOOR`）**不生效**（只对真实语义后端启用）
-- 向量那一路退化成「第二条词法通道」，`vector` 独占的 gold 测不出来
-- 「换个说法问同一件事」这类题靠的是字面重叠而不是语义
-
-它仍然守得住的是：jieba 分词与 tsvector 的中文 BM25、图遍历、RRF 融合、
-弃权与强命中补偿、四路召回的 SQL、注入预算截断、双时间轴回放 ——
-也就是绝大多数改动会碰到的地方。
-
-有意思的是两者总分只差 **0.025**（0.853 vs 0.877），说明在当前题集规模下
-（69 条有效事实全部塞得进 6000 token 预算）hash 后端是个相当称职的代理。
-**这个结论会随语料增长失效** —— 语料上千条之后必须重新评估，
-届时可能得把真实后端挪进 PR 门。
-
-### `--mode llm` 为什么不进回归门
-
-`evals/README.md` 已经定案：它真调抽取模型，结果随模型版本漂移，做回归门会变成
-随机红灯 —— **一条会随机变红的门，两周内就会被所有人无视，那时它连真正的回归
-都拦不住了。** 它的位置是「定期人工跑一次，看抽取质量」。
-
----
-
-## 四、生产部署
-
-```bash
-# 前提：.env 里 POSTGRES_PASSWORD / RUSTFS_SECRET_KEY 已改成真口令
-just prod-bootstrap    # 构建镜像 → 起 pg/rustfs → migration → 建桶 → 起 cortexd
+# 前提：记忆服务已在跑，且 .env 里 CORTEX_MEMORY_URL 指得到它
+just prod-bootstrap    # 构建 agentd 镜像 → 起 agentd + web
 just prod-ps
-just prod-logs cortexd
+just prod-logs agentd
 ```
+
+> **前提是记忆服务（Cormex）已经在跑**，且 `.env` 里的 `CORTEX_MEMORY_URL`
+> 指得到它 —— `prod-bootstrap` 第一行就是 `: "${CORTEX_MEMORY_URL:?}"`。
+> 这一侧的生产 compose 里**没有 Postgres、没有对象存储、也没有 migration**：
+> 那一整套跟着记忆那一半去了 Cormex，由它自己的 compose 管。
+> 部署顺序因此是**先记忆后 agent**：agentd 连不上记忆服务时不会崩
+> （第一条请求才失败，且那条失败说得清），但用户会先撞上它。
 
 生产变体是 `docker-compose.prod.yml`，**叠在** `docker-compose.yml` 之上：
 
@@ -1056,7 +959,7 @@ egress-proxy 换 scratch 之后也真机验过：沙箱容器经它访问放行�
 
 ---
 
-## 五、故障速查
+## 四、故障速查
 
 | 症状 | 多半是 | 怎么办 |
 |---|---|---|
@@ -1075,12 +978,12 @@ egress-proxy 换 scratch 之后也真机验过：沙箱容器经它访问放行�
 | `purge-rotate` 说「还有 blob 在主存储里」 | purge 没传播完 | 先 `just mirror --apply-purges`，这是**故意的硬拦截** |
 | 镜像目录只涨不落，占盘飙升 | 正常行为（无 `--delete`） | 要清理只能走 `--apply-purges`，由 `redactions` 表驱动 |
 | Git Bash 下 docker 命令报 `C:/Program Files/...` | MSYS 路径改写 | 脚本里已 `export MSYS_NO_PATHCONV=1`；手工敲命令时自己加 |
-| CI 检索门红了但本地是绿的 | 后端不一致 | 本地跑 `just evals-gate`（hash）而不是默认的 fast |
-| `embeddings` 容器起来很久不健康 | 在下 2.2 GB 权重 | `just prod-logs embeddings`；权重落在 `cortex-prod-embed-models` 卷，只下一次 |
+| CI 的「评测基线文件自检」红了 | 两份 baseline JSON 少字段或格式坏了 | 本地跑 `python3 scripts/evals-gate.py verify-baseline scripts/evals-baseline.*.json`。**真正的检索回归门在 Cormex**，这一步只校验文件格式 |
+| `embeddings` 容器起来很久不健康 | 在下 2.2 GB 权重 | 那个容器在 Cormex 的 compose 里，去那边看日志；权重卷只下一次 |
 
 ---
 
-## 六、已知缺口
+## 五、已知缺口
 
 诚实列出来，避免把「已经做了」和「以为做了」混在一起。
 
@@ -1093,4 +996,4 @@ egress-proxy 换 scratch 之后也真机验过：沙箱容器经它访问放行�
 | **RTO 未在生产规模上验证** | 86 MiB 的库测出 43–83 s，几十 GB 时会是另一个量级 | 语料长到 GB 级后重测并更新承诺 |
 | **cortexd 无备份纳管** | 只备了 Postgres 与 blobs，配置与模型缓存没备 | 配置在 `.env`（本就不该入库），模型可重下，暂可接受 |
 | **单机自托管无高可用** | 恢复期间服务是停的，RTO 就是停机时间 | 需要 HA 时上流复制，那是另一套东西 |
-| **hash 后端的代理有效性会失效** | 语料上千条后 hash 与真实后端的差距会拉开 | 见 [第三节](#ci-里-embedding-后端的取舍) |
+| **hash 后端的代理有效性会失效** | 语料上千条后 hash 与真实后端的差距会拉开 | 归 [Cormex](https://github.com/weironz/cormex) 管 —— 后端取舍与回归门都在那边 |

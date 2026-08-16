@@ -313,17 +313,22 @@ trait 的文档（六条，每条都注明「违反了不会当场报错」）�
 
 ### 本地把云端环境整套跑起来（`just dev`）
 
-在这之前的开发方式是 `just run`：cortexd 跑在**宿主进程**里，只有 postgres /
+在这之前的开发方式是 `just run`：编排进程跑在**宿主**里，只有 postgres /
 rustfs 在容器里。快，但它测的是一条**生产上不存在**的拓扑。
 
-`just run` 留着没删，但只该在两种时候用：要挂调试器，或者**要真机跑到
-`SandboxAddr::Relay`** —— 那一支只在 cortexd 不在沙箱网段里时才走到，
+> **`just run` 这条 recipe 已经删了**（记忆那一半离开时跟着走的，它跑的是
+> cortexd）。下表左列因此不再是一条现成命令，而是「编排进程在宿主上」
+> 这个**拓扑**的名字 —— 今天要复现它得手工
+> `cargo run -p cortex-agentd -- --same-network 0 --relay …`。
+
+那条拓扑仍然值得偶尔真机跑一次，理由只有一个：**它是唯一走得到
+`SandboxAddr::Relay` 的路**。那一支只在编排进程不在沙箱网段里时才用，
 而 `just dev` 与生产都是 `same_network=true` 走 `Direct`。改沙箱反代那块
 代码时，两条路都得过一遍。
 
-| | `just run` | `just dev` | 生产 |
+| | 宿主进程（旧 `just run`）| `just dev` | 生产 |
 |---|---|---|---|
-| cortexd 位置 | 宿主进程 | 容器 | 容器 |
+| 编排进程位置 | 宿主进程 | 容器 | 容器 |
 | `same_network` | false | **true** | true |
 | 反代进沙箱 | 经 `cortex-egress` 中继 | **直连容器名** | 直连容器名 |
 | 浏览器 → API | 直连 :8080（要开 CORS）| **nginx 同源** | traefik 同源 |

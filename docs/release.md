@@ -175,5 +175,7 @@ arm64 **二进制**照发 —— 那是原生 runner 编的，而且冒烟跑过
 
 1. **恢复演练**：`just drill`。没演练过的备份等于没有备份
 2. **告警自测**：`just notify-test`。备份坏了要有人知道
-3. **检索回归门**：`just evals-gate` 与 `just evals-gate fast`。
-   检索质量可以在没人察觉的情况下退化 —— 编译过、测试过、接口没变
+3. ~~**检索回归门**~~：**不在这个仓库里**。题集与 `cortex-evals` 跟着记忆那一半
+   去了 [Cormex](https://github.com/weironz/cormex)，`just evals-gate` 这条 recipe
+   也一并删了。检索质量仍然可以在没人察觉的情况下退化（编译过、测试过、
+   接口没变），但守它的门要在那边跑 —— **发 Cormex 的版之前做，不是发这一侧的版**
