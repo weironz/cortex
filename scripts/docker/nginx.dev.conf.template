@@ -85,6 +85,7 @@ server {
     #   人还没来得及填用户名就被判成「连不上」
     # - `llm` / `settings` —— 借模型与自带 key。「谁的 key、算不算额度、
     #   在哪花」必须由同一个进程决定，所以两条同一刀切
+    # - `sync` —— 补拉那条底线路径
     # - `sessions` / `projects` —— 会话与项目，数据在 Cortex 自己的库里。
     #   **两个必须同一批切**：`PATCH /sessions/{id}` 的 `project_id` 要先确认
     #   目标项目存在，分两批的话中间那一版会向一个自己读不到的库问
@@ -94,7 +95,7 @@ server {
     # 先后取第一个匹配的，于是「我明明改了」与「它没生效」会同时成立。
     #
     # 这份清单会一直缩短，最后只剩记忆那一侧真正的路由（memory、mcp）。
-    location ~ ^/(confirmations|memory|episodes|blobs|sync|import|sandbox-snapshots|delegated-tokens|mcp)(/|$) {
+    location ~ ^/(confirmations|memory|episodes|blobs|import|sandbox-snapshots|delegated-tokens|mcp)(/|$) {
         proxy_pass http://cortexd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
@@ -126,7 +127,7 @@ server {
     # 与上面那段的配置逐字相同（SSE 关缓冲、30 分钟读超时），只有上游不同。
     # 不合并成一段再按前缀选上游：nginx 里那么写要引一个 map，而两段各自
     # 完整、读得出「这条归谁」，比省下十行重要。
-    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings)(/|$) {
+    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync)(/|$) {
         proxy_pass http://agentd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
@@ -150,8 +151,11 @@ server {
     # 混进上面那段的话，那两个头会被 keepalive 的 `proxy_http_version 1.1`
     # 之外的默认行为吃掉，症状是握手回 200 而不是 101，
     # 客户端一直在重连而日志里没有任何错误
+    # `/ws` 也搬过来了 —— 实时推送现在由 agentd 自己发（每个租户一条总线，
+    # 因为 NOTIFY 通道名里带 schema）。单独一个 location 是因为 WebSocket
+    # 要 Upgrade 那几个首部，与上面那两条的转发参数不一样
     location /ws {
-        proxy_pass http://cortexd;
+        proxy_pass http://agentd;
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection "upgrade";

@@ -105,8 +105,37 @@ impl AgentState {
         Ok(tenant)
     }
 
-    // `tenant_for_user`（按用户 id 而不是请求头解析）没有跟过来：
-    // 它的调用方是后台任务与 `/delegated-tokens`，那两样还没搬。
+    /// 同样的解析，但入口是**一个用户 id** 而不是请求头。
+    ///
+    /// # 为什么要单开一个
+    ///
+    /// `/ws` 的凭据是 `?ticket=`（WebSocket 加不了请求头），而票据里没有
+    /// bearer 可解析 —— 能拿到的只有签票时记下的那个 owner。让调用方伪造
+    /// 一份请求头，等于先造一个 access token，那是凭空生成凭据的能力。
+    ///
+    /// # 为什么不直接暴露 `resolve_schema`
+    ///
+    /// 光有 schema 名没用：调用方还要自己建池、还要记得 `public` 那个是启动
+    /// 时就有的、不该再建一份。把那三步留给调用方，就是把 [`Tenant`] 这个
+    /// 类型当初要消灭的「漏一步」重新放回来。
+    ///
+    /// # Errors
+    /// 查不动 `cortex_auth.users`，或者那个 schema 的池建不起来。
+    pub async fn tenant_for_user(&self, user_id: &str) -> Result<Tenant, ApiError> {
+        let Some(public_store) = self.public_store() else {
+            return Err(ApiError::unsupported(
+                "这个部署没有接数据库（CORTEX_DATABASE_URL 为空）",
+            ));
+        };
+        let Ok(acc) = self.accounts() else {
+            return Ok(Tenant::Live {
+                schema: SchemaName::public(),
+                store: public_store,
+            });
+        };
+        let schema = resolve_schema(&acc.pool, user_id).await?;
+        self.tenant_on(schema).await
+    }
 
     /// schema 名 → 真的连上去的 `Tenant`。两条解析路的共同尾巴。
     ///

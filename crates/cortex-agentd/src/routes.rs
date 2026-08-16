@@ -84,6 +84,13 @@ protected_routes! {
     "/auth/usage" [GET] => get(crate::accounts::usage),
     // 加不了请求头的连接（WebSocket、<img src>）拿它换一个 60 秒的 `?ticket=`
     "/auth/ticket" [POST] => post(issue_ticket),
+    // ── 实时同步 ──
+    //
+    // `/sync` 是底线：轮询补拉，不依赖推送。`/ws` 只推「有变化了」这个信号，
+    // 不推数据 —— 客户端拿自己的游标去 `/sync` 补，于是「漏了一条推送」与
+    // 「刚重连」是同一条代码路径。
+    "/sync" [GET] => get(crate::sync::since),
+    "/ws" [GET] => get(crate::ws::handler),
     // ── 会话 ──
     //
     // 列会话、翻历史、改元数据。**这几条是「记忆服务挂了历史照样在」的
@@ -222,8 +229,12 @@ fn pending_cutover_routes() -> Vec<(&'static str, axum::routing::MethodRouter<Ag
 /// 消费者是**加不了请求头**的连接：WebSocket 的浏览器 API 不允许自定义
 /// 首部，`<img src>` 同理。它们只能把凭据放进查询串，而把长效 token 放进
 /// URL 会进代理日志、进浏览器历史 —— 所以给一张 60 秒、一次性的。
-async fn issue_ticket(State(st): State<AgentState>) -> Json<serde_json::Value> {
-    let ticket = st.ticket_book().issue();
+async fn issue_ticket(State(st): State<AgentState>, headers: HeaderMap) -> Json<serde_json::Value> {
+    // **签给谁必须在这里记下。** 这条路由在认证后面，用户是已知的；而票据
+    // 被用掉的那一刻（`/ws` 的 `?ticket=`）请求里没有任何可解析的身份。
+    // 不记的后果见 `TicketBook::inner` 的文档 —— 跨租户订错总线
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    let ticket = st.ticket_book().issue(&owner);
     Json(serde_json::json!({
         "ticket": ticket,
         "expires_in": crate::auth::TICKET_TTL.as_secs(),
@@ -1025,9 +1036,9 @@ mod tests {
         // `crate::sessions` 的模块头。剩下的这几条是真正属于记忆那一侧的：
         // 召回、MCP 门面、以及记忆浏览器的回放。
         //
-        // `/episodes` `/sync` `/ws` 暂时还在这份名单里，但**它们最终会搬过来**
-        // —— 到那时把它们从这里删掉，而不是给它们加豁免
-        for path in ["/memory/search", "/mcp", "/episodes", "/sync", "/ws"] {
+        // `/sync` 与 `/ws` 2026-08-16 也搬过来了，从名单里删掉。
+        // `/episodes` 还没 —— 到那时同样是删掉它，而不是给它加豁免
+        for path in ["/memory/search", "/mcp", "/episodes"] {
             let resp = app
                 .clone()
                 .oneshot(

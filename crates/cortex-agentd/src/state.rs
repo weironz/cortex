@@ -84,6 +84,8 @@ struct Inner {
     tickets: Arc<TicketBook>,
     /// 已签发的 access token。见 [`crate::accounts::AccessBook`]。
     access: Arc<crate::accounts::AccessBook>,
+    /// 每个租户一条的实时推送总线。懒建，见 [`crate::sync_bus::SyncBuses`]。
+    sync_buses: Arc<crate::sync_bus::SyncBuses>,
     //
     // 这里**还没有**委托令牌那本簿子（沙箱容器回调用的那种）。
     //
@@ -175,6 +177,7 @@ impl AgentState {
                 auth,
                 tickets: Arc::new(TicketBook::default()),
                 access: Arc::new(crate::accounts::AccessBook::default()),
+                sync_buses: Arc::new(crate::sync_bus::SyncBuses::default()),
                 last_use: Mutex::new(HashMap::new()),
             }),
         }
@@ -249,6 +252,12 @@ impl AgentState {
     #[must_use]
     pub fn access_book(&self) -> &crate::accounts::AccessBook {
         &self.inner.access
+    }
+
+    /// 按租户取实时推送总线。
+    #[must_use]
+    pub fn sync_buses(&self) -> &crate::sync_bus::SyncBuses {
+        &self.inner.sync_buses
     }
 
     #[must_use]

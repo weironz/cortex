@@ -225,12 +225,27 @@ pub fn generate() -> (String, String) {
 /// 反正它手上有长期 token。
 #[derive(Default)]
 pub struct TicketBook {
-    inner: Mutex<HashMap<String, Instant>>,
+    /// 票据 → （过期时刻，签给谁）。
+    ///
+    /// # 为什么要记「签给谁」
+    ///
+    /// 票据是给**加不了请求头**的连接用的（WebSocket、`<img src>`），而认证
+    /// 之后还有一步：这次请求落在哪个租户的库上。带 bearer 时那一步靠
+    /// `current_user` 解析，带票据时**没有任何东西可解析** —— 于是它会回落到
+    /// 1 号用户，也就是 `public`。
+    ///
+    /// 后果是跨租户的：B 用票据连上 `/ws`，订到的是 A 的推送总线。数据不会
+    /// 泄露（`/sync` 走 bearer，租户是对的），但 B 永远收不到自己的变更、
+    /// 却被 A 的变更反复唤醒 —— 一个不报错、只是「实时同步偶尔不动」的坏。
+    ///
+    /// 签票那条路由本身在认证后面，那时**用户是已知的**。把它一起记下来，
+    /// 这个洞就不存在了。
+    inner: Mutex<HashMap<String, (Instant, String)>>,
 }
 
 impl TicketBook {
     /// 签一张票。调用方必须**已经**通过了 bearer 校验。
-    pub fn issue(&self) -> String {
+    pub fn issue(&self, owner: &str) -> String {
         let mut buf = [0u8; 32];
         getrandom::fill(&mut buf).expect("内核熵源不可用，拒绝签发可预测的票据");
         let ticket = hex::encode(buf);
@@ -238,14 +253,23 @@ impl TicketBook {
         // 顺手清一遍过期的。没有单独的清理任务：签票是唯一会让这个表长大的
         // 动作，在这里清就不可能出现「只涨不清」
         let now = Instant::now();
-        guard.retain(|_, exp| *exp > now);
-        guard.insert(ticket.clone(), now + TICKET_TTL);
+        guard.retain(|_, (exp, _)| *exp > now);
+        guard.insert(ticket.clone(), (now + TICKET_TTL, owner.to_owned()));
         ticket
     }
 
     fn valid(&self, ticket: &str) -> bool {
+        self.owner(ticket).is_some()
+    }
+
+    /// 这张票是签给谁的。过期或不存在都是 `None`。
+    #[must_use]
+    pub fn owner(&self, ticket: &str) -> Option<String> {
         let guard = self.inner.lock().expect("票据本的锁不该中毒");
-        guard.get(ticket).is_some_and(|exp| *exp > Instant::now())
+        guard
+            .get(ticket)
+            .filter(|(exp, _)| *exp > Instant::now())
+            .map(|(_, who)| who.clone())
     }
 
     #[cfg(test)]
@@ -470,7 +494,7 @@ mod tests {
     #[test]
     fn a_ticket_is_valid_until_it_is_not_in_the_book() {
         let book = TicketBook::default();
-        let t = book.issue();
+        let t = book.issue("01TESTUSER0000000000000000");
         assert!(book.valid(&t));
         assert!(!book.valid("deadbeef"), "没签发过的票据不能通过");
         // 可重复使用：一个页面上的第二张图不该 401
@@ -482,10 +506,16 @@ mod tests {
         let book = TicketBook::default();
         {
             let mut g = book.inner.lock().unwrap();
-            g.insert("old".into(), Instant::now() - Duration::from_secs(1));
+            g.insert(
+                "old".into(),
+                (
+                    Instant::now() - Duration::from_secs(1),
+                    "01TESTUSER0000000000000000".into(),
+                ),
+            );
         }
         assert_eq!(book.len(), 1);
-        let fresh = book.issue();
+        let fresh = book.issue("01TESTUSER0000000000000000");
         assert_eq!(book.len(), 1, "过期票据应当在签新票时被清掉");
         assert!(book.valid(&fresh));
         assert!(!book.valid("old"));
