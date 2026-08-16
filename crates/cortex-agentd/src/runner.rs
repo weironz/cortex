@@ -630,6 +630,46 @@ impl DockerRunner {
             .is_some_and(|env| env.contains(&want))
     }
 
+    /// 这个正在跑的容器，跑的是不是**当前这个**镜像。
+    ///
+    /// # 比 ID，不比 tag
+    ///
+    /// 只比 tag 挡不住最常见的那次：`cortex/sandbox:dev` 重编之后 **tag 没变、
+    /// ID 变了**，而容器还跑着旧的那一份。生产上同样 —— 发一版修复镜像，
+    /// 已经在跑的容器不会自己换。
+    ///
+    /// 不比的后果是「发布了修复」与「用户真的拿到修复」之间隔着一次空闲回收，
+    /// 而那个阈值是 **12 小时**（`sandbox_reaper::IDLE`）。中间没有任何信号：
+    /// 容器是 healthy 的，请求也照常，只是跑的是旧二进制。
+    ///
+    /// 这不是假想 —— 2026-08-16 修完「agent 跑的命令没有网」之后就撞上了：
+    /// 镜像重编完，用户那个会话仍然出不了网，因为容器是几小时前起的。
+    /// 当时能救回来靠的是 agentd 重启让令牌对不上，那是**副作用不是设计**。
+    ///
+    /// # 镜像本地不存在时回 `true`，与 [`Self::token_matches`] 方向相反
+    ///
+    /// 那两者的「说不清」含义不同：令牌说不清 ⇒ 这个容器可能谁都认，重建。
+    /// 镜像说不清 ⇒ 我们**根本建不出新的**（`preflight` 会在启动时就报），
+    /// 此时把一个正在服务的容器拆掉只是把「有点旧」换成「彻底没有」。
+    async fn image_matches(&self, name: &str) -> bool {
+        let Ok(want) = self.docker.inspect_image(&self.image).await else {
+            return true;
+        };
+        let Ok(info) = self
+            .docker
+            .inspect_container(name, None::<qp::InspectContainerOptions>)
+            .await
+        else {
+            return false;
+        };
+        match (info.image, want.id) {
+            (Some(running), Some(current)) => running == current,
+            // 读不到就当不匹配 —— 与 token_matches 同一个方向：
+            // 一个我们说不清跑着什么的容器，不该被当成好的留下来
+            _ => false,
+        }
+    }
+
     fn volume_name(scope: &str) -> String {
         format!("{VOLUME_PREFIX}{}", sanitize(scope))
     }
@@ -1360,6 +1400,34 @@ impl SandboxRunner for DockerRunner {
         &self.remote
     }
 
+    /// 沙箱那张网上，回调地址那个主机名解析得出来吗。
+    ///
+    /// # 为什么不能拿容器名去比
+    ///
+    /// 原来的实现是「`inspect_network` 列出容器，看有没有一个 `name` 等于
+    /// 回调主机名」。那**恒为 false**，只要两者写法不同 —— 而它们本来就不同：
+    ///
+    /// | | 值 |
+    /// |---|---|
+    /// | 回调地址 | `http://agentd:8081`（compose **服务名**）|
+    /// | 容器名 | `cortex-agentd-dev` / `cortex-agentd`（`container_name:`）|
+    ///
+    /// 容器靠 docker 的内嵌 DNS 解析 `agentd`，走的是**网络别名**，
+    /// 而 `inspect_network` 那份列表给的是容器名。两者从来对不上，于是
+    /// `/health` 上这一格在**一切正常时也一直报 false**。
+    ///
+    /// 实测过：沙箱容器里 `getent hosts agentd` → `172.21.0.3`，
+    /// `agentd:8081` 连得上，而这个字段说看不见。
+    ///
+    /// # 改成看别名
+    ///
+    /// `inspect_network` 每个容器条目上没有别名，所以逐个 `inspect_container`
+    /// 拿 `NetworkSettings.Networks[沙箱网].Aliases` —— 那正是 DNS 认的那份，
+    /// 也就是容器真正能解析到的名字。容器名同时也留着比：
+    /// 有人把回调直接写成容器名时，那样也是对的。
+    ///
+    /// 一个假警报的代价不只是难看：`/health` 上长期挂着一条红的，
+    /// 会让真出问题的那天没人相信它。
     async fn callback_visible(&self) -> bool {
         let Some(host) = callback_host(&self.remote) else {
             return false;
@@ -1367,40 +1435,76 @@ impl SandboxRunner for DockerRunner {
         let Ok(net) = self.docker.inspect_network(NETWORK, None).await else {
             return false;
         };
-        net.containers
-            .unwrap_or_default()
-            .values()
-            .any(|c| c.name.as_deref() == Some(host))
+        for c in net.containers.unwrap_or_default().values() {
+            let Some(name) = c.name.as_deref() else {
+                continue;
+            };
+            if name == host {
+                return true;
+            }
+            let Ok(info) = self
+                .docker
+                .inspect_container(name, None::<qp::InspectContainerOptions>)
+                .await
+            else {
+                continue;
+            };
+            let aliases = info
+                .network_settings
+                .and_then(|s| s.networks)
+                .and_then(|n| n.get(NETWORK).and_then(|e| e.aliases.clone()))
+                .unwrap_or_default();
+            if aliases.iter().any(|a| a == host) {
+                return true;
+            }
+        }
+        false
     }
 
     async fn ensure(&self, scope: &str, token: &str, spec_hash: &str) -> Result<SandboxHandle> {
         let name = Self::container_name(scope);
 
-        // 已经在跑、**而且认的就是这把令牌**，就直接回。
+        // 已经在跑、**认的是这把令牌、而且跑的是当前这个镜像**，才直接回。
         //
-        // **幂等**：cortexd 每一轮对话都会调这个，每轮重建等于每轮丢掉一次
-        // 容器里的进程状态。
+        // **幂等**：每一轮对话都会调这个，每轮重建等于每轮丢掉一次容器里的
+        // 进程状态。所以复用是默认，下面两条是仅有的例外。
         //
-        // 但「在跑」不够。容器的入站认证认的是它**启动时** env 里那把令牌，
-        // 而令牌表在内存里 —— cortexd 一重启就空了，下一轮会签一把新的。
-        // 那时容器照常 Up、反代照常连上、然后每一条请求都 401，
-        // 而错误信息是「缺少或无效的凭据」，读起来像用户没登录。
+        // ① **令牌**。容器的入站认证认的是它**启动时** env 里那把，而令牌表
+        // 在内存里 —— agentd 一重启就空了，下一轮会签一把新的。那时容器
+        // 照常 Up、反代照常连上、然后每一条请求都 401，而错误信息是
+        // 「缺少或无效的凭据」，读起来像用户没登录。真机上撞到过：
+        // `just dev-restart` 之后第一句话就是 401。
         //
-        // 真机上撞到过：`just dev-restart` 之后第一句话就是 401，
-        // 而它会一直 401 到空闲回收把容器停掉为止 —— 现在那是 **12 小时**。
+        // ② **镜像**（2026-08-16 补）。只判 ① 的话，发一版新沙箱镜像之后
+        // 已经在跑的容器**不会自己换** —— 它一直用旧二进制，直到空闲回收把
+        // 它停掉，而那个阈值是 **12 小时**。中间没有任何信号：容器 healthy、
+        // 请求照常，只是修复没生效。
+        //
+        // 这条是修完「agent 跑的命令没有网」当天撞出来的：镜像重编完，
+        // 那个会话仍然出不了网，因为容器是几小时前起的。当时能救回来靠的是
+        // agentd 重启让令牌对不上 —— **副作用，不是设计**，而生产上发镜像
+        // 恰恰不重启 agentd。
+        //
+        // 两条都不满足就重建，而重建是安全的：工作区在卷上，rootfs 是
+        // `--read-only`，需要持久的东西**全都**在卷里。
         if let Some(h) = self.status(scope).await? {
-            if self.token_matches(&name, token).await {
+            let token_ok = self.token_matches(&name, token).await;
+            let image_ok = self.image_matches(&name).await;
+            if token_ok && image_ok {
                 return Ok(h);
             }
-            // 不匹配就重建。**不试图把旧令牌捡回来用**：cortexd 重启之后
-            // 那些容器本来就该被重新接管，让一个带着旧凭据的容器继续跑
-            // 才是问题（见 `sandbox_token` 的模块文档）。
+            // **不试图把旧令牌捡回来用**：agentd 重启之后那些容器本来就该被
+            // 重新接管，让一个带着旧凭据的容器继续跑才是问题
+            // （见 `sandbox_token` 的模块文档）。
             //
-            // 重建是安全的：工作区在卷上，rootfs 是 `--read-only`，
-            // 需要持久的东西**全都**在卷里。
+            // 日志点名是哪一条不满足：两者的运维动作完全不同 ——
+            // 令牌对不上是「agentd 重启过」，镜像对不上是「发过新版本」。
+            // 合成一句「重建它」的话，一台每轮都在重建容器的机器
+            // （比如 TOKEN_ENV 写歪了）看起来只是「有点慢」
             tracing::info!(
                 sandbox = %name,
-                "容器还在但令牌对不上（多半是 cortexd 重启过），重建它"
+                reason = if !token_ok { "令牌对不上（多半是 agentd 重启过）" } else { "镜像不是当前这个（多半是发过新版本）" },
+                "容器还在但要重建"
             );
         }
 
