@@ -812,6 +812,69 @@ void _sessionTests() {
       expect(ok, isFalse);
     });
 
+    /// **Web 形态（seed 恒 null + storage 里有 refresh token）下，启动必须走续期。**
+    ///
+    /// 这条钉的是一个存在过的整链断裂：Web 版的 `readSeedToken` 曾经与
+    /// `readRememberedToken` 读同一个 sessionStorage key。于是
+    /// `_bootstrap` 里「remembered ≠ seed 才续期」恒假 ——
+    /// `restoreSession` 在 Web 上**从来没有被调用过**，「登录一次管 30 天」
+    /// 在 Web 上根本不存在；同时 refresh token 被当预共享 token 塞进
+    /// Authorization 头，启动即 401 红字。
+    test('Web 形态：启动时用 remembered 续期并直接 ready', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          authSeedTokenProvider.overrideWithValue(null), // Web：无预共享 token
+          rememberedTokenProvider.overrideWith((_) async => 'refresh-old'),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      c.read(authControllerProvider); // 触发 build → bootstrap
+      // bootstrap 全程 async：让微任务与 restoreSession 落定
+      for (var i = 0; i < 8; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(
+        api.refreshCalls,
+        greaterThan(0),
+        reason:
+            '启动时必须真的去续期。以前 seed 与 remembered 是同一个值，'
+            '「不同才续」的判断恒假，restoreSession 全项目零调用',
+      );
+      final st = c.read(authControllerProvider);
+      expect(st.isReady, isTrue, reason: '续期成功就该直接进主界面，不见登录页');
+      expect(st.token, 'access-2');
+    });
+
+    /// 启动时旧凭据续不上 —— 安静回登录页，**不带红字**。
+    ///
+    /// 打开页面时揣着一份过期凭据是常态（服务端重启过、库清过、30 天到了）。
+    /// 「凭据已失效（HTTP 401）」压在还没输过密码的表单上，读起来是
+    /// 「我被拒绝了」—— 用户会把一次正常的登录当成失败来排查。实际发生过。
+    test('启动续期失败：回登录页且不显示 401 红字', () async {
+      final api = _SessionApi(refreshFails: true);
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          authSeedTokenProvider.overrideWithValue(null),
+          rememberedTokenProvider.overrideWith((_) async => 'refresh-dead'),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      c.read(authControllerProvider);
+      for (var i = 0; i < 8; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      final st = c.read(authControllerProvider);
+      expect(st.isReady, isFalse);
+      expect(st.error, isNull, reason: '启动清场不是事故，登录页本身已经在说「请登录」了');
+    });
+
     /// **半路 401 先续期，而不是把人弹回登录框。**
     ///
     /// access token 只活 15 分钟，服务端每重启一次那本簿子就清空一次

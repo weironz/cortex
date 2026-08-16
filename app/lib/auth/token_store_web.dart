@@ -33,21 +33,36 @@ const String kTokenStorageNote =
 /// configured to block site data both raise on the *getter*, not on the value.
 /// Treated as "nothing stored", because the alternative is a white screen at
 /// launch caused by a privacy setting.
-/// 与桌面端同名的入口。
-///
-/// Web 上「记住」与「读种子」是同一件事（都只有 sessionStorage 这一处），
-/// 所以它就是 [`readSeedToken`] 的异步壳。留着这个名字是为了让上层
-/// **一行 `kIsWeb` 都不用写** —— 那正是这道 seam 存在的意义。
-Future<String?> readRememberedToken() async => readSeedToken();
-
-String? readSeedToken() {
+/// sessionStorage 里那份 —— 它是 **refresh token**，登录/续期时存的。
+Future<String?> readRememberedToken() async {
   try {
     final raw = web.window.sessionStorage.getItem(_kKey)?.trim();
     return (raw == null || raw.isEmpty) ? null : raw;
   } on Object {
+    // 沙箱 iframe 或禁了站点数据的浏览器在 getter 上就抛。
+    // 当成「没存过」—— 另一个选项是启动白屏
     return null;
   }
 }
+
+/// Web 上**恒为 null** —— 浏览器没有预共享 token 这回事。
+///
+/// # 这里曾经是一个把整条登录链打断的 bug
+///
+/// 上一版写的是 `readRememberedToken() => readSeedToken()`，两个名字读同一个
+/// sessionStorage key。但那个 key 里存的是 **refresh token**，而 seed 的
+/// 消费者把它当**预共享 token**直接塞进 Authorization 头。后果是一整条链：
+///
+/// 1. 启动时 `_seeded()` 把 refresh token 放进 access token 的位置，
+///    随后每个认证请求 401 —— 登录页上凭空一句「凭据已失效（HTTP 401）」；
+/// 2. 更隐蔽的一半：`_bootstrap` 用「remembered ≠ seed」判断要不要续期，
+///    两个函数返回同一个值，条件**恒假** —— `restoreSession` 在 Web 上
+///    从来没有被调用过，「登录一次管 30 天」在 Web 上根本不存在。
+///
+/// 桌面端的两个函数是真正不同的东西（环境变量 vs 钥匙串），这个坑只在
+/// Web 版的「偷懒转发」里。分开之后：seed 恒 null，续期条件恒真，
+/// 启动走的是 refresh 那条正路。
+String? readSeedToken() => null;
 
 Future<void> rememberToken(String token) async {
   try {
