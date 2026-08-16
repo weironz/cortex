@@ -111,6 +111,28 @@ doctor:
     docker inspect "${CORMEX_CONTAINER:-cormex-cortexd}" >/dev/null 2>&1 \
         && say 记忆服务 "起着（${CORMEX_CONTAINER:-cormex-cortexd}）" \
         || say 记忆服务 "没起 —— 去 ../cormex 起，本仓库不提供它"
+    # ── 两个仓库共用一个 compose 项目名 ──────────────────────
+    #
+    # Cortex 与 Cormex 的根 compose **第一行都写着 `name: cortex`**，于是
+    # 两边的容器与卷落在同一个 compose 项目里。后果不是重名冲突（容器名
+    # 各自带前缀，撞不上），而是**作用域**：`docker compose down` 认的是
+    # 项目标签，在任一侧跑都会波及另一侧。
+    #
+    # 这个雷在 CLAUDE.md 与 justfile 里都记过，但**没有任何东西会拦它** ——
+    # 而它只在「刚好两边都起着」时才有杀伤力，也就是最忙的那天。
+    # 所以这里不去猜谁对谁错，只把事实摆出来：项目里有别人的容器时说一声。
+    #
+    # 不判 rc=1：这不是「环境坏了」，是「小心你手上的 down」。
+    foreign="$(docker ps -a --filter label=com.docker.compose.project=cortex \
+        --format '{{ "{{" }}.Names{{ "}}" }}' 2>/dev/null | grep -v '^cortex-' | tr '\n' ' ')"
+    if [ -n "$foreign" ]; then
+        say compose项目 "⚠ 项目 cortex 里还有别的仓库的容器：${foreign}"
+        echo "     两边根 compose 都写着 name: cortex，于是 down 的作用域会互相波及。"
+        echo "     本仓库的 dev-down / dev-reset 已经限定在 -f docker-compose.dev.yml，"
+        echo "     但**裸敲 docker compose down**（任一侧）会带走上面这些。"
+    else
+        say compose项目 "cortex（项目里只有本仓库的容器）"
+    fi
     [ "$rc" = 0 ] && echo "全部就绪。" || echo "有问题，见上。"
     exit $rc
 
