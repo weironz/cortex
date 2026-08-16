@@ -210,7 +210,7 @@ assert_is_cortex_db() {
        备错库不会报错、产物看着也正常，要到恢复那天才发现，所以这里停住。
        记忆那半的库归 Cormex 自己备；确实要备这个的话，说明表结构变了，
        改这条断言时请一并想清楚判据。" ;;
-        *) die "连不上 $PG_CONTAINER 里的库（用户 $POSTGRES_USER / 库 $POSTGRES_DB）。
+        *) die "连不上 ${PG_CONTAINER} 里的库（用户 ${POSTGRES_USER} / 库 ${POSTGRES_DB}）。
        口令读的是 CORTEX_PG_PASSWORD（老名字 POSTGRES_PASSWORD 兜底）——
        compose 用的是前者，两边不一致时报的是「密码认证失败」，
        看起来像库配错了，其实是变量名。" ;;
@@ -271,7 +271,7 @@ ensure_backup_dirs() {
 ensure_pg_dir() {
     local d="$1"
     pg_sh_root "mkdir -p '$d' && chown -R postgres:postgres '$d'" >/dev/null 2>&1 \
-        || die "在容器里建不出 $d（连 root 都建不了）。检查 $BACKUP_DIR 这个挂载点。"
+        || die "在容器里建不出 ${d}（连 root 都建不了）。检查 ${BACKUP_DIR} 这个挂载点。"
 }
 
 # ── Postgres：全部经容器，宿主机不需要 psql ────────────────
