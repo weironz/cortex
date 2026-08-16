@@ -57,6 +57,36 @@ M0–M8、N1–N3、R1–R11 全部完成，**并且在 2026-08 拆成了两个�
 
 ---
 
+## 手头挂着的两条（2026-08-16 登记）
+
+都是修别的东西时**顺手撞见、但刻意没有顺手改**的 —— 理由都是「改它需要
+自己的验证，混进一次清理里等于没验证」。
+
+### 备份从拆分之后就没成功过
+
+`scripts/lib.sh` 里 `PG_CONTAINER` 默认 `cortex-postgres`、`PG_IMAGE` 默认
+`pgvector/pgvector:pg17`，两个都不对应今天的任何东西：dev 是
+`cortex-postgres-dev`（plain `postgres:17-alpine`，没有 pgvector），
+生产是 `cortex-db`。于是 `just backup` 停在「容器 cortex-postgres 没在跑」。
+
+`just backup-status` 里那句「最近演练 —— 从未演练，这等于没有备份」说的
+正是它。**验收只有一条**：在生产上跑一次恢复演练并留下 report；改默认值
+等于改「生产上到底备份哪个库」，光让命令不报错不算做完。
+
+### 文档里还写着已经删掉的 recipe
+
+`docs/operations.md`（`just db-migrate` :166、evals 那几道门
+:854-856/:918-919/:1078、Python 那一行 :47）、`docs/release.md:178`，
+以及 `just bootstrap` 的旧描述「起服务 → 建库 → migration → 建桶」
+（`README.md:34`、`docs/install.md:4,244`、`docs/operations.md:9,56`）。
+bootstrap 现在能跑了，所以不是死链，只是描述不准 —— migration 由 agentd
+启动时自己跑，桶由 `MediaStore::from_env` 自己建。
+
+⚠️ 别误改：`CLAUDE.md:161` 与 `architecture.md:83` 说的是 **Cormex 那边**的
+`just db-migrate` / `just up`，那两处是对的。
+
+---
+
 ## 下一批 —— 挡在「敢给别人用」前面的
 
 > 「日常自己用」的五条（R1~R5）与运维三条（R6~R8）、沙箱（R10）
