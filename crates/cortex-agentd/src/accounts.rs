@@ -499,10 +499,22 @@ pub async fn current_user(st: &AgentState, headers: &axum::http::HeaderMap) -> S
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default();
-    match st.access_book().resolve(bearer) {
-        Some(id) => id,
-        None => owner_user_id(st).await.unwrap_or_else(|| "owner".into()),
+    if let Some(id) = st.access_book().resolve(bearer) {
+        return id;
     }
+    // **委托令牌也要认得出。**
+    //
+    // 沙箱容器带的就是这把（`auth::require` 已经放行了它，否则走不到这儿）。
+    // 认不出的后果不是 401 —— 是**静默落到 1 号用户**，于是容器写的 episode
+    // 全部进了 `public` 那片库，而不是发起这轮对话的人的。数据看着都在，
+    // 只是在别人家里，且没有任何一条日志说过这件事。
+    //
+    // 这条是从记忆服务那侧**原样带过来**的行为（那边一样如此），不是搬迁
+    // 引入的；但身份现在归这个进程管，所以补在这里。
+    if let Some(scope) = st.delegations().resolve(bearer) {
+        return scope.owner;
+    }
+    owner_user_id(st).await.unwrap_or_else(|| "owner".into())
 }
 
 /// `GET /auth/me`
@@ -521,9 +533,13 @@ pub async fn whoami(
         .unwrap_or_default();
     let user_id = match st.access_book().resolve(bearer) {
         Some(id) => id,
-        // 认不出就是老 token 那条路（它已经过了入站那道门，
-        // 否则这个 handler 根本不会被调到）
-        None => owner_user_id(&st).await.unwrap_or_else(|| "owner".into()),
+        // 委托令牌（沙箱容器带的那把）同样认得出，理由见 `current_user`
+        None => match st.delegations().resolve(bearer) {
+            Some(scope) => scope.owner,
+            // 认不出就是老 token 那条路（它已经过了入站那道门，
+            // 否则这个 handler 根本不会被调到）
+            None => owner_user_id(&st).await.unwrap_or_else(|| "owner".into()),
+        },
     };
     let row = sqlx::query("SELECT username, schema_name FROM cortex_auth.users WHERE id = $1")
         .bind(&user_id)

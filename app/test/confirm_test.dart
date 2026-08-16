@@ -551,6 +551,7 @@ class _ConfirmApi
   Future<bool> answerConfirmation({
     required String token,
     required bool allow,
+    String? sessionId,
   }) async {
     receipts.add((token, allow));
     if (throwTransport) {

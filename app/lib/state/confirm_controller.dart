@@ -221,6 +221,9 @@ class ConfirmController extends Notifier<ConfirmState> {
       final accepted = await _api.answerConfirmation(
         token: token,
         allow: allow,
+        // 从这条待确认自己身上取 —— 它在 `offer` 时被盖过章。云端那条路
+        // 要靠它找到这一轮跑在哪个容器里
+        sessionId: request.sessionId,
       );
       if (!_alive(generation)) return;
       _retire(

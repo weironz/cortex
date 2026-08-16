@@ -140,20 +140,29 @@ void main() {
     );
   });
 
-  testWidgets('切到旧方式才出现 token 输入框', (tester) async {
+  /// 登录页上**只有登录**：没有 token、没有 mock、没有那段凭据存储说明。
+  ///
+  /// 那三样各自有理由被拿掉：预共享 token 是「一台机器一把钥匙」的旧形态，
+  /// 而现在有真的账号；mock 数据源是给「想看看界面长什么样」的人的，而它
+  /// 出现在登录页上等于把一条演示路摆在正门；那段凭据存储说明讲的是 token
+  /// 存哪儿的权衡，token 走了它也就没有主语了。
+  ///
+  /// 钉住的是**不出现**。一个被删掉的入口最容易的复活方式是「顺手加回来
+  /// 方便调试」，而它不会有人反对 —— 直到它出现在生产的登录页上。
+  testWidgets('登录页上只有登录，没有 token / mock / 存储说明', (tester) async {
     await _pumpLogin(tester, handler: (_) async => _json(_health));
 
-    await tester.tap(find.text('用预共享 token 登录（旧方式）'));
-    await tester.pumpAndSettle();
+    expect(find.text('用户名'), findsOneWidget);
+    expect(find.text('密码'), findsOneWidget);
 
+    for (final gone in ['用预共享 token 登录（旧方式）', 'CORTEXD_TOKEN', '用 Mock 数据源']) {
+      expect(find.text(gone), findsNothing, reason: '「$gone」应当已经从登录页上拿掉了');
+    }
     expect(
-      find.text('CORTEXD_TOKEN'),
-      findsOneWidget,
-      reason:
-          '旧路必须还在：CLI、现有安装与单用户自托管都还在用它，'
-          '一次性切断会让它们当天全部失联',
+      find.textContaining('sessionStorage'),
+      findsNothing,
+      reason: '凭据存储那段说明是 token 那条路的注脚，主语没了它也该走',
     );
-    expect(find.text('用户名'), findsNothing);
   });
 }
 

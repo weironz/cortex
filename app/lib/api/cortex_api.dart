@@ -108,7 +108,16 @@ abstract interface class CortexApi {
   /// clock run out even though the agent treats both as refusal: a denial
   /// arrives immediately and frees the suspended turn, rather than parking a
   /// database connection and a model context for three minutes.
-  Future<bool> answerConfirmation({required String token, required bool allow});
+  /// 回答一条确认。
+  ///
+  /// [sessionId] **必须带上**：云端那条路要靠它找到这一轮跑在哪个沙箱容器里，
+  /// 而容器是按项目分的。不带的话回执会落到「未分组」那个沙箱上 —— 服务端
+  /// 会诚实地回 409（不会跑去别人容器里翻），但用户点的那一下就此石沉大海。
+  Future<bool> answerConfirmation({
+    required String token,
+    required bool allow,
+    String? sessionId,
+  });
 
   /// `POST /chat` → SSE.
   ///

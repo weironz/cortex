@@ -268,6 +268,7 @@ class _FakeApi
   Future<bool> answerConfirmation({
     required String token,
     required bool allow,
+    String? sessionId,
   }) => throw UnimplementedError('同步链路不应投递回执');
 }
 

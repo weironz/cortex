@@ -284,6 +284,7 @@ class ReplayApi
   Future<bool> answerConfirmation({
     required String token,
     required bool allow,
+    String? sessionId,
   }) => throw UnimplementedError();
 
   @override

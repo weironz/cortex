@@ -1074,18 +1074,25 @@ class HttpCortexApi implements CortexApi {
   Future<bool> answerConfirmation({
     required String token,
     required bool allow,
+    String? sessionId,
   }) async {
     try {
-      await _postJson('/confirmations', {
-        // In the body, never the path. `POST /confirmations/{token}` would be
-        // tidier REST and would write a credential that approves shell
-        // execution into every access log on the way.
-        'token': token,
-        // A two-value enum rather than a bool: `{"approve":"false"}` decodes as
-        // `true` in a surprising number of client libraries, and the direction
-        // that mistake fails in is "ran a command nobody approved".
-        'decision': allow ? 'allow' : 'deny',
-      });
+      // 会话走**查询串**而不是 body：服务端要在解析 body 之前就知道该把这条
+      // 转进哪个容器，而 body 是原样流式送进去的、它一个字节都不看
+      await _postJson(
+        '/confirmations',
+        {
+          // In the body, never the path. `POST /confirmations/{token}` would be
+          // tidier REST and would write a credential that approves shell
+          // execution into every access log on the way.
+          'token': token,
+          // A two-value enum rather than a bool: `{"approve":"false"}` decodes as
+          // `true` in a surprising number of client libraries, and the direction
+          // that mistake fails in is "ran a command nobody approved".
+          'decision': allow ? 'allow' : 'deny',
+        },
+        {'session_id': ?sessionId},
+      );
       return true;
     } on CortexApiException catch (e) {
       // The ordinary outcome of losing the race. Not routed through
@@ -1438,12 +1445,13 @@ class HttpCortexApi implements CortexApi {
   /// for why that is not the same as sending `{}`.
   Future<Map<String, dynamic>> _postJson(
     String path,
-    Map<String, dynamic>? body,
-  ) async {
+    Map<String, dynamic>? body, [
+    Map<String, String>? query,
+  ]) async {
     final http.Response response;
     try {
       response = await _client.post(
-        _uri(path),
+        _uri(path, query),
         headers: _headers({
           if (body != null) 'content-type': 'application/json',
           'accept': 'application/json',

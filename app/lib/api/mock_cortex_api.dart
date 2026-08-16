@@ -667,6 +667,7 @@ class MockCortexApi
   Future<bool> answerConfirmation({
     required String token,
     required bool allow,
+    String? sessionId,
   }) async {
     await _latency(50);
     // `remove`, not `get` — one-shot, first answer wins, and a replay 404s.
