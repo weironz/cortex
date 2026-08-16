@@ -339,7 +339,12 @@ dev-restart: dev-build
 # nginx 那侧是 bind mount + 一律不缓存，所以构建完刷新浏览器就生效，
 # 容器一个都不用动
 dev-web:
-    cd app && flutter build web --dart-define=CORTEX_BASE_URL=
+    # `--pwa-strategy=none`：**不生成也不注册 service worker**。
+    # Flutter 默认的 SW 让 index.html 走网络、main.dart.js 走缓存，两条策略
+    # 叠出一个混版本的应用 —— 2026-08-16 实测用户浏览器里新标题配三版前的
+    # 旧逻辑，此后每次修复他一版都没跑到。API 客户端要 SW 没有任何好处。
+    # index.html 里另有一段灭杀脚本清掉历史上已经装进浏览器的那个。
+    cd app && flutter build web --pwa-strategy=none --dart-define=CORTEX_BASE_URL=
     @echo "构建完了，刷新浏览器即可（nginx 直接读 app/build/web）"
 
 dev-logs *ARGS:

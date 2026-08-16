@@ -41,6 +41,42 @@
 
   <title>Cortex</title>
   <link rel="manifest" href="manifest.json">
+  <!--
+    ── 灭杀 service worker ─────────────────────────────────────
+
+    这个应用**不用** service worker（构建带 `--pwa-strategy=none`），
+    这段脚本的唯一使命是清掉**历史版本装进用户浏览器里的那一个**。
+
+    为什么必须有：Flutter 默认的 SW 对 index.html 是「先走网络」、对
+    main.dart.js 是「先走缓存」。两条策略叠起来就是一个**混版本**的应用 ——
+    2026-08-16 实测：用户页面的标题来自新代码、错误文案来自三版之前的旧代码，
+    此后每一次修复他的浏览器都一版没跑到，Ctrl+Shift+R 也无济于事
+    （硬刷只绕过 HTTP 缓存，SW 的 Cache Storage 不归它管）。
+
+    一个 API 客户端拿不到 SW 壳缓存的好处（数据全是动态的），却实打实
+    吃到了版本错位的亏 —— 所以是删掉，不是修好它的更新时序。
+
+    发现并卸载了 SW 才 reload（防循环：没有 SW 时这段什么都不做）。
+  -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        if (!regs.length) return;
+        Promise.all(
+          regs.map(function (r) { return r.unregister(); })
+        ).then(function () {
+          if (!('caches' in window)) return [];
+          return caches.keys().then(function (keys) {
+            return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+          });
+        }).then(function () {
+          // SW 已卸、缓存已清 —— 这次 reload 之后拿到的才是服务器上的版本
+          window.location.reload();
+        });
+      });
+    }
+  </script>
+
 </head>
 <body>
   <!--
