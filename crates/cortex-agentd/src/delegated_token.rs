@@ -159,8 +159,24 @@ impl DelegatedScope {
             (&Method::GET, p) if is_session_path(p) => true,
             // 启动时问「这把凭据属于谁」。漏掉的话状态目录永远落在 _pending
             (&Method::GET, "/auth/me") => true,
+            // 本轮附件的字节。沙箱够不到对象存储（egress 对私有段一律拒，
+            // 有意的设计），字节由 agentd 从对象存储中转 —— 漏掉这条的话
+            // 云端会话的附件会**静默全部不可用**（cortex-local 把取不到
+            // 落成「附件不可用」说明，不报错）。只放单段路径：`/blobs`
+            // 本身是 POST 上传，`/blobs/{hash}/url` 的预签名 URL 在沙箱里
+            // 也用不了（对象存储不可达），都不放。
+            (&Method::GET, p) if is_blob_path(p) => true,
             _ => false,
         }
+    }
+}
+
+/// `/blobs/{hash}` 形状（不含 `/blobs` 本身与 `/blobs/{hash}/url`）。
+fn is_blob_path(path: &str) -> bool {
+    match path.strip_prefix("/blobs/") {
+        // 只认一层，与 is_session_path 同一条纪律：多一层是另一个端点
+        Some(rest) => !rest.is_empty() && !rest.contains('/'),
+        None => false,
     }
 }
 
@@ -483,6 +499,34 @@ mod tests {
             "键必然以服务端解析出来的 owner 开头（current_user，不来自请求体），\
              所以无论项目 id 长成什么样都只能改动自己名下那一段"
         );
+    }
+
+    /// 附件字节那条：放行 `GET /blobs/{hash}`，且只放这一个形状。
+    ///
+    /// 红了的症状分两个方向：单段放行没了 → 云端会话的附件**静默全部
+    /// 不可用**（cortex-local 把取不到落成说明，不报错）；多段/别的
+    /// 方法被放进来 → 沙箱多了一条没审计过的路。
+    #[test]
+    fn blob_bytes_are_reachable_but_nothing_else_under_blobs() {
+        use axum::http::Method;
+        let s = scope();
+        assert!(
+            s.allows(&Method::GET, "/blobs/abc123"),
+            "沙箱取不到附件字节 —— 云端会话的附件会静默全部不可用"
+        );
+        for (m, p) in [
+            (Method::POST, "/blobs"),
+            (Method::POST, "/blobs/presign"),
+            (Method::POST, "/blobs/commit"),
+            (Method::GET, "/blobs/abc/url"),
+            (Method::GET, "/blobs/"),
+            (Method::DELETE, "/blobs/abc"),
+        ] {
+            assert!(
+                !s.allows(&m, p),
+                "{m} {p} 不在审计清单上，不该被 blob 那条捎带放行"
+            );
+        }
     }
 
     #[test]

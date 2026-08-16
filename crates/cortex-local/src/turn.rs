@@ -426,6 +426,23 @@ impl Engine {
         // 不报错，只是模型不会用那个功能。见 `chat_turn_for`。
         let external = self.mcp.specs().await;
         let bound = self.workspaces.get(&req.session_id);
+
+        // ── 3.5 附件投放：图片进多模态块，小文本进上下文，其余落工作区 ──
+        //
+        // 放在工作区解析之后（要知道往哪儿落）、消息组装之前（产物要进
+        // 这一轮的 user 消息）。任何失败都落成「附件不可用」的说明，
+        // 不挡轮次 —— 与离线没记忆是同一类降级。
+        let placements = if req.attachments.is_empty() {
+            Vec::new()
+        } else {
+            crate::attachments::place(
+                &self.remote,
+                &req.attachments,
+                bound.as_deref().map(std::path::Path::new),
+                self.llm.supports_vision(),
+            )
+            .await
+        };
         let workspace_turn = bound.as_deref().and_then(|ws| {
             // 绑定时校验过，但目录可能之后被删了/移了/换了外接盘。
             // 此时降级成纯聊天而不是让整轮失败 —— 用户只是想说句话
@@ -478,7 +495,31 @@ impl Engine {
                 "会话太长，最早的若干轮没进上下文"
             );
         }
-        messages.push(cortex_llm::Message::user().with_text(&user_content));
+        // 附件说明块贴在用户原话之后（最新一侧），图片作为多模态块随行。
+        // **不拍平**：goose 的 Image 块经 /llm/stream 无损透传，各家格式
+        // 转换在供应商层免费完成 —— 这里转成文本反而是丢信息（CLAUDE.md
+        // 的硬约束）。
+        let manifest = crate::attachments::render_manifest(&placements);
+        let mut user_msg =
+            cortex_llm::Message::user().with_text(format!("{user_content}{manifest}"));
+        for p in &placements {
+            if let crate::attachments::Placement::Image { name, mime, bytes } = p {
+                use cortex_llm::vision::MessageImageExt;
+                match user_msg.clone().with_image_bytes(bytes, mime) {
+                    Ok(m) => user_msg = m,
+                    // 尺寸在投放时已经卡过，走到这的是 MIME 不在支持列表
+                    // 这类少数情况 —— 降级成一句说明，别让整轮失败
+                    Err(e) => {
+                        tracing::warn!(attachment = %name, error = %e, "图片进不了多模态块，降级为说明");
+                        user_msg = user_msg.with_text(format!(
+                            "
+[附件 {name} 无法作为图片附上：{e}]"
+                        ));
+                    }
+                }
+            }
+        }
+        messages.push(user_msg);
 
         let host = LocalHost {
             remote: self.remote.clone(),

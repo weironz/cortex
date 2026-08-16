@@ -19,6 +19,11 @@ use cortex_proto::llm::LlmStreamRequest;
 /// 为「连不上」准备的，早点失败早点排队。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// [`Remote::blob_response`] 等响应头的上限。整请求超时罩不住大文件，
+/// 但「连不上 / 服务端不吭声」要尽快失败 —— 附件取不到只是降级，
+/// 不该让用户对着转圈等两分钟。
+const BLOB_HEADER_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// 启动路径上那两次探测的超时。
 ///
 /// `protocol_check` 与 `whoami` 都**只在启动时各调一次**，而且失败路径本来
@@ -242,6 +247,28 @@ impl Remote {
         checked(resp).await.map(|_| ())
     }
 
+    /// 取一个已登记附件的字节流（`GET /blobs/{hash}`）。
+    ///
+    /// 返回原始响应而不是字节：调用方要先看头（MIME、Content-Length）
+    /// 再决定读进内存、流式落盘、还是就地放弃 —— 一个 300 MB 的 zip
+    /// 不该先进内存再发现走错了路。策略在 `attachments` 模块，这里只管
+    /// 认证与错误归一。
+    ///
+    /// 容器里这条打的是回调面（agentd 从对象存储中转），委托令牌的
+    /// 白名单里有对应的一条 —— 少了它云端会话的附件会静默全部不可用。
+    pub async fn blob_response(&self, hash: &str) -> Result<reqwest::Response> {
+        let resp = self
+            .auth(self.http.get(self.url(&format!("/blobs/{hash}"))))
+            // 不用 REQUEST_TIMEOUT：那是整请求超时，罩不住大文件的
+            // 下载时长。只限「连上并等到响应头」，身子的读取由调用方
+            // 逐 chunk 消费，卡死由传输层的读超时兜底
+            .timeout(BLOB_HEADER_TIMEOUT)
+            .send()
+            .await
+            .map_err(map_transport)?;
+        checked(resp).await
+    }
+
     /// 取这个会话最近的若干轮，用来铺当前这一轮的上下文。
     ///
     /// # 为什么本地 agent 也要问远端
@@ -276,12 +303,18 @@ impl Remote {
         Ok(detail
             .episodes
             .into_iter()
-            .filter_map(|e| match e.role.as_str() {
-                // tool / system 是内部记录，塞进上下文既占预算，
-                // 又让模型以为那是用户说的话
-                "user" => Some((true, e.text.unwrap_or_default())),
-                "assistant" => Some((false, e.text.unwrap_or_default())),
-                _ => None,
+            .filter_map(|e| {
+                // 历史轮次里的附件不重新取字节（每轮重取重编码会打穿
+                // 前缀缓存，也贵）—— 只加一行**确定性**注记，让模型知道
+                // 「那一轮带过什么文件、工作区里那个文件是哪来的」
+                let note = crate::attachments::history_note(&e.attachments);
+                match e.role.as_str() {
+                    // tool / system 是内部记录，塞进上下文既占预算，
+                    // 又让模型以为那是用户说的话
+                    "user" => Some((true, format!("{}{note}", e.text.unwrap_or_default()))),
+                    "assistant" => Some((false, e.text.unwrap_or_default())),
+                    _ => None,
+                }
             })
             .collect())
     }
