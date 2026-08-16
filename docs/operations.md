@@ -208,7 +208,7 @@ CORTEX_EMBED_API_KEY=sk-...
 部署定的选型。本项目当前形态是 docker compose 单机自托管，这里**先用
 `pg_basebackup` + WAL 归档**，理由四条：
 
-1. **备份链路上少一个构件。** `pgvector/pgvector:pg17` 不带 pgbackrest，而
+1. **备份链路上少一个构件。** `postgres:17-alpine` 不带 pgbackrest，而
    `archive_command` 要在 *Postgres 容器内部* 调它 —— 意味着必须自建并长期
    维护一个 Postgres 镜像。备份系统自身的故障是最糟的一类故障：它平时不报错，
    只在你需要它的那天报错。
@@ -603,8 +603,10 @@ just drill --from-mirror        # ★ 从第二存储取回并解密后再恢复
 5. 探针必须出现在恢复出来的库里
    —— 它证明的不是「备份能起」，而是「备份 + 归档 WAL 一起能把最后一分钟的
    写入接回来」。只测前者的演练是自欺
-6. 逐项完整性检查：业务表齐全 / 行数 / `sync_log` 游标 / pgvector /
-   `episodes.tsv` / `pg_amcheck`
+6. 逐项完整性检查：业务表齐全 / 行数 / `sync_log` 游标 / `pg_amcheck`
+   （**pgvector 与 `episodes.tsv` 那两条 2026-08-16 删了**：这一侧没有向量，
+   而 tsv 列已随 BM25 一起去了 Cormex —— 留着不是「没通过」，是让整个演练
+   在 `set -e` 下静默死掉）
    —— 表清单**从源库现查**，不写死。写死的清单只会在加了 migration 之后
    悄悄过期：新表不在名单里，演练照样全绿，而它其实根本没被验证过
 7. 干净停机后 `pg_checksums --check` 逐页校验
@@ -628,7 +630,7 @@ just drill --from-mirror        # ★ 从第二存储取回并解密后再恢复
 | 结论 | PASS | PASS |
 
 完整性检查两次全绿：探针回放通过、12/12 张业务表、全部表行数 ≥ 基线快照、
-`sync_log` 游标追平、pgvector 距离算子正常、`episodes.tsv` 无缺失、
+`sync_log` 游标追平、
 `pg_amcheck --heapallindexed --parent-check` 通过、
 `pg_checksums --check` 扫 5457 页 **0 个坏页**。
 
@@ -664,7 +666,7 @@ just drill --from-mirror        # ★ 从第二存储取回并解密后再恢复
 | 结论 | PASS | PASS |
 
 完整性检查全绿：探针回放通过、14/14 张业务表、全部表行数 ≥ 基线、`sync_log`
-游标追平、pgvector 正常、`episodes.tsv` 无缺失、`pg_amcheck --heapallindexed
+游标追平、`pg_amcheck --heapallindexed
 --parent-check` 通过、`pg_checksums --check` 扫 8605 页 **0 个坏页**。
 
 RTO 比明文那次（43.6 s）高，但**原因不是加密**：解密只发生在取回阶段（已单列），
@@ -856,6 +858,21 @@ just purge-rotate --apply       # 真做，要手打确认串 PURGE-ROTATE
 
 ---
 
+> **2026-08-16 在 dev 上跑通了一次完整链路**（此前从拆分起就没成功过，
+> 五层问题叠在一起，逐层见那次提交）：`just backup` 93 MB 全量 +
+> `pg_verifybackup` 逐文件 SHA256 通过；`just drill` **PASS** —— 探针回放、
+> 9 张业务表齐全、行数逐表与基线一致、`sync_log` 游标追平、`pg_amcheck` ok，
+> 实测 **RPO 2.5~27 s / RTO 35~46 s**。
+>
+> ⚠️ 上面「恢复演练」一节里那些 12/12、14/14 张表与 RPO 46.9s 的数字来自
+> **拆分之前**（那时这个库里还有 facts / entities / 向量）。留着是因为它们
+> 是真实测过的历史，但**别拿它们当今天的基线** —— 今天这一侧是 9 张表。
+>
+> 生产上还没跑过。roadmap 那句「验收只有一条：在生产上跑一次并留下 report」
+> 仍然挂着，但在此之前它连本机都跑不起来。
+
+---
+
 ## 三、生产部署
 
 ```bash
@@ -878,29 +895,43 @@ just prod-logs agentd
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
-与开发环境的四处差别，每一处都有代价：
+与开发环境的差别，每一处都有代价：
 
-1. **cortexd 进容器**（镜像定义在 `scripts/docker/Dockerfile.cortexd`）。
-   开发时它在宿主机跑（改一行秒级重启），生产要的是「一条命令起完整环境」。
-2. **Postgres / RustFS 只绑 `127.0.0.1`**，只有 cortexd 的 8080 出来。
-   数据库直连口开在公网上是自托管最常见的失手。
-3. **RustFS 四卷纠删码**，`RUSTFS_UNSAFE_BYPASS_DISK_CHECK=false`。
-   四卷必须落在**四块独立物理盘**上 —— 挂在同一块盘上是假冗余，
-   RustFS 会检测到共享设备并拒绝启动，那是正确行为。挂之前先确认：
-   `lsblk -o NAME,MOUNTPOINT,PKNAME`
-4. **资源上限**。节点是 2C/3.5G 且上面跑着别的东西，任何一个容器不封顶
-   都能把 Postgres 饿到超时。
+1. **agentd 进容器**（镜像定义在 `scripts/docker/Dockerfile.agentd`）。
+   开发时它也在容器里，但二进制是挂进去的（`scripts/dev-build.sh` 编好放进
+   named volume，改一行走 `just dev-restart`）；生产是烧进镜像的。
+2. **一个端口都不发布。** `deploy/docker-compose.yml` 里连 `ports:` 都没有 ——
+   数据面只在 compose 网络内可达，对外只经 traefik 出去。数据库直连口开在
+   公网上是自托管最常见的失手，而这里让它**根本没有可开的口**。
+3. **cortexdb 开 WAL 归档**（2026-08-16 补，此前一条都没有）。
+   `archive_timeout=60` 就是 RPO 的上界，而 `archive_command` 与
+   `pg_basebackup` 必须写进**同一个**挂载点，否则恢复时 WAL 与全量对不上。
+   见上面「二、备份与灾备」。
+4. **资源上限**。节点是 2C/3.5G 且上面跑着别人的四个服务，任何一个容器
+   不封顶都能把 Postgres 饿到超时。
+5. **沙箱默认关**（`CORTEX_SANDBOX_ENABLED=0` + docker.sock 默认挂
+   `/dev/null`）。能访问 docker.sock 就能起一个挂着宿主 `/` 的特权容器，
+   所以默认必须是「没挂」，而不是「挂了但功能关着」—— 后者在 agentd
+   被攻破时没有任何区别。
 
-### 四个镜像各有多大，以及为什么
+> ⚠️ **这一节以前写的是另外四条**（cortexd 进容器、Postgres/RustFS 只绑
+> 回环、RustFS 四卷纠删码、资源上限），那是拆分之前的栈。今天这一侧的
+> 生产 compose 里**没有 RustFS、没有 pgvector、没有 cortexd** ——
+> 对象存储与记忆库都归 [Cormex](https://github.com/weironz/cormex)。
+> 照着旧的四条去查「四块独立物理盘」，会在一台根本没有 RustFS 的机器上
+> 找一个不存在的东西。
 
-全部多阶段构建，全部非 root。
+### 这一侧发几个镜像，各有多大
+
+全部多阶段构建，全部非 root。**cortexd 不在这张表里** —— 记忆服务由
+Cormex 自己发布（镜像叫 `cormex`）。
 
 | 镜像 | 大小 | 里面是什么 | 还能不能更小 |
 |---|---|---|---|
 | `cortex/egress-proxy` | **2.44 MB** | 一个静态二进制，`FROM scratch` | 不能，已经只剩它 |
-| `cortex/cortexd` | 207 MB | debian-slim + cortexd/cortex/sqlx | 能，但每一刀都有代价，见下 |
+| `cortex/cortex-agentd` | ~200 MB | debian-slim + agentd | 能，但每一刀都有代价，见下 |
 | `cortex/cortex-web` | 153 MB | nginx:alpine(93) + Flutter 产物(46) | 基本没有，见下 |
-| `cortex/sandbox` | 720 MB | **开发环境**：git/node/python/ripgrep… | **不该更小**，见下 |
+| `cortex/sandbox` | 724 MB | **开发环境**：git/node/python/ripgrep… | **不该更小**，见下 |
 
 **egress-proxy 是 scratch**，因为它跑在信任边界上：镜像里多一个可执行文件，
 就多一个被攻陷后能用的东西，而 scratch 里连 `sh` 都没有。musl 静态链接，
@@ -908,14 +939,17 @@ DNS 靠 docker 注入的 `/etc/resolv.conf`，uid 用数字写（没有 `/etc/pa
 上一版是 debian-slim + ca-certificates，125 MB —— 而这个代理**不发起 TLS**
 （CONNECT 是纯字节转发，TLS 在沙箱与目标之间端到端），那些信任根一张没用过。
 
-**cortexd 的 207 MB 里有三样看着可以砍、但砍了会疼的**：
+**agentd 那 200 MB 里有两样看着可以砍、但砍了会疼的**：
 
-- `sqlx` CLI（8 MB）：cortexd **刻意不在启动时自动迁移**（在跑着的集群上
-  自动改 schema 是运维事故的常见起点），所以 migration 要在部署机上手动跑。
-  砍掉它就得在部署机装 Rust 工具链。
-- `cortex` CLI（7 MB）：`docker exec` 进去查记忆用的，出事时的第一现场工具。
+- `cortex` CLI（7 MB）：`docker exec` 进去查会话用的，出事时的第一现场工具。
 - debian-slim 底座（87 MB）：换 distroless 能省 ~60 MB，代价是出事时
-  连 `sh` 都进不去。cortexd 不在信任边界上，这笔买卖不划算 —— egress 划算。
+  连 `sh` 都进不去。agentd 不在信任边界上，这笔买卖不划算 —— egress 划算。
+
+> **`sqlx` CLI 不在里面了**，而这一节以前把它列为「砍不得」的第一条，
+> 理由是「cortexd 刻意不在启动时自动迁移，所以要在部署机上手动跑」。
+> 那条理由现在反过来了：schema 由 `sqlx::migrate!` 编进二进制，agentd
+> 启动时自己跑 —— 部署时连 `migrations/` 都不必带，也就不会出现
+> 「镜像是新的、schema 是旧的」。见「数据库怎么初始化」那一节。
 
 **web 镜像的 46 MB 里有 37 MB 是 CanvasKit**（Flutter 的 WASM 渲染器）。
 它可以改成运行时从 gstatic 拉，镜像立刻小 37 MB —— 但那台节点在国内，
