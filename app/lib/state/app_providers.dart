@@ -645,6 +645,24 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
     return api;
   }
 
+  // ── 没到 ready 就发一个「门是关的」桩，而不是一个真客户端。──
+  //
+  // 消费方（会话列表、项目、确认轮询、/auth/me……）是 App 一起动就 fire 的，
+  // 而且以后还会添新的。在每个消费方里各开一道「登录了吗」的门是打地鼠 ——
+  // 漏一个，登录页阶段就多一串 401。把门装在唯一的出口上，现在和将来的
+  // 消费方就都拦住了。
+  //
+  // 三个非 ready 相位都该拦：needsToken（服务端要凭据而我们没有 ——
+  // 发出去只能是 401）、probing（还不知道要不要凭据 —— 发出去是在赌）、
+  // unreachable（用户填的地址没通 —— 发出去只是超时）。桌面端的离线模式
+  // 与关认证的部署都落在 ready（见 `AuthPhase.ready` 的注释），
+  // 这道门不会挡住它们；登录与续期走的是 `authProbeApiProvider`，
+  // 也不经过这里。
+  final phase = ref.watch(authControllerProvider.select((s) => s.phase));
+  if (phase != AuthPhase.ready) {
+    return GateClosedApi();
+  }
+
   final token = ref.watch(authControllerProvider.select((s) => s.token));
 
   // 本地 agent 起好之后指向它，否则指向远端 —— 两侧说同一套协议
@@ -677,12 +695,70 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
     // `read`, not `watch`: this is an outbound edge. Watching the notifier
     // would make every auth state change rebuild the client, including the one
     // this very callback triggers.
-    onUnauthorized: () =>
-        ref.read(authControllerProvider.notifier).onUnauthorized(),
+    onUnauthorized: () {
+      // ── 迟到的 401 没资格拉当前凭据下马。──
+      //
+      // 401 经 `scheduleMicrotask` 报上来，而 token 一换这个实例就被换掉
+      // （见上面 watch token 那段）—— 于是「上一代实例发的请求」的 401
+      // 完全可能在**新凭据已经生效之后**才落地。放它进去的实际后果
+      // （生产复现过）：登录成功 → 登录前发出的无凭据请求的 401 迟到抵达
+      // → 触发续期（成功）→ 3 秒内又一条迟到 401 → 熔断器判「刚续过还
+      // 401」→ 把刚登录的人打回登录页，红字「登录已过期」。
+      //
+      // 判据是**这个实例被造出来时的 token 还是不是当前那把**：不是，
+      // 说明它报的是一把已经退位的凭据，与现任无关，丢掉。
+      if (!ref.mounted) return;
+      if (!shouldForwardUnauthorized(
+        instanceToken: token,
+        currentToken: ref.read(authControllerProvider).token,
+      )) {
+        return;
+      }
+      ref.read(authControllerProvider.notifier).onUnauthorized();
+    },
   );
   ref.onDispose(api.dispose);
   return api;
 });
+
+/// 一个 401 报告要不要转给 [AuthController.onUnauthorized]。
+///
+/// 拆成纯函数是为了可测：真正的调用点在 `cortexApiProvider` 的闭包里，
+/// 从测试里够不着。
+@visibleForTesting
+bool shouldForwardUnauthorized({
+  required String? instanceToken,
+  required String? currentToken,
+}) => instanceToken == currentToken;
+
+/// 登录门没开时 `cortexApiProvider` 发出的桩：任何调用立刻抛，不碰网络。
+///
+/// # 为什么抛而不是静默空转
+///
+/// 空列表、空流这类「温和」的返回值会把「还没登录」伪装成「没有数据」——
+/// 一个界面要是在门没开时读到了空会话列表，它会如实渲染「没有会话」，
+/// 而那是假的。抛出去，消费方现有的错误路径（都有 try/catch）自然接住，
+/// 且这些界面全在登录门之后，用户根本看不到。
+///
+/// # 为什么用 `noSuchMethod`
+///
+/// [CortexApi] 有几十个方法且还在长。逐个写 `throw` 意味着每加一个方法
+/// 都要记得来这里补一刀 —— 忘了的那一个会在门关着时真的发请求。
+/// `noSuchMethod` 让「新方法默认被拦」成为不需要人记得的事。
+@visibleForTesting
+class GateClosedApi implements CortexApi {
+  /// provider 换代时会被调用（`ref.onDispose`），必须真的存在且不抛。
+  @override
+  void dispose() {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw const CortexApiException(
+    // ASCII 的「gate-closed」是给产物验证用的指纹：中文在 dart2js 产物里
+    // 是 \uXXXX 转义，grep 不到。
+    '还没登录，这个请求没有发出去（gate-closed）',
+    statusCode: 401,
+  );
+}
 
 /// `GET /health`, polled lazily (on demand + on manual refresh).
 final healthProvider = FutureProvider<HealthStatus>((ref) async {

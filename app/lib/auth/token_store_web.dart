@@ -22,10 +22,9 @@ const String _kKey = 'cortex.token';
 /// (exposing cortexd to the internet) than one who reads it as "any script on
 /// this page can read it".
 const String kTokenStorageNote =
-    '浏览器里没有安全的凭据存储：sessionStorage 与 localStorage 一样，'
-    '会被本页面上运行的任何脚本读到。这里只用 sessionStorage —— '
-    '它随标签页关闭而消失，刷新页面还在，但不会跨标签页、也不会留到明天。'
-    '不勾选则只存在于内存中，刷新即失效。';
+    '浏览器里没有安全的凭据存储：这份凭据会被本页面上运行的任何脚本读到。'
+    '勾选则存进 localStorage —— 关掉浏览器再打开还在，直到 30 天后过期'
+    '或主动登出。不勾选则只存在于内存中，刷新即失效。';
 
 /// Reads the opt-in copy, if the user made one.
 ///
@@ -33,10 +32,25 @@ const String kTokenStorageNote =
 /// configured to block site data both raise on the *getter*, not on the value.
 /// Treated as "nothing stored", because the alternative is a white screen at
 /// launch caused by a privacy setting.
-/// sessionStorage 里那份 —— 它是 **refresh token**，登录/续期时存的。
+///
+/// 这份是 **refresh token**，登录/续期时存的。
+///
+/// # 为什么是 localStorage 而不是 sessionStorage
+///
+/// 上一版用 sessionStorage，而它**随标签页死**：关掉浏览器再打开，凭据没了，
+/// 用户又见一次登录框 —— 可登录页上写的承诺是「记住 30 天，关掉再打开
+/// 不用重来」。两种存储对 XSS 的暴露一模一样（同页脚本都读得到），
+/// sessionStorage 换来的不是安全，只是把承诺变成谎话。
+/// 真正的 30 天上限由服务端的 refresh token 有效期把守，不靠浏览器。
+///
+/// 读的时候两个都看：sessionStorage 那份是旧版本存下的，认它，用户就不必
+/// 因为升级而重新登录一次。
 Future<String?> readRememberedToken() async {
   try {
-    final raw = web.window.sessionStorage.getItem(_kKey)?.trim();
+    final raw =
+        (web.window.localStorage.getItem(_kKey) ??
+                web.window.sessionStorage.getItem(_kKey))
+            ?.trim();
     return (raw == null || raw.isEmpty) ? null : raw;
   } on Object {
     // 沙箱 iframe 或禁了站点数据的浏览器在 getter 上就抛。
@@ -66,7 +80,10 @@ String? readSeedToken() => null;
 
 Future<void> rememberToken(String token) async {
   try {
-    web.window.sessionStorage.setItem(_kKey, token);
+    web.window.localStorage.setItem(_kKey, token);
+    // 旧版本可能在 sessionStorage 留了一份；不清的话登出（只清 local）之后
+    // 下次启动又会从那份「复活」。
+    web.window.sessionStorage.removeItem(_kKey);
   } on Object {
     // Storage blocked. The token still works for this run; silently keeping it
     // in memory is a better outcome than failing the login the user just
@@ -76,6 +93,7 @@ Future<void> rememberToken(String token) async {
 
 Future<void> forgetToken() async {
   try {
+    web.window.localStorage.removeItem(_kKey);
     web.window.sessionStorage.removeItem(_kKey);
   } on Object {
     // Nothing was stored if the setter failed earlier.
