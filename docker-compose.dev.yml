@@ -70,8 +70,31 @@ services:
       POSTGRES_DB: ${CORTEX_PG_DB:-cortex}
     ports:
       - "127.0.0.1:${CORTEX_PG_PORT:-5452}:5432"
+    # ── 归档配置与生产一致 ──────────────────────────────
+    #
+    # 开发机上不需要 PITR，但**需要能把备份链路真的跑一遍** —— 没有它，
+    # `just backup` 停在 `archive_mode=off`，于是那条链路只有到生产上
+    # 才第一次被执行，而那是最不该第一次执行的地方。
+    #
+    # 与 deploy/ 那份**逐条相同**（不是「差不多」）：备份脚本按归档布局
+    # 恢复，两边不一致的话，本机演练绿而生产恢复失败。
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=mkdir -p /backup/wal && test ! -f /backup/wal/%f && cp %p /backup/wal/%f
+      - -c
+      - archive_timeout=60
+      - -c
+      - wal_level=replica
+      - -c
+      - wal_compression=on
+      - -c
+      - summarize_wal=on
     volumes:
       - cortex_dev_pg:/var/lib/postgresql/data
+      - ${CORTEX_BACKUP_DIR:-./data/backup}:/backup
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${CORTEX_PG_USER:-cortex}"]
       interval: 5s

@@ -237,6 +237,10 @@ T_RESTORE_START="$(now_ms)"
 
 # 复制在容器内做：宿主机侧对 1400+ 个文件逐个走 bind mount 更慢，
 # 而且 cp -a 能原样保住 postgres(999) 的属主
+# 目录先用 root 建好再交给 postgres：它的 uid 随镜像变（Debian 999 /
+# alpine 70），而一台早先跑过备份的机器上这个目录属主是**老 uid**。
+# 见 `lib.sh::ensure_pg_dir`
+ensure_pg_dir "$(dirname "$DRILL_IN_PG")"
 pg_sh "mkdir -p '$DRILL_IN_PG' && cp -a '$SRC_IN_PG/base/$BASE/pgdata' '$DRILL_IN_PG/pgdata'" \
     || die "复制备份失败"
 log "数据目录已就位：$DRILL_HOST/pgdata"
@@ -338,22 +342,19 @@ else
     fail_check "sync_log 游标落后：恢复 $dst_seq < 基线 $BASELINE_SEQ —— 客户端会漏拉"
 fi
 
-# 3.5 pgvector 扩展与向量列真的能用（扩展装在库里，物理备份会带上，
-#     但 .so 在不在镜像里是另一回事 —— 这一条测的是后者）
-vec_ok="$(drill_psql "SELECT (('[1,0,1]'::vector <-> '[0,1,0]'::vector) > 0)::text")"
-if [ "$vec_ok" = "true" ]; then
-    pass_check "pgvector 可用，距离算子正常"
-else
-    fail_check "pgvector 不可用（返回 '$vec_ok'）—— 恢复出来的库跑不了向量召回"
-fi
-
-# 3.6 全文检索列。tsv 与主行同事务写入是硬约束，恢复后必须还在
-tsv_null="$(drill_psql "SELECT count(*) FROM episodes WHERE text IS NOT NULL AND tsv IS NULL")"
-if [ "${tsv_null:-0}" = "0" ]; then
-    pass_check "episodes.tsv 无缺失"
-else
-    fail_check "episodes 有 $tsv_null 行 text 非空但 tsv 为空"
-fi
+# ── 这里曾经有 3.5「pgvector 可用」与 3.6「episodes.tsv 无缺失」──────
+#
+# 两条都是**记忆时代的检查**，拆分之后在这一侧一条都不成立：
+# 这个库里一列向量都没有（所以也没装 pgvector），而 `episodes.tsv` 已被
+# `migrations/20260816000001_drop_episode_tsv.sql` 删掉 —— 它唯一的消费者
+# 是 BM25 那一路召回，而召回整个留在了 Cormex。
+#
+# **它们不是「没通过」，是让整个演练静默死掉。** 3.6 那条 SQL 在没有 tsv
+# 列的库上直接报错，`drill_psql` 非零退出，而本文件顶部是 `set -e` ——
+# 于是脚本在第 3 步与 3.7 之间无声无息地结束，连下一个 `step` 标题都没打。
+# 症状是「跑完了、退出码 1、报告没生成」，而上面每一条检查都是 ✓。
+#
+# 记忆那半的这两条检查归 Cormex 的演练脚本管。
 
 # 3.7 索引结构级校验。行数对不代表 B-tree 没坏 —— 一个断了链的索引页
 #     会让查询「查不到明明存在的行」，而 count(*) 走全表扫描完全看不出来。
@@ -437,7 +438,6 @@ fmt_s() { [ "$1" -lt 0 ] 2>/dev/null && { printf 'n/a'; return; }; printf '%d.%0
     printf '  行数        %s（恢复/基线快照）\n' "$ROWS_REPORT"
     printf '  sync_log    恢复 max(seq)=%s / 基线 %s（演练结束时源库已到 %s）\n' \
         "$dst_seq" "$BASELINE_SEQ" "$src_drift"
-    printf '  pgvector    %s\n' "$([ "$vec_ok" = true ] && echo 可用 || echo 不可用)"
     printf '  pg_amcheck  %s\n' "${AMCHECK_RESULT:-skipped}"
     printf '  逐页校验    %s\n' "$CHECKSUM_RESULT"
     if [ "$n_fail" -gt 0 ]; then

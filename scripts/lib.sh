@@ -62,11 +62,35 @@ load_env() {
 load_env "$REPO_ROOT/.env"
 
 # ── 默认值 ────────────────────────────────────────────────
-POSTGRES_USER="${POSTGRES_USER:-cortex}"
-POSTGRES_DB="${POSTGRES_DB:-cortex}"
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-cortex_dev_only}"
-PG_CONTAINER="${PG_CONTAINER:-cortex-postgres}"
-PG_IMAGE="${PG_IMAGE:-pgvector/pgvector:pg17}"
+# ── 备份的是**哪个库** ─────────────────────────────────────
+#
+# 拆分之后这四个默认值全错了，而且是一起错的 —— `just backup` 从那天起
+# 就停在「容器 cortex-postgres 没在跑」，一次都没成功过：
+#
+#   | | 拆分前 | 今天 |
+#   |---|---|---|
+#   | 容器 | cortex-postgres | 生产 `cortex-db` / dev `cortex-postgres-dev` |
+#   | 镜像 | pgvector/pgvector:pg17 | `postgres:17-alpine`（这一侧一列向量都没有）|
+#   | 凭据 | POSTGRES_USER/PASSWORD/DB | compose 用的是 **CORTEX_PG_**_*_ |
+#
+# 第三行最阴：就算容器名蒙对了，凭据也会回落到默认值 `cortex_dev_only`，
+# 而 dev 的实际口令是 `cortex` —— 于是错误变成「密码认证失败」，
+# 看起来像库配错了，而不是「脚本读错了变量名」。
+#
+# **默认指生产那个**（`cortex-db`）：备份是生产的事，开发机上要跑就显式
+# `PG_CONTAINER=cortex-postgres-dev just backup`。指错时下面 `need_pg_running`
+# 会把这台机器上正在跑的候选列出来，不让人对着一个名字猜。
+#
+# 备的是**这一侧的库**（会话 / 消息 / 附件 / 同步流水）。记忆那半的库归
+# Cormex 备，它有自己的一套 —— 两边各备各的，别拿这套脚本去打那个库。
+PG_CONTAINER="${PG_CONTAINER:-cortex-db}"
+PG_IMAGE="${PG_IMAGE:-postgres:17-alpine}"
+
+# 凭据：先认 compose 实际用的那组，`POSTGRES_*` 作为老名字兜底 ——
+# 直接改名会让已经在 .env 里写了老名字的部署**静默**回落到默认口令。
+POSTGRES_USER="${CORTEX_PG_USER:-${POSTGRES_USER:-cortex}}"
+POSTGRES_DB="${CORTEX_PG_DB:-${POSTGRES_DB:-cortex}}"
+POSTGRES_PASSWORD="${CORTEX_PG_PASSWORD:-${POSTGRES_PASSWORD:-cortex}}"
 
 RUSTFS_ACCESS_KEY="${RUSTFS_ACCESS_KEY:-cortexadmin}"
 RUSTFS_SECRET_KEY="${RUSTFS_SECRET_KEY:-cortex_dev_only}"
@@ -135,12 +159,62 @@ need_docker() {
 
 need_pg_running() {
     need_docker
-    docker inspect -f '{{.State.Running}}' "$PG_CONTAINER" 2>/dev/null | grep -q true \
-        || die "容器 $PG_CONTAINER 没在跑。先把库起来，或用 PG_CONTAINER= 指名要备份的那个。
-       （'just up' 已经没有了：dev 的库叫 cortex-postgres-dev，由 'just dev' 起；
-         生产那份叫 cortex-db。上面这个默认值两个都不是 —— 见 justfile 里
-         备份那一节的说明。）"
+    if ! docker inspect -f '{{.State.Running}}' "$PG_CONTAINER" 2>/dev/null | grep -q true; then
+        # 把这台机器上**真正在跑**的 postgres 列出来。
+        #
+        # 不列的话，一个撞上这条的人只能对着一个名字猜 —— 而拆分之后
+        # 「该备哪个」恰恰是最容易猜错的：这台机器上常常同时跑着这一侧的
+        # 库与 Cormex 的库，名字还很像。
+        local running
+        running="$(docker ps --filter ancestor=postgres:17-alpine \
+            --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')"
+        [ -n "$running" ] || running="$(docker ps --format '{{.Names}}' 2>/dev/null \
+            | grep -iE 'postgres|(^|-)db($|-)' | tr '\n' ' ')"
+        die "容器 $PG_CONTAINER 没在跑。
+       这台机器上正在跑的库：${running:-（一个都没有）}
+       用 PG_CONTAINER=<名字> 指名要备份的那个。
+       生产是 cortex-db，dev 是 cortex-postgres-dev（由 'just dev' 起）。
+       ⚠ 只备**这一侧**的库（会话/消息/附件/同步流水）；记忆那半归 Cormex 自己备。"
+    fi
+    assert_is_cortex_db
     resolve_pg_bin
+}
+
+# 这个库确实是**这一侧**的吗。
+#
+# # 为什么值得单判一次
+#
+# 备错库是这条链路上最贵的失败，而且**完全没有症状**：`pg_basebackup` 对
+# 任何一个 postgres 都跑得好好的，产物大小也像模像样，`just backup-status`
+# 照样显示「最近一次成功」。要到真的需要恢复的那天才发现备的是别人的库。
+#
+# 这台机器上同时跑着两个库（这一侧的会话库、Cormex 的记忆库），名字还很像
+# （`cortex-db` / `cormex-postgres`）—— 一个手滑的 `PG_CONTAINER=` 就够了。
+#
+# 判据取 `sync_log`：它是这一侧独有的（记忆那半没有这张表），而且是
+# **备份存在的理由本身**（同步的唯一事实序）。
+assert_is_cortex_db() {
+    local hit
+    # 【必须 `|| true`】本文件顶部是 `set -euo pipefail`，而 psql 连不上时
+    # 退出码非零 —— 赋值语句会**继承**它，于是整个脚本在这一行当场退出，
+    # `die` 一个字都来不及打。症状是「跑了没反应、退出码 2」，
+    # 而这个函数存在的全部意义就是把「为什么不行」说清楚。
+    # 与本文件里 `ensure_crypt_key` 那处 `|| true` 是同一个坑，写第二遍时又踩了一次。
+    hit="$( { docker exec -u postgres -e PGPASSWORD="$POSTGRES_PASSWORD" "$PG_CONTAINER" \
+        psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc \
+        "SELECT to_regclass('public.sync_log') IS NOT NULL" 2>/dev/null || true; } | tr -d '[:space:]')"
+    case "$hit" in
+        t) return 0 ;;
+        f) die "容器 $PG_CONTAINER 里的库 '$POSTGRES_DB' 找不到 sync_log ——
+       **它不像是 Cortex 这一侧的库**（会话/消息/附件/同步流水）。
+       备错库不会报错、产物看着也正常，要到恢复那天才发现，所以这里停住。
+       记忆那半的库归 Cormex 自己备；确实要备这个的话，说明表结构变了，
+       改这条断言时请一并想清楚判据。" ;;
+        *) die "连不上 $PG_CONTAINER 里的库（用户 $POSTGRES_USER / 库 $POSTGRES_DB）。
+       口令读的是 CORTEX_PG_PASSWORD（老名字 POSTGRES_PASSWORD 兜底）——
+       compose 用的是前者，两边不一致时报的是「密码认证失败」，
+       看起来像库配错了，其实是变量名。" ;;
+    esac
 }
 
 # Debian 的 postgresql-common 只把「常用」工具软链到 /usr/bin，
@@ -149,8 +223,27 @@ need_pg_running() {
 PG_BIN_DIR="${PG_BIN_DIR:-}"
 resolve_pg_bin() {
     [ -n "$PG_BIN_DIR" ] && return 0
-    PG_BIN_DIR="$(docker exec "$PG_CONTAINER" bash -lc \
-        'ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1' 2>/dev/null | tr -d '[:space:]')"
+    # **先问 PATH，再猜目录。**
+    #
+    # 原来只找 Debian 的 `/usr/lib/postgresql/*/bin`，找不到就回落 `/usr/bin`。
+    # 那在 `postgres:17-alpine` 上是错的（工具在 `/usr/local/bin`），而回落
+    # 让它**看起来有答案**：直到真去调 `pg_verifybackup` 才报
+    # `No such file or directory`，那时全量已经拍完了 —— 一份拍得出来、
+    # 验不了、于是被当成失败删掉的备份。实测撞过。
+    #
+    # `command -v` 顺带覆盖了以后任何布局；两条猜测留着是因为 Debian 镜像
+    # 把 pg_verifybackup 这类「不常用」工具留在版本私有目录里、不软链到 PATH。
+    local probe
+    probe="$( { docker exec "$PG_CONTAINER" sh -lc \
+        'command -v pg_verifybackup || command -v pg_basebackup' 2>/dev/null || true; } \
+        | tr -d '[:space:]')"
+    if [ -n "$probe" ]; then
+        PG_BIN_DIR="$(dirname "$probe")"
+        return 0
+    fi
+    PG_BIN_DIR="$( { docker exec "$PG_CONTAINER" sh -lc \
+        'ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1' 2>/dev/null || true; } \
+        | tr -d '[:space:]')"
     [ -n "$PG_BIN_DIR" ] || PG_BIN_DIR=/usr/bin
 }
 
@@ -158,6 +251,27 @@ pg_bin() { printf '%s/%s' "${PG_BIN_DIR:-/usr/bin}" "$1"; }
 
 ensure_backup_dirs() {
     mkdir -p "$BACKUP_DIR"/{wal,base,logical,blobs-mirror,reports,state}
+}
+
+# 让容器里的 postgres 真的写得进 `/backup` 下的某个目录。
+#
+# # 为什么需要这个，而不是直接 `mkdir -p`
+#
+# **postgres 的 uid 随镜像变**：老的 `pgvector/pgvector:pg17`（Debian）里是
+# **999**，现在的 `postgres:17-alpine` 里是 **70**。于是一台早先跑过备份的
+# 机器上，`/backup/drill` 属主是 999、模式 755 —— 换镜像之后 uid 70 的
+# postgres **写不进去**，而报错只有一句 `mkdir: Permission denied`，
+# 看起来像 bind mount 权限问题，跟镜像换代毫无关联。
+#
+# 实测撞到过：全量备份跑得好好的（`/backup/wal`、`/backup/base` 是
+# 777/新建的），偏偏恢复演练在第 2 步倒下。
+#
+# 所以：用 root 建目录，再交给**这个镜像里**的 postgres。
+# root 这一步是必要的 —— 目录属主是别人时，postgres 自己 chown 不了。
+ensure_pg_dir() {
+    local d="$1"
+    pg_sh_root "mkdir -p '$d' && chown -R postgres:postgres '$d'" >/dev/null 2>&1 \
+        || die "在容器里建不出 $d（连 root 都建不了）。检查 $BACKUP_DIR 这个挂载点。"
 }
 
 # ── Postgres：全部经容器，宿主机不需要 psql ────────────────
