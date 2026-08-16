@@ -1416,6 +1416,72 @@ mod tests {
         assert_eq!(by("memory_search").path_arg, None);
     }
 
+    /// **规格表与分发表不许漂开。**
+    ///
+    /// 工具的定义（`builtin_specs`）与执行（`execute` 的 match）是两处硬编码，
+    /// 加一个工具要改两处 —— 而漏掉任一处都**不报错**：
+    ///
+    /// - 只加规格：模型看得见这个工具、调它，拿回「未知工具：x」。模型通常
+    ///   会重试几轮再放弃，用户看到的是「它好像不太会用这个功能」
+    /// - 只加分发：那段代码永远跑不到，而 dead_code 检查不出来
+    ///   （它是 match 的一条臂，不是一个未被引用的函数）
+    ///
+    /// roadmap 的 H-2 想把两处并成一张注册表。那是纯内部整洁、没有功能挡在
+    /// 后面，所以先不动结构 —— 但**风险是真的**，这条测试把它钉住：
+    /// 每个规格都得有人执行，每个执行臂也都得有对应的规格。
+    ///
+    /// `memory_search` 是唯一的例外，而它是**有意**的：那个工具要访问存储层，
+    /// 由 agent 循环在更外层拦截分派（见 `execute` 的文档）。例外写死在这里，
+    /// 于是「又多了一个不在 execute 里的工具」会让这条测试红，
+    /// 而不是悄悄变成第二个特例。
+    #[test]
+    fn every_spec_has_a_handler_and_every_handler_has_a_spec() {
+        /// 在更外层拦截、不进 `execute` 的工具。**加进来之前先想清楚为什么。**
+        const DISPATCHED_ELSEWHERE: &[&str] = &["memory_search"];
+
+        let src = include_str!("tools.rs");
+        let body = src
+            .split("pub async fn execute")
+            .nth(1)
+            .expect("execute 还在吧");
+        // 只看 match 的臂：`        "name" =>`
+        let arms: std::collections::BTreeSet<String> = body
+            .lines()
+            .filter_map(|l| {
+                let t = l.trim();
+                let rest = t.strip_prefix('"')?;
+                let name = rest.split('"').next()?;
+                (t.contains("\" =>") && !name.is_empty()).then(|| name.to_owned())
+            })
+            .collect();
+
+        for spec in builtin_specs() {
+            let name: &str = spec.name.as_ref();
+            if DISPATCHED_ELSEWHERE.contains(&name) {
+                assert!(
+                    !arms.contains(name),
+                    "{name} 既在 execute 里又被标成「别处分派」—— 两条路会各自演化"
+                );
+                continue;
+            }
+            assert!(
+                arms.contains(name),
+                "工具 {name} 有规格但 execute 里没有对应的臂 —— 模型会调它然后拿回             「未知工具」，而那读起来像模型不会用，不像我们漏了一半"
+            );
+        }
+
+        let names: std::collections::BTreeSet<String> = builtin_specs()
+            .into_iter()
+            .map(|s| s.name.into_owned())
+            .collect();
+        for arm in &arms {
+            assert!(
+                names.contains(arm),
+                "execute 里有 {arm} 的分支，但 builtin_specs 里没有它 ——             那段代码永远跑不到，而 dead_code 检查不出来"
+            );
+        }
+    }
+
     /// 137 必须被翻译成一句模型能据以**换做法**的话，而不只是个数字。
     ///
     /// 这条同时钉住措辞里的三件事，少任何一件这个标注就白加了：
