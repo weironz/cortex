@@ -97,12 +97,12 @@ impl Client {
         let code = resp.status().as_u16();
         if code == 401 {
             return Err(CortexError::Provider(if self.token.is_some() {
-                "凭据不被接受（401）。检查 CORTEXD_TOKEN 是不是这台 cortexd 的那一份 ——\
+                "凭据不被接受（401）。检查 CORTEXD_TOKEN 是不是这台服务端的那一份 ——\
                  服务端存的是摘要，换过一次就得两边一起换。"
                     .into()
             } else {
-                "这台 cortexd 需要认证（401）。把明文 token 放进 CORTEXD_TOKEN，\
-                 或者用 --token 传。服务端上生成一份：cortexd --generate-token"
+                "这台服务端需要认证（401）。把明文 token 放进 CORTEXD_TOKEN，\
+                 或者用 --token 传。在服务端上生成一份：cortex-agentd --generate-token"
                     .into()
             }));
         }

@@ -1,13 +1,18 @@
-//! 认证 —— 「谁能连上这个 cortexd」。
+//! 认证 —— 「谁能连上这个 agentd」。
 //!
-//! 在此之前谁连上谁就是主人。一个绑到 `0.0.0.0` 的 cortexd、一条随手开的
-//! ngrok、一个把端口映射出去的 docker-compose，任何一个都足以让整个记忆库
+//! 在此之前谁连上谁就是主人。一个绑到 `0.0.0.0` 的 agentd、一条随手开的
+//! ngrok、一个把端口映射出去的 docker-compose，任何一个都足以让这台机器
 //! 对公网敞开，而且**不会有任何迹象**。
+//!
+//! 记忆那一半搬走之后，敞开的东西换了但没变少：会话与消息、附件、
+//! **一把能烧钱的 LLM key**，以及**一个能跑任意命令的沙箱容器**。
+//! 而 agentd 会拿着调用方那把 bearer 去记忆服务换委托凭据 —— 也就是说
+//! 突破这道门的人，仍然够得到记忆。
 //!
 //! # 方案：预共享 token，服务端只存摘要
 //!
 //! ```text
-//! 运维：cortexd --generate-token
+//! 运维：cortex-agentd --generate-token
 //!        ├─► 明文 token ──────────────► 客户端（CORTEXD_TOKEN，只显示这一次）
 //!        └─► SHA-256 摘要 ────────────► 服务端（.env 的 CORTEX_AUTH_TOKEN_SHA256）
 //!
@@ -142,18 +147,20 @@ impl AuthMode {
                     cortex_core::CortexError::Config(format!(
                         "{TOKEN_SHA256_ENV} 必须是 SHA-256 摘要（64 个十六进制字符）。\
                          注意这里要填的是**摘要**，不是 token 明文 —— \
-                         用 `cortexd --generate-token` 一次生成两者。"
+                         用 `cortex-agentd --generate-token` 一次生成两者。"
                     ))
                 })?;
                 Ok(Self::Token { digest })
             }
             (false, None) => Err(cortex_core::CortexError::Config(format!(
-                "没有配置任何凭据，cortexd 拒绝启动。\n\
+                "没有配置任何凭据，cortex-agentd 拒绝启动。\n\
                  \n\
-                 一个不认证的 cortexd 会把整个记忆库交给任何能连上这个端口的人，\n\
+                 一个不认证的 agentd 会把会话、附件、一把能烧钱的 LLM key 与\n\
+                 一个能跑任意命令的沙箱容器交给任何能连上这个端口的人；它还会\n\
+                 拿调用方的 bearer 去记忆服务换委托凭据，所以记忆也在里面。\n\
                  而这件事不会有任何症状 —— 所以这里选择当场失败，而不是默认放行。\n\
                  \n\
-                 生成一份凭据：  cortexd --generate-token\n\
+                 生成一份凭据：  cortex-agentd --generate-token\n\
                  然后把 {TOKEN_SHA256_ENV}=… 写进 .env（明文 token 给客户端）。\n\
                  \n\
                  只听回环的开发机确实不想要认证，就显式写 {AUTH_ENV}={DISABLED_VALUE}。"

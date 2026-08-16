@@ -7,84 +7,151 @@
 Cortex 是一个通用 AI Agent。与主流编码 Agent 的根本差别在于：**记忆是它的核心，而不是附加功能。**
 
 - **永不丢失** —— 全链路 append-only，每一轮对话原样归档，无 UPDATE、无 DELETE
-- **对话全模态归档** —— 你发给 agent 的一切（文本、图片、语音、视频）永久留存并可检索（注意：是对话内容的归档，不是 Rewind 式的屏幕/环境全量捕获）
+- **对话归档** —— 你发给 agent 的一切永久留存。文本与图片可检索（图片走转录入库）；
+  音视频目前只存不转录（[为什么](docs/roadmap.md)）。注意：是**对话内容**的归档，
+  不是 Rewind 式的屏幕/环境全量捕获
 - **云端同步** —— 记忆存于远端，任何设备连上即是完整的你
 - **可审计** —— 每条记忆可追溯出处，可查看、可修改、可删除
-- **事实演化** —— 记忆过期时标记取代而非抹除，可回答"三个月前为何如此决定"
+- **事实演化** —— 记忆过期时标记取代而非抹除，可回答「三个月前为何如此决定」
 - **不绑定厂商** —— 多 LLM 供应商自由切换
+
+## ⚠️ 这是两个仓库，不是一个
+
+2026-08 拆开了。**记忆那一半已经是一个独立产品**：
+
+| | 是什么 | 在哪 |
+|---|---|---|
+| **Cortex**（本仓库） | agent 那一支：循环、工具、沙箱、云端编排、三端客户端 | 你在看的这个 |
+| **Cormex** | 记忆那一支：存储、抽取、四路召回、双时间轴回放、MCP 门面 | [weironz/cormex](https://github.com/weironz/cormex) |
+
+两边**没有任何代码依赖，只有 HTTP**，各自发版、各自版本号。
+
+拆的理由：记忆引擎是这个项目唯一自己写的东西，也是唯一别人没有的东西。
+把它绑在一个 agent 产品里，等于要求想用它的人连 agent 一起装。
+拆开之后第三方 agent（Claude Code / goose）经 `/mcp` 接进来，走的是
+**与我们自己人完全相同的 API** —— 那个 API 才不会烂。
 
 ## 状态
 
-**v0.1.0 —— 第一个可安装的版本。**
+**v0.1.9。**
 
-现在能做的：CLI / 桌面 / Web 三端聊天，记忆自动抽取与召回，
-图片归档并可检索，会话绑定工作区后 agent 能读写文件，
-bearer token 认证，Linux / macOS 上有 OS 级沙箱。
-检索基线 R@5 0.877（116 题，真实向量），
-恢复演练 RPO 46.9 s / RTO 43.6 s（[细节](docs/operations.md)）。
+现在能做的：
 
-还不能做的：**离线**（瘦客户端，断网就用不了）、移动端、多用户、
-Windows 上执行命令（没有对等沙箱，默认拒绝）、语音转录、桌面安装包。
-逐条见 [CHANGELOG.md](CHANGELOG.md) 的「这一版**不能**干什么」。
+- **三端**：CLI / Windows 桌面端 / Web，同一套 HTTP·SSE·WS 协议
+- **agent 动的是你自己的文件** —— 循环跑在本机（`cortex-local`），
+  绑一个本地目录就能读写、跑命令、看 diff。Windows 上没有内核沙箱，
+  所以换一种保证：**逐条确认**
+- **Web 端也能动手** —— 一次性容器工作区，跨会话保留，能上传、能整包拿走；
+  容器只能访问放行清单内的外网
+- **离线也能用** —— 没有服务器时真模型、真工具、真读写你的文件，
+  界面上一直挂着「这些对话没有进记忆」，不装作有
+- **多用户** —— 账号密码登录，按 schema 隔离，配额与自带 API key
+- **我们也是 MCP 客户端** —— 接第三方 server（stdio / HTTP），
+  配置格式与 Claude Code 通用，外来工具默认走最高风险档
+- **搬家** —— 一键导入 ChatGPT / Claude 的导出文件，先摊开账再动手
+- 桌面端有安装程序与一键自动更新；项目分组；文件改动看得见（diff）
+
+检索基线 R@5 0.877（116 题，真实向量）、恢复演练 RPO 46.9 s / RTO 43.6 s ——
+**这两个数字属于 Cormex**，由那边维护。
+
+还不能做的：
+
+| | 说明 |
+|---|---|
+| CLI 不能登录 | 只能用预共享 token，也就是只能是 1 号用户。多用户部署里会读到别人的数据且不报错 |
+| 移动端 | 桌面与 Web 先跑通；移动端是采集端，可后置 |
+| macOS / Linux 桌面产物 | 只发 Windows 安装包，那两个平台自己 `flutter build` |
+| 语音转录 | 三条路都堵，缺口在上游，见 [roadmap](docs/roadmap.md) |
+| 生成图片 / 生成 Word·PPT·Excel | 文档那一半可以挂 MCP server 解决；图片要自己写 |
+| 从 Web 挂到在线的本地 agent | 机制已经有了（`/runs` 重放 + 广播），只差一个入口 |
+
+逐条见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 安装
 
 拿到的是二进制或镜像（不是这个仓库）→ **[docs/install.md](docs/install.md)**。
-要部署到一台服务器并接 traefik → [docs/deploy.md](docs/deploy.md)。
+要部署到那台生产节点并接 traefik → [docs/deploy.md](docs/deploy.md)。
 要改代码 → `just setup && just bootstrap`，见 [operations.md](docs/operations.md)。
 
-> **第一步一定是 `cortexd --generate-token`。**
-> 没有配置凭据时 cortexd 会**拒绝启动** —— 这是刻意的：一个不认证的
-> cortexd 会把整个记忆库交给任何能连上这个端口的人，而这件事没有任何症状。
+> **多数人只要装桌面端**：安装包里带着本地 agent，点「离线使用」就能干活。
+> 要记忆跨设备、要在浏览器里用、要派 agent 去云上，才需要一台服务端 ——
+> 而那时**先装 Cormex，再装 Cortex**。
+>
+> 服务端第一步一定是 `cortex-agentd --generate-token`：没有配置凭据时
+> 它会**拒绝启动**。这是刻意的 —— 一个不认证的 agentd 会把会话、附件、
+> 一把能烧钱的 key 和一个能跑任意命令的容器交给任何能连上的人，
+> 而这件事没有任何症状。
 
 ## 架构
 
 ```
-                 cortexd（远端，记忆权威）
-      axum · Postgres+pgvector · RustFS · agent 循环 · 工具执行
-                        ▲  HTTP / SSE / WS（同一套协议）
-        ┌───────────────┼───────────────┬──────────────┐
-        │               │               │              │
-    cortex-cli     Flutter 桌面    Flutter 移动    Flutter Web
-                                      （未做）
-
-   客户端一律是瘦客户端：只负责渲染与输入，不含业务逻辑。
-   agent 循环与工具执行都在 cortexd 里 —— 换设备接上就是完整的你。
+   你的机器                                云端节点
+   ─────────                              ──────────────────────────────
+   Flutter 桌面端 ──┐                     浏览器 ──► 边缘（traefik / nginx）
+                    │                                    │
+                    ├─► cortex-local                     ├─ /chat · /sandbox/*
+   cortex（CLI）  ──┘   agent 循环 · 工具              │      └──► cortex-agentd
+                        （读写**你的**文件）             │              │ docker
+                             │                           │      沙箱容器：cortex-local
+                             │            HTTP           │              │
+                             └───────────────────────────┴──────────────┤
+                                                                        ▼
+                                          ┌──────────────────────────────────┐
+   第三方 agent ─────────── /mcp ────────►│  Cormex（另一个仓库）             │
+   （Claude Code / goose）                 │  抽取 · 四路召回 · 双时间轴回放  │
+                                          └──────────────────────────────────┘
 ```
 
-> ⚠️ **上面画的是现状，而它有一个已定案要改的缺陷。**
->
-> 工具跑在 cortexd 进程内，也就是说 agent 读写的是**服务器**上的目录 ——
-> **你本地的代码它看不见**。对一个自称「编码 + 办公」的 agent，
-> 编码那一半现在不工作。这不是体验粗糙，是能力缺失。
->
-> 2026-08 已定案：**agent 循环搬到本地**，cortexd 退化成记忆服务。
-> 循环该待在它要操作的东西旁边（你的文件在你的机器上），
-> 而记忆要跨设备、要永久，只能有一个权威副本 —— 两个「跟着走」的方向不同。
->
-> 曾经的理由「工具必须和记忆在同一侧」是错的，代价是延迟与信任模型两头都差：
-> 一轮几十次文件操作变成几十个跨国往返，且服务端从此能让你的机器跑 shell。
-> 完整裁决、否决的备选方案与四步计划见
-> [架构决策文档](docs/architecture.md) 与 [roadmap 的 D/E 两节](docs/roadmap.md)。
->
-> **今天的代价**：没有离线能力，且本地文件用不了。都是已知缺口，不是疏忽。
+**agent 循环只有一份实现。** 本机跑的和沙箱容器里跑的是同一个
+`cortex-local`，差别只有 `--exec-env=container`。曾经有过第二份
+（cortexd 进程内那个），删掉的理由不是它有 bug，而是同一个 `Turn::run`
+有两处装配，**漏改的那一份不会有任何测试红**。
 
-服务端存储：
+**分流在边缘**，不在任何一个服务里 —— 让记忆服务知道 agentd 在哪，
+等于给要独立开源的那一半留一条「agent 服务地址」的配置，
+而独立部署它的人根本没有 agentd。
 
-- **Postgres + pgvector** —— episodes / entities / facts / 向量索引
-- **RustFS**（S3 兼容）—— 图片 / 音频 / 视频 / 大文本，SHA-256 内容寻址
+本仓库的 crate：
+
+```
+cortex-core          类型 / Id / 配置 / 错误 / 注入渲染   ← 无外部依赖
+cortex-llm           供应商层（封装 goose-providers）
+cortex-proto         线协议 DTO
+cortex-agent         agent loop + 工具 + OS 沙箱
+cortex-local         agent 本体：同一个二进制，跑在本机或容器里
+cortex-agentd        云端编排：按需拉起沙箱容器，把请求反代进去
+cortex-store         Cortex 自己的持久层：会话 / 消息 / 附件 / 同步流水
+cortex-mcp           MCP 客户端（stdio + HTTP）
+cortex-egress-proxy  沙箱的唯一出网口（CONNECT allowlist）
+cortex-blob          对象存储客户端
+cortex-import        导入 ChatGPT / Claude 的导出文件
+cortex-cli           终端瘦客户端
+app/                 Flutter（桌面 + Web 一套代码）
+```
+
+**这个仓库有自己的数据库**（`cortex-store` + `migrations/`），装的是**会话**：
+消息、附件、项目、同步流水、沙箱快照、自带 API key。判据只有一句 ——
+**这张表离开记忆能力还有没有意义**。有，就是 Cortex 的。
+它**不装记忆**：facts / entities / 向量 / 召回 / 回放全在 Cormex，
+这边一列向量都没有（所以也没有 pgvector）。
 
 关键设计约束：
 
 | 决策 | 理由 |
 |---|---|
-| 全链路 append-only | 多端并发写天然无冲突，同时满足"永不丢失" |
+| 全链路 append-only | 多端并发写天然无冲突，同时满足「永不丢失」 |
 | ULID 主键 | 全局唯一、时间有序，多端无需协调即可生成 |
-| daemon-first | 单写者、共享 embedding 模型常驻、后台任务、跨端连续性；记忆权威唯远端 cortexd |
+| 记忆权威唯远端 | 桌面端那个本地进程是**执行代理，不是第二个记忆库**。离线时写入排进本地队列，联网后灌回 |
+| **agent 循环跟着文件走** | 循环该待在它要操作的东西旁边（你的文件在你的机器上），而记忆要跨设备、要永久，只能有一个权威副本 —— 两个「跟着走」的方向不同 |
 | sync_log outbox | 同步的唯一事实序：单游标、不漏行、天然 FK 序，兼作实时推送事件源 |
-| ~~客户端不含业务逻辑~~ | **这一条已被推翻**（2026-08）。现状确实是 agent 循环与工具都在 cortexd，但那导致 agent 看不见你本地的文件。定案是把循环搬到本地、cortexd 只管记忆。见上面架构一节 |
+| 权限强度 = 爆炸半径的函数 | 不是「哪个二进制」的函数。同一个 agent 在你的机器上逐条问，在一次性容器里默认放行 |
 | 记忆 schema 领域无关 | entity / fact / relation 抽象，编码与办公通吃 |
-| 双时间轴 | 区分"事情何时变"与"我何时知道"，支撑可审计与历史回放 |
+| 双时间轴 | 区分「事情何时变」与「我何时知道」，支撑可审计与历史回放 |
+
+> **「客户端不含业务逻辑」这一条已经被推翻并处理完毕。** 它曾经让 agent
+> 循环与工具都待在服务端，后果是 agent 看不见你本地的文件 —— 对一个自称
+> 「编码 + 办公」的 agent，编码那一半根本不工作。定案与四步落地见
+> [architecture.md](docs/architecture.md)。
 
 ## 技术选型
 
@@ -93,12 +160,14 @@ Windows 上执行命令（没有对等沙箱，默认拒绝）、语音转录、
 | 核心逻辑 | Rust |
 | 服务端 | Rust · axum · sqlx |
 | CLI | Rust |
-| **全部图形界面** | **Flutter**（桌面 ×3 + Web；移动 ×2 未做） |
+| **全部图形界面** | **Flutter**（桌面 + Web 一套代码；移动端未做） |
 | 客户端 ↔ 服务端 | HTTP / SSE / WS —— 不用 flutter_rust_bridge，客户端不链 Rust |
-| 数据库 | Postgres + pgvector |
-| 对象存储 | RustFS（S3 兼容） |
-| Embedding | bge-m3 / 1024 维，本地 ONNX |
-| 中文分词 | jieba-rs（Rust 侧处理，不依赖 PG 扩展） |
+| 会话库 | Postgres（**不需要 pgvector**） |
+| 沙箱 | Linux landlock + seccomp / macOS Seatbelt；容器一层由 docker + `internal` 网段 |
+| 工具扩展 | 进程内注册表 + 进程外 MCP |
+
+> 向量、分词、embedding 后端那几行以前在这里，现在归
+> [Cormex](https://github.com/weironz/cormex) —— 这一侧一列向量都没有。
 
 选型理由、被否决的备选方案与已接受的代价，见 [架构决策文档](docs/architecture.md)。
 
@@ -111,7 +180,10 @@ Windows 上执行命令（没有对等沙箱，默认拒绝）、语音转录、
 | [architecture.md](docs/architecture.md) | 为什么这么设计（决策、否决的备选、代价、风险） |
 | [memory.md](docs/memory.md) | 记忆系统怎么工作（存储模型、双时间轴、检索、同步） |
 | [memory-content.md](docs/memory-content.md) | **记忆体存什么、不存什么**（五类输入 × 三种处理，含业界调研） |
+| [sandbox.md](docs/sandbox.md) | 云端沙箱 agent：隔离、出网、快照、真机实测结论 |
+| [install.md](docs/install.md) | 拿到产物之后怎么装 |
 | [operations.md](docs/operations.md) | 怎么部署、备份、恢复（含实测 RPO/RTO） |
+| [deploy.md](docs/deploy.md) | 怎么把某个版本放到生产节点上 |
 | [references.md](docs/references.md) | 同类项目调研与许可证边界 |
 
 schema 的权威版本是 [`migrations/`](migrations/)，文档中的 SQL 片段以它为准。

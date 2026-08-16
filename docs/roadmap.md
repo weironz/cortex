@@ -57,7 +57,7 @@ M0–M8、N1–N3、R1–R11 全部完成，**并且在 2026-08 拆成了两个�
 
 ---
 
-## 手头挂着的两条（2026-08-16 登记）
+## 手头挂着的（2026-08-16 登记）
 
 都是修别的东西时**顺手撞见、但刻意没有顺手改**的 —— 理由都是「改它需要
 自己的验证，混进一次清理里等于没验证」。
@@ -73,17 +73,124 @@ M0–M8、N1–N3、R1–R11 全部完成，**并且在 2026-08 拆成了两个�
 正是它。**验收只有一条**：在生产上跑一次恢复演练并留下 report；改默认值
 等于改「生产上到底备份哪个库」，光让命令不报错不算做完。
 
-### 文档里还写着已经删掉的 recipe
+### ~~文档里还写着已经删掉的 recipe~~ —— **已收（2026-08-16）**
 
-`docs/operations.md`（`just db-migrate` :166、evals 那几道门
-:854-856/:918-919/:1078、Python 那一行 :47）、`docs/release.md:178`，
-以及 `just bootstrap` 的旧描述「起服务 → 建库 → migration → 建桶」
-（`README.md:34`、`docs/install.md:4,244`、`docs/operations.md:9,56`）。
-bootstrap 现在能跑了，所以不是死链，只是描述不准 —— migration 由 agentd
-启动时自己跑，桶由 `MediaStore::from_env` 自己建。
+登记时列的是四处；**真正核对下来比登记的多一倍**，而多出来的部分不是靠
+读文档发现的，是靠一条机械对差：
+
+```bash
+just --list | tail -n +2 | awk '{print $1}' | sort -u > have
+grep -rhoE '\bjust [a-z][a-z0-9-]*' README.md docs/*.md | awk '{print $2}' | sort -u > used
+comm -23 used have          # 文档里提到但不存在的 recipe
+```
+
+跑出来五条：`db-migrate` / `prod-migrate` / `evals-gate` / `run` / `up`。
+登记时漏掉的是后两条 —— `just run` 在 `sandbox.md` 里是**整张对照表的
+第一列**（"`just run` 留着没删"，而它删了），在 `install.md` 的从源码构建
+里是三条命令之一。**「我记得还有哪些」这种回忆方式漏了一半。**
+
+改动比登记的范围大，多出来的三处各有理由：
+
+| | 为什么也改了 |
+|---|---|
+| `operations.md` 第三节「检索回归门」整节删掉 | 登记时只点了里面三处命令。但题集、`cortex-evals`、`.github/workflows/evals.yml` 在这个仓库里**一个都不存在** —— 只改命令等于留下一整节讲这里评得出检索质量的文档。留在 CI 里的只有 `evals-gate.py verify-baseline`（纯读 JSON 校格式），Python 那一行照这个改 |
+| 「向量化（embedding）跑在哪」加了一段警示 | `grep -rn CORTEX_EMBED crates/` **是空的**，compose 里也没有 `embeddings` 服务 —— 整节讲的是 Cormex 的配置。没删（部署常同机、`.env` 共用一份，删了配的人无处可查），但顶上写清「命令要去那边敲」 |
+| 「三、生产部署」的命令 | `prod-bootstrap` 的描述「起 pg/rustfs → migration → 建桶 → 起 cortexd」四件事今天一件都不做，`just prod-logs cortexd` 里那个服务名也不存在（prod compose 里只有 `agentd`）|
 
 ⚠️ 别误改：`CLAUDE.md:161` 与 `architecture.md:83` 说的是 **Cormex 那边**的
-`just db-migrate` / `just up`，那两处是对的。
+`just db-migrate` / `just up`，那两处是对的（对差脚本会把它们一起报出来，
+这两条要人来判）。
+
+### ~~第一个账号建不出来~~ —— 配置面与文档都有，实现没有 → **已补上（2026-08-16）**
+
+**重写 install.md 时撞出来的，是这一批里唯一一条真 bug。**
+
+默认配置（`CORTEX_OPEN_REGISTRATION` 没设 ⇒ 注册关闭）下，
+一台全新部署**没有任何办法建出第一个账号**：
+
+| 号称的路 | 实际 |
+|---|---|
+| `.env` 的 `CORTEX_ADMIN_USERNAME` / `_PASSWORD` | **没有任何代码读它们**（`grep -rn CORTEX_ADMIN crates/` 只剩注释） |
+| `cortex-agentd --create-user` | **不存在**。`main.rs` 的 `Args` 里只有 `--generate-token` |
+| `main::ensure_admin` | **不存在**。5 处注释引用它 |
+| register 里「第一个账号永远放行」的特例 | **已经删了**，而且有一条测试盯着它别长回来 |
+
+唯一能走的是「临时 `CORTEX_OPEN_REGISTRATION=enabled` → 注册 → 改回去」——
+也就是那个「谁先注册谁是主人」的公网窗口**还在**，只是从几秒变成了一段
+手工操作，而且要人记得关上。删掉特例换来的安全性，一分都没兑现。
+
+**它怎么藏住的**：`accounts.rs` 里两版注释**并排叠着**没删干净 ——
+前半段说「第一个账号永远放行」并给出理由，后半段紧接着说「不再有这条特例，
+现在由 `.env` / `--create-user` 建」。分开读每一段都自洽，
+连起来读才看出**两条路一条都没有**。而 `.env.example` 又把那两个变量
+连同用法一起写全了，于是配置面看上去完全正常。
+
+**两条都补上了**，因为它们覆盖的是两种部署者：`--create-user` 要 shell
+（口令走 stdin，不落文件）；`.env` 那条不要 shell（点一个 compose 就部署完
+的人只有这条），代价是口令在启动时进过环境变量。
+
+关键是**三条路落到同一个函数**：`create_account_in` 从 `AgentState` 的方法
+提成自由函数（只要一个 `&Accounts`），`/auth/register`、`--create-user`、
+`ensure_admin` 都调它。挂在 `AgentState` 上的话，后两条要么造一个假 state
+（那要 docker、要 LLM 客户端 —— 建号一样都不需要），要么各自再写一遍 ——
+而各自再写一遍正是这个仓库数了 11 次的那个形状。
+
+定下来的三条行为，每条都有理由：
+
+| | 为什么 |
+|---|---|
+| 账号已存在 → **跳过，不改密码** | 否则忘了从 `.env` 删掉那两行的人，**每次重启都会把用户改过的密码重置回去**，而他不会想到去看服务端的环境变量 |
+| 只配了一半 → **拒绝启动** | 半份配置建不出账号，而它没有任何症状：服务照起、healthy 照报，只是谁也登不进去，而你以为配了管理员。「空串顶掉默认值」那个形状的近亲 |
+| 用户名先在代码里判形状 | 让 CHECK 去拒也挡得住，但错误会被包成 `写用户记录失败：…violates check constraint`——HTTP 上是 500（「服务器坏了」，其实是「你名字里有空格」）。规则与 `users_username_shape` 同步，测试拿的是 CHECK 的边界值 |
+
+**真库验过**（scratch 库，跑完就 drop），十条：建号、第一个落 `public`、
+第二个另开 schema、重名（**大小写不敏感**）被拒且孤儿 schema 被回收、
+用户名不合法给的是人话不是 SQL、密码太短、口令走环境变量、管道输入时不打
+交互提示、**启动时 `ensure_admin` 真的被调到**、重启跳过且没改密码、
+只配一半当场拒绝启动。
+
+**真库第一跑就炸了一次，而单元测试全绿**：`--create-user` 只连了
+`Accounts`，而 `ulid` / `sha256` 两个 DOMAIN 由 `migrations/` 建在 `public`
+里、`cortex_auth` 那套引用它们 —— 于是全新的库上直接
+`type "ulid" does not exist`。**它只在全新的库上出现**，也就是这条命令
+最该管用的那一刻。补法是照 main 的顺序先跑租户那套 migration。
+
+那一条单元测试测不到（没有库就没有 migration 顺序可言），
+`ensure_admin` 被不被调用也测不到 —— 两条都只有真机跑一次才现形，
+而这个 bug 当初存在的原因正是没人跑过。
+
+### README 与 install.md 还整篇停在拆分之前 —— **已重写（2026-08-16）**
+
+上面那次对差**只查了 recipe 名**，所以它查不到这一类：句子里的每个词都对，
+只是描述的是 2026-08 之前的架构。逐条：
+
+| 位置 | 写着什么 | 实际 |
+|---|---|---|
+| `README.md:36`、`install.md:45-52,88` | 「第一步一定是 `cortexd --generate-token`」 | 这个仓库里**没有 cortexd 这个二进制**，是 `cortex-agentd`。而且 `crates/cortex-agentd/src/auth.rs` 自己的报错文案里也照抄着 `cortexd --generate-token` —— 用户照着敲会 command not found |
+| `README.md:43,52,83` | 「agent 循环与工具执行都在 cortexd 里」 | D2 之后循环在 `cortex-local`，README 自己在 :57-61 写了「已定案要搬」，但正文没跟着改 |
+| `install.md:19,26,158-172,220,325` | 整篇按「装一个 cortexd + 连它」组织 | 记忆那一半在 Cormex，这边发的是 agentd / cortex-local / CLI |
+| `install.md:105-110` | 「cortexd 不会在启动时自动迁移」+ 一条 `docker compose run --entrypoint sqlx` | 与 `operations.md` 刚改过的那节**正好相反**，且那条命令的服务名也没了 |
+| `operations.md` 三、生产部署的「四处差别」与镜像表 | 「cortexd 进容器（`scripts/docker/Dockerfile.cortexd`）」「Postgres / RustFS 只绑 127.0.0.1」「RustFS 四卷纠删码」 | 这一侧的 prod compose 里只有 `agentd` 与 web；`scripts/docker/` 下是 `Dockerfile.agentd`，没有 `.cortexd`。**这一节的命令已经改对了，四条差别与镜像表没改** |
+
+两篇都按今天的形状重写了，程序嘴里那几句一并改掉
+（`auth.rs`、`accounts.rs`、`cortex-cli` 的 401 文案与 `--token` 帮助）——
+**文档改了而报错文案没改的话，用户仍然会从程序嘴里听到 `cortexd`**。
+
+`CORTEXD_TOKEN` 这个环境变量名**刻意没改**：改名会让所有现存配置在下一次
+升级时静默失效，而读不到就是「没配」，症状是 401 不是报错。
+在 `main.rs` 的帮助文本里写清了它今天指的是 agentd。
+
+**重写时新知道的四件事**，都是「不查就会写进文档的假话」：
+
+| 以为 | 实际 |
+|---|---|
+| agentd 的健康检查是 `/api/health` | 那条**归记忆服务** —— 边缘只把 `/api/chat` 与 `/api/sandbox` 分给 agentd。它的探针是 `/api/sandbox/health`（同一个 handler 的第二个挂载点，存在理由就是这个）。拿 `/api/health` 去核对 agentd 的版本会得到记忆服务的版本号，而**一切看着正常** |
+| 「桌面端是瘦客户端，单独装没用」 | 早就不成立：安装包带着 `cortex-local`，离线模式下真模型真工具真读写本机文件 |
+| 「0.1.2 起不发裸二进制」 | 又发了 —— Windows 那一份 zip 里是 `cortex` / `cortex-local` / `cortex-agentd` 三个 |
+| agentd 可以先跑起来再补 docker | **连不上 docker 直接拒绝启动**，而且 `preflight` 会真的握一次手（`connect` 只造客户端不发请求，socket 挂 `/dev/null` 也返回成功）|
+
+第一条尤其值得记：它与「一个状态码身兼两职」是同一个家族 ——
+**同一个路径在两个进程上都存在**，问错了不会报错，只会答得很像。
 
 ---
 
@@ -1449,11 +1556,25 @@ docker.sock 做成三个开关而不是一个（`CORTEX_SANDBOX_ENABLED` +
 
 | | 状态 |
 |---|---|
-| 解析器（ChatGPT 的 `mapping` 树 / Claude 的 `chat_messages`，取当前分支） | ✅ `crates/cortex-import` |
-| CLI `cortex import`（`--dry-run` 是默认） | ✅ |
+| 解析器（ChatGPT 的 `mapping` 树 / Claude 的 `chat_messages`，取当前分支） | ✅ `crates/cortex-import`（28 条测试） |
+| CLI `cortex import`（`--dry-run` 是默认） | ✅ `cortex-cli` 的 `Command::Import` |
 | 桌面端：`POST /local/import/{preview,run}`，文件不过网络 | ✅ |
-| Web 端：上传到 cortexd 再解析 | 进行中 |
-| 桌面端与 Web 端的界面 | 待做 |
+| Web 端：上传再解析 | ✅ `cortex-agentd` 的 `/import/{upload,preview,run}`（**不是 cortexd** —— 记忆那一半走了之后这三条落在 agentd 上，流式落盘、句柄逃不出 spool 目录，2 条测试钉着） |
+| 桌面端与 Web 端的界面 | ✅ 设置 → 数据 → 「导入 ChatGPT / Claude 历史」→ `showImportSheet`。两端同一张页面，区别只在拿到的是路径还是句柄 |
+
+> **这两行「进行中 / 待做」是假的，2026-08-16 核对时才发现 —— 早就全做完了。**
+> 界面在 `app/lib/features/import/`，controller 在
+> `state/import_controller.dart`（8 条测试，含「账没摊开之前 start 什么都不做」
+> 那条），入口在 `settings/pages/data_page.dart`。
+>
+> 值得记的是**这一条的形状与那九次「造好了没人调用」正好相反**：那九次是
+> 代码有了没人接线，这次是**线全接好了、roadmap 没跟上**。代价方向也相反 ——
+> 前者用户用不到，后者是**照着它排期的人会去重做一件已经做完的事**。
+> 我这一轮就差点这么干：先按 roadmap 建了任务，跑了一遍
+> `grep -rn ImportSheet app/lib` 才发现它已经被 `data_page` 调着。
+>
+> 所以「这一格做完了吗」的答案要从**代码**来（有没有人调用它、测试跑不跑得过），
+> 不是从这张表来。同一条教训在上面「云沙箱那个 501」那节已经写过一次了。
 
 **解析器提成独立 crate 是必需的**：同一份要在 CLI、本地 agent、cortexd
 三处跑，各写一份的症状是同一个文件在桌面端导进 812 段、网页端 790 段，

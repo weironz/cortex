@@ -23,13 +23,17 @@ struct Cli {
     #[arg(long, env = "CORTEXD_URL", default_value = "http://127.0.0.1:8080")]
     server: String,
 
-    /// 访问 cortexd 的凭据（明文 token）。
+    /// 访问服务端的凭据（明文 token）。
     ///
     /// 常规用法是环境变量 `CORTEXD_TOKEN`（clap 的 `env` 已经接上），
     /// `--token` 只为一次性排查留着 —— 命令行参数会进 shell history，
     /// 也会出现在同机其他用户的 `ps` 输出里。
     ///
-    /// 服务端生成：`cortexd --generate-token`。
+    /// **环境变量名保留 `CORTEXD_` 前缀**：改名会让所有现存配置在下一次
+    /// 升级时静默失效（读不到就是「没配」，症状是 401 而不是报错）。
+    /// 它今天指的是 agentd，不是那个已经搬走的 cortexd。
+    ///
+    /// 服务端生成：`cortex-agentd --generate-token`。
     #[arg(long, env = "CORTEXD_TOKEN", hide_env_values = true)]
     token: Option<String>,
 
