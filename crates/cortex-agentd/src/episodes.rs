@@ -55,17 +55,21 @@ use crate::state::AgentState;
 /// 不是 409。离线队列重放会重复投递，那是预期内的正常路径 —— 报错会逼
 /// 客户端把正常结果当异常处理，而那段代码平时跑不到、真出事时才第一次执行。
 ///
-/// # 这里**没有**「沙箱只能写它自己那个会话」那道检查
+/// # 「沙箱只能写它自己那个会话」那道检查在这儿
 ///
-/// 那道检查读的是沙箱令牌里的作用域，而这个进程一把委托令牌都认不出来
-/// （签发仍在记忆服务，见 `state.rs` 里 `Inner` 那段注释）。眼下容器里的
-/// `cortex-local` 也还是把 `/episodes` 打在记忆服务上，由那一侧检查。
+/// 这一段以前写着「这里**没有**那道检查」，理由是这个进程一把委托令牌都认不
+/// 出来。2026-08-16 那本簿子搬了过来（[`crate::delegated_token`]），
+/// `auth::require` 认出令牌之后会把作用域塞进 extensions，于是这里终于有东西
+/// 可比 —— 比的是**凭据说的会话**，不是请求体自报的那个。
 ///
-/// 它跟**委托令牌那本簿子**一起来：那时 `auth::require` 要认得出沙箱令牌，
-/// 这里才有作用域可比。在那之前把检查写上去只能拿请求体自报的身份去比，
-/// 而那等于让一个被注入的 agent 自己声明它是谁。
+/// 那个区别就是这道检查的全部意义：让调用方自己声明「我是低信任的、我属于
+/// 哪个会话」，等于让一个被 prompt 注入的 agent 自选身份。没有这道检查，
+/// 它能把编造的「用户亲口说的」写进那个人**任何一个**会话，而令牌绑定到
+/// 会话这件事本身就是为了防它。
 ///
-/// # 这里也**没有**额度检查
+/// `None` = 这是一把完整的用户凭据，没有降级可言。
+///
+/// # 这里**没有**额度检查
 ///
 /// 原实现对带 `anchor_episode_id` 的那一条查配额，理由是「只有它会花钱
 /// （触发抽取）」。抽取现在发生在转发的那一端，钱也在那边花 —— 而这一侧
@@ -77,8 +81,22 @@ use crate::state::AgentState;
 pub async fn write(
     State(st): State<AgentState>,
     headers: HeaderMap,
+    // 委托凭据带的作用域，由认证中间件塞进来。**身份由凭据决定，不由请求体
+    // 决定** —— 这是整条记忆写入路上最要紧的一句
+    delegation: Option<axum::Extension<crate::delegated_token::DelegatedScope>>,
     Json(req): Json<NewEpisodeRequest>,
 ) -> Result<Json<EpisodeAck>, ApiError> {
+    if let Some(axum::Extension(scope)) = &delegation
+        && scope.session_id != req.session_id
+    {
+        tracing::warn!(
+            owner = %scope.owner, bound = %scope.session_id, attempted = %req.session_id,
+            "一把委托凭据想往别的会话里写"
+        );
+        return Err(ApiError::bad_request(
+            "这把凭据只能写它绑定的那个会话的对话记录",
+        ));
+    }
     let tenant = st.tenant(&headers).await?;
     let ack = write_one(
         &st,

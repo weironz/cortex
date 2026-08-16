@@ -9,34 +9,31 @@
 //! 反过来做（给编排器一把能替任意用户办事的服务密钥）会平白多一个越权面：
 //! 谁拿到那把密钥，谁就能替任何人签一把读他记忆的钥匙。
 //!
-//! # 认证也不必自己做
+//! # 认证在这条路上仍然由那一侧回答
 //!
-//! 这个进程**不校验 bearer**，它把 bearer 原样带给 cortexd，而 cortexd 的
-//! 回答就是认证结果：401 原样透出去。自己再实现一遍的后果是两份判断会漂开，
-//! 而漂开的那一天表现为「某条路能进、另一条不能」。
+//! 这一段以前写的是「这个进程**不校验 bearer**」。那句话 2026-08-15 起只对
+//! 剩下的这几条方法成立：身份搬过来之后，入站有了自己的一道门
+//! （[`crate::auth::require`]），委托凭据也在本进程签（
+//! [`crate::delegated_token`]）。
+//!
+//! 但**出站**没变，也不该变：这里把用户那把 bearer 原样带给记忆服务，
+//! 它的回答就是那一侧的认证结果，401 原样透出去。替它再判一遍的后果是两份
+//! 判断会漂开，而漂开的那一天表现为「某条路能进、另一条不能」。
 
 use cortex_core::{CortexError, Result};
-use cortex_proto::delegate::{DelegateRequest, Delegation, RevokeRequest};
 use cortex_proto::dto::FactDto;
 use cortex_proto::episodes::{EpisodeAck, NewEpisodeRequest};
 
-/// 打 cortexd 的超时。
+/// 把一轮对话转给记忆服务的超时。**刻意短。**
 ///
-/// 这几条都是短请求（查一行会话、签一把钥匙），而它们**挡在用户那一轮
-/// 对话前面** —— 卡住的表现是「点了发送半天没反应」。宁可快失败。
-///
-/// blob 那两条不设这个超时：快照可能是几十兆。
-const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// 把一轮对话转给记忆服务的超时。**比 [`TIMEOUT`] 短得多。**
-///
-/// 那一条是「要不到钥匙这轮就没法跑」，等 15 秒是值得的；这一条不是 ——
 /// 转发失败的后果只是**这一轮没有记忆命中**，而对话照样进行。让用户为一个
 /// 可降级的功能多等十几秒，是把「记忆是加分项」的失败模式做成了「记忆是
 /// 单点」。
 ///
-/// 5 秒而不是 600 毫秒（[`Self::probe`] 那个）：这条路那边要跑一次召回，
+/// 5 秒而不是 600 毫秒（[`Remote::probe`] 那个）：这条路那边要跑一次召回，
 /// 含一次 embedding 的外部调用，亚秒级会把**正常**的成功也判成失败。
+///
+/// blob 那两条不设超时：快照可能是几十兆。
 const EPISODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone)]
@@ -124,53 +121,16 @@ impl Remote {
             .is_ok_and(|r| r.status().is_success())
     }
 
-    /// 给这个会话要一把委托凭据。
-    ///
-    /// 一次拿全四样（钥匙、owner、作用域名、这个会话该跑在哪儿）——它们来自
-    /// 同一行会话记录。分几次问的话，并发改动下几个判断会看到不同快照，
-    /// 症状是「偶尔进错容器」。见 [`cortex_proto::delegate::Delegation`]。
-    ///
-    /// # Errors
-    /// 连不上，或者 cortexd 拒绝。
-    pub async fn delegate(&self, bearer: Option<&str>, session_id: &str) -> Result<Delegation> {
-        let rb = Self::auth(
-            self.http
-                .post(self.url("/delegated-tokens"))
-                .timeout(TIMEOUT)
-                .json(&DelegateRequest {
-                    session_id: session_id.to_owned(),
-                }),
-            bearer,
-        );
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("要不到委托凭据（记忆服务连不上）：{e}")))?;
-        Self::ok_or_err(resp, "签发委托凭据")
-            .await?
-            .json()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("解析委托凭据失败：{e}")))
-    }
-
-    /// 收回一把没派上用场的钥匙（容器没起来）。
-    ///
-    /// 失败只记日志：这一步是收尾，让它把「容器起不来」那条真正的错误盖掉
-    /// 是纯粹的帮倒忙。钥匙本身有 TTL 兜底。
-    pub async fn revoke(&self, bearer: Option<&str>, token: &str) {
-        let rb = Self::auth(
-            self.http
-                .delete(self.url("/delegated-tokens"))
-                .timeout(TIMEOUT)
-                .json(&RevokeRequest {
-                    token: token.to_owned(),
-                }),
-            bearer,
-        );
-        if let Err(e) = rb.send().await {
-            tracing::debug!(error = %e, "收回委托凭据失败，等它自己过期");
-        }
-    }
+    // 委托凭据那两条（`POST` / `DELETE /delegated-tokens`）不在这儿了。
+    //
+    // 2026-08-16 签发搬进了本进程（`crate::delegated_token` +
+    // `routes::issue_delegation`）。理由不是「少一次往返」，是**签发方必须是
+    // 持有会话行的那一方**：一把钥匙绑的是「哪个会话、哪个项目、跑在云上还是
+    // 本机」，而那一行会话现在在这边的库里。
+    //
+    // 留着这两个方法的话它们没有调用方 —— 而一个没人调的远端客户端方法是会
+    // 被人「顺手用起来」的：下一个人看见它，就以为钥匙仍然由记忆服务签，
+    // 然后写出一条「本地有会话行、却去问远端要作用域」的路。
 
     /// 把这一轮转给记忆服务：由它做抽取，并把该注入的记忆回给我们。
     ///

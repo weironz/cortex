@@ -54,7 +54,11 @@ const TOKEN_ENV: &str = "CORTEX_TOKEN";
 const AGENT_PORT: u16 = 8090;
 
 /// 容器名前缀。带前缀是为了 `docker ps` 一眼认得出，也为了 GC 能按名字捞。
-const NAME_PREFIX: &str = "cortex-sbx-";
+///
+/// `pub(crate)` 只为了让 `delegated_token` 那条 DNS 上限测试**真的引用它**：
+/// 那条算的是「前缀 + 作用域键」有没有超过 63 字节，抄一份字面量过去的话，
+/// 「有人把前缀加长了」正是它唯一抓不到的情况。
+pub(crate) const NAME_PREFIX: &str = "cortex-sbx-";
 
 /// 卷名前缀。**卷比容器长命** —— 停容器保留卷，那是用户的工作区。
 const VOLUME_PREFIX: &str = "cortex-ws-";

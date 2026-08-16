@@ -114,7 +114,16 @@ services:
       # 正常、`/sandbox/health` 报 memory_reachable=true（那是 **agentd**
       # 够得着，它不在 internal 网上），只有真发一轮对话才炸在
       # `/llm/stream` 上 —— 一个所有健康检查都说好的坏。
-      CORTEX_SANDBOX_CALLBACK: ${CORTEX_SANDBOX_CALLBACK:-http://cormex-cortexd:8080}
+      # **容器回调打 agentd 自己。**
+      #
+      # 以前指向记忆服务，因为 `/episodes` `/sessions` `/llm/stream` 都在那边。
+      # 2026-08-16 它们全搬过来了，于是沙箱只需要**一个**回调地址、**一把**
+      # 凭据（委托令牌也是这个进程签的），而记忆检索由 agentd 代理出去。
+      #
+      # 附带好处：不再要求记忆服务挂在沙箱那张 internal 网上 —— 那条约束
+      # 曾经是 dev 与生产各写一套配置的根源，也是「所有健康检查都说好，
+      # 只有真发一轮对话才炸」那个坑的来源。
+      CORTEX_SANDBOX_CALLBACK: ${CORTEX_SANDBOX_CALLBACK:-http://agentd:8081}
       # 同网段直连，回调不经出网代理（它本来就该拒绝内网地址）
       CORTEX_SANDBOX_SAME_NETWORK: "1"
       # Cortex 自己的库。服务名直连 —— 与上面那个记忆服务的地址无关

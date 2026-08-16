@@ -156,7 +156,16 @@ services:
       CORTEX_MEMORY_URL: ${CORTEX_MEMORY_URL:-http://cormex:8080}
       # **容器**怎么找到记忆服务。沙箱网段是 internal 的，与 agentd 同网段，
       # 所以这里直连服务名，中继那一整层不参与
-      CORTEX_SANDBOX_CALLBACK: ${CORTEX_SANDBOX_CALLBACK:-http://cormex:8080}
+      # **容器回调打 agentd 自己。**
+      #
+      # 以前指向记忆服务，因为 `/episodes` `/sessions` `/llm/stream` 都在那边。
+      # 2026-08-16 它们全搬过来了，于是沙箱只需要**一个**回调地址、**一把**
+      # 凭据（委托令牌也是这个进程签的），而记忆检索由 agentd 代理出去。
+      #
+      # 附带好处：不再要求记忆服务挂在沙箱那张 internal 网上 —— 那条约束
+      # 曾经是 dev 与生产各写一套配置的根源，也是「所有健康检查都说好，
+      # 只有真发一轮对话才炸」那个坑的来源。
+      CORTEX_SANDBOX_CALLBACK: ${CORTEX_SANDBOX_CALLBACK:-http://agentd:8081}
       CORTEX_SANDBOX_SAME_NETWORK: "1"
       # 沙箱镜像来自 registry，不是开发机上那个 `cortex/sandbox:dev`。
       # **漏了这一条不会启动失败**，只会在日志里印着 dev 那个名字，

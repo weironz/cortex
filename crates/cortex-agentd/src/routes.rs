@@ -38,6 +38,7 @@ use axum::{Json, Router};
 use cortex_proto::delegate::Delegation;
 use cortex_proto::dto::{ChatRequest, SessionRuntimeDto};
 
+use crate::delegated_token::DelegatedScope;
 use crate::state::AgentState;
 
 /// 一轮对话的请求体上限。与记忆服务那侧同一个数量级 —— 附件走 `/blobs`，
@@ -181,6 +182,29 @@ protected_routes! {
     "/blobs/commit" [POST] => post(crate::blobs::commit),
     "/blobs/{hash}" [GET] => get(crate::blobs::download),
     "/blobs/{hash}/url" [GET] => get(crate::blobs::download_url),
+    // ── 委托凭据 ──
+    //
+    // 签一把绑在某个会话上的短期钥匙，交给一个**不受信**的执行方（我们自己
+    // 的沙箱容器，或者一个自己编排沙箱的第三方）。见 `crate::delegated_token`。
+    //
+    // **必须带用户自己那把 bearer**，所以它在受保护侧：这条路上不存在任何
+    // 服务凭据，签发方只能替「把 token 交给它的那个人」签 —— 落到公开侧就是
+    // 一个谁都能给自己签一把读别人会话的钥匙的端点。
+    //
+    // 自己人 2026-08-16 起**不打这条 HTTP 了**（`chat` 直接调下面那个函数）。
+    // 它仍然要在：一个自己编排沙箱的第三方就得走它，而**自己人抄近路、
+    // 外人走 HTTP，那个 HTTP 就会烂** —— 与 `/sandbox-snapshots` 同一个理由。
+    "/delegated-tokens" [POST, DELETE] => post(delegate).delete(revoke_delegation),
+    // ── 工具确认回路 ──
+    //
+    // 反代进容器里那个 `cortex-local` —— 待确认的簿子在它身上（那个 crate 的
+    // `confirm.rs`），这个进程一条记录都没有。形状与 `/chat` 一样，
+    // 只是**不拉容器**，理由见 handler。
+    //
+    // 它在受保护侧而 `/chat` 还在过渡清单里，这不是不一致：过渡清单只减不
+    // 增，新路由一律落在受保护侧 —— 那正是 `protected_routes!` 那段文档说的
+    // 「加新路由的人不必记得任何事」。
+    "/confirmations" [GET, POST] => get(confirmations).post(confirmations),
 }
 
 /// 路由表。
@@ -382,35 +406,170 @@ pub fn bearer_of(headers: &HeaderMap) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
-/// 拿到一个能干活的沙箱：向 cortexd 要钥匙，再确保容器在跑。
+/// 这个会话的沙箱作用域：归谁、在哪个项目、该跑在哪儿。
+///
+/// # 查不到会话行按「未分组」处理，不算错误
+///
+/// 会话行随第一条 episode 一起建，所以**新会话的第一轮必然查不到**。
+/// 一个新会话还没有被移进任何项目，未分组就是正确答案。
+///
+/// 库连不上也按未分组处理：那时该报错的是紧随其后的那次真正的读写，
+/// 不是「决定用哪个容器」这一步 —— 在这儿报，错误信息指向的东西与病因
+/// 毫不相干。
+async fn delegation_scope(
+    st: &AgentState,
+    owner: &str,
+    session_id: &str,
+) -> (DelegatedScope, cortex_store::SessionRuntime) {
+    // 项目与执行归属来自**同一行**。分两次查的话，并发改动下两个判断会看到
+    // 不同的快照，症状是「偶尔进错容器」—— 没有比这更难复现的
+    let state = match st.tenant_for_user(owner).await {
+        Ok(tenant) => match tenant.store() {
+            Ok(store) => store.session_state(session_id).await.ok().flatten(),
+            Err(e) => {
+                tracing::debug!(owner, error = %e, "这个部署没有库，沙箱按未分组处理");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::debug!(owner, error = %e.message(), "租户库够不着，沙箱按未分组处理");
+            None
+        }
+    };
+    let runtime = state
+        .as_ref()
+        .map_or(cortex_store::SessionRuntime::Cloud, |s| s.runtime);
+    (
+        DelegatedScope {
+            owner: owner.to_owned(),
+            session_id: session_id.to_owned(),
+            project: state.and_then(|s| s.project_id),
+        },
+        runtime,
+    )
+}
+
+/// 给这个作用域签一把委托凭据 —— **有就复用，没有才签新的**。
+///
+/// # 为什么复用而不是每轮签一把
+///
+/// 令牌的生命周期**跟着容器走**，不跟着轮次走。容器的入站认证用的是它启动时
+/// env 里那把（`cortex-local` 的入站与出站共用一个 token）。每轮签新的话，
+/// 第二轮反代过去就是 401 —— 而那条错误读起来像「沙箱坏了」。真机上
+/// 「第一轮好使、第二轮 401」就是这个。
+///
+/// 复用的判据是**作用域键**，不是 owner：同一个用户换到另一个项目，那是另一
+/// 个容器、另一把令牌。按 owner 找会把 A 项目的令牌塞给 B 项目的容器，
+/// 而那个容器起来之后照常应答，只是它认的是另一把，第二轮才 401。
+///
+/// # 为什么单开一个函数
+///
+/// 它有两个调用方：这个进程自己那几条碰容器的路由，以及
+/// `POST /delegated-tokens`（第三方自己编排沙箱时走的那条）。**两者必须共用
+/// 一份实现** —— 签发规则漂开的症状是「从另一条路进来的容器第二轮 401」，
+/// 而那两条路服务的是不同的人群。
+fn delegate_token(st: &AgentState, scope: DelegatedScope) -> String {
+    let key = scope.key();
+    match st.delegations().find_by_key(&key) {
+        Some(t) => {
+            st.delegations().rebind(&t, &scope.session_id);
+            t
+        }
+        None => st.delegations().issue(scope),
+    }
+}
+
+/// 一次「要钥匙」的全部结果。**本地签，不再打 HTTP。**
+///
+/// # 为什么它不返回 `Result`
+///
+/// 这一步以前是 `st.remote().delegate(...)`，一次跨进程调用，于是每个调用点
+/// 都要处理「记忆服务连不上」并回 502。**记忆服务已经不在了**，而签一把钥匙
+/// 要的三样东西现在全在本进程：owner 来自凭据，项目与执行归属来自本进程库里
+/// 那行会话，额度来自本进程的账本。
+///
+/// 库够不着时 [`delegation_scope`] 按「未分组」降级（理由见它的文档），
+/// 所以这里没有失败可言。给它一个 `Result` 只会在每个调用点留一段永远走不到
+/// 的 502 分支 —— 而那种分支会让下一个人以为这条路还在跨进程。
+async fn issue_delegation(st: &AgentState, headers: &HeaderMap, session_id: &str) -> Delegation {
+    let owner = crate::accounts::current_user(st, headers).await;
+    let (scope, runtime) = delegation_scope(st, &owner, session_id).await;
+    let scope_key = scope.key();
+    // 额度只**报告**，不在这里拦：这把钥匙不只用于对话，拿它去列文件、下载
+    // 工作区一个 token 都不花。用额度拦签发等于用户额度用完之后连自己的文件
+    // 都拿不走。见 `Delegation::quota_exhausted`
+    let quota_exhausted = st.enforce_quota(&owner).await.is_err();
+    Delegation {
+        token: delegate_token(st, scope),
+        owner,
+        scope_key,
+        runtime: match runtime {
+            cortex_store::SessionRuntime::Local => SessionRuntimeDto::Local,
+            cortex_store::SessionRuntime::Cloud => SessionRuntimeDto::Cloud,
+        },
+        quota_exhausted,
+    }
+}
+
+/// `POST /delegated-tokens` —— 给调用方签一把绑在某个会话上的钥匙。
+///
+/// 见 [`cortex_proto::delegate`] 的模块头：这是**入站授权**，不是沙箱编排。
+/// owner 来自凭据，项目与执行归属来自会话行，三样一次给全。
+async fn delegate(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Json(req): Json<cortex_proto::delegate::DelegateRequest>,
+) -> Json<Delegation> {
+    Json(issue_delegation(&st, &headers, &req.session_id).await)
+}
+
+/// `DELETE /delegated-tokens` —— 收回一把用不上了的钥匙。
+///
+/// 幂等：作废一把不存在的（伪造的、已过期的、别人的）同样回 204。
+/// 分开报会把「猜一把试试」变成一个可用的探针。
+async fn revoke_delegation(
+    State(st): State<AgentState>,
+    Json(req): Json<cortex_proto::delegate::RevokeRequest>,
+) -> StatusCode {
+    st.delegations().revoke(&req.token);
+    StatusCode::NO_CONTENT
+}
+
+/// 拿到一个能干活的沙箱：签一把钥匙，再确保容器在跑。
 ///
 /// # 为什么每一条要摸容器的路由都得走它
 ///
 /// 上一版只有 `/chat` 会拉容器，文件那几条是「容器不在就报错」。于是用户从
 /// 侧栏点开文件树，看到的是一句「沙箱容器不在了，去发条消息把它拉起来」——
 /// 一件他既不该知道也无法理解的事。现在谁先来谁负责拉起，冷启动 913 ms。
+///
+/// # 起不来时**不作废那把钥匙**
+///
+/// 这里以前有一句 `remote().revoke()`，理由写的是「容器没起来，它就是一把
+/// 没有主人的钥匙」。那句话在「每轮签一把新的」时成立，而
+/// [`delegate_token`] 是**复用**的：作废掉的很可能是一把某个活着的容器正在
+/// 认的令牌。
+///
+/// 后果是具体的：`ensure` 最常见的失败是就绪超时，而 `runner::ensure` 的文档
+/// 明写着「容器还在……**重试会复用它**」——复用的前提正是下一次拿到同一把
+/// 令牌（`token_matches` 才判真）。在这里作废，等于把那句承诺换成「每次就绪
+/// 超时都把容器连同里面跑着的东西强制重建一次」。
+///
+/// 不作废的代价只有一条过期前占位的记录，而 [`crate::delegated_token`] 的
+/// TTL 会清掉它。
 async fn ensure_sandbox(
     st: &AgentState,
-    bearer: Option<&str>,
+    headers: &HeaderMap,
     session_id: &str,
 ) -> Result<(Delegation, crate::runner::SandboxHandle), Response> {
-    let d = st
-        .remote()
-        .delegate(bearer, session_id)
-        .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, &e.to_string()))?;
-
+    let d = issue_delegation(st, headers, session_id).await;
     match st.runner().ensure(&d.scope_key, &d.token, "v1").await {
         Ok(h) => {
             // 只有**真的进了容器**才算用过一次。见 `AgentState::last_use`
             st.touch(&d.scope_key);
             Ok((d, h))
         }
-        Err(e) => {
-            // 签出去的钥匙要收回来：容器没起来，它就是一把没有主人的钥匙
-            st.remote().revoke(bearer, &d.token).await;
-            Err(err(StatusCode::BAD_GATEWAY, &e.to_string()))
-        }
+        Err(e) => Err(err(StatusCode::BAD_GATEWAY, &e.to_string())),
     }
 }
 
@@ -440,17 +599,12 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
             );
         }
     };
-    let bearer = bearer_of(&parts.headers);
-
-    let d = match st.remote().delegate(bearer, &parsed.session_id).await {
-        Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &e.to_string()),
-    };
+    let d = issue_delegation(&st, &parts.headers, &parsed.session_id).await;
 
     // ── 额度用完了，别白起一个容器 ──
     //
-    // 这只是**省一次冷启动**。真正的闸门在 cortexd 的 `/llm/stream` ——
-    // 钱是在那儿花的，而那一条不依赖这里的自觉。
+    // 这只是**省一次冷启动**。真正的闸门在 `/llm/stream` —— 钱是在那儿花的，
+    // 而那一条不依赖这里的自觉。
     // 见 `cortex_proto::delegate::Delegation::quota_exhausted`
     if d.quota_exhausted {
         return err(
@@ -472,15 +626,17 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
         );
     }
 
+    // **不走 `ensure_sandbox`**：那个函数自己要一次钥匙，而这一条上面已经要过
+    // 了（额度与执行归属两道闸门都要读它）。再要一次只是多一次库查询 ——
+    // 拿到的是同一把令牌，因为 `delegate_token` 是复用的。
+    //
+    // 起不来时同样**不作废那把钥匙**，理由见 `ensure_sandbox` 的文档
     let handle = match st.runner().ensure(&d.scope_key, &d.token, "v1").await {
         Ok(h) => {
             st.touch(&d.scope_key);
             h
         }
-        Err(e) => {
-            st.remote().revoke(bearer, &d.token).await;
-            return err(StatusCode::BAD_GATEWAY, &e.to_string());
-        }
+        Err(e) => return err(StatusCode::BAD_GATEWAY, &e.to_string()),
     };
 
     tracing::debug!(owner = %d.owner, scope = %d.scope_key, sandbox = %handle.name, "本轮走云沙箱");
@@ -505,6 +661,12 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
     .await
 }
 
+/// 重挂不到时那句话。**提成常量是为了让测试能认出它。**
+///
+/// 容器不在与「这条路由压根没挂上」在状态码上都是 404，所以
+/// `the_attach_route_is_actually_mounted` 只能靠正文分辨这两者。
+const ATTACH_NO_RUN: &str = "这个会话现在没有正在跑的轮次。";
+
 /// `GET /sandbox/runs/{session_id}` —— 挂上容器里那一轮。
 ///
 /// # 为什么用 `status` 而不是 `ensure`
@@ -526,26 +688,15 @@ async fn attach_run(
     Path(session_id): Path<String>,
     req: Request,
 ) -> Response {
-    let bearer = bearer_of(&headers);
-    // 钥匙还是要要一次：`scope_key` 只有 cortexd 算得出（它由 owner 与项目
-    // 派生），而这条路由要拿它去问「那个容器在不在」
-    let d = match st.remote().delegate(bearer, &session_id).await {
-        Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &e.to_string()),
-    };
+    // 钥匙还是要要一次：`scope_key` 由 owner 与项目派生，而这条路由要拿它去问
+    // 「那个容器在不在」。**没派上用场也不作废**，理由见 `ensure_sandbox`
+    let d = issue_delegation(&st, &headers, &session_id).await;
 
     let handle = match st.runner().status(&d.scope_key).await {
         Ok(Some(h)) => h,
-        Ok(None) => {
-            // 容器不在 = 那一轮不在跑。签出去的钥匙没派上用场，收回来 ——
-            // 否则它在 TTL 内是一把没有主人的钥匙
-            st.remote().revoke(bearer, &d.token).await;
-            return err(StatusCode::NOT_FOUND, "这个会话现在没有正在跑的轮次。");
-        }
-        Err(e) => {
-            st.remote().revoke(bearer, &d.token).await;
-            return err(StatusCode::BAD_GATEWAY, &e.to_string());
-        }
+        // 容器不在 = 那一轮不在跑
+        Ok(None) => return err(StatusCode::NOT_FOUND, ATTACH_NO_RUN),
+        Err(e) => return err(StatusCode::BAD_GATEWAY, &e.to_string()),
     };
     st.touch(&d.scope_key);
 
@@ -564,6 +715,83 @@ async fn attach_run(
         &d.token,
         handle.addr.route_target(),
         proxied,
+    )
+    .await
+}
+
+// ──────────────────────── /confirmations ────────────────────────
+
+/// `/confirmations` 的查询串。
+///
+/// 字段名与容器那侧的 `PendingQuery` **逐字相同**，因为这条路上的查询串是
+/// 原样转进去的（[`crate::sandbox_proxy::forward`] 拿的是完整的
+/// `path_and_query`）。在这里改名等于让容器收到一个它不认识的参数，
+/// 而 `serde(default)` 会让那件事表现为「筛选没生效」而不是一次报错。
+#[derive(serde::Deserialize)]
+struct ConfirmQuery {
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+/// `GET|POST /confirmations` —— 反代进容器里那个 `cortex-local`。
+///
+/// 确认回路的簿子住在容器里（`cortex-local` 的 `confirm.rs`，它是唯一同时
+/// 知道「哪一轮在等」与「答案该交给谁」的地方）。这个进程一条确认记录都没有，
+/// 所以它只做转发。
+///
+/// # **不走 [`ensure_sandbox`]**
+///
+/// 与 [`attach_run`] 同一个理由，而且更强：确认是对一个**已经在跑**的轮次的
+/// 回答。为了回答它冷启动一个容器，除了白花 900 ms，那个新容器里根本没有这条
+/// 待确认记录 —— 于是用户点「允许」之后拿到的是「没有这条待确认项」，
+/// 一句既正确又完全帮不上忙的话。
+///
+/// # 没有活着的沙箱时回 409，不是 404
+///
+/// 404 在这条路上**已经有别的意思了**：容器自己用它表示「这个 token 已经用
+/// 掉了 / 那一轮超时了」，而客户端据此把这次点击显示成「抢答输了」
+/// （`confirm_controller` 的 `ConfirmOutcome.superseded`）。拿 404 表示
+/// 「这儿没有沙箱」会把两件补救方式完全不同的事说成同一件。
+///
+/// 409 会让客户端把正文原样显示出来（`回执没能送达：…`），所以那句话要能
+/// 直接读懂、并指出下一步。
+///
+/// # 不带 `?session_id=` 时落在**未分组**那个沙箱上
+///
+/// 客户端重连后的那次补拉是不带会话的（它还不知道该关心哪个），于是
+/// [`delegation_scope`] 查不到会话行、按未分组处理 —— 也就是这个用户那个
+/// 裸 owner 作用域。项目里的会话要拿到自己那个容器就必须带上
+/// `?session_id=`，否则这里会诚实地回 409 而不是去别人的容器里翻。
+async fn confirmations(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Query(q): Query<ConfirmQuery>,
+    req: Request,
+) -> Response {
+    let session_id = q.session_id.as_deref().unwrap_or_default();
+    let d = issue_delegation(&st, &headers, session_id).await;
+
+    let handle = match st.runner().status(&d.scope_key).await {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            return err(
+                StatusCode::CONFLICT,
+                "这个会话现在没有正在跑的沙箱，确认已经无处可送 —— \
+                 那一轮多半已经结束或被回收了。重新发一条消息会把沙箱拉起来。",
+            );
+        }
+        Err(e) => return err(StatusCode::BAD_GATEWAY, &e.to_string()),
+    };
+    st.touch(&d.scope_key);
+
+    // 请求原样转进去：路径与查询串都不变（容器那侧的路由就叫
+    // `/confirmations`），凭据由 `forward` 剥掉再换上沙箱令牌
+    crate::sandbox_proxy::forward(
+        st.http(),
+        handle.addr.endpoint(),
+        &d.token,
+        handle.addr.route_target(),
+        req,
     )
     .await
 }
@@ -595,8 +823,7 @@ async fn list_files(
     headers: HeaderMap,
     Query(q): Query<FileQuery>,
 ) -> Response {
-    let bearer = bearer_of(&headers);
-    let (d, _) = match ensure_sandbox(&st, bearer, q.session()).await {
+    let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -615,11 +842,10 @@ async fn read_file(
     headers: HeaderMap,
     Query(q): Query<FileQuery>,
 ) -> Response {
-    let bearer = bearer_of(&headers);
     let Some(path) = q.path.clone() else {
         return err(StatusCode::BAD_REQUEST, "要取哪个文件 —— 缺 ?path=");
     };
-    let (d, _) = match ensure_sandbox(&st, bearer, q.session()).await {
+    let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -654,11 +880,10 @@ async fn put_file(
     Query(q): Query<FileQuery>,
     body: bytes::Bytes,
 ) -> Response {
-    let bearer = bearer_of(&headers);
     let Some(path) = q.path.clone() else {
         return err(StatusCode::BAD_REQUEST, "要写到哪儿 —— 缺 ?path=");
     };
-    let (d, _) = match ensure_sandbox(&st, bearer, q.session()).await {
+    let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -680,8 +905,7 @@ async fn download_workspace(
     headers: HeaderMap,
     Query(q): Query<FileQuery>,
 ) -> Response {
-    let bearer = bearer_of(&headers);
-    let (d, _) = match ensure_sandbox(&st, bearer, q.session()).await {
+    let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -710,13 +934,9 @@ async fn list_snapshots(
     headers: HeaderMap,
     Query(q): Query<FileQuery>,
 ) -> Response {
-    let bearer = bearer_of(&headers);
-    // 只要作用域名，不要容器。仍然得问一次 cortexd —— owner 与项目都只有
-    // 它解析得出，而作用域名由这两样派生
-    let d = match st.remote().delegate(bearer, q.session()).await {
-        Ok(d) => d,
-        Err(e) => return err(StatusCode::BAD_GATEWAY, &e.to_string()),
-    };
+    // 只要作用域名，不要容器。仍然得签一次钥匙 —— 作用域名由 owner 与项目
+    // 派生，而那两样都只有服务端解析得出
+    let d = issue_delegation(&st, &headers, q.session()).await;
     // 查的是**本进程自己的库**，不再打一次 HTTP：账本 2026-08-16 搬了过来
     match crate::snapshot::list(&st, &d.owner, &d.scope_key).await {
         Ok(rows) => Json(rows).into_response(),
@@ -735,7 +955,7 @@ async fn take_snapshot(
     Query(q): Query<FileQuery>,
 ) -> Response {
     let bearer = bearer_of(&headers);
-    let (d, _) = match ensure_sandbox(&st, bearer, q.session()).await {
+    let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -761,7 +981,7 @@ async fn restore_snapshot(
 ) -> Response {
     let bearer = bearer_of(&headers);
     // 恢复是用户「刚丢了东西」才走的路，最不该在这里让他先去把容器拉起来
-    let (d, _) = match ensure_sandbox(&st, bearer, q.session()).await {
+    let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -1236,48 +1456,48 @@ mod tests {
         );
     }
 
-    /// **重挂那条不 `ensure`。**
+    /// **重挂那条不 `ensure`，`/confirmations` 也不。**
     ///
-    /// `NeverRunning::ensure` 一定失败、`status` 一定回 `None`。所以：
-    /// 走 `ensure` 的路由会以 502 结束，而重挂该以 404 结束 ——
+    /// `NeverRunning::ensure` 一定失败、`status` 一定回 `None`。所以走 `ensure`
+    /// 的路由会以 502 结束，而这两条各有自己的「没有容器」出口 ——
     /// 状态码就是「它到底走了哪一条」的证据。
     ///
-    /// 这条测得的东西看着小，实际拦的是一次真金白银的浪费：走 ensure 的话，
-    /// 用户每打开一个旧会话都会白起一个容器（900ms + 一次卷挂载），
-    /// 然后它立刻被空闲回收 —— 而界面上什么异常都看不到。
+    /// 这条以前是靠「远端指向一个没人监听的端口，于是要钥匙那一步就 502」
+    /// 来证明的。签发 2026-08-16 搬进了本进程，要钥匙不再会失败，于是它
+    /// **终于测的是自己文档里写的那件事**。
+    ///
+    /// 测得的东西看着小，实际拦的是一次真金白银的浪费：走 ensure 的话，用户
+    /// 每打开一个旧会话、每答一次确认都会白起一个容器（900ms + 一次卷挂载），
+    /// 然后它立刻被空闲回收 —— 而界面上什么异常都看不到。确认那条更糟：
+    /// 新容器里根本没有那条待确认记录。
     #[tokio::test]
-    async fn attaching_never_starts_a_container() {
-        let st = AgentState::new(
-            std::sync::Arc::new(NeverRunning),
-            reqwest::Client::new(),
-            // 远端指向一个没人监听的端口：`delegate` 必然失败，于是这条
-            // 会在要钥匙那一步就 502 —— 而那**同样证明**它没去起容器
-            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
-            // 这一组用例不碰库，也就没有账号体系，也不配模型
-            None,
-            None,
-            None,
-            // **认证显式关掉**，不是「没配」。测的是路由拓扑，不是那道门；
-            // 而 `AuthMode::from_env` 在没配任何凭据时会拒绝启动，正是为了
-            // 不让「忘了配」与「决定不要」长得一样
-            crate::auth::AuthMode::Disabled,
-            // 这一组用例也不接对象存储
-            None,
-        );
-        let resp = router(st)
-            .oneshot(
-                Request::builder()
-                    .uri("/sandbox/runs/S1")
-                    .body(axum::body::Body::empty())
-                    .expect("构造请求不该失败"),
-            )
-            .await
-            .expect("router 的错误类型是 Infallible");
-        assert_eq!(
-            resp.status(),
-            StatusCode::BAD_GATEWAY,
-            "要不到钥匙就该 502，而不是把请求当成一次「先起个容器再说」"
-        );
+    async fn attaching_and_answering_never_start_a_container() {
+        let app = router(topology_state());
+        for (method, uri, want) in [
+            (Method::GET, "/sandbox/runs/S1", StatusCode::NOT_FOUND),
+            (Method::GET, "/confirmations", StatusCode::CONFLICT),
+            (Method::POST, "/confirmations", StatusCode::CONFLICT),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(uri)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .expect("构造请求不该失败"),
+                )
+                .await
+                .expect("router 的错误类型是 Infallible");
+            assert_eq!(
+                resp.status(),
+                want,
+                "{method} {uri} 回了 {} —— 502 说明它走了 `ensure`（替身的 ensure 必失败），\
+                 也就是为了回答「没有」而先花 900ms 起了一个空容器",
+                resp.status()
+            );
+        }
     }
 
     /// 路由**挂上去了**（不是 404 那种「压根没这条路」）。
@@ -1285,24 +1505,15 @@ mod tests {
     /// 与上面那条一起看：一个是「走对了分支」，一个是「路径拼对了」。
     /// 少了这条的话，把 `{session_id}` 写成 `:session_id`（axum 0.7 的老写法）
     /// 会让这条路由永远 404，而上面那条测试**照样绿**。
+    ///
+    /// # 为什么必须看正文而不只看状态码
+    ///
+    /// 「容器不在」与「这条路由没挂上」如今都是 404 —— 前者是这个 handler
+    /// 自己给的（见 [`ATTACH_NO_RUN`]），后者是 axum 的兜底。只比状态码的话
+    /// 这条测试恒绿，而它要抓的恰恰是后者。
     #[tokio::test]
     async fn the_attach_route_is_actually_mounted() {
-        let st = AgentState::new(
-            std::sync::Arc::new(NeverRunning),
-            reqwest::Client::new(),
-            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
-            // 这一组用例不碰库，也就没有账号体系，也不配模型
-            None,
-            None,
-            None,
-            // **认证显式关掉**，不是「没配」。测的是路由拓扑，不是那道门；
-            // 而 `AuthMode::from_env` 在没配任何凭据时会拒绝启动，正是为了
-            // 不让「忘了配」与「决定不要」长得一样
-            crate::auth::AuthMode::Disabled,
-            // 这一组用例也不接对象存储
-            None,
-        );
-        let resp = router(st)
+        let resp = router(topology_state())
             .oneshot(
                 Request::builder()
                     .uri("/sandbox/runs/S1")
@@ -1311,10 +1522,173 @@ mod tests {
             )
             .await
             .expect("router 的错误类型是 Infallible");
-        assert_ne!(
-            resp.status(),
-            StatusCode::NOT_FOUND,
-            "路径没挂上 —— 客户端会看到「这个会话没在跑」，而它其实在跑"
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("读 body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains(ATTACH_NO_RUN),
+            "404 是 axum 的兜底而不是这个 handler 给的（正文是 {text:?}）—— \
+             路径没挂上。客户端会看到「这个会话没在跑」，而它其实在跑"
         );
+    }
+
+    /// **委托凭据能进来，但只进得了它够得着的那几条。**
+    ///
+    /// 这条走的是完整的一圈：签一把 → 拿它打真实的 `router()` → 看那道门。
+    /// `auth.rs` 里 `a_logged_in_access_token_is_not_the_preshared_one` 那条
+    /// 记着的教训就是这个 —— 账号体系当初断在「注册、登录、拿到 token，然后
+    /// 每个请求 401」，而三类测试没有一条**从签发走到用它**。
+    ///
+    /// 两个方向都要钉：够得着的路由不能 401（否则容器一句话都写不了），
+    /// 够不着的必须 403 而不是 401 —— 「凭据不对」与「这把钥匙开不了这扇门」
+    /// 是两件事，混成一个码会让排查从看日志变成猜。
+    #[tokio::test]
+    async fn a_delegated_credential_is_admitted_only_where_its_scope_reaches() {
+        // 认证**真的开着**：关掉它这一整条断言就是空的（`Disabled` 一路放行）。
+        // 明文那把 token 用不上 —— 被测的是另一把钥匙
+        let (_, digest_hex) = crate::auth::generate();
+        let raw = hex::decode(&digest_hex).expect("生成的摘要应当是合法十六进制");
+        let digest: [u8; 32] = raw.try_into().expect("SHA-256 应当是 32 字节");
+        let st = AgentState::new(
+            std::sync::Arc::new(NeverRunning),
+            reqwest::Client::new(),
+            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
+            None,
+            None,
+            None,
+            crate::auth::AuthMode::Token { digest },
+            None,
+        );
+        let delegated = st.delegations().issue(DelegatedScope {
+            owner: "01OWNER".into(),
+            session_id: "01SESSION".into(),
+            project: None,
+        });
+        let app = router(st);
+
+        let status = |method: Method, uri: &'static str, body: &'static str| {
+            let app = app.clone();
+            let delegated = delegated.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::AUTHORIZATION, format!("Bearer {delegated}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .expect("构造请求不该失败"),
+                )
+                .await
+                .expect("router 的错误类型是 Infallible")
+                .status()
+            }
+        };
+
+        // 够得着：`/llm/stream` 在白名单里。这个部署没配模型，所以它会 501 ——
+        // 而 501 恰恰证明请求**穿过了那道门**走进了 handler
+        let reachable = status(
+            Method::POST,
+            "/llm/stream",
+            r#"{"tier":"main","system":"","messages":[],"tools":[]}"#,
+        )
+        .await;
+        assert_eq!(
+            reachable,
+            StatusCode::NOT_IMPLEMENTED,
+            "白名单里的路由拿委托令牌打过去得到 {reachable}。401 说明这道门根本不认委托令牌，\
+             403 说明白名单漏了它 —— 两种都会让容器里的 agent 一句话都发不出来"
+        );
+
+        // 够不着：`/projects` 不在白名单里。**403 而不是 401**
+        let out_of_scope = status(Method::GET, "/projects", "").await;
+        assert_eq!(
+            out_of_scope,
+            StatusCode::FORBIDDEN,
+            "作用域外的路由得到 {out_of_scope}，预期 403。200 说明作用域根本没被检查，\
+             一把沙箱钥匙就此等同于用户的完整凭据"
+        );
+
+        // 够不着，而且是最要紧的那一条：`/confirmations` 放行会让 agentd 把
+        // 请求原样转回同一个容器，一个无限回环
+        let loopback = status(Method::GET, "/confirmations", "").await;
+        assert_eq!(
+            loopback,
+            StatusCode::FORBIDDEN,
+            "沙箱拿委托令牌打 /confirmations 得到 {loopback}，预期 403 —— \
+             这条路在 agentd 上是「原样转进容器」，放行它就是容器问自己"
+        );
+    }
+
+    /// **同一个作用域两次要钥匙，拿到的必须是同一把。**
+    ///
+    /// 走的是真实路由（`POST /delegated-tokens`），所以它钉的是
+    /// `delegate_token` 真的接在这条端点上，而不只是那个函数自己的性质
+    /// （那一半由 `delegated_token::the_same_scope_gets_the_same_token_back`
+    /// 守）。
+    ///
+    /// 红了的症状是真机上「第一轮好使、第二轮 401」：容器的入站认证认的是它
+    /// 启动时 env 里那把，而我们每轮换了新的。
+    #[tokio::test]
+    async fn asking_twice_for_the_same_scope_returns_the_same_key() {
+        let app = router(topology_state());
+        let ask = |session: &'static str| {
+            let app = app.clone();
+            async move {
+                let resp = app
+                    .oneshot(
+                        Request::builder()
+                            .method(Method::POST)
+                            .uri("/delegated-tokens")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(format!(r#"{{"session_id":"{session}"}}"#)))
+                            .expect("构造请求不该失败"),
+                    )
+                    .await
+                    .expect("router 的错误类型是 Infallible");
+                assert_eq!(resp.status(), StatusCode::OK, "签钥匙这条路本身不该失败");
+                let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                    .await
+                    .expect("读 body");
+                serde_json::from_slice::<Delegation>(&bytes).expect("回执要是一个 Delegation")
+            }
+        };
+
+        let first = ask("S1").await;
+        let second = ask("S2").await;
+        assert_eq!(
+            first.token, second.token,
+            "同一个作用域第二次拿到了另一把钥匙 —— 容器认的是启动时那把，\
+             于是第二轮反代进去就是 401，而那条错误读起来像「沙箱坏了」"
+        );
+        assert_eq!(
+            first.scope_key, second.scope_key,
+            "两次的作用域名必须一致，否则会去找一个不存在的容器、于是每轮新建一个"
+        );
+        assert!(
+            matches!(first.runtime, SessionRuntimeDto::Cloud),
+            "查不到会话行时执行归属该默认 Cloud —— 默认成 Local 的话，\
+             每个新会话的第一轮都会被 /chat 以 409 拒掉"
+        );
+    }
+
+    /// 这一组用例只关心路由拓扑：不碰库、不配模型、不接对象存储、
+    /// **认证显式关掉**。
+    ///
+    /// 关掉是「决定不要」而不是「忘了配」—— `AuthMode::from_env` 在没配任何
+    /// 凭据时会拒绝启动，正是为了不让这两件事长得一样。
+    fn topology_state() -> AgentState {
+        AgentState::new(
+            std::sync::Arc::new(NeverRunning),
+            reqwest::Client::new(),
+            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
+            None,
+            None,
+            None,
+            crate::auth::AuthMode::Disabled,
+            None,
+        )
     }
 }
