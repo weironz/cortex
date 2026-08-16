@@ -109,6 +109,121 @@ fn is_alive(_pid: u32) -> bool {
     true
 }
 
+/// 清掉状态目录里**主人已死**的存活指针。
+///
+/// # 为什么需要它 —— 「靠探活不靠删文件」只对了一半
+///
+/// `live_file` 的文档说陈旧靠读的一方探活兜底，那保证了**正确性**；
+/// 但没人删文件，指针就只增不减 —— 实测一台开发机上攒到 265 个，
+/// 每个发现方每次都要把它们全部扫一遍。这里补上**回收**：启动时凭
+/// 文件名里的 pid 查一次进程表，主人不在了就删。
+///
+/// # 为什么按 pid 判而不是逐个探活
+///
+/// 探活一个死指针要等满 800ms 超时，265 个就是三分半；进程表按平台
+/// 各取最便宜的问法（Windows 一次 tasklist 快照，unix 逐个 kill(0)，
+/// 后者不起进程、纳秒级）。pid 复用导致的误留（新进程碰巧顶了旧 pid）
+/// 由读方的探活兜底 —— 两层各管一半，谁也不用做到完美。
+///
+/// 任何一步失败都只记日志或按「活着」处理：回收是卫生工作，
+/// 误删一个活指针的代价（发现不了 agent）远大于多留几个死文件。
+pub fn reap_stale_live_files(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    // 先收集再判活：Windows 的进程表快照只该拍一次
+    let mut candidates: Vec<(std::path::PathBuf, Option<u32>)> = Vec::new();
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.extension().and_then(|s| s.to_str()) != Some(cortex_core::LIVE_FILE_EXT) {
+            continue;
+        }
+        // 文件名形如 agent-{pid}.live；解析不出 pid 的按坏文件处理，一并清掉
+        let pid = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_prefix("agent-"))
+            .and_then(|s| s.parse::<u32>().ok());
+        candidates.push((path, pid));
+    }
+    if candidates.is_empty() {
+        return;
+    }
+
+    #[cfg(windows)]
+    let snapshot = alive_pid_snapshot();
+    let me = std::process::id();
+    let mut removed = 0u32;
+    for (path, pid) in candidates {
+        let dead = match pid {
+            Some(p) if p == me => false,
+            #[cfg(windows)]
+            Some(p) => match &snapshot {
+                Some(set) => !set.contains(&p),
+                // 快照拍不下来就一个都不删 —— 与 is_alive 的失败方向一致
+                None => false,
+            },
+            #[cfg(not(windows))]
+            Some(p) => !is_alive(p),
+            None => true,
+        };
+        if dead && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "清掉了主人已退出的存活指针");
+    }
+}
+
+/// 一次拍下**当前所有 cortex-local 进程**的 pid。拍不下来回 `None`，
+/// 调用方按「都活着」处理。
+///
+/// # 为什么要按进程名过滤，只看 pid 在不在是不够的
+///
+/// Windows 回收 pid 很勤：实测 265 个死指针里有 245 个的 pid 已经被
+/// **无关进程**顶上 —— 只判「pid 存在」的收割器对它们永远无能为力，
+/// 目录照样只增不减。指针文件的主人只可能是 cortex-local，pid 对应的
+/// 映像不是它，指针就必然是陈旧的（pid 复用给了别人）。
+#[cfg(windows)]
+fn alive_pid_snapshot() -> Option<std::collections::HashSet<u32>> {
+    use std::process::Command;
+    let out = Command::new("tasklist")
+        .args(["/NH", "/FO", "CSV"])
+        .output();
+    let out = match out {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            tracing::warn!(status = %o.status, "tasklist 失败，这次不回收存活指针");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "起不了 tasklist，这次不回收存活指针");
+            return None;
+        }
+    };
+    // CSV 每行形如 "cortex-local.exe","1234","Console",… —— 名在第一列、
+    // pid 在第二列。行数为 0（tasklist 本地化输出变了形）时回 None：
+    // 拿空集合去删会把所有指针清光，包括活的
+    let text = String::from_utf8_lossy(&out.stdout);
+    if text.lines().filter(|l| l.contains("\",\"")).count() == 0 {
+        tracing::warn!("tasklist 输出不是预期的 CSV，这次不回收存活指针");
+        return None;
+    }
+    let set = text
+        .lines()
+        .filter_map(|l| {
+            let mut cols = l.trim_start_matches('"').split("\",\"");
+            let name = cols.next()?;
+            if !name.to_ascii_lowercase().starts_with("cortex-local") {
+                return None;
+            }
+            cols.next()?.parse::<u32>().ok()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    Some(set)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

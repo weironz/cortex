@@ -343,6 +343,9 @@ async fn main() -> anyhow::Result<()> {
     //
     // 写失败**不致命**：少一条发现路径而已，退化成「CLI 自己再拉一个」，
     // 也就是这次改动之前的行为。为它让整个 agent 起不来是不成比例的。
+    // 先收割再登记：死指针只增不减（实测一台机器攒到 265 个），
+    // 而每个发现方每次启动都要整目录扫一遍它们
+    supervise::reap_stale_live_files(&dir);
     let live_path = cortex_core::live_file(&dir, std::process::id());
     let pointer = cortex_core::LivePointer {
         addr: actual.to_string(),
