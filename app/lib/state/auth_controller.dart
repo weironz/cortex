@@ -463,12 +463,11 @@ class AuthController extends Notifier<AuthState> {
         // problem.
         phase: e.isUnauthorized ? AuthPhase.needsToken : AuthPhase.unreachable,
         busy: false,
-        error: e.isUnauthorized
-            ? 'cortexd 拒绝了这个 token。它区分不出「没带」与「带错了」——'
-                  '分开报等于给暴力破解一个进度条 —— 所以这里也只能说：没通过。'
-                  '确认复制的是 `cortexd --generate-token` 输出的 CORTEXD_TOKEN 明文，'
-                  '而不是写进服务端 .env 的那串摘要。'
-            : e.message,
+        // 这句话以前专讲预共享 token（「确认复制的是 --generate-token 输出的
+        // 明文」）。那条路已经从登录页上拿掉了，而这段代码还会在**手上那份
+        // 存下来的凭据过期**时走到 —— 于是用户看到的是一段关于他从来没用过
+        // 的东西的指路。改成说清「发生了什么、下一步做什么」
+        error: e.isUnauthorized ? '存下来的登录凭据已经失效了（服务端不认）。重新登录一次即可。' : e.message,
         token: null,
       );
     } on Object catch (e) {
@@ -498,6 +497,26 @@ class AuthController extends Notifier<AuthState> {
   /// 所以：第一个发起，其余的**等它**。
   Future<bool>? _refreshInFlight;
 
+  /// 上一次**续期成功**是什么时候。
+  ///
+  /// # 没有它就是一场续期风暴
+  ///
+  /// 续期成功之后客户端会重建、各面板重新拉一遍。如果那之后**立刻又 401**，
+  /// 说明新 token 也不好使 —— 而再续一次只会重复同一个循环，每圈还签一对
+  /// 新的 refresh token。
+  ///
+  /// 实测：加上「先续期」之后没有这道闸，五分钟里签了 **2765** 对，页面
+  /// 疯狂闪烁（每次状态变化都重建整棵树）。
+  ///
+  /// 所以判据是：刚续过还 401 = 续期解决不了这个问题 = 回登录页。
+  DateTime? _lastRefreshOk;
+
+  /// 续期成功之后，多久之内再收到 401 就认定「续了也没用」。
+  ///
+  /// 3 秒：足够覆盖一次重建 + 各面板重新拉一轮，又短到不会把两次真正独立的
+  /// 过期（相隔 15 分钟）误判成同一次。
+  static const Duration _refreshCooloff = Duration(seconds: 3);
+
   /// 凭据在半路失效了 —— **先自己续，续不动才回登录页**。
   ///
   /// Called from any 401, from anywhere, via `HttpCortexApi.onUnauthorized`.
@@ -520,6 +539,16 @@ class AuthController extends Notifier<AuthState> {
   Future<void> onUnauthorized() async {
     if (state.phase == AuthPhase.needsToken) return; // already there
 
+    // **刚续过又 401 —— 续期不是答案。**
+    //
+    // 再续一次只会重复同一个循环，而每圈都签一对新的 refresh token。
+    // 见 `_lastRefreshOk` 上那段：没有这道闸，实测五分钟签了 2765 对。
+    final last = _lastRefreshOk;
+    if (last != null && DateTime.now().difference(last) < _refreshCooloff) {
+      _fallBackToGate();
+      return;
+    }
+
     final refresh = state.refreshToken;
     if (refresh == null) {
       _fallBackToGate();
@@ -531,7 +560,12 @@ class AuthController extends Notifier<AuthState> {
       refresh,
     ).whenComplete(() => _refreshInFlight = null);
     final ok = await inflight;
-    if (!ok && ref.mounted) _fallBackToGate();
+    if (!ref.mounted) return;
+    if (ok) {
+      _lastRefreshOk = DateTime.now();
+    } else {
+      _fallBackToGate();
+    }
   }
 
   /// 回登录页，说清为什么。

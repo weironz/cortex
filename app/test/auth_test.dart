@@ -389,7 +389,14 @@ void main() {
       final state = container.read(authControllerProvider);
       expect(state.phase, AuthPhase.needsToken);
       expect(state.token, isNull);
-      expect(state.error, contains('摘要'), reason: '最常见的错就是把摘要当明文填了，得说出来');
+      // 这句以前断言的是「摘要」——那段文案专讲预共享 token（「别把摘要当
+      // 明文填」）。token 那条路已经从登录页上拿掉了，而这段代码现在只在
+      // **存下来的凭据过期**时走到，指路当然要换成那件事的下一步
+      expect(
+        state.error,
+        contains('重新登录'),
+        reason: '要说清下一步做什么；讲一个用户从来没用过的 token 形态是白指路',
+      );
     });
 
     test('签发端点连不上时不算「token 不对」', () async {
@@ -863,6 +870,46 @@ void _sessionTests() {
         reason:
             '七次 401 只该换来一次续期。多出来的每一次都是拿已经轮转过的那份'
             '去换 —— 服务端看到的是重放，反手把整条 family 作废',
+      );
+    });
+
+    /// **续期成功之后又 401 —— 不能再续，那是一场风暴。**
+    ///
+    /// 续成功之后客户端重建、各面板重新拉一遍。要是那之后立刻又 401，
+    /// 说明新 token 也不好使 —— 再续只会重复同一个循环，而每圈都签一对新的
+    /// refresh token。
+    ///
+    /// 这不是假想：加上「先续期」而没有这道闸之后，实测五分钟里签了 **2765**
+    /// 对，页面因为每次状态变化重建整棵树而疯狂闪烁。这条测试要是早写了，
+    /// 那次就不会发生。
+    test('续期成功后紧接着的 401 不再续，直接回登录页', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await ctrl.restoreSession('refresh-old');
+
+      await ctrl.onUnauthorized(); // 第一次：续上了
+      final afterFirst = api.refreshCalls;
+      expect(c.read(authControllerProvider).isReady, isTrue);
+
+      await ctrl.onUnauthorized(); // 紧接着又一次
+
+      expect(
+        api.refreshCalls,
+        afterFirst,
+        reason:
+            '刚续过还 401，说明续期解决不了这个问题。再续一次只会重复循环，'
+            '而每圈都签一对新的 refresh token —— 那正是那场 2765 对的风暴',
+      );
+      expect(
+        c.read(authControllerProvider).phase,
+        AuthPhase.needsToken,
+        reason: '续不动就该老实回登录页，而不是原地打转',
       );
     });
 
