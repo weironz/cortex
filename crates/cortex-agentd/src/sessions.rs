@@ -164,7 +164,14 @@ async fn session_detail(
 ///
 /// 「改名 + 归档」若分两个事务，别的设备会先拉到「改完名但还没归档」
 /// 那个中间态，列表上闪一下。同事务下它们在 `sync_log` 里连号到达。
-async fn patch_session(
+///
+/// # 为什么它是 `pub(crate)` 而不是私有
+///
+/// 导入（[`crate::import`]）每导完一段对话要给会话改名，而它**不该再打一次
+/// 自己的 HTTP 面**：那要多绕一次序列化 + 认证，且导入已经在这个进程里了。
+/// 它调的必须是这一份而不是另写一段插事件的代码 —— 上面那三条判断
+/// （空标题、超长、绑工作区）漏掉任何一条都不报错，只是把非法状态写进库。
+pub(crate) async fn patch_session(
     store: &Store,
     session_id: &str,
     patch: SessionPatch,

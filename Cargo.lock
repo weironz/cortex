@@ -881,6 +881,7 @@ dependencies = [
  "chrono",
  "clap",
  "cortex-core",
+ "cortex-import",
  "cortex-llm",
  "cortex-proto",
  "cortex-store",

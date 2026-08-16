@@ -32,6 +32,7 @@ mod credentials;
 mod cursor;
 mod env;
 mod error;
+mod import;
 mod llm;
 mod projects;
 mod quota;

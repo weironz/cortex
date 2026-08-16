@@ -17,6 +17,7 @@
 
 use cortex_core::{CortexError, Result};
 use cortex_proto::delegate::{DelegateRequest, Delegation, RevokeRequest};
+use cortex_proto::episodes::{EpisodeAck, NewEpisodeRequest};
 
 /// 打 cortexd 的超时。
 ///
@@ -25,6 +26,13 @@ use cortex_proto::delegate::{DelegateRequest, Delegation, RevokeRequest};
 ///
 /// blob 那两条不设这个超时：快照可能是几十兆。
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// 写一条 episode 的超时。与上面那个分开，理由见 [`Remote::write_episode`]。
+///
+/// 20 秒与 `cortex-local` 那侧的 `REQUEST_TIMEOUT` 取同一个数：两条路打的是
+/// **同一个端点**，超时不一致的话，同一份导出文件在桌面端能进、在网页端
+/// 有一批超时失败，而两边都不报别的错。
+const EPISODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Clone)]
 pub struct Remote {
@@ -166,6 +174,47 @@ impl Remote {
         if let Err(e) = rb.send().await {
             tracing::debug!(error = %e, "收回委托凭据失败，等它自己过期");
         }
+    }
+
+    /// 写一条 episode，顺带触发抽取。
+    ///
+    /// # 为什么这条路不搬进来
+    ///
+    /// 它看着像「往库里插一行原文」，实际上插完那一行还要跑抽取管线 ——
+    /// 而抽取就是记忆能力本身。按这次拆分的判据（这件事离开记忆能力还有
+    /// 没有意义），它永远在 Cormex 那一侧。
+    ///
+    /// 于是导入（[`crate::import`]）走的是**第三方 agent 走的同一条路**，
+    /// 没有私有捷径。
+    ///
+    /// # Errors
+    /// 连不上，或者记忆服务拒绝（凭据不对、额度用完）。
+    pub async fn write_episode(
+        &self,
+        bearer: Option<&str>,
+        req: &NewEpisodeRequest,
+    ) -> Result<EpisodeAck> {
+        // **不用 `TIMEOUT`。** 那 15 秒是给「查一行、签一把钥匙」这类短请求
+        // 的，而这一条在对端要跑一次抽取（一次 LLM 调用）。按短请求的尺度
+        // 掐断的后果不是「慢」：抽取在对端照样跑完、照样计费，而这一侧把它
+        // 记成失败，于是重跑时那一对**已经存在**、被算进 `skipped` ——
+        // 用户看到的是一份怎么重跑都有几百条失败的账
+        let rb = Self::auth(
+            self.http
+                .post(self.url("/episodes"))
+                .timeout(EPISODE_TIMEOUT)
+                .json(req),
+            bearer,
+        );
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| CortexError::Invalid(format!("写 episode 失败（记忆服务连不上）：{e}")))?;
+        Self::ok_or_err(resp, "写 episode")
+            .await?
+            .json()
+            .await
+            .map_err(|e| CortexError::Invalid(format!("解析 /episodes 响应失败：{e}")))
     }
 
     /// 把字节交给记忆服务存起来，拿回内容哈希。

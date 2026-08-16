@@ -125,6 +125,23 @@ protected_routes! {
     "/settings/llm-key" [GET, PUT, DELETE] => get(crate::byo_key::get)
         .put(crate::byo_key::put)
         .delete(crate::byo_key::delete),
+    // ── 导入外部历史 ──
+    //
+    // Web 端的导入：浏览器读不到磁盘，只能先把 conversations.json 传上来。
+    // 桌面端不走这条（文件在本机，本地 agent 直接读）。
+    //
+    // 三条都在受保护侧，而 `/import/run` 尤其不能落到公开侧：它每导一对
+    // 消息就在记忆服务那边触发一次抽取，也就是一次 LLM 调用 —— 一份真的
+    // Claude 导出是 6047 次。
+    //
+    // ⚠️ axum 默认体积上限 2 MiB，而这条路上是一份 97 MB 的导出文件。
+    // 体积上限由 `crate::import` 自己按流式计数管（`MAX_UPLOAD`），
+    // 所以这里把 axum 的默认闸门整个撤掉 —— 留着它只会在读到一半时把连接
+    // 掐了，而那时暂存文件已经写了一半
+    "/import/upload" [POST] => post(crate::import::upload)
+        .layer(axum::extract::DefaultBodyLimit::disable()),
+    "/import/preview" [POST] => post(crate::import::preview),
+    "/import/run" [POST] => post(crate::import::run),
 }
 
 /// 路由表。
