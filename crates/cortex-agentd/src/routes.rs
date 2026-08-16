@@ -125,6 +125,18 @@ protected_routes! {
     "/settings/llm-key" [GET, PUT, DELETE] => get(crate::byo_key::get)
         .put(crate::byo_key::put)
         .delete(crate::byo_key::delete),
+    // ── 工作区快照的账本 ──
+    //
+    // **与下面那条 `/sandbox/snapshots`（斜杠）不是同一条路由。** 那条是
+    // 动作（拍一份 / 解回去，碰 docker 与卷，界面打的是它），这条是账本
+    // （记一行 / 列一页，碰库）。见 `crate::snapshot_index` 的模块头。
+    //
+    // 两半 2026-08-16 起住在同一个进程，于是**我们自己已经不打这条 HTTP 了**
+    // ——`crate::snapshot` 直接调那两个函数。它仍然要在：这张表跟着库一起
+    // 搬了过来，边缘会把 `/sandbox-snapshots` 指到这儿，而一个自己编排沙箱
+    // 的第三方就得走它。自己人抄近路、外人走 HTTP，那个 HTTP 就会烂。
+    "/sandbox-snapshots" [GET, POST] => get(crate::snapshot_index::list)
+        .post(crate::snapshot_index::record),
 }
 
 /// 路由表。
@@ -650,7 +662,8 @@ async fn list_snapshots(
         Ok(d) => d,
         Err(e) => return err(StatusCode::BAD_GATEWAY, &e.to_string()),
     };
-    match st.remote().list_snapshots(bearer, &d.scope_key).await {
+    // 查的是**本进程自己的库**，不再打一次 HTTP：账本 2026-08-16 搬了过来
+    match crate::snapshot::list(&st, &d.owner, &d.scope_key).await {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => err(StatusCode::BAD_GATEWAY, &e.to_string()),
     }
@@ -671,7 +684,7 @@ async fn take_snapshot(
         Ok(v) => v,
         Err(r) => return r,
     };
-    match crate::snapshot::capture(&st, bearer, &d.scope_key).await {
+    match crate::snapshot::capture(&st, bearer, &d.owner, &d.scope_key).await {
         Ok(Some(row)) => Json(serde_json::json!({ "snapshot": row })).into_response(),
         // 刚 ensure 过还是没有，只能是这一瞬被别的东西停掉了。不当失败报：
         // 卷还在，用户也没做错任何事
@@ -697,7 +710,7 @@ async fn restore_snapshot(
         Ok(v) => v,
         Err(r) => return r,
     };
-    match crate::snapshot::restore(&st, bearer, &d.scope_key, &id).await {
+    match crate::snapshot::restore(&st, bearer, &d.owner, &d.scope_key, &id).await {
         Ok(()) => Json(serde_json::json!({
             "restored": id,
             // 这句话要回给用户看。「恢复」在人脑子里通常是「回到那一刻的样子」，

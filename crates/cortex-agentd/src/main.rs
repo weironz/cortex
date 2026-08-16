@@ -43,6 +43,7 @@ mod runner;
 mod sandbox_proxy;
 mod sessions;
 mod snapshot;
+mod snapshot_index;
 mod state;
 mod sync;
 mod sync_bus;
@@ -69,7 +70,11 @@ struct Args {
     #[arg(long, env = "CORTEX_AGENTD_BIND", default_value = "0.0.0.0:8081")]
     bind: String,
 
-    /// 记忆服务在哪儿。委托凭据、blob、快照索引都问它。
+    /// 记忆服务在哪儿。委托凭据与 blob 问它。
+    ///
+    /// **快照索引 2026-08-16 起不在这条路上了** —— 那张表跟着库搬进了本进程
+    /// （`crate::snapshot_index`）。blob 是下一个：对象存储搬过来之后，
+    /// 这条地址剩下的用途只有委托凭据。
     #[arg(long, env = "CORTEX_MEMORY_URL", default_value = "http://cortexd:8080")]
     memory: String,
 
