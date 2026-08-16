@@ -123,11 +123,19 @@ jobs:
         # 行为（防止拿默认口令上生产）。这里喂假值只为让 config 能解析，
         # 不代表可以用弱口令。
         #
-        # ⚠️ 这一组必须与 compose 里所有 `${VAR:?}` 保持同步：
-        #     grep -ohE '\$\{[A-Z0-9_]+:\?' docker-compose*.yml deploy/*.yml
-        # 漏一个的症状是 CI 挂在这一步，而**本机跑同一条命令是过的** ——
-        # 因为本机 `.env` 里有那个值，docker compose 会自动读它。
-        # 也就是说这道门在本地被自己的 .env 掩盖，只有 CI 才看得见。
+        # ⚠️ **必填变量是从 compose 里派生的，不是手工列的一张表。**
+        #
+        # 那张表在这儿维护过，也漏过两次，两次症状完全一样：本机
+        # `docker compose config` 是**过的**（`.env` 里有那个值，compose 会
+        # 自动读），一推上去 CI 才红 —— 这道门本来就是为「只有 CI 看得见」
+        # 而设的，于是漏的人在本机得不到任何信号。
+        #
+        #   0.1.9  加了 CORMEX_VERSION / CORTEX_MEMORY_URL，没加进表
+        #   0.1.9  加了 CORTEX_PG_PASSWORD（deploy 那份加自己的库），没加进表
+        #
+        # 第二次之后不再补名字：一张要靠人跟着改的清单，会一直漏第三次。
+        # 下面这段自己去 compose 里把 `${VAR:?}` 捞出来，缺哪个补哪个。
+        # 已经在环境里的（下面 env: 那几个）不覆盖 —— 有些值要像点样子。
         env:
           POSTGRES_PASSWORD: ci-syntax-check-only
           RUSTFS_SECRET_KEY: ci-syntax-check-only
@@ -135,13 +143,20 @@ jobs:
           CORTEX_VERSION: v0.0.0-ci
           DOMAIN: ci.invalid
           S3_DOMAIN: s3.ci.invalid
-          # 拆分之后新增的两个。上面那条「必须与所有 `${VAR:?}` 同步」的提醒
-          # 在 0.1.9 兑现了一次：加了 CORMEX_VERSION 与 CORTEX_MEMORY_URL，
-          # 却没加到这里，于是本机 `docker compose config` 是过的（.env 里有值），
-          # CI 一推上去就红。这道门本来就是为「只有 CI 看得见」而设的
           CORMEX_VERSION: v0.0.0-ci
           CORTEX_MEMORY_URL: http://memory.ci.invalid:8080
         run: |
+          required=$(grep -ohE '\$\{[A-Z0-9_]+:\?' \
+                       docker-compose*.yml deploy/*.yml \
+                     | sed -E 's/^\$\{([A-Z0-9_]+):\?$/\1/' | sort -u)
+          echo "compose 声明的必填变量：" $required
+          for v in $required; do
+            if [ -z "${!v:-}" ]; then
+              echo "  · $v 没给值，喂一个假的"
+              export "$v=ci-syntax-check-only"
+            fi
+          done
+
           docker compose -f docker-compose.yml config -q
           docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
           # 线上真正跑的是这一份（deploy.yml 按它的 sha256 校验节点）。
