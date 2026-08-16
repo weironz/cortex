@@ -56,6 +56,29 @@ const REFRESH_TTL: Duration = Duration::days(30);
 ///
 /// 取值刻意不是 `1` / `true` 而是这个字面量，与 `CORTEX_AUTH=disabled`
 /// 同款：一个手滑设成 `0` 的环境变量不该把门打开。
+/// 开发机免密登录：值就是**要登成谁**。
+///
+/// # 为什么是「用户名」而不是一个 `DEV=true`
+///
+/// 一个布尔开关答不出「那我进去是谁」，于是实现只能编一个幽灵用户或者
+/// 抓第一个账号 —— 前者让租户解析失去意义，后者在多账号的开发机上会随
+/// 建号顺序变。写清楚登成谁，这两个问题都不存在。
+///
+/// 它也因此**不可能手滑打开**：`CORTEX_DEV_LOGIN=1` 只会去找一个叫 `1` 的
+/// 用户然后失败，而不是把门敞开。
+///
+/// 生效条件还要求**用户名与密码都为空** —— 正常登录一行代码都不受影响。
+const DEV_LOGIN_ENV: &str = "CORTEX_DEV_LOGIN";
+
+/// 这台机器开着免密登录吗，登成谁。
+#[must_use]
+pub fn dev_login_user() -> Option<String> {
+    std::env::var(DEV_LOGIN_ENV)
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
 const OPEN_REGISTRATION_ENV: &str = "CORTEX_OPEN_REGISTRATION";
 const OPEN_REGISTRATION_ON: &str = "enabled";
 
@@ -332,11 +355,31 @@ pub async fn login(
     State(st): State<AgentState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthTokens>, ApiError> {
+    // ── 开发机免密：用户名与密码都空时，登成这台机器指名的那个人 ──
+    //
+    // 判断必须在**查库之前**：空用户名查不出任何行，事后再判等于永远走不到。
+    //
+    // 而查的是**真账号**（不是造一个幽灵用户）：登进去之后租户、schema、
+    // 配额全是真的。造一个假的能让登录成功，但那个人的会话会落进一片没人
+    // 认领的库里 —— 一个只在开发机上出现、查起来毫无头绪的坏。
+    let dev_login = req.username.trim().is_empty() && req.password.is_empty();
+    let username = if dev_login {
+        match dev_login_user() {
+            Some(u) => u,
+            // 没开这个开关就按普通登录走下去：空用户名查不到行，
+            // 回的是与「密码错了」同一句话
+            None => req.username.clone(),
+        }
+    } else {
+        req.username.clone()
+    };
+    let dev_login = dev_login && dev_login_user().is_some();
+
     let row = sqlx::query(
         "SELECT id, password_hash, disabled_at IS NOT NULL AS disabled
            FROM cortex_auth.users WHERE lower(username) = lower($1)",
     )
-    .bind(&req.username)
+    .bind(&username)
     .fetch_optional(&st.accounts()?.pool)
     .await
     .map_err(|e| ApiError::internal(format!("查用户失败：{e}")))?;
@@ -351,7 +394,11 @@ pub async fn login(
     if row.get::<bool, _>("disabled") {
         return Err(ApiError::unauthorized("这个账号已被停用"));
     }
-    if !verify_password(&req.password, &row.get::<String, _>("password_hash")) {
+    if dev_login {
+        // **每一次都记一条**，不是启动时说一遍就算。一台开着免密的机器
+        // 要在日志里持续可见 —— 「我以为那是开发机」是这类事故的原话
+        tracing::warn!(user = %username, "免密登录（CORTEX_DEV_LOGIN 开着）");
+    } else if !verify_password(&req.password, &row.get::<String, _>("password_hash")) {
         return Err(deny());
     }
 

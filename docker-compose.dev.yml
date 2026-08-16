@@ -135,6 +135,15 @@ services:
       # 服务端那把 key 烧钱，而生产是一台 2 核 3.5G 的机器。
       # 取值必须正好是 `enabled`，手滑写成 1 不会把门打开。
       CORTEX_OPEN_REGISTRATION: ${CORTEX_OPEN_REGISTRATION:-}
+      # 开发机免密登录：留空用户名与密码点「登录」，直接进成这个人。
+      #
+      # 值是**登成谁**而不是一个 `true`：布尔答不出「那我进去是谁」，
+      # 实现只能编个幽灵用户或抓第一个账号，前者让租户解析失去意义、
+      # 后者随建号顺序变。也因此它不可能手滑打开 —— `=1` 只会去找一个
+      # 叫 `1` 的用户然后失败。
+      #
+      # **生产的 compose 里没有这一行**，加进去要过 code review。
+      CORTEX_DEV_LOGIN: ${CORTEX_DEV_LOGIN:-admin}
       # ── 模型 ──
       #
       # `/llm/stream` 搬过来之后，**这个进程是花钱的那一方**：服务端那把 key
@@ -156,6 +165,31 @@ services:
       CORTEX_SECRET_KEY: ${CORTEX_SECRET_KEY:-}
       # 每人每月的 token 上限。0 = 不限
       CORTEX_QUOTA_TOKENS_PER_MONTH: ${CORTEX_QUOTA_TOKENS_PER_MONTH:-}
+      # ── 对象存储 ──
+      #
+      # 附件与快照的字节落在这儿。走**服务名** —— agentd 与 rustfs 同网段。
+      #
+      # ⚠️ **dev 上 32 MB 以上的附件传不了，这是已知的、没有假修的限制。**
+      #
+      # 客户端按大小分两条路（`app/lib/api/blob_upload.dart`）：
+      # ≤32 MB 走 `POST /blobs` 由 agentd 中转（**这条在 dev 上是通的**）；
+      # 更大的走 presign 直传 —— 而签名 URL 里带的就是这里这个 endpoint，
+      # SigV4 把 Host 一起签了，浏览器解析不了 `rustfs` 这个名字。
+      #
+      # 没有「填一个公网地址」这种解法：agentd 与浏览器必须用**同一个**
+      # 字符串，否则签名对不上。真要修得让边缘把 /s3 也代理掉，让两边同源
+      # —— 那是一件独立的事，不在这儿凑合。
+      # **写死服务名，不给 `.env` 覆盖的机会。** 与 `CORTEX_DATABASE_URL`
+      # 同一个道理：这是「容器怎么找到它的邻居」，而 `.env` 里那一份是
+      # 「宿主进程怎么找到它」。实测撞过：`.env` 里留着一个
+      # `S3_ENDPOINT=http://localhost:9010`（cortexd 还跑在宿主上的年代），
+      # 被 `${S3_ENDPOINT:-…}` 取走之后，容器里的 `localhost` 是它自己 ——
+      # 报的是 Connection refused，看着像 rustfs 没起来
+      S3_ENDPOINT: http://rustfs:9000
+      S3_BUCKET: ${S3_BUCKET:-cortex-blobs}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-cortexadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-cortex_dev_only}
       RUST_LOG: ${RUST_LOG:-cortex_agentd=debug,warn}
     volumes:
       - cortex_dev_bin:/opt/cortex/bin:ro
@@ -170,6 +204,60 @@ services:
     networks:
       - default
       - sandbox
+
+  # ─── 对象存储 ──────────────────────────────────────────
+  #
+  # **这里存两样东西，而且只有这两样**：对话附件与工作区快照。
+  # 判据是「要长期留着、跨设备可取」的字节。
+  #
+  # 它**不是 agent 的工作目录** —— 沙箱里那些文件在 docker 卷里
+  # （`PUT /sandbox/files` 走 docker 的 archive API，从不碰这儿），
+  # 随项目生死，agent 用文件工具直接读写，不该多一次上传下载。
+  #
+  # 以前这个服务在记忆服务那个 compose 里，因为附件表跟着库住在那边。
+  # 表搬回来了，存字节的地方也得跟着回来 —— 否则 agentd 只能干看着
+  # 一堆 blob 行、取不回字节。
+  #
+  # ⚠️ 容器名 `cortex-rustfs-dev`，与那边的 `cormex-rustfs` 不同名：
+  # 同名会被 compose 认成同一个容器直接替换掉（同项目名 + 同服务名那个坑，
+  # 见 `cortexdb` 上面那段）。
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: cortex-rustfs-dev
+    profiles: [dev]
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    environment:
+      # 开发机一块盘。四卷纠删码要**四块物理独立的盘**，单盘上那是假冗余，
+      # 而 RustFS 自己会认出共享设备然后拒绝启动
+      RUSTFS_VOLUMES: /data
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: ${RUSTFS_UNSAFE_BYPASS_DISK_CHECK:-true}
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-cortexadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-cortex_dev_only}
+      # strict = 写入落盘之后才算成功。「不丢东西」的前提，别调低
+      RUSTFS_DURABILITY_MODE: strict
+      # RustFS 没有按桶的 CORS 接口，只能整个服务开。开发机放开是为了让
+      # Flutter Web 能直接做 presigned PUT —— 大文件不经过 agentd 中转
+      RUSTFS_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_OBS_LOGGER_LEVEL: info
+    ports:
+      # 9000 必须发布：Flutter Web 的直传是**浏览器**发起的，它在容器网络外面。
+      # 端口挪开 9000/9001 —— 这台机器上别的项目占着（见 CLAUDE.md 那条）
+      - "127.0.0.1:${CORTEX_RUSTFS_API_PORT:-9040}:9000"
+      - "127.0.0.1:${CORTEX_RUSTFS_CONSOLE_PORT:-9041}:9001"
+    volumes:
+      - cortex_dev_rustfs:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   # ─── Web ──────────────────────────────────────────────
   web:
@@ -211,3 +299,8 @@ volumes:
   # 换个项目名就换一个卷，等于开发数据莫名其妙没了
   cortex_dev_pg:
     name: cortex_dev_pg
+
+  # 对象存储的数据。同样显式写 `name:` —— 换个项目名就换一个卷，
+  # 等于附件莫名其妙全没了
+  cortex_dev_rustfs:
+    name: cortex_dev_rustfs

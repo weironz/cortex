@@ -347,7 +347,13 @@ class AuthController extends Notifier<AuthState> {
   Future<void> signInWithPassword(String username, String password) async {
     // 说一句，而不是静默 return。**静默 return 的症状是「点登录没一点反应」**，
     // 而用户没法从一个什么都不做的按钮上看出自己漏了什么
-    if (username.trim().isEmpty || password.isEmpty) {
+    //
+    // 例外：服务端指名了免密登成谁（开发机的 `CORTEX_DEV_LOGIN`）。
+    // 那件事**只有服务端知道**，所以判据取自刚探到的 `/health`，
+    // 而不是客户端这边的什么编译期开关 —— 后者会让「这个包是不是 dev 版」
+    // 与「这台服务端开不开门」这两件独立的事绑在一起。
+    final blankOk = state.health?.allowsBlankLogin ?? false;
+    if (!blankOk && (username.trim().isEmpty || password.isEmpty)) {
       state = state.copyWith(error: '请填写用户名和密码。');
       return;
     }

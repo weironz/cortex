@@ -361,6 +361,12 @@ async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
         // 可言，探针问到的 `auth` 是记忆服务的。两边配得不一样时，那个
         // 回答会让人以为已经核对过了
         "auth": st.auth_mode().as_str(),
+        // 这台机器开着免密登录吗，登成谁。**由服务端说，不由客户端猜** ——
+        // 登录页据此跳过「请填写用户名和密码」那道校验。
+        //
+        // 报出用户名而不是一个布尔：运维扫一眼就知道那扇门后面是谁，
+        // 而一个 `true` 还要再去翻环境变量
+        "dev_login": crate::accounts::dev_login_user(),
         "live_scopes": st.scopes().len(),
     }))
 }

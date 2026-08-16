@@ -7,6 +7,7 @@ class HealthStatus {
     required this.version,
     required this.database,
     this.auth = authUnknown,
+    this.devLogin,
   });
 
   final String status;
@@ -22,6 +23,19 @@ class HealthStatus {
   /// route, which is precisely why the answer has to live here — anywhere else
   /// and asking the question would require already being past the gate.
   final String auth;
+
+  /// 这台服务端开着**免密登录**吗，开着的话登进去是谁。
+  ///
+  /// 与 [auth] 同类：客户端要据它决定行为，而不是自己猜。空登录框点「登录」
+  /// 之所以能通，是因为服务端指名了登成谁（`CORTEX_DEV_LOGIN`）——
+  /// 客户端无从得知那个配置，只能问。
+  ///
+  /// 报的是**用户名**而不是布尔：登录页据此能说清「会登成 admin」，
+  /// 而一个 `true` 只能说「大概能进」。
+  final String? devLogin;
+
+  /// 空着用户名密码点「登录」会不会成功。
+  bool get allowsBlankLogin => (devLogin ?? '').isNotEmpty;
 
   /// A daemon too old to report the field. Treated as "assume a token is
   /// needed": guessing `disabled` would send the user into a UI that then 401s
@@ -60,5 +74,6 @@ class HealthStatus {
     version: asString(json['version'], '?'),
     database: asString(json['database'], 'unknown'),
     auth: asString(json['auth'], authUnknown),
+    devLogin: json['dev_login'] as String?,
   );
 }
