@@ -9,6 +9,7 @@ import '../models/sync_event.dart';
 import '../models/sync_record.dart';
 import 'app_providers.dart';
 import 'chat_controller.dart';
+import 'auth_controller.dart';
 import 'confirm_controller.dart';
 
 /// State of the realtime link to `cortexd`.
@@ -156,6 +157,20 @@ class SyncController extends Notifier<SyncState> {
 
     final api = ref.watch(cortexApiProvider);
     if (ref.read(appConfigProvider).useMock) {
+      return const SyncState(status: SyncLinkStatus.disabled);
+    }
+
+    // ── 没登录就不连。──
+    //
+    // 这个 controller 是 App 一起动就被 watch 的，而它以前**无条件**开始
+    // 连 WS、换 ticket —— 于是登录页阶段就有一串打向认证接口的请求，全部
+    // 401。后果不只是 console 刷屏：那些 401 会敲响 `onUnauthorized`，把
+    // 「凭据已失效」的红字压在一张用户还没输过密码的登录表单上 ——
+    // 「无法登录」的错觉正是它造出来的。
+    //
+    // watch 而不是 read：登录成功（或登出）时这里要跟着重建 ——
+    // 登录后自动连上，登出后自动断开，两个方向都不需要谁记得手动通知。
+    if (!ref.watch(authControllerProvider.select((s) => s.isReady))) {
       return const SyncState(status: SyncLinkStatus.disabled);
     }
 

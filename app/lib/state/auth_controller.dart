@@ -568,9 +568,25 @@ class AuthController extends Notifier<AuthState> {
     }
   }
 
-  /// 回登录页，说清为什么。
+  /// 回登录页。**只有从「正在用」掉下来才值得一句红字。**
+  ///
+  /// # 启动阶段的 401 是清场，不是事故
+  ///
+  /// 还没登录时就有 401 打进来是常态（过期凭据、或后台某个还没被门挡住的
+  /// 请求）。那个 401 的意思只是「请登录」，而登录页本身已经在说这句话了
+  /// —— 再压一条「凭据已失效或被拒绝（HTTP 401）」上去，用户读到的是
+  /// 「我还没输密码就被拒绝了」，然后把一次正常的登录当成失败来排查。
+  /// 实际发生过，且反复发生。
+  ///
+  /// # 这段代码曾经「被修复过」但没有
+  ///
+  /// 上一次改它用的是脚本替换，锚点少了函数体里一段注释，没匹配上，而
+  /// 那次替换**没有 assert** —— 静默落空，此后每个人（包括改它的人）都
+  /// 以为它已经是新的了。配套测试也是绿的，因为那条测试走的路径根本不经过
+  /// 这里。教训写在这儿：**锚不上要响，测试要真的踩到被改的行。**
   void _fallBackToGate() {
     if (state.phase == AuthPhase.needsToken) return;
+    final wasReady = state.phase == AuthPhase.ready;
     // Deliberately not `forgetToken()`: a rotated server-side secret is not a
     // reason to also destroy the copy the user may still be editing, and on
     // desktop the "stored" copy is an environment variable this app must not
@@ -578,10 +594,7 @@ class AuthController extends Notifier<AuthState> {
     state = state.copyWith(
       phase: AuthPhase.needsToken,
       token: null,
-      // **不说「请重新填写 token」**：默认的表单是账号密码，而这句话在
-      // 那张表单前面是一条走不通的指路。这一层不知道用户会用哪种方式登录，
-      // 就别替他选
-      error: '凭据已失效或被拒绝（HTTP 401）。请重新登录。',
+      error: wasReady ? '登录已过期，续期也没有成功。请重新登录。' : null,
     );
   }
 

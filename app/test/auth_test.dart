@@ -424,7 +424,13 @@ void main() {
       final state = container.read(authControllerProvider);
       expect(state.phase, AuthPhase.needsToken);
       expect(state.token, isNull);
-      expect(state.error, contains('401'));
+      expect(
+        state.error,
+        contains('重新登录'),
+        reason:
+            '从 ready 掉下来才有红字，且不再引用状态码 —— '
+            '「HTTP 401」在登录表单上读起来像密码被拒',
+      );
     });
 
     test('环境变量里的 token 会被自动用掉，用户根本看不到登录屏', () async {
@@ -973,6 +979,48 @@ void _sessionTests() {
         c.read(authControllerProvider).phase,
         AuthPhase.needsToken,
         reason: '续不动就该老实回登录页，而不是原地打转',
+      );
+      expect(
+        c.read(authControllerProvider).error,
+        contains('重新登录'),
+        reason:
+            '从「正在用」掉下来必须说清为什么 —— 这一条真正踩到 '
+            '_fallBackToGate 的 wasReady 分支。上一轮的教训：配套测试绿着，'
+            '但没有一条踩到被改的那几行',
+      );
+    });
+
+    /// **未登录阶段的杂散 401 不许在登录页压红字。**
+    ///
+    /// 这条直接踩 `_fallBackToGate` 的非 ready 分支 —— 上一轮它「被修复过」
+    /// 但脚本替换静默落空，而当时的测试都绕着它走，全绿。这次的断言就钉在
+    /// 它写出来的 error 上。
+    test('未登录时收到 401：回登录页但不写红字', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          authSeedTokenProvider.overrideWithValue(null),
+          rememberedTokenProvider.overrideWith((_) async => null),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      for (var i = 0; i < 6; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(c.read(authControllerProvider).isReady, isFalse);
+
+      // 登录页阶段某个后台请求 401 了（历史上是 sync 的 ticket）
+      await ctrl.onUnauthorized();
+
+      expect(
+        c.read(authControllerProvider).error,
+        isNull,
+        reason:
+            '「凭据已失效」压在一张还没输过密码的表单上，读起来是'
+            '「我被拒绝了」—— 用户会把一次正常的登录当成失败来排查。实际发生过',
       );
     });
 

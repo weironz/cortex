@@ -22,6 +22,7 @@ import 'package:cortex_app/models/session_detail.dart';
 import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/sync_record.dart';
 import 'package:cortex_app/state/app_providers.dart';
+import 'package:cortex_app/state/auth_controller.dart';
 import 'package:cortex_app/state/sync_controller.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -298,11 +299,25 @@ Future<void> _until(bool Function() condition, {String reason = ''}) async {
   }
 }
 
+/// 已登录的替身。sync 现在有了「没登录就不连」的门（登录页阶段的 401
+/// 红字正是没这道门造成的），所以这套测试要先把门打开，才能测门后面的东西。
+class _ReadyAuth extends AuthController {
+  @override
+  AuthState build() => const AuthState(phase: AuthPhase.ready, token: 't');
+}
+
+/// 还没登录的替身。
+class _GateClosedAuth extends AuthController {
+  @override
+  AuthState build() => const AuthState(phase: AuthPhase.needsToken);
+}
+
 ProviderContainer _boot(_FakeApi api, {bool mock = false}) {
   final container = ProviderContainer(
     overrides: [
       appConfigProvider.overrideWith(mock ? _MockConfig.new : _LiveConfig.new),
       cortexApiProvider.overrideWithValue(api),
+      authControllerProvider.overrideWith(_ReadyAuth.new),
     ],
   );
   // Keeps the controller alive for the duration of the test.
@@ -311,6 +326,32 @@ ProviderContainer _boot(_FakeApi api, {bool mock = false}) {
 }
 
 void main() {
+  test('没登录就一个请求都不发 —— 登录页上的红字就是这么来的', () async {
+    final api = _FakeApi();
+    final container = ProviderContainer(
+      overrides: [
+        appConfigProvider.overrideWith(_LiveConfig.new),
+        cortexApiProvider.overrideWithValue(api),
+        authControllerProvider.overrideWith(_GateClosedAuth.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(syncControllerProvider, (_, _) {}, fireImmediately: true);
+    await _settle();
+
+    expect(
+      api.connectCount,
+      0,
+      reason:
+          '未登录阶段连 WS、要 ticket，得到的只能是 401 —— '
+          '而那个 401 会把「凭据已失效」压在登录表单上',
+    );
+    expect(
+      container.read(syncControllerProvider).status,
+      SyncLinkStatus.disabled,
+    );
+  });
+
   test('bump 只是信号：拉取一律用客户端自己的游标', () async {
     final api = _FakeApi()
       // The server says it reached 25, but this page only carries us to 22 —
