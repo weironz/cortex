@@ -112,3 +112,9 @@ Future<void> forgetToken() async {
     // 服务端那侧的作废在调到这里之前就已经发生了
   }
 }
+
+/// 把「换 refresh token」这件事串行化的锁。桌面端**同进程只有一个**
+/// `AuthController`，`_refreshInFlight ??=` 已经把并发续期收敛成一次 ——
+/// 这里直接执行就够了。真正需要锁的是 Web（多标签页共享 localStorage，
+/// 各自的内存里却各有一份轮换状态），见 `token_store_web.dart` 的同名实现。
+Future<T> withRefreshLock<T>(Future<T> Function() body) => body();

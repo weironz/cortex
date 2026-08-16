@@ -26,12 +26,17 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
 
 import '../api/api_exception.dart';
 import '../api/cortex_api.dart';
 import '../api/http_cortex_api.dart';
 import '../api/mock_cortex_api.dart';
 import '../auth/local_llm_store.dart';
+import '../models/attachment.dart';
+import '../models/chat_event.dart';
+import '../models/import_plan.dart';
+import '../models/sync_event.dart';
 import '../core/app_config.dart';
 import '../core/local_llm.dart';
 import '../core/settings_store.dart';
@@ -658,9 +663,16 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
   // 与关认证的部署都落在 ready（见 `AuthPhase.ready` 的注释），
   // 这道门不会挡住它们；登录与续期走的是 `authProbeApiProvider`，
   // 也不经过这里。
-  final phase = ref.watch(authControllerProvider.select((s) => s.phase));
-  if (phase != AuthPhase.ready) {
-    return GateClosedApi();
+  //
+  // select 的是**布尔**而不是 phase 本身：probing→needsToken 这类
+  // 非 ready 相位之间的跳变不该换桩 —— 换了，全部消费方就白白重建一轮。
+  final ready = ref.watch(
+    authControllerProvider.select((s) => s.phase == AuthPhase.ready),
+  );
+  if (!ready) {
+    final api = GateClosedApi();
+    ref.onDispose(api.dispose);
+    return api;
   }
 
   final token = ref.watch(authControllerProvider.select((s) => s.token));
@@ -692,6 +704,10 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
     baseUrl: origin,
     // 打到 agent 时用**它认的那把**，见 `apiToken`
     token: apiToken(userToken: token, onLocalAgent: agentOrigin.value != null),
+    // 生产恒 null（HttpCortexApi 自建）。这个口子只为测试存在：没有它，
+    // 下面 onUnauthorized 闭包的接线（资格审查用哪边的 token）从测试里
+    // 够不着 —— 上一轮它只有纯函数测试，接线错了照样全绿。
+    client: ref.watch(httpClientFactoryProvider)?.call(),
     // `read`, not `watch`: this is an outbound edge. Watching the notifier
     // would make every auth state change rebuild the client, including the one
     // this very callback triggers.
@@ -708,6 +724,13 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
       // 判据是**这个实例被造出来时的 token 还是不是当前那把**：不是，
       // 说明它报的是一把已经退位的凭据，与现任无关，丢掉。
       if (!ref.mounted) return;
+      // 离线模式没有「远端会话」这回事：一个主动选了离线的用户手里
+      // 本来就没有凭据（token 恒 null，与现任 null 相等，光靠上面的
+      // 判据拦不住），此时打向远端的任何 401 都不构成「你被登出了」。
+      // 不拦的实际后果（审查复现过）：点「离线使用」→ ready →
+      // 本地 agent 还没起、请求先落到远端 → 401 → 被打回登录页，
+      // 且 offline 已是 true，「离线使用」按钮从此同值短路、点不动。
+      if (ref.read(appConfigProvider).offline) return;
       if (!shouldForwardUnauthorized(
         instanceToken: token,
         currentToken: ref.read(authControllerProvider).token,
@@ -720,6 +743,12 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
   ref.onDispose(api.dispose);
   return api;
 });
+
+/// 测试注入 HTTP 层的口子。生产不 override，恒 null。
+@visibleForTesting
+final httpClientFactoryProvider = Provider<http.Client Function()?>(
+  (_) => null,
+);
 
 /// 一个 401 报告要不要转给 [AuthController.onUnauthorized]。
 ///
@@ -747,17 +776,46 @@ bool shouldForwardUnauthorized({
 /// `noSuchMethod` 让「新方法默认被拦」成为不需要人记得的事。
 @visibleForTesting
 class GateClosedApi implements CortexApi {
-  /// provider 换代时会被调用（`ref.onDispose`），必须真的存在且不抛。
-  @override
-  void dispose() {}
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => throw const CortexApiException(
+  static const _closed = CortexApiException(
     // ASCII 的「gate-closed」是给产物验证用的指纹：中文在 dart2js 产物里
     // 是 \uXXXX 转义，grep 不到。
     '还没登录，这个请求没有发出去（gate-closed）',
     statusCode: 401,
   );
+
+  /// provider 换代时会被调用（`ref.onDispose`），必须真的存在且不抛。
+  @override
+  void dispose() {}
+
+  // ── 四个 Stream 成员必须显式实现成 Stream.error，不能走 noSuchMethod。──
+  //
+  // 真实现全是 async*，**永远不会同步抛**，调用方据此把「先置 running
+  // 状态、再 listen」写成了非 async 的直筒代码（ImportController.start）。
+  // noSuchMethod 的同步抛会在 `.listen` 之前就穿出去：状态卡死在
+  // running、订阅号还是 null、异常直冲 unhandled zone —— 会话过期时
+  // 开着导入对话框点「开始导入」就能命中。Stream.error 保住时序契约，
+  // 错误从调用方现成的 onError 路径走。`RunAttachUnsupported` 是同一
+  // 判断的先例。
+  @override
+  Stream<ChatEvent> chat({
+    required String sessionId,
+    required String message,
+    List<Attachment> attachments = const [],
+    PermissionMode permissionMode = PermissionMode.ask,
+  }) => Stream.error(_closed);
+
+  @override
+  Stream<ChatEvent> attachChat(String sessionId) => Stream.error(_closed);
+
+  @override
+  Stream<SyncEvent> watchSync() => Stream.error(_closed);
+
+  @override
+  Stream<ImportEvent> runImport(ImportTarget target, {int? maxConversations}) =>
+      Stream.error(_closed);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw _closed;
 }
 
 /// `GET /health`, polled lazily (on demand + on manual refresh).

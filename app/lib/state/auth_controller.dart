@@ -395,9 +395,27 @@ class AuthController extends Notifier<AuthState> {
     final generation = ++_generation;
     final api = _probeApi(token: null);
     try {
-      final tokens = await api.refreshSession(refreshToken);
+      // ── 换 token 这件事要拿跨标签页的锁，且锁内先重读存储。──
+      //
+      // refresh token 是一次性轮换的：同一枚出示两次，服务端按重放处理，
+      // 整条 family 作废。Web 上凭据在 localStorage 里被所有标签页共享，
+      // 而每个标签页内存里的那份可能已经被别的标签页轮换掉 —— 浏览器
+      // 重启恢复两个标签页时，两边同时拿同一枚去续，后到的就是重放，
+      // **两页一起被登出**。锁把并发续期排成队；锁内重读让排在后面的
+      // 用前一个留下的后继，而不是自己手里那枚已作废的。
+      //
+      // 落盘也在锁内、成功后立即做：下一个等锁的标签页靠这份找到后继。
+      final tokens = await withRefreshLock(() async {
+        var candidate = refreshToken;
+        if (kCanRememberToken) {
+          final stored = await readRememberedToken();
+          if (stored != null && stored != candidate) candidate = stored;
+        }
+        final fresh = await api.refreshSession(candidate);
+        if (kCanRememberToken) await rememberToken(fresh.refreshToken);
+        return fresh;
+      });
       if (!_alive(generation)) return false;
-      if (kCanRememberToken) await rememberToken(tokens.refreshToken);
       state = state.copyWith(
         phase: AuthPhase.ready,
         token: tokens.accessToken,

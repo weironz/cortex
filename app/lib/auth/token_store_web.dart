@@ -1,3 +1,5 @@
+import 'dart:js_interop';
+
 import 'package:web/web.dart' as web;
 
 /// Not read on Web — a browser tab has no environment. Kept so the two halves
@@ -43,14 +45,15 @@ const String kTokenStorageNote =
 /// sessionStorage 换来的不是安全，只是把承诺变成谎话。
 /// 真正的 30 天上限由服务端的 refresh token 有效期把守，不靠浏览器。
 ///
-/// 读的时候两个都看：sessionStorage 那份是旧版本存下的，认它，用户就不必
-/// 因为升级而重新登录一次。
+/// **不回落读旧的 sessionStorage 份**。回落读曾经写过，后被审查证伪：
+/// sessionStorage 按标签页隔离，旧版本下每个登录过的标签页各持一条独立
+/// family —— 用户在 A 标签页登出（清掉 localStorage、作废 A 的 family），
+/// B 标签页一刷新，回落读到 B 自己的旧份、续期成功、又写回 localStorage：
+/// **明确登出之后凭据在另一个标签页复活**，还从「随标签页死」升格成
+/// 「跨重启存活」。迁移的全部收益是老用户少登录一次，换这个不值。
 Future<String?> readRememberedToken() async {
   try {
-    final raw =
-        (web.window.localStorage.getItem(_kKey) ??
-                web.window.sessionStorage.getItem(_kKey))
-            ?.trim();
+    final raw = web.window.localStorage.getItem(_kKey)?.trim();
     return (raw == null || raw.isEmpty) ? null : raw;
   } on Object {
     // 沙箱 iframe 或禁了站点数据的浏览器在 getter 上就抛。
@@ -98,4 +101,46 @@ Future<void> forgetToken() async {
   } on Object {
     // Nothing was stored if the setter failed earlier.
   }
+}
+
+/// 把「换 refresh token」串行化到**整个 origin**（所有标签页排队）。
+///
+/// # 为什么必须有它
+///
+/// refresh token 是一次性轮换的：同一枚被出示两次，服务端按重放处理，
+/// **整条 family 作废**（见 `cortex-agentd/src/credentials.rs`，一条测试
+/// 钉死了无并发宽限）。凭据搬进 localStorage 之后所有标签页共享一条链，
+/// 而每个标签页的内存里各有一份轮换状态 —— 浏览器重启恢复两个标签页，
+/// 两个 `_bootstrap` 同时拿同一枚去续，后到的就是重放：两页全被登出，
+/// 恰好把「关掉再打开不用重来」变成多标签用户身上的必然失败。
+///
+/// Web Locks 是跨标签页的进程级锁，正是为这种事设计的。排在后面的调用
+/// 要在锁内**重读存储**（见 `AuthController.restoreSession`），用前一个
+/// 留下的后继而不是自己手里那枚已作废的。
+Future<T> withRefreshLock<T>(Future<T> Function() body) async {
+  T? out;
+  Object? err;
+  StackTrace? st;
+  Future<void> run() async {
+    try {
+      out = await body();
+    } catch (e, s) {
+      err = e;
+      st = s;
+    }
+  }
+
+  try {
+    await web.window.navigator.locks
+        .request('cortex.token.refresh', ((JSAny? lock) => run().toJS).toJS)
+        .toDart;
+  } on Object {
+    // 没有 Web Locks 的环境（老浏览器、非安全上下文）：退回无锁执行。
+    // 单标签页时无影响；多标签页退回改动前的暴露面，不新增风险。
+    await run();
+  }
+  if (err != null) {
+    Error.throwWithStackTrace(err!, st ?? StackTrace.current);
+  }
+  return out as T;
 }
