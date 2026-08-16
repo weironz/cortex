@@ -73,7 +73,16 @@ server {
     # 「哪条路归谁」，而让 cortexd 知道 agentd 在哪，等于给要独立开源的那一半
     # 留一条「agent 服务地址」的配置 —— 那正是这次拆分要消灭的耦合。
     # 边缘本来就在做路径分流，这件事放它这儿一行配置都不多。
-    location ~ ^/(health|confirmations|memory|llm|episodes|sessions|projects|blobs|sync|auth|import|settings|sandbox-snapshots|delegated-tokens|mcp)(/|$) {
+    #
+    # ── 已经搬到 agentd 的，从这份清单里逐条删掉 ──
+    #
+    # 2026-08-16 删掉了 `sessions`：列会话与翻历史现在由 agentd 自己答，
+    # 数据在 Cortex 自己的库里。**删而不是加豁免** —— 一条路径同时出现在
+    # 两个 location 里时，nginx 按先后取第一个匹配的，于是「我明明改了」
+    # 与「它没生效」会同时成立。
+    #
+    # 这份清单会一直缩短，最后只剩记忆那一侧真正的路由（memory、mcp）。
+    location ~ ^/(health|confirmations|memory|llm|episodes|projects|blobs|sync|auth|import|settings|sandbox-snapshots|delegated-tokens|mcp)(/|$) {
         proxy_pass http://cortexd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
@@ -105,7 +114,7 @@ server {
     # 与上面那段的配置逐字相同（SSE 关缓冲、30 分钟读超时），只有上游不同。
     # 不合并成一段再按前缀选上游：nginx 里那么写要引一个 map，而两段各自
     # 完整、读得出「这条归谁」，比省下十行重要。
-    location ~ ^/(chat|sandbox)(/|$) {
+    location ~ ^/(chat|sandbox|sessions)(/|$) {
         proxy_pass http://agentd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;

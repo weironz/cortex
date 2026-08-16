@@ -84,6 +84,16 @@ protected_routes! {
     "/auth/usage" [GET] => get(crate::accounts::usage),
     // 加不了请求头的连接（WebSocket、<img src>）拿它换一个 60 秒的 `?ticket=`
     "/auth/ticket" [POST] => post(issue_ticket),
+    // ── 会话 ──
+    //
+    // 列会话与翻历史。**这两条是「记忆服务挂了历史照样在」的第一块** ——
+    // 它们此前住在记忆服务里，把它停掉之后 agent 连上一句话都读不到。
+    //
+    // 改名 / 归档 / 绑工作区那个 PATCH **还没搬**，所以这里只声明 GET：
+    // 路径整条会被边缘转过来，PATCH 打过来会拿到 405 而不是 404 ——
+    // 405 说的是「这条路在，只是这个动作还没有」，正是实情。
+    "/sessions" [GET] => get(crate::sessions::list),
+    "/sessions/{id}" [GET] => get(crate::sessions::detail),
 }
 
 /// 路由表。
@@ -936,7 +946,15 @@ mod tests {
             crate::auth::AuthMode::Disabled,
         );
         let app = router(st);
-        for path in ["/sessions", "/memory/search", "/episodes", "/sync", "/ws"] {
+        // **`/sessions` 已经不在这份名单里了。**
+        //
+        // 它 2026-08-16 搬了过来 —— 会话不是记忆能力，判据见
+        // `crate::sessions` 的模块头。剩下的这几条是真正属于记忆那一侧的：
+        // 召回、MCP 门面、以及记忆浏览器的回放。
+        //
+        // `/episodes` `/sync` `/ws` 暂时还在这份名单里，但**它们最终会搬过来**
+        // —— 到那时把它们从这里删掉，而不是给它们加豁免
+        for path in ["/memory/search", "/mcp", "/episodes", "/sync", "/ws"] {
             let resp = app
                 .clone()
                 .oneshot(
@@ -950,7 +968,7 @@ mod tests {
             assert_eq!(
                 resp.status(),
                 StatusCode::NOT_FOUND,
-                "{path} 不该由 agentd 应答 —— 它是记忆服务的路由，由边缘直转"
+                "{path} 不该由 agentd 应答 —— 要么它是记忆那一侧的路由（由边缘直转），                 要么它还没搬过来。真搬过来了就把它从这份名单里删掉"
             );
         }
     }

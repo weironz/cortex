@@ -165,6 +165,17 @@ impl AgentState {
         self.inner.store.as_ref()
     }
 
+    /// 同上，但给出一个能塞进 [`crate::request_tenant::Tenant`] 的所有权句柄。
+    ///
+    /// `None` = 这个部署没接数据库。**不要在这里回落到一个空 Store** ——
+    /// 那会让「没配库」与「库是空的」在调用点长得一样。
+    #[must_use]
+    pub fn public_store(&self) -> Option<Arc<cortex_store::Store>> {
+        // `Store` 内部是 `Arc<PgPool>` 的封装，clone 廉价；再包一层 Arc
+        // 只是为了让 `Tenant` 能持有它而不必借用 self
+        self.inner.store.clone().map(Arc::new)
+    }
+
     /// 账号相关的两个句柄。
     ///
     /// # Errors
