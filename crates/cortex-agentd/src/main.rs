@@ -39,6 +39,7 @@ mod import;
 mod llm;
 mod projects;
 mod quota;
+mod rate_limit;
 mod reaper;
 mod remote;
 mod request_tenant;

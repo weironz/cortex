@@ -93,6 +93,13 @@ struct Inner {
     tickets: Arc<TicketBook>,
     /// 已签发的 access token。见 [`crate::accounts::AccessBook`]。
     access: Arc<crate::accounts::AccessBook>,
+    /// 认证端点（login / refresh / register）的限流表。
+    ///
+    /// 与 [`Inner::tickets`] / [`Inner::access`] 同款的进程内簿子。它挂在
+    /// 这儿而不是做成一层中间件，是因为键要从**请求体**里来（refresh token
+    /// 的摘要、提交的用户名），而中间件那层还没解析请求体。
+    /// 阈值与逐端点的键怎么选，见 [`crate::rate_limit`] 的模块文档。
+    auth_throttle: Arc<crate::rate_limit::AuthThrottle>,
     /// 每个租户一条的实时推送总线。懒建，见 [`crate::sync_bus::SyncBuses`]。
     sync_buses: Arc<crate::sync_bus::SyncBuses>,
     /// 委托令牌那本簿子（沙箱容器回调用的那种）。见
@@ -212,6 +219,7 @@ impl AgentState {
                 auth,
                 tickets: Arc::new(TicketBook::default()),
                 access: Arc::new(crate::accounts::AccessBook::default()),
+                auth_throttle: Arc::new(crate::rate_limit::AuthThrottle::default()),
                 sync_buses: Arc::new(crate::sync_bus::SyncBuses::default()),
                 delegations: Arc::new(crate::delegated_token::DelegatedTokens::default()),
                 last_use: Mutex::new(HashMap::new()),
@@ -304,6 +312,12 @@ impl AgentState {
     #[must_use]
     pub fn access_book(&self) -> &crate::accounts::AccessBook {
         &self.inner.access
+    }
+
+    /// 认证端点的限流表。检查与记录都走它，见 [`crate::rate_limit`]。
+    #[must_use]
+    pub fn auth_throttle(&self) -> &crate::rate_limit::AuthThrottle {
+        &self.inner.auth_throttle
     }
 
     /// 按租户取实时推送总线。
