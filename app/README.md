@@ -1,5 +1,18 @@
 # Cortex 客户端（Flutter）
 
+> ⚠️ **这篇里的「cortexd」大多已经不是那个 cortexd 了**（2026-08-17 核过一遍）。
+> 记忆那一半拆成了独立产品 [Cormex](https://github.com/weironz/cormex)，
+> 这一侧的服务端是 **`cortex-agentd`**（云端编排）与 **`cortex-local`**
+> （agent 循环，跑在你自己机器上或沙箱容器里）。
+>
+> 客户端要连的是**部署入口**（边缘），不是记忆服务本身 —— `/chat` 归 agentd，
+> 其余归记忆服务，而知道该转给谁的只有边缘。填错的症状很难归因：
+> 会话、历史、实时同步全都正常，**只有对话不通**。
+>
+> 仍然写着 `cortexd::` 的地方是**历史出处引用**（某段逻辑当初抄自那里），
+> 不是今天的调用路径。
+
+
 Cortex 的图形界面。一套代码同时出 **Windows 桌面** 与 **Web**，后续复用到 macOS / Linux / 移动端。
 
 对应 roadmap 的 **M7**。
@@ -13,7 +26,8 @@ ChatGPT 和 Claude 都把「聊天」和「写代码」做成了两个菜单。*
 
 ```
 单一对话流
-  └─ 会话可选绑定一个「工作区」（cortexd 那台机器上的一个目录）
+  └─ 会话可选绑定一个「工作区」（**你自己机器上**的一个目录，由本机
+     cortex-local 校验与读写；云端会话则是容器里的 /workspace）
        未绑定 → 助手拿不到文件工具，就是纯聊天
        已绑定 → 侧边多一个可折叠的文件树，助手能读写该目录
 ```
@@ -33,7 +47,7 @@ UI 上分成两个入口，用户在心智上就把它们当成两件事了，�
 | 它们分开的原因 | Cortex 的解法 |
 |---|---|
 | **执行环境**：写代码要能碰文件，聊天不该碰 | 工作区绑定。未绑定的会话，服务端给模型的工具目录里**根本没有**文件工具（`WORKSPACE_FREE_TOOLS` 白名单），模型会直接说自己读不了文件，而不是调用失败几轮再放弃 |
-| **信任模型**：文件读写的授权粒度不同 | 授权点在「绑定」那一刻，而不是每条消息。路径由用户在界面上显式选一次，服务端 `cortexd::workspace::validate` 实打实校验；模型在运行时说什么都改不了这个根 |
+| **信任模型**：文件读写的授权粒度不同 | 授权点在「绑定」那一刻，而不是每条消息。路径由用户在界面上显式选一次，**本机 agent** 的 `cortex_agent::workspace::validate` 实打实校验（校验必须跑在拥有那个文件系统的那一侧）；模型在运行时说什么都改不了这个根 |
 | **交互节奏**：写代码要看工具轨迹，聊天要看回答 | 同一条流里分层：生成中工具行常驻可见，生成完折进一条细线。绑没绑工作区都是这一套 |
 | **上下文来源**：一个来自代码库，一个来自对话历史 | 这正是我们要合并的东西。两者都进同一个记忆底座，检索时不分家 |
 
@@ -54,7 +68,7 @@ flutter pub get
 ### 桌面（Windows）
 
 ```bash
-flutter run -d windows                       # 连本机 cortexd
+flutter run -d windows                       # 连本机部署入口
 flutter run -d windows --dart-define=USE_MOCK=true   # 纯离线，用内存夹具
 ```
 
@@ -78,7 +92,7 @@ flutter build web --release                  # 产物：build/web/
 cd build/web && python -m http.server 8000
 ```
 
-> Web 端连非同源的 cortexd 需要服务端允许 CORS。`cortexd` 已挂 `tower-http` 的 CORS layer，
+> Web 端连非同源的服务端需要允许 CORS。agentd 已挂 `tower-http` 的 CORS layer，
 > 本机开发直接可用；若换了部署方式，先确认 `Access-Control-Allow-Origin` 覆盖了页面来源。
 
 ---
@@ -93,10 +107,10 @@ cd build/web && python -m http.server 8000
 | 开关 | 默认值 | 含义 |
 |---|---|---|
 | `USE_MOCK` | `false` | `true` 时不发起任何网络请求，全部数据来自 `MockCortexApi` 的内存夹具 |
-| `CORTEX_BASE_URL` | `http://127.0.0.1:8080` | cortexd 地址 |
+| `CORTEX_BASE_URL` | `http://127.0.0.1:8080` | **部署入口**地址（不是记忆服务本身：`/chat` 归 agentd，分流在边缘；dev 是 `http://127.0.0.1:5173`）|
 
 ```bash
-# 离线演示：不需要起 cortexd
+# 离线演示：不需要任何服务端
 flutter run -d windows --dart-define=USE_MOCK=true
 flutter build web --release --dart-define=USE_MOCK=true
 
@@ -112,16 +126,16 @@ Mock 不是"塞几条假数据"：它实现同一个 `CortexApi` 接口，按同
 - **检索会弃权**：问题与夹具无关时**不发** `memory` 事件。若 mock 永远带回记忆，
   空态就只能在生产环境第一次被看见
 
-启动 cortexd：
+启动服务端（agent 编排）：
 
 ```bash
 cd ..
-cargo run -p cortexd -- --generate-token   # 第一次：生成凭据
+cargo run -p cortex-agentd -- --generate-token   # 第一次：生成凭据
 # 摘要那行写进 .env，明文那行给客户端
-cargo run -p cortexd
+cargo run -p cortex-agentd
 ```
 
-**注意认证。** `cortexd` 没配凭据会拒绝启动，所以客户端启动后会先落在登录屏。
+**注意认证。** `cortex-agentd` 没配凭据会拒绝启动，所以客户端启动后会先落在登录屏。
 桌面端把明文 token 设成环境变量 `CORTEXD_TOKEN` 就能跳过它：
 
 ```bash
@@ -272,7 +286,7 @@ SSE 解析器 `api/sse.dart` 是自己写的，因为 Dart 生态里两个主流
 
 ### 认证：凭据存在哪，以及为什么两端不一样
 
-`cortexd` **没配凭据就拒绝启动**，所以任何真实部署都开着认证。客户端因此必须有
+`cortex-agentd` **没配凭据就拒绝启动**，所以任何真实部署都开着认证。客户端因此必须有
 一个填地址与 token 的入口，否则它连不上任何真实服务端 —— 那是发版硬阻塞，不是体验问题。
 
 启动时先问一次不需要认证的 `GET /health`，它回一个 `auth: "token" | "disabled"`：
@@ -293,7 +307,7 @@ SSE 解析器 `api/sse.dart` 是自己写的，因为 Dart 生态里两个主流
 不是「一边有 API 一边没有」：
 
 - **桌面**：读环境变量 `CORTEXD_TOKEN`，本机不留任何副本。这正是
-  `cortexd --generate-token` 打印出来的那一行，照它办就是遵守契约而不是另发明一套。
+  `cortex-agentd --generate-token` 打印出来的那一行，照它办就是遵守契约而不是另发明一套。
   `setx CORTEXD_TOKEN "<token>"` 设一次，之后每次启动都自动带上，用户根本看不到登录屏。
   **不写明文文件**：没有 OS keychain 绑定的话，那和环境变量同样暴露，还多一份用户
   早就忘了自己创建过的东西。
@@ -386,7 +400,7 @@ MOCK_CONFIRM_TRIGGER`），登记、挂起、超时按拒绝、回执一次性�
 
 ### 实时同步：`GET /ws` 只推信号
 
-`cortexd` 的 WS 下行只有三种事件，且**不带数据**：
+服务端的 WS 下行只有三种事件，且**不带数据**：
 
 ```json
 {"type":"hello",  "cursor": 13, "version":"0.0.1"}
@@ -492,14 +506,14 @@ daemon 照样把这次尝试作为 `tool` 事件发出来，连同它从参数�
 - 不是因为浏览器选不了目录 —— Chromium 有 `showDirectoryPicker`，接进来并不难。
 - 不是因为 Flutter Web 缺插件。
 
-是因为**这个路径必须对 cortexd 有意义，而不是对浏览器有意义**。文件工具跑在 daemon
+是因为**这个路径必须对跑工具的那一侧有意义，而不是对浏览器有意义**。文件工具跑在 agent
 里、被 `cortex_agent::Sandbox` 围着，工作区是 **daemon 那台机器上**的绝对路径。
 浏览器的目录句柄指的是**用户**那台机器上的文件夹，Web 部署下多半根本不是同一台；
 就算是同一台，那个句柄也变不回一个路径。把 `showDirectoryPicker` 接上去，得到的是
 一个看起来能用、实际绑不出任何有效值的选择器。
 
 所以 Web 端给的是路径输入框 + 写在旁边的原因，校验交给 daemon 的
-`cortexd::workspace::validate`（绝对路径、存在、是目录、不是盘符根 / 系统目录 /
+`cortex_agent::workspace::validate`（绝对路径、存在、是目录、不是盘符根 / 系统目录 /
 主目录本身，且在解析符号链接之后判定）。它的拒绝理由是写给人看的，客户端**原样透出**，
 不重新措辞。
 
@@ -515,10 +529,10 @@ agent 照常读写，只是浏览器看不到那台机器的磁盘 —— 而对
 
 ### 附件：32 MiB 以下走中转，以上走直传
 
-门槛不是这里拍的，是**抄的** `cortexd::blobs::DIRECT_UPLOAD_LIMIT`。daemon 给
+门槛不是这里拍的，是**抄的**服务端那份 `DIRECT_UPLOAD_LIMIT`。daemon 给
 `POST /blobs` 挂的 `DefaultBodyLimit` 就是这个数：客户端定得更高只会换来一个
 413，定得更低会把小文件推上三次往返的直传路径。两条路的取舍在 daemon 的注释里已经
-写清楚了，客户端照做即可 —— 中转意味着同一份字节走两趟（客户端 → cortexd → 对象存储），
+写清楚了，客户端照做即可 —— 中转意味着同一份字节走两趟（客户端 → 服务端 → 对象存储），
 正好是上行最贵的那些文件在多付一倍带宽；而小文件上，presign 多出的两次往返比省下的
 传输还贵。
 
@@ -605,7 +619,7 @@ agent 照常读写，只是浏览器看不到那台机器的磁盘 —— 而对
 | 一页多大由客户端拍 | `kEpisodePage = 40`。服务端上限 500，没有「推荐值」的说法，40 是照着原来的渲染窗口定的，没有实测支撑 |
 | 对话流的自动重试 | WS 有指数退避自动重连，但 `POST /chat` 断了仍只有手动「重试」按钮 |
 | Web 端 WS 的运行时验证 | `flutter build web --release` 通过（说明 WS 这条路径没有漏进 `dart:io`），但**没有在真实浏览器里跑过一次连接**。`web_socket_channel` 在 web 上走浏览器 `WebSocket`，与 SSE 当年那个 `XMLHttpRequest` 坑不是同一类问题，不过在浏览器里点一次才算数 |
-| 多租户 / 多用户 | 服务端明确不做（见 `cortexd::auth` 末尾那段），客户端因此也只有一份凭据、没有「切换用户」 |
+| ~~多租户 / 多用户~~ | **已经做了**（R9）：账号密码登录、按 schema 隔离、配额、自带 key。这一行以前写着「服务端明确不做」，那是 2026-08 之前的结论 —— 客户端现在有登录屏与账号菜单 |
 | 桌面端记住 token | 不做。见「凭据存在哪」——没有 OS keychain 绑定的明文文件比环境变量更差 |
 | 国际化 | 文案硬编码中文，未接 `flutter_localizations` |
 
@@ -659,7 +673,7 @@ live 用例只断言协议真正保证的东西。它们原先要求 `['memory',
 ### 与真实后端的联调记录
 
 ```bash
-docker compose up -d && cargo run -p cortexd      # 终端 A
+just dev                                          # 终端 A（agentd + web + 库）
 ./build/windows/x64/runner/Debug/cortex_app.exe   # 终端 B
 cargo run -p cortex-cli -- chat "…"               # 终端 C
 ```
@@ -720,7 +734,7 @@ daemon 重启后客户端在退避窗口内自行重连（日志里一条 `GET /
 
 #### 认证 / 工具确认这一批的联调结果
 
-对一个**开着认证**的真实 daemon 跑通。凭据用 `cortexd --generate-token` 现生成一份，
+对一个**开着认证**的真实 daemon 跑通。凭据用 `cortex-agentd --generate-token` 现生成一份，
 摘要给服务端、明文给客户端。当时 `crates/` 正被另一个 agent 改到编译不过，
 所以 daemon 是在一个干净 commit 的 `git worktree` 上另起的（跑完已删）。
 
