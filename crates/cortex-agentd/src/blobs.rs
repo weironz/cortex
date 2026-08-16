@@ -435,6 +435,19 @@ pub async fn download(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
 
+    // 中转路径是**整对象进内存**（BlobStore::get 只有 Bytes 形状），
+    // 而 presign 直传的对象没有体积上限、commit 也不复核 size ——
+    // 不设闸门的话，一条指向超大对象的附件引用就能把 3.5G 的生产节点
+    // 顶出 OOM。上限与快照/导出的口径一致；真流式（ByteStream → Body）
+    // 记在任务表里，做完后这道闸只防「size_bytes 谎报」。
+    const MAX_TRANSIT_BYTES: i64 = 512 * 1024 * 1024;
+    if size > MAX_TRANSIT_BYTES {
+        return Err(ApiError::payload_too_large(format!(
+            "对象 {} MiB，超过中转上限 512 MiB",
+            size / (1024 * 1024)
+        )));
+    }
+
     match parse_range(raw_range.as_deref(), total) {
         RangeSpec::Full => {
             let bytes = media.get(&hash).await?;

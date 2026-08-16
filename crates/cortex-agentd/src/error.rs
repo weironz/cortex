@@ -55,6 +55,14 @@ impl ApiError {
         }
     }
 
+    /// 413：这个体积在这条路上搬不动。
+    pub fn payload_too_large(message: impl Into<String>) -> Self {
+        Self {
+            message: Some(message.into()),
+            status: Some(StatusCode::PAYLOAD_TOO_LARGE),
+            inner: cortex_core::CortexError::Invalid(String::new()),
+        }
+    }
     /// 429：额度用完了，或者来得太密（认证端点的限流，见 [`crate::rate_limit`]）。
     ///
     /// 与 403 分开：403 的意思是「这件事你永远不能做」，429 是

@@ -19,8 +19,8 @@ use cortex_proto::llm::LlmStreamRequest;
 /// 为「连不上」准备的，早点失败早点排队。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// [`Remote::blob_response`] 等响应头的上限。整请求超时罩不住大文件，
-/// 但「连不上 / 服务端不吭声」要尽快失败 —— 附件取不到只是降级，
+/// [`Remote::blob_response`] 等**响应头**的上限（只包 send，不包身子）。
+/// 「连不上 / 服务端不吭声」要尽快失败 —— 附件取不到只是降级，
 /// 不该让用户对着转圈等两分钟。
 const BLOB_HEADER_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -257,14 +257,18 @@ impl Remote {
     /// 容器里这条打的是回调面（agentd 从对象存储中转），委托令牌的
     /// 白名单里有对应的一条 —— 少了它云端会话的附件会静默全部不可用。
     pub async fn blob_response(&self, hash: &str) -> Result<reqwest::Response> {
-        let resp = self
+        // **不能用 `RequestBuilder::timeout`**：reqwest 的 per-request 超时
+        // 是**总死线** —— 计时器被塞进 Response，身子读到第 15 秒照样炸。
+        // 上一版就是这么写的，后果是任何下载总时长 >15s 的附件必然
+        // 「下载中断」，而 512MiB 的工作区上限在 15 秒预算下根本够不到。
+        // 这里只包 send()（连上 + 等到响应头）；身子的逐 chunk 空转超时
+        // 由调用方（`attachments::read_capped` / `write_stream`）自己包。
+        let fut = self
             .auth(self.http.get(self.url(&format!("/blobs/{hash}"))))
-            // 不用 REQUEST_TIMEOUT：那是整请求超时，罩不住大文件的
-            // 下载时长。只限「连上并等到响应头」，身子的读取由调用方
-            // 逐 chunk 消费，卡死由传输层的读超时兜底
-            .timeout(BLOB_HEADER_TIMEOUT)
-            .send()
+            .send();
+        let resp = tokio::time::timeout(BLOB_HEADER_TIMEOUT, fut)
             .await
+            .map_err(|_| CortexError::Unavailable("等附件响应头超时".into()))?
             .map_err(map_transport)?;
         checked(resp).await
     }

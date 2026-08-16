@@ -77,7 +77,7 @@ pub async fn place(
     model_can_see: bool,
 ) -> Vec<Placement> {
     let mut out = Vec::with_capacity(refs.len());
-    // 已占用的目标文件名（本轮内防撞；跨轮的撞名靠哈希前缀）
+    // 本轮内已占用的目标文件名；跨轮撞名在落盘时查磁盘、换哈希前缀
     let mut taken: Vec<String> = Vec::new();
     for r in refs {
         out.push(place_one(remote, r, workspace, model_can_see, &mut taken).await);
@@ -113,7 +113,14 @@ async fn place_one(
     let size = resp.content_length();
 
     // ── 岔路 1：图片 ──
-    if mime.starts_with("image/") && model_can_see {
+    //
+    // 只认供应商支持的那几种（png/jpeg/gif/webp）。嗅探出 image/heic、
+    // image/bmp 这类照样是图，但 with_image_bytes 会在组消息时拒掉 ——
+    // 那时字节已经白读一遍、还进不了工作区兜底。在岔路口就分对，
+    // 不支持的图直接当文件落工作区，模型用工具读。
+    let base_mime = mime.split(';').next().unwrap_or(&mime).trim();
+    let supported_image = cortex_llm::vision::SUPPORTED_IMAGE_MIMES.contains(&base_mime);
+    if supported_image && model_can_see {
         match read_capped(resp, MAX_IMAGE_BYTES as u64).await {
             Ok(bytes) => {
                 return Placement::Image { name, mime, bytes };
@@ -213,8 +220,20 @@ async fn write_stream_to_workspace(
         };
     }
 
-    let file_name = unique_file_name(&name, &r.hash, taken);
+    let mut file_name = unique_file_name(&name, &r.hash, taken);
     let dir = ws.join(ATTACHMENT_DIR);
+    // ── 跨轮撞名：磁盘上已有同名文件就换哈希前缀名。──
+    //
+    // 上一轮的 data.csv 不能被这一轮内容不同的 data.csv 静默顶掉 ——
+    // 历史注记还在告诉模型「当时附带的文件：data.csv」，它按旧引用
+    // 读到的会是新字节，且没有任何报错。同内容重发落到同一个前缀名，
+    // 覆盖的是相同字节，幂等无害。
+    if tokio::fs::try_exists(dir.join(&file_name))
+        .await
+        .unwrap_or(false)
+    {
+        file_name = format!("{}-{file_name}", &r.hash[..8.min(r.hash.len())]);
+    }
     let dest = dir.join(&file_name);
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return Placement::Unavailable {
@@ -259,7 +278,7 @@ async fn write_stream(resp: &mut reqwest::Response, dest: &PathBuf) -> Result<u6
         .await
         .map_err(|e| e.to_string())?;
     let mut total: u64 = 0;
-    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+    while let Some(chunk) = next_chunk(resp).await? {
         total += chunk.len() as u64;
         // Content-Length 缺失或撒谎时的兜底：写到上限就停
         if total > WORKSPACE_FILE_MAX {
@@ -269,6 +288,21 @@ async fn write_stream(resp: &mut reqwest::Response, dest: &PathBuf) -> Result<u6
     }
     file.flush().await.map_err(|e| e.to_string())?;
     Ok(total)
+}
+
+/// 下一段字节，带**空转**超时。
+///
+/// Remote 的 client 没设读超时（那个 client 也跑 /llm/stream，模型长
+/// 思考会被读超时误杀），`blob_response` 又只罩响应头 —— 于是身子的
+/// 卡死兜底只能在这里做：单个 chunk 30 秒不来就判死。限的是空转不是
+/// 总时长，大文件慢慢下没问题，僵住的连接才该被掐。
+async fn next_chunk(resp: &mut reqwest::Response) -> Result<Option<Vec<u8>>, String> {
+    match tokio::time::timeout(std::time::Duration::from_secs(30), resp.chunk()).await {
+        Ok(r) => r
+            .map(|opt| opt.map(|b| b.to_vec()))
+            .map_err(|e| e.to_string()),
+        Err(_) => Err("连接空转超过 30 秒".to_string()),
+    }
 }
 
 enum ReadCapped {
@@ -282,11 +316,7 @@ async fn read_capped(mut resp: reqwest::Response, cap: u64) -> Result<Vec<u8>, R
         return Err(ReadCapped::TooLarge);
     }
     let mut buf: Vec<u8> = Vec::with_capacity(resp.content_length().unwrap_or(0) as usize);
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| ReadCapped::Transport(e.to_string()))?
-    {
+    while let Some(chunk) = next_chunk(&mut resp).await.map_err(ReadCapped::Transport)? {
         if buf.len() as u64 + chunk.len() as u64 > cap {
             return Err(ReadCapped::TooLarge);
         }
