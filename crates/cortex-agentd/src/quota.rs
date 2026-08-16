@@ -50,10 +50,14 @@ fn limit() -> Option<i64> {
     (raw > 0).then_some(raw)
 }
 
-// `Usage` 与 `record_usage` **没有跟过来**：它们唯一的调用方是
-// `POST /llm/stream`，而那条路由还在记忆服务那边。搬一份没人调的记账代码
-// 过来，换来的是一条编译警告和「以为这边已经在记账了」的错觉 ——
-// 它们与 `/llm/stream` 一起来（持久层阶段三）。
+/// 用量的一条记录。
+#[derive(Debug, Clone, Copy)]
+pub struct Usage {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    /// 走的是用户自带的 key 吗。自带的照记，但不占配额。
+    pub own_key: bool,
+}
 
 /// 当前窗口的用量与上限。
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -94,6 +98,11 @@ impl From<QuotaStatus> for QuotaView {
 }
 
 impl QuotaStatus {
+    #[must_use]
+    pub fn exceeded(&self) -> bool {
+        self.limit_tokens.is_some_and(|l| self.used_tokens >= l)
+    }
+
     /// 还剩多少。不限量时是 `None`。
     #[must_use]
     pub fn remaining(&self) -> Option<i64> {
@@ -102,6 +111,31 @@ impl QuotaStatus {
 }
 
 impl AgentState {
+    /// 记一次用量。
+    ///
+    /// **失败只记日志，不让业务失败。** 一次对话已经跑完了，为了记不上账
+    /// 而把结果丢掉是本末倒置 —— 而漏记的后果只是这一次没被计入配额。
+    pub async fn record_usage(&self, user_id: &str, kind: &str, usage: Usage, model: &str) {
+        let Ok(acc) = self.accounts() else { return };
+        let r = sqlx::query(
+            "INSERT INTO cortex_auth.usage
+                 (id, user_id, kind, input_tokens, output_tokens, own_key, model)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(cortex_core::Id::new().to_string())
+        .bind(user_id)
+        .bind(kind)
+        .bind(usage.input_tokens)
+        .bind(usage.output_tokens)
+        .bind(usage.own_key)
+        .bind(model)
+        .execute(&acc.pool)
+        .await;
+        if let Err(e) = r {
+            tracing::warn!(error = %e, user = user_id, "用量没记上（本次不计入配额）");
+        }
+    }
+
     /// 这个用户当前窗口的用量。
     ///
     /// # Errors
@@ -132,9 +166,42 @@ impl AgentState {
         })
     }
 
-    // `enforce_quota` **没有跟过来**：它的两个调用方（`/llm/stream` 与
-    // `/delegated-tokens`）都还在记忆服务那边。这里只留「报出用量」那一半
-    // —— `/auth/usage` 真的在调它。
+    /// 超了就拦下。
+    ///
+    /// # 为什么在**发起调用之前**查，而不是事后扣
+    ///
+    /// 事后扣意味着最后那一次一定会超，而「最后那一次」可能是一次
+    /// 六千次调用的导入。查一次是一条走索引的 `sum()`，比一次 LLM 调用
+    /// 便宜四个数量级。
+    ///
+    /// 调用方现在只有 `/llm/stream` 一处。原先还有 `/delegated-tokens`
+    /// （签钥匙时顺手把「额度用完了」告诉 agentd，让它别白起一个容器），
+    /// 而那条路还在记忆服务那边 —— 少了它只是多花一次冷启动，
+    /// **钱仍然拦得住**，因为钱是在这一条上花的。
+    ///
+    /// # Errors
+    /// 超额（429），或者查不动。
+    pub async fn enforce_quota(&self, user_id: &str) -> Result<(), ApiError> {
+        // 没接账号体系 = 单用户自托管，花的是自己的钱，不设限
+        if self.accounts().is_err() {
+            return Ok(());
+        }
+        let status = self.quota_status(user_id).await?;
+        if !status.exceeded() {
+            return Ok(());
+        }
+        // **说清楚超了多少、什么时候恢复。** 一句「配额已用完」会让人
+        // 以为账号坏了，然后去重试、去重启、去提 issue
+        Err(ApiError::too_many_requests(format!(
+            "这个月的用量已经用完了（{} / {} token，按最近 {} 天滚动计算）。\
+             等最早那批用量滑出窗口就会自动恢复；\
+             要立刻继续，可以在**设置 → 模型 → 自己的 API key**里填一把自己的 —— \
+             自带 key 的调用不占这里的配额",
+            status.used_tokens,
+            status.limit_tokens.unwrap_or(0),
+            status.window_days,
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -150,11 +217,15 @@ mod tests {
         }
     }
 
-    /// 不限量的部署：剩余是「无限」而不是一个数。
+    /// 不限量的部署永远不该被拦。
     ///
     /// 自托管单人用是这个产品的主要形态，而在那里配额只会碍事。
     #[test]
-    fn an_unlimited_deployment_has_no_remaining_number() {
+    fn an_unlimited_deployment_never_blocks() {
+        assert!(
+            !status(999_999_999, None).exceeded(),
+            "不限量的部署把人拦住了 —— 自托管单人用花的是自己的钱"
+        );
         assert_eq!(
             status(1, None).remaining(),
             None,
@@ -162,19 +233,26 @@ mod tests {
         );
     }
 
-    /// 剩余不能是负数。
-    ///
-    /// 这正是它不让客户端自己减的理由：`limit - used` 超额时是负的，
-    /// 而每个客户端各写一遍这个判断，迟早有一个显示 -3999。
+    /// 边界是「用满即拦」，不是「超过才拦」。
     #[test]
-    fn remaining_never_goes_negative() {
-        assert_eq!(status(99, Some(100)).remaining(), Some(1));
-        assert_eq!(status(120, Some(100)).remaining(), Some(0));
+    fn the_limit_is_inclusive() {
+        assert!(!status(99, Some(100)).exceeded(), "还差一个 token 不该拦");
+        assert!(
+            status(100, Some(100)).exceeded(),
+            "用满就该拦 —— 放行等于每个人都能多花一次调用的钱"
+        );
+        assert!(status(101, Some(100)).exceeded(), "超了当然要拦");
+        assert_eq!(
+            status(120, Some(100)).remaining(),
+            Some(0),
+            "剩余不能是负数 —— 这正是它不让客户端自己减的理由：\
+             每个客户端各写一遍 limit - used，迟早有一个显示 -3999"
+        );
     }
 
     /// **自带 key 的用量不占配额，但要能看见。**
     ///
-    /// 混进 `used_tokens` 会让填了自己 key 的人照样被算超；
+    /// 混进 `used_tokens` 会让填了自己 key 的人照样被拦；
     /// 完全不记则「我这个月花了多少」永远答不上来。
     #[test]
     fn own_key_usage_is_visible_but_not_billed() {
@@ -184,6 +262,7 @@ mod tests {
             limit_tokens: Some(100),
             window_days: 30,
         };
+        assert!(!s.exceeded(), "自带 key 花的钱不该把人拦在自己的配额外面");
         assert_eq!(
             s.remaining(),
             Some(90),
@@ -191,9 +270,4 @@ mod tests {
         );
         assert_eq!(s.own_key_tokens, 5_000_000, "但它必须看得见");
     }
-
-    // 「用满即拦」那条边界的测试**跟着 `exceeded` 一起留在了记忆服务那边**
-    // ——判断本身要等 `enforce_quota` 搬过来（它的调用方是 `/llm/stream`
-    // 与 `/delegated-tokens`）。搬一个没人调的判断过来，等于把一条永远
-    // 为真的断言当成保护。
 }

@@ -27,6 +27,12 @@ cortex-proto.workspace = true
 # 自己人和外人用同一个 API，那个 API 才不会烂。
 cortex-store.workspace = true
 
+# **供应商层。只依赖它，不要写 `goose-provider-types`** —— 那个 crate 没有
+# `rustls-tls` feature（alpha 的每个版本都没有，TLS 后端只由 goose-providers
+# 转发给 reqwest），根 Cargo.toml 里给它写了这个 feature，直接引用会让
+# **依赖解析当场失败**。`cortex-llm` 已经把类型层整个 `pub use` 出来了。
+cortex-llm.workspace = true
+
 # 也没有 `cortex-agent`：这个进程不跑 agent 循环。循环在容器里那个
 # `cortex-local` 上（`--exec-env=container`），这里只负责把它拉起来、
 # 把请求原样送进去。
@@ -66,6 +72,9 @@ password-hash = { version = "0.5", features = ["alloc"] }
 # 盐与 refresh token 的熵。用 getrandom 而不是 rand：这里要的是内核熵源，
 # 取不到时必须 panic 而不是回落到可预测的种子
 getrandom = "0.3"
+# 自带 API key 的信封加密（AES-256-GCM）。**要的是 AEAD，不是「加密」** ——
+# 少了完整性那一半，库里那一行就是任何能写库的人都可以替换的。见 byo_key.rs
+ring = "0.17"
 
 tracing.workspace = true
 tracing-subscriber.workspace = true

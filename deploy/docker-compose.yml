@@ -190,6 +190,27 @@ services:
       # 服务端那把 key 烧钱，而生产是一台 2 核 3.5G 的机器。
       # 取值必须正好是 `enabled`，手滑写成 1 不会把门打开。
       CORTEX_OPEN_REGISTRATION: ${CORTEX_OPEN_REGISTRATION:-}
+      # ── 模型 ──
+      #
+      # `/llm/stream` 搬过来之后，**这个进程是花钱的那一方**：服务端那把 key
+      # 在这儿，额度闸门也在这儿。配不全只 warn 不退出 —— 这个进程的本职是
+      # 编排容器，不该因为一个模型设置起不来；`/llm/stream` 此时回 501，
+      # 客户端把 501 当成「这条路不会开」而不重试。
+      #
+      # ⚠️ `${VAR:-}` 展开成**空串**，而 `env::var` 对空串返回 `Ok("")`。
+      # 装配时会判一次「这把 key 是不是空的」，否则会造出一个看着活、
+      # 每一轮都被供应商拒的客户端 —— 这个仓库在「空串顶掉默认值」上栽过。
+      CORTEX_LLM_PROVIDER: ${CORTEX_LLM_PROVIDER:-}
+      CORTEX_LLM_MODEL: ${CORTEX_LLM_MODEL:-}
+      CORTEX_LLM_CHEAP_MODEL: ${CORTEX_LLM_CHEAP_MODEL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # 用户自带 key 的信封加密主密钥。**没有它就存不了自带 key**
+      # （`/settings/llm-key` 明说不支持，而不是假装存下了）
+      CORTEX_SECRET_KEY: ${CORTEX_SECRET_KEY:-}
+      # 每人每月的 token 上限。0 = 不限
+      CORTEX_QUOTA_TOKENS_PER_MONTH: ${CORTEX_QUOTA_TOKENS_PER_MONTH:-}
       RUST_LOG: ${AGENTD_LOG:-cortex_agentd=info,warn}
     volumes:
       # 起沙箱要 docker API。**这是把宿主 root 交给它** —— 论证的另一半是

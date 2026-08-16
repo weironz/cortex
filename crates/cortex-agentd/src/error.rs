@@ -55,8 +55,20 @@ impl ApiError {
         }
     }
 
-    // 429（配额）与 503（暂时不可用）**还没有跟过来**：前者的调用方是
-    // `enforce_quota`，后者是会话那批路由，两者都还在记忆服务那边。
+    /// 429：额度用完了。
+    ///
+    /// 与 403 分开：403 的意思是「这件事你永远不能做」，429 是
+    /// 「现在不行，等等就行」。客户端据此决定要不要显示重试。
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self {
+            message: Some(message.into()),
+            inner: cortex_core::CortexError::Store("quota".into()),
+            status: Some(StatusCode::TOO_MANY_REQUESTS),
+        }
+    }
+
+    // 503（暂时不可用）**还没有跟过来**：它的构造方在记忆那一侧的检索路径上
+    // （`CortexError::Unavailable` 的默认映射），这个进程还没有会走到它的路由。
     // 搬一个没人构造的错误变体过来，只会多一条编译警告。
 
     /// 500：我们这边出了问题。
