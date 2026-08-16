@@ -27,6 +27,7 @@
 
 mod accounts;
 mod auth;
+mod blobs;
 mod byo_key;
 mod credentials;
 mod cursor;
@@ -274,6 +275,23 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // ── 附件的字节 ────────────────────────────────────────
+    //
+    // **配不出来只警告，不拒绝启动**，与 LLM 那一段同一个理由：编排容器不需要
+    // 对象存储。没有它时 `/blobs` 全部 501（「这条路不会开」），客户端据此把
+    // 附件入口降级掉而不是反复重试。
+    //
+    // 装配时就判掉「配了个空串」，见 `blobs::MediaStore::from_env`
+    let blobs = blobs::MediaStore::from_env().await;
+    match blobs.as_ref() {
+        Some(m) => tracing::info!(backend = m.backend(), "附件存储就绪"),
+        None => tracing::warn!(
+            "没有可用的对象存储 —— /blobs 会回 501，界面上的附件入口会自己关掉。\
+             要开就把 S3_ENDPOINT / S3_BUCKET / S3_REGION / RUSTFS_ACCESS_KEY / \
+             RUSTFS_SECRET_KEY 填齐（开发机也可以只给 CORTEX_BLOB_DIR）"
+        ),
+    }
+
     // 认证形态在这里定，而不是在第一次请求时 —— 配错了要当场起不来，
     // 不要等到某个人登录失败才发现这台机器根本没设 token
     let auth = auth::AuthMode::from_env().context("认证配置不合法")?;
@@ -287,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
         accounts,
         llm,
         auth,
+        blobs,
     );
 
     // 后台三件：回收闲置容器、盯 OOM、盯卷配额。

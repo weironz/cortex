@@ -27,6 +27,10 @@ cortex-proto.workspace = true
 # 自己人和外人用同一个 API，那个 API 才不会烂。
 cortex-store.workspace = true
 
+# 附件的字节。**与 `cortex-store` 是两半，缺哪一半都是悬空引用**：那边写
+# 指向字节的那一行，这边写字节本身。见 `src/blobs.rs` 的模块头
+cortex-blob.workspace = true
+
 # **供应商层。只依赖它，不要写 `goose-provider-types`** —— 那个 crate 没有
 # `rustls-tls` feature（alpha 的每个版本都没有，TLS 后端只由 goose-providers
 # 转发给 reqwest），根 Cargo.toml 里给它写了这个 feature，直接引用会让
