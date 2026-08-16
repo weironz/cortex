@@ -141,7 +141,7 @@ class _WorkspaceBindingDialogState
                 controller: _path,
                 autofocus: !kCanBrowseLocalFiles,
                 decoration: InputDecoration(
-                  labelText: 'cortexd 所在机器上的绝对路径',
+                  labelText: '这台机器上的绝对路径',
                   hintText: r'D:\codes\cortex 或 /home/me/work/cortex',
                   errorText: _error,
                   errorMaxLines: 6,
@@ -159,11 +159,25 @@ class _WorkspaceBindingDialogState
               if (!kCanBrowseLocalFiles)
                 _Note(icon: Icons.public_rounded, text: kNoLocalFilesReason)
               else
+                // ── 绑定是**这台机器**的事，说清楚 ──────────────
+                //
+                // 这段以前写的是「路径是 cortexd 那台机器上的」。那已经不对了：
+                // 绑定由本机 agent 独自作答、存在本机的 workspaces.json 里，
+                // 服务端那侧的 workspace **永远是 null**（见
+                // cortex_local::local_workspace 的模块头）。
+                //
+                // 而真正没被说出口的是下一句：**同一个会话在别处打开时，
+                // 工具动的不是这个目录**。Web 端那条路给的是云沙箱容器里的
+                // /workspace，另一台桌面给的是它自己绑的目录。取舍一直是
+                // 「本地那侧说了算」，只是从来没在界面上表达过 ——
+                // 于是「我在公司电脑上绑了 D:\proj，回家打开同一个会话，
+                // agent 却找不到文件」看起来像 bug。
                 _Note(
-                  icon: Icons.dns_outlined,
+                  icon: Icons.devices_rounded,
                   text:
-                      '路径是 cortexd 那台机器上的。桌面端通常与 daemon 同机，'
-                      '直接选目录即可；连的是远端 daemon 时，请填那台机器上的路径。',
+                      '绑定只属于这台机器：它存在本机，不上传，也不跟着会话走。'
+                      '同一个会话在网页端打开时，助手动的是云端工作区；'
+                      '在另一台电脑上打开时，动的是那台电脑自己绑的目录。',
                 ),
               const SizedBox(height: 10),
               Text(
