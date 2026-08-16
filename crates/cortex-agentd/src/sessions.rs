@@ -24,7 +24,8 @@ use chrono::Utc;
 use cortex_core::CortexError;
 use cortex_proto::dto::{
     AttachmentDto, DEFAULT_EPISODE_PAGE, EpisodeDto, ListSessionsQuery, MAX_EPISODE_PAGE,
-    SessionDetail, SessionDetailQuery, SessionDto, SessionPatch, SessionRuntimeDto, ToolCallDto,
+    SessionDetail, SessionDetailQuery, SessionDto, SessionPatch, SessionRuntimeDto,
+    SessionsResponse, ToolCallDto,
 };
 use cortex_store::Store;
 
@@ -43,13 +44,24 @@ const TITLE_CHARS: usize = 40;
 // ─────────────────────────── 路由 ───────────────────────────
 
 /// `GET /sessions` —— 侧栏那份列表。
+///
+/// # 回的是 `{"sessions": [...]}`，**不是裸数组**
+///
+/// 客户端 `asObjectList(json['sessions'])` 按这个形状解。搬过来时我回成了
+/// 裸数组，症状是侧栏一条「/sessions 返回了非对象 JSON」——
+/// 而 curl 看到的是 **200**，逐条打状态码的那种验证一次都没发现它。
+///
+/// 顶层留一个对象而不是数组，本身也是为了以后加分页游标时不必改形状 ——
+/// 那正是这几条列表端点当初统一包一层的理由。
 pub async fn list(
     State(st): State<AgentState>,
     headers: HeaderMap,
     Query(q): Query<ListSessionsQuery>,
-) -> Result<Json<Vec<SessionDto>>, ApiError> {
+) -> Result<Json<SessionsResponse>, ApiError> {
     let tenant = st.tenant(&headers).await?;
-    Ok(Json(list_sessions(tenant.store()?, &q).await?))
+    Ok(Json(SessionsResponse {
+        sessions: list_sessions(tenant.store()?, &q).await?,
+    }))
 }
 
 /// `GET /sessions/{id}` —— 翻开一段历史。
@@ -507,6 +519,32 @@ fn session_title(first_user_text: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **列表端点回的是对象，不是裸数组。**
+    ///
+    /// 这条测试是被打脸打出来的：搬 `/sessions` 时丢了外层的
+    /// `{"sessions": …}`，而客户端按 `json['sessions']` 解，症状是侧栏一条
+    /// 「/sessions 返回了非对象 JSON」。
+    ///
+    /// 更要命的是**它躲过了验证**：我逐条 curl 打过去只看状态码，而形状错了
+    /// 照样是 200。所以这里钉的是序列化之后的**形状本身**，不是「能不能调通」。
+    #[test]
+    fn the_session_list_is_wrapped_in_an_object() {
+        let body = serde_json::to_value(SessionsResponse {
+            sessions: Vec::new(),
+        })
+        .expect("SessionsResponse 应当能序列化");
+
+        assert!(
+            body.is_object(),
+            "顶层必须是对象 —— 客户端按 json['sessions'] 解，裸数组会被判成             「返回了非对象 JSON」而整个侧栏空掉"
+        );
+        assert!(
+            body.get("sessions")
+                .is_some_and(serde_json::Value::is_array),
+            "对象里必须有 `sessions` 这个数组字段，实际是：{body}"
+        );
+    }
 
     /// 没有首条用户消息时给一个占位名，而不是空字符串。
     ///
