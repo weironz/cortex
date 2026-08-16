@@ -338,7 +338,22 @@ class _ErrorNote extends StatelessWidget {
   }
 }
 
-/// Shown between "request sent" and "first token" — the retrieval window.
+/// 「发出去了，还没有第一个 token」——**只表达这一件事**。
+///
+/// # 它以前写着「正在检索记忆…」，那是编的
+///
+/// 触发条件是 `streaming && text.isEmpty`，也就是**任何**等首 token 的时刻：
+/// 模型慢、先要调工具、这一轮压根没检索、甚至这个部署根本没接记忆服务
+/// （`memory_reachable: false`）——四种情况下它都言之凿凿地说在检索记忆。
+///
+/// 更根本的问题是**客户端无从知道**：流上只有 delta / tool / confirm /
+/// done / error 五种事件，没有任何一条讲检索。那句话不是过期，是从来就没有
+/// 依据 —— 原注释里那句「the retrieval window」把「等首 token 的窗口」
+/// 当成了「检索的窗口」。
+///
+/// 所以现在只留动效：**「有事在发生」是真的，「在做什么」我们不知道**。
+/// 要说得更具体，得先让服务端发一条真的阶段事件；在那之前，
+/// 一个诚实的省略号胜过一句好看的假话。
 class _ThinkingIndicator extends StatefulWidget {
   const _ThinkingIndicator();
 
@@ -362,33 +377,36 @@ class _ThinkingIndicatorState extends State<_ThinkingIndicator>
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (var i = 0; i < 3; i++)
-            AnimatedBuilder(
-              animation: _c,
-              builder: (context, _) {
-                final phase = (_c.value - i * 0.18) % 1.0;
-                final t = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
-                return Container(
-                  width: 6,
-                  height: 6,
-                  margin: const EdgeInsets.only(right: 5),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: scheme.onSurfaceVariant.withValues(
-                      alpha: 0.25 + 0.55 * t,
+    return Semantics(
+      // 读屏要有个说法，而这是唯一说得准的那句：请求发出去了，还没回来。
+      // 视觉上不显示它 —— 一行「等待回复」对看得见动效的人是冗余的
+      label: '等待回复',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < 3; i++)
+              AnimatedBuilder(
+                animation: _c,
+                builder: (context, _) {
+                  final phase = (_c.value - i * 0.18) % 1.0;
+                  final t = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
+                  return Container(
+                    width: 6,
+                    height: 6,
+                    margin: const EdgeInsets.only(right: 5),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: scheme.onSurfaceVariant.withValues(
+                        alpha: 0.25 + 0.55 * t,
+                      ),
                     ),
-                  ),
-                );
-              },
-            ),
-          const SizedBox(width: 4),
-          Text('正在检索记忆…', style: Theme.of(context).textTheme.labelSmall),
-        ],
+                  );
+                },
+              ),
+          ],
+        ),
       ),
     );
   }

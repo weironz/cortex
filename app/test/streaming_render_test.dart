@@ -114,4 +114,37 @@ void main() {
       reason: 'Rust 必须多色渲染，只有一种颜色说明降级成纯文本了：$colours',
     );
   });
+
+  /// **等首 token 时不许声称自己在干什么具体的事。**
+  ///
+  /// 这块动效以前写着「正在检索记忆…」，而它的触发条件是
+  /// `streaming && text.isEmpty` —— 也就是任何等首 token 的时刻：模型慢、
+  /// 先要调工具、这一轮压根没检索、甚至这个部署根本没接记忆服务，
+  /// 四种情况下它都言之凿凿地说在检索记忆。
+  ///
+  /// 更根本的是**客户端无从知道**：流上只有 delta / tool / confirm / done /
+  /// error 五种事件，没有任何一条讲检索。所以这条测试是反向的 ——
+  /// 不断言它显示什么，只断言它**不声称**那些客户端判断不了的事。
+  /// 要说得更具体，得先让服务端发一条真的阶段事件。
+  testWidgets('等首 token 的动效不声称在检索记忆', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: CortexTheme.dark(),
+        home: const Scaffold(
+          body: AssistantBlock(text: '', toolCalls: [], streaming: true),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    for (final claim in ['记忆', '检索', '思考']) {
+      expect(
+        find.textContaining(claim),
+        findsNothing,
+        reason:
+            '等首 token 时出现了「$claim」—— 客户端拿不到任何讲阶段的事件，'
+            '这类字样只能是编的（这一条正是「正在检索记忆…」栽过的地方）',
+      );
+    }
+  });
 }
