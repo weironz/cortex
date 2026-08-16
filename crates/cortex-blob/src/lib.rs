@@ -76,6 +76,12 @@ pub struct BlobRef {
 ///
 /// 所有以 `hash` 为入参的方法**必须**先过 [`hash::validate_hash`]。
 /// 那不只是格式检查，是路径遍历的唯一栅栏（详见该函数文档）。
+/// [`BlobStore::get_stream`] 返回的字节流。
+///
+/// 装箱是必要的：几个实现（S3 的 `ByteStream`、本地文件的 `ReaderStream`、
+/// 测试替身）的具体类型完全不同，而 trait 方法要有统一的返回类型。
+pub type BlobStream = std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<Bytes>> + Send>>;
+
 #[async_trait]
 pub trait BlobStore: Send + Sync {
     /// 内容寻址写入，返回 SHA-256。已存在则跳过上传（天然去重）。
@@ -94,8 +100,23 @@ pub trait BlobStore: Send + Sync {
     /// [`LocalFsBlobStore`] 为此走「临时文件 + rename」，S3 的 PUT 本身即原子。
     async fn put(&self, bytes: Bytes, declared_mime: Option<&str>) -> Result<BlobRef>;
 
-    /// 按哈希取回完整内容。
+    /// 按哈希取回完整内容。**整个进内存** —— 只该用在确定小的地方
+    /// （嗅探 MIME 的那 4 KiB）。要把字节转给别人请用 [`BlobStore::get_stream`]。
     async fn get(&self, hash: &str) -> Result<Bytes>;
+
+    /// 按哈希取回内容的**字节流**。
+    ///
+    /// # 为什么必须有它
+    ///
+    /// [`BlobStore::get`] 把整个对象收进一个 `Bytes` 才返回。中转一个
+    /// 512 MiB 的附件时那就是服务进程里凭空多出的 512 MiB × 并发数，
+    /// 而生产节点只有 3.5 G。上传侧没有体积上限（presign 直传不签
+    /// content-length，commit 也不复核 size），所以「对象不会太大」
+    /// 不是一个能指望的前提。
+    ///
+    /// 返回 `Stream` 而不是 `AsyncRead`：调用方是 HTTP 响应体，
+    /// 它要的正是这个形状。
+    async fn get_stream(&self, hash: &str) -> Result<BlobStream>;
 
     /// 取回字节区间 `[start, end)`（左闭右开，与 Rust 惯例一致；
     /// HTTP Range 的右闭端由实现负责换算）。

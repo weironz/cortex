@@ -959,12 +959,11 @@ async fn take_snapshot(
     headers: HeaderMap,
     Query(q): Query<FileQuery>,
 ) -> Response {
-    let bearer = bearer_of(&headers);
     let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
         Err(r) => return r,
     };
-    match crate::snapshot::capture(&st, bearer, &d.owner, &d.scope_key).await {
+    match crate::snapshot::capture(&st, &d.owner, &d.scope_key).await {
         Ok(Some(row)) => Json(serde_json::json!({ "snapshot": row })).into_response(),
         // 刚 ensure 过还是没有，只能是这一瞬被别的东西停掉了。不当失败报：
         // 卷还在，用户也没做错任何事
@@ -984,13 +983,12 @@ async fn restore_snapshot(
     Path(id): Path<String>,
     Query(q): Query<FileQuery>,
 ) -> Response {
-    let bearer = bearer_of(&headers);
     // 恢复是用户「刚丢了东西」才走的路，最不该在这里让他先去把容器拉起来
     let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
         Err(r) => return r,
     };
-    match crate::snapshot::restore(&st, bearer, &d.owner, &d.scope_key, &id).await {
+    match crate::snapshot::restore(&st, &d.owner, &d.scope_key, &id).await {
         Ok(()) => Json(serde_json::json!({
             "restored": id,
             // 这句话要回给用户看。「恢复」在人脑子里通常是「回到那一刻的样子」，

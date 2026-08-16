@@ -524,7 +524,8 @@ class _GateApi
         AccountUnsupported,
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
-        RunAttachUnsupported
+        RunAttachUnsupported,
+        SandboxHealthUnsupported
     implements CortexApi {
   _GateApi({
     this.auth = 'token',

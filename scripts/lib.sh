@@ -136,7 +136,10 @@ need_docker() {
 need_pg_running() {
     need_docker
     docker inspect -f '{{.State.Running}}' "$PG_CONTAINER" 2>/dev/null | grep -q true \
-        || die "容器 $PG_CONTAINER 没在跑。先执行 'just up'。"
+        || die "容器 $PG_CONTAINER 没在跑。先把库起来，或用 PG_CONTAINER= 指名要备份的那个。
+       （'just up' 已经没有了：dev 的库叫 cortex-postgres-dev，由 'just dev' 起；
+         生产那份叫 cortex-db。上面这个默认值两个都不是 —— 见 justfile 里
+         备份那一节的说明。）"
     resolve_pg_bin
 }
 

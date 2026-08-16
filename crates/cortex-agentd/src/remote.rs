@@ -193,61 +193,12 @@ impl Remote {
         }
     }
 
-    /// 把字节交给记忆服务存起来，拿回内容哈希。
-    ///
-    /// 走**已有的** `/blobs`：那条路已经有分片、去重、租户前缀与直传，
-    /// 而快照就是一坨字节，没有任何特殊之处。
-    ///
-    /// # Errors
-    /// 连不上或被拒。
-    pub async fn put_blob(&self, bearer: Option<&str>, bytes: bytes::Bytes) -> Result<String> {
-        let rb = Self::auth(
-            self.http
-                .post(self.url("/blobs"))
-                .header(reqwest::header::CONTENT_TYPE, "application/x-tar")
-                .body(bytes),
-            bearer,
-        );
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("上传快照失败：{e}")))?;
-        #[derive(serde::Deserialize)]
-        struct Ack {
-            hash: String,
-        }
-        let ack: Ack = Self::ok_or_err(resp, "上传快照")
-            .await?
-            .json()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("解析上传回执失败：{e}")))?;
-        Ok(ack.hash)
-    }
-
-    /// 取回之前存进去的字节。
-    ///
-    /// # Errors
-    /// 连不上，或者这个哈希在调用者名下不存在。
-    pub async fn get_blob(&self, bearer: Option<&str>, hash: &str) -> Result<bytes::Bytes> {
-        let rb = Self::auth(self.http.get(self.url(&format!("/blobs/{hash}"))), bearer);
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("取快照失败：{e}")))?;
-        Self::ok_or_err(resp, "取快照")
-            .await?
-            .bytes()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("读快照字节失败：{e}")))
-    }
-
-    // 快照**索引**那两条（`POST` / `GET /sandbox-snapshots`）不在这儿了。
+    // 快照**整个**不在这儿了 —— 索引与字节都是。
     //
-    // 2026-08-16 那张表跟着库搬进了本进程（`crate::snapshot_index`），于是
-    // 那两次 HTTP 变成了两次函数调用。留着这两个方法的话它们没有调用方 ——
-    // 而一个没人调的远端客户端方法是会被人「顺手用起来」的：下一个人看见
-    // 它，就以为索引仍然在那边，然后写出一条读远端、写本地的路。
-    //
-    // 剩下的 [`Self::put_blob`] / [`Self::get_blob`] 是快照的**字节**，
-    // 那一半还在记忆服务那边（对象存储没搬），见 `crate::snapshot` 的模块头。
+    // 索引那张表 2026-08-16 跟着库搬进本进程（`crate::snapshot_index`）；
+    // 字节这一半随后也搬了（`crate::blobs::store_bytes` / `load_bytes`），
+    // 那是拆分之后最后一段还打记忆服务的旧路。留着 `put_blob` / `get_blob`
+    // 的话它们没有调用方 —— 而一个没人调的远端客户端方法是会被人
+    // 「顺手用起来」的：下一个人看见它，就以为字节仍然在那边，
+    // 然后写出一条读远端、写本地的路。
 }

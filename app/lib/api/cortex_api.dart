@@ -17,6 +17,7 @@ import '../models/import_plan.dart';
 import '../models/pending_confirmation.dart';
 import '../models/project.dart';
 import '../models/session_detail.dart';
+import '../models/sandbox_health.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
 import '../models/workspace.dart';
@@ -70,6 +71,24 @@ abstract interface class CortexApi {
   /// is the one question such a client needs answered before it can decide
   /// whether to demand one from the user.
   Future<HealthStatus> health();
+
+  /// `GET /sandbox/health` —— 「这个部署跑不跑得了**云端对话**」。
+  ///
+  /// 与 [health] 分成两次请求，因为生产上它们**根本不是同一个进程**：
+  /// 边缘按路径分流，`/health` 归记忆服务、这一条才是 agent 编排服务。
+  /// 为什么 `/health` 通了还不够，见 [SandboxHealth] 的文档。
+  ///
+  /// 也是免认证的公开路由（消费者是配不了凭据的探针），所以登录之前
+  /// 就能问 —— 与 [health] 同一个理由。
+  ///
+  /// # **不抛异常**，每一种失败都是一个要显示的答案
+  ///
+  /// 404、一张 SPA 回落的网页、网关的 502 —— 这些在别处是故障，在这里
+  /// 分别是「这个部署没有沙箱」与「有但现在跑不起来」，都是要画到界面上
+  /// 的能力说明。让它抛的话，每个调用方都得自己判一次「这个错是不是其实
+  /// 正常」，而判漏的那一处会把「自托管没有沙箱」画成一个红框，
+  /// 让用户去修一个没坏的东西。与 `localWorkspaceRootProvider` 同一立场。
+  Future<SandboxHealth> sandboxHealth();
 
   /// `POST /auth/ticket` — trade the long-lived token for a 60-second one.
   ///
@@ -586,6 +605,20 @@ mixin LocalMcpUnsupported {
 
   Future<List<McpRegistryEntry>> searchMcpRegistry(String query) async =>
       throw _absent;
+}
+
+/// 同上，给答不了 `GET /sandbox/health` 的替身用：**一律「这里没有沙箱」**。
+///
+/// mock 数据源、回放替身、测试里那几个假 API 都属于这一类 —— 它们身后
+/// 没有任何编排服务。回 [SandboxHealth.absent] 而不是假装 `ready`：
+/// 假装的后果是连接页承诺一项这个后端给不了的能力，而用户要发一句话
+/// 才发现（那正是这条探测存在的理由）。
+///
+/// 与那几个同一条禁令：**不要用在真实客户端上**。用了之后，
+/// `HttpCortexApi` 漏实现这个方法不会编译报错，而是静默退化成
+/// 「这个部署没有沙箱」—— 症状是云端对话的能力说明永远显示不可用。
+mixin SandboxHealthUnsupported {
+  Future<SandboxHealth> sandboxHealth() async => SandboxHealth.absent;
 }
 
 mixin LlmKeyUnsupported {

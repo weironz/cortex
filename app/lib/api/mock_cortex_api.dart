@@ -36,7 +36,7 @@ import 'cortex_api.dart';
 /// milliseconds, not all at once) — so switching to the real backend is a
 /// one-line provider change, not a rewrite.
 class MockCortexApi
-    with RunAttachUnsupported, LlmKeyUnsupported
+    with RunAttachUnsupported, LlmKeyUnsupported, SandboxHealthUnsupported
     implements CortexApi {
   MockCortexApi({int? seed, this.instant = false})
     : _random = Random(seed ?? 7);

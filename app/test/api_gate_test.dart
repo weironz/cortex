@@ -245,6 +245,44 @@ void main() {
     });
   });
 
+  group('本地 agent 的凭据（#149）', () {
+    /// 钉的是「token 每 15 分钟轮换一次就重启一次本地 agent」的另一半：
+    /// 客户端**打 agent 时用的必须是钉住的那把**。跟着轮换去发的后果是
+    /// 每次续期都稳定 401 一次 —— 而 agent 的入站认证只认它启动时那个值。
+    test('打本地 agent 用钉住的凭据，不是当前轮换到的那把', () {
+      expect(
+        apiToken(
+          userToken: 'rotated-3',
+          onLocalAgent: true,
+          pinned: 'at-start',
+        ),
+        'at-start',
+        reason:
+            'agent 认的是启动时那个值 —— 发轮换后的新 token 只会被它 401，'
+            '而那个 401 会被读成「你的登录失效了」',
+      );
+    });
+
+    test('打远端一律用当前那把，钉住的与它无关', () {
+      expect(
+        apiToken(userToken: 'now', onLocalAgent: false, pinned: 'at-start'),
+        'now',
+        reason: '把本机凭据发给一个真要认证的远端，换回来的是内容完全不同的 401',
+      );
+    });
+
+    test('还没钉上时回落到当前值 —— 与钉之前的行为一致', () {
+      expect(apiToken(userToken: 'now', onLocalAgent: true), 'now');
+      expect(
+        apiToken(userToken: null, onLocalAgent: true),
+        isNotEmpty,
+        reason:
+            '关认证的部署没有用户 token，这里必须给出那把一次性凭据，'
+            '否则 agent 会把桌面端 401 挡在门外',
+      );
+    });
+  });
+
   group('401 报告的资格审查', () {
     /// 钉的是另一半根因：token 一换实例就换代，而 401 经微任务上报 ——
     /// 「上一代实例发的请求」的 401 会在新凭据生效**之后**才落地。

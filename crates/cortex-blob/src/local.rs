@@ -150,6 +150,18 @@ impl BlobStore for LocalFsBlobStore {
         }
     }
 
+    async fn get_stream(&self, hash: &str) -> Result<crate::BlobStream> {
+        let path = self.path_of(hash)?;
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                return Err(BlobError::NotFound(hash.to_owned()));
+            }
+            Err(e) => return Err(BlobError::Io(e)),
+        };
+        Ok(Box::pin(tokio_util::io::ReaderStream::new(file)))
+    }
+
     async fn get_range(&self, hash: &str, range: Range<u64>) -> Result<Bytes> {
         validate_range(&range)?;
         let path = self.path_of(hash)?;

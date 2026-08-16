@@ -475,7 +475,8 @@ class _ConfirmApi
         AccountUnsupported,
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
-        RunAttachUnsupported
+        RunAttachUnsupported,
+        SandboxHealthUnsupported
     implements CortexApi {
   _ConfirmApi({
     this.accept = true,

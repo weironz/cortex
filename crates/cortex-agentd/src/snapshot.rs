@@ -13,15 +13,15 @@
 //! 文件仍然是两个，但切口换了个位置、也换了理由：这里是**动作**（碰
 //! docker 与卷），那里是**账本**（碰库）。
 //!
-//! # 字节还在走 HTTP，那是欠账不是设计
+//! # 字节走的是本进程的对象存储
 //!
-//! tar 本身仍然经 [`crate::remote::Remote`] 交给记忆服务的 `/blobs` ——
-//! 对象存储这一侧还没搬过来。`/blobs` 落地之后，[`capture`] 里那次
-//! `put_blob` 与 [`restore`] 里那次 `get_blob` 一起改成本地调用，
-//! 这一段随之删掉。
+//! tar 经 [`crate::blobs::store_bytes`] / [`crate::blobs::load_bytes`] 存取 ——
+//! 与 HTTP 上传路同一对函数，所以去重、MIME、租户前缀、`sync_log` 同事务
+//! 这些性质一并继承，不另开一条上传路。
 //!
-//! 那时也别新开一条上传路：`/blobs` 已经有分片、去重、租户前缀与直传，
-//! 而快照就是一坨字节，没有任何特殊之处。
+//! 2026-08-16 之前这一段打的是**记忆服务**的 `/blobs`，那是拆分之后最后
+//! 一处还依赖它的地方。后果具体：只部署 Cortex 的环境里「快照」整个不能用，
+//! 而失败信息指向一个用户根本没听说过的服务。
 //!
 //! # 为什么每个函数都要一个 `owner`
 //!
@@ -50,12 +50,7 @@ use crate::state::AgentState;
 ///
 /// # Errors
 /// 导出、上传或记索引失败。
-pub async fn capture(
-    st: &AgentState,
-    bearer: Option<&str>,
-    owner: &str,
-    scope: &str,
-) -> Result<Option<SnapshotRow>> {
+pub async fn capture(st: &AgentState, owner: &str, scope: &str) -> Result<Option<SnapshotRow>> {
     let tar = match st.runner().export_workspace(scope).await {
         Ok(t) => t,
         Err(e) => {
@@ -64,9 +59,10 @@ pub async fn capture(
         }
     };
     let size_bytes = i64::try_from(tar.len()).unwrap_or(i64::MAX);
-    // 字节仍然走记忆服务的 /blobs —— 唯一还没搬过来的一段，见模块头
-    let hash = st.remote().put_blob(bearer, tar).await?;
     let tenant = tenant_of(st, owner).await?;
+    // tar 不是任何一种能被嗅探出来的东西，明说，别让 infer 去猜
+    let hash =
+        crate::blobs::store_bytes(st, tenant.store()?, tar, Some("application/x-tar")).await?;
     let row =
         crate::snapshot_index::record_row(tenant.store()?, owner, scope, &hash, size_bytes).await?;
     tracing::info!(scope, hash = %row.blob_hash, bytes = size_bytes, "快照已存");
@@ -102,13 +98,7 @@ pub async fn list(st: &AgentState, owner: &str, scope: &str) -> Result<Vec<Snaps
 ///
 /// # Errors
 /// 这个 id 不属于这个作用域，或者取字节 / 写入失败。
-pub async fn restore(
-    st: &AgentState,
-    bearer: Option<&str>,
-    owner: &str,
-    scope: &str,
-    snapshot_id: &str,
-) -> Result<()> {
+pub async fn restore(st: &AgentState, owner: &str, scope: &str, snapshot_id: &str) -> Result<()> {
     let rows = list(st, owner, scope).await?;
     let row = rows
         .into_iter()
@@ -117,8 +107,7 @@ pub async fn restore(
             kind: "snapshot",
             id: snapshot_id.to_owned(),
         })?;
-    // 同上：取字节这一段还没搬过来
-    let tar = st.remote().get_blob(bearer, &row.blob_hash).await?;
+    let tar = crate::blobs::load_bytes(st, &row.blob_hash).await?;
     st.runner().import_workspace(scope, tar).await
 }
 

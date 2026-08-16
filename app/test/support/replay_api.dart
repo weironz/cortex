@@ -41,7 +41,8 @@ class ReplayApi
         AccountUnsupported,
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
-        RunAttachUnsupported
+        RunAttachUnsupported,
+        SandboxHealthUnsupported
     implements CortexApi {
   ReplayApi({
     required this.episodeCount,

@@ -918,6 +918,7 @@ dependencies = [
  "bytes",
  "cortex-core",
  "dotenvy",
+ "futures",
  "hex",
  "imagesize",
  "infer",
@@ -928,6 +929,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
 ]

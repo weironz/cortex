@@ -5,6 +5,7 @@
 //! [`crate::proxy`] 原样转发 —— 本地 agent 不该为它们各写一个方法，
 //! 那等于把整套契约在这里再实现一遍。
 
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use cortex_core::{CortexError, Result};
@@ -45,7 +46,11 @@ const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct Remote {
     http: reqwest::Client,
     base: String,
-    token: Option<String>,
+    /// 出站凭据，**可热替换**。见 [`Remote::set_token`]。
+    ///
+    /// 共享一格而不是各克隆一份：`Remote` 被克隆进 `LocalState`、进每一个
+    /// 轮次的 host —— 各存各的话，换了凭据只有换的那一份知道。
+    token: Arc<RwLock<Option<String>>>,
 }
 
 impl std::fmt::Debug for Remote {
@@ -54,7 +59,7 @@ impl std::fmt::Debug for Remote {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Remote")
             .field("base", &self.base)
-            .field("token", &self.token.as_ref().map(|_| "<已设置>"))
+            .field("token", &self.read_token().map(|_| "<已设置>"))
             .finish()
     }
 }
@@ -71,7 +76,7 @@ impl Remote {
         Ok(Self {
             http,
             base: base.into().trim_end_matches('/').to_string(),
-            token,
+            token: Arc::new(RwLock::new(token)),
         })
     }
 
@@ -80,13 +85,43 @@ impl Remote {
         &self.base
     }
 
+    /// 当前出站凭据的副本。
+    ///
+    /// 返回 `String` 而不是 `&str`：它住在锁后面，借出去等于把守卫的生命周期
+    /// 泄露给调用方，而这个进程里的调用方全都会跨 `.await`。
     #[must_use]
-    pub fn token(&self) -> Option<&str> {
-        self.token.as_deref()
+    pub fn token(&self) -> Option<String> {
+        self.read_token()
+    }
+
+    /// 换一把出站凭据。**桌面端的 access token 每 15 分钟轮换一次。**
+    ///
+    /// # 为什么是热替换，而不是重启这个进程
+    ///
+    /// 凭据烧在进程启动参数里的时候，桌面端只能靠**重启整个 agent** 来换 ——
+    /// 于是每 15 分钟：跑着的轮次被拦腰砍断、监听端口换一个、旧进程咽气前
+    /// 用一把已经退位的凭据答 401，而客户端把那个 401 读成「你的登录失效了」
+    /// 并把用户踢回登录页。一次凭据轮换本该是无事发生的。
+    pub fn set_token(&self, token: Option<String>) {
+        let mut g = self
+            .token
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *g = token.filter(|t| !t.trim().is_empty());
+    }
+
+    fn read_token(&self) -> Option<String> {
+        // 中毒了也要把值读出来：写路径只是替换一个 String，不存在
+        // 「被看到的中间状态」；这里因为中毒而返回 None，等于让 agent
+        // 在一次无关的 panic 之后**静默失去凭据**，那才是真的坏
+        self.token
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.token {
+        match self.read_token() {
             Some(t) => rb.bearer_auth(t),
             None => rb,
         }
@@ -405,6 +440,35 @@ fn classify(status: reqwest::StatusCode, detail: String) -> CortexError {
 
 #[cfg(test)]
 mod tests {
+
+    /// 换凭据必须让**所有克隆**都看见 —— `Remote` 被克隆进 LocalState、
+    /// 进每一个轮次的 host，各存各的话换了等于没换（只有换的那份知道）。
+    #[test]
+    fn a_rotated_credential_is_visible_through_every_clone() {
+        let a = Remote::new("http://127.0.0.1:1", Some("old".into())).unwrap();
+        let b = a.clone();
+        a.set_token(Some("new".into()));
+        assert_eq!(
+            b.token().as_deref(),
+            Some("new"),
+            "克隆出去的那份还拿着旧凭据 —— 轮换之后它发的每个请求都会 401"
+        );
+    }
+
+    /// 空串必须落成「没有凭据」而不是「凭据是空串」。
+    ///
+    /// 后者的实测症状：agent 拿到 `Some("")`，以为自己有认证，
+    /// 于是发一个 `Authorization: Bearer ` 出去，而远端回的 401
+    /// 与「凭据过期」长得一模一样。
+    #[test]
+    fn a_blank_credential_means_none_not_empty() {
+        let r = Remote::new("http://127.0.0.1:1", Some("x".into())).unwrap();
+        for blank in ["", "   ", "	"] {
+            r.set_token(Some(blank.into()));
+            assert_eq!(r.token(), None, "空串 {blank:?} 被当成了一把凭据");
+        }
+    }
+
     use super::*;
     use reqwest::StatusCode;
 

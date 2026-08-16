@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../auth/token_store.dart';
+import '../../../models/sandbox_health.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/auth_controller.dart';
 
@@ -85,7 +86,13 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
           children: [
             Expanded(child: Text('后端状态', style: theme.textTheme.titleSmall)),
             TextButton(
-              onPressed: () => ref.invalidate(healthProvider),
+              // 两条都要重来。只刷 `/health` 的话，用户去把沙箱那一套起好、
+              // 回来点「重新检测」，看到的还是上一次的能力结论 ——
+              // 而他刚做的事恰恰是为了改变那个结论
+              onPressed: () {
+                ref.invalidate(healthProvider);
+                ref.invalidate(sandboxHealthProvider);
+              },
               child: const Text('重新检测'),
             ),
           ],
@@ -139,6 +146,19 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
                   ],
                 ),
               ],
+              // ── 「连得上」与「能跑云端对话」是两件事 ──────────────
+              //
+              // 上面那几行全部来自 `/health`，而 `/health` 只证明这个地址上
+              // 有个进程在答话。云端对话不是它答的：一轮云端对话要 agent
+              // 编排服务向记忆服务换委托凭据、据它拉起沙箱容器、容器再回连
+              // 编排服务 —— 这三段断哪一段，`/health` 都照样 200。于是这一页
+              // 画绿灯「已连接」，用户回到对话框发一句，得到的是失败。
+              //
+              // 生产上更狠：边缘把 `/health` 分给了**记忆服务**，
+              // `/sandbox/health` 才是编排服务 —— 那条路上的 `/health`
+              // 连「编排服务在不在」都没有回答。
+              const SizedBox(height: 10),
+              _cloudChat(context, ref),
             ],
           ),
         ),
@@ -152,6 +172,95 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
             style: theme.textTheme.bodySmall,
           ),
         ],
+      ],
+    );
+  }
+
+  /// 云端对话这项能力此刻在不在，以及不在时是哪一种「不在」。
+  ///
+  /// # 为什么它不是红的
+  ///
+  /// 「这个部署没有沙箱」是自托管与纯本机形态的**正常样子**，不是故障。
+  /// 画成红色错误的后果很具体：用户会去修一个没坏的东西，而真正的失败
+  /// （编排服务在、但它够不着记忆服务）反而淹没在同一片红里。
+  ///
+  /// 所以只有 [CloudChatStatus.blocked] 这一档才换颜色 —— 那一档是
+  /// 「本该能跑，现在跑不了」，用户确实有事可做，而下一步是什么由
+  /// [SandboxHealth.reason] 说。
+  ///
+  /// Mock 数据源下同样显示（它答的也是 absent）：那时「云端对话不可用」
+  /// 是实情 —— 那个模式一个网络请求都不发。
+  Widget _cloudChat(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final muted = theme.colorScheme.onSurfaceVariant;
+
+    return ref
+        .watch(sandboxHealthProvider)
+        .when(
+          loading: () =>
+              _capability(context, Icons.cloud_queue, '云端对话：检测中…', null, muted),
+          // 探测本身出错也不画红。这个方法承诺不抛（见 `CortexApi.sandboxHealth`），
+          // 走到这里说明是别的地方炸了 —— 而对用户来说「问不出来」与
+          // 「没有」的下一步是同一件事：云端对话别指望
+          error: (e, _) =>
+              _capability(context, Icons.cloud_off, '云端对话：探测不到', '$e', muted),
+          data: (s) => switch (s.status) {
+            CloudChatStatus.ready => _capability(
+              context,
+              Icons.cloud_done,
+              '云端对话：可用',
+              // 版本单独说：与上面那个 version 可能来自两个不同的进程，
+              // 滚更新滚到一半时这是唯一看得出来的地方
+              s.version == null ? null : 'agent 编排服务 ${s.version}',
+              muted,
+            ),
+            CloudChatStatus.absent => _capability(
+              context,
+              Icons.cloud_off,
+              '云端对话：不可用（这个部署没有沙箱）',
+              '本机对话与记忆不受影响 —— 自托管与纯本机形态本来就没有它。',
+              muted,
+            ),
+            CloudChatStatus.blocked => _capability(
+              context,
+              Icons.cloud_off,
+              '云端对话：现在跑不起来',
+              s.reason,
+              theme.colorScheme.tertiary,
+            ),
+          },
+        );
+  }
+
+  Widget _capability(
+    BuildContext context,
+    IconData icon,
+    String label,
+    String? note,
+    Color color,
+  ) {
+    final theme = Theme.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: theme.textTheme.bodySmall?.copyWith(color: color),
+              ),
+              if (note != null)
+                Text(
+                  note,
+                  style: theme.textTheme.labelSmall?.copyWith(color: color),
+                ),
+            ],
+          ),
+        ),
       ],
     );
   }

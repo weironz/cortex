@@ -247,6 +247,10 @@ impl MediaStore {
         Ok(self.inner.get(hash).await?)
     }
 
+    async fn get_stream(&self, hash: &str) -> cortex_core::Result<cortex_blob::BlobStream> {
+        Ok(self.inner.get_stream(hash).await?)
+    }
+
     async fn get_range(&self, hash: &str, range: Range<u64>) -> cortex_core::Result<Bytes> {
         Ok(self.inner.get_range(hash, range).await?)
     }
@@ -435,11 +439,9 @@ pub async fn download(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
 
-    // 中转路径是**整对象进内存**（BlobStore::get 只有 Bytes 形状），
-    // 而 presign 直传的对象没有体积上限、commit 也不复核 size ——
-    // 不设闸门的话，一条指向超大对象的附件引用就能把 3.5G 的生产节点
-    // 顶出 OOM。上限与快照/导出的口径一致；真流式（ByteStream → Body）
-    // 记在任务表里，做完后这道闸只防「size_bytes 谎报」。
+    // 整取路径已经改成流式（见下），所以这道闸不再是「防 OOM」而是
+    // **口径闸**：与快照/导出的 512 MiB 一致，超过它的东西在这套系统里
+    // 本来就搬不动，早点回 413 比让客户端下十分钟再失败好。
     const MAX_TRANSIT_BYTES: i64 = 512 * 1024 * 1024;
     if size > MAX_TRANSIT_BYTES {
         return Err(ApiError::payload_too_large(format!(
@@ -450,7 +452,10 @@ pub async fn download(
 
     match parse_range(raw_range.as_deref(), total) {
         RangeSpec::Full => {
-            let bytes = media.get(&hash).await?;
+            // **流式，不 collect**：这条路要中转附件（沙箱够不到对象存储，
+            // 字节由这个进程转手）。整取的话进程里凭空多出一个对象的大小
+            // × 并发数，而生产节点只有 3.5 G。
+            let stream = media.get_stream(&hash).await?;
             Ok((
                 StatusCode::OK,
                 [
@@ -458,8 +463,11 @@ pub async fn download(
                     // 没有这个头，播放器根本不会尝试发 Range —— 它会老实地
                     // 从头拉整个文件，然后拖动进度条就是一场灾难
                     (header::ACCEPT_RANGES, "bytes".to_string()),
+                    // 流式响应默认走 chunked；把长度写出来，客户端才能
+                    // 判「这个附件该走内联还是落工作区」而不必先下完
+                    (header::CONTENT_LENGTH, total.to_string()),
                 ],
-                bytes,
+                axum::body::Body::from_stream(stream),
             )
                 .into_response())
         }
@@ -509,6 +517,54 @@ fn presign_capable(st: &AgentState) -> Result<&MediaStore, ApiError> {
 }
 
 // ─────────────────────────── 数据 ───────────────────────────
+
+/// 把一段字节存进本地对象存储并登记，返回内容哈希。
+///
+/// 快照用（工作区 tar）。它以前打的是**记忆服务**的 `/blobs` —— 那是
+/// 拆分之前的最后一段旧路，而那个服务已经不在了：留着它，「快照」在
+/// 一个只部署 Cortex 的环境里是彻底不能用的，且失败信息指向一个用户
+/// 根本没听说过的服务。
+///
+/// 与 HTTP 上传路走同一对函数（`put` + `register`），所以去重、MIME
+/// 嗅探、`sync_log` 同事务这些性质全都一并继承，不另开一套。
+///
+/// # Errors
+/// 没配对象存储（501）、写对象失败、或登记失败。
+pub async fn store_bytes(
+    st: &AgentState,
+    store: &Store,
+    bytes: Bytes,
+    declared_mime: Option<&str>,
+) -> cortex_core::Result<String> {
+    // 「这个部署没配对象存储」在 HTTP 面上是 501，而快照这条路的调用方
+    // 说的是领域错误 —— 在这里就把它翻译过去，别让 ApiError 漏进领域层
+    let media = st
+        .blobs()
+        .map_err(|e| cortex_core::CortexError::Unavailable(e.message()))?;
+    let blob = media.put(bytes, declared_mime).await?;
+    register(
+        store,
+        media.tenant_prefix(),
+        &blob.hash,
+        &blob.mime,
+        blob.size_bytes,
+        blob.deduplicated,
+    )
+    .await?;
+    Ok(blob.hash)
+}
+
+/// 按哈希取回完整字节。**整个进内存** —— 快照 tar 要一次性交给 docker
+/// 的 archive API，那条路本来就没有流式形状。
+///
+/// # Errors
+/// 没配对象存储，或对象不在。
+pub async fn load_bytes(st: &AgentState, hash: &str) -> cortex_core::Result<Bytes> {
+    st.blobs()
+        .map_err(|e| cortex_core::CortexError::Unavailable(e.message()))?
+        .get(hash)
+        .await
+}
 
 /// 登记 blob 行 —— 三步固定顺序的第二步。
 ///

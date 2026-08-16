@@ -22,6 +22,7 @@ library;
 
 import '../core/permission_mode.dart';
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -44,6 +45,7 @@ import '../core/local_agent.dart';
 import '../models/account.dart';
 import '../models/health_status.dart';
 import '../models/mcp.dart';
+import '../models/sandbox_health.dart';
 import '../models/workspace.dart';
 import 'auth_controller.dart';
 
@@ -452,6 +454,19 @@ final localAgentHandleProvider = Provider<LocalAgentHandle>(
 class LocalAgentHandle {
   LocalAgent? _current;
 
+  /// 这一轮 agent **启动时**钉住的那把本机凭据。
+  ///
+  /// # 为什么要钉，而不是每次读当前的用户 token
+  ///
+  /// agent 的入站认证比对的是它启动时拿到的那个值，而用户的 access token
+  /// 每 15 分钟轮换一次。跟着轮换去发的后果是：客户端已经在用新的、
+  /// agent 还只认旧的 —— 每次续期都稳定 401 一次，而那个 401 会被读成
+  /// 「你的登录失效了」，把刚续过期的用户踢回登录页。
+  ///
+  /// 出站那把（agent 自己调部署入口用的）**照常跟着轮换**，走
+  /// `PUT /local/credential` 热替换，不重启进程。
+  String? pinnedCredential;
+
   // ignore: use_setters_to_change_properties
   void adopt(LocalAgent agent) => _current = agent;
 
@@ -500,13 +515,60 @@ String localAgentToken(String? userToken) => userToken ?? _sessionSecret;
 ///
 /// 只在指向 agent 时替换：把这把本机凭据发给一个真的要认证的 cortexd，
 /// 换回来的是一个内容完全不同的 401 —— 而两种 401 在界面上长得一样。
+/// [pinned] 是 agent 启动时钉住的那把（见 [`LocalAgentHandle.pinnedCredential`]）。
+/// 它为 null 只出现在「agent 刚起、还没钉上」的一瞬，那时回落到当前值 ——
+/// 与钉之前的行为一致。
 @visibleForTesting
-String? apiToken({required String? userToken, required bool onLocalAgent}) =>
-    onLocalAgent ? localAgentToken(userToken) : userToken;
+String? apiToken({
+  required String? userToken,
+  required bool onLocalAgent,
+  String? pinned,
+}) => onLocalAgent ? (pinned ?? localAgentToken(userToken)) : userToken;
+
+/// 把轮换过的凭据推给**还在跑的**那个 agent。
+///
+/// 失败只记日志：agent 手上那把还能用到过期为止，而它写不进去的 episode
+/// 会进 outbox 等重放 —— 为一次推送失败去重启进程（砍断正在跑的轮次）
+/// 是不成比例的。
+Future<void> _pushAgentCredential({
+  required String origin,
+  required String inbound,
+  required String? outbound,
+}) async {
+  try {
+    final resp = await http
+        .put(
+          Uri.parse('$origin/local/credential'),
+          headers: {
+            'authorization': 'Bearer $inbound',
+            'content-type': 'application/json',
+          },
+          body: jsonEncode({'token': outbound}),
+        )
+        .timeout(const Duration(seconds: 5));
+    if (resp.statusCode >= 400) {
+      debugPrint('本地 agent 拒绝了新凭据（HTTP ${resp.statusCode}）');
+    }
+  } on Object catch (e) {
+    debugPrint('新凭据没能推给本地 agent：$e');
+  }
+}
 
 final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   final config = ref.watch(appConfigProvider);
-  final token = ref.watch(authControllerProvider.select((s) => s.token));
+  // **watch 的是「有没有」，不是「是哪一把」。**
+  //
+  // 原先 watch 的是 token 本身，于是每 15 分钟一次的轮换都会重建这个
+  // provider —— onDispose 里 `agent.stop()`、换一个进程、换一个端口。
+  // 代价不只是浪费：跑着的轮次被拦腰砍断，而旧进程咽气前用一把已经
+  // 退位的凭据答的 401 会被读成「登录失效」。
+  //
+  // 登录 / 登出仍然要重建（那是真的换了身份），所以看的是「有没有」。
+  final hasToken = ref.watch(
+    authControllerProvider.select((s) => s.token != null),
+  );
+  // 启动要的是**此刻**那把，read 不建立依赖
+  final token = hasToken ? ref.read(authControllerProvider).token : null;
   // **watch 而不是 read**：改了本机模型配置要让 agent 带着新环境重启。
   // read 的话用户会保存、看到成功、然后发现模型还是老的 —— 而那时
   // 界面上没有任何东西提示他需要重启
@@ -611,6 +673,24 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
       ),
     );
     debugPrint('本地 agent 已就绪：$origin（工具在本机执行）');
+    // 入站凭据钉死在这一刻 —— 之后 `cortexApiProvider` 一直用它去打
+    // 这个 agent，与用户 token 轮不轮换无关。见 `pinnedCredential`
+    final inbound = localAgentToken(token);
+    handle.pinnedCredential = inbound;
+    // 出站那把跟着轮换，热替换而不是重启进程
+    ref.listen(authControllerProvider.select((s) => s.token), (_, next) {
+      unawaited(
+        _pushAgentCredential(origin: origin, inbound: inbound, outbound: next),
+      );
+    });
+    // start 与挂监听之间用户可能正好续期过一次；补推一次现值，
+    // 差一次推送的后果是 agent 拿着已过期的凭据去写 episode
+    final now = ref.read(authControllerProvider).token;
+    if (now != token) {
+      unawaited(
+        _pushAgentCredential(origin: origin, inbound: inbound, outbound: now),
+      );
+    }
     return origin;
   } on LocalAgentException catch (e) {
     // Loud in the log, silent in the UI: the app still works, it just runs
@@ -703,7 +783,13 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
   final api = HttpCortexApi(
     baseUrl: origin,
     // 打到 agent 时用**它认的那把**，见 `apiToken`
-    token: apiToken(userToken: token, onLocalAgent: agentOrigin.value != null),
+    // 打到 agent 时用**钉住的那把**：它认的是自己启动时那个值，
+    // 而 `token` 每 15 分钟就换一次
+    token: apiToken(
+      userToken: token,
+      onLocalAgent: agentOrigin.value != null,
+      pinned: ref.read(localAgentHandleProvider).pinnedCredential,
+    ),
     // 生产恒 null（HttpCortexApi 自建）。这个口子只为测试存在：没有它，
     // 下面 onUnauthorized 闭包的接线（资格审查用哪边的 token）从测试里
     // 够不着 —— 上一轮它只有纯函数测试，接线错了照样全绿。
@@ -731,6 +817,15 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
       // 本地 agent 还没起、请求先落到远端 → 401 → 被打回登录页，
       // 且 offline 已是 true，「离线使用」按钮从此同值短路、点不动。
       if (ref.read(appConfigProvider).offline) return;
+      // 本地 agent 的 401 说的是**它的入站凭据**对不上，与远端会话
+      // 活没活着无关。转发进去的实测后果：一次本机侧的凭据错位被读成
+      // 「你的登录失效了」，把凭据完全有效的用户踢回登录页。
+      // 真正该做的是让 agent 带着对的凭据重来一次。
+      if (agentOrigin.value != null) {
+        debugPrint('本地 agent 拒绝了这次请求（401）—— 重起它，不动登录态');
+        ref.invalidate(localAgentOriginProvider);
+        return;
+      }
       if (!shouldForwardUnauthorized(
         instanceToken: token,
         currentToken: ref.read(authControllerProvider).token,
@@ -822,6 +917,22 @@ class GateClosedApi implements CortexApi {
 final healthProvider = FutureProvider<HealthStatus>((ref) async {
   final api = ref.watch(cortexApiProvider);
   return api.health();
+});
+
+/// `GET /sandbox/health` —— 「这个地址跑不跑得了**云端对话**」。
+///
+/// # 为什么是第二个 provider，而不是并进 [healthProvider]
+///
+/// 生产上这两条路由由边缘分给了**两个不同的进程**（`/health` 归记忆服务，
+/// `/sandbox/health` 才是 agent 编排服务），一次请求问不完。
+///
+/// 更要紧的是它们**失败的含义不一样**：`/health` 不通是「连不上」，
+/// 而这一条不通往往只是「这个部署没有沙箱」——自托管与纯本机形态的常态。
+/// 合成一个 provider 之后，后者会把前者也拖成错误态，于是界面上一个
+/// 完全健康的本机部署会显示成连接故障。
+final sandboxHealthProvider = FutureProvider<SandboxHealth>((ref) async {
+  final api = ref.watch(cortexApiProvider);
+  return api.sandboxHealth();
 });
 
 /// 默认工作空间根目录 + 它下面已有的文件夹。

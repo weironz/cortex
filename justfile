@@ -45,21 +45,50 @@ setup:
     mkdir -p data/backup/{wal,base,logical,reports} data/mirror
     echo "就绪。执行 'just bootstrap' 一条命令起完整环境。"
 
-# ★ 一条命令从零到能用：起服务 → 建库 → 迁移 → 建桶 → 自检
+# 它现在几乎只是 `just dev` 外面套一层首次上手的准备 —— 因为原来那三步
+# 「建库 / 迁移 / 建桶」**已经没有人需要手动做了**，而它们各自的 recipe
+# 早在 b25c57f（记忆那一半离开 Cortex）就被删掉，只有这里的调用忘了跟着改。
+# 结果是一条 `just bootstrap` 直接报 "Justfile does not contain recipe `up`"
+# —— 一个摆在最显眼位置、看着能用一跑就死的入口。逐条说明为什么删而不是补：
+#
+#   just up          base compose 里的 Postgres 与 RustFS 跟着记忆服务走了；
+#                    这一侧自己的库与对象存储住在 docker-compose.dev.yml 的
+#                    dev profile 里（服务名 cortexdb / rustfs），由 `just dev` 起。
+#   just db-migrate  那是从宿主用 sqlx CLI 跑的一份。现在 migration 由 agentd
+#                    启动时自己跑（cortex_store::Store::migrate，schema 用
+#                    sqlx::migrate! 编进二进制），再补一条 recipe 就是第二处装配。
+#   just _ensure-bucket  同理：agentd 起来时 MediaStore::from_env 会调
+#                    S3BlobStore::ensure_bucket。justfile 里那份 rclone 版本
+#                    是同一件事的第二份实现，跟着删了。
+#
+# （末行是 `just --list` 里显示的那句 —— just 取紧挨 recipe 的最后一行注释）
+# ★ 一条命令从零到能用：备好 .env 与目录 → 起完整环境 → 等健康 → 自检
 bootstrap:
     #!/usr/bin/env bash
     set -euo pipefail
     export MSYS_NO_PATHCONV=1
     [ -f .env ] || { cp .env.example .env; echo "已从 .env.example 生成 .env"; }
     mkdir -p data/backup/{wal,base,logical,reports} data/mirror
-    just up
-    echo "── 应用 migration ──"
-    just db-migrate
-    echo "── 建对象存储桶 ──"
-    just _ensure-bucket
+    just dev
+    echo "── 等服务就绪 ──"
+    just _wait-healthy
     echo "── 自检 ──"
     just doctor
 
+# **问的是 dev 那一套**（`{{ _dev }}`），不是基座 compose。基座里现在只剩
+# egress，拿 `docker compose ps` 去 grep `postgres` 永远匹配不上 —— 而它的
+# else 分支说的是「没起」，于是自检在环境完全正常时也一直报红并让你去跑
+# 一条已经不存在的 `just up`。服务名同理：这一侧自己的库叫 **cortexdb**
+# 而不是 postgres（重名会让两个仓库的 compose 互删容器，见 dev compose 文件头）。
+#
+# 拿掉了三行：data_checksums / archive_mode / 全量备份。它们问的是**备份那
+# 一套**的 Postgres（`scripts/lib.sh` 的 $PG_CONTAINER），而 dev 的 cortexdb
+# 是原味 postgres:17-alpine，既没开 checksums 也没配 WAL 归档 —— 留着的效果
+# 是每次自检都挂两条永远为 off 的红，并指向一个不存在的动作。备份现状看
+# `just backup-status`，那才是它该待的地方。
+#
+# python 那一行也拿掉了：它唯一的用处是评测回归门，而那一套在 Cormex。
+#
 # 环境自检：把「起不来」拆成几条能一眼看懂的结论
 doctor:
     #!/usr/bin/env bash
@@ -70,78 +99,68 @@ doctor:
     echo "── Cortex 环境自检 ──"
     command -v docker >/dev/null && say docker "$(docker --version | cut -d, -f1)" || { say docker "缺失 —— 全部依赖服务都靠它"; rc=1; }
     command -v cargo  >/dev/null && say cargo  "$(cargo --version)"  || { say cargo "缺失"; rc=1; }
-    command -v python3 >/dev/null || command -v python >/dev/null \
-        && say python "有（评测回归门要用）" || say python "缺失 —— 只影响 just evals-gate"
-    if docker compose ps --format '{{ "{{" }}.Service{{ "}}" }}' 2>/dev/null | grep -q postgres; then
-        say Postgres "$(docker compose exec -T postgres psql -U "${POSTGRES_USER:-cortex}" -d "${POSTGRES_DB:-cortex}" -Atc 'SELECT version()' 2>/dev/null | cut -c1-40 || echo '起着但连不上')"
-        ck="$(docker compose exec -T postgres psql -U "${POSTGRES_USER:-cortex}" -d "${POSTGRES_DB:-cortex}" -Atc 'SHOW data_checksums' 2>/dev/null || echo '?')"
-        am="$(docker compose exec -T postgres psql -U "${POSTGRES_USER:-cortex}" -d "${POSTGRES_DB:-cortex}" -Atc 'SHOW archive_mode' 2>/dev/null || echo '?')"
-        say data_checksums "$ck$([ "$ck" = on ] || echo '  ← 跑 just pg-enable-checksums 补')"
-        say archive_mode   "$am$([ "$am" = on ] || echo '  ← 跑 just up 让 compose 里的归档配置生效')"
-        n="$(ls -1 data/backup/base 2>/dev/null | wc -l | tr -d ' ')"
-        say 全量备份 "$n 份$([ "$n" -gt 0 ] || echo '  ← 一份都没有，跑 just backup')"
+    if docker compose {{ _dev }} ps --format '{{ "{{" }}.Service{{ "}}" }}' 2>/dev/null | grep -q cortexdb; then
+        say Postgres "$(docker compose {{ _dev }} exec -T cortexdb psql -U "${CORTEX_PG_USER:-cortex}" -d "${CORTEX_PG_DB:-cortex}" -Atc 'SELECT version()' 2>/dev/null | cut -c1-40 || echo '起着但连不上')"
     else
-        say Postgres "没起 —— 跑 just up"; rc=1
+        say Postgres "没起 —— 跑 just dev"; rc=1
     fi
-    docker compose ps --format '{{ "{{" }}.Service{{ "}}" }}' 2>/dev/null | grep -q rustfs \
-        && say RustFS "起着" || { say RustFS "没起 —— 跑 just up"; rc=1; }
+    docker compose {{ _dev }} ps --format '{{ "{{" }}.Service{{ "}}" }}' 2>/dev/null | grep -q rustfs \
+        && say RustFS "起着" || { say RustFS "没起 —— 跑 just dev"; rc=1; }
+    # 记忆服务不在这个仓库里，但沙箱会话真的依赖它，且不接的时候所有
+    # 健康检查都是绿的（见 _dev-join-memory 那段）—— 所以自检要点它一下
+    docker inspect "${CORMEX_CONTAINER:-cormex-cortexd}" >/dev/null 2>&1 \
+        && say 记忆服务 "起着（${CORMEX_CONTAINER:-cormex-cortexd}）" \
+        || say 记忆服务 "没起 —— 去 ../cormex 起，本仓库不提供它"
     [ "$rc" = 0 ] && echo "全部就绪。" || echo "有问题，见上。"
     exit $rc
 
-# 建对象存储桶（幂等）
-_ensure-bucket:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export MSYS_NO_PATHCONV=1
-    net="${COMPOSE_PROJECT_NAME:-cortex}_default"
-    docker run --rm --network "$net" \
-        -e RCLONE_CONFIG_S3_TYPE=s3 -e RCLONE_CONFIG_S3_PROVIDER=Other \
-        -e RCLONE_CONFIG_S3_ENDPOINT=http://rustfs:9000 \
-        -e RCLONE_CONFIG_S3_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY:-cortexadmin}" \
-        -e RCLONE_CONFIG_S3_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY:-cortex_dev_only}" \
-        -e RCLONE_CONFIG_S3_REGION="${S3_REGION:-us-east-1}" \
-        rclone/rclone:latest mkdir "s3:${S3_BUCKET:-cortex-blobs}" 2>/dev/null || true
-    echo "桶 ${S3_BUCKET:-cortex-blobs} 就绪"
-
-# 启动 Postgres 与 RustFS
-# 停止服务（保留数据）
-down:
-    docker compose down
-
-# 停止服务并删除全部数据 —— 不可恢复
-nuke:
-    docker compose down -v
-
-# 查看服务状态
-ps:
-    docker compose ps
-
-# 跟踪服务日志
-logs service="":
-    docker compose logs -f {{ service }}
-
+# ── 这里曾经有 up / down / nuke / ps / logs 五条「基座 compose」开关 ──
+#
+# 全部删掉，因为**基座 compose 里已经没有服务可开关了**：Postgres 与 RustFS
+# 跟着记忆那一半去了 Cormex（b25c57f），这一侧自己的库与对象存储在
+# docker-compose.dev.yml 的 dev profile 里，`docker-compose.yml` 只剩 egress
+# （它自己有 sandbox-up / sandbox-down）。留着的后果不是报错，是**假信号**：
+# `just ps` 一行不返回，读起来像「什么都没起」，而 dev 那一套其实好好跑着。
+#
+# `nuke` 更危险一点：不带 `-f docker-compose.dev.yml` 的 `docker compose down -v`
+# 作用域是**整个 `cortex` 项目**，而 Cortex 与 Cormex 两个仓库的 compose
+# 第一行都写着 `name: cortex` —— 于是它会连 Cormex 的容器与数据卷一起带走
+# （同一个坑在 `dev` 那条 recipe 的注释里有实测记录）。要连数据清干净，用
+# `just dev-reset`：作用域限定在这一侧，而且要手打 yes。
+#
+# 开关现在只有三组：`dev-*`（本机完整环境）、`prod-*`（生产）、`sandbox-*`（出口容器）。
 _wait-healthy:
     #!/usr/bin/env bash
     set -euo pipefail
     echo -n "等待服务就绪"
     for _ in $(seq 1 60); do
-        if docker compose ps --format json 2>/dev/null | grep -q '"Health":"starting"'; then
+        if docker compose {{ _dev }} ps --format json 2>/dev/null | grep -q '"Health":"starting"'; then
             echo -n "."; sleep 2
         else
             echo " 就绪"; exit 0
         fi
     done
-    echo " 超时"; docker compose ps; exit 1
+    echo " 超时"; docker compose {{ _dev }} ps; exit 1
 
 # ══════════════════════════════════════════════════════════
 #  数据库
 # ══════════════════════════════════════════════════════════
 
-# 应用全部未执行的 migration
-# 回滚最近一次 migration
-db-revert:
-    sqlx migrate revert
+# ── 这里曾经有 db-migrate 与 db-revert ──
+#
+# **`db-migrate` 删了：迁移不需要人来跑。** agentd（与 cortex-local）启动时
+# 自己跑 `cortex_store::Store::migrate`，schema 由 `sqlx::migrate!` 编进二进制
+# —— 部署时不必带上 `migrations/`。再留一条从宿主跑 sqlx CLI 的 recipe，
+# 就是同一件事的第二处装配，而漏跑的那一边不会有任何测试红。
+#
+# **`db-revert` 删了：它从来跑不通。** `migrations/` 下是单文件 `.sql`
+# （没有配对的 `.down.sql`），sqlx 认作 non-reversible，`migrate revert`
+# 直接报 "Cannot revert non-reversible migration"。要回到干净状态用 db-reset。
 
+# ⚠️ `sqlx migrate run` 只跑 `./migrations`（每租户那一套），**不跑
+# `migrations-global`**（`cortex_auth` 那套身份表，见 store.rs 的 GLOBAL_MIGRATOR）。
+# 缺的那一半由 agentd 下次启动补上，所以 reset 完记得让它起一次再用。
+#
 # 删库重建并重新迁移 —— 数据全部丢失
 db-reset:
     sqlx database drop -y
@@ -410,39 +429,29 @@ ci: fmt-check lint check test flutter-check
     @echo "全部检查通过"
 
 # ══════════════════════════════════════════════════════════
-#  检索评测
+#  检索评测 —— **不在这个仓库里**
+#
+#  `evals-validate` / `evals` / `evals-gate` / `evals-bless` 四条全部删掉：
+#  它们跑的是 `cargo run -p cortex-evals`，而那个 package 连同 `evals/` 题集
+#  在 b25c57f 跟着记忆那一半去了 Cormex。检索质量要有抽取、向量与四路召回
+#  才评得出来，这边一样都没有 —— 补一个壳只会让人以为这里能评。
+#
+#  `scripts/evals-gate.py` 与两份 baseline JSON 还留着：CI 里那一步是
+#  `verify-baseline`，只读 JSON 校验格式，不需要那个 crate。真的回归门去 Cormex 跑。
 # ══════════════════════════════════════════════════════════
-
-# 题集静态校验（秒级，不连数据库）
-evals-validate:
-    cargo run -p cortex-evals --release -- validate
-
-# 跑一遍评测，出基线数字（生产默认配置）
-evals *ARGS:
-    cargo run -p cortex-evals --release -- run {{ ARGS }}
-
-# 本地复现 CI 的回归门。backend=hash 秒级；backend=fast 用真实语义模型
-evals-gate backend="hash":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export CORTEX_EMBED_BACKEND="{{ backend }}"
-    base="scripts/evals-baseline.{{ backend }}.json"
-    [ "{{ backend }}" = "fast" ] && base="scripts/evals-baseline.fastembed.json"
-    cargo run -p cortex-evals --release -- run --mode seed --json target/evals-report.json
-    python3 scripts/evals-gate.py check --report target/evals-report.json --baseline "$base"
-
-# 把当前结果定为新基线 —— 只在调参定案后执行，且必须在 PR 里说明数字为何变了
-evals-bless backend="hash":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export CORTEX_EMBED_BACKEND="{{ backend }}"
-    base="scripts/evals-baseline.{{ backend }}.json"
-    [ "{{ backend }}" = "fast" ] && base="scripts/evals-baseline.fastembed.json"
-    cargo run -p cortex-evals --release -- run --mode seed --json target/evals-report.json
-    python3 scripts/evals-gate.py bless --report target/evals-report.json --baseline "$base"
 
 # ══════════════════════════════════════════════════════════
 #  备份与灾备 —— 细节见 docs/operations.md
+#
+#  ⚠️ **这一整节的目标容器名还停在拆分之前**：`scripts/lib.sh` 里
+#  `PG_CONTAINER` 默认 `cortex-postgres`、`PG_IMAGE` 默认
+#  `pgvector/pgvector:pg17`，而这两样今天哪一个都不对 —— 这一侧 dev 的库
+#  是 `cortex-postgres-dev`（原味 postgres:17-alpine，没有 pgvector），
+#  生产那份是 `cortex-db`。所以在本机直接跑 `just backup` 会停在
+#  「容器 cortex-postgres 没在跑」，要么先 `PG_CONTAINER=cortex-postgres-dev`。
+#
+#  没有在 #142 里顺手改掉默认值：改它会同时改变生产节点上备份打哪个库，
+#  那是一次要单独验证的改动，不该混在「修 justfile 坏引用」里。
 # ══════════════════════════════════════════════════════════
 
 # Postgres 全量备份（+ WAL 归档已由 compose 常开）

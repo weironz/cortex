@@ -39,7 +39,8 @@ class _FakeApi
         AccountUnsupported,
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
-        RunAttachUnsupported
+        RunAttachUnsupported,
+        SandboxHealthUnsupported
     implements CortexApi {
   int connectCount = 0;
 

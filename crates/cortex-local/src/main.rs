@@ -351,7 +351,10 @@ async fn main() -> anyhow::Result<()> {
     let pointer = cortex_core::LivePointer {
         addr: actual.to_string(),
         remote: remote.base().to_string(),
-        token_fp: remote.token().map(cortex_core::token_fingerprint),
+        token_fp: remote
+            .token()
+            .as_deref()
+            .map(cortex_core::token_fingerprint),
     };
     match serde_json::to_string(&pointer) {
         Ok(json) => {

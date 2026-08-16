@@ -400,6 +400,24 @@ impl BlobStore for S3BlobStore {
         collect(out.body).await
     }
 
+    async fn get_stream(&self, hash: &str) -> Result<crate::BlobStream> {
+        let key = self.key_of(hash)?;
+        let out = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .send()
+            .await
+            .map_err(|e| map_get_err(hash, e))?;
+        // `ByteStream` 自己不实现 `Stream`（它是 smithy 的类型），
+        // 但给得出一个 `AsyncBufRead` —— 套上 `ReaderStream` 就与本地
+        // 文件那条走同一个形状，且一个字节都不缓冲
+        Ok(Box::pin(tokio_util::io::ReaderStream::new(
+            out.body.into_async_read(),
+        )))
+    }
+
     async fn get_range(&self, hash: &str, range: Range<u64>) -> Result<Bytes> {
         validate_range(&range)?;
         let key = self.key_of(hash)?;

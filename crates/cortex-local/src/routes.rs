@@ -63,6 +63,9 @@ pub fn router(state: LocalState) -> Router {
             get(local_workspace::get_root).put(local_workspace::set_root),
         )
         .route("/local/workspaces", post(local_workspace::create))
+        // 桌面端的 access token 每 15 分钟轮换一次，而这个进程的出站凭据
+        // 原本烧在启动参数里 —— 见 `set_credential` 的文档
+        .route("/local/credential", put(set_credential))
         // 「新建会话时没选工作区」那一档：按日期时间开一个文件夹并绑上。
         // 为什么由客户端来要而不是 agent 自己看着办，见 handler
         .route(
@@ -99,9 +102,16 @@ pub fn router(state: LocalState) -> Router {
         .with_state(state)
 }
 
-/// 入站认证：要求与出站**同一个** token。
+/// 入站认证：要求出示**启动时**那把 token。
 ///
 /// 本地 agent 本来就持有它去调 cortexd，所以不引入第二个秘密。
+///
+/// # 它与出站那把从此会分开
+///
+/// 出站凭据可以热替换（见 [`set_credential`]）—— 桌面端的 access token
+/// 每 15 分钟轮换一次。入站这把**刻意钉死在启动时那个值**：它回答的是
+/// 「你是不是拉起我的那个桌面端」，与用户会话什么时候续期无关。跟着换的
+/// 后果是每次轮换都有一个「客户端已用新的、这个进程还只认旧的」的窗口。
 ///
 /// # 为什么绑在 loopback 上也要认证
 ///
@@ -142,6 +152,42 @@ async fn require_auth(State(st): State<LocalState>, req: Request, next: Next) ->
     } else {
         (StatusCode::UNAUTHORIZED, "缺少或无效的凭据").into_response()
     }
+}
+
+/// `PUT /local/credential` —— 换一把出站凭据，不重启这个进程。
+///
+/// # 为什么需要它
+///
+/// 桌面端手里的 access token 只活 15 分钟。凭据烧在启动参数里的时候，
+/// 换它的唯一办法是**重启整个 agent**，代价是每 15 分钟一次：跑着的
+/// 轮次被拦腰砍断、监听端口换一个、旧进程咽气前用一把已经退位的凭据
+/// 答 401 —— 而客户端把那个 401 读成「你的登录失效了」，把刚续过期的
+/// 用户踢回登录页。
+///
+/// # 为什么换的只是**出站**那一把
+///
+/// 入站认证（[`require_auth`] 比对的 `inbound_token`）**刻意不跟着换**：
+/// 客户端换凭据是同步的、推送是异步的，两边一起换必然有一个窗口——
+/// 客户端已经在用新的、这个进程还只认旧的，于是每次轮换都稳定地 401
+/// 一次。入站那把的职责只是「证明你是拉起我的那个桌面端」，它没有
+/// 跟着用户会话轮换的理由，钉死一整个 agent 生命周期反而更准。
+///
+/// 谁能调它：能出示当前入站凭据的人 —— 也就是本来就能让这个 agent
+/// 执行命令的那一个。不新增任何暴露面。
+async fn set_credential(
+    State(st): State<LocalState>,
+    Json(body): Json<CredentialUpdate>,
+) -> StatusCode {
+    st.remote.set_token(body.token);
+    // 不回声任何凭据内容：这条响应会进代理日志
+    StatusCode::NO_CONTENT
+}
+
+#[derive(serde::Deserialize)]
+struct CredentialUpdate {
+    /// 新的出站凭据。`null` 或空串 = 清掉（登出后仍在跑的那一小段）。
+    #[serde(default)]
+    token: Option<String>,
 }
 
 /// 查询串里有没有 `ticket=`。**只看有没有，不看内容** —— 内容归远端管。
