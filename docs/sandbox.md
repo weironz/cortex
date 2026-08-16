@@ -515,6 +515,17 @@ musl 静态链接，DNS 靠 docker 注入的 `/etc/resolv.conf`（musl 不需要
 
 ### 真机实测（`just sandbox-verify`）
 
+> ⚠️ **这一整张表验的是容器拓扑，不是 agent 那条路。** 脚本全程用
+> `docker exec` 发命令，而那**绕过了工具沙箱的 seccomp**。
+>
+> 2026-08-16 因此漏掉了一个从第一个沙箱提交起就存在的 bug：`NetworkPolicy`
+> 默认 `Denied` 且从没有调用方抬起来，于是 agent 自己跑的每一条命令
+> `socket()` 都被 EPERM —— 下面每一行照样是绿的，而用户让 agent
+> `git clone` 拿到的是「Could not resolve proxy」。
+>
+> **在 `sandbox-verify.sh` 补上一条走 `cortex-local` HTTP 接口的用例之前，
+> 这张表全绿不代表 agent 能出网。** 见 roadmap 那一节。
+
 ```
 ── 拓扑 ──                                    期望   实际
   cortex-postgres:5432（DNS 名）              拒绝   拒绝(gaierror)

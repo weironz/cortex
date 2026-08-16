@@ -294,6 +294,78 @@ mod tests {
         }
     }
 
+    /// **真的起一个进程，真的开一个 `AF_INET` socket。**
+    ///
+    /// 上下两条邻居量的都是 BPF 的**形状**（长度、非空）—— 那证明不了内核
+    /// 到底放不放行，而 2026-08-16 咬人的正是这一格：`NetworkPolicy` 默认
+    /// `Denied` 且没有任何调用方抬起来，于是 agent 跑的每一条命令
+    /// `socket()` 都被 EPERM。报出来是「域名解析不了」，读起来像网络坏了。
+    /// 那天全套沙箱测试是绿的，`just sandbox-verify` 也是绿的
+    /// （它走 `docker exec`，绕过这一层）。
+    ///
+    /// 所以这条测试**两档都跑**：只断言 `Allowed` 能开会漏掉「过滤器根本
+    /// 没装上」那种假绿 —— 那时两档都能开，而断言照过。
+    ///
+    /// 拿 python3 当被试进程：镜像与 CI 的 ubuntu 上都有，找不到就跳过
+    /// （跳过也要说清楚，否则一条永远不跑的测试和删掉没区别）。
+    #[test]
+    fn the_network_policy_actually_decides_whether_a_child_gets_a_socket() {
+        let Ok(python) = which_python() else {
+            eprintln!("跳过：这台机器上没有 python3，测不了真进程那一档");
+            return;
+        };
+        if !detect().is_available() {
+            eprintln!("跳过：这个内核上 landlock/seccomp 不可用");
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("建临时目录");
+        // 只创建 socket，不发任何包 —— 测的是 `socket()` 这个 syscall 过不过闸，
+        // 而不是这台机器有没有网。CI 上没有出网也照样有意义
+        let argv = vec![
+            python,
+            "-c".to_owned(),
+            "import socket; socket.socket(socket.AF_INET, socket.SOCK_DGRAM).close()".to_owned(),
+        ];
+
+        for (network, should_succeed) in [
+            (NetworkPolicy::Allowed, true),
+            (NetworkPolicy::Denied, false),
+        ] {
+            let policy = SandboxPolicy::workspace(dir.path()).with_network(network);
+            let mut prepared =
+                crate::sandbox::prepare(&policy, &argv, dir.path()).expect("装配沙箱命令");
+            assert!(
+                prepared.enforced,
+                "沙箱没真的生效，这一轮什么都没测到（network={network:?}）"
+            );
+            let ok = prepared.command.status().expect("起子进程").success();
+            assert_eq!(
+                ok,
+                should_succeed,
+                "network={network:?} 时子进程开 AF_INET socket 应当{}。\
+                 放行档失败 ⇒ agent 跑的每条命令都没有网（git clone / npm install / \
+                 pip install 全挂，而报错说的是「域名解析不了」）；\
+                 禁止档成功 ⇒ 那道过滤器根本没装上",
+                if should_succeed {
+                    "成功"
+                } else {
+                    "被 EPERM 拒掉"
+                }
+            );
+        }
+    }
+
+    /// 找一个能用的 python3。
+    fn which_python() -> Result<String> {
+        for p in ["/usr/bin/python3", "/usr/local/bin/python3", "/bin/python3"] {
+            if std::path::Path::new(p).exists() {
+                return Ok(p.to_owned());
+            }
+        }
+        Err(CortexError::Invalid("找不到 python3".into()))
+    }
+
     #[test]
     fn denied_network_filter_is_strictly_larger_than_allowed() {
         let allowed = build_seccomp_filter(NetworkPolicy::Allowed).unwrap();

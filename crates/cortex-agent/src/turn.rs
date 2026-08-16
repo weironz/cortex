@@ -405,14 +405,31 @@ impl Turn {
     /// 而代码读起来毫无异样。名字挑明之后，那种调用一眼就是错的。
     /// 见 [`crate::ExecEnvironment`]。
     pub fn on_local_machine(root: impl Into<std::path::PathBuf>) -> Result<Self> {
+        Self::rooted(root, crate::ExecEnvironment::LocalMachine)
+    }
+
+    /// 两个「有工作区」的构造函数共用的装配。
+    ///
+    /// # 为什么非要合成一处
+    ///
+    /// 因为这里要按环境决定网络策略（[`crate::ExecEnvironment::network_policy`]），
+    /// 而**分散在两个构造函数里的同一件事，正是这个仓库反复漏掉的那一处**。
+    /// 网络策略尤其不能漏：漏掉的那一边报的是「域名解析不了」，
+    /// 读起来像网络坏了，不像我们自己关的。
+    fn rooted(root: impl Into<std::path::PathBuf>, env: crate::ExecEnvironment) -> Result<Self> {
+        let sandbox = Sandbox::new(root)?;
+        let exec = sandbox
+            .exec_policy()
+            .clone()
+            .with_network(env.network_policy());
         let specs = tools::builtin_specs();
         Ok(Self {
-            sandbox: Sandbox::new(root)?,
+            sandbox: sandbox.with_exec_policy(exec),
             tools: tools::to_llm_tools(&specs),
             specs,
             max_rounds: DEFAULT_MAX_ROUNDS,
             policy: ApprovalPolicy::default(),
-            env: crate::ExecEnvironment::LocalMachine,
+            env,
         })
     }
 
@@ -430,15 +447,7 @@ impl Turn {
     /// `Turn::new(root, true)`，而漏写 / 传反不会有任何症状 ——
     /// 直到某天一个 Web 会话拿到了本机语义。
     pub fn in_container(root: impl Into<std::path::PathBuf>) -> Result<Self> {
-        let specs = tools::builtin_specs();
-        Ok(Self {
-            sandbox: Sandbox::new(root)?,
-            tools: tools::to_llm_tools(&specs),
-            specs,
-            max_rounds: DEFAULT_MAX_ROUNDS,
-            policy: ApprovalPolicy::default(),
-            env: crate::ExecEnvironment::Container,
-        })
+        Self::rooted(root, crate::ExecEnvironment::Container)
     }
 
     /// 给**未绑定工作区**的会话用：沙箱是封闭的，一个路径也进不去。
@@ -1571,6 +1580,53 @@ mod tests {
         assert!(
             !c.allows_escape_prompt(),
             "越界在容器里不是一个能问的问题 —— 问了也没人答得上来"
+        );
+    }
+
+    /// **有工作区的两个环境都必须真的能开 socket。**
+    ///
+    /// 这一条钉的是一个藏了很久的 bug：`NetworkPolicy` 默认 `Denied`，而
+    /// 「需要联网时由调用方抬起来」那个调用方**从来没被写出来**，于是从第一个
+    /// 沙箱提交起每一条 `shell` 都跑在无网状态下。`socket(AF_INET, …)` 被
+    /// seccomp 回 EPERM，报出来是 `Temporary failure in name resolution` ——
+    /// 读起来像网络坏了，而不是「我们自己关的」。
+    ///
+    /// 它没被任何测试抓到，是因为 `scripts/sandbox-verify.sh` 全程走
+    /// `docker exec`，而那条路**不经过这层 seccomp**：出网清单、私有段防护、
+    /// 403 拒绝理由全都真的验过，验的却不是 agent 跑命令的那条路。
+    ///
+    /// 所以断言挂在**构造函数装出来的策略**上，而不是挂在 `ExecEnvironment`
+    /// 的谓词上 —— 后者只证明「那个函数返回值对」，证明不了有人把它接上。
+    #[test]
+    fn a_turn_with_a_workspace_can_actually_open_a_socket() {
+        use crate::sandbox::NetworkPolicy;
+
+        let dir = tempfile::tempdir().expect("建临时目录");
+        for (turn, name) in [
+            (
+                Turn::on_local_machine(dir.path()).expect("装配本机轮次"),
+                "on_local_machine",
+            ),
+            (
+                Turn::in_container(dir.path()).expect("装配容器轮次"),
+                "in_container",
+            ),
+        ] {
+            assert_eq!(
+                turn.exec_policy().network,
+                NetworkPolicy::Allowed,
+                "{name} 装出来的沙箱把网络关着 —— 那会让 git clone / npm install / \
+                 pip install 全部失败，而报错说的是「域名解析不了」。\
+                 容器里更糟：唯一获准的出口是 cortex-egress 代理，关掉 socket \
+                 等于把出网代理那一整套变成够不着的代码"
+            );
+        }
+
+        // 封闭沙箱是另一回事：那里一个进程都不会被启动，关着才是对的
+        assert_eq!(
+            Turn::sealed().exec_policy().network,
+            NetworkPolicy::Denied,
+            "未绑工作区的会话不该有网络 —— 它连 shell 都拿不到 cwd"
         );
     }
 

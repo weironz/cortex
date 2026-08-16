@@ -57,6 +57,65 @@ M0–M8、N1–N3、R1–R11 全部完成，**并且在 2026-08 拆成了两个�
 
 ---
 
+## agent 跑的每一条命令都没有网 —— 从第一个沙箱提交起（2026-08-16 修）
+
+用户在云沙箱里让 agent `git clone`，拿回来的是：
+
+```
+fatal: unable to access '…': Could not resolve proxy: cortex-egress
+socket.gaierror: [Errno -3] Temporary failure in name resolution
+PermissionError: [Errno 1] Operation not permitted   ← 创建 UDP socket
+```
+
+前两条读起来像**网络坏了**。第三条才是真的：`socket()` 本身被 EPERM，
+那不是网络不通（那是 timeout 或 unreachable），**那是内核策略**。
+
+对着真容器做 A/B 就分开了：
+
+| 从沙箱容器里 | 结果 |
+|---|---|
+| `docker exec` 解析 `cortex-egress` | ✅ 通 |
+| `docker exec` `curl https://github.com`（经代理）| ✅ **200** |
+| agent 自己的 `shell` 跑同样的事 | ❌ socket EPERM |
+
+拓扑、代理、放行清单全是好的。**是我们自己把 socket 关了。**
+
+根因：`NetworkPolicy` 默认 `Denied`，文档写着「需要联网的那条命令由调用方
+显式抬到 `Allowed`」—— 而那个调用方**从来没被写出来**。
+`with_network` 在生产代码里一次调用都没有，只有 macOS 的一条测试在用。
+从 `01c3750`（第一个沙箱提交）起就是这样，也就是说**`shell` 从来没有过网络**：
+`git clone` / `npm install` / `pip install` / `curl` 全部失败，
+而报错一律说「域名解析不了」。
+
+**它藏了这么久，是因为验证走的是另一条路。** `scripts/sandbox-verify.sh`
+全程 `docker exec` —— 出网放行清单、私有段防护、403 拒绝理由、
+「四条全部翻红」那组实测，每一条都真的验过，验的却**不是 agent 跑命令的
+那条路**。这正是本文件里已经记过一次的那个信号：
+「全绿但日志是空的 —— 断言过了不等于那条路走过了」。这次是它的升级版：
+断言过了，而且走过了一条路，只是**不是用户那条**。
+
+改法：网络策略由**执行环境**决定（`ExecEnvironment::network_policy`），
+两个有工作区的环境都是 `Allowed`，`None`（sealed）保持 `Denied`。
+默认值仍是 `Denied` —— 谁忘了设就是关着的，那条守默认值的老测试原样保留。
+
+**这不是放弃了一道防线，是把它放回真正挡得住的那一层**：容器里是
+`internal` 网段 + 代理的放行清单与私有段防护（seccomp 关掉 socket 只会
+把唯一获准的那条路一起堵死，让整套出网设计变成够不着的代码）；本机上是
+逐条确认回路 —— `shell` 恒 `Risk::Execute`，每条命令都由屏幕前的人点过。
+seccomp 这一层从来挡不住「被批准的命令想外传」，它只挡得住
+「没人注意到它联网了」，而这两个环境里都有人注意得到。
+
+装配收进一个私有的 `Turn::rooted(root, env)`，两个公开构造函数都走它 ——
+分散在两处的同一件事正是本仓库反复漏掉的那种。测试断言挂在**构造函数装
+出来的策略**上而不是谓词上（挂谓词只证明那个函数返回值对，证明不了有人
+把它接上），故障注入验过会红。
+
+**还欠一条**：`sandbox-verify.sh` 仍然只走 `docker exec`。要让它真的覆盖
+agent 那条路，得从容器里的 `cortex-local` HTTP 接口发一轮，那是另一件事。
+在补上之前，这个脚本全绿**不代表 agent 能出网**。
+
+---
+
 ## 手头挂着的（2026-08-16 登记）
 
 都是修别的东西时**顺手撞见、但刻意没有顺手改**的 —— 理由都是「改它需要

@@ -114,6 +114,37 @@ impl ExecEnvironment {
         matches!(self, Self::Container)
     }
 
+    /// `shell` 跑出来的进程能不能开 `AF_INET` socket。
+    ///
+    /// # 为什么这件事由**环境**答，而不是由每条命令答
+    ///
+    /// 因为「什么东西在挡出网」在每个环境里根本不是同一个东西：
+    ///
+    /// | | 真正的边界是 | seccomp 关掉它的后果 |
+    /// |---|---|---|
+    /// | [`Container`](Self::Container) | `internal` 网段（没有默认路由）+ `cortex-egress` 的放行清单与私有段防护 | **把唯一一条获准的路也堵死** —— 代理连接不上，整套出网设计变成够不着的代码 |
+    /// | [`LocalMachine`](Self::LocalMachine) | 逐条确认回路：`shell` 恒 [`Risk::Execute`]，每条命令都由屏幕前的人点过 | `git clone` / `npm install` / `pip install` 全部失败，而报错说的是「域名解析不了」 |
+    /// | [`None`](Self::None) | 压根没有进程被启动（`sealed`） | —— |
+    ///
+    /// 两个有文件系统的环境因此都是 [`NetworkPolicy::Allowed`]。
+    /// **这不是「放弃了那道防线」，是把它放回真正挡得住的那一层**：
+    /// 容器里是代理的放行清单（`CORTEX_EGRESS_ALLOW`，默认 `*` 但恒拒私有段），
+    /// 本机上是那个人。seccomp 这一层从来挡不住「被批准的命令想外传」——
+    /// 它只挡得住「没人注意到它联网了」，而在这两个环境里都有人注意得到。
+    ///
+    /// 剩下的仍然由 [`NetworkPolicy`] 的默认值兜底：**谁忘了设就是关着的**。
+    ///
+    /// [`Risk::Execute`]: crate::Risk::Execute
+    /// [`NetworkPolicy::Allowed`]: crate::sandbox::NetworkPolicy::Allowed
+    /// [`NetworkPolicy`]: crate::sandbox::NetworkPolicy
+    #[must_use]
+    pub const fn network_policy(self) -> crate::sandbox::NetworkPolicy {
+        match self {
+            Self::None => crate::sandbox::NetworkPolicy::Denied,
+            Self::LocalMachine | Self::Container => crate::sandbox::NetworkPolicy::Allowed,
+        }
+    }
+
     /// 进日志与 `/health` 的名字。也是 `--exec-env` 接受的字面量。
     #[must_use]
     pub const fn as_str(self) -> &'static str {
