@@ -345,6 +345,11 @@ dev-web:
     # 旧逻辑，此后每次修复他一版都没跑到。API 客户端要 SW 没有任何好处。
     # index.html 里另有一段灭杀脚本清掉历史上已经装进浏览器的那个。
     cd app && flutter build web --pwa-strategy=none --dart-define=CORTEX_BASE_URL=
+    # `--pwa-strategy=none` 会把 flutter_service_worker.js 写成 **0 字节**，
+    # 覆盖掉 web/ 里那份自杀版。空文件也能让旧 SW 失去拦截（无 fetch
+    # handler 就不拦），但不清缓存、不卸载 —— 换回自杀版：清光缓存、
+    # 卸载自己、强制重载，用户一次 F5 就从僵尸 SW 里出来
+    cp app/web/flutter_service_worker.js app/build/web/flutter_service_worker.js
     @echo "构建完了，刷新浏览器即可（nginx 直接读 app/build/web）"
 
 dev-logs *ARGS:
