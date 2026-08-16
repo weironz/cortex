@@ -53,6 +53,18 @@ struct Inner {
     ///
     /// `None` 与 `store` 同进同退：没给数据库地址就两个都没有。
     accounts: Option<Accounts>,
+    /// 服务端那把 LLM key 组装出来的客户端。`POST /llm/stream` 用它。
+    ///
+    /// # 为什么它是 `Option` 而不是必填
+    ///
+    /// 这个进程的本职是编排容器，那件事一行模型配置都不需要。要求必填的
+    /// 直接后果是：一台只跑沙箱、模型走别处的部署**起不来**，而报错说的是
+    /// 「缺少 DEEPSEEK_API_KEY」—— 一句听起来像配置漏了、实际上是我们多要了
+    /// 一样东西的话。
+    ///
+    /// `None` 时 `/llm/stream` 回 501（「这个部署永远提供不了」），
+    /// 与 [`Self::accounts`] 同一个形状：**明说不支持，而不是假装能用**。
+    llm: Option<cortex_llm::LlmClient>,
     /// 这个部署要不要凭据，以及那把预共享 token 的摘要。
     auth: AuthMode,
     /// 短命票据。给加不了请求头的连接用（`?ticket=`）。
@@ -136,6 +148,7 @@ impl AgentState {
         remote: Remote,
         store: Option<cortex_store::Store>,
         accounts: Option<Accounts>,
+        llm: Option<cortex_llm::LlmClient>,
         auth: AuthMode,
     ) -> Self {
         Self {
@@ -145,6 +158,7 @@ impl AgentState {
                 remote,
                 store,
                 accounts,
+                llm,
                 auth,
                 tickets: Arc::new(TicketBook::default()),
                 access: Arc::new(crate::accounts::AccessBook::default()),
@@ -185,6 +199,23 @@ impl AgentState {
         self.inner.accounts.as_ref().ok_or_else(|| {
             crate::error::ApiError::unsupported(
                 "这个部署没有接数据库（CORTEX_DATABASE_URL 为空），账号功能不可用",
+            )
+        })
+    }
+
+    /// 服务端那把 key 组装出来的 LLM 客户端。
+    ///
+    /// 自带 key 那条路也要它 —— 用户填的是 key，不是模型，模型配置沿用
+    /// 这一份（见 [`crate::llm`]）。
+    ///
+    /// # Errors
+    /// 这个部署没配模型。回 501 而不是 panic：客户端把 501 当成「这条路
+    /// 不会开」，据此降级并**不重试**，而那正是实情。
+    pub fn llm(&self) -> Result<&cortex_llm::LlmClient, crate::error::ApiError> {
+        self.inner.llm.as_ref().ok_or_else(|| {
+            crate::error::ApiError::unsupported(
+                "这个部署没有配 LLM 供应商（CORTEX_LLM_PROVIDER / 对应的 API key），\
+                 借模型这条路不可用。本地 agent 可以配成直连供应商。",
             )
         })
     }

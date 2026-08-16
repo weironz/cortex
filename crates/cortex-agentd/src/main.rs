@@ -27,10 +27,12 @@
 
 mod accounts;
 mod auth;
+mod byo_key;
 mod credentials;
 mod cursor;
 mod env;
 mod error;
+mod llm;
 mod quota;
 mod reaper;
 mod remote;
@@ -119,6 +121,30 @@ struct Args {
     generate_token: bool,
 }
 
+/// 这个客户端手上真的有一把 key 吗。
+///
+/// # 为什么光靠 `from_env` 成功还不够
+///
+/// compose 里写 `DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}` 时，**没配等于配成
+/// 了空串**，而 `env::var` 对空串返回的是 `Ok("")` —— 于是 `from_env` 会
+/// 高高兴兴地建出一个握着空 key 的客户端。症状不是「这个部署没开这条路」
+/// （501，客户端据此降级且**不重试**），而是每一轮对话都被供应商以鉴权失败
+/// 拒掉：一个看起来像 key 填错了、实际上是根本没填的错误。
+///
+/// 这是本仓库反复咬人的那个形状（空串顶掉「没设」）的又一处，
+/// 所以在装配的时候就把它判掉，而不是等第一次对话。
+fn has_usable_key(client: &cortex_llm::LlmClient) -> bool {
+    match cortex_llm::provider::api_key_env(client.provider_id()) {
+        // 变量名为空 = 该供应商免鉴权（本机 ollama，以及任何不校验 key 的
+        // 自建端点）。这条分支缺了的话，Ollama 部署会被判成「没配模型」
+        Ok(var) if var.is_empty() => true,
+        Ok(var) => std::env::var(var).is_ok_and(|v| !v.trim().is_empty()),
+        // 客户端都建出来了却查不到它的 key 变量名，只可能是供应商定义变了。
+        // 这时当作「有」—— 把一个能用的部署判成没配，比反过来更糟
+        Err(_) => true,
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
@@ -202,6 +228,47 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // ── 服务端那把 LLM key ────────────────────────────────
+    //
+    // **配不出来只警告，不拒绝启动。** 与数据库那一段刻意相反：库连不上是
+    // 「配了但坏了」，而模型这一项是**这个进程的本职之外**的东西 —— 它的
+    // 本职是编排容器，那件事一行模型配置都不需要。要求必填的后果是一台
+    // 只跑沙箱、模型走别处的部署起不来，而报错说的是「缺少 DEEPSEEK_API_KEY」。
+    //
+    // 读的是 `CORTEX_LLM_PROVIDER` / `CORTEX_LLM_MODEL` /
+    // `CORTEX_LLM_CHEAP_MODEL` / `CORTEX_LLM_BASE_URL` 与该供应商约定的那个
+    // key 变量。**不走 `cortex_core::Config::from_env`**：那一份要求
+    // `DATABASE_URL` 必填，而这个进程的库地址是 `CORTEX_DATABASE_URL`
+    // 且可以没有 —— 借它一用会让「没接库」变成起不来。
+    let llm = match cortex_llm::LlmClient::from_env() {
+        Ok(c) if has_usable_key(&c) => {
+            tracing::info!(
+                provider = c.provider_id(),
+                model = c.model().model_name,
+                cheap = c.cheap_model().model_name,
+                "模型代理就绪"
+            );
+            Some(c)
+        }
+        Ok(c) => {
+            tracing::warn!(
+                provider = c.provider_id(),
+                "供应商配好了，但它的 API key 变量是**空串** —— \
+                 当作没配处理，POST /llm/stream 回 501"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "没有可用的 LLM 配置 —— POST /llm/stream 会回 501。\
+                 本地 agent 可以配成直连供应商；要走这条代理就把 \
+                 CORTEX_LLM_PROVIDER 与对应的 API key 填上"
+            );
+            None
+        }
+    };
+
     // 认证形态在这里定，而不是在第一次请求时 —— 配错了要当场起不来，
     // 不要等到某个人登录失败才发现这台机器根本没设 token
     let auth = auth::AuthMode::from_env().context("认证配置不合法")?;
@@ -213,6 +280,7 @@ async fn main() -> anyhow::Result<()> {
         Remote::new(&args.memory, to_memory),
         store,
         accounts,
+        llm,
         auth,
     );
 

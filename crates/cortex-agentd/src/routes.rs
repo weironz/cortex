@@ -94,6 +94,25 @@ protected_routes! {
     // 405 说的是「这条路在，只是这个动作还没有」，正是实情。
     "/sessions" [GET] => get(crate::sessions::list),
     "/sessions/{id}" [GET] => get(crate::sessions::detail),
+    // ── 模型与钱袋 ──
+    //
+    // 借模型。**这是「记忆服务挂了照样能发消息」的那一块** —— 发消息是
+    // agent 的本职，它离开记忆能力照样成立。
+    //
+    // 它**必须在这份清单里**：这条路花的是服务端那把 key 的钱，落到公开侧
+    // 就是一个谁都能用的免费模型网关，而账单是我们付。
+    "/llm/stream" [POST] => post(crate::llm::stream),
+    // 自带 API key。三个动作一条路径：看状态 / 存 / 撤下。
+    //
+    // 它跟着 `/llm/stream` 一起来 —— 「谁的 key」与「在哪花」必须由同一个
+    // 进程决定，见 `crate::byo_key` 的模块头。
+    //
+    // ⚠️ 这条路径同时占了 GET / PUT / DELETE，于是下面那条覆盖测试的探针
+    // **只剩 PATCH 可用**。再给它加一个方法之前先去看那段
+    // `unsupported` 的挑选逻辑：候选被占光时它会 panic，而那正是它该做的
+    "/settings/llm-key" [GET, PUT, DELETE] => get(crate::byo_key::get)
+        .put(crate::byo_key::put)
+        .delete(crate::byo_key::delete),
 }
 
 /// 路由表。
@@ -712,6 +731,10 @@ mod tests {
             // 「是不是 401」，501 与 401 不是一回事，断言照样成立
             None,
             None,
+            // **不配模型**，理由同上，外加一条：配了的话
+            // `POST /llm/stream` 会真的去打供应商，而这组用例跑在没有网络
+            // 的 CI 上 —— 那条断言会变成一次几十秒的超时
+            None,
             crate::auth::AuthMode::Token { digest },
         );
         (router(st), token)
@@ -789,6 +812,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **没配模型时，借模型这条路要当场 501，而不是挂住。**
+    ///
+    /// 上面那条覆盖测试用 `{}` 当请求体，于是 `/llm/stream` 在 `Json` 提取器
+    /// 那一步就被打回（422），**根本走不进 handler**。它证明不了这件事。
+    ///
+    /// 这里送一个形状合法的请求体，让它一路走到装配上游流那一步。判据是
+    /// 501 而不是「随便一个错」：客户端把 501 当成「这条路不会开」并据此
+    /// 降级、**不重试**（`api_exception.dart` 的 `isUnsupported`），
+    /// 而 500 或 502 会让它反复重试一件永远不会成功的事。
+    ///
+    /// 挂住是这里最坏的下场：一个没配 key 的部署会让每一轮对话卡到超时，
+    /// 而日志里什么都没有。
+    #[tokio::test]
+    async fn borrowing_a_model_fails_fast_when_none_is_configured() {
+        let (app, token) = app_with_token();
+        let body = serde_json::json!({
+            "tier": "main",
+            "system": "",
+            "messages": [],
+            "tools": [],
+        })
+        .to_string();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/llm/stream")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .expect("构造请求不该失败");
+
+        let resp = app
+            .oneshot(req)
+            .await
+            .expect("router 的错误类型是 Infallible");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "没配模型时应当回 501（「这个部署提供不了」），实际是 {} —— \
+             500/502 会让客户端反复重试一件永远不会成功的事，\
+             而这条测试**根本跑不完**的话，说明它在没有 key 的情况下真的去打了供应商",
+            resp.status()
+        );
     }
 
     /// 免认证的入口只该有那几条，而且加一条要先说清理由。
@@ -937,7 +1004,8 @@ mod tests {
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
-            // 这一组用例不碰库，也就没有账号体系
+            // 这一组用例不碰库，也就没有账号体系，也不配模型
+            None,
             None,
             None,
             // **认证显式关掉**，不是「没配」。测的是路由拓扑，不是那道门；
@@ -988,7 +1056,8 @@ mod tests {
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
-            // 这一组用例不碰库，也就没有账号体系
+            // 这一组用例不碰库，也就没有账号体系，也不配模型
+            None,
             None,
             None,
             // **认证显式关掉**，不是「没配」。测的是路由拓扑，不是那道门；
@@ -1043,7 +1112,8 @@ mod tests {
             // 远端指向一个没人监听的端口：`delegate` 必然失败，于是这条
             // 会在要钥匙那一步就 502 —— 而那**同样证明**它没去起容器
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
-            // 这一组用例不碰库，也就没有账号体系
+            // 这一组用例不碰库，也就没有账号体系，也不配模型
+            None,
             None,
             None,
             // **认证显式关掉**，不是「没配」。测的是路由拓扑，不是那道门；
@@ -1078,7 +1148,8 @@ mod tests {
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
             crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
-            // 这一组用例不碰库，也就没有账号体系
+            // 这一组用例不碰库，也就没有账号体系，也不配模型
+            None,
             None,
             None,
             // **认证显式关掉**，不是「没配」。测的是路由拓扑，不是那道门；
