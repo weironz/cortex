@@ -550,6 +550,47 @@ void main() {
     );
   });
 
+  /// **服务端发的每一张「对话类」表都得触发刷新。**
+  ///
+  /// `session_events` / `project_events` 服务端一直在发（`SyncPayload` 与
+  /// `sync_payload::to_json` 两处都齐），而客户端的 `SyncTables.conversation`
+  /// 里没有它们 —— 帧到了、游标推进了，界面上什么都不动。
+  ///
+  /// 症状是「同步好像有点慢」：另一台设备上改个会话标题、建或删一个项目，
+  /// 这台机器要等下一次整体重拉才看得见，而链路全程是通的、不报任何错。
+  ///
+  /// 逐个表跑而不是一次塞进去：一次全给的话，只要有一张命中测试就绿，
+  /// 而漏掉的那张正是会被漏掉的那张。
+  test('会话与项目的变更都会触发重拉', () async {
+    for (final table in const [
+      'episodes',
+      'episode_tool_calls',
+      'session_events',
+      'project_events',
+    ]) {
+      final api = _FakeApi()
+        ..respond = (since) => SyncPage(
+          cursor: since + 1,
+          records: [SyncRecord(seq: since + 1, table: table, id: 'x')],
+        );
+      final container = _boot(api);
+      addTearDown(container.dispose);
+
+      await _settle();
+      api.emit(const SyncHello(cursor: 1, version: '0.0.1'));
+      api.emit(const SyncBump(2));
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+
+      expect(
+        api.sessionsCount,
+        greaterThan(0),
+        reason:
+            '$table 变了却没重拉会话列表 —— 服务端发了这张表，'
+            '而 SyncTables.conversation 里没有它，于是帧到了、游标走了、界面不动',
+      );
+    }
+  });
+
   /// `facts` 那几张表**照旧下发，但这一侧不再因此刷新任何东西** ——
   /// 记忆界面去了 Cormex。
   ///

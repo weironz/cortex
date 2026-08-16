@@ -72,7 +72,27 @@ class SyncPage {
 /// refreshes nothing.
 abstract final class SyncTables {
   /// Rows that change what the session list / transcripts should show.
-  static const conversation = {'episodes', 'summaries'};
+  ///
+  /// `session_events` / `project_events` 是 2026-08-17 补的，而**服务端一直
+  /// 在发它们**（`cortex_store::SyncPayload` 与 `sync_payload::to_json` 两处
+  /// 都齐了）—— 缺的只是这一行没把它们算进来。
+  ///
+  /// 症状正是这份注释上面那句警告说的「silently refreshes nothing」：
+  /// 另一台设备上改个会话标题、建或删一个项目，帧到了、游标推进了、
+  /// 而这台机器上什么都不动 —— 要等下一次整体重拉才看得见。不报错，
+  /// 只是「同步好像有点慢」。
+  ///
+  /// `episode_tool_calls` 同理：一轮里新落的工具调用属于这段对话。
+  ///
+  /// `summaries` 留着但**这一侧已经没有这张表**（摘要随记忆去了 Cormex）。
+  /// 留着不花钱：这是个字符串集合，多一个不存在的表名只是永远不命中。
+  static const conversation = {
+    'episodes',
+    'episode_tool_calls',
+    'session_events',
+    'project_events',
+    'summaries',
+  };
 
   /// Rows that change what the memory pane should show.
   static const memory = {
