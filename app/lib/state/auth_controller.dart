@@ -483,14 +483,60 @@ class AuthController extends Notifier<AuthState> {
     }
   }
 
-  /// The credential stopped working mid-session.
+  /// 同一时刻只允许**一次**续期在飞。
+  ///
+  /// # 不去重会把「掉一次线」变成「被登出」
+  ///
+  /// refresh token 是**一次性轮转**的：换一对新的，旧的立刻作废。服务端把
+  /// 「拿一个已经轮转过的来换」判定为泄露，于是**整条 family 一起作废**
+  /// （见 `credentials::judge_refresh`）。
+  ///
+  /// 而 401 是成批来的 —— 服务端一重启，页面上那七八个在飞的请求同时被拒。
+  /// 每个都去刷的话，第一个成功、其余全部拿着刚作废的那份去换 ——
+  /// 服务端看到的是一串重放，反手把这个人彻底登出。
+  ///
+  /// 所以：第一个发起，其余的**等它**。
+  Future<bool>? _refreshInFlight;
+
+  /// 凭据在半路失效了 —— **先自己续，续不动才回登录页**。
   ///
   /// Called from any 401, from anywhere, via `HttpCortexApi.onUnauthorized`.
-  /// The whole app drops back to the gate rather than leaving panes that
-  /// silently fail to load — which is the shape the same failure takes if
-  /// nobody handles it.
-  void onUnauthorized() {
+  ///
+  /// # 为什么不是直接回登录页
+  ///
+  /// 那正是这段代码原本的样子，而它的后果是：access token 只活 15 分钟，
+  /// 服务端每重启一次那本簿子就清空一次（它在内存里）—— 于是用户手上明明
+  /// 揣着一张 **30 天**的 refresh token，却被反复弹回登录框。
+  /// 生产上每发一次版，所有在线的人当场掉线。
+  ///
+  /// 续期成功之后**不做重试**：拿到 401 的那一次请求就让它失败。
+  /// 在这一层重放请求要把 body、幂等性、流式那三样都想清楚，而收益只是省掉
+  /// 一次「重试」的点击 —— 相比之下，「下次打开不用重新登录」才是那个真需求。
+  /// 新 token 一到，`cortexApiProvider` 重建，各个面板自己会再拉一次。
+  /// 返回值是**给测试用的**：让「续完了没有」可以被 await。
+  ///
+  /// 生产上的调用点（`HttpCortexApi.onUnauthorized`）把它丢掉 —— 那条路是从
+  /// 请求失败里以微任务调起来的，挂在那儿等于把一次网络往返压进失败路径。
+  Future<void> onUnauthorized() async {
     if (state.phase == AuthPhase.needsToken) return; // already there
+
+    final refresh = state.refreshToken;
+    if (refresh == null) {
+      _fallBackToGate();
+      return;
+    }
+    // `??=` 是这条并发保护的全部：第一个发起，其余的拿到同一个 future。
+    // 见字段上那段 —— 各刷各的会被服务端判成重放，把人彻底登出
+    final inflight = _refreshInFlight ??= restoreSession(
+      refresh,
+    ).whenComplete(() => _refreshInFlight = null);
+    final ok = await inflight;
+    if (!ok && ref.mounted) _fallBackToGate();
+  }
+
+  /// 回登录页，说清为什么。
+  void _fallBackToGate() {
+    if (state.phase == AuthPhase.needsToken) return;
     // Deliberately not `forgetToken()`: a rotated server-side secret is not a
     // reason to also destroy the copy the user may still be editing, and on
     // desktop the "stored" copy is an environment variable this app must not

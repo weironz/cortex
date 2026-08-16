@@ -805,6 +805,67 @@ void _sessionTests() {
       expect(ok, isFalse);
     });
 
+    /// **半路 401 先续期，而不是把人弹回登录框。**
+    ///
+    /// access token 只活 15 分钟，服务端每重启一次那本簿子就清空一次
+    /// （它在内存里）。原来的做法是一收到 401 就回登录页 —— 而用户手上
+    /// 明明揣着一张 30 天的 refresh token。生产上每发一次版，所有在线的人
+    /// 当场掉线。
+    test('半路 401 会先拿 refresh token 续，不弹登录框', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await ctrl.restoreSession('refresh-old'); // 先有一份可用的凭据
+      expect(c.read(authControllerProvider).isReady, isTrue);
+
+      await ctrl.onUnauthorized();
+
+      expect(
+        c.read(authControllerProvider).isReady,
+        isTrue,
+        reason: '续得上就该留在原地，把人弹回登录框是这次要修掉的行为',
+      );
+      expect(c.read(authControllerProvider).token, 'access-2');
+    });
+
+    /// **并发的 401 只能触发一次续期。**
+    ///
+    /// refresh token 一次性轮转，服务端把「拿一个已经轮转过的来换」判成泄露，
+    /// 于是**整条 family 一起作废**。而 401 是成批来的（服务端一重启，页面上
+    /// 七八个在飞的请求同时被拒）。每个各刷各的，第一个成功、其余全是重放 ——
+    /// 这个人被彻底登出。
+    ///
+    /// 这条测试比上一条重要：写错了不是「体验差一点」，是**主动把用户踢下线**。
+    test('并发的 401 只刷一次，不会被服务端判成重放', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await ctrl.restoreSession('refresh-old');
+      final before = api.refreshCalls;
+
+      // 七个请求同时撞上 401 —— **同一轮里全部发起**，这正是服务端重启时
+      // 页面上那几个在飞的请求的样子
+      await Future.wait([for (var i = 0; i < 7; i++) ctrl.onUnauthorized()]);
+
+      expect(
+        api.refreshCalls - before,
+        1,
+        reason:
+            '七次 401 只该换来一次续期。多出来的每一次都是拿已经轮转过的那份'
+            '去换 —— 服务端看到的是重放，反手把整条 family 作废',
+      );
+    });
+
     /// **登出要让服务端作废，不能只删本地。**
     ///
     /// 只删本地是「这台机器忘了」，而已经泄露出去的那一份还能用到 30 天后。
