@@ -1,6 +1,7 @@
 import 'diff_view.dart';
 import 'package:flutter/material.dart';
 
+import '../../../core/ansi.dart';
 import '../../../models/tool_call.dart';
 
 /// 一轮里 agent **做了什么** —— 工具调用与它们改动的内容。
@@ -238,15 +239,31 @@ class _ToolRowState extends State<_ToolRow> {
                     )
                   else if (call.arguments != null)
                     TextSpan(text: '  ${call.arguments}'),
+                  // 工具输出走 ANSI 解析：`shell` 跑的是真终端命令，
+                  // cargo / npm / git 一律带色。不解析的话那些序列**原样**
+                  // 进界面，用户看到的是 `[32m通过[0m` 而不是一个绿色的
+                  // 「通过」。失败时不解析 —— 那一行整条要是错误色，
+                  // 让命令自己的配色去覆盖它只会把「这条挂了」冲淡
                   if (call.result != null)
-                    TextSpan(
-                      text: '  · ${call.result}',
-                      style: labelStyle.copyWith(
-                        color: call.failed
-                            ? scheme.error
-                            : scheme.onSurfaceVariant,
+                    if (call.failed)
+                      TextSpan(
+                        text: '  · ${stripAnsi(call.result!)}',
+                        style: labelStyle.copyWith(color: scheme.error),
+                      )
+                    else ...[
+                      TextSpan(
+                        text: '  · ',
+                        style: labelStyle.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
                       ),
-                    ),
+                      ...parseAnsi(
+                        call.result!,
+                        base: labelStyle.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                 ],
               ),
             ),
