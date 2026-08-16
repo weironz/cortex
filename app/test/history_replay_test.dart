@@ -64,11 +64,11 @@ void main() {
       final container = await _loaded(api);
       addTearDown(container.dispose);
 
-      expect(
-        api.detailCalls.single,
-        ('s1', kEpisodePage, null),
-        reason: '首屏必须带 limit 且不带游标 —— 不带 limit 就是把 500 条全拉下来',
-      );
+      expect(api.detailCalls.single, (
+        's1',
+        kEpisodePage,
+        null,
+      ), reason: '首屏必须带 limit 且不带游标 —— 不带 limit 就是把 500 条全拉下来');
 
       final t = _transcript(container);
       expect(t.messages, hasLength(4));
