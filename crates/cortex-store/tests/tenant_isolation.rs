@@ -74,7 +74,6 @@ async fn seed(store: &Store, who: &str) -> String {
                 role: cortex_store::Role::User,
                 content: serde_json::json!([{"type": "text", "text": text}]),
                 text: Some(text.clone()),
-                tsv_source: Some(text.clone()),
                 domain: None,
                 device_id: "test".into(),
                 occurred_at: chrono::Utc::now(),

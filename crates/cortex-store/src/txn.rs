@@ -142,20 +142,23 @@ impl WriteTxn {
 
     // ── L0 原始层 ──────────────────────────────────────────
 
-    /// 落一条原始消息。`tsv_source` 与主行同事务写入，永不异步补写。
+    /// 落一条原始消息。
+    ///
+    /// 这里曾经还写一列 `tsv`（`to_tsvector('simple', $6)`）。它随 BM25
+    /// 召回一起留在了 Cormex，这一侧只写不读 —— 列与字段一起删了，
+    /// 见 `migrations/20260816000001_drop_episode_tsv.sql`。
     pub async fn insert_episode(&mut self, new: &NewEpisode) -> Result<i64> {
         let id = new.id.to_string();
         let stmt = sqlx::query(
             "INSERT INTO episodes
-                 (id, session_id, role, content, text, tsv, domain, device_id, occurred_at)
-             VALUES ($1, $2, $3, $4, $5, to_tsvector('simple', $6), $7, $8, $9)",
+                 (id, session_id, role, content, text, domain, device_id, occurred_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&id)
         .bind(&new.session_id)
         .bind(new.role)
         .bind(sqlx::types::Json(&new.content))
         .bind(&new.text)
-        .bind(&new.tsv_source)
         .bind(&new.domain)
         .bind(&new.device_id)
         .bind(new.occurred_at);

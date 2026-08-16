@@ -409,13 +409,17 @@ pub fn store_err(e: cortex_store::StoreError) -> CortexError {
 ///
 /// 打包成一个结构而不是给 [`episode_dto`] 两个参数：两个同型参数排在一起，
 /// 传错顺序编译器一声不吭。
+///
+/// [`crate::episodes`] 那条单条读取的路也用它。共用而不是各拼各的：
+/// 两份映射漂开的表现是**同一条消息在会话历史里和在单条详情里长得不一样**，
+/// 而没有任何报错。
 #[derive(Debug, Default)]
-struct Replay {
-    attachments: Vec<AttachmentDto>,
-    tool_calls: Vec<ToolCallDto>,
+pub struct Replay {
+    pub attachments: Vec<AttachmentDto>,
+    pub tool_calls: Vec<ToolCallDto>,
 }
 
-fn episode_dto(e: cortex_store::Episode, replay: Replay) -> EpisodeDto {
+pub fn episode_dto(e: cortex_store::Episode, replay: Replay) -> EpisodeDto {
     EpisodeDto {
         id: e.id,
         session_id: e.session_id,
@@ -429,7 +433,7 @@ fn episode_dto(e: cortex_store::Episode, replay: Replay) -> EpisodeDto {
     }
 }
 
-fn attachment_of(a: cortex_store::EpisodeAttachment) -> AttachmentDto {
+pub fn attachment_of(a: cortex_store::EpisodeAttachment) -> AttachmentDto {
     AttachmentDto {
         hash: a.blob_hash,
         kind: a.kind,
@@ -439,7 +443,7 @@ fn attachment_of(a: cortex_store::EpisodeAttachment) -> AttachmentDto {
     }
 }
 
-fn tool_call_dto(t: cortex_store::EpisodeToolCall) -> ToolCallDto {
+pub fn tool_call_dto(t: cortex_store::EpisodeToolCall) -> ToolCallDto {
     ToolCallDto {
         name: t.name,
         path: t.path,
