@@ -78,6 +78,15 @@ struct Inner {
     /// `None` 时 `/llm/stream` 回 501（「这个部署永远提供不了」），
     /// 与 [`Self::accounts`] 同一个形状：**明说不支持，而不是假装能用**。
     llm: Option<cortex_llm::LlmClient>,
+    /// 附件的字节住在哪儿（`/blobs` 那几条路要它）。
+    ///
+    /// `None` = 这个部署既没配 S3、也没显式给本地目录。此时 blob 端点一律
+    /// 501 —— **上传成功却没有字节落地是「自证清白的坏数据」**：`blobs` 行
+    /// 在、同步也推了，只有取回时才发现内容不存在，而那时已经追不回来源了。
+    ///
+    /// 与 [`Self::store`] 分工分明：那个是**指向字节的那一行**，这个是字节
+    /// 本身。两者必须同时在，缺哪一半都会留下取不回内容的悬空引用。
+    blobs: Option<crate::blobs::MediaStore>,
     /// 这个部署要不要凭据，以及那把预共享 token 的摘要。
     auth: AuthMode,
     /// 短命票据。给加不了请求头的连接用（`?ticket=`）。
@@ -156,7 +165,23 @@ impl Accounts {
 }
 
 impl AgentState {
+    /// 装配这个进程的全部依赖。
+    ///
+    /// # 为什么忍着这一长串参数，而不是收进一个配置结构体
+    ///
+    /// 收进结构体的直接后果是**漏配一项不再编译不过**：`Default` 一来，
+    /// 「忘了给对象存储」与「这台机器故意不接对象存储」就长得一模一样，
+    /// 而前者的症状是附件功能悄悄消失。位置参数难看，但它逼着每个构造点
+    /// 对每一项表态 —— 测试里那几个 `None` 各自带着一行「为什么这组用例
+    /// 不需要它」，正是这个约束换来的。
+    ///
+    /// 真要收，该收的是「这几个 `Option` 表达的其实是同一件事：这个部署开了
+    /// 哪几项能力」，那是另一次改动。在那之前不加 `Default`。
     #[must_use]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "见上：改成配置结构体会让「漏配一项」从编译错误退化成运行时静默缺失"
+    )]
     pub fn new(
         runner: Arc<dyn SandboxRunner>,
         http: reqwest::Client,
@@ -165,6 +190,9 @@ impl AgentState {
         accounts: Option<Accounts>,
         llm: Option<cortex_llm::LlmClient>,
         auth: AuthMode,
+        // 新参数一律**追加在末尾**：这几个都是 `Option<…>`，中间插一个的话
+        // 每个构造点都还编得过，只是把值传给了错的那一个字段
+        blobs: Option<crate::blobs::MediaStore>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -174,6 +202,7 @@ impl AgentState {
                 store,
                 accounts,
                 llm,
+                blobs,
                 auth,
                 tickets: Arc::new(TicketBook::default()),
                 access: Arc::new(crate::accounts::AccessBook::default()),
@@ -232,6 +261,22 @@ impl AgentState {
             crate::error::ApiError::unsupported(
                 "这个部署没有配 LLM 供应商（CORTEX_LLM_PROVIDER / 对应的 API key），\
                  借模型这条路不可用。本地 agent 可以配成直连供应商。",
+            )
+        })
+    }
+
+    /// 附件的字节存放处。
+    ///
+    /// # Errors
+    /// 这个部署没接对象存储。回 501 而不是 500：客户端把 501 当成「这条路
+    /// 不会开」，据此把附件入口整个降级掉并**不重试**，而那正是实情 ——
+    /// 一台没有对象存储的机器，重试一万次也传不上去。
+    pub fn blobs(&self) -> Result<&crate::blobs::MediaStore, crate::error::ApiError> {
+        self.inner.blobs.as_ref().ok_or_else(|| {
+            crate::error::ApiError::unsupported(
+                "这个部署没有接对象存储（S3_ENDPOINT / S3_BUCKET / S3_REGION / \
+                 RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY 缺项，也没有 CORTEX_BLOB_DIR），\
+                 附件功能不可用",
             )
         })
     }

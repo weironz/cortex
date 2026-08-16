@@ -1,7 +1,11 @@
-//! HTTP 面。**只有碰 docker 的那几条。**
+//! HTTP 面。
 //!
-//! 其余路径（会话、记忆、同步、blob、`/ws`）由**边缘**直接转给 cortexd，
-//! 不经过这个进程。
+//! 这一段以前写着「**只有碰 docker 的那几条**，其余由边缘直接转给 cortexd」。
+//! 2026-08-16 那句话失效了：会话、项目、附件、导入、快照、实时同步、模型
+//! 代理、身份**全部搬了过来**，边缘转给记忆服务的只剩 `/memory` 与 `/mcp`
+//! ——那两条是记忆能力本身，永远留在那边。
+//!
+//! 判据一直是同一句：**这张表离开记忆能力还有没有意义。**
 //!
 //! # 为什么不像 `cortex-local` 那样自带前门反代
 //!
@@ -163,6 +167,20 @@ protected_routes! {
     // 的第三方就得走它。自己人抄近路、外人走 HTTP，那个 HTTP 就会烂。
     "/sandbox-snapshots" [GET, POST] => get(crate::snapshot_index::list)
         .post(crate::snapshot_index::record),
+    // ── 附件 ──
+    //
+    // 与会话同一支：`episode_blobs` 挂在 episode 上，而回放每翻一页都要读它。
+    // 会话搬过来了而字节没搬的话，历史里每个附件都是取不回内容的占位符。
+    //
+    // axum 默认体积上限是 2 MiB —— 对「直传小文件」这个用途太紧（随手一张
+    // 手机照片就超了）。放宽到 DIRECT_UPLOAD_LIMIT，再大的走 /blobs/presign
+    // 直传对象存储，不经这个进程中转
+    "/blobs" [POST] => post(crate::blobs::upload)
+        .layer(axum::extract::DefaultBodyLimit::max(crate::blobs::DIRECT_UPLOAD_LIMIT)),
+    "/blobs/presign" [POST] => post(crate::blobs::presign),
+    "/blobs/commit" [POST] => post(crate::blobs::commit),
+    "/blobs/{hash}" [GET] => get(crate::blobs::download),
+    "/blobs/{hash}/url" [GET] => get(crate::blobs::download_url),
 }
 
 /// 路由表。
@@ -331,6 +349,11 @@ async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
         "callback": st.runner().callback(),
         "callback_visible_to_sandbox": callback_visible,
         "database": database,
+        // 附件的字节落在哪一路后端上。三档与 `database` 同源：`disabled`
+        // 是「这个部署没接对象存储」，而 **`local_fs` 出现在生产上就是一条
+        // 告警** —— 那意味着附件只活在这个容器的文件系统里，重建即丢失。
+        // 报一个布尔值的话，这两件完全不同的事会长成同一个红点
+        "blobs": st.blobs().map_or("disabled", crate::blobs::MediaStore::backend),
         // 这台机器要不要凭据。**只报形态，不报那把摘要** —— 前者是运维要
         // 核对的事实（「我以为线上开着认证」），后者是凭据本身的一半。
         //
@@ -791,6 +814,9 @@ mod tests {
             // 的 CI 上 —— 那条断言会变成一次几十秒的超时
             None,
             crate::auth::AuthMode::Token { digest },
+            // **不接对象存储**，理由与上面那两个 None 同源：blob 端点因此
+            // 回 501，而这一组断言只问「是不是 401」，501 与 401 不是一回事
+            None,
         );
         (router(st), token)
     }
@@ -911,6 +937,56 @@ mod tests {
              而这条测试**根本跑不完**的话，说明它在没有 key 的情况下真的去打了供应商",
             resp.status()
         );
+    }
+
+    /// **没接对象存储时，附件那几条要 501，而不是 500 / 503。**
+    ///
+    /// 上面那条覆盖测试只断言「带了凭据之后不再是 401」，401 之外的任何码
+    /// 都算过 —— 它证明不了这件事。
+    ///
+    /// 判据是 501：客户端把它当成「这条路不会开」，据此把附件入口整个关掉并
+    /// **不重试**（`api_exception.dart` 的 `isUnsupported`）。回 500 会让它
+    /// 反复重传同一个文件，回 503 会让它以为等一会儿就好 —— 而一台没有对象
+    /// 存储的机器，等多久都传不上去。
+    ///
+    /// 顺带钉住**顺序**：这几个 handler 必须先问「这个部署有没有对象存储」，
+    /// 再去解析租户。反过来的话，这一组（没接库）会先在 `tenant.store()` 上
+    /// 以 503 失败，而真正的原因根本没被报出来。
+    #[tokio::test]
+    async fn attachment_routes_fail_fast_when_there_is_no_object_store() {
+        let (app, token) = app_with_token();
+
+        // 读、写、签 URL 各一条：三条走的分支不同（`blobs()` / `presign_capable()`），
+        // 只测一条的话另外两条退化成 500 也看不出来
+        let cases = [
+            (Method::POST, "/blobs", "{}"),
+            (Method::POST, "/blobs/presign", r#"{"hash":"ab"}"#),
+            (Method::GET, "/blobs/anything", ""),
+            (Method::GET, "/blobs/anything/url", ""),
+        ];
+        for (method, path, body) in cases {
+            let req = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .expect("构造请求不该失败");
+            let status = app
+                .clone()
+                .oneshot(req)
+                .await
+                .expect("router 的错误类型是 Infallible")
+                .status();
+            assert_eq!(
+                status,
+                StatusCode::NOT_IMPLEMENTED,
+                "{method} {path} 在没接对象存储时回了 {status}，预期 501。\
+                 503 会让客户端以为等等就好，500 会让它反复重传同一个文件 —— \
+                 而这台机器上那个文件永远传不上去。若这里是 503，多半是 handler \
+                 先解析了租户、后问的对象存储"
+            );
+        }
     }
 
     /// 免认证的入口只该有那几条，而且加一条要先说清理由。
@@ -1067,6 +1143,8 @@ mod tests {
             // 而 `AuthMode::from_env` 在没配任何凭据时会拒绝启动，正是为了
             // 不让「忘了配」与「决定不要」长得一样
             crate::auth::AuthMode::Disabled,
+            // 这一组用例也不接对象存储
+            None,
         );
         let app = router(st);
         // **`/sessions` 已经不在这份名单里了。**
@@ -1119,6 +1197,8 @@ mod tests {
             // 而 `AuthMode::from_env` 在没配任何凭据时会拒绝启动，正是为了
             // 不让「忘了配」与「决定不要」长得一样
             crate::auth::AuthMode::Disabled,
+            // 这一组用例也不接对象存储
+            None,
         );
         let resp = router(st)
             .oneshot(
@@ -1175,6 +1255,8 @@ mod tests {
             // 而 `AuthMode::from_env` 在没配任何凭据时会拒绝启动，正是为了
             // 不让「忘了配」与「决定不要」长得一样
             crate::auth::AuthMode::Disabled,
+            // 这一组用例也不接对象存储
+            None,
         );
         let resp = router(st)
             .oneshot(
@@ -1211,6 +1293,8 @@ mod tests {
             // 而 `AuthMode::from_env` 在没配任何凭据时会拒绝启动，正是为了
             // 不让「忘了配」与「决定不要」长得一样
             crate::auth::AuthMode::Disabled,
+            // 这一组用例也不接对象存储
+            None,
         );
         let resp = router(st)
             .oneshot(

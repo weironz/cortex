@@ -880,6 +880,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "cortex-blob",
  "cortex-core",
  "cortex-import",
  "cortex-llm",

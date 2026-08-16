@@ -85,6 +85,7 @@ server {
     #   人还没来得及填用户名就被判成「连不上」
     # - `llm` / `settings` —— 借模型与自带 key。「谁的 key、算不算额度、
     #   在哪花」必须由同一个进程决定，所以两条同一刀切
+    # - `blobs` / `import` / `sandbox-snapshots` —— 附件、导入、快照账本
     # - `episodes` —— 写一轮。**这是整件事的落点**：先写自己的库，再尽力把它
     #   转发给记忆服务做抽取；转发失败只是这一轮没有记忆命中，不是失败
     # - `sync` —— 补拉那条底线路径
@@ -97,7 +98,9 @@ server {
     # 先后取第一个匹配的，于是「我明明改了」与「它没生效」会同时成立。
     #
     # 这份清单会一直缩短，最后只剩记忆那一侧真正的路由（memory、mcp）。
-    location ~ ^/(confirmations|memory|blobs|import|sandbox-snapshots|delegated-tokens|mcp)(/|$) {
+    # 剩下的：`memory` 与 `mcp` 是记忆那一侧真正的门面，**永远留在那边**；
+    # `delegated-tokens` 与 `confirmations` 是云端沙箱那条链，还没搬完
+    location ~ ^/(confirmations|memory|delegated-tokens|mcp)(/|$) {
         proxy_pass http://cortexd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
@@ -129,7 +132,7 @@ server {
     # 与上面那段的配置逐字相同（SSE 关缓冲、30 分钟读超时），只有上游不同。
     # 不合并成一段再按前缀选上游：nginx 里那么写要引一个 map，而两段各自
     # 完整、读得出「这条归谁」，比省下十行重要。
-    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes)(/|$) {
+    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes|blobs|import|sandbox-snapshots)(/|$) {
         proxy_pass http://agentd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;

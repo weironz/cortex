@@ -31,6 +31,9 @@ cortex-store.workspace = true
 # 各写一份的症状是同一个文件在桌面端导进 812 段、网页端 790 段，
 # 两边都不报错。见 cortex-import 的 crate 文档
 cortex-import.workspace = true
+# 附件的字节。**与 `cortex-store` 是两半，缺哪一半都是悬空引用**：那边写
+# 指向字节的那一行，这边写字节本身。见 `src/blobs.rs` 的模块头
+cortex-blob.workspace = true
 
 # **供应商层。只依赖它，不要写 `goose-provider-types`** —— 那个 crate 没有
 # `rustls-tls` feature（alpha 的每个版本都没有，TLS 后端只由 goose-providers
