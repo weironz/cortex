@@ -95,17 +95,23 @@ struct Inner {
     access: Arc<crate::accounts::AccessBook>,
     /// 每个租户一条的实时推送总线。懒建，见 [`crate::sync_bus::SyncBuses`]。
     sync_buses: Arc<crate::sync_bus::SyncBuses>,
-    //
-    // 这里**还没有**委托令牌那本簿子（沙箱容器回调用的那种）。
-    //
-    // 签一把委托凭据要先读会话行（它绑的是「哪个会话、哪个项目、跑在
-    // 云上还是本机」），而会话此刻还在记忆服务的库里。现在把那本簿子搬
-    // 过来，这个进程能签出的只会是一把作用域全错的钥匙 —— 于是签发仍然
-    // 由记忆服务做（`remote::Remote::delegate`），这边一把都认不出来。
-    //
-    // 它与 `/episodes`、`/delegated-tokens` 一起来（持久层阶段三）。
-    // 那时 `auth::require` 里也要补回对应的那一支。
-    //
+    /// 委托令牌那本簿子（沙箱容器回调用的那种）。见
+    /// [`crate::delegated_token`]。
+    ///
+    /// # 它为什么终于能在这儿
+    ///
+    /// 这一段以前写着「这里**还没有**这本簿子」，理由是：签一把委托凭据要先
+    /// 读会话行（它绑的是「哪个会话、哪个项目、跑在云上还是本机」），而会话
+    /// 那时还在记忆服务的库里 —— 在这儿签只会签出一把作用域全错的钥匙。
+    ///
+    /// 2026-08-16 会话搬进了 [`Self::store`]，那个前提反转了：**签发方必须
+    /// 是持有会话行的那一方**。于是簿子跟着会话走，[`crate::auth::require`]
+    /// 里也补上了认它的那一支。
+    ///
+    /// 与 [`Self::access`] 分工分明：那本是**用户自己**登录换来的，认出来就
+    /// 放行；这本带**语义作用域**，认出来之后还要问一句「这条路由它够不够
+    /// 得着」—— 因为持有者是不可信代码。
+    delegations: Arc<crate::delegated_token::DelegatedTokens>,
     /// 每个作用域最后一次真的被用是什么时候。
     ///
     /// # 为什么这份表在这儿，而不是继续读 cortexd 的令牌注册表
@@ -207,6 +213,7 @@ impl AgentState {
                 tickets: Arc::new(TicketBook::default()),
                 access: Arc::new(crate::accounts::AccessBook::default()),
                 sync_buses: Arc::new(crate::sync_bus::SyncBuses::default()),
+                delegations: Arc::new(crate::delegated_token::DelegatedTokens::default()),
                 last_use: Mutex::new(HashMap::new()),
             }),
         }
@@ -303,6 +310,12 @@ impl AgentState {
     #[must_use]
     pub fn sync_buses(&self) -> &crate::sync_bus::SyncBuses {
         &self.inner.sync_buses
+    }
+
+    /// 委托令牌簿。签发走 [`crate::routes`]，校验走 [`crate::auth::require`]。
+    #[must_use]
+    pub fn delegations(&self) -> &crate::delegated_token::DelegatedTokens {
+        &self.inner.delegations
     }
 
     #[must_use]

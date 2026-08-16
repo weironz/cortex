@@ -316,18 +316,40 @@ pub async fn require(State(st): State<AgentState>, req: Request, next: Next) -> 
         if st.access_book().resolve(tok).is_some() {
             return next.run(req).await;
         }
-        // 这里**还差一支：委托令牌**（沙箱容器回调用的那种）。
+        // 委托令牌（沙箱容器回调用的那种）。**它与上面两支的区别是带作用域**
+        // —— 认出来还不够，还要问一句「这条路由它够不够得着」。
         //
-        // 它带**语义作用域** —— 认出来还不够，还要问一句「这条路由它够不
-        // 够得着」，因为容器里跑的是不可信代码，而 `/episodes` 是穿透容器
-        // 边界的持久通道（写进去的东西会在未来所有会话里被读到）。
+        // 为什么不能像那两支一样认出来就放行：容器里跑的是不可信代码，
+        // 而 `/episodes` 是**穿透容器边界的持久通道**（写进去的东西会被转给
+        // 记忆服务抽取，抽出来的 fact 在未来所有会话、所有设备上被召回并注入
+        // system prompt）。完整论证在 `delegated_token` 的模块文档里。
         //
-        // 没有搬过来是因为**这个进程一把都签不出**：签一把委托凭据要先读
-        // 会话行，而会话此刻还在记忆服务的库里。搬一份认不出任何令牌的
-        // 校验逻辑过来，只会是一段永远走不到的分支。
-        //
-        // 它与 `/episodes`、`/delegated-tokens` 一起来（持久层阶段三）。
-        // 在那之前沙箱回调的是记忆服务，由那一侧校验。
+        // 这一支 2026-08-16 才补上：在那之前这个进程一把令牌都签不出（签发要
+        // 先读会话行，而会话还在记忆服务的库里），搬一份认不出任何东西的校验
+        // 逻辑过来只会是一段永远走不到的分支。
+        if let Some(scope) = st.delegations().resolve(tok) {
+            let (method, path) = (req.method().clone(), req.uri().path().to_owned());
+            if scope.allows(&method, &path) {
+                // 作用域塞进 extensions，让 handler 还能在**会话**这一层再收紧
+                // 一次：认证只答得了「够不够得着这条路由」，答不了「够不够得着
+                // 这个会话的数据」—— 后者要 handler 手上有请求体与参数。
+                // 消费者见 `crate::episodes::write`
+                let mut req = req;
+                req.extensions_mut().insert(scope);
+                return next.run(req).await;
+            }
+            tracing::warn!(
+                owner = %scope.owner, session = %scope.session_id, %method, %path,
+                "委托令牌够不到这条路由"
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(cortex_proto::dto::ErrorBody {
+                    error: format!("这把委托凭据不允许访问 {method} {path}"),
+                }),
+            )
+                .into_response();
+        }
     }
 
     // 2) 加不了请求头的那些客户端：短命票据

@@ -31,6 +31,7 @@ mod blobs;
 mod byo_key;
 mod credentials;
 mod cursor;
+mod delegated_token;
 mod env;
 mod episodes;
 mod error;
