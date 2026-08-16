@@ -33,6 +33,7 @@ use crate::credentials::{
     refresh_digest, verify_password,
 };
 use crate::error::ApiError;
+use crate::rate_limit::{key_prefix, login_key};
 use crate::state::AgentState;
 
 /// access token 的寿命。
@@ -355,6 +356,26 @@ pub async fn login(
     State(st): State<AgentState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthTokens>, ApiError> {
+    // ── 限流，在做任何事之前 ──
+    //
+    // 键是**提交的用户名**（小写），限的是**失败**次数：成功不计，所以正常
+    // 登录不受影响；被爆破时那个用户名一分钟只挨得了 10 下。外加一道全局
+    // 兜底，拦「每个名字只试一两下」的撒网。dev 免密登录（用户名为空）也
+    // 走这条 —— 空名字按 "(blank)" 计，既不豁免，也不与真实用户名互相牵连。
+    //
+    // 这里只查不记：记不记要等这次认证的结果（见下面的 `deny`）。
+    let throttle_key = login_key(&req.username);
+    if let Err(wait) = st.auth_throttle().check_login(&throttle_key) {
+        tracing::warn!(
+            key = %key_prefix(&throttle_key),
+            wait,
+            "login 限流命中：这个用户名（或全局兜底）的失败额度已满"
+        );
+        return Err(ApiError::too_many_requests(format!(
+            "登录尝试太频繁，请 {wait} 秒后再试"
+        )));
+    }
+
     // ── 开发机免密：用户名与密码都空时，登成这台机器指名的那个人 ──
     //
     // 判断必须在**查库之前**：空用户名查不出任何行，事后再判等于永远走不到。
@@ -389,9 +410,16 @@ pub async fn login(
     // 时间侧信道这里不做等时处理：真要防，得对不存在的用户也跑一遍 argon2，
     // 而那会把「随便猜个用户名」变成一次 16ms 的 CPU 消耗 —— 那是个更好用的
     // DoS 放大器。取舍写在这里，别当成漏了
-    let deny = || ApiError::unauthorized("用户名或密码不对");
+    let deny = || {
+        // 只在**失败**这一刻记账（成功那条路走不到这儿）——
+        // 与上面的 check_login 配对：先查、办事、失败了再记
+        st.auth_throttle().record_login_failure(&throttle_key);
+        ApiError::unauthorized("用户名或密码不对")
+    };
     let Some(row) = row else { return Err(deny()) };
     if row.get::<bool, _>("disabled") {
+        // 停用的账号也计一次失败：能持续敲一个停用账号的门，本身就是在探测
+        st.auth_throttle().record_login_failure(&throttle_key);
         return Err(ApiError::unauthorized("这个账号已被停用"));
     }
     if dev_login {
@@ -414,6 +442,27 @@ pub async fn refresh(
     State(st): State<AgentState>,
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<AuthTokens>, ApiError> {
+    // ── 限流，必须在碰库之前 ──
+    //
+    // 这道闸挡的正是「把库写爆」那种事故（2026-08-16：一个客户端续期循环
+    // 往 auth_tokens 里塞了 21.9 万行）—— 先查库再限流等于把闸建在洪水
+    // 下游，每一次被限的请求都已经打过一次库。`routes.rs` 的测试就靠这个
+    // 顺序钉住阈值：没接库时前 N 次 501、第 N+1 次 429。
+    //
+    // 键是 token 的摘要而不是用户名 / IP：正常客户端 15 分钟才来一次，
+    // 同一把 token 每分钟 5 次以上必是循环。为什么不能是用户名 / IP，
+    // 见 `rate_limit::AuthThrottle::check_refresh`。
+    let digest = refresh_digest(&req.refresh_token);
+    if let Err(wait) = st.auth_throttle().check_refresh(&digest) {
+        tracing::warn!(
+            key = %key_prefix(&digest),
+            wait,
+            "refresh 限流命中：同一把 token 来得太密，多半是客户端的续期循环跑飞了"
+        );
+        return Err(ApiError::too_many_requests(format!(
+            "刷新太频繁：这把凭据在过去一分钟里用得太多，请 {wait} 秒后再试"
+        )));
+    }
     Ok(Json(st.rotate(&req.refresh_token).await?))
 }
 
@@ -471,6 +520,19 @@ pub async fn register(
         // 说清楚是「这个部署关着」而不是「你填错了」，否则对方会一直重试
         return Err(ApiError::forbidden(format!(
             "这个部署没有开放注册。管理员可以设 {OPEN_REGISTRATION_ENV}={OPEN_REGISTRATION_ON} 打开，             或者用 cortexd --create-user 直接建号"
+        )));
+    }
+    // ── 全局限流，在碰库之前 ──
+    //
+    // 注册是人类填表单的动作，背后却是一次 argon2 加一片新 schema —— 全局
+    // 低频一道闸就够，不必按人细分（见 `rate_limit::REGISTER_PER_WINDOW`）。
+    //
+    // 放在上面那道 403 **之后**：关着的部署回 403（「永远不行」）比 429
+    // （「等等再来」）更真，别让限流把那个更有信息量的回答盖掉。
+    if let Err(wait) = st.auth_throttle().check_register() {
+        tracing::warn!(wait, "register 限流命中（全局闸）");
+        return Err(ApiError::too_many_requests(format!(
+            "注册请求太频繁，请 {wait} 秒后再试"
         )));
     }
     let user_id = st.create_account(&req.username, &req.password).await?;
@@ -593,8 +655,10 @@ mod tests {
             .split("pub async fn register")
             .nth(1)
             .expect("register 还在吧");
-        // 只看函数体前半段（到密码哈希为止就够了）
-        let head = &gate[..gate.len().min(2000)];
+        // 只看函数体前半段（到 create_account 为止就够了）。按**字符**截而
+        // 不是按字节：这个函数的注释是中文，字节 2000 落在多字节字符中间时
+        // 切片会 panic —— 限流那段注释加进来之后真的撞上过
+        let head: String = gate.chars().take(2000).collect();
         assert!(
             !head.contains("user_count"),
             "register 里又数起用户数了 —— 那通常意味着「第一个账号特殊对待」             这条特例回来了，而它带着一个公网上的抢主人窗口。             第一个账号应当由 .env（main::ensure_admin）或 --create-user 建"

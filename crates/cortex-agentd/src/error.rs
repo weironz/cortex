@@ -55,10 +55,11 @@ impl ApiError {
         }
     }
 
-    /// 429：额度用完了。
+    /// 429：额度用完了，或者来得太密（认证端点的限流，见 [`crate::rate_limit`]）。
     ///
     /// 与 403 分开：403 的意思是「这件事你永远不能做」，429 是
-    /// 「现在不行，等等就行」。客户端据此决定要不要显示重试。
+    /// 「现在不行，等等就行」。客户端据此决定要不要显示重试 ——
+    /// 尤其 403 会被当成「凭据废了」触发登出，限流命中绝不能走那条路。
     pub fn too_many_requests(message: impl Into<String>) -> Self {
         Self {
             message: Some(message.into()),

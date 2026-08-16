@@ -242,6 +242,11 @@ pub fn router(state: AgentState) -> Router {
 ///   要求同时带一个还没过期的 access token，等于让「过期后自动续期」
 ///   这件事只在没过期时可用。
 ///
+/// 公开不等于不设防：login / refresh / register 的 handler 里各有一道
+/// 进程内限流（[`crate::rate_limit`]）。2026-08-16 一个客户端续期循环把
+/// 21.9 万行写进 `auth_tokens` 之后补的 —— 这几条的下游是库，而它们又是
+/// 整个服务里唯一「不带任何凭据就打得到」的写路径。
+///
 /// # 往里加一条之前
 ///
 /// 这是整个服务**真正**的免认证入口。加东西的正确姿势是先在上面补一段
@@ -1213,6 +1218,94 @@ mod tests {
                  先解析了租户、后问的对象存储"
             );
         }
+    }
+
+    /// 公开侧的 POST：不带凭据，带一个真实的 JSON 体。
+    ///
+    /// 上面的 `status_of` 一律用 `{}` 当体，而限流这组用例的键在**请求体里**
+    /// （refresh token 的摘要）——`{}` 会在 `Json` 提取器那步被打回（422），
+    /// 根本走不进 handler，也就走不到限流那行。
+    async fn post_public(app: &Router, path: &str, body: &'static str) -> (StatusCode, String) {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .expect("构造请求不该失败");
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("router 的错误类型是 Infallible");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("读 body 不该失败");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// **同一把 refresh token 打得太密要被 429 掐住，而且掐在碰库之前。**
+    ///
+    /// 这组状态没接库，handler 一走到查库那步只能回 501 —— 于是
+    /// 「前 N 次 501、第 N+1 次 429」一口气钉住两件事：阈值本身，和
+    /// 「先查限流表、再碰库」的顺序。顺序反了的话这条测试拿到的是清一色的
+    /// 501（请求根本走不到限流那行），而生产上它意味着每一次被限的请求都
+    /// 已经先打过一次库 —— 2026-08-16 的事故正是 21.9 万行写进
+    /// `auth_tokens`，闸必须建在洪水上游。
+    #[tokio::test]
+    async fn a_hammering_refresh_token_hits_the_throttle_before_the_db() {
+        let (app, _) = app_with_token();
+        let body = r#"{"refresh_token":"the-runaway-loop"}"#;
+
+        for i in 1..=crate::rate_limit::REFRESH_PER_TOKEN {
+            let (status, _) = post_public(&app, "/auth/refresh", body).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_IMPLEMENTED,
+                "第 {i} 次刷新还在额度内，应当走到「没接库」的 501 而不是 {status} ——                  提前 429 说明实际阈值比 REFRESH_PER_TOKEN 紧"
+            );
+        }
+
+        let (status, text) = post_public(&app, "/auth/refresh", body).await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "第 {} 次必须 429。仍是 501 说明限流没生效，或检查被排到了碰库之后；             403 会被客户端当成「凭据废了」触发登出 —— 语义必须是「等等再来」",
+            crate::rate_limit::REFRESH_PER_TOKEN + 1
+        );
+        assert!(
+            text.contains("秒"),
+            "429 的响应体要说清多久后能再试，实际是：{text}"
+        );
+    }
+
+    /// **一把 token 被限，不能连坐别的 token。**
+    ///
+    /// 键是 token 摘要而不是用户名 / IP：refresh 的请求体里没有用户名，
+    /// 按用户名限等于送人一个「拿别人的名字锁别人」的开关；而同一台机器上
+    /// 的两个客户端（或轮转后的新 token）各自一份额度，正是摘要做键买到的
+    /// 性质。
+    #[tokio::test]
+    async fn throttling_one_refresh_token_leaves_others_alone() {
+        let (app, _) = app_with_token();
+        let hammered = r#"{"refresh_token":"the-noisy-one"}"#;
+        for _ in 0..crate::rate_limit::REFRESH_PER_TOKEN {
+            let _ = post_public(&app, "/auth/refresh", hammered).await;
+        }
+        let (status, _) = post_public(&app, "/auth/refresh", hammered).await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "先确认吵的那把真的被限住了，否则下面「另一把不受影响」的断言是空的"
+        );
+
+        let quiet = r#"{"refresh_token":"the-quiet-one"}"#;
+        let (status, _) = post_public(&app, "/auth/refresh", quiet).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_IMPLEMENTED,
+            "另一把 token 一次都没刷过，应当照常走到「没接库」的 501 ——              被连坐说明键混了（成了全局一份额度，或按连接来源计了）"
+        );
     }
 
     /// 免认证的入口只该有那几条，而且加一条要先说清理由。
