@@ -113,6 +113,65 @@ impl Client {
         )))
     }
 
+    /// 账号密码换一对令牌。**这条不带任何已有凭据** ——
+    /// 登录本来就是「我还没有凭据」时用的，带上一把旧的只会让服务端
+    /// 在两种身份之间做选择。
+    ///
+    /// # Errors
+    /// 网络不通、账号密码不对、或者这个部署没接账号体系（501）。
+    pub async fn login(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<cortex_proto::auth::AuthTokens> {
+        let resp = self
+            .http
+            .post(format!("{}/auth/login", self.base))
+            .json(&serde_json::json!({ "username": username, "password": password }))
+            .send()
+            .await
+            .map_err(|e| CortexError::Provider(format!("连不上 {}：{e}", self.base)))?;
+        let resp = self.checked(resp).await?;
+        resp.json()
+            .await
+            .map_err(|e| CortexError::Provider(format!("登录响应解析失败：{e}")))
+    }
+
+    /// 拿 refresh token 换一把新的 access（顺带轮转 refresh）。
+    ///
+    /// # Errors
+    /// 令牌不认识、已过期、已被作废，或者**被重放**（那时整条链一起废）。
+    pub async fn refresh(&self, refresh_token: &str) -> Result<cortex_proto::auth::AuthTokens> {
+        let resp = self
+            .http
+            .post(format!("{}/auth/refresh", self.base))
+            .json(&serde_json::json!({ "refresh_token": refresh_token }))
+            .send()
+            .await
+            .map_err(|e| CortexError::Provider(format!("连不上 {}：{e}", self.base)))?;
+        let resp = self.checked(resp).await?;
+        resp.json()
+            .await
+            .map_err(|e| CortexError::Provider(format!("续期响应解析失败：{e}")))
+    }
+
+    /// 注销：作废服务端那条 refresh 链。
+    ///
+    /// # Errors
+    /// 网络不通。**令牌本来就不认识不算错** —— 那时本机那份也该删掉。
+    pub async fn logout(&self, refresh_token: &str) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!("{}/auth/logout", self.base))
+            .json(&serde_json::json!({ "refresh_token": refresh_token }))
+            .send()
+            .await
+            .map_err(|e| CortexError::Provider(format!("连不上 {}：{e}", self.base)))?;
+        // 4xx 一律当成「服务端那边已经没有这条链了」，正是我们想要的终态
+        let _ = resp;
+        Ok(())
+    }
+
     pub async fn health(&self) -> Result<Health> {
         // /health 刻意不认证（Docker HEALTHCHECK 要用），所以这条即使
         // 没配 token 也应当通

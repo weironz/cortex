@@ -5,6 +5,7 @@
 
 mod agent;
 mod client;
+mod credentials;
 mod import;
 mod render;
 
@@ -74,6 +75,23 @@ struct Cli {
 enum Command {
     /// 检查 cortexd 是否在线
     Health,
+
+    /// 用账号密码登录，把 refresh token 存在本机
+    ///
+    /// # 为什么需要它
+    ///
+    /// 不登录时 CLI 只能用预共享 token（`cortex-agentd --generate-token`），
+    /// 而那把 token 映射的永远是**第一个账号**。单人部署没问题；多用户部署里
+    /// 桌面端登的若是 2 号，CLI 进去的是**1 号的数据** —— 不报错，
+    /// 就是另一个人的会话与记忆。
+    Login {
+        /// 用户名。省略则交互询问
+        #[arg(long)]
+        username: Option<String>,
+    },
+
+    /// 注销：作废服务端那条 refresh 链，并删掉本机凭据
+    Logout,
 
     /// 发起一轮对话（流式）
     Chat {
@@ -205,16 +223,153 @@ async fn main() -> anyhow::Result<()> {
     // 只对真的会用到工具的命令做这件事：`search` / `sessions` / `episode`
     // 全是查询，为它们拉起一个能执行命令的进程是白花的代价，而那个进程
     // 会一直活到 CLI 退出。
+    // ── 这次以谁的身份说话 ────────────────────────────────
+    //
+    // 三档，**显式给的优先**：
+    //
+    //   1. `--token` / `CORTEXD_TOKEN`：预共享 token。它映射的永远是
+    //      **第一个账号** —— 单人部署没问题，多用户部署里那是别人的数据
+    //   2. `cortex login` 存在本机的那份：拿 refresh 现换一把 access
+    //   3. 都没有：不带凭据发出去，让服务端用 401 说话
+    //      （这个部署可能就是 CORTEX_AUTH=disabled）
+    //
+    // 顺序不能反。反过来的话，一个显式传了 --token 的人会被本机某次
+    // 登录悄悄顶掉身份，而他手上那把 token 看起来完全没生效。
+    //
+    // 换不到 access 时**不静默回落到预共享**：那正好是「我以为我是 2 号，
+    // 结果读的是 1 号的数据」那个 bug 的另一种走法。说清楚，让人重新登录
+    // **空串按没配处理。** `CORTEXD_TOKEN=` 这种写法很常见（compose 里
+    // `${VAR:-}`、脚本里清一下），而 clap 会把它读成 `Some("")` ——
+    // 不过滤的话它会顶掉本机的登录，然后带着一个空 bearer 去撞 401，
+    // 而错误信息说的是「把 token 放进 CORTEXD_TOKEN」，看起来像没配。
+    // 这是本仓库数到第七次的这个形状，这次栽在我自己刚写的这段上：
+    // 真机验证时先得到「登录了却还是 401」，查下来是空串赢了优先级。
+    let explicit = cli
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned);
+    // `login` / `logout` **绕过这一整段**：它们是用来管理凭据的。
+    //
+    // 不绕的话有一个很难看的死结：一份坏掉的凭据会让身份解析先失败，
+    // 而那正是 `cortex login` 要修的东西 —— 于是用户被挡在「修不了自己的
+    // 登录」上。真机验证时第一次就撞到了：坏凭据下连 login 都跑不起来。
+    let manages_credentials = matches!(cli.command, Command::Login { .. } | Command::Logout);
+    let effective_token = if manages_credentials {
+        None
+    } else {
+        match (explicit, credentials::load(&cli.server)) {
+            (Some(t), _) => Some(t),
+            (None, Some(stored)) => {
+                let probe = Client::new(&cli.server, None);
+                match probe.refresh(&stored.refresh_token).await {
+                    Ok(fresh) => {
+                        // 轮转：服务端每次刷新都签一把新的并把旧的作废。
+                        // 不存回去的话，下一条命令拿着已作废的那把去换 ——
+                        // 而重放判定会把**整条 family** 一起废掉，于是用户被登出
+                        //
+                        // **存不回去要出声**，不能悄悄吞：下一条命令会拿着
+                        // 已经作废的那把去换，而重放判定把整条 family 一起废，
+                        // 于是用户莫名其妙被登出且看不出跟这次有关
+                        if let Err(e) = credentials::save(&credentials::StoredLogin {
+                            server: credentials::normalize_server(&cli.server),
+                            username: stored.username.clone(),
+                            refresh_token: fresh.refresh_token,
+                        }) {
+                            eprintln!(
+                                "提示：新的 refresh token 没存回去（{e}）—— 下一条命令可能会要求重新登录"
+                            );
+                        }
+                        Some(fresh.access_token)
+                    }
+                    Err(e) => {
+                        anyhow::bail!(
+                            "本机存着 {} 的登录，但换不到访问令牌：{e}\n\
+                             重新登录：cortex login\n\
+                             （不回落到预共享 token —— 那把 token 是第一个账号的，\n\
+                             悄悄用它等于让你以另一个人的身份读数据）",
+                            stored.username
+                        );
+                    }
+                }
+            }
+            (None, None) => None,
+        }
+    };
+
+    // 有本地 agent 就走它 —— 工具于是跑在**这台机器**上。
+    //
+    // 只对真的会用到工具的命令做这件事：`search` / `sessions` / `episode`
+    // 全是查询，为它们拉起一个能执行命令的进程是白花的代价，而那个进程
+    // 会一直活到 CLI 退出。
+    //
+    // **登录之后传给 agent 的是换来的 access token**：同机只留一个 agent
+    // 那件事靠的是凭据指纹比对，于是「CLI 是 2 号、桌面端是 1 号」会被
+    // 自动认成两个身份，各用各的 agent，不会串
     let server = if cli.no_local_agent || !needs_agent(&cli.command) {
         cli.server.clone()
     } else {
-        agent::ensure_running(&cli.server, cli.token.as_deref())
+        agent::ensure_running(&cli.server, effective_token.as_deref())
             .await
             .unwrap_or_else(|| cli.server.clone())
     };
-    let c = Client::new(&server, cli.token);
+    let c = Client::new(&server, effective_token);
 
     match cli.command {
+        Command::Login { username } => {
+            let server = credentials::normalize_server(&cli.server);
+            let user = match username {
+                Some(u) => u,
+                None => {
+                    eprint!("用户名：");
+                    let _ = std::io::stderr().flush();
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    line.trim().to_owned()
+                }
+            };
+            // 口令走 stdin，不做参数：命令行参数会进 shell history，也会出现在
+            // 同机其他用户的 `ps` 里 —— 与 `--token` 那条注释同一个理由
+            eprint!("密码：");
+            let _ = std::io::stderr().flush();
+            let mut pw = String::new();
+            std::io::stdin().read_line(&mut pw)?;
+            // 只剪行尾换行，**不 trim 空白**：口令里的空格是口令的一部分
+            let pw = pw.trim_end_matches('\n').trim_end_matches('\r');
+            if std::io::stdin().is_terminal() {
+                // 回显是这个实现的已知缺陷。说出来，而不是让人以为没留痕
+                eprintln!("（注意：终端会回显刚才那串，也会留在滚动缓冲里）");
+            }
+
+            let tokens = c.login(&user, pw).await?;
+            let path = credentials::save(&credentials::StoredLogin {
+                server: server.clone(),
+                username: user.clone(),
+                refresh_token: tokens.refresh_token,
+            })?;
+            println!("已登录 {user}（{server}）");
+            println!("凭据存在 {}", path.display());
+            println!("此后 cortex 的请求都以这个身份发出，不再落到预共享 token 那个账号上。");
+        }
+
+        Command::Logout => {
+            let server = credentials::normalize_server(&cli.server);
+            match credentials::load(&server) {
+                Some(stored) => {
+                    // 先告诉服务端作废，再删本机 —— 反过来的话，一旦网络失败，
+                    // 本机没了而服务端那条链还活着，用户手上再没有能作废它的东西
+                    c.logout(&stored.refresh_token).await?;
+                    credentials::clear()?;
+                    println!("已注销 {}（{server}）", stored.username);
+                }
+                None => {
+                    credentials::clear()?;
+                    println!("本机没有 {server} 的登录，无需注销。");
+                }
+            }
+        }
+
         Command::Health => {
             let h = c.health().await?;
             // 按角色说话。连着本地 agent 时「数据库 未报」不是故障，
