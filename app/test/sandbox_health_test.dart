@@ -295,6 +295,34 @@ void main() {
       await tester.pump(const Duration(milliseconds: 200));
     }
 
+    /// **设置里不许再出现 Mock 那个开关。**
+    ///
+    /// 它是开发用的实现细节被摆进了产品设置：Mock 是内存夹具、不连任何后端，
+    /// 打开它等于把一个能用的客户端换成一个演示。问一句「用户关掉它能得到
+    /// 什么好处」就露馅了 —— 没有，只会让人困惑「我现在的数据是真的吗」。
+    ///
+    /// 反向断言，与「输入框底部不许出现『沙箱』『容器』」同一个形状：
+    /// 正向断言只会把下一个开发开关一起钉住。夹具本身留着（测试要用），
+    /// 入口退回成构建参数 --dart-define=USE_MOCK=true。
+    testWidgets('连接页不提供 Mock 开关', (tester) async {
+      await boot(tester, sandboxStatus: 200, sandboxBody: '{}');
+
+      for (final w in ['Mock', 'mock', '夹具']) {
+        expect(
+          find.textContaining(w),
+          findsNothing,
+          reason:
+              '连接页出现了「$w」—— 内存夹具是开发用的东西，'
+              '不该摆在用户的设置里让他去决定',
+        );
+      }
+      expect(
+        find.byType(SwitchListTile),
+        findsNothing,
+        reason: '连接页又多了一个开关 —— 加之前先问「用户关掉它能得到什么好处」',
+      );
+    });
+
     /// **这一条是整个改动的理由。**
     ///
     /// `/health` 通 + `/sandbox/health` 不通 = 一个能连上、但发不出云端

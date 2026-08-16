@@ -223,15 +223,17 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                   child: Text(state.busy ? '登录中…' : '登录'),
                 ),
                 const Divider(height: 34),
-                // The escape hatch. Without it, a first-time user with no
-                // daemon at all is stuck on this screen with no way to see the
-                // app — and "run cortexd first" is a worse onboarding than
-                // "look around with fixtures".
+                // 连不上服务器时的出路。没有它，一个手上还没有 daemon 的人
+                // 会卡在这一屏，而「先去把 cortexd 跑起来」是个很糟的开场。
+                //
                 // 离线使用：**不是**夹具，是真的能干活 —— 真模型、真工具、
                 // 真读写本机文件。唯一缺的是记忆。
                 //
-                // 放在 mock 上面且更醒目：一个连不上服务器的人想要的是
-                // 「那我先用着」，而不是「让我看看界面长什么样」
+                // 这里曾经写着「放在 mock 上面且更醒目」，而**这一屏上从来
+                // 没有过 mock 入口** —— 那句话描述的是一个没做出来的布局。
+                // 今天连设置里那个开关也删了（见 connection_page），
+                // 所以出路只有这一条：一个连不上服务器的人想要的是
+                // 「那我先用着」，而不是「让我看看界面长什么样」。
                 //
                 // ── 只在有本机 agent 的平台上给 ──
                 //

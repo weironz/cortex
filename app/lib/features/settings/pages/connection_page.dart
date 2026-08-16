@@ -37,17 +37,20 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       children: [
-        SwitchListTile.adaptive(
-          contentPadding: EdgeInsets.zero,
-          value: config.useMock,
-          onChanged: notifier.setUseMock,
-          title: const Text('使用 Mock 数据源'),
-          subtitle: Text(
-            config.useMock ? '不发起任何网络请求，数据来自内存夹具。' : '直连 cortexd。',
-            style: theme.textTheme.bodySmall,
-          ),
-        ),
-        const SizedBox(height: 8),
+        // ── 这里曾经有一个「使用 Mock 数据源」开关，删了 ──────────
+        //
+        // 它是**开发用的实现细节，被摆到了产品设置里**。问一句「用户关掉它
+        // 能得到什么好处」就露馅了：Mock 是内存夹具，不连任何后端，
+        // 打开它等于把一个能用的客户端换成一个演示。没有哪个真实用户
+        // 会想要那个，而看到它的人只会困惑「我现在的数据是真的吗」。
+        //
+        // 与「云沙箱」那个开关同一个形状：把只有我们自己关心的实现细节
+        // 推给用户去决定。那次的判据是「省 10 MiB，代价是一个他不理解的
+        // 开关」，这次更干脆 —— 它对用户**没有任何好处**。
+        //
+        // 夹具本身留着（`MockCortexApi`，测试与离线演示要用），入口退回成
+        // 构建参数：`flutter run --dart-define=USE_MOCK=true`。
+        // 一个开发用的东西该长成开发用的样子，见 app/README.md。
         // ── 这里要的是**部署入口**，不是记忆服务本身 ──
         //
         // 原本写的是「cortexd 地址」，提示词给的是 `http://127.0.0.1:8080`
