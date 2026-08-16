@@ -34,7 +34,7 @@ use crate::credentials::{
 };
 use crate::error::ApiError;
 use crate::rate_limit::{key_prefix, login_key};
-use crate::state::AgentState;
+use crate::state::{Accounts, AgentState};
 
 /// access token 的寿命。
 ///
@@ -87,75 +87,263 @@ fn open_registration() -> bool {
     std::env::var(OPEN_REGISTRATION_ENV).is_ok_and(|v| v.trim() == OPEN_REGISTRATION_ON)
 }
 
-impl AgentState {
-    /// 建一个账号：开 schema、迁移、写 users 行。
-    ///
-    /// # 顺序不能反
-    ///
-    /// 先建 schema 并迁移，**最后**才写 users 那一行。反过来会留下
-    /// 「账号存在但库是空的」这个中间态，而那个用户一登录就撞上一片没有
-    /// 表的 schema —— 报的是看不懂的 SQL 错误，不是「你的账号还没建好」。
-    ///
-    /// # Errors
-    /// 用户名已存在、密码太短、建 schema 失败、migration 失败。
-    pub async fn create_account(&self, username: &str, password: &str) -> Result<String, ApiError> {
-        let hash = hash_password(password).map_err(|e| ApiError::bad_request(e.to_string()))?;
-        let user_id = cortex_core::Id::new().to_string();
+/// 用户名的形状。**与 `migrations-global` 里 `users_username_shape` 那条
+/// CHECK 是同一份规则**（`^[a-zA-Z0-9][a-zA-Z0-9._-]{1,62}$`）。
+///
+/// # 为什么要在这儿再判一次，而不是让约束去拒
+///
+/// 让 CHECK 去拒也能挡住，但那条路上的错误会被包成
+/// `写用户记录失败：…violates check constraint "users_username_shape"` ——
+/// HTTP 上是 500（「服务器坏了」，其实是「你名字里有空格」），
+/// 命令行上是一段没人读得懂的 SQL。**这不是防御性编程，是把状态码和
+/// 文案摆对**：用户名不合法是 400。
+///
+/// 两处规则同步不了会怎样：这边松了由 CHECK 兜底（退回今天的烂文案，
+/// 不会写坏数据）；这边紧了会拒掉库其实收得下的名字。所以下面那条
+/// 测试拿的是 CHECK 里那几类边界值。
+fn check_username_shape(username: &str) -> Result<(), ApiError> {
+    let mut chars = username.chars();
+    let head_ok = chars.next().is_some_and(|c| c.is_ascii_alphanumeric());
+    // 首字符之后还允许 1~62 个 —— 也就是总长 2~63，与 CHECK 一致。
+    // 类是纯 ASCII，所以按字符数与按字节数在这里没有区别
+    let rest: Vec<char> = chars.collect();
+    let ok = head_ok
+        && (1..=62).contains(&rest.len())
+        && rest
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if ok {
+        return Ok(());
+    }
+    Err(ApiError::bad_request(
+        "用户名只能用字母、数字和 . _ -，必须以字母或数字开头，长度 2~63。",
+    ))
+}
 
-        // **第一个账号落在 `public` 上，不另开 schema。**
-        //
-        // 那片库里已经有东西了 —— 一个自托管的人是先用了几个月、
-        // 后来才建账号的。给他也 derive 一个新 schema，等于他建完号
-        // 一登录，几个月的记忆全部消失（库还在，只是没有任何一条路
-        // 通向它了）。而这**不报错**：会话列表就是空的，看着像新装的。
-        //
-        // 端到端跑一次才发现：老 token 建号之后指向了 `u_01kz…`，
-        // 而存量数据在 `public`。设计里本来就写着「1 号用户的 schema 名
-        // 就叫 public，存量数据不搬家」，是实现漏了这一支。
-        let schema = schema_for_new_account(&user_id, self.user_count().await? == 0)?;
-
-        // schema 先行。失败时还没有任何账号记录，重试即可 ——
-        // 而反过来会留下一个登不进去的账号
-        cortex_store::provision(self.accounts()?.tenants.as_ref(), &schema)
-            .await
-            .map_err(|e| ApiError::internal(format!("给新账号开库失败：{e}")))?;
-
-        let inserted = sqlx::query(
-            "INSERT INTO cortex_auth.users (id, username, password_hash, schema_name)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(&user_id)
-        .bind(username)
-        .bind(&hash)
-        .bind(schema.as_str())
-        .execute(&self.accounts()?.pool)
+/// 这个部署有几个账号。
+///
+/// 只用来判断「是不是第一个」，所以不缓存 —— 它每次注册请求跑一次，
+/// 而注册在这个产品里是极低频动作。
+///
+/// # Errors
+/// 查不动。
+async fn user_count(accounts: &Accounts) -> Result<i64, ApiError> {
+    let row = sqlx::query("SELECT count(*) AS n FROM cortex_auth.users")
+        .fetch_one(&accounts.pool)
         .await
-        .map_err(|e| ApiError::internal(format!("写用户记录失败：{e}")))?;
+        .map_err(|e| ApiError::internal(format!("数不出用户数：{e}")))?;
+    Ok(row.get("n"))
+}
 
-        if inserted.rows_affected() == 0 {
-            // schema 已经建了，但账号没写成。删掉它，别留孤儿 ——
-            // 一片没人认领的 schema 会一直占着 catalog，而且下次用同一个
-            // 用户名注册时又会建一片新的
-            let _ = self.accounts()?.tenants.as_ref().drop_schema(&schema).await;
-            return Err(ApiError::bad_request("这个用户名已经有人用了"));
-        }
-        Ok(user_id)
+/// 建一个账号：开 schema、迁移、写 users 行。
+///
+/// # 为什么它是自由函数，而不是 `AgentState` 上的方法
+///
+/// 因为**建号有三个入口，而它们手上的东西不一样**：HTTP 的 `/auth/register`
+/// 有完整的 `AgentState`，`--create-user` 只有一个数据库连接，
+/// 启动时的 [`ensure_admin`] 也只有那个。挂在 `AgentState` 上的话，
+/// 后两条要么造一个假 state（那要 docker、要 LLM 客户端 —— 而建号一样都
+/// 不需要），要么各自再写一遍建号逻辑。
+///
+/// **各自再写一遍**正是这个仓库反复咬人的形状：同一件事两处装配，
+/// 漏改的那一处不会有任何测试红。所以三条路都落到这一个函数上。
+///
+/// # 顺序不能反
+///
+/// 先建 schema 并迁移，**最后**才写 users 那一行。反过来会留下
+/// 「账号存在但库是空的」这个中间态，而那个用户一登录就撞上一片没有
+/// 表的 schema —— 报的是看不懂的 SQL 错误，不是「你的账号还没建好」。
+///
+/// # Errors
+/// 用户名不合法或已存在、密码太短、建 schema 失败、migration 失败。
+pub async fn create_account_in(
+    accounts: &Accounts,
+    username: &str,
+    password: &str,
+) -> Result<String, ApiError> {
+    check_username_shape(username)?;
+    // `map_err(|e| bad_request(e.to_string()))` 会把文案套两层：
+    // `CortexError::Invalid` 的 Display 已经带了「非法输入：」，再包一次
+    // 得到的是「非法输入：非法输入：密码至少需要 12 个字节」。
+    // 直接 `From` 过来 —— `Invalid` 本来就映射到 400
+    let hash = hash_password(password).map_err(ApiError::from)?;
+    let user_id = cortex_core::Id::new().to_string();
+
+    // **第一个账号落在 `public` 上，不另开 schema。**
+    //
+    // 那片库里已经有东西了 —— 一个自托管的人是先用了几个月、
+    // 后来才建账号的。给他也 derive 一个新 schema，等于他建完号
+    // 一登录，几个月的记忆全部消失（库还在，只是没有任何一条路
+    // 通向它了）。而这**不报错**：会话列表就是空的，看着像新装的。
+    //
+    // 端到端跑一次才发现：老 token 建号之后指向了 `u_01kz…`，
+    // 而存量数据在 `public`。设计里本来就写着「1 号用户的 schema 名
+    // 就叫 public，存量数据不搬家」，是实现漏了这一支。
+    let schema = schema_for_new_account(&user_id, user_count(accounts).await? == 0)?;
+
+    // schema 先行。失败时还没有任何账号记录，重试即可 ——
+    // 而反过来会留下一个登不进去的账号
+    cortex_store::provision(accounts.tenants.as_ref(), &schema)
+        .await
+        .map_err(|e| ApiError::internal(format!("给新账号开库失败：{e}")))?;
+
+    let inserted = sqlx::query(
+        "INSERT INTO cortex_auth.users (id, username, password_hash, schema_name)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&user_id)
+    .bind(username)
+    .bind(&hash)
+    .bind(schema.as_str())
+    .execute(&accounts.pool)
+    .await
+    .map_err(|e| ApiError::internal(format!("写用户记录失败：{e}")))?;
+
+    if inserted.rows_affected() == 0 {
+        // schema 已经建了，但账号没写成。删掉它，别留孤儿 ——
+        // 一片没人认领的 schema 会一直占着 catalog，而且下次用同一个
+        // 用户名注册时又会建一片新的
+        let _ = accounts.tenants.as_ref().drop_schema(&schema).await;
+        return Err(ApiError::bad_request("这个用户名已经有人用了"));
+    }
+    Ok(user_id)
+}
+
+/// 这个用户名已经有账号了吗（大小写不敏感，与唯一索引同一口径）。
+///
+/// # Errors
+/// 查不动。
+pub async fn user_exists(accounts: &Accounts, username: &str) -> Result<bool, ApiError> {
+    // `idx_users_username` 建在 `lower(username)` 上，所以这里也必须 lower ——
+    // 不 lower 的话「Alice 不存在」会成立，然后 INSERT 撞唯一索引，
+    // 于是 ensure_admin 每次启动都报一次「用户名已经有人用了」而拒绝启动
+    let row =
+        sqlx::query("SELECT 1 AS hit FROM cortex_auth.users WHERE lower(username) = lower($1)")
+            .bind(username)
+            .fetch_optional(&accounts.pool)
+            .await
+            .map_err(|e| ApiError::internal(format!("查用户失败：{e}")))?;
+    Ok(row.is_some())
+}
+
+// ══════════════════════════════════════════════════════════════
+//  从 .env 建第一个账号
+// ══════════════════════════════════════════════════════════════
+
+/// 第一个管理员账号的用户名与密码。
+///
+/// 存在的理由是**把建号这件事挪到公网之前**。register 里那条
+/// 「第一个账号无条件放行」的特例已经删掉了，代价是没有别的路时，
+/// 一台刚部署好的机器只能靠临时打开开放注册来建号 —— 而那正是
+/// 「谁先注册谁是主人」那个窗口，只是换成了手工开关。
+///
+/// 这两个变量与 `--create-user` 是**同一件事的两条路**，覆盖两种部署者：
+/// 点一个 compose 就部署完的人没有 shell，只能用 `.env`；
+/// 而已经在机器上的人不想把口令写进文件，用 `--create-user` 走 stdin。
+const ADMIN_USER_ENV: &str = "CORTEX_ADMIN_USERNAME";
+pub const ADMIN_PASSWORD_ENV: &str = "CORTEX_ADMIN_PASSWORD";
+
+/// 这两个环境变量合起来是什么意思。
+///
+/// # 为什么单拎出来，而且不自己读环境
+///
+/// 「只配了一半要拒绝启动」这条规则是这里唯一容易写歪的东西，而它值得
+/// 一条测试。让它自己读 `std::env` 的话，测它就得 `set_var` —— 那是**进程
+/// 全局**的，与并行跑的别的用例互相踩，症状是单独跑绿、全量跑红。
+/// 这个仓库为同一个原因返工过一次（代理那组用例），不再来第二遍。
+///
+/// 返回 `None` = 两个都空 = 绝大多数部署，什么都不做。
+///
+/// # Errors
+/// 只配了一半。
+fn admin_spec<'a>(
+    raw_user: &'a str,
+    raw_password: &'a str,
+) -> anyhow::Result<Option<(&'a str, &'a str)>> {
+    // 用户名 trim，密码**不 trim**：口令里的空格是口令的一部分，
+    // 悄悄剪掉的后果是「服务端算的哈希和用户下次输入的对不上」，
+    // 而那看起来像密码记错了
+    let username = raw_user.trim();
+    match (username.is_empty(), raw_password.is_empty()) {
+        (true, true) => Ok(None),
+        (true, false) => anyhow::bail!(
+            "配了 {ADMIN_PASSWORD_ENV} 却没配 {ADMIN_USER_ENV}。\n\
+             半份配置建不出账号，而它不会有任何症状 —— 你会得到一台\n\
+             谁也登不进去的服务器。补上用户名，或者两个都留空。"
+        ),
+        (false, true) => anyhow::bail!(
+            "配了 {ADMIN_USER_ENV} 却没配 {ADMIN_PASSWORD_ENV}。\n\
+             半份配置建不出账号，而它不会有任何症状 —— 你会得到一台\n\
+             谁也登不进去的服务器。补上密码，或者两个都留空。"
+        ),
+        (false, false) => Ok(Some((username, raw_password))),
+    }
+}
+
+/// 启动时按 `.env` 把第一个账号建出来。**在开始监听之前调用。**
+///
+/// 三种情形，行为刻意不同：
+///
+/// | `.env` 里 | 做什么 |
+/// |---|---|
+/// | 两个都空 | 什么都不做（绝大多数部署） |
+/// | 两个都有，账号不存在 | 建号 |
+/// | 两个都有，账号已存在 | 跳过。**不改密码** —— 改密码是另一件事，见下 |
+/// | 只有一个 | **拒绝启动** |
+///
+/// # 为什么「只配了一半」要拒绝启动
+///
+/// 这是本仓库数到第 6 次的「空串顶掉默认值」那个形状的近亲：配了用户名
+/// 没配密码的人，**以为自己配了管理员**，而实际得到的是一台谁也登不进去
+/// 的服务器 —— 没有任何报错，登录框就是不认他。当场停住比那个好。
+///
+/// # 为什么已存在时不改密码
+///
+/// 因为那会让「忘了从 `.env` 里删掉这两行」变成一条**每次重启都把密码
+/// 重置回去**的路：用户在界面上改了密码，重启一次又变回 `.env` 里那个，
+/// 而他不会想到去看服务端的环境变量。真要改密码，那是一条需要旧密码的
+/// 独立操作。
+///
+/// # Errors
+/// 只配了一半、用户名不合法、密码太短、或者建号本身失败。
+pub async fn ensure_admin(accounts: &Accounts) -> anyhow::Result<()> {
+    let raw_user = std::env::var(ADMIN_USER_ENV).unwrap_or_default();
+    let raw_password = std::env::var(ADMIN_PASSWORD_ENV).unwrap_or_default();
+    let Some((username, password)) = admin_spec(&raw_user, &raw_password)? else {
+        return Ok(());
+    };
+
+    if user_exists(accounts, username)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e.message()))?
+    {
+        tracing::info!(
+            user = username,
+            "{ADMIN_USER_ENV} 指的账号已经存在，跳过（这两个变量只建号，不改密码）"
+        );
+        return Ok(());
     }
 
-    /// 这个部署有几个账号。
-    ///
-    /// 只用来判断「是不是第一个」，所以不缓存 —— 它每次注册请求跑一次，
-    /// 而注册在这个产品里是极低频动作。
+    let id = create_account_in(accounts, username, password)
+        .await
+        .map_err(|e| anyhow::anyhow!("按 {ADMIN_USER_ENV} 建管理员账号失败：{}", e.message()))?;
+    tracing::info!(
+        user = username,
+        id = %id,
+        "已按 .env 建好管理员账号。建完之后可以把 {ADMIN_PASSWORD_ENV} 从 .env 里删掉"
+    );
+    Ok(())
+}
+
+impl AgentState {
+    /// 建一个账号。实现在 [`create_account_in`] —— 这里只是把
+    /// `AgentState` 里那份连接取出来递过去。
     ///
     /// # Errors
-    /// 没接数据库，或者查不动。
-    pub async fn user_count(&self) -> Result<i64, ApiError> {
-        let row = sqlx::query("SELECT count(*) AS n FROM cortex_auth.users")
-            .fetch_one(&self.accounts()?.pool)
-            .await
-            .map_err(|e| ApiError::internal(format!("数不出用户数：{e}")))?;
-        Ok(row.get("n"))
+    /// 见 [`create_account_in`]，外加「这个部署没接数据库」。
+    pub async fn create_account(&self, username: &str, password: &str) -> Result<String, ApiError> {
+        create_account_in(self.accounts()?, username, password).await
     }
 
     /// 签一对新令牌。`family` 为 `None` 时开一条新链（登录）。
@@ -496,30 +684,28 @@ pub async fn register(
     State(st): State<AgentState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<AuthTokens>, ApiError> {
-    // **第一个账号永远放行。**
-    //
-    // 私有化部署的第一步是「把它跑起来」，而那时既没有邮箱通道、也可能
-    // 没有 shell（有人是点一个 compose 就部署完的）。要求先 SSH 上去跑
-    // `--create-user` 才能用，等于把一个纯运维的步骤塞进产品的第一分钟。
-    //
-    // 代价要说清楚：**一台刚部署好、还没建号、又直接暴露在公网上的机器，
-    // 第一个访问它的人会成为主人。** 这个窗口只在「部署完成」到「你注册」
-    // 之间，通常几秒，而且一旦关上就永远关上。不接受它的人应当先用
-    // `--create-user` 建号，再放通网络。
     // **不再有「第一个账号无条件放行」这条特例。**
     //
     // 它曾经的理由是：私有化部署的第一步是把它跑起来，那时既没有邮箱通道、
     // 也可能没有 shell。代价是一台刚部署好、还没建号、又暴露在公网上的机器，
     // 第一个访问它的人会成为主人 —— 对反复部署来说这个窗口躲不过去。
     //
-    // 现在第一个账号由 `.env` 里的 CORTEX_ADMIN_USERNAME / _PASSWORD 在
-    // **启动时**建好（见 `main::ensure_admin`），或者用 `--create-user`。
-    // 两条路都不经过公网，于是这里不需要任何特例 —— 少一条分支，
-    // 也少一个窗口。
+    // 替掉它的是两条**不经过公网**的路（2026-08-16 补上，此前它们只存在于
+    // 注释和 `.env.example` 里，代码一行都没有 —— 于是默认配置下根本建不出
+    // 第一个账号）：
+    //
+    //   - `.env` 的 `CORTEX_ADMIN_USERNAME` / `_PASSWORD` → [`ensure_admin`]，
+    //     在**开始监听之前**跑，所以那个窗口根本不存在
+    //   - `cortex-agentd --create-user <名字>`，口令走 stdin，不落文件
+    //
+    // 两条与这里都落到 [`create_account_in`]，不是三份实现。
     if !open_registration() {
-        // 说清楚是「这个部署关着」而不是「你填错了」，否则对方会一直重试
+        // 说清楚是「这个部署关着」而不是「你填错了」，否则对方会一直重试。
+        // 给的两条都要是**真实存在**的：指一条不存在的命令，对方会先怀疑
+        // 自己的 PATH，再怀疑版本，最后才怀疑这句话
         return Err(ApiError::forbidden(format!(
-            "这个部署没有开放注册。管理员可以设 {OPEN_REGISTRATION_ENV}={OPEN_REGISTRATION_ON} 打开，             或者用 cortexd --create-user 直接建号"
+            "这个部署没有开放注册。管理员可以设 {OPEN_REGISTRATION_ENV}={OPEN_REGISTRATION_ON} 打开，\
+             或者用 `cortex-agentd --create-user <用户名>` 直接建号（不用开放注册）。"
         )));
     }
     // ── 全局限流，在碰库之前 ──
@@ -645,9 +831,10 @@ mod tests {
     /// 机器，第一个访问 /auth/register 的人会成为主人。部署一次能靠手快
     /// 躲过去，反复部署躲不过去。
     ///
-    /// 现在第一个账号在**开始监听之前**就由 `.env` 建好了（见
-    /// `main::ensure_admin`），或者用 `--create-user`。两条都不经过公网，
-    /// 于是这里不需要特例 —— 而这条测试盯着那条特例别再长回来。
+    /// 替掉它的是两条不经过公网的路：[`ensure_admin`]（`.env`，在监听之前
+    /// 跑）与 `--create-user`。**这条测试成立的前提是那两条真的在**——
+    /// 它们缺席时删掉特例只是把窗口换了个形状（临时开放注册再关掉），
+    /// 而这条测试照样绿。2026-08-16 之前正是那个状态。
     #[test]
     fn registration_has_no_first_account_exception() {
         let src = include_str!("accounts.rs");
@@ -661,7 +848,7 @@ mod tests {
         let head: String = gate.chars().take(2000).collect();
         assert!(
             !head.contains("user_count"),
-            "register 里又数起用户数了 —— 那通常意味着「第一个账号特殊对待」             这条特例回来了，而它带着一个公网上的抢主人窗口。             第一个账号应当由 .env（main::ensure_admin）或 --create-user 建"
+            "register 里又数起用户数了 —— 那通常意味着「第一个账号特殊对待」             这条特例回来了，而它带着一个公网上的抢主人窗口。             第一个账号走的是不经过公网的两条：ensure_admin（.env，监听之前）             与 --create-user"
         );
     }
 
@@ -721,5 +908,75 @@ mod account_schema_tests {
             second.as_str()
         );
         assert_ne!(second.as_str(), "public");
+    }
+
+    /// 用户名的规则必须与库里那条 CHECK 一致。
+    ///
+    /// 取的全是 `users_username_shape`
+    /// （`^[a-zA-Z0-9][a-zA-Z0-9._-]{1,62}$`）的边界值 —— 两处规则漂开时，
+    /// 松了的后果是退回「500 + 一段 SQL」那种烂文案，紧了的后果是拒掉
+    /// 库其实收得下的名字。
+    #[test]
+    fn the_username_rule_matches_the_check_constraint() {
+        for ok in ["ab", "a1", "alice", "a.b_c-d", "0zz", &"a".repeat(63)] {
+            assert!(
+                check_username_shape(ok).is_ok(),
+                "CHECK 收得下 {ok:?}，这里却拒了 —— 规则比库还紧"
+            );
+        }
+        for bad in [
+            "",              // 空
+            "a",             // 只有 1 个字符，CHECK 要求至少 2
+            &"a".repeat(64), // 超过 63
+            ".ab",           // 首字符必须是字母或数字
+            "-ab",           //
+            "_ab",           //
+            "a b",           // 空格
+            "a@b",           // 类外字符
+            "张三",          // 非 ASCII
+            "ab\n",          // 尾随换行 —— 从 stdin/env 读来时最容易带上
+        ] {
+            assert!(
+                check_username_shape(bad).is_err(),
+                "CHECK 收不下 {bad:?}，这里却放行了 —— 会退化成 500 + 一段 SQL"
+            );
+        }
+    }
+
+    /// **只配了一半必须当场停住。**
+    ///
+    /// 半份配置建不出账号，而它没有任何症状：服务照起、healthy 照报，
+    /// 只是谁也登不进去，而配置看着「我明明配了管理员」。
+    #[test]
+    fn half_a_configuration_refuses_to_start() {
+        assert!(
+            admin_spec("", "").expect("两个都空是合法的").is_none(),
+            "两个都空 = 绝大多数部署，必须什么都不做"
+        );
+        assert!(
+            admin_spec("alice", "").is_err(),
+            "配了用户名没配密码要拒绝启动"
+        );
+        assert!(
+            admin_spec("", "hunter2hunter2").is_err(),
+            "配了密码没配用户名要拒绝启动"
+        );
+        // 全空白的用户名与没配是一回事 —— 这是本仓库数到第 6 次的
+        // 「空串顶掉默认值」那个形状：`.env` 里写 `CORTEX_ADMIN_USERNAME= `
+        // 的人以为自己没配，而 `is_empty()` 对一个空格是 false
+        assert!(
+            admin_spec("   ", "").expect("空白用户名等于没配").is_none(),
+            "只有空白的用户名要当成没配，而不是「配了用户名没配密码」"
+        );
+
+        let (user, password) = admin_spec("  alice  ", " pw with spaces ")
+            .expect("两个都有是合法的")
+            .expect("两个都有时不该是 None");
+        assert_eq!(user, "alice", "用户名要 trim");
+        assert_eq!(
+            password, " pw with spaces ",
+            "密码**不能** trim —— 口令里的空格是口令的一部分，\
+             悄悄剪掉的症状是「密码明明没打错却登不进去」"
+        );
     }
 }

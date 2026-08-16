@@ -134,6 +134,62 @@ struct Args {
     /// 这个开关跟着身份一起搬过来：认证权威在哪儿，发钥匙的那把工具就该在哪儿。
     #[arg(long)]
     generate_token: bool,
+
+    /// 建一个账号然后退出。**不经过公网，也不需要 docker。**
+    ///
+    /// # 密码为什么不是一个参数
+    ///
+    /// 命令行参数会进 shell history，也会出现在同机其他用户的 `ps` 输出里 ——
+    /// 与 `cortex --token` 那条注释同一个理由，只是密码比 token 更糟：
+    /// token 能重新生成一把作废旧的，密码往往是人自己在别处也用的那一个。
+    ///
+    /// 所以口令走 `CORTEX_ADMIN_PASSWORD`，没有就从 **stdin 读一行**
+    /// （`docker login --password-stdin` 那个惯例）。
+    ///
+    /// # 它与 `.env` 那两个变量是同一件事的两条路
+    ///
+    /// 覆盖两种部署者：点一个 compose 就部署完的人没有 shell，只能用 `.env`；
+    /// 已经在机器上的人不想把口令写进文件，用这条。两条都落到
+    /// `accounts::create_account_in`，不是两份实现。
+    #[arg(long, value_name = "USERNAME")]
+    create_user: Option<String>,
+}
+
+/// `--create-user` 的口令从哪儿来。
+///
+/// 顺序是**先环境变量后 stdin**，且只有一条生效 —— 两个都读再挑一个的话，
+/// 「我明明从管道里喂了口令」与「它其实用了环境里那个旧的」会长得一样。
+fn read_admin_password() -> anyhow::Result<String> {
+    use std::io::{BufRead as _, IsTerminal as _};
+
+    if let Ok(v) = std::env::var(accounts::ADMIN_PASSWORD_ENV)
+        && !v.is_empty()
+    {
+        eprintln!("（口令取自 {} ）", accounts::ADMIN_PASSWORD_ENV);
+        return Ok(v);
+    }
+    // 提示只在**交互**时打。管道输入时它是纯噪音，而且会混进调用方
+    // 收集的输出里 —— 一条给人看的提示出现在脚本的 stderr 上，读起来
+    // 像出了什么问题
+    if std::io::stdin().is_terminal() {
+        eprintln!(
+            "输入密码（至少 {} 字节），回车结束。\n\
+             注意：交互输入时终端会回显，也会留在滚动缓冲里 ——\n\
+             不想留痕就用管道：printf '%s' '<口令>' | cortex-agentd --create-user <用户名>",
+            credentials::MIN_PASSWORD_LEN
+        );
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("从 stdin 读密码失败")?;
+    // 只剪行尾的换行，**不 trim 空白**：口令里的空格是口令的一部分。
+    // `read_line` 在管道里读不到换行时返回的就是原样，两种输入方式因此一致
+    Ok(line
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_owned())
 }
 
 /// 这个客户端手上真的有一把 key 吗。
@@ -179,6 +235,45 @@ async fn main() -> anyhow::Result<()> {
         println!();
         println!("# 客户端：这一串就是要填的 token（服务端不保存它）");
         println!("{plain}");
+        return Ok(());
+    }
+
+    // ── `--create-user`：建号然后退出 ─────────────────────
+    //
+    // **刻意排在 docker 那一段之前。** 建号一行 docker 都不需要，而下面
+    // `DockerRunner::connect` + `preflight` 是拒绝启动式的 —— 排在后面的话，
+    // 一台还没装 docker（或者 socket 没挂）的机器就建不了第一个账号，
+    // 而那恰好是最需要建号的时刻：刚部署完、还什么都没配好。
+    if let Some(username) = args.create_user.as_deref() {
+        let url = args.database_url.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "建号要连 Cortex 自己的库，但没给 CORTEX_DATABASE_URL。\n\
+                 账号表在那个库的 cortex_auth schema 里 —— 记忆服务那个地址\
+                 （CORTEX_MEMORY_URL）不是它。"
+            )
+        })?;
+        // **租户那套 migration 要先跑。**
+        //
+        // 不是多余的一步：`ulid` / `sha256` 两个 DOMAIN 由 `migrations/`
+        // 建在 `public` 里，而 `cortex_auth` 那套引用它们 —— 全新的库上
+        // 只连 `Accounts` 会当场炸在
+        // `type "ulid" does not exist`。真库上第一次跑就撞到了，而它**只在
+        // 全新的库上出现**，也就是这条命令最该管用的那一刻。
+        //
+        // 顺序与 main 下面那段一致（那里也是先 `Store` 后 `Accounts`），
+        // 两处都 idempotent，所以先跑哪一条命令都不影响另一条。
+        let store = cortex_store::Store::connect(url)
+            .await
+            .context("连不上 Cortex 自己的数据库")?;
+        store.migrate().await.context("跑 migration 失败")?;
+        let accounts = state::Accounts::connect(url)
+            .await
+            .context("连不上 cortex_auth")?;
+        let password = read_admin_password()?;
+        let id = accounts::create_account_in(&accounts, username, &password)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+        println!("已建号：{username}（id {id}）");
         return Ok(());
     }
 
@@ -231,6 +326,19 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("连不上 cortex_auth")?;
             tracing::info!("Cortex 数据库就绪（migration 已跑，账号池已建）");
+
+            // ── 按 .env 把第一个账号建出来 ────────────────
+            //
+            // **在开始监听之前**，那正是它存在的全部意义：register 里
+            // 「第一个账号无条件放行」的特例删掉之后，如果没有这条路，
+            // 一台刚部署好的机器只能靠临时打开开放注册来建号 —— 而那就是
+            // 「谁先注册谁是主人」那个窗口，只是换成了手工开关。
+            //
+            // 建不出来就**拒绝启动**：配了管理员却没建成的话，你得到的是
+            // 一台谁也登不进去的服务器，而它照样报 healthy。
+            accounts::ensure_admin(&a)
+                .await
+                .context("按 .env 建管理员账号失败")?;
             (Some(s), Some(a))
         }
         None => {
