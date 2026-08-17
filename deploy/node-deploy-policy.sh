@@ -118,10 +118,44 @@ echo "==> $prev -> $tag"
 # ⚠️ agentd 是 0.1.9 补上的。它在 compose 里存在了整整一次发布而**不在这个
 #   清单里**，也就是永远不会被拉起——正是本文件末尾那条警告说的形状，
 #   而那条警告是 2026-08-13 加 egress 时写的。第二次兑现了。
-services="agentd web"
+#
+# ⚠️ cortexdb 是 0.1.10 补上的，**第三次兑现**：v0.1.10 第一次上线时
+#   compose 里有它、这份清单里没有，于是库根本没起来，agentd 连不上
+#   而十分钟后被判不健康、整个部署回滚。输出里没有一个字提到 cortexdb。
+#   所以这一次不只是补一行，下面那道闸也一起加了 —— 一条写了三次都还在
+#   被违反的注释，说明它需要的不是第四次提醒。
+services="cortexdb agentd web"
 if grep -qE '^[[:space:]]*CORTEX_SANDBOX_ENABLED[[:space:]]*=[[:space:]]*1[[:space:]]*$' .env; then
     services="$services egress"
     echo "==> 云沙箱已开：一并更新 egress 与沙箱镜像"
+fi
+
+# ── 闸：compose 里的每个服务都必须有归宿 ──────────────────
+#
+# 上面那条注释被写了三次、违反了三次（egress 险些、agentd 一次、
+# cortexdb 一次）。注释拦不住这个形状，因为**症状是沉默的**：部署全绿，
+# 只是有个服务从来没被启动过。
+#
+# 于是改成一道会当场拒绝的闸。新加服务时必须做一个决定：要么进
+# `services`（这次部署更新它），要么进 `DEPLOY_UNMANAGED`（明确说明
+# 为什么不归这次部署管）。**忘了就发不出去**，而不是发出去以后慢慢查。
+#
+# 已激活 profile 之外的服务不会出现在 `config --services` 里，
+# 所以关着沙箱时 egress 天然不在名单上 —— 那不是遗漏。
+DEPLOY_UNMANAGED="${DEPLOY_UNMANAGED:-}"
+unaccounted=""
+for s in $(docker compose config --services 2>/dev/null); do
+    case " $services $DEPLOY_UNMANAGED " in
+    *" $s "*) ;;
+    *) unaccounted="$unaccounted $s" ;;
+    esac
+done
+if [ -n "$unaccounted" ]; then
+    echo "cortex-deploy REFUSED: compose 里这些服务不在部署清单里，也没被显式排除：$unaccounted" >&2
+    echo "  要么把它加进 node-deploy-policy.sh 的 \$services（这次部署更新它），" >&2
+    echo "  要么在 .env 里写 DEPLOY_UNMANAGED='<名字>' 说明它不归这次部署管。" >&2
+    echo "  沉默地不启动一个服务，是这个脚本见过三次的故障形状。" >&2
+    exit 1
 fi
 
 # shellcheck disable=SC2086  # 故意分词：$services 是一份服务清单
@@ -168,15 +202,29 @@ fi
 # 带数据变更的发布之前仍然要有一份 pg_dump 退路
 # （docs/operations.md 的「真的出事了怎么恢复」）。
 
+# 库先起来，并且**等它真的健康**。
+#
+# 下面那条 `up` 带 `--no-deps`，而 `--no-deps` 会让 compose 忽略
+# `depends_on: condition: service_healthy` —— 也就是说 agentd 会在库还没
+# 接受连接时就启动。冷启动的 postgres 要十几秒，而 agentd 起来第一件事
+# 就是跑 migration，连不上就退出。
+#
+# 表现会是「部署输出全绿，但 agentd 在反复重启」，或者更糟：健康检查窗口
+# 恰好等到它重启成功，于是这次没事、下次冷启动慢一点就有事。
+#
+# 单独用 `--wait` 把这一步做实。库没变时这是个几乎瞬时的空操作。
+echo "==> 先确保库就绪"
+docker compose up -d --wait --wait-timeout 120 cortexdb
+
 # shellcheck disable=SC2086  # 同上，故意分词
 docker compose up -d --no-deps $services
 
-# 注意：上面点名了服务，所以一次部署碰不到 postgres / rustfs ——
-# 这也意味着**往 compose 里新加的服务会安静地永远不被启动**，
-# 而输出里没有任何一句话提到它。加服务时记得同步改 ${services}。
+# 注意：上面点名了服务，所以一次部署碰不到 rustfs 与记忆那一栈。
 #
-# 2026-08-13 这条警告第一次兑现：加 egress 时差点漏掉，
-# 症状会是「沙箱起来了但一出网就超时」，而部署输出全绿。
+# 「往 compose 里新加的服务会安静地永远不被启动」这条警告在这里立了三次
+# （2026-08-13 加 egress 时差点漏、0.1.9 的 agentd 漏了一整次发布、
+# 0.1.10 的 cortexdb 让一次上线回滚），所以它已经不再只是一条注释 ——
+# 上面那道「每个服务都必须有归宿」的闸会当场拒绝。
 
 # ── 回收磁盘 ──────────────────────────────────────────────
 # 每次部署都拉新镜像、把被替换的那个变成孤儿，节点的盘只涨不落。
