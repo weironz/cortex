@@ -24,6 +24,23 @@ pub struct LoginRequest {
     pub device_label: Option<String>,
 }
 
+/// `POST /auth/password` —— 改自己的口令。
+///
+/// # 为什么要带旧口令
+///
+/// 一把有效的 access token 只证明「这个会话是他开的」，不证明「现在坐在
+/// 键盘前的是他」。一台没锁屏的机器、一个借出去的终端，都足以让别人拿着
+/// 那把 token 把口令换掉，把真正的主人锁在外面。带旧口令是这条路上唯一
+/// 一次「重新确认是本人」的机会。
+///
+/// 忘了旧口令的那条路不在这里 —— 它是 `cortex-agentd --set-password`，
+/// 需要机器上的 shell。理由见那个参数的文档。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterRequest {
     pub username: String,

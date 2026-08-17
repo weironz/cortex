@@ -169,6 +169,32 @@ impl Client {
         Ok(())
     }
 
+    /// 改自己的口令。返回被作废的登录数。
+    ///
+    /// **成功之后本机那份凭据就废了** —— 服务端作废这个人所有设备的 refresh
+    /// 链，包括发起这次请求的这一台。调用方要负责重新登录一次，否则下一条
+    /// 命令会拿着一把已经作废的凭据去换 access，得到 401，
+    /// 而那读起来像「改密码把账号弄坏了」。
+    ///
+    /// # Errors
+    /// 旧口令不对（401）、新口令不合规（400）、身份认不出（403）。
+    pub async fn change_password(&self, old: &str, new: &str) -> Result<u64> {
+        let resp = self
+            .post("/auth/password")
+            .json(&serde_json::json!({ "old_password": old, "new_password": new }))
+            .send()
+            .await
+            .map_err(|e| CortexError::Provider(format!("连不上 {}：{e}", self.base)))?;
+        let resp = self.checked(resp).await?;
+        let v: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| CortexError::Provider(format!("改口令响应解析失败：{e}")))?;
+        Ok(v.get("revoked_sessions")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0))
+    }
+
     /// 这次请求会被认成谁。
     ///
     /// **带上凭据发**（与 `login` 相反）—— 它问的正是「我手上这把凭据是谁」。

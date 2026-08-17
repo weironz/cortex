@@ -87,6 +87,9 @@ protected_routes! {
     // 要求带着凭据才能登录是个死循环。
     "/auth/me" [GET] => get(crate::accounts::whoami),
     "/auth/usage" [GET] => get(crate::accounts::usage),
+    // 改口令**要凭据**，与 login/refresh 那几条相反：它不是「还没有凭据时
+    // 做的事」，而是「已经是本人才能做的事」。handler 里还要再验一次旧口令
+    "/auth/password" [POST] => post(crate::accounts::change_password),
     // 加不了请求头的连接（WebSocket、<img src>）拿它换一个 60 秒的 `?ticket=`
     "/auth/ticket" [POST] => post(issue_ticket),
     // ── 实时同步 ──
@@ -1290,6 +1293,49 @@ mod tests {
             status,
             StatusCode::NOT_IMPLEMENTED,
             "另一把 token 一次都没刷过，应当照常走到「没接库」的 501 ——              被连坐说明键混了（成了全局一份额度，或按连接来源计了）"
+        );
+    }
+
+    /// **改口令不吃「认不出就当 1 号用户」那个回落。**
+    ///
+    /// `accounts::current_user` 认不出 bearer 时会落到第一个账号 —— 那是预共享
+    /// token 那条老路，读写数据时它是对的。但改口令时不是：拿着部署密钥的人
+    /// 本来就能以 1 号身份读写，而**改掉 1 号的口令**多一件事 —— 把真正的
+    /// 主人锁在外面，并让持有者能交互式登录进来。
+    ///
+    /// 所以 handler 只认 `AccessBook` 解出来的人。这条用例里那本簿子是空的
+    /// （没登录过任何人），所以任何 bearer 都该被拒。
+    ///
+    /// 断言 403 而不是 401：凭据本身是有效的（它过了入站那道闸），
+    /// 不够的是「它证明不了你是谁」—— 两者对用户的下一步动作不同。
+    #[tokio::test]
+    async fn changing_a_password_refuses_an_identity_it_cannot_resolve() {
+        let app = router(topology_state());
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/auth/password")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, "Bearer some-deploy-token")
+            .body(Body::from(
+                r#"{"old_password":"whatever-old","new_password":"whatever-new-1"}"#,
+            ))
+            .expect("构造请求不该失败");
+        let resp = app
+            .oneshot(req)
+            .await
+            .expect("router 的错误类型是 Infallible");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "认不出身份就必须拒。回 501（没接库）说明它先去碰库了 ——              那意味着身份判断排在库后面，而这条路上身份是第一件事"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("读 body");
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(
+            body.contains("cortex login"),
+            "拒绝的时候要说出下一步该做什么，否则对方只会反复重试。实际：{body}"
         );
     }
 

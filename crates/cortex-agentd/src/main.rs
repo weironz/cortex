@@ -142,6 +142,22 @@ struct Args {
     /// `accounts::create_account_in`，不是两份实现。
     #[arg(long, value_name = "USERNAME")]
     create_user: Option<String>,
+
+    /// 重设某个账号的口令，然后退出。**不需要旧口令。**
+    ///
+    /// # 为什么这条可以不验旧口令
+    ///
+    /// 因为跑得了它的人**已经有这台机器的 shell**，也就已经有 `.env` 里的
+    /// 数据库口令 —— 他随时可以直接 UPDATE 那张表。要求旧口令挡不住任何人，
+    /// 只是把「忘了口令怎么办」从一条命令变成一次手写 argon2 哈希。
+    ///
+    /// 这与 `POST /auth/password` 是两条互补的路：那条是**用户自己**改，
+    /// 走网络、必须带旧口令；这条是**机器主人**恢复，走 shell、不需要。
+    ///
+    /// 口令来源与 `--create-user` 完全一致（`CORTEX_ADMIN_PASSWORD` 或 stdin），
+    /// 且同样会作废那个人所有设备上的凭据。
+    #[arg(long, value_name = "USERNAME")]
+    set_password: Option<String>,
 }
 
 /// `--create-user` 的口令从哪儿来。
@@ -263,6 +279,29 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
         println!("已建号：{username}（id {id}）");
+        return Ok(());
+    }
+
+    // ── `--set-password`：重设口令然后退出 ────────────────
+    //
+    // 与上面那段同样排在 docker 之前，同样的理由：恢复一个进不去的账号
+    // 一行 docker 都不需要，而最需要恢复的时刻常常是机器本身也不太对的时刻。
+    if let Some(username) = args.set_password.as_deref() {
+        let url = args.database_url.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("重设口令要连 Cortex 自己的库，但没给 CORTEX_DATABASE_URL。")
+        })?;
+        let store = cortex_store::Store::connect(url)
+            .await
+            .context("连不上 Cortex 自己的数据库")?;
+        store.migrate().await.context("跑 migration 失败")?;
+        let accounts = state::Accounts::connect(url)
+            .await
+            .context("连不上 cortex_auth")?;
+        let password = read_admin_password()?;
+        let revoked = accounts::set_password_in(&accounts, username, &password)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+        println!("已重设 {username} 的口令；作废了 {revoked} 条仍然有效的登录凭据");
         return Ok(());
     }
 

@@ -135,6 +135,42 @@ async fn user_count(accounts: &Accounts) -> Result<i64, ApiError> {
     Ok(row.get("n"))
 }
 
+/// 重设某人的口令，**不验旧口令**，并作废他所有设备的凭据。返回作废了几条。
+///
+/// 只给 `cortex-agentd --set-password` 用。为什么它可以不验旧口令，见那个
+/// 参数的文档 —— 一句话：跑得了它的人已经有这台机器的库口令。
+///
+/// 与 [`create_account_in`] 一样是 `pub` 而不是私有：调用方在 `main.rs`，
+/// 而把它抄一份到那边意味着「哈希用什么参数」「作废哪些行」会有两个版本。
+///
+/// # Errors
+/// 用户名不存在、口令不合规、库写不动。
+pub async fn set_password_in(
+    accounts: &Accounts,
+    username: &str,
+    password: &str,
+) -> Result<u64, ApiError> {
+    let hash = hash_password(password).map_err(ApiError::from)?;
+    // 一条 UPDATE 直接按用户名走，顺手把 id 拿回来 —— 分成「先查 id 再更新」
+    // 两步的话，中间那一刻账号被删掉会让第二步静默影响 0 行而这里报成功
+    let id: Option<String> = sqlx::query_scalar(
+        "UPDATE cortex_auth.users SET password_hash = $1
+          WHERE lower(username) = lower($2) RETURNING id",
+    )
+    .bind(&hash)
+    .bind(username)
+    .fetch_optional(&accounts.pool)
+    .await
+    .map_err(|e| ApiError::internal(format!("写新口令失败：{e}")))?;
+
+    let Some(id) = id else {
+        return Err(ApiError::bad_request(format!(
+            "没有叫 {username} 的账号。看一眼现有的：psql 里 `SELECT username FROM cortex_auth.users`"
+        )));
+    };
+    Ok(revoke_all_sessions(&accounts.pool, &id).await)
+}
+
 /// 建一个账号：开 schema、迁移、写 users 行。
 ///
 /// # 为什么它是自由函数，而不是 `AgentState` 上的方法
@@ -735,6 +771,113 @@ pub async fn usage(
 ) -> Result<Json<crate::quota::QuotaView>, ApiError> {
     let user_id = current_user(&st, &headers).await;
     Ok(Json(st.quota_status(&user_id).await?.into()))
+}
+
+/// `POST /auth/password` —— 改自己的口令。
+///
+/// # 在这之前完全没有这条路
+///
+/// 没有 API、没有 CLI、`CORTEX_ADMIN_*` 明确只建号不改密。于是第一个账号
+/// 的口令一旦定下就是永久的 —— 想换只能进库改 argon2 哈希。而「口令可能
+/// 泄露了」恰恰是最不该要求动手改数据库的时刻。
+///
+/// # 身份**严格**解析，不吃那个回落
+///
+/// [`current_user`] 认不出 bearer 时会落到 1 号用户（那是预共享 token 那条
+/// 老路）。这条路上不能要那个回落：一个拿着预共享 token 的人本来就能以
+/// 1 号的身份读写，但**改掉 1 号的口令**是另一件事 —— 它把真正的主人锁在
+/// 外面，并让那把 token 的持有者能交互式登录进来。
+///
+/// 所以只认 `access_book` 解出来的那个人。解不出来就 403 并说清该做什么。
+///
+/// 委托令牌（沙箱容器那把）根本走不到这里：入站那道闸按白名单拦，
+/// 而这条路不在白名单上 —— 那是 `delegated_token::allows` 的默认拒绝。
+///
+/// # 改完作废**所有**设备的 refresh 链
+///
+/// 改口令的意图九成是「我怀疑它泄露了」。只作废当前这条链等于把另外两台
+/// 机器上那份仍然有效的凭据留在原地 —— 而用户以为自己刚把门锁换了。
+///
+/// 代价是他自己所有设备都要重登一次。那正是他要的。
+///
+/// # Errors
+/// 没接库（501）、认不出身份（403）、旧口令不对（401）、
+/// 新口令不合规（400）、敲得太密（429）。
+pub async fn change_password(
+    State(st): State<AgentState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<cortex_proto::auth::ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    let Some(user_id) = st.access_book().resolve(bearer) else {
+        return Err(ApiError::forbidden(
+            "改口令要用**你自己登录换来的** access token。             这次请求带的认不出是谁（多半是部署的预共享 token）——              先 `cortex login`（或在客户端登录一次）再来改。",
+        ));
+    };
+
+    // 限流用登录那道闸，键是用户 id：这条路上「敲得太密」与猜密码是同一个
+    // 形状 —— 一把有效 access token 加上暴力试旧口令。
+    if let Err(wait) = st.auth_throttle().check_login(&user_id) {
+        return Err(ApiError::too_many_requests(format!(
+            "改口令的尝试太密，请等 {wait} 秒"
+        )));
+    }
+
+    let pool = &st.accounts()?.pool;
+    let row = sqlx::query("SELECT password_hash FROM cortex_auth.users WHERE id = $1")
+        .bind(&user_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| ApiError::internal(format!("查用户失败：{e}")))?
+        .ok_or_else(|| ApiError::forbidden("这把凭据指向的账号已经不在了"))?;
+
+    if !verify_password(&req.old_password, &row.get::<String, _>("password_hash")) {
+        st.auth_throttle().record_login_failure(&user_id);
+        return Err(ApiError::unauthorized("旧口令不对"));
+    }
+    // 新旧相同直接拒。放过去的后果是「什么都没变，但所有设备被登出了」——
+    // 一个没有任何解释的副作用
+    if req.old_password == req.new_password {
+        return Err(ApiError::bad_request("新口令与旧口令相同"));
+    }
+
+    let hash = hash_password(&req.new_password).map_err(ApiError::from)?;
+    sqlx::query("UPDATE cortex_auth.users SET password_hash = $1 WHERE id = $2")
+        .bind(&hash)
+        .bind(&user_id)
+        .execute(pool)
+        .await
+        .map_err(|e| ApiError::internal(format!("写新口令失败：{e}")))?;
+
+    let revoked = revoke_all_sessions(pool, &user_id).await;
+    tracing::info!(user = %user_id, revoked, "口令已更改，该用户所有设备的凭据已作废");
+    Ok(Json(serde_json::json!({ "revoked_sessions": revoked })))
+}
+
+/// 作废这个人**所有**设备上的 refresh 链。返回作废了几条。
+///
+/// 失败不往上抛：口令已经改成功了，此时报错会让调用方以为整件事没成功而
+/// 拿旧口令重试 —— 而那时旧口令已经不好使了。日志留一条，让运维看得见。
+async fn revoke_all_sessions(pool: &sqlx::PgPool, user_id: &str) -> u64 {
+    match sqlx::query(
+        "UPDATE cortex_auth.auth_tokens SET revoked_at = now()
+          WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await
+    {
+        Ok(r) => r.rows_affected(),
+        Err(e) => {
+            tracing::error!(user = %user_id, error = %e,
+                "口令改了但旧凭据没作废掉 —— 那些设备仍然登录着，需要人工处理");
+            0
+        }
+    }
 }
 
 /// 这个请求是谁发的。

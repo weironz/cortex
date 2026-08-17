@@ -93,6 +93,12 @@ enum Command {
     /// 注销：作废服务端那条 refresh 链，并删掉本机凭据
     Logout,
 
+    /// 改自己的口令
+    ///
+    /// 旧口令与新口令都从 stdin 读。改完**所有设备都要重登**（服务端会作废
+    /// 这个人全部的登录凭据），本机这一份由这条命令自己换掉。
+    Passwd,
+
     /// 这次请求会被认成谁
     ///
     /// 多用户部署里最该先问的一句：CLI 用的是预共享 token 还是这台机器上
@@ -345,10 +351,70 @@ async fn main() -> anyhow::Result<()> {
             println!("此后 cortex 的请求都以这个身份发出，不再落到预共享 token 那个账号上。");
         }
 
+        Command::Passwd => {
+            let server = credentials::normalize_server(&cli.server);
+            // 用户名从**本机存着的登录**里取。取不到就说清为什么 ——
+            // 那意味着这次用的是预共享 token，而服务端会拒（它认不出「你是谁」）
+            let Some(stored) = credentials::load(&server) else {
+                // 逐行 concat 而不是一个跨行字面量：Rust 的多行字符串会把
+                // 缩进原样带进去，终端上印出来是一段左边缘参差的话
+                anyhow::bail!(concat!(
+                    "本机没有存着的登录，改不了口令。\n",
+                    "先 `cortex login`：改口令要服务端认得出你是谁，而预共享 token\n",
+                    "指向的永远是第一个账号 —— 拿它改口令等于用一把部署密钥去改\n",
+                    "别人的密码，服务端会拒。"
+                ));
+            };
+
+            let ask = |label: &str| -> anyhow::Result<String> {
+                eprint!("{label}");
+                let _ = std::io::stderr().flush();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                // 只剪行尾的换行，**不 trim 空白**：口令里的空格是口令的一部分。
+                //
+                // 与 `Command::Login` 那段必须逐字一致。不一致的后果是同一个
+                // 尾随空格的口令「login 能过、passwd 说不对」—— 而没有人会
+                // 想到去数空格。
+                while line.ends_with('\n') || line.ends_with('\r') {
+                    line.pop();
+                }
+                Ok(line)
+            };
+            let old = ask("当前密码：")?;
+            let new = ask("新密码：")?;
+            let again = ask("再输一次新密码：")?;
+            if std::io::stdin().is_terminal() {
+                eprintln!("（注意：终端会回显刚才那几串，也会留在滚动缓冲里）");
+            }
+            // 两次不一致当场停下。不判的话，用户设了一个他以为是别的东西的
+            // 口令，而**所有设备同时被登出** —— 他手上再没有一个能进去的凭据
+            if new != again {
+                anyhow::bail!("两次输入的新密码不一样，什么都没改");
+            }
+
+            let revoked = c.change_password(&old, &new).await?;
+            println!("口令已更改；作废了 {revoked} 条登录凭据（含本机这一份）。");
+
+            // 立刻用新口令重登一次。**不能省** —— 刚才那次作废把本机存的
+            // refresh token 也废了，不换的话下一条命令会 401，
+            // 而那读起来像「改密码把账号弄坏了」
+            let tokens = c.login(&stored.username, &new).await?;
+            let path = credentials::save(&credentials::StoredLogin {
+                server,
+                username: stored.username.clone(),
+                refresh_token: tokens.refresh_token,
+            })?;
+            println!("本机凭据已换新：{}", path.display());
+            println!("其他设备需要用新口令重新登录一次。");
+        }
+
         Command::Whoami => {
             let who = c.whoami().await?;
             println!("{}（{}）", who.username, who.user_id);
-            println!("记忆 schema：{}", who.schema_name);
+            // 不叫「记忆 schema」了：记忆 2026-08-17 去掉了，这个 schema 装的是
+            // 这个人的会话与消息
+            println!("数据 schema：{}", who.schema_name);
             // 把「凭据从哪儿来」也说出来 —— 这条命令存在的理由就是回答
             // 「我现在是谁」，而「凭据是哪来的」是同一个问题的另一半：
             // 预共享 token 与本机登录可能指向**不同的人**
