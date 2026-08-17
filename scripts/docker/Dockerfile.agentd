@@ -48,6 +48,7 @@ COPY crates/cortex-agentd/Cargo.toml  crates/cortex-agentd/
 COPY crates/cortex-local/Cargo.toml   crates/cortex-local/
 COPY crates/cortex-cli/Cargo.toml     crates/cortex-cli/
 COPY crates/cortex-egress-proxy/Cargo.toml crates/cortex-egress-proxy/
+COPY crates/cortex-store/Cargo.toml   crates/cortex-store/
 
 # 占位 src，让依赖层能单独编出来再被缓存
 RUN for d in crates/*/; do \
@@ -61,6 +62,16 @@ RUN for d in crates/*/; do \
 
 # 真正的源码
 COPY crates/ crates/
+
+# **migration 目录是编译期输入，不是运行期资源。** `cortex-store` 用
+# `sqlx::migrate!()` 把这两个目录整个嵌进二进制里 —— 少了它们，报的是
+#
+#   error canonicalizing migration directory /build/.../migrations: No such file
+#
+# 而这个错**只在容器里出现**：CI 与本机都在完整的仓库树上编，那两个目录
+# 天然就在。第一次发现它是 v0.1.10 的镜像作业红了，而同一份代码的 CI 全绿。
+COPY migrations/ migrations/
+COPY migrations-global/ migrations-global/
 
 # 占位留下的时间戳会让 cargo 以为没变。touch 一遍强制重编真源码
 RUN find crates -name '*.rs' -exec touch {} + && \
