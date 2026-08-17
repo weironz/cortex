@@ -154,6 +154,51 @@ impl Workspaces {
             .or_else(|| self.default_root.clone())
     }
 
+    /// 容器工作区卷里的一个命名子目录，**按需创建**，返回绝对路径。
+    ///
+    /// # 为什么它不走 [`Self::bind`]
+    ///
+    /// `bind` 校验的是「用户在界面上点的一个**宿主机**路径」（绝对、存在、
+    /// 不是系统目录、不是主目录本身）。容器里这个是完全不同的东西：一段
+    /// 由服务端下发的**名字**，拼在卷根后面，而且**本来就不存在** ——
+    /// 第一次用到时才建。拿 `bind` 那套去校它，第一次一定失败在「目录不存在」。
+    ///
+    /// # 名字在这里再校一遍
+    ///
+    /// 服务端校过、schema 的 CHECK 也校过。这里是第三道，理由是这一道离
+    /// **拼路径**那一行最近：只要名字带上分隔符或 `..`，根就落到卷外面去，
+    /// 而沙箱围栏只保证「模型逃不出根」，对根本身选错了无能为力。
+    ///
+    /// 三道看着冗余，但它们各自防的是不同的绕过：HTTP 面、直接写库、
+    /// 以及「将来某个调用方自己拼了个名字传进来」。
+    ///
+    /// # Errors
+    /// 没有卷根（不在容器里）、名字不合格、建目录失败。
+    pub fn container_subdir(&self, name: &str) -> Result<String> {
+        let root = self.default_root.as_deref().ok_or_else(|| {
+            CortexError::Invalid(
+                "这个 agent 没有容器工作区卷（没给 --default-workspace），                 命名工作区只在容器里有意义"
+                    .into(),
+            )
+        })?;
+        let ok = !name.is_empty()
+            && name.len() <= 64
+            && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+        if !ok {
+            return Err(CortexError::Invalid(format!(
+                "工作区名 {name:?} 不合格：只允许一段字母数字与 . _ -，                 必须以字母或数字开头，长度 1~64"
+            )));
+        }
+        let dir = std::path::Path::new(root).join(name);
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            CortexError::Invalid(format!("建不出工作区目录 {}：{e}", dir.display()))
+        })?;
+        Ok(dir.to_string_lossy().into_owned())
+    }
+
     /// 绑定一个目录。`raw` 是用户在界面上点的那个路径。
     ///
     /// 校验走 [`cortex_agent::workspace::validate`] —— 与服务端**同一份**代码
@@ -471,6 +516,56 @@ fn sanitize_folder_name(name: &str) -> Result<&str> {
 
 #[cfg(test)]
 mod tests {
+    /// **命名工作区只能落在卷根里面，而且是按需建出来的。**
+    ///
+    /// 这一层离「拼路径」那一行最近，所以它挡不住的东西后面没有第二道能挡：
+    /// 根落到卷外面之后，沙箱围栏照常工作 —— 只是围的不是用户以为的那个目录。
+    #[test]
+    fn a_named_container_workspace_is_created_inside_the_volume() {
+        let vol = tempfile::tempdir().expect("临时目录当卷根");
+        let ws = Workspaces::load(vol.path())
+            .with_default_root(&vol.path().to_string_lossy())
+            .expect("卷根合法");
+
+        let dir = ws.container_subdir("client-a").expect("正常名字该过");
+        assert!(
+            std::path::Path::new(&dir).is_dir(),
+            "第一次用到时要把目录建出来 —— 不建的话 Sandbox::new 会在             「目录不存在」上失败，而那读起来像配置错了"
+        );
+        assert!(
+            std::path::Path::new(&dir).starts_with(vol.path()),
+            "必须落在卷根里面：{dir}"
+        );
+
+        // 幂等：第二个会话用同一个名字要拿到同一个目录，而不是报「已存在」
+        assert_eq!(
+            ws.container_subdir("client-a").expect("再来一次也该过"),
+            dir,
+            "同一个名字要能被多个会话共用 —— 那正是它不是「一个会话一个目录」的意思"
+        );
+
+        for bad in ["..", "../etc", "a/b", "/etc", ".hidden", "-flag", ""] {
+            assert!(
+                ws.container_subdir(bad).is_err(),
+                "{bad:?} 被接受了 —— 它能把根挪到卷外面去，而那不报错"
+            );
+        }
+    }
+
+    /// 没有卷根（不在容器里）时要**明说**，而不是拼出一个相对路径。
+    #[test]
+    fn naming_a_workspace_outside_a_container_says_so() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let ws = Workspaces::load(dir.path());
+        let e = ws
+            .container_subdir("client-a")
+            .expect_err("桌面端没有卷根，这里没有意义");
+        assert!(
+            e.to_string().contains("容器"),
+            "错误里要点出「这只在容器里有意义」，否则读起来像名字不合格。实际：{e}"
+        );
+    }
+
     use super::*;
 
     /// 绑定要能跨进程活下来 —— 重启之后不该退回纯聊天。

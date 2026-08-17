@@ -63,6 +63,18 @@ impl std::fmt::Debug for Remote {
     }
 }
 
+/// `/sessions/{id}` 那一次请求带回来的、这一轮要用的东西。
+///
+/// 只有两样，但**都要**：历史给模型看，工作区名决定文件工具的根。
+/// 分两次请求去拿是每轮多一次往返，而这两样本来就在同一个响应里。
+#[derive(Debug, Default)]
+pub struct RemoteSession {
+    /// `(是不是用户说的, 正文)`，按时间正序。
+    pub turns: Vec<(bool, String)>,
+    /// 容器工作区卷里的子目录名。`None` = 卷根（默认）。
+    pub container_workspace: Option<String>,
+}
+
 impl Remote {
     /// # Errors
     /// HTTP 客户端构造失败（TLS 后端不可用之类）。
@@ -306,11 +318,12 @@ impl Remote {
     ///
     /// 离线是明确支持的形态：这一轮照样能跑，只是模型看不到前几轮 ——
     /// 与「记忆未连接」是同一类降级，不该让整轮对话失败。
-    pub async fn session_history(
-        &self,
-        session_id: &str,
-        limit: i64,
-    ) -> Result<Vec<(bool, String)>> {
+    /// 顺带带回**容器工作区名**。
+    ///
+    /// 单独再打一次 `/sessions/{id}` 只为了拿一个字符串，是每轮多一次往返 ——
+    /// 而这条请求本来就在发。返回一个结构而不是元组：加第三样东西时不必改
+    /// 所有调用点的解构。
+    pub async fn session_history(&self, session_id: &str, limit: i64) -> Result<RemoteSession> {
         let resp = self
             .auth(self.http.get(self.url(&format!("/sessions/{session_id}"))))
             .timeout(REQUEST_TIMEOUT)
@@ -323,7 +336,8 @@ impl Remote {
             .json()
             .await
             .map_err(|e| CortexError::Invalid(format!("解析会话详情失败：{e}")))?;
-        Ok(detail
+        let container_workspace = detail.session.container_workspace.clone();
+        let turns = detail
             .episodes
             .into_iter()
             .filter_map(|e| {
@@ -339,7 +353,11 @@ impl Remote {
                     _ => None,
                 }
             })
-            .collect())
+            .collect();
+        Ok(RemoteSession {
+            turns,
+            container_workspace,
+        })
     }
 
     /// 远端活着吗。决定这一轮是走在线路径还是排进 outbox。

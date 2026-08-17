@@ -230,6 +230,10 @@ pub struct SessionDigest {
     pub archived: bool,
     /// 绑定的本机目录。`None` = 纯聊天会话，文件工具不进模型的工具目录。
     pub workspace: Option<String>,
+    /// 容器工作区卷里的子目录名。`None` = 卷根，也就是默认。
+    ///
+    /// 与 [`Self::workspace`] 不是一回事：那个是桌面端的本机路径。
+    pub container_workspace: Option<String>,
     /// 所属项目。`None` = 未分组，**也包括「原来那个项目已经被删了」** ——
     /// 视图已经把悬挂的绑定收敛成 `None`，这里读到的就是最终口径。
     pub project_id: Option<String>,
@@ -284,6 +288,7 @@ impl Store {
                     s.title,
                     coalesce(s.archived, false) AS archived,
                     s.workspace,
+                    s.container_workspace,
                     s.project_id,
                     -- LEFT JOIN 可能整行为空（会话还没有任何生命周期事件），
                     -- 那时 runtime 也是 NULL。视图里已经 coalesce 过一次，
@@ -329,6 +334,7 @@ impl Store {
                     s.title,
                     coalesce(s.archived, false) AS archived,
                     s.workspace,
+                    s.container_workspace,
                     s.project_id,
                     -- LEFT JOIN 可能整行为空（会话还没有任何生命周期事件），
                     -- 那时 runtime 也是 NULL。视图里已经 coalesce 过一次，
@@ -364,7 +370,8 @@ impl Store {
     /// 没归档、没绑工作区、没进过项目。调用方按「全默认」处理即可，不是错误。
     pub async fn session_state(&self, session_id: &str) -> Result<Option<SessionState>> {
         let row = sqlx::query_as::<_, SessionState>(
-            "SELECT session_id, title, archived, workspace, project_id, runtime, decided_at
+            "SELECT session_id, title, archived, workspace, project_id, runtime,
+                    container_workspace, decided_at
                FROM session_state WHERE session_id = $1",
         )
         .bind(session_id)

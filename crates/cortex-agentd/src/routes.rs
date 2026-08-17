@@ -1339,6 +1339,38 @@ mod tests {
         );
     }
 
+    /// **一条还没发过话的会话，`GET /sessions/{id}` 也得答得出来。**
+    ///
+    /// `session_digest` 是从 episodes 聚合的，所以刚建好的会话在它眼里不存在。
+    /// 而 `PATCH` 那条路一直支持这种会话（「先选工作区、再发第一句」）——
+    /// 两条路对同一个会话看法不一致。
+    ///
+    /// 这个不一致 2026-08-17 咬了一次：容器里的 agent 每轮打这条路取**容器
+    /// 工作区名**，而新会话第一轮拿到 404，于是名字明明在库里、那一轮却落在
+    /// 卷根。与「项目要在第一轮之前落地」是同一个形状。
+    ///
+    /// 这里没有库，所以断言的是**它不再是 404**（没库时统一 501）——
+    /// 真正的行为在 dev 上端到端验过。回 404 说明那条早退分支又回来了。
+    #[tokio::test]
+    async fn a_message_less_session_is_not_a_404() {
+        let app = router(topology_state());
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/sessions/never-said-a-word")
+            .body(Body::empty())
+            .expect("构造请求不该失败");
+        let status = app
+            .oneshot(req)
+            .await
+            .expect("router 的错误类型是 Infallible")
+            .status();
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "没有库时该是 501；回 404 说明 handler 在碰库之前就按「没有消息」             早退了 —— 那正是容器取不到工作区名的那个 bug"
+        );
+    }
+
     /// 免认证的入口只该有那几条，而且加一条要先说清理由。
     ///
     /// 数字写死是故意的：它一变就红，逼人回到 `public_routes` 的文档上

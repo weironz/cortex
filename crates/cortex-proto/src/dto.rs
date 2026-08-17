@@ -497,6 +497,17 @@ pub struct SessionDto {
     /// 注意这是**本机**路径。多端同步会把绑定下发到别的设备，而那台机器上
     /// 同一个路径多半不存在 —— 客户端遇到不存在的路径应按未绑定显示。
     pub workspace: Option<String>,
+    /// 容器工作区卷里的子目录名。`null` / 缺席 = 根就是卷根，也就是**默认**。
+    ///
+    /// 只对云端会话有意义。**与 [`Self::workspace`] 不是一回事**：那个是桌面端的
+    /// 本机绝对路径（而且是设备本地概念），这个是容器里的一段目录名。
+    ///
+    /// 名字可以被多个会话共用 —— 这不是「一个会话一个目录」：按会话分的话，
+    /// 「昨天让你生成的那份报告呢」会得到一个空目录。
+    ///
+    /// 老客户端忽略即可；空时整个字段省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_workspace: Option<String>,
     /// 所属项目的 id。`null` / 缺席 = 未分组。
     ///
     /// **不会指向一个已删除的项目**：删项目只是解散分组，服务端在算末态时
@@ -604,6 +615,23 @@ pub struct SessionPatch {
     /// 收敛成了 NULL），用户看到的是「拖进去又弹回来了」。
     #[serde(default, deserialize_with = "explicit_option")]
     pub project_id: Option<Option<String>>,
+    /// 容器工作区的子目录名，三态与 `workspace` 一致：
+    ///
+    /// | 请求体 | 含义 |
+    /// |---|---|
+    /// | 字段不出现 | 不动 |
+    /// | `"container_workspace": null` | 回到卷根（默认） |
+    /// | `"container_workspace": "client-a"` | 收窄到 `/workspace/client-a` |
+    ///
+    /// 名字必须是**单段**、只含字母数字与 `. _ -`、不以 `.` 或 `-` 开头、
+    /// 长度 1–64。不合格得到 400 —— 静默接受的话，那一轮的工作区会指着一个
+    /// 不存在的地方，而模型说的是「没有这个文件」，一句听起来像它失忆的实话。
+    /// **必须走 `explicit_option`**：serde 默认把「字段为 null」与「字段没出现」
+    /// 都解成 `None`，而这两件事在这里是「回到卷根」与「别动它」—— 第一版漏了
+    /// 这个属性，症状是 `{"container_workspace": null}` 被当成「什么都没提」，
+    /// 于是整条 PATCH 报「没有任何要改的字段」。
+    #[serde(default, deserialize_with = "explicit_option")]
+    pub container_workspace: Option<Option<String>>,
     /// 声明这个会话在哪儿跑。见 [`SessionRuntimeDto`]。
     ///
     /// 字段不出现 = 不动。**没有 `null` 那一档** —— 「没有执行归属」不是一个
@@ -877,6 +905,45 @@ pub struct ErrorBody {
 
 #[cfg(test)]
 mod tests {
+    /// **三态的每个字段都要用 `explicit_option`，一个都不能漏。**
+    ///
+    /// serde 默认把「字段为 null」与「字段没出现」都解成 `None`，而这三个字段
+    /// 靠这个区别表达「清空」与「别动」。漏掉那个属性不会有编译错误 ——
+    /// 症状是 `{"x": null}` 被当成「什么都没提」，于是整条 PATCH 报
+    /// 「请求体里没有任何要改的字段」。`container_workspace` 第一版就漏了，
+    /// 而它是在真服务端上打出 400 才发现的。
+    ///
+    /// 逐字段断言而不是只测一个：漏的那个永远是新加的那个。
+    #[test]
+    fn every_tri_state_field_tells_null_apart_from_absent() {
+        let absent: SessionPatch = serde_json::from_str("{}").expect("空对象合法");
+        assert!(absent.workspace.is_none() && absent.project_id.is_none());
+        assert!(
+            absent.container_workspace.is_none(),
+            "字段没出现应当是外层 None"
+        );
+
+        let nulled: SessionPatch = serde_json::from_str(
+            r#"{"workspace":null,"project_id":null,"container_workspace":null}"#,
+        )
+        .expect("显式 null 合法");
+        assert_eq!(
+            nulled.workspace,
+            Some(None),
+            "workspace: null 是「解绑」，不是「别动」"
+        );
+        assert_eq!(
+            nulled.project_id,
+            Some(None),
+            "project_id: null 是「移出项目」"
+        );
+        assert_eq!(
+            nulled.container_workspace,
+            Some(None),
+            "container_workspace: null 是「回到卷根」—— 解成 None 会让这条 PATCH              报「没有任何要改的字段」"
+        );
+    }
+
     use super::*;
 
     /// `workspace` 的三态必须分得清楚。

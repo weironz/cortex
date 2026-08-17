@@ -112,14 +112,41 @@ async fn session_detail(
     session_id: &str,
     q: &SessionDetailQuery,
 ) -> cortex_core::Result<SessionDetail> {
-    let digest = store
-        .session_digest(session_id)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| cortex_core::CortexError::NotFound {
-            kind: "session",
-            id: session_id.into(),
-        })?;
+    // ── 还没有消息的会话也要答得出来 ──
+    //
+    // `session_digest` 是从 episodes 聚合出来的，所以一条**刚建好、还没发过
+    // 话**的会话在它眼里不存在。而 `PATCH` 那条路早就支持这种会话
+    // （见 `session_overview` 的注释：「先选工作区、再发第一句」那个顺序要求
+    // 的），于是两条路对同一个会话的看法不一致。
+    //
+    // 这个不一致 2026-08-17 咬了一次：容器里的 agent 每轮打这条路来取
+    // **容器工作区名**，而新会话第一轮拿到 404 —— 名字明明在库里，那一轮却
+    // 落在了卷根。与「项目要在第一轮之前落地」是同一个形状：**先设好的状态，
+    // 在第一轮读不到**。
+    //
+    // 真正不存在的会话仍然 404：判据是「有没有生命周期事件」，
+    // 而不是「有没有消息」。
+    let digest = store.session_digest(session_id).await.map_err(store_err)?;
+    let Some(digest) = digest else {
+        let session = session_overview(store, session_id).await?;
+        if store
+            .session_state(session_id)
+            .await
+            .map_err(store_err)?
+            .is_none()
+        {
+            return Err(cortex_core::CortexError::NotFound {
+                kind: "session",
+                id: session_id.into(),
+            });
+        }
+        return Ok(SessionDetail {
+            session,
+            episodes: Vec::new(),
+            has_more: false,
+            next_cursor: None,
+        });
+    };
 
     let limit = q
         .limit
@@ -235,6 +262,25 @@ pub(crate) async fn patch_session(
         ));
     }
 
+    // ── 容器工作区的子目录名 ──
+    //
+    // 与上面那条**方向相反**：绑宿主路径是拒绝的（爆炸半径是整台机器），
+    // 而这个只在容器卷里挪一层，围栏还在原处。
+    match container_workspace_patch(patch.container_workspace.as_ref().map(Option::as_deref))? {
+        Some(Some(name)) => events.push(cortex_store::NewSessionEvent::set_container_workspace(
+            session_id,
+            name,
+            cortex_store::Actor::User,
+            DEVICE_ID,
+        )),
+        Some(None) => events.push(cortex_store::NewSessionEvent::clear_container_workspace(
+            session_id,
+            cortex_store::Actor::User,
+            DEVICE_ID,
+        )),
+        None => {}
+    }
+
     // ── 移进 / 移出项目 ──
     //
     // 目标项目的存在性在**进事务之前**查：写事务持着 advisory lock，纪律
@@ -292,7 +338,10 @@ pub(crate) async fn patch_session(
 
     if events.is_empty() {
         return Err(CortexError::Invalid(
-            "请求体里没有任何要改的字段（title / archived / workspace / project_id）".into(),
+            // 清单要跟着字段涨。漏一个的症状是「明明改了却报没改」——
+            // 而那条错误信息本身就是排查这件事时唯一的线索
+            "请求体里没有任何要改的字段（title / archived / workspace /              container_workspace / project_id / runtime）"
+                .into(),
         ));
     }
 
@@ -348,6 +397,53 @@ fn workspace_patch(field: Option<Option<&str>>) -> cortex_core::Result<bool> {
     }
 }
 
+/// `PATCH /sessions/{id}` 里那个 `container_workspace` 该怎么处置。
+///
+/// 返回 `Some(Some(name))` = 设成这个名字；`Some(None)` = 回到卷根；
+/// `None` = 这次没提这个字段。
+///
+/// # 为什么它与 `workspace_patch` 方向相反
+///
+/// 那条拒绝的是**宿主机路径**：爆炸半径是整台生产机加上所有租户的数据。
+/// 这条只在容器的工作区卷里往下挪一层 —— 沙箱的路径围栏还在原处，只是根
+/// 变成了 `<卷根>/<name>`。
+///
+/// # 为什么形状要在这里也校一遍
+///
+/// schema 上有同样的 CHECK。两道都要：**这一道给用户看**（错误信息里说清
+/// 允许什么），schema 那道防的是绕过 HTTP 面直接写库。
+///
+/// 而形状本身不是洁癖：根是拼出来的，而沙箱围栏只保证「模型逃不出根」，
+/// 对**根本身选错了**完全无能为力。`..` 能把根抬到卷外面，绝对路径能把它
+/// 换成别的地方 —— 这两个都不会报错，只会让文件工具指着不该指的地方。
+///
+/// # Errors
+/// 名字不合格。
+fn container_workspace_patch(
+    field: Option<Option<&str>>,
+) -> cortex_core::Result<Option<Option<&str>>> {
+    let Some(inner) = field else { return Ok(None) };
+    let Some(raw) = inner else {
+        return Ok(Some(None));
+    };
+    let name = raw.trim();
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !ok {
+        return Err(CortexError::Invalid(format!(
+            "工作区名 {name:?} 不合格。它是容器工作区卷里的**一段目录名**，             只允许字母、数字与 . _ -，必须以字母或数字开头，长度 1~64。             想指向别的地方是做不到的：那一轮的根是 /workspace/<名字>，             而带分隔符或 .. 的名字会把根挪到卷外面去。"
+        )));
+    }
+    Ok(Some(Some(name)))
+}
+
 /// 会话概览。没有消息时仍然返回一条 —— PATCH 之后客户端要拿回末态，
 /// 而此刻会话很可能一条消息都还没有。
 async fn session_overview(store: &Store, session_id: &str) -> cortex_core::Result<SessionDto> {
@@ -371,6 +467,7 @@ async fn session_overview(store: &Store, session_id: &str) -> cortex_core::Resul
         preview: None,
         archived: state.as_ref().is_some_and(|s| s.archived),
         workspace: state.as_ref().and_then(|s| s.workspace.clone()),
+        container_workspace: state.as_ref().and_then(|s| s.container_workspace.clone()),
         runtime: state
             .as_ref()
             .map_or(SessionRuntimeDto::Cloud, |s| runtime_dto(s.runtime)),
@@ -486,6 +583,7 @@ fn session_dto(d: cortex_store::SessionDigest) -> SessionDto {
         preview: d.last_text,
         archived: d.archived,
         workspace: d.workspace,
+        container_workspace: d.container_workspace,
         project_id: d.project_id,
         runtime: runtime_dto(d.runtime),
     }
@@ -517,6 +615,73 @@ fn session_title(first_user_text: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// **逃出卷的每一种写法都要被拦住。**
+    ///
+    /// 根是 `<卷根>/<名字>` 拼出来的，而沙箱的路径围栏只保证「模型逃不出根」，
+    /// 对**根本身选错了**完全无能为力。所以这一层挡不住的东西，后面没有第二道
+    /// 能挡 —— 而它失败的方式是沉默的：根落在卷外面，文件工具照常工作，
+    /// 只是动的不是用户以为的那个目录。
+    #[test]
+    fn a_container_workspace_name_cannot_escape_the_volume() {
+        for bad in [
+            "..",
+            "../etc",
+            "a/b",
+            r"a\b",
+            "/etc",
+            r"C:\Windows",
+            ".hidden",
+            "-flag",
+            "",
+            "   ",
+        ] {
+            let r = container_workspace_patch(Some(Some(bad)));
+            assert!(
+                r.is_err(),
+                "{bad:?} 被接受了 —— 它能把根挪到卷外面去，而那不报错"
+            );
+        }
+    }
+
+    /// 正常名字要过，而且**首尾空白要剪掉**（用户从别处粘过来常带一个）。
+    #[test]
+    fn ordinary_container_workspace_names_pass() {
+        for good in ["client-a", "scratch", "v1.2", "a", "A_B-c.d"] {
+            assert_eq!(
+                container_workspace_patch(Some(Some(good)))
+                    .expect("应当接受")
+                    .flatten(),
+                Some(good),
+                "{good:?} 该被接受"
+            );
+        }
+        assert_eq!(
+            container_workspace_patch(Some(Some("  client-a  ")))
+                .expect("应当接受")
+                .flatten(),
+            Some("client-a"),
+            "首尾空白要剪掉，否则库里会出现两个看起来一样的名字"
+        );
+    }
+
+    /// 三态：字段不出现 = 不动；`null` = 回到卷根。
+    ///
+    /// 把「不动」与「清空」搞混的后果是**用户改个标题就把工作区重置了** ——
+    /// 而那一轮的文件工具指向别的目录，模型说「没有这个文件」。
+    #[test]
+    fn absent_means_leave_it_alone_and_null_means_volume_root() {
+        assert_eq!(
+            container_workspace_patch(None).expect("不该报错"),
+            None,
+            "字段不出现 = 这次没提它"
+        );
+        assert_eq!(
+            container_workspace_patch(Some(None)).expect("不该报错"),
+            Some(None),
+            "显式 null = 回到卷根"
+        );
+    }
+
     use super::*;
 
     /// **列表端点回的是对象，不是裸数组。**
@@ -589,6 +754,7 @@ mod tests {
             last_text: None,
             archived: false,
             workspace: None,
+            container_workspace: None,
             project_id: None,
             runtime: cortex_store::SessionRuntime::Cloud,
         };

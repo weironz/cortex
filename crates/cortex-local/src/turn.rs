@@ -341,7 +341,11 @@ impl Engine {
     /// 两者共用一条 WARN 的代价不是崩，是**噪声**：每开一个新会话就有一条
     /// 「读会话历史失败」，看多了没人当回事 —— 而真正读丢历史的那次
     /// 长得一模一样。2026-08-13 生产上第一次跑云沙箱时撞见的就是这个。
-    async fn load_history(&self, session_id: &str) -> cortex_core::history::FittedHistory {
+    /// 取这一轮要用的会话上下文：历史，**外加容器工作区名**。
+    ///
+    /// 名字与历史来自**同一次** `/sessions/{id}` —— 单独再打一次只为拿一个
+    /// 字符串是每轮多一次往返。函数名说两件事，因为它做两件事。
+    async fn load_session_context(&self, session_id: &str) -> SessionContext {
         use cortex_core::history::{HistoryTurn, fit_history, history_budget};
 
         let budget = history_budget(self.context_window);
@@ -349,25 +353,31 @@ impl Engine {
         // 把全部原文都拉过网络。200 轮在任何合理预算下都绰绰有余
         const MAX_TURNS: i64 = 200;
 
-        let turns = match self.remote.session_history(session_id, MAX_TURNS).await {
+        let fetched = match self.remote.session_history(session_id, MAX_TURNS).await {
             Ok(t) => t,
             // 会话还不存在 —— 这是新会话第一轮的正常形态，不是失败
             Err(CortexError::NotFound { .. }) => {
                 tracing::debug!(session = session_id, "会话还没有历史（新会话的第一轮）");
-                Vec::new()
+                crate::remote::RemoteSession::default()
             }
             Err(e) => {
                 tracing::warn!(error = %e, session = session_id, "读会话历史失败，本轮按无历史处理");
-                Vec::new()
+                crate::remote::RemoteSession::default()
             }
         };
-        fit_history(
-            turns
-                .into_iter()
-                .map(|(is_user, text)| HistoryTurn { is_user, text })
-                .collect(),
-            budget,
-        )
+        // 连不上时工作区名也拿不到，于是回落到卷根 —— 与「没有历史」同一类
+        // 降级。**不能改成让整轮失败**：那会让一次网络抖动变成「文件工具没了」。
+        SessionContext {
+            history: fit_history(
+                fetched
+                    .turns
+                    .into_iter()
+                    .map(|(is_user, text)| HistoryTurn { is_user, text })
+                    .collect(),
+                budget,
+            ),
+            container_workspace: fetched.container_workspace,
+        }
     }
 
     async fn run_turn(
@@ -383,7 +393,8 @@ impl Engine {
         //
         // 本地 agent 没有数据库，这里必须问远端。代价是：**离线时没有历史**，
         // 与「离线时没有记忆」是同一类降级，UI 上已有那句提示。
-        let history = self.load_history(&req.session_id).await;
+        let ctx = self.load_session_context(&req.session_id).await;
+        let history = ctx.history;
 
         // ── 1. 写 user episode（顺带检索 + 归因）──
         //
@@ -423,7 +434,27 @@ impl Engine {
         // 于是「配好 MCP、开个没绑工作区的会话」拿到的外来工具是零 ——
         // 不报错，只是模型不会用那个功能。见 `chat_turn_for`。
         let external = self.mcp.specs().await;
-        let bound = self.workspaces.get(&req.session_id);
+        // 容器里那个名字**只在容器里生效**：桌面端的根是用户自己点的目录，
+        // 服务端那个字段与它无关（那边的路径是设备本地状态）。
+        // 判 exec_env 而不是判「名字是不是 None」：一个桌面会话上留着的名字
+        // （比如它以前在云端跑过）不该悄悄改写本机的根。
+        let bound = match (self.exec_env, ctx.container_workspace.as_deref()) {
+            (cortex_agent::ExecEnvironment::Container, Some(name)) => {
+                match self.workspaces.container_subdir(name) {
+                    Ok(root) => Some(root),
+                    // 建不出来就回落到卷根，并**说出来**。让整轮失败的话，
+                    // 一个磁盘满或一个权限问题会表现成「这个会话不能用了」
+                    Err(e) => {
+                        tracing::warn!(
+                            workspace = name, error = %e,
+                            "容器工作区子目录不可用，本轮回落到卷根"
+                        );
+                        self.workspaces.get(&req.session_id)
+                    }
+                }
+            }
+            _ => self.workspaces.get(&req.session_id),
+        };
 
         // ── 3.5 附件投放：图片进多模态块，小文本进上下文，其余落工作区 ──
         //
@@ -735,6 +766,13 @@ fn tool_path(args: &serde_json::Value) -> Option<String> {
         .or_else(|| args.get("file"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+/// 一轮对话开始前从远端取回来的会话上下文。
+struct SessionContext {
+    history: cortex_core::history::FittedHistory,
+    /// 容器工作区卷里的子目录名。`None` = 卷根（默认，也是桌面端唯一的情况）。
+    container_workspace: Option<String>,
 }
 
 /// agent 循环要的宿主能力。

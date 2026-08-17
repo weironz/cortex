@@ -170,6 +170,8 @@ text_enum! {
         MoveToProject => "move_to_project",
         RemoveFromProject => "remove_from_project",
         SetRuntime => "set_runtime",
+        SetContainerWorkspace => "set_container_workspace",
+        ClearContainerWorkspace => "clear_container_workspace",
     }
 }
 
@@ -447,6 +449,13 @@ pub struct NewSessionEvent {
     pub project_id: Option<String>,
     /// `op = SetRuntime` 时必填，其余必须为 `None`（schema CHECK 强制）
     pub runtime: Option<SessionRuntime>,
+    /// `op = SetContainerWorkspace` 时必填，其余必须为 `None`（schema CHECK 强制）
+    ///
+    /// **与 [`Self::workspace`] 是两件事，别合并**：那个是桌面端的本机绝对路径
+    /// （而且正在被排空 —— 路径其实是设备本地状态），这个是容器工作区卷里的一个
+    /// 子目录名，单段、不含分隔符。判错的后果是拿一个容器内名字去当宿主路径校验
+    /// （或反过来），两个方向都不报错，只是文件工具指着一个不存在的地方。
+    pub container_workspace: Option<String>,
     pub actor: Actor,
     pub device_id: String,
 }
@@ -461,6 +470,7 @@ impl NewSessionEvent {
             workspace: None,
             project_id: None,
             runtime: None,
+            container_workspace: None,
             actor,
             device_id: device_id.to_owned(),
         }
@@ -533,6 +543,44 @@ impl NewSessionEvent {
             runtime: Some(runtime),
             ..Self::bare(session_id, SessionOp::SetRuntime, actor, device_id)
         }
+    }
+
+    /// 把这个会话的容器工作区收窄到卷里的一个命名子目录。
+    ///
+    /// 只对云端会话有意义。名字由用户起、**可以被多个会话共用** —— 所以这不是
+    /// 「一个会话一个目录」：按会话分的话，「昨天让你生成的那份报告呢」会得到
+    /// 一个空目录，那正是当初选择「按项目分卷」的理由。
+    ///
+    /// 存储层**不校验名字形状**，但 schema 的 CHECK 会（单段、字母数字加
+    /// `. _ -`、不以 `.` 或 `-` 开头、1–64）。上层还会再校一遍并给出人能读懂的
+    /// 错误 —— 两道都要：上面那道给用户看，schema 那道防的是绕过 HTTP 面写库。
+    #[must_use]
+    pub fn set_container_workspace(
+        session_id: &str,
+        name: &str,
+        actor: Actor,
+        device_id: &str,
+    ) -> Self {
+        Self {
+            container_workspace: Some(name.to_owned()),
+            ..Self::bare(
+                session_id,
+                SessionOp::SetContainerWorkspace,
+                actor,
+                device_id,
+            )
+        }
+    }
+
+    /// 回到卷根。**这是默认状态** —— 从没设过名字的会话与它等价。
+    #[must_use]
+    pub fn clear_container_workspace(session_id: &str, actor: Actor, device_id: &str) -> Self {
+        Self::bare(
+            session_id,
+            SessionOp::ClearContainerWorkspace,
+            actor,
+            device_id,
+        )
     }
 
     /// 把会话移进某个项目。再移一次就是换项目 —— 一个会话同时只属于一个项目。
@@ -670,7 +718,11 @@ pub struct SessionState {
     /// 这个会话在哪儿跑。**视图里已经把 NULL 折成 `Cloud`** ——
     /// 缺省定在 SQL 一处，而不是让每个调用方各判一遍「没有事件算什么」。
     pub runtime: SessionRuntime,
+    /// 容器工作区卷里的子目录名。`None` = 根就是卷根，也就是**默认**。
+    ///
+    /// 桌面端会话与它无关：那边的目录是设备本地状态，见 [`Self::workspace`]。
     /// 五个维度中最近一次事件的时间
+    pub container_workspace: Option<String>,
     pub decided_at: DateTime<Utc>,
 }
 
