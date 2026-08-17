@@ -101,7 +101,7 @@ git push origin vX.Y.Z
 | `preflight` | 解析 tag、跑前置闸门。**其它作业全部 needs 它** |
 | `build` | 裸二进制。**自 0.1.2 起只有 Windows**，包含 cortexd + CLI + `cortex-local` |
 | `desktop` | Windows 桌面安装程序（Inno Setup）。**只有 Windows** —— macOS 的 Gatekeeper 是硬拒绝，不是警告 |
-| `image` ×2 | `cortexd` 与 `cortex-web`，各推 Docker Hub 与阿里云 ACR。**推完必须真的启动一次** |
+| `image` ×4 | `cortex-agentd`、`cortex-web`、`cortex-sandbox`、`cortex-egress-proxy`，各推 Docker Hub 与阿里云 ACR。**推完必须真的启动一次** |
 | `release` | 汇总 `SHA256SUMS`、清点产物是否齐、从 CHANGELOG 取这一版的段落、**直接发布** |
 | `deploy` | **调 `deploy.yml` 把这一版放到生产**，然后验五条硬断言（见下） |
 
