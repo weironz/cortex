@@ -15,7 +15,10 @@ import 'package:cortex_app/api/api_exception.dart';
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/app.dart';
 import 'package:cortex_app/core/app_config.dart';
+import 'package:cortex_app/models/attachment.dart';
+import 'package:cortex_app/models/chat_event.dart';
 import 'package:cortex_app/models/chat_session.dart';
+import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/models/project.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/chat_controller.dart';
@@ -50,6 +53,10 @@ class _Api extends MockCortexApi {
   int loads = 0;
   final List<(String, String?)> moves = [];
 
+  /// 第一次 `chat()` 之前有没有 PATCH 过分组。**顺序是这次要钉的东西。**
+  bool movedBeforeFirstChat = false;
+  bool _chatted = false;
+
   @override
   Future<List<Project>> projects() async {
     loads++;
@@ -76,10 +83,27 @@ class _Api extends MockCortexApi {
   }
 
   @override
+  Stream<ChatEvent> chat({
+    required String sessionId,
+    required String message,
+    List<Attachment> attachments = const [],
+    PermissionMode permissionMode = PermissionMode.ask,
+  }) {
+    _chatted = true;
+    return super.chat(
+      sessionId: sessionId,
+      message: message,
+      attachments: attachments,
+      permissionMode: permissionMode,
+    );
+  }
+
+  @override
   Future<ChatSession> moveSessionToProject(
     String sessionId,
     String? projectId,
   ) async {
+    if (!_chatted) movedBeforeFirstChat = true;
     moves.add((sessionId, projectId));
     return ChatSession(id: sessionId, title: 't', projectId: projectId);
   }
@@ -475,6 +499,48 @@ void main() {
         reason:
             '收起来是用户的选择，不是后端给的数据。'
             '跟着一起清掉的话，冷启动时那次自动换后端会把所有分组重新展开',
+      );
+    });
+  });
+
+  group('新建在项目里的会话', () {
+    /// **分组必须在第一轮之前落到服务端。**
+    ///
+    /// 沙箱容器与工作区卷按「owner + 项目」分，而服务端是在收到 `/chat`
+    /// 的那一刻去库里读这个会话属于哪个项目。补晚一步，第一轮就落进
+    /// **未分组**那个容器 —— 所有没分组的会话共用它。
+    ///
+    /// 真机上的症状：新建项目、发第一句让它写个文件，文件进了默认沙箱；
+    /// 第二轮起才进项目沙箱，于是第一轮写的东西再也看不见。生产上留下的
+    /// 证据是同一个 owner 名下并排两套容器与两个卷。
+    ///
+    /// 断言的是**顺序**，不是「最终补上了」—— 后者原来那版也满足。
+    test('分组先落地，再发第一句', () async {
+      final api = _Api(
+        seed: const [Project(id: 'prj_1', name: 'P')],
+      );
+      final container = _boot(api);
+      addTearDown(container.dispose);
+      final chat = container.read(chatControllerProvider.notifier);
+      await _settle(8);
+
+      final sid = chat.createSession(projectId: 'prj_1');
+      expect(api.moves, isEmpty, reason: '还没发消息，不该先建一行状态出来');
+
+      await chat.send('写个文件');
+      await _settle(8);
+
+      expect(
+        api.moves,
+        contains((sid, 'prj_1')),
+        reason: '第一轮之前必须已经 PATCH 过分组',
+      );
+      expect(
+        api.movedBeforeFirstChat,
+        isTrue,
+        reason:
+            '顺序才是这条测试的全部：补在 /chat 之后的话，第一轮已经带着'
+            '「未分组」去要过钥匙了，文件落在另一个卷里',
       );
     });
   });

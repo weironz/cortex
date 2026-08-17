@@ -338,26 +338,55 @@ class ChatController extends Notifier<ChatState> {
   /// 只在内存里，重启即忘 —— 一个从没发过消息的草稿本来也不会留下。
   final Map<String, String> _pendingProjectAssignment = {};
 
-  /// 第一轮落地之后，把建会话时选的项目补给服务端。
+  /// 把建会话时选的项目补给服务端。**在这一轮开始之前，而且要等它。**
   ///
-  /// 失败**不打扰用户**：他刚看完一次回答，弹一句「分组没存上」既打断阅读
-  /// 又没有可执行的动作。本地那份分组照旧显示，而老服务端（没有 /projects）
-  /// 上整个分组界面本来就是隐藏的，看不见也就不会误导。
-  void _flushPendingProject(String sessionId) {
-    final projectId = _pendingProjectAssignment.remove(sessionId);
-    if (projectId == null) return;
-    unawaited(() async {
-      try {
-        final updated = await _api.moveSessionToProject(sessionId, projectId);
-        if (!ref.mounted) return;
-        _replaceSession(
-          sessionId,
-          (s) => updated.copyWith(isLocalDraft: s.isLocalDraft),
-        );
-      } on Object {
-        // 见上：本地状态已经是对的，这里没有别的可做
-      }
-    }());
+  /// # 为什么不能等第一轮跑完
+  ///
+  /// 沙箱容器与工作区卷按「owner + 项目」分（服务端 `DelegatedScope::key`）。
+  /// 服务端是在**收到 /chat 的那一刻**去库里读这个会话属于哪个项目的 ——
+  /// 那时项目还没补上的话，这一轮就落进**未分组**那个容器，而它是所有
+  /// 没分组会话共用的。
+  ///
+  /// 真机上就是这么表现的：新建项目、发第一句、让它写个文件，文件进了默认
+  /// 沙箱；第二轮起才进项目沙箱，于是**第一轮写的东西再也看不见**。
+  /// 生产上留下的证据是同一个 owner 名下并排两套容器与两个卷。
+  ///
+  /// 这与紧邻的 [`_ensureLocalWorkspace`] 是同一条道理，它的注释写着
+  /// 「等 turn 造好再绑就晚了」—— 项目也一样晚。
+  ///
+  /// # 原来的理由（「服务端现在才确实有这一行会话」）是错的
+  ///
+  /// `PATCH /sessions/{id}` **不要求会话已经存在**：它只是往事件流里追加
+  /// 一条，状态行随之物化。实测对一个从未出现过的 id PATCH 回 200，
+  /// 响应里带着 `project_id`。404 的是 `GET`（它要有消息才有 transcript），
+  /// 两者被混为一谈了。
+  ///
+  /// # 失败就不发这一轮
+  ///
+  /// 与 [`_ensureLocalWorkspace`] 同样的取舍：分组没存上就发出去，等于把
+  /// 文件写进一个用户没打算用的工作区 —— 而那件事**没有任何提示**，
+  /// 等他发现时东西已经在另一个卷里了。宁可当场说「没发出去，再试一次」。
+  Future<bool> _flushPendingProject(String sessionId) async {
+    final projectId = _pendingProjectAssignment[sessionId];
+    if (projectId == null) return true;
+    try {
+      final updated = await _api.moveSessionToProject(sessionId, projectId);
+      _pendingProjectAssignment.remove(sessionId);
+      if (!ref.mounted) return false;
+      _replaceSession(
+        sessionId,
+        (s) => updated.copyWith(isLocalDraft: s.isLocalDraft),
+      );
+      return true;
+    } on Object catch (e) {
+      if (!ref.mounted) return false;
+      state = state.copyWith(
+        sendError:
+            '这个会话还没归到项目里，先发消息会让文件落进默认工作区。'
+            '请再试一次（$e）',
+      );
+      return false;
+    }
   }
 
   /// Binds a workspace. The daemon validates the path and its rejection message
@@ -747,6 +776,9 @@ class ChatController extends Notifier<ChatState> {
     // 绑定」分流，等 turn 造好再绑就晚了，那一轮已经送去云端了
     if (!await _ensureLocalWorkspace(sessionId)) return;
     if (!ref.mounted) return;
+    // 同上：项目决定沙箱容器与工作区卷，服务端在收到 /chat 那一刻就要读到它
+    if (!await _flushPendingProject(sessionId)) return;
+    if (!ref.mounted) return;
 
     final userMessage = ChatMessage(
       id: Ulid.generate(),
@@ -904,9 +936,6 @@ class ChatController extends Notifier<ChatState> {
     );
     _appendMessage(turn.sessionId, message);
     _touchSession(turn.sessionId);
-    // 这一轮跑通了，服务端现在才**确实**有这一行会话，PATCH 才有东西可打。
-    // 出错的那一轮不补：服务端可能根本没写下这个会话，补过去只是一个 404
-    if (error == null) _flushPendingProject(turn.sessionId);
   }
 
   /// User-initiated abort. Keeps whatever text already arrived.
