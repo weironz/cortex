@@ -248,6 +248,24 @@ services:
       CORTEX_SECRET_KEY: ${CORTEX_SECRET_KEY:-}
       # 每人每月的 token 上限。0 = 不限
       CORTEX_QUOTA_TOKENS_PER_MONTH: ${CORTEX_QUOTA_TOKENS_PER_MONTH:-}
+      # 对象存储：附件的字节落在这里。
+      #
+      # **这几行 0.1.10 之前一直不在**，于是生产上的 `/api/sandbox/health`
+      # 一直答 `blobs: disabled` —— 附件功能从 agentd 接手起就没通过，而它
+      # 不报错，只是上传时说「这个部署没有接对象存储」。
+      #
+      # ⚠️ 端点写 `cortex-rustfs` 而不是 `rustfs`：rustfs 那个容器在
+      # traefik-network 上同时叫这两个名字，而 **mica 的那台也叫 `rustfs`**
+      # —— 在那张网上按 `rustfs` 解析等于抛硬币，一半的时候把附件写进
+      # 别的产品的桶里。用带前缀的那个别名，它是唯一的。
+      #
+      # 走 traefik-network 是因为那是 agentd 与它唯一共有的网络：rustfs
+      # 属于 cormex 那个 compose 项目（它先于拆分存在），不在 cortex_default 上。
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://cortex-rustfs:9000}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-}
       RUST_LOG: ${AGENTD_LOG:-cortex_agentd=info,warn}
     volumes:
       # 起沙箱要 docker API。**这是把宿主 root 交给它** —— 论证的另一半是
