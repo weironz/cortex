@@ -194,6 +194,11 @@ services:
       # 曾经是 dev 与生产各写一套配置的根源，也是「所有健康检查都说好，
       # 只有真发一轮对话才炸」那个坑的来源。
       CORTEX_SANDBOX_CALLBACK: ${CORTEX_SANDBOX_CALLBACK:-http://agentd:8081}
+      # 反向中继地址。同网段（上面那行 =1）时用不上，所以两份 compose
+      # 里都长期缺席 —— 直到那道闸问「代码读了它，你怎么设它」。
+      # 留个口子的成本是一行；缺它的成本是 SAME_NETWORK=0 那种拓扑
+      # 下没有任何办法改地址，而症状是沙箱起来了但回调打不通。
+      CORTEX_SANDBOX_RELAY: ${CORTEX_SANDBOX_RELAY:-}
       CORTEX_SANDBOX_SAME_NETWORK: "1"
       # 沙箱镜像来自 registry，不是开发机上那个 `cortex/sandbox:dev`。
       # **漏了这一条不会启动失败**，只会在日志里印着 dev 那个名字，
@@ -247,6 +252,15 @@ services:
       # （`/settings/llm-key` 明说不支持，而不是假装存下了）
       CORTEX_SECRET_KEY: ${CORTEX_SECRET_KEY:-}
       # 每人每月的 token 上限。0 = 不限
+      # 第一个账号。**这是「只有 compose、没有 shell」的人唯一的建号入口** ——
+      # 代码里 `ensure_admin` 从 0.1.10 起就在开始监听之前跑，而这两行
+      # 直到 0.1.10 上线才被透进容器：在那之前它只存在于 `.env.example`
+      # 和文档里，也就是那条路对它面向的人从来没通过。
+      #
+      # 只建号，**不改密码**：账号已存在时跳过。所以改口令要走别的路，
+      # 而不是改这里再重启（那样什么都不会发生，且没有任何提示）。
+      CORTEX_ADMIN_USERNAME: ${CORTEX_ADMIN_USERNAME:-}
+      CORTEX_ADMIN_PASSWORD: ${CORTEX_ADMIN_PASSWORD:-}
       CORTEX_QUOTA_TOKENS_PER_MONTH: ${CORTEX_QUOTA_TOKENS_PER_MONTH:-}
       # 对象存储：附件的字节落在这里。
       #

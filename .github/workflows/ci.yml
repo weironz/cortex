@@ -164,6 +164,19 @@ jobs:
           # 要到 workflow_dispatch 之后才在节点上暴露
           docker compose -f deploy/docker-compose.yml config -q
 
+      - name: 代码读的环境变量，compose 都设得了
+        # 「造好了没人调用」在部署这一层的样子：代码认真读一个变量、
+        # `.env.example` 认真列着、文档认真写了怎么配 —— 而 compose 根本没把
+        # 它透进容器。那个功能于是对**它面向的所有用户**都不存在，且不报错。
+        #
+        # 2026-08-17 一天之内碰到两个：`S3_*`（附件从 agentd 接手起就没在
+        # 生产上通过，`/health` 一直答 blobs: disabled）与 `CORTEX_ADMIN_*`
+        # （「只有 compose、没有 shell 的人怎么建第一个账号」，代码写好了而
+        # 那两行不在 compose 里）。两次都是靠人肉比对发现的。
+        run: |
+          bash scripts/check-compose-env.sh deploy/docker-compose.yml
+          bash scripts/check-compose-env.sh docker-compose.dev.yml
+
   # ── 测试 ───────────────────────────────────────────────
   test:
     name: 测试
