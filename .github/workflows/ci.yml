@@ -305,7 +305,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # 与发版那个 build 作业共用一份缓存（见 release.yml 里那段长注释）。
+      # **这一份是发版唯一可能命中的来源** —— tag 读不到别的 tag 的缓存，
+      # 只读得到默认分支的，所以这里存下来的东西就是那 28 分钟冷编译的解药。
+      #
+      # 键里仍然带平台（`Linux-x64` / `Windows-x64`…），三个 os 不会互相覆盖。
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.os == 'windows-latest' && 'x86_64-pc-windows-msvc' || matrix.os }}
 
       - name: cargo build --release
         run: cargo build --workspace --release

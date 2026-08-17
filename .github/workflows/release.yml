@@ -118,9 +118,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # `shared-key` 而不是 `key`：前者**替换**掉键里那段 `github.job`，
+      # 后者只是再加一段。而「加一段」解决不了这里的问题 —— 发版这个作业
+      # 叫 `build`、CI 那个也叫 `build`，但它们此前分别带着 `release-<target>`
+      # 与什么都不带，于是两条永不相交。
+      #
+      # 为什么非要相交：**tag 那次运行读不到上一个 tag 的缓存**。GitHub 只让
+      # 一次运行读「本 ref 的 + 默认分支的」，而两个 tag 是兄弟 ref ——
+      # v0.1.10 存下的东西 v0.1.11 永远看不见。实测就是 `No cache found.`，
+      # 于是 Windows 那两个作业每次发版都从零编（14.4 + 13.4 分钟）。
+      #
+      # 唯一能命中的来源因此只剩 **main 上 CI 存的那份**，而要命中就得让键
+      # 对得上。发版会改版本号 → Cargo.lock 变 → 键末尾那段哈希不同，
+      # 但 rust-cache 的 restore-keys 会按前缀回落到最近一份 ——
+      # 于是那几百个第三方依赖仍然是热的，只有 workspace 自己的几个重编。
+      # 这一点与 docker 的层缓存不同：那边是整层全有或全无。
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          shared-key: ${{ matrix.target }}
 
       # cortex-local 是 0.1.2 加的第三个二进制：agent 循环与工具跑在
       # **用户这台机器上**。CLI 用户同样需要它 —— 没有它，`cortex` 连上
@@ -196,6 +211,17 @@ jobs:
         with:
           channel: stable
           cache: true
+
+      # 这个作业**此前一点 cargo 缓存都没有**，而它要编 `cortex-local`
+      # （打包脚本会把它放进安装包 —— 没有它，装完的桌面端是个没有 agent
+      # 的壳）。13.4 分钟里绝大部分是那次从零开始的编译。
+      #
+      # 与上面那个 build 作业共用同一份：两者都是 windows-latest 上的
+      # release 编译，依赖树几乎完全重合。
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: x86_64-pc-windows-msvc
 
       # InnoSetup 在当前 windows runner 镜像里是预装的（6.7.x）。
       # 它曾经在 windows-2025 镜像里缺席过大半年（actions/runner-images#11349
