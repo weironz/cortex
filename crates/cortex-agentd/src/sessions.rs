@@ -447,7 +447,6 @@ pub fn episode_dto(e: cortex_store::Episode, replay: Replay) -> EpisodeDto {
         occurred_at: e.occurred_at.to_rfc3339(),
         attachments: replay.attachments,
         // 恒空。见模块头 —— 这是归因，属于记忆那一侧
-        memories: Vec::new(),
         tool_calls: replay.tool_calls,
     }
 }

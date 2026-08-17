@@ -107,8 +107,8 @@ impl Plan {
             for (u, a) in pairs {
                 // 与服务端拼给模型的那一段同构（`用户：…\n助手：…`），
                 // 所以这个数字是「真的会被送进去的量」，不是文件大小
-                e.tokens += cortex_core::injection::estimate_tokens(&u.text)
-                    + cortex_core::injection::estimate_tokens(&a.text);
+                e.tokens += cortex_core::tokens::estimate_tokens(&u.text)
+                    + cortex_core::tokens::estimate_tokens(&a.text);
             }
             for m in &c.messages {
                 e.earliest = Some(e.earliest.map_or(m.at, |x: DateTime<Utc>| x.min(m.at)));
@@ -402,7 +402,6 @@ mod tests {
             Ok(EpisodeAck {
                 episode_id: req.id.clone(),
                 already_existed: false,
-                memories: Vec::new(),
             })
         }
         async fn rename_session(&self, session_id: &str, _title: &str) -> Result<()> {

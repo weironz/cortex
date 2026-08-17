@@ -352,8 +352,7 @@ async fn issue_ticket(State(st): State<AgentState>, headers: HeaderMap) -> Json<
 /// [`crate::runner::SandboxRunner::callback_visible`] —— 现在问的是 docker
 /// 「那个容器在不在沙箱那张网上」，也就是故障本身，而不是它的相关量。
 async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
-    let (reachable, callback_visible) =
-        tokio::join!(st.remote().is_reachable(), st.runner().callback_visible());
+    let callback_visible = st.runner().callback_visible().await;
 
     // ── 自己那个库 ────────────────────────────────────────
     //
@@ -373,8 +372,6 @@ async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
         "status": "ok",
         "version": cortex_core::VERSION,
         "role": "agent-orchestrator",
-        "memory": st.remote().base(),
-        "memory_reachable": reachable,
         "callback": st.runner().callback(),
         "callback_visible_to_sandbox": callback_visible,
         "database": database,
@@ -401,15 +398,6 @@ async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
 }
 
 // ─────────────────────────── 凭据与容器 ───────────────────────────
-
-/// 从请求里取出调用方的 bearer。**只取，不验。**
-pub fn bearer_of(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .filter(|t| !t.is_empty())
-}
 
 /// 这个会话的沙箱作用域：归谁、在哪个项目、该跑在哪儿。
 ///
@@ -1033,7 +1021,6 @@ mod tests {
         let st = AgentState::new(
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
-            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
             // 不接库。账号端点在没有它时回 501 —— 而这一组断言只问
             // 「是不是 401」，501 与 401 不是一回事，断言照样成立
             None,
@@ -1451,7 +1438,6 @@ mod tests {
         let st = AgentState::new(
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
-            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
             // 这一组用例不碰库，也就没有账号体系，也不配模型
             None,
             None,
@@ -1505,7 +1491,6 @@ mod tests {
         let st = AgentState::new(
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
-            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
             // 这一组用例不碰库，也就没有账号体系，也不配模型
             None,
             None,
@@ -1542,8 +1527,8 @@ mod tests {
             "替身明说看不见 —— 报 true 说明这个字段根本没问 runner"
         );
         assert!(
-            v.get("memory_reachable").is_some(),
-            "agentd 自己那条也得留着 —— 两条路坏的原因不同，合并会让排查从两步变成猜"
+            v.get("memory_reachable").is_none() && v.get("memory").is_none(),
+            "记忆 2026-08-17 整个去掉了 —— 健康里再报「记忆可达」就是一句谎，             而它恰好是运维最愿意相信的那一句"
         );
     }
 
@@ -1645,7 +1630,6 @@ mod tests {
         let st = AgentState::new(
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
-            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
             None,
             None,
             None,
@@ -1774,7 +1758,6 @@ mod tests {
         AgentState::new(
             std::sync::Arc::new(NeverRunning),
             reqwest::Client::new(),
-            crate::remote::Remote::new("http://127.0.0.1:1", reqwest::Client::new()),
             None,
             None,
             None,

@@ -98,13 +98,7 @@ pub async fn write(
         ));
     }
     let tenant = st.tenant(&headers).await?;
-    let ack = write_one(
-        &st,
-        tenant.store()?,
-        crate::routes::bearer_of(&headers),
-        &req,
-    )
-    .await?;
+    let ack = write_one(tenant.store()?, &req).await?;
     Ok(Json(ack))
 }
 
@@ -116,45 +110,32 @@ pub async fn write(
 /// 让它绕回自己的 HTTP 面，等于为了复用一段逻辑而多跑一次序列化、一次
 /// 回环、一次认证 —— 而那三样都可能以别的方式失败。
 ///
-/// 更要紧的是**别写第二份**：这里有幂等判重、有「转发失败不算失败」的取舍。
-/// 抄一份过去的话，漂开的那天表现为「导入进来的对话和聊出来的对话，在
-/// 记忆服务挂掉时行为不一样」。
+/// 更要紧的是**别写第二份**：这里有幂等判重。抄一份过去的话，漂开的那天
+/// 表现为「导入进来的对话和聊出来的对话，落库行为不一样」。
+///
+/// 这里曾经还有第二步：把这一轮转发给记忆服务做抽取，并把召回结果随
+/// 响应带回。2026-08-17 连同长期记忆一起去掉了 —— 生产上那一步每轮都被
+/// 回 401，日志里一行 WARN，而用户完全看不出来。
 pub(crate) async fn write_one(
-    st: &AgentState,
     store: &cortex_store::Store,
-    bearer: Option<&str>,
     req: &NewEpisodeRequest,
 ) -> Result<EpisodeAck, ApiError> {
-    // ── 第 1 步：落自己的库。**只有这一步失败才算请求失败** ──
     if persist(store, req).await? {
         tracing::debug!(episode = %req.id, "这条 episode 已经写过，本次是空操作");
-        // 重放不再转发一次：那边的抽取是按 episode 触发的，重复投递会让
-        // 同一轮被抽两遍（它自己也判重，但那是白花一次 LLM 调用）
         return Ok(EpisodeAck {
             episode_id: req.id.clone(),
-            memories: Vec::new(),
             already_existed: true,
         });
     }
 
-    // ── 第 2 步：尽力转发。失败只是「这一轮没有记忆命中」 ──
-    //
-    // 同步等而不是 spawn：召回的结果**这一轮就要用**（它是响应体的一半）。
-    // 而且攒着异步发会破坏那边靠 advisory lock 撑起来的提交顺序，
-    // 见 CLAUDE.md 的第一条不可违反约束
-    let memories = st.remote().forward_episode(bearer, req).await;
-
     Ok(EpisodeAck {
         episode_id: req.id.clone(),
-        memories,
         already_existed: false,
     })
 }
 
 /// `GET /episodes/{id}` —— 单条消息连同它的附件与工具轨迹。
 ///
-/// `memories` 恒空，理由与 [`crate::sessions`] 模块头里那段相同：
-/// 归因（「这一轮模型看见了哪几条记忆」）问的是记忆能力本身，属于那一侧。
 pub async fn get(
     State(st): State<AgentState>,
     headers: HeaderMap,

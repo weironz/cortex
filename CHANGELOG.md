@@ -10,6 +10,56 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ---
 
+## [未发布]
+
+### ⚠️ 拿掉了长期记忆
+
+**Cortex 不再有长期记忆。** 系统提示词不再提它，工具目录里没有
+`memory_search`，`/episodes` 不再转发给记忆服务，健康里不再报
+`memory_reachable`，CLI 的 `cortex search` 与 `--no-memory` 一并去掉。
+
+为什么：0.1.9 把记忆拆成独立产品（Cormex），0.1.10 把身份搬进 Cortex ——
+于是用户手上那把 bearer 是 agentd 签的，而记忆服务不认识它。结果是那条路
+**三段全断**：
+
+- 每一轮转发都被回 **401**，日志里一行 WARN，用户毫无察觉
+- 召回同一条路，同样 401 —— 「本轮不注入记忆」
+- `memory_search` 工具打的是 agentd 的 `/memory/search`，而那条路由**不存在**
+  （404），委托令牌的白名单里也明确没有它
+
+而系统提示词写着「你是 Cortex，一个**有长期记忆**的通用 AI 助理…也可以
+检索长期记忆」。于是模型照着它承诺：对一句 hello 答「我可以帮你读写工作区
+里的文件、执行命令、**检索记忆**等」。生产上核过：Cormex 库里最新的
+episode 停在 2026-08-13，而当天的对话只落进了 Cortex 自己的库。
+
+**留一个必然失败的能力，比没有这个能力更糟** —— 它不报错，只是让 agent
+替你撒谎。要接回来，先解决那条认证，再把提示词、工具、注入三处一起加回去。
+
+对话历史**不受影响**：那是会话，不是记忆，一直在 Cortex 自己的库里。
+
+顺带清掉的死重量：`cortex-agentd` 的 `Remote` 客户端与 `CORTEX_MEMORY_URL`、
+`cortex-core` 的 `injection` 模块（唯一还有用户的 token 估算搬进了
+`cortex_core::tokens`）、proto 的 `FactDto` / `MemorySearch*` / `ChatEvent::Memory`
+/ `EpisodeAck.memories`。本地 agent 健康里的 `memory` 字段改叫 `server` ——
+它一直指的是上游服务端，叫 `memory` 会让健康页写着「记忆：已连接」。
+
+### 修复：线上除了聊天和沙箱，整个应用都在打记忆服务
+
+边缘只把 `/api/chat` 与 `/api/sandbox` 转给 agentd，而 0.1.10 把身份、会话、
+项目、同步、附件全搬了过来。症状是登录时回一句英文
+「this deployment has no database attached」—— 那是记忆服务在答
+`/api/auth/login`。
+
+规则反过来写了：默认给 agentd，把记忆那一侧指名让出去。
+
+### 新增：第一个账号可以在 compose 里定义
+
+`CORTEX_ADMIN_USERNAME` / `CORTEX_ADMIN_PASSWORD` 的代码 0.1.10 就有，但两份
+compose 都没把它们透进容器 —— 也就是说这条路对它面向的那类人（只有 compose、
+没有 shell）从来没通过。只建号，不改密码。
+
+---
+
 ## [0.1.10] - 2026-08-17
 
 拆分（0.1.9）之后真正把云端那一半跑通的两天。**自托管的人有两条必读的

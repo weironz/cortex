@@ -105,25 +105,17 @@ pub struct Health {
     /// 工具沙箱一句话。**只有本地 agent 有** —— 服务端那侧由启动日志承担。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<String>,
-    /// 记忆连不连得上、积压多少。**只有本地 agent 有**。
+    /// 上游服务端连不连得上、离线队列积压多少。**只有本地 agent 有**。
+    ///
+    /// 这个字段以前叫 `memory`，因为那时本地 agent 的上游就是记忆服务。
+    /// 会话搬进 Cortex 自己的库、记忆整个去掉之后，它指的是 **agentd** ——
+    /// 名字不改的话，健康页上会写着「记忆：已连接」，而这个部署根本没有记忆。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory: Option<MemoryHealth>,
+    pub server: Option<ServerHealth>,
 }
 
 fn role_cortexd() -> String {
     "cortexd".into()
-}
-
-/// 本地 agent 与远端记忆库的连接状态。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryHealth {
-    /// 远端 cortexd 的地址
-    pub remote: String,
-    /// 名字用 reachable 而不是 ok：后者会让人以为记忆库本身健康，
-    /// 而这里只探到了它活着
-    pub reachable: bool,
-    /// 还有多少条 episode 等着补写
-    pub backlog: u64,
 }
 
 /// `/health` 里的向量化一节。
@@ -292,9 +284,6 @@ pub struct AttachmentDto {
 pub enum ChatEvent {
     /// 增量文本。客户端应追加而非替换，否则会闪烁重排。
     Delta { text: String },
-    /// 本轮注入了哪些记忆 —— 这是「可审计」在 UI 上的落点，
-    /// 让用户能看到 agent 凭什么这么答。
-    Memory { facts: Vec<FactDto> },
     /// 工具调用（编码场景）
     Tool {
         name: String,
@@ -444,126 +433,6 @@ pub struct TicketResponse {
 
 // ─────────────────────────── 记忆相关 ───────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FactDto {
-    pub id: String,
-    pub statement: String,
-    pub predicate: Option<String>,
-    pub domain: Option<String>,
-    pub confidence: f32,
-    /// 事件时间：这件事在真实世界何时开始为真
-    pub valid_at: Option<String>,
-    /// 系统时间：Cortex 何时知道
-    pub created_at: String,
-    /// 这条事实**此刻**已经被推翻了。
-    ///
-    /// # 为什么是加一个标记，而不是干脆不返回失效的事实
-    ///
-    /// 「日常检索不返回失效事实」这件事**已经**是现状了：四路召回全部查
-    /// `active_facts` 视图，所以不带 `as_of` 的检索里这个字段恒为 `false`。
-    ///
-    /// 真正有内容的是**回放**（`?as_of=`）：那条路故意回到
-    /// `facts` + `fact_events` 重放当时的快照，返回的正是「我三个月前以为
-    /// 是真的、后来被推翻了」的东西 —— 这是本项目的卖点，把它们过滤掉等于
-    /// 把回放变成一个只会重复现状的功能。但只返回不标记同样不对：用户看到
-    /// 一条已经不成立的结论，界面上却和现行结论长得一模一样。
-    ///
-    /// 所以两条路都不选「过滤」，选「照样给，但说清楚」——
-    /// 与 [`InjectedMemoryDto::invalidated`] 的口径一致，那边的注释里
-    /// 也写着同一句话。这个不对称正是客户端报上来的问题。
-    ///
-    /// 老客户端忽略这个字段即可；`#[serde(default)]` 让它在反序列化时
-    /// 也不构成破坏性变更。
-    #[serde(default)]
-    pub invalidated: bool,
-    /// 出处 —— 点开可看到产生这条记忆的原始对话
-    pub source_episode_id: Option<String>,
-    /// 来源通道：`user_stated` / `conversation` / `derived` / `tool_output` /
-    /// `external` / `unknown_legacy`。
-    ///
-    /// # 为什么这条要下发到客户端
-    ///
-    /// 「用户亲口说的」和「模型从对话里推断的」在抽屉上长得一模一样，
-    /// 是这个产品最不该有的含糊：**「为什么记得这个」正是它的卖点**，
-    /// 而一条推断出来的事实与一条亲述的事实，用户对它们的信任本就不同。
-    ///
-    /// 这一列从 migration 20260807000006 起就在写了，只是一直没人读得到。
-    ///
-    /// 老客户端忽略即可；`#[serde(default)]` 让它不构成破坏性变更。
-    #[serde(default)]
-    pub source_channel: Option<String>,
-    /// 来源信任级，1 最高。与 [`Self::source_channel`] 的对应关系由 schema 的
-    /// `facts_trust_tier_matches_channel` 锁死。
-    ///
-    /// 单独下发而不是让客户端按通道名自己算：那等于把映射抄第三遍
-    /// （Rust 一份、SQL 一份、Dart 一份），而第三份没有任何东西约束它。
-    ///
-    /// `None` 只可能是加列之前的存量行（`unknown_legacy`）。
-    #[serde(default)]
-    pub trust_tier: Option<i16>,
-}
-
-impl FactDto {
-    /// 转成注入渲染要的那个形状。
-    ///
-    /// # 为什么长在这儿
-    ///
-    /// 拿到 `FactDto` 之后要渲染成给模型看的文本，这件事有三个地方要做：
-    /// 本地 agent（`cortex-local::turn`）、cortexd 的 mock 后端、以及对外的
-    /// MCP server。此前只有第一处，它自己抄了一份字段搬运。
-    ///
-    /// 抄第二份的代价不是重复本身，是**漏字段不报错**：`FactDto` 加一个
-    /// 参与渲染的字段（`trust_tier` 就是这么加进来的），漏掉的那一份只是
-    /// 少渲染一点东西，编译照过、测试照绿，而症状是「同一条事实经过不同的路
-    /// 长得不一样」。
-    ///
-    /// 放在 `cortex-proto` 而不是 `cortex-core`：方向是 proto → core
-    /// （proto 已经依赖 core），反过来会让 core 认识 HTTP 契约。
-    #[must_use]
-    pub fn to_memory_item(&self) -> cortex_core::injection::MemoryItem {
-        cortex_core::injection::MemoryItem {
-            id: self.id.clone(),
-            statement: self.statement.clone(),
-            valid_at: self.valid_at.clone(),
-            known_since: self.created_at.clone(),
-            source_episode_id: self.source_episode_id.clone(),
-            domain: self.domain.clone(),
-            predicate: self.predicate.clone(),
-            confidence: Some(self.confidence),
-            source_channel: self.source_channel.clone(),
-            trust_tier: self.trust_tier,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MemorySearchQuery {
-    pub q: String,
-    #[serde(default = "default_limit")]
-    pub limit: i64,
-    /// 按系统时间回放：「三个月前我以为什么」。
-    /// 留空则查当前有效事实。
-    pub as_of: Option<String>,
-}
-
-fn default_limit() -> i64 {
-    20
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MemorySearchResponse {
-    pub facts: Vec<FactDto>,
-    /// 各条命中了哪几路召回，供调试与可观测
-    pub channels: Vec<ChannelHit>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ChannelHit {
-    pub fact_id: String,
-    pub channels: Vec<String>,
-    pub score: f64,
-}
-
 // ────────────────────────── episodes ───────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -577,41 +446,9 @@ pub struct EpisodeDto {
     /// 与「这个版本的服务端不给附件」。
     #[serde(default)]
     pub attachments: Vec<AttachmentDto>,
-    /// 这一轮注入了哪些记忆 —— 「为什么记得这个」抽屉的内容。
-    ///
-    /// 挂在 **user** 那条消息上（一轮对话的锚点，assistant 那条在模型出错时
-    /// 不落库）。客户端把抽屉画在哪个气泡上由它自己决定。
-    ///
-    /// 绝大多数消息没有内容，因此空时整个字段省略而不是给个空数组：
-    /// 一个几百条消息的会话，多出几百个 `"memories":[]` 是纯浪费。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub memories: Vec<InjectedMemoryDto>,
     /// 这一轮调用了哪些工具。省略规则同上。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallDto>,
-}
-
-/// 回放时看到的一条注入记忆。
-///
-/// 服务端只存了 `fact_id`，这里的正文是查库查出来的**现状**：
-/// 一条事实被 redact 之后抽屉里跟着变成占位符，不需要另外再清一遍。
-/// 代价是失去逐字保真 —— 但事实的 statement 本身是 append-only 的，
-/// 「现状」与「当时」只在被 redact 时才不同，而那正是我们希望它不同的场合。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InjectedMemoryDto {
-    pub fact_id: String,
-    /// `null` = 这条事实的行已经不在了。界面应显示「引用了一条已不可见的
-    /// 记忆」，而不是把这一项整个藏掉 —— 藏掉就是篡改回放。
-    pub statement: Option<String>,
-    pub domain: Option<String>,
-    /// 命中它的召回路（bm25 / vector / graph / episode …）
-    pub channels: Vec<String>,
-    pub score: Option<f64>,
-    /// 注入之后这条事实已被失效。**照样返回** ——
-    /// 「当时依据的这条现在已经不成立了」是审计最想看到的信息。
-    pub invalidated: bool,
-    /// 出处 —— 点开可看到产生这条记忆的原始对话
-    pub source_episode_id: Option<String>,
 }
 
 /// 回放时看到的一次工具调用。
@@ -1187,4 +1024,15 @@ mod permission_mode_tests {
             assert_eq!(PermissionMode::from_str(m.as_str()).unwrap(), m);
         }
     }
+}
+
+/// 本地 agent 与它的上游服务端之间那条线。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerHealth {
+    /// 上游地址（`--remote`）。
+    pub remote: String,
+    /// 刚才那次探活通没通。
+    pub reachable: bool,
+    /// 离线队列里还压着多少条没刷出去。
+    pub backlog: u64,
 }

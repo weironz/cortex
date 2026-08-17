@@ -10,7 +10,6 @@
 //!
 //! 凭用户自己那把 bearer —— 客户端刚发过来的那一把，原样带给 cortexd 去换
 //! 一把**绑在这个会话上的委托凭据**。所以这里没有服务密钥，也没有一份自己的
-//! 认证逻辑：cortexd 的回答就是认证结果。见 [`remote`]。
 //!
 //! # 为什么它与记忆服务分成两个进程
 //!
@@ -41,7 +40,6 @@ mod projects;
 mod quota;
 mod rate_limit;
 mod reaper;
-mod remote;
 mod request_tenant;
 mod routes;
 mod runner;
@@ -61,7 +59,6 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use clap::Parser;
 
-use crate::remote::Remote;
 use crate::state::AgentState;
 
 #[derive(Parser, Debug)]
@@ -74,14 +71,6 @@ struct Args {
     /// 而绑回环会让同 compose 网络里的 nginx 根本连不上它。
     #[arg(long, env = "CORTEX_AGENTD_BIND", default_value = "0.0.0.0:8081")]
     bind: String,
-
-    /// 记忆服务在哪儿。委托凭据与 blob 问它。
-    ///
-    /// **快照索引 2026-08-16 起不在这条路上了** —— 那张表跟着库搬进了本进程
-    /// （`crate::snapshot_index`）。blob 是下一个：对象存储搬过来之后，
-    /// 这条地址剩下的用途只有委托凭据。
-    #[arg(long, env = "CORTEX_MEMORY_URL", default_value = "http://cortexd:8080")]
-    memory: String,
 
     /// **Cortex 自己的库**。会话、消息、附件、同步流水都在这儿。
     ///
@@ -296,14 +285,10 @@ async fn main() -> anyhow::Result<()> {
     let runner = runner::DockerRunner::connect(&callback, same_network, &args.relay)
         .context("连不上 docker")?;
     runner.preflight().await.context("docker 预检没过")?;
-    tracing::info!(memory = %args.memory, callback = %callback, "docker 就绪");
+    tracing::info!(callback = %callback, "docker 就绪");
 
+    // 反代进容器的客户端。**刻意不设全局超时** —— 一轮对话想几分钟是常态。
     let http = sandbox_proxy::client().context("建反代客户端失败")?;
-    // 打 cortexd 的客户端与反代进容器的那个**分开**：后者刻意不设全局超时
-    // （一轮对话想几分钟是常态），而前者的每一条都该快失败。
-    let to_memory = reqwest::Client::builder()
-        .build()
-        .context("建记忆服务客户端失败")?;
     // ── Cortex 自己的库 ────────────────────────────────────
     //
     // **连不上就退出，不静默降级。** cortexd 曾经在连不上数据库时悄悄回落
@@ -414,16 +399,7 @@ async fn main() -> anyhow::Result<()> {
     let auth = auth::AuthMode::from_env().context("认证配置不合法")?;
     tracing::info!("{}", auth.status_line());
 
-    let state = AgentState::new(
-        Arc::new(runner),
-        http,
-        Remote::new(&args.memory, to_memory),
-        store,
-        accounts,
-        llm,
-        auth,
-        blobs,
-    );
+    let state = AgentState::new(Arc::new(runner), http, store, accounts, llm, auth, blobs);
 
     // 后台三件：回收闲置容器、盯 OOM、盯卷配额。
     // 快照那条定时任务**没有跟过来** —— 见下面那段

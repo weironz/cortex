@@ -58,17 +58,10 @@ class SandboxHealth {
     if (asString(json['role']) != _orchestratorRole) return absent;
     final version = asStringOrNull(json['version']);
 
-    // 下面两个字段是**服务端自己去打过**的结果，不是它的自我感觉
+    // 下面这个字段是**服务端自己去打过**的结果，不是它的自我感觉
     // （见 cortex-agentd 的 health handler）。缺字段一律当成通：
     // 老版本的编排服务不报它们，而据此宣布「跑不了」会把一个能用的部署
     // 说成坏的 —— 这个方向的误报比漏报贵得多。
-    if (json['memory_reachable'] == false) {
-      return SandboxHealth(
-        status: CloudChatStatus.blocked,
-        version: version,
-        reason: 'agent 编排服务够不着记忆服务，换不到委托凭据，因此起不了沙箱。',
-      );
-    }
     if (json['callback_visible_to_sandbox'] == false) {
       return SandboxHealth(
         status: CloudChatStatus.blocked,

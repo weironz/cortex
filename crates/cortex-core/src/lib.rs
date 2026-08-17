@@ -7,25 +7,24 @@
 //! 不透明块与 prompt caching 语义（见 docs/architecture.md「LLM 供应商」）。
 //! 自己再定义一层只会造成有损转换。
 //!
-//! # [`injection`] 为什么在这个「很薄」的 crate 里
+//! # 这里曾经有一个 `injection`
 //!
-//! 它本来在 `cortex-memory`，因为记忆注入是记忆引擎的出口。但 agent 循环
-//! 搬到本地之后，**两个独立发版的进程要渲染出逐字节相同的记忆块**：
-//! cortexd 给 Web 客户端渲染，本地 agent 给自己渲染。
+//! 那是把记忆渲染进上下文的一整套（框定语句、回合块、核心画像块、预算
+//! 截断）。它住在这个薄 crate 里，是为了让两个独立发版的进程渲染出**逐字节
+//! 相同**的记忆块 —— 端点只回结构化数据，格式漂移于是变成反序列化失败，
+//! 当场就炸，而不是模型悄悄收到一段结构不对的记忆。
 //!
-//! 让端点回渲染好的文本、由一侧渲染，看起来更省事，但那条路上格式漂移
-//! **不报错**——模型只是收到一段结构不对的记忆，效果悄悄变差，几周后
-//! 才从评测分上看出来。让两侧共享同一份代码、端点只回结构化数据，
-//! 漂移就变成 JSON 反序列化失败，当场就炸。
+//! 2026-08-17 长期记忆整个去掉了，那套东西随之无人调用。只有里面的
+//! token 估算还有真用户，搬进了 [`tokens`]。
 //!
-//! 放这里的前提是它真的没有依赖：整个模块只 `use std::fmt::Write`。
+//! 要找回来：`git log -- crates/cortex-core/src/injection.rs`。
 
 pub mod config;
 pub mod error;
 pub mod history;
 pub mod id;
-pub mod injection;
 pub mod state_dir;
+pub mod tokens;
 
 pub use config::Config;
 pub use error::{CortexError, Result};

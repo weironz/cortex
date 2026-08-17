@@ -4,7 +4,6 @@ import 'pending_confirmation.dart';
 /// One decoded frame of the `POST /chat` SSE stream.
 ///
 /// Wire contract (each SSE `data:` payload is one JSON object):
-/// * `{"type":"memory","facts":[{...}]}`
 /// * `{"type":"tool","name":"read_file","summary":"...","path":"src/main.rs"}`
 /// * `{"type":"delta","text":"..."}`
 /// * `{"type":"confirm","token":"...","tool":"shell","risk":"execute",
@@ -12,9 +11,9 @@ import 'pending_confirmation.dart';
 /// * `{"type":"done","episode_id":"01J..."}`
 /// * `{"type":"error","message":"..."}`
 ///
-/// Observed order from `cortexd`: `memory` → `tool` → N×`delta` → `done`.
-/// Nothing in the client depends on that order, though — `memory` and `tool`
-/// may interleave with `delta` once the agent loop does multi-step tool use.
+/// Observed order: `tool` → N×`delta` → `done`. Nothing in the client depends
+/// on that order, though — `tool` may interleave with `delta` once the agent
+/// loop does multi-step tool use.
 ///
 /// Unknown `type` values decode to [ChatUnknownEvent] rather than throwing, so
 /// a server that grows a new event type does not break older clients.
@@ -66,7 +65,6 @@ final class ChatDeltaEvent extends ChatEvent {
   final String text;
 }
 
-/// The memory facts injected into this turn's prompt.
 /// The agent invoked a tool. Rendered as a collapsible one-liner in the
 /// conversation, not as message content.
 final class ChatToolEvent extends ChatEvent {
@@ -75,8 +73,8 @@ final class ChatToolEvent extends ChatEvent {
   final String? summary;
 
   /// The file this call touched, or null for a tool that touches none.
-  /// Optional in the contract precisely so that `memory_search` can omit it
-  /// rather than send an empty string the UI would render as a path.
+  /// Optional in the contract precisely so that a tool touching no file can
+  /// omit it rather than send an empty string the UI would render as a path.
   final String? path;
 
   /// 这次写入改了什么。只随**结果**那条事件到达 —— 调用那一刻还没执行，

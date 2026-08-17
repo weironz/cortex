@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::dto::{AttachmentRef, FactDto};
+use crate::dto::AttachmentRef;
 
 /// 一次工具调用的归因 —— 上行方向。
 ///
@@ -93,11 +93,6 @@ pub struct NewEpisodeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpisodeAck {
     pub episode_id: String,
-    /// 这一轮该注入哪些记忆。`retrieve = false` 时为空。
-    ///
-    /// **不是渲染好的文本** —— 渲染在本地做，见模块注释。
-    #[serde(default)]
-    pub memories: Vec<FactDto>,
     /// 这个 id 之前就写过了，本次是空操作。
     ///
     /// 离线队列重放必然会重复投递（「服务端收下了」与「本地记下已刷出」

@@ -93,13 +93,4 @@ abstract final class SyncTables {
     'project_events',
     'summaries',
   };
-
-  /// Rows that change what the memory pane should show.
-  static const memory = {
-    'facts',
-    'fact_events',
-    'entities',
-    'entity_merges',
-    'redactions',
-  };
 }

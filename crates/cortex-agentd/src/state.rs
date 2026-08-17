@@ -12,7 +12,6 @@
 //! 于是这里有了两个句柄，分工必须分明：
 //!
 //! - [`Inner::store`] —— **Cortex 自己的库**。会话、消息、附件、同步流水。
-//! - [`Inner::remote`] —— **记忆服务**（Cormex）。抽取与召回，只有 HTTP。
 //!
 //! 混用它们的后果就是当初那个 bug 本身。
 
@@ -21,7 +20,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::auth::{AuthMode, TicketBook};
-use crate::remote::Remote;
 use crate::runner::SandboxRunner;
 
 /// 这个进程写会话 / 项目事件时盖的那个章（`device_id`）。
@@ -44,15 +42,13 @@ pub struct AgentState {
 
 struct Inner {
     runner: Arc<dyn SandboxRunner>,
-    /// 反代进容器用的客户端。与 [`Remote`] 里那个分开：这条打的是容器
-    /// （同网段、短超时），那条打的是 cortexd（可能跨机房）。
+    /// 反代进容器用的客户端：同网段、短超时。
     http: reqwest::Client,
-    remote: Remote,
     /// **Cortex 自己的持久层**：会话、消息、附件、同步流水。
     ///
-    /// 与 [`Remote`] 分工分明：那条打的是**记忆服务**（抽取与召回），
-    /// 这个是自己的库。会话曾经也在那边，而后果是「记忆服务挂了就没有产品」
-    /// —— 见 `cortex-store` 的 crate 文档。
+    /// 这个进程曾经还持有一个打记忆服务的客户端。2026-08-17 连同长期记忆
+    /// 一起去掉了 —— 会话早就搬进了这个库，而剩下那条抽取/召回的路在生产上
+    /// 每轮被回 401，见 `cortex-store` 的 crate 文档与 `episodes::write_one`。
     ///
     /// `None` = 这个部署还没给 `CORTEX_DATABASE_URL`。此时账号那一批端点
     /// 全部报 501 —— 假装能登录比明说不支持糟得多。
@@ -198,7 +194,6 @@ impl AgentState {
     pub fn new(
         runner: Arc<dyn SandboxRunner>,
         http: reqwest::Client,
-        remote: Remote,
         store: Option<cortex_store::Store>,
         accounts: Option<Accounts>,
         llm: Option<cortex_llm::LlmClient>,
@@ -211,7 +206,6 @@ impl AgentState {
             inner: Arc::new(Inner {
                 runner,
                 http,
-                remote,
                 store,
                 accounts,
                 llm,
@@ -340,11 +334,6 @@ impl AgentState {
     #[must_use]
     pub fn http(&self) -> &reqwest::Client {
         &self.inner.http
-    }
-
-    #[must_use]
-    pub fn remote(&self) -> &Remote {
-        &self.inner.remote
     }
 
     /// 记一次「这个作用域刚被用过」。

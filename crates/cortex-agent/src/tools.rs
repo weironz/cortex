@@ -523,24 +523,6 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             path_arg: None,
             source: ToolSource::Builtin,
         },
-        ToolSpec {
-            name: "memory_search".into(),
-            description: "在长期记忆中检索。当用户提到过去的决定、偏好或对话时使用".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string" },
-                    "as_of": {
-                        "type": "string",
-                        "description": "可选。按系统时间回放：查询在该时刻已知的事实（RFC3339）"
-                    }
-                },
-                "required": ["query"]
-            }),
-            risk: Risk::Safe,
-            path_arg: None,
-            source: ToolSource::Builtin,
-        },
     ]
 }
 
@@ -576,8 +558,9 @@ pub fn to_llm_tools(specs: &[ToolSpec]) -> Vec<Tool> {
 
 /// 执行一个内置工具。
 ///
-/// `memory_search` 不在这里执行 —— 它需要访问存储层，由 agent 循环
-/// 在更外层拦截分派。放在目录里是为了让模型看得见它。
+/// **这里就是全部的内置工具。** 2026-08-17 之前还有一个 `memory_search`
+/// 由 agent 循环在更外层拦截分派，那条路连同长期记忆一起去掉了 ——
+/// 理由见 `Turn` 的模块头。
 pub async fn execute(sandbox: &Sandbox, call: &ToolCall) -> ToolResult {
     match call.name.as_str() {
         "read_file" => match arg_str(&call.arguments, "path") {
@@ -1413,7 +1396,6 @@ mod tests {
             None,
             "shell 要碰的路径藏在命令文本里。声明一个 path_arg 会让越界确认             只覆盖到那一个参数，而命令里其余路径静默通过 —— 比不覆盖更糟，             因为它看起来是覆盖了的"
         );
-        assert_eq!(by("memory_search").path_arg, None);
     }
 
     /// **规格表与分发表不许漂开。**
@@ -1430,14 +1412,14 @@ mod tests {
     /// 后面，所以先不动结构 —— 但**风险是真的**，这条测试把它钉住：
     /// 每个规格都得有人执行，每个执行臂也都得有对应的规格。
     ///
-    /// `memory_search` 是唯一的例外，而它是**有意**的：那个工具要访问存储层，
-    /// 由 agent 循环在更外层拦截分派（见 `execute` 的文档）。例外写死在这里，
-    /// 于是「又多了一个不在 execute 里的工具」会让这条测试红，
-    /// 而不是悄悄变成第二个特例。
+    /// **例外表现在是空的。** 唯一的例外曾经是 `memory_search`（它要访问存储
+    /// 层，由 agent 循环在更外层拦截分派），2026-08-17 连同长期记忆一起去掉了。
+    /// 表留着而不是删掉：下一个要开例外的人得往里加一行并写清楚为什么，
+    /// 而不是在 `dispatch_once` 里默默多一条 `else if`。
     #[test]
     fn every_spec_has_a_handler_and_every_handler_has_a_spec() {
         /// 在更外层拦截、不进 `execute` 的工具。**加进来之前先想清楚为什么。**
-        const DISPATCHED_ELSEWHERE: &[&str] = &["memory_search"];
+        const DISPATCHED_ELSEWHERE: &[&str] = &[];
 
         let src = include_str!("tools.rs");
         let body = src

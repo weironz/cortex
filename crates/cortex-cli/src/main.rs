@@ -106,9 +106,6 @@ enum Command {
         /// 会话 id。省略则新建
         #[arg(long)]
         session: Option<String>,
-        /// 不显示本轮注入了哪些记忆
-        #[arg(long)]
-        no_memory: bool,
         /// 不逐条询问，一律拒绝高风险工具。
         ///
         /// 用于把 CLI 塞进脚本或 CI：那里没有人能回答，而默认行为
@@ -148,17 +145,6 @@ enum Command {
         /// 拒绝而不是批准
         #[arg(long)]
         deny: bool,
-    },
-
-    /// 搜索记忆
-    Search {
-        query: String,
-        #[arg(long, default_value = "10")]
-        limit: i64,
-        /// 按系统时间回放：「在这个时刻，我以为什么是真的」
-        /// 例：--as-of 2026-05-01T00:00:00Z
-        #[arg(long)]
-        as_of: Option<String>,
     },
 
     /// 列出会话
@@ -409,18 +395,18 @@ async fn main() -> anyhow::Result<()> {
                     h.version,
                     h.protocol
                 );
-                if let Some(m) = &h.memory {
-                    let state = if m.reachable {
+                if let Some(sv) = &h.server {
+                    let state = if sv.reachable {
                         "已连接"
                     } else {
                         "未连接"
                     };
-                    println!("   记忆：{state}（{}）", m.remote);
-                    if m.backlog > 0 {
+                    println!("   服务端：{state}（{}）", sv.remote);
+                    if sv.backlog > 0 {
                         println!(
                             "{}",
                             render::dim(
-                                &format!("   还有 {} 条对话等着补写，联网后自动重放", m.backlog),
+                                &format!("   还有 {} 条对话等着补写，联网后自动重放", sv.backlog),
                                 color
                             )
                         );
@@ -550,34 +536,9 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", e.text.unwrap_or_else(|| "（无文本）".into()));
         }
 
-        Command::Search {
-            query,
-            limit,
-            as_of,
-        } => {
-            let r = c.memory_search(&query, limit, as_of.as_deref()).await?;
-            if r.facts.is_empty() {
-                println!("{}", render::dim("没有找到相关记忆", color));
-            }
-            if as_of.is_some() {
-                println!(
-                    "{}\n",
-                    render::dim(
-                        &format!("按系统时间回放至 {}", as_of.as_deref().unwrap_or("")),
-                        color
-                    )
-                );
-            }
-            for f in &r.facts {
-                let hit = r.channels.iter().find(|c| c.fact_id == f.id);
-                println!("{}", render::fact_line(f, hit, color));
-            }
-        }
-
         Command::Chat {
             message,
             session,
-            no_memory,
             deny_all,
             permission_mode,
         } => {
@@ -592,18 +553,9 @@ async fn main() -> anyhow::Result<()> {
             let interactive_confirm = !deny_all && std::io::stdin().is_terminal();
             match message {
                 Some(m) => {
-                    one_turn(
-                        &c,
-                        &session_id,
-                        &m,
-                        !no_memory,
-                        color,
-                        interactive_confirm,
-                        mode,
-                    )
-                    .await?;
+                    one_turn(&c, &session_id, &m, color, interactive_confirm, mode).await?;
                 }
-                None => interactive(&c, &session_id, !no_memory, color, mode).await?,
+                None => interactive(&c, &session_id, color, mode).await?,
             }
         }
     }
@@ -652,7 +604,6 @@ async fn one_turn(
     c: &Client,
     session_id: &str,
     message: &str,
-    show_memory: bool,
     color: bool,
     interactive_confirm: bool,
     permission_mode: cortex_proto::dto::PermissionMode,
@@ -673,15 +624,6 @@ async fn one_turn(
 
     while let Some(ev) = stream.next().await {
         match ev {
-            Ok(ChatEvent::Memory { facts }) => {
-                if show_memory && !facts.is_empty() {
-                    println!("{}", render::memory_header(facts.len(), color));
-                    for f in &facts {
-                        println!("{}", render::memory_line(f, color));
-                    }
-                    println!();
-                }
-            }
             Ok(ChatEvent::Tool { name, summary, .. }) => {
                 println!("{}", render::tool_line(&name, &summary, color));
             }
@@ -758,7 +700,6 @@ async fn one_turn(
 async fn interactive(
     c: &Client,
     session_id: &str,
-    show_memory: bool,
     color: bool,
     permission_mode: cortex_proto::dto::PermissionMode,
 ) -> anyhow::Result<()> {
@@ -788,16 +729,7 @@ async fn interactive(
 
         println!();
         // 交互模式下人就在终端前面，确认当然逐条问
-        one_turn(
-            c,
-            session_id,
-            line,
-            show_memory,
-            color,
-            true,
-            permission_mode,
-        )
-        .await?;
+        one_turn(c, session_id, line, color, true, permission_mode).await?;
         println!();
     }
     Ok(())

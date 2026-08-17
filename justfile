@@ -106,11 +106,8 @@ doctor:
     fi
     docker compose {{ _dev }} ps --format '{{ "{{" }}.Service{{ "}}" }}' 2>/dev/null | grep -q rustfs \
         && say RustFS "起着" || { say RustFS "没起 —— 跑 just dev"; rc=1; }
-    # 记忆服务不在这个仓库里，但沙箱会话真的依赖它，且不接的时候所有
-    # 健康检查都是绿的（见 _dev-join-memory 那段）—— 所以自检要点它一下
-    docker inspect "${CORMEX_CONTAINER:-cormex-cortexd}" >/dev/null 2>&1 \
-        && say 记忆服务 "起着（${CORMEX_CONTAINER:-cormex-cortexd}）" \
-        || say 记忆服务 "没起 —— 去 ../cormex 起，本仓库不提供它"
+    # 这里以前还点一下记忆服务容器。2026-08-17 起本仓库不连它了 ——
+    # 再点就是在提醒一件与这个部署无关的事，而无关的提醒会训练人忽略提醒。
     # ── 两个仓库共用一个 compose 项目名 ──────────────────────
     #
     # Cortex 与 Cormex 的根 compose **第一行都写着 `name: cortex`**，于是
@@ -288,10 +285,8 @@ dev: dev-build dev-web-if-stale
     # restart 而不是 `up -d --force-recreate web`：只要重新解析一次 DNS，
     # 不需要换容器。
     docker compose {{ _dev }} restart web
-    @just _dev-join-memory
     @echo ""
     @echo "  Web    http://127.0.0.1:${CORTEX_WEB_DEV_PORT:-5173}"
-    @echo "  记忆   http://127.0.0.1:8080  （由 ../cormex 的 compose 提供）"
     @echo ""
     @echo "  ★ dev 是同源**根路径**：/health、/sandbox/health —— 没有 /api 前缀"
     @echo "    （拿 /api/… 去测会落到 nginx 的 SPA 回落上，回 200 + index.html）"
@@ -300,51 +295,6 @@ dev: dev-build dev-web-if-stale
     @echo "  改界面   → just dev-web"
     @echo "  看日志   → just dev-logs agentd"
 
-# 把记忆服务接进沙箱那张 internal 网。
-#
-# # 为什么必须有这一步
-#
-# 沙箱网段是 `internal: true`：容器**没有默认路由**，够不着宿主，于是
-# `host.docker.internal` 既解析不了也连不上；而唯一的出网口 cortex-egress
-# 会拒绝任何解析到内网的地址（SSRF 防护，不该放宽）。
-#
-# 生产没有这个问题：那份 compose 把记忆服务与沙箱放在同一张网上，回调走
-# 服务名。dev 的差别只有一个 —— 记忆服务在**另一个仓库的 compose** 里，
-# 所以要在这里把它接过来，让拓扑与生产一致。
-#
-# # 它治的是一个所有健康检查都说好的坏
-#
-# 不接的话：容器起得来、agentd 一切正常、`/sandbox/health` 还报
-# `memory_reachable: true`（那是 **agentd** 够得着，它不在 internal 网上）,
-# 只有真发一轮对话才炸在 `/llm/stream`。这正是 live 那几条测试长期红、
-# 而没人看出根因的原因。
-#
-# 幂等：已经接上了 `docker network connect` 回非零，吞掉即可。
-_dev-join-memory:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    name="${CORMEX_CONTAINER:-cormex-cortexd}"
-    if ! docker inspect "$name" >/dev/null 2>&1; then
-        echo "  ⚠ 找不到记忆服务容器 $name —— 去 ../cormex 跑 docker compose up -d"
-        echo "    （不接的话云端会话发消息会炸在 /llm/stream，而 health 全是绿的）"
-        exit 0
-    fi
-    if docker network connect cortex-sandbox-net "$name" 2>/dev/null; then
-        echo "  ✓ $name 已接入 cortex-sandbox-net（沙箱靠它回调记忆服务）"
-    else
-        echo "  ✓ $name 已在 cortex-sandbox-net 上"
-    fi
-
-# 界面产物比源码旧就重建一次。
-#
-# **这条是补一次真实的误判**：`just dev` 从不构建 Flutter，而 nginx 直接
-# bind mount `app/build/web`。于是浏览器里那份可能比代码旧十个小时 ——
-# 当时的症状是「空会话的输入框又跑到底部去了」，看起来像一次回归，
-# 实际是那次修复压根不在手上这份产物里。**没有任何东西会提示你**：
-# 页面能开、功能能用，只是不是你写的那一版。
-#
-# 判据是 mtime 而不是「每次都建」：整建要一分钟，而 `just dev` 也用来
-# 把容器拉回来，那时候多等一分钟纯属浪费。
 dev-web-if-stale:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -369,10 +319,6 @@ dev-web-if-stale:
 # 容器换了 IP，而 nginx 还指着旧的 —— 症状是 502，且直接打 :8080 完全正常。
 dev-restart: dev-build
     docker compose {{ _dev }} restart agentd web
-    # 顺手重接一次：`docker compose up -d cortexd` 那样**重建**记忆服务容器
-    # 会把它从沙箱那张网上摘掉，而症状要到发消息时才现（每一轮都说
-    # 「连不上 cortexd」）。这条是幂等的，接着的时候什么也不做
-    @just _dev-join-memory
     @echo "agentd 已重启（用的是刚编出来的二进制）"
 
 # 改完界面：重新构建 Flutter Web。

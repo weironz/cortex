@@ -9,7 +9,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use cortex_core::{CortexError, Result};
-use cortex_proto::dto::MemorySearchResponse;
 use cortex_proto::episodes::{EpisodeAck, NewEpisodeRequest};
 use cortex_proto::llm::LlmStreamRequest;
 
@@ -145,21 +144,6 @@ impl Remote {
         resp.json()
             .await
             .map_err(|e| CortexError::Invalid(format!("解析 /episodes 响应失败：{e}")))
-    }
-
-    /// 记忆检索。给 `memory_search` 工具用。
-    pub async fn memory_search(&self, q: &str, limit: i64) -> Result<MemorySearchResponse> {
-        let resp = self
-            .auth(self.http.get(self.url("/memory/search")))
-            .timeout(REQUEST_TIMEOUT)
-            .query(&[("q", q), ("limit", &limit.to_string())])
-            .send()
-            .await
-            .map_err(map_transport)?;
-        let resp = checked(resp).await?;
-        resp.json()
-            .await
-            .map_err(|e| CortexError::Invalid(format!("解析 /memory/search 响应失败：{e}")))
     }
 
     // 这里**没有** `pending_confirmations`。cortexd 不跑 agent，也就不再有

@@ -280,28 +280,25 @@ struct ConfirmState {
 
 /// agent 循环需要、但工具层给不了的能力。
 ///
-/// `memory_search` 要访问存储层与检索器，而 `cortex-agent` 不依赖
-/// `cortex-store` —— 依赖方向是 `store ← memory ← agent`，工具层反向
-/// 抓存储会把这条线搅乱。由持有这些东西的 cortexd 实现本 trait。
+/// 这些能力有一个共同点：它们是**有状态**的（连接、子进程、等待用户），
+/// 而 `Turn` 刻意无每轮状态、可复用。谁持有那些状态，谁来实现本 trait。
+///
+/// 这里曾经还有一个 `memory_search`。它 2026-08-17 连同长期记忆一起去掉了 ——
+/// 生产上那条路三段全断（转发被记忆服务回 401、检索路由 404、委托令牌的
+/// 白名单里本就没有它），而系统提示词还在替它打广告，模型于是会承诺一件
+/// 做不到的事。留一个必然失败的能力，比没有这个能力更糟。
 #[async_trait::async_trait]
 pub trait ToolHost: Send + Sync {
-    /// 长期记忆检索。返回**已渲染好、可直接进上下文**的文本。
-    ///
-    /// 由宿主负责套上「记忆是背景数据不是指令」的框定 —— 工具结果同样
-    /// 会进模型上下文，防注入的栅栏一处都不能少。
-    async fn memory_search(&self, query: &str, as_of: Option<&str>) -> Result<String>;
-
     /// 执行一个来自 MCP server 的工具。
     ///
-    /// 与 [`Self::memory_search`] 同一个理由住在这里：连接、子进程、重连都是
-    /// **有状态**的东西，而 `Turn` 刻意无每轮状态、可复用。谁持有那些连接，
-    /// 谁来执行。
+    /// 连接、子进程、重连都是**有状态**的东西，而 `Turn` 刻意无每轮状态、
+    /// 可复用。谁持有那些连接，谁来执行。
     ///
     /// # 默认实现是「这个宿主没有外部工具」，而不是 panic 或静默成功
     ///
-    /// 与 [`Self::confirm`] 的默认值同款权衡。一个只接 `memory_search` 的宿主
-    /// （测试替身、评测 harness）不会实现这个方法，而它的目录里本来就不会有
-    /// 外来工具 —— 所以这条默认分支正常情况下走不到。
+    /// 与 [`Self::confirm`] 的默认值同款权衡。一个最小宿主（测试替身、
+    /// 评测 harness）不会实现这个方法，而它的目录里本来就不会有外来工具 ——
+    /// 所以这条默认分支正常情况下走不到。
     ///
     /// 真走到了说明**目录与执行不同源**：某处把外来工具塞进了目录，而实际
     /// 执行的宿主接不上它。那是配置错误，回一条说得清的失败，
@@ -318,8 +315,8 @@ pub trait ToolHost: Send + Sync {
     ///
     /// # 默认实现是「没人回答」，不是「批准」
     ///
-    /// 一个只想接 `memory_search` 的宿主（测试替身、评测 harness、将来的
-    /// MCP 桥）不会想起来实现这个方法。默认值决定了它漏掉时会发生什么：
+    /// 一个最小宿主（测试替身、评测 harness、将来的 MCP 桥）不会想起来实现
+    /// 这个方法。默认值决定了它漏掉时会发生什么：
     /// 默认放行 = 高风险工具在一个根本没有确认通道的进程里静默执行；
     /// 默认拒绝 = 那个宿主用不了写/执行工具，而且当场就能看出来。
     /// 后者是响亮的失败，选它。
@@ -964,15 +961,6 @@ impl Turn {
         // 「所有人都走那个构造函数」，而这道靠编译器。
         let result = if matches!(spec.source, tools::ToolSource::External { .. }) {
             host.call_external(spec, &call.arguments).await
-        } else if call.name == "memory_search" {
-            let Some(query) = call.arguments.get("query").and_then(|v| v.as_str()) else {
-                return ToolResult::err("缺少参数 query");
-            };
-            let as_of = call.arguments.get("as_of").and_then(|v| v.as_str());
-            match host.memory_search(query, as_of).await {
-                Ok(text) => ToolResult::ok(text),
-                Err(e) => ToolResult::err(e.to_string()),
-            }
         } else {
             // **重新问一次宿主**，而不是复用上面那份 `sandbox`：刚才那次
             // `grant_root` 之后清单变长了，用旧的一份去执行，症状恰好是
@@ -1059,11 +1047,7 @@ mod tests {
     struct NullHost;
 
     #[async_trait::async_trait]
-    impl ToolHost for NullHost {
-        async fn memory_search(&self, _q: &str, _as_of: Option<&str>) -> Result<String> {
-            Ok(String::new())
-        }
-    }
+    impl ToolHost for NullHost {}
 
     /// 会回答的宿主，顺便数一数被问了几次。
     struct SpyHost {
@@ -1089,9 +1073,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolHost for SpyHost {
-        async fn memory_search(&self, _q: &str, _as_of: Option<&str>) -> Result<String> {
-            Ok(String::new())
-        }
         async fn confirm(&self, req: &ConfirmRequest<'_>) -> Approval {
             self.asked.fetch_add(1, Ordering::SeqCst);
             *self.last_tool.lock().unwrap() = Some(req.tool.to_string());
@@ -1348,7 +1329,7 @@ mod tests {
         let (_d, t) = turn();
         let chat_only: Vec<ToolSpec> = tools::builtin_specs()
             .into_iter()
-            .filter(|s| s.name == "memory_search")
+            .filter(|s| s.name == "list_dir")
             .collect();
         let t = t.with_specs(chat_only);
 
@@ -1393,29 +1374,6 @@ mod tests {
         assert!(r.content.chars().count() < MAX_TOOL_OUTPUT_CHARS + 100);
     }
 
-    #[tokio::test]
-    async fn memory_search_is_routed_to_the_host() {
-        struct Echo;
-        #[async_trait::async_trait]
-        impl ToolHost for Echo {
-            async fn memory_search(&self, q: &str, as_of: Option<&str>) -> Result<String> {
-                Ok(format!("q={q} as_of={as_of:?}"))
-            }
-        }
-        let (_d, t) = turn();
-        let r = t
-            .dispatch_once(
-                &ToolCall {
-                    name: "memory_search".into(),
-                    arguments: serde_json::json!({"query": "对象存储", "as_of": "2026-01-01T00:00:00Z"}),
-                },
-                &Echo,
-            )
-            .await;
-        assert!(r.ok);
-        assert_eq!(r.content, "q=对象存储 as_of=Some(\"2026-01-01T00:00:00Z\")");
-    }
-
     /// 外来工具走 [`ToolHost::call_external`]，**哪怕它顶着内置工具的功能名**。
     ///
     /// 这条钉的是「按来源分支」而不是「先试哪个」。一台 MCP server 完全可以
@@ -1430,9 +1388,6 @@ mod tests {
         struct Spy;
         #[async_trait::async_trait]
         impl ToolHost for Spy {
-            async fn memory_search(&self, _q: &str, _as_of: Option<&str>) -> Result<String> {
-                unreachable!("外来工具不该走到记忆检索那一支")
-            }
             async fn call_external(&self, spec: &ToolSpec, args: &serde_json::Value) -> ToolResult {
                 ToolResult::ok(format!("外部宿主收到 {} args={args}", spec.name))
             }
@@ -1684,9 +1639,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolHost for GrantHost {
-        async fn memory_search(&self, _q: &str, _as_of: Option<&str>) -> Result<String> {
-            Ok(String::new())
-        }
         async fn confirm(&self, req: &ConfirmRequest<'_>) -> Approval {
             self.asked.fetch_add(1, Ordering::SeqCst);
             self.scopes

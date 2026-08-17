@@ -92,17 +92,6 @@ fn path_of(handle: &str) -> Result<PathBuf, ApiError> {
 
 /// 从请求里取出调用方的 bearer。**只取，不验。**
 ///
-/// 这一条要原样带给记忆服务 —— 这个进程没有服务密钥，它只能替
-/// 「把 token 交给它的那个用户」办事（见 [`crate::remote`] 的模块头）。
-fn bearer_of(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .filter(|t| !t.is_empty())
-        .map(ToOwned::to_owned)
-}
-
 /// `POST /import/upload` —— 流式落盘。
 ///
 /// # Errors
@@ -270,11 +259,7 @@ pub async fn run(
             })
             .await;
 
-        let sink = ImportSink {
-            st: st.clone(),
-            bearer: bearer_of(&headers),
-            tenant,
-        };
+        let sink = ImportSink { tenant };
         let progress_tx = tx.clone();
         // 进度可丢：满了就跳过这一条，丢一条只是进度条跳一下，
         // 而阻塞在这里会让导入本身停下来等客户端
@@ -314,15 +299,6 @@ pub async fn run(
 
 /// 导入的出口。**两条路分别去两个地方**，理由见模块头最后一节。
 struct ImportSink {
-    /// 进程状态。写 episode 要它 —— 那条路先落自己的库，再由它去
-    /// 转发给记忆服务做抽取（见 [`crate::episodes::write_one`]）。
-    st: AgentState,
-    /// 调用方那把 bearer。
-    ///
-    /// **必须带着**：这个进程没有服务密钥，记忆服务只认「用户自己那把」。
-    /// 少了它，一份三年历史会以一个认不出的调用者的身份被拒，
-    /// 而症状是每一对都失败、导入跑完报 `failures = 全部`。
-    bearer: Option<String>,
     /// 这次导入属于谁。改标题要落进**这个人**的库。
     ///
     /// 少了它，一个人上传的三年历史会把另一个人的会话改名，
@@ -349,7 +325,7 @@ impl cortex_import::Sink for ImportSink {
         //
         // 好处不只是少一跳：记忆服务缺席时，导入照样把对话存进来 ——
         // 与聊出来的那条路**行为一致**，而不是「导入全失败、聊天正常」。
-        crate::episodes::write_one(&self.st, self.tenant.store()?, self.bearer.as_deref(), req)
+        crate::episodes::write_one(self.tenant.store()?, req)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e.message()))
     }

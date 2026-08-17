@@ -247,7 +247,7 @@ async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health>
                 cortex_agent::Attended::No
             },
         )),
-        memory: Some(cortex_proto::dto::MemoryHealth {
+        server: Some(cortex_proto::dto::ServerHealth {
             remote: st.remote.base().to_string(),
             reachable,
             backlog: st.outbox.backlog(),

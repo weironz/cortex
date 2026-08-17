@@ -413,9 +413,6 @@ class SyncController extends Notifier<SyncState> {
         unawaited(chat.loadTranscript(active));
       }
     }
-    // 记忆那几张表**不再触发任何客户端刷新** —— 这一侧没有记忆界面了。
-    // `SyncTables.memory` 留着：它描述的是服务端会下发哪些表，
-    // 与这个客户端渲不渲染它们无关。
   }
 
   // ------------------------------------------------------------------ teardown

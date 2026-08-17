@@ -34,10 +34,7 @@ pub struct ConfirmReceipt {
 /// `PendingInfo` 就是 `GET /confirmations` 那一项 —— CLI 此前那份漏了 `scope`，
 /// 而越界确认的全部信息就在那个字段里。
 pub use cortex_proto::confirm::PendingInfo;
-pub use cortex_proto::dto::{
-    ChannelHit, EpisodeDto, FactDto, MemorySearchResponse, PendingConfirmations, SessionDto,
-    SessionsResponse,
-};
+pub use cortex_proto::dto::{EpisodeDto, PendingConfirmations, SessionDto, SessionsResponse};
 
 pub struct Client {
     base: String,
@@ -209,22 +206,6 @@ impl Client {
             .send()
             .await
             .map_err(Self::map_err)?;
-        self.checked(r).await?.json().await.map_err(Self::map_err)
-    }
-
-    pub async fn memory_search(
-        &self,
-        q: &str,
-        limit: i64,
-        as_of: Option<&str>,
-    ) -> Result<MemorySearchResponse> {
-        let mut req = self
-            .get("/memory/search")
-            .query(&[("q", q), ("limit", &limit.to_string())]);
-        if let Some(t) = as_of {
-            req = req.query(&[("as_of", t)]);
-        }
-        let r = req.send().await.map_err(Self::map_err)?;
         self.checked(r).await?.json().await.map_err(Self::map_err)
     }
 

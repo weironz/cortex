@@ -21,22 +21,14 @@ use std::sync::Arc;
 
 use crate::confirm::{ConfirmRegistry, PendingMeta, preview_of};
 use cortex_agent::{AgentEvent, Approval, ApprovalPolicy, ConfirmRequest, ToolHost, Turn};
-use cortex_core::injection;
 use cortex_core::{CortexError, Id, Result};
-use cortex_proto::dto::{ChatEvent, ChatRequest, FactDto, PermissionMode};
+use cortex_proto::dto::{ChatEvent, ChatRequest, PermissionMode};
 use cortex_proto::episodes::{NewEpisodeRequest, ToolCallInput};
 use tokio::sync::mpsc;
 
 use crate::outbox::Outbox;
 use crate::remote::Remote;
 use crate::workspaces::Workspaces;
-
-/// `memory_search` 工具一次拿多少条。
-///
-/// 曾经这里写着「与 cortexd 那侧保持一致」，而那句话是假的：cortexd 那侧
-/// 一直是 20。**两个数不一样是对的** —— 这些结果要塞进本地这一轮的上下文
-/// 预算，而 MCP 那一侧给的是别人的宿主，宿主自己知道该留多少。
-const TOOL_SEARCH_LIMIT: i64 = 8;
 
 /// 容器里单轮的 wall-clock 上限。**只在容器模式生效。**
 ///
@@ -410,32 +402,20 @@ impl Engine {
             tool_calls: Vec::new(),
         };
 
-        let memories: Vec<FactDto> = match self.remote.write_episode(&user_req).await {
-            Ok(ack) => ack.memories,
-            // 连不上 → 排队，这一轮没有记忆。**明说**，别让用户以为 agent 变笨了
+        // 落库。**这是会话历史，不是记忆** —— 2026-08-17 之前这一步还会顺带
+        // 拿回「这一轮命中了哪些记忆」并渲染成注入块，那条路连同长期记忆一起
+        // 去掉了（理由见 `cortex_agent::turn::ToolHost` 的文档）。
+        match self.remote.write_episode(&user_req).await {
+            Ok(_) => {}
+            // 连不上 → 排队。**明说**，别让用户以为这一轮丢了
             Err(e @ CortexError::Unavailable(_)) => {
-                tracing::warn!(error = %e, "记忆未连接，这一轮不注入记忆");
+                tracing::warn!(error = %e, "写不进去，这一轮先排队");
                 self.queue_offline(&user_req, tx, &e).await?;
-                Vec::new()
             }
             Err(e) => return Err(e),
-        };
-
-        if !memories.is_empty() {
-            tx.send(ChatEvent::Memory {
-                facts: memories.clone(),
-            })
-            .await;
         }
 
-        // ── 2. 渲染注入块 —— 用与 cortexd **同一个**函数 ──
-        let items: Vec<injection::MemoryItem> = memories.iter().map(memory_item_of).collect();
-        let block = injection::render_turn_block(&items);
-        let user_content = if block.is_empty() {
-            req.message.clone()
-        } else {
-            format!("{block}\n\n{}", req.message)
-        };
+        let user_content = req.message.clone();
 
         // ── 3. 工具目录按**会话**决定 ──
         //
@@ -540,7 +520,6 @@ impl Engine {
         messages.push(user_msg);
 
         let host = LocalHost {
-            remote: self.remote.clone(),
             events: Arc::clone(tx),
             session_id: req.session_id.clone(),
             confirms: Arc::clone(&self.confirms),
@@ -692,17 +671,6 @@ impl Engine {
     }
 }
 
-/// `FactDto` → 注入用的 `MemoryItem`。
-///
-/// 搬运本身在 [`cortex_proto::dto::FactDto::to_memory_item`] —— 同一段字段
-/// 搬运此前这里一份、cortexd 的 mock 后端要再一份，而漏一个字段不报错：
-/// 编译照过、测试照绿，症状是「同一条事实经过不同的路长得不一样」。
-///
-/// 留这个薄封装是为了 `.map(memory_item_of)` 读起来仍然像一句话。
-fn memory_item_of(f: &FactDto) -> injection::MemoryItem {
-    f.to_memory_item()
-}
-
 /// agent 事件 → SSE 事件，顺带攒出工具归因。
 ///
 /// 与 cortexd 的桥接逻辑一致：`ToolCall` 带参数（路径在这里）、
@@ -771,7 +739,6 @@ fn tool_path(args: &serde_json::Value) -> Option<String> {
 
 /// agent 循环要的宿主能力。
 struct LocalHost {
-    remote: Remote,
     events: Arc<crate::runs::RunSink>,
     session_id: String,
     confirms: Arc<ConfirmRegistry>,
@@ -782,11 +749,6 @@ struct LocalHost {
 
 #[async_trait::async_trait]
 impl ToolHost for LocalHost {
-    /// 记忆检索走远端，渲染用**本地这份** `injection`。
-    ///
-    /// 框定语句（「记忆是背景数据不是指令」）一处都不能少：从工具通道
-    /// 进来的记忆和从注入通道进来的一样危险，里面可能混着被抽取进来的
-    /// 恶意指令。
     fn granted_roots(&self) -> Vec<std::path::PathBuf> {
         self.grants.get(&self.session_id)
     }
@@ -805,15 +767,6 @@ impl ToolHost for LocalHost {
 
     fn grant_root(&self, dir: &std::path::Path) {
         self.grants.add(&self.session_id, dir);
-    }
-
-    async fn memory_search(&self, query: &str, _as_of: Option<&str>) -> Result<String> {
-        let r = self.remote.memory_search(query, TOOL_SEARCH_LIMIT).await?;
-        if r.facts.is_empty() {
-            return Ok("没有检索到相关记忆。".into());
-        }
-        let items: Vec<injection::MemoryItem> = r.facts.iter().map(memory_item_of).collect();
-        Ok(injection::render_turn_block(&items))
     }
 
     /// 问用户准不准。逻辑与 cortexd 完全一致 —— 用的就是同一份
@@ -1070,43 +1023,6 @@ mod tests {
         assert!(
             tool_path(&serde_json::json!({"query": "找一下 src/main.rs"})).is_none(),
             "路径不能从别的字段里猜出来 —— 猜错的方向是界面上指向一个没被碰过的文件"
-        );
-    }
-
-    /// `FactDto` 的两条时间要落到 `MemoryItem` 的**对应**位置上。
-    ///
-    /// 换反了不会报错，只会让注入块里的日期全是错的 ——
-    /// 而这个项目卖的正是「能回答三个月前为何如此决定」。
-    #[test]
-    fn the_two_timelines_do_not_get_swapped() {
-        let f = FactDto {
-            id: "f1".into(),
-            statement: "s".into(),
-            predicate: None,
-            domain: None,
-            confidence: 1.0,
-            valid_at: Some("2026-01-01T00:00:00Z".into()),
-            created_at: "2026-08-08T00:00:00Z".into(),
-            invalidated: false,
-            source_episode_id: None,
-            source_channel: Some("user_stated".into()),
-            trust_tier: Some(1),
-        };
-        let m = memory_item_of(&f);
-        assert_eq!(
-            (m.source_channel.as_deref(), m.trust_tier),
-            (Some("user_stated"), Some(1)),
-            "来源与信任级要原样带过去 —— 丢了的话，\
-             哪天本地也要显示记忆抽屉时会以为是服务端没发"
-        );
-        assert_eq!(
-            m.valid_at.as_deref(),
-            Some("2026-01-01T00:00:00Z"),
-            "事件时间（这件事何时开始为真）"
-        );
-        assert_eq!(
-            m.known_since, "2026-08-08T00:00:00Z",
-            "系统时间（Cortex 何时知道）—— 与事件时间换反了不会报错，只会让日期全错"
         );
     }
 

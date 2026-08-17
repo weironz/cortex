@@ -367,7 +367,7 @@ pub fn render_manifest(placements: &[Placement]) -> String {
 
 /// 历史轮次里附件的一行注记。**必须确定性**：同一条 episode 每轮都要
 /// 渲染出逐字节相同的文本，否则历史被改写、前缀缓存失效（成本 5-10 倍，
-/// 见 `cortex_core::injection` 的教训）。
+/// 见 `cortex_core::tokens` 的教训）。
 #[must_use]
 pub fn history_note(atts: &[cortex_proto::dto::AttachmentDto]) -> String {
     if atts.is_empty() {
