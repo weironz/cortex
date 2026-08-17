@@ -308,13 +308,34 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: traefik-network
-      # ── /api 里分给 agent 的那两条 ─────────────────────
+      # ── /api 归 agentd，**记忆那几条除外** ───────────────
       #
-      # 与 cortex-api 同一个 `/api` 前缀、同一次 StripPrefix，只是按第二段
-      # 再分一次。**优先级必须高于 cortex-api**（那条是 100）：两条规则都
-      # 匹配 `/api/chat`，traefik 按优先级选，写死免得靠「规则更长」这种
-      # 会随改动漂移的东西。
-      traefik.http.routers.cortex-agent.rule: Host(`${DOMAIN}`) && (PathPrefix(`/api/chat`) || PathPrefix(`/api/sandbox`))
+      # 与 cortex-api 同一个 `/api` 前缀、同一次 StripPrefix。
+      # **优先级必须高于 cortex-api**（那条是 100，定义在 Cormex 那一栈里）：
+      # 两条规则都匹配，traefik 按优先级选，写死免得靠「规则更长」这种会随
+      # 改动漂移的东西。
+      #
+      # ⚠️ **这条规则以前是「只有 /api/chat 与 /api/sandbox 给 agentd」。**
+      # 0.1.10 把身份、会话、项目、同步、附件、导入、模型代理全搬了过来，
+      # 而这一行没跟着改 —— 于是线上除了聊天与沙箱，**整个应用都在打记忆
+      # 服务**：登录页填对用户名口令，回来的是记忆服务的一句英文
+      # 「this deployment has no database attached」，读起来像数据库没接上。
+      #
+      # 上线当天的验证没看出来，因为它查的是 `/api/sandbox/health` ——
+      # 恰好是当时唯二转给 agentd 的两条之一。「验证走的不是用户那条路」。
+      #
+      # 所以这次反过来写：**默认给 agentd，把记忆那一侧指名让出去**。
+      # 让出去的名单短且稳定（`routes.rs` 里有测试钉着它只有召回与 MCP），
+      # 而 agentd 的路由表还会长 —— 一份会长的清单不该由边缘维护。
+      #
+      # `/api/health` 也让出去：它历来是记忆服务在答，部署验证断言的
+      # `database` / `blob_backend` 都是它的字段。agentd 自己那条从公网
+      # 走 `/api/sandbox/health`（见 deploy.yml 里那段注释）。
+      traefik.http.routers.cortex-agent.rule: >-
+        Host(`${DOMAIN}`) && PathPrefix(`/api`)
+        && !PathPrefix(`/api/memory`)
+        && !PathPrefix(`/api/mcp`)
+        && !Path(`/api/health`)
       traefik.http.routers.cortex-agent.entrypoints: websecure
       traefik.http.routers.cortex-agent.tls: "true"
       traefik.http.routers.cortex-agent.tls.certresolver: letsencrypt
