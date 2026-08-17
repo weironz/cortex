@@ -154,6 +154,31 @@ id 在重装或克隆之后会骗人。
 复用一个 agent 等于**把自己的请求交给它的身份**，指向别的服务端或登着另一个
 账号的话，会静默读写别人的数据。
 
+#### 目标态：把「地方」与「谁托管」拆开
+
+现在 `runtime: Cloud|Local` 一个字段承担两件事：文件在哪、谁跑这一轮。而
+`session_state.workspace` 是个**裸路径字符串**（`"D:\proj"`），不带机器 ——
+「哪台机器」靠一个隐含约定解决：谁的 `workspaces.json` 里有这份绑定就是谁。
+项目的本机落地目录**只存在客户端**，服务端根本不知道。所以**服务端今天没有
+能力按工作区路由**，只能二选一。
+
+拆开之后：
+
+```
+Workspace  { id, kind: ContainerVolume | MachineDir, machine_hint?, path, project_id? }
+Agent      { id, machine_hint, kind, 能够到哪些 workspace, 版本, 心跳 }
+Session    { …, workspace_id: Option<WorkspaceId> }      ← 不再有 runtime
+```
+
+一轮对话的路由变成一句话：**找一个在线且够得到这个会话工作区的 agent**。
+
+这个方向调研过（[references.md](references.md)「远程挂载与多端」）：OpenHands V1
+的 `Conversation` 工厂就是「workspace 决定循环在哪跑」，Codespaces 也是「工作区
+一等 + 从任何地方挂」。**下面那条既有结论约束的是「同时」，不是「解耦」** ——
+两家同样不允许一个会话同时在两个环境里跑。
+
+阶段划分与三件明确不做的事，见 [roadmap.md](roadmap.md) 的 E 条。
+
 #### 执行环境是会话身份的一部分
 
 `SessionRuntime` 只有两档（`Cloud` 默认 / `Local`），而且**记在会话上**：

@@ -249,6 +249,115 @@ Charmbracelet 出品，**TUI 视觉与交互是业内最佳**。仅作界面设�
 
 ---
 
+## 远程挂载与多端 —— 2026-08-17 补的一路
+
+首轮那 17 路调研盯的是**沙箱与容器**。这一路盯的是另一件事：**一个在跑的
+agent，怎么被另一台设备挂上去**。它对应 roadmap 的 E 条与
+[architecture.md](architecture.md)「六者什么关系」那一节的阶段 3–4。
+
+调研起因是一个自我怀疑：architecture.md 里那句「调研过的四家没有一家允许
+同一个会话在两端各跑各的：执行环境是会话身份的一部分」，看起来否掉了
+「把 workspace 从 session 拆出来」这个设计。**查完的结论是它没有** ——
+那句话约束的是「同时」，不是「解耦」。
+
+### OpenHands V1 SDK —— 形状与我们最像，**认证除外**
+
+`Conversation` 是个工厂：传 `LocalWorkspace` 得到 `LocalConversation`
+（循环跑在进程内），传 `RemoteWorkspace` 得到 `RemoteConversation`
+（序列化配置、委托给 agent server 走 HTTP/WebSocket），**两者 API 完全相同**。
+也就是 **workspace 决定循环在哪跑**，而不是会话上一个 runtime 字段。
+
+多客户端挂载靠**事件流**：每个客户端各开一条 WebSocket 流同一份 event log，
+「事件流是唯一真相源」。
+
+**值得抄的一条：消息 FIFO 排队，而不是单写者租约。** 他们原来的 bug 与我们
+推演出的一字不差 —— WebSocket 收到消息就直接 `send_message(run=True)`，于是
+**多个执行循环可能同时跑**（[issue #333]，已修）。修法不是拒绝第二个客户端，
+而是 agent 忙时把消息排进 FIFO、当前这轮跑完再处理，另有一个 conversation
+state 的显式 `lock acquire` 管状态争用。
+
+比租约好在：第二个客户端发的话不会被顶回来。而这对我们几乎免费 ——
+`/sync` + `/ws` 已经在，episodes 本来 append-only。
+
+**不该抄的一条：它的认证。** agent server 就是**一把配置好的 key**
+（`session_api_key`，走 `Bearer` 或 `X-Session-API-Key`），由 provisioner 起
+沙箱时铸出、随 runtime 句柄一起返回。维护者自己的说法是应当把它描述成
+「bearer 认证 + 沙箱绑定，**而不是**一个有意义的第二因子」，因为一把 bearer
+key 就能铸出一把 sandbox key；[issue #14912] 正在提议加 `api_key_scopes`
+铸出降权的 session key。
+
+**那正是我们已经有的**：委托令牌的作用域是 `{owner, session_id, project}`
+加**精确四条** method+path 白名单、默认拒绝（`delegated_token::allows`）。
+所以按「能搬就不写」的规矩，这一条的结论是反的 —— **不搬，我们在前面**。
+
+> 顺带一条防守提醒：他们另一个 [issue #13506] 担心的是「沙箱里的 agent 能
+> 解析出原始用户凭据」。我们那张白名单里没有 `/settings/llm-key`，所以够不到。
+> **往白名单里加东西之前先想这一条。**
+
+**反面教训：并发上限不许静默。** 他们 Cloud 超出并发数时**静默把旧沙箱
+pause 掉**，调用方看不出来（[issue #13126] 正在要求改成回 429）。我们现在只有
+12 小时空闲回收、没有并发上限；要加的时候必须响亮。
+
+### VS Code Remote Tunnels —— 传输那一半照着做
+
+形态是**倒转连接**：host 主动拨出到中继服务（Azure），客户端也拨出去，
+两边都不开监听、不改防火墙、不要公网 IP —— 双 NAT 直接解决。
+
+分层是这次调研最有价值的一条：
+
+```
+WebSocket 中继层    ← 由一把 connect JWT 认证
+  └ SSH over WS     ← 端到端加密（服务端用 Rust 的 russh，AES-256-CTR）
+       用户名 tunnel、认证方法 None —— 外层已经认过了
+```
+
+**它回答了「中继会看到内容」这个顾虑。** 把 SSH 套在 WebSocket 里之后，中继
+读不到明文 —— 对自托管的论证是净赚：agentd 当中继时**不必被信任**。而
+`russh` 是 Rust 的，能直接用。
+
+认证：两端用**同一个账号**（GitHub / Microsoft）；host 侧走 device-code flow，
+自动化场景可以直接喂 token。
+
+**与 OpenHands 的关键分歧：VS Code 的「一个 server 实例一次只服务一个客户端」
+对我们不成立。** 它的 server 是**有状态的编辑器会话**，而 OpenHands 的是
+**事件日志**。我们是后者，所以多客户端挂载在我们这儿是可行的。
+
+**反面教训：** 每账号 5 个 tunnel 上限，建第 6 个时它**删掉一个「未使用」的**
+（随机）。又一个静默销毁。
+
+### GitHub Codespaces —— 「工作区一等 + 从任何地方挂」的现成证据
+
+codespace 本身是一等、长命的对象；浏览器与桌面 VS Code 都是**同一个 server 的
+客户端**，共享同一份状态，走 WebSocket 传 IDE 命令而不是画面。文档里
+**没有**「一个 codespace 只能一个客户端」的硬限制。
+
+这是「工作区一等 + attach from anywhere」最直接的背书。
+
+### 这一路的结论落到设计上
+
+| 我们原来的想法 | 查完之后 |
+|---|---|
+| workspace 从 session 拆出来 | ✅ 顺着纹理（OpenHands 的 `Conversation` 工厂就是这个） |
+| 单写者**租约** | ❌ 换成**消息 FIFO 排队 + state lock** |
+| 中继会看到 UI 事件流全文 | ✅ 有解：外层认证 + 内层 SSH，中继读不到 |
+| 抄 OpenHands 的认证 | ❌ **反了** —— 我们的委托令牌是它 issue 里在求的东西 |
+| 多客户端同时挂 | ✅ 对我们成立（事件日志形态），对 VS Code 不成立（编辑器会话形态） |
+
+[issue #333]: https://github.com/OpenHands/software-agent-sdk/issues/333
+[issue #14912]: https://github.com/openhands/openhands/issues/14912
+[issue #13506]: https://github.com/OpenHands/OpenHands/issues/13506
+[issue #13126]: https://github.com/OpenHands/OpenHands/issues/13126
+
+来源：
+[OpenHands SDK conversation](https://docs.openhands.dev/sdk/api-reference/openhands.sdk.conversation) ·
+[OpenHands SDK 论文（arXiv 2511.03690）](https://arxiv.org/html/2511.03690v1) ·
+[openhands-agent-server](https://github.com/OpenHands/software-agent-sdk/tree/main/openhands-agent-server/openhands/agent_server) ·
+[VS Code Remote Tunnels](https://code.visualstudio.com/docs/remote/tunnels) ·
+[dev tunnels 的协议分层分析](https://blog.xpnsec.com/accidental-c2/) ·
+[GitHub Codespaces（VS Code 文档）](https://code.visualstudio.com/docs/remote/codespaces)
+
+---
+
 ## 借鉴优先级
 
 | 优先级 | 项目 | 看什么 |
