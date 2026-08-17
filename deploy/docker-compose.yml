@@ -179,8 +179,12 @@ services:
       # 这个进程怎么找到记忆服务。同一台机器上走 compose 网络里的服务名。
       #
       # **有默认值是因为这份 compose 就把两者放在一起。** 换成外部记忆服务
-      # 时在 .env 里覆盖它 —— 而 agentd 的 /health 会报 memory_reachable，
-      # 配错了看得见（部署验证也断言它）。
+      # 时在 .env 里覆盖它。
+      #
+      # ⚠️ 配错了**不再看得见**：长期记忆 2026-08-17 整条拆掉之后 agentd 不再
+      # 连记忆服务，`/health` 里那个 `memory_reachable` 也删了。这个变量今天
+      # 只剩边缘转给 Cormex 的 `/memory` `/mcp` 那条路在用（给第三方 agent），
+      # 而那条路的健康归 Cormex 自己的 /health 管。
       CORTEX_MEMORY_URL: ${CORTEX_MEMORY_URL:-http://cormex:8080}
       # **容器**怎么找到记忆服务。沙箱网段是 internal 的，与 agentd 同网段，
       # 所以这里直连服务名，中继那一整层不参与

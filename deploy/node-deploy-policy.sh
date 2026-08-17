@@ -284,7 +284,9 @@ done
 
 # 一直没健康。真正的还原由 EXIT trap 做，这里只报为什么。
 #
-# 最常见的一种：agentd 连不上记忆服务（CORMEX_VERSION 没配、或者 cormex
-# 那个容器压根没起）。它的 /health 会报 memory_reachable=false，
-# 而部署验证那一步断言的正是这个字段。
+# 最常见的一种：agentd 连不上自己的库（cortexdb 没起、或者迁移失败）。
+# 它的 /health 会报 database=error，而部署验证那一步断言的正是这个字段。
+#
+# 「连不上记忆服务」曾经也在这一格。长期记忆 2026-08-17 拆掉之后 agentd
+# 不再连它，那条症状连同 memory_reachable 一起没了。
 fail "agentd 10 分钟内没有健康（schema 未回滚 —— 见 docs/deploy.md）"

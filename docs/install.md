@@ -40,9 +40,9 @@
 两边**没有任何代码依赖，只有 HTTP**。各自发版、各自版本号 ——
 生产 `.env` 里 `CORTEX_VERSION` 与 `CORMEX_VERSION` 是两个变量，正是为此。
 
-> ⚠️ **先装 Cormex，再装 Cortex。** 顺序反了的话 agentd 起来时连不上
-> 记忆服务，一条对话都开不了。它的 `/health` 会把 `memory_reachable: false`
-> 写在脸上（部署验证也断言这一条），但那时你已经多绕了一圈。
+> ⚠️ **Cortex 不再需要 Cormex 才能对话。** 长期记忆 2026-08-17 整条拆掉，
+> agentd 只连自己的库（`/health` 的 `database` 字段）。装 Cormex 只为让边缘
+> 那两条路（`/memory`、`/mcp`）有人应答 —— 那是给第三方 agent 用的。
 >
 > **Postgres + pgvector、对象存储、embedding 那一整套都是 Cormex 的**，
 > 装那一半的说明在**那个仓库**。这份文档不重复它 —— 抄一份过来的下场是
@@ -262,7 +262,6 @@ curl -fsS https://<你的域名>/api/sandbox/health  # ← agentd
 | 字段 | 必须是 | 不对时意味着 |
 |---|---|---|
 | `version` | 你装的那一版 | 拉到了别的镜像 |
-| `memory_reachable` | `true` | **连不上 Cormex** —— 一条对话都开不了 |
 | `database` | `ok` | `disabled` = 没配 `CORTEX_DATABASE_URL`（读不到任何历史）；`error: …` = 配了但连不上 |
 | `blobs` | `s3` | `local_fs` **出现在生产上就是一条告警**：附件只活在这个容器里，重建即丢失。`disabled` = 没接对象存储 |
 | `auth` | `token` | `disabled` = 这台机器对任何能连上的人敞开 |

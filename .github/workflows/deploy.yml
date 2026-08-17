@@ -157,11 +157,20 @@ jobs:
           echo "$agent" | grep -q '"role":"agent-orchestrator"' \
             || { echo "/api/sandbox/health 答话的不是 agentd —— traefik 的分流配错了"; exit 1; }
 
-          # **拆成两个服务之后，「两边各自都起来了」不等于「它们连得上」。**
-          # 而后者才是用户感受到的那件事：连不上记忆服务的 agentd 要不到
-          # 委托凭据，于是一条对话都开不了 —— 但它自己的容器是 healthy 的。
-          echo "$agent" | grep -q '"memory_reachable":true' \
-            || { echo "agentd 连不上记忆服务 —— 对话一条都开不了"; exit 1; }
+          # **「起来了」不等于「连得上它依赖的东西」。**
+          #
+          # 这条原先断言的是 `memory_reachable:true`。长期记忆 2026-08-17 整条
+          # 拆掉之后 agentd 不再连记忆服务，那个字段也从 /health 里删了 ——
+          # 于是这条断言在 0.1.11 的部署上**必然失败**，而部署本身是成功的。
+          # （`routes.rs` 里已经有单元测试钉住「这两个字段不存在」，只有这里漏了。
+          # 能力下线时得把断言一起下线，见 CLAUDE.md 约束 2 的同一个道理。）
+          #
+          # 换成现在真正的那条依赖：agentd → 它自己的库。理由一样硬 ——
+          # 部署用的是 `--no-deps`，它**忽略** depends_on 的健康等待，所以
+          # agentd 确实可能在 postgres 还没接受连接时起来，而它起来第一件事
+          # 就是跑 migration。连不上库的 agentd 一句历史都读不出来。
+          echo "$agent" | grep -q '"database":"ok"' \
+            || { echo "agentd 连不上自己的库 —— 一条会话都读不出来"; exit 1; }
 
           # Web 也要真的发得出来（traefik 的路径分流三条都得对）
           curl -fsS https://cortex.cloudcele.com/ | grep -q '<html'
