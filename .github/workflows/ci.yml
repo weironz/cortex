@@ -12,13 +12,28 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+
+# ⚠️ `RUSTFLAGS: -D warnings` **刻意不在这里**，它按作业单独设。
+#
+# 放顶层的代价不是编译慢，是**发版永远命中不了缓存**：rust-cache 把
+# `RUST*` 环境变量算进缓存键，而 release.yml 不设这个变量 —— 于是同一台
+# windows runner 上编同一份代码的两个作业，键的那一段一个是 af4551b0、
+# 一个是 982710c9，永不相交。（实测 v0.1.11：发版的 Windows 作业
+# `No cache found.`，冷编 14.4 分。）
+#
+# 而且**硬凑成一样也没用**：cargo 自己的 fingerprint 同样含 RUSTFLAGS，
+# 缓存就算恢复了也会全量重编。两边必须是同一个值，或者都不设。
+#
+# 「都不设」在 `build` 上是安全的：那个作业回答的是「三个平台上编不编得过」，
+# 而警告的把关在 `lint` 那条 —— 它命令行上就带着 `-D warnings`。
 
 jobs:
   # ── 格式与静态检查 ──────────────────────────────────────
   lint:
     name: 格式与 Clippy
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v5
 
@@ -199,6 +214,8 @@ jobs:
   test:
     name: 测试
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
 
     # **这里没有 Postgres，也没有 migration。**
     #
