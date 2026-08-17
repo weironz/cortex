@@ -30,10 +30,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use cortex_proto::dto::ChatEvent;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, broadcast};
 
 /// 跑完之后这条记录还留多久。
 ///
@@ -98,7 +99,7 @@ impl Run {
     }
 
     /// 快照 + 订阅，**在同一把锁下**。见 [`Self::record`]。
-    async fn attach(&self) -> (Vec<ChatEvent>, broadcast::Receiver<ChatEvent>) {
+    pub async fn attach(&self) -> (Vec<ChatEvent>, broadcast::Receiver<ChatEvent>) {
         let buf = self.replay.lock().await;
         let rx = self.tx.subscribe();
         (buf.clone(), rx)
@@ -113,15 +114,85 @@ impl Run {
     }
 }
 
+/// 一个会话最多有几条消息在排队等着跑（不含正在跑的那一条）。
+///
+/// # 为什么有个上限
+///
+/// 不设的话，一轮卡住 + 一个反复点发送的用户 = 内存无界，而且等它终于跑完
+/// 之后会**一口气连跑十几轮** —— 每一轮都在改同一个工作区的文件，用户看着
+/// 自己十分钟前那句话正在动今天的代码。
+///
+/// 4 足够覆盖真实的「手快连发两三条」，而第 5 条被明确拒掉比悄悄排上去好。
+const MAX_QUEUED: usize = 4;
+
+/// 一个会话在这个进程上的排队状态。
+struct Slot {
+    /// `GET /runs/{id}` 该挂哪一个：**正在跑的那个**，或者刚跑完还没被清掉的。
+    ///
+    /// 排在后面的那些**不在这里** —— 它们还没开始，重挂上去只会看到一片空白，
+    /// 而用户想看的是此刻真的在动的那一轮。
+    latest: Arc<Run>,
+    /// 一次一轮的闸门，1 个许可。
+    ///
+    /// 用 `Semaphore` 而不是手写队列：**tokio 的 Semaphore 是 FIFO 公平的**，
+    /// 于是「谁先到谁先跑」这条性质由它保证，我们不必自己维护一个
+    /// `VecDeque` 加唤醒逻辑 —— 那正是最容易写出「偶尔插队」的地方。
+    gate: Arc<Semaphore>,
+    /// 正在等闸门的条数。**只用于报给用户看**（`ahead`）与限流。
+    ///
+    /// 不能从 `Semaphore` 问出来（它不暴露等待者数量），所以单独记一个。
+    waiting: Arc<AtomicUsize>,
+}
+
 /// 这个进程上所有轮次。
 #[derive(Clone, Default)]
 pub struct Runs {
-    inner: Arc<Mutex<HashMap<String, Arc<Run>>>>,
+    inner: Arc<Mutex<HashMap<String, Slot>>>,
 }
 
-/// 一条已经在跑了。
+/// 这个会话排队的已经太多了。
 #[derive(Debug)]
-pub struct AlreadyRunning;
+pub struct QueueFull {
+    /// 当前排着几条，拼给用户看的那句话用。
+    pub queued: usize,
+}
+
+/// 排队的凭据：**流已经可以给客户端了，但轮次还没开始。**
+///
+/// 分成两步是这条路的关键：`POST /chat` 必须**立刻**返回一条 SSE，
+/// 哪怕前面还有一轮在跑。把 HTTP 请求按住等前面跑完的话，中间那些反代
+/// （dev 的 nginx、生产的 traefik）会在读超时上先把它掐掉，而客户端看到的
+/// 是「网络错误」——一次本该成功的排队变成一次失败。
+pub struct Ticket {
+    /// 这一轮自己的 `Run`。客户端马上挂上它，然后收 keepalive 直到轮到自己。
+    pub run: Arc<Run>,
+    /// 前面还有几轮。0 = 立刻就能跑。
+    pub ahead: usize,
+    session_id: String,
+    gate: Arc<Semaphore>,
+    waiting: Arc<AtomicUsize>,
+    runs: Runs,
+}
+
+impl Ticket {
+    /// 等到轮到自己，然后把这一轮登记成「当前在跑的」。
+    ///
+    /// 返回的许可**必须一直持有到这一轮彻底结束**（包括 episode 落库）——
+    /// 提前 drop 等于放下一轮进来，而它读历史时会读不到上一轮的结果。
+    pub async fn begin(&self) -> OwnedSemaphorePermit {
+        let permit = Arc::clone(&self.gate)
+            .acquire_owned()
+            .await
+            .expect("闸门不会被 close —— 没有任何地方调 Semaphore::close");
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        // 轮到自己了才成为「当前在跑的」，见 `Slot::latest` 的文档
+        let mut map = self.runs.inner.lock().await;
+        if let Some(slot) = map.get_mut(&self.session_id) {
+            slot.latest = Arc::clone(&self.run);
+        }
+        permit
+    }
+}
 
 impl Runs {
     #[must_use]
@@ -129,25 +200,59 @@ impl Runs {
         Self::default()
     }
 
-    /// 开一轮。**同一个会话已经在跑就拒绝。**
+    /// 排一轮。**同一个会话已经在跑就排到它后面，而不是拒绝。**
     ///
-    /// # 为什么拒绝而不是并跑
+    /// # 为什么是排队而不是拒绝
     ///
     /// 两轮同时跑一个会话，它们写同一个工作区的文件、往同一段历史里追加
-    /// 消息，谁覆盖谁取决于时序。客户端自己有「一次一轮」的守卫，所以走到
-    /// 这里的必然是**另一个设备或另一个标签页** —— 那个人不知道这边正在跑，
-    /// 而一句「这个会话正在跑，等它跑完」比一堆交错的文件改动好得多。
-    pub async fn begin(&self, session_id: &str) -> Result<Arc<Run>, AlreadyRunning> {
+    /// 消息，谁覆盖谁取决于时序 —— 所以**不能并跑**这条不变量没变。变的是
+    /// 撞上的那一条怎么办：原先回 409，代价是**用户敲的那句话就此消失**，
+    /// 而他往往正是因为看到「还在跑」才补了一句。
+    ///
+    /// 排队之后那句话不丢，只是晚一点被回答。OpenHands 在同一个问题上也
+    /// 从「拒绝第二个客户端」改成了 FIFO 排队（见 references.md）。
+    ///
+    /// # Errors
+    /// 排队的已经到 [`MAX_QUEUED`] 条。
+    pub async fn enqueue(&self, session_id: &str) -> Result<Ticket, QueueFull> {
         let mut map = self.inner.lock().await;
         self.sweep(&mut map);
-        if let Some(existing) = map.get(session_id)
-            && existing.is_running().await
-        {
-            return Err(AlreadyRunning);
-        }
         let run = Arc::new(Run::new());
-        map.insert(session_id.to_owned(), Arc::clone(&run));
-        Ok(run)
+        // 这个会话第一次出现：开一把满的闸门，于是下面那段对「第一条」和
+        // 「第五条」是同一段代码 —— 两条分支各算一次 `ahead` 的话，
+        // 其中一条迟早算错，而算错的表现只是界面上多写/少写一个数字，
+        // 不会有任何测试红
+        if !map.contains_key(session_id) {
+            map.insert(
+                session_id.to_owned(),
+                Slot {
+                    latest: Arc::clone(&run),
+                    gate: Arc::new(Semaphore::new(1)),
+                    waiting: Arc::new(AtomicUsize::new(0)),
+                },
+            );
+        }
+        let slot = &map[session_id];
+
+        // 前面还有几轮：正在跑的那一个（许可被占着）+ 已经在等的那些。
+        //
+        // 用 `available_permits` 而不是「latest 还在跑吗」：一轮的 `Done` 事件
+        // 发出之后到那个 task 真的结束之间有一小段时间，许可还没放开。
+        // 按 `latest` 判会在那一瞬间说「前面没人」，而 `begin` 实际还要等。
+        let running = usize::from(slot.gate.available_permits() == 0);
+        let waiting = slot.waiting.load(Ordering::SeqCst);
+        if waiting >= MAX_QUEUED {
+            return Err(QueueFull { queued: waiting });
+        }
+        slot.waiting.fetch_add(1, Ordering::SeqCst);
+        Ok(Ticket {
+            run,
+            ahead: running + waiting,
+            session_id: session_id.to_owned(),
+            gate: Arc::clone(&slot.gate),
+            waiting: Arc::clone(&slot.waiting),
+            runs: self.clone(),
+        })
     }
 
     /// 挂上一个还在跑（或刚跑完不久）的轮次。
@@ -158,7 +263,7 @@ impl Runs {
         let run = {
             let mut map = self.inner.lock().await;
             self.sweep(&mut map);
-            Arc::clone(map.get(session_id)?)
+            Arc::clone(&map.get(session_id)?.latest)
         };
         let running = run.is_running().await;
         let (replay, rx) = run.attach().await;
@@ -169,11 +274,11 @@ impl Runs {
     pub async fn running(&self) -> Vec<RunSummary> {
         let map = self.inner.lock().await;
         let mut out = Vec::new();
-        for (id, run) in map.iter() {
-            if run.is_running().await {
+        for (id, slot) in map.iter() {
+            if slot.latest.is_running().await {
                 out.push(RunSummary {
                     session_id: id.clone(),
-                    started_at: run.started_at.to_rfc3339(),
+                    started_at: slot.latest.started_at.to_rfc3339(),
                 });
             }
         }
@@ -186,10 +291,20 @@ impl Runs {
     /// 顺手做，不开后台任务：这张表只在有人开轮次 / 重挂 / 列表时被碰，
     /// 而一个专门的定时器意味着多一个要管生命周期的东西，换来的只是
     /// 「没人用的时候内存早几分钟释放」。
-    fn sweep(&self, map: &mut HashMap<String, Arc<Run>>) {
-        map.retain(|_, run| {
+    ///
+    /// # 有人在排队时**一格都不能清**
+    ///
+    /// 清掉整个 slot 等于扔掉那把闸门，于是下一条消息会新建一把空的 ——
+    /// 两轮就此并跑，而这正是这个模块存在的理由。所以先看闸门和等待数，
+    /// 再看时间。
+    fn sweep(&self, map: &mut HashMap<String, Slot>) {
+        map.retain(|_, slot| {
+            if slot.gate.available_permits() == 0 || slot.waiting.load(Ordering::SeqCst) > 0 {
+                return true;
+            }
             // `try_lock` 失败 = 正被别人用着，那它显然还活着
-            run.finished_at
+            slot.latest
+                .finished_at
                 .try_lock()
                 .is_ok_and(|f| f.is_none_or(|t| t.elapsed() < KEEP_FINISHED))
         });
@@ -245,6 +360,17 @@ mod tests {
         }
     }
 
+    /// 排一轮并等到它真的开跑。
+    ///
+    /// 返回的许可**必须接住**（`let (_run, _permit) = ...`）：drop 掉就等于告诉
+    /// 闸门这一轮结束了，于是排在后面的立刻插进来 —— 一个 `let _ = ` 会让
+    /// 「不许并跑」那几条测试无声地失去意义。
+    async fn start(runs: &Runs, sid: &str) -> (Arc<Run>, OwnedSemaphorePermit) {
+        let t = runs.enqueue(sid).await.expect("第一轮总排得进");
+        let permit = t.begin().await;
+        (Arc::clone(&t.run), permit)
+    }
+
     /// **顺序要保住，相邻的 delta 要合并。**
     ///
     /// 合并是为了让缓冲的条数与工具调用数同阶（delta 一轮上万条）；
@@ -253,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn the_replay_keeps_order_and_folds_adjacent_deltas() {
         let runs = Runs::new();
-        let run = runs.begin("s1").await.expect("第一轮");
+        let (run, _permit) = start(&runs, "s1").await;
         let sink = RunSink::new(Arc::clone(&run));
 
         sink.send(delta("你")).await;
@@ -277,7 +403,7 @@ mod tests {
     #[tokio::test]
     async fn attaching_then_receives_the_events_that_follow() {
         let runs = Runs::new();
-        let run = runs.begin("s1").await.expect("第一轮");
+        let (run, _permit) = start(&runs, "s1").await;
         let sink = RunSink::new(Arc::clone(&run));
 
         sink.send(delta("前半")).await;
@@ -295,7 +421,7 @@ mod tests {
     #[tokio::test]
     async fn a_confirm_is_broadcast_but_never_replayed() {
         let runs = Runs::new();
-        let run = runs.begin("s1").await.expect("第一轮");
+        let (run, _permit) = start(&runs, "s1").await;
         let sink = RunSink::new(Arc::clone(&run));
         let (_, mut rx, _) = runs.attach("s1").await.expect("挂得上");
 
@@ -321,24 +447,122 @@ mod tests {
         );
     }
 
-    /// 同一个会话不许并跑。
+    /// 同一个会话仍然不许并跑 —— 但第二条是**排队**，不是被拒。
     ///
-    /// 走到这一步的必然是另一个设备 / 另一个标签页 —— 客户端自己有守卫。
-    /// 让它们并跑的话，两轮写同一个工作区、往同一段历史追加，谁覆盖谁
-    /// 取决于时序。
+    /// 并跑那条不变量没变（两轮写同一个工作区、往同一段历史追加，谁覆盖谁
+    /// 取决于时序）。变的是撞上的那一条怎么办：原先回 409，也就是用户敲的
+    /// 那句话直接丢了。
     #[tokio::test]
-    async fn a_second_turn_on_the_same_session_is_refused() {
+    async fn a_second_turn_waits_instead_of_being_refused() {
         let runs = Runs::new();
-        let run = runs.begin("s1").await.expect("第一轮");
-        assert!(runs.begin("s1").await.is_err(), "第二轮必须被拒");
+        let (first, permit) = start(&runs, "s1").await;
 
-        // 跑完之后可以再开
-        RunSink::new(run)
+        let second = runs.enqueue("s1").await.expect("第二条该排得进，不该被拒");
+        assert_eq!(second.ahead, 1, "它前面有一轮在跑");
+
+        // 前面还占着闸门，`begin` 必须等
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), second.begin())
+                .await
+                .is_err(),
+            "第一轮还没结束，第二轮就开跑了 —— 这正是并跑"
+        );
+
+        // 第一轮结束（发 done 只是让 `is_running` 转假；真正放开闸门的是 drop 许可）
+        RunSink::new(first)
             .send(ChatEvent::Done {
                 episode_id: "e1".into(),
             })
             .await;
-        assert!(runs.begin("s1").await.is_ok(), "上一轮跑完了就该能再开");
+        drop(permit);
+
+        let _permit2 = tokio::time::timeout(Duration::from_secs(1), second.begin())
+            .await
+            .expect("上一轮放开之后，排着的这一轮就该开跑");
+    }
+
+    /// **先到先跑。** 排队的顺序就是到达的顺序。
+    ///
+    /// 钉这条是因为它是「用 Semaphore 而不是手写队列」的全部理由：tokio 的
+    /// 信号量本身 FIFO 公平。哪天有人为了「顺手」把它换成 `Notify` + 一个
+    /// 布尔，这条会红 —— 那时的症状否则是「偶尔有一句话被插队，看起来像
+    /// 模型答错了上一个问题」。
+    #[tokio::test]
+    async fn the_queue_runs_in_arrival_order() {
+        let runs = Runs::new();
+        let (_first, permit) = start(&runs, "s1").await;
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+        for i in 0..3u8 {
+            let t = runs.enqueue("s1").await.expect("排得进");
+            assert_eq!(
+                t.ahead,
+                usize::from(i) + 1,
+                "第 {i} 条前面该有 {} 轮",
+                i + 1
+            );
+            let order = Arc::clone(&order);
+            handles.push(tokio::spawn(async move {
+                let _p = t.begin().await;
+                order.lock().await.push(i);
+            }));
+            // 让这个 task 真的跑到 `acquire` 上排队再放下一个 —— 否则三个
+            // spawn 到达闸门的先后是调度顺序，测的就不是队列了
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        drop(permit);
+        for h in handles {
+            h.await.expect("排队的 task 不该 panic");
+        }
+        assert_eq!(*order.lock().await, vec![0, 1, 2], "跑的顺序必须是到达顺序");
+    }
+
+    /// 排到上限就明确拒掉，而不是继续收。
+    ///
+    /// 继续收的代价不是内存 —— 是等前面跑完之后**一口气连跑一串**十分钟前的
+    /// 指令，每一条都在改同一份文件。
+    #[tokio::test]
+    async fn the_queue_is_bounded() {
+        let runs = Runs::new();
+        let (_first, _permit) = start(&runs, "s1").await;
+
+        let mut tickets = Vec::new();
+        for i in 0..MAX_QUEUED {
+            tickets.push(
+                runs.enqueue("s1")
+                    .await
+                    .unwrap_or_else(|_| panic!("第 {i} 条还在上限内，该排得进")),
+            );
+        }
+        let full = runs.enqueue("s1").await;
+        assert!(full.is_err(), "排满之后必须拒，否则就是无限攒指令");
+        assert_eq!(
+            full.err().expect("上面刚断言过是 Err").queued,
+            MAX_QUEUED,
+            "拒的时候要如实说排着几条 —— 那句话直接给用户看"
+        );
+    }
+
+    /// 排队期间 `GET /runs/{id}` 挂到的是**正在跑的**那一轮，不是排在后面的。
+    ///
+    /// 反过来的话，一个回来重挂的用户会看到一片空白（排队的那轮还没发过任何
+    /// 事件），而屏幕上明明有一轮在动。
+    #[tokio::test]
+    async fn attaching_while_queued_lands_on_the_running_turn() {
+        let runs = Runs::new();
+        let (first, _permit) = start(&runs, "s1").await;
+        RunSink::new(first).send(delta("我是正在跑的那轮")).await;
+
+        let _queued = runs.enqueue("s1").await.expect("排得进");
+
+        let (replay, _, running) = runs.attach("s1").await.expect("挂得上");
+        assert!(running, "挂到的该是还在跑的那一轮");
+        assert!(
+            matches!(&replay[..], [ChatEvent::Delta { text }] if text == "我是正在跑的那轮"),
+            "挂到了排队那一轮（空的），而不是正在跑的：{replay:?}"
+        );
     }
 
     /// 跑完的那条**留一会儿**，重挂还挂得上（只是 running=false）。
@@ -348,7 +572,7 @@ mod tests {
     #[tokio::test]
     async fn a_finished_run_is_still_attachable_for_a_while() {
         let runs = Runs::new();
-        let run = runs.begin("s1").await.expect("第一轮");
+        let (run, _permit) = start(&runs, "s1").await;
         let sink = RunSink::new(run);
         sink.send(delta("答完了")).await;
         sink.send(ChatEvent::Done {

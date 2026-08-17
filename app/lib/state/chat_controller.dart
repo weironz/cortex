@@ -823,12 +823,21 @@ class ChatController extends Notifier<ChatState> {
     if (turn == null) return;
 
     switch (event) {
+      // 排在别人后面。**不是终态** —— 同一条流接着会送这一轮自己的内容。
+      // 记下来只为在气泡里说一句话：排队期间流上除了 keepalive 什么都没有，
+      // 不说的话屏幕上就是一个转了几分钟的圈
+      case ChatQueuedEvent(:final ahead):
+        state = state.copyWith(streaming: turn.copyWith(queuedAhead: ahead));
+
       case ChatDeltaEvent(:final text):
         if (text.isEmpty) return;
+        // 有自己的内容了 = 闸门已经放开。不清的话整轮都挂着「排队中」
+        _leaveQueue();
         _pending.write(text);
         _scheduleFlush();
 
       case ChatToolEvent(:final name, :final summary, :final path, :final diff):
+        _leaveQueue();
         _flushPending();
         // Call and result arrive as two events; [ToolCall.merge] folds them
         // into a single row instead of printing the same tool twice.
@@ -870,6 +879,16 @@ class ChatController extends Notifier<ChatState> {
         // Forward compatibility: ignore quietly rather than break the turn.
         break;
     }
+  }
+
+  /// 收到本轮自己的第一条内容就不再是「排队中」了。
+  ///
+  /// 幂等且便宜（已经清过就不动状态，免掉一次无谓的重建）—— 所以每条 delta
+  /// 都可以无脑调它，不必额外记一个「清过没有」的布尔。
+  void _leaveQueue() {
+    final turn = state.streaming;
+    if (turn == null || turn.queuedAhead == null) return;
+    state = state.copyWith(streaming: turn.copyWith(queuedAhead: null));
   }
 
   void _scheduleFlush() {

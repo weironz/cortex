@@ -59,6 +59,7 @@ fn state(dir: &Path) -> LocalState {
         standalone_llm: false,
         // 不认证：这几条断言要看的是路由与回执，不是认证中间件
         inbound_token: None,
+        attach_token: None,
     }
 }
 

@@ -132,10 +132,17 @@ void main() {
       sessionId: 'live-chat-${DateTime.now().millisecondsSinceEpoch}',
       // 点名一个工具，好让那对事件必定上线。
       //
-      // 从前这里点的是 `read_file`。cortexd 现在一个文件工具都不给
-      //（`WORKSPACE_FREE_TOOLS` 只有 `memory_search`），继续点它测的就成了
-      // 「模型面对一个不存在的工具会怎么办」—— 那是模型的事，不是契约的事
-      message: '用 memory_search 工具查一下 Cortex 这个项目，然后用一句话说说你查到了什么。',
+      // 这里点过 `read_file`，也点过 `memory_search`。两次都因为**同一个
+      // 原因**过期：那个工具在这条会话上不存在了（前者是 cortexd 曾经不给
+      // 文件工具，后者是记忆能力 2026-08-17 整条拆掉）。点一个不存在的工具，
+      // 测的就成了「模型面对不存在的工具会怎么办」—— 那是模型的事，
+      // 不是契约的事。
+      //
+      // `write_file` 在**没绑工作区**的会话里也在目录中（`Turn::sealed` 给的是
+      // 完整内置目录，只是沙箱封闭）。这条用例要的是那对「调用 + 返回」事件，
+      // **不要求它成功** —— 一次被沙箱拒掉的写入照样发两条事件，
+      // 而那正是被测的契约。
+      message: '用 write_file 工具往 note.txt 写一行 hello，然后一句话说说结果。',
     )) {
       events.add(event);
       switch (event) {
@@ -160,6 +167,11 @@ void main() {
             '这一轮不该触发高风险确认，但收到了 ${request.tool}（${request.risk}）：'
             '${request.preview}',
           );
+        // 排队：**不是终态**，接着还有这一轮自己的内容。
+        // 这条用例用的是全新会话，所以正常不该出现 —— 但它出现也不是错，
+        // 静静接住比 `ChatUnknownEvent` 那条 `fail` 好
+        case ChatQueuedEvent():
+          break;
         case ChatDoneEvent():
           break;
         case ChatErrorEvent(:final message):
@@ -177,7 +189,7 @@ void main() {
     expect(done.episodeId, isNotNull, reason: 'done 必须带回 episode id 供追溯');
 
     final rawToolEvents = events.whereType<ChatToolEvent>().length;
-    expect(toolCalls, isNotEmpty, reason: '这个问题必须触发一次 memory_search');
+    expect(toolCalls, isNotEmpty, reason: '这个问题必须触发一次 write_file');
     expect(
       rawToolEvents,
       toolCalls.length * 2,
@@ -728,31 +740,45 @@ void main() {
 
   // ─────────────── 工具确认已经不在 cortexd 这一侧 ───────────────
 
-  test('cortexd 不再有 /confirmations —— 确认属于 agent，而 agent 在别处', () async {
+  test('cortexd 的 /confirmations 是反代 —— 有沙箱 200、没沙箱 409，**都不是 404**', () async {
     if (!up) return markTestSkipped('cortexd not running');
     final api = _api();
     addTearDown(api.dispose);
 
-    // 这里原本有三条用例：mock 后端用 `#confirm` 口令触发一次确认、
-    // 从待办列表里捞回来、同一个 token 投两次。它们打的都是 cortexd 自己
-    // 那个进程内 agent，而那个 agent 删掉了（见 cortexd `routes::chat`）。
+    // 这条用例改过两次，两次都是因为**契约真的变了**，记下来免得下次又猜：
     //
-    // 换成钉住新契约的一条：**这个端点没了**。留着旧用例更糟 ——
-    // `answerConfirmation` 对 404 返回 false，于是那条断言在路由被删之后
-    // 照样是绿的，只是理由完全变了，而没人会发现。
-    await expectLater(
-      api.pendingConfirmations(),
-      throwsA(
-        isA<CortexApiException>().having(
-          (e) => e.isMissing,
-          'isMissing',
-          isTrue,
-        ),
-      ),
-      reason:
-          '确认回路在 agent 那一侧：桌面端问本机 cortex-local，'
-          '云端那一轮跑在容器里而容器里的 agent 压根不问',
-    );
+    // ① 最早三条：mock 后端用 `#confirm` 触发一次确认、从待办里捞回来、
+    //    同一个 token 投两次。它们打的是 cortexd 自己那个进程内 agent，
+    //    而那个 agent 删掉了。
+    // ② 于是改成「这个端点没了」（断言 404）。**那条也过期了** ——
+    //    `/confirmations` 后来作为**反代**回来了（提交 666c6f5）：簿子在容器里那个
+    //    cortex-local 手上，agentd 只转发。
+    //
+    // 现在钉的是那个反代的契约，而**关键在 404 不能出现**：那个码在这条路上
+    // 另有含义（容器用它说「这个 token 已经用掉了 / 那一轮超时了」，客户端据此
+    // 显示成「抢答输了」）。拿它表示「这儿没这个端点」会把两件补救方式完全不同
+    // 的事说成同一件。
+    //
+    // 200 与 409 都合法，取决于此刻这个用户有没有活着的沙箱 —— 一条 live 用例
+    // 不该去操纵那个状态，那属于上面那几条云端用例。
+    try {
+      // 有沙箱：转发进去，容器答一份列表（通常是空的 —— 没有轮次在等确认）。
+      // 不抛就是这条路通了；解析成功由返回类型本身保证
+      await api.pendingConfirmations();
+    } on CortexApiException catch (e) {
+      expect(
+        e.isMissing,
+        isFalse,
+        reason:
+            '404 在这条路上表示「token 用掉了 / 轮次超时了」。'
+            '拿它表示「没有沙箱」会让客户端把一次可重试的事显示成抢答输了',
+      );
+      expect(
+        e.statusCode,
+        409,
+        reason: '没有活着的沙箱时约定回 409，且正文要能直接读懂：${e.message}',
+      );
+    }
   });
 }
 

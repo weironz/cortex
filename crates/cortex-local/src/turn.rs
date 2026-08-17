@@ -270,26 +270,40 @@ impl Engine {
     /// 发起方与后来重挂的人订阅的是同一份 —— 于是不存在「实时那条看得见、
     /// 重挂那条看不见」的字段。
     ///
+    /// # 前面还有一轮在跑时**这里照样立刻返回一条流**
+    ///
+    /// 排队等在起 task 之后（`ticket.begin()`），不在这个函数里 —— 在这里等的话
+    /// `POST /chat` 的响应头就要等前面那一轮跑完才发得出去，而中间的反代会先
+    /// 在读超时上把它掐掉。客户端看到的是「网络错误」，而它明明排上了。
+    ///
     /// # Errors
-    /// 这个会话已经有一轮在跑。见 [`crate::runs::Runs::begin`]。
+    /// 这个会话排队的已经太多。见 [`crate::runs::Runs::enqueue`]。
     pub async fn chat(
         self: &Arc<Self>,
         req: ChatRequest,
-    ) -> Result<
-        (Vec<ChatEvent>, tokio::sync::broadcast::Receiver<ChatEvent>),
-        crate::runs::AlreadyRunning,
-    > {
-        let session_id = req.session_id.clone();
-        let run = self.runs.begin(&session_id).await?;
-        // 先订阅再起 task：反过来的话，任务开头那几条事件会发在订阅之前
-        let (replay, rx, _) = self
-            .runs
-            .attach(&session_id)
-            .await
-            .expect("刚 begin 出来的这一条必然还在");
-        let tx = Arc::new(crate::runs::RunSink::new(run));
+    ) -> Result<(Vec<ChatEvent>, tokio::sync::broadcast::Receiver<ChatEvent>), crate::runs::QueueFull>
+    {
+        let ticket = self.runs.enqueue(&req.session_id).await?;
+        // 先订阅再起 task：反过来的话，任务开头那几条事件会发在订阅之前。
+        //
+        // 直接问这张票自己的 `run`，不走 `runs.attach(session_id)` —— 那条路给的是
+        // 「当前在跑的那一轮」，而排在后面时那**是别人那一轮**，于是发起方会看到
+        // 别人的回答流进自己的气泡，最后收到别人的 `done`
+        let (replay, rx) = ticket.run.attach().await;
+        let tx = Arc::new(crate::runs::RunSink::new(Arc::clone(&ticket.run)));
         let engine = Arc::clone(self);
         tokio::spawn(async move {
+            // 排队要说一声：这条流在轮到自己之前只有 keepalive，
+            // 不说的话界面上就是一个转了三分钟的圈，与卡死一模一样
+            if ticket.ahead > 0 {
+                tx.send(ChatEvent::Queued {
+                    ahead: ticket.ahead,
+                })
+                .await;
+            }
+            // 许可要活到这一轮**彻底**结束（含 episode 落库）：提前放开等于
+            // 让下一轮开始读历史，而那时上一轮的结果还没进去
+            let _permit = ticket.begin().await;
             let run = engine.run_turn(req, &tx);
             // ── 容器里给单轮一个 wall-clock 上限 ──
             //

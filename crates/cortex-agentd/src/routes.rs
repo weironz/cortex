@@ -500,7 +500,16 @@ async fn heartbeat(
     Json(hb): Json<cortex_proto::presence::AgentHeartbeat>,
 ) -> Json<cortex_proto::presence::HeartbeatAck> {
     let owner = crate::accounts::current_user(&st, &headers).await;
-    st.presence().record(&owner, &hb);
+    // 探一次它报的那个地址。**在这里探而不是在每次 GET /agents 时探**：
+    // 后者会让一次列表请求变成 N 次外发 HTTP，而心跳本来就是每 30 秒一次。
+    //
+    // 探通 ≠ 能接入：那只说明那个端口上有个答 /health 的东西。真正的判据是
+    // 接下来反代过去时那把钥匙认不认 —— 而认不认由**那台机器**说。
+    let attach_reachable = match hb.attach.as_ref() {
+        None => false,
+        Some(offer) => crate::sandbox_proxy::probe_health(st.http(), &offer.addr).await,
+    };
+    st.presence().record(&owner, &hb, attach_reachable);
     Json(cortex_proto::presence::HeartbeatAck {
         ttl_secs: crate::presence::HEARTBEAT_SECS * 3,
     })
@@ -658,29 +667,80 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
     // agent 会拿到一个**完全不同的文件系统**：历史里那些路径全都不存在，
     // 而它读不到时说的是「没有这个文件」—— 一句听起来像它失忆了的实话。
     if matches!(d.runtime, SessionRuntimeDto::Local) {
-        // ── 说出**是哪一台**，以及它现在开着没有 ──
+        // ── 那台机器同意被接入？那就把这一轮接过去 ──
+        //
+        // roadmap E 的阶段 4。**判据不是「它在线」而是三件事同时成立**：
+        //
+        //   1. 它报告持有这个会话的绑定 —— 也就是它拿得出那份绑定
+        //   2. 机器主人显式开了远程接入（`--allow-remote-attach`，默认关）
+        //   3. 服务端刚才真的探通了它报的地址
+        //
+        // 少任何一件就落到下面那句 409。第 2 件是**产品决定不是技术判断**：
+        // 让云端够到一个能跑 shell 的进程，必须是机器主人的一次显式选择。
+        //
+        // 复用 `sandbox_proxy::forward` 而不是另写一份：它已经把「剥掉一切
+        // 凭据再换上这条路自己的钥匙」做对了，而那一处正是安全边界。
+        // 抄第二份的后果是两处剥离规则漂开，且漂开的那一天没人看得出来。
+        if let Some((addr, key)) = st.presence().attach_for(&d.owner, &parsed.session_id) {
+            tracing::debug!(
+                owner = %d.owner, session = %parsed.session_id, %addr,
+                "本轮接到那台机器上的本地 agent"
+            );
+            let mut proxied = Request::new(axum::body::Body::from(bytes));
+            *proxied.method_mut() = axum::http::Method::POST;
+            *proxied.uri_mut() = "/chat".parse().expect("常量路径可解析");
+            proxied.headers_mut().insert(
+                header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+            return crate::sandbox_proxy::forward(
+                st.http(),
+                &format!("http://{addr}"),
+                &key,
+                None,
+                proxied,
+            )
+            .await;
+        }
+
+        // ── 接不过去：说出**是哪一台**，以及为什么接不了 ──
         //
         // 这句话原来只说「请到那台机器上打开它」—— 没说哪一台，也没说它此刻
-        // 在不在线。用户要么记得，要么挨个试。在线名册（roadmap E 的阶段 3）
-        // 就是为了让这句话答得出来。
+        // 在不在线。在线名册（阶段 3）让它答得出来；阶段 4 之后还要答得出
+        // 「在线但没开放接入」与「在线且开放了但探不通」的区别，
+        // 否则用户唯一能做的还是挨个试。
+        // 逐行 `concat!`，而不是靠反斜杠续行拼一句长文案。
         //
-        // 名册**不参与判断**：不在名册里也照样 409，只是文案换成「没有在线的
-        // agent 报告持有它」。把它变成一个判断（比如「在线就放行」）是第四步
-        // 的事，而那时的判据仍然是「那个 agent 拿不拿得出那份绑定」。
-        let msg = match st.presence().machine_holding(&d.owner, &parsed.session_id) {
-            // 逐行 `concat!`，而不是靠反斜杠续行拼一句长文案。
-            //
-            // Rust 的续行**本来是对的**（实测：它会吃掉换行与下一行的缩进）。
-            // 换掉它的理由是这段文案第一版是**脚本生成进文件**的，而那个续行没能
-            // 正确落地 —— 结果服务端真的吐出一句中间夹着 17 个空格的话，
-            // 在 dev 上打出来才看见。
-            //
-            // `concat!` 加显式换行不依赖源文件怎么写，于是「这句话长什么样」
-            // 只由这几行本身决定。用户可见的文案值得这个。
-            Some(machine) => format!(
+        // Rust 的续行**本来是对的**（实测：它会吃掉换行与下一行的缩进）。
+        // 换掉它的理由是这段文案第一版是**脚本生成进文件**的，而那个续行没能
+        // 正确落地 —— 结果服务端真的吐出一句中间夹着 17 个空格的话，
+        // 在 dev 上打出来才看见。
+        //
+        // `concat!` 加显式换行不依赖源文件怎么写，于是「这句话长什么样」
+        // 只由这几行本身决定。用户可见的文案值得这个。
+        let msg = match st
+            .presence()
+            .why_not_attachable(&d.owner, &parsed.session_id)
+        {
+            // 在线，但机器主人没开远程接入。**这不是故障** —— 所以话要说成
+            // 「它没同意」而不是「连不上」，否则用户会去查网络
+            Some((machine, crate::presence::WhyNot::NotOffered)) => format!(
                 concat!(
                     "这个会话绑在 {machine} 上的一个目录里，它的文件只在那儿。\n",
-                    "那台机器现在**在线** —— 在它上面打开这个会话就能接着聊。"
+                    "那台机器**在线**，但它没有开放远程接入 —— 要在这里继续聊，",
+                    "在那台机器上用 `--allow-remote-attach` 起 agent；\n",
+                    "或者直接到它上面打开这个会话。"
+                ),
+                machine = machine
+            ),
+            // 开放了却打不通。多半是地址报错了或网络不通 —— 这条要把
+            // 「它同意了」说在前面，否则用户会以为自己没开对开关
+            Some((machine, crate::presence::WhyNot::Unreachable)) => format!(
+                concat!(
+                    "这个会话绑在 {machine} 上的一个目录里。\n",
+                    "那台机器**开放了远程接入，但这边打不通它报的地址** —— ",
+                    "查一下它 `--bind` 的地址是不是这台服务器够得到的",
+                    "（VPN / tailnet 网卡地址，而不是 127.0.0.1 或 0.0.0.0）。"
                 ),
                 machine = machine
             ),

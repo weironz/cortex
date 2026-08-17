@@ -690,6 +690,17 @@ async fn one_turn(
 
     while let Some(ev) = stream.next().await {
         match ev {
+            // 排在别人后面。**必须说一声**：这条流在轮到自己之前只有 keepalive，
+            // 不说的话终端就是干等着不动，和卡死看不出区别
+            Ok(ChatEvent::Queued { ahead }) => {
+                println!(
+                    "{}",
+                    render::dim(
+                        &format!("这个会话前面还有 {ahead} 轮在跑，排队等着…"),
+                        color
+                    )
+                );
+            }
             Ok(ChatEvent::Tool { name, summary, .. }) => {
                 println!("{}", render::tool_line(&name, &summary, color));
             }

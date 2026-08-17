@@ -158,6 +158,45 @@ struct Args {
     /// 隐藏：`--self-check` 起的探针子进程用它。**不是给人敲的。**
     #[arg(long = "sandbox-probe", hide = true)]
     sandbox_probe: bool,
+
+    /// 允许云端**远程接入**这个 agent（默认关）。
+    ///
+    /// 打开之后心跳里会多带一个「你可以从这个地址接进来，用这把钥匙」，
+    /// 于是 Web 端能挂到这台机器上，继续那些绑在本机目录的会话。
+    ///
+    /// # 为什么默认关，而且必须是显式的一次决定
+    ///
+    /// 这个进程能跑 shell。让云端够到它，是把「我笔记本上的执行能力」交出去的
+    /// 一部分 —— 那不该是「装上就有」。
+    ///
+    /// 钥匙是**另铸的**，只在接入面上有效（`POST /chat`、`GET /runs/*`、
+    /// `POST /confirmations`、`/health`），换凭据 / 绑目录 / 改 MCP 一律 401。
+    /// 也就是说：**开放远程接入不等于交出机器**。见 `routes::attach_allows`。
+    ///
+    /// # 与 loopback 绑定互斥
+    ///
+    /// 绑在 `127.0.0.1` 上的 agent 报一个 `127.0.0.1:x` 出去，云端打过去是打到
+    /// **它自己**身上。所以两个一起给会拒绝启动，而不是让名册里出现一个
+    /// 「可接入但打不通」的谎 —— 那种谎的症状是「点了继续，转圈然后超时」。
+    #[arg(long)]
+    allow_remote_attach: bool,
+
+    /// 告诉云端「从这个地址接我」。默认用实际绑到的那个。
+    ///
+    /// # 为什么绑定地址与通告地址要分开
+    ///
+    /// 它们本来是两件事，合成一个会挡住一个很常见的拓扑：绑 `0.0.0.0:8099`
+    /// （听所有网卡），而云端该走的是这台机器在 VPN 上的那个地址。
+    ///
+    /// 只看 `--bind` 的话，`local_addr()` 回的是 `0.0.0.0:8099` —— 一个拨不出去
+    /// 的值。第一版就是这么写的，结果在开发机上**连测都测不了**（Docker 那张
+    /// 网的网关地址宿主绑不上，而通配又被自己拦住）。
+    ///
+    /// 给了这个参数就不再管 `--bind` 是不是通配 —— **通告地址是用户明确说的，
+    /// 而他比这段代码更清楚自己的拓扑**。仍然拦 loopback：那个值无论怎么解释
+    /// 都是「打到云端自己身上」。
+    #[arg(long, requires = "allow_remote_attach")]
+    attach_addr: Option<String>,
 }
 
 #[tokio::main]
@@ -334,7 +373,12 @@ async fn main() -> anyhow::Result<()> {
         //
         // 桌面端离线模式传的正是 `token ?? ''` —— 结果是它被自己拉起的
         // agent 全程 401，而日志里没有任何一行说明为什么
-        inbound_token: args.token.filter(|t| !t.trim().is_empty()),
+        inbound_token: args.token.clone().filter(|t| !t.trim().is_empty()),
+        // 每次启动现铸一把，**不持久化**：它的寿命就是这个进程的寿命，
+        // 而落盘的钥匙是一件需要被保管、轮换、清理的东西。
+        attach_token: args
+            .allow_remote_attach
+            .then(|| cortex_core::Id::new().to_string()),
     };
 
     if state.inbound_token.is_none() {
@@ -378,6 +422,66 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ── 远程接入与 loopback 绑定互斥 ──
+    //
+    // 绑在 127.0.0.1 上的 agent 报一个 `127.0.0.1:x` 给云端，而云端打过去是打到
+    // **它自己**身上。放过去的后果是名册里出现一个「可接入」的谎，而用户看到的
+    // 是「点了继续，转圈然后超时」——**拒绝启动**，并且把该怎么办说出来。
+    //
+    // 判的是 `--bind` 的字面值而不是解析后的 IP：`localhost` 也要拦住，
+    // 而它解析出来可能是 ::1。
+    if args.allow_remote_attach {
+        // 校验**通告地址**：给了 `--attach-addr` 就校它，否则退回 `--bind`。
+        // 校错对象的后果是「绑通配 + 通告一个具体地址」这种完全正常的拓扑
+        // 被拒绝启动 —— 而那正是第一版的样子。
+        let advertised = args.attach_addr.as_deref().unwrap_or(&args.bind);
+        let host = advertised
+            .rsplit_once(':')
+            .map_or(advertised, |(h, _)| h)
+            .trim_matches(['[', ']']);
+        // 两类都不能用，而**原因不同**：
+        //
+        // - loopback：云端打过去是打到它自己身上
+        // - 通配（0.0.0.0 / ::）：`local_addr()` 回的就是通配本身，
+        //   报给云端等于报了一个拨不出去的地址
+        //
+        // 后者尤其要拦：它「看起来像个地址」，于是名册会显示「可接入」，
+        // 而用户看到的是「点了继续，转圈然后超时」。
+        //
+        // 不去靠 `X-Forwarded-For` 反推源 IP：反代后面那个值取决于中间有几层、
+        // 每层配没配，而猜错的表现同样是超时。**要一个具体地址，
+        // 由知道自己拓扑的人给。**
+        let why = match host {
+            "127.0.0.1" | "::1" | "localhost" => Some("云端打这个地址会打到它自己身上"),
+            // 只有**没给** `--attach-addr` 时通配才是问题：那时通告的就是它本身
+            "0.0.0.0" | "::" | "" if args.attach_addr.is_none() => {
+                Some("通配地址拨不出去 —— 用 --attach-addr 告诉云端该打哪个地址")
+            }
+            _ => None,
+        };
+        if let Some(why) = why {
+            anyhow::bail!(
+                concat!(
+                    "--allow-remote-attach 与通告地址 {addr} 冲突：{why}。\n",
+                    "给一个云端**够得到的具体地址** —— 比如这台机器在 VPN / tailnet 上的地址：\n",
+                    "    cortex-local --bind 0.0.0.0:8090 --allow-remote-attach \\\n",
+                    "                 --attach-addr 100.x.y.z:8090\n",
+                    "⚠️ 那个端口对同网段是开着的，而这个进程能跑命令。接入面另有一把\n",
+                    "只在 /chat、/runs、/confirmations 上有效的钥匙，但端口本身是暴露的。"
+                ),
+                addr = advertised,
+                why = why
+            );
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind(&args.bind)
+        .await
+        .with_context(|| format!("绑定 {} 失败", args.bind))?;
+    // 报**实际**地址而不是请求的那个：`--bind 127.0.0.1:0` 时两者不一样，
+    // 而调用方要连的是实际那个
+    let actual = listener.local_addr().context("拿不到实际绑定的地址")?;
+
     // ── 在线名册的心跳（roadmap E 的阶段 3）──
     //
     // **只在本机 agent 上报，容器里不报。** 名册回答的是「我那个绑在别处的
@@ -394,11 +498,34 @@ async fn main() -> anyhow::Result<()> {
         // 像真名字的东西：界面上写着「未命名机器」，用户知道该去配主机名；
         // 写成 "localhost" 的话三台机器长得一模一样。
         let machine_hint = hostname_or_fallback();
+        // 「你可以从这个地址接进来，用这把钥匙」。只在 `--allow-remote-attach`
+        // 打开时存在。
+        //
+        // 地址用**实际监听到的那个**：`--bind 0.0.0.0:0` 时端口由内核挑，
+        // 所以这一段必须在 listener 起来之后 —— 这也是它从原来的位置挪到
+        // 这里的原因（今天已经因为「顺序」咬过两次：项目要在第一轮之前落地、
+        // 会话名要在第一轮读得到）。
+        // 通告地址：显式给的优先，否则用**实际**绑到的那个（`:0` 时端口由内核
+        // 挑，所以必须等 listener 起来 —— 这也是这一整段挪到这里的原因）。
+        let advertised = args
+            .attach_addr
+            .clone()
+            .unwrap_or_else(|| actual.to_string());
+        let attach_offer =
+            state
+                .attach_token
+                .as_ref()
+                .map(|token| cortex_proto::presence::AttachOffer {
+                    addr: advertised.clone(),
+                    token: token.clone(),
+                });
         // agent_id 每次启动换一把即可：名册按 (owner, agent_id) 存，旧的那条
         // 会因为不再有心跳而在 TTL 之后自然消失。不必持久化一个「机器 id」——
         // 而且**刻意不持久化**：那种 id 在重装或克隆之后会骗人，
         // 见 `cortex_store::SessionRuntime` 的那段论证。
         let agent_id = cortex_core::Id::new().to_string();
+        // 绑定一变就补一条心跳，不等这一轮的 30 秒睡完，见 `Workspaces::changed`
+        let bindings_changed = engine.workspaces.changed();
         tokio::spawn(async move {
             // 默认间隔在服务端第一次回执之前用；之后按它说的走
             let mut interval = std::time::Duration::from_secs(30);
@@ -407,6 +534,7 @@ async fn main() -> anyhow::Result<()> {
                     agent_id: agent_id.clone(),
                     machine_hint: machine_hint.clone(),
                     sessions: engine.workspaces.bound_sessions(),
+                    attach: attach_offer.clone(),
                 };
                 match engine.remote.heartbeat(&hb).await {
                     // TTL 的三分之一 —— 掉一条心跳还来得及补上第二条，
@@ -417,17 +545,17 @@ async fn main() -> anyhow::Result<()> {
                     // 于是真正要紧的那条也没人看了
                     Err(e) => tracing::debug!(error = %e, "心跳没报上去（名册这一轮不更新）"),
                 }
-                tokio::time::sleep(interval).await;
+                // 睡到下一轮，**或者**绑定变了就立刻醒。用户刚在这台机器上绑好
+                // 一个会话就去 Web 上打开它是最常见的动作，而名册只认上一条心跳
+                // 报过的那些 —— 干睡满 30 秒的代价是那半分钟里 Web 说
+                // 「没有任何在线的 agent 持有它」，而机器就在他面前开着
+                tokio::select! {
+                    () = tokio::time::sleep(interval) => {}
+                    () = bindings_changed.notified() => {}
+                }
             }
         });
     }
-
-    let listener = tokio::net::TcpListener::bind(&args.bind)
-        .await
-        .with_context(|| format!("绑定 {} 失败", args.bind))?;
-    // 报**实际**地址而不是请求的那个：`--bind 127.0.0.1:0` 时两者不一样，
-    // 而调用方要连的是实际那个
-    let actual = listener.local_addr().context("拿不到实际绑定的地址")?;
     if let Some(path) = &args.addr_file {
         write_addr_file(path, &actual.to_string())
             .with_context(|| format!("写地址文件 {} 失败", path.display()))?;

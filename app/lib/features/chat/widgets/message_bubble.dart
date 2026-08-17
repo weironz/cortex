@@ -144,6 +144,7 @@ class AssistantBlock extends StatelessWidget {
     this.episodeId,
     this.error,
     this.streaming = false,
+    this.queuedAhead,
   });
 
   final String text;
@@ -153,6 +154,9 @@ class AssistantBlock extends StatelessWidget {
   final String? episodeId;
   final String? error;
   final bool streaming;
+
+  /// 这一轮还排在队里，前面有几轮。`null` = 没排队（绝大多数情况）。
+  final int? queuedAhead;
 
   @override
   Widget build(BuildContext context) {
@@ -220,7 +224,13 @@ class AssistantBlock extends StatelessWidget {
                       ),
                     if (streaming) ...[
                       if (text.isEmpty)
-                        const _ThinkingIndicator()
+                        // 排队中就把「前面还有几轮」说出来，而不是一个和
+                        // 「等首 token」长得一样的省略号 —— 那两件事在屏幕上
+                        // 分不开的话，用户会以为模型卡住了
+                        if (queuedAhead case final ahead?)
+                          _QueuedNote(ahead: ahead)
+                        else
+                          const _ThinkingIndicator()
                       else
                         const _Caret(),
                     ],
@@ -354,6 +364,35 @@ class _ErrorNote extends StatelessWidget {
 /// 所以现在只留动效：**「有事在发生」是真的，「在做什么」我们不知道**。
 /// 要说得更具体，得先让服务端发一条真的阶段事件；在那之前，
 /// 一个诚实的省略号胜过一句好看的假话。
+/// 「这句话排在队里，前面还有几轮」。
+///
+/// # 为什么它不是 [_ThinkingIndicator] 加一行字
+///
+/// 那个指示器的全部意思是「发出去了，还没有第一个 token」——它刻意不说在做
+/// 什么，因为客户端无从知道（见它自己的文档）。而这里是**服务端真的说了**
+/// 的一件事：`queued` 事件带着 `ahead`。两者的区别正是「有依据」与「没依据」，
+/// 所以分成两个部件，而不是给一个部件加一个可选的说明文字。
+class _QueuedNote extends StatelessWidget {
+  const _QueuedNote({required this.ahead});
+
+  final int ahead;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Text(
+        // 说清楚是**这个会话**在忙，而不是服务不可用 —— 后者会让人去刷新页面
+        '这个会话前面还有 $ahead 轮在跑，你这句排在后面，跑完就接着答。',
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+        ),
+      ),
+    );
+  }
+}
+
 class _ThinkingIndicator extends StatefulWidget {
   const _ThinkingIndicator();
 

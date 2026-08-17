@@ -73,6 +73,8 @@ pub struct Workspaces {
     /// **一个文件工具都没有**，用户只会觉得「这个沙箱什么都干不了」，
     /// 而日志里一句异常都不会有。
     default_root: Option<String>,
+    /// 绑定表变了就叫一声，让心跳**立刻**补一条。见 [`Self::changed`]。
+    changed: Arc<tokio::sync::Notify>,
 }
 
 impl std::fmt::Debug for Workspaces {
@@ -107,7 +109,24 @@ impl Workspaces {
             path,
             map: Arc::new(Mutex::new(disk)),
             default_root: None,
+            changed: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// 「绑定表变了」的信号，给心跳任务等。
+    ///
+    /// # 为什么需要它
+    ///
+    /// 在线名册只知道**上一次心跳报过的**那些会话。心跳每 30 秒一条，于是
+    /// 用户在桌面端刚绑好一个会话、转头去 Web 上打开它，有最多 30 秒会被
+    /// 告知「没有任何在线的 agent 报告持有它」—— 而那台机器就在他面前开着。
+    /// 实测撞到过，就在把这条加上之前。
+    ///
+    /// `Notify::notify_one` 在没人等的时候会存下一个许可，所以绑定发生在心跳
+    /// 正在发请求的那一瞬间也不会丢，下一次 `notified()` 立刻返回。
+    #[must_use]
+    pub fn changed(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.changed)
     }
 
     /// 设一个回落根（容器专用，见 [`Self::default_root`]）。
@@ -406,6 +425,12 @@ impl Workspaces {
             .map_err(|e| CortexError::Config(format!("写工作区绑定失败：{e}")))?;
         std::fs::rename(&tmp, &self.path)
             .map_err(|e| CortexError::Config(format!("提交工作区绑定失败：{e}")))?;
+        // 落盘成功之后才叫 —— 报一个没落盘的绑定，重启之后名册说的就是假的。
+        //
+        // 放在这里而不是各个 `bind` / `unbind` / `auto_bind` 里：这是绑定表变化
+        // 的唯一咽喉，往上挪一层就得记住三处，而漏掉的那一处不会有任何症状，
+        // 只是那个会话在别的设备上要多等半分钟才能打开
+        self.changed.notify_one();
         Ok(())
     }
 }

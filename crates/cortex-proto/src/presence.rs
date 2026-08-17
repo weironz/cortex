@@ -52,6 +52,41 @@ pub struct AgentHeartbeat {
     /// 空数组是合法且常见的：一个刚起来、用户还没选过目录的 agent。
     #[serde(default)]
     pub sessions: Vec<String>,
+    /// **这台机器同意被远程接入**时带上它，否则 `None`。
+    ///
+    /// 默认 `None` —— 让云端够到你笔记本上那个能跑 shell 的进程，必须是机器
+    /// 主人的一次显式决定（`cortex-local --allow-remote-attach`），
+    /// 不能是「装上就有」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<AttachOffer>,
+}
+
+/// 「你可以从这个地址接进来，用这把钥匙」。
+///
+/// # 这把钥匙**不是**入站凭据
+///
+/// 本地 agent 的入站凭据（`inbound_token`）能做的事包括换出站凭据、绑工作区、
+/// 改 MCP 配置 —— 那是「拉起我的那个桌面端」的权限。把它交给云端等于把笔记本
+/// 的钥匙给出去。
+///
+/// 这里给的是一把**另铸的**、只在接入面上有效的钥匙：`POST /chat`、
+/// `GET /runs/{id}`、`POST /confirmations`、`/health`。其余一律 401 ——
+/// 白名单 + 默认拒绝，与沙箱那侧的委托令牌同一个形状，只是镜像到本地。
+///
+/// # 它只在心跳里出现，不在任何响应里
+///
+/// 服务端把它留在内存的名册里，**从不下发给客户端**（`AgentPresenceDto` 只
+/// 有一个布尔）。下发它等于让任何一个登录过的设备都能直连别人的笔记本。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachOffer {
+    /// agentd 该打哪儿。**必须是 agentd 够得到的地址** —— 绑在 loopback 上的
+    /// agent 报一个 `127.0.0.1:x` 出来，云端打过去是打到它自己身上。
+    ///
+    /// 所以 `--allow-remote-attach` 与 loopback 绑定**互斥**，本地那侧启动时
+    /// 就拒绝，而不是让名册里出现一个「可接入但打不通」的谎。
+    pub addr: String,
+    /// 接入面专用的钥匙。见结构体文档。
+    pub token: String,
 }
 
 /// 心跳的回执。
@@ -82,6 +117,14 @@ pub struct AgentPresenceDto {
     /// 查询里带了 `?session=` 时：这台机器有没有那个会话的绑定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_session: Option<bool>,
+    /// 这台机器同意被远程接入，**而且服务端刚才真的探通了**。
+    ///
+    /// 只是个布尔：地址与钥匙都不下发。见 [`AttachOffer`]。
+    ///
+    /// 「同意」与「探通了」合成一个字段是刻意的：分成两个的话，客户端要自己
+    /// 判断「同意但探不通」该显示什么，而那个判断迟早与服务端的漂开。
+    #[serde(default)]
+    pub attachable: bool,
 }
 
 /// `GET /agents` 的响应。

@@ -29,6 +29,7 @@ class StreamingTurn {
     this.text = '',
     this.toolCalls = const [],
     this.awaitingFirstToken = true,
+    this.queuedAhead,
   });
 
   final String messageId;
@@ -36,18 +37,25 @@ class StreamingTurn {
   final DateTime startedAt;
   final String text;
 
-  /// Facts injected into this turn (from the `memory` event).
-
   /// Tools the agent invoked (from `tool` events).
   final List<ToolCall> toolCalls;
 
   /// True until the first `delta` lands — drives the thinking indicator.
   final bool awaitingFirstToken;
 
+  /// 这一轮还排在队里，前面有几轮（来自 `queued` 事件）。`null` = 没排队。
+  ///
+  /// 一收到本轮**自己的**第一条事件就清掉：那说明闸门放开了，已经在跑。
+  /// 不清的话，界面会在整轮回答期间一直挂着「排队中」。
+  final int? queuedAhead;
+
   StreamingTurn copyWith({
     String? text,
     List<ToolCall>? toolCalls,
     bool? awaitingFirstToken,
+    // 这一个要能置回 null（开跑了就不再排队），所以走哨兵而不是 `int?` ——
+    // `int?` 的话「不改」和「清掉」在签名上是同一件事
+    Object? queuedAhead = _sentinel,
   }) => StreamingTurn(
     messageId: messageId,
     sessionId: sessionId,
@@ -55,7 +63,12 @@ class StreamingTurn {
     text: text ?? this.text,
     toolCalls: toolCalls ?? this.toolCalls,
     awaitingFirstToken: awaitingFirstToken ?? this.awaitingFirstToken,
+    queuedAhead: queuedAhead == _sentinel
+        ? this.queuedAhead
+        : queuedAhead as int?,
   );
+
+  static const Object _sentinel = Object();
 }
 
 /// One session's messages plus the state of paging them in.

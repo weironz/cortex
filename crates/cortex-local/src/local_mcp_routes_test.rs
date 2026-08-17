@@ -48,6 +48,7 @@ fn state(dir: &Path) -> LocalState {
         http: reqwest::Client::new(),
         standalone_llm: false,
         inbound_token: None,
+        attach_token: None,
     }
 }
 
@@ -350,8 +351,10 @@ async fn 跑着的轮次列得出来也挂得上() {
     let dir = tempfile::tempdir().expect("临时目录");
     let st = state(dir.path());
 
-    let run = st.engine.runs.begin("S9").await.expect("开一轮");
-    crate::runs::RunSink::new(run)
+    let ticket = st.engine.runs.enqueue("S9").await.expect("排一轮");
+    // 许可要留住：drop 掉等于这一轮结束了，而下面要看的正是「跑着的」
+    let _permit = ticket.begin().await;
+    crate::runs::RunSink::new(std::sync::Arc::clone(&ticket.run))
         .send(cortex_proto::dto::ChatEvent::Delta {
             text: "在写了".into(),
         })

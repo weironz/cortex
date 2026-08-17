@@ -8,6 +8,7 @@ import 'pending_confirmation.dart';
 /// * `{"type":"delta","text":"..."}`
 /// * `{"type":"confirm","token":"...","tool":"shell","risk":"execute",
 ///    "preview":"command: rm -rf …","timeout_secs":180}`
+/// * `{"type":"queued","ahead":1}`
 /// * `{"type":"done","episode_id":"01J..."}`
 /// * `{"type":"error","message":"..."}`
 ///
@@ -22,6 +23,7 @@ sealed class ChatEvent {
 
   factory ChatEvent.fromJson(Map<String, dynamic> json) {
     return switch (asString(json['type'])) {
+      'queued' => ChatQueuedEvent(asIntOrNull(json['ahead']) ?? 1),
       'delta' => ChatDeltaEvent(asString(json['text'])),
       'tool' => ChatToolEvent(
         name: asString(json['name'], 'tool'),
@@ -57,6 +59,20 @@ sealed class ChatEvent {
       final other => ChatUnknownEvent(other, json),
     };
   }
+}
+
+/// 这一轮排在队里，前面还有 [ahead] 轮没跑完。
+///
+/// **不是终态。** 同一条流接着会送这一轮自己的 delta / tool，最后一条 `done`。
+///
+/// 为什么服务端要发它：一个会话一次只跑一轮，排队期间这条流上除了 keepalive
+/// 什么都没有 —— 不说一声的话界面就是一个转了几分钟的圈，与卡死一模一样。
+final class ChatQueuedEvent extends ChatEvent {
+  const ChatQueuedEvent(this.ahead);
+
+  /// 前面还有几轮。服务端保证 `>= 1`；缺字段时按 1 处理（说「在排队」总比
+  /// 说「排在第 0 位」好）。
+  final int ahead;
 }
 
 /// Incremental assistant text. Append, never replace.

@@ -104,6 +104,29 @@ fn is_credential(name: &str) -> bool {
 /// 「缺少 X-Cortex-Sandbox 头」，还算看得见；所以这条不加测试守。
 pub const ROUTE_HEADER: &str = "x-cortex-sandbox";
 
+/// 那个地址上有没有一个答 `/health` 的东西。
+///
+/// 给在线名册的「可接入」用（roadmap E 的阶段 4）。**短超时**：这一步跑在
+/// 心跳的处理路径上，一台关掉的机器不该让心跳挂两秒以上。
+///
+/// # 探通 ≠ 能接入
+///
+/// 它只说明那个端口上有个应答的东西。真正的判据是接下来反代过去时**那台机器
+/// 认不认那把钥匙** —— 而那由它自己说，不由这里猜。所以探活只用来把
+/// 「报了一个拨不出去的地址」这种常见误配挡在用户点下去之前。
+///
+/// 不带凭据：`/health` 在本地 agent 那侧是唯一免认证的路由。
+pub async fn probe_health(http: &reqwest::Client, addr: &str) -> bool {
+    let url = format!("http://{}/health", addr.trim_end_matches('/'));
+    matches!(
+        http.get(&url)
+            .timeout(std::time::Duration::from_millis(1500))
+            .send()
+            .await,
+        Ok(r) if r.status().is_success()
+    )
+}
+
 /// 把 `req` 转给 `base_url`，响应流式转回。
 ///
 /// `token` 是这个沙箱的令牌 —— 容器那侧用同一把做入站认证

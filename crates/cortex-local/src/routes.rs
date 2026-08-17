@@ -140,17 +140,54 @@ async fn require_auth(State(st): State<LocalState>, req: Request, next: Next) ->
     let Some(expected) = st.inbound_token.as_deref() else {
         return next.run(req).await;
     };
-    let ok = req
+    let bearer = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|t| bytes_eq(t.as_bytes(), expected.as_bytes()))
-        || (req.uri().path() == "/ws" && carries_ticket(req.uri().query()));
+        .and_then(|v| v.strip_prefix("Bearer "));
+    // 入站那把：全套权限（换凭据、绑目录、改 MCP……）
+    let full = bearer.is_some_and(|t| bytes_eq(t.as_bytes(), expected.as_bytes()));
+    // 远程接入那把：**只在接入面上有效**。见 `attach_allows`
+    let attach = st
+        .attach_token
+        .as_deref()
+        .is_some_and(|k| bearer.is_some_and(|t| bytes_eq(t.as_bytes(), k.as_bytes())))
+        && attach_allows(req.method(), req.uri().path());
+    let ok = full || attach || (req.uri().path() == "/ws" && carries_ticket(req.uri().query()));
     if ok {
         next.run(req).await
     } else {
         (StatusCode::UNAUTHORIZED, "缺少或无效的凭据").into_response()
+    }
+}
+
+/// 远程接入那把钥匙够得到哪些路由。**白名单 + 默认拒绝。**
+///
+/// # 为什么是白名单
+///
+/// 与沙箱那侧的 `delegated_token::allows` 同一个论证：黑名单漏掉一条新路由 =
+/// 云端悄悄多了一样能力（静默、危险）；白名单漏掉一条 = 远程接入少一样能力
+/// （响亮、当场可见）。**失败方向不同，选会往安全那边倒的那个。**
+///
+/// # 名单外面那些为什么必须在外面
+///
+/// `PUT /local/credential` 能换掉这个 agent 的出站身份；
+/// `/local/workspaces/*` 能把 agent 指向这台机器上任意一个目录；
+/// `/local/mcp/*` 能改它连哪些外部 server。这三样都是「机器主人」的权限，
+/// 而远程接入的授权只到「继续这段对话」——**开放远程接入不等于交出机器**。
+///
+/// `/sessions*` 也不在名单里：那几条是本地 agent 反手去问远端的，云端自己
+/// 就有，绕一圈毫无意义。
+fn attach_allows(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+    match (method, path) {
+        (&Method::GET, "/health") => true,
+        (&Method::POST, "/chat") => true,
+        // 断线重连要能接回正在跑的那一轮
+        (&Method::GET, p) if p.starts_with("/runs") => true,
+        // 工具确认：不放行的话，一个需要确认的工具会把远程那一轮永久挂住
+        (&Method::POST, "/confirmations") => true,
+        _ => false,
     }
 }
 
@@ -355,11 +392,17 @@ async fn chat_here(st: LocalState, req: ChatRequest) -> Response {
     match st.engine.chat(req).await {
         Ok((replay, rx)) => sse(replay, rx).into_response(),
         // 409 而不是 400：请求本身没问题，是**这个会话此刻的状态**不允许。
-        // 客户端据此说「这个会话正在跑」并去重挂，而不是说「请求有误」
-        Err(crate::runs::AlreadyRunning) => (
+        //
+        // 「已经有一轮在跑」现在不再走到这里 —— 它排队（见 `runs::Runs::enqueue`）。
+        // 剩下的只有排到上限这一档，而那时拒绝是对的：再收下去就是攒着一串
+        // 十分钟前的指令，等前面跑完一口气全放出来改同一份文件
+        Err(crate::runs::QueueFull { queued }) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
-                "error": "这个会话已经有一轮在跑了。等它跑完，或者挂上去看它跑到哪儿了。"
+                "error": format!(
+                    "这个会话已经排了 {queued} 条还没跑，先等一等。\
+                     挂上去（GET /runs/{{session_id}}）能看到正在跑的那一轮到哪儿了。"
+                )
             })),
         )
             .into_response(),
@@ -388,7 +431,35 @@ fn sse(
         }
     });
 
-    let stream = futures::stream::iter(replay).chain(live).map(|ev| {
+    // ── 终态事件之后**把流关掉** ──
+    //
+    // 广播那一端的发送者活在 `Runs` 的表里，跑完之后还留 `KEEP_FINISHED`
+    // （5 分钟，为的是让断线的客户端回来还挂得上）。于是这条流在 `done`
+    // 之后**不会自己结束**，只剩每 15 秒一个 ping。
+    //
+    // 对界面无所谓（它收到 `done` 就收尾），但对任何「等流结束」的调用方是
+    // 致命的，而那正是两个真实调用方：
+    //   * `cortex chat` —— 实测答案和 episode id 都打出来了，然后**卡住**，
+    //     直到 5 分钟后那条记录被清掉
+    //   * Flutter 那份 live 测试 —— `await for` 永远等不到结尾，30 秒超时
+    //
+    // 所以要在这里收：`done` / `error` 之后不再往下走。判据与
+    // `RunSink::send` 里那个「终态」是同一个，别各写一份。
+    // 用 `unfold`，**不是** `take_while` 也不是 `scan`：那两个都要等**下一条**
+    // 事件到来才判得出该停，而 `done` 之后根本没有下一条 —— 那正是这个 bug
+    // 本身。第一版写的就是 `scan`，被下面那条测试当场抓住。
+    //
+    // `unfold` 的状态是「内层流还在不在」：发完终态那条就把它丢掉，
+    // 于是下一次 poll 立刻结束，一次都不会再去等广播。
+    let inner = Box::pin(futures::stream::iter(replay).chain(live));
+    let stopping = futures::stream::unfold(Some(inner), |state| async move {
+        let mut inner = state?;
+        let ev = futures::StreamExt::next(&mut inner).await?;
+        let terminal = matches!(ev, ChatEvent::Done { .. } | ChatEvent::Error { .. });
+        // 终态那条本身要发出去，只是**它之后**不再有
+        Some((ev, if terminal { None } else { Some(inner) }))
+    });
+    let stream = stopping.map(|ev| {
         let json = serde_json::to_string(&ev).unwrap_or_else(|e| {
             serde_json::to_string(&ChatEvent::Error {
                 message: format!("事件序列化失败：{e}"),
@@ -620,6 +691,111 @@ mod tests {
             cleaned(Some("real-token")).as_deref(),
             Some("real-token"),
             "真凭据不能被这道清洗吃掉"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::attach_allows;
+    use axum::http::Method;
+
+    /// **远程接入那把钥匙够不到「机器主人」的那几条路。**
+    ///
+    /// 挡不住的话，开放远程接入就等于交出机器：`PUT /local/credential` 能换掉
+    /// 这个 agent 的出站身份，`/local/workspaces/*` 能把它指向本机任意目录，
+    /// `/local/mcp/*` 能改它连哪些外部 server。
+    ///
+    /// 这三样都不报错 —— 它们会**成功**，而用户以为自己只是允许了「继续那段
+    /// 对话」。所以这条测试逐条钉住，而不是只测一个代表。
+    #[test]
+    fn the_attach_key_cannot_touch_machine_owner_routes() {
+        for (m, p) in [
+            (Method::PUT, "/local/credential"),
+            (Method::PUT, "/local/workspaces/01ABC"),
+            (Method::POST, "/local/workspaces"),
+            (Method::GET, "/local/mcp"),
+            (Method::POST, "/local/mcp/reload"),
+            (Method::POST, "/local/import/run"),
+            (Method::GET, "/local/workspace-root"),
+        ] {
+            assert!(
+                !attach_allows(&m, p),
+                "{m} {p} 被远程接入那把钥匙放过了 —— 那不是「继续对话」，                 那是机器主人的权限"
+            );
+        }
+    }
+
+    /// 接入面本身要够用，否则远程那一轮会挂在某一步上。
+    ///
+    /// `/confirmations` 尤其不能漏：一个需要确认的工具会把那一轮**永久挂住**，
+    /// 而用户看到的是「它不动了」。
+    #[test]
+    fn the_attach_surface_is_enough_to_finish_a_turn() {
+        for (m, p) in [
+            (Method::GET, "/health"),
+            (Method::POST, "/chat"),
+            (Method::GET, "/runs"),
+            (Method::GET, "/runs/01ABC"),
+            (Method::POST, "/confirmations"),
+        ] {
+            assert!(attach_allows(&m, p), "{m} {p} 是远程那一轮要用的");
+        }
+    }
+
+    /// 方法也要判。`POST /runs/...` 不在名单里 —— 白名单是 (方法, 路径) 的对。
+    #[test]
+    fn the_method_matters_too() {
+        assert!(!attach_allows(&Method::POST, "/health"));
+        assert!(!attach_allows(&Method::DELETE, "/runs/01ABC"));
+        assert!(!attach_allows(&Method::GET, "/chat"));
+    }
+}
+
+#[cfg(test)]
+mod sse_tests {
+    use super::*;
+    use cortex_proto::dto::ChatEvent;
+
+    /// **`done` 之后这条流必须自己结束。**
+    ///
+    /// 广播的发送端活在 `Runs` 的表里，跑完还留 5 分钟（为的是断线重挂）。
+    /// 不在这里收的话，流在 `done` 之后只剩 ping，而两个真实调用方都是
+    /// 「等流结束」：`cortex chat` 实测答完之后卡住五分钟，Flutter 那份 live
+    /// 测试 30 秒超时。界面看不出问题（它收到 `done` 就收尾）—— 这正是它
+    /// 能活这么久的原因。
+    #[tokio::test]
+    async fn the_stream_ends_right_after_a_terminal_event() {
+        let runs = crate::runs::Runs::new();
+        let ticket = runs.enqueue("s1").await.expect("排得进");
+        let permit = ticket.begin().await;
+        let sink = crate::runs::RunSink::new(std::sync::Arc::clone(&ticket.run));
+
+        sink.send(ChatEvent::Delta { text: "好".into() }).await;
+        sink.send(ChatEvent::Done {
+            episode_id: "e1".into(),
+        })
+        .await;
+        // 轮次结束了，但那条记录还在表里 —— 也就是发送端还活着，
+        // 这正是这个 bug 成立的前提
+        drop(permit);
+
+        let (replay, rx, _) = runs.attach("s1").await.expect("挂得上");
+        let body = sse(replay, rx).into_response().into_body();
+        // 流真的结束了，`collect` 才回得来。没结束的话这里挂到测试超时 ——
+        // 而那正是 `cortex chat` 的症状
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            axum::body::to_bytes(body, 64 * 1024),
+        )
+        .await
+        .expect("`done` 之后流没有结束 —— 客户端会一直等下去")
+        .expect("读流失败");
+
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains(r#""type":"done""#),
+            "终态那条本身必须发出去，不能连它一起截掉：{text}"
         );
     }
 }
