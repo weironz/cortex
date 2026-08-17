@@ -83,4 +83,4 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
-echo "✔ $COMPOSE / $SERVICE：代码读的 $(echo "$read_vars" | wc -w) 个变量都设得了（豁免 ${#EXEMPT[@]} 个）"
+echo "✔ ${COMPOSE} / ${SERVICE}：代码读的 $(echo "$read_vars" | wc -w) 个变量都设得了（豁免 ${#EXEMPT[@]} 个）"

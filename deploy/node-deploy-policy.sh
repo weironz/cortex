@@ -152,7 +152,7 @@ for s in $(docker compose config --services 2>/dev/null); do
 done
 if [ -n "$unaccounted" ]; then
     echo "cortex-deploy REFUSED: compose 里这些服务不在部署清单里，也没被显式排除：$unaccounted" >&2
-    echo "  要么把它加进 node-deploy-policy.sh 的 \$services（这次部署更新它），" >&2
+    echo "  要么把它加进 node-deploy-policy.sh 的 \${services}（这次部署更新它），" >&2
     echo "  要么在 .env 里写 DEPLOY_UNMANAGED='<名字>' 说明它不归这次部署管。" >&2
     echo "  沉默地不启动一个服务，是这个脚本见过三次的故障形状。" >&2
     exit 1
