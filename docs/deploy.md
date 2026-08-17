@@ -40,15 +40,51 @@
 ## 一、路由：一个域名，路径分流
 
 ```
-                    traefik（已存在）
-                          │
-   ┌──────────────────────┼──────────────────────┐
-   │                      │                      │
-cortex.cloudcele.com   同一域名 /api      s3.cortex.cloudcele.com
-   priority 1          priority 100
-   → web:80            → StripPrefix(/api)       → rustfs:9000
-                       → cortexd:8080
+                         traefik（已存在）
+                               │
+   ┌───────────────┬───────────┴───────────┬─────────────────────┐
+   │               │                       │                     │
+cortex.cloudcele  /api（除记忆那几条）   /api/memory · /api/mcp   s3.cortex.…
+  .com            priority 200            /api/health            → rustfs:9000
+  priority 1      → StripPrefix(/api)      priority 100
+  → web:80        → agentd:8081            → StripPrefix(/api)
+                                           → cormex:8080
 ```
+
+### 默认给 agentd，**只把记忆那几条让出去**
+
+这条规则的方向 2026-08-17 反过来了，值得说清楚为什么。
+
+它原来是「**指名**把 `/api/chat` 与 `/api/sandbox` 给 agentd，其余进记忆服务」。
+0.1.10 把身份、会话、项目、同步、附件、导入、模型代理全搬进了 agentd，而这
+一行没跟着改 —— 于是线上除了聊天和沙箱，**整个应用都在打记忆服务**。用户看到
+的是登录页填对用户名口令，回来一句英文
+`this deployment has no database attached, so accounts are unavailable`：
+那是记忆服务在答 `/api/auth/login`，而它确实没有账号体系。读起来像数据库没
+接上，实际是请求进错了进程。
+
+上线当天的验证没看出来，因为它查的是 `/api/sandbox/health` —— 恰好是当时唯二
+转给 agentd 的路径之一。
+
+```yaml
+traefik.http.routers.cortex-agent.rule: >-
+  Host(`${DOMAIN}`) && PathPrefix(`/api`)
+  && !PathPrefix(`/api/memory`)
+  && !PathPrefix(`/api/mcp`)
+  && !Path(`/api/health`)
+traefik.http.routers.cortex-agent.priority: "200"
+```
+
+**让出去的名单短且稳定**（`cortex-agentd/src/routes.rs` 有测试钉着 agentd 不
+应答 `/memory/search` 与 `/mcp`），而 agentd 的路由表还会长 —— 一份会长的清单
+不该由边缘维护。`scripts/check-compose-env.sh` 会比对这两处，对不上就红。
+
+`/api/health` 也让出去：它历来由记忆服务应答，部署验证断言的 `database` /
+`blob_backend` 都是它的字段。**agentd 自己那条从公网走 `/api/sandbox/health`。**
+
+> 用否定式而不是让 Cormex 那侧缩小自己的规则，是为了**只改一侧**：那条
+> `/api` priority 100 的规则住在 Cormex 的仓库里，两边同时改一次跨两仓的提交
+> 做不到，而「一边改了另一边忘了」的症状是上线才炸。
 
 **同源是刻意选的。** Web 与 API 在同一个 origin 上，于是 cortexd
 **完全不需要 CORS** —— 少一个只在浏览器里才会暴露、而且每次改域名都要

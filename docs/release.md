@@ -140,6 +140,45 @@ git push origin vX.Y.Z
 
 ---
 
+## 两道会拦住发版的闸（2026-08-17 加）
+
+都是「代码改了、部署没跟」这一个形状的两个面，而它们的共同点是**症状沉默**：
+发版全绿、部署全绿，只是有个东西从来没生效过。
+
+### 一、compose 里的每个服务都必须有归宿
+
+`node-deploy-policy.sh` 是**点名**更新服务的（`docker compose up -d --no-deps
+$services`），所以往 compose 里新加一个服务时如果忘了同步那份清单，
+它**永远不会被启动**，而部署输出里一个字都不会提到它。
+
+这条形状立过三次：加 egress 时险些漏、0.1.9 的 agentd 漏了整整一次发布、
+0.1.10 的 `cortexdb` 让一次上线在十分钟后回滚（库没起来，agentd 连不上而被判
+不健康）。所以它不再只是一条注释：
+
+    cortex-deploy REFUSED: compose 里这些服务不在部署清单里，也没被显式排除：cortexdb
+
+新加服务时必须做一个决定 —— 进 `$services`（这次部署更新它），或者进
+`.env` 的 `DEPLOY_UNMANAGED`（写清楚为什么它不归这次部署管）。**忘了发不出去。**
+
+> 顺带堵了一个还没发作的：`--no-deps` 会让 compose **忽略**
+> `depends_on: service_healthy`，也就是 agentd 会在 postgres 还没接受连接时
+> 启动，而它起来第一件事就是跑 migration。库现在单独 `up --wait` 一次。
+
+### 二、代码读的环境变量，compose 都得设得了
+
+`scripts/check-compose-env.sh`（CI 里跑）把「agentd 读的每个
+`CORTEX_` / `S3_` / `RUSTFS_` 变量」和「compose 透进容器的」对一遍。
+
+同一天碰到两个：`S3_*` 那组让**附件从 agentd 接管 `/blobs` 起就没在生产上
+工作过**（`/health` 一直答 `blobs: disabled`，而没人查过那个字段）；
+`CORTEX_ADMIN_*` 让「只有 compose、没有 shell 的人怎么建第一个账号」这条路
+对它专门服务的那类人从来没通过。两次都是靠人肉比对发现的。
+
+豁免表是**手写**的，每条要写理由：能自动推导的东西不需要闸，需要闸的正是
+「这里要一个人做决定」的地方。
+
+---
+
 ## 镜像 tag 永远是具体版本，不打 `latest`
 
 生产钉死版本，重启之后必须回到同一个。一个会漂移的 tag 会让
@@ -174,7 +213,11 @@ arm64 **二进制**照发 —— 那是原生 runner 编的，而且冒烟跑过
 按重要性排：
 
 1. **恢复演练**：`just drill`。没演练过的备份等于没有备份
+   > ⚠️ **本机跑通不算。** 0.1.10 发版时这一条只在开发机上跑过，生产上
+   > `/data/cortex/backup` 是空的 —— 也就是那次发版的前提条件其实没满足。
+   > 而且节点上备份目录与 docker root 同在 `/dev/vdb`，那块盘挂了两边一起走。
 2. **告警自测**：`just notify-test`。备份坏了要有人知道
+   > ⚠️ 生产 `.env` 里出口是 **0 个**，这一条至今没有真的满足过。
 3. ~~**检索回归门**~~：**不在这个仓库里**。题集与 `cortex-evals` 跟着记忆那一半
    去了 [Cormex](https://github.com/weironz/cormex)，`just evals-gate` 这条 recipe
    也一并删了。检索质量仍然可以在没人察觉的情况下退化（编译过、测试过、

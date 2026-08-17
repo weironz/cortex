@@ -94,7 +94,7 @@ WHERE (f.valid_at IS NULL OR f.valid_at <= :T)
 
 ## 四、Schema 设计要点
 
-> **权威版本是 [`migrations/20260807000001_init.sql`](../migrations/20260807000001_init.sql)。**
+> **权威版本是 `migrations/20260807000001_init.sql`（在 Cormex 仓库里）。**
 > 本节只讲设计意图，不复制 SQL —— 两份拷贝必然漂移。
 
 所有主键为 **ULID**（26 字符 Crockford base32 **大写**，`COLLATE "C"` + 正则 CHECK 强制），
@@ -289,7 +289,7 @@ score(d) = Σ  1 / (k + rank_i(d))      k 取 60
 
 此策略下向量索引规模约为 episodes 的 1/50，**十万级对话不会爆**。
 
-完整索引清单见 [migration](../migrations/20260807000001_init.sql)。要点：
+完整索引清单见 `migration`（在 Cormex 仓库里）。要点：
 
 - `entities` 也建向量索引，但**仅用于抽取期实体消解**（同名/近义实体匹配），不参与四路召回
 - `idx_facts_sp (subject_id, predicate)` 的前缀即覆盖按主语查询，不另建单列索引
@@ -475,7 +475,7 @@ redact/purge 是 UPDATE，不会产生新的业务行版本。传播靠 `redacti
 **在途任务防护**：抽取 / 转录 pipeline 在写入任何派生行之前必须查 `redactions` 表，
 防止 redact 执行时在途的异步任务事后把秘密回填。级联清除任务本身可重跑（幂等）。
 
-表结构见 [migration](../migrations/20260807000001_init.sql) 的 `redactions`
+表结构见 `migration`（在 Cormex 仓库里） 的 `redactions`
 （墓碑行本身走 `sync_log` 下发到所有设备）。
 
 约束：

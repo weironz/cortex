@@ -247,8 +247,9 @@ curl -fsS https://<你的域名>/api/health          # ← 记忆服务（Cormex
 curl -fsS https://<你的域名>/api/sandbox/health  # ← agentd
 ```
 
-> ⚠️ **`/api/health` 问到的是记忆服务，不是 agentd。** 边缘按路径分流，
-> 只有 `/api/chat` 与 `/api/sandbox` 归 agentd —— 所以它的 `/health`
+> ⚠️ **`/api/health` 问到的是记忆服务，不是 agentd。** 边缘按路径分流：
+> `/api` 默认归 agentd，只有 `/api/memory`、`/api/mcp` 与 `/api/health`
+> 让给记忆服务（见 [deploy.md](deploy.md)）—— 所以 agentd 的 `/health`
 > 从公网永远问不到，得走 `/sandbox/health`（同一个处理函数，第二个挂载点，
 > 存在的理由就是这个）。
 >
@@ -466,6 +467,38 @@ Microsoft Defender SmartScreen 阻止了无法识别的应用启动。
 
 ---
 
+## CLI：`cortex` 有哪些命令
+
+终端瘦客户端。它自己不跑 agent 循环 —— 需要文件工具时会**自己拉起**一个本机
+`cortex-local`（除非 `--no-local-agent`）。
+
+| 命令 | 干什么 |
+|---|---|
+| `cortex chat [消息]` | 一轮对话，或不带参数进交互模式 |
+| `cortex login [--username u]` | 登录并把 refresh token 存在本机（`~/.cortex/credentials.json`，0600） |
+| `cortex whoami` | 我是谁、数据在哪个 schema、**凭据是哪来的** |
+| `cortex passwd` | 改自己的口令（要旧口令；改完所有设备都要重登） |
+| `cortex logout` | 作废服务端那条链并删掉本机凭据 |
+| `cortex sessions` / `cortex episode <id>` | 列会话 / 看单条消息 |
+| `cortex confirmations` / `cortex confirm <token>` | 待确认的工具调用 / 批或拒 |
+| `cortex import …` | 导入 ChatGPT / Claude 的导出文件 |
+| `cortex health` | 服务端与本机 agent 各自的状态 |
+
+三个值得单独说的：
+
+**`--permission-mode`**（`ask` / `accept-edits`）。**`bypass` 会被显式拒绝** ——
+那个档位只有在沙箱里才有意义，而 CLI 默认跑在你自己的机器上。
+线上取值与这里的拼写**同一份**（`cortex-proto` 里有测试钉着）。
+
+**`cortex whoami` 会多打一行「凭据来源」。** 预共享 token 映射的永远是第一个
+账号，本机登录是另一个人 —— 两者读到的是不同的数据。只报用户名的话，一个
+拿着预共享 token 的人会看到 `admin` 然后以为没问题。
+
+**身份优先级**：`--token` / `CORTEXD_TOKEN` > 本机登录 > 无。
+`CORTEXD_TOKEN=`（空串）**当作没设**，不会顶掉本机存着的登录。
+
+---
+
 ## 装完之后该做的三件事
 
 按重要性排，第三件最重要（全部细节见 [operations.md](operations.md)）：
@@ -477,9 +510,8 @@ Microsoft Defender SmartScreen 阻止了无法识别的应用启动。
    备份脚本跑绿了只证明「写出去了」，证明不了「读得回来」
 
 > ⚠️ 这三条都要 clone 一次仓库（它们是 `just` recipe，不在发布产物里）。
-> 而**备份脚本当前的默认目标容器名还停在拆分之前**，直接跑会停在
-> 「容器 cortex-postgres 没在跑」—— 见 [roadmap](roadmap.md) 手头挂着的那条。
-> 记忆那一半的备份归 Cormex 管。
+> 备份脚本的默认目标是 `cortex-db`（**这一侧**那个库）；记忆那一半的备份
+> 归 Cormex 管，用 `PG_CONTAINER=` 指名别的容器。
 
 ---
 
@@ -489,7 +521,9 @@ Microsoft Defender SmartScreen 阻止了无法识别的应用启动。
 |---|---|
 | `cortex-agentd` 启动就退出，说「没有配置任何凭据」 | 正常行为。回到 [★ 生成凭据](#-服务端第一步生成凭据) |
 | `cortex-agentd` 启动就退出，说「连不上 docker」/「docker 预检没过」 | 这台机器没装 docker，或 socket 没权限。它**不降级**，因为编排容器就是它的本职 |
-| `/health` 里 `memory_reachable` 是 `false` | Cormex 没起，或 `CORTEX_MEMORY_URL` 指错了。**先装 Cormex** |
+| `/health` 里没有 `memory_reachable` | 正常。长期记忆 2026-08-17 去掉了，这一侧不再连记忆服务 |
+| 登录时回一句英文 `no database attached` | 边缘把 `/api/auth/*` 转给了记忆服务。见 [deploy.md](deploy.md) 的分流规则 |
+| `cortex passwd` 说「本机没有存着的登录」 | 这次用的是预共享 token，服务端认不出你是谁。先 `cortex login` |
 | `/health` 里 `database` 是 `disabled` | 没配 `CORTEX_DATABASE_URL`。服务会起，但读不到任何历史 |
 | `/health` 里 `blobs` 是 `local_fs` | 没接对象存储。附件只活在这个容器里，**重建即丢失** |
 | `/health` 里 `auth` 是 `disabled` | `.env` 里有 `CORTEX_AUTH=disabled`，或摘要没读到 |

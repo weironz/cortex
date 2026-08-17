@@ -22,6 +22,7 @@
 ## 目录
 
 - [一、首次使用](#一首次使用)
+  - [账号：建、改、忘了怎么办](#账号建改忘了怎么办)
 - [二、备份与灾备](#二备份与灾备)
   - [Postgres：为什么是 pg_basebackup](#postgres为什么是-pg_basebackup-而不是-pgbackrest)
   - [告警：光有退出码不算告警](#告警光有退出码不算告警)
@@ -33,6 +34,7 @@
   - [真的出事了怎么恢复](#真的出事了怎么恢复)
   - [彻底抹除：purge 之后轮转备份](#彻底抹除purge-之后必须轮转备份)
 - [三、生产部署](#三生产部署)
+  - [从 0.1.9 升到 0.1.10：会话数据要自己搬一次](#从-019或更早升到-0110会话数据要自己搬一次)
 - [四、故障速查](#四故障速查)
 - [五、已知缺口](#五已知缺口)
 
@@ -191,6 +193,58 @@ CORTEX_EMBED_API_KEY=sk-...
 要回到干净状态用 `just db-reset`（**会删数据**）。没有 `db-revert`：
 `migrations/` 下是单文件 `.sql`，sqlx 认作 non-reversible，
 `migrate revert` 直接报错。
+
+### 账号：建、改、忘了怎么办
+
+四条路，覆盖四种处境。**没有第五条** —— 界面上没有注册表单，客户端也没有
+注册那条 API，所以别指望「打开网页注册一个」。
+
+| 处境 | 怎么做 | 需要 |
+|---|---|---|
+| 全新部署，只有 compose，没有 shell | `.env` 里填 `CORTEX_ADMIN_USERNAME` / `CORTEX_ADMIN_PASSWORD`，重启 agentd | 能改 `.env` |
+| 全新部署，人在机器上 | `cortex-agentd --create-user <名字>` | shell |
+| 用户自己改口令 | `cortex passwd` | 登录过，且记得旧口令 |
+| 忘了口令 / 被锁在外面 | `cortex-agentd --set-password <名字>` | shell |
+
+口令一律从 **stdin** 读，不做命令行参数：参数会进 shell history，也会出现在
+同机其他用户的 `ps` 里。`CORTEX_ADMIN_PASSWORD` 存在时优先用它，
+**两者只有一个生效** —— 都读再挑一个的话，「我明明从管道里喂了口令」与
+「它其实用了环境里那个旧的」会长得一样。
+
+```bash
+# compose 那条（容器里）
+docker compose exec -T agentd cortex-agentd --create-user alice   # 口令从 stdin
+printf '%s' '你的口令' | docker compose exec -T agentd     cortex-agentd --set-password alice
+```
+
+**`CORTEX_ADMIN_*` 只建号，不改密码。** 账号已存在时它什么都不做（日志里会
+说一句）。想换口令改这两行再重启是**没有效果**的，且没有任何提示 ——
+要换走上面那两条改口令的路。
+
+#### 为什么 `--set-password` 不验旧口令
+
+跑得了它的人**已经有这台机器的 shell**，也就已经有 `.env` 里的数据库口令 ——
+他随时可以直接 `UPDATE` 那张表。要求旧口令挡不住任何人，只是把「忘了口令
+怎么办」从一条命令变成一次手写 argon2 哈希。
+
+`POST /auth/password`（`cortex passwd` 走的那条）**必须**带旧口令，理由相反：
+一把有效的 access token 只证明「这个会话是他开的」，不证明「现在坐在键盘前
+的是他」。一台没锁屏的机器就足以让别人把口令换掉、把主人锁在外面。
+
+#### 改口令会把**所有设备**登出
+
+两条改口令的路都会作废那个人全部的 refresh 链，不只是当前这一条。改口令的
+意图九成是「我怀疑它泄露了」，只废当前这条等于把另外两台机器上仍然有效的
+凭据留在原地 —— 而用户以为自己刚把门锁换了。
+
+`cortex passwd` 会自己用新口令重登一次并换掉本机凭据；**其他设备要手工重登**。
+
+#### 预共享 token 改不了口令
+
+`cortex-agentd --generate-token` 那把 token 映射的永远是第一个账号，而
+`POST /auth/password` **不接受**这个身份，会回 403。拿部署密钥去改口令等于
+把真正的主人锁在外面，还让持有者能交互式登录进来 —— 所以那条路只认
+「自己登录换来的」access token。先 `cortex login`。
 
 ---
 
@@ -875,6 +929,30 @@ just purge-rotate --apply       # 真做，要手打确认串 PURGE-ROTATE
 
 ## 三、生产部署
 
+### 从 0.1.9（或更早）升到 0.1.10：会话数据要自己搬**一次**
+
+0.1.9 之前 agentd **没有** `CORTEX_DATABASE_URL` —— 会话、消息、附件、项目、
+同步流水、身份全都代理给记忆服务，住在**它的**库里。0.1.10 起 Cortex 直连
+自己的库，于是升级完新库是空的：**账号不在里面（登不进去），历史不在里面
+（侧栏空白）**。旧数据没丢，只是没有人再去读它。
+
+```bash
+bash scripts/adopt-session-data.sh              # 试跑，什么都不动
+bash scripts/adopt-session-data.sh --apply      # 真搬
+```
+
+默认从 `cortex-postgres`（记忆那一侧的库）搬到 `cortex-db`（Cortex 自己的），
+两个都能用 `FROM_CONTAINER` / `TO_CONTAINER` 指名。**只读源库** ——
+跑砸了最坏是目标脏了，清空重来，源库一个字节不动。
+
+前提是 agentd **已经起过一次**（表由它启动时的 migration 建）。目标非空时
+脚本拒绝执行：这是给「升级那一次」用的，往里叠第二份会撞主键。
+
+`auth_tokens` 刻意不搬 —— 那是活着的 refresh token，升级本来就是重登的好
+时机，不搬就不会在那条链上留下两份互不知道的记录。所有客户端要重新登录。
+
+> 搬完源库那些行还在。确认无误之后可以自行清理，脚本不动它们。
+
 ```bash
 # 前提：记忆服务已在跑，且 .env 里 CORTEX_MEMORY_URL 指得到它
 just prod-bootstrap    # 构建 agentd 镜像 → 起 agentd + web
@@ -1013,6 +1091,10 @@ egress-proxy 换 scratch 之后也真机验过：沙箱容器经它访问放行�
 | 镜像目录只涨不落，占盘飙升 | 正常行为（无 `--delete`） | 要清理只能走 `--apply-purges`，由 `redactions` 表驱动 |
 | Git Bash 下 docker 命令报 `C:/Program Files/...` | MSYS 路径改写 | 脚本里已 `export MSYS_NO_PATHCONV=1`；手工敲命令时自己加 |
 | CI 的「评测基线文件自检」红了 | 两份 baseline JSON 少字段或格式坏了 | 本地跑 `python3 scripts/evals-gate.py verify-baseline scripts/evals-baseline.*.json`。**真正的检索回归门在 Cormex**，这一步只校验文件格式 |
+| 登录时回一句英文 `this deployment has no database attached` | **边缘把 `/api/auth/*` 转给了记忆服务**（它确实没有账号体系），不是数据库没接上 | 看 `cortex-agent.rule` 是不是还写着「只有 `/api/chat` 与 `/api/sandbox` 给 agentd」。0.1.10 起该反过来：默认给 agentd，只让出 `/api/memory`、`/api/mcp`、`/api/health` |
+| 部署全绿，但某个服务从来没起来 | `node-deploy-policy.sh` 的 `$services` 清单里没有它 | 现在有闸会当场拒（compose 里每个服务必须进 `$services` 或 `DEPLOY_UNMANAGED`）。这条形状犯过三次：egress、agentd、cortexdb |
+| 项目里第一轮写的文件之后找不到 | 那一轮落在了**未分组**沙箱（`cortex-ws-<owner>`），第二轮起才进项目卷 | 客户端 0.1.10 之后会在发第一句**之前**把分组落到服务端。老客户端要么先发一句再让它写文件，要么用工作区导出/导入把文件搬过去 |
+| `cortex passwd` 说「本机没有存着的登录」 | 这次用的是预共享 token，服务端认不出「你是谁」 | 先 `cortex login`。改口令只认自己登录换来的 access token，见上文 |
 | `embeddings` 容器起来很久不健康 | 在下 2.2 GB 权重 | 那个容器在 Cormex 的 compose 里，去那边看日志；权重卷只下一次 |
 
 ---
@@ -1023,6 +1105,8 @@ egress-proxy 换 scratch 之后也真机验过：沙箱容器经它访问放行�
 
 | 缺口 | 影响 | 后续 |
 |---|---|---|
+| **生产上 backup / drill 一次都没跑过** | 本机跑通了，生产那份 compose 也补齐了 WAL 归档，但没有一份生产 report。没演练过的备份等于没有备份 | 在节点上跑一次并留下 report |
+| **备份目录与数据盘是同一块** | 节点上 `CORTEX_BACKUP_DIR=/data/cortex/backup`，而 docker root 是 `/data/docker` —— 都在 `/dev/vdb`。那块盘挂了，数据和备份一起走 | 挑一块别的盘，或把异地镜像那条真的接上 |
 | **告警出口没有「送达确认」** | webhook 返回 200 不等于人看到了。钉钉/企业微信的关键词策略被拦下时也是 200 | 靠外部心跳服务反向兜底；`just notify-test` 至少能证明链路通 |
 | **本机备份目录仍是明文** | 加密只作用于出本机的那一份 | 本机磁盘加密交给 LUKS / BitLocker，不在备份脚本的职责内 |
 | **密钥托管全靠人** | 恢复卡没有真的存到机器外面的话，加密就是负资产 | 无法用脚本验证；`backup-key card` 只能提醒 |
