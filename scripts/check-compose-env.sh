@@ -83,4 +83,42 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
+# ── 闸二：边缘让给记忆那一侧的路径，必须与代码钉的那份一致 ──
+#
+# 0.1.10 的事故：代码把身份/会话/项目/同步全搬到 agentd 了，而 traefik 的
+# 规则还写着「只有 /api/chat 与 /api/sandbox 给 agentd」—— 线上除了聊天和
+# 沙箱，整个应用都在打记忆服务。用户看到的是登录时一句「this deployment
+# has no database attached」，读起来像数据库没接上。
+#
+# 规则现在反过来写（默认给 agentd，指名让出记忆那几条），所以**新增**路由
+# 天然被覆盖，剩下的风险只有一个方向：有人把 /memory/search 或 /mcp 也搬
+# 进 agentd，而边缘还在把它们转走。
+#
+# `routes.rs` 里那条测试是这份名单的权威（它断言这些路径 agentd 回 404）。
+# 这里比对两者，对不上就红 —— 那正是「搬完了忘了改边缘」的信号。
+if [ "$COMPOSE" = "deploy/docker-compose.yml" ]; then
+    # 代码那侧：测试里 `for path in [...]` 的那一行
+    pinned=$(grep -oE 'for path in \[[^]]*\]' crates/cortex-agentd/src/routes.rs |
+        grep -oE '/[a-z/-]+' | sort -u)
+    # 边缘那侧：规则里所有 `!PathPrefix(`/api/x`)` 与 `!Path(`/api/x`)`
+    excluded=$(grep -oE '!Path(Prefix)?\(`/api[a-z/-]*`\)' "$COMPOSE" |
+        grep -oE '/api[a-z/-]*' | sed 's|^/api||' | sort -u)
+
+    for p in $pinned; do
+        # 名单里的路径可能比排除项更深（/memory/search vs /api/memory）
+        hit=0
+        for e in $excluded; do
+            case "$p" in "$e"*) hit=1 ;; esac
+        done
+        if [ "$hit" -eq 0 ]; then
+            echo "失败 ${COMPOSE} 没把 $p 让给记忆那一侧，而 routes.rs 断言 agentd 不应答它。" >&2
+            echo "  要么在 cortex-agent.rule 里加一条 !PathPrefix(\`/api$p\`)，" >&2
+            echo "  要么它真搬过来了 —— 那就把它从 routes.rs 那条测试的名单里删掉。" >&2
+            exit 1
+        fi
+    done
+    echo "✔ 边缘让出的路径覆盖了 routes.rs 钉的那份（$(echo "$pinned" | tr '
+' ' '))"
+fi
+
 echo "✔ ${COMPOSE} / ${SERVICE}：代码读的 $(echo "$read_vars" | wc -w) 个变量都设得了（豁免 ${#EXEMPT[@]} 个）"
