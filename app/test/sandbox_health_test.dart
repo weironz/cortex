@@ -47,7 +47,6 @@ const _sandboxOk = {
   'status': 'ok',
   'version': '0.1.9',
   'role': 'agent-orchestrator',
-  'memory_reachable': true,
   'callback_visible_to_sandbox': true,
   'database': 'ok',
   'auth': 'token',
@@ -188,30 +187,11 @@ void main() {
       );
     });
 
-    /// 服务端自己去打过的那两条。缺字段一律当通 —— 老版本不报它们，
+    /// 服务端自己去打过的那条。缺字段一律当通 —— 老版本不报它，
     /// 据此宣布「跑不了」会把一个能用的部署说成坏的。
-    test('memory_reachable=false 点名断在哪一段', () async {
-      final api = _api(
-        MockClient(
-          (_) async => http.Response(
-            jsonEncode({..._sandboxOk, 'memory_reachable': false}),
-            200,
-          ),
-        ),
-      );
-      addTearDown(api.dispose);
-
-      final probe = await api.sandboxHealth();
-      expect(probe.status, CloudChatStatus.blocked);
-      expect(
-        probe.reason,
-        contains('记忆服务'),
-        reason:
-            '编排服务离开记忆服务换不到委托凭据、起不了容器。原因里不点名的话，'
-            '用户会去重启一个完全健康的 agentd',
-      );
-    });
-
+    ///
+    /// 这里以前还有一条 `memory_reachable=false`。记忆 2026-08-17 整个去掉了，
+    /// 服务端不再报那个字段，客户端也不再读它。
     test('callback_visible_to_sandbox=false 点名断在哪一段', () async {
       final api = _api(
         MockClient(
@@ -373,7 +353,10 @@ void main() {
       await boot(
         tester,
         sandboxStatus: 200,
-        sandboxBody: jsonEncode({..._sandboxOk, 'memory_reachable': false}),
+        sandboxBody: jsonEncode({
+          ..._sandboxOk,
+          'callback_visible_to_sandbox': false,
+        }),
       );
 
       expect(
@@ -381,12 +364,11 @@ void main() {
         findsOneWidget,
         reason: '这一档不是「没有」而是「本该能跑」—— 两句话不能长得一样',
       );
-      // 同上，用整句而不是「记忆服务」三个字 —— 地址提示语里也有它
       expect(
-        find.textContaining('够不着记忆服务'),
+        find.textContaining('回连不到'),
         findsOneWidget,
         reason:
-            '断在哪一段决定用户下一步做什么（去把记忆服务起起来）。'
+            '断在哪一段决定用户下一步做什么（去看容器接没接上那张网）。'
             '只说「不可用」，他只能来问我们',
       );
       expect(
