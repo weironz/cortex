@@ -164,6 +164,15 @@ jobs:
           # 要到 workflow_dispatch 之后才在节点上暴露
           docker compose -f deploy/docker-compose.yml config -q
 
+      - name: 文档链接指得到
+        # 一条断链不报错、不影响构建，只是读文档的人点过去落进 404 ——
+        # 而写文档的人永远不会去点自己刚写的链接。
+        #
+        # 这个脚本自己的 slug 算法返工过两次（把 `_` 剪了、把连续空白折叠了），
+        # 两次都是**假阳性**，而假阳性比漏报更贵：它训练人忽略输出。
+        # 算法照 github-slugger 抄，理由逐条写在脚本的模块文档里。
+        run: python3 scripts/check-doc-links.py
+
       - name: 代码读的环境变量，compose 都设得了
         # 「造好了没人调用」在部署这一层的样子：代码认真读一个变量、
         # `.env.example` 认真列着、文档认真写了怎么配 —— 而 compose 根本没把

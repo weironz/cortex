@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="31.1.5">
+  <diagram id="runtime-objects" name="运行时对象的包含关系">
+    <mxGraphModel dx="1800" dy="1300" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1760" pageHeight="1240" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="用户 / 项目 / 会话 / 机器 / agent / 工作区" style="text;html=1;align=left;verticalAlign=middle;fontSize=22;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="10" width="900" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="嵌套 = 包含。实线 = 一对多。虚线 = 「至多一个，可以没有」。" style="text;html=1;align=left;verticalAlign=middle;fontSize=13;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="900" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ─────────────── 逻辑侧：用户 ⊃ 项目 ⊃ 会话 ─────────────── -->
+        <mxCell id="laneLogic" value="逻辑对象（存在服务端的库里，与机器无关）" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#666666;dashed=1;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="80" width="700" height="360" as="geometry" />
+        </mxCell>
+
+        <mxCell id="owner" value="用户（owner）" style="swimlane;startSize=28;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;" vertex="1" parent="laneLogic">
+          <mxGeometry x="30" y="50" width="640" height="290" as="geometry" />
+        </mxCell>
+
+        <mxCell id="proj1" value="项目 P" style="swimlane;startSize=26;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;align=left;spacingLeft=10;" vertex="1" parent="owner">
+          <mxGeometry x="20" y="40" width="290" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="sesC" value="会话 C" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="proj1">
+          <mxGeometry x="20" y="40" width="110" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="sesD" value="会话 D" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="proj1">
+          <mxGeometry x="160" y="40" width="110" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="projNote" value="项目里的会话数不限" style="text;html=1;align=left;fontSize=11;fontColor=#666666;" vertex="1" parent="proj1">
+          <mxGeometry x="20" y="96" width="250" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="proj2" value="项目 Q" style="swimlane;startSize=26;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;align=left;spacingLeft=10;" vertex="1" parent="owner">
+          <mxGeometry x="340" y="40" width="150" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="sesE" value="会话 E" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="proj2">
+          <mxGeometry x="20" y="40" width="110" height="44" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ungrouped" value="未分组（不是一个项目，是「没有项目」）" style="swimlane;startSize=26;html=1;fillColor=#f5f5f5;strokeColor=#999999;dashed=1;verticalAlign=top;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="owner">
+          <mxGeometry x="20" y="205" width="470" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="sesA" value="会话 A" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="ungrouped">
+          <mxGeometry x="20" y="34" width="110" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="sesB" value="会话 B" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="ungrouped">
+          <mxGeometry x="160" y="34" width="110" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="ungNote" value="project_id = NULL" style="text;html=1;align=left;fontSize=11;fontColor=#666666;" vertex="1" parent="ungrouped">
+          <mxGeometry x="290" y="34" width="170" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="logicNote" value="会话至多属于一个项目，也可以不属于任何项目。&#10;项目改名不影响任何 id，所以不影响容器与目录。" style="text;html=1;align=left;fontSize=11;fontColor=#666666;verticalAlign=top;" vertex="1" parent="laneLogic">
+          <mxGeometry x="520" y="52" width="170" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- ─────────────── 执行侧：两条互斥的路 ─────────────── -->
+        <mxCell id="laneExec" value="执行环境（每个会话二选一，记在会话上）" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#666666;dashed=1;fontStyle=1;verticalAlign=top;align=left;spacingLeft=10;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="800" y="80" width="800" height="640" as="geometry" />
+        </mxCell>
+
+        <!-- 云端 -->
+        <mxCell id="cloud" value="runtime = cloud（默认，处处可续）" style="swimlane;startSize=28;html=1;fillColor=none;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;" vertex="1" parent="laneExec">
+          <mxGeometry x="30" y="50" width="740" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="node" value="节点（一台机器，跑 cortex-agentd）" style="swimlane;startSize=26;html=1;fillColor=#f5f5f5;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="cloud">
+          <mxGeometry x="20" y="40" width="700" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="ctr1" value="容器 cortex-sbx-&lt;owner&gt;--p-&lt;hash(P)&gt;" style="swimlane;startSize=26;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="node">
+          <mxGeometry x="20" y="40" width="320" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="ag1" value="cortex-local --exec-env=container" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="ctr1">
+          <mxGeometry x="20" y="36" width="280" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="vol1" value="卷 cortex-ws-&lt;owner&gt;--p-&lt;hash(P)&gt; → /workspace" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="ctr1">
+          <mxGeometry x="20" y="82" width="280" height="36" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ctr2" value="容器 cortex-sbx-&lt;owner&gt;（未分组共用这一个）" style="swimlane;startSize=26;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="node">
+          <mxGeometry x="360" y="40" width="320" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="ag2" value="cortex-local --exec-env=container" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="ctr2">
+          <mxGeometry x="20" y="36" width="280" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="vol2" value="卷 cortex-ws-&lt;owner&gt; → /workspace" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="ctr2">
+          <mxGeometry x="20" y="82" width="280" height="36" as="geometry" />
+        </mxCell>
+
+        <!-- 桌面端 -->
+        <mxCell id="desk" value="runtime = local（钉在这一台，别的设备只能看）" style="swimlane;startSize=28;html=1;fillColor=none;strokeColor=#82b366;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;" vertex="1" parent="laneExec">
+          <mxGeometry x="30" y="330" width="740" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="machine" value="你的机器" style="swimlane;startSize=26;html=1;fillColor=#f5f5f5;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="desk">
+          <mxGeometry x="20" y="40" width="700" height="220" as="geometry" />
+        </mxCell>
+        <mxCell id="ag3" value="cortex-local（一台机器只有一个，复用）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="machine">
+          <mxGeometry x="20" y="36" width="660" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="dir1" value="D:\proj-p&#10;（项目 P 的落地目录）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="machine">
+          <mxGeometry x="20" y="96" width="200" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="dir2" value="D:\anything&#10;（会话自己绑的目录）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="machine">
+          <mxGeometry x="250" y="96" width="200" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="nodir" value="无工作区&#10;（没有文件与 shell 工具）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;dashed=1;fontSize=11;" vertex="1" parent="machine">
+          <mxGeometry x="480" y="96" width="200" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="wsjson" value="绑定表 workspaces.json：session_id → 目录，project_id → 落地目录。&#10;只在这台机器上 —— 「这台机器有没有这个会话的绑定」本身就是设备检查。" style="text;html=1;align=left;fontSize=11;fontColor=#666666;verticalAlign=top;" vertex="1" parent="machine">
+          <mxGeometry x="20" y="156" width="660" height="46" as="geometry" />
+        </mxCell>
+
+        <!-- ─────────────── 跨侧的对应关系 ─────────────── -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#6c8ebf;endArrow=block;endFill=1;" edge="1" parent="1" source="proj1" target="ctr1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1l" value="项目 → 容器与卷，一对一" style="edgeLabel;html=1;fontSize=11;fontColor=#6c8ebf;" vertex="1" connectable="0" parent="e1">
+          <mxGeometry x="-0.1" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#999999;endArrow=block;endFill=1;dashed=1;" edge="1" parent="1" source="ungrouped" target="ctr2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#82b366;endArrow=block;endFill=1;dashed=1;" edge="1" parent="1" source="proj1" target="dir1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3l" value="项目也可以在本机有一个落地目录" style="edgeLabel;html=1;fontSize=11;fontColor=#82b366;" vertex="1" connectable="0" parent="e3">
+          <mxGeometry x="0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+
+        <!-- ─────────────── 基数表 ─────────────── -->
+        <mxCell id="card" value="基数" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#666666;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="470" width="700" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="c1" value="用户 → 项目&#9;&#9;1 : N&#10;项目 → 会话&#9;&#9;1 : N（会话至多一个项目，可以没有）&#10;项目 → 容器 / 卷&#9;1 : 1（云端，按 owner + hash(项目) 定名）&#10;项目 → 本机目录&#9;1 : 至多 1（桌面端的「落地目录」，按 id 记）&#10;机器 → agent&#9;&#9;1 : 1（复用；两个实例会抢同一份 workspaces.json）&#10;agent → 会话&#9;&#9;1 : N（它是个服务器，不是每会话一个进程）&#10;会话 → 工作区&#9;1 : 至多 1（没有就降级成纯对话）&#10;工作区 → 会话&#9;1 : N（云端同项目共用一个卷 —— 会话之间没有文件隔离）" style="text;html=1;align=left;fontSize=12;verticalAlign=top;spacingLeft=10;" vertex="1" parent="card">
+          <mxGeometry x="10" y="40" width="680" height="200" as="geometry" />
+        </mxCell>
+
+        <!-- ─────────────── 三条容易想错的 ─────────────── -->
+        <mxCell id="traps" value="三条容易想错的" style="swimlane;startSize=30;html=1;fillColor=none;strokeColor=#b85450;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="750" width="1560" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="t1" value="① 工作区不是「一个会话一个」。云端同项目的会话共用一个卷 —— A 会话建的文件 B 会话直接看得见。&#10;&#9;这是刻意的（按会话分的话，「昨天让你生成的那份报告呢」会得到一个空目录），但它意味着会话之间没有文件隔离，只有项目之间有。" style="text;html=1;align=left;fontSize=12;verticalAlign=top;spacingLeft=10;" vertex="1" parent="traps">
+          <mxGeometry x="10" y="36" width="1540" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="t2" value="② 「哪台机器」这个字段不存在。runtime = local 只说「钉在本机」，不说哪一台。本机绑定存在 workspaces.json，天然只在那台机器上，&#10;&#9;于是「这台机器有没有这个会话的绑定」本身就是设备检查 —— 比一个 device id 更硬，id 在重装或克隆之后会骗人。" style="text;html=1;align=left;fontSize=12;verticalAlign=top;spacingLeft=10;" vertex="1" parent="traps">
+          <mxGeometry x="10" y="84" width="1540" height="42" as="geometry" />
+        </mxCell>
+        <mxCell id="t3" value="③ 「一台机器一个 agent」是约束，不是设计。workspaces.json 与 outbox.mark 只有进程内 Mutex、没有文件锁：两个实例同时跑，&#10;&#9;绑定后写的赢，队列高水位互相覆盖会漏重放。所以 CLI 复用前还要比对 remote 与凭据指纹 —— 复用等于把请求交给它的身份。" style="text;html=1;align=left;fontSize=12;verticalAlign=top;spacingLeft=10;" vertex="1" parent="traps">
+          <mxGeometry x="10" y="132" width="1540" height="42" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
