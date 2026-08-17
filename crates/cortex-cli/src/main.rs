@@ -93,6 +93,12 @@ enum Command {
     /// 注销：作废服务端那条 refresh 链，并删掉本机凭据
     Logout,
 
+    /// 这次请求会被认成谁
+    ///
+    /// 多用户部署里最该先问的一句：CLI 用的是预共享 token 还是这台机器上
+    /// 存着的登录？两者可能是**不同的人**，而它们读到的是不同的数据。
+    Whoami,
+
     /// 发起一轮对话（流式）
     Chat {
         /// 要说的话。省略则进入交互模式
@@ -351,6 +357,27 @@ async fn main() -> anyhow::Result<()> {
             println!("已登录 {user}（{server}）");
             println!("凭据存在 {}", path.display());
             println!("此后 cortex 的请求都以这个身份发出，不再落到预共享 token 那个账号上。");
+        }
+
+        Command::Whoami => {
+            let who = c.whoami().await?;
+            println!("{}（{}）", who.username, who.user_id);
+            println!("记忆 schema：{}", who.schema_name);
+            // 把「凭据从哪儿来」也说出来 —— 这条命令存在的理由就是回答
+            // 「我现在是谁」，而「凭据是哪来的」是同一个问题的另一半：
+            // 预共享 token 与本机登录可能指向**不同的人**
+            match (&cli.token, credentials::load(&cli.server)) {
+                (Some(t), _) if !t.trim().is_empty() => {
+                    println!("凭据来源：预共享 token（映射到第一个账号）");
+                }
+                (_, Some(stored)) => {
+                    println!(
+                        "凭据来源：本机登录（cortex login，登的是 {}）",
+                        stored.username
+                    );
+                }
+                _ => println!("凭据来源：无 —— 这个部署多半关了认证"),
+            }
         }
 
         Command::Logout => {

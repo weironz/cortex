@@ -172,6 +172,24 @@ impl Client {
         Ok(())
     }
 
+    /// 这次请求会被认成谁。
+    ///
+    /// **带上凭据发**（与 `login` 相反）—— 它问的正是「我手上这把凭据是谁」。
+    ///
+    /// # Errors
+    /// 没有凭据（401）、或者这个部署没接账号体系（501）。
+    pub async fn whoami(&self) -> Result<cortex_proto::auth::WhoAmI> {
+        let resp = self
+            .get("/auth/me")
+            .send()
+            .await
+            .map_err(|e| CortexError::Provider(format!("连不上 {}：{e}", self.base)))?;
+        let resp = self.checked(resp).await?;
+        resp.json()
+            .await
+            .map_err(|e| CortexError::Provider(format!("whoami 响应解析失败：{e}")))
+    }
+
     pub async fn health(&self) -> Result<Health> {
         // /health 刻意不认证（Docker HEALTHCHECK 要用），所以这条即使
         // 没配 token 也应当通
