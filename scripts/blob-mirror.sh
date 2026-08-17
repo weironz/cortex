@@ -116,6 +116,28 @@ if [ "$APPLY_PURGES" = "1" ]; then
     step "按 redactions 表传播 purge"
     need_pg_running
 
+    # ── `redactions` 不在这个库里 ────────────────────────────
+    #
+    # 那张表随记忆去了 Cormex（抹除的是**事实**，而事实在那边）。这一侧
+    # 的库里只有会话/消息/附件，`FROM redactions` 直接报「关系不存在」。
+    #
+    # **而报错是被吞掉的**：`psql_val` 的错误进不了 mapfile，于是
+    # `purge_hashes` 是空的，脚本一路走到「✔ 没有待传播的 purge」并退出 0。
+    # 一条抹除传播路径在**根本没查成**的情况下说「全清了」—— 这是这条链上
+    # 最不能出的那种错，而它今天就是这么表现的（2026-08-17 实测）。
+    #
+    # 与恢复演练里那两条记忆时代的检查同一个形状，只是那边是静默死掉、
+    # 这边是静默说好。所以这里当场停住而不是「查不到就当没有」。
+    if [ "$(psql_val "SELECT to_regclass('public.redactions') IS NOT NULL")" != "t" ]; then
+        die "这个库里没有 redactions 表 —— 它随记忆去了 Cormex。
+     purge 传播由那张表驱动，所以**这条路在这一侧没有驱动源**，
+     而它此前会静默报「没有待传播的 purge」并退出 0（查都没查成）。
+
+     要抹除记忆里的事实：去 Cormex 那边跑它的 purge 流程。
+     这一侧的镜像里只有会话附件；真需要按会话删附件的话，
+     那是另一件事，得先有一张这一侧的抹除台账。"
+    fi
+
     purge_sql="
         SELECT DISTINCT r.target_id
         FROM redactions r

@@ -100,16 +100,26 @@ RTO 35~46 s，报告在 `data/backup/reports/`）。五层问题逐层见
 （连本机都跑不起来），现在生产那份 compose 也补齐了 WAL 归档，可以真去跑了。
 要跑之前先确认节点上 `CORTEX_BACKUP_DIR` 指的那块盘 **与数据盘不同**。
 
-### compose 项目重名：只做了「看得见」，没改名
+### compose 项目重名：**这一侧已经可以改了，挡路的全在 Cormex**
 
 Cortex 与 Cormex 的根 compose 第一行都写着 `name: cortex`，于是
-`docker compose down` 在任一侧裸敲都会波及另一侧。`just doctor` 现在会把
-项目里不属于本仓库的容器列出来并说清这件事，但**没有改名**。
+`docker compose down` 在任一侧裸敲都会波及另一侧。`just doctor` 会把项目里
+不属于本仓库的容器列出来并说清这件事。
 
-改名的代价与决定权都不在这一侧：卷名带项目前缀，改名等于把 `cortex_dev_pg`
-变成孤儿（dev 库里的会话当场「消失」）；而真正该改的是那一侧 —— 一个叫
-`cormex` 的仓库占着 `cortex` 这个项目名才是异常。真要改的正确顺序是
-**先给两边的卷都写显式 `name:`，再改项目名**。
+**2026-08-17 核了一遍：改名的前置在这一侧已经满足。** 之前记的是
+「先给两边的卷都写显式 `name:`，再改项目名」，而这一侧三份 compose 的卷
+**早就全钉死了**：
+
+    docker-compose.dev.yml   cortex_dev_bin / cortex_dev_pg / cortex_dev_rustfs
+    deploy/docker-compose.yml  cortex-db-data
+
+也就是说改这一侧的项目名**一个卷都不会变孤儿**。真正没钉的是那七个：
+`cortex_pg_data` / `cortex_rustfs_0..3` / `cortex_rustfs_data` /
+`cortex_embed_models` —— 全是 Cormex 的，改名要在**那个仓库**做。
+
+> 顺带查到一个陈旧孤儿：`cortex_cortex_dev_bin`（钉 `name:` 之前留下的
+> 双前缀那份）。`dev-build.sh` 用的是 `cortex_dev_bin`，没人读它。
+> 它只是占盘，删不删都不影响运行 —— 没动，因为删卷不该由一次清理顺手做。
 
 ### 沙箱镜像没发版，生产上 agent 仍然出不了网
 
