@@ -354,6 +354,14 @@ mod tests {
             (Method::GET, "/projects"),
             (Method::POST, "/blobs"),
             (Method::GET, "/sync"),
+            // 在线名册（roadmap E 的阶段 3）。**沙箱不该出现在里面**：
+            // 那份名册回答的是「我那个绑在别处的会话该去哪台机器上打开」，
+            // 而容器不是一台用户能过去的机器 —— 报上去只会多一行没人能用的。
+            //
+            // 靠白名单默认拒绝而不是靠容器里那个 agent 自觉：它那侧确实也
+            // 判了 exec_env，但那只是为了少一条每 30 秒的失败日志。
+            (Method::POST, "/agents/heartbeat"),
+            (Method::GET, "/agents"),
             (Method::POST, "/auth/ticket"),
             // 写 episode 是 POST；GET 那条是回放别人的对话
             (Method::GET, "/episodes/01ABC"),

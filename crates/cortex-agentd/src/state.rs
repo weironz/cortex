@@ -89,6 +89,8 @@ struct Inner {
     tickets: Arc<TicketBook>,
     /// 已签发的 access token。见 [`crate::accounts::AccessBook`]。
     access: Arc<crate::accounts::AccessBook>,
+    /// 在线名册。寿命秒级，刻意不进库 —— 见 crate::presence 的模块文档。
+    presence: Arc<crate::presence::PresenceBook>,
     /// 认证端点（login / refresh / register）的限流表。
     ///
     /// 与 [`Inner::tickets`] / [`Inner::access`] 同款的进程内簿子。它挂在
@@ -213,6 +215,7 @@ impl AgentState {
                 auth,
                 tickets: Arc::new(TicketBook::default()),
                 access: Arc::new(crate::accounts::AccessBook::default()),
+                presence: Arc::new(crate::presence::PresenceBook::default()),
                 auth_throttle: Arc::new(crate::rate_limit::AuthThrottle::default()),
                 sync_buses: Arc::new(crate::sync_bus::SyncBuses::default()),
                 delegations: Arc::new(crate::delegated_token::DelegatedTokens::default()),
@@ -329,6 +332,12 @@ impl AgentState {
     #[must_use]
     pub fn runner(&self) -> &Arc<dyn SandboxRunner> {
         &self.inner.runner
+    }
+
+    /// 在线名册。**只报不判** —— 见 `crate::presence` 的模块文档。
+    #[must_use]
+    pub fn presence(&self) -> &crate::presence::PresenceBook {
+        &self.inner.presence
     }
 
     #[must_use]

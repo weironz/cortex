@@ -163,6 +163,33 @@ impl Remote {
     // 删掉了。跨端批确认要回来的话，得先有一个「确认属于哪台机器」的答案，
     // 而不是再挂一次 HTTP。
 
+    /// 报一次到 —— 「这台机器上的 agent 活着，它手上有这些会话的绑定」。
+    ///
+    /// 返回服务端认为的 TTL（秒），调用方据此定下一次的间隔。**不要自己写一个
+    /// 常数**：两侧各一个的话，改一边就会出现「agent 以为自己还在线、名册里
+    /// 已经没了」，而用户看到的是「机器离线」而机器明明开着。
+    ///
+    /// # Errors
+    /// 连不上、或者服务端认不出这把凭据。调用方应当**只打一条 debug**：
+    /// 名册是锦上添花，报不上去不影响任何一轮对话。
+    pub async fn heartbeat(
+        &self,
+        hb: &cortex_proto::presence::AgentHeartbeat,
+    ) -> Result<cortex_proto::presence::HeartbeatAck> {
+        let resp = self
+            .auth(self.http.post(self.url("/agents/heartbeat")))
+            .timeout(REQUEST_TIMEOUT)
+            .json(hb)
+            .send()
+            .await
+            .map_err(map_transport)?;
+        checked(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| CortexError::Invalid(format!("解析心跳回执失败：{e}")))
+    }
+
     /// 起一次 LLM 代理调用，返回**原始字节流**。SSE 的解析在
     /// [`crate::provider`] 里做 —— 那边才知道要还原成什么类型。
     pub async fn llm_stream(&self, req: &LlmStreamRequest) -> Result<reqwest::Response> {

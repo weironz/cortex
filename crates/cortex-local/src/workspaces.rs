@@ -199,6 +199,27 @@ impl Workspaces {
         Ok(dir.to_string_lossy().into_owned())
     }
 
+    /// 这台机器上**真的绑过目录**的会话 id。
+    ///
+    /// 给在线名册的心跳用（roadmap E 的阶段 3）。
+    ///
+    /// # 为什么不算 `default_root` 那一档
+    ///
+    /// 回落根是容器里那个 `/workspace`，它不是「这台机器持有的绑定」——
+    /// 报上去会让名册说「这台机器持有你所有的会话」，而那句话在界面上会变成
+    /// 「去那台机器上打开它」，指向一个根本没有那些文件的地方。
+    ///
+    /// 也就是说这个列表**只在桌面端非空**，容器里恒为空 —— 而容器里那个
+    /// agent 本来就不该心跳（它不是一台用户能过去的机器）。
+    #[must_use]
+    pub fn bound_sessions(&self) -> Vec<String> {
+        self.map
+            .lock()
+            .ok()
+            .map(|m| m.sessions.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// 绑定一个目录。`raw` 是用户在界面上点的那个路径。
     ///
     /// 校验走 [`cortex_agent::workspace::validate`] —— 与服务端**同一份**代码

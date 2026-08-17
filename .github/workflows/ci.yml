@@ -164,6 +164,15 @@ jobs:
           # 要到 workflow_dispatch 之后才在节点上暴露
           docker compose -f deploy/docker-compose.yml config -q
 
+      - name: 边缘转得到每条路由
+        # 这个仓库最熟的故障形状：代码加了路由、边缘不知道，**而症状是 200**。
+        # dev 的 nginx 里 API 是枚举的，漏一条就落到 SPA 回落上，回
+        # 200 + index.html —— 逐条打状态码的那种验证一次都发现不了。
+        #
+        # 数到第四次了（部署清单三次 + 生产边缘一次），第五次差点发生在加
+        # /agents 的当天。理由与前两道闸相同：注释拦不住沉默的形状。
+        run: python3 scripts/check-edge-routes.py
+
       - name: 文档链接指得到
         # 一条断链不报错、不影响构建，只是读文档的人点过去落进 404 ——
         # 而写文档的人永远不会去点自己刚写的链接。

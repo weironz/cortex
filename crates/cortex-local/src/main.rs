@@ -378,6 +378,50 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ── 在线名册的心跳（roadmap E 的阶段 3）──
+    //
+    // **只在本机 agent 上报，容器里不报。** 名册回答的是「我那个绑在别处的
+    // 会话该去哪台机器上打开」，而一个容器不是用户能过去的机器 —— 报上去只会
+    // 在列表里多一行没人能用的东西，而它的「持有的绑定」恒为空。
+    //
+    // 它**报不上去也不是靠自觉**：沙箱那把委托令牌的白名单里没有这条路。
+    // 这里的判断是为了不去做一件必然被 403 的事，顺带少一条每 30 秒的 WARN。
+    if args.exec_env == cortex_agent::ExecEnvironment::LocalMachine {
+        let engine = Arc::clone(&engine);
+        // 机器名给人看，用来在别的设备上认出「是哪一台」。
+        //
+        // 拿不到 hostname 时回落到一个**明显是回落**的字符串，而不是编一个
+        // 像真名字的东西：界面上写着「未命名机器」，用户知道该去配主机名；
+        // 写成 "localhost" 的话三台机器长得一模一样。
+        let machine_hint = hostname_or_fallback();
+        // agent_id 每次启动换一把即可：名册按 (owner, agent_id) 存，旧的那条
+        // 会因为不再有心跳而在 TTL 之后自然消失。不必持久化一个「机器 id」——
+        // 而且**刻意不持久化**：那种 id 在重装或克隆之后会骗人，
+        // 见 `cortex_store::SessionRuntime` 的那段论证。
+        let agent_id = cortex_core::Id::new().to_string();
+        tokio::spawn(async move {
+            // 默认间隔在服务端第一次回执之前用；之后按它说的走
+            let mut interval = std::time::Duration::from_secs(30);
+            loop {
+                let hb = cortex_proto::presence::AgentHeartbeat {
+                    agent_id: agent_id.clone(),
+                    machine_hint: machine_hint.clone(),
+                    sessions: engine.workspaces.bound_sessions(),
+                };
+                match engine.remote.heartbeat(&hb).await {
+                    // TTL 的三分之一 —— 掉一条心跳还来得及补上第二条，
+                    // 而服务端的 TTL 本身就是间隔的三倍（见 presence 模块）
+                    Ok(ack) => interval = std::time::Duration::from_secs((ack.ttl_secs / 3).max(5)),
+                    // **只 debug 不 warn。** 名册是锦上添花：报不上去不影响任何
+                    // 一轮对话，而每 30 秒一条 WARN 会把日志淹掉，
+                    // 于是真正要紧的那条也没人看了
+                    Err(e) => tracing::debug!(error = %e, "心跳没报上去（名册这一轮不更新）"),
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("绑定 {} 失败", args.bind))?;
@@ -438,4 +482,17 @@ fn write_addr_file(path: &std::path::Path, addr: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("addr.tmp");
     std::fs::write(&tmp, addr)?;
     std::fs::rename(&tmp, path)
+}
+
+/// 这台机器叫什么 —— 只给人看。
+///
+/// 回落成 `未命名机器` 而不是 `localhost`：后者会让三台机器在界面上长得
+/// 一模一样，而用户要做的判断恰恰是「是哪一台」。前者至少提示他去配主机名。
+fn hostname_or_fallback() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .map(|h| h.trim().to_owned())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "未命名机器".to_owned())
 }

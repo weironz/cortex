@@ -36,6 +36,7 @@ mod episodes;
 mod error;
 mod import;
 mod llm;
+mod presence;
 mod projects;
 mod quota;
 mod rate_limit;

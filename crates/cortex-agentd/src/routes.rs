@@ -92,6 +92,16 @@ protected_routes! {
     "/auth/password" [POST] => post(crate::accounts::change_password),
     // 加不了请求头的连接（WebSocket、<img src>）拿它换一个 60 秒的 `?ticket=`
     "/auth/ticket" [POST] => post(issue_ticket),
+    // ── 在线名册（roadmap E 的阶段 3）──
+    //
+    // **只报不判。** 心跳里的东西只用于拼一句给人看的话与这个列表 ——
+    // 哪怕 agent 谎报，后果也只是那句话说错了。这条性质是它能在中继之前
+    // 独立上线的全部理由，见 `crate::presence` 的模块文档。
+    //
+    // 走受保护侧：带的是用户自己那把凭据，于是名册天然按人隔离。沙箱那把
+    // 委托令牌够不到它 —— 白名单里没有，默认拒绝。
+    "/agents" [GET] => get(list_agents),
+    "/agents/heartbeat" [POST] => post(heartbeat),
     // ── 实时同步 ──
     //
     // `/sync` 是底线：轮询补拉，不依赖推送。`/ws` 只推「有变化了」这个信号，
@@ -479,6 +489,39 @@ fn delegate_token(st: &AgentState, scope: DelegatedScope) -> String {
 ///
 /// # 为什么它不返回 `Result`
 ///
+/// `POST /agents/heartbeat` —— 本地 agent 报到。
+///
+/// 回执里带 TTL，**由服务端说而不是客户端猜**：两侧各写一个常数的话，改一边
+/// 的后果是「agent 以为自己还在线、名册里已经没了」，而用户看到的是「机器
+/// 离线」而机器明明开着。
+async fn heartbeat(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Json(hb): Json<cortex_proto::presence::AgentHeartbeat>,
+) -> Json<cortex_proto::presence::HeartbeatAck> {
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    st.presence().record(&owner, &hb);
+    Json(cortex_proto::presence::HeartbeatAck {
+        ttl_secs: crate::presence::HEARTBEAT_SECS * 3,
+    })
+}
+
+/// `GET /agents[?session=]` —— 我名下哪些机器现在在线。
+///
+/// 过期的**不出现**，而不是带一个 `online: false`：「不在名册里」与「在名册里
+/// 但离线」是同一件事，两种表达会让客户端多一条分支，而那条分支迟早与服务端
+/// 的判断漂开。
+async fn list_agents(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Query(q): Query<cortex_proto::presence::AgentsQuery>,
+) -> Json<cortex_proto::presence::AgentsResponse> {
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    Json(cortex_proto::presence::AgentsResponse {
+        agents: st.presence().list(&owner, q.session.as_deref()),
+    })
+}
+
 /// 这一步以前是 `st.remote().delegate(...)`，一次跨进程调用，于是每个调用点
 /// 都要处理「记忆服务连不上」并回 502。**记忆服务已经不在了**，而签一把钥匙
 /// 要的三样东西现在全在本进程：owner 来自凭据，项目与执行归属来自本进程库里
@@ -615,11 +658,41 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
     // agent 会拿到一个**完全不同的文件系统**：历史里那些路径全都不存在，
     // 而它读不到时说的是「没有这个文件」—— 一句听起来像它失忆了的实话。
     if matches!(d.runtime, SessionRuntimeDto::Local) {
-        return err(
-            StatusCode::CONFLICT,
-            "这个会话绑在某台机器上的一个目录里，它的文件只在那儿。\
-             在这里继续聊的话 agent 看不到那些文件 —— 请到那台机器上打开它。",
-        );
+        // ── 说出**是哪一台**，以及它现在开着没有 ──
+        //
+        // 这句话原来只说「请到那台机器上打开它」—— 没说哪一台，也没说它此刻
+        // 在不在线。用户要么记得，要么挨个试。在线名册（roadmap E 的阶段 3）
+        // 就是为了让这句话答得出来。
+        //
+        // 名册**不参与判断**：不在名册里也照样 409，只是文案换成「没有在线的
+        // agent 报告持有它」。把它变成一个判断（比如「在线就放行」）是第四步
+        // 的事，而那时的判据仍然是「那个 agent 拿不拿得出那份绑定」。
+        let msg = match st.presence().machine_holding(&d.owner, &parsed.session_id) {
+            // 逐行 `concat!`，而不是靠反斜杠续行拼一句长文案。
+            //
+            // Rust 的续行**本来是对的**（实测：它会吃掉换行与下一行的缩进）。
+            // 换掉它的理由是这段文案第一版是**脚本生成进文件**的，而那个续行没能
+            // 正确落地 —— 结果服务端真的吐出一句中间夹着 17 个空格的话，
+            // 在 dev 上打出来才看见。
+            //
+            // `concat!` 加显式换行不依赖源文件怎么写，于是「这句话长什么样」
+            // 只由这几行本身决定。用户可见的文案值得这个。
+            Some(machine) => format!(
+                concat!(
+                    "这个会话绑在 {machine} 上的一个目录里，它的文件只在那儿。\n",
+                    "那台机器现在**在线** —— 在它上面打开这个会话就能接着聊。"
+                ),
+                machine = machine
+            ),
+            None => concat!(
+                "这个会话绑在某台机器上的一个目录里，它的文件只在那儿。\n",
+                "而现在**没有任何在线的 agent** 报告持有它的绑定 —— ",
+                "那台机器多半没开，或者上面没在跑 Cortex。\n",
+                "`GET /agents` 能看到当前在线的机器。"
+            )
+            .to_owned(),
+        };
+        return err(StatusCode::CONFLICT, &msg);
     }
 
     // **不走 `ensure_sandbox`**：那个函数自己要一次钥匙，而这一条上面已经要过
