@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -11,6 +14,7 @@ import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
 import '../../workspace/workspace_fs.dart';
 import 'cloud_workspace_sheet.dart';
+import 'file_preview.dart';
 import 'sandbox_file_tree.dart';
 import 'workspace_binding_sheet.dart';
 
@@ -150,16 +154,20 @@ class WorkspacePanel extends ConsumerWidget {
   }
 }
 
-class _Tree extends StatefulWidget {
+class _Tree extends ConsumerStatefulWidget {
   const _Tree({super.key, required this.root});
 
   final String root;
 
   @override
-  State<_Tree> createState() => _TreeState();
+  ConsumerState<_Tree> createState() => _TreeState();
 }
 
-class _TreeState extends State<_Tree> {
+/// 改成 `ConsumerStatefulWidget` 只为一件事：**订阅「一轮跑完了」**。
+///
+/// 这棵树列过一层就记住，而 agent 刚写完的文件恰恰在那份缓存之外 ——
+/// 用户打开树，里面没有它。云沙箱那棵树同一个毛病，同一个修法。
+class _TreeState extends ConsumerState<_Tree> {
   /// Absolute paths of every expanded directory. Keyed by path rather than by
   /// index so the set survives a sibling being added or removed.
   final Set<String> _open = {};
@@ -171,10 +179,76 @@ class _TreeState extends State<_Tree> {
 
   bool? _rootExists;
 
+  /// 正在预览哪个文件，以及它的内容。见 `FilePreview`。
+  FileNode? _preview;
+  Uint8List? _previewBytes;
+  String? _previewError;
+  bool _previewLoading = false;
+
+  /// 「一轮结束了」的订阅。见 [initState]。
+  ProviderSubscription<bool>? _turnEnd;
+
   @override
   void initState() {
     super.initState();
     _checkRoot();
+    // 判据是「流从有到没有」，不是工具事件 —— 后者要先认出哪些工具会写文件
+    // （write_file / shell / 外来 MCP 工具……），漏认一个就是一次静默的不刷新
+    _turnEnd = ref.listenManual(
+      chatControllerProvider.select((s) => s.streaming != null),
+      (was, now) {
+        if (was == true && now == false) unawaited(_refresh());
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    // `listenManual` 不跟着部件走，得自己关 —— 不关的话回调会在这个 State
+    // 销毁之后还去 `setState`
+    _turnEnd?.close();
+    super.dispose();
+  }
+
+  /// 重列**已展开**的那几层，并重读正在预览的那个文件。
+  ///
+  /// 折叠着的不重列：为看不见的目录发请求，等于把懒加载退回急切加载。
+  Future<void> _refresh() async {
+    final open = [widget.root, ..._open];
+    for (final path in open) {
+      _children.remove(path);
+    }
+    for (final path in open) {
+      _load(path);
+    }
+    if (_preview case final node?) await _openPreview(node);
+  }
+
+  /// 点一个文件 = 看它。与云沙箱那棵树同一个面板、同一套判据。
+  Future<void> _openPreview(FileNode node) async {
+    final tooBig = (node.sizeBytes ?? 0) > kPreviewMaxBytes;
+    setState(() {
+      _preview = node;
+      _previewBytes = null;
+      _previewError = null;
+      _previewLoading = !tooBig;
+    });
+    if (tooBig) return;
+    try {
+      final bytes = await readWorkspaceFile(node.path);
+      // 读的过程中用户可能又点了别的 —— 那份结果已经过期
+      if (!mounted || _preview?.path != node.path) return;
+      setState(() {
+        _previewBytes = bytes;
+        _previewLoading = false;
+      });
+    } on Object catch (e) {
+      if (!mounted || _preview?.path != node.path) return;
+      setState(() {
+        _previewError = '$e';
+        _previewLoading = false;
+      });
+    }
   }
 
   Future<void> _checkRoot() async {
@@ -287,37 +361,100 @@ class _TreeState extends State<_Tree> {
     walk(widget.root, 0);
 
     if (rows.isEmpty) {
-      return Center(child: Text('目录是空的', style: theme.textTheme.labelSmall));
+      return _withPreview(
+        Center(child: Text('目录是空的', style: theme.textTheme.labelSmall)),
+      );
     }
 
-    return Scrollbar(
-      child: ListView.builder(
-        padding: const EdgeInsets.only(bottom: 8),
-        itemCount: rows.length,
-        itemExtent: 24,
-        itemBuilder: (context, i) {
-          final row = rows[i];
-          if (row.placeholder) {
-            return Padding(
-              padding: EdgeInsets.only(left: 14.0 + row.depth * 13, top: 6),
-              child: SizedBox(
-                width: 11,
-                height: 11,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.5,
-                  color: scheme.onSurfaceVariant,
+    return _withPreview(
+      Scrollbar(
+        child: ListView.builder(
+          padding: const EdgeInsets.only(bottom: 8),
+          itemCount: rows.length,
+          itemExtent: 24,
+          itemBuilder: (context, i) {
+            final row = rows[i];
+            if (row.placeholder) {
+              return Padding(
+                padding: EdgeInsets.only(left: 14.0 + row.depth * 13, top: 6),
+                child: SizedBox(
+                  width: 11,
+                  height: 11,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.5,
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ),
-              ),
+              );
+            }
+            return _NodeRow(
+              node: row.node,
+              depth: row.depth,
+              expanded: _open.contains(row.node.path),
+              // 文件从前是 `null`（点了没反应）。现在点一下就看 ——
+              // 与云沙箱那棵树同一个动作
+              onTap: () => row.node.isDirectory
+                  ? _toggle(row.node.path)
+                  : unawaited(_openPreview(row.node)),
             );
-          }
-          return _NodeRow(
-            node: row.node,
-            depth: row.depth,
-            expanded: _open.contains(row.node.path),
-            onTap: row.node.isDirectory ? () => _toggle(row.node.path) : null,
-          );
-        },
+          },
+        ),
       ),
+    );
+  }
+
+  /// 树 + （有的话）预览 + 一排底部动作。
+  ///
+  /// 抽成一个包装函数是因为这个 `build` 有**五个出口**（还在探根、根不存在、
+  /// 根还没列出来、目录是空的、正常那棵树），而刷新按钮在后四个出口上都该在 ——
+  /// 尤其是「目录是空的」那一个：那正是用户最想点一下刷新的时刻。
+  Widget _withPreview(Widget tree) {
+    final preview = _preview;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(child: tree),
+        if (preview != null)
+          ConstrainedBox(
+            // 上限半屏：再高就把树挤没了，而用户还得靠它切下一个文件
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(context).height * 0.5,
+            ),
+            child: FilePreview(
+              node: preview,
+              bytes: _previewBytes,
+              error: _previewError,
+              loading: _previewLoading,
+              onClose: () => setState(() {
+                _preview = null;
+                _previewBytes = null;
+                _previewError = null;
+              }),
+            ),
+          ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 2, 8, 6),
+            child: IconButton(
+              // 自动刷新之外还留手动这一个：文件也可能由别的东西改
+              //（编辑器、git、另一个终端），那些没有「一轮结束」这个信号
+              onPressed: _loading.isNotEmpty
+                  ? null
+                  : () => unawaited(_refresh()),
+              iconSize: 16,
+              tooltip: '重新列一遍',
+              icon: _loading.isNotEmpty
+                  ? const SizedBox(
+                      width: 13,
+                      height: 13,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.refresh_rounded),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

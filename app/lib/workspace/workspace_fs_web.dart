@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import '../models/workspace.dart';
 
 /// A browser tab cannot enumerate the user's disk.
@@ -45,4 +47,10 @@ Future<String?> pickWorkspaceDirectory() async => null;
 Future<bool> workspaceExists(String path) async => true;
 
 Future<List<FileNode>> listWorkspaceDirectory(String path) async =>
+    throw UnsupportedError(kNoLocalFilesReason);
+
+/// Web 上没有本机文件可读。**这条永远不会被调到**：没有本地 agent 的构建
+/// 压根不会构造本机文件树（判据在 `WorkspacePanel`）。留着是为了这道缝的
+/// 两半暴露同一组名字 —— 少一个名字，条件导入会在编译期就红。
+Future<Uint8List> readWorkspaceFile(String path) =>
     throw UnsupportedError(kNoLocalFilesReason);

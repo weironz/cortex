@@ -17,6 +17,7 @@
 library;
 
 import 'package:file_picker/file_picker.dart';
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -124,11 +125,28 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
   /// 逐文件已经足够消掉「界面只是卡着」：用户看得见在传第几个、传的是哪个。
   SandboxUpload? _upload_;
 
+  /// 「一轮结束了」的订阅。见 [initState]。
+  ProviderSubscription<bool>? _turnEnd;
+
   @override
   void initState() {
     super.initState();
     _open.add(widget.root);
     _load(widget.root);
+    // ── 一轮跑完就自动重列 ──
+    //
+    // 用 `listenManual` 而不是在 `build` 里 `ref.listen`：这棵树的 build 会
+    // 因为展开/折叠反复跑，而订阅只需要建一次。
+    //
+    // 判据是「流从有到没有」。**不用工具事件**：那样得先认出哪些工具会写文件
+    // （`write_file`、`shell`、外来 MCP 工具……），而漏认一个就是「这次没刷新」，
+    // 一条静默的漏。一轮结束多列一次目录，代价是每个展开层一个请求。
+    _turnEnd = ref.listenManual(
+      chatControllerProvider.select((s) => s.streaming != null),
+      (was, now) {
+        if (was == true && now == false) unawaited(_refresh());
+      },
+    );
   }
 
   /// [force] 为真时无视缓存重拉 —— 上传之后必须这样，否则新文件要等用户
@@ -156,6 +174,37 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
         _errors[path] = _Failure.from(e);
       });
     }
+  }
+
+  /// 把已经展开的那几层**重新列一遍**，并顺带重读正在预览的那个文件。
+  ///
+  /// # 为什么必须有这个
+  ///
+  /// 这棵树列过一层就记住（`_children` 就是懒加载的全部状态），而最常见的
+  /// 那件事恰恰是「agent 刚写完一个文件，我看看」—— 打开树，里面没有它。
+  /// 真机上撞到过：agent 写完 `demo.md`，树上没有，切会话也没用，
+  /// **只有把整栏关掉再打开**才重列（那时部件被销毁，缓存跟着没了）。
+  ///
+  /// # 只重列展开的那几层
+  ///
+  /// 折叠着的目录用户看不见，为它们发请求等于把懒加载又退回急切加载 ——
+  /// 而那正是这棵树最初要避开的东西（一个带 `node_modules` 的工作区
+  /// 会打出上千个请求）。
+  Future<void> _refresh() async {
+    // 先拍一份快照：`_load` 会 `setState`，而在迭代 `_open` 时改它是错的
+    final open = _open.toList();
+    await Future.wait([for (final path in open) _load(path, force: true)]);
+    // 预览也可能过期了：agent 刚重写的就是它。文件没了就让它显示那个错误 ——
+    // 比继续展示一份已经不存在的内容诚实
+    if (_preview case final node?) await _openPreview(node);
+  }
+
+  @override
+  void dispose() {
+    // `listenManual` 的订阅不跟着部件走，得自己关。不关的后果是这个 State
+    // 被销毁之后回调还在，而它第一件事就是 `setState`
+    _turnEnd?.close();
+    super.dispose();
   }
 
   void _toggle(FileNode node) {
@@ -332,6 +381,8 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
           targetName: basenameOf(_target),
           progress: _upload_,
           onUpload: _upload,
+          onRefresh: _refresh,
+          refreshing: _loading.isNotEmpty,
         ),
       ],
     );
@@ -555,11 +606,20 @@ class _Actions extends StatelessWidget {
     required this.targetName,
     required this.progress,
     required this.onUpload,
+    required this.onRefresh,
+    required this.refreshing,
   });
 
   final String targetName;
   final SandboxUpload? progress;
   final VoidCallback onUpload;
+
+  /// 手动重列。**自动刷新之外还要留这一个**：一轮结束会自动重列，但文件也可能
+  /// 由别的东西改（另一台设备上的同一个会话、同项目的另一个会话、
+  /// 用户自己刚传进来的那一批）—— 那几种情况没有「一轮结束」这个信号。
+  final Future<void> Function() onRefresh;
+
+  final bool refreshing;
 
   @override
   Widget build(BuildContext context) {
@@ -584,6 +644,20 @@ class _Actions extends StatelessWidget {
             label: Text(progress?.label ?? '传文件到 $targetName/'),
           ),
           const SandboxDownloadButton(),
+          // 图标按钮而不是带文字的：这一排已经有两个长按钮，侧栏窄的时候
+          // 第三个会把它们挤到第三行
+          IconButton(
+            onPressed: refreshing ? null : () => unawaited(onRefresh()),
+            iconSize: 16,
+            tooltip: '重新列一遍',
+            icon: refreshing
+                ? const SizedBox(
+                    width: 13,
+                    height: 13,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.refresh_rounded),
+          ),
         ],
       ),
     );

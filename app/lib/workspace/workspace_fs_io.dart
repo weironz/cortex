@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 
@@ -78,3 +79,9 @@ String _basename(String path) {
   final i = path.lastIndexOf(RegExp(r'[/\\]'));
   return i < 0 ? path : path.substring(i + 1);
 }
+
+/// 读一个文件的字节，给预览面板用。
+///
+/// **不在这里判大小**：判据是目录列表里已经拿到的 `size`，调用方在决定要不要
+/// 读之前就有它。放在这里的话，一个 200 MB 的日志已经被读进内存才被拒。
+Future<Uint8List> readWorkspaceFile(String path) => File(path).readAsBytes();
