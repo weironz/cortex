@@ -40,11 +40,17 @@
 //! 所以「爆炸半径已被容器限住」这句话对那四家成立，对我们不成立。作用域
 //! 必须下沉到**语义**：见 [`DelegatedScope`]。
 //!
-//! # 令牌与 session 绑定，不只与 owner 绑定
+//! # 作用域的粒度 = **容器**的粒度，不是会话
 //!
-//! 一个用户可能有多个会话。沙箱只该看得见自己那一个 —— 否则「隔离」只隔到
-//! 了用户这一层，而同一个用户的两段工作之间同样需要边界（一段在处理公司
-//! 合同、另一段在跑一个从网上抄来的脚本）。
+//! 一个用户可能有多个会话，而同一个用户的两段工作之间确实需要边界（一段在
+//! 处理公司合同、另一段在跑一个从网上抄来的脚本）。那条边界由**项目**划：
+//! 按项目分容器、分卷（见 [`DelegatedScope::key`]）。
+//!
+//! 令牌的作用域必须与容器**一样粗**。曾经它只认签发时那一个会话 id，
+//! 比容器细一格 —— 而细出来的那一格不买任何隔离（同容器的会话本来就共用
+//! 一个卷、彼此文件全可见），只逼出一个 `rebind` 补丁，而那个补丁会把上一个
+//! 还在跑的那一轮打死。2026-08-18 生产实测，见
+//! [`DelegatedScope::may_write_session`]。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -54,8 +60,8 @@ use std::time::{Duration, Instant};
 ///
 /// 比票据（60 秒）长得多：这把是长连接用的，容器一活可能几小时。
 /// 但仍然有限 —— 容器被回收后令牌应当自然失效，而不是永远留在表里。
-/// 每次成功的 [`DelegatedTokens::resolve`] 会盖一个新时间戳（[`
-/// DelegatedTokens::rebind`] 同理），所以活跃的沙箱不会被误杀。
+/// 每次成功的 [`DelegatedTokens::resolve`] 与 [`DelegatedTokens::find_by_key`]
+/// 都会盖一个新时间戳，所以活跃的沙箱不会被误杀。
 const TTL: Duration = Duration::from_secs(6 * 3600);
 
 /// 沙箱能做什么。**按语义授权，不是按路由**。
@@ -63,7 +69,21 @@ const TTL: Duration = Duration::from_secs(6 * 3600);
 pub struct DelegatedScope {
     /// 令牌属于谁。租户隔离仍然由它决定 —— 这一层是既有的。
     pub owner: String,
-    /// 绑定的会话。沙箱只能读写这一个会话的东西。
+    /// 签发这把令牌时的那个会话。
+    ///
+    /// # ⚠️ 它**不再**是「只能写这一个会话」的判据
+    ///
+    /// 一个容器服务的是**同一个 key 下的全部会话**（见 [`Self::key`]）——
+    /// 同项目的、以及全部未分组的。而这里从前只记一个会话 id，写 episode 时
+    /// 逐字比对，于是同一个容器换一个会话来用就必须 `rebind`。
+    ///
+    /// 那条 rebind 会把**上一个会话还在跑的那一轮**打死：它写 assistant
+    /// episode 时拿到 400「这把凭据只能写它绑定的那个会话」。生产日志里那两行
+    /// 配对就是它（`bound=live-sbx-… attempted=live-chat-…`）。触发条件很日常：
+    /// 在 Web 上同时开着两个会话。
+    ///
+    /// 现在判据是 [`Self::may_write_session`] —— 「这个会话属不属于这个作用域」。
+    /// 这个字段留着只为**排查**（这把钥匙当初是为谁签的），不参与授权。
     pub session_id: String,
     /// 这个会话属于哪个项目。`None` = 未分组。
     ///
@@ -127,6 +147,26 @@ impl DelegatedScope {
                 format!("{}--p-{}", self.owner, hex::encode(&digest[..6]))
             }
         }
+    }
+
+    /// 这把令牌能不能写那个会话的对话记录。
+    ///
+    /// # 判据是「同一个容器」，不是「同一个会话」
+    ///
+    /// 授权的粒度必须与**容器**的粒度一致：一个容器服务同一个 key 下的全部
+    /// 会话，读写的是同一个卷。让令牌只认一个会话，换来的不是更强的隔离
+    /// （那些会话的文件本来就在同一个卷里、彼此完全可见），而是一个必须靠
+    /// `rebind` 打补丁的错配 —— 而 rebind 会打死上一个还在跑的那一轮。
+    ///
+    /// 放宽到「同 key」之后，一把被偷走的沙箱令牌能多做的事是：写同项目下
+    /// 别的会话的对话记录。而它**本来就能**读写那些会话的全部文件。
+    /// 也就是说这不是放宽了一格权限，是把权限调回与它实际能碰到的东西一致。
+    ///
+    /// `other` 是那个会话所属的项目（`None` = 未分组）。调用方从库里查，
+    /// 查不到就按未分组 —— 与 `delegation_scope` 的降级方向一致。
+    #[must_use]
+    pub fn may_write_session(&self, other_project: Option<&str>) -> bool {
+        self.project.as_deref() == other_project
     }
 
     /// 这条路径 + 方法允许吗。
@@ -244,26 +284,22 @@ impl DelegatedTokens {
     /// 按 [`DelegatedScope::key`] 而不是按 owner 找：一个用户可以同时有几个
     /// 项目的沙箱活着，拿错那把的后果是**把 A 项目的令牌塞给 B 项目的容器**
     /// —— 而容器起来之后照常应答，只是它认的是另一把，第二轮才 401。
+    /// # 命中就顺手续期
+    ///
+    /// 那次续期从前由 `rebind` 顺带做（每轮都会调它）。`rebind` 删掉之后
+    /// 必须挪到这里 —— 不挪的话，一个连着聊了 6 小时的容器会在 TTL 上突然
+    /// 失效，而它明明一直在被用。
     #[must_use]
     pub fn find_by_key(&self, key: &str) -> Option<String> {
-        let guard = self.inner.lock().ok()?;
+        let mut guard = self.inner.lock().ok()?;
         let now = Instant::now();
-        guard.iter().find_map(|(tok, (scope, at))| {
+        let hit = guard.iter().find_map(|(tok, (scope, at))| {
             (scope.key() == key && now.duration_since(*at) < TTL).then(|| tok.clone())
-        })
-    }
-
-    /// 把一把已有的令牌改绑到另一个会话上。
-    ///
-    /// 同一个容器服务这个用户的下一个会话时用。**不是放宽作用域** ——
-    /// 改完之后它仍然只对得上一个会话，只是换了一个。
-    pub fn rebind(&self, token: &str, session_id: &str) {
-        if let Ok(mut g) = self.inner.lock()
-            && let Some((scope, at)) = g.get_mut(token)
-        {
-            scope.session_id = session_id.to_owned();
-            *at = Instant::now();
+        })?;
+        if let Some((_, at)) = guard.get_mut(&hit) {
+            *at = now;
         }
+        Some(hit)
     }
 
     /// 作废。调用方是 `DELETE /delegated-tokens` —— 一个自己编排沙箱的
@@ -563,6 +599,45 @@ mod tests {
 
     /// 同一个作用域**重复要钥匙拿到的是同一把**，且会跟着换会话。
     ///
+    /// **同一个容器下的两个会话不许互相打死。**
+    ///
+    /// 生产实测（2026-08-18）：一个容器服务同 owner/项目下的全部会话，而令牌
+    /// 从前只认签发时那一个会话 id，于是每来一个新会话就 `rebind`。上一个
+    /// 会话**还在跑的那一轮**随后写 assistant episode 时拿到 400 ——
+    /// 文件已经改完了，回答却进不了历史。日志里那两行配对是它的指纹：
+    /// `bound=live-sbx-… attempted=live-chat-…`。
+    ///
+    /// 触发条件很日常：在 Web 上同时开着两个会话。
+    #[test]
+    fn two_sessions_in_one_container_do_not_evict_each_other() {
+        let book = DelegatedTokens::default();
+        // 未分组作用域 —— 一个用户所有「没归到项目里」的会话共用这一个容器
+        let token = book.issue(DelegatedScope {
+            owner: "u1".into(),
+            session_id: "第一个会话".into(),
+            project: None,
+        });
+
+        // 第二个会话来了。同一个 key，于是复用同一把令牌 —— 而**不改绑**
+        let same = book
+            .find_by_key(
+                &DelegatedScope {
+                    owner: "u1".into(),
+                    session_id: "第二个会话".into(),
+                    project: None,
+                }
+                .key(),
+            )
+            .expect("同一个 key 该找回同一把");
+        assert_eq!(same, token);
+
+        let scope = book.resolve(&token).expect("令牌还有效");
+        assert!(
+            scope.may_write_session(None),
+            "第一个会话还在跑的那一轮必须写得进去 —— 这正是从前被 400 打死的那一步"
+        );
+    }
+
     /// 这条钉的是 `routes::delegate_token` 依赖的那个性质。它红了，症状是
     /// 真机上「第一轮好使、第二轮 401」：容器的入站认证认的是启动时 env 里
     /// 那把，而我们每轮换了新的。
@@ -578,16 +653,23 @@ mod tests {
             "找回来的不是同一把 —— 下一轮反代进容器就是 401，而那条错误读起来像「沙箱坏了」"
         );
 
-        book.rebind(&found, "s2");
-        let after = book.resolve(&found).expect("改绑不该让令牌失效");
-        assert_eq!(
-            after.session_id, "s2",
-            "改绑之后作用域该指向新会话；没生效的话，同一个容器服务下一个会话时\
-             写 episode 会被 auth 那一支按「不是你绑的会话」拒掉"
-        );
+        // 同一个容器服务下一个会话时**什么都不用改**。
+        //
+        // 这里从前是 `rebind(&found, "s2")` —— 把令牌改绑到新会话。那一步会把
+        // **上一个还在跑的那一轮**打死：它写 assistant episode 时拿到 400。
+        // 现在授权看作用域、不看这个 id，所以改绑连同它的坑一起删了。
+        let after = book.resolve(&found).expect("找回来的令牌该是有效的");
         assert_eq!(
             after.owner, "u1",
-            "改绑只换会话，owner 与项目不许动 —— 动了就是放宽作用域"
+            "作用域里的 owner 与项目才是判据，它们不该被任何一轮动过"
+        );
+        assert!(
+            after.may_write_session(None),
+            "未分组作用域的令牌，写未分组会话的记录 —— 同一个容器、同一个卷"
+        );
+        assert!(
+            !after.may_write_session(Some("别人的项目")),
+            "跨项目**必须**拒：那是另一个容器、另一个卷"
         );
 
         // 别人的作用域找不到它

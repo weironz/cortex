@@ -493,11 +493,11 @@ async fn delegation_scope(
 /// 而那两条路服务的是不同的人群。
 fn delegate_token(st: &AgentState, scope: DelegatedScope) -> String {
     let key = scope.key();
+    // 命中就直接用，**不再改绑**：授权判据是作用域（owner + 项目），
+    // 与这把钥匙当初为谁签的无关。改绑那一步从前会把上一个还在跑的那一轮
+    // 打死，见 `DelegatedScope::may_write_session`
     match st.delegations().find_by_key(&key) {
-        Some(t) => {
-            st.delegations().rebind(&t, &scope.session_id);
-            t
-        }
+        Some(t) => t,
         None => st.delegations().issue(scope),
     }
 }

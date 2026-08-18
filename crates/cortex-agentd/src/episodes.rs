@@ -86,18 +86,40 @@ pub async fn write(
     delegation: Option<axum::Extension<crate::delegated_token::DelegatedScope>>,
     Json(req): Json<NewEpisodeRequest>,
 ) -> Result<Json<EpisodeAck>, ApiError> {
-    if let Some(axum::Extension(scope)) = &delegation
-        && scope.session_id != req.session_id
-    {
-        tracing::warn!(
-            owner = %scope.owner, bound = %scope.session_id, attempted = %req.session_id,
-            "一把委托凭据想往别的会话里写"
-        );
-        return Err(ApiError::bad_request(
-            "这把凭据只能写它绑定的那个会话的对话记录",
-        ));
-    }
     let tenant = st.tenant(&headers).await?;
+    // ── 委托凭据只能写**它那个容器服务的那些会话** ──
+    //
+    // 判据是作用域（owner + 项目），不是签发时那个会话 id。逐字比对会话 id 的
+    // 后果实测过：一个容器服务同 key 下的全部会话，于是换一个会话来用就得
+    // `rebind`，而那会把**上一个还在跑的那一轮**打死 —— 它写 assistant
+    // episode 时拿到 400，文件已经改完了，回答却进不了历史。
+    // 见 `DelegatedScope::may_write_session`。
+    if let Some(axum::Extension(scope)) = &delegation {
+        // 查不到那个会话就按未分组处理，与 `delegation_scope` 的降级方向一致 ——
+        // 两处对同一件事的判断必须同向，否则「能起容器但写不进去」
+        let project = match tenant.store() {
+            Ok(store) => store
+                .session_state(&req.session_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.project_id),
+            Err(_) => None,
+        };
+        if !scope.may_write_session(project.as_deref()) {
+            tracing::warn!(
+                owner = %scope.owner,
+                signed_for = %scope.session_id,
+                attempted = %req.session_id,
+                scope_project = ?scope.project,
+                session_project = ?project,
+                "一把委托凭据想往**别的项目**的会话里写"
+            );
+            return Err(ApiError::bad_request(
+                "这把凭据只能写它那个工作区下的会话的对话记录",
+            ));
+        }
+    }
     let ack = write_one(tenant.store()?, &req).await?;
     Ok(Json(ack))
 }
