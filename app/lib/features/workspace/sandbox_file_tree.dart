@@ -17,36 +17,38 @@
 library;
 
 import 'package:file_picker/file_picker.dart';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_exception.dart';
 import '../../api/cortex_api.dart';
 import '../../core/formatting.dart';
-import '../../core/local_agent.dart';
 import '../../core/save_file.dart';
 import '../../models/attachment.dart' show formatBytes;
 import '../../models/workspace.dart';
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
+import 'file_preview.dart';
 import 'sandbox_download_button.dart';
 
-/// 挂在 `WorkspacePanel` 的 Web 那一支：一句说明 + 文件树 + 两个出入口。
+/// 挂在 `WorkspacePanel` 的**云端**那一支：一句说明 + 文件树 + 两个出入口。
 ///
-/// 平台判据只在这里出现一次，而且判的是**能力**（这个构建有没有自己的
-/// agent）而不是 `kIsWeb`。桌面端 agent 动的就是用户自己的目录，那儿的
-/// 「工作区」是本机文件树，云沙箱在那儿是个看不见你项目的更弱选项。
+/// # 这里**不再**做平台判断
 ///
-/// 判据留在外层而不是塞进 [SandboxBrowser]：那样这棵树在桌面上的测试里
-/// 会整个变成 `SizedBox.shrink`，于是「懒加载」「501 原样透出」这些
-/// 断言在 CI 上一条都跑不到。
+/// 它从前第一行就是 `if (kLocalAgentSupported) return SizedBox.shrink()`，
+/// 也就是「桌面端一律不画」。那个判断当时对（桌面端的会话都绑本机目录），
+/// 但它按**构建**判 —— 于是桌面端打开一个**云端**会话时，文件在容器的卷里，
+/// 而这块面板要么显示「你还没绑目录」，要么（判据修好之后）显示一片空白。
+///
+/// 现在「这个会话的文件在哪」只由 `WorkspacePanel` 判一次，见它那段注释。
+/// 判据留在一处的理由与从前一样：**两处判据迟早说不到一块去**。
 class SandboxWorkspaceView extends StatelessWidget {
   const SandboxWorkspaceView({super.key});
 
   @override
   Widget build(BuildContext context) {
-    if (kLocalAgentSupported) return const SizedBox.shrink();
-
     final theme = Theme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -55,8 +57,11 @@ class SandboxWorkspaceView extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
           child: Text(
             // 不提「容器」「沙箱」。用户要知道的只有两件事：
-            // 这些文件不是他本机的，以及 agent 动的就是它们
-            '浏览器读不到你这台机器的磁盘，所以 agent 有一份自己的工作区。'
+            // 这些文件不是他本机的，以及 agent 动的就是它们。
+            //
+            // 措辞不能再从「浏览器」说起：桌面端上的云端会话也走这一支，
+            // 而那儿的用户明明有磁盘 —— 说「浏览器读不到你的磁盘」是句错话
+            '这个会话跑在远端，agent 有一份自己的工作区 —— 不是你本机的目录。'
             '下面就是它，跨会话保留。',
             style: theme.textTheme.labelSmall,
           ),
@@ -93,6 +98,15 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
   late String _target = widget.root;
 
   String? _downloading;
+
+  /// 正在预览哪个文件。null = 预览面板不出现。
+  FileNode? _preview;
+
+  /// 预览的内容。与 [_preview] 分开存，因为「选中了但还在读」是一个真实状态，
+  /// 而合成一个字段会让它与「读完了但是空文件」分不开。
+  Uint8List? _previewBytes;
+  String? _previewError;
+  bool _previewLoading = false;
 
   /// 当前在看哪个会话。**每一次文件请求都要带上它。**
   ///
@@ -150,6 +164,45 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
       if (!_open.remove(node.path)) _open.add(node.path);
     });
     if (_open.contains(node.path)) _load(node.path);
+  }
+
+  /// 点一个文件 = 看它，而不是下载它。
+  ///
+  /// 从前点一下直接触发下载。那对「把产物拿走」是对的，对更常见的
+  /// 「agent 说它写了 report.md，写了什么」则是绕远路 —— 下载、找下载目录、
+  /// 用别的程序打开，只为看三行字。下载挪到了预览面板的标题栏上。
+  ///
+  /// 太大的文件**先不读**：判据用目录列表里的 `size`，于是一个 200 MB 的日志
+  /// 连请求都不会发出去。读回来再判的话，那 200 MB 已经过了网络、进了内存
+  /// （Web 上是浏览器的堆）。
+  Future<void> _openPreview(FileNode node) async {
+    final tooBig = (node.sizeBytes ?? 0) > kPreviewMaxBytes;
+    setState(() {
+      _preview = node;
+      _previewBytes = null;
+      _previewError = null;
+      _previewLoading = !tooBig;
+    });
+    if (tooBig) return;
+    try {
+      final bytes = await ref
+          .read(cortexApiProvider)
+          .sandboxReadFile(node.path, sessionId: _session);
+      if (!mounted) return;
+      // 读的过程中用户可能又点了别的文件 —— 那时这份结果已经过期。
+      // 不判的话，慢的那次请求回来会把快的那次覆盖掉（经典的乱序落地）
+      if (_preview?.path != node.path) return;
+      setState(() {
+        _previewBytes = bytes;
+        _previewLoading = false;
+      });
+    } on Object catch (e) {
+      if (!mounted || _preview?.path != node.path) return;
+      setState(() {
+        _previewError = _Failure.from(e).message;
+        _previewLoading = false;
+      });
+    }
   }
 
   Future<void> _download(FileNode node) async {
@@ -249,10 +302,32 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
 
   @override
   Widget build(BuildContext context) {
+    final preview = _preview;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Expanded(child: _body(context)),
+        // 预览占下半栏，**上限是一半**：再高就把文件树挤没了，而用户还得
+        // 靠那棵树切到下一个文件。`Flexible` + `maxHeight` 让短文件只占它
+        // 实际需要的高度，长文件到一半为止再滚
+        if (preview != null)
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(context).height * 0.5,
+            ),
+            child: FilePreview(
+              node: preview,
+              bytes: _previewBytes,
+              error: _previewError,
+              loading: _previewLoading,
+              onDownload: () => _download(preview),
+              onClose: () => setState(() {
+                _preview = null;
+                _previewBytes = null;
+                _previewError = null;
+              }),
+            ),
+          ),
         _Actions(
           targetName: basenameOf(_target),
           progress: _upload_,
@@ -350,8 +425,9 @@ class _SandboxBrowserState extends ConsumerState<SandboxBrowser> {
             expanded: _open.contains(row.node.path),
             isTarget: row.node.isDirectory && row.node.path == _target,
             busy: _downloading == row.node.path,
-            onTap: () =>
-                row.node.isDirectory ? _toggle(row.node) : _download(row.node),
+            onTap: () => row.node.isDirectory
+                ? _toggle(row.node)
+                : _openPreview(row.node),
           );
         },
       ),

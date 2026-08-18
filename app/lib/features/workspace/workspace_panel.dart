@@ -42,25 +42,34 @@ class WorkspacePanel extends ConsumerWidget {
     final workspace = session?.workspace;
     final scheme = Theme.of(context).colorScheme;
 
-    // 没有本地 agent 的构建（Web）：这块面板回答的是「我的文件在哪」，
-    // 而在那儿答案与本机绑定**无关** —— 文件在云端容器的卷里。
+    // 这块面板回答的是「**这个会话**的文件在哪」，所以判据是这个会话有没有
+    // 本机绑定 —— 没有就是跑在云端容器里，文件在那个卷里。
     //
-    // 所以它不能跟着 `workspace != null` 走。跟着走的后果实测过：Web 端绑
-    // 工作区会被服务端 400 拒（任务 #75 卸掉了 cortexd 自己的文件工具），
-    // 于是 workspace 恒为 null，整块面板连同**唯一的文件出入口**在 Web 上
-    // 永远不出现 —— 而 Web 恰恰是唯一需要它的地方。
-    final sandboxOnly = !kLocalAgentSupported;
+    // # 判据曾经是「这是不是 Web 构建」，那是错的
+    //
+    // 写成 `!kLocalAgentSupported` 的本意是对的（Web 上文件必然在云端），但它
+    // 按**构建**判而不是按**会话**判，于是桌面端打开一个云端会话时，面板走的是
+    // 本机那一支，显示「这个会话还没绑定目录 —— 点上面那个换向箭头选一个」。
+    // 用户看到的是一句「你还没选目录」，而 agent 明明刚在云端建完文件。
+    // 实测复现（2026-08-18，桌面端 + 云端会话）。
+    //
+    // `workspace == null` 与两处是**同一个判据**：底部那个「云端」标签，
+    // 以及服务端 `routes::chat` 的分流（「这台机器有没有这个会话的绑定」）。
+    // 三处说的必须是同一件事，否则界面会指着一个 agent 根本没用的目录。
+    //
+    // Web 上它仍然恒为 true：那边绑不了本机目录（服务端 400 拒），
+    // `workspace` 恒 null —— 与改之前的行为一字不差。
+    final sandboxOnly = workspace == null;
 
-    // 没有会话、或者桌面端这个会话还没绑目录 —— **没东西可画，但栏还得在**。
+    // 没有会话 —— **没东西可画，但栏还得在**。
     //
-    // 搬到右栏之前这两处是 `SizedBox.shrink()`：那时它只是左栏底下的一块，
+    // 搬到右栏之前这里是 `SizedBox.shrink()`：那时它只是左栏底下的一块，
     // 消失就消失了。现在它是**整整一列**，画不出东西就等于一片空白，
     // 而且连关闭按钮都没有 —— 用户打开一个关不掉的空栏。
-    final empty = session == null
-        ? '还没选中会话。'
-        : (!sandboxOnly && workspace == null
-              ? '这个会话还没绑定目录 —— 点上面那个换向箭头选一个。'
-              : null);
+    //
+    // 「桌面端还没绑目录」那一支没有了：那种会话现在如实显示云端沙箱的文件，
+    // 因为它的这一轮就跑在那儿。
+    final empty = session == null ? '还没选中会话。' : null;
 
     // 面板自己那层折叠没了：右栏整个由顶栏那个图标控制，再套一层
     // 就是两个开关管同一件事 —— 而用户永远说不清该点哪个
@@ -73,13 +82,13 @@ class WorkspacePanel extends ConsumerWidget {
           // 需要先做点什么才能用
           title: sandboxOnly
               ? (session?.containerWorkspace ?? '文件')
-              : (workspace?.displayName ?? '文件'),
+              : workspace.displayName,
           subtitle: sandboxOnly
               ? (session?.containerWorkspace == null
                     ? 'agent 读写的就是这些，跨会话保留'
                     // 路径写全：用户点开选择器之前，得先看得出自己在哪一层
                     : '/workspace/${session!.containerWorkspace}')
-              : workspace?.root,
+              : workspace.root,
           leading: Icon(
             Icons.folder_rounded,
             size: 15,
@@ -134,7 +143,7 @@ class WorkspacePanel extends ConsumerWidget {
               // Keyed by root so switching sessions to a differently-bound
               // one discards the expansion set and cached listings of the
               // old tree instead of showing them under the new root.
-              : _Tree(key: ValueKey(workspace!.root), root: workspace.root),
+              : _Tree(key: ValueKey(workspace.root), root: workspace.root),
         ),
       ],
     );

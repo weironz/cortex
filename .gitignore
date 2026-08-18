@@ -74,3 +74,6 @@ app/.idea/
 # 它们是**另一个 git 仓库**，被 `git add -A` 卷进来会变成 embedded repo：
 # 克隆外层仓库的人拿到一个空目录，且不知道去哪儿取内容。
 .claude/worktrees/
+
+# 提交消息用的临时文件（反引号在 shell 里会被当成命令替换，所以走文件）
+.git-msg.tmp

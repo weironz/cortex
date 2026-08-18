@@ -19,7 +19,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_exception.dart';
-import '../../core/local_agent.dart';
 import '../../core/save_file.dart';
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
@@ -81,10 +80,13 @@ class _SandboxDownloadButtonState extends ConsumerState<SandboxDownloadButton> {
 
   @override
   Widget build(BuildContext context) {
-    // 判据是能力而不是平台。桌面端 agent 动的就是用户自己的目录，
-    // 「下载工作区」在那儿没有意义
-    if (kLocalAgentSupported) return const SizedBox.shrink();
-
+    // 这里从前是 `if (kLocalAgentSupported) return SizedBox.shrink()`，
+    // 理由写着「桌面端 agent 动的就是用户自己的目录」。那句话对**绑了本机
+    // 目录的会话**成立，但桌面端也能开云端会话 —— 那时文件在容器的卷里，
+    // 用户想拿回本机唯一的路就是这个按钮，而它被藏起来了。
+    //
+    // 现在这个按钮只出现在云端那一支里（`SandboxWorkspaceView` 的子树），
+    // 而那一支由 `WorkspacePanel` 按**会话**决定 —— 判据一处即可。
     return OutlinedButton.icon(
       onPressed: _busy ? null : _download,
       icon: _busy

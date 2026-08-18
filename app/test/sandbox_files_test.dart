@@ -28,12 +28,13 @@ import 'package:cortex_app/api/api_exception.dart';
 import 'package:cortex_app/api/cortex_api.dart';
 import 'package:cortex_app/api/http_cortex_api.dart';
 import 'package:cortex_app/api/mock_cortex_api.dart';
-import 'package:cortex_app/core/local_agent.dart';
 import 'package:cortex_app/features/workspace/sandbox_file_tree.dart';
 import 'package:cortex_app/models/workspace.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:cortex_app/features/workspace/file_preview.dart';
+import 'package:cortex_app/widgets/markdown/cortex_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -55,9 +56,13 @@ const String _kNoSandbox =
 
 /// 记下每一次列目录的请求 —— 「只要了这一层」这件事只能这样断言。
 class _TreeApi extends MockCortexApi {
-  _TreeApi(this.tree) : super(instant: true);
+  _TreeApi(this.tree, {this.files = const {}}) : super(instant: true);
 
   final Map<String, List<FileNode>> tree;
+
+  /// 路径 → 内容。**没配的路径照旧抛** —— 见 `sandboxReadFile` 那段注释。
+  final Map<String, String> files;
+
   final List<String> listed = [];
   final List<String> read = [];
 
@@ -77,6 +82,9 @@ class _TreeApi extends MockCortexApi {
   @override
   Future<Uint8List> sandboxReadFile(String path, {String? sessionId}) async {
     read.add(path);
+    if (files[path] case final text?) {
+      return Uint8List.fromList(utf8.encode(text));
+    }
     // 刻意抛：真去下载会走到 `saveBytesAs`，而它在桌面端**真的会往
     // ~/Downloads 写文件**。这里要验的是「点文件去读的是哪条路径」，
     // 顺带把下载失败时的原样透出也一起验了
@@ -283,7 +291,60 @@ void main() {
     });
   });
 
-  group('点文件就下载', () {
+  group('点文件就预览', () {
+    /// `.md` 交给 markdown 渲染器，别的当纯文本铺。
+    ///
+    /// # 断言的是**我们做的那个选择**，不是渲染器画出了什么
+    ///
+    /// 先写的是「屏幕上该出现『标题一』且不该出现『# 标题一』」，看着更硬。
+    /// 它跑不通，而且不该通：`gpt_markdown` 把每个块渲染成自己的 `Text.rich`
+    /// + WidgetSpan，`toPlainText()` 取不到字 —— 于是「找不到」与「压根没
+    /// 渲染」在断言里长得一模一样。钉住第三方的内部形状，还会让它升一次版
+    /// 就红一次。
+    testWidgets('.md 走 markdown 渲染器，不是原样铺源码', (tester) async {
+      final api = _TreeApi(
+        _threeLevels(),
+        files: {'$kSandboxRoot/README.md': '# 标题一\n\n正文一行。'},
+      );
+      await _boot(tester, api);
+
+      await tester.tap(find.text('README.md'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byType(CortexMarkdown),
+        findsOneWidget,
+        reason: '.md 要交给 markdown 渲染器 —— 与聊天气泡里那份是同一个',
+      );
+      expect(
+        find.byType(SelectableText),
+        findsNothing,
+        reason: '走了纯文本那一支，就说明井号会原样铺在屏幕上',
+      );
+    });
+
+    /// 点一下是**看**，不是往磁盘上写。
+    ///
+    /// 从前点一下直接走 `saveBytesAs`。这条钉住那个行为已经换掉了 ——
+    /// 换回去的话，用户每点一个文件看一眼，下载目录里就多一份。
+    testWidgets('预览面板出现，文件名在标题栏上', (tester) async {
+      final api = _TreeApi(
+        _threeLevels(),
+        files: {'$kSandboxRoot/README.md': 'hello'},
+      );
+      await _boot(tester, api);
+
+      await tester.tap(find.text('README.md'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(FilePreview), findsOneWidget);
+      expect(
+        find.text('hello', findRichText: true),
+        findsOneWidget,
+        reason: '非 markdown 按纯文本显示（SelectableText 内部也是 RichText）',
+      );
+    });
+
     testWidgets('取的是这个节点的绝对路径，失败时原样说原因', (tester) async {
       final api = _TreeApi(_threeLevels());
       await _boot(tester, api);
@@ -395,24 +456,31 @@ void main() {
     });
   });
 
-  group('平台判据', () {
-    testWidgets('有本地 agent 的构建里整块都不出现', (tester) async {
+  group('判据', () {
+    /// **这块面板画不画，与「这是什么构建」无关。**
+    ///
+    /// 它从前的第一行是 `if (kLocalAgentSupported) return SizedBox.shrink()`，
+    /// 而这条用例钉的就是那句。理由当时说得通（桌面端的会话都绑本机目录），
+    /// 但它按**构建**判 —— 桌面端打开一个**云端**会话时，文件明明在容器的卷里，
+    /// 面板却什么都不画。实测复现过（2026-08-18）。
+    ///
+    /// 判据搬去了 `WorkspacePanel`：那儿按 `session.workspace == null` 决定
+    /// 走哪一支，与底部那个「云端」标签、以及服务端 `routes::chat` 的分流
+    /// 是同一个判据。所以这里改成钉「被摆出来就照常工作」。
+    testWidgets('被摆出来就画树并拉数据，不看这是什么构建', (tester) async {
       final api = _TreeApi(_threeLevels());
       await tester.pumpWidget(_wrap(const SandboxWorkspaceView(), api));
       await tester.pumpAndSettle();
 
       expect(
         find.byType(SandboxBrowser),
-        kLocalAgentSupported ? findsNothing : findsOneWidget,
-        reason: kLocalAgentSupported
-            ? '桌面端 agent 动的就是用户自己的目录。给它一个云沙箱文件树，'
-                  '等于在本机文件旁边摆一份看不见你项目的副本'
-            : 'Web 端没有它就既看不见也送不进去 —— 这个功能在产品上等于不存在',
+        findsOneWidget,
+        reason: '谁该看到它由 WorkspacePanel 决定；到了这里就该画',
       );
       expect(
         api.listed,
-        kLocalAgentSupported ? isEmpty : isNotEmpty,
-        reason: '不显示的时候也不该发请求 —— 那会在桌面端凭空拉起一个云容器',
+        isNotEmpty,
+        reason: '画了就得真去列目录 —— 一棵空树与「没有这个功能」在屏幕上一样',
       );
     });
   });
