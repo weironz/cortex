@@ -63,6 +63,11 @@ pub struct Run {
     /// 保序的重放缓冲，见模块文档。
     replay: Mutex<Vec<ChatEvent>>,
     tx: broadcast::Sender<ChatEvent>,
+    /// 掐掉这一轮的把手。见 [`Runs::stop`]。
+    ///
+    /// `None` = 这一轮的 task 还没起来（`chat` 是先建 Run 再 spawn 的），
+    /// 那种情况极短，且此时也没什么可停的。
+    abort: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl Run {
@@ -73,6 +78,7 @@ impl Run {
             finished_at: Mutex::new(None),
             replay: Mutex::new(Vec::new()),
             tx,
+            abort: Mutex::new(None),
         }
     }
 
@@ -103,6 +109,11 @@ impl Run {
         let buf = self.replay.lock().await;
         let rx = self.tx.subscribe();
         (buf.clone(), rx)
+    }
+
+    /// 登记这一轮的 task 把手。`Engine::chat` spawn 完就调。
+    pub async fn set_abort(&self, handle: tokio::task::AbortHandle) {
+        *self.abort.lock().await = Some(handle);
     }
 
     async fn finish(&self) {
@@ -268,6 +279,52 @@ impl Runs {
         let running = run.is_running().await;
         let (replay, rx) = run.attach().await;
         Some((replay, rx, running))
+    }
+
+    /// 掐掉这个会话正在跑的那一轮。返回 `false` = 本来就没有在跑的。
+    ///
+    /// # 为什么是 `abort` 而不是往循环里塞一个取消信号
+    ///
+    /// 取消信号要穿过 `Turn::run`（在 `cortex-agent` 里，两个宿主共用），
+    /// 而它买到的额外好处只有「在两步之间干净地停」—— 可 `abort` 停在下一个
+    /// await 点，粒度已经足够，且**一行都不用改共用的那个 crate**。
+    ///
+    /// 两者都停不掉的是**已经派出去的子进程**：一条正在跑的 shell 不会因为
+    /// 谁被取消而消失。那是另一件事，别在这里假装解决了。
+    ///
+    /// # 半截回答不落库
+    ///
+    /// 与「模型中途出错」走同一条既有规矩（见 `turn.rs` 那句注释：
+    /// 半截回答下一轮会被当成事实抽取）。所以这里只发一条终态事件，
+    /// 不去把重放缓冲里那半段文字补写成 episode。
+    ///
+    /// # 许可跟着 task 一起没
+    ///
+    /// 闸门的许可被那个 task 持有，`abort` 之后它被 drop —— 于是排在后面的
+    /// 下一轮自动开始。这正是想要的：用户停掉的是**这一条**，不是整个队列。
+    pub async fn stop(&self, session_id: &str) -> bool {
+        let run = {
+            let map = self.inner.lock().await;
+            match map.get(session_id) {
+                Some(slot) => Arc::clone(&slot.latest),
+                None => return false,
+            }
+        };
+        if !run.is_running().await {
+            return false;
+        }
+        if let Some(handle) = run.abort.lock().await.take() {
+            handle.abort();
+        }
+        // 终态事件由**这里**发：那个 task 已经没了，没人再替它收尾。
+        // 用 Error 而不是 Done —— 什么都没落库，报成正常完成是句假话
+        RunSink::new(run)
+            .send(ChatEvent::Error {
+                message: "已停止。这一轮没有写进历史 —— 半截回答留着会被当成事实。                          已经改过的文件不会退回去。"
+                    .into(),
+            })
+            .await;
+        true
     }
 
     /// 现在有哪些在跑。
@@ -586,6 +643,77 @@ mod tests {
         assert!(
             runs.running().await.is_empty(),
             "「正在跑」的列表里不该有它"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    /// **停止要真的把那个 task 掐掉，而不只是标记一下。**
+    ///
+    /// 起一个永远不结束的 task 当「正在跑的一轮」，停掉它，然后断言：
+    /// 它真的不再跑了、闸门放开了（排在后面的能开始）、并且流上收到了终态。
+    ///
+    /// 从前界面上那个「停止生成」只 cancel 了客户端的订阅 —— 服务端照跑。
+    #[tokio::test]
+    async fn stopping_actually_kills_the_task_and_frees_the_gate() {
+        let runs = Runs::new();
+        let ticket = runs.enqueue("s1").await.expect("排得进");
+        let permit = ticket.begin().await;
+        let run = Arc::clone(&ticket.run);
+
+        // 一个永不结束的 task，持有许可 —— 与真实的一轮同形。
+        // 它只能被 abort 结束，所以「它结束了」就等价于「abort 生效了」
+        let handle = tokio::spawn(async move {
+            let _permit = permit;
+            loop {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        run.set_abort(handle.abort_handle()).await;
+
+        let (_, mut rx) = run.attach().await;
+        assert!(runs.stop("s1").await, "有在跑的轮次，该报停掉了");
+
+        assert!(
+            handle
+                .await
+                .expect_err("被 abort 的 task 该是 cancelled")
+                .is_cancelled(),
+            "task 必须真的被掐掉 —— 只标记的话它继续烧 token、继续改文件"
+        );
+        assert!(
+            matches!(rx.recv().await, Ok(ChatEvent::Error { .. })),
+            "流上要有终态，否则挂着的客户端会一直转圈"
+        );
+        assert!(!run.is_running().await, "登记簿里也该是「跑完了」");
+
+        // 闸门放开：排在后面的那一轮能开始
+        let next = runs.enqueue("s1").await.expect("排得进");
+        let _p = tokio::time::timeout(Duration::from_secs(1), next.begin())
+            .await
+            .expect("许可跟着被掐的 task 一起释放，下一轮该能开跑");
+    }
+
+    /// 没在跑的时候要如实说「没有」，而不是假装停了一个。
+    #[tokio::test]
+    async fn stopping_nothing_says_so() {
+        let runs = Runs::new();
+        assert!(!runs.stop("从没跑过").await, "没有这个会话");
+
+        let ticket = runs.enqueue("s1").await.expect("排得进");
+        let permit = ticket.begin().await;
+        RunSink::new(Arc::clone(&ticket.run))
+            .send(ChatEvent::Done {
+                episode_id: "e1".into(),
+            })
+            .await;
+        drop(permit);
+        assert!(
+            !runs.stop("s1").await,
+            "已经跑完的那一轮不该被报成「刚被你停掉」—— 客户端会据此写一条误导的消息"
         );
     }
 }

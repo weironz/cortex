@@ -232,6 +232,16 @@ abstract interface class CortexApi {
   /// CHECK 是同一份规则），拒绝时的措辞是写给用户看的 —— 原样显示，别替换。
   Future<ChatSession> setContainerWorkspace(String sessionId, String? name);
 
+  /// `DELETE /runs/{session_id}` —— 真的把服务端那一轮掐掉。
+  ///
+  /// # 为什么客户端自己取消订阅不算「停止」
+  ///
+  /// 取消订阅只是**不看了**：服务端那一轮照跑，继续烧 token、继续按模型的
+  /// 意思改文件，而屏幕上写着「已停止生成」。一个说了假话的按钮比没有更糟。
+  ///
+  /// 404 不是错误：那一轮可能刚好自己结束了。调用方按「已经停了」处理。
+  Future<void> stopRun(String sessionId);
+
   /// `GET /sessions/{id}?limit=&before=` — overview plus **one page** of
   /// episodes, oldest first within the page.
   ///

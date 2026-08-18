@@ -111,6 +111,9 @@ class _Api extends MockCortexApi {
   @override
   Future<ChatSession> setContainerWorkspace(String sessionId, String? name) =>
       throw UnimplementedError();
+
+  @override
+  Future<void> stopRun(String sessionId) => throw UnimplementedError();
 }
 
 /// 老服务端：`/projects` 这条路由根本不存在。

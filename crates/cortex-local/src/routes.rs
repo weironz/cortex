@@ -93,7 +93,7 @@ pub fn router(state: LocalState) -> Router {
         // 而那一侧对外的名字是 `/sandbox/runs/...`（agentd 转进来）——
         // 两处指的是同一件事，路径前缀由各自的宿主决定
         .route("/runs", get(list_runs))
-        .route("/runs/{session_id}", get(attach_run))
+        .route("/runs/{session_id}", get(attach_run).delete(stop_run))
         // WebSocket 升级走不了普通反代（那条路把 `upgrade` 头当逐跳首部剥了）。
         // 见 [`crate::ws_proxy`]
         .route("/ws", get(ws_proxy::handler))
@@ -185,6 +185,9 @@ fn attach_allows(method: &axum::http::Method, path: &str) -> bool {
         (&Method::POST, "/chat") => true,
         // 断线重连要能接回正在跑的那一轮
         (&Method::GET, p) if p.starts_with("/runs") => true,
+        // 停得掉。不放行的话，远程接入的人能看着 agent 在自己机器上跑，
+        // 却按不下那个停止按钮 —— 而它跑的是**他的**文件
+        (&Method::DELETE, p) if p.starts_with("/runs/") => true,
         // 工具确认：不放行的话，一个需要确认的工具会把远程那一轮永久挂住
         (&Method::POST, "/confirmations") => true,
         _ => false,
@@ -480,6 +483,28 @@ fn sse(
     )
 }
 
+/// `DELETE /runs/{session_id}` —— 掐掉这个会话正在跑的那一轮。
+///
+/// # 为什么必须有这条
+///
+/// 界面上那个「停止生成」从前只 cancel 了客户端的 SSE 订阅 —— 服务端那一轮
+/// **照跑**：继续烧 token、继续按模型的意思改文件，而屏幕上写着「已停止生成」。
+/// 一个说了假话的按钮比没有按钮更糟。
+///
+/// 404 = 这个会话现在没有在跑的轮次。**不是错误**：用户点得快一点、或者那一轮
+/// 刚好自己结束了，都会走到这里，客户端按「已经停了」处理即可。
+async fn stop_run(State(st): State<LocalState>, Path(session_id): Path<String>) -> Response {
+    if st.engine.runs.stop(&session_id).await {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "这个会话现在没有正在跑的轮次。" })),
+        )
+            .into_response()
+    }
+}
+
 /// `GET /runs` —— 这个进程上还在跑的那些轮次。
 async fn list_runs(State(st): State<LocalState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "runs": st.engine.runs.running().await }))
@@ -748,12 +773,21 @@ mod attach_tests {
         }
     }
 
-    /// 方法也要判。`POST /runs/...` 不在名单里 —— 白名单是 (方法, 路径) 的对。
+    /// 方法也要判 —— 白名单是 (方法, 路径) 的**对**，不是两张独立的表。
+    ///
+    /// `DELETE /runs/{id}` 从前在这条里被断言**不放行**，那时是对的（还没有
+    /// 中止那条路）。它现在放行，理由写在 `attach_allows` 上：远程接入的人
+    /// 看着 agent 在自己机器上跑，却按不下停止键是说不通的。
+    /// 所以这里换成另外三个仍然该被拒的组合。
     #[test]
     fn the_method_matters_too() {
         assert!(!attach_allows(&Method::POST, "/health"));
-        assert!(!attach_allows(&Method::DELETE, "/runs/01ABC"));
         assert!(!attach_allows(&Method::GET, "/chat"));
+        // 中止是 `DELETE /runs/{id}`，**不是**整张列表
+        assert!(!attach_allows(&Method::DELETE, "/runs"));
+        // 换凭据、绑目录、改 MCP 那三样永远在名单外，方法换成什么都一样
+        assert!(!attach_allows(&Method::DELETE, "/local/credential"));
+        assert!(!attach_allows(&Method::PUT, "/local/workspaces/01ABC"));
     }
 }
 

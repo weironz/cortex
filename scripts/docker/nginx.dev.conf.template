@@ -135,7 +135,7 @@ server {
     # 与上面那段的配置逐字相同（SSE 关缓冲、30 分钟读超时），只有上游不同。
     # 不合并成一段再按前缀选上游：nginx 里那么写要引一个 map，而两段各自
     # 完整、读得出「这条归谁」，比省下十行重要。
-    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes|blobs|import|sandbox-snapshots|confirmations|delegated-tokens|agents)(/|$) {
+    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes|blobs|import|sandbox-snapshots|confirmations|delegated-tokens|agents|runs)(/|$) {
         proxy_pass http://agentd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;

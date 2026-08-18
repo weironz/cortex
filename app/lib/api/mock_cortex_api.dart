@@ -442,6 +442,12 @@ class MockCortexApi
     return updated;
   }
 
+  /// mock 后端没有「服务端那一轮」这回事：这里的流是本地生成的，
+  /// 客户端一取消订阅它就真的停了。所以这条是个空操作 —— 但**必须存在**，
+  /// 否则界面在 mock 上点停止会抛，而那是开发时最常用的后端
+  @override
+  Future<void> stopRun(String sessionId) async {}
+
   @override
   Future<ChatSession> setContainerWorkspace(
     String sessionId,

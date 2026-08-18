@@ -224,6 +224,9 @@ class _BlobApi
       throw UnimplementedError();
 
   @override
+  Future<void> stopRun(String sessionId) => throw UnimplementedError();
+
+  @override
   Future<SessionDetail> sessionDetail(
     String id, {
     int? limit,

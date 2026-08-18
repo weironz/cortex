@@ -292,7 +292,8 @@ impl Engine {
         let (replay, rx) = ticket.run.attach().await;
         let tx = Arc::new(crate::runs::RunSink::new(Arc::clone(&ticket.run)));
         let engine = Arc::clone(self);
-        tokio::spawn(async move {
+        let run = Arc::clone(&ticket.run);
+        let handle = tokio::spawn(async move {
             // 排队要说一声：这条流在轮到自己之前只有 keepalive，
             // 不说的话界面上就是一个转了三分钟的圈，与卡死一模一样
             if ticket.ahead > 0 {
@@ -336,6 +337,10 @@ impl Engine {
                 .await;
             }
         });
+        // 把「掐掉它」的把手交给登记簿。**在 spawn 之后**：`abort_handle`
+        // 要有 task 才拿得到。中间那一小段窗口里 `stop` 拿不到把手，
+        // 而那时也没什么可停的 —— 这一轮还没开始跑
+        run.set_abort(handle.abort_handle()).await;
         Ok((replay, rx))
     }
 

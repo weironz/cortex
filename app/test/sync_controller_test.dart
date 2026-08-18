@@ -145,6 +145,9 @@ class _FakeApi
       throw UnimplementedError();
 
   @override
+  Future<void> stopRun(String sessionId) => throw UnimplementedError();
+
+  @override
   String get label => 'fake';
 
   @override

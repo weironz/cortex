@@ -1051,6 +1051,27 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
+  Future<void> stopRun(String sessionId) async {
+    // 与 `attachChat` 打同一条路径，只是方法不同 —— 桌面端落到本机 agent，
+    // Web 落到 agentd 那条同名别名，再由它转进容器
+    final http.Response response;
+    try {
+      response = await _client.delete(
+        _uri('/runs/${Uri.encodeComponent(sessionId)}'),
+        headers: _headers(const {'accept': 'application/json'}),
+      );
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    // 404 = 那一轮刚好自己结束了。**不是错误**，也不该弹给用户看 ——
+    // 他按下停止时它已经停了，那正是他要的结果
+    if (response.statusCode == 404) return;
+    if (response.statusCode >= 400) {
+      throw _failure(response.statusCode, _errorMessage(response));
+    }
+  }
+
+  @override
   Stream<ChatEvent> attachChat(String sessionId) async* {
     // GET，没有 body。**与 `chat` 走同一个解析**（`_events`）：重挂拿到的
     // 是「重放 + 后续」拼成的一条流，形状与新发那条一模一样 ——

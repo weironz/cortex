@@ -980,11 +980,36 @@ class ChatController extends Notifier<ChatState> {
   }
 
   /// User-initiated abort. Keeps whatever text already arrived.
+  /// 停止这一轮。**先掐服务端，再收界面。**
+  ///
+  /// # 从前这里只取消了订阅
+  ///
+  /// 那只是「不看了」：服务端那一轮照跑，继续烧 token、继续按模型的意思改
+  /// 文件，而屏幕上写着「已停止生成」。一个说了假话的按钮比没有按钮更糟。
+  ///
+  /// # 顺序：先服务端，后本地
+  ///
+  /// 反过来的话，取消订阅会让 `_subscription` 变 null，而中间那次网络往返
+  /// 期间用户看到的是「已经停了」——若那次请求失败，他得到的仍是一个谎。
+  /// 先等服务端确认，界面才敢说停了。
+  ///
+  /// # 服务端掐不掉时**照样收界面**
+  ///
+  /// 网断了、后端是个不认这条路由的旧版本 —— 那时最不该做的是把用户按在
+  /// 一个转着圈的界面上。收掉本地这一半，并把原因如实写进那条消息里：
+  /// 「界面停了，但服务端那一轮可能还在跑」比一句「已停止」诚实。
   Future<void> stopGeneration() async {
-    if (state.streaming == null) return;
+    final turn = state.streaming;
+    if (turn == null) return;
+    String? warning;
+    try {
+      await _api.stopRun(turn.sessionId);
+    } on Object catch (e) {
+      warning = '（服务端没能确认停止：$e —— 那一轮可能还在跑）';
+    }
     await _subscription?.cancel();
     _subscription = null;
-    _commit(error: '已停止生成');
+    _commit(error: '已停止生成${warning ?? ''}');
   }
 
   Future<void> _cancelStream() async {

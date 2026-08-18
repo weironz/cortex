@@ -218,6 +218,20 @@ protected_routes! {
     // 增，新路由一律落在受保护侧 —— 那正是 `protected_routes!` 那段文档说的
     // 「加新路由的人不必记得任何事」。
     "/confirmations" [GET, POST] => get(confirmations).post(confirmations),
+    // ── 裸 `/runs/{id}`：重挂与停止 ──
+    //
+    // **客户端只认这一个名字。** 桌面端上它打的是本机 agent 的同名路由，
+    // 而 agentd 从前只有带 `/sandbox` 前缀的那条 —— 于是 Web 上
+    // 「关掉浏览器回来接着看」打的是一条根本不存在的路由，404 被客户端当成
+    // 「没在跑」静静吞掉。那个能力在 Web 上从来没生效过。
+    //
+    // 别名而不是让客户端按后端改路径：客户端**不该知道**自己连的是本机 agent
+    // 还是 agentd —— 那正是「两端同一套协议」这条设计的全部意义。
+    //
+    // 放这里而不是 `pending_cutover_routes`：那张单子**只允许变短**
+    // （`the_cutover_list_never_grows` 会当场变红，而它抓住了这次），
+    // 而这条是新加的，本来就该落在受保护侧。
+    "/runs/{session_id}" [GET, DELETE] => get(attach_run).delete(attach_run),
 }
 
 /// 路由表。
@@ -307,7 +321,10 @@ fn pending_cutover_routes() -> Vec<(&'static str, axum::routing::MethodRouter<Ag
         ("/chat", post(chat)),
         // 重挂：与桌面端那条 `/runs/{id}` 是同一件事，只是要多穿一层容器。
         // **不走 `ensure`**，理由见 handler
-        ("/sandbox/runs/{session_id}", get(attach_run)),
+        (
+            "/sandbox/runs/{session_id}",
+            get(attach_run).delete(attach_run),
+        ),
         ("/sandbox/files", get(list_files).put(put_file)),
         ("/sandbox/files/raw", get(read_file)),
         ("/sandbox/workspace.tar", get(download_workspace)),
@@ -832,8 +849,12 @@ async fn attach_run(
     // 重组一个只带必要首部的请求。`sandbox_proxy::forward` 会把一切凭据
     // 剥掉再换上沙箱令牌 —— 用户的 bearer 绝不进容器
     let (parts, _) = req.into_parts();
+    // **保留进来的方法**：GET 是重挂，DELETE 是掐掉那一轮。两者除了方法之外
+    // 一模一样（都要先确认容器在、都不 `ensure`），所以共用这一个 handler
+    // 而不是抄一份 —— 抄一份的下场是「404 的条件」两处慢慢漂开
+    let method = parts.method.clone();
     let mut proxied = Request::from_parts(parts, axum::body::Body::empty());
-    *proxied.method_mut() = axum::http::Method::GET;
+    *proxied.method_mut() = method;
     *proxied.uri_mut() = format!("/runs/{session_id}")
         .parse()
         .unwrap_or_else(|_| "/runs".parse().expect("常量路径可解析"));
