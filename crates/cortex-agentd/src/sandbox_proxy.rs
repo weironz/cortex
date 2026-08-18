@@ -180,6 +180,43 @@ pub async fn forward(
         Ok(resp) => {
             let status = StatusCode::from_u16(resp.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+            // ── 上游的 401 **绝不能原样传给客户端** ──
+            //
+            // 这条路上的 401 不可能是「调用方的登录过期了」：调用方在进到这里
+            // 之前就已经被 agentd 认证过，而转进去用的是**我们自己铸的**那把
+            // 钥匙。所以它只有一个意思：**那一端不认我们这把钥匙了**，
+            // 而那是服务端的事，用户重新登录一百次也没用。
+            //
+            // 原样传出去的代价实测过一次（2026-08-18 生产）：发版重启 agentd，
+            // 还在跑的沙箱容器仍持着上一代的入站令牌，于是浏览器每隔几秒轮询的
+            // `GET /confirmations` 稳定拿到 401（响应体就是容器那句「缺少或无效
+            // 的凭据」，24 字节，在 traefik 日志里一眼可认）。客户端把任何 401
+            // 都读成「登录过期」→ 续期（成功）→ 又一条 401 落地 → 它的熔断器判
+            // 「刚续过还 401，续期不是答案」→ **把人踢回登录页**。
+            // 用户看到的是「登录已过期，续期也没有成功」，而他的登录完全有效。
+            //
+            // 这正是仓库反复记着的那个形状：**一个状态码身兼两职**。
+            // 换成 409：客户端在这条路上本来就会把 409 的正文原样显示出来，
+            // 而且它不碰登录态。
+            if status == StatusCode::UNAUTHORIZED {
+                tracing::warn!(
+                    %url,
+                    "上游拒绝了我们的凭据（401）—— 多半是 agentd 重启过而那一端还认着上一代的令牌"
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({
+                        "error": concat!(
+                            "这一端不认当前的凭据了 —— 多半是服务端重启过，",
+                            "而那个沙箱容器还认着上一代的令牌。\n",
+                            "**你的登录没有问题**：下一次对话会把它换掉，稍后重试即可。"
+                        )
+                    })),
+                )
+                    .into_response();
+            }
+
             let mut out = Response::builder().status(status);
             for (k, v) in resp.headers() {
                 if !is_hop_by_hop(k.as_str()) {
@@ -268,6 +305,67 @@ mod tests {
             READ_TIMEOUT >= PING * 3,
             "读超时 {READ_TIMEOUT:?} 太接近 ping 间隔 {PING:?} —— \
              一次 GC 停顿或网络抖动就会把正常的沙箱判成僵死并掐掉对话"
+        );
+    }
+}
+
+#[cfg(test)]
+mod upstream_401_tests {
+    use super::*;
+
+    /// **上游回 401 时，客户端拿到的不能也是 401。**
+    ///
+    /// 起一个只会回 401 的假上游，走真的 `forward`。
+    ///
+    /// 钉这条是因为它在生产上真的把人踢下线过（2026-08-18）：发版重启 agentd，
+    /// 沙箱容器还认着上一代令牌，浏览器轮询 `/confirmations` 稳定拿 401，
+    /// 而客户端把任何 401 都读成「你的登录过期了」。
+    #[tokio::test]
+    async fn an_upstream_401_never_reaches_the_client_as_401() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑一个随机端口");
+        let addr = listener.local_addr().expect("拿得到实际地址");
+        tokio::spawn(async move {
+            let app = axum::Router::new().fallback(axum::routing::any(|| async {
+                // 与 cortex-local 的 `require_auth` 回的是同一句话
+                (StatusCode::UNAUTHORIZED, "缺少或无效的凭据")
+            }));
+            axum::serve(listener, app).await.ok();
+        });
+
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/confirmations")
+            .body(axum::body::Body::empty())
+            .expect("造得出请求");
+        let resp = forward(
+            &reqwest::Client::new(),
+            &format!("http://{addr}"),
+            "一把上游不认的钥匙",
+            None,
+            req,
+        )
+        .await;
+
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "把上游的 401 原样传出去 = 告诉用户「你的登录过期了」，而他的登录好好的"
+        );
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "约定换成 409：客户端在这条路上会把正文原样显示，且不碰登录态"
+        );
+
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("读得出正文");
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("你的登录没有问题"),
+            "这句话是给用户看的关键 —— 不说他就会去反复重登：{text}"
         );
     }
 }
