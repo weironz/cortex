@@ -608,6 +608,10 @@ class _ConfirmApi
   ) => throw UnimplementedError();
 
   @override
+  Future<ChatSession> setContainerWorkspace(String sessionId, String? name) =>
+      throw UnimplementedError();
+
+  @override
   Stream<ChatEvent> chat({
     required String sessionId,
     required String message,

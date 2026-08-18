@@ -107,6 +107,10 @@ class _Api extends MockCortexApi {
     moves.add((sessionId, projectId));
     return ChatSession(id: sessionId, title: 't', projectId: projectId);
   }
+
+  @override
+  Future<ChatSession> setContainerWorkspace(String sessionId, String? name) =>
+      throw UnimplementedError();
 }
 
 /// 老服务端：`/projects` 这条路由根本不存在。

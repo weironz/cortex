@@ -399,6 +399,28 @@ class ChatController extends Notifier<ChatState> {
 
   Future<void> unbindWorkspace(String id) async => _bindWorkspace(id, null);
 
+  /// 换云沙箱卷里的子目录。[name] 为 null = 回到卷根。
+  ///
+  /// # 为什么不走 [_patch] 那条「服务端不认就本地记着」的回落
+  ///
+  /// 那条回落是给「改名 / 归档」这类**纯客户端也说得通**的东西准备的：
+  /// 服务端没这条路由时，本地留一份带标记的改动仍然对用户有意义。
+  ///
+  /// 这一条不一样：它决定的是**容器里 agent 的根目录**，而那个判断只在
+  /// 服务端做。本地记一份「我选了 client-a」而服务端不知道，界面会显示
+  /// 那个名字，agent 却仍然在卷根上写文件 —— 一个不报错的谎。
+  /// 所以失败就让它失败，由调用方把服务端那句话原样显示出来。
+  Future<void> setContainerWorkspace(String id, String? name) async {
+    final updated = await _api.setContainerWorkspace(id, name);
+    if (!ref.mounted) return;
+    // 用服务端回来的那份，而不是把 `name` 直接写进状态：服务端才是权威，
+    // 而它可能规范化过（比如去掉首尾空白）
+    _replaceSession(
+      id,
+      (s) => s.copyWith(containerWorkspace: updated.containerWorkspace),
+    );
+  }
+
   /// 用户对这个会话显式选了「云端」。见 [_ensureLocalWorkspace]。
   final Set<String> _cloudByChoice = {};
 

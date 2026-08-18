@@ -255,7 +255,12 @@ fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
 /// 本地这个进程的状态。
 ///
 /// **不转发给远端** —— 那样报的是远端的状态，而客户端问的是
-/// 「我连着的这个东西还好吗」。`memory` 一节说的才是远端。
+/// 「我连着的这个东西还好吗」。`server` 一节说的才是远端。
+///
+/// 这一节从前叫 `memory`（那时远端就是记忆服务）。2026-08-17 记忆整条拆掉
+/// 之后它改成了 `server`，而**改名时漏了两处断言**：`local_agent_test.dart`
+/// 与部署流水线各拿旧名字判了一次。前者只在有编好的二进制的开发机上跑
+/// （CI 上那条用例自己跳过），所以它红了一版都没人看见。
 async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health> {
     let reachable = st.remote.is_reachable().await;
     Json(cortex_proto::dto::Health {

@@ -141,6 +141,10 @@ class _FakeApi
   ) => throw UnimplementedError();
 
   @override
+  Future<ChatSession> setContainerWorkspace(String sessionId, String? name) =>
+      throw UnimplementedError();
+
+  @override
   String get label => 'fake';
 
   @override

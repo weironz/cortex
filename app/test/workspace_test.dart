@@ -1,4 +1,6 @@
 import 'package:cortex_app/api/api_exception.dart';
+import 'package:cortex_app/features/workspace/cloud_workspace_sheet.dart';
+import 'package:cortex_app/models/chat_session.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/models/tool_call.dart';
 import 'package:cortex_app/state/app_providers.dart';
@@ -280,6 +282,81 @@ void main() {
         fileCalls.every((c) => !c.pending),
         isTrue,
         reason: '两条事件应配对成一行并带上结果',
+      );
+    });
+  });
+  group('云端工作区（容器卷里的子目录）', () {
+    /// 选一个名字、再回到卷根 —— **两个方向都要走通**。
+    ///
+    /// 回卷根那一步发的是**显式的 `null`**，而「字段不在」的意思是「别动」。
+    /// 这两件事在线协议上长得很像，混掉的症状是：用户点「整个卷」，
+    /// 界面回到默认，而服务端那边一个字都没改 —— 下一次刷新又跳回去。
+    test('选中子目录会记住，选回整个卷会清掉', () async {
+      final container = _boot();
+      addTearDown(container.dispose);
+      final controller = container.read(chatControllerProvider.notifier);
+
+      await _until(
+        () => !container.read(chatControllerProvider).sessionsLoading,
+        reason: '会话列表',
+      );
+      final id = container.read(chatControllerProvider).sessions.first.id;
+
+      ChatSession read() => container
+          .read(chatControllerProvider)
+          .sessions
+          .firstWhere((s) => s.id == id);
+
+      expect(read().containerWorkspace, isNull, reason: '默认就是卷根');
+
+      await controller.setContainerWorkspace(id, 'client-a');
+      expect(read().containerWorkspace, 'client-a');
+
+      await controller.setContainerWorkspace(id, null);
+      expect(
+        read().containerWorkspace,
+        isNull,
+        reason: '「整个卷」必须真的清掉，而不是留着上一次那个名字',
+      );
+    });
+
+    /// 不合格的名字要被拒，而且**这一侧也判一次**。
+    ///
+    /// 服务端是权威，但让用户等一次往返才知道「不能有斜杠」是没必要的。
+    /// 这条同时守住 mock 与真后端说的是同一套规则 —— mock 更宽松的话，
+    /// 界面会在开发时放行一个上线就报错的名字。
+    test('带斜杠的名字被拒，且会话状态不变', () async {
+      final container = _boot();
+      addTearDown(container.dispose);
+      final controller = container.read(chatControllerProvider.notifier);
+
+      await _until(
+        () => !container.read(chatControllerProvider).sessionsLoading,
+        reason: '会话列表',
+      );
+      final id = container.read(chatControllerProvider).sessions.first.id;
+
+      expect(
+        kContainerWorkspaceShape.hasMatch('a/b'),
+        isFalse,
+        reason: '它是**一段**目录名，不是路径',
+      );
+      expect(kContainerWorkspaceShape.hasMatch('.hidden'), isFalse);
+      expect(kContainerWorkspaceShape.hasMatch('client-a'), isTrue);
+
+      await expectLater(
+        controller.setContainerWorkspace(id, 'a/b'),
+        throwsA(isA<CortexApiException>()),
+        reason: '后端也得拒 —— 只靠客户端判的话，别的客户端照样能塞进去',
+      );
+      expect(
+        container
+            .read(chatControllerProvider)
+            .sessions
+            .firstWhere((s) => s.id == id)
+            .containerWorkspace,
+        isNull,
+        reason: '失败不能留下半个状态',
       );
     });
   });

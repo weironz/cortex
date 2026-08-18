@@ -219,6 +219,19 @@ abstract interface class CortexApi {
   /// 「字段不在」与「字段是 null」必须表达两件不同的事。
   Future<ChatSession> moveSessionToProject(String sessionId, String? projectId);
 
+  /// `PATCH /sessions/{id} {"container_workspace": …}` —— 换云沙箱里的子目录。
+  ///
+  /// [name] 为 null 时发的是**显式的** `null`，意思是「回到卷根」；
+  /// 与 [moveSessionToProject] 是同一套三态约定（「字段不在」= 别动）。
+  ///
+  /// 这是**云端**那一支的「选工作区」。桌面端那一支走
+  /// [bindLocalWorkspace]，两者不共用一条路：本机路径是设备本地概念，
+  /// 而这个名字是服务端记着的会话状态。
+  ///
+  /// 服务端校验名字的形状（`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`，与库里那条
+  /// CHECK 是同一份规则），拒绝时的措辞是写给用户看的 —— 原样显示，别替换。
+  Future<ChatSession> setContainerWorkspace(String sessionId, String? name);
+
   /// `GET /sessions/{id}?limit=&before=` — overview plus **one page** of
   /// episodes, oldest first within the page.
   ///

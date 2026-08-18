@@ -296,6 +296,17 @@ class HttpCortexApi implements CortexApi {
   );
 
   @override
+  Future<ChatSession> setContainerWorkspace(
+    String sessionId,
+    String? name,
+  ) async => ChatSession.fromJson(
+    // 与上面同理：显式的 `null` 才是「回到卷根」，省略字段等于「别动」
+    await _patchJson('/sessions/${Uri.encodeComponent(sessionId)}', {
+      'container_workspace': name,
+    }),
+  );
+
+  @override
   Future<SessionDetail> sessionDetail(
     String id, {
     int? limit,

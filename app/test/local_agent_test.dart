@@ -61,7 +61,7 @@ void main() {
         final body = jsonDecode(res.body) as Map<String, dynamic>;
         expect(body['role'], 'local-agent');
         expect(
-          (body['memory'] as Map)['reachable'],
+          (body['server'] as Map)['reachable'],
           false,
           reason: '远端是个死地址，agent 必须如实报告而不是假装连上了',
         );

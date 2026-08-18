@@ -10,6 +10,7 @@ import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
 import '../../workspace/workspace_fs.dart';
+import 'cloud_workspace_sheet.dart';
 import 'sandbox_file_tree.dart';
 import 'workspace_binding_sheet.dart';
 
@@ -70,18 +71,35 @@ class WorkspacePanel extends ConsumerWidget {
           // 不叫「云沙箱」。用户这里要的是「我的文件在哪」，而「沙箱」
           // 是一个实现细节的名字 —— 它既不告诉他里面有什么，也让他以为
           // 需要先做点什么才能用
-          title: sandboxOnly ? '文件' : (workspace?.displayName ?? '文件'),
-          subtitle: sandboxOnly ? 'agent 读写的就是这些，跨会话保留' : workspace?.root,
+          title: sandboxOnly
+              ? (session?.containerWorkspace ?? '文件')
+              : (workspace?.displayName ?? '文件'),
+          subtitle: sandboxOnly
+              ? (session?.containerWorkspace == null
+                    ? 'agent 读写的就是这些，跨会话保留'
+                    // 路径写全：用户点开选择器之前，得先看得出自己在哪一层
+                    : '/workspace/${session!.containerWorkspace}')
+              : workspace?.root,
           leading: Icon(
             Icons.folder_rounded,
             size: 15,
             color: scheme.secondary,
           ),
           actions: [
-            // 云端那一支没有「更换工作区」可点 —— 那儿的根是服务端定的
-            if (!sandboxOnly && session != null)
+            // 两支各有一个「更换工作区」，**同一个图标、同一个位置**，
+            // 但打开的是两个不同的界面 —— 因为它们问的不是同一个问题：
+            // 桌面端问「用这台机器上的哪个目录」，云端问「用那个卷里的
+            // 哪个子目录」。
+            //
+            // 云端这一支从前是没有的，注释里写着「那儿的根是服务端定的」。
+            // 那句话在 0.1.11 之后就不成立了（会话可以把根收窄到
+            // `/workspace/<名字>`），只是能力做完之后**没人回来接界面** ——
+            // 于是它在 HTTP 上活了一版，用户点不到。
+            if (session != null)
               IconButton(
-                onPressed: () => showWorkspaceBindingSheet(context, session),
+                onPressed: () => sandboxOnly
+                    ? showCloudWorkspaceSheet(context, session)
+                    : showWorkspaceBindingSheet(context, session),
                 iconSize: 17,
                 tooltip: '更换工作区',
                 icon: const Icon(Icons.swap_horiz_rounded),

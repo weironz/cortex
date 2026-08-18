@@ -159,6 +159,10 @@ class ReplayApi
   ) => throw UnimplementedError();
 
   @override
+  Future<ChatSession> setContainerWorkspace(String sessionId, String? name) =>
+      throw UnimplementedError();
+
+  @override
   Future<SessionDetail> sessionDetail(
     String id, {
     int? limit,

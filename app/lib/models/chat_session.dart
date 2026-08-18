@@ -12,6 +12,7 @@ class ChatSession {
     this.messageCount = 0,
     this.preview,
     this.workspace,
+    this.containerWorkspace,
     this.archived = false,
     this.projectId,
     this.isLocalDraft = false,
@@ -40,6 +41,17 @@ class ChatSession {
   /// The directory this session's agent may touch. Null = plain chat, no file
   /// tools. See [Workspace] for whose filesystem this is.
   final Workspace? workspace;
+
+  /// 云沙箱那个卷里的子目录名。null = 根就是卷根（默认）。
+  ///
+  /// **与 [workspace] 不是一回事**：那个是桌面端的本机绝对路径，是设备本地
+  /// 概念；这个是容器里的一段目录名，只对云端会话有意义。两个字段在同一个
+  /// 会话上同时有值是正常的 —— 一个会话可以既在这台机器上绑过目录，
+  /// 又在云端有过自己的子目录，取哪一个由**这一轮跑在哪儿**决定。
+  ///
+  /// 名字可以被多个会话共用：按会话分的话，「昨天让你生成的那份报告呢」
+  /// 会得到一个空目录。
+  final String? containerWorkspace;
 
   /// Hidden from the list unless "显示已归档" is on. Never deleted — the store
   /// is append-only, so "归档" is the only honest verb.
@@ -76,6 +88,9 @@ class ChatSession {
     int? messageCount,
     String? preview,
     Object? workspace = _sentinel,
+    // 同 projectId：`containerWorkspace: null` 是「回到卷根」，
+    // 与「这次不改」是两件事
+    Object? containerWorkspace = _sentinel,
     bool? archived,
     // 哨兵而不是可空参数：`projectId: null` 的意思是「移出项目」，
     // 与「这次不改分组」是两件事，而后者才是不传时该发生的
@@ -93,6 +108,9 @@ class ChatSession {
     workspace: workspace == _sentinel
         ? this.workspace
         : workspace as Workspace?,
+    containerWorkspace: containerWorkspace == _sentinel
+        ? this.containerWorkspace
+        : containerWorkspace as String?,
     archived: archived ?? this.archived,
     projectId: projectId == _sentinel ? this.projectId : projectId as String?,
     isLocalDraft: isLocalDraft ?? this.isLocalDraft,
@@ -116,6 +134,9 @@ class ChatSession {
       messageCount: asInt(json['message_count']),
       preview: asStringOrNull(json['preview']),
       workspace: root == null ? null : Workspace(root: root),
+      // 老服务端不发 —— 读成 null，也就是「根就是卷根」，
+      // 而那正是一个还没有这个能力的部署里每条会话的真实状态
+      containerWorkspace: asStringOrNull(json['container_workspace']),
       archived: json['archived'] == true,
       // 老服务端不发这个字段，读成 null —— 也就是「未分组」，
       // 而那正是一个没有项目功能的部署里每条会话的真实状态

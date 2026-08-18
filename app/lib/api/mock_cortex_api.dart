@@ -442,6 +442,35 @@ class MockCortexApi
     return updated;
   }
 
+  @override
+  Future<ChatSession> setContainerWorkspace(
+    String sessionId,
+    String? name,
+  ) async {
+    await _latency(110);
+    final index = _sessions.indexWhere((s) => s.id == sessionId);
+    if (index == -1) {
+      throw CortexApiException('session $sessionId 不存在', statusCode: 404);
+    }
+    // 名字的形状**在这里也判一次**，而且用与服务端一模一样的措辞：
+    // mock 后端是很多人第一次点这个功能的地方，让它比真后端宽松的话，
+    // 界面会在 mock 上放行一个真后端会拒的名字 —— 那种「本地好好的、
+    // 一上线就报错」最难查
+    if (name != null && !_containerWsShape.hasMatch(name)) {
+      throw CortexApiException(
+        '工作区名 "$name" 不合格：只允许一段字母数字与 . _ -，'
+        '必须以字母或数字开头，长度 1~64',
+        statusCode: 400,
+      );
+    }
+    final updated = _sessions[index].copyWith(containerWorkspace: name);
+    _sessions[index] = updated;
+    return updated;
+  }
+
+  /// 与库里那条 CHECK、以及 `cortex-local` 的 `container_subdir` 是同一份规则。
+  static final _containerWsShape = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$');
+
   /// Pages the same way the daemon does, cursor and all.
   ///
   /// The fixtures are far too small to need paging — which is exactly why the
