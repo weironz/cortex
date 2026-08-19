@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use cortex_core::{CortexError, Result};
 use cortex_proto::episodes::{EpisodeAck, NewEpisodeRequest};
-use cortex_proto::llm::LlmStreamRequest;
+use cortex_proto::llm::{GeneratedImages, LlmStreamRequest};
 
 /// 写入与检索的超时。
 ///
@@ -156,6 +156,38 @@ impl Remote {
         resp.json()
             .await
             .map_err(|e| CortexError::Invalid(format!("解析 /episodes 响应失败：{e}")))
+    }
+
+    /// 生一张图。图由服务端抓下来入库，这里只拿回哈希。
+    ///
+    /// # 为什么超时给得比别的路长得多
+    ///
+    /// 生图是**同步等结果**的：旗舰型号几十秒，加上服务端还要把图从供应商
+    /// 那儿下载下来再入库。用 `REQUEST_TIMEOUT`（给普通请求的那个）会在
+    /// 图生成到一半时把连接掐了 —— 而钱已经花掉了。
+    ///
+    /// # Errors
+    /// 服务端没有能生图的来源、供应商拒绝、或者网络断了。
+    pub async fn generate_image(
+        &self,
+        prompt: &str,
+        size: Option<&str>,
+    ) -> Result<GeneratedImages> {
+        let resp = self
+            .auth(self.http.post(self.url("/llm/image")))
+            .timeout(std::time::Duration::from_secs(240))
+            .json(&serde_json::json!({
+                "prompt": prompt,
+                "size": size,
+                "n": 1,
+            }))
+            .send()
+            .await
+            .map_err(map_transport)?;
+        let resp = checked(resp).await?;
+        resp.json()
+            .await
+            .map_err(|e| CortexError::Invalid(format!("解析 /llm/image 响应失败：{e}")))
     }
 
     // 这里**没有** `pending_confirmations`。cortexd 不跑 agent，也就不再有

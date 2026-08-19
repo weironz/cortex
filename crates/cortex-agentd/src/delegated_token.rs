@@ -193,6 +193,10 @@ impl DelegatedScope {
         match (method, path) {
             // 每轮一次到多次。LLM key 不进容器的代价与收益都在这条上
             (&Method::POST, "/llm/stream") => true,
+            // 生图（`generate_image` 工具）。**漏掉这条的表现是**：桌面端
+            // 画得出来，云端会话画不出来 —— 而两者跑的是同一份 agent 代码，
+            // 看起来完全像随机故障
+            (&Method::POST, "/llm/image") => true,
             // 写 user / assistant episode，以及 outbox 重放
             (&Method::POST, "/episodes") => true,
             // 每轮拉会话历史。**漏掉这条 = 逐轮失忆且静默**
@@ -363,6 +367,9 @@ mod tests {
         let s = scope();
         for (m, p) in [
             (Method::POST, "/llm/stream"),
+            // 生图。漏掉的表现是「桌面端画得出来、云端画不出来」，
+            // 而两者跑的是同一份 agent 代码
+            (Method::POST, "/llm/image"),
             (Method::POST, "/episodes"),
             (Method::GET, "/sessions/01ABC"),
             (Method::GET, "/auth/me"),

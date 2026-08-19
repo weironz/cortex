@@ -144,13 +144,33 @@ fn system_prompt_for(
 ///
 /// 抽出来是因为**两条路都要用**：绑了工作区的和没绑的。曾经只有前者并了
 /// 外来工具，症状见 [`chat_turn_for`]。
-fn with_external(base: Turn, external: &[cortex_agent::ToolSpec]) -> Turn {
-    if external.is_empty() {
+fn with_external(base: Turn, external: &[cortex_agent::ToolSpec], can_draw: bool) -> Turn {
+    if external.is_empty() && !can_draw {
         return base;
     }
     let mut specs = cortex_agent::tools::builtin_specs();
+    if can_draw {
+        specs.push(cortex_agent::tools::image_spec());
+    }
     specs.extend(external.iter().cloned());
     base.with_specs(specs)
+}
+
+/// 这个 agent 够不够得着生图那条路。
+///
+/// # 判据是「有没有服务端」，不是「服务端配没配生图来源」
+///
+/// 后者要在每轮装配工具前多问服务端一次，而那是一次同步往返插在
+/// 用户等回复的路径上。
+///
+/// 代价说清楚：一个连着服务端但没配生图来源的部署，模型**会**答应画图
+/// 然后失败。但那条失败是**用户能处理的** —— 错误里写着「去设置 → 模型
+/// 里加一条通义千问的来源」，他照做就好了。
+///
+/// 这与 `memory_search` 那次不同：那次失败的是 401，用户看不懂也做不了
+/// 任何事。判据是**失败能不能被用户处理**，不是「会不会失败」。
+fn can_generate_images(llm: &cortex_llm::LlmClient) -> bool {
+    llm.provider_id() == crate::llm::PROXY_PROVIDER_ID
 }
 
 /// 没绑工作区那条会话的 `Turn`：沙箱封闭，但**外来工具照给**。
@@ -165,8 +185,8 @@ fn with_external(base: Turn, external: &[cortex_agent::ToolSpec]) -> Turn {
 /// 「配了 MCP 但它不会用」。现搭的成本是每轮拼一次 `Vec<ToolSpec>`，
 /// 与「和绑了工作区那条同一个形状」比起来不值一提 —— **同形状才是这次
 /// 修得掉、下次不再漏的原因**。
-fn chat_turn_for(max_rounds: usize, external: &[cortex_agent::ToolSpec]) -> Turn {
-    with_external(Turn::sealed(), external).with_max_rounds(max_rounds)
+fn chat_turn_for(max_rounds: usize, external: &[cortex_agent::ToolSpec], can_draw: bool) -> Turn {
+    with_external(Turn::sealed(), external, can_draw).with_max_rounds(max_rounds)
 }
 
 /// 按执行环境挑构造函数 —— **这是「agent 的沙箱长什么样」的唯一出处**。
@@ -210,8 +230,9 @@ fn workspace_turn_for(
     max_rounds: usize,
     mode: PermissionMode,
     external: &[cortex_agent::ToolSpec],
+    can_draw: bool,
 ) -> Result<Turn> {
-    Ok(with_external(turn_for_env(env, root)?, external)
+    Ok(with_external(turn_for_env(env, root)?, external, can_draw)
         .with_max_rounds(max_rounds)
         .with_policy(policy_for(mode, env)))
 }
@@ -540,6 +561,9 @@ impl Engine {
             )
             .await
         };
+        // 生图那条路要有服务端才够得着。**在装配工具之前定** ——
+        // 目录里摆什么，模型就会去调什么
+        let can_draw = can_generate_images(&self.llm);
         let workspace_turn = bound.as_deref().and_then(|ws| {
             // 绑定时校验过，但目录可能之后被删了/移了/换了外接盘。
             // 此时降级成纯聊天而不是让整轮失败 —— 用户只是想说句话
@@ -549,6 +573,7 @@ impl Engine {
                 self.max_rounds,
                 req.permission_mode,
                 &external,
+                can_draw,
             )
             .inspect_err(|e| {
                 tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
@@ -557,7 +582,7 @@ impl Engine {
         });
         // 没绑工作区那条也要现搭：外来工具是**运行时可变**的（设置页能增删），
         // 而 `Engine.chat_turn` 是启动时那一份，装不下之后加的 server
-        let chat_turn = chat_turn_for(self.max_rounds, &external);
+        let chat_turn = chat_turn_for(self.max_rounds, &external, can_draw);
         let turn = workspace_turn.as_ref().unwrap_or(&chat_turn);
         // 用 `workspace_turn` 而不是 `bound` 判断：绑过但目录已不可用时上面
         // 降级成了纯聊天，此刻模型手里确实没有文件工具 —— 提示词必须跟着降级，
@@ -624,6 +649,8 @@ impl Engine {
             confirms: Arc::clone(&self.confirms),
             mcp: Arc::clone(&self.mcp),
             grants: self.grants.clone(),
+            remote: self.remote.clone(),
+            drawn: std::sync::Mutex::new(Vec::new()),
         };
         // 这一轮用哪个模型。逐轮的选择是**那一轮的属性**，而 `self.llm`
         // 是进程级的 —— 所以造一份带这一轮模型的副本（供应商是 Arc，
@@ -667,7 +694,10 @@ impl Engine {
                 role: "assistant".into(),
                 text: reply,
                 occurred_at: Some(chrono::Utc::now().to_rfc3339()),
-                attachments: Vec::new(),
+                // 这一轮 `generate_image` 生成的图。挂在 assistant 消息上，
+                // 与用户自己上传的附件走同一条路 —— 渲染、同步、跨设备
+                // 都不必另写一套
+                attachments: host.take_drawn(),
                 retrieve: false,
                 anchor_episode_id: Some(user_id),
                 tool_calls,
@@ -860,6 +890,36 @@ struct LocalHost {
     grants: crate::grants::Grants,
     /// 与 `Engine` 里那份是同一个 —— 目录从它来，执行也回到它。
     mcp: Arc<cortex_mcp::McpHub>,
+    /// 打服务端那条路。**生图要用它** —— key 在服务端，本地拿不到，
+    /// 见 `cortex_agentd::image` 的模块头。
+    remote: crate::remote::Remote,
+    /// 这一轮生成的图。
+    ///
+    /// # 为什么攒着而不是当场挂到消息上
+    ///
+    /// 工具是在 `Turn::run` 里面被调的，那时 assistant episode 还没写。
+    /// 攒到轮次结束一起挂 —— 一张生成的图与用户自己上传的附件走**同一条路**
+    /// （`NewEpisodeRequest.attachments`），于是渲染、同步、跨设备都不用另写。
+    drawn: std::sync::Mutex<Vec<cortex_proto::dto::AttachmentRef>>,
+}
+
+impl LocalHost {
+    /// 取走这一轮生成的图（取完清空）。
+    fn take_drawn(&self) -> Vec<cortex_proto::dto::AttachmentRef> {
+        self.drawn
+            .lock()
+            .map(|mut d| std::mem::take(&mut *d))
+            .unwrap_or_default()
+    }
+}
+
+/// MIME → 后缀。名字要给人看的，`生成的图.png` 比一串哈希强。
+fn ext_of(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        _ => "png",
+    }
 }
 
 #[async_trait::async_trait]
@@ -878,6 +938,59 @@ impl ToolHost for LocalHost {
         arguments: &serde_json::Value,
     ) -> cortex_agent::ToolResult {
         self.mcp.call(spec, arguments).await
+    }
+
+    /// 生图 —— 转给服务端，回来的是 blob 哈希。
+    ///
+    /// # 结果里给模型看什么
+    ///
+    /// **哈希，不是图片本身。** 把 base64 的图塞回上下文等于每张图烧掉
+    /// 上万个 token，而模型看那张图并不能让它把话说得更好 —— 它只需要
+    /// 知道「生成好了、编号是这个」。图由客户端按哈希取，走的是附件那条路。
+    ///
+    /// 结果里也**明说别再写文件**：不说的话模型会顺手 `write_file` 一份，
+    /// 而那份是它编出来的假图（它手上根本没有字节）。
+    async fn generate_image(&self, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
+        let Some(prompt) = arguments.get("prompt").and_then(|v| v.as_str()) else {
+            return cortex_agent::ToolResult::err("缺少 prompt 参数");
+        };
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return cortex_agent::ToolResult::err("prompt 不能为空");
+        }
+        let size = arguments
+            .get("size")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        match self.remote.generate_image(prompt, size).await {
+            Ok(got) if !got.images.is_empty() => {
+                // 攒起来，轮次结束时挂到 assistant episode 上
+                if let Ok(mut d) = self.drawn.lock() {
+                    d.extend(got.images.iter().map(|i| cortex_proto::dto::AttachmentRef {
+                        hash: i.hash.clone(),
+                        kind: Some("image".into()),
+                        filename: Some(format!("生成的图.{}", ext_of(&i.mime))),
+                    }));
+                }
+                let refs: Vec<String> = got
+                    .images
+                    .iter()
+                    .map(|i| format!("{} ({})", i.hash, i.mime))
+                    .collect();
+                cortex_agent::ToolResult::ok(format!(
+                    "生成好了 {} 张图（模型 {}）：{}。
+                     图已经在回复里了，**不要**再写文件、也不要试图描述它的内容 ——                      你手上只有编号，没有图。",
+                    refs.len(),
+                    got.model,
+                    refs.join("、")
+                ))
+            }
+            // 200 但零张图。当成成功的话，模型会说「画好了」而用户看不到任何东西
+            Ok(_) => cortex_agent::ToolResult::err("服务端说生成成功，但一张图都没回来"),
+            Err(e) => cortex_agent::ToolResult::err(format!("生图失败：{e}")),
+        }
     }
 
     fn grant_root(&self, dir: &std::path::Path) {
@@ -964,7 +1077,7 @@ mod tests {
         let root = dir.path().to_string_lossy().into_owned();
         let external = vec![fake_external("docs", "search")];
 
-        let unbound = chat_turn_for(8, &external);
+        let unbound = chat_turn_for(8, &external, false);
         assert!(
             unbound.tool_names().contains(&"mcp__docs__search"),
             "没绑工作区不等于没有外来工具 —— 那台 server 与工作区毫无关系。\
@@ -978,6 +1091,7 @@ mod tests {
             8,
             PermissionMode::Ask,
             &external,
+            false,
         )
         .expect("临时目录是合法根");
         assert!(
@@ -987,10 +1101,37 @@ mod tests {
         );
     }
 
+    /// 生图工具**只在够得着服务端时**才进目录。
+    ///
+    /// 两个方向都要盯：
+    ///
+    /// - 进不去 → 模型永远不会画图，而用户看到的是「它说它不会」
+    /// - 该进不进 / 不该进却进 → 直连模式下模型答应画图，然后调一条
+    ///   根本打不到的路
+    #[test]
+    fn 生图工具跟着能不能够到服务端走() {
+        let with_server = chat_turn_for(8, &[], true);
+        assert!(
+            with_server.tool_names().contains(&"generate_image"),
+            "代理模式下要有生图工具，否则模型只会回「我不会画图」。实际：{:?}",
+            with_server.tool_names()
+        );
+
+        // ⚠️ **要带一个外来工具**：`with_external` 在两者皆空时提前 return，
+        // 于是「不该加却加了」那条代码根本走不到。第一版就是这么写的，
+        // 故障注入之后照样绿 —— 一条没有区分度的测试
+        let direct = chat_turn_for(8, &[fake_external("docs", "search")], false);
+        assert!(
+            !direct.tool_names().contains(&"generate_image"),
+            "直连模式没有可打的服务端。摆出来的话，模型会答应画图然后失败 ——              而那条失败用户什么都做不了。实际：{:?}",
+            direct.tool_names()
+        );
+    }
+
     /// 一台 server 都没有时，目录里就只有内置的 —— 不多出空壳。
     #[test]
     fn no_mcp_server_means_the_catalog_is_exactly_the_builtin_one() {
-        let plain = chat_turn_for(8, &[]);
+        let plain = chat_turn_for(8, &[], false);
         let names = plain.tool_names();
         assert!(
             !names.iter().any(|n| n.starts_with("mcp__")),
@@ -1014,6 +1155,7 @@ mod tests {
             8,
             PermissionMode::Ask,
             &[],
+            false,
         )
         .expect("临时目录是合法根");
         let container = workspace_turn_for(
@@ -1022,6 +1164,7 @@ mod tests {
             8,
             PermissionMode::Ask,
             &[],
+            false,
         )
         .expect("临时目录是合法根");
 

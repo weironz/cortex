@@ -15,7 +15,8 @@
 //! 生图本身就要几十秒，多这一两秒不改变体验，而少这一步就是数据在过期。
 
 use axum::{Json, extract::State};
-use serde::{Deserialize, Serialize};
+use cortex_proto::llm::{GeneratedImageRef, GeneratedImages};
+use serde::Deserialize;
 
 use crate::error::ApiError;
 use crate::state::AgentState;
@@ -46,23 +47,6 @@ const fn one() -> u8 {
     1
 }
 
-#[derive(Serialize)]
-pub struct ImageResponse {
-    /// 生成的图，已经入库。
-    pub images: Vec<StoredImage>,
-    /// 实际用的型号与来源 —— **回给调用方**，因为「不传就自己找」那条路
-    /// 意味着用户不知道最后落在了哪儿，而账单是按型号算的。
-    pub model: String,
-    pub source: String,
-}
-
-#[derive(Serialize)]
-pub struct StoredImage {
-    /// blob 哈希。客户端按它取图，与附件走同一条路。
-    pub hash: String,
-    pub mime: String,
-}
-
 /// `POST /llm/image` —— 生一张图。
 ///
 /// # Errors
@@ -71,7 +55,7 @@ pub async fn generate(
     State(st): State<AgentState>,
     headers: axum::http::HeaderMap,
     Json(req): Json<ImageRequest>,
-) -> Result<Json<ImageResponse>, ApiError> {
+) -> Result<Json<GeneratedImages>, ApiError> {
     let prompt = req.prompt.trim();
     if prompt.is_empty() {
         return Err(ApiError::bad_request("提示词不能为空"));
@@ -107,7 +91,7 @@ pub async fn generate(
         let hash = crate::blobs::store_bytes(&st, store, bytes, Some(mime))
             .await
             .map_err(|e| ApiError::internal(format!("图存不进去：{e}")))?;
-        stored.push(StoredImage {
+        stored.push(GeneratedImageRef {
             hash,
             mime: mime.to_owned(),
         });
@@ -119,7 +103,7 @@ pub async fn generate(
         count = stored.len(),
         "生成并存下了图"
     );
-    Ok(Json(ImageResponse {
+    Ok(Json(GeneratedImages {
         images: stored,
         model,
         source: source.id.clone(),

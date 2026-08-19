@@ -311,6 +311,23 @@ pub trait ToolHost: Send + Sync {
         ))
     }
 
+    /// 生一张图。**由宿主执行，不走 `tools::execute`。**
+    ///
+    /// 那条路是纯文件系统与 shell —— 没有 HTTP 客户端，也不知道服务端在哪。
+    /// 而生图要打 `POST /llm/image`（key 在服务端，见那一侧的模块头），
+    /// 所以它和 [`Self::call_external`] 一样是宿主能力。
+    ///
+    /// # 默认实现是「这个宿主不会」，不是编一张图出来
+    ///
+    /// 直连模式的 agent 没有可打的服务端，评测 harness 也没有。
+    /// 默认回一条说得清的失败，而不是让模型以为成功了 ——
+    /// 它会接着说「图已经生成好了」，而根本没有图。
+    async fn generate_image(&self, _arguments: &serde_json::Value) -> ToolResult {
+        ToolResult::err(
+            "这个 agent 进程连不到能生图的服务端（本机直连模式没有这条路）。             告诉用户：生图需要连着 Cortex 服务端使用。",
+        )
+    }
+
     /// 问用户准不准。**必须在有限时间内返回。**
     ///
     /// # 默认实现是「没人回答」，不是「批准」
@@ -961,6 +978,10 @@ impl Turn {
         // 「所有人都走那个构造函数」，而这道靠编译器。
         let result = if matches!(spec.source, tools::ToolSource::External { .. }) {
             host.call_external(spec, &call.arguments).await
+        } else if spec.name == "generate_image" {
+            // 内置，但**不走 `tools::execute`** —— 那条路是文件系统与 shell，
+            // 没有 HTTP 客户端也不知道服务端在哪。见 `ToolHost::generate_image`
+            host.generate_image(&call.arguments).await
         } else {
             // **重新问一次宿主**，而不是复用上面那份 `sandbox`：刚才那次
             // `grant_root` 之后清单变长了，用旧的一份去执行，症状恰好是

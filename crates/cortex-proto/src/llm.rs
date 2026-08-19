@@ -282,3 +282,29 @@ mod tests {
         );
     }
 }
+
+/// `POST /llm/image` 的响应 —— 图**已经入库**，这里只有哈希。
+///
+/// # 为什么不是图片 URL
+///
+/// 供应商给的那个链接只活 24 小时（DashScope 明说的）。让客户端拿着它，
+/// 表现是今天生成的图明天打开是 404，而历史里那条消息看起来完好无损。
+/// 服务端在生成的那一刻就把字节抓下来入库了，这里给的是 blob 哈希 ——
+/// 与用户自己上传的附件走同一条取图路径。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneratedImages {
+    pub images: Vec<GeneratedImageRef>,
+    /// 实际用的型号与来源。**回给调用方** —— 「不传就自己找」那条路意味着
+    /// 调用方不知道最后落在了哪儿，而账单是按型号算的。
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneratedImageRef {
+    /// blob 哈希。取图与附件同一条路。
+    pub hash: String,
+    pub mime: String,
+}

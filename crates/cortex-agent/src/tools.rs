@@ -457,6 +457,45 @@ impl Sandbox {
     }
 }
 
+/// 生图工具的声明。**不在 [`builtin_specs`] 里，要调用方显式加。**
+///
+/// # 为什么不默认给
+///
+/// 目录里摆什么，模型就会去调什么。而生图要一条**能打到服务端、且那边
+/// 配了生图来源**的路 —— 直连模式的 agent 没有前者，一个没配来源的部署
+/// 没有后者。默认给出去，模型会答应画图然后失败。
+///
+/// 这与 `memory_search` 那次的教训是同一条，只是方向反过来：那次是能力
+/// 下线了而目录没跟着下线。所以这里做成**加进去要有人负责** ——
+/// 谁确认这条路通，谁把它加上。
+#[must_use]
+pub fn image_spec() -> ToolSpec {
+    ToolSpec {
+        name: "generate_image".into(),
+        description: "按文字描述生成图片。生成的图会直接出现在回复里，                      不需要再写文件。适合用户说「画一张…」「生成一张…」的时候"
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "画什么。写得具体些：主体、场景、光线、风格。                                    英文与中文都可以"
+                },
+                "size": {
+                    "type": "string",
+                    "description": "尺寸，`宽*高`，如 1024*1024。不填由模型按描述自己定"
+                }
+            },
+            "required": ["prompt"]
+        }),
+        // 它花钱（按张计费）但不碰文件系统、不执行任何东西。
+        // Write 档：与「写一个文件」同一级 —— 有副作用、可撤销、不危险
+        risk: Risk::Write,
+        path_arg: None,
+        source: ToolSource::Builtin,
+    }
+}
+
 /// 内置工具目录。
 #[must_use]
 pub fn builtin_specs() -> Vec<ToolSpec> {
