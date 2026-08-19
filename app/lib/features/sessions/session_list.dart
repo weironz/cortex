@@ -9,6 +9,8 @@ import '../../models/project.dart';
 import '../../models/session_search_hit.dart';
 import '../../state/chat_controller.dart';
 import '../../state/chat_state.dart';
+import '../../core/session_export.dart';
+import '../../state/export_controller.dart';
 import '../../state/project_controller.dart';
 import '../../state/session_search_controller.dart';
 import '../../widgets/empty_state.dart';
@@ -175,6 +177,7 @@ class SessionList extends ConsumerWidget {
           onToggleArchive: () =>
               _archive(context, ref, session, !session.archived),
           onMove: () => _move(context, ref, session, projects.projects),
+          onExport: (format) => _export(context, ref, session, format),
         ),
       },
     );
@@ -198,6 +201,47 @@ class SessionList extends ConsumerWidget {
       rows.addAll(group.sessions.map(_SessionRow.new));
     }
     return rows;
+  }
+
+  /// 导出这一段会话。
+  ///
+  /// 从服务端**整段**拉，与屏幕上加载了多少无关 —— 见 [ExportController]。
+  static Future<void> _export(
+    BuildContext context,
+    WidgetRef ref,
+    ChatSession session,
+    ExportFormat format,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('正在导出「${session.title}」为 ${format.label}…'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+    await ref
+        .read(exportControllerProvider.notifier)
+        .export(session.id, format);
+    final result = ref.read(exportControllerProvider);
+    messenger.hideCurrentSnackBar();
+    if (result.error != null) {
+      messenger.showSnackBar(SnackBar(content: Text('导出失败：${result.error}')));
+      return;
+    }
+    // 用户自己取消了「另存为」—— 不该弹任何提示
+    final name = result.savedName;
+    if (name == null) return;
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          result.truncated
+              // 不完整的存档必须当场说。悄悄少一半比导不出来更糟 ——
+              // 后者用户会重试，前者他三个月后才会发现
+              ? '已导出 $name，但这段会话太长，只导出了最近的 ${result.episodeCount} 条'
+              : '已导出 $name（${result.episodeCount} 条消息）',
+        ),
+      ),
+    );
   }
 
   // --------------------------------------------------------------- projects
@@ -667,6 +711,7 @@ class _SessionTile extends StatefulWidget {
     required this.onRename,
     required this.onToggleArchive,
     required this.onMove,
+    required this.onExport,
   });
 
   final ChatSession session;
@@ -680,6 +725,7 @@ class _SessionTile extends StatefulWidget {
   final VoidCallback onRename;
   final VoidCallback onToggleArchive;
   final VoidCallback onMove;
+  final void Function(ExportFormat) onExport;
 
   @override
   State<_SessionTile> createState() => _SessionTileState();
@@ -820,6 +866,7 @@ class _SessionTileState extends State<_SessionTile> {
                   onRename: widget.onRename,
                   onToggleArchive: widget.onToggleArchive,
                   onMove: widget.onMove,
+                  onExport: widget.onExport,
                 ),
               ),
             ],
@@ -838,6 +885,7 @@ class _TileMenu extends StatelessWidget {
     required this.onRename,
     required this.onToggleArchive,
     required this.onMove,
+    required this.onExport,
   });
 
   final bool archived;
@@ -846,6 +894,7 @@ class _TileMenu extends StatelessWidget {
   final VoidCallback onRename;
   final VoidCallback onToggleArchive;
   final VoidCallback onMove;
+  final void Function(ExportFormat) onExport;
 
   @override
   Widget build(BuildContext context) {
@@ -859,6 +908,8 @@ class _TileMenu extends StatelessWidget {
       onSelected: (value) => switch (value) {
         'rename' => onRename(),
         'move' => onMove(),
+        'export_md' => onExport(ExportFormat.markdown),
+        'export_json' => onExport(ExportFormat.json),
         _ => onToggleArchive(),
       },
       itemBuilder: (context) => [
@@ -885,6 +936,30 @@ class _TileMenu extends StatelessWidget {
               ],
             ),
           ),
+        // 两个格式各占一项，而不是一个「导出…」再弹一个对话框：
+        // 用户点进来时已经知道自己要哪个，多一次点击只是拦路
+        const PopupMenuItem(
+          value: 'export_md',
+          height: 38,
+          child: Row(
+            children: [
+              Icon(Icons.description_outlined, size: 15),
+              SizedBox(width: 9),
+              Text('导出 Markdown'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'export_json',
+          height: 38,
+          child: Row(
+            children: [
+              Icon(Icons.data_object_rounded, size: 15),
+              SizedBox(width: 9),
+              Text('导出 JSON'),
+            ],
+          ),
+        ),
         PopupMenuItem(
           value: 'archive',
           height: 38,
