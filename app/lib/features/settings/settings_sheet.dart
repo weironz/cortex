@@ -6,6 +6,7 @@ import 'pages/connection_page.dart';
 import 'pages/data_page.dart';
 import 'pages/mcp_page.dart';
 import 'pages/model_page.dart';
+import 'pages/model_roles_page.dart';
 
 /// 打开设置窗。
 ///
@@ -31,8 +32,10 @@ Future<void> showSettingsSheet(BuildContext context) {
 ///
 /// # 分类按「我要改什么」，不按「它属于哪个模块」
 ///
-/// 「模型」里放的是自带 key 与本机模型 —— 一个在服务端一个在本机，
-/// 模块上八竿子打不着，但用户来这里想的是同一件事：**这一轮由谁付钱**。
+/// 「模型服务」（有哪些来源、每条开放哪些型号）与「默认模型」（每种活儿
+/// 默认用哪个）分成两页，照 Cherry Studio 的分法：前者是**配置**、一次性
+/// 的；后者是**偏好**、会反复改。堆在一页里的下场是想换个默认模型的人
+/// 得先滚过一屏 key 与端点。
 class _SettingsWindow extends StatefulWidget {
   const _SettingsWindow();
 
@@ -54,10 +57,16 @@ class _SettingsWindowState extends State<_SettingsWindow> {
       page: ConnectionPage(),
     ),
     (
-      label: '模型',
-      hint: '自己的 key · 本机模型',
+      label: '模型服务',
+      hint: '供应商 · key · 型号',
       icon: Icons.psychology_outlined,
       page: ModelPage(),
+    ),
+    (
+      label: '默认模型',
+      hint: '主 · 快速 · 绘画',
+      icon: Icons.tune_rounded,
+      page: ModelRolesPage(),
     ),
     (
       label: 'MCP 与工具',

@@ -308,3 +308,54 @@ pub struct GeneratedImageRef {
     pub hash: String,
     pub mime: String,
 }
+
+/// `POST /settings/model-sources/{id}/models` 的响应。
+///
+/// # 为什么不只回一串名字
+///
+/// 名字回答不了「这个型号能不能跑 agent」，而那是这里唯一会造成**静默
+/// 失败**的一位：不支持工具调用的模型跑 agent 会流畅地回答而一个工具都
+/// 不调，用户只会觉得它「不听话」。240 个裸名字里挑一个，等于蒙。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FetchedModels {
+    pub models: Vec<FetchedModel>,
+    /// 真是从供应商拉的吗。`false` = 内置回落，界面**必须**说出来 ——
+    /// 悄悄回落的表现是「我点了获取列表，它给了我一份看起来像样的、
+    /// 但其实是编译期写死的清单」。
+    pub live: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// 一个可加入的型号 —— 名字 + 它能干什么。
+///
+/// 能力字段一律 `Option`：**「不知道」与「不行」是两回事**。
+/// 目录里查不到的型号三个字段都是 `None`，界面据此说「不知道」而不是
+/// 画一个看起来像「不支持」的灰徽标。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FetchedModel {
+    pub id: String,
+    /// 给人看的名字。目录没有更好听的就等于 [`id`](Self::id)。
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<usize>,
+    /// **支持工具调用吗。** 这是筛选里最要紧的一位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<bool>,
+    /// 看得懂图吗（视觉输入）。与 [`image_output`](Self::image_output) 是
+    /// 两件事 —— `qwen-vl` 看得懂图但不生图，`qwen-image` 反过来。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
+    /// 能生图吗。判据见 `cortex_llm::image::is_image_model`：
+    /// **它还包含「我们调不调得动这家」** —— 目录说能生图但协议没接的，
+    /// 这里是 false。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_output: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// 每百万输入 token 多少**美元微元**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_micros_per_mtok: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_micros_per_mtok: Option<i64>,
+}

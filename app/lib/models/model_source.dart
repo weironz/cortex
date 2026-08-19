@@ -160,17 +160,71 @@ class ModelSources {
   Iterable<ModelSource> get usable => sources.where((s) => s.enabled);
 }
 
+/// 一个可加入的型号 —— 名字 + 它能干什么。
+///
+/// 能力字段一律可空：**「不知道」与「不行」是两回事**。目录里查不到的
+/// 型号三个字段都是 null，界面据此说「不知道」，而不是画一个看起来像
+/// 「不支持」的灰徽标。
+class FetchedModel {
+  const FetchedModel({
+    required this.id,
+    this.displayName = '',
+    this.context,
+    this.toolCall,
+    this.vision,
+    this.imageOutput,
+    this.reasoning,
+    this.inputMicrosPerMtok,
+    this.outputMicrosPerMtok,
+  });
+
+  factory FetchedModel.fromJson(Map<String, dynamic> json) => FetchedModel(
+    id: asString(json['id']),
+    displayName: asString(json['display_name']),
+    context: asIntOrNull(json['context']),
+    toolCall: json['tool_call'] as bool?,
+    vision: json['vision'] as bool?,
+    imageOutput: json['image_output'] as bool?,
+    reasoning: json['reasoning'] as bool?,
+    inputMicrosPerMtok: asIntOrNull(json['input_micros_per_mtok']),
+    outputMicrosPerMtok: asIntOrNull(json['output_micros_per_mtok']),
+  );
+
+  final String id;
+  final String displayName;
+  final int? context;
+
+  /// **支持工具调用吗。** 筛选里最要紧的一位 —— 不支持的模型跑 agent
+  /// 会流畅地回答而一个工具都不调，界面上看不出任何异常。
+  final bool? toolCall;
+
+  /// 看得懂图吗（视觉输入）。与 [imageOutput] 是两件事。
+  final bool? vision;
+
+  /// 能生图吗。这一位的含义是「点了能不能出图」，不是「理论上会不会画」
+  /// —— 协议没接的那几家一律 false。
+  final bool? imageOutput;
+
+  final bool? reasoning;
+  final int? inputMicrosPerMtok;
+  final int? outputMicrosPerMtok;
+
+  String get label => displayName.isEmpty ? id : displayName;
+}
+
 /// `POST .../{id}/models` 的响应。
 class FetchedModels {
   const FetchedModels({this.models = const [], this.live = false, this.note});
 
   factory FetchedModels.fromJson(Map<String, dynamic> json) => FetchedModels(
-    models: asStringList(json['models']),
+    models: asObjectList(
+      json['models'],
+    ).map(FetchedModel.fromJson).toList(growable: false),
     live: json['live'] == true,
     note: json['note'] as String?,
   );
 
-  final List<String> models;
+  final List<FetchedModel> models;
 
   /// 真是从供应商拉的吗。`false` = 内置回落，界面**必须**说出来 ——
   /// 悄悄回落的表现是「我点了获取列表，它给了我一份看起来像样的、

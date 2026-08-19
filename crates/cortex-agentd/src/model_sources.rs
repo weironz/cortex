@@ -33,6 +33,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use cortex_proto::llm::{FetchedModel, FetchedModels};
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use serde::{Deserialize, Serialize};
 
@@ -534,8 +535,9 @@ pub async fn fetch_models(
             .llm()
             .map(|c| c.provider_id().to_owned())
             .map_err(|_| ApiError::unsupported("这个部署没配模型，问不出型号"))?;
+        let names = cortex_llm::provider::allowed_models(&provider).unwrap_or_default();
         return Ok(Json(FetchedModels {
-            models: cortex_llm::provider::allowed_models(&provider).unwrap_or_default(),
+            models: describe_all(&provider, &names),
             live: false,
             note: Some("这条是服务端配的，型号来自它的供应商定义".to_owned()),
         }));
@@ -556,10 +558,10 @@ pub async fn fetch_models(
     .map_err(|e| ApiError::bad_request(format!("这条来源建不起供应商：{e}")))?;
 
     match client.fetch_supported_models().await {
-        Ok(models) if !models.is_empty() => {
-            tracing::info!(source = %id, count = models.len(), "拉到了供应商的型号列表");
+        Ok(names) if !names.is_empty() => {
+            tracing::info!(source = %id, count = names.len(), "拉到了供应商的型号列表");
             Ok(Json(FetchedModels {
-                models,
+                models: describe_all(&source.provider, &names),
                 live: true,
                 note: None,
             }))
@@ -576,8 +578,9 @@ pub async fn fetch_models(
 
 /// 拉不动时的回落。**note 必须说清是回落** —— 见 [`fetch_models`]。
 fn fallback_models(provider: &str, why: Option<String>) -> FetchedModels {
+    let names = cortex_llm::provider::allowed_models(provider).unwrap_or_default();
     FetchedModels {
-        models: cortex_llm::provider::allowed_models(provider).unwrap_or_default(),
+        models: describe_all(provider, &names),
         live: false,
         note: Some(match why {
             Some(e) => format!("问不到这家的型号列表（{e}），下面这份是内置的，未必与你的账号一致"),
@@ -586,14 +589,55 @@ fn fallback_models(provider: &str, why: Option<String>) -> FetchedModels {
     }
 }
 
-/// `POST .../models` 的响应。
-#[derive(Serialize)]
-pub struct FetchedModels {
-    pub models: Vec<String>,
-    /// 真是从供应商拉的吗。`false` = 内置回落，界面要说出来
-    pub live: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
+/// 把一串裸名字配上能力与价目。
+///
+/// 目录查不到的**不丢掉**，能力字段留 `None` —— 那多半是刚发布的新型号，
+/// 丢了比留着更糟；留着，界面说「不知道」。
+fn describe_all(provider: &str, names: &[String]) -> Vec<FetchedModel> {
+    names
+        .iter()
+        .map(|id| {
+            let info = cortex_llm::catalog::lookup(provider, id);
+            // ⚠️ 生图这一位**不能只问目录**：目录里 alibaba 一个
+            // `image_output` 都没有，而真实账号上有 19 个。而且它还要
+            // 回答「我们调不调得动这家」—— 判据统一在 `is_image_model`
+            let draws = cortex_llm::image::is_image_model(provider, id);
+            FetchedModel {
+                id: id.clone(),
+                display_name: info
+                    .as_ref()
+                    .map_or_else(|| id.clone(), |i| i.display_name.clone()),
+                context: info.as_ref().map(|i| i.context),
+                tool_call: info.as_ref().map(|i| i.tool_call),
+                vision: info.as_ref().map(|i| i.vision),
+                // ⚠️ **只认 `is_image_model`，不回落到目录那一位。**
+                //
+                // 回落的话，`gpt-image-1` 会被报成能生图 —— 目录里它确实
+                // 是（它真的能生图），可我们没接 OpenAI 的生图协议。
+                // 这一位在界面上的含义是「点了能不能出图」，不是
+                // 「这个模型理论上会不会画画」。
+                //
+                // 目录查不到、判据也不认的 → `None`（不知道），
+                // 而不是 `Some(false)`：那条来源可能只是我们还没核实过。
+                image_output: if draws {
+                    Some(true)
+                } else if info.is_some() {
+                    Some(false)
+                } else {
+                    None
+                },
+                reasoning: info.as_ref().map(|i| i.reasoning),
+                input_micros_per_mtok: info
+                    .as_ref()
+                    .and_then(|i| i.cost)
+                    .map(|c| c.input_micros_per_mtok),
+                output_micros_per_mtok: info
+                    .as_ref()
+                    .and_then(|i| i.cost)
+                    .map(|c| c.output_micros_per_mtok),
+            }
+        })
+        .collect()
 }
 
 /// 这家要不要 key。查不到就按「要」算 —— 猜错的两个方向代价不对等：
@@ -745,6 +789,74 @@ mod tests {
         assert!(
             DEPLOYMENT_SOURCE_ID.chars().any(|c| c.is_ascii_lowercase()),
             "保留 id 必须含小写字母 —— ULID 是全大写，这是它们不会撞的理由"
+        );
+    }
+
+    /// 目录查不到的型号**不丢掉**，能力留 `None`。
+    ///
+    /// 丢掉的表现是「我账号里明明有这个型号，列表里却没有」—— 那多半是
+    /// 刚发布的新型号，而新型号恰恰是用户最想试的。
+    #[test]
+    fn 目录查不到的型号留着_能力是不知道而不是不行() {
+        let got = describe_all("deepseek", &["某个还没进目录的型号".to_owned()]);
+        let m = got.first().expect("不该被丢掉");
+        assert_eq!(m.id, "某个还没进目录的型号");
+        assert_eq!(
+            m.tool_call, None,
+            "查不到要给 None（不知道）。塌成 Some(false) 的话，界面会把它\
+             画成「不支持工具调用」并拦住 —— 而它可能完全能用"
+        );
+        assert_eq!(m.context, None);
+        assert_eq!(m.input_micros_per_mtok, None);
+    }
+
+    /// 目录里有的型号，能力照实带出来。
+    #[test]
+    fn 目录里有的型号带出真实能力() {
+        let got = describe_all("deepseek", &["deepseek-v4-pro".to_owned()]);
+        let m = got.first().expect("deepseek-v4-pro 在目录里");
+        assert_eq!(
+            m.tool_call,
+            Some(true),
+            "它是能跑 agent 的，必须带出来 —— 这是筛选里最要紧的一位"
+        );
+        assert!(m.context.is_some(), "上下文查得到");
+        assert!(m.input_micros_per_mtok.is_some(), "价目查得到");
+    }
+
+    /// 生图那一位**不能只问目录**。
+    ///
+    /// 目录里 alibaba 一个 `image_output` 都没有，而真实账号上有 19 个。
+    /// 只问目录的表现是「我账号里有 qwen-image-3.0，筛选里却一个生图的
+    /// 都挑不出来」。
+    #[test]
+    fn 生图那一位走的是我们自己核实过的判据() {
+        let got = describe_all("alibaba", &["qwen-image-3.0".to_owned()]);
+        assert_eq!(
+            got[0].image_output,
+            Some(true),
+            "目录里没有它，但我们对着真实账号核实过 —— 该给 true"
+        );
+
+        // 反向：看图的不是生图的
+        let vl = describe_all("alibaba", &["qwen-vl-max".to_owned()]);
+        assert_ne!(
+            vl[0].image_output,
+            Some(true),
+            "qwen-vl 是**看**图的。误判的后果是 agent 拿它去调生图接口"
+        );
+    }
+
+    /// 目录说能生图、但我们没接那家的协议 → 不能报告成能生图。
+    #[test]
+    fn 协议没接的家不报告成能生图() {
+        let got = describe_all("openai", &["gpt-image-1".to_owned()]);
+        assert_ne!(
+            got[0].image_output,
+            Some(true),
+            "目录里它的 image_output 是真的，但 OpenAI 的生图协议还没接 —— \
+             报告成能生图等于把一次本可在挑选阶段避开的失败，推迟到用户\
+             点下按钮之后"
         );
     }
 }

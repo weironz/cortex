@@ -25,9 +25,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../api/api_exception.dart';
 import '../../../auth/local_llm_store.dart';
 import '../../../core/local_llm.dart';
+import '../../../models/model_option.dart';
 import '../../../models/model_source.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/model_controller.dart';
+import 'model_add_dialog.dart';
 
 class ModelPage extends ConsumerStatefulWidget {
   const ModelPage({super.key});
@@ -113,6 +115,7 @@ class _ModelPageState extends ConsumerState<ModelPage> {
                             onDelete: () => _delete(current),
                             onFetch: () => _fetch(current),
                             onModels: (m) => _saveModels(current, m),
+                            known: _known(),
                             offlineNote: _offlineNote(current),
                           ),
                   ),
@@ -179,6 +182,16 @@ class _ModelPageState extends ConsumerState<ModelPage> {
           ),
     );
     await _mirrorOffline(got);
+  }
+
+  /// 型号名 → 能力，取自已经拉过的那份目录（`/llm/models`）。
+  ///
+  /// **不为几个图标再发一次请求**：那份目录本来就要拉（撰写框的选择器
+  /// 用它），这里只是复用。查不到的型号不出现在这个表里，界面据此不画徽标。
+  Map<String, ModelOption> _known() {
+    final c = ref.watch(modelCatalogProvider).value;
+    if (c == null) return const {};
+    return {for (final m in c.models) m.id: m};
   }
 
   /// 这条来源在离线那一侧是什么状态。
@@ -341,39 +354,20 @@ class _ModelPageState extends ConsumerState<ModelPage> {
         ),
   );
 
-  /// 去问供应商它有哪些型号，把结果存回这条来源。
+  /// 去问供应商它有哪些型号，然后**让用户挑**。
+  ///
+  /// # 为什么不再整份塞进来
+  ///
+  /// 那把 alibaba key 拉回来 240 个型号。整份塞进去之后，撰写框的选择器里
+  /// 就是 240 条，而真正会用的不超过五个。
   Future<void> _fetch(ModelSource s) async {
     setState(() {
       _busy = true;
       _error = null;
     });
+    FetchedModels? got;
     try {
-      final got = await ref.read(cortexApiProvider).fetchSourceModels(s.id);
-      if (!mounted) return;
-      // 部署那条只读，拉回来只是给人看，不写库
-      if (!s.builtin) {
-        await ref
-            .read(cortexApiProvider)
-            .saveModelSource(
-              id: s.id,
-              provider: s.provider,
-              label: s.label,
-              baseUrl: s.baseUrl,
-              models: got.models,
-            );
-        ref.invalidate(modelSourcesProvider);
-        ref.invalidate(modelCatalogProvider);
-      }
-      if (!mounted) return;
-      // ⚠️ **回落必须说出来。** 悄悄回落的表现是「我点了获取列表，
-      // 它给了我一份看起来像样的、但其实是编译期写死的清单」，
-      // 而那份清单可能与这个账号真正开通的东西毫无关系
-      final msg = got.live
-          ? '拉到 ${got.models.length} 个型号'
-          : (got.note ?? '没拉到，用的是内置那份');
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        SnackBar(content: Text(msg), duration: const Duration(seconds: 6)),
-      );
+      got = await ref.read(cortexApiProvider).fetchSourceModels(s.id);
     } on Object catch (e) {
       if (mounted) {
         setState(() => _error = e is CortexApiException ? e.message : e);
@@ -381,6 +375,18 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+    if (got == null || !mounted) return;
+
+    final picked = await showAddModels(
+      context,
+      fetched: got,
+      already: s.models,
+    );
+    if (picked == null || picked.isEmpty || !mounted) return;
+
+    // 部署那条只读 —— 拉回来只是给人看
+    if (s.builtin) return;
+    await _saveModels(s, [...s.models, ...picked]);
   }
 }
 
@@ -555,6 +561,7 @@ class _Detail extends StatefulWidget {
     required this.onDelete,
     required this.onFetch,
     required this.onModels,
+    required this.known,
     this.offlineNote,
   });
 
@@ -567,6 +574,9 @@ class _Detail extends StatefulWidget {
   final VoidCallback onDelete;
   final VoidCallback onFetch;
   final ValueChanged<List<String>> onModels;
+
+  /// 型号名 → 它的能力（来自已经拉过的那份目录）。查不到的就不画徽标。
+  final Map<String, ModelOption> known;
 
   /// 这条在离线那一侧是什么状态。`null` = 不用说（Web，或部署那条）。
   final String? offlineNote;
@@ -738,6 +748,9 @@ class _DetailState extends State<_Detail> {
             for (final m in group.$2)
               _ModelRow(
                 model: m,
+                // 能力从**已经拉过的那份目录**里查，不为几个图标再发一次
+                // 请求。查不到就不画徽标 —— 「不知道」不该长得像「不支持」
+                known: widget.known[m],
                 busy: widget.busy,
                 onRemove: s.builtin
                     ? null
@@ -763,11 +776,17 @@ class _DetailState extends State<_Detail> {
 class _ModelRow extends StatelessWidget {
   const _ModelRow({
     required this.model,
+    required this.known,
     required this.busy,
     required this.onRemove,
   });
 
   final String model;
+
+  /// 它的能力。`null` = 目录里查不到 —— **不画徽标**，因为一个灰徽标
+  /// 会被读成「不支持」，而实际是「不知道」。
+  final ModelOption? known;
+
   final bool busy;
   final VoidCallback? onRemove;
 
@@ -786,6 +805,18 @@ class _ModelRow extends StatelessWidget {
               style: theme.textTheme.bodySmall,
             ),
           ),
+          for (final b in badgesOfOption(known))
+            Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child: Tooltip(
+                message: b.$2,
+                child: Icon(
+                  b.$1,
+                  size: 13,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
           if (onRemove != null)
             IconButton(
               tooltip: '从这条来源移除',

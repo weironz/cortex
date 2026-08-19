@@ -174,6 +174,10 @@ protected_routes! {
     // 而这三件事都不该挡住「把一条来源存下来」。Cherry Studio 的
     // 「获取模型列表」也是一个独立按钮，同一个理由
     "/settings/model-sources/{id}/models" [POST] => post(crate::model_sources::fetch_models),
+    // 默认模型（主 / 快速 / 绘画）。**整份替换** —— 角色只有三个，
+    // 界面上是同一屏三个下拉，增量协议不值那套复杂度
+    "/settings/model-roles" [GET, PUT] => get(crate::model_roles::list)
+        .put(crate::model_roles::put),
     // ── 导入外部历史 ──
     //
     // Web 端的导入：浏览器读不到磁盘，只能先把 conversations.json 传上来。

@@ -37,6 +37,7 @@ mod image;
 mod import;
 mod llm;
 mod model_pick;
+mod model_roles;
 mod model_sources;
 mod presence;
 mod pricing;

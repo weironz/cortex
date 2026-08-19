@@ -20,6 +20,7 @@ class ModelOption {
     this.context,
     this.toolCall,
     this.vision,
+    this.imageOutput,
     this.reasoning,
     this.inputMicrosPerMtok,
     this.outputMicrosPerMtok,
@@ -34,6 +35,7 @@ class ModelOption {
     context: asIntOrNull(json['context']),
     toolCall: json['tool_call'] as bool?,
     vision: json['vision'] as bool?,
+    imageOutput: json['image_output'] as bool?,
     reasoning: json['reasoning'] as bool?,
     inputMicrosPerMtok: asIntOrNull(json['input_micros_per_mtok']),
     outputMicrosPerMtok: asIntOrNull(json['output_micros_per_mtok']),
@@ -66,7 +68,16 @@ class ModelOption {
   /// 把「不知道」当成 `false` 会把一个能用的模型挡在外面。
   final bool? toolCall;
 
+  /// 看得懂图吗（视觉**输入**）。
   final bool? vision;
+
+  /// **点了能不能出图。** 与 [vision] 是两件事。
+  ///
+  /// 「绘画模型」那个角色靠它筛：不筛的话，用户会在一屏对话模型里挑一个
+  /// 当绘画模型，然后在**保存那一刻**吃一个「生不了图」——
+  /// 而他看不出哪个能选。服务端那侧用同一个判据校验。
+  final bool? imageOutput;
+
   final bool? reasoning;
 
   /// 每百万输入 token 多少**美元微元**。`null` = 目录里没有它的价目。

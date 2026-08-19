@@ -12,6 +12,7 @@ import '../import/import_source.dart';
 import '../models/account.dart';
 import '../models/auth_tokens.dart';
 import '../models/model_source.dart';
+import '../models/model_role.dart';
 import '../models/mcp.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
@@ -441,6 +442,40 @@ class HttpCortexApi implements CortexApi {
   Future<FetchedModels> fetchSourceModels(String id) async {
     final body = await _sourcesRaw('POST', '/$id/models', null);
     return FetchedModels.fromJson(body);
+  }
+
+  @override
+  Future<RoleAssignments> modelRoles() async =>
+      RoleAssignments.fromJson(await _rolesRaw('GET', null));
+
+  @override
+  Future<RoleAssignments> saveModelRoles(RoleAssignments roles) async =>
+      RoleAssignments.fromJson(await _rolesRaw('PUT', roles.toJson()));
+
+  /// 两个动作共用一段 —— 与 [_sourcesRaw] 同一个理由：各写一遍的话，
+  /// 迟早有一处忘了检查状态码，然后把一段错误 JSON 当成正常响应解析，
+  /// 界面上显示「一个角色都没指派」，而实际是存失败了。
+  Future<Map<String, dynamic>> _rolesRaw(
+    String method,
+    Map<String, Object?>? body,
+  ) async {
+    const path = '/settings/model-roles';
+    final http.Response response;
+    try {
+      final req = http.Request(method, _uri(path))
+        ..headers.addAll(_headers(const {'accept': 'application/json'}));
+      if (body != null) {
+        req.headers['content-type'] = 'application/json';
+        req.body = jsonEncode(body);
+      }
+      response = await http.Response.fromStream(await _client.send(req));
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(response.statusCode, _errorMessage(response));
+    }
+    return _decodeObject(path, utf8.decode(response.bodyBytes));
   }
 
   Future<ModelSources> _sources(

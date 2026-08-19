@@ -6,6 +6,7 @@ import '../import/import_source.dart';
 import '../models/account.dart';
 import '../models/auth_tokens.dart';
 import '../models/model_source.dart';
+import '../models/model_role.dart';
 import '../models/mcp.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
@@ -347,6 +348,16 @@ abstract interface class CortexApi {
   ///
   /// 拉不动时服务端回落到内置定义并把 `live` 置 false —— 界面要说出来。
   Future<FetchedModels> fetchSourceModels(String id);
+
+  /// `GET /settings/model-roles` —— 现在把哪个模型指派给了哪个角色。
+  Future<RoleAssignments> modelRoles();
+
+  /// `PUT /settings/model-roles` —— **整份替换**。
+  ///
+  /// 服务端会校验（来源还在不在、那条来源开没开放这个型号、绘画角色指的
+  /// 是不是真的画得出来），不合法直接 400 —— 所以界面要么筛掉不合法的
+  /// 选项，要么把这个错误原样显示出来。
+  Future<RoleAssignments> saveModelRoles(RoleAssignments roles);
 
   /// Hands the daemon a file to parse, and gets back something cheap to refer
   /// to it by.
@@ -739,4 +750,8 @@ mixin ModelSourcesUnsupported {
 
   Future<FetchedModels> fetchSourceModels(String id) async =>
       const FetchedModels();
+
+  Future<RoleAssignments> modelRoles() async => const RoleAssignments();
+
+  Future<RoleAssignments> saveModelRoles(RoleAssignments roles) async => roles;
 }

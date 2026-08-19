@@ -32,19 +32,65 @@ import '../../../state/model_controller.dart';
 /// 两份实现的下场是改了一处忘了另一处，而两处长得不一样时用户会以为
 /// 它们是两个功能。
 Future<void> showModelPicker(BuildContext context, WidgetRef ref) async {
+  final picked = await pickModel(
+    context,
+    ref,
+    current: ref.read(selectedModelProvider),
+  );
+  if (picked == null || !context.mounted) return;
+  ref.read(selectedModelProvider.notifier).select(picked.pick);
+}
+
+/// 同一个面板，但**只把选择交回来**，不写任何状态。
+///
+/// # 为什么要拆出这一层
+///
+/// 「默认模型」那一页要选三次（主 / 快速 / 绘画），而每一次都不该动
+/// 撰写框上那个逐轮选择。另写一个选择器的下场是两处的能力提示、分组、
+/// 配额标注各走各的 —— 而用户会以为它们是两个功能。
+///
+/// # 两条规则必须能关掉，否则绘画角色一个都选不了
+///
+/// - [requireTools]：默认拦下不支持工具调用的。**绘画模型要关掉它** ——
+///   生图模型基本都不支持工具调用，开着的话，这个面板会把它该提供的
+///   每一项都画成灰的。
+/// - [where]：绘画角色只列真的画得出来的。不筛的话，用户会在一屏对话
+///   模型里挑一个，然后在**保存那一刻**吃一个「生不了图」。
+Future<({ModelPick pick})?> pickModel(
+  BuildContext context,
+  WidgetRef ref, {
+  required ModelPick current,
+
+  /// 只列符合条件的。`null` = 全都列。
+  bool Function(ModelOption)? where,
+
+  /// 不支持工具调用的要不要拦。
+  bool requireTools = true,
+
+  /// 第一项叫什么（那一项 pop 的是一个空的 [ModelPick]）。
+  String firstTitle = '跟随部署',
+  String? firstSubtitle,
+
+  /// 摆不摆「自动」。角色指派摆不了 —— 它存的是一对
+  /// `(来源, 型号)`，而「自动」不是任何一条来源上的型号。
+  bool allowAuto = true,
+
+  /// 一句话说明这个面板是干嘛的。角色指派要它 ——
+  /// 三个角色的面板长得一模一样，没有这一句分不清在选哪个。
+  String? headline,
+}) async {
   final catalog = ref.read(modelCatalogProvider).value;
   // 还没拉到就先拉一次再开，别弹一个空面板出来
   if (catalog == null) {
     ref.invalidate(modelCatalogProvider);
-    return;
+    return null;
   }
-  final current = ref.read(selectedModelProvider);
 
   // ⚠️ 返回值包一层记录。**直接返回 `ModelPick?` 是错的**：
-  // 「跟随部署」这一项要 pop 一个「空的选择」，而点面板外关掉给到的是
+  // 第一项要 pop 一个「空的选择」，而点面板外关掉给到的是
   // `null` —— 两者撞车的表现是「本来选着 Flash，随手关掉面板，
   // 就静默退回默认了」，而用户完全不知道自己改过什么。
-  final picked = await showModalBottomSheet<({ModelPick pick})>(
+  return showModalBottomSheet<({ModelPick pick})>(
     context: context,
     showDragHandle: true,
     isScrollControlled: true,
@@ -57,17 +103,27 @@ Future<void> showModelPicker(BuildContext context, WidgetRef ref) async {
         child: ListView(
           shrinkWrap: true,
           children: [
+            if (headline != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                child: Text(
+                  headline,
+                  style: Theme.of(ctx).textTheme.titleSmall,
+                ),
+              ),
             _tile(
               ctx,
               pick: const ModelPick(),
-              title: '跟随部署',
-              subtitle: catalog.defaultModel.isEmpty
-                  ? '服务端配的那个'
-                  : catalog.defaultModel,
+              title: firstTitle,
+              subtitle:
+                  firstSubtitle ??
+                  (catalog.defaultModel.isEmpty
+                      ? '服务端配的那个'
+                      : catalog.defaultModel),
               icon: Icons.settings_suggest_outlined,
               current: current,
             ),
-            if (catalog.autoAvailable)
+            if (allowAuto && catalog.autoAvailable)
               _tile(
                 ctx,
                 pick: const ModelPick(model: kAutoModel),
@@ -79,7 +135,15 @@ Future<void> showModelPicker(BuildContext context, WidgetRef ref) async {
               ),
             // 按来源分组：一个型号名离开它的来源没有意义 ——
             // key、端点、账单三样都跟着来源走
-            for (final (source, label, models) in catalog.grouped) ...[
+            //
+            // 筛完一个不剩的分组整组不画：留一个空标题在那儿，
+            // 看起来像「这条来源坏了」，而实际只是它没有符合条件的型号
+            for (final (source, label, models)
+                in catalog.grouped
+                    .map(
+                      (g) => (g.$1, g.$2, g.$3.where(where ?? _any).toList()),
+                    )
+                    .where((g) => g.$3.isNotEmpty)) ...[
               const Divider(height: 12),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
@@ -118,11 +182,22 @@ Future<void> showModelPicker(BuildContext context, WidgetRef ref) async {
                   icon: Icons.memory_outlined,
                   current: current,
                   // 不支持工具调用的不给选：那样的模型会流畅地回答而
-                  // 一个工具都不调，界面上看不出任何异常
-                  disabled: m.toolCall == false,
+                  // 一个工具都不调，界面上看不出任何异常。
+                  //
+                  // ⚠️ 只在**要跑 agent** 的场合拦。绘画角色关掉这一条 ——
+                  // 生图模型基本都不支持工具调用，开着的话这个面板会把
+                  // 它该提供的每一项都画成灰的
+                  disabled: requireTools && !_chatty(m),
                   // 目录里查不到的能选，但要说一句「我们不知道」——
                   // 当成不行会把一个能用的模型挡在外面
-                  note: m.toolCall == null ? '服务端目录里没有它，不知道它支不支持工具调用' : null,
+                  note: requireTools && m.toolCall == null && !_draws(m)
+                      ? '服务端目录里没有它，不知道它支不支持工具调用'
+                      : null,
+                  // 拦下来时说的是**这一个**为什么不行，不是一句通用的
+                  disabledReason: _draws(m)
+                      ? '这是生图模型，对话跑不了 —— 想画图的话，'
+                            '在「默认模型」里把它设成绘画模型'
+                      : null,
                 ),
             ],
             Padding(
@@ -141,9 +216,31 @@ Future<void> showModelPicker(BuildContext context, WidgetRef ref) async {
       ),
     ),
   );
-  if (picked == null || !context.mounted) return;
-  ref.read(selectedModelProvider.notifier).select(picked.pick);
 }
+
+/// 不筛。抽成一个具名函数而不是就地写 `(_) => true`，是为了
+/// 上面那句 `where ?? _any` 读起来仍然是一句话。
+bool _any(ModelOption _) => true;
+
+/// 这是个生图模型。
+bool _draws(ModelOption m) => m.imageOutput == true;
+
+/// 拿它跑对话说得过去吗。
+///
+/// # 为什么「能生图」在这里是一条**否决**
+///
+/// 生图与对话是两条协议：qwen-image 那些根本不吐 token。而它们在目录里
+/// 查不到（`tool_call == null`），于是「不知道就放行」那条规则会把它们
+/// 原样摆出来 —— 2026-08-20 在真实账号上就是这样：主模型选择器里
+/// 20 个 qwen-image 全都能选，注解还写着一句轻飘飘的「不知道它支不支持
+/// 工具调用」。
+///
+/// 但我们**知道**：`image_output` 那一位就是为绘画角色算出来的，
+/// 同一份数据摆在那儿没人用。选中它的代价是每一轮对话都失败，
+/// 而错误来自供应商，用户看不出是选错了。
+///
+/// 「不知道」仍然放行（那多半是刚发布的新型号），「知道它是画画的」不放。
+bool _chatty(ModelOption m) => m.toolCall != false && !_draws(m);
 
 Widget _tile(
   BuildContext ctx, {
@@ -154,6 +251,12 @@ Widget _tile(
   required ModelPick current,
   bool disabled = false,
   String? note,
+
+  /// 拦下来时**这一个**为什么不行。`null` = 用那句通用的（不支持工具调用）。
+  ///
+  /// 分开写是因为两种拦法的出路完全不同：不支持工具调用的只能换一个，
+  /// 而生图模型是走错了地方 —— 它在「绘画模型」那一栏里正是要选的东西。
+  String? disabledReason,
 }) {
   final theme = Theme.of(ctx);
   final scheme = theme.colorScheme;
@@ -165,7 +268,9 @@ Widget _tile(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          disabled ? '不支持工具调用 —— 选它 agent 就读不了文件、跑不了命令' : subtitle,
+          disabled
+              ? (disabledReason ?? '不支持工具调用 —— 选它 agent 就读不了文件、跑不了命令')
+              : subtitle,
           style: disabled ? TextStyle(color: scheme.error) : null,
         ),
         if (note != null)

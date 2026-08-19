@@ -66,7 +66,30 @@ pub async fn generate(
         .map_err(|e| ApiError::unsupported(format!("这个部署存不了图：{e}")))?;
 
     let sources = st.model_sources(&tenant).await;
-    let (source, model) = pick(&sources, req.source.as_deref(), req.model.as_deref())?;
+
+    // 用户指派过绘画模型就用它。**没指派才自动挑** ——
+    // 自动挑的是「最便宜的能生图的」，那是个合理的默认，但不该盖过
+    // 他明确配过的东西。
+    let assigned = st
+        .role_of(&tenant, cortex_proto::model_roles::ModelRole::Image)
+        .await;
+    let (want_source, want_model) = match (&req.source, &req.model, &assigned) {
+        // 请求里指名了就听请求的：那是**这一次**的意图，比偏好更近
+        (Some(s), m, _) => (Some(s.as_str()), m.as_deref()),
+        (None, Some(m), _) => (None, Some(m.as_str())),
+        (None, None, Some(a)) => (Some(a.source.as_str()), Some(a.model.as_str())),
+        (None, None, None) => (None, None),
+    };
+    let (source, model) = pick(&sources, want_source, want_model).or_else(|e| {
+        // 指派的那条来源被删了 / 型号被移除了 —— 回落到自动挑并记 WARN。
+        // 报错等于让一个不记得自己配过什么的人画不了图
+        if assigned.is_some() && req.source.is_none() && req.model.is_none() {
+            tracing::warn!(error = ?e, "指派的绘画模型用不了，回落到自动挑");
+            pick(&sources, None, None)
+        } else {
+            Err(e)
+        }
+    })?;
 
     let images = cortex_llm::image::generate(
         &source.provider,

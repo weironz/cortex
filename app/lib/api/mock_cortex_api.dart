@@ -131,15 +131,59 @@ class MockCortexApi
     );
   }
 
-  /// 拉型号：mock 里**故意回 live=false**，让「回落要说出来」那条界面
-  /// 分支在演示形态下也画得出来。
+  /// 拉型号。
+  ///
+  /// 夹具里**特意混齐五种形态**，否则筛选那几条界面分支一条都画不出来：
+  /// 能跑 agent 的、看得懂图的、能生图的、有思考的、以及目录里查不到的
+  /// （能力字段全 null —— 那是「不知道」，不是「不行」）。
+  ///
+  /// `live = false` 也是故意的：让「回落要说出来」那条分支在演示形态下
+  /// 也看得见。
   @override
   Future<FetchedModels> fetchSourceModels(String id) async {
     await _latency(200);
     return const FetchedModels(
-      models: ['qwen-flash', 'qwen-plus', 'qwen-turbo'],
       live: false,
       note: '问不到这家的型号列表（mock 后端不联网），下面这份是内置的',
+      models: [
+        FetchedModel(
+          id: 'qwen-flash',
+          displayName: 'Qwen Flash',
+          context: 1000000,
+          toolCall: true,
+          vision: false,
+          imageOutput: false,
+          reasoning: true,
+          inputMicrosPerMtok: 50000,
+          outputMicrosPerMtok: 400000,
+        ),
+        FetchedModel(
+          id: 'qwen-vl-max',
+          displayName: 'Qwen VL Max',
+          context: 262144,
+          toolCall: true,
+          vision: true,
+          imageOutput: false,
+          inputMicrosPerMtok: 200000,
+          outputMicrosPerMtok: 600000,
+        ),
+        FetchedModel(
+          id: 'qwen-image-3.0',
+          displayName: 'Qwen Image 3.0',
+          toolCall: false,
+          imageOutput: true,
+        ),
+        FetchedModel(
+          id: 'legacy-completion',
+          displayName: '老式补全模型',
+          context: 8000,
+          toolCall: false,
+          inputMicrosPerMtok: 50000,
+          outputMicrosPerMtok: 50000,
+        ),
+        // 目录里查不到的：三个能力字段全 null
+        FetchedModel(id: 'brand-new-model'),
+      ],
     );
   }
 

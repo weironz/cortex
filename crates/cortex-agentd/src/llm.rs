@@ -79,6 +79,15 @@ pub async fn stream(
     let tenant = st.tenant(&headers).await?;
     let sources = st.model_sources(&tenant).await;
 
+    // 「跟随部署」这一档现在**先看用户指派的默认模型**。
+    //
+    // 在此之前它只能用部署配的那个，而 `tier = cheap` 那一路
+    // （抽取、会话命名）**根本不经过用户** —— 一个自带 key 的人没有任何
+    // 办法让这些调用走自己的账户。
+    //
+    // ⚠️ 没指派时必须与从前**逐字节相同**：这条路上跑着所有老客户端。
+    let req = apply_role(&st, &tenant, req).await;
+
     // 服务端那把 key。自带来源那条路也要它身上的模型配置（tier 回落），
     // 所以两条路都先要它 —— 没配模型就在这里 501，一个字节都还没发出去
     let server = st.llm()?;
@@ -278,6 +287,56 @@ fn resolve_auto(
         model: ModelChoice::Named(model),
         source,
         ..req
+    }
+}
+
+/// 把「跟随部署」换成用户指派的默认模型。
+///
+/// 不是那一档就原样返回；没指派也原样返回 —— **那时行为与从前逐字节相同**。
+///
+/// # 为什么指派失效时回落而不是报错
+///
+/// 与 [`pick_source`] 同一个判据：这不是用户此刻刚做的选择，而是他很久以前
+/// 配的一条偏好。那条来源可能在另一台设备上被删了，而他正在等一句回答。
+/// 报错等于让一个不知道自己配过什么的人发不出话。
+async fn apply_role(
+    st: &AgentState,
+    tenant: &crate::request_tenant::Tenant,
+    req: LlmStreamRequest,
+) -> LlmStreamRequest {
+    if !matches!(req.model, ModelChoice::Deployment) {
+        return req;
+    }
+    let want = role_for(req.tier);
+    let assigned = st.role_of(tenant, want).await;
+    if let Some(a) = &assigned {
+        tracing::debug!(role = a.role.as_str(), model = %a.model, "用了指派的默认模型");
+    }
+    with_role(req, assigned)
+}
+
+/// [`apply_role`] 的纯逻辑那一半 —— 拿得到 `AgentState` 的那层测不了，
+/// 这一层测得到。
+///
+/// **没指派就原样返回**，一个字段都不动。
+fn with_role(
+    req: LlmStreamRequest,
+    assigned: Option<cortex_proto::model_roles::RoleAssignment>,
+) -> LlmStreamRequest {
+    let Some(a) = assigned else { return req };
+    LlmStreamRequest {
+        model: ModelChoice::Named(a.model),
+        source: Some(a.source),
+        ..req
+    }
+}
+
+/// 这个档位想要哪个角色。
+const fn role_for(tier: ModelTier) -> cortex_proto::model_roles::ModelRole {
+    use cortex_proto::model_roles::ModelRole;
+    match tier {
+        ModelTier::Main => ModelRole::Main,
+        ModelTier::Cheap => ModelRole::Cheap,
     }
 }
 
@@ -489,6 +548,17 @@ pub struct ModelOption {
     pub tool_call: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vision: Option<bool>,
+    /// **点了能不能出图。** 与 [`vision`](Self::vision)（看得懂图）是两件事。
+    ///
+    /// 这一位专门给「绘画模型」那个角色用：不带这一位的话，选择器只能把
+    /// 全部型号都摆出来，用户挑一个对话模型当绘画模型，然后在**保存那一刻**
+    /// 吃一个 400 —— 而他看不出哪个能选。
+    ///
+    /// ⚠️ 判据必须与 `model_roles::validate` 用的是**同一个函数**
+    /// （`cortex_llm::image::is_image_model`）。两处各判各的话，
+    /// 选择器摆出来的东西保存时会被自己拒掉。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_output: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
     /// 每百万输入 token 多少**美元微元**。`null` = 目录里没有它的价目。
@@ -636,6 +706,16 @@ fn describe(
                 context: info.as_ref().map(|i| i.context),
                 tool_call: info.as_ref().map(|i| i.tool_call),
                 vision: info.as_ref().map(|i| i.vision),
+                // 三态，与 `model_sources::describe_all` 一字不差：
+                // 画得出 = true；目录认得它但画不出 = false；
+                // 目录里根本没有它 = 不知道（`None`），界面据此不画徽标
+                image_output: if cortex_llm::image::is_image_model(provider, id) {
+                    Some(true)
+                } else if info.is_some() {
+                    Some(false)
+                } else {
+                    None
+                },
                 reasoning: info.as_ref().map(|i| i.reasoning),
                 input_micros_per_mtok: info
                     .as_ref()
@@ -977,5 +1057,113 @@ mod resolve_tests {
             base_url: None,
             models: models.iter().map(|m| (*m).to_string()).collect(),
         }
+    }
+
+    /// 没指派时**一个字段都不动**。
+    ///
+    /// 这条路上跑着所有老客户端。变一点点的表现是「升级之后后台抽取
+    /// 突然跑到贵模型上」，而账单要到月底才看得见。
+    #[test]
+    fn 没指派默认模型时请求原样不动() {
+        let before = req(ModelChoice::Deployment, ModelTier::Cheap);
+        let after = with_role(before.clone(), None);
+        assert!(matches!(after.model, ModelChoice::Deployment));
+        assert_eq!(after.source, None);
+        assert_eq!(after.tier, before.tier, "档位更不该被动");
+    }
+
+    /// 指派了就换成它，**并且带上来源**。
+    ///
+    /// 只换型号不带来源的话，服务端会拿部署那条的白名单去校验一个属于
+    /// 别人 key 的型号 —— 那正是 2026-08-19 那个 400 的形状。
+    #[test]
+    fn 指派了就换成它并带上来源() {
+        use cortex_proto::model_roles::{ModelRole, RoleAssignment};
+        let after = with_role(
+            req(ModelChoice::Deployment, ModelTier::Main),
+            Some(RoleAssignment {
+                role: ModelRole::Main,
+                source: "01M0AAA".into(),
+                model: "qwen-turbo".into(),
+            }),
+        );
+        assert_eq!(after.model, ModelChoice::Named("qwen-turbo".into()));
+        assert_eq!(
+            after.source.as_deref(),
+            Some("01M0AAA"),
+            "只换型号不带来源的话，服务端会拿部署那条的白名单去校验一个\
+             属于别人 key 的型号 —— 每一轮都被 400 拒"
+        );
+    }
+
+    /// 两个档位各要各的角色。
+    ///
+    /// 弄反的表现是「我把快速模型设成便宜的，结果主对话也变便宜了」——
+    /// 而那正好也是省钱的方向，所以极难被察觉。
+    #[test]
+    fn 主档与快速档要的是不同角色() {
+        use cortex_proto::model_roles::ModelRole;
+        assert_eq!(role_for(ModelTier::Main), ModelRole::Main);
+        assert_eq!(role_for(ModelTier::Cheap), ModelRole::Cheap);
+    }
+
+    /// 选择器看到的「能生图」与保存时校验的「能生图」必须是同一个判据。
+    ///
+    /// 这两处分叉的表现最难查：`/llm/models` 说 qwen-image 能画（于是它
+    /// 出现在绘画模型的候选里），而 `model_roles::validate` 说不能 ——
+    /// 用户在列表里挑了一个明明标着「能生图」的，点保存，吃一个
+    /// 「`x` 生不了图」。他没有任何办法知道该挑哪个。
+    ///
+    /// 所以两处都调 `cortex_llm::image::is_image_model`，这条测试钉住的
+    /// 就是「`describe` 真的用了它」，而不是自己写了一份看起来差不多的。
+    #[test]
+    fn 目录里的能生图位与保存时的校验用同一个判据() {
+        let list = ["qwen-image-plus".to_owned(), "qwen-turbo".to_owned()];
+        let out = describe("alibaba", &list, "01M0AAA", "通义千问", true);
+
+        for m in &out {
+            assert_eq!(
+                m.image_output,
+                Some(cortex_llm::image::is_image_model("alibaba", &m.id)),
+                "`{}` 在列表里标的是 {:?}，而保存时的校验说 {} —— \
+                 两处分叉的话，用户会挑一个标着「能生图」的然后被拒",
+                m.id,
+                m.image_output,
+                cortex_llm::image::is_image_model("alibaba", &m.id)
+            );
+        }
+    }
+
+    /// 目录里查不到的型号，「能生图」是**不知道**，不是「不能」。
+    ///
+    /// 画成 `Some(false)` 的话，界面会把一个刚发布的生图模型画成
+    /// 「不能生图」并挡在绘画角色之外 —— 与 `tool_call` 那一位同一条判据。
+    #[test]
+    fn 目录里没有的型号能生图位留空而不是报false() {
+        let list = [
+            "deepseek-chat".to_owned(),
+            "某个还没进目录的新型号".to_owned(),
+        ];
+        let out = describe("deepseek", &list, "deployment", "部署提供", false);
+
+        let known = out
+            .iter()
+            .find(|m| m.id == "deepseek-chat")
+            .expect("目录里有它");
+        assert_eq!(
+            known.image_output,
+            Some(false),
+            "目录认得 deepseek-chat 且它画不出图 —— 这是确定的「不能」"
+        );
+
+        let unknown = out
+            .iter()
+            .find(|m| m.id != "deepseek-chat")
+            .expect("另一个");
+        assert_eq!(
+            unknown.image_output, None,
+            "目录里没有它，所以「能不能生图」是不知道。报 false 的话，\
+             一个刚发布的生图模型会被画成「不能生图」并挡在绘画角色之外"
+        );
     }
 }
