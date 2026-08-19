@@ -278,6 +278,47 @@ pub struct AttachmentDto {
     pub size_bytes: i64,
 }
 
+/// `GET /sessions/search` 的查询串。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionSearchQuery {
+    /// 要搜的词。空串**不当成「列出全部」**，见 `sessions::search`。
+    #[serde(default)]
+    pub q: String,
+    /// 归档的也搜。默认 false —— 与侧栏列表同一个默认，
+    /// 否则「搜出来的会话点进去在列表里找不到」。
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+/// `GET /sessions/search?q=` 里的一条。
+///
+/// **一个会话一行**，不是一条消息一行：一次搜索在同一段对话里常常命中十几条，
+/// 逐条列出来会把结果页塞满同一个会话，而用户在问的是「哪几段对话提到过它」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSearchHitDto {
+    pub session_id: String,
+    /// 用户设的标题。`null` = 从没改过名，客户端回落到自己那套派生规则。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub archived: bool,
+    /// 标题本身命中。客户端据此**不显示摘录** —— 那时它是多余的。
+    pub title_match: bool,
+    /// 这个会话里有几条消息命中。0 = 只有标题命中。
+    pub hit_count: i64,
+    /// 最近一条命中消息的上下文片段（命中词前后各一段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
+}
+
+/// `GET /sessions/search` 的响应。
+///
+/// 顶层包一层对象而不是裸数组，与别的列表端点同一个理由：以后加分页游标时
+/// 不必改形状。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSearchResponse {
+    pub hits: Vec<SessionSearchHitDto>,
+}
+
 /// SSE 事件。`type` 字段做判别式，客户端按它分派。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

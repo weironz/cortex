@@ -42,6 +42,7 @@ class ReplayApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        SessionSearchUnsupported,
         SandboxHealthUnsupported
     implements CortexApi {
   ReplayApi({

@@ -17,6 +17,7 @@ import '../models/import_plan.dart';
 import '../models/pending_confirmation.dart';
 import '../models/project.dart';
 import '../models/session_detail.dart';
+import '../models/session_search_hit.dart';
 import '../models/sandbox_health.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
@@ -190,6 +191,19 @@ abstract interface class CortexApi {
   Future<List<ChatSession>> sessions({
     bool includeArchived = false,
     String? projectId,
+  });
+
+  /// `GET /sessions/search?q=` —— 在标题与消息正文里找。
+  ///
+  /// 搜索在**服务端**做：全部消息只在那张库里，客户端手上只有当前会话
+  /// 这一页，拿它去搜等于「只能搜到刚才看过的东西」。
+  ///
+  /// 老服务端没有这条路由，答 404 —— 调用方按
+  /// [CortexApiException.isUnsupported] 优雅降级成「这个部署搜不了」，
+  /// 而不是把侧边栏整块换成错误提示。
+  Future<List<SessionSearchHit>> searchSessions(
+    String query, {
+    bool includeArchived = false,
   });
 
   /// `GET /projects` —— 全部项目。
@@ -600,6 +614,19 @@ mixin LocalWorkspaceUnsupported {
 /// 空流会被当成「挂上了但那一轮瞬间结束」——于是界面上闪一下「正在生成」。
 ///
 /// 与那边同一条禁令：**不要用在真实客户端上**。
+/// 给测试替身用：这个后端搜不了。
+///
+/// 回**抛错**而不是空列表：空列表与「真的一条都没搜到」长得一模一样，
+/// 于是一个忘了接搜索的后端在界面上表现为「搜索能用，只是永远没结果」。
+mixin SessionSearchUnsupported {
+  Future<List<SessionSearchHit>> searchSessions(
+    String query, {
+    bool includeArchived = false,
+  }) => Future.error(
+    const CortexApiException('这个后端不支持搜索。', statusCode: 404),
+  );
+}
+
 mixin RunAttachUnsupported {
   Stream<ChatEvent> attachChat(String sessionId) => Stream<ChatEvent>.error(
     const CortexApiException('这个后端没有可重挂的轮次。', statusCode: 404),

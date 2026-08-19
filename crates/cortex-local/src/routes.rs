@@ -51,6 +51,13 @@ pub fn router(state: LocalState) -> Router {
         // canonicalize 服务器的文件系统。见 handler 的注释
         .route("/sessions/{id}", any(patch_session))
         .route("/sessions", get(list_sessions))
+        // 搜索的权威在远端（消息全在那张库里），这里只是转发。
+        //
+        // 写成一条显式路由而不是让它落进 `/sessions/{id}`：axum 的匹配
+        // 确实是静态段优先，「search」不会被当成 id —— 但那样一来，
+        // 搜索能不能用就取决于一个没人写下来的匹配优先级，而 handler
+        // 的名字（`patch_session`）会让读代码的人以为这条路不存在
+        .route("/sessions/search", get(search_sessions))
         // 绑定的**权威在这台机器**，所以给它一条自己的路，完全不碰网络。
         // 走 PATCH /sessions 的老路子有两个实测到的坏处，见 local_workspace
         .route("/local/workspaces/{session_id}", put(local_workspace::bind))
@@ -581,6 +588,12 @@ async fn list_confirmations(
 /// 不走兜底反代的唯一原因就是这个注入：那条路是流式的，改不了响应体。
 /// 见 [`crate::local_workspace`]。
 async fn list_sessions(State(st): State<LocalState>, req: Request) -> Response {
+    let (parts, _) = req.into_parts();
+    proxy::forward_json(&st, reqwest::Method::GET, &parts.uri, Vec::new()).await
+}
+
+/// `GET /sessions/search` —— 原样转给远端，连查询串一起。
+async fn search_sessions(State(st): State<LocalState>, req: Request) -> Response {
     let (parts, _) = req.into_parts();
     proxy::forward_json(&st, reqwest::Method::GET, &parts.uri, Vec::new()).await
 }

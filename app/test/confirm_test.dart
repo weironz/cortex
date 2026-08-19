@@ -476,6 +476,7 @@ class _ConfirmApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        SessionSearchUnsupported,
         SandboxHealthUnsupported
     implements CortexApi {
   _ConfirmApi({

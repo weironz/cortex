@@ -87,7 +87,7 @@ pub use model::{
     WORKSPACE_PATH_MAX_CHARS, table,
 };
 pub use query::EpisodeCursor;
-pub use store::{SessionDigest, Store};
+pub use store::{SessionDigest, SessionSearchHit, Store};
 pub use sync::{SyncLogEntry, SyncNotifications, SyncPayload, SyncRecord, SyncSignal};
 pub use tenant::{MAX_RESIDENT_TENANTS, PER_TENANT_CONNECTIONS, SchemaName, TenantPools};
 pub use txn::{SYNC_ADVISORY_LOCK_KEY, WriteTxn};

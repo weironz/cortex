@@ -19,6 +19,7 @@ import '../models/mcp.dart';
 import '../models/pending_confirmation.dart';
 import '../models/project.dart';
 import '../models/session_detail.dart';
+import '../models/session_search_hit.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
 import '../models/tool_call.dart';
@@ -338,6 +339,34 @@ class MockCortexApi
       _sessions
           .where((s) => includeArchived || !s.archived)
           .where((s) => projectId == null || s.projectId == projectId),
+    );
+  }
+
+  @override
+  Future<List<SessionSearchHit>> searchSessions(
+    String query, {
+    bool includeArchived = false,
+  }) async {
+    await _latency(150);
+    final needle = query.trim().toLowerCase();
+    // 空词回空，与服务端同一个规矩：`contains('')` 对任何串都为真，
+    // 于是清空搜索框会变成「列出全部」
+    if (needle.isEmpty) return const [];
+    return List.unmodifiable(
+      _sessions.where((s) => includeArchived || !s.archived).where((s) {
+        return s.title.toLowerCase().contains(needle) ||
+            (s.preview ?? '').toLowerCase().contains(needle);
+      }).map((s) {
+        final inTitle = s.title.toLowerCase().contains(needle);
+        return SessionSearchHit(
+          sessionId: s.id,
+          title: s.titleIsCustom ? s.title : null,
+          archived: s.archived,
+          titleMatch: inTitle,
+          hitCount: inTitle ? 0 : 1,
+          excerpt: inTitle ? null : s.preview,
+        );
+      }),
     );
   }
 

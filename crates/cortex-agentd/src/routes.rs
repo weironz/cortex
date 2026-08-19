@@ -115,6 +115,10 @@ protected_routes! {
     // 第一块** —— 它们此前住在记忆服务里，把它停掉之后 agent 连上一句话
     // 都读不到。
     "/sessions" [GET] => get(crate::sessions::list),
+    // **必须排在 `/sessions/{id}` 前面**：axum 的路由是按具体度匹配的，
+    // 但 `search` 与一个 id 长得一样，写反了的症状是搜索被当成
+    // 「打开一个叫 search 的会话」并回 404
+    "/sessions/search" [GET] => get(crate::sessions::search),
     "/sessions/{id}" [GET, PATCH] => get(crate::sessions::detail).patch(crate::sessions::patch),
     // ── 一轮对话 ──
     //

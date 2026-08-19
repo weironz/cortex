@@ -202,6 +202,25 @@ impl Store {
     }
 }
 
+/// 搜索结果里的一行 —— **一个会话一行**，不是一条消息一行。
+///
+/// 一次搜索在同一个会话里常常命中十几条，逐条列出来会把结果页塞满同一段
+/// 对话。用户真正在问的是「哪几段对话提到过这个」。
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct SessionSearchHit {
+    pub session_id: String,
+    pub title: Option<String>,
+    pub archived: bool,
+    /// 标题本身命中。界面据此不显示摘录 —— 那时摘录是多余的。
+    pub title_match: bool,
+    /// 这个会话里有几条消息命中。0 = 只有标题命中。
+    pub hit_count: i64,
+    /// 最近一条命中消息的上下文片段。标题命中且正文没命中时为 `None`。
+    pub excerpt: Option<String>,
+    /// 排序用：最近一次命中的时间。
+    pub hit_at: Option<DateTime<Utc>>,
+}
+
 /// 一个会话的概览。
 ///
 /// **两个来源拼起来**：能从消息本身算出来的（起止时间、条数、首条用户消息）
@@ -318,6 +337,114 @@ impl Store {
         .bind(limit)
         .bind(include_archived)
         .bind(project_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// 搜会话：标题与消息正文里找 [`q`]。
+    ///
+    /// # 为什么是 `ILIKE` 而不是 `to_tsvector`
+    ///
+    /// 这个库里的内容大半是中文，而 **Postgres 自带的分词器不切中文** ——
+    /// 它把连续的 CJK 当成一个词。实测（17.11）：
+    ///
+    /// ```text
+    /// to_tsvector('simple','今天天气很好') @@ websearch_to_tsquery('simple','天气')  →  f
+    /// ```
+    ///
+    /// 照搬 tsvector 那套写出来的搜索**编译得过、跑得动、什么都搜不到**。
+    /// 切中文要装 zhparser / pg_jieba，而这套部署用官方 postgres 镜像，
+    /// 可用扩展里只有 `pg_trgm`。索引见 `20260819000001_search_index.sql`。
+    ///
+    /// # 命中位置：标题命中与正文命中要分得开
+    ///
+    /// 用户搜「合同」，命中标题的那条与「某一句话里提到合同」的那条，
+    /// 在界面上要显示不同的东西（前者跳会话，后者要给一段上下文）。
+    /// 所以这里回的是**每个会话一行**，外加一段摘录与它来自哪儿。
+    ///
+    /// # 摘录在 SQL 里切
+    ///
+    /// 拿整条消息回来再在 Rust 里截，等于把一条 40 KB 的模型回答搬过网络
+    /// 只为显示 80 个字符。`substring` + `position` 在库里做完。
+    ///
+    /// # Errors
+    /// 库不可达。
+    pub async fn search_sessions(
+        &self,
+        q: &str,
+        limit: i64,
+        include_archived: bool,
+    ) -> Result<Vec<SessionSearchHit>> {
+        // `%` 与 `_` 在 LIKE 里是通配符 —— 用户搜「50%」时不转义的话，
+        // 那个 `%` 会变成「任意字符」，搜出一堆无关的东西
+        let pattern = format!(
+            "%{}%",
+            q.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let rows = sqlx::query_as::<_, SessionSearchHit>(
+            // ⚠️ 定位命中位置用的是 `$4`（原词），不是 `$1`（`%…%` 模式）。
+            //    拿模式去 `strpos` 永远找不到，返回 0，于是每一条摘录都从
+            //    正文开头切 —— 不报错，只是**看起来像**在给上下文。
+            //    再套一层 `lower()`：`strpos` 区分大小写而 `ILIKE` 不，
+            //    不套的话英文查询只要大小写不一致就退化成同一个 0。
+            "WITH hit AS (
+                 SELECT e.session_id,
+                        max(e.occurred_at) AS hit_at,
+                        count(*)           AS hit_count,
+                        (SELECT substring(x.text FROM greatest(1, strpos(lower(x.text), lower($4)) - 40) FOR 160)
+                           FROM episodes x
+                          WHERE x.session_id = e.session_id AND x.text ILIKE $1 ESCAPE '\\'
+                          ORDER BY x.occurred_at DESC, x.id DESC LIMIT 1) AS excerpt
+                   FROM episodes e
+                  WHERE e.text ILIKE $1 ESCAPE '\\'
+                  GROUP BY e.session_id
+             ),
+             -- ⚠️ 候选集从 **episodes** 来，不是从 `session_state` 来。
+             --
+             -- 那个视图只认识**有过生命周期事件**的会话（它的 `known` 就是
+             -- `SELECT DISTINCT session_id FROM session_events`）。以它为
+             -- 驱动表的话，一条只发过消息、从没改过名/归档过的会话
+             -- **一条都搜不出来** —— 而那是最常见的会话形态。
+             --
+             -- 与 `sessions::session_detail` 那段注释是同一个坑的两次现形：
+             -- 「消息在、事件不在」的会话，在按事件建的视图里等于不存在。
+             cand AS (
+                 SELECT session_id FROM hit
+                 UNION
+                 SELECT session_id FROM session_state
+                  WHERE title ILIKE $1 ESCAPE '\\'
+             )
+             SELECT c.session_id,
+                    s.title,
+                    coalesce(s.archived, false) AS archived,
+                    -- 标题命中单独报：界面上它不需要摘录，直接跳过去。
+                    -- `coalesce` 不能省：没改过名的会话 title 是 NULL，
+                    -- `NULL ILIKE …` 还是 NULL，而这一列要解成 `bool`
+                    coalesce(s.title ILIKE $1 ESCAPE '\\', false) AS title_match,
+                    coalesce(h.hit_count, 0)                      AS hit_count,
+                    h.excerpt,
+                    h.hit_at
+               FROM cand c
+               LEFT JOIN session_state s ON s.session_id = c.session_id
+               LEFT JOIN hit h ON h.session_id = c.session_id
+              WHERE ($3 OR NOT coalesce(s.archived, false))
+              -- 标题命中排在最前，其余按最近一次命中的时间。
+              -- 只按时间排的话，一个用户**亲手起过这个名字**的会话会掉到
+              -- 一堆「某句话里顺带提过」的下面 —— 而前者恰恰是他在找的那个。
+              -- 标题命中没有 hit_at（正文可能一次都没命中），NULLS LAST
+              -- 会把它排到最后，正好是反的
+              ORDER BY coalesce(s.title ILIKE $1 ESCAPE '\\', false) DESC,
+                       h.hit_at DESC NULLS LAST,
+                       c.session_id DESC
+              LIMIT $2",
+        )
+        .bind(&pattern)
+        .bind(limit)
+        .bind(include_archived)
+        .bind(q)
         .fetch_all(self.pool())
         .await?;
         Ok(rows)

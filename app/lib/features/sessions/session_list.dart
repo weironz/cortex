@@ -1,13 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_exception.dart';
 import '../../core/formatting.dart';
 import '../../models/chat_session.dart';
 import '../../models/project.dart';
+import '../../models/session_search_hit.dart';
 import '../../state/chat_controller.dart';
 import '../../state/chat_state.dart';
 import '../../state/project_controller.dart';
+import '../../state/session_search_controller.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/panel_header.dart';
 
@@ -23,6 +26,7 @@ class SessionList extends ConsumerWidget {
     final state = ref.watch(chatControllerProvider);
     final controller = ref.read(chatControllerProvider.notifier);
     final projects = ref.watch(projectControllerProvider);
+    final search = ref.watch(sessionSearchProvider);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -55,7 +59,14 @@ class SessionList extends ConsumerWidget {
             ),
           ],
         ),
-        Expanded(child: _body(context, ref, state, projects, controller)),
+        // 老服务端没有 /sessions/search —— 那里不画搜索框。
+        // 画一个点下去只会得到 404 的框，比没有这个框更糟
+        if (!search.unsupported) const _SearchBox(),
+        Expanded(
+          child: search.active
+              ? _SearchResults(onSelected: onSelected)
+              : _body(context, ref, state, projects, controller),
+        ),
       ],
     );
   }
@@ -892,6 +903,284 @@ class _TileMenu extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+
+// ─────────────────────────── 搜索 ───────────────────────────
+
+/// 侧栏顶部那个搜索框。
+///
+/// 自己拿着 `TextEditingController` 而不是每帧从 provider 读文本：
+/// 后者会在每次异步状态变化时重建输入框，而重建时写 `controller.text`
+/// 会把光标弹回行尾 —— 中文输入法下那意味着**打不完一个词**。
+class _SearchBox extends ConsumerStatefulWidget {
+  const _SearchBox();
+
+  @override
+  ConsumerState<_SearchBox> createState() => _SearchBoxState();
+}
+
+class _SearchBoxState extends ConsumerState<_SearchBox> {
+  final _controller = TextEditingController();
+  final _focus = FocusNode();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _clear() {
+    _controller.clear();
+    ref.read(sessionSearchProvider.notifier).clear();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final search = ref.watch(sessionSearchProvider);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      child: CallbackShortcuts(
+        // Esc 退出搜索 —— 焦点在搜索框里时，那是所有人都会先按的那个键
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): () {
+            if (_controller.text.isEmpty) {
+              _focus.unfocus();
+            } else {
+              _clear();
+            }
+          },
+        },
+        child: TextField(
+          controller: _controller,
+          focusNode: _focus,
+          textInputAction: TextInputAction.search,
+          onChanged: ref.read(sessionSearchProvider.notifier).setQuery,
+          decoration: InputDecoration(
+            isDense: true,
+            hintText: '搜索会话与消息',
+            prefixIcon: const Icon(Icons.search_rounded, size: 18),
+            prefixIconConstraints: const BoxConstraints(minWidth: 34),
+            suffixIcon: search.active
+                ? IconButton(
+                    onPressed: _clear,
+                    iconSize: 16,
+                    tooltip: '清空',
+                    icon: const Icon(Icons.close_rounded),
+                  )
+                : null,
+            border: const OutlineInputBorder(),
+            contentPadding: const EdgeInsets.symmetric(vertical: 10),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SearchResults extends ConsumerWidget {
+  const _SearchResults({this.onSelected});
+
+  final VoidCallback? onSelected;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final search = ref.watch(sessionSearchProvider);
+    final state = ref.watch(chatControllerProvider);
+
+    if (search.error != null) {
+      return EmptyState(
+        icon: Icons.cloud_off_rounded,
+        title: '搜索失败',
+        description: search.error,
+        tone: EmptyStateTone.error,
+        action: OutlinedButton.icon(
+          onPressed: ref.read(sessionSearchProvider.notifier).retry,
+          icon: const Icon(Icons.refresh_rounded, size: 16),
+          label: const Text('重试'),
+        ),
+      );
+    }
+
+    // 有旧结果时不换成转圈：连着打字的每一次防抖到期都会闪一下空白，
+    // 而用户正在看的那份结果与新的通常只差一两条
+    if (search.loading && search.hits.isEmpty) {
+      return const Center(
+        child: SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+
+    if (search.hits.isEmpty) {
+      return const EmptyState(
+        icon: Icons.search_off_rounded,
+        title: '没有匹配的会话',
+        description: '搜的是标题与消息正文。已归档的会话不在结果里。',
+      );
+    }
+
+    final needle = search.query.trim();
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      itemCount: search.hits.length,
+      itemBuilder: (context, i) {
+        final hit = search.hits[i];
+        return _SearchTile(
+          key: ValueKey('hit_${hit.sessionId}'),
+          hit: hit,
+          needle: needle,
+          // 标题为 null = 从没改过名。回落到侧栏列表里那个派生标题，
+          // 而不是显示裸 id —— 同一个会话在两处该是同一个名字。
+          // 列表里没有（归档的、超出那 200 条的）才退到占位文案
+          fallbackTitle: _titleOf(state, hit.sessionId),
+          selected: hit.sessionId == state.activeSessionId,
+          onTap: () {
+            ref
+                .read(chatControllerProvider.notifier)
+                .selectSession(hit.sessionId);
+            onSelected?.call();
+          },
+        );
+      },
+    );
+  }
+
+  static String _titleOf(ChatState state, String sessionId) {
+    for (final s in state.sessions) {
+      if (s.id == sessionId) return s.title;
+    }
+    return '未命名会话';
+  }
+}
+
+class _SearchTile extends StatelessWidget {
+  const _SearchTile({
+    super.key,
+    required this.hit,
+    required this.needle,
+    required this.fallbackTitle,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final SessionSearchHit hit;
+  final String needle;
+  final String fallbackTitle;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final title = hit.title ?? fallbackTitle;
+    // 标题命中时不显示摘录：命中的地方已经在标题里摆着了，再补一段正文
+    // 只会把别的结果挤出屏幕
+    final excerpt = hit.titleMatch ? null : hit.excerpt;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Material(
+        color: selected
+            ? scheme.primary.withValues(alpha: 0.12)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: _highlight(
+                        title,
+                        needle,
+                        theme.textTheme.bodyMedium,
+                        scheme,
+                        maxLines: 1,
+                      ),
+                    ),
+                    if (hit.hitCount > 0) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        '${hit.hitCount} 条',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                if (excerpt != null && excerpt.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  _highlight(
+                    excerpt,
+                    needle,
+                    theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                    scheme,
+                    maxLines: 2,
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 把命中的那几个字标出来。
+  ///
+  /// 不标的话，一段 160 字的摘录里用户还得自己找那个词在哪 —— 而他刚刚
+  /// 才把它打进搜索框。大小写不敏感，与服务端那侧的 `ILIKE` 一致。
+  static Widget _highlight(
+    String text,
+    String needle,
+    TextStyle? style,
+    ColorScheme scheme, {
+    required int maxLines,
+  }) {
+    final spans = <TextSpan>[];
+    final lowerText = text.toLowerCase();
+    final lowerNeedle = needle.toLowerCase();
+    var at = 0;
+    // 空词走不到这里（那时搜索没激活），但真进来了也要能收场：
+    // `indexOf` 找空串恒为 0，不判空就是死循环
+    if (lowerNeedle.isNotEmpty) {
+      while (true) {
+        final found = lowerText.indexOf(lowerNeedle, at);
+        if (found < 0) break;
+        if (found > at) spans.add(TextSpan(text: text.substring(at, found)));
+        spans.add(
+          TextSpan(
+            text: text.substring(found, found + needle.length),
+            style: TextStyle(
+              color: scheme.primary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        );
+        at = found + needle.length;
+      }
+    }
+    if (at < text.length) spans.add(TextSpan(text: text.substring(at)));
+
+    return Text.rich(
+      TextSpan(style: style, children: spans),
+      maxLines: maxLines,
+      overflow: TextOverflow.ellipsis,
     );
   }
 }

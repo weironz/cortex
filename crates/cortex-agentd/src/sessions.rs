@@ -25,7 +25,7 @@ use cortex_core::CortexError;
 use cortex_proto::dto::{
     AttachmentDto, DEFAULT_EPISODE_PAGE, EpisodeDto, ListSessionsQuery, MAX_EPISODE_PAGE,
     SessionDetail, SessionDetailQuery, SessionDto, SessionPatch, SessionRuntimeDto,
-    SessionsResponse, ToolCallDto,
+    SessionSearchHitDto, SessionSearchQuery, SessionSearchResponse, SessionsResponse, ToolCallDto,
 };
 use cortex_store::Store;
 
@@ -40,6 +40,12 @@ const SESSION_LIST_LIMIT: i64 = 200;
 
 /// 标题最多取几个**字符**。
 const TITLE_CHARS: usize = 40;
+
+/// 一次搜索最多回多少个会话。
+///
+/// 比列表的 200 小一截：搜索结果是要一条条读的，第 51 条之后没人看，
+/// 而每一条都带着一段摘录 —— 那是列表项的好几倍字节。
+const SEARCH_LIMIT: i64 = 50;
 
 // ─────────────────────────── 路由 ───────────────────────────
 
@@ -73,6 +79,52 @@ pub async fn detail(
 ) -> Result<Json<SessionDetail>, ApiError> {
     let tenant = st.tenant(&headers).await?;
     Ok(Json(session_detail(tenant.store()?, &id, &q).await?))
+}
+
+/// `GET /sessions/search?q=` —— 在标题与消息正文里找。
+///
+/// # 空词回空，不回全量
+///
+/// 搜索框里删干净的那一刻 `q` 就是空串，而空串在 `ILIKE '%%'` 下匹配**一切**：
+/// 于是「清空搜索框」会变成一次全表扫描 + 一份看起来像搜索结果的会话列表。
+/// 本仓库数到第七次的「空串顶掉默认值」，这次的默认值是「什么都不搜」。
+///
+/// 只有空白（用户还在打字、或误敲了空格）同样按空处理 —— 一个全是空格的
+/// 模式能匹配上任何带空格的句子，那份结果对谁都没有意义。
+pub async fn search(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Query(q): Query<SessionSearchQuery>,
+) -> Result<Json<SessionSearchResponse>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+    let needle = q.q.trim();
+    if needle.is_empty() {
+        return Ok(Json(SessionSearchResponse { hits: vec![] }));
+    }
+    let hits = tenant
+        .store()?
+        .search_sessions(needle, SEARCH_LIMIT, q.include_archived)
+        .await
+        .map_err(store_err)?;
+    Ok(Json(SessionSearchResponse {
+        hits: hits.into_iter().map(search_hit_dto).collect(),
+    }))
+}
+
+fn search_hit_dto(h: cortex_store::SessionSearchHit) -> SessionSearchHitDto {
+    SessionSearchHitDto {
+        session_id: h.session_id,
+        title: h.title,
+        archived: h.archived,
+        title_match: h.title_match,
+        hit_count: h.hit_count,
+        // 摘录里的换行会把结果列表撑成一整屏 —— 那一行是「哪几段对话提到过
+        // 它」的索引，不是正文预览。压成一行，长度由 SQL 那侧的 160 字管着
+        excerpt: h
+            .excerpt
+            .map(|e| e.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|e| !e.is_empty()),
+    }
 }
 
 /// `PATCH /sessions/{id}` —— 改名 / 归档 / 解绑工作区 / 移进项目 / 设 runtime。

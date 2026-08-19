@@ -25,6 +25,7 @@ import '../models/pending_confirmation.dart';
 import '../models/project.dart';
 import '../models/sandbox_health.dart';
 import '../models/session_detail.dart';
+import '../models/session_search_hit.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
 import '../models/workspace.dart';
@@ -241,6 +242,20 @@ class HttpCortexApi implements CortexApi {
     return asObjectList(
       json['sessions'],
     ).map(ChatSession.fromJson).toList(growable: false);
+  }
+
+  @override
+  Future<List<SessionSearchHit>> searchSessions(
+    String query, {
+    bool includeArchived = false,
+  }) async {
+    final json = await _getJson('/sessions/search', {
+      'q': query,
+      if (includeArchived) 'include_archived': 'true',
+    });
+    return asObjectList(
+      json['hits'],
+    ).map(SessionSearchHit.fromJson).toList(growable: false);
   }
 
   // ---------------------------------------------------------------- projects
