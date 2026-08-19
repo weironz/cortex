@@ -497,12 +497,25 @@ ProviderContainer _boot(CortexApi api, {String? seed}) => ProviderContainer(
   ],
 );
 
+/// 排干微任务，直到 [cond] 成立（或者放弃）。
+///
+/// ⚠️ **不要换回「排固定次数的 `Future.delayed(Duration.zero)`」。**
+/// 那种写法把测试钉死在实现此刻的 await 次数上：2026-08-19 给启动路径
+/// 加了一次「等地址落定」的 await（修「每次启动都要重新登录」那个 race），
+/// 三条本来无关的测试当场变红 —— 它们等的圈数不够，而失败信息说的是
+/// 「前提没成立」，看起来像业务坏了。
+Future<void> _settleUntil(bool Function() cond, {int rounds = 60}) async {
+  for (var i = 0; i < rounds && !cond(); i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
+}
+
 /// Drives the deferred probe to completion.
 Future<void> _settle(ProviderContainer container) async {
   container.read(authControllerProvider);
-  for (var i = 0; i < 8; i++) {
-    await Future<void>.delayed(Duration.zero);
-  }
+  await _settleUntil(
+    () => container.read(authControllerProvider).phase != AuthPhase.probing,
+  );
 }
 
 class _LiveConfig extends AppConfigNotifier {
@@ -793,7 +806,16 @@ void _sessionTests() {
     test('续期之后存下来的是新令牌，不是旧的', () async {
       final api = _SessionApi();
       final c = ProviderContainer(
-        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          // **必须替掉**：不替的话这条测试会去读开发机上真实的
+          // `%APPDATA%\cortex\settings.json`。里面那个地址一被读回来就会
+          // 触发 `_reset()`，把这次续期判成「已被取代」——
+          // 于是测试的成败取决于跑它的那台机器上存过什么地址
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
       );
       addTearDown(c.dispose);
 
@@ -801,7 +823,9 @@ void _sessionTests() {
       // 控制器 build 时会排一次探活，而那会递增 generation。不等它落定就
       // 调用，我们这次的 generation 会被它作废，返回值变成「没续上」——
       // 那是测试的时序问题，不是代码的
-      await Future<void>.delayed(Duration.zero);
+      await _settleUntil(
+        () => c.read(authControllerProvider).phase != AuthPhase.probing,
+      );
       final ok = await ctrl.restoreSession('refresh-old');
 
       expect(ok, isTrue);
@@ -818,7 +842,16 @@ void _sessionTests() {
     test('续期失败就落回登录页', () async {
       final api = _SessionApi(refreshFails: true);
       final c = ProviderContainer(
-        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          // **必须替掉**：不替的话这条测试会去读开发机上真实的
+          // `%APPDATA%\cortex\settings.json`。里面那个地址一被读回来就会
+          // 触发 `_reset()`，把这次续期判成「已被取代」——
+          // 于是测试的成败取决于跑它的那台机器上存过什么地址
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
       );
       addTearDown(c.dispose);
 
@@ -841,6 +874,13 @@ void _sessionTests() {
       final c = ProviderContainer(
         overrides: [
           authProbeApiProvider.overrideWithValue((_) => api),
+          // **必须替掉**：不替的话这条测试会去读开发机上真实的
+          // `%APPDATA%\cortex\settings.json`。里面那个地址一被读回来就会
+          // 触发 `_reset()`，把这次续期判成「已被取代」——
+          // 于是测试的成败取决于跑它的那台机器上存过什么地址
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
           authSeedTokenProvider.overrideWithValue(null), // Web：无预共享 token
           rememberedTokenProvider.overrideWith((_) async => 'refresh-old'),
         ],
@@ -849,9 +889,9 @@ void _sessionTests() {
 
       c.read(authControllerProvider); // 触发 build → bootstrap
       // bootstrap 全程 async：让微任务与 restoreSession 落定
-      for (var i = 0; i < 8; i++) {
-        await Future<void>.delayed(Duration.zero);
-      }
+      // 等到**真的 ready**，不是等到「发出去了」——
+      // 后者在状态写回之前就成立了
+      await _settleUntil(() => c.read(authControllerProvider).isReady);
 
       expect(
         api.refreshCalls,
@@ -875,6 +915,13 @@ void _sessionTests() {
       final c = ProviderContainer(
         overrides: [
           authProbeApiProvider.overrideWithValue((_) => api),
+          // **必须替掉**：不替的话这条测试会去读开发机上真实的
+          // `%APPDATA%\cortex\settings.json`。里面那个地址一被读回来就会
+          // 触发 `_reset()`，把这次续期判成「已被取代」——
+          // 于是测试的成败取决于跑它的那台机器上存过什么地址
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
           authSeedTokenProvider.overrideWithValue(null),
           rememberedTokenProvider.overrideWith((_) async => 'refresh-dead'),
         ],
@@ -900,7 +947,16 @@ void _sessionTests() {
     test('半路 401 会先拿 refresh token 续，不弹登录框', () async {
       final api = _SessionApi();
       final c = ProviderContainer(
-        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          // **必须替掉**：不替的话这条测试会去读开发机上真实的
+          // `%APPDATA%\cortex\settings.json`。里面那个地址一被读回来就会
+          // 触发 `_reset()`，把这次续期判成「已被取代」——
+          // 于是测试的成败取决于跑它的那台机器上存过什么地址
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
       );
       addTearDown(c.dispose);
 
@@ -930,7 +986,16 @@ void _sessionTests() {
     test('并发的 401 只刷一次，不会被服务端判成重放', () async {
       final api = _SessionApi();
       final c = ProviderContainer(
-        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          // **必须替掉**：不替的话这条测试会去读开发机上真实的
+          // `%APPDATA%\cortex\settings.json`。里面那个地址一被读回来就会
+          // 触发 `_reset()`，把这次续期判成「已被取代」——
+          // 于是测试的成败取决于跑它的那台机器上存过什么地址
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
       );
       addTearDown(c.dispose);
 
@@ -964,7 +1029,16 @@ void _sessionTests() {
     test('续期成功后紧接着的 401 不再续，直接回登录页', () async {
       final api = _SessionApi();
       final c = ProviderContainer(
-        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          // **必须替掉**：不替的话这条测试会去读开发机上真实的
+          // `%APPDATA%\cortex\settings.json`。里面那个地址一被读回来就会
+          // 触发 `_reset()`，把这次续期判成「已被取代」——
+          // 于是测试的成败取决于跑它的那台机器上存过什么地址
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
       );
       addTearDown(c.dispose);
 
@@ -1010,6 +1084,13 @@ void _sessionTests() {
       final c = ProviderContainer(
         overrides: [
           authProbeApiProvider.overrideWithValue((_) => api),
+          // **必须替掉**：不替的话这条测试会去读开发机上真实的
+          // `%APPDATA%\cortex\settings.json`。里面那个地址一被读回来就会
+          // 触发 `_reset()`，把这次续期判成「已被取代」——
+          // 于是测试的成败取决于跑它的那台机器上存过什么地址
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
           authSeedTokenProvider.overrideWithValue(null),
           rememberedTokenProvider.overrideWith((_) async => null),
         ],
@@ -1040,7 +1121,16 @@ void _sessionTests() {
     test('登出会把作废请求发给服务端', () async {
       final api = _SessionApi();
       final c = ProviderContainer(
-        overrides: [authProbeApiProvider.overrideWithValue((_) => api)],
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          // **必须替掉**：不替的话这条测试会去读开发机上真实的
+          // `%APPDATA%\cortex\settings.json`。里面那个地址一被读回来就会
+          // 触发 `_reset()`，把这次续期判成「已被取代」——
+          // 于是测试的成败取决于跑它的那台机器上存过什么地址
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
       );
       addTearDown(c.dispose);
 

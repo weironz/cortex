@@ -86,6 +86,56 @@ void main() {
     );
   });
 
+  /// **这条是线上那个「每次启动都要重新登录」的复现。**
+  ///
+  /// 上面那条测试用 `_LiveConfig` 替掉了真的 `AppConfigNotifier`，于是它
+  /// 拿到的地址从第一帧起就是终值 —— 而真实启动**不是那样**：
+  ///
+  /// 1. `AppConfigNotifier.build()` 先返回编译期默认地址，再排一个微任务
+  ///    从磁盘把上次那个读回来（异步）
+  /// 2. `AuthController` 监听 baseUrl，一变就 `_reset()` → `++_generation`
+  /// 3. `_bootstrap` 此时正卡在读凭据库（跨进程，比读设置慢），回来一看
+  ///    代次变了，判定「有人接手了」**直接返回 —— 续期一次都没发出去**
+  ///
+  /// 所以只要用户存过一个与编译期默认值不同的地址（也就是所有自建部署的
+  /// 用户），登录状态就永远续不上。服务端那侧看得很清楚：token 签发之后
+  /// `rotated_at` 一直是空的，一次轮换都没有。
+  test('地址是异步读回来的，续期不能被它挤掉', () async {
+    final api = _Refreshing();
+    final container = ProviderContainer(
+      overrides: [
+        // **不替 appConfigProvider** —— 要的就是它那段异步恢复
+        settingsReaderProvider.overrideWithValue(
+          () async => {'base_url': 'https://cortex.example.com/api'},
+        ),
+        settingsWriterProvider.overrideWithValue((_) async {}),
+        authSeedTokenProvider.overrideWithValue(null),
+        authProbeApiProvider.overrideWithValue((_) => api),
+        rememberedTokenProvider.overrideWith((ref) async => 'stored-refresh'),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(authControllerProvider);
+    for (var i = 0; i < 20; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    expect(
+      api.refreshCalls,
+      greaterThan(0),
+      reason:
+          '存过自定义地址的用户每次启动都回到登录页 —— 因为地址恢复把'
+          '正在读凭据库的那次续期判成了「已被取代」。'
+          '服务端那侧的证据：token 的 rotated_at 一直是空的',
+    );
+    expect(
+      container.read(authControllerProvider).phase,
+      AuthPhase.ready,
+      reason: '续上了就该直接进主界面',
+    );
+  });
+
   test('凭据失效时落回登录页，而不是卡在转圈', () async {
     final api = _Refreshing(shouldSucceed: false);
     final container = ProviderContainer(

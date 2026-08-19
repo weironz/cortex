@@ -107,18 +107,46 @@ class AppConfigNotifier extends Notifier<AppConfig> {
   ///
   /// **在此之前这个类完全活在内存里** —— 重启之后地址回到编译期默认值，
   /// 而一个把 cortexd 部署在别处的人每次打开都要重填一遍。
+  /// 「地址已经落定」。见 [restored]。
+  ///
+  /// `null` = 压根没有待办的恢复。**测试里的替身会走到这一支**：
+  /// 它们覆写 `build()` 且不调 `super`，于是这个字段一直是 null ——
+  /// 那时 `restored` 必须立刻完成，否则等它的人会永远挂着。
+  Completer<void>? _pending;
+
+  /// 等「上次那个地址」从磁盘读回来。
+  ///
+  /// # 谁需要它
+  ///
+  /// [AuthController._bootstrap]。它启动时要拿存下来的 refresh token 去续
+  /// 会话，而**读凭据库比读设置慢**（跨进程问钥匙串）。地址一落地就会触发
+  /// `_reset()`，于是那次续期回来时发现代次变了，把自己判成「已被取代」
+  /// 直接返回 —— 续期请求一次都没发出去。
+  ///
+  /// 症状：**存过自定义地址的用户（也就是所有自建部署的用户）每次启动都
+  /// 回到登录页**，而界面上写着「登录状态会记住 30 天」。服务端那侧的
+  /// 证据是 refresh token 的 `rotated_at` 恒为空 —— 一次轮换都没发生过。
+  Future<void> get restored => _pending?.future ?? Future<void>.value();
+
   @override
   AppConfig build() {
+    _pending = Completer<void>();
     Future.microtask(_restore);
     return AppConfig.initial;
   }
 
   Future<void> _restore() async {
-    final saved = await ref.read(settingsReaderProvider)();
-    if (!ref.mounted) return;
-    final url = saved[_kBaseUrl]?.trim();
-    if (url == null || url.isEmpty || url == state.baseUrl) return;
-    state = state.copyWith(baseUrl: url);
+    try {
+      final saved = await ref.read(settingsReaderProvider)();
+      if (!ref.mounted) return;
+      final url = saved[_kBaseUrl]?.trim();
+      if (url == null || url.isEmpty || url == state.baseUrl) return;
+      state = state.copyWith(baseUrl: url);
+    } finally {
+      // **放 finally 里**：读设置失败（文件损坏、权限）时同样要放行，
+      // 否则启动路径上等它的那一步会永远挂着，而界面是一片空白
+      if (_pending?.isCompleted == false) _pending!.complete();
+    }
   }
 
   static const String _kBaseUrl = 'base_url';

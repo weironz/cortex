@@ -172,6 +172,19 @@ class AuthController extends Notifier<AuthState> {
     // 不让位的话，下面那次 `probe()` 会 `++_generation`，把那次**已经成功**
     // 的登录判成「已被取代」，于是他看到登录成功、界面却退回登录页。
     // 手快就会中招，而且一次都复现不出来。
+    // ⚠️ **先等地址落定，再取代次。**
+    //
+    // 上次那个地址是异步从磁盘读回来的（`AppConfigNotifier._restore`），
+    // 而它一落地就会触发下面那个 listener 的 `_reset()` → `++_generation`。
+    // 不等的话，接下来那次「读凭据库 → 续会话」正好卡在中间，回来发现
+    // 代次变了，把自己判成「已被取代」直接返回 —— **续期一次都没发出去**。
+    //
+    // 症状是存过自定义地址的用户每次启动都回到登录页，而登录页上写着
+    // 「登录状态会记住 30 天」。这条路径原先的测试用一个覆写了 `build()`
+    // 的替身替掉了 AppConfig，于是那段异步恢复从来没被跑过，测试一直是绿的。
+    await ref.read(appConfigProvider.notifier).restored;
+    if (!ref.mounted) return;
+
     var mine = _generation;
     bool superseded() => !ref.mounted || _generation != mine;
     // mock / 离线模式没有可续的会话，直接走各自的短路
@@ -408,8 +421,21 @@ class AuthController extends Notifier<AuthState> {
       final tokens = await withRefreshLock(() async {
         var candidate = refreshToken;
         if (kCanRememberToken) {
-          final stored = await readRememberedToken();
-          if (stored != null && stored != candidate) candidate = stored;
+          // **读不出来不该拖垮这次续期。**
+          //
+          // 这一步是给 Web 多标签页兜底的（别的标签页可能已经把 token 轮换
+          // 掉了，锁内重读才拿得到后继）。它失败的含义只是「没拿到更新的」，
+          // 而手上这枚本来就是我们要用的那一枚 —— 直接往下走。
+          //
+          // 不裹的话，钥匙串锁着 / 平台通道缺失时异常会穿出整个
+          // `restoreSession`，表现是**续期请求一次都没发出去**，
+          // 而日志里只有一个与登录毫无关系的 MissingPluginException。
+          try {
+            final stored = await readRememberedToken();
+            if (stored != null && stored != candidate) candidate = stored;
+          } on Object catch (e) {
+            debugPrint('锁内重读凭据失败（$e），用手上这枚续');
+          }
         }
         final fresh = await api.refreshSession(candidate);
         if (kCanRememberToken) await rememberToken(fresh.refreshToken);

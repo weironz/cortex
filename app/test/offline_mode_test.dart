@@ -21,6 +21,19 @@ import 'package:cortex_app/state/auth_controller.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+/// 排干微任务，直到 [cond] 成立（或者放弃）。
+///
+/// ⚠️ **不要换回「排固定次数的 `Future.delayed(Duration.zero)`」。**
+/// 那种写法把测试钉死在实现此刻的 await 次数上：2026-08-19 给启动路径
+/// 加了一次「等地址落定」的 await（修那个「每次启动都要重新登录」的race），
+/// 四条本来无关的测试当场变红 —— 它们等的圈数不够，而失败信息说的是
+/// 「前提没成立」，看起来像业务坏了。
+Future<void> _settle(bool Function() cond, {int rounds = 40}) async {
+  for (var i = 0; i < rounds && !cond(); i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
+}
+
 void main() {
   test('离线与 mock 互斥 —— 同时开着分不清眼前是真是假', () {
     final container = ProviderContainer();
@@ -57,8 +70,7 @@ void main() {
 
     // 真实顺序：先停在登录界面（探测失败），用户才点「离线使用」
     container.read(authControllerProvider);
-    await Future<void>.delayed(Duration.zero);
-    await Future<void>.delayed(Duration.zero);
+    await _settle(() => probes > 0);
     final before = probes;
     expect(before, greaterThan(0), reason: '前提没成立：一次都没探过');
 
