@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'pages/about_page.dart';
+import 'pages/usage_page.dart';
 import 'pages/connection_page.dart';
 import 'pages/data_page.dart';
 import 'pages/mcp_page.dart';
@@ -69,6 +70,12 @@ class _SettingsWindowState extends State<_SettingsWindow> {
       hint: '工作空间 · 导入',
       icon: Icons.folder_outlined,
       page: DataPage(),
+    ),
+    (
+      label: '用量',
+      hint: 'token · 花费 · 配额',
+      icon: Icons.receipt_long_outlined,
+      page: UsagePage(),
     ),
     (
       label: '关于',

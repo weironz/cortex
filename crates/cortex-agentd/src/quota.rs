@@ -60,7 +60,7 @@ pub struct Usage {
 }
 
 /// 当前窗口的用量与上限。
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct QuotaStatus {
     /// 占配额的那部分（不含自带 key）
     pub used_tokens: i64,
@@ -76,25 +76,27 @@ pub struct QuotaStatus {
 ///
 /// 剩余不让客户端自己减：`limit - used` 在不限量时该是「无限」而不是负数，
 /// 而每个客户端各写一遍这个判断，迟早有一个写成显示 -3999。
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct QuotaView {
     pub used_tokens: i64,
     pub own_key_tokens: i64,
     pub limit_tokens: Option<i64>,
     pub remaining_tokens: Option<i64>,
     pub window_days: i64,
-}
-
-impl From<QuotaStatus> for QuotaView {
-    fn from(s: QuotaStatus) -> Self {
-        Self {
-            used_tokens: s.used_tokens,
-            own_key_tokens: s.own_key_tokens,
-            limit_tokens: s.limit_tokens,
-            remaining_tokens: s.remaining(),
-            window_days: s.window_days,
-        }
-    }
+    /// 这个窗口花了多少**微元**（百万分之一货币单位）。
+    ///
+    /// 只含算得出价的那些模型。用整数而不是小数：钱上的浮点误差累积起来
+    /// 没有任何人能解释，而客户端只要在显示时除一次就够了。
+    pub cost_micros: i64,
+    /// 货币代码，只影响显示。
+    pub currency: String,
+    /// 属于**没有价目的模型**的 token 数。
+    ///
+    /// 单独报，不是加进金额里按 0 算：「用了 300 万 token，花了 ¥0.00」
+    /// 读起来是「免费」，而事实是「我们不知道」。客户端据此明说这件事。
+    pub unpriced_tokens: i64,
+    /// 逐模型明细。花得多的在前。
+    pub by_model: Vec<crate::pricing::ModelUsage>,
 }
 
 impl QuotaStatus {
@@ -163,6 +165,82 @@ impl AgentState {
             own_key_tokens: row.get("own"),
             limit_tokens: limit(),
             window_days: WINDOW.num_days(),
+        })
+    }
+
+    /// 给「用量」那一页的完整报表：总量 + 逐模型 + 金额。
+    ///
+    /// # 为什么不把它并进 [`Self::quota_status`]
+    ///
+    /// 那个方法在**每一次 LLM 调用之前**都会跑一遍（见
+    /// [`Self::enforce_quota`]）。给它加一次 `GROUP BY model` 等于让热路径
+    /// 多付一次分组的钱，而热路径根本不需要明细 —— 它只要一个「超没超」。
+    ///
+    /// 这条路一天被点几次，多一次分组无所谓。
+    ///
+    /// # Errors
+    /// 没接数据库，或者查不动。
+    pub async fn usage_report(&self, user_id: &str) -> Result<QuotaView, ApiError> {
+        let since = Utc::now() - WINDOW;
+        // 一次查询拿全：按 (模型, 是不是自带 key) 分组之后，
+        // 总量是它的合计。分两次查的话，两次之间新写进来的一条用量会让
+        // 「明细加起来 ≠ 总量」—— 一个只在有人正好在用时出现的不一致
+        let rows = sqlx::query(
+            "SELECT COALESCE(model, '') AS model,
+                    own_key,
+                    -- ::bigint 见 quota_status 里那段：sum(bigint) 是 numeric，
+                    -- 按 i64 解会 panic 成一次连接被掐断
+                    COALESCE(sum(input_tokens), 0)::bigint  AS inp,
+                    COALESCE(sum(output_tokens), 0)::bigint AS outp
+               FROM cortex_auth.usage
+              WHERE user_id = $1 AND occurred_at >= $2
+              GROUP BY 1, 2",
+        )
+        .bind(user_id)
+        .bind(since)
+        .fetch_all(&self.accounts()?.pool)
+        .await
+        .map_err(|e| ApiError::internal(format!("算不出用量：{e}")))?;
+
+        // 金额按模型算，与自带不自带无关 —— 「这一个月花了多少」问的是
+        // 花费本身。而配额只看服务端那把 key，所以 token 数仍然分开数
+        let mut merged: std::collections::BTreeMap<String, (i64, i64)> =
+            std::collections::BTreeMap::new();
+        let mut billed = 0_i64;
+        let mut own = 0_i64;
+        for row in &rows {
+            let model: String = row.get("model");
+            let inp: i64 = row.get("inp");
+            let outp: i64 = row.get("outp");
+            if row.get::<bool, _>("own_key") {
+                own += inp + outp;
+            } else {
+                billed += inp + outp;
+            }
+            let e = merged.entry(model).or_default();
+            e.0 += inp;
+            e.1 += outp;
+        }
+
+        let (by_model, cost_micros, unpriced_tokens) =
+            crate::pricing::report(merged.into_iter().map(|(m, (i, o))| (m, i, o)));
+
+        let status = QuotaStatus {
+            used_tokens: billed,
+            own_key_tokens: own,
+            limit_tokens: limit(),
+            window_days: WINDOW.num_days(),
+        };
+        Ok(QuotaView {
+            used_tokens: status.used_tokens,
+            own_key_tokens: status.own_key_tokens,
+            limit_tokens: status.limit_tokens,
+            remaining_tokens: status.remaining(),
+            window_days: status.window_days,
+            cost_micros,
+            currency: crate::pricing::currency(),
+            unpriced_tokens,
+            by_model,
         })
     }
 

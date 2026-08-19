@@ -39,6 +39,7 @@ class _BlobApi
         LocalMcpUnsupported,
         RunAttachUnsupported,
         SessionSearchUnsupported,
+        UsageUnsupported,
         SandboxHealthUnsupported
     implements CortexApi {
   _BlobApi({this.presignSupported = true, this.alreadyUploaded = false});

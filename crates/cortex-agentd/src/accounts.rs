@@ -770,7 +770,7 @@ pub async fn usage(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<crate::quota::QuotaView>, ApiError> {
     let user_id = current_user(&st, &headers).await;
-    Ok(Json(st.quota_status(&user_id).await?.into()))
+    Ok(Json(st.usage_report(&user_id).await?))
 }
 
 /// `POST /auth/password` —— 改自己的口令。

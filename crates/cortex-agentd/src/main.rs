@@ -37,6 +37,7 @@ mod error;
 mod import;
 mod llm;
 mod presence;
+mod pricing;
 mod projects;
 mod quota;
 mod rate_limit;

@@ -211,6 +211,10 @@ services:
       CORTEX_ADMIN_USERNAME: ${CORTEX_ADMIN_USERNAME:-}
       CORTEX_ADMIN_PASSWORD: ${CORTEX_ADMIN_PASSWORD:-}
       CORTEX_QUOTA_TOKENS_PER_MONTH: ${CORTEX_QUOTA_TOKENS_PER_MONTH:-}
+      # 价目表（元/百万 token）与货币。不设就用内置那张小表 ——
+      # 没有价目的模型在界面上显示「没有价目」，不是 ¥0.00
+      CORTEX_MODEL_PRICES: ${CORTEX_MODEL_PRICES:-}
+      CORTEX_PRICE_CURRENCY: ${CORTEX_PRICE_CURRENCY:-}
       # ── 对象存储 ──
       #
       # 附件与快照的字节落在这儿。走**服务名** —— agentd 与 rustfs 同网段。

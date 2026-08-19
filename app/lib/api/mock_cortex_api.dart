@@ -20,6 +20,7 @@ import '../models/pending_confirmation.dart';
 import '../models/project.dart';
 import '../models/session_detail.dart';
 import '../models/session_search_hit.dart';
+import '../models/usage_report.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
 import '../models/tool_call.dart';
@@ -367,6 +368,42 @@ class MockCortexApi
           excerpt: inTitle ? null : s.preview,
         );
       }),
+    );
+  }
+
+  @override
+  Future<UsageReport> usage() async {
+    await _latency(160);
+    // 夹具里**特意混一个没有价目的模型**：那条路（金额算不出来时说清楚，
+    // 而不是显示 ¥0.00）只有在有这种行时才画得出来
+    return const UsageReport(
+      usedTokens: 1167079,
+      ownKeyTokens: 121,
+      limitTokens: 2000000,
+      remainingTokens: 832921,
+      windowDays: 30,
+      costMicros: 2729748,
+      currency: 'CNY',
+      unpricedTokens: 12040,
+      byModel: [
+        ModelUsage(
+          model: 'deepseek-v4-pro',
+          inputTokens: 1101156,
+          outputTokens: 65923,
+          costMicros: 2729696,
+        ),
+        ModelUsage(
+          model: 'deepseek-v4-flash',
+          inputTokens: 91,
+          outputTokens: 30,
+          costMicros: 105,
+        ),
+        ModelUsage(
+          model: 'local-qwen3-32b',
+          inputTokens: 9000,
+          outputTokens: 3040,
+        ),
+      ],
     );
   }
 

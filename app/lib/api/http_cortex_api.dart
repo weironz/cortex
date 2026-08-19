@@ -26,6 +26,7 @@ import '../models/project.dart';
 import '../models/sandbox_health.dart';
 import '../models/session_detail.dart';
 import '../models/session_search_hit.dart';
+import '../models/usage_report.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
 import '../models/workspace.dart';
@@ -257,6 +258,10 @@ class HttpCortexApi implements CortexApi {
       json['hits'],
     ).map(SessionSearchHit.fromJson).toList(growable: false);
   }
+
+  @override
+  Future<UsageReport> usage() async =>
+      UsageReport.fromJson(await _getJson('/auth/usage'));
 
   // ---------------------------------------------------------------- projects
 

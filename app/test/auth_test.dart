@@ -526,6 +526,7 @@ class _GateApi
         LocalMcpUnsupported,
         RunAttachUnsupported,
         SessionSearchUnsupported,
+        UsageUnsupported,
         SandboxHealthUnsupported
     implements CortexApi {
   _GateApi({

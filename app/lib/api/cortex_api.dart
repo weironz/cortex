@@ -18,6 +18,7 @@ import '../models/pending_confirmation.dart';
 import '../models/project.dart';
 import '../models/session_detail.dart';
 import '../models/session_search_hit.dart';
+import '../models/usage_report.dart';
 import '../models/sandbox_health.dart';
 import '../models/sync_event.dart';
 import '../models/sync_record.dart';
@@ -205,6 +206,16 @@ abstract interface class CortexApi {
     String query, {
     bool includeArchived = false,
   });
+
+  /// `GET /auth/usage` —— 这个窗口用了多少、花了多少、还剩多少。
+  ///
+  /// 服务端一直在记这笔账（`cortex_auth.usage`，每次 LLM 调用一行），
+  /// 但在这条路接上之前**没有任何地方看得见它** —— 用户唯一会知道
+  /// 自己用了多少的时刻，是撞上配额被 429 拦下那一次。
+  ///
+  /// 没接账号体系的部署（自托管单人）没有这条路，答 404 ——
+  /// 那时用量这一页整个不出现，见 [CortexApiException.isUnsupported]。
+  Future<UsageReport> usage();
 
   /// `GET /projects` —— 全部项目。
   ///
@@ -624,6 +635,13 @@ mixin SessionSearchUnsupported {
     bool includeArchived = false,
   }) => Future.error(
     const CortexApiException('这个后端不支持搜索。', statusCode: 404),
+  );
+}
+
+/// 给测试替身用：这个后端没有用量端点。
+mixin UsageUnsupported {
+  Future<UsageReport> usage() => Future.error(
+    const CortexApiException('这个后端没有用量端点。', statusCode: 404),
   );
 }
 
