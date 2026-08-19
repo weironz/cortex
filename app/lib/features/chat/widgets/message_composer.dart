@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../models/attachment.dart';
 import '../../../state/attachment_controller.dart';
+import '../../../state/composer_draft.dart';
 import '../../workspace/workspace_panel.dart';
 import 'attachment_views.dart';
 import 'permission_mode_chip.dart';
@@ -67,6 +68,20 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
     // The container draws a focus ring, so focus changes must repaint it.
     _focusNode.addListener(() {
       if (mounted) setState(() {});
+    });
+    // 「改一改再发一次」把原话塞进来。用 listenManual 而不是在 build 里
+    // watch：写 `_controller.text = …` 属于副作用，放 build 里会在每次
+    // 重建时把用户正在打的字冲掉
+    ref.listenManual(composerDraftProvider, (_, draft) {
+      if (draft == null || !mounted) return;
+      _controller.text = draft.text;
+      // 光标停在末尾。默认停在开头的话，用户接着敲的字会插在最前面 ——
+      // 而他要做的通常是在后面补一句
+      _controller.selection = TextSelection.collapsed(
+        offset: draft.text.length,
+      );
+      _focusNode.requestFocus();
+      ref.read(composerDraftProvider.notifier).consume();
     });
   }
 

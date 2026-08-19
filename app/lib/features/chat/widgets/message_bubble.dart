@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/formatting.dart';
 import '../../../core/link_launcher.dart';
 import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
 import '../../../models/tool_call.dart';
+import '../../../state/chat_controller.dart';
+import '../../../state/composer_draft.dart';
 import '../../../widgets/markdown/cortex_markdown.dart';
 import 'attachment_views.dart';
 import 'turn_drawer.dart';
@@ -23,14 +26,29 @@ const kMessageMaxWidth = 760.0;
 /// the user's own input through a markdown parser would silently mangle any
 /// `*` or `#` they typed literally.
 class MessageBubble extends StatelessWidget {
-  const MessageBubble({super.key, required this.message});
+  const MessageBubble({
+    super.key,
+    required this.message,
+    this.busy = false,
+    this.retryTarget,
+  });
 
   final ChatMessage message;
+
+  /// 这个会话此刻有一轮在跑吗。有的话重发与改写都按不动。
+  ///
+  /// 由 [ConversationView] 算好传进来，气泡自己不读全局状态 ——
+  /// 一个纯展示的部件在 build 里把 controller 拉起来，会让「单独渲染
+  /// 一条消息」的测试连带触发一次拉列表。
+  final bool busy;
+
+  /// 这条**回答**要重试时该重发哪一条用户消息。`null` = 找不到，不给按钮。
+  final String? retryTarget;
 
   @override
   Widget build(BuildContext context) {
     return message.role == MessageRole.user
-        ? _UserBubble(message: message)
+        ? _UserBubble(message: message, busy: busy)
         : AssistantBlock(
             text: message.text,
             toolCalls: message.toolCalls,
@@ -38,17 +56,23 @@ class MessageBubble extends StatelessWidget {
             createdAt: message.createdAt,
             episodeId: message.episodeId,
             error: message.error,
+            busy: busy,
+            retryTarget: retryTarget,
           );
   }
 }
 
-class _UserBubble extends StatelessWidget {
-  const _UserBubble({required this.message});
+class _UserBubble extends ConsumerWidget {
+  const _UserBubble({required this.message, required this.busy});
 
   final ChatMessage message;
 
+  /// 有一轮在跑时两个动作都停用：`send` 那边本来就会直接返回，
+  /// 而一个点了没反应的按钮比没有这个按钮更让人困惑。
+  final bool busy;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
 
@@ -107,7 +131,33 @@ class _UserBubble extends StatelessWidget {
                   if (message.text.isNotEmpty) ...[
                     _CopyButton(text: message.text, tooltip: '复制这条'),
                     const SizedBox(width: 4),
+                    // 「改一改再发一次」而不是「编辑」。
+                    //
+                    // 历史是 append-only，这条消息改不掉 —— 它会以新的一轮
+                    // 追加在末尾，旧的那一轮留在原地。叫「编辑」的话，
+                    // 用户会以为上面那句被换掉了，直到他换一台设备回放才发现
+                    // 它还在，而那时他可能已经在里面写过不该留下的东西
+                    _BubbleAction(
+                      icon: Icons.edit_note_rounded,
+                      tooltip: busy ? '这一轮跑完才能改' : '改一改再发一次（原来那条留在历史里）',
+                      onPressed: busy
+                          ? null
+                          : () => ref
+                                .read(composerDraftProvider.notifier)
+                                .offer(message.text),
+                    ),
+                    const SizedBox(width: 4),
                   ],
+                  _BubbleAction(
+                    icon: Icons.refresh_rounded,
+                    tooltip: busy ? '这一轮跑完才能重发' : '原样再发一次',
+                    onPressed: busy
+                        ? null
+                        : () => ref
+                              .read(chatControllerProvider.notifier)
+                              .resend(message.id),
+                  ),
+                  const SizedBox(width: 4),
                   Text(
                     formatRelative(message.createdAt),
                     style: theme.textTheme.labelSmall,
@@ -145,6 +195,8 @@ class AssistantBlock extends StatelessWidget {
     this.error,
     this.streaming = false,
     this.queuedAhead,
+    this.busy = false,
+    this.retryTarget,
   });
 
   final String text;
@@ -157,6 +209,13 @@ class AssistantBlock extends StatelessWidget {
 
   /// 这一轮还排在队里，前面有几轮。`null` = 没排队（绝大多数情况）。
   final int? queuedAhead;
+
+  /// 这个会话此刻有一轮在跑吗。
+  final bool busy;
+
+  /// 出错时「重试」该重发哪一条用户消息。`null` = 没有可重试的对象
+  /// （直播中的那一轮、或者前面压根没有用户消息）。
+  final String? retryTarget;
 
   @override
   Widget build(BuildContext context) {
@@ -234,7 +293,12 @@ class AssistantBlock extends StatelessWidget {
                       else
                         const _Caret(),
                     ],
-                    if (error != null) _ErrorNote(error: error!),
+                    if (error != null)
+                      _ErrorNote(
+                        error: error!,
+                        busy: busy,
+                        retryTarget: retryTarget,
+                      ),
                     TurnDrawer(toolCalls: toolCalls, streaming: streaming),
                     // 这一行动作 + 元信息，贴在回答**底部左侧**。
                     //
@@ -313,14 +377,20 @@ class _CopyButtonState extends State<_CopyButton> {
   }
 }
 
-class _ErrorNote extends StatelessWidget {
-  const _ErrorNote({required this.error});
+class _ErrorNote extends ConsumerWidget {
+  const _ErrorNote({required this.error, this.busy = false, this.retryTarget});
   final String error;
+  final bool busy;
+
+  /// 找得到对应的那句用户消息才给「重试」。找不到（历史翻页翻掉了、
+  /// 或者这一块前面压根没有用户消息）时不给一个点下去什么都不发生的按钮。
+  final String? retryTarget;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final target = retryTarget;
     return Container(
       margin: const EdgeInsets.only(top: 8),
       padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
@@ -342,6 +412,25 @@ class _ErrorNote extends StatelessWidget {
               ),
             ),
           ),
+          if (target != null) ...[
+            const SizedBox(width: 8),
+            TextButton.icon(
+              onPressed: busy
+                  ? null
+                  : () => ref
+                        .read(chatControllerProvider.notifier)
+                        .resend(target),
+              icon: const Icon(Icons.refresh_rounded, size: 15),
+              label: const Text('重试'),
+              style: TextButton.styleFrom(
+                foregroundColor: scheme.error,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -486,6 +575,41 @@ class _CaretState extends State<_Caret> with SingleTickerProviderStateMixin {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 气泡下面那一行里的一个小动作按钮。
+///
+/// 与 [_CopyButton] 同一个尺寸与手感，但不带「已复制」那个瞬时状态 ——
+/// 重发与改写的反馈是屏幕上真的多了一条消息 / 输入框里出现了文字，
+/// 不需要按钮自己再说一遍。
+class _BubbleAction extends StatelessWidget {
+  const _BubbleAction({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String tooltip;
+
+  /// `null` = 停用。停用而不是整个藏起来：按钮忽隐忽现会让这一行的宽度
+  /// 在每一轮开始和结束时跳一下，而 tooltip 还能说清为什么现在点不了
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return IconButton(
+      onPressed: onPressed,
+      icon: Icon(icon, size: 15),
+      tooltip: tooltip,
+      color: scheme.onSurfaceVariant,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints.tightFor(width: 26, height: 22),
+      visualDensity: VisualDensity.compact,
+      splashRadius: 14,
     );
   }
 }

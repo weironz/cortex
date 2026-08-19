@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../models/chat_message.dart';
 import '../../../state/chat_controller.dart';
 import '../../../state/chat_state.dart';
 import '../../../widgets/empty_state.dart';
@@ -202,6 +203,16 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
                 return MessageBubble(
                   key: ValueKey(message.id),
                   message: message,
+                  // 「有一轮在跑吗」与「这条回答对应哪句话」都由这里算好
+                  // 再传下去，气泡自己不去读全局状态。
+                  //
+                  // 不这么做的话，一个纯展示的气泡在 build 期间就会把
+                  // ChatController 拉起来 —— 单独渲染一条消息的那些测试
+                  // 会连带触发一次拉列表，卡在一个没人处理的定时器上
+                  busy: streaming,
+                  retryTarget: message.role == MessageRole.assistant
+                      ? _userMessageBefore(messages, i)
+                      : null,
                 );
               }
               return const _StreamingBubble();
@@ -225,6 +236,17 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
 }
 
 /// The single widget that rebuilds per SSE delta.
+/// 往前找「这条回答是回应哪句话的」。
+///
+/// 往前扫而不是按下标减一：工具行、被打断的轮次都可能插在中间，
+/// 而「上一条用户消息」这个说法在任何排布下都成立。
+String? _userMessageBefore(List<ChatMessage> messages, int at) {
+  for (var i = at - 1; i >= 0; i--) {
+    if (messages[i].role == MessageRole.user) return messages[i].id;
+  }
+  return null;
+}
+
 class _StreamingBubble extends ConsumerWidget {
   const _StreamingBubble();
 

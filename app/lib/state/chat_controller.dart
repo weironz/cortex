@@ -840,6 +840,51 @@ class ChatController extends Notifier<ChatState> {
     );
   }
 
+  /// 把某一条用户消息**再发一次**。
+  ///
+  /// # 为什么是「再发一次」而不是「改写那一轮」
+  ///
+  /// 这个项目的历史是 append-only —— `UPDATE` / `DELETE` 只在 redact/purge
+  /// 里被允许。别家那种「编辑后重发把旧的那一轮换掉」在这里做不到，
+  /// 而假装做到了（只在客户端把它藏起来）更糟：换一台设备回放，
+  /// 那条「已经改掉」的消息原样还在，而用户以为它没了。
+  ///
+  /// 所以重发就是重发：新的一轮追加在末尾，旧的那一轮留在历史里。
+  /// 界面上的文案必须把这件事说清楚，别叫「编辑」。
+  ///
+  /// 附件跟着一起带上 —— 一条「看这张图」重发时丢了图，那一轮必然答非所问。
+  /// 它们是已登记的 blob（哈希在服务端），重发不需要再传一遍字节。
+  /// 「一轮只跑一次」那道闸**在 [send] 里**，这里不再写一遍：写了的话
+  /// 两处都得对，而删掉其中任何一处都没有测试会红 —— 那种防御只是让人
+  /// 以为这里做了检查。
+  Future<void> resend(String messageId) async {
+    final sessionId = state.activeSessionId;
+    if (sessionId == null) return;
+    final messages = state.activeTranscript;
+    final source = messages.where((m) => m.id == messageId).firstOrNull;
+    if (source == null || source.role != MessageRole.user) return;
+    await send(source.text, attachments: source.attachments);
+  }
+
+  /// 找到「这条回答是回应哪句话的」。
+  ///
+  /// 失败那一轮上的「重试」要它：屏幕上出错的是 assistant 那一块，
+  /// 而要重发的是它**前面**那条用户消息。
+  ///
+  /// 往前找而不是按下标减一：工具行、被打断的轮次都可能插在中间，
+  /// 而「上一条用户消息」这个说法在任何排布下都成立。
+  String? userMessageBefore(String assistantMessageId) {
+    final sessionId = state.activeSessionId;
+    if (sessionId == null) return null;
+    final messages = state.activeTranscript;
+    final at = messages.indexWhere((m) => m.id == assistantMessageId);
+    if (at < 0) return null;
+    for (var i = at - 1; i >= 0; i--) {
+      if (messages[i].role == MessageRole.user) return messages[i].id;
+    }
+    return null;
+  }
+
   void _onEvent(ChatEvent event) {
     final turn = state.streaming;
     if (turn == null) return;
@@ -1024,27 +1069,26 @@ class ChatController extends Notifier<ChatState> {
     if (state.sendError != null) state = state.copyWith(sendError: null);
   }
 
-  /// Drops the last assistant turn and re-sends the user message before it.
+  /// 顶部那条错误横幅上的「重试」：把最后那句用户消息再发一次。
+  ///
+  /// # 它以前会把失败那一轮从屏幕上抹掉，那是骗人的
+  ///
+  /// 原来的实现先把本地 transcript 里的 assistant 与 user 两条删掉再重发，
+  /// 于是屏幕上看起来「那一轮没发生过」。**服务端两条都在** —— 历史是
+  /// append-only，客户端删的只是自己内存里那一份。换台设备、或者刷新一次
+  /// 页面回放，两条原样回来，而用户以为它们没了。
+  ///
+  /// 现在与气泡上那个「重试」走同一条路：**追加**，不改写。
   Future<void> retryLast() async {
     final transcript = state.activeTranscript;
     if (transcript.isEmpty) return;
-    final sessionId = state.activeSessionId!;
-
-    final trimmed = [...transcript];
-    if (trimmed.last.role == MessageRole.assistant) trimmed.removeLast();
-    if (trimmed.isEmpty || trimmed.last.role != MessageRole.user) return;
-    final last = trimmed.removeLast();
-
-    _putTranscript(
-      sessionId,
-      (state.transcripts[sessionId] ?? const Transcript()).copyWith(
-        messages: trimmed,
-      ),
+    final last = transcript.lastWhere(
+      (m) => m.role == MessageRole.user,
+      orElse: () => transcript.first,
     );
+    if (last.role != MessageRole.user) return;
     state = state.copyWith(sendError: null);
-    // Attachments ride along: they are already registered blobs, so resending
-    // costs nothing and dropping them would change the question being asked.
-    await send(last.text, attachments: last.attachments);
+    await resend(last.id);
   }
 
   // ----------------------------------------------------------------- helpers

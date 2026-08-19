@@ -14,10 +14,13 @@
 /// 粘贴之后发现格式没了，再手动补一遍。
 library;
 
+import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/chat/widgets/message_bubble.dart';
+import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/models/chat_message.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// 拦住剪贴板，把写进去的内容抓出来。
@@ -46,9 +49,21 @@ class _Clipboard {
   }
 }
 
-Widget _wrap(Widget child) => MaterialApp(
-  home: Scaffold(body: SingleChildScrollView(child: child)),
+/// 气泡现在要读 `chatControllerProvider`（「有一轮在跑吗」决定重发按钮
+/// 能不能按），所以必须有 `ProviderScope`。用 mock 数据源起，
+/// 免得一个复制按钮的测试去连真后端。
+Widget _wrap(Widget child) => ProviderScope(
+  overrides: [appConfigProvider.overrideWith(_MockConfig.new)],
+  child: MaterialApp(
+    home: Scaffold(body: SingleChildScrollView(child: child)),
+  ),
 );
+
+class _MockConfig extends AppConfigNotifier {
+  @override
+  AppConfig build() =>
+      const AppConfig(useMock: true, baseUrl: 'http://127.0.0.1:8080');
+}
 
 ChatMessage _msg({required MessageRole role, required String text}) =>
     ChatMessage(
