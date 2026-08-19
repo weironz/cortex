@@ -211,7 +211,17 @@ void main() {
         await tester.pump(const Duration(milliseconds: 100));
       }
       expect(find.text('删除'), findsOneWidget);
-      expect(find.text('编辑'), findsOneWidget);
+      // 密钥与端点**直接在面板里改**，不弹窗 —— 端点是最常需要核对的一项，
+      // 而弹窗把它藏在两次点击之后（那把 alibaba key 的 401 就是端点错了）
+      expect(find.text('API 密钥'), findsOneWidget);
+      expect(find.text('API 地址'), findsOneWidget);
+      expect(
+        find.textContaining('已存 …5236'),
+        findsOneWidget,
+        reason:
+            '界面永远拿不到明文，只能显示后四位当占位 —— '
+            '一个空的密钥框说不出「已经存过一把了」',
+      );
       expect(find.textContaining('不占配额'), findsOneWidget);
     });
 
@@ -361,11 +371,14 @@ void main() {
       for (var i = 0; i < 4; i++) {
         await tester.pump(const Duration(milliseconds: 100));
       }
-      await tester.tap(find.text('编辑'));
-      for (var i = 0; i < 8; i++) {
+      // 只改端点，密钥框留空 = 不改动服务端那把
+      await tester.enterText(
+        find.byType(TextField).last,
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
+      for (var i = 0; i < 4; i++) {
         await tester.pump(const Duration(milliseconds: 100));
       }
-      // 密钥框留空 = 不改动服务端那把。直接保存
       await tester.tap(find.text('保存'));
       for (var i = 0; i < 10; i++) {
         await tester.pump(const Duration(milliseconds: 100));
@@ -400,7 +413,7 @@ void main() {
             '用户会在断网时才发现，那时他既不知道原因也不知道怎么办',
       );
       expect(
-        find.textContaining('把密钥重填一遍'),
+        find.textContaining('重填一遍'),
         findsOneWidget,
         reason: '说了「不行」就要说「怎么办」',
       );
@@ -484,6 +497,65 @@ void main() {
             '他可能有两条来源。删了 A 就把 B 的离线也弄没了的话，'
             '症状是「我删了一个没在用的，结果另一个也不能离线用了」',
       );
+    });
+  });
+
+  group('Cherry 那套布局', () {
+    test('型号按系列分组，组内顺序不变', () {
+      final got = groupModels([
+        'qwen-turbo',
+        'qwen-image-3.0',
+        'wan2.7-image',
+        'z-image-turbo',
+        'qwen-flash',
+      ]);
+      expect(got.map((g) => g.$1).toList(), ['qwen', 'wan2.7', 'z']);
+      expect(
+        got.first.$2,
+        ['qwen-turbo', 'qwen-image-3.0', 'qwen-flash'],
+        reason:
+            '组内保持服务端给的顺序 —— 重排一次就多一个'
+            '「我记得它在上面」的困惑',
+      );
+    });
+
+    test('没有连字符的型号自成一组，不崩', () {
+      expect(groupModels(['gpt5']).single.$1, 'gpt5');
+      expect(groupModels(['-weird']).single.$1, '-weird');
+      expect(groupModels(const []), isEmpty);
+    });
+
+    testWidgets('来源列表能搜', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+
+      // 搜索框是第二列顶上那个
+      await tester.enterText(find.byType(TextField).first, 'qwen');
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(find.text('Alibaba (Qwen)'), findsWidgets);
+      expect(
+        find.text('本机 Ollama'),
+        findsNothing,
+        reason: '配了七八条来源之后这一列就得翻，搜一下比翻快',
+      );
+    });
+
+    testWidgets('搜不到时说清楚，而不是给一片空白', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+
+      await tester.enterText(find.byType(TextField).first, '不存在的家');
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(find.text('没有匹配的来源'), findsOneWidget);
     });
   });
 }

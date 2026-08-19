@@ -39,6 +39,7 @@ class ModelPage extends ConsumerStatefulWidget {
 class _ModelPageState extends ConsumerState<ModelPage> {
   /// 选中的那条。`null` = 还没选，显示第一条。
   String? _selected;
+  String _query = '';
   bool _busy = false;
   Object? _error;
 
@@ -91,6 +92,8 @@ class _ModelPageState extends ConsumerState<ModelPage> {
                       data: data,
                       selected: current?.id,
                       busy: _busy,
+                      query: _query,
+                      onQuery: (q) => setState(() => _query = q),
                       onSelect: (id) => setState(() => _selected = id),
                       onAdd: _add,
                       onToggle: _toggle,
@@ -105,7 +108,8 @@ class _ModelPageState extends ConsumerState<ModelPage> {
                             data: data,
                             source: current,
                             busy: _busy,
-                            onEdit: () => _edit(current),
+                            onSave: ({required apiKey, required baseUrl}) =>
+                                _saveInline(current, apiKey, baseUrl),
                             onDelete: () => _delete(current),
                             onFetch: () => _fetch(current),
                             onModels: (m) => _saveModels(current, m),
@@ -194,7 +198,7 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     }
     return '本机没有这把密钥，所以断网时用不了它 —— '
         '密钥从不明文离开服务端，只有你在这台机器上亲手填过的那次才会留一份。'
-        '想让它能离线用：点「编辑」把密钥重填一遍。';
+        '想让它能离线用：在上面的「API 密钥」里重填一遍。';
   }
 
   /// 顺手在这台机器上留一份，**离线时就是它**。
@@ -241,26 +245,33 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     }
   }
 
-  Future<void> _edit(ModelSource s) async {
-    final data = ref.read(modelSourcesProvider).value;
-    if (data == null) return;
-    final got = await showDialog<_SourceForm>(
-      context: context,
-      builder: (_) => _SourceDialog(providers: data.providers, initial: s),
-    );
-    if (got == null) return;
+  /// 内联保存密钥 / 端点。
+  ///
+  /// # 为什么不再走弹窗
+  ///
+  /// 弹窗版每次想核对一眼端点都要点开、关掉。而端点恰恰是最常需要核对的
+  /// 一项 —— 那把 alibaba key 的 401 就是端点错了（内置默认国际站），
+  /// 而弹窗把它藏在了两次点击之后。
+  Future<void> _saveInline(ModelSource s, String apiKey, String baseUrl) async {
     await _run(
       () => ref
           .read(cortexApiProvider)
           .saveModelSource(
             id: s.id,
-            provider: got.provider,
-            apiKey: got.apiKey,
-            label: got.label,
-            baseUrl: got.baseUrl,
+            provider: s.provider,
+            apiKey: apiKey,
+            label: s.label,
+            baseUrl: baseUrl,
           ),
     );
-    await _mirrorOffline(got);
+    await _mirrorOffline(
+      _SourceForm(
+        provider: s.provider,
+        apiKey: apiKey,
+        label: s.label,
+        baseUrl: baseUrl,
+      ),
+    );
   }
 
   Future<void> _delete(ModelSource s) async {
@@ -379,6 +390,8 @@ class _SourceList extends StatelessWidget {
     required this.data,
     required this.selected,
     required this.busy,
+    required this.query,
+    required this.onQuery,
     required this.onSelect,
     required this.onAdd,
     required this.onToggle,
@@ -387,6 +400,10 @@ class _SourceList extends StatelessWidget {
   final ModelSources data;
   final String? selected;
   final bool busy;
+
+  /// 搜索框里的字。空 = 全都显示。
+  final String query;
+  final ValueChanged<String> onQuery;
   final ValueChanged<String> onSelect;
   final VoidCallback onAdd;
   final void Function(ModelSource, bool) onToggle;
@@ -394,16 +411,48 @@ class _SourceList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final keep = query.trim().toLowerCase();
+    final shown = keep.isEmpty
+        ? data.sources
+        : data.sources
+              .where(
+                (s) =>
+                    data.nameOf(s).toLowerCase().contains(keep) ||
+                    s.provider.toLowerCase().contains(keep),
+              )
+              .toList();
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Expanded(
-          child: ListView(
-            children: [
-              for (final s in data.sources)
-                _row(context, s, s.id == selected, theme),
-            ],
+        // 配了七八条来源之后，这一列就得翻。搜一下比翻快
+        TextField(
+          onChanged: onQuery,
+          autocorrect: false,
+          decoration: const InputDecoration(
+            isDense: true,
+            hintText: '搜索',
+            prefixIcon: Icon(Icons.search, size: 16),
+            border: OutlineInputBorder(),
           ),
+        ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: shown.isEmpty
+              ? Center(
+                  child: Text(
+                    '没有匹配的来源',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                )
+              : ListView(
+                  children: [
+                    for (final s in shown)
+                      _row(context, s, s.id == selected, theme),
+                  ],
+                ),
         ),
         const SizedBox(height: 6),
         if (data.canAdd)
@@ -486,13 +535,23 @@ class _SourceList extends StatelessWidget {
 }
 
 /// 右边那一块：选中来源的详情。
-class _Detail extends StatelessWidget {
+/// 右边那一块：选中来源的详情。
+///
+/// # 形态照 Cherry Studio 的「模型服务」
+///
+/// **密钥与端点直接在这里改，不弹窗。** 弹窗那版每次想核对一眼端点都要
+/// 点开、关掉，而端点恰恰是最常需要核对的一项（国内站 / 国际站、公司网关）
+/// —— 那把 alibaba key 的 401 就是端点错了，而弹窗把它藏了起来。
+///
+/// 型号**按系列分组**（`qwen-image-3.0` → `qwen`）。240 个型号铺成一条
+/// 平列表没法看，而同一系列的东西本来就该待在一起。
+class _Detail extends StatefulWidget {
   const _Detail({
     super.key,
     required this.data,
     required this.source,
     required this.busy,
-    required this.onEdit,
+    required this.onSave,
     required this.onDelete,
     required this.onFetch,
     required this.onModels,
@@ -502,7 +561,9 @@ class _Detail extends StatelessWidget {
   final ModelSources data;
   final ModelSource source;
   final bool busy;
-  final VoidCallback onEdit;
+
+  /// 存改动。`apiKey` 空串 = 不动原来那把。
+  final void Function({required String apiKey, required String baseUrl}) onSave;
   final VoidCallback onDelete;
   final VoidCallback onFetch;
   final ValueChanged<List<String>> onModels;
@@ -511,11 +572,30 @@ class _Detail extends StatelessWidget {
   final String? offlineNote;
 
   @override
+  State<_Detail> createState() => _DetailState();
+}
+
+class _DetailState extends State<_Detail> {
+  final _key = TextEditingController();
+  late final _baseUrl = TextEditingController(
+    text: widget.source.baseUrl ?? '',
+  );
+  bool _reveal = false;
+  bool _dirty = false;
+
+  @override
+  void dispose() {
+    _key.dispose();
+    _baseUrl.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final p = data.providerOf(source.provider);
-    final endpoint = source.baseUrl ?? p?.baseUrl ?? '';
+    final s = widget.source;
+    final official = widget.data.providerOf(s.provider)?.baseUrl ?? '';
 
     return ListView(
       children: [
@@ -523,23 +603,18 @@ class _Detail extends StatelessWidget {
           children: [
             Expanded(
               child: Text(
-                data.nameOf(source),
+                widget.data.nameOf(s),
                 style: theme.textTheme.titleSmall,
               ),
             ),
-            if (!source.builtin) ...[
+            if (!s.builtin)
               TextButton(
-                onPressed: busy ? null : onEdit,
-                child: const Text('编辑'),
-              ),
-              TextButton(
-                onPressed: busy ? null : onDelete,
+                onPressed: widget.busy ? null : widget.onDelete,
                 child: Text('删除', style: TextStyle(color: scheme.error)),
               ),
-            ],
           ],
         ),
-        if (source.builtin)
+        if (s.builtin)
           Text(
             '这条是服务端配的，改不了也删不掉。它花的是我们的钱，所以计入你的配额。',
             style: theme.textTheme.labelSmall?.copyWith(
@@ -547,42 +622,98 @@ class _Detail extends StatelessWidget {
             ),
           )
         else ...[
+          const SizedBox(height: 12),
+          Text('API 密钥', style: theme.textTheme.labelLarge),
+          const SizedBox(height: 4),
+          TextField(
+            controller: _key,
+            autocorrect: false,
+            enableSuggestions: false,
+            // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的粘贴
+            // 迟早会错一次，且症状要到下一次对话才出现
+            obscureText: !_reveal,
+            onChanged: (_) => setState(() => _dirty = true),
+            decoration: InputDecoration(
+              isDense: true,
+              border: const OutlineInputBorder(),
+              // 界面永远拿不到明文，所以只能显示后四位当占位。
+              // 留空保存 = 不动原来那把
+              hintText: '已存 …${s.keyTail}，留空 = 不改动',
+              suffixIcon: IconButton(
+                onPressed: () => setState(() => _reveal = !_reveal),
+                iconSize: 18,
+                icon: Icon(
+                  _reveal
+                      ? Icons.visibility_off_outlined
+                      : Icons.visibility_outlined,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text('API 地址', style: theme.textTheme.labelLarge),
+          const SizedBox(height: 4),
+          TextField(
+            controller: _baseUrl,
+            autocorrect: false,
+            enableSuggestions: false,
+            onChanged: (_) => setState(() => _dirty = true),
+            decoration: InputDecoration(
+              isDense: true,
+              border: const OutlineInputBorder(),
+              // 说得出留空会连到哪 ——「用官方的」回答不了「官方的是哪个」，
+              // 而那正是想改端点的人要核对的东西
+              hintText: official.isEmpty ? '留空 = 用官方的' : '留空 = $official',
+            ),
+          ),
+          if (_dirty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton(
+                  onPressed: widget.busy ? null : _save,
+                  child: const Text('保存'),
+                ),
+              ),
+            ),
+          const SizedBox(height: 6),
           Text(
-            '密钥 …${source.keyTail} · 端点 $endpoint\n用它的调用走你自己的账户，不占配额。',
+            '用它的调用走你自己的账户，不占配额。',
             style: theme.textTheme.labelSmall?.copyWith(
               color: scheme.onSurfaceVariant,
             ),
           ),
           // 离线那一侧的实况。**不说的话，用户会在断网时才发现** ——
           // 而那时他既不知道原因也不知道怎么办
-          if (offlineNote != null)
+          if (widget.offlineNote != null)
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(
-                offlineNote!,
+                widget.offlineNote!,
                 style: theme.textTheme.labelSmall?.copyWith(
                   color: scheme.onSurfaceVariant,
                 ),
               ),
             ),
         ],
-        const SizedBox(height: 14),
+        const SizedBox(height: 16),
         Row(
           children: [
             Expanded(
               child: Text(
-                '模型（${source.models.length}）',
+                '模型（${s.models.length}）',
                 style: theme.textTheme.labelLarge,
               ),
             ),
             TextButton.icon(
-              onPressed: busy ? null : onFetch,
+              onPressed: widget.busy ? null : widget.onFetch,
               icon: const Icon(Icons.refresh, size: 15),
               label: const Text('获取模型列表'),
             ),
           ],
         ),
-        if (source.models.isEmpty)
+        if (s.models.isEmpty)
           Text(
             // 不拿内置目录顶替：目录知道这家有几十个型号，但这个账号未必
             // 都开通了。填进选择器的每一个都必须是真的调得通的
@@ -593,28 +724,100 @@ class _Detail extends StatelessWidget {
             ),
           )
         else
-          for (final m in source.models)
-            ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.memory_outlined, size: 18),
-              title: Text(m, style: theme.textTheme.bodySmall),
-              trailing: source.builtin
-                  ? null
-                  : IconButton(
-                      tooltip: '从这条来源移除',
-                      iconSize: 16,
-                      onPressed: busy
-                          ? null
-                          : () => onModels(
-                              source.models.where((x) => x != m).toList(),
-                            ),
-                      icon: const Icon(Icons.close),
-                    ),
+          for (final group in groupModels(s.models)) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(0, 10, 0, 2),
+              child: Text(
+                '${group.$1}（${group.$2.length}）',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
             ),
+            for (final m in group.$2)
+              _ModelRow(
+                model: m,
+                busy: widget.busy,
+                onRemove: s.builtin
+                    ? null
+                    : () => widget.onModels(
+                        s.models.where((x) => x != m).toList(),
+                      ),
+              ),
+          ],
       ],
     );
   }
+
+  void _save() {
+    widget.onSave(apiKey: _key.text.trim(), baseUrl: _baseUrl.text.trim());
+    setState(() {
+      _dirty = false;
+      _key.clear();
+    });
+  }
+}
+
+/// 型号列表里的一行。
+class _ModelRow extends StatelessWidget {
+  const _ModelRow({
+    required this.model,
+    required this.busy,
+    required this.onRemove,
+  });
+
+  final String model;
+  final bool busy;
+  final VoidCallback? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              model,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+          if (onRemove != null)
+            IconButton(
+              tooltip: '从这条来源移除',
+              iconSize: 14,
+              visualDensity: VisualDensity.compact,
+              onPressed: busy ? null : onRemove,
+              icon: const Icon(Icons.close),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 按**系列**把型号分组：`qwen-image-3.0` 与 `qwen-turbo` 都进 `qwen`。
+///
+/// 240 个型号铺成一条平列表没法看，而同一系列的东西本来就该待在一起。
+/// 组内与组间都保持服务端给的顺序 —— 那是它 `/models` 的顺序，
+/// 重排一次就多一个「我记得它在上面」的困惑。
+List<(String, List<String>)> groupModels(List<String> models) {
+  final out = <(String, List<String>)>[];
+  for (final m in models) {
+    final i = m.indexOf('-');
+    final family = i <= 0 ? m : m.substring(0, i);
+    final at = out.indexWhere((g) => g.$1 == family);
+    if (at < 0) {
+      out.add((family, <String>[m]));
+    } else {
+      out[at].$2.add(m);
+    }
+  }
+  return out;
 }
 
 /// 添加 / 编辑对话框的结果。
@@ -640,10 +843,9 @@ class _SourceForm {
 /// `kimi` 不行要写 `moonshot`（实测被拒）。猜错的反馈来得也晚：
 /// 填完、点保存，才收到一句「不认识的供应商」。
 class _SourceDialog extends StatefulWidget {
-  const _SourceDialog({required this.providers, this.initial});
+  const _SourceDialog({required this.providers});
 
   final List<ProviderChoice> providers;
-  final ModelSource? initial;
 
   @override
   State<_SourceDialog> createState() => _SourceDialogState();
@@ -651,19 +853,13 @@ class _SourceDialog extends StatefulWidget {
 
 class _SourceDialogState extends State<_SourceDialog> {
   late String? _picked = _initialPick();
-  late final _label = TextEditingController(text: widget.initial?.label ?? '');
-  late final _baseUrl = TextEditingController(
-    text: widget.initial?.baseUrl ?? '',
-  );
+  final _label = TextEditingController();
+  final _baseUrl = TextEditingController();
   final _key = TextEditingController();
   bool _reveal = false;
 
-  String? _initialPick() {
-    if (widget.providers.isEmpty) return null;
-    final want = widget.initial?.provider;
-    if (want != null && widget.providers.any((p) => p.id == want)) return want;
-    return widget.providers.first.id;
-  }
+  String? _initialPick() =>
+      widget.providers.isEmpty ? null : widget.providers.first.id;
 
   ProviderChoice? get _current {
     for (final p in widget.providers) {
@@ -686,10 +882,9 @@ class _SourceDialogState extends State<_SourceDialog> {
     final cur = _current;
     // 免鉴权的（本机 ollama）不该逼人填 key
     final needsKey = cur?.requiresAuth ?? true;
-    final editing = widget.initial != null;
 
     return AlertDialog(
-      title: Text(editing ? '编辑来源' : '添加模型'),
+      title: const Text('添加模型'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -733,7 +928,7 @@ class _SourceDialogState extends State<_SourceDialog> {
             if (needsKey)
               TextField(
                 controller: _key,
-                autofocus: !editing,
+                autofocus: true,
                 autocorrect: false,
                 enableSuggestions: false,
                 // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的
@@ -743,7 +938,6 @@ class _SourceDialogState extends State<_SourceDialog> {
                   labelText: 'API key',
                   // 改一条时留空 = 不动原来那把。界面永远拿不到明文，
                   // 所以「只想改个端点」根本没有 key 可以回填
-                  hintText: editing ? '留空 = 不改动已存的那把' : null,
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
                     onPressed: () => setState(() => _reveal = !_reveal),
