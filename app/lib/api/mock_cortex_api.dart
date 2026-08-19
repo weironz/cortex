@@ -466,10 +466,16 @@ class MockCortexApi
       defaultModel: 'deepseek-v4-pro',
       cheapModel: 'deepseek-v4-flash',
       autoAvailable: true,
+      // **两条来源**：部署提供的（占配额）与用户自带的 alibaba（他的 key）。
+      // 一份只有部署那家型号的夹具画不出「按来源分组」那条界面分支，
+      // 而那正是从前那个 bug 的所在 —— 配了 alibaba key 的人在选择器里
+      // 根本看不到 qwen
       models: [
         ModelOption(
           id: 'deepseek-v4-pro',
           displayName: 'DeepSeek V4 Pro',
+          source: kDeploymentSource,
+          sourceLabel: '部署提供',
           context: 1000000,
           toolCall: true,
           vision: false,
@@ -480,6 +486,8 @@ class MockCortexApi
         ModelOption(
           id: 'deepseek-v4-flash',
           displayName: 'DeepSeek V4 Flash',
+          source: kDeploymentSource,
+          sourceLabel: '部署提供',
           context: 1000000,
           toolCall: true,
           vision: false,
@@ -489,12 +497,30 @@ class MockCortexApi
         ModelOption(
           id: 'legacy-completion',
           displayName: '老式补全模型',
+          source: kDeploymentSource,
+          sourceLabel: '部署提供',
           context: 8000,
           toolCall: false,
           inputMicrosPerMtok: 50000,
           outputMicrosPerMtok: 50000,
         ),
-        ModelOption(id: 'unknown-model', displayName: 'unknown-model'),
+        ModelOption(
+          id: 'unknown-model',
+          displayName: 'unknown-model',
+          source: kDeploymentSource,
+          sourceLabel: '部署提供',
+        ),
+        ModelOption(
+          id: 'qwen-flash',
+          displayName: 'Qwen Flash',
+          source: '01M0MOCKSOURCEAAAAAAAAAAAA',
+          sourceLabel: 'Alibaba (Qwen)',
+          freeOfQuota: true,
+          context: 1000000,
+          toolCall: true,
+          inputMicrosPerMtok: 50000,
+          outputMicrosPerMtok: 400000,
+        ),
       ],
     );
   }
@@ -1171,6 +1197,7 @@ class MockCortexApi
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
+    String? source,
   }) async* {
     if (_disposed) {
       throw const CortexApiException('Mock 数据源已关闭');

@@ -78,16 +78,55 @@ pub async fn stream(
     // 却没记账。多来源之后这个区别是真的了
     let tenant = st.tenant(&headers).await?;
     let sources = st.model_sources(&tenant).await;
+
+    // 服务端那把 key。自带来源那条路也要它身上的模型配置（tier 回落），
+    // 所以两条路都先要它 —— 没配模型就在这里 501，一个字节都还没发出去
+    let server = st.llm()?;
+
+    // **自动档在选来源之前定** —— 它挑的是「所有来源里最便宜的那个模型」，
+    // 而模型定了来源才定。放在选来源之后的话，自动档只能在用户碰巧选中的
+    // 那条来源里挑，「最便宜」就变成了「这条来源里最便宜」。
+    //
+    // 顺带一个真实的好处：跨来源挑经常会挑到用户自己那把 key ——
+    // 那一轮因此不占配额，而这正是他配 key 的理由。
+    let was_auto = matches!(req.model, ModelChoice::Auto);
+    let req = resolve_auto(server, &sources, req);
     let picked = pick_source(&sources, req.source.as_deref());
     if picked.is_none() {
         st.enforce_quota(&user).await?;
     }
 
-    // 服务端那把 key。自带来源那条路也要它身上的模型配置（tier 回落），
-    // 所以两条路都先要它 —— 没配模型就在这里 501，一个字节都还没发出去
-    let server = st.llm()?;
-    let upstream = upstream(server, req, picked).await?;
-    let used_own_key = picked.is_some();
+    // ⚠️ **自动档挑中的那条来源建不起流时要回落，别让整轮失败。**
+    //
+    // key 过期、端点填错、供应商临时抽风 —— 这些在自带来源上很常见，
+    // 而自动档是**我们**替他挑的：挑中一条坏的然后让他发不出话，
+    // 那个错误他既看不懂也不该由他承担。实测撞到过：一把打国际站
+    // 会 401 的 alibaba key 被自动档选中，整轮直接失败。
+    //
+    // **只有自动档回落。** 用户明确选了某个模型时悄悄换掉，表现是
+    // 「我选了 Qwen，拿到的却是 DeepSeek 的回答」—— 他会拿着那个回答
+    // 做判断，而没有任何地方告诉过他。
+    let mut used_own_key = picked.is_some();
+    let upstream = match upstream(server, req.clone(), picked).await {
+        Ok(s) => s,
+        Err(e) if was_auto && picked.is_some() => {
+            tracing::warn!(
+                source = ?req.source,
+                error = %e,
+                "自动档挑中的来源建不起流，回落到部署那条"
+            );
+            // 回落到部署那条 = 花我们的钱，所以这时候才查配额
+            st.enforce_quota(&user).await?;
+            used_own_key = false;
+            let fallback = LlmStreamRequest {
+                model: ModelChoice::Deployment,
+                source: None,
+                ..req
+            };
+            upstream(server, fallback, None).await?
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // 记账：流里每一帧都带着 `ProviderUsage`，而**最后一帧的累计值**
     // 才是这次调用的总量。所以边转发边留最新的那个，流结束时写一行。
@@ -167,6 +206,79 @@ pub async fn stream(
     let body = body.chain(tail).filter_map(|x| async move { x });
 
     Ok(Sse::new(body).keep_alive(KeepAlive::new().interval(KEEP_ALIVE_INTERVAL).text("ping")))
+}
+
+/// 把「自动」这一档就地解成一个具体的 (来源, 模型)。
+///
+/// 不是自动档就原样返回。
+///
+/// # 为什么要跨来源挑
+///
+/// 一个人配了自己的 key，多半就是为了便宜或者为了某个更强的型号。
+/// 只在「他这一轮碰巧选中的那条来源」里挑，等于把自动档降级成
+/// 「这条来源里最便宜的」—— 而他打开自动档时想的是「你替我挑」。
+///
+/// # 挑不出来时不报错
+///
+/// 回落到默认档（部署那条 + tier）。报错等于让一个开着自动档的人
+/// 什么都做不了，而回落至少给供应商一个机会 —— 它的真实上下文
+/// 可能比我们目录里记的大。
+fn resolve_auto(
+    server: &cortex_llm::LlmClient,
+    sources: &[crate::model_sources::ModelSource],
+    req: LlmStreamRequest,
+) -> LlmStreamRequest {
+    if !matches!(req.model, ModelChoice::Auto) {
+        return req;
+    }
+    let shape = crate::model_pick::TurnShape::of(&req.system, &req.messages, req.tools.len());
+
+    // 候选：部署那条 + 全部启用的来源。部署那条排最前，
+    // 于是同价时它赢 —— 用户没配 key 时的行为与从前一致
+    let mut candidates: Vec<(Option<&str>, &str, Vec<String>)> = vec![(
+        None,
+        server.provider_id(),
+        cortex_llm::provider::allowed_models(server.provider_id()).unwrap_or_default(),
+    )];
+    for s in sources {
+        let list = if s.models.is_empty() {
+            cortex_llm::provider::allowed_models(&s.provider).unwrap_or_default()
+        } else {
+            s.models.clone()
+        };
+        candidates.push((Some(s.id.as_str()), s.provider.as_str(), list));
+    }
+
+    let mut best: Option<(i64, Option<String>, String)> = None;
+    for (source, provider, list) in &candidates {
+        let Some((score, model)) = crate::model_pick::cheapest(provider, list, shape) else {
+            continue;
+        };
+        // 严格小于：同价时先来的赢，也就是部署那条
+        if best.as_ref().is_none_or(|(b, _, _)| score < *b) {
+            best = Some((score, source.map(str::to_owned), model));
+        }
+    }
+
+    let Some((_, source, model)) = best else {
+        tracing::warn!(
+            candidates = candidates.len(),
+            input_tokens = shape.input_tokens,
+            needs_tools = shape.needs_tools,
+            "自动档在所有来源里都没挑出模型，回落到部署默认"
+        );
+        return LlmStreamRequest {
+            model: ModelChoice::Deployment,
+            source: None,
+            ..req
+        };
+    };
+    tracing::debug!(?source, model, "自动档挑了这个");
+    LlmStreamRequest {
+        model: ModelChoice::Named(model),
+        source,
+        ..req
+    }
 }
 
 /// 这一轮落在哪条来源上。
@@ -354,6 +466,15 @@ fn resolve_model(
 pub struct ModelOption {
     /// 填进请求里的那个名字。
     pub id: String,
+    /// 它属于哪条来源。**与 `id` 一起才唯一确定一个模型** ——
+    /// 同一个型号名可以在两条来源上都有（比如两个 OpenAI 兼容网关），
+    /// 而它们用的是不同的 key、不同的端点、不同的账单。
+    pub source: String,
+    /// 那条来源在界面上叫什么。放在这里是为了让客户端**不必**再查一遍
+    /// `/settings/model-sources` 才画得出分组标题。
+    pub source_label: String,
+    /// 用这条来源要不要占配额。界面据此在贵的那些旁边标一句。
+    pub free_of_quota: bool,
     /// 给人看的名字。目录没有更好听的就等于 [`Self::id`]。
     pub display_name: String,
     /// 上下文窗口。`null` = 目录里查不到这个模型。
@@ -380,13 +501,16 @@ pub struct ModelOption {
 /// `GET /llm/models` 的响应。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ModelsResponse {
-    /// 这个部署连的是哪一家。
+    /// 部署那条连的是哪一家。**只描述部署那条** —— 别的来源各有各的，
+    /// 见每个 [`ModelOption::source`]。
     pub provider: String,
     /// 不选时用的那个（也就是 `tier = main`）。
     pub default_model: String,
     /// 后台杂活用的那个。
     pub cheap_model: String,
-    /// 这个部署开放了哪些。**客户端只能在这里面挑。**
+    /// **所有启用来源**开放的模型，客户端只能在这里面挑。
+    ///
+    /// 按来源分组：部署那条在最前，其余按加入顺序。
     pub models: Vec<ModelOption>,
     /// 这个部署支持「自动」档吗。
     ///
@@ -395,13 +519,20 @@ pub struct ModelsResponse {
     pub auto_available: bool,
 }
 
-/// `GET /llm/models` —— 这个部署能用哪些模型。
+/// `GET /llm/models` —— 现在能挑哪些模型（**跨全部启用的来源**）。
 ///
 /// # 为什么必须有这条路，而不是让客户端填任意模型名
 ///
 /// 填任意名字的话，填错的表现是**每一轮对话都失败**，而错误来自供应商
 /// （「no such model」），看不出是选错了。客户端只有拿到这份列表，
 /// 才能把选择做成一个选不错的下拉框。
+///
+/// # 为什么每一项都带着它的来源
+///
+/// 从前这份列表只有部署那家的型号，而 `/llm/stream` 在有自带 key 时拿的是
+/// **那条来源**的白名单 —— 于是用户在选择器里选什么都被 400 拒
+/// （2026-08-19 实测）。一个模型名离开它的来源是没有意义的：
+/// key、端点、账单三样都跟着来源走。
 ///
 /// # Errors
 /// 这个部署没配 LLM。
@@ -411,15 +542,63 @@ pub async fn models(
 ) -> Result<Json<ModelsResponse>, crate::error::ApiError> {
     // 要认证：这份列表里有这个部署配了哪家供应商、开放了哪些模型 ——
     // 那是部署形态，不该对任何能连上端口的人可见
-    let _ = st.tenant(&headers).await?;
+    let tenant = st.tenant(&headers).await?;
     let client = st.llm()?;
     let provider = client.provider_id().to_owned();
-    let allowed = cortex_llm::provider::allowed_models(&provider).unwrap_or_default();
 
-    // 保留名撞车：一个真叫 `auto` 的模型会被当成自动档。
-    // 记一条 WARN 而不是拒绝启动 —— 拒绝启动太重，而这件事目前
-    // 在真实供应商里一次都没出现过
-    if allowed.iter().any(|m| {
+    let mut models = Vec::new();
+
+    // ── 部署那条 ────────────────────────────────────────
+    let deployment = cortex_llm::provider::allowed_models(&provider).unwrap_or_default();
+    warn_on_reserved(&provider, &deployment);
+    models.extend(describe(
+        &provider,
+        &deployment,
+        crate::model_sources::DEPLOYMENT_SOURCE_ID,
+        "部署提供",
+        // 部署那把 key 是我们付钱，所以它**要**计配额
+        false,
+    ));
+
+    // ── 用户自己加的那些 ────────────────────────────────
+    for src in st.model_sources(&tenant).await {
+        // 还没拉过型号的用供应商定义里那份兜底：一条来源在选择器里
+        // 一个模型都没有的话，用户会以为它没生效
+        let list = if src.models.is_empty() {
+            cortex_llm::provider::allowed_models(&src.provider).unwrap_or_default()
+        } else {
+            src.models.clone()
+        };
+        warn_on_reserved(&src.provider, &list);
+        let label = cortex_llm::provider::catalog()
+            .into_iter()
+            .find(|p| p.id == src.provider)
+            .map_or_else(|| src.provider.clone(), |p| p.display_name);
+        models.extend(describe(&src.provider, &list, &src.id, &label, true));
+    }
+
+    // 自动档要挑得动才摆出来：候选不足两个时它与默认档没有区别
+    let auto_available = models
+        .iter()
+        .filter(|m| m.input_micros_per_mtok.is_some() && m.tool_call.is_some())
+        .count()
+        >= 2;
+
+    Ok(Json(ModelsResponse {
+        provider,
+        default_model: client.model().model_name.clone(),
+        cheap_model: client.cheap_model().model_name.clone(),
+        models,
+        auto_available,
+    }))
+}
+
+/// 保留名撞车：一个真叫 `auto` 的模型会被当成自动档。
+///
+/// 记一条 WARN 而不是拒绝启动 —— 拒绝启动太重，而这件事目前
+/// 在真实供应商里一次都没出现过。
+fn warn_on_reserved(provider: &str, models: &[String]) {
+    if models.iter().any(|m| {
         cortex_proto::model_choice::RESERVED
             .iter()
             .any(|r| m.eq_ignore_ascii_case(r))
@@ -429,13 +608,28 @@ pub async fn models(
             "供应商定义里有一个模型名与保留名撞车（auto），它会被当成自动档"
         );
     }
+}
 
-    let models: Vec<ModelOption> = allowed
+/// 把一串裸型号名配上能力与价目（来自内置目录）。
+///
+/// 查不到的**不丢掉**，三个能力字段留空 —— 那多半是刚发布的新型号，
+/// 丢了比留着更糟；留着，界面会说「不知道」。
+fn describe(
+    provider: &str,
+    models: &[String],
+    source: &str,
+    source_label: &str,
+    free_of_quota: bool,
+) -> Vec<ModelOption> {
+    models
         .iter()
         .map(|id| {
-            let info = cortex_llm::catalog::lookup(&provider, id);
+            let info = cortex_llm::catalog::lookup(provider, id);
             ModelOption {
                 id: id.clone(),
+                source: source.to_owned(),
+                source_label: source_label.to_owned(),
+                free_of_quota,
                 display_name: info
                     .as_ref()
                     .map_or_else(|| id.clone(), |i| i.display_name.clone()),
@@ -453,22 +647,7 @@ pub async fn models(
                     .map(|c| c.output_micros_per_mtok),
             }
         })
-        .collect();
-
-    // 自动档要挑得动才摆出来：候选不足两个时它与默认档没有区别
-    let auto_available = models
-        .iter()
-        .filter(|m| m.input_micros_per_mtok.is_some() && m.tool_call.is_some())
-        .count()
-        >= 2;
-
-    Ok(Json(ModelsResponse {
-        provider,
-        default_model: client.model().model_name.clone(),
-        cheap_model: client.cheap_model().model_name.clone(),
-        models,
-        auto_available,
-    }))
+        .collect()
 }
 
 #[cfg(test)]
@@ -702,5 +881,101 @@ mod resolve_tests {
             .is_err(),
             "放过去的表现是把 `deepseek-v4-pro` 这个名字发给 DashScope"
         );
+    }
+
+    /// 自动档挑的是**所有来源里**最便宜的，不是「这条来源里」最便宜的。
+    ///
+    /// 一个人配了自己的 key 多半就是为了便宜。只在他碰巧选中的那条来源里
+    /// 挑，等于把自动档降级成「这条来源里最便宜的」。
+    ///
+    /// ⚠️ 这条测试**必须挑一个真的更便宜的型号**，否则它没有区分度：
+    /// 第一版用的是 `qwen-flash`（入 $0.05 / 出 $0.40），而按「一次典型
+    /// 调用」比价它比 `deepseek-v4-flash`（$0.14 / $0.28）**贵** ——
+    /// 出价占大头。于是测试走的是「部署那条更便宜」的分支，
+    /// 把跨来源那段代码整个删掉照样绿。`qwen-turbo`（$0.05 / $0.20）才是
+    /// 真的更便宜那个。
+    #[test]
+    fn 自动档跨来源挑而不是只在一条里挑() {
+        let c = client(); // 部署 = deepseek
+        let mine = [source_of("01M0AAA", "alibaba", &["qwen-turbo"])];
+        let shape = crate::model_pick::TurnShape::of("你是助手", &[], 0);
+
+        // 先证明这条测试有区分度：那条来源确实更便宜
+        let (d_score, _) = crate::model_pick::cheapest("deepseek", &allowed(), shape)
+            .expect("deepseek 该挑得出东西");
+        let (a_score, a_model) =
+            crate::model_pick::cheapest("alibaba", &["qwen-turbo".to_owned()], shape)
+                .expect("alibaba 该挑得出东西");
+        assert!(
+            a_score < d_score,
+            "qwen-turbo（{a_score}）该比 deepseek 最便宜那个（{d_score}）还便宜，             不然这条测试分不出「跨来源挑」和「只在部署那条挑」——              目录价目变了的话，换一个更便宜的型号来测"
+        );
+
+        let got = resolve_auto(&c, &mine, req(ModelChoice::Auto, ModelTier::Main));
+        assert_eq!(
+            got.source.as_deref(),
+            Some("01M0AAA"),
+            "更便宜的那条来源没被挑中 —— 自动档没看别的来源"
+        );
+        assert_eq!(got.model, ModelChoice::Named(a_model));
+    }
+
+    /// 同价时部署那条赢 —— 没配 key 的人行为与从前一致。
+    #[test]
+    fn 同价时挑部署那条() {
+        let c = client();
+        // 拿 deepseek 自己的列表当成一条「别的来源」：两边分数必然相同
+        let list = allowed();
+        let names: Vec<&str> = list.iter().map(String::as_str).collect();
+        let tie = [source_of("01M0TIE", "deepseek", &names)];
+        let got = resolve_auto(&c, &tie, req(ModelChoice::Auto, ModelTier::Main));
+        assert!(
+            got.source.is_none(),
+            "同价却挑了别的来源（{:?}）—— 那会让一个没配过 key 的人的行为             跟着「他碰巧加过一条同样的来源」变，而两者本该没区别",
+            got.source
+        );
+    }
+
+    /// 一条模型列表为空的来源不会把自动档搞崩。
+    #[test]
+    fn 还没拉过型号的来源在自动档里退回供应商定义() {
+        let c = client();
+        let empty = [source_of("01M0EMPTY", "alibaba", &[])];
+        let got = resolve_auto(&c, &empty, req(ModelChoice::Auto, ModelTier::Main));
+        assert!(
+            matches!(got.model, ModelChoice::Named(_)),
+            "空列表该退回供应商定义那份，而不是让自动档挑不出东西"
+        );
+    }
+
+    /// 不是自动档的原样放行 —— 别顺手改了用户明确选的东西。
+    #[test]
+    fn 非自动档不被_resolve_auto_改动() {
+        let c = client();
+        let mine = [source_of("01M0AAA", "alibaba", &["qwen-flash"])];
+        for choice in [
+            ModelChoice::Deployment,
+            ModelChoice::Named("deepseek-v4-pro".into()),
+        ] {
+            let mut r = req(choice.clone(), ModelTier::Main);
+            r.source = Some("01M0AAA".to_owned());
+            let got = resolve_auto(&c, &mine, r);
+            assert_eq!(got.model, choice, "用户明确选的档不该被改");
+            assert_eq!(
+                got.source.as_deref(),
+                Some("01M0AAA"),
+                "来源更不该被改 —— 改了就是拿别人的 key 跑他没选的模型"
+            );
+        }
+    }
+
+    fn source_of(id: &str, provider: &str, models: &[&str]) -> crate::model_sources::ModelSource {
+        crate::model_sources::ModelSource {
+            id: id.to_owned(),
+            provider: provider.to_owned(),
+            api_key: "test-key".to_owned(),
+            base_url: None,
+            models: models.iter().map(|m| (*m).to_string()).collect(),
+        }
     }
 }

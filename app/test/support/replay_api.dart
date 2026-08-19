@@ -214,6 +214,7 @@ class ReplayApi
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
+    String? source,
     bool sandbox = false,
   }) async* {
     yield const ChatDeltaEvent('好');

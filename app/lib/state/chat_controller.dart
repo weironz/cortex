@@ -841,7 +841,8 @@ class ChatController extends Notifier<ChatState> {
       // 逐轮读，不缓存：用户在输入框底部随时能改，改完这一句就该按新档位走
       permissionMode: ref.read(permissionModeProvider),
       // 模型同理 —— 在设置里换完，**下一句**就该按新的走
-      model: ref.read(selectedModelProvider),
+      model: ref.read(selectedModelProvider).model,
+      source: ref.read(selectedModelProvider).source,
     );
     _subscription = stream.listen(
       _onEvent,

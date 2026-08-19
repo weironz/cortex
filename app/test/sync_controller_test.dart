@@ -166,6 +166,7 @@ class _FakeApi
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
+    String? source,
     bool sandbox = false,
   }) => throw UnimplementedError('同步链路不应发起对话');
 

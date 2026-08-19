@@ -105,6 +105,16 @@ const RESERVE_FOR_OUTPUT: usize = 8_000;
 /// `None` = 一个都不合适。调用方应当回落到部署默认并记一条 WARN。
 #[must_use]
 pub fn pick(provider: &str, allowed: &[String], shape: TurnShape) -> Option<String> {
+    cheapest(provider, allowed, shape).map(|(_, id)| id)
+}
+
+/// 同上，但**连分数一起给**。
+///
+/// 跨来源比价要用它：`pick` 只回名字，而两条来源各自的赢家还得再比一次。
+/// 分数是「一次典型调用」的微元成本，不同供应商之间可直接比 ——
+/// 它们的价目在目录里是同一个单位（美元微元 / 百万 token）。
+#[must_use]
+pub fn cheapest(provider: &str, allowed: &[String], shape: TurnShape) -> Option<(i64, String)> {
     let mut best: Option<(i64, ModelInfo)> = None;
     for name in allowed {
         // 目录里查不到的**跳过**，不是当成「便宜」。
@@ -127,7 +137,7 @@ pub fn pick(provider: &str, allowed: &[String], shape: TurnShape) -> Option<Stri
             _ => best = Some((score, info)),
         }
     }
-    best.map(|(_, m)| m.id)
+    best.map(|(score, m)| (score, m.id))
 }
 
 #[cfg(test)]

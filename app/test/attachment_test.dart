@@ -182,6 +182,7 @@ class _BlobApi
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
+    String? source,
     bool sandbox = false,
   }) async* {
     lastSentAttachments = attachments;

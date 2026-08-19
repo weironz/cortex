@@ -16,6 +16,7 @@ import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/features/settings/pages/model_picker.dart';
+
 import 'package:cortex_app/models/attachment.dart';
 import 'package:cortex_app/models/chat_event.dart';
 import 'package:cortex_app/models/model_option.dart';
@@ -25,6 +26,29 @@ import 'package:cortex_app/state/model_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+/// 一个只为把面板叫出来的按钮。
+///
+/// 从前这里挂的是 `ModelPickerTile`（设置页里那一行摘要），而模型那一页
+/// 改成来源列表之后它没有生产调用方了 —— 留着一个只有测试在用的组件，
+/// 正是「造好了没人调用」那个形状。面板本身才是要测的东西。
+class _OpenPickerButton extends ConsumerWidget {
+  const _OpenPickerButton();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // **必须 watch 一下目录**，否则它从没被拉过，而 `showModelPicker`
+    // 看到 null 会直接早退 —— 真实入口（chip）是靠 `modelLabelProvider`
+    // 间接 watch 到的，这里要还原那个前提
+    ref.watch(modelCatalogProvider);
+    return Center(
+      child: TextButton(
+        onPressed: () => showModelPicker(context, ref),
+        child: const Text('开面板'),
+      ),
+    );
+  }
+}
 
 class _MockConfig extends AppConfigNotifier {
   @override
@@ -43,6 +67,7 @@ class _Api extends MockCortexApi {
 
   final CortexApiException? catalogFailure;
   final List<String?> sentModels = [];
+  final List<String?> sentSources = [];
 
   @override
   Future<ModelCatalog> llmModels() async {
@@ -57,8 +82,10 @@ class _Api extends MockCortexApi {
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
+    String? source,
   }) {
     sentModels.add(model);
+    sentSources.add(source);
     return Stream<ChatEvent>.fromIterable([
       const ChatDeltaEvent('好'),
       const ChatDoneEvent('ep'),
@@ -101,7 +128,7 @@ Future<void> _settle(bool Function() cond, {int rounds = 60}) async {
 /// 设置页现在只显示**当前是什么**，那六个选项在面板里 —— 平铺六个单选项
 /// 会让这一节的体积是另外两节的三倍，用户读到的是「上来就四种选择」。
 Future<void> _openPicker(WidgetTester tester) async {
-  await tester.tap(find.text('更改'));
+  await tester.tap(find.text('开面板'));
   for (var i = 0; i < 8; i++) {
     await tester.pump(const Duration(milliseconds: 100));
   }
@@ -126,9 +153,7 @@ Future<void> _pump(WidgetTester tester, ProviderContainer container) async {
   await tester.pumpWidget(
     UncontrolledProviderScope(
       container: container,
-      child: const MaterialApp(
-        home: Scaffold(body: SingleChildScrollView(child: ModelPickerTile())),
-      ),
+      child: const MaterialApp(home: Scaffold(body: _OpenPickerButton())),
     ),
   );
   // FutureProvider 要好几轮微任务才落地；一次 pump 不够，而
@@ -180,7 +205,11 @@ void main() {
       addTearDown(c.dispose);
       await _settle(() => !c.read(chatControllerProvider).sessionsLoading);
 
-      c.read(selectedModelProvider.notifier).select('deepseek-v4-flash');
+      c
+          .read(selectedModelProvider.notifier)
+          .select(
+            const ModelPick(source: 'deployment', model: 'deepseek-v4-flash'),
+          );
       final ctrl = c.read(chatControllerProvider.notifier);
       ctrl.createSession();
       await ctrl.send('一句话');
@@ -195,15 +224,65 @@ void main() {
       );
     });
 
-    test('选空串等于回到默认，不是「一个叫空串的模型」', () {
+    test('来源跟着模型一起发出去', () async {
       final api = _Api();
       final c = _boot(api);
       addTearDown(c.dispose);
+      await _settle(() => !c.read(chatControllerProvider).sessionsLoading);
 
-      c.read(selectedModelProvider.notifier)
-        ..select('x')
-        ..select('   ');
-      expect(c.read(selectedModelProvider), isNull);
+      c
+          .read(selectedModelProvider.notifier)
+          .select(
+            const ModelPick(
+              source: '01M0MOCKSOURCEAAAAAAAAAAAA',
+              model: 'qwen-flash',
+            ),
+          );
+      final ctrl = c.read(chatControllerProvider.notifier);
+      ctrl.createSession();
+      await ctrl.send('一句话');
+      await _settle(() => api.sentModels.isNotEmpty);
+
+      expect(
+        api.sentSources,
+        ['01M0MOCKSOURCEAAAAAAAAAAAA'],
+        reason:
+            '只发型号不发来源的话，服务端只能猜是哪条 —— 而猜错的表现是'
+            '「我选的是自己那把 key，账单却记在配额上」',
+      );
+    });
+
+    test('存进设置的那个串能原样读回来', () {
+      // 分隔符是 `|` 而不是冒号：**ollama 的型号名本身带冒号**
+      // （llama3:8b），按冒号拆会把型号拆断
+      for (final p in [
+        const ModelPick(),
+        const ModelPick(model: 'auto'),
+        const ModelPick(source: 'deployment', model: 'deepseek-v4-pro'),
+        const ModelPick(source: '01M0ABC', model: 'llama3:8b'),
+        const ModelPick(source: '01M0ABC', model: 'a:b:c'),
+      ]) {
+        expect(
+          ModelPick.decode(p.encode()),
+          p,
+          reason: '编码 ${p.encode()} 之后读不回来',
+        );
+      }
+    });
+
+    test('空串是没选过，不是一个叫空串的模型', () {
+      expect(ModelPick.decode(''), const ModelPick());
+      expect(ModelPick.decode('   '), const ModelPick());
+      expect(ModelPick.decode('src|'), const ModelPick(), reason: '型号为空同理');
+    });
+
+    test('旧格式（只有型号名）不丢掉用户的选择', () {
+      // 升级前存的是一个裸型号名。当成「没选过」的话，用户升级之后会发现
+      // 自己选的模型莫名其妙变回默认了
+      expect(
+        ModelPick.decode('deepseek-v4-flash'),
+        const ModelPick(model: 'deepseek-v4-flash'),
+      );
     });
   });
 
@@ -227,7 +306,7 @@ void main() {
       // 点它不该生效
       await tester.tap(find.text('老式补全模型'), warnIfMissed: false);
       await tester.pump(const Duration(milliseconds: 300));
-      expect(c.read(selectedModelProvider), isNull);
+      expect(c.read(selectedModelProvider), const ModelPick());
     });
 
     testWidgets('目录里查不到的模型能选，但说明「不知道」', (tester) async {
@@ -245,7 +324,7 @@ void main() {
 
       await _tapInSheet(tester, find.text('unknown-model'));
       expect(
-        c.read(selectedModelProvider),
+        c.read(selectedModelProvider).model,
         'unknown-model',
         reason: '不知道不等于不给选',
       );
@@ -269,18 +348,19 @@ void main() {
       expect(find.textContaining('最优'), findsNothing, reason: '这个词我们证明不了');
     });
 
-    testWidgets('老服务端没有这条路由时说清楚，不给一条红色 404', (tester) async {
+    testWidgets('拉不到目录时不弹一个空面板出来', (tester) async {
       final api = _Api(
         catalogFailure: const CortexApiException('Not Found', statusCode: 404),
       );
       final c = _boot(api, withChat: false);
       addTearDown(c.dispose);
       await _pump(tester, c);
+      await _openPicker(tester);
 
-      expect(find.textContaining('这个部署选不了模型'), findsOneWidget);
-      expect(find.text('重试'), findsNothing, reason: '没这个功能不是重试能解决的');
-      // autoDispose 的回收是排在定时器上的。错误态这一支比另外三支多走一次
-      // 重建，回收因此排在了断言之后 —— 不排干净的话树销毁时会被判成
+      // 弹一个只有标题栏的空面板，比什么都不弹更糟：用户会以为
+      // 「这个部署一个模型都没有」，而实际是这条路由不存在
+      expect(find.text('跟随部署'), findsNothing);
+      // autoDispose 的回收排在定时器上，不排干净的话树销毁时会被判成
       // 「A Timer is still pending」，而那与本条测的东西毫无关系
       await tester.pump(const Duration(seconds: 5));
     });

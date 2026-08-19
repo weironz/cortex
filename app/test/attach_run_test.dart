@@ -34,6 +34,7 @@ class _RunningApi extends MockCortexApi {
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
+    String? source,
   }) => sent.stream;
 
   @override

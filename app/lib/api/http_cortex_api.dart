@@ -1060,6 +1060,7 @@ class HttpCortexApi implements CortexApi {
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
+    String? source,
   }) async* {
     final request = http.Request('POST', _uri('/chat'))
       // A header, not a ticket: `POST /chat` is issued by `package:http`, which
@@ -1091,6 +1092,9 @@ class HttpCortexApi implements CortexApi {
         // 只在真的选过时才带这个字段：不带 = 部署默认，而带一个 null
         // 与不带在服务端是同一个意思，少发一个字段更省事
         if (model != null && model.isNotEmpty) 'model': model,
+        // 来源是独立字段，不编进 model —— ollama 的型号名本身带冒号，
+        // 而且同一家可以配两条来源
+        if (source != null && source.isNotEmpty) 'source': source,
       });
 
     final http.StreamedResponse response;

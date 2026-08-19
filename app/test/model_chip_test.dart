@@ -14,7 +14,6 @@ library;
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/chat/widgets/model_chip.dart';
-import 'package:cortex_app/features/settings/pages/model_picker.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/model_controller.dart';
 import 'package:flutter/material.dart';
@@ -93,7 +92,7 @@ void main() {
       await _tapInSheet(tester, find.text('DeepSeek V4 Flash').last);
 
       expect(
-        c.read(selectedModelProvider),
+        c.read(selectedModelProvider).model,
         'deepseek-v4-flash',
         reason:
             'chip 换了模型却没写进 selectedModelProvider 的话，'
@@ -104,7 +103,11 @@ void main() {
     testWidgets('随手关掉面板不改动已有的选择', (tester) async {
       final c = _boot();
       addTearDown(c.dispose);
-      c.read(selectedModelProvider.notifier).select('deepseek-v4-flash');
+      c
+          .read(selectedModelProvider.notifier)
+          .select(
+            const ModelPick(source: 'deployment', model: 'deepseek-v4-flash'),
+          );
       await _pump(tester, c, const ModelChip());
 
       await tester.tap(find.byType(ModelChip));
@@ -116,7 +119,7 @@ void main() {
       }
 
       expect(
-        c.read(selectedModelProvider),
+        c.read(selectedModelProvider).model,
         'deepseek-v4-flash',
         reason:
             '取消与「选了跟随部署」都回 null 的话，误触一下就静默退回默认了，'
@@ -124,30 +127,46 @@ void main() {
       );
     });
 
-    testWidgets('chip 与设置页读的是同一份选择', (tester) async {
+    testWidgets('选择器按来源分组，一个型号名离开来源没有意义', (tester) async {
       final c = _boot();
       addTearDown(c.dispose);
-      await _pump(
-        tester,
-        c,
-        const SingleChildScrollView(
-          child: Column(children: [ModelChip(), ModelPickerTile()]),
-        ),
-      );
+      await _pump(tester, c, const ModelChip());
 
-      // 从设置页那一侧开面板选 —— 两处弹的是同一个 `showModelPicker`
-      await tester.tap(find.text('更改'));
-      for (var i = 0; i < 8; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
-      await _tapInSheet(tester, find.text('DeepSeek V4 Flash').last);
+      await tester.tap(find.byType(ModelChip));
+      await tester.pump(const Duration(milliseconds: 400));
 
+      // mock 里两条启用的来源：部署提供（占配额）与 alibaba（你的 key）
+      expect(find.text('部署提供'), findsOneWidget);
       expect(
-        find.text('DeepSeek V4 Flash'),
-        findsNWidgets(2),
+        find.text('占配额'),
+        findsOneWidget,
+        reason: '「用这个会不会花我的额度」要在选之前就看得见',
+      );
+      expect(find.text('你的 key'), findsWidgets);
+      expect(
+        find.text('Qwen Flash'),
+        findsOneWidget,
         reason:
-            'chip 与设置行都该显示新的。只有一个变了的话，说明两处各存了'
-            '一份状态 —— 那时用户看到的和发出去的会是两个不同的模型',
+            '别的来源的型号也要能挑到 —— 从前这份列表只有部署那家的，'
+            '于是配了 alibaba key 的人选什么都被服务端 400 拒',
+      );
+    });
+
+    testWidgets('选中带来源的型号之后，两段都记下来', (tester) async {
+      final c = _boot();
+      addTearDown(c.dispose);
+      await _pump(tester, c, const ModelChip());
+
+      await tester.tap(find.byType(ModelChip));
+      await tester.pump(const Duration(milliseconds: 400));
+      await _tapInSheet(tester, find.text('Qwen Flash'));
+
+      final got = c.read(selectedModelProvider);
+      expect(got.model, 'qwen-flash');
+      expect(
+        got.source,
+        '01M0MOCKSOURCEAAAAAAAAAAAA',
+        reason: '只记型号不记来源的话，同一个名字在两条来源上都有时就分不清了',
       );
     });
   });

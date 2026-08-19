@@ -14,6 +14,9 @@ class ModelOption {
   const ModelOption({
     required this.id,
     required this.displayName,
+    this.source = '',
+    this.sourceLabel = '',
+    this.freeOfQuota = false,
     this.context,
     this.toolCall,
     this.vision,
@@ -25,6 +28,9 @@ class ModelOption {
   factory ModelOption.fromJson(Map<String, dynamic> json) => ModelOption(
     id: asString(json['id']),
     displayName: asString(json['display_name']),
+    source: asString(json['source']),
+    sourceLabel: asString(json['source_label']),
+    freeOfQuota: json['free_of_quota'] == true,
     context: asIntOrNull(json['context']),
     toolCall: json['tool_call'] as bool?,
     vision: json['vision'] as bool?,
@@ -36,6 +42,17 @@ class ModelOption {
   /// 填进请求里的那个名字。
   final String id;
   final String displayName;
+
+  /// 它属于哪条来源。**与 [`id`] 一起才唯一确定一个模型** ——
+  /// 同一个型号名可以在两条来源上都有（两个 OpenAI 兼容网关），
+  /// 而它们用的是不同的 key、不同的端点、不同的账单。
+  final String source;
+
+  /// 那条来源在界面上叫什么。选择器拿它当分组标题。
+  final String sourceLabel;
+
+  /// 用这条来源要不要占配额。
+  final bool freeOfQuota;
 
   /// 上下文窗口。`null` = 服务端目录里查不到这个模型。
   final int? context;
@@ -94,11 +111,38 @@ class ModelCatalog {
   /// 那时它与默认档没有区别，摆出来只会让人以为它在做什么。
   final bool autoAvailable;
 
+  /// 按型号名找。**只在「不关心来源」时用**（比如部署默认那个）。
   ModelOption? byId(String id) {
     for (final m in models) {
       if (m.id == id) return m;
     }
     return null;
+  }
+
+  /// 按 (来源, 型号) 找 —— 这才是唯一确定的那一对。
+  ///
+  /// `source` 为 null 时退回按型号名找：那是旧格式的设置值，
+  /// 或者调用方确实不关心来源。
+  ModelOption? pick(String? source, String id) {
+    if (source == null) return byId(id);
+    for (final m in models) {
+      if (m.id == id && m.source == source) return m;
+    }
+    return null;
+  }
+
+  /// 按来源分组，保持服务端给的顺序（部署那条在最前）。
+  List<(String source, String label, List<ModelOption>)> get grouped {
+    final out = <(String, String, List<ModelOption>)>[];
+    for (final m in models) {
+      final i = out.indexWhere((g) => g.$1 == m.source);
+      if (i < 0) {
+        out.add((m.source, m.sourceLabel, [m]));
+      } else {
+        out[i].$3.add(m);
+      }
+    }
+    return out;
   }
 }
 

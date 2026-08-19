@@ -47,6 +47,55 @@ final modelSourcesProvider = FutureProvider.autoDispose<ModelSources>(
   },
 );
 
+/// 用户选的模型 —— **型号 + 它属于哪条来源**。
+///
+/// 两段缺一不可：同一个型号名可以在两条来源上都有（两个 OpenAI 兼容网关），
+/// 而它们用的是不同的 key、不同的端点、不同的账单。只存型号名的话，
+/// 服务端只能猜，而猜错的表现是「我选的是自己那把 key，账单却记在配额上」。
+class ModelPick {
+  const ModelPick({this.source, this.model});
+
+  /// 部署那条 = [`kDeploymentSource`]；`null` = 没选过。
+  final String? source;
+
+  /// `null` = 跟随部署；[`kAutoModel`] = 自动档；别的 = 指名一个。
+  final String? model;
+
+  bool get isDefault => model == null;
+  bool get isAuto => model == kAutoModel;
+
+  /// 存进设置里的那个字符串。
+  ///
+  /// 分隔符用 `|` 而不是冒号：**ollama 的型号名本身带冒号**
+  /// （`llama3:8b`），按冒号拆会把型号拆断。来源 id 只可能是 ULID
+  /// 或字面量 `deployment`，两者都不含 `|`。
+  String encode() => model == null ? '' : '${source ?? ''}|$model';
+
+  static ModelPick decode(String? raw) {
+    final v = raw?.trim();
+    // 空串按「没选过」处理，不是按「一个叫空串的模型」——
+    // 服务端那侧也是这么判的（`ModelChoice::from`），两侧一致
+    if (v == null || v.isEmpty) return const ModelPick();
+    final i = v.indexOf('|');
+    // 没有分隔符 = 旧格式（只有型号名）。当成部署那条，别丢掉用户的选择
+    if (i < 0) return ModelPick(model: v);
+    final source = v.substring(0, i);
+    final model = v.substring(i + 1);
+    if (model.isEmpty) return const ModelPick();
+    return ModelPick(source: source.isEmpty ? null : source, model: model);
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is ModelPick && other.source == source && other.model == model;
+
+  @override
+  int get hashCode => Object.hash(source, model);
+
+  @override
+  String toString() => 'ModelPick($source, $model)';
+}
+
 /// 用户选的模型。**逐轮带**，与 `permissionModeProvider` 完全同构。
 ///
 /// # 存在客户端，不是服务端
@@ -55,44 +104,44 @@ final modelSourcesProvider = FutureProvider.autoDispose<ModelSources>(
 /// localStorage）。存服务端要多一次同步，而那次同步失败时用户看到的是
 /// 「我明明换了模型」—— 而权限档从第一天起就是这么做的，两者语义完全一样：
 /// 在对话框里改一下，**下一句**就按新的走。
-///
-/// # 三种取值
-///
-/// - `null` —— 用部署配的那个（默认）
-/// - [`kAutoModel`] —— 自动档
-/// - 别的字符串 —— 指定一个
-class SelectedModelNotifier extends Notifier<String?> {
+class SelectedModelNotifier extends Notifier<ModelPick> {
   static const String _key = 'selected_model';
 
   @override
-  String? build() {
+  ModelPick build() {
     Future.microtask(_restore);
-    return null;
+    return const ModelPick();
   }
 
   Future<void> _restore() async {
     final saved = await ref.read(settingsReaderProvider)();
     if (!ref.mounted) return;
-    final v = saved[_key]?.trim();
-    // 空串按「没选过」处理，不是按「一个叫空串的模型」——
-    // 服务端那侧也是这么判的（`ModelChoice::from`），两侧一致
-    if (v == null || v.isEmpty) return;
+    final v = ModelPick.decode(saved[_key]);
+    // ⚠️ **没存过就别写回去。**
+    //
+    // 恢复是异步的，而用户（或者一段代码）可能在它落地之前就选了一个。
+    // 无条件赋值的话，「设置里是空的」会把那个选择抹掉 —— 表现是
+    // 「我刚选了 Flash，一秒之后自己变回默认了」。
+    //
+    // 旧版是提前 return 躲过这一条的；改成两段式选择之后这个分支必须
+    // 显式写出来，不然就成了一次真的回归。
+    if (v.isDefault) return;
     if (v != state) state = v;
   }
 
-  /// 选一个。`null` = 回到部署默认。
-  void select(String? id) {
-    final next = (id == null || id.trim().isEmpty) ? null : id.trim();
-    if (state == next) return;
-    state = next;
-    // 存空串表示「回到默认」——`_restore` 那侧把空串当成没选过
-    unawaited(ref.read(settingsPatcherProvider)(_key, next ?? ''));
+  /// 选一个。`const ModelPick()` = 回到部署默认。
+  void select(ModelPick pick) {
+    if (state == pick) return;
+    state = pick;
+    // 存空串表示「回到默认」——`decode` 那侧把空串当成没选过
+    unawaited(ref.read(settingsPatcherProvider)(_key, pick.encode()));
   }
 }
 
-final selectedModelProvider = NotifierProvider<SelectedModelNotifier, String?>(
-  SelectedModelNotifier.new,
-);
+final selectedModelProvider =
+    NotifierProvider<SelectedModelNotifier, ModelPick>(
+      SelectedModelNotifier.new,
+    );
 
 /// 当前选择在界面上该显示成什么。
 ///
@@ -123,7 +172,7 @@ class ModelLabel {
 /// | 目录里查不到（三个字段全 null） | 提醒 | 不知道不等于不行，但用户该知道我们不知道 |
 /// | 选的模型不在列表里了 | 提醒 | 运维下掉了它，下一轮会被服务端拒绝 |
 final modelLabelProvider = Provider.autoDispose<ModelLabel>((ref) {
-  final selected = ref.watch(selectedModelProvider);
+  final pick = ref.watch(selectedModelProvider);
   final catalog = ref.watch(modelCatalogProvider);
 
   return catalog.when(
@@ -135,13 +184,13 @@ final modelLabelProvider = Provider.autoDispose<ModelLabel>((ref) {
     // 「正在看这个部署能用哪些…」，而上一次的结果明明还在手里。
     skipLoadingOnReload: true,
     skipLoadingOnRefresh: true,
-    loading: () => ModelLabel(text: selected ?? '默认模型'),
+    loading: () => ModelLabel(text: pick.model ?? '默认模型'),
     error: (e, _) => ModelLabel(
-      text: selected ?? '默认模型',
+      text: pick.model ?? '默认模型',
       unsupported: e is CortexApiException && e.isUnsupported,
     ),
     data: (c) {
-      if (selected == null) {
+      if (pick.isDefault) {
         final d = c.byId(c.defaultModel);
         return ModelLabel(
           text:
@@ -149,14 +198,14 @@ final modelLabelProvider = Provider.autoDispose<ModelLabel>((ref) {
               (c.defaultModel.isEmpty ? '默认模型' : c.defaultModel),
         );
       }
-      if (selected == kAutoModel) {
-        return const ModelLabel(text: '自动');
-      }
-      final m = c.byId(selected);
+      if (pick.isAuto) return const ModelLabel(text: '自动');
+      final m = c.pick(pick.source, pick.model!);
       if (m == null) {
         return ModelLabel(
-          text: selected,
-          warning: '这个部署已经没有开放这个模型了，下一轮会被拒绝。换一个吧。',
+          text: pick.model!,
+          warning:
+              '这个模型已经不在可选列表里了（那条来源被删了或关了），'
+              '下一轮会回落到默认。换一个吧。',
         );
       }
       return ModelLabel(

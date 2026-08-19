@@ -165,6 +165,7 @@ abstract interface class CortexApi {
     /// 逐轮带，与 [permissionMode] 同一路数：用户在设置里换了模型，
     /// **下一句**就该按新的走。
     String? model,
+    String? source,
   });
 
   /// `GET /runs/{session_id}` → SSE —— 挂上一个**已经在跑**的轮次。

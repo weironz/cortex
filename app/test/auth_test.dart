@@ -644,6 +644,7 @@ class _GateApi
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
+    String? source,
     bool sandbox = false,
   }) => throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
 
