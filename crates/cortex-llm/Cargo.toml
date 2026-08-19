@@ -19,6 +19,16 @@ rmcp = { version = "1.8", default-features = false }
 # 图像块要把 &[u8] 编成 base64。与 cortex-providers 钉同一个大版本，
 # 免得多出一份 base64 实现。
 base64 = "0.22"
+# 生图走各家自己的协议（DashScope 的 `/api/v1/services/aigc/...`），
+# **不是** OpenAI 那套 `/chat/completions` —— 所以 `cortex-providers` 那一层
+# 用不上，要自己发 HTTP。实测确认：百炼的 OpenAI 兼容模式只覆盖
+# chat/completions，没有 `/v1/images/generations`
+# ⚠️ 0.13 的 TLS feature 叫 `rustls`，不是 `rustls-tls` —— 取件那次
+# 已经栽过一回
+reqwest = { workspace = true, default-features = false, features = [
+  "json",
+  "rustls",
+] }
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true

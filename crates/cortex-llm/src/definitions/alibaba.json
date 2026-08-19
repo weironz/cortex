@@ -1,0 +1,79 @@
+{
+  "name": "alibaba",
+  "engine": "openai",
+  "display_name": "Alibaba (Qwen)",
+  "description": "通义千问 · 阿里云百炼（OpenAI 兼容）",
+  "api_key_env": "DASHSCOPE_API_KEY",
+  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "models": [
+    {
+      "name": "qwen3.7-max",
+      "context_limit": 1000000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": false
+    },
+    {
+      "name": "qwen3.6-plus",
+      "context_limit": 1000000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": true
+    },
+    {
+      "name": "qwen3-max",
+      "context_limit": 262144,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": false
+    },
+    {
+      "name": "qwen-plus",
+      "context_limit": 1000000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": false
+    },
+    {
+      "name": "qwen-turbo",
+      "context_limit": 1000000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": false
+    },
+    {
+      "name": "qwen-flash",
+      "context_limit": 1000000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": false
+    },
+    {
+      "name": "qwen3-coder-plus",
+      "context_limit": 1000000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": false
+    }
+  ],
+  "headers": null,
+  "timeout_seconds": null,
+  "requires_auth": true,
+  "dynamic_models": true,
+  "preserves_thinking": true,
+  "supports_streaming": true
+}

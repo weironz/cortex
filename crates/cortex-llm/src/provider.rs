@@ -51,6 +51,12 @@ const BUILTIN: &[(&str, &str)] = &[
     // 上游那份的 base_url 是没展开的 `${ZHIPU_BASE_URL}` —— 那个变量
     // 我们从不设，于是选了 GLM 就是个连不上的端点，而字面上看不出来
     ("zhipu", include_str!("definitions/zhipu.json")),
+    // 上游那份默认**国际站**（`dashscope-intl`），而中国大陆的账号打它
+    // 必然 401（`Incorrect API key`）—— 同一把 key 换成
+    // `dashscope.aliyuncs.com` 立刻拉回 240 个模型。2026-08-19 实测。
+    //
+    // 错在这里特别难查：报的是「密钥不对」，而密钥完全没问题
+    ("alibaba", include_str!("definitions/alibaba.json")),
 ];
 
 /// 把固定密钥喂给 goose，而不是让它自己去读环境变量。

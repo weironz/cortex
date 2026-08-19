@@ -33,6 +33,7 @@ mod delegated_token;
 mod env;
 mod episodes;
 mod error;
+mod image;
 mod import;
 mod llm;
 mod model_pick;

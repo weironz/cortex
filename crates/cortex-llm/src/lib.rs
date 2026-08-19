@@ -39,6 +39,7 @@
 pub mod catalog;
 pub mod client;
 pub mod error;
+pub mod image;
 pub mod provider;
 pub mod vision;
 
