@@ -14,6 +14,7 @@ library;
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/chat/widgets/model_chip.dart';
+import 'package:cortex_app/auth/local_llm_store.dart';
 import 'package:cortex_app/features/settings/pages/model_page.dart';
 import 'package:cortex_app/features/settings/pages/model_picker.dart';
 import 'package:cortex_app/state/app_providers.dart';
@@ -136,19 +137,60 @@ void main() {
         ),
       );
 
-      // 从设置页那一侧选
-      await tester.tap(find.text('DeepSeek V4 Flash'));
-      for (var i = 0; i < 6; i++) {
+      // 从设置页那一侧开面板选 —— 两处弹的是同一个 `showModelPicker`
+      await tester.tap(find.text('更改'));
+      for (var i = 0; i < 8; i++) {
         await tester.pump(const Duration(milliseconds: 100));
       }
+      await _tapInSheet(tester, find.text('DeepSeek V4 Flash').last);
 
       expect(
         find.text('DeepSeek V4 Flash'),
         findsNWidgets(2),
         reason:
-            'chip 上还是旧的话，说明两处各存了一份状态 —— '
-            '那时用户看到的和发出去的会是两个不同的模型',
+            'chip 与设置行都该显示新的。只有一个变了的话，说明两处各存了'
+            '一份状态 —— 那时用户看到的和发出去的会是两个不同的模型',
       );
+    });
+  });
+
+  group('设置页的三节', () {
+    testWidgets('三个问题各有标题，不是一串平铺的选项', (tester) async {
+      final c = _boot();
+      addTearDown(c.dispose);
+      await _pump(tester, c, const ModelPage());
+
+      // 用户的原话是「上来就给四种选择，太难理解了」—— 他没看错：
+      // 那四项看着并列，实际回答三个不同问题。标题是唯一能让这件事
+      // 不用解释就看得出来的东西
+      expect(find.text('用哪个模型'), findsOneWidget);
+      expect(find.text('谁的账户付这笔钱'), findsOneWidget);
+      expect(
+        find.text('没有网的时候打给谁'),
+        kCanStoreLocalLlm ? findsOneWidget : findsNothing,
+        reason:
+            'Web 上这一节该整节消失 —— 那里没有本地 agent，配置存了也没有'
+            '任何东西会读它。留一个空标题会让人以为这里坏了',
+      );
+    });
+
+    testWidgets('选模型收成一行，六个选项在面板里', (tester) async {
+      final c = _boot();
+      addTearDown(c.dispose);
+      await _pump(tester, c, const ModelPage());
+
+      // 铺开的话这一节体积是另外两节的三倍，于是它像「主菜单」
+      // 而后两节像它的下级
+      expect(find.text('跟随部署'), findsNothing);
+      expect(find.text('DeepSeek V4 Flash'), findsNothing);
+      expect(find.text('更改'), findsOneWidget);
+
+      await tester.tap(find.text('更改'));
+      for (var i = 0; i < 8; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(find.text('跟随部署'), findsOneWidget);
+      expect(find.text('DeepSeek V4 Flash'), findsOneWidget);
     });
   });
 

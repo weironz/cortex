@@ -10,10 +10,29 @@ import '../../../models/llm_key_status.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/model_controller.dart';
 
-/// 模型这一页：服务端那把 key 之外的两个出口。
+/// 模型这一页：**三个问题，各一节**。
 ///
-/// 「自己的 key」与「本机模型」放在一起，是因为它们回答的是同一个问题
-/// —— **这一轮由谁付钱、跑在哪** —— 只是答案一个在云上一个在本机。
+/// # 为什么要分节
+///
+/// 原先这一页是一串平铺的选项：六个单选按钮（跟随部署 / 自动 / 四个型号），
+/// 紧接着「自己的 API key」，再接着「本机模型」。用户的原话是
+/// 「上来就给四种选择，太难理解了」。
+///
+/// 他没看错 —— 那四项**看起来并列，实际回答三个不同问题**：
+///
+/// | 问题 | 谁回答 |
+/// |---|---|
+/// | 用哪个模型 | 跟随部署 / 自动 / 指定一个 |
+/// | 谁的账户付这笔钱 | 服务端那把 key，还是你自己的 |
+/// | 没有网的时候打给谁 | 本机模型（只有桌面端有这一节） |
+///
+/// 平铺的问题不在「选项多」，而在**读者无从知道哪些是互斥的**：
+/// 「自己的 API key」看着像第四个模型选项，可它跟选哪个模型毫无关系。
+/// 分节之后，同一节里的东西互斥、跨节的东西正交，这件事不用解释就看得出来。
+///
+/// 顺带把第一节收成一行：铺开六个单选项会让它的体积是另外两节的三倍，
+/// 于是它像「主菜单」而后两节像它的下级。换模型的主入口现在也不在这儿 ——
+/// 输入框下面那个 chip 才是（见 `ModelChip`）。
 class ModelPage extends StatelessWidget {
   const ModelPage({super.key});
 
@@ -21,15 +40,77 @@ class ModelPage extends StatelessWidget {
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.symmetric(horizontal: 4),
     children: const [
-      // 选模型排在最前：这是这一页最常被打开的理由
-      ModelPickerTile(),
-      Divider(height: 28),
-      // 配额超限的消息里写着「可以在设置里填自己的 API key」。那句话在这个
-      // 入口存在之前就已经发到用户眼前了 —— 一个正被拦住的人会来这里找它
-      OwnApiKeyTile(),
-      LocalLlmTile(),
+      _Section(
+        title: '用哪个模型',
+        blurb: '这个选择逐轮生效，下一句就按新的走。',
+        child: ModelPickerTile(),
+      ),
+      _Section(
+        title: '谁的账户付这笔钱',
+        // 配额超限的消息里写着「可以在设置里填自己的 API key」。那句话在这个
+        // 入口存在之前就已经发到用户眼前了 —— 一个正被拦住的人会来这里找它
+        blurb: '默认走服务端那把 key，并计入这里的配额。',
+        child: OwnApiKeyTile(),
+      ),
+      // 这一节 Web 上整节不显示 —— 浏览器里没有本地 agent，
+      // 这份配置存了也没有任何东西会读它（见 `local_llm_store_web.dart`）。
+      // **不是「Web 功能少一块」**，是那里根本不存在这个问题
+      _Section(
+        title: '没有网的时候打给谁',
+        blurb: '离线模式下本地 agent 直连你填的端点，配置只存在这台电脑上。',
+        child: LocalLlmTile(),
+      ),
     ],
   );
+}
+
+/// 一节：标题 + 一句话说清这一节在回答什么 + 内容。
+///
+/// 内容为空（例如 Web 上的「本机模型」）时**整节消失** ——
+/// 留一个空标题会让人以为这里坏了。
+class _Section extends StatelessWidget {
+  const _Section({
+    required this.title,
+    required this.blurb,
+    required this.child,
+  });
+
+  final String title;
+  final String blurb;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    if (!_visible(child)) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 22),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: theme.textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            blurb,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 6),
+          child,
+        ],
+      ),
+    );
+  }
+
+  /// 这一节有没有内容。目前只有「本机模型」会整节缺席（Web）。
+  static bool _visible(Widget child) =>
+      child is! LocalLlmTile || kCanStoreLocalLlm;
 }
 
 /// 自带 API key 的那一格。
@@ -164,10 +245,12 @@ class OwnApiKeyTileState extends ConsumerState<OwnApiKeyTile> {
       title: const Text('自己的 API key'),
       subtitle: Text(
         st.configured
-            ? '正在用你自己的 ${st.provider} key（…${st.keyTail}）'
+            ? '你自己的 ${st.provider} key（…${st.keyTail}）'
                   '${st.baseUrl == null ? "" : " → ${st.baseUrl}"} —— 这部分调用不占配额。'
-            : '填一把自己的 key，这之后的调用走你自己的账户，不占这里的配额。'
-                  '明文只会在保存那一次发出去，服务端加密存储、之后只回后四位。',
+            // 「明文只发一次」这句必须留着：它是用户决定要不要填的依据，
+            // 而分节的标题回答不了「我的 key 会被怎么处理」
+            : '填一把自己的，调用就走你自己的账户。明文只在保存那一次发出去，'
+                  '服务端加密存储、之后只回后四位。',
         style: theme.textTheme.bodySmall,
       ),
       trailing: _busy
@@ -403,9 +486,8 @@ class LocalLlmTile extends ConsumerWidget {
         '离线时用 ${cfg.provider}'
             '${cfg.model.isEmpty ? "" : " · ${cfg.model}"}'
             '${cfg.baseUrl.isEmpty ? "" : " → ${cfg.baseUrl}"}',
-      _ =>
-        '离线模式要用它 —— 没有 cortexd 就没有可代理的对象，'
-            '本地 agent 必须自己知道打给谁。只存在这台电脑的系统凭据库里。',
+      // 节标题已经说过「配置只存在这台电脑上」，这里只说**没配的后果**
+      _ => '还没配 —— 断网时这台机器发不出消息。',
     };
 
     return ListTile(

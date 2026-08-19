@@ -96,6 +96,29 @@ Future<void> _settle(bool Function() cond, {int rounds = 60}) async {
   }
 }
 
+/// 点开「更改」，把面板拉出来。
+///
+/// 设置页现在只显示**当前是什么**，那六个选项在面板里 —— 平铺六个单选项
+/// 会让这一节的体积是另外两节的三倍，用户读到的是「上来就四种选择」。
+Future<void> _openPicker(WidgetTester tester) async {
+  await tester.tap(find.text('更改'));
+  for (var i = 0; i < 8; i++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+}
+
+/// 点面板里的一项。**要先 `ensureVisible`** —— 底部面板在测试里能排到
+/// 视口之外，那时 `tap` 只打印一行 Warning 就过去了，测试表现为
+/// 「点了但什么都没发生」，而失败信息里一个字都没提是没点到。
+Future<void> _tapInSheet(WidgetTester tester, Finder f) async {
+  await tester.ensureVisible(f);
+  await tester.pump(const Duration(milliseconds: 200));
+  await tester.tap(f);
+  for (var i = 0; i < 6; i++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+}
+
 Future<void> _pump(WidgetTester tester, ProviderContainer container) async {
   tester.view.physicalSize = const Size(1000, 1400);
   tester.view.devicePixelRatio = 1.0;
@@ -190,6 +213,7 @@ void main() {
       final c = _boot(api, withChat: false);
       addTearDown(c.dispose);
       await _pump(tester, c);
+      await _openPicker(tester);
 
       expect(find.text('老式补全模型'), findsOneWidget);
       expect(
@@ -202,7 +226,7 @@ void main() {
 
       // 点它不该生效
       await tester.tap(find.text('老式补全模型'), warnIfMissed: false);
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
       expect(c.read(selectedModelProvider), isNull);
     });
 
@@ -211,6 +235,7 @@ void main() {
       final c = _boot(api, withChat: false);
       addTearDown(c.dispose);
       await _pump(tester, c);
+      await _openPicker(tester);
 
       expect(
         find.textContaining('不知道它支不支持工具调用'),
@@ -218,8 +243,7 @@ void main() {
         reason: '「不知道」与「不行」是两回事。当成不行会把一个能用的模型挡在外面',
       );
 
-      await tester.tap(find.text('unknown-model'));
-      await tester.pump();
+      await _tapInSheet(tester, find.text('unknown-model'));
       expect(
         c.read(selectedModelProvider),
         'unknown-model',
@@ -232,6 +256,7 @@ void main() {
       final c = _boot(api, withChat: false);
       addTearDown(c.dispose);
       await _pump(tester, c);
+      await _openPicker(tester);
 
       expect(find.text('自动'), findsOneWidget);
       expect(
@@ -252,7 +277,7 @@ void main() {
       addTearDown(c.dispose);
       await _pump(tester, c);
 
-      expect(find.textContaining('不支持切换模型'), findsOneWidget);
+      expect(find.textContaining('这个部署选不了模型'), findsOneWidget);
       expect(find.text('重试'), findsNothing, reason: '没这个功能不是重试能解决的');
       // autoDispose 的回收是排在定时器上的。错误态这一支比另外三支多走一次
       // 重建，回收因此排在了断言之后 —— 不排干净的话树销毁时会被判成
