@@ -50,6 +50,19 @@ pub struct LlmStreamRequest {
     /// 的行为与从前**逐字节相同**。
     #[serde(default)]
     pub model: crate::model_choice::ModelChoice,
+    /// 这个模型属于哪条**来源**（`GET /settings/model-sources` 里的 id）。
+    ///
+    /// `None` 或 `"deployment"` = 部署提供的那条（服务端的 key，计配额）。
+    ///
+    /// # 为什么是独立字段，而不是编进 [`model`](Self::model)
+    ///
+    /// 编成 `来源:型号` 那种字符串拆不干净：**ollama 的型号名本身带冒号**
+    /// （`llama3:8b`）。而且同一家可以配两条来源（两个网关、两个账号），
+    /// 光靠供应商名也认不出是哪一条。
+    ///
+    /// 老客户端不传这个字段 → 部署那条，行为与从前逐字节相同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub system: String,
     pub messages: Vec<Message>,
     #[serde(default)]

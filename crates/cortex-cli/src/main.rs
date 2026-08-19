@@ -695,6 +695,10 @@ async fn one_turn(
             attachments: Vec::new(),
             // `--model`（2026-08-19 补）。空串按默认档处理，见 `ModelChoice`
             model,
+            // CLI 暂时只认部署那条来源。给它一个 `--source` 要先能列出
+            // 来源（那是 `/settings/model-sources`），而 CLI 现在连
+            // 模型列表都不列 —— 加半个不如不加
+            source: None,
             // `--permission-mode`（2026-08-17 补）。收得到 ask 与
             // accept-edits；bypass 被显式拒绝，见 `parse_cli_permission_mode`
             permission_mode,

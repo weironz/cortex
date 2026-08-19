@@ -533,7 +533,7 @@ class _MockConfig extends AppConfigNotifier {
 /// A daemon stand-in for the gate: only `/health` and `/auth/ticket` matter.
 class _GateApi
     with
-        LlmKeyUnsupported,
+        ModelSourcesUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,

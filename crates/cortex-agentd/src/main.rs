@@ -27,7 +27,6 @@
 mod accounts;
 mod auth;
 mod blobs;
-mod byo_key;
 mod credentials;
 mod cursor;
 mod delegated_token;
@@ -37,6 +36,7 @@ mod error;
 mod import;
 mod llm;
 mod model_pick;
+mod model_sources;
 mod presence;
 mod pricing;
 mod projects;

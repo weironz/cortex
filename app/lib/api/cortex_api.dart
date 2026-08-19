@@ -5,7 +5,7 @@ import 'api_exception.dart';
 import '../import/import_source.dart';
 import '../models/account.dart';
 import '../models/auth_tokens.dart';
-import '../models/llm_key_status.dart';
+import '../models/model_source.dart';
 import '../models/mcp.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
@@ -322,20 +322,30 @@ abstract interface class CortexApi {
   /// 而已经泄露出去的那一份照样能用到 30 天后。
   Future<void> logout(String refreshToken);
 
-  /// `GET /settings/llm-key` —— 填没填过自带 key、填的是哪一把。
-  Future<LlmKeyStatus> llmKeyStatus();
+  /// `GET /settings/model-sources` —— 全部模型来源（含部署提供的那条）。
+  Future<ModelSources> modelSources();
 
-  /// `PUT /settings/llm-key` —— 存一把自己的 key。
+  /// 新增（`id == null`）或修改一条来源。
   ///
-  /// 明文只在这一次请求体里出现，之后再也拿不回来（服务端只回后 4 位）。
-  Future<LlmKeyStatus> setLlmKey({
+  /// 明文 key 只在这一次请求体里出现，之后再也拿不回来（服务端只回后 4 位）。
+  /// 改一条时 `apiKey` 留空 = **不动原来那把**。
+  Future<ModelSources> saveModelSource({
+    String? id,
     required String provider,
-    required String apiKey,
+    String apiKey,
+    String label,
     String? baseUrl,
+    bool? enabled,
+    List<String>? models,
   });
 
-  /// `DELETE /settings/llm-key` —— 撤下，回到用服务端那把（重新占配额）。
-  Future<LlmKeyStatus> clearLlmKey();
+  /// 删掉一条。部署提供的那条删不掉（服务端会拒）。
+  Future<ModelSources> deleteModelSource(String id);
+
+  /// 去问这条来源的供应商它到底有哪些型号。
+  ///
+  /// 拉不动时服务端回落到内置定义并把 `live` 置 false —— 界面要说出来。
+  Future<FetchedModels> fetchSourceModels(String id);
 
   /// Hands the daemon a file to parse, and gets back something cheap to refer
   /// to it by.
@@ -595,8 +605,8 @@ abstract interface class CortexApi {
 /// 编译报错，而是静默退化成「这个部署不支持」—— 用户看到的是入口消失了。
 /// 同上，给 [CortexApi.whoAmI] 用。
 ///
-/// 单开一个而不是并进 [LlmKeyUnsupported]：那个名字说的是「存不了 API key」，
-/// 把「答不出我是谁」塞进去，下一个读到 `with LlmKeyUnsupported` 的人会
+/// 单开一个而不是并进 [ModelSourcesUnsupported]：那个名字说的是「存不了 API key」，
+/// 把「答不出我是谁」塞进去，下一个读到 `with ModelSourcesUnsupported` 的人会
 /// 以为这个替身只是没有密钥存储。名字与它承诺的事对不上，是这一类 mixin
 /// 最容易积累的债。
 ///
@@ -710,14 +720,22 @@ mixin SandboxHealthUnsupported {
   Future<SandboxHealth> sandboxHealth() async => SandboxHealth.absent;
 }
 
-mixin LlmKeyUnsupported {
-  Future<LlmKeyStatus> llmKeyStatus() async => LlmKeyStatus.empty;
+mixin ModelSourcesUnsupported {
+  Future<ModelSources> modelSources() async => const ModelSources();
 
-  Future<LlmKeyStatus> setLlmKey({
+  Future<ModelSources> saveModelSource({
+    String? id,
     required String provider,
-    required String apiKey,
+    String apiKey = '',
+    String label = '',
     String? baseUrl,
-  }) async => LlmKeyStatus.empty;
+    bool? enabled,
+    List<String>? models,
+  }) async => const ModelSources();
 
-  Future<LlmKeyStatus> clearLlmKey() async => LlmKeyStatus.empty;
+  Future<ModelSources> deleteModelSource(String id) async =>
+      const ModelSources();
+
+  Future<FetchedModels> fetchSourceModels(String id) async =>
+      const FetchedModels();
 }

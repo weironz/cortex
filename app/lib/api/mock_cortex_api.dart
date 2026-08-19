@@ -3,7 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 import '../models/account.dart';
 import '../models/auth_tokens.dart';
-import '../models/llm_key_status.dart';
+import '../models/model_source.dart';
 import 'package:cortex_app/models/import_plan.dart';
 import 'package:cortex_app/import/import_source.dart';
 import 'dart:math';
@@ -40,46 +40,8 @@ import 'cortex_api.dart';
 /// milliseconds, not all at once) — so switching to the real backend is a
 /// one-line provider change, not a rewrite.
 class MockCortexApi
-    with RunAttachUnsupported, LlmKeyUnsupported, SandboxHealthUnsupported
+    with RunAttachUnsupported, ModelSourcesUnsupported, SandboxHealthUnsupported
     implements CortexApi {
-  /// 供应商清单要**真的有东西**。
-  ///
-  /// `LlmKeyUnsupported` 回的是 `LlmKeyStatus.empty`，它的 `providers` 是空的
-  /// —— 而空清单在界面上的含义是「老服务端，退回手打输入框」。照搬它，
-  /// 那个下拉在 mock 形态下**一次都画不出来**，测试和离线演示看到的
-  /// 都是它取代掉的那个旧输入框。
-  ///
-  /// 三家足够：一家要 key、一家免 key（ollama）、一家用来验切换。
-  @override
-  Future<LlmKeyStatus> llmKeyStatus() async {
-    await _latency(90);
-    return const LlmKeyStatus(
-      configured: false,
-      supported: true,
-      providers: [
-        ProviderChoice(
-          id: 'deepseek',
-          displayName: 'DeepSeek',
-          description: 'DeepSeek 官方 API（OpenAI 兼容）',
-          baseUrl: 'https://api.deepseek.com',
-        ),
-        ProviderChoice(
-          id: 'anthropic',
-          displayName: 'Anthropic',
-          description: 'Claude',
-          baseUrl: 'https://api.anthropic.com',
-        ),
-        ProviderChoice(
-          id: 'ollama',
-          displayName: 'Ollama',
-          description: '本机 Ollama，无需密钥',
-          baseUrl: 'http://localhost:11434',
-          requiresAuth: false,
-        ),
-      ],
-    );
-  }
-
   MockCortexApi({int? seed, this.instant = false})
     : _random = Random(seed ?? 7);
 
@@ -101,6 +63,85 @@ class MockCortexApi
   ///
   /// 治在源头而不是在测试里追着 pump：追 pump 只是让这一次赶上。
   final bool instant;
+
+  /// 来源列表要**真的有东西**。
+  ///
+  /// `ModelSourcesUnsupported` 回的是空的 `ModelSources`，而空列表在界面上
+  /// 的含义是「这个部署一条来源都没有」。照搬它，模型那一页在 mock 形态下
+  /// 就是一片空白 —— 测试与离线演示看到的都不是真实形状。
+  ///
+  /// 三条足够：部署提供的那条（内置、计配额）、一条自带 key 的、
+  /// 一条关着的。
+  @override
+  Future<ModelSources> modelSources() async {
+    await _latency(90);
+    return const ModelSources(
+      canAdd: true,
+      sources: [
+        ModelSource(
+          id: kDeploymentSource,
+          provider: 'deepseek',
+          label: '部署提供',
+          builtin: true,
+          models: [
+            'deepseek-v4-pro',
+            'deepseek-v4-flash',
+            'legacy-completion',
+            'unknown-model',
+          ],
+        ),
+        ModelSource(
+          id: '01M0MOCKSOURCEAAAAAAAAAAAA',
+          provider: 'alibaba',
+          keyTail: '5236',
+          freeOfQuota: true,
+          models: ['qwen-flash', 'qwen-plus'],
+        ),
+        ModelSource(
+          id: '01M0MOCKSOURCEBBBBBBBBBBBB',
+          provider: 'ollama',
+          label: '本机 Ollama',
+          keyTail: '',
+          enabled: false,
+          baseUrl: 'http://localhost:11434',
+          freeOfQuota: true,
+        ),
+      ],
+      providers: [
+        ProviderChoice(
+          id: 'deepseek',
+          displayName: 'DeepSeek',
+          description: 'DeepSeek 官方 API（OpenAI 兼容）',
+          baseUrl: 'https://api.deepseek.com',
+        ),
+        ProviderChoice(
+          id: 'alibaba',
+          displayName: 'Alibaba (Qwen)',
+          description: '通义千问',
+          baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        ),
+        ProviderChoice(
+          id: 'ollama',
+          displayName: 'Ollama',
+          description: '本机 Ollama，无需密钥',
+          baseUrl: 'http://localhost:11434',
+          requiresAuth: false,
+        ),
+      ],
+    );
+  }
+
+  /// 拉型号：mock 里**故意回 live=false**，让「回落要说出来」那条界面
+  /// 分支在演示形态下也画得出来。
+  @override
+  Future<FetchedModels> fetchSourceModels(String id) async {
+    await _latency(200);
+    return const FetchedModels(
+      models: ['qwen-flash', 'qwen-plus', 'qwen-turbo'],
+      live: false,
+      note: '问不到这家的型号列表（mock 后端不联网），下面这份是内置的',
+    );
+  }
 
   /// The mock stands in for a plain cortexd: no local agent, so no local
   /// workspace route. Reporting it as unsupported is what makes the caller

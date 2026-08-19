@@ -37,7 +37,7 @@ import 'package:cortex_app/models/sync_record.dart';
 /// check that it really does.
 class ReplayApi
     with
-        LlmKeyUnsupported,
+        ModelSourcesUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,

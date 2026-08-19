@@ -14,8 +14,6 @@ library;
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/chat/widgets/model_chip.dart';
-import 'package:cortex_app/auth/local_llm_store.dart';
-import 'package:cortex_app/features/settings/pages/model_page.dart';
 import 'package:cortex_app/features/settings/pages/model_picker.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/model_controller.dart';
@@ -151,100 +149,6 @@ void main() {
             'chip 与设置行都该显示新的。只有一个变了的话，说明两处各存了'
             '一份状态 —— 那时用户看到的和发出去的会是两个不同的模型',
       );
-    });
-  });
-
-  group('设置页的三节', () {
-    testWidgets('三个问题各有标题，不是一串平铺的选项', (tester) async {
-      final c = _boot();
-      addTearDown(c.dispose);
-      await _pump(tester, c, const ModelPage());
-
-      // 用户的原话是「上来就给四种选择，太难理解了」—— 他没看错：
-      // 那四项看着并列，实际回答三个不同问题。标题是唯一能让这件事
-      // 不用解释就看得出来的东西
-      expect(find.text('用哪个模型'), findsOneWidget);
-      expect(find.text('谁的账户付这笔钱'), findsOneWidget);
-      expect(
-        find.text('没有网的时候打给谁'),
-        kCanStoreLocalLlm ? findsOneWidget : findsNothing,
-        reason:
-            'Web 上这一节该整节消失 —— 那里没有本地 agent，配置存了也没有'
-            '任何东西会读它。留一个空标题会让人以为这里坏了',
-      );
-    });
-
-    testWidgets('选模型收成一行，六个选项在面板里', (tester) async {
-      final c = _boot();
-      addTearDown(c.dispose);
-      await _pump(tester, c, const ModelPage());
-
-      // 铺开的话这一节体积是另外两节的三倍，于是它像「主菜单」
-      // 而后两节像它的下级
-      expect(find.text('跟随部署'), findsNothing);
-      expect(find.text('DeepSeek V4 Flash'), findsNothing);
-      expect(find.text('更改'), findsOneWidget);
-
-      await tester.tap(find.text('更改'));
-      for (var i = 0; i < 8; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
-      expect(find.text('跟随部署'), findsOneWidget);
-      expect(find.text('DeepSeek V4 Flash'), findsOneWidget);
-    });
-  });
-
-  group('供应商下拉', () {
-    testWidgets('是下拉不是输入框，且带上端点', (tester) async {
-      final c = _boot();
-      addTearDown(c.dispose);
-      await _pump(tester, c, const OwnApiKeyTile());
-
-      await tester.tap(find.text('填写'));
-      for (var i = 0; i < 8; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
-
-      expect(
-        find.byType(DropdownButtonFormField<String>),
-        findsOneWidget,
-        reason:
-            '手打的话，填对完全靠猜中我们内部的 id —— '
-            'claude 不行要写 anthropic、kimi 不行要写 moonshot',
-      );
-      expect(
-        find.textContaining('https://api.deepseek.com'),
-        findsWidgets,
-        reason:
-            '端点输入框要说得出「留空会连到哪」——「用官方的」'
-            '回答不了「官方的是哪个」，而那正是想改端点的人要核对的',
-      );
-    });
-
-    testWidgets('免 key 的那家不逼人填 key', (tester) async {
-      final c = _boot();
-      addTearDown(c.dispose);
-      await _pump(tester, c, const OwnApiKeyTile());
-
-      await tester.tap(find.text('填写'));
-      for (var i = 0; i < 8; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
-      expect(find.widgetWithText(TextField, 'API key'), findsOneWidget);
-
-      await tester.tap(find.byType(DropdownButtonFormField<String>));
-      await tester.pump(const Duration(milliseconds: 400));
-      await tester.tap(find.text('Ollama').last);
-      for (var i = 0; i < 6; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
-
-      expect(
-        find.widgetWithText(TextField, 'API key'),
-        findsNothing,
-        reason: '本机 ollama 没有密钥这回事。留着这个框，用户会以为自己漏填了什么',
-      );
-      expect(find.textContaining('不需要密钥'), findsOneWidget);
     });
   });
 }

@@ -1,316 +1,562 @@
-import 'model_picker.dart';
-import 'dart:async';
+/// 模型这一页 —— **一份来源列表，第一步就是「添加模型」**。
+///
+/// # 它取代了什么
+///
+/// 从前这里平铺着三样东西：「跟随部署」六个单选项、「自己的 API key」、
+/// 「本机模型」。用户的原话是「上来就给四种选择，太难理解了」，接着是
+/// 「第一步都是添加模型，不分云端本地，离线在线」。
+///
+/// 那三样结构上本来就是同一个东西（`{供应商, key, 端点}`），只是**存储
+/// 位置**不同。位置是我们的实现细节，不该由用户来分类。
+///
+/// 形态参照 Cherry Studio 的「模型服务」：左边一列来源，右边是选中那条的
+/// 详情（密钥 / 端点 / 型号），型号靠「获取模型列表」向供应商实拉。
+///
+/// # 部署提供的那条也在列表里
+///
+/// 它只读、不可删（`builtin`），但**能关**。藏起来的话，一个零配置就能聊
+/// 的新用户会以为自己什么都没有；而不给关，一个自带 key 的人就没办法
+/// 阻止某些对话去花服务端的钱。
+library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../auth/local_llm_store.dart';
-import '../../../core/local_llm.dart';
-import '../../../models/llm_key_status.dart';
+import '../../../api/api_exception.dart';
+import '../../../models/model_source.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/model_controller.dart';
 
-/// 模型这一页：**三个问题，各一节**。
-///
-/// # 为什么要分节
-///
-/// 原先这一页是一串平铺的选项：六个单选按钮（跟随部署 / 自动 / 四个型号），
-/// 紧接着「自己的 API key」，再接着「本机模型」。用户的原话是
-/// 「上来就给四种选择，太难理解了」。
-///
-/// 他没看错 —— 那四项**看起来并列，实际回答三个不同问题**：
-///
-/// | 问题 | 谁回答 |
-/// |---|---|
-/// | 用哪个模型 | 跟随部署 / 自动 / 指定一个 |
-/// | 谁的账户付这笔钱 | 服务端那把 key，还是你自己的 |
-/// | 没有网的时候打给谁 | 本机模型（只有桌面端有这一节） |
-///
-/// 平铺的问题不在「选项多」，而在**读者无从知道哪些是互斥的**：
-/// 「自己的 API key」看着像第四个模型选项，可它跟选哪个模型毫无关系。
-/// 分节之后，同一节里的东西互斥、跨节的东西正交，这件事不用解释就看得出来。
-///
-/// 顺带把第一节收成一行：铺开六个单选项会让它的体积是另外两节的三倍，
-/// 于是它像「主菜单」而后两节像它的下级。换模型的主入口现在也不在这儿 ——
-/// 输入框下面那个 chip 才是（见 `ModelChip`）。
-class ModelPage extends StatelessWidget {
+class ModelPage extends ConsumerStatefulWidget {
   const ModelPage({super.key});
 
   @override
-  Widget build(BuildContext context) => ListView(
-    padding: const EdgeInsets.symmetric(horizontal: 4),
-    children: const [
-      _Section(
-        title: '用哪个模型',
-        blurb: '这个选择逐轮生效，下一句就按新的走。',
-        child: ModelPickerTile(),
-      ),
-      _Section(
-        title: '谁的账户付这笔钱',
-        // 配额超限的消息里写着「可以在设置里填自己的 API key」。那句话在这个
-        // 入口存在之前就已经发到用户眼前了 —— 一个正被拦住的人会来这里找它
-        blurb: '默认走服务端那把 key，并计入这里的配额。',
-        child: OwnApiKeyTile(),
-      ),
-      // 这一节 Web 上整节不显示 —— 浏览器里没有本地 agent，
-      // 这份配置存了也没有任何东西会读它（见 `local_llm_store_web.dart`）。
-      // **不是「Web 功能少一块」**，是那里根本不存在这个问题
-      _Section(
-        title: '没有网的时候打给谁',
-        blurb: '离线模式下本地 agent 直连你填的端点，配置只存在这台电脑上。',
-        child: LocalLlmTile(),
-      ),
-    ],
-  );
+  ConsumerState<ModelPage> createState() => _ModelPageState();
 }
 
-/// 一节：标题 + 一句话说清这一节在回答什么 + 内容。
-///
-/// 内容为空（例如 Web 上的「本机模型」）时**整节消失** ——
-/// 留一个空标题会让人以为这里坏了。
-class _Section extends StatelessWidget {
-  const _Section({
-    required this.title,
-    required this.blurb,
-    required this.child,
-  });
-
-  final String title;
-  final String blurb;
-  final Widget child;
+class _ModelPageState extends ConsumerState<ModelPage> {
+  /// 选中的那条。`null` = 还没选，显示第一条。
+  String? _selected;
+  bool _busy = false;
+  Object? _error;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    if (!_visible(child)) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 22),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: theme.textTheme.titleSmall?.copyWith(
-              fontWeight: FontWeight.w700,
+    final async = ref.watch(modelSourcesProvider);
+
+    return async.when(
+      // ⚠️ **重拉时不要退回转圈**：认证落定时 `cortexApiProvider` 会重建一次，
+      // 那时 Riverpod 给的是「带着上一次结果的 AsyncLoading」，朴素的 `.when`
+      // 会匹配到 loading —— 表现是每次都闪一下空列表
+      skipLoadingOnReload: true,
+      skipLoadingOnRefresh: true,
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, _) {
+        // 老服务端没有这条路。那不是错误，也不是用户能处理的事
+        if (e is CortexApiException && e.isUnsupported) {
+          return _hint('这个部署还不支持管理模型来源（服务端版本较早），用的是它自己配的那个。');
+        }
+        return _hint(
+          e is CortexApiException ? e.message : '$e',
+          onRetry: () => ref.invalidate(modelSourcesProvider),
+        );
+      },
+      data: (data) {
+        final list = data.sources;
+        final current =
+            data.byId(_selected ?? '') ?? (list.isEmpty ? null : list.first);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  '$_error',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.error,
+                  ),
+                ),
+              ),
+            Expanded(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    width: 190,
+                    child: _SourceList(
+                      data: data,
+                      selected: current?.id,
+                      busy: _busy,
+                      onSelect: (id) => setState(() => _selected = id),
+                      onAdd: _add,
+                      onToggle: _toggle,
+                    ),
+                  ),
+                  const VerticalDivider(width: 20),
+                  Expanded(
+                    child: current == null
+                        ? _hint('还没有任何模型来源。点左边的「添加模型」开始。')
+                        : _Detail(
+                            key: ValueKey(current.id),
+                            data: data,
+                            source: current,
+                            busy: _busy,
+                            onEdit: () => _edit(current),
+                            onDelete: () => _delete(current),
+                            onFetch: () => _fetch(current),
+                            onModels: (m) => _saveModels(current, m),
+                          ),
+                  ),
+                ],
+              ),
             ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _hint(String text, {VoidCallback? onRetry}) => Padding(
+    padding: const EdgeInsets.all(12),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(text, style: Theme.of(context).textTheme.bodySmall),
+        if (onRetry != null)
+          TextButton(onPressed: onRetry, child: const Text('重试')),
+      ],
+    ),
+  );
+
+  /// 跑一次会改动来源的操作，然后重拉列表。
+  ///
+  /// 统一在这里 catch：每处各写一遍的话，迟早有一处把错误吞了，
+  /// 而症状是「点了保存，什么都没发生」。
+  Future<void> _run(Future<void> Function() body) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await body();
+      ref.invalidate(modelSourcesProvider);
+      // 型号列表变了，选择器也要重拉
+      ref.invalidate(modelCatalogProvider);
+    } on Object catch (e) {
+      if (mounted) {
+        setState(() => _error = e is CortexApiException ? e.message : e);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _add() async {
+    final data = ref.read(modelSourcesProvider).value;
+    if (data == null) return;
+    final got = await showDialog<_SourceForm>(
+      context: context,
+      builder: (_) => _SourceDialog(providers: data.providers),
+    );
+    if (got == null) return;
+    await _run(
+      () => ref
+          .read(cortexApiProvider)
+          .saveModelSource(
+            provider: got.provider,
+            apiKey: got.apiKey,
+            label: got.label,
+            baseUrl: got.baseUrl,
           ),
-          const SizedBox(height: 2),
+    );
+  }
+
+  Future<void> _edit(ModelSource s) async {
+    final data = ref.read(modelSourcesProvider).value;
+    if (data == null) return;
+    final got = await showDialog<_SourceForm>(
+      context: context,
+      builder: (_) => _SourceDialog(providers: data.providers, initial: s),
+    );
+    if (got == null) return;
+    await _run(
+      () => ref
+          .read(cortexApiProvider)
+          .saveModelSource(
+            id: s.id,
+            provider: got.provider,
+            apiKey: got.apiKey,
+            label: got.label,
+            baseUrl: got.baseUrl,
+          ),
+    );
+  }
+
+  Future<void> _delete(ModelSource s) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删掉这条来源？'),
+        content: const Text('里面那把 key 会一起删掉，不能撤销。只是想暂时不用的话，把它关掉即可。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('算了'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            child: const Text('删掉'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _run(() => ref.read(cortexApiProvider).deleteModelSource(s.id));
+  }
+
+  Future<void> _toggle(ModelSource s, bool on) => _run(
+    () => ref
+        .read(cortexApiProvider)
+        .saveModelSource(
+          id: s.id,
+          provider: s.provider,
+          label: s.label,
+          baseUrl: s.baseUrl,
+          enabled: on,
+        ),
+  );
+
+  Future<void> _saveModels(ModelSource s, List<String> models) => _run(
+    () => ref
+        .read(cortexApiProvider)
+        .saveModelSource(
+          id: s.id,
+          provider: s.provider,
+          label: s.label,
+          baseUrl: s.baseUrl,
+          models: models,
+        ),
+  );
+
+  /// 去问供应商它有哪些型号，把结果存回这条来源。
+  Future<void> _fetch(ModelSource s) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final got = await ref.read(cortexApiProvider).fetchSourceModels(s.id);
+      if (!mounted) return;
+      // 部署那条只读，拉回来只是给人看，不写库
+      if (!s.builtin) {
+        await ref
+            .read(cortexApiProvider)
+            .saveModelSource(
+              id: s.id,
+              provider: s.provider,
+              label: s.label,
+              baseUrl: s.baseUrl,
+              models: got.models,
+            );
+        ref.invalidate(modelSourcesProvider);
+        ref.invalidate(modelCatalogProvider);
+      }
+      if (!mounted) return;
+      // ⚠️ **回落必须说出来。** 悄悄回落的表现是「我点了获取列表，
+      // 它给了我一份看起来像样的、但其实是编译期写死的清单」，
+      // 而那份清单可能与这个账号真正开通的东西毫无关系
+      final msg = got.live
+          ? '拉到 ${got.models.length} 个型号'
+          : (got.note ?? '没拉到，用的是内置那份');
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(content: Text(msg), duration: const Duration(seconds: 6)),
+      );
+    } on Object catch (e) {
+      if (mounted) {
+        setState(() => _error = e is CortexApiException ? e.message : e);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+}
+
+/// 左边那一列。
+class _SourceList extends StatelessWidget {
+  const _SourceList({
+    required this.data,
+    required this.selected,
+    required this.busy,
+    required this.onSelect,
+    required this.onAdd,
+    required this.onToggle,
+  });
+
+  final ModelSources data;
+  final String? selected;
+  final bool busy;
+  final ValueChanged<String> onSelect;
+  final VoidCallback onAdd;
+  final void Function(ModelSource, bool) onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: ListView(
+            children: [
+              for (final s in data.sources)
+                _row(context, s, s.id == selected, theme),
+            ],
+          ),
+        ),
+        const SizedBox(height: 6),
+        if (data.canAdd)
+          OutlinedButton.icon(
+            onPressed: busy ? null : onAdd,
+            icon: const Icon(Icons.add, size: 16),
+            label: const Text('添加模型'),
+          )
+        else
+          // **如实说** —— 给一个存不进去的表单，用户会填、会点保存、
+          // 会以为成了，下次打开又是空的
           Text(
-            blurb,
+            '这个部署存不了密钥（服务端未配 CORTEX_SECRET_KEY），只能用它自己配的那条。',
             style: theme.textTheme.labelSmall?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
           ),
-          const SizedBox(height: 6),
-          child,
-        ],
+      ],
+    );
+  }
+
+  Widget _row(BuildContext ctx, ModelSource s, bool on, ThemeData theme) {
+    final scheme = theme.colorScheme;
+    return InkWell(
+      onTap: () => onSelect(s.id),
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+        decoration: BoxDecoration(
+          color: on ? scheme.primary.withValues(alpha: 0.10) : null,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    data.nameOf(s),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: s.enabled ? null : scheme.onSurfaceVariant,
+                    ),
+                  ),
+                  Text(
+                    _sub(s),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // 开关而不是删除：删掉再填一遍 key 是最烦的一种「临时关掉」
+            Switch(
+              value: s.enabled,
+              onChanged: busy ? null : (v) => onToggle(s, v),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  /// 这一节有没有内容。目前只有「本机模型」会整节缺席（Web）。
-  static bool _visible(Widget child) =>
-      child is! LocalLlmTile || kCanStoreLocalLlm;
+  /// 一条来源的副标题：**先说钱，再说型号**。
+  ///
+  /// 「免费」是这一列里最要紧的一位 —— 它回答「用这条会不会花我的额度」。
+  static String _sub(ModelSource s) {
+    final bits = <String>[
+      if (s.builtin) '免费 · 占配额' else '你的 key …${s.keyTail}',
+      '${s.models.length} 个型号',
+    ];
+    return bits.join(' · ');
+  }
 }
 
-/// 自带 API key 的那一格。
-///
-/// # 为什么不做成「输入框常驻」
-///
-/// 绝大多数人不需要它 —— 服务端那把 key 够用。常驻一个 API key 输入框
-/// 会让每个打开设置的人以为「我是不是该填点什么」。所以默认只显示状态，
-/// 点开才是输入。
-class OwnApiKeyTile extends ConsumerStatefulWidget {
-  const OwnApiKeyTile({super.key});
+/// 右边那一块：选中来源的详情。
+class _Detail extends StatelessWidget {
+  const _Detail({
+    super.key,
+    required this.data,
+    required this.source,
+    required this.busy,
+    required this.onEdit,
+    required this.onDelete,
+    required this.onFetch,
+    required this.onModels,
+  });
 
-  @override
-  ConsumerState<OwnApiKeyTile> createState() => OwnApiKeyTileState();
-}
-
-class OwnApiKeyTileState extends ConsumerState<OwnApiKeyTile> {
-  LlmKeyStatus? _status;
-  Object? _error;
-  bool _busy = false;
-
-  @override
-  void initState() {
-    super.initState();
-    unawaited(_refresh());
-  }
-
-  Future<void> _refresh() async {
-    try {
-      final s = await ref.read(cortexApiProvider).llmKeyStatus();
-      if (mounted) {
-        setState(() {
-          _status = s;
-          _error = null;
-        });
-      }
-    } on Object catch (e) {
-      // 读不出来不该让整个设置页出错 —— 其余每一项都还是好的
-      if (mounted) setState(() => _error = e);
-    }
-  }
-
-  Future<void> _edit() async {
-    final entered =
-        await showDialog<({String provider, String key, String baseUrl})>(
-          context: context,
-          builder: (_) => _ApiKeyDialog(
-            providers: _status?.providers ?? const [],
-            initial: _status?.provider,
-          ),
-        );
-    if (entered == null || !mounted) return;
-    setState(() => _busy = true);
-    try {
-      final s = await ref
-          .read(cortexApiProvider)
-          .setLlmKey(
-            provider: entered.provider,
-            apiKey: entered.key,
-            baseUrl: entered.baseUrl,
-          );
-      if (mounted) {
-        setState(() {
-          _status = s;
-          _error = null;
-        });
-      }
-    } on Object catch (e) {
-      if (mounted) setState(() => _error = e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _clear() async {
-    setState(() => _busy = true);
-    try {
-      final s = await ref.read(cortexApiProvider).clearLlmKey();
-      if (mounted) {
-        setState(() {
-          _status = s;
-          _error = null;
-        });
-      }
-    } on Object catch (e) {
-      if (mounted) setState(() => _error = e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
+  final ModelSources data;
+  final ModelSource source;
+  final bool busy;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+  final VoidCallback onFetch;
+  final ValueChanged<List<String>> onModels;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final st = _status;
+    final scheme = theme.colorScheme;
+    final p = data.providerOf(source.provider);
+    final endpoint = source.baseUrl ?? p?.baseUrl ?? '';
 
-    if (_error != null) {
-      return ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.key_outlined),
-        title: const Text('自己的 API key'),
-        subtitle: Text('读不出状态：$_error', style: theme.textTheme.bodySmall),
-        trailing: TextButton(onPressed: _refresh, child: const Text('重试')),
-      );
-    }
-    if (st == null) {
-      return const ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: Icon(Icons.key_outlined),
-        title: Text('自己的 API key'),
-        subtitle: Text('读取中…'),
-      );
-    }
-    // 这个部署存不了（没配主密钥）。**如实说** —— 给一个存不进去的
-    // 输入框，用户会填、会点保存、会以为成了，下次打开又是空的
-    if (!st.supported) {
-      return ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.key_off_outlined),
-        title: const Text('自己的 API key'),
-        subtitle: Text(
-          '这个部署没有开启（服务端未配置 CORTEX_SECRET_KEY，存不了密钥）。'
-          '所有调用走服务端那把 key，并计入配额。',
-          style: theme.textTheme.bodySmall,
-        ),
-      );
-    }
-
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(st.configured ? Icons.key : Icons.key_outlined),
-      title: const Text('自己的 API key'),
-      subtitle: Text(
-        st.configured
-            ? '你自己的 ${st.provider} key（…${st.keyTail}）'
-                  '${st.baseUrl == null ? "" : " → ${st.baseUrl}"} —— 这部分调用不占配额。'
-            // 「明文只发一次」这句必须留着：它是用户决定要不要填的依据，
-            // 而分节的标题回答不了「我的 key 会被怎么处理」
-            : '填一把自己的，调用就走你自己的账户。明文只在保存那一次发出去，'
-                  '服务端加密存储、之后只回后四位。',
-        style: theme.textTheme.bodySmall,
-      ),
-      trailing: _busy
-          ? const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (st.configured)
-                  TextButton(onPressed: _clear, child: const Text('撤下')),
-                TextButton(
-                  onPressed: _edit,
-                  child: Text(st.configured ? '换一把' : '填写'),
-                ),
-              ],
+    return ListView(
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                data.nameOf(source),
+                style: theme.textTheme.titleSmall,
+              ),
             ),
+            if (!source.builtin) ...[
+              TextButton(
+                onPressed: busy ? null : onEdit,
+                child: const Text('编辑'),
+              ),
+              TextButton(
+                onPressed: busy ? null : onDelete,
+                child: Text('删除', style: TextStyle(color: scheme.error)),
+              ),
+            ],
+          ],
+        ),
+        if (source.builtin)
+          Text(
+            '这条是服务端配的，改不了也删不掉。它花的是我们的钱，所以计入你的配额。',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          )
+        else
+          Text(
+            '密钥 …${source.keyTail} · 端点 $endpoint\n用它的调用走你自己的账户，不占配额。',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        const SizedBox(height: 14),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '模型（${source.models.length}）',
+                style: theme.textTheme.labelLarge,
+              ),
+            ),
+            TextButton.icon(
+              onPressed: busy ? null : onFetch,
+              icon: const Icon(Icons.refresh, size: 15),
+              label: const Text('获取模型列表'),
+            ),
+          ],
+        ),
+        if (source.models.isEmpty)
+          Text(
+            // 不拿内置目录顶替：目录知道这家有几十个型号，但这个账号未必
+            // 都开通了。填进选择器的每一个都必须是真的调得通的
+            '还没有型号。点「获取模型列表」去问这家它到底开放了哪些 —— '
+            '内置那份是编译期写死的，未必与你的账号一致。',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          )
+        else
+          for (final m in source.models)
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.memory_outlined, size: 18),
+              title: Text(m, style: theme.textTheme.bodySmall),
+              trailing: source.builtin
+                  ? null
+                  : IconButton(
+                      tooltip: '从这条来源移除',
+                      iconSize: 16,
+                      onPressed: busy
+                          ? null
+                          : () => onModels(
+                              source.models.where((x) => x != m).toList(),
+                            ),
+                      icon: const Icon(Icons.close),
+                    ),
+            ),
+      ],
     );
   }
 }
 
-/// 填 key 的对话框。
+/// 添加 / 编辑对话框的结果。
+class _SourceForm {
+  const _SourceForm({
+    required this.provider,
+    required this.apiKey,
+    required this.label,
+    required this.baseUrl,
+  });
+  final String provider;
+  final String apiKey;
+  final String label;
+  final String baseUrl;
+}
+
+/// 添加或编辑一条来源。
 ///
 /// # 供应商是下拉，不是输入框
 ///
-/// 服务端只认它自己那份清单里的名字（`byo_key` 保存时逐字校验）。
-/// 让人手打的话，能填对完全靠他猜中我们内部的 id —— `claude` 不行要写
-/// `anthropic`、`gemini` 不行要写 `google`、`kimi` 不行要写 `moonshot`。
-/// 猜错的反馈来得也晚：填完、点保存，才收到一句「不认识的供应商」。
-///
-/// 清单是服务端下发的（`providers`），不是客户端硬编一份 ——
-/// 硬编的那份迟早与校验那份分叉，而分叉的表现是「下拉里选得到、保存时被拒」。
-class _ApiKeyDialog extends StatefulWidget {
-  const _ApiKeyDialog({required this.providers, this.initial});
+/// 服务端只认它自己那份清单里的名字（保存时逐字校验）。让人手打的话，
+/// 填对完全靠他猜中我们内部的 id —— `claude` 不行要写 `anthropic`、
+/// `kimi` 不行要写 `moonshot`（实测被拒）。猜错的反馈来得也晚：
+/// 填完、点保存，才收到一句「不认识的供应商」。
+class _SourceDialog extends StatefulWidget {
+  const _SourceDialog({required this.providers, this.initial});
 
   final List<ProviderChoice> providers;
-
-  /// 已经填过的那家，回填用。
-  final String? initial;
+  final ModelSource? initial;
 
   @override
-  State<_ApiKeyDialog> createState() => _ApiKeyDialogState();
+  State<_SourceDialog> createState() => _SourceDialogState();
 }
 
-class _ApiKeyDialogState extends State<_ApiKeyDialog> {
+class _SourceDialogState extends State<_SourceDialog> {
   late String? _picked = _initialPick();
+  late final _label = TextEditingController(text: widget.initial?.label ?? '');
+  late final _baseUrl = TextEditingController(
+    text: widget.initial?.baseUrl ?? '',
+  );
   final _key = TextEditingController();
-  final _baseUrl = TextEditingController();
   bool _reveal = false;
-
-  /// 老服务端不下发 `providers`。那时退回手打 —— 一个空下拉比输入框更糟，
-  /// 它让人**完全无法**填，而这个功能在那种部署上其实是好的
-  bool get _manual => widget.providers.isEmpty;
-  final _manualProvider = TextEditingController();
 
   String? _initialPick() {
     if (widget.providers.isEmpty) return null;
-    final want = widget.initial;
+    final want = widget.initial?.provider;
     if (want != null && widget.providers.any((p) => p.id == want)) return want;
     return widget.providers.first.id;
   }
@@ -323,16 +569,10 @@ class _ApiKeyDialogState extends State<_ApiKeyDialog> {
   }
 
   @override
-  void initState() {
-    super.initState();
-    _manualProvider.text = widget.initial ?? '';
-  }
-
-  @override
   void dispose() {
-    _key.dispose();
+    _label.dispose();
     _baseUrl.dispose();
-    _manualProvider.dispose();
+    _key.dispose();
     super.dispose();
   }
 
@@ -342,62 +582,64 @@ class _ApiKeyDialogState extends State<_ApiKeyDialog> {
     final cur = _current;
     // 免鉴权的（本机 ollama）不该逼人填 key
     final needsKey = cur?.requiresAuth ?? true;
+    final editing = widget.initial != null;
 
     return AlertDialog(
-      title: const Text('填自己的 API key'),
+      title: Text(editing ? '编辑来源' : '添加模型'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (_manual)
-              TextField(
-                controller: _manualProvider,
-                autocorrect: false,
-                decoration: const InputDecoration(
-                  labelText: '供应商',
-                  hintText: 'deepseek / anthropic / …',
-                  helperText: '这个部署没有下发可选清单（服务端版本较早）',
-                  border: OutlineInputBorder(),
-                ),
-              )
-            else
-              DropdownButtonFormField<String>(
-                initialValue: _picked,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  labelText: '供应商',
-                  border: OutlineInputBorder(),
-                ),
-                items: [
-                  for (final p in widget.providers)
-                    DropdownMenuItem(
-                      value: p.id,
-                      child: Text(
-                        p.displayName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                ],
-                onChanged: (v) => setState(() => _picked = v),
+            DropdownButtonFormField<String>(
+              initialValue: _picked,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: '供应商',
+                border: OutlineInputBorder(),
               ),
+              items: [
+                for (final p in widget.providers)
+                  DropdownMenuItem(
+                    value: p.id,
+                    child: Text(
+                      p.displayName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+              onChanged: (v) => setState(() => _picked = v),
+            ),
             if (cur != null && cur.description.isNotEmpty) ...[
               const SizedBox(height: 6),
               Text(cur.description, style: theme.textTheme.labelSmall),
             ],
             const SizedBox(height: 14),
+            TextField(
+              controller: _label,
+              autocorrect: false,
+              decoration: const InputDecoration(
+                labelText: '名字（可选）',
+                hintText: '同一家配两条时用来分辨',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 14),
             if (needsKey)
               TextField(
                 controller: _key,
-                autofocus: true,
+                autofocus: !editing,
                 autocorrect: false,
                 enableSuggestions: false,
-                // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的粘贴
-                // 迟早会错一次，且症状要到下一次对话才出现
+                // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的
+                // 粘贴迟早会错一次，且症状要到下一次对话才出现
                 obscureText: !_reveal,
                 decoration: InputDecoration(
                   labelText: 'API key',
+                  // 改一条时留空 = 不动原来那把。界面永远拿不到明文，
+                  // 所以「只想改个端点」根本没有 key 可以回填
+                  hintText: editing ? '留空 = 不改动已存的那把' : null,
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
                     onPressed: () => setState(() => _reveal = !_reveal),
@@ -422,8 +664,8 @@ class _ApiKeyDialogState extends State<_ApiKeyDialog> {
               enableSuggestions: false,
               decoration: InputDecoration(
                 labelText: '端点（可选）',
-                // 说得出留空会连到哪 —— 「用官方的」这四个字回答不了
-                // 「官方的是哪个」，而那正是想改端点的人要核对的东西
+                // 说得出留空会连到哪 ——「用官方的」回答不了「官方的是哪个」，
+                // 而那正是想改端点的人要核对的东西
                 hintText: cur == null ? '留空 = 用官方的' : '留空 = ${cur.baseUrl}',
                 helperText: '公司网关、one-api / LiteLLM、自建 vLLM 都填这里',
                 border: const OutlineInputBorder(),
@@ -438,245 +680,12 @@ class _ApiKeyDialogState extends State<_ApiKeyDialog> {
           child: const Text('取消'),
         ),
         FilledButton(
-          onPressed: () => Navigator.of(context).pop((
-            provider: _manual ? _manualProvider.text.trim() : (_picked ?? ''),
-            key: _key.text.trim(),
-            baseUrl: _baseUrl.text.trim(),
-          )),
-          child: const Text('保存'),
-        ),
-      ],
-    );
-  }
-}
-
-/// 本机模型配置 —— 离线模式那一格。
-///
-/// # 为什么与上面那格并排，而不是合成一个
-///
-/// 它们回答的是两个不同的问题：
-///
-/// - 「自己的 API key」= **服务器**用哪把 key（存进 cortexd、跟着账号走）
-/// - 「本机模型」= **这台电脑离线时**打给谁（存进系统凭据库、不上传）
-///
-/// 合成一格会让「我明明填过 key 了怎么离线还是用不了」成为常态，
-/// 而那时用户找不到任何线索。并排且各自说清用途，是这里唯一诚实的做法。
-/// 默认工作空间存储路径。
-///
-/// # 为什么它显示的路径**可能还不存在**
-///
-/// 没设过时 agent 回的是建议值（`~/Cortex`），磁盘上要到第一次真用到才落地。
-/// 照样显示它，因为这一栏回答的问题是「我的文件会去哪儿」——「还没建」不是
-/// 这个问题的答案。
-class LocalLlmTile extends ConsumerWidget {
-  const LocalLlmTile({super.key});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    if (!kCanStoreLocalLlm) return const SizedBox.shrink();
-
-    final theme = Theme.of(context);
-    final offline = ref.watch(appConfigProvider.select((c) => c.offline));
-    final async = ref.watch(localLlmProvider);
-    final cfg = async.value ?? LocalLlmConfig.empty;
-
-    final subtitle = switch ((async.isLoading, cfg.isUsable)) {
-      (true, _) => '读取中…',
-      (_, true) =>
-        '离线时用 ${cfg.provider}'
-            '${cfg.model.isEmpty ? "" : " · ${cfg.model}"}'
-            '${cfg.baseUrl.isEmpty ? "" : " → ${cfg.baseUrl}"}',
-      // 节标题已经说过「配置只存在这台电脑上」，这里只说**没配的后果**
-      _ => '还没配 —— 断网时这台机器发不出消息。',
-    };
-
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(
-        cfg.isUsable ? Icons.computer : Icons.computer_outlined,
-        // 离线模式下没配 = 用不了，这时候才需要把它标红
-        color: offline && !cfg.isUsable ? theme.colorScheme.error : null,
-      ),
-      title: const Text('本机模型（离线时用）'),
-      subtitle: Text(subtitle, style: theme.textTheme.bodySmall),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (cfg.isUsable)
-            TextButton(
-              onPressed: () => ref.read(localLlmProvider.notifier).clear(),
-              child: const Text('清除'),
-            ),
-          TextButton(
-            onPressed: () async {
-              final entered = await showDialog<LocalLlmConfig>(
-                context: context,
-                builder: (_) => _LocalLlmDialog(
-                  initial: cfg,
-                  providers:
-                      ref.read(providerChoicesProvider).value ?? const [],
-                ),
-              );
-              if (entered == null) return;
-              await ref.read(localLlmProvider.notifier).save(entered);
-            },
-            child: Text(cfg.isUsable ? '修改' : '配置'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _LocalLlmDialog extends StatefulWidget {
-  const _LocalLlmDialog({required this.initial, required this.providers});
-
-  final LocalLlmConfig initial;
-
-  /// 可选的供应商。空 = 服务端没下发（老版本或离线），退回手打。
-  final List<ProviderChoice> providers;
-
-  @override
-  State<_LocalLlmDialog> createState() => _LocalLlmDialogState();
-}
-
-class _LocalLlmDialogState extends State<_LocalLlmDialog> {
-  late final _provider = TextEditingController(text: widget.initial.provider);
-  late final _model = TextEditingController(text: widget.initial.model);
-  late final _baseUrl = TextEditingController(text: widget.initial.baseUrl);
-  // key **不回填**：它存在凭据库里，读出来放进一个输入框等于把它又摊开
-  // 一次。想换就重填，想保持不动就留空
-  final _key = TextEditingController();
-  bool _reveal = false;
-
-  @override
-  void dispose() {
-    _provider.dispose();
-    _model.dispose();
-    _baseUrl.dispose();
-    _key.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return AlertDialog(
-      title: const Text('本机模型'),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '离线模式下本地 agent 直连这个端点。配置只存在这台电脑上，'
-              '不会上传到任何地方。',
-              style: theme.textTheme.bodySmall,
-            ),
-            const SizedBox(height: 14),
-            // 与上面那个对话框同一份清单、同一个理由：服务端只认它自己
-            // 那些 id，手打就是在猜（`kimi` 要写 `moonshot`）。
-            // 清单拉不到时（老服务端 / 离线）退回输入框 ——
-            // 本机模型这一格在离线时正是最需要能用的那个
-            if (widget.providers.isEmpty)
-              TextField(
-                controller: _provider,
-                autocorrect: false,
-                autofocus: true,
-                decoration: const InputDecoration(
-                  labelText: '供应商',
-                  hintText: 'ollama / deepseek / openai …',
-                  helperText: '本机 ollama 免 key；其余按各家的 key 填下面',
-                  border: OutlineInputBorder(),
-                ),
-              )
-            else
-              DropdownButtonFormField<String>(
-                initialValue:
-                    widget.providers.any((p) => p.id == _provider.text)
-                    ? _provider.text
-                    : widget.providers.first.id,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  labelText: '供应商',
-                  helperText: '本机 ollama 免 key；其余按各家的 key 填下面',
-                  border: OutlineInputBorder(),
-                ),
-                items: [
-                  for (final p in widget.providers)
-                    DropdownMenuItem(
-                      value: p.id,
-                      child: Text(
-                        p.displayName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                ],
-                onChanged: (v) => setState(() => _provider.text = v ?? ''),
-              ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: _model,
-              autocorrect: false,
-              decoration: const InputDecoration(
-                labelText: '模型（可选）',
-                hintText: '留空 = 用供应商的默认模型',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: _baseUrl,
-              autocorrect: false,
-              decoration: const InputDecoration(
-                labelText: '端点（可选）',
-                hintText: 'http://127.0.0.1:11434 …',
-                helperText: '留空 = 用供应商的官方地址',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: _key,
-              obscureText: !_reveal,
-              autocorrect: false,
-              enableSuggestions: false,
-              decoration: InputDecoration(
-                labelText: 'API key（可选）',
-                hintText: widget.initial.apiKey.isEmpty
-                    ? '免鉴权的端点留空'
-                    : '留空 = 不改动已存的那把',
-                border: const OutlineInputBorder(),
-                suffixIcon: IconButton(
-                  onPressed: () => setState(() => _reveal = !_reveal),
-                  iconSize: 18,
-                  icon: Icon(
-                    _reveal
-                        ? Icons.visibility_off_outlined
-                        : Icons.visibility_outlined,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('取消'),
-        ),
-        FilledButton(
           onPressed: () => Navigator.of(context).pop(
-            LocalLlmConfig(
-              provider: _provider.text.trim(),
-              model: _model.text.trim(),
+            _SourceForm(
+              provider: _picked ?? '',
+              apiKey: _key.text.trim(),
+              label: _label.text.trim(),
               baseUrl: _baseUrl.text.trim(),
-              // 留空 = 保留原来那把，不是清空。清空请用外面那个「清除」
-              apiKey: _key.text.trim().isEmpty
-                  ? widget.initial.apiKey
-                  : _key.text.trim(),
             ),
           ),
           child: const Text('保存'),
@@ -685,9 +694,3 @@ class _LocalLlmDialogState extends State<_LocalLlmDialog> {
     );
   }
 }
-
-/// 版本号 + 手动检查更新的入口。
-///
-/// 顶栏那个小图标是常驻的、安静的那一半；这里是「我特地来找它」的那一半。
-/// 两个入口指向同一个 controller —— 一个功能有两个各自的状态是本仓库
-/// 已经吃过几次亏的形状。

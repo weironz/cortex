@@ -151,14 +151,23 @@ protected_routes! {
     // 自带 API key。三个动作一条路径：看状态 / 存 / 撤下。
     //
     // 它跟着 `/llm/stream` 一起来 —— 「谁的 key」与「在哪花」必须由同一个
-    // 进程决定，见 `crate::byo_key` 的模块头。
+    // 进程决定，见 `crate::model_sources` 的模块头。
     //
-    // ⚠️ 这条路径同时占了 GET / PUT / DELETE，于是下面那条覆盖测试的探针
-    // **只剩 PATCH 可用**。再给它加一个方法之前先去看那段
+    // ⚠️ 这条路径同时占了 GET / POST，于是下面那条覆盖测试的探针
+    // **只剩 PATCH / DELETE 可用**。再给它加方法之前先去看那段
     // `unsupported` 的挑选逻辑：候选被占光时它会 panic，而那正是它该做的
-    "/settings/llm-key" [GET, PUT, DELETE] => get(crate::byo_key::get)
-        .put(crate::byo_key::put)
-        .delete(crate::byo_key::delete),
+    "/settings/model-sources" [GET, POST] => get(crate::model_sources::list)
+        .post(crate::model_sources::create),
+    // 改一条 / 删一条。**必须排在上面那条之后**没关系（路径不同段数），
+    // 但要与 `/sessions/{id}` 一样注意：axum 按具体度匹配
+    "/settings/model-sources/{id}" [PUT, DELETE] => axum::routing::put(crate::model_sources::update)
+        .delete(crate::model_sources::remove),
+    // 去问供应商它到底有哪些型号。
+    //
+    // **单独一条路而不是保存时顺手拉**：拉列表要联网、要几百毫秒、可能失败，
+    // 而这三件事都不该挡住「把一条来源存下来」。Cherry Studio 的
+    // 「获取模型列表」也是一个独立按钮，同一个理由
+    "/settings/model-sources/{id}/models" [POST] => post(crate::model_sources::fetch_models),
     // ── 导入外部历史 ──
     //
     // Web 端的导入：浏览器读不到磁盘，只能先把 conversations.json 传上来。

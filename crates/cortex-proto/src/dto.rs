@@ -236,6 +236,16 @@ pub struct ChatRequest {
     /// 新开一张表。
     #[serde(default)]
     pub model: crate::model_choice::ModelChoice,
+    /// 这个模型属于哪条**来源**（`GET /settings/model-sources` 里的 id）。
+    ///
+    /// `None` 或 `"deployment"` = 部署提供的那条。与
+    /// [`LlmStreamRequest::source`](crate::llm::LlmStreamRequest::source)
+    /// 同一个含义 —— 本地 agent 收到之后原样往上带。
+    ///
+    /// 独立字段而不是编进 `model`：ollama 的型号名本身带冒号
+    /// （`llama3:8b`），而且同一家可以配两条来源。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// 这一轮的权限档位。老客户端不传即 [`PermissionMode::Ask`]。
     ///
     /// 逐轮带而不是存在会话上：用户在对话框底部随时能改，而改完之后

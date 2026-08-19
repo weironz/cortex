@@ -11,7 +11,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../import/import_source.dart';
 import '../models/account.dart';
 import '../models/auth_tokens.dart';
-import '../models/llm_key_status.dart';
+import '../models/model_source.dart';
 import '../models/mcp.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
@@ -408,33 +408,59 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
-  Future<LlmKeyStatus> llmKeyStatus() => _llmKey('GET', null);
+  Future<ModelSources> modelSources() => _sources('GET', '', null);
 
   @override
-  Future<LlmKeyStatus> setLlmKey({
+  Future<ModelSources> saveModelSource({
+    String? id,
     required String provider,
-    required String apiKey,
+    String apiKey = '',
+    String label = '',
     String? baseUrl,
-  }) => _llmKey('PUT', {
+    bool? enabled,
+    List<String>? models,
+  }) => _sources(id == null ? 'POST' : 'PUT', id == null ? '' : '/$id', {
     'provider': provider,
+    // 改一条时留空 = 不动原来那把。界面永远拿不到明文（只回后四位），
+    // 所以「改个端点」这种操作根本没有 key 可以回传
     'api_key': apiKey,
-    if (baseUrl != null && baseUrl.trim().isNotEmpty)
-      'base_url': baseUrl.trim(),
+    'label': label,
+    if (baseUrl != null) 'base_url': baseUrl.trim(),
+    // ⚠️ 这两个用 `?` 而不是 `if (x != null)` —— lint 要求的写法，
+    // 语义相同：null 就整个键不出现，而服务端那侧「键不出现」正是
+    // 「保持原样」
+    'enabled': ?enabled,
+    'models': ?models,
   });
 
   @override
-  Future<LlmKeyStatus> clearLlmKey() => _llmKey('DELETE', null);
+  Future<ModelSources> deleteModelSource(String id) =>
+      _sources('DELETE', '/$id', null);
 
-  /// 三个动作共用一条路径，只有方法与请求体不同。
-  ///
-  /// 合成一个是因为**错误处理必须逐字相同**：三处各写一遍的话，
-  /// 迟早有一处忘了检查状态码，然后把一段错误 JSON 当成状态解析，
-  /// 界面上显示「未配置」—— 而实际是存失败了。
-  Future<LlmKeyStatus> _llmKey(
+  @override
+  Future<FetchedModels> fetchSourceModels(String id) async {
+    final body = await _sourcesRaw('POST', '/$id/models', null);
+    return FetchedModels.fromJson(body);
+  }
+
+  Future<ModelSources> _sources(
     String method,
+    String suffix,
+    Map<String, Object?>? body,
+  ) async => ModelSources.fromJson(await _sourcesRaw(method, suffix, body));
+
+  /// 四个动作共用一段。
+  ///
+  /// 合成一个是因为**错误处理必须逐字相同**：各写一遍的话，迟早有一处
+  /// 忘了检查状态码，然后把一段错误 JSON 当成正常响应解析，
+  /// 界面上显示「一条来源都没有」—— 而实际是存失败了。
+  Future<Map<String, dynamic>> _sourcesRaw(
+    String method,
+    String suffix,
     Map<String, Object?>? body,
   ) async {
-    final uri = _uri('/settings/llm-key');
+    final path = '/settings/model-sources$suffix';
+    final uri = _uri(path);
     final http.Response response;
     try {
       final req = http.Request(method, uri)
@@ -452,9 +478,7 @@ class HttpCortexApi implements CortexApi {
     if (response.statusCode >= 400) {
       throw _failure(response.statusCode, _errorMessage(response));
     }
-    return LlmKeyStatus.fromJson(
-      _decodeObject('settings/llm-key', utf8.decode(response.bodyBytes)),
-    );
+    return _decodeObject(path, utf8.decode(response.bodyBytes));
   }
 
   @override

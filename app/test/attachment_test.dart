@@ -33,7 +33,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// presign — so the fake reports the path rather than the payload.
 class _BlobApi
     with
-        LlmKeyUnsupported,
+        ModelSourcesUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,

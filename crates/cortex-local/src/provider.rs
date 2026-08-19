@@ -72,12 +72,14 @@ impl Provider for RemoteProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
+        // 这一轮的模型选择与来源编在占位名里 —— 见 `llm::proxy_model_config`。
+        // 这条通道本来就在用（`tier_of` 也读同一个名字），
+        // 只是从前只编得下「主 / 廉价」两档
+        let (model, source) = crate::llm::choice_from_name(&model_config.model_name);
         let req = LlmStreamRequest {
             tier: Self::tier_of(model_config),
-            // 这一轮的模型选择编在占位名里 —— 见 `llm::proxy_model_config`。
-            // 这条通道本来就在用（`tier_of` 也读同一个名字），
-            // 只是从前只编得下「主 / 廉价」两档
-            model: crate::llm::choice_from_name(&model_config.model_name),
+            model,
+            source,
             system: system.to_string(),
             messages: messages.to_vec(),
             tools: tools.to_vec(),

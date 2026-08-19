@@ -274,12 +274,20 @@ impl Engine {
     ///   配出来。配不出来（用户填了个不存在的模型）时**回落到默认并记
     ///   一条 WARN**，而不是让这一轮失败：直连是自托管运维在用，
     ///   他改的是环境变量，一次手滑不该让对话整个不能用。
-    fn llm_for(&self, choice: &cortex_proto::model_choice::ModelChoice) -> cortex_llm::LlmClient {
+    fn llm_for(
+        &self,
+        choice: &cortex_proto::model_choice::ModelChoice,
+        source: Option<&str>,
+    ) -> cortex_llm::LlmClient {
         use cortex_proto::model_choice::ModelChoice;
         if matches!(choice, ModelChoice::Deployment) {
             return (*self.llm).clone();
         }
-        // 直连时本地知道有哪些模型；代理时不知道，也不该知道
+        // 直连时本地知道有哪些模型；代理时不知道，也不该知道。
+        //
+        // ⚠️ 直连路径**忽略 source**：来源那份列表存在服务端，而直连
+        // 恰恰是「不经过服务端」。这一轮用的就是本机配的那家 —— 不是漏了，
+        // 是那个概念在这条路上不存在
         if self.llm.provider_id() != crate::llm::PROXY_PROVIDER_ID {
             // 直连：本地就能把模型配出来
             let ModelChoice::Named(name) = choice else {
@@ -298,7 +306,8 @@ impl Engine {
                 }
             };
         }
-        self.llm.with_model(crate::llm::proxy_model_config(choice))
+        self.llm
+            .with_model(crate::llm::proxy_model_config(choice, source))
     }
 
     /// 跑一轮。事件同时进重放缓冲与广播，见 [`crate::runs`]。
@@ -624,7 +633,7 @@ impl Engine {
         // 直连路径下 `with_model` 拿到的是真模型配置；代理路径下拿到的是
         // 一个把选择编进名字的占位（见 `llm::proxy_model_config`）。
         // 两条路在这里长得一样，是有意的。
-        let llm = self.llm_for(&req.model);
+        let llm = self.llm_for(&req.model, req.source.as_deref());
         let outcome = turn
             .run(&llm, &system_prompt, &mut messages, &host, &atx)
             .await;

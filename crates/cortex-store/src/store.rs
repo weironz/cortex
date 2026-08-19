@@ -14,6 +14,18 @@ use crate::txn::WriteTxn;
 /// 用 `migrate!` 而非运行时读目录：二进制自带 schema，部署时不必带上 `migrations/`。
 /// 注意它只是**读**文件，不需要编译期数据库连接（`query!` 宏才需要，本 crate
 /// 刻意不用 —— 见 crate 级文档）。
+///
+/// ⚠️ **加了新的 migration 文件之后要 `touch` 这个文件再编。**
+///
+/// 稳定版 Rust 的 proc macro 声明不了「我依赖这个目录」（`track_path` 还没
+/// 稳定），于是 cargo 不知道 `migrations/` 变过 —— 增量编译会直接跳过这个
+/// crate，新迁移**不进二进制**。
+///
+/// 症状极难认：编译成功、容器起得来、`/health` 说 `database: ok`，
+/// 只有那张新表不存在。2026-08-19 加 `model_sources` 时实测撞到 ——
+/// `_sqlx_migrations` 里最新一条还是上一个版本，而日志里一个字都没提。
+///
+/// 判断方法：`grep 新表名 目标二进制`，找不到就是没编进去。
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
 /// **整个部署只跑一遍**的那一套：账号、令牌、邀请、用量。

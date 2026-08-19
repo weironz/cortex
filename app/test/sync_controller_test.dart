@@ -35,7 +35,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// silently burning tokens.
 class _FakeApi
     with
-        LlmKeyUnsupported,
+        ModelSourcesUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,

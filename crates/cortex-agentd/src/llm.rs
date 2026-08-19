@@ -7,7 +7,7 @@
 //! 一个不接记忆服务的 Cortex 照样要能对话。它此前住在那边，
 //! 后果就是「停掉记忆服务，agent 连一句话都发不出来」。
 //!
-//! 钱袋跟着它一起搬：**谁的 key（[`crate::byo_key`]）、算不算额度
+//! 钱袋跟着它一起搬：**哪条来源（[`crate::model_sources`]）、算不算额度
 //! （[`crate::quota`]）、在哪条通道上花**，三件事必须在同一个进程里决定。
 //! 拆开的话，中间那次跨进程询问要么变成一次额外往返，要么干脆没有 ——
 //! 而后者的症状是「填了自己的 key 却照样被算配额」，不报错。
@@ -69,31 +69,25 @@ pub async fn stream(
     // 可能是一场六千次调用的导入
     let user = crate::accounts::current_user(&st, &headers).await;
 
-    // 自带 key 的人走自己的、不占配额，所以**先看有没有 key，再决定要不要查配额**。
-    // 顺序反过来会把一个填了自己 key 的人拦在他自己的额度外面 ——
-    // 而配额消息里恰恰写着「填自己的 key 就不占配额」
+    // 这一轮用哪条来源。**先定来源，再决定要不要查配额** ——
+    // 自带 key 的来源走用户自己的账户，拿我们的配额去拦他等于收两次钱，
+    // 而配额消息里恰恰写着「填自己的 key 就不占配额」。
+    //
+    // ⚠️ 判据是**这一轮用的那条**，不是「他有没有 key」。从前是后者，
+    // 于是一个配了 key 的人走部署那条来源时也不计配额 —— 我们替他付钱
+    // 却没记账。多来源之后这个区别是真的了
     let tenant = st.tenant(&headers).await?;
-    let own = st.own_key(&tenant).await;
-    if own.is_none() {
+    let sources = st.model_sources(&tenant).await;
+    let picked = pick_source(&sources, req.source.as_deref());
+    if picked.is_none() {
         st.enforce_quota(&user).await?;
     }
 
-    // 服务端那把 key。自带 key 那条路也要它身上的模型配置，所以两条路
-    // 都先要它 —— 没配模型就在这里 501，一个字节都还没发出去
+    // 服务端那把 key。自带来源那条路也要它身上的模型配置（tier 回落），
+    // 所以两条路都先要它 —— 没配模型就在这里 501，一个字节都还没发出去
     let server = st.llm()?;
-    let upstream = upstream(
-        server,
-        req,
-        own.as_ref().map(|k| {
-            (
-                k.provider.as_str(),
-                k.api_key.as_str(),
-                k.base_url.as_deref(),
-            )
-        }),
-    )
-    .await?;
-    let used_own_key = own.is_some();
+    let upstream = upstream(server, req, picked).await?;
+    let used_own_key = picked.is_some();
 
     // 记账：流里每一帧都带着 `ProviderUsage`，而**最后一帧的累计值**
     // 才是这次调用的总量。所以边转发边留最新的那个，流结束时写一行。
@@ -175,50 +169,105 @@ pub async fn stream(
     Ok(Sse::new(body).keep_alive(KeepAlive::new().interval(KEEP_ALIVE_INTERVAL).text("ping")))
 }
 
-/// 建流：用服务端那把 key，或者用户自己那把。
+/// 这一轮落在哪条来源上。
 ///
-/// `own` 是用户自己填的那把。给了就现建一个 provider 用它，
-/// 这次调用因此不占配额（也不花服务端的钱）。
+/// `None` = 部署提供的那条（服务端的 key，计配额）。
 ///
-/// # 模型由服务端选，不由客户端点名
+/// # 为什么指名一条不存在的来源要回落而不是报错
 ///
-/// 请求里只有档位。让客户端指定模型名，等于让任何拿到 token 的人
-/// **拿服务端的 key 跑任意模型** —— 而账单是服务端付。
+/// 来源可以被删、被关。而客户端手里那份选择是上一次打开设置时记下的 ——
+/// 一个在另一台设备上删掉了某条来源的人，回到这台机器发第一句话时
+/// **不该收到一条报错**，他甚至不知道自己选过什么。回落到部署那条能聊，
+/// 而选择器下次刷新就会自己纠正过来。
 ///
-/// # 为什么自带 key 每次现建 provider 而不是缓存
+/// 这与「指名一个不存在的**模型**要拒绝」不矛盾：那一条是用户此刻
+/// 刚选的，悄悄换掉他会拿着一个以为是 Claude 的回答做判断。
+fn pick_source<'a>(
+    sources: &'a [crate::model_sources::ModelSource],
+    want: Option<&str>,
+) -> Option<&'a crate::model_sources::ModelSource> {
+    let want = want?;
+    if want == crate::model_sources::DEPLOYMENT_SOURCE_ID {
+        return None;
+    }
+    let found = sources.iter().find(|s| s.id == want);
+    if found.is_none() {
+        tracing::warn!(
+            source = want,
+            "指名的模型来源不在了（删了或关了），回落到部署那条"
+        );
+    }
+    found
+}
+
+/// 建流：用部署那把 key，或者用户某条来源自己那把。
 ///
-/// 缓存要按 (用户, 供应商, key) 做键并处理失效 —— 而 key 是可以随时
-/// 被换掉或撤下的，一个还活着的缓存项意味着「撤下之后还在用旧 key 扣钱」。
+/// # 为什么自带来源每次现建 provider 而不是缓存
+///
+/// 缓存要按 (用户, 来源) 做键并处理失效 —— 而 key 是可以随时被换掉或
+/// 删掉的，一个还活着的缓存项意味着「删了之后还在用旧 key 扣钱」。
 /// 建一个 provider 只是搭一个 reqwest 客户端，比它随后那次 HTTP 便宜得多。
 ///
 /// # Errors
-/// 供应商建不起来，或者上游拒绝。
+/// 供应商建不起来、这条来源一个模型都没有、或者上游拒绝。
 async fn upstream(
     server: &cortex_llm::LlmClient,
     req: LlmStreamRequest,
-    own: Option<(&str, &str, Option<&str>)>,
+    own: Option<&crate::model_sources::ModelSource>,
 ) -> cortex_core::Result<MessageStream> {
-    let Some((provider_name, api_key, base_url)) = own else {
-        let model = resolve_model(server.provider_id(), server, &req)?;
+    let Some(source) = own else {
+        let allowed =
+            cortex_llm::provider::allowed_models(server.provider_id()).unwrap_or_default();
+        let model = resolve_model(server.provider_id(), &allowed, server, &req)?;
         return Ok(server
             .stream_with(&model, &req.system, &req.messages, &req.tools)
             .await?);
     };
 
-    let provider: std::sync::Arc<dyn cortex_llm::Provider> =
-        cortex_llm::provider::build_with(provider_name, api_key, base_url)
-            .map_err(|e| cortex_core::CortexError::Config(format!("自带 key 建不起供应商：{e}")))?
-            .into();
-    // 模型配置沿用服务端那份 —— 用户填的是 key，不是模型。
-    // 让他连模型一起换需要一整套「这个供应商有哪些模型」的校验，
-    // 而填错模型名的表现是每次对话都失败
+    let provider: std::sync::Arc<dyn cortex_llm::Provider> = cortex_llm::provider::build_with(
+        &source.provider,
+        &source.api_key,
+        source.base_url.as_deref(),
+    )
+    .map_err(|e| cortex_core::CortexError::Config(format!("这条来源建不起供应商：{e}")))?
+    .into();
+
+    // 这条来源的默认模型 = 它自己列表里的第一个。
+    //
+    // ⚠️ **不能再沿用服务端那份**。从前那样写的后果 2026-08-19 实测到了：
+    // 自带 key 是 alibaba、部署是 deepseek，于是「跟随部署」这一档把
+    // `deepseek-v4-pro` 这个名字发给了 DashScope。一条来源的 key、端点、
+    // 模型必须是同一套，否则它们之间怎么组合都是错的
+    let default_model = source
+        .models
+        .first()
+        .and_then(|m| cortex_llm::provider::model_config(&source.provider, m).ok())
+        .or_else(|| {
+            cortex_llm::provider::allowed_models(&source.provider)
+                .ok()?
+                .first()
+                .and_then(|m| cortex_llm::provider::model_config(&source.provider, m).ok())
+        })
+        .ok_or_else(|| {
+            cortex_core::CortexError::Config(format!(
+                "来源 {} 一个模型都没有 —— 去设置里点「获取模型列表」",
+                source.provider
+            ))
+        })?;
+
     let client = cortex_llm::LlmClient::from_provider(
         provider,
-        provider_name,
-        server.model().clone(),
-        server.cheap_model().clone(),
+        &source.provider,
+        default_model.clone(),
+        default_model,
     );
-    let model = resolve_model(provider_name, &client, &req)?;
+    // 白名单是**这条来源自己的**列表；还没拉过时退回供应商定义里那份
+    let allowed = if source.models.is_empty() {
+        cortex_llm::provider::allowed_models(&source.provider).unwrap_or_default()
+    } else {
+        source.models.clone()
+    };
+    let model = resolve_model(&source.provider, &allowed, &client, &req)?;
     Ok(client
         .stream_with(&model, &req.system, &req.messages, &req.tools)
         .await?)
@@ -246,6 +295,7 @@ async fn upstream(
 /// 指定了允许列表之外的模型。
 fn resolve_model(
     provider: &str,
+    allowed: &[String],
     client: &cortex_llm::LlmClient,
     req: &LlmStreamRequest,
 ) -> cortex_core::Result<ModelConfig> {
@@ -257,10 +307,9 @@ fn resolve_model(
     match &req.model {
         ModelChoice::Deployment => Ok(fallback()),
         ModelChoice::Auto => {
-            let allowed = cortex_llm::provider::allowed_models(provider).unwrap_or_default();
             let shape =
                 crate::model_pick::TurnShape::of(&req.system, &req.messages, req.tools.len());
-            match crate::model_pick::pick(provider, &allowed, shape) {
+            match crate::model_pick::pick(provider, allowed, shape) {
                 Some(name) => Ok(cortex_llm::provider::model_config(provider, &name)
                     .unwrap_or_else(|_| fallback())),
                 None => {
@@ -280,7 +329,6 @@ fn resolve_model(
             }
         }
         ModelChoice::Named(name) => {
-            let allowed = cortex_llm::provider::allowed_models(provider).unwrap_or_default();
             if !allowed.iter().any(|m| m == name) {
                 return Err(cortex_core::CortexError::Invalid(format!(
                     "这个部署没有开放模型 `{name}`。能用的是：{}",
@@ -445,10 +493,17 @@ mod resolve_tests {
         LlmStreamRequest {
             tier,
             model,
+            source: None,
             system: "你是助手".into(),
             messages: Vec::new(),
             tools: Vec::new(),
         }
+    }
+
+    /// deepseek 的允许列表 —— 从前 `resolve_model` 自己去查，
+    /// 现在由调用方给（因为它得跟着**这条来源**走，不是跟着供应商）。
+    fn allowed() -> Vec<String> {
+        cortex_llm::provider::allowed_models("deepseek").unwrap()
     }
 
     #[test]
@@ -456,6 +511,7 @@ mod resolve_tests {
         let c = client();
         let main = resolve_model(
             "deepseek",
+            &allowed(),
             &c,
             &req(ModelChoice::Deployment, ModelTier::Main),
         )
@@ -464,6 +520,7 @@ mod resolve_tests {
 
         let cheap = resolve_model(
             "deepseek",
+            &allowed(),
             &c,
             &req(ModelChoice::Deployment, ModelTier::Cheap),
         )
@@ -480,6 +537,7 @@ mod resolve_tests {
         let c = client();
         let got = resolve_model(
             "deepseek",
+            &allowed(),
             &c,
             &req(
                 ModelChoice::Named("deepseek-v4-flash".into()),
@@ -495,6 +553,7 @@ mod resolve_tests {
         let c = client();
         let err = resolve_model(
             "deepseek",
+            &allowed(),
             &c,
             &req(ModelChoice::Named("gpt-4o".into()), ModelTier::Main),
         )
@@ -518,6 +577,7 @@ mod resolve_tests {
         let c = client();
         let got = resolve_model(
             "deepseek",
+            &allowed(),
             &c,
             &req(ModelChoice::Named("claude-opus-4".into()), ModelTier::Main),
         );
@@ -531,13 +591,116 @@ mod resolve_tests {
     #[test]
     fn 自动档挑得出一个允许列表里的模型() {
         let c = client();
-        let got = resolve_model("deepseek", &c, &req(ModelChoice::Auto, ModelTier::Main))
-            .expect("自动档挑不出来时也该回落，不该失败");
+        let got = resolve_model(
+            "deepseek",
+            &allowed(),
+            &c,
+            &req(ModelChoice::Auto, ModelTier::Main),
+        )
+        .expect("自动档挑不出来时也该回落，不该失败");
         let allowed = cortex_llm::provider::allowed_models("deepseek").unwrap();
         assert!(
             allowed.contains(&got.model_name),
             "自动档挑出来的必须在允许列表里，实际挑了 {}",
             got.model_name
+        );
+    }
+
+    /// 造一条来源。key 是常量字节，不是任何真实凭据。
+    fn source(id: &str, models: &[&str]) -> crate::model_sources::ModelSource {
+        crate::model_sources::ModelSource {
+            id: id.to_owned(),
+            provider: "alibaba".to_owned(),
+            api_key: "test-key".to_owned(),
+            base_url: None,
+            models: models.iter().map(|m| (*m).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn 不指名来源就是部署那条() {
+        let all = [source("01M0AAA", &["qwen-flash"])];
+        assert!(
+            pick_source(&all, None).is_none(),
+            "老客户端不传 source —— 必须落在部署那条，与从前逐字节相同"
+        );
+        assert!(
+            pick_source(&all, Some(crate::model_sources::DEPLOYMENT_SOURCE_ID)).is_none(),
+            "显式指名 deployment 也是部署那条"
+        );
+    }
+
+    #[test]
+    fn 指名的来源被删掉之后回落而不是报错() {
+        let all = [source("01M0AAA", &["qwen-flash"])];
+        assert!(
+            pick_source(&all, Some("01M0GONE")).is_none(),
+            "来源可以在另一台设备上被删。这时候报错等于让一个不知道自己             选过什么的人发不出话 —— 回落到部署那条至少能聊，             而选择器下次刷新会自己纠正"
+        );
+    }
+
+    #[test]
+    fn 指名的来源在就用它() {
+        let all = [
+            source("01M0AAA", &["qwen-flash"]),
+            source("01M0BBB", &["glm-4.7"]),
+        ];
+        let got = pick_source(&all, Some("01M0BBB")).expect("这条在");
+        assert_eq!(got.id, "01M0BBB", "同一家配两条时，认的是 id 不是供应商名");
+    }
+
+    /// 白名单跟着**来源**走，不跟着供应商走。
+    ///
+    /// 这条盯的正是 2026-08-19 在 dev 上实测到的那个 bug：自带 key 是
+    /// alibaba、部署是 deepseek，于是选择器给 deepseek 的型号而校验拿
+    /// alibaba 的白名单 —— 选什么都被拒。
+    #[test]
+    fn 白名单跟着来源走_而不是跟着部署() {
+        let c = client();
+        // 这条来源只开放 qwen-flash
+        let mine = vec!["qwen-flash".to_owned()];
+        let ok = resolve_model(
+            "alibaba",
+            &mine,
+            &c,
+            &req(ModelChoice::Named("qwen-flash".into()), ModelTier::Main),
+        );
+        assert!(ok.is_ok(), "这条来源自己列的型号必须能用");
+
+        // ⚠️ 这里**必须**挑一个「在 alibaba 的供应商定义里、但不在这条
+        // 来源列表里」的型号，否则这条测试没有区分度：`deepseek-v4-pro`
+        // 本来就不在 alibaba 的定义里，两种写法都会拒它 —— 第一版就是
+        // 这么写的，故障注入之后照样绿
+        assert!(
+            cortex_llm::provider::allowed_models("alibaba")
+                .unwrap()
+                .contains(&"qwen-turbo".to_owned()),
+            "qwen-turbo 得在 alibaba 的定义里，这条测试才分得出两种写法"
+        );
+        let rejected = resolve_model(
+            "alibaba",
+            &mine,
+            &c,
+            &req(ModelChoice::Named("qwen-turbo".into()), ModelTier::Main),
+        );
+        assert!(
+            rejected.is_err(),
+            "这条来源只开放了 qwen-flash。放过 qwen-turbo 说明白名单查的是             供应商定义而不是这条来源 —— 那正是「用户这个账号没开通的型号             也进了选择器」的来路"
+        );
+
+        // 另一半：别家的型号更不该能用在这把 key 上
+        assert!(
+            resolve_model(
+                "alibaba",
+                &mine,
+                &c,
+                &req(
+                    ModelChoice::Named("deepseek-v4-pro".into()),
+                    ModelTier::Main
+                ),
+            )
+            .is_err(),
+            "放过去的表现是把 `deepseek-v4-pro` 这个名字发给 DashScope"
         );
     }
 }

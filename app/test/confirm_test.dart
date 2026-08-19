@@ -471,7 +471,7 @@ class _LiveConfig extends AppConfigNotifier {
 /// A daemon stand-in for the confirmation surface.
 class _ConfirmApi
     with
-        LlmKeyUnsupported,
+        ModelSourcesUnsupported,
         AccountUnsupported,
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
