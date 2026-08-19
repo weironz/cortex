@@ -88,11 +88,7 @@ void main() {
   group('比例', () {
     test('不限量时没有比例，而不是除以零', () {
       const r = UsageReport(usedTokens: 500);
-      expect(
-        r.ratio,
-        isNull,
-        reason: '不限量时不该出现进度条 —— 一条画不出终点的进度条只会让人猜',
-      );
+      expect(r.ratio, isNull, reason: '不限量时不该出现进度条 —— 一条画不出终点的进度条只会让人猜');
       expect(r.limited, isFalse);
     });
 
@@ -151,9 +147,7 @@ void main() {
     testWidgets('没接账号体系的部署说「不记账」，不是一条红字', (tester) async {
       await _pump(
         tester,
-        _Api(
-          failure: const CortexApiException('Not Found', statusCode: 404),
-        ),
+        _Api(failure: const CortexApiException('Not Found', statusCode: 404)),
       );
 
       expect(find.text('这个部署不记用量'), findsOneWidget);

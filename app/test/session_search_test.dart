@@ -68,9 +68,8 @@ Future<void> _drain([int turns = 4]) async {
 }
 
 /// 等过防抖窗口。
-Future<void> _pastDebounce() => Future<void>.delayed(
-  const Duration(milliseconds: 400),
-);
+Future<void> _pastDebounce() =>
+    Future<void>.delayed(const Duration(milliseconds: 400));
 
 void main() {
   group('搜索控制器', () {
@@ -164,11 +163,9 @@ void main() {
       final state = container.read(sessionSearchProvider);
       expect(state.active, isFalse, reason: '空词不激活搜索');
       expect(state.hits, isEmpty, reason: '上一次的结果要清掉，否则它会挂在那儿');
-      expect(
-        api.queries,
-        ['预算'],
-        reason: '空词一次请求都不该发 —— ILIKE %% 匹配一切，那是一次全表扫描',
-      );
+      expect(api.queries, [
+        '预算',
+      ], reason: '空词一次请求都不该发 —— ILIKE %% 匹配一切，那是一次全表扫描');
     });
 
     test('只有空格也当空处理', () async {

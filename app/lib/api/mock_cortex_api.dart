@@ -354,20 +354,23 @@ class MockCortexApi
     // 于是清空搜索框会变成「列出全部」
     if (needle.isEmpty) return const [];
     return List.unmodifiable(
-      _sessions.where((s) => includeArchived || !s.archived).where((s) {
-        return s.title.toLowerCase().contains(needle) ||
-            (s.preview ?? '').toLowerCase().contains(needle);
-      }).map((s) {
-        final inTitle = s.title.toLowerCase().contains(needle);
-        return SessionSearchHit(
-          sessionId: s.id,
-          title: s.titleIsCustom ? s.title : null,
-          archived: s.archived,
-          titleMatch: inTitle,
-          hitCount: inTitle ? 0 : 1,
-          excerpt: inTitle ? null : s.preview,
-        );
-      }),
+      _sessions
+          .where((s) => includeArchived || !s.archived)
+          .where((s) {
+            return s.title.toLowerCase().contains(needle) ||
+                (s.preview ?? '').toLowerCase().contains(needle);
+          })
+          .map((s) {
+            final inTitle = s.title.toLowerCase().contains(needle);
+            return SessionSearchHit(
+              sessionId: s.id,
+              title: s.titleIsCustom ? s.title : null,
+              archived: s.archived,
+              titleMatch: inTitle,
+              hitCount: inTitle ? 0 : 1,
+              excerpt: inTitle ? null : s.preview,
+            );
+          }),
     );
   }
 

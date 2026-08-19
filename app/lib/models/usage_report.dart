@@ -52,9 +52,9 @@ class UsageReport {
     costMicros: asInt(json['cost_micros']),
     currency: asString(json['currency'], 'CNY'),
     unpricedTokens: asInt(json['unpriced_tokens']),
-    byModel: asObjectList(json['by_model'])
-        .map(ModelUsage.fromJson)
-        .toList(growable: false),
+    byModel: asObjectList(
+      json['by_model'],
+    ).map(ModelUsage.fromJson).toList(growable: false),
   );
 
   /// 占配额的那部分（服务端那把 key）。

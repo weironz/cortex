@@ -633,16 +633,13 @@ mixin SessionSearchUnsupported {
   Future<List<SessionSearchHit>> searchSessions(
     String query, {
     bool includeArchived = false,
-  }) => Future.error(
-    const CortexApiException('这个后端不支持搜索。', statusCode: 404),
-  );
+  }) => Future.error(const CortexApiException('这个后端不支持搜索。', statusCode: 404));
 }
 
 /// 给测试替身用：这个后端没有用量端点。
 mixin UsageUnsupported {
-  Future<UsageReport> usage() => Future.error(
-    const CortexApiException('这个后端没有用量端点。', statusCode: 404),
-  );
+  Future<UsageReport> usage() =>
+      Future.error(const CortexApiException('这个后端没有用量端点。', statusCode: 404));
 }
 
 mixin RunAttachUnsupported {

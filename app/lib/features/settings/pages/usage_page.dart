@@ -223,7 +223,10 @@ class _ModelRow extends StatelessWidget {
               ),
             )
           else
-            Text(formatMoney(cost, currency), style: theme.textTheme.bodyMedium),
+            Text(
+              formatMoney(cost, currency),
+              style: theme.textTheme.bodyMedium,
+            ),
         ],
       ),
     );
@@ -248,7 +251,11 @@ class _UnpricedNote extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.info_outline_rounded, size: 16, color: scheme.onSurfaceVariant),
+          Icon(
+            Icons.info_outline_rounded,
+            size: 16,
+            color: scheme.onSurfaceVariant,
+          ),
           const SizedBox(width: 8),
           Expanded(
             child: Text.rich(
@@ -257,7 +264,9 @@ class _UnpricedNote extends StatelessWidget {
                   color: scheme.onSurfaceVariant,
                 ),
                 children: [
-                  TextSpan(text: '有 ${formatTokens(tokens)} token 用的是没有价目的模型，上面那个金额里'),
+                  TextSpan(
+                    text: '有 ${formatTokens(tokens)} token 用的是没有价目的模型，上面那个金额里',
+                  ),
                   const TextSpan(
                     text: '不包含',
                     style: TextStyle(fontWeight: FontWeight.w700),
