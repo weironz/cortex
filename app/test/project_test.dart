@@ -88,6 +88,7 @@ class _Api extends MockCortexApi {
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    String? model,
   }) {
     _chatted = true;
     return super.chat(

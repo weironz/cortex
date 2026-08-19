@@ -10,11 +10,11 @@
 use std::sync::Arc;
 
 use cortex_core::config::LlmConfig;
+use cortex_providers::base::{MessageStream, Provider};
+use cortex_providers::conversation::message::Message;
+use cortex_providers::conversation::token_usage::ProviderUsage;
+use cortex_providers::model::ModelConfig;
 use futures::{StreamExt, TryStreamExt};
-use goose_providers::base::{MessageStream, Provider};
-use goose_providers::conversation::message::Message;
-use goose_providers::conversation::token_usage::ProviderUsage;
-use goose_providers::model::ModelConfig;
 use rmcp::model::Tool;
 
 use crate::error::{LlmError, Result};
@@ -123,6 +123,22 @@ impl LlmClient {
             provider_id: provider_id.into(),
             model,
             cheap_model,
+        }
+    }
+
+    /// 换一个主模型，其余照旧。
+    ///
+    /// 用于**逐轮选模型**：一轮对话的模型选择是那一轮的属性，而
+    /// `LlmClient` 是进程级的。克隆它极便宜（供应商是 `Arc`），
+    /// 所以每轮造一个比给 `Turn::run` 的签名加一个参数干净得多 ——
+    /// 后者要动 agent 循环的核心签名，而那份循环两个宿主共用。
+    #[must_use]
+    pub fn with_model(&self, model: ModelConfig) -> Self {
+        Self {
+            provider: Arc::clone(&self.provider),
+            provider_id: self.provider_id.clone(),
+            model,
+            cheap_model: self.cheap_model.clone(),
         }
     }
 

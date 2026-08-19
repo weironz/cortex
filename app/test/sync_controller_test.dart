@@ -40,6 +40,7 @@ class _FakeApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
         SandboxHealthUnsupported
@@ -164,6 +165,7 @@ class _FakeApi
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    String? model,
     bool sandbox = false,
   }) => throw UnimplementedError('同步链路不应发起对话');
 

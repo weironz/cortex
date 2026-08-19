@@ -40,6 +40,16 @@ pub enum ModelTier {
 pub struct LlmStreamRequest {
     #[serde(default)]
     pub tier: ModelTier,
+    /// 这一轮用哪个模型。**与 [`tier`](Self::tier) 并存，不是取代它。**
+    ///
+    /// tier 说的是「这是主对话还是后台杂活」，由**调用点**决定（agent 循环
+    /// 用 Main，抽取用 Cheap）；model 说的是「用户想用哪个」。两件事：
+    /// 一个用户选了 Claude，他的后台抽取仍然该走廉价档。
+    ///
+    /// 默认 [`ModelChoice::Deployment`]，也就是老客户端不传这个字段时
+    /// 的行为与从前**逐字节相同**。
+    #[serde(default)]
+    pub model: crate::model_choice::ModelChoice,
     pub system: String,
     pub messages: Vec<Message>,
     #[serde(default)]

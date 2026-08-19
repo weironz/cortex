@@ -19,6 +19,7 @@ import '../models/mcp.dart';
 import '../models/pending_confirmation.dart';
 import '../models/project.dart';
 import '../models/session_detail.dart';
+import '../models/model_option.dart';
 import '../models/session_search_hit.dart';
 import '../models/usage_report.dart';
 import '../models/sync_event.dart';
@@ -371,6 +372,50 @@ class MockCortexApi
               excerpt: inTitle ? null : s.preview,
             );
           }),
+    );
+  }
+
+  @override
+  Future<ModelCatalog> llmModels() async {
+    await _latency(140);
+    // 夹具里**特意混三种形态**：能跑 agent 的、不支持工具调用的、
+    // 以及目录里查不到的（三个字段全 null）。三条界面分支只有在有这三种
+    // 数据时才画得出来
+    return const ModelCatalog(
+      provider: 'deepseek',
+      defaultModel: 'deepseek-v4-pro',
+      cheapModel: 'deepseek-v4-flash',
+      autoAvailable: true,
+      models: [
+        ModelOption(
+          id: 'deepseek-v4-pro',
+          displayName: 'DeepSeek V4 Pro',
+          context: 1000000,
+          toolCall: true,
+          vision: false,
+          reasoning: true,
+          inputMicrosPerMtok: 435000,
+          outputMicrosPerMtok: 870000,
+        ),
+        ModelOption(
+          id: 'deepseek-v4-flash',
+          displayName: 'DeepSeek V4 Flash',
+          context: 1000000,
+          toolCall: true,
+          vision: false,
+          inputMicrosPerMtok: 140000,
+          outputMicrosPerMtok: 280000,
+        ),
+        ModelOption(
+          id: 'legacy-completion',
+          displayName: '老式补全模型',
+          context: 8000,
+          toolCall: false,
+          inputMicrosPerMtok: 50000,
+          outputMicrosPerMtok: 50000,
+        ),
+        ModelOption(id: 'unknown-model', displayName: 'unknown-model'),
+      ],
     );
   }
 
@@ -1045,6 +1090,7 @@ class MockCortexApi
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    String? model,
   }) async* {
     if (_disposed) {
       throw const CortexApiException('Mock 数据源已关闭');

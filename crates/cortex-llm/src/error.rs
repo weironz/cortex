@@ -5,7 +5,7 @@
 //! 它已经区分了鉴权失败 / 限流 / 超上下文 / 网络错误，
 //! 上层重试与降级策略要靠这个分类，包成一个字符串就废了。
 
-use goose_providers::errors::ProviderError;
+use cortex_providers::errors::ProviderError;
 use thiserror::Error;
 
 pub type Result<T, E = LlmError> = std::result::Result<T, E>;

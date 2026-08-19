@@ -139,6 +139,15 @@ enum Command {
         /// 用户唯一真正卡住的地方。
         #[arg(long, value_name = "MODE", value_parser = parse_cli_permission_mode)]
         permission_mode: Option<cortex_proto::dto::PermissionMode>,
+
+        /// 这一轮用哪个模型。`auto` = 按这一轮的特征自动挑（在能干这活的
+        /// 模型里选最便宜的）；不传 = 用部署配的那个。
+        ///
+        /// 能选哪些看 `GET /llm/models`。填一个不在列表里的会被服务端
+        /// **明确拒绝**并列出可选项 —— 不会悄悄换成别的，那样账单和行为
+        /// 都对不上你以为的那个模型。
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
     },
 
     /// 列出还等着答复的工具确认（断线重连后用它把待办捡回来）
@@ -607,9 +616,13 @@ async fn main() -> anyhow::Result<()> {
             session,
             deny_all,
             permission_mode,
+            model,
         } => {
             let session_id = session.unwrap_or_else(|| Id::new().to_string());
             let mode = permission_mode.unwrap_or_default();
+            // 空串 / 空白按默认档，不是「一个叫空串的模型」——
+            // `From<Option<String>>` 那一侧统一处理，见 `ModelChoice`
+            let model = cortex_proto::model_choice::ModelChoice::from(model);
             // 非 TTY（管道、CI）下没有人能回答确认，只能一律拒绝。
             // 不这么判的话，`echo hi | cortex chat` 会在第一次确认时
             // 从一个已经 EOF 的 stdin 上读到空行，然后表现得像卡住了
@@ -619,9 +632,9 @@ async fn main() -> anyhow::Result<()> {
             let interactive_confirm = !deny_all && std::io::stdin().is_terminal();
             match message {
                 Some(m) => {
-                    one_turn(&c, &session_id, &m, color, interactive_confirm, mode).await?;
+                    one_turn(&c, &session_id, &m, color, interactive_confirm, mode, model).await?;
                 }
-                None => interactive(&c, &session_id, color, mode).await?,
+                None => interactive(&c, &session_id, color, mode, model).await?,
             }
         }
     }
@@ -673,12 +686,15 @@ async fn one_turn(
     color: bool,
     interactive_confirm: bool,
     permission_mode: cortex_proto::dto::PermissionMode,
+    model: cortex_proto::model_choice::ModelChoice,
 ) -> anyhow::Result<()> {
     let mut stream = c
         .chat(ChatRequest {
             session_id: session_id.to_string(),
             message: message.to_string(),
             attachments: Vec::new(),
+            // `--model`（2026-08-19 补）。空串按默认档处理，见 `ModelChoice`
+            model,
             // `--permission-mode`（2026-08-17 补）。收得到 ask 与
             // accept-edits；bypass 被显式拒绝，见 `parse_cli_permission_mode`
             permission_mode,
@@ -779,6 +795,7 @@ async fn interactive(
     session_id: &str,
     color: bool,
     permission_mode: cortex_proto::dto::PermissionMode,
+    model: cortex_proto::model_choice::ModelChoice,
 ) -> anyhow::Result<()> {
     println!(
         "{}",
@@ -806,7 +823,16 @@ async fn interactive(
 
         println!();
         // 交互模式下人就在终端前面，确认当然逐条问
-        one_turn(c, session_id, line, color, true, permission_mode).await?;
+        one_turn(
+            c,
+            session_id,
+            line,
+            color,
+            true,
+            permission_mode,
+            model.clone(),
+        )
+        .await?;
         println!();
     }
     Ok(())

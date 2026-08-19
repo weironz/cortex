@@ -31,7 +31,9 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use cortex_llm::MessageStream;
+use cortex_llm::ModelConfig;
 use cortex_proto::llm::{LlmStreamChunk, LlmStreamError, LlmStreamRequest, ModelTier};
+use cortex_proto::model_choice::ModelChoice;
 use futures::{Stream, StreamExt as _};
 
 use crate::error::ApiError;
@@ -197,12 +199,9 @@ async fn upstream(
     own: Option<(&str, &str, Option<&str>)>,
 ) -> cortex_core::Result<MessageStream> {
     let Some((provider_name, api_key, base_url)) = own else {
-        let model = match req.tier {
-            ModelTier::Main => server.model(),
-            ModelTier::Cheap => server.cheap_model(),
-        };
+        let model = resolve_model(server.provider_id(), server, &req)?;
         return Ok(server
-            .stream_with(model, &req.system, &req.messages, &req.tools)
+            .stream_with(&model, &req.system, &req.messages, &req.tools)
             .await?);
     };
 
@@ -219,11 +218,326 @@ async fn upstream(
         server.model().clone(),
         server.cheap_model().clone(),
     );
-    let model = match req.tier {
-        ModelTier::Main => client.model(),
-        ModelTier::Cheap => client.cheap_model(),
-    };
+    let model = resolve_model(provider_name, &client, &req)?;
     Ok(client
-        .stream_with(model, &req.system, &req.messages, &req.tools)
+        .stream_with(&model, &req.system, &req.messages, &req.tools)
         .await?)
+}
+
+/// 这一轮到底用哪个模型。
+///
+/// 三档（见 [`ModelChoice`]）：
+///
+/// - **默认**：按 `tier` 取部署配的主 / 廉价模型。老客户端不传 `model`
+///   字段时走这里，行为与从前逐字节相同。
+/// - **指定**：校验它在**这个部署的允许列表**里（供应商定义的 `models`），
+///   不在就**明确拒绝**。
+/// - **自动**：按这一轮的特征挑（[`crate::model_pick`]），挑不出来回落默认。
+///
+/// # 为什么指定一个不在列表里的模型要拒绝，而不是悄悄回落
+///
+/// 悄悄回落的后果是：用户在界面上选了 Claude，账单和行为却都是 DeepSeek，
+/// 而**没有任何地方告诉他**。他会拿着一个以为是 Claude 的回答做判断。
+///
+/// 拒绝也不能只回一句「模型不对」—— 那条错误要能让他自己修好，所以把
+/// 能用的列出来。
+///
+/// # Errors
+/// 指定了允许列表之外的模型。
+fn resolve_model(
+    provider: &str,
+    client: &cortex_llm::LlmClient,
+    req: &LlmStreamRequest,
+) -> cortex_core::Result<ModelConfig> {
+    let fallback = || match req.tier {
+        ModelTier::Main => client.model().clone(),
+        ModelTier::Cheap => client.cheap_model().clone(),
+    };
+
+    match &req.model {
+        ModelChoice::Deployment => Ok(fallback()),
+        ModelChoice::Auto => {
+            let allowed = cortex_llm::provider::allowed_models(provider).unwrap_or_default();
+            let shape =
+                crate::model_pick::TurnShape::of(&req.system, &req.messages, req.tools.len());
+            match crate::model_pick::pick(provider, &allowed, shape) {
+                Some(name) => Ok(cortex_llm::provider::model_config(provider, &name)
+                    .unwrap_or_else(|_| fallback())),
+                None => {
+                    // 不报错：用户开着自动档，而这一轮恰好没有模型合适。
+                    // 报错等于让他什么都做不了；回落至少给供应商一个机会
+                    // （它的真实上下文可能比目录记的大）。
+                    // WARN 让运维看得见「自动档在这个部署上挑不出东西」
+                    tracing::warn!(
+                        provider,
+                        candidates = allowed.len(),
+                        input_tokens = shape.input_tokens,
+                        needs_tools = shape.needs_tools,
+                        "自动档没挑出模型，回落到部署默认"
+                    );
+                    Ok(fallback())
+                }
+            }
+        }
+        ModelChoice::Named(name) => {
+            let allowed = cortex_llm::provider::allowed_models(provider).unwrap_or_default();
+            if !allowed.iter().any(|m| m == name) {
+                return Err(cortex_core::CortexError::Invalid(format!(
+                    "这个部署没有开放模型 `{name}`。能用的是：{}",
+                    if allowed.is_empty() {
+                        "（供应商定义里一个都没列）".to_owned()
+                    } else {
+                        allowed.join("、")
+                    }
+                )));
+            }
+            cortex_llm::provider::model_config(provider, name).map_err(|e| {
+                cortex_core::CortexError::Invalid(format!("模型 `{name}` 配不出来：{e}"))
+            })
+        }
+    }
+}
+
+// ───────────────────────── 这个部署能用哪些模型 ─────────────────────────
+
+/// 一个可选的模型 —— **能不能用**（定义说了算）与**能干什么、多少钱**
+/// （目录说了算）拼起来。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelOption {
+    /// 填进请求里的那个名字。
+    pub id: String,
+    /// 给人看的名字。目录没有更好听的就等于 [`Self::id`]。
+    pub display_name: String,
+    /// 上下文窗口。`null` = 目录里查不到这个模型。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<usize>,
+    /// **支持工具调用吗。** `null` = 不知道。
+    ///
+    /// 界面必须把「false」与「不知道」画成不同的东西：前者要拦，
+    /// 后者只能提醒。把「不知道」当成 true，用户会选中一个跑不了 agent
+    /// 的模型然后发现工具一个都没调。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// 每百万输入 token 多少**美元微元**。`null` = 目录里没有它的价目。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_micros_per_mtok: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_micros_per_mtok: Option<i64>,
+}
+
+/// `GET /llm/models` 的响应。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelsResponse {
+    /// 这个部署连的是哪一家。
+    pub provider: String,
+    /// 不选时用的那个（也就是 `tier = main`）。
+    pub default_model: String,
+    /// 后台杂活用的那个。
+    pub cheap_model: String,
+    /// 这个部署开放了哪些。**客户端只能在这里面挑。**
+    pub models: Vec<ModelOption>,
+    /// 这个部署支持「自动」档吗。
+    ///
+    /// 需要至少两个**目录里查得到、且带价目**的模型才有意义 —— 只有一个
+    /// 候选时自动档等于默认档，摆出来只会让人以为它在做什么。
+    pub auto_available: bool,
+}
+
+/// `GET /llm/models` —— 这个部署能用哪些模型。
+///
+/// # 为什么必须有这条路，而不是让客户端填任意模型名
+///
+/// 填任意名字的话，填错的表现是**每一轮对话都失败**，而错误来自供应商
+/// （「no such model」），看不出是选错了。客户端只有拿到这份列表，
+/// 才能把选择做成一个选不错的下拉框。
+///
+/// # Errors
+/// 这个部署没配 LLM。
+pub async fn models(
+    State(st): State<crate::state::AgentState>,
+    headers: HeaderMap,
+) -> Result<Json<ModelsResponse>, crate::error::ApiError> {
+    // 要认证：这份列表里有这个部署配了哪家供应商、开放了哪些模型 ——
+    // 那是部署形态，不该对任何能连上端口的人可见
+    let _ = st.tenant(&headers).await?;
+    let client = st.llm()?;
+    let provider = client.provider_id().to_owned();
+    let allowed = cortex_llm::provider::allowed_models(&provider).unwrap_or_default();
+
+    // 保留名撞车：一个真叫 `auto` 的模型会被当成自动档。
+    // 记一条 WARN 而不是拒绝启动 —— 拒绝启动太重，而这件事目前
+    // 在真实供应商里一次都没出现过
+    if allowed.iter().any(|m| {
+        cortex_proto::model_choice::RESERVED
+            .iter()
+            .any(|r| m.eq_ignore_ascii_case(r))
+    }) {
+        tracing::warn!(
+            provider,
+            "供应商定义里有一个模型名与保留名撞车（auto），它会被当成自动档"
+        );
+    }
+
+    let models: Vec<ModelOption> = allowed
+        .iter()
+        .map(|id| {
+            let info = cortex_llm::catalog::lookup(&provider, id);
+            ModelOption {
+                id: id.clone(),
+                display_name: info
+                    .as_ref()
+                    .map_or_else(|| id.clone(), |i| i.display_name.clone()),
+                context: info.as_ref().map(|i| i.context),
+                tool_call: info.as_ref().map(|i| i.tool_call),
+                vision: info.as_ref().map(|i| i.vision),
+                reasoning: info.as_ref().map(|i| i.reasoning),
+                input_micros_per_mtok: info
+                    .as_ref()
+                    .and_then(|i| i.cost)
+                    .map(|c| c.input_micros_per_mtok),
+                output_micros_per_mtok: info
+                    .as_ref()
+                    .and_then(|i| i.cost)
+                    .map(|c| c.output_micros_per_mtok),
+            }
+        })
+        .collect();
+
+    // 自动档要挑得动才摆出来：候选不足两个时它与默认档没有区别
+    let auto_available = models
+        .iter()
+        .filter(|m| m.input_micros_per_mtok.is_some() && m.tool_call.is_some())
+        .count()
+        >= 2;
+
+    Ok(Json(ModelsResponse {
+        provider,
+        default_model: client.model().model_name.clone(),
+        cheap_model: client.cheap_model().model_name.clone(),
+        models,
+        auto_available,
+    }))
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use cortex_llm::LlmClient;
+
+    /// 造一个真的 `LlmClient`：`resolve_model` 只读它的两个 `ModelConfig`，
+    /// 不发任何请求。
+    fn client() -> LlmClient {
+        let provider = cortex_llm::provider::build_with("deepseek", "test-key", None)
+            .expect("deepseek 的定义内置在 cortex-llm 里");
+        LlmClient::from_provider(
+            provider.into(),
+            "deepseek",
+            cortex_llm::provider::model_config("deepseek", "deepseek-v4-pro").unwrap(),
+            cortex_llm::provider::model_config("deepseek", "deepseek-v4-flash").unwrap(),
+        )
+    }
+
+    fn req(model: ModelChoice, tier: ModelTier) -> LlmStreamRequest {
+        LlmStreamRequest {
+            tier,
+            model,
+            system: "你是助手".into(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn 不传模型时行为与从前逐字节相同() {
+        let c = client();
+        let main = resolve_model(
+            "deepseek",
+            &c,
+            &req(ModelChoice::Deployment, ModelTier::Main),
+        )
+        .expect("默认档不该失败");
+        assert_eq!(main.model_name, "deepseek-v4-pro");
+
+        let cheap = resolve_model(
+            "deepseek",
+            &c,
+            &req(ModelChoice::Deployment, ModelTier::Cheap),
+        )
+        .expect("默认档不该失败");
+        assert_eq!(
+            cheap.model_name, "deepseek-v4-flash",
+            "老客户端不传 model 字段时，tier 仍然决定主 / 廉价 —— \
+             这条一破，所有老客户端的后台抽取都会跑到贵模型上"
+        );
+    }
+
+    #[test]
+    fn 指定允许列表里的模型能用() {
+        let c = client();
+        let got = resolve_model(
+            "deepseek",
+            &c,
+            &req(
+                ModelChoice::Named("deepseek-v4-flash".into()),
+                ModelTier::Main,
+            ),
+        )
+        .expect("它在 deepseek 的定义里");
+        assert_eq!(got.model_name, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn 指定列表外的模型被明确拒绝_而不是悄悄换掉() {
+        let c = client();
+        let err = resolve_model(
+            "deepseek",
+            &c,
+            &req(ModelChoice::Named("gpt-4o".into()), ModelTier::Main),
+        )
+        .expect_err("这个部署没开放 gpt-4o");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("gpt-4o"),
+            "错误里要写清是哪个模型不行，实际：{msg}"
+        );
+        assert!(
+            msg.contains("deepseek-v4-pro"),
+            "还要列出能用的 —— 一句「模型不对」用户自己修不好。实际：{msg}"
+        );
+    }
+
+    #[test]
+    fn 悄悄回落是这条路最不该有的行为() {
+        // 这条测试与上一条盯的是同一件事，但断言的是**相反面**：
+        // 回落的话调用会成功并给出默认模型，而用户在界面上选的是别的 ——
+        // 他会拿着一个以为是 Claude 的回答做判断，账单也对不上
+        let c = client();
+        let got = resolve_model(
+            "deepseek",
+            &c,
+            &req(ModelChoice::Named("claude-opus-4".into()), ModelTier::Main),
+        );
+        assert!(
+            got.is_err(),
+            "没开放的模型必须报错。回落成 {:?} 的话，用户不会知道自己没用上他选的那个",
+            got.map(|m| m.model_name)
+        );
+    }
+
+    #[test]
+    fn 自动档挑得出一个允许列表里的模型() {
+        let c = client();
+        let got = resolve_model("deepseek", &c, &req(ModelChoice::Auto, ModelTier::Main))
+            .expect("自动档挑不出来时也该回落，不该失败");
+        let allowed = cortex_llm::provider::allowed_models("deepseek").unwrap();
+        assert!(
+            allowed.contains(&got.model_name),
+            "自动档挑出来的必须在允许列表里，实际挑了 {}",
+            got.model_name
+        );
+    }
 }

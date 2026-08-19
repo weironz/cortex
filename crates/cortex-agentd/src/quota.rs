@@ -90,6 +90,13 @@ pub struct QuotaView {
     pub cost_micros: i64,
     /// 货币代码，只影响显示。
     pub currency: String,
+    /// 折算汇率（1 USD = 多少 [`Self::currency`]）。
+    ///
+    /// **有值时界面必须写明「按 X 折算」** —— 目录里的价目是美元，
+    /// 一个不说明来源的折算金额，用户没法判断对不对。
+    /// `null` = 没折算（那时 `currency` 就是 USD）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usd_rate: Option<f64>,
     /// 属于**没有价目的模型**的 token 数。
     ///
     /// 单独报，不是加进金额里按 0 算：「用了 300 万 token，花了 ¥0.00」
@@ -222,8 +229,15 @@ impl AgentState {
             e.1 += outp;
         }
 
-        let (by_model, cost_micros, unpriced_tokens) =
-            crate::pricing::report(merged.into_iter().map(|(m, (i, o))| (m, i, o)));
+        let (by_model, cost_micros, unpriced_tokens) = crate::pricing::report(
+            // 这个部署配的那家。查目录要它 —— 同一个模型名在不同家
+            // 的价目可以不一样，只按模型名查会算错
+            self.llm().map_or("", cortex_llm::LlmClient::provider_id),
+            merged.into_iter().map(|(m, (i, o))| (m, i, o)),
+        );
+
+        // 显示货币与折算汇率。没配汇率时会退回美元 —— 见 pricing::usd_rate
+        let display_currency = crate::pricing::display_currency();
 
         let status = QuotaStatus {
             used_tokens: billed,
@@ -238,7 +252,8 @@ impl AgentState {
             remaining_tokens: status.remaining(),
             window_days: status.window_days,
             cost_micros,
-            currency: crate::pricing::currency(),
+            currency: display_currency.0,
+            usd_rate: display_currency.1,
             unpriced_tokens,
             by_model,
         })

@@ -476,6 +476,7 @@ class _ConfirmApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
         SandboxHealthUnsupported
@@ -622,6 +623,7 @@ class _ConfirmApi
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    String? model,
     bool sandbox = false,
   }) => const Stream.empty();
 

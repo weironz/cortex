@@ -270,6 +270,10 @@ services:
       # 没有价目的模型在界面上显示「没有价目」，不是 ¥0.00
       CORTEX_MODEL_PRICES: ${CORTEX_MODEL_PRICES:-}
       CORTEX_PRICE_CURRENCY: ${CORTEX_PRICE_CURRENCY:-}
+      # 美元→显示货币的汇率。**不配就整个用美元显示** ——
+      # 模型目录里的价目是美元，随手挑一个汇率折出来的金额，
+      # 用户没法判断对不对，也不知道该按哪天的汇率复核
+      CORTEX_USD_RATE: ${CORTEX_USD_RATE:-}
       # 对象存储：附件的字节落在这里。
       #
       # **这几行 0.1.10 之前一直不在**，于是生产上的 `/api/sandbox/health`

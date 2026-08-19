@@ -17,6 +17,7 @@ import '../models/import_plan.dart';
 import '../models/pending_confirmation.dart';
 import '../models/project.dart';
 import '../models/session_detail.dart';
+import '../models/model_option.dart';
 import '../models/session_search_hit.dart';
 import '../models/usage_report.dart';
 import '../models/sandbox_health.dart';
@@ -158,6 +159,12 @@ abstract interface class CortexApi {
     required String message,
     List<Attachment> attachments,
     PermissionMode permissionMode,
+
+    /// 这一轮用哪个模型。`null` = 部署配的那个，`'auto'` = 自动档。
+    ///
+    /// 逐轮带，与 [permissionMode] 同一路数：用户在设置里换了模型，
+    /// **下一句**就该按新的走。
+    String? model,
   });
 
   /// `GET /runs/{session_id}` → SSE —— 挂上一个**已经在跑**的轮次。
@@ -206,6 +213,17 @@ abstract interface class CortexApi {
     String query, {
     bool includeArchived = false,
   });
+
+  /// `GET /llm/models` —— 这个部署能用哪些模型。
+  ///
+  /// # 为什么必须先拿这份列表，而不是让用户填一个名字
+  ///
+  /// 填错的表现是**每一轮对话都失败**，而错误来自供应商（「no such
+  /// model」），看不出是选错了。有了列表，选择才做得成一个选不错的下拉框。
+  ///
+  /// 老服务端没有这条路由，答 404 —— 那时模型选择器整个不出现
+  /// （[CortexApiException.isUnsupported]），而不是给一个点下去报错的框。
+  Future<ModelCatalog> llmModels();
 
   /// `GET /auth/usage` —— 这个窗口用了多少、花了多少、还剩多少。
   ///
@@ -629,6 +647,12 @@ mixin LocalWorkspaceUnsupported {
 ///
 /// 回**抛错**而不是空列表：空列表与「真的一条都没搜到」长得一模一样，
 /// 于是一个忘了接搜索的后端在界面上表现为「搜索能用，只是永远没结果」。
+/// 给测试替身用：这个后端没有模型列表。
+mixin LlmModelsUnsupported {
+  Future<ModelCatalog> llmModels() =>
+      Future.error(const CortexApiException('这个后端没有模型列表。', statusCode: 404));
+}
+
 mixin SessionSearchUnsupported {
   Future<List<SessionSearchHit>> searchSessions(
     String query, {

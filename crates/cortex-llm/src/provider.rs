@@ -1,7 +1,7 @@
 //! 供应商目录与构造。
 //!
 //! 一条路走到黑：**所有**供应商都由一份声明式 JSON 描述，交给 goose 的
-//! [`goose_providers::declarative::from_json`] 装配。goose 把 JSON 里的
+//! [`cortex_providers::declarative::from_json`] 装配。goose 把 JSON 里的
 //! `engine` 映射到三套已经调好的引擎实现（openai / anthropic / ollama），
 //! 各家的 prompt caching、thinking 不透明块、格式转换、重试都在那一层完成 ——
 //! 这里一行适配代码都不用写，加供应商 = 加一个 JSON 文件。
@@ -23,12 +23,12 @@
 
 use std::convert::Infallible;
 
-use goose_providers::base::Provider;
-use goose_providers::declarative::{
+use cortex_providers::base::Provider;
+use cortex_providers::declarative::{
     DeclarativeProviderConfig, KeyResolver, deserialize_provider_config,
     fixed_provider_config_entries, from_json,
 };
-use goose_providers::model::ModelConfig;
+use cortex_providers::model::ModelConfig;
 
 use crate::error::{LlmError, Result};
 use crate::vision::VisionSupport;
@@ -39,6 +39,15 @@ const BUILTIN: &[(&str, &str)] = &[
     ("anthropic", include_str!("definitions/anthropic.json")),
     ("openai", include_str!("definitions/openai.json")),
     ("ollama", include_str!("definitions/ollama.json")),
+    // Gemini 走 google 原生协议，不走它的 OpenAI 兼容端点 ——
+    // 后者透不出 thinking 块，而那是 Gemini 3 最贵的能力之一
+    ("google", include_str!("definitions/google.json")),
+    // xAI 是 OpenAI 兼容，所以只用加一个 JSON。这条正是
+    // 「加一家供应商 = 加一个文件」那句话的证据
+    ("xai", include_str!("definitions/xai.json")),
+    // 覆盖上游那份：它列的型号名（kimi-k2-0711 等）在模型目录里查不到，
+    // 于是那 6 个模型在选择器里全都显示「不知道能力与价格」
+    ("moonshot", include_str!("definitions/moonshot.json")),
 ];
 
 /// 把固定密钥喂给 goose，而不是让它自己去读环境变量。
@@ -98,6 +107,63 @@ pub(crate) fn default_models(name: &str) -> Result<(Option<String>, Option<Strin
     Ok((main, cheap))
 }
 
+/// 只为读 `models` 那一串而存在的极简视图。
+///
+/// # 为什么不走 `config_of`
+///
+/// 那条路要过 goose 的声明式解析器，而它只认三种引擎
+/// （openai / anthropic / ollama）。Gemini 的定义写着 `"engine": "google"`，
+/// 过去会直接报「Invalid provider type」—— 于是 Gemini 那家在模型选择器里
+/// **一个模型都列不出来**，而它明明是能用的（`build_with` 里走专用实现）。
+///
+/// 与下面 `VisionModel` 那份视图同一个路数、同一个理由。
+#[derive(serde::Deserialize)]
+struct ModelListView {
+    #[serde(default)]
+    models: Vec<ModelNameView>,
+}
+
+#[derive(serde::Deserialize)]
+struct ModelNameView {
+    name: String,
+    #[serde(default)]
+    context_limit: Option<usize>,
+}
+
+fn model_list(name: &str) -> Result<ModelListView> {
+    let json = definition(name).ok_or_else(|| LlmError::UnknownProvider {
+        name: name.to_string(),
+        available: available().join(", "),
+    })?;
+    serde_json::from_str(json).map_err(|e| LlmError::Build {
+        name: name.to_string(),
+        source: anyhow::anyhow!("{name} 的定义读不出模型列表：{e}"),
+    })
+}
+
+/// 这个供应商**允许用哪些模型** —— 也就是定义 JSON 里 `models` 那一串。
+///
+/// 这是模型选择的**权威白名单**：客户端只能在它里面挑。
+///
+/// # 为什么不是「目录里这家的全部模型」
+///
+/// 目录（`catalog::for_provider`）知道 DeepSeek 有几十个型号，但这个部署
+/// 未必都能用 —— 有的要单独开通、有的已经下线、有的这个 base_url 后面
+/// 根本没有。放进选择器里的每一个，都必须是**这个部署真的调得通**的，
+/// 否则用户选完之后每一轮对话都失败，而错误来自供应商、看不出是选错了。
+///
+/// 目录负责回答「这个模型能干什么、多少钱」，定义负责回答「能不能用」。
+///
+/// # Errors
+/// 供应商名字不认识。
+pub fn allowed_models(name: &str) -> Result<Vec<String>> {
+    Ok(model_list(name)?
+        .models
+        .into_iter()
+        .map(|m| m.name)
+        .collect())
+}
+
 fn config_of(name: &str) -> Result<DeclarativeProviderConfig> {
     let json = definition(name).ok_or_else(|| LlmError::UnknownProvider {
         name: name.to_string(),
@@ -140,6 +206,38 @@ pub fn build(name: &str, api_key: &str) -> Result<Box<dyn Provider>> {
 /// # Errors
 /// 供应商名不认识，或者 goose 建不起来。
 pub fn build_with(name: &str, api_key: &str, base_url: Option<&str>) -> Result<Box<dyn Provider>> {
+    // ── Gemini 走专用实现，不是声明式 ──
+    //
+    // 声明式那条路只认三种引擎（openai / anthropic / ollama，见
+    // `declarative.rs` 的 `ProviderEngine::from_str`）。Gemini 讲的是第四种
+    // 协议，而它的实现在 `cortex_providers::google`。
+    //
+    // 走它的 OpenAI 兼容端点能省掉这一段分支，但那条路**透不出 thinking
+    // 块** —— 而那是 Gemini 3 最贵的能力之一，也正是 CLAUDE.md 不可违反
+    // 约束第 3 条点名不许丢的东西。
+    if name.eq_ignore_ascii_case("google") || name.eq_ignore_ascii_case("gemini") {
+        let host = base_url
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .unwrap_or("https://generativelanguage.googleapis.com")
+            .trim_end_matches('/')
+            .to_owned();
+        let p = cortex_providers::google::GoogleProvider::new(
+            host,
+            api_key.to_owned(),
+            None,
+            None,
+            // thinking 预算交给模型自己定：写死一个数会让「简单问题也想很久」
+            // 或者「难题想不完」，而我们没有判断依据
+            None,
+        )
+        .map_err(|source| LlmError::Build {
+            name: name.to_string(),
+            source,
+        })?;
+        return Ok(Box::new(p));
+    }
+
     let json = definition(name).ok_or_else(|| LlmError::UnknownProvider {
         name: name.to_string(),
         available: available().join(", "),
@@ -175,12 +273,13 @@ pub fn build_with(name: &str, api_key: &str, base_url: Option<&str>) -> Result<B
 /// Cortex 不打算让用户去设 `GOOSE_*`，所以上限一律由本层的 JSON 定义说了算；
 /// 定义里没列到的模型才回落到 goose 的 canonical 表。
 pub fn model_config(provider: &str, model: &str) -> Result<ModelConfig> {
-    let config = config_of(provider)?;
-    let limit = config
+    // 走极简视图而不是声明式解析器：后者不认 `engine: google`，
+    // 而 Gemini 是能用的（见 `build_with`）。理由同 `allowed_models`
+    let limit = model_list(provider)?
         .models
-        .iter()
+        .into_iter()
         .find(|info| info.name == model)
-        .map(|info| info.context_limit);
+        .and_then(|info| info.context_limit);
 
     Ok(ModelConfig::new(model)
         .with_canonical_limits(provider)
@@ -336,11 +435,50 @@ mod base_url_tests {
 mod tests {
     use super::*;
 
+    /// 走声明式那条路的定义。**不含 google** —— 它讲第四种协议，
+    /// 由 `build_with` 里的专用分支处理（见那段注释）。
+    fn declarative_builtins() -> Vec<&'static str> {
+        BUILTIN
+            .iter()
+            .map(|(n, _)| *n)
+            .filter(|n| *n != "google")
+            .collect()
+    }
+
     #[test]
     fn builtin_definitions_all_parse() {
-        for (name, _) in BUILTIN {
+        for name in declarative_builtins() {
             config_of(name).unwrap_or_else(|e| panic!("内置定义 {name} 解析失败：{e}"));
         }
+    }
+
+    /// **每个内置定义都必须建得起来**，不管走哪条路。
+    ///
+    /// 这条比「都能被声明式解析器解析」更强，也是真正要保的性质：
+    /// 加一个定义而它建不起来时，表现是那家在选择器里列得出模型、
+    /// 选中之后每一轮对话都失败。
+    ///
+    /// 上一版这条测试写的是「都能被声明式解析」——加 Gemini 时它红了，
+    /// 而红得对：Gemini 的 `engine` 声明式解析器不认。断言改成这个之后
+    /// 两条路都覆盖到了。
+    #[test]
+    fn 每个内置定义都建得起来() {
+        for (name, _) in BUILTIN {
+            build_with(name, "test-key", None)
+                .unwrap_or_else(|e| panic!("内置定义 {name} 建不起来：{e}"));
+        }
+    }
+
+    #[test]
+    fn gemini_走的是专用实现_不是声明式() {
+        // 它的 engine 声明式解析器不认 —— 这正是它必须走专用分支的原因
+        assert!(
+            config_of("google").is_err(),
+            "google 若能被声明式解析，说明有人把 engine 改成了 openai ——              那条路透不出 thinking 块"
+        );
+        // 但它必须建得起来、也必须列得出模型
+        assert!(build_with("google", "k", None).is_ok());
+        assert!(!allowed_models("google").unwrap().is_empty());
     }
 
     #[test]
@@ -418,9 +556,9 @@ mod tests {
         // 我们往 goose 的 JSON 里塞了它不认识的 `vision` 字段。
         // serde 默认忽略未知字段——但这是**约定而非契约**，
         // goose 哪天加上 deny_unknown_fields 就会在这里炸，而不是在生产上。
-        for (name, _) in BUILTIN {
+        for name in declarative_builtins() {
             let config = config_of(name).unwrap_or_else(|e| panic!("{name} 解析失败：{e}"));
-            assert!(!config.models.is_empty() || name == &"ollama");
+            assert!(!config.models.is_empty() || name == "ollama");
         }
     }
 

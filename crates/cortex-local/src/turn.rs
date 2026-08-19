@@ -261,6 +261,46 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// 这一轮该用哪个 `LlmClient`。
+    ///
+    /// 默认档直接借用进程级那个（最常见的路径，一次克隆都不做）；
+    /// 选了具体模型或自动档时才造一份副本。
+    ///
+    /// # 两条路的分歧写在这里
+    ///
+    /// - **代理**（默认）：本地不知道服务端配了哪些模型，也不该知道。
+    ///   把选择编进占位名，由 agentd 去校验与解析 —— 白名单在它那儿。
+    /// - **直连**：key 和模型都在本机，直接查本地定义把 `ModelConfig`
+    ///   配出来。配不出来（用户填了个不存在的模型）时**回落到默认并记
+    ///   一条 WARN**，而不是让这一轮失败：直连是自托管运维在用，
+    ///   他改的是环境变量，一次手滑不该让对话整个不能用。
+    fn llm_for(&self, choice: &cortex_proto::model_choice::ModelChoice) -> cortex_llm::LlmClient {
+        use cortex_proto::model_choice::ModelChoice;
+        if matches!(choice, ModelChoice::Deployment) {
+            return (*self.llm).clone();
+        }
+        // 直连时本地知道有哪些模型；代理时不知道，也不该知道
+        if self.llm.provider_id() != crate::llm::PROXY_PROVIDER_ID {
+            // 直连：本地就能把模型配出来
+            let ModelChoice::Named(name) = choice else {
+                // 自动档在直连路径下**没有实现**：挑模型要一份「这个部署
+                // 开放了哪些」的白名单，而直连那侧的白名单就是本地定义 ——
+                // 可以做，但那是另一件事。现在老实回落到默认，
+                // 而不是假装挑过了
+                tracing::warn!("直连路径暂不支持自动档，这一轮用默认模型");
+                return (*self.llm).clone();
+            };
+            return match cortex_llm::provider::model_config(self.llm.provider_id(), name) {
+                Ok(cfg) => self.llm.with_model(cfg),
+                Err(e) => {
+                    tracing::warn!(model = name, error = %e, "配不出这个模型，回落到默认");
+                    (*self.llm).clone()
+                }
+            };
+        }
+        self.llm.with_model(crate::llm::proxy_model_config(choice))
+    }
+
     /// 跑一轮。事件同时进重放缓冲与广播，见 [`crate::runs`]。
     ///
     /// # 为什么不再直接回一个 `mpsc::Receiver`
@@ -576,8 +616,17 @@ impl Engine {
             mcp: Arc::clone(&self.mcp),
             grants: self.grants.clone(),
         };
+        // 这一轮用哪个模型。逐轮的选择是**那一轮的属性**，而 `self.llm`
+        // 是进程级的 —— 所以造一份带这一轮模型的副本（供应商是 Arc，
+        // 克隆极便宜），而不是给 `Turn::run` 的签名加参数：那份签名
+        // 两个宿主共用，为一个部署选择去改它不划算。
+        //
+        // 直连路径下 `with_model` 拿到的是真模型配置；代理路径下拿到的是
+        // 一个把选择编进名字的占位（见 `llm::proxy_model_config`）。
+        // 两条路在这里长得一样，是有意的。
+        let llm = self.llm_for(&req.model);
         let outcome = turn
-            .run(&self.llm, &system_prompt, &mut messages, &host, &atx)
+            .run(&llm, &system_prompt, &mut messages, &host, &atx)
             .await;
         drop(atx);
         let tool_calls = bridge.await.unwrap_or_else(|e| {

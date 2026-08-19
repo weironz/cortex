@@ -42,6 +42,7 @@ class ReplayApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
         SandboxHealthUnsupported
@@ -212,6 +213,7 @@ class ReplayApi
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    String? model,
     bool sandbox = false,
   }) async* {
     yield const ChatDeltaEvent('好');

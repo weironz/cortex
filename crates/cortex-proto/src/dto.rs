@@ -225,6 +225,17 @@ pub struct ChatRequest {
     /// 默认空，因此老客户端不传这个字段也照常工作。
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>,
+    /// 这一轮用哪个模型。老客户端不传即「用这个部署配的那个」。
+    ///
+    /// 逐轮带，与 [`permission_mode`](Self::permission_mode) 完全同构 ——
+    /// 用户在对话框里换了模型，**下一句**就该按新的走。存服务端的话，
+    /// 客户端要多一次同步，而那次同步失败时用户看到的是「我明明换了」。
+    ///
+    /// 「账号级默认」因此就是客户端自己的设置（桌面端存 settings.json、
+    /// Web 存 localStorage）—— 与权限档同一个位置、同一套语义，不必为它
+    /// 新开一张表。
+    #[serde(default)]
+    pub model: crate::model_choice::ModelChoice,
     /// 这一轮的权限档位。老客户端不传即 [`PermissionMode::Ask`]。
     ///
     /// 逐轮带而不是存在会话上：用户在对话框底部随时能改，而改完之后

@@ -1,3 +1,4 @@
+import 'model_picker.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -19,6 +20,9 @@ class ModelPage extends StatelessWidget {
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.symmetric(horizontal: 4),
     children: const [
+      // 选模型排在最前：这是这一页最常被打开的理由
+      ModelPickerTile(),
+      Divider(height: 28),
       // 配额超限的消息里写着「可以在设置里填自己的 API key」。那句话在这个
       // 入口存在之前就已经发到用户眼前了 —— 一个正被拦住的人会来这里找它
       OwnApiKeyTile(),

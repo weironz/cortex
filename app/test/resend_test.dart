@@ -50,6 +50,7 @@ class _Api extends MockCortexApi {
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    String? model,
   }) {
     sent.add((text: message, attachments: attachments));
     if (hangNext) {

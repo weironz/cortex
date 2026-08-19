@@ -1,0 +1,43 @@
+{
+  "name": "xai",
+  "engine": "openai",
+  "display_name": "xAI Grok",
+  "description": "xAI Grok 官方 API（OpenAI 兼容）",
+  "api_key_env": "XAI_API_KEY",
+  "base_url": "https://api.x.ai/v1",
+  "models": [
+    {
+      "name": "grok-4.3",
+      "context_limit": 2000000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "reasoning": true,
+      "vision": true
+    },
+    {
+      "name": "grok-4.20-0309-reasoning",
+      "context_limit": 2000000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "reasoning": true,
+      "vision": true
+    },
+    {
+      "name": "grok-4.20-0309-non-reasoning",
+      "context_limit": 2000000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": true
+    }
+  ],
+  "headers": null,
+  "timeout_seconds": null,
+  "preserves_thinking": true,
+  "supports_streaming": true
+}

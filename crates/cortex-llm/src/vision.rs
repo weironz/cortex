@@ -6,7 +6,7 @@
 //! `{"type":"image","source":{"type":"base64","media_type":…,"data":…}}`，
 //! OpenAI 兼容那一系要 `{"type":"image_url","image_url":{"url":"data:…"}}`。
 //! 但这个差异**在取件的 goose 里已经解决了**：
-//! `goose_provider_types::images::convert_image` 按 `ImageFormat` 分派，
+//! `cortex_providers::images::convert_image` 按 `ImageFormat` 分派，
 //! anthropic 引擎传 `ImageFormat::Anthropic`，openai / ollama 引擎传
 //! `ImageFormat::OpenAi`，而声明式配置的 `engine` 字段决定走哪个引擎。
 //!
@@ -22,7 +22,7 @@
 //!    以「模型说它没看到图片」的形式静默丢失，这是最难查的一类问题。
 
 use base64::Engine as _;
-use goose_providers::conversation::message::{Message, MessageContent};
+use cortex_providers::conversation::message::{Message, MessageContent};
 
 use crate::error::{LlmError, Result};
 

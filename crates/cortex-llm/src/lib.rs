@@ -35,6 +35,8 @@
 //! # }
 //! ```
 
+/// 模型目录：一个模型能干什么、多少钱。见模块文档。
+pub mod catalog;
 pub mod client;
 pub mod error;
 pub mod provider;
@@ -49,9 +51,9 @@ pub use vision::{
 
 // 直接透出 goose 的规范类型。上层（cortex-agent / cortexd）就用这些类型，
 // 不要在 Cortex 里另立一套 —— 任何再包一层的转换都是有损的。
-pub use goose_providers::base::{MessageStream, Provider};
-pub use goose_providers::conversation::message::{Message, MessageContent};
-pub use goose_providers::conversation::token_usage::{ProviderUsage, Usage};
-pub use goose_providers::errors::ProviderError;
-pub use goose_providers::model::ModelConfig;
+pub use cortex_providers::base::{MessageStream, Provider};
+pub use cortex_providers::conversation::message::{Message, MessageContent};
+pub use cortex_providers::conversation::token_usage::{ProviderUsage, Usage};
+pub use cortex_providers::errors::ProviderError;
+pub use cortex_providers::model::ModelConfig;
 pub use rmcp::model::Tool;

@@ -38,6 +38,7 @@ class _BlobApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
         SandboxHealthUnsupported
@@ -180,6 +181,7 @@ class _BlobApi
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    String? model,
     bool sandbox = false,
   }) async* {
     lastSentAttachments = attachments;

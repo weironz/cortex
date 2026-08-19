@@ -13,6 +13,7 @@ members = [
     "crates/cortex-cli",
     "crates/cortex-blob",
     "crates/cortex-mcp",
+    "crates/cortex-providers",
 ]
 
 [workspace.package]
@@ -44,15 +45,11 @@ cortex-import = { path = "crates/cortex-import" }
 cortex-llm = { path = "crates/cortex-llm" }
 cortex-agent = { path = "crates/cortex-agent" }
 cortex-mcp = { path = "crates/cortex-mcp" }
+cortex-providers = { path = "crates/cortex-providers" }
 cortex-proto = { path = "crates/cortex-proto" }
 cortex-store = { path = "crates/cortex-store" }
 cortex-blob = { path = "crates/cortex-blob" }
 
-# 供应商层：取件自 goose（Apache-2.0）。
-# 只依赖 goose-providers —— 它已 pub use 了 goose-provider-types 的全部类型层，
-# 而 goose-provider-types 本身**没有 rustls-tls feature**（写了会导致依赖解析直接失败），
-# TLS 后端只由 goose-providers 转发给 reqwest。
-goose-providers = { version = "0.1.0-alpha", default-features = false, features = ["rustls-tls"] }
 
 # 异步运行时
 tokio = { version = "1.53", features = ["full"] }
@@ -65,7 +62,6 @@ async-trait = "0.1"
 # 服务端
 axum = { version = "0.8", features = ["macros", "ws"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
-
 
 # 序列化
 serde = { version = "1", features = ["derive"] }
@@ -101,7 +97,6 @@ bollard = { version = "0.21", default-features = false, features = ["pipe"] }
 # 版本必须与 axum 内部那份一致（`cargo tree -i tokio-tungstenite` 核对）：
 # 两份共存会让 `bytes::Bytes` 之外的类型对不上，报错在转换处而不在依赖处。
 tokio-tungstenite = "0.29"
-
 
 # OS 级沙箱（仅 Linux 目标启用）。
 # 取件自 codex（Apache-2.0）的选型：它的 linux-sandbox 就是这两个 crate 的编排。

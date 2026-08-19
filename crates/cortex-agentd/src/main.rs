@@ -36,6 +36,7 @@ mod episodes;
 mod error;
 mod import;
 mod llm;
+mod model_pick;
 mod presence;
 mod pricing;
 mod projects;

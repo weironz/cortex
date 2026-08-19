@@ -538,6 +538,7 @@ class _GateApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
         SandboxHealthUnsupported
@@ -642,6 +643,7 @@ class _GateApi
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    String? model,
     bool sandbox = false,
   }) => throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
 

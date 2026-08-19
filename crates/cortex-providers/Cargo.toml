@@ -1,0 +1,119 @@
+[package]
+name = "cortex-providers"
+version.workspace = true
+# ⚠️ **2021，不是工作区的 2024。**
+# 取件来的是 2021 的代码，而 2024 改了 `ref` 模式的规则
+# （"cannot explicitly borrow within an implicitly-borrowing pattern"）。
+# 把几千行改成 2024 写法，等于在取件当天就制造一堆与上游的无谓分歧，
+# 而收益是零 —— edition 是 per-crate 的，混用完全正常。
+edition = "2021"
+license.workspace = true
+description = "LLM 供应商层：取件自 goose（Apache-2.0），此后由 Cortex 自行维护"
+
+# ⚠️ 这里的版本与 feature **照抄取件时上游那一份**，不是随手挑的。
+#
+# 取件带走的是源码，不是它的依赖解析结果 —— 而这些 crate（尤其 rmcp 与
+# utoipa）在大版本之间会改 derive 宏与 trait 形状，版本挑错的表现是几百行
+# 谁也读不懂的宏展开错误，而不是「某个功能没了」。
+#
+# 之后要升哪一个，按本仓库自己的判据升，不必等上游 —— 但升的时候要知道
+# 这里的起点是上游那一版。
+
+[dependencies]
+# ── 类型层（Message / 格式转换 / 模型目录）────────────────────
+anyhow.workspace = true
+async-stream = "0.3.6"
+async-trait.workspace = true
+base64 = "0.22"
+chrono.workspace = true
+futures.workspace = true
+once_cell = "1.21"
+rand = "0.10"
+regex = "1.12"
+reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
+# `Tool` 就是 rmcp 的那个。**与 cortex-llm 钉同一版**，否则同一个类型会有
+# 两份，而错误信息长得像「expected Tool, found Tool」
+rmcp = { version = "1.8", default-features = false, features = [
+    "schemars",
+    "server",
+    "macros",
+] }
+serde.workspace = true
+serde_json.workspace = true
+strum = { version = "0.28", default-features = false, features = [
+    "derive",
+    "std",
+] }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+unicode-normalization = "0.1"
+utoipa = { version = "4.2", features = ["chrono"] }
+uuid = { version = "1.23", default-features = false, features = ["v4", "std"] }
+
+# ── 真正发 HTTP 那几个额外要的 ────────────────────────────────
+# 声明式供应商定义靠它在编译期把 JSON 目录嵌进来
+include_dir = { version = "0.7", default-features = false }
+tokio-stream = { version = "0.1", default-features = false, features = [
+    "io-util",
+] }
+tokio-util = { version = "0.7", default-features = false, features = [
+    "compat",
+] }
+url = { version = "2.5", default-features = false, features = ["std"] }
+urlencoding = "2.1"
+
+# ── 只有 native-tls 那条路要的 ────────────────────────────────
+#
+# `api_client.rs` 里有一段把客户端证书私钥转成 PKCS#8 的代码
+# （reqwest 的 native-tls Identity 只收这一种）。我们发的是 rustls，
+# 那条路一次都跑不到 —— 但 `just ci` 的 lint 跑的是 `--all-features`，
+# 会把它编一遍。四个都是可选依赖，不开 native-tls 时一个都不拉。
+# feature 与取件时上游那份逐字一致 —— `ALGORITHM_ID` / `ALGORITHM_OID`
+# 这些常量藏在 feature 后面，少一个就是「找不到这个值」
+pem = { version = "3.0.2", default-features = false, features = [
+    "std",
+], optional = true }
+pkcs1 = { version = "0.7.5", default-features = false, features = [
+    "pkcs8",
+    "std",
+], optional = true }
+pkcs8 = { version = "0.10", default-features = false, features = [
+    "alloc",
+    "std",
+], optional = true }
+sec1 = { version = "0.7", default-features = false, features = [
+    "der",
+    "pkcs8",
+    "std",
+], optional = true }
+
+[features]
+default = []
+# TLS 后端。**必须传下去一个** —— 它只是转发给 reqwest，
+# 两个都不开时 reqwest 没有 TLS，所有 https 请求要到运行时才失败。
+# ⚠️ reqwest 0.13 把 feature 改名了：`rustls-tls` → `rustls`。
+# 名字沿用外面那个（上游与本仓库别处都叫 rustls-tls），只在这里转一次 ——
+# 改调用方的名字会让「跟上游对不上」这件事散到十几个地方
+rustls-tls = ["reqwest/rustls"]
+native-tls = [
+    "reqwest/native-tls",
+    "dep:pem",
+    "dep:pkcs1",
+    "dep:pkcs8",
+    "dep:sec1",
+]
+
+# ── 上游自带的单元测试要的 ────────────────────────────────────
+#
+# **把测试一起取过来，不是可选项。** 这一层是 2 万行协议转换代码，
+# 而协议转换出错的方式几乎全是「不报错的错」：少一个字段、把 thinking 块
+# 当普通文本、把 tool_call 的 id 对错。这些上游都有用例钉着 ——
+# 丢掉它们等于把这 2 万行变成没人验证过的代码，而我们刚刚成了它的维护者。
+[dev-dependencies]
+env-lock = "1"
+tempfile = "3.10"
+test-case = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio-stream = "0.1"
+wiremock = "0.6"

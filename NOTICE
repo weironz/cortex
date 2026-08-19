@@ -16,10 +16,35 @@ Copyright Block, Inc.
 Licensed under the Apache License, Version 2.0
 ───────────────────────────────────────────────────────────────────────
 
-以 crate 依赖方式使用（未修改源码）：
+**已取件，此后由 Cortex 自行维护，不再与上游同步。**（2026-08-19）
 
-  goose-providers        LLM 供应商适配层。含 39 个声明式 JSON 供应商定义，
-                         已处理 prompt caching 与 thinking / reasoning 不透明块。
+  crates/cortex-providers/     LLM 供应商适配层。类型层（Message / 格式转换 /
+                               模型目录）与四个引擎（openai / anthropic /
+                               google / ollama）的实现，含声明式 JSON 供应商
+                               定义。已处理 prompt caching 与 thinking /
+                               reasoning 不透明块。
+
+原先是 crates.io 上的 `goose-providers = "0.1.0-alpha"`。改成取件的理由写在
+`crates/cortex-providers/src/lib.rs` 的模块文档里，一句话是：它是 alpha，
+而我们用不到它的大半 —— databricks / snowflake 那几套在本仓库一行都执行不到，
+却一直在编。
+
+砍掉的与保留的、以及当初是怎么取的，见 `scripts/vendor-providers.py`
+（一次性脚本，留着当记录，不打算再跑）。
+
+⚠️ **不与上游同步**是有意的：那份代码现在按本仓库的判据改，不必去看上游。
+刻意不留「定期同步 upstream」的流程 —— 一个没人会执行的流程会让读代码的人
+以为这里的改动需要先跟谁对齐。
+
+保留署名是 Apache-2.0 第 4 条的要求（每个取件文件头部都写着出处），
+与「这是不是我们的代码」无关。
+
+与上游的分歧（都在源文件里注明了理由）：
+
+  src/images.rs   `candidate_anchors` —— 上游只认 POSIX 绝对路径（只找 `/`），
+                  于是 Windows 上粘一个 `D:\pics\shot.png` 图片**静默**不被
+                  内联。补了盘符与 UNC 两种起点。上游那 6 条 images 测试在
+                  Windows 上原本全红。
 
 `cortex-llm` 直接复用其 `Message` / `MessageContent` 作为内部规范消息格式，
 不再包一层有损转换 —— 中间抽象会丢掉 prompt caching 与 thinking 块，
@@ -27,7 +52,6 @@ Licensed under the Apache License, Version 2.0
 
 相关文件：
   crates/cortex-llm/src/{client,error,provider,vision}.rs
-  crates/cortex-memory/src/transcribe.rs
 
 ───────────────────────────────────────────────────────────────────────
 codex

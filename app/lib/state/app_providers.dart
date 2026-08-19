@@ -925,6 +925,7 @@ class GateClosedApi implements CortexApi {
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    String? model,
   }) => Stream.error(_closed);
 
   @override

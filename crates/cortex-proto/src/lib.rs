@@ -32,6 +32,7 @@ pub mod dto;
 pub mod episodes;
 pub mod import;
 pub mod llm;
+pub mod model_choice;
 pub mod presence;
 
 /// 本端讲的线协议版本。**契约不兼容地变了才 +1。**

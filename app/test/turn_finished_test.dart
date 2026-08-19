@@ -41,6 +41,7 @@ class _SlowApi extends MockCortexApi {
     required String message,
     List<Attachment> attachments = const [],
     PermissionMode permissionMode = PermissionMode.ask,
+    String? model,
   }) {
     final c = StreamController<ChatEvent>();
     _controllers.add(c);
