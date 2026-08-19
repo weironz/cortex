@@ -82,6 +82,11 @@ HEADER = """// 取件自 goose（https://github.com/block/goose），Apache-2.0�
 """
 
 
+def write_text(path, text):
+    """写文本，一律 LF —— 仓库里的 .rs 是 LF，Windows 上不这么写会全文件变更。"""
+    io.open(path, "w", encoding="utf-8", newline="\n").write(text)
+
+
 def copy_one(src, dst):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if src.endswith(".rs"):
@@ -102,8 +107,7 @@ def main():
         shutil.rmtree(OUT)
     os.makedirs(OUT)
     if keep_lib is not None:
-        io.open(lib, "w", encoding="utf-8", newline="
-").write(keep_lib)
+        write_text(lib, keep_lib)
 
     taken, skipped = [], []
 
