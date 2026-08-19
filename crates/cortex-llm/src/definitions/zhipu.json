@@ -1,0 +1,61 @@
+{
+  "name": "zhipu",
+  "engine": "openai",
+  "display_name": "Zhipu AI (GLM)",
+  "description": "智谱 GLM 开放平台（OpenAI 兼容）",
+  "api_key_env": "ZHIPU_API_KEY",
+  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "models": [
+    {
+      "name": "glm-4.7",
+      "context_limit": 204800,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": false
+    },
+    {
+      "name": "glm-4.7-flash",
+      "context_limit": 200000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": false
+    },
+    {
+      "name": "glm-4.7-flashx",
+      "context_limit": 200000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": false
+    },
+    {
+      "name": "glm-4.6",
+      "context_limit": 204800,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": false
+    },
+    {
+      "name": "glm-4.6v",
+      "context_limit": 128000,
+      "input_token_cost": null,
+      "output_token_cost": null,
+      "currency": null,
+      "supports_cache_control": null,
+      "vision": true
+    }
+  ],
+  "headers": null,
+  "timeout_seconds": null,
+  "requires_auth": true,
+  "dynamic_models": false,
+  "preserves_thinking": true,
+  "supports_streaming": true
+}

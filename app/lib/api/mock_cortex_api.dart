@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 import '../models/account.dart';
 import '../models/auth_tokens.dart';
+import '../models/llm_key_status.dart';
 import 'package:cortex_app/models/import_plan.dart';
 import 'package:cortex_app/import/import_source.dart';
 import 'dart:math';
@@ -41,6 +42,44 @@ import 'cortex_api.dart';
 class MockCortexApi
     with RunAttachUnsupported, LlmKeyUnsupported, SandboxHealthUnsupported
     implements CortexApi {
+  /// 供应商清单要**真的有东西**。
+  ///
+  /// `LlmKeyUnsupported` 回的是 `LlmKeyStatus.empty`，它的 `providers` 是空的
+  /// —— 而空清单在界面上的含义是「老服务端，退回手打输入框」。照搬它，
+  /// 那个下拉在 mock 形态下**一次都画不出来**，测试和离线演示看到的
+  /// 都是它取代掉的那个旧输入框。
+  ///
+  /// 三家足够：一家要 key、一家免 key（ollama）、一家用来验切换。
+  @override
+  Future<LlmKeyStatus> llmKeyStatus() async {
+    await _latency(90);
+    return const LlmKeyStatus(
+      configured: false,
+      supported: true,
+      providers: [
+        ProviderChoice(
+          id: 'deepseek',
+          displayName: 'DeepSeek',
+          description: 'DeepSeek 官方 API（OpenAI 兼容）',
+          baseUrl: 'https://api.deepseek.com',
+        ),
+        ProviderChoice(
+          id: 'anthropic',
+          displayName: 'Anthropic',
+          description: 'Claude',
+          baseUrl: 'https://api.anthropic.com',
+        ),
+        ProviderChoice(
+          id: 'ollama',
+          displayName: 'Ollama',
+          description: '本机 Ollama，无需密钥',
+          baseUrl: 'http://localhost:11434',
+          requiresAuth: false,
+        ),
+      ],
+    );
+  }
+
   MockCortexApi({int? seed, this.instant = false})
     : _random = Random(seed ?? 7);
 

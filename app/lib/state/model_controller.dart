@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_exception.dart';
+import '../models/llm_key_status.dart';
 import '../models/model_option.dart';
 import 'app_providers.dart';
 
@@ -28,6 +29,27 @@ final modelCatalogProvider = FutureProvider.autoDispose<ModelCatalog>(
     return Duration(seconds: secs[count.clamp(0, secs.length - 1)]);
   },
 );
+
+/// 能填自带 key 的那几家（`GET /settings/llm-key` 的 `providers`）。
+///
+/// # 为什么不是从 `modelCatalogProvider` 里拿
+///
+/// 那条路（`/llm/models`）开头就要 `st.llm()` —— 部署自己那把 key 配坏时
+/// 它直接报错。而「部署的模型用不了」恰恰是最需要填自己 key 的时刻，
+/// 那时下拉不能跟着一起死。
+///
+/// 空列表 = 老服务端没这个字段，界面退回手打输入框。
+final providerChoicesProvider =
+    FutureProvider.autoDispose<List<ProviderChoice>>(
+      (ref) async =>
+          (await ref.watch(cortexApiProvider).llmKeyStatus()).providers,
+      // 与模型目录同一个判据：没有这条路不是故障，重试永远不会成功
+      retry: (count, error) {
+        if (error is CortexApiException && error.isUnsupported) return null;
+        final secs = [1, 3, 8, 20, 30];
+        return Duration(seconds: secs[count.clamp(0, secs.length - 1)]);
+      },
+    );
 
 /// 用户选的模型。**逐轮带**，与 `permissionModeProvider` 完全同构。
 ///

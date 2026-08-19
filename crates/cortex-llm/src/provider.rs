@@ -48,6 +48,9 @@ const BUILTIN: &[(&str, &str)] = &[
     // 覆盖上游那份：它列的型号名（kimi-k2-0711 等）在模型目录里查不到，
     // 于是那 6 个模型在选择器里全都显示「不知道能力与价格」
     ("moonshot", include_str!("definitions/moonshot.json")),
+    // 上游那份的 base_url 是没展开的 `${ZHIPU_BASE_URL}` —— 那个变量
+    // 我们从不设，于是选了 GLM 就是个连不上的端点，而字面上看不出来
+    ("zhipu", include_str!("definitions/zhipu.json")),
 ];
 
 /// 把固定密钥喂给 goose，而不是让它自己去读环境变量。
@@ -162,6 +165,107 @@ pub fn allowed_models(name: &str) -> Result<Vec<String>> {
         .into_iter()
         .map(|m| m.name)
         .collect())
+}
+
+/// 一家供应商的「介绍」—— 够客户端画一个下拉就行。
+///
+/// 不含模型列表：下拉里只需要认出「这是哪家」，型号是选完之后的事，
+/// 而把七家的全部型号一次塞进同一个响应会让它涨到几十 KB。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInfo {
+    /// 填进请求里的那个 id，如 `deepseek`。
+    pub id: String,
+    /// 给人看的名字，如 `DeepSeek`。
+    pub display_name: String,
+    pub description: String,
+    /// 官方端点。客户端拿它当「留空就是这个」的提示 ——
+    /// 一个空的端点输入框说不出留空会连到哪去。
+    pub base_url: String,
+    /// 要不要 API key。Ollama 这类是 `false`，
+    /// 界面据此**不逼用户填一把它根本没有的 key**。
+    pub requires_auth: bool,
+}
+
+/// 供应商定义里给人看的那几个字段。
+///
+/// 与 [`ModelListView`] 同一个路数：只挑要用的字段，避开
+/// `DeclarativeProviderConfig` 的完整反序列化 —— google 那份的
+/// `engine` 不在声明式引擎里，走完整解析会直接失败，
+/// 于是它会从下拉里**整家消失**，而它明明是能用的。
+#[derive(serde::Deserialize)]
+struct ProviderInfoView {
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    base_url: String,
+    /// 上游那些定义里没有这个字段的一律按「要 key」算 —— 猜错的两个方向
+    /// 代价不对等：多问一次 key 只是啰嗦，少问一次是保存完才发现调不通。
+    #[serde(default = "yes")]
+    requires_auth: bool,
+}
+
+const fn yes() -> bool {
+    true
+}
+
+/// **我们发的那几家。** 下拉里出现的就是这一串，顺序即展示顺序。
+///
+/// # 为什么不是 [`available`] 的全部
+///
+/// `available()` 有 38 家 —— 那是 goose 目录带来的长尾，绝大多数我们
+/// 一次都没调通过，有几家的 `base_url` 还是没展开的 `${XXX_HOST}`
+/// 模板（选了就是个连不上的端点）。把它们全倒进下拉，等于把「一屏
+/// 四十张卡片」那种乱换个地方摆 —— 而用户抱怨的正是那个。
+///
+/// 校验那侧（`byo_key`）仍然按 `available()` 放行：知道自己在做什么的人
+/// 可以直接指名一家长尾供应商。**分歧只允许朝这个方向** ——
+/// 下拉里有的必须存得进去，反过来不必。
+const SHIPPED: &[&str] = &[
+    "anthropic", // Claude
+    "openai",    // ChatGPT
+    "google",    // Gemini
+    "deepseek",
+    "xai",      // Grok
+    "zhipu",    // GLM
+    "moonshot", // Kimi
+    "alibaba",  // Qwen
+    "minimax",
+    // 本机那一家排最后：它是「不花钱、不联网」的那个选项，
+    // 与上面九家回答的不是同一个问题
+    "ollama",
+];
+
+/// 下拉里该出现哪些供应商，**按 [`SHIPPED`] 的顺序**。
+///
+/// 校验（`byo_key`）与展示（下拉）从此读的是同一个来源 ——
+/// 两份各自维护的清单迟早会分叉，而分叉的表现是「下拉里选得到、
+/// 保存时被拒」，用户看着一个自己刚选出来的名字被说成「不认识」。
+#[must_use]
+pub fn catalog() -> Vec<ProviderInfo> {
+    SHIPPED
+        .iter()
+        .filter_map(|id| {
+            let v: ProviderInfoView = serde_json::from_str(definition(id)?).ok()?;
+            // 没展开的 `${VAR}` 模板要挡掉。它作为「留空 = 用这个」的提示
+            // 是错的（那个变量在我们这儿没人设），而用户没法从字面看出来
+            if v.base_url.contains("${") {
+                return None;
+            }
+            Some(ProviderInfo {
+                id: (*id).to_string(),
+                display_name: if v.display_name.is_empty() {
+                    (*id).to_string()
+                } else {
+                    v.display_name
+                },
+                description: v.description,
+                base_url: v.base_url,
+                requires_auth: v.requires_auth,
+            })
+        })
+        .collect()
 }
 
 fn config_of(name: &str) -> Result<DeclarativeProviderConfig> {
@@ -479,6 +583,85 @@ mod tests {
         // 但它必须建得起来、也必须列得出模型
         assert!(build_with("google", "k", None).is_ok());
         assert!(!allowed_models("google").unwrap().is_empty());
+    }
+
+    #[test]
+    fn 下拉里的每一家都存得进去() {
+        // `byo_key` 用的就是 `available()`。下拉里出现而它不认的，
+        // 症状是用户选完、点保存、被告知「不认识的供应商 xxx」——
+        // 而那个名字是他刚从我们自己的下拉里选出来的
+        for p in catalog() {
+            assert!(
+                available().contains(&p.id),
+                "{} 在下拉里但 byo_key 不认它",
+                p.id
+            );
+        }
+    }
+
+    #[test]
+    fn 说要发的那几家一家都没漏() {
+        // 这一条盯的是**静默消失**：定义缺失、JSON 解析失败、base_url 是
+        // `${VAR}` 模板 —— `catalog()` 对这三种都是 `filter_map` 掉，
+        // 不报错。zhipu 就是这么丢过一次的（`${ZHIPU_BASE_URL}`）
+        let got: Vec<String> = catalog().into_iter().map(|p| p.id).collect();
+        for want in SHIPPED {
+            assert!(
+                got.iter().any(|g| g == want),
+                "{want} 从下拉里消失了 —— 定义缺失 / 解析失败 / base_url 还是 ${{VAR}} 模板。\
+                 现有：{got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn 每家都说得出名字和端点() {
+        for p in catalog() {
+            assert!(
+                !p.display_name.is_empty(),
+                "{} 没有 display_name —— 下拉里会出现一个空白项",
+                p.id
+            );
+            // 端点是「留空 = 用这个」的那句提示的内容。缺了它，
+            // 那个可选输入框就只能说「留空用官方的」而说不出官方的是哪个
+            assert!(
+                p.base_url.starts_with("http"),
+                "{} 的 base_url 不是个地址：{:?}",
+                p.id,
+                p.base_url
+            );
+        }
+    }
+
+    #[test]
+    fn ollama_不要求填_key() {
+        let ollama = catalog()
+            .into_iter()
+            .find(|p| p.id == "ollama")
+            .expect("ollama 应在清单里");
+        assert!(
+            !ollama.requires_auth,
+            "本机 ollama 被标成要 key 的话，界面会逼用户填一把他根本没有的密钥"
+        );
+        // 对照：另一家必须仍然要 key，否则上面那条是「全都不要 key」蒙对的
+        let deepseek = catalog()
+            .into_iter()
+            .find(|p| p.id == "deepseek")
+            .expect("deepseek 应在清单里");
+        assert!(
+            deepseek.requires_auth,
+            "deepseek 不要 key 的话这个字段就是废的"
+        );
+    }
+
+    #[test]
+    fn google_没有从清单里消失() {
+        // 它的 engine 过不了声明式解析（见上面那条）。清单要是走完整
+        // 反序列化，它会**整家不见**，而它明明能用
+        assert!(
+            catalog().iter().any(|p| p.id == "google"),
+            "google 不在下拉里 —— 多半是有人把 catalog() 改成了走 config_of"
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ import '../../../state/composer_draft.dart';
 import '../../../state/file_mention_controller.dart';
 import '../../workspace/workspace_panel.dart';
 import 'attachment_views.dart';
+import 'model_chip.dart';
 import 'permission_mode_chip.dart';
 
 /// Input box.
@@ -607,6 +608,11 @@ class _BeforeSendChips extends StatelessWidget {
       WorkspaceChip(),
       SizedBox(width: 6),
       PermissionModeChip(),
+      SizedBox(width: 6),
+      // 模型排最后：它是三者里唯一**改错了也不会造成损失**的一个
+      // （只影响这一轮答得好不好、花多少钱），而前两个改错了是
+      // 文件写错地方、命令没人把关
+      ModelChip(),
     ],
   );
 }

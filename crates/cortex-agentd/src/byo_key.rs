@@ -143,6 +143,57 @@ pub struct KeyStatus {
     pub updated_at: Option<String>,
     /// 这个部署支持保存自带 key 吗（没配主密钥就是 false）
     pub supported: bool,
+    /// 能填哪几家。**客户端据它画下拉，而不是让人手打一个名字。**
+    ///
+    /// # 为什么挂在这条路上而不是 `/llm/models`
+    ///
+    /// 那条路开头就是 `st.llm()?` —— 部署自己那把 key 配坏时它直接报错。
+    /// 而「部署的模型用不了」恰恰是用户最需要填自己 key 的时刻，
+    /// 那时下拉不能跟着一起死。这条路只依赖库。
+    pub providers: Vec<ProviderChoice>,
+}
+
+/// 下拉里的一项。
+#[derive(Serialize)]
+pub struct ProviderChoice {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    /// 官方端点。界面拿它当「留空 = 连到这里」的提示 ——
+    /// 一个空的端点输入框说不出留空会去哪
+    pub base_url: String,
+    /// 要不要 key。Ollama 这类是 `false`，
+    /// 界面据此不逼用户填一把他根本没有的密钥
+    pub requires_auth: bool,
+}
+
+fn provider_choices() -> Vec<ProviderChoice> {
+    cortex_llm::provider::catalog()
+        .into_iter()
+        .map(|p| ProviderChoice {
+            id: p.id,
+            display_name: p.display_name,
+            description: p.description,
+            base_url: p.base_url,
+            requires_auth: p.requires_auth,
+        })
+        .collect()
+}
+
+impl KeyStatus {
+    /// 「没填过」的那一份。**三处早退都走它** —— 手写三遍的下场是
+    /// 加字段时漏掉其中一处，而那一处正好是出错时才走到的分支
+    fn empty(supported: bool) -> Self {
+        Self {
+            configured: false,
+            provider: None,
+            key_tail: None,
+            base_url: None,
+            updated_at: None,
+            supported,
+            providers: provider_choices(),
+        }
+    }
 }
 
 impl AgentState {
@@ -193,14 +244,7 @@ pub async fn get(
     let supported = kek().is_ok();
     let tenant = st.tenant(&headers).await?;
     let Ok(store) = tenant.store() else {
-        return Ok(Json(KeyStatus {
-            configured: false,
-            provider: None,
-            key_tail: None,
-            base_url: None,
-            updated_at: None,
-            supported,
-        }));
+        return Ok(Json(KeyStatus::empty(supported)));
     };
 
     let row = sqlx::query_as::<
@@ -228,15 +272,9 @@ pub async fn get(
             base_url,
             updated_at: Some(at.to_rfc3339()),
             supported,
+            providers: provider_choices(),
         },
-        _ => KeyStatus {
-            configured: false,
-            provider: None,
-            key_tail: None,
-            base_url: None,
-            updated_at: None,
-            supported,
-        },
+        _ => KeyStatus::empty(supported),
     }))
 }
 
