@@ -1,4 +1,6 @@
 import 'package:desktop_drop/desktop_drop.dart';
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../models/attachment.dart';
 import '../../../state/attachment_controller.dart';
 import '../../../state/composer_draft.dart';
+import '../../../state/file_mention_controller.dart';
 import '../../workspace/workspace_panel.dart';
 import 'attachment_views.dart';
 import 'permission_mode_chip.dart';
@@ -58,12 +61,22 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
   bool _hasText = false;
   bool _dragging = false;
 
+  /// 正在打的那个 `@…`：`(起点下标, 已经打了的片段)`。null = 没在引用文件。
+  ///
+  /// 记起点而不是每次重新扫一遍：插入时要把 `@片段` 整段换掉，
+  /// 而用户可能在这中间又移动过光标。
+  (int, String)? _mention;
+
+  /// 候选列表里高亮的那一条。
+  int _mentionAt = 0;
+
   @override
   void initState() {
     super.initState();
     _controller.addListener(() {
       final has = _controller.text.trim().isNotEmpty;
       if (has != _hasText) setState(() => _hasText = has);
+      _syncMention();
     });
     // The container draws a focus ring, so focus changes must repaint it.
     _focusNode.addListener(() {
@@ -90,6 +103,80 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
+  }
+
+  /// 光标前面那段有没有正在打的 `@…`。
+  ///
+  /// 只认**词首**的 `@`（行首或前面是空白）：邮箱地址、`user@host`、
+  /// Dart 里的注解都带 `@`，把它们都弹出一个文件列表来会让输入框没法用。
+  void _syncMention() {
+    final sel = _controller.selection;
+    if (!sel.isValid || !sel.isCollapsed) {
+      _setMention(null);
+      return;
+    }
+    final text = _controller.text;
+    final caret = sel.baseOffset.clamp(0, text.length);
+    var i = caret - 1;
+    while (i >= 0) {
+      final c = text[i];
+      if (c == '@') break;
+      // 片段里不允许空白：`@` 之后敲了空格就当这次引用结束了
+      if (c.trim().isEmpty) {
+        _setMention(null);
+        return;
+      }
+      i--;
+    }
+    if (i < 0) {
+      _setMention(null);
+      return;
+    }
+    if (i > 0 && text[i - 1].trim().isNotEmpty) {
+      // 前面粘着别的字符 —— 那是 `a@b`，不是一次引用
+      _setMention(null);
+      return;
+    }
+    _setMention((i, text.substring(i + 1, caret)));
+  }
+
+  void _setMention((int, String)? next) {
+    final changed = next?.$1 != _mention?.$1 || next?.$2 != _mention?.$2;
+    if (!changed) return;
+    setState(() {
+      _mention = next;
+      _mentionAt = 0;
+    });
+    // 第一次弹出来才去扫。开着对话就预扫的话，一个几百文件的工作区会在
+    // 用户还没打算引用任何东西的时候先卡一下
+    if (next != null) {
+      unawaited(ref.read(fileMentionProvider.notifier).ensure());
+    }
+  }
+
+  /// 把 `@片段` 换成 `@完整路径 `。
+  void _insertMention(String path) {
+    final m = _mention;
+    if (m == null) return;
+    final text = _controller.text;
+    final end = (m.$1 + 1 + m.$2.length).clamp(0, text.length);
+    // 末尾补一个空格：不补的话用户接着打的字会粘在路径后面，
+    // 而模型看到的是一个不存在的文件名
+    final inserted = '@$path ';
+    final next = text.replaceRange(m.$1, end, inserted);
+    _controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: m.$1 + inserted.length),
+    );
+    _setMention(null);
+    _focusNode.requestFocus();
+  }
+
+  /// 候选列表当前显示的那几条。
+  List<String> _candidates() {
+    final m = _mention;
+    if (m == null) return const [];
+    return ref.read(fileMentionProvider).filter(m.$2).take(8).toList();
   }
 
   void _submit() {
@@ -156,6 +243,13 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
               children: [
                 if (sessionId != null)
                   PendingAttachmentTray(sessionId: sessionId),
+                if (_mention != null)
+                  _MentionList(
+                    index: ref.watch(fileMentionProvider),
+                    options: _candidates(),
+                    selected: _mentionAt,
+                    onPick: _insertMention,
+                  ),
                 Container(
                   decoration: BoxDecoration(
                     color: _dragging
@@ -195,15 +289,56 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                           shortcuts: const {
                             SingleActivator(LogicalKeyboardKey.enter):
                                 _SendIntent(),
+                            SingleActivator(LogicalKeyboardKey.arrowDown):
+                                _MentionMoveIntent(1),
+                            SingleActivator(LogicalKeyboardKey.arrowUp):
+                                _MentionMoveIntent(-1),
+                            SingleActivator(LogicalKeyboardKey.escape):
+                                _MentionDismissIntent(),
                           },
                           child: Actions(
                             actions: {
                               _SendIntent: CallbackAction<_SendIntent>(
                                 onInvoke: (_) {
+                                  // 引用列表开着时，Enter 是「选中这一条」，
+                                  // 不是「发出去」—— 直接发的话，用户刚打了
+                                  // 一半的路径会被当成正文送走
+                                  final options = _candidates();
+                                  if (_mention != null && options.isNotEmpty) {
+                                    _insertMention(
+                                      options[_mentionAt % options.length],
+                                    );
+                                    return null;
+                                  }
                                   _submit();
                                   return null;
                                 },
                               ),
+                              _MentionMoveIntent:
+                                  CallbackAction<_MentionMoveIntent>(
+                                    onInvoke: (intent) {
+                                      final options = _candidates();
+                                      if (_mention == null || options.isEmpty) {
+                                        return null;
+                                      }
+                                      setState(() {
+                                        _mentionAt =
+                                            (_mentionAt + intent.delta) %
+                                            options.length;
+                                        if (_mentionAt < 0) {
+                                          _mentionAt += options.length;
+                                        }
+                                      });
+                                      return null;
+                                    },
+                                  ),
+                              _MentionDismissIntent:
+                                  CallbackAction<_MentionDismissIntent>(
+                                    onInvoke: (_) {
+                                      _setMention(null);
+                                      return null;
+                                    },
+                                  ),
                             },
                             child: TextField(
                               controller: _controller,
@@ -298,6 +433,168 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
 ///
 /// 单开一个 widget 是因为它要被画两遍 —— 一遍真的，一遍透明的占位，
 /// 好让中间那句说明居中。两处必须**同宽**，所以必须是同一个东西。
+/// `@` 之后那张候选文件列表。
+///
+/// # 为什么画在输入框**上方**，而不是用 Overlay 悬浮
+///
+/// 悬浮层要自己算位置、跟着窗口缩放走、还要在滚动时重定位。而这里的输入框
+/// 本来就贴在底部，正上方那块地方是空的 —— 直接占用它，没有任何定位逻辑
+/// 可以出错。
+class _MentionList extends StatelessWidget {
+  const _MentionList({
+    required this.index,
+    required this.options,
+    required this.selected,
+    required this.onPick,
+  });
+
+  final MentionIndex index;
+  final List<String> options;
+  final int selected;
+  final void Function(String) onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    // 没绑工作区就整个不出现。一个引用了文件的问题发给一个没有文件工具的
+    // agent，得到的回答会一本正经地跑偏 —— 而用户看不出哪里错了
+    if (!index.available) return const SizedBox.shrink();
+
+    final Widget body;
+    if (index.loading) {
+      body = const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 8),
+            Text('正在看工作区里有什么…'),
+          ],
+        ),
+      );
+    } else if (index.error != null) {
+      body = Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Text(
+          index.error!,
+          style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+        ),
+      );
+    } else if (options.isEmpty) {
+      body = Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Text(
+          '没有匹配的文件',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
+      );
+    } else {
+      body = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (var i = 0; i < options.length; i++)
+            _MentionRow(
+              path: options[i],
+              highlighted: i == selected,
+              onTap: () => onPick(options[i]),
+            ),
+          // 清单不完整这件事要说。不说的话，用户打了个名字搜不到，
+          // 会以为那个文件不存在
+          if (index.truncated)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: Text(
+                '工作区文件很多，这里只收了前 $kMentionScanLimit 个',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+        ],
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: body,
+    );
+  }
+}
+
+class _MentionRow extends StatelessWidget {
+  const _MentionRow({
+    required this.path,
+    required this.highlighted,
+    required this.onTap,
+  });
+
+  final String path;
+  final bool highlighted;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final slash = path.lastIndexOf('/');
+    final dir = slash < 0 ? '' : path.substring(0, slash + 1);
+    final name = slash < 0 ? path : path.substring(slash + 1);
+
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        color: highlighted ? scheme.primary.withValues(alpha: 0.12) : null,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        child: Row(
+          children: [
+            Icon(
+              Icons.insert_drive_file_outlined,
+              size: 14,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text.rich(
+                TextSpan(
+                  children: [
+                    // 目录淡一点、文件名正常：一屏八条路径全同色的话，
+                    // 眼睛得逐条从右往左找文件名
+                    if (dir.isNotEmpty)
+                      TextSpan(
+                        text: dir,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    TextSpan(text: name, style: theme.textTheme.bodyMedium),
+                  ],
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _BeforeSendChips extends StatelessWidget {
   const _BeforeSendChips();
 
@@ -312,6 +609,17 @@ class _BeforeSendChips extends StatelessWidget {
       PermissionModeChip(),
     ],
   );
+}
+
+/// 在候选列表里上下移动。
+class _MentionMoveIntent extends Intent {
+  const _MentionMoveIntent(this.delta);
+  final int delta;
+}
+
+/// 关掉候选列表。
+class _MentionDismissIntent extends Intent {
+  const _MentionDismissIntent();
 }
 
 class _SendIntent extends Intent {
