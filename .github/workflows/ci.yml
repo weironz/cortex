@@ -331,5 +331,25 @@ jobs:
         with:
           shared-key: ${{ matrix.os == 'windows-latest' && 'x86_64-pc-windows-msvc' || matrix.os }}
 
+      # ⚠️ **Windows 那条腿必须带 `--target`，否则上面那份缓存对发版无效。**
+      #
+      # release.yml 的 build 作业跑的是
+      # `cargo build --release --target x86_64-pc-windows-msvc`，而这里原先
+      # 跑的是不带 target 的版本。两者在 cargo 眼里是**两个输出目录**
+      # （`target/release` 与 `target/x86_64-pc-windows-msvc/release`），
+      # 指纹各算各的 —— 于是 `shared-key` 明明对上了、依赖包也都下下来了，
+      # 发版那一侧还是从零编一遍整个依赖树。
+      #
+      # 这是最难发现的一类浪费：缓存命中率是绿的，下载量是对的，
+      # 只有墙钟时间说不通，而没人会为一次「本来就慢」的发版去查它。
+      #
+      # 写成两个 `if:` 步骤而不是一个带条件 env 的步骤：
+      # `CARGO_BUILD_TARGET` 取空串时 cargo 的行为没有明确文档，
+      # 而这条路径一年只被人看两次 —— 不该留一个要去查 cargo 源码的地方。
       - name: cargo build --release
+        if: matrix.os != 'windows-latest'
         run: cargo build --workspace --release
+
+      - name: cargo build --release（三元组对齐发版）
+        if: matrix.os == 'windows-latest'
+        run: cargo build --workspace --release --target x86_64-pc-windows-msvc

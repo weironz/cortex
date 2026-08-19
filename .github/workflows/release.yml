@@ -205,6 +205,18 @@ jobs:
     name: Windows 桌面安装程序
     needs: preflight
     runs-on: windows-latest
+    # ⚠️ **这一行是下面那份共用 rust-cache 真正生效的条件。**
+    #
+    # `build` 作业跑的是 `--target x86_64-pc-windows-msvc`，而打包脚本
+    # 原先跑的是不带 target 的。两者在 cargo 眼里是两个输出目录、两套
+    # 指纹，于是尽管 `shared-key` 对上了、依赖包也都下下来了，这个作业
+    # 还是从零编一遍整个依赖树 —— 缓存「命中」了，编译产物一个都没用上。
+    # 那正是本仓库最难发现的一类浪费：每个指标看起来都是绿的。
+    #
+    # 放作业级而不是某一步上：打包脚本里的 cargo 调用不止一处，
+    # 而漏掉的那一处会安静地退回旧目录。
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
       - uses: subosito/flutter-action@v2
@@ -219,6 +231,8 @@ jobs:
       # 与上面那个 build 作业共用同一份：两者都是 windows-latest 上的
       # release 编译，依赖树几乎完全重合。
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: x86_64-pc-windows-msvc

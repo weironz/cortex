@@ -178,9 +178,29 @@ cp -r "${BUNDLE}"/. "${STAGE}/"
 # 它不在就不是「少个功能」而是**静默退化**：GUI 照常启动、照常聊天，
 # 只是所有工具都在服务器上执行，而用户以为它在读自己的代码。
 # 所以这里 die 而不是 warn。
-AGENT_EXE="target/release/cortex-local.exe"
+# ⚠️ **target 三元组要与发版流水线里那个 build 作业一致。**
+#
+# 那个作业跑的是 `cargo build --release --target x86_64-pc-windows-msvc`，
+# 而这里原先跑的是不带 `--target` 的版本。两者在 cargo 眼里是**两个不同的
+# 输出目录**（`target/release` 与 `target/x86_64-pc-windows-msvc/release`），
+# 指纹也各算各的 —— 于是尽管两个作业共用同一份 rust-cache（`shared-key:
+# x86_64-pc-windows-msvc`），这一步照样从零编一遍整个依赖树。
+#
+# 缓存命中率看起来是好的（键对上了、包也下下来了），只是编译产物一个都
+# 用不上 —— 又一个「看起来成功」的浪费。
+#
+# `CARGO_BUILD_TARGET` 认得出来就用它（CI 会设），本机不设时回落到不带
+# target 的老路径 —— 本机上没有第二个作业要对齐，多一层目录只是碍事。
+CARGO_TARGET="${CARGO_BUILD_TARGET:-}"
+if [ -n "${CARGO_TARGET}" ]; then
+    AGENT_EXE="target/${CARGO_TARGET}/release/cortex-local.exe"
+else
+    AGENT_EXE="target/release/cortex-local.exe"
+fi
 if [ "${SKIP_BUILD}" != "1" ]; then
-    log "cargo build --release -p cortex-local"
+    log "cargo build --release -p cortex-local${CARGO_TARGET:+ --target ${CARGO_TARGET}}"
+    # 不显式传 --target：`CARGO_BUILD_TARGET` 已经是 cargo 认的环境变量，
+    # 再传一遍只是多一处可能写不一致的地方
     cargo build --release -p cortex-local         || die "编 cortex-local 失败（原因在上面 cargo 自己的输出里）"
 fi
 [ -f "${AGENT_EXE}" ]     || die "找不到 ${AGENT_EXE} —— 没有它，装完的桌面端会把工具跑在服务器上，
