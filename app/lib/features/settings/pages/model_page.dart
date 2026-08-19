@@ -23,6 +23,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../api/api_exception.dart';
+import '../../../auth/local_llm_store.dart';
+import '../../../core/local_llm.dart';
 import '../../../models/model_source.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/model_controller.dart';
@@ -107,6 +109,7 @@ class _ModelPageState extends ConsumerState<ModelPage> {
                             onDelete: () => _delete(current),
                             onFetch: () => _fetch(current),
                             onModels: (m) => _saveModels(current, m),
+                            offlineNote: _offlineNote(current),
                           ),
                   ),
                 ],
@@ -171,6 +174,71 @@ class _ModelPageState extends ConsumerState<ModelPage> {
             baseUrl: got.baseUrl,
           ),
     );
+    await _mirrorOffline(got);
+  }
+
+  /// 这条来源在离线那一侧是什么状态。
+  ///
+  /// 三种，每一种都对应一件用户看不见但会咬到他的事：
+  ///
+  /// | 说什么 | 为什么必须说 |
+  /// |---|---|
+  /// | 「离线时用它」 | 他要知道断网之后跑的是哪一条、花的是哪把 key |
+  /// | 「本机没有这把 key」 | 在另一台设备上加的来源，这台机器离线用不了 ——   ///   而界面上其余地方看起来它完全正常 |
+  /// | Web / 部署那条 → `null` | 那里没有离线这回事，说了只是噪音 |
+  String? _offlineNote(ModelSource s) {
+    if (!kCanStoreLocalLlm || s.builtin) return null;
+    final local = ref.watch(localLlmProvider).value;
+    if (local != null && local.isUsable && local.provider == s.provider) {
+      return '断网时用的就是它（密钥在这台电脑的系统凭据库里）。';
+    }
+    return '本机没有这把密钥，所以断网时用不了它 —— '
+        '密钥从不明文离开服务端，只有你在这台机器上亲手填过的那次才会留一份。'
+        '想让它能离线用：点「编辑」把密钥重填一遍。';
+  }
+
+  /// 顺手在这台机器上留一份，**离线时就是它**。
+  ///
+  /// # 为什么只能在这里做
+  ///
+  /// 客户端**永远拿不到明文 key** —— 服务端只回后四位。所以「用户刚输入的
+  /// 那一刻」是唯一有明文的时刻，错过就再也拿不到了。
+  ///
+  /// 代价必须说清楚（界面上也写着）：**在另一台设备上加的来源，这台机器
+  /// 离线时用不了**。那不是漏做，是密钥从不明文离开服务端的直接结果。
+  ///
+  /// # 为什么不问用户
+  ///
+  /// 他的原话是「不分云端本地，离线在线」。多一个「要不要也存在本机」的
+  /// 勾选框，就是又让他分类一次。默认存 —— 密钥进的是系统凭据库，
+  /// 与从前那个「本机模型」同一个地方，不是新增的风险面。
+  Future<void> _mirrorOffline(_SourceForm form) async {
+    // Web 上没有本地 agent，存了也没有任何东西会读它
+    if (!kCanStoreLocalLlm) return;
+    // 编辑时留空 = 不改动服务端那把，那我们手上也就没有明文可存 ——
+    // 这时**不要动**本机那份：覆盖成空的话，离线会从「能用」变成「不能用」，
+    // 而用户只是改了个标签
+    if (form.apiKey.isEmpty) return;
+    try {
+      await ref
+          .read(localLlmProvider.notifier)
+          .save(
+            LocalLlmConfig(
+              provider: form.provider,
+              apiKey: form.apiKey,
+              baseUrl: form.baseUrl,
+              // 型号这时候多半还没拉过。留空 = 让本地 agent 用供应商定义里
+              // 的默认那个，比写一个我们还不知道存不存在的名字强
+              model: '',
+            ),
+          );
+    } on Object catch (e) {
+      // **不打断保存。** 服务端那份已经存好了，在线完全可用 ——
+      // 离线那份存不上只是少一个能力，不该让用户以为整个操作失败了
+      if (mounted) {
+        setState(() => _error = '来源已保存，但没能在本机留一份（离线时用不了）：$e');
+      }
+    }
   }
 
   Future<void> _edit(ModelSource s) async {
@@ -192,6 +260,7 @@ class _ModelPageState extends ConsumerState<ModelPage> {
             baseUrl: got.baseUrl,
           ),
     );
+    await _mirrorOffline(got);
   }
 
   Future<void> _delete(ModelSource s) async {
@@ -217,6 +286,24 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     );
     if (ok != true) return;
     await _run(() => ref.read(cortexApiProvider).deleteModelSource(s.id));
+
+    // ⚠️ **本机那份也要清。**
+    //
+    // 不清的话，一把用户以为已经删掉的密钥会一直留在系统凭据库里 ——
+    // 界面上那条来源没了，而离线时 agent 仍然拿着它去调。
+    // 「我删了它」与「它还在用」同时成立，是删除操作最不该有的结果。
+    //
+    // 只清匹配这一家的：他可能有两条来源，删了 A 不该让 B 的离线也失效
+    final local = ref.read(localLlmProvider).value;
+    if (kCanStoreLocalLlm && local != null && local.provider == s.provider) {
+      try {
+        await ref.read(localLlmProvider.notifier).clear();
+      } on Object catch (e) {
+        if (mounted) {
+          setState(() => _error = '来源已删除，但本机那份密钥没清掉：$e');
+        }
+      }
+    }
   }
 
   Future<void> _toggle(ModelSource s, bool on) => _run(
@@ -409,6 +496,7 @@ class _Detail extends StatelessWidget {
     required this.onDelete,
     required this.onFetch,
     required this.onModels,
+    this.offlineNote,
   });
 
   final ModelSources data;
@@ -418,6 +506,9 @@ class _Detail extends StatelessWidget {
   final VoidCallback onDelete;
   final VoidCallback onFetch;
   final ValueChanged<List<String>> onModels;
+
+  /// 这条在离线那一侧是什么状态。`null` = 不用说（Web，或部署那条）。
+  final String? offlineNote;
 
   @override
   Widget build(BuildContext context) {
@@ -455,13 +546,26 @@ class _Detail extends StatelessWidget {
               color: scheme.onSurfaceVariant,
             ),
           )
-        else
+        else ...[
           Text(
             '密钥 …${source.keyTail} · 端点 $endpoint\n用它的调用走你自己的账户，不占配额。',
             style: theme.textTheme.labelSmall?.copyWith(
               color: scheme.onSurfaceVariant,
             ),
           ),
+          // 离线那一侧的实况。**不说的话，用户会在断网时才发现** ——
+          // 而那时他既不知道原因也不知道怎么办
+          if (offlineNote != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                offlineNote!,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+        ],
         const SizedBox(height: 14),
         Row(
           children: [

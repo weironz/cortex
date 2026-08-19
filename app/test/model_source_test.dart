@@ -12,6 +12,7 @@ library;
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/settings/pages/model_page.dart';
+import 'package:cortex_app/core/local_llm.dart';
 import 'package:cortex_app/models/model_source.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:flutter/material.dart';
@@ -60,6 +61,31 @@ class _Api extends MockCortexApi {
   }
 }
 
+/// 记下本机凭据库被写成了什么。
+///
+/// 真去碰系统凭据库的话，测试成败取决于跑它的那台机器上存过什么 ——
+/// 而 Windows 上还会直接抛 `MissingPluginException`。
+class _FakeLocalLlm extends LocalLlmNotifier {
+  static LocalLlmConfig? saved;
+  static int clears = 0;
+
+  @override
+  Future<LocalLlmConfig> build() async => saved ?? LocalLlmConfig.empty;
+
+  @override
+  Future<void> save(LocalLlmConfig config) async {
+    saved = config;
+    state = AsyncData(config);
+  }
+
+  @override
+  Future<void> clear() async {
+    clears++;
+    saved = null;
+    state = const AsyncData(LocalLlmConfig.empty);
+  }
+}
+
 ProviderContainer _boot(_Api api) => ProviderContainer(
   overrides: [
     appConfigProvider.overrideWith(_MockConfig.new),
@@ -68,6 +94,7 @@ ProviderContainer _boot(_Api api) => ProviderContainer(
       () async => const <String, String>{},
     ),
     settingsWriterProvider.overrideWithValue((_) async {}),
+    localLlmProvider.overrideWith(_FakeLocalLlm.new),
   ],
 );
 
@@ -279,6 +306,183 @@ void main() {
         reason:
             '内置那份是编译期写死的。拿它当「这条来源开放了哪些」，'
             '用户选完之后每轮对话都失败，而错误来自供应商、看不出是选错了',
+      );
+    });
+  });
+
+  group('离线镜像', () {
+    setUp(() {
+      _FakeLocalLlm.saved = null;
+      _FakeLocalLlm.clears = 0;
+    });
+
+    testWidgets('新增来源时顺手在本机留一份', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+
+      await tester.tap(find.text('添加模型'));
+      for (var i = 0; i < 8; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await tester.enterText(
+        find.widgetWithText(TextField, 'API key'),
+        'sk-offline-test',
+      );
+      await tester.tap(find.text('保存'));
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(
+        _FakeLocalLlm.saved?.apiKey,
+        'sk-offline-test',
+        reason:
+            '客户端**永远拿不到明文 key**（服务端只回后四位）。'
+            '用户刚输入的这一刻是唯一有明文的时刻，错过就再也存不了本机那份，'
+            '而症状是「在线好好的，一断网就用不了」',
+      );
+      expect(_FakeLocalLlm.saved?.provider, 'deepseek');
+    });
+
+    testWidgets('编辑时留空密钥，不能把本机那份清掉', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      // 本机已经有一份
+      _FakeLocalLlm.saved = const LocalLlmConfig(
+        provider: 'alibaba',
+        apiKey: 'sk-already-here',
+      );
+      await _pump(tester, c);
+
+      await tester.tap(find.text('Alibaba (Qwen)'));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await tester.tap(find.text('编辑'));
+      for (var i = 0; i < 8; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      // 密钥框留空 = 不改动服务端那把。直接保存
+      await tester.tap(find.text('保存'));
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(
+        _FakeLocalLlm.saved?.apiKey,
+        'sk-already-here',
+        reason:
+            '只是改了个标签，却把本机那份覆盖成空的话，'
+            '离线会从「能用」变成「不能用」，而用户完全不知道自己弄坏了什么',
+      );
+      expect(_FakeLocalLlm.clears, 0, reason: '编辑不该清掉本机那份');
+    });
+
+    testWidgets('本机没有这把密钥时说清楚，而不是装作能离线', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+
+      await tester.tap(find.text('Alibaba (Qwen)'));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(
+        find.textContaining('本机没有这把密钥'),
+        findsOneWidget,
+        reason:
+            '在另一台设备上加的来源，这台机器离线用不了 —— '
+            '而界面上其余地方看起来它完全正常。不说的话，'
+            '用户会在断网时才发现，那时他既不知道原因也不知道怎么办',
+      );
+      expect(
+        find.textContaining('把密钥重填一遍'),
+        findsOneWidget,
+        reason: '说了「不行」就要说「怎么办」',
+      );
+    });
+
+    testWidgets('部署提供那条不说离线的事', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      // 默认选中的就是部署那条
+      expect(
+        find.textContaining('本机没有这把密钥'),
+        findsNothing,
+        reason:
+            '那把 key 本来就不是用户的，离线这件事对它不成立 —— '
+            '说了只是噪音',
+      );
+    });
+    testWidgets('删掉来源时把本机那把密钥也清掉', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      _FakeLocalLlm.saved = const LocalLlmConfig(
+        provider: 'alibaba',
+        apiKey: 'sk-should-be-gone',
+      );
+      await _pump(tester, c);
+
+      await tester.tap(find.text('Alibaba (Qwen)'));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await tester.tap(find.text('删除'));
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await tester.tap(find.text('删掉'));
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(
+        _FakeLocalLlm.saved,
+        isNull,
+        reason:
+            '不清的话，一把用户以为已经删掉的密钥会一直留在系统凭据库里 —— '
+            '界面上那条来源没了，而离线时 agent 仍然拿着它去调。'
+            '「我删了它」与「它还在用」同时成立，是删除最不该有的结果',
+      );
+    });
+
+    testWidgets('删掉别家的来源，不动本机这一份', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      // 本机存的是 ollama 那条，而要删的是 alibaba
+      _FakeLocalLlm.saved = const LocalLlmConfig(
+        provider: 'ollama',
+        baseUrl: 'http://localhost:11434',
+      );
+      await _pump(tester, c);
+
+      await tester.tap(find.text('Alibaba (Qwen)'));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await tester.tap(find.text('删除'));
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await tester.tap(find.text('删掉'));
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(
+        _FakeLocalLlm.saved?.provider,
+        'ollama',
+        reason:
+            '他可能有两条来源。删了 A 就把 B 的离线也弄没了的话，'
+            '症状是「我删了一个没在用的，结果另一个也不能离线用了」',
       );
     });
   });
