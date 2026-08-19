@@ -165,6 +165,9 @@ class SessionList extends ConsumerWidget {
           streaming:
               state.streaming?.sessionId == session.id ||
               state.unfinished.contains(session.id),
+          // 「跑完了，你还没看」。与「在跑」互斥 —— 同一条会话不可能
+          // 既在跑又刚跑完（`_commit` 是先撤 unfinished 再加 finished）
+          justFinished: state.finished.contains(session.id),
           canMove: projects.showGrouping,
           onTap: () {
             controller.selectSession(session.id);
@@ -706,6 +709,7 @@ class _SessionTile extends StatefulWidget {
     required this.session,
     required this.selected,
     required this.streaming,
+    required this.justFinished,
     required this.canMove,
     required this.onTap,
     required this.onRename,
@@ -717,6 +721,9 @@ class _SessionTile extends StatefulWidget {
   final ChatSession session;
   final bool selected;
   final bool streaming;
+
+  /// 人不在的时候跑完了，还没被打开过。
+  final bool justFinished;
 
   /// 这个部署有项目功能吗。没有的话「移动到项目」不进菜单 —— 一个点下去
   /// 只会报错的菜单项，比没有这个菜单项更糟。
@@ -852,6 +859,20 @@ class _SessionTileState extends State<_SessionTile> {
                   decoration: BoxDecoration(
                     color: scheme.primary,
                     shape: BoxShape.circle,
+                  ),
+                )
+              // 用勾而不是第二个圆点：两个只有颜色不同的点，在色弱视角下
+              // 与「在跑」分不开，而这两件事的下一步完全相反
+              else if (widget.justFinished)
+                Padding(
+                  padding: const EdgeInsets.only(right: 5),
+                  child: Tooltip(
+                    message: '这一轮跑完了，你还没看',
+                    child: Icon(
+                      Icons.check_circle_rounded,
+                      size: 13,
+                      color: scheme.primary,
+                    ),
                   ),
                 ),
               // Kept mounted rather than built on hover: a menu that appears

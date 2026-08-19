@@ -155,6 +155,7 @@ class ChatState {
     this.sendError,
     this.showArchived = false,
     this.unfinished = const {},
+    this.finished = const {},
   });
 
   final List<ChatSession> sessions;
@@ -186,6 +187,22 @@ class ChatState {
   /// 已知的局限，写在这里免得下一个人以为它坏了：**别的设备起的轮次看不到**。
   /// 补它需要记忆服务那边给一条「我的会话谁在跑」，那是另一个仓库的事。
   final Set<String> unfinished;
+
+  /// **人不在的时候跑完的**那些会话 id。
+  ///
+  /// 与 [unfinished] 是一对：那个说「还在跑」，这个说「跑完了，而你当时
+  /// 没在看」。分开而不是复用一个状态机，因为它们在界面上的意思相反 ——
+  /// 前者是「别急」，后者是「可以来看了」。
+  ///
+  /// # 为什么需要它
+  ///
+  /// 「派出去干活」这件事在执行侧一直是成立的（关掉浏览器活还在干），
+  /// 但**跑完了没有任何人告诉你**：徽章只是从「在跑」变成没有徽章，
+  /// 而「没有徽章」与「从来没跑过」长得一模一样。于是用户只能隔一会儿
+  /// 就点进去看一眼 —— 那正是这个能力想省掉的事。
+  ///
+  /// 打开那个会话就清掉：它的全部意思是「你还没看」。
+  final Set<String> finished;
 
   static const _emptyTranscript = <ChatMessage>[];
 
@@ -230,6 +247,7 @@ class ChatState {
     Object? sendError = _sentinel,
     bool? showArchived,
     Set<String>? unfinished,
+    Set<String>? finished,
   }) => ChatState(
     sessions: sessions ?? this.sessions,
     sessionsLoading: sessionsLoading ?? this.sessionsLoading,
@@ -246,6 +264,7 @@ class ChatState {
     sendError: sendError == _sentinel ? this.sendError : sendError as String?,
     showArchived: showArchived ?? this.showArchived,
     unfinished: unfinished ?? this.unfinished,
+    finished: finished ?? this.finished,
   );
 
   /// Distinguishes "not passed" from "explicitly set to null" in [copyWith].

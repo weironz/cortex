@@ -177,7 +177,15 @@ class ChatController extends Notifier<ChatState> {
     // An in-flight generation belongs to the session that started it; keep it
     // running and just look away. Cancelling on every sidebar click would lose
     // work the user did not ask to discard.
-    state = state.copyWith(activeSessionId: id, sendError: null);
+    state = state.copyWith(
+      activeSessionId: id,
+      sendError: null,
+      // 打开它就等于「看过了」。留着的话，那个「跑完了」的标记会一直挂在
+      // 一个用户正盯着的会话上
+      finished: state.finished.contains(id)
+          ? ({...state.finished}..remove(id))
+          : state.finished,
+    );
     unawaited(_ensureTranscript(id));
     unawaited(_tryAttach(id));
   }
@@ -1013,12 +1021,19 @@ class ChatController extends Notifier<ChatState> {
       error: error,
     );
 
+    // 人不在这个会话上时，记一笔「跑完了、你还没看」。
+    //
+    // 在这一句之前，跑完的表现是徽章从「在跑」变成**什么都没有** ——
+    // 而「什么都没有」与「从来没跑过」长得一模一样。于是「派出去干活」
+    // 这个能力在观测侧缺最后一格：活干完了没人告诉你。
+    final away = turn.sessionId != state.activeSessionId;
     state = state.copyWith(
       streaming: null,
       sendError: error,
       // 见到收尾了就把徽章撤掉。**出错那一轮也撤** —— 它同样不再跑了，
       // 而一个撤不掉的「正在跑」比没有徽章更糟
       unfinished: {...state.unfinished}..remove(turn.sessionId),
+      finished: away ? {...state.finished, turn.sessionId} : state.finished,
     );
     _appendMessage(turn.sessionId, message);
     _touchSession(turn.sessionId);

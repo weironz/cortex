@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../state/app_providers.dart';
+import '../../state/chat_controller.dart';
 import '../chat/chat_pane.dart';
 import '../sessions/session_list.dart';
 import '../workspace/workspace_panel.dart';
@@ -50,6 +51,44 @@ class _AppShellState extends ConsumerState<AppShell> {
   static const _rightWidth = 348.0;
   static const _wideBreakpoint = 1240.0;
   static const _mediumBreakpoint = 900.0;
+
+  @override
+  void initState() {
+    super.initState();
+    // 「你不在的时候那一轮跑完了」。
+    //
+    // 挂在 shell 上而不是聊天面板上：面板会随着布局收起来（窄屏上它可能
+    // 正被抽屉盖着），而这条提示恰恰是给「人不在那个会话上」的时候用的。
+    //
+    // 用 listenManual 而不是 build 里 watch：弹 SnackBar 是副作用，
+    // 放 build 里会在每次无关重建时再弹一次
+    ref.listenManual(chatControllerProvider.select((s) => s.finished), (
+      was,
+      now,
+    ) {
+      final fresh = now.difference(was ?? const <String>{});
+      if (fresh.isEmpty || !mounted) return;
+      final id = fresh.first;
+      final sessions = ref.read(chatControllerProvider).sessions;
+      final title = sessions
+          .where((s) => s.id == id)
+          .map((s) => s.title)
+          .firstOrNull;
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      if (messenger == null) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(title == null ? '有一轮跑完了' : '「$title」跑完了'),
+          duration: const Duration(seconds: 6),
+          action: SnackBarAction(
+            label: '去看看',
+            onPressed: () =>
+                ref.read(chatControllerProvider.notifier).selectSession(id),
+          ),
+        ),
+      );
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
