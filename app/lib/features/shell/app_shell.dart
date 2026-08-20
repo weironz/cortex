@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/theme.dart';
 
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
@@ -92,7 +93,7 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final tokens = Theme.of(context).cortex;
     final layout = ref.watch(layoutProvider);
     final layoutNotifier = ref.read(layoutProvider.notifier);
 
@@ -123,7 +124,7 @@ class _AppShellState extends ConsumerState<AppShell> {
               ? null
               : Drawer(
                   width: _sessionsWidth + 20,
-                  backgroundColor: scheme.surfaceContainerLow,
+                  backgroundColor: tokens.sidebar,
                   child: SafeArea(
                     child: _LeftPane(
                       onSelected: () => Navigator.of(context).maybePop(),
@@ -134,7 +135,7 @@ class _AppShellState extends ConsumerState<AppShell> {
               ? null
               : Drawer(
                   width: _rightWidth + 20,
-                  backgroundColor: scheme.surfaceContainerLow,
+                  backgroundColor: tokens.sidebar,
                   child: SafeArea(
                     child: rightPane(() => Navigator.of(context).maybePop()),
                   ),
@@ -146,11 +147,14 @@ class _AppShellState extends ConsumerState<AppShell> {
                   SizedBox(
                     width: _sessionsWidth,
                     child: Container(
-                      color: scheme.surfaceContainerLow,
+                      // 导航区是**独立表面**，不是「浅一点的内容区」。
+                      // 抄 Cherry Studio 的 sidebar 那一档：两个功能区靠
+                      // 底色分开，比靠一条线分开省力得多
+                      color: tokens.sidebar,
                       child: const _LeftPane(),
                     ),
                   ),
-                  VerticalDivider(width: 1, color: scheme.outlineVariant),
+                  VerticalDivider(width: 1, color: tokens.sidebarBorder),
                 ],
                 Expanded(
                   child: ChatPane(
@@ -180,11 +184,11 @@ class _AppShellState extends ConsumerState<AppShell> {
                   ),
                 ),
                 if (showRightInline) ...[
-                  VerticalDivider(width: 1, color: scheme.outlineVariant),
+                  VerticalDivider(width: 1, color: tokens.sidebarBorder),
                   SizedBox(
                     width: _rightWidth,
                     child: Container(
-                      color: scheme.surfaceContainerLow,
+                      color: tokens.sidebar,
                       child: rightPane(layoutNotifier.closeRight),
                     ),
                   ),
