@@ -99,6 +99,28 @@ M0–M8、N1–N3、R1–R11 全部完成，**并且在 2026-08 拆成了两个�
 | **三态里的 `null` 漏掉一个已知事实** | 新 | 「不知道就放行」放走了 20 个 qwen-image —— 它们 `tool_call` 是 null，而**旁边的 `image_output` 明说了**它们是画画的。写 `a != false` 之前先看 `b == true` 算不算数（2026-08-20） |
 | **假数据让测试失去区分力** | 新 | 上一条的测试一开始用 `toolCall: false` 造生图模型，而真实形态是 `null` —— 测试绿着，线上是坏的。造夹具时照**线上真实形状**造，不照「方便断言的形状」 |
 
+### 桌面端「两个进程」这件事 —— 调研做完了，六条改动排好了
+
+用户 2026-08-20 报「连了 dev 的地址却串台了」，查下来地址好好地存着，
+`127.0.0.1:9826` 是本机 agent 的随机端口 —— 而**产品里没有任何一个地方
+承认这个进程存在**。开发者有 `just app-status`，装机用户手上是零。
+
+调研了六家同架构产品（goose / Claude Code / Codex / pi / dsh / Ollama），
+结论见 [agent-lifecycle-survey.md](agent-lifecycle-survey.md)。最反直觉的一条：
+**goose 与我们同构度最高，而它连状态页都没有** —— 行业押注的是诊断闭环
+（一份能贴给别人的报告），不是常驻仪表盘。
+
+排好的六条：
+
+| | 抄谁 |
+|---|---|
+| 1. 修文案（README 的记忆承诺已过期、卸载残留没人说） | Claude Code / pi |
+| 2. `cortex doctor`（含 `--json`） | Claude Code 的双形态 + Codex 的 Notes/JSON |
+| 3. 连接页「本机 agent」一节 | Claude Code `daemon status` 的版本比对 |
+| 4. 启动诊断文件 | goose 的事件流 + Codex 的 stderr 尾部 |
+| 5. 本机口拒绝带 Origin 的请求 | Codex（防 DNS rebinding） |
+| 6. 卸载器数据目录 checkbox | Ollama（算出大小、写明路径） |
+
 ## 手头挂着的
 
 ### 备份：本机已经跑通，**生产上还没跑过**
