@@ -327,9 +327,32 @@ stable/beta 渠道，托盘模式下关窗口不杀 server 且重启后恢复上
 | 1 | 修文案：README / 登录屏 / 卸载残留说明 | ✅ | `71e902b` |
 | 2 | `cortex doctor`（含 `--json`） | ✅ | `crates/cortex-cli/src/doctor.rs`，`2b51f7e` |
 | 3 | 连接页「本机 agent」一节 | ✅ | `connection_page.dart:_localAgent` |
-| 4 | 启动诊断文件（事件流 + stderr 尾部） | ⬜ | |
-| 5 | `cortex-local` 拒绝带 `Origin` 的请求 | ⬜ | |
+| 4 | 启动诊断文件（事件流 + stderr 尾部） | ✅ | `app/lib/core/agent_launch_log.dart`，`3f61c06` |
+| 5 | `cortex-local` 拒绝带 `Origin` 的请求 | ✅ | `routes.rs:deny_browser_origin` |
 | 6 | 卸载器数据目录 checkbox | ⬜ | |
+
+### 第 4 项当天就抓到的两件事
+
+**一、自己造的假故障。** 冷启动必然有一次「启动到一半被 provider 重建停掉」
+（界面那侧的依赖在头几百毫秒里陆续落定，每落定一次 Riverpod 就重建一次）。
+原样记成 `start-failed` 的话，开三次机就凑够三条，doctor 会在一台**完全
+健康**的机器上报「崩溃循环」。拆出 `superseded` 事件，不计入故障。
+
+**二、每次冷启动多起一个进程又杀掉。** 上面那个重建导致的：第一个
+`cortex-local` 起到一半就被 kill。功能上无害（第二个正常接管），
+但它此前是**不可见**的 —— 现在文件里明明白白两条 `spawn`。
+
+### 第 5 项差点打死整条云端路
+
+「本地监听口凡带 `Origin` 一律 403」这条抄过来时**不能一刀切**：
+沙箱里的 `cortex-local` 前面站着 agentd，而 `sandbox_proxy` 的
+`is_credential` / `is_hop_by_hop` 都不剥 `Origin` —— 浏览器那个
+`Origin: https://<部署域名>` 会被原样带进容器，而 Web 端打 `/chat` 是
+POST，**同源 POST 照样带 Origin**。
+
+一刀切拒的话云端会话全挂，而**所有现存路由测试仍然全绿**（它们都不带
+这个头）。所以守卫按 `exec_env` 分档，且专门有一条测试钉住「容器形态必须
+放行」。容器里也确实不需要它：那个口不在用户的 loopback 上。
 
 ### 第 3 项顺带修掉的一个假信号
 

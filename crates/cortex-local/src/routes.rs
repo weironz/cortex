@@ -106,7 +106,53 @@ pub fn router(state: LocalState) -> Router {
         .route("/ws", get(ws_proxy::handler))
         .fallback(any(proxy::forward))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        // **在认证外面**：不认证的那种形态（`CORTEX_AUTH=disabled` 的本机
+        // 开发）恰恰是最需要它的，而 `/health` 也在认证豁免名单里
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            deny_browser_origin,
+        ))
         .with_state(state)
+}
+
+/// 带 `Origin` 的请求一律拒 —— **只在本机形态上**。
+///
+/// # 防的是 DNS rebinding
+///
+/// 这个进程绑 `127.0.0.1`、能跑 shell，而且本机开发形态下可能**根本不认证**。
+/// 攻击者让自己域名的 A 记录指向 `127.0.0.1`，用户浏览器上那个页面就能
+/// 同源地打进来 —— 端口是内核随机分的，但一个页面几秒钟就能把几万个端口
+/// 扫完，而「随机端口」从来不是一道认证。
+///
+/// 判据用 `Origin` 而不是 `Host`：浏览器**一定**会带 `Origin`
+/// （跨源请求、以及任何非 GET/HEAD 的请求都带），而且它是浏览器自己填的、
+/// 页面脚本改不了。我们真正的客户端 —— 桌面端（`dart:io`）、CLI（reqwest）、
+/// `--attach` 进来的那些 —— 一个都不带。
+///
+/// # 为什么容器里不能拒
+///
+/// **这一条是实测出来的，不是设计出来的：** 沙箱里的这个进程前面站着 agentd，
+/// 而 `sandbox_proxy::is_credential` / `is_hop_by_hop` 都不剥 `Origin`，
+/// 于是浏览器那个 `Origin: https://<部署域名>` 会被原样带进来。
+/// 而 Web 端打 `/chat` 是 POST —— **同源 POST 照样带 Origin**。
+/// 一刀切拒的话，整条云端会话路当场 403，而单测里全绿（测试不带这个头）。
+///
+/// 容器里也不需要它：那个监听口不在用户的 loopback 上，够得着它的只有 agentd，
+/// 而 agentd 自己有认证。
+async fn deny_browser_origin(State(st): State<LocalState>, req: Request, next: Next) -> Response {
+    if st.engine.exec_env == cortex_agent::ExecEnvironment::LocalMachine
+        && req.headers().contains_key(header::ORIGIN)
+    {
+        // 403 而不是 401：换一把凭据也没用，这条路本身就不对。
+        // 说清「浏览器该去打部署入口」—— 万一哪天真有人这么连，
+        // 他要的是下一步怎么做，不是一个空白的拒绝
+        return (
+            StatusCode::FORBIDDEN,
+            "本机 agent 不接受浏览器直连（防 DNS rebinding）。请打部署入口地址",
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 /// 入站认证：要求出示**启动时**那把 token。

@@ -52,6 +52,10 @@ mod local_workspace_routes_test;
 #[cfg(test)]
 mod local_mcp_routes_test;
 
+/// 浏览器直连守卫：本机形态拒 `Origin`，容器形态必须放行（同上，不开端口）。
+#[cfg(test)]
+mod origin_guard_test;
+
 use std::sync::Arc;
 use std::time::Duration;
 
