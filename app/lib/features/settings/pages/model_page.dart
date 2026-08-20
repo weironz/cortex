@@ -916,91 +916,98 @@ class _SourceDialogState extends State<_SourceDialog> {
 
     return AlertDialog(
       title: const Text('添加模型'),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            DropdownButtonFormField<String>(
-              initialValue: _picked,
-              isExpanded: true,
-              decoration: const InputDecoration(
-                labelText: '供应商',
-                border: OutlineInputBorder(),
+      // 给死宽度：`AlertDialog` 不给的话会缩到内容的最小宽度，而这里最长的
+      // 那几行是**提示文案**（端点那一栏的「公司网关、one-api / LiteLLM、
+      // 自建 vLLM…」）—— 它们被 `ellipsis` 截在半句上，正好把「留空会连到
+      // 哪儿」这个唯一要核对的信息截没了。
+      content: SizedBox(
+        width: 460,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              DropdownButtonFormField<String>(
+                initialValue: _picked,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: '供应商',
+                  border: OutlineInputBorder(),
+                ),
+                items: [
+                  for (final p in widget.providers)
+                    DropdownMenuItem(
+                      value: p.id,
+                      child: Text(
+                        p.displayName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+                onChanged: (v) => setState(() => _picked = v),
               ),
-              items: [
-                for (final p in widget.providers)
-                  DropdownMenuItem(
-                    value: p.id,
-                    child: Text(
-                      p.displayName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+              if (cur != null && cur.description.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(cur.description, style: theme.textTheme.labelSmall),
+              ],
+              const SizedBox(height: 14),
+              TextField(
+                controller: _label,
+                autocorrect: false,
+                decoration: const InputDecoration(
+                  labelText: '名字（可选）',
+                  hintText: '同一家配两条时用来分辨',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 14),
+              if (needsKey)
+                TextField(
+                  controller: _key,
+                  autofocus: true,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的
+                  // 粘贴迟早会错一次，且症状要到下一次对话才出现
+                  obscureText: !_reveal,
+                  decoration: InputDecoration(
+                    labelText: 'API key',
+                    // 改一条时留空 = 不动原来那把。界面永远拿不到明文，
+                    // 所以「只想改个端点」根本没有 key 可以回填
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      onPressed: () => setState(() => _reveal = !_reveal),
+                      iconSize: 18,
+                      icon: Icon(
+                        _reveal
+                            ? Icons.visibility_off_outlined
+                            : Icons.visibility_outlined,
+                      ),
                     ),
                   ),
-              ],
-              onChanged: (v) => setState(() => _picked = v),
-            ),
-            if (cur != null && cur.description.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(cur.description, style: theme.textTheme.labelSmall),
-            ],
-            const SizedBox(height: 14),
-            TextField(
-              controller: _label,
-              autocorrect: false,
-              decoration: const InputDecoration(
-                labelText: '名字（可选）',
-                hintText: '同一家配两条时用来分辨',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 14),
-            if (needsKey)
+                )
+              else
+                Text(
+                  '${cur?.displayName ?? "这一家"}不需要密钥，直接保存即可。',
+                  style: theme.textTheme.bodySmall,
+                ),
+              const SizedBox(height: 14),
               TextField(
-                controller: _key,
-                autofocus: true,
+                controller: _baseUrl,
                 autocorrect: false,
                 enableSuggestions: false,
-                // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的
-                // 粘贴迟早会错一次，且症状要到下一次对话才出现
-                obscureText: !_reveal,
                 decoration: InputDecoration(
-                  labelText: 'API key',
-                  // 改一条时留空 = 不动原来那把。界面永远拿不到明文，
-                  // 所以「只想改个端点」根本没有 key 可以回填
+                  labelText: '端点（可选）',
+                  // 说得出留空会连到哪 ——「用官方的」回答不了「官方的是哪个」，
+                  // 而那正是想改端点的人要核对的东西
+                  hintText: cur == null ? '留空 = 用官方的' : '留空 = ${cur.baseUrl}',
+                  helperText: '公司网关、one-api / LiteLLM、自建 vLLM 都填这里',
                   border: const OutlineInputBorder(),
-                  suffixIcon: IconButton(
-                    onPressed: () => setState(() => _reveal = !_reveal),
-                    iconSize: 18,
-                    icon: Icon(
-                      _reveal
-                          ? Icons.visibility_off_outlined
-                          : Icons.visibility_outlined,
-                    ),
-                  ),
                 ),
-              )
-            else
-              Text(
-                '${cur?.displayName ?? "这一家"}不需要密钥，直接保存即可。',
-                style: theme.textTheme.bodySmall,
               ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: _baseUrl,
-              autocorrect: false,
-              enableSuggestions: false,
-              decoration: InputDecoration(
-                labelText: '端点（可选）',
-                // 说得出留空会连到哪 ——「用官方的」回答不了「官方的是哪个」，
-                // 而那正是想改端点的人要核对的东西
-                hintText: cur == null ? '留空 = 用官方的' : '留空 = ${cur.baseUrl}',
-                helperText: '公司网关、one-api / LiteLLM、自建 vLLM 都填这里',
-                border: const OutlineInputBorder(),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
       actions: [

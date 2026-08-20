@@ -96,10 +96,19 @@ class _SettingsWindowState extends State<_SettingsWindow> {
 
   @override
   Widget build(BuildContext context) {
-    // 窗口跟着屏幕走：小屏上写死 900×620 会让内容区被裁掉一半
+    // 窗口跟着屏幕走：小屏上写死尺寸会让内容区被裁掉一半。
+    //
+    // **两个方向都按比例，然后各自封顶**（上一版宽度直接 `clamp(320, 940)`
+    // —— 那不是「跟着屏幕走」，是「除非屏幕比 940 还窄，否则永远 940」）。
+    // 1080p 上量出来只占半个屏宽，而「模型服务」那一页里面自己还是两栏，
+    // 于是右边的型号列表挤成一条缝。
+    //
+    // 封顶不是怕大，是**行长**：正文超过一定宽度就难读了。而这里最宽的
+    // 东西是两栏加起来（左边导航 208 + 来源列表 190 + 详情），
+    // 1280 之后再宽就只是在拉长空白。
     final size = MediaQuery.sizeOf(context);
-    final width = size.width.clamp(320.0, 940.0);
-    final height = (size.height * 0.82).clamp(360.0, 660.0);
+    final width = (size.width * 0.78).clamp(320.0, 1280.0);
+    final height = (size.height * 0.86).clamp(360.0, 860.0);
 
     return Dialog(
       clipBehavior: Clip.antiAlias,
