@@ -151,8 +151,8 @@ impl WriteTxn {
         let id = new.id.to_string();
         let stmt = sqlx::query(
             "INSERT INTO episodes
-                 (id, session_id, role, content, text, domain, device_id, occurred_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 (id, session_id, role, content, text, domain, device_id, occurred_at, models)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(&id)
         .bind(&new.session_id)
@@ -161,7 +161,14 @@ impl WriteTxn {
         .bind(&new.text)
         .bind(&new.domain)
         .bind(&new.device_id)
-        .bind(new.occurred_at);
+        .bind(new.occurred_at)
+        // 空存 NULL 而不是空数组：两者在读回来时都该是「不知道」，
+        // 而 NULL 说得更明白，也与迁移之前的历史行长得一样
+        .bind(if new.models.is_empty() {
+            None
+        } else {
+            Some(&new.models)
+        });
 
         self.insert_row(table::EPISODES, &id, stmt).await
     }

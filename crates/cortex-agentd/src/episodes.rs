@@ -243,6 +243,7 @@ async fn persist(store: &Store, req: &NewEpisodeRequest) -> cortex_core::Result<
         domain: None,
         device_id: crate::state::DEVICE_ID.to_owned(),
         occurred_at,
+        models: req.models.clone(),
     };
     let links: Vec<cortex_store::NewEpisodeBlob> = attachments
         .iter()

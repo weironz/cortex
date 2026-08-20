@@ -237,6 +237,9 @@ pub struct Episode {
     pub occurred_at: DateTime<Utc>,
     /// 服务端入库时间
     pub created_at: DateTime<Utc>,
+    /// 这条回复**先后**是谁写的。`None` = 迁移之前的历史，或导入进来的
+    /// 记录 —— 界面据此什么都不画，不猜一个填上去。
+    pub models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +254,9 @@ pub struct NewEpisode {
     pub domain: Option<String>,
     pub device_id: String,
     pub occurred_at: DateTime<Utc>,
+    /// 这一轮先后用过哪些模型，按发生顺序，连续重复已去掉。
+    /// 空 = 不知道，落库存 NULL。
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]

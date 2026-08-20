@@ -77,6 +77,7 @@ async fn seed(store: &Store, who: &str) -> String {
                 domain: None,
                 device_id: "test".into(),
                 occurred_at: chrono::Utc::now(),
+                models: Vec::new(),
             })
             .await
         })

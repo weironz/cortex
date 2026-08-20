@@ -14,6 +14,7 @@ class Episode {
     this.occurredAt,
     this.attachments = const [],
     this.toolCalls = const [],
+    this.models = const [],
   });
 
   final String id;
@@ -25,6 +26,10 @@ class Episode {
 
   final String text;
   final DateTime? occurredAt;
+
+  /// 这条回复**先后**是谁写的，按发生顺序。空 = 不知道
+  /// （迁移之前的历史、导入的记录）—— 界面什么都不画。
+  final List<String> models;
 
   /// Blobs hanging off this turn. The server sends `[]` rather than omitting
   /// the key, so the client never has to tell "no attachments" apart from
@@ -59,5 +64,6 @@ class Episode {
     toolCalls: asObjectList(
       json['tool_calls'],
     ).map(ToolCall.replayed).toList(growable: false),
+    models: asStringList(json['models']),
   );
 }

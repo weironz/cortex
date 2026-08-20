@@ -764,6 +764,7 @@ class ChatController extends Notifier<ChatState> {
           attachments: e.attachments,
           toolCalls: handOff ? const [] : e.toolCalls,
           episodeId: e.id,
+          models: e.models,
         ),
       );
 
@@ -778,6 +779,9 @@ class ChatController extends Notifier<ChatState> {
             attachments: answer.attachments,
             toolCalls: [...e.toolCalls, ...answer.toolCalls],
             episodeId: answer.id,
+            // **取 answer 那条的，不是 e 的** —— e 是用户说的话，
+            // 它永远没有模型名
+            models: answer.models,
           ),
         );
         i++;
@@ -948,8 +952,8 @@ class ChatController extends Notifier<ChatState> {
             .read(confirmControllerProvider.notifier)
             .offer(request, sessionId: turn.sessionId);
 
-      case ChatDoneEvent(:final episodeId):
-        _commit(episodeId: episodeId);
+      case ChatDoneEvent(:final episodeId, :final models):
+        _commit(episodeId: episodeId, models: models);
 
       case ChatErrorEvent(:final message):
         _commit(error: message);
@@ -1004,7 +1008,11 @@ class ChatController extends Notifier<ChatState> {
   }
 
   /// Moves the in-flight turn into the transcript and clears streaming state.
-  void _commit({String? episodeId, String? error}) {
+  void _commit({
+    String? episodeId,
+    String? error,
+    List<String> models = const [],
+  }) {
     _flushTimer?.cancel();
     _flushTimer = null;
     _flushPending();
@@ -1023,6 +1031,7 @@ class ChatController extends Notifier<ChatState> {
       toolCalls: turn.toolCalls,
       episodeId: episodeId,
       error: error,
+      models: models,
     );
 
     // 人不在这个会话上时，记一笔「跑完了、你还没看」。

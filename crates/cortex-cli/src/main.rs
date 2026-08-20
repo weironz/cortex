@@ -775,11 +775,18 @@ async fn one_turn(
                 stdout.flush().ok();
                 wrote_body = true;
             }
-            Ok(ChatEvent::Done { episode_id }) => {
+            Ok(ChatEvent::Done { episode_id, models }) => {
                 if wrote_body {
                     println!();
                 }
-                println!("{}", render::dim(&format!("— {episode_id}"), color));
+                // 谁答的也打出来。**别只在这里解构掉** —— CLI 与图形界面
+                // 看到的是同一条流，一边显示一边不显示会让人以为是两套东西
+                let who = if models.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", models.join(" → "))
+                };
+                println!("{}", render::dim(&format!("— {episode_id}{who}"), color));
             }
             Ok(ChatEvent::Error { message }) => {
                 eprintln!("\n{}", render::error(&message, color));

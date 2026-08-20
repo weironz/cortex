@@ -529,6 +529,7 @@ mod tests {
         RunSink::new(first)
             .send(ChatEvent::Done {
                 episode_id: "e1".into(),
+                models: Vec::new(),
             })
             .await;
         drop(permit);
@@ -634,6 +635,7 @@ mod tests {
         sink.send(delta("答完了")).await;
         sink.send(ChatEvent::Done {
             episode_id: "e1".into(),
+            models: Vec::new(),
         })
         .await;
 
@@ -708,6 +710,7 @@ mod stop_tests {
         RunSink::new(Arc::clone(&ticket.run))
             .send(ChatEvent::Done {
                 episode_id: "e1".into(),
+                models: Vec::new(),
             })
             .await;
         drop(permit);

@@ -391,6 +391,32 @@ pub struct TurnOutcome {
     /// 实际执行了几轮工具
     pub tool_rounds: usize,
     pub stop: StopReason,
+    /// 这一轮**先后**用过哪些模型，按发生顺序。
+    ///
+    /// # 为什么是列表
+    ///
+    /// 一次回复要跑好几轮模型调用（有几次工具调用就有几轮），而
+    /// 「自动」档是**按请求**挑模型的 —— 于是同一条回复可能先用便宜的
+    /// 跑工具、再用贵的写答案。只留最后一个会把这件事整个抹掉。
+    ///
+    /// **连续重复已经去掉**（见 [`push_model`]）：一轮跑 20 次工具调用、
+    /// 每次都是同一个模型时，这里只有一条。
+    ///
+    /// 空 = 一次都没问出模型名（供应商没在用量里报）。调用方据此
+    /// 存 NULL，界面什么都不画 —— 而不是猜一个填上去。
+    pub models: Vec<String>,
+}
+
+/// 记下这一轮用的模型，**连续重复的不记**。
+///
+/// 只去连续的：`A → B → A` 要原样留着，那是真的换回去了；
+/// 而 `A → A → A` 是同一个模型跑了三轮工具，画出来只是噪音。
+fn push_model(models: &mut Vec<String>, model: Option<String>) {
+    let Some(m) = model else { return };
+    if m.is_empty() || models.last().is_some_and(|last| *last == m) {
+        return;
+    }
+    models.push(m);
 }
 
 // ─────────────────────────── 循环 ───────────────────────────
@@ -624,6 +650,9 @@ impl Turn {
 
         let mut reply = String::new();
         let mut tool_rounds = 0usize;
+        // 这一轮先后用过哪些模型。**在循环外** —— 三个返回点都要带上它，
+        // 放循环里就只剩最后一轮那次
+        let mut models: Vec<String> = Vec::new();
         // 本轮的确认状态。**每轮一份**，不挂在 `self` 上 —— [`Turn`] 是可复用、
         // 无每轮状态的，把它塞进 `self` 会让上一轮的超时把下一轮也一起废掉
         let mut confirm = ConfirmState::default();
@@ -642,12 +671,14 @@ impl Turn {
                 .one_round(llm, system, messages, offered, events)
                 .await?;
             reply.push_str(&round.text);
+            push_model(&mut models, round.model.clone());
 
             if round.client_gone {
                 return Ok(TurnOutcome {
                     reply,
                     tool_rounds,
                     stop: StopReason::ClientGone,
+                    models,
                 });
             }
 
@@ -656,6 +687,7 @@ impl Turn {
                     reply,
                     tool_rounds,
                     stop: StopReason::MaxRounds,
+                    models,
                 });
             }
 
@@ -664,6 +696,7 @@ impl Turn {
                     reply,
                     tool_rounds,
                     stop: StopReason::Completed,
+                    models,
                 });
             }
 
@@ -737,7 +770,18 @@ impl Turn {
         let mut round = Round::default();
 
         while let Some(item) = stream.next().await {
-            let (msg, _usage) = item.map_err(|e| CortexError::Provider(e.to_string()))?;
+            let (msg, usage) = item.map_err(|e| CortexError::Provider(e.to_string()))?;
+            // ⚠️ 这里以前是 `_usage` —— **模型名一直就在里面，被丢掉了**。
+            //
+            // 它是「这句话是谁答的」唯一可靠的来源：请求里带的可能是
+            // `auto`（服务端才知道解析成了谁），也可能是一个把选择编进
+            // 名字的占位（代理路径）。只有回来的这一份是实际用的那个。
+            //
+            // 供应商在流末尾单独吐一条只带用量的尾项，所以这里可能收到
+            // 好几条、大多数没有 usage —— 取最后一个非空的
+            if let Some(u) = usage {
+                round.model = Some(u.model);
+            }
             let Some(msg) = msg else { continue };
 
             for content in msg.content {
@@ -1015,6 +1059,11 @@ struct Round {
     /// thinking / redacted_thinking —— 内容不透明，只负责原样带回
     opaque: Vec<MessageContent>,
     client_gone: bool,
+    /// 这一轮实际是哪个模型答的（供应商在用量里报的那个）。
+    ///
+    /// `None` = 它没报。**不猜** —— 上游要么如实带出去，
+    /// 要么让界面什么都不画。
+    model: Option<String>,
 }
 
 /// 把工具结果封成 MCP 的 `CallToolResult`。
@@ -1915,6 +1964,54 @@ mod diff_side_channel_tests {
         assert!(
             r.diff.is_none(),
             "写失败了还画一份「改了什么」，用户会以为文件已经变了"
+        );
+    }
+}
+
+#[cfg(test)]
+mod model_trail_tests {
+    use super::push_model;
+
+    /// 连续重复不记，**不连续的要记**。
+    ///
+    /// 一轮跑 20 次工具调用、每次都是同一个模型时，存 20 份相同字符串
+    /// 既占地方，画出来也是 `A → A → A …` 的噪音。
+    ///
+    /// 但 `A → B → A` 必须原样留着 —— 那是真的换回去了，而「自动」档
+    /// 恰恰会这样：先用便宜的跑工具，写答案时换贵的，下一轮又换回来。
+    /// 全局去重的话这个来回就被抹平成 `A → B`，而那是假的。
+    #[test]
+    fn 只去连续重复_不去全局重复() {
+        let mut got = Vec::new();
+        for m in ["a", "a", "b", "b", "b", "a"] {
+            push_model(&mut got, Some(m.to_owned()));
+        }
+        assert_eq!(
+            got,
+            vec!["a", "b", "a"],
+            "连着的要合并，换回去的要留着 —— 全局去重会把 `a→b→a` 抹成 `a→b`，\
+             而那不是这一轮真实发生的事"
+        );
+    }
+
+    /// 供应商没报模型名时**什么都不记**，不记一个占位。
+    ///
+    /// 记 `"unknown"` 之类的话，界面上会画出一个看起来像模型名的标签，
+    /// 而用户没有任何办法看出那是我们编的。
+    #[test]
+    fn 没报模型名就不记() {
+        let mut got = Vec::new();
+        push_model(&mut got, None);
+        push_model(&mut got, Some(String::new()));
+        assert!(got.is_empty(), "None 与空串都是「不知道」，不该占一个位置");
+
+        push_model(&mut got, Some("a".to_owned()));
+        push_model(&mut got, None);
+        push_model(&mut got, Some("a".to_owned()));
+        assert_eq!(
+            got,
+            vec!["a"],
+            "中间那次没报，不该把它当成「换过模型」而让 a 重复一遍"
         );
     }
 }

@@ -279,6 +279,7 @@ pub fn new_episode(session_id: &str, text: &str) -> NewEpisode {
         domain: Some("test".to_owned()),
         device_id: DEVICE.to_owned(),
         occurred_at: Utc::now(),
+        models: Vec::new(),
     }
 }
 

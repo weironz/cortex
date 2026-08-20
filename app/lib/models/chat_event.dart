@@ -52,7 +52,10 @@ sealed class ChatEvent {
           ),
         ),
       ),
-      'done' => ChatDoneEvent(asStringOrNull(json['episode_id'])),
+      'done' => ChatDoneEvent(
+        asStringOrNull(json['episode_id']),
+        models: asStringList(json['models']),
+      ),
       'error' => ChatErrorEvent(
         asStringOrNull(json['message']) ?? '服务端返回了一个未描述的错误',
       ),
@@ -112,8 +115,15 @@ final class ChatConfirmEvent extends ChatEvent {
 
 /// Terminal frame. [episodeId] is the archived assistant episode.
 final class ChatDoneEvent extends ChatEvent {
-  const ChatDoneEvent(this.episodeId);
+  const ChatDoneEvent(this.episodeId, {this.models = const []});
   final String? episodeId;
+
+  /// 这一轮**先后**是谁写的，按发生顺序。
+  ///
+  /// 带在终帧上而不是等下次拉会话：那样当前这一轮要刷新才看得到标签。
+  /// 空 = 不知道（供应商没报、或者老服务端不发这个字段）——
+  /// 界面据此什么都不画，不猜一个填上去。
+  final List<String> models;
 }
 
 /// Terminal frame carrying a server-side failure.

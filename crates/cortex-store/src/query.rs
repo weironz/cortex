@@ -30,7 +30,7 @@ impl Store {
 
     pub async fn episode(&self, id: &str) -> Result<Option<Episode>> {
         let row = sqlx::query_as::<_, Episode>(
-            "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at
+            "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at, models
                FROM episodes WHERE id = $1",
         )
         .bind(id)
@@ -46,7 +46,7 @@ impl Store {
     /// 截掉的是**最新**那些消息，用户看到一段没有结尾的对话，而且看不出被截断了。
     pub async fn episodes_by_session(&self, session_id: &str, limit: i64) -> Result<Vec<Episode>> {
         let rows = sqlx::query_as::<_, Episode>(
-            "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at
+            "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at, models
                FROM episodes WHERE session_id = $1
               ORDER BY occurred_at ASC, id ASC
               LIMIT $2",
@@ -78,7 +78,7 @@ impl Store {
         before: Option<&EpisodeCursor>,
     ) -> Result<Vec<Episode>> {
         let rows = sqlx::query_as::<_, Episode>(
-            "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at
+            "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at, models
                FROM episodes
               WHERE session_id = $1
                 AND ($2::timestamptz IS NULL
@@ -99,7 +99,7 @@ impl Store {
     /// 时间近因那一路召回：最近 N 条（走 `idx_episodes_time`）。
     pub async fn recent_episodes(&self, limit: i64) -> Result<Vec<Episode>> {
         let rows = sqlx::query_as::<_, Episode>(
-            "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at
+            "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at, models
                FROM episodes ORDER BY occurred_at DESC, id DESC LIMIT $1",
         )
         .bind(limit)
@@ -116,7 +116,7 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<Episode>> {
         let rows = sqlx::query_as::<_, Episode>(
-            "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at
+            "SELECT id, session_id, role, content, text, domain, device_id, occurred_at, created_at, models
                FROM episodes
               WHERE occurred_at >= $1 AND occurred_at < $2
               ORDER BY occurred_at ASC, id ASC

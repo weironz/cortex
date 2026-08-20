@@ -490,6 +490,7 @@ impl Engine {
         // id 在本地生成：离线时也要有 id 才排得进队列，而 ULID 本来就是
         // 为「多端无需协调即可生成」设计的
         let user_id = Id::new().to_string();
+        // 用户说的话没有「谁写的」可言 —— 留空
         let user_req = NewEpisodeRequest {
             id: user_id.clone(),
             session_id: req.session_id.clone(),
@@ -500,6 +501,7 @@ impl Engine {
             retrieve: true,
             anchor_episode_id: None,
             tool_calls: Vec::new(),
+            models: Vec::new(),
         };
 
         // 落库。**这是会话历史，不是记忆** —— 2026-08-17 之前这一步还会顺带
@@ -670,9 +672,18 @@ impl Engine {
             Vec::new()
         });
 
+        // 这一轮先后是谁写的。**出错那一支留空** —— 半截回答本来就不落库，
+        // 而一个挂着模型名却没有内容的记录读起来像「它答过又被删了」
+        let mut models: Vec<String> = Vec::new();
         let reply = match outcome {
             Ok(o) => {
-                tracing::info!(tool_rounds = o.tool_rounds, stop = ?o.stop, "本轮结束");
+                tracing::info!(
+                    tool_rounds = o.tool_rounds,
+                    stop = ?o.stop,
+                    models = ?o.models,
+                    "本轮结束"
+                );
+                models = o.models;
                 o.reply
             }
             Err(e) => {
@@ -701,6 +712,7 @@ impl Engine {
                 retrieve: false,
                 anchor_episode_id: Some(user_id),
                 tool_calls,
+                models: models.clone(),
             };
             if let Err(e) = self.remote.write_episode(&ep).await {
                 if matches!(e, CortexError::Unavailable(_)) {
@@ -729,8 +741,11 @@ impl Engine {
             .await;
         }
 
+        // 带上模型名，让**当前这一轮**立刻就能标出来 —— 不带的话要刷新
+        // 一次才看得到，而那条流本来就要送 Done，顺路带上是零成本
         tx.send(ChatEvent::Done {
             episode_id: assistant_id,
+            models,
         })
         .await;
         Ok(())

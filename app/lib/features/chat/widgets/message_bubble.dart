@@ -8,6 +8,7 @@ import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
 import '../../../models/tool_call.dart';
 import '../../../state/chat_controller.dart';
+import '../../../state/model_controller.dart';
 import '../../../state/composer_draft.dart';
 import '../../../widgets/markdown/cortex_markdown.dart';
 import 'attachment_views.dart';
@@ -58,6 +59,7 @@ class MessageBubble extends StatelessWidget {
             error: message.error,
             busy: busy,
             retryTarget: retryTarget,
+            models: message.models,
           );
   }
 }
@@ -197,6 +199,7 @@ class AssistantBlock extends StatelessWidget {
     this.queuedAhead,
     this.busy = false,
     this.retryTarget,
+    this.models = const [],
   });
 
   final String text;
@@ -209,6 +212,9 @@ class AssistantBlock extends StatelessWidget {
 
   /// 这一轮还排在队里，前面有几轮。`null` = 没排队（绝大多数情况）。
   final int? queuedAhead;
+
+  /// 这条回复**先后**是谁写的。空 = 不知道，什么都不画。
+  final List<String> models;
 
   /// 这个会话此刻有一轮在跑吗。
   final bool busy;
@@ -258,6 +264,12 @@ class AssistantBlock extends StatelessWidget {
                   ),
                   const SizedBox(width: 8),
                   Text('Cortex', style: theme.textTheme.titleSmall),
+                  // 谁写的。**流式过程中不画** —— 那时还不知道，
+                  // 而先画一个再换掉会闪
+                  if (models.isNotEmpty && !streaming) ...[
+                    const SizedBox(width: 8),
+                    Flexible(child: _ModelTrail(models: models)),
+                  ],
                   if (createdAt != null && !streaming) ...[
                     const SizedBox(width: 8),
                     Text(
@@ -610,6 +622,54 @@ class _BubbleAction extends StatelessWidget {
       constraints: const BoxConstraints.tightFor(width: 26, height: 22),
       visualDensity: VisualDensity.compact,
       splashRadius: 14,
+    );
+  }
+}
+
+/// 「这条回复是谁写的」。
+///
+/// # 为什么显示的是目录里的名字，不是原始 id
+///
+/// 服务端记下来的是模型 id（`gemini-3-pro-image-preview`），而人认得的是
+/// 显示名（`Gemini 3 Pro Image`）。目录客户端本来就加载了（撰写框那个
+/// 选择器用它），顺手查一下不多花一次请求。
+///
+/// **查不到就显示原始 id**，不显示「未知模型」—— 目录跟着 models.dev 走，
+/// 新发的型号会有一段空窗期，那时原始 id 仍然是有用信息。
+///
+/// # 为什么可能有好几个
+///
+/// 一次回复要跑好几轮模型调用（有几次工具调用就有几轮），而「自动」档是
+/// **按请求**挑模型的 —— 于是可能先用便宜的跑工具、再用贵的写答案。
+/// 用 `→` 连起来，按发生顺序。
+class _ModelTrail extends ConsumerWidget {
+  const _ModelTrail({required this.models});
+
+  final List<String> models;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    // ⚠️ 目录**没拉到也要照画**（用原始 id）。等它才画的话，
+    // 一个连不上 `/llm/models` 的部署里这一行永远不出现，
+    // 而那与「这条消息没记模型」看起来一模一样
+    final catalog = ref.watch(modelCatalogProvider).value;
+    final label = models
+        .map((id) => catalog?.byId(id)?.displayName ?? id)
+        .join(' → ');
+
+    return Tooltip(
+      // 悬停给原始 id：显示名可能与配置里要填的那个不一样，
+      // 而要照着抄的人抄的是 id
+      message: models.join(' → '),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: theme.textTheme.labelSmall?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+        ),
+      ),
     );
   }
 }

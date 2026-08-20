@@ -826,6 +826,7 @@ mod sse_tests {
         sink.send(ChatEvent::Delta { text: "好".into() }).await;
         sink.send(ChatEvent::Done {
             episode_id: "e1".into(),
+            models: Vec::new(),
         })
         .await;
         // 轮次结束了，但那条记录还在表里 —— 也就是发送端还活着，

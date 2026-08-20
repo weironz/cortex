@@ -160,7 +160,7 @@ impl Store {
         match table_name {
             table::EPISODES => collect!(
                 "SELECT id, session_id, role, content, text, domain, device_id,
-                        occurred_at, created_at
+                        occurred_at, created_at, models
                    FROM episodes WHERE id = ANY($1)",
                 Episode,
                 |row: &Episode| row.id.clone(),

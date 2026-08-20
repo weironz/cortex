@@ -447,7 +447,17 @@ pub enum ChatEvent {
         diff: Option<String>,
     },
     /// 结束，带上本轮 episode id 供追溯
-    Done { episode_id: String },
+    Done {
+        episode_id: String,
+        /// 这一轮**先后**用过哪些模型，按发生顺序。
+        ///
+        /// 带在这里而不是让客户端重新拉一次会话：那样当前这一轮要刷新
+        /// 才看得到标签，而这条流本来就要送 `Done`，顺路带上是零成本。
+        ///
+        /// 空 = 不知道（供应商没报）。客户端据此什么都不画。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        models: Vec<String>,
+    },
     /// 出错。仍以 SSE 事件形式返回，避免流中断后客户端无从判断原因
     Error { message: String },
 }
@@ -530,6 +540,11 @@ pub struct EpisodeDto {
     /// 这一轮调用了哪些工具。省略规则同上。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallDto>,
+    /// 这条回复**先后**是谁写的，按发生顺序。见 [`ChatEvent::Done`]。
+    ///
+    /// 空 = 不知道（迁移之前的历史、导入进来的记录）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
 }
 
 /// 回放时看到的一次工具调用。

@@ -18,6 +18,7 @@ class ChatMessage {
     this.attachments = const [],
     this.episodeId,
     this.error,
+    this.models = const [],
   });
 
   /// Client-local id. Stable across the streaming lifetime of the message.
@@ -39,6 +40,15 @@ class ChatMessage {
   /// Blobs carried by this message. Only user messages have them today, but the
   /// field is on the base type because `episode_blobs` is not role-scoped.
   final List<Attachment> attachments;
+
+  /// 这条回复**先后**是谁写的，按发生顺序。
+  ///
+  /// 一轮里可能不止一个：「自动」档按请求挑模型，而一次回复有几次工具
+  /// 调用就发几次请求 —— 于是可能先用便宜的跑工具、再用贵的写答案。
+  ///
+  /// 空 = 不知道（迁移之前的历史、导入的记录、老服务端）。
+  /// 界面**什么都不画** —— 猜一个「默认模型」填上去等于对历史撒谎。
+  final List<String> models;
 
   /// Server-assigned archival id, available once the turn completes.
   final String? episodeId;

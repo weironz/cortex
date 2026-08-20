@@ -597,6 +597,8 @@ pub fn episode_dto(e: cortex_store::Episode, replay: Replay) -> EpisodeDto {
         attachments: replay.attachments,
         // 恒空。见模块头 —— 这是归因，属于记忆那一侧
         tool_calls: replay.tool_calls,
+        // 迁移之前的历史是 NULL，原样塌成空 —— 界面据此什么都不画
+        models: e.models.unwrap_or_default(),
     }
 }
 

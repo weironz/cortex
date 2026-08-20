@@ -65,6 +65,13 @@ pub struct NewEpisodeRequest {
     /// 附件。哈希必须是**已登记**的 blob，服务端只做关联
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>,
+    /// 这一轮**先后**用过哪些模型，按发生顺序，连续重复已去掉。
+    ///
+    /// 只对 `role = assistant` 有意义。空 = 不知道（老客户端不传、
+    /// 导入的历史、或者供应商没在用量里报）—— 界面据此什么都不画，
+    /// 而不是猜一个填上去。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
     /// 要不要顺带检索一次记忆。只对 `role = user` 有意义。
     ///
     /// 离线重放时设 false：那一轮的记忆早就该注入而没注入，
