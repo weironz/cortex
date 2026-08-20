@@ -119,7 +119,15 @@ void main() {
       'hunter2-hunter2',
     );
     await tester.tap(find.widgetWithText(FilledButton, '登录'));
-    await tester.pumpAndSettle();
+    // **不能用 pumpAndSettle。** 按下之后按钮里是一个转圈的
+    // `CircularProgressIndicator`，而这条用例只断言「请求发出去了」，
+    // 不等整条登录流程走完 —— 于是 busy 一直是 true，动画一直在转，
+    // pumpAndSettle 会一直等到超时。
+    //
+    // 换成静态文字能让它 settle，但那是**为了测试好写而把界面做差**：
+    // 转圈比「登录中…」四个字更快看出有没有在动。
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
 
     final login = seen.where((r) => r.url.path == '/auth/login').toList();
     expect(
@@ -259,10 +267,83 @@ void main() {
       reason: '「不同步」与「看不到历史」是两件事，都要说',
     );
   });
+
+  // ── 用过的部署记得住、切得回 ──────────────────────────────
+
+  group('记住用过的部署', () {
+    test('最近用的在前，去重，封顶', () {
+      var known = <String>[];
+      known = AppConfig.remember(known, 'https://a/api');
+      known = AppConfig.remember(known, 'http://127.0.0.1:5173');
+      expect(known, ['http://127.0.0.1:5173', 'https://a/api']);
+
+      known = AppConfig.remember(known, 'https://a/api');
+      expect(known, [
+        'https://a/api',
+        'http://127.0.0.1:5173',
+      ], reason: '再用一次要冒到最前面，而不是多出一条重复的');
+
+      for (var i = 0; i < 20; i++) {
+        known = AppConfig.remember(known, 'https://x$i/api');
+      }
+      expect(
+        known.length,
+        lessThanOrEqualTo(6),
+        reason:
+            '不封顶的话，几个月之后这份清单会长到没法用 —— '
+            '而它的全部作用是「少打一次字」',
+      );
+    });
+
+    test('尾斜杠不合并 —— 那可能真是两条路', () {
+      final known = AppConfig.remember(
+        AppConfig.remember([], 'https://a/api'),
+        'https://a/api/',
+      );
+      expect(known.length, 2, reason: '替用户做 URL 归一化等于替他改配置，而服务端那侧它们可能真不一样');
+    });
+  });
+
+  testWidgets('展开地址后能收起，也能一点切回用过的部署', (tester) async {
+    await _pumpLogin(tester, handler: (_) async => _json(_health));
+    await tester.tap(find.widgetWithText(TextButton, '连接到你自己的部署'));
+    await tester.pumpAndSettle();
+
+    // 用过的那个（不是当前这个）该摆成可点的
+    final chip = find.widgetWithText(ActionChip, 'cortex.example.com');
+    expect(
+      chip,
+      findsOneWidget,
+      reason:
+          '没有它，「切回另一个部署」就等于凭记忆重打一串 URL —— '
+          '而人记不住自己的部署地址是完全正常的事',
+    );
+    await tester.tap(chip);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('https://cortex.example.com/api'),
+      findsOneWidget,
+      reason: '点了就该把地址填进去',
+    );
+
+    await tester.tap(find.byTooltip('收起'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('部署入口地址'),
+      findsNothing,
+      reason:
+          '展开之后没有回头路的话，一个连不上、想换回另一个部署的人'
+          '在这一屏上就没有任何可点的东西了',
+    );
+  });
 }
 
 class _LiveConfig extends AppConfigNotifier {
   @override
-  AppConfig build() =>
-      const AppConfig(useMock: false, baseUrl: 'http://127.0.0.1:8080');
+  AppConfig build() => const AppConfig(
+    useMock: false,
+    baseUrl: 'http://127.0.0.1:8080',
+    // 装一个「以前用过、现在没在用」的部署 —— 切回去那条路正是要测的
+    knownBaseUrls: ['http://127.0.0.1:8080', 'https://cortex.example.com/api'],
+  );
 }

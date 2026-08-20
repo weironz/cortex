@@ -139,9 +139,19 @@ class AppConfigNotifier extends Notifier<AppConfig> {
     try {
       final saved = await ref.read(settingsReaderProvider)();
       if (!ref.mounted) return;
+      final known = _decodeKnown(saved[_kKnownBaseUrls]);
       final url = saved[_kBaseUrl]?.trim();
-      if (url == null || url.isEmpty || url == state.baseUrl) return;
-      state = state.copyWith(baseUrl: url);
+      if (url == null || url.isEmpty) {
+        if (known.isNotEmpty) state = state.copyWith(knownBaseUrls: known);
+        return;
+      }
+      state = state.copyWith(
+        baseUrl: url,
+        // 存过地址就说明这个地址是**选出来的**，哪怕它还没进过清单
+        // （这个功能之前的老配置就是这样）—— 不补上的话，升级之后
+        // 第一次打开，清单里连自己正在用的那个都没有
+        knownBaseUrls: AppConfig.remember(known, url),
+      );
     } finally {
       // **放 finally 里**：读设置失败（文件损坏、权限）时同样要放行，
       // 否则启动路径上等它的那一步会永远挂着，而界面是一片空白
@@ -150,10 +160,31 @@ class AppConfigNotifier extends Notifier<AppConfig> {
   }
 
   static const String _kBaseUrl = 'base_url';
+  static const String _kKnownBaseUrls = 'known_base_urls';
+
+  /// 设置表的值只能是字符串，所以清单编码成 JSON 数组。
+  ///
+  /// 读不懂就当**空清单**，不抛 —— 这份数据的全部作用是「少打一次字」，
+  /// 为它把启动路径弄挂是完全不成比例的。
+  static List<String> _decodeKnown(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return [
+        for (final e in decoded)
+          if (e is String && e.trim().isNotEmpty) e.trim(),
+      ];
+    } on FormatException {
+      return const [];
+    }
+  }
 
   /// 落盘。失败只是「下次要重填」，不打断任何事（见 `writeSettings`）。
   void _persist() {
-    unawaited(ref.read(settingsPatcherProvider)(_kBaseUrl, state.baseUrl));
+    final patch = ref.read(settingsPatcherProvider);
+    unawaited(patch(_kBaseUrl, state.baseUrl));
+    unawaited(patch(_kKnownBaseUrls, jsonEncode(state.knownBaseUrls)));
   }
 
   void setUseMock(bool value) {
@@ -164,7 +195,10 @@ class AppConfigNotifier extends Notifier<AppConfig> {
   void setBaseUrl(String value) {
     final trimmed = value.trim();
     if (trimmed.isEmpty || state.baseUrl == trimmed) return;
-    state = state.copyWith(baseUrl: trimmed);
+    state = state.copyWith(
+      baseUrl: trimmed,
+      knownBaseUrls: AppConfig.remember(state.knownBaseUrls, trimmed),
+    );
     _persist();
   }
 

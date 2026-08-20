@@ -153,27 +153,59 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
       unreachable: unreachable,
     );
 
+    final known = ref
+        .watch(appConfigProvider)
+        .knownBaseUrls
+        .where((u) => u != _urlController.text.trim())
+        .toList();
+
     return Scaffold(
       body: Center(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(28),
+          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 40),
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 460),
+            // 380 而不是 460：一行输入框超过这个宽度，眼睛从标签扫到光标
+            // 要跨过一段空白，读起来像一张表单而不是一道门
+            constraints: const BoxConstraints(maxWidth: 380),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text('登录 Cortex', style: theme.textTheme.headlineSmall),
-                const SizedBox(height: 6),
+                // 品牌标。用的是仓库里那份**产品图标本尊**
+                // （`web/icons/Icon-192.png`），不是现搭一个字母或者随便挑
+                // 一个 Material 图标 —— 登录页是很多人见到这个产品的第一屏，
+                // 摆一个临时替身在这儿，第一印象就是「半成品」。
+                Center(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: Image.asset(
+                      'web/icons/Icon-192.png',
+                      width: 64,
+                      height: 64,
+                      filterQuality: FilterQuality.medium,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  '登录 Cortex',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 8),
                 Text(
                   unreachable
                       ? '还没连上服务端。先确认地址，再填账号。'
                       : '登录状态会记住 30 天，关掉再打开不用重来。',
+                  textAlign: TextAlign.center,
                   style: theme.textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
+                    color: unreachable ? scheme.error : scheme.onSurfaceVariant,
+                    height: 1.5,
                   ),
                 ),
-                const SizedBox(height: 22),
+                const SizedBox(height: 26),
 
                 // ── 地址字段 ──
                 //
@@ -191,15 +223,50 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                     controller: _urlController,
                     autocorrect: false,
                     autofocus: unreachable,
-                    decoration: const InputDecoration(
+                    onChanged: (_) => setState(() {}),
+                    decoration: InputDecoration(
                       labelText: '部署入口地址',
                       hintText: 'https://<域名>/api',
-                      helperText: '本机开发是 http://127.0.0.1:5173',
-                      border: OutlineInputBorder(),
+                      prefixIcon: const Icon(Icons.dns_outlined, size: 18),
+                      // 收起来的入口**必须一直在**：地址是连不上时自动展开的，
+                      // 而展开之后如果没有回头路，一个想换回另一个部署的人
+                      // 在这一屏上就没有任何可点的东西了。
+                      // 2026-08-21 实测到的原话是「进到这里就没办法切换回去了」
+                      suffixIcon: kIsWeb || unreachable
+                          ? null
+                          : IconButton(
+                              onPressed: () =>
+                                  setState(() => _showEndpoint = false),
+                              iconSize: 18,
+                              tooltip: '收起',
+                              icon: const Icon(Icons.expand_less_rounded),
+                            ),
                     ),
                     onSubmitted: (_) => _submit(),
                   ),
-                  const SizedBox(height: 14),
+                  // 用过的其它部署，一点就换。
+                  //
+                  // 没有它的话「切回另一个部署」= 凭记忆重打一串 URL，
+                  // 而人记不住自己的部署地址是完全正常的事。
+                  if (known.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final url in known)
+                          ActionChip(
+                            avatar: const Icon(Icons.history_rounded, size: 15),
+                            label: Text(_shortHost(url)),
+                            tooltip: url,
+                            onPressed: () => setState(() {
+                              _urlController.text = url;
+                            }),
+                          ),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: 16),
                 ],
 
                 TextField(
@@ -212,11 +279,11 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                   autofillHints: const [AutofillHints.username],
                   decoration: const InputDecoration(
                     labelText: '用户名',
-                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.person_outline_rounded, size: 18),
                   ),
                   onSubmitted: (_) => _submit(),
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: 12),
                 TextField(
                   controller: _passwordController,
                   obscureText: !_revealPassword,
@@ -226,7 +293,10 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                   autofillHints: const [AutofillHints.password],
                   decoration: InputDecoration(
                     labelText: '密码',
-                    border: const OutlineInputBorder(),
+                    prefixIcon: const Icon(
+                      Icons.lock_outline_rounded,
+                      size: 18,
+                    ),
                     suffixIcon: IconButton(
                       onPressed: () =>
                           setState(() => _revealPassword = !_revealPassword),
@@ -242,7 +312,6 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                   onSubmitted: (_) => _submit(),
                 ),
 
-                const SizedBox(height: 10),
                 // 「凭据存在哪儿」那一大段说明**删掉了**：它讲的是 token 那条路
                 // 的存储权衡，而 token 登录已经不在这个界面上了。密码登录换回来的
                 // 是 refresh token，由平台的凭据库保管 —— 那件事不需要用户决策，
@@ -254,7 +323,7 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                     padding: const EdgeInsets.all(11),
                     decoration: BoxDecoration(
                       color: scheme.errorContainer,
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(10),
                     ),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -278,24 +347,41 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                   ),
                 ],
 
-                const SizedBox(height: 18),
+                const SizedBox(height: 20),
                 FilledButton(
                   onPressed: state.busy ? null : _submit,
-                  child: Text(state.busy ? '登录中…' : '登录'),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(46),
+                  ),
+                  child: state.busy
+                      // 转圈而不是把文字换成「登录中…」：按钮宽度不变，
+                      // 而「有没有在动」比多读四个字更快看出来
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Text('登录'),
                 ),
 
                 // 自托管的那条出路。**措辞抄 LobeHub**：说「连接到你自己的
                 // 部署」而不是「修改服务器地址」—— 前者描述的是一类用户
                 // （我自己搭了一个），后者描述的是一个控件，而看不懂
                 // 「部署入口地址」的人同样看不懂「修改」它意味着什么
-                if (!kIsWeb && !showEndpoint)
+                if (!kIsWeb && !showEndpoint) ...[
+                  const SizedBox(height: 4),
                   Align(
-                    child: TextButton(
+                    child: TextButton.icon(
                       onPressed: () => setState(() => _showEndpoint = true),
-                      child: const Text('连接到你自己的部署'),
+                      icon: const Icon(Icons.dns_outlined, size: 16),
+                      label: const Text('连接到你自己的部署'),
                     ),
                   ),
-                const Divider(height: 34),
+                ],
+                const SizedBox(height: 26),
                 // 连不上服务器时的出路。没有它，一个手上还没有 daemon 的人
                 // 会卡在这一屏，而「先去把 cortexd 跑起来」是个很糟的开场。
                 //
@@ -325,81 +411,96 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                 // 一个给不出承诺的入口比没有入口更糟：没有的话用户去想别的办法，
                 // 有的话他会以为自己已经解决了。
                 if (kLocalAgentSupported)
-                  Card.filled(
-                    margin: EdgeInsets.zero,
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(
-                                Icons.cloud_off_outlined,
-                                size: 18,
-                                color: scheme.onSurfaceVariant,
-                              ),
-                              const SizedBox(width: 8),
-                              Text('先离线用着', style: theme.textTheme.titleSmall),
-                            ],
-                          ),
-                          const SizedBox(height: 6),
-                          // 强调用真的粗体，**不要在 Text 里写 Markdown 星号** ——
-                          // 那是纯文本组件，星号会原样显示给用户看。
-                          // 这个错在 0.1.6 发版前的目视冒烟里被抓到，
-                          // 而所有 widget 测试都是绿的：它们断言的是文字内容，
-                          // 而字面星号恰恰**在**文字内容里
-                          Text.rich(
-                            TextSpan(
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: scheme.onSurfaceVariant,
-                              ),
-                              children: [
-                                const TextSpan(text: '不连服务器也能对话、能读写你本机的文件。'),
-                                TextSpan(
-                                  text: '这段时间不会同步到服务端',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    color: scheme.onSurface,
-                                  ),
-                                ),
-                                const TextSpan(
-                                  text: ' —— 对话排进本地队列，接上服务器后自动补回去。\n',
-                                ),
-                                // **这一句此前没有，而它是离线模式最容易被误读的地方。**
-                                //
-                                // `cortex-local` 的 `list_sessions` 是纯转发
-                                // （它不依赖 cortex-store，本机没有第二个库），
-                                // 所以离线时会话列表只剩这次新建的草稿。
-                                // 不说的话，用户看到的是「我昨天那些对话没了」——
-                                // 而它们其实好好地在服务器上。
-                                TextSpan(
-                                  text: '也看不到以前的会话',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    color: scheme.onSurface,
-                                  ),
-                                ),
-                                const TextSpan(
-                                  text:
-                                      ' —— 历史在服务器上，接上就全回来。\n'
-                                      '需要先在设置里配好本机模型（也可以进去之后再配）。',
-                                ),
-                              ],
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerLow,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: scheme.outlineVariant),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.cloud_off_outlined,
+                              size: 17,
+                              color: scheme.onSurfaceVariant,
                             ),
-                          ),
-                          const SizedBox(height: 8),
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: FilledButton.tonal(
+                            const SizedBox(width: 8),
+                            Text(
+                              '先离线用着',
+                              style: theme.textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const Spacer(),
+                            // 按钮挪到标题这一行：它此前吊在整段说明下面，
+                            // 而那段说明是**读完才决定点不点**的东西 ——
+                            // 一个已经知道自己要离线的人，不该为了找按钮
+                            // 先扫过四行字
+                            TextButton(
                               onPressed: () => ref
                                   .read(appConfigProvider.notifier)
                                   .setOffline(true),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                ),
+                                minimumSize: const Size(0, 32),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
                               child: const Text('离线使用'),
                             ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        // 强调用真的粗体，**不要在 Text 里写 Markdown 星号** ——
+                        // 那是纯文本组件，星号会原样显示给用户看。
+                        // 这个错在 0.1.6 发版前的目视冒烟里被抓到，
+                        // 而所有 widget 测试都是绿的：它们断言的是文字内容，
+                        // 而字面星号恰恰**在**文字内容里
+                        Text.rich(
+                          TextSpan(
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                            children: [
+                              const TextSpan(text: '不连服务器也能对话、能读写你本机的文件。'),
+                              TextSpan(
+                                text: '这段时间不会同步到服务端',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  color: scheme.onSurface,
+                                ),
+                              ),
+                              const TextSpan(
+                                text: ' —— 对话排进本地队列，接上服务器后自动补回去。\n',
+                              ),
+                              // **这一句此前没有，而它是离线模式最容易被误读的地方。**
+                              //
+                              // `cortex-local` 的 `list_sessions` 是纯转发
+                              // （它不依赖 cortex-store，本机没有第二个库），
+                              // 所以离线时会话列表只剩这次新建的草稿。
+                              // 不说的话，用户看到的是「我昨天那些对话没了」——
+                              // 而它们其实好好地在服务器上。
+                              TextSpan(
+                                text: '也看不到以前的会话',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  color: scheme.onSurface,
+                                ),
+                              ),
+                              const TextSpan(
+                                text:
+                                    ' —— 历史在服务器上，接上就全回来。\n'
+                                    '需要先在设置里配好本机模型（也可以进去之后再配）。',
+                              ),
+                            ],
                           ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
               ],
@@ -409,4 +510,16 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
       ),
     );
   }
+}
+
+/// 一串 URL 拿来当按钮上的字。
+///
+/// 只留 host（外加非默认端口）：完整的 `https://cortex.example.com/api`
+/// 在一个小按钮上会被截断成 `https://cortex.exa…`，而被截掉的恰恰是
+/// **区分两个部署的那一半**。同一台机器上的两个端口也要分得开，
+/// 所以端口不能一起丢。
+String _shortHost(String url) {
+  final u = Uri.tryParse(url);
+  if (u == null || u.host.isEmpty) return url;
+  return u.hasPort ? '${u.host}:${u.port}' : u.host;
 }

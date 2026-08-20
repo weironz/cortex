@@ -8,6 +8,7 @@ class AppConfig {
     required this.useMock,
     required this.baseUrl,
     this.offline = false,
+    this.knownBaseUrls = const [],
   });
 
   /// When true, [MockCortexApi] is used and no network call is ever made.
@@ -15,6 +16,19 @@ class AppConfig {
 
   /// `cortexd` origin, e.g. `http://127.0.0.1:8080`.
   final String baseUrl;
+
+  /// 这台机器上**用过的**部署入口，最近用的在前，含当前这个。
+  ///
+  /// # 为什么要记
+  ///
+  /// 地址收进一行小字之后，它变成了一个纯文本框 —— 而一个在公司部署和
+  /// 本机 dev 之间来回切的人，每切一次都要**凭记忆重打一串 URL**。
+  /// 2026-08-21 实测到的症状是「进到这里就没办法切回去了」：
+  /// 界面上没有任何一处还记得另一个地址长什么样。
+  ///
+  /// 只记**显式设过的**，编译期默认值不进这份清单：那个值
+  /// （`127.0.0.1:8080`）没有人真的选过它，摆出来只是噪音。
+  final List<String> knownBaseUrls;
 
   /// 离线模式：**没有 cortexd**，只有本地 agent。
   ///
@@ -91,20 +105,48 @@ class AppConfig {
     baseUrl: defaultBaseUrl,
   );
 
-  AppConfig copyWith({bool? useMock, String? baseUrl, bool? offline}) =>
-      AppConfig(
-        useMock: useMock ?? this.useMock,
-        baseUrl: baseUrl ?? this.baseUrl,
-        offline: offline ?? this.offline,
-      );
+  AppConfig copyWith({
+    bool? useMock,
+    String? baseUrl,
+    bool? offline,
+    List<String>? knownBaseUrls,
+  }) => AppConfig(
+    useMock: useMock ?? this.useMock,
+    baseUrl: baseUrl ?? this.baseUrl,
+    offline: offline ?? this.offline,
+    knownBaseUrls: knownBaseUrls ?? this.knownBaseUrls,
+  );
+
+  /// 把 [url] 记成「最近用过」。返回新的清单，最近的在前、去重、封顶。
+  ///
+  /// 纯函数：前插去重这件事看着显然，实际有三个坑（重复项、大小写与尾斜杠
+  /// 不一致、无上限增长），而它们全都只在用了几个月之后才显形。
+  static List<String> remember(List<String> known, String url, {int cap = 6}) {
+    final u = url.trim();
+    if (u.isEmpty) return known;
+    // 只按**原样**去重，不做 URL 归一化：`https://x/api` 与 `https://x/api/`
+    // 在服务端可能真的是两条路，替用户合并等于替他改配置
+    final next = [u, ...known.where((k) => k != u)];
+    return next.length > cap ? next.sublist(0, cap) : next;
+  }
 
   @override
   bool operator ==(Object other) =>
       other is AppConfig &&
       other.useMock == useMock &&
       other.baseUrl == baseUrl &&
-      other.offline == offline;
+      other.offline == offline &&
+      _sameList(other.knownBaseUrls, knownBaseUrls);
+
+  static bool _sameList(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 
   @override
-  int get hashCode => Object.hash(useMock, baseUrl, offline);
+  int get hashCode =>
+      Object.hash(useMock, baseUrl, offline, Object.hashAll(knownBaseUrls));
 }
