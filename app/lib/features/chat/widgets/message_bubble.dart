@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/formatting.dart';
+import '../../../core/theme.dart';
 import '../../../core/link_launcher.dart';
 import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
@@ -92,9 +93,11 @@ class _UserBubble extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              // Above the bubble rather than inside it: an image tinted by the
-              // primary-coloured bubble reads as part of the UI instead of as
-              // content the user attached.
+              // 放在气泡外面而不是里面：附件是**用户的内容**，被气泡的底色
+              // 罩住一层之后会读成界面的一部分。
+              //
+              // （气泡此前是实心品牌色，那时这条理由更强烈；现在底色淡了，
+              // 但结论不变 —— 一张图不该带着任何界面色。）
               AttachmentStrip(attachments: message.attachments, alignEnd: true),
               // A message can legitimately be attachments only — "看这张图" with
               // a screenshot and nothing else. An empty bubble next to the
@@ -106,11 +109,24 @@ class _UserBubble extends ConsumerWidget {
                     vertical: 11,
                   ),
                   decoration: BoxDecoration(
-                    color: scheme.primary,
+                    // ── 中性填充，不是实心品牌色 ──
+                    //
+                    // 这里原来是整块 `scheme.primary`。按新规范（见
+                    // docs/design.md）色彩只表达**动作或含义**，而一条
+                    // 用户消息是内容 —— Cherry Studio 的规矩里这一条写得
+                    // 很直接：「不要把 primary 当成通用蓝或装饰色」。
+                    //
+                    // 两家参考产品都是这么做的：助手消息不带气泡（我们
+                    // 已经如此），用户消息用一层很轻的中性底把它与助手的
+                    // 输出分开。一屏对话里因此只剩下真正需要注意的地方
+                    // 才有颜色。
+                    color: scheme.surfaceContainerHigh,
                     borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(14),
-                      topRight: Radius.circular(14),
-                      bottomLeft: Radius.circular(14),
+                      topLeft: Radius.circular(CortexTokens.radiusXl),
+                      topRight: Radius.circular(CortexTokens.radiusXl),
+                      bottomLeft: Radius.circular(CortexTokens.radiusXl),
+                      // 右下角收窄成一个「尾巴」。这一个不走圆角阶：
+                      // 它不是装饰，是指向发送者的方向
                       bottomRight: Radius.circular(4),
                     ),
                   ),
@@ -118,7 +134,7 @@ class _UserBubble extends ConsumerWidget {
                     child: Text(
                       message.text,
                       style: theme.textTheme.bodyLarge?.copyWith(
-                        color: scheme.onPrimary,
+                        color: scheme.onSurface,
                       ),
                     ),
                   ),
