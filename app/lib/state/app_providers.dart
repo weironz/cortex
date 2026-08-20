@@ -810,6 +810,9 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
 
   final api = HttpCortexApi(
     baseUrl: origin,
+    // 打的是本机 agent 时，把**用户配的那个地址**一并交给它 ——
+    // 连不上时那句话要说得出「你配的是哪儿、这个 127.0.0.1 又是谁」
+    frontsDeployment: agentOrigin.value == null ? null : config.baseUrl,
     // 打到 agent 时用**它认的那把**，见 `apiToken`
     // 打到 agent 时用**钉住的那把**：它认的是自己启动时那个值，
     // 而 `token` 每 15 分钟就换一次

@@ -44,12 +44,28 @@ class HttpCortexApi implements CortexApi {
     String? token,
     http.Client? client,
     this.onUnauthorized,
+    this.frontsDeployment,
   }) : _base = _normalise(baseUrl),
        _token = (token != null && token.trim().isEmpty) ? null : token?.trim(),
        _client = client ?? createHttpClient();
 
   final Uri _base;
   final http.Client _client;
+
+  /// `baseUrl` 是桌面端**自己拉起的本机 agent** 时，它前面挡着的那个部署。
+  ///
+  /// `null` = 直接打用户配的地址（Web、或者这台机器没有 agent）。
+  ///
+  /// # 它只为一句错误信息存在，而那句话此前一直在骗人
+  ///
+  /// 本机 agent 绑的是**内核随机分的端口**，用户从没配过它。连不上时
+  /// 原来那句「连不上 cortexd（http://127.0.0.1:9826）。确认 daemon 已启动，
+  /// 或在设置里切到 Mock 数据源」有三处不对：那不是 cortexd、用户没有
+  /// 「daemon」可启动、切 Mock 也解决不了。
+  ///
+  /// 2026-08-20 实测的现场：设置页显示 `https://…/api`，而报错说
+  /// `127.0.0.1:9826` —— 用户读出来的是「串台了，我配的地址没生效」。
+  final String? frontsDeployment;
 
   /// The long-lived bearer credential, or null against a daemon running with
   /// `CORTEX_AUTH=disabled`.
@@ -1714,9 +1730,21 @@ class HttpCortexApi implements CortexApi {
   /// is pointless if the client then prints it.
   String _wsUnreachableMessage(Object e) => '连不上实时同步通道（${_wsUri(null)}）。$e';
 
-  String _unreachableMessage(Object e) =>
-      '连不上 cortexd（$_base）。确认 daemon 已启动，'
-      '或在设置里切到 Mock 数据源。\n$e';
+  /// 连不上时那句话。**先说清楚这个地址是谁。**
+  ///
+  /// 打的是本机 agent 时，那个端口是桌面端自己拉起的进程、内核随机分的，
+  /// 用户从没配过它。照搬「确认 daemon 已启动」会让他去找一个根本不存在
+  /// 的东西 —— 而他看到一个陌生的 127.0.0.1 端口，第一反应是
+  /// 「串台了，我配的地址没生效」。2026-08-20 就是这么被问的。
+  String _unreachableMessage(Object e) {
+    if (frontsDeployment case final remote?) {
+      return '连不上本机 agent（$_base）—— 那是桌面端自己拉起的进程，'
+          '不是你配的地址；你配的部署是 $remote。\n'
+          '它多半刚退出（会自动重启，稍等一下）。一直这样就重启一次应用。\n$e';
+    }
+    return '连不上 cortexd（$_base）。确认 daemon 已启动，'
+        '或在设置里切到 Mock 数据源。\n$e';
+  }
 
   /// Decodes a JSON object body, turning "this is not JSON at all" into a
   /// message that names the likely cause.
