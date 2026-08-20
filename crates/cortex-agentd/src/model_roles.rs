@@ -193,7 +193,8 @@ fn validate(
         if !cortex_llm::image::is_image_model(&provider, &a.model) {
             return Err(ApiError::bad_request(format!(
                 "`{}` 生不了图。绘画模型要选带「能生图」标记的那些 —— \
-                 现在能生图的只有通义千问（Alibaba）的 qwen-image 系列",
+                 现在能生图的是通义千问（Alibaba）的 qwen-image 系列，\
+                 与 Google 的 gemini-*-image 系列",
                 a.model
             )));
         }

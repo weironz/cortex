@@ -818,37 +818,77 @@ ollama 的型号名本身带冒号（`llama3:8b`），拆不干净；而且同�
 
 #### 生图：一个工具，不是选择器里的一个模型
 
-**生图与对话是两条协议。** 对话流式吐 token，生图一次请求回一个图片 URL。
+**生图与对话是两条协议。** 对话流式吐 token，生图一次请求回一张图。
 把 `qwen-image` 放进对话模型选择器，用户选中之后每一轮都会失败。
 
 所以它是 `generate_image` 工具 —— 阿里官方文档给的做法也是这个：
 文本模型走 `compatible-mode/v1`，工具内部调原生的生图接口。
 
 链路：`generate_image`（cortex-local）→ `POST /llm/image`（agentd，key 在
-这儿）→ DashScope 原生协议 → 抓字节 → 存 blob → 哈希挂到 assistant
+这儿）→ 各家原生协议 → 拿到字节 → 存 blob → 哈希挂到 assistant
 episode 的 `attachments` 上。**与用户自己上传的附件走同一条路**，
 于是渲染、同步、跨设备都不必另写一套。
 
-三件实测确认的事（2026-08-19）：
+已接两家（各一个函数，**不做统一抽象**）：
+
+| | 端点 | 鉴权 | 图怎么回来 | 尺寸怎么说 |
+|---|---|---|---|---|
+| alibaba | `/api/v1/services/aigc/multimodal-generation/generation` | `Bearer` | **URL**（活 24 小时） | `宽*高` |
+| google | `/v1beta/interactions` | **`x-goog-api-key`** | **内联 base64** | `aspect_ratio` + `image_size` |
+
+这张表就是不做「通用图像接口」的理由：四列里有三列两家不一样，取交集
+之后连「图是链接还是字节」都统一不了。所以 `GeneratedImage` 索性是个
+**枚举**（`Url` / `Inline`），让调用方 `match` 一次 —— 它本来就要为两种
+存法分派。
+
+五件实测确认的事：
 
 - **百炼的 OpenAI 兼容模式不支持 `/v1/images/generations`**，只覆盖
-  chat/completions。qwen-image 必须走
-  `/api/v1/services/aigc/multimodal-generation/generation`。
+  chat/completions。qwen-image 必须走原生那条（2026-08-19）。
 - **内置的 alibaba 端点默认国际站是错的**：国内账号打 `dashscope-intl`
   必然 401，而报的是「密钥不对」—— 密钥完全没问题。同一把 key 换成
-  `dashscope.aliyuncs.com` 立刻拉回 240 个模型。
+  `dashscope.aliyuncs.com` 立刻拉回 240 个模型（2026-08-19）。
 - **图 URL 只活 24 小时**。存链接的表现是今天生成的图明天打开 404，
   而历史里那条消息看起来完好无损。所以必须在生成那一刻抓字节。
+- **Gemini 的鉴权不是 Bearer**，是 `x-goog-api-key` 自定义头。写成 Bearer
+  的表现是 401，而那个 401 读起来像「key 不对」—— 与上面 alibaba 国际站
+  那次是同一种误导（2026-08-20）。
+- **MIME 要按字节头自己认，别信对方声明的。** Gemini 实测回的是
+  **JPEG**，而 DashScope 那条的兜底假设是 PNG。认错的表现是浏览器
+  按错的类型处理一张好图（2026-08-20）。
+
+##### 尺寸：算不出来就不发，不凑一个
+
+请求里的尺寸是 `宽*高`（DashScope 的形状），Gemini 要的是「宽高比 + 档位」，
+而且比例是个**枚举**（1:1 到 21:9 那几个）。`1000*777` 硬算成 `1000:777`
+发过去是 400，而错误里只说那个值不合法，不会说是我们编的。
+
+所以只翻译能整除到已知比例的，其余**两个字段都不发**，让对方按默认走
+（`gemini_shape`）。
 
 ##### 「能生图」与「我们调得动」是两件事
 
 目录（models.dev 快照）里 alibaba 一个 `image_output` 都没有，而真实账号上
-有 19 个。所以判据是两级：目录说有就是有，目录不认时按已核实的命名前缀
-兜底（`cortex_llm::image::is_image_model`）。
+有 19 个；google 那边目录只认三个带 `-preview` 的，而账号上还有三个正式版。
+所以判据是两级：目录说有就是有，目录不认时按已核实的命名前缀兜底
+（`cortex_llm::image::is_image_model`）。只信目录的表现是「同一个型号的
+preview 能选，正式版反而不能」。
 
-但**先看这家接没接**：`gpt-image-1` 在目录里 `image_output` 是真的，可我们
-没接 OpenAI 的生图协议 —— 认下它等于把一次本可在挑选阶段避开的失败，
-推迟到用户点下按钮之后。
+但**先看这家接没接**（`supported()`）。2026-08-20 审计了一遍目录，
+按我们的供应商 id 归口：
+
+| 目录说能出图 | 数量 | 我们接了吗 |
+|---|---|---|
+| openai（`gpt-image-1`、`gpt-image-1.5`…） | 5 | ❌ |
+| google（`gemini-*-image`） | 3 | ✅ |
+| xai（`grok-imagine-image`…） | 2 | ❌ |
+| alibaba | **0**（全靠命名前缀兜底） | ✅ |
+| anthropic / deepseek / zhipu / moonshot / minimax | 0 | — |
+
+**openai 与 xai 那 7 个是明知故不认的。** 认下来等于把一次本可在挑选阶段
+避开的失败，推迟到用户点下按钮之后 —— 而那时报错来自供应商，他看不出是
+选错了模型。要接就补 `generate()` 里的分支，然后 `supported()` 加一行；
+两处必须同一笔提交，只加后者就是「说得到做不到」。
 
 ##### 工具目录里加它要有人负责
 

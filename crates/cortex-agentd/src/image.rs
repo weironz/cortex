@@ -105,11 +105,26 @@ pub async fn generate(
     .await
     .map_err(|e| ApiError::bad_request(format!("生图失败：{e}")))?;
 
-    // 抓字节 + 入库。**串行**：n 最多 6，而并发下载几张几 MB 的图
+    // 拿到字节 + 入库。**串行**：n 最多 6，而并发下载几张几 MB 的图
     // 省不下多少，却要多一套错误合并
     let mut stored = Vec::with_capacity(images.len());
     for img in images {
-        let bytes = fetch(&img.url).await?;
+        // 两家给的东西不是一个类型：DashScope 回链接（要现抓，那个 URL
+        // 只活 24 小时），Gemini 直接把字节内联在响应里
+        let bytes = match img {
+            cortex_llm::image::GeneratedImage::Url(url) => fetch(&url).await?,
+            cortex_llm::image::GeneratedImage::Inline { bytes, .. } => {
+                if bytes.len() > MAX_IMAGE_BYTES {
+                    return Err(ApiError::bad_request(format!(
+                        "生成的图太大（{} 字节），超过 {MAX_IMAGE_BYTES}",
+                        bytes.len()
+                    )));
+                }
+                bytes::Bytes::from(bytes)
+            }
+        };
+        // **按字节头自己认**，不用对方声明的那个：声明错了的表现是浏览器
+        // 把一张 png 当别的东西处理，而字节头是不会说谎的
         let mime = sniff(&bytes);
         let hash = crate::blobs::store_bytes(&st, store, bytes, Some(mime))
             .await
@@ -153,8 +168,9 @@ fn pick<'a>(
 
     if candidates.is_empty() {
         return Err(ApiError::bad_request(
-            "没有能生图的模型来源。去设置 → 模型里加一条通义千问（Alibaba）的来源，\
-             再点「获取模型列表」把 qwen-image 拉进来",
+            "没有能生图的模型来源。去设置 → 模型服务里加一条通义千问（Alibaba）\
+             或 Google（Gemini）的来源，再点「获取模型列表」，\
+             把 qwen-image / gemini-*-image 那些拉进来",
         ));
     }
 
@@ -186,8 +202,8 @@ fn pick<'a>(
 
     Err(ApiError::bad_request(match want_model {
         Some(m) => format!(
-            "这些来源里没有开放 `{m}`。去设置 → 模型里点「获取模型列表」，\
-             确认 qwen-image 系列在列表里"
+            "这些来源里没有开放 `{m}`。去设置 → 模型服务里点「获取模型列表」，\
+             再把它勾进来（能生图的是 qwen-image / gemini-*-image 那些）"
         ),
         None => "那条来源里一个生图模型都没有。去设置 → 模型里点「获取模型列表」，\
              把 qwen-image 系列拉进来"
