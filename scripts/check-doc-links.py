@@ -57,13 +57,62 @@ def slug(heading: str) -> str:
     return PUNCT.sub("", heading.strip().lower()).replace(" ", "-")
 
 
+
+def line_spans(text: str):
+    """逐行给出 (起始偏移, 该行内容)。"""
+    pos = 0
+    for line in text.splitlines():
+        yield pos, line
+        pos += len(line) + 1
+
+
+def strip_code(text: str) -> str:
+    """把代码块与行内代码抹成空白，再去找链接。
+
+    不抹的话，**一份讲 markdown 语法的文档会把自己写红**：文里那句
+    「只认 ![](…) 那种真图片语法」（原文带反引号）会被当成一个指向文件
+    `…` 的图片链接。2026-08-20 就是这么红的一次，而它给的提示
+    （「先怀疑标题改过了」）把人往完全无关的方向带。
+
+    抹成等长的空白而不是删掉：行号列号还得对得上，
+    否则报错里那个位置就没意义了。
+    """
+    out = list(text)
+    fence = None
+    i = 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        marker = next((f for f in ("```", "~~~") if stripped.startswith(f)), None)
+        if fence is None and marker:
+            fence = marker
+        elif fence is not None:
+            if marker == fence:
+                fence = None
+            else:
+                for k in range(i, i + len(line)):
+                    if out[k] != "\n":
+                        out[k] = " "
+        i += len(line)
+    text = "".join(out)
+
+    # 行内代码：成对的反引号，**只在同一行内配对** ——
+    # 跨行配对会把两段正文之间的东西整片抹掉
+    out = list(text)
+    for start, line in line_spans(text):
+        ticks = [j for j, c in enumerate(line) if c == "`"]
+        for a, b in zip(ticks[::2], ticks[1::2]):
+            for k in range(start + a, start + b + 1):
+                out[k] = " "
+    return "".join(out)
+
+
 def main() -> int:
     files = sorted(glob.glob("docs/*.md")) + ["README.md", "CLAUDE.md", "CHANGELOG.md"]
     bad: list[str] = []
     for f in files:
         if not os.path.exists(f):
             continue
-        text = io.open(f, encoding="utf-8").read()
+        text = strip_code(io.open(f, encoding="utf-8").read())
         heads = {
             slug(m.group(1)) for m in re.finditer(r"^#{1,6}\s+(.+)$", text, re.M)
         }

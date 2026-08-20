@@ -419,8 +419,17 @@ flutter-check:
 flutter-live:
     cd app && flutter test --tags live
 
+# 版本号一致 + 文档链接指得到。CI 里是两个独立作业，本地并成一条
+#
+# 2026-08-20：`just ci` 全绿而 CI 红了 —— 红在文档链接那个作业上，
+# 而这条 recipe 从来就没跑过它。**「本地跑一遍 CI 的全部检查」少一样就不是
+# 那句话**，而缺的那一样偏偏是最容易在写文档时踩到的
+docs-check:
+    bash scripts/check-version.sh
+    python3 scripts/check-doc-links.py
+
 # 本地跑一遍 CI 的全部检查（含客户端 —— 不含的话它与 CI 是两回事）
-ci: fmt-check lint check test flutter-check
+ci: fmt-check lint check test docs-check flutter-check
     @echo "全部检查通过"
 
 # ══════════════════════════════════════════════════════════
