@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../../core/theme.dart';
 import 'highlight_registry.dart';
+import '../../core/motion.dart';
 
 /// A fenced code block with a header (language + copy) and horizontally
 /// scrollable, syntax-highlighted body.
@@ -212,7 +213,15 @@ class _StreamingDotState extends State<_StreamingDot>
   late final AnimationController _c = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 900),
-  )..repeat(reverse: true);
+  );
+
+  // 「减少动效」开着时停在完全不透明：这个点表示「还在输出」，
+  // 让它消失等于把唯一的进度证据一起关掉。见 core/motion.dart
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    syncLoop(_c, context, reverse: true);
+  }
 
   @override
   void dispose() {

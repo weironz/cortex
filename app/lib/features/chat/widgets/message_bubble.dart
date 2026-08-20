@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/formatting.dart';
 import '../../../core/theme.dart';
 import '../../../core/link_launcher.dart';
+import '../../../core/motion.dart';
 import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
 import '../../../models/tool_call.dart';
@@ -21,6 +22,16 @@ const kMessageGutter = 28.0;
 /// Upper bound on line length. Long measure hurts readability badly in CJK,
 /// and an ultrawide monitor would otherwise stretch a paragraph across 2000px.
 const kMessageMaxWidth = 760.0;
+
+/// 整条对话那一列有多宽。**与输入框同宽**。
+///
+/// [kMessageMaxWidth] 管的是单个气泡里那行字最长多少，而这一条管的是
+/// **整列**——两者不是一回事，而此前只有前者。少了后者的表现是：宽窗口上
+/// 助手的文字贴着左边、用户的气泡贴着右边，中间横跨一千多像素。
+///
+/// 取值 = 文本宽度 + 两侧 [kMessageGutter]，与 `message_composer` 里那个
+/// 820 对齐 —— 消息列的边与输入框的边落在同一条竖线上。
+const kConversationWidth = kMessageMaxWidth + kMessageGutter * 2;
 
 /// A committed message.
 ///
@@ -522,7 +533,15 @@ class _ThinkingIndicatorState extends State<_ThinkingIndicator>
   late final AnimationController _c = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1100),
-  )..repeat();
+  );
+
+  // 「减少动效」开着时停在终态：三个点的透明度公式在 t=1 处最实，
+  // 于是它变成三个静止的点，而不是消失
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    syncLoop(_c, context);
+  }
 
   @override
   void dispose() {
@@ -580,7 +599,15 @@ class _CaretState extends State<_Caret> with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 640),
-  )..repeat(reverse: true);
+  );
+
+  // 停在 1 = 完全不透明。停在 0 的话光标会**消失**，而它此刻正是
+  // 「还在输出」的唯一视觉证据
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    syncLoop(_c, context, reverse: true);
+  }
 
   @override
   void dispose() {

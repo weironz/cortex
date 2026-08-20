@@ -185,38 +185,22 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
             // controllers are not torn down and rebuilt.
             addAutomaticKeepAlives: true,
             itemCount: headers + messages.length + (streaming ? 1 : 0),
-            itemBuilder: (context, index) {
-              var i = index;
-              if (hasEarlier) {
-                if (i == 0) {
-                  return _LoadEarlier(
-                    loading: loadingEarlier,
-                    onTap: sessionId == null
-                        ? null
-                        : () => unawaited(_loadEarlier(sessionId)),
-                  );
-                }
-                i -= 1;
-              }
-              if (i < messages.length) {
-                final message = messages[i];
-                return MessageBubble(
-                  key: ValueKey(message.id),
-                  message: message,
-                  // 「有一轮在跑吗」与「这条回答对应哪句话」都由这里算好
-                  // 再传下去，气泡自己不去读全局状态。
-                  //
-                  // 不这么做的话，一个纯展示的气泡在 build 期间就会把
-                  // ChatController 拉起来 —— 单独渲染一条消息的那些测试
-                  // 会连带触发一次拉列表，卡在一个没人处理的定时器上
-                  busy: streaming,
-                  retryTarget: message.role == MessageRole.assistant
-                      ? _userMessageBefore(messages, i)
-                      : null,
-                );
-              }
-              return const _StreamingBubble();
-            },
+            // ── 每一条都收进同一列 ──
+            //
+            // 收在**每一项**上而不是把整个 ListView 包起来：后者会让
+            // 窗口两侧那几百像素不再响应滚轮，而一个「滚不动的空白区」
+            // 在宽屏上占了半个界面。
+            itemBuilder: (context, index) => _column(
+              _item(
+                context,
+                index,
+                messages,
+                streaming,
+                hasEarlier,
+                loadingEarlier,
+                sessionId,
+              ),
+            ),
           ),
         ),
         if (!_follow)
@@ -232,6 +216,65 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
           ),
       ],
     );
+  }
+
+  /// 把一条消息放进居中的内容列。
+  ///
+  /// # 为什么必须有这一层
+  ///
+  /// `kMessageMaxWidth` 此前只约束**单个气泡**的宽度，整列没有约束 ——
+  /// 于是在一个 1400px 的窗口上，助手的文字贴着左边、用户的气泡贴着右边，
+  /// 中间横跨一千多像素。眼睛要在两端来回跑，而这正是两家参考产品
+  /// （Cherry Studio / LobeHub）都不这么做的原因：对话是**一列**。
+  ///
+  /// 宽度与输入框对齐（同为 [kConversationWidth]）：消息列的边与输入框的边
+  /// 落在同一条竖线上，是「这些东西属于一起」最省力的表达。
+  static Widget _column(Widget child) => Center(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: kConversationWidth),
+      child: child,
+    ),
+  );
+
+  Widget _item(
+    BuildContext context,
+    int index,
+    List<ChatMessage> messages,
+    bool streaming,
+    bool hasEarlier,
+    bool loadingEarlier,
+    String? sessionId,
+  ) {
+    var i = index;
+    if (hasEarlier) {
+      if (i == 0) {
+        return _LoadEarlier(
+          loading: loadingEarlier,
+          onTap: sessionId == null
+              ? null
+              : () => unawaited(_loadEarlier(sessionId)),
+        );
+      }
+      i -= 1;
+    }
+    if (i < messages.length) {
+      final message = messages[i];
+      return MessageBubble(
+        key: ValueKey(message.id),
+        message: message,
+        // 「有一轮在跑吗」与「这条回答对应哪句话」都由这里算好
+        // 再传下去，气泡自己不去读全局状态。
+        //
+        // 不这么做的话，一个纯展示的气泡在 build 期间就会把
+        // ChatController 拉起来 —— 单独渲染一条消息的那些测试
+        // 会连带触发一次拉列表，卡在一个没人处理的定时器上
+        busy: streaming,
+        retryTarget: message.role == MessageRole.assistant
+            ? _userMessageBefore(messages, i)
+            : null,
+      );
+    }
+    return const _StreamingBubble();
   }
 }
 

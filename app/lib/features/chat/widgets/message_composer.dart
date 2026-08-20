@@ -12,6 +12,7 @@ import '../../../state/file_mention_controller.dart';
 import '../../workspace/workspace_panel.dart';
 import 'attachment_views.dart';
 import 'model_chip.dart';
+import 'message_bubble.dart';
 import 'permission_mode_chip.dart';
 
 /// Input box.
@@ -237,7 +238,9 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
             : const EdgeInsets.fromLTRB(20, 14, 20, 16),
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 820),
+            // 与消息列同宽。两条边落在同一条竖线上，是「这些东西属于一起」
+            // 最省力的表达 —— 差 4px 反而比差 100px 更难看
+            constraints: const BoxConstraints(maxWidth: kConversationWidth),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,
@@ -412,13 +415,22 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                     // widget**，于是每个标签在树里都有两份 —— 读屏会念两遍，
                     // chip 的构建白做一次，而 `find.text` 一律数到 2。
                     // 换来的只是几十像素的偏移。
-                    Expanded(
-                      child: Text(
-                        'Cortex 会把这轮对话归档，之后还能搜得到。',
-                        textAlign: TextAlign.center,
-                        style: theme.textTheme.labelSmall,
+                    // 只在**还没开始聊**的那一屏说。
+                    //
+                    // 它是一句永远为真、且没有任何动作挂在上面的话 ——
+                    // 一个新用户需要知道「这些对话会留下来」，而第二轮之后
+                    // 它就只是占着输入框最宽的那一格。常驻的无动作文案会
+                    // 训练人忽略那一整片区域，于是真的有话要说时也没人看。
+                    //
+                    // 两家参考产品的输入框脚注里只有控件，没有说明文字。
+                    if (widget.centred)
+                      Expanded(
+                        child: Text(
+                          'Cortex 会把这轮对话归档，之后还能搜得到。',
+                          textAlign: TextAlign.center,
+                          style: theme.textTheme.labelSmall,
+                        ),
                       ),
-                    ),
                   ],
                 ),
               ],
