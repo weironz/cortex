@@ -8,11 +8,34 @@ class HealthStatus {
     required this.database,
     this.auth = authUnknown,
     this.devLogin,
+    this.role = roleCortexd,
+    this.server,
   });
 
   final String status;
   final String version;
   final String database;
+
+  /// 答话的是谁：`cortexd` / `local-agent`。
+  ///
+  /// # 为什么客户端必须认这一位
+  ///
+  /// 本地 agent 在跑时，桌面端的**每一个**请求（含 `/health`）都打给它 ——
+  /// 于是「后端状态」那几行显示的其实是 **agent 自己**的健康，
+  /// 而界面把它标成了部署的。用户看到的 `database unknown`、`auth unknown`
+  /// 正是 agent 的答法（它没有数据库），却读起来像「我的服务端坏了」。
+  ///
+  /// 老服务端不报这一位，按 `cortexd` 处理 —— 那时本地 agent 还不存在。
+  final String role;
+
+  /// agent 上游那台的状态。`null` = 答话的不是 agent（或它没报）。
+  final ServerLink? server;
+
+  /// 答话的是本地 agent 吗。
+  bool get isLocalAgent => role == roleLocalAgent;
+
+  static const String roleCortexd = 'cortexd';
+  static const String roleLocalAgent = 'local-agent';
 
   /// `"token"` / `"disabled"`, or [authUnknown] against a daemon that predates
   /// the field.
@@ -75,5 +98,35 @@ class HealthStatus {
     database: asString(json['database'], 'unknown'),
     auth: asString(json['auth'], authUnknown),
     devLogin: json['dev_login'] as String?,
+    role: asString(json['role'], roleCortexd),
+    server: json['server'] is Map<String, dynamic>
+        ? ServerLink.fromJson(json['server'] as Map<String, dynamic>)
+        : null,
   );
+}
+
+/// 本地 agent 报的「我上游那台怎么样」。
+///
+/// 只有 `role == local-agent` 时才有 —— 部署本身没有上游。
+class ServerLink {
+  const ServerLink({
+    required this.remote,
+    required this.reachable,
+    this.backlog = 0,
+  });
+
+  factory ServerLink.fromJson(Map<String, dynamic> json) => ServerLink(
+    remote: asString(json['remote']),
+    reachable: json['reachable'] == true,
+    backlog: asIntOrNull(json['backlog']) ?? 0,
+  );
+
+  /// agent 的 `--remote`，也就是**用户配的那个部署**。
+  final String remote;
+
+  /// 刚才那次探活通没通。
+  final bool reachable;
+
+  /// 离线队列里还压着多少条没刷出去。
+  final int backlog;
 }

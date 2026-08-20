@@ -386,8 +386,12 @@ void main() {
       );
 
       expect(find.textContaining('云端对话：可用'), findsOneWidget);
+      // 带上「云端对话：」这个前缀，而不是光找「不可用」三个字：同一页上
+      // 还有「本机 agent 没在跑 → 读写文件、跑命令不可用」，那是另一件事，
+      // 而且在测试环境里它**本来就**没在跑。不限定前缀的话，这条断言会被
+      // 一句正确的话弄红，然后有人跑去改那句正确的话
       expect(
-        find.textContaining('不可用'),
+        find.textContaining('云端对话：不可用'),
         findsNothing,
         reason: '通了还说不可用，用户会去关掉一个正常工作的部署',
       );

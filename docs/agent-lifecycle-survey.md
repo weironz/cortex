@@ -318,6 +318,33 @@ stable/beta 渠道，托盘模式下关窗口不杀 server 且重启后恢复上
 
 ---
 
+## 落地进度
+
+「抄什么」那张表里，2026-08-20 开始按顺序落地的六项：
+
+| # | 做什么 | 状态 | 落在哪 |
+|---|---|---|---|
+| 1 | 修文案：README / 登录屏 / 卸载残留说明 | ✅ | `71e902b` |
+| 2 | `cortex doctor`（含 `--json`） | ✅ | `crates/cortex-cli/src/doctor.rs`，`2b51f7e` |
+| 3 | 连接页「本机 agent」一节 | ✅ | `connection_page.dart:_localAgent` |
+| 4 | 启动诊断文件（事件流 + stderr 尾部） | ⬜ | |
+| 5 | `cortex-local` 拒绝带 `Origin` 的请求 | ⬜ | |
+| 6 | 卸载器数据目录 checkbox | ⬜ | |
+
+### 第 3 项顺带修掉的一个假信号
+
+`just app-status` 用 python 读 `%LOCALAPPDATA%\cortex\settings.json`，
+而这台机器上的 python 是 MSIX 包装的（Python install manager），
+对 `AppData\Local` 的访问走**包内重定向** —— 同一条绝对路径，
+它读到的是一份旧快照，`os.stat` 报的大小都跟着错。
+
+于是这个脚本报「连的部署 = `http://127.0.0.1:5173`」，
+而应用与 `cortex doctor` 都在连生产。**一条诊断命令给出假信号，
+比没有这条命令更糟**：它把「界面显示的地址是对的」这个事实，
+读成了「配置持久化坏了」。现在改成 grep 读，与原生程序看到的一致。
+
+---
+
 ## 核实记录
 
 每家的初版结论都过了一轮**挑刺核实**（goose 用本地源码逐文件对，其余用

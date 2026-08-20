@@ -40,15 +40,22 @@ echo "── 桌面端状态 ──"
 # ── 1. 配置：它连的是哪个部署 ────────────────────────────
 SETTINGS="${LOCALAPPDATA}/cortex/settings.json"
 if [ -f "${SETTINGS}" ]; then
-    BASE="$(python3 -c "
-import io,json,sys
-try:
-    d=json.load(io.open(sys.argv[1],encoding='utf-8'))
-    print(d.get('base_url') or '(没存过，用编译期默认值)')
-except Exception as e:
-    print(f'(读不出来：{e})')
-" "${SETTINGS}" 2>/dev/null || echo '(读不出来)')"
-    say "连的部署" "${BASE}"
+    # ⚠️ **不要用 python 读这个文件。**
+    #
+    # 这台机器上的 python 是「Python install manager」装的 MSIX 包
+    # （`AppData\Local\Python\pythoncore-*`），它对 `%LOCALAPPDATA%` 的读写
+    # 走**包内重定向**：同一条绝对路径，cmd / PowerShell / Git Bash 读到的是
+    # 185 字节的真文件，python 读到的是 243 字节的旧快照 —— 连 `os.stat`
+    # 报的大小都跟着错。2026-08-20 实测。
+    #
+    # 后果不是「读不出来」，而是**读出一个看着很像真的旧地址**：这个脚本
+    # 因此报过「连的部署 = http://127.0.0.1:5173」，而应用和 `cortex doctor`
+    # 都在连生产。一条诊断命令给出假信号，比没有这条命令更糟。
+    #
+    # JSON 是一层平铺的 string→string，所以 grep 够用，也不必再引一个解释器。
+    BASE="$(grep -o '"base_url"[[:space:]]*:[[:space:]]*"[^"]*"' "${SETTINGS}" \
+        | head -n 1 | sed 's/.*:[[:space:]]*"//; s/"$//')"
+    say "连的部署" "${BASE:-(没存过，用编译期默认值)}"
     say "配置文件" "${SETTINGS}"
 else
     say "连的部署" "还没存过（settings.json 不在）"

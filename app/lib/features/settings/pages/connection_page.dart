@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../auth/token_store.dart';
+import '../../../core/app_config.dart';
+import '../../../core/local_agent.dart';
+import '../../../models/health_status.dart';
 import '../../../models/sandbox_health.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/auth_controller.dart';
@@ -169,6 +172,7 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
             ],
           ),
         ),
+        _localAgent(context, ref),
         // 「退出登录」搬去了左下角账号菜单。凭据存在哪这句话留着 ——
         // 它回答的是「我关掉这个窗口，密码会留在哪」，属于知情，不是一个操作
         if (!config.useMock && auth.token != null) ...[
@@ -181,6 +185,159 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
         ],
       ],
     );
+  }
+
+  /// 本机 agent 那一节。
+  ///
+  /// # 为什么必须有它
+  ///
+  /// 桌面端**不是一个进程，是两个**：这个界面，与它拉起的 `cortex-local`
+  /// （工具、文件读写、命令执行全在后者）。后者 `--bind 127.0.0.1:0`，
+  /// 端口每次由内核随机分。
+  ///
+  /// 而在这一节之前，**产品里没有任何一个地方承认它存在**。2026-08-20
+  /// 用户报「串台了」：设置页显示 `https://…/api`，报错却说
+  /// `127.0.0.1:9826` —— 那个端口他从没配过，除了「串台」得不出别的结论。
+  ///
+  /// # 三件它要说清的事
+  ///
+  /// 1. **在不在跑。**「不在跑」本身是一个要显示的状态（抄 Codex 的
+  ///    `app-server ○ not running` —— 把架构事实告诉用户，而不是留白让他猜）。
+  /// 2. **版本一不一致。** 抄 Claude Code 的 `daemon status`。对应的真实
+  ///    故障是「桌面端一直跑着旧 agent，而看起来完全正常」。
+  /// 3. **上面那节数字是谁的。** agent 在跑时 `/health` 是**它**答的 ——
+  ///    `database unknown` 是它没有数据库，不是你的服务端坏了。
+  Widget _localAgent(BuildContext context, WidgetRef ref) {
+    // Web 上没有本地 agent，这一整节都不该出现 —— 画一个恒为「不在跑」的
+    // 状态，只会让人去找一个这个平台上根本不存在的东西
+    if (!kLocalAgentSupported) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final muted = scheme.onSurfaceVariant;
+    final origin = ref.watch(localAgentOriginProvider);
+    final health = ref.watch(healthProvider).value;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Divider(height: 24),
+        Text('本机 agent', style: theme.textTheme.titleSmall),
+        const SizedBox(height: 4),
+        Text(
+          '工具、读写文件、跑命令都在它里面。由界面自动拉起、随界面退出，'
+          '端口每次由系统随机分 —— 所以报错里那个 127.0.0.1 不是你配的地址。',
+          style: theme.textTheme.labelSmall?.copyWith(color: muted),
+        ),
+        const SizedBox(height: 8),
+        ...switch (origin) {
+          AsyncData(value: final o?) => _agentRunning(context, o, health),
+          // 起不来 / 这台机器上没有它。**说清后果**：不是「少了个进程」，
+          // 是工具全都不能用，而对话本身照常 —— 用户否则会以为整个坏了
+          AsyncData() => [
+            _capability(
+              context,
+              Icons.highlight_off,
+              '没在跑 —— 已直接连远端',
+              '对话照常，但读写本机文件、跑命令这些都不可用。'
+                  '重启一次应用通常就好了。',
+              scheme.error,
+            ),
+          ],
+          AsyncError(:final error) => [
+            _capability(
+              context,
+              Icons.error_outline,
+              '起不来',
+              '$error',
+              scheme.error,
+            ),
+          ],
+          _ => [
+            _capability(context, Icons.hourglass_empty, '正在启动…', null, muted),
+          ],
+        },
+      ],
+    );
+  }
+
+  /// agent 在跑时那两三行。
+  List<Widget> _agentRunning(
+    BuildContext context,
+    String origin,
+    HealthStatus? health,
+  ) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final muted = scheme.onSurfaceVariant;
+    final out = <Widget>[
+      _capability(
+        context,
+        Icons.check_circle_outline,
+        '在跑 · $origin',
+        null,
+        muted,
+      ),
+    ];
+
+    // 版本比对 —— 这一节最值钱的一行。
+    //
+    // ⚠️ **只在 `/health` 确实是 agent 答的时候比**：它不在跑时那份 health
+    // 来自远端部署，拿远端版本去比就是在比两个无关的数字，
+    // 而结论会是一个不存在的「版本不一致」
+    if (health != null && health.isLocalAgent) {
+      final mine = AppConfig.appVersion;
+      if (mine.isEmpty) {
+        // 开发构建没有版本号（`just app` 不传 --dart-define）。
+        // 这时**不比**，也不说「一致」—— 那是编出来的
+        out.add(
+          _capability(
+            context,
+            Icons.info_outline,
+            'agent v${health.version}（这份界面没有版本号，比不了）',
+            null,
+            muted,
+          ),
+        );
+      } else if (health.version == mine) {
+        out.add(
+          _capability(
+            context,
+            Icons.check_circle_outline,
+            '版本一致（v$mine）',
+            null,
+            muted,
+          ),
+        );
+      } else {
+        out.add(
+          _capability(
+            context,
+            Icons.warning_amber_rounded,
+            'agent 是 v${health.version}，界面是 v$mine',
+            '两个版本混着跑，行为无法预期。重装一次桌面端让两者对齐。',
+            scheme.error,
+          ),
+        );
+      }
+      // 上面那节数字是谁的 —— 不说的话，agent 报的 `database unknown`
+      // 读起来像「我的服务端坏了」
+      final link = health.server;
+      if (link != null) {
+        out.add(
+          _capability(
+            context,
+            link.reachable ? Icons.cloud_done_outlined : Icons.cloud_off,
+            link.reachable
+                ? '上面那节是 agent 报的；它连着 ${link.remote}'
+                : '上面那节是 agent 报的；它连不上 ${link.remote}',
+            link.backlog > 0 ? '还有 ${link.backlog} 条对话等着补写，联网后自动重放。' : null,
+            link.reachable ? muted : scheme.error,
+          ),
+        );
+      }
+    }
+    return out;
   }
 
   /// 云端对话这项能力此刻在不在，以及不在时是哪一种「不在」。
