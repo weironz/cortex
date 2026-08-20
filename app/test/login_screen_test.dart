@@ -164,6 +164,101 @@ void main() {
       reason: '凭据存储那段说明是 token 那条路的注脚，主语没了它也该走',
     );
   });
+
+  // ── 地址字段：默认收起 ────────────────────────────────────
+
+  group('地址字段该不该出现', () {
+    test('web 上永远不出现', () {
+      for (final expanded in [true, false]) {
+        for (final unreachable in [true, false]) {
+          expect(
+            shouldShowEndpointField(
+              isWeb: true,
+              expanded: expanded,
+              unreachable: unreachable,
+            ),
+            isFalse,
+            reason:
+                'web 构建的 CORTEX_BASE_URL 是空串、走同源根路径 —— '
+                '那个字段不是「可以不填」，是**填了就坏**：'
+                '请求会从 nginx 同源那条路挪到一个没人接的绝对地址上。'
+                '（expanded=$expanded, unreachable=$unreachable）',
+          );
+        }
+      }
+    });
+
+    test('桌面上默认收起，点开才出现', () {
+      expect(
+        shouldShowEndpointField(
+          isWeb: false,
+          expanded: false,
+          unreachable: false,
+        ),
+        isFalse,
+        reason: '「部署入口地址」只有自托管的人答得上来，不该是第一屏第一个字段',
+      );
+      expect(
+        shouldShowEndpointField(
+          isWeb: false,
+          expanded: true,
+          unreachable: false,
+        ),
+        isTrue,
+      );
+    });
+
+    test('连不上时自动展开', () {
+      expect(
+        shouldShowEndpointField(
+          isWeb: false,
+          expanded: false,
+          unreachable: true,
+        ),
+        isTrue,
+        reason:
+            '编译期默认值是 127.0.0.1:8080，对任何有真部署的人都是错的。'
+            '不自动展开的话，连不上的人看到的是一个没有出路的屏 —— '
+            '而出路藏在他不知道要点的那行小字后面',
+      );
+    });
+  });
+
+  testWidgets('默认看不到地址输入框，只有一行小字；点了才出现', (tester) async {
+    await _pumpLogin(tester, handler: (_) async => _json(_health));
+
+    expect(
+      find.text('部署入口地址'),
+      findsNothing,
+      reason: '每个新用户都要先处理一个与自己无关的字段 —— 这正是要拿掉的东西',
+    );
+    final link = find.widgetWithText(TextButton, '连接到你自己的部署');
+    expect(link, findsOneWidget, reason: '收起来不等于拿走：自托管的人得有路可走');
+
+    await tester.tap(link);
+    await tester.pumpAndSettle();
+
+    expect(find.text('部署入口地址'), findsOneWidget);
+    expect(link, findsNothing, reason: '展开之后那行小字该让位，否则同一件事在屏幕上有两个入口');
+  });
+
+  testWidgets('离线卡片说清「看不到以前的会话」', (tester) async {
+    await _pumpLogin(tester, handler: (_) async => _json(_health));
+
+    expect(
+      find.textContaining('也看不到以前的会话'),
+      findsOneWidget,
+      reason:
+          'cortex-local 的 list_sessions 是纯转发，离线时列表只剩本机草稿。'
+          '不说的话，用户看到的是「我昨天那些对话没了」—— '
+          '而它们好好地在服务器上',
+    );
+    expect(
+      find.textContaining('这段时间不会同步到服务端'),
+      findsOneWidget,
+      reason: '「不同步」与「看不到历史」是两件事，都要说',
+    );
+  });
 }
 
 class _LiveConfig extends AppConfigNotifier {

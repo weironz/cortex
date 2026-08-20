@@ -7,6 +7,7 @@ import '../../core/formatting.dart';
 import '../../models/chat_session.dart';
 import '../../models/project.dart';
 import '../../models/session_search_hit.dart';
+import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../state/chat_state.dart';
 import '../../core/session_export.dart';
@@ -61,6 +62,12 @@ class SessionList extends ConsumerWidget {
             ),
           ],
         ),
+        // 待补写的那些。**必须画在这儿，不能只留在设置里。**
+        //
+        // 这个数字此前只出现在 设置 → 连接 那一页（两层菜单之外），
+        // 而用户是在**这份列表**上发现「我昨天那段对话不见了」的 ——
+        // 答案离问题四次点击远，等于没有答案。
+        const _BacklogNote(),
         // 老服务端没有 /sessions/search —— 那里不画搜索框。
         // 画一个点下去只会得到 404 的框，比没有这个框更糟
         if (!search.unsupported) const _SearchBox(),
@@ -880,7 +887,7 @@ class _SessionTileState extends State<_SessionTile> {
               // arrives, which makes the title jitter as the mouse crosses it.
               Opacity(
                 opacity: _hovered || widget.selected ? 1 : 0,
-                child: _TileMenu(
+                child: SessionTileMenu(
                   archived: session.archived,
                   enabled: _hovered || widget.selected,
                   canMove: widget.canMove,
@@ -898,8 +905,28 @@ class _SessionTileState extends State<_SessionTile> {
   }
 }
 
-class _TileMenu extends StatelessWidget {
-  const _TileMenu({
+/// 会话那一行右边的「…」。
+///
+/// # 离线时前三项是灰的
+///
+/// 标题、项目归属、归档状态的权威**都在服务器上**：`cortex-local` 的
+/// `patch_session` 只把 `workspace` 留在本机，其余原样转发。离线时那条
+/// 转发回 502，`_patch` 因为不是 404/405/501 而重新抛出，最后落成一个
+/// SnackBar。
+///
+/// 也就是说它**不会丢数据**—— 但它是**事后**才说的：用户已经打完字、
+/// 点完确定，才被告知这件事做不了。灰掉是事前说，而「导出」留着能点，
+/// 因为那件事确实只发生在这台机器上。
+///
+/// # 为什么是公开类型
+///
+/// **只为了测得到。** 它在真实布局里被一道悬停门挡着
+/// （`_SessionTile` 只在 `_hovered || selected` 时才让它 `enabled`，
+/// 平时 opacity 为 0），widget 测试里既点不开也不稳定 —— 而它的全部内容
+/// 都只在弹出之后才存在。公开之后测试直接挂它，跳过那道门。
+class SessionTileMenu extends ConsumerWidget {
+  const SessionTileMenu({
+    super.key,
     required this.archived,
     required this.enabled,
     required this.canMove,
@@ -918,7 +945,8 @@ class _TileMenu extends StatelessWidget {
   final void Function(ExportFormat) onExport;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final offline = ref.watch(appConfigProvider).offline;
     return PopupMenuButton<String>(
       enabled: enabled,
       tooltip: '',
@@ -934,10 +962,11 @@ class _TileMenu extends StatelessWidget {
         _ => onToggleArchive(),
       },
       itemBuilder: (context) => [
-        const PopupMenuItem(
+        PopupMenuItem(
           value: 'rename',
           height: 38,
-          child: Row(
+          enabled: !offline,
+          child: const Row(
             children: [
               Icon(Icons.edit_outlined, size: 15),
               SizedBox(width: 9),
@@ -946,10 +975,11 @@ class _TileMenu extends StatelessWidget {
           ),
         ),
         if (canMove)
-          const PopupMenuItem(
+          PopupMenuItem(
             value: 'move',
             height: 38,
-            child: Row(
+            enabled: !offline,
+            child: const Row(
               children: [
                 Icon(Icons.drive_file_move_outlined, size: 15),
                 SizedBox(width: 9),
@@ -984,6 +1014,7 @@ class _TileMenu extends StatelessWidget {
         PopupMenuItem(
           value: 'archive',
           height: 38,
+          enabled: !offline,
           child: Row(
             children: [
               Icon(
@@ -998,6 +1029,17 @@ class _TileMenu extends StatelessWidget {
             ],
           ),
         ),
+        // 一句话解释那三项为什么是灰的，而不是给每一项各加一个后缀 ——
+        // 三份「（离线时改不了）」是同一句话说三遍，而灰掉的原因只有一个
+        if (offline)
+          PopupMenuItem(
+            enabled: false,
+            height: 30,
+            child: Text(
+              '离线时改不了 —— 标题、项目、归档都在服务器上',
+              style: Theme.of(context).textTheme.labelSmall,
+            ),
+          ),
       ],
     );
   }
@@ -1010,6 +1052,62 @@ class _TileMenu extends StatelessWidget {
 /// 自己拿着 `TextEditingController` 而不是每帧从 provider 读文本：
 /// 后者会在每次异步状态变化时重建输入框，而重建时写 `controller.text`
 /// 会把光标弹回行尾 —— 中文输入法下那意味着**打不完一个词**。
+/// 「还有 N 条等着补写」。
+///
+/// # 为什么这一条值得占一行像素
+///
+/// 离线聊过的那几轮排在 `cortex-local` 的 outbox 里，联网后由后台循环
+/// 按序灌回服务端。整个过程是**收敛**的，但在灌完之前，那些会话
+/// 本地有、服务端没有 —— 而会话列表读的是服务端。
+///
+/// 也就是说：重连之后有一段时间，用户在这份列表上看不到自己昨天聊的东西。
+/// 那不是数据丢了，但**没有任何东西告诉他这一点**，看起来就是丢了。
+///
+/// 数字为 0（绝大多数时候）什么都不画：一个常驻的「0 条待同步」是噪音，
+/// 而噪音会让真的有积压的那一次也被忽略。
+class _BacklogNote extends ConsumerWidget {
+  const _BacklogNote();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final backlog = ref.watch(healthProvider).value?.server?.backlog ?? 0;
+    if (backlog <= 0) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(8, 0, 8, 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: scheme.secondaryContainer,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.cloud_sync_outlined,
+            size: 15,
+            color: scheme.onSecondaryContainer,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            // 说清**它会自己好**。不说的话，一个「还有 3 条没同步」的提示
+            // 只会让人去找一个并不存在的「立即同步」按钮
+            child: Text(
+              '还有 $backlog 条离线时的对话在补写，完成后会出现在这份列表里。',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: scheme.onSecondaryContainer,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SearchBox extends ConsumerStatefulWidget {
   const _SearchBox();
 

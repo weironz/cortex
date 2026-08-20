@@ -390,6 +390,74 @@ Ollama 那个复选框的**实质**是四件事：在哪、多大、里面是什
 
 ---
 
+## 附：第一屏该问什么（2026-08-21，读的是三家的源码）
+
+起因是「登录页要手动填云端地址，还有个离线模式，太复杂了」。
+
+### 三家都不把地址放在第一屏
+
+| | 第一屏 | 地址填在哪 | 有同步吗 |
+|---|---|---|---|
+| **Chatbox** | **没有登录页**，web 版打开即用 | 设置里的 `API Host`（`team-sharing/` 那个 Caddy 反代用） | ❌ |
+| **AnythingLLM 桌面** | 没有登录页，单用户 | 不给（要账号就用 Docker 那份 web） | ❌ |
+| **LobeHub 桌面** | 五屏引导，**登录是第 5 屏且是硬门** | 登录屏上一行小字，**点了才出现输入框** | ✅ |
+
+读到的关键代码：
+
+- Chatbox（`chatboxai/chatbox`）：`BaseStorage` 把读写全转给 `platform`，
+  而 web 是 `IndexedDBStorage` + `localforage`、桌面是 `SQLiteSessionMetaStorage`
+  —— **两端各存各的，全仓库没有一行会话同步**（路径里带 `sync` 的三个文件
+  全是内置 skills 的同步）。它那个「登录」在
+  `routes/settings/provider/chatbox-ai/LoginView.tsx` —— 路径本身就说明了：
+  **设置 → 模型供应商**，买的是模型额度，旁边写着「Continue with license key」。
+  跨设备靠手动导出（`web_exporter.ts` 里文件选择器的类型名就叫 `Chatbox backup`）。
+- LobeHub（`lobehub/lobehub`）：`DesktopOnboarding/steps/LoginStep.tsx` 里
+  `const [showEndpoint, setShowEndpoint] = useState(false)` —— 默认只有
+  「登录 LobeHub Cloud」加一行「连接到你自己的 LobeHub 服务实例」，
+  点了才出现 `OR` 分隔线与地址输入框。登录过不去：
+  `canStart() = !!successLoginMethod`，而「下一步」按钮包在 `{canStart() && …}` 里。
+  两条路都走 OIDC 跳浏览器，桌面端自己不收密码。
+  `packages/electron-client-ipc/types/dataSync.ts` 里
+  `StorageMode = 'cloud' | 'selfHost'` —— **类型层面已经没有本地模式**，
+  登录屏上还挂着「迁移旧版本地数据库」的链接。
+
+### 结论：地址收起来，登录留着，离线也留着
+
+Chatbox / AnythingLLM 敢不要登录，是因为**它们没有同步可给**；
+LobeHub 敢让登录当硬门，是因为**服务端有 SRE 兜着**。Cortex 两样都不是：
+有同步（所以要账号），而服务端是自己那台机器（所以要离线出路）。
+
+杀死 LobeHub 本地模式的是**存储层的第二份实现**（[RFC 036] 承认要
+「为 Postgres 和 Dexie 维护两套 schema」）。Cortex 的离线模式不是那个东西：
+`cortex-local` **不依赖 `cortex-store`**，全部家当是 `outbox.rs` 一个
+append-only JSONL 加一个高水位，**维护成本是常数，不随表增长**。
+
+[RFC 036]: https://github.com/lobehub/lobehub/discussions/1851
+
+### 落地（2026-08-21）
+
+1. **web 上删掉地址字段。** 那份构建的 `CORTEX_BASE_URL` 是空串、走同源根路径
+   —— 那个字段不是「可以不填」，是**填了就坏**。
+2. **桌面上收进一行「连接到你自己的部署」**，点了才出现；
+   但 `unreachable` 时**自动展开** —— 编译期默认值 `127.0.0.1:8080`
+   对任何有真部署的人都是错的，藏起来而不自动展开等于把出路也藏了。
+3. **离线卡片补上「也看不到以前的会话」。** 此前没说：`list_sessions` 是纯转发，
+   离线时列表只剩本机草稿，而用户看到的是「我昨天那些对话没了」。
+4. **待补写条数挪到会话列表顶上**（此前只在 设置 → 连接，四次点击之外）。
+5. **离线时把改标题 / 移项目 / 归档灰掉并说明。** 它们的权威在服务器上，
+   离线时那条转发必然 502 —— 此前是事后弹 SnackBar，现在事前说。
+
+### 途中的两个更正
+
+- 一度认为「离线改标题会静默丢数据」。**不会**：502 不在
+  `isUnsupported`（只认 404/405/501）里，`_patch` 会重新抛出，
+  `session_list.dart` 的 `_run` 弹 SnackBar。它是**事后**说，不是不说。
+- 一度打算把「离线」改叫「本机」，理由是 LobeHub 拿 offline 当卖点。
+  读完代码发现**它根本没有 offline**。而 Cortex 的离线确实读不到历史，
+  「离线」反而是更诚实的词 —— 「本机」会暗示一个不存在的完整本地模式。
+
+---
+
 ## 核实记录
 
 每家的初版结论都过了一轮**挑刺核实**（goose 用本地源码逐文件对，其余用
