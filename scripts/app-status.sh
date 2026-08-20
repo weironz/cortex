@@ -21,7 +21,10 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "${REPO_ROOT}"
+# `|| exit` 不是形式主义：下面那两个二进制路径是**相对**仓库根的，
+# cd 失败而继续跑的话，它会在别的目录下找不到文件，然后报
+# 「还没拷到 exe 旁边」—— 一句看起来像结论、实际是走错了路的话
+cd "${REPO_ROOT}" || exit 1
 
 case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN*) ;;
