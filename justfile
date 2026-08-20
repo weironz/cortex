@@ -226,6 +226,22 @@ memory-hint:
 app *ARGS:
     bash scripts/dev-app.sh {{ ARGS }}
 
+# 桌面端现在什么状态：连哪个部署、跑了几个、agent 绑在哪、二进制新不新
+#
+# **桌面端是两个进程**（窗口 + 它拉起的 cortex-local），而它们的状态
+# 分散在四个地方：settings.json、tasklist、netstat、两个二进制的时间戳。
+# 2026-08-20 查一次「为什么串台」花了二十分钟手拼这四样 —— 这条就是那次的产物。
+app-status:
+    bash scripts/app-status.sh
+
+# 关掉桌面端**与它拉起的本机 agent**
+#
+# 只关窗口不够：agent 通常跟着退，但见过没退的（进程活着、端口已放掉）。
+# `just app` 开头本来就清场，抽出来是因为「不想用了」与「要重新构建」
+# 是两回事，而前者此前只能去任务管理器。
+app-stop:
+    bash scripts/app-stop.sh
+
 # ══════════════════════════════════════════════════════════
 #  本地云端环境（just dev）—— 完整形态，跑在这一台机器上
 #
