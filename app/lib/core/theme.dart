@@ -18,6 +18,7 @@ import 'package:flutter/material.dart';
 class CortexTokens extends ThemeExtension<CortexTokens> {
   const CortexTokens({
     required this.sidebar,
+    required this.sidebarAccent,
     required this.sidebarBorder,
     required this.foregroundTertiary,
     required this.success,
@@ -29,6 +30,18 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
   /// 明确单列出来的一档，也是「一眼看出哪边是导航」最省力的做法：
   /// 不用画分隔线，也不用加阴影。
   final Color sidebar;
+
+  /// 侧栏里**被选中 / 悬停**的那一项的底色。
+  ///
+  /// # 为什么不是品牌色的淡淡一层
+  ///
+  /// 此前是 `primary.withValues(alpha: .12)` —— 整条侧栏因此常年挂着一块
+  /// 紫。按第一节那条（色彩只表达动作或含义），「当前在看哪个会话」是
+  /// **位置**，不是动作；而一个永远在那儿的彩色块会把真正需要注意的东西
+  /// 稀释掉。
+  ///
+  /// Cherry Studio 为这件事单列了 `--cs-sidebar-accent`，也是中性的一档。
+  final Color sidebarAccent;
 
   /// 侧栏与内容区之间那条线。比通用 outlineVariant 实一点点 ——
   /// 它分的是两个**功能区**，不是两行内容。
@@ -46,6 +59,17 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
   final Color warning;
   final Color info;
 
+  /// 没挂扩展时从 `ColorScheme` 现推一份。见 [CortexTokensX.cortex]。
+  factory CortexTokens.fallbackFor(ColorScheme s) => CortexTokens(
+    sidebar: s.surfaceContainerLow,
+    sidebarAccent: s.surfaceContainerHigh,
+    sidebarBorder: s.outlineVariant,
+    foregroundTertiary: s.onSurfaceVariant,
+    success: s.secondary,
+    warning: s.tertiary,
+    info: s.primary,
+  );
+
   /// 圆角阶。按密度取，不要每处现编一个数。
   ///
   /// 数值来自 Cherry Studio 的 `radius.css`（它写成 rem，这里换算成逻辑
@@ -59,6 +83,7 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
   @override
   CortexTokens copyWith({
     Color? sidebar,
+    Color? sidebarAccent,
     Color? sidebarBorder,
     Color? foregroundTertiary,
     Color? success,
@@ -66,6 +91,7 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     Color? info,
   }) => CortexTokens(
     sidebar: sidebar ?? this.sidebar,
+    sidebarAccent: sidebarAccent ?? this.sidebarAccent,
     sidebarBorder: sidebarBorder ?? this.sidebarBorder,
     foregroundTertiary: foregroundTertiary ?? this.foregroundTertiary,
     success: success ?? this.success,
@@ -78,6 +104,7 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     if (other == null) return this;
     return CortexTokens(
       sidebar: Color.lerp(sidebar, other.sidebar, t)!,
+      sidebarAccent: Color.lerp(sidebarAccent, other.sidebarAccent, t)!,
       sidebarBorder: Color.lerp(sidebarBorder, other.sidebarBorder, t)!,
       foregroundTertiary: Color.lerp(
         foregroundTertiary,
@@ -92,8 +119,20 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
 }
 
 /// `Theme.of(context).cortex` —— 少写一遍那串泛型查找。
+///
+/// # 挂了扩展就用挂着那份，没挂就从 `ColorScheme` 现推一份
+///
+/// **不写成 `extension<CortexTokens>()!`。** 那个感叹号的代价是：任何一个
+/// 把部件挂在裸 `MaterialApp` 下的 widget 测试都会当场
+/// 「Null check operator used on a null value」炸掉，而报错指向的是那个
+/// 部件，跟主题一点关系都看不出来。2026-08-21 就这么红过一次。
+///
+/// 推出来的那份**不追求好看**，只保证「在任何主题下都说得通」：
+/// 侧栏取 `surfaceContainerLow`、第三级前景取 `onSurfaceVariant`。
+/// 真正调过的那份在 [CortexTheme] 里，两者不会同时生效。
 extension CortexTokensX on ThemeData {
-  CortexTokens get cortex => extension<CortexTokens>()!;
+  CortexTokens get cortex =>
+      extension<CortexTokens>() ?? CortexTokens.fallbackFor(colorScheme);
 }
 
 /// Cortex design tokens.
@@ -215,6 +254,11 @@ abstract final class CortexTheme {
           // 它的 `--cs-sidebar` 在浅色是 0.9672、深色是 0.2393，
           // 两边都与 background 差出肉眼分得清的一档
           sidebar: dark ? const Color(0xFF171717) : const Color(0xFFF4F4F4),
+          // 比 sidebar 再走一档。差得太小选中态就看不出来，
+          // 差得太大它会读成「另一个区域」而不是「这一项」
+          sidebarAccent: dark
+              ? const Color(0xFF2A2A2A)
+              : const Color(0xFFE4E4E4),
           sidebarBorder: dark
               ? const Color(0xFF262626)
               : const Color(0xFFE5E5E5),

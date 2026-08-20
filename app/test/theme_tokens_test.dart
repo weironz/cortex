@@ -65,6 +65,22 @@ void main() {
         }
       });
 
+      test('侧栏的选中态是中性的', () {
+        expect(
+          _chroma(tokens.sidebarAccent),
+          lessThanOrEqualTo(2),
+          reason:
+              '「当前在看哪个会话」是**位置**，不是动作。此前这里是 '
+              'primary.withValues(alpha: .12)，于是整条侧栏常年挂着一块紫，'
+              '把真正需要注意的东西一起稀释掉',
+        );
+        expect(
+          (_luma(tokens.sidebarAccent) - _luma(tokens.sidebar)).abs(),
+          greaterThan(4),
+          reason: '与侧栏底色差得太小，选中态就看不出来',
+        );
+      });
+
       test('侧栏与内容区分得开', () {
         expect(
           (_luma(tokens.sidebar) - _luma(scheme.surface)).abs(),
@@ -130,6 +146,32 @@ void main() {
       _luma(s.surfaceContainer),
       greaterThan(_luma(s.surface)),
       reason: '卡片在底板之上',
+    );
+  });
+
+  /// 裸主题下取 `cortex` **不许炸**。
+  ///
+  /// 写成 `extension<CortexTokens>()!` 的那一版，任何一个把部件挂在默认
+  /// `MaterialApp` 下的 widget 测试都会当场
+  /// 「Null check operator used on a null value」—— 而报错指向那个部件，
+  /// 跟主题看不出关系。2026-08-21 真红过一次（offline_visibility_test）。
+  testWidgets('没挂扩展的主题下也取得到，不炸', (tester) async {
+    late CortexTokens got;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) {
+            got = Theme.of(context).cortex;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+    expect(got.sidebar, isNotNull);
+    expect(
+      got.foregroundTertiary,
+      isNotNull,
+      reason: '推出来的那份不追求好看，只保证在任何主题下都说得通',
     );
   });
 

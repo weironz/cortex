@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_exception.dart';
 import '../../core/formatting.dart';
+import '../../core/theme.dart';
 import '../../models/chat_session.dart';
 import '../../models/project.dart';
 import '../../models/session_search_hit.dart';
@@ -565,7 +566,10 @@ class _GroupHeader extends StatelessWidget {
     final project = group.project;
 
     return Padding(
-      padding: const EdgeInsets.only(top: 6, bottom: 2),
+      // 上面 14 下面 2：分组头属于**它下面那一组**，不是上下均分的
+      // 分隔物。均分的话它会读成「两组之间的一条线」，而不是
+      // 「这一组的标题」—— 此前 6/2 太挤，一列扫下来看不出分组
+      padding: const EdgeInsets.only(top: 14, bottom: 2),
       child: InkWell(
         onTap: project == null ? null : onToggle,
         borderRadius: BorderRadius.circular(6),
@@ -754,11 +758,17 @@ class _SessionTileState extends State<_SessionTile> {
     final scheme = theme.colorScheme;
     final session = widget.session;
 
+    final tokens = theme.cortex;
+    // 「当前在看哪个会话」是**位置**，不是动作 —— 所以用中性的一档，
+    // 不用品牌色。此前是 `primary.withValues(alpha: .12)`，于是整条侧栏
+    // 常年挂着一块紫，把真正需要注意的东西一起稀释掉了。见 docs/design.md
     final Color background;
     if (widget.selected) {
-      background = scheme.primary.withValues(alpha: 0.12);
+      background = tokens.sidebarAccent;
     } else if (_hovered) {
-      background = scheme.surfaceContainerHigh;
+      // 悬停比选中再浅一档：两者同色的话，鼠标扫过时每一行看起来都像
+      // 被选中了，而真正选中的那一行反而认不出来
+      background = tokens.sidebarAccent.withValues(alpha: 0.55);
     } else {
       background = Colors.transparent;
     }
@@ -771,11 +781,14 @@ class _SessionTileState extends State<_SessionTile> {
         onTap: widget.onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 110),
-          margin: const EdgeInsets.only(bottom: 2),
-          padding: const EdgeInsets.fromLTRB(11, 9, 4, 9),
+          // 左右各留一点：选中块贴着侧栏两边时，它读成「整条栏换了颜色」
+          // 而不是「这一项被选中了」。上下的 3 给相邻两项一点呼吸 ——
+          // 此前是 2，一列下来是一堵字墙
+          margin: const EdgeInsets.fromLTRB(6, 1, 6, 2),
+          padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
           decoration: BoxDecoration(
             color: background,
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
           ),
           child: Row(
             children: [
