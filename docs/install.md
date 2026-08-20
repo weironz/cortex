@@ -463,7 +463,10 @@ Microsoft Defender SmartScreen 阻止了无法识别的应用启动。
 - 里面有两个可执行文件：`cortex_app.exe`（GUI）与 `cortex-local.exe`
   （本地 agent，随 GUI 起、跟着 GUI 退）
 - 快捷方式：开始菜单的 `Cortex` 分组 + 桌面（安装时可取消勾选）
-- 卸载：设置 → 应用 → `Cortex`，或安装目录里的 `unins000.exe`
+- 卸载：设置 → 应用 → `Cortex`，或安装目录里的 `unins000.exe`。
+  它会问一句**本地数据（`%LOCALAPPDATA%\cortex`）要不要一起删**，
+  把当前占了多大摆出来，**默认留着**；静默卸载一律留。
+  选了删而 `cortex` CLI 还装着的话，那个目录下次一跑又会重建
 - **自动更新**：顶栏那个小图标，有新版本时右上角多一个点。点一下把整条
   走完（下载 → 比对 SHA-256 → 静默装 → 重启）。不弹窗
 

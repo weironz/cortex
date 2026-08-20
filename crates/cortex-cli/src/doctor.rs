@@ -635,9 +635,8 @@ fn judge_launch_log(tail: &[&str], path: &str) -> Check {
 
 /// 数据在哪、多大。
 ///
-/// 顺带回答「卸载之后留下了什么」—— 卸载程序不碰这个目录，而此前
-/// 没有任何地方告诉用户它在哪（Ollama 的卸载器会把大小摆出来，
-/// Claude Code 的文档会列全路径；我们两样都没有）。
+/// 顺带回答「卸载之后留下了什么」。抄的是 Ollama（卸载器把大小摆出来）
+/// 与 Claude Code（文档列全路径）—— 此前这两样我们都没有。
 fn check_state_dir() -> Check {
     let Ok(dir) = cortex_core::state_dir() else {
         return Check::new("state_dir", "本地数据", Level::Skip, "找不到本地状态目录");
@@ -657,7 +656,7 @@ fn check_state_dir() -> Check {
         Level::Ok,
         format!("{} · {}", human_size(bytes), dir.display()),
     )
-    .with_fix("卸载程序**不删**这里。想彻底清干净就手动删掉整个目录")
+    .with_fix("卸载桌面端时会问一句删不删，**默认留着**。CLI 与桌面端共用这里")
 }
 
 /// 目录占多少字节。**不跟符号链接**，也不因为一个读不动的子目录就放弃。
