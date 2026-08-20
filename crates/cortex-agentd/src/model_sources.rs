@@ -626,6 +626,18 @@ fn describe_all(provider: &str, names: &[String]) -> Vec<FetchedModel> {
                 } else {
                     None
                 },
+                // 「它会画，但我们调不动」—— 上面那一位把这种情况压成了
+                // `false`，而 `false` 在界面上读作「这模型不会画画」，
+                // 是**错的**，且把责任推给了模型。
+                //
+                // 2026-08-20 的实例：用户搜 `image` 搜出一屏
+                // `gemini-*-image`，筛选栏却写着「能生图 0」—— 他只能来问
+                // 为什么。差的就是这一位：说清楚是**我们**还没接这家。
+                //
+                // 只认目录说是的那些。按名字猜「这个大概是生图模型」再报
+                // 「没接」，猜错的表现是给一个正常的对话模型挂上一句
+                // 莫名其妙的话
+                image_unwired: info.as_ref().is_some_and(|i| i.image_output) && !draws,
                 reasoning: info.as_ref().map(|i| i.reasoning),
                 input_micros_per_mtok: info
                     .as_ref()
@@ -822,6 +834,42 @@ mod tests {
         );
         assert!(m.context.is_some(), "上下文查得到");
         assert!(m.input_micros_per_mtok.is_some(), "价目查得到");
+    }
+
+    /// 「它会画，但我们没接这家」要单独说出来。
+    ///
+    /// 2026-08-20 的实例：用户搜 `image` 搜出一屏 `gemini-*-image`，
+    /// 而筛选栏写着「能生图 0」—— 他只能来问为什么。`image_output`
+    /// 压成 `false` 之后，界面读起来是「这模型不会画画」，
+    /// 既是错的，又把责任推给了模型。
+    #[test]
+    fn 目录说会画而我们没接的要明说是我们的缺口() {
+        // openai 的生图协议没接。目录里 gpt-image-1 的 image_output 是真的
+        let got = describe_all("openai", &["gpt-image-1".to_owned()]);
+        let m = &got[0];
+        assert_eq!(
+            m.image_output,
+            Some(false),
+            "点了确实出不了图 —— 这一位的含义是「能不能用」，不变"
+        );
+        assert!(
+            m.image_unwired,
+            "但要说清楚是**我们**没接这家，而不是它不会画。\
+             差这一位的表现就是用户盯着一屏生图模型问「为什么都不支持」"
+        );
+
+        // ⚠️ 接了的那家不该挂这句话
+        let ok = describe_all("google", &["gemini-3-pro-image-preview".to_owned()]);
+        assert_eq!(ok[0].image_output, Some(true));
+        assert!(!ok[0].image_unwired, "google 已经接了，不该说成没接");
+
+        // ⚠️ 普通对话模型更不该挂 —— 按名字瞎猜的话，
+        // 一个正常型号上会冒出一句莫名其妙的话
+        let chat = describe_all("deepseek", &["deepseek-v4-pro".to_owned()]);
+        assert!(
+            !chat[0].image_unwired,
+            "它本来就不是生图模型，与「没接」无关"
+        );
     }
 
     /// 生图那一位**不能只问目录**。

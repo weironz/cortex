@@ -173,6 +173,7 @@ class FetchedModel {
     this.toolCall,
     this.vision,
     this.imageOutput,
+    this.imageUnwired = false,
     this.reasoning,
     this.inputMicrosPerMtok,
     this.outputMicrosPerMtok,
@@ -185,6 +186,7 @@ class FetchedModel {
     toolCall: json['tool_call'] as bool?,
     vision: json['vision'] as bool?,
     imageOutput: json['image_output'] as bool?,
+    imageUnwired: json['image_unwired'] == true,
     reasoning: json['reasoning'] as bool?,
     inputMicrosPerMtok: asIntOrNull(json['input_micros_per_mtok']),
     outputMicrosPerMtok: asIntOrNull(json['output_micros_per_mtok']),
@@ -204,6 +206,14 @@ class FetchedModel {
   /// 能生图吗。这一位的含义是「点了能不能出图」，不是「理论上会不会画」
   /// —— 协议没接的那几家一律 false。
   final bool? imageOutput;
+
+  /// 「它会画，但**我们**还没接这家」。
+  ///
+  /// [imageOutput] 把这种情况压成了 false，而 false 在界面上读作
+  /// 「这模型不会画画」—— 错的，且把责任推给了模型。2026-08-20 用户
+  /// 就是因此来问「为什么这些模型不支持」：搜出一屏 `gemini-*-image`，
+  /// 筛选栏却写着「能生图 0」。
+  final bool imageUnwired;
 
   final bool? reasoning;
   final int? inputMicrosPerMtok;

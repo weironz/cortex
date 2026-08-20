@@ -80,6 +80,18 @@ class _AddModelsDialogState extends State<_AddModelsDialog> {
         .toList(growable: false);
   }
 
+  /// 这家有几个「会画但我们没接」的（当前搜索范围内）。
+  ///
+  /// 用来把「能生图 0」这个空结果解释清楚 —— 0 的原因是我们的缺口，
+  /// 不是这家不会画。
+  int get _unwiredCount {
+    final q = _query.trim().toLowerCase();
+    return widget.fetched.models
+        .where((m) => m.imageUnwired)
+        .where((m) => q.isEmpty || m.id.toLowerCase().contains(q))
+        .length;
+  }
+
   /// 每个维度剩几个。**搜索也算进去** —— 搜了「image」之后还显示
   /// 「能跑 agent 120」会让人以为筛选没生效。
   int _count(_Facet f) {
@@ -173,10 +185,20 @@ class _AddModelsDialogState extends State<_AddModelsDialog> {
             Expanded(
               child: shown.isEmpty
                   ? Center(
-                      child: Text(
-                        '没有符合条件的型号',
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: scheme.onSurfaceVariant,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Text(
+                          // 「能生图」筛出 0 条，而这家其实有会画的型号 ——
+                          // 光说「没有符合条件的」等于让用户以为这家不会画。
+                          // 这正是 2026-08-20 那次提问的现场
+                          _facet == _Facet.image && _unwiredCount > 0
+                              ? '这家有 $_unwiredCount 个会生图的型号，但我们还没接它的生图接口，'
+                                    '所以都没列出来。现在能画的是通义千问与 Google。'
+                              : '没有符合条件的型号',
+                          textAlign: TextAlign.center,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
                         ),
                       ),
                     )
@@ -255,11 +277,32 @@ class _AddModelsDialogState extends State<_AddModelsDialog> {
             ),
         ],
       ),
-      subtitle: Text(
-        noTools ? '不支持工具调用 —— 加进来能选，但 agent 用它读不了文件、跑不了命令' : describeFetched(m),
-        style: theme.textTheme.labelSmall?.copyWith(
-          color: noTools ? scheme.error : scheme.onSurfaceVariant,
-        ),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            noTools
+                ? '不支持工具调用 —— 加进来能选，但 agent 用它读不了文件、跑不了命令'
+                : describeFetched(m),
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: noTools ? scheme.error : scheme.onSurfaceVariant,
+            ),
+          ),
+          // ⚠️ 「它会画，但我们没接这家」**要单独说出来**。
+          //
+          // 不说的话，它在界面上与一个普通对话模型长得一模一样，而
+          // 「能生图」那个筛选是 0 —— 用户看到一屏名字带 image 的型号
+          // 配一个 0，只能来问为什么（2026-08-20 就是这么问的）。
+          //
+          // 措辞上责任在我们，不在模型：写「它不支持生图」是错的。
+          if (m.imageUnwired)
+            Text(
+              '它能生图，但我们还没接这家的生图接口 —— 加进来也画不了。现在能画的是通义千问与 Google。',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: scheme.tertiary,
+              ),
+            ),
+        ],
       ),
     );
   }

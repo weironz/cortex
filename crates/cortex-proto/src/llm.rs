@@ -351,6 +351,15 @@ pub struct FetchedModel {
     /// 这里是 false。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_output: Option<bool>,
+    /// 「它会画，但**我们**还没接这家」。
+    ///
+    /// 上面那一位把这种情况压成了 `false`，而 `false` 在界面上读作
+    /// 「这模型不会画画」—— 错的，且把责任推给了模型。这一位专门用来
+    /// 说清楚是我们的缺口，好让界面写出一句用户能懂的话
+    /// （截至 2026-08-20：openai 的 gpt-image-* 5 个、xai 的
+    /// grok-imagine-* 2 个）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub image_unwired: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
     /// 每百万输入 token 多少**美元微元**。
@@ -358,4 +367,47 @@ pub struct FetchedModel {
     pub input_micros_per_mtok: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_micros_per_mtok: Option<i64>,
+}
+
+#[cfg(test)]
+mod fetched_model_tests {
+    use super::*;
+
+    /// 「会画但我们没接」这一位必须真的发到线上去。
+    ///
+    /// 它带着 `skip_serializing_if`，写错的表现是**字段整个消失** ——
+    /// 服务端算对了，客户端永远收不到，界面上那句解释永远不出现。
+    /// 而两侧的单元测试各自都是绿的：一个测计算，一个测渲染，
+    /// 中间这一段没人测。
+    #[test]
+    fn 会画但没接这一位发得到线上() {
+        let m = FetchedModel {
+            id: "gpt-image-1".into(),
+            display_name: "gpt-image-1".into(),
+            context: None,
+            tool_call: Some(false),
+            vision: None,
+            image_output: Some(false),
+            image_unwired: true,
+            reasoning: None,
+            input_micros_per_mtok: None,
+            output_micros_per_mtok: None,
+        };
+        let json = serde_json::to_string(&m).expect("序列化");
+        assert!(
+            json.contains("\"image_unwired\":true"),
+            "这一位没发出去，客户端就永远画不出那句解释。实际发的是：{json}"
+        );
+
+        // 反过来：false 时省掉是有意的（线上少一个恒假字段），
+        // 但**读回来必须仍是 false**，不能变成「不知道」
+        let plain = FetchedModel {
+            image_unwired: false,
+            ..m
+        };
+        let json = serde_json::to_string(&plain).expect("序列化");
+        assert!(!json.contains("image_unwired"), "false 不必上线");
+        let back: FetchedModel = serde_json::from_str(&json).expect("读回来");
+        assert!(!back.image_unwired, "省掉的字段要读成 false");
+    }
 }
