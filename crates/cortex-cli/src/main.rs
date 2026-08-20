@@ -6,6 +6,7 @@
 mod agent;
 mod client;
 mod credentials;
+mod doctor;
 mod import;
 mod render;
 
@@ -75,6 +76,20 @@ struct Cli {
 enum Command {
     /// 检查 cortexd 是否在线
     Health,
+
+    /// 出问题时**第一条该跑的命令** —— 只读，不改任何东西
+    ///
+    /// 它一次答完此前要手拼的四样：盘上真正存的地址、凭据形态、
+    /// 部署那两条 health（并核对 role —— 边缘按路径分流，两条归不同进程）、
+    /// 本机 agent 的版本与我一不一致、以及本地数据在哪多大。
+    ///
+    /// **刻意不拉起本地 agent、也不要求登录成功**：桌面端起不来的时候
+    /// 正是最需要它的时候，而那时设置页是够不着的那一半。
+    Doctor {
+        /// 输出 JSON —— 报问题时贴这个。**里面不含凭据**，只有「有没有配」
+        #[arg(long)]
+        json: bool,
+    },
 
     /// 用账号密码登录，把 refresh token 存在本机
     ///
@@ -262,7 +277,23 @@ async fn main() -> anyhow::Result<()> {
     // 不绕的话有一个很难看的死结：一份坏掉的凭据会让身份解析先失败，
     // 而那正是 `cortex login` 要修的东西 —— 于是用户被挡在「修不了自己的
     // 登录」上。真机验证时第一次就撞到了：坏凭据下连 login 都跑不起来。
-    let manages_credentials = matches!(cli.command, Command::Login { .. } | Command::Logout);
+    //
+    // **`doctor` 也绕过。** 它的全部意义是「在东西坏掉的时候能跑」——
+    // 而下面那段会为了换 access token 打一次网络，换不到就 `bail!`。
+    // 一条会因为登录过期而自己失败的诊断命令，正好在最需要它的时刻缺席。
+    let manages_credentials = matches!(
+        cli.command,
+        Command::Login { .. } | Command::Logout | Command::Doctor { .. }
+    );
+    // 凭据的**形态**（不是值）—— doctor 要报它，而上面那段绕过之后
+    // `effective_token` 恒为 None，看不出用户其实是配过的
+    let token_kind = if explicit.is_some() {
+        doctor::TokenKind::PreShared
+    } else if credentials::load(&cli.server).is_some() {
+        doctor::TokenKind::LoggedIn
+    } else {
+        doctor::TokenKind::None
+    };
     let effective_token = if manages_credentials {
         None
     } else {
@@ -456,6 +487,12 @@ async fn main() -> anyhow::Result<()> {
                     println!("本机没有 {server} 的登录，无需注销。");
                 }
             }
+        }
+
+        Command::Doctor { json } => {
+            // 用 `cli.server` 而不是上面那个 `server`：后者可能已经被换成
+            // 本地 agent 的地址，而 doctor 要探的是**用户配的那个部署**
+            doctor::run(&cli.server, token_kind, json).await?;
         }
 
         Command::Health => {
