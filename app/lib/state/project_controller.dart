@@ -310,5 +310,5 @@ String deleteProjectWarning(Project project) {
   final scope = count > 0 ? '里面的 $count 个会话' : '里面的会话';
   return '只删掉「${project.name}」这个分组本身。'
       '$scope不会被删除，它们会变成「未分组」，'
-      '消息、附件和已抽取的记忆一概不动。';
+      '消息与附件一概不动。';
 }

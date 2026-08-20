@@ -138,8 +138,12 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
-                        '这个 cortexd 关闭了认证：任何能连上 '
-                        '${config.baseUrl} 的人都拥有全部记忆。'
+                        // 说「拥有全部记忆」是过期的：长期记忆 2026-08-17
+                        // 拆去了 Cormex，这一侧没有。而真正暴露的东西
+                        // 一点不轻 —— 会话、历史、以及 agent 够得着的文件
+                        '这个部署关闭了认证：任何能连上 '
+                        '${config.baseUrl} 的人都拥有你的全部会话与历史，'
+                        '也能让 agent 读写它够得着的文件。'
                         '只有监听地址确实是回环时才可接受。',
                         style: theme.textTheme.labelSmall?.copyWith(
                           color: scheme.error,
@@ -221,7 +225,7 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
               context,
               Icons.cloud_off,
               '云端对话：不可用（这个部署没有沙箱）',
-              '本机对话与记忆不受影响 —— 自托管与纯本机形态本来就没有它。',
+              '本机对话不受影响 —— 自托管与纯本机形态本来就没有它。',
               muted,
             ),
             CloudChatStatus.blocked => _capability(

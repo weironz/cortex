@@ -204,7 +204,7 @@ class _Bill extends StatelessWidget {
           const SizedBox(height: 8),
           Text(
             '每次抽取是一回 LLM 调用，按你那个模型的单价自己乘。'
-            '导入之后没有「撤销」按钮 —— 记忆是只追加的，要撤得走 redact。',
+            '导入之后没有「撤销」按钮 —— 会话是只追加的，要撤得逐条删。',
             style: theme.textTheme.bodySmall?.copyWith(
               color: scheme.onSurfaceVariant,
             ),
@@ -214,7 +214,7 @@ class _Bill extends StatelessWidget {
             Text(
               '另有 ${estimate.unpaired} 条消息落单（开头就是助手、或最后一问没有回答）。'
               '它们照样写进原文，只是不产生事实 —— 所以「导入了多少条」'
-              '会比「多出多少条记忆」大一些。',
+              '会比「多出多少条消息」大一些。',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: scheme.onSurfaceVariant,
               ),
@@ -345,7 +345,7 @@ class _Summary extends StatelessWidget {
           ),
         const SizedBox(height: 8),
         Text(
-          '事实抽取在服务端异步进行，可能还要再跑一阵子才会全部出现在记忆里。',
+          '导入在服务端异步进行，可能还要再跑一阵子才会全部出现。',
           style: theme.textTheme.bodySmall?.copyWith(
             color: theme.colorScheme.onSurfaceVariant,
           ),

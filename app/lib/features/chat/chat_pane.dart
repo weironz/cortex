@@ -296,7 +296,7 @@ class _OfflineBanner extends ConsumerWidget {
                 children: const [
                   TextSpan(text: '离线模式：这些对话'),
                   TextSpan(
-                    text: '没有在记忆里',
+                    text: '还没进服务端',
                     style: TextStyle(fontWeight: FontWeight.w700),
                   ),
                   TextSpan(text: '。它们排在本地队列，接上服务器后会自动补回去。'),

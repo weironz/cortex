@@ -51,7 +51,9 @@ class AccountBar extends ConsumerWidget {
               // 「我看到的是不是我自己的库」在多租户里是个会被问出口的问题
               tooltip: account == null
                   ? label
-                  : '${account.username}\n记忆库：${account.schemaName}',
+                  // 那个 schema 现在装的是**会话**（消息、附件、同步流水），
+                  // 不是记忆 —— 记忆整条拆去了 Cormex，见 CLAUDE.md
+                  : '${account.username}\n数据库 schema：${account.schemaName}',
               avatarText: avatarLetter(label),
             ),
           ),
@@ -79,7 +81,8 @@ String accountLabel({
   required bool authDisabled,
 }) {
   if (useMock) return 'Mock 数据源';
-  if (offline) return '离线 · 无记忆';
+  // 「无记忆」暗示联网时有。真正的差别是同步：离线这几轮还没进服务端
+  if (offline) return '离线 · 未同步';
   if (account != null && account.username.trim().isNotEmpty) {
     return account.username;
   }

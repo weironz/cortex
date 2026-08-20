@@ -227,7 +227,13 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                 // 会卡在这一屏，而「先去把 cortexd 跑起来」是个很糟的开场。
                 //
                 // 离线使用：**不是**夹具，是真的能干活 —— 真模型、真工具、
-                // 真读写本机文件。唯一缺的是记忆。
+                // 真读写本机文件。缺的是同步：这几轮不会进服务端。
+                //
+                // ⚠️ 这里曾经写着「唯一缺的是记忆」，界面文案也跟着写
+                // 「这段时间不会有记忆」。**那句话在 2026-08-17 之后就是错的**：
+                // 长期记忆整条拆去了 Cormex，这一侧连着服务器也不做记忆注入。
+                // 说「离线时没有记忆」等于暗示联网时有 —— 承诺一个不存在的
+                // 功能，与提示词里写没接的能力是同一个错。
                 //
                 // 这里曾经写着「放在 mock 上面且更醒目」，而**这一屏上从来
                 // 没有过 mock 入口** —— 那句话描述的是一个没做出来的布局。
@@ -278,7 +284,7 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                               children: [
                                 const TextSpan(text: '不连服务器也能对话、能读写你本机的文件。'),
                                 TextSpan(
-                                  text: '这段时间不会有记忆',
+                                  text: '这段时间不会同步到服务端',
                                   style: TextStyle(
                                     fontWeight: FontWeight.w700,
                                     color: scheme.onSurface,

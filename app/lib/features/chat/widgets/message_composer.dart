@@ -414,7 +414,7 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                     // 换来的只是几十像素的偏移。
                     Expanded(
                       child: Text(
-                        'Cortex 会把这轮对话归档，并从中抽取可追溯的记忆。',
+                        'Cortex 会把这轮对话归档，之后还能搜得到。',
                         textAlign: TextAlign.center,
                         style: theme.textTheme.labelSmall,
                       ),
