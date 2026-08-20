@@ -117,6 +117,7 @@ pub async fn run(base: &str, token_kind: TokenKind, json: bool) -> anyhow::Resul
     checks.push(check_credential(token_kind));
     checks.extend(check_deployment(base).await);
     checks.push(check_agent_binary());
+    checks.push(check_launch_log());
     checks.push(check_state_dir());
 
     let report = Report {
@@ -488,6 +489,150 @@ fn sibling_agent() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// 桌面端上次拉起 agent 发生了什么。
+///
+/// # 为什么 doctor 要读一个别人写的文件
+///
+/// 这份 JSONL 由桌面端（`app/lib/core/agent_launch_log.dart`）写，而读它的
+/// 第一读者是这里 —— **诊断入口不能依赖被诊断的东西活着**：agent 起不来时，
+/// 界面上那句话每 6 秒被下一次覆盖一遍，而这条命令在 shell 里照跑。
+///
+/// 崩溃循环优先于「最后一条是什么」：连着崩三次和崩一次是两个不同的问题，
+/// 而只看最后一条的话，两者长得一模一样。
+fn check_launch_log() -> Check {
+    let Ok(dir) = cortex_core::state_dir() else {
+        return Check::new("launch_log", "启动记录", Level::Skip, "找不到本地状态目录");
+    };
+    let path = dir.join("logs").join("agent-launch.jsonl");
+    let shown = path.display().to_string();
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        // 没有这个文件是**正常**的：纯 CLI 用户从不拉起本机 agent。
+        // 报成 Warn 会让他去找一个自己根本不需要的东西
+        return Check::new(
+            "launch_log",
+            "启动记录",
+            Level::Note,
+            "还没有（这台机器上没起过本机 agent）",
+        );
+    };
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = &lines[lines.len().saturating_sub(10)..];
+    judge_launch_log(tail, &shown)
+}
+
+/// 从最后几条事件里读出结论。
+///
+/// 与 [`judge_agent_version`] 同样拆成纯函数：造一个「连崩三次」的真现场
+/// 要跑三次崩溃循环，而这条判断恰恰是**只在故障时才走到**的那种代码 ——
+/// 不测就等于没写。
+fn judge_launch_log(tail: &[&str], path: &str) -> Check {
+    let events: Vec<serde_json::Value> = tail
+        .iter()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let Some(last) = events.last() else {
+        return Check::new(
+            "launch_log",
+            "启动记录",
+            Level::Note,
+            format!("空的（{path}）"),
+        );
+    };
+    let ev = |v: &serde_json::Value| {
+        v.get("ev")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let bad = |v: &serde_json::Value| match ev(v).as_str() {
+        "start-failed" => true,
+        // `expected` 缺省当成「是我们让它退的」：老版本写的记录没有这个字段，
+        // 把它们一律算成崩溃，会让一份健康的历史看起来像连环故障
+        "exit" => !v.get("expected").and_then(|x| x.as_bool()).unwrap_or(true),
+        _ => false,
+    };
+    // 最后一行 stderr 通常就是死因本身（Rust 的 `Error:` 那一行）
+    let why = |v: &serde_json::Value| -> String {
+        if let Some(w) = v.get("why").and_then(|x| x.as_str()) {
+            return w.to_string();
+        }
+        v.get("tail")
+            .and_then(|x| x.as_array())
+            .and_then(|a| a.last())
+            .and_then(|x| x.as_str())
+            .unwrap_or("没留下输出")
+            .to_string()
+    };
+
+    let failures = events.iter().filter(|v| bad(v)).count();
+    if failures >= 3 {
+        return Check::new(
+            "launch_log",
+            "启动记录",
+            Level::Warn,
+            format!(
+                "最近 {} 次启动里崩了 {failures} 次 —— {}",
+                events.len(),
+                why(last)
+            ),
+        )
+        .with_fix(format!("在崩溃循环里。完整记录：{path}"));
+    }
+    match ev(last).as_str() {
+        "ready" => {
+            let o = last.get("origin").and_then(|x| x.as_str()).unwrap_or("?");
+            let ms = last.get("ms").and_then(|x| x.as_i64()).unwrap_or(-1);
+            Check::new(
+                "launch_log",
+                "启动记录",
+                Level::Ok,
+                format!("上次起来了 · {o} · {ms} ms"),
+            )
+        }
+        "exit" if !bad(last) => Check::new("launch_log", "启动记录", Level::Ok, "上次是正常退出"),
+        "exit" => {
+            let code = last.get("code").and_then(|x| x.as_i64()).unwrap_or(-1);
+            Check::new(
+                "launch_log",
+                "启动记录",
+                Level::Warn,
+                format!("上次是崩溃退出（code {code}）—— {}", why(last)),
+            )
+            .with_fix(format!("完整记录：{path}"))
+        }
+        "start-failed" => Check::new(
+            "launch_log",
+            "启动记录",
+            Level::Warn,
+            format!("上次没起来 —— {}", why(last)),
+        )
+        .with_fix(format!("完整记录：{path}")),
+        // 记录停在 spawn：它现在多半正跑着（ready 之后就不再写了，直到它退）。
+        // 也可能是被任务管理器硬杀 —— 那种死法没有退出事件可写，
+        // 所以这两种情况在文件里长得一样，别替用户选一个
+        "spawn" => Check::new(
+            "launch_log",
+            "启动记录",
+            Level::Ok,
+            "上次拉起后没有退出记录（多半正跑着）",
+        ),
+        // 冷启动时必然出现一次：界面那侧的依赖陆续落定，每落定一次就重建一次
+        // provider，顺手停掉上一轮还没报出地址的进程。**不是故障**
+        "superseded" => Check::new(
+            "launch_log",
+            "启动记录",
+            Level::Ok,
+            "上次那轮启动到一半被新的一轮取代（正常）",
+        ),
+        other => Check::new(
+            "launch_log",
+            "启动记录",
+            Level::Note,
+            format!("最后一条是 {other}"),
+        ),
+    }
+}
+
 /// 数据在哪、多大。
 ///
 /// 顺带回答「卸载之后留下了什么」—— 卸载程序不碰这个目录，而此前
@@ -648,5 +793,113 @@ mod tests {
     #[test]
     fn 目录数不出来时给零而不是崩() {
         assert_eq!(dir_size(std::path::Path::new("这个目录不存在")), 0);
+    }
+
+    // ── 启动记录 ──────────────────────────────────────────
+    //
+    // 这些判断**只在故障时才走到**，跑不到自然测不到 —— 而故障现场
+    // （连崩三次）要真跑出来代价很高。所以判断本身是纯函数，这里喂假数据。
+
+    const SPAWN: &str = r#"{"ev":"spawn","pid":1,"exe":"a","remote":"r","llm":"proxy"}"#;
+    const READY: &str = r#"{"ev":"ready","origin":"http://127.0.0.1:7499","ms":812}"#;
+    const CLEAN_EXIT: &str = r#"{"ev":"exit","code":0,"expected":true}"#;
+    const CRASH: &str =
+        r#"{"ev":"exit","code":101,"expected":false,"tail":["前一行","Error: 端口被占"]}"#;
+
+    #[test]
+    fn 崩溃循环压过最后一条是什么() {
+        let tail = [SPAWN, CRASH, SPAWN, CRASH, SPAWN, CRASH, SPAWN, READY];
+        let c = judge_launch_log(&tail, "P");
+        assert_eq!(
+            c.level,
+            Level::Warn,
+            "最后一次起来了，但前面连崩三次 —— 只看最后一条会把崩溃循环报成健康，\
+             而那正是 2026-08-20 花了二十分钟才看出来的形状"
+        );
+        assert!(
+            c.detail.contains('3'),
+            "要说清崩了几次：崩一次和连崩三次是两个不同的问题，detail = {}",
+            c.detail
+        );
+    }
+
+    #[test]
+    fn 正常退出不算故障() {
+        let tail = [SPAWN, READY, CLEAN_EXIT, SPAWN, READY, CLEAN_EXIT];
+        assert_eq!(
+            judge_launch_log(&tail, "P").level,
+            Level::Ok,
+            "登出、关应用都会产生退出事件。把它们算成崩溃，\
+             一份健康的历史就会看起来像连环故障"
+        );
+    }
+
+    #[test]
+    fn 崩溃退出把死因带出来() {
+        let c = judge_launch_log(&[SPAWN, CRASH], "P");
+        assert_eq!(c.level, Level::Warn);
+        assert!(
+            c.detail.contains("端口被占"),
+            "stderr 最后一行通常就是死因本身；不带出来的话，\
+             用户拿到的是「它崩了」这种没法行动的话。detail = {}",
+            c.detail
+        );
+    }
+
+    #[test]
+    fn 缺_expected_字段时当成正常退出() {
+        let old = r#"{"ev":"exit","code":0}"#;
+        assert_eq!(
+            judge_launch_log(&[SPAWN, old], "P").level,
+            Level::Ok,
+            "老版本写的记录没有 expected。缺省当崩溃的话，\
+             升级之后所有人的历史都会突然变红"
+        );
+    }
+
+    #[test]
+    fn 停在_spawn_不猜是死是活() {
+        let c = judge_launch_log(&[SPAWN], "P");
+        assert_eq!(
+            c.level,
+            Level::Ok,
+            "正跑着（ready 之后不再写）与被任务管理器硬杀，在文件里长得一样。\
+             替用户选一个，就有一半的时候在撒谎"
+        );
+    }
+
+    /// 冷启动时必然出现的那一条**不许算成故障**。
+    ///
+    /// 落地当天就撞上了：界面那侧的依赖在头几百毫秒里陆续落定，每落定一次
+    /// 就重建一次 provider、停掉上一轮还没报出地址的进程。记成失败的话，
+    /// 开三次机就凑够三条，doctor 在一台完全健康的机器上报「崩溃循环」——
+    /// **自造的假故障，而且专挑健康的机器报**。
+    #[test]
+    fn 被取代的那轮启动不算故障() {
+        const SUPERSEDED: &str = r#"{"ev":"superseded"}"#;
+        let tail = [
+            SPAWN, SUPERSEDED, SPAWN, READY, CLEAN_EXIT, SPAWN, SUPERSEDED, SPAWN, READY,
+        ];
+        assert_eq!(
+            judge_launch_log(&tail, "P").level,
+            Level::Ok,
+            "每次开机都有一条 superseded；算成失败等于给所有人造一个假故障"
+        );
+        assert_eq!(
+            judge_launch_log(&[SPAWN, SUPERSEDED], "P").level,
+            Level::Ok,
+            "它作为最后一条也很常见（两轮的写入顺序不保证），同样不该报警"
+        );
+    }
+
+    #[test]
+    fn 读不懂的行跳过而不是整份作废() {
+        let tail = ["这不是 JSON", SPAWN, READY];
+        assert_eq!(
+            judge_launch_log(&tail, "P").level,
+            Level::Ok,
+            "写日志是 append + 崩溃可能截断，半行是正常现象；\
+             因为一行坏了就报「读不出来」，等于把整份现场丢掉"
+        );
     }
 }

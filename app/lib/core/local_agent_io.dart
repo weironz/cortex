@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'agent_launch_log.dart';
+
 /// Desktop can run an agent. See `local_agent.dart` for the seam's rationale.
 const bool kLocalAgentSupported = true;
 
@@ -110,6 +112,13 @@ class LocalAgent {
   final List<String> _logTail = [];
   static const _tailLines = 30;
 
+  /// 落盘那一份。[_logTail] 跟着进程死，这一份跨进程活着 —— 崩溃循环的
+  /// 形状（同一个死因重复 N 次）只有在多次启动的记录摆在一起时才看得出来。
+  late final AgentLaunchLog _launchLog = AgentLaunchLog.inStateDir(stateDir);
+
+  /// 启动诊断文件的路径，给报错文案与 `cortex doctor` 用。
+  String get launchLogPath => _launchLog.file.path;
+
   /// `http://127.0.0.1:<port>` once running, else null.
   String? get origin => _origin;
 
@@ -138,9 +147,11 @@ class LocalAgent {
     if (_process != null) return _origin!;
     _stopping = false;
     _logTail.clear();
+    final startedAt = DateTime.now();
 
     final exe = File(executable);
     if (!exe.existsSync()) {
+      _launchLog.failed(why: '找不到本地 agent：$executable');
       throw LocalAgentException('找不到本地 agent：$executable');
     }
 
@@ -196,9 +207,16 @@ class LocalAgent {
         addrFile.path,
       ], environment: env);
     } on ProcessException catch (e) {
+      _launchLog.failed(why: '启动本地 agent 失败：${e.message}');
       throw LocalAgentException('启动本地 agent 失败：${e.message}');
     }
     _process = proc;
+    _launchLog.spawn(
+      exe: executable,
+      pid: proc.pid,
+      remote: remote,
+      llm: llmRoute ?? 'proxy',
+    );
 
     // Both pipes must be consumed. Not consuming them is a real hang on
     // Windows: the child blocks once the OS buffer fills, which happens after a
@@ -222,6 +240,13 @@ class LocalAgent {
         unawaited(p.cancel());
       }
       _pipes.clear();
+      // 正常退出也记：不记的话，文件里全是崩溃，看不出「这台机器上它平时
+      // 活得好好的」，也就判断不了这次崩溃是不是新出现的
+      _launchLog.exited(
+        code: code,
+        expected: !unexpected,
+        tail: _logTail.join('\n'),
+      );
       if (unexpected) onExit?.call(code, _logTail.join('\n'));
     });
 
@@ -243,14 +268,27 @@ class LocalAgent {
       // entire reason the child refuses to start rather than limping along.
       final why = _logTail.isEmpty ? '' : '\n它最后说的是：\n${_logTail.join('\n')}';
       final died = _process == null;
+      final headline = died
+          ? '本地 agent 启动后立即退出'
+          : '本地 agent 在 ${timeout.inSeconds} 秒内没有报出监听地址';
+      // 是**我们自己**在启动中途把它停了（provider 重建、登出、换地址），
+      // 那不是启动失败。见 `AgentLaunchLog.superseded` —— 混为一谈的话，
+      // 每次开机都会记一条假故障
+      if (_stopping) {
+        _launchLog.superseded();
+      } else {
+        _launchLog.failed(why: headline, tail: _logTail.join('\n'));
+      }
       await stop();
-      throw LocalAgentException(
-        died
-            ? '本地 agent 启动后立即退出$why'
-            : '本地 agent 在 ${timeout.inSeconds} 秒内没有报出监听地址$why',
-      );
+      // 报错里带上文件路径：这一屏上的字用户复制不走，而崩溃循环里
+      // 它每 6 秒被下一次覆盖一遍 —— 能带走的只有那个文件
+      throw LocalAgentException('$headline$why\n完整启动记录：$launchLogPath');
     }
     _origin = 'http://$addr';
+    _launchLog.ready(
+      origin: _origin!,
+      ms: DateTime.now().difference(startedAt).inMilliseconds,
+    );
     return _origin!;
   }
 
