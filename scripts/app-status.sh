@@ -71,10 +71,52 @@ agent_pids="$(tasklist 2>/dev/null | grep -E '^cortex-local\.exe' | awk '{print 
 n_app="$(printf '%s' "${app_pids}" | grep -c . || true)"
 n_agent="$(printf '%s' "${agent_pids}" | grep -c . || true)"
 
-# 加引号并去掉尾空格：不加引号 shellcheck 会挑（SC2086），
-# 而 CI 对 scripts/*.sh 跑它
-app_list="$(echo "${app_pids}" | tr '\n' ' ' | sed 's/ *$//')"
-say "桌面端进程" "${n_app} 个${app_list:+（PID ${app_list}）}"
+# ── PID → 它是从哪个 exe 起来的 ──────────────────────────
+#
+# **`tasklist` 给不出路径，而「哪个 exe」正是这里最要紧的一问。**
+#
+# 2026-08-21：这台机器上同时跑着装机版（`%LOCALAPPDATA%\Programs\Cortex`，
+# 一个旧构建，界面还是上个版本的文案）和 dev 构建。两个窗口标题都叫
+# Cortex、图标一样，而 PID 数字本身一点都不提示这件事 —— 于是「刚改的东西
+# 怎么没生效」查了半天，看的其实是另一个程序。
+#
+# 一条 PowerShell 拿全部路径，而不是每个 PID 起一次进程：
+# 那玩意儿启动要小半秒，跑着三四个进程时这条命令会明显发卡。
+proc_paths="$(powershell -NoProfile -Command \
+    "Get-Process cortex_app,cortex-local -ErrorAction SilentlyContinue |
+     ForEach-Object { '{0} {1}' -f \$_.Id, \$_.Path }" 2>/dev/null | tr -d '\r')"
+
+# 这个仓库编出来的产物长什么样。转成小写正斜杠，好跟 PowerShell 给的
+# 反斜杠大小写混排路径比 —— Windows 路径比较不区分大小写，而字符串比较区分
+dev_prefix="$(printf '%s' "$(pwd -W 2>/dev/null || pwd)" | tr 'A-Z' 'a-z')"
+
+origin_of() {
+    local p n
+    p="$(printf '%s\n' "${proc_paths}" \
+        | awk -v pid="$1" '$1 == pid { $1=""; sub(/^ /, ""); print; exit }')"
+    if [ -z "${p}" ]; then
+        echo "（问不出路径）"
+        return
+    fi
+    n="$(printf '%s' "${p}" | tr 'A-Z\\' 'a-z/')"
+    case "${n}" in
+        "${dev_prefix}"/*)     echo "dev 构建 · ${p}" ;;
+        */programs/cortex/*)   echo "⚠ 装机版（不是这个仓库编的）· ${p}" ;;
+        *)                     echo "⚠ 别处 · ${p}" ;;
+    esac
+}
+
+if [ "${n_app}" = 0 ]; then
+    say "桌面端进程" "没在跑"
+else
+    say "桌面端进程" "${n_app} 个"
+    # while-read 而不是 `for pid in $app_pids`：后者靠未加引号的词分割，
+    # shellcheck 会挑（SC2086），而 CI 对 scripts/*.sh 跑它
+    while IFS= read -r pid; do
+        [ -n "${pid}" ] || continue
+        say "" "PID ${pid}  $(origin_of "${pid}")"
+    done <<< "${app_pids}"
+fi
 
 if [ "${n_agent}" = 0 ]; then
     say "本机 agent" "没在跑 —— 工具（读写文件、跑命令）都不可用"
@@ -95,13 +137,10 @@ else
         else
             say "本机 agent" "PID ${pid} ⚠ 活着但没有监听端口（刚起来，或正在退出）"
         fi
+        # agent 也要报路径：装机版的桌面端拉起的是**它自己旁边**那份 agent，
+        # 与 dev 构建那份是两个不同版本的二进制
+        say "" "$(origin_of "${pid}")"
     done <<< "${agent_pids}"
-fi
-
-if [ "${n_app}" -gt 1 ] || [ "${n_agent}" -gt 1 ]; then
-    echo
-    echo "  ⚠ 跑了不止一个。两个窗口长得一模一样，你很可能在对着旧构建找新东西。"
-    echo "    just app-stop 全清掉，再 just app。"
 fi
 
 # ── 4. exe 旁边那份 agent 过期没有 ───────────────────────
@@ -121,6 +160,14 @@ if [ -f "${BESIDE}" ] && [ -f "${FRESH}" ]; then
     fi
 elif [ -f "${FRESH}" ]; then
     say "agent 二进制" "还没拷到 exe 旁边 —— 跑一次 just app"
+fi
+
+# 摆在最后，紧挨着「怎么办」那一行 —— 夹在中间的话，它会把
+# 「进程」与「二进制」两节劈开，而读的人正需要那两节连着看
+if [ "${n_app}" -gt 1 ] || [ "${n_agent}" -gt 1 ]; then
+    echo
+    echo "  ⚠ 跑了不止一个。窗口标题与图标完全一样 —— 看上面每个 PID 后面那个"
+    echo "    路径，你很可能在对着旧构建找新做的东西。"
 fi
 
 echo
