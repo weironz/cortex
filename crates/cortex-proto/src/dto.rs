@@ -55,6 +55,13 @@ const fn protocol_before_this_check() -> u32 {
 pub struct Health {
     pub status: String,
     pub version: String,
+    /// 构建时那个 git 提交（短 sha）。老服务端不报，那时是 `None`。
+    ///
+    /// **与 `version` 分开报，因为 semver 不够。** 它打完 tag 的下一秒就
+    /// 不再唯一：之后每个提交都还报同一个版本号，于是「线上有没有这个修复」
+    /// 只看版本号会得出错误结论。见 `cortex_core::BUILD_SHA`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
     /// 本端是什么："cortexd" / "local-agent"。
     ///
     /// 客户端据此把话说对：连着本地 agent 时，「数据库未接」不是故障而是

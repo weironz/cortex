@@ -45,3 +45,44 @@ pub const WORKSPACE_PATH_MAX_CHARS: usize = 4096;
 
 /// 编译期版本号，用于 `/health` 与 CLI 的版本输出。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 构建时那个 git 提交（短 sha，工作区脏时带 `-dirty`），拿不到是 `unknown`。
+///
+/// # 为什么 [`VERSION`] 不够
+///
+/// semver **打完 tag 的下一秒就不再唯一**：之后每个提交都还报同一个版本号。
+/// 判「线上有没有某个修复」只看版本号会得出错误结论 —— 2026-08-21 就这么
+/// 判过一次，两边都写着 `0.1.14`，中间隔着 18 个提交。
+///
+/// 判据应该是：`git merge-base --is-ancestor <修复> <线上这个 sha>`。
+///
+/// 怎么填进来见 `build.rs`。
+pub const BUILD_SHA: &str = env!("CORTEX_GIT_SHA");
+
+#[cfg(test)]
+mod build_sha_tests {
+    /// `build.rs` **永远给得出一个值**。
+    ///
+    /// 空串是这里最坏的结果：`/health` 会报一个 `"commit":""`，
+    /// 而读的人分不清「这一版没带 sha」与「带了但是空的」。所以
+    /// build.rs 拿不到时明写 `unknown`，而不是让 `env!` 拿到空串。
+    #[test]
+    fn 永远有值() {
+        assert!(
+            !super::BUILD_SHA.trim().is_empty(),
+            "BUILD_SHA 是空的 —— build.rs 那三级回落漏了最后一级"
+        );
+    }
+
+    /// 本机 `cargo test` 一定在一棵 git 树里，所以这里该是真 sha 而不是
+    /// 兜底值。这条**顺带盯住 build.rs 自己没坏**：它整个不执行的表现
+    /// 是编译失败（`env!` 找不到），但「执行了却什么都没查到」是静默的。
+    #[test]
+    fn 在仓库里编时不是兜底值() {
+        assert_ne!(
+            super::BUILD_SHA,
+            "unknown",
+            "在这棵 git 树里编却拿到兜底值 —— build.rs 的 git 那一级没生效"
+        );
+    }
+}

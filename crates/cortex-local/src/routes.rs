@@ -322,6 +322,7 @@ async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health>
     Json(cortex_proto::dto::Health {
         status: "ok".into(),
         version: cortex_core::VERSION.into(),
+        commit: Some(cortex_core::BUILD_SHA.into()),
         role: "local-agent".into(),
         // 协议握手只在启动那一刻做过一次。之后远端可能被升级到一个
         // 不再支持本端的版本 —— 那时**不该**把这个进程杀掉（用户正聊到一半），

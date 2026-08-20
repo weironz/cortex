@@ -272,11 +272,32 @@ GitHub → Actions → Deploy → Run workflow → version = 0.1.0
 5. **验证线上真的在跑这一版**：
 
 ```bash
-curl -fsS https://cortex.cloudcele.com/api/health
+curl -fsS https://cortex.cloudcele.com/api/sandbox/health
 # 必须同时满足：
 #   "version":"0.1.0"   ← 不信部署脚本自己的报喜
 #   "auth":"token"      ← disabled 就是把记忆库交出去了
+#   "commit":"<sha>"    ← 见下面那段
 ```
+
+> ### ⚠️ 判「线上有没有某个修复」不能只看版本号
+>
+> `version` 报的是 `Cargo.toml` 里那个 semver，而它**打完 tag 的下一秒就
+> 不再唯一**：之后每个提交都还报同一个版本号。
+>
+> 2026-08-21 被它骗过。用户问「这个问题为什么还没解决」，第一步对的是
+> 版本号 —— 生产 `0.1.14`、本地 `Cargo.toml` 也 `0.1.14`，**看起来完全
+> 一致**。实际上那个 tag 打在中午 12:09，修复是 15:37 提交的，中间隔着
+> 18 个提交。一个会骗人的判据比没有判据更糟：它让人停止排查。
+>
+> 所以 `/health` 从 0.1.16 起还报 `commit`（构建时的 git 短 sha，由
+> `release.yml` 经 `--build-arg CORTEX_GIT_SHA` 送进镜像）。判据是：
+>
+> ```bash
+> SHA=$(curl -fsS https://cortex.cloudcele.com/api/sandbox/health | >       python3 -c 'import json,sys; print(json.load(sys.stdin)["commit"])')
+> git merge-base --is-ancestor <修复的提交> "$SHA" && echo 线上有 || echo 线上没有
+> ```
+>
+> `cortex doctor` 也一并报出来，不用自己拼这条命令。
 
 `set -o pipefail` 那行不是样板。mica 上真实发生过：`ssh … | tee`
 把 ssh 的退出码藏在 tee 后面，节点明明**拒绝**了部署，这一步还是绿的。

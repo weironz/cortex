@@ -46,9 +46,12 @@ RUN set -eux; \
 
 COPY crates/ crates/
 
+# 构建时的 git 提交。理由与摆在这个位置的原因见 Dockerfile.agentd 同名 ARG
+ARG CORTEX_GIT_SHA=unknown
+
 RUN set -eux; \
     find crates evals -name '*.rs' -exec touch {} +; \
-    cargo build --release -p cortex-local; \
+    CORTEX_GIT_SHA="${CORTEX_GIT_SHA}" cargo build --release -p cortex-local; \
     strip target/release/cortex-local || true
 
 # ── 运行阶段 ──────────────────────────────────────────────

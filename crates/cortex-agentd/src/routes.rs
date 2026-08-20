@@ -427,6 +427,11 @@ async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "version": cortex_core::VERSION,
+        // **版本号之外还要报 sha。** semver 打完 tag 的下一秒就不再唯一，
+        // 而「线上到底有没有那个修复」正是要靠这一位判的 —— 见
+        // `cortex_core::BUILD_SHA`。这个字段与 version 一样属于部署形态，
+        // 不是用户数据（那段权衡见 `Health::auth` 的注释）
+        "commit": cortex_core::BUILD_SHA,
         "role": "agent-orchestrator",
         "callback": st.runner().callback(),
         "callback_visible_to_sandbox": callback_visible,

@@ -73,9 +73,19 @@ COPY crates/ crates/
 COPY migrations/ migrations/
 COPY migrations-global/ migrations-global/
 
+# 构建时的 git 提交，烧进 `/health` 的 `commit` 字段。
+#
+# **必须由外面传进来**：`.dockerignore` 把 `.git` 挡在构建上下文外面
+# （那是对的，几十兆没必要进镜像），所以镜像里跑 git 问不出东西。
+# 传不进来就是 `unknown` —— 见 `crates/cortex-core/build.rs`。
+#
+# ⚠️ 位置**必须在依赖那几层之后**。放前面的话，每个提交都会换掉一个
+# 早期层，把后面几百个 crate 的缓存全部作废 —— 一次冷编按十分钟计。
+ARG CORTEX_GIT_SHA=unknown
+
 # 占位留下的时间戳会让 cargo 以为没变。touch 一遍强制重编真源码
 RUN find crates -name '*.rs' -exec touch {} + && \
-    cargo build --release -p cortex-agentd
+    CORTEX_GIT_SHA="${CORTEX_GIT_SHA}" cargo build --release -p cortex-agentd
 
 # ── 运行阶段 ──────────────────────────────────────────────
 FROM debian:trixie-slim

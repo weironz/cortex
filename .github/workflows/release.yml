@@ -311,14 +311,21 @@ jobs:
       # cortex-web 要把 API 地址编译进去；别的镜像不需要这个 arg。
       # 传给用不到它的 Dockerfile 是无害的（会有一条 UnusedBuildArgs 警告），
       # 但显式区分能让「哪个镜像与域名绑定」这件事在文件里看得见
+      # `CORTEX_GIT_SHA` 每个镜像都传：`.dockerignore` 把 `.git` 挡在构建
+      # 上下文外面，容器里问不出提交号，只能由这里送进去。它落进
+      # `/health` 的 `commit` —— 判「线上有没有某个修复」靠的是它，
+      # 不是版本号（semver 打完 tag 的下一秒就不再唯一，2026-08-21 踩过）。
       - name: 决定 build-args
         id: args
         run: |
-          if [ "${{ matrix.image }}" = "cortex-web" ]; then
-            echo "value=CORTEX_BASE_URL=${{ env.CORTEX_WEB_API_BASE }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=" >> "$GITHUB_OUTPUT"
-          fi
+          {
+            echo 'value<<EOF'
+            echo "CORTEX_GIT_SHA=${{ github.sha }}"
+            if [ "${{ matrix.image }}" = "cortex-web" ]; then
+              echo "CORTEX_BASE_URL=${{ env.CORTEX_WEB_API_BASE }}"
+            fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
 
       - name: 构建并推送
         uses: docker/build-push-action@v6

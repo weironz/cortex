@@ -198,7 +198,11 @@ fn check_version() -> Check {
         "cli_version",
         "CLI",
         Level::Ok,
-        format!("v{} · {exe}", env!("CARGO_PKG_VERSION")),
+        format!(
+            "v{} ({}) · {exe}",
+            env!("CARGO_PKG_VERSION"),
+            cortex_core::BUILD_SHA
+        ),
     )
 }
 
@@ -368,8 +372,17 @@ async fn check_deployment(base: &str) -> Vec<Check> {
                         .and_then(|x| x.as_str())
                         .unwrap_or("(没报 role)");
                     let ver = v.get("version").and_then(|x| x.as_str()).unwrap_or("?");
+                    // sha 带出来 —— **判「线上有没有那个修复」靠的是它**，
+                    // 不是版本号（semver 打完 tag 就不再唯一）。老服务端
+                    // 不报这个字段，那时什么都不加，不写成 `(unknown)`：
+                    // 那会让人以为对面那台有问题
+                    let sha = v
+                        .get("commit")
+                        .and_then(|x| x.as_str())
+                        .map(|s| format!(" ({s})"))
+                        .unwrap_or_default();
                     roles.push(role.to_owned());
-                    Check::new(id, path, Level::Ok, format!("{role} v{ver}"))
+                    Check::new(id, path, Level::Ok, format!("{role} v{ver}{sha}"))
                 }
             },
         };
