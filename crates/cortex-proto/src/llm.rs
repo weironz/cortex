@@ -360,6 +360,18 @@ pub struct FetchedModel {
     /// grok-imagine-* 2 个）。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub image_unwired: bool,
+    /// 这条来源填了**自己的端点**（中转站 / 公司网关 / one-api / 自建）。
+    ///
+    /// 一为真，上面那些能力就**不是断言**：目录描述的是厂商官方接口，
+    /// 而端点后面是谁我们一无所知。界面据此不拦、不下结论，
+    /// 只把目录里的话当提醒说。
+    ///
+    /// 2026-08-20 实测：一个中转站把 `gpt-image-2` 包装成普通聊天
+    /// （`/v1/chat/completions` 回一段带图链接的 markdown），零代码就能跑，
+    /// 而我们照着目录把它画成灰的、还说「我们没接这家的生图接口」——
+    /// 两句都是错的。那次它甚至把型号偷偷换成了 `gpt-image-2-vip`。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub custom_endpoint: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
     /// 每百万输入 token 多少**美元微元**。
@@ -389,6 +401,7 @@ mod fetched_model_tests {
             vision: None,
             image_output: Some(false),
             image_unwired: true,
+            custom_endpoint: false,
             reasoning: None,
             input_micros_per_mtok: None,
             output_micros_per_mtok: None,

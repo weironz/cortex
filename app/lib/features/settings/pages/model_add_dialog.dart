@@ -229,8 +229,12 @@ class _AddModelsDialogState extends State<_AddModelsDialog> {
     final scheme = theme.colorScheme;
     final have = widget.already.contains(m.id);
     // **加之前就警告**，而不是等他选中之后在选择器里拦 —— 那要他先加、
-    // 再选、再被拦，才知道这个型号跑不了 agent
-    final noTools = m.toolCall == false;
+    // 再选、再被拦，才知道这个型号跑不了 agent。
+    //
+    // ⚠️ 自定义端点上**不下这个断言**：目录说的是厂商官方那个型号，
+    // 而中转站后面接的是谁我们不知道。2026-08-20 实测一个中转站的
+    // `gpt-image-2` 走聊天协议就能出图，而我们照着目录把它标成红的
+    final noTools = m.toolCall == false && !m.customEndpoint;
 
     return CheckboxListTile(
       dense: true,
@@ -295,6 +299,16 @@ class _AddModelsDialogState extends State<_AddModelsDialog> {
           // 配一个 0，只能来问为什么（2026-08-20 就是这么问的）。
           //
           // 措辞上责任在我们，不在模型：写「它不支持生图」是错的。
+          // 目录说这个型号支持不了工具调用，但端点是自定义的 ——
+          // 说一句，别下结论
+          if (m.toolCall == false && m.customEndpoint)
+            Text(
+              '官方那边这个型号不支持工具调用。你这条来源是自定义端点，'
+              '后面接的是谁我们不知道 —— 能不能跑 agent 得试一下。',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: scheme.tertiary,
+              ),
+            ),
           if (m.imageUnwired)
             Text(
               '它能生图，但我们还没接这家的生图接口 —— 加进来也画不了。现在能画的是通义千问与 Google。',

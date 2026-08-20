@@ -35,6 +35,17 @@ use crate::vision::VisionSupport;
 
 /// 本 crate 内置的供应商定义。名字即配置里的 `provider` 取值。
 const BUILTIN: &[(&str, &str)] = &[
+    // 「自定义（OpenAI 兼容）」—— 中转站 / 公司网关 / one-api / 自建。
+    //
+    // 上游没有这一项，因为 goose 是按厂商组织的。而**中转站不是厂商**：
+    // 让用户去选「OpenAI」再改端点有两个坏处 —— 界面上那条来源从此叫
+    // 「OpenAI」（他配的明明是别家），而且我们会拿 OpenAI 官方的目录去
+    // 给它的型号下能力断言。2026-08-20 就是这么把一个实测可用的
+    // `gpt-image-2` 画成灰的。
+    //
+    // `dynamic_models: true`：中转站开放什么只能问它，内置列表填什么
+    // 都是错的
+    ("custom", include_str!("definitions/custom.json")),
     ("deepseek", include_str!("definitions/deepseek.json")),
     ("anthropic", include_str!("definitions/anthropic.json")),
     ("openai", include_str!("definitions/openai.json")),
@@ -241,6 +252,10 @@ const SHIPPED: &[&str] = &[
     // 本机那一家排最后：它是「不花钱、不联网」的那个选项，
     // 与上面九家回答的不是同一个问题
     "ollama",
+    // 「哪一家都不是」那个选项，排在最后。中转站、公司网关、one-api、
+    // 自建 vLLM 都走它 —— 选了它就没有「官方端点」可回落，
+    // 端点是必填的（界面据 base_url 里那个占位提示）
+    "custom",
 ];
 
 /// 下拉里该出现哪些供应商，**按 [`SHIPPED`] 的顺序**。
@@ -747,7 +762,14 @@ mod tests {
         // goose 哪天加上 deny_unknown_fields 就会在这里炸，而不是在生产上。
         for name in declarative_builtins() {
             let config = config_of(name).unwrap_or_else(|e| panic!("{name} 解析失败：{e}"));
-            assert!(!config.models.is_empty() || name == "ollama");
+            // 两家**本来就没有**内置型号，且都不是疏漏：
+            // ollama 的型号取决于你本机 pull 过什么；
+            // custom 后面是哪个中转站只有它自己知道 —— 填什么都是错的，
+            // 两家都靠 `dynamic_models` 去实拉
+            assert!(
+                !config.models.is_empty() || matches!(name, "ollama" | "custom"),
+                "{name} 一个内置型号都没有 —— 那样选择器里它是空的，                 而用户看不出是「这家没型号」还是「我们漏配了」"
+            );
         }
     }
 

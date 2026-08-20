@@ -17,6 +17,7 @@ class ModelOption {
     this.source = '',
     this.sourceLabel = '',
     this.freeOfQuota = false,
+    this.customEndpoint = false,
     this.context,
     this.toolCall,
     this.vision,
@@ -32,6 +33,7 @@ class ModelOption {
     source: asString(json['source']),
     sourceLabel: asString(json['source_label']),
     freeOfQuota: json['free_of_quota'] == true,
+    customEndpoint: json['custom_endpoint'] == true,
     context: asIntOrNull(json['context']),
     toolCall: json['tool_call'] as bool?,
     vision: json['vision'] as bool?,
@@ -55,6 +57,11 @@ class ModelOption {
 
   /// 用这条来源要不要占配额。
   final bool freeOfQuota;
+
+  /// 这条来源指向它自己的端点（中转站 / 网关 / 自建），或者供应商是
+  /// 「自定义」。一为真，下面那些能力就**不是断言** —— 界面不据此拦人。
+  /// 详见 [`FetchedModel.customEndpoint`]。
+  final bool customEndpoint;
 
   /// 上下文窗口。`null` = 服务端目录里查不到这个模型。
   final int? context;

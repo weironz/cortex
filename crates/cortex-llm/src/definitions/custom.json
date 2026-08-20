@@ -1,0 +1,15 @@
+{
+  "name": "custom",
+  "engine": "openai",
+  "display_name": "自定义（OpenAI 兼容）",
+  "description": "中转站、公司网关、one-api / LiteLLM、自建 vLLM —— 填你自己的端点",
+  "api_key_env": "CORTEX_CUSTOM_API_KEY",
+  "base_url": "https://你的端点/v1",
+  "models": [],
+  "headers": null,
+  "timeout_seconds": null,
+  "requires_auth": true,
+  "dynamic_models": true,
+  "preserves_thinking": true,
+  "supports_streaming": true
+}

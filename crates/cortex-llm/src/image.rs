@@ -142,7 +142,20 @@ pub async fn generate(
     api_key: &str,
     base_url: Option<&str>,
     req: &ImageRequest,
+    custom_endpoint: bool,
 ) -> Result<Vec<GeneratedImage>> {
+    // ⚠️ **自定义端点优先走聊天协议，不看 provider 写的是谁。**
+    //
+    // 中转站普遍把生图包装成普通聊天：`POST /v1/chat/completions`，回一条
+    // 消息、正文是一段带图片链接的 markdown。2026-08-20 实测
+    // `api.tutujin.com` 的 `gpt-image-2` 正是这样。
+    //
+    // 这种来源上 provider 字段说明不了任何事（用户多半填 `openai` 或
+    // `custom`），而厂商原生协议打过去必然 404 —— 端点既然是自定义的，
+    // 就按中转站的通行做法试。
+    if custom_endpoint {
+        return chat_protocol(provider, api_key, base_url, req).await;
+    }
     match provider {
         "alibaba" => dashscope(api_key, base_url, req).await,
         "google" => gemini(api_key, base_url, req).await,
@@ -154,6 +167,144 @@ pub async fn generate(
             ),
         }),
     }
+}
+
+/// 中转站那种「把生图包装成聊天」的做法。
+///
+/// ```text
+/// POST {root}/chat/completions
+/// { "model": "gpt-image-2", "messages": [{"role":"user","content":"画…"}] }
+/// → { "choices": [ { "message": { "content": "![](https://…/x.png)" } } ] }
+/// ```
+///
+/// # 为什么这条分支值得存在
+///
+/// 用户的原话是「难道每家中转站我们都要实现一个接口」。**不用** ——
+/// 它们说的是同一个 OpenAI 兼容协议，我们本来就会说。缺的只是
+/// 「从回来的正文里把图链接抠出来」这一步。
+///
+/// # 为什么不复用 `LlmClient`
+///
+/// 那条路要构造 provider、走流式、拼消息类型，而这里要的只是「发一句、
+/// 拿正文」。与本模块另外两家保持一致：一家一个函数，各自贴着对方的形状写。
+async fn chat_protocol(
+    provider: &str,
+    api_key: &str,
+    base_url: Option<&str>,
+    req: &ImageRequest,
+) -> Result<Vec<GeneratedImage>> {
+    let root = base_url
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| LlmError::Build {
+            name: provider.to_string(),
+            source: anyhow::anyhow!("这条来源没填端点，不知道该把生图请求发到哪儿"),
+        })?;
+    // 端点已经指到 `chat/completions` 的话别再拼一遍 —— 用户常直接把文档里
+    // 那条 curl 的地址整个粘进来（取件来的 openai provider 也这么宽容，
+    // 见 `openai.rs` 里的 `contains("chat/completions")`）
+    let root = root.trim_end_matches('/');
+    let url = if root.contains("chat/completions") {
+        root.to_owned()
+    } else {
+        format!("{root}/chat/completions")
+    };
+
+    // 尺寸只能写进提示词：聊天协议没有放它的地方，而对方认不认这句话取决于
+    // 它背后接的是谁 —— 所以是**尽力而为**，不做承诺
+    let prompt = match &req.size {
+        Some(size) if !size.trim().is_empty() => {
+            format!("{}\n\n(image size: {})", req.prompt, size.trim())
+        }
+        _ => req.prompt.clone(),
+    };
+
+    let body = serde_json::json!({
+        "model": req.model,
+        "messages": [{ "role": "user", "content": prompt }],
+        // 不流式：这一层要的是完整正文，流式回来还得自己拼
+        "stream": false,
+    });
+
+    let resp = http()
+        .post(&url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| LlmError::Build {
+            name: provider.to_string(),
+            source: anyhow::anyhow!("生图请求发不出去：{e}"),
+        })?;
+
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(LlmError::Build {
+            name: provider.to_string(),
+            source: anyhow::anyhow!("生图失败（HTTP {status}）：{}", trim(&text)),
+        });
+    }
+
+    let parsed: ChatResponse = serde_json::from_str(&text).map_err(|e| LlmError::Build {
+        name: provider.to_string(),
+        source: anyhow::anyhow!("回来的结构读不懂（{e}）：{}", trim(&text)),
+    })?;
+    let content: String = parsed
+        .choices
+        .into_iter()
+        .filter_map(|c| c.message.content)
+        .collect();
+
+    let urls = image_urls(&content);
+    if urls.is_empty() {
+        // 它回了一段话但里面没有图。**这不是成功** —— 多半是这个型号根本
+        // 不生图（用户把一个对话模型设成了绘画模型），把那段话原样带出去，
+        // 他一眼就看得出
+        return Err(LlmError::Build {
+            name: provider.to_string(),
+            source: anyhow::anyhow!(
+                "`{}` 回了内容但里面没有图 —— 它可能不是生图模型。它说：{}",
+                req.model,
+                trim(&content)
+            ),
+        });
+    }
+    Ok(urls.into_iter().map(GeneratedImage::Url).collect())
+}
+
+/// 从一段 markdown 正文里把图片链接抠出来，按出现顺序。
+///
+/// 中转站回的通常是 `![](url)`，前面可能还有一句「🎨 生成中…」、后面跟一条
+/// 「[点击下载](url)」。**只认 `![...](...)`**（真正的图片语法）——
+/// 把普通链接也算进来的话，那条下载链接会被当成第二张图，
+/// 于是同一张图入库两次。
+fn image_urls(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] != b'!' || bytes[i + 1] != b'[' {
+            i += 1;
+            continue;
+        }
+        let Some(close) = text[i..].find("](") else {
+            break;
+        };
+        let start = i + close + 2;
+        let Some(end) = text[start..].find(')') else {
+            break;
+        };
+        let url = text[start..start + end].trim();
+        // 只要 http(s)：data: URI 与相对路径这一层抓不下来
+        if (url.starts_with("http://") || url.starts_with("https://"))
+            && !out.iter().any(|u| u == url)
+        {
+            out.push(url.to_owned());
+        }
+        i = start + end;
+    }
+    out
 }
 
 /// DashScope 原生协议。
@@ -512,6 +663,23 @@ struct DashScopeContent {
 }
 
 #[derive(Deserialize)]
+struct ChatResponse {
+    #[serde(default)]
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Deserialize)]
+struct ChatChoice {
+    message: ChatMessage,
+}
+
+#[derive(Deserialize)]
+struct ChatMessage {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct GeminiResponse {
     #[serde(default)]
     steps: Vec<GeminiStep>,
@@ -804,5 +972,72 @@ mod tests {
             "OpenAI 的生图协议还没接。认它等于让 agent 调一条不存在的路"
         );
         assert!(!is_image_model("deepseek", "qwen-image-3.0"));
+    }
+}
+
+#[cfg(test)]
+mod chat_protocol_tests {
+    use super::image_urls;
+
+    /// 中转站回来的**真实形状**（2026-08-20 从 `api.tutujin.com` 抄的）。
+    ///
+    /// 注意它把同一张图写了两遍：一次是图片语法，一次是下载链接。
+    /// 只认 `![](…)` 那种，否则同一张图会入库两次。
+    #[test]
+    fn 抠得出图链接_且不把下载链接算成第二张() {
+        let body = "\n\n> 🎨 生成中...\n\n\
+            ![https://x.site/a.png](https://x.site/a.png)\n\n\
+            [点击下载](https://x.site/a.png)";
+        assert_eq!(
+            image_urls(body),
+            vec!["https://x.site/a.png"],
+            "同一张图在正文里出现两次（图片 + 下载链接），只该算一张"
+        );
+    }
+
+    #[test]
+    fn 多张图按出现顺序全都要() {
+        let body = "![](https://x.site/1.png) 和 ![](https://x.site/2.jpg)";
+        assert_eq!(
+            image_urls(body),
+            vec!["https://x.site/1.png", "https://x.site/2.jpg"],
+            "顺序要原样 —— 它对应用户提示词里的第一张、第二张"
+        );
+    }
+
+    /// **普通链接不算图**。
+    ///
+    /// 中转站的正文里常有「查看文档」「点击下载」这类链接。把它们当成图
+    /// 会去抓一个 HTML 页面回来存成 blob —— 而 `sniff` 认不出，
+    /// 会给它贴上 `image/png` 的标签，于是会话里出现一张打不开的「图」。
+    #[test]
+    fn 普通链接不算图() {
+        let body = "这是[文档](https://x.site/doc)，还有 https://x.site/bare.png";
+        assert!(
+            image_urls(body).is_empty(),
+            "只认 `![](…)`。裸 URL 与普通链接都不算 —— \
+             抓回来一个 HTML 页面存成图，用户会看到一张打不开的图"
+        );
+    }
+
+    #[test]
+    fn 一个字都没有时给空_让调用方报错() {
+        // 型号不生图时它会正常回一段话。那**不是成功** ——
+        // 调用方据空列表报错并把原话带出去，用户一眼看得出选错了模型
+        assert!(image_urls("我是一个语言模型，无法直接生成图片。").is_empty());
+        assert!(image_urls("").is_empty());
+    }
+
+    /// 半截的 markdown 不能让它死循环或 panic。
+    ///
+    /// 上游随时可能被截断（超时、限流打断），而这一层在热路径上。
+    #[test]
+    fn 半截语法不崩也不死循环() {
+        for bad in ["![", "![alt", "![alt](", "![alt](http", "!![](x)", "]("] {
+            let _ = image_urls(bad);
+        }
+        // data: URI 与相对路径抓不下来，直接忽略而不是当成链接
+        assert!(image_urls("![](data:image/png;base64,AAAA)").is_empty());
+        assert!(image_urls("![](/local/a.png)").is_empty());
     }
 }

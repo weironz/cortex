@@ -174,6 +174,7 @@ class FetchedModel {
     this.vision,
     this.imageOutput,
     this.imageUnwired = false,
+    this.customEndpoint = false,
     this.reasoning,
     this.inputMicrosPerMtok,
     this.outputMicrosPerMtok,
@@ -187,6 +188,7 @@ class FetchedModel {
     vision: json['vision'] as bool?,
     imageOutput: json['image_output'] as bool?,
     imageUnwired: json['image_unwired'] == true,
+    customEndpoint: json['custom_endpoint'] == true,
     reasoning: json['reasoning'] as bool?,
     inputMicrosPerMtok: asIntOrNull(json['input_micros_per_mtok']),
     outputMicrosPerMtok: asIntOrNull(json['output_micros_per_mtok']),
@@ -214,6 +216,16 @@ class FetchedModel {
   /// 就是因此来问「为什么这些模型不支持」：搜出一屏 `gemini-*-image`，
   /// 筛选栏却写着「能生图 0」。
   final bool imageUnwired;
+
+  /// 这条来源指向的是**它自己的端点**（中转站 / 公司网关 / one-api / 自建），
+  /// 或者供应商就是「自定义」。
+  ///
+  /// 一为真，上面那些能力就**不是断言**：目录描述的是厂商官方接口，
+  /// 而端点后面是谁我们一无所知 —— 界面据此不拦，只把目录里的话当提醒。
+  ///
+  /// 2026-08-20 实测：一个中转站把 `gpt-image-2` 包装成普通聊天，
+  /// 零代码就能跑，而我们照着目录把它画成灰的、还说「我们没接这家」。
+  final bool customEndpoint;
 
   final bool? reasoning;
   final int? inputMicrosPerMtok;

@@ -190,9 +190,15 @@ Future<({ModelPick pick})?> pickModel(
                   disabled: requireTools && !_chatty(m),
                   // 目录里查不到的能选，但要说一句「我们不知道」——
                   // 当成不行会把一个能用的模型挡在外面
-                  note: requireTools && m.toolCall == null && !_draws(m)
-                      ? '服务端目录里没有它，不知道它支不支持工具调用'
-                      : null,
+                  note: switch (m) {
+                    // 自定义端点：目录里那句话只能当提醒，不能当结论
+                    _ when m.customEndpoint && m.toolCall == false =>
+                      '官方那边这个型号不支持工具调用 —— 你这条是自定义端点，'
+                          '后面接的是谁我们不知道，能不能跑 agent 得试一下',
+                    _ when requireTools && m.toolCall == null && !_draws(m) =>
+                      '服务端目录里没有它，不知道它支不支持工具调用',
+                    _ => null,
+                  },
                   // 拦下来时说的是**这一个**为什么不行，不是一句通用的
                   disabledReason: _draws(m)
                       ? '这是生图模型，对话跑不了 —— 想画图的话，'
@@ -240,7 +246,16 @@ bool _draws(ModelOption m) => m.imageOutput == true;
 /// 而错误来自供应商，用户看不出是选错了。
 ///
 /// 「不知道」仍然放行（那多半是刚发布的新型号），「知道它是画画的」不放。
-bool _chatty(ModelOption m) => m.toolCall != false && !_draws(m);
+bool _chatty(ModelOption m) =>
+    // ⚠️ **自定义端点上一律放行。**
+    //
+    // 上面两条判据问的都是「厂商官方那个型号怎么样」，而中转站 / 公司网关
+    // 后面接的是谁我们不知道。2026-08-20 实测：一个中转站的 `gpt-image-2`
+    // 走聊天协议就能出图，而我们照着 OpenAI 官方目录把它画成灰的 ——
+    // 一个实测可用的型号被挡在外面，用户只能来问为什么。
+    //
+    // 不知道就不拦。它真跑不了时，失败来自供应商且带着原话。
+    m.customEndpoint || (m.toolCall != false && !_draws(m));
 
 Widget _tile(
   BuildContext ctx, {

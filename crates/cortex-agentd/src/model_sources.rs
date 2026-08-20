@@ -537,7 +537,8 @@ pub async fn fetch_models(
             .map_err(|_| ApiError::unsupported("这个部署没配模型，问不出型号"))?;
         let names = cortex_llm::provider::allowed_models(&provider).unwrap_or_default();
         return Ok(Json(FetchedModels {
-            models: describe_all(&provider, &names),
+            // 部署那条走的是服务端自己配的供应商，不是自定义端点
+            models: describe_all(&provider, &names, false),
             live: false,
             note: Some("这条是服务端配的，型号来自它的供应商定义".to_owned()),
         }));
@@ -561,26 +562,38 @@ pub async fn fetch_models(
         Ok(names) if !names.is_empty() => {
             tracing::info!(source = %id, count = names.len(), "拉到了供应商的型号列表");
             Ok(Json(FetchedModels {
-                models: describe_all(&source.provider, &names),
+                models: describe_all(
+                    &source.provider,
+                    &names,
+                    is_custom_endpoint(&source.provider, source.base_url.as_deref()),
+                ),
                 live: true,
                 note: None,
             }))
         }
         // 空列表与失败**同样处理**：一个回了 200 但没有内容的
         // `/v1/models` 与拉不动没有区别，都不能拿来当「这家没有模型」
-        Ok(_) => Ok(Json(fallback_models(&source.provider, None))),
+        Ok(_) => Ok(Json(fallback_models(
+            &source.provider,
+            None,
+            is_custom_endpoint(&source.provider, source.base_url.as_deref()),
+        ))),
         Err(e) => {
             tracing::warn!(source = %id, error = %e, "拉不到型号列表，回落到内置定义");
-            Ok(Json(fallback_models(&source.provider, Some(e.to_string()))))
+            Ok(Json(fallback_models(
+                &source.provider,
+                Some(e.to_string()),
+                is_custom_endpoint(&source.provider, source.base_url.as_deref()),
+            )))
         }
     }
 }
 
 /// 拉不动时的回落。**note 必须说清是回落** —— 见 [`fetch_models`]。
-fn fallback_models(provider: &str, why: Option<String>) -> FetchedModels {
+fn fallback_models(provider: &str, why: Option<String>, custom_endpoint: bool) -> FetchedModels {
     let names = cortex_llm::provider::allowed_models(provider).unwrap_or_default();
     FetchedModels {
-        models: describe_all(provider, &names),
+        models: describe_all(provider, &names, custom_endpoint),
         live: false,
         note: Some(match why {
             Some(e) => format!("问不到这家的型号列表（{e}），下面这份是内置的，未必与你的账号一致"),
@@ -589,11 +602,37 @@ fn fallback_models(provider: &str, why: Option<String>) -> FetchedModels {
     }
 }
 
+/// 这条来源指向的是**它自己的端点**吗。
+///
+/// 两种情况都算：填了自己的 `base_url`（中转站 / 公司网关 / one-api /
+/// 自建 vLLM），或者供应商就是「自定义」。
+///
+/// **判据只此一处** —— `/llm/models` 与「添加模型」两条路都读它。
+/// 各判各的话，同一个型号在两个界面上一个能选、一个不能，
+/// 而用户完全看不出为什么。
+#[must_use]
+pub fn is_custom_endpoint(provider: &str, base_url: Option<&str>) -> bool {
+    provider == "custom" || base_url.is_some_and(|u| !u.trim().is_empty())
+}
+
 /// 把一串裸名字配上能力与价目。
 ///
 /// 目录查不到的**不丢掉**，能力字段留 `None` —— 那多半是刚发布的新型号，
 /// 丢了比留着更糟；留着，界面说「不知道」。
-fn describe_all(provider: &str, names: &[String]) -> Vec<FetchedModel> {
+///
+/// # `custom_endpoint`：目录描述的是**厂商官方接口**
+///
+/// 来源填了自己的 `base_url`（中转站、公司网关、one-api、自建 vLLM）时，
+/// 端点后面是谁我们一无所知 —— 目录里那些能力全都不再是断言。
+///
+/// 2026-08-20 的实例：一个中转站把 `gpt-image-2` 包装成了**普通聊天**
+/// （`/v1/chat/completions` 回一段带图片链接的 markdown），一行新代码都不用
+/// 就能跑。而我们照着目录说「它不支持工具调用」「我们还没接这家的生图接口」
+/// 并把它画成灰的 —— 两句都是错的，还把一个实测可用的型号挡在了外面。
+/// 那次它甚至偷偷把型号换成了 `gpt-image-2-vip`。
+///
+/// 所以这一位一为真，界面就**不拦、不下断言**，只把目录里的话当提醒说。
+fn describe_all(provider: &str, names: &[String], custom_endpoint: bool) -> Vec<FetchedModel> {
     names
         .iter()
         .map(|id| {
@@ -637,7 +676,13 @@ fn describe_all(provider: &str, names: &[String]) -> Vec<FetchedModel> {
                 // 只认目录说是的那些。按名字猜「这个大概是生图模型」再报
                 // 「没接」，猜错的表现是给一个正常的对话模型挂上一句
                 // 莫名其妙的话
-                image_unwired: info.as_ref().is_some_and(|i| i.image_output) && !draws,
+                // ⚠️ 自定义端点上**不说这句话**：「我们还没接这家」讲的是
+                // 厂商官方的生图接口，而中转站可能压根就走聊天协议出图 ——
+                // 那种情况下没有「接」这回事，它已经能用了
+                image_unwired: !custom_endpoint
+                    && info.as_ref().is_some_and(|i| i.image_output)
+                    && !draws,
+                custom_endpoint,
                 reasoning: info.as_ref().map(|i| i.reasoning),
                 input_micros_per_mtok: info
                     .as_ref()
@@ -810,7 +855,7 @@ mod tests {
     /// 刚发布的新型号，而新型号恰恰是用户最想试的。
     #[test]
     fn 目录查不到的型号留着_能力是不知道而不是不行() {
-        let got = describe_all("deepseek", &["某个还没进目录的型号".to_owned()]);
+        let got = describe_all("deepseek", &["某个还没进目录的型号".to_owned()], false);
         let m = got.first().expect("不该被丢掉");
         assert_eq!(m.id, "某个还没进目录的型号");
         assert_eq!(
@@ -825,7 +870,7 @@ mod tests {
     /// 目录里有的型号，能力照实带出来。
     #[test]
     fn 目录里有的型号带出真实能力() {
-        let got = describe_all("deepseek", &["deepseek-v4-pro".to_owned()]);
+        let got = describe_all("deepseek", &["deepseek-v4-pro".to_owned()], false);
         let m = got.first().expect("deepseek-v4-pro 在目录里");
         assert_eq!(
             m.tool_call,
@@ -845,7 +890,7 @@ mod tests {
     #[test]
     fn 目录说会画而我们没接的要明说是我们的缺口() {
         // openai 的生图协议没接。目录里 gpt-image-1 的 image_output 是真的
-        let got = describe_all("openai", &["gpt-image-1".to_owned()]);
+        let got = describe_all("openai", &["gpt-image-1".to_owned()], false);
         let m = &got[0];
         assert_eq!(
             m.image_output,
@@ -859,16 +904,44 @@ mod tests {
         );
 
         // ⚠️ 接了的那家不该挂这句话
-        let ok = describe_all("google", &["gemini-3-pro-image-preview".to_owned()]);
+        let ok = describe_all("google", &["gemini-3-pro-image-preview".to_owned()], false);
         assert_eq!(ok[0].image_output, Some(true));
         assert!(!ok[0].image_unwired, "google 已经接了，不该说成没接");
 
         // ⚠️ 普通对话模型更不该挂 —— 按名字瞎猜的话，
         // 一个正常型号上会冒出一句莫名其妙的话
-        let chat = describe_all("deepseek", &["deepseek-v4-pro".to_owned()]);
+        let chat = describe_all("deepseek", &["deepseek-v4-pro".to_owned()], false);
         assert!(
             !chat[0].image_unwired,
             "它本来就不是生图模型，与「没接」无关"
+        );
+    }
+
+    /// 自定义端点上**一句能力断言都不下**。
+    ///
+    /// 2026-08-20 的现场：一个中转站（`api.tutujin.com`）把 `gpt-image-2`
+    /// 包装成普通聊天，`/v1/chat/completions` 回一段带图链接的 markdown ——
+    /// 实测通了，一行新代码都没走。而我们照着 OpenAI 官方目录说
+    /// 「它不支持工具调用」「我们还没接这家的生图接口」，还把它画成灰的。
+    ///
+    /// 目录描述的是**厂商官方接口**。端点是用户自己填的时候，那份描述
+    /// 与端点后面那个东西没有任何关系。
+    #[test]
+    fn 自定义端点上不说我们没接() {
+        // 官方 openai：目录说 gpt-image-1 能出图，而我们没接它的生图协议
+        let official = describe_all("openai", &["gpt-image-1".to_owned()], false);
+        assert!(official[0].image_unwired, "官方那条上这句话是对的");
+        assert!(!official[0].custom_endpoint);
+
+        // 同一个型号，走中转站
+        let relay = describe_all("openai", &["gpt-image-1".to_owned()], true);
+        assert!(
+            relay[0].custom_endpoint,
+            "这一位要带出去 —— 界面全靠它决定拦不拦"
+        );
+        assert!(
+            !relay[0].image_unwired,
+            "中转站上没有「接」这回事：它可能把生图包装成聊天，那条路我们本来             就会走。说「我们还没接这家」是错的，而且会让用户以为要等我们"
         );
     }
 
@@ -879,7 +952,7 @@ mod tests {
     /// 都挑不出来」。
     #[test]
     fn 生图那一位走的是我们自己核实过的判据() {
-        let got = describe_all("alibaba", &["qwen-image-3.0".to_owned()]);
+        let got = describe_all("alibaba", &["qwen-image-3.0".to_owned()], false);
         assert_eq!(
             got[0].image_output,
             Some(true),
@@ -887,7 +960,7 @@ mod tests {
         );
 
         // 反向：看图的不是生图的
-        let vl = describe_all("alibaba", &["qwen-vl-max".to_owned()]);
+        let vl = describe_all("alibaba", &["qwen-vl-max".to_owned()], false);
         assert_ne!(
             vl[0].image_output,
             Some(true),
@@ -898,7 +971,7 @@ mod tests {
     /// 目录说能生图、但我们没接那家的协议 → 不能报告成能生图。
     #[test]
     fn 协议没接的家不报告成能生图() {
-        let got = describe_all("openai", &["gpt-image-1".to_owned()]);
+        let got = describe_all("openai", &["gpt-image-1".to_owned()], false);
         assert_ne!(
             got[0].image_output,
             Some(true),

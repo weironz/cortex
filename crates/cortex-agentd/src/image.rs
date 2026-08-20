@@ -91,6 +91,8 @@ pub async fn generate(
         }
     })?;
 
+    let custom =
+        crate::model_sources::is_custom_endpoint(&source.provider, source.base_url.as_deref());
     let images = cortex_llm::image::generate(
         &source.provider,
         &source.api_key,
@@ -101,6 +103,7 @@ pub async fn generate(
             size: req.size.clone(),
             n: req.n,
         },
+        custom,
     )
     .await
     .map_err(|e| ApiError::bad_request(format!("生图失败：{e}")))?;
@@ -162,7 +165,13 @@ fn pick<'a>(
 ) -> Result<(&'a crate::model_sources::ModelSource, String), ApiError> {
     let candidates: Vec<&crate::model_sources::ModelSource> = sources
         .iter()
-        .filter(|s| cortex_llm::image::supported(&s.provider))
+        // 两类有资格：接了原生协议的那几家，以及**任何自定义端点** ——
+        // 中转站普遍把生图包装成聊天，而端点后面是谁我们不知道，
+        // 只能试。试不出图时那条错误会原样带上它回的话
+        .filter(|s| {
+            cortex_llm::image::supported(&s.provider)
+                || crate::model_sources::is_custom_endpoint(&s.provider, s.base_url.as_deref())
+        })
         .filter(|s| want_source.is_none_or(|w| w == s.id))
         .collect();
 
@@ -178,10 +187,15 @@ fn pick<'a>(
         // 这条来源开放的型号里，哪些能生图。判据见
         // `cortex_llm::image::is_image_model` —— 目录优先，目录不认时
         // 按各家已核实的命名规则兜底（目录里 alibaba 一个生图模型都没有）
+        // ⚠️ 自定义端点上**不筛** —— `is_image_model` 问的是「厂商官方那家
+        // 接没接」，而中转站的型号在目录里查不到、provider 也说明不了什么。
+        // 按它筛的结果是一个都不剩，于是「指名一个型号」这件事在中转站上
+        // 永远失败。让用户指名的那个直接过去，画不出来时错误里有对方原话
+        let custom = crate::model_sources::is_custom_endpoint(&s.provider, s.base_url.as_deref());
         let mut usable: Vec<&String> = s
             .models
             .iter()
-            .filter(|m| cortex_llm::image::is_image_model(&s.provider, m))
+            .filter(|m| custom || cortex_llm::image::is_image_model(&s.provider, m))
             .collect();
         if let Some(want) = want_model {
             if usable.iter().any(|m| m.as_str() == want) {

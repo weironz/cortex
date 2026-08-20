@@ -534,6 +534,14 @@ pub struct ModelOption {
     pub source_label: String,
     /// 用这条来源要不要占配额。界面据此在贵的那些旁边标一句。
     pub free_of_quota: bool,
+    /// 这条来源指向的是**它自己的端点**（中转站 / 网关 / one-api / 自建），
+    /// 或者供应商就是「自定义」。
+    ///
+    /// 一为真，下面那些能力就**不是断言** —— 目录描述的是厂商官方接口，
+    /// 而端点后面是谁我们一无所知。界面据此不拦，只把目录里的话当提醒。
+    /// 详见 `cortex_proto::llm::FetchedModel::custom_endpoint`。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub custom_endpoint: bool,
     /// 给人看的名字。目录没有更好听的就等于 [`Self::id`]。
     pub display_name: String,
     /// 上下文窗口。`null` = 目录里查不到这个模型。
@@ -628,6 +636,8 @@ pub async fn models(
         "部署提供",
         // 部署那把 key 是我们付钱，所以它**要**计配额
         false,
+        // 部署那条走的是服务端自己配的供应商，不是自定义端点
+        false,
     ));
 
     // ── 用户自己加的那些 ────────────────────────────────
@@ -644,7 +654,14 @@ pub async fn models(
             .into_iter()
             .find(|p| p.id == src.provider)
             .map_or_else(|| src.provider.clone(), |p| p.display_name);
-        models.extend(describe(&src.provider, &list, &src.id, &label, true));
+        models.extend(describe(
+            &src.provider,
+            &list,
+            &src.id,
+            &label,
+            true,
+            crate::model_sources::is_custom_endpoint(&src.provider, src.base_url.as_deref()),
+        ));
     }
 
     // 自动档要挑得动才摆出来：候选不足两个时它与默认档没有区别
@@ -690,6 +707,7 @@ fn describe(
     source: &str,
     source_label: &str,
     free_of_quota: bool,
+    custom_endpoint: bool,
 ) -> Vec<ModelOption> {
     models
         .iter()
@@ -700,6 +718,7 @@ fn describe(
                 source: source.to_owned(),
                 source_label: source_label.to_owned(),
                 free_of_quota,
+                custom_endpoint,
                 display_name: info
                     .as_ref()
                     .map_or_else(|| id.clone(), |i| i.display_name.clone()),
@@ -1119,7 +1138,7 @@ mod resolve_tests {
     #[test]
     fn 目录里的能生图位与保存时的校验用同一个判据() {
         let list = ["qwen-image-plus".to_owned(), "qwen-turbo".to_owned()];
-        let out = describe("alibaba", &list, "01M0AAA", "通义千问", true);
+        let out = describe("alibaba", &list, "01M0AAA", "通义千问", true, false);
 
         for m in &out {
             assert_eq!(
@@ -1144,7 +1163,7 @@ mod resolve_tests {
             "deepseek-chat".to_owned(),
             "某个还没进目录的新型号".to_owned(),
         ];
-        let out = describe("deepseek", &list, "deployment", "部署提供", false);
+        let out = describe("deepseek", &list, "deployment", "部署提供", false, false);
 
         let known = out
             .iter()
