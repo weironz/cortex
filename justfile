@@ -387,10 +387,37 @@ test:
 # 客户端：format + analyze + test，与 CI 的 `flutter` 作业同一组命令
 flutter-check:
     cd app && dart format --output=none --set-exit-if-changed lib test
-    # `live_backend_test.dart` 会去探 127.0.0.1:5173：**本机起着 `just dev`
-    # 的话它就不跳过了**，而那几条要的是一个完整可用的部署。它们红了先看
-    # 那个环境 —— CI 上没有那个部署，所以只有本机会撞到这一条
-    cd app && flutter analyze && flutter test
+    # 这一条要与 CI 跑出**同样的结果**，而 CI 那台机器有两件本机没有的事：
+    # 没有 `.env`，也没有一个在跑的部署。两件都得在这里复现，否则
+    # `just ci` 会给出只有本机才有的红 —— 而那种红每次都要重查一遍。
+    #
+    # ⚠️ `env -u CORTEXD_TOKEN`：顶上那句 `dotenv-load` 把 `.env` 灌进
+    # **每一条 recipe**，而 `token_store_io.dart` 读这个变量的语义是
+    # 「运维已经配好了一把 token」。于是 `auth_test` 与
+    # `session_persistence_test` 里那两条「存下来的是新令牌」看见一把
+    # 自己没放进去的旧令牌，稳定红两条。
+    #
+    # 清在这里而不是从 `.env` 里删：那个变量对**跑起来**的客户端是真配置
+    # （`just dev` 之后 CLI 与桌面端都靠它免登录）。
+    #
+    # ⚠️ `--exclude-tags live`：那两个 live 套件靠「连不上 127.0.0.1:5173
+    # 就跳过」自我豁免，而**本机起着 `just dev` 时它连得上** —— 于是它们
+    # 真的去打那个后端，红不红取决于此刻那个部署是什么状态。标签本来就是
+    # 为这件事留的（见 `app/dart_test.yaml`）。
+    #
+    # 要真的跑它们：`just flutter-live`。
+    cd app && flutter analyze && env -u CORTEXD_TOKEN flutter test --exclude-tags live
+
+# 打真后端的那两个套件 —— **要先 `just dev`**
+#
+# 从 `flutter-check` 里排掉了（理由见那边），所以这里是跑它们的正路。
+#
+# 必须走 recipe 而不是直接 `flutter test test/live_backend_test.dart`：
+# 那两个套件靠 `CORTEXD_TOKEN` 认证，而那把 token 在 `.env` 里 ——
+# `dotenv-load` 只灌给 just 的 recipe，你自己的 shell 里没有。少了它的表现
+# 是**十三条整整齐齐地 401**，看起来像后端坏了。
+flutter-live:
+    cd app && flutter test --tags live
 
 # 本地跑一遍 CI 的全部检查（含客户端 —— 不含的话它与 CI 是两回事）
 ci: fmt-check lint check test flutter-check

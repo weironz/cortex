@@ -1,6 +1,16 @@
-# `live` tests need a running cortexd on 127.0.0.1:8080. They skip themselves
-# when it is absent, so they are safe to run by default; the tag exists so CI
-# can exclude them explicitly with `--exclude-tags live`.
+# `live` 套件打的是边缘那个口（127.0.0.1:5173），要一个**跑着的完整部署**。
+#
+# 它们确实会在连不上时自我跳过，但那个自我豁免只在「本机没起 dev」时成立
+# —— 而开发时本机基本一直起着 `just dev`。那时它们会真的去打那个后端，
+# 红不红取决于此刻那个部署是什么状态（.env 里的 token 过没过期、迁移跑没跑、
+# 沙箱镜像新不新），与这次改动无关。
+#
+# 所以 `just flutter-check` 用 `--exclude-tags live` 显式排掉它们，
+# 好让本地那一遍与 CI 跑出同样的结果。要真的跑，点名文件即可
+# （点名时标签不拦）：
+#
+#     cd app && flutter test test/live_backend_test.dart
+#
 tags:
   live:
-    description: Requires a running cortexd daemon.
+    description: 要一个跑着的部署（just dev），打 127.0.0.1:5173 那个边缘口。
