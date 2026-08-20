@@ -111,7 +111,12 @@ if [ "${n_app}" = 0 ]; then
 else
     say "桌面端进程" "${n_app} 个"
     # while-read 而不是 `for pid in $app_pids`：后者靠未加引号的词分割，
-    # shellcheck 会挑（SC2086），而 CI 对 scripts/*.sh 跑它
+    # 会被 SC2086 挑出来，而 CI 对 scripts/*.sh 跑静态检查。
+    #
+    # ⚠️ 这一段**不要以「shellcheck」开头换行**：以那个词起头的注释会被
+    # 当成 shellcheck 指令解析，报 SC1072/SC1073（「Expected '=' after
+    # directive key」）—— 一句中文注释把整个 CI 弄红，而本机没装它，
+    # 只有推上去才看得见。2026-08-21 踩过。
     while IFS= read -r pid; do
         [ -n "${pid}" ] || continue
         say "" "PID ${pid}  $(origin_of "${pid}")"

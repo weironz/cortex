@@ -444,8 +444,36 @@ docs-check:
     bash scripts/check-version.sh
     python3 scripts/check-doc-links.py
 
+# 运维脚本的静态检查。**与 CI 那一步同一条命令**（见 ci.yml 的 shellcheck）。
+#
+# 没装就跳过并说出来，而不是静默通过：一条无声跳过的检查会让
+# 「本地全绿」变成一个假信号 —— 而这一步只有推上去才会红，
+# 一来一回二十多分钟。2026-08-21 就是这么红的（一句中文注释以
+# 「shellcheck」开头，被当成指令解析）。
+lint-sh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # 以「shellcheck」开头的注释是**指令**，不是注释。
+    #
+    # 一句中文注释恰好断行成 `# shellcheck 会挑（SC2086）…`，shellcheck 就
+    # 报 SC1072/SC1073 并且整份文件不再检查。这一条不依赖 shellcheck 装没装，
+    # 所以放在前面 —— 它正是本机唯一能自己抓到的那种。
+    if grep -nE '^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]+' scripts/*.sh deploy/*.sh \
+        | grep -vE 'shellcheck[[:space:]]+(disable|enable|source|shell|external-sources)='; then
+        echo "✘ 上面那些注释以「shellcheck」开头，会被当成指令解析（SC1072/SC1073）。" >&2
+        echo "  换个词开头，或者把它挪到行中间。" >&2
+        exit 1
+    fi
+    if command -v shellcheck >/dev/null 2>&1; then
+        shellcheck --severity=warning --exclude=SC1091 scripts/*.sh deploy/*.sh
+        echo "✔ shellcheck 通过"
+    else
+        echo "⚠ 本机没装 shellcheck，这一步跳过了 —— CI 上它是会跑的。"
+        echo "  装上：winget install koalaman.shellcheck"
+    fi
+
 # 本地跑一遍 CI 的全部检查（含客户端 —— 不含的话它与 CI 是两回事）
-ci: fmt-check lint check test docs-check flutter-check
+ci: fmt-check lint check test docs-check lint-sh flutter-check
     @echo "全部检查通过"
 
 # ══════════════════════════════════════════════════════════
