@@ -110,16 +110,29 @@ M0–M8、N1–N3、R1–R11 全部完成，**并且在 2026-08 拆成了两个�
 **goose 与我们同构度最高，而它连状态页都没有** —— 行业押注的是诊断闭环
 （一份能贴给别人的报告），不是常驻仪表盘。
 
-排好的六条：
+排好的六条，**2026-08-20 全部做完**（落地细节与途中撞到的坑见调研文档的
+「落地进度」一节）：
 
-| | 抄谁 |
-|---|---|
-| 1. 修文案（README 的记忆承诺已过期、卸载残留没人说） | Claude Code / pi |
-| 2. `cortex doctor`（含 `--json`） | Claude Code 的双形态 + Codex 的 Notes/JSON |
-| 3. 连接页「本机 agent」一节 | Claude Code `daemon status` 的版本比对 |
-| 4. 启动诊断文件 | goose 的事件流 + Codex 的 stderr 尾部 |
-| 5. 本机口拒绝带 Origin 的请求 | Codex（防 DNS rebinding） |
-| 6. 卸载器数据目录 checkbox | Ollama（算出大小、写明路径） |
+| | 抄谁 | |
+|---|---|---|
+| 1. 修文案（README 的记忆承诺已过期、卸载残留没人说） | Claude Code / pi | ✅ `71e902b` |
+| 2. `cortex doctor`（含 `--json`） | Claude Code 的双形态 + Codex 的 Notes/JSON | ✅ `2b51f7e` |
+| 3. 连接页「本机 agent」一节 | Claude Code `daemon status` 的版本比对 | ✅ `a931b06` |
+| 4. 启动诊断文件 | goose 的事件流 + Codex 的 stderr 尾部 | ✅ `3f61c06` |
+| 5. 本机口拒绝带 Origin 的请求 | Codex（防 DNS rebinding） | ✅ `b6ea9ca` |
+| 6. 卸载器问「数据要不要一起删」 | Ollama（算出大小、写明路径） | ✅ `f799c70` |
+
+途中抓到的三个 bug 都属于同一形状 —— **只在故障路径 / 离场路径上跑的代码，
+没人验就等于没写**：
+
+- `just app-status` 用 python 读 `settings.json`，而这台机器的 python 是
+  MSIX 包装的、对 `%LOCALAPPDATA%` 走包内重定向 —— 它报出一个**看着很像
+  真的旧地址**，把「界面显示的地址是对的」读成了「配置持久化坏了」
+- 启动诊断文件把每次冷启动必然发生的一次「被 provider 重建停掉」记成
+  启动失败，开三次机就够 doctor 在**健康机器**上报崩溃循环
+- 卸载器里一句 `Format('%.2f GB', …)` 运行期抛异常，而 Inno 把
+  `CurUninstallStepChanged` 的异常当致命错误 —— **整个卸载中止，
+  程序文件一个都没删**
 
 ## 手头挂着的
 
