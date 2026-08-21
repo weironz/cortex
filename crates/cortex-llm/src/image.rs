@@ -177,7 +177,69 @@ pub fn supported(provider: &str) -> bool {
     matches!(provider, "alibaba" | "google")
 }
 
+/// 走哪条协议。
+///
+/// 抽出来是因为**「谁来满足 `n`」这个问题只有它答得了** ——
+/// 三条路里只有 DashScope 有 `n` 这个参数（见 [`Protocol::native_n`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    /// 中转站/网关：把生图包成 `/v1/chat/completions`。
+    Chat,
+    /// DashScope 原生。
+    DashScope,
+    /// Gemini。
+    Gemini,
+}
+
+impl Protocol {
+    /// 一次请求就能出多张吗。
+    ///
+    /// 只有 DashScope 的请求体里有 `n`（`parameters.n`，1–6）。另外两条
+    /// **请求里根本没有放它的地方** —— 所以「生成 3 张」在它们那儿由
+    /// [`generate`] 连发三次来兑现，而不是把这个控件画成灰的。
+    const fn native_n(self) -> bool {
+        matches!(self, Self::DashScope)
+    }
+}
+
+/// 认出这条来源该走哪条协议。
+///
+/// ⚠️ **自定义端点优先，不看 provider 写的是谁。**
+///
+/// 中转站普遍把生图包装成普通聊天：`POST /v1/chat/completions`，回一条
+/// 消息、正文是一段带图片链接的 markdown。2026-08-20 实测
+/// `api.tutujin.com` 的 `gpt-image-2` 正是这样。
+///
+/// 这种来源上 provider 字段说明不了任何事（用户多半填 `openai` 或
+/// `custom`），而厂商原生协议打过去必然 404 —— 端点既然是自定义的，
+/// 就按中转站的通行做法试。
+///
+/// [`is_image_model`] 的 `custom_endpoint` 那一位与这里是**同一条规矩**：
+/// 判定门不能拿 provider 白名单去挡分发器根本不看 provider 的那一格。
+fn protocol_of(provider: &str, custom_endpoint: bool) -> Option<Protocol> {
+    if custom_endpoint {
+        return Some(Protocol::Chat);
+    }
+    match provider {
+        "alibaba" => Some(Protocol::DashScope),
+        "google" => Some(Protocol::Gemini),
+        _ => None,
+    }
+}
+
 /// 生一张（或几张）图。
+///
+/// # `n` 由这一层兜底，而不是把控件画成灰的
+///
+/// 三条协议里只有 DashScope 的请求体带 `n`。从前另外两条**默默只出一张**：
+/// 界面上「生成数量」调到 4，回来还是 1 张 —— 一个调了没反应的控件。
+///
+/// 现在不支持的那两条由这里**并发连发 `n` 次**再把结果拼起来。并发而不是
+/// 串行：单张就要几十秒，串 4 张会顶到 `cortex-local` 那边 240s 的超时上，
+/// 而那时钱已经花掉了。
+///
+/// **部分成功要保留**：4 张回来 3 张就返回那 3 张。全都失败才报错 ——
+/// 为了一次失败把另外三张（以及那三份钱）一起丢掉，是最不该有的结果。
 ///
 /// # Errors
 /// 这家还没接、HTTP 失败、或者对方回的结构读不出图。
@@ -188,28 +250,85 @@ pub async fn generate(
     req: &ImageRequest,
     custom_endpoint: bool,
 ) -> Result<Vec<GeneratedImage>> {
-    // ⚠️ **自定义端点优先走聊天协议，不看 provider 写的是谁。**
-    //
-    // 中转站普遍把生图包装成普通聊天：`POST /v1/chat/completions`，回一条
-    // 消息、正文是一段带图片链接的 markdown。2026-08-20 实测
-    // `api.tutujin.com` 的 `gpt-image-2` 正是这样。
-    //
-    // 这种来源上 provider 字段说明不了任何事（用户多半填 `openai` 或
-    // `custom`），而厂商原生协议打过去必然 404 —— 端点既然是自定义的，
-    // 就按中转站的通行做法试。
-    if custom_endpoint {
-        return chat_protocol(provider, api_key, base_url, req).await;
-    }
-    match provider {
-        "alibaba" => dashscope(api_key, base_url, req).await,
-        "google" => gemini(api_key, base_url, req).await,
-        _ => Err(LlmError::Build {
+    let Some(protocol) = protocol_of(provider, custom_endpoint) else {
+        return Err(LlmError::Build {
             name: provider.to_string(),
             source: anyhow::anyhow!(
                 "{provider} 的生图接口还没接。现在能生图的有：\
-                 alibaba（通义千问）、google（Gemini）"
+                 alibaba（通义千问）、google（Gemini），\
+                 以及任何自己填了端点的来源（中转站/网关）"
             ),
-        }),
+        });
+    };
+
+    let want = req.n.max(1);
+    if protocol.native_n() || want == 1 {
+        return once(protocol, provider, api_key, base_url, req).await;
+    }
+
+    // 每次都发同一份请求（`n` 置 1）—— 同样的提示词连发几次拿到的是几张
+    // 变体，那正是「生成数量」这个控件的本意
+    let one = ImageRequest {
+        n: 1,
+        ..req.clone()
+    };
+    let results = futures::future::join_all(
+        (0..want).map(|_| once(protocol, provider, api_key, base_url, &one)),
+    )
+    .await;
+
+    let images = collect(results, provider, want)?;
+    // **记下实际发了几次** —— 账单是按次算的，而这一层是唯一知道
+    // 「一次请求变成了几次调用」的地方
+    tracing::info!(
+        model = %req.model,
+        calls = want,
+        images = images.len(),
+        "这条协议一次只出一张，连发了几次凑够数量"
+    );
+    Ok(images)
+}
+
+/// 把连发几次的结果归成一份。
+///
+/// **部分成功要保留**：4 次回来 3 张就给那 3 张。为了一次失败把另外三张
+/// （以及那三份钱）一起丢掉，是这条路最不该有的结果。全都空了才报错，
+/// 且报的是**第一条**真实错误 —— 一句「都失败了」帮不了任何人排查。
+fn collect(
+    results: Vec<Result<Vec<GeneratedImage>>>,
+    provider: &str,
+    want: u8,
+) -> Result<Vec<GeneratedImage>> {
+    let mut images = Vec::with_capacity(want as usize);
+    let mut first_error = None;
+    for r in results {
+        match r {
+            Ok(mut got) => images.append(&mut got),
+            Err(e) if first_error.is_none() => first_error = Some(e),
+            Err(_) => {}
+        }
+    }
+    if images.is_empty() {
+        return Err(first_error.unwrap_or_else(|| LlmError::Build {
+            name: provider.to_string(),
+            source: anyhow::anyhow!("连发 {want} 次都没拿到图"),
+        }));
+    }
+    Ok(images)
+}
+
+/// 发一次。**`n` 的兜底不在这里** —— 见 [`generate`]。
+async fn once(
+    protocol: Protocol,
+    provider: &str,
+    api_key: &str,
+    base_url: Option<&str>,
+    req: &ImageRequest,
+) -> Result<Vec<GeneratedImage>> {
+    match protocol {
+        Protocol::Chat => chat_protocol(provider, api_key, base_url, req).await,
+        Protocol::DashScope => dashscope(api_key, base_url, req).await,
+        Protocol::Gemini => gemini(api_key, base_url, req).await,
     }
 }
 
@@ -1140,5 +1259,189 @@ mod chat_protocol_tests {
         // data: URI 与相对路径抓不下来，直接忽略而不是当成链接
         assert!(image_urls("![](data:image/png;base64,AAAA)").is_empty());
         assert!(image_urls("![](/local/a.png)").is_empty());
+    }
+}
+
+/// 「生成 n 张」这件事在**不支持 n 的那两条协议**上到底成没成立。
+///
+/// 纯函数那一半（[`collect`]）盯归并，wiremock 那一半盯**发了几次** ——
+/// 后者是这条路的全部意义，而它只有对着一个真的 HTTP 端点才验得出来。
+#[cfg(test)]
+mod fanout_tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn req(n: u8) -> ImageRequest {
+        ImageRequest {
+            prompt: "一只戴眼镜的柴犬".into(),
+            model: "gpt-image-2".into(),
+            size: None,
+            n,
+        }
+    }
+
+    /// 中转站回一条带图链接的普通聊天消息。
+    fn chat_reply(url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "choices": [{ "message": { "content": format!("![]({url})") } }]
+        })
+    }
+
+    #[test]
+    fn 只有_dashscope_自己会出多张() {
+        assert!(Protocol::DashScope.native_n());
+        assert!(
+            !Protocol::Chat.native_n() && !Protocol::Gemini.native_n(),
+            "这两条的请求体里根本没有放 n 的地方 —— \
+             说它们支持，表现就是「数量调到 4，回来还是 1 张」"
+        );
+    }
+
+    #[test]
+    fn 自定义端点认成聊天协议_不看_provider_写的是谁() {
+        assert_eq!(protocol_of("openai", true), Some(Protocol::Chat));
+        assert_eq!(protocol_of("alibaba", true), Some(Protocol::Chat));
+        assert_eq!(protocol_of("alibaba", false), Some(Protocol::DashScope));
+        assert_eq!(protocol_of("google", false), Some(Protocol::Gemini));
+        assert_eq!(
+            protocol_of("openai", false),
+            None,
+            "OpenAI 官方生图协议没接 —— 这里放行等于把失败推迟到用户点下按钮"
+        );
+    }
+
+    #[test]
+    fn 部分失败要保住已经画出来的那些() {
+        let got = collect(
+            vec![
+                Ok(vec![GeneratedImage::Url("a".into())]),
+                Err(LlmError::Build {
+                    name: "x".into(),
+                    source: anyhow::anyhow!("上游 500"),
+                }),
+                Ok(vec![GeneratedImage::Url("b".into())]),
+            ],
+            "openai",
+            3,
+        )
+        .expect("三次里成了两次，就该给这两张");
+        assert_eq!(
+            got.len(),
+            2,
+            "为了一次失败把另外两张（以及那两份钱）一起丢掉，\
+             是这条路最不该有的结果"
+        );
+    }
+
+    #[test]
+    fn 全都失败时报的是第一条真实错误() {
+        let e = collect(
+            vec![
+                Err(LlmError::Build {
+                    name: "x".into(),
+                    source: anyhow::anyhow!("余额不足"),
+                }),
+                Err(LlmError::Build {
+                    name: "x".into(),
+                    source: anyhow::anyhow!("上游 500"),
+                }),
+            ],
+            "openai",
+            2,
+        )
+        .expect_err("一张都没有就该报错");
+        assert!(
+            e.to_string().contains("余额不足"),
+            "一句「都失败了」帮不了任何人排查，要把对方的原话带出来。实际：{e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn 聊天协议上生成三张真的发了三次请求() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(chat_reply("https://x.site/a.png")),
+            )
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let got = generate(
+            "openai",
+            "k",
+            Some(&format!("{}/v1", server.uri())),
+            &req(3),
+            true,
+        )
+        .await
+        .expect("三次都回了图");
+
+        assert_eq!(
+            got.len(),
+            3,
+            "「生成数量」调到 3 就该回 3 张 —— 回 1 张的表现是一个调了没反应的控件"
+        );
+        // `expect(3)` 在 server drop 时校验：少发或多发都会 panic
+    }
+
+    #[tokio::test]
+    async fn 只要一张时不走连发那条路() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(chat_reply("https://x.site/a.png")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let got = generate(
+            "openai",
+            "k",
+            Some(&format!("{}/v1", server.uri())),
+            &req(1),
+            true,
+        )
+        .await
+        .expect("一次就够");
+        assert_eq!(got.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn 三次里坏一次_仍然拿得到另外两张() {
+        let server = MockServer::start().await;
+        // wiremock 按注册顺序匹配，`up_to_n_times` 让第一条只答一次
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(chat_reply("https://x.site/a.png")),
+            )
+            .mount(&server)
+            .await;
+
+        let got = generate(
+            "openai",
+            "k",
+            Some(&format!("{}/v1", server.uri())),
+            &req(3),
+            true,
+        )
+        .await
+        .expect("坏了一次不该让整批失败");
+        assert_eq!(
+            got.len(),
+            2,
+            "钱已经花在那两张上了，不该因为第三张失败就一起丢掉"
+        );
     }
 }

@@ -135,7 +135,14 @@ server {
     # 与上面那段的配置逐字相同（SSE 关缓冲、30 分钟读超时），只有上游不同。
     # 不合并成一段再按前缀选上游：nginx 里那么写要引一个 map，而两段各自
     # 完整、读得出「这条归谁」，比省下十行重要。
-    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes|blobs|import|sandbox-snapshots|confirmations|delegated-tokens|agents|runs)(/|$) {
+    #
+    # ⚠️ **加新端点时这份清单要跟着加，而生产不用。**
+    #
+    # 生产（traefik）是 deny-list：`/api` 底下除 memory / mcp 之外全归 agentd
+    # （`deploy/docker-compose.yml:346`）。dev 这条是 allow-list，漏一条的
+    # 表现是**回 200 + index.html** —— 看起来像成功，实际落在了下面那个 SPA
+    # 回落上。2026-08-22 加 `/images` 时正撞上这个。
+    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes|blobs|images|import|sandbox-snapshots|confirmations|delegated-tokens|agents|runs)(/|$) {
         proxy_pass http://agentd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;

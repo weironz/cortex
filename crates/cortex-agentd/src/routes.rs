@@ -154,6 +154,9 @@ protected_routes! {
     //
     // 图在这条路上就抓下来入库了 —— 供应商给的 URL 只活 24 小时
     "/llm/image" [POST] => post(crate::image::generate),
+    // 画廊。**不在 `/llm` 下面** —— 那个前缀底下是「去问模型」，
+    // 而这条只是读自己库里的一张表，一次外部调用都不发
+    "/images" [GET] => get(crate::image::gallery),
     // 自带 API key。三个动作一条路径：看状态 / 存 / 撤下。
     //
     // 它跟着 `/llm/stream` 一起来 —— 「谁的 key」与「在哪花」必须由同一个

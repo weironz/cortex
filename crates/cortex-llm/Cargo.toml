@@ -41,3 +41,7 @@ serde_json.workspace = true
 [dev-dependencies]
 dotenvy.workspace = true
 tracing-subscriber.workspace = true
+# 「生成 3 张时真的发了 3 次请求」只有对着一个真的 HTTP 端点才验得出来 ——
+# 纯函数测试能盯住归并逻辑，盯不住「发了几次」，而后者正是这条路的全部意义。
+# 与 `cortex-providers` 钉同一版
+wiremock = "0.6"

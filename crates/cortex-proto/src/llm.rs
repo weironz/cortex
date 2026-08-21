@@ -309,6 +309,44 @@ pub struct GeneratedImageRef {
     pub mime: String,
 }
 
+/// 画廊里的一张 —— `GET /images` 的一项。
+///
+/// # 为什么带着提示词一起回
+///
+/// 「以此为提示词重画」是这一页唯一的再生产动作，而它要的就是这句话。
+/// 让客户端去 episode 里翻的话，图片页直接画的那些**根本没有 episode**。
+///
+/// `model` / `source` 是**实际用的**那两个（请求可以不指名，由服务端挑）——
+/// 画在图上是为了回答「这张多少钱、还画得出来吗」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GalleryImage {
+    pub id: String,
+    pub hash: String,
+    pub prompt: String,
+    pub model: String,
+    pub source: String,
+    /// `宽*高`。`None` = 当时没指定尺寸。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    /// 在哪条会话里画的。`None` = 从图片页直接画的。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// RFC 3339。
+    pub created_at: String,
+}
+
+/// `GET /images` 的响应。游标形状与 `sessionDetail` 一致。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Gallery {
+    pub items: Vec<GalleryImage>,
+    /// 还有更早的吗。**不靠「返回条数 == limit」去猜** ——
+    /// 恰好整除时那个猜法会多翻一页空的，界面上是「加载中…」闪一下
+    pub has_more: bool,
+    /// 下一页从这里往前翻（最后一项的 id）。`has_more` 为假时是 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
 /// `POST /settings/model-sources/{id}/models` 的响应。
 ///
 /// # 为什么不只回一串名字

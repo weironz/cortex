@@ -41,6 +41,11 @@ pub struct ImageRequest {
     pub size: Option<String>,
     #[serde(default = "one")]
     pub n: u8,
+    /// 在哪条会话里画的。**只进画廊，不影响生成** ——
+    /// 有了它，画廊里那张图才回答得了「这是我在哪儿画的」。
+    /// 图片页直接画的不传（画廊里那一列就是 NULL）。
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 const fn one() -> u8 {
@@ -138,6 +143,35 @@ pub async fn generate(
         });
     }
 
+    // ── 记进画廊 ────────────────────────────────────────────
+    //
+    // **只有这一个记录点**：图片页直接调这条路，agent 的 `generate_image`
+    // 工具也是打这条。两处各记一遍的下场是漏改一处不会有任何测试红，
+    // 只是某一类图静默地不进画廊。
+    //
+    // ⚠️ 记不上**不让整次生成失败**。图已经画出来也入库了，钱花掉了 ——
+    // 为了一条画廊记录把它退回去，是在拿最贵的那一步给最便宜的那一步陪葬。
+    // 记 WARN，让排查时看得见。
+    for img in &stored {
+        if let Err(e) = sqlx::query(
+            "INSERT INTO generated_images
+                 (id, blob_hash, prompt, model, source, size, session_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(cortex_core::Id::new().to_string())
+        .bind(&img.hash)
+        .bind(prompt)
+        .bind(&model)
+        .bind(&source.id)
+        .bind(req.size.as_deref())
+        .bind(req.session_id.as_deref())
+        .execute(store.pool())
+        .await
+        {
+            tracing::warn!(error = %e, hash = %img.hash, "图画出来了，但没进画廊");
+        }
+    }
+
     tracing::info!(
         model = %model,
         source = %source.id,
@@ -149,6 +183,108 @@ pub async fn generate(
         model,
         source: source.id.clone(),
     }))
+}
+
+/// 一页画廊最多多少张。
+///
+/// 缩略图是按哈希逐张取字节的（与附件同一条路），一页 60 张就是 60 次
+/// 并发请求 —— 再多，第一屏反而更慢。
+const GALLERY_PAGE_MAX: i64 = 60;
+
+#[derive(Deserialize)]
+pub struct GalleryQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// 从这个 id **之前**接着往回翻（不含它）。
+    #[serde(default)]
+    pub before: Option<String>,
+}
+
+/// `GET /images` —— 画廊，按时间倒序翻页。
+///
+/// # 为什么按 `id` 排序，而不是 `created_at`
+///
+/// 连发 n 次凑数量那条路会在**同一毫秒**里插好几行。按时间戳翻页时，
+/// 那几行的相对顺序不定，游标落在中间就会重复或漏掉。
+///
+/// `id` 是 ULID：域上带 `COLLATE "C"`（见 init 迁移），逐字节比较就是生成
+/// 顺序，且**唯一**。于是 `id < 游标` + `ORDER BY id DESC` 在构造上就不可能
+/// 重复或漏行 —— 这比「用 `(created_at, id)` 做行比较再写测试盯住它」强：
+/// 那个失败模式压根不存在了，也不需要额外的索引（主键就是它）。
+///
+/// `created_at` 因此只是**展示**用的一列。
+///
+/// # Errors
+/// 这个部署没有数据库。
+pub async fn gallery(
+    State(st): State<AgentState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<GalleryQuery>,
+) -> Result<Json<cortex_proto::llm::Gallery>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+    let store = tenant
+        .store()
+        .map_err(|e| ApiError::unsupported(format!("这个部署没有画廊：{e}")))?;
+
+    let limit = q.limit.unwrap_or(30).clamp(1, GALLERY_PAGE_MAX);
+    // 多取一条来回答「还有没有」。靠「取回来的条数 == limit」去猜的话，
+    // 恰好整除时会多翻一页空的 —— 界面上是「加载中…」闪一下
+    let rows: Vec<GalleryRow> = sqlx::query_as(
+        "SELECT id, blob_hash, prompt, model, source, size, session_id, created_at
+           FROM generated_images
+          WHERE $2::TEXT IS NULL OR id < $2
+          ORDER BY id DESC
+          LIMIT $1",
+    )
+    .bind(limit + 1)
+    .bind(q.before.as_deref())
+    .fetch_all(store.pool())
+    .await
+    .map_err(|e| ApiError::internal(format!("读画廊失败：{e}")))?;
+
+    let has_more = rows.len() as i64 > limit;
+    let items: Vec<cortex_proto::llm::GalleryImage> = rows
+        .into_iter()
+        .take(limit as usize)
+        .map(GalleryRow::into_dto)
+        .collect();
+    let next_cursor = if has_more {
+        items.last().map(|i| i.id.clone())
+    } else {
+        None
+    };
+    Ok(Json(cortex_proto::llm::Gallery {
+        items,
+        has_more,
+        next_cursor,
+    }))
+}
+
+#[derive(sqlx::FromRow)]
+struct GalleryRow {
+    id: String,
+    blob_hash: String,
+    prompt: String,
+    model: String,
+    source: String,
+    size: Option<String>,
+    session_id: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl GalleryRow {
+    fn into_dto(self) -> cortex_proto::llm::GalleryImage {
+        cortex_proto::llm::GalleryImage {
+            id: self.id,
+            hash: self.blob_hash,
+            prompt: self.prompt,
+            model: self.model,
+            source: self.source,
+            size: self.size,
+            session_id: self.session_id,
+            created_at: self.created_at.to_rfc3339(),
+        }
+    }
 }
 
 /// 挑一条能生图的来源与一个型号。

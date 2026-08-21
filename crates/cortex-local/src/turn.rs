@@ -979,7 +979,11 @@ impl ToolHost for LocalHost {
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        match self.remote.generate_image(prompt, size).await {
+        match self
+            .remote
+            .generate_image(prompt, size, &self.session_id)
+            .await
+        {
             Ok(got) if !got.images.is_empty() => {
                 // 攒起来，轮次结束时挂到 assistant episode 上
                 if let Ok(mut d) = self.drawn.lock() {

@@ -172,6 +172,7 @@ impl Remote {
         &self,
         prompt: &str,
         size: Option<&str>,
+        session_id: &str,
     ) -> Result<GeneratedImages> {
         let resp = self
             .auth(self.http.post(self.url("/llm/image")))
@@ -180,6 +181,9 @@ impl Remote {
                 "prompt": prompt,
                 "size": size,
                 "n": 1,
+                // 只进画廊，不影响生成 —— 有了它，画廊里那张图才回答得了
+                // 「这是我在哪条会话里画的」
+                "session_id": session_id,
             }))
             .send()
             .await
