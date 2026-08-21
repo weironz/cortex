@@ -221,6 +221,56 @@ void main() {
       expect(find.textContaining('计入你的配额'), findsOneWidget);
     });
 
+    testWidgets('部署那条拉不到「实时」不算出错，自带那条算', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+
+      // mock 后端永远回 live=false + note，两条来源走的是同一份响应 ——
+      // 所以这一条测的纯粹是**客户端怎么定性**
+      await _open(tester, kDeploymentSource);
+      await tester.tap(find.text('获取模型列表'));
+      for (var i = 0; i < 8; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(
+        find.byKey(const ValueKey('banner:note')),
+        findsOneWidget,
+        reason:
+            '部署那条没有 key 可以拿去问，live 恒为 false —— '
+            '把这句恒真的说明画成红色，等于每点一次就报一次假警',
+      );
+      expect(
+        find.byKey(const ValueKey('banner:error')),
+        findsNothing,
+        reason: '它没有失败，只是本来就这么工作',
+      );
+
+      // 拉完会顺手弹出选型抽屉，它盖住了左列 —— 先关掉
+      await tester.tap(find.byTooltip('关闭'));
+      for (var i = 0; i < 8; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      // 换一条来源：上一条的横幅**必须消失**，否则读起来像「这一条出问题了」
+      await _open(tester, _kAlibaba);
+      expect(find.byKey(const ValueKey('banner:note')), findsNothing);
+
+      await tester.tap(find.text('获取模型列表'));
+      for (var i = 0; i < 8; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(
+        find.byKey(const ValueKey('banner:error')),
+        findsOneWidget,
+        reason:
+            '自带 key 那条本该问得到供应商却回落到内置清单 —— '
+            '那份清单可能与他的账号毫无关系，这个必须警示',
+      );
+      expect(find.byKey(const ValueKey('banner:note')), findsNothing);
+    });
+
     testWidgets('选中自带那条之后能删能改', (tester) async {
       final api = _Api();
       final c = _boot(api);

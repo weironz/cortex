@@ -72,6 +72,20 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   bool _busy = false;
   Object? _error;
 
+  /// 「不是失败，但你该知道」那一类的话。
+  ///
+  /// # 为什么不跟 `_error` 挤一个槽位
+  ///
+  /// 挤过。于是「部署提供」上每点一次「获取模型列表」就红一行 ——
+  /// 而那一行说的是「这条是服务端配的，型号来自它的供应商定义」，
+  /// 一个**恒真**的事实：那条来源没有 key 可以拿去问，`live` 永远是
+  /// false。红色被这样磨钝之后，真拉不动的那一次也就没人看了。
+  ///
+  /// 判据是**本该做到却没做到**：用户自己那条来源回落到内置清单，
+  /// 是拉不动（那份清单未必与他的账号一致，该警示）；部署那条从来
+  /// 就不拉，那是它的工作方式。
+  String? _note;
+
   /// 上一次连通性检查的结果。换一条来源就清掉 —— 一条属于 A 的结论
   /// 挂在 B 的详情页上，比没有结论更糟。
   SourceCheck? _check;
@@ -139,8 +153,20 @@ class _ModelPageState extends ConsumerState<ModelPage> {
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Text(
                     '$_error',
+                    key: const ValueKey('banner:error'),
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.error,
+                    ),
+                  ),
+                ),
+              if (_note != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    _note!,
+                    key: const ValueKey('banner:note'),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.cortex.foregroundTertiary,
                     ),
                   ),
                 ),
@@ -201,8 +227,11 @@ class _ModelPageState extends ConsumerState<ModelPage> {
 
   void _select(_Selection id) => setState(() {
     _selected = id;
-    // 换页就把上一条的检查结论丢掉
+    // 换页就把上一条的结论全丢掉。**三样都要清**：一条属于 A 的
+    // 报错挂在 B 的详情页上，读起来就是「B 出问题了」—— 比没有结论更糟
     _check = null;
+    _error = null;
+    _note = null;
   });
 
   Widget _hint(String text, {VoidCallback? onRetry}) => Padding(
@@ -225,6 +254,7 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     setState(() {
       _busy = true;
       _error = null;
+      _note = null;
     });
     try {
       await body();
@@ -465,13 +495,23 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     setState(() {
       _busy = true;
       _error = null;
+      _note = null;
     });
     try {
       final got = await ref.read(cortexApiProvider).fetchSourceModels(s.id);
       // 回落时**必须说出来**：那份清单是编译期写死的，可能与这个账号
-      // 真正开通的东西毫无关系
+      // 真正开通的东西毫无关系。
+      //
+      // 但「部署提供」那条本来就没有 key 可以拿去问，`live` 恒为 false ——
+      // 那不是回落，是它的工作方式，所以走中性的 [_note]（见那里的判据）
       if (mounted && !got.live && got.note != null) {
-        setState(() => _error = got.note);
+        setState(() {
+          if (s.builtin) {
+            _note = got.note;
+          } else {
+            _error = got.note;
+          }
+        });
       }
       ref.invalidate(modelSourcesProvider);
       // 拉完**顺手把抽屉打开**：点这个按钮的人要的不是「列表更新了」
