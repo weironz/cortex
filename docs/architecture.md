@@ -810,6 +810,55 @@ key 就全免，于是一个配了 key 的人走部署那条时我们替他付�
 而不是 `catalog`：为空时拿 `models` 兜底，否则一个新客户端连上老服务端
 会把一条**配着型号的**来源画成「还没有型号」，而用户上一分钟还在用它聊天。
 
+#### 生图：`n` 由谁满足，图去哪儿找
+
+##### `n` 在两条协议上是**连发**凑出来的
+
+三条生图协议里只有 DashScope 的请求体带 `n`（`parameters.n`，1–6）。
+Gemini 与中转站的聊天协议**请求里根本没有放它的地方** —— 从前它们默默只出
+一张，界面上「生成数量」调到 4 回来还是 1 张，一个调了没反应的控件。
+
+2026-08-22 起由 `cortex_llm::image::generate` 兜底：不支持的那两条**并发**
+连发 `n` 次再合并（`Protocol::native_n` 是那个判据）。
+
+* 并发不是串行：单张几十秒，串 4 张会顶到 `cortex-local` 那边 240s 的超时上，
+  而那时钱已经花掉了
+* **部分成功要保留**：4 次回来 3 张就给那 3 张。全空才报错，且报**第一条
+  真实错误** —— 一句「都失败了」帮不了任何人排查
+* 实际发了几次要记 log，否则账单对不上
+
+界面那侧必须说出来：非 DashScope 的来源上，`n` 张就是 n 次调用、n 份钱、
+n 倍的等待（见 [design.md](design.md) 第十一节）。
+
+##### `generated_images`：这张图是哪句提示词画出来的
+
+生成的图作为附件挂在 assistant 消息上（`episode_blobs`），那张表回答不了
+两件事，而这两件正是画廊存在的理由：
+
+1. **哪句提示词画出了它** —— 「以此为提示词重画」要的就是那句话
+2. **图片页直接画的图根本没有 episode**，反推的结果是它们一张都不在画廊里
+
+所以是一张新表（`migrations/20260822000001_generated_images.sql`），
+**记录点只有一个**：`cortex-agentd` 的 `POST /llm/image`。图片页直接调这条，
+agent 的 `generate_image` 工具也是打这条 —— 两处各记一遍的下场是漏改一处
+不会有任何测试红，只是某一类图静默地不进画廊。
+
+⚠️ **记不上不让整次生成失败**：图已经画出来也入库了，钱花掉了。记 WARN。
+
+**不进 `sync_log`**：它与 `model_sources` / `llm_keys` 同类，客户端按需 GET。
+进 sync 要连带 `cortex-store` 的 `table::ALL` 与 `SyncPayload` 一起改
+（漏一支会让整条 `/sync` 断掉），而画廊不需要实时推送。
+
+`GET /images` 的游标**按 `id` 不按 `created_at`**：连发 n 次会在同一毫秒插
+好几行，按时间戳翻页那几行会重复或漏掉。`id` 是 ULID，域上带 `COLLATE "C"`
+（逐字节即生成顺序）且唯一 —— 单列游标在构造上就没有那个失败模式，
+也不需要额外索引（主键就是它）。`created_at` 因此只是展示用的一列。
+
+⚠️ **dev 的 nginx 是 allow-list，生产的 traefik 是 deny-list。**
+加 `/images` 时它一开始落到了 SPA 回落上（**回 200 + index.html**，看起来像
+成功）。生产那侧 `/api` 除 memory/mcp 外全归 agentd，不用动 —— 这条不对称
+写在 `scripts/docker/nginx.dev.conf.template` 那份清单的注释里。
+
 ##### `POST /settings/model-sources/{id}/check`：真发一次请求
 
 明文 key 从不下发（只回后四位），所以「我填对了没有」这件事**客户端答不了**，

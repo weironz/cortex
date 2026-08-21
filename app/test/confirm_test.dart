@@ -476,6 +476,7 @@ class _ConfirmApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        ImagesUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,

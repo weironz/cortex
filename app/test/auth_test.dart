@@ -538,6 +538,7 @@ class _GateApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        ImagesUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,

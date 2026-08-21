@@ -370,6 +370,58 @@ final layoutProvider = NotifierProvider<LayoutNotifier, LayoutState>(
   LayoutNotifier.new,
 );
 
+/// 中间那一大栏现在是哪个「地方」。
+///
+/// # 为什么不塞进 [LayoutState]
+///
+/// 那个类回答的是**两侧怎么排**（收起没有、右边画谁），而这个回答的是
+/// **我在哪儿**。合并的代价很具体：`LayoutState` 有四处构造点，每一处
+/// 都得顺手把当前视图带上，而「收起左栏」与「我在画廊里」之间没有任何关系 ——
+/// 漏带一处的表现是收个侧栏就被弹回聊天。
+///
+/// # 为什么是枚举而不是 `bool isImages`
+///
+/// 与 [RightPanel] 同一条理由：下一个「地方」进来时（roadmap 里排着的
+/// 资料库），bool 那条路要把每个调用点改一遍。
+enum MainView {
+  chat,
+  images;
+
+  static MainView fromWire(String? s) =>
+      MainView.values.where((v) => v.name == s).firstOrNull ?? MainView.chat;
+}
+
+/// 在哪个地方，跨重启记住。
+///
+/// 持久化的理由与侧栏折叠同源：切到画廊的人多半要在那儿待一会儿，
+/// 每次开窗都弹回聊天，等于这个入口只在当前这个窗口有效。
+class MainViewNotifier extends Notifier<MainView> {
+  static const String _key = 'main_view';
+
+  @override
+  MainView build() {
+    Future.microtask(_restore);
+    return MainView.chat;
+  }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    final v = MainView.fromWire(saved[_key]);
+    if (v != state) state = v;
+  }
+
+  void go(MainView view) {
+    if (state == view) return;
+    state = view;
+    unawaited(ref.read(settingsPatcherProvider)(_key, view.name));
+  }
+}
+
+final mainViewProvider = NotifierProvider<MainViewNotifier, MainView>(
+  MainViewNotifier.new,
+);
+
 class PermissionModeNotifier extends Notifier<PermissionMode> {
   static const String _key = 'permission_mode';
 

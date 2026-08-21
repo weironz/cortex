@@ -10,6 +10,7 @@ import '../models/model_role.dart';
 import '../models/mcp.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
+import '../models/generated_image.dart';
 import '../models/chat_event.dart';
 import '../models/chat_session.dart';
 import '../models/episode.dart';
@@ -545,6 +546,35 @@ abstract interface class CortexApi {
   /// having to know which backend they are on.
   Future<Uint8List> blobBytes(String hash);
 
+  /// `GET /blobs/{hash}/url` —— 一条**会过期**的直链，给「复制链接」用。
+  ///
+  /// 与 [blobBytes] 是两件事：那条是**我自己要看**（中转，永远能用），
+  /// 这条是**发给别人**（直链，对象存储签的，十五分钟）。
+  ///
+  /// 部署用本地文件系统当对象存储时签不出来，服务端回 501 ——
+  /// 界面据此把按钮置灰**并说明**，而不是让它点下去弹一句红字。
+  Future<BlobUrl> blobUrl(String hash);
+
+  /// `POST /llm/image` —— 画几张图，回它们的 blob 哈希。
+  ///
+  /// # 为什么只回哈希
+  ///
+  /// 图在服务端就抓下来入库了（供应商给的链接只活 24 小时）。取图与附件
+  /// 走同一条路（[blobBytes]），所以这里不需要第二种「图片从哪来」。
+  ///
+  /// 提示词、型号、时间这些由画廊（[gallery]）回答 —— 画完刷一次即可，
+  /// 一份数据一个来源。
+  Future<List<String>> generateImages({
+    required String prompt,
+    String? model,
+    String? source,
+    String? size,
+    int n = 1,
+  });
+
+  /// `GET /images` —— 画廊，按时间倒序翻页。
+  Future<Gallery> gallery({int limit, String? before});
+
   /// `GET /sandbox/workspace.tar` — 把云沙箱的整个工作区打包取回来。
   ///
   /// 没有这条的话，agent 在容器卷里写出来的东西**用户永远拿不到**：
@@ -700,6 +730,27 @@ mixin RunAttachUnsupported {
   Stream<ChatEvent> attachChat(String sessionId) => Stream<ChatEvent>.error(
     const CortexApiException('这个后端没有可重挂的轮次。', statusCode: 404),
   );
+}
+
+/// 给测试替身用：这个后端不画图，也没有画廊。
+mixin ImagesUnsupported {
+  static const _absent = CortexApiException('这个后端不画图。', statusCode: 404);
+
+  Future<BlobUrl> blobUrl(String hash) async => throw _absent;
+
+  Future<List<String>> generateImages({
+    required String prompt,
+    String? model,
+    String? source,
+    String? size,
+    int n = 1,
+  }) async => throw _absent;
+
+  /// 画廊回**空**而不是抛：一个「还没画过图」的账号本来就是空的，
+  /// 而这里的替身多半只是不关心图片这一块。抛错会让每个用它的测试
+  /// 都被迫处理一个与它无关的异常。
+  Future<Gallery> gallery({int limit = 30, String? before}) async =>
+      const Gallery();
 }
 
 mixin LocalMcpUnsupported {

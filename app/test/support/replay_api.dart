@@ -42,6 +42,7 @@ class ReplayApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        ImagesUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,

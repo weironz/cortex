@@ -1,0 +1,110 @@
+/// 左栏顶上那一小块导航，以及它切换的那个「地方」。
+///
+/// # 盯住的两件事
+///
+/// 1. **点会话要回聊天。** 人在画廊里点一条会话，要的是去看那条会话。
+///    停在原地的表现是「点了没反应」—— 与 2026-08-21 修的那个部署提供
+///    型号开关是同一类 bug。
+/// 2. **「新建会话」不参与选中态。** 它是一个动作不是一个地方，
+///    画成选中会让人以为「我现在在新建会话这一页」。
+library;
+
+import 'package:cortex_app/api/mock_cortex_api.dart';
+import 'package:cortex_app/core/app_config.dart';
+import 'package:cortex_app/features/shell/widgets/nav_block.dart';
+import 'package:cortex_app/state/app_providers.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+class _MockConfig extends AppConfigNotifier {
+  @override
+  AppConfig build() =>
+      const AppConfig(useMock: true, baseUrl: 'http://127.0.0.1:8080');
+}
+
+/// 记下写进设置里的键值 —— 「跨重启记住」只有这么验得出来。
+final Map<String, String> _written = {};
+
+ProviderContainer _boot() => ProviderContainer(
+  overrides: [
+    appConfigProvider.overrideWith(_MockConfig.new),
+    cortexApiProvider.overrideWithValue(MockCortexApi(instant: true)),
+    settingsReaderProvider.overrideWithValue(
+      () async => const <String, String>{},
+    ),
+    settingsWriterProvider.overrideWithValue((_) async {}),
+    settingsPatcherProvider.overrideWithValue((k, v) async {
+      _written[k] = v;
+    }),
+  ],
+);
+
+Future<void> _pump(WidgetTester tester, ProviderContainer c) async {
+  await tester.pumpWidget(
+    UncontrolledProviderScope(
+      container: c,
+      child: const MaterialApp(
+        home: Scaffold(body: SizedBox(width: 264, child: NavBlock())),
+      ),
+    ),
+  );
+  for (var i = 0; i < 6; i++) {
+    await tester.pump(const Duration(milliseconds: 60));
+  }
+}
+
+void main() {
+  setUp(_written.clear);
+
+  testWidgets('点「图片」把主区切过去，并记进设置', (tester) async {
+    final c = _boot();
+    addTearDown(c.dispose);
+    await _pump(tester, c);
+
+    expect(c.read(mainViewProvider), MainView.chat, reason: '默认在聊天');
+
+    await tester.tap(find.text('图片'));
+    await tester.pump();
+
+    expect(c.read(mainViewProvider), MainView.images);
+    expect(
+      _written['main_view'],
+      'images',
+      reason:
+          '切到画廊的人多半要在那儿待一会儿 —— '
+          '每次开窗都弹回聊天，等于这个入口只在当前这个窗口有效',
+    );
+  });
+
+  testWidgets('点「新建会话」回到聊天，而且它自己不显示成选中', (tester) async {
+    final c = _boot();
+    addTearDown(c.dispose);
+    await _pump(tester, c);
+
+    c.read(mainViewProvider.notifier).go(MainView.images);
+    await tester.pump();
+
+    await tester.tap(find.text('新建会话'));
+    await tester.pump();
+
+    expect(
+      c.read(mainViewProvider),
+      MainView.chat,
+      reason: '新建了一条会话却停在画廊上，看起来就是点了没反应',
+    );
+  });
+
+  group('MainView.fromWire', () {
+    test('认不出来的值退回聊天，而不是崩', () {
+      expect(MainView.fromWire('images'), MainView.images);
+      expect(MainView.fromWire('chat'), MainView.chat);
+      expect(
+        MainView.fromWire('memory'),
+        MainView.chat,
+        reason: '存过一个后来被删掉的地方的老用户，要落回一个一定存在的地方',
+      );
+      expect(MainView.fromWire(null), MainView.chat);
+    });
+  });
+}

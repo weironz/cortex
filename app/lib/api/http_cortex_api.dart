@@ -16,6 +16,7 @@ import '../models/model_role.dart';
 import '../models/mcp.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
+import '../models/generated_image.dart';
 import '../models/chat_event.dart';
 import '../models/chat_session.dart';
 import '../models/episode.dart';
@@ -1609,6 +1610,42 @@ class HttpCortexApi implements CortexApi {
     }
     return response.bodyBytes;
   }
+
+  @override
+  Future<BlobUrl> blobUrl(String hash) async => BlobUrl.fromJson(
+    await _getJson('/blobs/${Uri.encodeComponent(hash)}/url'),
+  );
+
+  @override
+  Future<List<String>> generateImages({
+    required String prompt,
+    String? model,
+    String? source,
+    String? size,
+    int n = 1,
+  }) async {
+    final body = await _postJson('/llm/image', {
+      'prompt': prompt,
+      // 三个都用 `?`：null 就整个键不出现，而服务端那侧「键不出现」
+      // 正是「你替我挑」—— 传 null 进去会被当成一个显式的空值
+      'model': ?model,
+      'source': ?source,
+      'size': ?size,
+      'n': n,
+      // `session_id` 刻意**不传**：从图片页画的图不属于任何一条会话，
+      // 画廊里那一列为 NULL 就是这个意思。对话里画的由 agent 那条路带
+    });
+    return [
+      for (final m in (body['images'] as List? ?? const []))
+        if (m is Map && m['hash'] is String) m['hash'] as String,
+    ];
+  }
+
+  @override
+  Future<Gallery> gallery({int limit = 30, String? before}) async =>
+      Gallery.fromJson(
+        await _getJson('/images', {'limit': '$limit', 'before': ?before}),
+      );
 
   @override
   Future<Uint8List> sandboxWorkspaceTar({String? sessionId}) =>

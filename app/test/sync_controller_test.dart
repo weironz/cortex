@@ -40,6 +40,7 @@ class _FakeApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        ImagesUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,

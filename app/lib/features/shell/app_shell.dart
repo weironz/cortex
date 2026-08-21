@@ -5,9 +5,11 @@ import '../../core/theme.dart';
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../chat/chat_pane.dart';
+import '../images/image_page.dart';
 import '../sessions/session_list.dart';
 import '../workspace/workspace_panel.dart';
 import 'widgets/account_bar.dart';
+import 'widgets/nav_block.dart';
 
 /// Responsive three-pane shell.
 ///
@@ -156,32 +158,45 @@ class _AppShellState extends ConsumerState<AppShell> {
                   ),
                   VerticalDivider(width: 1, color: tokens.sidebarBorder),
                 ],
+                // 中间那一大栏是哪个「地方」。**只有聊天那一支要顶栏
+                // 那堆参数** —— 画廊没有会话、没有右栏面板，把它硬塞进
+                // 同一个组件里只会多出一串对它无意义的入参
                 Expanded(
-                  child: ChatPane(
-                    // 同一个按钮、同一句话（「显示/隐藏会话」），但窄到放不下
-                    // 内联时它只能开抽屉 —— 那时「收起」这个状态无处安放。
-                    // 由这里按断点决定它具体做什么，ChatPane 只管画
-                    onToggleSessions: isMedium
-                        ? layoutNotifier.toggleLeft
-                        : () => _scaffoldKey.currentState?.openDrawer(),
-                    sessionsVisible: showSessionsInline,
-                    // 两条路的语义不同，所以显式分开写：
-                    //
-                    // 宽屏：右栏就是 `rightPanel`，点同一个 = 收起。
-                    // 窄屏：右栏是抽屉，开合归 `Scaffold` 管 —— 这里只能
-                    //   「选中」。用 selectRight 的话，连点两次「文件」的
-                    //   第二次会把它置空，而抽屉照样开，里面画的是记忆。
-                    //   顺序也不能反：抽屉的内容取自 `layout.rightPanel`
-                    onSelectPanel: (panel) {
-                      if (isWide) {
-                        layoutNotifier.selectRight(panel);
-                      } else {
-                        layoutNotifier.showRight(panel);
-                        _scaffoldKey.currentState?.openEndDrawer();
-                      }
-                    },
-                    activePanel: showRightInline ? layout.rightPanel : null,
-                  ),
+                  child: switch (ref.watch(mainViewProvider)) {
+                    MainView.images => ImagePage(
+                      // 窄屏上左栏是抽屉，画廊里也要有路把它叫出来 ——
+                      // 少了这个按钮，从画廊回会话列表就只剩「从屏幕左缘划」
+                      onToggleSessions: isMedium
+                          ? layoutNotifier.toggleLeft
+                          : () => _scaffoldKey.currentState?.openDrawer(),
+                      sessionsVisible: showSessionsInline,
+                    ),
+                    MainView.chat => ChatPane(
+                      // 同一个按钮、同一句话（「显示/隐藏会话」），但窄到放不下
+                      // 内联时它只能开抽屉 —— 那时「收起」这个状态无处安放。
+                      // 由这里按断点决定它具体做什么，ChatPane 只管画
+                      onToggleSessions: isMedium
+                          ? layoutNotifier.toggleLeft
+                          : () => _scaffoldKey.currentState?.openDrawer(),
+                      sessionsVisible: showSessionsInline,
+                      // 两条路的语义不同，所以显式分开写：
+                      //
+                      // 宽屏：右栏就是 `rightPanel`，点同一个 = 收起。
+                      // 窄屏：右栏是抽屉，开合归 `Scaffold` 管 —— 这里只能
+                      //   「选中」。用 selectRight 的话，连点两次「文件」的
+                      //   第二次会把它置空，而抽屉照样开，里面画的是记忆。
+                      //   顺序也不能反：抽屉的内容取自 `layout.rightPanel`
+                      onSelectPanel: (panel) {
+                        if (isWide) {
+                          layoutNotifier.selectRight(panel);
+                        } else {
+                          layoutNotifier.showRight(panel);
+                          _scaffoldKey.currentState?.openEndDrawer();
+                        }
+                      },
+                      activePanel: showRightInline ? layout.rightPanel : null,
+                    ),
+                  },
                 ),
                 if (showRightInline) ...[
                   VerticalDivider(width: 1, color: tokens.sidebarBorder),
@@ -202,21 +217,34 @@ class _AppShellState extends ConsumerState<AppShell> {
   }
 }
 
-/// 会话列表 + 底部账号栏。
+/// 导航 + 会话列表 + 底部账号栏。
 ///
 /// 文件树原来夹在这两者之间，占着一个「40% 高、最多 320px」的框。搬到右栏
 /// 之后这里只剩一件事，`Expanded` 就够了 —— 原来那套计算高度的理由
 /// （两个可滚动的孩子不能都 `Expanded`）随之消失。
-class _LeftPane extends StatelessWidget {
+///
+/// 顶上那一小块导航是 2026-08-22 加画廊时进来的，见 [NavBlock] 的文档。
+class _LeftPane extends ConsumerWidget {
   const _LeftPane({this.onSelected});
 
   final VoidCallback? onSelected;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // **点会话就回聊天。** 人在画廊里点一条会话，要的是去看那条会话 ——
+    // 停在原地的表现是「点了没反应」，而那正是这一轮刚修过的那类 bug。
+    //
+    // 挂在这里而不是 `ChatController.selectSession` 里：控制器不该知道
+    // 界面上有几个「地方」，而 `onSelected` 恰好在每一次选中/新建时都会响
+    void selected() {
+      ref.read(mainViewProvider.notifier).go(MainView.chat);
+      onSelected?.call();
+    }
+
     return Column(
       children: [
-        Expanded(child: SessionList(onSelected: onSelected)),
+        NavBlock(onNavigated: onSelected),
+        Expanded(child: SessionList(onSelected: selected)),
         // 内联与抽屉共用这一棵，所以账号栏两处都会有 —— 不必为抽屉
         // 单独再摆一遍，也就不会有两份各自漂移的版本
         const AccountBar(),

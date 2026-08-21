@@ -106,6 +106,16 @@ class ModelSource {
   /// 同一件事两处表达，迟早不一致，而症状是「界面上关着、选择器里还在」。
   bool isEnabled(String modelId) => models.contains(modelId);
 
+  /// 这条来源自己填了端点（中转站 / 公司网关 / one-api / 自建 vLLM）。
+  ///
+  /// **与服务端 `model_sources::is_custom_endpoint` 是同一条判据**，
+  /// 两边必须一字不差：这一位决定了目录里那些能力还算不算数（端点后面是谁
+  /// 我们一无所知），也决定了生图走哪条协议。判歪的表现是界面上说「支持」
+  /// 而实际打过去 404，或者反过来 —— 明明能画却一个候选都不给
+  /// （2026-08-21 报的就是后者）。
+  bool get isCustom =>
+      provider == 'custom' || (baseUrl?.trim().isNotEmpty ?? false);
+
   /// 部署提供的那条：只读、不可删。
   final bool builtin;
 

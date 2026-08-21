@@ -38,6 +38,7 @@ class _BlobApi
         LocalWorkspaceUnsupported,
         LocalMcpUnsupported,
         RunAttachUnsupported,
+        ImagesUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
