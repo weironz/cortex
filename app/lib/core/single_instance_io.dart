@@ -16,6 +16,22 @@ void releaseSingleInstanceLockForTest() {
   _lockHolder = null;
 }
 
+/// 抢不到名额时**真的把这个进程结束掉**。
+///
+/// # 为什么 `main()` 里 `return` 不够
+///
+/// 桌面端的窗口消息循环在 **C++ runner** 里（`windows/runner/main.cpp` →
+/// `FlutterWindow`），不由 Dart 的 `main()` 驱动。原生窗口在 Dart 代码
+/// 跑起来**之前**就已经建好并显示了，所以从 `main()` 里 return 只是
+/// 「不 runApp」而已 —— 进程照样活着，屏幕上多一扇**永远白屏的 Cortex
+/// 窗口**，任务栏里两个一模一样的图标。
+///
+/// 2026-08-21 实测到的就是这个：单实例锁确实拦住了第二份去碰凭据、
+/// settings.json 与 agent（要防的数据损坏确实防住了），但留下一个幽灵窗口，
+/// 而 `just app-status` 会如实报「跑了不止一个」—— 一个由防护措施自己
+/// 造出来的告警。
+void exitDuplicateInstance() => exit(0);
+
 /// 争这台机器上「唯一一份桌面端」的名额。
 ///
 /// 返回 true = 名额是我们的，继续启动。
@@ -66,11 +82,19 @@ void _focusExisting() {
   if (!Platform.isWindows) return;
   try {
     final user32 = DynamicLibrary.open('user32.dll');
-    final findWindow = user32
+    // `FindWindowExW` 而不是 `FindWindowW`：后者只给第一个匹配，
+    // 而我们需要**跳过自己那扇**（见下面那段）。父窗口传 NULL 时
+    // 它枚举顶层窗口，`hWndChildAfter` 是「从这个之后接着找」
+    final findWindowEx = user32
         .lookupFunction<
-          IntPtr Function(Pointer<Utf16>, Pointer<Utf16>),
-          int Function(Pointer<Utf16>, Pointer<Utf16>)
-        >('FindWindowW');
+          IntPtr Function(IntPtr, IntPtr, Pointer<Utf16>, Pointer<Utf16>),
+          int Function(int, int, Pointer<Utf16>, Pointer<Utf16>)
+        >('FindWindowExW');
+    final getWindowPid = user32
+        .lookupFunction<
+          Uint32 Function(IntPtr, Pointer<Uint32>),
+          int Function(int, Pointer<Uint32>)
+        >('GetWindowThreadProcessId');
     final showWindow = user32
         .lookupFunction<Int32 Function(IntPtr, Int32), int Function(int, int)>(
           'ShowWindow',
@@ -80,13 +104,27 @@ void _focusExisting() {
           'SetForegroundWindow',
         );
 
-    // 按标题找。此刻**我们自己的窗口还不存在**（检查在 runApp 之前），
-    // 所以找到的必然是先来那份的。两个构建标题都叫 Cortex —— 这里
-    // 恰好是「分不清是哪份」帮了忙：不管找到哪份，它都是该被聚焦的那份
+    // ⚠️ **必须跳过自己那扇窗。**
+    //
+    // 这里原来的注释写着「此刻我们自己的窗口还不存在（检查在 runApp
+    // 之前）」—— 那是错的：原生窗口由 C++ runner 在 Dart `main()`
+    // **之前**就建好并显示了。于是 `FindWindowW('Cortex')` 很可能返回
+    // 我们自己那扇（还没画任何东西的）窗，结果是「把白屏窗口置到前台，
+    // 然后退出」—— 用户眼里就是点了图标闪一下什么也没发生。
+    //
+    // 判据用 PID 而不是别的：两个构建的窗口标题与类名完全一样
+    // （那正是「用户看不出自己开了两个」的根源），只有进程号能分开。
     final title = 'Cortex'.toNativeUtf16();
+    final pidOut = calloc<Uint32>();
     try {
-      final hwnd = findWindow(nullptr, title);
-      if (hwnd == 0) return;
+      final self = pid;
+      var hwnd = 0;
+      while (true) {
+        hwnd = findWindowEx(0, hwnd, nullptr, title);
+        if (hwnd == 0) return; // 找完了也没有别人的 —— 静默放弃
+        getWindowPid(hwnd, pidOut);
+        if (pidOut.value != self) break;
+      }
       const swRestore = 9; // 最小化的要先还原，直接置前台是无效的
       showWindow(hwnd, swRestore);
       // 我们此刻是前台进程（用户刚双击了图标），把前台**让**出去是
@@ -94,6 +132,7 @@ void _focusExisting() {
       setForeground(hwnd);
     } finally {
       calloc.free(title);
+      calloc.free(pidOut);
     }
   } on Object {
     // 聚焦失败不值得让退出流程炸掉
