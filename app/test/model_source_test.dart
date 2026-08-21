@@ -526,6 +526,33 @@ void main() {
     // 「一把 key 拉回来 240 个型号」，而现在那件事由搜索框 + 模态页签
     // 接手 —— 判据换了地方，不是这条需求消失了。
 
+    /// ⚠️ 2026-08-21 实测撞到的顺序坑。
+    ///
+    /// 抽屉的 `endDrawer` 在没人看时是 `null`（不为一条没人看的来源白建）。
+    /// 而 `setState` 只标脏、不立刻重建 —— 紧接着调 `openEndDrawer()` 时
+    /// Scaffold 手上还没有抽屉，于是**什么都不发生**：按钮点下去没反应。
+    /// 必须等到下一帧。
+    testWidgets('点「获取模型列表」会把右侧抽屉打开', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _open(tester, _kAlibaba);
+
+      await tester.tap(find.text('获取模型列表'));
+      for (var i = 0; i < 8; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(
+        find.textContaining('添加全部'),
+        findsOneWidget,
+        reason:
+            '拉完不把抽屉打开的话，用户还得再找一次入口 —— '
+            '而界面上除了这个按钮，没有别的地方通向那份全集',
+      );
+    });
+
     testWidgets('来源列表能搜', (tester) async {
       final api = _Api();
       final c = _boot(api);

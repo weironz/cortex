@@ -754,11 +754,17 @@ pub async fn fetch_models(
     };
 
     // **落库。** 这一步此前没有 —— 拉到的名单只在这一次响应里存在过，
-    // 于是「拉到过、但我不用」这件事没有任何地方记着，界面上那个
-    // 「未启用」分组永远是空的。
+    // 于是「拉到过、但我不用」这件事没有任何地方记着，选型抽屉里空空如也。
     //
-    // **回落那一支也写**：内置清单同样是「这家有哪些」的一个答案，
-    // 而它正是拉不动的时候用户唯一看得到的那份。
+    // ⚠️ **回落那一支不许覆盖已有的**（`WHERE ... AND ($1 OR 空)`）。
+    //
+    // 2026-08-21 实测：一把 key 实拉到 281 个型号存好了，随后代理挂掉、
+    // 再点一次「获取模型列表」—— 拉不动，回落到内置那份 **2 个**，
+    // 于是库里 281 变成 2。用户什么都没做错，一次网络抖动就把一份好目录
+    // 换成了一份编译期写死的清单，而他正在用的 `gpt-image-2` 根本不在
+    // 里面（选型抽屉里从此找不到它）。
+    //
+    // 空的时候仍然写：那时内置那份严格好于「什么都没有」。
     //
     // 写失败只吞成一条 warn：用户要的是这份名单，为一次缓存写失败
     // 把它整个作废不成比例 —— 下次再点一下就补上了
@@ -767,10 +773,14 @@ pub async fn fetch_models(
         match serde_json::to_value(&ids) {
             Ok(json) => {
                 if let Err(e) = sqlx::query(
-                    "UPDATE model_sources SET catalog = $1, updated_at = now() WHERE id = $2",
+                    "UPDATE model_sources
+                        SET catalog = $1, updated_at = now()
+                      WHERE id = $2
+                        AND ($3 OR jsonb_array_length(catalog) = 0)",
                 )
                 .bind(json)
                 .bind(&id)
+                .bind(fetched.live)
                 .execute(store.pool())
                 .await
                 {

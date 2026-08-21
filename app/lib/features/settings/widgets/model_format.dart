@@ -73,6 +73,37 @@ String formatPricePair(FetchedModel m) {
   return '输入 $input/M · 输出 $output/M';
 }
 
+/// 按**系列**把型号分组：`qwen-image-3.0` 与 `qwen-turbo` 都进 `qwen`。
+///
+/// 240 个型号铺成一条平列表没法看，而同一系列的东西本来就该待在一起。
+/// 组内与组间都保持服务端给的顺序 —— 那是它 `/models` 的顺序，
+/// 重排一次就多一个「我记得它在上面」的困惑。
+///
+/// ## 它去过又回来了
+///
+/// 2026-08-21 上午照 LobeHub 改成平铺时删掉过（那份列表是平的），当天下午
+/// 又照 Cherry Studio 改回来 —— 两份列表（主列表与选型抽屉）都按系列分组。
+/// 留着这段是想说清：**分组解决的是「240 个型号铺成一条平列表」**，
+/// 而那个问题一直在，只是被搜索框与页签**分担**过一阵子。
+List<(String, List<T>)> groupByFamily<T>(
+  List<T> items,
+  String Function(T) idOf,
+) {
+  final out = <(String, List<T>)>[];
+  for (final m in items) {
+    final id = idOf(m);
+    final i = id.indexOf('-');
+    final family = i <= 0 ? id : id.substring(0, i);
+    final at = out.indexWhere((g) => g.$1 == family);
+    if (at < 0) {
+      out.add((family, <T>[m]));
+    } else {
+      out[at].$2.add(m);
+    }
+  }
+  return out;
+}
+
 /// 型号的模态分类。**只有我们真的判得出的那几档。**
 ///
 /// LobeHub 那一排页签有 `视频 / 向量化 / ASR / TTS`，我们四样数据都没有 ——

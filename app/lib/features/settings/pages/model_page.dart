@@ -42,6 +42,7 @@ import '../../../core/theme.dart';
 import '../../../models/model_source.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/model_controller.dart';
+import '../widgets/model_picker_drawer.dart';
 import '../widgets/model_table.dart';
 import '../widgets/provider_mark.dart';
 import '../widgets/provider_overview.dart';
@@ -75,6 +76,16 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   /// 挂在 B 的详情页上，比没有结论更糟。
   SourceCheck? _check;
 
+  /// 右侧选型抽屉正在为哪条来源开着。`null` = 没开。
+  String? _picking;
+
+  /// 抽屉挂在这个 Scaffold 上。
+  ///
+  /// **这一页自己带一个 Scaffold**，而不是借设置页那个：抽屉是
+  /// 「模型服务」这一页的东西，挂在外面的话，切到「用量」再划出来
+  /// 还会看到它。
+  final _scaffold = GlobalKey<ScaffoldState>();
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -99,68 +110,90 @@ class _ModelPageState extends ConsumerState<ModelPage> {
       },
       data: (data) {
         final current = _selected == null ? null : data.byId(_selected!);
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Text(
-                  '$_error',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.error,
-                  ),
+        final picking = _picking == null ? null : data.byId(_picking!);
+        return Scaffold(
+          key: _scaffold,
+          backgroundColor: Colors.transparent,
+          endDrawer: picking == null
+              ? null
+              : ModelPickerDrawer(
+                  title: data.nameOf(picking),
+                  provider: picking.provider,
+                  catalog: picking.shownCatalog,
+                  enabled: picking.models,
+                  busy: _busy,
+                  onToggle: (id, on) => _toggleModel(picking, id, on),
+                  onAddAll: (ids) =>
+                      _toggleModels(picking, [...picking.models, ...ids]),
                 ),
-              ),
-            Expanded(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SizedBox(
-                    width: 200,
-                    child: _SourceList(
-                      data: data,
-                      selected: _selected,
-                      busy: _busy,
-                      query: _query,
-                      onQuery: (q) => setState(() => _query = q),
-                      onSelect: _select,
-                      onAdd: () => _add(data),
-                      onToggle: _toggle,
+          // 抽屉关掉时把那条来源忘掉 —— 留着的话下次点别处的
+          // 「获取模型列表」会有一瞬间显示上一条的型号
+          onEndDrawerChanged: (open) {
+            if (!open && mounted) setState(() => _picking = null);
+          },
+          body: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    '$_error',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.error,
                     ),
                   ),
-                  const VerticalDivider(width: 20),
-                  Expanded(
-                    child: current == null
-                        ? ProviderOverview(
-                            data: data,
-                            busy: _busy,
-                            query: _query,
-                            onOpen: _select,
-                            onToggle: _toggle,
-                            onAdd: (p) => _add(data, initial: p.id),
-                          )
-                        : _Detail(
-                            key: ValueKey(current.id),
-                            data: data,
-                            source: current,
-                            busy: _busy,
-                            check: _check,
-                            onSave: ({required apiKey, required baseUrl}) =>
-                                _saveInline(current, apiKey, baseUrl),
-                            onDelete: () => _delete(current),
-                            onFetch: () => _fetch(current),
-                            onToggleModel: (id, on) =>
-                                _toggleModel(current, id, on),
-                            onToggleSource: (on) => _toggle(current, on),
-                            onCheck: (model) => _runCheck(current, model),
-                            offlineNote: _offlineNote(current),
-                          ),
-                  ),
-                ],
+                ),
+              Expanded(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      width: 200,
+                      child: _SourceList(
+                        data: data,
+                        selected: _selected,
+                        busy: _busy,
+                        query: _query,
+                        onQuery: (q) => setState(() => _query = q),
+                        onSelect: _select,
+                        onAdd: () => _add(data),
+                        onToggle: _toggle,
+                      ),
+                    ),
+                    const VerticalDivider(width: 20),
+                    Expanded(
+                      child: current == null
+                          ? ProviderOverview(
+                              data: data,
+                              busy: _busy,
+                              query: _query,
+                              onOpen: _select,
+                              onToggle: _toggle,
+                              onAdd: (p) => _add(data, initial: p.id),
+                            )
+                          : _Detail(
+                              key: ValueKey(current.id),
+                              data: data,
+                              source: current,
+                              busy: _busy,
+                              check: _check,
+                              onSave: ({required apiKey, required baseUrl}) =>
+                                  _saveInline(current, apiKey, baseUrl),
+                              onDelete: () => _delete(current),
+                              onFetch: () => _fetch(current),
+                              onToggleModel: (id, on) =>
+                                  _toggleModel(current, id, on),
+                              onToggleSource: (on) => _toggle(current, on),
+                              onCheck: (model) => _runCheck(current, model),
+                              offlineNote: _offlineNote(current),
+                            ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         );
       },
     );
@@ -386,9 +419,26 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     // 修法不是把开关禁掉，是**把那个分支删掉**：服务端现在存得下
     // 「部署提供」关掉了哪些型号（20260821000002），所有来源走同一条路。
     // 少一个分支，也就少一处将来会写成空操作的地方。
-    final next = on
-        ? [...s.models, if (!s.models.contains(modelId)) modelId]
-        : s.models.where((m) => m != modelId).toList();
+    return _toggleModels(
+      s,
+      on
+          ? [...s.models, if (!s.models.contains(modelId)) modelId]
+          : s.models.where((m) => m != modelId).toList(),
+    );
+  }
+
+  /// 整份替换这条来源开着的型号。
+  ///
+  /// 「加一个」「移一个」「一次加一批」走同一条路 —— 服务端那侧本来就是
+  /// 整份替换（见 `UpsertRequest.models`），各写一遍只会多出几处
+  /// 「这次忘了去重」的机会。
+  Future<void> _toggleModels(ModelSource s, List<String> models) {
+    // 去重且保序：`onAddAll` 会把已有的和新加的拼在一起
+    final seen = <String>{};
+    final next = [
+      for (final m in models)
+        if (seen.add(m)) m,
+    ];
     return _run(
       () => ref
           .read(cortexApiProvider)
@@ -424,6 +474,10 @@ class _ModelPageState extends ConsumerState<ModelPage> {
         setState(() => _error = got.note);
       }
       ref.invalidate(modelSourcesProvider);
+      // 拉完**顺手把抽屉打开**：点这个按钮的人要的不是「列表更新了」
+      // 这条消息，而是**挑几个加进来**。不开的话他还得再找一次入口，
+      // 而界面上除了这个按钮没有别的地方通向那份全集
+      if (mounted) _openPicker(s.id);
     } on Object catch (e) {
       if (mounted) {
         setState(() => _error = e is CortexApiException ? e.message : e);
@@ -431,6 +485,24 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// 打开右侧的选型抽屉。
+  ///
+  /// 传 id 而不是那条 `ModelSource`：抽屉活得比这一次 build 长，
+  /// 而每次加一个型号都会重拉列表、换掉那个对象 —— 抓着旧的那份
+  /// 会让抽屉里的「已加」状态停在打开的那一刻。
+  void _openPicker(String sourceId) {
+    setState(() => _picking = sourceId);
+    // ⚠️ **必须等下一帧。**
+    //
+    // `endDrawer` 在 `_picking == null` 时是 `null`（不为一条没人看的来源
+    // 白建一个抽屉）。而 `setState` 只是标脏，这一刻树还没重建 ——
+    // 直接调 `openEndDrawer()` 时 Scaffold 手上还没有抽屉，于是**什么都不
+    // 发生**：按钮点下去没反应，和 2026-08-21 那个静默空操作一模一样。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scaffold.currentState?.openEndDrawer();
+    });
   }
 
   Future<void> _runCheck(ModelSource s, String model) async {
