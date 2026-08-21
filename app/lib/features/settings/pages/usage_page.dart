@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../api/api_exception.dart';
+import '../../../core/theme.dart';
 import '../../../models/usage_report.dart';
 import '../../../state/app_providers.dart';
 import '../../../widgets/empty_state.dart';
+import '../widgets/settings_layout.dart';
 
 /// `GET /auth/usage`。
 ///
@@ -63,30 +65,51 @@ class UsagePage extends ConsumerWidget {
       data: (r) => ListView(
         padding: const EdgeInsets.symmetric(horizontal: 4),
         children: [
-          _Summary(report: r),
-          const SizedBox(height: 20),
-          Text('按模型', style: theme.textTheme.titleSmall),
-          const SizedBox(height: 8),
-          if (r.byModel.isEmpty)
-            Text(
-              '最近 ${r.windowDays} 天还没有调用记录。',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            )
-          else
-            ...r.byModel.map((m) => _ModelRow(usage: m, currency: r.currency)),
-          if (r.unpricedTokens > 0) ...[
-            const SizedBox(height: 12),
-            _UnpricedNote(tokens: r.unpricedTokens),
-          ],
-          const SizedBox(height: 20),
-          Text(
-            '按最近 ${r.windowDays} 天滚动计算，不是自然月 —— '
-            '自然月会让「这个月」的含义随时区漂移，也会在月初造出一个集中重置的尖峰。',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
+          SettingsSection(
+            title: '花费',
+            // 「最近 N 天」这件事读数字的人一定会问，所以写在小标题下面，
+            // 而不是压在整页最底下一行细字里（重排前它在那儿）
+            description:
+                '按最近 ${r.windowDays} 天滚动计算，不是自然月 —— '
+                '自然月会让「这个月」的含义随时区漂移，也会在月初造出一个集中重置的尖峰。',
+            trailing: IconButton(
+              tooltip: '刷新',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.refresh_rounded, size: 16),
+              onPressed: () => ref.invalidate(usageProvider),
             ),
+            children: [SettingsCard(child: _Summary(report: r))],
+          ),
+          SettingsSection(
+            title: '按模型',
+            children: [
+              if (r.byModel.isEmpty)
+                SettingsNote(
+                  child: Text(
+                    '最近 ${r.windowDays} 天还没有调用记录。',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                )
+              else
+                SettingsCard(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 6,
+                  ),
+                  child: Column(
+                    children: [
+                      for (final m in r.byModel)
+                        _ModelRow(usage: m, currency: r.currency),
+                    ],
+                  ),
+                ),
+              if (r.unpricedTokens > 0) ...[
+                const SizedBox(height: 10),
+                _UnpricedNote(tokens: r.unpricedTokens),
+              ],
+            ],
           ),
         ],
       ),
@@ -119,25 +142,19 @@ class _Summary extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(bottom: 4),
               child: Text(
-                '最近 ${report.windowDays} 天',
+                '最近 ${report.windowDays} 天 · '
+                '${formatTokens(report.usedTokens + report.ownKeyTokens)} token',
                 style: theme.textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
+                  color: theme.cortex.foregroundTertiary,
                 ),
               ),
             ),
           ],
         ),
-        const SizedBox(height: 4),
-        Text(
-          '${formatTokens(report.usedTokens + report.ownKeyTokens)} token',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: scheme.onSurfaceVariant,
-          ),
-        ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 14),
         if (ratio != null) ...[
           ClipRRect(
-            borderRadius: BorderRadius.circular(4),
+            borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
             child: LinearProgressIndicator(
               value: ratio,
               minHeight: 8,
@@ -147,29 +164,22 @@ class _Summary extends StatelessWidget {
               backgroundColor: scheme.surfaceContainerHighest,
             ),
           ),
-          const SizedBox(height: 8),
-          Text(
-            '配额：已用 ${formatTokens(report.usedTokens)} / '
-            '${formatTokens(report.limitTokens!)}，'
-            '还剩 ${formatTokens(report.remainingTokens ?? 0)}',
-            style: theme.textTheme.bodySmall,
+          const SizedBox(height: 10),
+          SettingsRow(
+            label: '配额',
+            value:
+                '已用 ${formatTokens(report.usedTokens)} / '
+                '${formatTokens(report.limitTokens!)}',
+            note: '还剩 ${formatTokens(report.remainingTokens ?? 0)}',
           ),
         ] else
-          Text(
-            '这个部署不限额度。',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
+          SettingsRow(label: '配额', value: '不限', note: '这个部署不限额度。'),
+        if (report.ownKeyTokens > 0)
+          SettingsRow(
+            label: '自带 key',
+            value: '${formatTokens(report.ownKeyTokens)} token',
+            note: '走的是你自己的 key，不占配额。',
           ),
-        if (report.ownKeyTokens > 0) ...[
-          const SizedBox(height: 6),
-          Text(
-            '其中 ${formatTokens(report.ownKeyTokens)} token 走的是你自己的 key，不占配额。',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
-          ),
-        ],
       ],
     );
   }
@@ -184,11 +194,10 @@ class _ModelRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
     final cost = usage.costMicros;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.symmetric(vertical: 7),
       child: Row(
         children: [
           Expanded(
@@ -197,7 +206,9 @@ class _ModelRow extends StatelessWidget {
               children: [
                 Text(
                   usage.model.isEmpty ? '（没记下模型名）' : usage.model,
-                  style: theme.textTheme.bodyMedium,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurface,
+                  ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -205,7 +216,7 @@ class _ModelRow extends StatelessWidget {
                   '输入 ${formatTokens(usage.inputTokens)} · '
                   '输出 ${formatTokens(usage.outputTokens)}',
                   style: theme.textTheme.labelSmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
+                    color: theme.cortex.foregroundTertiary,
                   ),
                 ),
               ],
@@ -217,15 +228,19 @@ class _ModelRow extends StatelessWidget {
           if (cost == null)
             Text(
               '没有价目',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.cortex.foregroundTertiary,
                 fontStyle: FontStyle.italic,
               ),
             )
           else
             Text(
               formatMoney(cost, currency),
-              style: theme.textTheme.bodyMedium,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurface,
+                // 金额右对齐成一列要等宽，否则小数点参差不齐
+                fontFamily: 'monospace',
+              ),
             ),
         ],
       ),
@@ -242,41 +257,23 @@ class _UnpricedNote extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(
-            Icons.info_outline_rounded,
-            size: 16,
+    return SettingsNote(
+      child: Text.rich(
+        TextSpan(
+          style: theme.textTheme.labelSmall?.copyWith(
             color: scheme.onSurfaceVariant,
           ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text.rich(
-              TextSpan(
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-                children: [
-                  TextSpan(
-                    text: '有 ${formatTokens(tokens)} token 用的是没有价目的模型，上面那个金额里',
-                  ),
-                  const TextSpan(
-                    text: '不包含',
-                    style: TextStyle(fontWeight: FontWeight.w700),
-                  ),
-                  const TextSpan(text: '它们。要把它们算进去，在服务端配 CORTEX_MODEL_PRICES。'),
-                ],
-              ),
+          children: [
+            TextSpan(
+              text: '有 ${formatTokens(tokens)} token 用的是没有价目的模型，上面那个金额里',
             ),
-          ),
-        ],
+            const TextSpan(
+              text: '不包含',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+            const TextSpan(text: '它们。要把它们算进去，在服务端配 CORTEX_MODEL_PRICES。'),
+          ],
+        ),
       ),
     );
   }

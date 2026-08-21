@@ -158,19 +158,49 @@ Cherry 在它的 provider 里专门为这一条写了注释。
 
 ## 八、动效
 
-**尊重系统的「减少动效」**（`MediaQuery.disableAnimations`，对应 Windows 的
-「显示动画效果」、macOS 的「减弱动态效果」、浏览器的
-`prefers-reduced-motion`）。判据取自系统，不是我们自己的设置：用户在系统里
-表达过一次的偏好，不该要求他在每个应用里再表达一遍。
+**默认尊重系统的「减少动效」**（`MediaQuery.disableAnimations`，对应
+Windows 的「显示动画效果」、macOS 的「减弱动态效果」、浏览器的
+`prefers-reduced-motion`）：用户在系统里表达过一次的偏好，不该要求他在
+每个应用里再表达一遍。
 
 这个产品的动效**几乎全是循环的**（等待回复的三个点、流式光标、代码块的
 进度点），而循环动画正是这个开关最主要的目标 —— 它不是「好看一点」，
 对前庭功能敏感的人是会引起不适的东西。
 
-统一走 [`core/motion.dart`](../app/lib/core/motion.dart) 的 `syncLoop`，
-**在 `didChangeDependencies` 里调**（写在 `initState` 里只有重启才生效），
-并且关掉时停在**看得见**的那一端 —— 停在 0 的话「减少动效」会变成
-「这个东西不见了」。
+### 三档，默认跟随系统
+
+系统那一位是**二元**的，表达不了两种真实需求：「系统开着减少动效，但我在
+这个应用里想要」，以及「系统没开，但我不想要」。所以
+[`MotionPref`](../app/lib/core/motion.dart) 有三档 —— `system`（默认）/
+`full` / `reduced`，落在 settings.json 的 `motion` 键，入口在设置的「外观」页。
+
+**不照抄 LobeHub 的 `agile / default / disabled`。** 它那三档调的是转场
+**时长**，而这里的动效几乎全是循环指示器，只有两处是真转场；把一个循环
+指示器调快，得到的是一个转得更急、更抢注意力的角落，与 `agile` 承诺的
+「轻快」正好相反。这里三档调的是**要不要**，不是**多快**。
+
+### 落地方式：改写 `MediaQuery` 本身
+
+三档在 [`app.dart`](../app/lib/app.dart) 的 `MaterialApp.builder` 里
+`copyWith(disableAnimations:)`，**不另发明一个只有我们自己读的标志**。
+于是整棵树 —— 包括 Flutter 自己的路由转场、`Scrollable` 的隐式滚动、
+以及所有 `reducedMotion(context)` 的调用点 —— 读到的是同一位。
+另起一套的下场是：用户选了「关闭」，我们的三个点停了，框架的转场照旧。
+
+⚠️ **推论：想知道「系统怎么说」的地方不能读 `MediaQuery`。**「外观」页上
+那行「系统现在：…」读的是
+`platformDispatcher.accessibilityFeatures.disableAnimations`；读 `MediaQuery`
+拿到的是被我们改写过的当前生效值，那行字会变成同义反复 —— 选「关闭」它就
+写「系统现在：关闭」，向用户报告一个他从没设过的系统设置。
+
+### 循环与转场
+
+* **循环**统一走 `syncLoop`，**在 `didChangeDependencies` 里调**
+  （写在 `initState` 里只有重启才生效），关掉时停在**看得见**的那一端 ——
+  停在 0 的话「减少动效」会变成「这个东西不见了」。
+* **转场**统一走 `motionDuration(context, …)`，关掉时是 `Duration.zero`，
+  **不是「短一点」**：那仍然是一次会动的位移，而位移正是前庭敏感最难受的
+  一类。此前这两处（侧栏选中底色、工具调用抽屉展开）**根本没读这个开关**。
 
 ---
 
@@ -195,8 +225,31 @@ Cherry 在它的 provider 里专门为这一条写了注释。
 
 ## 十、设置页
 
+版式件只有一份：[`settings_layout.dart`](../app/lib/features/settings/widgets/settings_layout.dart)
+的 `SettingsSection` / `SettingsCard` / `SettingsRow` / `SettingsChoice` /
+`SettingsNote`。**每页各自现编一套**的下场在 2026-08-21 重排之前就是实况：
+「数据」页两条裸 `ListTile`、「用量」页把说明卡画成 `surfaceContainerHigh`
+（规范里没有这一档）加一个手写的圆角 8、「模型服务」页又是另一套。
+更要命的是它**不可核对** —— 规范写着「卡片用 `surfaceContainer`、圆角走
+那五阶」，却没有任何一处代码是那句话的唯一落点，于是 review 时谁都看不出偏了。
+
 键值那一列的**键用第三级前景，值用正文色**。两者同色时眼睛要逐行分辨
 哪边是标签哪边是内容 —— 而这正是第三节那三级存在的理由。
+
+**列表的选中态是中性的**，与第九节侧栏那条同一个理由。「模型服务」页的
+来源列表此前漏了这一处，仍是 `primary.withValues(alpha: .10)`。
+
+### ⚠️ 每加一页，配一条「它画得出来吗」
+
+[`settings_pages_test.dart`](../app/test/settings_pages_test.dart) 把每一页
+真的画一遍并 `takeException()`。这不是形式主义：重排当天「外观」页发出去
+是**一片空白**（`Row(stretch)` 待在竖直无界的 `ListView` 里，抛
+`BoxConstraints forces an infinite height`），而 `flutter analyze` 与当时
+510 条测试**全绿** —— 渲染期约束错误静态分析看不见，而没有任何一条测试
+把那一页画出来过。
+
+断言要**落在内容上**，不能只断言「没抛异常」：那次标题一直画着，
+空的是内容。
 
 版本那一行同时显示 **版本号 + git sha**：semver 打完 tag 的下一秒就不再
 唯一，判「线上有没有那个修复」靠的是 sha（见
@@ -207,6 +260,11 @@ Cherry 在它的 provider 里专门为这一条写了注释。
 
 ## 十一、还没做的
 
-- LobeHub 把动效做成了**用户可选三档**（`agile / default / disabled`），
-  我们只读了系统那一档 —— 想比系统更细的人还没有地方表达
-- 模型服务、数据、用量几页的版式还没按这份规范重排过
+- **圆角还有 40 来处是现编的数字**，没走第四节那五阶。这次只收拾了重排
+  到的那几页；剩下的散在对话区与各种弹层里，改动面比看起来大
+- **`SettingsRow` 的标签列宽写死 96。** 中文标签长短差得不多所以还看得过去，
+  真出现一个长标签会被截断 —— 那时要么换成 `IntrinsicWidth`，要么让调用方
+  自己传宽度，两条都还没验过
+- **「用量」页拉不到数时那两支没有渲染测试**，原因与后续做法写在
+  [`settings_pages_test.dart`](../app/test/settings_pages_test.dart) 的文件
+  注释里（Riverpod 的错误投递在 `flutter_test` 的假时钟下没能传到界面）

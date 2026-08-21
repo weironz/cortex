@@ -2,6 +2,7 @@ import 'diff_view.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/ansi.dart';
+import '../../../core/motion.dart';
 import '../../../models/tool_call.dart';
 
 /// 一轮里 agent **做了什么** —— 工具调用与它们改动的内容。
@@ -63,7 +64,12 @@ class _TurnDrawerState extends State<TurnDrawer> {
             onTap: () => setState(() => _expanded = !_expanded),
           ),
           AnimatedSize(
-            duration: const Duration(milliseconds: 160),
+            // 展开工具调用列表时下面的内容整块位移 —— 位移正是前庭敏感
+            // 最难受的一类，比循环的三个点更该跟着这个开关走
+            duration: motionDuration(
+              context,
+              const Duration(milliseconds: 160),
+            ),
             curve: Curves.easeOutCubic,
             alignment: Alignment.topLeft,
             child: _expanded

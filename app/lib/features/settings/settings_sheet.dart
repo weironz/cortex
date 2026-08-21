@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'pages/about_page.dart';
+import 'pages/appearance_page.dart';
 import 'pages/usage_page.dart';
 import 'pages/connection_page.dart';
 import 'pages/data_page.dart';
@@ -85,6 +86,14 @@ class _SettingsWindowState extends State<_SettingsWindow> {
       hint: 'token · 花费 · 配额',
       icon: Icons.receipt_long_outlined,
       page: UsagePage(),
+    ),
+    // 排在「关于」前面：它是**偏好**，与上面几项同类；
+    // 「关于」是这一列里唯一一个不改任何东西的，压在最后
+    (
+      label: '外观',
+      hint: '主题 · 动效',
+      icon: Icons.palette_outlined,
+      page: AppearancePage(),
     ),
     (
       label: '关于',

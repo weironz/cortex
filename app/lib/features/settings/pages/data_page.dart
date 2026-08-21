@@ -8,6 +8,7 @@ import '../../../core/local_agent.dart';
 import '../../../state/app_providers.dart';
 import '../../../workspace/workspace_fs.dart';
 import '../../import/import_sheet.dart';
+import '../widgets/settings_layout.dart';
 
 /// 数据这一页：文件落在哪、以及从别处搬进来。
 class DataPage extends StatelessWidget {
@@ -15,36 +16,16 @@ class DataPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 4),
-      children: [
-        const WorkspaceRootTile(),
-        // 放这里而不是工具栏：导入是一个人做一次的事。一个常驻按钮配一个
-        // 一次性动作是噪音，而「数据」正是他会来找它的地方
-        ListTile(
-          contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.download_outlined),
-          title: const Text('导入 ChatGPT / Claude 历史'),
-          subtitle: Text(
-            '选择导出包里的 conversations.json。会先把要花多少钱摊开，'
-            '确认之后才开始写。',
-            style: theme.textTheme.bodySmall,
-          ),
-          onTap: () {
-            // 先关掉设置窗。把一个能跑一刻钟的进度条叠在设置上面，
-            // 会留下一层再也点不到的遮罩
-            Navigator.of(context).pop();
-            unawaited(showImportSheet(context));
-          },
-        ),
-      ],
+      children: const [WorkspaceSection(), _ImportSection()],
     );
   }
 }
 
-class WorkspaceRootTile extends ConsumerWidget {
-  const WorkspaceRootTile({super.key});
+/// 工作空间落在哪。
+class WorkspaceSection extends ConsumerWidget {
+  const WorkspaceSection({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -52,27 +33,28 @@ class WorkspaceRootTile extends ConsumerWidget {
     // `/workspace`。判据用能力而不是 kIsWeb，与 WorkspaceChip 同一个
     if (!kLocalAgentSupported) return const SizedBox.shrink();
 
-    final theme = Theme.of(context);
     final async = ref.watch(localWorkspaceRootProvider);
     final root = async.value?.root;
 
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: const Icon(Icons.folder_special_outlined),
-      title: const Text('默认工作空间'),
-      subtitle: Text(
-        async.isLoading
-            ? '读取中…'
-            : root == null
-            ? '本地 agent 没在跑，读不到这台机器上的设置。'
-            : '$root\n新建对话时会在这里建文件夹；改了不影响已有数据。',
-        style: theme.textTheme.bodySmall,
-      ),
-      isThreeLine: root != null,
+    return SettingsSection(
+      title: '工作空间',
+      description: '新建对话时会在这里建文件夹。改了不影响已有数据 —— 老会话仍指向它们各自建好的目录。',
       trailing: TextButton(
         onPressed: root == null ? null : () => _change(context, ref),
         child: const Text('更改'),
       ),
+      children: [
+        SettingsCard(
+          child: SettingsRow(
+            label: '默认目录',
+            // 路径要逐字符看（哪一层拼错了），所以等宽
+            monospace: root != null,
+            value: async.isLoading
+                ? '读取中…'
+                : root ?? '本地 agent 没在跑，读不到这台机器上的设置',
+          ),
+        ),
+      ],
     );
   }
 
@@ -89,5 +71,48 @@ class WorkspaceRootTile extends ConsumerWidget {
         context,
       ).showSnackBar(SnackBar(content: Text(e.message)));
     }
+  }
+}
+
+/// 从 ChatGPT / Claude 搬历史进来。
+class _ImportSection extends StatelessWidget {
+  const _ImportSection();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SettingsSection(
+      title: '导入',
+      // 放这里而不是工具栏：导入是一个人做一次的事。一个常驻按钮配一个
+      // 一次性动作是噪音，而「数据」正是他会来找它的地方
+      description: '把别处的对话历史搬进来。会先把要花多少钱摊开，确认之后才开始写。',
+      children: [
+        SettingsCard(
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '选择导出包里的 conversations.json',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurface,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              FilledButton.tonalIcon(
+                onPressed: () {
+                  // 先关掉设置窗。把一个能跑一刻钟的进度条叠在设置上面，
+                  // 会留下一层再也点不到的遮罩
+                  Navigator.of(context).pop();
+                  unawaited(showImportSheet(context));
+                },
+                icon: const Icon(Icons.download_outlined, size: 16),
+                label: const Text('选择文件'),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 }

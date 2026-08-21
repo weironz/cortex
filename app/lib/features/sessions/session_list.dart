@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_exception.dart';
 import '../../core/formatting.dart';
+import '../../core/motion.dart';
 import '../../core/theme.dart';
 import '../../models/chat_session.dart';
 import '../../models/project.dart';
@@ -780,7 +781,10 @@ class _SessionTileState extends State<_SessionTile> {
       child: GestureDetector(
         onTap: widget.onTap,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 110),
+          // 悬停/选中的底色渐变。**这一处此前没读「减少动效」** ——
+          // 那个开关只接了三个循环指示器，于是关掉之后鼠标扫过侧栏
+          // 每一行仍然在渐变，而侧栏正是鼠标经过最频繁的地方
+          duration: motionDuration(context, const Duration(milliseconds: 110)),
           // 左右各留一点：选中块贴着侧栏两边时，它读成「整条栏换了颜色」
           // 而不是「这一项被选中了」。上下的 3 给相邻两项一点呼吸 ——
           // 此前是 2，一列下来是一堵字墙

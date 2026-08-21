@@ -25,10 +25,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../api/api_exception.dart';
 import '../../../auth/local_llm_store.dart';
 import '../../../core/local_llm.dart';
+import '../../../core/theme.dart';
 import '../../../models/model_option.dart';
 import '../../../models/model_source.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/model_controller.dart';
+import '../widgets/settings_layout.dart';
 import 'model_add_dialog.dart';
 
 class ModelPage extends ConsumerStatefulWidget {
@@ -484,13 +486,17 @@ class _SourceList extends StatelessWidget {
     final scheme = theme.colorScheme;
     return InkWell(
       onTap: () => onSelect(s.id),
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
       child: Container(
         margin: const EdgeInsets.only(bottom: 4),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
         decoration: BoxDecoration(
-          color: on ? scheme.primary.withValues(alpha: 0.10) : null,
-          borderRadius: BorderRadius.circular(8),
+          // **选中态是中性的**（规范第九节）。此前是
+          // `primary.withValues(alpha: .10)` —— 与侧栏那处被拆掉的
+          // 是同一层「品牌色的淡淡一层」，只是这里漏掉了。
+          // 「我现在在看哪一条来源」是位置，不是动作
+          color: on ? theme.cortex.sidebarAccent : null,
+          borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
         ),
         child: Row(
           children: [
@@ -503,7 +509,10 @@ class _SourceList extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.bodyMedium?.copyWith(
-                      color: s.enabled ? null : scheme.onSurfaceVariant,
+                      // 关掉的那条整体退到第三级 —— 它还在，但不参与对话
+                      color: s.enabled
+                          ? scheme.onSurface
+                          : theme.cortex.foregroundTertiary,
                     ),
                   ),
                   Text(
@@ -511,7 +520,7 @@ class _SourceList extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.labelSmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
+                      color: theme.cortex.foregroundTertiary,
                     ),
                   ),
                 ],
@@ -624,16 +633,20 @@ class _DetailState extends State<_Detail> {
               ),
           ],
         ),
-        if (s.builtin)
-          Text(
-            '这条是服务端配的，改不了也删不掉。它花的是我们的钱，所以计入你的配额。',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
-          )
-        else ...[
+        if (s.builtin) ...[
+          const SizedBox(height: 10),
+          const SettingsNote(
+            icon: Icons.lock_outline_rounded,
+            child: Text('这条是服务端配的，改不了也删不掉。它花的是我们的钱，所以计入你的配额。'),
+          ),
+        ] else ...[
           const SizedBox(height: 12),
-          Text('API 密钥', style: theme.textTheme.labelLarge),
+          Text(
+            'API 密钥',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.cortex.foregroundTertiary,
+            ),
+          ),
           const SizedBox(height: 4),
           TextField(
             controller: _key,
@@ -661,7 +674,12 @@ class _DetailState extends State<_Detail> {
             ),
           ),
           const SizedBox(height: 12),
-          Text('API 地址', style: theme.textTheme.labelLarge),
+          Text(
+            'API 地址',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.cortex.foregroundTertiary,
+            ),
+          ),
           const SizedBox(height: 4),
           TextField(
             controller: _baseUrl,
@@ -687,33 +705,28 @@ class _DetailState extends State<_Detail> {
                 ),
               ),
             ),
-          const SizedBox(height: 6),
-          Text(
-            '用它的调用走你自己的账户，不占配额。',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
-          ),
-          // 离线那一侧的实况。**不说的话，用户会在断网时才发现** ——
-          // 而那时他既不知道原因也不知道怎么办
-          if (widget.offlineNote != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(
-                widget.offlineNote!,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
+          const SizedBox(height: 8),
+          SettingsNote(
+            child: Text(
+              [
+                '用它的调用走你自己的账户，不占配额。',
+                // 离线那一侧的实况。**不说的话，用户会在断网时才发现** ——
+                // 而那时他既不知道原因也不知道怎么办
+                ?widget.offlineNote,
+              ].join('\n'),
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: scheme.onSurfaceVariant,
               ),
             ),
+          ),
         ],
-        const SizedBox(height: 16),
+        const SizedBox(height: 20),
         Row(
           children: [
             Expanded(
               child: Text(
                 '模型（${s.models.length}）',
-                style: theme.textTheme.labelLarge,
+                style: theme.textTheme.titleSmall,
               ),
             ),
             TextButton.icon(
@@ -723,42 +736,58 @@ class _DetailState extends State<_Detail> {
             ),
           ],
         ),
+        const SizedBox(height: 8),
         if (s.models.isEmpty)
-          Text(
-            // 不拿内置目录顶替：目录知道这家有几十个型号，但这个账号未必
-            // 都开通了。填进选择器的每一个都必须是真的调得通的
-            '还没有型号。点「获取模型列表」去问这家它到底开放了哪些 —— '
-            '内置那份是编译期写死的，未必与你的账号一致。',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
+          SettingsNote(
+            child: Text(
+              // 不拿内置目录顶替：目录知道这家有几十个型号，但这个账号未必
+              // 都开通了。填进选择器的每一个都必须是真的调得通的
+              '还没有型号。点「获取模型列表」去问这家它到底开放了哪些 —— '
+              '内置那份是编译期写死的，未必与你的账号一致。',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
             ),
           )
         else
-          for (final group in groupModels(s.models)) ...[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(0, 10, 0, 2),
-              child: Text(
-                '${group.$1}（${group.$2.length}）',
-                style: theme.textTheme.labelSmall?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-            for (final m in group.$2)
-              _ModelRow(
-                model: m,
-                // 能力从**已经拉过的那份目录**里查，不为几个图标再发一次
-                // 请求。查不到就不画徽标 —— 「不知道」不该长得像「不支持」
-                known: widget.known[m],
-                busy: widget.busy,
-                onRemove: s.builtin
-                    ? null
-                    : () => widget.onModels(
-                        s.models.where((x) => x != m).toList(),
+          // 型号成组，所以放进一张卡（规范第二节）。此前它们裸铺在
+          // 底板上，与上面的表单之间没有任何边界 —— 240 个型号铺开时，
+          // 「哪些属于这条来源」全靠上下距离猜
+          SettingsCard(
+            padding: const EdgeInsets.fromLTRB(14, 6, 8, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final group in groupModels(s.models)) ...[
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(0, 8, 0, 2),
+                    child: Text(
+                      '${group.$1}（${group.$2.length}）',
+                      // **不是 w700。** 字重只有三档，粗那一档留给页面级
+                      // 强调；一个系列名不是页面级的（规范第三节）
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: theme.cortex.foregroundTertiary,
                       ),
-              ),
-          ],
+                    ),
+                  ),
+                  for (final m in group.$2)
+                    _ModelRow(
+                      model: m,
+                      // 能力从**已经拉过的那份目录**里查，不为几个图标再发一次
+                      // 请求。查不到就不画徽标 —— 「不知道」不该长得像「不支持」
+                      known: widget.known[m],
+                      busy: widget.busy,
+                      onRemove: s.builtin
+                          ? null
+                          : () => widget.onModels(
+                              s.models.where((x) => x != m).toList(),
+                            ),
+                    ),
+                ],
+              ],
+            ),
+          ),
       ],
     );
   }

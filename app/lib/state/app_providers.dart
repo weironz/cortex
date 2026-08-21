@@ -40,6 +40,7 @@ import '../models/import_plan.dart';
 import '../models/sync_event.dart';
 import '../core/app_config.dart';
 import '../core/local_llm.dart';
+import '../core/motion.dart';
 import '../core/settings_store.dart';
 import '../core/local_agent.dart';
 import '../models/account.dart';
@@ -1135,19 +1136,81 @@ final mcpConfigProvider = FutureProvider<McpConfigView>((ref) async {
 });
 
 /// System-following theme mode with a manual override.
+/// 浅色 / 深色 / 跟随系统。
+///
+/// # 为什么要落盘
+///
+/// 在此之前它**只活在内存里**：一个把应用调成深色的人，每次启动都会被
+/// 白底闪一下，然后要自己再点回去。而顶栏那个按钮是循环的，
+/// 「回到深色」在最坏情况下要点两下 —— 一个每次启动都要做一遍的动作。
+///
+/// 与权限档同一套（[settingsPatcherProvider]）：读不出来就是
+/// [ThemeMode.system]，也就是「跟系统走」这个最不冒犯的默认。
 class ThemeModeNotifier extends Notifier<ThemeMode> {
-  @override
-  ThemeMode build() => ThemeMode.system;
+  static const String _key = 'theme_mode';
 
-  void cycle() {
-    state = switch (state) {
-      ThemeMode.system => ThemeMode.light,
-      ThemeMode.light => ThemeMode.dark,
-      ThemeMode.dark => ThemeMode.system,
-    };
+  @override
+  ThemeMode build() {
+    Future.microtask(_restore);
+    return ThemeMode.system;
   }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    final mode = switch (saved[_key]) {
+      'light' => ThemeMode.light,
+      'dark' => ThemeMode.dark,
+      // 认不出来（包括没存过、以及文件坏了）一律跟随系统
+      _ => ThemeMode.system,
+    };
+    if (mode != state) state = mode;
+  }
+
+  void set(ThemeMode mode) {
+    if (state == mode) return;
+    state = mode;
+    unawaited(ref.read(settingsPatcherProvider)(_key, mode.name));
+  }
+
+  void cycle() => set(switch (state) {
+    ThemeMode.system => ThemeMode.light,
+    ThemeMode.light => ThemeMode.dark,
+    ThemeMode.dark => ThemeMode.system,
+  });
 }
 
 final themeModeProvider = NotifierProvider<ThemeModeNotifier, ThemeMode>(
   ThemeModeNotifier.new,
+);
+
+/// 动效三档。见 [MotionPref]。
+///
+/// 默认 [MotionPref.system]，也就是与加这个设置之前**行为完全一致** ——
+/// 一个无障碍开关不该因为我们多给了一个选项就改变既有用户的观感。
+class MotionPrefNotifier extends Notifier<MotionPref> {
+  static const String _key = 'motion';
+
+  @override
+  MotionPref build() {
+    Future.microtask(_restore);
+    return MotionPref.system;
+  }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    final pref = MotionPref.fromWire(saved[_key]);
+    if (pref != state) state = pref;
+  }
+
+  void set(MotionPref pref) {
+    if (state == pref) return;
+    state = pref;
+    unawaited(ref.read(settingsPatcherProvider)(_key, pref.wire));
+  }
+}
+
+final motionPrefProvider = NotifierProvider<MotionPrefNotifier, MotionPref>(
+  MotionPrefNotifier.new,
 );
