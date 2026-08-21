@@ -67,7 +67,16 @@ void main() {
     );
   });
 
-  test('已经有人持着时抢不到 —— 这才是这道门的全部意义', () {
+  // ⚠️ **只在 Windows 上跑。**
+  //
+  // 这条用「同一个进程再开一个句柄去锁」当第二实例的替身，而那个替身
+  // 只在 Windows 上成立：`LockFileEx` 是**强制锁**，同进程的另一个句柄
+  // 照样被拒；POSIX 的 `fcntl` 锁是**按进程**记的，同进程再锁直接成功。
+  //
+  // 跨进程互斥两边都对（那才是这道门真正依赖的语义），所以这里不是
+  // 「Linux 上没防护」，而是「这个替身在 Linux 上测不出东西」。
+  // 桌面端本来也只发 Windows 产物。
+  test('已经有人持着时抢不到 —— 这才是这道门的全部意义', testOn: 'windows', () {
     expect(ensureSingleInstance(dirOverride: tmp.path), isTrue);
     // 同一个进程里再抢一次拿不到锁（Windows 的 LockFileEx 对同一句柄
     // 之外的请求一律拒），等价于「第二份实例来了」
