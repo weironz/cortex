@@ -572,7 +572,11 @@ class _MentionRow extends StatelessWidget {
       onTap: onTap,
       child: Container(
         width: double.infinity,
-        color: highlighted ? scheme.primary.withValues(alpha: 0.12) : null,
+        // **中性**（规范第九节）：这是键盘光标停在哪一条，是位置不是动作。
+        //
+        // 与下面那个拖放高亮（`_dragging` 用 primary）分得开是有意的 ——
+        // 那个表达的是「松手就会发生一件事」，这个只表达「我现在在这一行」
+        color: highlighted ? theme.cortex.sidebarAccent : null,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
         child: Row(
           children: [

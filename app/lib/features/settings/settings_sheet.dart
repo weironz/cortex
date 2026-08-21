@@ -162,15 +162,31 @@ class _SettingsWindowState extends State<_SettingsWindow> {
                   child: ListTile(
                     dense: true,
                     selected: selected,
-                    selectedTileColor: theme.colorScheme.primaryContainer
-                        .withValues(alpha: 0.45),
+                    // **中性**（规范第九节）。此前是 `primaryContainer` 的
+                    // 一层，于是这一列常年挂着一块紫 —— 与侧栏、模型服务
+                    // 那两处被拆掉的是同一个东西，这里是最后一处。
+                    // 「我现在在看哪一页」是位置，不是动作
+                    selectedTileColor: theme.cortex.sidebarAccent,
+                    // 连**文字与图标**一起收回中性。ListTile 的
+                    // `selectedColor` 默认是 `colorScheme.primary`，
+                    // 只换底色的话，选中项仍然是一行紫字配一个紫图标 ——
+                    // 那一块紫只是从背景挪到了前景
+                    selectedColor: theme.colorScheme.onSurface,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(
                         CortexTokens.radiusMd,
                       ),
                     ),
                     leading: Icon(s.icon, size: 20),
-                    title: Text(s.label, style: theme.textTheme.bodyMedium),
+                    title: Text(
+                      s.label,
+                      // 底色转中性之后，「哪一项被选中」只剩底色一个信号。
+                      // 加一档字重把它补回来 —— 与「外观」页那组三档选择器
+                      // 同一个做法（`SettingsChoice`）
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontWeight: selected ? FontWeight.w600 : null,
+                      ),
+                    ),
                     subtitle: Text(s.hint, style: theme.textTheme.labelSmall),
                     onTap: () => setState(() => _index = i),
                   ),

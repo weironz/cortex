@@ -1297,9 +1297,10 @@ class _SearchTile extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
       child: Material(
-        color: selected
-            ? scheme.primary.withValues(alpha: 0.12)
-            : Colors.transparent,
+        // **中性**（规范第九节）。搜索结果与上面那份会话列表画在**同一栏**
+        // 里，而那边早就换成中性了 —— 这一处留着品牌色，表现是搜一下、
+        // 选中项忽然变成一块紫，与刚才同一位置的选中态长得完全不同
+        color: selected ? theme.cortex.sidebarAccent : Colors.transparent,
         borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
         child: InkWell(
           onTap: onTap,
