@@ -572,9 +572,7 @@ fn judge_launch_log(tail: &[&str], path: &str) -> Check {
             // 桌面端写的是本地时间且**不带时区**（Dart 的
             // `DateTime.now().toIso8601String()`），parse_from_rfc3339 认不了。
             // 补一个零偏移再解析：这里只比**两条之间的差**，偏移是多少无所谓
-            .or_else(|| {
-                chrono::DateTime::parse_from_rfc3339(&format!("{raw}Z")).ok()
-            })
+            .or_else(|| chrono::DateTime::parse_from_rfc3339(&format!("{raw}Z")).ok())
     };
 
     // 最后一行 stderr 通常就是死因本身（Rust 的 `Error:` 那一行）
@@ -599,8 +597,7 @@ fn judge_launch_log(tail: &[&str], path: &str) -> Check {
     // 所以再加一条只看**拉起的密度**的：一分钟之内起了 5 次以上，不管
     // 中间记了什么、不管是谁杀的，那都不正常。这一条对「下一个我还没想到
     // 的重启源」同样成立 —— 而那正是防护该有的样子。
-    let spawns: Vec<&serde_json::Value> =
-        events.iter().filter(|v| ev(v) == "spawn").collect();
+    let spawns: Vec<&serde_json::Value> = events.iter().filter(|v| ev(v) == "spawn").collect();
     if spawns.len() >= 5
         && let (Some(first), Some(last_spawn)) = (spawns.first(), spawns.last())
         && let (Some(a), Some(b)) = (stamp(first), stamp(last_spawn))
@@ -1015,17 +1012,9 @@ mod tests {
     /// 恰恰是那种日志。
     #[test]
     fn 只看拉起密度也认得出风暴() {
-        let at = |s: &str| {
-            format!(r#"{{"t":"2026-08-21T09:20:{s}","ev":"spawn","pid":1}}"#)
-        };
+        let at = |s: &str| format!(r#"{{"t":"2026-08-21T09:20:{s}","ev":"spawn","pid":1}}"#);
         let ready = r#"{"t":"2026-08-21T09:20:10","ev":"ready","ms":230}"#;
-        let rows = [
-            at("00"),
-            at("01"),
-            at("02"),
-            at("03"),
-            at("04"),
-        ];
+        let rows = [at("00"), at("01"), at("02"), at("03"), at("04")];
         let mut tail: Vec<&str> = rows.iter().map(String::as_str).collect();
         tail.push(ready);
         let c = judge_launch_log(&tail, "P");

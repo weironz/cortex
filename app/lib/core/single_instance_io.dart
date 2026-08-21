@@ -25,8 +25,13 @@ void releaseSingleInstanceLockForTest() {
 ///
 /// 为什么是排它锁而不是 PID 文件、以及它防的是哪次事故，见
 /// `single_instance.dart` 的库注释。
-bool ensureSingleInstance() {
-  final dir = stateDir();
+///
+/// [dirOverride] **只给测试用**。不给的话锁落在真实状态目录里 ——
+/// 而测试若也去锁那一个，它就变成了「此刻这台机器上有没有跑着 Cortex」
+/// 的探测：开发者一边开着应用一边 `just ci`，测试必红，而被测的机制
+/// 完全正常。测试该测机制，不该测机器状态。
+bool ensureSingleInstance({String? dirOverride}) {
+  final dir = dirOverride ?? stateDir();
   // 连状态目录都解析不出来（缺 %LOCALAPPDATA%）的环境里没有可共享的
   // 状态，也就没有要防的冲突 —— 放行，别把启动挡死在一个防护措施上
   if (dir == null) return true;
