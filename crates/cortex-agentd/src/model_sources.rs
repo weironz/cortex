@@ -282,6 +282,144 @@ impl AgentState {
     }
 }
 
+/// 改「部署提供」那条：只有总开关与型号可见性两样。
+///
+/// # 为什么 key / 端点 / 备注名仍然拒绝
+///
+/// 它们真的改不了 —— 那把 key 是服务端环境变量，端点跟着供应商定义走。
+/// **拒绝时要说清是哪一样**，一句笼统的「改不了」会让人以为总开关也白点。
+///
+/// # `models` 传的是「开着哪些」，存的是「关掉了哪些」
+///
+/// 界面那边所有来源共用一套逻辑（发一份完整的启用列表），
+/// 而这条来源的全集是**算出来的**，存 allow-list 会让服务端新加的型号
+/// 静默消失。所以在这里把它翻成补集再存 —— 翻译只此一处。
+///
+/// # Errors
+/// 想改改不了的东西、或者写不进去。
+async fn update_deployment(
+    st: &AgentState,
+    tenant: &crate::request_tenant::Tenant,
+    req: &UpsertRequest,
+) -> Result<(), ApiError> {
+    if !req.api_key.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "「部署提供」那把 key 是服务端配的（CORTEX_LLM_API_KEY），这里改不了。\
+             要用自己的 key 请加一条来源",
+        ));
+    }
+    if req.base_url.as_ref().is_some_and(|u| !u.trim().is_empty()) {
+        return Err(ApiError::bad_request(
+            "「部署提供」的端点跟着服务端的供应商定义走，这里改不了",
+        ));
+    }
+    if !req.label.trim().is_empty() && req.label.trim() != "部署提供" {
+        return Err(ApiError::bad_request("「部署提供」这个名字改不了"));
+    }
+
+    let store = tenant
+        .store()
+        .map_err(|e| ApiError::unsupported(format!("这个部署存不了设置：{e}")))?;
+
+    // 全集用来算补集。取不到时（服务端没配模型）就当空 ——
+    // 那时也没有型号可关
+    let all = st
+        .llm()
+        .map(|c| cortex_llm::provider::allowed_models(c.provider_id()).unwrap_or_default())
+        .unwrap_or_default();
+
+    let off: Option<Vec<String>> = req.models.as_ref().map(|on| {
+        all.iter()
+            .filter(|m| !on.iter().any(|k| k == *m))
+            .cloned()
+            .collect()
+    });
+
+    // 一条 UPSERT 覆盖两种改动。**COALESCE 保住没传的那一样** ——
+    // 分成两条 UPDATE 的话，只改开关的那次会把型号偏好抹掉
+    sqlx::query(
+        "INSERT INTO deployment_source (singleton, enabled, models_off, updated_at)
+              VALUES (TRUE, COALESCE($1, TRUE), COALESCE($2, '[]'::jsonb), now())
+         ON CONFLICT (singleton) DO UPDATE
+            SET enabled    = COALESCE($1, deployment_source.enabled),
+                models_off = COALESCE($2, deployment_source.models_off),
+                updated_at = now()",
+    )
+    .bind(req.enabled)
+    .bind(off.map(|o| serde_json::to_value(o).unwrap_or_else(|_| serde_json::json!([]))))
+    .execute(store.pool())
+    .await
+    .map_err(|e| ApiError::internal(format!("存不进去：{e}")))?;
+
+    Ok(())
+}
+
+/// 「部署提供」那条的用户偏好。见
+/// `migrations/20260821000002_deployment_source.sql`。
+#[derive(Debug, Clone)]
+pub struct DeploymentPrefs {
+    pub enabled: bool,
+    /// 用户关掉的型号。**deny-list** —— 那条来源的全集是算出来的，
+    /// 存 allow-list 会让服务端新加的型号静默消失。
+    pub models_off: Vec<String>,
+}
+
+impl Default for DeploymentPrefs {
+    /// **默认全开。** 读不出来时的安全方向只有这一个：
+    /// 一次读库失败把用户唯一能用的来源关掉，症状是「突然没有模型了」，
+    /// 而他什么都没改过。
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            models_off: Vec::new(),
+        }
+    }
+}
+
+impl DeploymentPrefs {
+    /// 从全集里滤掉关掉的那些。
+    #[must_use]
+    pub fn keep(&self, all: &[String]) -> Vec<String> {
+        all.iter()
+            .filter(|m| !self.models_off.iter().any(|off| off == *m))
+            .cloned()
+            .collect()
+    }
+}
+
+impl AgentState {
+    /// 读「部署提供」那条的偏好。
+    ///
+    /// 读不动一律回 [`DeploymentPrefs::default`]（全开）并记 warn ——
+    /// 理由见那个 `Default` 实现。
+    pub async fn deployment_prefs(
+        &self,
+        tenant: &crate::request_tenant::Tenant,
+    ) -> DeploymentPrefs {
+        let Ok(store) = tenant.store() else {
+            return DeploymentPrefs::default();
+        };
+        match sqlx::query_as::<_, (bool, serde_json::Value)>(
+            "SELECT enabled, models_off FROM deployment_source WHERE singleton",
+        )
+        .fetch_optional(store.pool())
+        .await
+        {
+            Ok(Some((enabled, off))) => DeploymentPrefs {
+                enabled,
+                models_off: serde_json::from_value(off).unwrap_or_default(),
+            },
+            // 一行都没有 = 迁移刚建好还没插过（那条 INSERT 是幂等的，
+            // 但老库上可能顺序不同）。当作全开
+            Ok(None) => DeploymentPrefs::default(),
+            Err(e) => {
+                tracing::warn!(error = %e, "读不出「部署提供」的偏好，按全开算");
+                DeploymentPrefs::default()
+            }
+        }
+    }
+}
+
 /// 列出全部来源。
 ///
 /// # 为什么「部署提供」那条也在这份列表里
@@ -301,7 +439,8 @@ pub async fn list(
     let can_add = kek().is_ok();
     let tenant = st.tenant(&headers).await?;
 
-    let mut sources = vec![deployment_view(&st)];
+    let prefs = st.deployment_prefs(&tenant).await;
+    let mut sources = vec![deployment_view(&st, &prefs)];
 
     if let Ok(store) = tenant.store() {
         let rows = sqlx::query_as::<
@@ -362,8 +501,8 @@ pub async fn list(
 }
 
 /// 「部署提供」那一条。**没有库里的行** —— 它是环境变量配出来的。
-fn deployment_view(st: &AgentState) -> SourceView {
-    let (provider, models) = match st.llm() {
+fn deployment_view(st: &AgentState, prefs: &DeploymentPrefs) -> SourceView {
+    let (provider, all) = match st.llm() {
         Ok(c) => {
             let p = c.provider_id().to_owned();
             let m = cortex_llm::provider::allowed_models(&p).unwrap_or_default();
@@ -374,17 +513,18 @@ fn deployment_view(st: &AgentState) -> SourceView {
         Err(_) => (String::new(), Vec::new()),
     };
     SourceView {
-        // 部署那条的「全集」就是它的定义文件允许的那些 —— 没有别的来源。
-        // 它也没有可关的余地（`models` 恒等于全集），所以界面上那一条的
-        // 「未启用」组永远是空的，这是**事实**而不是缺陷
-        catalog: describe_all(&provider, &models, false),
+        // **全集是算出来的**（供应商定义允许的那些），而 `models` 是它
+        // 减去用户关掉的。两者的差就是界面上那个「未启用」组 ——
+        // 在 20260821000002 之前没地方存「关掉了哪些」，于是那一组
+        // 恒为空，而每个型号旁边那个开关点下去**什么都不做**
+        catalog: describe_all(&provider, &all, false),
+        models: prefs.keep(&all),
         id: DEPLOYMENT_SOURCE_ID.to_owned(),
         provider,
         label: "部署提供".to_owned(),
         key_tail: None,
         base_url: None,
-        enabled: true,
-        models,
+        enabled: prefs.enabled,
         builtin: true,
         // 部署那把 key 是我们付钱，所以它**要**计配额 —— 这正是配额存在的理由
         free_of_quota: false,
@@ -415,13 +555,19 @@ pub async fn upsert(
             cortex_llm::provider::available().join(" / ")
         )));
     }
+    let tenant = st.tenant(&headers).await?;
+
+    // 「部署提供」那条**没有行**（环境变量配出来的），但它的两个开关
+    // 是真的：总开关与每个型号那个。走单独一张表，见
+    // `migrations/20260821000002_deployment_source.sql`。
+    //
+    // 此前这里是整个拒绝，于是界面上那两个开关点下去要么弹一句
+    // 「非法输入」再跳回原位、要么静默什么都不做
     if id.as_deref() == Some(DEPLOYMENT_SOURCE_ID) {
-        return Err(ApiError::bad_request(
-            "「部署提供」那条是服务端配的，改不了。要换模型请加一条自己的来源",
-        ));
+        update_deployment(&st, &tenant, &req).await?;
+        return list(State(st), headers).await;
     }
 
-    let tenant = st.tenant(&headers).await?;
     let store = tenant
         .store()
         .map_err(|e| ApiError::unsupported(format!("这个部署存不了模型来源：{e}")))?;
@@ -1245,6 +1391,52 @@ mod tests {
             got.contains("No available channel"),
             "分不清的时候唯一诚实的做法是把原文给他 —— 那句话自己就说清了。实际：{got}"
         );
+    }
+
+    // ──────────────── 「部署提供」那条的偏好 ────────────────
+
+    #[test]
+    fn 关掉的型号被滤掉_其余原样() {
+        let prefs = DeploymentPrefs {
+            enabled: true,
+            models_off: vec!["b".into()],
+        };
+        let all = ["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        assert_eq!(prefs.keep(&all), vec!["a".to_owned(), "c".to_owned()]);
+    }
+
+    /// ⚠️ **存的是 deny-list，这一条就是它的全部理由。**
+    ///
+    /// 那条来源的型号是算出来的（跟着服务端的供应商定义走）。存 allow-list
+    /// 的话，服务端哪天加一个新型号，用户这边会**静默看不到它** ——
+    /// 而他从没做过任何选择。
+    #[test]
+    fn 服务端新加的型号默认可见() {
+        let prefs = DeploymentPrefs {
+            enabled: true,
+            models_off: vec!["old-one".into()],
+        };
+        let after_upgrade = [
+            "old-one".to_owned(),
+            "kept".to_owned(),
+            "brand-new".to_owned(),
+        ];
+        assert!(
+            prefs.keep(&after_upgrade).contains(&"brand-new".to_owned()),
+            "用户从没关过它。存 allow-list 的话它会悄无声息地不出现，\
+             而没有任何地方告诉过他服务端多了一个可用型号"
+        );
+    }
+
+    /// 读不出来时**全开**，不是全关。
+    #[test]
+    fn 读不出偏好时不要把人锁在门外() {
+        let d = DeploymentPrefs::default();
+        assert!(
+            d.enabled,
+            "一次读库失败把用户唯一能用的来源关掉，症状是「突然没有模型了」"
+        );
+        assert_eq!(d.keep(&["a".to_owned()]), vec!["a".to_owned()]);
     }
 
     #[test]

@@ -376,8 +376,16 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   /// 关掉的型号仍留在这条来源的全集里，所以它还在「未启用」组里看得见，
   /// 想再打开不用重新拉一次列表。这正是加 `catalog` 那个字段的全部理由。
   Future<void> _toggleModel(ModelSource s, String modelId, bool on) {
-    // 部署那条只读：它的型号来自服务端的供应商定义，改不了
-    if (s.builtin) return Future<void>.value();
+    // ⚠️ **这里曾经有一句 `if (s.builtin) return;`。**
+    //
+    // 那是一个静默的空操作，而开关画得与别处一模一样 —— 用户点它，
+    // 什么都不发生、也没有任何解释。2026-08-21 报上来的就是这个
+    // （「模型列表里不能禁用某个模型，点击没反应」），而它恰好违反了
+    // 我在同一笔改动里刚写进 design.md 的那条：**不画点不动的控件**。
+    //
+    // 修法不是把开关禁掉，是**把那个分支删掉**：服务端现在存得下
+    // 「部署提供」关掉了哪些型号（20260821000002），所有来源走同一条路。
+    // 少一个分支，也就少一处将来会写成空操作的地方。
     final next = on
         ? [...s.models, if (!s.models.contains(modelId)) modelId]
         : s.models.where((m) => m != modelId).toList();

@@ -101,7 +101,25 @@ pub async fn stream(
     let was_auto = matches!(req.model, ModelChoice::Auto);
     let req = resolve_auto(server, &sources, req);
     let picked = pick_source(&sources, req.source.as_deref());
+
+    // 「部署提供」还开着吗。**算一次，两条回落路径共用** —— 各查各的话，
+    // 迟早有一条忘了查，而那条就是开关的漏洞
+    let deployment_ok = st.deployment_prefs(&tenant).await.enabled;
+
     if picked.is_none() {
+        // ⚠️ **用户把「部署提供」关掉了，就不能再拿它顶上。**
+        //
+        // 这条路是「没指名来源」时的兜底，而兜底恰恰是那个总开关要拦的
+        // 东西：他关它的理由就是不想让某些对话去花配额。悄悄照跑的话，
+        // 开关是纯装饰 —— 界面上写着关，账单上照记。
+        if !deployment_ok {
+            return Err(cortex_core::CortexError::Config(
+                "「部署提供」被你关掉了，而这一轮没有指定别的来源。\
+                 去 设置 → 模型服务 把它打开，或者选一个自己的来源"
+                    .to_owned(),
+            )
+            .into());
+        }
         st.enforce_quota(&user).await?;
     }
 
@@ -118,7 +136,9 @@ pub async fn stream(
     let mut used_own_key = picked.is_some();
     let upstream = match upstream(server, req.clone(), picked).await {
         Ok(s) => s,
-        Err(e) if was_auto && picked.is_some() => {
+        // `deployment_ok` 一并判：关掉之后连自动档的回落也不许走它，
+        // 否则「挑中的那条坏了」会变成一条绕开开关的后门
+        Err(e) if was_auto && picked.is_some() && deployment_ok => {
             tracing::warn!(
                 source = ?req.source,
                 error = %e,
@@ -627,7 +647,18 @@ pub async fn models(
     let mut models = Vec::new();
 
     // ── 部署那条 ────────────────────────────────────────
-    let deployment = cortex_llm::provider::allowed_models(&provider).unwrap_or_default();
+    //
+    // ⚠️ **这里算的是第二遍**：`model_sources::deployment_view` 也算一次
+    // （设置页读那一份）。两处必须**同样**尊重用户的偏好，否则表现是
+    // 「设置页里关掉了，选择器里还在」—— 而两个界面都言之凿凿。
+    //
+    // 整条关掉时**一个都不列**：留着它们等于那个总开关只是装饰
+    let prefs = st.deployment_prefs(&tenant).await;
+    let deployment = if prefs.enabled {
+        prefs.keep(&cortex_llm::provider::allowed_models(&provider).unwrap_or_default())
+    } else {
+        Vec::new()
+    };
     warn_on_reserved(&provider, &deployment);
     models.extend(describe(
         &provider,
