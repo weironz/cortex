@@ -179,22 +179,39 @@ fn validate(
     // 绘画角色必须真的画得出来。**在这里拒绝，而不是等他点「画一张」** ——
     // 那时他既不记得自己配过什么，也不知道该改哪儿
     if a.role == ModelRole::Image {
-        let provider = if a.source == crate::model_sources::DEPLOYMENT_SOURCE_ID {
-            st.llm()
-                .map(|c| c.provider_id().to_owned())
-                .unwrap_or_default()
+        // ⚠️ `custom_endpoint` 与 provider 必须**一起**取。少了它这一关会
+        // 拒掉中转站上实测能画的型号，而界面上那个面板压根不会把它列出来 ——
+        // 于是「绘画模型」这一栏在中转站用户那里是个死格子
+        let (provider, custom) = if a.source == crate::model_sources::DEPLOYMENT_SOURCE_ID {
+            // 部署那条走服务端自己配的供应商，端点跟着定义走，不是自定义的
+            (
+                st.llm()
+                    .map(|c| c.provider_id().to_owned())
+                    .unwrap_or_default(),
+                false,
+            )
         } else {
             sources
                 .iter()
                 .find(|s| s.id == a.source)
-                .map(|s| s.provider.clone())
+                .map(|s| {
+                    (
+                        s.provider.clone(),
+                        crate::model_sources::is_custom_endpoint(
+                            &s.provider,
+                            s.base_url.as_deref(),
+                        ),
+                    )
+                })
                 .unwrap_or_default()
         };
-        if !cortex_llm::image::is_image_model(&provider, &a.model) {
+        if !cortex_llm::image::is_image_model(&provider, &a.model, custom) {
             return Err(ApiError::bad_request(format!(
                 "`{}` 生不了图。绘画模型要选带「能生图」标记的那些 —— \
-                 现在能生图的是通义千问（Alibaba）的 qwen-image 系列，\
-                 与 Google 的 gemini-*-image 系列",
+                 接了官方生图接口的是通义千问（Alibaba）的 qwen-image 系列\
+                 与 Google 的 gemini-*-image 系列；\
+                 自己填了端点的来源（中转站/网关）上，\
+                 gpt-image / dall-e 这些也算",
                 a.model
             )));
         }

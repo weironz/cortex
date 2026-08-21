@@ -987,7 +987,7 @@ fn describe_all(provider: &str, names: &[String], custom_endpoint: bool) -> Vec<
             // ⚠️ 生图这一位**不能只问目录**：目录里 alibaba 一个
             // `image_output` 都没有，而真实账号上有 19 个。而且它还要
             // 回答「我们调不调得动这家」—— 判据统一在 `is_image_model`
-            let draws = cortex_llm::image::is_image_model(provider, id);
+            let draws = cortex_llm::image::is_image_model(provider, id, custom_endpoint);
             FetchedModel {
                 id: id.clone(),
                 display_name: info

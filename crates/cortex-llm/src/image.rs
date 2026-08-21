@@ -79,18 +79,40 @@ pub enum GeneratedImage {
 /// 所以是两级：**目录说有就是有**（它准），目录不知道时按各家已核实的
 /// 命名规则兜底。兜底那份是**具体列举的前缀**，不是一个「名字里带 image」
 /// 的模糊匹配 —— 后者会把 `qwen-vl`（看图的）之类误判成生图的。
+///
+/// # `custom_endpoint`：这一位必须传，且必须与 [`generate`] 同源
+///
+/// 2026-08-21 这个函数少了这个参数，代价是**一个实测能画的模型在界面上
+/// 一个都选不出来**。
+///
+/// [`generate`] 在自定义端点上**直接走聊天协议，根本不看 provider** ——
+/// 中转站普遍把生图包成 `/v1/chat/completions`。而这个判定门当时只有
+/// `(provider, model)`，于是对 `provider = "openai"` 一律回 false。
+/// 结果是同一个问题有两个答案：日志里 `gpt-image-2` 刚生成并存下一张图，
+/// 「默认模型 → 绘画模型」那个面板却一个候选都列不出来，用户来问
+/// 「绘画模型怎么不能选」。
+///
+/// 判据：**判定门与分发器必须看同一组输入**。分发器不看 provider 的那一格，
+/// 判定门也不能拿 provider 白名单去挡。
 #[must_use]
-pub fn is_image_model(provider: &str, model: &str) -> bool {
-    // ⚠️ **先看这家接没接。**
+pub fn is_image_model(provider: &str, model: &str, custom_endpoint: bool) -> bool {
+    // ⚠️ **先看这家接没接** —— 但只在走厂商官方接口时。
     //
     // 目录里 `gpt-image-1` 的 `image_output` 是真的 —— 它确实能生图。
-    // 但我们没接 OpenAI 的生图协议，认下它的表现是：agent 挑中它、
+    // 但我们没接 OpenAI 的**官方**生图协议，认下它的表现是：agent 挑中它、
     // 调过去、`generate` 那里返回「还没接」。一次本可以在挑选阶段
     // 就避开的失败，被推迟到了用户点下按钮之后。
     //
-    // 「它能生图」与「我们调得动」是两件事。
-    if !supported(provider) {
+    // 「它能生图」与「我们调得动」是两件事 —— 而自定义端点上「调得动」
+    // 由聊天协议那条路回答，与这家接没接无关
+    if !custom_endpoint && !supported(provider) {
         return false;
+    }
+    if custom_endpoint {
+        // 端点后面是谁我们不知道，只能看名字与目录。**这里给的是
+        // 「值不值得试」，不是断言** —— 试不出图时错误里会带上对方原话
+        return crate::catalog::lookup(provider, model).is_some_and(|i| i.image_output)
+            || looks_like_image_model(model);
     }
     if let Some(info) = crate::catalog::lookup(provider, model)
         && info.image_output
@@ -124,10 +146,32 @@ pub fn is_image_model(provider: &str, model: &str) -> bool {
     }
 }
 
-/// 这家能不能生图。
+/// 中转站上「这个名字像不像生图模型」。
 ///
-/// 界面据它决定要不要摆「绘画模型」那一栏 —— 摆一个点了必然报错的
-/// 选项，比不摆更糟。
+/// 中转站的型号名**照抄上游**，所以各家已核实的规则在这里全都适用；
+/// 再加 OpenAI 那一族 —— 它的官方生图协议我们没接，但中转站是把它
+/// 包成聊天出图的（2026-08-20 实测 `gpt-image-2`，2026-08-21 日志里
+/// 它真的生成并存下了一张图）。
+///
+/// ⚠️ 仍然是**具体列举的前缀**，不是「名字里带 image」的模糊匹配 ——
+/// 后者会把 `qwen-vl` / `gpt-4o-vision` 这些**看**图的误判成**生**图的，
+/// 而那种误判要等用户点下按钮才暴露。
+fn looks_like_image_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("qwen-image")
+        || m.starts_with("z-image")
+        || (m.starts_with("wan") && m.contains("-image"))
+        || (m.starts_with("gemini") && m.contains("-image"))
+        // `gpt-image-2-vip` 也要认：那个中转站会偷偷把型号换成 `-vip`
+        || m.starts_with("gpt-image")
+        || m.starts_with("dall-e")
+}
+
+/// 这家的**官方生图协议**我们接没接。
+///
+/// ⚠️ 它回答的不是「这条来源能不能生图」—— 自定义端点上不看这个
+/// （见 [`is_image_model`] 的 `custom_endpoint`）。拿它去挡中转站，
+/// 表现就是 2026-08-21 那次：图画得出来，界面却一个候选都不给。
 #[must_use]
 pub fn supported(provider: &str) -> bool {
     matches!(provider, "alibaba" | "google")
@@ -778,7 +822,7 @@ mod tests {
             "gemini-3-pro-image-preview",
             "gemini-3.1-flash-image-preview",
         ] {
-            assert!(is_image_model("google", m), "{m} 是生图型号");
+            assert!(is_image_model("google", m, false), "{m} 是生图型号");
         }
         // ⚠️ 目录里**没有**的那三个（真实账号上有）。只信目录的表现是
         // 「同一个型号的 preview 能选，正式版反而不能」
@@ -788,14 +832,17 @@ mod tests {
             "gemini-3.1-flash-lite-image",
         ] {
             assert!(
-                is_image_model("google", m),
+                is_image_model("google", m, false),
                 "{m} 在目录里查不到，要靠命名规则兜底 —— 它在真实账号上是有的"
             );
         }
         // 看图的不是生图的：这两件事在 Gemini 上是同一个家族的不同型号，
         // 判错的代价是把一个对话主力当成绘画模型
         for m in ["gemini-3-pro", "gemini-2.5-flash", "gemini-embedding-001"] {
-            assert!(!is_image_model("google", m), "{m} 是对话/嵌入型号，不生图");
+            assert!(
+                !is_image_model("google", m, false),
+                "{m} 是对话/嵌入型号，不生图"
+            );
         }
     }
 
@@ -939,7 +986,10 @@ mod tests {
             "wan2.7-image-pro",
             "z-image-turbo",
         ] {
-            assert!(is_image_model("alibaba", m), "{m} 是生图型号，却没被认出来");
+            assert!(
+                is_image_model("alibaba", m, false),
+                "{m} 是生图型号，却没被认出来"
+            );
         }
     }
 
@@ -958,7 +1008,7 @@ mod tests {
             "wan2.5-t2v-plus",
         ] {
             assert!(
-                !is_image_model("alibaba", m),
+                !is_image_model("alibaba", m, false),
                 "{m} 不是生图型号。误判的后果是 agent 拿它去调生图接口，                 而那条请求会被供应商拒 —— 用户看到的是「生成失败」，                 完全看不出是我们挑错了型号"
             );
         }
@@ -968,10 +1018,61 @@ mod tests {
     #[test]
     fn 没接的家一律不认() {
         assert!(
-            !is_image_model("openai", "gpt-image-1"),
+            !is_image_model("openai", "gpt-image-1", false),
             "OpenAI 的生图协议还没接。认它等于让 agent 调一条不存在的路"
         );
-        assert!(!is_image_model("deepseek", "qwen-image-3.0"));
+        assert!(!is_image_model("deepseek", "qwen-image-3.0", false));
+    }
+
+    /// 2026-08-21 的回归：**判定门与分发器必须看同一组输入**。
+    ///
+    /// [`generate`] 在自定义端点上直接走聊天协议、根本不看 provider，
+    /// 而这个判定门当时拿 `supported(provider)` 去挡 —— 于是日志里
+    /// `gpt-image-2` 刚生成并存下一张图，界面上「绘画模型」那个面板
+    /// 一个候选都列不出来。
+    #[test]
+    fn 自定义端点上不看这家接没接() {
+        for m in ["gpt-image-2", "gpt-image-2-vip", "dall-e-3"] {
+            assert!(
+                is_image_model("openai", m, true),
+                "{m} 在中转站上是包成聊天出图的，实测能画 —— \
+                 拿「OpenAI 官方生图协议没接」去挡它，\
+                 结果是画得出来却一个都选不了"
+            );
+            assert!(
+                !is_image_model("openai", m, false),
+                "{m} 走 OpenAI **官方**接口时仍然不认：那条协议我们真没写，\
+                 认下来的表现是推迟到用户点下按钮才失败"
+            );
+        }
+    }
+
+    /// 放宽的只有 provider 那一格，**不是「名字里带 image 就算」**。
+    #[test]
+    fn 自定义端点上仍然只认列举过的前缀() {
+        for m in [
+            "qwen-vl-max",        // 看图，不生图
+            "gpt-4o",             // 目录认得它，image_output 是假
+            "gemini-3-pro",       // 看图
+            "some-imagery-model", // 名字里有 image 的子串
+            "deepseek-v4-pro",
+        ] {
+            assert!(
+                !is_image_model("openai", m, true),
+                "{m} 不该被认成生图型号 —— 模糊匹配的误判要等用户点下按钮才暴露"
+            );
+        }
+        // 各家已核实的规则在中转站上照样适用（型号名是照抄上游的）
+        for m in [
+            "qwen-image-3.0",
+            "z-image-turbo",
+            "gemini-3-pro-image-preview",
+        ] {
+            assert!(
+                is_image_model("openai", m, true),
+                "{m} 是上游的生图型号，中转站照抄了这个名字"
+            );
+        }
     }
 }
 

@@ -759,7 +759,7 @@ fn describe(
                 // 三态，与 `model_sources::describe_all` 一字不差：
                 // 画得出 = true；目录认得它但画不出 = false；
                 // 目录里根本没有它 = 不知道（`None`），界面据此不画徽标
-                image_output: if cortex_llm::image::is_image_model(provider, id) {
+                image_output: if cortex_llm::image::is_image_model(provider, id, custom_endpoint) {
                     Some(true)
                 } else if info.is_some() {
                     Some(false)
@@ -1174,12 +1174,12 @@ mod resolve_tests {
         for m in &out {
             assert_eq!(
                 m.image_output,
-                Some(cortex_llm::image::is_image_model("alibaba", &m.id)),
+                Some(cortex_llm::image::is_image_model("alibaba", &m.id, false)),
                 "`{}` 在列表里标的是 {:?}，而保存时的校验说 {} —— \
                  两处分叉的话，用户会挑一个标着「能生图」的然后被拒",
                 m.id,
                 m.image_output,
-                cortex_llm::image::is_image_model("alibaba", &m.id)
+                cortex_llm::image::is_image_model("alibaba", &m.id, false)
             );
         }
     }

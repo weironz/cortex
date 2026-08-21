@@ -177,9 +177,11 @@ fn pick<'a>(
 
     if candidates.is_empty() {
         return Err(ApiError::bad_request(
-            "没有能生图的模型来源。去设置 → 模型服务里加一条通义千问（Alibaba）\
-             或 Google（Gemini）的来源，再点「获取模型列表」，\
-             把 qwen-image / gemini-*-image 那些拉进来",
+            "没有能生图的模型来源。去设置 → 模型服务里加一条来源，再点\
+             「获取模型列表」把生图型号加进来 —— 接了官方生图接口的是\
+             通义千问（Alibaba）的 qwen-image 系列与 Google 的\
+             gemini-*-image 系列；自己填了端点的来源（中转站/网关）也行，\
+             那种来源上 gpt-image / dall-e 这些同样能用",
         ));
     }
 
@@ -187,22 +189,34 @@ fn pick<'a>(
         // 这条来源开放的型号里，哪些能生图。判据见
         // `cortex_llm::image::is_image_model` —— 目录优先，目录不认时
         // 按各家已核实的命名规则兜底（目录里 alibaba 一个生图模型都没有）
-        // ⚠️ 自定义端点上**不筛** —— `is_image_model` 问的是「厂商官方那家
-        // 接没接」，而中转站的型号在目录里查不到、provider 也说明不了什么。
-        // 按它筛的结果是一个都不剩，于是「指名一个型号」这件事在中转站上
-        // 永远失败。让用户指名的那个直接过去，画不出来时错误里有对方原话
         let custom = crate::model_sources::is_custom_endpoint(&s.provider, s.base_url.as_deref());
-        let mut usable: Vec<&String> = s
-            .models
-            .iter()
-            .filter(|m| custom || cortex_llm::image::is_image_model(&s.provider, m))
-            .collect();
+
+        // ⚠️ **指名与自动挑选是两条不同的规矩，别合成一条。**
+        //
+        // 合过：`filter(|m| custom || is_image_model(..))`，一个条件同时
+        // 服务两处。代价是**自动挑选在中转站上会挑中一个对话模型** ——
+        // 那一格根本没筛。
+        //
+        // 分开之后各自说得清：
+        //
+        // | | 判据 | 为什么 |
+        // |---|---|---|
+        // | 指名 | 自定义端点上直接放行 | 中转站的型号名千奇百怪，我们的前缀表不可能全；他既然点名了，就让它过去，画不出来时错误里有对方原话 |
+        // | 自动 | 一律要过判定门 | 挑错了他连自己挑了什么都不知道 |
         if let Some(want) = want_model {
-            if usable.iter().any(|m| m.as_str() == want) {
+            let ok = s.models.iter().any(|m| m == want)
+                && (custom || cortex_llm::image::is_image_model(&s.provider, want, custom));
+            if ok {
                 return Ok((s, want.to_owned()));
             }
             continue;
         }
+
+        let mut usable: Vec<&String> = s
+            .models
+            .iter()
+            .filter(|m| cortex_llm::image::is_image_model(&s.provider, m, custom))
+            .collect();
         // 没指名就挑最便宜的：生图按张计费，而 agent 每轮可能调好几次
         usable.sort_by_key(|m| {
             cortex_llm::catalog::lookup(&s.provider, m)
