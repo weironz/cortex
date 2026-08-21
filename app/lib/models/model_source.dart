@@ -30,6 +30,7 @@ class ModelSource {
     this.baseUrl,
     this.enabled = true,
     this.models = const [],
+    this.catalog = const [],
     this.builtin = false,
     this.freeOfQuota = false,
   });
@@ -42,6 +43,9 @@ class ModelSource {
     baseUrl: json['base_url'] as String?,
     enabled: json['enabled'] != false,
     models: asStringList(json['models']),
+    catalog: asObjectList(
+      json['catalog'],
+    ).map(FetchedModel.fromJson).toList(growable: false),
     builtin: json['builtin'] == true,
     freeOfQuota: json['free_of_quota'] == true,
   );
@@ -66,8 +70,41 @@ class ModelSource {
   /// 删掉再填一遍 key 是最烦的一种「临时关掉」。
   final bool enabled;
 
-  /// 这条来源开放哪些型号。空 = 还没拉过（界面提示去点「获取模型列表」）。
+  /// 这条来源**开放**哪些型号。空 = 还没拉过（界面提示去点「获取模型列表」）。
   final List<String> models;
+
+  /// 最近一次「获取模型列表」拉到的**全部**型号，带能力与价目。
+  ///
+  /// [models] 是它的子集，两者的差就是界面上那个「未启用」分组。
+  ///
+  /// **可能是空的**，两种情况：还没拉过，或者对面是**老服务端**
+  /// （2026-08-21 之前的版本不下发这个字段）。界面别直接读它，
+  /// 读 [shownCatalog]。
+  final List<FetchedModel> catalog;
+
+  /// 界面该画哪些型号。
+  ///
+  /// # ⚠️ 为什么不能直接用 [catalog]
+  ///
+  /// 老服务端不认识这个字段，回来就是空的 —— 而那台机器上这条来源
+  /// **明明配着几个型号**（`models` 里有）。直接画 `catalog` 的结果是
+  /// 「还没有型号，点获取模型列表」，而用户上一分钟还在用它们聊天。
+  ///
+  /// 一个新客户端连上老服务端就让人以为配置丢了，是升级里最不该有的
+  /// 表现：他会去重填，而重填并不能修好一个根本没坏的东西。
+  ///
+  /// 兜底出来的条目**只有 id**，能力与价目一概为 null —— 界面据此留白，
+  /// 不编数字（那正是三态里 `null` 的用法）。
+  List<FetchedModel> get shownCatalog {
+    if (catalog.isNotEmpty) return catalog;
+    return [for (final id in models) FetchedModel(id: id)];
+  }
+
+  /// 这个型号此刻开着吗。
+  ///
+  /// 判据只有一处：**在 [models] 里就是开着的**。不另存一位布尔 ——
+  /// 同一件事两处表达，迟早不一致，而症状是「界面上关着、选择器里还在」。
+  bool isEnabled(String modelId) => models.contains(modelId);
 
   /// 部署提供的那条：只读、不可删。
   final bool builtin;
@@ -232,6 +269,25 @@ class FetchedModel {
   final int? outputMicrosPerMtok;
 
   String get label => displayName.isEmpty ? id : displayName;
+}
+
+/// `POST .../{id}/check` 的响应 —— 拿存下来的 key 真发一次请求的结果。
+///
+/// **失败也是 200**：这条端点的产出是「一次检查的结论」，不是「请求成功了
+/// 没有」。用 4xx 表达「你的 key 不对」会与「这条端点不存在」「你没登录」
+/// 混在一起，而客户端已经有一整套按状态码分支的逻辑，那些分支会把一次
+/// 正常的检查结果当成故障处理。
+class SourceCheck {
+  const SourceCheck({required this.ok, required this.detail});
+
+  factory SourceCheck.fromJson(Map<String, dynamic> json) =>
+      SourceCheck(ok: json['ok'] == true, detail: asString(json['detail']));
+
+  final bool ok;
+
+  /// 一句给人看的话。**通过时也有** —— 「通过」两个字回答不了
+  /// 「我刚才到底验了什么」，而那正是点这个按钮的人想知道的。
+  final String detail;
 }
 
 /// `POST .../{id}/models` 的响应。

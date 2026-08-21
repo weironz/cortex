@@ -349,6 +349,14 @@ abstract interface class CortexApi {
   /// 拉不动时服务端回落到内置定义并把 `live` 置 false —— 界面要说出来。
   Future<FetchedModels> fetchSourceModels(String id);
 
+  /// 拿这条来源存下来的 key 真发一次请求，验「我填对了没有」。
+  ///
+  /// **不能在客户端做**：明文 key 从不下发（服务端只回后 4 位），
+  /// 这里没有任何东西可以拿去试。
+  ///
+  /// [model] 留空 = 让服务端挑这条来源开着的第一个。
+  Future<SourceCheck> checkModelSource(String id, {String model = ''});
+
   /// `GET /settings/model-roles` —— 现在把哪个模型指派给了哪个角色。
   Future<RoleAssignments> modelRoles();
 
@@ -750,6 +758,9 @@ mixin ModelSourcesUnsupported {
 
   Future<FetchedModels> fetchSourceModels(String id) async =>
       const FetchedModels();
+
+  Future<SourceCheck> checkModelSource(String id, {String model = ''}) async =>
+      const SourceCheck(ok: false, detail: '这个部署不支持连通性检查');
 
   Future<RoleAssignments> modelRoles() async => const RoleAssignments();
 

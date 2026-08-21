@@ -185,6 +185,77 @@ class SettingsRow extends StatelessWidget {
   }
 }
 
+/// 一行表单：**左边标签 + 说明，右边控件**。
+///
+/// # 为什么不是「标签在上、控件在下」
+///
+/// 上下堆的版式里，每一项都要占两到三行，而这一页上「API 密钥」「API 地址」
+/// 「连通性检查」三项加起来会推到一屏之外 —— 于是想核对一眼端点的人得先滚。
+/// 而端点恰恰是最常需要核对的那一项。
+///
+/// 左右分栏还顺带解决了另一件事：**说明有地方放了**。上下堆时说明只能
+/// 挤在标签与输入框之间，读起来像输入框的一部分。
+class SettingsField extends StatelessWidget {
+  const SettingsField({
+    super.key,
+    required this.label,
+    this.hint,
+    required this.child,
+  });
+
+  final String label;
+
+  /// 标签下面那行小字：格式要求、留空会怎样、以及**后果**。
+  final String? hint;
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 9),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 160,
+            child: Padding(
+              // 与右边控件的第一行对齐：输入框自带内边距，标签顶对齐会
+              // 显得浮在上面半格
+              padding: const EdgeInsets.only(top: 7),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurface,
+                    ),
+                  ),
+                  if (hint != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        hint!,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: theme.cortex.foregroundTertiary,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(child: child),
+        ],
+      ),
+    );
+  }
+}
+
 /// 一组互斥选项，横着摆。
 ///
 /// # 为什么不是下拉框

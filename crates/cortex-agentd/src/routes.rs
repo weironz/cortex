@@ -174,6 +174,12 @@ protected_routes! {
     // 而这三件事都不该挡住「把一条来源存下来」。Cherry Studio 的
     // 「获取模型列表」也是一个独立按钮，同一个理由
     "/settings/model-sources/{id}/models" [POST] => post(crate::model_sources::fetch_models),
+    // 拿存下来的 key 真发一次请求，验「我填对了没有」。
+    //
+    // **必须在服务端**：明文 key 从不下发，客户端没有东西可以拿去试。
+    // 与上面那条分开也是有意的 —— 列得出不等于调得通（中转站常照抄一份
+    // 上游目录，下单时才发现没开通），反过来有的网关压根不实现 /v1/models
+    "/settings/model-sources/{id}/check" [POST] => post(crate::model_sources::check),
     // 默认模型（主 / 快速 / 绘画）。**整份替换** —— 角色只有三个，
     // 界面上是同一屏三个下拉，增量协议不值那套复杂度
     "/settings/model-roles" [GET, PUT] => get(crate::model_roles::list)

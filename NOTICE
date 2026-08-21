@@ -76,6 +76,27 @@ Licensed under the Apache License, Version 2.0
   crates/cortex-agent/src/sandbox/macos.rs
       sandbox-exec 的调用形状取自 codex-rs/sandboxing/src/seatbelt.rs
 
+  app/assets/providers/*.png
+      供应商品牌标，来自两处：
+
+      * anthropic / google / minimax / ollama / openai / xai
+        取自 goose 的 ui/desktop/src/components/settings/providers/modal/
+        subcomponents/icons/（各家的 @3x 那份，128px）
+
+      * deepseek / zhipu / moonshot / alibaba
+        取自 lobehub/lobe-icons 的 packages/static-png/light/
+        （deepseek-color / zhipu-color / kimi-color / qwen-color，640px）
+        MIT License, Copyright (c) 2023 LobeHub
+
+      文件名就是 provider id，与 `ProviderMark` 的约定一致。
+
+      ⚠️ 这些图**本身是各厂商的商标**，不是 goose 的作品 —— Apache-2.0
+      覆盖的是 goose 的代码，不是它打包的第三方标识。这里的用法是
+      「用某商标指代该商标的产品」（指名性使用）：界面上每一个标都紧挨着
+      那家供应商自己的名字，不用作 Cortex 的标识、不暗示任何背书或合作。
+      任一厂商提出异议时，`ProviderMark` 的首字母圆标兜底就是退路 ——
+      删掉对应的 png 即可，不用改一行代码。
+
 ═══════════════════════════════════════════════════════════════════════
 明确未取件
 ═══════════════════════════════════════════════════════════════════════

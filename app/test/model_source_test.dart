@@ -115,6 +115,22 @@ Future<void> _pump(WidgetTester tester, ProviderContainer c) async {
   }
 }
 
+/// 点开左列的某一条来源。
+///
+/// **不能用 `find.text(名字)`**：2026-08-21 照 LobeHub 重做之后，这一页
+/// 默认落在「全部」总览上，同一条来源的名字在屏幕上出现两次 ——
+/// 左列一次、卡片墙一次。裸文本查找指不准是哪一个，而「点左列那一行」
+/// 与「点那张卡」是两个不同的动作（后者也能进详情，但走的是另一条路）。
+Future<void> _open(WidgetTester tester, String id) async {
+  await tester.tap(find.byKey(ValueKey('src:$id')));
+  for (var i = 0; i < 4; i++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+}
+
+const _kAlibaba = '01M0MOCKSOURCEAAAAAAAAAAAA';
+const _kOllama = '01M0MOCKSOURCEBBBBBBBBBBBB';
+
 void main() {
   group('解析', () {
     test('只认后四位，永远没有明文字段', () {
@@ -170,15 +186,20 @@ void main() {
       addTearDown(c.dispose);
       await _pump(tester, c);
 
-      // 「部署提供」出现两次是对的：左列表一次，右边详情的标题一次
-      expect(find.text('部署提供'), findsNWidgets(2));
-      expect(find.text('Alibaba (Qwen)'), findsOneWidget);
-      expect(find.text('本机 Ollama'), findsOneWidget);
+      // 每条来源出现**两次**：左列一次，总览卡片墙上一次。
+      // 这一页默认落在「全部」上 —— 打开它最常见的意图是
+      // 「我现在有什么」，而不是「改第一条的 key」
+      for (final name in ['部署提供', 'Alibaba (Qwen)', '本机 Ollama']) {
+        expect(find.text(name), findsNWidgets(2), reason: '$name 左列 + 卡片各一次');
+      }
+      expect(find.byKey(const ValueKey('src:all')), findsOneWidget);
       expect(
-        find.textContaining('免费 · 占配额'),
+        find.textContaining('免费但占配额'),
         findsOneWidget,
-        reason: '「用这条会不会花我的额度」是这一列里最要紧的一位',
+        reason: '「用这条会不会花我的额度」是这一屏上最要紧的一位',
       );
+      // 关掉的那条要说清「关着」意味着什么 —— 配置留着，只是不进选择器
+      expect(find.textContaining('它不进模型选择器'), findsOneWidget);
       expect(find.text('添加模型'), findsOneWidget);
     });
 
@@ -188,7 +209,7 @@ void main() {
       addTearDown(c.dispose);
       await _pump(tester, c);
 
-      // 默认选中第一条（部署提供）
+      await _open(tester, kDeploymentSource);
       expect(
         find.text('删除'),
         findsNothing,
@@ -206,15 +227,20 @@ void main() {
       addTearDown(c.dispose);
       await _pump(tester, c);
 
-      await tester.tap(find.text('Alibaba (Qwen)'));
-      for (var i = 0; i < 4; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
+      await _open(tester, _kAlibaba);
       expect(find.text('删除'), findsOneWidget);
       // 密钥与端点**直接在面板里改**，不弹窗 —— 端点是最常需要核对的一项，
       // 而弹窗把它藏在两次点击之后（那把 alibaba key 的 401 就是端点错了）
       expect(find.text('API 密钥'), findsOneWidget);
-      expect(find.text('API 地址'), findsOneWidget);
+      // 照 LobeHub 的叫法：它指的是「换一个端点」，而不是「这家的官方地址」
+      expect(find.text('API 代理地址'), findsOneWidget);
+      expect(
+        find.textContaining('AES-256-GCM'),
+        findsOneWidget,
+        reason:
+            '这句是真的（服务端 ring::aead::AES_256_GCM）。'
+            '把一把 key 交出去的人有权知道它落在哪、怎么存的',
+      );
       expect(
         find.textContaining('已存 …5236'),
         findsOneWidget,
@@ -305,10 +331,7 @@ void main() {
       addTearDown(c.dispose);
       await _pump(tester, c);
 
-      await tester.tap(find.text('本机 Ollama'));
-      for (var i = 0; i < 4; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
+      await _open(tester, _kOllama);
       expect(find.text('获取模型列表'), findsOneWidget);
       expect(
         find.textContaining('未必与你的账号一致'),
@@ -340,7 +363,12 @@ void main() {
         find.widgetWithText(TextField, 'API key'),
         'sk-offline-test',
       );
-      await tester.tap(find.text('保存'));
+      // 填完要画一帧：「添加」按钮在 key 为空时是禁用的，
+      // 而它的启用状态是在 build 里算的
+      await tester.pump();
+      // 「添加」而不是「保存」：编辑已经挪到详情页内联了，
+      // 这个对话框现在只做一件事
+      await tester.tap(find.text('添加'));
       for (var i = 0; i < 10; i++) {
         await tester.pump(const Duration(milliseconds: 100));
       }
@@ -367,13 +395,12 @@ void main() {
       );
       await _pump(tester, c);
 
-      await tester.tap(find.text('Alibaba (Qwen)'));
-      for (var i = 0; i < 4; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
+      await _open(tester, _kAlibaba);
       // 只改端点，密钥框留空 = 不改动服务端那把
       await tester.enterText(
-        find.byType(TextField).last,
+        // **按名字，不按位置**：这一页有四个输入框，`.last` 会随着
+        // 页面加一个框就悄悄指到别处
+        find.byKey(const ValueKey('field:base-url')),
         'https://dashscope.aliyuncs.com/compatible-mode/v1',
       );
       for (var i = 0; i < 4; i++) {
@@ -400,10 +427,7 @@ void main() {
       addTearDown(c.dispose);
       await _pump(tester, c);
 
-      await tester.tap(find.text('Alibaba (Qwen)'));
-      for (var i = 0; i < 4; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
+      await _open(tester, _kAlibaba);
       expect(
         find.textContaining('本机没有这把密钥'),
         findsOneWidget,
@@ -443,10 +467,7 @@ void main() {
       );
       await _pump(tester, c);
 
-      await tester.tap(find.text('Alibaba (Qwen)'));
-      for (var i = 0; i < 4; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
+      await _open(tester, _kAlibaba);
       await tester.tap(find.text('删除'));
       for (var i = 0; i < 6; i++) {
         await tester.pump(const Duration(milliseconds: 100));
@@ -477,10 +498,7 @@ void main() {
       );
       await _pump(tester, c);
 
-      await tester.tap(find.text('Alibaba (Qwen)'));
-      for (var i = 0; i < 4; i++) {
-        await tester.pump(const Duration(milliseconds: 100));
-      }
+      await _open(tester, _kAlibaba);
       await tester.tap(find.text('删除'));
       for (var i = 0; i < 6; i++) {
         await tester.pump(const Duration(milliseconds: 100));
@@ -501,29 +519,12 @@ void main() {
   });
 
   group('Cherry 那套布局', () {
-    test('型号按系列分组，组内顺序不变', () {
-      final got = groupModels([
-        'qwen-turbo',
-        'qwen-image-3.0',
-        'wan2.7-image',
-        'z-image-turbo',
-        'qwen-flash',
-      ]);
-      expect(got.map((g) => g.$1).toList(), ['qwen', 'wan2.7', 'z']);
-      expect(
-        got.first.$2,
-        ['qwen-turbo', 'qwen-image-3.0', 'qwen-flash'],
-        reason:
-            '组内保持服务端给的顺序 —— 重排一次就多一个'
-            '「我记得它在上面」的困惑',
-      );
-    });
-
-    test('没有连字符的型号自成一组，不崩', () {
-      expect(groupModels(['gpt5']).single.$1, 'gpt5');
-      expect(groupModels(['-weird']).single.$1, '-weird');
-      expect(groupModels(const []), isEmpty);
-    });
+    // 「型号按系列分组」那两条测试随 `groupModels` 一起去掉了。
+    //
+    // 2026-08-21 模型列表照 LobeHub 重做成**平铺**：分组改成按
+    // 已启用 / 未启用 分，家族分组没有了。当初分组是为了对付
+    // 「一把 key 拉回来 240 个型号」，而现在那件事由搜索框 + 模态页签
+    // 接手 —— 判据换了地方，不是这条需求消失了。
 
     testWidgets('来源列表能搜', (tester) async {
       final api = _Api();

@@ -88,6 +88,14 @@ flutter:
   # 再放一份就有了「改了图标忘了改另一处」这条只在发版时才发现的路。
   assets:
     - web/icons/Icon-192.png
+    # 供应商品牌标。**声明整个目录**，文件名就是 provider id
+    # （`anthropic.png` ↔ `provider == "anthropic"`）—— 加一家只要丢一个
+    # 文件进去，不用回来改这里，也就不会出现「图放了但没声明」那种
+    # 只在真机上才看得见的漏。
+    #
+    # 缺文件的那几家自动退回首字母圆标，见 `ProviderMark`。
+    # 来源与许可写在仓库根的 NOTICE 里。
+    - assets/providers/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

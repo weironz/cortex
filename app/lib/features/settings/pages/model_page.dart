@@ -9,8 +9,21 @@
 /// 那三样结构上本来就是同一个东西（`{供应商, key, 端点}`），只是**存储
 /// 位置**不同。位置是我们的实现细节，不该由用户来分类。
 ///
-/// 形态参照 Cherry Studio 的「模型服务」：左边一列来源，右边是选中那条的
-/// 详情（密钥 / 端点 / 型号），型号靠「获取模型列表」向供应商实拉。
+/// # 2026-08-21：照 LobeHub 重做
+///
+/// 形态与信息密度对着 LobeHub 的「模型服务商」页做，三处结构变化：
+///
+/// 1. **「全部」总览**（卡片墙）—— 一屏看清有哪几家、开了哪几家；
+/// 2. **来源列表按 已启用 / 未启用 分组**；
+/// 3. **型号在列表里就地开关**，不再「拉完弹一个对话框勾选」。
+///    第 3 条是服务端那个 `catalog` 字段解锁的：在此之前没勾中的型号
+///    不在任何地方，想找回来只能重新拉一次。
+///
+/// 两处**有意不复刻**，理由都是「不画我们答不出的东西」：
+///
+/// * 型号的**发布日期** —— 目录里没有这一位；
+/// * `视频 / 向量化 / ASR / TTS` 四个页签 —— 四类数据我们都没有，
+///   画四个恒为 0 的页签，是在说一个不成立的能力。
 ///
 /// # 部署提供的那条也在列表里
 ///
@@ -26,12 +39,19 @@ import '../../../api/api_exception.dart';
 import '../../../auth/local_llm_store.dart';
 import '../../../core/local_llm.dart';
 import '../../../core/theme.dart';
-import '../../../models/model_option.dart';
 import '../../../models/model_source.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/model_controller.dart';
+import '../widgets/model_table.dart';
+import '../widgets/provider_mark.dart';
+import '../widgets/provider_overview.dart';
 import '../widgets/settings_layout.dart';
-import 'model_add_dialog.dart';
+
+/// 左列里「全部」那一条的位置。`null` = 选中它。
+///
+/// 用可空而不是一个字符串常量：一个 `'__all__'` 之类的哨兵迟早会与
+/// 某条来源的真实 id 相提并论（`byId('__all__')`），而那时错法是静默的。
+typedef _Selection = String?;
 
 class ModelPage extends ConsumerStatefulWidget {
   const ModelPage({super.key});
@@ -41,11 +61,19 @@ class ModelPage extends ConsumerStatefulWidget {
 }
 
 class _ModelPageState extends ConsumerState<ModelPage> {
-  /// 选中的那条。`null` = 还没选，显示第一条。
-  String? _selected;
+  /// 选中的那条来源。`null` = 「全部」总览。
+  ///
+  /// **默认落在总览上**：打开这一页最常见的意图是「我现在有什么」，
+  /// 而不是「改第一条的 key」。
+  _Selection _selected;
+
   String _query = '';
   bool _busy = false;
   Object? _error;
+
+  /// 上一次连通性检查的结果。换一条来源就清掉 —— 一条属于 A 的结论
+  /// 挂在 B 的详情页上，比没有结论更糟。
+  SourceCheck? _check;
 
   @override
   Widget build(BuildContext context) {
@@ -70,9 +98,7 @@ class _ModelPageState extends ConsumerState<ModelPage> {
         );
       },
       data: (data) {
-        final list = data.sources;
-        final current =
-            data.byId(_selected ?? '') ?? (list.isEmpty ? null : list.first);
+        final current = _selected == null ? null : data.byId(_selected!);
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -91,33 +117,43 @@ class _ModelPageState extends ConsumerState<ModelPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   SizedBox(
-                    width: 190,
+                    width: 200,
                     child: _SourceList(
                       data: data,
-                      selected: current?.id,
+                      selected: _selected,
                       busy: _busy,
                       query: _query,
                       onQuery: (q) => setState(() => _query = q),
-                      onSelect: (id) => setState(() => _selected = id),
-                      onAdd: _add,
+                      onSelect: _select,
+                      onAdd: () => _add(data),
                       onToggle: _toggle,
                     ),
                   ),
                   const VerticalDivider(width: 20),
                   Expanded(
                     child: current == null
-                        ? _hint('还没有任何模型来源。点左边的「添加模型」开始。')
+                        ? ProviderOverview(
+                            data: data,
+                            busy: _busy,
+                            query: _query,
+                            onOpen: _select,
+                            onToggle: _toggle,
+                            onAdd: (p) => _add(data, initial: p.id),
+                          )
                         : _Detail(
                             key: ValueKey(current.id),
                             data: data,
                             source: current,
                             busy: _busy,
+                            check: _check,
                             onSave: ({required apiKey, required baseUrl}) =>
                                 _saveInline(current, apiKey, baseUrl),
                             onDelete: () => _delete(current),
                             onFetch: () => _fetch(current),
-                            onModels: (m) => _saveModels(current, m),
-                            known: _known(),
+                            onToggleModel: (id, on) =>
+                                _toggleModel(current, id, on),
+                            onToggleSource: (on) => _toggle(current, on),
+                            onCheck: (model) => _runCheck(current, model),
                             offlineNote: _offlineNote(current),
                           ),
                   ),
@@ -129,6 +165,12 @@ class _ModelPageState extends ConsumerState<ModelPage> {
       },
     );
   }
+
+  void _select(_Selection id) => setState(() {
+    _selected = id;
+    // 换页就把上一条的检查结论丢掉
+    _check = null;
+  });
 
   Widget _hint(String text, {VoidCallback? onRetry}) => Padding(
     padding: const EdgeInsets.all(12),
@@ -165,12 +207,11 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     }
   }
 
-  Future<void> _add() async {
-    final data = ref.read(modelSourcesProvider).value;
-    if (data == null) return;
+  Future<void> _add(ModelSources data, {String? initial}) async {
     final got = await showDialog<_SourceForm>(
       context: context,
-      builder: (_) => _SourceDialog(providers: data.providers),
+      builder: (_) =>
+          _SourceDialog(providers: data.providers, initial: initial),
     );
     if (got == null) return;
     await _run(
@@ -186,16 +227,6 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     await _mirrorOffline(got);
   }
 
-  /// 型号名 → 能力，取自已经拉过的那份目录（`/llm/models`）。
-  ///
-  /// **不为几个图标再发一次请求**：那份目录本来就要拉（撰写框的选择器
-  /// 用它），这里只是复用。查不到的型号不出现在这个表里，界面据此不画徽标。
-  Map<String, ModelOption> _known() {
-    final c = ref.watch(modelCatalogProvider).value;
-    if (c == null) return const {};
-    return {for (final m in c.models) m.id: m};
-  }
-
   /// 这条来源在离线那一侧是什么状态。
   ///
   /// 三种，每一种都对应一件用户看不见但会咬到他的事：
@@ -203,7 +234,7 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   /// | 说什么 | 为什么必须说 |
   /// |---|---|
   /// | 「离线时用它」 | 他要知道断网之后跑的是哪一条、花的是哪把 key |
-  /// | 「本机没有这把 key」 | 在另一台设备上加的来源，这台机器离线用不了 ——   ///   而界面上其余地方看起来它完全正常 |
+  /// | 「本机没有这把 key」 | 在另一台设备上加的来源，这台机器离线用不了 —— 而界面上其余地方看起来它完全正常 |
   /// | Web / 部署那条 → `null` | 那里没有离线这回事，说了只是噪音 |
   String? _offlineNote(ModelSource s) {
     if (!kCanStoreLocalLlm || s.builtin) return null;
@@ -225,12 +256,6 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   ///
   /// 代价必须说清楚（界面上也写着）：**在另一台设备上加的来源，这台机器
   /// 离线时用不了**。那不是漏做，是密钥从不明文离开服务端的直接结果。
-  ///
-  /// # 为什么不问用户
-  ///
-  /// 他的原话是「不分云端本地，离线在线」。多一个「要不要也存在本机」的
-  /// 勾选框，就是又让他分类一次。默认存 —— 密钥进的是系统凭据库，
-  /// 与从前那个「本机模型」同一个地方，不是新增的风险面。
   Future<void> _mirrorOffline(_SourceForm form) async {
     // Web 上没有本地 agent，存了也没有任何东西会读它
     if (!kCanStoreLocalLlm) return;
@@ -262,7 +287,7 @@ class _ModelPageState extends ConsumerState<ModelPage> {
 
   /// 内联保存密钥 / 端点。
   ///
-  /// # 为什么不再走弹窗
+  /// # 为什么不走弹窗
   ///
   /// 弹窗版每次想核对一眼端点都要点开、关掉。而端点恰恰是最常需要核对的
   /// 一项 —— 那把 alibaba key 的 401 就是端点错了（内置默认国际站），
@@ -312,6 +337,8 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     );
     if (ok != true) return;
     await _run(() => ref.read(cortexApiProvider).deleteModelSource(s.id));
+    // 删掉的那条不能继续选中着 —— 详情会指向一个不存在的 id
+    if (mounted) _select(null);
 
     // ⚠️ **本机那份也要清。**
     //
@@ -344,32 +371,51 @@ class _ModelPageState extends ConsumerState<ModelPage> {
         ),
   );
 
-  Future<void> _saveModels(ModelSource s, List<String> models) => _run(
-    () => ref
-        .read(cortexApiProvider)
-        .saveModelSource(
-          id: s.id,
-          provider: s.provider,
-          label: s.label,
-          baseUrl: s.baseUrl,
-          models: models,
-        ),
-  );
+  /// 开 / 关一个型号 —— **只动 `models`，不动 `catalog`**。
+  ///
+  /// 关掉的型号仍留在这条来源的全集里，所以它还在「未启用」组里看得见，
+  /// 想再打开不用重新拉一次列表。这正是加 `catalog` 那个字段的全部理由。
+  Future<void> _toggleModel(ModelSource s, String modelId, bool on) {
+    // 部署那条只读：它的型号来自服务端的供应商定义，改不了
+    if (s.builtin) return Future<void>.value();
+    final next = on
+        ? [...s.models, if (!s.models.contains(modelId)) modelId]
+        : s.models.where((m) => m != modelId).toList();
+    return _run(
+      () => ref
+          .read(cortexApiProvider)
+          .saveModelSource(
+            id: s.id,
+            provider: s.provider,
+            label: s.label,
+            baseUrl: s.baseUrl,
+            models: next,
+          ),
+    );
+  }
 
-  /// 去问供应商它有哪些型号，然后**让用户挑**。
+  /// 去问供应商它有哪些型号。
   ///
-  /// # 为什么不再整份塞进来
+  /// # 为什么拉完不再弹选择器
   ///
-  /// 那把 alibaba key 拉回来 240 个型号。整份塞进去之后，撰写框的选择器里
-  /// 就是 240 条，而真正会用的不超过五个。
+  /// 服务端现在会把拉到的全集存进 `catalog`，列表里就地开关 ——
+  /// 弹窗那一步是多余的。而它原本存在的理由（那把 alibaba key 拉回来
+  /// 240 个型号，整份塞进去会让撰写框的选择器变成 240 条）**照样成立**：
+  /// 拉列表只动 `catalog`，`models` 一个字都不动，所以选择器里
+  /// 仍然只有用户亲手打开的那几个。
   Future<void> _fetch(ModelSource s) async {
     setState(() {
       _busy = true;
       _error = null;
     });
-    FetchedModels? got;
     try {
-      got = await ref.read(cortexApiProvider).fetchSourceModels(s.id);
+      final got = await ref.read(cortexApiProvider).fetchSourceModels(s.id);
+      // 回落时**必须说出来**：那份清单是编译期写死的，可能与这个账号
+      // 真正开通的东西毫无关系
+      if (mounted && !got.live && got.note != null) {
+        setState(() => _error = got.note);
+      }
+      ref.invalidate(modelSourcesProvider);
     } on Object catch (e) {
       if (mounted) {
         setState(() => _error = e is CortexApiException ? e.message : e);
@@ -377,22 +423,40 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
-    if (got == null || !mounted) return;
+  }
 
-    final picked = await showAddModels(
-      context,
-      fetched: got,
-      already: s.models,
-    );
-    if (picked == null || picked.isEmpty || !mounted) return;
-
-    // 部署那条只读 —— 拉回来只是给人看
-    if (s.builtin) return;
-    await _saveModels(s, [...s.models, ...picked]);
+  Future<void> _runCheck(ModelSource s, String model) async {
+    setState(() {
+      _busy = true;
+      _check = null;
+    });
+    try {
+      final got = await ref
+          .read(cortexApiProvider)
+          .checkModelSource(s.id, model: model);
+      if (mounted) setState(() => _check = got);
+    } on CortexApiException catch (e) {
+      // 端点本身不存在（老服务端）与「检查没通过」是两回事，
+      // 分开说 —— 混起来的话用户会去改一把其实没问题的 key
+      if (mounted) {
+        setState(
+          () => _check = SourceCheck(
+            ok: false,
+            detail: e.isUnsupported ? '这个部署还没有连通性检查（服务端版本较早）' : e.message,
+          ),
+        );
+      }
+    } on Object catch (e) {
+      if (mounted) {
+        setState(() => _check = SourceCheck(ok: false, detail: '$e'));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 }
 
-/// 左边那一列。
+/// 左边那一列：「全部」+ 按启用状态分的两组。
 class _SourceList extends StatelessWidget {
   const _SourceList({
     required this.data,
@@ -406,13 +470,13 @@ class _SourceList extends StatelessWidget {
   });
 
   final ModelSources data;
-  final String? selected;
+  final _Selection selected;
   final bool busy;
 
   /// 搜索框里的字。空 = 全都显示。
   final String query;
   final ValueChanged<String> onQuery;
-  final ValueChanged<String> onSelect;
+  final ValueChanged<_Selection> onSelect;
   final VoidCallback onAdd;
   final void Function(ModelSource, bool) onToggle;
 
@@ -429,6 +493,8 @@ class _SourceList extends StatelessWidget {
                     s.provider.toLowerCase().contains(keep),
               )
               .toList();
+    final on = shown.where((s) => s.enabled).toList();
+    final off = shown.where((s) => !s.enabled).toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -437,9 +503,10 @@ class _SourceList extends StatelessWidget {
         TextField(
           onChanged: onQuery,
           autocorrect: false,
+          style: theme.textTheme.bodySmall,
           decoration: const InputDecoration(
             isDense: true,
-            hintText: '搜索',
+            hintText: '搜索服务商',
             prefixIcon: Icon(Icons.search, size: 16),
             border: OutlineInputBorder(),
           ),
@@ -451,14 +518,27 @@ class _SourceList extends StatelessWidget {
                   child: Text(
                     '没有匹配的来源',
                     style: theme.textTheme.labelSmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
+                      color: theme.cortex.foregroundTertiary,
                     ),
                   ),
                 )
               : ListView(
                   children: [
-                    for (final s in shown)
-                      _row(context, s, s.id == selected, theme),
+                    // 「全部」置顶：它是这一列里唯一一个**不指向某一条**的
+                    // 入口，也是「我现在有什么」的答案
+                    _AllRow(
+                      key: const ValueKey('src:all'),
+                      selected: selected == null,
+                      onTap: () => onSelect(null),
+                    ),
+                    if (on.isNotEmpty) ...[
+                      _group(theme, '已启用', on.length),
+                      for (final s in on) _row(context, s, theme),
+                    ],
+                    if (off.isNotEmpty) ...[
+                      _group(theme, '未启用', off.length),
+                      for (final s in off) _row(context, s, theme),
+                    ],
                   ],
                 ),
         ),
@@ -475,119 +555,159 @@ class _SourceList extends StatelessWidget {
           Text(
             '这个部署存不了密钥（服务端未配 CORTEX_SECRET_KEY），只能用它自己配的那条。',
             style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
+              color: theme.cortex.foregroundTertiary,
             ),
           ),
       ],
     );
   }
 
-  Widget _row(BuildContext ctx, ModelSource s, bool on, ThemeData theme) {
+  Widget _group(ThemeData theme, String label, int count) => Padding(
+    // 上 14 下 2：分组头属于**下面**那一组（规范第九节）
+    padding: const EdgeInsets.fromLTRB(8, 14, 8, 2),
+    child: Text(
+      '$label $count',
+      style: theme.textTheme.labelSmall?.copyWith(
+        fontWeight: FontWeight.w600,
+        color: theme.cortex.foregroundTertiary,
+      ),
+    ),
+  );
+
+  Widget _row(BuildContext ctx, ModelSource s, ThemeData theme) {
     final scheme = theme.colorScheme;
+    final on = s.id == selected;
     return InkWell(
+      // 稳定的 key。**同一条来源的名字在这一屏上出现两次**（左列一次、
+      // 总览卡片一次），裸 `find.text` 指不准是哪一个 —— 而「点左列那一行」
+      // 与「点那张卡」是两个不同的动作
+      key: ValueKey('src:${s.id}'),
       onTap: () => onSelect(s.id),
       borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
       child: Container(
-        margin: const EdgeInsets.only(bottom: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+        margin: const EdgeInsets.only(bottom: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(
-          // **选中态是中性的**（规范第九节）。此前是
-          // `primary.withValues(alpha: .10)` —— 与侧栏那处被拆掉的
-          // 是同一层「品牌色的淡淡一层」，只是这里漏掉了。
-          // 「我现在在看哪一条来源」是位置，不是动作
+          // **选中态是中性的**（规范第九节）。「我现在在看哪一条」
+          // 是位置，不是动作
           color: on ? theme.cortex.sidebarAccent : null,
           borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
         ),
         child: Row(
           children: [
+            ProviderMark(
+              provider: s.provider,
+              displayName: data.nameOf(s),
+              size: 18,
+            ),
+            const SizedBox(width: 8),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    data.nameOf(s),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      // 关掉的那条整体退到第三级 —— 它还在，但不参与对话
-                      color: s.enabled
-                          ? scheme.onSurface
-                          : theme.cortex.foregroundTertiary,
-                    ),
-                  ),
-                  Text(
-                    _sub(s),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: theme.cortex.foregroundTertiary,
-                    ),
-                  ),
-                ],
+              child: Text(
+                data.nameOf(s),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  // 关掉的那条整体退到第三级 —— 它还在，但不参与对话
+                  color: s.enabled
+                      ? scheme.onSurface
+                      : theme.cortex.foregroundTertiary,
+                ),
               ),
             ),
-            // 开关而不是删除：删掉再填一遍 key 是最烦的一种「临时关掉」
-            Switch(
-              value: s.enabled,
-              onChanged: busy ? null : (v) => onToggle(s, v),
+            // 开着的画一个小圆点，而不是再摆一个开关：这一列已经按
+            // 已启用/未启用 分了组，开关在这里是同一件事说第三遍，
+            // 而它还会把行高撑起来
+            if (s.enabled)
+              Container(
+                width: 6,
+                height: 6,
+                // 圆点，不走圆角那五阶
+                decoration: BoxDecoration(
+                  color: theme.cortex.success,
+                  shape: BoxShape.circle,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 「全部」那一条。
+class _AllRow extends StatelessWidget {
+  const _AllRow({super.key, required this.selected, required this.onTap});
+
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected ? theme.cortex.sidebarAccent : null,
+          borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.apps_rounded,
+              size: 18,
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 8),
+            Text(
+              '全部',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurface,
+                fontWeight: selected ? FontWeight.w600 : null,
+              ),
             ),
           ],
         ),
       ),
     );
   }
-
-  /// 一条来源的副标题：**先说钱，再说型号**。
-  ///
-  /// 「免费」是这一列里最要紧的一位 —— 它回答「用这条会不会花我的额度」。
-  static String _sub(ModelSource s) {
-    final bits = <String>[
-      if (s.builtin) '免费 · 占配额' else '你的 key …${s.keyTail}',
-      '${s.models.length} 个型号',
-    ];
-    return bits.join(' · ');
-  }
 }
 
 /// 右边那一块：选中来源的详情。
-/// 右边那一块：选中来源的详情。
 ///
-/// # 形态照 Cherry Studio 的「模型服务」
+/// # 形态照 LobeHub 的「模型服务商」
 ///
 /// **密钥与端点直接在这里改，不弹窗。** 弹窗那版每次想核对一眼端点都要
 /// 点开、关掉，而端点恰恰是最常需要核对的一项（国内站 / 国际站、公司网关）
 /// —— 那把 alibaba key 的 401 就是端点错了，而弹窗把它藏了起来。
-///
-/// 型号**按系列分组**（`qwen-image-3.0` → `qwen`）。240 个型号铺成一条
-/// 平列表没法看，而同一系列的东西本来就该待在一起。
 class _Detail extends StatefulWidget {
   const _Detail({
     super.key,
     required this.data,
     required this.source,
     required this.busy,
+    required this.check,
     required this.onSave,
     required this.onDelete,
     required this.onFetch,
-    required this.onModels,
-    required this.known,
-    this.offlineNote,
+    required this.onToggleModel,
+    required this.onToggleSource,
+    required this.onCheck,
+    required this.offlineNote,
   });
 
   final ModelSources data;
   final ModelSource source;
   final bool busy;
-
-  /// 存改动。`apiKey` 空串 = 不动原来那把。
+  final SourceCheck? check;
   final void Function({required String apiKey, required String baseUrl}) onSave;
   final VoidCallback onDelete;
   final VoidCallback onFetch;
-  final ValueChanged<List<String>> onModels;
-
-  /// 型号名 → 它的能力（来自已经拉过的那份目录）。查不到的就不画徽标。
-  final Map<String, ModelOption> known;
-
-  /// 这条在离线那一侧是什么状态。`null` = 不用说（Web，或部署那条）。
+  final void Function(String, bool) onToggleModel;
+  final ValueChanged<bool> onToggleSource;
+  final ValueChanged<String> onCheck;
   final String? offlineNote;
 
   @override
@@ -601,6 +721,9 @@ class _DetailState extends State<_Detail> {
   );
   bool _reveal = false;
   bool _dirty = false;
+
+  /// 拿哪个型号去验。空 = 让服务端挑第一个开着的。
+  String _probe = '';
 
   @override
   void dispose() {
@@ -618,177 +741,229 @@ class _DetailState extends State<_Detail> {
 
     return ListView(
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                widget.data.nameOf(s),
-                style: theme.textTheme.titleSmall,
-              ),
+        _header(context, s),
+        if (s.builtin)
+          const Padding(
+            padding: EdgeInsets.only(top: 10),
+            child: SettingsNote(
+              icon: Icons.lock_outline_rounded,
+              child: Text('这条是服务端配的，改不了也删不掉。它花的是我们的钱，所以计入你的配额。'),
             ),
-            if (!s.builtin)
-              TextButton(
-                onPressed: widget.busy ? null : widget.onDelete,
-                child: Text('删除', style: TextStyle(color: scheme.error)),
-              ),
-          ],
-        ),
-        if (s.builtin) ...[
-          const SizedBox(height: 10),
-          const SettingsNote(
-            icon: Icons.lock_outline_rounded,
-            child: Text('这条是服务端配的，改不了也删不掉。它花的是我们的钱，所以计入你的配额。'),
-          ),
-        ] else ...[
-          const SizedBox(height: 12),
-          Text(
-            'API 密钥',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.cortex.foregroundTertiary,
-            ),
-          ),
-          const SizedBox(height: 4),
-          TextField(
-            controller: _key,
-            autocorrect: false,
-            enableSuggestions: false,
-            // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的粘贴
-            // 迟早会错一次，且症状要到下一次对话才出现
-            obscureText: !_reveal,
-            onChanged: (_) => setState(() => _dirty = true),
-            decoration: InputDecoration(
-              isDense: true,
-              border: const OutlineInputBorder(),
-              // 界面永远拿不到明文，所以只能显示后四位当占位。
-              // 留空保存 = 不动原来那把
-              hintText: '已存 …${s.keyTail}，留空 = 不改动',
-              suffixIcon: IconButton(
-                onPressed: () => setState(() => _reveal = !_reveal),
-                iconSize: 18,
-                icon: Icon(
-                  _reveal
-                      ? Icons.visibility_off_outlined
-                      : Icons.visibility_outlined,
+          )
+        else ...[
+          SettingsField(
+            label: 'API 密钥',
+            hint: '留空 = 不改动原来那把',
+            child: TextField(
+              controller: _key,
+              autocorrect: false,
+              enableSuggestions: false,
+              // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的粘贴
+              // 迟早会错一次，且症状要到下一次对话才出现
+              obscureText: !_reveal,
+              onChanged: (_) => setState(() => _dirty = true),
+              decoration: InputDecoration(
+                isDense: true,
+                border: const OutlineInputBorder(),
+                // 界面永远拿不到明文，所以只能显示后四位当占位
+                hintText: '已存 …${s.keyTail}',
+                suffixIcon: IconButton(
+                  onPressed: () => setState(() => _reveal = !_reveal),
+                  iconSize: 18,
+                  icon: Icon(
+                    _reveal
+                        ? Icons.visibility_off_outlined
+                        : Icons.visibility_outlined,
+                  ),
                 ),
               ),
             ),
           ),
-          const SizedBox(height: 12),
-          Text(
-            'API 地址',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.cortex.foregroundTertiary,
-            ),
-          ),
-          const SizedBox(height: 4),
-          TextField(
-            controller: _baseUrl,
-            autocorrect: false,
-            enableSuggestions: false,
-            onChanged: (_) => setState(() => _dirty = true),
-            decoration: InputDecoration(
-              isDense: true,
-              border: const OutlineInputBorder(),
-              // 说得出留空会连到哪 ——「用官方的」回答不了「官方的是哪个」，
-              // 而那正是想改端点的人要核对的东西
-              hintText: official.isEmpty ? '留空 = 用官方的' : '留空 = $official',
+          SettingsField(
+            label: 'API 代理地址',
+            // 说得出留空会连到哪 ——「用官方的」回答不了「官方的是哪个」，
+            // 而那正是想改端点的人要核对的东西
+            hint: official.isEmpty ? '必须包含 http(s)://' : '留空 = $official',
+            child: TextField(
+              // 有名字才指得准。这一页上现在有四个输入框（来源搜索、密钥、
+              // 端点、型号搜索），按位置找（`byType(TextField).last`）
+              // 会随着页面加一个框就悄悄指到别处 —— 2026-08-21 就是这么
+              // 让一条离线镜像的测试红的，而它测的东西一点没变
+              key: const ValueKey('field:base-url'),
+              controller: _baseUrl,
+              autocorrect: false,
+              enableSuggestions: false,
+              onChanged: (_) => setState(() => _dirty = true),
+              decoration: const InputDecoration(
+                isDense: true,
+                border: OutlineInputBorder(),
+                hintText: 'https://…',
+              ),
             ),
           ),
           if (_dirty)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: FilledButton(
-                  onPressed: widget.busy ? null : _save,
-                  child: const Text('保存'),
-                ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton(
+                onPressed: widget.busy ? null : _save,
+                child: const Text('保存'),
               ),
             ),
-          const SizedBox(height: 8),
-          SettingsNote(
-            child: Text(
-              [
-                '用它的调用走你自己的账户，不占配额。',
-                // 离线那一侧的实况。**不说的话，用户会在断网时才发现** ——
-                // 而那时他既不知道原因也不知道怎么办
-                ?widget.offlineNote,
-              ].join('\n'),
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-        ],
-        const SizedBox(height: 20),
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                '模型（${s.models.length}）',
-                style: theme.textTheme.titleSmall,
-              ),
-            ),
-            TextButton.icon(
-              onPressed: widget.busy ? null : widget.onFetch,
-              icon: const Icon(Icons.refresh, size: 15),
-              label: const Text('获取模型列表'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        if (s.models.isEmpty)
-          SettingsNote(
-            child: Text(
-              // 不拿内置目录顶替：目录知道这家有几十个型号，但这个账号未必
-              // 都开通了。填进选择器的每一个都必须是真的调得通的
-              '还没有型号。点「获取模型列表」去问这家它到底开放了哪些 —— '
-              '内置那份是编译期写死的，未必与你的账号一致。',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-          )
-        else
-          // 型号成组，所以放进一张卡（规范第二节）。此前它们裸铺在
-          // 底板上，与上面的表单之间没有任何边界 —— 240 个型号铺开时，
-          // 「哪些属于这条来源」全靠上下距离猜
-          SettingsCard(
-            padding: const EdgeInsets.fromLTRB(14, 6, 8, 10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+          _checkField(context, s),
+          const SizedBox(height: 10),
+          // **这句是真的**：`ring::aead::AES_256_GCM`，密钥与端点一起封装，
+          // 主密钥来自服务端的 CORTEX_SECRET_KEY
+          Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                for (final group in groupModels(s.models)) ...[
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(0, 8, 0, 2),
-                    child: Text(
-                      '${group.$1}（${group.$2.length}）',
-                      // **不是 w700。** 字重只有三档，粗那一档留给页面级
-                      // 强调；一个系列名不是页面级的（规范第三节）
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        fontWeight: FontWeight.w600,
-                        color: theme.cortex.foregroundTertiary,
-                      ),
-                    ),
+                Icon(
+                  Icons.lock_outline_rounded,
+                  size: 13,
+                  color: theme.cortex.foregroundTertiary,
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  '你的密钥与代理地址在服务端以 AES-256-GCM 加密存储，界面永远只拿得到后四位',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.cortex.foregroundTertiary,
                   ),
-                  for (final m in group.$2)
-                    _ModelRow(
-                      model: m,
-                      // 能力从**已经拉过的那份目录**里查，不为几个图标再发一次
-                      // 请求。查不到就不画徽标 —— 「不知道」不该长得像「不支持」
-                      known: widget.known[m],
-                      busy: widget.busy,
-                      onRemove: s.builtin
-                          ? null
-                          : () => widget.onModels(
-                              s.models.where((x) => x != m).toList(),
-                            ),
-                    ),
-                ],
+                ),
               ],
             ),
           ),
+          const SizedBox(height: 6),
+          if (widget.offlineNote != null)
+            SettingsNote(
+              child: Text(
+                '用它的调用走你自己的账户，不占配额。\n${widget.offlineNote}',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+        ],
+        const SizedBox(height: 24),
+        ModelTable(
+          source: s,
+          busy: widget.busy,
+          onToggle: widget.onToggleModel,
+          onFetch: widget.onFetch,
+        ),
       ],
+    );
+  }
+
+  Widget _header(BuildContext context, ModelSource s) {
+    final theme = Theme.of(context);
+    return Row(
+      children: [
+        ProviderMark(
+          provider: s.provider,
+          displayName: widget.data.nameOf(s),
+          size: 26,
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            widget.data.nameOf(s),
+            style: theme.textTheme.titleMedium,
+          ),
+        ),
+        if (!s.builtin)
+          TextButton(
+            onPressed: widget.busy ? null : widget.onDelete,
+            child: Text('删除', style: TextStyle(color: theme.colorScheme.error)),
+          ),
+        const SizedBox(width: 4),
+        Switch(
+          value: s.enabled,
+          onChanged: widget.busy ? null : widget.onToggleSource,
+        ),
+      ],
+    );
+  }
+
+  /// 连通性检查那一行。
+  ///
+  /// 型号下拉只列**开着的**：验一个自己没打开的型号，通过了也用不上，
+  /// 而没通过又说明不了当前配置有问题。
+  Widget _checkField(BuildContext context, ModelSource s) {
+    final theme = Theme.of(context);
+    final result = widget.check;
+    final options = s.models;
+
+    return SettingsField(
+      label: '连通性检查',
+      hint: '拿存下来的密钥真发一次请求，验它对不对',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  initialValue: options.contains(_probe) ? _probe : null,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                    hintText: '挑一个已启用的型号',
+                  ),
+                  items: [
+                    for (final m in options)
+                      DropdownMenuItem(
+                        value: m,
+                        child: Text(m, style: theme.textTheme.bodySmall),
+                      ),
+                  ],
+                  onChanged: (v) => setState(() => _probe = v ?? ''),
+                ),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton(
+                // 一个型号都没开时按不动，并在下面说清为什么 ——
+                // 一个点了没反应的按钮比没有这个按钮更让人困惑
+                onPressed: widget.busy || options.isEmpty
+                    ? null
+                    : () => widget.onCheck(_probe),
+                child: const Text('检查'),
+              ),
+            ],
+          ),
+          if (options.isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                '先在下面打开至少一个型号，才有东西可以拿去验。',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.cortex.foregroundTertiary,
+                ),
+              ),
+            ),
+          if (result != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: SettingsNote(
+                icon: result.ok
+                    ? Icons.check_circle_outline
+                    : Icons.error_outline,
+                // 成功/失败是**状态**，正是反馈色该用的地方（规范第五节）
+                tone: result.ok
+                    ? theme.cortex.success
+                    : theme.colorScheme.error,
+                child: Text(
+                  result.detail,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: result.ok
+                        ? theme.cortex.success
+                        : theme.colorScheme.error,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
@@ -799,85 +974,6 @@ class _DetailState extends State<_Detail> {
       _key.clear();
     });
   }
-}
-
-/// 型号列表里的一行。
-class _ModelRow extends StatelessWidget {
-  const _ModelRow({
-    required this.model,
-    required this.known,
-    required this.busy,
-    required this.onRemove,
-  });
-
-  final String model;
-
-  /// 它的能力。`null` = 目录里查不到 —— **不画徽标**，因为一个灰徽标
-  /// 会被读成「不支持」，而实际是「不知道」。
-  final ModelOption? known;
-
-  final bool busy;
-  final VoidCallback? onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 1),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              model,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.bodySmall,
-            ),
-          ),
-          for (final b in badgesOfOption(known))
-            Padding(
-              padding: const EdgeInsets.only(left: 6),
-              child: Tooltip(
-                message: b.$2,
-                child: Icon(
-                  b.$1,
-                  size: 13,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-          if (onRemove != null)
-            IconButton(
-              tooltip: '从这条来源移除',
-              iconSize: 14,
-              visualDensity: VisualDensity.compact,
-              onPressed: busy ? null : onRemove,
-              icon: const Icon(Icons.close),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// 按**系列**把型号分组：`qwen-image-3.0` 与 `qwen-turbo` 都进 `qwen`。
-///
-/// 240 个型号铺成一条平列表没法看，而同一系列的东西本来就该待在一起。
-/// 组内与组间都保持服务端给的顺序 —— 那是它 `/models` 的顺序，
-/// 重排一次就多一个「我记得它在上面」的困惑。
-List<(String, List<String>)> groupModels(List<String> models) {
-  final out = <(String, List<String>)>[];
-  for (final m in models) {
-    final i = m.indexOf('-');
-    final family = i <= 0 ? m : m.substring(0, i);
-    final at = out.indexWhere((g) => g.$1 == family);
-    if (at < 0) {
-      out.add((family, <String>[m]));
-    } else {
-      out[at].$2.add(m);
-    }
-  }
-  return out;
 }
 
 /// 添加 / 编辑对话框的结果。
@@ -894,7 +990,7 @@ class _SourceForm {
   final String baseUrl;
 }
 
-/// 添加或编辑一条来源。
+/// 添加一条来源。
 ///
 /// # 供应商是下拉，不是输入框
 ///
@@ -903,9 +999,13 @@ class _SourceForm {
 /// `kimi` 不行要写 `moonshot`（实测被拒）。猜错的反馈来得也晚：
 /// 填完、点保存，才收到一句「不认识的供应商」。
 class _SourceDialog extends StatefulWidget {
-  const _SourceDialog({required this.providers});
+  const _SourceDialog({required this.providers, this.initial});
 
   final List<ProviderChoice> providers;
+
+  /// 从卡片墙点进来时预选的那一家。**省掉一次「我刚点的是哪家来着」** ——
+  /// 那面墙上有十几张卡，让人在下拉里再找一遍是纯粹的重复劳动。
+  final String? initial;
 
   @override
   State<_SourceDialog> createState() => _SourceDialogState();
@@ -918,8 +1018,11 @@ class _SourceDialogState extends State<_SourceDialog> {
   final _key = TextEditingController();
   bool _reveal = false;
 
-  String? _initialPick() =>
-      widget.providers.isEmpty ? null : widget.providers.first.id;
+  String? _initialPick() {
+    final want = widget.initial;
+    if (want != null && widget.providers.any((p) => p.id == want)) return want;
+    return widget.providers.isEmpty ? null : widget.providers.first.id;
+  }
 
   ProviderChoice? get _current {
     for (final p in widget.providers) {
@@ -940,17 +1043,12 @@ class _SourceDialogState extends State<_SourceDialog> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cur = _current;
-    // 免鉴权的（本机 ollama）不该逼人填 key
     final needsKey = cur?.requiresAuth ?? true;
 
     return AlertDialog(
-      title: const Text('添加模型'),
-      // 给死宽度：`AlertDialog` 不给的话会缩到内容的最小宽度，而这里最长的
-      // 那几行是**提示文案**（端点那一栏的「公司网关、one-api / LiteLLM、
-      // 自建 vLLM…」）—— 它们被 `ellipsis` 截在半句上，正好把「留空会连到
-      // 哪儿」这个唯一要核对的信息截没了。
+      title: const Text('添加模型来源'),
       content: SizedBox(
-        width: 460,
+        width: 420,
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -961,16 +1059,23 @@ class _SourceDialogState extends State<_SourceDialog> {
                 isExpanded: true,
                 decoration: const InputDecoration(
                   labelText: '供应商',
+                  isDense: true,
                   border: OutlineInputBorder(),
                 ),
                 items: [
                   for (final p in widget.providers)
                     DropdownMenuItem(
                       value: p.id,
-                      child: Text(
-                        p.displayName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      child: Row(
+                        children: [
+                          ProviderMark(
+                            provider: p.id,
+                            displayName: p.displayName,
+                            size: 16,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(p.displayName),
+                        ],
                       ),
                     ),
                 ],
@@ -980,30 +1085,26 @@ class _SourceDialogState extends State<_SourceDialog> {
                 const SizedBox(height: 6),
                 Text(cur.description, style: theme.textTheme.labelSmall),
               ],
-              const SizedBox(height: 14),
-              TextField(
-                controller: _label,
-                autocorrect: false,
-                decoration: const InputDecoration(
-                  labelText: '名字（可选）',
-                  hintText: '同一家配两条时用来分辨',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 12),
+              // ⚠️ **不需要 key 的那家整个不画这个框**，不是改个标签。
+              //
+              // 本机 ollama 没有密钥这回事。留着一个写「（这家不需要）」的
+              // 输入框，用户仍然会盯着它想「那我是不是漏填了什么」——
+              // 一个不该填的框，最省事的处理是让它不存在。
               if (needsKey)
                 TextField(
                   controller: _key,
-                  autofocus: true,
                   autocorrect: false,
                   enableSuggestions: false,
-                  // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的
-                  // 粘贴迟早会错一次，且症状要到下一次对话才出现
                   obscureText: !_reveal,
+                  // ⚠️ **这一行不能省。** 下面那个「添加」按钮在 key 为空时
+                  // 是禁用的，而禁用与否是在 `build` 里算的 —— 不随输入重建
+                  // 的话，用户填完 key 那个按钮**仍然按不动**，
+                  // 而界面上看不出任何理由
+                  onChanged: (_) => setState(() {}),
                   decoration: InputDecoration(
                     labelText: 'API key',
-                    // 改一条时留空 = 不动原来那把。界面永远拿不到明文，
-                    // 所以「只想改个端点」根本没有 key 可以回填
+                    isDense: true,
                     border: const OutlineInputBorder(),
                     suffixIcon: IconButton(
                       onPressed: () => setState(() => _reveal = !_reveal),
@@ -1018,21 +1119,34 @@ class _SourceDialogState extends State<_SourceDialog> {
                 )
               else
                 Text(
-                  '${cur?.displayName ?? "这一家"}不需要密钥，直接保存即可。',
-                  style: theme.textTheme.bodySmall,
+                  '这家不需要密钥。',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.cortex.foregroundTertiary,
+                  ),
                 ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 12),
               TextField(
                 controller: _baseUrl,
                 autocorrect: false,
                 enableSuggestions: false,
                 decoration: InputDecoration(
-                  labelText: '端点（可选）',
-                  // 说得出留空会连到哪 ——「用官方的」回答不了「官方的是哪个」，
-                  // 而那正是想改端点的人要核对的东西
-                  hintText: cur == null ? '留空 = 用官方的' : '留空 = ${cur.baseUrl}',
-                  helperText: '公司网关、one-api / LiteLLM、自建 vLLM 都填这里',
+                  labelText: 'API 代理地址（可留空）',
+                  isDense: true,
                   border: const OutlineInputBorder(),
+                  hintText: (cur?.baseUrl.isNotEmpty ?? false)
+                      ? '留空 = ${cur!.baseUrl}'
+                      : 'https://…',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _label,
+                decoration: const InputDecoration(
+                  labelText: '备注名（可留空）',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                  // 同一家配两条时全靠它分辨 —— 说清它是干嘛的
+                  hintText: '同一家配两条时用来区分，如「公司网关」',
                 ),
               ),
             ],
@@ -1045,15 +1159,17 @@ class _SourceDialogState extends State<_SourceDialog> {
           child: const Text('取消'),
         ),
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(
-            _SourceForm(
-              provider: _picked ?? '',
-              apiKey: _key.text.trim(),
-              label: _label.text.trim(),
-              baseUrl: _baseUrl.text.trim(),
-            ),
-          ),
-          child: const Text('保存'),
+          onPressed: _picked == null || (needsKey && _key.text.trim().isEmpty)
+              ? null
+              : () => Navigator.of(context).pop(
+                  _SourceForm(
+                    provider: _picked!,
+                    apiKey: _key.text.trim(),
+                    label: _label.text.trim(),
+                    baseUrl: _baseUrl.text.trim(),
+                  ),
+                ),
+          child: const Text('添加'),
         ),
       ],
     );

@@ -41,6 +41,7 @@ import 'package:cortex_app/core/motion.dart';
 import 'package:cortex_app/features/settings/pages/about_page.dart';
 import 'package:cortex_app/features/settings/pages/appearance_page.dart';
 import 'package:cortex_app/features/settings/pages/data_page.dart';
+import 'package:cortex_app/features/settings/pages/model_page.dart';
 import 'package:cortex_app/features/settings/pages/usage_page.dart';
 import 'package:cortex_app/features/settings/widgets/settings_layout.dart';
 import 'package:cortex_app/state/app_providers.dart';
@@ -198,6 +199,20 @@ void main() {
       final err = await _paint(tester, const DataPage());
       expect(err, isNull);
       expect(find.text('导入'), findsOneWidget);
+    });
+
+    testWidgets('模型服务 —— 默认落在「全部」总览上', (tester) async {
+      final err = await _paint(tester, const ModelPage());
+      expect(err, isNull);
+      // 这一页最大的一块是卡片墙。它画崩了的话右侧一片空白，
+      // 而左列照常 —— 与 2026-08-21「外观」页那次一模一样的形状
+      expect(find.text('已启用服务商'), findsOneWidget);
+      expect(find.text('未启用服务商'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('src:all')),
+        findsOneWidget,
+        reason: '「全部」是左列里唯一一个不指向某一条的入口，也是默认落点',
+      );
     });
 
     testWidgets('关于', (tester) async {

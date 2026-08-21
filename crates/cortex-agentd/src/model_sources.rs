@@ -156,6 +156,17 @@ pub struct SourceView {
     pub base_url: Option<String>,
     pub enabled: bool,
     pub models: Vec<String>,
+    /// 最近一次「获取模型列表」拉到的**全部**型号，配好能力与价目。
+    ///
+    /// [`Self::models`] 是其中被启用的那些，两者的差就是界面上那个
+    /// 「未启用」分组。在此之前没有这一份，于是关掉一个型号只能靠删掉它 ——
+    /// 而删掉之后它不在任何地方，想找回来得重新拉一次列表。
+    ///
+    /// **富信息现算，不存快照**：库里只有 id，上下文与价目每次由
+    /// [`describe_all`] 查内置目录。存快照的话，目录更新之后老来源会一直
+    /// 显示旧价格 —— 而一个具体但过期的数字比「查不到」更糟，
+    /// 查不到的人会去核实，看到数字的人不会。
+    pub catalog: Vec<FetchedModel>,
     /// 部署提供的那条：只读、不可删、**不占用户的钱**。
     pub builtin: bool,
     /// 用这条来源不计配额吗（自带 key 的都不计）。
@@ -303,9 +314,10 @@ pub async fn list(
                 Option<String>,
                 bool,
                 serde_json::Value,
+                serde_json::Value,
             ),
         >(
-            "SELECT id, provider, label, key_tail, base_url, enabled, models
+            "SELECT id, provider, label, key_tail, base_url, enabled, models, catalog
                FROM model_sources ORDER BY created_at",
         )
         .fetch_all(store.pool())
@@ -313,17 +325,31 @@ pub async fn list(
         .map_err(|e| ApiError::internal(format!("查不出模型来源：{e}")))?;
 
         sources.extend(rows.into_iter().map(
-            |(id, provider, label, key_tail, base_url, enabled, models)| SourceView {
-                id,
-                provider,
-                label,
-                key_tail: Some(key_tail),
-                base_url,
-                enabled,
-                models: serde_json::from_value(models).unwrap_or_default(),
-                builtin: false,
-                // 自带 key 走的是用户自己的账户，不该再算我们的配额
-                free_of_quota: true,
+            |(id, provider, label, key_tail, base_url, enabled, models, catalog)| {
+                let models: Vec<String> = serde_json::from_value(models).unwrap_or_default();
+                let catalog_ids: Vec<String> = serde_json::from_value(catalog).unwrap_or_default();
+                // 还没拉过列表的老来源：拿已启用的那些当全集。
+                // 空着的话界面会画一个「这家一个型号都没有」，
+                // 而它明明有几个正在用的
+                let catalog_ids = if catalog_ids.is_empty() {
+                    models.clone()
+                } else {
+                    catalog_ids
+                };
+                let custom = is_custom_endpoint(&provider, base_url.as_deref());
+                SourceView {
+                    catalog: describe_all(&provider, &catalog_ids, custom),
+                    id,
+                    provider,
+                    label,
+                    key_tail: Some(key_tail),
+                    base_url,
+                    enabled,
+                    models,
+                    builtin: false,
+                    // 自带 key 走的是用户自己的账户，不该再算我们的配额
+                    free_of_quota: true,
+                }
             },
         ));
     }
@@ -348,6 +374,10 @@ fn deployment_view(st: &AgentState) -> SourceView {
         Err(_) => (String::new(), Vec::new()),
     };
     SourceView {
+        // 部署那条的「全集」就是它的定义文件允许的那些 —— 没有别的来源。
+        // 它也没有可关的余地（`models` 恒等于全集），所以界面上那一条的
+        // 「未启用」组永远是空的，这是**事实**而不是缺陷
+        catalog: describe_all(&provider, &models, false),
         id: DEPLOYMENT_SOURCE_ID.to_owned(),
         provider,
         label: "部署提供".to_owned(),
@@ -558,35 +588,54 @@ pub async fn fetch_models(
     )
     .map_err(|e| ApiError::bad_request(format!("这条来源建不起供应商：{e}")))?;
 
-    match client.fetch_supported_models().await {
+    let custom = is_custom_endpoint(&source.provider, source.base_url.as_deref());
+    let fetched = match client.fetch_supported_models().await {
         Ok(names) if !names.is_empty() => {
             tracing::info!(source = %id, count = names.len(), "拉到了供应商的型号列表");
-            Ok(Json(FetchedModels {
-                models: describe_all(
-                    &source.provider,
-                    &names,
-                    is_custom_endpoint(&source.provider, source.base_url.as_deref()),
-                ),
+            FetchedModels {
+                models: describe_all(&source.provider, &names, custom),
                 live: true,
                 note: None,
-            }))
+            }
         }
         // 空列表与失败**同样处理**：一个回了 200 但没有内容的
         // `/v1/models` 与拉不动没有区别，都不能拿来当「这家没有模型」
-        Ok(_) => Ok(Json(fallback_models(
-            &source.provider,
-            None,
-            is_custom_endpoint(&source.provider, source.base_url.as_deref()),
-        ))),
+        Ok(_) => fallback_models(&source.provider, None, custom),
         Err(e) => {
             tracing::warn!(source = %id, error = %e, "拉不到型号列表，回落到内置定义");
-            Ok(Json(fallback_models(
-                &source.provider,
-                Some(e.to_string()),
-                is_custom_endpoint(&source.provider, source.base_url.as_deref()),
-            )))
+            fallback_models(&source.provider, Some(e.to_string()), custom)
+        }
+    };
+
+    // **落库。** 这一步此前没有 —— 拉到的名单只在这一次响应里存在过，
+    // 于是「拉到过、但我不用」这件事没有任何地方记着，界面上那个
+    // 「未启用」分组永远是空的。
+    //
+    // **回落那一支也写**：内置清单同样是「这家有哪些」的一个答案，
+    // 而它正是拉不动的时候用户唯一看得到的那份。
+    //
+    // 写失败只吞成一条 warn：用户要的是这份名单，为一次缓存写失败
+    // 把它整个作废不成比例 —— 下次再点一下就补上了
+    if let Ok(store) = tenant.store() {
+        let ids: Vec<&str> = fetched.models.iter().map(|m| m.id.as_str()).collect();
+        match serde_json::to_value(&ids) {
+            Ok(json) => {
+                if let Err(e) = sqlx::query(
+                    "UPDATE model_sources SET catalog = $1, updated_at = now() WHERE id = $2",
+                )
+                .bind(json)
+                .bind(&id)
+                .execute(store.pool())
+                .await
+                {
+                    tracing::warn!(source = %id, error = %e, "型号全集没存下来");
+                }
+            }
+            Err(e) => tracing::warn!(source = %id, error = %e, "型号全集序列化失败"),
         }
     }
+
+    Ok(Json(fetched))
 }
 
 /// 拉不动时的回落。**note 必须说清是回落** —— 见 [`fetch_models`]。
@@ -599,6 +648,148 @@ fn fallback_models(provider: &str, why: Option<String>, custom_endpoint: bool) -
             Some(e) => format!("问不到这家的型号列表（{e}），下面这份是内置的，未必与你的账号一致"),
             None => "这家没回任何型号，下面这份是内置的，未必与你的账号一致".to_owned(),
         }),
+    }
+}
+
+/// `POST /settings/model-sources/{id}/check` 的请求。
+#[derive(Deserialize)]
+pub struct CheckRequest {
+    /// 拿哪个型号去试。空 = 让服务端挑这条来源开着的第一个。
+    #[serde(default)]
+    pub model: String,
+}
+
+/// 检查结果。
+#[derive(Serialize)]
+pub struct CheckResponse {
+    pub ok: bool,
+    /// 一句给人看的话。**成功也要有** —— 「通过」两个字回答不了
+    /// 「我刚才到底验了什么」，而这一页存在的意义就是那个。
+    pub detail: String,
+}
+
+/// `POST /settings/model-sources/{id}/check` —— 拿存下来的 key 真发一次请求。
+///
+/// # 为什么必须在服务端
+///
+/// 明文 key 从不下发（[`SourceView`] 只有尾巴），所以客户端**没有东西
+/// 可以拿去试**。这也是这条端点唯一的理由：不是为了少写点客户端代码。
+///
+/// # 为什么不用「获取模型列表」代替
+///
+/// 那条走的是 `/v1/models`，**列得出不等于调得通**：中转站常常照抄一份
+/// 上游目录，而真正下单时才发现这个型号没开通；反过来，有的网关压根不实现
+/// `/v1/models`，列不出来但每个型号都能跑。要回答「我填对了没有」，
+/// 只能真发一次。
+///
+/// # 失败要说清是**哪一步**不对
+///
+/// 一条笼统的「检查失败」等于把用户送回去逐项瞎试 —— 而他能改的三样
+/// （key、端点、型号名）互相看不出区别。
+///
+/// ⚠️ 尤其是 `RateLimitExceeded` 与 `CreditsExhausted`：这两种情况
+/// **key 是对的**，报成失败会让人去换一把本来就正确的密钥。
+///
+/// # Errors
+/// 没有这条来源、建不起供应商、型号名查不到。
+pub async fn check(
+    State(st): State<AgentState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<CheckRequest>,
+) -> Result<Json<CheckResponse>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+
+    // 部署那条的 key 是服务端环境变量，不在这张表里 —— 说清它去哪儿看，
+    // 而不是回一句「没有这条来源」让人以为界面坏了
+    if id == DEPLOYMENT_SOURCE_ID {
+        return Err(ApiError::bad_request(
+            "「部署提供」那条是服务端配的，这里验不了。它是否可用见 设置 → 连接 的后端状态",
+        ));
+    }
+
+    let source = st
+        .model_sources(&tenant)
+        .await
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| ApiError::bad_request(format!("没有这条来源：{id}（或者它是关着的）")))?;
+
+    let model = if req.model.trim().is_empty() {
+        source.models.first().cloned().ok_or_else(|| {
+            ApiError::bad_request("这条来源还没有开启任何型号，先「获取模型列表」再来验")
+        })?
+    } else {
+        req.model.trim().to_owned()
+    };
+
+    let client = cortex_llm::provider::build_with(
+        &source.provider,
+        &source.api_key,
+        source.base_url.as_deref(),
+    )
+    .map_err(|e| ApiError::bad_request(format!("这条来源建不起供应商：{e}")))?;
+
+    // 目录里查不到就用裸配置：新发布的型号、中转站独有的名字都会走到这里，
+    // 而**拦住他没有任何好处** —— 这一次调用本身就是最终判据
+    let config = cortex_llm::provider::model_config(&source.provider, &model)
+        .unwrap_or_else(|_| cortex_llm::ModelConfig::new(&model))
+        // 只要一个 token 就够证明这条路通了。不设上限的话，
+        // 一次「检查」可能真的生成几百 token，花的是用户的钱
+        .with_max_tokens(Some(1));
+
+    let probe = [cortex_llm::Message::user().with_text("hi")];
+    match client.complete(&config, "", &probe, &[]).await {
+        Ok(_) => Ok(Json(CheckResponse {
+            ok: true,
+            detail: format!("通了 —— {model} 用这条来源的密钥与端点调得通"),
+        })),
+        Err(e) => Ok(Json(CheckResponse {
+            ok: false,
+            detail: diagnose(&e, &model),
+        })),
+    }
+}
+
+/// 把供应商的错误翻成「你该去改哪一样」。
+///
+/// 分类的价值全在**指向**：用户手上能改的只有 key、端点、型号名三样，
+/// 而这三样的失败在原始错误里长得差不多。
+fn diagnose(e: &cortex_llm::ProviderError, model: &str) -> String {
+    use cortex_llm::ProviderError as P;
+    match e {
+        P::Authentication(d) => format!("密钥不对 —— 供应商拒绝了这把 key（{d}）"),
+        P::NetworkError(d) => format!("连不上这个端点 —— 检查 API 地址是否写对、网络是否通（{d}）"),
+        P::EndpointNotFound(d) => {
+            format!("端点回了 404 —— 地址多半少了或多了一段路径（{d}）")
+        }
+        // ⚠️ 下面两种**密钥是对的**。说成「检查失败」会让人去换一把
+        // 本来就正确的 key，而真正该做的是等一会儿、或者去充值
+        P::RateLimitExceeded { details, .. } => {
+            format!("密钥与端点都对，但这会儿被限流了，过一阵再试（{details}）")
+        }
+        P::CreditsExhausted { details, .. } => {
+            format!("密钥与端点都对，但这个账户余额不足（{details}）")
+        }
+        // ⚠️ **不要说「不是你的配置问题」。**
+        //
+        // 5xx 在这里身兼两职：可能真是对面临时故障，也可能是这个型号名
+        // 它不认 —— 中转站几乎都把「没有这个型号」报成 5xx。2026-08-21
+        // 实测一个网关对 `no-such-model-xyz` 回 503 + 「No available
+        // channel for model …」，而我们当时一口咬定「不是你的配置问题」，
+        // 把唯一有用的线索盖掉了。
+        //
+        // 分不清就**别替用户下结论**，把原文给他 —— 那句
+        // 「No available channel for model xxx」自己就说清了。
+        P::ServerError(d) => format!(
+            "供应商回了服务端错误：{d}\n\
+             可能是它那侧临时故障，也可能是这个型号名它不认 —— \
+             中转站常把「没有这个型号」报成 5xx"
+        ),
+        // 剩下的多半是「这个型号名这家不认」。不敢断言，所以给两种可能
+        other => format!(
+            "{model} 没调通：{other}。多半是型号名这家不认，也可能是端点后面那个服务不支持它"
+        ),
     }
 }
 
@@ -978,6 +1169,91 @@ mod tests {
             "目录里它的 image_output 是真的，但 OpenAI 的生图协议还没接 —— \
              报告成能生图等于把一次本可在挑选阶段避开的失败，推迟到用户\
              点下按钮之后"
+        );
+    }
+
+    // ───────────────────────── 连通性检查的诊断 ─────────────────────────
+    //
+    // 这个端点的全部价值就是**指向**：用户手上能改的只有 key、端点、
+    // 型号名三样，而这三样的失败在原始错误里长得差不多。一句笼统的
+    // 「检查失败」等于把他送回去逐项瞎试。
+
+    use cortex_llm::ProviderError as P;
+
+    #[test]
+    fn 三类失败指向三样不同的东西() {
+        let auth = diagnose(&P::Authentication("401".into()), "m");
+        let net = diagnose(&P::NetworkError("dns".into()), "m");
+        let missing = diagnose(&P::EndpointNotFound("404".into()), "m");
+
+        assert!(auth.contains("密钥"), "认证失败要指向密钥，实际：{auth}");
+        assert!(
+            net.contains("端点") && !net.contains("密钥"),
+            "连不上要指向端点，且**不能**提密钥 —— 提了他就会去换一把没问题的 key。实际：{net}"
+        );
+        assert!(
+            missing.contains("404"),
+            "端点 404 要把状态码说出来：地址少一段与多一段的症状是一样的，\
+             只有原始状态码能让人对着文档核。实际：{missing}"
+        );
+        assert_ne!(auth, net, "三类必须各说各的");
+        assert_ne!(net, missing);
+    }
+
+    /// ⚠️ **这两种情况密钥是对的。**
+    ///
+    /// 报成「检查失败」会让人去换一把本来就正确的 key，而真正该做的是
+    /// 等一会儿、或者去充值。这是这组诊断里最容易写反的一条。
+    #[test]
+    fn 限流与欠费要说清密钥没问题() {
+        for e in [
+            P::RateLimitExceeded {
+                details: "slow down".into(),
+                retry_delay: None,
+            },
+            P::CreditsExhausted {
+                details: "no funds".into(),
+                top_up_url: None,
+            },
+        ] {
+            let got = diagnose(&e, "m");
+            assert!(
+                got.contains("密钥与端点都对"),
+                "{e:?} 说明配置是对的，只是这会儿用不了 —— \
+                 报成失败会让用户去改一样没坏的东西。实际：{got}"
+            );
+        }
+    }
+
+    /// ⚠️ 5xx **分不清**是对面故障还是型号名不认，所以不许下结论。
+    ///
+    /// 2026-08-21 实测：一个网关对 `no-such-model-xyz` 回 503 +
+    /// 「No available channel for model …」，而我们当时写着
+    /// 「不是你的配置问题」—— 那次它恰恰**就是**配置问题，
+    /// 而那句断言把唯一有用的线索盖掉了。
+    #[test]
+    fn 服务端错误不替用户排除配置问题() {
+        let got = diagnose(
+            &P::ServerError("503: No available channel for model xyz".into()),
+            "xyz",
+        );
+        assert!(
+            !got.contains("不是你的配置问题"),
+            "5xx 身兼两职，断言「不是你的问题」会让人不去看那条原文。实际：{got}"
+        );
+        assert!(
+            got.contains("No available channel"),
+            "分不清的时候唯一诚实的做法是把原文给他 —— 那句话自己就说清了。实际：{got}"
+        );
+    }
+
+    #[test]
+    fn 认不出的错误把型号名带上() {
+        let got = diagnose(&P::RequestFailed("model_not_found".into()), "qwen-max");
+        assert!(
+            got.contains("qwen-max"),
+            "剩下的多半是「这个型号名这家不认」。不带上名字的话，\
+             一个配了 240 个型号的人不知道是哪一个的问题。实际：{got}"
         );
     }
 }

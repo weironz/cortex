@@ -491,6 +491,12 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
+  Future<SourceCheck> checkModelSource(String id, {String model = ''}) async {
+    final body = await _sourcesRaw('POST', '/$id/check', {'model': model});
+    return SourceCheck.fromJson(body);
+  }
+
+  @override
   Future<RoleAssignments> modelRoles() async =>
       RoleAssignments.fromJson(await _rolesRaw('GET', null));
 
