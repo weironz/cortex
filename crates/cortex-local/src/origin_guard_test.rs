@@ -116,3 +116,42 @@ async fn 容器形态必须放行_否则整条云端路当场_403() {
          而其余所有路由测试仍然全绿 —— 它们都不带这个头"
     );
 }
+
+/// 本机 agent **自己**拒的 401 必须带 `x-cortex-denied-by: local-agent`。
+///
+/// # 为什么这个头值得一条测试
+///
+/// 客户端收到 401 时面对两种完全不同的处境：这里拒的（重启 agent 能治）
+/// 与远端经反代转回来的（重启 agent 永远治不了）。此前客户端分不出来，
+/// 把远端 401 也当成本机错位去「重启 agent」—— 2026-08-21 的实测后果是
+/// 凭据在服务端失效后，1 秒一次的轮询把 agent 杀了 639+ 次。
+///
+/// 这个头一旦掉了，那个死循环就会**无声地**回来：所有功能测试照绿，
+/// 只有跑起来之后凭据恰好过期的那台机器会看到。
+#[tokio::test]
+async fn 自己拒的_401_带着谁拒的标记() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let mut st = state(dir.path(), cortex_agent::ExecEnvironment::LocalMachine);
+    st.inbound_token = Some("正确的钥匙".to_owned());
+
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri("/sessions")
+        .header("authorization", "Bearer 错误的钥匙")
+        .body(Body::empty())
+        .expect("构造请求");
+    let resp = crate::routes::router(st)
+        .oneshot(req)
+        .await
+        .expect("Infallible");
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        resp.headers()
+            .get("x-cortex-denied-by")
+            .and_then(|v| v.to_str().ok()),
+        Some("local-agent"),
+        "客户端全靠这个头分辨「重启能不能治」—— 掉了它，远端凭据一失效，\
+         agent 就会被 1 秒一次地杀下去"
+    );
+}

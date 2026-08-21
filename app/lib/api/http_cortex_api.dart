@@ -44,6 +44,7 @@ class HttpCortexApi implements CortexApi {
     String? token,
     http.Client? client,
     this.onUnauthorized,
+    this.onLocalAgentRejected,
     this.frontsDeployment,
   }) : _base = _normalise(baseUrl),
        _token = (token != null && token.trim().isEmpty) ? null : token?.trim(),
@@ -75,6 +76,15 @@ class HttpCortexApi implements CortexApi {
   /// it settable would leave in-flight requests straddling two identities and
   /// would keep a stale token alive inside closures.
   final String? _token;
+
+  /// 本机 agent **自己**拒了请求（401 且带 `x-cortex-denied-by: local-agent`）。
+  ///
+  /// 与 [onUnauthorized] 是两种截然不同的处境：这个说的是**入站凭据错位**
+  /// （重启 agent 能治），那个说的是**远端不认用户凭据**（重启 agent 永远
+  /// 治不了）。2026-08-21 之前两者共用一个回调，客户端把远端 401 也当成
+  /// 本机错位去重启 agent —— 凭据在服务端失效后，1 秒一次的轮询把 agent
+  /// 杀了 639+ 次，用户看到的是「总是连不上 agent、看不到会话」。
+  final void Function()? onLocalAgentRejected;
 
   /// Called once whenever the daemon answers 401.
   ///
@@ -184,13 +194,25 @@ class HttpCortexApi implements CortexApi {
   /// Centralised so no route can forget: the whole point of [onUnauthorized] is
   /// that expiry is noticed wherever it happens, not only on the routes someone
   /// remembered to annotate.
-  CortexApiException _failure(int status, String message) {
-    if (status == 401 && onUnauthorized != null) {
-      // Deferred: the listener drops the credential, which rebuilds
-      // `cortexApiProvider` and disposes *this* instance — including the HTTP
-      // client whose response we are still holding. Letting that happen a
-      // microtask later keeps the unwind on this call stack ordinary.
-      scheduleMicrotask(onUnauthorized!);
+  CortexApiException _failure(
+    int status,
+    String message, {
+    Map<String, String>? headers,
+  }) {
+    if (status == 401) {
+      // 按「谁拒的」分铃。头是 agent 侧打的（routes.rs 的 require_auth），
+      // package:http 会把响应头的键统一成小写。没带头 = 远端拒的
+      // （反代回来的响应不会自称 local-agent）
+      final bell = headers?['x-cortex-denied-by'] == 'local-agent'
+          ? onLocalAgentRejected
+          : onUnauthorized;
+      if (bell != null) {
+        // Deferred: the listener drops the credential, which rebuilds
+        // `cortexApiProvider` and disposes *this* instance — including the
+        // HTTP client whose response we are still holding. Letting that happen
+        // a microtask later keeps the unwind on this call stack ordinary.
+        scheduleMicrotask(bell);
+      }
     }
     return CortexApiException(message, statusCode: status);
   }
@@ -319,7 +341,11 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     // 回的是 `{}`，没有可读的东西 —— 不解析，省得哪天服务端改成 204
     // 就要在这里炸一次
@@ -417,7 +443,11 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     return AuthTokens.fromJson(
       _decodeObject(path, utf8.decode(response.bodyBytes)),
@@ -489,7 +519,11 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     return _decodeObject(path, utf8.decode(response.bodyBytes));
   }
@@ -527,7 +561,11 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     return _decodeObject(path, utf8.decode(response.bodyBytes));
   }
@@ -553,7 +591,11 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     final body = _decodeObject(
       'POST /import/upload',
@@ -588,7 +630,11 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     return ImportEstimate.fromJson(
       _decodeObject('import/preview', utf8.decode(response.bodyBytes)),
@@ -622,6 +668,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _unwrapError(body) ??
             _statusFallback(response.statusCode, 'import/run'),
+        headers: response.headers,
       );
     }
 
@@ -713,11 +760,16 @@ class HttpCortexApi implements CortexApi {
       throw _failure(
         response.statusCode,
         '这个后端没有本地工作区端点，改走 PATCH /sessions/{id}。',
+        headers: response.headers,
       );
     }
     if (response.statusCode >= 400) {
       // The validator's wording ("整台机器不是工作区") is written for the user.
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     final body = _decodeObject(
       'PUT /local/workspaces',
@@ -760,10 +812,18 @@ class HttpCortexApi implements CortexApi {
     // 纯 cortexd 没有这条路由（Web 端就是这种情况），也包括比它旧的本地
     // agent。调用方按「这台机器上没有本机工作区」处理，而不是当成故障
     if (response.statusCode == 404 || response.statusCode == 405) {
-      throw _failure(response.statusCode, '这个后端没有本地工作空间根目录。');
+      throw _failure(
+        response.statusCode,
+        '这个后端没有本地工作空间根目录。',
+        headers: response.headers,
+      );
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     final body = _decodeObject(
       '/local/workspace-root',
@@ -794,11 +854,19 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode == 404 || response.statusCode == 405) {
-      throw _failure(response.statusCode, '这个后端建不了本地工作空间。');
+      throw _failure(
+        response.statusCode,
+        '这个后端建不了本地工作空间。',
+        headers: response.headers,
+      );
     }
     if (response.statusCode >= 400) {
       // 校验器的拒绝话术是写给人看的（「工作空间名里不能有 '/'」），原样上带
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     final body = _decodeObject(
       'POST /local/workspaces',
@@ -819,10 +887,18 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode == 404 || response.statusCode == 405) {
-      throw _failure(response.statusCode, '这个后端不会自动开工作空间目录。');
+      throw _failure(
+        response.statusCode,
+        '这个后端不会自动开工作空间目录。',
+        headers: response.headers,
+      );
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     final body = _decodeObject(
       'POST /local/workspaces/{id}/auto',
@@ -913,10 +989,18 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode == 404 || response.statusCode == 405) {
-      throw _failure(response.statusCode, '这个后端没有本机 MCP。');
+      throw _failure(
+        response.statusCode,
+        '这个后端没有本机 MCP。',
+        headers: response.headers,
+      );
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     return jsonDecode(utf8.decode(response.bodyBytes)) as Object?;
   }
@@ -997,6 +1081,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode == 405 || response.statusCode == 404
             ? 'cortexd 还没有 PATCH /sessions/{id}，改动只在本地生效。'
             : _errorMessage(response),
+        headers: response.headers,
       );
     }
     return ChatSession.fromJson(
@@ -1175,7 +1260,11 @@ class HttpCortexApi implements CortexApi {
     // 他按下停止时它已经停了，那正是他要的结果
     if (response.statusCode == 404) return;
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
   }
 
@@ -1220,6 +1309,7 @@ class HttpCortexApi implements CortexApi {
       throw _failure(
         response.statusCode,
         _unwrapError(body) ?? _statusFallback(response.statusCode, label),
+        headers: response.headers,
       );
     }
 
@@ -1505,7 +1595,11 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _trim(response.body));
+      throw _failure(
+        response.statusCode,
+        _trim(response.body),
+        headers: response.headers,
+      );
     }
     return response.bodyBytes;
   }
@@ -1546,7 +1640,11 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     return response.bodyBytes;
   }
@@ -1619,7 +1717,11 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     final json = _decodeObject(
       'PUT /sandbox/files',
@@ -1651,7 +1753,11 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     return _decodeObject(path, utf8.decode(response.bodyBytes));
   }
@@ -1680,7 +1786,11 @@ class HttpCortexApi implements CortexApi {
       throw CortexApiException(_unreachableMessage(e), cause: e);
     }
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     return _decodeObject(path, utf8.decode(response.bodyBytes));
   }
@@ -1700,6 +1810,7 @@ class HttpCortexApi implements CortexApi {
       throw _failure(
         response.statusCode,
         body.isEmpty ? '$what 失败' : _trim(body),
+        headers: response.headers,
       );
     }
     return _decodeObject(what, body);
@@ -1720,7 +1831,11 @@ class HttpCortexApi implements CortexApi {
     }
 
     if (response.statusCode >= 400) {
-      throw _failure(response.statusCode, _errorMessage(response));
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
     }
     return _decodeObject(path, utf8.decode(response.bodyBytes));
   }

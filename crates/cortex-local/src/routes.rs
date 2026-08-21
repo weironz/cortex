@@ -210,7 +210,24 @@ async fn require_auth(State(st): State<LocalState>, req: Request, next: Next) ->
     if ok {
         next.run(req).await
     } else {
-        (StatusCode::UNAUTHORIZED, "缺少或无效的凭据").into_response()
+        // ── 这个头是给客户端分辨「谁拒的」用的，**不能省** ──
+        //
+        // 客户端收到 401 时面对两种完全不同的处境：**这里**拒的（入站凭据
+        // 错位 —— 重启 agent 能治）；**远端**经反代转回来的（用户凭据在
+        // 服务端已失效 —— 重启 agent 永远治不了）。此前客户端分不出来，
+        // 「agent 在跑就重启 agent」把远端 401 也当成了本机错位 ——
+        // 2026-08-21 实测后果：凭据在服务端死掉之后，confirmations 的
+        // 1 秒轮询每次 401 都触发一次重启，**agent 被杀了 639+ 次**，
+        // 用户看到的是「总是连不上 agent、看不到会话」。
+        //
+        // 反代回来的响应不会带这个头（远端没有理由自称 local-agent），
+        // 所以「带 = 我拒的，不带 = 别人拒的」成立。
+        (
+            StatusCode::UNAUTHORIZED,
+            [("x-cortex-denied-by", "local-agent")],
+            "缺少或无效的凭据",
+        )
+            .into_response()
     }
 }
 

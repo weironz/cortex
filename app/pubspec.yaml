@@ -55,6 +55,10 @@ dependencies:
   # some other package drops it.
   web: ^1.1.0
   flutter_secure_storage: ^10.3.1
+  # 单实例守门要调 user32（把已有窗口带到前台）。ffi 提供 Utf16 转换 ——
+  # 它本来就是 flutter_secure_storage 的传递依赖，这里只是把「我们直接
+  # import 它」这件事如实写出来（靠传递依赖 import 会在上游换实现时静默断）
+  ffi: ^2.1.0
 
 dev_dependencies:
   flutter_test:

@@ -79,6 +79,14 @@ class AgentLaunchLog {
     if (tail != null && tail.isNotEmpty) 'tail': _lastLines(tail),
   });
 
+  /// 起来之后被我们**主动**停掉了（登出、换地址、provider 重建、退出）。
+  ///
+  /// 此前主动停**什么都不记**（stop() 先撤掉退出监听再 kill，exit 事件
+  /// 无从写起），于是 2026-08-21 那个「agent 被 1 秒一次杀了 639+ 次」的
+  /// 死循环在日志里只有一串 spawn/ready —— 看起来像它自己活不长，
+  /// 而真相是**我们在杀它**。谁杀的必须留痕，否则下次还要考古半小时。
+  void stopped() => _append('stopped', const {});
+
   /// 还在启动就被我们自己停掉了 —— **不是故障**。
   ///
   /// 每次冷启动都会发生一次：`localAgentOriginProvider` 依赖的东西

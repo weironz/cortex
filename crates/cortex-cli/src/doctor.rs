@@ -564,6 +564,19 @@ fn judge_launch_log(tail: &[&str], path: &str) -> Check {
         "exit" => !v.get("expected").and_then(|x| x.as_bool()).unwrap_or(true),
         _ => false,
     };
+    // 事件的时间戳。读不出来就当没有 —— 频率判据宁可漏报也不能误报
+    let stamp = |v: &serde_json::Value| -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        let raw = v.get("t")?.as_str()?;
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .ok()
+            // 桌面端写的是本地时间且**不带时区**（Dart 的
+            // `DateTime.now().toIso8601String()`），parse_from_rfc3339 认不了。
+            // 补一个零偏移再解析：这里只比**两条之间的差**，偏移是多少无所谓
+            .or_else(|| {
+                chrono::DateTime::parse_from_rfc3339(&format!("{raw}Z")).ok()
+            })
+    };
+
     // 最后一行 stderr 通常就是死因本身（Rust 的 `Error:` 那一行）
     let why = |v: &serde_json::Value| -> String {
         if let Some(w) = v.get("why").and_then(|x| x.as_str()) {
@@ -576,6 +589,63 @@ fn judge_launch_log(tail: &[&str], path: &str) -> Check {
             .unwrap_or("没留下输出")
             .to_string()
     };
+
+    // ── 频率判据：不依赖任何终止事件 ──
+    //
+    // 上面那条数的是 `stopped`，而**老版本的桌面端根本不写它**（stop() 先
+    // 撤掉退出监听再 kill，没有事件可写）—— 2026-08-21 那次事故的日志里
+    // 只有一长串 spawn/ready，用 stopped 去数一条也数不到。
+    //
+    // 所以再加一条只看**拉起的密度**的：一分钟之内起了 5 次以上，不管
+    // 中间记了什么、不管是谁杀的，那都不正常。这一条对「下一个我还没想到
+    // 的重启源」同样成立 —— 而那正是防护该有的样子。
+    let spawns: Vec<&serde_json::Value> =
+        events.iter().filter(|v| ev(v) == "spawn").collect();
+    if spawns.len() >= 5
+        && let (Some(first), Some(last_spawn)) = (spawns.first(), spawns.last())
+        && let (Some(a), Some(b)) = (stamp(first), stamp(last_spawn))
+        && (b - a).num_seconds() <= 60
+    {
+        return Check::new(
+            "launch_log",
+            "启动记录",
+            Level::Warn,
+            format!(
+                "{} 秒内被拉起 {} 次 —— 有东西在反复重启它",
+                (b - a).num_seconds().max(1),
+                spawns.len()
+            ),
+        )
+        .with_fix(format!(
+            "本机 agent 正常情况下起一次就一直跑着。完整记录：{path}"
+        ));
+    }
+
+    // ── 被反复「主动」杀，是另一种病，而且更难看出来 ──
+    //
+    // 2026-08-21 实测：客户端把远端 401 误判成本机凭据错位，于是每次
+    // 401 都「重启 agent 治一治」—— agent 在 13.7 分钟里被体面地停掉再
+    // 拉起 **730 次**，周期稳定 1.13 秒。每一条单看都完全正常
+    // （spawn / ready / stopped 三件套），**只有频率露馅**。
+    //
+    // 所以这里数的是 stopped 的密度，不看最后一条是什么。放在崩溃循环
+    // 之前判：两者同时成立时，「有东西在反复重启它」比「它自己崩了」
+    // 更接近根因 —— 而下一步动作完全不同。
+    let stops = events.iter().filter(|v| ev(v) == "stopped").count();
+    if stops >= 3 {
+        return Check::new(
+            "launch_log",
+            "启动记录",
+            Level::Warn,
+            format!(
+                "最近 {} 条里被主动停了 {stops} 次 —— agent 没崩，是有东西在反复重启它",
+                events.len()
+            ),
+        )
+        .with_fix(format!(
+            "多半是客户端把某个持续失败当成了「重启能治」。完整记录：{path}"
+        ));
+    }
 
     let failures = events.iter().filter(|v| bad(v)).count();
     if failures >= 3 {
@@ -636,6 +706,14 @@ fn judge_launch_log(tail: &[&str], path: &str) -> Check {
             "启动记录",
             Level::Ok,
             "上次那轮启动到一半被新的一轮取代（正常）",
+        ),
+        // 单独一条主动停是正常的（登出、换地址、退出应用）。
+        // **高频**的主动停是病，由上面 stops >= 3 那条拦下
+        "stopped" => Check::new(
+            "launch_log",
+            "启动记录",
+            Level::Ok,
+            "上次是我们主动停的（登出 / 换地址 / 退出）",
         ),
         other => Check::new(
             "launch_log",
@@ -901,6 +979,93 @@ mod tests {
             judge_launch_log(&[SPAWN, SUPERSEDED], "P").level,
             Level::Ok,
             "它作为最后一条也很常见（两轮的写入顺序不保证），同样不该报警"
+        );
+    }
+
+    /// **被反复主动杀**要认得出来 —— 它是 2026-08-21 那次事故的形状。
+    ///
+    /// 每一条单看都正常（spawn / ready / stopped），只有频率露馅：
+    /// 13.7 分钟 730 次，周期稳定 1.13 秒。只看最后一条的话，
+    /// doctor 会答「上次是我们主动停的（正常）」—— 一个完全正确、
+    /// 而且完全没用的回答。
+    #[test]
+    fn 被反复重启认得出来() {
+        const STOPPED: &str = r#"{"ev":"stopped"}"#;
+        let tail = [
+            SPAWN, READY, STOPPED, SPAWN, READY, STOPPED, SPAWN, READY, STOPPED, SPAWN, READY,
+        ];
+        let c = judge_launch_log(&tail, "P");
+        assert_eq!(
+            c.level,
+            Level::Warn,
+            "13.7 分钟被杀 730 次而 doctor 说「正常」—— 那正是这条要防的"
+        );
+        assert!(
+            c.detail.contains("反复重启"),
+            "要说清是**有东西在重启它**，不是它自己崩了 —— 两者的下一步动作完全不同。detail = {}",
+            c.detail
+        );
+    }
+
+    /// **老日志里没有 `stopped`**，风暴照样要认得出来。
+    ///
+    /// 2026-08-21 那次事故的真实日志就是这个形状：一长串 spawn/ready，
+    /// 一条终止事件都没有（老版本 stop() 先撤退出监听再 kill）。只按
+    /// `stopped` 数的话，历史现场一条也数不到 —— 而用户报障时手里拿的
+    /// 恰恰是那种日志。
+    #[test]
+    fn 只看拉起密度也认得出风暴() {
+        let at = |s: &str| {
+            format!(r#"{{"t":"2026-08-21T09:20:{s}","ev":"spawn","pid":1}}"#)
+        };
+        let ready = r#"{"t":"2026-08-21T09:20:10","ev":"ready","ms":230}"#;
+        let rows = [
+            at("00"),
+            at("01"),
+            at("02"),
+            at("03"),
+            at("04"),
+        ];
+        let mut tail: Vec<&str> = rows.iter().map(String::as_str).collect();
+        tail.push(ready);
+        let c = judge_launch_log(&tail, "P");
+        assert_eq!(
+            c.level,
+            Level::Warn,
+            "5 秒内起了 5 次而 doctor 说正常 —— 用户报障时带来的正是这种日志"
+        );
+        assert!(
+            c.detail.contains("反复重启"),
+            "要说清是**有东西在重启它**。detail = {}",
+            c.detail
+        );
+    }
+
+    /// 正常使用不该被这条频率判据误伤。
+    #[test]
+    fn 正常的几次启动不算风暴() {
+        let rows = [
+            r#"{"t":"2026-08-21T09:00:00","ev":"spawn","pid":1}"#,
+            r#"{"t":"2026-08-21T09:00:01","ev":"ready","ms":230}"#,
+            r#"{"t":"2026-08-21T11:00:00","ev":"spawn","pid":2}"#,
+            r#"{"t":"2026-08-21T11:00:01","ev":"ready","ms":230}"#,
+        ];
+        assert_eq!(
+            judge_launch_log(&rows, "P").level,
+            Level::Ok,
+            "一天开关几次应用是常态。误报的话所有人的 doctor 都是红的，             于是真红的那次没人看"
+        );
+    }
+
+    /// 偶尔一次主动停是**正常的**（登出、换地址、退出应用）。
+    #[test]
+    fn 偶尔一次主动停不报警() {
+        const STOPPED: &str = r#"{"ev":"stopped"}"#;
+        let tail = [SPAWN, READY, STOPPED, SPAWN, READY];
+        assert_eq!(
+            judge_launch_log(&tail, "P").level,
+            Level::Ok,
+            "每个正常关一次应用的人都会留下一条 stopped。报警的话，             所有人的 doctor 都是红的，于是没人再看它"
         );
     }
 

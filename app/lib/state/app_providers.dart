@@ -489,10 +489,69 @@ class _RestartBudget {
 
   bool get exhausted => consecutive >= _maxConsecutiveRestarts;
 
-  /// 1s, 2s, 4s, 8s, 16s. Backing off matters more than it looks: the common
+  /// 2s, 4s, 8s, 16s, 16s。Backing off matters more than it looks: the common
   /// cause of an instant re-death is something transient holding a resource,
   /// and hammering it is how a transient failure becomes a permanent one.
+  ///
+  /// ⚠️ 注释此前写的是「1s, 2s, 4s, 8s, 16s」，而**实现给不出 1s**：
+  /// 调用方在读 `delay` 之前先 `consecutive++`，所以第一档取到的是
+  /// `1 << 1 = 2s`。差一档不致命，但一份与实现对不上的注释会让排查的人
+  /// 拿错误的节律去比对日志 —— 而「日志里的周期是 1.13 秒」正是
+  /// 2026-08-21 那次判断根因的关键证据。
   Duration get delay => Duration(seconds: 1 << consecutive.clamp(0, 4));
+
+  // ── 401 引发的重启另记一本账 ──────────────────────────────
+  //
+  // 上面那本记的是**崩溃**（进程死了才 +1）。401 重启走的是
+  // `invalidate`，进程是被我们自己体面停掉的，永远不会进那本账 ——
+  // 于是它此前**完全没有预算**。2026-08-21 的实测后果：凭据在服务端
+  // 失效后，confirmations 的 1 秒轮询每次 401 都触发一次重启，agent
+  // 被杀了 639+ 次，仍在继续。一个没有预算的自愈动作不是自愈，
+  // 是把一次故障变成永动机。
+
+  DateTime? _lastKick;
+  int _kicks = 0;
+
+  /// 这一次 401 重启还批不批。规则见 [allowRestartKick]。
+  bool allowKick(DateTime now) {
+    final r = allowRestartKick(now: now, lastKick: _lastKick, kicks: _kicks);
+    _lastKick = now;
+    _kicks = r.kicks;
+    return r.allowed;
+  }
+}
+
+/// 401 重启的节流规则：**30 秒窗口内最多 2 次**。
+///
+/// # 为什么这是最后一道防线
+///
+/// 上游还有一道判据（「这个 401 是 agent 自己拒的吗」）。那道判据 2026-08-21
+/// 之前是错的，后果是 agent 在 13.7 分钟里被杀了 730 次。判据可以再错，
+/// 而这里保证**错的后果有上界**：坏也只坏成「重启两次没用」，不是永动机。
+///
+/// 一个没有预算的自愈动作不是自愈，是把一次故障变成永动机。
+///
+/// # 为什么是 2 次
+///
+/// 入站凭据错位是「agent 手上是旧的、客户端已经换新」这类**一次性**错位，
+/// 重启一次就该好。给到 2 是容忍重启期间在飞的旧请求再触发一回。
+/// 第 3 次还 401，说明根因不在错位 —— 再杀多少次进程也没用。
+///
+/// 拆成纯函数是为了**测得到**：这条规则只在故障时才走到，而故障现场
+/// （持续 401）在测试里造出来代价很高。
+@visibleForTesting
+({bool allowed, int kicks}) allowRestartKick({
+  required DateTime now,
+  required DateTime? lastKick,
+  required int kicks,
+  Duration window = const Duration(seconds: 30),
+  int limit = 2,
+}) {
+  // 窗口外就重新计数：真的隔了很久又错位一次，那是新的一次故障，
+  // 不该被上一次的额度拖累
+  final fresh = lastKick == null || now.difference(lastKick) > window;
+  final next = (fresh ? 0 : kicks) + 1;
+  return (allowed: next <= limit, kicks: next);
 }
 
 /// 指向此刻活着的那个本地 agent —— **只为了「装更新之前先把它停掉」**。
@@ -617,7 +676,19 @@ Future<void> _pushAgentCredential({
 }
 
 final localAgentOriginProvider = FutureProvider<String?>((ref) async {
-  final config = ref.watch(appConfigProvider);
+  // ── 每多 watch 一样东西，冷启动就多杀一个健康 agent ──
+  //
+  // 这个 provider 的每一次重建都会 `onDispose` → `agent.stop()` → 杀掉
+  // 一个刚 ready 的进程再拉一个。而它 watch 的东西在冷启动时是**逐个
+  // 异步落定**的（磁盘设置、凭据库、网络续期），于是「落定几样就杀几次」。
+  //
+  // 所以这里 watch 的每一位都必须是**真的会改变 agent 该怎么起**的：
+  // 只 select 那三个字段（useMock / baseUrl / offline），而不是整个
+  // AppConfig —— 后者的 `==` 含 `knownBaseUrls`，那是「你用过哪些地址」
+  // 的清单，与 agent 怎么起毫无关系，而它恰好在冷启动时从磁盘晚到一次。
+  final useMock = ref.watch(appConfigProvider.select((c) => c.useMock));
+  final baseUrl = ref.watch(appConfigProvider.select((c) => c.baseUrl));
+  final offline = ref.watch(appConfigProvider.select((c) => c.offline));
   // **watch 的是「有没有」，不是「是哪一把」。**
   //
   // 原先 watch 的是 token 本身，于是每 15 分钟一次的轮换都会重建这个
@@ -633,8 +704,13 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   final token = hasToken ? ref.read(authControllerProvider).token : null;
   // **watch 而不是 read**：改了本机模型配置要让 agent 带着新环境重启。
   // read 的话用户会保存、看到成功、然后发现模型还是老的 —— 而那时
-  // 界面上没有任何东西提示他需要重启
-  final localLlm = ref.watch(localLlmProvider).value;
+  // 界面上没有任何东西提示他需要重启。
+  //
+  // 但**只在离线模式下 watch**：这份配置只有离线时才注入进环境
+  // （见下面的 extraEnv），在线时它变不变都与 agent 无关。而它每次冷启动
+  // 必然变一次（AsyncLoading → AsyncData，跨进程读凭据库），于是无条件
+  // watch 的那一版让**每一次冷启动**都白白杀掉一个刚 ready 的 agent。
+  final localLlm = offline ? ref.watch(localLlmProvider).value : null;
   // 关掉认证的部署（`CORTEX_AUTH=disabled`，自托管跑在 127.0.0.1 上的
   // 常见形态）根本没有 token 可拿。
   //
@@ -646,11 +722,11 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   final needsToken = ref.watch(
     authControllerProvider.select((s) => s.health?.requiresToken ?? true),
   );
-  if (config.useMock || !kLocalAgentSupported) return null;
+  if (useMock || !kLocalAgentSupported) return null;
   // 离线模式：**没有 cortexd**，本地 agent 就是全部 —— 必须起，
   // 而且没有 token 可给（也没人会来校验它）。不放行的话这个模式
   // 什么也不是：没有模型、没有工具、只有一个空界面
-  if (!config.offline && needsToken && token == null) return null;
+  if (!offline && needsToken && token == null) return null;
 
   final agent = discoverLocalAgent();
   if (agent == null) return null;
@@ -710,7 +786,7 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
 
   try {
     final origin = await agent.start(
-      remote: config.baseUrl,
+      remote: baseUrl,
       // 没有用户 token 时（离线、或 `CORTEX_AUTH=disabled`）用那把一次性
       // 凭据。**不能传空串**：agent 会拿到 `Some("")`、以为自己有认证、
       // 把桌面端 401 挡在外面，而「不做认证」那条警告一次都不打。
@@ -720,10 +796,10 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
       token: localAgentToken(token),
       // 离线模式必须本地直连模型：代理那条路要经 cortexd，而它不存在。
       // 传 null 表示「不干预」，让 agent 自己按环境变量决定
-      llmRoute: config.offline ? 'direct' : null,
+      llmRoute: offline ? 'direct' : null,
       // 只在离线模式下注入：连着服务器时模型是 cortexd 的事，
       // 把本机那份塞进去只会让两处配置打架
-      extraEnv: config.offline ? localLlm?.toEnvironment() : null,
+      extraEnv: offline ? localLlm?.toEnvironment() : null,
       // Unexpected death only — a deliberate `stop()` never lands here, so
       // signing out cannot be mistaken for a crash.
       //
@@ -882,15 +958,15 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
       // 本地 agent 还没起、请求先落到远端 → 401 → 被打回登录页，
       // 且 offline 已是 true，「离线使用」按钮从此同值短路、点不动。
       if (ref.read(appConfigProvider).offline) return;
-      // 本地 agent 的 401 说的是**它的入站凭据**对不上，与远端会话
-      // 活没活着无关。转发进去的实测后果：一次本机侧的凭据错位被读成
-      // 「你的登录失效了」，把凭据完全有效的用户踢回登录页。
-      // 真正该做的是让 agent 带着对的凭据重来一次。
-      if (agentOrigin.value != null) {
-        debugPrint('本地 agent 拒绝了这次请求（401）—— 重起它，不动登录态');
-        ref.invalidate(localAgentOriginProvider);
-        return;
-      }
+      // ⚠️ 这里**不再**按「agent 在跑」就重启 agent。
+      //
+      // 那条老路的前提是「401 = 本机入站凭据错位」，而 401 还有另一个
+      // 来源：**远端经反代转回来的**（用户凭据在服务端已失效）。老路
+      // 分不出两者，把远端 401 也当成错位去重启 —— 重启治不了远端，
+      // 于是下一次轮询又 401、又重启：2026-08-21 实测 agent 被 1 秒一次
+      // 地杀了 639+ 次。现在 agent 自己拒的 401 带
+      // `x-cortex-denied-by: local-agent` 头，走 [onLocalAgentRejected]
+      // 那条带预算的路；走到这里的 401 一律按「远端不认」处理。
       if (!shouldForwardUnauthorized(
         instanceToken: token,
         currentToken: ref.read(authControllerProvider).token,
@@ -898,6 +974,22 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
         return;
       }
       ref.read(authControllerProvider.notifier).onUnauthorized();
+    },
+    // agent **自己**拒的 401（带 x-cortex-denied-by 头）：入站凭据错位，
+    // 让它带着对的凭据重来一次 —— 但**有预算**。没有预算的自愈动作
+    // 不是自愈，是把一次故障变成永动机（见 _RestartBudget.allowKick）。
+    onLocalAgentRejected: () {
+      if (!ref.mounted) return;
+      if (agentOrigin.value == null) return;
+      if (!ref.read(_agentRestartBudgetProvider).allowKick(DateTime.now())) {
+        debugPrint(
+          '本机 agent 30 秒内第 3 次拒绝入站凭据 —— 不再重启。'
+          '错位重启一次就该好，还在 401 说明根因不在错位，再杀进程也没用',
+        );
+        return;
+      }
+      debugPrint('本机 agent 拒绝了这次请求（401）—— 重起它，不动登录态');
+      ref.invalidate(localAgentOriginProvider);
     },
   );
   ref.onDispose(api.dispose);

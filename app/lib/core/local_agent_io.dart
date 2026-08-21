@@ -25,7 +25,7 @@ LocalAgent? discoverLocalAgent() {
       ? override
       : _besideTheApp();
   if (candidate == null || !File(candidate).existsSync()) return null;
-  final state = _stateDir();
+  final state = stateDir();
   if (state == null) return null;
   return LocalAgent(executable: candidate, stateDir: state);
 }
@@ -42,7 +42,11 @@ String? _besideTheApp() {
 
 /// Must match `cortex_local::config::state_dir` — the agent writes its outbox
 /// and workspace bindings there, and the address handshake file goes alongside.
-String? _stateDir() {
+///
+/// 公开（去掉下划线）是给 `single_instance_io.dart` 用的：单实例锁必须
+/// 落在**同一个**状态目录里，锁的正是「谁拥有这个目录」。再抄一份解析
+/// 逻辑的话，两处漂移的后果是锁和数据各守一个目录 —— 等于没锁。
+String? stateDir() {
   if (Platform.isWindows) {
     final base = Platform.environment['LOCALAPPDATA'];
     return (base == null || base.isEmpty)
@@ -332,11 +336,26 @@ class LocalAgent {
   /// directory is the kind of thing that gets noticed years later and looks
   /// like a leak. Best-effort: a failure here must not stop the agent.
   void _sweepStaleHandshakes(Directory dir) {
+    // ⚠️ **只扫自己 pid 的那些**，不是所有 `agent-*.addr`。
+    //
+    // 文件名是 `agent-<本进程pid>-<时间戳>.addr`。扫全部的那一版会跨进程
+    // 误杀：另一份桌面端此刻可能正**等着**它自己那个握手文件被子进程写出来
+    // （`_awaitAddress` 轮询它），而我们把它删了 —— 对方等到 20 秒超时，
+    // 报「本地 agent 在 20 秒内没有报出监听地址」，而它的 agent 其实好好地
+    // 起来了、地址也写过了。
+    //
+    // 一份不该存在的第二实例（见 core/single_instance.dart）本来就该被挡在
+    // 门外，但**防护不能建立在另一道防护没漏的前提上** —— 老版本的桌面端
+    // 不抢那把锁，而它们至少不该互相删文件。
+    //
+    // 代价：别的 pid 留下的陈旧文件不再被清。它们是几十字节的空壳，
+    // 而清掉别人的东西这件事，风险比那点字节大得多。
+    final mine = 'agent-$pid-';
     try {
       if (!dir.existsSync()) return;
       for (final e in dir.listSync()) {
         final name = e.path.split(Platform.pathSeparator).last;
-        if (e is File && name.startsWith('agent-') && name.endsWith('.addr')) {
+        if (e is File && name.startsWith(mine) && name.endsWith('.addr')) {
           e.deleteSync();
         }
       }
@@ -353,6 +372,9 @@ class LocalAgent {
   Future<void> stop() async {
     _stopping = true;
     final proc = _process;
+    // 在撤掉退出监听**之前**记：撤了之后这次退出就没人看见了。
+    // 只有真有进程在跑才记 —— 空 stop（防御性调用）不该在日志里留噪音
+    if (proc != null) _launchLog.stopped();
     _process = null;
     _origin = null;
     await _exitWatch?.cancel();
