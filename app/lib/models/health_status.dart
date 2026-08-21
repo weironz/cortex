@@ -8,6 +8,7 @@ class HealthStatus {
     required this.database,
     this.auth = authUnknown,
     this.devLogin,
+    this.commit,
     this.role = roleCortexd,
     this.server,
   });
@@ -57,6 +58,12 @@ class HealthStatus {
   /// 而一个 `true` 只能说「大概能进」。
   final String? devLogin;
 
+  /// 对面那台构建时的 git 短 sha。老服务端不报，那时是 `null`。
+  ///
+  /// **与 `version` 分开**：semver 打完 tag 的下一秒就不再唯一，
+  /// 之后每个提交都还报同一个版本号 —— 判「线上有没有那个修复」靠的是它。
+  final String? commit;
+
   /// 空着用户名密码点「登录」会不会成功。
   bool get allowsBlankLogin => (devLogin ?? '').isNotEmpty;
 
@@ -98,6 +105,7 @@ class HealthStatus {
     database: asString(json['database'], 'unknown'),
     auth: asString(json['auth'], authUnknown),
     devLogin: json['dev_login'] as String?,
+    commit: json['commit'] as String?,
     role: asString(json['role'], roleCortexd),
     server: json['server'] is Map<String, dynamic>
         ? ServerLink.fromJson(json['server'] as Map<String, dynamic>)

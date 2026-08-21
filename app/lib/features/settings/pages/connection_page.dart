@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/theme.dart';
 import '../../../auth/token_store.dart';
 import '../../../core/app_config.dart';
 import '../../../core/local_agent.dart';
@@ -121,7 +122,16 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _kv(context, 'status', h.status),
-              _kv(context, 'version', h.version),
+              // 版本号与 sha 并排。**只有版本号是不够的** —— semver 打完
+              // tag 的下一秒就不再唯一，之后每个提交都还报同一个版本号。
+              // 判「线上有没有那个修复」靠的是 sha，见 cortex_core::BUILD_SHA。
+              // 老服务端不报，那时只显示版本号（不写「未知」：那会让人以为
+              // 对面那台有问题，而它只是旧一点）
+              _kv(
+                context,
+                'version',
+                h.commit == null ? h.version : '${h.version}  ·  ${h.commit}',
+              ),
               _kv(context, 'database', h.database),
               _kv(context, 'auth', h.auth),
               // 说出来，而不是默默庆幸。cortexd 只有在有人**特意**写了
@@ -437,7 +447,14 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
         children: [
           SizedBox(
             width: 80,
-            child: Text(k, style: theme.textTheme.labelSmall),
+            // 键用第三级前景：这一列是**标签**，值才是内容。
+            // 两者同色的话眼睛要逐行分辨哪边是哪边
+            child: Text(
+              k,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.cortex.foregroundTertiary,
+              ),
+            ),
           ),
           Text(
             v,
