@@ -106,7 +106,7 @@ class _CodeBlockState extends State<CodeBlock> {
       margin: const EdgeInsets.symmetric(vertical: 10),
       decoration: BoxDecoration(
         color: rootBg,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
         border: Border.all(color: scheme.outlineVariant),
       ),
       clipBehavior: Clip.antiAlias,

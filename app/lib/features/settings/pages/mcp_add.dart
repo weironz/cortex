@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../api/api_exception.dart';
 import '../../../models/mcp.dart';
 import '../../../state/app_providers.dart';
+import '../../../core/theme.dart';
 
 /// 粘贴添加。**两步：解析 → 确认。**
 ///
@@ -186,7 +187,7 @@ class _McpAddPanelState extends ConsumerState<McpAddPanel> {
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
                     color: theme.colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
                   ),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -522,7 +523,7 @@ class _Chip extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(4),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
       ),
       child: Text(text, style: theme.textTheme.labelSmall),
     );

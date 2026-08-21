@@ -5,6 +5,7 @@ import '../../core/formatting.dart';
 import '../../models/attachment.dart';
 import '../../models/import_plan.dart';
 import '../../state/import_controller.dart';
+import '../../core/theme.dart';
 
 Future<void> showImportSheet(BuildContext context) {
   return showDialog<void>(
@@ -180,7 +181,7 @@ class _Bill extends StatelessWidget {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -372,7 +373,7 @@ class _Problem extends StatelessWidget {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: scheme.errorContainer,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
       ),
       child: SelectableText(
         message,

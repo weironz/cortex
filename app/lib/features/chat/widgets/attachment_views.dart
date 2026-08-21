@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../models/attachment.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/attachment_controller.dart';
+import '../../../core/theme.dart';
 
 /// Thumbnails for attachments already committed to a message.
 class AttachmentStrip extends StatelessWidget {
@@ -124,7 +125,7 @@ class _ImageThumbState extends ConsumerState<_ImageThumb> {
         height: 96,
         decoration: BoxDecoration(
           color: scheme.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(9),
+          borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
           border: Border.all(color: scheme.outlineVariant),
         ),
         clipBehavior: Clip.antiAlias,
@@ -173,7 +174,7 @@ class _FileCard extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(9),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
         border: Border.all(color: scheme.outlineVariant),
       ),
       child: Row(
@@ -273,7 +274,7 @@ class _PendingCard extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(9),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
         border: Border.all(color: accent.withValues(alpha: 0.35)),
       ),
       child: Row(
@@ -309,6 +310,9 @@ class _PendingCard extends StatelessWidget {
                 if (item.status == UploadStatus.uploading) ...[
                   const SizedBox(height: 5),
                   ClipRRect(
+                    // **不走圆角那五阶**：这是个胶囊，不是一个面。
+                    // 条子高 3，半高就是 1.5 —— 2 已经把两端切成半圆了，
+                    // 换成最小的 radiusSm（6）不会更圆，只会白绕一圈
                     borderRadius: BorderRadius.circular(2),
                     child: LinearProgressIndicator(
                       // Indeterminate once everything is handed over: the

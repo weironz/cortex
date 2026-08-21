@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/theme.dart';
+
 /// 一份统一 diff，按行着色。
 ///
 /// # 为什么值得单独有一个组件
@@ -37,7 +39,7 @@ class DiffView extends StatelessWidget {
       constraints: BoxConstraints(maxHeight: maxHeight),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest.withValues(alpha: 0.35),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
         border: Border.all(color: scheme.outlineVariant),
       ),
       child: Scrollbar(

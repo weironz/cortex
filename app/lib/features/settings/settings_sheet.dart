@@ -8,6 +8,7 @@ import 'pages/data_page.dart';
 import 'pages/mcp_page.dart';
 import 'pages/model_page.dart';
 import 'pages/model_roles_page.dart';
+import '../../core/theme.dart';
 
 /// 打开设置窗。
 ///
@@ -164,7 +165,9 @@ class _SettingsWindowState extends State<_SettingsWindow> {
                     selectedTileColor: theme.colorScheme.primaryContainer
                         .withValues(alpha: 0.45),
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(
+                        CortexTokens.radiusMd,
+                      ),
                     ),
                     leading: Icon(s.icon, size: 20),
                     title: Text(s.label, style: theme.textTheme.bodyMedium),

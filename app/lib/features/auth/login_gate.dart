@@ -6,6 +6,7 @@ import '../../core/local_agent.dart';
 import '../../state/app_providers.dart';
 import '../../state/auth_controller.dart';
 import '../shell/app_shell.dart';
+import '../../core/theme.dart';
 
 /// Stands between the app and the daemon's front door.
 ///
@@ -177,7 +178,7 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                 // 摆一个临时替身在这儿，第一印象就是「半成品」。
                 Center(
                   child: ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(CortexTokens.radiusXl),
                     child: Image.asset(
                       'web/icons/Icon-192.png',
                       width: 64,
@@ -323,7 +324,9 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                     padding: const EdgeInsets.all(11),
                     decoration: BoxDecoration(
                       color: scheme.errorContainer,
-                      borderRadius: BorderRadius.circular(10),
+                      borderRadius: BorderRadius.circular(
+                        CortexTokens.radiusLg,
+                      ),
                     ),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -415,7 +418,9 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
                       color: scheme.surfaceContainerLow,
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: BorderRadius.circular(
+                        CortexTokens.radiusXl,
+                      ),
                       border: Border.all(color: scheme.outlineVariant),
                     ),
                     child: Column(

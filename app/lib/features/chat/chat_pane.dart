@@ -9,6 +9,7 @@ import 'session_changes_sheet.dart';
 import 'widgets/confirm_panel.dart';
 import 'widgets/conversation_view.dart';
 import 'widgets/message_composer.dart';
+import '../../core/theme.dart';
 
 /// Centre pane: header, transcript, composer.
 class ChatPane extends ConsumerWidget {
@@ -226,7 +227,7 @@ class _BackendBadge extends ConsumerWidget {
         padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
         decoration: BoxDecoration(
           color: color.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(5),
+          borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
           border: Border.all(color: color.withValues(alpha: 0.35)),
         ),
         child: Row(

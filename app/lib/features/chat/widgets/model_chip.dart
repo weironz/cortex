@@ -16,6 +16,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../features/settings/pages/model_picker.dart';
 import '../../../state/model_controller.dart';
+import '../../../core/theme.dart';
 
 class ModelChip extends ConsumerWidget {
   const ModelChip({super.key});
@@ -36,7 +37,7 @@ class ModelChip extends ConsumerWidget {
     return Tooltip(
       message: label.warning ?? '这一轮用哪个模型',
       child: InkWell(
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
         onTap: () => showModelPicker(context, ref),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),

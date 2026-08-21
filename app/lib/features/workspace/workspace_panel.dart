@@ -17,6 +17,7 @@ import 'cloud_workspace_sheet.dart';
 import 'file_preview.dart';
 import 'sandbox_file_tree.dart';
 import 'workspace_binding_sheet.dart';
+import '../../core/theme.dart';
 
 /// The collapsible file tree that appears once a session is bound.
 ///
@@ -649,7 +650,7 @@ class WorkspaceChip extends ConsumerWidget {
       message: tip,
       child: Material(
         color: color.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(7),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: () => _pick(context, ref, session),
@@ -657,7 +658,7 @@ class WorkspaceChip extends ConsumerWidget {
             constraints: const BoxConstraints(maxWidth: 200),
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(7),
+              borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
               border: Border.all(color: color.withValues(alpha: 0.32)),
             ),
             child: Row(

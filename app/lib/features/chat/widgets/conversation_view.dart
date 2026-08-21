@@ -8,6 +8,7 @@ import '../../../state/chat_controller.dart';
 import '../../../state/chat_state.dart';
 import '../../../widgets/empty_state.dart';
 import 'message_bubble.dart';
+import '../../../core/theme.dart';
 
 /// The scrolling transcript.
 ///
@@ -404,7 +405,7 @@ class ConversationHero extends StatelessWidget {
               gradient: LinearGradient(
                 colors: [scheme.primary, scheme.secondary],
               ),
-              borderRadius: BorderRadius.circular(15),
+              borderRadius: BorderRadius.circular(CortexTokens.radiusXl),
             ),
             child: const Icon(
               Icons.auto_awesome,

@@ -14,6 +14,7 @@ import 'attachment_views.dart';
 import 'model_chip.dart';
 import 'message_bubble.dart';
 import 'permission_mode_chip.dart';
+import '../../../core/theme.dart';
 
 /// Input box.
 ///
@@ -539,7 +540,7 @@ class _MentionList extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 6),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
         border: Border.all(color: scheme.outlineVariant),
       ),
       clipBehavior: Clip.antiAlias,

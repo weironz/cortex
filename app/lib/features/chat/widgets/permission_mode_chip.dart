@@ -16,6 +16,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/permission_mode.dart';
 import '../../../state/app_providers.dart';
+import '../../../core/theme.dart';
 
 class PermissionModeChip extends ConsumerWidget {
   const PermissionModeChip({super.key});
@@ -30,7 +31,7 @@ class PermissionModeChip extends ConsumerWidget {
     return Tooltip(
       message: mode.blurb,
       child: InkWell(
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
         onTap: () => _open(context, ref, mode),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),

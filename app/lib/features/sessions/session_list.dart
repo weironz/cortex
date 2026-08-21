@@ -573,7 +573,7 @@ class _GroupHeader extends StatelessWidget {
       padding: const EdgeInsets.only(top: 14, bottom: 2),
       child: InkWell(
         onTap: project == null ? null : onToggle,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(4, 3, 2, 3),
           child: Row(
@@ -1098,7 +1098,7 @@ class _BacklogNote extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
       decoration: BoxDecoration(
         color: scheme.secondaryContainer,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1300,10 +1300,10 @@ class _SearchTile extends StatelessWidget {
         color: selected
             ? scheme.primary.withValues(alpha: 0.12)
             : Colors.transparent,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             child: Column(

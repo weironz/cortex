@@ -320,8 +320,22 @@ abstract final class CortexTheme {
         labelStyle: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 0),
       ),
+      // 对话框那一阶。**在此之前 `radius2xl` 用量是 0** —— 规范第四节写着
+      // 「对话框 18」，却没有任何一处代码是那句话的落点，于是所有对话框
+      // 一直用的是 Material 3 的默认 28，比规范圆了一半还多。
+      //
+      // 放在主题里而不是每个 `Dialog` 上：这个产品有七八个对话框
+      // （设置、导入、权限、会话改动…），逐个设的下场就是这次收拾的
+      // 那 42 处 —— 迟早有人新开一个而忘了设。
+      dialogTheme: DialogThemeData(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(CortexTokens.radius2xl),
+        ),
+      ),
       scrollbarTheme: ScrollbarThemeData(
         thickness: const WidgetStatePropertyAll(8),
+        // 半宽 = 胶囊，**不走圆角那五阶**。跟着 thickness 走：
+        // 改粗细时这个数要一起改，取一个阶常量反而会脱钩
         radius: const Radius.circular(4),
         thumbColor: WidgetStatePropertyAll(
           scheme.onSurfaceVariant.withValues(alpha: 0.35),

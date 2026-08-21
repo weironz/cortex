@@ -6,6 +6,7 @@ import '../../../core/local_agent.dart';
 import '../../../models/mcp.dart';
 import '../../../state/app_providers.dart';
 import 'mcp_add.dart';
+import '../../../core/theme.dart';
 
 /// MCP 与工具这一页。
 ///
@@ -283,7 +284,7 @@ class _ServerCard extends ConsumerWidget {
       margin: EdgeInsets.zero,
       child: InkWell(
         onTap: onOpen,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusXl),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
           child: Row(
@@ -438,7 +439,7 @@ class _Chip extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(4),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
       ),
       child: Text(text, style: theme.textTheme.labelSmall),
     );

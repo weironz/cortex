@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../../core/ansi.dart';
 import '../../../core/motion.dart';
 import '../../../models/tool_call.dart';
+import '../../../core/theme.dart';
 
 /// 一轮里 agent **做了什么** —— 工具调用与它们改动的内容。
 ///
@@ -103,7 +104,7 @@ class _Panel extends StatelessWidget {
       margin: const EdgeInsets.only(top: 8),
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(11),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
         border: Border.all(color: scheme.secondary.withValues(alpha: 0.28)),
         color: scheme.secondary.withValues(alpha: 0.04),
       ),
@@ -130,7 +131,7 @@ class _Toggle extends StatelessWidget {
 
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(7),
+      borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
         child: Row(

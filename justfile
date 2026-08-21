@@ -443,6 +443,7 @@ flutter-live:
 docs-check:
     bash scripts/check-version.sh
     python3 scripts/check-doc-links.py
+    python3 scripts/check-radii.py
 
 # 运维脚本的静态检查。**与 CI 那一步同一条命令**（见 ci.yml 的 shellcheck）。
 #

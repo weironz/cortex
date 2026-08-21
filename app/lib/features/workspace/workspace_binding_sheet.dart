@@ -5,6 +5,7 @@ import '../../api/api_exception.dart';
 import '../../models/chat_session.dart';
 import '../../state/chat_controller.dart';
 import '../../workspace/workspace_fs.dart';
+import '../../core/theme.dart';
 
 /// Binds (or rebinds) a session's workspace.
 ///
@@ -232,7 +233,7 @@ class _Note extends StatelessWidget {
       padding: const EdgeInsets.all(11),
       decoration: BoxDecoration(
         color: scheme.secondary.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(9),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
         border: Border.all(color: scheme.secondary.withValues(alpha: 0.25)),
       ),
       child: Row(

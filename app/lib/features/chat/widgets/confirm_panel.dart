@@ -6,6 +6,7 @@ import '../../../models/pending_confirmation.dart';
 import '../../../state/chat_controller.dart';
 import '../../../state/confirm_controller.dart';
 import 'diff_view.dart';
+import '../../../core/theme.dart';
 
 /// The tool-confirmation prompt, pinned directly above the composer.
 ///
@@ -99,7 +100,7 @@ class _ConfirmCard extends ConsumerWidget {
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
       decoration: BoxDecoration(
         color: scheme.errorContainer.withValues(alpha: 0.42),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
         border: Border.all(color: scheme.error.withValues(alpha: 0.55)),
       ),
       padding: const EdgeInsets.fromLTRB(14, 11, 14, 11),
@@ -262,7 +263,7 @@ class _Preview extends StatelessWidget {
       width: double.infinity,
       decoration: BoxDecoration(
         color: scheme.surface.withValues(alpha: 0.72),
-        borderRadius: BorderRadius.circular(7),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
         border: Border.all(color: scheme.outlineVariant),
       ),
       padding: const EdgeInsets.fromLTRB(11, 9, 11, 9),
@@ -309,7 +310,7 @@ class _RiskChip extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
       decoration: BoxDecoration(
         color: scheme.error.withValues(alpha: 0.16),
-        borderRadius: BorderRadius.circular(4),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
       ),
       child: Text(
         label,
@@ -399,7 +400,7 @@ class _ResolvedNote extends ConsumerWidget {
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
       ),
       padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
       child: Row(
@@ -448,7 +449,7 @@ class _ReceiptError extends ConsumerWidget {
       padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
       decoration: BoxDecoration(
         color: scheme.errorContainer,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
       ),
       child: Row(
         children: [

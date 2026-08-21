@@ -32,6 +32,7 @@ import '../../../models/model_role.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/model_controller.dart';
 import 'model_picker.dart';
+import '../../../core/theme.dart';
 
 /// 现在指派了什么（`GET /settings/model-roles`）。
 final modelRolesProvider = FutureProvider.autoDispose<RoleAssignments>(
@@ -131,7 +132,7 @@ class _ModelRolesPageState extends ConsumerState<ModelRolesPage> {
           color: error
               ? theme.colorScheme.errorContainer
               : theme.colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
         ),
         child: Text(
           text,

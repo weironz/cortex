@@ -101,7 +101,7 @@ class _InlineCode extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(4),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
         border: Border.all(color: scheme.outlineVariant),
       ),
       child: Text(
@@ -162,7 +162,7 @@ class _MarkdownTableState extends State<_MarkdownTable> {
       margin: const EdgeInsets.symmetric(vertical: 10),
       decoration: BoxDecoration(
         border: Border.all(color: scheme.outlineVariant),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
       ),
       clipBehavior: Clip.antiAlias,
       child: Scrollbar(

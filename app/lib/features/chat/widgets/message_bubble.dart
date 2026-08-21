@@ -281,7 +281,9 @@ class AssistantBlock extends StatelessWidget {
                           scheme.secondary.withValues(alpha: 0.9),
                         ],
                       ),
-                      borderRadius: BorderRadius.circular(6),
+                      borderRadius: BorderRadius.circular(
+                        CortexTokens.radiusSm,
+                      ),
                     ),
                     child: const Icon(
                       Icons.auto_awesome,
@@ -435,7 +437,7 @@ class _ErrorNote extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
       decoration: BoxDecoration(
         color: scheme.errorContainer.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
         border: Border.all(color: scheme.error.withValues(alpha: 0.3)),
       ),
       child: Row(
@@ -626,6 +628,9 @@ class _CaretState extends State<_Caret> with SingleTickerProviderStateMixin {
           height: 15,
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.primary,
+            // **不走圆角那五阶**：它在画一个**字形**（文本光标），
+            // 不是一个容纳内容的面。宽 7 的条子，半宽才 3.5 ——
+            // 取最小的 radiusSm（6）会直接变成一颗药丸
             borderRadius: BorderRadius.circular(1.5),
           ),
         ),
