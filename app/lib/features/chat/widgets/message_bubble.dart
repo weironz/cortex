@@ -9,6 +9,7 @@ import '../../../core/motion.dart';
 import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
 import '../../../models/tool_call.dart';
+import '../../images/widgets/drawing_placeholder.dart';
 import '../../../state/chat_controller.dart';
 import '../../../state/model_controller.dart';
 import '../../../state/composer_draft.dart';
@@ -315,6 +316,20 @@ class AssistantBlock extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     AttachmentStrip(attachments: attachments),
+                    // 正在画图 —— 占住那张图**将来的位置**。
+                    //
+                    // 判据是「有一次 generate_image 还没回结果」，而不是
+                    // 「这一轮在跑」：一轮里可能先读文件再画图，前半段画一块
+                    // 空图位是在承诺一件还没发生的事。
+                    //
+                    // 图回来之后这一行会变成 `AttachmentStrip` 里的缩略图，
+                    // 而占位随 pending 消失 —— 两者不会同时出现
+                    for (final _ in toolCalls.where(
+                      (t) => t.name == 'generate_image' && t.pending,
+                    )) ...[
+                      const DrawingPlaceholder(),
+                      const SizedBox(height: 8),
+                    ],
                     if (text.isNotEmpty)
                       SelectionArea(
                         child: CortexMarkdown(

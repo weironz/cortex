@@ -21,6 +21,8 @@ import 'package:cortex_app/models/model_option.dart';
 import 'package:cortex_app/models/model_source.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/model_controller.dart';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -38,6 +40,42 @@ class _FlakyGalleryApi extends MockCortexApi {
   Future<Gallery> gallery({int limit = 30, String? before}) =>
       _gallery(limit: limit, before: before);
 }
+
+/// 图库里已经有几张的替身。
+///
+/// ⚠️ **不能在测试体里 `await api.generateImages(...)` 去攒数据。**
+/// `testWidgets` 跑在假时钟里，那条路上任何一个真 Future 都不会自己走完，
+/// 测试直接挂住（实测：卡满 2 分 25 秒才被判 did not complete）。
+/// 给一份**现成的**数据，一个 await 都不欠。
+class _SeededApi extends MockCortexApi {
+  _SeededApi(this.items) : super(instant: true);
+
+  final List<GeneratedImage> items;
+
+  @override
+  Future<Gallery> gallery({int limit = 30, String? before}) async =>
+      Gallery(items: items);
+
+  /// 缩略图要真的画得出来 —— 回一张 1×1 的合法 PNG。
+  /// 解不开的话那一格是「破图」图标，而这一组正是要看图画出来了没有。
+  @override
+  Future<Uint8List> blobBytes(String hash) async => Uint8List.fromList(const [
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
+    0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0,
+    0x90, 0x77, 0x53, 0xDE, //
+    0, 0, 0, 12, 73, 68, 65, 84, 0x78, 0x01, 0x01, 1, 0, 0xFE, 0xFF, 0, 0, 0,
+    2, 0, 1, 0xE5, 0x27, 0xDE, 0xFC, //
+    0, 0, 0, 0, 73, 69, 78, 68, 0xAE, 0x42, 0x60, 0x82,
+  ]);
+}
+
+GeneratedImage _img(String prompt) => GeneratedImage(
+  id: 'MOCKIMG0001',
+  hash: 'a' * 64,
+  prompt: prompt,
+  model: 'gpt-image-2',
+  source: 'src',
+);
 
 class _MockConfig extends AppConfigNotifier {
   @override
@@ -71,6 +109,18 @@ Future<void> _pump(WidgetTester tester, ProviderContainer c) async {
   for (var i = 0; i < 10; i++) {
     await tester.pump(const Duration(milliseconds: 100));
   }
+  // **照真实入口走，而且要等会话列表先落地。**
+  //
+  // 从侧栏点「图片」会开一条属于图片页的空会话。在列表加载完**之前**点，
+  // 那条草稿会被随后自动选中的第一条远端会话顶掉 —— 真实使用里点不到
+  // 那个时机（列表早就在那儿了），但测试里一上来就点，正好撞上。
+  //
+  // 不走这一步的话，页面显示的是假后端默认选中的那条**有历史的**会话，
+  // 落地页（输入框 + 图库）根本不出现，而那正是这一组要测的
+  c.read(mainViewProvider.notifier).go(MainView.images);
+  for (var i = 0; i < 6; i++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
 }
 
 Future<void> _settle(WidgetTester tester, [int rounds = 12]) async {
@@ -80,8 +130,8 @@ Future<void> _settle(WidgetTester tester, [int rounds = 12]) async {
 }
 
 void main() {
-  group('图片页', () {
-    testWidgets('空画廊说清楚要做什么，而不是给一片空白', (tester) async {
+  group('图片页 · 落地形态', () {
+    testWidgets('空会话上是输入框 + 我的图片，而不是一片空白', (tester) async {
       final c = _boot();
       addTearDown(c.dispose);
       await _pump(tester, c);
@@ -94,57 +144,33 @@ void main() {
             '「外观」那一页就是这么漏过去的',
       );
       expect(find.text('还没有画过图'), findsOneWidget);
-      expect(find.text('描述新图片…'), findsOneWidget);
       // 型号与规格两个 chip 都在
       expect(find.byKey(const ValueKey('chip:model')), findsOneWidget);
       expect(find.byKey(const ValueKey('chip:spec')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('images:new')),
+        findsOneWidget,
+        reason: '「新对话」既是开新会话，也是回到图库那一屏的唯一入口',
+      );
     });
 
-    testWidgets('画一张之后它出现在墙上', (tester) async {
-      final c = _boot();
+    testWidgets('画廊里有图时画得出来，点开是查看器', (tester) async {
+      final api = _SeededApi([_img('一只戴眼镜的柴犬')]);
+      final c = ProviderContainer(
+        overrides: [
+          appConfigProvider.overrideWith(_MockConfig.new),
+          cortexApiProvider.overrideWithValue(api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+          settingsWriterProvider.overrideWithValue((_) async {}),
+        ],
+      );
       addTearDown(c.dispose);
       await _pump(tester, c);
 
-      await tester.enterText(find.byType(TextField).first, '一只戴眼镜的柴犬');
-      await tester.tap(find.byTooltip('生成'));
-      await _settle(tester, 20);
-
-      expect(tester.takeException(), isNull);
-      expect(
-        find.byType(Image),
-        findsWidgets,
-        reason:
-            '画完要重取画廊并画出来 —— 只回一句「成功」而墙上什么都没多，'
-            '用户没法确认它真画了',
-      );
       expect(find.text('还没有画过图'), findsNothing, reason: '墙上有东西了，空态必须让位');
-    });
-
-    testWidgets('画成了才清空输入框', (tester) async {
-      final c = _boot();
-      addTearDown(c.dispose);
-      await _pump(tester, c);
-
-      await tester.enterText(find.byType(TextField).first, '一只柴犬');
-      await tester.tap(find.byTooltip('生成'));
-      await _settle(tester, 20);
-
-      final field = tester.widget<TextField>(find.byType(TextField).first);
-      expect(
-        field.controller?.text,
-        isEmpty,
-        reason: '画成了就清空；失败时留着，那时用户最不该被迫重打一遍',
-      );
-    });
-
-    testWidgets('点开大图，「以此为提示词重画」把那句话填回输入框', (tester) async {
-      final c = _boot();
-      addTearDown(c.dispose);
-      await _pump(tester, c);
-
-      await tester.enterText(find.byType(TextField).first, '水彩风格的柴犬');
-      await tester.tap(find.byTooltip('生成'));
-      await _settle(tester, 20);
+      expect(find.byType(Image), findsWidgets);
 
       await tester.tap(find.byType(InkWell).last);
       await _settle(tester);
@@ -156,17 +182,61 @@ void main() {
             '这个按钮不叫「编辑」—— 我们没有 img2img，'
             '叫编辑用户会以为是在这张图上改',
       );
+    });
 
+    testWidgets('「以此为提示词重画」把那句话交给输入框那条草稿通道', (tester) async {
+      final api = _SeededApi([_img('水彩风格的柴犬')]);
+      final c = ProviderContainer(
+        overrides: [
+          appConfigProvider.overrideWith(_MockConfig.new),
+          cortexApiProvider.overrideWithValue(api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+          settingsWriterProvider.overrideWithValue((_) async {}),
+        ],
+      );
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+
+      await tester.tap(find.byType(InkWell).last);
+      await _settle(tester);
       await tester.tap(find.byKey(const ValueKey('viewer:reprompt')));
       await _settle(tester);
 
+      // ⚠️ 断言落在**输入框里那行字**上，不是那个草稿 provider ——
+      // `MessageComposer` 收到草稿之后当场 `consume()` 置空（免得切走再
+      // 切回来被同一段覆盖第二次）。盯 provider 的话，测的是一个必然为
+      // null 的中间态，而用户看的是输入框
       final field = tester.widget<TextField>(find.byType(TextField).first);
       expect(
         field.controller?.text,
         '水彩风格的柴犬',
         reason:
-            '这个动作的全部意义就是把提示词拿回来改一改 —— '
-            '填不回去就是点了没反应',
+            '输入框现在是共用的 `MessageComposer`，它自己持 controller —— '
+            '这个动作只能走那条草稿通道，走不通就是点了没反应',
+      );
+    });
+
+    testWidgets('规格写进 provider，不留本地副本', (tester) async {
+      final c = _boot();
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+
+      await tester.tap(find.byKey(const ValueKey('chip:spec')));
+      await _settle(tester);
+      await tester.tap(find.byKey(const ValueKey('size:1024*1536')));
+      await tester.pump();
+      await tester.tap(find.text('用这个规格'));
+      await _settle(tester);
+
+      expect(
+        c.read(imagePrefsProvider).size,
+        '1024*1536',
+        reason:
+            '`ChatController.send` 在发出去那一刻读这个 provider。'
+            '页面再存一份本地副本的话，就是同一件事两个来源 —— '
+            '不一致的表现是「chip 上写着 2 张，画出来 1 张」，两边都不报错',
       );
     });
   });

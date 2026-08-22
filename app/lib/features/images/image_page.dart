@@ -20,12 +20,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
 import '../../models/generated_image.dart';
+import '../../models/image_prefs.dart';
 import '../../models/model_role.dart';
 import '../../models/model_source.dart';
 import '../../state/image_controller.dart';
 import '../../state/model_controller.dart';
+import '../../state/app_providers.dart';
+import '../../state/chat_controller.dart';
+import '../../state/composer_draft.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/panel_header.dart';
+import '../chat/widgets/confirm_panel.dart';
+import '../chat/widgets/conversation_view.dart';
+import '../chat/widgets/message_composer.dart';
 import '../settings/pages/model_picker.dart';
 import '../settings/pages/model_roles_page.dart' show modelRolesProvider;
 import 'widgets/image_spec.dart';
@@ -51,7 +58,6 @@ class ImagePage extends ConsumerStatefulWidget {
 }
 
 class _ImagePageState extends ConsumerState<ImagePage> {
-  final _prompt = TextEditingController();
   final _scroll = ScrollController();
 
   /// 这一次用哪个型号。`ModelPick()` = 交给服务端挑。
@@ -59,9 +65,6 @@ class _ImagePageState extends ConsumerState<ImagePage> {
   /// **只管这一次**，不写回「绘画模型」那个指派 —— 与撰写框下面那个
   /// chip 同一条规矩：想改默认的人去设置里改，在这儿改的是当下这一张。
   ModelPick? _pick;
-
-  String? _size;
-  int _count = 1;
 
   @override
   void initState() {
@@ -73,7 +76,6 @@ class _ImagePageState extends ConsumerState<ImagePage> {
   void dispose() {
     _scroll.removeListener(_onScroll);
     _scroll.dispose();
-    _prompt.dispose();
     super.dispose();
   }
 
@@ -153,13 +155,29 @@ class _ImagePageState extends ConsumerState<ImagePage> {
     final state = ref.watch(imageControllerProvider);
     final pick = _effective;
     final spec = _spec(pick);
+    final sessionId = ref.watch(
+      chatControllerProvider.select((s) => s.activeSessionId),
+    );
+    final streaming = ref.watch(
+      chatControllerProvider.select((s) => s.isStreamingActive),
+    );
+    // 「还没开口」的判据与 `ChatPane` 逐字相同 —— 两处差一个条件就是
+    // 「落地页与对话同时出现」，而那种错位只有真跑起来才看得见
+    final empty = ref.watch(
+      chatControllerProvider.select(
+        (s) =>
+            s.activeTranscript.isEmpty &&
+            !s.isStreamingActive &&
+            !(s.activeTranscriptState?.loading ?? false),
+      ),
+    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         PanelHeader(
           title: '图片',
-          subtitle: '描述一张图，它画出来',
+          subtitle: empty ? '描述一张图，它画出来' : null,
           leading: widget.onToggleSessions == null
               ? null
               : IconButton(
@@ -172,25 +190,53 @@ class _ImagePageState extends ConsumerState<ImagePage> {
                         : Icons.menu_rounded,
                   ),
                 ),
+          actions: [
+            // 回到落地页 = 开一条新的空会话。**不是一个单独的「看图库」
+            // 开关** —— 图库只在空会话上出现（照 ChatGPT），而「新对话」
+            // 本来就要有，一个按钮同时办了两件事
+            TextButton.icon(
+              key: const ValueKey('images:new'),
+              onPressed: streaming
+                  ? null
+                  : () => ref.read(mainViewProvider.notifier).newImageSession(),
+              icon: const Icon(Icons.add_rounded, size: 16),
+              label: const Text('新对话'),
+            ),
+          ],
         ),
-        Expanded(
-          child: ListView(
-            controller: _scroll,
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-            children: [
-              Center(
-                child: ConstrainedBox(
-                  // 输入框跟着窗口无限变宽的话，一行提示词会横跨整个屏幕 ——
-                  // 与对话那边同一个理由，正文有一个可读的宽度上限
-                  constraints: const BoxConstraints(maxWidth: 760),
-                  child: _composer(context, state, pick, spec),
+        // ⚠️ **这一页有两个形态，与 `ChatPane` 是同一个判据。**
+        //
+        // 空会话 = 落地页：输入框 + 「我的图片」。开口之后图库让位给对话
+        // —— 照 ChatGPT。把图库常驻在对话下面试过想过，代价是两个都要滚，
+        // 而 `ConversationView` 自带滚动与自动跟随，套进外层滚动里就是
+        // 「竖直方向无界约束」那个当场空白的老坑。
+        if (empty)
+          Expanded(
+            child: ListView(
+              controller: _scroll,
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+              children: [
+                Center(
+                  child: ConstrainedBox(
+                    // 输入框跟着窗口无限变宽的话，一行提示词会横跨整个屏幕
+                    constraints: const BoxConstraints(maxWidth: 760),
+                    child: _composer(context, state, pick, spec, sessionId),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 28),
-              _wall(context, state),
-            ],
+                const SizedBox(height: 28),
+                _wall(context, state),
+              ],
+            ),
+          )
+        else ...[
+          const Expanded(child: ConversationView()),
+          Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 760),
+              child: _composer(context, state, pick, spec, sessionId),
+            ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -200,35 +246,30 @@ class _ImagePageState extends ConsumerState<ImagePage> {
     ImageState state,
     ModelPick pick,
     ({bool nativeMultiImage, bool customEndpoint}) spec,
+    String? sessionId,
   ) {
     final theme = Theme.of(context);
-    final busy = state.generating;
+    final prefs = ref.watch(imagePrefsProvider);
+    final streaming = ref.watch(
+      chatControllerProvider.select((s) => s.isStreamingActive),
+    );
+    final busy = streaming;
 
     return Column(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        TextField(
-          controller: _prompt,
-          enabled: !busy,
-          minLines: 1,
-          maxLines: 5,
-          textInputAction: TextInputAction.newline,
-          decoration: InputDecoration(
-            hintText: '描述新图片…',
-            border: const OutlineInputBorder(),
-            suffixIcon: IconButton(
-              tooltip: '生成',
-              onPressed: busy ? null : _generate,
-              icon: busy
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.arrow_upward_rounded),
-            ),
-          ),
-          onSubmitted: busy ? null : (_) => _generate(),
+        // 与 `ChatPane` 共用这一摞。确认弹层挂在这儿而不是别处：一轮正在跑
+        // 时用户的眼睛就在输入框上，离发送键近到划不过去
+        const ConfirmPanel(),
+        MessageComposer(
+          enabled: sessionId != null,
+          sessionId: sessionId,
+          streaming: streaming,
+          onSend: (text, attachments) => ref
+              .read(chatControllerProvider.notifier)
+              .send(text, attachments: attachments),
+          onStop: ref.read(chatControllerProvider.notifier).stopGeneration,
         ),
         const SizedBox(height: 8),
         Row(
@@ -243,22 +284,11 @@ class _ImagePageState extends ConsumerState<ImagePage> {
             _ChipButton(
               key: const ValueKey('chip:spec'),
               icon: Icons.tune_rounded,
-              label: '$_count · ${_sizeLabel()}',
+              label: '${prefs.count} · ${_sizeLabel(prefs.size)}',
               onTap: busy ? null : () => _pickSpec(spec),
             ),
           ],
         ),
-        if (busy) ...[
-          const SizedBox(height: 10),
-          // 生图要几十秒。**必须说它在干活，还要说大概多久** ——
-          // 一个转圈图标在第二十秒时读起来就是「卡住了」
-          Text(
-            _count > 1 ? '正在画 $_count 张，通常要一两分钟…' : '正在画，通常要几十秒…',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.cortex.foregroundTertiary,
-            ),
-          ),
-        ],
         if (state.error != null) ...[
           const SizedBox(height: 10),
           Row(
@@ -294,8 +324,8 @@ class _ImagePageState extends ConsumerState<ImagePage> {
     );
   }
 
-  String _sizeLabel() =>
-      kImageSizes.where((s) => s.value == _size).firstOrNull?.label ?? '自动';
+  String _sizeLabel(String? size) =>
+      kImageSizes.where((s) => s.value == size).firstOrNull?.label ?? '自动';
 
   Widget _wall(BuildContext context, ImageState state) {
     final theme = Theme.of(context);
@@ -390,10 +420,11 @@ class _ImagePageState extends ConsumerState<ImagePage> {
   Future<void> _pickSpec(
     ({bool nativeMultiImage, bool customEndpoint}) spec,
   ) async {
+    final prefs = ref.read(imagePrefsProvider);
     final got = await showImageSpecSheet(
       context,
-      size: _size,
-      count: _count,
+      size: prefs.size,
+      count: prefs.count,
       // 判据与服务端 `Protocol::native_n` 同源：只有走 DashScope 原生
       //（alibaba 且没填自定义端点）那一条一次能出多张。「自动」档怎么算，
       // 见 [_spec]
@@ -401,39 +432,28 @@ class _ImagePageState extends ConsumerState<ImagePage> {
       customEndpoint: spec.customEndpoint,
     );
     if (got == null || !mounted) return;
-    setState(() {
-      _size = got.size;
-      _count = got.count;
-    });
-  }
-
-  Future<void> _generate() async {
-    final text = _prompt.text.trim();
-    if (text.isEmpty) return;
-    final pick = _effective;
-    final ok = await ref
-        .read(imageControllerProvider.notifier)
-        .generate(
-          prompt: text,
-          model: pick.model,
-          source: pick.source,
-          size: _size,
-          n: _count,
-        );
-    // **画成了才清空。** 失败时留着，用户不用重打一遍 ——
-    // 而失败恰恰是最需要再试一次的时候
-    if (ok && mounted) _prompt.clear();
+    // ⚠️ **写进 provider，不留本地副本。**
+    //
+    // `ChatController.send` 在发出去那一刻读 `imagePrefsProvider`。这边再
+    // 存一份 `_size`/`_count` 的话，就是同一件事两个来源 —— 而不一致的
+    // 表现是「chip 上写着 2 张，画出来 1 张」，且两边都不报错。
+    ref
+        .read(imagePrefsProvider.notifier)
+        .set(ImagePrefs(size: got.size, count: got.count));
   }
 
   Future<void> _open(GeneratedImage img) async {
     final again = await showImageViewer(context, img);
     if (again == null || !mounted) return;
-    // 「以此为提示词重画」：把那句话填回输入框并聚焦，**不直接开画** ——
-    // 这个动作的意义就是让他改一改，替他按下去等于跳过了唯一有价值的一步
-    setState(() {
-      _prompt.text = again;
-      _prompt.selection = TextSelection.collapsed(offset: again.length);
-    });
+    // 「以此为提示词重画」：把那句话放进输入框，**不直接开画** ——
+    // 这个动作的意义就是让他改一改，替他按下去等于跳过了唯一有价值的一步。
+    //
+    // 走 `composerDraftProvider` 而不是自己持一个 controller：输入框现在是
+    // 共用的 `MessageComposer`，那条草稿通道本来就是给「改一改再发一次」
+    // 造的（消息气泡里的重发用的也是它）
+    ref.read(composerDraftProvider.notifier).offer(again);
+    // 图库在落地页上，而重画要在对话里发 —— 但此刻会话可能已经有内容了。
+    // 什么都不用做：草稿会落进哪个形态的输入框都一样，它只有一个
   }
 }
 

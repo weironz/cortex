@@ -50,6 +50,10 @@ import '../models/mcp.dart';
 import '../models/sandbox_health.dart';
 import '../models/workspace.dart';
 import 'auth_controller.dart';
+// 循环 import（chat_controller 也 import 这里）—— Dart 在库这一级允许，
+// 而把 MainView 那套挪去 chat_controller 会让「我在哪个地方」跟对话状态
+// 绑在一起，那正是它当初没塞进 LayoutState 的同一个理由
+import 'chat_controller.dart';
 
 /// Mutable runtime config. Seeded from `--dart-define`, editable in settings.
 /// 读取跨重启的非密设置。做成 provider 是为了能在测试里换掉 ——
@@ -398,9 +402,36 @@ enum MainView {
 /// 每次开窗都弹回聊天，等于这个入口只在当前这个窗口有效。
 class MainViewNotifier extends Notifier<MainView> {
   static const String _key = 'main_view';
+  static const String _kImageSession = 'image_session';
+
+  /// 离开聊天页时它正开着哪条会话 —— 回来时接着看那条。
+  ///
+  /// 只活在内存里：跨重启由 `activeSessionId` 自己那套恢复负责，
+  /// 这里再存一份就是同一件事两个来源。
+  String? _chatSession;
+
+  /// 图片页那条会话。跨重启记住 —— 不然每次开窗都多一条空会话。
+  String? _imageSession;
 
   @override
   MainView build() {
+    // ⚠️ **「在图片页时，活动会话必须是图片那条」是一个不变式，
+    // 不是一次性的动作。**
+    //
+    // `ChatController` 在 `cortexApiProvider` 变化时会 `_reload()` **重置
+    // 整个状态**（认证续上、地址从磁盘恢复，启动时都会触发）。冷启动直接
+    // 恢复到图片页时，`_restore` 建好的那条会话正好被随后那次 reload 冲掉，
+    // 于是图片页上显示的是聊天那条对话 —— 实测撞到过。
+    //
+    // 所以每次会话列表加载完都重新落一次这个不变式，而不是只在进入时做。
+    ref.listen(chatControllerProvider.select((s) => s.sessionsLoading), (
+      was,
+      now,
+    ) {
+      if (was == true && now == false && state == MainView.images) {
+        _enterImages();
+      }
+    });
     Future.microtask(_restore);
     return MainView.chat;
   }
@@ -408,19 +439,107 @@ class MainViewNotifier extends Notifier<MainView> {
   Future<void> _restore() async {
     final saved = await ref.read(settingsReaderProvider)();
     if (!ref.mounted) return;
+    _imageSession = saved[_kImageSession];
     final v = MainView.fromWire(saved[_key]);
-    if (v != state) state = v;
+    if (v != state) {
+      state = v;
+      // 恢复到图片页时也要把那条会话选回来 —— 否则显示的是上次聊天
+      // 那一条，而它跟画图毫无关系。**上面那个监听是它的保险**：
+      // 这一下可能被随后的 reload 冲掉
+      if (v == MainView.images) _enterImages();
+    }
   }
 
+  /// 去某个地方。
+  ///
+  /// # 为什么切「地方」要跟着切会话
+  ///
+  /// `ConversationView` 画的永远是**当前活动会话**（十几处
+  /// `activeSessionId` 选择器）。把它参数化要动整个对话内核，而收益只是
+  /// 让两个地方各记一条会话 —— 那件事换个方式也能做到：**进哪个地方，
+  /// 就把那个地方的会话设成活动的**。
+  ///
+  /// 这不是将就。「每个地方有自己当下那条对话」本来就是它该有的语义，
+  /// 而 `selectSession` 明写着切换**不会打断在飞的那一轮**
+  ///（"keep it running and just look away"）—— 所以来回走不丢东西。
   void go(MainView view) {
     if (state == view) return;
+    final chat = ref.read(chatControllerProvider);
+    if (view == MainView.images) {
+      _chatSession = chat.activeSessionId;
+      _enterImages();
+    } else {
+      final back = _chatSession;
+      // 那条会话可能已经被删了 —— 删了就停在图片那条上，
+      // 而不是把用户扔进一个空白页
+      if (back != null && chat.sessions.any((s) => s.id == back)) {
+        ref.read(chatControllerProvider.notifier).selectSession(back);
+      }
+    }
     state = view;
     unawaited(ref.read(settingsPatcherProvider)(_key, view.name));
+  }
+
+  /// 让图片页那条会话成为活动会话，没有就建一条。
+  ///
+  /// **懒建而不是每次都建**：每点一次「图片」多一条空会话的话，
+  /// 侧栏很快就全是「新会话」。记住 id 之后重复进出复用同一条。
+  void _enterImages() {
+    final ctrl = ref.read(chatControllerProvider.notifier);
+    final chat = ref.read(chatControllerProvider);
+    final known = _imageSession;
+    if (known != null) {
+      // ⚠️ **会话列表还在路上时，「不在列表里」不等于「已经删了」。**
+      //
+      // 冷启动恢复到图片页时 `sessions` 还是空的，拿它当判据的话每次
+      // 开窗都会多建一条空会话，而记住的那条永远用不上。
+      final gone =
+          !chat.sessionsLoading && !chat.sessions.any((s) => s.id == known);
+      if (!gone) {
+        // 已经是它了就什么都不做 —— `selectSession` 自己也早退，
+        // 但这里显式写出来是为了下面「否则新建」那一支读起来没有歧义
+        if (chat.activeSessionId != known) ctrl.selectSession(known);
+        return;
+      }
+    }
+    _imageSession = ctrl.createSession();
+    unawaited(
+      ref.read(settingsPatcherProvider)(_kImageSession, _imageSession!),
+    );
+  }
+
+  /// 图片页上点「新对话」。
+  void newImageSession() {
+    _imageSession = ref.read(chatControllerProvider.notifier).createSession();
+    unawaited(
+      ref.read(settingsPatcherProvider)(_kImageSession, _imageSession!),
+    );
   }
 }
 
 final mainViewProvider = NotifierProvider<MainViewNotifier, MainView>(
   MainViewNotifier.new,
+);
+
+/// 这一轮如果画图，按什么规格。
+///
+/// # 为什么是 provider 而不是 `send()` 的一个参数
+///
+/// 与权限档、模型选择完全同一路数：`ChatController.send` 在**发出去那一刻**
+/// 读它们（`chat_controller.dart` 里那三行）。做成参数的话，每一个调用
+/// `send` 的地方都得记着传，而漏传的表现是「我设了 2 张，它只画了 1 张」。
+///
+/// 只有图片页会写它。聊天页那边保持默认（完全听模型的）——
+/// 在一条聊天里顺口让它画张图，本来就不该被图片页上某个设置左右。
+class ImagePrefsNotifier extends Notifier<ImagePrefs> {
+  @override
+  ImagePrefs build() => const ImagePrefs();
+
+  void set(ImagePrefs prefs) => state = prefs;
+}
+
+final imagePrefsProvider = NotifierProvider<ImagePrefsNotifier, ImagePrefs>(
+  ImagePrefsNotifier.new,
 );
 
 class PermissionModeNotifier extends Notifier<PermissionMode> {

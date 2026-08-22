@@ -1,3 +1,4 @@
+import 'chat_event.dart';
 import 'json.dart';
 
 /// A tool invocation surfaced by the agent loop during a turn.
@@ -115,20 +116,31 @@ class ToolCall {
 
   /// Folds one `tool` event into [calls], returning a new list.
   ///
-  /// Pairing rule: an event whose name matches the **last** entry and which is
-  /// still awaiting a result closes that entry; anything else opens a new one.
-  /// This is exactly the agent loop's ordering — it dispatches a call, awaits
-  /// it, emits the result, then moves to the next call — so no correlation id
-  /// is needed. Two consecutive calls to the same tool still produce two rows,
-  /// because the first one is no longer pending by then.
+  /// 配对靠事件自己带的 [ToolPhase]：`call` 一律**开新行**，`result` 合进
+  /// 最后一条同名且还没结果的行。
+  ///
+  /// # ⚠️ 从前是猜的，而那个猜法有个洞
+  ///
+  /// 旧规则是「同名且上一行还 pending 就当结果」。agent 循环一次派一个、
+  /// 等它回来再派下一个，所以那条启发式**在今天成立** —— 但它成立得很脆：
+  /// 一旦有两次同名调用在同一时刻派出去（并行工具调用），第二条 `call`
+  /// 会被当成第一条的**结果**吃掉，于是两次调用只画出一行，而第二张图
+  /// 从头到尾不出现。不报错、不崩，只是少了一样东西。
+  ///
+  /// 服务端 2026-08-23 起明说这一位（`ChatEvent::Tool.phase`），
+  /// 就不必再猜。老服务端不发时缺省是 `result`，退化成旧行为。
   static List<ToolCall> merge(
     List<ToolCall> calls,
     String name,
     String? summary, {
     String? path,
     String? diff,
+    ToolPhase phase = ToolPhase.result,
   }) {
-    if (calls.isNotEmpty && calls.last.name == name && calls.last.pending) {
+    if (phase == ToolPhase.result &&
+        calls.isNotEmpty &&
+        calls.last.name == name &&
+        calls.last.pending) {
       final result = _stripPrefix(summary, '$name ');
       return [
         ...calls.take(calls.length - 1),

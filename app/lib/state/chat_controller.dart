@@ -847,6 +847,9 @@ class ChatController extends Notifier<ChatState> {
       // 模型同理 —— 在设置里换完，**下一句**就该按新的走
       model: ref.read(selectedModelProvider).model,
       source: ref.read(selectedModelProvider).source,
+      // 生图规格同理。**兜底不覆盖** —— 模型在工具参数里自己填了尺寸就
+      // 听模型的，见服务端 `resolve_image_spec`
+      imagePrefs: ref.read(imagePrefsProvider),
     );
     _subscription = stream.listen(
       _onEvent,
@@ -919,7 +922,13 @@ class ChatController extends Notifier<ChatState> {
         _pending.write(text);
         _scheduleFlush();
 
-      case ChatToolEvent(:final name, :final summary, :final path, :final diff):
+      case ChatToolEvent(
+        :final name,
+        :final summary,
+        :final path,
+        :final diff,
+        :final phase,
+      ):
         _leaveQueue();
         _flushPending();
         // Call and result arrive as two events; [ToolCall.merge] folds them
@@ -934,6 +943,7 @@ class ChatController extends Notifier<ChatState> {
               summary,
               path: path,
               diff: diff,
+              phase: phase,
             ),
           ),
         );
