@@ -8,6 +8,7 @@ import '../../../state/app_providers.dart';
 import '../../../state/attachment_controller.dart';
 import '../../../core/theme.dart';
 import '../../images/widgets/image_actions.dart';
+import '../../images/widgets/image_thumb.dart' show decodeWidthFor;
 import '../../images/widgets/image_viewer.dart';
 
 /// Thumbnails for attachments already committed to a message.
@@ -23,6 +24,26 @@ class AttachmentStrip extends StatelessWidget {
   /// User bubbles are right-aligned; assistant blocks are not.
   final bool alignEnd;
 
+  /// 这一条里的图画多大。
+  ///
+  /// # ⚠️ 「模型画出来的」与「我传上去的」不是一个东西
+  ///
+  /// 从前两者都是 132×96、`BoxFit.cover`（**裁掉**）。在那个尺寸上，一张
+  /// 生成图画得对不对根本看不出来 —— 而那正是用户唯一想知道的事。
+  ///
+  /// 所以按两件事分档：
+  ///
+  /// * **assistant 那一侧是内容**：一张就画大（384），几张一起出是一份
+  ///   contact sheet，缩到 224 好横着比 —— 四张 384 会砌成一堵墙。
+  /// * **user 那一侧是材料**：他自己刚传上去的，知道是什么，
+  ///   给到看得清就够（160）。
+  ///
+  /// 一律 `BoxFit.contain`：生成图裁一刀就不是那张图了。
+  double get _extent {
+    if (alignEnd) return 160;
+    return attachments.length == 1 ? 384 : 224;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (attachments.isEmpty) return const SizedBox.shrink();
@@ -33,7 +54,8 @@ class AttachmentStrip extends StatelessWidget {
         runSpacing: 6,
         alignment: alignEnd ? WrapAlignment.end : WrapAlignment.start,
         children: [
-          for (final a in attachments) _CommittedAttachment(attachment: a),
+          for (final a in attachments)
+            _CommittedAttachment(attachment: a, extent: _extent),
         ],
       ),
     );
@@ -41,14 +63,21 @@ class AttachmentStrip extends StatelessWidget {
 }
 
 class _CommittedAttachment extends StatelessWidget {
-  const _CommittedAttachment({required this.attachment});
+  const _CommittedAttachment({required this.attachment, required this.extent});
 
   final Attachment attachment;
+
+  /// 图片那一档的边长。文件卡片不受它影响（那是一行字，不是一张图）。
+  final double extent;
 
   @override
   Widget build(BuildContext context) {
     return attachment.isImage
-        ? _ImageThumb(hash: attachment.hash, label: attachment.displayName)
+        ? _ImageThumb(
+            hash: attachment.hash,
+            label: attachment.displayName,
+            extent: extent,
+          )
         : _FileCard(
             title: attachment.displayName,
             subtitle: [
@@ -70,10 +99,17 @@ class _CommittedAttachment extends StatelessWidget {
 /// makes that trivially safe: the same hash can never mean different bytes, so
 /// there is no invalidation problem to get wrong.
 class _ImageThumb extends ConsumerStatefulWidget {
-  const _ImageThumb({required this.hash, required this.label});
+  const _ImageThumb({
+    required this.hash,
+    required this.label,
+    required this.extent,
+  });
 
   final String hash;
   final String label;
+
+  /// 这张图占多大（正方形）。见 [AttachmentStrip._extent]。
+  final double extent;
 
   @override
   ConsumerState<_ImageThumb> createState() => _ImageThumbState();
@@ -135,8 +171,8 @@ class _ImageThumbState extends ConsumerState<_ImageThumb> {
           side: BorderSide(color: scheme.outlineVariant),
         ),
         child: InkWell(
-          // 点一下放大。**对话里那张也要能放大** —— 缩略图 132×96，
-          // 一张图画得对不对在这个尺寸上根本看不出来
+          // 点一下放大看原图。缩略图再大也只是「够判断画对没有」，
+          // 而挑细节要的是原尺寸
           onTap: () => showImageViewer(
             context,
             ViewerImage(
@@ -161,8 +197,10 @@ class _ImageThumbState extends ConsumerState<_ImageThumb> {
             ),
           ),
           child: SizedBox(
-            width: 132,
-            height: 96,
+            // 正方形，**不按图的比例撑开**：比例得等字节到齐才知道，
+            // 而按到齐之后再撑，整段对话会在图加载完的那一刻整体跳一下
+            width: widget.extent,
+            height: widget.extent,
             child: _bytes == null
                 ? const Center(
                     child: SizedBox(
@@ -173,11 +211,12 @@ class _ImageThumbState extends ConsumerState<_ImageThumb> {
                   )
                 : Image.memory(
                     _bytes!,
-                    fit: BoxFit.cover,
-                    // Decoding at display size instead of full resolution: a
-                    // 12 MP photo would otherwise sit in the raster cache at
-                    // ~48 MB.
-                    cacheWidth: 264,
+                    // **不裁。** 生成图裁一刀就不是那张图了 —— 竖版被切成
+                    // 方的之后，用户看到的构图跟模型画的不是一回事
+                    fit: BoxFit.contain,
+                    // 按显示尺寸解码，不按原图：一张 12 MP 的照片全分辨率
+                    // 解出来在光栅缓存里是 48 MB
+                    cacheWidth: decodeWidthFor(context, widget.extent),
                     errorBuilder: (_, _, _) => Center(
                       child: Icon(
                         Icons.broken_image_outlined,

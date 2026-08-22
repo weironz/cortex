@@ -143,23 +143,42 @@ class ImageThumb extends ConsumerWidget {
           color: scheme.onSurfaceVariant,
         ),
       ),
-      data: (b) => Image.memory(
-        b,
-        fit: BoxFit.cover,
-        width: double.infinity,
-        height: double.infinity,
-        // 按显示尺寸解码，不按原图：一格 180 宽的位置放一张 1024×1024
-        // 的 png，全分辨率解出来在光栅缓存里是 4 MB —— 一屏二十格
-        // 就是 80 MB
-        cacheWidth: 400,
-        errorBuilder: (_, _, _) => Center(
-          child: Icon(
-            Icons.broken_image_outlined,
-            size: 18,
-            color: scheme.onSurfaceVariant,
+      data: (b) => LayoutBuilder(
+        builder: (context, c) => Image.memory(
+          b,
+          fit: BoxFit.cover,
+          width: double.infinity,
+          height: double.infinity,
+          // ⚠️ **按这一格真实的物理像素解码，不按原图，也不写死一个数。**
+          //
+          // 一张 1024×1024 的 png 全分辨率解出来在光栅缓存里是 4 MB，
+          // 一屏二十格就是 80 MB。
+          //
+          // 从前这里是写死的 400。格子从 180 放宽到最多 330 之后，在 2×
+          // 屏上就不够了 —— 表现是缩略图发糊，而没有任何报错。乘上
+          // `devicePixelRatio` 才是「这一格真正需要多少像素」。
+          cacheWidth: decodeWidthFor(context, c.maxWidth),
+          errorBuilder: (_, _, _) => Center(
+            child: Icon(
+              Icons.broken_image_outlined,
+              size: 18,
+              color: scheme.onSurfaceVariant,
+            ),
           ),
         ),
       ),
     );
   }
+}
+
+/// 这一格真正需要多少物理像素。
+///
+/// 夹在 [1, 1400]：无界约束下 `maxWidth` 是 `infinity`（取整之后是个垃圾
+/// 值，解码器当场抛），而上限挡住「有人把一格拉到整屏宽」时把原图整张
+/// 解出来。
+int decodeWidthFor(BuildContext context, double logicalWidth) {
+  final dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 1.0;
+  final px = logicalWidth * dpr;
+  if (!px.isFinite || px <= 0) return 512;
+  return px.round().clamp(1, 1400);
 }

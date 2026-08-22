@@ -244,10 +244,9 @@ class _ImagePageState extends ConsumerState<ImagePage> {
         // 这是一个**翻东西**的地方，不是一个写提示词的地方。
         if (_gallery)
           Expanded(
-            child: ListView(
+            child: CustomScrollView(
               controller: _scroll,
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-              children: [_wall(context, state)],
+              slivers: _wall(context, state),
             ),
           )
         // ⚠️ **另外两个形态与 `ChatPane` 是同一个判据。**
@@ -258,19 +257,22 @@ class _ImagePageState extends ConsumerState<ImagePage> {
         // 「竖直方向无界约束」那个当场空白的老坑。
         else if (empty)
           Expanded(
-            child: ListView(
+            child: CustomScrollView(
               controller: _scroll,
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-              children: [
-                Center(
-                  child: ConstrainedBox(
-                    // 输入框跟着窗口无限变宽的话，一行提示词会横跨整个屏幕
-                    constraints: const BoxConstraints(maxWidth: 760),
-                    child: _composer(context, state, pick, spec, sessionId),
+              slivers: [
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+                    child: Center(
+                      child: ConstrainedBox(
+                        // 输入框跟着窗口无限变宽的话，一行提示词会横跨整个屏幕
+                        constraints: const BoxConstraints(maxWidth: 760),
+                        child: _composer(context, state, pick, spec, sessionId),
+                      ),
+                    ),
                   ),
                 ),
-                const SizedBox(height: 28),
-                _wall(context, state),
+                ..._wall(context, state),
               ],
             ),
           )
@@ -373,105 +375,133 @@ class _ImagePageState extends ConsumerState<ImagePage> {
   String _sizeLabel(String? size) =>
       kImageSizes.where((s) => s.value == size).firstOrNull?.label ?? '自动';
 
-  Widget _wall(BuildContext context, ImageState state) {
+  /// 图库那一面 —— **一串 sliver，不是一个 widget**。
+  ///
+  /// # ⚠️ 为什么非改不可
+  ///
+  /// 从前它是 `GridView(shrinkWrap: true, physics: NeverScrollable)` 套在
+  /// 外层 `ListView` 里。`shrinkWrap` 会**把整页格子全部布局出来** ——
+  /// 于是一页 24 张图**同时开下**，包括屏幕外那十几张。
+  ///
+  /// 生成出来的 PNG 实测 1.6–2.7 MB 一张，24 张就是 **50 MB 左右**。
+  /// 在本机回环上完全看不出来，走公网就是几十秒的白屏加一堆流量。
+  ///
+  /// 换成 `SliverGrid` 之后按需建：只有滚到的那几格才取字节。
+  List<Widget> _wall(BuildContext context, ImageState state) {
+    Widget box(Widget child) => SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        child: child,
+      ),
+    );
+
     if (state.unsupported) {
-      return const EmptyState(
-        icon: Icons.image_not_supported_outlined,
-        title: '这个后端没有画廊',
-        // 说清是**后端**旧了，不是出错了 —— 重试永远不会成功
-        description: '它是一个老版本的部署，还没有 /images 这条路。升级之后这里会自己出现。',
-      );
+      return [
+        box(
+          const EmptyState(
+            icon: Icons.image_not_supported_outlined,
+            title: '这个后端没有画廊',
+            // 说清是**后端**旧了，不是出错了 —— 重试永远不会成功
+            description: '它是一个老版本的部署，还没有 /images 这条路。升级之后这里会自己出现。',
+          ),
+        ),
+      ];
     }
     if (state.loading) {
-      return const Padding(
-        padding: EdgeInsets.only(top: 40),
-        child: Center(child: CircularProgressIndicator()),
-      );
+      return [
+        box(
+          const Padding(
+            padding: EdgeInsets.only(top: 40),
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        ),
+      ];
     }
     // 空相册与空图库要说**不一样**的话：在一个空相册里看到「还没有画过图」，
     // 用户会以为自己的图全没了
     if (state.items.isEmpty) {
       if (state.album != null) {
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            AlbumBar(said: _say),
+        return [
+          box(AlbumBar(said: _say)),
+          box(
             const EmptyState(
               icon: Icons.photo_album_outlined,
               title: '这个相册还是空的',
               description: '回「全部」里勾几张，点「加入相册」。',
             ),
-          ],
-        );
+          ),
+        ];
       }
-      return const EmptyState(
-        icon: Icons.image_outlined,
-        title: '还没有画过图',
-        description: '上面描述一张图，画出来的都会留在这儿 —— 在对话里让它画的也算。',
-      );
+      return [
+        box(
+          const EmptyState(
+            icon: Icons.image_outlined,
+            title: '还没有画过图',
+            description: '上面描述一张图，画出来的都会留在这儿 —— 在对话里让它画的也算。',
+          ),
+        ),
+      ];
     }
 
     final selecting = state.selected.isNotEmpty;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        AlbumBar(said: _say),
-        const SizedBox(height: 10),
-        LayoutBuilder(
-          builder: (context, c) {
-            // 列数按可用宽度算（每格最窄 160），不写死 —— 与卡片墙同一路数
-            final columns = (c.maxWidth / 180).floor().clamp(2, 8);
-            return GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: columns,
-                crossAxisSpacing: 10,
-                mainAxisSpacing: 10,
-              ),
-              itemCount: state.items.length,
-              itemBuilder: (context, i) {
-                final img = state.items[i];
-                return ImageThumb(
-                  key: ValueKey('thumb:${img.id}'),
-                  image: img,
-                  selected: state.selected.contains(img.id),
-                  selecting: selecting,
-                  onToggleSelect: () => ref
+    return [
+      SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+          child: AlbumBar(said: _say),
+        ),
+      ),
+      SliverPadding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+        sliver: SliverGrid.builder(
+          // 每格最窄 260 → 常见宽度上一行 3–4 格，格子落在 260–330。
+          // 从前是 160，一屏能塞八列 —— 而 180 宽的格子上，一张图画得
+          // 对不对根本看不出来，图库就退化成一面色块墙
+          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: 330,
+            crossAxisSpacing: 10,
+            mainAxisSpacing: 10,
+          ),
+          itemCount: state.items.length,
+          itemBuilder: (context, i) {
+            final img = state.items[i];
+            return ImageThumb(
+              key: ValueKey('thumb:${img.id}'),
+              image: img,
+              selected: state.selected.contains(img.id),
+              selecting: selecting,
+              onToggleSelect: () => ref
+                  .read(imageControllerProvider.notifier)
+                  .toggleSelect(img.id),
+              onSaid: _say,
+              onChanged: () =>
+                  ref.read(imageControllerProvider.notifier).refresh(),
+              onTap: () {
+                // Ctrl / ⌘ + 点 = 勾选。桌面上这是**通用**的多选手势，
+                // 而长按在鼠标下面根本不是一个动作
+                if (_multiSelectHeld) {
+                  ref
                       .read(imageControllerProvider.notifier)
-                      .toggleSelect(img.id),
-                  onSaid: _say,
-                  onChanged: () =>
-                      ref.read(imageControllerProvider.notifier).refresh(),
-                  onTap: () {
-                    // Ctrl / ⌘ + 点 = 勾选。桌面上这是**通用**的多选手势，
-                    // 而长按在鼠标下面根本不是一个动作
-                    if (_multiSelectHeld) {
-                      ref
-                          .read(imageControllerProvider.notifier)
-                          .toggleSelect(img.id);
-                      return;
-                    }
-                    _open(img);
-                  },
-                );
+                      .toggleSelect(img.id);
+                  return;
+                }
+                _open(img);
               },
             );
           },
         ),
-        if (state.loadingMore)
-          const Padding(
-            padding: EdgeInsets.only(top: 16),
-            child: Center(
-              child: SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
+      ),
+      if (state.loadingMore)
+        box(
+          const Center(
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
             ),
           ),
-      ],
-    );
+        ),
+    ];
   }
 
   Future<void> _pickModel() async {

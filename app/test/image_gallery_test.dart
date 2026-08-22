@@ -722,6 +722,94 @@ void main() {
       expect(find.text('回到对话'), findsNothing);
     });
   });
+
+  group('缩略图尺寸', () {
+    Widget strip(List<Attachment> a, {bool alignEnd = false}) => MaterialApp(
+      home: Scaffold(
+        body: Center(
+          child: AttachmentStrip(attachments: a, alignEnd: alignEnd),
+        ),
+      ),
+    );
+
+    Attachment img(String h) =>
+        Attachment(hash: h, kind: 'image', filename: '$h.png');
+
+    testWidgets('生成图不裁 —— 裁一刀就不是那张图了', (tester) async {
+      final c = _boot(_GalleryApi());
+      addTearDown(c.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(container: c, child: strip([img(_hashA)])),
+      );
+      await _settle(tester, 6);
+
+      final image = tester.widget<Image>(find.byType(Image));
+      expect(image.fit, BoxFit.contain, reason: '竖版被切成方的之后，用户看到的构图跟模型画的不是一回事');
+    });
+
+    testWidgets('一张画大、多张缩小、自己传的更小', (tester) async {
+      final c = _boot(_GalleryApi());
+      addTearDown(c.dispose);
+
+      Future<double> extentOf(List<Attachment> a, {bool mine = false}) async {
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: c,
+            child: strip(a, alignEnd: mine),
+          ),
+        );
+        await _settle(tester, 6);
+        return tester
+            .widgetList<SizedBox>(find.byType(SizedBox))
+            .map((b) => b.width ?? 0)
+            .reduce((a, b) => a > b ? a : b);
+      }
+
+      final one = await extentOf([img(_hashA)]);
+      final many = await extentOf([img(_hashA), img(_hashB)]);
+      final mine = await extentOf([img(_hashA)], mine: true);
+
+      expect(
+        one,
+        greaterThanOrEqualTo(320),
+        reason:
+            '⚠️ 从前是 132×96 —— 那个尺寸上一张生成图画得对不对根本看不出来，'
+            '而那正是用户唯一想知道的事',
+      );
+      expect(
+        many,
+        lessThan(one),
+        reason: '四张 384 会砌成一堵墙；几张一起出是一份 contact sheet，缩小好横着比',
+      );
+      expect(mine, lessThan(one), reason: '自己刚传上去的是材料不是内容，他知道那是什么');
+    });
+  });
+
+  group('图库不许一次把整页图都下下来', () {
+    testWidgets('屏幕外的格子不建，也就不取字节', (tester) async {
+      // 60 张：远超一屏。从前 `shrinkWrap: true` 会把它们全部布局出来，
+      // 于是 60 张原图（实测 1.6–2.7 MB 一张）同时开下
+      final many = [
+        for (var i = 0; i < 60; i++)
+          _img('IMG-$i', '${i.toString().padLeft(4, '0')}${'a' * 60}'),
+      ];
+      final api = _GalleryApi(all: many);
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _settle(tester);
+
+      final built = find.byType(ImageThumb).evaluate().length;
+      expect(built, greaterThan(0), reason: '总得画出来几格');
+      expect(
+        built,
+        lessThan(many.length),
+        reason:
+            '⚠️ 一屏装不下 60 格。全建出来 = 60 张原图同时开下（约 120 MB），'
+            '本机回环上看不出来，走公网就是几十秒白屏',
+      );
+    });
+  });
 }
 
 /// 一轮按脚本跑完：一句话 + 一次 `generate_image` + 终帧。
