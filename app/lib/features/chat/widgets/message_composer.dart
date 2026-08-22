@@ -11,6 +11,7 @@ import '../../../state/composer_draft.dart';
 import '../../../state/file_mention_controller.dart';
 import '../../workspace/workspace_panel.dart';
 import 'attachment_views.dart';
+import 'assistant_chip.dart';
 import 'model_chip.dart';
 import 'message_bubble.dart';
 import 'permission_mode_chip.dart';
@@ -630,6 +631,10 @@ class _BeforeSendChips extends StatelessWidget {
       // （只影响这一轮答得好不好、花多少钱），而前两个改错了是
       // 文件写错地方、命令没人把关
       ModelChip(),
+      // 智能体单独排在最后，且大多数时候**根本不出现**（没建过智能体、
+      // 或这条对话用的是默认人设）—— 它不是逐轮的决定，与左边三个不同类
+      SizedBox(width: 6),
+      AssistantChip(),
     ],
   );
 }

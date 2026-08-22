@@ -5,6 +5,7 @@ import '../../core/theme.dart';
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../chat/chat_pane.dart';
+import '../assistants/assistants_page.dart';
 import '../images/image_page.dart';
 import '../projects/projects_page.dart';
 import '../sessions/session_list.dart';
@@ -164,6 +165,12 @@ class _AppShellState extends ConsumerState<AppShell> {
                 // 同一个组件里只会多出一串对它无意义的入参
                 Expanded(
                   child: switch (ref.watch(mainViewProvider)) {
+                    MainView.assistants => AssistantsPage(
+                      onToggleSessions: isMedium
+                          ? layoutNotifier.toggleLeft
+                          : () => _scaffoldKey.currentState?.openDrawer(),
+                      sessionsVisible: showSessionsInline,
+                    ),
                     MainView.projects => ProjectsPage(
                       onToggleSessions: isMedium
                           ? layoutNotifier.toggleLeft

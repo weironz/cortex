@@ -79,7 +79,24 @@ use crate::workspaces::Workspaces;
 ///
 /// 提示词是模型对自己能力的唯一描述：它写什么，模型就会答应什么。
 /// 所以它只能写**当下真的成立**的。
-const SYSTEM_PROMPT: &str = "你是 Cortex，一个通用 AI 助理。你可以调用工具读写用户本地工作区里的文件、执行命令。回答用中文，简洁准确。";
+///
+/// # 为什么拆成两半
+///
+/// 智能体（用户自己写的人设）要**替换**前一半，而不是追加：
+/// 「你是 Cortex，一个通用 AI 助理」与「你是一位精通全球美食的资深大厨」
+/// 并存的话，模型会在两个身份之间摇摆 —— 有时自称 Cortex，有时自称大厨。
+///
+/// 后一半是**能力与口径**，与人设无关：不论谁在说话，工具就是那几个、
+/// 中文就是中文。所以它永远在，智能体换不掉。
+const PERSONA: &str = "你是 Cortex，一个通用 AI 助理。";
+
+/// 见 [`PERSONA`]。这一半智能体换不掉。
+const CAPABILITIES: &str =
+    "你可以调用工具读写用户本地工作区里的文件、执行命令。回答用中文，简洁准确。";
+
+// 没有「默认那份」这个常量：两半各自传进 `Engine`，由 `system_prompt_for`
+// 组装。拼一个合并常量出来的话，要么引一个 crate 只为一次拼接，要么把
+// 两句话再抄一遍 —— 而抄一遍正是「改了一处忘了另一处」的来源。
 
 const DEFAULT_MAX_ROUNDS: usize = 8;
 
@@ -355,7 +372,8 @@ async fn main() -> anyhow::Result<()> {
         outbox: outbox.clone(),
         max_rounds: DEFAULT_MAX_ROUNDS,
         context_window,
-        system_prompt: SYSTEM_PROMPT,
+        persona: PERSONA,
+        capabilities: CAPABILITIES,
         exec_env: args.exec_env,
     });
 

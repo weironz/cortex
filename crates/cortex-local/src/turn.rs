@@ -122,13 +122,41 @@ fn policy_for(mode: PermissionMode, env: cortex_agent::ExecEnvironment) -> Appro
 /// 从 base 那一端插进去会把它推到一个与 cortexd 不同的位置上。接在后面则
 /// 两段各自完整，且**都是整会话稳定的**，一起进可缓存前缀，
 /// 不逐轮打穿它（CLAUDE.md 约束 4）。
+///
+/// # ⚠️ 智能体的人设**替换**默认那句，不是追加
+///
+/// 「你是 Cortex，一个通用 AI 助理」与「你是一位精通全球美食的资深大厨」
+/// 并存的话，模型会在两个身份之间摇摆 —— 有时自称 Cortex，有时自称大厨，
+/// 而这两句都在提示词里，没有哪一句是错的。
+///
+/// 被替换的只有人设那一句。`capabilities`（工具、语言、口径）与工作区、
+/// 出网说明都是**事实**，不论谁在说话都成立，所以智能体换不掉它们 ——
+/// 一份人设能把「你可以读写文件」删掉的话，模型会开始说自己做不到。
 #[must_use]
 fn system_prompt_for(
-    base: &str,
+    persona: &str,
+    capabilities: &str,
     env: cortex_agent::ExecEnvironment,
     workspace: Option<&str>,
+    agent: Option<&cortex_proto::assistants::AssistantBrief>,
 ) -> String {
-    let mut prompt = cortex_agent::workspace::brief(base, workspace);
+    let mut base = String::new();
+    match agent.filter(|a| a.is_meaningful()) {
+        Some(a) => {
+            let name = a.name.trim();
+            if !name.is_empty() {
+                // 名字单独一句：一份没有名字的人设读起来像一段悬空的指令，
+                // 而用户在界面上给它起了名字，就是希望它这么自称
+                base.push_str(&format!("你叫「{name}」。"));
+            }
+            base.push_str(a.instructions.trim());
+            base.push_str("\n\n");
+        }
+        None => base.push_str(persona),
+    }
+    base.push_str(capabilities);
+
+    let mut prompt = cortex_agent::workspace::brief(&base, workspace);
     if let Some(note) = cortex_agent::prompt::egress_note(env) {
         prompt.push_str("\n\n");
         prompt.push_str(note);
@@ -270,7 +298,10 @@ pub struct Engine {
     /// 与 cortexd 各配各的：这一侧的模型由**用户本机**的配置决定，
     /// 可能和服务端跑的根本不是同一个。
     pub context_window: usize,
-    pub system_prompt: &'static str,
+    /// 默认人设那一句。**智能体会替换它** —— 见 [`system_prompt_for`]。
+    pub persona: &'static str,
+    /// 能力与口径。不论谁在说话都成立，智能体换不掉。
+    pub capabilities: &'static str,
     /// 这个进程手上的执行环境。由 `--exec-env` 决定，见
     /// [`cortex_agent::ExecEnvironment`]。
     ///
@@ -590,9 +621,11 @@ impl Engine {
         // 降级成了纯聊天，此刻模型手里确实没有文件工具 —— 提示词必须跟着降级，
         // 否则它会照着一个已经不存在的工作区去许诺
         let system_prompt = system_prompt_for(
-            self.system_prompt,
+            self.persona,
+            self.capabilities,
             self.exec_env,
             workspace_turn.as_ref().and(bound.as_deref()),
+            req.assistant.as_ref(),
         );
 
         // ── 4. agent 循环。工具在**这台机器**上执行 ──
@@ -1262,6 +1295,69 @@ mod tests {
 
     /// 出网说明只能出现在容器模式，且不能挤掉 `brief` 那两段。
     ///
+    /// ⚠️ **智能体的人设替换默认那句，而不是追加。**
+    ///
+    /// 追加的话，「你是 Cortex，一个通用 AI 助理」与「你是一位精通全球美食
+    /// 的资深大厨」会同时在提示词里 —— 模型于是在两个身份之间摇摆，
+    /// 有时自称 Cortex，有时自称大厨，而这两句都是提示词说的。
+    #[test]
+    fn a_persona_replaces_the_default_one() {
+        let chef = cortex_proto::assistants::AssistantBrief {
+            name: "味蕾领航员".into(),
+            instructions: "你是一位精通全球美食、拥有 20 年烹饪经验的资深大厨。".into(),
+        };
+        let prompt = system_prompt_for(
+            "你是 Cortex，一个通用 AI 助理。",
+            "你可以调用工具读写文件。回答用中文。",
+            cortex_agent::ExecEnvironment::LocalMachine,
+            Some("/w"),
+            Some(&chef),
+        );
+
+        assert!(prompt.contains("资深大厨"), "人设本身要在：{prompt}");
+        assert!(
+            prompt.contains("味蕾领航员"),
+            "名字要在 —— 用户起了名字就是希望它这么自称"
+        );
+        assert!(
+            !prompt.contains("你是 Cortex"),
+            "⚠️ 默认人设必须被**换掉**。两句人设并存的话，模型会在两个身份之间摇摆：{prompt}"
+        );
+        assert!(
+            prompt.contains("调用工具读写文件"),
+            "但能力那一半换不掉 —— 一份人设能把它删掉的话，模型会开始说自己做不到：{prompt}"
+        );
+        assert!(
+            prompt.contains("工作区"),
+            "工作区说明也换不掉：那是事实，不论谁在说话都成立：{prompt}"
+        );
+    }
+
+    /// 没挑智能体、或者挑了一个**空人设**的，都走默认那句。
+    ///
+    /// 空人设去替换的话，模型拿到的是一句「你叫「X」。」后面直接接能力说明
+    /// —— 没有任何身份描述，比默认那句更糟。
+    #[test]
+    fn an_empty_persona_falls_back_to_the_default() {
+        let blank = cortex_proto::assistants::AssistantBrief {
+            name: "还没写完的智能体".into(),
+            instructions: "   ".into(),
+        };
+        for agent in [None, Some(&blank)] {
+            let prompt = system_prompt_for(
+                "你是 Cortex，一个通用 AI 助理。",
+                "你可以调用工具。",
+                cortex_agent::ExecEnvironment::LocalMachine,
+                None,
+                agent,
+            );
+            assert!(
+                prompt.contains("你是 Cortex"),
+                "空人设不该把默认那句挤掉：{prompt}"
+            );
+        }
+    }
+
     /// 两个方向的失败都不报错：
     /// - 容器里少了它 → 模型撞上 `CONNECT tunnel failed, response 403`
     ///   只会原样重试，白白烧掉一轮
@@ -1271,8 +1367,10 @@ mod tests {
     fn only_the_container_prompt_mentions_the_egress_proxy() {
         let container = system_prompt_for(
             "底座",
+            "",
             cortex_agent::ExecEnvironment::Container,
             Some("/workspace"),
+            None,
         );
         assert!(
             container.contains("CONNECT tunnel failed, response 403"),
@@ -1287,7 +1385,7 @@ mod tests {
             cortex_agent::ExecEnvironment::LocalMachine,
             cortex_agent::ExecEnvironment::None,
         ] {
-            let desktop = system_prompt_for("底座", env, Some("/workspace"));
+            let desktop = system_prompt_for("底座", "", env, Some("/workspace"), None);
             assert!(
                 !desktop.contains("CORTEX_EGRESS_ALLOW"),
                 "{} 上没有出网代理，这段话就是假话 —— \
@@ -1308,8 +1406,10 @@ mod tests {
         let plain = cortex_agent::workspace::brief(base, Some("/workspace"));
         let with_note = system_prompt_for(
             base,
+            "",
             cortex_agent::ExecEnvironment::Container,
             Some("/workspace"),
+            None,
         );
         assert!(
             with_note.starts_with(&plain),
@@ -1319,7 +1419,13 @@ mod tests {
         );
 
         // 未绑定工作区时，降级过的那段（「可访问的文件范围是空集」）同样要保住
-        let unbound = system_prompt_for(base, cortex_agent::ExecEnvironment::Container, None);
+        let unbound = system_prompt_for(
+            base,
+            "",
+            cortex_agent::ExecEnvironment::Container,
+            None,
+            None,
+        );
         assert!(
             unbound.contains("只有那个目录本身"),
             "没绑工作区时 brief 那句「绑完也只有那个目录」不能被这次改动挤掉：{unbound}"

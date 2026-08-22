@@ -11,8 +11,8 @@
 ///
 /// # 为什么不做一个可注册的表
 ///
-/// 现在三条，而第三条（项目）进来时改这里花了四行 —— 当初不搞注册表
-/// 这个决定因此是划算的。同样的话对第四条仍然成立。
+/// 加到第四条（项目、智能体）时，每一条都只花了四行 —— 当初不搞注册表
+/// 这个决定因此一直是划算的。
 library;
 
 import 'package:flutter/material.dart';
@@ -60,6 +60,17 @@ class NavBlock extends ConsumerWidget {
             selected: view == MainView.projects,
             onTap: () {
               ref.read(mainViewProvider.notifier).go(MainView.projects);
+              onNavigated?.call();
+            },
+          ),
+          const SizedBox(height: 2),
+          _NavItem(
+            key: const ValueKey('nav:assistants'),
+            icon: Icons.smart_toy_outlined,
+            label: '智能体',
+            selected: view == MainView.assistants,
+            onTap: () {
+              ref.read(mainViewProvider.notifier).go(MainView.assistants);
               onNavigated?.call();
             },
           ),

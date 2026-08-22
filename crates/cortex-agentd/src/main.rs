@@ -25,6 +25,7 @@
 //! traefik（prod）决定。见 [`routes`] 的模块头。
 
 mod accounts;
+mod assistants;
 mod auth;
 mod blobs;
 mod credentials;

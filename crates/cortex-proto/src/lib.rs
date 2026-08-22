@@ -25,6 +25,7 @@
 //! 不问确认）。风险等级的线上写法则是 `cortex_agent::Risk::as_wire`，
 //! 住在枚举自己旁边 —— 任何拿得到 `Risk` 的宿主都拿得到它。
 
+pub mod assistants;
 pub mod auth;
 pub mod confirm;
 pub mod delegate;

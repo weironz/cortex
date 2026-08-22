@@ -253,6 +253,21 @@ pub struct ChatRequest {
     /// （`llama3:8b`），而且同一家可以配两条来源。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// 这一轮用哪个智能体的人设。`None` = 默认那个（通用助理）。
+    ///
+    /// 逐轮带，与 [`model`](Self::model) 完全同构 —— 理由见
+    /// [`crate::assistants`] 的模块文档。
+    ///
+    /// ⚠️ 它在一条会话里应当**保持稳定**：系统提示词是可缓存前缀的第一段，
+    /// 逐轮换人设等于每一轮都在打穿 prompt caching。所以界面上「换智能体」
+    /// 的语义是开一条新对话。
+    ///
+    /// ⚠️ **线上的键名是 `assistant` 而不是 `agent`。** 这个仓库里
+    /// 「agent」已经是另一个东西（跑在用户机器上的 `cortex-local` 进程，
+    /// `/agents` 是它的心跳注册）。两者在同一份 JSON 里撞名的话，读日志的人
+    /// 会以为这一轮在说那个 agent。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<crate::assistants::AssistantBrief>,
     /// 这一轮的权限档位。老客户端不传即 [`PermissionMode::Ask`]。
     ///
     /// 逐轮带而不是存在会话上：用户在对话框底部随时能改，而改完之后
@@ -841,7 +856,7 @@ pub struct SessionPatch {
 /// serde 默认把两者都解成 `None`，而这里必须分得清：前者是「解绑」，
 /// 后者是「别动它」。多包一层 `Option` 是标准做法 —— `deserialize` 只在
 /// 字段真的出现时被调用，没出现时走 `#[serde(default)]` 拿到外层 `None`。
-fn explicit_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+pub(crate) fn explicit_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

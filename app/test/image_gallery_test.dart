@@ -13,6 +13,7 @@
 ///    「还没有画过图」，用户会以为自己的图全没了。
 library;
 
+import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/models/attachment.dart';
@@ -827,6 +828,7 @@ class _ScriptedChat extends MockCortexApi {
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    Assistant? assistant,
     ImagePrefs? imagePrefs,
   }) async* {
     yield const ChatToolEvent(

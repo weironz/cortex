@@ -5,6 +5,7 @@
 /// need the same paging behaviour, and two copies would drift.
 library;
 
+import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/models/image_prefs.dart';
 import 'dart:typed_data';
@@ -44,6 +45,7 @@ class ReplayApi
         LocalMcpUnsupported,
         RunAttachUnsupported,
         ImagesUnsupported,
+        AssistantsUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
@@ -217,6 +219,7 @@ class ReplayApi
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    Assistant? assistant,
     ImagePrefs? imagePrefs,
   }) async* {
     yield const ChatDeltaEvent('好');

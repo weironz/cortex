@@ -11,6 +11,7 @@
 ///    不是「最优的」
 library;
 
+import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/api/api_exception.dart';
 import 'package:cortex_app/models/image_prefs.dart';
 import 'package:cortex_app/api/mock_cortex_api.dart';
@@ -89,6 +90,7 @@ class _Api extends MockCortexApi {
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    Assistant? assistant,
     ImagePrefs? imagePrefs,
   }) {
     sentModels.add(model);

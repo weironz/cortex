@@ -34,6 +34,7 @@ import '../api/cortex_api.dart';
 import '../api/http_cortex_api.dart';
 import '../api/mock_cortex_api.dart';
 import '../auth/local_llm_store.dart';
+import '../models/assistant.dart';
 import '../models/attachment.dart';
 import '../models/chat_event.dart';
 import '../models/image_prefs.dart';
@@ -391,7 +392,8 @@ final layoutProvider = NotifierProvider<LayoutNotifier, LayoutState>(
 enum MainView {
   chat,
   images,
-  projects;
+  projects,
+  assistants;
 
   static MainView fromWire(String? s) =>
       MainView.values.where((v) => v.name == s).firstOrNull ?? MainView.chat;
@@ -482,9 +484,9 @@ class MainViewNotifier extends Notifier<MainView> {
         if (back != null && chat.sessions.any((s) => s.id == back)) {
           ref.read(chatControllerProvider.notifier).selectSession(back);
         }
-      // 项目页**不碰活动会话**：它是一面卡片墙，点某张卡才会去某条会话。
-      // 顺手切一条的话，从项目页返回聊天会发现对话被换掉了
-      case MainView.projects:
+      // 项目页与智能体页**都不碰活动会话**：它们是卡片墙，点某张卡才会
+      // 去某条会话。顺手切一条的话，从这两页返回聊天会发现对话被换掉了
+      case MainView.projects || MainView.assistants:
         break;
     }
     state = view;
@@ -1240,6 +1242,7 @@ class GateClosedApi implements CortexApi {
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    Assistant? assistant,
     ImagePrefs? imagePrefs,
   }) => Stream.error(_closed);
 

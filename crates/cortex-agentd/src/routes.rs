@@ -134,6 +134,15 @@ protected_routes! {
     // 与会话**同一批**搬，不是顺手多搬一个：`PATCH /sessions/{id}` 的
     // `project_id` 要先确认目标项目存在，拆成两批的话，中间那一版会向一个
     // 自己读不到的库问「这个项目在不在」，而答案恒为「不在」。
+    // ⚠️ **不能叫 `/agents`** —— 那个已经是「哪些本机 agent 进程在线」
+    // （上面那条心跳注册）。两个「agent」在这个仓库里不是一回事：
+    // 一个是跑着的进程，一个是用户写的人设。撞在一起时 axum 直接 panic
+    // 「Overlapping method route」，而那还是好的 —— 更糟的是有人以为
+    // 它们是同一个东西。界面上仍叫「智能体」，路由与代码里叫 assistant
+    "/assistants" [GET, POST] => get(crate::assistants::list)
+        .post(crate::assistants::create),
+    "/assistants/{id}" [PATCH, DELETE] => patch(crate::assistants::patch)
+        .delete(crate::assistants::delete),
     "/projects" [GET, POST] => get(crate::projects::list).post(crate::projects::create),
     "/projects/{id}" [PATCH, DELETE] => patch(crate::projects::patch)
         .delete(crate::projects::delete),

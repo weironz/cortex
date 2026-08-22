@@ -1,3 +1,4 @@
+import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/models/image_prefs.dart';
 import 'dart:async';
@@ -540,6 +541,7 @@ class _GateApi
         LocalMcpUnsupported,
         RunAttachUnsupported,
         ImagesUnsupported,
+        AssistantsUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
@@ -647,6 +649,7 @@ class _GateApi
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    Assistant? assistant,
     ImagePrefs? imagePrefs,
   }) => throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
 

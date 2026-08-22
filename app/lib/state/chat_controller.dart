@@ -15,6 +15,8 @@ import '../models/project.dart';
 import '../models/tool_call.dart';
 import '../models/workspace.dart';
 import 'app_providers.dart';
+import '../models/assistant.dart';
+import 'assistant_controller.dart';
 import 'chat_state.dart';
 import 'model_controller.dart';
 import 'confirm_controller.dart';
@@ -885,6 +887,16 @@ class ChatController extends Notifier<ChatState> {
       // 模型同理 —— 在设置里换完，**下一句**就该按新的走
       model: ref.read(selectedModelProvider).model,
       source: ref.read(selectedModelProvider).source,
+      // 这条会话当初是用哪个智能体开的。
+      //
+      // ⚠️ 读的是**这条会话**绑的那个，不是一个全局「当前智能体」：
+      // 后者的表现是「用大厨聊了半天，切回一条旧的技术会话，那条也变成
+      // 大厨了」—— 而它的历史里模型一直自称 Cortex
+      //
+      // ⚠️ **空人设在这儿就滤掉**，而不是留给某一条传输去挡：空的
+      // instructions 拿去替换默认那句身份描述，模型得到的是一段没有身份的
+      // 提示词 —— 比默认那句更糟。挡在传输层的话，换一条传输就漏
+      assistant: _assistantFor(sessionId),
       // 生图规格同理。**兜底不覆盖** —— 模型在工具参数里自己填了尺寸就
       // 听模型的，见服务端 `resolve_image_spec`
       imagePrefs: ref.read(imagePrefsProvider),
@@ -895,6 +907,19 @@ class ChatController extends Notifier<ChatState> {
       onDone: _onDone,
       cancelOnError: true,
     );
+  }
+
+  /// 这条会话要带的人设。
+  ///
+  /// ⚠️ **空人设在这儿就滤掉**，而不是留给某一条传输去挡：空的
+  /// instructions 拿去替换默认那句身份描述，模型得到的是一段没有身份的
+  /// 提示词 —— 比默认那句更糟。挡在传输层的话，换一条传输就漏一次。
+  /// （服务端 `AssistantBrief::is_meaningful` 是最后一道闸，不是唯一一道。）
+  Assistant? _assistantFor(String sessionId) {
+    final a = ref
+        .read(assistantControllerProvider)
+        .byId(ref.read(sessionAssistantProvider.notifier).of(sessionId));
+    return a != null && a.isMeaningful ? a : null;
   }
 
   /// 把某一条用户消息**再发一次**。

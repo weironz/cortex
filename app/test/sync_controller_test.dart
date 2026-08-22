@@ -1,3 +1,4 @@
+import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/models/image_prefs.dart';
 import 'dart:async';
@@ -42,6 +43,7 @@ class _FakeApi
         LocalMcpUnsupported,
         RunAttachUnsupported,
         ImagesUnsupported,
+        AssistantsUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
@@ -169,6 +171,7 @@ class _FakeApi
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    Assistant? assistant,
     ImagePrefs? imagePrefs,
   }) => throw UnimplementedError('同步链路不应发起对话');
 

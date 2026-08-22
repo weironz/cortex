@@ -14,6 +14,7 @@ import '../models/auth_tokens.dart';
 import '../models/model_source.dart';
 import '../models/model_role.dart';
 import '../models/mcp.dart';
+import '../models/assistant.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
 import '../models/image_prefs.dart';
@@ -322,6 +323,47 @@ class HttpCortexApi implements CortexApi {
   @override
   Future<Project> createProject(String name) async =>
       Project.fromJson(await _postJson('/projects', {'name': name}));
+
+  @override
+  Future<List<Assistant>> assistants() async {
+    final body = await _getJson('/assistants');
+    return asObjectList(
+      body['assistants'],
+    ).map(Assistant.fromJson).toList(growable: false);
+  }
+
+  @override
+  Future<Assistant> createAssistant(Assistant draft) async =>
+      Assistant.fromJson(
+        await _postJson('/assistants', {
+          'name': draft.name,
+          'description': draft.description,
+          'instructions': draft.instructions,
+          'icon': draft.icon,
+          'model': ?draft.model,
+          'source': ?draft.source,
+        }),
+      );
+
+  @override
+  Future<Assistant> updateAssistant(
+    String id, {
+    String? name,
+    String? description,
+    String? instructions,
+    String? icon,
+  }) async => Assistant.fromJson(
+    await _patchJson('/assistants/${Uri.encodeComponent(id)}', {
+      'name': ?name,
+      'description': ?description,
+      'instructions': ?instructions,
+      'icon': ?icon,
+    }),
+  );
+
+  @override
+  Future<void> deleteAssistant(String id) =>
+      _noContent('DELETE', '/assistants/${Uri.encodeComponent(id)}');
 
   @override
   Future<Project> patchProject(String id, {String? name, bool? pinned}) async =>
@@ -1208,6 +1250,7 @@ class HttpCortexApi implements CortexApi {
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    Assistant? assistant,
     ImagePrefs? imagePrefs,
   }) async* {
     final request = http.Request('POST', _uri('/chat'))
@@ -1243,6 +1286,10 @@ class HttpCortexApi implements CortexApi {
         // 来源是独立字段，不编进 model —— ollama 的型号名本身带冒号，
         // 而且同一家可以配两条来源
         if (source != null && source.isNotEmpty) 'source': source,
+        // 空人设的智能体**不发** —— 它等于没有智能体，而发过去会让服务端
+        // 拿一段没有身份描述的提示词去替换默认那句（比默认那句更糟）
+        if (assistant != null && assistant.isMeaningful)
+          'assistant': assistant.toBrief(),
         // 什么都没设时整个字段不发 —— 发一个全默认的对象与不发在服务端
         // 是同一个意思（`resolve_image_spec` 两边都走「听模型的」）
         if (imagePrefs != null && !imagePrefs.isDefault)

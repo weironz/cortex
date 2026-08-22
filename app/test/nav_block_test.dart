@@ -119,6 +119,29 @@ void main() {
     expect(_written['main_view'], 'projects');
   });
 
+  testWidgets('点「智能体」进智能体页，同样不碰活动会话', (tester) async {
+    final c = _boot();
+    addTearDown(c.dispose);
+    await _pump(tester, c);
+
+    c.read(mainViewProvider.notifier).go(MainView.images);
+    await tester.pump();
+    final onImages = c.read(chatControllerProvider).activeSessionId;
+
+    await tester.tap(find.text('智能体'));
+    await tester.pump();
+
+    expect(c.read(mainViewProvider), MainView.assistants);
+    expect(
+      c.read(chatControllerProvider).activeSessionId,
+      onImages,
+      // 与项目页同一条理由：它是卡片墙，点某张卡才该开一条新对话。
+      // 进来就顺手换一条的话，从这儿返回会发现对话被换掉了
+      reason: '智能体页只是一面墙，进来这个动作本身不该动到活动会话',
+    );
+    expect(_written['main_view'], 'assistants');
+  });
+
   testWidgets('聊天 → 项目 → 聊天，回来的是同一条会话', (tester) async {
     final c = _boot();
     addTearDown(c.dispose);

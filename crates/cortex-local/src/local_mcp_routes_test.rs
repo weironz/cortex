@@ -38,7 +38,8 @@ fn state(dir: &Path) -> LocalState {
         outbox: Outbox::new(dir),
         max_rounds: 4,
         context_window: 8192,
-        system_prompt: "",
+        persona: "",
+        capabilities: "",
         exec_env: cortex_agent::ExecEnvironment::LocalMachine,
     };
     LocalState {

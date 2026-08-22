@@ -10,6 +10,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import '../core/hashing.dart';
+import '../models/assistant.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
 import '../models/image_prefs.dart';
@@ -1269,6 +1270,80 @@ class MockCortexApi
     return hashes;
   }
 
+  /// 智能体。假后端里就这一份，够界面走通「建 / 改 / 删」。
+  ///
+  /// 预置一个：一个空列表看不出卡片长什么样，而这一页的全部意义就是
+  /// 让人一眼看见「我有哪些人设」。
+  final List<Assistant> _assistants = [
+    const Assistant(
+      id: 'MOCKASSIST0001',
+      name: '味蕾领航员',
+      icon: '🍳',
+      description: '一位精通全球美食的资深大厨',
+      instructions:
+          '你是一位精通全球美食、拥有 20 年烹饪经验的资深大厨，'
+          '深谙食材营养学与各种烹饪技巧。',
+    ),
+  ];
+
+  @override
+  Future<List<Assistant>> assistants() async {
+    await _latency(90);
+    return List.unmodifiable(_assistants);
+  }
+
+  @override
+  Future<Assistant> createAssistant(Assistant draft) async {
+    await _latency(110);
+    final name = draft.name.trim();
+    if (name.isEmpty) {
+      throw const CortexApiException('智能体得有个名字', statusCode: 400);
+    }
+    final made = Assistant(
+      id: 'MOCKASSIST${(_assistants.length + 2).toString().padLeft(4, '0')}',
+      name: name,
+      description: draft.description,
+      instructions: draft.instructions,
+      icon: draft.icon,
+      model: draft.model,
+      source: draft.source,
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    _assistants.insert(0, made);
+    return made;
+  }
+
+  @override
+  Future<Assistant> updateAssistant(
+    String id, {
+    String? name,
+    String? description,
+    String? instructions,
+    String? icon,
+  }) async {
+    await _latency(110);
+    final i = _assistants.indexWhere((a) => a.id == id);
+    if (i == -1) {
+      throw CortexApiException('找不到智能体：$id', statusCode: 404);
+    }
+    final updated = _assistants[i].copyWith(
+      name: name?.trim(),
+      description: description,
+      instructions: instructions,
+      icon: icon,
+    );
+    _assistants[i] = updated;
+    return updated;
+  }
+
+  @override
+  Future<void> deleteAssistant(String id) async {
+    await _latency(100);
+    // 重复删不报错 —— 与服务端那侧同一个约定
+    _assistants.removeWhere((a) => a.id == id);
+  }
+
   /// 相册。假后端里就这一份，够界面走通「建 / 改名 / 加图 / 删」。
   final List<Album> _albums = [];
   final Map<String, Set<String>> _albumItems = {};
@@ -1501,6 +1576,7 @@ class MockCortexApi
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    Assistant? assistant,
     ImagePrefs? imagePrefs,
   }) async* {
     if (_disposed) {

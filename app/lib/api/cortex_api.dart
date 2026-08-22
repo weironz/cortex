@@ -18,6 +18,7 @@ import '../models/episode.dart';
 import '../models/health_status.dart';
 import '../models/import_plan.dart';
 import '../models/pending_confirmation.dart';
+import '../models/assistant.dart';
 import '../models/project.dart';
 import '../models/session_detail.dart';
 import '../models/model_option.dart';
@@ -170,6 +171,13 @@ abstract interface class CortexApi {
     String? model,
     String? source,
 
+    /// 这一轮用哪个智能体的人设。`null` = 默认那个（通用助理）。
+    ///
+    /// 逐轮带，与 [model] 完全同构。⚠️ 它在一条会话里应当**保持稳定**：
+    /// 系统提示词是可缓存前缀的第一段，逐轮换人设等于每一轮都在打穿
+    /// prompt caching。所以界面上「换智能体」= 开一条新对话。
+    Assistant? assistant,
+
     /// 这一轮如果画图，按什么规格。`null` = 完全听模型的。
     ///
     /// 与 [permissionMode] 同一路数：逐轮带。图片页底下那个规格面板随时
@@ -251,6 +259,31 @@ abstract interface class CortexApi {
   /// 功能」优雅降级（[CortexApiException.isUnsupported]），而不是让整个
   /// 侧边栏变成一块错误提示 —— 会话列表本身与项目毫无关系，它照样能用。
   Future<List<Project>> projects();
+
+  /// `GET /assistants` —— 全部智能体。
+  ///
+  /// ⚠️ **路由叫 assistants 不叫 agents**：服务端那条 `/agents` 是
+  /// 「哪些本机 agent 进程在线」，两个 agent 不是一回事。
+  ///
+  /// 老服务端答 404，调用方按 [CortexApiException.isUnsupported] 优雅降级。
+  Future<List<Assistant>> assistants();
+
+  /// `POST /assistants`
+  Future<Assistant> createAssistant(Assistant draft);
+
+  /// `PATCH /assistants/{id}` —— 只发真的要改的那几个字段。
+  Future<Assistant> updateAssistant(
+    String id, {
+    String? name,
+    String? description,
+    String? instructions,
+    String? icon,
+  });
+
+  /// `DELETE /assistants/{id}`
+  ///
+  /// **不影响已经用它聊过的会话**：人设是逐轮带的，历史一个字都不会变。
+  Future<void> deleteAssistant(String id);
 
   /// `POST /projects {"name": …}`
   Future<Project> createProject(String name);
@@ -782,6 +815,29 @@ mixin RunAttachUnsupported {
   Stream<ChatEvent> attachChat(String sessionId) => Stream<ChatEvent>.error(
     const CortexApiException('这个后端没有可重挂的轮次。', statusCode: 404),
   );
+}
+
+/// 给测试替身用：这个后端没有智能体。
+mixin AssistantsUnsupported {
+  static const _absent = CortexApiException('这个后端没有智能体。', statusCode: 404);
+
+  /// 列表回**空**而不是抛：一个「还没建过智能体」的账号本来就是空的，
+  /// 而用这个 mixin 的替身多半只是不关心这一块 —— 抛错会让每个测试
+  /// 都被迫处理一个与它无关的异常。与 `ImagesUnsupported` 同一条理由。
+  Future<List<Assistant>> assistants() async => const [];
+
+  // 下面三个是**动作**：回一个假的「成功了」等于骗调用方
+  Future<Assistant> createAssistant(Assistant draft) async => throw _absent;
+
+  Future<Assistant> updateAssistant(
+    String id, {
+    String? name,
+    String? description,
+    String? instructions,
+    String? icon,
+  }) async => throw _absent;
+
+  Future<void> deleteAssistant(String id) async => throw _absent;
 }
 
 /// 给测试替身用：这个后端不画图，也没有画廊。

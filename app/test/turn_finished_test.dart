@@ -13,6 +13,7 @@ library;
 
 import 'dart:async';
 
+import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/models/image_prefs.dart';
 import 'package:cortex_app/app.dart';
@@ -44,6 +45,7 @@ class _SlowApi extends MockCortexApi {
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    Assistant? assistant,
     ImagePrefs? imagePrefs,
   }) {
     final c = StreamController<ChatEvent>();

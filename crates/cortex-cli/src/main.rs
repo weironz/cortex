@@ -741,6 +741,9 @@ async fn one_turn(
             permission_mode,
             // CLI 不画图 —— 规格面板是图片页那边的东西
             image_prefs: None,
+            // 智能体是图形界面上挑的。给 CLI 一个 --agent 要先能列出智能体，
+            // 而它现在连模型列表都不列 —— 与 source 同一个理由
+            assistant: None,
         })
         .await?;
 

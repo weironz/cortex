@@ -854,6 +854,28 @@ agent 的 `generate_image` 工具也是打这条 —— 两处各记一遍的下
 （逐字节即生成顺序）且唯一 —— 单列游标在构造上就没有那个失败模式，
 也不需要额外索引（主键就是它）。`created_at` 因此只是展示用的一列。
 
+### 智能体：一张普通的配置表，一个不能叫 agent 的名字
+
+`migrations/20260825000001_assistants.sql` + `crates/cortex-agentd/src/assistants.rs`。
+与 `model_sources` / `model_roles` 同类：**不是**事件溯源、**不进** `sync_log`，
+客户端按需 GET。判据还是那一句 —— 这张表离开记忆能力还有没有意义，以及它需不
+需要跨设备实时推送。人设是配置，不是会话历史。
+
+⚠️ **路由不能叫 `/agents`。** 那条已经是「哪些本机 agent 进程在线」的心跳注册
+（`presence.rs`）。两条撞在一起时 axum 在启动时直接 panic —— 这一次算是运气好，
+它至少是响的失败。表名与线上的键名跟着一起用 `assistant`：一个 JSON 里同时出现
+两种含义的 `agent`，读日志的人会以为这一轮在说那个进程。
+
+**人设逐轮带，不让 `cortex-local` 反查。** 与 `model` / `permission_mode` /
+`image_prefs` 完全同构：客户端带上，`sandbox_proxy::forward` 逐字节透传（它不
+解析 body，所以新字段是白送的），`cortex-local` 直接用。反过来只带一个 id 让它
+去 `GET /assistants/{id}`，是在**用户等回复的路径上**插一次同步往返，换来的只是
+少传几百字节。
+
+⚠️ **人设在一条会话里必须保持稳定** —— 系统提示词是可缓存前缀的第一段
+（CLAUDE.md 约束 4）。所以界面上「换智能体」的语义是开一条新对话，
+理由与具体做法写在 [`docs/design.md`](design.md) 第十二节。
+
 ⚠️ **dev 的 nginx 是 allow-list，生产的 traefik 是 deny-list。**
 加 `/images` 时它一开始落到了 SPA 回落上（**回 200 + index.html**，看起来像
 成功）。生产那侧 `/api` 除 memory/mcp 外全归 agentd，不用动 —— 这条不对称

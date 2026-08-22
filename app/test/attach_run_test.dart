@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/api/api_exception.dart';
 import 'package:cortex_app/models/image_prefs.dart';
 import 'package:cortex_app/core/permission_mode.dart';
@@ -36,6 +37,7 @@ class _RunningApi extends MockCortexApi {
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    Assistant? assistant,
     ImagePrefs? imagePrefs,
   }) => sent.stream;
 
