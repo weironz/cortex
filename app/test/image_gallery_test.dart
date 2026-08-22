@@ -24,6 +24,7 @@ import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/chat/widgets/attachment_views.dart';
 import 'package:cortex_app/features/images/image_page.dart';
 import 'package:cortex_app/features/images/widgets/image_actions.dart';
+import 'package:cortex_app/features/images/widgets/image_thumb.dart';
 import 'package:cortex_app/features/images/widgets/image_viewer.dart';
 import 'package:cortex_app/models/generated_image.dart';
 import 'package:cortex_app/state/app_providers.dart';
@@ -670,6 +671,55 @@ void main() {
         isEmpty,
         reason: '一条常年挂着的提示等于没有提示',
       );
+    });
+  });
+
+  group('图库要有一个常驻入口', () {
+    testWidgets('开口说过话之后，图库还找得回来', (tester) async {
+      final api = _GalleryApi(all: [_img('IMG-1', _hashA)]);
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _settle(tester);
+
+      // 落地页上图库本来就在
+      expect(find.text('我的图片'), findsWidgets);
+
+      // 说一句话 —— 图库让位给对话
+      final n = c.read(chatControllerProvider.notifier);
+      await n.send('画一只柴犬');
+      await _settle(tester, 20);
+      expect(find.byType(ImageThumb), findsNothing);
+
+      // ⚠️ 这里就是用户报的那一句「图片库怎么找不到了」：
+      // 从前唯一的回去办法是「新对话」，而没人会把「新建」读成「回到图库」
+      final entry = find.byKey(const ValueKey('images:gallery'));
+      expect(entry, findsOneWidget, reason: '图库是一个地方，不该藏在「新对话」后面');
+      await tester.tap(entry);
+      await _settle(tester, 20);
+
+      expect(find.byType(ImageThumb), findsWidgets);
+    });
+
+    testWidgets('「新对话」要把人带回对话，不留在图库上', (tester) async {
+      final api = _GalleryApi(all: [_img('IMG-1', _hashA)]);
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _settle(tester);
+
+      await tester.tap(find.byKey(const ValueKey('images:gallery')));
+      await _settle(tester, 12);
+      expect(find.text('回到对话'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('images:new')));
+      await _settle(tester, 20);
+      expect(
+        find.text('我的图片'),
+        findsWidgets,
+        reason: '回到落地页 —— 停在图库上的话，「新对话」点了像没反应',
+      );
+      expect(find.text('回到对话'), findsNothing);
     });
   });
 }

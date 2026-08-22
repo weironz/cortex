@@ -76,6 +76,9 @@ class _ImagePageState extends ConsumerState<ImagePage> {
   /// chip 同一条规矩：想改默认的人去设置里改，在这儿改的是当下这一张。
   ModelPick? _pick;
 
+  /// 正在看图库（而不是对话）。见头上那个开关的注释。
+  bool _gallery = false;
+
   @override
   void initState() {
     super.initState();
@@ -201,26 +204,59 @@ class _ImagePageState extends ConsumerState<ImagePage> {
                   ),
                 ),
           actions: [
-            // 回到落地页 = 开一条新的空会话。**不是一个单独的「看图库」
-            // 开关** —— 图库只在空会话上出现（照 ChatGPT），而「新对话」
-            // 本来就要有，一个按钮同时办了两件事
+            // ⚠️ **图库要有一个常驻入口。**
+            //
+            // 第一版没有：图库只画在空会话的落地页上，开口之后就让位给
+            // 对话（照 ChatGPT）。用户报上来的第一句话是「图片库怎么
+            // 找不到了」—— 因为回去的唯一办法是「新对话」，而没人会把
+            // 「新建」理解成「回到我的图片」。
+            //
+            // 图库是一个**地方**，不是某个形态的附属品。所以它有自己的
+            // 开关，任何时候都按得到。
+            TextButton.icon(
+              key: const ValueKey('images:gallery'),
+              onPressed: () => setState(() => _gallery = !_gallery),
+              icon: Icon(
+                _gallery
+                    ? Icons.chat_bubble_outline_rounded
+                    : Icons.grid_view_rounded,
+                size: 16,
+              ),
+              label: Text(_gallery ? '回到对话' : '我的图片'),
+            ),
+            const SizedBox(width: 4),
             TextButton.icon(
               key: const ValueKey('images:new'),
               onPressed: streaming
                   ? null
-                  : () => ref.read(mainViewProvider.notifier).newImageSession(),
+                  : () {
+                      ref.read(mainViewProvider.notifier).newImageSession();
+                      // 开新对话就该看见对话，不该停在图库上 ——
+                      // 否则「新对话」这个按钮点了像没反应
+                      setState(() => _gallery = false);
+                    },
               icon: const Icon(Icons.add_rounded, size: 16),
               label: const Text('新对话'),
             ),
           ],
         ),
-        // ⚠️ **这一页有两个形态，与 `ChatPane` 是同一个判据。**
+        // 「我的图片」被按下 —— 整页就是图库，不带输入框：
+        // 这是一个**翻东西**的地方，不是一个写提示词的地方。
+        if (_gallery)
+          Expanded(
+            child: ListView(
+              controller: _scroll,
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+              children: [_wall(context, state)],
+            ),
+          )
+        // ⚠️ **另外两个形态与 `ChatPane` 是同一个判据。**
         //
         // 空会话 = 落地页：输入框 + 「我的图片」。开口之后图库让位给对话
         // —— 照 ChatGPT。把图库常驻在对话下面试过想过，代价是两个都要滚，
         // 而 `ConversationView` 自带滚动与自动跟随，套进外层滚动里就是
         // 「竖直方向无界约束」那个当场空白的老坑。
-        if (empty)
+        else if (empty)
           Expanded(
             child: ListView(
               controller: _scroll,
