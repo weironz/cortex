@@ -780,7 +780,7 @@ impl Engine {
             grants: self.grants.clone(),
             remote: self.remote.clone(),
             image_prefs: req.image_prefs.clone(),
-            computer: crate::computer::Computer::default(),
+            computer: crate::computer::Computer::new(),
             drawn: std::sync::Mutex::new(Vec::new()),
         };
         // 这一轮用哪个模型。逐轮的选择是**那一轮的属性**，而 `self.llm`

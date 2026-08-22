@@ -14,8 +14,8 @@
 //! # 坐标：模型看到的是缩小图，点击落在真实像素上
 //!
 //! 原图动辄 4K，直接塞进上下文要几万 token，而模型也不需要那个分辨率。
-//! 所以截图按长边 [`MAX_EDGE`] 缩小，**并且这一侧记住缩放比例**
-//! （[`Screen::scale`]），点击时乘回去。
+//! 所以截图按长边 `MAX_EDGE` 缩小，**并且这一侧记住缩放比例**
+//! （`Shot::scale`），点击时乘回去。
 //!
 //! ⚠️ 反过来做（把比例告诉模型，让它自己换算）试过一次就够了：模型会算错，
 //! 而算错的表现是点偏一点点 —— 它看不出是自己算错了，只会重试，然后一直偏。
@@ -76,11 +76,24 @@ mod real {
         last: std::sync::Mutex<Option<f64>>,
     }
 
-    impl Default for Computer {
-        fn default() -> Self {
+    impl Computer {
+        /// ⚠️ **不叫 `default()`。** 另一半平台上 `Computer` 是个单元结构体，
+        /// 而 `Computer::default()` 在那儿会被 clippy 的
+        /// `default_constructed_unit_structs` 拦掉 —— 那条 lint 只在 Linux 上
+        /// 触发，于是本机全绿、CI 红（实测撞过）。
+        /// 一个两侧都写得出的构造函数就没有这个问题。
+        pub fn new() -> Self {
             Self {
                 last: std::sync::Mutex::new(None),
             }
+        }
+    }
+
+    /// 只为满足 clippy 的 `new_without_default` 而存在 —— **调用方一律用
+    /// `new()`**（`default()` 在另一半平台上会被另一条 lint 拦掉）。
+    impl Default for Computer {
+        fn default() -> Self {
+            Self::new()
         }
     }
 
@@ -418,7 +431,7 @@ mod real {
         /// 没截过图就点，要当场拒绝。
         #[test]
         fn clicking_before_any_screenshot_is_refused() {
-            let c = Computer::default();
+            let c = Computer::new();
             let r = c.click(&serde_json::json!({"x": 10, "y": 10}));
             assert!(!r.ok);
             assert!(
@@ -441,10 +454,21 @@ mod stub {
     ///
     /// **它不会被调到**：`supported()` 是 false，于是这一组工具根本不进目录。
     /// 留着它是为了让上层不必到处 `cfg` —— 上层只问 `supported()`。
+    ///
+    /// `Default` 只为满足 clippy 的 `new_without_default`；调用方一律用
+    /// `new()`，因为 `Computer::default()` 在单元结构体上会被
+    /// `default_constructed_unit_structs` 拦掉。
     #[derive(Default)]
     pub struct Computer;
 
     impl Computer {
+        /// 与真实现同名同签名 —— 上层那一行不必 `cfg`。
+        /// 不用 `Default`：`Computer::default()` 在单元结构体上会被 clippy
+        /// 的 `default_constructed_unit_structs` 拦掉。
+        pub const fn new() -> Self {
+            Self
+        }
+
         pub const fn screen_size() -> Option<(u32, u32)> {
             None
         }
