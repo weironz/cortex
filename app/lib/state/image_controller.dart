@@ -29,6 +29,8 @@ class ImageState {
     this.cursor,
     this.error,
     this.unsupported = false,
+    this.album,
+    this.selected = const {},
   });
 
   final List<GeneratedImage> items;
@@ -50,6 +52,16 @@ class ImageState {
   /// 这一页同时只可能有一个在飞（画的时候输入框禁用）。
   final Object? error;
 
+  /// 正在看哪个相册。`null` = 全部。
+  ///
+  /// **它是查询的一部分**：翻页游标是在这个条件下取出来的，换相册必须
+  /// 从头拉。把它放进状态而不是页面里，正是为了让 [ImageController.loadMore]
+  /// 也看得见 —— 页面持有一份的话，翻页会拿「全部」的游标去翻一个相册。
+  final String? album;
+
+  /// 勾中的那些（图库那一行的 id）。空 = 不在多选态。
+  final Set<String> selected;
+
   /// 这个后端没有画廊（老服务端 404）。
   ///
   /// **不是错误**，是能力说明 —— 画成红字会让用户去修一个没坏的东西。
@@ -65,6 +77,7 @@ class ImageState {
     Object? error,
     bool clearError = false,
     bool? unsupported,
+    Set<String>? selected,
   }) => ImageState(
     items: items ?? this.items,
     loading: loading ?? this.loading,
@@ -74,6 +87,8 @@ class ImageState {
     cursor: cursor ?? this.cursor,
     error: clearError ? null : (error ?? this.error),
     unsupported: unsupported ?? this.unsupported,
+    album: album,
+    selected: selected ?? this.selected,
   );
 }
 
@@ -88,12 +103,19 @@ class ImageController extends Notifier<ImageState> {
   Future<void> refresh() async {
     state = state.copyWith(loading: true, clearError: true);
     try {
-      final page = await ref.read(cortexApiProvider).gallery(limit: _kPageSize);
+      final album = state.album;
+      final page = await ref
+          .read(cortexApiProvider)
+          .gallery(limit: _kPageSize, album: album);
       if (!ref.mounted) return;
       state = ImageState(
         items: page.items,
         hasMore: page.hasMore,
         cursor: page.nextCursor,
+        album: album,
+        // 勾选**跟着这一页作废**：留着的话，用户切到别的相册再点「加入相册」，
+        // 加进去的是他现在根本看不见的那几张
+        selected: const {},
       );
     } on CortexApiException catch (e) {
       if (!ref.mounted) return;
@@ -102,11 +124,85 @@ class ImageController extends Notifier<ImageState> {
       state = ImageState(
         unsupported: e.isUnsupported,
         error: e.isUnsupported ? null : e.message,
+        album: state.album,
       );
     } on Object catch (e) {
       if (!ref.mounted) return;
-      state = ImageState(error: e);
+      state = ImageState(error: e, album: state.album);
     }
+  }
+
+  /// 换一个相册看（`null` = 全部）。
+  ///
+  /// **必须重取第一页**，不能只过滤手上这些：手上这些只是最新的一页，
+  /// 过滤出来的「这个相册」会少掉所有还没翻到的 —— 而它看起来是完整的。
+  Future<void> setAlbum(String? album) async {
+    if (album == state.album) return;
+    // ⚠️ 直接造一个新状态，不走 `copyWith` —— 它**不改 album**（那是查询
+    // 条件，不是可选覆盖），改了才会连着把游标一起换掉
+    state = ImageState(loading: true, album: album);
+    await refresh();
+  }
+
+  /// 勾 / 取消勾一张。
+  void toggleSelect(String id) {
+    final next = {...state.selected};
+    if (!next.remove(id)) next.add(id);
+    state = state.copyWith(selected: next);
+  }
+
+  void clearSelection() => state = state.copyWith(selected: const {});
+
+  void selectAll() =>
+      state = state.copyWith(selected: {for (final i in state.items) i.id});
+
+  /// 把勾中的那些从图库移除。**blob 不动**，对话里那些照常显示。
+  ///
+  /// 一张一张地删而不是一条批量接口：这条路上出错的唯一真实原因是某一张
+  /// 已经被别处删了，而那种时候「其余的照删」比「整批回滚」更接近用户想要的。
+  /// 失败的张数如实报出来。
+  Future<String> removeSelected() async {
+    final ids = state.selected.toList();
+    if (ids.isEmpty) return '';
+    final api = ref.read(cortexApiProvider);
+    var failed = 0;
+    for (final id in ids) {
+      try {
+        await api.removeImage(id);
+      } on Object {
+        failed++;
+      }
+    }
+    await refresh();
+    return failed == 0
+        ? '已从图库移除 ${ids.length} 张（对话里那些还在）。'
+        : '移除了 ${ids.length - failed} 张，另有 $failed 张没成功。';
+  }
+
+  /// 把勾中的那些加进 / 拿出一个相册。
+  Future<String> setAlbumMembership(
+    String albumId,
+    String albumName, {
+    required bool add,
+  }) async {
+    final ids = state.selected.toList();
+    if (ids.isEmpty) return '';
+    try {
+      await ref.read(cortexApiProvider).setAlbumItems(albumId, ids, add: add);
+    } on Object catch (e) {
+      return '$e';
+    }
+    // 加进去之后**不清空当前这一页**（还在「全部」里看着呢），但要重取
+    // ——张数变了，相册那一行上的数字得跟上
+    ref.invalidate(albumsProvider);
+    if (state.album != null) {
+      await refresh();
+    } else {
+      state = state.copyWith(selected: const {});
+    }
+    return add
+        ? '已加进「$albumName」（${ids.length} 张）。'
+        : '已从「$albumName」里拿出 ${ids.length} 张。';
   }
 
   /// 往后翻一页。
@@ -118,12 +214,14 @@ class ImageController extends Notifier<ImageState> {
     try {
       final page = await ref
           .read(cortexApiProvider)
-          .gallery(limit: _kPageSize, before: cursor);
+          .gallery(limit: _kPageSize, before: cursor, album: state.album);
       if (!ref.mounted) return;
       state = ImageState(
         items: [...state.items, ...page.items],
         hasMore: page.hasMore,
         cursor: page.nextCursor,
+        album: state.album,
+        selected: state.selected,
       );
     } on Object catch (e) {
       if (!ref.mounted) return;
@@ -182,3 +280,20 @@ class ImageController extends Notifier<ImageState> {
 final imageControllerProvider = NotifierProvider<ImageController, ImageState>(
   ImageController.new,
 );
+
+/// 相册列表。
+///
+/// # 为什么这个是 `FutureProvider`，而画廊不是
+///
+/// 相册**一次取完**（没有翻页），改动之后整份重取就够了 —— 服务端那几条
+/// 写接口回的也正是整份列表。画廊不同，它是一份在长的东西（见本文件顶上）。
+final albumsProvider = FutureProvider<Albums>((ref) async {
+  try {
+    return await ref.watch(cortexApiProvider).albums();
+  } on CortexApiException catch (e) {
+    // 老服务端没有 `/albums`。**回一份空的，不抛** —— 抛的话画廊上面
+    // 会挂一条红字，而用户能做的只有升级服务端
+    if (e.isUnsupported) return const Albums();
+    rethrow;
+  }
+});

@@ -59,11 +59,17 @@ class _SandboxDownloadButtonState extends ConsumerState<SandboxDownloadButton> {
     setState(() => _busy = false);
 
     if (bytes != null) {
-      final saved = await saveBytesAs(bytes, 'workspace.tar');
+      final saved = await saveBytesAs(
+        bytes,
+        'workspace.tar',
+        mimeType: 'application/x-tar',
+      );
       if (!mounted) return;
-      if (!saved) return; // 用户自己取消了，不该弹提示
+      if (saved == null) return; // 用户自己取消了，不该弹提示
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已下载 workspace.tar（${_size(bytes.length)}）')),
+        // 桌面端 `saved` 是真实路径，Web 上只有文件名（浏览器不告诉我们
+        // 它落在哪儿）—— 所以这句话说的是「存到了 X」，X 就是拿到的那个
+        SnackBar(content: Text('已存到 $saved（${_size(bytes.length)}）')),
       );
       return;
     }

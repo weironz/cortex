@@ -858,6 +858,58 @@ agent 的 `generate_image` 工具也是打这条 —— 两处各记一遍的下
 加 `/images` 时它一开始落到了 SPA 回落上（**回 200 + index.html**，看起来像
 成功）。生产那侧 `/api` 除 memory/mcp 外全归 agentd，不用动 —— 这条不对称
 写在 `scripts/docker/nginx.dev.conf.template` 那份清单的注释里。
+后来加的 `/albums` 与 `/s` 是同一回事，`/images?hash=` 不是（同一条前缀）。
+
+`GET /images` 支持三个过滤：`before`（游标）、`album`、`hash`。
+`hash=` 是给**对话里那张图**用的 —— 附件只带 blob 哈希，而分享 / 移除要的
+是画廊那一行的 id。没有它，同一张图在对话里右键出来的菜单比图库里少三项。
+
+⚠️ 客户端拿到那一行之后**要自己核对哈希**：老服务端不认得这个参数，会静默
+忽略它、回最新那一页。见 `image_actions.dart` 的 `_id()`。
+
+##### 分享：这一支唯一的免认证出口
+
+从前「复制链接」复制的是 presigned URL，对着 `http://rustfs:9000`（容器内网
+名）签的 —— 外网打不开；而 SigV4 把 host 签进签名，**改域名会让签名失效**，
+所以「把域名换成对外的」这条路走不通。生产上对象存储也根本没有对外路由。
+
+所以是一条自己的路：`POST /images/{id}/share` 生成 32 字节随机 token，
+`GET /s/{token}/{filename}` **免认证**流式回 blob，`DELETE …/share` 当场失效。
+
+⚠️ **token 必须随机，不能用 blob 哈希。** 哈希会出现在别的响应里（画廊、
+附件），拿它当分享凭据等于「凡是见过这张图的人都永久有权限」。
+
+⚠️ **token → 租户的映射住在全局 schema**（`cortex_auth.image_shares`）：
+那条请求上没有任何东西能说明这是谁的图。画廊那条查询因此
+`LEFT JOIN cortex_auth.image_shares ON schema_name = current_schema()` ——
+**不在租户表里再存一列**：存两份的下场是撤销时漏改一处，症状是界面说
+「已撤销」而链接照样能打开。
+
+⚠️ **文件名里的扩展名由 `blobs.mime` 决定，不由 URL 里那一段决定**：
+路径段是可控输入，直接回写进 `Content-Disposition` 是一个头部注入面。
+
+`public_routes()` 因此长了一条，`the_public_list_stays_short` 那个测试跟着
+改了 —— 理由写在那儿：分享链接按定义就是给一个没有凭据的人看的。
+
+⚠️ **公开链接的域名从请求首部推**（`public_base`）：优先
+`CORTEX_PUBLIC_URL`，然后 `X-Forwarded-Host`，最后 `Host`。
+nginx 的 `$host` **会把端口丢掉**，所以 dev 上拼出来的是
+`http://127.0.0.1/s/…`（少了 `:5173`，本机打不开）—— 那份模板里传的是
+`$http_host`。
+
+##### 相册：多对多，两张表
+
+`image_albums` + `image_album_items`（`migrations/20260823000001_…`）。
+
+**多对多而不是 `generated_images.album_id` 一列**：immich 的相册就是多对多，
+一张图可以既在「柴犬」也在「水彩」里。一列的话第二个相册要复制一行，
+而那一行的 id 与原图不同 —— 分享/删除立刻变成两套语义。
+
+`ON DELETE CASCADE` 在这里是对的（与 `blobs` 那条外键相反）：相册项是纯
+关系，图没了关系就该没，没有「谁还引用着它」的问题。
+
+`DELETE /images/{id}` 只删画廊那一行（连带 share token 与相册关系），
+**blob 不动** —— 对话里那张图照常显示。所以界面上它叫「从图库移除」。
 
 ##### `POST /settings/model-sources/{id}/check`：真发一次请求
 
@@ -945,6 +997,18 @@ ollama 的型号名本身带冒号（`llama3:8b`），拆不干净；而且同�
 没有勾选框问「要不要也存在本机」：那就是又让他分类一次。默认存 ——
 进的是系统凭据库，与从前那个「本机模型」同一个地方，不是新增的风险面。
 
+#### 工具事件分得出「开始」与「结束」
+
+`ChatEvent::Tool` 带 `phase: ToolPhase { call, result }`。
+
+从前两条事件形状完全相同（调用那一刻发一条 `diff: None`，结束再发一条），
+客户端只能靠 `summary` 的文本前缀猜是哪一条 —— 而「正在画图」那个闪烁占位
+的整个意义就是**在开始时出现、在结束时消失**，猜错的表现是它永远不消失
+或者根本不出现。
+
+⚠️ 老客户端读不到这个字段时按 `result` 走（`#[serde(default)]`）：
+那是「不画占位」，比画一个永不消失的占位好。
+
 #### 生图：一个工具，不是选择器里的一个模型
 
 **生图与对话是两条协议。** 对话流式吐 token，生图一次请求回一张图。
@@ -985,6 +1049,21 @@ episode 的 `attachments` 上。**与用户自己上传的附件走同一条路*
 - **MIME 要按字节头自己认，别信对方声明的。** Gemini 实测回的是
   **JPEG**，而 DashScope 那条的兜底假设是 PNG。认错的表现是浏览器
   按错的类型处理一张好图（2026-08-20）。
+
+##### 规格（尺寸 / 张数）怎么从界面走到工具里
+
+图片页那个规格 chip 走 `ChatRequest.image_prefs { size, n }`。它能穿三层
+是因为 agentd 的 `sandbox_proxy::forward` **逐字节透传**请求体（不解析），
+所以给 `cortex_proto::dto::ChatRequest` 加一个字段就自动到了 cortex-local。
+
+`LocalHost` 存下这一份，`generate_image` 执行时**兜底**：
+
+* 模型自己在工具参数里填了 `size` 就**听模型的** —— 用户在句子里说了
+  「画一张宽的」，那句话比面板上那个默认值更近
+* 没填才用面板那个；`n` 直接用面板那个（工具参数里本来就没有 n）
+
+**兜底而不是覆盖**：覆盖的话，用户在句子里说的会被规格面板静默否决，
+而他看不出是谁改的。这一段抽成了 `resolve_image_spec`，五条测试盯着它。
 
 ##### 尺寸：算不出来就不发，不凑一个
 

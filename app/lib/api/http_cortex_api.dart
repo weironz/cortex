@@ -1648,10 +1648,59 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
-  Future<Gallery> gallery({int limit = 30, String? before}) async =>
-      Gallery.fromJson(
-        await _getJson('/images', {'limit': '$limit', 'before': ?before}),
-      );
+  Future<Gallery> gallery({
+    int limit = 30,
+    String? before,
+    String? album,
+    String? hash,
+  }) async => Gallery.fromJson(
+    await _getJson('/images', {
+      'limit': '$limit',
+      'before': ?before,
+      'album': ?album,
+      'hash': ?hash,
+    }),
+  );
+
+  @override
+  Future<String> shareImage(String id) async => asString(
+    (await _postJson('/images/${Uri.encodeComponent(id)}/share', null))['url'],
+  );
+
+  @override
+  Future<void> unshareImage(String id) =>
+      _noContent('DELETE', '/images/${Uri.encodeComponent(id)}/share');
+
+  @override
+  Future<void> removeImage(String id) =>
+      _noContent('DELETE', '/images/${Uri.encodeComponent(id)}');
+
+  @override
+  Future<Albums> albums() async => Albums.fromJson(await _getJson('/albums'));
+
+  @override
+  Future<Albums> createAlbum(String name) async =>
+      Albums.fromJson(await _postJson('/albums', {'name': name}));
+
+  @override
+  Future<Albums> renameAlbum(String id, String name) async => Albums.fromJson(
+    await _patchJson('/albums/${Uri.encodeComponent(id)}', {'name': name}),
+  );
+
+  @override
+  Future<void> deleteAlbum(String id) =>
+      _noContent('DELETE', '/albums/${Uri.encodeComponent(id)}');
+
+  @override
+  Future<void> setAlbumItems(
+    String id,
+    List<String> images, {
+    bool add = true,
+  }) => _noContent(
+    add ? 'POST' : 'DELETE',
+    '/albums/${Uri.encodeComponent(id)}/items',
+    {'images': images},
+  );
 
   @override
   Future<Uint8List> sandboxWorkspaceTar({String? sessionId}) =>
@@ -1863,6 +1912,38 @@ class HttpCortexApi implements CortexApi {
       );
     }
     return _decodeObject(what, body);
+  }
+
+  /// 一条**不回内容**的请求（204）。
+  ///
+  /// 单开一个而不是复用 `_postJson`：那几个都要 `_decodeObject`，
+  /// 而 204 的正文是空的 —— 解它只会抛一个与真正问题无关的 JSON 错误。
+  Future<void> _noContent(
+    String method,
+    String path, [
+    Map<String, dynamic>? body,
+  ]) async {
+    final request = http.Request(method, _uri(path))
+      ..headers.addAll(
+        _headers(
+          body == null ? const {} : const {'content-type': 'application/json'},
+        ),
+      );
+    if (body != null) request.body = jsonEncode(body);
+    final http.StreamedResponse response;
+    try {
+      response = await _client.send(request);
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    final text = await response.stream.bytesToString().catchError((_) => '');
+    if (response.statusCode >= 400) {
+      throw _failure(
+        response.statusCode,
+        text.isEmpty ? '$method $path 失败' : _trim(text),
+        headers: response.headers,
+      );
+    }
   }
 
   Future<Map<String, dynamic>> _getJson(

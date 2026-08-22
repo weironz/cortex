@@ -1,10 +1,18 @@
-/// 图片 —— 一个输入框 + 一面「我的图片」。照 ChatGPT 的那一页。
+/// 图片 —— 一条**会话** + 一面「我的图片」。照 ChatGPT 的那一页。
 ///
-/// # 为什么它不是一条会话
+/// # 它就是对话，只是话题是画图
 ///
-/// 生图与对话是两条协议：那条流式吐 token，这条一次回一张图，中间没有
-/// 「上下文」这回事。做成会话的代价很具体 —— 撰写框那一套（附件、权限档、
-/// 工作区）对生图一样都用不上，而生图要的（尺寸、张数）在那儿一个都没有。
+/// 早先这里是一个表单，直接打 `/llm/image`。用户看完的第一句话是
+/// 「图片生成应该是对话式的，和标准对话一样的逻辑，只是识别到要生成图片，
+/// 就调用图片生成模型而已」—— 而那正是 `generate_image` 工具本来就在做的事。
+///
+/// 所以这一页现在**复用 `ConversationView` 与 `MessageComposer`**，
+/// 与聊天页逐字相同的那一套。差别只有三处：
+/// 它记住的是自己那条会话（[MainViewNotifier] 里的 `_imageSession`）、
+/// 型号 chip 选的是绘画角色、以及底下多一面图库。
+///
+/// 不复用的代价很具体：气泡、附件、确认弹层、重发草稿会各走各的，
+/// 而「在对话里能，在图片页不能」这种差别用户根本分不清是两个功能。
 ///
 /// # 灵感墙不做
 ///
@@ -16,6 +24,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
@@ -35,6 +44,7 @@ import '../chat/widgets/conversation_view.dart';
 import '../chat/widgets/message_composer.dart';
 import '../settings/pages/model_picker.dart';
 import '../settings/pages/model_roles_page.dart' show modelRolesProvider;
+import 'widgets/album_bar.dart';
 import 'widgets/image_spec.dart';
 import 'widgets/image_thumb.dart';
 import 'widgets/image_viewer.dart';
@@ -328,8 +338,6 @@ class _ImagePageState extends ConsumerState<ImagePage> {
       kImageSizes.where((s) => s.value == size).firstOrNull?.label ?? '自动';
 
   Widget _wall(BuildContext context, ImageState state) {
-    final theme = Theme.of(context);
-
     if (state.unsupported) {
       return const EmptyState(
         icon: Icons.image_not_supported_outlined,
@@ -344,7 +352,22 @@ class _ImagePageState extends ConsumerState<ImagePage> {
         child: Center(child: CircularProgressIndicator()),
       );
     }
+    // 空相册与空图库要说**不一样**的话：在一个空相册里看到「还没有画过图」，
+    // 用户会以为自己的图全没了
     if (state.items.isEmpty) {
+      if (state.album != null) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            AlbumBar(said: _say),
+            const EmptyState(
+              icon: Icons.photo_album_outlined,
+              title: '这个相册还是空的',
+              description: '回「全部」里勾几张，点「加入相册」。',
+            ),
+          ],
+        );
+      }
       return const EmptyState(
         icon: Icons.image_outlined,
         title: '还没有画过图',
@@ -352,10 +375,11 @@ class _ImagePageState extends ConsumerState<ImagePage> {
       );
     }
 
+    final selecting = state.selected.isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('我的图片', style: theme.textTheme.titleSmall),
+        AlbumBar(said: _say),
         const SizedBox(height: 10),
         LayoutBuilder(
           builder: (context, c) {
@@ -375,7 +399,25 @@ class _ImagePageState extends ConsumerState<ImagePage> {
                 return ImageThumb(
                   key: ValueKey('thumb:${img.id}'),
                   image: img,
-                  onTap: () => _open(img),
+                  selected: state.selected.contains(img.id),
+                  selecting: selecting,
+                  onToggleSelect: () => ref
+                      .read(imageControllerProvider.notifier)
+                      .toggleSelect(img.id),
+                  onSaid: _say,
+                  onChanged: () =>
+                      ref.read(imageControllerProvider.notifier).refresh(),
+                  onTap: () {
+                    // Ctrl / ⌘ + 点 = 勾选。桌面上这是**通用**的多选手势，
+                    // 而长按在鼠标下面根本不是一个动作
+                    if (_multiSelectHeld) {
+                      ref
+                          .read(imageControllerProvider.notifier)
+                          .toggleSelect(img.id);
+                      return;
+                    }
+                    _open(img);
+                  },
                 );
               },
             );
@@ -442,8 +484,35 @@ class _ImagePageState extends ConsumerState<ImagePage> {
         .set(ImagePrefs(size: got.size, count: got.count));
   }
 
+  /// 此刻按着 Ctrl / ⌘ 吗。
+  ///
+  /// `InkWell.onTap` 不带修饰键，而为了拿到它去换一套 `Listener` +
+  /// 自绘水波纹，代价远大于问一句键盘状态。
+  bool get _multiSelectHeld {
+    // 不能是 `const`：`LogicalKeyboardKey` 自己重载了 `==`
+    final keys = {
+      LogicalKeyboardKey.controlLeft,
+      LogicalKeyboardKey.controlRight,
+      LogicalKeyboardKey.metaLeft,
+      LogicalKeyboardKey.metaRight,
+    };
+    return HardwareKeyboard.instance.logicalKeysPressed.any(keys.contains);
+  }
+
+  void _say(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      // 一条一条地排队的话，连点几个动作要等上十几秒才看到最后那条
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
   Future<void> _open(GeneratedImage img) async {
-    final again = await showImageViewer(context, img);
+    final again = await showImageViewer(
+      context,
+      ViewerImage.fromGallery(img),
+      onChanged: () => ref.read(imageControllerProvider.notifier).refresh(),
+    );
     if (again == null || !mounted) return;
     // 「以此为提示词重画」：把那句话放进输入框，**不直接开画** ——
     // 这个动作的意义就是让他改一改，替他按下去等于跳过了唯一有价值的一步。

@@ -37,8 +37,12 @@ class _FlakyGalleryApi extends MockCortexApi {
   final Future<Gallery> Function({int limit, String? before}) _gallery;
 
   @override
-  Future<Gallery> gallery({int limit = 30, String? before}) =>
-      _gallery(limit: limit, before: before);
+  Future<Gallery> gallery({
+    int limit = 30,
+    String? before,
+    String? album,
+    String? hash,
+  }) => _gallery(limit: limit, before: before);
 }
 
 /// 图库里已经有几张的替身。
@@ -53,8 +57,12 @@ class _SeededApi extends MockCortexApi {
   final List<GeneratedImage> items;
 
   @override
-  Future<Gallery> gallery({int limit = 30, String? before}) async =>
-      Gallery(items: items);
+  Future<Gallery> gallery({
+    int limit = 30,
+    String? before,
+    String? album,
+    String? hash,
+  }) async => Gallery(items: items);
 
   /// 缩略图要真的画得出来 —— 回一张 1×1 的合法 PNG。
   /// 解不开的话那一格是「破图」图标，而这一组正是要看图画出来了没有。

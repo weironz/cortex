@@ -7,6 +7,8 @@ import '../../../models/attachment.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/attachment_controller.dart';
 import '../../../core/theme.dart';
+import '../../images/widgets/image_actions.dart';
+import '../../images/widgets/image_viewer.dart';
 
 /// Thumbnails for attachments already committed to a message.
 class AttachmentStrip extends StatelessWidget {
@@ -120,37 +122,72 @@ class _ImageThumbState extends ConsumerState<_ImageThumb> {
 
     return Tooltip(
       message: widget.label,
-      child: Container(
-        width: 132,
-        height: 96,
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
-          border: Border.all(color: scheme.outlineVariant),
-        ),
+      // 与图库那一格（`ImageThumb`）**同一副骨架**：`Material` + `InkWell`。
+      //
+      // 从前这里是裸的 `GestureDetector`，没有按下去的水波纹 —— 而它现在
+      // 是可以点的（点开大图）。一个能点却没有任何反馈的方块，用户要试
+      // 一下才知道点不点得动。
+      child: Material(
+        color: scheme.surfaceContainerHigh,
         clipBehavior: Clip.antiAlias,
-        child: _bytes == null
-            ? const Center(
-                child: SizedBox(
-                  width: 15,
-                  height: 15,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              )
-            : Image.memory(
-                _bytes!,
-                fit: BoxFit.cover,
-                // Decoding at display size instead of full resolution: a 12 MP
-                // photo would otherwise sit in the raster cache at ~48 MB.
-                cacheWidth: 264,
-                errorBuilder: (_, _, _) => Center(
-                  child: Icon(
-                    Icons.broken_image_outlined,
-                    size: 18,
-                    color: scheme.onSurfaceVariant,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
+          side: BorderSide(color: scheme.outlineVariant),
+        ),
+        child: InkWell(
+          // 点一下放大。**对话里那张也要能放大** —— 缩略图 132×96，
+          // 一张图画得对不对在这个尺寸上根本看不出来
+          onTap: () => showImageViewer(
+            context,
+            ViewerImage(
+              hash: widget.hash,
+              // 手上只有哈希。agent 画的那些都在图库里，所以**允许按哈希
+              // 去问一次**：不问的话，同一张图在对话里右键出来的菜单比
+              // 图库里少三项，而用户分不清那是两个东西
+              lookupByHash: true,
+            ),
+          ),
+          // 对话里那张图与图库里那张**共用同一份动作**（见 `ImageActions`）
+          onSecondaryTapDown: (d) => showImageContextMenu(
+            context,
+            d.globalPosition,
+            ImageActions(
+              ref: ref,
+              hash: widget.hash,
+              lookupByHash: true,
+              said: (m) => ScaffoldMessenger.maybeOf(
+                context,
+              )?.showSnackBar(SnackBar(content: Text(m))),
+            ),
+          ),
+          child: SizedBox(
+            width: 132,
+            height: 96,
+            child: _bytes == null
+                ? const Center(
+                    child: SizedBox(
+                      width: 15,
+                      height: 15,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                : Image.memory(
+                    _bytes!,
+                    fit: BoxFit.cover,
+                    // Decoding at display size instead of full resolution: a
+                    // 12 MP photo would otherwise sit in the raster cache at
+                    // ~48 MB.
+                    cacheWidth: 264,
+                    errorBuilder: (_, _, _) => Center(
+                      child: Icon(
+                        Icons.broken_image_outlined,
+                        size: 18,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
                   ),
-                ),
-              ),
+          ),
+        ),
       ),
     );
   }

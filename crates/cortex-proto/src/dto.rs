@@ -526,6 +526,21 @@ pub enum ChatEvent {
         /// 空 = 不知道（供应商没报）。客户端据此什么都不画。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         models: Vec<String>,
+        /// 这一轮**工具产出**的附件（当下只有 `generate_image` 画的图）。
+        ///
+        /// # ⚠️ 不带的话，画出来的图要重启应用才看得见
+        ///
+        /// 流式那条路只见过 delta 与工具事件，从来不知道这一轮往 episode 上
+        /// 挂了什么 blob。于是收尾时客户端拼出来的那条消息**没有附件** ——
+        /// 用户看到模型说「画好啦」，而屏幕上一张图都没有；要等到下次重新
+        /// 拉这条会话（换个会话再回来、或者重启）才出现。2026-08-23 实测。
+        ///
+        /// 让客户端在 `done` 之后自己再拉一次也能修，但那是每一轮多一次
+        /// 往返去问一个服务端此刻正握在手里的答案。
+        ///
+        /// 老客户端读不到这个字段 = 维持从前的行为（刷新后才见），不会更坏。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<AttachmentRef>,
     },
     /// 出错。仍以 SSE 事件形式返回，避免流中断后客户端无从判断原因
     Error { message: String },
@@ -1070,6 +1085,54 @@ pub struct ErrorBody {
 
 #[cfg(test)]
 mod tests {
+
+    /// 终帧要把这一轮**画出来的图**一起带走。
+    ///
+    /// 不带的话，客户端在流式那条路上从来不知道这一轮往 episode 上挂了什么
+    /// blob —— 用户看到模型说「画好啦」而屏幕上一张图都没有，要重新拉一次
+    /// 这条会话才出现。2026-08-23 在桌面端实测到的就是这个。
+    ///
+    /// 同时盯住**老客户端/老服务端**那两个方向：字段缺席要解成空表，
+    /// 空表要不出现在线上（否则老客户端会多收一个它不认识的键）。
+    #[test]
+    fn done_carries_what_the_turn_drew() {
+        let ev = super::ChatEvent::Done {
+            episode_id: "ep1".into(),
+            models: vec!["qwen-image".into()],
+            attachments: vec![super::AttachmentRef {
+                hash: "a".repeat(64),
+                kind: Some("image".into()),
+                filename: Some("生成的图.png".into()),
+            }],
+        };
+        let json = serde_json::to_string(&ev).expect("终帧可序列化");
+        assert!(
+            json.contains("生成的图.png"),
+            "画出来的图必须出现在终帧里，否则这一轮的界面上一张图都没有：{json}"
+        );
+
+        let old: super::ChatEvent = serde_json::from_str(r#"{"type":"done","episode_id":"ep1"}"#)
+            .expect("老服务端不发 attachments/models，仍要解得出来");
+        match old {
+            super::ChatEvent::Done { attachments, .. } => assert!(
+                attachments.is_empty(),
+                "字段缺席 = 这一轮没画东西，不是解析失败"
+            ),
+            other => panic!("解成了别的事件：{other:?}"),
+        }
+
+        let empty = serde_json::to_string(&super::ChatEvent::Done {
+            episode_id: "ep1".into(),
+            models: Vec::new(),
+            attachments: Vec::new(),
+        })
+        .expect("可序列化");
+        assert!(
+            !empty.contains("attachments"),
+            "空表不该上线 —— 老客户端会多收一个它不认识的键：{empty}"
+        );
+    }
+
     /// **三态的每个字段都要用 `explicit_option`，一个都不能漏。**
     ///
     /// serde 默认把「字段为 null」与「字段没出现」都解成 `None`，而这三个字段

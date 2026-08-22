@@ -18,6 +18,7 @@ class GeneratedImage {
     this.size,
     this.sessionId,
     this.createdAt,
+    this.shareUrl,
   });
 
   factory GeneratedImage.fromJson(Map<String, dynamic> json) => GeneratedImage(
@@ -29,6 +30,7 @@ class GeneratedImage {
     size: json['size'] as String?,
     sessionId: json['session_id'] as String?,
     createdAt: DateTime.tryParse(asString(json['created_at']))?.toLocal(),
+    shareUrl: json['share_url'] as String?,
   );
 
   final String id;
@@ -50,6 +52,13 @@ class GeneratedImage {
   /// 解析不出来时是 `null`。**不拿「现在」顶替** ——
   /// 一个编出来的时间会让整面墙的排序看起来是对的，而它其实是乱的。
   final DateTime? createdAt;
+
+  /// 已经分享出去的那条**公开**链接。`null` = 没分享过。
+  ///
+  /// 服务端回完整 URL 而不是 token：怎么拼（前缀、文件名、域名）是它的事，
+  /// 让客户端各拼各的，改一次路由就是一批拼错的链接 —— 而拼错的表现是
+  /// 用户发出去之后对方打不开。
+  final String? shareUrl;
 }
 
 /// `GET /images` 的一页。
@@ -87,4 +96,41 @@ class BlobUrl {
 
   final String url;
   final int expiresInSecs;
+}
+
+/// 一个相册。
+class Album {
+  const Album({
+    required this.id,
+    required this.name,
+    this.count = 0,
+    this.coverHash,
+  });
+
+  factory Album.fromJson(Map<String, dynamic> json) => Album(
+    id: asString(json['id']),
+    name: asString(json['name']),
+    count: asInt(json['count']),
+    coverHash: json['cover_hash'] as String?,
+  );
+
+  final String id;
+  final String name;
+  final int count;
+
+  /// 封面那张的 blob 哈希。`null` = 空相册。
+  final String? coverHash;
+}
+
+/// `GET /albums` 的响应。
+class Albums {
+  const Albums({this.albums = const []});
+
+  factory Albums.fromJson(Map<String, dynamic> json) => Albums(
+    albums: asObjectList(
+      json['albums'],
+    ).map(Album.fromJson).toList(growable: false),
+  );
+
+  final List<Album> albums;
 }

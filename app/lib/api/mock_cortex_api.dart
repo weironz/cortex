@@ -1260,10 +1260,107 @@ class MockCortexApi
     return hashes;
   }
 
+  /// 相册。假后端里就这一份，够界面走通「建 / 改名 / 加图 / 删」。
+  final List<Album> _albums = [];
+  final Map<String, Set<String>> _albumItems = {};
+
   @override
-  Future<Gallery> gallery({int limit = 30, String? before}) async {
+  Future<String> shareImage(String id) async {
+    await _latency(60);
+    _shared[id] = 'https://example.invalid/s/mocktoken/image.png';
+    return _shared[id]!;
+  }
+
+  @override
+  Future<void> unshareImage(String id) async {
+    await _latency(60);
+    _shared.remove(id);
+  }
+
+  final Map<String, String> _shared = {};
+
+  @override
+  Future<void> removeImage(String id) async {
+    await _latency(60);
+    _gallery.removeWhere((i) => i.id == id);
+    _shared.remove(id);
+    for (final s in _albumItems.values) {
+      s.remove(id);
+    }
+  }
+
+  @override
+  Future<Albums> albums() async {
+    await _latency(60);
+    return Albums(
+      albums: [
+        for (final a in _albums)
+          Album(
+            id: a.id,
+            name: a.name,
+            count: _albumItems[a.id]?.length ?? 0,
+            coverHash: _gallery
+                .where((i) => _albumItems[a.id]?.contains(i.id) ?? false)
+                .map((i) => i.hash)
+                .firstOrNull,
+          ),
+      ],
+    );
+  }
+
+  @override
+  Future<Albums> createAlbum(String name) async {
+    await _latency(60);
+    _albums.insert(0, Album(id: 'MOCKALBUM${_albums.length}', name: name));
+    return albums();
+  }
+
+  @override
+  Future<Albums> renameAlbum(String id, String name) async {
+    await _latency(60);
+    final at = _albums.indexWhere((a) => a.id == id);
+    if (at >= 0) _albums[at] = Album(id: id, name: name);
+    return albums();
+  }
+
+  @override
+  Future<void> deleteAlbum(String id) async {
+    await _latency(60);
+    _albums.removeWhere((a) => a.id == id);
+    _albumItems.remove(id);
+  }
+
+  @override
+  Future<void> setAlbumItems(
+    String id,
+    List<String> images, {
+    bool add = true,
+  }) async {
+    await _latency(60);
+    final set = _albumItems.putIfAbsent(id, () => <String>{});
+    if (add) {
+      set.addAll(images);
+    } else {
+      set.removeAll(images);
+    }
+  }
+
+  @override
+  Future<Gallery> gallery({
+    int limit = 30,
+    String? before,
+    String? album,
+    String? hash,
+  }) async {
     await _latency(80);
-    var items = _gallery;
+    var items = album == null
+        ? _gallery
+        : _gallery
+              .where((i) => _albumItems[album]?.contains(i.id) ?? false)
+              .toList();
+    if (hash != null) {
+      items = items.where((i) => i.hash == hash).toList();
+    }
     if (before != null) {
       final at = items.indexWhere((i) => i.id == before);
       items = at < 0 ? const [] : items.sublist(at + 1);

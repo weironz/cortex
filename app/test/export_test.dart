@@ -24,6 +24,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'dart:convert';
+import 'dart:typed_data';
 
 ChatSession _session({String title = '一段对话'}) =>
     ChatSession(id: 's1', title: title);
@@ -43,6 +44,20 @@ Episode _ep({
   toolCalls: tools,
   attachments: attachments,
 );
+
+/// 记下「另存为」被叫成什么名字。**替换掉真的那一条平台通道** ——
+/// 不替换的话，这一组测翻页的测试会挂在
+/// `MissingPluginException: ...method save...` 上，而那句失败信息读起来
+/// 跟翻页毫无关系。
+class _Saver {
+  String? name;
+  String? result = 'D:/tmp/x.json';
+
+  Future<String?> call(Uint8List bytes, String filename) async {
+    name = filename;
+    return result;
+  }
+}
 
 /// 一个分页的后端：把 [pages] 从新到旧一页一页发出去。
 class _PagedApi extends MockCortexApi {
@@ -175,8 +190,12 @@ void main() {
         [_ep(id: 'mid1', text: '中间一页')],
         [_ep(id: 'old1', text: '最早一页')],
       ]);
+      final saver = _Saver();
       final container = ProviderContainer(
-        overrides: [cortexApiProvider.overrideWithValue(api)],
+        overrides: [
+          cortexApiProvider.overrideWithValue(api),
+          saveBytesProvider.overrideWithValue(saver.call),
+        ],
       );
       addTearDown(container.dispose);
 
@@ -203,7 +222,10 @@ void main() {
         [_ep(id: 'old1', text: '最早')],
       ]);
       final container = ProviderContainer(
-        overrides: [cortexApiProvider.overrideWithValue(api)],
+        overrides: [
+          cortexApiProvider.overrideWithValue(api),
+          saveBytesProvider.overrideWithValue(_Saver().call),
+        ],
       );
       addTearDown(container.dispose);
 
@@ -225,6 +247,55 @@ void main() {
           .export('s1', ExportFormat.json);
       // 控制器那侧同样要是老→新
       expect(container.read(exportControllerProvider).episodeCount, 2);
+    });
+  });
+
+  group('另存为', () {
+    ProviderContainer containerWith(_Saver saver) {
+      final c = ProviderContainer(
+        overrides: [
+          cortexApiProvider.overrideWithValue(
+            _PagedApi([
+              [_ep(id: 'e1', text: '你好')],
+            ]),
+          ),
+          saveBytesProvider.overrideWithValue(saver.call),
+        ],
+      );
+      addTearDown(c.dispose);
+      return c;
+    }
+
+    test('留下的是**真实路径**，不是本地拼出来的文件名', () async {
+      final saver = _Saver()..result = r'C:\Users\me\Desktop\存档.json';
+      final container = containerWith(saver);
+
+      final ok = await container
+          .read(exportControllerProvider.notifier)
+          .export('s1', ExportFormat.json);
+
+      expect(ok, isTrue);
+      expect(
+        container.read(exportControllerProvider).savedName,
+        r'C:\Users\me\Desktop\存档.json',
+        reason:
+            '「存好了：cortex-xxx.json」却说不出存在哪，用户只能去翻文件夹 —— '
+            '2026-08-22 报上来的就是这个',
+      );
+      expect(saver.name, endsWith('.json'), reason: '扩展名要跟着格式走');
+    });
+
+    test('用户取消不是失败：不报错，也不说存好了', () async {
+      final container = containerWith(_Saver()..result = null);
+
+      final ok = await container
+          .read(exportControllerProvider.notifier)
+          .export('s1', ExportFormat.markdown);
+
+      expect(ok, isFalse);
+      final state = container.read(exportControllerProvider);
+      expect(state.savedName, isNull);
+      expect(state.error, isNull, reason: '取消是用户自己按的，弹一句红字会让他以为哪儿坏了');
     });
   });
 }

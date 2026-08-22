@@ -1,3 +1,4 @@
+import 'attachment.dart';
 import 'json.dart';
 import 'pending_confirmation.dart';
 
@@ -56,6 +57,9 @@ sealed class ChatEvent {
       'done' => ChatDoneEvent(
         asStringOrNull(json['episode_id']),
         models: asStringList(json['models']),
+        attachments: asObjectList(
+          json['attachments'],
+        ).map(Attachment.fromJson).toList(growable: false),
       ),
       'error' => ChatErrorEvent(
         asStringOrNull(json['message']) ?? '服务端返回了一个未描述的错误',
@@ -144,7 +148,11 @@ final class ChatConfirmEvent extends ChatEvent {
 
 /// Terminal frame. [episodeId] is the archived assistant episode.
 final class ChatDoneEvent extends ChatEvent {
-  const ChatDoneEvent(this.episodeId, {this.models = const []});
+  const ChatDoneEvent(
+    this.episodeId, {
+    this.models = const [],
+    this.attachments = const [],
+  });
   final String? episodeId;
 
   /// 这一轮**先后**是谁写的，按发生顺序。
@@ -153,6 +161,18 @@ final class ChatDoneEvent extends ChatEvent {
   /// 空 = 不知道（供应商没报、或者老服务端不发这个字段）——
   /// 界面据此什么都不画，不猜一个填上去。
   final List<String> models;
+
+  /// 这一轮**工具产出**的附件（当下只有 `generate_image` 画的图）。
+  ///
+  /// # ⚠️ 没有它，画出来的图要重新拉一次会话才看得见
+  ///
+  /// 流式这条路只见过 delta 与工具事件，从来不知道这一轮往 episode 上挂了
+  /// 什么 blob。于是收尾时拼出来的那条消息没有附件 —— 用户看到模型说
+  /// 「画好啦」，而屏幕上一张图都没有。2026-08-23 实测到的就是这个。
+  ///
+  /// 空 = 这一轮没产出附件，**或者**服务端是个不发这个字段的老版本
+  /// （那时维持从前的行为：刷新之后才见到，不会更坏）。
+  final List<Attachment> attachments;
 }
 
 /// Terminal frame carrying a server-side failure.

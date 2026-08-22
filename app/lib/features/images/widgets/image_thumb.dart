@@ -1,18 +1,48 @@
 /// 画廊里的一格。
 library;
 
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/theme.dart';
 import '../../../models/generated_image.dart';
 import '../../../state/blob_bytes.dart';
+import 'image_actions.dart';
 
 class ImageThumb extends ConsumerWidget {
-  const ImageThumb({super.key, required this.image, required this.onTap});
+  const ImageThumb({
+    super.key,
+    required this.image,
+    required this.onTap,
+    this.onSaid,
+    this.onChanged,
+    this.selected = false,
+    this.selecting = false,
+    this.onToggleSelect,
+  });
 
   final GeneratedImage image;
   final VoidCallback onTap;
+
+  /// 这一格被勾中了。
+  final bool selected;
+
+  /// 整面墙都在多选态 —— 这时**点一下就是勾选**，不是打开。
+  ///
+  /// 不这么做的话，用户勾了三张之后想勾第四张，得记得按住 Ctrl，
+  /// 而漏按的表现是弹出一张大图、勾选还在（他会以为是误触）。
+  final bool selecting;
+
+  /// `null` = 这一格不参与多选（对话里那张）。
+  final VoidCallback? onToggleSelect;
+
+  /// 动作做完之后要说的那句话（页面拿它弹 SnackBar）。
+  final void Function(String message)? onSaid;
+
+  /// 图库内容或分享状态变了。
+  final VoidCallback? onChanged;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -27,44 +57,106 @@ class ImageThumb extends ConsumerWidget {
       waitDuration: const Duration(milliseconds: 500),
       child: Material(
         color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
         clipBehavior: Clip.antiAlias,
+        // 勾中的画一圈实线边框 + 一个角标。**不是只改底色** ——
+        // 缩略图铺满整格，底色一点都露不出来。
+        //
+        // ⚠️ 圆角走 `shape` 而不是 `borderRadius`：`Material` 断言两者
+        // 不能同时给，而同时给的表现是**整页红屏**
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
+          side: selected
+              ? BorderSide(color: scheme.primary, width: 2.5)
+              : BorderSide.none,
+        ),
         child: InkWell(
-          onTap: onTap,
-          child: bytes.when(
-            loading: () => const Center(
-              child: SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
+          onTap: selecting && onToggleSelect != null ? onToggleSelect : onTap,
+          // 长按进多选（触屏）；Ctrl / ⌘ 点也行，见 `_ImagePageState`
+          onLongPress: onToggleSelect,
+          // 右键菜单与对话里那张**共用同一份动作**（`ImageActions`）——
+          // 两处各写一遍的下场是「在对话里能复制链接，在图库里不能」，
+          // 而用户根本分不清那是两个功能
+          onSecondaryTapDown: (d) => showImageContextMenu(
+            context,
+            d.globalPosition,
+            ImageActions(
+              ref: ref,
+              hash: image.hash,
+              galleryId: image.id,
+              prompt: image.prompt,
+              shareUrl: image.shareUrl,
+              said: onSaid ?? (_) {},
+              onRemoved: onChanged,
             ),
-            // 取不到就说取不到，**不画一个空格子** —— 空格子读起来像
-            // 「这张图是空白的」，而事实是它没下下来
-            error: (e, _) => Center(
-              child: Icon(
-                Icons.broken_image_outlined,
-                size: 18,
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-            data: (b) => Image.memory(
-              b,
-              fit: BoxFit.cover,
-              width: double.infinity,
-              height: double.infinity,
-              // 按显示尺寸解码，不按原图：一格 180 宽的位置放一张 1024×1024
-              // 的 png，全分辨率解出来在光栅缓存里是 4 MB —— 一屏二十格
-              // 就是 80 MB
-              cacheWidth: 400,
-              errorBuilder: (_, _, _) => Center(
-                child: Icon(
-                  Icons.broken_image_outlined,
-                  size: 18,
-                  color: scheme.onSurfaceVariant,
+          ),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              _picture(context, ref, bytes),
+              // 多选态下**每一格**都要有勾选框，不只是勾中的那些 ——
+              // 只画勾中的，用户看不出别的格子也能勾
+              if (selecting || selected)
+                Positioned(
+                  top: 6,
+                  left: 6,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: selected ? scheme.primary : scheme.surface,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: scheme.outlineVariant),
+                    ),
+                    padding: const EdgeInsets.all(2),
+                    child: Icon(
+                      selected ? Icons.check_rounded : Icons.circle_outlined,
+                      size: 13,
+                      color: selected ? scheme.onPrimary : scheme.outline,
+                    ),
+                  ),
                 ),
-              ),
-            ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _picture(
+    BuildContext context,
+    WidgetRef ref,
+    AsyncValue<Uint8List> bytes,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    return bytes.when(
+      loading: () => const Center(
+        child: SizedBox(
+          width: 16,
+          height: 16,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      ),
+      // 取不到就说取不到，**不画一个空格子** —— 空格子读起来像
+      // 「这张图是空白的」，而事实是它没下下来
+      error: (e, _) => Center(
+        child: Icon(
+          Icons.broken_image_outlined,
+          size: 18,
+          color: scheme.onSurfaceVariant,
+        ),
+      ),
+      data: (b) => Image.memory(
+        b,
+        fit: BoxFit.cover,
+        width: double.infinity,
+        height: double.infinity,
+        // 按显示尺寸解码，不按原图：一格 180 宽的位置放一张 1024×1024
+        // 的 png，全分辨率解出来在光栅缓存里是 4 MB —— 一屏二十格
+        // 就是 80 MB
+        cacheWidth: 400,
+        errorBuilder: (_, _, _) => Center(
+          child: Icon(
+            Icons.broken_image_outlined,
+            size: 18,
+            color: scheme.onSurfaceVariant,
           ),
         ),
       ),

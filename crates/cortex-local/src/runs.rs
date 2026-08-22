@@ -531,6 +531,7 @@ mod tests {
             .send(ChatEvent::Done {
                 episode_id: "e1".into(),
                 models: Vec::new(),
+                attachments: Vec::new(),
             })
             .await;
         drop(permit);
@@ -637,6 +638,7 @@ mod tests {
         sink.send(ChatEvent::Done {
             episode_id: "e1".into(),
             models: Vec::new(),
+            attachments: Vec::new(),
         })
         .await;
 
@@ -712,6 +714,7 @@ mod stop_tests {
             .send(ChatEvent::Done {
                 episode_id: "e1".into(),
                 models: Vec::new(),
+                attachments: Vec::new(),
             })
             .await;
         drop(permit);

@@ -814,7 +814,12 @@ async fn one_turn(
                 stdout.flush().ok();
                 wrote_body = true;
             }
-            Ok(ChatEvent::Done { episode_id, models }) => {
+            Ok(ChatEvent::Done {
+                episode_id,
+                models,
+                // CLI 不画图，附件只在图形界面上有意义
+                attachments: _,
+            }) => {
                 if wrote_body {
                     println!();
                 }

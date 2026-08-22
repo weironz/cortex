@@ -962,8 +962,8 @@ class ChatController extends Notifier<ChatState> {
             .read(confirmControllerProvider.notifier)
             .offer(request, sessionId: turn.sessionId);
 
-      case ChatDoneEvent(:final episodeId, :final models):
-        _commit(episodeId: episodeId, models: models);
+      case ChatDoneEvent(:final episodeId, :final models, :final attachments):
+        _commit(episodeId: episodeId, models: models, attachments: attachments);
 
       case ChatErrorEvent(:final message):
         _commit(error: message);
@@ -1022,6 +1022,7 @@ class ChatController extends Notifier<ChatState> {
     String? episodeId,
     String? error,
     List<String> models = const [],
+    List<Attachment> attachments = const [],
   }) {
     _flushTimer?.cancel();
     _flushTimer = null;
@@ -1039,6 +1040,10 @@ class ChatController extends Notifier<ChatState> {
       text: turn.text,
       createdAt: turn.startedAt,
       toolCalls: turn.toolCalls,
+      // 这一轮工具画出来的图。**服务端在终帧上带过来的** —— 不带的话
+      // 用户看到「画好啦」而屏幕上一张图都没有，要重新拉一次这条会话
+      // 才出现（见 `ChatDoneEvent.attachments`）
+      attachments: attachments,
       episodeId: episodeId,
       error: error,
       models: models,

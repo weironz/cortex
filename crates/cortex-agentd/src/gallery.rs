@@ -36,6 +36,18 @@ pub struct GalleryQuery {
     /// 只看这个相册里的。不传 = 全部。
     #[serde(default)]
     pub album: Option<String>,
+    /// 只看这个 blob 哈希对应的那一行。
+    ///
+    /// # 为什么需要它
+    ///
+    /// 对话里那张图**只有哈希**（附件就是这么带的），而分享 / 移除这些
+    /// 动作要的是画廊那一行的 id。没有这条路的话，同一张图在对话里
+    /// 右键出来的菜单比图库里少几项 —— 而用户根本分不清那是两个东西。
+    ///
+    /// 只回最新那一行：同一份字节被画过两次时（提示词一样、去重之后
+    /// 哈希相同），分享哪一行都指向同一批字节。
+    #[serde(default)]
+    pub hash: Option<String>,
 }
 
 /// `GET /images` —— 画廊，按时间倒序翻页。
@@ -85,12 +97,14 @@ pub async fn gallery(
             AND ($3::TEXT IS NULL OR EXISTS (
                     SELECT 1 FROM image_album_items i
                      WHERE i.image_id = g.id AND i.album_id = $3))
+            AND ($4::TEXT IS NULL OR g.blob_hash = $4)
           ORDER BY g.id DESC
           LIMIT $1",
     )
     .bind(limit + 1)
     .bind(q.before.as_deref())
     .bind(q.album.as_deref())
+    .bind(q.hash.as_deref())
     .fetch_all(store.pool())
     .await
     .map_err(|e| ApiError::internal(format!("读画廊失败：{e}")))?;

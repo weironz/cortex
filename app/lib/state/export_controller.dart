@@ -10,6 +10,24 @@ import '../core/session_export.dart';
 import '../models/episode.dart';
 import 'app_providers.dart';
 
+/// 「另存为」那一步。
+///
+/// # 为什么把它做成一个可替换的 provider
+///
+/// 不是抽象洁癖：它是**一条平台通道**。纯 `test()` 里碰它会抛
+/// `MissingPluginException`，而那个异常会被 [ExportController.export] 的
+/// catch 吞成一句 `state.error` —— 于是一组测「翻页」的测试挂在保存上，
+/// 读失败信息（「No implementation found for method save」）完全看不出
+/// 跟翻页有没有关系。2026-08-23 就是这么排了一轮。
+///
+/// 换成一个接缝之后，测翻页的只管翻页，测保存的自己去替换它。
+typedef SaveBytes = Future<String?> Function(Uint8List bytes, String filename);
+
+final saveBytesProvider = Provider<SaveBytes>(
+  (_) =>
+      (bytes, filename) => saveBytesAs(bytes, filename),
+);
+
 /// 一次导出最多往回翻多少页。
 ///
 /// **不是为了限制导出的长度**，是为了在游标出问题时不无限翻下去 ——
@@ -68,13 +86,18 @@ class ExportController extends Notifier<ExportState> {
         exportedAt: DateTime.now(),
       );
       final bytes = Uint8List.fromList(utf8.encode(doc.render(format)));
-      final saved = await saveBytesAs(bytes, doc.fileName(format));
+      // `saveBytesAs` 现在回**真实路径**（Web 上回文件名）。此前它回 bool，
+      // 界面只能拿本地拼的文件名充数 —— 而那时用户根本没选过位置
+      final saved = await ref.read(saveBytesProvider)(
+        bytes,
+        doc.fileName(format),
+      );
       state = ExportState(
-        savedName: saved ? doc.fileName(format) : null,
+        savedName: saved,
         episodeCount: all.length,
         truncated: truncated,
       );
-      return saved;
+      return saved != null;
     } on CortexApiException catch (e) {
       state = ExportState(error: e.message);
       return false;

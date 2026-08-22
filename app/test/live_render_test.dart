@@ -99,10 +99,16 @@ void main() {
             // 正是审计行里有那次调用。同 `live_backend_test` 里的 `POST /chat`
             sessionId:
                 'live-render-${DateTime.now().millisecondsSinceEpoch}-$attempt',
-            // 从前这里让它读 `app/pubspec.yaml`。cortexd 现在不提供文件工具，
-            // 那句话只会换来一次失败的调用 —— 而这条用例要的是一次**成功**的，
-            // 好让审计行有东西可画。`memory_search` 是它唯一给的那个
-            message: '用 memory_search 工具查一下 Cortex 这个项目，再用一两句话说说你查到了什么',
+            // ⚠️ **这里点名的工具必须是当下真的存在的那个。**
+            //
+            // 这条用例要的是一次**成功**的调用，好让审计行有东西可画。
+            // 从前它点名 `memory_search` —— 而那个工具 2026-08-17
+            // 随记忆层一起拆掉了，于是模型只能回一句「我没有这个工具」，
+            // 一次调用都不发，这条从那天起一直是红的。
+            //
+            // 用 `write_file`，与 `live_backend_test` 里那条「工具事件成对」
+            // 同一个 —— 两处点同一个工具，下线时一起红，不会漏掉一处。
+            message: '用 write_file 工具往 note.txt 写一行 hello，然后一句话说说结果。',
           )) {
             switch (event) {
               case ChatDeltaEvent(:final text):

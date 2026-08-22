@@ -699,6 +699,10 @@ impl Engine {
 
         // ── 5. 写 assistant episode（顺带工具归因 + 触发抽取）──
         let assistant_id = Id::new().to_string();
+        // **取出来留一份**：episode 要它，下面那条 Done 也要它。
+        // 只给 episode 的话，客户端在这一轮里看不到画出来的图（见
+        // `ChatEvent::Done::attachments` 的注释）
+        let drawn = host.take_drawn();
         if !reply.is_empty() || !tool_calls.is_empty() {
             let ep = NewEpisodeRequest {
                 id: assistant_id.clone(),
@@ -709,7 +713,7 @@ impl Engine {
                 // 这一轮 `generate_image` 生成的图。挂在 assistant 消息上，
                 // 与用户自己上传的附件走同一条路 —— 渲染、同步、跨设备
                 // 都不必另写一套
-                attachments: host.take_drawn(),
+                attachments: drawn.clone(),
                 retrieve: false,
                 anchor_episode_id: Some(user_id),
                 tool_calls,
@@ -747,6 +751,9 @@ impl Engine {
         tx.send(ChatEvent::Done {
             episode_id: assistant_id,
             models,
+            // 这一轮画出来的图。不带的话，用户看到「画好啦」而屏幕上
+            // 一张图都没有 —— 要重新拉一次这条会话才出现
+            attachments: drawn,
         })
         .await;
         Ok(())

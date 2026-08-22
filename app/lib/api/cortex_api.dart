@@ -580,7 +580,48 @@ abstract interface class CortexApi {
   });
 
   /// `GET /images` —— 画廊，按时间倒序翻页。
-  Future<Gallery> gallery({int limit, String? before});
+  ///
+  /// [album] 只看某个相册里的；[hash] 只看某份字节对应的那一行。
+  ///
+  /// [hash] 是给**对话里那张图**用的：附件只带哈希，而分享 / 移除要的是
+  /// 画廊那一行的 id。没有它，同一张图在对话里右键出来的菜单会比图库里
+  /// 少几项 —— 而用户根本分不清那是两个东西。
+  Future<Gallery> gallery({
+    int limit,
+    String? before,
+    String? album,
+    String? hash,
+  });
+
+  /// `POST /images/{id}/share` —— 拿一条**公开**链接（免登录、长期有效）。
+  ///
+  /// 重复调用回同一条。界面上必须说清它是公开的 —— 用户以为自己只是
+  /// 「复制了个地址」，而那是把这张图放到了公网上。
+  Future<String> shareImage(String id);
+
+  /// `DELETE /images/{id}/share` —— 撤销。那条链接当场 404。
+  Future<void> unshareImage(String id);
+
+  /// `DELETE /images/{id}` —— 从图库移除。
+  ///
+  /// **blob 不动**：对话里那张图照常显示。所以界面上这个动作叫
+  /// 「从图库移除」，不叫「删除图片」。
+  Future<void> removeImage(String id);
+
+  /// `GET /albums` —— 相册列表（带张数与封面）。
+  Future<Albums> albums();
+
+  /// `POST /albums` —— 新建。回**整份列表**，客户端不必自己拼。
+  Future<Albums> createAlbum(String name);
+
+  /// `PATCH /albums/{id}` —— 改名。
+  Future<Albums> renameAlbum(String id, String name);
+
+  /// `DELETE /albums/{id}` —— 删相册。**里面的图一张都不会没。**
+  Future<void> deleteAlbum(String id);
+
+  /// `POST|DELETE /albums/{id}/items` —— 把几张图加进 / 拿出这个相册。
+  Future<void> setAlbumItems(String id, List<String> images, {bool add});
 
   /// `GET /sandbox/workspace.tar` — 把云沙箱的整个工作区打包取回来。
   ///
@@ -755,9 +796,35 @@ mixin ImagesUnsupported {
 
   /// 画廊回**空**而不是抛：一个「还没画过图」的账号本来就是空的，
   /// 而这里的替身多半只是不关心图片这一块。抛错会让每个用它的测试
-  /// 都被迫处理一个与它无关的异常。
-  Future<Gallery> gallery({int limit = 30, String? before}) async =>
-      const Gallery();
+  /// 都被迫处理一个与它无关的异常。同理相册。
+  Future<Gallery> gallery({
+    int limit = 30,
+    String? before,
+    String? album,
+    String? hash,
+  }) async => const Gallery();
+
+  Future<Albums> albums() async => const Albums();
+
+  // 下面这些都是**动作**，不是查询 —— 回一个「成功了」等于骗调用方。
+  // 空列表与「没画过图」讲得通，「分享成功但没有链接」讲不通
+  Future<String> shareImage(String id) async => throw _absent;
+
+  Future<void> unshareImage(String id) async => throw _absent;
+
+  Future<void> removeImage(String id) async => throw _absent;
+
+  Future<Albums> createAlbum(String name) async => throw _absent;
+
+  Future<Albums> renameAlbum(String id, String name) async => throw _absent;
+
+  Future<void> deleteAlbum(String id) async => throw _absent;
+
+  Future<void> setAlbumItems(
+    String id,
+    List<String> images, {
+    bool add = true,
+  }) async => throw _absent;
 }
 
 mixin LocalMcpUnsupported {
