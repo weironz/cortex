@@ -49,7 +49,7 @@
 | Docker（含 compose v2） | Postgres / RustFS / rclone / 恢复演练全部走容器 | 什么都跑不起来 |
 | Rust 1.97.1（`rust-toolchain.toml` 已钉） | 编译 | 只跑生产镜像的话不需要 |
 | `just` | 全部命令的入口 | 可以手工照着 justfile 敲 |
-| Python 3.9+ | **只有 CI 用**：`scripts/evals-gate.py verify-baseline` 校验两份基线 JSON 的格式 | 本机什么都不影响，`just ci` 不碰它 |
+| Python 3.9+ | `just ci` 里的六条静态闸：文档链接、圆角阶、边缘路由、变量名边界、评测基线格式、以及「CI 的每一步本机都跑得到」 | `just ci` 直接失败 —— 2026-08-22 之前这些只有 CI 跑得到，于是本机的绿是假的 |
 
 宿主机**不需要**装 `psql`、`pg_basebackup`、`rclone` —— 备份脚本一律经容器调用。
 这是刻意的：备份链路上每多一个宿主机依赖，就多一个在灾难当天装不上的东西。

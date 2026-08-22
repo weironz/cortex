@@ -88,27 +88,11 @@ jobs:
       # 「-P supports only unibyte and UTF-8 locales」并以非零码退出，
       # 而 `if grep …` 会把那个错误当成「没匹配」—— **守卫静默失效，一路绿灯**。
       # 这道检查本身就是为了防静默失效，它自己不能有静默失效。
+      #
+      # ⚠️ 2026-08-22 从 inline 抽成脚本：inline 的那份**本机没有任何办法跑**，
+      # 而 `just ci` 自称跑得到 CI 的每一步。抽出去之后两边调同一份。
       - name: 变量名边界（$VAR 后面紧跟中文标点）
-        run: |
-          python3 - <<'PY'
-          import glob, io, re, sys
-          pat = re.compile(rb'\$[A-Za-z_][A-Za-z0-9_]*[\xc0-\xf7]')
-          bad = []
-          for f in sorted(glob.glob('scripts/*.sh') + glob.glob('deploy/*.sh')):
-              for n, line in enumerate(io.open(f, 'rb').read().split(b'\n'), 1):
-                  if pat.search(line):
-                      bad.append(f'{f}:{n}: {line.decode("utf-8", "replace").strip()}')
-          if bad:
-              for b in bad:
-                  print(f'::error file={b.split(":")[0]},line={b.split(":")[1]}::变量名边界不确定')
-                  print(b)
-              print(f'\n共 {len(bad)} 处。$VAR 后面紧跟非 ASCII 字符时，'
-                    '变量名到哪结束取决于 locale 与 bash 版本 —— '
-                    'macOS 自带的 bash 3.2 会把那个字节吃进变量名。')
-              print('改成 ${VAR} 即可：加一对花括号，不改语义。')
-              sys.exit(1)
-          print('✓ 没有边界不确定的变量展开')
-          PY
+        run: python3 scripts/check-var-boundaries.py
 
       - name: python 语法检查
         run: python3 -m py_compile scripts/*.py
@@ -219,6 +203,16 @@ jobs:
         run: |
           bash scripts/check-compose-env.sh deploy/docker-compose.yml
           bash scripts/check-compose-env.sh docker-compose.dev.yml
+
+      # 上面每一步都要在 `just ci` 里也跑得到 —— 否则本机的绿是假的。
+      #
+      # 这句话以前只是 `just ci` 上面的一句注释，而注释不校验自己：
+      # 2026-08-20（文档链接）与 08-22（compose 变量）各烂过一次，两次都是
+      # 本机全绿、推上去才红，一来一回二十多分钟。
+      #
+      # **这一步放在最后**：它是关于这个作业本身的，前面全绿了它才有话可说。
+      - name: 本机 just ci 跑得到 CI 的每一步
+        run: python3 scripts/check-ci-parity.py
 
   # ── 测试 ───────────────────────────────────────────────
   test:

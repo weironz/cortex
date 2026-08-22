@@ -454,6 +454,11 @@ docs-check:
 lint-sh:
     #!/usr/bin/env bash
     set -euo pipefail
+    # 语法先于风格：shellcheck 对一个语法不成立的文件报的东西没法读。
+    for f in scripts/*.sh; do
+        bash -n "$f"
+    done
+    echo "✔ bash -n 通过"
     # 以「shellcheck」开头的注释是**指令**，不是注释。
     #
     # 一句中文注释恰好断行成 `# shellcheck 会挑（SC2086）…`，shellcheck 就
@@ -472,6 +477,33 @@ lint-sh:
         echo "⚠ 本机没装 shellcheck，这一步跳过了 —— CI 上它是会跑的。"
         echo "  装上：winget install koalaman.shellcheck"
     fi
+    python3 scripts/check-var-boundaries.py
+
+# scripts/ 里的 python 语法。与 lint-sh 分开是因为它扫的是另一类文件，
+# 合在一条叫 lint-sh 的 recipe 里，名字就开始骗人了。
+lint-py:
+    python3 -m py_compile scripts/*.py
+    @echo "✔ python 语法通过"
+
+# 路由加了、边缘不知道 —— **而症状是 200**。
+#
+# dev 的 nginx 里 API 是枚举的，漏一条就落到 SPA 回落上，回 200 + index.html。
+# 逐条打状态码的那种验证一次都发现不了（见 CLAUDE.md 里 `/api` 前缀那段）。
+lint-edge:
+    python3 scripts/check-edge-routes.py
+
+# 基线文件是回归门的全部依据，它自己损坏 / 缺字段的话，门会静静地失效。
+#
+# 真的回归门在 Cormex 那边跑（见 justfile 里「检索评测」那一节），
+# 这里只校验 JSON 的格式 —— 不需要那个 crate，所以本机跑得动。
+evals-baseline:
+    python3 scripts/evals-gate.py verify-baseline scripts/evals-baseline.*.json
+
+# 闸：CI 跑的每一步，`just ci` 要么也跑，要么在脚本的 EXEMPT 里写清为什么不必。
+#
+# 它自己也在 `ci` 的闭包里 —— 否则这道闸就是它自己要拦的那种东西。
+lint-ci-parity:
+    python3 scripts/check-ci-parity.py
 
 # agentd 读的每个环境变量，两份 compose 都得能设它。
 #
@@ -489,7 +521,12 @@ lint-compose-env:
     bash scripts/check-compose-env.sh docker-compose.dev.yml
 
 # 本地跑一遍 CI 的全部检查（含客户端 —— 不含的话它与 CI 是两回事）
-ci: fmt-check lint check test docs-check lint-sh lint-compose-env flutter-check
+#
+# ⚠️ **这一行不再靠人维护**：`lint-ci-parity` 拿 ci.yml 的步骤名逐条比对这条
+# 依赖链，CI 加了一步而这里没跟上就红（那件事 2026-08-20 与 08-22 各发生过
+# 一次，两次都是本机全绿、推上去才知道）。加 recipe 时连同
+# `scripts/check-ci-parity.py` 的 COVERED 一起改。
+ci: fmt-check lint check test docs-check lint-sh lint-py lint-edge release-check evals-baseline lint-compose-env lint-ci-parity flutter-check
     @echo "全部检查通过"
 
 # ══════════════════════════════════════════════════════════
