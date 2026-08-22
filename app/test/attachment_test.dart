@@ -186,7 +186,6 @@ class _BlobApi
     String? model,
     String? source,
     ImagePrefs? imagePrefs,
-    bool sandbox = false,
   }) async* {
     lastSentAttachments = attachments;
     yield const ChatDoneEvent('epi_1');

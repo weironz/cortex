@@ -170,7 +170,6 @@ class _FakeApi
     String? model,
     String? source,
     ImagePrefs? imagePrefs,
-    bool sandbox = false,
   }) => throw UnimplementedError('同步链路不应发起对话');
 
   @override

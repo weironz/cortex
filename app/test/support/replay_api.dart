@@ -218,7 +218,6 @@ class ReplayApi
     String? model,
     String? source,
     ImagePrefs? imagePrefs,
-    bool sandbox = false,
   }) async* {
     yield const ChatDeltaEvent('好');
     yield const ChatDoneEvent('epi_new');

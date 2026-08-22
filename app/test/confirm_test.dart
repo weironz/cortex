@@ -628,7 +628,6 @@ class _ConfirmApi
     String? model,
     String? source,
     ImagePrefs? imagePrefs,
-    bool sandbox = false,
   }) => const Stream.empty();
 
   @override
