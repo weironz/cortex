@@ -260,6 +260,40 @@ pub struct ChatRequest {
     /// 而那次同步失败时用户看到的是「我明明切了档」。
     #[serde(default)]
     pub permission_mode: PermissionMode,
+    /// 这一轮如果画图，按什么规格画。`None` = 完全听模型的。
+    ///
+    /// 与 [`Self::permission_mode`] 同一个路数：逐轮带，用户在图片页底下
+    /// 那个规格面板随时能改，改完**下一句**就该按新的走。
+    ///
+    /// # 它穿了三层，而中间那层不认识它
+    ///
+    /// 客户端 → agentd → `cortex-local`。agentd 那侧是**逐字节透传**
+    /// （`sandbox_proxy::forward` 不解析 body），所以只有两端要认识它。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_prefs: Option<ImagePrefs>,
+}
+
+/// 这一轮生图的规格偏好。
+///
+/// # ⚠️ 它是**兜底**，不是覆盖
+///
+/// 模型自己在工具参数里填了 `size` 就听模型的 —— 用户那句「画一张宽的」
+/// 是**这一次**的意图，比规格面板上那个留着没动的值更近。覆盖的表现是
+/// 他说的话被一个他早就忘了的设置静默否决，而界面上没有任何地方解释。
+///
+/// `n` 没有这个问题：工具参数里根本没有它，模型表达不了。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImagePrefs {
+    /// `宽*高`，如 `1024*1024`。`None` = 让模型自己按提示词推荐。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    /// 出几张。
+    #[serde(default = "one_image")]
+    pub n: u8,
+}
+
+const fn one_image() -> u8 {
+    1
 }
 
 /// 一条 `episode_blobs` 关联 —— **上行**方向（客户端 → 服务端）。
@@ -347,6 +381,23 @@ pub struct SessionSearchResponse {
     pub hits: Vec<SessionSearchHitDto>,
 }
 
+/// 一条 [`ChatEvent::Tool`] 说的是「要调了」还是「调完了」。
+///
+/// # 缺省是 `Result` 而不是 `Call`
+///
+/// 老服务端不下发这个字段。那时按 `Result` 走 = **不画进行中的占位**，
+/// 而按 `Call` 走 = 画一个**永远不会消失**的占位（因为那台服务端也不会
+/// 发第二条来撤它）。少一个动画，好过界面上永久卡着一块「正在生成」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPhase {
+    /// 即将执行。这一刻还没有结果，也就没有 `diff`。
+    Call,
+    /// 执行完了。
+    #[default]
+    Result,
+}
+
 /// SSE 事件。`type` 字段做判别式，客户端按它分派。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -394,6 +445,17 @@ pub enum ChatEvent {
         /// 结构化内容，改一次措辞就是**静默显示错东西**。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<String>,
+        /// 这是**开始调**还是**调完了**。
+        ///
+        /// # 为什么必须是一个字段，而不是让客户端猜
+        ///
+        /// 这两件事发的是同一个变体（同样的 name / path），此前只有 `summary`
+        /// 的措辞不同（「调用 x」vs「x 完成」）。于是「生成中那个占位什么时候
+        /// 撤掉」只能靠正则去切一句给人看的话 —— 与 `path`、`diff` 单独成
+        /// 字段是同一条理由，而这里猜错的表现更难查：占位要么永远不出现，
+        /// 要么永远不消失。
+        #[serde(default)]
+        phase: ToolPhase,
     },
     /// **需要用户确认一次高风险工具调用。这一轮已经挂起，在等回执。**
     ///

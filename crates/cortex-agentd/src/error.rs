@@ -55,6 +55,22 @@ impl ApiError {
         }
     }
 
+    /// 404：这个东西不在。
+    ///
+    /// 与 400 分开是有具体后果的：分享链接被撤销之后再打开，回 400 的话
+    /// 浏览器地址栏那一页写的是「错误的请求」——**而请求一点没错**，
+    /// 是那张图不在了。用户会去检查自己有没有复制全。
+    ///
+    /// ⚠️ 这条消息**不该区分「从来没有」与「撤销了」**：区分开就是一个
+    /// 可探测的信息面（拿一堆 token 来问，能问出哪些曾经存在过）。
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            message: Some(message.into()),
+            inner: cortex_core::CortexError::Store("not found".into()),
+            status: Some(StatusCode::NOT_FOUND),
+        }
+    }
+
     /// 413：这个体积在这条路上搬不动。
     pub fn payload_too_large(message: impl Into<String>) -> Self {
         Self {

@@ -172,15 +172,22 @@ impl Remote {
         &self,
         prompt: &str,
         size: Option<&str>,
+        n: u8,
         session_id: &str,
     ) -> Result<GeneratedImages> {
         let resp = self
             .auth(self.http.post(self.url("/llm/image")))
-            .timeout(std::time::Duration::from_secs(240))
+            // ⚠️ **超时要跟着张数走。** 服务端在不支持 n 的协议上是**连发**
+            // n 次凑够的（见 `cortex_llm::image::generate`），四张就是四倍的
+            // 时间。写死 240s 的话，画三张以上必定在最后一张上被掐断 ——
+            // 而那时前面几张的钱已经花掉了
+            .timeout(std::time::Duration::from_secs(
+                180 + 120 * u64::from(n.max(1)),
+            ))
             .json(&serde_json::json!({
                 "prompt": prompt,
                 "size": size,
-                "n": 1,
+                "n": n,
                 // 只进画廊，不影响生成 —— 有了它，画廊里那张图才回答得了
                 // 「这是我在哪条会话里画的」
                 "session_id": session_id,

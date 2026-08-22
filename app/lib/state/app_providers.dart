@@ -36,6 +36,7 @@ import '../api/mock_cortex_api.dart';
 import '../auth/local_llm_store.dart';
 import '../models/attachment.dart';
 import '../models/chat_event.dart';
+import '../models/image_prefs.dart';
 import '../models/import_plan.dart';
 import '../models/sync_event.dart';
 import '../core/app_config.dart';
@@ -1109,6 +1110,7 @@ class GateClosedApi implements CortexApi {
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    ImagePrefs? imagePrefs,
   }) => Stream.error(_closed);
 
   @override

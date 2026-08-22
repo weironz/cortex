@@ -16,6 +16,7 @@ import '../models/model_role.dart';
 import '../models/mcp.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
+import '../models/image_prefs.dart';
 import '../models/generated_image.dart';
 import '../models/chat_event.dart';
 import '../models/chat_session.dart';
@@ -1204,6 +1205,7 @@ class HttpCortexApi implements CortexApi {
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    ImagePrefs? imagePrefs,
   }) async* {
     final request = http.Request('POST', _uri('/chat'))
       // A header, not a ticket: `POST /chat` is issued by `package:http`, which
@@ -1238,6 +1240,10 @@ class HttpCortexApi implements CortexApi {
         // 来源是独立字段，不编进 model —— ollama 的型号名本身带冒号，
         // 而且同一家可以配两条来源
         if (source != null && source.isNotEmpty) 'source': source,
+        // 什么都没设时整个字段不发 —— 发一个全默认的对象与不发在服务端
+        // 是同一个意思（`resolve_image_spec` 两边都走「听模型的」）
+        if (imagePrefs != null && !imagePrefs.isDefault)
+          'image_prefs': imagePrefs.toJson(),
       });
 
     final http.StreamedResponse response;

@@ -6,6 +6,7 @@
 library;
 
 import 'package:cortex_app/core/permission_mode.dart';
+import 'package:cortex_app/models/image_prefs.dart';
 import 'dart:typed_data';
 import 'package:cortex_app/models/auth_tokens.dart';
 import 'package:cortex_app/models/import_plan.dart';
@@ -216,6 +217,7 @@ class ReplayApi
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    ImagePrefs? imagePrefs,
     bool sandbox = false,
   }) async* {
     yield const ChatDeltaEvent('好');

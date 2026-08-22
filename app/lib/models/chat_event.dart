@@ -30,6 +30,7 @@ sealed class ChatEvent {
         summary: asStringOrNull(json['summary']),
         path: asStringOrNull(json['path']),
         diff: asStringOrNull(json['diff']),
+        phase: ToolPhase.fromWire(json['phase']),
       ),
       'confirm' => ChatConfirmEvent(
         PendingConfirmation(
@@ -86,10 +87,38 @@ final class ChatDeltaEvent extends ChatEvent {
 
 /// The agent invoked a tool. Rendered as a collapsible one-liner in the
 /// conversation, not as message content.
+/// 一条 [ChatToolEvent] 说的是「要调了」还是「调完了」。
+///
+/// # 缺省是 [result] 而不是 [call]
+///
+/// 老服务端不下发这个字段。按 `result` 走 = **不画进行中的占位**；
+/// 按 `call` 走 = 画一个**永远不会消失**的占位（那台服务端也不会发
+/// 第二条来撤它）。少一个动画，好过界面上永久卡着一块「正在生成」。
+enum ToolPhase {
+  call,
+  result;
+
+  static ToolPhase fromWire(Object? v) =>
+      v == 'call' ? ToolPhase.call : ToolPhase.result;
+}
+
 final class ChatToolEvent extends ChatEvent {
-  const ChatToolEvent({required this.name, this.summary, this.path, this.diff});
+  const ChatToolEvent({
+    required this.name,
+    this.summary,
+    this.path,
+    this.diff,
+    this.phase = ToolPhase.result,
+  });
   final String name;
   final String? summary;
+
+  /// 要调了，还是调完了。
+  ///
+  /// 单独一个字段而不是从 [summary] 里正则抠 —— 与 [path] / [diff] 同一条
+  /// 理由：summary 是给人看的一句话，措辞随时会改，而这里猜错的表现是
+  /// 「正在生成」那块占位要么永远不出现、要么永远不消失。
+  final ToolPhase phase;
 
   /// The file this call touched, or null for a tool that touches none.
   /// Optional in the contract precisely so that a tool touching no file can

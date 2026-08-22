@@ -1,4 +1,5 @@
 import 'package:cortex_app/core/permission_mode.dart';
+import 'package:cortex_app/models/image_prefs.dart';
 import 'dart:async';
 import 'package:cortex_app/models/auth_tokens.dart';
 import 'package:cortex_app/models/import_plan.dart';
@@ -646,6 +647,7 @@ class _GateApi
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    ImagePrefs? imagePrefs,
     bool sandbox = false,
   }) => throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
 

@@ -11,6 +11,7 @@ import '../models/mcp.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
 import '../models/generated_image.dart';
+import '../models/image_prefs.dart';
 import '../models/chat_event.dart';
 import '../models/chat_session.dart';
 import '../models/episode.dart';
@@ -168,6 +169,12 @@ abstract interface class CortexApi {
     /// **下一句**就该按新的走。
     String? model,
     String? source,
+
+    /// 这一轮如果画图，按什么规格。`null` = 完全听模型的。
+    ///
+    /// 与 [permissionMode] 同一路数：逐轮带。图片页底下那个规格面板随时
+    /// 能改，改完**下一句**就该按新的走。
+    ImagePrefs? imagePrefs,
   });
 
   /// `GET /runs/{session_id}` → SSE —— 挂上一个**已经在跑**的轮次。

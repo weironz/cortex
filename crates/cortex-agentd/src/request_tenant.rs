@@ -142,7 +142,7 @@ impl AgentState {
     /// 抽出来是因为「`public` 复用启动时那个池」这一条**两边都要记得**，
     /// 而漏掉它不报错 —— 只是给 1 号用户多开一个连着同一个 schema 的池，
     /// 在 `max_connections` 只有 100 的机器上悄悄吃掉配额。
-    async fn tenant_on(&self, schema: SchemaName) -> Result<Tenant, ApiError> {
+    pub(crate) async fn tenant_on(&self, schema: SchemaName) -> Result<Tenant, ApiError> {
         let Some(public_store) = self.public_store() else {
             return Ok(Tenant::Mock);
         };

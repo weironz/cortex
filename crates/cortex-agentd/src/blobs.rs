@@ -247,7 +247,10 @@ impl MediaStore {
         Ok(self.inner.get(hash).await?)
     }
 
-    async fn get_stream(&self, hash: &str) -> cortex_core::Result<cortex_blob::BlobStream> {
+    pub(crate) async fn get_stream(
+        &self,
+        hash: &str,
+    ) -> cortex_core::Result<cortex_blob::BlobStream> {
         Ok(self.inner.get_stream(hash).await?)
     }
 

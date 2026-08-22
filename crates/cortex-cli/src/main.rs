@@ -739,6 +739,8 @@ async fn one_turn(
             // `--permission-mode`（2026-08-17 补）。收得到 ask 与
             // accept-edits；bypass 被显式拒绝，见 `parse_cli_permission_mode`
             permission_mode,
+            // CLI 不画图 —— 规格面板是图片页那边的东西
+            image_prefs: None,
         })
         .await?;
 

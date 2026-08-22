@@ -333,6 +333,35 @@ pub struct GalleryImage {
     pub session_id: Option<String>,
     /// RFC 3339。
     pub created_at: String,
+    /// 分享出去的那条链接。`None` = 没分享过。
+    ///
+    /// **回完整 URL 而不是 token**：token 拼成什么样是服务端的事（前缀、
+    /// 文件名、域名都由它定），让客户端各拼各的，改一次路由就是一批
+    /// 拼错的链接 —— 而拼错的表现是用户发出去之后对方打不开。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_url: Option<String>,
+}
+
+/// 一个相册。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Album {
+    pub id: String,
+    pub name: String,
+    /// 里面有几张。
+    pub count: i64,
+    /// 封面那张的 blob 哈希。`None` = 空相册。
+    ///
+    /// 不做单独上传的封面：一张要维护的封面图会立刻带出「封面那张被删了
+    /// 怎么办」。取相册里最新那张，删了就自动换下一张。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_hash: Option<String>,
+    pub created_at: String,
+}
+
+/// `GET /albums` 的响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Albums {
+    pub albums: Vec<Album>,
 }
 
 /// `GET /images` 的响应。游标形状与 `sessionDetail` 一致。

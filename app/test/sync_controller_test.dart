@@ -1,4 +1,5 @@
 import 'package:cortex_app/core/permission_mode.dart';
+import 'package:cortex_app/models/image_prefs.dart';
 import 'dart:async';
 import 'package:cortex_app/models/auth_tokens.dart';
 import 'package:cortex_app/models/import_plan.dart';
@@ -168,6 +169,7 @@ class _FakeApi
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    ImagePrefs? imagePrefs,
     bool sandbox = false,
   }) => throw UnimplementedError('同步链路不应发起对话');
 

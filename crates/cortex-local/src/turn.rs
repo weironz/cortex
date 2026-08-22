@@ -652,6 +652,7 @@ impl Engine {
             mcp: Arc::clone(&self.mcp),
             grants: self.grants.clone(),
             remote: self.remote.clone(),
+            image_prefs: req.image_prefs.clone(),
             drawn: std::sync::Mutex::new(Vec::new()),
         };
         // 这一轮用哪个模型。逐轮的选择是**那一轮的属性**，而 `self.llm`
@@ -849,6 +850,7 @@ async fn bridge_events(
                     // 「即将调用」这一刻还没有结果，也就还没有 diff。
                     // 它随 ToolResult 那一条到达
                     diff: None,
+                    phase: cortex_proto::dto::ToolPhase::Call,
                 }
             }
             AgentEvent::ToolResult {
@@ -870,6 +872,7 @@ async fn bridge_events(
                     name,
                     path,
                     diff,
+                    phase: cortex_proto::dto::ToolPhase::Result,
                 }
             }
         };
@@ -898,6 +901,35 @@ struct SessionContext {
 }
 
 /// agent 循环要的宿主能力。
+/// 这一次画图，尺寸听谁的、画几张。
+///
+/// # 尺寸：模型说了算，面板兜底
+///
+/// 模型在工具参数里填了 `size`，说明用户在**这句话里**表达过（「画一张
+/// 宽的」「竖版海报」）。规格面板上那个值可能是他几天前设的、早就忘了。
+/// 反过来让面板覆盖，表现就是「我说画宽的，它给我方的」，而界面上没有
+/// 任何地方解释是谁改的。
+///
+/// # 张数：只能听面板的
+///
+/// 工具参数里**根本没有** `n`（见 `cortex-agent/src/tools.rs` 的
+/// `generate_image` schema），模型表达不了这件事。
+fn resolve_image_spec(
+    asked: Option<&str>,
+    prefs: Option<&cortex_proto::dto::ImagePrefs>,
+) -> (Option<String>, u8) {
+    let asked = asked
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    (
+        asked.or_else(|| prefs.and_then(|p| p.size.clone())),
+        // `max(1)` 不是防御式编程：线上收到 0 的表现是一张都不画而界面
+        // 说成功了，那比画一张更糟
+        prefs.map_or(1, |p| p.n.max(1)),
+    )
+}
+
 struct LocalHost {
     events: Arc<crate::runs::RunSink>,
     session_id: String,
@@ -908,6 +940,13 @@ struct LocalHost {
     /// 打服务端那条路。**生图要用它** —— key 在服务端，本地拿不到，
     /// 见 `cortex_agentd::image` 的模块头。
     remote: crate::remote::Remote,
+
+    /// 这一轮的生图规格偏好（图片页那个规格面板发过来的）。
+    ///
+    /// ⚠️ **兜底，不是覆盖**：模型自己在工具参数里填了尺寸就听模型的 ——
+    /// 用户那句「画一张宽的」是**这一次**的意图，比规格面板上那个留着没动
+    /// 的值更近。覆盖的表现是他说的话被一个他早就忘了的设置静默否决。
+    image_prefs: Option<cortex_proto::dto::ImagePrefs>,
     /// 这一轮生成的图。
     ///
     /// # 为什么攒着而不是当场挂到消息上
@@ -973,15 +1012,12 @@ impl ToolHost for LocalHost {
         if prompt.is_empty() {
             return cortex_agent::ToolResult::err("prompt 不能为空");
         }
-        let size = arguments
-            .get("size")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+        let asked = arguments.get("size").and_then(|v| v.as_str());
+        let (size, n) = resolve_image_spec(asked, self.image_prefs.as_ref());
 
         match self
             .remote
-            .generate_image(prompt, size, &self.session_id)
+            .generate_image(prompt, size.as_deref(), n, &self.session_id)
             .await
         {
             Ok(got) if !got.images.is_empty() => {
@@ -1364,6 +1400,72 @@ mod tests {
             PermissionMode::default(),
             PermissionMode::Ask,
             "一个从别处抄来的配置、一个忘了传的字段，都不该让 agent 静默             拿到无人值守的执行权"
+        );
+    }
+}
+
+/// 「这一次画图听谁的」——[`resolve_image_spec`]。
+///
+/// 这一段只有两行，但它错了的表现极难查：用户在句子里说的尺寸被一个他
+/// 早就忘了的面板设置静默否决，而两边都不报错、也没有任何地方解释。
+#[cfg(test)]
+mod image_spec_tests {
+    use super::resolve_image_spec;
+    use cortex_proto::dto::ImagePrefs;
+
+    fn prefs(size: Option<&str>, n: u8) -> ImagePrefs {
+        ImagePrefs {
+            size: size.map(str::to_owned),
+            n,
+        }
+    }
+
+    #[test]
+    fn 模型说了尺寸就听模型的() {
+        let (size, _) = resolve_image_spec(Some("1536*1024"), Some(&prefs(Some("1024*1024"), 1)));
+        assert_eq!(
+            size.as_deref(),
+            Some("1536*1024"),
+            "用户在这句话里说的是「宽的」，那比面板上留着没动的值更近 —— \
+             反过来的表现是「我说画宽的，它给我方的」"
+        );
+    }
+
+    #[test]
+    fn 模型没说才用面板的() {
+        let (size, _) = resolve_image_spec(None, Some(&prefs(Some("1024*1536"), 1)));
+        assert_eq!(size.as_deref(), Some("1024*1536"));
+        // 空串与全空白都算「没说」——它们来自模型填了一个占位符
+        let (size, _) = resolve_image_spec(Some("   "), Some(&prefs(Some("1024*1536"), 1)));
+        assert_eq!(
+            size.as_deref(),
+            Some("1024*1536"),
+            "一个只有空格的 size 是「没填」，不是「填了个空尺寸」"
+        );
+    }
+
+    #[test]
+    fn 两边都没说就交给上游() {
+        let (size, n) = resolve_image_spec(None, None);
+        assert_eq!(size, None, "让模型按提示词自己推荐，而不是我们编一个");
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn 张数只听面板的() {
+        let (_, n) = resolve_image_spec(Some("1024*1024"), Some(&prefs(None, 3)));
+        assert_eq!(
+            n, 3,
+            "工具参数里根本没有 n，模型表达不了这件事 —— 只能听面板"
+        );
+    }
+
+    #[test]
+    fn 张数为零时按一张走() {
+        let (_, n) = resolve_image_spec(None, Some(&prefs(None, 0)));
+        assert_eq!(
+            n, 1,
+            "收到 0 的表现是一张都不画而界面说成功了，那比画一张更糟"
         );
     }
 }

@@ -33,7 +33,7 @@
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use cortex_proto::delegate::Delegation;
 use cortex_proto::dto::{ChatRequest, SessionRuntimeDto};
@@ -156,7 +156,20 @@ protected_routes! {
     "/llm/image" [POST] => post(crate::image::generate),
     // 画廊。**不在 `/llm` 下面** —— 那个前缀底下是「去问模型」，
     // 而这条只是读自己库里的一张表，一次外部调用都不发
-    "/images" [GET] => get(crate::image::gallery),
+    "/images" [GET] => get(crate::gallery::gallery),
+    // 从图库移除。**blob 不动** —— 对话里那张图照常显示，
+    // 见 `gallery::remove` 的文档
+    "/images/{id}" [DELETE] => delete(crate::gallery::remove),
+    // 分享 / 撤销。链接本身落在公开清单里的 `/s/{token}/{filename}`
+    "/images/{id}/share" [POST, DELETE] => post(crate::gallery::share)
+        .delete(crate::gallery::unshare),
+    // 相册（照 immich：一张图可以在多个相册里）
+    "/albums" [GET, POST] => get(crate::gallery::albums)
+        .post(crate::gallery::create_album),
+    "/albums/{id}" [PATCH, DELETE] => patch(crate::gallery::rename_album)
+        .delete(crate::gallery::delete_album),
+    "/albums/{id}/items" [POST, DELETE] => post(crate::gallery::add_to_album)
+        .delete(crate::gallery::remove_from_album),
     // 自带 API key。三个动作一条路径：看状态 / 存 / 撤下。
     //
     // 它跟着 `/llm/stream` 一起来 —— 「谁的 key」与「在哪花」必须由同一个
@@ -330,6 +343,19 @@ fn public_routes() -> Vec<(&'static str, axum::routing::MethodRouter<AgentState>
         ("/auth/refresh", post(crate::accounts::refresh)),
         ("/auth/logout", post(crate::accounts::logout)),
         ("/auth/register", post(crate::accounts::register)),
+        // **分享链接。**
+        //
+        // 为什么它不能要凭据：分享按定义就是给一个**没有凭据的人**看的。
+        // 要了凭据它就不成立 —— 这与上面两类（探针配不了首部、登录时
+        // 还没有凭据）是同一个形状：不是「懒得认证」，是「认证在这里
+        // 没有意义」。
+        //
+        // 能这么开的前提是 **token 自己就是凭据**：32 字节随机、只在用户
+        // 点下「分享」那一刻才存在、撤销就没了（见
+        // `migrations-global/20260823000001_image_shares.sql`）。
+        // 它与 blob hash 刻意分开 —— hash 会出现在别的响应里，
+        // 拿它当凭据等于「见过这张图的人永久有权限」。
+        ("/s/{token}/{filename}", get(crate::gallery::shared_image)),
     ]
 }
 
@@ -1581,6 +1607,7 @@ mod tests {
                 "/auth/refresh",
                 "/auth/logout",
                 "/auth/register",
+                "/s/{token}/{filename}",
             ],
             "免认证清单变了。**每一条都要能单独说出「为什么它不能要凭据」** ——              探针配不了首部、登录时还没有凭据，就这两类。             说不出来的那一条，属于 protected_routes!"
         );

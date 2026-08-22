@@ -110,6 +110,14 @@ server {
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # ⚠️ **`$host` 不带端口，`$http_host` 带。**
+        #
+        # 分享链接是 agentd 自己拼的（它看不到自己对外是什么地址），
+        # 只有 `Host` 时 dev 上拼出来的是 `http://127.0.0.1/s/...` ——
+        # 少了 `:5173`，复制出去谁都打不开。生产上恰好不发作（443 是默认
+        # 端口），所以这个洞只在开发机上看得见，也只有实跑才撞得到。
+        # traefik 默认就发这个头，两边因此一致
+        proxy_set_header X-Forwarded-Host  $http_host;
 
         # ── SSE 必须关掉缓冲 ──
         #
@@ -142,13 +150,21 @@ server {
     # （`deploy/docker-compose.yml:346`）。dev 这条是 allow-list，漏一条的
     # 表现是**回 200 + index.html** —— 看起来像成功，实际落在了下面那个 SPA
     # 回落上。2026-08-22 加 `/images` 时正撞上这个。
-    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes|blobs|images|import|sandbox-snapshots|confirmations|delegated-tokens|agents|runs)(/|$) {
+    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes|blobs|images|albums|s|import|sandbox-snapshots|confirmations|delegated-tokens|agents|runs)(/|$) {
         proxy_pass http://agentd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # ⚠️ **`$host` 不带端口，`$http_host` 带。**
+        #
+        # 分享链接是 agentd 自己拼的（它看不到自己对外是什么地址），
+        # 只有 `Host` 时 dev 上拼出来的是 `http://127.0.0.1/s/...` ——
+        # 少了 `:5173`，复制出去谁都打不开。生产上恰好不发作（443 是默认
+        # 端口），所以这个洞只在开发机上看得见，也只有实跑才撞得到。
+        # traefik 默认就发这个头，两边因此一致
+        proxy_set_header X-Forwarded-Host  $http_host;
 
         # `/chat` 是 SSE，理由同上面那段
         proxy_buffering    off;

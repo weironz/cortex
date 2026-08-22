@@ -414,6 +414,7 @@ mod tests {
             summary: String::new(),
             path: None,
             diff: None,
+            phase: cortex_proto::dto::ToolPhase::Result,
         }
     }
 

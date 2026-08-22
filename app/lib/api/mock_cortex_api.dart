@@ -12,6 +12,7 @@ import 'dart:typed_data';
 import '../core/hashing.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
+import '../models/image_prefs.dart';
 import '../models/generated_image.dart';
 import '../models/chat_event.dart';
 import '../models/chat_session.dart';
@@ -1394,6 +1395,7 @@ class MockCortexApi
     PermissionMode permissionMode = PermissionMode.ask,
     String? model,
     String? source,
+    ImagePrefs? imagePrefs,
   }) async* {
     if (_disposed) {
       throw const CortexApiException('Mock 数据源已关闭');
