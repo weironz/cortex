@@ -5,10 +5,11 @@ import '../../../api/api_exception.dart';
 import '../../../core/local_agent.dart';
 import '../../../models/mcp.dart';
 import '../../../state/app_providers.dart';
+import 'connector_strip.dart';
 import 'mcp_add.dart';
 import '../../../core/theme.dart';
 
-/// MCP 与工具这一页。
+/// 连接器这一页。
 ///
 /// # 四层，靠一个 `_view` 在同一块地方切
 ///
@@ -225,7 +226,11 @@ class _ServerListState extends ConsumerState<_ServerList> {
             ),
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 14),
+        // 精选排在**列表上面**：新用户到这一页时列表是空的，而他要的正是
+        // 「我该接什么」—— 把答案压在一块空白下面等于没给
+        ConnectorStrip(config: cfg),
+        const Divider(height: 26),
         Expanded(
           child: cfg.isEmpty
               ? _Empty(path: cfg.path)

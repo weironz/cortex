@@ -93,8 +93,10 @@ class _SettingsPageState extends State<SettingsPage> {
       page: SkillsPage(),
     ),
     (
-      label: 'MCP 与工具',
-      hint: '第三方 server',
+      // 「连接器」而不是「MCP」：MCP 是协议名，说的是**怎么接**；
+      // 用户在这一列里找的是**接什么**。协议名留在页内解释里
+      label: '连接器',
+      hint: '一键接入 · MCP server',
       icon: Icons.extension_outlined,
       page: McpPage(),
     ),
