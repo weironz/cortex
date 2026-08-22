@@ -77,3 +77,11 @@ app/.idea/
 
 # 提交消息用的临时文件（反引号在 shell 里会被当成命令替换，所以走文件）
 .git-msg.tmp
+
+# 调试时用来喂 curl 的临时 JSON。
+#
+# ⚠️ **这一条是有代价换来的**：2026-08-24 一次 `git add -A` 把 `.reg-out.json`
+# 一起提交推上去了，而那里面装着一个刚注册出来的 dev access/refresh token。
+# Git Bash 弄不好中文请求体（见 CLAUDE.md 的边界一节），所以这类临时文件会
+# 反复出现 —— 让 .gitignore 记住它，比每次记得手动删可靠。
+/.[a-z0-9_-]*.json
