@@ -648,7 +648,6 @@ class _GateApi
     String? model,
     String? source,
     ImagePrefs? imagePrefs,
-    bool sandbox = false,
   }) => throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
 
   @override
