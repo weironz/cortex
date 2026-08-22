@@ -876,6 +876,37 @@ agent 的 `generate_image` 工具也是打这条 —— 两处各记一遍的下
 （CLAUDE.md 约束 4）。所以界面上「换智能体」的语义是开一条新对话，
 理由与具体做法写在 [`docs/design.md`](design.md) 第十二节。
 
+### 技能：两层，而分层的意义全在「贵的那一半什么时候搬」
+
+`migrations/20260826000001_skills.sql` + `crates/cortex-agentd/src/skills.rs`。
+又一张普通的配置表（不做事件溯源、不进 `sync_log`）。真正的设计在于**它分两层**：
+
+| 层 | 内容 | 什么时候进上下文 | 走哪条路 |
+|---|---|---|---|
+| 目录 | 名字 + 一句话说明 | **每一轮**，在系统提示词里 | `ChatRequest.skills`，客户端带 |
+| 正文 | `instructions` | 模型调了 `load_skill` 之后 | `GET /skills/body?name=…` |
+
+全塞进提示词也能跑，而且只有一两条时更省事。撑不住的是第十条：系统提示词是
+可缓存前缀的头，十份做法全塞进去等于**每一轮**都为那九份用不上的付钱。
+
+⚠️ **目录与 `load_skill` 同生共死**（CLAUDE.md 约束 2）。一处判据
+（`cortex-local` 的 `has_skills`），两处消费：`prompt::skills_note` 决定印不印
+那一块，`with_external` 决定摆不摆那个工具。各判各的话，漏掉的那一半不会有
+任何测试红 —— 症状只是「模型看得见技能却取不回来」或者反过来，两种都表现为
+模型胡说。`turn.rs` 的 `技能目录与取正文的工具一起出现一起消失` 钉着它。
+
+⚠️ **`GET /skills/body` 必须进委托令牌的白名单，`GET /skills` 不能进。**
+前者漏掉的症状实测过：桌面端取得回来，云端会话里 `load_skill` 连吃两个 403，
+而两边跑的是同一份 agent 代码 —— 看起来完全像随机故障。后者放行则等于让容器
+里的不可信代码一次拿走**所有**正文，把分层绕了过去。两条都由
+`routes.rs::a_delegated_credential_is_admitted_only_where_its_scope_reaches` 守。
+
+**名字是标识符，不是标签**：数据库上带 UNIQUE。模型在目录里看见名字、
+`load_skill` 拿的也是名字，重名会让那次取回**静默地**取到其中一条，而另一条的
+做法从此再也不会被执行。取正文那条路的名字走 query（`?name=…`）而不是路径段：
+技能名是用户随手起的，里面完全可以有斜杠，而 `%2F` 在不同的反代上被规范化的
+方式还不一样。
+
 ⚠️ **dev 的 nginx 是 allow-list，生产的 traefik 是 deny-list。**
 加 `/images` 时它一开始落到了 SPA 回落上（**回 200 + index.html**，看起来像
 成功）。生产那侧 `/api` 除 memory/mcp 外全归 agentd，不用动 —— 这条不对称

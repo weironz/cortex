@@ -496,6 +496,43 @@ pub fn image_spec() -> ToolSpec {
     }
 }
 
+/// `load_skill` —— 把一份技能的正文取回来。
+///
+/// # 它与 `image_spec` 一样，**默认不在目录里**
+///
+/// 只有这一轮真的带了非空的技能目录时才加进去。没有技能却摆着它，模型会
+/// 拿一个它从提示词里读不到的名字去调，然后收到「没有这个技能」——
+/// 一次白白浪费的往返，且读起来像出了故障。这是 CLAUDE.md 约束 2
+/// 的直接后果：目录里摆什么，模型就会去调什么。
+///
+/// # 参数是**名字**，不是 id
+///
+/// 模型手上只有名字（提示词里那块目录就是这么写的）。要 id 意味着目录里
+/// 得多一列对它毫无意义的乱码，而它多半还会抄错。
+#[must_use]
+pub fn skill_spec() -> ToolSpec {
+    ToolSpec {
+        name: "load_skill".into(),
+        description: "把一份技能的完整做法取回来。系统提示词里只列了技能的                      名字和一句话说明 —— 判断某一条与当前任务相关时，先用                      这个工具取回正文，再照着做"
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "技能的名字，与目录里列出的那个一字不差"
+                }
+            },
+            "required": ["name"]
+        }),
+        // 只读，且读的是用户自己写下的东西：与 `read_file` 同一档（Safe）。
+        // 抬一档的话每取一次都要打断用户一次，而它什么也没改、什么也没花
+        risk: Risk::Safe,
+        path_arg: None,
+        source: ToolSource::Builtin,
+    }
+}
+
 /// 内置工具目录。
 #[must_use]
 pub fn builtin_specs() -> Vec<ToolSpec> {

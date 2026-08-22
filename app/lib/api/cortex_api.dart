@@ -20,6 +20,7 @@ import '../models/import_plan.dart';
 import '../models/pending_confirmation.dart';
 import '../models/assistant.dart';
 import '../models/project.dart';
+import '../models/skill.dart';
 import '../models/session_detail.dart';
 import '../models/model_option.dart';
 import '../models/session_search_hit.dart';
@@ -178,6 +179,14 @@ abstract interface class CortexApi {
     /// prompt caching。所以界面上「换智能体」= 开一条新对话。
     Assistant? assistant,
 
+    /// 这一轮**有哪些技能可用** —— 只有名字与说明，没有正文。
+    ///
+    /// 服务端据此在系统提示词里渲染一小块目录，并且**只有在这个列表非空时**
+    /// 才把 `load_skill` 摆进工具目录。正文由那个工具按需取回。
+    ///
+    /// ⚠️ 不带正文正是分层的全部意义：贵的那一半只在真要用时才进上下文。
+    List<Skill> skills,
+
     /// 这一轮如果画图，按什么规格。`null` = 完全听模型的。
     ///
     /// 与 [permissionMode] 同一路数：逐轮带。图片页底下那个规格面板随时
@@ -284,6 +293,34 @@ abstract interface class CortexApi {
   ///
   /// **不影响已经用它聊过的会话**：人设是逐轮带的，历史一个字都不会变。
   Future<void> deleteAssistant(String id);
+
+  /// `GET /skills` —— 全部技能（**含正文**，设置页要编辑它）。
+  ///
+  /// ⚠️ 发给 `/chat` 的那一份**不含正文**（`Skill.toBrief()`）——
+  /// 分层的意义就在那一点。
+  ///
+  /// 老服务端答 404，调用方按 [CortexApiException.isUnsupported] 优雅降级。
+  Future<List<Skill>> skills();
+
+  /// `POST /skills`
+  ///
+  /// 重名会被拒（名字在服务端带 UNIQUE：模型用它取正文，重名会取错）。
+  Future<Skill> createSkill(Skill draft);
+
+  /// `PATCH /skills/{id}` —— 只发真的要改的那几个字段。
+  Future<Skill> updateSkill(
+    String id, {
+    String? name,
+    String? description,
+    String? instructions,
+    bool? enabled,
+  });
+
+  /// `DELETE /skills/{id}`
+  ///
+  /// **不影响已经聊过的会话**：目录是逐轮带的、正文是当场取回来的，
+  /// 两样都已经落进历史里的消息了。
+  Future<void> deleteSkill(String id);
 
   /// `POST /projects {"name": …}`
   Future<Project> createProject(String name);
@@ -815,6 +852,26 @@ mixin RunAttachUnsupported {
   Stream<ChatEvent> attachChat(String sessionId) => Stream<ChatEvent>.error(
     const CortexApiException('这个后端没有可重挂的轮次。', statusCode: 404),
   );
+}
+
+/// 给测试替身用：这个后端没有技能。
+mixin SkillsUnsupported {
+  static const _absent = CortexApiException('这个后端没有技能。', statusCode: 404);
+
+  /// 列表回**空**而不是抛 —— 与 `AssistantsUnsupported` 同一条理由。
+  Future<List<Skill>> skills() async => const [];
+
+  Future<Skill> createSkill(Skill draft) async => throw _absent;
+
+  Future<Skill> updateSkill(
+    String id, {
+    String? name,
+    String? description,
+    String? instructions,
+    bool? enabled,
+  }) async => throw _absent;
+
+  Future<void> deleteSkill(String id) async => throw _absent;
 }
 
 /// 给测试替身用：这个后端没有智能体。

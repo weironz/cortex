@@ -1,3 +1,4 @@
+import 'package:cortex_app/models/skill.dart';
 import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/models/image_prefs.dart';
@@ -480,6 +481,7 @@ class _ConfirmApi
         RunAttachUnsupported,
         ImagesUnsupported,
         AssistantsUnsupported,
+        SkillsUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
@@ -630,6 +632,7 @@ class _ConfirmApi
     String? model,
     String? source,
     Assistant? assistant,
+    List<Skill> skills = const [],
     ImagePrefs? imagePrefs,
   }) => const Stream.empty();
 

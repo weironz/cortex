@@ -13,6 +13,7 @@ library;
 
 import 'dart:async';
 
+import 'package:cortex_app/models/skill.dart';
 import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/models/image_prefs.dart';
@@ -55,6 +56,7 @@ class _Api extends MockCortexApi {
     String? model,
     String? source,
     Assistant? assistant,
+    List<Skill> skills = const [],
     ImagePrefs? imagePrefs,
   }) {
     sent.add((text: message, attachments: attachments));

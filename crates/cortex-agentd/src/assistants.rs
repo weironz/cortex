@@ -12,7 +12,7 @@
 //! # 为什么不做事件溯源、也不进 sync_log
 //!
 //! 见 `migrations/20260825000001_assistants.sql` 顶上那段。一句话：它是配置，
-//! 改就是覆盖；代价是另一台设备上改了要等下一次 `GET /agents` 才看得见。
+//! 改就是覆盖；代价是另一台设备上改了要等下一次 `GET /assistants` 才看得见。
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -28,7 +28,7 @@ use crate::state::AgentState;
 /// 与迁移里那条 CHECK 同一个数 —— **两处都要有**：数据库那条是最后一道
 /// 闸（挡住绕过 API 的写入），这一条是为了让用户拿到一句看得懂的话，
 /// 而不是一条「违反约束」。
-const MAX_INSTRUCTIONS: usize = 20_000;
+pub(crate) const MAX_INSTRUCTIONS: usize = 20_000;
 const MAX_NAME: usize = 100;
 const MAX_DESCRIPTION: usize = 500;
 
@@ -61,7 +61,7 @@ impl From<AssistantRow> for AssistantDto {
     }
 }
 
-/// `GET /agents`
+/// `GET /assistants`
 ///
 /// 三条查询各自把列名写全，而不是 `format!` 拼一个常量进去：sqlx 明确拒绝
 /// 拼出来的 SQL（`dynamic SQL strings should be audited`），而那道闸是对的
@@ -92,7 +92,7 @@ pub async fn list(
     }))
 }
 
-/// `POST /agents`
+/// `POST /assistants`
 ///
 /// # Errors
 /// 名字为空、人设太长，或者这个部署没有数据库。
@@ -131,7 +131,7 @@ pub async fn create(
     Ok(Json(row.into()))
 }
 
-/// `PATCH /agents/{id}`
+/// `PATCH /assistants/{id}`
 ///
 /// # Errors
 /// 请求体里一个要改的字段都没有、值不合法、这个智能体不存在，
@@ -202,7 +202,7 @@ pub async fn patch(
         .ok_or_else(|| ApiError::not_found(format!("找不到智能体：{id}")))
 }
 
-/// `DELETE /agents/{id}`
+/// `DELETE /assistants/{id}`
 ///
 /// # 删掉它**不影响已经用它聊过的会话**
 ///
@@ -249,7 +249,7 @@ fn validate_name(raw: &str) -> Result<String, ApiError> {
 /// 在服务端**也**截住长度，而不是只靠数据库那条 CHECK。
 ///
 /// 靠 CHECK 的话，用户写了一万五千字的人设，得到的是一条
-/// 「违反约束 agents_instructions_check」—— 他既看不懂，也不知道该删多少。
+/// 「违反约束 assistants_instructions_check」—— 他既看不懂，也不知道该删多少。
 fn validate_len(raw: &str, max: usize, what: &str) -> Result<String, ApiError> {
     let v = raw.trim();
     let n = v.chars().count();
@@ -275,7 +275,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_nameless_agent_is_rejected() {
+    fn a_nameless_assistant_is_rejected() {
         assert!(
             validate_name("   ").is_err(),
             "空白名字要当场拒，而不是存一个看不见的东西"

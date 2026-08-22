@@ -39,6 +39,7 @@ import '../models/attachment.dart';
 import '../models/chat_event.dart';
 import '../models/image_prefs.dart';
 import '../models/import_plan.dart';
+import '../models/skill.dart';
 import '../models/sync_event.dart';
 import '../core/app_config.dart';
 import '../core/local_llm.dart';
@@ -1243,6 +1244,7 @@ class GateClosedApi implements CortexApi {
     String? model,
     String? source,
     Assistant? assistant,
+    List<Skill> skills = const [],
     ImagePrefs? imagePrefs,
   }) => Stream.error(_closed);
 

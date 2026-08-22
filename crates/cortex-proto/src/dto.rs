@@ -268,6 +268,15 @@ pub struct ChatRequest {
     /// 会以为这一轮在说那个 agent。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant: Option<crate::assistants::AssistantBrief>,
+    /// 这一轮**有哪些技能可用** —— 只有名字与说明，没有正文。
+    ///
+    /// `cortex-local` 据此在系统提示词里渲染一小块目录，并且**只有在这个
+    /// 列表非空时**才把 `load_skill` 摆进工具目录。正文由那个工具按需取回。
+    ///
+    /// ⚠️ 为什么正文不在这里：正文是这两层里贵的那一半，把它每轮都发过来
+    /// 就等于取消了分层。见 [`crate::skills`] 的模块文档。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<crate::skills::SkillBrief>,
     /// 这一轮的权限档位。老客户端不传即 [`PermissionMode::Ask`]。
     ///
     /// 逐轮带而不是存在会话上：用户在对话框底部随时能改，而改完之后

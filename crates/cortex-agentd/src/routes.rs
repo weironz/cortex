@@ -143,6 +143,14 @@ protected_routes! {
         .post(crate::assistants::create),
     "/assistants/{id}" [PATCH, DELETE] => patch(crate::assistants::patch)
         .delete(crate::assistants::delete),
+    // 技能。⚠️ 取正文那条的名字走 **query**（`?name=…`）而不是路径段：
+    // 技能名是用户随手起的，里面完全可以有斜杠、`?`、空格。塞进路径段要自己
+    // 转义，而 `%2F` 在不同的反代上被规范化的方式还不一样
+    "/skills" [GET, POST] => get(crate::skills::list)
+        .post(crate::skills::create),
+    "/skills/body" [GET] => get(crate::skills::body),
+    "/skills/{id}" [PATCH, DELETE] => patch(crate::skills::patch)
+        .delete(crate::skills::delete),
     "/projects" [GET, POST] => get(crate::projects::list).post(crate::projects::create),
     "/projects/{id}" [PATCH, DELETE] => patch(crate::projects::patch)
         .delete(crate::projects::delete),
@@ -1992,6 +2000,28 @@ mod tests {
             StatusCode::FORBIDDEN,
             "作用域外的路由得到 {out_of_scope}，预期 403。200 说明作用域根本没被检查，\
              一把沙箱钥匙就此等同于用户的完整凭据"
+        );
+
+        // 够得着：取技能正文那条。这个部署没有数据库，所以它会 501 ——
+        // 而 501 恰恰证明请求穿过了那道门。
+        //
+        // ⚠️ 这条**是实测补上的**：第一版漏了它，症状是模型在云端会话里调
+        // `load_skill` 连吃两个 403，然后老实告诉用户「取不回来」—— 桌面端
+        // 却好使，而两边跑的是同一份 agent 代码，看起来完全像随机故障
+        let skill_body = status(Method::GET, "/skills/body?name=x", "").await;
+        assert_eq!(
+            skill_body,
+            StatusCode::NOT_IMPLEMENTED,
+            "取技能正文那条拿委托令牌打过去得到 {skill_body}。403 说明白名单漏了它 ——              云端会话里的技能会静默地全部取不回来，而桌面端一切正常"
+        );
+
+        // 够不着：整张技能表（含所有正文）是**设置页**的路。容器里没有任何
+        // 理由把全部正文一次拉走 —— 那是把「按需取回」这层设计绕过去了
+        let whole_table = status(Method::GET, "/skills", "").await;
+        assert_eq!(
+            whole_table,
+            StatusCode::FORBIDDEN,
+            "沙箱拿委托令牌拉整张技能表得到 {whole_table}，预期 403 ——              放行它等于让不可信代码一次拿走所有正文，而分层的意义正是不这么做"
         );
 
         // 够不着，而且是最要紧的那一条：`/confirmations` 放行会让 agentd 把

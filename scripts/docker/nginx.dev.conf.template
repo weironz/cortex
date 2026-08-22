@@ -150,7 +150,7 @@ server {
     # （`deploy/docker-compose.yml:346`）。dev 这条是 allow-list，漏一条的
     # 表现是**回 200 + index.html** —— 看起来像成功，实际落在了下面那个 SPA
     # 回落上。2026-08-22 加 `/images` 时正撞上这个。
-    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes|blobs|images|albums|s|import|sandbox-snapshots|confirmations|delegated-tokens|agents|assistants|runs)(/|$) {
+    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes|blobs|images|albums|s|import|sandbox-snapshots|confirmations|delegated-tokens|agents|assistants|skills|runs)(/|$) {
         proxy_pass http://agentd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;

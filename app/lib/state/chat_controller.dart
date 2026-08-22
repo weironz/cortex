@@ -17,6 +17,7 @@ import '../models/workspace.dart';
 import 'app_providers.dart';
 import '../models/assistant.dart';
 import 'assistant_controller.dart';
+import 'skill_controller.dart';
 import 'chat_state.dart';
 import 'model_controller.dart';
 import 'confirm_controller.dart';
@@ -897,6 +898,12 @@ class ChatController extends Notifier<ChatState> {
       // instructions 拿去替换默认那句身份描述，模型得到的是一段没有身份的
       // 提示词 —— 比默认那句更糟。挡在传输层的话，换一条传输就漏
       assistant: _assistantFor(sessionId),
+      // 技能目录 —— **开着的那些，全局的，不按会话**。
+      //
+      // 与人设不同：人设回答「你是谁」（换掉会让历史前后不一致，所以按
+      // 会话绑），技能回答「这件事怎么做」（多一条可用的做法不会让模型
+      // 改口）。理由写在 `skill_controller.dart` 的文件注释里
+      skills: ref.read(skillControllerProvider).listable,
       // 生图规格同理。**兜底不覆盖** —— 模型在工具参数里自己填了尺寸就
       // 听模型的，见服务端 `resolve_image_spec`
       imagePrefs: ref.read(imagePrefsProvider),

@@ -1,3 +1,4 @@
+import 'package:cortex_app/models/skill.dart';
 import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/models/image_prefs.dart';
@@ -44,6 +45,7 @@ class _FakeApi
         RunAttachUnsupported,
         ImagesUnsupported,
         AssistantsUnsupported,
+        SkillsUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
@@ -172,6 +174,7 @@ class _FakeApi
     String? model,
     String? source,
     Assistant? assistant,
+    List<Skill> skills = const [],
     ImagePrefs? imagePrefs,
   }) => throw UnimplementedError('同步链路不应发起对话');
 

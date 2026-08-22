@@ -27,6 +27,7 @@ import '../models/import_plan.dart';
 import '../models/json.dart';
 import '../models/pending_confirmation.dart';
 import '../models/project.dart';
+import '../models/skill.dart';
 import '../models/sandbox_health.dart';
 import '../models/session_detail.dart';
 import '../models/model_option.dart';
@@ -364,6 +365,43 @@ class HttpCortexApi implements CortexApi {
   @override
   Future<void> deleteAssistant(String id) =>
       _noContent('DELETE', '/assistants/${Uri.encodeComponent(id)}');
+
+  @override
+  Future<List<Skill>> skills() async {
+    final body = await _getJson('/skills');
+    return asObjectList(
+      body['skills'],
+    ).map(Skill.fromJson).toList(growable: false);
+  }
+
+  @override
+  Future<Skill> createSkill(Skill draft) async => Skill.fromJson(
+    await _postJson('/skills', {
+      'name': draft.name,
+      'description': draft.description,
+      'instructions': draft.instructions,
+    }),
+  );
+
+  @override
+  Future<Skill> updateSkill(
+    String id, {
+    String? name,
+    String? description,
+    String? instructions,
+    bool? enabled,
+  }) async => Skill.fromJson(
+    await _patchJson('/skills/${Uri.encodeComponent(id)}', {
+      'name': ?name,
+      'description': ?description,
+      'instructions': ?instructions,
+      'enabled': ?enabled,
+    }),
+  );
+
+  @override
+  Future<void> deleteSkill(String id) =>
+      _noContent('DELETE', '/skills/${Uri.encodeComponent(id)}');
 
   @override
   Future<Project> patchProject(String id, {String? name, bool? pinned}) async =>
@@ -1251,6 +1289,7 @@ class HttpCortexApi implements CortexApi {
     String? model,
     String? source,
     Assistant? assistant,
+    List<Skill> skills = const [],
     ImagePrefs? imagePrefs,
   }) async* {
     final request = http.Request('POST', _uri('/chat'))
@@ -1290,6 +1329,14 @@ class HttpCortexApi implements CortexApi {
         // 拿一段没有身份描述的提示词去替换默认那句（比默认那句更糟）
         if (assistant != null && assistant.isMeaningful)
           'assistant': assistant.toBrief(),
+        // 目录带上，**正文不带** —— 分层的意义就在这一点上。
+        // 关掉的、没名字的都进不了目录（`isListable`），与服务端那条
+        // `SkillBrief::is_listable` 是同一个判据
+        if (skills.any((s) => s.isListable))
+          'skills': [
+            for (final s in skills)
+              if (s.isListable) s.toBrief(),
+          ],
         // 什么都没设时整个字段不发 —— 发一个全默认的对象与不发在服务端
         // 是同一个意思（`resolve_image_spec` 两边都走「听模型的」）
         if (imagePrefs != null && !imagePrefs.isDefault)

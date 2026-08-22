@@ -11,6 +11,7 @@
 ///    不是「最优的」
 library;
 
+import 'package:cortex_app/models/skill.dart';
 import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/api/api_exception.dart';
 import 'package:cortex_app/models/image_prefs.dart';
@@ -91,6 +92,7 @@ class _Api extends MockCortexApi {
     String? model,
     String? source,
     Assistant? assistant,
+    List<Skill> skills = const [],
     ImagePrefs? imagePrefs,
   }) {
     sentModels.add(model);

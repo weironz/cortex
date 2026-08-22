@@ -36,6 +36,7 @@ pub mod llm;
 pub mod model_choice;
 pub mod model_roles;
 pub mod presence;
+pub mod skills;
 
 /// 本端讲的线协议版本。**契约不兼容地变了才 +1。**
 ///

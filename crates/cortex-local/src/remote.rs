@@ -201,6 +201,33 @@ impl Remote {
             .map_err(|e| CortexError::Invalid(format!("解析 /llm/image 响应失败：{e}")))
     }
 
+    /// 取一份技能的正文（`load_skill` 走的那条）。
+    ///
+    /// # 为什么按名字取一份，而不是把整张表拉回来自己找
+    ///
+    /// 拉整张表意味着一次工具调用把**所有**技能的正文搬过网络，只为了用其中
+    /// 一份 —— 那正好把分层的好处退回去了。分层的意义是「贵的那一半只在真的
+    /// 要用时才搬」，搬的定义包括这一段网络。
+    ///
+    /// # Errors
+    /// 没有这个技能（或者它被关掉了）、服务端不认识这条路（老部署），
+    /// 或者网络断了。
+    pub async fn skill_body(&self, name: &str) -> Result<cortex_proto::skills::SkillBody> {
+        // ⚠️ 名字走 query 而不是路径段：技能名是用户随手起的，里面完全
+        // 可以有斜杠、`?`、空格。塞进路径段要自己转义（而 `%2F` 在不同的
+        // 反代上被规范化的方式还不一样），走 query 则由 reqwest 转义
+        let resp = self
+            .auth(self.http.get(self.url("/skills/body")))
+            .query(&[("name", name)])
+            .send()
+            .await
+            .map_err(map_transport)?;
+        let resp = checked(resp).await?;
+        resp.json()
+            .await
+            .map_err(|e| CortexError::Invalid(format!("解析技能正文失败：{e}")))
+    }
+
     // 这里**没有** `pending_confirmations`。cortexd 不跑 agent，也就不再有
     // 「远端那本确认簿」可问 —— 那个端点连同它服务的那个进程内 agent 一起
     // 删掉了。跨端批确认要回来的话，得先有一个「确认属于哪台机器」的答案，

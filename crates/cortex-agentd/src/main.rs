@@ -52,6 +52,7 @@ mod routes;
 mod runner;
 mod sandbox_proxy;
 mod sessions;
+mod skills;
 mod snapshot;
 mod snapshot_index;
 mod state;

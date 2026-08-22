@@ -5,6 +5,7 @@
 /// need the same paging behaviour, and two copies would drift.
 library;
 
+import 'package:cortex_app/models/skill.dart';
 import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/models/image_prefs.dart';
@@ -46,6 +47,7 @@ class ReplayApi
         RunAttachUnsupported,
         ImagesUnsupported,
         AssistantsUnsupported,
+        SkillsUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
@@ -220,6 +222,7 @@ class ReplayApi
     String? model,
     String? source,
     Assistant? assistant,
+    List<Skill> skills = const [],
     ImagePrefs? imagePrefs,
   }) async* {
     yield const ChatDeltaEvent('好');

@@ -1,3 +1,4 @@
+import 'package:cortex_app/models/skill.dart';
 import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/models/image_prefs.dart';
@@ -42,6 +43,7 @@ class _BlobApi
         RunAttachUnsupported,
         ImagesUnsupported,
         AssistantsUnsupported,
+        SkillsUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
@@ -188,6 +190,7 @@ class _BlobApi
     String? model,
     String? source,
     Assistant? assistant,
+    List<Skill> skills = const [],
     ImagePrefs? imagePrefs,
   }) async* {
     lastSentAttachments = attachments;

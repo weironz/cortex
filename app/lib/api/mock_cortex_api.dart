@@ -22,6 +22,7 @@ import '../models/health_status.dart';
 import '../models/mcp.dart';
 import '../models/pending_confirmation.dart';
 import '../models/project.dart';
+import '../models/skill.dart';
 import '../models/session_detail.dart';
 import '../models/model_option.dart';
 import '../models/session_search_hit.dart';
@@ -1286,6 +1287,78 @@ class MockCortexApi
     ),
   ];
 
+  /// 技能。预置一条：一个空列表看不出这一页长什么样。
+  final List<Skill> _skills = [
+    const Skill(
+      id: 'MOCKSKILL0001',
+      name: '周报',
+      description: '按公司模板写周报：本周进展 / 下周计划 / 风险',
+      instructions:
+          '写周报时按三段来：\n'
+          '1. 本周进展 —— 每条一句话，带上可验证的结果\n'
+          '2. 下周计划 —— 每条要能在一周内做完\n'
+          '3. 风险与阻塞 —— 没有就写「无」，不要略过这一段',
+    ),
+  ];
+
+  @override
+  Future<List<Skill>> skills() async {
+    await _latency(90);
+    return List.unmodifiable(_skills);
+  }
+
+  @override
+  Future<Skill> createSkill(Skill draft) async {
+    await _latency(110);
+    final name = draft.name.trim();
+    if (name.isEmpty) {
+      throw const CortexApiException('非法输入：技能得有个名字', statusCode: 400);
+    }
+    // 重名在假后端也要拒 —— 界面上那条错误路径才有地方走
+    if (_skills.any((s) => s.name == name)) {
+      throw CortexApiException('非法输入：已经有一个叫「$name」的技能了', statusCode: 400);
+    }
+    final made = Skill(
+      id: 'MOCKSKILL${(_skills.length + 2).toString().padLeft(4, '0')}',
+      name: name,
+      description: draft.description.trim(),
+      instructions: draft.instructions,
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+    );
+    _skills.insert(0, made);
+    return made;
+  }
+
+  @override
+  Future<Skill> updateSkill(
+    String id, {
+    String? name,
+    String? description,
+    String? instructions,
+    bool? enabled,
+  }) async {
+    await _latency(90);
+    final i = _skills.indexWhere((s) => s.id == id);
+    if (i < 0) {
+      throw CortexApiException('找不到技能：$id', statusCode: 404);
+    }
+    final updated = _skills[i].copyWith(
+      name: name?.trim(),
+      description: description?.trim(),
+      instructions: instructions,
+      enabled: enabled,
+    );
+    _skills[i] = updated;
+    return updated;
+  }
+
+  @override
+  Future<void> deleteSkill(String id) async {
+    await _latency(70);
+    _skills.removeWhere((s) => s.id == id);
+  }
+
   @override
   Future<List<Assistant>> assistants() async {
     await _latency(90);
@@ -1577,6 +1650,7 @@ class MockCortexApi
     String? model,
     String? source,
     Assistant? assistant,
+    List<Skill> skills = const [],
     ImagePrefs? imagePrefs,
   }) async* {
     if (_disposed) {

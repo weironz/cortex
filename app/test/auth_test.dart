@@ -1,3 +1,4 @@
+import 'package:cortex_app/models/skill.dart';
 import 'package:cortex_app/models/assistant.dart';
 import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/models/image_prefs.dart';
@@ -542,6 +543,7 @@ class _GateApi
         RunAttachUnsupported,
         ImagesUnsupported,
         AssistantsUnsupported,
+        SkillsUnsupported,
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
@@ -650,6 +652,7 @@ class _GateApi
     String? model,
     String? source,
     Assistant? assistant,
+    List<Skill> skills = const [],
     ImagePrefs? imagePrefs,
   }) => throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
 

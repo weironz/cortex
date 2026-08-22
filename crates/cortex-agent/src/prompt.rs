@@ -78,6 +78,61 @@ pub const fn egress_note(env: ExecEnvironment) -> Option<&'static str> {
     )
 }
 
+/// 技能目录 —— 贴进系统提示词的那一小块。**空清单一律返回 `None`。**
+///
+/// # 为什么这里只收 `(名字, 说明)`，而不是 `SkillBrief`
+///
+/// `cortex-agent` 不依赖 `cortex-proto`（线协议 crate 反过来也不该拖进整个
+/// agent 循环，见 CLAUDE.md 的依赖方向）。收一对字符串就够了，而且它顺带
+/// 让这个函数不必知道技能是从哪来的。
+///
+/// # ⚠️ 返回 `None` 时，`load_skill` 也**必须**从工具目录里拿掉
+///
+/// 两者同生共死（CLAUDE.md 约束 2）。只做一半的后果：
+///
+/// * 有目录没工具 → 模型看见「你可以取回技能」，却没有取的手段；
+/// * 有工具没目录 → 模型手上有个不知道拿什么参数调的工具。
+///
+/// 两种都不报错，都表现为「模型胡说」。
+///
+/// # 为什么要写「先取回来再照着做」
+///
+/// 不写的话，模型会拿那一句话说明**当作技能本身**去做事 —— 它看起来像一条
+/// 完整的指令（「按公司模板写周报」），于是它就照着自己脑补的模板写了。
+/// 那次失败没有任何征兆：没有报错，只有一份不符合模板的周报。
+#[must_use]
+pub fn skills_note(catalog: &[(&str, &str)]) -> Option<String> {
+    if catalog.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "# 可用技能
+
+         下面每一条都是用户写好的一份做法，这里只列名字和用途。         判断某一条与当前任务相关时，**先用 `load_skill` 把正文取回来，再照着做** ——         不要拿这里的一句话说明当作技能本身，它只是索引。
+
+",
+    );
+    for (name, description) in catalog {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let description = description.trim();
+        if description.is_empty() {
+            out.push_str(&format!(
+                "- `{name}`
+"
+            ));
+        } else {
+            out.push_str(&format!(
+                "- `{name}`：{description}
+"
+            ));
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +190,49 @@ mod tests {
                 "出网说明里少了 {needle:?}：{why}。实际内容：{note}"
             );
         }
+    }
+    /// 一条技能都没有时**什么都不印**。
+    ///
+    /// 印一句「你可以使用技能（当前没有）」的话，模型仍然会去调
+    /// `load_skill` 试试 —— 那是 CLAUDE.md 约束 2 说的那种「说得到做不到」。
+    #[test]
+    fn no_skills_means_no_block_at_all() {
+        assert!(
+            skills_note(&[]).is_none(),
+            "空目录必须整块不印 —— 连同 load_skill 一起消失，两者同生共死"
+        );
+    }
+
+    /// 目录里要有名字、用途，以及**「先取回来」这条动作**。
+    #[test]
+    fn the_catalog_tells_the_model_to_fetch_before_acting() {
+        let note = skills_note(&[("周报", "按公司模板写周报"), ("查数", "从内网报表取数")])
+            .expect("非空目录必须印");
+        assert!(note.contains("周报") && note.contains("按公司模板"));
+        assert!(note.contains("查数"));
+        assert!(
+            note.contains("load_skill"),
+            "不点名那个工具的话，模型不知道用什么去取"
+        );
+        assert!(
+            note.contains("不要拿这里的一句话说明当作技能本身"),
+            "缺这句时模型会照着说明脑补着做 —— 而那次失败没有任何征兆，             只有一份不符合模板的周报"
+        );
+    }
+
+    /// 没写说明的技能仍然进目录 —— 名字本身往往就说明了用途。
+    #[test]
+    fn a_skill_without_a_description_still_gets_listed() {
+        let note = skills_note(&[("周报", "  ")]).expect("非空目录");
+        assert!(
+            note.contains("`周报`"),
+            "把它挡在外面等于用户配了个永远不出现的技能"
+        );
+        // 名字是空的那条要跳过：模型没法用空字符串去取它
+        let only_blank = skills_note(&[("  ", "有说明没名字")]).expect("清单非空");
+        assert!(
+            !only_blank.contains("有说明没名字"),
+            "没名字的那条取不回来，列出来只会诱导模型去调一个必然失败的调用"
+        );
     }
 }

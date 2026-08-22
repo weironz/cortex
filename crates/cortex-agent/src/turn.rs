@@ -328,6 +328,25 @@ pub trait ToolHost: Send + Sync {
         )
     }
 
+    /// 把一份技能的正文取回来。**由宿主执行，不走 `tools::execute`。**
+    ///
+    /// 与 [`Self::generate_image`] 同一个理由：正文存在服务端的数据库里，
+    /// 而 `tools::execute` 那条路是纯文件系统与 shell。
+    ///
+    /// # 默认实现是「这个宿主不会」，不是编一份做法出来
+    ///
+    /// 正常情况下走不到：`load_skill` 只在这一轮真的带了技能目录时才进工具
+    /// 目录，而带得出目录的宿主必然也接得上取正文那条路。真走到了说明**目录
+    /// 与执行不同源** —— 与 `call_external` 那条默认分支是同一类配置错误。
+    ///
+    /// ⚠️ 回失败，别回空串。空串会被模型读成「这个技能没有内容」，
+    /// 于是它照着那句一句话说明脑补着做 —— 而那次失败没有任何征兆。
+    async fn load_skill(&self, _arguments: &serde_json::Value) -> ToolResult {
+        ToolResult::err(
+            "这个 agent 进程取不回技能正文（它没有可打的服务端）。             不要照着目录里那句说明去做 —— 那只是索引，不是做法。             告诉用户：技能需要连着 Cortex 服务端使用。",
+        )
+    }
+
     /// 问用户准不准。**必须在有限时间内返回。**
     ///
     /// # 默认实现是「没人回答」，不是「批准」
@@ -1026,6 +1045,9 @@ impl Turn {
             // 内置，但**不走 `tools::execute`** —— 那条路是文件系统与 shell，
             // 没有 HTTP 客户端也不知道服务端在哪。见 `ToolHost::generate_image`
             host.generate_image(&call.arguments).await
+        } else if spec.name == "load_skill" {
+            // 同上：正文在服务端的库里，不在文件系统上
+            host.load_skill(&call.arguments).await
         } else {
             // **重新问一次宿主**，而不是复用上面那份 `sandbox`：刚才那次
             // `grant_root` 之后清单变长了，用旧的一份去执行，症状恰好是

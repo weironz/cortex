@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/theme.dart';
 import 'pages/about_page.dart';
 import 'pages/appearance_page.dart';
+import 'pages/skills_page.dart';
 import 'pages/usage_page.dart';
 import 'pages/connection_page.dart';
 import 'pages/data_page.dart';
@@ -81,6 +82,15 @@ class _SettingsPageState extends State<SettingsPage> {
       hint: '主 · 快速 · 绘画',
       icon: Icons.tune_rounded,
       page: ModelRolesPage(),
+    ),
+    // 技能紧挨着「MCP 与工具」：两者都是「模型手上多了什么」。
+    // 差别是 MCP 给的是**能力**（去做一件它本来做不到的事），
+    // 技能给的是**做法**（同一件事按你的规矩做）
+    (
+      label: '技能',
+      hint: '写好的做法 · 按需取用',
+      icon: Icons.auto_stories_outlined,
+      page: SkillsPage(),
     ),
     (
       label: 'MCP 与工具',
