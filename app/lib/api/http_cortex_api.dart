@@ -324,10 +324,11 @@ class HttpCortexApi implements CortexApi {
       Project.fromJson(await _postJson('/projects', {'name': name}));
 
   @override
-  Future<Project> renameProject(String id, String name) async =>
+  Future<Project> patchProject(String id, {String? name, bool? pinned}) async =>
       Project.fromJson(
         await _patchJson('/projects/${Uri.encodeComponent(id)}', {
-          'name': name,
+          'name': ?name,
+          'pinned': ?pinned,
         }),
       );
 
@@ -1052,6 +1053,7 @@ class HttpCortexApi implements CortexApi {
     String id, {
     String? title,
     bool? archived,
+    bool? pinned,
     String? workspace,
     bool clearWorkspace = false,
   }) async {
@@ -1061,6 +1063,7 @@ class HttpCortexApi implements CortexApi {
     final body = <String, dynamic>{
       'title': ?title,
       'archived': ?archived,
+      'pinned': ?pinned,
       if (clearWorkspace) 'workspace': null,
       if (!clearWorkspace && workspace != null) 'workspace': workspace,
     };

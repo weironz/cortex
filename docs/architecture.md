@@ -911,6 +911,33 @@ nginx 的 `$host` **会把端口丢掉**，所以 dev 上拼出来的是
 `DELETE /images/{id}` 只删画廊那一行（连带 share token 与相册关系），
 **blob 不动** —— 对话里那张图照常显示。所以界面上它叫「从图库移除」。
 
+##### 置顶：一个新的事件 op，两处各加一对
+
+会话与项目的每个维度本来就是事件溯源（`session_events` / `project_events`
+→ 末态视图）。置顶顺着它走，**跨设备同步是白送的**：`sync.rs` 只把原始事件
+行发下去，列一个没多；客户端也不重放事件，只把同步信号当作「重新拉一次」的
+触发（`sync_record.dart` 的 `SyncTables.conversation`）。
+
+另开一列 boolean 反而要新写一条同步路径，而那条路上「谁赢」没有全序可言 ——
+两台设备同时改，末态取决于哪一次 UPDATE 后到。事件有 ULID，有全序。
+
+**归档与置顶是两台独立的状态机**，互不干涉：置顶的会话照样能归档，归档之后
+它不出现在 Pinned 段里（与它不出现在聊天段里同一个理由），取消归档就回来。
+
+迁移（`migrations/20260824000001_pinned.sql`）里三处容易漏：
+
+* ⚠️ `project_events` 那条「除了 delete 都必须有 name」的 CHECK **必须跟着
+  放开** —— pin 事件不带 name，不改的话第一次置顶被数据库拒掉，而错误信息
+  只说「违反约束」。
+* ⚠️ `session_state` 的 `greatest(...)` 要把 pin 那一列算进去。少了它，一条
+  「只置顶过、别的什么都没改」的会话末态时间戳不动 —— 而那一列正是排序与
+  「有没有变过」的依据。
+* ⚠️ **新列只能追加在末尾**（`CREATE OR REPLACE VIEW` 按位置比对列名），
+  且 `project_state` 要先于 `session_state` 重建（后者引用前者）。
+
+约束是匿名的，所以用 `pg_constraint` 按定义体找出来再删，不猜名字 ——
+路数与 `20260817000001_container_workspace.sql` 那份一样。
+
 ##### `POST /settings/model-sources/{id}/check`：真发一次请求
 
 明文 key 从不下发（只回后四位），所以「我填对了没有」这件事**客户端答不了**，

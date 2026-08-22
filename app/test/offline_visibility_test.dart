@@ -110,6 +110,8 @@ void main() {
               enabled: true,
               canMove: true,
               onRename: () {},
+              onTogglePin: () {},
+              pinned: false,
               onToggleArchive: () {},
               onMove: () {},
               onExport: (_) {},

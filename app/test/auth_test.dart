@@ -664,7 +664,7 @@ class _GateApi
   Future<Project> createProject(String name) => throw UnimplementedError();
 
   @override
-  Future<Project> renameProject(String id, String name) =>
+  Future<Project> patchProject(String id, {String? name, bool? pinned}) =>
       throw UnimplementedError();
 
   @override
@@ -695,6 +695,7 @@ class _GateApi
     String id, {
     String? title,
     bool? archived,
+    bool? pinned,
     String? workspace,
     bool clearWorkspace = false,
   }) => throw UnimplementedError();

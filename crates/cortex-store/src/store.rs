@@ -271,6 +271,9 @@ pub struct SessionDigest {
     /// 这个会话在哪儿跑。**没有 session_state 行时（纯新会话）也要有值** ——
     /// 视图里 coalesce 成 'cloud'，LEFT JOIN 出来的 NULL 在这里再兜一次。
     pub runtime: crate::model::SessionRuntime,
+    /// 置顶。与 [`Self::archived`] 是两台独立的状态机 ——
+    /// 见 [`crate::model::SessionState::pinned`]。
+    pub pinned: bool,
 }
 
 impl Store {
@@ -324,7 +327,8 @@ impl Store {
                     -- LEFT JOIN 可能整行为空（会话还没有任何生命周期事件），
                     -- 那时 runtime 也是 NULL。视图里已经 coalesce 过一次，
                     -- 这里兜的是「压根没 join 上」那一种
-                    coalesce(s.runtime, 'cloud') AS runtime
+                    coalesce(s.runtime, 'cloud') AS runtime,
+                    coalesce(s.pinned, false) AS pinned
                FROM (
                     SELECT e.session_id,
                            count(*)            AS message_count,
@@ -478,7 +482,8 @@ impl Store {
                     -- LEFT JOIN 可能整行为空（会话还没有任何生命周期事件），
                     -- 那时 runtime 也是 NULL。视图里已经 coalesce 过一次，
                     -- 这里兜的是「压根没 join 上」那一种
-                    coalesce(s.runtime, 'cloud') AS runtime
+                    coalesce(s.runtime, 'cloud') AS runtime,
+                    coalesce(s.pinned, false) AS pinned
                FROM (
                     SELECT e.session_id,
                            count(*)            AS message_count,
@@ -510,7 +515,7 @@ impl Store {
     pub async fn session_state(&self, session_id: &str) -> Result<Option<SessionState>> {
         let row = sqlx::query_as::<_, SessionState>(
             "SELECT session_id, title, archived, workspace, project_id, runtime,
-                    container_workspace, decided_at
+                    container_workspace, decided_at, pinned
                FROM session_state WHERE session_id = $1",
         )
         .bind(session_id)
@@ -551,7 +556,7 @@ impl Store {
     pub async fn projects(&self) -> Result<Vec<Project>> {
         let rows = sqlx::query_as::<_, Project>(
             "SELECT p.project_id, p.name, p.created_at,
-                    coalesce(c.n, 0) AS session_count
+                    coalesce(c.n, 0) AS session_count, p.pinned
                FROM project_state p
                LEFT JOIN (
                     SELECT s.project_id, count(*) AS n
@@ -573,7 +578,7 @@ impl Store {
     pub async fn project(&self, project_id: &str) -> Result<Option<Project>> {
         let row = sqlx::query_as::<_, Project>(
             "SELECT p.project_id, p.name, p.created_at,
-                    coalesce(c.n, 0) AS session_count
+                    coalesce(c.n, 0) AS session_count, p.pinned
                FROM project_state p
                LEFT JOIN (
                     SELECT s.project_id, count(*) AS n

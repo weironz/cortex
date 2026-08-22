@@ -655,17 +655,24 @@ class MockCortexApi
   }
 
   @override
-  Future<Project> renameProject(String id, String name) async {
+  Future<Project> patchProject(String id, {String? name, bool? pinned}) async {
     await _latency(110);
     final index = _projects.indexWhere((p) => p.id == id);
     if (index == -1) {
       throw CortexApiException('project $id 不存在', statusCode: 404);
     }
-    final trimmed = name.trim();
-    if (trimmed.isEmpty) {
+    if (name == null && pinned == null) {
+      throw const CortexApiException(
+        '请求体里没有任何要改的字段（name / pinned）',
+        statusCode: 400,
+      );
+    }
+    final trimmed = name?.trim();
+    if (trimmed != null && trimmed.isEmpty) {
       throw const CortexApiException('项目名不能为空白', statusCode: 400);
     }
-    final updated = _projects[index].copyWith(name: trimmed);
+    // 改名与置顶各自生效 —— 与服务端那侧「两条事件」一一对应
+    final updated = _projects[index].copyWith(name: trimmed, pinned: pinned);
     _projects[index] = updated;
     return _withCount(updated);
   }
@@ -831,6 +838,7 @@ class MockCortexApi
     String id, {
     String? title,
     bool? archived,
+    bool? pinned,
     String? workspace,
     bool clearWorkspace = false,
   }) async {
@@ -850,6 +858,7 @@ class MockCortexApi
       title: title?.trim(),
       titleIsCustom: title != null ? true : null,
       archived: archived,
+      pinned: pinned,
       workspace: clearWorkspace
           ? null
           : (workspace == null

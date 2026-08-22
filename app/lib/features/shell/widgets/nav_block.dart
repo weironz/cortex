@@ -11,8 +11,8 @@
 ///
 /// # 为什么不做一个可注册的表
 ///
-/// 现在只有两条。为两条搞注册表，是在给还不存在的第三条付钱 ——
-/// 而第三条进来时，改这里比改一套注册机制便宜。
+/// 现在三条，而第三条（项目）进来时改这里花了四行 —— 当初不搞注册表
+/// 这个决定因此是划算的。同样的话对第四条仍然成立。
 library;
 
 import 'package:flutter/material.dart';
@@ -41,8 +41,9 @@ class NavBlock extends ConsumerWidget {
           // 「新建会话」**不是一个地方，是一个动作** —— 所以它不参与
           // 选中态。画成选中会让人以为「我现在在新建会话这一页」
           _NavItem(
+            key: const ValueKey('nav:new'),
             icon: Icons.edit_outlined,
-            label: '新建会话',
+            label: '新聊天',
             selected: false,
             onTap: () {
               ref.read(chatControllerProvider.notifier).createSession();
@@ -53,6 +54,18 @@ class NavBlock extends ConsumerWidget {
           ),
           const SizedBox(height: 2),
           _NavItem(
+            key: const ValueKey('nav:projects'),
+            icon: Icons.folder_outlined,
+            label: '项目',
+            selected: view == MainView.projects,
+            onTap: () {
+              ref.read(mainViewProvider.notifier).go(MainView.projects);
+              onNavigated?.call();
+            },
+          ),
+          const SizedBox(height: 2),
+          _NavItem(
+            key: const ValueKey('nav:images'),
             icon: Icons.image_outlined,
             label: '图片',
             selected: view == MainView.images,
@@ -69,6 +82,7 @@ class NavBlock extends ConsumerWidget {
 
 class _NavItem extends StatefulWidget {
   const _NavItem({
+    super.key,
     required this.icon,
     required this.label,
     required this.selected,

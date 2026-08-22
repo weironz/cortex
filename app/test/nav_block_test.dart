@@ -13,6 +13,7 @@ import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/shell/widgets/nav_block.dart';
 import 'package:cortex_app/state/app_providers.dart';
+import 'package:cortex_app/state/chat_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -85,13 +86,65 @@ void main() {
     c.read(mainViewProvider.notifier).go(MainView.images);
     await tester.pump();
 
-    await tester.tap(find.text('新建会话'));
+    await tester.tap(find.text('新聊天'));
     await tester.pump();
 
     expect(
       c.read(mainViewProvider),
       MainView.chat,
       reason: '新建了一条会话却停在画廊上，看起来就是点了没反应',
+    );
+  });
+
+  testWidgets('点「项目」进项目页，且**不碰活动会话**', (tester) async {
+    final c = _boot();
+    addTearDown(c.dispose);
+    await _pump(tester, c);
+
+    c.read(mainViewProvider.notifier).go(MainView.images);
+    await tester.pump();
+    final onImages = c.read(chatControllerProvider).activeSessionId;
+
+    await tester.tap(find.text('项目'));
+    await tester.pump();
+
+    expect(c.read(mainViewProvider), MainView.projects);
+    expect(
+      c.read(chatControllerProvider).activeSessionId,
+      onImages,
+      reason:
+          '项目页是一面卡片墙，点某张卡才该去某条会话 —— '
+          '进来就顺手换一条的话，从这儿返回会发现对话被换掉了',
+    );
+    expect(_written['main_view'], 'projects');
+  });
+
+  testWidgets('聊天 → 项目 → 聊天，回来的是同一条会话', (tester) async {
+    final c = _boot();
+    addTearDown(c.dispose);
+    await _pump(tester, c);
+    // 先去一趟图片页，让「上一次的聊天会话」这个记忆里有点旧东西
+    c.read(mainViewProvider.notifier).go(MainView.images);
+    await tester.pump();
+    c.read(mainViewProvider.notifier).go(MainView.chat);
+    await tester.pump();
+
+    final ctrl = c.read(chatControllerProvider.notifier);
+    final mine = ctrl.createSession();
+    await tester.pump();
+    expect(c.read(chatControllerProvider).activeSessionId, mine);
+
+    c.read(mainViewProvider.notifier).go(MainView.projects);
+    await tester.pump();
+    c.read(mainViewProvider.notifier).go(MainView.chat);
+    await tester.pump();
+
+    expect(
+      c.read(chatControllerProvider).activeSessionId,
+      mine,
+      reason:
+          '⚠️ 从前只在「去图片时」记一次。加了项目页之后那条路上没人记过，'
+          '回来恢复的是上一次去图片页之前那条 —— 用户看到的是「换了个对话」',
     );
   });
 

@@ -669,6 +669,15 @@ pub struct SessionDto {
     /// 界面上把它叫「删除」是可以的，但别在文案里承诺「已彻底删除」——
     /// 真正的销毁是 redact / purge，那是另一条路、要二次确认。
     pub archived: bool,
+    /// 置顶 —— 左栏「Pinned」那一段只列这些。
+    ///
+    /// **与 [`Self::archived`] 是两台独立的状态机**：置顶的会话照样能归档，
+    /// 归档之后它不出现在 Pinned 段里（与它不出现在聊天段里同一个理由），
+    /// 取消归档就回来。
+    ///
+    /// 老服务端不发这个字段 = 全部按未置顶算，界面上那一段就是空的。
+    #[serde(default)]
+    pub pinned: bool,
     /// 绑定的本机目录绝对路径。
     ///
     /// `null` = 纯聊天会话：文件工具**不会**出现在给模型的工具目录里，
@@ -780,6 +789,9 @@ pub struct SessionPatch {
     /// true = 归档，false = 取消归档。
     #[serde(default)]
     pub archived: Option<bool>,
+    /// true = 置顶，false = 取消置顶。与 [`Self::archived`] 互不干涉。
+    #[serde(default)]
+    pub pinned: Option<bool>,
     #[serde(default, deserialize_with = "explicit_option")]
     pub workspace: Option<Option<String>>,
     /// 所属项目，三态与 `workspace` 完全一致：
@@ -920,6 +932,12 @@ pub struct ProjectDto {
     /// 一条消息都还没有的也不算。口径与 `GET /sessions?project_id=` 一致 ——
     /// 对不上的话，用户会看到「3 个会话」点进去只有 2 个。
     pub session_count: i64,
+    /// 置顶 —— 左栏「项目」那一段只列这些，项目页上则全都列。
+    ///
+    /// 所以它**不改变可见性**，只决定「要不要一直摆在左栏」。
+    /// 老服务端不发这个字段 = 全部按未置顶算，左栏那一段是空的。
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// `GET /projects` 的响应。
@@ -948,6 +966,12 @@ pub struct NewProjectRequest {
 pub struct ProjectPatch {
     #[serde(default)]
     pub name: Option<String>,
+    /// true = 置顶，false = 取消置顶。
+    ///
+    /// 与 `name` 各自是一次事件：同一个请求里两个都给，就写两条 ——
+    /// 「改名顺带置顶」在事件流里本来就是两件事。
+    #[serde(default)]
+    pub pinned: Option<bool>,
 }
 
 // ──────────────────────────── /blobs ────────────────────────────

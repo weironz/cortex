@@ -14,6 +14,7 @@ class ChatSession {
     this.workspace,
     this.containerWorkspace,
     this.archived = false,
+    this.pinned = false,
     this.projectId,
     this.isLocalDraft = false,
     this.hasLocalOverrides = false,
@@ -57,6 +58,15 @@ class ChatSession {
   /// is append-only, so "归档" is the only honest verb.
   final bool archived;
 
+  /// 置顶 —— 左栏「Pinned」那一段只列这些。
+  ///
+  /// **与 [archived] 是两台独立的状态机**：置顶的会话照样能归档，归档之后
+  /// 它不出现在 Pinned 段里（与它不出现在聊天段里同一个理由），取消归档
+  /// 就回来。
+  ///
+  /// 老服务端不发这个字段 = 全部读成 `false`，那一段就是空的 —— 不报错。
+  final bool pinned;
+
   /// 所属项目，null = 未分组。
   ///
   /// 指向一个**已经不存在**的项目也当作未分组处理（见
@@ -92,6 +102,7 @@ class ChatSession {
     // 与「这次不改」是两件事
     Object? containerWorkspace = _sentinel,
     bool? archived,
+    bool? pinned,
     // 哨兵而不是可空参数：`projectId: null` 的意思是「移出项目」，
     // 与「这次不改分组」是两件事，而后者才是不传时该发生的
     Object? projectId = _sentinel,
@@ -112,6 +123,7 @@ class ChatSession {
         ? this.containerWorkspace
         : containerWorkspace as String?,
     archived: archived ?? this.archived,
+    pinned: pinned ?? this.pinned,
     projectId: projectId == _sentinel ? this.projectId : projectId as String?,
     isLocalDraft: isLocalDraft ?? this.isLocalDraft,
     hasLocalOverrides: hasLocalOverrides ?? this.hasLocalOverrides,
@@ -138,6 +150,7 @@ class ChatSession {
       // 而那正是一个还没有这个能力的部署里每条会话的真实状态
       containerWorkspace: asStringOrNull(json['container_workspace']),
       archived: json['archived'] == true,
+      pinned: json['pinned'] == true,
       // 老服务端不发这个字段，读成 null —— 也就是「未分组」，
       // 而那正是一个没有项目功能的部署里每条会话的真实状态
       projectId: asStringOrNull(json['project_id']),

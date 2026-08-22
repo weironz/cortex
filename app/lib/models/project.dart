@@ -16,6 +16,7 @@ class Project {
     required this.name,
     this.createdAt,
     this.sessionCount = 0,
+    this.pinned = false,
   });
 
   final String id;
@@ -30,11 +31,18 @@ class Project {
   /// 的数字只会让人以为界面漏了东西。
   final int sessionCount;
 
-  Project copyWith({String? name, int? sessionCount}) => Project(
+  /// 置顶 —— 左栏「项目」那一段只列这些，项目页上则全都列。
+  ///
+  /// 所以它**不改变可见性**，只决定「要不要一直摆在左栏」。老服务端不发
+  /// 这个字段 = 全部读成 `false`，左栏那一段是空的 —— 不报错。
+  final bool pinned;
+
+  Project copyWith({String? name, int? sessionCount, bool? pinned}) => Project(
     id: id,
     name: name ?? this.name,
     createdAt: createdAt,
     sessionCount: sessionCount ?? this.sessionCount,
+    pinned: pinned ?? this.pinned,
   );
 
   /// 与其它模型一样宽松地读：缺字段的老服务端应当读成「没有会话的项目」，
@@ -44,6 +52,7 @@ class Project {
     name: asString(json['name'], '未命名项目'),
     createdAt: asDateOrNull(json['created_at']),
     sessionCount: asInt(json['session_count']),
+    pinned: json['pinned'] == true,
   );
 
   /// 只为往返测试与本地调试存在 —— 客户端从不 POST 整个 ProjectDto
@@ -56,6 +65,7 @@ class Project {
     'name': name,
     if (createdAt case final at?) 'created_at': at.toUtc().toIso8601String(),
     'session_count': sessionCount,
+    'pinned': pinned,
   };
 
   @override
@@ -64,10 +74,11 @@ class Project {
       other.id == id &&
       other.name == name &&
       other.createdAt == createdAt &&
-      other.sessionCount == sessionCount;
+      other.sessionCount == sessionCount &&
+      other.pinned == pinned;
 
   @override
-  int get hashCode => Object.hash(id, name, createdAt, sessionCount);
+  int get hashCode => Object.hash(id, name, createdAt, sessionCount, pinned);
 
   @override
   String toString() => 'Project($id, $name, $sessionCount)';

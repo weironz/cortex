@@ -172,6 +172,8 @@ text_enum! {
         SetRuntime => "set_runtime",
         SetContainerWorkspace => "set_container_workspace",
         ClearContainerWorkspace => "clear_container_workspace",
+        Pin => "pin",
+        Unpin => "unpin",
     }
 }
 
@@ -217,6 +219,8 @@ text_enum! {
         Create => "create",
         Rename => "rename",
         Delete => "delete",
+        Pin => "pin",
+        Unpin => "unpin",
     }
 }
 
@@ -508,6 +512,21 @@ impl NewSessionEvent {
         Self::bare(session_id, SessionOp::Unarchive, actor, device_id)
     }
 
+    /// 置顶 —— 让它常驻左栏的「Pinned」那一段。
+    ///
+    /// **与归档正交**：置顶不改变可见性，归档不清除置顶。两台状态机各自
+    /// 记各自的最后一条事件，末态互不参考。
+    #[must_use]
+    pub fn pin(session_id: &str, actor: Actor, device_id: &str) -> Self {
+        Self::bare(session_id, SessionOp::Pin, actor, device_id)
+    }
+
+    /// 取消置顶。
+    #[must_use]
+    pub fn unpin(session_id: &str, actor: Actor, device_id: &str) -> Self {
+        Self::bare(session_id, SessionOp::Unpin, actor, device_id)
+    }
+
     /// 把会话绑到一个本机目录上。
     ///
     /// `workspace` 必须是**已由服务端校验过**的绝对路径（存在、是目录、
@@ -675,6 +694,22 @@ impl NewProjectEvent {
         }
     }
 
+    /// 置顶 —— 让它常驻左栏的「项目」那一段。
+    ///
+    /// ⚠️ **不带 `name`**。数据库上那条「除了 delete 都必须有 name」的约束
+    /// 因此在 20260824 那份迁移里跟着放开了 —— 忘了改的话第一次置顶就被
+    /// 数据库拒掉，而错误信息只说「违反约束」。
+    #[must_use]
+    pub fn pin(project_id: &str, actor: Actor, device_id: &str) -> Self {
+        Self::bare(project_id, ProjectOp::Pin, actor, device_id)
+    }
+
+    /// 取消置顶。
+    #[must_use]
+    pub fn unpin(project_id: &str, actor: Actor, device_id: &str) -> Self {
+        Self::bare(project_id, ProjectOp::Unpin, actor, device_id)
+    }
+
     /// 改名。末态由最后一条 `rename`（或 `create`）决定，不做撤销栈。
     #[must_use]
     pub fn rename(project_id: &str, name: &str, actor: Actor, device_id: &str) -> Self {
@@ -730,6 +765,12 @@ pub struct SessionState {
     /// 五个维度中最近一次事件的时间
     pub container_workspace: Option<String>,
     pub decided_at: DateTime<Utc>,
+    /// 置顶 —— 左栏「Pinned」那一段只列置顶的。
+    ///
+    /// 与 [`Self::archived`] 是两台**独立**的状态机：置顶的会话照样能归档，
+    /// 归档之后它不出现在 Pinned 段里（与它不出现在聊天段里同一个理由），
+    /// 取消归档就回来 —— pin 那台状态机压根没动过。
+    pub pinned: bool,
 }
 
 /// `project_state` 视图 + 会话计数：项目列表的一行。
@@ -744,6 +785,11 @@ pub struct Project {
     /// 这个项目下有多少个**会显示在列表里**的会话。口径见
     /// [`crate::Store::projects`] 的文档。
     pub session_count: i64,
+    /// 置顶 —— 左栏「项目」那一段只列置顶的。
+    ///
+    /// 与归档不同，它**不改变可见性**：没置顶的项目照样在项目页上，
+    /// 只是不占左栏的位置。所以它是纯粹的「我要一直看得见吗」。
+    pub pinned: bool,
 }
 
 #[cfg(test)]

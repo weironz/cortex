@@ -326,6 +326,44 @@ class ChatController extends Notifier<ChatState> {
     }
   }
 
+  /// 置顶 / 取消置顶。
+  ///
+  /// # ⚠️ 要核对回来的那条真的变了
+  ///
+  /// 老服务端不认得 `pinned`：它**不会报错**，只是静默忽略这个字段并回
+  /// 200 带着原样的会话。走 [_patch] 的话那条原样的记录会被写回状态，
+  /// 于是界面上那一行当场跳回原位 —— 用户看到的是「点了一下，它抖了一下
+  /// 又回来了」，而没有任何地方说得清为什么。
+  ///
+  /// 所以这里不走 [_patch]，自己核对一次。返回一句要说给用户的话；
+  /// `null` = 一切正常，不必打扰他。
+  Future<String?> setPinned(String id, bool pinned) async {
+    try {
+      final updated = await _api.updateSession(id, pinned: pinned);
+      if (!ref.mounted) return null;
+      if (updated.pinned != pinned) {
+        return '这个部署还不支持置顶会话 —— 它是个老版本的服务端。';
+      }
+      _replaceSession(
+        id,
+        (s) => updated.copyWith(isLocalDraft: s.isLocalDraft),
+      );
+      return null;
+    } on CortexApiException catch (e) {
+      if (!ref.mounted) return null;
+      // 这一次请求体里**只有 `pinned`**，而 `pinned` 是个 bool，没有别的
+      // 校验会失败。所以老服务端那句「请求体里没有任何要改的字段」
+      // 与 404「没有这条路由」是同一件事：它不认识这个字段
+      if (e.isUnsupported || e.statusCode == 400) {
+        return '这个部署还不支持置顶会话 —— 它是个老版本的服务端。';
+      }
+      return e.message;
+    } on Object catch (e) {
+      if (!ref.mounted) return null;
+      return '$e';
+    }
+  }
+
   /// 移入项目，[projectId] 为 null 表示移出（变未分组）。
   ///
   /// 项目里的会话数变了，所以顺手让项目列表重拉一次 —— 那个数字会出现在

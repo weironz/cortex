@@ -72,9 +72,9 @@ class _Api extends MockCortexApi {
   }
 
   @override
-  Future<Project> renameProject(String id, String name) async {
+  Future<Project> patchProject(String id, {String? name, bool? pinned}) async {
     final i = stored.indexWhere((p) => p.id == id);
-    stored[i] = stored[i].copyWith(name: name);
+    stored[i] = stored[i].copyWith(name: name, pinned: pinned);
     return stored[i];
   }
 

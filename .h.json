@@ -1,0 +1,1 @@
+{"auth":"token","blobs":"s3","callback":"http://agentd:8081","callback_visible_to_sandbox":true,"commit":"b5566de834f5-dirty","database":"ok","dev_login":"admin","live_scopes":1,"role":"agent-orchestrator","status":"ok","version":"0.1.18"}

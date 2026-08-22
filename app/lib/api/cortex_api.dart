@@ -255,8 +255,11 @@ abstract interface class CortexApi {
   /// `POST /projects {"name": …}`
   Future<Project> createProject(String name);
 
-  /// `PATCH /projects/{id} {"name": …}`
-  Future<Project> renameProject(String id, String name);
+  /// `PATCH /projects/{id}` —— 改名和/或置顶。
+  ///
+  /// 两者是**两台独立的状态机**（服务端各写一条事件），所以两个参数各自
+  /// 可空：只给 `pinned` 就只改置顶，名字一个字都不动。
+  Future<Project> patchProject(String id, {String? name, bool? pinned});
 
   /// `DELETE /projects/{id}` —— **只删这层分组**。
   ///
@@ -512,6 +515,7 @@ abstract interface class CortexApi {
     String id, {
     String? title,
     bool? archived,
+    bool? pinned,
     String? workspace,
     bool clearWorkspace = false,
   });

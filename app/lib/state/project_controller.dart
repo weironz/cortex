@@ -161,7 +161,7 @@ class ProjectController extends Notifier<ProjectState> {
     if (trimmed.isEmpty) return;
     final seq = _requestSeq;
     final updated = await _guard(
-      () => _api.renameProject(id, trimmed),
+      () => _api.patchProject(id, name: trimmed),
       featureProbe: false,
     );
     if (updated == null || _stale(seq)) return;
@@ -171,6 +171,48 @@ class ProjectController extends Notifier<ProjectState> {
           if (p.id == id) updated else p,
       ],
     );
+  }
+
+  /// 置顶 / 取消置顶。
+  ///
+  /// # ⚠️ 要核对回来的那条真的变了
+  ///
+  /// 老服务端不认得 `pinned`，会**静默忽略它并回 200** —— 不核对的话，
+  /// 界面上那一项当场移进「项目」段，而下一次 `GET /projects` 又把它挪
+  /// 回去。用户看到的是「点了有反应，刷新就没了」，最难查的一类。
+  ///
+  /// 返回一句要说给用户的话；`null` = 一切正常，不必打扰他。
+  ///
+  /// # ⚠️ 这里**不能**走 `_guard`
+  ///
+  /// 那个助手是 `rethrow` 的 —— 异常会一路逃进按钮的 `onSelected` 回调，
+  /// 变成一条没人处理的 async error。界面上的表现是**点了完全没反应**，
+  /// 而这正是 2026-08-23 在 0.1.18 的生产上实测到的：老服务端回 400，
+  /// 用户既没看到图标变化，也没看到任何一句话。
+  Future<String?> setPinned(String id, bool pinned) async {
+    const notSupported = '这个部署还不支持置顶项目 —— 它是个老版本的服务端。';
+    final seq = _requestSeq;
+    final Project updated;
+    try {
+      updated = await _api.patchProject(id, pinned: pinned);
+    } on CortexApiException catch (e) {
+      // 这一次请求体里**只有 `pinned`**，而 `pinned` 是个 bool，没有别的
+      // 校验会失败。所以老服务端那句「请求体里没有任何要改的字段（name）」
+      // 与 404「没有这条路由」是同一件事：它不认识这个字段
+      if (e.isUnsupported || e.statusCode == 400) return notSupported;
+      return e.message;
+    } on Object catch (e) {
+      return '$e';
+    }
+    if (_stale(seq)) return null;
+    if (updated.pinned != pinned) return notSupported;
+    state = state.copyWith(
+      projects: [
+        for (final p in state.projects)
+          if (p.id == id) updated else p,
+      ],
+    );
+    return null;
   }
 
   /// 删除分组本身。会话不动 —— 见 [CortexApi.deleteProject]。

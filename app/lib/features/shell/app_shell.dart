@@ -6,6 +6,7 @@ import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../chat/chat_pane.dart';
 import '../images/image_page.dart';
+import '../projects/projects_page.dart';
 import '../sessions/session_list.dart';
 import '../workspace/workspace_panel.dart';
 import 'widgets/account_bar.dart';
@@ -153,7 +154,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                       // 抄 Cherry Studio 的 sidebar 那一档：两个功能区靠
                       // 底色分开，比靠一条线分开省力得多
                       color: tokens.sidebar,
-                      child: const _LeftPane(),
+                      child: const _LeftPane(collapsible: true),
                     ),
                   ),
                   VerticalDivider(width: 1, color: tokens.sidebarBorder),
@@ -163,6 +164,12 @@ class _AppShellState extends ConsumerState<AppShell> {
                 // 同一个组件里只会多出一串对它无意义的入参
                 Expanded(
                   child: switch (ref.watch(mainViewProvider)) {
+                    MainView.projects => ProjectsPage(
+                      onToggleSessions: isMedium
+                          ? layoutNotifier.toggleLeft
+                          : () => _scaffoldKey.currentState?.openDrawer(),
+                      sessionsVisible: showSessionsInline,
+                    ),
                     MainView.images => ImagePage(
                       // 窄屏上左栏是抽屉，画廊里也要有路把它叫出来 ——
                       // 少了这个按钮，从画廊回会话列表就只剩「从屏幕左缘划」
@@ -217,6 +224,34 @@ class _AppShellState extends ConsumerState<AppShell> {
   }
 }
 
+/// 侧栏最上面那一行 —— 目前只有收起按钮。
+///
+/// 单独一个部件而不是几行内联：窄屏上侧栏是抽屉，那里**不该有**这个按钮
+/// （抽屉自己会关，一个「收起」在那儿收的是什么并不清楚）。有个部件才好
+/// 让那条路自己判断。
+class _SidebarTopRow extends ConsumerWidget {
+  const _SidebarTopRow();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 0),
+      child: Row(
+        children: [
+          IconButton(
+            key: const ValueKey('sidebar:collapse'),
+            onPressed: ref.read(layoutProvider.notifier).toggleLeft,
+            iconSize: 18,
+            visualDensity: VisualDensity.compact,
+            tooltip: '收起侧栏',
+            icon: const Icon(Icons.menu_open_rounded),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// 导航 + 会话列表 + 底部账号栏。
 ///
 /// 文件树原来夹在这两者之间，占着一个「40% 高、最多 320px」的框。搬到右栏
@@ -225,9 +260,16 @@ class _AppShellState extends ConsumerState<AppShell> {
 ///
 /// 顶上那一小块导航是 2026-08-22 加画廊时进来的，见 [NavBlock] 的文档。
 class _LeftPane extends ConsumerWidget {
-  const _LeftPane({this.onSelected});
+  const _LeftPane({this.onSelected, this.collapsible = false});
 
   final VoidCallback? onSelected;
+
+  /// 画不画「收起侧栏」那个按钮。
+  ///
+  /// **显式一个参数，而不是拿 `onSelected == null` 当判据**：那个回调回答的
+  /// 是「选完要不要关抽屉」，与「这里收得起来吗」是两件事。借它当判据的话，
+  /// 哪天内联那条路也想要一个 onSelected，按钮就无声地消失了。
+  final bool collapsible;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -243,6 +285,17 @@ class _LeftPane extends ConsumerWidget {
 
     return Column(
       children: [
+        // ⚠️ **收起按钮长在侧栏自己身上。**
+        //
+        // 从前它只在内容区的顶栏上（`ChatPane` / `ImagePage` 的
+        // `onToggleSessions`）。那个位置回答的是「把它叫回来」，而
+        // 「把它收起去」的手该落在**要收的那个东西**上 —— lobehub 与
+        // claude.ai 都把它放在侧栏左上角。
+        //
+        // 内容区那个**保留**：侧栏一收起，它自己的按钮也跟着没了，
+        // 那时唯一的回路就是内容区那个。两者调的是同一个 `toggleLeft`，
+        // 不是两套状态。
+        if (collapsible) const _SidebarTopRow(),
         NavBlock(onNavigated: onSelected),
         Expanded(child: SessionList(onSelected: selected)),
         // 内联与抽屉共用这一棵，所以账号栏两处都会有 —— 不必为抽屉

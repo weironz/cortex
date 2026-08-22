@@ -302,6 +302,16 @@ pub(crate) async fn patch_session(
         });
     }
 
+    // 置顶与归档是两台**独立**的状态机，所以是两条并列的 if，不是
+    // else-if：同一个 PATCH 里既归档又取消置顶，写两条事件，各自生效
+    if let Some(pinned) = patch.pinned {
+        events.push(if pinned {
+            cortex_store::NewSessionEvent::pin(session_id, cortex_store::Actor::User, DEVICE_ID)
+        } else {
+            cortex_store::NewSessionEvent::unpin(session_id, cortex_store::Actor::User, DEVICE_ID)
+        });
+    }
+
     // ── 绑定工作区：**服务端明确拒绝** ──
     //
     // 判断本身在 `workspace_patch` 里，理由见它的文档。这里只把「要解绑」
@@ -392,7 +402,7 @@ pub(crate) async fn patch_session(
         return Err(CortexError::Invalid(
             // 清单要跟着字段涨。漏一个的症状是「明明改了却报没改」——
             // 而那条错误信息本身就是排查这件事时唯一的线索
-            "请求体里没有任何要改的字段（title / archived / workspace /              container_workspace / project_id / runtime）"
+            "请求体里没有任何要改的字段（title / archived / pinned / workspace /              container_workspace / project_id / runtime）"
                 .into(),
         ));
     }
@@ -518,6 +528,7 @@ async fn session_overview(store: &Store, session_id: &str) -> cortex_core::Resul
         message_count: 0,
         preview: None,
         archived: state.as_ref().is_some_and(|s| s.archived),
+        pinned: state.as_ref().is_some_and(|s| s.pinned),
         workspace: state.as_ref().and_then(|s| s.workspace.clone()),
         container_workspace: state.as_ref().and_then(|s| s.container_workspace.clone()),
         runtime: state
@@ -636,6 +647,7 @@ fn session_dto(d: cortex_store::SessionDigest) -> SessionDto {
         message_count: d.message_count,
         preview: d.last_text,
         archived: d.archived,
+        pinned: d.pinned,
         workspace: d.workspace,
         container_workspace: d.container_workspace,
         project_id: d.project_id,
@@ -811,6 +823,7 @@ mod tests {
             container_workspace: None,
             project_id: None,
             runtime: cortex_store::SessionRuntime::Cloud,
+            pinned: false,
         };
         let dto = session_dto(d);
         assert_eq!(dto.title, "我起的名字");

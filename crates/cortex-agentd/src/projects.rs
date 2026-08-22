@@ -108,21 +108,47 @@ async fn patch_project(
     id: &str,
     patch: ProjectPatch,
 ) -> cortex_core::Result<ProjectDto> {
-    let Some(raw) = patch.name.as_deref() else {
-        return Err(CortexError::Invalid(
-            "请求体里没有任何要改的字段（name）".into(),
-        ));
-    };
-    let name = validate_project_name(raw)?;
+    // 改名与置顶是两台**独立**的状态机，所以是两条并列的分支而不是二选一：
+    // 同一个 PATCH 里两个都给就写两条事件，各自生效
+    let mut events = Vec::new();
 
-    // 改名之前先确认它还在。少了这一句，给一个已删除项目改名会**静默成功**
+    if let Some(raw) = patch.name.as_deref() {
+        let name = validate_project_name(raw)?;
+        events.push(cortex_store::NewProjectEvent::rename(
+            id,
+            &name,
+            cortex_store::Actor::User,
+            DEVICE_ID,
+        ));
+    }
+
+    if let Some(pinned) = patch.pinned {
+        events.push(if pinned {
+            cortex_store::NewProjectEvent::pin(id, cortex_store::Actor::User, DEVICE_ID)
+        } else {
+            cortex_store::NewProjectEvent::unpin(id, cortex_store::Actor::User, DEVICE_ID)
+        });
+    }
+
+    if events.is_empty() {
+        return Err(CortexError::Invalid(
+            // 清单要跟着字段涨。漏一个的症状是「明明改了却报没改」——
+            // 而那条错误信息本身就是排查这件事时唯一的线索
+            "请求体里没有任何要改的字段（name / pinned）".into(),
+        ));
+    }
+
+    // 动手之前先确认它还在。少了这一句，给一个已删除项目改名会**静默成功**
     // （事件照样落库），而列表里什么都不会出现 —— 用户看到的是「改完就没了」
     require_project(store, id).await?;
 
-    let event =
-        cortex_store::NewProjectEvent::rename(id, &name, cortex_store::Actor::User, DEVICE_ID);
     store
-        .write_txn(async |t| t.insert_project_event(&event).await)
+        .write_txn(async |t| {
+            for e in &events {
+                t.insert_project_event(e).await?;
+            }
+            Ok(())
+        })
         .await
         .map_err(store_err)?;
 
@@ -181,6 +207,7 @@ fn project_dto(p: cortex_store::Project) -> ProjectDto {
         name: p.name,
         created_at: p.created_at.to_rfc3339(),
         session_count: p.session_count,
+        pinned: p.pinned,
     }
 }
 

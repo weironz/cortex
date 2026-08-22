@@ -390,7 +390,8 @@ final layoutProvider = NotifierProvider<LayoutNotifier, LayoutState>(
 /// 资料库），bool 那条路要把每个调用点改一遍。
 enum MainView {
   chat,
-  images;
+  images,
+  projects;
 
   static MainView fromWire(String? s) =>
       MainView.values.where((v) => v.name == s).firstOrNull ?? MainView.chat;
@@ -465,16 +466,26 @@ class MainViewNotifier extends Notifier<MainView> {
   void go(MainView view) {
     if (state == view) return;
     final chat = ref.read(chatControllerProvider);
-    if (view == MainView.images) {
-      _chatSession = chat.activeSessionId;
-      _enterImages();
-    } else {
-      final back = _chatSession;
-      // 那条会话可能已经被删了 —— 删了就停在图片那条上，
-      // 而不是把用户扔进一个空白页
-      if (back != null && chat.sessions.any((s) => s.id == back)) {
-        ref.read(chatControllerProvider.notifier).selectSession(back);
-      }
+    // ⚠️ **离开聊天时就记下它那条会话，不论去哪儿。**
+    //
+    // 从前是「去图片时记一下」。加了项目页之后那个写法会错：
+    // 聊天 → 项目 → 聊天 这条路上没人记过，于是回来时恢复的是**上一次
+    // 去图片页之前**那条会话 —— 用户看到的是「回来之后换了个对话」。
+    if (state == MainView.chat) _chatSession = chat.activeSessionId;
+    switch (view) {
+      case MainView.images:
+        _enterImages();
+      case MainView.chat:
+        final back = _chatSession;
+        // 那条会话可能已经被删了 —— 删了就停在原来那条上，
+        // 而不是把用户扔进一个空白页
+        if (back != null && chat.sessions.any((s) => s.id == back)) {
+          ref.read(chatControllerProvider.notifier).selectSession(back);
+        }
+      // 项目页**不碰活动会话**：它是一面卡片墙，点某张卡才会去某条会话。
+      // 顺手切一条的话，从项目页返回聊天会发现对话被换掉了
+      case MainView.projects:
+        break;
     }
     state = view;
     unawaited(ref.read(settingsPatcherProvider)(_key, view.name));

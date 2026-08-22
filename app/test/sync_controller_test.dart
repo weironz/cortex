@@ -133,7 +133,7 @@ class _FakeApi
   Future<Project> createProject(String name) => throw UnimplementedError();
 
   @override
-  Future<Project> renameProject(String id, String name) =>
+  Future<Project> patchProject(String id, {String? name, bool? pinned}) =>
       throw UnimplementedError();
 
   @override
@@ -223,6 +223,7 @@ class _FakeApi
     String id, {
     String? title,
     bool? archived,
+    bool? pinned,
     String? workspace,
     bool clearWorkspace = false,
   }) => throw UnimplementedError('同步链路不应改会话');

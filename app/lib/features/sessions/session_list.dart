@@ -15,6 +15,8 @@ import '../../state/chat_state.dart';
 import '../../core/session_export.dart';
 import '../../state/export_controller.dart';
 import '../../state/project_controller.dart';
+import '../../state/sidebar_sections.dart';
+import '../projects/project_actions.dart';
 import '../../state/session_search_controller.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/panel_header.dart';
@@ -132,12 +134,22 @@ class SessionList extends ConsumerWidget {
       );
     }
 
-    final rows = _rows(sessions, projects);
+    final rows = _rows(sessions, projects, ref.watch(sidebarSectionsProvider));
 
     return ListView.builder(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       itemCount: rows.length,
       itemBuilder: (context, i) => switch (rows[i]) {
+        _SectionRow(:final section, :final count) => _SectionHeader(
+          key: ValueKey('section:${section.key}'),
+          section: section,
+          count: count,
+          collapsed: ref
+              .read(sidebarSectionsProvider.notifier)
+              .isCollapsed(section),
+          onToggle: () =>
+              ref.read(sidebarSectionsProvider.notifier).toggle(section),
+        ),
         _HeaderRow(:final group) => _GroupHeader(
           key: ValueKey('grp_${group.projectId ?? "none"}'),
           group: group,
@@ -158,8 +170,15 @@ class SessionList extends ConsumerWidget {
             ref.read(projectControllerProvider.notifier).select(id);
             onSelected?.call();
           },
-          onRename: () => _renameProject(context, ref, group.project!),
-          onDelete: () => _deleteProject(context, ref, group.project!),
+          onRename: () => renameProject(context, ref, group.project!),
+          onTogglePin: () => setProjectPinned(
+            context,
+            ref,
+            group.project!,
+            !group.project!.pinned,
+          ),
+          pinned: group.project?.pinned ?? false,
+          onDelete: () => deleteProject(context, ref, group.project!),
         ),
         _SessionRow(:final session) => _SessionTile(
           key: ValueKey(session.id),
@@ -186,6 +205,8 @@ class SessionList extends ConsumerWidget {
             onSelected?.call();
           },
           onRename: () => _rename(context, ref, session),
+          onTogglePin: () => _pin(context, ref, session, !session.pinned),
+          pinned: session.pinned,
           onToggleArchive: () =>
               _archive(context, ref, session, !session.archived),
           onMove: () => _move(context, ref, session, projects.projects),
@@ -195,23 +216,93 @@ class SessionList extends ConsumerWidget {
     );
   }
 
-  /// 把分组摊平成一串行，交给 `ListView.builder` 按需构建。
+  /// 把三段摊平成一串行，交给 `ListView.builder` 按需构建。
   ///
-  /// 没有项目时**不画任何标题**，直接退回原来那张平铺列表：只有「未分组」
-  /// 一组时，那个标题不传达任何信息，只是白占一行。
-  static List<_Row> _rows(List<ChatSession> sessions, ProjectState projects) {
-    if (!projects.showGrouping) {
+  /// # ⚠️ 一条会话只出现在一段里
+  ///
+  /// 优先级是**置顶 > 属于置顶项目 > 其余**，而且是一条全序：
+  ///
+  /// 1. `pinned` 的会话 → 「Pinned」段
+  /// 2. 否则，属于某个置顶项目的 → 「项目」段那棵树里
+  /// 3. 否则 → 「聊天」段（未置顶的项目仍在这里以分组标题出现）
+  ///
+  /// 少了这条全序的下场是同一条会话在左栏有两行：点哪一行都对，
+  /// 但用户会以为自己看重了，或者以为有两条一模一样的对话。
+  ///
+  /// 置顶优先于项目，是因为「我把这条钉起来了」是一个**更晚、更具体**的
+  /// 意图 —— 项目归属可能是几周前顺手分的。
+  ///
+  /// # 没有项目、也没有置顶时退回一张平铺列表
+  ///
+  /// 三个段头对着一列会话，每一个都不传达信息，只是白占三行。
+  static List<_Row> _rows(
+    List<ChatSession> sessions,
+    ProjectState projects,
+    Set<SidebarSection> collapsed,
+  ) {
+    final pinnedProjects = projects.projects.where((p) => p.pinned).toList();
+    final pinnedSessions = sessions.where((s) => s.pinned).toList();
+
+    // 一段都用不上时就是从前那张平铺列表
+    if (!projects.showGrouping && pinnedSessions.isEmpty) {
       return [for (final s in sessions) _SessionRow(s)];
     }
+
     final rows = <_Row>[];
-    for (final group in groupSessionsByProject(sessions, projects.projects)) {
-      // 未分组那一组空着就整个不画：一个空的「未分组」标题是纯噪音
-      if (group.isUngrouped && group.sessions.isEmpty) continue;
-      rows.add(_HeaderRow(group));
-      final id = group.projectId;
-      if (id != null && projects.isCollapsed(id)) continue;
-      rows.addAll(group.sessions.map(_SessionRow.new));
+
+    void section(SidebarSection which, int count, void Function() body) {
+      // 空的段整个不画。一个常年空着的「项目」标题只是噪音 ——
+      // 而它下面什么都没有这件事，标题本身也说不清楚
+      if (count == 0) return;
+      rows.add(_SectionRow(which, count));
+      if (collapsed.contains(which)) return;
+      body();
     }
+
+    // ── 1. 项目：置顶的那些，每个可展开成它的会话 ──
+    final pinnedIds = {for (final p in pinnedProjects) p.id};
+    section(SidebarSection.projects, pinnedProjects.length, () {
+      final byProject = groupSessionsByProject(
+        // 置顶的会话已经被第 2 段收走了，这里不能再算进来
+        sessions.where((s) => !s.pinned).toList(),
+        pinnedProjects,
+      );
+      for (final group in byProject) {
+        if (group.isUngrouped) continue;
+        rows.add(_HeaderRow(group));
+        final id = group.projectId;
+        if (id != null && projects.isCollapsed(id)) continue;
+        rows.addAll(group.sessions.map(_SessionRow.new));
+      }
+    });
+
+    // ── 2. Pinned：置顶的会话，平铺 ──
+    section(SidebarSection.pinned, pinnedSessions.length, () {
+      rows.addAll(pinnedSessions.map(_SessionRow.new));
+    });
+
+    // ── 3. 聊天：其余的，保留现有的项目分组 ──
+    final rest = sessions
+        .where((s) => !s.pinned && !pinnedIds.contains(s.projectId))
+        .toList();
+    section(SidebarSection.chats, rest.length, () {
+      if (!projects.showGrouping) {
+        rows.addAll(rest.map(_SessionRow.new));
+        return;
+      }
+      final unpinned = projects.projects
+          .where((p) => !p.pinned)
+          .toList(growable: false);
+      for (final group in groupSessionsByProject(rest, unpinned)) {
+        // 未分组那一组空着就整个不画：一个空的「未分组」标题是纯噪音
+        if (group.isUngrouped && group.sessions.isEmpty) continue;
+        rows.add(_HeaderRow(group));
+        final id = group.projectId;
+        if (id != null && projects.isCollapsed(id)) continue;
+        rows.addAll(group.sessions.map(_SessionRow.new));
+      }
+    });
+
     return rows;
   }
 
@@ -258,104 +349,8 @@ class SessionList extends ConsumerWidget {
 
   // --------------------------------------------------------------- projects
 
-  Future<void> _createProject(BuildContext context, WidgetRef ref) async {
-    final name = await _askName(context, title: '新建项目', hint: '例如：Cortex 客户端');
-    if (name == null || !context.mounted) return;
-    await _run(
-      context,
-      () => ref.read(projectControllerProvider.notifier).create(name),
-    );
-  }
-
-  Future<void> _renameProject(
-    BuildContext context,
-    WidgetRef ref,
-    Project project,
-  ) async {
-    final name = await _askName(context, title: '重命名项目', initial: project.name);
-    if (name == null || !context.mounted) return;
-    await _run(
-      context,
-      () =>
-          ref.read(projectControllerProvider.notifier).rename(project.id, name),
-    );
-  }
-
-  /// 删除项目。
-  ///
-  /// 对话框正文由 [deleteProjectWarning] 写死，且**必须**说清会话不会丢：
-  /// 用户在这里唯一真正害怕的事就是「删项目把对话也删了」，而那恰恰是唯一
-  /// 不会发生的事。说不清楚的代价不是一次误操作，是从此没人敢碰这个功能。
-  Future<void> _deleteProject(
-    BuildContext context,
-    WidgetRef ref,
-    Project project,
-  ) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('删除项目「${project.name}」？'),
-        content: Text(deleteProjectWarning(project)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            // 「删除项目」而不是「删除」：按钮上那个宾语是最后一次说明
-            // 被删掉的到底是什么
-            child: const Text('删除项目'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true || !context.mounted) return;
-    await _run(
-      context,
-      () => ref.read(projectControllerProvider.notifier).remove(project.id),
-    );
-  }
-
-  Future<String?> _askName(
-    BuildContext context, {
-    required String title,
-    String? initial,
-    String? hint,
-  }) async {
-    final field = TextEditingController(text: initial ?? '');
-    final result = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: TextField(
-          controller: field,
-          autofocus: true,
-          // 服务端 trim 之后限 100 字符。在这里就截住，是为了不让用户
-          // 打完一长串再收到一条他看不出所以然的 400
-          maxLength: 100,
-          buildCounter:
-              (_, {required currentLength, required isFocused, maxLength}) =>
-                  null,
-          decoration: InputDecoration(labelText: '项目名', hintText: hint),
-          onSubmitted: (v) => Navigator.of(context).pop(v),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(field.text),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    field.dispose();
-    if (result == null || result.trim().isEmpty) return null;
-    return result.trim();
-  }
+  Future<void> _createProject(BuildContext context, WidgetRef ref) =>
+      createProject(context, ref);
 
   /// 「移动到项目」。列出全部项目加一个「未分组」，当前那一项打勾。
   ///
@@ -468,6 +463,26 @@ class SessionList extends ConsumerWidget {
   /// the controller absorbs that case and marks the session as locally edited.
   /// For projects it *does* reach here, deliberately: there is no meaningful
   /// local-only project, so the honest outcome is to say it did not happen.
+  /// 置顶 / 取消置顶一条会话。
+  ///
+  /// 控制器那边会**核对服务端真的改了** —— 老服务端静默忽略 `pinned` 并回
+  /// 200，不核对的话这一行当场搬进 Pinned 段、刷新又弹回来。它回一句话就
+  /// 在这里原样说出去。
+  static Future<void> _pin(
+    BuildContext context,
+    WidgetRef ref,
+    ChatSession session,
+    bool pinned,
+  ) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final said = await ref
+        .read(chatControllerProvider.notifier)
+        .setPinned(session.id, pinned);
+    if (said != null) {
+      messenger?.showSnackBar(SnackBar(content: Text(said)));
+    }
+  }
+
   static Future<void> _run(
     BuildContext context,
     Future<void> Function() action,
@@ -528,6 +543,17 @@ sealed class _Row {
   const _Row();
 }
 
+/// 三段之一的段头。
+class _SectionRow extends _Row {
+  const _SectionRow(this.section, this.count);
+
+  final SidebarSection section;
+
+  /// 这一段里有几条。**是「现在看得见几条」**，不是服务端那个统计 ——
+  /// 旁边就是那些行，写一个对不上的数字只会让人以为界面漏了东西
+  final int count;
+}
+
 class _HeaderRow extends _Row {
   const _HeaderRow(this.group);
 
@@ -540,6 +566,70 @@ class _SessionRow extends _Row {
   final ChatSession session;
 }
 
+/// 三段的段头：标题 + 折叠箭头 + 条数。
+///
+/// 与项目那一行（[_GroupHeader]）**故意长得不一样**：它是更高一层的东西，
+/// 长一样的话用户分不出「项目」这个段头和一个叫「项目」的项目。
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({
+    super.key,
+    required this.section,
+    required this.count,
+    required this.collapsed,
+    required this.onToggle,
+  });
+
+  final SidebarSection section;
+  final int count;
+  final bool collapsed;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tokens = theme.cortex;
+
+    return Padding(
+      // 上面留得多：段头属于**它下面那一段**，不是两段之间的分隔物
+      padding: const EdgeInsets.only(top: 16, bottom: 2),
+      child: InkWell(
+        onTap: onToggle,
+        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(4, 4, 6, 4),
+          child: Row(
+            children: [
+              Text(
+                section.label,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.8,
+                  color: tokens.foregroundTertiary,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                '$count',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: tokens.foregroundTertiary,
+                ),
+              ),
+              const Spacer(),
+              Icon(
+                collapsed
+                    ? Icons.chevron_right_rounded
+                    : Icons.expand_more_rounded,
+                size: 15,
+                color: tokens.foregroundTertiary,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _GroupHeader extends StatelessWidget {
   const _GroupHeader({
     super.key,
@@ -549,6 +639,8 @@ class _GroupHeader extends StatelessWidget {
     required this.onToggle,
     required this.onNewSession,
     required this.onRename,
+    required this.onTogglePin,
+    required this.pinned,
     required this.onDelete,
   });
 
@@ -558,6 +650,8 @@ class _GroupHeader extends StatelessWidget {
   final VoidCallback onToggle;
   final VoidCallback onNewSession;
   final VoidCallback onRename;
+  final VoidCallback onTogglePin;
+  final bool pinned;
   final VoidCallback onDelete;
 
   @override
@@ -625,7 +719,9 @@ class _GroupHeader extends StatelessWidget {
                 ),
                 _ProjectMenu(
                   projectName: project.name,
+                  pinned: pinned,
                   onRename: onRename,
+                  onTogglePin: onTogglePin,
                   onDelete: onDelete,
                 ),
               ],
@@ -640,7 +736,9 @@ class _GroupHeader extends StatelessWidget {
 class _ProjectMenu extends StatelessWidget {
   const _ProjectMenu({
     required this.projectName,
+    required this.pinned,
     required this.onRename,
+    required this.onTogglePin,
     required this.onDelete,
   });
 
@@ -648,7 +746,9 @@ class _ProjectMenu extends StatelessWidget {
   /// 每一个都弹一句话很吵），项目这一行只有一两个，说清是**哪个**项目
   /// 反而有用 —— 顺带让测试有一个稳定的抓手。
   final String projectName;
+  final bool pinned;
   final VoidCallback onRename;
+  final VoidCallback onTogglePin;
   final VoidCallback onDelete;
 
   @override
@@ -661,10 +761,27 @@ class _ProjectMenu extends StatelessWidget {
       icon: const Icon(Icons.more_horiz_rounded),
       onSelected: (value) => switch (value) {
         'rename' => onRename(),
+        'pin' => onTogglePin(),
         _ => onDelete(),
       },
-      itemBuilder: (context) => const [
+      itemBuilder: (context) => [
         PopupMenuItem(
+          value: 'pin',
+          height: 38,
+          child: Row(
+            children: [
+              Icon(
+                pinned ? Icons.push_pin_outlined : Icons.push_pin_rounded,
+                size: 15,
+              ),
+              const SizedBox(width: 9),
+              // 取消置顶之后它不会消失，只是从左栏挪回项目页 ——
+              // 文案要让人敢按
+              Text(pinned ? '取消置顶' : '置顶到左栏'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
           value: 'rename',
           height: 38,
           child: Row(
@@ -675,7 +792,7 @@ class _ProjectMenu extends StatelessWidget {
             ],
           ),
         ),
-        PopupMenuItem(
+        const PopupMenuItem(
           value: 'delete',
           height: 38,
           child: Row(
@@ -725,6 +842,8 @@ class _SessionTile extends StatefulWidget {
     required this.canMove,
     required this.onTap,
     required this.onRename,
+    required this.onTogglePin,
+    required this.pinned,
     required this.onToggleArchive,
     required this.onMove,
     required this.onExport,
@@ -742,6 +861,10 @@ class _SessionTile extends StatefulWidget {
   final bool canMove;
   final VoidCallback onTap;
   final VoidCallback onRename;
+  final VoidCallback onTogglePin;
+
+  /// 置顶了 —— 这一行此刻住在「Pinned」那一段里。
+  final bool pinned;
   final VoidCallback onToggleArchive;
   final VoidCallback onMove;
   final void Function(ExportFormat) onExport;
@@ -909,6 +1032,8 @@ class _SessionTileState extends State<_SessionTile> {
                   enabled: _hovered || widget.selected,
                   canMove: widget.canMove,
                   onRename: widget.onRename,
+                  onTogglePin: widget.onTogglePin,
+                  pinned: widget.pinned,
                   onToggleArchive: widget.onToggleArchive,
                   onMove: widget.onMove,
                   onExport: widget.onExport,
@@ -948,6 +1073,8 @@ class SessionTileMenu extends ConsumerWidget {
     required this.enabled,
     required this.canMove,
     required this.onRename,
+    required this.onTogglePin,
+    required this.pinned,
     required this.onToggleArchive,
     required this.onMove,
     required this.onExport,
@@ -957,6 +1084,10 @@ class SessionTileMenu extends ConsumerWidget {
   final bool enabled;
   final bool canMove;
   final VoidCallback onRename;
+  final VoidCallback onTogglePin;
+
+  /// 置顶了 —— 菜单里那一项因此说「取消置顶」。
+  final bool pinned;
   final VoidCallback onToggleArchive;
   final VoidCallback onMove;
   final void Function(ExportFormat) onExport;
@@ -973,6 +1104,7 @@ class SessionTileMenu extends ConsumerWidget {
       icon: const Icon(Icons.more_horiz_rounded),
       onSelected: (value) => switch (value) {
         'rename' => onRename(),
+        'pin' => onTogglePin(),
         'move' => onMove(),
         'export_md' => onExport(ExportFormat.markdown),
         'export_json' => onExport(ExportFormat.json),
@@ -988,6 +1120,23 @@ class SessionTileMenu extends ConsumerWidget {
               Icon(Icons.edit_outlined, size: 15),
               SizedBox(width: 9),
               Text('重命名'),
+            ],
+          ),
+        ),
+        PopupMenuItem(
+          value: 'pin',
+          height: 38,
+          enabled: !offline,
+          child: Row(
+            children: [
+              Icon(
+                pinned ? Icons.push_pin_outlined : Icons.push_pin_rounded,
+                size: 15,
+              ),
+              const SizedBox(width: 9),
+              // 置顶**不改变可见性**，只是搬进左栏那一段 ——
+              // 与归档（从默认列表消失）是两件完全不同的事
+              Text(pinned ? '取消置顶' : '置顶'),
             ],
           ),
         ),
