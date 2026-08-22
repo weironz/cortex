@@ -907,6 +907,36 @@ agent 的 `generate_image` 工具也是打这条 —— 两处各记一遍的下
 技能名是用户随手起的，里面完全可以有斜杠，而 `%2F` 在不同的反代上被规范化的
 方式还不一样。
 
+### 电脑操作：唯一一组**目标平台限定**的依赖
+
+`crates/cortex-local/src/computer.rs`（`xcap` 截屏 + `enigo` 键鼠），依赖写在
+`[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]`
+下面。这条 cfg 边界正好等于**产品边界**：电脑操作是桌面端的能力，而这个仓库
+的 Linux 产物是沙箱容器与 agentd —— 容器里根本没有屏幕。顺带解决 CI：
+Linux 上 `enigo` 默认要 `libxdo`（C 库），装它得改 workflow，而那条依赖在
+Linux 上本来就没有用户。
+
+代价是**Linux 桌面用不了**。所以 `computer::supported()` 照实回答，
+`/health` 把它报成 `computer_use`，界面据此决定摆不摆那个开关。
+
+**三个条件同时成立才摆工具**（`Caps.can_use_computer`）：用户开了、这个构建
+编进了那一组、跑在 `ExecEnvironment::LocalMachine`。三条写在**一处** ——
+分散判的话，漏掉第三条的表现是云端会话里模型答应去点按钮然后每次都失败。
+
+⚠️ **坐标换算在服务端这一侧做，不告诉模型缩放比例。** 截图按长边 1400 缩小
+（4K 原图一张就上万 token），点击时乘回去。反过来做的话模型会自己算，
+而算错的表现是点偏一点点 —— 它看不出是自己算错了，只会重试，然后一直偏。
+没截过图就点则**当场拒绝**，不按 1.0 蒙混。
+
+`ToolResult` 因此多了一个 `image` 字段：它与 `diff` 正好相反（`diff` 只给界面
+不进模型，`image` 只进模型）。`to_mcp_result` 把它发成 `Content::image`，
+供应商那侧的 `From<Content>` 才会翻成真正的图片块 —— 塞进文本的话是烧掉几万
+token 而模型什么也没看见。
+
+⚠️ **模型看不懂图时客户端就不发这个字段**：截图是工具执行时才拍的，
+发过去再被回一句 400，代价是屏幕白拍一次并已经发给供应商。理由与做法见
+[`docs/design.md`](design.md) 第十五节。
+
 ⚠️ **dev 的 nginx 是 allow-list，生产的 traefik 是 deny-list。**
 加 `/images` 时它一开始落到了 SPA 回落上（**回 200 + index.html**，看起来像
 成功）。生产那侧 `/api` 除 memory/mcp 外全归 agentd，不用动 —— 这条不对称

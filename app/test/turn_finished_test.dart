@@ -48,6 +48,7 @@ class _SlowApi extends MockCortexApi {
     String? source,
     Assistant? assistant,
     List<Skill> skills = const [],
+    bool computerUse = false,
     ImagePrefs? imagePrefs,
   }) {
     final c = StreamController<ChatEvent>();

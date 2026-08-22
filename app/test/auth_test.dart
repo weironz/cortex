@@ -653,6 +653,7 @@ class _GateApi
     String? source,
     Assistant? assistant,
     List<Skill> skills = const [],
+    bool computerUse = false,
     ImagePrefs? imagePrefs,
   }) => throw UnimplementedError('闸门只该碰 /health 与 /auth/ticket');
 

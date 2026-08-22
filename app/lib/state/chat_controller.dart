@@ -904,6 +904,12 @@ class ChatController extends Notifier<ChatState> {
       // 会话绑），技能回答「这件事怎么做」（多一条可用的做法不会让模型
       // 改口）。理由写在 `skill_controller.dart` 的文件注释里
       skills: ref.read(skillControllerProvider).listable,
+      // 电脑操作。逐轮带，与 `permissionMode` 同一路数：用户在设置里关掉，
+      // **下一句**就该关上。
+      //
+      // ⚠️ 这里只答「用户准了」。够不够得着由 agent 那侧再判一次
+      //（容器里没有屏幕）—— 两处各管一半是有意的：客户端答不了「你跑在哪」
+      computerUse: ref.read(computerUseEffectiveProvider),
       // 生图规格同理。**兜底不覆盖** —— 模型在工具参数里自己填了尺寸就
       // 听模型的，见服务端 `resolve_image_spec`
       imagePrefs: ref.read(imagePrefsProvider),

@@ -20,6 +20,7 @@
 
 mod attachments;
 mod checkpoint;
+mod computer;
 mod config;
 /// 工具确认的那本簿子。**唯一的宿主是这里** —— cortexd 不跑 agent，
 /// 容器里那个不问确认（越界路径直接拒绝）。见模块头。

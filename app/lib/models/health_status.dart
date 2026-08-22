@@ -11,6 +11,7 @@ class HealthStatus {
     this.commit,
     this.role = roleCortexd,
     this.server,
+    this.computerUse = false,
   });
 
   final String status;
@@ -31,6 +32,15 @@ class HealthStatus {
 
   /// agent 上游那台的状态。`null` = 答话的不是 agent（或它没报）。
   final ServerLink? server;
+
+  /// 这个 agent **做不做得到**操作电脑（截屏 + 键鼠）。
+  ///
+  /// 做不到有两种情形：跑在容器里（没有屏幕），或者这个构建没编进那一组
+  /// （Linux 桌面）。两种都不是「关着」而是「没有」—— 界面据此决定
+  /// **摆不摆那个开关**，摆一个打开也没用的开关比没有它更糟。
+  ///
+  /// 缺字段读成 `false`：老 agent 上这个能力本来就不存在。
+  final bool computerUse;
 
   /// 答话的是本地 agent 吗。
   bool get isLocalAgent => role == roleLocalAgent;
@@ -110,6 +120,7 @@ class HealthStatus {
     server: json['server'] is Map<String, dynamic>
         ? ServerLink.fromJson(json['server'] as Map<String, dynamic>)
         : null,
+    computerUse: json['computer_use'] as bool? ?? false,
   );
 }
 

@@ -1651,6 +1651,7 @@ class MockCortexApi
     String? source,
     Assistant? assistant,
     List<Skill> skills = const [],
+    bool computerUse = false,
     ImagePrefs? imagePrefs,
   }) async* {
     if (_disposed) {

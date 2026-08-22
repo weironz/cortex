@@ -328,6 +328,23 @@ pub trait ToolHost: Send + Sync {
         )
     }
 
+    /// 看屏幕、动鼠标键盘。**由宿主执行，不走 `tools::execute`。**
+    ///
+    /// 那条路是文件系统与子进程；这一组要的是这台机器的显示与输入子系统，
+    /// 而那是**平台相关**的东西 —— 谁编得进那些平台代码，谁来实现。
+    ///
+    /// # 默认实现是「这个宿主不会」，不是假装点了一下
+    ///
+    /// 容器里的 agent 没有屏幕，Linux 上的构建也没编这一组进去。假装成功的
+    /// 后果比别处更重：模型会接着说「我已经点了确认」，而用户屏幕上什么都
+    /// 没发生 —— 它会照着一个虚构的状态一路走下去。
+    async fn computer(&self, _tool: &str, _arguments: &serde_json::Value) -> ToolResult {
+        ToolResult::err(
+            "这个 agent 进程操作不了电脑（容器里没有屏幕，Linux 构建也没编进这一组）。\
+             不要假设点击已经发生 —— 告诉用户这条路在当前环境下不可用。",
+        )
+    }
+
     /// 把一份技能的正文取回来。**由宿主执行，不走 `tools::execute`。**
     ///
     /// 与 [`Self::generate_image`] 同一个理由：正文存在服务端的数据库里，
@@ -1048,6 +1065,12 @@ impl Turn {
         } else if spec.name == "load_skill" {
             // 同上：正文在服务端的库里，不在文件系统上
             host.load_skill(&call.arguments).await
+        } else if tools::is_computer_tool(&spec.name) {
+            // 同上：这一组要的是显示与输入子系统，而那是平台相关的东西。
+            // 判据用 `is_computer_tool` 而不是在这里再写一遍名字清单 ——
+            // 写两遍的话，加第六个工具时漏掉这里不会有任何编译错误，
+            // 症状是那个工具被当成文件工具丢进 `tools::execute`
+            host.computer(&spec.name, &call.arguments).await
         } else {
             // **重新问一次宿主**，而不是复用上面那份 `sandbox`：刚才那次
             // `grant_root` 之后清单变长了，用旧的一份去执行，症状恰好是
@@ -1095,6 +1118,15 @@ struct Round {
 /// 用 Err 会让部分供应商把它渲染成协议错误，模型反而不知道该怎么改。
 fn to_mcp_result(r: ToolResult) -> CallToolResult {
     if r.ok {
+        // 有图就把图一起带上。**文字仍然要有** —— 一条只有图的工具结果在
+        // 部分供应商那儿会被当成空回复，而那时模型只知道「调过了」，
+        // 不知道调的是哪一次、看到的是什么
+        if let Some(img) = r.image {
+            return CallToolResult::success(vec![
+                Content::text(r.content),
+                Content::image(img.base64, img.mime),
+            ]);
+        }
         CallToolResult::success(vec![Content::text(r.content)])
     } else {
         CallToolResult::error(vec![Content::text(format!("工具执行失败：{}", r.content))])

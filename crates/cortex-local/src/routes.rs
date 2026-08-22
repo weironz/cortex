@@ -368,6 +368,13 @@ async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health>
             reachable,
             backlog: st.outbox.backlog(),
         }),
+        // **照实报，别乐观。** 界面据此决定摆不摆那个开关，而摆一个打开也
+        // 没用的开关比没有它更糟。两个条件缺一不可：这个构建编进了那一组
+        //（Linux 上没有），以及跑在桌面端（容器里没有屏幕）
+        computer_use: Some(
+            crate::computer::supported()
+                && st.engine.exec_env == cortex_agent::ExecEnvironment::LocalMachine,
+        ),
     })
 }
 

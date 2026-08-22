@@ -40,6 +40,7 @@ class _RunningApi extends MockCortexApi {
     String? source,
     Assistant? assistant,
     List<Skill> skills = const [],
+    bool computerUse = false,
     ImagePrefs? imagePrefs,
   }) => sent.stream;
 

@@ -633,6 +633,7 @@ class _ConfirmApi
     String? source,
     Assistant? assistant,
     List<Skill> skills = const [],
+    bool computerUse = false,
     ImagePrefs? imagePrefs,
   }) => const Stream.empty();
 

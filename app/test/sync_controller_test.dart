@@ -175,6 +175,7 @@ class _FakeApi
     String? source,
     Assistant? assistant,
     List<Skill> skills = const [],
+    bool computerUse = false,
     ImagePrefs? imagePrefs,
   }) => throw UnimplementedError('同步链路不应发起对话');
 

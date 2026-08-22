@@ -48,6 +48,26 @@ hex = "0.4"
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+# 电脑操作（截屏 + 键鼠）。**只在 Windows 与 macOS 上编进来。**
+#
+# 不是偷懒，是这条边界正好等于产品边界：电脑操作是**桌面端**的能力，
+# 而这个仓库的 Linux 产物是沙箱容器与 agentd —— 容器里根本没有屏幕。
+#
+# 顺带解决 CI：Linux 上 enigo 默认要 libxdo（C 库），装它得改 workflow，
+# 而那条依赖在 Linux 上本来就没有用户。目标平台限定让 Linux 连编都不编它们。
+#
+# 代价说清楚：**Linux 桌面用不了这个功能**。所以本机 agent 在 `/health` 里
+# 报一个 `computer_use` 字段，界面据此决定要不要摆那个开关 —— 摆一个打开也
+# 没用的开关，比没有这个开关更糟（CLAUDE.md 约束 2）。
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+# 截屏。Apache-2.0
+xcap = "0.9"
+# 键鼠合成。MIT
+enigo = "0.6"
+# 截图要编码成 png 再 base64 给模型
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }

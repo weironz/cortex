@@ -223,6 +223,7 @@ class ReplayApi
     String? source,
     Assistant? assistant,
     List<Skill> skills = const [],
+    bool computerUse = false,
     ImagePrefs? imagePrefs,
   }) async* {
     yield const ChatDeltaEvent('好');

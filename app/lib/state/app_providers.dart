@@ -579,6 +579,51 @@ class PermissionModeNotifier extends Notifier<PermissionMode> {
   }
 }
 
+/// 准不准操作电脑（截屏 + 键鼠）。
+///
+/// # ⚠️ 默认关，而且这个默认值是安全属性的一部分
+///
+/// 别的工具都被围栏管着：文件工具受工作区限制、shell 在沙箱里、外来工具在
+/// 别人的进程里。这一组**没有围栏** —— 它动的是用户整台机器上正在运行的
+/// 一切：浏览器里登录着的账号、聊天窗口、密码管理器。
+///
+/// 与 `permissionModeProvider` 完全同构（逐轮带、存本地设置），只有默认值
+/// 那一条刻意不同：权限档的默认是「每次询问」（一个安全的**中间**值），
+/// 这里的默认是**没有这个能力**。
+///
+/// # 它只是「用户准了」
+///
+/// 够不够得着还要看跑在哪：容器里没有屏幕。`cortex-local` 那侧会再判一次，
+/// 而界面这侧靠 `/health` 的 `computer_use` 决定摆不摆那个开关。
+class ComputerUseNotifier extends Notifier<bool> {
+  static const String _key = 'computer_use';
+
+  @override
+  bool build() {
+    Future.microtask(_restore);
+    return false;
+  }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    // ⚠️ 只有**明确存过 `true`** 才打开。别用「不是 false 就当 true」那种
+    // 写法：设置文件损坏、键名改过、旧版本没写过这一项，都会变成默认打开
+    final on = saved[_key] == 'true';
+    if (on != state) state = on;
+  }
+
+  void set({required bool on}) {
+    if (state == on) return;
+    state = on;
+    unawaited(ref.read(settingsPatcherProvider)(_key, on ? 'true' : 'false'));
+  }
+}
+
+final computerUseProvider = NotifierProvider<ComputerUseNotifier, bool>(
+  ComputerUseNotifier.new,
+);
+
 final permissionModeProvider =
     NotifierProvider<PermissionModeNotifier, PermissionMode>(
       PermissionModeNotifier.new,
@@ -1245,6 +1290,7 @@ class GateClosedApi implements CortexApi {
     String? source,
     Assistant? assistant,
     List<Skill> skills = const [],
+    bool computerUse = false,
     ImagePrefs? imagePrefs,
   }) => Stream.error(_closed);
 

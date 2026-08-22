@@ -1290,6 +1290,7 @@ class HttpCortexApi implements CortexApi {
     String? source,
     Assistant? assistant,
     List<Skill> skills = const [],
+    bool computerUse = false,
     ImagePrefs? imagePrefs,
   }) async* {
     final request = http.Request('POST', _uri('/chat'))
@@ -1332,6 +1333,10 @@ class HttpCortexApi implements CortexApi {
         // 目录带上，**正文不带** —— 分层的意义就在这一点上。
         // 关掉的、没名字的都进不了目录（`isListable`），与服务端那条
         // `SkillBrief::is_listable` 是同一个判据
+        // ⚠️ 只在**真的开着**时才发。恒发一个 false 也能跑，但那样老服务端
+        // 的日志里会多一个它不认识的字段，而且这个字段的缺席本身就是
+        // 「没开」——不发比发 false 更不容易出错
+        if (computerUse) 'computer_use': true,
         if (skills.any((s) => s.isListable))
           'skills': [
             for (final s in skills)

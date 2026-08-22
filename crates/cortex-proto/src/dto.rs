@@ -119,6 +119,17 @@ pub struct Health {
     /// 名字不改的话，健康页上会写着「记忆：已连接」，而这个部署根本没有记忆。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<ServerHealth>,
+    /// 这个 agent **做不做得到**操作电脑（截屏 + 键鼠）。**只有本地 agent 有**。
+    ///
+    /// # 界面据此决定摆不摆那个开关
+    ///
+    /// 做不到有两种情形：跑在容器里（没有屏幕），或者这个构建没编进那一组
+    /// （Linux 桌面）。两种都不是「关着」而是「没有」—— 摆一个打开也没用的
+    /// 开关，比没有这个开关更糟（CLAUDE.md 约束 2）。
+    ///
+    /// 老服务端不报，那时是 `None`，界面按「没有」处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_use: Option<bool>,
 }
 
 fn role_cortexd() -> String {
@@ -277,6 +288,22 @@ pub struct ChatRequest {
     /// 就等于取消了分层。见 [`crate::skills`] 的模块文档。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<crate::skills::SkillBrief>,
+    /// 这一轮准不准操作电脑（看屏幕、动鼠标键盘）。
+    ///
+    /// # ⚠️ 默认 `false`，而且这个默认值是安全属性的一部分
+    ///
+    /// 别的工具都被围栏管着（文件工具受工作区限制、shell 在沙箱里）。
+    /// 这一组**没有围栏** —— 它动的是用户整台机器上正在运行的一切。
+    /// 老客户端不发这个字段，于是升级服务端**不会**给任何人悄悄打开它。
+    ///
+    /// 逐轮带，与 `permission_mode` 同一路数：用户在设置里关掉，
+    /// **下一句**就该关上。
+    ///
+    /// ⚠️ 它只是「用户准了」。够不够得着还要看**跑在哪** ——
+    /// 容器里没有屏幕，`cortex-local` 那侧会再判一次
+    /// （`ExecEnvironment::LocalMachine` 且这个构建编进了那一组）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub computer_use: bool,
     /// 这一轮的权限档位。老客户端不传即 [`PermissionMode::Ask`]。
     ///
     /// 逐轮带而不是存在会话上：用户在对话框底部随时能改，而改完之后

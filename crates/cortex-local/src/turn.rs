@@ -140,6 +140,7 @@ fn system_prompt_for(
     workspace: Option<&str>,
     assistant: Option<&cortex_proto::assistants::AssistantBrief>,
     skills: &[(&str, &str)],
+    can_use_computer: bool,
 ) -> String {
     let mut base = String::new();
     match assistant.filter(|a| a.is_meaningful()) {
@@ -161,18 +162,52 @@ fn system_prompt_for(
     // 技能目录。空清单一律不印 —— 而且**同一个判据**决定了 `load_skill`
     // 进不进工具目录（见 `with_external`）
     if let Some(note) = cortex_agent::prompt::skills_note(skills) {
-        prompt.push_str(
-            "
-
-",
-        );
+        prompt.push_str("\n\n");
         prompt.push_str(&note);
+    }
+    // 电脑操作那段说明。与工具目录同生共死 —— 判据是同一个 `can_use_computer`。
+    // 摆了工具不讲坐标系，模型会一直点偏；讲了坐标系却没有工具，
+    // 它会承诺一件做不到的事
+    if can_use_computer {
+        // 屏幕尺寸问不到就按一个常见的写。**不能因此不印这一段**：缺了它
+        // 模型不知道要先截图、也不知道坐标可以直接用，于是每一次都点偏
+        let (w, h) = crate::computer::Computer::screen_size().unwrap_or((1920, 1080));
+        prompt.push_str("\n\n");
+        prompt.push_str(&cortex_agent::prompt::computer_note(w, h));
     }
     if let Some(note) = cortex_agent::prompt::egress_note(env) {
         prompt.push_str("\n\n");
         prompt.push_str(note);
     }
     prompt
+}
+
+/// 这一轮**额外**有哪三样能力。
+///
+/// # 为什么攒成一个类型，而不是三个 `bool` 参数
+///
+/// 直接的理由是参数太多（clippy 也这么说）。但更要紧的是：这三个都要
+/// **同时**喂给两个地方 —— 工具目录（`with_external`）与系统提示词
+/// （`system_prompt_for`）。攒成一个值之后，「装配时算一次、两处都用它」
+/// 这件事在类型上就成立了；散着传的话，某一处漏一个参数是编译得过的。
+///
+/// 三样的共同点：**都会让模型答应做某件事**。所以每一个都必须在
+/// 「真的做得到」时才为真 —— 那正是 CLAUDE.md 约束 2。
+#[derive(Debug, Clone, Copy, Default)]
+struct Caps {
+    /// 够得着生图那条路（有服务端）。
+    can_draw: bool,
+    /// 这一轮带了非空的技能目录。
+    has_skills: bool,
+    /// 用户开了电脑操作，**且**这个构建与这个执行环境真的做得到。
+    can_use_computer: bool,
+}
+
+impl Caps {
+    /// 有没有任何一样。`with_external` 用它决定要不要重建目录。
+    const fn any(self) -> bool {
+        self.can_draw || self.has_skills || self.can_use_computer
+    }
 }
 
 /// 把外来工具并进目录：**内置 + 外来，一起交给 `with_specs`**。
@@ -183,24 +218,25 @@ fn system_prompt_for(
 ///
 /// 抽出来是因为**两条路都要用**：绑了工作区的和没绑的。曾经只有前者并了
 /// 外来工具，症状见 [`chat_turn_for`]。
-fn with_external(
-    base: Turn,
-    external: &[cortex_agent::ToolSpec],
-    can_draw: bool,
-    has_skills: bool,
-) -> Turn {
-    if external.is_empty() && !can_draw && !has_skills {
+fn with_external(base: Turn, external: &[cortex_agent::ToolSpec], caps: Caps) -> Turn {
+    if external.is_empty() && !caps.any() {
         return base;
     }
     let mut specs = cortex_agent::tools::builtin_specs();
-    if can_draw {
+    if caps.can_draw {
         specs.push(cortex_agent::tools::image_spec());
     }
     // ⚠️ **与提示词里那块目录同生共死**（CLAUDE.md 约束 2）。判据是同一个
     // `has_skills`，而不是各算各的 —— 两处各判一次的话，其中一处漏掉不会有
     // 任何测试红，症状只是「模型看得见技能却取不回来」或者反过来
-    if has_skills {
+    if caps.has_skills {
         specs.push(cortex_agent::tools::skill_spec());
+    }
+    // ⚠️ 与提示词里那段说明同生共死（同 `has_skills` 那条）：判据是同一个
+    // `can_use_computer`。摆了工具不讲坐标系，模型会一直点偏；讲了坐标系
+    // 却没有工具，它会承诺一件做不到的事
+    if caps.can_use_computer {
+        specs.extend(cortex_agent::tools::computer_specs());
     }
     specs.extend(external.iter().cloned());
     base.with_specs(specs)
@@ -235,13 +271,8 @@ fn can_generate_images(llm: &cortex_llm::LlmClient) -> bool {
 /// 「配了 MCP 但它不会用」。现搭的成本是每轮拼一次 `Vec<ToolSpec>`，
 /// 与「和绑了工作区那条同一个形状」比起来不值一提 —— **同形状才是这次
 /// 修得掉、下次不再漏的原因**。
-fn chat_turn_for(
-    max_rounds: usize,
-    external: &[cortex_agent::ToolSpec],
-    can_draw: bool,
-    has_skills: bool,
-) -> Turn {
-    with_external(Turn::sealed(), external, can_draw, has_skills).with_max_rounds(max_rounds)
+fn chat_turn_for(max_rounds: usize, external: &[cortex_agent::ToolSpec], caps: Caps) -> Turn {
+    with_external(Turn::sealed(), external, caps).with_max_rounds(max_rounds)
 }
 
 /// 按执行环境挑构造函数 —— **这是「agent 的沙箱长什么样」的唯一出处**。
@@ -285,14 +316,11 @@ fn workspace_turn_for(
     max_rounds: usize,
     mode: PermissionMode,
     external: &[cortex_agent::ToolSpec],
-    can_draw: bool,
-    has_skills: bool,
+    caps: Caps,
 ) -> Result<Turn> {
-    Ok(
-        with_external(turn_for_env(env, root)?, external, can_draw, has_skills)
-            .with_max_rounds(max_rounds)
-            .with_policy(policy_for(mode, env)),
-    )
+    Ok(with_external(turn_for_env(env, root)?, external, caps)
+        .with_max_rounds(max_rounds)
+        .with_policy(policy_for(mode, env)))
 }
 
 /// 一轮所需的全部依赖。
@@ -636,6 +664,21 @@ impl Engine {
             .map(|s| (s.name.as_str(), s.description.as_str()))
             .collect();
         let has_skills = !catalog.is_empty();
+        // 电脑操作要**三个条件同时成立**，缺一不可：
+        //
+        // 1. 用户在设置里打开了（`req.computer_use`）；
+        // 2. 这个构建编进了那一组（Linux 上没有，见 `computer::supported`）；
+        // 3. 跑在**桌面端**（容器里没有屏幕，摆出来就是骗人）。
+        //
+        // 三条写在**一处**：分散判的话，漏掉第三条的表现是云端会话里模型
+        // 答应去点按钮，然后每一次都失败 —— 而用户完全看不出为什么
+        let caps = Caps {
+            can_draw,
+            has_skills,
+            can_use_computer: req.computer_use
+                && crate::computer::supported()
+                && self.exec_env == cortex_agent::ExecEnvironment::LocalMachine,
+        };
         let workspace_turn = bound.as_deref().and_then(|ws| {
             // 绑定时校验过，但目录可能之后被删了/移了/换了外接盘。
             // 此时降级成纯聊天而不是让整轮失败 —— 用户只是想说句话
@@ -645,8 +688,7 @@ impl Engine {
                 self.max_rounds,
                 req.permission_mode,
                 &external,
-                can_draw,
-                has_skills,
+                caps,
             )
             .inspect_err(|e| {
                 tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
@@ -655,7 +697,17 @@ impl Engine {
         });
         // 没绑工作区那条也要现搭：外来工具是**运行时可变**的（设置页能增删），
         // 而 `Engine.chat_turn` 是启动时那一份，装不下之后加的 server
-        let chat_turn = chat_turn_for(self.max_rounds, &external, can_draw, has_skills);
+        let chat_turn = chat_turn_for(self.max_rounds, &external, caps);
+        // 这一轮模型手上到底有什么。**排查「它说它不会」时的第一现场** ——
+        // 那句话有两种成因（工具真的没摆出来 / 摆了但模型没用），
+        // 而没有这一行的话，两者在日志里长得一模一样
+        tracing::info!(
+            can_draw = caps.can_draw,
+            has_skills = caps.has_skills,
+            computer = caps.can_use_computer,
+            tools = ?workspace_turn.as_ref().unwrap_or(&chat_turn).tool_names(),
+            "本轮工具目录"
+        );
         let turn = workspace_turn.as_ref().unwrap_or(&chat_turn);
         // 用 `workspace_turn` 而不是 `bound` 判断：绑过但目录已不可用时上面
         // 降级成了纯聊天，此刻模型手里确实没有文件工具 —— 提示词必须跟着降级，
@@ -667,6 +719,7 @@ impl Engine {
             workspace_turn.as_ref().and(bound.as_deref()),
             req.assistant.as_ref(),
             &catalog,
+            caps.can_use_computer,
         );
 
         // ── 4. agent 循环。工具在**这台机器**上执行 ──
@@ -727,6 +780,7 @@ impl Engine {
             grants: self.grants.clone(),
             remote: self.remote.clone(),
             image_prefs: req.image_prefs.clone(),
+            computer: crate::computer::Computer::default(),
             drawn: std::sync::Mutex::new(Vec::new()),
         };
         // 这一轮用哪个模型。逐轮的选择是**那一轮的属性**，而 `self.llm`
@@ -1028,6 +1082,10 @@ struct LocalHost {
     /// 用户那句「画一张宽的」是**这一次**的意图，比规格面板上那个留着没动
     /// 的值更近。覆盖的表现是他说的话被一个他早就忘了的设置静默否决。
     image_prefs: Option<cortex_proto::dto::ImagePrefs>,
+    /// 电脑操作的执行者。**每轮新建一个** —— 它记着上一次截图的缩放比例，
+    /// 而那是**这一轮**的坐标系：跨轮复用的话，用户中途换了显示器分辨率，
+    /// 点击会落在一个谁也不知道的地方
+    computer: crate::computer::Computer,
     /// 这一轮生成的图。
     ///
     /// # 为什么攒着而不是当场挂到消息上
@@ -1073,6 +1131,18 @@ impl ToolHost for LocalHost {
         arguments: &serde_json::Value,
     ) -> cortex_agent::ToolResult {
         self.mcp.call(spec, arguments).await
+    }
+
+    /// 看屏幕、动鼠标键盘。
+    ///
+    /// 到这里时**闸门已经过了** —— 这一组一律 `Risk::Execute`，所以在
+    /// 「每次询问」档下用户刚刚亲手批过一次。
+    async fn computer(
+        &self,
+        tool: &str,
+        arguments: &serde_json::Value,
+    ) -> cortex_agent::ToolResult {
+        self.computer.call(tool, arguments).await
     }
 
     /// 取一份技能的正文 —— 转给服务端。
@@ -1251,7 +1321,7 @@ mod tests {
         let root = dir.path().to_string_lossy().into_owned();
         let external = vec![fake_external("docs", "search")];
 
-        let unbound = chat_turn_for(8, &external, false, false);
+        let unbound = chat_turn_for(8, &external, Caps::default());
         assert!(
             unbound.tool_names().contains(&"mcp__docs__search"),
             "没绑工作区不等于没有外来工具 —— 那台 server 与工作区毫无关系。\
@@ -1265,8 +1335,7 @@ mod tests {
             8,
             PermissionMode::Ask,
             &external,
-            false,
-            false,
+            Caps::default(),
         )
         .expect("临时目录是合法根");
         assert!(
@@ -1285,7 +1354,14 @@ mod tests {
     ///   根本打不到的路
     #[test]
     fn 生图工具跟着能不能够到服务端走() {
-        let with_server = chat_turn_for(8, &[], true, false);
+        let with_server = chat_turn_for(
+            8,
+            &[],
+            Caps {
+                can_draw: true,
+                ..Caps::default()
+            },
+        );
         assert!(
             with_server.tool_names().contains(&"generate_image"),
             "代理模式下要有生图工具，否则模型只会回「我不会画图」。实际：{:?}",
@@ -1295,7 +1371,7 @@ mod tests {
         // ⚠️ **要带一个外来工具**：`with_external` 在两者皆空时提前 return，
         // 于是「不该加却加了」那条代码根本走不到。第一版就是这么写的，
         // 故障注入之后照样绿 —— 一条没有区分度的测试
-        let direct = chat_turn_for(8, &[fake_external("docs", "search")], false, false);
+        let direct = chat_turn_for(8, &[fake_external("docs", "search")], Caps::default());
         assert!(
             !direct.tool_names().contains(&"generate_image"),
             "直连模式没有可打的服务端。摆出来的话，模型会答应画图然后失败 ——              而那条失败用户什么都做不了。实际：{:?}",
@@ -1317,7 +1393,7 @@ mod tests {
         // 「不该加却加了」那条代码根本走不到 —— 生图那条测试踩过同一个坑
         let external = [fake_external("docs", "search")];
 
-        let none = chat_turn_for(8, &external, false, false);
+        let none = chat_turn_for(8, &external, Caps::default());
         assert!(
             !none.tool_names().contains(&"load_skill"),
             "一条技能都没有时不该摆这个工具：模型会拿一个提示词里读不到的名字去调，             收到「没有这个技能」—— 一次白白浪费的往返，读起来还像出了故障。实际：{:?}",
@@ -1328,12 +1404,111 @@ mod tests {
             "同一个判据的另一半：空目录不印那一块"
         );
 
-        let some = chat_turn_for(8, &external, false, true);
+        let some = chat_turn_for(
+            8,
+            &external,
+            Caps {
+                has_skills: true,
+                ..Caps::default()
+            },
+        );
         assert!(
             some.tool_names().contains(&"load_skill"),
             "有技能就必须有取正文的手段，否则目录里那几行是空头支票。实际：{:?}",
             some.tool_names()
         );
+    }
+
+    /// ⚠️ **电脑操作的工具与那段说明也是同生共死的。**
+    ///
+    /// 与技能那条同一个形状，但后果更重：这一组没有围栏（它动的是用户整台
+    /// 机器）。两个方向的症状都不报错 ——
+    ///
+    /// - 有工具没说明 → 模型不知道要先截图、不知道坐标能直接用，于是每一次
+    ///   都点偏，而它看不出为什么；
+    /// - 有说明没工具 → 它承诺去点某个按钮，然后发现自己没有手。
+    #[test]
+    fn 电脑操作的工具与说明一起出现一起消失() {
+        // 要带一个外来工具：`with_external` 在四者皆空时提前 return，
+        // 「不该加却加了」那条代码根本走不到 —— 生图那条测试踩过这个坑
+        let external = [fake_external("docs", "search")];
+
+        let off = chat_turn_for(8, &external, Caps::default());
+        for t in ["screenshot", "click", "type_text", "key", "scroll"] {
+            assert!(
+                !off.tool_names().contains(&t),
+                "没开电脑操作时不该有 {t}：这一组没有围栏，默认摆出来等于默认开着。实际：{:?}",
+                off.tool_names()
+            );
+        }
+
+        let on = chat_turn_for(
+            8,
+            &external,
+            Caps {
+                can_use_computer: true,
+                ..Caps::default()
+            },
+        );
+        for t in ["screenshot", "click", "type_text", "key", "scroll"] {
+            assert!(
+                on.tool_names().contains(&t),
+                "开了就得五个都在，少一个模型会绕路（比如没有 scroll 就狂点滚动条）。实际：{:?}",
+                on.tool_names()
+            );
+        }
+
+        // 另一半：说明跟着一起出现
+        let with_note = system_prompt_for(
+            "底座",
+            "",
+            cortex_agent::ExecEnvironment::LocalMachine,
+            None,
+            None,
+            &[],
+            true,
+        );
+        assert!(
+            with_note.contains("先 `screenshot`") && with_note.contains("密码"),
+            "开了工具就必须讲坐标系与「哪些不许代做」：{with_note}"
+        );
+        let without = system_prompt_for(
+            "底座",
+            "",
+            cortex_agent::ExecEnvironment::LocalMachine,
+            None,
+            None,
+            &[],
+            false,
+        );
+        assert!(
+            !without.contains("操作这台电脑"),
+            "没开的时候印这一段，等于告诉模型一件它做不到的事：{without}"
+        );
+    }
+
+    /// **每一个电脑操作工具都是 `Execute` 档，截屏也不例外。**
+    ///
+    /// 截屏最容易被说服放宽（「只是看一眼」）。但一张截图里有屏幕上的一切
+    /// —— 另一个窗口里的私信、密码管理器刚展开的那一条、没关掉的银行页面。
+    /// 它离开这台机器进了模型的上下文就再也收不回来了。这是**泄露**风险，
+    /// 不是修改风险，而后者不可撤销。
+    #[test]
+    fn 截屏也要过确认闸() {
+        for spec in cortex_agent::tools::computer_specs() {
+            assert_eq!(
+                spec.risk,
+                cortex_agent::Risk::Execute,
+                "{} 不是 Execute 档。这一组没有围栏，降档就是绕过唯一那道闸",
+                spec.name
+            );
+            assert!(
+                cortex_agent::tools::is_computer_tool(&spec.name),
+                "{} 在目录里但 `is_computer_tool` 不认它 —— 它会被当成文件工具\
+                 丢进 tools::execute，而那条路根本不知道怎么执行它",
+                spec.name
+            );
+        }
     }
 
     /// 技能目录进提示词，而**正文不进** —— 那正是分层的全部意义。
@@ -1346,6 +1521,7 @@ mod tests {
             None,
             None,
             &[("周报", "按公司模板写周报")],
+            false,
         );
         assert!(
             prompt.contains("周报"),
@@ -1368,6 +1544,7 @@ mod tests {
             None,
             None,
             &[],
+            false,
         );
         assert!(
             !bare.contains("load_skill") && !bare.contains("可用技能"),
@@ -1378,7 +1555,7 @@ mod tests {
     /// 一台 server 都没有时，目录里就只有内置的 —— 不多出空壳。
     #[test]
     fn no_mcp_server_means_the_catalog_is_exactly_the_builtin_one() {
-        let plain = chat_turn_for(8, &[], false, false);
+        let plain = chat_turn_for(8, &[], Caps::default());
         let names = plain.tool_names();
         assert!(
             !names.iter().any(|n| n.starts_with("mcp__")),
@@ -1402,8 +1579,7 @@ mod tests {
             8,
             PermissionMode::Ask,
             &[],
-            false,
-            false,
+            Caps::default(),
         )
         .expect("临时目录是合法根");
         let container = workspace_turn_for(
@@ -1412,8 +1588,7 @@ mod tests {
             8,
             PermissionMode::Ask,
             &[],
-            false,
-            false,
+            Caps::default(),
         )
         .expect("临时目录是合法根");
 
@@ -1467,6 +1642,7 @@ mod tests {
             Some("/w"),
             Some(&chef),
             &[],
+            false,
         );
 
         assert!(prompt.contains("资深大厨"), "人设本身要在：{prompt}");
@@ -1506,6 +1682,7 @@ mod tests {
                 None,
                 agent,
                 &[],
+                false,
             );
             assert!(
                 prompt.contains("你是 Cortex"),
@@ -1528,6 +1705,7 @@ mod tests {
             Some("/workspace"),
             None,
             &[],
+            false,
         );
         assert!(
             container.contains("CONNECT tunnel failed, response 403"),
@@ -1542,7 +1720,7 @@ mod tests {
             cortex_agent::ExecEnvironment::LocalMachine,
             cortex_agent::ExecEnvironment::None,
         ] {
-            let desktop = system_prompt_for("底座", "", env, Some("/workspace"), None, &[]);
+            let desktop = system_prompt_for("底座", "", env, Some("/workspace"), None, &[], false);
             assert!(
                 !desktop.contains("CORTEX_EGRESS_ALLOW"),
                 "{} 上没有出网代理，这段话就是假话 —— \
@@ -1568,6 +1746,7 @@ mod tests {
             Some("/workspace"),
             None,
             &[],
+            false,
         );
         assert!(
             with_note.starts_with(&plain),
@@ -1584,6 +1763,7 @@ mod tests {
             None,
             None,
             &[],
+            false,
         );
         assert!(
             unbound.contains("只有那个目录本身"),
