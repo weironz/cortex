@@ -292,6 +292,17 @@ services:
       S3_REGION: ${S3_REGION:-}
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-}
+      # 分享链接的基地址。**正常不配** —— `public_base` 从
+      # `X-Forwarded-Proto` / `X-Forwarded-Host` / `X-Forwarded-Prefix` 推，
+      # 而 traefik 三个头都设，推出来的比写死的准（写死会在换域名时静默作废）。
+      #
+      # 留这个口子是给**反代不设这些头**的部署兜底：那种部署拼出来的是
+      # `http://127.0.0.1/s/...`，用户复制出去、对方打不开，而他不会怀疑到
+      # 这一步 —— 症状离原因太远，所以要有一条能一行改掉的路。
+      #
+      # ⚠️ 空串是安全的：`public_base` 判了 `is_empty()` 才回落到头，
+      # 不像这个仓库栽过的那些「空串顶掉默认值」。
+      CORTEX_PUBLIC_URL: ${CORTEX_PUBLIC_URL:-}
       RUST_LOG: ${AGENTD_LOG:-cortex_agentd=info,warn}
     volumes:
       # 起沙箱要 docker API。**这是把宿主 root 交给它** —— 论证的另一半是
