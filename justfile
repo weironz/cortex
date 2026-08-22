@@ -473,8 +473,23 @@ lint-sh:
         echo "  装上：winget install koalaman.shellcheck"
     fi
 
+# agentd 读的每个环境变量，两份 compose 都得能设它。
+#
+# **与 CI 那一步同一条命令**（ci.yml 的「代码读的环境变量，compose 都设得了」）。
+#
+# 2026-08-22：`just ci` 全绿而 CI 红了 —— 红在这一步上，而这条 recipe 从来
+# 没跑过它。与 2026-08-20 文档链接那次（见 docs-check 上面那段）是同一个形状，
+# 第二次了：**CI 加了一步而 `just ci` 没跟着加，本机的绿就是假的**，
+# 而代价每次都是推上去等二十多分钟才看见。
+#
+# 两份都要跑：dev 与生产各有一份 compose，漏的那一份通常是 dev ——
+# 而 dev 正是本机唯一跑得起来的那份。
+lint-compose-env:
+    bash scripts/check-compose-env.sh deploy/docker-compose.yml
+    bash scripts/check-compose-env.sh docker-compose.dev.yml
+
 # 本地跑一遍 CI 的全部检查（含客户端 —— 不含的话它与 CI 是两回事）
-ci: fmt-check lint check test docs-check lint-sh flutter-check
+ci: fmt-check lint check test docs-check lint-sh lint-compose-env flutter-check
     @echo "全部检查通过"
 
 # ══════════════════════════════════════════════════════════
