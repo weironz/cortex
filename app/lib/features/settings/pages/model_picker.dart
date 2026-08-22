@@ -25,6 +25,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../api/api_exception.dart';
 import '../../../models/model_option.dart';
 import '../../../state/model_controller.dart';
 
@@ -79,12 +80,36 @@ Future<({ModelPick pick})?> pickModel(
   /// 三个角色的面板长得一模一样，没有这一句分不清在选哪个。
   String? headline,
 }) async {
-  final catalog = ref.read(modelCatalogProvider).value;
-  // 还没拉到就先拉一次再开，别弹一个空面板出来
-  if (catalog == null) {
-    ref.invalidate(modelCatalogProvider);
-    return null;
+  // ⚠️ **目录还没拉到时要等它，不能直接 return。**
+  //
+  // 从前这里是 `if (catalog == null) { invalidate(); return null; }` ——
+  // 一个**静默的空操作**：点下去什么都不发生，也没有任何解释。
+  //
+  // 在「默认模型」那一页它侥幸不发作（那页自己 watch 着目录，打开就拉了），
+  // 而 2026-08-22 新加的图片页没有 —— 于是**第一次点那个型号 chip 必然
+  // 没反应**，用户报上来的就是这个。侥幸成立的正确性不是正确性。
+  final ModelCatalog loaded;
+  final cached = ref.read(modelCatalogProvider).value;
+  if (cached != null) {
+    loaded = cached;
+  } else {
+    try {
+      loaded = await ref.read(modelCatalogProvider.future);
+    } on Object catch (e) {
+      // 拉不到就**说出来**。这条路上唯一比「点了没反应」更糟的，
+      // 是弹一个空面板让人以为自己一个模型都没配
+      if (context.mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(
+            content: Text('拉不到模型列表：${e is CortexApiException ? e.message : e}'),
+          ),
+        );
+      }
+      return null;
+    }
   }
+  // await 之后这个 context 可能已经没了（用户切走了）
+  if (!context.mounted) return null;
 
   // ⚠️ 返回值包一层记录。**直接返回 `ModelPick?` 是错的**：
   // 第一项要 pop 一个「空的选择」，而点面板外关掉给到的是
@@ -117,13 +142,13 @@ Future<({ModelPick pick})?> pickModel(
               title: firstTitle,
               subtitle:
                   firstSubtitle ??
-                  (catalog.defaultModel.isEmpty
+                  (loaded.defaultModel.isEmpty
                       ? '服务端配的那个'
-                      : catalog.defaultModel),
+                      : loaded.defaultModel),
               icon: Icons.settings_suggest_outlined,
               current: current,
             ),
-            if (allowAuto && catalog.autoAvailable)
+            if (allowAuto && loaded.autoAvailable)
               _tile(
                 ctx,
                 pick: const ModelPick(model: kAutoModel),
@@ -139,7 +164,7 @@ Future<({ModelPick pick})?> pickModel(
             // 筛完一个不剩的分组整组不画：留一个空标题在那儿，
             // 看起来像「这条来源坏了」，而实际只是它没有符合条件的型号
             for (final (source, label, models)
-                in catalog.grouped
+                in loaded.grouped
                     .map(
                       (g) => (g.$1, g.$2, g.$3.where(where ?? _any).toList()),
                     )
@@ -190,15 +215,24 @@ Future<({ModelPick pick})?> pickModel(
                   disabled: requireTools && !_chatty(m),
                   // 目录里查不到的能选，但要说一句「我们不知道」——
                   // 当成不行会把一个能用的模型挡在外面
-                  note: switch (m) {
-                    // 自定义端点：目录里那句话只能当提醒，不能当结论
-                    _ when m.customEndpoint && m.toolCall == false =>
-                      '官方那边这个型号不支持工具调用 —— 你这条是自定义端点，'
-                          '后面接的是谁我们不知道，能不能跑 agent 得试一下',
-                    _ when requireTools && m.toolCall == null && !_draws(m) =>
-                      '服务端目录里没有它，不知道它支不支持工具调用',
-                    _ => null,
-                  },
+                  // ⚠️ **工具调用那两句只在要跑 agent 的场合说。**
+                  //
+                  // `requireTools == false` 的唯一去处是选**绘画模型**，
+                  // 而生图那条路根本不调工具。在那儿画一句「能不能跑 agent
+                  // 得试一下」，是拿一件与这次选择无关的事去警告用户 ——
+                  // 2026-08-22 实测：`gpt-image-2` 下面挂着一整段橙色警告，
+                  // 而它是这台机器上唯一画得出图的型号。
+                  note: !requireTools
+                      ? null
+                      : switch (m) {
+                          // 自定义端点：目录里那句话只能当提醒，不能当结论
+                          _ when m.customEndpoint && m.toolCall == false =>
+                            '官方那边这个型号不支持工具调用 —— 你这条是自定义端点，'
+                                '后面接的是谁我们不知道，能不能跑 agent 得试一下',
+                          _ when m.toolCall == null && !_draws(m) =>
+                            '服务端目录里没有它，不知道它支不支持工具调用',
+                          _ => null,
+                        },
                   // 拦下来时说的是**这一个**为什么不行，不是一句通用的
                   disabledReason: _draws(m)
                       ? '这是生图模型，对话跑不了 —— 想画图的话，'
@@ -306,7 +340,12 @@ String describeModel(ModelOption m) {
     return '服务端目录里没有它 —— 能力与价格都不知道';
   }
   final bits = <String>[
-    '上下文 ${formatContext(m.context)}',
+    // ⚠️ 查不到就**整条不画**，不画「上下文 —」。
+    //
+    // 一个横杠在一行数字里读作「0」或者「不支持」，而事实是
+    // 「目录里没有这个型号的上下文长度」。与列表行那边同一条规矩
+    //（见 docs/design.md 第十节），从前这两处的规矩是反的。
+    if (m.context != null && m.context! > 0) '上下文 ${formatContext(m.context)}',
     '入 ${formatPerMtok(m.inputMicrosPerMtok)} / 出 ${formatPerMtok(m.outputMicrosPerMtok)}',
   ];
   if (m.vision == true) bits.add('看得懂图');

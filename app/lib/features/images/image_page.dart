@@ -261,12 +261,33 @@ class _ImagePageState extends ConsumerState<ImagePage> {
         ],
         if (state.error != null) ...[
           const SizedBox(height: 10),
-          Text(
-            '${state.error}',
-            key: const ValueKey('images:error'),
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.error,
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(
+                  '${state.error}',
+                  key: const ValueKey('images:error'),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.error,
+                  ),
+                ),
+              ),
+              // ⚠️ **这条错误必须有一条出路。**
+              //
+              // 画廊只在页面建起来时拉一次。首次那一下失败（2026-08-22
+              // 实测：app 启动时正撞上 nginx 重启，连接被掐），这条红字
+              // 就一直挂着，而唯一的办法是重启整个应用 —— 一个红字加一个
+              // 死胡同，比没有这条错误更让人恼火
+              TextButton(
+                key: const ValueKey('images:retry'),
+                onPressed: state.loading || state.generating
+                    ? null
+                    : () =>
+                          ref.read(imageControllerProvider.notifier).refresh(),
+                child: const Text('重试'),
+              ),
+            ],
           ),
         ],
       ],

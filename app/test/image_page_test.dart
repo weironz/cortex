@@ -11,7 +11,9 @@
 ///    有后续动作的按钮，断掉的表现是点了没反应。
 library;
 
+import 'package:cortex_app/api/api_exception.dart';
 import 'package:cortex_app/api/mock_cortex_api.dart';
+import 'package:cortex_app/models/generated_image.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/images/image_page.dart';
 import 'package:cortex_app/features/images/widgets/image_spec.dart';
@@ -22,6 +24,20 @@ import 'package:cortex_app/state/model_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+/// 只替换 `gallery` 一个方法的替身。
+///
+/// 其余全走 [MockCortexApi] —— 从头造一个 `CortexApi` 要实现几十个方法，
+/// 而这一组只关心画廊那一条路失败之后有没有出路。
+class _FlakyGalleryApi extends MockCortexApi {
+  _FlakyGalleryApi(this._gallery) : super(instant: true);
+
+  final Future<Gallery> Function({int limit, String? before}) _gallery;
+
+  @override
+  Future<Gallery> gallery({int limit = 30, String? before}) =>
+      _gallery(limit: limit, before: before);
+}
 
 class _MockConfig extends AppConfigNotifier {
   @override
@@ -152,6 +168,52 @@ void main() {
             '这个动作的全部意义就是把提示词拿回来改一改 —— '
             '填不回去就是点了没反应',
       );
+    });
+  });
+
+  group('画廊拉不到时有出路', () {
+    /// 第一次拉炸，之后正常 —— 还原 2026-08-22 那次：app 启动时正撞上
+    /// nginx 重启，连接被掐，而那条红字此后一直挂着，只能重启整个应用。
+    late int calls;
+
+    Future<Gallery> flakyGallery({int limit = 30, String? before}) async {
+      calls++;
+      if (calls == 1) {
+        throw const CortexApiException('Connection closed before full header');
+      }
+      return const Gallery();
+    }
+
+    testWidgets('首次失败之后能重试，且重试真的再问一次', (tester) async {
+      calls = 0;
+      final c = ProviderContainer(
+        overrides: [
+          appConfigProvider.overrideWith(_MockConfig.new),
+          cortexApiProvider.overrideWithValue(_FlakyGalleryApi(flakyGallery)),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+          settingsWriterProvider.overrideWithValue((_) async {}),
+        ],
+      );
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+
+      expect(find.byKey(const ValueKey('images:error')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('images:retry')),
+        findsOneWidget,
+        reason:
+            '一条红字加一个死胡同，比没有这条错误更让人恼火 —— '
+            '画廊只在建页时拉一次，没有这个按钮就只能重启整个应用',
+      );
+
+      await tester.tap(find.byKey(const ValueKey('images:retry')));
+      await _settle(tester);
+
+      expect(calls, 2, reason: '重试要真的再问一次服务端，不能只是把红字擦掉');
+      expect(find.byKey(const ValueKey('images:error')), findsNothing);
+      expect(find.text('还没有画过图'), findsOneWidget);
     });
   });
 

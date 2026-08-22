@@ -37,10 +37,15 @@ class _OpenPickerButton extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // **必须 watch 一下目录**，否则它从没被拉过，而 `showModelPicker`
-    // 看到 null 会直接早退 —— 真实入口（chip）是靠 `modelLabelProvider`
-    // 间接 watch 到的，这里要还原那个前提
-    ref.watch(modelCatalogProvider);
+    // ⚠️ **这里刻意不 watch 目录。**
+    //
+    // 从前这一行是 `ref.watch(modelCatalogProvider)`，注释写着「否则
+    // showModelPicker 看到 null 会直接早退」—— 也就是说**测试替被测代码
+    // 把前提补上了**，于是那个「点了没反应」的空操作一直是绿的。
+    // 2026-08-22 图片页正好是一个没有替它补前提的入口，当场发作。
+    //
+    // 现在 `pickModel` 自己会等目录。这个按钮还原的是最朴素的入口：
+    // 什么都没预热，点一下就该出面板。
     return Center(
       child: TextButton(
         onPressed: () => showModelPicker(context, ref),
@@ -346,6 +351,93 @@ void main() {
             '是编的 —— 我们没有任何办法知道哪个模型答得更好',
       );
       expect(find.textContaining('最优'), findsNothing, reason: '这个词我们证明不了');
+    });
+
+    testWidgets('选绘画模型时不说工具调用那一套', (tester) async {
+      final api = _Api();
+      final c = _boot(api, withChat: false);
+      addTearDown(c.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: c,
+          child: MaterialApp(
+            home: Scaffold(
+              body: Consumer(
+                builder: (context, ref, _) => Center(
+                  child: TextButton(
+                    onPressed: () => pickModel(
+                      context,
+                      ref,
+                      current: const ModelPick(),
+                      // 绘画那一行的参数，与 `model_roles_page` 逐字相同
+                      requireTools: false,
+                      allowAuto: false,
+                      where: (m) => m.imageOutput == true,
+                    ),
+                    child: const Text('开面板'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      for (var i = 0; i < 8; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await _openPicker(tester);
+
+      expect(
+        find.textContaining('跑 agent'),
+        findsNothing,
+        reason:
+            '生图那条路根本不调工具 —— 在绘画选择器上画一句「能不能跑 agent '
+            '得试一下」，是拿一件与这次选择无关的事去警告用户，'
+            '而它挂在唯一画得出图的那个型号下面',
+      );
+      expect(find.textContaining('工具调用'), findsNothing);
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('上下文查不到时整条不画，不画一个横杠', (tester) async {
+      // 一个横杠在一行数字里读作「0」或者「不支持」，而事实是
+      // 「目录里没有这个型号的上下文长度」
+      expect(
+        describeModel(
+          const ModelOption(
+            id: 'x',
+            displayName: 'X',
+            inputMicrosPerMtok: 1000000,
+            outputMicrosPerMtok: 2000000,
+          ),
+        ),
+        isNot(contains('—')),
+      );
+      expect(
+        describeModel(
+          const ModelOption(
+            id: 'x',
+            displayName: 'X',
+            inputMicrosPerMtok: 1000000,
+            outputMicrosPerMtok: 2000000,
+          ),
+        ),
+        isNot(contains('上下文')),
+        reason: '查不到就整条不画，而不是画「上下文 —」',
+      );
+      // 查得到的时候照常画
+      expect(
+        describeModel(
+          const ModelOption(
+            id: 'x',
+            displayName: 'X',
+            context: 1000000,
+            inputMicrosPerMtok: 1000000,
+            outputMicrosPerMtok: 2000000,
+          ),
+        ),
+        contains('上下文'),
+      );
     });
 
     testWidgets('拉不到目录时不弹一个空面板出来', (tester) async {
