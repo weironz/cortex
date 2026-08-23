@@ -138,6 +138,44 @@ just dev         # 本机拉起完整云端环境（agentd + web + 沙箱）
 just ci          # 本地跑一遍 CI 的全部检查
 ```
 
+### Windows 上的 shell —— 新环境先看这一节
+
+`just` 的 recipe **一律是 bash**，Windows 上那必须是 **Git Bash**。justfile 顶上
+钉死了绝对路径：
+
+```
+set shell         := ["bash", "-uc"]
+set windows-shell := ["C:/Program Files/Git/bin/bash.exe", "-uc"]
+```
+
+三个坑，都实测撞过：
+
+**1. 裸写 `bash` 会解析到 WSL。** PATH 上第一个 `bash` 是
+`C:\WINDOWS\system32\bash.exe` —— WSL 的启动器，System32 永远排在 `Git\bin`
+前面。WSL 里没有 Windows 那套工具链（docker / flutter / cargo），文件系统视图
+也不一样（`/mnt/d/...`）。所以上面那行写死绝对路径，别改成 `bash`。
+换机器时 Git 装在别处，改这一行。
+
+**2. 不许写 shebang recipe。** 带 `#!/usr/bin/env bash` 的 recipe **绕开**
+`windows-shell`，改由 just 自己去翻译解释器路径，那一步要 `cygpath` ——
+它只在 `C:\Program Files\Git\usr\bin`，而 Git 安装器只把 `Git\cmd` 放进 PATH。
+症状是从 PowerShell 跑报 `could not find cygpath executable ... program not found`，
+而同一条命令在 Git Bash 里好好的。
+
+写法是**内容挪进 `scripts/*.sh`，recipe 只留一行** `bash scripts/xxx.sh`
+（要 justfile 里的变量就当参数传，如 `bash scripts/doctor.sh {{ _dev }}`）。
+2026-08-23 把仅剩的 12 条搬完了，现在整份 justfile **一条 shebang recipe 都没有**
+—— 从 PowerShell / cmd / Git Bash 起 just 都一样。别加回来。
+
+**3. 从 Git Bash 写 PowerShell 脚本，中文会烂。** PowerShell 5.1 读 `.ps1`
+时**只有看见 BOM 才当 UTF-8**，否则按系统 ANSI（简中机器是 GBK）解 ——
+中文注释变乱码，还会连带报语法错。要写就用 `utf-8-sig`。
+
+**换新机器要装的**：Git for Windows、just、Rust、Flutter、Docker Desktop、
+Python 3。`just doctor` 会把缺的那几样点出来。想在 PowerShell 里跑别的仓库
+的 shebang recipe，给 profile 加个包装函数临时前置 `<Git>\usr\bin`
+（不要直接加进全局 PATH：那里的 `find.exe` / `sort.exe` 会盖住 Windows 自带的）。
+
 **改动一律先在本机拉起来看一眼，再谈发版。** 云上验证的每一次失败都要重跑
 整条流水线（二十多分钟），而同样的问题本机三分钟就看得见。
 

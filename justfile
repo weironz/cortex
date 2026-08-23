@@ -13,17 +13,22 @@ set dotenv-load := true
 # 但那个「宽容」的实际效果是**静默切到 WSL**，然后一路报 command not found
 # —— 一个改一行就能解决的问题，换成一个查半天的问题。
 #
-# ── 它**不**管 shebang recipe，别指望 ──────────────────────
+# ── ⚠️ 它**不**管 shebang recipe，所以本文件里一条都不许有 ────
 #
 # 带 `#!/usr/bin/env bash` 的 recipe 绕过这里，由 just 自己去翻译解释器
 # 路径，而那一步要 `cygpath` —— 且是在 **Windows PATH** 上找，不是在上面
-# 这个 shell 旁边找。实测：钉死之后 `just doctor` 仍然报
-# 「could not find cygpath ... program not found」。
+# 这个 shell 旁边找。它只在 `C:\Program Files\Git\usr\bin`，而 Git 的安装器
+# 只把 `Git\cmd` 放进 PATH。症状是从 PowerShell 跑报
+# 「could not find cygpath ... program not found」，而同一条在 Git Bash 里好好的。
 #
-# 所以从 PowerShell / Nushell 跑本文件里那些 shebang recipe，仍然需要把
-# `C:\Program Files\Git\usr\bin` 加进 PATH（或者干脆在 Git Bash 里跑）。
-# 想彻底摆脱，就得像 `app` 那样把 recipe 挪进 `scripts/*.sh`，
-# 一行 `bash scripts/xxx.sh` 调过去。
+# 2026-08-23 把仅剩的 12 条搬完了（setup / bootstrap / doctor / _wait-healthy /
+# dev-web-if-stale / dev-reset / lint-sh / backup-status / prod-bootstrap /
+# image-build / deploy-check / deploy-sync）—— **现在这份文件里一条 shebang
+# recipe 都没有**，从哪个终端起 just 都一样。
+#
+# 要写多行脚本：内容进 `scripts/xxx.sh`，这里只留一行 `bash scripts/xxx.sh`。
+# 需要本文件里的变量就当参数传（`bash scripts/doctor.sh {{ _dev }}`）——
+# 别在脚本里再写一份，那是第二处装配。
 set shell := ["bash", "-uc"]
 set windows-shell := ["C:/Program Files/Git/bin/bash.exe", "-uc"]
 
@@ -37,13 +42,7 @@ default:
 
 # 首次配置：生成 .env、安装开发工具
 setup:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    [ -f .env ] || { cp .env.example .env; echo "已生成 .env"; }
-    command -v sqlx >/dev/null || cargo install sqlx-cli --no-default-features --features rustls,postgres
-    rustup component add rustfmt clippy
-    mkdir -p data/backup/{wal,base,logical,reports} data/mirror
-    echo "就绪。执行 'just bootstrap' 一条命令起完整环境。"
+    bash scripts/setup.sh
 
 # 它现在几乎只是 `just dev` 外面套一层首次上手的准备 —— 因为原来那三步
 # 「建库 / 迁移 / 建桶」**已经没有人需要手动做了**，而它们各自的 recipe
@@ -64,16 +63,7 @@ setup:
 # （末行是 `just --list` 里显示的那句 —— just 取紧挨 recipe 的最后一行注释）
 # ★ 一条命令从零到能用：备好 .env 与目录 → 起完整环境 → 等健康 → 自检
 bootstrap:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export MSYS_NO_PATHCONV=1
-    [ -f .env ] || { cp .env.example .env; echo "已从 .env.example 生成 .env"; }
-    mkdir -p data/backup/{wal,base,logical,reports} data/mirror
-    just dev
-    echo "── 等服务就绪 ──"
-    just _wait-healthy
-    echo "── 自检 ──"
-    just doctor
+    bash scripts/bootstrap.sh
 
 # **问的是 dev 那一套**（`{{ _dev }}`），不是基座 compose。基座里现在只剩
 # egress，拿 `docker compose ps` 去 grep `postgres` 永远匹配不上 —— 而它的
@@ -91,47 +81,7 @@ bootstrap:
 #
 # 环境自检：把「起不来」拆成几条能一眼看懂的结论
 doctor:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    export MSYS_NO_PATHCONV=1
-    rc=0
-    say() { printf '  %-28s %s\n' "$1" "$2"; }
-    echo "── Cortex 环境自检 ──"
-    command -v docker >/dev/null && say docker "$(docker --version | cut -d, -f1)" || { say docker "缺失 —— 全部依赖服务都靠它"; rc=1; }
-    command -v cargo  >/dev/null && say cargo  "$(cargo --version)"  || { say cargo "缺失"; rc=1; }
-    if docker compose {{ _dev }} ps --format '{{ "{{" }}.Service{{ "}}" }}' 2>/dev/null | grep -q cortexdb; then
-        say Postgres "$(docker compose {{ _dev }} exec -T cortexdb psql -U "${CORTEX_PG_USER:-cortex}" -d "${CORTEX_PG_DB:-cortex}" -Atc 'SELECT version()' 2>/dev/null | cut -c1-40 || echo '起着但连不上')"
-    else
-        say Postgres "没起 —— 跑 just dev"; rc=1
-    fi
-    docker compose {{ _dev }} ps --format '{{ "{{" }}.Service{{ "}}" }}' 2>/dev/null | grep -q rustfs \
-        && say RustFS "起着" || { say RustFS "没起 —— 跑 just dev"; rc=1; }
-    # 这里以前还点一下记忆服务容器。2026-08-17 起本仓库不连它了 ——
-    # 再点就是在提醒一件与这个部署无关的事，而无关的提醒会训练人忽略提醒。
-    # ── 两个仓库共用一个 compose 项目名 ──────────────────────
-    #
-    # Cortex 与 Cormex 的根 compose **第一行都写着 `name: cortex`**，于是
-    # 两边的容器与卷落在同一个 compose 项目里。后果不是重名冲突（容器名
-    # 各自带前缀，撞不上），而是**作用域**：`docker compose down` 认的是
-    # 项目标签，在任一侧跑都会波及另一侧。
-    #
-    # 这个雷在 CLAUDE.md 与 justfile 里都记过，但**没有任何东西会拦它** ——
-    # 而它只在「刚好两边都起着」时才有杀伤力，也就是最忙的那天。
-    # 所以这里不去猜谁对谁错，只把事实摆出来：项目里有别人的容器时说一声。
-    #
-    # 不判 rc=1：这不是「环境坏了」，是「小心你手上的 down」。
-    foreign="$(docker ps -a --filter label=com.docker.compose.project=cortex \
-        --format '{{ "{{" }}.Names{{ "}}" }}' 2>/dev/null | grep -v '^cortex-' | tr '\n' ' ')"
-    if [ -n "$foreign" ]; then
-        say compose项目 "⚠ 项目 cortex 里还有别的仓库的容器：${foreign}"
-        echo "     两边根 compose 都写着 name: cortex，于是 down 的作用域会互相波及。"
-        echo "     本仓库的 dev-down / dev-reset 已经限定在 -f docker-compose.dev.yml，"
-        echo "     但**裸敲 docker compose down**（任一侧）会带走上面这些。"
-    else
-        say compose项目 "cortex（项目里只有本仓库的容器）"
-    fi
-    [ "$rc" = 0 ] && echo "全部就绪。" || echo "有问题，见上。"
-    exit $rc
+    bash scripts/doctor.sh {{ _dev }}
 
 # ── 这里曾经有 up / down / nuke / ps / logs 五条「基座 compose」开关 ──
 #
@@ -149,17 +99,7 @@ doctor:
 #
 # 开关现在只有三组：`dev-*`（本机完整环境）、`prod-*`（生产）、`sandbox-*`（出口容器）。
 _wait-healthy:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo -n "等待服务就绪"
-    for _ in $(seq 1 60); do
-        if docker compose {{ _dev }} ps --format json 2>/dev/null | grep -q '"Health":"starting"'; then
-            echo -n "."; sleep 2
-        else
-            echo " 就绪"; exit 0
-        fi
-    done
-    echo " 超时"; docker compose {{ _dev }} ps; exit 1
+    bash scripts/wait-healthy.sh {{ _dev }}
 
 # ══════════════════════════════════════════════════════════
 #  数据库
@@ -312,22 +252,7 @@ dev: dev-build dev-web-if-stale
     @echo "  看日志   → just dev-logs agentd"
 
 dev-web-if-stale:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    out=app/build/web/main.dart.js
-    if [ ! -f "$out" ]; then
-        echo "界面产物不存在，构建一次…"
-        just dev-web
-        exit 0
-    fi
-    # 源码里有比产物新的东西吗。`-newer` 逐个比 mtime，找到一个就够
-    newer=$(find app/lib app/pubspec.yaml app/web -newer "$out" -type f -print -quit 2>/dev/null)
-    if [ -n "$newer" ]; then
-        echo "界面产物比源码旧（$newer 更新），重建一次…"
-        just dev-web
-    else
-        echo "界面产物是新的，跳过构建"
-    fi
+    bash scripts/dev-web-if-stale.sh
 
 # 改完 Rust：重编 + 重启，不重建镜像
 # **web 也要重启。** nginx 的 `upstream` 在启动时把服务名解析一次就永久
@@ -366,15 +291,7 @@ dev-down:
 
 # 连数据一起清掉，从零来一遍。**会删库**，要输 yes
 dev-reset:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    read -r -p "这会删掉开发库、对象存储、以及所有沙箱工作区卷。输 yes 继续：" a
-    [ "$a" = yes ] || { echo "取消"; exit 1; }
-    docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile dev --profile sandbox down -v
-    docker rm -f $(docker ps -aq --filter "name=cortex-sbx-") 2>/dev/null || true
-    docker volume rm $(docker volume ls -q --filter "name=cortex-ws-") 2>/dev/null || true
-    docker rmi -f $(docker images -q cortex-sandbox-cache) 2>/dev/null || true
-    echo "清干净了。just dev 重新来。"
+    bash scripts/dev-reset.sh {{ _dev }}
 
 # ══════════════════════════════════════════════════════════
 #  质量
@@ -452,32 +369,7 @@ docs-check:
 # 一来一回二十多分钟。2026-08-21 就是这么红的（一句中文注释以
 # 「shellcheck」开头，被当成指令解析）。
 lint-sh:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # 语法先于风格：shellcheck 对一个语法不成立的文件报的东西没法读。
-    for f in scripts/*.sh; do
-        bash -n "$f"
-    done
-    echo "✔ bash -n 通过"
-    # 以「shellcheck」开头的注释是**指令**，不是注释。
-    #
-    # 一句中文注释恰好断行成 `# shellcheck 会挑（SC2086）…`，shellcheck 就
-    # 报 SC1072/SC1073 并且整份文件不再检查。这一条不依赖 shellcheck 装没装，
-    # 所以放在前面 —— 它正是本机唯一能自己抓到的那种。
-    if grep -nE '^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]+' scripts/*.sh deploy/*.sh \
-        | grep -vE 'shellcheck[[:space:]]+(disable|enable|source|shell|external-sources)='; then
-        echo "✘ 上面那些注释以「shellcheck」开头，会被当成指令解析（SC1072/SC1073）。" >&2
-        echo "  换个词开头，或者把它挪到行中间。" >&2
-        exit 1
-    fi
-    if command -v shellcheck >/dev/null 2>&1; then
-        shellcheck --severity=warning --exclude=SC1091 scripts/*.sh deploy/*.sh
-        echo "✔ shellcheck 通过"
-    else
-        echo "⚠ 本机没装 shellcheck，这一步跳过了 —— CI 上它是会跑的。"
-        echo "  装上：winget install koalaman.shellcheck"
-    fi
-    python3 scripts/check-var-boundaries.py
+    bash scripts/lint-sh.sh
 
 # scripts/ 里的 python 语法。与 lint-sh 分开是因为它扫的是另一类文件，
 # 合在一条叫 lint-sh 的 recipe 里，名字就开始骗人了。
@@ -623,20 +515,7 @@ pg-enable-checksums *ARGS:
 
 # 备份现状一览
 backup-status:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    d="${CORTEX_BACKUP_DIR:-data/backup}"
-    echo "备份根 $d"
-    printf '  全量    %s 份　最新 %s\n' \
-        "$(ls -1 "$d/base" 2>/dev/null | wc -l | tr -d ' ')" \
-        "$(ls -1 "$d/base" 2>/dev/null | sort | tail -1 || echo 无)"
-    printf '  WAL     %s 段\n' "$(ls -1 "$d/wal" 2>/dev/null | wc -l | tr -d ' ')"
-    printf '  逻辑    %s 份\n' "$(ls -1 "$d/logical" 2>/dev/null | wc -l | tr -d ' ')"
-    printf '  最近演练 %s\n' "$(ls -1 "$d/reports"/restore-drill-*.txt 2>/dev/null | sort | tail -1 || echo '从未演练 —— 这等于没有备份')"
-    printf '  最近对账 %s\n' "$(ls -1 "$d/reports"/reconcile-*.txt 2>/dev/null | sort | tail -1 || echo 无)"
-    printf '  加密    %s\n' "$([ -n "${CORTEX_BACKUP_ENC_PASSPHRASE:-}" ] && echo "开（just backup-key status 看指纹）" || echo '关 —— 异地那份是明文')"
-    printf '  告警    %s\n' "$([ -n "${CORTEX_ALERT_WEBHOOK_URL:-}${CORTEX_ALERT_CMD:-}${CORTEX_HEARTBEAT_URL:-}" ] && echo '已配（just notify-test 自测）' || echo '未配 —— 备份失败不会有人知道')"
-    printf '  轮转记录 %s\n' "$(tail -1 "$d/reports/purge-rotation.log" 2>/dev/null || echo '无（从未做过 purge 轮转）')"
+    bash scripts/backup-status.sh
 
 # ══════════════════════════════════════════════════════════
 #  Web 端沙箱（docs/sandbox.md）
@@ -726,14 +605,7 @@ prod-logs service="":
 #
 # 前提：**记忆服务已经在跑**，且 .env 里的 CORTEX_MEMORY_URL 指得到它。
 prod-bootstrap:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    : "${CORTEX_MEMORY_URL:?先部署记忆服务（Cormex），再把它的地址写进 .env 的 CORTEX_MEMORY_URL}"
-    mkdir -p data/workspace
-    just prod-build
-    docker compose {{ _prod }} up -d
-    echo "起完了。核对两条：\"$CORTEX_MEMORY_URL/health\" 是记忆服务，"
-    echo "http://127.0.0.1/health 走边缘。"
+    bash scripts/prod-bootstrap.sh {{ _prod }}
 
 # ══════════════════════════════════════════════════════════
 #  构建
@@ -768,12 +640,7 @@ release-package *ARGS:
 #
 # **cortexd 的镜像不在这里** —— 记忆服务在 Cormex 仓库，由它自己发布。
 image-build version="dev":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export MSYS_NO_PATHCONV=1
-    docker build -f scripts/docker/Dockerfile.web \
-        --build-arg CORTEX_BASE_URL="${CORTEX_WEB_API_BASE:-}" \
-        -t "cortex/cortex-web:{{ version }}" .
+    bash scripts/image-build.sh {{ version }}
 
 # ══════════════════════════════════════════════════════════
 #  部署 —— 细节见 docs/deploy.md
@@ -785,16 +652,7 @@ image-build version="dev":
 
 # 部署编排文件的静态校验（不连节点、不需要 .env 真值）
 deploy-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export MSYS_NO_PATHCONV=1
-    bash -n deploy/node-deploy-policy.sh
-    # 喂假值只为让 config 能解析。真值在节点的 .env 里，绝不入库
-    DOMAIN=example.invalid S3_DOMAIN=s3.example.invalid \
-    POSTGRES_PASSWORD=x RUSTFS_SECRET_KEY=y \
-    CORTEX_AUTH_TOKEN_SHA256=z CORTEX_VERSION=v0.0.0 \
-        docker compose -f deploy/docker-compose.yml config -q
-    echo "deploy/ 编排可解析，节点脚本语法正常"
+    bash scripts/deploy-check.sh
 
 # 打印节点上那份 compose 的期望指纹。节点与它不一致时部署会被拒
 deploy-fingerprint:
@@ -803,12 +661,4 @@ deploy-fingerprint:
 # 把 compose 与部署策略同步到节点 —— **要 root，走带外通道，不经 CI**。
 # CI 只能读那道限制自己的围栏，永远不能安装它
 deploy-sync host="root@120.79.61.68":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "把下面两份传到节点（需要 root，CI 无权做这件事）："
-    echo "  scp deploy/docker-compose.yml {{ host }}:/data/cortex/docker-compose.yml"
-    echo "  scp deploy/node-deploy-policy.sh {{ host }}:/usr/local/sbin/cortex-deploy"
-    echo "  ssh {{ host }} 'chown root:root /usr/local/sbin/cortex-deploy && chmod 755 /usr/local/sbin/cortex-deploy'"
-    echo
-    echo "compose 指纹应为：$(sha256sum deploy/docker-compose.yml | cut -d' ' -f1)"
-    echo "策略脚本指纹应为：$(sha256sum deploy/node-deploy-policy.sh | cut -c1-16)"
+    bash scripts/deploy-sync.sh {{ host }}
