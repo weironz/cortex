@@ -80,13 +80,35 @@
         groups: docker
         append: true
 
+    # ⚠️ **这一步不许被静默跳过。**
+    #
+    # 第一版写的是 `when: deploy_public_key is defined`，而那个变量哪儿都没
+    # 定义 —— 于是整步安静地不执行，装完的机器连不上，而 playbook 全绿。
+    # 那正是这个仓库的头号故障形状（造好了没人调用，数到第 13 次）。
+    #
+    # 现在公钥有默认值（group_vars 里那把 CI 用的），没配就当场报错。
+    - name: 得有一把公钥可装
+      ansible.builtin.assert:
+        that:
+          - deploy_public_key is defined
+          - deploy_public_key | length > 0
+          - deploy_public_key is match('^(ssh-ed25519|ssh-rsa|ecdsa-)')
+        fail_msg: >-
+          deploy_public_key 没配（或者不像一把公钥）。它是 CI 连这台机器用的
+          那把，值放 ansible/group_vars/cortex_nodes.yml —— **公钥进 git 是安全的**，
+          私钥在 GitHub Secrets 的 DEPLOY_SSH_KEY 里。
+          临时也可以 -e deploy_public_key='ssh-ed25519 AAAA…'。
+        quiet: true
+
     - name: 部署账号的公钥
       ansible.posix.authorized_key:
         user: cortex-deploy
         key: "{{ deploy_public_key }}"
+        # exclusive：这台机器上这个账号**只认这一把**。多出来的（手工加过的、
+        # 上一把轮换掉的）会被清掉 —— 一把没人记得的旧钥匙留在 authorized_keys
+        # 里，是最难发现的那种后门
         exclusive: true
         # 刻意**不带** key_options —— 见上面那段
-      when: deploy_public_key is defined
 
     - name: 部署账号的 sudo 权限
       community.general.sudoers:
@@ -97,11 +119,22 @@
         # 这个模块会先 `visudo -c` 校验再落盘。手写文件的话，一个语法错的
         # sudoers 会把**所有人**挡在 sudo 外面 —— 那是少数真的回不去的故障
 
-    # ── 拆掉旧的部署入口 ──────────────────────────────────
+    # ── 拆掉旧的部署入口 —— **默认不做** ──────────────────
     #
-    # 那个强制命令脚本连同它的 sudoers 一起退休。留着的话节点上会有两条
-    # 部署路径，而其中一条（脚本）会把 .env 里的 CORTEX_VERSION 改成
-    # ansible 不知道的值 —— 下一次 ansible 部署再覆盖回去，两边打架。
+    # 那个强制命令脚本是 ansible 这条路走通之前**唯一的退路**：ansible 连不上
+    # 节点时，root 还能在机器上直接 `/usr/local/sbin/cortex-deploy deploy X.Y.Z`
+    # 切版本。第一次跑 provision 就把它删掉，等于在还没验证新路的时候先烧掉旧路。
+    #
+    # 所以它挂在一个显式开关上。顺序是：
+    #
+    #   1. ansible-playbook provision.yml -e ansible_user=root
+    #   2. ansible-playbook deploy.yml -e version=<当前线上版本>   ← 同版本重放
+    #   3. 走一次真发版，确认线上验证那段全过
+    #   4. ansible-playbook provision.yml -e remove_legacy_entrypoint=true
+    #
+    # 留着它的**代价**要说清：节点上会有两条部署路径，而旧那条会把 .env 里的
+    # CORTEX_VERSION 改成 ansible 不知道的值。两条都用的话会打架 ——
+    # 所以第 4 步别一直拖着。
     - name: 撤掉旧的强制命令入口
       ansible.builtin.file:
         path: "{{ item }}"
@@ -109,6 +142,17 @@
       loop:
         - /usr/local/sbin/cortex-deploy
         - /etc/sudoers.d/cortex-deploy-forced
+      when: remove_legacy_entrypoint | default(false) | bool
+
+    - name: 旧入口还留着
+      ansible.builtin.debug:
+        msg: >-
+          /usr/local/sbin/cortex-deploy 还在（当作 ansible 这条路的退路）。
+          新路在生产上跑通之后，用
+          `ansible-playbook provision.yml -e remove_legacy_entrypoint=true` 删掉它 ——
+          两条部署路径同时活着的话，旧那条会改 .env 里的 CORTEX_VERSION，
+          与 ansible 渲染的那份打架。
+      when: not (remove_legacy_entrypoint | default(false) | bool)
 
     # ── traefik 的外部网络 ────────────────────────────────
     - name: traefik 外部网络

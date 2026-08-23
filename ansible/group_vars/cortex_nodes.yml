@@ -8,6 +8,25 @@
 
 node_dir: /data/cortex
 
+# ── CI 连这台机器用的那把公钥 ─────────────────────────────
+#
+# **公钥进 git 是安全的** —— 它本来就是公开的那一半。私钥在 GitHub Secrets
+# 的 `DEPLOY_SSH_KEY` 里，永远不进仓库。
+#
+# 放这里而不是每次 `-e` 传：不然「换机器一条命令」就不成立了，而且下一个人
+# 不会知道该传什么。`provision.yml` 里有一条 assert，空着就当场报错 ——
+# 第一版写的是 `when: … is defined`，于是整步安静地跳过、装完的机器连不上，
+# 而 playbook 全绿。
+#
+# 取值（两条都行）：
+#   ssh-keygen -y -f <私钥文件>                        # 从私钥推出公钥
+#   ssh root@<节点> 'cat ~cortex-deploy/.ssh/authorized_keys'
+#                                                      # 节点上现成的那把
+#                                                      # ⚠️ 只取 `ssh-ed25519 …`
+#                                                      #    那部分，**别抄前面的
+#                                                      #    restrict,command=**
+deploy_public_key: ""
+
 # ── 域名 ──────────────────────────────────────────────────
 # compose 里 `${DOMAIN}` 没有默认值，缺了整份 compose 解析不了
 cortex_domain: cortex.cloudcele.com

@@ -133,6 +133,38 @@ ansible-playbook provision.yml -e ansible_user=root
 可以用默认的 `cortex-deploy`（它有 NOPASSWD sudo）。playbook 是幂等的，
 随时可以再跑一遍。
 
+⚠️ **跑之前先把 `deploy_public_key` 填进 `ansible/group_vars/cortex_nodes.yml`。**
+那是 CI 连节点用的那把公钥（公钥进 git 是安全的；私钥在 GitHub Secrets 的
+`DEPLOY_SSH_KEY` 里）。空着的话 playbook 会当场 assert 失败 —— 刻意的：
+第一版写成「没配就跳过」，结果是装完的机器连不上而 playbook 全绿。
+
+取值：`ssh-keygen -y -f <私钥>`，或者从节点上现有的
+`~cortex-deploy/.ssh/authorized_keys` 里抄（**只取 `ssh-ed25519 …` 那部分，
+别抄前面的 `restrict,command=`**）。
+
+### ★ 切换顺序 —— 别一上来就把退路删了
+
+`/usr/local/sbin/cortex-deploy` 是 ansible 这条路走通之前**唯一的退路**
+（ansible 连不上时 root 还能在机器上直接切版本）。所以 provision 默认**不删**它：
+
+```bash
+# 1. 装机（旧入口留着）
+ansible-playbook provision.yml -e ansible_user=root
+
+# 2. 同版本重放 —— 期望「什么都没变、健康检查过」。这一步是关键验证
+ansible-playbook deploy.yml -e version=<当前线上版本>
+
+# 3. 改一行 compose 再跑一次，确认自动同步了（不再需要 scp）
+
+# 4. 走一次真发版，看线上验证那段全过
+
+# 5. 新路确认可用之后，才删旧入口
+ansible-playbook provision.yml -e remove_legacy_entrypoint=true
+```
+
+⚠️ 第 5 步别一直拖着：两条部署路径同时活着的话，旧那条会改 `.env` 里的
+`CORTEX_VERSION`，与 ansible 渲染的那份打架。
+
 它做的事（原先是 `docs/deploy.md` 里一屏手敲命令）：
 
 | | |
