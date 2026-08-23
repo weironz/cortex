@@ -22,21 +22,36 @@ import 'app_providers.dart';
 /// 与「测试里的抓手」三处，散成字面量的话改一处就会有两处对不上。
 enum SidebarSection {
   /// 置顶的**项目**，展开是它下面的会话。
-  projects('projects', '项目'),
+  projects('projects', '项目', '把项目置顶，它会出现在这里'),
 
   /// 置顶的**会话**，平铺。
-  pinned('pinned', 'Pinned'),
+  pinned('pinned', 'Pinned', '把对话置顶，它会出现在这里'),
 
   /// 其余会话。未置顶的项目仍然在这一段里以分组标题出现。
-  chats('chats', '聊天');
+  chats('chats', '聊天', '还没有对话');
 
-  const SidebarSection(this.key, this.label);
+  const SidebarSection(this.key, this.label, this.emptyHint);
 
   /// 存进设置时用的键的后半段。**与 [name] 分开**：枚举名是 Dart 侧的
   /// 标识符，会随重构改；这个是落盘的格式，改了就是所有人的折叠状态清零。
   final String key;
 
   final String label;
+
+  /// 这一段空着时，段头底下那一行字。
+  ///
+  /// # 为什么它必须存在
+  ///
+  /// 空段原先整个不画，理由是「常年空着的标题只是噪音」。但置顶会话与
+  /// 置顶项目这两个功能在界面上**只有段头这一个入口** —— 不画段头，
+  /// 用户就不知道能置顶，于是永远没有置顶，于是永远不画。
+  /// 2026-08-23 用户报「左侧只有一个聊天的分组」，正是这个闭环。
+  ///
+  /// # 为什么跟着枚举走
+  ///
+  /// 与 [label] 同一个理由：它是这一段的属性，散成 widget 里的字面量之后，
+  /// 加第四段的人会漏掉其中一处，而漏掉的表现是一段空着什么都不说。
+  final String emptyHint;
 }
 
 /// 哪几段是折起来的。

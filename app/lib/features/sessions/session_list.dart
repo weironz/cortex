@@ -56,12 +56,12 @@ class SessionList extends ConsumerWidget {
             ),
             IconButton(
               onPressed: () {
-                controller.createSession();
+                controller.startNewChat();
                 ref.read(projectControllerProvider.notifier).select(null);
                 onSelected?.call();
               },
               iconSize: 18,
-              tooltip: '新建会话',
+              tooltip: '新对话',
               icon: const Icon(Icons.add_rounded),
             ),
           ],
@@ -119,18 +119,15 @@ class SessionList extends ConsumerWidget {
     // 有项目就得画出来，哪怕一条会话都没有 —— 刚建好的空项目正是要被拖进
     // 东西的那个空篮子，藏掉它等于新建按钮什么也没做
     if (sessions.isEmpty && !projects.showGrouping) {
+      // ⚠️ **不给「新建」按钮。** 惰性建会话之后它会变成一个点了看不出
+      // 反应的按钮：白纸不进左栏，而这一栏此刻就是空的。
+      // 真正的入口是右边那个输入框 —— 说一句话就有了第一条对话
       return EmptyState(
         icon: Icons.forum_outlined,
-        title: state.showArchived ? '还没有会话' : '没有未归档的会话',
-        description: state.showArchived ? null : '打开右上角的归档开关可以看到已归档的会话。',
-        action: FilledButton.icon(
-          onPressed: () {
-            controller.createSession();
-            onSelected?.call();
-          },
-          icon: const Icon(Icons.add_rounded, size: 18),
-          label: const Text('新建会话'),
-        ),
+        title: state.showArchived ? '还没有对话' : '没有未归档的对话',
+        description: state.showArchived
+            ? '在右边说一句话，第一条对话就出现在这里。'
+            : '在右边说一句话就能开始。已归档的对话在右上角那个开关里。',
       );
     }
 
@@ -150,6 +147,10 @@ class SessionList extends ConsumerWidget {
           onToggle: () =>
               ref.read(sidebarSectionsProvider.notifier).toggle(section),
         ),
+        _EmptySectionRow(:final section) => _EmptySectionHint(
+          key: ValueKey('section_empty:${section.key}'),
+          section: section,
+        ),
         _HeaderRow(:final group) => _GroupHeader(
           key: ValueKey('grp_${group.projectId ?? "none"}'),
           group: group,
@@ -166,7 +167,8 @@ class SessionList extends ConsumerWidget {
             if (id != null) {
               ref.read(projectControllerProvider.notifier).expand(id);
             }
-            controller.createSession(projectId: id);
+            // 白纸带着项目归属：真开口时那条会话才建出来，且落在这个项目下
+            controller.startNewChat(projectId: id);
             ref.read(projectControllerProvider.notifier).select(id);
             onSelected?.call();
           },
@@ -232,9 +234,19 @@ class SessionList extends ConsumerWidget {
   /// 置顶优先于项目，是因为「我把这条钉起来了」是一个**更晚、更具体**的
   /// 意图 —— 项目归属可能是几周前顺手分的。
   ///
-  /// # 没有项目、也没有置顶时退回一张平铺列表
+  /// # 三段**恒在**，空着也画
   ///
-  /// 三个段头对着一列会话，每一个都不传达信息，只是白占三行。
+  /// 这里原先有两条「省掉噪音」的捷径：没有项目也没有置顶时整个退回一张
+  /// 平铺列表，以及任何一段空着就不画它的段头。理由写的是「三个段头对着
+  /// 一列会话，每一个都不传达信息，只是白占三行」。
+  ///
+  /// **那个理由算错了成本。** 空着的段头传达的恰恰是最重要的那件事：
+  /// 这里可以放东西。置顶会话、置顶项目这两个功能在界面上**只有段头这一个
+  /// 入口** —— 段头不画，用户就永远不知道能置顶，于是永远没有置顶，
+  /// 于是段头永远不画。2026-08-23 用户报「左侧只有一个聊天的分组」，
+  /// 正是走到了这个闭环里。
+  ///
+  /// 代价（三行常驻）是真的，但它是一次性的；发现不了功能是永久的。
   static List<_Row> _rows(
     List<ChatSession> sessions,
     ProjectState projects,
@@ -243,19 +255,17 @@ class SessionList extends ConsumerWidget {
     final pinnedProjects = projects.projects.where((p) => p.pinned).toList();
     final pinnedSessions = sessions.where((s) => s.pinned).toList();
 
-    // 一段都用不上时就是从前那张平铺列表
-    if (!projects.showGrouping && pinnedSessions.isEmpty) {
-      return [for (final s in sessions) _SessionRow(s)];
-    }
-
     final rows = <_Row>[];
 
     void section(SidebarSection which, int count, void Function() body) {
-      // 空的段整个不画。一个常年空着的「项目」标题只是噪音 ——
-      // 而它下面什么都没有这件事，标题本身也说不清楚
-      if (count == 0) return;
       rows.add(_SectionRow(which, count));
       if (collapsed.contains(which)) return;
+      // 空段展开时给一行「这里能放什么」。**不是装饰** —— 它是置顶这个
+      // 功能唯一的说明书：段头只说得出这一段叫什么，说不出怎么往里放东西
+      if (count == 0) {
+        rows.add(_EmptySectionRow(which));
+        return;
+      }
       body();
     }
 
@@ -554,6 +564,16 @@ class _SectionRow extends _Row {
   final int count;
 }
 
+/// 空着的那一段下面那行说明。
+///
+/// 只在展开且 `count == 0` 时出现。折起来时不画 —— 折叠的意思是
+/// 「这一段我现在不看」，那时连提示都是打扰。
+class _EmptySectionRow extends _Row {
+  const _EmptySectionRow(this.section);
+
+  final SidebarSection section;
+}
+
 class _HeaderRow extends _Row {
   const _HeaderRow(this.group);
 
@@ -624,6 +644,33 @@ class _SectionHeader extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 空着的那一段下面那一行字。
+///
+/// 刻意**不是**一个带边框的空状态卡片：它挨着段头、缩进对齐会话行，
+/// 读起来像「这一段的内容」而不是「一个错误提示」。左栏那么窄，
+/// 任何带框的东西都会把三段撑成三个盒子。
+class _EmptySectionHint extends StatelessWidget {
+  const _EmptySectionHint({super.key, required this.section});
+
+  final SidebarSection section;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      // 左边与会话行的文字对齐，不是与段头对齐 —— 它说的是「这一段里」
+      padding: const EdgeInsets.fromLTRB(10, 2, 10, 6),
+      child: Text(
+        section.emptyHint,
+        style: theme.textTheme.labelSmall?.copyWith(
+          color: theme.cortex.foregroundTertiary,
+          height: 1.4,
         ),
       ),
     );

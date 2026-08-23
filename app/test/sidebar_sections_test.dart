@@ -171,7 +171,7 @@ void main() {
       expect(find.text('pinned-one'), findsOneWidget);
     });
 
-    testWidgets('空的段整个不画', (tester) async {
+    testWidgets('⚠️ 空的段照画，并且说得出这里能放什么', (tester) async {
       final c = _boot(
         sessions: [_s('plain')],
         // 有项目但一个都没置顶 → 「项目」那一段是空的
@@ -180,12 +180,43 @@ void main() {
       addTearDown(c.dispose);
       await _pump(tester, c);
 
+      // 这两条曾经断言 findsNothing（「空段整个不画」）。反过来了，因为那个
+      // 判断算错了成本：置顶会话与置顶项目在界面上**只有段头这一个入口**，
+      // 段头不画 → 用户不知道能置顶 → 永远没有置顶 → 段头永远不画。
+      // 2026-08-23 用户报「左侧只有一个聊天的分组」，正是走进了这个闭环
       expect(
         find.text('项目'),
-        findsNothing,
-        reason: '一个常年空着的段头只是噪音，而它下面什么都没有这件事，标题本身也说不清楚',
+        findsOneWidget,
+        reason: '空着的段头传达的正是最重要的那件事：这里可以放东西',
       );
-      expect(find.text('Pinned'), findsNothing);
+      expect(find.text('Pinned'), findsOneWidget);
+
+      // 光有标题不够 —— 标题说得出这一段叫什么，说不出怎么往里放东西
+      expect(
+        find.text(SidebarSection.projects.emptyHint),
+        findsOneWidget,
+        reason: '空段展开时要有一行说明，否则用户只看到一个空标题',
+      );
+      expect(find.text(SidebarSection.pinned.emptyHint), findsOneWidget);
+    });
+
+    testWidgets('空段折起来之后，连那行说明也不画', (tester) async {
+      final c = _boot(sessions: [_s('plain')], projects: [_p('P')]);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      expect(find.text(SidebarSection.pinned.emptyHint), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('section:pinned')));
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 80));
+      }
+
+      expect(
+        find.text(SidebarSection.pinned.emptyHint),
+        findsNothing,
+        reason: '折叠的意思是「这一段我现在不看」，那时连提示都是打扰',
+      );
+      expect(find.text('Pinned'), findsOneWidget, reason: '段头还在，否则没法再展开');
     });
 
     testWidgets('折起来之后那一段的行就不画了', (tester) async {
@@ -206,16 +237,21 @@ void main() {
       expect(find.text('Pinned'), findsOneWidget, reason: '段头还在，否则就没法再展开了');
     });
 
-    testWidgets('一段都用不上时退回一张平铺列表', (tester) async {
+    testWidgets('⚠️ 什么都没有的全新账号，三段仍然都在', (tester) async {
       final c = _boot(sessions: [_s('a'), _s('b')], projects: const []);
       addTearDown(c.dispose);
       await _pump(tester, c);
 
-      expect(
-        find.text('聊天'),
-        findsNothing,
-        reason: '三个段头对着一列会话，每一个都不传达信息，只是白占三行',
-      );
+      // 曾经断言 findsNothing（没有项目也没有置顶时整个退回平铺列表）。
+      // 那条捷径让**最需要看见这三段的人**——一个还什么都没有的新用户——
+      // 恰恰一段都看不见
+      for (final s in SidebarSection.values) {
+        expect(
+          find.text(s.label),
+          findsOneWidget,
+          reason: '${s.label} 段头要恒在：它是这个功能唯一的发现入口',
+        );
+      }
       expect(find.text('a'), findsOneWidget);
       expect(find.text('b'), findsOneWidget);
     });
