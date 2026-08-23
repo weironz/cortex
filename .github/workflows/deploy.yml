@@ -102,6 +102,37 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
 
+      # ⚠️ **这道闸盯着上面那个 `ref:` 真的生效了。**
+      #
+      # 写死 ref 之后两个入口应当拿到同一份东西，但「应当」正是这一天里
+      # 栽过两次的地方，而 workflow_call 那条路**只有真发版时才走得到** ——
+      # 手动跑一百次也验不到它。所以与其等下次发版才发现，不如让它自己喊。
+      #
+      # 具体防的是两种静默退化：
+      #   1. `github.event.repository.default_branch` 取到空值（某个 event
+      #      的 payload 里没有 repository 对象）→ checkout 会**悄悄 fallback**
+      #      到触发 ref，于是 workflow_call 又拿回了 tag，而日志一切正常。
+      #   2. 拿到的确实不是默认分支 —— 老 tag 上没有 ansible/ 目录，
+      #      症状是三步之后一句 "requirements file does not exist"。
+      - name: 确认 ansible/ 真的来自默认分支
+        run: |
+          set -euo pipefail
+          want='${{ github.event.repository.default_branch }}'
+          [ -n "$want" ] || {
+            echo "::error::default_branch 表达式取到空值 —— checkout 会 fallback 到触发 ref"
+            exit 1
+          }
+          have="$(git rev-parse --abbrev-ref HEAD)"
+          [ "$have" = "$want" ] || {
+            echo "::error::ansible/ 取自 '$have'，应当是 '$want'（checkout 的 ref 没生效）"
+            exit 1
+          }
+          [ -f ansible/deploy.yml ] || {
+            echo "::error::ansible/deploy.yml 不在 —— 这不是默认分支的内容"
+            exit 1
+          }
+          echo "ansible/ 来自 $have ✓"
+
       - name: 拒绝一切不是 X.Y.Z 的东西
         run: |
           [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
