@@ -693,10 +693,22 @@ void main() {
       final container = ProviderScope.containerOf(
         tester.element(find.byType(CortexApp)),
       );
-      final state = container.read(chatControllerProvider);
-      final created = state.sessions.firstWhere(
-        (s) => s.id == state.activeSessionId,
+      final chat = container.read(chatControllerProvider.notifier);
+
+      // ⚠️ 契约在 2026-08-23 变了：点 + **不再当场建会话**（惰性化）。
+      // 项目归属先攒在白纸上，用户真开口时才与会话一起兑现
+      expect(
+        container.read(chatControllerProvider).pendingNewChat?.projectId,
+        'prj_office',
+        reason: '点 + 只是「我要在这个项目里开一条」，那个归属得先记住',
       );
+
+      // 兑现之后归属必须还在 —— 这才是原来那条断言守着的东西
+      final id = chat.materializeSession();
+      final created = container
+          .read(chatControllerProvider)
+          .sessions
+          .firstWhere((s) => s.id == id);
       expect(
         created.projectId,
         'prj_office',

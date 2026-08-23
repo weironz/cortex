@@ -44,8 +44,17 @@ class AssistantChip extends ConsumerWidget {
     final started = ref.watch(
       chatControllerProvider.select((s) => s.activeTranscript.isNotEmpty),
     );
+    // 白纸上（还没有会话）挑的人设存在 `pendingNewChat` 里，不在按 sessionId
+    // 存的那张表里。不读它的话，用户挑完 chip 纹丝不动 —— 值是对的，
+    // 只是没人画出来，而那一轮对话确实会用上它
+    final pendingAssistantId = ref.watch(
+      chatControllerProvider.select((s) => s.pendingNewChat?.assistantId),
+    );
+    final boundAssistantId = ref.watch(
+      sessionAssistantProvider.select((m) => m[sessionId]),
+    );
     final current = state.byId(
-      ref.watch(sessionAssistantProvider.select((m) => m[sessionId])),
+      sessionId == null ? pendingAssistantId : boundAssistantId,
     );
 
     // 一个字都没说、也没挑过 —— 那就还没有「智能体」这个话题。
@@ -104,8 +113,9 @@ class AssistantChip extends ConsumerWidget {
   }
 
   void _startFresh(WidgetRef ref, Assistant a) {
-    final id = ref.read(chatControllerProvider.notifier).createSession();
-    ref.read(sessionAssistantProvider.notifier).bind(id, a.id);
+    // 白纸带着人设：会话与绑定都等用户真开口时一起兑现
+    // （见 `ChatController.materializeSession`）
+    ref.read(chatControllerProvider.notifier).startNewChat(assistantId: a.id);
   }
 
   Future<void> _pick(
@@ -153,11 +163,15 @@ class AssistantChip extends ConsumerWidget {
       ),
     );
     if (picked == null) return;
-    // 还没有会话就先建一条：绑定要有个东西可绑
-    final id =
-        sessionId ?? ref.read(chatControllerProvider.notifier).createSession();
-    ref
-        .read(sessionAssistantProvider.notifier)
-        .bind(id, picked.isEmpty ? null : picked);
+    final chosen = picked.isEmpty ? null : picked;
+    // 还在白纸上（没有会话）就只记下来 —— 从前这里会先建一条会话「好有个
+    // 东西可绑」，那正是「点一下就多一条空对话」的来源之一。
+    // ⚠️ 走 setPendingAssistant 而不是 startNewChat：后者会把攒着的项目
+    // 归属一起换掉
+    if (sessionId == null) {
+      ref.read(chatControllerProvider.notifier).setPendingAssistant(chosen);
+      return;
+    }
+    ref.read(sessionAssistantProvider.notifier).bind(sessionId, chosen);
   }
 }

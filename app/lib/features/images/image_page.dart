@@ -313,6 +313,12 @@ class _ImagePageState extends ConsumerState<ImagePage> {
         MessageComposer(
           enabled: sessionId != null,
           sessionId: sessionId,
+          // 图片页自己管会话（`app_providers` 里那条恒非空的图片会话），
+          // 所以这里走不到白纸那条路 —— 真走到了也只能说明上面那个
+          // `enabled` 已经把输入框关掉了，兑现一条会话反而更糟
+          ensureSession: () =>
+              sessionId ??
+              ref.read(chatControllerProvider.notifier).materializeSession(),
           streaming: streaming,
           onSend: (text, attachments) => ref
               .read(chatControllerProvider.notifier)

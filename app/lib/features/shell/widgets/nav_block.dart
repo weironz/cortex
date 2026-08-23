@@ -38,15 +38,19 @@ class NavBlock extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // 「新建会话」**不是一个地方，是一个动作** —— 所以它不参与
-          // 选中态。画成选中会让人以为「我现在在新建会话这一页」
+          // 「新对话」**不是一个地方，是一个动作** —— 所以它不参与
+          // 选中态。画成选中会让人以为「我现在在新对话这一页」
+          //
+          // ⚠️ 它**不建会话**，只把当前选中清空（见 `startNewChat`）。
+          // 从前点一下就往左栏塞一条「新会话」，于是每次「我看看能干什么」
+          // 都留下一行自己从没说过话的对话
           _NavItem(
             key: const ValueKey('nav:new'),
             icon: Icons.edit_outlined,
-            label: '新聊天',
+            label: '新对话',
             selected: false,
             onTap: () {
-              ref.read(chatControllerProvider.notifier).createSession();
+              ref.read(chatControllerProvider.notifier).startNewChat();
               ref.read(projectControllerProvider.notifier).select(null);
               ref.read(mainViewProvider.notifier).go(MainView.chat);
               onNavigated?.call();

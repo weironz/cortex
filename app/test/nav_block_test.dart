@@ -27,7 +27,17 @@ class _MockConfig extends AppConfigNotifier {
 /// 记下写进设置里的键值 —— 「跨重启记住」只有这么验得出来。
 final Map<String, String> _written = {};
 
-ProviderContainer _boot() => ProviderContainer(
+ProviderContainer _boot() {
+  final c = _rawBoot();
+  // 与 `chat_turn_test` 同款：这一组只渲染 `NavBlock`，它不 watch
+  // chatController，于是「开机拉一次会话列表」不会自己发生。
+  // 生产上 chat_pane 与 session_list 一直 watch 着它 —— 挂上这个 listener
+  // 是为了让测试环境与那边一致，而不是为了对抗什么回收
+  c.listen(chatControllerProvider, (_, _) {}, fireImmediately: true);
+  return c;
+}
+
+ProviderContainer _rawBoot() => ProviderContainer(
   overrides: [
     appConfigProvider.overrideWith(_MockConfig.new),
     cortexApiProvider.overrideWithValue(MockCortexApi(instant: true)),
@@ -78,7 +88,7 @@ void main() {
     );
   });
 
-  testWidgets('点「新建会话」回到聊天，而且它自己不显示成选中', (tester) async {
+  testWidgets('点「新对话」回到聊天，而且它自己不显示成选中', (tester) async {
     final c = _boot();
     addTearDown(c.dispose);
     await _pump(tester, c);
@@ -86,13 +96,33 @@ void main() {
     c.read(mainViewProvider.notifier).go(MainView.images);
     await tester.pump();
 
-    await tester.tap(find.text('新聊天'));
+    await tester.tap(find.text('新对话'));
+    // 先看紧挨着 tap 的那一刻：这里都没有的话，是 startNewChat 没生效；
+    // 这里有、pump 之后没有，就是被某处重置了
+    final rightAfterTap = c.read(chatControllerProvider);
+    expect(
+      rightAfterTap.pendingNewChat,
+      isNotNull,
+      reason:
+          'startNewChat 没把白纸立起来（activeSessionId='
+          '${rightAfterTap.activeSessionId}）',
+    );
     await tester.pump();
 
     expect(
       c.read(mainViewProvider),
       MainView.chat,
-      reason: '新建了一条会话却停在画廊上，看起来就是点了没反应',
+      reason: '开了一张白纸却停在画廊上，看起来就是点了没反应',
+    );
+    // 惰性化（2026-08-23）之后它开的是白纸，不是一条会话 ——
+    // 这一条钉住「点了不建」，与 lazy_session_test 里那组是同一个契约
+    expect(
+      c.read(chatControllerProvider).activeSessionId,
+      isNull,
+      reason:
+          '点「新对话」不该当场建会话，否则左栏又会攒出一列没说过话的对话。'
+          '（pendingNewChat=${c.read(chatControllerProvider).pendingNewChat} '
+          'sessions=${c.read(chatControllerProvider).sessions.length}）',
     );
   });
 

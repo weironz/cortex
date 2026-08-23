@@ -124,15 +124,38 @@ void main() {
     );
     await _tick(tester);
 
-    // ⚠️ 断言在**绑定表**上而不是 `activeSessionId` 上：mock 后端自己也会
-    // 载入一批会话并挑一条当活动会话，那时 `activeSessionId` 非空只说明
-    // 「有会话」，说明不了「点卡片建了一条并绑上了」
+    // ⚠️ 契约在 2026-08-23 变了：点卡片**不再当场建会话**（惰性化，见
+    // `ChatController.startNewChat`）。人设先攒在白纸上，用户真开口时
+    // 才与会话一起兑现。所以断言分两段 ——
+    final blank = c.read(chatControllerProvider);
+    expect(
+      blank.activeSessionId,
+      isNull,
+      reason:
+          '点一张卡片只是「打算用它」，不该在左栏留下一条没说过话的对话。'
+          '（此刻 pendingNewChat.assistantId='
+          '${blank.pendingNewChat?.assistantId} —— 它是 null 的话说明白纸'
+          '被某处重置了，非 null 却仍有 activeSessionId 说明有人把它顶了回去）',
+    );
+    expect(
+      blank.pendingNewChat?.assistantId,
+      'MOCKASSIST0001',
+      reason: '人设要跟着白纸走，否则兑现时就不知道该绑谁了',
+    );
+
+    // ── 第二段：真开口，人设必须跟着落地 ──
+    //
+    // 这一段才是原来那条断言守着的东西。少了它，惰性化会把「绑定」这一步
+    // 整个丢掉，而表现与从前一模一样地隐蔽：界面全对，只有模型用默认人设说话
+    await tester.runAsync(
+      () => c.read(chatControllerProvider.notifier).send('你好'),
+    );
+    await _tick(tester);
+
     final bound = c.read(sessionAssistantProvider);
     expect(
       bound.values,
       contains('MOCKASSIST0001'),
-      // 少这一步的表现最难发现：界面切到聊天页了，看着一切正常，
-      // 只有模型仍然用默认人设说话
       reason: '开了对话却没绑上人设 —— 模型会用默认人设说话，而用户以为自己选过了',
     );
   });
@@ -225,14 +248,25 @@ void main() {
       reason: '说过话之后还能换的话，缓存被打穿、对话前后不一致，两件事都不会报错',
     );
 
-    // 点它是**开一条新的**，不是就地换掉
+    // 点它是**开一条新的**，不是就地换掉。
+    // 惰性化之后「新的」是一张白纸：会话等用户开口才建，人设先攒着
     await tester.tap(find.byType(AssistantChip));
     await _tick(tester);
-    final fresh = c.read(chatControllerProvider).activeSessionId;
-    expect(fresh, isNot(id), reason: '锁住之后点它应当另开一条，而不是就地换掉');
+    final after = c.read(chatControllerProvider);
     expect(
-      c.read(sessionAssistantProvider.notifier).of(fresh),
+      after.activeSessionId,
+      isNull,
+      reason: '锁住之后点它应当另开一张白纸，而不是就地换掉这一条的人设',
+    );
+    expect(
+      after.pendingNewChat?.assistantId,
       'MOCKASSIST0001',
+      reason: '另开的那条要继承这个人设 —— 用户点的就是它',
+    );
+    expect(
+      c.read(sessionAssistantProvider.notifier).of(id),
+      'MOCKASSIST0001',
+      reason: '原来那条会话的绑定不该被动过',
     );
   });
 

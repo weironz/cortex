@@ -49,6 +49,13 @@ dependencies:
   file_picker: ^11.0.3
   desktop_drop: ^0.7.1
   cross_file: ^0.3.5+4
+  # 从剪贴板读图片字节（Ctrl/⌘+V 粘图）。Flutter 官方的 `Clipboard` 只读
+  # 文本 —— 那是这个包存在的全部理由。
+  #
+  # 选它而不是 super_clipboard：后者要 Rust 工具链才能构建，而我们需要的
+  # 只是「读一张图」。pasteboard 在 Windows / macOS / Linux / iOS / Web 上
+  # 都**不需要额外配置**（Android 需要，而我们不发 Android）。
+  pasteboard: ^0.5.0
   # Only reached from `auth/token_store_web.dart`, for `sessionStorage`. Already
   # present transitively via flutter_web_plugins; declared explicitly because we
   # import it directly, and an undeclared transitive import breaks the moment

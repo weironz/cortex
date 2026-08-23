@@ -459,22 +459,26 @@ class ConversationPrompts extends ConsumerWidget {
 }
 
 /// Shown when nothing is selected at all.
+/// 一张还没写字的白纸。
+///
+/// # ⚠️ 这里**没有**「新建」按钮
+///
+/// 从前有一个，因为从前「新建会话」是一个真的动作。惰性化之后
+/// （见 `ChatController.startNewChat`）会话是在**第一句话**落地时才建的，
+/// 于是那个按钮点下去什么都不会发生 —— 它已经在白纸上了。
+///
+/// 一个点了没反应的按钮比没有按钮糟得多：用户会反复点，然后以为坏了。
+/// 真正的入口就在这一段下面 —— 输入框在没有会话时照常画着
+/// （`chat_pane.dart` 里 composer 在 Expanded 外面）。
 class NoSessionState extends StatelessWidget {
-  const NoSessionState({super.key, required this.onCreate});
-
-  final VoidCallback onCreate;
+  const NoSessionState({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return EmptyState(
+    return const EmptyState(
       icon: Icons.forum_outlined,
-      title: '还没有选中会话',
-      description: '新建一个会话开始对话。',
-      action: FilledButton.icon(
-        onPressed: onCreate,
-        icon: const Icon(Icons.add_rounded, size: 18),
-        label: const Text('新建会话'),
-      ),
+      title: '开始新对话',
+      description: '在下面说一句话。对话会在你发出第一条消息时创建。',
     );
   }
 }

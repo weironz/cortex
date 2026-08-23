@@ -74,8 +74,16 @@ class ChatPane extends ConsumerWidget {
         // 划不过去。为什么不是模态，见 `ConfirmPanel`
         const ConfirmPanel(),
         MessageComposer(
-          enabled: hasSession,
+          // ⚠️ **不能是 `hasSession`。** 惰性建会话之后白纸上没有 id，
+          // 那样写会把输入框整个禁用 —— 而白纸恰恰是要在这里开口的地方，
+          // 用户会看到一个点不动的输入框，以为应用坏了。
+          //
+          // 从前这么写是对的：那时「没有会话」意味着「你还没选中任何东西」，
+          // 而现在它意味着「新对话」。同一段代码，语义被脚下换掉了
+          enabled: true,
           sessionId: sessionId,
+          // 附件入口要的：白纸上拖/选/粘一张图，会话在那一刻兑现
+          ensureSession: controller.materializeSession,
           streaming: streaming,
           centred: centred,
           onSend: (text, attachments) =>
@@ -182,7 +190,7 @@ class ChatPane extends ConsumerWidget {
           Expanded(
             child: hasSession
                 ? const ConversationView()
-                : NoSessionState(onCreate: controller.createSession),
+                : const NoSessionState(),
           ),
           composer(centred: false),
         ],

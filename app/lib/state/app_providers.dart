@@ -480,9 +480,24 @@ class MainViewNotifier extends Notifier<MainView> {
         _enterImages();
       case MainView.chat:
         final back = _chatSession;
-        // 那条会话可能已经被删了 —— 删了就停在原来那条上，
-        // 而不是把用户扔进一个空白页
-        if (back != null && chat.sessions.any((s) => s.id == back)) {
+        // ⚠️ **刚点了「新对话」时不要恢复。**
+        //
+        // 「回聊天页就恢复上次那条会话」与「点新对话开一张白纸」是直接冲突的，
+        // 而它们会在同一次点击里先后发生：`NavBlock` 的「新对话」按钮先
+        // `startNewChat()`，再 `go(MainView.chat)` —— 于是白纸刚立起来就被
+        // 这里顶掉，用户被扔回上一条会话。
+        //
+        // 从图片页或项目页点「新对话」就是这条路（在聊天页上点时 `_chatSession`
+        // 恰好等于当前那条，看不出来）。2026-08-23 惰性化时实测撞到，
+        // 症状是「点新对话没反应」，而三条 provider 各自都工作正常。
+        //
+        // `pendingNewChat` 就是那张白纸的存在证明 —— 它非空说明用户此刻
+        // 要的是新的，不是回到旧的
+        if (chat.pendingNewChat == null &&
+            back != null &&
+            chat.sessions.any((s) => s.id == back)) {
+          // 那条会话可能已经被删了 —— 删了就停在原来那条上，
+          // 而不是把用户扔进一个空白页
           ref.read(chatControllerProvider.notifier).selectSession(back);
         }
       // 项目页与智能体页**都不碰活动会话**：它们是卡片墙，点某张卡才会

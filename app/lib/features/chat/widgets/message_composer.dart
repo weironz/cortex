@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:pasteboard/pasteboard.dart';
 
 import '../../../models/attachment.dart';
 import '../../../state/attachment_controller.dart';
@@ -35,6 +36,7 @@ class MessageComposer extends ConsumerStatefulWidget {
     required this.onSend,
     required this.onStop,
     required this.streaming,
+    required this.ensureSession,
     this.sessionId,
     this.enabled = true,
     this.centred = false,
@@ -45,7 +47,23 @@ class MessageComposer extends ConsumerStatefulWidget {
   final bool streaming;
 
   /// Attachments are per-session, so the tray needs to know which one.
+  ///
+  /// **`null` 是白纸状态**（还没开口，会话还没建出来），不是「坏了」。
   final String? sessionId;
+
+  /// 把白纸兑现成一条真会话，返回它的 id。
+  ///
+  /// # ⚠️ 为什么附件入口需要它
+  ///
+  /// 附件托盘按 sessionId 存，而惰性建会话之后白纸上没有 id。这一处原先
+  /// 的做法是**整个禁用**（`enable: … && sessionId != null`），在从前是对的
+  /// ——那时无会话意味着「你还没选中任何东西」。现在它意味着「新对话」，
+  /// 于是同一段代码变成了「新对话里不能拖图进来」。
+  ///
+  /// 拖一张图进来**本身就是开口**，所以这里兑现会话是合理的：用户抱怨的
+  /// 是「点开又走开留下空壳」，不是这个。
+  final String Function() ensureSession;
+
   final bool enabled;
 
   /// 会话还是空的 —— 输入框此刻**站在页面中央**，不是钉在底边。
@@ -183,6 +201,63 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
     return ref.read(fileMentionProvider).filter(m.$2).take(8).toList();
   }
 
+  /// Ctrl/⌘+V：剪贴板里是图就当附件收下，是文字就照常粘。
+  ///
+  /// # ⚠️ 文字优先，而且这不是随手定的
+  ///
+  /// 从网页复制一段带插图的内容，剪贴板里**两样都有**。十次里九次用户要的
+  /// 是文字 —— 反过来的话，他会得到一张莫名其妙的图而正文没了，
+  /// 还得手动删掉那张图再重新复制。
+  ///
+  /// # 为什么要自己插入文字，而不是「放行让 TextField 自己粘」
+  ///
+  /// 快捷键一旦被 `Shortcuts` 接住就不会再往下走，没有「我不处理」这个
+  /// 返回值可用（判据是异步的 —— 得先读一次剪贴板才知道里面是什么，
+  /// 而 `Action.isEnabled` 是同步的）。所以文字这条路要手动补上替换选区
+  /// 与移动光标，与原生粘贴逐字对齐。
+  Future<void> _paste() async {
+    if (!widget.enabled) return;
+
+    final text = await Pasteboard.text;
+    if (!mounted) return;
+    // 先只读文字：有文字就不必再去问图片（那一步在某些平台上会弹权限）
+    if (choosePaste(text: text, hasImage: false) == PasteChoice.text) {
+      final sel = _controller.selection;
+      final old = _controller.text;
+      // 选区可能是「无效」的（从没聚焦过）—— 那时按插到末尾处理，
+      // 直接用 sel.start 会是 -1 并抛 RangeError
+      final start = sel.start < 0 ? old.length : sel.start;
+      final end = sel.end < 0 ? old.length : sel.end;
+      _controller.value = TextEditingValue(
+        text: old.replaceRange(start, end, text!),
+        selection: TextSelection.collapsed(offset: start + text.length),
+      );
+      return;
+    }
+
+    final bytes = await Pasteboard.image;
+    if (!mounted) return;
+    if (bytes == null ||
+        choosePaste(text: null, hasImage: bytes.isNotEmpty) !=
+            PasteChoice.image) {
+      return;
+    }
+    // 粘一张图**就是开口** —— 白纸在这里兑现成一条真会话
+    final id = widget.sessionId ?? widget.ensureSession();
+    await ref
+        .read(attachmentQueueProvider.notifier)
+        .addBytes(
+          id,
+          // 剪贴板里的图没有文件名。带上时间戳而不是固定名字：同一轮里粘
+          // 两张的话，两个「粘贴的图片.png」在托盘里分不出谁是谁。
+          // ⚠️ 一律 .png —— `Pasteboard.image` 在各平台上给的都是 PNG 字节，
+          // 而真正的判据在服务端（登记 blob 时从字节头嗅探，不信这个名字）
+          filename: '粘贴的图片-${DateTime.now().millisecondsSinceEpoch}.png',
+          bytes: bytes,
+          mime: 'image/png',
+        );
+  }
+
   void _submit() {
     if (widget.streaming || !widget.enabled) return;
     final sessionId = widget.sessionId;
@@ -217,15 +292,17 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
     final canSend = widget.enabled && !uploading && (_hasText || hasReady);
 
     return DropTarget(
-      enable: widget.enabled && sessionId != null,
+      // ⚠️ 不再要求 `sessionId != null`：白纸上拖图进来是合法的，
+      // 会话在那一刻兑现（见 [MessageComposer.ensureSession]）
+      enable: widget.enabled,
       onDragEntered: (_) => setState(() => _dragging = true),
       onDragExited: (_) => setState(() => _dragging = false),
       onDragDone: (detail) {
         setState(() => _dragging = false);
-        if (sessionId == null) return;
+        if (detail.files.isEmpty) return;
         ref
             .read(attachmentQueueProvider.notifier)
-            .addDropped(sessionId, detail.files);
+            .addDropped(sessionId ?? widget.ensureSession(), detail.files);
       },
       child: Container(
         decoration: BoxDecoration(
@@ -280,13 +357,16 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                       Padding(
                         padding: const EdgeInsets.only(bottom: 4),
                         child: IconButton(
-                          onPressed: widget.enabled && sessionId != null
+                          // 白纸上也能选文件 —— 会话在选完那一刻兑现
+                          onPressed: widget.enabled
                               ? () => ref
                                     .read(attachmentQueueProvider.notifier)
-                                    .pickAndUpload(sessionId)
+                                    .pickAndUpload(
+                                      sessionId ?? widget.ensureSession(),
+                                    )
                               : null,
                           iconSize: 19,
-                          tooltip: '添加附件（也可以直接拖进来）',
+                          tooltip: '添加附件（也可以直接拖进来或粘贴）',
                           icon: const Icon(Icons.attach_file_rounded),
                         ),
                       ),
@@ -301,6 +381,17 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                                 _MentionMoveIntent(-1),
                             SingleActivator(LogicalKeyboardKey.escape):
                                 _MentionDismissIntent(),
+                            // 粘贴要自己接管，因为 TextField 的原生粘贴只认
+                            // 文本 —— 剪贴板里那张图它当作「什么都没有」。
+                            // 两个键位都列上：Windows/Linux 是 Ctrl，macOS 是 ⌘
+                            SingleActivator(
+                              LogicalKeyboardKey.keyV,
+                              control: true,
+                            ): _PasteIntent(),
+                            SingleActivator(
+                              LogicalKeyboardKey.keyV,
+                              meta: true,
+                            ): _PasteIntent(),
                           },
                           child: Actions(
                             actions: {
@@ -317,6 +408,12 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                                     return null;
                                   }
                                   _submit();
+                                  return null;
+                                },
+                              ),
+                              _PasteIntent: CallbackAction<_PasteIntent>(
+                                onInvoke: (_) {
+                                  unawaited(_paste());
                                   return null;
                                 },
                               ),
@@ -652,6 +749,32 @@ class _MentionDismissIntent extends Intent {
 
 class _SendIntent extends Intent {
   const _SendIntent();
+}
+
+/// Ctrl/⌘+V。见 [`_MessageComposerState._paste`]。
+class _PasteIntent extends Intent {
+  const _PasteIntent();
+}
+
+/// 一次粘贴该收下什么。
+enum PasteChoice { text, image, nothing }
+
+/// 剪贴板里两样都有时取哪一样。
+///
+/// 拆成纯函数是为了可测：真正的调用点在一段异步 IO 里
+/// （`Pasteboard.text` / `Pasteboard.image` 都走 platform channel），
+/// 从测试里够不着 —— 与 `app_providers.dart` 的 `shouldForwardUnauthorized`
+/// 同一个理由。
+///
+/// ⚠️ **文字优先。** 从网页复制一段带插图的内容，剪贴板里两样都有，
+/// 而十次里九次用户要的是文字。反过来的话他会得到一张莫名其妙的图、
+/// 正文没了，还得手动删掉再重新复制一次。
+///
+/// 局限说清楚：这里只钉住判据，钉不住「接线有没有接对」。
+@visibleForTesting
+PasteChoice choosePaste({required String? text, required bool hasImage}) {
+  if (text != null && text.isNotEmpty) return PasteChoice.text;
+  return hasImage ? PasteChoice.image : PasteChoice.nothing;
 }
 
 class _RoundButton extends StatelessWidget {

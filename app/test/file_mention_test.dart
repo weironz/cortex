@@ -67,6 +67,9 @@ Future<void> _pumpComposer(
             alignment: Alignment.bottomCenter,
             child: MessageComposer(
               sessionId: 's1',
+              // 这一组用例都带着 sessionId，走不到白纸那条路。
+              // 真被调到说明有人改坏了兜底 —— 所以抛而不是给个假 id
+              ensureSession: () => throw StateError('已经有会话了，不该兑现白纸'),
               streaming: false,
               onSend: (_, _) {},
               onStop: () {},

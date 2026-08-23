@@ -224,11 +224,17 @@ class _AssistantCard extends ConsumerWidget {
 
 /// 用这个智能体开一条新对话。
 ///
-/// 三步缺一不可：建会话 → 把会话与智能体绑上 → 回到聊天页。
-/// 少了第二步，模型仍然用默认人设，而用户以为自己选过了。
+/// ⚠️ **不立刻建会话**（2026-08-23 起）：点一个智能体看看，与真的用它说话，
+/// 是两件事 —— 前者不该在左栏留下一条空对话。人设攒在
+/// [`PendingNewChat`] 上，用户真开口时 `materializeSession` 会连着会话
+/// 一起兑现并绑定。
+///
+/// 绑定那一步在那里，不在这里 —— 但它同样缺一不可：少了它模型仍然用默认
+/// 人设，而用户以为自己选过了，且没有任何报错。
 void startChatWith(BuildContext context, WidgetRef ref, Assistant assistant) {
-  final id = ref.read(chatControllerProvider.notifier).createSession();
-  ref.read(sessionAssistantProvider.notifier).bind(id, assistant.id);
+  ref
+      .read(chatControllerProvider.notifier)
+      .startNewChat(assistantId: assistant.id);
   ref.read(projectControllerProvider.notifier).select(null);
   ref.read(mainViewProvider.notifier).go(MainView.chat);
 }

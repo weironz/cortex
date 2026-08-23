@@ -89,6 +89,15 @@ class ChatController extends Notifier<ChatState> {
       // The toggle is a view preference, not backend data — a source swap
       // should not silently re-hide what the user asked to see.
       showArchived: state.showArchived,
+      // ⚠️ 同一个道理，而且这一条是**实测撞出来的**：`build()` 末尾排了一个
+      // `Future.microtask(_reload)`，所以「首次读到这个 controller」与
+      // 「用户点新对话」之间只隔着一个 microtask —— 从智能体卡片点进来时
+      // 正好是这个顺序（那一下同时创建 controller 并 startNewChat）。
+      // 不带上它的话，刚开的白纸会被这次重置抹掉，用户被扔回上一条会话，
+      // 而他挑的人设也一起没了，全程无报错。
+      //
+      // 换后端时同理：「我正要开一条新对话」是用户的意图，不是后端数据。
+      pendingNewChat: state.pendingNewChat,
     );
     await loadSessions();
   }
@@ -109,8 +118,19 @@ class ChatController extends Notifier<ChatState> {
       final remote = await _api.sessions(includeArchived: state.showArchived);
       if (_stale(seq)) return;
       final merged = _mergeSessions(remote);
+      // ⚠️ **白纸不能被自动选中顶掉。**
+      //
+      // 这里原先是 `activeSessionId ?? merged.first.id`：没有当前会话就挑
+      // 第一条。惰性建会话之后「没有当前会话」多了第二种含义 —— 用户刚点了
+      // 新对话 —— 于是任何一次刷新（WebSocket 推一下、别的设备改了什么）
+      // 都会把他**拉回上一条会话**，而他正打字打到一半。
+      //
+      // `pendingNewChat` 就是用来分辨这两种 null 的：它非空 = 这是一张
+      // 用户要的白纸，别动它。
+      final onBlankPage = state.pendingNewChat != null;
       final active =
-          state.activeSessionId ?? (merged.isNotEmpty ? merged.first.id : null);
+          state.activeSessionId ??
+          (onBlankPage || merged.isEmpty ? null : merged.first.id);
       state = state.copyWith(
         sessions: merged,
         sessionsLoading: false,
@@ -184,6 +204,9 @@ class ChatController extends Notifier<ChatState> {
     state = state.copyWith(
       activeSessionId: id,
       sendError: null,
+      // 点开了别的会话 = 那张白纸不要了。攒着的项目/人设跟着作废，
+      // 否则它们会在下一次「新对话」时莫名其妙地生效
+      pendingNewChat: null,
       // 打开它就等于「看过了」。留着的话，那个「跑完了」的标记会一直挂在
       // 一个用户正盯着的会话上
       finished: state.finished.contains(id)
@@ -261,7 +284,74 @@ class ChatController extends Notifier<ChatState> {
   /// 落了地，再补一次 `PATCH /sessions/{id}`。
   ///
   /// 反过来先 PATCH 是不行的：那时服务端上还没有这一行，只会拿回 404。
+  /// 开一张**白纸** —— 不建会话，只把当前选中清空。
+  ///
+  /// # 为什么这不是 [createSession]
+  ///
+  /// 从前点「新对话」就立刻 mint 一条草稿塞进左栏。于是每一次「我看看能干
+  /// 什么」都留下一行「新会话」，用户回头看见一列自己从没说过话的对话。
+  /// 2026-08-23 用户报的正是这个。
+  ///
+  /// 惰性化的落点在 [send]：那里本来就有 `?? createSession()` 的兜底，
+  /// 所以「真的开口才建」几乎是白送的 —— 唯一要接住的是**上下文**
+  /// （从哪个项目、哪个智能体点进来的），那就是 [PendingNewChat]。
+  ///
+  /// # ⚠️ 附件入口也要走 [materializeSession]
+  ///
+  /// 粘贴/拖一张图进来同样算「开口」（[`AttachmentController`] 需要一个真实
+  /// 的 sessionId 才能挂上传）。少了那一处，白纸状态下拖文件会静默落进一个
+  /// 不存在的会话桶里 —— 上传成功、界面上什么都没有。
+  void startNewChat({String? projectId, String? assistantId}) {
+    state = state.copyWith(
+      activeSessionId: null,
+      pendingNewChat: PendingNewChat(
+        projectId: projectId,
+        assistantId: assistantId,
+      ),
+      sendError: null,
+    );
+  }
+
+  /// 在白纸上换人设 —— 只动攒着的那份，不碰项目归属。
+  ///
+  /// 有会话时什么都不做：那种情况该走
+  /// [`SessionAssistantNotifier.bind`]，它按 sessionId 存。
+  ///
+  /// ⚠️ 不能用 [startNewChat] 代替：那个会把 [PendingNewChat] 整个换掉，
+  /// 于是「在某个项目里点新对话、再挑一个人设」会**悄悄丢掉项目归属** ——
+  /// 对话建出来落在项目外面，而用户什么都没看见。
+  void setPendingAssistant(String? assistantId) {
+    if (state.activeSessionId != null) return;
+    state = state.copyWith(
+      pendingNewChat: PendingNewChat(
+        projectId: state.pendingNewChat?.projectId,
+        assistantId: assistantId,
+      ),
+    );
+  }
+
+  /// 把白纸兑现成一条真的会话，连同它攒着的项目与人设。
+  ///
+  /// 幂等地只在 `activeSessionId == null` 时有意义；已经有会话时直接返回它。
+  String materializeSession() {
+    final existing = state.activeSessionId;
+    if (existing != null) return existing;
+
+    final pending = state.pendingNewChat;
+    final id = createSession(projectId: pending?.projectId);
+
+    // 人设要在会话真的存在之后才绑得上（绑定是按 sessionId 存的）。
+    // ⚠️ 这一步漏掉的表现极其隐蔽：模型照常回答，只是用的是默认人设，
+    // 而用户以为自己选过了 —— `assistants_page.dart` 那段注释也写着同一件事
+    final assistantId = pending?.assistantId;
+    if (assistantId != null) {
+      ref.read(sessionAssistantProvider.notifier).bind(id, assistantId);
+    }
+    return id;
+  }
+
   String createSession({String? projectId}) {
+    // 白纸已经兑现（或者被显式建会话覆盖）——攒着的上下文不能留到下一次
     final session = ChatSession(
       id: Ulid.generate(),
       title: '新会话',
@@ -280,6 +370,9 @@ class ChatController extends Notifier<ChatState> {
         session.id: const Transcript(loadedFromServer: true),
       },
       sendError: null,
+      // 白纸没了 —— 留着的话下一次 `materializeSession` 会把这一次的项目
+      // 归属安到另一条会话头上
+      pendingNewChat: null,
     );
     return session.id;
   }
@@ -846,7 +939,11 @@ class ChatController extends Notifier<ChatState> {
     if (text.isEmpty && attachments.isEmpty) return;
     if (state.streaming != null) return; // one generation at a time
 
-    final sessionId = state.activeSessionId ?? createSession();
+    // **白纸状态在这里落地成一条真的会话。**
+    //
+    // 「点新对话」不再立刻建会话（见 [startNewChat]），所以绝大多数情况下
+    // 走的是这一支。`materializeSession` 会把攒着的项目/人设一起兑现
+    final sessionId = state.activeSessionId ?? materializeSession();
 
     // 工作目录要在**这一轮开始之前**定下来：`routes::chat` 拿「有没有本地
     // 绑定」分流，等 turn 造好再绑就晚了，那一轮已经送去云端了

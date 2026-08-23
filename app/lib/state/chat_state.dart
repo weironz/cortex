@@ -144,6 +144,27 @@ class Transcript {
   static const Object _sentinel = Object();
 }
 
+/// 「点了新对话，但还没说话」时攒着的那点意图。
+///
+/// # 为什么需要它
+///
+/// 惰性建会话之后，「新对话」这个动作不再产生一个 id —— 但它仍然可能**带着
+/// 信息**：从某个项目里点的（这条对话属于那个项目），或者从智能体卡片点的
+/// （用它的人设）。那些信息要活到用户真的开口为止。
+///
+/// 存在这里而不是各个界面自己记：真正消费它的是
+/// [`ChatController.send`]（那里才建会话），而发起的地方有五处 ——
+/// 让五个界面各自把上下文传下来，漏掉的那个会静默失去分组。
+class PendingNewChat {
+  const PendingNewChat({this.projectId, this.assistantId});
+
+  /// 建出来的会话属于哪个项目。
+  final String? projectId;
+
+  /// 建出来的会话用哪个人设。⚠️ 绑定要在会话真的存在之后做。
+  final String? assistantId;
+}
+
 class ChatState {
   const ChatState({
     this.sessions = const [],
@@ -156,12 +177,21 @@ class ChatState {
     this.showArchived = false,
     this.unfinished = const {},
     this.finished = const {},
+    this.pendingNewChat,
   });
 
   final List<ChatSession> sessions;
   final bool sessionsLoading;
   final String? sessionsError;
+
+  /// 当前这条会话。**`null` 是一个正常状态，不是「出错了」** ——
+  /// 它的意思是「一张还没写字的白纸」：用户刚点了新对话，或者刚进应用
+  /// 而一条会话都没有。这时输入框照常画着，打字发送就会建出会话来。
   final String? activeSessionId;
+
+  /// [activeSessionId] 为 null 时，这张白纸带着什么上下文。见
+  /// [PendingNewChat]。不在白纸状态时恒 null。
+  final PendingNewChat? pendingNewChat;
 
   /// Committed messages, keyed by session id.
   final Map<String, Transcript> transcripts;
@@ -248,6 +278,7 @@ class ChatState {
     bool? showArchived,
     Set<String>? unfinished,
     Set<String>? finished,
+    Object? pendingNewChat = _sentinel,
   }) => ChatState(
     sessions: sessions ?? this.sessions,
     sessionsLoading: sessionsLoading ?? this.sessionsLoading,
@@ -265,6 +296,9 @@ class ChatState {
     showArchived: showArchived ?? this.showArchived,
     unfinished: unfinished ?? this.unfinished,
     finished: finished ?? this.finished,
+    pendingNewChat: pendingNewChat == _sentinel
+        ? this.pendingNewChat
+        : pendingNewChat as PendingNewChat?,
   );
 
   /// Distinguishes "not passed" from "explicitly set to null" in [copyWith].

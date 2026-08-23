@@ -33,7 +33,13 @@ void main() {
   testWidgets('输入框底部没有任何容器概念', (tester) async {
     await tester.pumpWidget(
       _wrap(
-        MessageComposer(onSend: (_, _) {}, onStop: () {}, streaming: false),
+        MessageComposer(
+          onSend: (_, _) {},
+          onStop: () {},
+          streaming: false,
+          // 这条用例只看输入框上的文案，不碰附件那条路
+          ensureSession: () => throw StateError('这条用例不该兑现会话'),
+        ),
       ),
     );
     await tester.pump();
