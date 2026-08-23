@@ -131,6 +131,35 @@ class AuthState {
 /// `auth: "token" | "disabled"`. So a loopback dev daemon running
 /// `CORTEX_AUTH=disabled` lets the user straight through, and a real one asks —
 /// with no setting to get wrong in either direction.
+/// 把人送回登录页的三条路径。
+///
+/// # 为什么值得一个枚举
+///
+/// 三者对用户是同一句红字，对我们却是三个不同的 bug 家族：
+///
+/// * [cooloff] —— **客户端时序**。刚续期成功，3 秒内又有 401 打进来。
+///   多半是「一批请求带着旧 token 同时发出去、续期只救得了第一个」，
+///   也就是雪崩式 401。修法在请求侧（预续期、或者让迟到的 401 认得出
+///   自己已经过时），不在凭据上。
+/// * [noRefreshToken] —— **本地存储**。手上压根没有 refresh token。
+///   可能从来没存下来（存储写失败、Web 上被清），也可能被
+///   `restoreSession` 里那次 `forgetToken()` 删掉了。
+/// * [refreshRejected] —— **服务端真的拒了**。这一条才需要看服务端：
+///   被轮换过、判成重放、或者真的过期。配套日志在 `restoreSession` 的
+///   catch 里，带状态码。
+///
+/// 2026-08-23 加的：用户报「开着不动几十分钟就掉」，而这三条在日志里
+/// 长得一模一样，定位不了。
+enum _GateReason {
+  cooloff('刚续期成功 3 秒内又收到 401 —— 续期解决不了，多半是一批带旧凭据的请求同时回来'),
+  noRefreshToken('手上没有 refresh token —— 要么从没存下来，要么被上一次续期失败时删了'),
+  refreshRejected('服务端拒绝了这枚 refresh token —— 看紧邻的「续期被拒」那行日志的状态码');
+
+  const _GateReason(this.explain);
+
+  final String explain;
+}
+
 class AuthController extends Notifier<AuthState> {
   /// Guards against a stale probe (from a previous base URL) writing its result
   /// over a newer one.
@@ -453,6 +482,17 @@ class AuthController extends Notifier<AuthState> {
       return true;
     } on CortexApiException catch (e) {
       if (!_alive(generation)) return false;
+      // ⚠️ **续期失败是「用户被登出」这条链上唯一有服务端参与的一环，
+      // 而它此前一个字都不说。** 上层三条路径共用同一句红字，日志里分不出
+      // 是熔断、是手上没有 refresh token、还是这里真的被拒了 ——
+      // 三者的修法完全不同（分别是客户端时序、本地存储、服务端凭据）。
+      //
+      // 状态码是关键：401/403 = 这枚 refresh token 服务端不认（被轮换过、
+      // 被判重放、或者过期）；5xx / unreachable = 服务端的问题，凭据没毛病。
+      debugPrint(
+        '续期被拒：status=${e.statusCode} unreachable=${e.isUnreachable} '
+        'msg=${e.message}',
+      );
       // 连不上**不算凭据失效**。清掉一个其实还有效的 token，
       // 会让「服务端暂时没起来」变成「你被登出了」
       if (!e.isUnreachable && kCanRememberToken) await forgetToken();
@@ -589,13 +629,13 @@ class AuthController extends Notifier<AuthState> {
     // 见 `_lastRefreshOk` 上那段：没有这道闸，实测五分钟签了 2765 对。
     final last = _lastRefreshOk;
     if (last != null && DateTime.now().difference(last) < _refreshCooloff) {
-      _fallBackToGate();
+      _fallBackToGate(_GateReason.cooloff);
       return;
     }
 
     final refresh = state.refreshToken;
     if (refresh == null) {
-      _fallBackToGate();
+      _fallBackToGate(_GateReason.noRefreshToken);
       return;
     }
     // `??=` 是这条并发保护的全部：第一个发起，其余的拿到同一个 future。
@@ -608,7 +648,7 @@ class AuthController extends Notifier<AuthState> {
     if (ok) {
       _lastRefreshOk = DateTime.now();
     } else {
-      _fallBackToGate();
+      _fallBackToGate(_GateReason.refreshRejected);
     }
   }
 
@@ -628,9 +668,19 @@ class AuthController extends Notifier<AuthState> {
   /// 那次替换**没有 assert** —— 静默落空，此后每个人（包括改它的人）都
   /// 以为它已经是新的了。配套测试也是绿的，因为那条测试走的路径根本不经过
   /// 这里。教训写在这儿：**锚不上要响，测试要真的踩到被改的行。**
-  void _fallBackToGate() {
+  void _fallBackToGate(_GateReason reason) {
     if (state.phase == AuthPhase.needsToken) return;
     final wasReady = state.phase == AuthPhase.ready;
+    // ⚠️ **红字对用户是一样的，日志必须分得清。**
+    //
+    // 这三条路径的病因与修法毫不相干（客户端时序 / 本地存储 / 服务端凭据），
+    // 而用户看到的只有「登录已过期，续期也没有成功」。2026-08-23 用户报
+    // 「开着不动几十分钟就掉」时，光看代码定位不出是哪一条 —— 服务端配置
+    // （access 15 分钟、refresh 30 天且每次续期）是对的，生产日志里也没有
+    // 任何一条 refresh 被拒的记录。
+    //
+    // 给用户的文案刻意不动：他不需要知道是哪一条，他需要的是重新登录。
+    if (wasReady) debugPrint('回登录页：${reason.explain}');
     // Deliberately not `forgetToken()`: a rotated server-side secret is not a
     // reason to also destroy the copy the user may still be editing, and on
     // desktop the "stored" copy is an environment variable this app must not
