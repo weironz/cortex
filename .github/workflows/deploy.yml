@@ -73,24 +73,44 @@ jobs:
       url: https://cortex.cloudcele.com
 
     steps:
+      # ── ⚠️ **默认分支**，不是被部署的那个 tag ──────────────
+      #
+      # 部署机制（ansible/）与应用版本是**两条独立的时间线**。旧设计里这一条
+      # 已经写着了（它拿节点上的策略脚本与 main 比，不与 tag 比），而我第一版
+      # 把两者都挪到了 tag 上 —— 后果不只是「新东西在老 tag 上不存在」，
+      # 而是**回滚到任何早于 ansible 的版本都会失败**：
+      #
+      #     [ERROR]: The requirements file 'ansible/requirements.yml' does not exist.
+      #
+      # 2026-08-23 实测撞到（部署 v0.1.18 那次）。
       - uses: actions/checkout@v5
-        with:
-          # 要 tag 上那棵树：送到节点的 compose 与 ansible playbook 都从这里来，
-          # 于是一个版本永远只会被部署到它一起发布的那份编排上
-          ref: v${{ inputs.version }}
 
       - name: 拒绝一切不是 X.Y.Z 的东西
         run: |
           [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
             || { echo "version 必须是 X.Y.Z"; exit 1; }
 
-      # ansible 只装在**这里**。目标机器不装 ansible —— 但需要 python3
-      # （模块推过去要它执行）与 python3-requests，那两样由 provision.yml 装。
-      - name: 装 ansible
+      # ── 但 compose 要**那个 tag 上**那份 ──────────────────
+      #
+      # 与上面正好相反，而这个不对称是有意的：一个版本应当被部署到它一起
+      # 发布的那份编排上（compose 里有它的服务、端口、健康检查）。
+      # 部署机制则该是最新的 —— 修了一个部署 bug，不该只有以后的版本受益。
+      - name: 取 tag 上那份 compose
         run: |
           set -euo pipefail
-          pipx install --include-deps ansible
-          ansible-galaxy collection install -r ansible/requirements.yml
+          tag="v${{ inputs.version }}"
+          git fetch -q --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"
+          git checkout "${tag}" -- deploy/docker-compose.yml
+          echo "compose 取自 ${tag}，ansible/ 取自默认分支"
+
+      # ansible 只装在**这里**。目标机器不装 ansible —— 但需要 python3
+      # （模块推过去要它执行）与 python3-requests，那两样由 provision.yml 装。
+      #
+      # ansible-core 在 ubuntu runner 上是**预装**的，再 pipx 装一遍只会刷
+      # 二十行「File exists … Not modifying」。这里只装我们钉了版本的那三个
+      # collection —— 那才是会影响 playbook 行为的部分。
+      - name: 装 ansible collection
+        run: ansible-galaxy collection install -r ansible/requirements.yml
 
       - name: 部署
         env:
