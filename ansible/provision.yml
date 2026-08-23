@@ -35,20 +35,74 @@
           换发行版要改包名与 docker 源，不是改一行的事。
 
     # ── 依赖 ──────────────────────────────────────────────
-    - name: 装 docker 与 ansible 要用的 Python 库
+    #
+    # ⚠️ **刷索引与装包是两步，因为它们的失败含义完全不同。**
+    #
+    # 显然的写法是 `apt: name=[...] state=present update_cache=true` 一行完事。
+    # 2026-08-23 在生产节点上实测撞死：那台 ECS 的源是阿里云**内网**镜像
+    # （mirrors.cloud.aliyuncs.com / 100.100.2.148），连不上，于是
+    #
+    #     Failed to update apt cache after 5 retries:        ← 冒号后面是空的
+    #
+    # 整个 playbook 停在这里，而它要装的东西**本来就都在**（docker 三件套
+    # 装着、requests 是 pip 装在 /usr/local 的）。一个「让索引别太旧」的
+    # 辅助步骤，把装机主路径整个挡死了。
+    #
+    # 更糟的是 `--check --diff` 那次是**绿的** —— check 模式不真跑 apt
+    # update，所以这个坑只在真跑时出现。（`apt-get update` 自己遇到这种
+    # 情况是 rc=0 的：它降级用旧索引继续。ansible 把它当硬失败。）
+    #
+    # 所以：刷索引尽力而为，装包才是硬要求。包已装时 `state: present`
+    # 根本不需要新索引；包没装而索引又不通时，下一步会自己报错，
+    # 而那条错误说的是「装不上哪个包」，比「apt cache 刷不动」准得多。
+    - name: 刷一下 apt 索引（失败不致命）
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      register: apt_cache
+      failed_when: false
+
+    - name: 索引没刷上
+      ansible.builtin.debug:
+        msg: >-
+          ⚠ apt 索引刷不动（多半是源不通），下面按现有索引装。
+          包都已经在的话没有影响；真缺包的话下一步会报。
+      when: apt_cache is failed
+
+    - name: 装 docker
       ansible.builtin.apt:
         name:
           - docker-ce
           - docker-ce-cli
           - docker-compose-plugin
-          # ⚠️ 只有 docker_prune / docker_image_pull 要它（那两个走 Docker
-          #    API）。核心的 docker_compose_v2 走 docker CLI，不需要。
-          #    缺了它 deploy.yml 会在中途报一句 import 错误 —— 所以那边
-          #    开头有一条 assert 提前问，指回这里
-          - python3-requests
         state: present
-        update_cache: true
-        cache_valid_time: 3600
+
+    # ── python 的 requests ────────────────────────────────
+    #
+    # ⚠️ **判据是「import 得通」，不是「dpkg 里有这个包」。**
+    #
+    # 只有 docker_prune / docker_image_pull 要它（那两个走 Docker API）；
+    # 核心的 docker_compose_v2 走 docker CLI，不需要。deploy.yml 开头那条
+    # assert 查的也是 `import requests` —— 这里必须用同一个判据，不然两边
+    # 对「装好了」的定义不一样。
+    #
+    # 2026-08-23 实测：生产这台上 requests 2.30.0 是 **pip 装在
+    # /usr/local/lib/python3.10/dist-packages** 的，apt 眼里「没装」，
+    # 于是无条件 `state: present` 会去拉 deb —— 而那台的源是阿里云内网
+    # 镜像、连不上，装机就此停住。更荒谬的是：**就算装成功也没用**，
+    # /usr/local 在 sys.path 里优先，apt 那份会被 pip 那份直接遮住。
+    - name: python3 能 import requests 吗
+      ansible.builtin.command:
+        cmd: "{{ ansible_python_interpreter | default('/usr/bin/python3') }} -c 'import requests'"
+      register: has_requests
+      changed_when: false
+      failed_when: false
+
+    - name: 装 python3-requests（只在 import 不通时）
+      ansible.builtin.apt:
+        name: python3-requests
+        state: present
+      when: has_requests.rc != 0
 
     # ── 目录 ──────────────────────────────────────────────
     - name: 部署目录

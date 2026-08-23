@@ -25,12 +25,25 @@ node_dir: /data/cortex
 #                                                      # ⚠️ 只取 `ssh-ed25519 …`
 #                                                      #    那部分，**别抄前面的
 #                                                      #    restrict,command=**
-deploy_public_key: ""
+deploy_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxWEymfiOIDKBjdAGZCvewEO0FpY7+uJWoBtK+lBqGn cortex-ci-deploy"
 
 # ── 域名 ──────────────────────────────────────────────────
 # compose 里 `${DOMAIN}` 没有默认值，缺了整份 compose 解析不了
 cortex_domain: cortex.cloudcele.com
-cortex_public_url: https://cortex.cloudcele.com
+
+# ⚠️ **刻意留空，别填 https://cortex.cloudcele.com。**
+#
+# 它不是「站点地址」，是 `gallery.rs::public_base` 的**兜底开关**：填了就
+# 以它为准，**跳过 `X-Forwarded-Prefix`**。而生产的 traefik 有 stripprefix，
+# 那个头是 `/api` —— 填一个不带 `/api` 的值，分享链接就从
+# `…/api/s/<id>` 变成 `…/s/<id>`，复制出去谁都打不开。
+#
+# 症状离原因极远（那段函数的注释自己写着「他不会怀疑到这一步」），而且
+# agentd 照样健康、页面照样能开。留空则走三个头拼，那是设计上的主路径；
+# 这一项只给「反代不设这些头」的部署兜底，生产不是那种部署。
+#
+# 2026-08-23 差点踩进去：第一版这里填的就是那个看起来天经地义的值。
+cortex_public_url: ""
 
 # ── 镜像 ──────────────────────────────────────────────────
 cortex_registry: registry.cn-shenzhen.aliyuncs.com/willspace
@@ -52,13 +65,25 @@ cortex_memory_url: http://cormex:8080
 
 # ── LLM ───────────────────────────────────────────────────
 cortex_llm_provider: deepseek
+# 留空 = 走 `config.rs::default_model(provider)`，deepseek 那一支恰好就是
+# `deepseek-v4-pro` / `deepseek-v4-flash` —— 与节点 .env 里手写的那两行
+# 逐字相同，所以留空不是降级。要钉死某个模型再填。
+# （`optional()` 把空串当未设，有 `env_empty_is_unset.rs` 钉着）
 cortex_llm_model: ""
 cortex_llm_cheap_model: ""
 
 # ── 云沙箱 ────────────────────────────────────────────────
 # ⚠️ 开它 = 把这台机器的 root 交给 agentd（docker.sock）。
 # 这台机器上还跑着 mica / neostor / headscale / rustdesk。
-cortex_sandbox_enabled: false
+#
+# **生产上它是开着的**（2026-08-23 核对：节点 .env 里 CORTEX_SANDBOX_ENABLED=1、
+# COMPOSE_PROFILES=sandbox，cortex-egress 与沙箱容器都在跑）。这里第一版写的是
+# false —— 那不是一个保守的默认，而是**一次静默的功能下线**：ansible 渲染的
+# .env 会关掉 profile，egress 掉出编排、在跑的会话断，而部署全绿。
+#
+# 接管一个已有系统时，配置源的初值必须是**它当下的真实状态**，不是我们
+# 认为合理的状态。要改配置就单独改一次，别混在「换部署工具」这一步里。
+cortex_sandbox_enabled: true
 # stat -c %g /var/run/docker.sock —— **必须自己查**，因发行版而异。
 # 写错的表现是 agentd `client error (Connect)` 然后 restart 循环，
 # 而那条错误读起来像「docker 没起来」
