@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
 import 'pages/about_page.dart';
 import 'pages/appearance_page.dart';
+import 'pages/computer_use_page.dart';
+import 'pages/computer_use_section.dart';
 import 'pages/skills_page.dart';
 import 'pages/usage_page.dart';
 import 'pages/connection_page.dart';
@@ -51,37 +54,57 @@ Future<void> showSettingsSheet(BuildContext context) {
 /// **导航不分组。** Cherry 那边分了工具 / 偏好 / 系统三组，因为它有二十
 /// 来项；我们只有八项，分组会让每组只剩一两条 —— 那时组标题比它组织的
 /// 内容还多，纯属噪音。
-class SettingsPage extends StatefulWidget {
+class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
 
   @override
-  State<SettingsPage> createState() => _SettingsPageState();
+  ConsumerState<SettingsPage> createState() => _SettingsPageState();
 }
 
 /// 一页。
-typedef _Section = ({String label, String hint, IconData icon, Widget page});
+typedef _Section = ({
+  String label,
+  String hint,
+  IconData icon,
+  Widget page,
 
-class _SettingsPageState extends State<SettingsPage> {
+  /// 这一项在这个部署上摆不摆得出来。`null` = 恒摆。
+  ///
+  /// ⚠️ 闸放在**目录**上而不只是页面里：一个点进去一片空白的菜单项，
+  /// 比没有这个菜单项更糟（CLAUDE.md 约束 2 在界面上的样子）。
+  /// 而判据必须与那一页用的是**同一个** provider，各判各的迟早对不上。
+  Provider<bool>? gate,
+});
+
+class _SettingsPageState extends ConsumerState<SettingsPage> {
+  /// **全量索引**，不是「可见项里的第几个」。
+  ///
+  /// 差别在闸会变：`/health` 还没回来时电脑操作那一项不摆，回来之后摆上。
+  /// 存可见序号的话，那一刻用户选中的页会**悄悄换成另一页** —— 而他什么
+  /// 都没点。存全量索引则天然不受影响。
   int _index = 0;
 
-  static const _sections = <_Section>[
+  static final _sections = <_Section>[
     (
       label: '连接',
       hint: '数据源 · 后端状态',
       icon: Icons.cable_rounded,
-      page: ConnectionPage(),
+      page: const ConnectionPage(),
+      gate: null,
     ),
     (
       label: '模型服务',
       hint: '供应商 · key · 型号',
       icon: Icons.psychology_outlined,
-      page: ModelPage(),
+      page: const ModelPage(),
+      gate: null,
     ),
     (
       label: '默认模型',
       hint: '主 · 快速 · 绘画',
       icon: Icons.tune_rounded,
-      page: ModelRolesPage(),
+      page: const ModelRolesPage(),
+      gate: null,
     ),
     // 技能紧挨着「MCP 与工具」：两者都是「模型手上多了什么」。
     // 差别是 MCP 给的是**能力**（去做一件它本来做不到的事），
@@ -90,7 +113,8 @@ class _SettingsPageState extends State<SettingsPage> {
       label: '技能',
       hint: '写好的做法 · 按需取用',
       icon: Icons.auto_stories_outlined,
-      page: SkillsPage(),
+      page: const SkillsPage(),
+      gate: null,
     ),
     (
       // 「连接器」而不是「MCP」：MCP 是协议名，说的是**怎么接**；
@@ -98,19 +122,35 @@ class _SettingsPageState extends State<SettingsPage> {
       label: '连接器',
       hint: '一键接入 · MCP server',
       icon: Icons.extension_outlined,
-      page: McpPage(),
+      page: const McpPage(),
+      gate: null,
+    ),
+    // 紧跟连接器：同样是「模型手上有什么」。
+    //
+    // 但它**不再压在连接器页里面**（2026-08-23 搬出来的）。理由不是分类，
+    // 是权限：别的连接器交出去的是一台别人写的 server，只有这一条交出去的
+    // 是你这台机器的屏幕与键鼠 —— 想确认「我到底有没有开着它」的人，
+    // 不会想到去翻连接器页并往下滚过一整列 MCP。
+    (
+      label: '电脑操作',
+      hint: '截屏与键鼠 · 默认关',
+      icon: Icons.desktop_windows_outlined,
+      page: const ComputerUsePage(),
+      gate: computerUseAvailableProvider,
     ),
     (
       label: '数据',
       hint: '工作空间 · 导入',
       icon: Icons.folder_outlined,
-      page: DataPage(),
+      page: const DataPage(),
+      gate: null,
     ),
     (
       label: '用量',
       hint: 'token · 花费 · 配额',
       icon: Icons.receipt_long_outlined,
-      page: UsagePage(),
+      page: const UsagePage(),
+      gate: null,
     ),
     // 排在「关于」前面：它是**偏好**，与上面几项同类；
     // 「关于」是这一列里唯一一个不改任何东西的，压在最后
@@ -118,20 +158,43 @@ class _SettingsPageState extends State<SettingsPage> {
       label: '外观',
       hint: '主题 · 动效',
       icon: Icons.palette_outlined,
-      page: AppearancePage(),
+      page: const AppearancePage(),
+      gate: null,
     ),
     (
       label: '关于',
       hint: '版本 · 更新',
       icon: Icons.info_outline_rounded,
-      page: AboutPage(),
+      page: const AboutPage(),
+      gate: null,
     ),
   ];
+
+  /// 这一刻摆得出来的那些**全量索引**（见 [_index] 上那段）。
+  List<int> get _visible {
+    final out = <int>[];
+    for (var i = 0; i < _sections.length; i++) {
+      final gate = _sections[i].gate;
+      if (gate == null || ref.watch(gate)) out.add(i);
+    }
+    return out;
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final width = MediaQuery.sizeOf(context).width;
+
+    final visible = _visible;
+    // **选中项落在一个已经不摆了的页上时，回落到第一页。**
+    //
+    // 这里算的是局部值而不是 `setState(_index = …)`：build 里改 state 是
+    // 禁忌，而且也没必要 —— 闸再翻回来时 `_index` 还指着原来那一页，
+    // 用户会回到他本来待着的地方。
+    //
+    // 不处理的后果不是「显示错了」，是**崩溃**：窄屏那条路的
+    // `DropdownButton` 断言 value 必须在 items 里。
+    final index = visible.contains(_index) ? _index : visible.first;
 
     return Scaffold(
       backgroundColor: theme.colorScheme.surface,
@@ -143,13 +206,13 @@ class _SettingsPageState extends State<SettingsPage> {
             Expanded(
               // 窄屏（手机、被拖窄的窗口）放不下两列，退回一列 + 顶部下拉
               child: width < 640
-                  ? _narrow(context)
+                  ? _narrow(context, visible, index)
                   : Row(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        _nav(context),
+                        _nav(context, visible, index),
                         const VerticalDivider(width: 1),
-                        Expanded(child: _content(context)),
+                        Expanded(child: _content(context, index)),
                       ],
                     ),
             ),
@@ -185,7 +248,7 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _nav(BuildContext context) {
+  Widget _nav(BuildContext context, List<int> visible, int index) {
     final theme = Theme.of(context);
     return Container(
       width: 216,
@@ -194,10 +257,11 @@ class _SettingsPageState extends State<SettingsPage> {
       color: theme.cortex.sidebar,
       child: ListView.builder(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-        itemCount: _sections.length,
-        itemBuilder: (context, i) {
+        itemCount: visible.length,
+        itemBuilder: (context, row) {
+          final i = visible[row];
           final s = _sections[i];
-          final selected = i == _index;
+          final selected = i == index;
           return Padding(
             padding: const EdgeInsets.only(bottom: 2),
             child: ListTile(
@@ -227,8 +291,8 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _content(BuildContext context) {
-    final s = _sections[_index];
+  Widget _content(BuildContext context, int index) {
+    final s = _sections[index];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -248,7 +312,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 constraints: const BoxConstraints(maxWidth: 1160),
                 // 换页时把内部滚动位置也换掉：不给 key 的话，从一页很长的
                 // 内容切到一页短的，滚动偏移会被沿用，看起来像那一页是空的
-                child: KeyedSubtree(key: ValueKey(_index), child: s.page),
+                child: KeyedSubtree(key: ValueKey(index), child: s.page),
               ),
             ),
           ),
@@ -257,7 +321,7 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _narrow(BuildContext context) {
+  Widget _narrow(BuildContext context, List<int> visible, int index) {
     final theme = Theme.of(context);
     return Column(
       children: [
@@ -265,10 +329,12 @@ class _SettingsPageState extends State<SettingsPage> {
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
           child: DropdownButtonHideUnderline(
             child: DropdownButton<int>(
-              value: _index,
+              // ⚠️ 必须是 `index` 而不是 `_index`：DropdownButton 断言
+              // value 出现在 items 里，选中项被闸掉时直接崩
+              value: index,
               isExpanded: true,
               items: [
-                for (var i = 0; i < _sections.length; i++)
+                for (final i in visible)
                   DropdownMenuItem(
                     value: i,
                     child: Row(
@@ -292,8 +358,8 @@ class _SettingsPageState extends State<SettingsPage> {
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
             child: KeyedSubtree(
-              key: ValueKey(_index),
-              child: _sections[_index].page,
+              key: ValueKey(index),
+              child: _sections[index].page,
             ),
           ),
         ),

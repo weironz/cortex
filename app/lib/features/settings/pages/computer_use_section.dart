@@ -1,10 +1,13 @@
-/// 「操作这台电脑」那一节 —— 连接器页最下面的开关。
+/// 「操作这台电脑」那一节 —— 内容本体，壳在 [`computer_use_page.dart`]。
 ///
-/// # 为什么在连接器页，而不是自己一页
+/// # 为什么从连接器页搬走了
 ///
-/// 它回答的是同一个问题：**模型手上有什么**。MCP 给的是别人写的工具，
-/// 这个给的是这台机器的屏幕与键鼠 —— 用户在一个地方看完「它能干什么」，
-/// 比在设置目录里多一项好。
+/// 原先它压在连接器页最下面，理由是「回答的是同一个问题：模型手上有什么」。
+/// 那个归类没错，但它把**权限最大的一组能力**藏在了一页的末尾 ——
+/// 要往下滚过一整列 MCP server 才看得见。别的都是「接一台别人写的 server」，
+/// 只有这一条交出去的是你这台机器的屏幕与键鼠；它该有自己的一页。
+///
+/// 内容留在这个文件里没动，页面只是个壳 —— 这样搬家不碰那段措辞。
 ///
 /// # ⚠️ 做不到的时候**整节不画**
 ///
@@ -28,17 +31,32 @@ import '../../../state/app_providers.dart';
 import '../../../state/model_controller.dart';
 import '../widgets/settings_layout.dart';
 
+/// 这个部署做不做得到「操作电脑」。
+///
+/// # ⚠️ 抽成 provider 是为了**只有一个判据**
+///
+/// 设置目录里的那一项与这一页的内容各判各的话，会长出两种都很难看的状态：
+/// 菜单里有这一项、点进去一片空白；或者反过来，能力在但没有入口。
+/// 这正是这个仓库的头号故障形状（造好了没人调用）的近亲 —— 判据分叉。
+///
+/// 所以它有且只有这一处定义，[`ComputerUseSection`] 与
+/// `settings_sheet.dart` 的菜单闸都读它。
+final computerUseAvailableProvider = Provider<bool>(
+  (ref) => ref.watch(healthProvider).value?.computerUse == true,
+);
+
 class ComputerUseSection extends ConsumerWidget {
   const ComputerUseSection({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final health = ref.watch(healthProvider).value;
 
     // 做不到就整节不画。**不是画一个灰的开关** —— 灰开关读起来像
     // 「你可以去别处打开它」，而这里根本没有那个别处
-    if (health?.computerUse != true) return const SizedBox.shrink();
+    if (!ref.watch(computerUseAvailableProvider)) {
+      return const SizedBox.shrink();
+    }
 
     final on = ref.watch(computerUseProvider);
     // 模型看不懂图 = 这个开关打开也不生效。**必须当场说** ——

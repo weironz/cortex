@@ -5,7 +5,6 @@ import '../../../api/api_exception.dart';
 import '../../../core/local_agent.dart';
 import '../../../models/mcp.dart';
 import '../../../state/app_providers.dart';
-import 'computer_use_section.dart';
 import 'connector_strip.dart';
 import 'mcp_add.dart';
 import '../../../core/theme.dart';
@@ -246,10 +245,9 @@ class _ServerListState extends ConsumerState<_ServerList> {
         ),
         const SizedBox(height: 8),
         SelectableText('配置文件：${cfg.path}', style: theme.textTheme.labelSmall),
-        // 电脑操作压在最后：它与 MCP 回答的是同一个问题（模型手上有什么），
-        // 但它不是「接一台 server」。做不到时整节不画，见那个文件的注释
-        const SizedBox(height: 18),
-        const ComputerUseSection(),
+        // 「电脑操作」曾经压在这里。搬去设置目录里自己一项了（见
+        // computer_use_page.dart）：它交出去的是这台机器的屏幕与键鼠，
+        // 而不是「一台别人写的 server」，藏在一整列 MCP 后面找不着
       ],
     );
   }
