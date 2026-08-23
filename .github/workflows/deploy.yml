@@ -12,15 +12,30 @@ name: Deploy
 #  `workflow_dispatch` 保留着，用来把线上回退到某个更早的版本 ——
 #  那是与「发新版」完全不同的一件事，不该只能靠再打一个 tag 来做。
 #
-#  安全模型（照抄 mica 那套，不简化）：
-#  用的不是 root 密钥。节点上 `~cortex-deploy/.ssh/authorized_keys` 用
-#      restrict,command="/usr/bin/sudo /usr/local/sbin/cortex-deploy"
-#  把它钉死，而 sshd 在**接受密钥之前**就套上这条命令。所以这把密钥
-#  即使泄露，也只能在已发布的版本之间切换：没有 shell、读不到 .env
-#  （里面有认证摘要、数据库口令、DeepSeek key）、碰不到数据库。
+#  ── ⚠️ 安全模型：这把密钥**等于节点 root** ────────────────
 #
-#  CI **只送 compose 的 sha256，不送文件本身**。送文件等于把「把宿主根
-#  挂进容器」的能力交给这把密钥；一个哈希只能拒绝，不能注入。
+#  它曾经不是。节点上 `~cortex-deploy/.ssh/authorized_keys` 用
+#      restrict,command="/usr/bin/sudo /usr/local/sbin/cortex-deploy"
+#  钉死，CI 只送 compose 的 sha256 不送文件 —— 于是一把泄露的密钥只能在
+#  已发布的版本之间切换。2026-08-23 改用 ansible 之后那道限制撤掉了：
+#  ansible 要把模块推过去执行，任何 forced command 都会挡住它。
+#
+#  **为什么可以接受**：那道闸挡住的比它看起来少。
+#  `deploy/docker-compose.yml` 把 /var/run/docker.sock 挂进 agentd（文件里
+#  自己写着「这是把宿主 root 交给它」），而 agentd 的镜像 tag 由 CI 决定、
+#  ACR 推送凭据就在同一个 GitHub Secrets 里（见 release.yml）。也就是说
+#  **一次 Actions 沦陷早就等于节点 root** —— 推个恶意 cortex-agentd:v9.9.9
+#  再部署它即可，compose 那道闸完全不在这条路上。它真正还挡得住的只有
+#  「单独泄露 DEPLOY_SSH_KEY」这一种。
+#
+#  换来的是：compose 与 .env 由 ansible 送过去，不再要人带外 scp。此前
+#  改一次 compose 就得手动同步，忘了的表现是**流水线跑二十多分钟最后一步红**。
+#
+#  ⚠️ 真要把「Actions 沦陷 ≠ 节点 root」拿回来，该做的是把 registry 凭据换成
+#  GitHub OIDC → 阿里云 RAM 角色，而不是守 compose 这道门。没排期，记着。
+#
+#  ⚠️ **凭据不经过 CI。** 节点上 /data/cortex/.env.secrets 由人装机时写一次，
+#  ansible 只检查它在不在、从不写它。见 deploy/.env.example 的 B 节。
 # ══════════════════════════════════════════════════════════
 
 on:
@@ -60,7 +75,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # 要用 tag 上那棵树来给 compose 取指纹
+          # 要 tag 上那棵树：送到节点的 compose 与 ansible playbook 都从这里来，
+          # 于是一个版本永远只会被部署到它一起发布的那份编排上
           ref: v${{ inputs.version }}
 
       - name: 拒绝一切不是 X.Y.Z 的东西
@@ -68,17 +84,24 @@ jobs:
           [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
             || { echo "version 必须是 X.Y.Z"; exit 1; }
 
+      # ansible 只装在**这里**。目标机器不装 ansible —— 但需要 python3
+      # （模块推过去要它执行）与 python3-requests，那两样由 provision.yml 装。
+      - name: 装 ansible
+        run: |
+          set -euo pipefail
+          pipx install --include-deps ansible
+          ansible-galaxy collection install -r ansible/requirements.yml
+
       - name: 部署
         env:
-          # 这**不是** root 密钥。见文件头的安全模型。
+          # ⚠️ 这**是**一把全权密钥（见文件头）。ansible 用它 become 到 root。
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          # ansible 检测到不是 tty 就关掉颜色，而 Actions 的日志**认 ANSI**。
+          # 关着的话失败那一行与其余几十行长得一模一样，得逐行读
+          ANSIBLE_FORCE_COLOR: "1"
         run: |
-          # `ssh … | tee` 会把 ssh 的退出码藏在 tee 后面，而 runner 默认的
-          # shell 不带 pipefail。mica 上真实发生过：节点**拒绝**了部署
-          # （compose 指纹不匹配），这一步照样报成功，只有后面的健康检查
-          # 才抓住。**一个在部署被拒时还报成功的步骤，比没有这个步骤更糟。**
-          set -o pipefail
+          set -euo pipefail
           install -m 700 -d ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
@@ -86,30 +109,10 @@ jobs:
           # 那不是验证
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
 
-          # **tag 上那份** compose 的指纹。节点自己那份不一致就拒绝，
-          # 于是一个版本永远不会被部署到它从没一起发布过的 compose 上
-          sha=$(sha256sum deploy/docker-compose.yml | cut -d' ' -f1)
-
-          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes \
-            cortex-deploy@cortex.cloudcele.com \
-            "deploy ${{ inputs.version }} $sha" | tee /tmp/deploy.log
-
-          # 节点会报出它跑的那份部署策略的构建指纹。CI 只能**读**这道
-          # 限制自己的围栏，绝不能安装它。
-          #
-          # 比的是**默认分支**，不是被部署的那个 tag：部署策略与应用版本
-          # 是两条独立的时间线。mica 上第一次跑这个检查时比的是 v0.12.8 ——
-          # 那个 tag 早于脚本本身，于是 sha256sum 出来是空的，报了一次
-          # 「与空哈希漂移」的假警报，而节点其实与 main 一模一样。
-          # **假警报会教人忽略警报。**
-          git fetch -q --depth 1 origin main 2>/dev/null || true
-          want=$(git show FETCH_HEAD:deploy/node-deploy-policy.sh 2>/dev/null | sha256sum | cut -c1-16)
-          got=$(grep -oP 'script_sha=\K\S+' /tmp/deploy.log || true)
-          if [ -z "$want" ]; then
-            echo "::warning::读不到默认分支的 deploy/node-deploy-policy.sh —— 漂移检查跳过"
-          elif [ -n "$got" ] && [ "$got" != "$want" ]; then
-            echo "::warning::节点跑的部署策略是 $got，默认分支是 $want —— 跑 'just deploy-sync' 同步"
-          fi
+          cd ansible
+          ansible-playbook deploy.yml \
+            --private-key ~/.ssh/id_ed25519 \
+            -e version=${{ inputs.version }}
 
       # 不信部署脚本自己的报喜。它说健康只代表容器的 HEALTHCHECK 绿了，
       # 证明不了 traefik 的路由、StripPrefix、证书这一整条链路是通的，

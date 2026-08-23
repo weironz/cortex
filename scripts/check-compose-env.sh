@@ -122,3 +122,85 @@ if [ "$COMPOSE" = "deploy/docker-compose.yml" ]; then
 fi
 
 echo "✔ ${COMPOSE} / ${SERVICE}：代码读的 $(echo "$read_vars" | wc -w) 个变量都设得了（豁免 ${#EXEMPT[@]} 个）"
+
+# ── 第三环：compose 要的变量，`.env.example` 得有 ─────────
+#
+# 上面两环管的是「代码 → compose」。这一环管的是「compose → 人」：
+# 一个 compose 里**没有默认值**的变量，装机的人必须知道要填它。
+#
+# 判据只卡没有默认值的（`${VAR}` 与 `${VAR:?}`）。有默认值的豁免 ——
+# compose 自己兜得住，硬要求列出来只会制造一堆没人维护的行。
+#
+# 2026-08-23 加。加它是因为这份模板在 Cormex 拆分之后漂了半个月没人发现：
+# `CORTEX_PG_PASSWORD`（compose 里是 `${VAR:?}`）与 `S3_DOMAIN` 都是缺的，
+# 拿它装新机器直接起不来；同时还留着 12 个记忆服务时代的变量。
+# **而这件事只有真去装一台新机器才会暴露** —— 那是最差的发现时机。
+case "${COMPOSE}" in
+deploy/*) ENV_EXAMPLE="deploy/.env.example" ;;
+*) ENV_EXAMPLE=".env.example" ;;
+esac
+
+if [ -f "${ENV_EXAMPLE}" ]; then
+    # `${VAR}` / `${VAR:?...}` 算必填；`${VAR:-...}` 算有默认值。
+    #
+    # ⚠️ 注释里也可能出现 `${VAR}` 当例子写（compose 那份就有一处
+    # `${VAR:-}` 的示范），所以先把整行是注释的滤掉
+    # ⚠️ `|| true` 不能省。`var=$(…)` 的退出码**就是命令替换的退出码**，
+    # 而 grep 一个都没匹配到时退出 1 —— 在 `set -e` 下会当场中止整个脚本，
+    # 且**一个字都不打印**。dev 那份 compose 恰好没有无默认值的变量，
+    # 于是这道新闸第一次跑就是「静默 exit 1」。
+    # 同一个坑 `node-deploy-policy.sh` 里也写着（那次是 `reg="$(grep …)"`）。
+    required=$(grep -vE '^[[:space:]]*#' "${COMPOSE}" |
+        grep -oE '\$\{[A-Z_][A-Z0-9_]*(:\?[^}]*)?\}' |
+        sed -E 's/^\$\{([A-Z_][A-Z0-9_]*).*/\1/' | sort -u || true)
+    documented=$(grep -oE '^[[:space:]]*#?[[:space:]]*[A-Z_][A-Z0-9_]*=' "${ENV_EXAMPLE}" |
+        tr -d ' #=' | sort -u || true)
+
+    missing=""
+    for v in ${required}; do
+        printf '%s\n' "${documented}" | grep -qx "${v}" || missing="${missing} ${v}"
+    done
+
+    if [ -n "${missing}" ]; then
+        echo "失败 ${COMPOSE} 里这些变量没有默认值，而 ${ENV_EXAMPLE} 里没有它们：${missing}" >&2
+        echo "  缺了它们的机器起不来（compose 会报 required variable is missing）。" >&2
+        echo "  在 ${ENV_EXAMPLE} 里补上，并写清楚怎么取值。" >&2
+        exit 1
+    fi
+    echo "✔ ${ENV_EXAMPLE} 覆盖了 ${COMPOSE} 里全部 $(echo "${required}" | wc -w) 个必填变量"
+fi
+
+# ── 第四环：ansible 的模板得跟 `.env.example` 的 A 节对得上 ──
+#
+# `deploy/.env.example` 分两半：A 节（非敏感）由 ansible 渲染进节点的 `.env`，
+# B 节（敏感）是人工写的 `.env.secrets`。这一环只管 A 节。
+#
+# 漏一个的后果按变量而异，而**两种都难查**：
+#   - 没有默认值的（DOMAIN）→ 部署时 compose 当场报错。响，但要跑到那一步。
+#   - 有默认值的（CORTEX_PUBLIC_URL）→ **静默**用 compose 的默认值。
+#     那个例子的症状是分享链接变成 http://127.0.0.1/s/…，用户复制出去打不开，
+#     而他不会怀疑到部署这一步。
+if [ "${COMPOSE}" = "deploy/docker-compose.yml" ] && [ -f ansible/templates/env.j2 ]; then
+    # A 节 = 文件开头到「B. 敏感」那一行之前
+    section_a=$(sed -n '1,/^#  B\. 敏感/p' "${ENV_EXAMPLE}")
+    # 只看**没被注释掉**的行：注释掉的是「可选，想调再打开」，
+    # 模板里没有它是对的
+    documented_a=$(printf '%s\n' "${section_a}" |
+        grep -oE '^[A-Z_][A-Z0-9_]*=' | tr -d '=' | sort -u || true)
+    rendered=$(grep -oE '^[A-Z_][A-Z0-9_]*=' ansible/templates/env.j2 |
+        tr -d '=' | sort -u || true)
+
+    absent=""
+    for v in ${documented_a}; do
+        printf '%s\n' "${rendered}" | grep -qx "${v}" || absent="${absent} ${v}"
+    done
+
+    if [ -n "${absent}" ]; then
+        echo "失败 ${ENV_EXAMPLE} 的 A 节列了这些变量，而 ansible/templates/env.j2 不渲染它们：${absent}" >&2
+        echo "  节点上那份 .env 里就不会有它们 —— 有默认值的会**静默**回落到 compose 的默认值。" >&2
+        echo "  要么补进 env.j2（值放 ansible/group_vars/cortex_nodes.yml），" >&2
+        echo "  要么在 ${ENV_EXAMPLE} 里把那一行注释掉（表示「可选，想调再打开」）。" >&2
+        exit 1
+    fi
+    echo "✔ ansible/templates/env.j2 渲染了 ${ENV_EXAMPLE} A 节的全部 $(echo "${documented_a}" | wc -w) 个变量"
+fi

@@ -6,18 +6,29 @@
 # ══════════════════════════════════════════════════════════
 set -euo pipefail
 
+# ⚠️ 用 `find` 而不是 `scripts/*.sh deploy/*.sh`。
+#
+# 2026-08-23 撞过：`deploy/node-deploy-policy.sh` 被 ansible 取代删掉之后，
+# `deploy/` 里一个 .sh 都不剩，于是 `deploy/*.sh` **展不开**，bash 把字面量
+# 原样传下去，shellcheck 报 "does not exist" 并退出非零。
+#
+# 更糟的是它**本机看不见**：没装 shellcheck 时那一步整个跳过，`just ci` 全绿，
+# 只有 CI（Linux，装了）才红。glob 展不开是个静默的地雷，find 没有这个问题。
+mapfile -t SH_FILES < <(find scripts deploy -maxdepth 1 -name '*.sh' -type f | sort)
+[ "${#SH_FILES[@]}" -gt 0 ] || { echo "一个 .sh 都没找到 —— 这不对劲" >&2; exit 1; }
+
 # 语法先于风格：shellcheck 对一个语法不成立的文件报的东西没法读。
-for f in scripts/*.sh; do
+for f in "${SH_FILES[@]}"; do
     bash -n "${f}"
 done
-echo "✔ bash -n 通过"
+echo "✔ bash -n 通过（${#SH_FILES[@]} 个文件）"
 
 # 以「shellcheck」开头的注释是**指令**，不是注释。
 #
 # 一句中文注释恰好断行成 `# shellcheck 会挑（SC2086）…`，shellcheck 就
 # 报 SC1072/SC1073 并且整份文件不再检查。这一条不依赖 shellcheck 装没装，
 # 所以放在前面 —— 它正是本机唯一能自己抓到的那种。
-if grep -nE '^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]+' scripts/*.sh deploy/*.sh |
+if grep -nE '^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]+' "${SH_FILES[@]}" |
     grep -vE 'shellcheck[[:space:]]+(disable|enable|source|shell|external-sources)='; then
     echo "✘ 上面那些注释以「shellcheck」开头，会被当成指令解析（SC1072/SC1073）。" >&2
     echo "  换个词开头，或者把它挪到行中间。" >&2
@@ -25,7 +36,7 @@ if grep -nE '^[[:space:]]*#[[:space:]]*shellcheck[[:space:]]+' scripts/*.sh depl
 fi
 
 if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck --severity=warning --exclude=SC1091 scripts/*.sh deploy/*.sh
+    shellcheck --severity=warning --exclude=SC1091 "${SH_FILES[@]}"
     echo "✔ shellcheck 通过"
 else
     echo "⚠ 本机没装 shellcheck，这一步跳过了 —— CI 上它是会跑的。"

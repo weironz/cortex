@@ -116,10 +116,11 @@ git push origin vX.Y.Z
 `deploy` 依赖的是 `release` 而不是 `image`：产物没发成功就不该上生产，
 「线上是新版、下载页是旧版」比两者都旧更难解释。
 
-> **⚠️ 改过 `deploy/docker-compose.yml` 的话，这一步会失败，而且是对的。**
-> 节点上那份得先由 root 带外同步（`just deploy-sync`）—— CI 不能碰
-> 那道限制它自己的围栏。节点的拒绝信息里写了该跑什么。
-> **顺序是：先同步 compose，再打 tag。**
+> **改过 `deploy/docker-compose.yml` 不用再做任何额外的事**（2026-08-23 起）。
+> ansible 每次部署都把 tag 上那份 compose 与渲染好的 `.env` 一起送过去。
+>
+> 此前 CI 只送哈希、文件要 root 带外 scp，忘了同步的表现是**这一步在跑完
+> 二十多分钟之后才红**。改造的经过见 [deploy.md](deploy.md) 第四节。
 
 > **Linux / macOS 裸二进制与 Flutter Web 静态包自 0.1.2 起停发。**
 > 它们占掉整条流水线绝大部分时间，而镜像里 cortexd 与 CLI 都在、
@@ -151,9 +152,12 @@ git push origin vX.Y.Z
 
 ### 一、compose 里的每个服务都必须有归宿
 
-`node-deploy-policy.sh` 是**点名**更新服务的（`docker compose up -d --no-deps
-$services`），所以往 compose 里新加一个服务时如果忘了同步那份清单，
-它**永远不会被启动**，而部署输出里一个字都不会提到它。
+部署是**点名**更新服务的（`up -d --no-deps` + 一份服务清单），所以往 compose
+里新加一个服务时如果忘了同步那份清单，它**永远不会被启动**，而部署输出里
+一个字都不会提到它。
+
+清单现在在 `ansible/group_vars/cortex_nodes.yml` 的 `deploy_services`
+（2026-08-23 之前在 `node-deploy-policy.sh` 里，那个脚本已被 ansible 取代）。
 
 这条形状立过三次：加 egress 时险些漏、0.1.9 的 agentd 漏了整整一次发布、
 0.1.10 的 `cortexdb` 让一次上线在十分钟后回滚（库没起来，agentd 连不上而被判

@@ -23,8 +23,9 @@ set dotenv-load := true
 #
 # 2026-08-23 把仅剩的 12 条搬完了（setup / bootstrap / doctor / _wait-healthy /
 # dev-web-if-stale / dev-reset / lint-sh / backup-status / prod-bootstrap /
-# image-build / deploy-check / deploy-sync）—— **现在这份文件里一条 shebang
-# recipe 都没有**，从哪个终端起 just 都一样。
+# image-build / deploy-check，以及后来随部署改造删掉的 deploy-sync）——
+# **现在这份文件里一条 shebang recipe 都没有**，从哪个终端起 just 都一样。
+# `scripts/lint-sh.sh` 里有一道闸盯着，加回来就红。
 #
 # 要写多行脚本：内容进 `scripts/xxx.sh`，这里只留一行 `bash scripts/xxx.sh`。
 # 需要本文件里的变量就当参数传（`bash scripts/doctor.sh {{ _dev }}`）——
@@ -654,11 +655,16 @@ image-build version="dev":
 deploy-check:
     bash scripts/deploy-check.sh
 
-# 打印节点上那份 compose 的期望指纹。节点与它不一致时部署会被拒
-deploy-fingerprint:
-    @sha256sum deploy/docker-compose.yml | cut -d' ' -f1
+# 装一台节点（低频、要 root、人在场）。换机器就是跑这一条。
+#
+# ⚠️ 第一次必须用 root：那时 cortex-deploy 这个账号还不存在。
+#    凭据（.env.secrets）**不在这里** —— playbook 只检查它在不在，
+#    不在就把要填的 10 项打出来然后停。见 deploy/.env.example 的 B 节。
+node-provision *ARGS:
+    cd ansible && ansible-playbook provision.yml {{ ARGS }}
 
-# 把 compose 与部署策略同步到节点 —— **要 root，走带外通道，不经 CI**。
-# CI 只能读那道限制自己的围栏，永远不能安装它
-deploy-sync host="root@120.79.61.68":
-    bash scripts/deploy-sync.sh {{ host }}
+# 手动部署一个版本（平时由 CI 走同一份 playbook）。
+#
+#     just node-deploy -e version=0.1.18
+node-deploy *ARGS:
+    cd ansible && ansible-playbook deploy.yml {{ ARGS }}

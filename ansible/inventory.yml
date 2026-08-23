@@ -1,0 +1,27 @@
+# ══════════════════════════════════════════════════════════
+#  节点清单 —— **换机器只改这个文件**。
+#
+#  这里一个凭据都没有：私钥由控制端提供（CI 里从 secret 写进
+#  ~/.ssh/，本机跑就用你自己的 agent）。
+# ══════════════════════════════════════════════════════════
+all:
+  children:
+    cortex_nodes:
+      hosts:
+        prod:
+          ansible_host: cortex.cloudcele.com
+          # ⚠️ 这个账号原先带 `restrict,command=` 强制命令，只能跑
+          #    /usr/local/sbin/cortex-deploy 一条。改用 ansible 之后那道
+          #    限制必须去掉（ansible 要推模块过去执行），sudoers 也从
+          #    「只允许那一条」放宽成 NOPASSWD: ALL。
+          #
+          #    也就是说：**这把密钥现在等于节点 root**。能接受是因为推镜像的
+          #    ACR 凭据本来就在同一个 GitHub Secrets 里，而 agentd 挂着
+          #    docker.sock —— 那条路早就通到 root 了（见 docs/deploy.md）。
+          ansible_user: cortex-deploy
+          # 部署目录。compose、.env、.env.secrets 都在这儿
+          node_dir: /data/cortex
+      vars:
+        # 装机时**不能**用 cortex-deploy（那时它还不存在）。
+        # 跑 provision.yml 时覆盖：-e ansible_user=root
+        ansible_python_interpreter: /usr/bin/python3

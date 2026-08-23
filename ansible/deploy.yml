@@ -1,0 +1,298 @@
+---
+# ══════════════════════════════════════════════════════════
+#  发版 —— 高频、无人值守。
+#
+#      ansible-playbook deploy.yml -e version=0.1.18
+#
+#  它取代了节点上的 /usr/local/sbin/cortex-deploy。那个脚本里每一样行为
+#  在这里都有对应的 task，而且**每一样都是拿事故换来的**，删之前先读注释。
+#
+#  与旧脚本的两处不同：
+#
+#  1. **compose 与 .env 由这里送过去**，不再要人带外 scp。旧脚本只收一个
+#     compose 的 sha256、对不上就拒绝 —— 那道闸的代价是「改一次 compose
+#     就得手动同步一次，忘了的话流水线跑二十多分钟最后一步红」。
+#     换掉它的前提是承认「CI 已经等于节点 root」（见 docs/deploy.md）。
+#  2. **版本号由这里渲染进 .env**，不再由脚本 sed。两边都写会打架。
+# ══════════════════════════════════════════════════════════
+- name: 把某个已发布的版本放到线上
+  hosts: cortex_nodes
+  become: true
+  gather_facts: true
+
+  vars:
+    # 沙箱开着时才有 egress —— profile 没激活的话 compose 根本不认识它，
+    # `docker compose pull egress` 会报 "no such service"
+    services: >-
+      {{ deploy_services + (deploy_services_sandbox if cortex_sandbox_enabled else []) }}
+    compose_cmd: >-
+      docker compose --env-file .env --env-file .env.secrets
+
+  tasks:
+    # ── 前置：不满足就一步都不做 ──────────────────────────
+    #
+    # 全部放在最前面。半途才发现前提不成立，意味着 .env 已经被改写、
+    # 而服务还没起来 —— 那比一开始就拒绝糟得多。
+
+    - name: 版本号必须是 X.Y.Z
+      ansible.builtin.assert:
+        that:
+          - version is defined
+          - version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+        fail_msg: >-
+          version 必须是 X.Y.Z（收到 '{{ version | default("(没传)") }}'）。
+          只认不可变的版本号：生产钉死具体版本，重启之后必须回到同一个。
+        quiet: true
+
+    - name: 凭据文件在不在
+      ansible.builtin.stat:
+        path: "{{ node_dir }}/.env.secrets"
+      register: secrets_file
+
+    - name: 没有凭据就停在这里
+      ansible.builtin.assert:
+        that: secrets_file.stat.exists
+        fail_msg: >-
+          {{ node_dir }}/.env.secrets 不存在。它是人工维护的（ansible 从不写
+          凭据），先跑 provision.yml —— 那边会把要填的 10 项列出来。
+        quiet: true
+
+    # docker_prune / docker_image_pull 走 Docker API，要目标机器上有
+    # python3-requests。缺了它们会在中途报一句看不懂的 import 错误，
+    # 而那时 .env 已经改过了。提前问一次，指回 provision.yml
+    - name: 目标机器上有 python3-requests 吗
+      ansible.builtin.command:
+        cmd: "{{ ansible_python_interpreter | default('/usr/bin/python3') }} -c 'import requests'"
+      register: has_requests
+      changed_when: false
+      failed_when: false
+
+    - name: 缺 python3-requests
+      ansible.builtin.assert:
+        that: has_requests.rc == 0
+        fail_msg: >-
+          目标机器上没有 python3-requests。docker_prune 与 docker_image_pull
+          走的是 Docker API，需要它（docker_compose_v2 不需要，它走 CLI）。
+          跑一次 provision.yml 就装上了。
+        quiet: true
+
+    # ── 记住现在是哪一版，失败时回到它 ────────────────────
+    - name: 读节点上现有的 .env
+      ansible.builtin.slurp:
+        src: "{{ node_dir }}/.env"
+      register: current_env
+      failed_when: false
+
+    - name: 取出上一版的版本号
+      ansible.builtin.set_fact:
+        prev_version: >-
+          {{ (current_env.content | b64decode | regex_search('^CORTEX_VERSION=v(\S+)$', '\1', multiline=True) | first)
+             if current_env.content is defined else '' }}
+
+    - name: 报一下这次要做什么
+      ansible.builtin.debug:
+        msg: >-
+          {{ prev_version | default('(首次部署)', true) }} -> {{ version }}
+          ；这次会动的服务：{{ services | join(', ') }}
+
+    # ── 正事。任何一步失败都走 rescue 回滚 ────────────────
+    - name: 部署
+      block:
+        # compose 与 .env 送过去。**分叉就在这一步消失** ——
+        # 旧设计是 CI 只送哈希、文件靠人 scp，于是两边会漂
+        - name: 送 compose
+          ansible.builtin.copy:
+            src: ../deploy/docker-compose.yml
+            dest: "{{ node_dir }}/docker-compose.yml"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: 渲染 .env（不含凭据）
+          ansible.builtin.template:
+            src: templates/env.j2
+            dest: "{{ node_dir }}/.env"
+            owner: root
+            group: root
+            mode: "0644"
+
+        # ── 闸：compose 里每个服务都必须有归宿 ────────────
+        #
+        # 「往 compose 里加了服务却没人启动它」这个形状**犯过三次**：
+        # egress 险些、agentd 漏了一整次发布、cortexdb 让 v0.1.10 上线回滚。
+        # 症状是沉默的 —— 部署全绿，只是那个服务从来没被启动过。
+        #
+        # 所以新加服务时必须做一个决定：要么进 deploy_services，
+        # 要么进 deploy_unmanaged 并写清为什么。忘了就发不出去。
+        - name: compose 声明了哪些服务
+          ansible.builtin.command:
+            cmd: "{{ compose_cmd }} config --services"
+            chdir: "{{ node_dir }}"
+          register: declared
+          changed_when: false
+
+        - name: 每个服务都得有归宿
+          ansible.builtin.assert:
+            that: >-
+              declared.stdout_lines | difference(services) | difference(deploy_unmanaged) | length == 0
+            fail_msg: >-
+              compose 里这些服务不在部署清单里，也没被显式排除：
+              {{ declared.stdout_lines | difference(services) | difference(deploy_unmanaged) | join(' ') }}。
+              要么把它加进 group_vars 的 deploy_services（这次部署更新它），
+              要么加进 deploy_unmanaged 并写清它为什么不归这次部署管。
+              沉默地不启动一个服务，是这条路见过三次的故障形状。
+            quiet: true
+
+        # ── 库先起来，并且等它真的健康 ────────────────────
+        #
+        # 下面那步带 dependencies=false（= --no-deps），而 --no-deps 会让
+        # compose **忽略** depends_on 的健康等待 —— agentd 会在库还没接受
+        # 连接时就启动，而它起来第一件事就是跑 migration。冷启动的 postgres
+        # 要十几秒，连不上就退出。
+        #
+        # 表现会是「部署输出全绿，但 agentd 在反复重启」，或者更糟：健康检查
+        # 窗口恰好等到它重启成功，于是这次没事、下次冷启动慢一点就有事。
+        - name: 先把库拉起来并等健康
+          community.docker.docker_compose_v2:
+            project_src: "{{ node_dir }}"
+            env_files: [.env, .env.secrets]
+            services: [cortexdb]
+            state: present
+            pull: always
+            wait: true
+            wait_timeout: 120
+
+        # ── 沙箱镜像 ──────────────────────────────────────
+        #
+        # agentd **不会自己 pull**（它没有 registry 凭据，也不该有）。
+        # 拉不到的表现是启动时 preflight 直说「镜像不在本地」并关掉沙箱 ——
+        # 不是等用户点下去才发现。所以这里失败只警告，不中止整次部署：
+        # 一个「能对话、沙箱暂时关着」的部署，比一个回滚掉的部署好。
+        - name: 拉沙箱镜像
+          community.docker.docker_image_pull:
+            name: "{{ cortex_registry }}/cortex-sandbox"
+            tag: "v{{ version }}"
+          register: sandbox_pull
+          failed_when: false
+          when: cortex_sandbox_enabled
+
+        - name: 沙箱镜像没拉下来
+          ansible.builtin.debug:
+            msg: >-
+              ⚠ 沙箱镜像没拉下来，云沙箱会在 agentd 启动时自己关掉。
+              其余功能不受影响。
+          when: cortex_sandbox_enabled and sandbox_pull is failed
+
+        # ── 主体 ──────────────────────────────────────────
+        #
+        # dependencies=false 就是 --no-deps：只动点名的这几个，
+        # 碰不到 rustfs 与记忆那一栈（它们在 /data/cormex，另一条版本线）。
+        #
+        # wait=true 把「等 agentd 健康」做实。窗口给到 10 分钟：agentd 启动时
+        # 会做 docker preflight，daemon 忙的时候那一下可以很慢。
+        - name: 拉镜像并起服务
+          community.docker.docker_compose_v2:
+            project_src: "{{ node_dir }}"
+            env_files: [.env, .env.secrets]
+            services: "{{ services }}"
+            state: present
+            pull: always
+            dependencies: false
+            wait: true
+            wait_timeout: 600
+
+      rescue:
+        # ── 回滚 ──────────────────────────────────────────
+        #
+        # 任何一步失败都到这里，不只是健康检查失败那一种。旧脚本用的是
+        # EXIT trap，理由一样：`docker compose pull` 一失败就中止，而那时
+        # .env 已经被改写了。部署一个 registry 里根本不存在的版本，会留下
+        # 一个指向它的 .env —— 容器还在跑旧的（所以看着一切正常），但持久化
+        # 的期望状态已经坏了，下一次重启就会去拉一个不存在的 tag。
+        - name: 没有上一版可回
+          ansible.builtin.fail:
+            msg: >-
+              部署失败，而节点上没有可回退的版本（.env 里读不出 CORTEX_VERSION）。
+              这多半是首次部署失败 —— 服务的状态需要人去看一眼。
+          when: not prev_version
+
+        - name: 把 .env 还原到上一版
+          ansible.builtin.template:
+            src: templates/env.j2
+            dest: "{{ node_dir }}/.env"
+            owner: root
+            group: root
+            mode: "0644"
+          vars:
+            version: "{{ prev_version }}"
+
+        # 尽力而为：把上一版拉回来。它的镜像本来就在本地，很快，
+        # 而且不需要 registry —— 那正是下面「保留最新 N 个版本」要留着它的理由
+        - name: 把上一版起回来
+          community.docker.docker_compose_v2:
+            project_src: "{{ node_dir }}"
+            env_files: [.env, .env.secrets]
+            services: "{{ services }}"
+            state: present
+            pull: never
+            dependencies: false
+            wait: true
+            wait_timeout: 300
+          failed_when: false
+
+        - name: 报清楚失败了什么
+          ansible.builtin.fail:
+            msg: >-
+              部署 {{ version }} 失败，已还原到 {{ prev_version }}。
+              ⚠️ **数据库 schema 不会回滚** —— sqlx 的 migration 只前滚。
+              带数据变更的发布出事时看 docs/operations.md 的恢复那一节。
+
+    # ── 回收磁盘 ──────────────────────────────────────────
+    #
+    # 每次部署都拉新镜像、把被替换的那个变成孤儿，节点的盘只涨不落。
+    # 这两步在 rescue 之外：清磁盘失败不该把一次健康的部署判成失败。
+
+    - name: 清掉悬空镜像
+      community.docker.docker_prune:
+        images: true
+        images_filters:
+          dangling: true
+          until: 168h
+      failed_when: false
+
+    # ⚠️ **这是唯一一处退回 shell 的地方。** 没有原生模块能表达
+    # 「按版本号排序、保留最新 N 个」：docker_prune 只认 dangling / until，
+    # 而每次发布留下的是两个**有 tag** 的镜像（agentd / web），
+    # 不带 -a 的 prune 永远不碰它们。
+    #
+    # 按**版本**排序而不是按创建时间：镜像是按拉取顺序到的，
+    # 一个被重新拉过的老版本会显得「最新」。
+    - name: 只保留最新 {{ keep_versions }} 个版本的镜像
+      ansible.builtin.shell:
+        # `|| true` 一路带着：这一步失败绝不该影响部署结论
+        cmd: |
+          set -uo pipefail
+          stale=$(docker images --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}' \
+            | grep -E '/(cortex-agentd|cortex-web):v[0-9]+(\.[0-9]+)+$' \
+            | sed -E 's/.*:(v[0-9.]+)$/\1/' \
+            | sort -uV \
+            | head -n "-{{ keep_versions }}" || true)
+          for v in $stale; do
+            [ "$v" = "v{{ version }}" ] && continue
+            # docker rmi 会拒绝删一个正在被容器使用的镜像 —— 这就是让它可以
+            # 无人值守跑的兜底：最坏情况只是跳过
+            docker images --format '{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}' \
+              | grep -E "/(cortex-agentd|cortex-web):${v}\$" \
+              | xargs -r docker rmi >/dev/null 2>&1 || true
+          done
+          printf '%s' "$stale"
+        executable: /bin/bash
+      register: pruned
+      changed_when: pruned.stdout | length > 0
+      failed_when: false
+
+    - name: 部署完了
+      ansible.builtin.debug:
+        msg: >-
+          deployed=v{{ version }}
+          {{ '（清掉了更旧的版本：' ~ pruned.stdout ~ '）' if pruned.stdout else '' }}

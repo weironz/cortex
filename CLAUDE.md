@@ -220,6 +220,38 @@ Web 在 `http://127.0.0.1:5173`。**dev 是同源根路径分流**（`CORTEX_BAS
 - 提交前必须过 `cargo fmt --all`、`cargo clippy --workspace --all-targets -- -D warnings`
 - 遇到 dead_code 警告，**优先让代码真的用起来**，而不是加 `#[allow]`
 
+### 部署：ansible 送配置，凭据不经过 CI
+
+`ansible/` 是唯一的部署入口（2026-08-23 起；此前是节点上那个
+`/usr/local/sbin/cortex-deploy` 强制命令脚本，已删）。
+
+```bash
+just node-provision -e ansible_user=root   # 装机，换机器就这一条
+just node-deploy -e version=0.1.18         # 发版（平时由 CI 走同一份 playbook）
+```
+
+**ansible 只装在控制端**（GitHub runner 或你的机器）。目标机器不装 ansible，
+但要有 `python3`（模块推过去用它执行）与 `python3-requests`（只有
+`docker_prune` / `docker_image_pull` 要，走 Docker API；`docker_compose_v2`
+走 docker CLI 不需要）。
+
+⚠️ **节点上的 `.env` 拆成两份**，compose 两份都读
+（`--env-file .env --env-file .env.secrets`，显式给了就不再自动读 `.env`）：
+
+| | 谁维护 | 内容 |
+|---|---|---|
+| `.env` | ansible 渲染，每次部署覆盖 | 版本号、域名、上限、开关 |
+| `.env.secrets` | **人工写一次**，ansible 从不碰 | 10 个凭据 |
+
+凭据不进 CI 是有意的：ansible 那把 SSH 密钥在 GitHub Secrets 里，
+再把凭据也放过去等于多开一个入口（一个恶意 action 能把 secrets 一次性
+dump 走）。**改非敏感的值改 `ansible/group_vars/cortex_nodes.yml`，
+别直接改节点上的 `.env`** —— 那份是渲染产物。
+
+三道闸盯着这套别漂（`scripts/check-compose-env.sh`，进 `just ci`）：
+代码 → compose → `.env.example` → `env.j2`。最后一环防的是最难查的那种：
+漏一个**有默认值**的变量，compose 静默回落到默认值。
+
 ## 边界
 
 - **绝不把 API key 写进任何被 git 跟踪的文件**。只放 `.env`

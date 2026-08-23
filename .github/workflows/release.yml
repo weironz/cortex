@@ -565,9 +565,9 @@ jobs:
   # （版本、认证、数据库真接上、对象存储真接上、Web 出得来），
   # 抄第二份的下场是两边迟早不一样，而不一样只有出事时才发现。
   #
-  # **compose 改了的话这一步会失败**，而且是对的：节点上那份得先由 root
-  # 带外同步（`just deploy-sync`）—— CI 不能碰那道限制它自己的围栏。
-  # 节点的拒绝信息里写了该跑什么。
+  # **compose 改了不用再做任何额外的事**（2026-08-23 起）：ansible 每次部署
+  # 都把 tag 上那份 compose 与渲染好的 .env 一起送过去。此前 CI 只送哈希、
+  # 文件要人带外 scp，忘了的表现是这一步在跑完二十多分钟之后才红。
   deploy:
     needs: [preflight, release]
     uses: ./.github/workflows/deploy.yml

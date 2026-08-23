@@ -1,0 +1,90 @@
+# ══════════════════════════════════════════════════════════
+#  节点的非敏感配置 —— 这些会被渲染进 /data/cortex/.env。
+#
+#  ⚠️ **一个凭据都不许写在这里。** 敏感项住在节点的
+#  `/data/cortex/.env.secrets`，装机时人工写一次，ansible 只检查它在不在。
+#  哪一项算敏感，见 `deploy/.env.example` 的 B 节。
+# ══════════════════════════════════════════════════════════
+
+node_dir: /data/cortex
+
+# ── 域名 ──────────────────────────────────────────────────
+# compose 里 `${DOMAIN}` 没有默认值，缺了整份 compose 解析不了
+cortex_domain: cortex.cloudcele.com
+cortex_public_url: https://cortex.cloudcele.com
+
+# ── 镜像 ──────────────────────────────────────────────────
+cortex_registry: registry.cn-shenzhen.aliyuncs.com/willspace
+
+# ── 会话库 ────────────────────────────────────────────────
+cortex_pg_user: cortex
+cortex_pg_db: cortex
+
+# ── 对象存储 ──────────────────────────────────────────────
+# ⚠️ rustfs 本身**不在这一栈**，它跟着记忆服务在 /data/cormex。
+# 这里只是从内网连过去，凭据在 .env.secrets 里
+s3_endpoint: http://cortex-rustfs:9000
+s3_bucket: cortex-blobs
+s3_region: us-east-1
+
+# ── 记忆服务 ──────────────────────────────────────────────
+# 另一个仓库、另一条版本线（github.com/weironz/cormex）
+cortex_memory_url: http://cormex:8080
+
+# ── LLM ───────────────────────────────────────────────────
+cortex_llm_provider: deepseek
+cortex_llm_model: ""
+cortex_llm_cheap_model: ""
+
+# ── 云沙箱 ────────────────────────────────────────────────
+# ⚠️ 开它 = 把这台机器的 root 交给 agentd（docker.sock）。
+# 这台机器上还跑着 mica / neostor / headscale / rustdesk。
+cortex_sandbox_enabled: false
+# stat -c %g /var/run/docker.sock —— **必须自己查**，因发行版而异。
+# 写错的表现是 agentd `client error (Connect)` 然后 restart 循环，
+# 而那条错误读起来像「docker 没起来」
+cortex_docker_gid: 126
+cortex_egress_allow: "*"
+cortex_egress_deny: ""
+
+# ── 资源上限 ──────────────────────────────────────────────
+# 这台是 2 核 3.5G，上面还有别人的四个服务。cpus 不该超过核数
+agentd_cpu_limit: "1.0"
+agentd_mem_limit: 512m
+cortex_pg_cpu_limit: "0.5"
+cortex_pg_mem_limit: 384m
+cortex_egress_cpu_limit: "0.5"
+cortex_egress_mem_limit: 128m
+
+# ── 日志 ──────────────────────────────────────────────────
+agentd_log: cortex_agentd=info,warn
+cortex_egress_log: cortex_egress_proxy=info,warn
+
+# ── 备份 ──────────────────────────────────────────────────
+cortex_backup_dir: /data/cortex/backup
+
+# ══════════════════════════════════════════════════════════
+#  部署行为
+# ══════════════════════════════════════════════════════════
+
+# 这次部署要动哪些服务。
+#
+# ⚠️ **compose 里每个服务都必须在这里、或在 deploy_unmanaged 里。**
+# deploy.yml 有一条 assert 当场拒绝没归宿的服务 —— 那条闸不是洁癖：
+# 「往 compose 里加了服务却没人启动它」这个形状**犯过三次**
+# （egress 险些、agentd 漏了一整次发布、cortexdb 让 v0.1.10 上线回滚），
+# 而症状是沉默的：部署全绿，只是那个服务从来没起来过。
+deploy_services:
+  - cortexdb
+  - agentd
+  - web
+# 沙箱开着时追加（profile 没激活时 compose 根本不认识 egress）
+deploy_services_sandbox:
+  - egress
+
+# 明确说明「不归这次部署管」的服务。加进来要写清为什么。
+deploy_unmanaged: []
+
+# 镜像清理：保留最新几个**版本**（不是几个镜像）。
+# 上一版必须留着 —— 回滚要用它，而它已经在本地，不需要 registry
+keep_versions: 3

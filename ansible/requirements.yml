@@ -1,0 +1,23 @@
+# ══════════════════════════════════════════════════════════
+#  控制端要装的集合。CI 里：
+#      ansible-galaxy collection install -r requirements.yml
+#
+#  **钉版本**，理由与镜像不用 latest 是同一条：一个会漂的依赖会让
+#  「上次能部署这次不能」变成查不清的问题，而它只在最忙的那天发作。
+# ══════════════════════════════════════════════════════════
+collections:
+  # docker_compose_v2 / docker_prune / docker_image_pull
+  #
+  # docker_compose_v2 走的是**目标机器上的 docker CLI**（不需要 Python
+  # docker SDK）；docker_prune 与 docker_image_pull 走 Docker API，
+  # 需要目标机器上有 python3-requests —— provision.yml 会装。
+  - name: community.docker
+    version: ">=4.0.0,<5.0.0"
+  # provision.yml 写部署账号的 authorized_keys 用它
+  - name: ansible.posix
+    version: ">=1.5.0,<3.0.0"
+  # provision.yml 用它写 sudoers。比手写文件安全：它会先 `visudo -c` 校验，
+  # 而一个语法错的 sudoers 会把**所有人**挡在 sudo 外面 ——
+  # 那是少数真的回不去的故障
+  - name: community.general
+    version: ">=10.0.0,<12.0.0"

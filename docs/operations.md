@@ -1092,7 +1092,7 @@ egress-proxy 换 scratch 之后也真机验过：沙箱容器经它访问放行�
 | Git Bash 下 docker 命令报 `C:/Program Files/...` | MSYS 路径改写 | 脚本里已 `export MSYS_NO_PATHCONV=1`；手工敲命令时自己加 |
 | CI 的「评测基线文件自检」红了 | 两份 baseline JSON 少字段或格式坏了 | 本地跑 `python3 scripts/evals-gate.py verify-baseline scripts/evals-baseline.*.json`。**真正的检索回归门在 Cormex**，这一步只校验文件格式 |
 | 登录时回一句英文 `this deployment has no database attached` | **边缘把 `/api/auth/*` 转给了记忆服务**（它确实没有账号体系），不是数据库没接上 | 看 `cortex-agent.rule` 是不是还写着「只有 `/api/chat` 与 `/api/sandbox` 给 agentd」。0.1.10 起该反过来：默认给 agentd，只让出 `/api/memory`、`/api/mcp`、`/api/health` |
-| 部署全绿，但某个服务从来没起来 | `node-deploy-policy.sh` 的 `$services` 清单里没有它 | 现在有闸会当场拒（compose 里每个服务必须进 `$services` 或 `DEPLOY_UNMANAGED`）。这条形状犯过三次：egress、agentd、cortexdb |
+| 部署全绿，但某个服务从来没起来 | 它不在部署清单里 | 现在有闸会当场拒：`ansible/deploy.yml` 那条 assert 要求 compose 里每个服务都在 `deploy_services` 或 `deploy_unmanaged` 里（两者都在 `ansible/group_vars/cortex_nodes.yml`）。这条形状犯过三次：egress、agentd、cortexdb |
 | 项目里第一轮写的文件之后找不到 | 那一轮落在了**未分组**沙箱（`cortex-ws-<owner>`），第二轮起才进项目卷 | 客户端 0.1.10 之后会在发第一句**之前**把分组落到服务端。老客户端要么先发一句再让它写文件，要么用工作区导出/导入把文件搬过去 |
 | `cortex passwd` 说「本机没有存着的登录」 | 这次用的是预共享 token，服务端认不出「你是谁」 | 先 `cortex login`。改口令只认自己登录换来的 access token，见上文 |
 | `embeddings` 容器起来很久不健康 | 在下 2.2 GB 权重 | 那个容器在 Cormex 的 compose 里，去那边看日志；权重卷只下一次 |

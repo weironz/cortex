@@ -1,0 +1,178 @@
+---
+# ══════════════════════════════════════════════════════════
+#  装机 —— 低频、人在场、需要 root。
+#
+#      ansible-playbook provision.yml -e ansible_user=root
+#
+#  ⚠️ 第一次跑必须用 root：那时 cortex-deploy 这个账号还不存在。
+#     之后再跑可以用默认的 cortex-deploy（它有 NOPASSWD sudo）。
+#
+#  它吃掉的是 docs/deploy.md 第二、三节那些手敲步骤。**幂等** ——
+#  随时可以再跑一遍，只有真的变了的东西才报 changed。
+#
+#  ── 它刻意不做的事 ────────────────────────────────────────
+#
+#  **不写 .env.secrets。** 那是这台机器上唯一需要人动手的东西
+#  （10 个凭据），playbook 只检查它在不在、不在就当场停并把清单打出来。
+#  理由：ansible 用的是全权 SSH 密钥，而那把钥匙在 GitHub Secrets 里。
+#  凭据留在节点上，至少它们不会在 GitHub 那边**再存一份**。
+#
+#  **不建 DNS 记录**，那在域名服务商那边。缺 A 记录的症状是 traefik 反复
+#  申请证书失败、浏览器拿到自签证书，而应用本身看着「起来了」——
+#  所以下面有一条 assert 先把它问清楚。
+# ══════════════════════════════════════════════════════════
+- name: 装一台 Cortex 节点
+  hosts: cortex_nodes
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: 只支持 Debian 系（apt）
+      ansible.builtin.assert:
+        that: ansible_facts['os_family'] == 'Debian'
+        fail_msg: >-
+          这份 playbook 只写了 apt 那条路（节点是 Debian/Ubuntu）。
+          换发行版要改包名与 docker 源，不是改一行的事。
+
+    # ── 依赖 ──────────────────────────────────────────────
+    - name: 装 docker 与 ansible 要用的 Python 库
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - docker-compose-plugin
+          # ⚠️ 只有 docker_prune / docker_image_pull 要它（那两个走 Docker
+          #    API）。核心的 docker_compose_v2 走 docker CLI，不需要。
+          #    缺了它 deploy.yml 会在中途报一句 import 错误 —— 所以那边
+          #    开头有一条 assert 提前问，指回这里
+          - python3-requests
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    # ── 目录 ──────────────────────────────────────────────
+    - name: 部署目录
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ node_dir }}"
+        - "{{ cortex_backup_dir }}"
+
+    # ── 部署账号 ──────────────────────────────────────────
+    #
+    # ⚠️ 这个账号**曾经**被 `restrict,command=` 钉死，只能跑一条
+    #    /usr/local/sbin/cortex-deploy。改用 ansible 之后那道限制必须去掉：
+    #    ansible 要把模块推过去执行，任何 forced command 都会挡住它。
+    #
+    #    也就是说这把密钥现在等于节点 root。能接受这一点，是因为推镜像的
+    #    ACR 凭据本来就在同一个 GitHub Secrets 里，而 agentd 挂着
+    #    docker.sock —— 那条路早就通到 root 了。要真正拿回「Actions 沦陷
+    #    ≠ 节点 root」，该做的是把 registry 凭据换成 OIDC，不是守这道门。
+    - name: 部署账号
+      ansible.builtin.user:
+        name: cortex-deploy
+        shell: /bin/bash
+        create_home: true
+        groups: docker
+        append: true
+
+    - name: 部署账号的公钥
+      ansible.posix.authorized_key:
+        user: cortex-deploy
+        key: "{{ deploy_public_key }}"
+        exclusive: true
+        # 刻意**不带** key_options —— 见上面那段
+      when: deploy_public_key is defined
+
+    - name: 部署账号的 sudo 权限
+      community.general.sudoers:
+        name: cortex-deploy
+        user: cortex-deploy
+        commands: ALL
+        nopassword: true
+        # 这个模块会先 `visudo -c` 校验再落盘。手写文件的话，一个语法错的
+        # sudoers 会把**所有人**挡在 sudo 外面 —— 那是少数真的回不去的故障
+
+    # ── 拆掉旧的部署入口 ──────────────────────────────────
+    #
+    # 那个强制命令脚本连同它的 sudoers 一起退休。留着的话节点上会有两条
+    # 部署路径，而其中一条（脚本）会把 .env 里的 CORTEX_VERSION 改成
+    # ansible 不知道的值 —— 下一次 ansible 部署再覆盖回去，两边打架。
+    - name: 撤掉旧的强制命令入口
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/sbin/cortex-deploy
+        - /etc/sudoers.d/cortex-deploy-forced
+
+    # ── traefik 的外部网络 ────────────────────────────────
+    - name: traefik 外部网络
+      community.docker.docker_network:
+        name: traefik-network
+        state: present
+
+    # ── 凭据：只检查，从不写 ──────────────────────────────
+    - name: 看一眼 .env.secrets 在不在
+      ansible.builtin.stat:
+        path: "{{ node_dir }}/.env.secrets"
+      register: secrets_file
+
+    - name: 没有凭据就停在这里
+      ansible.builtin.fail:
+        msg: |
+          {{ node_dir }}/.env.secrets 不存在。
+
+          这是这台机器上**唯一**要人动手的一步，ansible 刻意不代劳
+          （那把 SSH 密钥在 GitHub Secrets 里，凭据不该在那边再存一份）。
+
+          在节点上建它，chmod 600，内容照 deploy/.env.example 的 B 节：
+
+              CORTEX_PG_PASSWORD=       # openssl rand -hex 32
+              RUSTFS_ACCESS_KEY=cortexadmin
+              RUSTFS_SECRET_KEY=        # openssl rand -hex 32
+              CORTEX_AUTH=token
+              CORTEX_AUTH_TOKEN_SHA256= # cortex-agentd --generate-token
+              CORTEX_SECRET_KEY=        # openssl rand -hex 32
+              CORTEX_ADMIN_USERNAME=
+              CORTEX_ADMIN_PASSWORD=
+              DEEPSEEK_API_KEY=
+
+          建好之后再跑一次这个 playbook。
+      when: not secrets_file.stat.exists
+
+    - name: 凭据文件的权限收紧
+      ansible.builtin.file:
+        path: "{{ node_dir }}/.env.secrets"
+        owner: root
+        group: root
+        mode: "0600"
+
+    # ── DNS ───────────────────────────────────────────────
+    #
+    # 不是这台机器能改的事，但缺了它的症状离原因很远：traefik 反复申请证书
+    # 失败、浏览器拿到自签证书，而应用本身看着完全正常。所以在这里问一次。
+    - name: 域名解析到本机了吗
+      ansible.builtin.command:
+        cmd: getent hosts {{ cortex_domain }}
+      register: dns_check
+      changed_when: false
+      failed_when: false
+
+    - name: 解析不到就说清楚
+      ansible.builtin.fail:
+        msg: >-
+          {{ cortex_domain }} 解析不到。Let's Encrypt 的 HTTP-01 挑战要求域名
+          先指向这台机器 —— 缺 A 记录时 traefik 会反复申请证书失败，
+          而应用本身看着「起来了」，症状离原因很远。先去域名服务商那边加记录。
+      when: dns_check.rc != 0
+
+    - name: 装完了
+      ansible.builtin.debug:
+        msg: >-
+          节点就绪。接下来跑：
+          ansible-playbook deploy.yml -e version=X.Y.Z

@@ -775,7 +775,9 @@ hash，调用方说不出第二个挂载，有测试守着。
 
 #### 部署脚本必须同步改
 
-`node-deploy-policy.sh` 里 `up -d --no-deps` 是**点名**服务的，所以
+部署用的 `up -d --no-deps` 是**点名**服务的（清单在
+`ansible/group_vars/cortex_nodes.yml` 的 `deploy_services`；2026-08-23 之前
+在 `node-deploy-policy.sh` 里），所以
 「往 compose 里新加的服务会安静地永远不被启动」。那句警告本来就写在脚本里，
 这次是它第一次兑现 —— 加 egress 时差点漏掉，症状会是「沙箱起来了但一出网
 就超时」而部署输出全绿。

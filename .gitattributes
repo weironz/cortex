@@ -22,6 +22,13 @@ Justfile text eol=lf
 *.yml text eol=lf
 *.md text eol=lf
 
+# ansible 的模板与配置。渲染出来的东西要落到 Linux 节点上，而 `.env`
+# 里一行结尾多个  的表现是变量值末尾带一个不可见字符 —— 比如
+# CORTEX_VERSION=v0.1.18 会让 docker 去拉一个不存在的 tag
+*.j2 text eol=lf
+*.cfg text eol=lf
+.env.example text eol=lf
+
 # 二进制别碰
 *.png binary
 *.jpg binary
