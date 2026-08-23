@@ -33,6 +33,9 @@ name: Deploy
 #
 #  ⚠️ 真要把「Actions 沦陷 ≠ 节点 root」拿回来，该做的是把 registry 凭据换成
 #  GitHub OIDC → 阿里云 RAM 角色，而不是守 compose 这道门。没排期，记着。
+#  **但那条路目前走不通**：这台节点连不上 100.100.100.200（实例元数据），
+#  而 RAM 的临时凭据正是从那里取的。前置条件是 VPC / 安全组那边的网络问题，
+#  不是这台机器上能改的。见 docs/deploy.md 二节末尾。
 #
 #  ⚠️ **凭据不经过 CI。** 节点上 /data/cortex/.env.secrets 由人装机时写一次，
 #  ansible 只检查它在不在、从不写它。见 deploy/.env.example 的 B 节。
