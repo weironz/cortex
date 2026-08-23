@@ -58,41 +58,23 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: bash 语法检查
-        run: |
-          set -euo pipefail
-          for f in scripts/*.sh; do
-            echo "== $f"
-            bash -n "$f"
-          done
-
-      # shellcheck 在 ubuntu runner 上自带。SC1091 是「source 的文件解析不到」，
-      # lib.sh 是运行时按路径拼出来的，静态分析看不见，不是问题
-      - name: shellcheck
-        run: shellcheck --severity=warning --exclude=SC1091 scripts/*.sh deploy/*.sh
-
-      # ── 变量名边界：`$VAR（` 这种写法在 macOS 上会炸 ──────────────
+      # ⚠️ **不在这里重写命令，调那份脚本。**
       #
-      # 我们的脚本消息全是中文，于是「$ARTIFACT（$SIZE）」这类写法遍地都是。
-      # 变量名到哪里结束，取决于 locale 与 bash 版本：Linux 的 bash 5 在第一个
-      # 非 ASCII 字节处断开，**macOS 自带的 bash 3.2 会把那个字节吃进变量名**，
-      # 于是报 `ARTIFACT?: unbound variable`。
+      # 这三步原先是 inline 的（bash -n / shellcheck / 变量边界），与
+      # `scripts/lint-sh.sh` 各写一份 —— 2026-08-23 兑现了：那边把
+      # `deploy/*.sh` 换成了 find（`deploy/` 里最后一个脚本被 ansible 取代
+      # 删掉之后，那个 glob 展不开、shellcheck 报 "does not exist"），
+      # 而这里那份没跟着改，于是 CI 红而本机绿。
       #
-      # v0.1.0 第一次发版就栽在这里：Linux 与 Windows 全绿，
-      # aarch64-apple-darwin 在打包那步挂掉，而**冒烟测试是通过的** ——
-      # 也就是说产物本身没问题，是脚本自己在 macOS 上跑不完。
-      # 当时全仓库有 36 处同款写法，一处都没被任何检查拦住。
+      # `check-ci-parity.py` 拦不住这种：它比对的是**步骤名**，不是步骤做的事
+      # （那份文件自己写着这一点）。所以根治办法是让两边跑同一个文件 ——
+      # `check-var-boundaries.py` 2026-08-22 已经这么做过一次，只是当时
+      # 只抽了三步里的一步。
       #
-      # shellcheck 不报这个（它在语法上完全合法）。所以单开一条。
-      # 用 Python 而不是 grep -P：后者在非 UTF-8 locale 下直接报
-      # 「-P supports only unibyte and UTF-8 locales」并以非零码退出，
-      # 而 `if grep …` 会把那个错误当成「没匹配」—— **守卫静默失效，一路绿灯**。
-      # 这道检查本身就是为了防静默失效，它自己不能有静默失效。
-      #
-      # ⚠️ 2026-08-22 从 inline 抽成脚本：inline 的那份**本机没有任何办法跑**，
-      # 而 `just ci` 自称跑得到 CI 的每一步。抽出去之后两边调同一份。
-      - name: 变量名边界（$VAR 后面紧跟中文标点）
-        run: python3 scripts/check-var-boundaries.py
+      # 用 `bash scripts/…` 而不是 `just lint-sh`：runner 上没有 just，
+      # 而为一步检查装它不划算。跑的是同一个文件，这就够了。
+      - name: shell 脚本这一关（语法 / shellcheck / 变量边界）
+        run: bash scripts/lint-sh.sh
 
       - name: python 语法检查
         run: python3 -m py_compile scripts/*.py

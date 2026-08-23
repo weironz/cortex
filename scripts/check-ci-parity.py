@@ -55,9 +55,11 @@ COVERED = {
     "cargo fmt": "fmt-check",
     "cargo clippy": "lint",
     "cargo test": "test",
-    "bash 语法检查": "lint-sh",
-    "shellcheck": "lint-sh",
-    "变量名边界（$VAR 后面紧跟中文标点）": "lint-sh",
+    # 三步合成一步、并且**直接调那份脚本**（2026-08-23）。此前 CI 把命令
+    # 又写了一遍，于是 `scripts/lint-sh.sh` 改了而这里没改：CI 红、本机绿。
+    # 这道闸看不见那种漂移（它比对步骤名，不比对步骤做的事），
+    # 所以改成两边跑同一个文件。
+    "shell 脚本这一关（语法 / shellcheck / 变量边界）": "lint-sh",
     "python 语法检查": "lint-py",
     "版本号一致性": "docs-check",
     "文档链接指得到": "docs-check",
