@@ -212,9 +212,12 @@ CORTEX_EMBED_API_KEY=sk-...
 「它其实用了环境里那个旧的」会长得一样。
 
 ```bash
-# compose 那条（容器里）
-docker compose exec -T agentd cortex-agentd --create-user alice   # 口令从 stdin
-printf '%s' '你的口令' | docker compose exec -T agentd     cortex-agentd --set-password alice
+# compose 那条（容器里）。⚠️ 生产节点上用 /data/cortex/dc，别裸敲 docker
+# compose —— 凭据在 .env.secrets 里，裸敲会报 CORTEX_PG_PASSWORD missing。
+# 见 deploy.md 三节
+cd /data/cortex
+./dc exec -T agentd cortex-agentd --create-user alice   # 口令从 stdin
+printf '%s' '你的口令' | ./dc exec -T agentd cortex-agentd --set-password alice
 ```
 
 **`CORTEX_ADMIN_*` 只建号，不改密码。** 账号已存在时它什么都不做（日志里会

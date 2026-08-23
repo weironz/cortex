@@ -175,20 +175,24 @@
 
     # ── 拆掉旧的部署入口 —— **默认不做** ──────────────────
     #
-    # 那个强制命令脚本是 ansible 这条路走通之前**唯一的退路**：ansible 连不上
-    # 节点时，root 还能在机器上直接 `/usr/local/sbin/cortex-deploy deploy X.Y.Z`
-    # 切版本。第一次跑 provision 就把它删掉，等于在还没验证新路的时候先烧掉旧路。
+    # ⚠️ **它已经不是退路了。** 2026-08-23 实测：凭据搬进 .env.secrets 之后，
+    # 那个脚本内部的裸 `docker compose`（它的 94 / 147 / 162 行）读不到
+    # CORTEX_PG_PASSWORD，跑到第一条 compose 命令就会插值失败。
     #
-    # 所以它挂在一个显式开关上。顺序是：
+    # 也就是说这一段原先写的理由（「ansible 连不上时 root 还能手动切版本」）
+    # 现在是假的。真正的应急路径是上面那个 `{{ node_dir }}/dc` 包装。
+    #
+    # 那为什么还默认不删？因为**节点上那份是最后一份** ——
+    # deploy/node-deploy-policy.sh 已经从仓库删掉了。删掉之后要看它做过什么，
+    # 只能翻 git 历史。留着不花钱，而它现在也害不了人（跑不动就是跑不动，
+    # 不会半路改坏 .env：第一条 compose 命令就退出了）。
+    #
+    # 顺序：
     #
     #   1. ansible-playbook provision.yml -e ansible_user=root
     #   2. ansible-playbook deploy.yml -e version=<当前线上版本>   ← 同版本重放
     #   3. 走一次真发版，确认线上验证那段全过
     #   4. ansible-playbook provision.yml -e remove_legacy_entrypoint=true
-    #
-    # 留着它的**代价**要说清：节点上会有两条部署路径，而旧那条会把 .env 里的
-    # CORTEX_VERSION 改成 ansible 不知道的值。两条都用的话会打架 ——
-    # 所以第 4 步别一直拖着。
     - name: 撤掉旧的强制命令入口
       ansible.builtin.file:
         path: "{{ item }}"
@@ -201,12 +205,59 @@
     - name: 旧入口还留着
       ansible.builtin.debug:
         msg: >-
-          /usr/local/sbin/cortex-deploy 还在（当作 ansible 这条路的退路）。
-          新路在生产上跑通之后，用
-          `ansible-playbook provision.yml -e remove_legacy_entrypoint=true` 删掉它 ——
-          两条部署路径同时活着的话，旧那条会改 .env 里的 CORTEX_VERSION，
-          与 ansible 渲染的那份打架。
+          /usr/local/sbin/cortex-deploy 还在，但它**已经跑不动了**：凭据搬进
+          .env.secrets 之后，它内部的裸 docker compose 读不到 CORTEX_PG_PASSWORD。
+          别把它当退路 —— 应急请用 {{ node_dir }}/dc（带了两个 env 文件的包装）。
+          确认不需要翻它的实现之后，用
+          `ansible-playbook provision.yml -e remove_legacy_entrypoint=true` 删掉。
       when: not (remove_legacy_entrypoint | default(false) | bool)
+
+    # ── 让节点上还能敲 compose ────────────────────────────
+    #
+    # ⚠️ **凭据搬进 .env.secrets 之后，裸 `docker compose` 在这台机器上是废的。**
+    #
+    # 2026-08-23 实测，节点上 `docker compose ps` 直接报：
+    #
+    #     required variable CORTEX_PG_PASSWORD is missing a value
+    #
+    # 因为 compose 只自动读 `.env`，而口令已经不在那儿了。部署本身不受影响
+    # （deploy.yml 给的是 `env_files: [.env, .env.secrets]`），受影响的是**人**：
+    # ps / logs / restart / 手动切版本，全都是排障时最先敲的那几条。
+    #
+    # 这也意味着 /usr/local/sbin/cortex-deploy 那条「退路」已经名存实亡 ——
+    # 它内部同样是裸 compose（见它的 94 / 147 / 162 行）。留着一个必然失败的
+    # 退路，比没有退路更糟：真出事时才发现它不工作，而那正是最不该发现这件事的时候。
+    #
+    # 为什么不用 COMPOSE_ENV_FILES 环境变量（compose 2.24+ 支持，这台是 2.29.2）：
+    # 它是**全局**的。写绝对路径会让同机的 mica / cormex / neostor 也去读
+    # /data/cortex/.env.secrets；写相对路径则会让它们找不到 `.env.secrets` 而报错。
+    # 这台机器上有五个 compose 项目，一个全局变量按住所有人不是修复，是扩散。
+    - name: compose 的包装脚本（带上两个 env 文件）
+      ansible.builtin.copy:
+        dest: "{{ node_dir }}/dc"
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # 由 ansible 生成（provision.yml），手改会被下次装机覆盖。
+          #
+          # 凭据在 .env.secrets 里，而 docker compose 只自动读 .env ——
+          # 裸敲 `docker compose ps` 会报 CORTEX_PG_PASSWORD missing。
+          # 在这台机器上请一律用这个包装：
+          #
+          #     cd {{ node_dir }} && ./dc ps
+          #     ./dc logs -f agentd
+          #     ./dc up -d --no-deps agentd
+          #
+          # 应急切版本（GitHub 不可用时）：改 .env 里的 CORTEX_VERSION，
+          # 再 `./dc up -d --no-deps cortexdb agentd web egress`。
+          # 正常路径是 CI 跑 ansible 的 deploy.yml，别在这里长期绕过它 ——
+          # 手改的 .env 会被下一次部署重新渲染掉。
+          exec docker compose \
+            --env-file {{ node_dir }}/.env \
+            --env-file {{ node_dir }}/.env.secrets \
+            "$@"
 
     # ── traefik 的外部网络 ────────────────────────────────
     - name: traefik 外部网络

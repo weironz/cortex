@@ -217,6 +217,37 @@ docker compose --env-file .env --env-file .env.secrets up -d
 ⚠️ **一旦显式给了 `--env-file`，compose 就不再自动读 `.env`** —— 两个都得列。
 ansible 那边是 `docker_compose_v2` 的 `env_files: [.env, .env.secrets]`。
 
+### 在节点上一律用 `./dc`，别裸敲 `docker compose`
+
+凭据搬进 `.env.secrets` 之后，**裸 `docker compose` 在这台机器上是废的**：
+
+```
+$ docker compose ps
+required variable CORTEX_PG_PASSWORD is missing a value
+```
+
+compose 只自动读 `.env`，而口令已经不在那儿了。部署本身不受影响（ansible
+给的是两个文件），受影响的是**人** —— `ps` / `logs` / `restart` 正是排障时
+最先敲的那几条。所以 `provision.yml` 在节点上放了一个包装：
+
+```bash
+cd /data/cortex
+./dc ps
+./dc logs -f agentd
+./dc up -d --no-deps agentd
+```
+
+它就是 `docker compose --env-file .env --env-file .env.secrets "$@"`。
+
+> **为什么不设 `COMPOSE_ENV_FILES`**（compose 2.24+ 支持，节点是 2.29.2）：
+> 那个变量是**全局**的。写绝对路径会让同机的 mica / cormex / neostor 也去读
+> `/data/cortex/.env.secrets`；写相对路径则让它们找不到 `.env.secrets` 而报错。
+> 这台机器上有五个 compose 项目，用一个全局变量按住所有人不是修复，是扩散。
+
+> ⚠️ 同一个原因，节点上那个 `/usr/local/sbin/cortex-deploy`（旧的强制命令
+> 入口）**已经跑不动了** —— 它内部也是裸 compose。它还在机器上只是因为
+> 仓库里那份已经删了、留着方便查它做过什么，**别把它当退路**。
+
 要改非敏感的值：改 `ansible/group_vars/cortex_nodes.yml`，下次部署生效。
 **别直接改节点上的 `.env`**，那份是渲染产物。
 
@@ -357,14 +388,22 @@ Actions → Deploy → Run workflow → version = <上一个版本>
 退路），所以回滚很快且不需要 registry。
 
 ⚠️ **节点上没有本地部署入口了。** 那个 `/usr/local/sbin/cortex-deploy`
-随这次改造删掉了，所以回滚需要一台装了 ansible 且能拉到这个仓库的机器。
+随这次改造退役（仓库里那份已删，节点上那份也已经跑不动 —— 见三节末尾），
+所以回滚需要一台装了 ansible 且能拉到这个仓库的机器。
 GitHub 挂了或者你手边只有手机时，节点上只能手敲：
 
 ```bash
 cd /data/cortex
 sed -i -E 's|^CORTEX_VERSION=.*|CORTEX_VERSION=v<上一版>|' .env
-docker compose --env-file .env --env-file .env.secrets up -d --no-deps cortexdb agentd web
+./dc up -d --no-deps cortexdb agentd web egress
 ```
+
+> 手改的 `.env` **会被下一次部署重新渲染掉**（版本号来自 ansible 的
+> `-e version=`）。所以这条路是应急，不是常态：GitHub 恢复之后要补跑一次
+> `deploy.yml -e version=<上一版>`，让声明的状态与实际状态重新对齐。
+>
+> `egress` 要不要带上，看 `.env` 里 `CORTEX_SANDBOX_ENABLED` 是不是 1 ——
+> 沙箱关着时 profile 没激活，compose 根本不认识这个服务。
 
 > ⚠️ **回滚只回版本，不回 schema。** `sqlx` 的 migration 只前滚。
 > 失败的那一版如果跑过 migration，schema 会停在迁移后的状态，
