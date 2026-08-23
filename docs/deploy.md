@@ -142,28 +142,30 @@ ansible-playbook provision.yml -e ansible_user=root
 `~cortex-deploy/.ssh/authorized_keys` 里抄（**只取 `ssh-ed25519 …` 那部分，
 别抄前面的 `restrict,command=`**）。
 
-### ★ 切换顺序 —— 别一上来就把退路删了
+### 从旧方案切过来 —— 已完成，留着是因为思路可复用
 
-`/usr/local/sbin/cortex-deploy` 是 ansible 这条路走通之前**唯一的退路**
-（ansible 连不上时 root 还能在机器上直接切版本）。所以 provision 默认**不删**它：
+生产节点 2026-08-23 切完了（v0.1.19 那次发版），`provision.yml` 里那个
+`remove_legacy_entrypoint` 开关也随之去掉：现在它**无条件**声明
+「这台机器上不该有 `/usr/local/sbin/cortex-deploy`」，新机器上是 no-op。
 
-```bash
-# 1. 装机（旧入口留着）
-ansible-playbook provision.yml -e ansible_user=root
+当时的顺序值得记下来，因为**下次换任何一条部署链路都该这么走**：
 
-# 2. 同版本重放 —— 期望「什么都没变、健康检查过」。这一步是关键验证
-ansible-playbook deploy.yml -e version=<当前线上版本>
+1. `provision.yml`（装机，旧入口先留着当退路）
+2. `deploy.yml -e version=<当前线上版本>` —— **同版本重放**，期望「什么都没变、
+   健康检查过」。这一步是整个改造的关键验证：幂等成立才说明新路真的等价
+3. 改一行 compose 再跑一次，确认自动同步了（不再需要 scp）
+4. 走一次真发版，看线上验证那段全过
+5. 新路确认可用之后，才删旧入口
 
-# 3. 改一行 compose 再跑一次，确认自动同步了（不再需要 scp）
+⚠️ **第 5 步别一直拖着**：两条部署路径同时活着的话，旧那条会改 `.env` 里的
+`CORTEX_VERSION`，与 ansible 渲染的那份打架，而症状是「线上跑的版本不是
+ansible 以为的那个」，没有任何报错。
 
-# 4. 走一次真发版，看线上验证那段全过
-
-# 5. 新路确认可用之后，才删旧入口
-ansible-playbook provision.yml -e remove_legacy_entrypoint=true
-```
-
-⚠️ 第 5 步别一直拖着：两条部署路径同时活着的话，旧那条会改 `.env` 里的
-`CORTEX_VERSION`，与 ansible 渲染的那份打架。
+⚠️ 但那次的真实教训是反过来的：**旧入口在第 1 步之后就已经不是退路了。**
+凭据一搬进 `.env.secrets`，它内部的裸 `docker compose` 就读不到
+`CORTEX_PG_PASSWORD`，跑到第一条 compose 命令就退出 —— 而我们以为它还在守着。
+一条必然失败的退路比没有退路更糟：真出事时才发现它不工作。
+所以第 1 步之后要**真的跑一次**旧入口确认它还活着，否则那个"退路"只是心理安慰。
 
 它做的事（原先是 `docs/deploy.md` 里一屏手敲命令）：
 
@@ -172,7 +174,8 @@ ansible-playbook provision.yml -e remove_legacy_entrypoint=true
 | 装包 | docker-ce / docker-compose-plugin / **python3-requests** |
 | 目录 | `/data/cortex`、`/data/cortex/backup` |
 | 部署账号 | `cortex-deploy`，写 `authorized_keys` 与 NOPASSWD sudoers |
-| 拆旧入口 | 删掉 `/usr/local/sbin/cortex-deploy`（已被 ansible 取代） |
+| 唯一入口 | 确保没有 `/usr/local/sbin/cortex-deploy`（第二条部署路径会与 ansible 抢 `.env`） |
+| compose 包装 | 生成 `/data/cortex/dc`（见三节 —— 裸 `docker compose` 读不到凭据） |
 | 网络 | `traefik-network` |
 | 检查 | `.env.secrets` 在不在、域名解析得到吗 |
 
@@ -244,9 +247,10 @@ cd /data/cortex
 > `/data/cortex/.env.secrets`；写相对路径则让它们找不到 `.env.secrets` 而报错。
 > 这台机器上有五个 compose 项目，用一个全局变量按住所有人不是修复，是扩散。
 
-> ⚠️ 同一个原因，节点上那个 `/usr/local/sbin/cortex-deploy`（旧的强制命令
-> 入口）**已经跑不动了** —— 它内部也是裸 compose。它还在机器上只是因为
-> 仓库里那份已经删了、留着方便查它做过什么，**别把它当退路**。
+> ⚠️ 同一个原因，旧的强制命令入口 `/usr/local/sbin/cortex-deploy`
+> 在凭据拆分之后就**已经跑不动了**（它内部也是裸 compose），
+> 2026-08-23 已从节点上删除。它的实现在 git 历史里：
+> `git show f4522f7^:deploy/node-deploy-policy.sh`。
 
 要改非敏感的值：改 `ansible/group_vars/cortex_nodes.yml`，下次部署生效。
 **别直接改节点上的 `.env`**，那份是渲染产物。
@@ -387,8 +391,8 @@ Actions → Deploy → Run workflow → version = <上一个版本>
 而且 `docker_prune` **不带 `-a`** —— 有 tag 的不会被清掉，就是为了留住这条
 退路），所以回滚很快且不需要 registry。
 
-⚠️ **节点上没有本地部署入口了。** 那个 `/usr/local/sbin/cortex-deploy`
-随这次改造退役（仓库里那份已删，节点上那份也已经跑不动 —— 见三节末尾），
+⚠️ **节点上没有本地部署入口了。** `/usr/local/sbin/cortex-deploy`
+2026-08-23 随这次改造删除（见三节末尾），
 所以回滚需要一台装了 ansible 且能拉到这个仓库的机器。
 GitHub 挂了或者你手边只有手机时，节点上只能手敲：
 

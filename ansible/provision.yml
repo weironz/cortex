@@ -173,44 +173,29 @@
         # 这个模块会先 `visudo -c` 校验再落盘。手写文件的话，一个语法错的
         # sudoers 会把**所有人**挡在 sudo 外面 —— 那是少数真的回不去的故障
 
-    # ── 拆掉旧的部署入口 —— **默认不做** ──────────────────
+    # ── 这台机器上不该有第二条部署入口 ────────────────────
     #
-    # ⚠️ **它已经不是退路了。** 2026-08-23 实测：凭据搬进 .env.secrets 之后，
-    # 那个脚本内部的裸 `docker compose`（它的 94 / 147 / 162 行）读不到
-    # CORTEX_PG_PASSWORD，跑到第一条 compose 命令就会插值失败。
+    # 声明的是一个**持续有效**的约束，不是一次性清理：部署路径只有一条
+    # （CI 跑 ansible 的 deploy.yml），应急路径只有一条（下面那个 `dc`）。
+    # 多一条就多一个会改 `.env` 里 CORTEX_VERSION 的东西，而两边打架的表现
+    # 是「节点上跑的版本不是 ansible 以为的那个」，没有任何报错。
     #
-    # 也就是说这一段原先写的理由（「ansible 连不上时 root 还能手动切版本」）
-    # 现在是假的。真正的应急路径是上面那个 `{{ node_dir }}/dc` 包装。
+    # 具体清掉的是 2026-08-23 之前那套：`/usr/local/sbin/cortex-deploy`
+    # （强制命令脚本，仓库里对应 deploy/node-deploy-policy.sh，已随 f4522f7
+    # 删除）与它自己的 sudoers 片段。生产节点上已于 2026-08-23 清掉，
+    # 新装的机器上本来就没有 —— 两种情况这一步都是 no-op。
     #
-    # 那为什么还默认不删？因为**节点上那份是最后一份** ——
-    # deploy/node-deploy-policy.sh 已经从仓库删掉了。删掉之后要看它做过什么，
-    # 只能翻 git 历史。留着不花钱，而它现在也害不了人（跑不动就是跑不动，
-    # 不会半路改坏 .env：第一条 compose 命令就退出了）。
-    #
-    # 顺序：
-    #
-    #   1. ansible-playbook provision.yml -e ansible_user=root
-    #   2. ansible-playbook deploy.yml -e version=<当前线上版本>   ← 同版本重放
-    #   3. 走一次真发版，确认线上验证那段全过
-    #   4. ansible-playbook provision.yml -e remove_legacy_entrypoint=true
-    - name: 撤掉旧的强制命令入口
+    # ⚠️ 那个脚本在凭据拆进 .env.secrets 之后其实已经跑不动了（它内部是裸
+    # `docker compose`，读不到 CORTEX_PG_PASSWORD）。一度留着它当「ansible
+    # 连不上时的退路」，那个理由是假的 —— 一条必然失败的退路比没有退路更糟：
+    # 真出事时才发现它不工作，而那正是最不该发现这件事的时候。
+    - name: 不许有旧的强制命令入口
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
       loop:
         - /usr/local/sbin/cortex-deploy
         - /etc/sudoers.d/cortex-deploy-forced
-      when: remove_legacy_entrypoint | default(false) | bool
-
-    - name: 旧入口还留着
-      ansible.builtin.debug:
-        msg: >-
-          /usr/local/sbin/cortex-deploy 还在，但它**已经跑不动了**：凭据搬进
-          .env.secrets 之后，它内部的裸 docker compose 读不到 CORTEX_PG_PASSWORD。
-          别把它当退路 —— 应急请用 {{ node_dir }}/dc（带了两个 env 文件的包装）。
-          确认不需要翻它的实现之后，用
-          `ansible-playbook provision.yml -e remove_legacy_entrypoint=true` 删掉。
-      when: not (remove_legacy_entrypoint | default(false) | bool)
 
     # ── 让节点上还能敲 compose ────────────────────────────
     #
