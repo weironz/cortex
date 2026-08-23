@@ -83,7 +83,24 @@ jobs:
       #     [ERROR]: The requirements file 'ansible/requirements.yml' does not exist.
       #
       # 2026-08-23 实测撞到（部署 v0.1.18 那次）。
+      #
+      # ⚠️ **`ref:` 不能省，这一条是同一天撞的第二次。** 不写 ref 时
+      # actions/checkout 取的是**触发工作流的那个 ref**，而这个 workflow
+      # 有两个入口，它们的 ref 不一样：
+      #
+      #   * workflow_dispatch（手动）→ main       ← 我当时只验了这一个，通过
+      #   * workflow_call（release.yml 调）→ tag  ← 发 v0.1.19 时炸在这里
+      #
+      # 后果有两层：ansible/ 会退回 tag 上那份（旧 tag 上根本没有），
+      # 而且下一步 `git fetch refs/tags/vX:refs/tags/vX` 会因为**本地已经在
+      # 那个 tag 上**而被拒绝（would clobber existing tag），退出码 1、
+      # `-q` 还把原因吞了 —— 日志里只剩一句 `Process completed with exit code 1`。
+      #
+      # 写死 ref 之后两个入口拿到的是同一份东西，这正是「一份实现两个入口」
+      # 本来要保证的事。
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: 拒绝一切不是 X.Y.Z 的东西
         run: |
@@ -99,9 +116,13 @@ jobs:
         run: |
           set -euo pipefail
           tag="v${{ inputs.version }}"
-          git fetch -q --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"
+          # `--force` 与去掉 `-q`：上面那次失败里，fetch 因为「本地已有同名
+          # tag」被拒，而 -q 把 stderr 一起吞了，日志上只剩一句 exit code 1。
+          # 修好 checkout 的 ref 之后这种情况不该再发生，但一个只在出事时
+          # 才闭嘴的命令不值得留着
+          git fetch --force --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"
           git checkout "${tag}" -- deploy/docker-compose.yml
-          echo "compose 取自 ${tag}，ansible/ 取自默认分支"
+          echo "compose 取自 ${tag}，ansible/ 取自默认分支 $(git rev-parse --abbrev-ref HEAD)"
 
       # ansible 只装在**这里**。目标机器不装 ansible —— 但需要 python3
       # （模块推过去要它执行）与 python3-requests，那两样由 provision.yml 装。
