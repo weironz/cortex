@@ -373,6 +373,7 @@ async fn main() -> anyhow::Result<()> {
         outbox: outbox.clone(),
         max_rounds: DEFAULT_MAX_ROUNDS,
         todos: turn::Todos::default(),
+        background: turn::BackgroundBooks::default(),
         context_window,
         persona: PERSONA,
         capabilities: CAPABILITIES,

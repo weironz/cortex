@@ -376,6 +376,18 @@ pub trait ToolHost: Send + Sync {
         ToolResult::err("这个宿主不保存任务清单。把你的计划直接写在回答里，别再调这个工具。")
     }
 
+    /// 这个会话的后台任务簿。`None` = 这个宿主不支持后台命令。
+    ///
+    /// # 为什么是宿主给簿子，而不是宿主执行整件事
+    ///
+    /// 起进程要沙箱装配（`sandbox::prepare`），而那是 agent 这一侧的事 ——
+    /// 让宿主自己起的话，后台命令与前台命令会有两套沙箱实现，
+    /// 而漏改一处不会有任何测试红。所以：**沙箱在这边，簿子在那边**
+    /// （任务跨轮存活，而 `Turn` 无每轮状态）。
+    fn background_tasks(&self) -> Option<crate::background::Tasks> {
+        None
+    }
+
     /// 上网搜一下。**由宿主执行** —— key 在服务端（沙箱容器的出网是
     /// 白名单管着的，给它开搜索域名等于开一条往外发任意字符串的路）。
     ///
@@ -1154,6 +1166,20 @@ impl Turn {
         } else if spec.name == "load_skill" {
             // 同上：正文在服务端的库里，不在文件系统上
             host.load_skill(&call.arguments).await
+        } else if tools::is_background_tool(&spec.name) {
+            match host.background_tasks() {
+                // 说清是「这个环境不支持」而不是「命令失败」—— 后者会让
+                // 模型去改命令再试一次，而改什么都不会成
+                None => ToolResult::err(
+                    "这个环境不支持后台命令。用 shell 跑（它有超时上限），                     或者告诉用户这条路在当前环境下不可用。",
+                ),
+                Some(tasks) => {
+                    // 与上面 `tools::execute` 同一条：**重新问一次宿主**，
+                    // 用刚批准过的那份清单去起进程
+                    let sandbox = self.sandbox.clone().with_grants(host.granted_roots());
+                    dispatch_background(&spec.name, &call.arguments, &sandbox, &tasks).await
+                }
+            }
         } else if spec.name == "web_search" {
             host.web_search(&call.arguments).await
         } else if tools::is_library_tool(&spec.name) {
@@ -1272,6 +1298,79 @@ fn collapse_tool_responses(messages: &mut [Message], keep_last: usize) -> usize 
         }
     }
     collapsed
+}
+
+/// 后台那三个的分派。
+async fn dispatch_background(
+    name: &str,
+    args: &serde_json::Value,
+    sandbox: &crate::Sandbox,
+    tasks: &crate::background::Tasks,
+) -> ToolResult {
+    match name {
+        "background_run" => match args.get("command").and_then(|v| v.as_str()) {
+            None => ToolResult::err("缺少 command 参数"),
+            Some(cmd) => tools::spawn_background(sandbox, tasks, cmd).await,
+        },
+        "background_output" => match args.get("id").and_then(|v| v.as_str()) {
+            // 不传 id = 列出全部。列表里不带输出，见 `Tasks::list`
+            None => {
+                let all = tasks.list();
+                if all.is_empty() {
+                    return ToolResult::ok("这个会话没有后台任务。");
+                }
+                let body = all
+                    .iter()
+                    .map(|t| {
+                        let state = match &t.state {
+                            crate::background::TaskState::Running => "在跑".to_string(),
+                            crate::background::TaskState::Exited(c) => {
+                                format!("已结束（退出码 {c}）")
+                            }
+                            crate::background::TaskState::Killed => "已停止".to_string(),
+                        };
+                        format!("{} · {} · {}", t.id, state, t.command)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(
+                        "
+",
+                    );
+                ToolResult::ok(body)
+            }
+            Some(id) => match tasks.get(id) {
+                None => ToolResult::err(format!("没有编号 {id} 的后台任务")),
+                Some(t) => {
+                    let state = match &t.state {
+                        crate::background::TaskState::Running => "还在跑".to_string(),
+                        crate::background::TaskState::Exited(c) => format!("已结束，退出码 {c}"),
+                        crate::background::TaskState::Killed => "已被停止".to_string(),
+                    };
+                    // 截断过要说出来 —— 否则模型对着一段被悄悄截短的日志
+                    // 找一行永远不会出现的输出
+                    let note = if t.truncated {
+                        "
+（输出过长，只留了开头）"
+                    } else {
+                        ""
+                    };
+                    ToolResult::ok(format!(
+                        "{}（{}）
+{}{}",
+                        t.command, state, t.output, note
+                    ))
+                }
+            },
+        },
+        "background_kill" => match args.get("id").and_then(|v| v.as_str()) {
+            None => ToolResult::err("缺少 id 参数"),
+            Some(id) => match tasks.kill(id) {
+                Ok(()) => ToolResult::ok(format!("已停止 {id}。")),
+                Err(e) => ToolResult::err(e),
+            },
+        },
+        other => ToolResult::err(format!("未知的后台工具：{other}")),
+    }
 }
 
 fn to_mcp_result(r: ToolResult) -> CallToolResult {

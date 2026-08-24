@@ -12,6 +12,17 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ## [未发布]
 
+### agent 能起后台命令了
+
+`background_run` 起一条不等它跑完的命令（dev server、watch 模式的测试、
+大构建），`background_output` 随时看输出，`background_kill` 停掉。
+
+从前 `shell` 是同步单发、最多 10 分钟就杀 —— 「起个 dev server 然后接着
+干别的」在这个产品里做不到，模型只能把一整轮挂在那儿等超时。
+
+一个会话最多 8 个同时在跑；输出留开头 64 KB（启动日志与第一条报错在
+开头，尾部通常是同一行重复一万次），截断过会明说。
+
 ### 技能能与 Claude Code / Codex / Grok 互通了
 
 设置 → 技能里多了「导入 SKILL.md」，每条技能后面也多了导出。

@@ -48,6 +48,7 @@ fn state(dir: &Path) -> LocalState {
         outbox: Outbox::new(dir),
         max_rounds: 4,
         todos: crate::turn::Todos::default(),
+        background: crate::turn::BackgroundBooks::default(),
         context_window: 8192,
         persona: "",
         capabilities: "",

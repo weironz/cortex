@@ -211,6 +211,13 @@ struct Caps {
     has_skills: bool,
     /// 用户开了电脑操作，**且**这个构建与这个执行环境真的做得到。
     can_use_computer: bool,
+    /// 后台命令做不做得了。
+    ///
+    /// **判据是「这一轮有没有工作区」** —— 起一条命令总要有个目录，
+    /// 而没绑工作区的会话可访问的文件范围是空集。摆出来的话，
+    /// 模型每次调都拿到同一句「本会话没有绑定工作区」。
+    can_background: bool,
+
     /// 够得着联网检索那条路（有服务端）。
     ///
     /// 判据与生图**同源**：都是「有没有可打的服务端」。服务端配没配
@@ -237,6 +244,7 @@ impl Caps {
             || self.can_use_computer
             || self.can_use_library
             || self.can_search
+            || self.can_background
     }
 }
 
@@ -277,6 +285,9 @@ fn with_external(
     }
     if caps.can_search {
         specs.push(cortex_agent::tools::web_search_spec());
+    }
+    if caps.can_background {
+        specs.extend(cortex_agent::tools::background_specs());
     }
     // ⚠️ 与提示词里那段说明同生共死（同 `has_skills` 那条）：判据是同一个
     // `can_use_computer`。摆了工具不讲坐标系，模型会一直点偏；讲了坐标系
@@ -410,6 +421,9 @@ pub struct Engine {
     /// 而 `Engine` 正是「跑一轮所需的全部依赖」。
     pub runs: crate::runs::Runs,
     pub max_rounds: usize,
+    /// 各会话的后台命令簿。**内存态** —— 进程重启时那些子进程也
+    /// 跟着没了（`kill_on_drop`），簿子留着只会指向一堆不存在的任务。
+    pub background: BackgroundBooks,
     /// 各会话的任务清单（`todo_write` 存的）。**内存态，重启即清** ——
     /// 清单是轮内工作记忆（「这次任务做到哪了」），不是数据：任务本身
     /// 跑完就没了，跨重启还留着的清单只会指着一件早已结束的事。
@@ -745,6 +759,8 @@ impl Engine {
             // 各写各的话，判错的症状是模型调一个必然失败的工具
             can_use_library: can_draw,
             can_search: can_draw,
+            // 起命令要有工作目录 —— 与 `Caps::can_background` 上那段
+            can_background: bound.is_some(),
         };
         // 这个智能体关掉了哪些工具。**与提示词同源**：换的人设与关掉的
         // 工具来自同一个 brief，各取各的话会出现「人设是大厨、工具却是
@@ -867,6 +883,7 @@ impl Engine {
             computer: crate::computer::Computer::new(),
             drawn: std::sync::Mutex::new(Vec::new()),
             todos: self.todos.clone(),
+            background: self.background.for_session(&req.session_id),
         };
         // 这一轮用哪个模型。逐轮的选择是**那一轮的属性**，而 `self.llm`
         // 是进程级的 —— 所以造一份带这一轮模型的副本（供应商是 Arc，
@@ -1150,6 +1167,26 @@ fn resolve_image_spec(
     )
 }
 
+/// 会话 → 后台命令簿。见 `Engine::background`。
+#[derive(Clone, Default)]
+pub struct BackgroundBooks(
+    Arc<std::sync::Mutex<std::collections::HashMap<String, cortex_agent::background::Tasks>>>,
+);
+
+impl BackgroundBooks {
+    /// 拿这条会话那本（没有就开一本）。
+    fn for_session(&self, session_id: &str) -> cortex_agent::background::Tasks {
+        let mut m = match self.0.lock() {
+            Ok(m) => m,
+            // 锁坏了（另一个线程 panic 过）就给一本新的：后台任务不是
+            // 数据，丢了最多是「看不到刚才那个的输出」，而 panic 掉整轮
+            // 是把一次可恢复的意外升级成事故
+            Err(_) => return cortex_agent::background::Tasks::default(),
+        };
+        m.entry(session_id.to_string()).or_default().clone()
+    }
+}
+
 /// 会话 → 任务清单。见 `Engine::todos`。
 #[derive(Clone, Default)]
 pub struct Todos(Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>);
@@ -1210,6 +1247,8 @@ struct LocalHost {
     computer: crate::computer::Computer,
     /// 会话任务清单的入口 —— 与 `Engine` 里那份是同一个。
     todos: Todos,
+    /// 这条会话的后台命令簿。
+    background: cortex_agent::background::Tasks,
 
     /// 这一轮生成的图。
     ///
@@ -1290,6 +1329,10 @@ impl ToolHost for LocalHost {
                 "已记下（{n} 字符）。清单每轮都会出现在你的上下文里，完成一步就更新它"
             )),
         }
+    }
+
+    fn background_tasks(&self) -> Option<cortex_agent::background::Tasks> {
+        Some(self.background.clone())
     }
 
     async fn web_search(&self, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
@@ -1582,6 +1625,38 @@ mod tests {
             !direct.tool_names().contains(&"generate_image"),
             "直连模式没有可打的服务端。摆出来的话，模型会答应画图然后失败 ——              而那条失败用户什么都做不了。实际：{:?}",
             direct.tool_names()
+        );
+    }
+
+    /// 后台命令跟着「有没有工作区」走。
+    ///
+    /// 起一条命令总要有个目录。没绑工作区时摆出来的话，模型每次调都
+    /// 拿到同一句「本会话没有绑定工作区」—— 而它会以为是自己写错了，
+    /// 换个命令再试一次。
+    #[test]
+    fn 后台命令要有工作区才给() {
+        let with_ws = chat_turn_for(
+            8,
+            &[],
+            Caps {
+                can_background: true,
+                ..Caps::default()
+            },
+            &[],
+        );
+        let names = with_ws.tool_names();
+        assert!(
+            names.contains(&"background_run")
+                && names.contains(&"background_output")
+                && names.contains(&"background_kill"),
+            "三个要一起给 —— 只给「起」不给「看」的话，起完就再也拿不到输出。实际：{names:?}"
+        );
+
+        let no_ws = chat_turn_for(8, &[fake_external("docs", "search")], Caps::default(), &[]);
+        assert!(
+            !no_ws.tool_names().contains(&"background_run"),
+            "没绑工作区就没有可用的工作目录。实际：{:?}",
+            no_ws.tool_names()
         );
     }
 
