@@ -669,6 +669,43 @@ pub fn is_background_tool(name: &str) -> bool {
 /// 超时、以及「一页 300KB 的 HTML 塞进上下文」—— 而模型要的通常
 /// 就是那几句摘要。真要读某一页时，那是另一个工具（还没有）。
 #[must_use]
+/// 列 / 读 MCP server 提供的 resource。
+///
+/// # 为什么是一个工具而不是两个
+///
+/// 不带 `uri` 时列清单，带了就读那一份 —— 与 `background_output`
+/// 同一个形状。两个工具的话，模型得先学会「先调 A 再调 B」，而目录里
+/// 每多一个名字，它挑错的概率就高一分。
+///
+/// # 为什么不把清单印进提示词
+///
+/// resource 可能有几百条（一个文档站的 MCP 会把每一页都列出来）。
+/// 印进去是每轮都付一遍钱，而模型十轮里有九轮用不上它 ——
+/// 与技能目录那条相反的判断，因为技能只有个位数。
+pub fn mcp_resource_spec() -> ToolSpec {
+    ToolSpec {
+        name: "mcp_resource".into(),
+        description: "看 MCP server 提供的材料（resource）。\
+                      不带 uri 时列出有哪些；带上 uri 读那一份的正文。"
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "uri": {
+                    "type": "string",
+                    "description": "要读哪一份。省略则列出全部可读的材料。"
+                }
+            }
+        }),
+        // 只读，且读的是用户自己配的那台 server —— 与 `read_file` 同级。
+        // 不像 `web_search` 那样有外发：uri 是从清单里挑出来的，
+        // 不带上下文里的任何一句话
+        risk: Risk::Safe,
+        path_arg: None,
+        source: ToolSource::Builtin,
+    }
+}
+
 pub fn web_search_spec() -> ToolSpec {
     ToolSpec {
         name: "web_search".into(),
@@ -992,6 +1029,39 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             source: ToolSource::Builtin,
         },
         ToolSpec {
+            name: "grep".into(),
+            description: "在工作区里**按内容**搜（正则）。找「哪里用到了这个函数」                          「这个报错是从哪抛的」用它 —— 比 list_dir 逐个读快得多。                          尊重 .gitignore"
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "正则。与 rg 一样的写法" },
+                    "glob": { "type": "string", "description": "可选。只搜名字匹配的文件，如 `*.rs`、`src/**/*.ts`" },
+                    "path": { "type": "string", "description": "可选。从哪个目录往下搜，默认整个工作区" }
+                },
+                "required": ["pattern"]
+            }),
+            risk: Risk::Safe,
+            path_arg: Some("path"),
+            source: ToolSource::Builtin,
+        },
+        ToolSpec {
+            name: "glob".into(),
+            description: "在工作区里**按文件名**找。`*` 不跨目录、`**` 跨。                          尊重 .gitignore"
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "如 `*.md`、`src/**/*.rs`" },
+                    "path": { "type": "string", "description": "可选。从哪个目录往下找，默认整个工作区" }
+                },
+                "required": ["pattern"]
+            }),
+            risk: Risk::Safe,
+            path_arg: Some("path"),
+            source: ToolSource::Builtin,
+        },
+        ToolSpec {
             name: "tree".into(),
             description: "看一个目录的整体结构（带每个文件的行数）。认识一个项目                          先用它，别 list_dir 逐层摸。尊重 .gitignore"
                 .into(),
@@ -1076,6 +1146,31 @@ pub fn to_llm_tools(specs: &[ToolSpec]) -> Vec<Tool> {
             ))
         })
         .collect()
+}
+
+/// `grep` 与 `glob` 共用的那一半：解析路径、跑、包结果。
+fn search_tool(sandbox: &Sandbox, call: &ToolCall, is_grep: bool) -> ToolResult {
+    let Ok(pattern) = arg_str(&call.arguments, "pattern") else {
+        return ToolResult::err("缺少 pattern 参数");
+    };
+    // path 不传就搜整个工作区。`resolve(".")` 走的是与别的文件工具
+    // **同一条**路径解析 —— 越界与授权因此自动一致
+    let raw = arg_str(&call.arguments, "path").unwrap_or_else(|_| ".".to_string());
+    match sandbox.resolve(&raw) {
+        Err(e) => ToolResult::err(e.to_string()),
+        Ok(root) => {
+            let out = if is_grep {
+                let glob = arg_str(&call.arguments, "glob").ok();
+                crate::search::grep(&root, &pattern, glob.as_deref())
+            } else {
+                crate::search::glob_files(&root, &pattern)
+            };
+            match out {
+                Ok(body) => ToolResult::ok(body),
+                Err(e) => ToolResult::err(e),
+            }
+        }
+    }
 }
 
 /// 执行一个内置工具。
@@ -1185,6 +1280,14 @@ pub async fn execute(sandbox: &Sandbox, call: &ToolCall) -> ToolResult {
                 run_shell(sandbox, &cmd, timeout).await
             }
         },
+
+        // ⚠️ **两条臂分开写，不合并成 `"grep" | "glob"`。**
+        //
+        // 那条「每个规格都有对应的臂」的测试是按字面量数的（它扫的是
+        // 源码文本），合并臂里的第二个名字它看不见 —— 于是「漏了一半」
+        // 这件事就再也测不出来了。多一行重复，换那条闸继续有效。
+        "grep" => search_tool(sandbox, call, true),
+        "glob" => search_tool(sandbox, call, false),
 
         "tree" => match arg_str(&call.arguments, "path") {
             Err(e) => ToolResult::err(e),

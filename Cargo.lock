@@ -1156,6 +1156,7 @@ dependencies = [
  "ignore",
  "landlock",
  "libc",
+ "regex",
  "rmcp",
  "seccompiler",
  "serde",

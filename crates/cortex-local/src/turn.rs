@@ -240,17 +240,45 @@ struct Caps {
     /// 只在想查时才调工具。库空着时检索回「没找到」是一个正确且有用的
     /// 答案，不是骗人。
     can_use_library: bool,
+
+    /// 连着的 MCP server 里**有没有 resource**。
+    ///
+    /// 判据是「真的有」而不是「有没有连 server」—— 与技能那条同源：
+    /// 一台只提供工具的 server（绝大多数）摆出 `mcp_resource` 的话，
+    /// 模型每次调都拿到「一个都没有」。
+    has_mcp_resources: bool,
 }
 
 impl Caps {
     /// 有没有任何一样。`with_external` 用它决定要不要重建目录。
+    ///
+    /// ⚠️ **故意写成解构，不写 `self.x || self.y`。** 那种写法漏掉一个
+    /// 字段是**静默**的：`with_external` 会走提前返回那条捷径，于是那个
+    /// 能力对应的工具永远进不了目录，而编译器与测试都不会红 ——
+    /// 症状只有「模型说它做不到那件事」。`can_background` 栽过一次，
+    /// `can_spawn` 栽过第二次（2026-08-25 才发现，派子 agent 在没有
+    /// 任何别的能力时整个不存在）。
+    ///
+    /// 解构之后，加一个字段就是一个编译错误，落在这里。
     const fn any(self) -> bool {
-        self.can_draw
-            || self.has_skills
-            || self.can_use_computer
-            || self.can_use_library
-            || self.can_search
-            || self.can_background
+        let Self {
+            can_draw,
+            has_skills,
+            can_use_computer,
+            can_spawn,
+            can_background,
+            can_search,
+            can_use_library,
+            has_mcp_resources,
+        } = self;
+        can_draw
+            || has_skills
+            || can_use_computer
+            || can_spawn
+            || can_background
+            || can_search
+            || can_use_library
+            || has_mcp_resources
     }
 }
 
@@ -291,6 +319,9 @@ fn with_external(
     }
     if caps.can_search {
         specs.push(cortex_agent::tools::web_search_spec());
+    }
+    if caps.has_mcp_resources {
+        specs.push(cortex_agent::tools::mcp_resource_spec());
     }
     if caps.can_background {
         specs.extend(cortex_agent::tools::background_specs());
@@ -775,6 +806,9 @@ impl Engine {
             // 起命令要有工作目录 —— 与 `Caps::can_background` 上那段
             can_background: bound.is_some(),
             can_spawn: bound.is_some(),
+            // 问的是「连着的那些 server 里真的有 resource 吗」，不是
+            // 「连着 server 吗」—— 绝大多数 server 只提供工具
+            has_mcp_resources: self.mcp.has_resources().await,
         };
         // 这个智能体关掉了哪些工具。**与提示词同源**：换的人设与关掉的
         // 工具来自同一个 brief，各取各的话会出现「人设是大厨、工具却是
@@ -1512,6 +1546,33 @@ impl ToolHost for LocalHost {
         }
     }
 
+    async fn mcp_resource(&self, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
+        let uri = arguments
+            .get("uri")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        // 空串按「没给」处理 —— 模型偶尔会把可选参数填成 ""，
+        // 而那时它想要的显然是清单，不是「读一份叫空串的材料」
+        let Some(uri) = uri else {
+            let all = self.mcp.list_resources().await;
+            if all.is_empty() {
+                return cortex_agent::ToolResult::ok(
+                    "连着的 MCP server 一份材料都没提供（它们只有工具）。",
+                );
+            }
+            let mut out = String::from("可读的材料：\n");
+            for (server, uri, desc) in all {
+                out.push_str(&format!("- {uri}（来自 {server}）：{desc}\n"));
+            }
+            return cortex_agent::ToolResult::ok(out);
+        };
+        match self.mcp.read_resource(uri).await {
+            Ok(text) => cortex_agent::ToolResult::ok(text),
+            Err(e) => cortex_agent::ToolResult::err(e),
+        }
+    }
+
     async fn library(&self, tool: &str, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
         match tool {
             "library_search" => {
@@ -2137,6 +2198,43 @@ mod tests {
             !names.iter().any(|n| n.starts_with("mcp__")),
             "没配 MCP 时不该有任何 mcp__ 前缀的工具：{names:?}"
         );
+    }
+
+    /// **每一样能力单独开着时，它的工具都要真的进目录。**
+    ///
+    /// 这条测的是 `with_external` 那条提前返回的捷径：它按 `Caps::any()`
+    /// 判「要不要重建目录」，而 `any()` 里漏掉一个字段是完全静默的 ——
+    /// 那样能力对应的工具永远进不去，编译器与别的测试都不会红。
+    ///
+    /// `can_background` 栽过一次；`can_spawn` 栽过第二次（2026-08-25
+    /// 发现时它已经漏了一段时间：只要会话没同时开着别的能力，
+    /// `subagent` 就整个不存在）。`any()` 现在写成解构，加字段会编译错误；
+    /// 这条测试补的是另一半 —— **字段进了 `any()`，但 push 那一行忘了写**。
+    #[test]
+    fn 每一样能力单独开着时它的工具都要进目录() {
+        /// 把某一样能力打开。
+        type Open = fn(&mut Caps);
+        // (改哪个字段, 期待出现的工具名)
+        let cases: &[(Open, &str)] = &[
+            (|c| c.can_draw = true, "generate_image"),
+            (|c| c.can_search = true, "web_search"),
+            (|c| c.can_background = true, "background_run"),
+            (|c| c.can_spawn = true, "spawn_agents"),
+            (|c| c.can_use_library = true, "library_search"),
+            (|c| c.has_mcp_resources = true, "mcp_resource"),
+        ];
+        for (set, tool) in cases {
+            let mut caps = Caps::default();
+            set(&mut caps);
+            let turn = chat_turn_for(8, &[], caps, &[]);
+            let names = turn.tool_names();
+            assert!(
+                names.contains(tool),
+                "只开这一样能力时 {tool} 没进目录 —— \
+                 要么 Caps::any() 漏了那个字段（走了提前返回的捷径），\
+                 要么 with_external 里少了那一行 push。实际目录：{names:?}"
+            );
+        }
     }
 
     /// 桌面端与容器只差两处，而且都是「错了不报错」的那种。

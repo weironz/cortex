@@ -422,6 +422,19 @@ pub trait ToolHost: Send + Sync {
         )
     }
 
+    /// 列 / 读 MCP server 提供的 resource。**由宿主执行** —— hub 在宿主手里。
+    ///
+    /// # 默认实现是「这个宿主没有 MCP」，不是回一份空清单
+    ///
+    /// 与 `library` 同一条：回空的话模型会断定「那台 server 什么都没提供」，
+    /// 而实际是这个进程根本够不着它。
+    async fn mcp_resource(&self, _arguments: &serde_json::Value) -> ToolResult {
+        ToolResult::err(
+            "这个 agent 进程没有连着任何 MCP server。\
+             不要断定那份材料不存在 —— 是这条路在当前环境下不通。",
+        )
+    }
+
     /// 查 / 读用户的资料库。**由宿主执行** —— 材料在服务端的库里，
     /// 而 `tools::execute` 那条路是纯文件系统与 shell（与 `load_skill`
     /// 同一个理由）。
@@ -1222,6 +1235,8 @@ impl Turn {
             }
         } else if spec.name == "web_search" {
             host.web_search(&call.arguments).await
+        } else if spec.name == "mcp_resource" {
+            host.mcp_resource(&call.arguments).await
         } else if tools::is_library_tool(&spec.name) {
             // 同上：材料在服务端的库里，不在文件系统上
             host.library(&spec.name, &call.arguments).await

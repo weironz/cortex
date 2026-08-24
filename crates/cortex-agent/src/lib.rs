@@ -21,6 +21,7 @@ pub mod egress;
 pub mod hooks;
 pub mod prompt;
 pub mod sandbox;
+pub mod search;
 pub mod tools;
 pub mod tree;
 pub mod turn;

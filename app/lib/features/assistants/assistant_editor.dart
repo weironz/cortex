@@ -17,6 +17,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../models/assistant.dart';
 import '../../state/assistant_controller.dart';
+import '../settings/pages/computer_use_section.dart'
+    show computerUseAvailableProvider;
 
 /// 打开编辑器。[existing] 为空 = 新建。
 Future<void> showAssistantEditor(
@@ -267,28 +269,49 @@ class _AssistantEditorState extends State<_AssistantEditor> {
 /// 也永远不会被清掉。要给 MCP 工具做开关，判据得是「这台 server 开不开」
 /// 而不是「这个工具关不关」，那是另一件事。
 ///
-/// 六样的名字必须与 `cortex_agent::tools::builtin_specs()` 里的**一字不差**
+/// 名字必须与 `cortex_agent::tools::builtin_specs()` 里的**一字不差**
 /// —— 服务端按名字剔，拼错的症状是开关拨了但工具照旧在（而且不报错）。
-class _ToolToggles extends StatelessWidget {
+class _ToolToggles extends ConsumerWidget {
   const _ToolToggles({required this.disabled, required this.onChanged});
 
   final Set<String> disabled;
   final void Function(String name, bool on) onChanged;
 
-  /// (工具名, 显示名)。名字见类文档那段 ⚠️。
-  static const List<(String, String)> _tools = [
-    ('read_file', '读文件'),
-    ('write_file', '写文件'),
-    ('edit_file', '改文件'),
-    ('shell', '执行命令'),
-    ('web_search', '联网检索'),
-    ('tree', '看目录结构'),
-    ('generate_image', '画图'),
+  /// (这一格管哪几个工具, 显示名)。名字见类文档那段 ⚠️。
+  ///
+  /// 大多数是一格一个，**电脑操作那格管五个** —— 截屏、点、打字、按键、
+  /// 滚动是同一件事的五个动作，拆成五格既不是设计稿里的样子，也没人会
+  /// 只关掉其中一个。所以这里的类型是「一组名字」而不是「一个名字」。
+  static const List<(List<String>, String)> _tools = [
+    (['read_file'], '读文件'),
+    (['write_file'], '写文件'),
+    (['edit_file'], '改文件'),
+    (['shell'], '执行命令'),
+    (['grep', 'glob'], '搜索文件'),
+    (['tree'], '看目录结构'),
+    (['web_search'], '联网检索'),
+    (['generate_image'], '画图'),
   ];
 
+  /// 电脑操作那五个。**单独一条，因为它要另外过一道闸** ——
+  /// 这台机器做不做得到（`/health` 的 `computer_use`）。
+  static const (List<String>, String) _computer = (
+    ['screenshot', 'click', 'type_text', 'key', 'scroll'],
+    '电脑操作',
+  );
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
+    // ⚠️ 做不到就不摆这一格。摆出来的话，用户拨开它，然后模型答应去点
+    // 按钮、每一次都失败 —— 与 `with_external` 那侧 `can_use_computer`
+    // 同一条判据（CLAUDE.md 约束 2）。判的是**这台机器支不支持**，
+    // 不是「用户开没开」：用户在设置里关着的时候，这个人设上的偏好
+    // 仍然是有意义的（他之后会打开）
+    final tools = [
+      ..._tools,
+      if (ref.watch(computerUseAvailableProvider)) _computer,
+    ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -309,12 +332,18 @@ class _ToolToggles extends StatelessWidget {
           spacing: 6,
           runSpacing: 6,
           children: [
-            for (final (name, label) in _tools)
+            for (final (names, label) in tools)
               FilterChip(
-                key: ValueKey('assistant:tool:$name'),
+                key: ValueKey('assistant:tool:${names.first}'),
                 label: Text(label),
-                selected: !disabled.contains(name),
-                onSelected: (on) => onChanged(name, on),
+                // 一组里**只要有一个被关掉就算关掉** —— 反过来（全关才算关）
+                // 会让一个半开的状态显示成「开着」，而模型确实少了几样工具
+                selected: !names.any(disabled.contains),
+                onSelected: (on) {
+                  for (final n in names) {
+                    onChanged(n, on);
+                  }
+                },
               ),
           ],
         ),

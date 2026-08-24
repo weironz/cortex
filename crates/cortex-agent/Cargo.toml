@@ -19,6 +19,7 @@ cortex-llm.workspace = true
 futures.workspace = true
 similar.workspace = true
 ignore.workspace = true
+regex.workspace = true
 async-trait.workspace = true
 
 # 工具调用的规范类型（Tool / CallToolRequestParams / CallToolResult）。

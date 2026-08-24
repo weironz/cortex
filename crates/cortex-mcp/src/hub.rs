@@ -47,6 +47,11 @@ struct Server {
     /// 存在的意义不只是「用来发请求」——**它同时是子进程的生命周期**。
     service: RunningService<rmcp::RoleClient, ()>,
     specs: Vec<ToolSpec>,
+    /// 这台 server 提供的 resource（uri + 一句说明）。
+    ///
+    /// 连接时列一次。**列不出来不算失败** —— 大多数 server 只提供工具，
+    /// 对 `resources/list` 回一个 method-not-found，那是正常形态。
+    resources: Vec<(String, String)>,
 }
 
 /// 所有 MCP 连接。
@@ -205,6 +210,73 @@ impl McpHub {
                 tracing::warn!(server = name, error = %e, "重连没成");
             }
         }
+    }
+
+    /// 有没有任何一台 server 提供 resource。
+    ///
+    /// 工具目录据此决定摆不摆 `mcp_resource` —— 一台都没有的时候摆出来，
+    /// 模型每次调都拿到一句「没有任何 resource」（约束 2）。
+    pub async fn has_resources(&self) -> bool {
+        self.inner
+            .read()
+            .await
+            .servers
+            .values()
+            .any(|s| !s.resources.is_empty())
+    }
+
+    /// 列出全部 resource：`(server, uri, 说明)`。
+    pub async fn list_resources(&self) -> Vec<(String, String, String)> {
+        self.inner
+            .read()
+            .await
+            .servers
+            .iter()
+            .flat_map(|(name, s)| {
+                s.resources
+                    .iter()
+                    .map(move |(uri, desc)| (name.clone(), uri.clone(), desc.clone()))
+            })
+            .collect()
+    }
+
+    /// 读一个 resource 的正文。
+    ///
+    /// # Errors
+    /// 没有哪台 server 认这个 uri、或者对端读失败。
+    pub async fn read_resource(&self, uri: &str) -> Result<String, String> {
+        let inner = self.inner.read().await;
+        // 按 uri 找是哪台的。**不要求调用方指明 server** —— uri 本身
+        // 就是全局标识（MCP 的约定），多要一个参数只会多一处填错的机会
+        let server = inner
+            .servers
+            .iter()
+            .find(|(_, s)| s.resources.iter().any(|(u, _)| u == uri));
+        let Some((name, server)) = server else {
+            return Err(format!(
+                "没有哪台 MCP server 提供 {uri}。先不带 uri 调一次看看有哪些。"
+            ));
+        };
+        let result = server
+            .service
+            .read_resource(rmcp::model::ReadResourceRequestParams::new(uri))
+            .await
+            .map_err(|e| format!("{name} 读 {uri} 失败：{e}"))?;
+
+        // 只取文本。二进制 resource（图片、pdf）跳过并说一句 —— 与
+        // 工具结果那侧同一条：把字节塞进上下文只会变成一段乱码
+        let mut out = String::new();
+        for c in result.contents {
+            match c {
+                rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
+                    out.push_str(&text);
+                }
+                rmcp::model::ResourceContents::BlobResourceContents { .. } => {
+                    out.push_str("（这一段是二进制内容，读不进上下文）");
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// 所有 server 提供的工具，可以直接并进 `Turn::with_specs`。
@@ -475,6 +547,24 @@ async fn connect_one(name: &str, sc: &ServerConfig) -> Result<Server, String> {
         .await
         .map_err(|e| format!("列工具失败：{e}"))?;
 
+    // resource 列一次。**失败当没有**：大多数 server 不实现这一族，
+    // 把 method-not-found 当成连接失败的话，一台好好的 server 会连不上
+    let resources: Vec<(String, String)> = match service.list_all_resources().await {
+        Ok(rs) => rs
+            .into_iter()
+            .map(|r| {
+                (
+                    r.uri.clone(),
+                    r.description.clone().unwrap_or_else(|| r.name.clone()),
+                )
+            })
+            .collect(),
+        Err(e) => {
+            tracing::debug!(server = name, error = %e, "这台 server 没有 resource（或不支持列出）");
+            Vec::new()
+        }
+    };
+
     let server: Arc<str> = Arc::from(name);
     let risk = sc.trust.risk();
     let specs = listed
@@ -495,7 +585,11 @@ async fn connect_one(name: &str, sc: &ServerConfig) -> Result<Server, String> {
         })
         .collect();
 
-    Ok(Server { service, specs })
+    Ok(Server {
+        service,
+        specs,
+        resources,
+    })
 }
 
 #[cfg(test)]

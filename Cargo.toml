@@ -116,8 +116,10 @@ libc = "0.2"
 # 注意 `default-features = false` 会把 `text` 一起关掉 —— 那样 `TextDiff`
 # 就不在 crate root 里了，报的是「no TextDiff in the root」，
 # 看着像版本不对，实际是 feature 少了一个。
-# tree 工具的 gitignore 感知遍历（goose 同款）
+# tree / grep / glob 的 gitignore 感知遍历（goose 同款）
 ignore = "0.4"
+# grep 的模式匹配。cortex-providers 早就依赖它，不是新拉的
+regex = "1.12"
 similar = { version = "2", default-features = false, features = ["text"] }
 
 # 存储
