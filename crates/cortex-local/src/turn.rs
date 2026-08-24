@@ -211,12 +211,19 @@ struct Caps {
     has_skills: bool,
     /// 用户开了电脑操作，**且**这个构建与这个执行环境真的做得到。
     can_use_computer: bool,
+    /// 够得着资料库那条路（有服务端）。
+    ///
+    /// **不看「库里有没有东西」** —— 与技能那条相反：技能目录**每轮都印在
+    /// 提示词里**，空清单印出来是纯噪音；资料库的内容从不进提示词，模型
+    /// 只在想查时才调工具。库空着时检索回「没找到」是一个正确且有用的
+    /// 答案，不是骗人。
+    can_use_library: bool,
 }
 
 impl Caps {
     /// 有没有任何一样。`with_external` 用它决定要不要重建目录。
     const fn any(self) -> bool {
-        self.can_draw || self.has_skills || self.can_use_computer
+        self.can_draw || self.has_skills || self.can_use_computer || self.can_use_library
     }
 }
 
@@ -241,6 +248,11 @@ fn with_external(base: Turn, external: &[cortex_agent::ToolSpec], caps: Caps) ->
     // 任何测试红，症状只是「模型看得见技能却取不回来」或者反过来
     if caps.has_skills {
         specs.push(cortex_agent::tools::skill_spec());
+    }
+    // 资料库那两个。判据是「够不够得着服务端」而不是「库里有没有东西」——
+    // 见 `Caps::can_use_library` 上那段
+    if caps.can_use_library {
+        specs.extend(cortex_agent::tools::library_specs());
     }
     // ⚠️ 与提示词里那段说明同生共死（同 `has_skills` 那条）：判据是同一个
     // `can_use_computer`。摆了工具不讲坐标系，模型会一直点偏；讲了坐标系
@@ -692,6 +704,9 @@ impl Engine {
             can_use_computer: req.computer_use
                 && crate::computer::supported()
                 && self.exec_env == cortex_agent::ExecEnvironment::LocalMachine,
+            // 与生图同一个判据（有没有可打的服务端）—— 复用而不是各写一遍：
+            // 各写各的话，判错的症状是模型调一个必然失败的工具
+            can_use_library: can_draw,
         };
         let workspace_turn = bound.as_deref().and_then(|ws| {
             // 绑定时校验过，但目录可能之后被删了/移了/换了外接盘。
@@ -1231,6 +1246,47 @@ impl ToolHost for LocalHost {
         }
     }
 
+    async fn library(&self, tool: &str, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
+        match tool {
+            "library_search" => {
+                let Some(query) = arguments.get("query").and_then(|v| v.as_str()) else {
+                    return cortex_agent::ToolResult::err("缺少 query 参数（要找的关键词）");
+                };
+                let limit = arguments.get("limit").and_then(serde_json::Value::as_i64);
+                match self.remote.library_search(query.trim(), limit).await {
+                    Ok(hits) => {
+                        let empty = hits.as_array().is_none_or(|a| a.is_empty());
+                        if empty {
+                            // ⚠️ 说清这是**关键词**没命中，不是「资料库里没有」。
+                            // 后者是模型最容易得出的错误结论，而它会照着那句
+                            // 断言往下说 —— 用户明明传过那份文档
+                            cortex_agent::ToolResult::ok(format!(
+                                "资料库里没有匹配「{query}」的段落。这是关键词检索：                                 换文档里可能出现的原词再试一次，                                 别据此断定用户没有相关材料。"
+                            ))
+                        } else {
+                            cortex_agent::ToolResult::ok(hits.to_string())
+                        }
+                    }
+                    Err(e) => cortex_agent::ToolResult::err(format!("检索资料库失败：{e}")),
+                }
+            }
+            "library_read" => {
+                let Some(id) = arguments.get("item_id").and_then(|v| v.as_str()) else {
+                    return cortex_agent::ToolResult::err(
+                        "缺少 item_id 参数（先用 library_search 拿到它）",
+                    );
+                };
+                let from = arguments.get("from").and_then(serde_json::Value::as_i64);
+                let to = arguments.get("to").and_then(serde_json::Value::as_i64);
+                match self.remote.library_read(id.trim(), from, to).await {
+                    Ok(doc) => cortex_agent::ToolResult::ok(doc.to_string()),
+                    Err(e) => cortex_agent::ToolResult::err(format!("读资料库失败：{e}")),
+                }
+            }
+            other => cortex_agent::ToolResult::err(format!("未知的资料库工具：{other}")),
+        }
+    }
+
     async fn load_skill(&self, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
         let Some(name) = arguments.get("name").and_then(|v| v.as_str()) else {
             return cortex_agent::ToolResult::err(
@@ -1453,6 +1509,37 @@ mod tests {
         assert!(
             !direct.tool_names().contains(&"generate_image"),
             "直连模式没有可打的服务端。摆出来的话，模型会答应画图然后失败 ——              而那条失败用户什么都做不了。实际：{:?}",
+            direct.tool_names()
+        );
+    }
+
+    /// 资料库的两个工具跟着「够不够得着服务端」走。
+    ///
+    /// 与生图同一条判据（`can_use_library: can_draw`）—— 直连模式下
+    /// 摆出来的话，模型会答应去查用户的资料库然后调一条打不到的路，
+    /// 而它拿到失败之后多半会说「你的资料库里没有」。
+    #[test]
+    fn 资料库工具跟着能不能够到服务端走() {
+        let with_server = chat_turn_for(
+            8,
+            &[],
+            Caps {
+                can_use_library: true,
+                ..Caps::default()
+            },
+        );
+        let names = with_server.tool_names();
+        assert!(
+            names.contains(&"library_search") && names.contains(&"library_read"),
+            "够得着服务端就该两个都在 —— 只给检索不给读，模型拿到段号也补不出前后文。实际：{names:?}"
+        );
+
+        // ⚠️ 带一个外来工具，否则 `with_external` 在两者皆空时提前 return，
+        // 「不该加却加了」那条代码走不到 —— 见上面生图那条的同款注释
+        let direct = chat_turn_for(8, &[fake_external("docs", "search")], Caps::default());
+        assert!(
+            !direct.tool_names().contains(&"library_search"),
+            "直连模式没有可打的服务端。摆出来的话模型会去查一个查不到的库，             然后告诉用户「你没有这份材料」—— 而他明明传过。实际：{:?}",
             direct.tool_names()
         );
     }

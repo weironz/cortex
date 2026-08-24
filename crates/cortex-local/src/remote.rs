@@ -228,6 +228,57 @@ impl Remote {
             .map_err(|e| CortexError::Invalid(format!("解析技能正文失败：{e}")))
     }
 
+    /// `POST /library/search` —— 资料库全文检索。
+    ///
+    /// 回的是 `[{item_id, item_name, ord, body, rank}]`。**原样透传**给
+    /// 模型：这一层不挑不改 —— 排序与截断都在服务端做过了（那里才知道
+    /// 一次给几段合适），客户端再挑一次只会让两处判据漂移。
+    pub async fn library_search(
+        &self,
+        query: &str,
+        limit: Option<i64>,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .auth(self.http.post(self.url("/library/search")))
+            .json(&serde_json::json!({ "query": query, "limit": limit }))
+            .send()
+            .await
+            .map_err(map_transport)?;
+        let resp = checked(resp).await?;
+        resp.json()
+            .await
+            .map_err(|e| CortexError::Invalid(format!("解析检索结果失败：{e}")))
+    }
+
+    /// `GET /library/{id}/text` —— 按段读资料库里某一份的正文。
+    pub async fn library_read(
+        &self,
+        item_id: &str,
+        from: Option<i64>,
+        to: Option<i64>,
+    ) -> Result<serde_json::Value> {
+        let mut q: Vec<(&str, String)> = Vec::new();
+        if let Some(f) = from {
+            q.push(("from", f.to_string()));
+        }
+        if let Some(t) = to {
+            q.push(("to", t.to_string()));
+        }
+        let resp = self
+            // id 直接插值：它是 ULID（域上钉死 26 个大写字母数字，
+            // 见 init 迁移），没有需要转义的字符 —— 与 `/sessions/{id}`
+            // 同样的判断。技能名走 query 是因为**那个**是用户随手起的
+            .auth(self.http.get(self.url(&format!("/library/{item_id}/text"))))
+            .query(&q)
+            .send()
+            .await
+            .map_err(map_transport)?;
+        let resp = checked(resp).await?;
+        resp.json()
+            .await
+            .map_err(|e| CortexError::Invalid(format!("解析正文失败：{e}")))
+    }
+
     // 这里**没有** `pending_confirmations`。cortexd 不跑 agent，也就不再有
     // 「远端那本确认簿」可问 —— 那个端点连同它服务的那个进程内 agent 一起
     // 删掉了。跨端批确认要回来的话，得先有一个「确认属于哪台机器」的答案，

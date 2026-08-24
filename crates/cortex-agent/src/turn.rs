@@ -376,6 +376,22 @@ pub trait ToolHost: Send + Sync {
         ToolResult::err("这个宿主不保存任务清单。把你的计划直接写在回答里，别再调这个工具。")
     }
 
+    /// 查 / 读用户的资料库。**由宿主执行** —— 材料在服务端的库里，
+    /// 而 `tools::execute` 那条路是纯文件系统与 shell（与 `load_skill`
+    /// 同一个理由）。
+    ///
+    /// # 默认实现是「这个宿主没有资料库」，不是回空结果
+    ///
+    /// 回空的话模型会得出「资料库里没有这份材料」这个**错误结论**并照着
+    /// 往下说；说清「这个进程连不到资料库」它才会换条路或者告诉用户。
+    /// 与 `generate_image` 的默认分支同一条纪律：响亮的失败胜过假的成功。
+    async fn library(&self, _tool: &str, _arguments: &serde_json::Value) -> ToolResult {
+        ToolResult::err(
+            "这个 agent 进程连不到资料库（它没有可打的服务端）。\
+             不要断定用户的资料库里没有这份材料 —— 是这条路在当前环境下不通。",
+        )
+    }
+
     /// 问用户准不准。**必须在有限时间内返回。**
     ///
     /// # 默认实现是「没人回答」，不是「批准」
@@ -1125,6 +1141,9 @@ impl Turn {
         } else if spec.name == "load_skill" {
             // 同上：正文在服务端的库里，不在文件系统上
             host.load_skill(&call.arguments).await
+        } else if tools::is_library_tool(&spec.name) {
+            // 同上：材料在服务端的库里，不在文件系统上
+            host.library(&spec.name, &call.arguments).await
         } else if spec.name == "todo_write" {
             // 同上：清单跟着会话走，会话是宿主的概念
             host.todo_write(&call.arguments).await
