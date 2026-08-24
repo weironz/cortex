@@ -65,6 +65,45 @@ List<FileChanges> groupChangesByFile(List<ChatMessage> messages) {
   ];
 }
 
+/// 本会话改动的正文 —— 弹层与右栏「本轮改动」页签**共用这一份**。
+///
+/// 抄成两份的下场：空态文案、「改了 N 次」标注、diff 上限这些细节
+/// 各自演化，哪天一边修了另一边还带着老毛病。
+class SessionChangesView extends ConsumerWidget {
+  const SessionChangesView({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final messages = ref.watch(
+      chatControllerProvider.select((s) => s.activeTranscript),
+    );
+    final files = groupChangesByFile(messages);
+
+    if (files.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 4),
+        child: Text(
+          // 说清是「没改过」而不是「没记录」—— 两者对用户的下一步
+          // 完全不同：前者不用去查，后者要去查为什么没记上
+          '这个会话还没有改过任何文件。',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
+      );
+    }
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [for (final f in files) _FileSection(file: f)],
+      ),
+    );
+  }
+}
+
 class _ChangesDialog extends ConsumerWidget {
   const _ChangesDialog();
 
@@ -94,28 +133,7 @@ class _ChangesDialog extends ConsumerWidget {
         ],
       ),
       contentPadding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
-      content: SizedBox(
-        width: 720,
-        child: files.isEmpty
-            ? Padding(
-                padding: const EdgeInsets.symmetric(vertical: 24),
-                child: Text(
-                  // 说清是「没改过」而不是「没记录」—— 两者对用户的下一步
-                  // 完全不同：前者不用去查，后者要去查为什么没记上
-                  '这个会话还没有改过任何文件。',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              )
-            : SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [for (final f in files) _FileSection(file: f)],
-                ),
-              ),
-      ),
+      content: const SizedBox(width: 720, child: SessionChangesView()),
       actions: [
         FilledButton(
           onPressed: () => Navigator.of(context).pop(),

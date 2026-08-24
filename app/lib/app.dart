@@ -20,8 +20,8 @@ class CortexApp extends ConsumerWidget {
     return MaterialApp(
       title: 'Cortex',
       debugShowCheckedModeBanner: false,
-      theme: CortexTheme.light(),
-      darkTheme: CortexTheme.dark(),
+      theme: CortexTheme.light(compact: ref.watch(densityProvider)),
+      darkTheme: CortexTheme.dark(compact: ref.watch(densityProvider)),
       // 存在 settings.json 里，见 ThemeModeNotifier；顶栏那个按钮循环切
       themeMode: ref.watch(themeModeProvider),
       // 动效三档在这里落地：**改写 `MediaQuery.disableAnimations` 本身**，

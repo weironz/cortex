@@ -336,6 +336,36 @@ class ConfirmController extends Notifier<ConfirmState> {
 final confirmControllerProvider =
     NotifierProvider<ConfirmController, ConfirmState>(ConfirmController.new);
 
+/// 正在**等用户确认**的那些会话 id —— 界面上的第四状态。
+///
+/// # 为什么值得单独一个状态（和一个 provider）
+///
+/// running / finished / failed 三态里，只有它是「不处理就永远卡住」的：
+/// 别的状态时间都在替用户干活，这个状态时间在流逝而什么都没发生。
+/// 它却曾与 running 共用蓝色 —— 人扫一眼分不出「在跑」和「在等我」。
+///
+/// 落点必须**同色**（琥珀，`tokens.warning`），目前两处：左栏会话行的
+/// 状态点、顶栏的「等你确认 · N」pill。⚠️ 设计稿还有第三处（系统托盘
+/// 图标），但这个应用**目前没有托盘** —— 那一处等托盘功能立项时一起做，
+/// 别为一个点先引入一整个托盘。
+///
+/// 派生成独立 provider 而不是各处自己 `watch(confirmControllerProvider)`
+/// 再算：算法（按 sessionId 去重）要写一遍就够。
+///
+/// ⚠️ **select 的目标是 String，不是 Set。** `_sweep` 每秒都换一次
+/// pending 的列表引用（倒计时靠它重画），而 `select` 按 `==` 比较 ——
+/// Set/List 是引用相等，选它们等于每秒重建整条左栏。String 是值相等，
+/// 队列内容没变时 tick 被滤掉。
+final awaitingConfirmSessionsProvider = Provider<Set<String>>((ref) {
+  final joined = ref.watch(
+    confirmControllerProvider.select((s) {
+      final ids = {for (final p in s.pending) ?p.sessionId}.toList()..sort();
+      return ids.join('\n');
+    }),
+  );
+  return joined.isEmpty ? const {} : joined.split('\n').toSet();
+});
+
 extension _FirstOrNull<E> on Iterable<E> {
   E? get firstOrNull {
     final it = iterator;

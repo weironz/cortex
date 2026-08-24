@@ -129,7 +129,7 @@ class _SkillRow extends ConsumerWidget {
     // 关掉的整行压暗：它在提示词里根本不存在，长得和开着的一样是在骗人
     final dim = !skill.enabled;
 
-    return ListTile(
+    final tile = ListTile(
       key: ValueKey('skill:${skill.id}'),
       onTap: () => showSkillEditor(context, ref, skill),
       contentPadding: const EdgeInsets.fromLTRB(14, 2, 8, 2),
@@ -180,6 +180,9 @@ class _SkillRow extends ConsumerWidget {
         ],
       ),
     );
+    // **整行** 0.45，不只是标题变灰（设计稿的数）：标题灰、开关和图标
+    // 照常鲜亮的行，扫一眼仍像开着的。Opacity 不挡命中 —— 开关照样能点
+    return dim ? Opacity(opacity: 0.45, child: tile) : tile;
   }
 
   Future<void> _confirmDelete(

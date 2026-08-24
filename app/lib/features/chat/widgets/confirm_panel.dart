@@ -95,13 +95,43 @@ class _ConfirmCard extends ConsumerWidget {
           )
         : null;
 
+    // ── 边框强度按**爆炸半径**分三档，不是统一样式 ──
+    //
+    // 判据是「批错了能坏到哪」，不是「错误多严重」：读（越界看一眼，
+    // 半径最小）→ 琥珀细框；写入（改文件，能回滚）→ 中等红框；
+    // 执行（shell，什么都可能发生）→ 最重的红框。
+    // 统一样式的代价是人对确认框脱敏 —— 每天点十个「读取」之后，
+    // 那个真正危险的「执行」看起来毫无区别。
+    // 未知档按最重画：一个新长出来的风险等级绝不能被画成最轻的
+    final (
+      Color borderColor,
+      double borderWidth,
+      Color fillColor,
+    ) = switch (request.risk) {
+      'safe' => (
+        theme.cortex.warning.withValues(alpha: 0.55),
+        1.0,
+        theme.cortex.warning.withValues(alpha: 0.06),
+      ),
+      'write' => (
+        scheme.error.withValues(alpha: 0.45),
+        1.0,
+        scheme.errorContainer.withValues(alpha: 0.30),
+      ),
+      _ => (
+        scheme.error.withValues(alpha: 0.70),
+        1.5,
+        scheme.errorContainer.withValues(alpha: 0.42),
+      ),
+    };
+
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
       decoration: BoxDecoration(
-        color: scheme.errorContainer.withValues(alpha: 0.42),
+        color: fillColor,
         borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
-        border: Border.all(color: scheme.error.withValues(alpha: 0.55)),
+        border: Border.all(color: borderColor, width: borderWidth),
       ),
       padding: const EdgeInsets.fromLTRB(14, 11, 14, 11),
       child: Column(

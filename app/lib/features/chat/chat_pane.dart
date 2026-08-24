@@ -4,8 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
+import '../settings/pages/model_picker.dart';
 import '../shell/widgets/sync_indicator.dart';
 import 'session_changes_sheet.dart';
+import 'widgets/awaiting_confirm_pill.dart';
 import 'widgets/confirm_panel.dart';
 import 'widgets/conversation_view.dart';
 import 'widgets/message_composer.dart';
@@ -17,6 +19,7 @@ class ChatPane extends ConsumerWidget {
     super.key,
     this.onToggleSessions,
     this.onSelectPanel,
+    this.onOpenPanel,
     this.sessionsVisible = false,
     this.activePanel,
   });
@@ -26,6 +29,11 @@ class ChatPane extends ConsumerWidget {
 
   /// 点右侧某个面板的图标。窄屏时 `AppShell` 会顺手把抽屉打开。
   final void Function(RightPanel panel)? onSelectPanel;
+
+  /// **确保**右栏开着并显示某面板 —— 与 [onSelectPanel] 的差别是语义：
+  /// 那个是开关（同面板再点一次 = 收起），这个是「带我去」。
+  /// 「本会话改动」要的是后者 —— 右栏已经开着时点它，收起整栏是事故。
+  final void Function(RightPanel panel)? onOpenPanel;
 
   /// 左栏此刻是不是内联可见 —— 决定图标朝哪边、tooltip 说「显示」还是「隐藏」。
   final bool sessionsVisible;
@@ -114,17 +122,30 @@ class ChatPane extends ConsumerWidget {
                   ),
                 ),
           actions: [
+            // 第四状态在顶栏的落点：**哪几条会话在等你**。
+            // 会话行上那个琥珀点只有翻到那一行才看得见，这颗 pill 保证
+            // 「有人在等」这件事在任何滚动位置都可见，点一下直达
+            const AwaitingConfirmPill(),
             // 工作区那个 chip 搬去了输入框底下（见 `MessageComposer` 里的
             // `_BeforeSendChips`）：它与权限档是同一类东西 —— 发出去**之前**
             // 要定的事。这一排剩下的都是应用级的显示开关，混在一起会让人
             // 以为工作区也是「看不看」而不是「跑在哪」
             const SyncIndicator(),
             const _BackendBadge(),
-            // 本会话改动。放在状态与显示开关之间：它既不是状态
-            //（不会自己变），也不是显示开关（点开是一个弹层）
+            // 本会话改动。右栏能开时开到「本轮改动」页签 —— 改动是
+            // **对照着对话读**的，弹层会把对话挡住；右栏开不了的场景
+            // 退回弹层
             if (hasSession)
               IconButton(
-                onPressed: () => showSessionChanges(context),
+                onPressed: () {
+                  final open = onOpenPanel;
+                  if (open == null) {
+                    showSessionChanges(context);
+                    return;
+                  }
+                  ref.read(railTabProvider.notifier).go(RailTab.changes);
+                  open(RightPanel.files);
+                },
                 iconSize: 18,
                 tooltip: '本会话改动',
                 icon: const Icon(Icons.difference_outlined),
@@ -355,6 +376,13 @@ class _SendErrorBanner extends ConsumerWidget {
             ),
           ),
           TextButton(onPressed: controller.retryLast, child: const Text('重试')),
+          // 模型失败的第二条出路：**换一个再试**。失败往往是这个模型的事
+          // （配额、超时、这家供应商挂了），换一个立刻能走 —— 只给「重试」
+          // 等于让人对着同一堵墙撞第二次
+          TextButton(
+            onPressed: () => showModelPicker(context, ref),
+            child: const Text('换模型'),
+          ),
           IconButton(
             onPressed: controller.clearSendError,
             iconSize: 16,

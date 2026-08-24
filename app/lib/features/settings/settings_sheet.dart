@@ -51,14 +51,26 @@ Future<void> showSettingsSheet(BuildContext context) {
 /// 的；后者是**偏好**、会反复改。堆在一页里的下场是想换个默认模型的人
 /// 得先滚过一屏 key 与端点。
 ///
-/// **导航不分组。** Cherry 那边分了工具 / 偏好 / 系统三组，因为它有二十
-/// 来项；我们只有八项，分组会让每组只剩一两条 —— 那时组标题比它组织的
-/// 内容还多，纯属噪音。
+/// **导航分四组**（模型 / 工具 / 偏好 / 系统，2026-08-24 起）。
+/// 上一版写着「只有八项不分组」—— 现在十项了，每组两三条，组标题开始
+/// 挣回它占的那一行：想改模型的人不必扫过技能和用量。
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
 
   @override
   ConsumerState<SettingsPage> createState() => _SettingsPageState();
+}
+
+/// 导航的四组。声明顺序 = 展示顺序。
+enum _NavGroup {
+  model('模型'),
+  tools('工具'),
+  prefs('偏好'),
+  system('系统');
+
+  const _NavGroup(this.label);
+
+  final String label;
 }
 
 /// 一页。
@@ -67,6 +79,7 @@ typedef _Section = ({
   String hint,
   IconData icon,
   Widget page,
+  _NavGroup group,
 
   /// 这一项在这个部署上摆不摆得出来。`null` = 恒摆。
   ///
@@ -84,19 +97,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   /// 都没点。存全量索引则天然不受影响。
   int _index = 0;
 
+  // 组内排序沿用原则「按我要改什么，不按它属于哪个模块」；
+  // 组间顺序 = _NavGroup 声明顺序。列表按组连续排，组头在渲染时
+  // 「与上一项不同组就画」—— 不用二级结构，闸掉一项也不会剩个空组头
+  // （组里全被闸掉时组头跟着最后一项一起消失）
   static final _sections = <_Section>[
-    (
-      label: '连接',
-      hint: '数据源 · 后端状态',
-      icon: Icons.cable_rounded,
-      page: const ConnectionPage(),
-      gate: null,
-    ),
     (
       label: '模型服务',
       hint: '供应商 · key · 型号',
       icon: Icons.psychology_outlined,
       page: const ModelPage(),
+      group: _NavGroup.model,
       gate: null,
     ),
     (
@@ -104,16 +115,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       hint: '主 · 快速 · 绘画',
       icon: Icons.tune_rounded,
       page: const ModelRolesPage(),
+      group: _NavGroup.model,
       gate: null,
     ),
-    // 技能紧挨着「MCP 与工具」：两者都是「模型手上多了什么」。
-    // 差别是 MCP 给的是**能力**（去做一件它本来做不到的事），
+    // 技能紧挨着连接器：两者都是「模型手上多了什么」。
+    // 差别是连接器给的是**能力**（去做一件它本来做不到的事），
     // 技能给的是**做法**（同一件事按你的规矩做）
     (
       label: '技能',
       hint: '写好的做法 · 按需取用',
       icon: Icons.auto_stories_outlined,
       page: const SkillsPage(),
+      group: _NavGroup.tools,
       gate: null,
     ),
     (
@@ -123,26 +136,42 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       hint: '一键接入 · MCP server',
       icon: Icons.extension_outlined,
       page: const McpPage(),
+      group: _NavGroup.tools,
       gate: null,
     ),
-    // 紧跟连接器：同样是「模型手上有什么」。
-    //
-    // 但它**不再压在连接器页里面**（2026-08-23 搬出来的）。理由不是分类，
+    // 它**不压在连接器页里面**（2026-08-23 搬出来的）。理由不是分类，
     // 是权限：别的连接器交出去的是一台别人写的 server，只有这一条交出去的
-    // 是你这台机器的屏幕与键鼠 —— 想确认「我到底有没有开着它」的人，
-    // 不会想到去翻连接器页并往下滚过一整列 MCP。
+    // 是你这台机器的屏幕与键鼠
     (
       label: '电脑操作',
       hint: '截屏与键鼠 · 默认关',
       icon: Icons.desktop_windows_outlined,
       page: const ComputerUsePage(),
+      group: _NavGroup.tools,
       gate: computerUseAvailableProvider,
+    ),
+    (
+      label: '外观',
+      hint: '主题 · 动效',
+      icon: Icons.palette_outlined,
+      page: const AppearancePage(),
+      group: _NavGroup.prefs,
+      gate: null,
     ),
     (
       label: '数据',
       hint: '工作空间 · 导入',
       icon: Icons.folder_outlined,
       page: const DataPage(),
+      group: _NavGroup.prefs,
+      gate: null,
+    ),
+    (
+      label: '连接',
+      hint: '数据源 · 后端状态',
+      icon: Icons.cable_rounded,
+      page: const ConnectionPage(),
+      group: _NavGroup.system,
       gate: null,
     ),
     (
@@ -150,22 +179,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       hint: 'token · 花费 · 配额',
       icon: Icons.receipt_long_outlined,
       page: const UsagePage(),
+      group: _NavGroup.system,
       gate: null,
     ),
-    // 排在「关于」前面：它是**偏好**，与上面几项同类；
-    // 「关于」是这一列里唯一一个不改任何东西的，压在最后
-    (
-      label: '外观',
-      hint: '主题 · 动效',
-      icon: Icons.palette_outlined,
-      page: const AppearancePage(),
-      gate: null,
-    ),
+    // 「关于」压在最后：它是这一列里唯一一个不改任何东西的
     (
       label: '关于',
       hint: '版本 · 更新',
       icon: Icons.info_outline_rounded,
       page: const AboutPage(),
+      group: _NavGroup.system,
       gate: null,
     ),
   ];
@@ -262,7 +285,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           final i = visible[row];
           final s = _sections[i];
           final selected = i == index;
-          return Padding(
+          // 组头：与**可见的**上一项不同组才画。判据是可见序列而不是
+          // 全量序列 —— 一组被闸得只剩没被闸的那项时组头还在；
+          // 整组都被闸掉时组头跟着一起消失，不留一个空标题
+          final newGroup =
+              row == 0 || _sections[visible[row - 1]].group != s.group;
+          final tile = Padding(
             padding: const EdgeInsets.only(bottom: 2),
             child: ListTile(
               dense: true,
@@ -285,6 +313,25 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               subtitle: Text(s.hint, style: theme.textTheme.labelSmall),
               onTap: () => setState(() => _index = i),
             ),
+          );
+          if (!newGroup) return tile;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                // 首组顶部少留：上面已经有 ListView 自己的 padding
+                padding: EdgeInsets.fromLTRB(14, row == 0 ? 2 : 14, 14, 4),
+                child: Text(
+                  s.group.label,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.8,
+                    color: theme.cortex.foregroundTertiary,
+                  ),
+                ),
+              ),
+              tile,
+            ],
           );
         },
       ),

@@ -24,6 +24,9 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     required this.success,
     required this.warning,
     required this.info,
+    required this.hover,
+    required this.accentSoft,
+    required this.accentInk,
   });
 
   /// 导航区那一整块。**与内容区是两个表面** —— 这是 Cherry Studio
@@ -55,9 +58,26 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
   final Color foregroundTertiary;
 
   /// 三种反馈色。**只在传达状态时用**，不当装饰。
+  ///
+  /// ⚠️ [warning]（琥珀）从 2026-08-24 起兼任**第四状态** awaiting_confirm
+  /// 的颜色：它是唯一一个「不处理就永远卡住」的状态，却曾与 running 共用
+  /// 蓝色 —— 人扫一眼分不出「在跑」和「在等我」。三处落点（左栏状态点、
+  /// 顶栏 pill、托盘图标）必须都取这一个值，各配各的迟早漂。
   final Color success;
   final Color warning;
   final Color info;
+
+  /// 悬停垫色。**半透明**，与 [sidebarAccent]（实色、表达选中）分开 ——
+  /// 悬停要能叠在任何表面上，选中只出现在侧栏那一种表面上。
+  final Color hover;
+
+  /// 品牌色的**垫底**版本：选中态背景、pill 底。半透明，
+  /// 叠在哪个表面上都成立（设计稿 `--accSoft`）。
+  final Color accentSoft;
+
+  /// 品牌色的**文字**版本：链接、彩色数字。比主色深/亮一档 ——
+  /// 主色是为按钮底调的，直接当文字用对比度不够（设计稿 `--accInk`）。
+  final Color accentInk;
 
   /// 没挂扩展时从 `ColorScheme` 现推一份。见 [CortexTokensX.cortex]。
   factory CortexTokens.fallbackFor(ColorScheme s) => CortexTokens(
@@ -68,17 +88,32 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     success: s.secondary,
     warning: s.tertiary,
     info: s.primary,
+    hover: s.onSurface.withValues(alpha: 0.045),
+    accentSoft: s.primary.withValues(alpha: 0.10),
+    accentInk: s.primary,
   );
 
-  /// 圆角阶。按密度取，不要每处现编一个数。
+  /// 圆角阶 —— 2026-08-24 起对齐设计稿的五档体系。
   ///
-  /// 数值来自 Cherry Studio 的 `radius.css`（它写成 rem，这里换算成逻辑
-  /// 像素）。**紧凑控件用小的，容器用大的**，全圆只留给胶囊、头像和圆钮。
-  static const double radiusSm = 6; // 徽标、小按钮
-  static const double radiusMd = 8; // 输入框、菜单项
-  static const double radiusLg = 10; // 主按钮、气泡
-  static const double radiusXl = 14; // 卡片、面板
-  static const double radius2xl = 18; // 对话框
+  /// 主干五档：**窗口 14 / 卡片 13 / 输入框 18 / 行 9 / 胶囊 999**。
+  /// 成体系的意义是不再逐个组件拍脑袋 —— 每一处圆角都答得出
+  /// 「它是五档里的哪一档」。小构件（徽标 7、气泡 11）是主干外的两个
+  /// 辅助档，设计稿里各出现 20/18 次，不是漏网之鱼。
+  ///
+  /// 旧的 Sm/Md/Lg/Xl/2xl 命名保留（消费面 40+ 处），**值重定**到新体系：
+  /// 改名的收益是零，改值让所有旧调用点一次到位。
+  static const double radiusSm = 7; // 徽标、小按钮（辅助档）
+  static const double radiusMd = 9; // 行、菜单项（=radiusRow）
+  static const double radiusLg = 11; // 气泡、主按钮（辅助档）
+  static const double radiusXl = 13; // 卡片、面板（=radiusCard）
+  static const double radius2xl = 14; // 对话框 = 浮起的窗口（=radiusWindow）
+
+  /// 语义别名 —— 新代码写这几个，读的人不用背数值表。
+  static const double radiusWindow = 14;
+  static const double radiusCard = 13;
+  static const double radiusInput = 18; // 输入框刻意比对话框还圆：胶囊感
+  static const double radiusRow = 9;
+  static const double radiusPill = 999;
 
   @override
   CortexTokens copyWith({
@@ -89,6 +124,9 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     Color? success,
     Color? warning,
     Color? info,
+    Color? hover,
+    Color? accentSoft,
+    Color? accentInk,
   }) => CortexTokens(
     sidebar: sidebar ?? this.sidebar,
     sidebarAccent: sidebarAccent ?? this.sidebarAccent,
@@ -97,6 +135,9 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     success: success ?? this.success,
     warning: warning ?? this.warning,
     info: info ?? this.info,
+    hover: hover ?? this.hover,
+    accentSoft: accentSoft ?? this.accentSoft,
+    accentInk: accentInk ?? this.accentInk,
   );
 
   @override
@@ -114,6 +155,9 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
       success: Color.lerp(success, other.success, t)!,
       warning: Color.lerp(warning, other.warning, t)!,
       info: Color.lerp(info, other.info, t)!,
+      hover: Color.lerp(hover, other.hover, t)!,
+      accentSoft: Color.lerp(accentSoft, other.accentSoft, t)!,
+      accentInk: Color.lerp(accentInk, other.accentInk, t)!,
     );
   }
 }
@@ -142,22 +186,24 @@ extension CortexTokensX on ThemeData {
 /// 刻意手写而不是 `ColorScheme.fromSeed`：生成的色调板会给**每一个表面**
 /// 都染上一层可见的色偏，读起来像「一个 Flutter demo」。
 ///
-/// 2026-08-21 按 Cherry Studio 与 LobeHub 的设计语言重做了一遍
-/// （逐条对照见 [docs/design.md](../../../docs/design.md)）。三条最关键的：
+/// 2026-08-24 对齐设计稿（`docs/design/cortex-ui-design.html`，13 屏双主题）
+/// 重做了一遍，数值**逐个照抄**它的 CSS 变量，不再自己调：
 ///
-/// 1. **灰是纯中性的**（色度为 0），不是「略偏冷」。偏冷的灰在与真正的
-///    彩色并排时会读成「一个没调准的颜色」，而不是「无色」。
-/// 2. **边框用透明度，不用实色**。实色边框只在它被调出来的那一个表面上
-///    好看；换到卡片、弹层、侧栏上就会偏亮或偏暗。
-/// 3. **层级靠表面，不靠阴影**。ground → card → popover 逐层变亮
-///    （深色下尤其重要：弹层在卡片**之上**，就该更亮）。
+/// 1. **中性阶从纯灰换成冷调**（fg `#17171A`、sb `#EFEEF3` 都带一丝蓝紫）。
+///    上一版坚持色度为 0，理由是「偏色的灰像没调准」—— 设计稿的答案是
+///    让整套灰**往品牌靛蓝的方向**统一偏，偏得成体系就不是没调准，
+///    而且与 macOS 的 sidebar/content 分层观感一致。
+/// 2. **边框仍用透明度**：浅色 7% 黑、深色 9% 白，同一个值在每个表面上
+///    都成立。强分隔（功能区之间）浅 11% / 深 15%。
+/// 3. **层级靠表面**：深色下 win `#1B1B1F` → card `#26262C` → fill
+///    `#2C2C33` 逐层变亮 —— 浮起来的东西更亮，不是更暗。
 ///
-/// 品牌靛蓝**保留**。抄的是它们的体系（角色划分、表面分层、克制程度），
-/// 不是它们的色相 —— 换成 Cherry 的品牌绿只会让 Cortex 看起来像 Cherry。
+/// 品牌靛蓝保留（浅 `#5B62F4` / 深 `#7C82FF`）。渐变**只留发送键一处**：
+/// 渐变一多，「主要动作」就不再突出。
 abstract final class CortexTheme {
   // 主强调色 —— 用户气泡、焦点、主要动作。整个产品里唯一的品牌色。
   static const _indigo = Color(0xFF5B62F4);
-  static const _indigoLight = Color(0xFF7A80FF);
+  static const _indigoLight = Color(0xFF7C82FF);
 
   /// 第二个语义强调色：**状态**（完成、激活、附件就位）。
   ///
@@ -167,8 +213,13 @@ abstract final class CortexTheme {
   static const _tealLight = Color(0xFF0E7C86);
   static const _tealDark = Color(0xFF4FD1C5);
 
-  static ThemeData light() => _build(_lightScheme, Brightness.light);
-  static ThemeData dark() => _build(_darkScheme, Brightness.dark);
+  /// [compact] 是桌面端的「紧凑」密度档：行高收 −6px（VisualDensity
+  /// vertical −1.5，Material 一档 4px）、正文 14px/1.66。
+  /// **默认档一个数都不动** —— 长回答需要那个行距。
+  static ThemeData light({bool compact = false}) =>
+      _build(_lightScheme, Brightness.light, compact: compact);
+  static ThemeData dark({bool compact = false}) =>
+      _build(_darkScheme, Brightness.dark, compact: compact);
 
   static const _lightScheme = ColorScheme(
     brightness: Brightness.light,
@@ -180,29 +231,31 @@ abstract final class CortexTheme {
     onSecondary: Colors.white,
     secondaryContainer: Color(0xFFD3F1F3),
     onSecondaryContainer: Color(0xFF04353A),
-    error: Color(0xFFB3261E),
+    // 失败红加深到 #BC2E38：原值在 fill 上只有 4.1:1，
+    // 比旁边的绿弱一档 —— 失败恰恰是最不能弱的那个
+    error: Color(0xFFBC2E38),
     onError: Colors.white,
     errorContainer: Color(0xFFF9DEDC),
     onErrorContainer: Color(0xFF410E0B),
-    // ── 中性阶：色度全为 0 ──
+    // ── 中性阶：冷调（设计稿 LIGHT）──
     //
-    // 数值对齐 Cherry Studio 的 provider（它用 oklch 写，`oklch(0.556 0 0)`
-    // 这一串就是 Tailwind neutral-500 = #737373）。**不要顺手把它们调"暖"
-    // 或"冷"一点**：那正是这次要去掉的东西。
+    // fg #17171A / fg2 #5E5E68 / fg3 见 CortexTokens.foregroundTertiary。
+    // 整套灰往品牌靛蓝的方向统一偏 —— 偏得成体系就不是「没调准」
     surface: Colors.white,
-    onSurface: Color(0xFF1C1C1C),
-    onSurfaceVariant: Color(0xFF737373),
-    // 边框用**透明度**：同一个值在白底、卡片、侧栏上都成立。
-    // 实色边框只在被调出来的那一个表面上好看
-    outline: Color(0x33000000),
-    outlineVariant: Color(0x14000000),
+    onSurface: Color(0xFF17171A),
+    onSurfaceVariant: Color(0xFF5E5E68),
+    // 边框用**透明度**：sep 7% 黑、sepStrong 11%。
+    // 同一个值在白底、卡片、侧栏上都成立
+    outline: Color(0x1C17171A),
+    outlineVariant: Color(0x1217171A),
+    // fill 阶：#F4F4F7（输入框、chip 底）→ #EDEDF1（按下、第二档）
     surfaceContainerLowest: Colors.white,
-    surfaceContainerLow: Color(0xFFFAFAFA),
-    surfaceContainer: Color(0xFFF5F5F5),
-    surfaceContainerHigh: Color(0xFFF0F0F0),
-    surfaceContainerHighest: Color(0xFFE9E9E9),
-    inverseSurface: Color(0xFF262626),
-    onInverseSurface: Color(0xFFFAFAFA),
+    surfaceContainerLow: Color(0xFFF9F9FB),
+    surfaceContainer: Color(0xFFF6F6F9),
+    surfaceContainerHigh: Color(0xFFF4F4F7),
+    surfaceContainerHighest: Color(0xFFEDEDF1),
+    inverseSurface: Color(0xFF26262C),
+    onInverseSurface: Color(0xFFF9F9FB),
   );
 
   static const _darkScheme = ColorScheme(
@@ -215,34 +268,43 @@ abstract final class CortexTheme {
     onSecondary: Color(0xFF00312F),
     secondaryContainer: Color(0xFF0C4A4C),
     onSecondaryContainer: Color(0xFFB8F0EC),
-    error: Color(0xFFF2B8B5),
-    onError: Color(0xFF601410),
+    error: Color(0xFFF87171),
+    onError: Color(0xFF3A0A0D),
     errorContainer: Color(0xFF8C1D18),
     onErrorContainer: Color(0xFFF9DEDC),
-    // ── 深色下**层越高越亮** ──
+    // ── 深色阶照抄设计稿 DARK，层越高越亮 ──
     //
-    // Cherry Studio 在它的 provider 里专门为这一条写了注释：弹层坐在卡片
-    // **之上**，所以它该更亮，而不是更暗。反过来做（弹层更深）会让浮起来的
-    // 东西看着陷进去，而那是浅色模式的直觉被原样搬过来的结果。
-    surface: Color(0xFF0F0F0F),
-    onSurface: Color(0xFFEDEDED),
-    onSurfaceVariant: Color(0xFFA1A1A1),
-    outline: Color(0x33FFFFFF),
-    outlineVariant: Color(0x14FFFFFF),
-    surfaceContainerLowest: Color(0xFF0A0A0A),
-    surfaceContainerLow: Color(0xFF141414),
-    surfaceContainer: Color(0xFF171717),
-    surfaceContainerHigh: Color(0xFF1F1F1F),
-    surfaceContainerHighest: Color(0xFF262626),
-    inverseSurface: Color(0xFFEDEDED),
-    onInverseSurface: Color(0xFF171717),
+    // win #1B1B1F → card #26262C → fill #2C2C33 → fill2 #33333B。
+    // 浮起来的东西更亮，不是更暗 —— 反过来做会让弹层看着陷进去
+    surface: Color(0xFF1B1B1F),
+    onSurface: Color(0xFFF2F2F5),
+    onSurfaceVariant: Color(0xFFB4B4BE),
+    // sep 9% 白 / sepStrong 15%
+    outline: Color(0x26FFFFFF),
+    outlineVariant: Color(0x17FFFFFF),
+    surfaceContainerLowest: Color(0xFF17171B),
+    surfaceContainerLow: Color(0xFF232328),
+    surfaceContainer: Color(0xFF26262C),
+    surfaceContainerHigh: Color(0xFF2C2C33),
+    surfaceContainerHighest: Color(0xFF33333B),
+    inverseSurface: Color(0xFFF2F2F5),
+    onInverseSurface: Color(0xFF26262C),
   );
 
-  static ThemeData _build(ColorScheme scheme, Brightness brightness) {
+  static ThemeData _build(
+    ColorScheme scheme,
+    Brightness brightness, {
+    bool compact = false,
+  }) {
     final base = ThemeData(
       useMaterial3: true,
       colorScheme: scheme,
       brightness: brightness,
+      // 紧凑档：Material 组件整体收 6px（vertical −1.5 × 4px）。
+      // 水平只收一半 —— 行高是这档要省的，左右缩太狠会挤到文案
+      visualDensity: compact
+          ? const VisualDensity(horizontal: -1.0, vertical: -1.5)
+          : VisualDensity.standard,
     );
 
     final dark = brightness == Brightness.dark;
@@ -250,25 +312,33 @@ abstract final class CortexTheme {
       scaffoldBackgroundColor: scheme.surface,
       extensions: [
         CortexTokens(
-          // 侧栏比内容区**暗一档**（深色下则是亮一档）。抄 Cherry Studio：
-          // 它的 `--cs-sidebar` 在浅色是 0.9672、深色是 0.2393，
-          // 两边都与 background 差出肉眼分得清的一档
-          sidebar: dark ? const Color(0xFF171717) : const Color(0xFFF4F4F4),
-          // 比 sidebar 再走一档。差得太小选中态就看不出来，
-          // 差得太大它会读成「另一个区域」而不是「这一项」
+          // 侧栏（设计稿 --sb）：浅色 #EFEEF3 带冷紫调，与 macOS 的
+          // sidebar/content 分层观感一致；深色 #232328 比 win 亮一档
+          sidebar: dark ? const Color(0xFF232328) : const Color(0xFFEFEEF3),
+          // 选中/悬停那一项（--sb2）：比 sidebar 再走一档。
+          // 差得太小选中态看不出来，差得太大会读成「另一个区域」
           sidebarAccent: dark
-              ? const Color(0xFF2A2A2A)
-              : const Color(0xFFE4E4E4),
+              ? const Color(0xFF2A2A30)
+              : const Color(0xFFE7E6ED),
           sidebarBorder: dark
-              ? const Color(0xFF262626)
-              : const Color(0xFFE5E5E5),
+              ? const Color(0xFF2A2A30)
+              : const Color(0xFFE3E2E9),
+          // fg3（--fg3）：浅 #63636C / 深 #9A9AA5。实色，不是透明度
           foregroundTertiary: dark
-              ? const Color(0xFF737373)
-              : const Color(0xFF909090),
-          // 反馈三色：深色下取更亮的一档，否则在深底上读不出来
-          success: dark ? const Color(0xFF4ADE80) : const Color(0xFF16A34A),
-          warning: dark ? const Color(0xFFFBBF24) : const Color(0xFFD97706),
+              ? const Color(0xFF9A9AA5)
+              : const Color(0xFF63636C),
+          // 反馈三色（--ok / --warn / --del 见 ColorScheme.error）。
+          // 浅色取的是**深**的一档（#0F6B32 / #7C500A）：它们大多落在
+          // fill 或白底上当文字/描边用，浅色的绿黄在那儿读不出来
+          success: dark ? const Color(0xFF4ADE80) : const Color(0xFF0F6B32),
+          warning: dark ? const Color(0xFFFBBF24) : const Color(0xFF7C500A),
           info: dark ? const Color(0xFF60A5FA) : const Color(0xFF2563EB),
+          // 悬停垫（--hov）：半透明，叠在任何表面上都成立
+          hover: dark ? const Color(0x0FFFFFFF) : const Color(0x0B17171A),
+          // 品牌色垫底（--accSoft）：浅 10% / 深 18%
+          accentSoft: dark ? const Color(0x2E7C82FF) : const Color(0x1A5B62F4),
+          // 品牌色文字（--accInk）：链接、彩色数字
+          accentInk: dark ? const Color(0xFFA5A9FF) : const Color(0xFF4348DE),
         ),
       ],
       dividerTheme: DividerThemeData(
@@ -276,7 +346,7 @@ abstract final class CortexTheme {
         thickness: 1,
         space: 1,
       ),
-      textTheme: _textTheme(base.textTheme, scheme),
+      textTheme: _textTheme(base.textTheme, scheme, compact: compact),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: scheme.surfaceContainerHigh,
@@ -351,7 +421,11 @@ abstract final class CortexTheme {
         borderSide: BorderSide(color: color, width: width),
       );
 
-  static TextTheme _textTheme(TextTheme base, ColorScheme scheme) => base
+  static TextTheme _textTheme(
+    TextTheme base,
+    ColorScheme scheme, {
+    bool compact = false,
+  }) => base
       .copyWith(
         titleLarge: base.titleLarge?.copyWith(
           fontSize: 17,
@@ -367,7 +441,11 @@ abstract final class CortexTheme {
           fontWeight: FontWeight.w600,
           letterSpacing: 0.4,
         ),
-        bodyLarge: base.bodyLarge?.copyWith(fontSize: 15, height: 1.62),
+        // 紧凑档正文 14px/1.66（设计稿的数）：字小一号，行距**反而放宽**
+        // 一点 —— 小字挤行距是最快变得读不动的组合
+        bodyLarge: compact
+            ? base.bodyLarge?.copyWith(fontSize: 14, height: 1.66)
+            : base.bodyLarge?.copyWith(fontSize: 15, height: 1.62),
         bodyMedium: base.bodyMedium?.copyWith(fontSize: 14, height: 1.6),
         bodySmall: base.bodySmall?.copyWith(
           fontSize: 12.5,

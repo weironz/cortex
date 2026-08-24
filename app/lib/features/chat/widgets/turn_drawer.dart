@@ -1,10 +1,14 @@
 import 'diff_view.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/ansi.dart';
 import '../../../core/motion.dart';
 import '../../../models/tool_call.dart';
 import '../../../core/theme.dart';
+import '../../../state/app_providers.dart';
+import '../../../state/chat_controller.dart';
+import '../../workspace/right_rail.dart';
 
 /// 一轮里 agent **做了什么** —— 工具调用与它们改动的内容。
 ///
@@ -275,9 +279,10 @@ class _ToolRowState extends State<_ToolRow> {
               ),
             ),
           ),
-          // 有改动才给展开箭头 —— 一个点下去什么都不展开的箭头，
-          // 比没有箭头更让人困惑
-          if (call.diff != null)
+          // 有东西可展开才给箭头 —— 一个点下去什么都不展开的箭头，
+          // 比没有箭头更让人困惑。可展开的两种：改动（diff）、
+          // 失败的完整输出（行内被压成一行，真正的报错常在后半段）
+          if (call.diff != null || (call.failed && call.result != null))
             InkResponse(
               onTap: () => setState(() => _open = !_open),
               radius: 12,
@@ -310,7 +315,66 @@ class _ToolRowState extends State<_ToolRow> {
       ),
     );
 
-    if (!_open || call.diff == null) return row;
+    final failedDetail = call.failed && call.result != null;
+    if (!_open || (call.diff == null && !failedDetail)) return row;
+
+    // 失败展开：完整 stderr（等宽、可选中）+「让它自己修」。
+    // 修不是玄学 —— 就是把失败的命令与输出发回去当下一条消息，
+    // 模型看得到全文，比用户手动复述「刚才那个报错」强得多
+    if (call.diff == null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          row,
+          Padding(
+            padding: const EdgeInsets.only(left: 27, bottom: 8, right: 4),
+            child: Container(
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(CortexTokens.radiusRow),
+                border: Border.all(color: scheme.outlineVariant),
+              ),
+              padding: const EdgeInsets.all(10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SelectionArea(
+                    child: Text(
+                      stripAnsi(call.result!),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        fontFamily: 'monospace',
+                        height: 1.5,
+                      ),
+                    ),
+                  ),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Consumer(
+                      builder: (context, ref, _) => TextButton.icon(
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          textStyle: const TextStyle(fontSize: 11),
+                        ),
+                        onPressed: () => ref
+                            .read(chatControllerProvider.notifier)
+                            .send(
+                              '刚才 ${call.name} 失败了：\n\n'
+                              '```\n${stripAnsi(call.result!)}\n```\n\n'
+                              '请自己修复这个问题，然后重试。',
+                            ),
+                        icon: const Icon(Icons.build_outlined, size: 13),
+                        label: const Text('让它自己修'),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      );
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -318,7 +382,40 @@ class _ToolRowState extends State<_ToolRow> {
         row,
         Padding(
           padding: const EdgeInsets.only(left: 27, bottom: 8, right: 4),
-          child: DiffView(call.diff!),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 长 diff 在气泡里只能看个开头（DiffView 有高度上限）。
+              // 「在右栏打开」去的是「本轮改动」页签 —— 那里有这个文件
+              // 的全部几次改动，且与对话并排、能一直开着对照读
+              Align(
+                alignment: Alignment.centerRight,
+                child: Consumer(
+                  builder: (context, ref, _) => TextButton.icon(
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      textStyle: const TextStyle(fontSize: 11),
+                    ),
+                    onPressed: () {
+                      ref.read(railTabProvider.notifier).go(RailTab.changes);
+                      ref
+                          .read(layoutProvider.notifier)
+                          .showRight(RightPanel.files);
+                      // 窄屏上右栏放不下内联，从底部抽上来；
+                      // 宽屏 showRight 已经让内联栏出现了
+                      if (MediaQuery.sizeOf(context).width <
+                          kRailInlineBreakpoint) {
+                        showRightRailSheet(context);
+                      }
+                    },
+                    icon: const Icon(Icons.open_in_new_rounded, size: 13),
+                    label: const Text('在右栏打开'),
+                  ),
+                ),
+              ),
+              DiffView(call.diff!),
+            ],
+          ),
         ),
       ],
     );

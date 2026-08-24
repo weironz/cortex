@@ -401,10 +401,10 @@ class ConversationHero extends StatelessWidget {
           Container(
             width: 52,
             height: 52,
+            // 纯色，不渐变（设计稿：渐变**只留发送键一处**）。
+            // 渐变一多，「主要动作」就不再突出 —— 头像是身份不是动作
             decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [scheme.primary, scheme.secondary],
-              ),
+              color: scheme.primary,
               borderRadius: BorderRadius.circular(CortexTokens.radiusXl),
             ),
             child: const Icon(

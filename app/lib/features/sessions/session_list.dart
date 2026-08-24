@@ -12,6 +12,7 @@ import '../../models/session_search_hit.dart';
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../state/chat_state.dart';
+import '../../state/confirm_controller.dart';
 import '../../core/session_export.dart';
 import '../../state/export_controller.dart';
 import '../../state/project_controller.dart';
@@ -195,6 +196,12 @@ class SessionList extends ConsumerWidget {
           streaming:
               state.streaming?.sessionId == session.id ||
               state.unfinished.contains(session.id),
+          // 第四状态：**在等你确认**。它必然发生在「在跑」当中（一轮跑到
+          // 一半停下来问人），所以行上的优先级要压过 streaming —— 蓝点说
+          // 「不用管」，而这个状态恰恰是唯一「不管就永远卡住」的
+          awaitingConfirm: ref
+              .watch(awaitingConfirmSessionsProvider)
+              .contains(session.id),
           // 「跑完了，你还没看」。与「在跑」互斥 —— 同一条会话不可能
           // 既在跑又刚跑完（`_commit` 是先撤 unfinished 再加 finished）
           justFinished: state.finished.contains(session.id),
@@ -269,11 +276,20 @@ class SessionList extends ConsumerWidget {
       body();
     }
 
-    // ── 1. 项目：置顶的那些，每个可展开成它的会话 ──
+    // 段序 2026-08-24 重排为 置顶 → 项目 → 最近（照设计稿）：
+    // 「置顶」的定义就是用户要它在最上面；「最近」固定最下 —— 它是
+    // 绝大多数进来的人要找的那一段。各段的过滤互相独立，重排不改归属。
+
+    // ── 1. 置顶：置顶的会话，平铺 ──
+    section(SidebarSection.pinned, pinnedSessions.length, () {
+      rows.addAll(pinnedSessions.map(_SessionRow.new));
+    });
+
+    // ── 2. 项目：置顶的那些，每个可展开成它的会话 ──
     final pinnedIds = {for (final p in pinnedProjects) p.id};
     section(SidebarSection.projects, pinnedProjects.length, () {
       final byProject = groupSessionsByProject(
-        // 置顶的会话已经被第 2 段收走了，这里不能再算进来
+        // 置顶的会话已经被「置顶」段收走了，这里不能再算进来
         sessions.where((s) => !s.pinned).toList(),
         pinnedProjects,
       );
@@ -286,12 +302,7 @@ class SessionList extends ConsumerWidget {
       }
     });
 
-    // ── 2. Pinned：置顶的会话，平铺 ──
-    section(SidebarSection.pinned, pinnedSessions.length, () {
-      rows.addAll(pinnedSessions.map(_SessionRow.new));
-    });
-
-    // ── 3. 聊天：其余的，保留现有的项目分组 ──
+    // ── 3. 最近：其余的，保留现有的项目分组 ──
     final rest = sessions
         .where((s) => !s.pinned && !pinnedIds.contains(s.projectId))
         .toList();
@@ -885,6 +896,7 @@ class _SessionTile extends StatefulWidget {
     required this.session,
     required this.selected,
     required this.streaming,
+    required this.awaitingConfirm,
     required this.justFinished,
     required this.canMove,
     required this.onTap,
@@ -899,6 +911,10 @@ class _SessionTile extends StatefulWidget {
   final ChatSession session;
   final bool selected;
   final bool streaming;
+
+  /// 第四状态：一轮跑到一半，**在等这个人点确认**。
+  /// 行上压过 [streaming] —— 蓝点的意思是「不用管」，而这个状态不管就永远卡住。
+  final bool awaitingConfirm;
 
   /// 人不在的时候跑完了，还没被打开过。
   final bool justFinished;
@@ -1045,7 +1061,23 @@ class _SessionTileState extends State<_SessionTile> {
                   ],
                 ),
               ),
-              if (widget.streaming)
+              // 琥珀点压过蓝点：等确认必然发生在「在跑」当中，两个都真时
+              // 该喊的是「等你」。外加一圈同色描边把它与蓝点在形状上也
+              // 区分开 —— 色弱视角下「实心点 vs 带环的点」仍然分得出
+              if (widget.awaitingConfirm)
+                Tooltip(
+                  message: '在等你确认才能继续',
+                  child: Container(
+                    width: 8,
+                    height: 8,
+                    margin: const EdgeInsets.only(right: 5),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: tokens.warning, width: 2),
+                    ),
+                  ),
+                )
+              else if (widget.streaming)
                 Container(
                   width: 6,
                   height: 6,

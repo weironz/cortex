@@ -1181,7 +1181,20 @@ class ChatController extends Notifier<ChatState> {
   }
 
   void _onError(Object error, StackTrace _) {
-    final message = error is CortexApiException ? error.message : '$error';
+    var message = error is CortexApiException ? error.message : '$error';
+    // 连接断了要**说清哪几步已落盘**，光报「连不上」会让人以为这一轮
+    // 整个丢了。事实是：已经流回来的文字就在眼前（_commit 会把它进历史），
+    // 服务端那一轮还在自己跑并照常入库 —— 断的只是「看着它跑」这条线。
+    // 不说的代价是用户重发一遍，得到两份回答
+    if (error is CortexApiException && error.isUnreachable) {
+      final turn = state.streaming;
+      final got = turn != null && turn.text.isNotEmpty;
+      message =
+          '$message\n'
+          '${got ? '已收到的回答保留在下面；' : ''}'
+          '服务端那一轮仍在继续并会正常存档 —— 连上之后刷新这条会话就能看到全部，'
+          '不用重发。';
+    }
     _commit(error: message);
   }
 

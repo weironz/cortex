@@ -83,6 +83,21 @@ class _AppearancePageState extends ConsumerState<AppearancePage>
           ],
         ),
         SettingsSection(
+          title: '密度',
+          description: '紧凑档把列表行高收 6px、正文缩到 14px —— 一屏多看几行。默认档为长回答留着行距。',
+          children: [
+            SettingsChoice<bool>(
+              value: ref.watch(densityProvider),
+              onChanged: (compact) =>
+                  ref.read(densityProvider.notifier).set(compact: compact),
+              options: const [
+                (value: false, label: '默认', hint: '为长回答留行距'),
+                (value: true, label: '紧凑', hint: '行高 −6px · 正文 14px'),
+              ],
+            ),
+          ],
+        ),
+        SettingsSection(
           title: '动效',
           description:
               '这个界面里会动的东西几乎都是循环的 —— 等待回复的三个点、'

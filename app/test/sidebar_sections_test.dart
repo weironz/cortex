@@ -1,4 +1,4 @@
-/// 左栏下半部那三段：项目 / Pinned / 聊天。
+/// 左栏下半部那三段：置顶 / 项目 / 最近（2026-08-24 按设计稿重排）。
 ///
 /// # 这一组盯住的头号失败：**同一条会话在左栏出现两次**
 ///
@@ -129,7 +129,7 @@ void main() {
         expect(s.key, isNotEmpty);
       }
       expect(SidebarSection.pinned.key, 'pinned');
-      expect(SidebarSection.pinned.label, 'Pinned');
+      expect(SidebarSection.pinned.label, '置顶');
     });
   });
 
@@ -166,8 +166,8 @@ void main() {
       addTearDown(c.dispose);
       await _pump(tester, c);
 
-      expect(find.text('Pinned'), findsOneWidget);
-      expect(find.text('聊天'), findsOneWidget);
+      expect(find.text('置顶'), findsOneWidget);
+      expect(find.text('最近'), findsOneWidget);
       expect(find.text('pinned-one'), findsOneWidget);
     });
 
@@ -189,7 +189,7 @@ void main() {
         findsOneWidget,
         reason: '空着的段头传达的正是最重要的那件事：这里可以放东西',
       );
-      expect(find.text('Pinned'), findsOneWidget);
+      expect(find.text('置顶'), findsOneWidget);
 
       // 光有标题不够 —— 标题说得出这一段叫什么，说不出怎么往里放东西
       expect(
@@ -216,7 +216,7 @@ void main() {
         findsNothing,
         reason: '折叠的意思是「这一段我现在不看」，那时连提示都是打扰',
       );
-      expect(find.text('Pinned'), findsOneWidget, reason: '段头还在，否则没法再展开');
+      expect(find.text('置顶'), findsOneWidget, reason: '段头还在，否则没法再展开');
     });
 
     testWidgets('折起来之后那一段的行就不画了', (tester) async {
@@ -234,7 +234,7 @@ void main() {
       }
 
       expect(find.text('pinned-one'), findsNothing);
-      expect(find.text('Pinned'), findsOneWidget, reason: '段头还在，否则就没法再展开了');
+      expect(find.text('置顶'), findsOneWidget, reason: '段头还在，否则就没法再展开了');
     });
 
     testWidgets('⚠️ 什么都没有的全新账号，三段仍然都在', (tester) async {

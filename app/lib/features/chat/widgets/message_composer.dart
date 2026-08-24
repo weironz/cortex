@@ -338,8 +338,10 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                     color: _dragging
                         ? scheme.primary.withValues(alpha: 0.06)
                         : scheme.surfaceContainerHigh,
+                    // 输入框是圆角五档里最圆的一档（18，比对话框 14 还圆）：
+                    // 它要读出胶囊感 —— 这一档只给它，别处不用
                     borderRadius: BorderRadius.circular(
-                      widget.centred ? 18 : 14,
+                      CortexTokens.radiusInput,
                     ),
                     border: Border.all(
                       color: _dragging || _focusNode.hasFocus
@@ -500,37 +502,38 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                   ),
                 ),
                 const SizedBox(height: 7),
-                Row(
-                  children: [
-                    // 「这轮的文件去哪儿」与「谁来把关」是同一类东西：
-                    // 发出去**之前**要定的事。所以它们贴着输入框，而不是
-                    // 挂在顶栏 —— 顶栏那一排是应用级的显示开关，混在一起
-                    // 会让人以为工作区也是「看不看」而不是「跑在哪」
-                    const _BeforeSendChips(),
-                    // 居中于**剩下的那段**，而不是整行。
-                    //
-                    // 这里原本在右边挂一个透明的等宽占位，好让那句话相对整行
-                    // 严格居中。两个 chip 之后那个代价变实了：占位是一份**真的
-                    // widget**，于是每个标签在树里都有两份 —— 读屏会念两遍，
-                    // chip 的构建白做一次，而 `find.text` 一律数到 2。
-                    // 换来的只是几十像素的偏移。
-                    // 只在**还没开始聊**的那一屏说。
-                    //
-                    // 它是一句永远为真、且没有任何动作挂在上面的话 ——
-                    // 一个新用户需要知道「这些对话会留下来」，而第二轮之后
-                    // 它就只是占着输入框最宽的那一格。常驻的无动作文案会
-                    // 训练人忽略那一整片区域，于是真的有话要说时也没人看。
-                    //
-                    // 两家参考产品的输入框脚注里只有控件，没有说明文字。
-                    if (widget.centred)
-                      Expanded(
-                        child: Text(
-                          'Cortex 会把这轮对话归档，之后还能搜得到。',
-                          textAlign: TextAlign.center,
-                          style: theme.textTheme.labelSmall,
-                        ),
-                      ),
-                  ],
+                // LayoutBuilder 在这里拿得到真实宽度（Column 给的是有界
+                // 约束）；放进 Row 里就拿不到了 —— Row 给非弹性子项的是
+                // 无界宽
+                LayoutBuilder(
+                  builder: (context, cons) {
+                    // 四颗 chip 摊开约 460px。窄过它就收：从前是固定
+                    // flex，放不下直接溢出报黄条
+                    final narrow = cons.maxWidth < 460;
+                    return Row(
+                      children: [
+                        // 「这轮的文件去哪儿」与「谁来把关」是同一类东西：
+                        // 发出去**之前**要定的事。所以它们贴着输入框，而
+                        // 不是挂在顶栏 —— 顶栏那一排是应用级的显示开关
+                        _BeforeSendChips(narrow: narrow),
+                        // 居中于**剩下的那段**，而不是整行。
+                        //
+                        // 这里原本在右边挂一个透明的等宽占位，好让那句话
+                        // 相对整行严格居中。两个 chip 之后那个代价变实了：
+                        // 占位是一份**真的 widget**，读屏会念两遍。
+                        // 只在**还没开始聊**的那一屏说 —— 常驻的无动作
+                        // 文案会训练人忽略那一整片区域
+                        if (widget.centred && !narrow)
+                          Expanded(
+                            child: Text(
+                              'Cortex 会把这轮对话归档，之后还能搜得到。',
+                              textAlign: TextAlign.center,
+                              style: theme.textTheme.labelSmall,
+                            ),
+                          ),
+                      ],
+                    );
+                  },
                 ),
               ],
             ),
@@ -712,28 +715,73 @@ class _MentionRow extends StatelessWidget {
 }
 
 class _BeforeSendChips extends StatelessWidget {
-  const _BeforeSendChips();
+  const _BeforeSendChips({required this.narrow});
+
+  /// 窄到摊不开四颗时收成「目录 + 权限档 + …」。
+  ///
+  /// # 为什么留下的是这两颗
+  ///
+  /// 判据是**改错的代价**，不是使用频率：工作区决定文件落在哪、权限档
+  /// 决定命令有没有人把关 —— 这两个选错了是真损失，而且难在事后发现。
+  /// 模型与智能体改错了只影响这一轮答得好不好，收进「…」里翻一下够用。
+  final bool narrow;
 
   @override
-  Widget build(BuildContext context) => const Row(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      // 工作区在前：它决定文件落在哪，是两者里更容易选错、
-      // 也更难在事后发现选错了的那一个
-      WorkspaceChip(),
-      SizedBox(width: 6),
-      PermissionModeChip(),
-      SizedBox(width: 6),
-      // 模型排最后：它是三者里唯一**改错了也不会造成损失**的一个
-      // （只影响这一轮答得好不好、花多少钱），而前两个改错了是
-      // 文件写错地方、命令没人把关
-      ModelChip(),
-      // 智能体单独排在最后，且大多数时候**根本不出现**（没建过智能体、
-      // 或这条对话用的是默认人设）—— 它不是逐轮的决定，与左边三个不同类
-      SizedBox(width: 6),
-      AssistantChip(),
-    ],
-  );
+  Widget build(BuildContext context) {
+    if (!narrow) {
+      return const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 工作区在前：它决定文件落在哪，是两者里更容易选错、
+          // 也更难在事后发现选错了的那一个
+          WorkspaceChip(),
+          SizedBox(width: 6),
+          PermissionModeChip(),
+          SizedBox(width: 6),
+          // 模型排最后：它是三者里唯一**改错了也不会造成损失**的一个
+          // （只影响这一轮答得好不好、花多少钱），而前两个改错了是
+          // 文件写错地方、命令没人把关
+          ModelChip(),
+          // 智能体单独排在最后，且大多数时候**根本不出现**（没建过智能体、
+          // 或这条对话用的是默认人设）—— 它不是逐轮的决定，与左边三个不同类
+          SizedBox(width: 6),
+          AssistantChip(),
+        ],
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const WorkspaceChip(),
+        const SizedBox(width: 6),
+        const PermissionModeChip(),
+        const SizedBox(width: 2),
+        // 收进来的 chip **原样**放进菜单，不是重画一份菜单项：
+        // 它们各自的弹层、锁定态、不可用时自隐藏的逻辑都在 chip 里，
+        // 抄成菜单项等于那些行为都要再维护一份
+        MenuAnchor(
+          menuChildren: const [
+            Padding(
+              padding: EdgeInsets.fromLTRB(10, 8, 10, 4),
+              child: ModelChip(),
+            ),
+            Padding(
+              padding: EdgeInsets.fromLTRB(10, 4, 10, 8),
+              child: AssistantChip(),
+            ),
+          ],
+          builder: (context, controller, _) => IconButton(
+            onPressed: () =>
+                controller.isOpen ? controller.close() : controller.open(),
+            iconSize: 16,
+            visualDensity: VisualDensity.compact,
+            tooltip: '模型与智能体',
+            icon: const Icon(Icons.more_horiz_rounded),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 /// 在候选列表里上下移动。

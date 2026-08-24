@@ -275,13 +275,9 @@ class AssistantBlock extends StatelessWidget {
                   Container(
                     width: 21,
                     height: 21,
+                    // 纯色，不渐变（渐变只留发送键一处 —— 头像是身份不是动作）
                     decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          scheme.primary,
-                          scheme.secondary.withValues(alpha: 0.9),
-                        ],
-                      ),
+                      color: scheme.primary,
                       borderRadius: BorderRadius.circular(
                         CortexTokens.radiusSm,
                       ),

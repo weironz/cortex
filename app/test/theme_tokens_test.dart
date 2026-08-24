@@ -45,8 +45,12 @@ void main() {
         );
       });
 
-      test('外壳是无彩的', () {
-        // 正文与背景允许极小的偏差（排版惯例），但不该是一个"有颜色的灰"
+      test('外壳是统一的冷调，不是各偏各的', () {
+        // 2026-08-24 起这条钉的决策**反过来了**。上一版坚持色度为 0
+        // （「偏色的灰像没调准」），设计稿的答案是让整套灰**往品牌靛蓝的
+        // 方向统一偏** —— 偏得成体系就不是没调准。所以现在钉两件事：
+        // 幅度有上限（不许偏成真正的彩色），方向统一（蓝 ≥ 红，
+        // 一个偏蓝一个偏黄才是「各自没调准」）。
         for (final (label, color) in [
           ('surface', scheme.surface),
           ('surfaceContainer', scheme.surfaceContainer),
@@ -57,10 +61,15 @@ void main() {
         ]) {
           expect(
             _chroma(color),
-            lessThanOrEqualTo(2),
+            lessThanOrEqualTo(12),
+            reason: '$label 偏出中性范围了 —— 冷调是一丝，不是一个颜色',
+          );
+          expect(
+            (color.b * 255).round(),
+            greaterThanOrEqualTo((color.r * 255).round()),
             reason:
-                '$label 是有彩的。偏冷/偏暖的灰与真正的彩色并排时会被读成'
-                '「一个没调准的颜色」，而不是「无色」—— 这正是这一版要去掉的东西',
+                '$label 偏暖了。整套灰要往同一个方向（品牌靛蓝）偏，'
+                '一个偏蓝一个偏黄，并排时才真的读成「没调准」',
           );
         }
       });
@@ -68,7 +77,7 @@ void main() {
       test('侧栏的选中态是中性的', () {
         expect(
           _chroma(tokens.sidebarAccent),
-          lessThanOrEqualTo(2),
+          lessThanOrEqualTo(12),
           reason:
               '「当前在看哪个会话」是**位置**，不是动作。此前这里是 '
               'primary.withValues(alpha: .12)，于是整条侧栏常年挂着一块紫，'

@@ -265,6 +265,40 @@ enum RightPanel {
   files,
 }
 
+/// 右栏里的页签（2026-08-24 起右栏是三页签，见 `RightRail`）。
+///
+/// # 为什么页签不进 [RightPanel]
+///
+/// [RightPanel] 管的是「右栏开没开、开着谁」—— 顶栏一个图标一格。
+/// 三页签共用同一个入口图标，进了枚举就得有三个图标或一个三态图标，
+/// 而用户的心智是「打开文件栏，然后在里面翻」。
+enum RailTab {
+  files('文件'),
+  changes('本轮改动'),
+  terminal('终端');
+
+  const RailTab(this.label);
+
+  final String label;
+}
+
+/// 右栏当前停在哪个页签。
+///
+/// 独立 provider 而不是 `RightRail` 的局部 state：顶栏「本会话改动」
+/// 与气泡里 diff 卡的「在右栏打开」都要**从外面**把它切到某一页 ——
+/// 局部 state 够不着。刻意不持久化：页签是「这次想看什么」，
+/// 不是布局偏好。
+class RailTabNotifier extends Notifier<RailTab> {
+  @override
+  RailTab build() => RailTab.files;
+
+  void go(RailTab tab) => state = tab;
+}
+
+final railTabProvider = NotifierProvider<RailTabNotifier, RailTab>(
+  RailTabNotifier.new,
+);
+
 /// 两侧面板的显示状态。
 class LayoutState {
   const LayoutState({this.leftCollapsed = false, this.rightPanel});
@@ -1432,6 +1466,42 @@ class ThemeModeNotifier extends Notifier<ThemeMode> {
 
 final themeModeProvider = NotifierProvider<ThemeModeNotifier, ThemeMode>(
   ThemeModeNotifier.new,
+);
+
+/// 界面密度：默认 / 紧凑。
+///
+/// # 为什么只有两档、且默认档一动不动
+///
+/// 「紧凑」是给桌面端一次看更多行的人的（行高 −6px、正文 14px/1.66）。
+/// 默认档保持原样 —— 长回答需要那个行距，把它顺手收紧等于替所有人做了
+/// 一个只有一部分人要的决定。落地在 `CortexTheme.light/dark(compact:)`。
+class DensityNotifier extends Notifier<bool> {
+  static const String _key = 'ui_density_compact';
+
+  @override
+  bool build() {
+    Future.microtask(_restore);
+    return false;
+  }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    // 只有明确存过 'true' 才紧凑 —— 键名改过、文件坏了都落回默认，
+    // 与电脑操作那个开关同一条纪律
+    final compact = saved[_key] == 'true';
+    if (compact != state) state = compact;
+  }
+
+  void set({required bool compact}) {
+    if (state == compact) return;
+    state = compact;
+    unawaited(ref.read(settingsPatcherProvider)(_key, '$compact'));
+  }
+}
+
+final densityProvider = NotifierProvider<DensityNotifier, bool>(
+  DensityNotifier.new,
 );
 
 /// 动效三档。见 [MotionPref]。

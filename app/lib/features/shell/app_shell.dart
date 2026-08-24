@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme.dart';
 
@@ -9,7 +10,8 @@ import '../assistants/assistants_page.dart';
 import '../images/image_page.dart';
 import '../projects/projects_page.dart';
 import '../sessions/session_list.dart';
-import '../workspace/workspace_panel.dart';
+import '../workspace/right_rail.dart';
+import 'command_palette.dart';
 import 'widgets/account_bar.dart';
 import 'widgets/nav_block.dart';
 
@@ -54,7 +56,6 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   static const _sessionsWidth = 264.0;
   static const _rightWidth = 348.0;
-  static const _wideBreakpoint = 1240.0;
   static const _mediumBreakpoint = 900.0;
 
   @override
@@ -104,7 +105,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
-        final isWide = width >= _wideBreakpoint;
+        final isWide = width >= kRailInlineBreakpoint;
         final isMedium = width >= _mediumBreakpoint;
 
         // 够宽**并且**没被收起来才内联。两个条件分工不同：断点说的是
@@ -114,115 +115,129 @@ class _AppShellState extends ConsumerState<AppShell> {
 
         // 右栏画谁。内联与抽屉共用它 —— 两处各写一遍 switch 的话，
         // 加第三个面板时漏改一处不会报错，只是抽屉里画的是另一个
+        // 2026-08-24 起右栏是 RightRail（文件 / 本轮改动 / 终端三页签），
+        // WorkspacePanel 变成它的第一页。RightPanel 仍然只有一格 ——
+        // 页签在栏内切，见 RailTab 上那段
         Widget rightPane(VoidCallback onClose) => switch (layout.rightPanel) {
-          RightPanel.files || null => WorkspacePanel(onClose: onClose),
+          RightPanel.files || null => RightRail(onClose: onClose),
           // `null` 只会在抽屉那条路上出现：内联那条已被 `showRightInline`
           // 挡住，而点图标进来的走 `showRight`（它必定先设好再开抽屉）。
-          // 剩下的唯一入口是**从屏幕右缘划开**抽屉 —— 那时用户没说要看哪个，
-          // 而记忆是默认那个。画空白比画记忆更像「坏了」
+          // 剩下的唯一入口是**从屏幕右缘划开**抽屉 —— 那时用户没说要看哪个。
+          // 画空白比画默认页更像「坏了」
         };
 
-        return Scaffold(
-          key: _scaffoldKey,
-          drawer: showSessionsInline
-              ? null
-              : Drawer(
-                  width: _sessionsWidth + 20,
-                  backgroundColor: tokens.sidebar,
-                  child: SafeArea(
-                    child: _LeftPane(
-                      onSelected: () => Navigator.of(context).maybePop(),
+        return CallbackShortcuts(
+          // ⌘K / Ctrl+K 呼出命令面板。挂在 shell 最外层：焦点在哪
+          // （输入框、列表、设置页）都够得着 —— 命令面板的意义就是
+          // 「不管在哪，两个键到任何地方」
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.keyK, control: true): () =>
+                showCommandPalette(context),
+            const SingleActivator(LogicalKeyboardKey.keyK, meta: true): () =>
+                showCommandPalette(context),
+          },
+          child: Scaffold(
+            key: _scaffoldKey,
+            drawer: showSessionsInline
+                ? null
+                : Drawer(
+                    width: _sessionsWidth + 20,
+                    backgroundColor: tokens.sidebar,
+                    child: SafeArea(
+                      child: _LeftPane(
+                        onSelected: () => Navigator.of(context).maybePop(),
+                      ),
                     ),
                   ),
-                ),
-          endDrawer: showRightInline
-              ? null
-              : Drawer(
-                  width: _rightWidth + 20,
-                  backgroundColor: tokens.sidebar,
-                  child: SafeArea(
-                    child: rightPane(() => Navigator.of(context).maybePop()),
-                  ),
-                ),
-          body: SafeArea(
-            child: Row(
-              children: [
-                if (showSessionsInline) ...[
-                  SizedBox(
-                    width: _sessionsWidth,
-                    child: Container(
-                      // 导航区是**独立表面**，不是「浅一点的内容区」。
-                      // 抄 Cherry Studio 的 sidebar 那一档：两个功能区靠
-                      // 底色分开，比靠一条线分开省力得多
-                      color: tokens.sidebar,
-                      child: const _LeftPane(collapsible: true),
+            // ⚠️ 刻意没有 endDrawer：窄屏的右栏从**底部**抽上来
+            // （showRightRailSheet）。从右边推会和系统手势打架 ——
+            // Android 返回、iPad 边缘滑动、Windows 触屏右缘呼出全占着那条边
+            body: SafeArea(
+              child: Row(
+                children: [
+                  if (showSessionsInline) ...[
+                    SizedBox(
+                      width: _sessionsWidth,
+                      child: Container(
+                        // 导航区是**独立表面**，不是「浅一点的内容区」。
+                        // 抄 Cherry Studio 的 sidebar 那一档：两个功能区靠
+                        // 底色分开，比靠一条线分开省力得多
+                        color: tokens.sidebar,
+                        child: const _LeftPane(collapsible: true),
+                      ),
                     ),
-                  ),
-                  VerticalDivider(width: 1, color: tokens.sidebarBorder),
-                ],
-                // 中间那一大栏是哪个「地方」。**只有聊天那一支要顶栏
-                // 那堆参数** —— 画廊没有会话、没有右栏面板，把它硬塞进
-                // 同一个组件里只会多出一串对它无意义的入参
-                Expanded(
-                  child: switch (ref.watch(mainViewProvider)) {
-                    MainView.assistants => AssistantsPage(
-                      onToggleSessions: isMedium
-                          ? layoutNotifier.toggleLeft
-                          : () => _scaffoldKey.currentState?.openDrawer(),
-                      sessionsVisible: showSessionsInline,
-                    ),
-                    MainView.projects => ProjectsPage(
-                      onToggleSessions: isMedium
-                          ? layoutNotifier.toggleLeft
-                          : () => _scaffoldKey.currentState?.openDrawer(),
-                      sessionsVisible: showSessionsInline,
-                    ),
-                    MainView.images => ImagePage(
-                      // 窄屏上左栏是抽屉，画廊里也要有路把它叫出来 ——
-                      // 少了这个按钮，从画廊回会话列表就只剩「从屏幕左缘划」
-                      onToggleSessions: isMedium
-                          ? layoutNotifier.toggleLeft
-                          : () => _scaffoldKey.currentState?.openDrawer(),
-                      sessionsVisible: showSessionsInline,
-                    ),
-                    MainView.chat => ChatPane(
-                      // 同一个按钮、同一句话（「显示/隐藏会话」），但窄到放不下
-                      // 内联时它只能开抽屉 —— 那时「收起」这个状态无处安放。
-                      // 由这里按断点决定它具体做什么，ChatPane 只管画
-                      onToggleSessions: isMedium
-                          ? layoutNotifier.toggleLeft
-                          : () => _scaffoldKey.currentState?.openDrawer(),
-                      sessionsVisible: showSessionsInline,
-                      // 两条路的语义不同，所以显式分开写：
-                      //
-                      // 宽屏：右栏就是 `rightPanel`，点同一个 = 收起。
-                      // 窄屏：右栏是抽屉，开合归 `Scaffold` 管 —— 这里只能
-                      //   「选中」。用 selectRight 的话，连点两次「文件」的
-                      //   第二次会把它置空，而抽屉照样开，里面画的是记忆。
-                      //   顺序也不能反：抽屉的内容取自 `layout.rightPanel`
-                      onSelectPanel: (panel) {
-                        if (isWide) {
-                          layoutNotifier.selectRight(panel);
-                        } else {
+                    VerticalDivider(width: 1, color: tokens.sidebarBorder),
+                  ],
+                  // 中间那一大栏是哪个「地方」。**只有聊天那一支要顶栏
+                  // 那堆参数** —— 画廊没有会话、没有右栏面板，把它硬塞进
+                  // 同一个组件里只会多出一串对它无意义的入参
+                  Expanded(
+                    child: switch (ref.watch(mainViewProvider)) {
+                      MainView.assistants => AssistantsPage(
+                        onToggleSessions: isMedium
+                            ? layoutNotifier.toggleLeft
+                            : () => _scaffoldKey.currentState?.openDrawer(),
+                        sessionsVisible: showSessionsInline,
+                      ),
+                      MainView.projects => ProjectsPage(
+                        onToggleSessions: isMedium
+                            ? layoutNotifier.toggleLeft
+                            : () => _scaffoldKey.currentState?.openDrawer(),
+                        sessionsVisible: showSessionsInline,
+                      ),
+                      MainView.images => ImagePage(
+                        // 窄屏上左栏是抽屉，画廊里也要有路把它叫出来 ——
+                        // 少了这个按钮，从画廊回会话列表就只剩「从屏幕左缘划」
+                        onToggleSessions: isMedium
+                            ? layoutNotifier.toggleLeft
+                            : () => _scaffoldKey.currentState?.openDrawer(),
+                        sessionsVisible: showSessionsInline,
+                      ),
+                      MainView.chat => ChatPane(
+                        // 同一个按钮、同一句话（「显示/隐藏会话」），但窄到放不下
+                        // 内联时它只能开抽屉 —— 那时「收起」这个状态无处安放。
+                        // 由这里按断点决定它具体做什么，ChatPane 只管画
+                        onToggleSessions: isMedium
+                            ? layoutNotifier.toggleLeft
+                            : () => _scaffoldKey.currentState?.openDrawer(),
+                        sessionsVisible: showSessionsInline,
+                        // 两条路的语义不同，所以显式分开写：
+                        //
+                        // 宽屏：右栏就是 `rightPanel`，点同一个 = 收起。
+                        // 窄屏：右栏是抽屉，开合归 `Scaffold` 管 —— 这里只能
+                        //   「选中」。用 selectRight 的话，连点两次「文件」的
+                        //   第二次会把它置空，而抽屉照样开，里面画的是记忆。
+                        //   顺序也不能反：抽屉的内容取自 `layout.rightPanel`
+                        onSelectPanel: (panel) {
+                          if (isWide) {
+                            layoutNotifier.selectRight(panel);
+                          } else {
+                            layoutNotifier.showRight(panel);
+                            showRightRailSheet(context);
+                          }
+                        },
+                        // 「带我去」语义：无论右栏此刻开没开，开着并停在
+                        // 这个面板上。与上面开关语义的差别见 ChatPane 的注释
+                        onOpenPanel: (panel) {
                           layoutNotifier.showRight(panel);
-                          _scaffoldKey.currentState?.openEndDrawer();
-                        }
-                      },
-                      activePanel: showRightInline ? layout.rightPanel : null,
-                    ),
-                  },
-                ),
-                if (showRightInline) ...[
-                  VerticalDivider(width: 1, color: tokens.sidebarBorder),
-                  SizedBox(
-                    width: _rightWidth,
-                    child: Container(
-                      color: tokens.sidebar,
-                      child: rightPane(layoutNotifier.closeRight),
-                    ),
+                          if (!isWide) showRightRailSheet(context);
+                        },
+                        activePanel: showRightInline ? layout.rightPanel : null,
+                      ),
+                    },
                   ),
+                  if (showRightInline) ...[
+                    VerticalDivider(width: 1, color: tokens.sidebarBorder),
+                    SizedBox(
+                      width: _rightWidth,
+                      child: Container(
+                        color: tokens.sidebar,
+                        child: rightPane(layoutNotifier.closeRight),
+                      ),
+                    ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         );
