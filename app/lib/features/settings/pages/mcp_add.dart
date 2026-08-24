@@ -131,14 +131,22 @@ class _McpAddPanelState extends ConsumerState<McpAddPanel> {
                 controller: _text,
                 minLines: 4,
                 maxLines: 8,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                style: const TextStyle(
+                  fontFamily: 'JetBrains Mono',
+                  fontFamilyFallback: CortexTheme.monoFallback,
+                  fontSize: 12,
+                ),
                 decoration: const InputDecoration(
                   border: OutlineInputBorder(),
                   hintText:
                       'npx -y @modelcontextprotocol/server-filesystem C:/work\n'
                       '或 https://example.com/mcp\n'
                       '或 {"mcpServers": {…}}',
-                  hintStyle: TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  hintStyle: TextStyle(
+                    fontFamily: 'JetBrains Mono',
+                    fontFamilyFallback: CortexTheme.monoFallback,
+                    fontSize: 12,
+                  ),
                 ),
                 onChanged: (_) {
                   // 改了文本就作废上一次的预览：留着的话用户会对着
@@ -269,7 +277,8 @@ class _Preview extends StatelessWidget {
             SelectableText(
               parsed.commandLine,
               style: theme.textTheme.bodySmall?.copyWith(
-                fontFamily: 'monospace',
+                fontFamily: 'JetBrains Mono',
+                fontFamilyFallback: CortexTheme.monoFallback,
               ),
             ),
           ],
@@ -466,7 +475,8 @@ class _RegistryCard extends StatelessWidget {
                   Text(
                     entry.name,
                     style: theme.textTheme.labelSmall?.copyWith(
-                      fontFamily: 'monospace',
+                      fontFamily: 'JetBrains Mono',
+                      fontFamilyFallback: CortexTheme.monoFallback,
                       color: theme.colorScheme.outline,
                     ),
                   ),

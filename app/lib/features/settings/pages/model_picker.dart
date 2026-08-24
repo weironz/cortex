@@ -26,6 +26,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../api/api_exception.dart';
+import '../../../core/theme.dart';
 import '../../../models/model_option.dart';
 import '../../../state/model_controller.dart';
 
@@ -325,7 +326,12 @@ Widget _tile(
         if (note != null)
           Text(
             note,
-            style: theme.textTheme.labelSmall?.copyWith(color: scheme.tertiary),
+            // note 是「要留神」不是「坏了」，用警示琥珀。
+            // ⚠️ 不写 scheme.tertiary：这套主题没配它，会静默回落成
+            // Material 默认的 teal —— 一个不属于任何语义的颜色
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.cortex.warning,
+            ),
           ),
       ],
     ),

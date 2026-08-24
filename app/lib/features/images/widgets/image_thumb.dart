@@ -64,7 +64,8 @@ class ImageThumb extends ConsumerWidget {
         // ⚠️ 圆角走 `shape` 而不是 `borderRadius`：`Material` 断言两者
         // 不能同时给，而同时给的表现是**整页红屏**
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
+          // 卡片档圆角（radiusCard）—— 与项目卡、智能体卡同一个数
+          borderRadius: BorderRadius.circular(CortexTokens.radiusCard),
           side: selected
               ? BorderSide(color: scheme.primary, width: 2.5)
               : BorderSide.none,
@@ -143,29 +144,77 @@ class ImageThumb extends ConsumerWidget {
           color: scheme.onSurfaceVariant,
         ),
       ),
-      data: (b) => LayoutBuilder(
-        builder: (context, c) => Image.memory(
-          b,
-          fit: BoxFit.cover,
-          width: double.infinity,
-          height: double.infinity,
-          // ⚠️ **按这一格真实的物理像素解码，不按原图，也不写死一个数。**
-          //
-          // 一张 1024×1024 的 png 全分辨率解出来在光栅缓存里是 4 MB，
-          // 一屏二十格就是 80 MB。
-          //
-          // 从前这里是写死的 400。格子从 180 放宽到最多 330 之后，在 2×
-          // 屏上就不够了 —— 表现是缩略图发糊，而没有任何报错。乘上
-          // `devicePixelRatio` 才是「这一格真正需要多少像素」。
-          cacheWidth: decodeWidthFor(context, c.maxWidth),
-          errorBuilder: (_, _, _) => Center(
-            child: Icon(
-              Icons.broken_image_outlined,
-              size: 18,
-              color: scheme.onSurfaceVariant,
-            ),
-          ),
+      data: (b) => _InkPicture(bytes: b),
+    );
+  }
+}
+
+/// 图本体 —— 画在 ink 层上，不画在子树里。
+///
+/// # ⚠️ 为什么不是 `Image.memory`
+///
+/// `Image.memory` 是 Material **子树里**的一个不透明矩形，而 `InkWell`
+/// 的水波纹画在 Material 的 ink 层上 —— 在子树**底下**。图铺满整格之后
+/// 波纹被整张盖住，hover / 点按看起来完全没反应，像一格死图。
+/// `Ink.image` 把图挪进 ink 层本身：装饰先画、后来的波纹叠在图上面。
+///
+/// 拆成 StatefulWidget 只为一件事：`Ink.image` 没有 `errorBuilder`
+/// （只有 `onImageError` 回调），解码失败的兜底图标得自己记一位。
+class _InkPicture extends StatefulWidget {
+  const _InkPicture({required this.bytes});
+
+  final Uint8List bytes;
+
+  @override
+  State<_InkPicture> createState() => _InkPictureState();
+}
+
+class _InkPictureState extends State<_InkPicture> {
+  /// 字节到手了但**解不出来**（坏 blob）。取不到字节的情况在外面的
+  /// `bytes.when(error:)` 里，走不到这儿。
+  bool _broken = false;
+
+  @override
+  void didUpdateWidget(_InkPicture oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 刷新可能换来一份新字节 —— 上一份坏不代表这一份也坏
+    if (!identical(oldWidget.bytes, widget.bytes)) _broken = false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_broken) {
+      // 与「取不到」的图标一致：对用户来说都是「这张图坏了」，
+      // 分成两种画法只会让人以为是两种问题
+      return Center(
+        child: Icon(
+          Icons.broken_image_outlined,
+          size: 18,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
         ),
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, c) => Ink.image(
+        // ⚠️ **按这一格真实的物理像素解码，不按原图，也不写死一个数。**
+        //
+        // 一张 1024×1024 的 png 全分辨率解出来在光栅缓存里是 4 MB，
+        // 一屏二十格就是 80 MB。
+        //
+        // 从前这里是写死的 400。格子从 180 放宽到最多 330 之后，在 2×
+        // 屏上就不够了 —— 表现是缩略图发糊，而没有任何报错。乘上
+        // `devicePixelRatio` 才是「这一格真正需要多少像素」。
+        //
+        // `ResizeImage(width:)` 与 `Image.memory` 的 `cacheWidth` 是同一条
+        // 路 —— 后者内部就是 `ResizeImage.resizeIfNeeded` 包一层，逐字等价
+        image: ResizeImage(
+          MemoryImage(widget.bytes),
+          width: decodeWidthFor(context, c.maxWidth),
+        ),
+        fit: BoxFit.cover,
+        onImageError: (_, _) {
+          if (mounted) setState(() => _broken = true);
+        },
       ),
     );
   }

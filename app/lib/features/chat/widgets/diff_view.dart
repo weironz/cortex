@@ -31,9 +31,11 @@ class DiffView extends StatelessWidget {
     final lines = diff.split('\n');
 
     // 绿加红减是这件事的通用语言（git、GitHub、每一个 code review 工具）。
-    // 换一套配色只会让人多认一遍
-    const added = Color(0xFF2E9E5B);
-    const removed = Color(0xFFCF4A4A);
+    // 换一套配色只会让人多认一遍。
+    // 取主题里按深浅配好对的语义色，不写死单值：一个色值不可能同时在
+    // 深浅两底上够对比 —— 之前那对写死的在浅色下只有 3.1:1
+    final added = theme.cortex.success;
+    final removed = scheme.error;
 
     return Container(
       constraints: BoxConstraints(maxHeight: maxHeight),
@@ -58,7 +60,8 @@ class DiffView extends StatelessWidget {
                     Text(
                       line,
                       style: TextStyle(
-                        fontFamily: 'monospace',
+                        fontFamily: 'JetBrains Mono',
+                        fontFamilyFallback: CortexTheme.monoFallback,
                         fontSize: 12,
                         height: 1.35,
                         color: switch (_kindOf(line)) {

@@ -68,7 +68,8 @@ class SkillsPage extends ConsumerWidget {
       padding: const EdgeInsets.fromLTRB(4, 4, 4, 24),
       children: [
         SettingsSection(
-          title: '技能',
+          // 不传节头：内容区大标题已经写着「技能」，节头再抄一遍页名是
+          // 口吃（见 SettingsSection.title 的注释）—— 单节页只留说明与动作
           // ⚠️ 这两句是这一页最重要的一行字：不讲清两层，用户会把说明留空，
           // 于是模型永远不知道该不该取正文 —— 而那次失败没有任何征兆
           description:
@@ -203,6 +204,13 @@ class _SkillRow extends ConsumerWidget {
             child: const Text('取消'),
           ),
           FilledButton(
+            // 不用默认的 primary：那会让「删除」与编辑器里的「保存」同款 ——
+            // 确认框里肌肉记忆点的正是右下角那颗主按钮。危险动作要长得
+            // 危险，把 error 配色画在按钮自己身上，而不是只靠标题那个问号
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+              foregroundColor: Theme.of(ctx).colorScheme.onError,
+            ),
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('删除'),
           ),

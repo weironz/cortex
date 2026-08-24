@@ -26,6 +26,7 @@ import 'package:cortex_app/models/sync_event.dart';
 import 'package:cortex_app/models/sync_record.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/confirm_controller.dart';
+import 'package:cortex_app/core/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -376,8 +377,15 @@ void main() {
       );
       expect(
         preview.style?.fontFamily,
-        'monospace',
+        'JetBrains Mono',
         reason: '`rm -rf /tmp/x` 与 `rm -rf /tmp /x` 差一个空格，等宽字才看得出来',
+      );
+      expect(
+        preview.style?.fontFamilyFallback,
+        CortexTheme.monoFallback,
+        // 裸写 'monospace' 在 Windows 上会落进中文栈用**比例字体**渲染 ——
+        // 等宽在这里是安全属性，不是排版偏好，所以栈也要钉住
+        reason: '没有 fallback 栈的话，Windows 中文环境下等宽承诺是假的',
       );
       container.dispose();
     });

@@ -103,25 +103,34 @@ class _ConfirmCard extends ConsumerWidget {
     // 统一样式的代价是人对确认框脱敏 —— 每天点十个「读取」之后，
     // 那个真正危险的「执行」看起来毫无区别。
     // 未知档按最重画：一个新长出来的风险等级绝不能被画成最轻的
+    //
+    // `accent` 是头部图标与风险 chip 的取色，跟外框走**同一个** switch：
+    // 从前它们不分档一律 error，于是「读取」的琥珀细框旁边站着一颗红字
+    // 红底的 chip —— 卡片内部自己打架，三档边框的意义被抵消掉了。
+    // 分开写两个 switch 的话，下次加档只改一处就又是这个样子
     final (
       Color borderColor,
       double borderWidth,
       Color fillColor,
+      Color accent,
     ) = switch (request.risk) {
       'safe' => (
         theme.cortex.warning.withValues(alpha: 0.55),
         1.0,
         theme.cortex.warning.withValues(alpha: 0.06),
+        theme.cortex.warning,
       ),
       'write' => (
         scheme.error.withValues(alpha: 0.45),
         1.0,
         scheme.errorContainer.withValues(alpha: 0.30),
+        scheme.error,
       ),
       _ => (
         scheme.error.withValues(alpha: 0.70),
         1.5,
         scheme.errorContainer.withValues(alpha: 0.42),
+        scheme.error,
       ),
     };
 
@@ -139,7 +148,7 @@ class _ConfirmCard extends ConsumerWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.gpp_maybe_outlined, size: 18, color: scheme.error),
+              Icon(Icons.gpp_maybe_outlined, size: 18, color: accent),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
@@ -150,7 +159,7 @@ class _ConfirmCard extends ConsumerWidget {
                   ),
                 ),
               ),
-              _RiskChip(risk: request.risk),
+              _RiskChip(risk: request.risk, color: accent),
               const SizedBox(width: 8),
               _Countdown(remaining: remaining),
             ],
@@ -292,7 +301,13 @@ class _Preview extends StatelessWidget {
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
-        color: scheme.surface.withValues(alpha: 0.72),
+        // 深浅两套分开取实色，不共用一个半透明 surface：深色下 surface 是
+        // 全应用最暗的一层，垫在带填充的确认卡里会让预览块比卡片还暗 ——
+        // 层级反了（规范：深色下浮起来的更亮）。浅色下 surface 是白，
+        // 半透明压一点正好，保持原样
+        color: theme.brightness == Brightness.dark
+            ? scheme.surfaceContainerHigh
+            : scheme.surface.withValues(alpha: 0.72),
         borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
         border: Border.all(color: scheme.outlineVariant),
       ),
@@ -304,7 +319,8 @@ class _Preview extends StatelessWidget {
           child: SelectableText(
             text.isEmpty ? '（服务端没有给出参数预览）' : text,
             style: theme.textTheme.bodySmall?.copyWith(
-              fontFamily: 'monospace',
+              fontFamily: 'JetBrains Mono',
+              fontFamilyFallback: CortexTheme.monoFallback,
               height: 1.45,
               color: scheme.onSurface,
             ),
@@ -316,14 +332,17 @@ class _Preview extends StatelessWidget {
 }
 
 class _RiskChip extends StatelessWidget {
-  const _RiskChip({required this.risk});
+  const _RiskChip({required this.risk, required this.color});
 
   final String risk;
+
+  /// 分档色由卡片传进来，不在这里再判一遍 `risk`：判据只有外框那个
+  /// switch 一份（见 `_ConfirmCard.build`），这里只负责画。
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
     // Unknown levels are shown verbatim rather than mapped to a default: a
     // daemon that grows a new risk level must not have it silently rendered as
     // the mildest one.
@@ -339,13 +358,13 @@ class _RiskChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
       decoration: BoxDecoration(
-        color: scheme.error.withValues(alpha: 0.16),
+        color: color.withValues(alpha: 0.16),
         borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
       ),
       child: Text(
         label,
         style: theme.textTheme.labelSmall?.copyWith(
-          color: scheme.error,
+          color: color,
           fontWeight: FontWeight.w700,
         ),
       ),
@@ -381,7 +400,8 @@ class _Countdown extends StatelessWidget {
         Text(
           text,
           style: theme.textTheme.labelMedium?.copyWith(
-            fontFamily: 'monospace',
+            fontFamily: 'JetBrains Mono',
+            fontFamilyFallback: CortexTheme.monoFallback,
             fontWeight: FontWeight.w700,
             color: scheme.onErrorContainer,
           ),

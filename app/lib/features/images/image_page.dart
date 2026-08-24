@@ -423,6 +423,28 @@ class _ImagePageState extends ConsumerState<ImagePage> {
         ),
       ];
     }
+    // 一张都没拉到且有错 —— 要说失败，不能落进下面「还没有画过图」的空态：
+    // 「我的图片」那个全屏形态下没有 composer，底下那条红字根本不在场，
+    // 这里不拦的话失败就被谎报成「没有」。手上还有图时不走这支：让旧数据
+    // 继续显示，composer 形态下的那条红字负责说话
+    if (state.error != null && state.items.isEmpty) {
+      return [
+        box(
+          EmptyState(
+            icon: Icons.cloud_off_rounded,
+            title: '拉不到图片',
+            description: '${state.error}',
+            tone: EmptyStateTone.error,
+            action: OutlinedButton.icon(
+              onPressed: () =>
+                  ref.read(imageControllerProvider.notifier).refresh(),
+              icon: const Icon(Icons.refresh_rounded, size: 16),
+              label: const Text('重试'),
+            ),
+          ),
+        ),
+      ];
+    }
     // 空相册与空图库要说**不一样**的话：在一个空相册里看到「还没有画过图」，
     // 用户会以为自己的图全没了
     if (state.items.isEmpty) {

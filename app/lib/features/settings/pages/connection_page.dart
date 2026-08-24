@@ -9,6 +9,7 @@ import '../../../models/health_status.dart';
 import '../../../models/sandbox_health.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/auth_controller.dart';
+import '../widgets/settings_layout.dart';
 
 /// 连接这一页：连的是谁、它现在什么样。
 class ConnectionPage extends ConsumerStatefulWidget {
@@ -65,134 +66,167 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
         // 2026-08-15 真机上把人卡了半天：症状是「桌面端发不出消息」，
         // 而所有健康检查都是绿的 —— `/health` 两个地址都答 `role: cortexd`，
         // 光看它分不出来。**一个默认值把用户领到了唯一走不通的那条路上。**
-        TextField(
-          controller: _urlController,
-          enabled: !config.useMock,
-          decoration: const InputDecoration(
-            labelText: '部署入口地址',
-            hintText: 'https://<域名>/api',
-            helperText:
-                '填部署入口，不是记忆服务本身 —— 云端对话由它转给 agent 编排服务。'
-                '本机开发是 http://127.0.0.1:5173。',
-            helperMaxLines: 3,
-          ),
-          onSubmitted: notifier.setBaseUrl,
-        ),
-        const SizedBox(height: 6),
-        Align(
-          alignment: Alignment.centerRight,
-          child: TextButton(
-            onPressed: config.useMock
-                ? null
-                : () => notifier.setBaseUrl(_urlController.text),
-            child: const Text('应用地址'),
-          ),
-        ),
-        const Divider(height: 24),
-        Row(
+        SettingsSection(
           children: [
-            Expanded(child: Text('后端状态', style: theme.textTheme.titleSmall)),
-            TextButton(
-              // 两条都要重来。只刷 `/health` 的话，用户去把沙箱那一套起好、
-              // 回来点「重新检测」，看到的还是上一次的能力结论 ——
-              // 而他刚做的事恰恰是为了改变那个结论
-              onPressed: () {
-                ref.invalidate(healthProvider);
-                ref.invalidate(sandboxHealthProvider);
-              },
-              child: const Text('重新检测'),
+            SettingsField(
+              label: '部署入口地址',
+              hint:
+                  '填部署入口，不是记忆服务本身 —— 云端对话由它转给 agent 编排服务。'
+                  '本机开发是 http://127.0.0.1:5173。',
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _urlController,
+                      enabled: !config.useMock,
+                      decoration: const InputDecoration(
+                        hintText: 'https://<域名>/api',
+                      ),
+                      onSubmitted: notifier.setBaseUrl,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  // 按钮与输入框同一行：它只作用于这一个框。撂在整节
+                  // 右下角会读成「应用这一页的所有改动」，而这一页别的
+                  // 东西根本没有「应用」这回事
+                  TextButton(
+                    onPressed: config.useMock
+                        ? null
+                        : () => notifier.setBaseUrl(_urlController.text),
+                    child: const Text('应用地址'),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
-        const SizedBox(height: 8),
-        health.when(
-          loading: () => const Padding(
-            padding: EdgeInsets.symmetric(vertical: 6),
-            child: SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
+        SettingsSection(
+          title: '后端状态',
+          trailing: TextButton(
+            // 两条都要重来。只刷 `/health` 的话，用户去把沙箱那一套起好、
+            // 回来点「重新检测」，看到的还是上一次的能力结论 ——
+            // 而他刚做的事恰恰是为了改变那个结论
+            onPressed: () {
+              ref.invalidate(healthProvider);
+              ref.invalidate(sandboxHealthProvider);
+            },
+            child: const Text('重新检测'),
           ),
-          error: (e, _) => Text(
-            '$e',
-            style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
-          ),
-          data: (h) => Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _kv(context, 'status', h.status),
-              // 版本号与 sha 并排。**只有版本号是不够的** —— semver 打完
-              // tag 的下一秒就不再唯一，之后每个提交都还报同一个版本号。
-              // 判「线上有没有那个修复」靠的是 sha，见 cortex_core::BUILD_SHA。
-              // 老服务端不报，那时只显示版本号（不写「未知」：那会让人以为
-              // 对面那台有问题，而它只是旧一点）
-              _kv(
-                context,
-                'version',
-                h.commit == null ? h.version : '${h.version}  ·  ${h.commit}',
+          children: [
+            health.when(
+              loading: () => const Padding(
+                padding: EdgeInsets.symmetric(vertical: 6),
+                child: SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
               ),
-              _kv(context, 'database', h.database),
-              _kv(context, 'auth', h.auth),
-              // 说出来，而不是默默庆幸。cortexd 只有在有人**特意**写了
-              // `CORTEX_AUTH=disabled` 时才会到这个状态，而且它每次启动都会
-              // 警告；客户端要是不提，它就是整套系统里唯一一个没有指出
-              // 「记忆库对任何够得着这个端口的人开放」的地方
-              if (h.authDisabled && !config.useMock) ...[
-                const SizedBox(height: 6),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      Icons.lock_open_rounded,
-                      size: 14,
-                      color: scheme.error,
+              error: (e, _) => Text(
+                '$e',
+                style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+              ),
+              data: (h) => Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // 键值行走 SettingsRow：值是可选中的等宽字 ——
+                  // version/sha 正是用户要原样复制进 bug 报告的东西
+                  SettingsCard(
+                    child: Column(
+                      children: [
+                        SettingsRow(
+                          label: 'status',
+                          value: h.status,
+                          monospace: true,
+                        ),
+                        // 版本号与 sha 并排。**只有版本号是不够的** —— semver 打完
+                        // tag 的下一秒就不再唯一，之后每个提交都还报同一个版本号。
+                        // 判「线上有没有那个修复」靠的是 sha，见 cortex_core::BUILD_SHA。
+                        // 老服务端不报，那时只显示版本号（不写「未知」：那会让人以为
+                        // 对面那台有问题，而它只是旧一点）
+                        SettingsRow(
+                          label: 'version',
+                          value: h.commit == null
+                              ? h.version
+                              : '${h.version}  ·  ${h.commit}',
+                          monospace: true,
+                        ),
+                        SettingsRow(
+                          label: 'database',
+                          value: h.database,
+                          monospace: true,
+                        ),
+                        SettingsRow(
+                          label: 'auth',
+                          value: h.auth,
+                          monospace: true,
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        // 说「拥有全部记忆」是过期的：长期记忆 2026-08-17
-                        // 拆去了 Cormex，这一侧没有。而真正暴露的东西
-                        // 一点不轻 —— 会话、历史、以及 agent 够得着的文件
-                        '这个部署关闭了认证：任何能连上 '
-                        '${config.baseUrl} 的人都拥有你的全部会话与历史，'
-                        '也能让 agent 读写它够得着的文件。'
-                        '只有监听地址确实是回环时才可接受。',
-                        style: theme.textTheme.labelSmall?.copyWith(
+                  ),
+                  // 说出来，而不是默默庆幸。cortexd 只有在有人**特意**写了
+                  // `CORTEX_AUTH=disabled` 时才会到这个状态，而且它每次启动都会
+                  // 警告；客户端要是不提，它就是整套系统里唯一一个没有指出
+                  // 「记忆库对任何够得着这个端口的人开放」的地方
+                  if (h.authDisabled && !config.useMock) ...[
+                    const SizedBox(height: 6),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          Icons.lock_open_rounded,
+                          size: 14,
                           color: scheme.error,
                         ),
-                      ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            // 说「拥有全部记忆」是过期的：长期记忆 2026-08-17
+                            // 拆去了 Cormex，这一侧没有。而真正暴露的东西
+                            // 一点不轻 —— 会话、历史、以及 agent 够得着的文件
+                            '这个部署关闭了认证：任何能连上 '
+                            '${config.baseUrl} 的人都拥有你的全部会话与历史，'
+                            '也能让 agent 读写它够得着的文件。'
+                            '只有监听地址确实是回环时才可接受。',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: scheme.error,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
-                ),
-              ],
-              // ── 「连得上」与「能跑云端对话」是两件事 ──────────────
-              //
-              // 上面那几行全部来自 `/health`，而 `/health` 只证明这个地址上
-              // 有个进程在答话。云端对话不是它答的：一轮云端对话要 agent
-              // 编排服务向记忆服务换委托凭据、据它拉起沙箱容器、容器再回连
-              // 编排服务 —— 这三段断哪一段，`/health` 都照样 200。于是这一页
-              // 画绿灯「已连接」，用户回到对话框发一句，得到的是失败。
-              //
-              // 生产上更狠：边缘把 `/health` 分给了**记忆服务**，
-              // `/sandbox/health` 才是编排服务 —— 那条路上的 `/health`
-              // 连「编排服务在不在」都没有回答。
-              const SizedBox(height: 10),
-              _cloudChat(context, ref),
-            ],
-          ),
+                  // ── 「连得上」与「能跑云端对话」是两件事 ──────────────
+                  //
+                  // 上面那几行全部来自 `/health`，而 `/health` 只证明这个地址上
+                  // 有个进程在答话。云端对话不是它答的：一轮云端对话要 agent
+                  // 编排服务向记忆服务换委托凭据、据它拉起沙箱容器、容器再回连
+                  // 编排服务 —— 这三段断哪一段，`/health` 都照样 200。于是这一页
+                  // 画绿灯「已连接」，用户回到对话框发一句，得到的是失败。
+                  //
+                  // 生产上更狠：边缘把 `/health` 分给了**记忆服务**，
+                  // `/sandbox/health` 才是编排服务 —— 那条路上的 `/health`
+                  // 连「编排服务在不在」都没有回答。
+                  const SizedBox(height: 10),
+                  _cloudChat(context, ref),
+                ],
+              ),
+            ),
+          ],
         ),
         _localAgent(context, ref),
         // 「退出登录」搬去了左下角账号菜单。凭据存在哪这句话留着 ——
         // 它回答的是「我关掉这个窗口，密码会留在哪」，属于知情，不是一个操作
-        if (!config.useMock && auth.token != null) ...[
-          const Divider(height: 24),
-          Text(
-            '已用 token 连接。凭据只存在于内存'
-            '${kCanRememberToken ? '（以及你勾选的 sessionStorage）' : '与环境变量 $kTokenEnvVar'}。',
-            style: theme.textTheme.bodySmall,
+        if (!config.useMock && auth.token != null)
+          SettingsSection(
+            children: [
+              Text(
+                '已用 token 连接。凭据只存在于内存'
+                '${kCanRememberToken ? '（以及你勾选的 sessionStorage）' : '与环境变量 $kTokenEnvVar'}。',
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
           ),
-        ],
       ],
     );
   }
@@ -222,52 +256,43 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
     // 状态，只会让人去找一个这个平台上根本不存在的东西
     if (!kLocalAgentSupported) return const SizedBox.shrink();
 
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
+    final scheme = Theme.of(context).colorScheme;
     final muted = scheme.onSurfaceVariant;
     final origin = ref.watch(localAgentOriginProvider);
     final health = ref.watch(healthProvider).value;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Divider(height: 24),
-        Text('本机 agent', style: theme.textTheme.titleSmall),
-        const SizedBox(height: 4),
-        Text(
+    return SettingsSection(
+      title: '本机 agent',
+      description:
           '工具、读写文件、跑命令都在它里面。由界面自动拉起、随界面退出，'
           '端口每次由系统随机分 —— 所以报错里那个 127.0.0.1 不是你配的地址。',
-          style: theme.textTheme.labelSmall?.copyWith(color: muted),
-        ),
-        const SizedBox(height: 8),
-        ...switch (origin) {
-          AsyncData(value: final o?) => _agentRunning(context, o, health),
-          // 起不来 / 这台机器上没有它。**说清后果**：不是「少了个进程」，
-          // 是工具全都不能用，而对话本身照常 —— 用户否则会以为整个坏了
-          AsyncData() => [
-            _capability(
-              context,
-              Icons.highlight_off,
-              '没在跑 —— 已直接连远端',
-              '对话照常，但读写本机文件、跑命令这些都不可用。'
-                  '重启一次应用通常就好了。',
-              scheme.error,
-            ),
-          ],
-          AsyncError(:final error) => [
-            _capability(
-              context,
-              Icons.error_outline,
-              '起不来',
-              '$error',
-              scheme.error,
-            ),
-          ],
-          _ => [
-            _capability(context, Icons.hourglass_empty, '正在启动…', null, muted),
-          ],
-        },
-      ],
+      children: switch (origin) {
+        AsyncData(value: final o?) => _agentRunning(context, o, health),
+        // 起不来 / 这台机器上没有它。**说清后果**：不是「少了个进程」，
+        // 是工具全都不能用，而对话本身照常 —— 用户否则会以为整个坏了
+        AsyncData() => [
+          _capability(
+            context,
+            Icons.highlight_off,
+            '没在跑 —— 已直接连远端',
+            '对话照常，但读写本机文件、跑命令这些都不可用。'
+                '重启一次应用通常就好了。',
+            scheme.error,
+          ),
+        ],
+        AsyncError(:final error) => [
+          _capability(
+            context,
+            Icons.error_outline,
+            '起不来',
+            '$error',
+            scheme.error,
+          ),
+        ],
+        _ => [
+          _capability(context, Icons.hourglass_empty, '正在启动…', null, muted),
+        ],
+      },
     );
   }
 
@@ -400,7 +425,10 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
               Icons.cloud_off,
               '云端对话：现在跑不起来',
               s.reason,
-              theme.colorScheme.tertiary,
+              // 「本该能跑，现在跑不了」是警示，不是故障（故障是 error）。
+              // ⚠️ 不写 scheme.tertiary：这套主题没配它，会静默回落成
+              // Material 默认的 teal —— 一个不属于任何语义的颜色
+              theme.cortex.warning,
             ),
           },
         );
@@ -436,35 +464,6 @@ class _ConnectionPageState extends ConsumerState<ConnectionPage> {
           ),
         ),
       ],
-    );
-  }
-
-  Widget _kv(BuildContext context, String k, String v) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 80,
-            // 键用第三级前景：这一列是**标签**，值才是内容。
-            // 两者同色的话眼睛要逐行分辨哪边是哪边
-            child: Text(
-              k,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.cortex.foregroundTertiary,
-              ),
-            ),
-          ),
-          Text(
-            v,
-            style: theme.textTheme.bodySmall?.copyWith(
-              fontFamily: 'monospace',
-              color: theme.colorScheme.onSurface,
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

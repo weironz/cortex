@@ -21,6 +21,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/ansi.dart';
 import '../../core/theme.dart';
 import '../../models/tool_call.dart';
 import '../../state/app_providers.dart';
@@ -207,15 +208,21 @@ class _TerminalView extends ConsumerWidget {
                       Text(
                         r'$ ',
                         style: theme.textTheme.bodySmall?.copyWith(
-                          fontFamily: 'monospace',
+                          fontFamily: 'JetBrains Mono',
+                          fontFamilyFallback: CortexTheme.monoFallback,
                           color: theme.cortex.foregroundTertiary,
                         ),
                       ),
                       Expanded(
                         child: Text(
-                          c.arguments ?? '(命令内容不可用)',
+                          // shellCommand 而不是 arguments：后者是 daemon 的
+                          // `(command=…)` 包装，接在 `$ ` 后面画出来是
+                          // `$ (command=git status)` —— 伪终端的形式感
+                          // 反而放大了内容的不对
+                          c.shellCommand ?? '(命令内容不可用)',
                           style: theme.textTheme.bodySmall?.copyWith(
-                            fontFamily: 'monospace',
+                            fontFamily: 'JetBrains Mono',
+                            fontFamilyFallback: CortexTheme.monoFallback,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
@@ -232,14 +239,41 @@ class _TerminalView extends ConsumerWidget {
                   ),
                   if ((c.result ?? '').isNotEmpty) ...[
                     const SizedBox(height: 6),
-                    Text(
-                      c.result!,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        fontFamily: 'monospace',
-                        height: 1.5,
-                        color: scheme.onSurfaceVariant,
+                    // 输出走 ANSI 解析着色：这里放的是真终端的输出，
+                    // cargo / npm / git 一律带色，不解析的话用户看到的是
+                    // `[32m通过[0m` 而不是一个绿色的「通过」。失败时不解析
+                    // —— 整段错误色说的是「这条挂了」，让命令自己的配色
+                    // 盖过它只会把这件事冲淡
+                    if (c.failed)
+                      Text(
+                        stripAnsi(c.result!),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          fontFamily: 'JetBrains Mono',
+                          fontFamilyFallback: CortexTheme.monoFallback,
+                          height: 1.5,
+                          color: scheme.error,
+                        ),
+                      )
+                    else
+                      Text.rich(
+                        TextSpan(
+                          children: parseAnsi(
+                            c.result!,
+                            base:
+                                (theme.textTheme.bodySmall ?? const TextStyle())
+                                    .copyWith(
+                                      fontFamily: 'JetBrains Mono',
+                                      fontFamilyFallback:
+                                          CortexTheme.monoFallback,
+                                      height: 1.5,
+                                      color: scheme.onSurfaceVariant,
+                                    ),
+                            // 深色主题要亮档色板 —— 不传的话 cargo 的红字
+                            // 在深底上对比度不够，编译报错恰好最读不清
+                            brightness: theme.brightness,
+                          ),
+                        ),
                       ),
-                    ),
                   ],
                 ],
               ),

@@ -7,9 +7,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pasteboard/pasteboard.dart';
 
 import '../../../models/attachment.dart';
+import '../../../state/assistant_controller.dart';
 import '../../../state/attachment_controller.dart';
 import '../../../state/composer_draft.dart';
 import '../../../state/file_mention_controller.dart';
+import '../../../state/model_controller.dart';
 import '../../workspace/workspace_panel.dart';
 import 'attachment_views.dart';
 import 'assistant_chip.dart';
@@ -490,6 +492,8 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                                 onPressed: canSend ? _submit : null,
                                 tooltip: uploading ? '附件还在上传' : '发送',
                                 icon: Icons.arrow_upward_rounded,
+                                // 可发送时带品牌渐变 —— 全产品唯一的一处
+                                accent: canSend,
                                 background: canSend
                                     ? scheme.primary
                                     : scheme.surfaceContainerHighest,
@@ -544,10 +548,6 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
   }
 }
 
-/// 发送**之前**要定的两件事：这轮跑在哪个目录、谁来把关。
-///
-/// 单开一个 widget 是因为它要被画两遍 —— 一遍真的，一遍透明的占位，
-/// 好让中间那句说明居中。两处必须**同宽**，所以必须是同一个东西。
 /// `@` 之后那张候选文件列表。
 ///
 /// # 为什么画在输入框**上方**，而不是用 Overlay 悬浮
@@ -714,7 +714,11 @@ class _MentionRow extends StatelessWidget {
   }
 }
 
-class _BeforeSendChips extends StatelessWidget {
+/// 发送**之前**要定的那几件事：这轮跑在哪个目录、谁来把关、用哪个模型。
+///
+/// 单开一个 widget 是因为宽窄两套排法要并排读得出差别 —— 收哪几颗、
+/// 留哪几颗是一个需要解释的决定（见 [narrow]），散在 build 里没地方写。
+class _BeforeSendChips extends ConsumerWidget {
   const _BeforeSendChips({required this.narrow});
 
   /// 窄到摊不开四颗时收成「目录 + 权限档 + …」。
@@ -727,7 +731,7 @@ class _BeforeSendChips extends StatelessWidget {
   final bool narrow;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     if (!narrow) {
       return const Row(
         mainAxisSize: MainAxisSize.min,
@@ -749,36 +753,49 @@ class _BeforeSendChips extends StatelessWidget {
         ],
       );
     }
+    // 「…」里只有模型与智能体两颗，而它们在老服务端上会**双双自隐藏**
+    // （ModelChip 判 /llm/models 不存在、AssistantChip 判 /assistants
+    // 不存在）。这里 watch 的是它们各自内部**同一份**判据 —— 不这样的话
+    // 菜单按钮照常画着，点开却是空的，用户只会当它坏了
+    final modelGone = ref.watch(
+      modelLabelProvider.select((l) => l.unsupported),
+    );
+    final assistantGone = ref.watch(
+      assistantControllerProvider.select((s) => s.unsupported),
+    );
+
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         const WorkspaceChip(),
         const SizedBox(width: 6),
         const PermissionModeChip(),
-        const SizedBox(width: 2),
-        // 收进来的 chip **原样**放进菜单，不是重画一份菜单项：
-        // 它们各自的弹层、锁定态、不可用时自隐藏的逻辑都在 chip 里，
-        // 抄成菜单项等于那些行为都要再维护一份
-        MenuAnchor(
-          menuChildren: const [
-            Padding(
-              padding: EdgeInsets.fromLTRB(10, 8, 10, 4),
-              child: ModelChip(),
+        if (!(modelGone && assistantGone)) ...[
+          const SizedBox(width: 2),
+          // 收进来的 chip **原样**放进菜单，不是重画一份菜单项：
+          // 它们各自的弹层、锁定态、不可用时自隐藏的逻辑都在 chip 里，
+          // 抄成菜单项等于那些行为都要再维护一份
+          MenuAnchor(
+            menuChildren: const [
+              Padding(
+                padding: EdgeInsets.fromLTRB(10, 8, 10, 4),
+                child: ModelChip(),
+              ),
+              Padding(
+                padding: EdgeInsets.fromLTRB(10, 4, 10, 8),
+                child: AssistantChip(),
+              ),
+            ],
+            builder: (context, controller, _) => IconButton(
+              onPressed: () =>
+                  controller.isOpen ? controller.close() : controller.open(),
+              iconSize: 16,
+              visualDensity: VisualDensity.compact,
+              tooltip: '模型与智能体',
+              icon: const Icon(Icons.more_horiz_rounded),
             ),
-            Padding(
-              padding: EdgeInsets.fromLTRB(10, 4, 10, 8),
-              child: AssistantChip(),
-            ),
-          ],
-          builder: (context, controller, _) => IconButton(
-            onPressed: () =>
-                controller.isOpen ? controller.close() : controller.open(),
-            iconSize: 16,
-            visualDensity: VisualDensity.compact,
-            tooltip: '模型与智能体',
-            icon: const Icon(Icons.more_horiz_rounded),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -832,6 +849,7 @@ class _RoundButton extends StatelessWidget {
     required this.icon,
     required this.background,
     required this.foreground,
+    this.accent = false,
   });
 
   final VoidCallback? onPressed;
@@ -840,20 +858,37 @@ class _RoundButton extends StatelessWidget {
   final Color background;
   final Color foreground;
 
+  /// 画成品牌渐变（acc → accInk，180°）。**整个产品里只有可发送状态的
+  /// 发送键是 true** —— 设计稿的原话是「渐变只留发送键一处」：渐变一多，
+  /// 「主要动作」就不再突出，这一处的辨识度正是靠别处都没有换来的。
+  final bool accent;
+
   @override
   Widget build(BuildContext context) {
+    final tokens = Theme.of(context).cortex;
     return Tooltip(
       message: tooltip,
       child: Material(
-        color: background,
+        color: accent ? Colors.transparent : background,
         shape: const CircleBorder(),
         clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onPressed,
-          child: SizedBox(
-            width: 34,
-            height: 34,
-            child: Icon(icon, size: 18, color: foreground),
+        child: Ink(
+          decoration: accent
+              ? BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [background, tokens.accentInk],
+                  ),
+                )
+              : null,
+          child: InkWell(
+            onTap: onPressed,
+            child: SizedBox(
+              width: 34,
+              height: 34,
+              child: Icon(icon, size: 18, color: foreground),
+            ),
           ),
         ),
       ),

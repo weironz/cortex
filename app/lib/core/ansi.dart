@@ -24,7 +24,11 @@ import 'package:flutter/material.dart';
 /// 256 色与真彩（`38;5;n` / `38;2;r;g;b`）只取到「有颜色」这一层：
 /// 它们的参数被吃掉，不会漏成正文。做全套要一张调色板，而终端调色板
 /// 与应用主题是两套颜色体系 —— 在浅色主题上照搬终端的亮黄，等于不可读。
-List<TextSpan> parseAnsi(String input, {required TextStyle base}) {
+List<TextSpan> parseAnsi(
+  String input, {
+  required TextStyle base,
+  Brightness brightness = Brightness.light,
+}) {
   final spans = <TextSpan>[];
   final buf = StringBuffer();
   var style = base;
@@ -74,7 +78,7 @@ List<TextSpan> parseAnsi(String input, {required TextStyle base}) {
     final params = input.substring(i + 2, j);
     if (finalByte == 'm') {
       flush();
-      style = _applySgr(style, params, base);
+      style = _applySgr(style, params, base, brightness);
     }
     // 其余最终字节（A/B/C/D 光标、J/K 清除、H 定位…）：认出来并丢掉
     i = j + 1;
@@ -92,7 +96,12 @@ String stripAnsi(String input) {
 }
 
 /// SGR（`ESC[…m`）。只实现在这个界面里说得清的那几档。
-TextStyle _applySgr(TextStyle current, String params, TextStyle base) {
+TextStyle _applySgr(
+  TextStyle current,
+  String params,
+  TextStyle base,
+  Brightness brightness,
+) {
   // 空参数等价于 `0`（重置）—— `ESC[m` 是合法写法，漏掉它会让重置失效，
   // 于是后面所有文字都带着上一段的颜色
   final codes = (params.isEmpty ? '0' : params)
@@ -135,26 +144,32 @@ TextStyle _applySgr(TextStyle current, String params, TextStyle base) {
           k += mode == 5 ? 2 : (mode == 2 ? 4 : 1);
         }
       default:
-        final c = _sgrColor(code);
+        final c = _sgrColor(code, brightness);
         if (c != null) style = style.copyWith(color: c);
     }
   }
   return style;
 }
 
-/// 标准 8 色与亮色的前景码。
+/// 标准 8 色与亮色的前景码 —— **按主题亮度取两组**。
 ///
-/// 取的是**中等饱和度**的一组，而不是终端里那种纯 `#00FF00`：
-/// 后者在浅色主题上几乎读不了，而这个组件两种主题下都要能用。
+/// 上一版是一组中等饱和度的值配一句「两种主题下都要能用」，实测那组值
+/// 只在浅色底上成立：深色 `#1B1B1F` 上红 `#D64545` 约 3.5:1、灰 `#6B7280`
+/// 约 3.2:1，编译报错的那几行红字恰好是深色下最读不清的。深色组取与
+/// `CortexTokens` 反馈色同族的亮档（红 #F87171 / 绿 #4ADE80 / 黄 #FBBF24 /
+/// 蓝 #60A5FA），两套颜色体系不再各说各话。
 /// 背景色（40-47）**不给** —— 一段带背景块的文字在气泡里像是被选中了。
-Color? _sgrColor(int code) => switch (code) {
-  30 || 90 => const Color(0xFF6B7280),
-  31 || 91 => const Color(0xFFD64545),
-  32 || 92 => const Color(0xFF2E9E5B),
-  33 || 93 => const Color(0xFFB7791F),
-  34 || 94 => const Color(0xFF3B7DD8),
-  35 || 95 => const Color(0xFF9B51E0),
-  36 || 96 => const Color(0xFF12A5A5),
-  37 || 97 => const Color(0xFF9CA3AF),
-  _ => null,
-};
+Color? _sgrColor(int code, Brightness brightness) {
+  final dark = brightness == Brightness.dark;
+  return switch (code) {
+    30 || 90 => dark ? const Color(0xFF9CA3AF) : const Color(0xFF6B7280),
+    31 || 91 => dark ? const Color(0xFFF87171) : const Color(0xFFD64545),
+    32 || 92 => dark ? const Color(0xFF4ADE80) : const Color(0xFF2E9E5B),
+    33 || 93 => dark ? const Color(0xFFFBBF24) : const Color(0xFFB7791F),
+    34 || 94 => dark ? const Color(0xFF60A5FA) : const Color(0xFF3B7DD8),
+    35 || 95 => dark ? const Color(0xFFC084FC) : const Color(0xFF9B51E0),
+    36 || 96 => dark ? const Color(0xFF4FD1C5) : const Color(0xFF12A5A5),
+    37 || 97 => dark ? const Color(0xFFD1D5DB) : const Color(0xFF9CA3AF),
+    _ => null,
+  };
+}

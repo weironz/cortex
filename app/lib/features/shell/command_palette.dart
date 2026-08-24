@@ -64,14 +64,40 @@ class _Palette extends ConsumerStatefulWidget {
 
 class _PaletteState extends ConsumerState<_Palette> {
   final TextEditingController _controller = TextEditingController();
+  final ScrollController _scroll = ScrollController();
   int _selected = 0;
+
+  /// 已经为 `@` 分支踢过一次扫描。
+  ///
+  /// 去重不能交给 `ensure()` 自己：它只对「已经扫完」的会话短路，
+  /// loading 期间再调会**再起一次全量扫描** —— 而 `@` 分支里每敲一个字
+  /// 都会走到这里。面板是临时的，一次生命周期里踢一次正好。
+  bool _mentionScanKicked = false;
+
+  /// 每行固定高度。
+  ///
+  /// 固定而不是各排各的：itemExtent 让「第 N 行在视口哪儿」变成一道乘法，
+  /// 键盘跟随滚动（[_revealSelected]）才算得准。52 = 上一版两行内容的
+  /// 自然高度（8 + 标题 20 + 副标题 16 + 8），副标题行内截断、不撑高行。
+  static const double _rowExtent = 52;
+
+  /// 列表上下的内边距 —— 滚动数学要用到它，写死在两处迟早漂。
+  static const double _listPad = 6;
 
   @override
   void initState() {
     super.initState();
     _controller.addListener(() {
       setState(() => _selected = 0);
+      // 换了词选中项回到第一行，视口不跟着回去的话，高亮会停在看不见的地方
+      if (_scroll.hasClients) _scroll.jumpTo(0);
       final text = _controller.text;
+      // 面板要自己踢扫描 —— 唯一的另一处 ensure() 在输入框的 @ 弹层里，
+      // 从 ⌘K 直接进 @ 分支的话没人扫过，列表会永远停在「没有匹配的文件」
+      if (text.startsWith('@') && !_mentionScanKicked) {
+        _mentionScanKicked = true;
+        unawaited(ref.read(fileMentionProvider.notifier).ensure());
+      }
       // 无前缀才喂给会话搜索 —— 前缀模式下把 `>set` 发去搜全文，
       // 结果闪一下又消失，读起来像面板在抽搐
       if (!text.startsWith('>') &&
@@ -85,8 +111,33 @@ class _PaletteState extends ConsumerState<_Palette> {
   @override
   void dispose() {
     _controller.dispose();
+    _scroll.dispose();
     ref.read(sessionSearchProvider.notifier).clear();
     super.dispose();
+  }
+
+  /// 把选中行滚进视口。
+  ///
+  /// ListView 自己不知道「选中」这回事：↑↓ 改的是 [_selected]，不动
+  /// 滚动位置，于是选中项会移出视口、Enter 执行一条看不见的行。
+  /// 行高固定（[_rowExtent]），位置是乘法，不必量 RenderObject。
+  void _revealSelected() {
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    final top = _listPad + _selected * _rowExtent;
+    final bottom = top + _rowExtent;
+    double? target;
+    if (top - _listPad < pos.pixels) {
+      target = top - _listPad;
+    } else if (bottom + _listPad > pos.pixels + pos.viewportDimension) {
+      target = bottom + _listPad - pos.viewportDimension;
+    }
+    if (target == null) return;
+    _scroll.animateTo(
+      target.clamp(0.0, pos.maxScrollExtent).toDouble(),
+      duration: const Duration(milliseconds: 120),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   /// 静态命令表。动作里**先关面板再干活** —— 反过来的话，打开设置那类
@@ -150,10 +201,11 @@ class _PaletteState extends ConsumerState<_Palette> {
       final files = ref.watch(fileMentionProvider).filter(q).take(8);
       return [
         for (final path in files)
+          // 不带副标题 —— 八行同一句「放进输入框」是噪音，
+          // 选中后做什么由 Enter 的行为自己说
           _Entry(
             icon: Icons.description_outlined,
             title: path,
-            subtitle: '放进输入框',
             run: (context, ref) {
               ref.read(composerDraftProvider.notifier).offer('@$path ');
               ref.read(mainViewProvider.notifier).go(MainView.chat);
@@ -203,13 +255,73 @@ class _PaletteState extends ConsumerState<_Palette> {
     entry.run(context, ref);
   }
 
+  /// 列表空着时说什么。
+  ///
+  /// 四种来源各有各的「为什么是空的」：还在扫、没绑工作区、后端不支持、
+  /// 网络错了 —— 一句笼统的「没有匹配的结果」会把它们全说成「没有」，
+  /// 用户会以为要找的东西不存在。
+  Widget _status(ThemeData theme) {
+    final tokens = theme.cortex;
+    final scheme = theme.colorScheme;
+    final text = _controller.text;
+    final dim = theme.textTheme.bodySmall?.copyWith(
+      color: tokens.foregroundTertiary,
+    );
+
+    Widget line(String message) => Padding(
+      padding: const EdgeInsets.all(20),
+      child: Text(message, style: dim),
+    );
+
+    if (text.startsWith('@')) {
+      final index = ref.watch(fileMentionProvider);
+      if (!index.available) return line('这个会话没有绑定工作区');
+      if (index.loading) return line('正在看工作区里有什么…');
+      return line('没有匹配的文件');
+    }
+    if (text.startsWith('>') || text.startsWith('/')) {
+      return line('没有匹配的结果。');
+    }
+    final search = ref.watch(sessionSearchProvider);
+    if (search.error != null) {
+      // 错误要显示、要给一条重试的路 —— 只说「没有匹配的结果」的话，
+      // 一次网络抖动看起来就像「那条会话不存在」
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(20, 10, 12, 10),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                search.error!,
+                style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+              ),
+            ),
+            TextButton(
+              onPressed: () => ref.read(sessionSearchProvider.notifier).retry(),
+              child: const Text('重试'),
+            ),
+          ],
+        ),
+      );
+    }
+    // 「没有这个功能」与错误分开：它不该长得像坏了，也不该给重试
+    if (search.unsupported) return line('这个部署不支持全文搜索');
+    if (search.loading) return line('搜索中…');
+    if (text.isEmpty) return line('直接打字搜会话；> 命令、@ 文件、/ 技能。');
+    return line('没有匹配的结果。');
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final tokens = theme.cortex;
     final entries = _entries();
-    final searching = ref.watch(sessionSearchProvider).loading;
+    // 只在 @ 分支 watch —— 脚注要用 truncated，别的分支不必因为
+    // 扫描状态变化而重建
+    final mention = _controller.text.startsWith('@')
+        ? ref.watch(fileMentionProvider)
+        : null;
 
     return Material(
       color: Colors.transparent,
@@ -217,7 +329,10 @@ class _PaletteState extends ConsumerState<_Palette> {
         width: 560,
         constraints: const BoxConstraints(maxHeight: 420),
         decoration: BoxDecoration(
-          color: scheme.surface,
+          // surfaceContainer 而不是 surface：弹层要比被它盖住的内容浅一档，
+          // 深色下同用 surface 会让面板陷进背景里 —— 阴影在深底上几乎不可见，
+          // 「浮起来」只能靠底色差
+          color: scheme.surfaceContainer,
           borderRadius: BorderRadius.circular(CortexTokens.radiusWindow),
           border: Border.all(color: scheme.outline),
           boxShadow: kElevationToShadow[12],
@@ -240,6 +355,7 @@ class _PaletteState extends ConsumerState<_Palette> {
                           ? entries.length - 1
                           : (_selected + i.delta) % entries.length,
                     );
+                    _revealSelected();
                   }
                   return null;
                 },
@@ -269,22 +385,15 @@ class _PaletteState extends ConsumerState<_Palette> {
                 Divider(height: 1, color: tokens.sidebarBorder),
                 Flexible(
                   child: entries.isEmpty
-                      ? Padding(
-                          padding: const EdgeInsets.all(20),
-                          child: Text(
-                            searching
-                                ? '搜索中…'
-                                : _controller.text.isEmpty
-                                ? '直接打字搜会话；> 命令、@ 文件、/ 技能。'
-                                : '没有匹配的结果。',
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: tokens.foregroundTertiary,
-                            ),
-                          ),
-                        )
+                      ? _status(theme)
                       : ListView.builder(
+                          controller: _scroll,
                           shrinkWrap: true,
-                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          padding: const EdgeInsets.symmetric(
+                            vertical: _listPad,
+                          ),
+                          // 行高固定，键盘跟随滚动才算得准（见 _rowExtent）
+                          itemExtent: _rowExtent,
                           itemCount: entries.length,
                           itemBuilder: (context, i) {
                             final e = entries[i];
@@ -300,7 +409,6 @@ class _PaletteState extends ConsumerState<_Palette> {
                                     : Colors.transparent,
                                 padding: const EdgeInsets.symmetric(
                                   horizontal: 16,
-                                  vertical: 8,
                                 ),
                                 child: Row(
                                   children: [
@@ -312,6 +420,8 @@ class _PaletteState extends ConsumerState<_Palette> {
                                     const SizedBox(width: 10),
                                     Expanded(
                                       child: Column(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
                                         crossAxisAlignment:
                                             CrossAxisAlignment.start,
                                         children: [
@@ -319,7 +429,15 @@ class _PaletteState extends ConsumerState<_Palette> {
                                             e.title,
                                             maxLines: 1,
                                             overflow: TextOverflow.ellipsis,
-                                            style: theme.textTheme.bodyMedium,
+                                            style: theme.textTheme.bodyMedium
+                                                ?.copyWith(
+                                                  // 选中态补一档字重：底色
+                                                  // 是中性的一档，扫视时
+                                                  // 只靠它不够跳
+                                                  fontWeight: selected
+                                                      ? FontWeight.w600
+                                                      : null,
+                                                ),
                                           ),
                                           if (e.subtitle != null)
                                             Text(
@@ -342,6 +460,19 @@ class _PaletteState extends ConsumerState<_Palette> {
                           },
                         ),
                 ),
+                // 清单不完整这件事要说：不说的话，用户打了个名字搜不到，
+                // 会以为那个文件不存在。放在列表外面而不是当最后一行 ——
+                // itemExtent 要求每行同高，脚注混进去会破坏滚动数学
+                if (mention != null && entries.isNotEmpty && mention.truncated)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                    child: Text(
+                      '只收了前 $kMentionScanLimit 个',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: tokens.foregroundTertiary,
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),

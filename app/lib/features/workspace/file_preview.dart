@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import '../../core/theme.dart';
 
 import '../../models/workspace.dart';
 import '../../widgets/markdown/cortex_markdown.dart';
@@ -209,7 +210,8 @@ class FilePreview extends StatelessWidget {
             : SelectableText(
                 text,
                 style: theme.textTheme.bodySmall?.copyWith(
-                  fontFamily: 'monospace',
+                  fontFamily: 'JetBrains Mono',
+                  fontFamilyFallback: CortexTheme.monoFallback,
                   height: 1.5,
                 ),
               ),

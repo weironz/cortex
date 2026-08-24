@@ -232,7 +232,8 @@ class _IdChip extends StatelessWidget {
         id,
         style: theme.textTheme.labelSmall?.copyWith(
           // 填进请求里的就是它，要能逐字符核对
-          fontFamily: 'monospace',
+          fontFamily: 'JetBrains Mono',
+          fontFamilyFallback: CortexTheme.monoFallback,
           color: theme.cortex.foregroundTertiary,
         ),
       ),

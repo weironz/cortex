@@ -107,7 +107,7 @@ class _InlineCode extends StatelessWidget {
       child: Text(
         text,
         style: style.copyWith(
-          fontFamily: 'monospace',
+          fontFamily: 'JetBrains Mono',
           fontFamilyFallback: CortexTheme.monoFallback,
           fontSize: (style.fontSize ?? 15) * 0.88,
           color: scheme.brightness == Brightness.dark

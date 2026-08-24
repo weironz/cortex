@@ -25,13 +25,16 @@ import '../../../core/theme.dart';
 class SettingsSection extends StatelessWidget {
   const SettingsSection({
     super.key,
-    required this.title,
+    this.title,
     this.description,
     this.trailing,
     required this.children,
   });
 
-  final String title;
+  /// 节头。**单节页可以不传**：内容区大标题已经写着页名，节头再抄一遍
+  /// 页名是口吃（技能页曾是「技能」「技能」两行叠着）—— 不传时只画
+  /// description 与 trailing 那一行。
+  final String? title;
   final String? description;
 
   /// 标题右边那个动作（「刷新」「添加」之类）。
@@ -42,6 +45,19 @@ class SettingsSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final desc = description == null
+        ? null
+        : ConstrainedBox(
+            // 说明文字单独限宽：内容区整体封顶 1160 是为模型服务那种三栏
+            // 页定的，一段中文说明摊成一整行 1100px 远超可读行宽（约 40 字）
+            constraints: const BoxConstraints(maxWidth: 640),
+            child: Text(
+              description!,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.cortex.foregroundTertiary,
+              ),
+            ),
+          );
     return Padding(
       // 节与节之间靠**留白**分开，不靠分隔线：一页里画三条横线之后，
       // 真正需要一条线的地方（比如表头）就再也强调不出来了
@@ -49,24 +65,88 @@ class SettingsSection extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Expanded(child: Text(title, style: theme.textTheme.titleSmall)),
-              ?trailing,
-            ],
-          ),
-          if (description != null) ...[
+          if (title != null)
+            Row(
+              children: [
+                Expanded(
+                  child: Text(title!, style: theme.textTheme.titleSmall),
+                ),
+                ?trailing,
+              ],
+            )
+          else if (trailing case final t?)
+            Row(
+              children: [
+                if (desc case final d?) Expanded(child: d) else const Spacer(),
+                t,
+              ],
+            )
+          else
+            ?desc,
+          if (title != null && desc != null) ...[
             const SizedBox(height: 4),
-            Text(
-              description!,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.cortex.foregroundTertiary,
-              ),
-            ),
+            desc,
           ],
           const SizedBox(height: 10),
           ...children,
         ],
+      ),
+    );
+  }
+}
+
+/// 整页级的说明/空态/错误态 —— 设置各页共用这一个。
+///
+/// # 为什么值得一个公共件
+///
+/// 此前是四套手写：技能页的 `_Note`、电脑操作的 `_Unavailable`、连接器页
+/// 的 `_NoLocalAgent` 与 `_Failed` —— 图标从 30 到 36、限宽从 380 到不限、
+/// 重试按钮一个 OutlinedButton 一个 TextButton。同类东西四个长相，
+/// 逐页切换时最容易被看出来是拼的；`_Failed` 最伤：一段红色裸异常文本
+/// 居中挂着，读起来像程序崩了而不是一个设计过的「拉不到，重试」。
+class SettingsPageNote extends StatelessWidget {
+  const SettingsPageNote({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.body,
+    this.action,
+  });
+
+  final IconData icon;
+  final String title;
+  final String body;
+
+  /// 出路（重试之类）。错误态**必须**给一个 —— 没有出路的错误是死胡同。
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 48),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 32, color: theme.cortex.foregroundTertiary),
+              const SizedBox(height: 12),
+              Text(title, style: theme.textTheme.titleSmall),
+              const SizedBox(height: 6),
+              Text(
+                body,
+                textAlign: TextAlign.center,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.cortex.foregroundTertiary,
+                  height: 1.6,
+                ),
+              ),
+              if (action != null) ...[const SizedBox(height: 14), action!],
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -11,6 +11,7 @@ import 'package:cortex_app/features/chat/session_changes_sheet.dart';
 import 'package:cortex_app/features/chat/widgets/diff_view.dart';
 import 'package:cortex_app/models/chat_message.dart';
 import 'package:cortex_app/models/tool_call.dart';
+import 'package:cortex_app/core/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -117,12 +118,15 @@ void main() {
       Color colorOf(String text) =>
           tester.widget<Text>(find.text(text)).style!.color!;
 
+      // 2026-08-24 起取主题 token（深浅各配一档），不再是写死的单值 ——
+      // 旧的中间调在两种主题下都不到 4.5:1，而 diff 恰恰出现在确认框里
+      final theme = Theme.of(tester.element(find.byType(DiffView)));
       expect(
         colorOf('+new line'),
-        const Color(0xFF2E9E5B),
+        theme.cortex.success,
         reason: '绿加红减是这件事的通用语言（git、GitHub、每个 code review 工具）',
       );
-      expect(colorOf('-old line'), const Color(0xFFCF4A4A));
+      expect(colorOf('-old line'), theme.colorScheme.error);
       expect(
         colorOf('+new line'),
         isNot(colorOf(' keep this')),

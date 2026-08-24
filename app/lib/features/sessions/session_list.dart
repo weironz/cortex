@@ -55,16 +55,9 @@ class SessionList extends ConsumerWidget {
               value: state.showArchived,
               onChanged: controller.setShowArchived,
             ),
-            IconButton(
-              onPressed: () {
-                controller.startNewChat();
-                ref.read(projectControllerProvider.notifier).select(null);
-                onSelected?.call();
-              },
-              iconSize: 18,
-              tooltip: '新对话',
-              icon: const Icon(Icons.add_rounded),
-            ),
+            // 这里曾有第三个按钮「新对话」（add_rounded）。删掉了：左栏
+            // NavBlock 首行已经是同一个动作的入口，同一件事两个入口还配着
+            // 两个不同的图标，读起来像两个不同的功能 —— 留下的是首行那个
           ],
         ),
         // 待补写的那些。**必须画在这儿，不能只留在设置里。**
@@ -302,26 +295,20 @@ class SessionList extends ConsumerWidget {
       }
     });
 
-    // ── 3. 最近：其余的，保留现有的项目分组 ──
+    // ── 3. 最近：其余的，**纯时间线，只有对话这一层** ──
+    //
+    // 这里曾按未置顶项目再分一层组（连带一个「未分组」组头）。删掉了
+    // （2026-08-24 实测反馈：「最近里面应该只有对话这一层，怎么还有
+    // 未分组」）：「最近」回答的是**什么时候**，项目回答的是**属于哪**，
+    // 两个维度叠在同一段里，读者哪个都拿不稳 —— 时间线被组头切碎，
+    // 分组又只覆盖没置顶的那半。项目维度有自己的两个入口
+    // （置顶进「项目」段、全部在项目页），不缺这一处。
+    // 参考 Claude 的左栏：Chats 就是一条平铺的时间线。
     final rest = sessions
         .where((s) => !s.pinned && !pinnedIds.contains(s.projectId))
         .toList();
     section(SidebarSection.chats, rest.length, () {
-      if (!projects.showGrouping) {
-        rows.addAll(rest.map(_SessionRow.new));
-        return;
-      }
-      final unpinned = projects.projects
-          .where((p) => !p.pinned)
-          .toList(growable: false);
-      for (final group in groupSessionsByProject(rest, unpinned)) {
-        // 未分组那一组空着就整个不画：一个空的「未分组」标题是纯噪音
-        if (group.isUngrouped && group.sessions.isEmpty) continue;
-        rows.add(_HeaderRow(group));
-        final id = group.projectId;
-        if (id != null && projects.isCollapsed(id)) continue;
-        rows.addAll(group.sessions.map(_SessionRow.new));
-      }
+      rows.addAll(rest.map(_SessionRow.new));
     });
 
     return rows;
@@ -980,145 +967,157 @@ class _SessionTileState extends State<_SessionTile> {
             color: background,
             borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
           ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        if (session.workspace != null) ...[
-                          Tooltip(
-                            message: '已绑定工作区：${session.workspace!.root}',
-                            child: Icon(
-                              Icons.folder_rounded,
-                              size: 11,
-                              color: scheme.secondary,
-                            ),
-                          ),
-                          const SizedBox(width: 5),
-                        ],
-                        Expanded(
-                          child: Text(
-                            session.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              fontWeight: widget.selected
-                                  ? FontWeight.w600
-                                  : FontWeight.w400,
-                              color: session.archived
-                                  ? scheme.onSurface.withValues(alpha: 0.55)
-                                  : widget.selected
-                                  ? scheme.onSurface
-                                  : scheme.onSurface.withValues(alpha: 0.88),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 2),
-                    Row(
-                      children: [
-                        Text(
-                          formatRelative(session.updatedAt),
-                          style: theme.textTheme.labelSmall,
-                        ),
-                        if (session.archived) ...[
-                          const SizedBox(width: 6),
-                          Text('已归档', style: theme.textTheme.labelSmall),
-                        ],
-                        if (session.isLocalDraft) ...[
-                          const SizedBox(width: 6),
-                          Text(
-                            '未同步',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: scheme.onSurfaceVariant.withValues(
-                                alpha: 0.7,
-                              ),
-                            ),
-                          ),
-                        ],
-                        if (session.hasLocalOverrides) ...[
-                          const SizedBox(width: 6),
-                          Tooltip(
-                            // Said out loud because the alternative is a
-                            // rename that looks saved and silently is not.
-                            message:
-                                'cortexd 还没有 PATCH /sessions/{id}，'
-                                '这次改动只存在于本地，重启后会消失。',
+          // 已归档 = **整行**压暗（对齐「关掉的技能整行压暗」的做法）：
+          // 压的是这一行整体 —— 时间戳、徽标、状态点一起退后，而不是给
+          // 标题文字单独调透明度。后者把层级表达混进前景色里，与上面那条
+          // 「前景全实色」互相打架
+          child: Opacity(
+            opacity: session.archived ? 0.45 : 1,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          // 这里曾有一个「绑定了工作区」的 teal 文件夹小图标。
+                          // 删掉了：对用户它是一个看不懂的绿色徽章（2026-08-24
+                          // 实测反馈原话「绿色图标又是什么」）—— 绑没绑目录是
+                          // 会话**内部**的事，输入框的工作区 chip 与右栏都在
+                          // 说它；左栏一行的职责只有「这是哪条对话、什么状态」。
+                          // 实现细节漏成用户可见的元素，是这个仓库记过的形状
+                          Expanded(
                             child: Text(
-                              '仅本地',
-                              style: theme.textTheme.labelSmall?.copyWith(
-                                color: scheme.tertiary,
+                              session.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              // 前景一律实色，选中与否只差字重 —— 层级不靠
+                              // 「更亮一点」表达。透明度分级的下场是同一段字
+                              // 在不同表面上深浅不一，还与禁用态的半透明撞车
+                              //（见 CortexTokens.foregroundTertiary 的注）
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                fontWeight: widget.selected
+                                    ? FontWeight.w600
+                                    : FontWeight.w400,
+                                color: scheme.onSurface,
                               ),
                             ),
                           ),
                         ],
-                      ],
-                    ),
-                  ],
+                      ),
+                      const SizedBox(height: 2),
+                      Row(
+                        children: [
+                          Text(
+                            formatRelative(session.updatedAt),
+                            style: theme.textTheme.labelSmall,
+                          ),
+                          if (session.archived) ...[
+                            const SizedBox(width: 6),
+                            Text('已归档', style: theme.textTheme.labelSmall),
+                          ],
+                          if (session.isLocalDraft) ...[
+                            const SizedBox(width: 6),
+                            Text(
+                              '未同步',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: scheme.onSurfaceVariant.withValues(
+                                  alpha: 0.7,
+                                ),
+                              ),
+                            ),
+                          ],
+                          if (session.hasLocalOverrides) ...[
+                            const SizedBox(width: 6),
+                            Tooltip(
+                              // Said out loud because the alternative is a
+                              // rename that looks saved and silently is not.
+                              message:
+                                  'cortexd 还没有 PATCH /sessions/{id}，'
+                                  '这次改动只存在于本地，重启后会消失。',
+                              child: Text(
+                                '仅本地',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  // 琥珀 —— 它是「重启会丢」的警告。⚠️ 不用
+                                  // scheme.tertiary：这套主题没定义 tertiary，
+                                  // M3 会静默回落成 teal，把警告画成安心绿
+                                  color: tokens.warning,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              // 琥珀点压过蓝点：等确认必然发生在「在跑」当中，两个都真时
-              // 该喊的是「等你」。外加一圈同色描边把它与蓝点在形状上也
-              // 区分开 —— 色弱视角下「实心点 vs 带环的点」仍然分得出
-              if (widget.awaitingConfirm)
-                Tooltip(
-                  message: '在等你确认才能继续',
-                  child: Container(
-                    width: 8,
-                    height: 8,
-                    margin: const EdgeInsets.only(right: 5),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: tokens.warning, width: 2),
+                // 琥珀点压过蓝点：等确认必然发生在「在跑」当中，两个都真时
+                // 该喊的是「等你」。外加一圈同色描边把它与蓝点在形状上也
+                // 区分开 —— 色弱视角下「实心点 vs 带环的点」仍然分得出
+                if (widget.awaitingConfirm)
+                  Tooltip(
+                    message: '在等你确认才能继续',
+                    child: Container(
+                      width: 8,
+                      height: 8,
+                      margin: const EdgeInsets.only(right: 5),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: tokens.warning, width: 2),
+                      ),
+                    ),
+                  )
+                else if (widget.streaming)
+                  // 三个状态标记里它此前唯一没有 Tooltip。点本身不识字 ——
+                  // 悬停说得出口，人才学得会认它
+                  Tooltip(
+                    message: '还在跑，不用等',
+                    child: Container(
+                      width: 6,
+                      height: 6,
+                      margin: const EdgeInsets.only(right: 6),
+                      decoration: BoxDecoration(
+                        color: scheme.primary,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  )
+                // 用勾而不是第二个圆点：两个只有颜色不同的点，在色弱视角下
+                // 与「在跑」分不开，而这两件事的下一步完全相反
+                else if (widget.justFinished)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 5),
+                    child: Tooltip(
+                      message: '这一轮跑完了，你还没看',
+                      child: Icon(
+                        Icons.check_circle_rounded,
+                        size: 13,
+                        // 绿 = 完成。此前与 streaming 蓝点同用 primary ——
+                        // 两个下一步完全相反的状态共享同一个色彩通道
+                        color: tokens.success,
+                      ),
                     ),
                   ),
-                )
-              else if (widget.streaming)
-                Container(
-                  width: 6,
-                  height: 6,
-                  margin: const EdgeInsets.only(right: 6),
-                  decoration: BoxDecoration(
-                    color: scheme.primary,
-                    shape: BoxShape.circle,
-                  ),
-                )
-              // 用勾而不是第二个圆点：两个只有颜色不同的点，在色弱视角下
-              // 与「在跑」分不开，而这两件事的下一步完全相反
-              else if (widget.justFinished)
-                Padding(
-                  padding: const EdgeInsets.only(right: 5),
-                  child: Tooltip(
-                    message: '这一轮跑完了，你还没看',
-                    child: Icon(
-                      Icons.check_circle_rounded,
-                      size: 13,
-                      color: scheme.primary,
-                    ),
+                // Kept mounted rather than built on hover: a menu that appears
+                // under the cursor shifts the row's layout the moment the pointer
+                // arrives, which makes the title jitter as the mouse crosses it.
+                Opacity(
+                  opacity: _hovered || widget.selected ? 1 : 0,
+                  child: SessionTileMenu(
+                    archived: session.archived,
+                    enabled: _hovered || widget.selected,
+                    canMove: widget.canMove,
+                    onRename: widget.onRename,
+                    onTogglePin: widget.onTogglePin,
+                    pinned: widget.pinned,
+                    onToggleArchive: widget.onToggleArchive,
+                    onMove: widget.onMove,
+                    onExport: widget.onExport,
                   ),
                 ),
-              // Kept mounted rather than built on hover: a menu that appears
-              // under the cursor shifts the row's layout the moment the pointer
-              // arrives, which makes the title jitter as the mouse crosses it.
-              Opacity(
-                opacity: _hovered || widget.selected ? 1 : 0,
-                child: SessionTileMenu(
-                  archived: session.archived,
-                  enabled: _hovered || widget.selected,
-                  canMove: widget.canMove,
-                  onRename: widget.onRename,
-                  onTogglePin: widget.onTogglePin,
-                  pinned: widget.pinned,
-                  onToggleArchive: widget.onToggleArchive,
-                  onMove: widget.onMove,
-                  onExport: widget.onExport,
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

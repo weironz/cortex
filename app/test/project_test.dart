@@ -625,22 +625,49 @@ void main() {
       await tester.pump(const Duration(milliseconds: 900));
     }
 
-    testWidgets('会话按项目分组，未分组单独一组', (tester) async {
+    testWidgets('⚠️ 「最近」是纯时间线：没有组头，也没有「未分组」', (tester) async {
       await boot(tester);
 
-      expect(find.text('Cortex 客户端'), findsOneWidget);
-      expect(find.text('季度规划'), findsOneWidget);
+      // 契约在 2026-08-24 反转（此前钉的是「按项目分组，未分组单独一组」）：
+      // 「最近」回答的是**什么时候**，项目回答的是**属于哪** —— 两个维度
+      // 叠在同一段里，时间线被组头切碎，分组又只覆盖没置顶的那半。
+      // 项目维度有自己的入口：置顶进「项目」段、全部在项目页
       expect(
         find.text('未分组'),
-        findsOneWidget,
-        reason:
-            '夹具里那条没有 project_id 的会话必须有地方落脚，'
-            '否则它在侧边栏里就是不存在的',
+        findsNothing,
+        reason: '「未分组」是个用户没建过的分组名 —— 实测反馈原话「怎么还有未分组」',
       );
+      expect(
+        find.text('Q3 OKR 草稿与部门对齐'),
+        findsOneWidget,
+        reason: '属于未置顶项目的会话**平铺**在最近段 —— 组头没了，会话不能跟着消失',
+      );
+
+      // 置顶之后，组头才出现（在「项目」段）—— 这是项目分组唯一的左栏入口
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(CortexApp)),
+      );
+      await tester.runAsync(
+        () => container
+            .read(projectControllerProvider.notifier)
+            .setPinned('prj_office', true),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('季度规划'), findsOneWidget, reason: '置顶的项目在「项目」段有可展开的组头');
     });
 
     testWidgets('删除项目的确认框写明会话不会丢，删完会话真的还在', (tester) async {
       await boot(tester);
+      // 2026-08-24 起组头只属于置顶项目（最近段是纯时间线），先置顶
+      final container0 = ProviderScope.containerOf(
+        tester.element(find.byType(CortexApp)),
+      );
+      await tester.runAsync(
+        () => container0
+            .read(projectControllerProvider.notifier)
+            .setPinned('prj_office', true),
+      );
+      await tester.pumpAndSettle();
 
       await tester.tap(find.byTooltip('「季度规划」的更多操作'));
       await tester.pumpAndSettle();
@@ -686,6 +713,16 @@ void main() {
 
     testWidgets('项目分组标题上的 + 建出来的会话属于该项目', (tester) async {
       await boot(tester);
+      // 同上：组头（连同它的 + 按钮）只在置顶项目上
+      final container0 = ProviderScope.containerOf(
+        tester.element(find.byType(CortexApp)),
+      );
+      await tester.runAsync(
+        () => container0
+            .read(projectControllerProvider.notifier)
+            .setPinned('prj_office', true),
+      );
+      await tester.pumpAndSettle();
 
       await tester.tap(find.byTooltip('在「季度规划」里新建会话'));
       await tester.pumpAndSettle();

@@ -165,7 +165,9 @@ class _AssistantCard extends ConsumerWidget {
       color: scheme.surfaceContainerLow,
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
+        // 卡片走卡片档（radiusCard），不是气泡那一档 —— 三面墙的格子
+        // 圆角必须同一个数，差 2px 摆在一屏里看得出来
+        borderRadius: BorderRadius.circular(CortexTokens.radiusCard),
         side: BorderSide(color: scheme.outlineVariant),
       ),
       child: InkWell(
@@ -180,22 +182,35 @@ class _AssistantCard extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
+                // ⋮ 顶着第一行的上缘 —— 与项目卡同一条规矩：卡片菜单在
+                // **右上角**。不设的话 40px 的按钮把整行撑高再垂直居中，
+                // 标题比项目卡低了将近 10px，两面墙并排一看就穿帮
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    // 没填图标就给一个 —— 一排空白读起来像加载失败
-                    assistant.icon.isEmpty ? '🤖' : assistant.icon,
-                    style: const TextStyle(fontSize: 18),
-                  ),
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Text(
-                      assistant.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleSmall,
+                  // ⚠️ 图标+名字包成一组再 Expanded，**不能**写成
+                  // `Flexible(名字) + Spacer()`：那两个的 flex 都是 1，
+                  // 名字短时它们**平分**剩余空间 —— ⋮ 被留在卡片正中间
+                  // （项目卡上实物撞见过，不是理论）
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Text(
+                          // 没填图标就给一个 —— 一排空白读起来像加载失败
+                          assistant.icon.isEmpty ? '🤖' : assistant.icon,
+                          style: const TextStyle(fontSize: 18),
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            assistant.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.titleSmall,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  const Spacer(),
                   _AssistantMenu(assistant: assistant),
                 ],
               ),

@@ -239,7 +239,8 @@ class _ModelRow extends StatelessWidget {
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurface,
                 // 金额右对齐成一列要等宽，否则小数点参差不齐
-                fontFamily: 'monospace',
+                fontFamily: 'JetBrains Mono',
+                fontFamilyFallback: CortexTheme.monoFallback,
               ),
             ),
         ],

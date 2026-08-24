@@ -8,6 +8,7 @@ import '../../../state/app_providers.dart';
 import 'connector_strip.dart';
 import 'mcp_add.dart';
 import '../../../core/theme.dart';
+import '../widgets/settings_layout.dart';
 
 /// 连接器这一页。
 ///
@@ -88,35 +89,15 @@ class _NoLocalAgent extends StatelessWidget {
   const _NoLocalAgent();
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.extension_off_outlined,
-              size: 36,
-              color: theme.colorScheme.outline,
-            ),
-            const SizedBox(height: 12),
-            Text('MCP 需要本机 agent', style: theme.textTheme.titleSmall),
-            const SizedBox(height: 8),
-            Text(
-              '第三方 MCP server 是在你自己这台机器上跑的子进程，'
-              '所以只有桌面端能配。\n\n'
-              '云端会话走另一条路：在工作区根目录放一个 .mcp.json'
-              '（文件名与 Claude Code 的项目作用域相同），下次起沙箱时生效。',
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodySmall,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => const SettingsPageNote(
+    icon: Icons.extension_off_outlined,
+    title: 'MCP 需要本机 agent',
+    body:
+        '第三方 MCP server 是在你自己这台机器上跑的子进程，'
+        '所以只有桌面端能配。\n\n'
+        '云端会话走另一条路：在工作区根目录放一个 .mcp.json'
+        '（文件名与 Claude Code 的项目作用域相同），下次起沙箱时生效。',
+  );
 }
 
 class _Failed extends ConsumerWidget {
@@ -125,28 +106,18 @@ class _Failed extends ConsumerWidget {
   final String error;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            error,
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.error,
-            ),
-          ),
-          const SizedBox(height: 12),
-          TextButton(
-            onPressed: () => ref.invalidate(mcpConfigProvider),
-            child: const Text('重试'),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context, WidgetRef ref) => SettingsPageNote(
+    icon: Icons.cloud_off_rounded,
+    // 标题先说人话，异常原文放正文留给排查 —— 一段红色裸异常居中挂着，
+    // 读起来像程序崩了，而不是一个设计过的「拉不到，重试」
+    title: '拉不到连接器配置',
+    body: error,
+    action: OutlinedButton.icon(
+      onPressed: () => ref.invalidate(mcpConfigProvider),
+      icon: const Icon(Icons.refresh_rounded, size: 16),
+      label: const Text('重试'),
+    ),
+  );
 }
 
 /// 列表页。
@@ -333,7 +304,8 @@ class _ServerCard extends ConsumerWidget {
                     Text(
                       server.commandLine,
                       style: theme.textTheme.labelSmall?.copyWith(
-                        fontFamily: 'monospace',
+                        fontFamily: 'JetBrains Mono',
+                        fontFamilyFallback: CortexTheme.monoFallback,
                         color: scheme.outline,
                       ),
                       maxLines: 1,
@@ -421,11 +393,14 @@ class _Dot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final color = server.disabled
         ? scheme.outlineVariant
+        // 不用 Colors.green：Material 调色板原色不跟主题的深浅配对走，
+        // 语义状态色一律取 cortex 扩展，深浅两套在那边成对定好
         : server.connected
-        ? Colors.green
+        ? theme.cortex.success
         : scheme.error;
     return Container(
       width: 8,
@@ -518,7 +493,8 @@ class _ServerDetailState extends ConsumerState<_ServerDetail> {
               SelectableText(
                 s.commandLine,
                 style: theme.textTheme.bodySmall?.copyWith(
-                  fontFamily: 'monospace',
+                  fontFamily: 'JetBrains Mono',
+                  fontFamilyFallback: CortexTheme.monoFallback,
                 ),
               ),
               if (s.envNames.isNotEmpty) ...[
@@ -586,7 +562,8 @@ class _ServerDetailState extends ConsumerState<_ServerDetail> {
                         Text(
                           t.name,
                           style: theme.textTheme.bodySmall?.copyWith(
-                            fontFamily: 'monospace',
+                            fontFamily: 'JetBrains Mono',
+                            fontFamilyFallback: CortexTheme.monoFallback,
                           ),
                         ),
                         Text(t.description, style: theme.textTheme.labelSmall),

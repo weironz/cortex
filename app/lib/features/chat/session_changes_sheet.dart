@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/theme.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../models/chat_message.dart';
@@ -173,7 +174,8 @@ class _FileSection extends StatelessWidget {
                   child: Text(
                     file.path,
                     style: theme.textTheme.bodySmall?.copyWith(
-                      fontFamily: 'monospace',
+                      fontFamily: 'JetBrains Mono',
+                      fontFamilyFallback: CortexTheme.monoFallback,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -183,7 +185,8 @@ class _FileSection extends StatelessWidget {
               Text(
                 '+${t.added} −${t.removed}',
                 style: theme.textTheme.labelSmall?.copyWith(
-                  fontFamily: 'monospace',
+                  fontFamily: 'JetBrains Mono',
+                  fontFamilyFallback: CortexTheme.monoFallback,
                   color: scheme.onSurfaceVariant,
                 ),
               ),

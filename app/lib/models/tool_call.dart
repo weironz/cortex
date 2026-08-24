@@ -76,6 +76,22 @@ class ToolCall {
   /// the SSE frame. Shown only when there is no [path] to show instead.
   final String? arguments;
 
+  /// shell 调用的**命令本身**，从 [arguments] 的 `(command=…)` 包装里剥出来。
+  ///
+  /// 终端页签把它接在 `$ ` 提示符后面 —— 不剥的话画出来是
+  /// `$ (command=git status)`，伪终端的形式感反而放大了内容的不对。
+  /// 剥不出来（不是 shell、或 daemon 换了包装格式）就原样返回，
+  /// 宁可少一层格式也不能把参数弄丢。
+  String? get shellCommand {
+    final a = arguments;
+    if (a == null) return null;
+    const prefix = '(command=';
+    if (a.startsWith(prefix) && a.endsWith(')')) {
+      return a.substring(prefix.length, a.length - 1);
+    }
+    return a;
+  }
+
   /// One-line outcome, e.g. `返回 12 行 / 340 字符`. Null while the call is in
   /// flight.
   final String? result;

@@ -20,7 +20,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../core/theme.dart';
+import '../widgets/settings_layout.dart';
 import 'computer_use_section.dart';
 
 class ComputerUsePage extends ConsumerWidget {
@@ -52,35 +52,12 @@ class ComputerUsePage extends ConsumerWidget {
 /// 那个布尔，分不出来 —— 所以这里如实把两种都说出来，而不是猜一个。
 class _Unavailable extends StatelessWidget {
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 420),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.desktop_access_disabled_outlined,
-              size: 32,
-              color: theme.cortex.foregroundTertiary,
-            ),
-            const SizedBox(height: 12),
-            Text('这里用不了电脑操作', style: theme.textTheme.titleSmall),
-            const SizedBox(height: 6),
-            Text(
-              '这一轮的 agent 跑在没有屏幕的地方（云端会话在容器里），'
-              '或者这个构建没有编进那一组工具（Linux 桌面）。\n\n'
-              '在桌面端本机跑的会话里，这一页会自己出现。',
-              textAlign: TextAlign.center,
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.cortex.foregroundTertiary,
-                height: 1.6,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => const SettingsPageNote(
+    icon: Icons.desktop_access_disabled_outlined,
+    title: '这里用不了电脑操作',
+    body:
+        '这一轮的 agent 跑在没有屏幕的地方（云端会话在容器里），'
+        '或者这个构建没有编进那一组工具（Linux 桌面）。\n\n'
+        '在桌面端本机跑的会话里，这一页会自己出现。',
+  );
 }

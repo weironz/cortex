@@ -407,17 +407,18 @@ class ConversationHero extends StatelessWidget {
               color: scheme.primary,
               borderRadius: BorderRadius.circular(CortexTokens.radiusXl),
             ),
-            child: const Icon(
-              Icons.auto_awesome,
-              color: Colors.white,
-              size: 25,
-            ),
+            // onPrimary，不写死白色：深色主题下 primary 是**浅**靛，
+            // 白色叠上去只有 3.2:1，onPrimary（深靛）才读得清
+            child: Icon(Icons.auto_awesome, color: scheme.onPrimary, size: 25),
           ),
           const SizedBox(height: 18),
-          Text('记忆原生的 AI Agent', style: theme.textTheme.titleLarge),
+          // 只写当下真的成立的能力（CLAUDE.md 约束 2）：长期记忆
+          // 2026-08-17 已拆去 Cormex，「抽取的事实可追溯、可回放」在
+          // 这一侧不再成立 —— 留着就是每次打开都在骗人
+          Text('通用 AI Agent', style: theme.textTheme.titleLarge),
           const SizedBox(height: 7),
           Text(
-            '每一轮对话都会被原样归档，抽取出的事实可追溯、可审计、可回放。',
+            '对话跨设备实时同步；可以调用工具、读写工作区里的文件。',
             textAlign: TextAlign.center,
             style: theme.textTheme.bodySmall,
           ),

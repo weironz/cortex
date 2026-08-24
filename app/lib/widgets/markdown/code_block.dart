@@ -93,7 +93,7 @@ class _CodeBlockState extends State<CodeBlock> {
     final rootFg = hlTheme['root']?.color ?? scheme.onSurface;
 
     final baseStyle = TextStyle(
-      fontFamily: 'monospace',
+      fontFamily: 'JetBrains Mono',
       fontFamilyFallback: CortexTheme.monoFallback,
       fontSize: 12.8,
       height: 1.55,
@@ -169,7 +169,7 @@ class _Header extends StatelessWidget {
           Text(
             label,
             style: TextStyle(
-              fontFamily: 'monospace',
+              fontFamily: 'JetBrains Mono',
               fontFamilyFallback: CortexTheme.monoFallback,
               fontSize: 11.5,
               letterSpacing: 0.3,

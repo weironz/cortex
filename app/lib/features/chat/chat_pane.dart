@@ -106,7 +106,9 @@ class ChatPane extends ConsumerWidget {
       children: [
         PanelHeader(
           title: title ?? 'Cortex',
-          subtitle: hasSession ? null : '记忆原生的通用 AI Agent',
+          // 不提「记忆」—— 长期记忆 2026-08-17 整条拆去了 Cormex，界面
+          // 只许描述当下真的成立的能力（CLAUDE.md 约束 2）
+          subtitle: hasSession ? null : '通用 AI Agent',
           // 左栏伸缩，**任何宽度都在**。此前它只在窄屏出现（那时叫
           // 「会话列表」），于是宽屏下根本没有收起侧栏这回事
           leading: onToggleSessions == null
@@ -231,23 +233,30 @@ class _BackendBadge extends ConsumerWidget {
     final config = ref.watch(appConfigProvider);
     final health = ref.watch(healthProvider);
 
-    final (Color color, String label, String tooltip) = switch ((
+    final (Color color, String label, String tooltip)? badge = switch ((
       config.useMock,
       health,
     )) {
       (true, _) => (scheme.onSurfaceVariant, 'MOCK', '数据来自内存夹具，未连接后端'),
+      // LIVE 且一切正常：**整个不画**。一枚恒真的常驻绿章只会训练人忽略
+      // 那个位置 —— 等它哪天真变成 DOWN，那里早已是盲区。连接详情在
+      // 设置的连接页里查得到，不靠这颗 tooltip
+      (false, AsyncData(:final value))
+          when value.isHealthy && value.databaseNote == null =>
+        null,
+      // 服务答 ok 但存储层有话要说（isHealthy 故意不看 database，见
+      // health_status.dart）：这一种**不能跟着藏** —— 藏了就是
+      // 「status: ok 盖住 database: error」那个见过的假信号
       (false, AsyncData(:final value)) when value.isHealthy => (
-        const Color(0xFF2E9E5B),
+        theme.cortex.success,
         'LIVE',
-        [
-          config.baseUrl,
-          'v${value.version}',
-          if (value.databaseNote != null) value.databaseNote!,
-        ].join(' · '),
+        [config.baseUrl, 'v${value.version}', value.databaseNote!].join(' · '),
       ),
       (false, AsyncError()) => (scheme.error, 'DOWN', '连不上 ${config.baseUrl}'),
       _ => (scheme.onSurfaceVariant, '…', '正在检测 ${config.baseUrl}'),
     };
+    if (badge == null) return const SizedBox.shrink();
+    final (color, label, tooltip) = badge;
 
     return Tooltip(
       message: tooltip,
@@ -304,32 +313,36 @@ class _OfflineBanner extends ConsumerWidget {
 
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final tokens = theme.cortex;
     return Container(
       width: double.infinity,
-      color: scheme.tertiaryContainer,
+      // 琥珀软垫。⚠️ 不用 tertiaryContainer —— 这套主题没定义 tertiary，
+      // M3 会静默回落成 teal，把「离线在攒队列」这句警示画成安心色
+      color: tokens.warning.withValues(alpha: 0.12),
       padding: const EdgeInsets.fromLTRB(20, 8, 10, 8),
       child: Row(
         children: [
-          Icon(
-            Icons.cloud_off_outlined,
-            size: 16,
-            color: scheme.onTertiaryContainer,
-          ),
+          Icon(Icons.cloud_off_outlined, size: 16, color: tokens.warning),
           const SizedBox(width: 9),
           Expanded(
             // 同上：Text 不渲染 Markdown，星号会原样显示
             child: Text.rich(
               TextSpan(
+                // 正文跟表面走（onSurface）：软垫只有 12% 透明度，底下仍是
+                // 内容区。琥珀只留给图标与强调字 —— 整段染黄反而分不出重点
                 style: theme.textTheme.bodySmall?.copyWith(
-                  color: scheme.onTertiaryContainer,
+                  color: scheme.onSurface,
                 ),
-                children: const [
-                  TextSpan(text: '离线模式：这些对话'),
+                children: [
+                  const TextSpan(text: '离线模式：这些对话'),
                   TextSpan(
                     text: '还没进服务端',
-                    style: TextStyle(fontWeight: FontWeight.w700),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: tokens.warning,
+                    ),
                   ),
-                  TextSpan(text: '。它们排在本地队列，接上服务器后会自动补回去。'),
+                  const TextSpan(text: '。它们排在本地队列，接上服务器后会自动补回去。'),
                 ],
               ),
             ),
@@ -423,7 +436,8 @@ class _PanelButton extends StatelessWidget {
       // 开着的时候说「隐藏」：同一个按钮既是「给我看」也是「不看了」，
       // 用户不用去找第二个关闭入口
       tooltip: active ? '隐藏$tooltip栏' : tooltip,
-      color: active ? Theme.of(context).colorScheme.secondary : null,
+      // 激活态只靠 filled/outlined 图标切换，不上色 —— 「选中」在这个
+      // 产品里一律用中性表达，上一版的 teal 会被读成某个含义不明的状态
       icon: Icon(active ? filled : outlined),
     );
   }

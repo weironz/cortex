@@ -178,7 +178,12 @@ void main() {
       await _pump(tester, c);
 
       expect(find.text('还没有画过图'), findsNothing, reason: '墙上有东西了，空态必须让位');
-      expect(find.byType(Image), findsWidgets);
+      // Image.memory 换成了 Ink.image（水波纹要画在图之上，否则 hover/点击
+      // 毫无反馈）—— Ink.image 树上没有 Image widget，改抓 Ink
+      expect(
+        find.byWidgetPredicate((w) => w is Ink && w.decoration != null),
+        findsWidgets,
+      );
 
       await tester.tap(find.byType(InkWell).last);
       await _settle(tester);

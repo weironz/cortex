@@ -109,8 +109,11 @@ class _Panel extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
-        border: Border.all(color: scheme.secondary.withValues(alpha: 0.28)),
-        color: scheme.secondary.withValues(alpha: 0.04),
+        // 中性容器而不是 secondary 淡染：这块面板是审计轨迹，不表达任何
+        // 状态，彩色边框会让它看起来像一条常驻的提醒（反馈色只在传达
+        // 状态时用，不当装饰）
+        border: Border.all(color: scheme.outlineVariant),
+        color: scheme.surfaceContainer,
       ),
       child: child,
     );
@@ -141,12 +144,20 @@ class _Toggle extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.psychology_outlined, size: 14, color: scheme.secondary),
+            // terminal 而不是 psychology：后者是「本轮用到的记忆」时代的
+            // 遗留，现在这行摊开的只有工具调用。整行中性灰 —— 折叠行是
+            // 入口不是状态，彩色在这里只是装饰；w600 留着，靠字重而不是
+            // 颜色把它与正文分开
+            Icon(
+              Icons.terminal_rounded,
+              size: 14,
+              color: scheme.onSurfaceVariant,
+            ),
             const SizedBox(width: 6),
             Text(
               label,
               style: theme.textTheme.labelSmall?.copyWith(
-                color: scheme.secondary,
+                color: scheme.onSurfaceVariant,
                 fontWeight: FontWeight.w600,
               ),
             ),
@@ -157,7 +168,7 @@ class _Toggle extends StatelessWidget {
               child: Icon(
                 Icons.expand_more_rounded,
                 size: 15,
-                color: scheme.secondary,
+                color: scheme.onSurfaceVariant,
               ),
             ),
           ],
@@ -195,7 +206,9 @@ class _ToolRowState extends State<_ToolRow> {
     if (call.failed) {
       icon = scheme.error;
     } else if (call.pending) {
-      icon = scheme.secondary;
+      // primary 而不是 secondary：「在跑」在会话行上是蓝点（info/primary
+      // 同族），同一个语义在这里换个颜色，读的人要多背一条对照
+      icon = scheme.primary;
     } else {
       icon = scheme.onSurfaceVariant;
     }
@@ -230,7 +243,8 @@ class _ToolRowState extends State<_ToolRow> {
                   TextSpan(
                     text: call.name,
                     style: labelStyle.copyWith(
-                      fontFamily: 'monospace',
+                      fontFamily: 'JetBrains Mono',
+                      fontFamilyFallback: CortexTheme.monoFallback,
                       fontWeight: FontWeight.w600,
                       color: scheme.onSurface,
                     ),
@@ -244,8 +258,12 @@ class _ToolRowState extends State<_ToolRow> {
                     TextSpan(
                       text: '  $path',
                       style: labelStyle.copyWith(
-                        fontFamily: 'monospace',
-                        color: scheme.secondary,
+                        fontFamily: 'JetBrains Mono',
+                        fontFamilyFallback: CortexTheme.monoFallback,
+                        // accentInk（品牌色的文字档）而不是 secondary：
+                        // 路径是这行里要被认出来的对象，用全产品统一的
+                        // 强调文字色；secondary 在这里没有语义，只是 teal
+                        color: theme.cortex.accentInk,
                       ),
                     )
                   else if (call.arguments != null)
@@ -273,6 +291,9 @@ class _ToolRowState extends State<_ToolRow> {
                         base: labelStyle.copyWith(
                           color: scheme.onSurfaceVariant,
                         ),
+                        // 深色主题要亮档色板 —— 不传的话 cargo 的红字
+                        // 在深底上只有 3.5:1，编译报错恰好最读不清
+                        brightness: theme.brightness,
                       ),
                     ],
                 ],
@@ -306,7 +327,8 @@ class _ToolRowState extends State<_ToolRow> {
                 height: 9,
                 child: CircularProgressIndicator(
                   strokeWidth: 1.4,
-                  color: scheme.secondary,
+                  // 与 pending 的图标同色（见上面 icon 的注释）
+                  color: scheme.primary,
                 ),
               ),
             ),
@@ -343,7 +365,8 @@ class _ToolRowState extends State<_ToolRow> {
                     child: Text(
                       stripAnsi(call.result!),
                       style: theme.textTheme.bodySmall?.copyWith(
-                        fontFamily: 'monospace',
+                        fontFamily: 'JetBrains Mono',
+                        fontFamilyFallback: CortexTheme.monoFallback,
                         height: 1.5,
                       ),
                     ),

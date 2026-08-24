@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/theme.dart';
 import '../../../state/sync_controller.dart';
 
 /// Realtime-link status, deliberately the quietest thing in the header.
@@ -20,13 +21,16 @@ class SyncIndicator extends ConsumerWidget {
     final state = ref.watch(syncControllerProvider);
     if (state.status == SyncLinkStatus.disabled) return const SizedBox.shrink();
 
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final (Color color, IconData? icon) = switch (state.status) {
       SyncLinkStatus.live when state.catchingUp || state.isBehind => (
         scheme.secondary,
         null,
       ),
-      SyncLinkStatus.live => (const Color(0xFF2E9E5B), null),
+      // 绿 = 已追平。取语义 token 而不是写死色值：深浅主题各配了一档，
+      // 硬编码的那一个在深色底上对比不够，也没人会记得同步它
+      SyncLinkStatus.live => (theme.cortex.success, null),
       SyncLinkStatus.connecting => (scheme.onSurfaceVariant, null),
       SyncLinkStatus.reconnecting => (scheme.error, Icons.sync_problem_rounded),
       SyncLinkStatus.disabled => (scheme.onSurfaceVariant, null),

@@ -133,10 +133,12 @@ class _UserBubble extends ConsumerWidget {
                     // 输出分开。一屏对话里因此只剩下真正需要注意的地方
                     // 才有颜色。
                     color: scheme.surfaceContainerHigh,
+                    // 气泡归辅助档 radiusLg(11) —— 五档体系里写明
+                    // 「气泡 11」（见 CortexTokens）；Xl(13) 是卡片那一档
                     borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(CortexTokens.radiusXl),
-                      topRight: Radius.circular(CortexTokens.radiusXl),
-                      bottomLeft: Radius.circular(CortexTokens.radiusXl),
+                      topLeft: Radius.circular(CortexTokens.radiusLg),
+                      topRight: Radius.circular(CortexTokens.radiusLg),
+                      bottomLeft: Radius.circular(CortexTokens.radiusLg),
                       // 右下角收窄成一个「尾巴」。这一个不走圆角阶：
                       // 它不是装饰，是指向发送者的方向
                       bottomRight: Radius.circular(4),
@@ -282,10 +284,12 @@ class AssistantBlock extends StatelessWidget {
                         CortexTokens.radiusSm,
                       ),
                     ),
-                    child: const Icon(
+                    // onPrimary，不写死白色：深色主题下 primary 是**浅**靛，
+                    // 白色叠上去只有 3.2:1，onPrimary（深靛）才读得清
+                    child: Icon(
                       Icons.auto_awesome,
                       size: 12,
-                      color: Colors.white,
+                      color: scheme.onPrimary,
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -372,7 +376,9 @@ class AssistantBlock extends StatelessWidget {
                                 child: Text(
                                   'episode ${shortId(episodeId)}',
                                   style: theme.textTheme.labelSmall?.copyWith(
-                                    fontFamily: 'monospace',
+                                    fontFamily: 'JetBrains Mono',
+                                    fontFamilyFallback:
+                                        CortexTheme.monoFallback,
                                   ),
                                 ),
                               ),

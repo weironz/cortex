@@ -339,7 +339,9 @@ class _PendingCard extends StatelessWidget {
             : '上传中 ${(item.progress * 100).round()}%',
       ),
       UploadStatus.ready => (
-        const Color(0xFF2E9E5B),
+        // 主题里的 success，不写死色值：单值绿在浅色底上对比不够，
+        // 而这个 token 深浅两套已经配好对
+        theme.cortex.success,
         formatBytes(item.attachment?.sizeBytes ?? item.total),
       ),
       UploadStatus.failed => (scheme.error, item.error ?? '上传失败'),

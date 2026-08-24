@@ -81,6 +81,22 @@ class ProjectsPage extends ConsumerWidget {
         description: '它是一个老版本的部署，还没有 /projects 这条路。升级之后这里会自己出现。',
       );
     }
+    // 失败要说失败 —— 不拦在这儿的话会落进下面「还没有项目」的空态，
+    // 外加一个新建按钮：把「拉不到」谎报成「没有」。写法照智能体页那一支
+    if (state.error != null) {
+      return EmptyState(
+        icon: Icons.cloud_off_rounded,
+        title: '拉不到项目',
+        description: '${state.error}',
+        tone: EmptyStateTone.error,
+        action: OutlinedButton.icon(
+          // 刷新叫 `load`，不叫 `refresh` —— 它就是首次加载那条路本身
+          onPressed: () => ref.read(projectControllerProvider.notifier).load(),
+          icon: const Icon(Icons.refresh_rounded, size: 16),
+          label: const Text('重试'),
+        ),
+      );
+    }
     if (state.loading && state.projects.isEmpty) {
       return const Center(
         child: SizedBox(
@@ -143,7 +159,9 @@ class _ProjectCard extends ConsumerWidget {
       color: scheme.surfaceContainerLow,
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
+        // 卡片走卡片档（radiusCard），不是气泡那一档 —— 三面墙的格子
+        // 圆角必须同一个数，差 2px 摆在一屏里看得出来
+        borderRadius: BorderRadius.circular(CortexTokens.radiusCard),
         side: BorderSide(color: scheme.outlineVariant),
       ),
       child: InkWell(
@@ -161,27 +179,39 @@ class _ProjectCard extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
+                // ⋮ 顶着第一行的上缘 —— 卡片的菜单要在**右上角**，
+                // 不是随行高垂直居中
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Flexible(
-                    child: Text(
-                      project.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleSmall,
+                  // ⚠️ 名字+pin 包成一组再 Expanded，**不能**写成
+                  // `Flexible(名字) + Spacer()`：那两个的 flex 都是 1，
+                  // 名字短时它们**平分**剩余空间 —— ⋮ 被留在卡片正中间，
+                  // 而且卡片越宽偏得越远（实物上撞见的，不是理论）
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            project.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.titleSmall,
+                          ),
+                        ),
+                        // 置顶的**一眼看得见**：否则用户点了置顶之后，除了
+                        // 左栏多一行以外，这一页上没有任何地方能告诉他
+                        if (project.pinned) ...[
+                          const SizedBox(width: 6),
+                          Icon(
+                            Icons.push_pin,
+                            size: 13,
+                            key: const ValueKey('project:pinned'),
+                            color: theme.cortex.foregroundTertiary,
+                          ),
+                        ],
+                      ],
                     ),
                   ),
-                  // 置顶的**一眼看得见**：否则用户点了置顶之后，除了左栏
-                  // 多一行以外，这一页上没有任何地方能告诉他状态变了
-                  if (project.pinned) ...[
-                    const SizedBox(width: 6),
-                    Icon(
-                      Icons.push_pin,
-                      size: 13,
-                      key: const ValueKey('project:pinned'),
-                      color: theme.cortex.foregroundTertiary,
-                    ),
-                  ],
-                  const Spacer(),
                   _ProjectCardMenu(project: project),
                 ],
               ),

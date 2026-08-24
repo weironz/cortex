@@ -620,7 +620,7 @@ class WorkspaceChip extends ConsumerWidget {
         .read(chatControllerProvider.notifier)
         .isCloudByChoice(session.id);
 
-    final (IconData icon, String label, String tip, Color color) = switch ((
+    final (IconData icon, String label, String tip) = switch ((
       workspace,
       cloud,
     )) {
@@ -628,7 +628,6 @@ class WorkspaceChip extends ConsumerWidget {
         Icons.folder_rounded,
         w.displayName,
         '这次对话的文件都在 ${w.root}\n点击更换',
-        scheme.secondary,
       ),
       // 还没定：草稿会在第一句话之前自动开一个按日期时间命名的文件夹，
       // 而**已经开过口**的会话不会 —— 那时说「新建工作区」就是句空话
@@ -636,50 +635,52 @@ class WorkspaceChip extends ConsumerWidget {
         Icons.auto_awesome_outlined,
         '新建工作区',
         '发出第一句话时，会在默认工作空间下建一个以当前时间命名的文件夹。\n点击改成别的。',
-        scheme.onSurfaceVariant,
       ),
       (null, _) => (
         Icons.cloud_outlined,
         '云端',
         '这次对话跑在远端 agent 的容器里，任何设备上都能接着聊。\n点击改成本机目录。',
-        scheme.onSurfaceVariant,
       ),
     };
 
+    // 与旁边三颗 chip（权限档 / 模型 / 智能体）**同一副骨架**：裸 InkWell、
+    // 无填充无描边、onSurfaceVariant。
+    //
+    // 从前「已绑定」这一态是 teal 填充 + 描边 + 粗体 —— 整排里唯一有色的
+    // 一颗，而它标的恰恰是**已经定好**的常态。这一排里颜色的语义是
+    // 「例外，看我一眼」（权限档只在完全放行时变红、模型只在有告警时
+    // 变色），常态着色等于把那个信号用反了。已定与未定的区别只留
+    // w600 —— 够认，不抢
+    final color = scheme.onSurfaceVariant;
+
     return Tooltip(
       message: tip,
-      child: Material(
-        color: color.withValues(alpha: 0.10),
+      child: InkWell(
         borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: () => _pick(context, ref, session),
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 200),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
-              border: Border.all(color: color.withValues(alpha: 0.32)),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 13, color: color),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: color,
-                      fontWeight: FontWeight.w600,
-                    ),
+        onTap: () => _pick(context, ref, session),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 13, color: color),
+              const SizedBox(width: 4),
+              // 目录名可以很长，不封顶会把右边的 chip 挤出可视区 ——
+              // 与 ModelChip 封型号名同一个理由
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 200),
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: color,
+                    fontWeight: workspace != null ? FontWeight.w600 : null,
                   ),
                 ),
-                Icon(Icons.arrow_drop_down_rounded, size: 15, color: color),
-              ],
-            ),
+              ),
+              Icon(Icons.arrow_drop_up_rounded, size: 15, color: color),
+            ],
           ),
         ),
       ),
