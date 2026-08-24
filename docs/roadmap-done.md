@@ -51,6 +51,14 @@ goose 的 todo+moim 模式：模型整体覆写一份 markdown checklist，每�
 按原样失败 —— 那说明大的是历史或系统提示词，是历史侧摘要（I3 另一半，
 未做）的事。直连与代理两条路径都认得这个错误（proto 把它编码过线）。
 
+### I10（半） · MCP HTTP 自定义头 —— **已接上**
+
+`hub.rs` 从前对配置里的 headers 只 WARN 后裸连 —— 带 Authorization 的
+server 永远 401，而用户明明配了那行头。现在逐个校验后带上（rmcp 1.8 的
+`custom_headers`）；**坏头拒连而不是静默跳过**，与 `CORTEX_LOCAL_LLM`
+「认不出的取值报错而不是回落」同一个纪律。断线自动重连、resources/
+prompts 仍未做。
+
 ### O1 · /health 报 llm 路由 —— **已完成**
 
 `"llm": "direct:{provider}/{model}" | "proxy:{remote}"`。2026-08-24 实测

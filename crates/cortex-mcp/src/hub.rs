@@ -7,6 +7,7 @@ use cortex_agent::{ToolResult, ToolSpec};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, RawContent};
 use rmcp::service::RunningService;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use tokio::process::Command;
 
@@ -378,15 +379,22 @@ async fn connect_one(name: &str, sc: &ServerConfig) -> Result<Server, String> {
                 .map_err(|e| format!("握手失败：{e}"))?
         }
         Transport::Http { url, headers } => {
-            if !headers.is_empty() {
-                // 说出来而不是假装支持：一个带 Authorization 的 server 在
-                // 这里会以 401 失败，而用户明明配了那个头
-                tracing::warn!(
-                    server = name,
-                    "配置里的自定义请求头暂时没有接上，这台 server 会以不带头的方式连接"
-                );
+            // 自定义头逐个校验后带上。**坏头拒连而不是跳过**：一个打错的
+            // `Authorization` 被静默丢掉的症状是这台 server 永远 401，而
+            // 用户对着自己明明配了的那行头排查不出任何东西 ——「认不出的
+            // 取值报错而不是回落」，与 CORTEX_LOCAL_LLM 那条同一个纪律
+            // 结构体标了 non_exhaustive，只能走构造函数再改字段
+            let mut config = StreamableHttpClientTransportConfig::with_uri(url.clone());
+            for (k, v) in headers {
+                let name = k
+                    .parse::<reqwest::header::HeaderName>()
+                    .map_err(|e| format!("请求头名 `{k}` 非法：{e}"))?;
+                let value = v
+                    .parse::<reqwest::header::HeaderValue>()
+                    .map_err(|e| format!("请求头 `{k}` 的值非法：{e}"))?;
+                config.custom_headers.insert(name, value);
             }
-            let transport = StreamableHttpClientTransport::from_uri(url.clone());
+            let transport = StreamableHttpClientTransport::from_config(config);
             ().serve(transport)
                 .await
                 .map_err(|e| format!("连不上 {url}：{e}"))?
