@@ -599,7 +599,7 @@ v1.45.0，Apache-2.0，能搬就不写）：
 |---|---|---|---|---|
 | I1 | **精确编辑工具** | `write_file` 全量覆盖（`tools.rs:833` 就是 `std::fs::write`），零 patch/str_replace —— 局部改动只能整文件重写或让模型拼 sed | goose `developer/edit.rs`（512 行）：`{path, before, after}` 唯一匹配替换，0 匹配给相似提示、多匹配给行号 | 小 |
 | I2 | **项目指引文件（AGENTS.md）** | 工作区绑定只注入**路径**，不读任何指引文件 —— 三家都读（Codex `AGENTS.md`、CC `CLAUDE.md`、goose `.goosehints`+`AGENTS.md`），这是事实标准 | goose `hints/`（load_hints 1039 行 + @import 展开 488 行），信任姿态沿用 `.mcp.json` 那条：工作区自带内容注入前的边界要想清 | 小-中 |
-| I3 | **上下文压缩** | 只有进轮前裁剪（历史 50% 窗口、绝对顶 24K，`history.rs:63-76`）；轮内 8 个工具轮次无限累积；**撞窗 = 整轮失败**（`ContextLengthExceeded` 被抹成通用错误，不重试不压缩） | goose `context_mgmt/`（1169 行）+ `token_counter.rs`：0.8 阈值触发、快模型结构化摘要、可见性翻转（用户仍看得到原文）。类型层（`MessageMetadata` 双可见性）goose-provider-types 里已有 | 中-大 |
+| I3 ✅ | **上下文压缩** | 只有进轮前裁剪（历史 50% 窗口、绝对顶 24K，`history.rs:63-76`）；轮内 8 个工具轮次无限累积；**撞窗 = 整轮失败**（`ContextLengthExceeded` 被抹成通用错误，不重试不压缩） | goose `context_mgmt/`（1169 行）+ `token_counter.rs`：0.8 阈值触发、快模型结构化摘要、可见性翻转（用户仍看得到原文）。类型层（`MessageMetadata` 双可见性）goose-provider-types 里已有 | 中-大 |
 | I4 | **todo/计划工具** | 无 —— 长任务跑到第 6 轮忘了自己要干什么，三家都有（CC TaskCreate、Codex plan、Grok plan mode） | goose `todo.rs`（202 行）+ moim 每轮注入模式：todo 不占消息历史、不被压缩 | 小 |
 | I5 | **搜索/结构工具** | 无 glob/grep/tree —— 模型只能 `list_dir` 逐层摸或拼 shell | goose 只有 `tree`（299 行，`ignore` crate）可搬；glob/grep goose 也没有（靠提示词教 rg），自己写或同样走提示词 | 小-中 |
 | I6 ✅ | **后台/长时命令** | shell 同步单发（默认 120s、封顶 600s，`tools.rs:885-887`），无 run_in_background —— 起个 dev server 就把一轮挂死 | goose `summon` 的后台任务簿记（~500 行：JoinHandle+cancel+load/peek） | 中 |
@@ -617,7 +617,8 @@ I7 都还没有，谈不上。
 
 > 进度：I1 ✅ I2 ✅ I4 ✅ I5(tree) ✅；I3 **轮内自救已做**（撞窗 →
 > 折叠旧工具结果重试两次，两条路径都认得 `ContextLengthExceeded`），
-> 历史侧的 LLM 摘要待做；顺手补了 /health 报 llm 路由（直连/代理
+> **历史侧的 LLM 摘要 2026-08-25 也做完了**（掉出上下文的那些用廉价
+> 模型摘一段，按丢掉的条数缓存）；顺手补了 /health 报 llm 路由（直连/代理
 > 的唯一观测点）；I10 的 HTTP 自定义头已接上（坏头拒连不静默）。
 > 都在 2026-08-24，见 roadmap-done。I3(历史摘要)、I6-I9、I10 其余未动。
 

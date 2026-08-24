@@ -421,6 +421,8 @@ pub struct Engine {
     /// 而 `Engine` 正是「跑一轮所需的全部依赖」。
     pub runs: crate::runs::Runs,
     pub max_rounds: usize,
+    /// 各会话「掉出上下文的早期对话」的摘要。见 [`crate::recap`]。
+    pub recaps: crate::recap::Recaps,
     /// 各会话的后台命令簿。**内存态** —— 进程重启时那些子进程也
     /// 跟着没了（`kill_on_drop`），簿子留着只会指向一堆不存在的任务。
     pub background: BackgroundBooks,
@@ -836,6 +838,29 @@ impl Engine {
                 kept = messages.len(),
                 "会话太长，最早的若干轮没进上下文"
             );
+            // 掉出去的那些摘一段放在最前面 —— 从前它们是**彻底消失**的，
+            // 模型答不出「我们一开始说好的方案」而用户看不出为什么。
+            //
+            // 摘不出来就当没有（见 `recap` 的第三条纪律）：用户只是想说句话
+            if let Some(recap) = crate::recap::summarise_dropped(
+                &self.llm,
+                &self.recaps,
+                &req.session_id,
+                &history.dropped_turns,
+            )
+            .await
+            {
+                // 插在**最前面**，且说清它是摘要不是原话 —— 不说的话模型
+                // 会把这段转述当成用户真的讲过的句子去引用
+                messages.insert(
+                    0,
+                    cortex_llm::Message::user().with_text(format!(
+                        "[更早的对话（共 {} 轮）已经压成这段摘要，不是原话]
+{recap}",
+                        history.dropped
+                    )),
+                );
+            }
         }
         // 附件说明块贴在用户原话之后（最新一侧），图片作为多模态块随行。
         // **不拍平**：goose 的 Image 块经 /llm/stream 无损透传，各家格式

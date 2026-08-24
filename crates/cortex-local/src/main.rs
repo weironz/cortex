@@ -33,6 +33,7 @@ mod local_workspace;
 mod outbox;
 mod provider;
 mod proxy;
+mod recap;
 mod remote;
 mod routes;
 mod runs;
@@ -374,6 +375,7 @@ async fn main() -> anyhow::Result<()> {
         max_rounds: DEFAULT_MAX_ROUNDS,
         todos: turn::Todos::default(),
         background: turn::BackgroundBooks::default(),
+        recaps: recap::Recaps::default(),
         context_window,
         persona: PERSONA,
         capabilities: CAPABILITIES,

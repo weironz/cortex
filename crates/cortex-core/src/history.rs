@@ -51,6 +51,13 @@ pub struct FittedHistory {
     pub turns: Vec<HistoryTurn>,
     /// 因为预算不够被丢掉的条数（全是更老的那些）
     pub dropped: usize,
+    /// 被丢掉的那些的原文，**按时间正序**。
+    ///
+    /// 留着是给摘要用的（见 `cortex-local` 的 `summarise_dropped`）——
+    /// 从前这里只有一个计数，于是「最早那几十轮」在上下文里是**彻底
+    /// 消失**的：模型答不出「我们一开始说好的方案」，而用户完全看不出
+    /// 为什么。丢与摘要是两件事，前者省钱、后者保住线索。
+    pub dropped_turns: Vec<HistoryTurn>,
 }
 
 /// 历史能占 context window 的多少。
@@ -111,9 +118,13 @@ pub fn fit_history(turns: Vec<HistoryTurn>, max_tokens: usize) -> FittedHistory 
         keep_from += 1;
     }
 
+    // 分成两半而不是 `skip` —— 被丢的那些要留着给摘要用
+    let mut turns = turns;
+    let kept = turns.split_off(keep_from);
     FittedHistory {
         dropped: keep_from,
-        turns: turns.into_iter().skip(keep_from).collect(),
+        dropped_turns: turns,
+        turns: kept,
     }
 }
 

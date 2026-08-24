@@ -46,6 +46,7 @@ fn state(dir: &Path, exec_env: cortex_agent::ExecEnvironment) -> LocalState {
         max_rounds: 4,
         todos: crate::turn::Todos::default(),
         background: crate::turn::BackgroundBooks::default(),
+        recaps: crate::recap::Recaps::default(),
         context_window: 8192,
         persona: "",
         capabilities: "",

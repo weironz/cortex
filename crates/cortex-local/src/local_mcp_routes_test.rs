@@ -39,6 +39,7 @@ fn state(dir: &Path) -> LocalState {
         max_rounds: 4,
         todos: crate::turn::Todos::default(),
         background: crate::turn::BackgroundBooks::default(),
+        recaps: crate::recap::Recaps::default(),
         context_window: 8192,
         persona: "",
         capabilities: "",
