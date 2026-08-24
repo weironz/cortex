@@ -243,7 +243,7 @@ impl MediaStore {
         Ok(self.inner.put(bytes, declared_mime).await?)
     }
 
-    async fn get(&self, hash: &str) -> cortex_core::Result<Bytes> {
+    pub(crate) async fn get(&self, hash: &str) -> cortex_core::Result<Bytes> {
         Ok(self.inner.get(hash).await?)
     }
 

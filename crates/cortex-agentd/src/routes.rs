@@ -187,6 +187,17 @@ protected_routes! {
         .delete(crate::gallery::delete_album),
     "/albums/{id}/items" [POST, DELETE] => post(crate::gallery::add_to_album)
         .delete(crate::gallery::remove_from_album),
+    // 资料库 —— 与会话无关的材料。**不在 /images 下面**：图片是产物，
+    // 资料库是材料，两者的生命周期与归档方式都不同（相册可重叠，
+    // 文件夹排他），见 library 模块头
+    "/library" [GET, POST] => get(crate::library::list)
+        .post(crate::library::add),
+    "/library/folders" [POST] => post(crate::library::create_folder),
+    "/library/folders/{id}" [DELETE] => delete(crate::library::delete_folder),
+    "/library/search" [POST] => post(crate::library::search),
+    "/library/{id}" [PATCH, DELETE] => patch(crate::library::update)
+        .delete(crate::library::remove),
+    "/library/{id}/text" [GET] => get(crate::library::read),
     // 自带 API key。三个动作一条路径：看状态 / 存 / 撤下。
     //
     // 它跟着 `/llm/stream` 一起来 —— 「谁的 key」与「在哪花」必须由同一个

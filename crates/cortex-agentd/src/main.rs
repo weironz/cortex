@@ -37,6 +37,7 @@ mod error;
 mod gallery;
 mod image;
 mod import;
+mod library;
 mod llm;
 mod model_pick;
 mod model_roles;
