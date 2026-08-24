@@ -615,8 +615,10 @@ tree-sitter 符号索引**（goose 2600 行 + 9 个语法 crate）—— 编译�
 能力 shell+rg 够到八成，等真需求；**Agent Teams 式多 agent 通信** ——
 I7 都还没有，谈不上。
 
-> 进度：I1 ✅ I2 ✅ I4 ✅ I5(tree) ✅（2026-08-24，见 roadmap-done）；
-> I3 是下一个大件；I6-I10 未动。
+> 进度：I1 ✅ I2 ✅ I4 ✅ I5(tree) ✅；I3 **轮内自救已做**（撞窗 →
+> 折叠旧工具结果重试两次，两条路径都认得 `ContextLengthExceeded`），
+> 历史侧的 LLM 摘要待做；顺手补了 /health 报 llm 路由（直连/代理
+> 的唯一观测点）。都在 2026-08-24，见 roadmap-done。I6-I10 未动。
 
 ---
 

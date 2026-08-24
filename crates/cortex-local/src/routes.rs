@@ -344,6 +344,18 @@ async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health>
         // 协议握手只在启动那一刻做过一次。之后远端可能被升级到一个
         // 不再支持本端的版本 —— 那时**不该**把这个进程杀掉（用户正聊到一半），
         // 但要能看出来。这两个数字就是排查时的第一现场
+        // 「我在直连还是代理」的唯一观测点 —— 见 DTO 字段上的注释
+        llm: Some(
+            if st.engine.llm.provider_id() == crate::llm::PROXY_PROVIDER_ID {
+                format!("proxy:{}", st.remote.base())
+            } else {
+                format!(
+                    "direct:{}/{}",
+                    st.engine.llm.provider_id(),
+                    st.engine.llm.model().model_name
+                )
+            },
+        ),
         protocol: cortex_proto::PROTOCOL_VERSION,
         min_peer_protocol: cortex_proto::MIN_PEER_PROTOCOL,
         // 本地 agent 没有数据库、没有对象存储、不管认证形态

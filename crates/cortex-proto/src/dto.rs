@@ -69,6 +69,17 @@ pub struct Health {
     /// 还不存在，不会误判。
     #[serde(default = "role_cortexd")]
     pub role: String,
+    /// 这个进程的 LLM 走哪条路：`"direct:{provider}/{model}"` 或
+    /// `"proxy:{remote}"`。只有本地 agent 报。
+    ///
+    /// # 为什么值得一个字段
+    ///
+    /// 直连与代理的差别（谁的 key、打谁的账单、模型是哪个）从界面上
+    /// **完全看不出来** —— `LlmRoute::from_env` 的注释担心的「以为自己在
+    /// 直连、实际跑着服务端的模型」，2026-08-24 实测差点应验：判断当时
+    /// 靠的是手起一个进程看 tracing。观测点要在 /health，不在日志堆里。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm: Option<String>,
     /// 线协议版本。见 [`crate::PROTOCOL_VERSION`]。
     ///
     /// 与 `version` 分开报：后者每发一版都变，而这个只在契约不兼容地

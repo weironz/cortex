@@ -715,9 +715,40 @@ impl Turn {
                 messages.push(Message::user().with_text(TOOLS_EXHAUSTED_NUDGE));
             }
 
-            let round = self
-                .one_round(llm, system, messages, offered, events)
-                .await?;
+            // ── 撞上下文窗口的自救：折叠旧工具结果，重试 ──
+            //
+            // 撞窗从前被抹成通用 Provider 错误直接整轮失败 —— 用户看到
+            // 「模型返回出错」，而半截回答已经吐出去了。error.rs 里那句
+            // 「包成一个字符串就废了」警告的正是这个消费点。
+            //
+            // 自救的对象是**轮内累积的工具结果**：8 个工具轮次里 read_file
+            // 与 shell 的输出最占地方，而模型此刻多半已经用完了它们。
+            // 第一次折叠保留最近 2 条（往往正是模型正要引用的），
+            // 第二次全折；还不行就按原样失败 —— 说明大的是历史或系统
+            // 提示词，那不是这一层能救的（历史侧摘要见 roadmap I3）。
+            let round = {
+                let mut overflow_retries = 0u8;
+                loop {
+                    match self.one_round(llm, system, messages, offered, events).await {
+                        Ok(r) => break r,
+                        Err(e) if is_context_overflow(&e) && overflow_retries < 2 => {
+                            let keep = if overflow_retries == 0 { 2 } else { 0 };
+                            let collapsed = collapse_tool_responses(messages, keep);
+                            if collapsed == 0 {
+                                // 没有可折叠的 —— 重试只会原样再撞一次
+                                return Err(CortexError::Provider(e.to_string()));
+                            }
+                            overflow_retries += 1;
+                            tracing::warn!(
+                                collapsed,
+                                retry = overflow_retries,
+                                "上下文超限，折叠旧工具结果后重试"
+                            );
+                        }
+                        Err(e) => return Err(CortexError::Provider(e.to_string())),
+                    }
+                }
+            };
             reply.push_str(&round.text);
             push_model(&mut models, round.model.clone());
 
@@ -809,16 +840,15 @@ impl Turn {
         messages: &[Message],
         tools: &[Tool],
         events: &mpsc::Sender<AgentEvent>,
-    ) -> Result<Round> {
-        let mut stream = llm
-            .stream(system, messages, tools)
-            .await
-            .map_err(|e| CortexError::Provider(e.to_string()))?;
+    ) -> std::result::Result<Round, cortex_llm::LlmError> {
+        // 错误**保真**返回 LlmError：调用方要按分类行事（超上下文 → 折叠
+        // 重试），转成字符串就再也分不出来了 —— error.rs 的原话
+        let mut stream = llm.stream(system, messages, tools).await?;
 
         let mut round = Round::default();
 
         while let Some(item) = stream.next().await {
-            let (msg, usage) = item.map_err(|e| CortexError::Provider(e.to_string()))?;
+            let (msg, usage) = item?;
             // ⚠️ 这里以前是 `_usage` —— **模型名一直就在里面，被丢掉了**。
             //
             // 它是「这句话是谁答的」唯一可靠的来源：请求里带的可能是
@@ -1149,6 +1179,67 @@ struct Round {
 /// 失败用 `Ok(CallToolResult::error(..))` 而非 `Err(ErrorData)`：后者在
 /// MCP 语义里是「协议层坏了」，而工具跑失败是**模型该看见并处理**的信息。
 /// 用 Err 会让部分供应商把它渲染成协议错误，模型反而不知道该怎么改。
+/// 这个错误是不是「上下文超限」。
+///
+/// 两条路径都认：直连时供应商层直接给 `ContextLengthExceeded`；
+/// 代理时服务端把它编码成 `context_length_exceeded` 过线，
+/// `cortex-proto` 解码回同一个变体 —— 所以这里的判据全局唯一。
+fn is_context_overflow(e: &cortex_llm::LlmError) -> bool {
+    matches!(
+        e,
+        cortex_llm::LlmError::Provider(cortex_llm::ProviderError::ContextLengthExceeded(_))
+    )
+}
+
+/// 折叠占位的标记前缀 —— 也当「已折叠过」的判据用。
+const COLLAPSED_MARK: &str = "（工具结果已折叠";
+
+/// 把轮内已完成的工具结果换成一行占位，腾出上下文。
+///
+/// `keep_last` 条**最新的**含工具结果的消息不动 —— 模型正要引用的
+/// 多半是它们。返回真折叠掉的条数：0 = 没有可折叠的，重试没有意义。
+fn collapse_tool_responses(messages: &mut [Message], keep_last: usize) -> usize {
+    // 先数出含工具结果的消息有几条，算出保护线
+    let holders: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            m.content
+                .iter()
+                .any(|c| matches!(c, MessageContent::ToolResponse(_)))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let protect_from = holders.len().saturating_sub(keep_last);
+    let mut collapsed = 0usize;
+
+    for &idx in holders.iter().take(protect_from) {
+        for content in &mut messages[idx].content {
+            let MessageContent::ToolResponse(resp) = content else {
+                continue;
+            };
+            let text: String = match &resp.tool_result {
+                Ok(r) => r
+                    .content
+                    .iter()
+                    .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                    .collect(),
+                Err(e) => e.to_string(),
+            };
+            // 已经是占位、或本来就短的，折了也省不出什么
+            if text.starts_with(COLLAPSED_MARK) || text.chars().count() < 200 {
+                continue;
+            }
+            resp.tool_result = Ok(CallToolResult::success(vec![Content::text(format!(
+                "{COLLAPSED_MARK}以腾出上下文，原 {} 字符。需要的话重新调用工具获取）",
+                text.chars().count()
+            ))]));
+            collapsed += 1;
+        }
+    }
+    collapsed
+}
+
 fn to_mcp_result(r: ToolResult) -> CallToolResult {
     if r.ok {
         // 有图就把图一起带上。**文字仍然要有** —— 一条只有图的工具结果在
@@ -2099,6 +2190,70 @@ mod model_trail_tests {
             got,
             vec!["a"],
             "中间那次没报，不该把它当成「换过模型」而让 a 重复一遍"
+        );
+    }
+}
+
+#[cfg(test)]
+mod collapse_tests {
+    use super::*;
+
+    fn tool_msg(id: &str, payload: &str) -> Message {
+        Message::user().with_tool_response(
+            id.to_string(),
+            Ok(CallToolResult::success(vec![Content::text(payload)])),
+        )
+    }
+
+    #[test]
+    fn collapses_old_keeps_recent() {
+        let big = "x".repeat(1_000);
+        let mut messages = vec![
+            tool_msg("a", &big),
+            Message::user().with_text("中间的普通消息"),
+            tool_msg("b", &big),
+            tool_msg("c", &big),
+        ];
+        let n = collapse_tool_responses(&mut messages, 2);
+        assert_eq!(n, 1, "三条工具结果保最近两条，只折最老那条");
+        let first: String = messages[0]
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                MessageContent::ToolResponse(r) => r.tool_result.as_ref().ok().map(|res| {
+                    res.content
+                        .iter()
+                        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                        .collect::<String>()
+                }),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            first.contains("已折叠") && first.contains("1000 字符"),
+            "占位要说清折了什么、怎么找回来：{first}"
+        );
+    }
+
+    #[test]
+    fn second_pass_is_idempotent_on_placeholders() {
+        let big = "y".repeat(1_000);
+        let mut messages = vec![tool_msg("a", &big), tool_msg("b", &big)];
+        assert_eq!(collapse_tool_responses(&mut messages, 0), 2, "第一遍全折");
+        assert_eq!(
+            collapse_tool_responses(&mut messages, 0),
+            0,
+            "第二遍没有可折的 —— 返回 0 让调用方停止重试，而不是无限循环"
+        );
+    }
+
+    #[test]
+    fn short_results_are_not_worth_collapsing() {
+        let mut messages = vec![tool_msg("a", "短结果")];
+        assert_eq!(
+            collapse_tool_responses(&mut messages, 0),
+            0,
+            "折一条 6 字符的结果省不出上下文，还骗了调用方「有进展」"
         );
     }
 }
