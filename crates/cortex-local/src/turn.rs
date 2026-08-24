@@ -211,6 +211,12 @@ struct Caps {
     has_skills: bool,
     /// 用户开了电脑操作，**且**这个构建与这个执行环境真的做得到。
     can_use_computer: bool,
+    /// 派得出子 agent 不。判据与后台命令同源：**要有工作区**。
+    ///
+    /// 子 agent 只读，而没绑工作区时可读的范围是空集 —— 派出去的
+    /// 五个会一起回「我什么都读不到」。
+    can_spawn: bool,
+
     /// 后台命令做不做得了。
     ///
     /// **判据是「这一轮有没有工作区」** —— 起一条命令总要有个目录，
@@ -288,6 +294,9 @@ fn with_external(
     }
     if caps.can_background {
         specs.extend(cortex_agent::tools::background_specs());
+    }
+    if caps.can_spawn {
+        specs.push(cortex_agent::tools::subagent_spec());
     }
     // ⚠️ 与提示词里那段说明同生共死（同 `has_skills` 那条）：判据是同一个
     // `can_use_computer`。摆了工具不讲坐标系，模型会一直点偏；讲了坐标系
@@ -765,6 +774,7 @@ impl Engine {
             can_search: can_draw,
             // 起命令要有工作目录 —— 与 `Caps::can_background` 上那段
             can_background: bound.is_some(),
+            can_spawn: bound.is_some(),
         };
         // 这个智能体关掉了哪些工具。**与提示词同源**：换的人设与关掉的
         // 工具来自同一个 brief，各取各的话会出现「人设是大厨、工具却是
@@ -773,6 +783,19 @@ impl Engine {
             .assistant
             .as_ref()
             .map_or(&[], |a| a.disabled_tools.as_slice());
+        // 子 agent 那份 `Turn`：**同一个沙箱，只读的工具目录**。
+        //
+        // 沙箱同一个是关键 —— 子 agent 能读的范围与主 agent 一样，
+        // 不多不少。另建一个「更宽的」沙箱等于开了一条绕过工作区边界
+        // 的路，而它不会有任何症状（只读，看着人畜无害）。
+        let subagent_turn = bound.as_deref().and_then(|ws| {
+            turn_for_env(self.exec_env, ws).ok().map(|t| {
+                t.with_specs(cortex_agent::tools::readonly_specs())
+                    // 轮数比主 agent 少：子 agent 的活儿是「查一件事」，
+                    // 给它八轮等于允许它自己也陷进一个循环
+                    .with_max_rounds(4)
+            })
+        });
         let workspace_turn = bound.as_deref().and_then(|ws| {
             // 绑定时校验过，但目录可能之后被删了/移了/换了外接盘。
             // 此时降级成纯聊天而不是让整轮失败 —— 用户只是想说句话
@@ -899,6 +922,9 @@ impl Engine {
         }
         messages.push(user_msg);
 
+        // ⚠️ **`llm` 要在 host 之前造好**：子 agent 由 host 派出去，
+        // 而它们跟主 agent 用同一个模型（见 `LocalHost::llm`）
+        let llm = self.llm_for(&req.model, req.source.as_deref());
         let host = LocalHost {
             events: Arc::clone(tx),
             session_id: req.session_id.clone(),
@@ -912,6 +938,8 @@ impl Engine {
             todos: self.todos.clone(),
             background: self.background.for_session(&req.session_id),
             hooks: Arc::clone(&self.hooks),
+            llm: Arc::new(llm.clone()),
+            subagent_turn: subagent_turn.map(Arc::new),
         };
         // 这一轮用哪个模型。逐轮的选择是**那一轮的属性**，而 `self.llm`
         // 是进程级的 —— 所以造一份带这一轮模型的副本（供应商是 Arc，
@@ -921,7 +949,6 @@ impl Engine {
         // 直连路径下 `with_model` 拿到的是真模型配置；代理路径下拿到的是
         // 一个把选择编进名字的占位（见 `llm::proxy_model_config`）。
         // 两条路在这里长得一样，是有意的。
-        let llm = self.llm_for(&req.model, req.source.as_deref());
         let outcome = turn
             .run(&llm, &system_prompt, &mut messages, &host, &atx)
             .await;
@@ -1252,6 +1279,19 @@ impl Todos {
     }
 }
 
+/// 子 agent 的宿主 —— **什么都不提供**。
+///
+/// 它只有只读工具（`readonly_specs`），那些走 `tools::execute`，
+/// 一个宿主能力都用不到。默认实现全是「这个宿主不会」，正好：
+/// 子 agent 真去调一个它不该有的工具时，拿到的是一句说得清的拒绝，
+/// 而不是一次静默的成功。
+///
+/// 确认回路也是默认的「没人回答」——而它只有 Safe 工具，压根走不到闸门。
+struct SubagentHost;
+
+#[async_trait::async_trait]
+impl ToolHost for SubagentHost {}
+
 struct LocalHost {
     events: Arc<crate::runs::RunSink>,
     session_id: String,
@@ -1279,6 +1319,14 @@ struct LocalHost {
     background: cortex_agent::background::Tasks,
     /// 用户配的 hooks —— 与 `Engine` 里那份是同一个。
     hooks: Arc<[cortex_agent::hooks::Hook]>,
+    /// 这一轮用的那个模型 —— 子 agent 跟主 agent 用**同一个**。
+    ///
+    /// 用廉价模型是个诱人的省法，但子 agent 要读代码、下判断，
+    /// 那正是廉价模型最不擅长的；省下的钱换来一份看不出错在哪的调查。
+    llm: Arc<cortex_llm::LlmClient>,
+    /// 子 agent 用的只读 `Turn`。`None` = 这一轮没绑工作区，
+    /// 也就没什么可读的（工具目录里因此也不会有 spawn_agents）。
+    subagent_turn: Option<Arc<Turn>>,
 
     /// 这一轮生成的图。
     ///
@@ -1359,6 +1407,77 @@ impl ToolHost for LocalHost {
                 "已记下（{n} 字符）。清单每轮都会出现在你的上下文里，完成一步就更新它"
             )),
         }
+    }
+
+    async fn spawn_agents(&self, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
+        /// 一次最多派几个。
+        ///
+        /// 4 个：够覆盖「同时了解四处」，又小到一次派出去的钱看得见
+        /// （每个都是一次完整的多轮对话）。再多的话，一句轻飘飘的
+        /// 「派 20 个去查」会变成 20 份账单。
+        const MAX_AGENTS: usize = 4;
+
+        let Some(tasks) = arguments.get("tasks").and_then(|v| v.as_array()) else {
+            return cortex_agent::ToolResult::err("缺少 tasks 参数（一个字符串数组）");
+        };
+        let tasks: Vec<String> = tasks
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if tasks.is_empty() {
+            return cortex_agent::ToolResult::err(
+                "tasks 是空的 —— 每个子 agent 要有一句话说清干什么",
+            );
+        }
+        if tasks.len() > MAX_AGENTS {
+            return cortex_agent::ToolResult::err(format!(
+                "一次最多派 {MAX_AGENTS} 个（收到 {}）。每个子 agent 都是一次完整的多轮对话 ——                  挑最要紧的几件，或者分两次派。",
+                tasks.len()
+            ));
+        }
+        let Some(turn) = self.subagent_turn.clone() else {
+            return cortex_agent::ToolResult::err(
+                "这一轮没有绑定工作区，子 agent 没有可读的东西。先让用户绑一个目录。",
+            );
+        };
+
+        // 每个子 agent 一个独立的 host：**它自己的**空后台簿、空 hooks、
+        // 且 `spawn_agents` 不在它的目录里（`readonly_specs` 只筛 Safe）——
+        // 套娃会让「派 5 个」炸成 5^n
+        let futures = tasks.iter().enumerate().map(|(i, task)| {
+            let turn = Arc::clone(&turn);
+            let llm = Arc::clone(&self.llm);
+            let task = task.clone();
+            async move {
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<cortex_agent::AgentEvent>(64);
+                // 子 agent 的事件**不往界面上送**：四个并行的 agent 各自
+                // 吐字，混进主对话流里是一团谁也读不懂的东西。用户看到的
+                // 是主 agent 那一句「派了四个去查」，以及最后的结论
+                let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+                let host = SubagentHost;
+                let mut messages = vec![cortex_llm::Message::user().with_text(&task)];
+                let system = "你是一个只负责**查清一件事**的子 agent。                     你只有只读工具，不能改文件也不能执行命令。                     查完之后直接给结论 —— 不要复述你做了哪些步骤，                     不要建议下一步做什么（那是主 agent 的事）。                     查不到就说查不到，不要猜。";
+                let outcome = turn.run(&llm, system, &mut messages, &host, &tx).await;
+                drop(tx);
+                let _ = drain.await;
+                match outcome {
+                    Ok(o) => format!("【子 agent {}：{task}】
+{}", i + 1, o.reply.trim()),
+                    // 一个失败不影响别的 —— 照实说是哪一个失败了，
+                    // 主 agent 可以决定要不要自己补上那一块
+                    Err(e) => format!("【子 agent {}：{task}】没查成：{e}", i + 1),
+                }
+            }
+        });
+
+        let results = futures::future::join_all(futures).await;
+        cortex_agent::ToolResult::ok(results.join(
+            "
+
+",
+        ))
     }
 
     fn hooks(&self) -> Vec<cortex_agent::hooks::Hook> {
@@ -1659,6 +1778,33 @@ mod tests {
             !direct.tool_names().contains(&"generate_image"),
             "直连模式没有可打的服务端。摆出来的话，模型会答应画图然后失败 ——              而那条失败用户什么都做不了。实际：{:?}",
             direct.tool_names()
+        );
+    }
+
+    /// 子 agent 只拿只读工具，且**不能套娃**。
+    ///
+    /// 两条都是这个功能的安全边界：能写的话两个子 agent 会撞同一个文件
+    /// （谁后写谁赢，且不报错）；能套娃的话一次「派 4 个」炸成 4^n。
+    #[test]
+    fn 子agent只有只读工具且不能再派子agent() {
+        let names: Vec<String> = cortex_agent::tools::readonly_specs()
+            .iter()
+            .map(|s| s.name.to_string())
+            .collect();
+        let has = |n: &str| names.iter().any(|x| x == n);
+        assert!(has("read_file") && has("tree"), "读的那些要在：{names:?}");
+        assert!(
+            !has("write_file") && !has("edit_file"),
+            "能写的话两个子 agent 会撞同一个文件，谁后写谁赢且不报错：{names:?}"
+        );
+        assert!(!has("shell"), "执行留给主 agent：{names:?}");
+        assert!(
+            !has("spawn_agents"),
+            "套娃会让一次「派 4 个」炸成 4^n：{names:?}"
+        );
+        assert!(
+            !has("todo_write"),
+            "计划是主 agent 记的，子 agent 记了没人看：{names:?}"
         );
     }
 

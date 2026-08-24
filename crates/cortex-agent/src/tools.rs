@@ -535,6 +535,63 @@ pub fn image_spec() -> ToolSpec {
     }
 }
 
+/// 派几个子 agent 并行去查。
+///
+/// # 为什么只给**只读**工具
+///
+/// 三家的并行原语各不相同（Claude Code 的 subagent 树、Codex 的云容器、
+/// Grok 的 8 个 worktree），但它们要解决的核心问题是同一个：
+/// **并行写会撞车**。两个子 agent 同时改一个文件，谁后写谁赢，
+/// 而没有任何地方会报错。
+///
+/// 让它们只读之后，那个问题整个不存在 —— 而并行最值钱的场景恰好是
+/// 只读的：「这三个模块各自怎么处理超时的」「同时查这五个文件里有没有
+/// 用到那个 API」。一个人读五份材料要五轮，五个子 agent 一轮就回来了。
+///
+/// 写与执行留给主 agent：它看得到全部子 agent 的回答，能一次改对。
+///
+/// # 为什么不套娃
+///
+/// 子 agent 的目录里**没有这个工具**。允许嵌套的话，一次「派 5 个」
+/// 可以炸成 5^n —— 而这个产品里没有任何场景需要第二层。
+#[must_use]
+pub fn subagent_spec() -> ToolSpec {
+    ToolSpec {
+        name: "spawn_agents".into(),
+        description: "派几个子 agent **并行**去查东西，各自独立看资料再把结论带回来。                      它们只能读（读文件、看目录、检索资料库、联网搜），不能改也不能执行 ——                       写代码和跑命令是你自己的事。适合「同时了解好几处」这种活儿"
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "description": "每个子 agent 干什么。一条一个，写清楚要它查什么、带回什么",
+                    "items": { "type": "string" }
+                }
+            },
+            "required": ["tasks"]
+        }),
+        // 只读的一组工具 + 花模型的钱：与生图同一档（有成本、无破坏）
+        risk: Risk::Write,
+        path_arg: None,
+        source: ToolSource::Builtin,
+    }
+}
+
+/// 子 agent 手上那几样 —— **只读**。
+///
+/// 从内置目录里筛，而不是另写一份名字清单：新增一个只读工具时，
+/// 子 agent 自动就有了；而另写一份的话，那份清单会慢慢与真相脱节。
+#[must_use]
+pub fn readonly_specs() -> Vec<ToolSpec> {
+    builtin_specs()
+        .into_iter()
+        .filter(|s| s.risk == Risk::Safe)
+        // todo_write 是给主 agent 记计划用的，子 agent 记了没人看
+        .filter(|s| s.name != "todo_write")
+        .collect()
+}
+
 /// 后台命令那三个 —— 起、看、停。
 ///
 /// # 为什么是三个工具，不是给 `shell` 加一个参数

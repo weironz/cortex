@@ -603,7 +603,7 @@ v1.45.0，Apache-2.0，能搬就不写）：
 | I4 | **todo/计划工具** | 无 —— 长任务跑到第 6 轮忘了自己要干什么，三家都有（CC TaskCreate、Codex plan、Grok plan mode） | goose `todo.rs`（202 行）+ moim 每轮注入模式：todo 不占消息历史、不被压缩 | 小 |
 | I5 | **搜索/结构工具** | 无 glob/grep/tree —— 模型只能 `list_dir` 逐层摸或拼 shell | goose 只有 `tree`（299 行，`ignore` crate）可搬；glob/grep goose 也没有（靠提示词教 rg），自己写或同样走提示词 | 小-中 |
 | I6 ✅ | **后台/长时命令** | shell 同步单发（默认 120s、封顶 600s，`tools.rs:885-887`），无 run_in_background —— 起个 dev server 就把一轮挂死 | goose `summon` 的后台任务簿记（~500 行：JoinHandle+cancel+load/peek） | 中 |
-| I7 | **子 agent 并行** | 无。三家三种原语：CC subagent 树、Codex 云容器 best-of-n、Grok 8-worktree —— cortex 的对应物该绑自己的 `Turn::run` 与会话，goose 的执行层**不可搬**（绑死它的 Agent） | 思路借 goose `summon`，实现自研 | 大 |
+| I7 ✅ | **子 agent 并行** | 无。三家三种原语：CC subagent 树、Codex 云容器 best-of-n、Grok 8-worktree —— cortex 的对应物该绑自己的 `Turn::run` 与会话，goose 的执行层**不可搬**（绑死它的 Agent） | 思路借 goose `summon`，实现自研 | 大 |
 | I8 ✅ | **hooks** | 无（CC/Grok 都有生命周期钩子跑确定性脚本） | — | 中，后置 |
 | I9 ✅ | **SKILL.md 开放标准兼容** | 已有技能系统（`skills_note` + `load_skill`），但格式是自己的 —— SKILL.md 已事实上跨厂商通用（同一份 skill 三家都能装） | 对齐格式即可 | 小 |
 | I10 ✅ | **MCP 客户端补洞** | 已有 stdio+HTTP，但 HTTP 自定义头没接上（带鉴权的 server 会 401，`hub.rs:381-388` 只 WARN 后裸连）、断线不自动重连、resources/prompts 不支持 | — | 小-中 |
@@ -615,12 +615,11 @@ tree-sitter 符号索引**（goose 2600 行 + 9 个语法 crate）—— 编译�
 能力 shell+rg 够到八成，等真需求；**Agent Teams 式多 agent 通信** ——
 I7 都还没有，谈不上。
 
-> 进度：I1 ✅ I2 ✅ I4 ✅ I5(tree) ✅；I3 **轮内自救已做**（撞窗 →
-> 折叠旧工具结果重试两次，两条路径都认得 `ContextLengthExceeded`），
-> **历史侧的 LLM 摘要 2026-08-25 也做完了**（掉出上下文的那些用廉价
-> 模型摘一段，按丢掉的条数缓存）；顺手补了 /health 报 llm 路由（直连/代理
-> 的唯一观测点）；I10 的 HTTP 自定义头已接上（坏头拒连不静默）。
-> 都在 2026-08-24，见 roadmap-done。I3(历史摘要)、I6-I9、I10 其余未动。
+> **I 节 2026-08-25 全部完成。** 十项逐条见上表的 ✅ 与 CHANGELOG；
+> 实现里有三处判断是**做的过程中翻转的**，理由都写在了代码注释里：
+> hook 跑不起来时 fail-closed（第一版写成放行）、`relates_to` 式的
+> 「区别对待」在经 shell 跑时根本做不到、子 agent 只读（并行写会撞车
+> 且不报错）。
 
 ### J · 设计稿里有、产品里没有的 —— 2026-08-24 逐屏核对
 

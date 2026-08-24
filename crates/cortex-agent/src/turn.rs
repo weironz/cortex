@@ -376,6 +376,19 @@ pub trait ToolHost: Send + Sync {
         ToolResult::err("这个宿主不保存任务清单。把你的计划直接写在回答里，别再调这个工具。")
     }
 
+    /// 派几个子 agent 并行去查。**由宿主执行** —— 它要一个 `LlmClient`，
+    /// 而那是宿主持有的东西（`dispatch` 手上只有沙箱与工具目录）。
+    ///
+    /// # 默认实现是「这个宿主不会」，不是假装派了
+    ///
+    /// 假装派了是这一组默认实现里最贵的一种：模型会照着几段**它自己
+    /// 编出来的**调查结论往下做。
+    async fn spawn_agents(&self, _arguments: &serde_json::Value) -> ToolResult {
+        ToolResult::err(
+            "这个 agent 进程派不出子 agent（它没有可用的模型客户端）。             不要编造调查结果 —— 自己一个个查，或者告诉用户这条路在当前环境下不可用。",
+        )
+    }
+
     /// 用户配的 hooks。空 = 没配（也是绝大多数会话的形态）。
     ///
     /// **由宿主给**：那份配置在用户目录里，而读文件是宿主的事
@@ -1191,6 +1204,8 @@ impl Turn {
         } else if spec.name == "load_skill" {
             // 同上：正文在服务端的库里，不在文件系统上
             host.load_skill(&call.arguments).await
+        } else if spec.name == "spawn_agents" {
+            host.spawn_agents(&call.arguments).await
         } else if tools::is_background_tool(&spec.name) {
             match host.background_tasks() {
                 // 说清是「这个环境不支持」而不是「命令失败」—— 后者会让
