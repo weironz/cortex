@@ -506,6 +506,46 @@ async fn connect_with_deadline(name: &str, sc: &ServerConfig) -> Result<Server, 
     }
 }
 
+/// 子进程起不来时说给用户听的那句话。
+///
+/// # 为什么要专门翻译一次
+///
+/// 外面绝大多数 MCP server 是 `npx -y 某个包` 或 `uvx 某个包`，而**安装包
+/// 里不带 node、也不带 python** —— 带一个是几十 MB，而绝大多数用户从不
+/// 挂连接器（这是有意的取舍，见 install.md「挂连接器要先有 node 或 python」）。
+///
+/// 没装的人点一下「接上」，原来拿到的是「拉不起子进程 npx：程序未找到」。
+/// 那句话**长得像我们的 bug**：用户看到的是一条我们的报错、指着一个他没
+/// 听说过的命令，于是他会去重装桌面端、去提 issue，而不会去装 node。
+///
+/// 一句能照做的话不增加任何包体积，只多几行代码 —— 这是这两件事之间
+/// 唯一划算的交换。
+fn spawn_failure_message(command: &str, raw: &str) -> String {
+    // 判「是不是没装」而不是逐平台认错误码：Windows 报 2、Unix 报
+    // ENOENT，而两边的**文案**都含 not found / 找不到。认不出来时
+    // 回落到原文 —— 猜错的代价是把一个真 bug 说成「你没装 node」
+    let missing = raw.contains("not found")
+        || raw.contains("No such file")
+        || raw.contains("cannot find")
+        || raw.contains("找不到")
+        || raw.contains("os error 2");
+    if !missing {
+        return format!("拉不起子进程 {command}：{raw}");
+    }
+    let hint = match command {
+        "npx" | "npm" | "node" => {
+            "这台机器上没有 Node.js。装一个（nodejs.org）之后重连即可 —— \
+             桌面端安装包刻意不带它（几十 MB，而绝大多数人不挂连接器）。"
+        }
+        "uvx" | "uv" | "python" | "python3" => {
+            "这台机器上没有 Python / uv。装一个（astral.sh/uv）之后重连即可 —— \
+             桌面端安装包刻意不带它。"
+        }
+        _ => "这个命令不在 PATH 上。检查一下配置里的命令名，或者先把它装上。",
+    };
+    format!("起不来：找不到命令 {command}。{hint}（原始错误：{raw}）")
+}
+
 async fn connect_one(name: &str, sc: &ServerConfig) -> Result<Server, String> {
     let service = match &sc.transport {
         Transport::Stdio { command, args, env } => {
@@ -513,8 +553,8 @@ async fn connect_one(name: &str, sc: &ServerConfig) -> Result<Server, String> {
             for (k, v) in env {
                 cmd.env(k, v);
             }
-            let transport =
-                TokioChildProcess::new(cmd).map_err(|e| format!("拉不起子进程 {command}：{e}"))?;
+            let transport = TokioChildProcess::new(cmd)
+                .map_err(|e| spawn_failure_message(command, &e.to_string()))?;
             ().serve(transport)
                 .await
                 .map_err(|e| format!("握手失败：{e}"))?
@@ -595,6 +635,30 @@ async fn connect_one(name: &str, sc: &ServerConfig) -> Result<Server, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「没装 node」要说成一句用户能照做的话，不是一句像 bug 的话。
+    #[test]
+    fn 找不到命令时告诉用户去装什么() {
+        let msg = spawn_failure_message("npx", "program not found");
+        assert!(
+            msg.contains("Node.js") && msg.contains("nodejs.org"),
+            "要直接说装什么、去哪装 —— 「程序未找到」会让用户去重装桌面端：{msg}"
+        );
+        assert!(
+            msg.contains("program not found"),
+            "原始错误仍要带上：认错「是不是没装」的时候，它是唯一的翻案依据：{msg}"
+        );
+
+        let py = spawn_failure_message("uvx", "No such file or directory (os error 2)");
+        assert!(py.contains("uv"), "python 那条走另一句：{py}");
+
+        // 认不出来就别猜 —— 把一个真 bug 说成「你没装 node」更难查
+        let other = spawn_failure_message("npx", "permission denied");
+        assert!(
+            !other.contains("nodejs.org") && other.contains("permission denied"),
+            "不是「没装」的错误要原样带出去：{other}"
+        );
+    }
 
     /// **重连有预算，用完就不再试。**
     ///

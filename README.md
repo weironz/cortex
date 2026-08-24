@@ -65,12 +65,17 @@ Cortex 是一个通用 AI Agent。
 
 | | 说明 |
 |---|---|
-| CLI 不能登录 | 只能用预共享 token，也就是只能是 1 号用户。多用户部署里会读到别人的数据且不报错 |
 | 移动端 | 桌面与 Web 先跑通；移动端是采集端，可后置 |
 | macOS / Linux 桌面产物 | 只发 Windows 安装包，那两个平台自己 `flutter build` |
 | 语音转录 | 三条路都堵，缺口在上游，见 [roadmap](docs/roadmap.md) |
-| 生成图片 / 生成 Word·PPT·Excel | 文档那一半可以挂 MCP server 解决；图片要自己写 |
+| 生成 Word / PPT / Excel | 挂一个 Office 类 MCP server 就有，我们不自己写。**但桌面端安装包不带 node / python**，得自己装一个 —— 理由与做法见 [install.md](docs/install.md#挂连接器mcp-server要先有-node-或-python) |
 | 从 Web 挂到在线的本地 agent | 机制已经有了（`/runs` 重放 + 广播），只差一个入口 |
+
+> 这张表 2026-08-25 核过一遍，删掉两行**已经不成立**的：
+> 「CLI 不能登录」（`cortex login` / `logout` 早就有了）与「生成图片要自己
+> 写」（`generate_image` 2026-08-19 落地）。写「还不能做什么」的表比写
+> 「能做什么」更容易过期 —— 做完的人会去改 CHANGELOG，很少有人回来
+> 划掉这里的一行。
 
 逐条见 [CHANGELOG.md](CHANGELOG.md)。
 

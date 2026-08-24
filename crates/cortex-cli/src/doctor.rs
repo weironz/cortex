@@ -119,6 +119,7 @@ pub async fn run(base: &str, token_kind: TokenKind, json: bool) -> anyhow::Resul
     checks.push(check_agent_binary());
     checks.push(check_launch_log());
     checks.push(check_state_dir());
+    checks.push(check_connector_runtime());
 
     let report = Report {
         cortex_version: env!("CARGO_PKG_VERSION"),
@@ -189,6 +190,61 @@ fn print_human(report: &Report, color: bool) {
 }
 
 // ────────────────────────── 各项检查 ──────────────────────────
+
+/// 挂 stdio 连接器要的那两个运行时在不在。
+///
+/// # 为什么这一项值得占一行
+///
+/// 连接器页面上那四条一键精选、以及外面绝大多数 MCP server，跑的都是
+/// `npx -y 某个包` 或 `uvx 某个包`。**安装包里不带 node，也不带 python**
+/// —— 带一个是几十 MB，而绝大多数用户从不挂连接器。
+///
+/// 代价是：没装的人点「接上」之后拿到的是一句「程序未找到」，而那句话
+/// 长得像我们的 bug。**这一项把它变成一句用户能照做的话。**
+///
+/// # 为什么不报 Warn
+///
+/// 没装 node 不是故障 —— 不挂连接器的人一辈子用不到它。画成红的话，
+/// 所有人的 doctor 都有一条红字，于是真红的那次没人看（与
+/// `check_launch_log` 那条误报纪律同一个理由）。
+fn check_connector_runtime() -> Check {
+    // 只看 PATH 上有没有，**不去跑它** —— doctor 是只读的，
+    // 而 `npx --version` 在没有缓存时会去 registry 拉东西
+    let npx = which("npx");
+    let uvx = which("uvx");
+    let detail = match (npx, uvx) {
+        (true, true) => "npx 与 uvx 都在 —— stdio 类连接器都挂得起来".to_string(),
+        (true, false) => "npx 在（node 类连接器可用）；没有 uvx，python 类的挂不起来".to_string(),
+        (false, true) => "uvx 在（python 类连接器可用）；没有 npx，node 类的挂不起来".to_string(),
+        (false, false) => "都没有。连接器页面上那几条一键精选跑的是 `npx`，\
+             此刻点「接上」会失败在「程序未找到」。装一个 Node.js 即可；\
+             只想用 HTTP 类连接器的话这一项不影响。"
+            .to_string(),
+    };
+    Check::new("connector_runtime", "连接器运行时", Level::Note, detail)
+}
+
+/// PATH 上有没有这个命令。
+///
+/// 自己写而不是拉 `which` crate：要的只是「找得到吗」，而那个 crate
+/// 会连着 PATHEXT 解析、符号链接跟随、可执行位检查一起拖进来。
+///
+/// Windows 上要试后缀 —— 裸 `npx` 在盘上是 `npx.cmd`，只按名字找会
+/// **在一台装好了 node 的机器上报没装**。
+fn which(cmd: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let exts: &[&str] = if cfg!(windows) {
+        &["", ".cmd", ".exe", ".bat"]
+    } else {
+        &[""]
+    };
+    std::env::split_paths(&path).any(|dir| {
+        exts.iter()
+            .any(|ext| dir.join(format!("{cmd}{ext}")).is_file())
+    })
+}
 
 fn check_version() -> Check {
     let exe = std::env::current_exe()
