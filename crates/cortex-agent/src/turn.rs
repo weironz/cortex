@@ -1299,11 +1299,6 @@ struct Round {
     model: Option<String>,
 }
 
-/// 把工具结果封成 MCP 的 `CallToolResult`。
-///
-/// 失败用 `Ok(CallToolResult::error(..))` 而非 `Err(ErrorData)`：后者在
-/// MCP 语义里是「协议层坏了」，而工具跑失败是**模型该看见并处理**的信息。
-/// 用 Err 会让部分供应商把它渲染成协议错误，模型反而不知道该怎么改。
 /// 这个错误是不是「上下文超限」。
 ///
 /// 两条路径都认：直连时供应商层直接给 `ContextLengthExceeded`；
@@ -1438,6 +1433,11 @@ async fn dispatch_background(
     }
 }
 
+/// 把工具结果封成 MCP 的 `CallToolResult`。
+///
+/// 失败用 `Ok(CallToolResult::error(..))` 而非 `Err(ErrorData)`：后者在
+/// MCP 语义里是「协议层坏了」，而工具跑失败是**模型该看见并处理**的信息。
+/// 用 Err 会让部分供应商把它渲染成协议错误，模型反而不知道该怎么改。
 fn to_mcp_result(r: ToolResult) -> CallToolResult {
     if r.ok {
         // 有图就把图一起带上。**文字仍然要有** —— 一条只有图的工具结果在
