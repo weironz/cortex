@@ -41,6 +41,7 @@ struct AssistantRow {
     icon: String,
     model: Option<String>,
     source: Option<String>,
+    disabled_tools: Vec<String>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -55,6 +56,7 @@ impl From<AssistantRow> for AssistantDto {
             icon: r.icon,
             model: r.model,
             source: r.source,
+            disabled_tools: r.disabled_tools,
             created_at: r.created_at.to_rfc3339(),
             updated_at: r.updated_at.to_rfc3339(),
         }
@@ -79,7 +81,7 @@ pub async fn list(
         .map_err(|e| ApiError::unsupported(format!("这个部署没有智能体：{e}")))?;
 
     let rows: Vec<AssistantRow> = sqlx::query_as(
-        "SELECT id, name, description, instructions, icon, model, source,
+        "SELECT id, name, description, instructions, icon, model, source, disabled_tools,
                 created_at, updated_at
            FROM assistants ORDER BY updated_at DESC, id DESC",
     )
@@ -112,9 +114,9 @@ pub async fn create(
 
     let id = Id::new().to_string();
     let row: AssistantRow = sqlx::query_as(
-        "INSERT INTO assistants (id, name, description, instructions, icon, model, source)
-              VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING id, name, description, instructions, icon, model, source,
+        "INSERT INTO assistants (id, name, description, instructions, icon, model, source, disabled_tools)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           RETURNING id, name, description, instructions, icon, model, source, disabled_tools,
                      created_at, updated_at",
     )
     .bind(&id)
@@ -124,6 +126,7 @@ pub async fn create(
     .bind(body.icon.trim())
     .bind(model_pair(body.model.as_deref()))
     .bind(model_pair(body.source.as_deref()))
+    .bind(&body.disabled_tools)
     .fetch_one(store.pool())
     .await
     .map_err(|e| ApiError::internal(format!("建智能体失败：{e}")))?;
@@ -175,9 +178,12 @@ pub async fn patch(
              -- 多一个布尔参数说明「这次到底提没提这个字段」
              model        = CASE WHEN $6 THEN $7 ELSE model END,
              source       = CASE WHEN $8 THEN $9 ELSE source END,
+             -- 整份替换。`coalesce` 就够：空数组与 NULL 不是一回事 ——
+             -- 「传了空数组」是「把所有工具都打开」，而不传才是「别动」
+             disabled_tools = coalesce($10, disabled_tools),
              updated_at   = clock_timestamp()
            WHERE id = $1
-       RETURNING id, name, description, instructions, icon, model, source,
+       RETURNING id, name, description, instructions, icon, model, source, disabled_tools,
                  created_at, updated_at",
     )
     .bind(&id)
@@ -194,6 +200,7 @@ pub async fn patch(
     .bind(body.model.clone().flatten())
     .bind(body.source.is_some())
     .bind(body.source.clone().flatten())
+    .bind(body.disabled_tools.as_deref())
     .fetch_optional(store.pool())
     .await
     .map_err(|e| ApiError::internal(format!("改智能体失败：{e}")))?;

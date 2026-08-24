@@ -354,12 +354,14 @@ class HttpCortexApi implements CortexApi {
     String? description,
     String? instructions,
     String? icon,
+    List<String>? disabledTools,
   }) async => Assistant.fromJson(
     await _patchJson('/assistants/${Uri.encodeComponent(id)}', {
       'name': ?name,
       'description': ?description,
       'instructions': ?instructions,
       'icon': ?icon,
+      'disabled_tools': ?disabledTools,
     }),
   );
 

@@ -100,6 +100,7 @@ class AssistantController extends Notifier<AssistantState> {
     String? description,
     String? instructions,
     String? icon,
+    List<String>? disabledTools,
   }) async {
     final updated = await ref
         .read(cortexApiProvider)
@@ -109,6 +110,7 @@ class AssistantController extends Notifier<AssistantState> {
           description: description,
           instructions: instructions,
           icon: icon,
+          disabledTools: disabledTools,
         );
     if (ref.mounted) {
       state = state.copyWith(

@@ -21,6 +21,7 @@ class Assistant {
     this.icon = '',
     this.model,
     this.source,
+    this.disabledTools = const [],
     this.createdAt,
     this.updatedAt,
   });
@@ -33,6 +34,9 @@ class Assistant {
     icon: asString(json['icon']),
     model: json['model'] as String?,
     source: json['source'] as String?,
+    disabledTools: (json['disabled_tools'] as List<dynamic>? ?? const [])
+        .map((e) => '$e')
+        .toList(growable: false),
     createdAt: asDateOrNull(json['created_at']),
     updatedAt: asDateOrNull(json['updated_at']),
   );
@@ -56,6 +60,12 @@ class Assistant {
   /// 那个模型属于哪条来源。与 [model] 成对。
   final String? source;
 
+  /// 这个智能体**关掉**的工具名。空 = 全开。
+  ///
+  /// 存禁用而不是启用：新增内置工具时，禁用清单里没提到它 → 自动可用。
+  /// 反过来要求逐个智能体去补一次，漏掉的那些静默用不上新工具。
+  final List<String> disabledTools;
+
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
@@ -74,6 +84,7 @@ class Assistant {
     String? icon,
     String? model,
     String? source,
+    List<String>? disabledTools,
   }) => Assistant(
     id: id,
     name: name ?? this.name,
@@ -82,6 +93,7 @@ class Assistant {
     icon: icon ?? this.icon,
     model: model ?? this.model,
     source: source ?? this.source,
+    disabledTools: disabledTools ?? this.disabledTools,
     createdAt: createdAt,
     updatedAt: updatedAt,
   );
@@ -93,6 +105,10 @@ class Assistant {
   Map<String, dynamic> toBrief() => {
     'name': name,
     'instructions': instructions,
+    // ⚠️ **必须随 brief 一起发。** 关掉的工具与换掉的人设来自同一个
+    // 智能体，只发人设的话服务端拿到的是「大厨的人设 + 全套工具」——
+    // 而用户明明在编辑页里关掉了执行命令
+    'disabled_tools': disabledTools,
   };
 
   @override

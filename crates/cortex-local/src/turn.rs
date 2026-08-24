@@ -235,8 +235,16 @@ impl Caps {
 ///
 /// 抽出来是因为**两条路都要用**：绑了工作区的和没绑的。曾经只有前者并了
 /// 外来工具，症状见 [`chat_turn_for`]。
-fn with_external(base: Turn, external: &[cortex_agent::ToolSpec], caps: Caps) -> Turn {
-    if external.is_empty() && !caps.any() {
+fn with_external(
+    base: Turn,
+    external: &[cortex_agent::ToolSpec],
+    caps: Caps,
+    disabled: &[String],
+) -> Turn {
+    // ⚠️ **禁用清单非空时不能提前 return。** 那条捷径原本只看
+    // 「有没有额外工具要加」，而关掉工具是**减法** —— 走了捷径的话，
+    // 一个只关了 shell 的智能体会照旧拿到完整目录，且没有任何测试红
+    if external.is_empty() && !caps.any() && disabled.is_empty() {
         return base;
     }
     let mut specs = cortex_agent::tools::builtin_specs();
@@ -261,6 +269,11 @@ fn with_external(base: Turn, external: &[cortex_agent::ToolSpec], caps: Caps) ->
         specs.extend(cortex_agent::tools::computer_specs());
     }
     specs.extend(external.iter().cloned());
+    // 智能体关掉的那些，**最后统一剔** —— 放在各处 push 之前逐个判的话，
+    // 加一个工具时漏掉那一处不会有编译错误，症状是「关了却还在」
+    if !disabled.is_empty() {
+        specs.retain(|s| !disabled.iter().any(|d| d == &s.name));
+    }
     base.with_specs(specs)
 }
 
@@ -293,8 +306,13 @@ fn can_generate_images(llm: &cortex_llm::LlmClient) -> bool {
 /// 「配了 MCP 但它不会用」。现搭的成本是每轮拼一次 `Vec<ToolSpec>`，
 /// 与「和绑了工作区那条同一个形状」比起来不值一提 —— **同形状才是这次
 /// 修得掉、下次不再漏的原因**。
-fn chat_turn_for(max_rounds: usize, external: &[cortex_agent::ToolSpec], caps: Caps) -> Turn {
-    with_external(Turn::sealed(), external, caps).with_max_rounds(max_rounds)
+fn chat_turn_for(
+    max_rounds: usize,
+    external: &[cortex_agent::ToolSpec],
+    caps: Caps,
+    disabled: &[String],
+) -> Turn {
+    with_external(Turn::sealed(), external, caps, disabled).with_max_rounds(max_rounds)
 }
 
 /// 按执行环境挑构造函数 —— **这是「agent 的沙箱长什么样」的唯一出处**。
@@ -339,10 +357,13 @@ fn workspace_turn_for(
     mode: PermissionMode,
     external: &[cortex_agent::ToolSpec],
     caps: Caps,
+    disabled: &[String],
 ) -> Result<Turn> {
-    Ok(with_external(turn_for_env(env, root)?, external, caps)
-        .with_max_rounds(max_rounds)
-        .with_policy(policy_for(mode, env)))
+    Ok(
+        with_external(turn_for_env(env, root)?, external, caps, disabled)
+            .with_max_rounds(max_rounds)
+            .with_policy(policy_for(mode, env)),
+    )
 }
 
 /// 一轮所需的全部依赖。
@@ -708,6 +729,13 @@ impl Engine {
             // 各写各的话，判错的症状是模型调一个必然失败的工具
             can_use_library: can_draw,
         };
+        // 这个智能体关掉了哪些工具。**与提示词同源**：换的人设与关掉的
+        // 工具来自同一个 brief，各取各的话会出现「人设是大厨、工具却是
+        // 上一个智能体那套」
+        let disabled: &[String] = req
+            .assistant
+            .as_ref()
+            .map_or(&[], |a| a.disabled_tools.as_slice());
         let workspace_turn = bound.as_deref().and_then(|ws| {
             // 绑定时校验过，但目录可能之后被删了/移了/换了外接盘。
             // 此时降级成纯聊天而不是让整轮失败 —— 用户只是想说句话
@@ -718,6 +746,7 @@ impl Engine {
                 req.permission_mode,
                 &external,
                 caps,
+                disabled,
             )
             .inspect_err(|e| {
                 tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
@@ -726,7 +755,7 @@ impl Engine {
         });
         // 没绑工作区那条也要现搭：外来工具是**运行时可变**的（设置页能增删），
         // 而 `Engine.chat_turn` 是启动时那一份，装不下之后加的 server
-        let chat_turn = chat_turn_for(self.max_rounds, &external, caps);
+        let chat_turn = chat_turn_for(self.max_rounds, &external, caps, disabled);
         // 这一轮模型手上到底有什么。**排查「它说它不会」时的第一现场** ——
         // 那句话有两种成因（工具真的没摆出来 / 摆了但模型没用），
         // 而没有这一行的话，两者在日志里长得一模一样
@@ -735,7 +764,7 @@ impl Engine {
             has_skills = caps.has_skills,
             computer = caps.can_use_computer,
             tools = ?workspace_turn.as_ref().unwrap_or(&chat_turn).tool_names(),
-            "本轮工具目录"
+            "本轮工具目录",
         );
         let turn = workspace_turn.as_ref().unwrap_or(&chat_turn);
         // 用 `workspace_turn` 而不是 `bound` 判断：绑过但目录已不可用时上面
@@ -1455,7 +1484,7 @@ mod tests {
         let root = dir.path().to_string_lossy().into_owned();
         let external = vec![fake_external("docs", "search")];
 
-        let unbound = chat_turn_for(8, &external, Caps::default());
+        let unbound = chat_turn_for(8, &external, Caps::default(), &[]);
         assert!(
             unbound.tool_names().contains(&"mcp__docs__search"),
             "没绑工作区不等于没有外来工具 —— 那台 server 与工作区毫无关系。\
@@ -1470,12 +1499,13 @@ mod tests {
             PermissionMode::Ask,
             &external,
             Caps::default(),
+            &[],
         )
         .expect("临时目录是合法根");
         assert!(
             bound.tool_names().contains(&"mcp__docs__search"),
             "绑了工作区那条也得有，实际目录：{:?}",
-            bound.tool_names()
+            bound.tool_names(),
         );
     }
 
@@ -1495,6 +1525,7 @@ mod tests {
                 can_draw: true,
                 ..Caps::default()
             },
+            &[],
         );
         assert!(
             with_server.tool_names().contains(&"generate_image"),
@@ -1505,11 +1536,48 @@ mod tests {
         // ⚠️ **要带一个外来工具**：`with_external` 在两者皆空时提前 return，
         // 于是「不该加却加了」那条代码根本走不到。第一版就是这么写的，
         // 故障注入之后照样绿 —— 一条没有区分度的测试
-        let direct = chat_turn_for(8, &[fake_external("docs", "search")], Caps::default());
+        let direct = chat_turn_for(8, &[fake_external("docs", "search")], Caps::default(), &[]);
         assert!(
             !direct.tool_names().contains(&"generate_image"),
             "直连模式没有可打的服务端。摆出来的话，模型会答应画图然后失败 ——              而那条失败用户什么都做不了。实际：{:?}",
             direct.tool_names()
+        );
+    }
+
+    /// **智能体关掉的工具真的不在目录里。**
+    ///
+    /// 这条盯的是 J2 的全部意义：开关存下来了、界面画出来了，而目录
+    /// 照旧给全套 —— 那是「造好了没人调用」在这个功能上的样子，
+    /// 且用户完全看不出来（模型照样会去写文件）。
+    #[test]
+    fn 智能体关掉的工具不进目录() {
+        let full = chat_turn_for(8, &[], Caps::default(), &[]);
+        assert!(full.tool_names().contains(&"shell"), "先确认不关的时候它在");
+
+        let no_shell = chat_turn_for(8, &[], Caps::default(), &["shell".to_string()]);
+        assert!(
+            !no_shell.tool_names().contains(&"shell"),
+            "关了 shell 它就不该在目录里。实际：{:?}",
+            no_shell.tool_names()
+        );
+        assert!(
+            no_shell.tool_names().contains(&"read_file"),
+            "只关一个，别的不受影响 —— 一刀切掉全部是另一个 bug"
+        );
+    }
+
+    /// ⚠️ **只关工具、没有别的额外能力时，那条提前 return 不能吃掉减法。**
+    ///
+    /// `with_external` 开头有一条「没有外来工具也没有额外能力就原样返回」
+    /// 的捷径。它只考虑了加法 —— 而关掉工具是减法，走了捷径的话
+    /// 「只关了 shell 的智能体」会拿到完整目录，且没有任何测试红。
+    #[test]
+    fn 只关工具时也不许走那条提前返回的捷径() {
+        let turn = chat_turn_for(8, &[], Caps::default(), &["shell".to_string()]);
+        assert!(
+            !turn.tool_names().contains(&"shell"),
+            "外来工具为空、能力全关、只有一个禁用项 —— 正是那条捷径的形状。实际：{:?}",
+            turn.tool_names()
         );
     }
 
@@ -1527,6 +1595,7 @@ mod tests {
                 can_use_library: true,
                 ..Caps::default()
             },
+            &[],
         );
         let names = with_server.tool_names();
         assert!(
@@ -1536,7 +1605,7 @@ mod tests {
 
         // ⚠️ 带一个外来工具，否则 `with_external` 在两者皆空时提前 return，
         // 「不该加却加了」那条代码走不到 —— 见上面生图那条的同款注释
-        let direct = chat_turn_for(8, &[fake_external("docs", "search")], Caps::default());
+        let direct = chat_turn_for(8, &[fake_external("docs", "search")], Caps::default(), &[]);
         assert!(
             !direct.tool_names().contains(&"library_search"),
             "直连模式没有可打的服务端。摆出来的话模型会去查一个查不到的库，             然后告诉用户「你没有这份材料」—— 而他明明传过。实际：{:?}",
@@ -1558,7 +1627,7 @@ mod tests {
         // 「不该加却加了」那条代码根本走不到 —— 生图那条测试踩过同一个坑
         let external = [fake_external("docs", "search")];
 
-        let none = chat_turn_for(8, &external, Caps::default());
+        let none = chat_turn_for(8, &external, Caps::default(), &[]);
         assert!(
             !none.tool_names().contains(&"load_skill"),
             "一条技能都没有时不该摆这个工具：模型会拿一个提示词里读不到的名字去调，             收到「没有这个技能」—— 一次白白浪费的往返，读起来还像出了故障。实际：{:?}",
@@ -1576,6 +1645,7 @@ mod tests {
                 has_skills: true,
                 ..Caps::default()
             },
+            &[],
         );
         assert!(
             some.tool_names().contains(&"load_skill"),
@@ -1598,7 +1668,7 @@ mod tests {
         // 「不该加却加了」那条代码根本走不到 —— 生图那条测试踩过这个坑
         let external = [fake_external("docs", "search")];
 
-        let off = chat_turn_for(8, &external, Caps::default());
+        let off = chat_turn_for(8, &external, Caps::default(), &[]);
         for t in ["screenshot", "click", "type_text", "key", "scroll"] {
             assert!(
                 !off.tool_names().contains(&t),
@@ -1614,6 +1684,7 @@ mod tests {
                 can_use_computer: true,
                 ..Caps::default()
             },
+            &[],
         );
         for t in ["screenshot", "click", "type_text", "key", "scroll"] {
             assert!(
@@ -1720,7 +1791,7 @@ mod tests {
     /// 一台 server 都没有时，目录里就只有内置的 —— 不多出空壳。
     #[test]
     fn no_mcp_server_means_the_catalog_is_exactly_the_builtin_one() {
-        let plain = chat_turn_for(8, &[], Caps::default());
+        let plain = chat_turn_for(8, &[], Caps::default(), &[]);
         let names = plain.tool_names();
         assert!(
             !names.iter().any(|n| n.starts_with("mcp__")),
@@ -1745,6 +1816,7 @@ mod tests {
             PermissionMode::Ask,
             &[],
             Caps::default(),
+            &[],
         )
         .expect("临时目录是合法根");
         let container = workspace_turn_for(
@@ -1754,6 +1826,7 @@ mod tests {
             PermissionMode::Ask,
             &[],
             Caps::default(),
+            &[],
         )
         .expect("临时目录是合法根");
 
@@ -1799,6 +1872,7 @@ mod tests {
         let chef = cortex_proto::assistants::AssistantBrief {
             name: "味蕾领航员".into(),
             instructions: "你是一位精通全球美食、拥有 20 年烹饪经验的资深大厨。".into(),
+            disabled_tools: Vec::new(),
         };
         let prompt = system_prompt_for(
             "你是 Cortex，一个通用 AI 助理。",
@@ -1838,6 +1912,7 @@ mod tests {
         let blank = cortex_proto::assistants::AssistantBrief {
             name: "还没写完的智能体".into(),
             instructions: "   ".into(),
+            disabled_tools: Vec::new(),
         };
         for agent in [None, Some(&blank)] {
             let prompt = system_prompt_for(

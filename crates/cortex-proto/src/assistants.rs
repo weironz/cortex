@@ -42,6 +42,9 @@ pub struct AssistantDto {
     /// 那个模型属于哪条来源。与 `model` 成对出现。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// 关掉的工具名。见 [`AssistantBrief::disabled_tools`]。
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -66,6 +69,9 @@ pub struct NewAssistant {
     pub model: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// 关掉哪些工具。见 [`AssistantBrief::disabled_tools`]。
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
 }
 
 /// `PATCH /assistants/{id}` —— 改。
@@ -90,6 +96,9 @@ pub struct AssistantPatch {
     pub model: Option<Option<String>>,
     #[serde(default, deserialize_with = "crate::dto::explicit_option")]
     pub source: Option<Option<String>>,
+    /// 整份替换（不是增量）。`None` = 这次不改它。
+    #[serde(default)]
+    pub disabled_tools: Option<Vec<String>>,
 }
 
 /// 这一轮用的那个智能体，**只带模型真的要看的两样**。
@@ -101,6 +110,14 @@ pub struct AssistantPatch {
 pub struct AssistantBrief {
     pub name: String,
     pub instructions: String,
+    /// 这个智能体**关掉**的工具名。空 = 全开。
+    ///
+    /// 存禁用而不是启用，理由见 `migrations/20260828000001` 的头注释：
+    /// 老客户端不发这个字段 → 空 → 全开 → 行为与从前一模一样。
+    /// 反过来（存启用清单）的话，老客户端发来的空清单会把智能体
+    /// 变成哑巴，而没有任何地方会报错。
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
 }
 
 impl AssistantBrief {
@@ -132,6 +149,7 @@ mod tests {
         let named = AssistantBrief {
             name: "大厨".into(),
             instructions: "   ".into(),
+            disabled_tools: Vec::new(),
         };
         assert!(
             !named.is_meaningful(),
@@ -141,6 +159,7 @@ mod tests {
             AssistantBrief {
                 name: "大厨".into(),
                 instructions: "你精通全球美食".into(),
+                disabled_tools: Vec::new(),
             }
             .is_meaningful()
         );

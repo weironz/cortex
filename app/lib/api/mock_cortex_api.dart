@@ -1395,6 +1395,7 @@ class MockCortexApi
     String? description,
     String? instructions,
     String? icon,
+    List<String>? disabledTools,
   }) async {
     await _latency(110);
     final i = _assistants.indexWhere((a) => a.id == id);
@@ -1406,6 +1407,7 @@ class MockCortexApi
       description: description,
       instructions: instructions,
       icon: icon,
+      disabledTools: disabledTools,
     );
     _assistants[i] = updated;
     return updated;

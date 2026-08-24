@@ -297,6 +297,9 @@ abstract interface class CortexApi {
     String? description,
     String? instructions,
     String? icon,
+
+    /// 整份替换（不是增量）。`null` = 这次不改它。
+    List<String>? disabledTools,
   });
 
   /// `DELETE /assistants/{id}`
@@ -942,6 +945,7 @@ mixin AssistantsUnsupported {
     String? description,
     String? instructions,
     String? icon,
+    List<String>? disabledTools,
   }) async => throw _absent;
 
   Future<void> deleteAssistant(String id) async => throw _absent;
