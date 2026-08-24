@@ -72,6 +72,13 @@ pub struct McpHub {
 struct Inner {
     servers: BTreeMap<String, Server>,
     failures: BTreeMap<String, String>,
+    /// 上一次 `reload` 用的那份配置 —— **按需重连要照着它重来一次**。
+    ///
+    /// 留一份副本而不是每次去读文件：读文件会把「用户此刻正在编辑
+    /// 那个 json」的半截内容读进来，而重连的本意只是「照原样再试一次」。
+    config: McpConfig,
+    /// 每台 server 重连过几次。见 [`McpHub::MAX_RECONNECTS`]。
+    reconnects: BTreeMap<String, u32>,
 }
 
 impl Inner {
@@ -142,13 +149,62 @@ impl McpHub {
     /// 反过来做的话，整个重连期间读锁全被挡住 —— 而正在跑的一轮对话
     /// 恰好要读 `specs()`。
     pub async fn reload(&self, cfg: &McpConfig) -> Vec<ServerStatus> {
-        let fresh = Inner::build(cfg).await;
+        let mut fresh = Inner::build(cfg).await;
+        fresh.config = cfg.clone();
         let old = {
             let mut guard = self.inner.write().await;
             std::mem::replace(&mut *guard, fresh)
         };
         drop(old);
         self.status().await
+    }
+
+    /// 同一台 server 最多自动重连几次。
+    ///
+    /// 用完之后要人来点一次「重新连接」—— 那时他至少知道有台 server
+    /// 一直连不上，而不是每轮对话莫名其妙多等一分钟。计数在 `reload`
+    /// 时清零：用户改过配置就是一次新的开始。
+    const MAX_RECONNECTS: u32 = 3;
+
+    /// 照上一次那份配置把某一台重连回来。**失败不吵**（调用方会报）。
+    async fn try_reconnect(&self, name: &str) {
+        let mut guard = self.inner.write().await;
+        let used = guard.reconnects.get(name).copied().unwrap_or(0);
+        if used >= Self::MAX_RECONNECTS {
+            tracing::debug!(server = name, "重连次数用完了，等人来点一次「重新连接」");
+            return;
+        }
+        let Some(sc) = guard.config.servers.get(name).cloned() else {
+            // 配置里根本没有这台 —— 多半是模型拿着一份过期的工具目录在调。
+            // 重连一个不存在的东西没有意义
+            return;
+        };
+        if sc.disabled {
+            return;
+        }
+        guard.reconnects.insert(name.to_string(), used + 1);
+        // ⚠️ **连接期间不能占着写锁。** 连一台要几秒到一分钟，占着锁
+        // 会让这段时间里所有工具调用（包括别的 server 的）一起卡住
+        drop(guard);
+
+        tracing::info!(
+            server = name,
+            attempt = used + 1,
+            "MCP server 断了，自动重连"
+        );
+        match connect_with_deadline(name, &sc).await {
+            Ok(server) => {
+                let mut guard = self.inner.write().await;
+                guard.failures.remove(name);
+                guard.servers.insert(name.to_string(), server);
+                tracing::info!(server = name, "重连成功");
+            }
+            Err(e) => {
+                let mut guard = self.inner.write().await;
+                guard.failures.insert(name.to_string(), e.clone());
+                tracing::warn!(server = name, error = %e, "重连没成");
+            }
+        }
     }
 
     /// 所有 server 提供的工具，可以直接并进 `Turn::with_specs`。
@@ -206,10 +262,23 @@ impl McpHub {
                 spec.name
             ));
         };
+        // ── 断了就照原样重连一次，**但有预算** ──
+        //
+        // 没有这一步的话，一台中途断掉的 server（子进程被杀、HTTP 服务
+        // 重启）要等用户去设置页手动点「重新连接」才回来 —— 而他根本
+        // 不知道断了，只看到模型说「那个工具用不了」。
+        //
+        // 预算是这段代码最重要的一半：本仓库记过「自愈动作必须有预算」
+        //（agent 曾被 1 秒一次杀了 730 次）。一台**永远连不上**的 server
+        // 每来一次工具调用就重连一次的话，每一轮对话都要为它多等一个
+        // 连接超时（默认 60 秒）。
+        if !self.inner.read().await.servers.contains_key(server_name) {
+            self.try_reconnect(server_name).await;
+        }
         let inner = self.inner.read().await;
         let Some(server) = inner.servers.get(server_name) else {
             return ToolResult::err(format!(
-                "MCP server {server_name} 现在没有连接。它可能在启动时就连不上，\
+                "MCP server {server_name} 现在没有连接（重连也没成）。它可能在启动时就连不上，\
                  也可能中途断了 —— 请用户检查 MCP 配置，或者换一个工具。"
             ));
         };
@@ -432,6 +501,50 @@ async fn connect_one(name: &str, sc: &ServerConfig) -> Result<Server, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **重连有预算，用完就不再试。**
+    ///
+    /// 这条盯的是本仓库记过的那个形状：没有上限的自愈不是自愈，是把
+    /// 一次故障变成永动机（agent 曾被 1 秒一次杀了 730 次）。这里的
+    /// 具体代价是：一台永远连不上的 server，每轮对话都要为它多等一个
+    /// 连接超时（默认 60 秒）。
+    #[tokio::test]
+    async fn 重连次数用完之后就不再尝试() {
+        let hub = McpHub::empty();
+        {
+            let mut guard = hub.inner.write().await;
+            // 一台配置里有、但地址指向黑洞的 server
+            guard.config.servers.insert(
+                "dead".into(),
+                ServerConfig {
+                    transport: Transport::Http {
+                        // 保留给文档用的地址段，连它不会打扰任何人
+                        url: "http://192.0.2.1:1/mcp".into(),
+                        headers: Default::default(),
+                    },
+                    disabled: false,
+                    trust: Default::default(),
+                },
+            );
+            // 预算已经用完
+            guard
+                .reconnects
+                .insert("dead".into(), McpHub::MAX_RECONNECTS);
+        }
+
+        hub.try_reconnect("dead").await;
+
+        let guard = hub.inner.read().await;
+        assert_eq!(
+            guard.reconnects.get("dead"),
+            Some(&McpHub::MAX_RECONNECTS),
+            "预算用完之后连计数都不该再涨 —— 涨了说明那次连接真的发出去了，             而每一次都要等一个完整的连接超时"
+        );
+        assert!(
+            guard.failures.is_empty(),
+            "根本没试，就不该留下一条失败记录（那会让界面显示一个刚发生的错误）"
+        );
+    }
 
     /// 从**左边**数第二个 `__` 拆，而不是从右边。
     ///

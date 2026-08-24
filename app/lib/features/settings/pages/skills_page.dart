@@ -18,9 +18,15 @@
 /// 并偶尔改一条 —— 一列带开关的行比一墙卡片快得多。
 library;
 
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/save_file.dart';
+import '../../../core/skill_md.dart';
 import '../../../core/theme.dart';
 import '../../../models/skill.dart';
 import '../../../state/skill_controller.dart';
@@ -75,11 +81,26 @@ class SkillsPage extends ConsumerWidget {
           description:
               '一份写好的做法。每一轮只有「名字 + 一句话说明」进模型的上下文，'
               '正文要等它判断用得上、自己取回来 —— 所以那句说明写得越准，它越取得对。',
-          trailing: TextButton.icon(
-            key: const ValueKey('skills:new'),
-            onPressed: () => showSkillEditor(context, ref, null),
-            icon: const Icon(Icons.add_rounded, size: 16),
-            label: const Text('新建'),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // SKILL.md 是三家（Claude Code / Codex / Grok Build）已经
+              // 收敛的那份格式 —— 兼容它的全部意义是「用户已经写好的
+              // 技能不用手抄一遍」
+              TextButton.icon(
+                key: const ValueKey('skills:import'),
+                onPressed: () => _importSkillMd(context, ref),
+                icon: const Icon(Icons.file_open_outlined, size: 16),
+                label: const Text('导入 SKILL.md'),
+              ),
+              const SizedBox(width: 4),
+              TextButton.icon(
+                key: const ValueKey('skills:new'),
+                onPressed: () => showSkillEditor(context, ref, null),
+                icon: const Icon(Icons.add_rounded, size: 16),
+                label: const Text('新建'),
+              ),
+            ],
           ),
           children: [
             if (state.skills.isEmpty)
@@ -170,6 +191,29 @@ class _SkillRow extends ConsumerWidget {
                 messenger?.showSnackBar(SnackBar(content: Text(err)));
               }
             },
+          ),
+          IconButton(
+            key: ValueKey('skill:export:${skill.id}'),
+            tooltip: '导出为 SKILL.md',
+            iconSize: 18,
+            onPressed: () async {
+              final md = toSkillMd(
+                name: skill.name,
+                description: skill.description,
+                instructions: skill.instructions,
+              );
+              // 文件名固定 SKILL.md：那是这份格式的约定，
+              // 别人拿到之后直接放进技能目录就能用
+              final at = await saveBytesAs(
+                Uint8List.fromList(utf8.encode(md)),
+                'SKILL.md',
+                mimeType: 'text/markdown',
+              );
+              if (at != null) {
+                messenger?.showSnackBar(SnackBar(content: Text('已导出到 $at')));
+              }
+            },
+            icon: const Icon(Icons.ios_share_rounded),
           ),
           IconButton(
             key: ValueKey('skill:delete:${skill.id}'),
@@ -445,3 +489,49 @@ Widget? _noCounter(
   required bool isFocused,
   int? maxLength,
 }) => null;
+
+/// 从一份 `SKILL.md` 建技能。
+///
+/// 解析失败时**说清是哪一种失败**：文件读不了、还是里面没有名字。
+/// 一句「导入失败」会让用户去查错的地方。
+Future<void> _importSkillMd(BuildContext context, WidgetRef ref) async {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final picked = await FilePicker.pickFiles(
+    dialogTitle: '选一份 SKILL.md',
+    type: FileType.custom,
+    allowedExtensions: const ['md', 'markdown', 'txt'],
+    withData: true,
+  );
+  final file = picked?.files.firstOrNull;
+  final bytes = file?.bytes;
+  if (bytes == null) return;
+
+  final text = utf8.decode(bytes, allowMalformed: true);
+  // 文件名当兜底名字：一份没有 frontmatter、也没有一级标题的做法，
+  // 用它的文件名比整个拒收强
+  final parsed = parseSkillMd(text, fallbackName: file?.name);
+  if (parsed == null) {
+    messenger?.showSnackBar(
+      const SnackBar(
+        content: Text('这份文件里找不到技能名（frontmatter 的 name、或者一个一级标题）。'),
+      ),
+    );
+    return;
+  }
+  try {
+    await ref
+        .read(skillControllerProvider.notifier)
+        .create(
+          Skill(
+            id: '',
+            name: parsed.name,
+            description: parsed.description,
+            instructions: parsed.instructions,
+          ),
+        );
+    messenger?.showSnackBar(SnackBar(content: Text('已导入技能「${parsed.name}」。')));
+  } on Object catch (e) {
+    // 服务端那句话原样显示 —— 「已经有一条同名技能」比「导入失败」有用
+    messenger?.showSnackBar(SnackBar(content: Text('$e')));
+  }
+}
