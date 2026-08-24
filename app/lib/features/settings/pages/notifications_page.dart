@@ -71,7 +71,8 @@ class NotificationsPage extends ConsumerWidget {
           ],
         ),
         SettingsSection(
-          description: '窗口最小化之后就看不到应用内的提示了。系统级通知'
+          description:
+              '窗口最小化之后就看不到应用内的提示了。系统级通知'
               '（桌面右下角那种横幅）还没有做 —— 在它落地之前，这里不'
               '声称「会通知你」，只声称「回来就看得见」。',
           children: const [],

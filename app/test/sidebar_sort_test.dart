@@ -69,11 +69,11 @@ void main() {
         finished: const {},
         running: const {},
       );
-      expect(
-        sorted.map((s) => s.id).toList(),
-        ['CCC', 'BBB', 'AAA'],
-        reason: '都在同一档时，这一档不该把时间顺序打乱 —— 那会让列表看起来是随机的',
-      );
+      expect(sorted.map((s) => s.id).toList(), [
+        'CCC',
+        'BBB',
+        'AAA',
+      ], reason: '都在同一档时，这一档不该把时间顺序打乱 —— 那会让列表看起来是随机的');
     });
 
     test('置顶排在普通会话之前，但让位于要你动手的那些', () {
@@ -98,10 +98,7 @@ void main() {
     test('按顺序表排，不在表里的排后面而不是消失', () {
       final sorted = sortSessions(
         [_s('AAA'), _s('BBB'), _s('CCC')],
-        const SidebarSortState(
-          mode: SidebarSort.manual,
-          order: ['CCC', 'AAA'],
-        ),
+        const SidebarSortState(mode: SidebarSort.manual, order: ['CCC', 'AAA']),
         awaiting: const {},
         finished: const {},
         running: const {},

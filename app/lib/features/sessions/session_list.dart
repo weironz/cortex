@@ -135,10 +135,7 @@ class SessionList extends ConsumerWidget {
       ref.watch(sidebarSortProvider),
       awaiting: ref.watch(awaitingConfirmSessionsProvider),
       finished: state.finished,
-      running: {
-        ...state.unfinished,
-        if (state.streaming?.sessionId case final id?) id,
-      },
+      running: {...state.unfinished, ?state.streaming?.sessionId},
     );
     final rows = _rows(sorted, projects, ref.watch(sidebarSectionsProvider));
 
@@ -198,42 +195,42 @@ class SessionList extends ConsumerWidget {
           id: session.id,
           visibleIds: sorted.map((x) => x.id).toList(growable: false),
           child: _SessionTile(
-          key: ValueKey(session.id),
-          session: session,
-          selected: session.id == state.activeSessionId,
-          // 「这个会话正在跑」有两个来源，**两个都要认**：
-          //
-          // 1. `state.streaming` —— 此刻这个客户端正连着的那一轮
-          // 2. `state.unfinished` —— 发出去了、还没见到收尾的（用户切走了、
-          //    甚至关掉过页面）。第 2 条正是「派出去干活」那个场景的落点，
-          //    只认第 1 条的话，人一切走徽章就没了，而活还在干
-          streaming:
-              state.streaming?.sessionId == session.id ||
-              state.unfinished.contains(session.id),
-          // 第四状态：**在等你确认**。它必然发生在「在跑」当中（一轮跑到
-          // 一半停下来问人），所以行上的优先级要压过 streaming —— 蓝点说
-          // 「不用管」，而这个状态恰恰是唯一「不管就永远卡住」的
-          awaitingConfirm: ref
-              .watch(awaitingConfirmSessionsProvider)
-              .contains(session.id),
-          // 「跑完了，你还没看」。与「在跑」互斥 —— 同一条会话不可能
-          // 既在跑又刚跑完（`_commit` 是先撤 unfinished 再加 finished）
-          justFinished: state.finished.contains(session.id),
-          canMove: projects.showGrouping,
-          onTap: () {
-            controller.selectSession(session.id);
-            ref
-                .read(projectControllerProvider.notifier)
-                .select(session.projectId);
-            onSelected?.call();
-          },
-          onRename: () => _rename(context, ref, session),
-          onTogglePin: () => _pin(context, ref, session, !session.pinned),
-          pinned: session.pinned,
-          onToggleArchive: () =>
-              _archive(context, ref, session, !session.archived),
-          onMove: () => _move(context, ref, session, projects.projects),
-          onExport: (format) => _export(context, ref, session, format),
+            key: ValueKey(session.id),
+            session: session,
+            selected: session.id == state.activeSessionId,
+            // 「这个会话正在跑」有两个来源，**两个都要认**：
+            //
+            // 1. `state.streaming` —— 此刻这个客户端正连着的那一轮
+            // 2. `state.unfinished` —— 发出去了、还没见到收尾的（用户切走了、
+            //    甚至关掉过页面）。第 2 条正是「派出去干活」那个场景的落点，
+            //    只认第 1 条的话，人一切走徽章就没了，而活还在干
+            streaming:
+                state.streaming?.sessionId == session.id ||
+                state.unfinished.contains(session.id),
+            // 第四状态：**在等你确认**。它必然发生在「在跑」当中（一轮跑到
+            // 一半停下来问人），所以行上的优先级要压过 streaming —— 蓝点说
+            // 「不用管」，而这个状态恰恰是唯一「不管就永远卡住」的
+            awaitingConfirm: ref
+                .watch(awaitingConfirmSessionsProvider)
+                .contains(session.id),
+            // 「跑完了，你还没看」。与「在跑」互斥 —— 同一条会话不可能
+            // 既在跑又刚跑完（`_commit` 是先撤 unfinished 再加 finished）
+            justFinished: state.finished.contains(session.id),
+            canMove: projects.showGrouping,
+            onTap: () {
+              controller.selectSession(session.id);
+              ref
+                  .read(projectControllerProvider.notifier)
+                  .select(session.projectId);
+              onSelected?.call();
+            },
+            onRename: () => _rename(context, ref, session),
+            onTogglePin: () => _pin(context, ref, session, !session.pinned),
+            pinned: session.pinned,
+            onToggleArchive: () =>
+                _archive(context, ref, session, !session.archived),
+            onMove: () => _move(context, ref, session, projects.projects),
+            onExport: (format) => _export(context, ref, session, format),
           ),
         ),
       },

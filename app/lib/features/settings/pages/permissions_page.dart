@@ -34,7 +34,8 @@ class PermissionsPage extends ConsumerWidget {
       children: [
         SettingsSection(
           title: '默认权限档',
-          description: '新会话从哪一档开始。对话里那颗 chip 仍然能临时改这一轮 —— '
+          description:
+              '新会话从哪一档开始。对话里那颗 chip 仍然能临时改这一轮 —— '
               '改了不影响这里，下一条新会话照旧从这一档起步。',
           children: [
             SettingsChoice<PermissionMode>(

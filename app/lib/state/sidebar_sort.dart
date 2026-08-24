@@ -45,7 +45,10 @@ enum SidebarSort {
 
 /// 排序方式 + 手动那一档的顺序表，跨重启记住。
 class SidebarSortState {
-  const SidebarSortState({this.mode = SidebarSort.recent, this.order = const []});
+  const SidebarSortState({
+    this.mode = SidebarSort.recent,
+    this.order = const [],
+  });
 
   final SidebarSort mode;
 
@@ -156,7 +159,9 @@ List<ChatSession> sortSessions(
         return ra != rb ? ra.compareTo(rb) : b.id.compareTo(a.id);
       });
     case SidebarSort.manual:
-      final rank = {for (var i = 0; i < sort.order.length; i++) sort.order[i]: i};
+      final rank = {
+        for (var i = 0; i < sort.order.length; i++) sort.order[i]: i,
+      };
       out.sort((a, b) {
         // 没在顺序表里的排后面（新建的会话就是这种），彼此之间仍按时序
         final ra = rank[a.id] ?? 1 << 30;
