@@ -354,6 +354,28 @@ async fn main() -> anyhow::Result<()> {
     tracing::debug!(path = %mcp_path.display(), "MCP 配置");
     let mcp = cortex_mcp::McpConfig::load(&mcp_path)?;
     let mcp = Arc::new(cortex_mcp::McpHub::connect(&mcp).await);
+
+    // hooks：**只读用户目录**，不读工作区。
+    //
+    // 与 `.mcp.json` 那条边界同一个理由，而且更硬 —— hook 是一条不过
+    // 权限闸门的 shell 命令：clone 一个陌生仓库、绑上工作区，它自带的
+    // hooks 会在第一次写文件时就跑起来，没人点过同意。
+    let hooks_path = user_dir.join("hooks.json");
+    let hooks = match std::fs::read_to_string(&hooks_path) {
+        Ok(raw) => match serde_json::from_str::<Vec<cortex_agent::hooks::Hook>>(&raw) {
+            Ok(h) => {
+                tracing::info!(count = h.len(), path = %hooks_path.display(), "读到 hooks");
+                h
+            }
+            // 解析失败**说出来**：一份写坏的 hooks.json 静默变成「没有
+            // hooks」的话，用户以为规矩生效了，而它一条都没跑
+            Err(e) => {
+                tracing::warn!(path = %hooks_path.display(), error = %e, "hooks.json 解析失败，本次按没有 hooks 处理");
+                Vec::new()
+            }
+        },
+        Err(_) => Vec::new(),
+    };
     for st in mcp.status().await {
         if st.connected {
             tracing::info!(server = %st.name, tools = st.tools.len(), "MCP 已接入");
@@ -376,6 +398,7 @@ async fn main() -> anyhow::Result<()> {
         todos: turn::Todos::default(),
         background: turn::BackgroundBooks::default(),
         recaps: recap::Recaps::default(),
+        hooks: Arc::from(hooks.into_boxed_slice()),
         context_window,
         persona: PERSONA,
         capabilities: CAPABILITIES,

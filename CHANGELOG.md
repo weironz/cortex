@@ -12,6 +12,27 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ## [未发布]
 
+### hooks：在工具调用前后跑你自己的命令
+
+`~/.cortex/hooks.json` 里配一条，比如「每次写完 dart 文件跑一遍
+dart format」：
+
+```json
+[{ "event": "postToolUse", "tools": ["write_file", "edit_file"],
+   "command": "dart format $CORTEX_TOOL_PATH" }]
+```
+
+提示词是「请你记得」，hook 是「由不得你」—— 写进人设的规矩模型十次做对
+八次，挂成 hook 就是十次十次。
+
+`preToolUse` 的 hook **非零退出会拦下这次调用**（用来挡「不许碰
+migrations/」这类）；hook 自己跑不起来时也拦 —— 一条本该挡住的调用被
+静默放过去没人会发现，而一个突然开始拒绝的 agent 你三秒内就去查配置了。
+
+⚠️ hook 是一条**不过权限确认**的 shell 命令（那正是它的价值），所以它
+**只从你的用户目录读，不读工作区** —— 否则 clone 一个陌生仓库就等于
+执行它自带的脚本。
+
 ### 长对话不再「忘掉开头」
 
 一段聊久了的对话，最早那些轮次会因为上下文预算不够被丢掉 —— 从前它们是

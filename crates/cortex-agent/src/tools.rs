@@ -1521,7 +1521,7 @@ fn mib(bytes: u64) -> String {
 ///
 /// 不写死 `bash`：精简容器镜像里常常只有 `sh`。也不查 PATH ——
 /// PATH 是被沙箱防着的那一侧能影响的东西。
-fn shell_argv(command: &str) -> std::result::Result<Vec<String>, String> {
+pub(crate) fn shell_argv(command: &str) -> std::result::Result<Vec<String>, String> {
     #[cfg(unix)]
     {
         for sh in ["/bin/bash", "/bin/sh"] {

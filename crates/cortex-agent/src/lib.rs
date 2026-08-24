@@ -18,6 +18,7 @@ pub mod background;
 pub mod diff;
 pub mod edit;
 pub mod egress;
+pub mod hooks;
 pub mod prompt;
 pub mod sandbox;
 pub mod tools;

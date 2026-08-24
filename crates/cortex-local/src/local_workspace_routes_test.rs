@@ -50,6 +50,7 @@ fn state(dir: &Path) -> LocalState {
         todos: crate::turn::Todos::default(),
         background: crate::turn::BackgroundBooks::default(),
         recaps: crate::recap::Recaps::default(),
+        hooks: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         context_window: 8192,
         persona: "",
         capabilities: "",

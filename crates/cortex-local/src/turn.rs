@@ -421,6 +421,8 @@ pub struct Engine {
     /// 而 `Engine` 正是「跑一轮所需的全部依赖」。
     pub runs: crate::runs::Runs,
     pub max_rounds: usize,
+    /// 用户配的 hooks（`~/.cortex/hooks.json`）。启动时读一次。
+    pub hooks: Arc<[cortex_agent::hooks::Hook]>,
     /// 各会话「掉出上下文的早期对话」的摘要。见 [`crate::recap`]。
     pub recaps: crate::recap::Recaps,
     /// 各会话的后台命令簿。**内存态** —— 进程重启时那些子进程也
@@ -909,6 +911,7 @@ impl Engine {
             drawn: std::sync::Mutex::new(Vec::new()),
             todos: self.todos.clone(),
             background: self.background.for_session(&req.session_id),
+            hooks: Arc::clone(&self.hooks),
         };
         // 这一轮用哪个模型。逐轮的选择是**那一轮的属性**，而 `self.llm`
         // 是进程级的 —— 所以造一份带这一轮模型的副本（供应商是 Arc，
@@ -1274,6 +1277,8 @@ struct LocalHost {
     todos: Todos,
     /// 这条会话的后台命令簿。
     background: cortex_agent::background::Tasks,
+    /// 用户配的 hooks —— 与 `Engine` 里那份是同一个。
+    hooks: Arc<[cortex_agent::hooks::Hook]>,
 
     /// 这一轮生成的图。
     ///
@@ -1354,6 +1359,10 @@ impl ToolHost for LocalHost {
                 "已记下（{n} 字符）。清单每轮都会出现在你的上下文里，完成一步就更新它"
             )),
         }
+    }
+
+    fn hooks(&self) -> Vec<cortex_agent::hooks::Hook> {
+        self.hooks.to_vec()
     }
 
     fn background_tasks(&self) -> Option<cortex_agent::background::Tasks> {

@@ -376,6 +376,14 @@ pub trait ToolHost: Send + Sync {
         ToolResult::err("这个宿主不保存任务清单。把你的计划直接写在回答里，别再调这个工具。")
     }
 
+    /// 用户配的 hooks。空 = 没配（也是绝大多数会话的形态）。
+    ///
+    /// **由宿主给**：那份配置在用户目录里，而读文件是宿主的事
+    /// （与 MCP 配置同一条边界 —— 且**不读工作区**，见 `hooks` 模块头）。
+    fn hooks(&self) -> Vec<crate::hooks::Hook> {
+        Vec::new()
+    }
+
     /// 这个会话的后台任务簿。`None` = 这个宿主不支持后台命令。
     ///
     /// # 为什么是宿主给簿子，而不是宿主执行整件事
@@ -1157,6 +1165,23 @@ impl Turn {
         // `mcp__` 前缀让碰撞在**注册时**就不可能发生（`ToolSpec::external`），
         // 这里的类型分支是第二道 —— 两道都在，是因为前缀那道靠的是
         // 「所有人都走那个构造函数」，而这道靠编译器。
+        // ── hooks：用户自己配的规矩，在闸门**之后**、执行**之前** ──
+        //
+        // 顺序是有讲究的：放在闸门之前的话，一次会被用户拒掉的调用
+        // 也要先跑一遍 hook —— 而 hook 可能有副作用（写日志、改文件）。
+        let hooks = host.hooks();
+        if !hooks.is_empty() {
+            let cwd = self.sandbox.root().map_or_else(
+                || std::path::PathBuf::from("."),
+                std::path::Path::to_path_buf,
+            );
+            if let crate::hooks::PreOutcome::Deny(why) =
+                crate::hooks::run_pre(&hooks, &spec.name, outside.as_deref(), &cwd).await
+            {
+                return ToolResult::err(why);
+            }
+        }
+
         let result = if matches!(spec.source, tools::ToolSource::External { .. }) {
             host.call_external(spec, &call.arguments).await
         } else if spec.name == "generate_image" {
@@ -1204,6 +1229,16 @@ impl Turn {
             )
             .await
         };
+
+        // PostToolUse。**不看结果、不改结果** —— 那一步已经发生了，
+        // 而一条 hook 没跑成不该把一次成功的写入说成失败
+        if !hooks.is_empty() {
+            let cwd = self.sandbox.root().map_or_else(
+                || std::path::PathBuf::from("."),
+                std::path::Path::to_path_buf,
+            );
+            crate::hooks::run_post(&hooks, &spec.name, outside.as_deref(), &cwd).await;
+        }
 
         // 预览挂在**成功**的结果上：写失败了还画一份「改了什么」，
         // 说的是一件没有发生的事。失败原因在 content 里，那才是要看的

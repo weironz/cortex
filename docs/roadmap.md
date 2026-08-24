@@ -604,7 +604,7 @@ v1.45.0，Apache-2.0，能搬就不写）：
 | I5 | **搜索/结构工具** | 无 glob/grep/tree —— 模型只能 `list_dir` 逐层摸或拼 shell | goose 只有 `tree`（299 行，`ignore` crate）可搬；glob/grep goose 也没有（靠提示词教 rg），自己写或同样走提示词 | 小-中 |
 | I6 ✅ | **后台/长时命令** | shell 同步单发（默认 120s、封顶 600s，`tools.rs:885-887`），无 run_in_background —— 起个 dev server 就把一轮挂死 | goose `summon` 的后台任务簿记（~500 行：JoinHandle+cancel+load/peek） | 中 |
 | I7 | **子 agent 并行** | 无。三家三种原语：CC subagent 树、Codex 云容器 best-of-n、Grok 8-worktree —— cortex 的对应物该绑自己的 `Turn::run` 与会话，goose 的执行层**不可搬**（绑死它的 Agent） | 思路借 goose `summon`，实现自研 | 大 |
-| I8 | **hooks** | 无（CC/Grok 都有生命周期钩子跑确定性脚本） | — | 中，后置 |
+| I8 ✅ | **hooks** | 无（CC/Grok 都有生命周期钩子跑确定性脚本） | — | 中，后置 |
 | I9 ✅ | **SKILL.md 开放标准兼容** | 已有技能系统（`skills_note` + `load_skill`），但格式是自己的 —— SKILL.md 已事实上跨厂商通用（同一份 skill 三家都能装） | 对齐格式即可 | 小 |
 | I10 ✅ | **MCP 客户端补洞** | 已有 stdio+HTTP，但 HTTP 自定义头没接上（带鉴权的 server 会 401，`hub.rs:381-388` 只 WARN 后裸连）、断线不自动重连、resources/prompts 不支持 | — | 小-中 |
 
