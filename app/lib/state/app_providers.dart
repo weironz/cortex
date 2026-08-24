@@ -428,7 +428,8 @@ enum MainView {
   chat,
   images,
   projects,
-  assistants;
+  assistants,
+  library;
 
   static MainView fromWire(String? s) =>
       MainView.values.where((v) => v.name == s).firstOrNull ?? MainView.chat;
@@ -534,9 +535,10 @@ class MainViewNotifier extends Notifier<MainView> {
           // 而不是把用户扔进一个空白页
           ref.read(chatControllerProvider.notifier).selectSession(back);
         }
-      // 项目页与智能体页**都不碰活动会话**：它们是卡片墙，点某张卡才会
-      // 去某条会话。顺手切一条的话，从这两页返回聊天会发现对话被换掉了
-      case MainView.projects || MainView.assistants:
+      // 项目页、智能体页、资料库**都不碰活动会话**：它们是卡片墙，
+      // 点某张卡才会去某条会话。顺手切一条的话，从这几页返回聊天会
+      // 发现对话被换掉了
+      case MainView.projects || MainView.assistants || MainView.library:
         break;
     }
     state = view;

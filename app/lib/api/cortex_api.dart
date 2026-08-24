@@ -5,6 +5,7 @@ import 'api_exception.dart';
 import '../import/import_source.dart';
 import '../models/account.dart';
 import '../models/auth_tokens.dart';
+import '../models/library_item.dart';
 import '../models/model_source.dart';
 import '../models/model_role.dart';
 import '../models/mcp.dart';
@@ -695,6 +696,41 @@ abstract interface class CortexApi {
   /// `GET /folders` —— 文件夹清单（图片与资料**共用**，带项数与封面）。
   Future<Folders> folders();
 
+  /// `GET /library` —— 资料库的一页。
+  ///
+  /// [folder] 只看某个文件夹（`"none"` = 只看未归档的）；
+  /// [tab] 是 `all` / `images` / `files`。
+  Future<LibraryPage> library({
+    int limit,
+    String? before,
+    String? folder,
+    String? tab,
+  });
+
+  /// `POST /library` —— 把一份**已登记的 blob** 收进资料库。
+  ///
+  /// 字节要先走 `/blobs`（与附件同一条路）。同一份内容重复收会回原来
+  /// 那条而不是报错 —— 拖两次同一个文件不是错误。
+  Future<LibraryItem> addToLibrary({
+    required String blobHash,
+    required String name,
+    String? origin,
+    String? folderId,
+  });
+
+  /// `PATCH /library/{id}` —— 改名 / 移动到文件夹。
+  ///
+  /// [folderId] 显式传 `null` 且 [moveFolder] 为真 = 移出文件夹。
+  Future<LibraryItem> updateLibraryItem(
+    String id, {
+    String? name,
+    String? folderId,
+    bool moveFolder = false,
+  });
+
+  /// `DELETE /library/{id}` —— 从资料库移除。**blob 不动。**
+  Future<void> removeFromLibrary(String id);
+
   /// `POST /folders` —— 新建。回**整份列表**，客户端不必自己拼。
   Future<Folders> createFolder(String name);
 
@@ -936,6 +972,29 @@ mixin ImagesUnsupported {
   }) async => const Gallery();
 
   Future<Folders> folders() async => const Folders();
+
+  Future<LibraryPage> library({
+    int limit = 60,
+    String? before,
+    String? folder,
+    String? tab,
+  }) async => const LibraryPage();
+
+  Future<LibraryItem> addToLibrary({
+    required String blobHash,
+    required String name,
+    String? origin,
+    String? folderId,
+  }) async => throw _absent;
+
+  Future<LibraryItem> updateLibraryItem(
+    String id, {
+    String? name,
+    String? folderId,
+    bool moveFolder = false,
+  }) async => throw _absent;
+
+  Future<void> removeFromLibrary(String id) async => throw _absent;
 
   // 下面这些都是**动作**，不是查询 —— 回一个「成功了」等于骗调用方。
   // 空列表与「没画过图」讲得通，「分享成功但没有链接」讲不通

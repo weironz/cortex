@@ -80,6 +80,17 @@ class NavBlock extends ConsumerWidget {
           ),
           const SizedBox(height: 2),
           _NavItem(
+            key: const ValueKey('nav:library'),
+            icon: Icons.library_books_outlined,
+            label: '资料库',
+            selected: view == MainView.library,
+            onTap: () {
+              ref.read(mainViewProvider.notifier).go(MainView.library);
+              onNavigated?.call();
+            },
+          ),
+          const SizedBox(height: 2),
+          _NavItem(
             key: const ValueKey('nav:images'),
             icon: Icons.image_outlined,
             label: '图片',

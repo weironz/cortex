@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 import '../models/account.dart';
 import '../models/auth_tokens.dart';
+import '../models/library_item.dart';
 import '../models/model_source.dart';
 import 'package:cortex_app/models/import_plan.dart';
 import 'package:cortex_app/import/import_source.dart';
@@ -1445,6 +1446,104 @@ class MockCortexApi
     _gallery.removeWhere((i) => i.id == id);
     _shared.remove(id);
     _imageFolder.remove(id);
+  }
+
+  /// 资料库。mock 里也**真的存着**（而不是恒空）—— 恒空的话
+  /// 「传一份文件进去」这条路在 mock 上永远看不出效果，
+  /// 而界面正是照 mock 调出来的
+  final List<LibraryItem> _library = [];
+
+  @override
+  Future<LibraryPage> library({
+    int limit = 60,
+    String? before,
+    String? folder,
+    String? tab,
+  }) async {
+    await _latency(70);
+    var items = switch (folder) {
+      null => _library,
+      'none' => _library.where((i) => i.folderId == null).toList(),
+      final f => _library.where((i) => i.folderId == f).toList(),
+    };
+    items = switch (tab) {
+      'images' => items.where((i) => i.isImage).toList(),
+      'files' => items.where((i) => !i.isImage).toList(),
+      _ => items,
+    };
+    return LibraryPage(
+      items: items.take(limit).toList(growable: false),
+      folders: [
+        for (final f in _folders)
+          {
+            'id': f.id,
+            'name': f.name,
+            'count': _library.where((i) => i.folderId == f.id).length,
+          },
+      ],
+      hasMore: items.length > limit,
+    );
+  }
+
+  @override
+  Future<LibraryItem> addToLibrary({
+    required String blobHash,
+    required String name,
+    String? origin,
+    String? folderId,
+  }) async {
+    await _latency(70);
+    // 同一份内容只有一条 —— 与服务端的 UNIQUE(blob_hash) 同一个语义。
+    // mock 不照做的话，「拖两次同一个文件」在两个数据源上答得不一样
+    final existing = _library.where((i) => i.blobHash == blobHash).firstOrNull;
+    if (existing != null) return existing;
+    final item = LibraryItem(
+      id: 'MOCKLIB${_library.length}',
+      blobHash: blobHash,
+      name: name,
+      mime: name.endsWith('.png') ? 'image/png' : 'text/markdown',
+      sizeBytes: 4096,
+      origin: origin ?? 'uploaded',
+      folderId: folderId,
+      chunkState: name.endsWith('.png')
+          ? ChunkState.unsupported
+          : ChunkState.ready,
+      chunkCount: name.endsWith('.png') ? 0 : 3,
+    );
+    _library.insert(0, item);
+    return item;
+  }
+
+  @override
+  Future<LibraryItem> updateLibraryItem(
+    String id, {
+    String? name,
+    String? folderId,
+    bool moveFolder = false,
+  }) async {
+    await _latency(60);
+    final at = _library.indexWhere((i) => i.id == id);
+    if (at < 0) throw const CortexApiException('没有这个条目', statusCode: 404);
+    final old = _library[at];
+    final next = LibraryItem(
+      id: old.id,
+      blobHash: old.blobHash,
+      name: name ?? old.name,
+      mime: old.mime,
+      sizeBytes: old.sizeBytes,
+      origin: old.origin,
+      folderId: moveFolder ? folderId : old.folderId,
+      chunkState: old.chunkState,
+      chunkCount: old.chunkCount,
+    );
+    _library[at] = next;
+    return next;
+  }
+
+  @override
+  Future<void> removeFromLibrary(String id) async {
+    await _latency(60);
+    _library.removeWhere((i) => i.id == id);
   }
 
   @override

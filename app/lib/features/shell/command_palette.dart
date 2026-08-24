@@ -170,6 +170,12 @@ class _PaletteState extends ConsumerState<_Palette> {
           ref.read(mainViewProvider.notifier).go(MainView.images),
     ),
     _Entry(
+      icon: Icons.library_books_outlined,
+      title: '打开资料库',
+      run: (context, ref) =>
+          ref.read(mainViewProvider.notifier).go(MainView.library),
+    ),
+    _Entry(
       icon: Icons.settings_outlined,
       title: '打开设置',
       run: (context, ref) => showSettingsSheet(context),
