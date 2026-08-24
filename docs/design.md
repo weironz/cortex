@@ -32,19 +32,27 @@
 
 ## 一、中性优先，色彩只表达动作或含义
 
-界面的「外壳」——背景、卡片、边框、绝大多数文字——**一律无彩**。
+界面的「外壳」——背景、卡片、边框、绝大多数文字——**一律中性**。
 彩色留给：主要动作、当前选中、以及状态反馈（成功 / 警告 / 信息 / 错误）。
 
-### 灰是纯中性的（色度为 0）
+### 灰是统一的冷调（2026-08-24 起，此前是「色度为 0」）
 
-改这一版之前，`theme.dart` 里写的是「slightly cool greys」。去掉了：
-偏冷的灰与真正的彩色并排时会被读成**一个没调准的颜色**，而不是「无色」。
-现在的数值对齐 Cherry 的 provider，也就是 Tailwind 的 neutral 阶
-（`oklch(0.556 0 0)` = `#737373`）。
+这一条**反转过两次**，两次的理由都要留着，下一个想改的人才知道自己在
+改什么：
+
+* 第一版是「slightly cool greys」——各处随手偏，没有体系。
+* 第二版改成色度为 0 的纯灰，理由是「偏色的灰与真正的彩色并排时会被
+  读成一个没调准的颜色」。
+* 现在这版（照设计稿 `docs/design/cortex-ui-design.html`）回到冷调，但
+  **整套灰往品牌靛蓝的方向统一偏**（fg `#17171A`、sb `#EFEEF3`）——
+  第二版那句话对的是「各偏各的」，偏得成体系就不是没调准，而且与
+  macOS 的 sidebar/content 分层观感一致。`theme_tokens_test` 钉的就是
+  这两条：幅度有上限（chroma ≤ 12）、方向统一（蓝 ≥ 红）。
 
 ### 边框用透明度，不用实色
 
-`outline` = 20% 黑（深色下 20% 白），`outlineVariant` = 8%。
+`outlineVariant`（常规分隔）= 7% 黑（深色 9% 白），`outline`（功能区
+之间的强分隔）= 11%（深色 15%）。
 
 实色边框只在它被调出来的**那一个**表面上好看；同一个值放到卡片、弹层、
 侧栏上就会偏亮或偏暗，于是有人会为每个表面各调一个 —— 那正是这份规范
@@ -58,10 +66,11 @@
 
 | 表面 | 用在哪 | 浅色 | 深色 |
 |---|---|---|---|
-| ground（`surface`） | 应用底板、内容区 | `#FFFFFF` | `#0F0F0F` |
-| card（`surfaceContainer`） | 成组的内容 | `#F5F5F5` | `#171717` |
-| popover（`surfaceContainerHighest`） | 菜单、气泡、临时浮层 | `#E9E9E9` | `#262626` |
-| **sidebar**（`CortexTokens.sidebar`） | 导航区 | `#F4F4F4` | `#171717` |
+| ground（`surface`） | 应用底板、内容区 | `#FFFFFF` | `#1B1B1F` |
+| card（`surfaceContainer`） | 成组的内容 | `#F6F6F9` | `#26262C` |
+| fill（`surfaceContainerHigh`） | 输入框、chip 底 | `#F4F4F7` | `#2C2C33` |
+| popover（`surfaceContainerHighest`） | 菜单、气泡、临时浮层 | `#EDEDF1` | `#33333B` |
+| **sidebar**（`CortexTokens.sidebar`） | 导航区 | `#EFEEF3` | `#232328` |
 
 **深色下层越高越亮。** 弹层坐在卡片之上，就该比卡片更亮 —— 反过来做会让
 浮起来的东西看着陷进去，那是把浅色模式的直觉原样搬过来的结果。
@@ -79,9 +88,9 @@ Cherry 在它的 provider 里专门为这一条写了注释。
 
 | 角色 | 用在哪 | 浅色 | 深色 |
 |---|---|---|---|
-| `onSurface` | 正文、标题 | `#1C1C1C` | `#EDEDED` |
-| `onSurfaceVariant` | 次要信息、图标 | `#737373` | `#A1A1A1` |
-| `CortexTokens.foregroundTertiary` | 说明、时间戳、禁用 | `#909090` | `#737373` |
+| `onSurface` | 正文、标题 | `#17171A` | `#F2F2F5` |
+| `onSurfaceVariant` | 次要信息、图标 | `#5E5E68` | `#B4B4BE` |
+| `CortexTokens.foregroundTertiary` | 说明、时间戳、禁用 | `#63636C` | `#9A9AA5` |
 
 **第三级必须是实色，不能用 `onSurfaceVariant.withValues(alpha: .6)` 造。**
 半透明造出来的层级在不同表面上深浅不一，而且会与「这个控件被禁用了」的
@@ -94,15 +103,19 @@ Cherry 在它的 provider 里专门为这一条写了注释。
 
 ## 四、圆角
 
-`CortexTokens` 上的静态常量，换算自 Cherry 的 `radius.css`：
+`CortexTokens` 上的静态常量。2026-08-24 起对齐设计稿的五档体系
+（窗口 14 / 卡片 13 / 输入框 18 / 行 9 / 胶囊 999），旧阶名保留、
+**值重定** —— 40+ 调用点一次到位：
 
 | 阶 | 值 | 用在哪 |
 |---|---|---|
-| `radiusSm` | 6 | 徽标、小按钮 |
-| `radiusMd` | 8 | 输入框、菜单项 |
-| `radiusLg` | 10 | 主按钮、消息气泡 |
-| `radiusXl` | 14 | 卡片、面板 |
-| `radius2xl` | 18 | 对话框 |
+| `radiusSm` | 7 | 徽标、小按钮（辅助档） |
+| `radiusMd` / `radiusRow` | 9 | 行、菜单项 |
+| `radiusLg` | 11 | 气泡、主按钮（辅助档） |
+| `radiusXl` / `radiusCard` | 13 | 卡片、面板 |
+| `radius2xl` / `radiusWindow` | 14 | 对话框 = 浮起的窗口 |
+| `radiusInput` | 18 | **只给聊天输入框** —— 比对话框还圆，胶囊感 |
+| `radiusPill` | 999 | 胶囊（顶栏 pill、chip） |
 
 **按密度取，不要每处现编一个数。** 光写这一句是不够的 —— 2026-08-21 清点
 时有 **42 处现编的数字、14 个互不相同的值**（1.5 / 2 / 4 / 5 / 6 / 7 / 8 /
