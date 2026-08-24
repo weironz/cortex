@@ -33,9 +33,12 @@ pub struct GalleryQuery {
     /// 从这个 id **之前**接着往回翻（不含它）。
     #[serde(default)]
     pub before: Option<String>,
-    /// 只看这个相册里的。不传 = 全部。
+    /// 只看这个文件夹里的。不传 = 全部；`"none"` = 只看未归档的。
+    ///
+    /// 「未归档」必须与「全部」分得开：合成一个的话，未归档那一段
+    /// 永远显示全部内容（与 `library::list` 同一条判据）
     #[serde(default)]
-    pub album: Option<String>,
+    pub folder: Option<String>,
     /// 只看这个 blob 哈希对应的那一行。
     ///
     /// # 为什么需要它
@@ -78,6 +81,10 @@ pub async fn gallery(
 
     let base = public_base(&headers);
     let limit = q.limit.unwrap_or(30).clamp(1, GALLERY_PAGE_MAX);
+    let (folder_filter, want_unfiled) = match q.folder.as_deref() {
+        Some("none") => (None, true),
+        other => (other, false),
+    };
     // 多取一条来回答「还有没有」。靠「取回来的条数 == limit」去猜的话，
     // 恰好整除时会多翻一页空的 —— 界面上是「加载中…」闪一下。
     //
@@ -94,17 +101,17 @@ pub async fn gallery(
            LEFT JOIN cortex_auth.image_shares s
              ON s.image_id = g.id AND s.schema_name = current_schema()
           WHERE ($2::TEXT IS NULL OR g.id < $2)
-            AND ($3::TEXT IS NULL OR EXISTS (
-                    SELECT 1 FROM image_album_items i
-                     WHERE i.image_id = g.id AND i.album_id = $3))
+            AND ($3::TEXT IS NULL OR g.folder_id = $3)
+            AND (NOT $6::BOOLEAN OR g.folder_id IS NULL)
             AND ($4::TEXT IS NULL OR g.blob_hash = $4)
           ORDER BY g.id DESC
           LIMIT $1",
     )
     .bind(limit + 1)
     .bind(q.before.as_deref())
-    .bind(q.album.as_deref())
+    .bind(folder_filter)
     .bind(q.hash.as_deref())
+    .bind(want_unfiled)
     .fetch_all(store.pool())
     .await
     .map_err(|e| ApiError::internal(format!("读画廊失败：{e}")))?;
@@ -446,212 +453,50 @@ pub async fn remove(
 }
 
 // ══════════════════════════════════════════════════════════
-//  相册
+//  归档 —— 文件夹在 [`crate::library`]，这里只管「这张图放哪」
+//
+//  相册（多对多）2026-08-27 整个废掉了，理由见那次迁移的头注释：
+//  收藏与归档是两件事，而这个产品要的是后者 —— 一份东西只在一个
+//  文件夹里，才答得了「它放哪了」。
 // ══════════════════════════════════════════════════════════
 
 #[derive(Deserialize)]
-pub struct AlbumBody {
-    pub name: String,
+pub struct MoveBody {
+    /// 移到哪个文件夹。`null` = 移出来，回到未归档。
+    #[serde(default)]
+    pub folder_id: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct AlbumItems {
-    /// 要加进 / 移出这个相册的图 id。
-    pub images: Vec<String>,
-}
-
-#[derive(sqlx::FromRow)]
-struct AlbumRow {
-    id: String,
-    name: String,
-    count: i64,
-    cover_hash: Option<String>,
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// `GET /albums` —— 相册列表，带张数与封面。
+/// `PATCH /images/{id}` —— 把一张图移进 / 移出文件夹。
+///
+/// # 为什么是 PATCH 图片，而不是 POST 文件夹的成员
+///
+/// 排他之后「加进这个文件夹」与「从那个文件夹拿出来」是**同一个动作**：
+/// 改这张图的归属。做成 `POST /folders/{id}/items` 的话，移动要客户端
+/// 自己拆成「先从旧的移出、再加进新的」两次请求 —— 中间断网就是一张
+/// 谁也不属于的图，而用户以为自己只是拖了一下。
 ///
 /// # Errors
-/// 没有数据库（501）。
-pub async fn albums(
-    State(st): State<AgentState>,
-    headers: HeaderMap,
-) -> Result<Json<cortex_proto::llm::Albums>, ApiError> {
-    let tenant = st.tenant(&headers).await?;
-    let store = tenant
-        .store()
-        .map_err(|e| ApiError::unsupported(format!("这个部署没有相册：{e}")))?;
-
-    // 封面：显式设过就用它，否则取相册里**最新**那张。不做单独上传的封面
-    // —— 一张要维护的封面图会立刻带出「封面那张被删了怎么办」，
-    // 而这个 COALESCE 自己就答了
-    let rows: Vec<AlbumRow> = sqlx::query_as(
-        "SELECT a.id, a.name, a.created_at,
-                (SELECT count(*) FROM image_album_items i WHERE i.album_id = a.id) AS count,
-                COALESCE(
-                    (SELECT g.blob_hash FROM generated_images g WHERE g.id = a.cover_image_id),
-                    (SELECT g.blob_hash
-                       FROM image_album_items i JOIN generated_images g ON g.id = i.image_id
-                      WHERE i.album_id = a.id
-                      ORDER BY g.id DESC LIMIT 1)
-                ) AS cover_hash
-           FROM image_albums a
-          ORDER BY a.id DESC",
-    )
-    .fetch_all(store.pool())
-    .await
-    .map_err(|e| ApiError::internal(format!("读相册失败：{e}")))?;
-
-    Ok(Json(cortex_proto::llm::Albums {
-        albums: rows
-            .into_iter()
-            .map(|r| cortex_proto::llm::Album {
-                id: r.id,
-                name: r.name,
-                count: r.count,
-                cover_hash: r.cover_hash,
-                created_at: r.created_at.to_rfc3339(),
-            })
-            .collect(),
-    }))
-}
-
-/// `POST /albums` —— 新建一个。
-///
-/// # Errors
-/// 名字空的或太长（400）、没有数据库（501）。
-pub async fn create_album(
-    State(st): State<AgentState>,
-    headers: HeaderMap,
-    Json(body): Json<AlbumBody>,
-) -> Result<Json<cortex_proto::llm::Albums>, ApiError> {
-    let name = body.name.trim();
-    if name.is_empty() {
-        return Err(ApiError::bad_request("相册要有个名字"));
-    }
-    if name.chars().count() > 64 {
-        return Err(ApiError::bad_request("相册名最多 64 个字"));
-    }
-    let tenant = st.tenant(&headers).await?;
-    let store = tenant
-        .store()
-        .map_err(|e| ApiError::unsupported(format!("这个部署没有相册：{e}")))?;
-    sqlx::query("INSERT INTO image_albums (id, name) VALUES ($1, $2)")
-        .bind(cortex_core::Id::new().to_string())
-        .bind(name)
-        .execute(store.pool())
-        .await
-        .map_err(|e| ApiError::internal(format!("建不了相册：{e}")))?;
-    // 回整份列表而不是刚建的那一个：客户端本来就要刷新，回一个它还得自己
-    // 拼进去 —— 而拼错的表现是新相册的张数永远是 0
-    albums(State(st), headers).await
-}
-
-/// `PATCH /albums/{id}` —— 改名。
-///
-/// # Errors
-/// 名字空的（400）、没有数据库（501）。
-pub async fn rename_album(
+/// 没有数据库（501）、图不存在（404）。
+pub async fn move_image(
     State(st): State<AgentState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(body): Json<AlbumBody>,
-) -> Result<Json<cortex_proto::llm::Albums>, ApiError> {
-    let name = body.name.trim();
-    if name.is_empty() {
-        return Err(ApiError::bad_request("相册要有个名字"));
-    }
-    if name.chars().count() > 64 {
-        return Err(ApiError::bad_request("相册名最多 64 个字"));
-    }
-    let tenant = st.tenant(&headers).await?;
-    let store = tenant
-        .store()
-        .map_err(|e| ApiError::unsupported(format!("这个部署没有相册：{e}")))?;
-    sqlx::query("UPDATE image_albums SET name = $1 WHERE id = $2")
-        .bind(name)
-        .bind(&id)
-        .execute(store.pool())
-        .await
-        .map_err(|e| ApiError::internal(format!("改不了名：{e}")))?;
-    albums(State(st), headers).await
-}
-
-/// `DELETE /albums/{id}` —— 删相册。
-///
-/// ⚠️ **里面的图一张都不会没。** 删的只是这个分组本身，
-/// `image_album_items` 那些关系由 `ON DELETE CASCADE` 收拾。
-///
-/// # Errors
-/// 没有数据库（501）。
-pub async fn delete_album(
-    State(st): State<AgentState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
+    Json(body): Json<MoveBody>,
 ) -> Result<StatusCode, ApiError> {
     let tenant = st.tenant(&headers).await?;
     let store = tenant
         .store()
-        .map_err(|e| ApiError::unsupported(format!("这个部署没有相册：{e}")))?;
-    sqlx::query("DELETE FROM image_albums WHERE id = $1")
+        .map_err(|e| ApiError::unsupported(format!("这个部署没有图库：{e}")))?;
+    let done = sqlx::query("UPDATE generated_images SET folder_id = $2 WHERE id = $1")
         .bind(&id)
+        .bind(body.folder_id.as_deref())
         .execute(store.pool())
         .await
-        .map_err(|e| ApiError::internal(format!("删不掉：{e}")))?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// `POST /albums/{id}/items` —— 把几张图加进这个相册。
-///
-/// 已经在里面的**不算错**（`ON CONFLICT DO NOTHING`）：批量加的时候选中的
-/// 图里混着几张已经加过的，是最正常不过的情况。
-///
-/// # Errors
-/// 没有数据库（501）。
-pub async fn add_to_album(
-    State(st): State<AgentState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(body): Json<AlbumItems>,
-) -> Result<StatusCode, ApiError> {
-    let tenant = st.tenant(&headers).await?;
-    let store = tenant
-        .store()
-        .map_err(|e| ApiError::unsupported(format!("这个部署没有相册：{e}")))?;
-    // 一条 INSERT 灌整批：逐条发的话，选中三十张就是三十个往返
-    sqlx::query(
-        "INSERT INTO image_album_items (album_id, image_id)
-         SELECT $1, x FROM unnest($2::TEXT[]) AS x
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(&id)
-    .bind(&body.images)
-    .execute(store.pool())
-    .await
-    .map_err(|e| ApiError::internal(format!("加不进相册：{e}")))?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// `DELETE /albums/{id}/items` —— 从相册里拿出来（图本身还在图库里）。
-///
-/// # Errors
-/// 没有数据库（501）。
-pub async fn remove_from_album(
-    State(st): State<AgentState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(body): Json<AlbumItems>,
-) -> Result<StatusCode, ApiError> {
-    let tenant = st.tenant(&headers).await?;
-    let store = tenant
-        .store()
-        .map_err(|e| ApiError::unsupported(format!("这个部署没有相册：{e}")))?;
-    sqlx::query("DELETE FROM image_album_items WHERE album_id = $1 AND image_id = ANY($2)")
-        .bind(&id)
-        .bind(&body.images)
-        .execute(store.pool())
-        .await
-        .map_err(|e| ApiError::internal(format!("从相册里拿不出来：{e}")))?;
+        .map_err(|e| ApiError::internal(format!("移动失败：{e}")))?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::not_found("没有这张图"));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

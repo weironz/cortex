@@ -99,15 +99,15 @@ class BlobUrl {
 }
 
 /// 一个相册。
-class Album {
-  const Album({
+class Folder {
+  const Folder({
     required this.id,
     required this.name,
     this.count = 0,
     this.coverHash,
   });
 
-  factory Album.fromJson(Map<String, dynamic> json) => Album(
+  factory Folder.fromJson(Map<String, dynamic> json) => Folder(
     id: asString(json['id']),
     name: asString(json['name']),
     count: asInt(json['count']),
@@ -122,15 +122,15 @@ class Album {
   final String? coverHash;
 }
 
-/// `GET /albums` 的响应。
-class Albums {
-  const Albums({this.albums = const []});
+/// `GET /folders` 的响应 —— **图片与资料共用这一份清单**。
+class Folders {
+  const Folders({this.folders = const []});
 
-  factory Albums.fromJson(Map<String, dynamic> json) => Albums(
-    albums: asObjectList(
-      json['albums'],
-    ).map(Album.fromJson).toList(growable: false),
+  factory Folders.fromJson(Map<String, dynamic> json) => Folders(
+    folders: asObjectList(
+      json['folders'],
+    ).map(Folder.fromJson).toList(growable: false),
   );
 
-  final List<Album> albums;
+  final List<Folder> folders;
 }

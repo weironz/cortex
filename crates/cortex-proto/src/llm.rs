@@ -344,15 +344,15 @@ pub struct GalleryImage {
 
 /// 一个相册。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Album {
+pub struct Folder {
     pub id: String,
     pub name: String,
-    /// 里面有几张。
+    /// 里面有几项 —— **图片与文件加起来**。
     pub count: i64,
-    /// 封面那张的 blob 哈希。`None` = 空相册。
+    /// 封面那张的 blob 哈希。`None` = 里面没有图（可能有文件）。
     ///
     /// 不做单独上传的封面：一张要维护的封面图会立刻带出「封面那张被删了
-    /// 怎么办」。取相册里最新那张，删了就自动换下一张。
+    /// 怎么办」。取文件夹里最新那张图，删了就自动换下一张。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_hash: Option<String>,
     pub created_at: String,
@@ -360,8 +360,8 @@ pub struct Album {
 
 /// `GET /albums` 的响应。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Albums {
-    pub albums: Vec<Album>,
+pub struct Folders {
+    pub folders: Vec<Folder>,
 }
 
 /// `GET /images` 的响应。游标形状与 `sessionDetail` 一致。

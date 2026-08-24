@@ -20,6 +20,8 @@ import '../../../core/copy_image.dart';
 import '../../../core/save_file.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/blob_bytes.dart';
+import '../../../state/image_controller.dart';
+import 'folder_picker.dart';
 
 /// 做完一件事之后要对用户说的那句话。
 typedef ImageActionSaid = void Function(String message);
@@ -169,6 +171,30 @@ class ImageActions {
     }
   }
 
+  /// 移进一个文件夹（`null` = 移出来）。
+  ///
+  /// # 为什么单张也要有这个入口
+  ///
+  /// 归档此前**只有批量那条路**：先进多选、勾中、再点顶上的按钮。
+  /// 而「看到一张想归类」是单张场景 —— 为了归一张图先进多选模式，
+  /// 是让人绕一圈去够一个本该就在手边的动作。2026-08-27 用户实测报的。
+  Future<void> moveToFolder(String? folderId, String folderName) async {
+    final id = await _id();
+    if (id == null) {
+      said('这张图不在图库里 —— 没有可归档的那一行。');
+      return;
+    }
+    try {
+      await ref.read(cortexApiProvider).moveImage(id, folderId);
+      // 文件夹那一行上的数字要跟上；当前这一页也可能因此少一张
+      ref.invalidate(foldersProvider);
+      said(folderId == null ? '已移出文件夹。' : '已移进「$folderName」。');
+      onRemoved?.call();
+    } on Object catch (e) {
+      said('$e');
+    }
+  }
+
   /// 从图库移除。**blob 不动**，对话里那张照常显示。
   Future<void> removeFromGallery() async {
     final id = await _id();
@@ -184,6 +210,13 @@ class ImageActions {
       said('$e');
     }
   }
+}
+
+/// 菜单里那一项的落点：挑一个文件夹，然后把这张图移过去。
+Future<void> _pickFolder(BuildContext context, ImageActions actions) async {
+  final folder = await pickFolder(context, actions.ref, said: actions.said);
+  if (folder == null) return;
+  await actions.moveToFolder(folder.id, folder.name);
 }
 
 /// 这条链接**其实发不出去**时补的那一句。没问题就回空串。
@@ -245,6 +278,12 @@ Future<void> showImageContextMenu(
         PopupMenuItem(onTap: actions.unshare, child: const Text('停止分享')),
       if (actions.inGallery) ...[
         const PopupMenuDivider(),
+        // 归档。**单张也给** —— 此前只有多选那条路，为了归一张图
+        // 得先进多选模式，见 `ImageActions.moveToFolder`
+        PopupMenuItem(
+          onTap: () => _pickFolder(context, actions),
+          child: const Text('移动到文件夹…'),
+        ),
         PopupMenuItem(
           onTap: actions.removeFromGallery,
           // **叫「从图库移除」，不叫「删除图片」** —— blob 不动，

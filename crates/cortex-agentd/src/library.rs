@@ -232,18 +232,50 @@ pub struct LibraryItem {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Serialize, sqlx::FromRow)]
-pub struct LibraryFolder {
-    pub id: String,
-    pub name: String,
-    /// 里面几项。界面卡片上那个「12 项」
-    pub item_count: i64,
+/// 数据库里的一行。转成 [`cortex_proto::llm::Folder`] 给客户端。
+#[derive(sqlx::FromRow)]
+struct FolderRow {
+    id: String,
+    name: String,
+    count: i64,
+    cover_hash: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 列出全部文件夹（图片与资料**共用**这一份清单）。
+///
+/// 计数是两张表的和：设计稿那句「图片和文件都能放进来」在界面上就是
+/// 卡片右下角那个「12 项」—— 只数一边的话，一个装了 10 份文档的文件夹
+/// 会显示「0 项」。
+async fn list_folders(pool: &sqlx::PgPool) -> Result<Vec<cortex_proto::llm::Folder>, ApiError> {
+    let rows: Vec<FolderRow> = sqlx::query_as(
+        "SELECT f.id, f.name, f.created_at,
+                (SELECT COUNT(*) FROM generated_images g WHERE g.folder_id = f.id)
+              + (SELECT COUNT(*) FROM library_items i WHERE i.folder_id = f.id) AS count,
+                (SELECT g.blob_hash FROM generated_images g
+                  WHERE g.folder_id = f.id ORDER BY g.id DESC LIMIT 1) AS cover_hash
+           FROM folders f
+          ORDER BY f.id DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ApiError::internal(format!("读文件夹失败：{e}")))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| cortex_proto::llm::Folder {
+            id: r.id,
+            name: r.name,
+            count: r.count,
+            cover_hash: r.cover_hash,
+            created_at: r.created_at.to_rfc3339(),
+        })
+        .collect())
 }
 
 #[derive(Serialize)]
 pub struct LibraryPage {
     pub items: Vec<LibraryItem>,
-    pub folders: Vec<LibraryFolder>,
+    pub folders: Vec<cortex_proto::llm::Folder>,
     /// 还有更多 —— 界面据此决定要不要再翻一页
     pub has_more: bool,
 }
@@ -311,16 +343,8 @@ pub async fn list(
     rows.truncate(limit as usize);
 
     // 文件夹只在第一页给 —— 翻页时它们不会变，每页都带一遍是白费带宽
-    let folders: Vec<LibraryFolder> = if q.before.is_none() {
-        sqlx::query_as(
-            "SELECT f.id, f.name,
-                    (SELECT COUNT(*) FROM library_items i WHERE i.folder_id = f.id) AS item_count
-               FROM library_folders f
-              ORDER BY f.id DESC",
-        )
-        .fetch_all(store.pool())
-        .await
-        .map_err(|e| ApiError::internal(format!("读文件夹失败：{e}")))?
+    let folders = if q.before.is_none() {
+        list_folders(store.pool()).await?
     } else {
         Vec::new()
     };
@@ -595,7 +619,7 @@ pub async fn create_folder(
     State(st): State<AgentState>,
     headers: HeaderMap,
     Json(req): Json<FolderRequest>,
-) -> Result<Json<LibraryFolder>, ApiError> {
+) -> Result<Json<cortex_proto::llm::Folders>, ApiError> {
     let tenant = st.tenant(&headers).await?;
     let store = tenant
         .store()
@@ -605,16 +629,60 @@ pub async fn create_folder(
         return Err(ApiError::bad_request("文件夹名要在 1..64 个字符之间"));
     }
     let id = cortex_core::Id::new().to_string();
-    sqlx::query("INSERT INTO library_folders (id, name) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO folders (id, name) VALUES ($1, $2)")
         .bind(&id)
         .bind(name)
         .execute(store.pool())
         .await
         .map_err(|e| ApiError::internal(format!("建文件夹失败：{e}")))?;
-    Ok(Json(LibraryFolder {
-        id,
-        name: name.to_string(),
-        item_count: 0,
+    Ok(Json(cortex_proto::llm::Folders {
+        folders: list_folders(store.pool()).await?,
+    }))
+}
+
+/// `PATCH /folders/{id}` —— 改名。
+///
+/// # Errors
+/// 名字非法、库不可用。
+pub async fn rename_folder(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<FolderRequest>,
+) -> Result<Json<cortex_proto::llm::Folders>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+    let store = tenant
+        .store()
+        .map_err(|e| ApiError::unsupported(format!("这个部署没有文件夹：{e}")))?;
+    let name = req.name.trim();
+    if name.is_empty() || name.chars().count() > 64 {
+        return Err(ApiError::bad_request("文件夹名要在 1..64 个字符之间"));
+    }
+    sqlx::query("UPDATE folders SET name = $2 WHERE id = $1")
+        .bind(&id)
+        .bind(name)
+        .execute(store.pool())
+        .await
+        .map_err(|e| ApiError::internal(format!("改名失败：{e}")))?;
+    Ok(Json(cortex_proto::llm::Folders {
+        folders: list_folders(store.pool()).await?,
+    }))
+}
+
+/// `GET /folders` —— 图片与资料共用的那一份清单。
+///
+/// # Errors
+/// 库不可用。
+pub async fn folders(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+) -> Result<Json<cortex_proto::llm::Folders>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+    let store = tenant
+        .store()
+        .map_err(|e| ApiError::unsupported(format!("这个部署没有文件夹：{e}")))?;
+    Ok(Json(cortex_proto::llm::Folders {
+        folders: list_folders(store.pool()).await?,
     }))
 }
 
@@ -629,17 +697,19 @@ pub async fn delete_folder(
     State(st): State<AgentState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<StatusOk, ApiError> {
+) -> Result<Json<cortex_proto::llm::Folders>, ApiError> {
     let tenant = st.tenant(&headers).await?;
     let store = tenant
         .store()
         .map_err(|e| ApiError::unsupported(format!("这个部署没有资料库：{e}")))?;
-    sqlx::query("DELETE FROM library_folders WHERE id = $1")
+    sqlx::query("DELETE FROM folders WHERE id = $1")
         .bind(&id)
         .execute(store.pool())
         .await
         .map_err(|e| ApiError::internal(format!("删文件夹失败：{e}")))?;
-    Ok(StatusOk)
+    Ok(Json(cortex_proto::llm::Folders {
+        folders: list_folders(store.pool()).await?,
+    }))
 }
 
 #[derive(Deserialize)]

@@ -40,7 +40,7 @@ class _FlakyGalleryApi extends MockCortexApi {
   Future<Gallery> gallery({
     int limit = 30,
     String? before,
-    String? album,
+    String? folder,
     String? hash,
   }) => _gallery(limit: limit, before: before);
 }
@@ -60,7 +60,7 @@ class _SeededApi extends MockCortexApi {
   Future<Gallery> gallery({
     int limit = 30,
     String? before,
-    String? album,
+    String? folder,
     String? hash,
   }) async => Gallery(items: items);
 

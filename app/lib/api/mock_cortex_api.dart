@@ -1418,8 +1418,11 @@ class MockCortexApi
   }
 
   /// 相册。假后端里就这一份，够界面走通「建 / 改名 / 加图 / 删」。
-  final List<Album> _albums = [];
-  final Map<String, Set<String>> _albumItems = {};
+  final List<Folder> _folders = [];
+
+  /// 图 id → 它在哪个文件夹。**排他**，所以是一对一而不是集合 ——
+  /// 与服务端 `generated_images.folder_id` 同形
+  final Map<String, String> _imageFolder = {};
 
   @override
   Future<String> shareImage(String id) async {
@@ -1441,23 +1444,21 @@ class MockCortexApi
     await _latency(60);
     _gallery.removeWhere((i) => i.id == id);
     _shared.remove(id);
-    for (final s in _albumItems.values) {
-      s.remove(id);
-    }
+    _imageFolder.remove(id);
   }
 
   @override
-  Future<Albums> albums() async {
+  Future<Folders> folders() async {
     await _latency(60);
-    return Albums(
-      albums: [
-        for (final a in _albums)
-          Album(
-            id: a.id,
-            name: a.name,
-            count: _albumItems[a.id]?.length ?? 0,
+    return Folders(
+      folders: [
+        for (final f in _folders)
+          Folder(
+            id: f.id,
+            name: f.name,
+            count: _imageFolder.values.where((v) => v == f.id).length,
             coverHash: _gallery
-                .where((i) => _albumItems[a.id]?.contains(i.id) ?? false)
+                .where((i) => _imageFolder[i.id] == f.id)
                 .map((i) => i.hash)
                 .firstOrNull,
           ),
@@ -1466,39 +1467,38 @@ class MockCortexApi
   }
 
   @override
-  Future<Albums> createAlbum(String name) async {
+  Future<Folders> createFolder(String name) async {
     await _latency(60);
-    _albums.insert(0, Album(id: 'MOCKALBUM${_albums.length}', name: name));
-    return albums();
+    _folders.insert(0, Folder(id: 'MOCKFOLDER${_folders.length}', name: name));
+    return folders();
   }
 
   @override
-  Future<Albums> renameAlbum(String id, String name) async {
+  Future<Folders> renameFolder(String id, String name) async {
     await _latency(60);
-    final at = _albums.indexWhere((a) => a.id == id);
-    if (at >= 0) _albums[at] = Album(id: id, name: name);
-    return albums();
+    final at = _folders.indexWhere((f) => f.id == id);
+    if (at >= 0) _folders[at] = Folder(id: id, name: name);
+    return folders();
   }
 
   @override
-  Future<void> deleteAlbum(String id) async {
+  Future<Folders> deleteFolder(String id) async {
     await _latency(60);
-    _albums.removeWhere((a) => a.id == id);
-    _albumItems.remove(id);
+    _folders.removeWhere((f) => f.id == id);
+    // 里面的东西回未归档 —— 与服务端的 ON DELETE SET NULL 同一个语义。
+    // mock 这边不照做的话，「删文件夹会不会删掉里面的图」在两个数据源上
+    // 答得不一样，而界面是照 mock 调出来的
+    _imageFolder.removeWhere((_, folder) => folder == id);
+    return folders();
   }
 
   @override
-  Future<void> setAlbumItems(
-    String id,
-    List<String> images, {
-    bool add = true,
-  }) async {
+  Future<void> moveImage(String id, String? folderId) async {
     await _latency(60);
-    final set = _albumItems.putIfAbsent(id, () => <String>{});
-    if (add) {
-      set.addAll(images);
+    if (folderId == null) {
+      _imageFolder.remove(id);
     } else {
-      set.removeAll(images);
+      _imageFolder[id] = folderId;
     }
   }
 
@@ -1506,15 +1506,15 @@ class MockCortexApi
   Future<Gallery> gallery({
     int limit = 30,
     String? before,
-    String? album,
+    String? folder,
     String? hash,
   }) async {
     await _latency(80);
-    var items = album == null
-        ? _gallery
-        : _gallery
-              .where((i) => _albumItems[album]?.contains(i.id) ?? false)
-              .toList();
+    var items = switch (folder) {
+      null => _gallery,
+      'none' => _gallery.where((i) => !_imageFolder.containsKey(i.id)).toList(),
+      final f => _gallery.where((i) => _imageFolder[i.id] == f).toList(),
+    };
     if (hash != null) {
       items = items.where((i) => i.hash == hash).toList();
     }

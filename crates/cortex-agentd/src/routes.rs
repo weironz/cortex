@@ -176,24 +176,22 @@ protected_routes! {
     "/images" [GET] => get(crate::gallery::gallery),
     // 从图库移除。**blob 不动** —— 对话里那张图照常显示，
     // 见 `gallery::remove` 的文档
-    "/images/{id}" [DELETE] => delete(crate::gallery::remove),
+    "/images/{id}" [DELETE, PATCH] => delete(crate::gallery::remove)
+        .patch(crate::gallery::move_image),
     // 分享 / 撤销。链接本身落在公开清单里的 `/s/{token}/{filename}`
     "/images/{id}/share" [POST, DELETE] => post(crate::gallery::share)
         .delete(crate::gallery::unshare),
-    // 相册（照 immich：一张图可以在多个相册里）
-    "/albums" [GET, POST] => get(crate::gallery::albums)
-        .post(crate::gallery::create_album),
-    "/albums/{id}" [PATCH, DELETE] => patch(crate::gallery::rename_album)
-        .delete(crate::gallery::delete_album),
-    "/albums/{id}/items" [POST, DELETE] => post(crate::gallery::add_to_album)
-        .delete(crate::gallery::remove_from_album),
+    // 文件夹 —— **图片与资料共用这一份**。相册（多对多）已废，
+    // 理由见 migrations/20260827000002_folders_unified.sql
+    "/folders" [GET, POST] => get(crate::library::folders)
+        .post(crate::library::create_folder),
+    "/folders/{id}" [PATCH, DELETE] => patch(crate::library::rename_folder)
+        .delete(crate::library::delete_folder),
     // 资料库 —— 与会话无关的材料。**不在 /images 下面**：图片是产物，
     // 资料库是材料，两者的生命周期与归档方式都不同（相册可重叠，
     // 文件夹排他），见 library 模块头
     "/library" [GET, POST] => get(crate::library::list)
         .post(crate::library::add),
-    "/library/folders" [POST] => post(crate::library::create_folder),
-    "/library/folders/{id}" [DELETE] => delete(crate::library::delete_folder),
     "/library/search" [POST] => post(crate::library::search),
     "/library/{id}" [PATCH, DELETE] => patch(crate::library::update)
         .delete(crate::library::remove),

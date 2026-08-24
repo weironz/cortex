@@ -1753,13 +1753,13 @@ class HttpCortexApi implements CortexApi {
   Future<Gallery> gallery({
     int limit = 30,
     String? before,
-    String? album,
+    String? folder,
     String? hash,
   }) async => Gallery.fromJson(
     await _getJson('/images', {
       'limit': '$limit',
       'before': ?before,
-      'album': ?album,
+      'folder': ?folder,
       'hash': ?hash,
     }),
   );
@@ -1778,30 +1778,31 @@ class HttpCortexApi implements CortexApi {
       _noContent('DELETE', '/images/${Uri.encodeComponent(id)}');
 
   @override
-  Future<Albums> albums() async => Albums.fromJson(await _getJson('/albums'));
+  Future<Folders> folders() async =>
+      Folders.fromJson(await _getJson('/folders'));
 
   @override
-  Future<Albums> createAlbum(String name) async =>
-      Albums.fromJson(await _postJson('/albums', {'name': name}));
+  Future<Folders> createFolder(String name) async =>
+      Folders.fromJson(await _postJson('/folders', {'name': name}));
 
   @override
-  Future<Albums> renameAlbum(String id, String name) async => Albums.fromJson(
-    await _patchJson('/albums/${Uri.encodeComponent(id)}', {'name': name}),
+  Future<Folders> renameFolder(String id, String name) async =>
+      Folders.fromJson(
+        await _patchJson('/folders/${Uri.encodeComponent(id)}', {'name': name}),
+      );
+
+  @override
+  Future<Folders> deleteFolder(String id) async => Folders.fromJson(
+    await _deleteJson('/folders/${Uri.encodeComponent(id)}'),
   );
 
   @override
-  Future<void> deleteAlbum(String id) =>
-      _noContent('DELETE', '/albums/${Uri.encodeComponent(id)}');
-
-  @override
-  Future<void> setAlbumItems(
-    String id,
-    List<String> images, {
-    bool add = true,
-  }) => _noContent(
-    add ? 'POST' : 'DELETE',
-    '/albums/${Uri.encodeComponent(id)}/items',
-    {'images': images},
+  Future<void> moveImage(String id, String? folderId) => _noContent(
+    'PATCH',
+    '/images/${Uri.encodeComponent(id)}',
+    // 显式带 null 而不是省掉这个键：省掉的话服务端读成「没说要动归属」，
+    // 于是「移出文件夹」这个动作静默地什么都不做
+    {'folder_id': folderId},
   );
 
   @override
@@ -1934,6 +1935,28 @@ class HttpCortexApi implements CortexApi {
 
   /// A JSON POST. [body] null means "send nothing at all" — see [issueTicket]
   /// for why that is not the same as sending `{}`.
+  /// DELETE 且**要回体** —— 删文件夹会把整份新清单带回来，
+  /// 客户端不必自己从本地列表里抠掉一条（抠错的症状是界面与服务端不一致）。
+  Future<Map<String, dynamic>> _deleteJson(String path) async {
+    final http.Response response;
+    try {
+      response = await _client.delete(
+        _uri(path),
+        headers: _headers(const {'accept': 'application/json'}),
+      );
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
+    }
+    return _decodeObject(path, utf8.decode(response.bodyBytes));
+  }
+
   Future<Map<String, dynamic>> _postJson(
     String path,
     Map<String, dynamic>? body, [

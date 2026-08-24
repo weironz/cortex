@@ -29,7 +29,7 @@ class ImageState {
     this.cursor,
     this.error,
     this.unsupported = false,
-    this.album,
+    this.folder,
     this.selected = const {},
   });
 
@@ -52,12 +52,12 @@ class ImageState {
   /// 这一页同时只可能有一个在飞（画的时候输入框禁用）。
   final Object? error;
 
-  /// 正在看哪个相册。`null` = 全部。
+  /// 正在看哪个文件夹。`null` = 全部。
   ///
-  /// **它是查询的一部分**：翻页游标是在这个条件下取出来的，换相册必须
+  /// **它是查询的一部分**：翻页游标是在这个条件下取出来的，换文件夹必须
   /// 从头拉。把它放进状态而不是页面里，正是为了让 [ImageController.loadMore]
-  /// 也看得见 —— 页面持有一份的话，翻页会拿「全部」的游标去翻一个相册。
-  final String? album;
+  /// 也看得见 —— 页面持有一份的话，翻页会拿「全部」的游标去翻一个文件夹。
+  final String? folder;
 
   /// 勾中的那些（图库那一行的 id）。空 = 不在多选态。
   final Set<String> selected;
@@ -87,7 +87,7 @@ class ImageState {
     cursor: cursor ?? this.cursor,
     error: clearError ? null : (error ?? this.error),
     unsupported: unsupported ?? this.unsupported,
-    album: album,
+    folder: folder,
     selected: selected ?? this.selected,
   );
 }
@@ -103,17 +103,17 @@ class ImageController extends Notifier<ImageState> {
   Future<void> refresh() async {
     state = state.copyWith(loading: true, clearError: true);
     try {
-      final album = state.album;
+      final folder = state.folder;
       final page = await ref
           .read(cortexApiProvider)
-          .gallery(limit: _kPageSize, album: album);
+          .gallery(limit: _kPageSize, folder: folder);
       if (!ref.mounted) return;
       state = ImageState(
         items: page.items,
         hasMore: page.hasMore,
         cursor: page.nextCursor,
-        album: album,
-        // 勾选**跟着这一页作废**：留着的话，用户切到别的相册再点「加入相册」，
+        folder: folder,
+        // 勾选**跟着这一页作废**：留着的话，用户切到别的文件夹再点「加入文件夹」，
         // 加进去的是他现在根本看不见的那几张
         selected: const {},
       );
@@ -124,23 +124,23 @@ class ImageController extends Notifier<ImageState> {
       state = ImageState(
         unsupported: e.isUnsupported,
         error: e.isUnsupported ? null : e.message,
-        album: state.album,
+        folder: state.folder,
       );
     } on Object catch (e) {
       if (!ref.mounted) return;
-      state = ImageState(error: e, album: state.album);
+      state = ImageState(error: e, folder: state.folder);
     }
   }
 
-  /// 换一个相册看（`null` = 全部）。
+  /// 换一个文件夹看（`null` = 全部）。
   ///
   /// **必须重取第一页**，不能只过滤手上这些：手上这些只是最新的一页，
-  /// 过滤出来的「这个相册」会少掉所有还没翻到的 —— 而它看起来是完整的。
-  Future<void> setAlbum(String? album) async {
-    if (album == state.album) return;
-    // ⚠️ 直接造一个新状态，不走 `copyWith` —— 它**不改 album**（那是查询
+  /// 过滤出来的「这个文件夹」会少掉所有还没翻到的 —— 而它看起来是完整的。
+  Future<void> setFolder(String? folder) async {
+    if (folder == state.folder) return;
+    // ⚠️ 直接造一个新状态，不走 `copyWith` —— 它**不改 folder**（那是查询
     // 条件，不是可选覆盖），改了才会连着把游标一起换掉
-    state = ImageState(loading: true, album: album);
+    state = ImageState(loading: true, folder: folder);
     await refresh();
   }
 
@@ -179,30 +179,40 @@ class ImageController extends Notifier<ImageState> {
         : '移除了 ${ids.length - failed} 张，另有 $failed 张没成功。';
   }
 
-  /// 把勾中的那些加进 / 拿出一个相册。
-  Future<String> setAlbumMembership(
-    String albumId,
-    String albumName, {
-    required bool add,
-  }) async {
+  /// 把勾中的那些**移进**一个文件夹（`null` = 移出来，回未归档）。
+  ///
+  /// # 为什么没有「从文件夹里拿出」这个单独动作
+  ///
+  /// 归档排他之后，「移进 A」自带「离开原来那个」，而「拿出来」就是
+  /// 「移进 null」—— 一个动作两个方向。相册时代那两个按钮（加进 / 拿出）
+  /// 是多对多才需要的，留着会让人以为「移进 A」之后它还在 B 里。
+  Future<String> moveSelectedTo(String? folderId, String folderName) async {
     final ids = state.selected.toList();
     if (ids.isEmpty) return '';
-    try {
-      await ref.read(cortexApiProvider).setAlbumItems(albumId, ids, add: add);
-    } on Object catch (e) {
-      return '$e';
+    final api = ref.read(cortexApiProvider);
+    var failed = 0;
+    for (final id in ids) {
+      try {
+        await api.moveImage(id, folderId);
+      } on Object {
+        failed++;
+      }
     }
-    // 加进去之后**不清空当前这一页**（还在「全部」里看着呢），但要重取
-    // ——张数变了，相册那一行上的数字得跟上
-    ref.invalidate(albumsProvider);
-    if (state.album != null) {
+    // 张数变了，文件夹那一行上的数字得跟上
+    ref.invalidate(foldersProvider);
+    // 正在看某个文件夹时，移走的那些要从这一页消失 —— 不重取的话
+    // 用户会看着自己刚移走的图还留在原地，以为没生效
+    if (state.folder != null) {
       await refresh();
     } else {
       state = state.copyWith(selected: const {});
     }
-    return add
-        ? '已加进「$albumName」（${ids.length} 张）。'
-        : '已从「$albumName」里拿出 ${ids.length} 张。';
+    if (failed > 0) {
+      return '移动了 ${ids.length - failed} 张，另有 $failed 张没成功。';
+    }
+    return folderId == null
+        ? '已移出文件夹（${ids.length} 张）。'
+        : '已移进「$folderName」（${ids.length} 张）。';
   }
 
   /// 往后翻一页。
@@ -214,13 +224,13 @@ class ImageController extends Notifier<ImageState> {
     try {
       final page = await ref
           .read(cortexApiProvider)
-          .gallery(limit: _kPageSize, before: cursor, album: state.album);
+          .gallery(limit: _kPageSize, before: cursor, folder: state.folder);
       if (!ref.mounted) return;
       state = ImageState(
         items: [...state.items, ...page.items],
         hasMore: page.hasMore,
         cursor: page.nextCursor,
-        album: state.album,
+        folder: state.folder,
         selected: state.selected,
       );
     } on Object catch (e) {
@@ -281,19 +291,19 @@ final imageControllerProvider = NotifierProvider<ImageController, ImageState>(
   ImageController.new,
 );
 
-/// 相册列表。
+/// 文件夹列表。
 ///
 /// # 为什么这个是 `FutureProvider`，而画廊不是
 ///
-/// 相册**一次取完**（没有翻页），改动之后整份重取就够了 —— 服务端那几条
+/// 文件夹**一次取完**（没有翻页），改动之后整份重取就够了 —— 服务端那几条
 /// 写接口回的也正是整份列表。画廊不同，它是一份在长的东西（见本文件顶上）。
-final albumsProvider = FutureProvider<Albums>((ref) async {
+final foldersProvider = FutureProvider<Folders>((ref) async {
   try {
-    return await ref.watch(cortexApiProvider).albums();
+    return await ref.watch(cortexApiProvider).folders();
   } on CortexApiException catch (e) {
     // 老服务端没有 `/albums`。**回一份空的，不抛** —— 抛的话画廊上面
     // 会挂一条红字，而用户能做的只有升级服务端
-    if (e.isUnsupported) return const Albums();
+    if (e.isUnsupported) return const Folders();
     rethrow;
   }
 });

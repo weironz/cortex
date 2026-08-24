@@ -44,7 +44,7 @@ import '../chat/widgets/conversation_view.dart';
 import '../chat/widgets/message_composer.dart';
 import '../settings/pages/model_picker.dart';
 import '../settings/pages/model_roles_page.dart' show modelRolesProvider;
-import 'widgets/album_bar.dart';
+import 'widgets/folder_bar.dart';
 import 'widgets/image_spec.dart';
 import 'widgets/image_thumb.dart';
 import 'widgets/image_viewer.dart';
@@ -445,17 +445,17 @@ class _ImagePageState extends ConsumerState<ImagePage> {
         ),
       ];
     }
-    // 空相册与空图库要说**不一样**的话：在一个空相册里看到「还没有画过图」，
+    // 空文件夹与空图库要说**不一样**的话：在一个空文件夹里看到「还没有画过图」，
     // 用户会以为自己的图全没了
     if (state.items.isEmpty) {
-      if (state.album != null) {
+      if (state.folder != null) {
         return [
-          box(AlbumBar(said: _say)),
+          box(FolderBar(said: _say)),
           box(
             const EmptyState(
               icon: Icons.photo_album_outlined,
-              title: '这个相册还是空的',
-              description: '回「全部」里勾几张，点「加入相册」。',
+              title: '这个文件夹还是空的',
+              description: '回「全部」里勾几张，点「加入文件夹」。',
             ),
           ),
         ];
@@ -476,7 +476,7 @@ class _ImagePageState extends ConsumerState<ImagePage> {
       SliverToBoxAdapter(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
-          child: AlbumBar(said: _say),
+          child: FolderBar(said: _say),
         ),
       ),
       SliverPadding(

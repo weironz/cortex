@@ -1,15 +1,15 @@
-/// 图库那一面：相册、多选，以及一张图上能做的那几件事。
+/// 图库那一面：文件夹、多选，以及一张图上能做的那几件事。
 ///
 /// # 这一组在盯的四件事
 ///
 /// 1. **按哈希查图库那一行时，回来的必须自己核对哈希。** 老服务端不认得
 ///    `hash=`，会静默忽略它、回最新那一页 —— 不核对的话，「复制链接」
 ///    分享出去的是**别人的图**，而两边都不报错。
-/// 2. **换相册要重取第一页，而不是过滤手上这些。** 过滤出来的那一份看着
+/// 2. **换文件夹要重取第一页，而不是过滤手上这些。** 过滤出来的那一份看着
 ///    是完整的，实际少掉所有还没翻到的。
-/// 3. **勾中之后那一条整个换成动作条**，且「移出相册」只在真的看着某个
-///    相册时出现 —— 在「全部」里它答不上来「从哪个里拿」。
-/// 4. **空相册与空图库说的不是同一句话。** 在一个空相册里看到
+/// 3. **勾中之后那一条整个换成动作条**，且「移出文件夹」只在真的看着某个
+///    文件夹时出现 —— 在「全部」里它答不上来「从哪个里拿」。
+/// 4. **空文件夹与空图库说的不是同一句话。** 在一个空文件夹里看到
 ///    「还没有画过图」，用户会以为自己的图全没了。
 library;
 
@@ -51,13 +51,13 @@ GeneratedImage _img(String id, String hash, {String prompt = '一只柴犬'}) =>
 
 /// 记下每一次 `gallery` 的参数，并按脚本回内容。
 class _GalleryApi extends MockCortexApi {
-  _GalleryApi({this.byAlbum = const {}, this.all = const []})
+  _GalleryApi({this.byFolder = const {}, this.all = const []})
     : super(instant: true);
 
-  final Map<String, List<GeneratedImage>> byAlbum;
+  final Map<String, List<GeneratedImage>> byFolder;
   final List<GeneratedImage> all;
 
-  final List<({String? album, String? hash, String? before})> calls = [];
+  final List<({String? folder, String? hash, String? before})> calls = [];
 
   /// 装成一个**不认得 `hash=`** 的老服务端：忽略它，照回最新那一页。
   bool ignoreHash = false;
@@ -66,11 +66,11 @@ class _GalleryApi extends MockCortexApi {
   Future<Gallery> gallery({
     int limit = 30,
     String? before,
-    String? album,
+    String? folder,
     String? hash,
   }) async {
-    calls.add((album: album, hash: hash, before: before));
-    var items = album == null ? all : (byAlbum[album] ?? const []);
+    calls.add((folder: folder, hash: hash, before: before));
+    var items = folder == null ? all : (byFolder[folder] ?? const []);
     if (hash != null && !ignoreHash) {
       items = items.where((i) => i.hash == hash).toList();
     }
@@ -78,12 +78,20 @@ class _GalleryApi extends MockCortexApi {
   }
 
   @override
-  Future<Albums> albums() async => Albums(
-    albums: [
-      for (final e in byAlbum.entries)
-        Album(id: e.key, name: '相册 ${e.key}', count: e.value.length),
+  Future<Folders> folders() async => Folders(
+    folders: [
+      for (final e in byFolder.entries)
+        Folder(id: e.key, name: '文件夹 ${e.key}', count: e.value.length),
     ],
   );
+
+  /// 记下每一次移动：(图 id, 目标文件夹 —— null = 移出来)
+  final List<({String id, String? folder})> moves = [];
+
+  @override
+  Future<void> moveImage(String id, String? folderId) async {
+    moves.add((id: id, folder: folderId));
+  }
 
   final List<String> shared = [];
 
@@ -297,11 +305,51 @@ void main() {
     });
   });
 
-  group('相册', () {
-    test('换相册是重取，不是过滤手上这些', () async {
+  group('文件夹', () {
+    /// **归档是排他的：移进 A 自带离开 B。**
+    ///
+    /// 相册时代这是两个动作（加进 / 拿出，多对多）。2026-08-27 改成
+    /// 文件夹之后必须是一个 —— 拆成两次请求的话，中间断网就是一张
+    /// 谁也不属于的图，而用户以为自己只是拖了一下。
+    test('移动一批图：每张只发一次，带的是目标文件夹', () async {
       final api = _GalleryApi(
         all: [_img('IMG-1', _hashA), _img('IMG-2', _hashB)],
-        byAlbum: {
+      );
+      final c = _boot(api);
+      addTearDown(c.dispose);
+
+      final n = c.read(imageControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await n.refresh();
+      n.toggleSelect('IMG-1');
+      n.toggleSelect('IMG-2');
+
+      final said = await n.moveSelectedTo('fld-9', '客户 POC');
+      expect(api.moves, [
+        (id: 'IMG-1', folder: 'fld-9'),
+        (id: 'IMG-2', folder: 'fld-9'),
+      ], reason: '一张图一次请求，且带的就是目标 —— 没有「先移出再移进」那半步');
+      expect(said, contains('客户 POC'), reason: '做完要说清移进了哪儿');
+    });
+
+    /// 「移出来」= 移进 null，而不是另一个端点。
+    test('移出文件夹传的是 null', () async {
+      final api = _GalleryApi(all: [_img('IMG-1', _hashA)]);
+      final c = _boot(api);
+      addTearDown(c.dispose);
+
+      final n = c.read(imageControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await n.refresh();
+      n.toggleSelect('IMG-1');
+      await n.moveSelectedTo(null, '');
+      expect(api.moves.single.folder, isNull);
+    });
+
+    test('换文件夹是重取，不是过滤手上这些', () async {
+      final api = _GalleryApi(
+        all: [_img('IMG-1', _hashA), _img('IMG-2', _hashB)],
+        byFolder: {
           'alb-1': [_img('IMG-2', _hashB)],
         },
       );
@@ -313,32 +361,32 @@ void main() {
       await n.refresh();
       expect(c.read(imageControllerProvider).items, hasLength(2));
 
-      await n.setAlbum('alb-1');
+      await n.setFolder('alb-1');
       expect(
-        api.calls.last.album,
+        api.calls.last.folder,
         'alb-1',
         reason:
-            '只过滤手上这一页的话，「这个相册」会少掉所有还没翻到的 —— '
+            '只过滤手上这一页的话，「这个文件夹」会少掉所有还没翻到的 —— '
             '而它看起来是完整的',
       );
       expect(c.read(imageControllerProvider).items, hasLength(1));
-      expect(c.read(imageControllerProvider).album, 'alb-1');
+      expect(c.read(imageControllerProvider).folder, 'alb-1');
     });
 
-    testWidgets('空相册说的不是「还没有画过图」', (tester) async {
-      final api = _GalleryApi(all: const [], byAlbum: {'alb-1': const []});
+    testWidgets('空文件夹说的不是「还没有画过图」', (tester) async {
+      final api = _GalleryApi(all: const [], byFolder: {'alb-1': const []});
       final c = _boot(api);
       addTearDown(c.dispose);
       await _pump(tester, c);
 
-      await c.read(imageControllerProvider.notifier).setAlbum('alb-1');
+      await c.read(imageControllerProvider.notifier).setFolder('alb-1');
       await _settle(tester);
 
-      expect(find.text('这个相册还是空的'), findsOneWidget);
+      expect(find.text('这个文件夹还是空的'), findsOneWidget);
       expect(
         find.text('还没有画过图'),
         findsNothing,
-        reason: '在一个空相册里看到这句，用户会以为自己的图全没了',
+        reason: '在一个空文件夹里看到这句，用户会以为自己的图全没了',
       );
     });
   });
@@ -351,7 +399,7 @@ void main() {
       await _pump(tester, c);
       await _settle(tester);
 
-      expect(find.byKey(const ValueKey('album:new')), findsOneWidget);
+      expect(find.byKey(const ValueKey('folder:new')), findsOneWidget);
       expect(find.byKey(const ValueKey('sel:count')), findsNothing);
 
       c.read(imageControllerProvider.notifier).toggleSelect('IMG-1');
@@ -360,16 +408,16 @@ void main() {
       expect(find.byKey(const ValueKey('sel:count')), findsOneWidget);
       expect(find.text('选中 1 张'), findsOneWidget);
       expect(
-        find.byKey(const ValueKey('album:new')),
+        find.byKey(const ValueKey('folder:new')),
         findsNothing,
         reason: '两排按钮叠着的话，用户得先分清哪一排管的是哪件事',
       );
     });
 
-    testWidgets('「移出相册」只在真的看着某个相册时出现', (tester) async {
+    testWidgets('「移出文件夹」只在真的看着某个文件夹时出现', (tester) async {
       final api = _GalleryApi(
         all: [_img('IMG-1', _hashA)],
-        byAlbum: {
+        byFolder: {
           'alb-1': [_img('IMG-1', _hashA)],
         },
       );
@@ -383,20 +431,20 @@ void main() {
       expect(
         find.byKey(const ValueKey('sel:pull')),
         findsNothing,
-        reason: '在「全部」里，「移出相册」答不上来「从哪个里拿」',
+        reason: '在「全部」里，「移出文件夹」答不上来「从哪个里拿」',
       );
 
-      await c.read(imageControllerProvider.notifier).setAlbum('alb-1');
+      await c.read(imageControllerProvider.notifier).setFolder('alb-1');
       await _settle(tester);
       c.read(imageControllerProvider.notifier).toggleSelect('IMG-1');
       await _settle(tester);
       expect(find.byKey(const ValueKey('sel:pull')), findsOneWidget);
     });
 
-    test('换相册时勾选跟着作废', () async {
+    test('换文件夹时勾选跟着作废', () async {
       final api = _GalleryApi(
         all: [_img('IMG-1', _hashA)],
-        byAlbum: {'alb-1': const []},
+        byFolder: {'alb-1': const []},
       );
       final c = _boot(api);
       addTearDown(c.dispose);
@@ -405,11 +453,11 @@ void main() {
       n.toggleSelect('IMG-1');
       expect(c.read(imageControllerProvider).selected, {'IMG-1'});
 
-      await n.setAlbum('alb-1');
+      await n.setFolder('alb-1');
       expect(
         c.read(imageControllerProvider).selected,
         isEmpty,
-        reason: '留着的话，用户切到别的相册再点「加入相册」，加进去的是他现在根本看不见的那几张',
+        reason: '留着的话，用户切到别的文件夹再点「加入文件夹」，加进去的是他现在根本看不见的那几张',
       );
     });
   });

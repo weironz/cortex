@@ -88,7 +88,7 @@ server {
     # - `confirmations` / `delegated-tokens` —— 云端对话那条链。委托凭据现在
     #   本地签（要读会话行，而会话在这边了），确认回路原样反代进沙箱容器
     # - `blobs` / `import` / `sandbox-snapshots` —— 附件、导入、快照账本
-    # - `library` —— 资料库（与会话无关的材料）
+    # - `library` / `folders` —— 资料库与归档文件夹（图片和资料共用）
     # - `episodes` —— 写一轮。**这是整件事的落点**：先写自己的库，再尽力把它
     #   转发给记忆服务做抽取；转发失败只是这一轮没有记忆命中，不是失败
     # - `sync` —— 补拉那条底线路径
@@ -151,7 +151,7 @@ server {
     # （`deploy/docker-compose.yml:346`）。dev 这条是 allow-list，漏一条的
     # 表现是**回 200 + index.html** —— 看起来像成功，实际落在了下面那个 SPA
     # 回落上。2026-08-22 加 `/images` 时正撞上这个。
-    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes|blobs|images|albums|library|s|import|sandbox-snapshots|confirmations|delegated-tokens|agents|assistants|skills|runs)(/|$) {
+    location ~ ^/(chat|sandbox|sessions|projects|auth|health|llm|settings|sync|episodes|blobs|images|folders|library|s|import|sandbox-snapshots|confirmations|delegated-tokens|agents|assistants|skills|runs)(/|$) {
         proxy_pass http://agentd;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
