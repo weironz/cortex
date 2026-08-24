@@ -18,6 +18,12 @@ Licensed under the Apache License, Version 2.0
 
 **已取件，此后由 Cortex 自行维护，不再与上游同步。**（2026-08-19）
 
+  crates/cortex-agent/src/edit.rs
+                               `string_replace` 的错误提示逻辑（0 匹配给相似
+                               片段、多匹配给行号）。2026-08-24 取件。
+  crates/cortex-agent/src/tree.rs
+                               gitignore 感知的目录树（带行数标注）。
+                               2026-08-24 取件。
   crates/cortex-providers/     LLM 供应商适配层。类型层（Message / 格式转换 /
                                模型目录）与四个引擎（openai / anthropic /
                                google / ollama）的实现，含声明式 JSON 供应商

@@ -47,6 +47,7 @@ fn state(dir: &Path) -> LocalState {
         grants: crate::grants::Grants::new(),
         outbox: Outbox::new(dir),
         max_rounds: 4,
+        todos: crate::turn::Todos::default(),
         context_window: 8192,
         persona: "",
         capabilities: "",

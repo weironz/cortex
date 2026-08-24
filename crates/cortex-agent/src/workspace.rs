@@ -238,6 +238,73 @@ pub fn brief(base: &str, workspace: Option<&str>) -> String {
     }
 }
 
+/// 项目指引文件的候选名，按优先级。
+///
+/// `AGENTS.md` 是三家（Codex / Grok Build / goose）已收敛的事实标准；
+/// `CLAUDE.md` 是 Claude Code 的名字 —— 存量项目里它最常见（本仓库自己
+/// 就是），只认标准名会把最大的一批存量用户排除在外。**只取第一个存在
+/// 的**：两份都有时它们多半是复制漂移的关系，同时注入等于让模型仲裁
+/// 两份过期程度不同的指令。
+const GUIDE_FILES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
+
+/// 指引内容的注入上限。
+///
+/// 指引是每一轮都进上下文的常驻开销 —— 一份 40K 字符的「指引」会把
+/// 小窗口模型的历史预算整个吃掉。24K 字符 ≈ 中文 24K token 的最坏情况，
+/// 大于绝大多数真实指引（本仓库的 CLAUDE.md 约 12K），超出就头部截断
+/// 并说明 —— 指引文件的惯例是重要的写在前面。
+const GUIDE_MAX_CHARS: usize = 24_000;
+
+/// 读工作区根目录的项目指引文件（AGENTS.md / CLAUDE.md），包成提示词段。
+///
+/// # 为什么自动读，而 `.mcp.json` 却坚持「先问一次」
+///
+/// 两者的爆炸半径不同：`.mcp.json` 会**拉起子进程**（见 cortex-mcp
+/// config.rs 那段），指引文件只是进提示词的文本。文本注入的风险是
+/// 提示词注入 —— clone 一个陌生仓库，它自带的 AGENTS.md 能试图指挥
+/// 模型。这个权衡三家都做了同样的选择（Codex / Claude Code / goose
+/// 都自动读）：真正的防线不在读不读，而在权限闸门 —— 指引说破天，
+/// 写文件与执行命令照样要过 Risk × PermissionMode 那道闸。
+///
+/// # v1 的边界（记在这，别当成漏掉）
+///
+/// 不做 goose 的 @import 展开与子目录惰性注入 —— 前者要处理递归深度与
+/// git root 边界，后者要跟踪工具调用触达的目录。单文件先把「项目有话
+/// 对 agent 说」这条路打通，两个扩展等真实指引文件长出这些需求再说。
+#[must_use]
+pub fn project_guide(root: &str) -> Option<String> {
+    let dir = std::path::Path::new(root);
+    for name in GUIDE_FILES {
+        let path = dir.join(name);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (body, note) = if trimmed.chars().count() > GUIDE_MAX_CHARS {
+            let cut: String = trimmed.chars().take(GUIDE_MAX_CHARS).collect();
+            (
+                cut,
+                format!(
+                    "
+
+（{name} 过长，只注入了前 {GUIDE_MAX_CHARS} 字符）"
+                ),
+            )
+        } else {
+            (trimmed.to_string(), String::new())
+        };
+        return Some(format!(
+            "工作区根目录的 {name} 是这个项目给你的指引，遵循它：
+
+{body}{note}"
+        ));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +477,64 @@ mod tests {
             boundary(&desktop),
             boundary(&web),
             "边界说明必须逐字相同。两侧各写一份的话，「桌面能不能碰」             会随入口给出不同答案 —— 那是最难归因的一类差异"
+        );
+    }
+}
+
+#[cfg(test)]
+mod guide_tests {
+    use super::project_guide;
+
+    #[test]
+    fn agents_md_wins_over_claude_md() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("AGENTS.md"), "来自 AGENTS").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "来自 CLAUDE").unwrap();
+        let g = project_guide(dir.path().to_str().unwrap()).expect("该读到指引");
+        assert!(
+            g.contains("来自 AGENTS") && !g.contains("来自 CLAUDE"),
+            "两份都有时只取标准名那份 —— 同时注入等于让模型仲裁两份漂移的指令：{g}"
+        );
+    }
+
+    #[test]
+    fn claude_md_is_the_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("CLAUDE.md"), "存量项目的指引").unwrap();
+        let g = project_guide(dir.path().to_str().unwrap()).expect("该读到 CLAUDE.md");
+        assert!(
+            g.contains("存量项目的指引"),
+            "存量项目最常见的是 CLAUDE.md：{g}"
+        );
+    }
+
+    #[test]
+    fn empty_or_missing_guide_yields_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            project_guide(dir.path().to_str().unwrap()).is_none(),
+            "没有文件就没有指引段"
+        );
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "   
+  ",
+        )
+        .unwrap();
+        assert!(
+            project_guide(dir.path().to_str().unwrap()).is_none(),
+            "空白文件不该注入一段只有壳的「指引」"
+        );
+    }
+
+    #[test]
+    fn oversized_guide_is_truncated_with_a_note() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("AGENTS.md"), "字".repeat(30_000)).unwrap();
+        let g = project_guide(dir.path().to_str().unwrap()).expect("超长也要读");
+        assert!(
+            g.contains("过长") && g.chars().count() < 25_000,
+            "超长指引要截断并说明，否则把小窗口模型的历史预算整个吃掉"
         );
     }
 }

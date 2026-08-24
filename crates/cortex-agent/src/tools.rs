@@ -733,6 +733,23 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             source: ToolSource::Builtin,
         },
         ToolSpec {
+            name: "edit_file".into(),
+            description: "在文件里做一次精确替换：把 before 换成 after。                          before 必须在文件里**唯一**出现（带上足够的上下文行）；                          改动大半个文件时用 write_file 整体重写更直接"
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "相对工作区根的路径，或工作区外的绝对路径" },
+                    "before": { "type": "string", "description": "要被替换的原文，必须与文件内容逐字符一致（含缩进）且唯一" },
+                    "after": { "type": "string", "description": "替换后的新文本" }
+                },
+                "required": ["path", "before", "after"]
+            }),
+            risk: Risk::Write,
+            path_arg: Some("path"),
+            source: ToolSource::Builtin,
+        },
+        ToolSpec {
             name: "list_dir".into(),
             description: "列出目录条目。工作区外的路径用绝对路径，会请用户当场批准".into(),
             parameters: serde_json::json!({
@@ -742,6 +759,40 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             }),
             risk: Risk::Safe,
             path_arg: Some("path"),
+            source: ToolSource::Builtin,
+        },
+        ToolSpec {
+            name: "tree".into(),
+            description: "看一个目录的整体结构（带每个文件的行数）。认识一个项目                          先用它，别 list_dir 逐层摸。尊重 .gitignore"
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "相对工作区根的路径，或工作区外的绝对路径" },
+                    "depth": { "type": "integer", "description": "最多几层，默认 2；0 = 不限" }
+                },
+                "required": ["path"]
+            }),
+            risk: Risk::Safe,
+            path_arg: Some("path"),
+            source: ToolSource::Builtin,
+        },
+        ToolSpec {
+            name: "todo_write".into(),
+            description: "维护你自己的任务清单（markdown checklist），**整体覆写**。                          多步任务开工前先写下计划，每完成一步就更新 ——                           清单会每轮出现在你的上下文里，防止跑到第 6 轮忘了要干什么"
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "完整的任务清单 markdown，通常是 - [ ] / - [x] 列表。传空串清空" }
+                },
+                "required": ["content"]
+            }),
+            // Safe：它写的是**会话内存里的一段文字**，不碰文件系统、
+            // 不执行任何东西 —— 与 read_file 同级。执行在宿主
+            //（状态住在会话侧），不走下面 execute 的 match
+            risk: Risk::Safe,
+            path_arg: None,
             source: ToolSource::Builtin,
         },
         ToolSpec {
@@ -838,6 +889,37 @@ pub async fn execute(sandbox: &Sandbox, call: &ToolCall) -> ToolResult {
             }
         }
 
+        "edit_file" => {
+            let (Ok(p), Ok(before), Ok(after)) = (
+                arg_str(&call.arguments, "path"),
+                arg_str(&call.arguments, "before"),
+                arg_str(&call.arguments, "after"),
+            ) else {
+                return ToolResult::err("缺少 path / before / after 参数");
+            };
+            match sandbox.resolve(&p) {
+                Err(e) => ToolResult::err(e.to_string()),
+                Ok(path) => match std::fs::read_to_string(&path) {
+                    // 文件不存在时明说下一步：新文件该走 write_file，
+                    // 而不是让模型对着「读取失败」猜
+                    Err(e) => ToolResult::err(format!(
+                        "读取失败：{e}。文件不存在的话，新建请用 write_file"
+                    )),
+                    Ok(content) => match crate::edit::string_replace(&content, &before, &after) {
+                        Err(msg) => ToolResult::err(msg),
+                        Ok(new_content) => match std::fs::write(&path, new_content.as_bytes()) {
+                            Ok(()) => ToolResult::ok(format!(
+                                "已编辑 {p}（{} 行 -> {} 行）",
+                                before.lines().count(),
+                                after.lines().count()
+                            )),
+                            Err(e) => ToolResult::err(format!("写入失败：{e}")),
+                        },
+                    },
+                },
+            }
+        }
+
         "list_dir" => match arg_str(&call.arguments, "path") {
             Err(e) => ToolResult::err(e),
             Ok(p) => match sandbox.resolve(&p) {
@@ -873,6 +955,29 @@ pub async fn execute(sandbox: &Sandbox, call: &ToolCall) -> ToolResult {
                 run_shell(sandbox, &cmd, timeout).await
             }
         },
+
+        "tree" => match arg_str(&call.arguments, "path") {
+            Err(e) => ToolResult::err(e),
+            Ok(p) => {
+                let depth = call
+                    .arguments
+                    .get("depth")
+                    .and_then(serde_json::Value::as_u64)
+                    .map_or(2, |d| u32::try_from(d).unwrap_or(u32::MAX));
+                match sandbox.resolve(&p) {
+                    Err(e) => ToolResult::err(e.to_string()),
+                    Ok(path) => match crate::tree::render(&path, depth) {
+                        Ok(out) => ToolResult::ok(out),
+                        Err(e) => ToolResult::err(e),
+                    },
+                }
+            }
+        },
+
+        // 防御：todo_write 由宿主执行（状态在会话侧），`Turn::dispatch`
+        // 在进这里之前就该拦走。走到了说明分派漏了分支 —— 说清，别报
+        // 「未知工具」误导排查
+        "todo_write" => ToolResult::err("todo_write 该由宿主处理，落到 execute 是分派的 bug"),
 
         other => ToolResult::err(format!("未知工具：{other}")),
     }

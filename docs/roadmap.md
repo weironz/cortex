@@ -575,6 +575,49 @@ pi 干脆不谈这件事。
 两家参考实现都没回答这个问题：dsh 把审批策略放进一个可以被换掉的插件，
 pi 干脆不谈。
 
+### I · 与 Claude Code / Codex / Grok Build / goose 的差距 —— 核过代码的清单
+
+2026-08-24 起。四家对照（Claude Code 闭源、Codex 与 Grok Build 与 goose
+都开源了 harness），**每条差距都在本仓库代码里核过现状**，不是印象分。
+先说三样**不差反超**的，免得清单读起来像一无是处：
+
+- **OS 沙箱**：Linux landlock+seccomp（读也限，codex 只限写）、macOS
+  Seatbelt、纯白名单策略 —— 比 Claude Code 的纯权限路线硬，与 codex
+  同级。Windows 无内核沙箱改「有人在场逐条确认」，判据钉死在
+  `turn_for_env`。
+- **权限模型**：Risk 三档 × PermissionMode 三档 × 越界独立提问 +
+  per-session grants + 确认超时短路 —— 比三家公开资料里的都细。
+  MCP 外来工具一律 `Risk::Execute`、只有用户 trust 能降档。
+- **轮与连接解耦**：turn 在独立 task 里跑、断开重挂（`GET /runs/{id}`
+  回放+续订）、`DELETE` 停止 —— Claude Code 的后台轮次 2026 年才补齐
+  这个形状。
+
+差距按「价值 / 成本」排序，取件来源标明（goose = `D:/codes/_ref/goose`
+v1.45.0，Apache-2.0，能搬就不写）：
+
+| # | 差距 | 现状（核过的证据） | 取件 | 成本 |
+|---|---|---|---|---|
+| I1 | **精确编辑工具** | `write_file` 全量覆盖（`tools.rs:833` 就是 `std::fs::write`），零 patch/str_replace —— 局部改动只能整文件重写或让模型拼 sed | goose `developer/edit.rs`（512 行）：`{path, before, after}` 唯一匹配替换，0 匹配给相似提示、多匹配给行号 | 小 |
+| I2 | **项目指引文件（AGENTS.md）** | 工作区绑定只注入**路径**，不读任何指引文件 —— 三家都读（Codex `AGENTS.md`、CC `CLAUDE.md`、goose `.goosehints`+`AGENTS.md`），这是事实标准 | goose `hints/`（load_hints 1039 行 + @import 展开 488 行），信任姿态沿用 `.mcp.json` 那条：工作区自带内容注入前的边界要想清 | 小-中 |
+| I3 | **上下文压缩** | 只有进轮前裁剪（历史 50% 窗口、绝对顶 24K，`history.rs:63-76`）；轮内 8 个工具轮次无限累积；**撞窗 = 整轮失败**（`ContextLengthExceeded` 被抹成通用错误，不重试不压缩） | goose `context_mgmt/`（1169 行）+ `token_counter.rs`：0.8 阈值触发、快模型结构化摘要、可见性翻转（用户仍看得到原文）。类型层（`MessageMetadata` 双可见性）goose-provider-types 里已有 | 中-大 |
+| I4 | **todo/计划工具** | 无 —— 长任务跑到第 6 轮忘了自己要干什么，三家都有（CC TaskCreate、Codex plan、Grok plan mode） | goose `todo.rs`（202 行）+ moim 每轮注入模式：todo 不占消息历史、不被压缩 | 小 |
+| I5 | **搜索/结构工具** | 无 glob/grep/tree —— 模型只能 `list_dir` 逐层摸或拼 shell | goose 只有 `tree`（299 行，`ignore` crate）可搬；glob/grep goose 也没有（靠提示词教 rg），自己写或同样走提示词 | 小-中 |
+| I6 | **后台/长时命令** | shell 同步单发（默认 120s、封顶 600s，`tools.rs:885-887`），无 run_in_background —— 起个 dev server 就把一轮挂死 | goose `summon` 的后台任务簿记（~500 行：JoinHandle+cancel+load/peek） | 中 |
+| I7 | **子 agent 并行** | 无。三家三种原语：CC subagent 树、Codex 云容器 best-of-n、Grok 8-worktree —— cortex 的对应物该绑自己的 `Turn::run` 与会话，goose 的执行层**不可搬**（绑死它的 Agent） | 思路借 goose `summon`，实现自研 | 大 |
+| I8 | **hooks** | 无（CC/Grok 都有生命周期钩子跑确定性脚本） | — | 中，后置 |
+| I9 | **SKILL.md 开放标准兼容** | 已有技能系统（`skills_note` + `load_skill`），但格式是自己的 —— SKILL.md 已事实上跨厂商通用（同一份 skill 三家都能装） | 对齐格式即可 | 小 |
+| I10 | **MCP 客户端补洞** | 已有 stdio+HTTP，但 HTTP 自定义头没接上（带鉴权的 server 会 401，`hub.rs:381-388` 只 WARN 后裸连）、断线不自动重连、resources/prompts 不支持 | — | 小-中 |
+
+不追的，写清为什么：**apply_patch 的 V4A 格式**（codex 的 diff 语法）——
+str_replace 语义对模型更稳（0/多匹配可解释），三家实测都在收敛到
+string-replace 式编辑，V4A 是 codex 的历史包袱不是优势；**analyze 式
+tree-sitter 符号索引**（goose 2600 行 + 9 个语法 crate）—— 编译代价换的
+能力 shell+rg 够到八成，等真需求；**Agent Teams 式多 agent 通信** ——
+I7 都还没有，谈不上。
+
+> 进度：I1 ✅ I2 ✅ I4 ✅ I5(tree) ✅（2026-08-24，见 roadmap-done）；
+> I3 是下一个大件；I6-I10 未动。
+
 ---
 
 ## 已知但不排期

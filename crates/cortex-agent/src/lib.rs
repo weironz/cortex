@@ -15,10 +15,12 @@
 //! 用户唯一想绑的目录。
 
 pub mod diff;
+pub mod edit;
 pub mod egress;
 pub mod prompt;
 pub mod sandbox;
 pub mod tools;
+pub mod tree;
 pub mod turn;
 pub mod workspace;
 

@@ -372,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
         grants: grants::Grants::new(),
         outbox: outbox.clone(),
         max_rounds: DEFAULT_MAX_ROUNDS,
+        todos: turn::Todos::default(),
         context_window,
         persona: PERSONA,
         capabilities: CAPABILITIES,

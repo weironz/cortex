@@ -364,6 +364,18 @@ pub trait ToolHost: Send + Sync {
         )
     }
 
+    /// 记下模型自己维护的任务清单。**由宿主执行** —— 清单跟着会话走，
+    /// 而「会话」是宿主才有的概念（`Turn` 刻意无每轮状态）。
+    ///
+    /// # 默认实现是「这个宿主不记」，不是静默成功
+    ///
+    /// 假装记了比拒绝糟：模型会以为清单每轮都在，照着一个不存在的备忘
+    /// 干活。最小宿主（评测 harness）收到这条拒绝会促使模型把计划写进
+    /// 回答正文 —— 那正是没有清单时该有的退路。
+    async fn todo_write(&self, _arguments: &serde_json::Value) -> ToolResult {
+        ToolResult::err("这个宿主不保存任务清单。把你的计划直接写在回答里，别再调这个工具。")
+    }
+
     /// 问用户准不准。**必须在有限时间内返回。**
     ///
     /// # 默认实现是「没人回答」，不是「批准」
@@ -939,11 +951,11 @@ impl Turn {
         //
         // 算完一路带着走：确认要用、事件要用、落库也要用。
         //
-        // 只对 `write_file`：只有它手上同时有旧内容与新内容。shell 跑完
-        // 文件变成什么样，agent 并不知道，硬要显示就得每条命令前后扫一遍
-        // 工作区 —— 那是另一个数量级的事。
-        let preview = if call.name == "write_file" {
-            match (
+        // 只对 `write_file` 与 `edit_file`：只有它们手上算得出新内容。
+        // shell 跑完文件变成什么样，agent 并不知道，硬要显示就得每条命令
+        // 前后扫一遍工作区 —— 那是另一个数量级的事。
+        let preview = match call.name.as_str() {
+            "write_file" => match (
                 call.arguments.get("path").and_then(|v| v.as_str()),
                 call.arguments.get("content").and_then(|v| v.as_str()),
             ) {
@@ -952,9 +964,27 @@ impl Turn {
                     .ok()
                     .and_then(|r| crate::diff::preview_write(r.path(), content)),
                 _ => None,
-            }
-        } else {
-            None
+            },
+            // edit_file 的新内容要现算：读旧文 + 做一次替换。替换失败
+            //（0/多匹配）就没有预览 —— 那次执行也必然失败，确认框里
+            // 没 diff 无妨，用户拒不拒都改不到文件
+            "edit_file" => match (
+                call.arguments.get("path").and_then(|v| v.as_str()),
+                call.arguments.get("before").and_then(|v| v.as_str()),
+                call.arguments.get("after").and_then(|v| v.as_str()),
+            ) {
+                (Some(raw), Some(before), Some(after)) => {
+                    sandbox.classify(raw).ok().and_then(|r| {
+                        let path = r.path();
+                        let old_content = std::fs::read_to_string(path).ok()?;
+                        let new_content =
+                            crate::edit::string_replace(&old_content, before, after).ok()?;
+                        crate::diff::preview_write(path, &new_content)
+                    })
+                }
+                _ => None,
+            },
+            _ => None,
         };
 
         // ── 越界 + 「问了也没人答得上来」的环境 → 直接拒，不问 ──
@@ -1065,6 +1095,9 @@ impl Turn {
         } else if spec.name == "load_skill" {
             // 同上：正文在服务端的库里，不在文件系统上
             host.load_skill(&call.arguments).await
+        } else if spec.name == "todo_write" {
+            // 同上：清单跟着会话走，会话是宿主的概念
+            host.todo_write(&call.arguments).await
         } else if tools::is_computer_tool(&spec.name) {
             // 同上：这一组要的是显示与输入子系统，而那是平台相关的东西。
             // 判据用 `is_computer_tool` 而不是在这里再写一遍名字清单 ——

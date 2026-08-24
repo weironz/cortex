@@ -159,6 +159,16 @@ fn system_prompt_for(
     base.push_str(capabilities);
 
     let mut prompt = cortex_agent::workspace::brief(&base, workspace);
+    // 项目指引（AGENTS.md / CLAUDE.md）。跟着工作区走：没绑定就没有
+    // 「项目」这个概念。为什么自动读而不问一次，见 `project_guide`
+    if let Some(guide) = workspace.and_then(cortex_agent::workspace::project_guide) {
+        prompt.push_str(
+            "
+
+",
+        );
+        prompt.push_str(&guide);
+    }
     // 技能目录。空清单一律不印 —— 而且**同一个判据**决定了 `load_skill`
     // 进不进工具目录（见 `with_external`）
     if let Some(note) = cortex_agent::prompt::skills_note(skills) {
@@ -351,6 +361,10 @@ pub struct Engine {
     /// 而 `Engine` 正是「跑一轮所需的全部依赖」。
     pub runs: crate::runs::Runs,
     pub max_rounds: usize,
+    /// 各会话的任务清单（`todo_write` 存的）。**内存态，重启即清** ——
+    /// 清单是轮内工作记忆（「这次任务做到哪了」），不是数据：任务本身
+    /// 跑完就没了，跨重启还留着的清单只会指着一件早已结束的事。
+    pub todos: Todos,
     /// 模型的上下文窗口，决定历史能占多少 token（见 [`cortex_core::history`]）。
     ///
     /// 与 cortexd 各配各的：这一侧的模型由**用户本机**的配置决定，
@@ -750,6 +764,15 @@ impl Engine {
         // **不拍平**：goose 的 Image 块经 /llm/stream 无损透传，各家格式
         // 转换在供应商层免费完成 —— 这里转成文本反而是丢信息（CLAUDE.md
         // 的硬约束）。
+        // 任务清单：作为独立 user 消息插在本轮用户原话**之前**。
+        // 不进 system prompt —— 那会打穿前缀缓存（清单每轮都在变）；
+        // 不落库 —— 历史从 episode 重放，这条每轮现插，永远是最新值
+        if let Some(todo) = self.todos.get(&req.session_id) {
+            messages.push(cortex_llm::Message::user().with_text(format!(
+                "[当前任务清单 —— 你自己用 todo_write 维护的，完成一步就更新]
+{todo}"
+            )));
+        }
         let manifest = crate::attachments::render_manifest(&placements);
         let mut user_msg =
             cortex_llm::Message::user().with_text(format!("{user_content}{manifest}"));
@@ -782,6 +805,7 @@ impl Engine {
             image_prefs: req.image_prefs.clone(),
             computer: crate::computer::Computer::new(),
             drawn: std::sync::Mutex::new(Vec::new()),
+            todos: self.todos.clone(),
         };
         // 这一轮用哪个模型。逐轮的选择是**那一轮的属性**，而 `self.llm`
         // 是进程级的 —— 所以造一份带这一轮模型的副本（供应商是 Arc，
@@ -1065,6 +1089,43 @@ fn resolve_image_spec(
     )
 }
 
+/// 会话 → 任务清单。见 `Engine::todos`。
+#[derive(Clone, Default)]
+pub struct Todos(Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>);
+
+impl Todos {
+    /// `todo_write` 的正文上限。清单是**每轮**都注入上下文的常驻开销，
+    /// 5000 字符已经是一份 60 行的清单 —— 比这长的不是清单，是文档，
+    /// 该让模型写进文件里
+    const MAX_CHARS: usize = 5_000;
+
+    pub fn get(&self, session_id: &str) -> Option<String> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|m| m.get(session_id).cloned())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    fn set(&self, session_id: &str, content: &str) -> Result<usize, String> {
+        let n = content.chars().count();
+        if n > Self::MAX_CHARS {
+            return Err(format!(
+                "清单太长（{n} 字符，上限 {}）。清单只该有当前任务的步骤 —— 长篇内容写进工作区文件",
+                Self::MAX_CHARS
+            ));
+        }
+        if let Ok(mut m) = self.0.lock() {
+            if content.trim().is_empty() {
+                m.remove(session_id);
+            } else {
+                m.insert(session_id.to_string(), content.to_string());
+            }
+        }
+        Ok(n)
+    }
+}
+
 struct LocalHost {
     events: Arc<crate::runs::RunSink>,
     session_id: String,
@@ -1086,6 +1147,9 @@ struct LocalHost {
     /// 而那是**这一轮**的坐标系：跨轮复用的话，用户中途换了显示器分辨率，
     /// 点击会落在一个谁也不知道的地方
     computer: crate::computer::Computer,
+    /// 会话任务清单的入口 —— 与 `Engine` 里那份是同一个。
+    todos: Todos,
+
     /// 这一轮生成的图。
     ///
     /// # 为什么攒着而不是当场挂到消息上
@@ -1153,6 +1217,20 @@ impl ToolHost for LocalHost {
     /// 那句一句话说明，而那句话读起来像一条完整的指令（「按公司模板写周报」）
     /// —— 它会照着自己脑补的模板写一份交上去。那次失败**没有任何征兆**：
     /// 没有报错，只有一份不符合模板的周报。所以错误里必须明说这件事。
+    async fn todo_write(&self, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
+        let content = arguments
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        match self.todos.set(&self.session_id, content) {
+            Err(e) => cortex_agent::ToolResult::err(e),
+            Ok(0) => cortex_agent::ToolResult::ok("清单已清空"),
+            Ok(n) => cortex_agent::ToolResult::ok(format!(
+                "已记下（{n} 字符）。清单每轮都会出现在你的上下文里，完成一步就更新它"
+            )),
+        }
+    }
+
     async fn load_skill(&self, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
         let Some(name) = arguments.get("name").and_then(|v| v.as_str()) else {
             return cortex_agent::ToolResult::err(

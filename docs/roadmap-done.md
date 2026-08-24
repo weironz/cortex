@@ -4,6 +4,46 @@
 
 ---
 
+## 2026-08-24 · 差距清单 I 节的第一批：edit_file / tree / todo_write / 项目指引
+
+对照 Claude Code / Codex / Grok Build / goose 逐项核代码得出差距清单
+（roadmap I 节，含三样不差反超的），当天落地四件，全部从 goose 取件或
+借其模式（Apache-2.0，NOTICE 已记）：
+
+### I1 · `edit_file` 精确替换 —— **已完成**
+
+`crates/cortex-agent/src/edit.rs`。此前改文件只有 `write_file` 全量覆盖。
+搬的重点不是 `replacen` 那一行，是**失配时的错误提示**：0 匹配给「你是
+不是想找这段」的相似片段（失配九成是缩进差一格）+ 文件预览，多匹配给
+前两处行号上下文。确认框的 diff 预览对 `edit_file` 要**现算**（读旧文 +
+做一次替换再 diff）—— 替换必然失败时预览为 None，用户批不批都改不到文件。
+
+### I2 · 项目指引（AGENTS.md / CLAUDE.md）—— **已完成**
+
+`workspace::project_guide`。绑定工作区后读根目录指引进系统提示词，
+AGENTS.md（三家收敛的事实标准）优先、CLAUDE.md（存量最多）兜底，
+**只取其一** —— 两份都有时多半是复制漂移，同时注入等于让模型仲裁。
+为什么自动读而 `.mcp.json` 坚持先问：后者拉起子进程，前者只是文本，
+文本注入的真正防线在权限闸门。@import 展开与子目录惰性注入刻意没做，
+边界记在函数注释里。
+
+### I4 · `todo_write` 任务清单 —— **已完成**
+
+goose 的 todo+moim 模式：模型整体覆写一份 markdown checklist，每轮以
+独立 user 消息注入在本轮用户原话之前 —— **不进 system prompt**（会打穿
+前缀缓存）、**不落库**（历史从 episode 重放，注入每轮现插永远是最新值）。
+状态在 `Engine::todos`（内存态，重启即清 —— 清单是轮内工作记忆不是数据）。
+执行走宿主（`ToolHost::todo_write`），最小宿主的默认实现是礼貌拒绝而不是
+静默成功 —— 假装记了比拒绝糟。
+
+### I5 · `tree` 目录树 —— **已完成**
+
+`crates/cortex-agent/src/tree.rs`（goose 同款，`ignore` crate）。认识一个
+项目从五次 `list_dir` 变成一眼；带行数标注、尊重 .gitignore。超大输出由
+`MAX_TOOL_OUTPUT_CHARS` 的统一截断兜底，不另设上限。
+
+---
+
 ## 2026-08-16 ~ 17 · 拆分之后的收尾：备份、身份、以及一批「说了假话的地方」
 
 这一批的共同点是**没有一件是靠读代码发现的**：备份是照着 roadmap 去修一个
