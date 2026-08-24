@@ -195,6 +195,9 @@ services:
       CORTEX_LLM_MODEL: ${CORTEX_LLM_MODEL:-}
       CORTEX_LLM_CHEAP_MODEL: ${CORTEX_LLM_CHEAP_MODEL:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # 联网检索。空 = 这个部署没有 web_search 工具（它整个不进目录）
+      CORTEX_SEARCH_API_KEY: ${CORTEX_SEARCH_API_KEY:-}
+      CORTEX_SEARCH_BASE_URL: ${CORTEX_SEARCH_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # 用户自带 key 的信封加密主密钥。**没有它就存不了自带 key**

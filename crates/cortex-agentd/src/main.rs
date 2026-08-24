@@ -52,6 +52,7 @@ mod request_tenant;
 mod routes;
 mod runner;
 mod sandbox_proxy;
+mod search;
 mod sessions;
 mod skills;
 mod snapshot;

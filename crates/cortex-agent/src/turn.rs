@@ -376,6 +376,19 @@ pub trait ToolHost: Send + Sync {
         ToolResult::err("这个宿主不保存任务清单。把你的计划直接写在回答里，别再调这个工具。")
     }
 
+    /// 上网搜一下。**由宿主执行** —— key 在服务端（沙箱容器的出网是
+    /// 白名单管着的，给它开搜索域名等于开一条往外发任意字符串的路）。
+    ///
+    /// # 默认实现是「这个宿主上不了网」，不是编几条结果
+    ///
+    /// 编结果是这一组默认实现里最危险的一种：模型会把编出来的 URL
+    /// 当成真的引用给用户。
+    async fn web_search(&self, _arguments: &serde_json::Value) -> ToolResult {
+        ToolResult::err(
+            "这个 agent 进程上不了网（它没有可打的服务端）。             不要凭记忆编造搜索结果或链接 —— 告诉用户这条路在当前环境下不可用。",
+        )
+    }
+
     /// 查 / 读用户的资料库。**由宿主执行** —— 材料在服务端的库里，
     /// 而 `tools::execute` 那条路是纯文件系统与 shell（与 `load_skill`
     /// 同一个理由）。
@@ -1141,6 +1154,8 @@ impl Turn {
         } else if spec.name == "load_skill" {
             // 同上：正文在服务端的库里，不在文件系统上
             host.load_skill(&call.arguments).await
+        } else if spec.name == "web_search" {
+            host.web_search(&call.arguments).await
         } else if tools::is_library_tool(&spec.name) {
             // 同上：材料在服务端的库里，不在文件系统上
             host.library(&spec.name, &call.arguments).await

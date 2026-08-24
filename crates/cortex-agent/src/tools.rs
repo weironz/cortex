@@ -535,6 +535,41 @@ pub fn image_spec() -> ToolSpec {
     }
 }
 
+/// 联网检索。
+///
+/// # 为什么它不是「读网页」
+///
+/// 只回搜索结果的摘要与 URL，不抓正文。抓正文要处理反爬、编码、
+/// 超时、以及「一页 300KB 的 HTML 塞进上下文」—— 而模型要的通常
+/// 就是那几句摘要。真要读某一页时，那是另一个工具（还没有）。
+#[must_use]
+pub fn web_search_spec() -> ToolSpec {
+    ToolSpec {
+        name: "web_search".into(),
+        description: "上网搜一下。回的是搜索结果的标题、链接与摘要 ——                       不是网页正文。用它来查你不知道或可能已经过时的事实                      （新版本号、今天的新闻、某个 API 的现状）"
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "搜索词" },
+                "limit": { "type": "integer", "description": "最多回几条，默认 5，上限 5" }
+            },
+            "required": ["query"]
+        }),
+        // ⚠️ **不是 Safe。** 别的只读工具读的是用户自己的东西；
+        // 这一个**把用户的话发到第三方服务上**。搜索词里完全可能带着
+        // 上下文里的私密信息（「张三的合同里那个违约金条款」），
+        // 而那句话一旦发出去就收不回来了 —— 与截屏同一类风险：
+        // 不是「改了什么」，是「泄露了什么」。
+        //
+        // Write 档而不是 Execute：它花钱、有外发，但不碰这台机器上的
+        // 任何东西，与「写一个文件」同一级
+        risk: Risk::Write,
+        path_arg: None,
+        source: ToolSource::Builtin,
+    }
+}
+
 /// 资料库的两个工具 —— **检索 + 按段读**。
 ///
 /// # 为什么是两个而不是一个「读整份」

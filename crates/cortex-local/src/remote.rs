@@ -228,6 +228,20 @@ impl Remote {
             .map_err(|e| CortexError::Invalid(format!("解析技能正文失败：{e}")))
     }
 
+    /// `POST /search` —— 联网检索。key 在服务端，见 `cortex_agentd::search`。
+    pub async fn web_search(&self, query: &str, limit: Option<i64>) -> Result<serde_json::Value> {
+        let resp = self
+            .auth(self.http.post(self.url("/search")))
+            .json(&serde_json::json!({ "query": query, "limit": limit }))
+            .send()
+            .await
+            .map_err(map_transport)?;
+        let resp = checked(resp).await?;
+        resp.json()
+            .await
+            .map_err(|e| CortexError::Invalid(format!("解析搜索结果失败：{e}")))
+    }
+
     /// `POST /library/search` —— 资料库全文检索。
     ///
     /// 回的是 `[{item_id, item_name, ord, body, rank}]`。**原样透传**给

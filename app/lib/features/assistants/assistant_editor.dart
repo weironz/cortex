@@ -281,6 +281,7 @@ class _ToolToggles extends StatelessWidget {
     ('write_file', '写文件'),
     ('edit_file', '改文件'),
     ('shell', '执行命令'),
+    ('web_search', '联网检索'),
     ('tree', '看目录结构'),
     ('generate_image', '画图'),
   ];

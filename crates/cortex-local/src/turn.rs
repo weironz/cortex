@@ -211,6 +211,15 @@ struct Caps {
     has_skills: bool,
     /// 用户开了电脑操作，**且**这个构建与这个执行环境真的做得到。
     can_use_computer: bool,
+    /// 够得着联网检索那条路（有服务端）。
+    ///
+    /// 判据与生图**同源**：都是「有没有可打的服务端」。服务端配没配
+    /// 搜索 key 不在这里问 —— 那要每轮多一次同步往返插在用户等回复的
+    /// 路径上。没配时那次调用回的是一句**用户能处理**的话
+    /// （「去 .env 里设 CORTEX_SEARCH_API_KEY」），而这正是
+    /// `can_generate_images` 那段文档定下的判据。
+    can_search: bool,
+
     /// 够得着资料库那条路（有服务端）。
     ///
     /// **不看「库里有没有东西」** —— 与技能那条相反：技能目录**每轮都印在
@@ -223,7 +232,11 @@ struct Caps {
 impl Caps {
     /// 有没有任何一样。`with_external` 用它决定要不要重建目录。
     const fn any(self) -> bool {
-        self.can_draw || self.has_skills || self.can_use_computer || self.can_use_library
+        self.can_draw
+            || self.has_skills
+            || self.can_use_computer
+            || self.can_use_library
+            || self.can_search
     }
 }
 
@@ -261,6 +274,9 @@ fn with_external(
     // 见 `Caps::can_use_library` 上那段
     if caps.can_use_library {
         specs.extend(cortex_agent::tools::library_specs());
+    }
+    if caps.can_search {
+        specs.push(cortex_agent::tools::web_search_spec());
     }
     // ⚠️ 与提示词里那段说明同生共死（同 `has_skills` 那条）：判据是同一个
     // `can_use_computer`。摆了工具不讲坐标系，模型会一直点偏；讲了坐标系
@@ -728,6 +744,7 @@ impl Engine {
             // 与生图同一个判据（有没有可打的服务端）—— 复用而不是各写一遍：
             // 各写各的话，判错的症状是模型调一个必然失败的工具
             can_use_library: can_draw,
+            can_search: can_draw,
         };
         // 这个智能体关掉了哪些工具。**与提示词同源**：换的人设与关掉的
         // 工具来自同一个 brief，各取各的话会出现「人设是大厨、工具却是
@@ -1275,6 +1292,30 @@ impl ToolHost for LocalHost {
         }
     }
 
+    async fn web_search(&self, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
+        let Some(query) = arguments.get("query").and_then(|v| v.as_str()) else {
+            return cortex_agent::ToolResult::err("缺少 query 参数（要搜什么）");
+        };
+        let limit = arguments.get("limit").and_then(serde_json::Value::as_i64);
+        match self.remote.web_search(query.trim(), limit).await {
+            Ok(hits) => {
+                let empty = hits.as_array().is_none_or(|a| a.is_empty());
+                if empty {
+                    // 空结果与「上不了网」是两回事，说清哪一种 ——
+                    // 混起来的话模型会把一次真的「没搜到」说成「我上不了网」
+                    cortex_agent::ToolResult::ok(format!(
+                        "没有搜到「{query}」相关的结果。换个说法再试一次。"
+                    ))
+                } else {
+                    cortex_agent::ToolResult::ok(hits.to_string())
+                }
+            }
+            // 服务端那句话**原样带上** —— 没配 key 时它写的是用户能照做的
+            // 那一步，在这里改写成「搜索失败」等于把它扔掉
+            Err(e) => cortex_agent::ToolResult::err(format!("联网检索失败：{e}")),
+        }
+    }
+
     async fn library(&self, tool: &str, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
         match tool {
             "library_search" => {
@@ -1540,6 +1581,50 @@ mod tests {
         assert!(
             !direct.tool_names().contains(&"generate_image"),
             "直连模式没有可打的服务端。摆出来的话，模型会答应画图然后失败 ——              而那条失败用户什么都做不了。实际：{:?}",
+            direct.tool_names()
+        );
+    }
+
+    /// 联网检索跟着「够不够得着服务端」走，且**关得掉**。
+    ///
+    /// 后半句是与 J2 的交叉点：`web_search` 把用户的话发到第三方服务上，
+    /// 所以「这个智能体不许上网」必须真的做得到 —— 只在编辑页画一个
+    /// 开关而目录照给，是这个功能上最坏的一种「造好了没人调用」。
+    #[test]
+    fn 联网检索够得着才给且关得掉() {
+        let with_server = chat_turn_for(
+            8,
+            &[],
+            Caps {
+                can_search: true,
+                ..Caps::default()
+            },
+            &[],
+        );
+        assert!(
+            with_server.tool_names().contains(&"web_search"),
+            "够得着服务端就该有。实际：{:?}",
+            with_server.tool_names()
+        );
+
+        let muted = chat_turn_for(
+            8,
+            &[],
+            Caps {
+                can_search: true,
+                ..Caps::default()
+            },
+            &["web_search".to_string()],
+        );
+        assert!(
+            !muted.tool_names().contains(&"web_search"),
+            "智能体关掉了它就不许在目录里 —— 它会把用户的话发到第三方服务上"
+        );
+
+        let direct = chat_turn_for(8, &[fake_external("docs", "search")], Caps::default(), &[]);
+        assert!(
+            !direct.tool_names().contains(&"web_search"),
+            "直连模式没有可打的服务端。实际：{:?}",
             direct.tool_names()
         );
     }
