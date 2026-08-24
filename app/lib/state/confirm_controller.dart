@@ -6,6 +6,7 @@ import '../api/api_exception.dart';
 import '../api/cortex_api.dart';
 import '../models/pending_confirmation.dart';
 import 'app_providers.dart';
+import 'notify_prefs.dart';
 
 /// What happened to a prompt that is no longer answerable.
 ///
@@ -160,7 +161,13 @@ class ConfirmController extends Notifier<ConfirmState> {
     final stamped = sessionId == null
         ? request
         : request.withSession(sessionId);
+    final isNew = !state.pending.any((p) => p.token == stamped.token);
     state = state.copyWith(pending: _merge(state.pending, [stamped]));
+    // 响一声。**只为新来的那一条** —— `offer` 会被重复调到（流里来一次、
+    // 恢复端点再报一次），每次都响的话同一个确认框会响两下
+    if (isNew && ref.read(notifyPrefsProvider).onConfirm) {
+      unawaited(playAlert());
+    }
     _ensureTicking();
   }
 

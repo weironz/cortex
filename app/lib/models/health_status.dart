@@ -12,6 +12,7 @@ class HealthStatus {
     this.role = roleCortexd,
     this.server,
     this.computerUse = false,
+    this.sandbox,
   });
 
   final String status;
@@ -41,6 +42,15 @@ class HealthStatus {
   ///
   /// 缺字段读成 `false`：老 agent 上这个能力本来就不存在。
   final bool computerUse;
+
+  /// 这个 agent 进程受什么保护 —— agent 自己实测出来的一句话
+  /// （`cortex_agent::status_line_for`）。`null` = 老服务端不报，
+  /// 或者对端是 cortexd（它不跑工具）。
+  ///
+  /// **原样显示，不在客户端重新推断**：推断要复制一份平台矩阵，
+  /// 而那份复制品迟早与真实执行环境对不上 —— 而这一句恰恰是
+  /// 「那些确认框是不是唯一的闸」的答案。
+  final String? sandbox;
 
   /// 答话的是本地 agent 吗。
   bool get isLocalAgent => role == roleLocalAgent;
@@ -121,6 +131,7 @@ class HealthStatus {
         ? ServerLink.fromJson(json['server'] as Map<String, dynamic>)
         : null,
     computerUse: json['computer_use'] as bool? ?? false,
+    sandbox: json['sandbox'] as String?,
   );
 }
 

@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme.dart';
 import 'pages/about_page.dart';
 import 'pages/appearance_page.dart';
+import 'pages/notifications_page.dart';
+import 'pages/permissions_page.dart';
 import 'pages/computer_use_page.dart';
 import 'pages/computer_use_section.dart';
 import 'pages/skills_page.dart';
@@ -155,6 +157,22 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       hint: '主题 · 动效',
       icon: Icons.palette_outlined,
       page: const AppearancePage(),
+      group: _NavGroup.prefs,
+      gate: null,
+    ),
+    (
+      label: '通知',
+      hint: '提示音',
+      icon: Icons.notifications_outlined,
+      page: const NotificationsPage(),
+      group: _NavGroup.prefs,
+      gate: null,
+    ),
+    (
+      label: '权限与沙箱',
+      hint: '默认档 · 这台机器的保护',
+      icon: Icons.shield_outlined,
+      page: const PermissionsPage(),
       group: _NavGroup.prefs,
       gate: null,
     ),

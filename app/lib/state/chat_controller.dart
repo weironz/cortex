@@ -19,6 +19,7 @@ import '../models/assistant.dart';
 import 'assistant_controller.dart';
 import 'skill_controller.dart';
 import 'chat_state.dart';
+import 'notify_prefs.dart';
 import 'model_controller.dart';
 import 'confirm_controller.dart';
 import 'project_controller.dart';
@@ -1241,6 +1242,12 @@ class ChatController extends Notifier<ChatState> {
     // 而「什么都没有」与「从来没跑过」长得一模一样。于是「派出去干活」
     // 这个能力在观测侧缺最后一格：活干完了没人告诉你。
     final away = turn.sessionId != state.activeSessionId;
+    // 跑完了、而人在别处 —— 响一声把他叫回来。**盯着看的人不响**：
+    // 那会变成每轮一响的噪音（判据与上面那个 `finished` 徽章同源，
+    // 各判一次的话会出现「响了但没徽章」这种说不通的组合）
+    if (away && ref.read(notifyPrefsProvider).onFinish) {
+      unawaited(playAlert());
+    }
     state = state.copyWith(
       streaming: null,
       sendError: error,

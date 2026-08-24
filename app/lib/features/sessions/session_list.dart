@@ -17,6 +17,7 @@ import '../../core/session_export.dart';
 import '../../state/export_controller.dart';
 import '../../state/project_controller.dart';
 import '../../state/sidebar_sections.dart';
+import '../../state/sidebar_sort.dart';
 import '../projects/project_actions.dart';
 import '../../state/session_search_controller.dart';
 import '../../widgets/empty_state.dart';
@@ -51,6 +52,7 @@ class SessionList extends ConsumerWidget {
                 tooltip: '新建项目',
                 icon: const Icon(Icons.create_new_folder_outlined),
               ),
+            const _SortMenu(),
             _ArchivedToggle(
               value: state.showArchived,
               onChanged: controller.setShowArchived,
@@ -125,7 +127,20 @@ class SessionList extends ConsumerWidget {
       );
     }
 
-    final rows = _rows(sessions, projects, ref.watch(sidebarSectionsProvider));
+    // 排序在**分组之前**：分组管结构、排序管顺序，两件事互不排斥
+    //（设计稿把菜单切成两组正是这个意思）。反过来做的话，
+    // 「优先级」那一档只会在每个项目内部生效，而用户要的是全局那一眼
+    final sorted = sortSessions(
+      sessions,
+      ref.watch(sidebarSortProvider),
+      awaiting: ref.watch(awaitingConfirmSessionsProvider),
+      finished: state.finished,
+      running: {
+        ...state.unfinished,
+        if (state.streaming?.sessionId case final id?) id,
+      },
+    );
+    final rows = _rows(sorted, projects, ref.watch(sidebarSectionsProvider));
 
     return ListView.builder(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
@@ -176,7 +191,13 @@ class SessionList extends ConsumerWidget {
           pinned: group.project?.pinned ?? false,
           onDelete: () => deleteProject(context, ref, group.project!),
         ),
-        _SessionRow(:final session) => _SessionTile(
+        _SessionRow(:final session) => _Reorderable(
+          // 手动档才挂拖拽。别的档里拖动毫无意义（松手之后顺序被
+          // 重新算掉），而一个能拖但拖了不算数的行比不能拖更糟
+          enabled: ref.watch(sidebarSortProvider).mode == SidebarSort.manual,
+          id: session.id,
+          visibleIds: sorted.map((x) => x.id).toList(growable: false),
+          child: _SessionTile(
           key: ValueKey(session.id),
           session: session,
           selected: session.id == state.activeSessionId,
@@ -213,6 +234,7 @@ class SessionList extends ConsumerWidget {
               _archive(context, ref, session, !session.archived),
           onMove: () => _move(context, ref, session, projects.projects),
           onExport: (format) => _export(context, ref, session, format),
+          ),
         ),
       },
     );
@@ -1619,6 +1641,108 @@ class _SearchTile extends StatelessWidget {
       TextSpan(style: style, children: spans),
       maxLines: maxLines,
       overflow: TextOverflow.ellipsis,
+    );
+  }
+}
+
+/// 排序方式那三档。
+///
+/// # 为什么是菜单不是一排按钮
+///
+/// 这一栏顶上已经有三个图标了，再平铺三个排序会让「常用」与「偶尔换一次」
+/// 抢同样的位置 —— 而排序方式是设一次就不动的东西。菜单里带勾，一眼看得出
+/// 当前是哪一档（不带勾的话，用户点开只能靠回忆）。
+class _SortMenu extends ConsumerWidget {
+  const _SortMenu();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final sort = ref.watch(sidebarSortProvider);
+    return PopupMenuButton<SidebarSort>(
+      key: const ValueKey('sidebar:sort'),
+      tooltip: '排序方式',
+      iconSize: 18,
+      icon: const Icon(Icons.swap_vert_rounded),
+      onSelected: ref.read(sidebarSortProvider.notifier).setMode,
+      itemBuilder: (context) => [
+        for (final m in SidebarSort.values)
+          CheckedPopupMenuItem(
+            key: ValueKey('sidebar:sort:${m.name}'),
+            value: m,
+            checked: sort.mode == m,
+            child: Text(
+              // 手动那一档要说清怎么用 —— 一个只写「手动排序」的菜单项
+              // 选完之后界面没有任何变化，用户不知道下一步该做什么
+              m == SidebarSort.manual ? '手动排序（拖动）' : m.label,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// 手动排序那一档的拖拽壳。
+///
+/// # 为什么是 Draggable + DragTarget，不是 ReorderableListView
+///
+/// 左栏是一串**异构**的行：段头、项目组头、会话行混在一个
+/// `ListView.builder` 里。`ReorderableListView` 要求每一项都可拖、
+/// 且它自己管顺序 —— 套上去等于把段头也变成可拖的，而拖一个段头
+/// 是没有意义的动作。
+///
+/// 所以只给会话行挂：拖起来一条，落在另一条上就插到它前面。
+class _Reorderable extends ConsumerWidget {
+  const _Reorderable({
+    required this.enabled,
+    required this.id,
+    required this.visibleIds,
+    required this.child,
+  });
+
+  final bool enabled;
+  final String id;
+
+  /// 当前屏幕上这一串的顺序 —— 落点要按它算索引。
+  final List<String> visibleIds;
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (!enabled) return child;
+    final theme = Theme.of(context);
+    return DragTarget<String>(
+      onWillAcceptWithDetails: (d) => d.data != id,
+      onAcceptWithDetails: (d) {
+        final at = visibleIds.indexOf(id);
+        if (at < 0) return;
+        ref.read(sidebarSortProvider.notifier).reorder(visibleIds, d.data, at);
+      },
+      builder: (context, candidate, _) => DecoratedBox(
+        decoration: BoxDecoration(
+          // 落点提示画在**上边**：插入语义是「放到这一条之前」，
+          // 画在整行上的话用户以为是「放进这一条里」（那是移动到项目）
+          border: candidate.isEmpty
+              ? null
+              : Border(
+                  top: BorderSide(color: theme.colorScheme.primary, width: 2),
+                ),
+        ),
+        child: LongPressDraggable<String>(
+          data: id,
+          // 长按而不是直接拖：这一列的主要动作是**点开**，
+          // 直接拖会让每一次「点歪一点」都变成一次意外的重排
+          feedback: Material(
+            color: Colors.transparent,
+            child: Opacity(
+              opacity: 0.9,
+              child: SizedBox(width: 240, child: child),
+            ),
+          ),
+          childWhenDragging: Opacity(opacity: 0.35, child: child),
+          child: child,
+        ),
+      ),
     );
   }
 }
