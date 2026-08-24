@@ -195,17 +195,23 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  unreachable
-                      ? '还没连上服务端。先确认地址，再填账号。'
-                      : '登录状态会记住 30 天，关掉再打开不用重来。',
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: unreachable ? scheme.error : scheme.onSurfaceVariant,
-                    height: 1.5,
+                // 这里曾有一句常驻副标题「登录状态会记住 30 天，关掉再打开
+                // 不用重来」。删了：记住登录是行业默认预期，不值得占登录页
+                // 视觉中心一行（Claude / ChatGPT 的登录页都不写）；而只要
+                // 还存在任何被误踢的路径，这句承诺就摆在「登录已过期」的
+                // 红字正上方 —— 读起来像嘲讽。正确的位置是修掉误踢，
+                // 而不是提前辩解。unreachable 那句保留：它有用户可做的事
+                if (unreachable) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    '还没连上服务端。先确认地址，再填账号。',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.error,
+                      height: 1.5,
+                    ),
                   ),
-                ),
+                ],
                 const SizedBox(height: 26),
 
                 // ── 地址字段 ──
@@ -461,48 +467,19 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                           ],
                         ),
                         const SizedBox(height: 4),
-                        // 强调用真的粗体，**不要在 Text 里写 Markdown 星号** ——
-                        // 那是纯文本组件，星号会原样显示给用户看。
-                        // 这个错在 0.1.6 发版前的目视冒烟里被抓到，
-                        // 而所有 widget 测试都是绿的：它们断言的是文字内容，
-                        // 而字面星号恰恰**在**文字内容里
-                        Text.rich(
-                          TextSpan(
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                            ),
-                            children: [
-                              const TextSpan(text: '不连服务器也能对话、能读写你本机的文件。'),
-                              TextSpan(
-                                text: '这段时间不会同步到服务端',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  color: scheme.onSurface,
-                                ),
-                              ),
-                              const TextSpan(
-                                text: ' —— 对话排进本地队列，接上服务器后自动补回去。\n',
-                              ),
-                              // **这一句此前没有，而它是离线模式最容易被误读的地方。**
-                              //
-                              // `cortex-local` 的 `list_sessions` 是纯转发
-                              // （它不依赖 cortex-store，本机没有第二个库），
-                              // 所以离线时会话列表只剩这次新建的草稿。
-                              // 不说的话，用户看到的是「我昨天那些对话没了」——
-                              // 而它们其实好好地在服务器上。
-                              TextSpan(
-                                text: '也看不到以前的会话',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  color: scheme.onSurface,
-                                ),
-                              ),
-                              const TextSpan(
-                                text:
-                                    ' —— 历史在服务器上，接上就全回来。\n'
-                                    '需要先在设置里配好本机模型（也可以进去之后再配）。',
-                              ),
-                            ],
+                        // **一行说完。** 这里曾是五行说明带两处粗体警示
+                        // （不同步 / 看不到以前的会话 / 要配模型）—— 登录页上
+                        // 它的视觉重量压过了主表单，而那几句后果是**进入离线
+                        // 之后**才用得上的知识。现在它们由 `_OfflineBanner`
+                        // 常驻横幅在正确的时刻说（auth_controller 里的原则：
+                        // 消息在它有用的那一刻出现，而不是一直挂着）。
+                        // 登录页只回答一个问题：这条路是什么、能不能走
+                        Text(
+                          '不连服务器也能对话、读写本机文件。不同步、看不到'
+                          '服务器上的历史 —— 接上之后都回来。',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                            height: 1.5,
                           ),
                         ),
                       ],

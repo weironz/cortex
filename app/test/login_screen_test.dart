@@ -250,21 +250,37 @@ void main() {
     expect(link, findsNothing, reason: '展开之后那行小字该让位，否则同一件事在屏幕上有两个入口');
   });
 
-  testWidgets('离线卡片说清「看不到以前的会话」', (tester) async {
+  testWidgets('离线卡片一行说清后果：不同步、看不到历史', (tester) async {
+    await _pumpLogin(tester, handler: (_) async => _json(_health));
+
+    // 2026-08-24 收敛：五行说明带两处粗体压过了主表单，详细后果搬去了
+    // 进入离线之后的 `_OfflineBanner`（消息在它有用的那一刻出现）。
+    // 登录页只留一行 —— 但两个要点必须都在：「不同步」防的是数据丢失的
+    // 误解，「看不到历史」防的是「我昨天那些对话没了」的恐慌
+    final line = find.textContaining('看不到');
+    expect(line, findsOneWidget);
+    expect(
+      (tester.widget<Text>(line).data)!,
+      contains('不同步'),
+      reason: '「不同步」与「看不到历史」是两件事，一行里都要说到',
+    );
+    expect(
+      find.textContaining('接上之后都回来'),
+      findsOneWidget,
+      reason: '只说损失不说恢复，用户会把「暂时看不到」读成「没了」',
+    );
+  });
+
+  testWidgets('登录页不再承诺「记住 30 天」', (tester) async {
     await _pumpLogin(tester, handler: (_) async => _json(_health));
 
     expect(
-      find.textContaining('也看不到以前的会话'),
-      findsOneWidget,
+      find.textContaining('30 天'),
+      findsNothing,
       reason:
-          'cortex-local 的 list_sessions 是纯转发，离线时列表只剩本机草稿。'
-          '不说的话，用户看到的是「我昨天那些对话没了」—— '
-          '而它们好好地在服务器上',
-    );
-    expect(
-      find.textContaining('这段时间不会同步到服务端'),
-      findsOneWidget,
-      reason: '「不同步」与「看不到历史」是两件事，都要说',
+          '记住登录是行业默认预期，不值得占登录页一行；而只要还存在任何'
+          '被误踢的路径，这句承诺就摆在「登录已过期」红字的正上方，读起来'
+          '像嘲讽。正确的做法是修掉误踢（RefreshOutcome 那一批），不是辩解',
     );
   });
 

@@ -131,33 +131,71 @@ class AuthState {
 /// `auth: "token" | "disabled"`. So a loopback dev daemon running
 /// `CORTEX_AUTH=disabled` lets the user straight through, and a real one asks —
 /// with no setting to get wrong in either direction.
-/// 把人送回登录页的三条路径。
+/// 把人送回登录页的几条路径。
 ///
 /// # 为什么值得一个枚举
 ///
-/// 三者对用户是同一句红字，对我们却是三个不同的 bug 家族：
+/// 三者对用户是差不多的一句红字，对我们却是三个不同的 bug 家族：
 ///
-/// * [cooloff] —— **客户端时序**。刚续期成功，3 秒内又有 401 打进来。
-///   多半是「一批请求带着旧 token 同时发出去、续期只救得了第一个」，
-///   也就是雪崩式 401。修法在请求侧（预续期、或者让迟到的 401 认得出
-///   自己已经过时），不在凭据上。
 /// * [noRefreshToken] —— **本地存储**。手上压根没有 refresh token。
 ///   可能从来没存下来（存储写失败、Web 上被清），也可能被
 ///   `restoreSession` 里那次 `forgetToken()` 删掉了。
-/// * [refreshRejected] —— **服务端真的拒了**。这一条才需要看服务端：
-///   被轮换过、判成重放、或者真的过期。配套日志在 `restoreSession` 的
-///   catch 里，带状态码。
+/// * [refreshRejected] —— **服务端真的拒了**（401/403）。这一条才需要看
+///   服务端：被轮换过、判成重放、或者真的过期。配套日志在
+///   `restoreSession` 的 catch 里，带状态码。
+/// * [refreshStalled] —— **续期一直换不成，但不是凭据的错**（5xx、限流、
+///   网络抖动），连着几次都这样。凭据**没有删**：下次启动还能拿它自动续。
+/// * [refreshFutile] —— **续期一直成功，可新 token 照样被拒**，连着几次。
+///   refresh 路由永远答应的话，上面两条都到不了 —— 这是那族「静默坏死」
+///   唯一的终态（详见 `_futileRefreshes`）。
 ///
-/// 2026-08-23 加的：用户报「开着不动几十分钟就掉」，而这三条在日志里
+/// 2026-08-23 加的：用户报「开着不动几十分钟就掉」，而这几条在日志里
 /// 长得一模一样，定位不了。
+///
+/// 这里曾有第四条 `cooloff`（刚续期成功 3 秒内又收到 401 → 踢）。
+/// 2026-08-24 拆掉了：那个 401 几乎总是重建窗口里的迟到毛刺（新旧 client
+/// 换代、服务端两台实例一新一旧），把它当「续了也没用」直接登出，用户
+/// 每 15 分钟就有一次被误杀的机会 —— 正是「过一会儿突然退出」的来源之一。
+/// 现在 cooloff 窗口内的 401 **忽略**；真坏的凭据等窗口过后由下一轮续期
+/// 的 [refreshRejected] 裁决，循环风暴由 [refreshStalled] 的预算兜底。
 enum _GateReason {
-  cooloff('刚续期成功 3 秒内又收到 401 —— 续期解决不了，多半是一批带旧凭据的请求同时回来'),
   noRefreshToken('手上没有 refresh token —— 要么从没存下来，要么被上一次续期失败时删了'),
-  refreshRejected('服务端拒绝了这枚 refresh token —— 看紧邻的「续期被拒」那行日志的状态码');
+  refreshRejected('服务端拒绝了这枚 refresh token —— 看紧邻的「续期被拒」那行日志的状态码'),
+  refreshStalled('连续几次续期都没换成（服务端 5xx / 限流 / 网络）—— 凭据留着，稍后能自动续'),
+  refreshFutile('续期一直成功、可新 token 照样被拒 —— 服务端多实例验签不同步或时钟偏差的形状，再签只是浪费');
 
   const _GateReason(this.explain);
 
   final String explain;
+}
+
+/// 一次续期尝试的三种结局 —— **谁的错，决定谁买单**。
+///
+/// 此前它是一个 bool，于是「服务端明确拒绝这枚凭据」（401/403）与
+/// 「服务端此刻答不上来」（5xx、429 限流、连不上）落进同一个 false ——
+/// 而两者该做的事截然相反：前者删凭据、回登录页；后者**什么都不该动**，
+/// 凭据没毛病，动了它才是把一次服务端抖动升级成「你被登出了」。
+///
+/// 实测踩过的坑：生产每次发版重启 agentd 的那几秒里，恰逢续期的客户端
+/// 拿到 502 —— 老代码把 30 天的凭据当场删掉，用户被踢回登录页，且下次
+/// 启动再也自动续不上。日志里那句「续期被拒：status=501」同族。
+enum RefreshOutcome {
+  /// 换到了新的一对，已进主界面。
+  ok,
+
+  /// 服务端认得这条路由，并**明确拒绝了这枚凭据**（401/403）。
+  /// 存储里的副本已删 —— 留着一个已作废的 token 只会让每次启动白跑。
+  rejected,
+
+  /// 没换成，但**不是凭据的错**：连不上、5xx、429、501。凭据原样留着。
+  transient,
+
+  /// 这次尝试**被更新的操作取代**（换了地址、手动登录、_reset）。
+  ///
+  /// 单列一档而不是并进 [transient]：被取代与服务端健康毫无关系，
+  /// 计进「服务端抖动」的踢人预算会让一次改地址的操作替服务端背黑锅 ——
+  /// 日志与红字都会指向一个不存在的服务端问题。
+  superseded,
 }
 
 class AuthController extends Notifier<AuthState> {
@@ -236,7 +274,7 @@ class AuthController extends Notifier<AuthState> {
       //
       // 所以只认「除它之外还有人动过」：恰好多一次就是它自己。
       final before = _generation;
-      if (await restoreSession(remembered)) return;
+      if (await restoreSession(remembered) == RefreshOutcome.ok) return;
       if (_generation != before + 1) return;
       mine = _generation;
     }
@@ -410,6 +448,8 @@ class AuthController extends Notifier<AuthState> {
       // 之后，而他要到下次打开才发现自己没被记住
       if (kCanRememberToken) await rememberToken(tokens.refreshToken);
       if (!_alive(generation)) return;
+      // 新的一次登录，不背上一段会话的续期旧账
+      _clearRefreshBookkeeping();
       state = state.copyWith(
         phase: AuthPhase.ready,
         token: tokens.accessToken,
@@ -428,12 +468,11 @@ class AuthController extends Notifier<AuthState> {
 
   /// 拿存下来的 refresh token 换一对新的 —— **启动时走这条**。
   ///
-  /// 成功就直接进主界面，用户什么都不用做；失败（过期 30 天、被登出、
-  /// 或者服务端检测到重放把整条链废了）就落回登录页，并把凭据清掉 ——
-  /// 留着一个已经作废的 token 只会让每次启动都白跑一次失败的请求。
-  ///
-  /// 返回是否续上了。
-  Future<bool> restoreSession(String refreshToken) async {
+  /// 成功就直接进主界面，用户什么都不用做。失败分两种，见 [RefreshOutcome]：
+  /// 服务端明确拒了（过期 30 天、被登出、判成重放）才清凭据 ——
+  /// 留着一个已经作废的 token 只会让每次启动都白跑一次失败的请求；
+  /// 服务端此刻答不上来（5xx / 限流 / 连不上）则**一个字节都不动**。
+  Future<RefreshOutcome> restoreSession(String refreshToken) async {
     final generation = ++_generation;
     final api = _probeApi(token: null);
     try {
@@ -470,7 +509,7 @@ class AuthController extends Notifier<AuthState> {
         if (kCanRememberToken) await rememberToken(fresh.refreshToken);
         return fresh;
       });
-      if (!_alive(generation)) return false;
+      if (!_alive(generation)) return RefreshOutcome.superseded;
       state = state.copyWith(
         phase: AuthPhase.ready,
         token: tokens.accessToken,
@@ -479,24 +518,31 @@ class AuthController extends Notifier<AuthState> {
         error: null,
         remember: true,
       );
-      return true;
+      return RefreshOutcome.ok;
     } on CortexApiException catch (e) {
-      if (!_alive(generation)) return false;
+      if (!_alive(generation)) return RefreshOutcome.superseded;
       // ⚠️ **续期失败是「用户被登出」这条链上唯一有服务端参与的一环，
-      // 而它此前一个字都不说。** 上层三条路径共用同一句红字，日志里分不出
-      // 是熔断、是手上没有 refresh token、还是这里真的被拒了 ——
-      // 三者的修法完全不同（分别是客户端时序、本地存储、服务端凭据）。
-      //
-      // 状态码是关键：401/403 = 这枚 refresh token 服务端不认（被轮换过、
-      // 被判重放、或者过期）；5xx / unreachable = 服务端的问题，凭据没毛病。
+      // 而它此前一个字都不说。** 上层几条路径共用差不多的红字，日志里分不出
+      // 是手上没有 refresh token、被拒了、还是服务端暂时答不上来 ——
+      // 三者的修法完全不同（分别是本地存储、服务端凭据、等着就好）。
       debugPrint(
-        '续期被拒：status=${e.statusCode} unreachable=${e.isUnreachable} '
+        '续期没成：status=${e.statusCode} unreachable=${e.isUnreachable} '
         'msg=${e.message}',
       );
-      // 连不上**不算凭据失效**。清掉一个其实还有效的 token，
-      // 会让「服务端暂时没起来」变成「你被登出了」
-      if (!e.isUnreachable && kCanRememberToken) await forgetToken();
-      return false;
+      // **只有 401/403 才算凭据失效。** 这里曾经写成「只要不是连不上就删」，
+      // 于是 502（发版重启的那几秒）、429（自家限流）、501（打到一个没有
+      // 账号功能的后端）都把 30 天的凭据删了 —— 一次服务端抖动就变成
+      // 「你被登出了，而且下次启动也自动续不上」。用户报的「过一会儿突然
+      // 退出」有一半就是它。
+      final rejected = e.statusCode == 401 || e.statusCode == 403;
+      if (rejected && kCanRememberToken) await forgetToken();
+      return rejected ? RefreshOutcome.rejected : RefreshOutcome.transient;
+    } on Object catch (e) {
+      // 超时、序列化炸了、平台通道缺失 …… 都不是服务端对凭据的裁决。
+      // 不接住的话异常会从 `onUnauthorized` 的微任务里穿出去成为 uncaught，
+      // 而凭据的命运悬在半空 —— 按「暂时没成」处理，最坏也就是下次再试。
+      if (_alive(generation)) debugPrint('续期没跑完（$e），按暂时失败处理');
+      return RefreshOutcome.transient;
     } finally {
       api.dispose();
     }
@@ -579,7 +625,59 @@ class AuthController extends Notifier<AuthState> {
   /// 服务端看到的是一串重放，反手把这个人彻底登出。
   ///
   /// 所以：第一个发起，其余的**等它**。
-  Future<bool>? _refreshInFlight;
+  Future<RefreshOutcome>? _refreshInFlight;
+
+  /// 连续多少次续期以 [RefreshOutcome.transient] 收场。成功清零。
+  ///
+  /// # 为什么 transient 也要有预算
+  ///
+  /// 「暂时失败不踢人」单独存在会造出一台永动机：服务端持续 5xx 时，
+  /// 每条 401 都触发一次「续一下 → 没成 → 算了」，请求循环永远不收敛 ——
+  /// 与本仓库那次「agent 被 1 秒一次杀了 730 次」同一个形状：
+  /// **没有上限的自愈不是自愈**。三次都换不成就老实回登录页 ——
+  /// 但凭据留着：服务端缓过来之后，下次启动还能拿它无感续上。
+  int _transientRefreshes = 0;
+
+  /// 连续 [RefreshOutcome.transient] 多少次后放弃、回登录页。
+  static const int _maxTransientRefreshes = 3;
+
+  /// 连续多少次「白续」（续期成功、可新 token 没撑过 [_futileWindow] 又被
+  /// 叫来续）。成功且**不白**时清零。
+  ///
+  /// # 为什么 transient 预算管不了这一族
+  ///
+  /// 有一族坏法是：refresh 路由一直答应（每轮 ok、transient 计数归零），
+  /// 可换来的 access token 照样被每个请求 401 —— 服务端多实例验签密钥
+  /// 不同步、时钟偏差都长这样。2765 对 refresh token 的那场生产风暴正是
+  /// 它。cooloff 从「踢」改成「忽略」之后，这一族一度**失去了全部出口**：
+  /// 不 rejected（refresh 没被拒）、不 stalled（没有 transient）——
+  /// 界面停在 ready、请求全失败、每 3 秒签一对新 token，静默坏死。
+  /// 这个计数器就是补回来的终态。
+  int _futileRefreshes = 0;
+
+  /// 一对新 token 至少该活多久。ok 之后不到这个时长又要续，
+  /// 说明上一对根本没起作用 —— access 的正常寿命是 15 分钟。
+  static const Duration _futileWindow = Duration(seconds: 60);
+
+  /// 连续白续多少次后收口。3 次 = 三对没用的 token、约三分钟 ——
+  /// 比老 cooloff 的「秒杀」温和，比无限循环有终点。
+  static const int _maxFutileRefreshes = 3;
+
+  /// 测试拨表用。生产恒 [DateTime.now] —— cooloff / futile 的判据都是
+  /// 秒级窗口，真等墙钟会把测试拖成分钟级。
+  @visibleForTesting
+  DateTime Function() clock = DateTime.now;
+
+  /// 把续期的记账清干净 —— **换人、换后端、手动登录都要调。**
+  ///
+  /// 漏掉的后果（审查抓到的）：对后端 A 攒下的两次 transient 记到后端 B
+  /// 头上，B 的第一次抖动就把人踢了；或者登出再登录的新会话，背着上一个
+  /// 会话的旧账。
+  void _clearRefreshBookkeeping() {
+    _transientRefreshes = 0;
+    _futileRefreshes = 0;
+    _lastRefreshOk = null;
+  }
 
   /// 上一次**续期成功**是什么时候。
   ///
@@ -623,13 +721,20 @@ class AuthController extends Notifier<AuthState> {
   Future<void> onUnauthorized() async {
     if (state.phase == AuthPhase.needsToken) return; // already there
 
-    // **刚续过又 401 —— 续期不是答案。**
+    // **刚续过又 401 —— 这一条不算数。**
     //
-    // 再续一次只会重复同一个循环，而每圈都签一对新的 refresh token。
-    // 见 `_lastRefreshOk` 上那段：没有这道闸，实测五分钟签了 2765 对。
+    // 再续一次只会重复同一个循环，而每圈都签一对新的 refresh token
+    // （见 `_lastRefreshOk` 上那段：没有这道闸，实测五分钟签了 2765 对）。
+    // 但它也**不构成登出的理由**：新 token 生效后的头几秒里，重建窗口的
+    // 迟到毛刺、负载均衡后面一台还没跟上的旧实例，都会掉出一两条 401。
+    // 这里从前直接 `_fallBackToGate`，于是每 15 分钟（access 的寿命）就有
+    // 一次被误杀的机会 —— 「开着不动过一会儿就被退出」的另一半来源。
+    //
+    // 真坏的凭据不会因此漏网：窗口一过，下一条 401 照常走续期，服务端
+    // 拒绝它的话由 [_GateReason.refreshRejected] 收口。
     final last = _lastRefreshOk;
-    if (last != null && DateTime.now().difference(last) < _refreshCooloff) {
-      _fallBackToGate(_GateReason.cooloff);
+    if (last != null && clock().difference(last) < _refreshCooloff) {
+      debugPrint('刚续期成功又收到 401 —— 当作重建窗口的迟到毛刺忽略，不踢');
       return;
     }
 
@@ -639,17 +744,66 @@ class AuthController extends Notifier<AuthState> {
       return;
     }
     // `??=` 是这条并发保护的全部：第一个发起，其余的拿到同一个 future。
-    // 见字段上那段 —— 各刷各的会被服务端判成重放，把人彻底登出
-    final inflight = _refreshInFlight ??= restoreSession(
+    // 见字段上那段 —— 各刷各的会被服务端判成重放，把人彻底登出。
+    //
+    // ⚠️ **记账与踢人都在创建链里做，一次尝试只结一次账。**
+    // 此前 switch 写在每个 awaiter 手里 —— 于是「服务端一重启，七八个
+    // 在飞请求同时 401」这个常态下，同一次失败的续期被七个等待者各记
+    // 一笔，「连续 3 次才踢」的预算在最典型的场景里实际是 1 次就踢：
+    // 发版重启踢人换了句红字回来了。审查抓到的，测试没抓到 ——
+    // 串行调用的测试里每次尝试恰好一个等待者，数出来永远是对的。
+    final inflight = _refreshInFlight ??= _refreshAndSettle(
       refresh,
     ).whenComplete(() => _refreshInFlight = null);
-    final ok = await inflight;
-    if (!ref.mounted) return;
-    if (ok) {
-      _lastRefreshOk = DateTime.now();
-    } else {
-      _fallBackToGate(_GateReason.refreshRejected);
+    await inflight;
+  }
+
+  /// 发起一次续期并**结账**：计数、踢人、记时都只在这里发生。
+  ///
+  /// awaiter 无论有几个都只是 await —— 见 [onUnauthorized] 里那段。
+  Future<RefreshOutcome> _refreshAndSettle(String refresh) async {
+    // 「这次续期是不是白续」要在**发起前**判：ok 会刷新 _lastRefreshOk，
+    // 结账时已经读不到上一轮的时刻了
+    final lastOk = _lastRefreshOk;
+    final futile = lastOk != null && clock().difference(lastOk) < _futileWindow;
+
+    final outcome = await restoreSession(refresh);
+    if (!ref.mounted) return outcome;
+    switch (outcome) {
+      case RefreshOutcome.ok:
+        _lastRefreshOk = clock();
+        _transientRefreshes = 0;
+        // 上一对 token 没活过 [_futileWindow] 就又被叫来续 —— 续是续上了，
+        // 但显然没解决问题。连着几次就收口：refresh 路由永远答应的话，
+        // rejected 与 stalled 都到不了，这里是这一族唯一的终态
+        if (!futile) {
+          _futileRefreshes = 0;
+        } else if (++_futileRefreshes >= _maxFutileRefreshes) {
+          _futileRefreshes = 0;
+          _fallBackToGate(_GateReason.refreshFutile);
+        } else {
+          debugPrint('续上了，但上一对 token 没起作用（第 $_futileRefreshes 次白续）');
+        }
+      case RefreshOutcome.rejected:
+        _transientRefreshes = 0;
+        _futileRefreshes = 0;
+        _fallBackToGate(_GateReason.refreshRejected);
+      case RefreshOutcome.transient:
+        // 服务端此刻答不上来（5xx / 限流 / 网络）。凭据没毛病，这条 401
+        // 对应的请求失败就失败 —— 等服务端缓过来，下一条 401 会再试。
+        // 预算见 `_transientRefreshes`：不设上限的话这就是台永动机。
+        if (++_transientRefreshes >= _maxTransientRefreshes) {
+          _transientRefreshes = 0;
+          _fallBackToGate(_GateReason.refreshStalled);
+        } else {
+          debugPrint('续期暂时没成（第 $_transientRefreshes 次）—— 凭据留着，这条 401 放过');
+        }
+      case RefreshOutcome.superseded:
+        // 被换地址 / 手动登录 / _reset 取代。与服务端健康无关，
+        // 不记任何账 —— 记了就是让一次用户操作替服务端背黑锅
+        break;
     }
+    return outcome;
   }
 
   /// 回登录页。**只有从「正在用」掉下来才值得一句红字。**
@@ -671,15 +825,12 @@ class AuthController extends Notifier<AuthState> {
   void _fallBackToGate(_GateReason reason) {
     if (state.phase == AuthPhase.needsToken) return;
     final wasReady = state.phase == AuthPhase.ready;
-    // ⚠️ **红字对用户是一样的，日志必须分得清。**
+    // ⚠️ **红字接近一样，日志必须分得清。**
     //
-    // 这三条路径的病因与修法毫不相干（客户端时序 / 本地存储 / 服务端凭据），
-    // 而用户看到的只有「登录已过期，续期也没有成功」。2026-08-23 用户报
-    // 「开着不动几十分钟就掉」时，光看代码定位不出是哪一条 —— 服务端配置
-    // （access 15 分钟、refresh 30 天且每次续期）是对的，生产日志里也没有
-    // 任何一条 refresh 被拒的记录。
-    //
-    // 给用户的文案刻意不动：他不需要知道是哪一条，他需要的是重新登录。
+    // 这几条路径的病因与修法毫不相干（本地存储 / 服务端凭据 / 服务端抖动），
+    // 而用户看到的只有一句短话。2026-08-23 用户报「开着不动几十分钟就掉」
+    // 时，光看代码定位不出是哪一条 —— 服务端配置（access 15 分钟、refresh
+    // 30 天且每次续期）是对的，生产日志里也没有任何一条 refresh 被拒的记录。
     if (wasReady) debugPrint('回登录页：${reason.explain}');
     // Deliberately not `forgetToken()`: a rotated server-side secret is not a
     // reason to also destroy the copy the user may still be editing, and on
@@ -688,12 +839,25 @@ class AuthController extends Notifier<AuthState> {
     state = state.copyWith(
       phase: AuthPhase.needsToken,
       token: null,
-      error: wasReady ? '登录已过期，续期也没有成功。请重新登录。' : null,
+      // stalled 那条**不许说「已过期」**：凭据好好的，是服务端此刻答不上
+      // 来。说过期会让用户以为自己的登录坏了，而他该做的只是等一等
+      error: !wasReady
+          ? null
+          : reason == _GateReason.refreshStalled
+          ? '续期一直没有成功（服务端暂时答不上来）。稍等片刻再试；反复出现的话，检查部署入口地址。'
+          : reason == _GateReason.refreshFutile
+          ? '续期成功但新凭据仍不被接受 —— 服务端可能有配置问题。请稍后重新登录。'
+          : '登录已过期，续期也没有成功。请重新登录。',
     );
   }
 
   /// Explicit sign-out. Drops the in-memory credential and any stored copy.
   Future<void> signOut() async {
+    // **先作废在飞的续期。** 不作废的话：登出时恰有一次续期在飞，它成功
+    // 回来发现代次没变，把 state 写回 ready + 新 token —— 用户明确点了
+    // 登出却被「登回去」，锁内还把新凭据写回了系统凭据库
+    ++_generation;
+    _clearRefreshBookkeeping();
     // **先告诉服务端作废，再删本地那份。**
     //
     // 只删本地只是「这台机器忘了」——已经泄露出去的那一份照样能用到 30 天后。
@@ -725,6 +889,8 @@ class AuthController extends Notifier<AuthState> {
 
   void _reset() {
     ++_generation;
+    // 换了后端就是换了账本 —— 对 A 攒的 transient 不许记到 B 头上
+    _clearRefreshBookkeeping();
     state = _seeded();
     Future.microtask(probe);
   }

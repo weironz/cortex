@@ -342,7 +342,13 @@ class _OfflineBanner extends ConsumerWidget {
                       color: tokens.warning,
                     ),
                   ),
-                  const TextSpan(text: '。它们排在本地队列，接上服务器后会自动补回去。'),
+                  // 「看不到以前的会话」必须在这儿说：离线时 `list_sessions`
+                  // 是纯转发，列表只剩本次的草稿 —— 不说的话用户读到的是
+                  // 「我昨天那些对话没了」。这句从前只写在登录页的离线卡上，
+                  // 而真正对着空列表发慌的人已经过了登录页
+                  const TextSpan(
+                    text: '。它们排在本地队列，接上服务器后自动补回去；以前的会话也在服务器上，接上就回来。',
+                  ),
                 ],
               ),
             ),

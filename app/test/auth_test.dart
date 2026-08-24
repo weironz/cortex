@@ -770,9 +770,15 @@ class _GateApi
 
 /// 记住 / 换回一对新令牌用的假后端。
 class _SessionApi extends _GateApi {
-  _SessionApi({this.refreshFails = false}) : super();
+  _SessionApi({this.refreshFails = false, this.refreshStatusCode = 401})
+    : super();
 
-  final bool refreshFails;
+  /// 可变：有的测试要「先续得上、后来续不上」——
+  /// 服务端发版重启正是这个时序
+  bool refreshFails;
+
+  /// 续期失败时抛的状态码。401 = 凭据被拒；5xx / 429 = 服务端的问题
+  int refreshStatusCode;
   int loginCalls = 0;
   int refreshCalls = 0;
   int logoutCalls = 0;
@@ -797,7 +803,7 @@ class _SessionApi extends _GateApi {
     refreshCalls++;
     lastRefreshSent = refreshToken;
     if (refreshFails) {
-      throw const CortexApiException('登录已过期，请重新登录', statusCode: 401);
+      throw CortexApiException('续期没成', statusCode: refreshStatusCode);
     }
     return _tokens('2');
   }
@@ -839,9 +845,9 @@ void _sessionTests() {
       await _settleUntil(
         () => c.read(authControllerProvider).phase != AuthPhase.probing,
       );
-      final ok = await ctrl.restoreSession('refresh-old');
+      final outcome = await ctrl.restoreSession('refresh-old');
 
-      expect(ok, isTrue);
+      expect(outcome, RefreshOutcome.ok);
       expect(api.lastRefreshSent, 'refresh-old', reason: '换的时候要用旧的');
       expect(
         c.read(authControllerProvider).refreshToken,
@@ -870,8 +876,40 @@ void _sessionTests() {
 
       final ctrl = c.read(authControllerProvider.notifier);
       await Future<void>.delayed(Duration.zero);
-      final ok = await ctrl.restoreSession('refresh-dead');
-      expect(ok, isFalse);
+      final outcome = await ctrl.restoreSession('refresh-dead');
+      expect(
+        outcome,
+        RefreshOutcome.rejected,
+        reason: '401 是服务端对凭据的明确裁决 —— 只有这一档才配删存储里的副本',
+      );
+    });
+
+    /// **5xx 不是凭据的错，一个字节都不许动。**
+    ///
+    /// 老代码「只要不是连不上就删凭据」——于是发版重启那几秒里的 502、
+    /// 自家限流的 429、打到无账号后端的 501，都把 30 天的凭据当场删掉，
+    /// 用户被踢回登录页且下次启动再也自动续不上。「过一会儿突然退出」
+    /// 的一半来源就是它。
+    test('续期遇到 502：transient，凭据不删', () async {
+      final api = _SessionApi(refreshFails: true, refreshStatusCode: 502);
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      final outcome = await ctrl.restoreSession('refresh-old');
+      expect(
+        outcome,
+        RefreshOutcome.transient,
+        reason: '502 是服务端此刻答不上来，不是凭据被拒 —— 判据错了凭据就被误删',
+      );
     });
 
     /// **Web 形态（seed 恒 null + storage 里有 refresh token）下，启动必须走续期。**
@@ -1039,7 +1077,7 @@ void _sessionTests() {
     /// 这不是假想：加上「先续期」而没有这道闸之后，实测五分钟里签了 **2765**
     /// 对，页面因为每次状态变化重建整棵树而疯狂闪烁。这条测试要是早写了，
     /// 那次就不会发生。
-    test('续期成功后紧接着的 401 不再续，直接回登录页', () async {
+    test('续期成功后紧接着的 401：不再续，也不踢 —— 当迟到毛刺忽略', () async {
       final api = _SessionApi();
       final c = ProviderContainer(
         overrides: [
@@ -1069,22 +1107,218 @@ void _sessionTests() {
         api.refreshCalls,
         afterFirst,
         reason:
-            '刚续过还 401，说明续期解决不了这个问题。再续一次只会重复循环，'
-            '而每圈都签一对新的 refresh token —— 那正是那场 2765 对的风暴',
+            '刚续过还 401，再续一次只会重复循环，而每圈都签一对新的 '
+            'refresh token —— 那正是那场 2765 对的风暴。这半边不许回退',
       );
+      // ⚠️ 2026-08-24 反转：老行为是直接 _fallBackToGate 踢回登录页。
+      // 但新 token 生效后的头几秒里，重建窗口的迟到毛刺、负载均衡后面
+      // 一台还没跟上的旧实例都会掉出一两条 401 —— 按老行为，每 15 分钟
+      // （access 的寿命）就有一次被误杀的机会，用户的症状是「开着不动
+      // 过一会儿就被退出」。真坏的凭据不会漏网：窗口一过，下一轮续期
+      // 由服务端拒绝（refreshRejected）收口
       expect(
-        c.read(authControllerProvider).phase,
-        AuthPhase.needsToken,
-        reason: '续不动就该老实回登录页，而不是原地打转',
+        c.read(authControllerProvider).isReady,
+        isTrue,
+        reason: '冷却窗口内的 401 是迟到毛刺，不构成登出的理由',
       );
       expect(
         c.read(authControllerProvider).error,
-        contains('重新登录'),
-        reason:
-            '从「正在用」掉下来必须说清为什么 —— 这一条真正踩到 '
-            '_fallBackToGate 的 wasReady 分支。上一轮的教训：配套测试绿着，'
-            '但没有一条踩到被改的那几行',
+        isNull,
+        reason: '没有踢人就不许有红字',
       );
+    });
+
+    /// **一次失败的续期只结一次账 —— 有几个等待者都一样。**
+    ///
+    /// 审查抓到的：结账曾写在每个 awaiter 手里，「服务端一重启，七八个
+    /// 在飞请求同时 401」这个常态下，同一次 502 被七个等待者各记一笔，
+    /// 「连续 3 次才踢」实际是 1 次就踢 —— 发版重启踢人换了句红字回来了。
+    /// 串行调用的测试踩不到它，这条必须并发。
+    test('并发 7 条 401 共享一次 502 续期：预算只记一次，不踢', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await ctrl.restoreSession('refresh-old');
+      expect(c.read(authControllerProvider).isReady, isTrue);
+
+      api.refreshFails = true;
+      api.refreshStatusCode = 502;
+      final before = api.refreshCalls;
+
+      // 服务端重启：一批在飞请求同时被拒
+      await Future.wait([for (var i = 0; i < 7; i++) ctrl.onUnauthorized()]);
+
+      expect(
+        api.refreshCalls,
+        before + 1,
+        reason: '七个等待者必须合流成一次续期 —— 各刷各的会被服务端判成重放',
+      );
+      expect(
+        c.read(authControllerProvider).isReady,
+        isTrue,
+        reason:
+            '一次 502 抖动只许消耗一格预算。按等待者计数的话，'
+            '第 3 个等待者就把人踢了 —— 发版重启踢人根本没修掉',
+      );
+
+      // 后续两次独立的 transient 才耗尽预算
+      await ctrl.onUnauthorized();
+      expect(c.read(authControllerProvider).isReady, isTrue);
+      await ctrl.onUnauthorized();
+      expect(
+        c.read(authControllerProvider).phase,
+        AuthPhase.needsToken,
+        reason: '第三次独立失败才收口 —— 预算数的是续期次数，不是等待者',
+      );
+    });
+
+    /// **续期一直成功、可新 token 照样被拒 —— 必须有终态。**
+    ///
+    /// 这正是当年引入 cooloff 的那场生产风暴的形态（五分钟 2765 对：
+    /// refresh 路由一直答应，access 一直 401）。cooloff 从「踢」改成
+    /// 「忽略」之后，这一族一度失去了全部出口：不 rejected、不 stalled，
+    /// 界面停在 ready、每 3 秒签一对、静默坏死。futile 预算是补回的终态。
+    test('连续白续三次（ok 但新 token 没起作用）：收口回登录页', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      // 手上得先有一枚 refresh token，onUnauthorized 才有得续
+      await ctrl.restoreSession('refresh-old');
+
+      // 拨表：cooloff（3 秒）要过、futile 窗口（60 秒）不过 ——
+      // 真等墙钟会把这条测试拖到十几秒
+      var now = DateTime(2026, 8, 24, 12, 0, 0);
+      ctrl.clock = () => now;
+
+      await ctrl.onUnauthorized(); // 第一次：正常续上
+      expect(c.read(authControllerProvider).isReady, isTrue);
+
+      for (var round = 1; round <= 3; round++) {
+        now = now.add(const Duration(seconds: 5)); // 出 cooloff、在 futile 窗口内
+        await ctrl.onUnauthorized(); // 续期又「成功」—— 但这就是问题所在
+      }
+
+      final st = c.read(authControllerProvider);
+      expect(
+        st.phase,
+        AuthPhase.needsToken,
+        reason:
+            '三对新 token 都没让 401 停下来，再签只是浪费 —— '
+            '无终态的话这是每 3 秒签一对的静默坏死',
+      );
+      expect(
+        st.error,
+        contains('配置'),
+        reason: '这族的病根在服务端（验签不同步 / 时钟偏差），红字要指对方向',
+      );
+    });
+
+    /// **换人换后端不背旧账。**
+    test('手动重新登录后，续期预算从零开始', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await ctrl.restoreSession('refresh-old');
+
+      // 攒两次 transient（差一次就踢）
+      api.refreshFails = true;
+      api.refreshStatusCode = 502;
+      await ctrl.onUnauthorized();
+      await ctrl.onUnauthorized();
+      expect(c.read(authControllerProvider).isReady, isTrue);
+
+      // 用户手动重新登录成功
+      api.refreshFails = false;
+      await ctrl.signInWithPassword('u', 'p');
+      expect(c.read(authControllerProvider).isReady, isTrue);
+
+      // 新会话的第一次抖动不许直接踢 —— 旧账必须已清
+      api.refreshFails = true;
+      await ctrl.onUnauthorized();
+      expect(
+        c.read(authControllerProvider).isReady,
+        isTrue,
+        reason:
+            '登录成功不清计数的话，上一段会话攒的 2 次会记到新会话头上，'
+            '「连续 3 次」的承诺实际只剩 1 次',
+      );
+    });
+
+    /// **服务端抖动不踢人，但抖个不停要有出口。**
+    ///
+    /// transient 不踢单独存在就是台永动机（服务端持续 5xx 时每条 401 都
+    /// 「续一下 → 没成 → 算了」，循环永不收敛）—— 与「agent 被 1 秒一次
+    /// 杀了 730 次」同形状：没有上限的自愈不是自愈。
+    test('续期连续 transient：前两次忍住，第三次回登录页且红字不说「过期」', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await ctrl.restoreSession('refresh-old'); // 先正常登上
+      expect(c.read(authControllerProvider).isReady, isTrue);
+
+      // 服务端开始发版重启：续期一律 502
+      api.refreshFails = true;
+      api.refreshStatusCode = 502;
+
+      await ctrl.onUnauthorized(); // 第 1 次 transient
+      expect(
+        c.read(authControllerProvider).isReady,
+        isTrue,
+        reason: '一次 502 不是登出的理由 —— 凭据没毛病，等服务端缓过来',
+      );
+      await ctrl.onUnauthorized(); // 第 2 次
+      expect(c.read(authControllerProvider).isReady, isTrue);
+
+      await ctrl.onUnauthorized(); // 第 3 次：预算用完
+      final st = c.read(authControllerProvider);
+      expect(st.phase, AuthPhase.needsToken, reason: '连着三次都换不成就该老实回登录页，而不是永动');
+      expect(
+        st.error,
+        isNot(contains('已过期')),
+        reason: '凭据好好的，是服务端答不上来 —— 说「过期」会让用户以为登录坏了',
+      );
+      expect(st.error, contains('稍等'));
+      expect(st.refreshToken, isNotNull, reason: '凭据必须留着：服务端缓过来之后，下次启动要拿它无感续上');
     });
 
     /// **未登录阶段的杂散 401 不许在登录页压红字。**
