@@ -461,6 +461,32 @@ class ChatController extends Notifier<ChatState> {
     }
   }
 
+  /// 分叉：带着历史开一条新会话并切过去。**旧会话不动。**
+  ///
+  /// [upToEpisodeId] 给了就截到那条消息（含）——「从这里分叉」。
+  ///
+  /// 与 [setPinned] 同款地返回一句要说给用户的话（`null` = 成功，不打扰）：
+  /// 分叉入口有两处（会话菜单、消息动作），异常在这里收敛成一句话，
+  /// 两处就不必各自写一遍 catch —— 判据只算一处。
+  ///
+  /// 新会话**整条插进列表再选中**，不等下一次 `loadSessions`：等的话，
+  /// 切过去的那一瞬列表里没有这一行，侧栏会闪一下「选中了一个不存在的会话」。
+  Future<String?> forkSession(String id, {String? upToEpisodeId}) async {
+    try {
+      final forked = await _api.forkSession(id, upToEpisodeId: upToEpisodeId);
+      if (!ref.mounted) return null;
+      state = state.copyWith(sessions: [forked, ...state.sessions]);
+      selectSession(forked.id);
+      return null;
+    } on CortexApiException catch (e) {
+      if (!ref.mounted) return null;
+      return e.message;
+    } on Object catch (e) {
+      if (!ref.mounted) return null;
+      return '$e';
+    }
+  }
+
   /// 移入项目，[projectId] 为 null 表示移出（变未分组）。
   ///
   /// 项目里的会话数变了，所以顺手让项目列表重拉一次 —— 那个数字会出现在

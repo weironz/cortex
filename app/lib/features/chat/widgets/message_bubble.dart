@@ -190,6 +190,8 @@ class _UserBubble extends ConsumerWidget {
                               .resend(message.id),
                   ),
                   const SizedBox(width: 4),
+                  _ForkHereButton(episodeId: message.episodeId, busy: busy),
+                  const SizedBox(width: 4),
                   Text(
                     formatRelative(message.createdAt),
                     style: theme.textTheme.labelSmall,
@@ -370,6 +372,7 @@ class AssistantBlock extends StatelessWidget {
                         child: Row(
                           children: [
                             if (text.isNotEmpty) _CopyButton(text: text),
+                            _ForkHereButton(episodeId: episodeId, busy: busy),
                             if (episodeId != null)
                               Padding(
                                 padding: const EdgeInsets.only(left: 5),
@@ -652,6 +655,56 @@ class _CaretState extends State<_Caret> with SingleTickerProviderStateMixin {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 「从这里分叉」—— 到这条消息为止的历史进入一条新会话，原会话不动。
+///
+/// # 为什么按钮自己是 ConsumerWidget
+///
+/// 它要拿两样只有 provider 里才有的东西：当前会话 id 与控制器。让
+/// [AssistantBlock] 整个变成 Consumer 的代价是流式路径上每次状态变化都
+/// 多一层重建判断，而这颗按钮只在一轮结束后才出现。
+///
+/// # 为什么锚是 episodeId 而不是客户端消息 id
+///
+/// 服务端认的是**落库的** episode id。刚发出去、还没收到回执的消息只有
+/// 客户端本地 id —— 那时按钮停用，tooltip 说清等一会儿，而不是把一个
+/// 服务端不认识的 id 发过去换一条 400。
+class _ForkHereButton extends ConsumerWidget {
+  const _ForkHereButton({required this.episodeId, required this.busy});
+
+  final String? episodeId;
+
+  /// 这个会话有一轮在跑。跑着的时候历史还在长，「到这里」指不稳。
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final enabled = !busy && episodeId != null;
+    return _BubbleAction(
+      icon: Icons.call_split_rounded,
+      tooltip: busy
+          ? '这一轮跑完才能分叉'
+          : episodeId == null
+          ? '这条还没写进历史，稍等片刻再分叉'
+          : '从这里分叉：到这条为止的历史进入新会话，这条会话不动',
+      onPressed: !enabled
+          ? null
+          : () async {
+              final messenger = ScaffoldMessenger.maybeOf(context);
+              final sessionId = ref
+                  .read(chatControllerProvider)
+                  .activeSessionId;
+              if (sessionId == null) return;
+              final said = await ref
+                  .read(chatControllerProvider.notifier)
+                  .forkSession(sessionId, upToEpisodeId: episodeId);
+              if (said != null) {
+                messenger?.showSnackBar(SnackBar(content: Text(said)));
+              }
+            },
     );
   }
 }

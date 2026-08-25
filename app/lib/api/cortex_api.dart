@@ -610,6 +610,16 @@ abstract interface class CortexApi {
     bool clearWorkspace = false,
   });
 
+  /// `POST /sessions/{id}/fork` — 分叉：带着历史开一条新会话，旧会话不动。
+  ///
+  /// [upToEpisodeId] 给了就截到那条消息（**含**它）——「从这里分叉」；
+  /// 不给就整段复制。返回**新会话**，标题是「原标题（分叉）」。
+  ///
+  /// 复制发生在服务端一个写事务里（消息、工具轨迹、附件引用；附件字节
+  /// 内容寻址，不复制）。客户端拿到返回值后直接切过去即可 —— 历史按
+  /// 正常的 [sessionDetail] 拉取，不需要任何本地拼装。
+  Future<ChatSession> forkSession(String id, {String? upToEpisodeId});
+
   /// `POST /blobs` — server-relayed upload, for content up to
   /// `kRelayUploadLimit`.
   Future<BlobRef> uploadBlob({

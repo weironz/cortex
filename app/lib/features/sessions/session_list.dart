@@ -225,6 +225,7 @@ class SessionList extends ConsumerWidget {
               onSelected?.call();
             },
             onRename: () => _rename(context, ref, session),
+            onFork: () => _fork(context, ref, session),
             onTogglePin: () => _pin(context, ref, session, !session.pinned),
             pinned: session.pinned,
             onToggleArchive: () =>
@@ -505,6 +506,24 @@ class SessionList extends ConsumerWidget {
     final said = await ref
         .read(chatControllerProvider.notifier)
         .setPinned(session.id, pinned);
+    if (said != null) {
+      messenger?.showSnackBar(SnackBar(content: Text(said)));
+    }
+  }
+
+  /// 分叉：整段复制成一条新会话并切过去。旧会话不动，无需确认框。
+  ///
+  /// 与 [_pin] 同款：控制器把异常收敛成一句话，这里只负责说出去 ——
+  /// 分叉入口有两处（这里与消息动作），catch 写两遍迟早漂开。
+  static Future<void> _fork(
+    BuildContext context,
+    WidgetRef ref,
+    ChatSession session,
+  ) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final said = await ref
+        .read(chatControllerProvider.notifier)
+        .forkSession(session.id);
     if (said != null) {
       messenger?.showSnackBar(SnackBar(content: Text(said)));
     }
@@ -907,6 +926,7 @@ class _SessionTile extends StatefulWidget {
     required this.canMove,
     required this.onTap,
     required this.onRename,
+    required this.onFork,
     required this.onTogglePin,
     required this.pinned,
     required this.onToggleArchive,
@@ -930,6 +950,7 @@ class _SessionTile extends StatefulWidget {
   final bool canMove;
   final VoidCallback onTap;
   final VoidCallback onRename;
+  final VoidCallback onFork;
   final VoidCallback onTogglePin;
 
   /// 置顶了 —— 这一行此刻住在「Pinned」那一段里。
@@ -1128,6 +1149,7 @@ class _SessionTileState extends State<_SessionTile> {
                     enabled: _hovered || widget.selected,
                     canMove: widget.canMove,
                     onRename: widget.onRename,
+                    onFork: widget.onFork,
                     onTogglePin: widget.onTogglePin,
                     pinned: widget.pinned,
                     onToggleArchive: widget.onToggleArchive,
@@ -1170,6 +1192,7 @@ class SessionTileMenu extends ConsumerWidget {
     required this.enabled,
     required this.canMove,
     required this.onRename,
+    required this.onFork,
     required this.onTogglePin,
     required this.pinned,
     required this.onToggleArchive,
@@ -1181,6 +1204,9 @@ class SessionTileMenu extends ConsumerWidget {
   final bool enabled;
   final bool canMove;
   final VoidCallback onRename;
+
+  /// 分叉：整段复制成新会话。历史的权威在服务器上，离线时同样灰掉。
+  final VoidCallback onFork;
   final VoidCallback onTogglePin;
 
   /// 置顶了 —— 菜单里那一项因此说「取消置顶」。
@@ -1201,6 +1227,7 @@ class SessionTileMenu extends ConsumerWidget {
       icon: const Icon(Icons.more_horiz_rounded),
       onSelected: (value) => switch (value) {
         'rename' => onRename(),
+        'fork' => onFork(),
         'pin' => onTogglePin(),
         'move' => onMove(),
         'export_md' => onExport(ExportFormat.markdown),
@@ -1234,6 +1261,20 @@ class SessionTileMenu extends ConsumerWidget {
               // 置顶**不改变可见性**，只是搬进左栏那一段 ——
               // 与归档（从默认列表消失）是两件完全不同的事
               Text(pinned ? '取消置顶' : '置顶'),
+            ],
+          ),
+        ),
+        PopupMenuItem(
+          value: 'fork',
+          height: 38,
+          enabled: !offline,
+          child: const Row(
+            children: [
+              Icon(Icons.call_split_rounded, size: 15),
+              SizedBox(width: 9),
+              // 「分叉」而不是「复制会话」：复制暗示得到一份一样的东西，
+              // 而这个动作的意义是**从这里分头走** —— 旧的留在原地不动
+              Text('分叉会话'),
             ],
           ),
         ),

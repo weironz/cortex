@@ -69,6 +69,7 @@
 
 mod bootstrap;
 mod error;
+mod fork;
 mod model;
 mod query;
 mod store;
@@ -78,6 +79,7 @@ mod txn;
 
 pub use bootstrap::{TenantMigration, migrate_all, provision};
 pub use error::{Result, StoreError};
+pub use fork::ForkOutcome;
 pub use model::{
     ATTACHMENT_FILENAME_MAX_CHARS, Actor, Blob, Episode, EpisodeAttachment, EpisodeBlob,
     EpisodeToolCall, NewBlob, NewEpisode, NewEpisodeBlob, NewEpisodeToolCall, NewProjectEvent,

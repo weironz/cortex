@@ -1187,6 +1187,42 @@ class HttpCortexApi implements CortexApi {
     );
   }
 
+  @override
+  Future<ChatSession> forkSession(String id, {String? upToEpisodeId}) async {
+    final http.Response response;
+    try {
+      response = await _client.post(
+        _uri('/sessions/${Uri.encodeComponent(id)}/fork'),
+        headers: _headers(const {
+          'content-type': 'application/json',
+          'accept': 'application/json',
+        }),
+        // 截断点是消息 id，不是「前 N 条」：序号要两端对口径，数错是
+        // 静默截错；id 指错服务端会明确回 400
+        body: jsonEncode({'up_to_episode_id': ?upToEpisodeId}),
+      );
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode >= 400) {
+      // 404 在这条路上有两个来源：老服务端没这条路由（axum 兜底，空 body），
+      // 与「会话不存在」（服务端写了给人看的话）。有话就原样透出，
+      // 没话才翻成「老版本」—— 反过来会把真 404 也说成版本问题
+      final served = _unwrapError(utf8.decode(response.bodyBytes));
+      final oldServer =
+          (response.statusCode == 404 && served == null) ||
+          response.statusCode == 405;
+      throw _failure(
+        response.statusCode,
+        oldServer ? '这个服务端还不支持分叉会话 —— 它是个老版本。' : _errorMessage(response),
+        headers: response.headers,
+      );
+    }
+    return ChatSession.fromJson(
+      _decodeObject('POST /sessions/fork', utf8.decode(response.bodyBytes)),
+    );
+  }
+
   /// Unwraps `ErrorBody { error }` so the daemon's own wording reaches the user
   /// instead of a JSON blob. The workspace validator in particular writes its
   /// rejections to be read ("整台机器不是工作区"), and re-phrasing them here

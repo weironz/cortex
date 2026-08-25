@@ -123,6 +123,9 @@ protected_routes! {
     // 「打开一个叫 export 的会话」并回 404
     "/sessions/export" [GET] => get(crate::export::export),
     "/sessions/{id}" [GET, PATCH] => get(crate::sessions::detail).patch(crate::sessions::patch),
+    // 分叉：带着历史开一条新会话。**复制在一个写事务里、逐行记 sync_log**
+    // （`Store::fork_session`）—— 别的设备靠那份流水才看得见新会话
+    "/sessions/{id}/fork" [POST] => post(crate::sessions::fork),
     // ── 一轮对话 ──
     //
     // **这一条是「记忆服务挂了对话照样继续」的最后一块，也是整件事的验收
@@ -1631,6 +1634,40 @@ mod tests {
             status,
             StatusCode::NOT_FOUND,
             "没有库时该是 501；回 404 说明 handler 在碰库之前就按「没有消息」             早退了 —— 那正是容器取不到工作区名的那个 bug"
+        );
+    }
+
+    /// **分叉那条路由真的挂上了**（不是 axum 兜底的 404）。
+    ///
+    /// 与 `the_attach_route_is_actually_mounted` 同一个理由：把
+    /// `{id}` 写成老式 `:id`、或整条忘了进清单，症状都是 404 —— 而 404
+    /// 恰好长得像「没有这个会话」，客户端会安静地把它当业务结果吞掉。
+    /// 这组状态没接库，挂上了的判据是「不是 404/405」——
+    /// 走进 handler 拿到的是「没接库」那一档（实测 503）。
+    #[tokio::test]
+    async fn the_fork_route_is_actually_mounted() {
+        let app = router(topology_state());
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/sessions/S1/fork")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .expect("构造请求不该失败");
+        let status = app
+            .oneshot(req)
+            .await
+            .expect("router 的错误类型是 Infallible")
+            .status();
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "404 说明路由没挂上（或 {{id}} 写成了老式 :id）——\
+             它会被客户端当成「会话不存在」静静吞掉"
+        );
+        assert_ne!(
+            status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "405 说明路径在、方法没挂上 —— fork 只有 POST，挂错就是这个形状"
         );
     }
 

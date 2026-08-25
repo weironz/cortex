@@ -249,6 +249,10 @@ class ReplayApi
   }) => throw UnimplementedError();
 
   @override
+  Future<ChatSession> forkSession(String id, {String? upToEpisodeId}) =>
+      throw UnimplementedError();
+
+  @override
   Future<BlobRef> uploadBlob({
     required Uint8List bytes,
     String? mime,

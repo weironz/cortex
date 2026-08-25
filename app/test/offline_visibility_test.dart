@@ -109,6 +109,7 @@ void main() {
               archived: false,
               enabled: true,
               canMove: true,
+              onFork: () {},
               onRename: () {},
               onTogglePin: () {},
               pinned: false,
