@@ -479,6 +479,10 @@ class HttpCortexApi implements CortexApi {
       _postAuth('/auth/login', {'username': username, 'password': password});
 
   @override
+  Future<AuthTokens> register(String username, String password) =>
+      _postAuth('/auth/register', {'username': username, 'password': password});
+
+  @override
   Future<AuthTokens> refreshSession(String refreshToken) =>
       _postAuth('/auth/refresh', {'refresh_token': refreshToken});
 

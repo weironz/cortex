@@ -528,6 +528,11 @@ class _ConfirmApi
   }
 
   @override
+  Future<AuthTokens> register(String username, String password) async {
+    throw const CortexApiException('这个数据源不支持账号注册', statusCode: 501);
+  }
+
+  @override
   Future<AuthTokens> refreshSession(String refreshToken) async {
     throw const CortexApiException('这个数据源不支持账号登录', statusCode: 501);
   }
