@@ -181,6 +181,13 @@ START_WAL='$START_WAL'
 START_LSN='$START_LSN'
 PG_VERSION='$(psql_val 'SHOW server_version')'
 DATA_CHECKSUMS='$checksums'
+# 这个库的身份。**恢复演练靠它认出「归档里混着别的数据库」** ——
+# 一个库被重建过（dev-reset、换机器重装）之后，WAL 段名会从头
+# 开始，而 archive_command 见到同名文件不覆盖，于是新 WAL 一段都进不去，
+# 归档目录里躺着的全是上一个库的。PG 恢复到那一步才会说
+# 「WAL file is from different database system」——七十秒之后，
+# 而且那句话在临时实例的日志里，没人会去翻。
+SYSTEM_ID='$(psql_val 'SELECT system_identifier FROM pg_control_system()')'
 ARCHIVE_TIMEOUT='$archive_timeout'
 ELAPSED_MS='$elapsed_ms'
 SIZE_BYTES='$SIZE_BYTES'

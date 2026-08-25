@@ -123,6 +123,35 @@ SRC_VERSION="$(psql_val 'SHOW server_version')"
 [ "${SRC_VERSION%% *}" = "${PG_VERSION%% *}" ] \
     || warn "备份是 PG ${PG_VERSION}，当前源库是 PG $SRC_VERSION —— 物理备份不能跨大版本恢复。"
 
+# ── 这份备份与现在这个库是不是同一个数据库 ────────────────
+#
+# **前置闸，不是锦上添花。** 库被重建过之后（`just dev-reset`、换机器
+# 重装、误删数据目录），WAL 段名从头开始，而 `archive_command` 见到同名
+# 文件**不覆盖** —— 于是新库的 WAL 一段都进不了归档，目录里躺着的全是
+# 上一个库的。
+#
+# 不查的话，这件事的表现是：演练照常跑七十秒，恢复「成功」升主，
+# 然后在探针检查处失败，而真正的原因
+# （`WAL file is from different database system`）只在临时实例的日志里，
+# 没人会去翻。2026-08-25 实测走过一遍这条弯路。
+#
+# 在生产上它更贵：**PITR 能力已经没了，而没有任何症状** —— 全量备份照做、
+# pg_verifybackup 照过，只有真的要恢复那天才发现归档接不上。
+SRC_SYSTEM_ID="$(psql_val 'SELECT system_identifier FROM pg_control_system()')"
+if [ -z "${SYSTEM_ID:-}" ]; then
+    # 老备份没记这一项。**不当失败** —— 那是这次改动之前做的备份，
+    # 而拿它演练仍然有意义
+    warn "base/$BASE 是加 SYSTEM_ID 之前做的，跳过「同一个库」检查。下一份全量就有了。"
+elif [ "$SYSTEM_ID" != "$SRC_SYSTEM_ID" ]; then
+    die "**这份备份不是当前这个库的**（备份 ${SYSTEM_ID} / 当前 ${SRC_SYSTEM_ID}）。
+
+     多半是库被重建过，而归档目录没清 —— 新库的 WAL 因为同名不覆盖
+     根本进不去，归档里全是上一个库的段。此刻 PITR 是断的。
+
+     怎么办：清掉 ${BACKUP_DIR}/wal 与 ${BACKUP_DIR}/base，重做一份全量，
+     再跑这个演练。**在那之前不要相信任何 RPO 数字。**"
+fi
+
 # ══════════════════════════════════════════════════════════
 #  第 1 步：探针 + RPO 实测
 # ══════════════════════════════════════════════════════════
