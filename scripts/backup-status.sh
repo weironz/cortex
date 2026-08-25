@@ -84,17 +84,23 @@ else
     printf '  加密    关 —— 异地那份会是明文\n'
 fi
 
-# 告警：两条路都算。老的是 CORTEX_ALERT_*（本机脚本用），
-# 新的是 HEALTHCHECK_URL（备份容器的死人开关）。
-alert=""
-[ -n "${CORTEX_ALERT_WEBHOOK_URL:-}${CORTEX_ALERT_CMD:-}${CORTEX_HEARTBEAT_URL:-}" ] &&
-    alert="本机脚本已配（just notify-test 自测）"
-if docker inspect -f '{{.State.Running}}' cortex-backup 2>/dev/null | grep -q true &&
-    docker inspect cortex-backup 2>/dev/null | grep -q 'HEALTHCHECK_URL=[^"]'; then
-    alert="${alert:+${alert}；}容器的死人开关已配"
+# 告警。判据只看本机脚本那一套（`CORTEX_ALERT_*` / `CORTEX_HEARTBEAT_URL`，
+# 见 scripts/notify.sh）—— 备份容器那侧 2026-08-25 起没有这个通道了。
+#
+# ⚠️ **这一行刻意不再劝人去配。**
+#
+# 它原先写的是「未配 —— **备份失败不会有人知道**」。那句话本身没错，但
+# 这套部署**明知代价地决定不配告警**（单机自托管、一个人运维、有事自己看
+# `docker logs`）。对一个已经做过决定的人重复同一句提醒，就从「提示」变成
+# 了「噪音」，而噪音的代价是**整份状态输出开始被跳着看** —— 于是真正要紧
+# 的那几行（半截段、从未演练）也一起被跳过去。
+#
+# 所以改成中性陈述：说清现在是什么状态、去哪儿配，不作评价。
+if [ -n "${CORTEX_ALERT_WEBHOOK_URL:-}${CORTEX_ALERT_CMD:-}${CORTEX_HEARTBEAT_URL:-}" ]; then
+    printf '  告警    已配（just notify-test 自测）\n'
+else
+    printf '  告警    未配（本机脚本那套；要配见 .env.example 的「备份告警」）\n'
 fi
-printf '  告警    %s\n' \
-    "${alert:-未配 —— **备份失败不会有人知道**，而「压根没跑」连退出码都没有}"
 
 printf '  轮转记录 %s\n' \
     "$(tail -1 "${d}/reports/purge-rotation.log" 2>/dev/null || echo '无（从未做过 purge 轮转）')"

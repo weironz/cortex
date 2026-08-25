@@ -135,7 +135,6 @@ OSS_ROOT=cortex
 OSS_ACCESS_KEY_ID=…
 OSS_SECRET_ACCESS_KEY=…
 CORTEX_BACKUP_PASSWORD=…      # ★★ 丢了它整个仓库再也打不开，存一份在机器之外
-HEALTHCHECK_URL=https://hc-ping.com/<uuid>   # 可选
 ```
 
 ### 3. 打开它
@@ -408,7 +407,28 @@ just blob-reconcile --deep      # 在开发机上跑，它会点名 HASH_MISMATC
 | 容器日志里一直 `archive command failed` | 备份根的属主不对（要是容器里 postgres 的 uid，**70**，不是 root） | `ls -ln /data/cortex/backup`；不对就重跑一次 `just node-provision` |
 | 演练在第 0 步死在 `meta.env: No such file` | 那份全量是加 `meta.env` 之前做的 | 用 `--backup <更新的时间戳>`，或先跑一次 ② |
 | `rustic` 说 `No repository given` | 配置没渲染出来 | `docker exec cortex-backup /opt/cortex-backup/render-config.sh` 看它报什么（缺变量会以 78 退出并点名） |
-| 备份**一次都没跑**，而没有任何告警 | 死人开关没配 | 配 `HEALTHCHECK_URL`。退出码只在有人看的时候才有意义，而「压根没跑」连退出码都没有 |
+| 备份**一次都没跑**，而没有任何告警 | 这套**没有配告警**，是明知代价的决定（见下） | 靠体检那条命令自己看 —— 「异地 … 上一次：」那行给的就是最后一次的结果 |
+
+### 为什么没有告警
+
+**这是一个决定，不是漏做的。** 写下来是为了它不被当成疏漏补上。
+
+代价说清楚：**「压根没跑」不产生任何退出码** —— 容器死了、守护循环卡住了、
+节点重启后 profile 没激活，这几种情形下你手上每一个信号都还是绿的，而备份
+已经停了几周。这正是死人开关（成功 ping 一个 URL、失败 ping 另一个）唯一
+能覆盖的那一格。
+
+接受它的理由：单机自托管、一个人运维，而这个人本来就会经常登上去看。
+再加一个要注册、要维护、要在 `.env.secrets` 里多一行的外部依赖，
+换的是一个他大概率会自己发现的问题。
+
+**哪天该翻回来**：这台机器不再是一个人天天看的时候。那时加回来只要三处 ——
+`run.sh` 里成功/失败各 ping 一次、compose 透一个变量、这份文档写一句。
+
+> 本机脚本那条路（`just backup-all`，cron 驱动）**仍然带着一套告警**
+> （`CORTEX_ALERT_*` / `CORTEX_HEARTBEAT_URL`，见 `scripts/notify.sh`）。
+> 它没被删，因为它服务的是另一种部署形态 —— 没开备份容器、靠 cron 跑本机
+> 脚本的那种。生产上跑的是容器，用不到它。
 
 ---
 
@@ -445,12 +465,3 @@ just blob-reconcile --deep      # 在开发机上跑，它会点名 HASH_MISMATC
    connection」，而它只在备份真跑起来时出现，也就是凌晨三点。
 
 ---
-
-## 死人开关
-
-`HEALTHCHECK_URL` 配了的话：成功 ping 它，失败 ping `<URL>/fail`。指向
-healthchecks.io 之类。
-
-**它覆盖的是「压根没跑」** —— 容器死了、循环卡住了，那一类不产生任何退出码，
-也就不会有任何告警，而你手上每一个信号都还是绿的。退出码只在有人看的时候
-才有意义。

@@ -506,9 +506,6 @@ services:
       KEEP_WEEKLY: ${KEEP_WEEKLY:-4}
       KEEP_MONTHLY: ${KEEP_MONTHLY:-6}
       CORTEX_BACKUP_CHECK_DOW: ${CORTEX_BACKUP_CHECK_DOW:-7}
-      # 死人开关：成功 ping URL，失败 ping URL/fail。**不配就没有** ——
-      # 它覆盖的是「压根没跑」，而那一类不产生任何退出码
-      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
     volumes:
       - ${CORTEX_BACKUP_DIR:-/data/cortex/backup}:/backup
     # 2 核机器上还跑着别人的四个服务。备份是后台活儿，让它慢没关系，

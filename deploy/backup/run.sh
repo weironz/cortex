@@ -67,14 +67,16 @@ leg() {
     fi
 }
 
-ping_health() {
-    [ -n "${HEALTHCHECK_URL:-}" ] || return 0
-    # 尽力而为：**ping 本身绝不能让备份失败**。它是一个观测通道，
-    # 不是备份的一部分
-    curl -fsS -m 10 -o /dev/null "$1" 2>/dev/null || true
-}
-
-ping_health "${HEALTHCHECK_URL:-}/start"
+# ── 这里曾经有一个死人开关（HEALTHCHECK_URL）───────────────
+#
+# 成功 ping 一个 URL、失败 ping `<URL>/fail`，指向 healthchecks.io 之类。
+# 它覆盖的是「压根没跑」—— 那一类不产生任何退出码。
+#
+# **2026-08-25 按用户的决定去掉了。** 留着一个没人配的可选通道，代价不是零：
+# 它在 `.env.example`、compose、文档、状态输出里各占一行，而每一行都在说
+# 「你还差这个」—— 一句对已经决定不做的人重复的提醒，就是噪音。
+#
+# 要加回来的话：这里 ping、compose 透一个变量、文档写一句，三处。
 started="$(date -u +%s)"
 
 # 三个目录先建出来。**全新部署上它们不存在** —— `/backup/wal` 要等
@@ -197,8 +199,6 @@ fi
 elapsed=$(( $(date -u +%s) - started ))
 if [ -n "$FAILED" ]; then
     note "备份**不完整**，失败的腿：$FAILED（耗时 ${elapsed}s）"
-    ping_health "${HEALTHCHECK_URL:-}/fail"
     exit 1
 fi
 note "全部完成，耗时 ${elapsed}s"
-ping_health "${HEALTHCHECK_URL:-}"
