@@ -158,15 +158,46 @@ cortex_backup_enabled: true
 
 ---
 
-## 日常操作
+## 人来操作：先认清自己在哪一格
 
-都对**跑着的**容器 `docker exec`（配置已经渲染好，裸 `rustic` 就能用）：
+自动的那部分不用管（容器每天 `BACKUP_HOUR` 点跑一次、每周 `rustic check`
+一次）。**人要动手只有六种情形**，按频率排：
+
+| 我现在要… | 翻到 |
+|---|---|
+| 看一眼备份到底好不好 | [体检](#体检一条命令) |
+| 做危险操作之前先留个退路 | [立刻备一次](#立刻备一次做危险操作之前) |
+| 证明备份真的读得回来 | [恢复演练](#恢复演练证明它读得回来) |
+| 只想捞回某张表 / 某段数据 | [从转储捞](#从转储捞一张表) |
+| **库整个没了，要救回来** | [灾难恢复](#灾难恢复库整个没了) |
+| 附件 / 生成图丢了 | [灌回 blobs](#灌回-blobs) |
+
+**所有命令都在节点上跑**（`ssh root@<节点>`，然后 `cd /data/cortex`）。
+那里有 `scripts/`（随部署送的）与 `dc`（compose 包装，自动带上两个 env 文件
+—— **别裸敲 `docker compose`**，凭据在 `.env.secrets` 里，裸敲会报
+`CORTEX_PG_PASSWORD missing`）。
+
+---
+
+### 体检：一条命令
 
 ```bash
-docker exec cortex-backup rustic snapshots --group-by label   # 有哪些快照
-docker exec cortex-backup rustic check                        # 仓库完整性
-docker exec cortex-backup /opt/cortex-backup/run.sh           # 立刻跑一次
-docker logs -f cortex-backup                                  # 看它在干什么
+cd /data/cortex && CORTEX_BACKUP_DIR=/data/cortex/backup bash scripts/backup-status.sh
+```
+
+它一次答完：全量几份、WAL 多少段、**有没有半截段**（有的话归档已经卡死，
+它会给出清理命令）、上次演练是什么时候、异地那一半在不在跑、加密开没开、
+失败了会不会有人知道。
+
+每一行都刻意把「没有」说成后果：`从未演练 —— 这等于没有备份` 比 `0 份`
+更能让人动手。
+
+再往下看：
+
+```bash
+docker logs --tail 40 cortex-backup                            # 上一次跑了什么
+docker exec cortex-backup rustic snapshots --group-by label    # OSS 上有哪些快照
+docker exec cortex-backup rustic check                         # 仓库完整性（几分钟）
 ```
 
 `rustic check` 每周自动跑一次（`CORTEX_BACKUP_CHECK_DOW`，默认周日）——
@@ -175,52 +206,209 @@ docker logs -f cortex-backup                                  # 看它在干什�
 
 ---
 
-## 恢复
+### 立刻备一次：做危险操作之前
 
-### ⚠️ 取回的路径是**完整源路径**，不是你给的那个目录
-
-这一条最容易让人以为「没恢复出来」。`rustic restore latest /tmp/r` 之后，
-文件在 `/tmp/r/backup/dump/cortex.sql`，**不是** `/tmp/r/cortex.sql`。
-下面每条命令里的路径都是这么算出来的。
-
-### A. 逻辑转储（换机器、跨版本、只想要某张表）
+改数据的迁移、手工改表、升大版本 —— **动手之前先留一个退路**。
 
 ```bash
-docker exec cortex-backup rustic restore latest /tmp/r --filter-label pgdump
-docker exec cortex-backup head -3 /tmp/r/backup/dump/cortex.sql   # 先看一眼是不是转储
-docker cp cortex-backup:/tmp/r/backup/dump/cortex.sql ./cortex.sql
-docker exec cortex-backup rm -rf /tmp/r
+docker exec cortex-backup /opt/cortex-backup/run.sh
 ```
 
-**先在一次性库上演练**，别直接盖生产 —— 一个恢复了一半的生产库比一个停着的
-更糟。
+它跑完整的六条腿（全量 + 校验 / 逻辑转储 / 两条 rustic lineage /
+blobs 镜像 / 保留策略），生产上约 2 分钟。**看到最后那行
+`全部完成` 才算数** —— 任何一条腿失败它都会点名，并以非零退出。
 
-### B. PITR（整个数据目录丢了，要回到某个时刻）
+> 只要一份**本机**的、不推 OSS 的快照（更快，但防不住整机丢失）：
+> ```bash
+> cd /data/cortex && CORTEX_BACKUP_DIR=/data/cortex/backup \
+>   bash -c 'set -a; . ./.env.secrets; set +a; bash scripts/pg-backup.sh'
+> ```
+
+---
+
+### 恢复演练：证明它读得回来
+
+**这一条是这份文档里最重要的。** 备份跑绿只证明「写出去了」；
+`rustic check` 只证明「字节没坏」。证明**恢复得出一个能起来的数据库**
+的只有它。
+
+```bash
+cd /data/cortex
+export $(grep -E '^CORTEX_PG_PASSWORD=' .env.secrets | xargs)
+export CORTEX_BACKUP_DIR=/data/cortex/backup
+bash scripts/restore-drill.sh --rpo-mode forced
+```
+
+它做的事：往生产库写一条**探针**（独立 schema `cortex_drill`，不碰任何业务
+表）→ 等它进归档（这一步测的就是 RPO）→ 拿一份**早于探针**的全量恢复到一个
+独立实例 → **探针必须出现在恢复出来的库里**。
+
+对生产的影响：一条探针行、一份基础备份大小的临时磁盘、几十秒 CPU。
+临时实例 `archive_mode=off`（不会污染归档序列）、**不发布端口**、跑完自删。
+
+看结论那一行：
+
+```
+[06:06:06] ✔ 恢复演练通过。RPO=1.044s  RTO=5.102s
+```
+
+报告落在 `/data/cortex/backup/reports/restore-drill-<时间戳>.txt`。
+
+**多久跑一次**：改过备份链路之后必跑；此外每月一次。
+`--rpo-mode forced` 会主动切段（约 10 秒出结果）；不加它走自然切段，
+要等 `archive_timeout`（60 秒）+ 余量，测的是**稳态** RPO。
+
+> ⚠️ 现在报告里 `逐页校验 skipped` —— 生产库 `data_checksums=off`。
+> 也就是说**页级静默损坏这一类它验不了**（验到的是文件级 SHA256 与
+> 堆/索引自洽）。开它要停一次库（`just pg-enable-checksums`），
+> 而且要**下一份全量**才生效。
+
+---
+
+### 从转储捞一张表
+
+不是灾难，只是想拿回某段数据。走 `pgdump` 那条 lineage（未压缩的 SQL，
+可移植、跨大版本）。
+
+```bash
+# 1) 从 OSS 取回来
+docker exec cortex-backup rustic restore latest /tmp/r --filter-label pgdump
+
+# ⚠️ 取回的路径是**完整源路径**，不是你给的那个目录：
+#    文件在 /tmp/r/backup/dump/cortex.sql，不是 /tmp/r/cortex.sql
+docker exec cortex-backup head -3 /tmp/r/backup/dump/cortex.sql   # 先确认是转储
+
+# 2) 拿到宿主上
+docker cp cortex-backup:/tmp/r/backup/dump/cortex.sql /tmp/cortex.sql
+docker exec cortex-backup rm -rf /tmp/r
+
+# 3) **灌进一次性库**，不要直接往生产上灌
+cd /data/cortex
+docker exec cortex-db psql -U cortex -d postgres -c 'CREATE DATABASE scratch'
+docker exec -i cortex-db psql -q -U cortex -d scratch < /tmp/cortex.sql
+
+# 4) 在 scratch 里把要的行捞出来，再决定怎么放回生产
+docker exec cortex-db psql -U cortex -d scratch -c 'SELECT ... FROM ...'
+
+# 5) 收拾
+docker exec cortex-db psql -U cortex -d postgres -c 'DROP DATABASE scratch'
+rm -f /tmp/cortex.sql
+```
+
+**别跳过第 3 步。** 直接往生产灌一份全量转储是在用「几天前的全部数据」
+覆盖「现在的全部数据」—— 你想要的只是其中几行。
+
+---
+
+### 灾难恢复：库整个没了
+
+数据卷损坏、误删、机器重装。**这一段是有序的，别跳步。**
+
+先判断走哪条：
+
+| 情况 | 走哪条 | 丢多少 |
+|---|---|---|
+| 归档 WAL 还在（`/data/cortex/backup/wal` 有东西） | **PITR** | 最后一分钟以内 |
+| 只有 OSS 上那份 | **从 OSS 取回再 PITR** | 同上（WAL 也在快照里） |
+| 上面都没有，只有逻辑转储 | 灌转储 | **回到上一次备份那一刻** |
+
+#### 第 0 步：先停写
+
+```bash
+cd /data/cortex
+./dc stop agentd web            # 让 agent 与界面先别写
+# ⚠️ 不要停 cortexdb —— 下面要往它里面恢复
+```
+
+#### 第 1 步：把备份取回来（本机没有的话）
 
 ```bash
 docker exec cortex-backup rustic restore latest /tmp/p --filter-label pgdata
-# 取回来的是整棵树：/tmp/p/backup/base/<时间戳>/pgdata 与 /tmp/p/backup/wal
+# 取回的是整棵树：/tmp/p/backup/base/<时间戳>/pgdata 与 /tmp/p/backup/wal
 docker exec cortex-backup sh -c 'pg_verifybackup /tmp/p/backup/base/*/pgdata'
 ```
 
-`pg_verifybackup` 通过 = 这份基础备份逐文件的 SHA256 都对得上。之后照
-[operations.md](operations.md) 的 PITR 步骤起一个实例、配
-`restore_command` 指向取回的 `wal` 目录、`recovery_target` 定到你要的时刻。
+`pg_verifybackup` 通过 = 这份基础备份逐文件的 SHA256 都对得上。
+**不过就别往下走** —— 拿一份坏的备份去恢复，会把「还能救」变成「救不回」。
 
-**恢复演练走 `just drill`**（本机那套），它会真的起一个独立实例、真的回放
-归档 WAL、真的查探针 —— 那才是「读得回来」的证明。`rustic check` 只证明
-仓库里的字节没坏。
+#### 第 2 步：**先在一次性实例上验一遍**
 
-### C. blobs
+这一步就是 [恢复演练](#恢复演练证明它读得回来)，只是指定那份备份：
 
 ```bash
-docker exec cortex-backup rclone copy \
-  oss:${OSS_BUCKET}/${OSS_ROOT}/rustfs rustfs:${S3_BUCKET} --checksum
+bash scripts/restore-drill.sh --backup <时间戳>
 ```
 
-默认**不覆盖已存在的对象**要自己加 `--ignore-existing`；主存储上已有的那份
-是不是好的，这条命令不预设立场。先用 `just blob-reconcile --deep` 点名哪些
-坏了，再只灌那些。
+**演练不过就不要往生产上恢复。** 一个恢复了一半的生产库比一个停着的更糟：
+停着的还能再试，半个的要先想清楚现在库里是什么。
+
+#### 第 3 步：真的恢复
+
+演练脚本已经替你走通了全部步骤，照它做的来：停掉旧实例 → 把
+`base/<时间戳>/pgdata` 复制成新的数据目录 → 写 `restore_command` 指向
+归档目录 → `touch recovery.signal` → 起来。逐条命令见
+[operations.md](operations.md) 的恢复那一节。
+
+要恢复到**某个时刻**（比如误删之前），在 `postgresql.auto.conf` 里加：
+
+```
+recovery_target_time = '2026-08-25 14:30:00+08'
+recovery_target_action = 'promote'
+```
+
+不写 `recovery_target` = 恢复到归档的最末端，那是灾难恢复的默认诉求。
+
+#### 第 4 步：起回来并确认
+
+```bash
+cd /data/cortex && ./dc up -d
+curl -fsS https://<域名>/api/sandbox/health      # 看 role 字段
+```
+
+> ⚠️ **schema 不会回滚。** sqlx 的 migration 只前滚 —— 如果恢复到的是一个
+> 更早的 schema，而线上跑的是更新的 agentd，它会把缺的迁移再跑一遍（没问题）；
+> 反过来（旧 agentd 遇到新 schema）**起不来**。不确定就把 `CORTEX_VERSION`
+> 钉回那份备份当时线上的版本。
+
+---
+
+### 灌回 blobs
+
+附件或生成图丢了（对象存储被清、误删）。blobs 是**内容寻址**的
+（key 就是内容的 SHA-256），所以灌回去不会有「覆盖成错的」这种事。
+
+⚠️ **那几个变量分散在两个文件里** —— `OSS_*` 在 `.env.secrets`，`S3_BUCKET`
+在 `.env`。两个都要 source，只 source 一个的症状是
+`S3_BUCKET: unbound variable`（实测踩过）。
+
+```bash
+cd /data/cortex
+set -a; . ./.env; . ./.env.secrets; set +a
+
+# 先 --dry-run 看它会灌什么，确认无误再去掉那个开关
+docker exec cortex-backup rclone copy \
+  "oss:${OSS_BUCKET}/${OSS_ROOT}/rustfs" "rustfs:${S3_BUCKET}" \
+  --checksum --ignore-existing --dry-run
+```
+
+`--ignore-existing`：**默认不覆盖主存储上已经有的那份**。它是不是好的，
+这条命令不预设立场 —— 先用对账点名哪些坏了，再只灌那些：
+
+```bash
+just blob-reconcile --deep      # 在开发机上跑，它会点名 HASH_MISMATCH
+```
+
+---
+
+## 出事时先看这三样
+
+| 症状 | 多半是 | 怎么办 |
+|---|---|---|
+| `backup-status` 报「半截段 N 个」 | 一次被打断的 `cp` 留下不足 16 MiB 的段，`test ! -f` 拒绝覆盖，**归档永久卡死** | 按它给的 `find … -delete` 删掉，归档会自己接着跑 |
+| 容器日志里一直 `archive command failed` | 备份根的属主不对（要是容器里 postgres 的 uid，**70**，不是 root） | `ls -ln /data/cortex/backup`；不对就重跑一次 `just node-provision` |
+| 演练在第 0 步死在 `meta.env: No such file` | 那份全量是加 `meta.env` 之前做的 | 用 `--backup <更新的时间戳>`，或先跑一次 ② |
+| `rustic` 说 `No repository given` | 配置没渲染出来 | `docker exec cortex-backup /opt/cortex-backup/render-config.sh` 看它报什么（缺变量会以 78 退出并点名） |
+| 备份**一次都没跑**，而没有任何告警 | 死人开关没配 | 配 `HEALTHCHECK_URL`。退出码只在有人看的时候才有意义，而「压根没跑」连退出码都没有 |
 
 ---
 

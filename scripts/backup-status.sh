@@ -9,6 +9,14 @@
 # ══════════════════════════════════════════════════════════
 set -uo pipefail
 
+# ── Git Bash 路径改写 ──────────────────────────────────────
+# 下面要 docker exec / docker inspect。MSYS 会把长得像 Unix 绝对路径的
+# 参数改写成 Windows 路径，容器里于是报「文件不存在」。与 lib.sh 里那两行
+# 同一个理由；这个脚本不 source 它（那会拖进 .env 加载与 cd 仓库根，而它
+# 要能在节点上裸跑）。Linux / macOS 上设了无害。
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*'
+
 d="${CORTEX_BACKUP_DIR:-data/backup}"
 echo "备份根 ${d}"
 
@@ -33,14 +41,60 @@ if [ "${partial}" != "0" ]; then
     printf '  ⚠ 半截段 %s 个 —— **归档已经卡死**，删掉它们才会继续：\n' "${partial}"
     printf '      find %s/wal -maxdepth 1 -type f -name "0*" ! -name "*.backup" ! -name "*.tmp" -size -16777216c -delete\n' "${d}"
 fi
-printf '  逻辑    %s 份\n' "$(ls -1 "${d}/logical" 2>/dev/null | wc -l | tr -d ' ')"
+# 逻辑转储在**两个地方**：老脚本写 `logical/`，备份容器写 `dump/cortex.sql`。
+# 只数前者的话，一台由容器备份的机器会显示「逻辑 0 份」，而它明明有一份 ——
+# 那是一句会让人以为「转储没做」的假话。
+logical_n="$(ls -1 "${d}/logical" 2>/dev/null | wc -l | tr -d ' ')"
+[ -f "${d}/dump/cortex.sql" ] && logical_n="$(( logical_n + 1 ))"
+printf '  逻辑    %s 份\n' "${logical_n}"
 printf '  最近演练 %s\n' \
     "$(ls -1 "${d}/reports"/restore-drill-*.txt 2>/dev/null | sort | tail -1 || echo '从未演练 —— 这等于没有备份')"
 printf '  最近对账 %s\n' \
     "$(ls -1 "${d}/reports"/reconcile-*.txt 2>/dev/null | sort | tail -1 || echo 无)"
-printf '  加密    %s\n' \
-    "$([ -n "${CORTEX_BACKUP_ENC_PASSPHRASE:-}" ] && echo "开（just backup-key status 看指纹）" || echo '关 —— 异地那份是明文')"
+
+# ── 异地那一半 ────────────────────────────────────────────
+#
+# 上面全是**本机**的账。异地那一半 2026-08-25 起由 compose 的 `backup`
+# 容器管（rustic 备 PG、rclone 备 RustFS → 阿里云 OSS，见 docs/backup.md）。
+#
+# 不报它的话，这份「现状一览」在一台异地备份跑得好好的机器上，看起来与
+# 一台完全没有异地备份的机器**一模一样** —— 而它正是运维第一眼看的东西。
+if docker inspect -f '{{.State.Running}}' cortex-backup 2>/dev/null | grep -q true; then
+    last="$(docker logs --tail 200 cortex-backup 2>&1 |
+        grep -E '全部完成|备份\*\*不完整\*\*' | tail -1)"
+    printf '  异地    容器在跑（rustic → OSS）%s\n' \
+        "${last:+
+      上一次：${last}}"
+    printf '            立刻跑一次：docker exec cortex-backup /opt/cortex-backup/run.sh\n'
+    printf '            看快照：    docker exec cortex-backup rustic snapshots --group-by label\n'
+else
+    printf '  异地    **没有** —— 只有本机备份，防不住整机丢失。\n'
+    printf '            开它见 docs/backup.md（compose 的 backup profile）\n'
+fi
+
+# ⚠️ 加密这一行**改过**：它原先只看 `CORTEX_BACKUP_ENC_PASSPHRASE`（老的
+# rclone-crypt 那条路），于是在一台已经由 rustic 加密推到 OSS 的机器上，
+# 它照样印「关 —— 异地那份是明文」。那是一句**反话**，比不印更糟：
+# 运维会以为自己的备份是裸的，然后去配一条已经不用的路。
+if docker inspect -f '{{.State.Running}}' cortex-backup 2>/dev/null | grep -q true; then
+    printf '  加密    开（rustic 仓库加密；口令是 CORTEX_BACKUP_PASSWORD）\n'
+elif [ -n "${CORTEX_BACKUP_ENC_PASSPHRASE:-}" ]; then
+    printf '  加密    开（rclone crypt；just backup-key status 看指纹）\n'
+else
+    printf '  加密    关 —— 异地那份会是明文\n'
+fi
+
+# 告警：两条路都算。老的是 CORTEX_ALERT_*（本机脚本用），
+# 新的是 HEALTHCHECK_URL（备份容器的死人开关）。
+alert=""
+[ -n "${CORTEX_ALERT_WEBHOOK_URL:-}${CORTEX_ALERT_CMD:-}${CORTEX_HEARTBEAT_URL:-}" ] &&
+    alert="本机脚本已配（just notify-test 自测）"
+if docker inspect -f '{{.State.Running}}' cortex-backup 2>/dev/null | grep -q true &&
+    docker inspect cortex-backup 2>/dev/null | grep -q 'HEALTHCHECK_URL=[^"]'; then
+    alert="${alert:+${alert}；}容器的死人开关已配"
+fi
 printf '  告警    %s\n' \
-    "$([ -n "${CORTEX_ALERT_WEBHOOK_URL:-}${CORTEX_ALERT_CMD:-}${CORTEX_HEARTBEAT_URL:-}" ] && echo '已配（just notify-test 自测）' || echo '未配 —— 备份失败不会有人知道')"
+    "${alert:-未配 —— **备份失败不会有人知道**，而「压根没跑」连退出码都没有}"
+
 printf '  轮转记录 %s\n' \
     "$(tail -1 "${d}/reports/purge-rotation.log" 2>/dev/null || echo '无（从未做过 purge 轮转）')"
