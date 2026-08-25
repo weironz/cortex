@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-agent"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-agentd"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-blob"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-cli"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1268,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-core"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-egress-proxy"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "tokio",
  "tracing",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-import"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-llm"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1327,7 +1327,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-local"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-mcp"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "async-trait",
  "cortex-agent",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-proto"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "chrono",
  "cortex-core",
@@ -1394,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-providers"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1433,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "cortex-store"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "chrono",
