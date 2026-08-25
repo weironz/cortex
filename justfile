@@ -437,15 +437,19 @@ ci: fmt-check lint check test docs-check lint-sh lint-py lint-edge release-check
 # ══════════════════════════════════════════════════════════
 #  备份与灾备 —— 细节见 docs/operations.md
 #
-#  ⚠️ **这一整节的目标容器名还停在拆分之前**：`scripts/lib.sh` 里
-#  `PG_CONTAINER` 默认 `cortex-postgres`、`PG_IMAGE` 默认
-#  `pgvector/pgvector:pg17`，而这两样今天哪一个都不对 —— 这一侧 dev 的库
-#  是 `cortex-postgres-dev`（原味 postgres:17-alpine，没有 pgvector），
-#  生产那份是 `cortex-db`。所以在本机直接跑 `just backup` 会停在
-#  「容器 cortex-postgres 没在跑」，要么先 `PG_CONTAINER=cortex-postgres-dev`。
+#  **默认打的是生产那个库**（`scripts/lib.sh` 里 `PG_CONTAINER` 默认
+#  `cortex-db`，`PG_IMAGE` 默认 `postgres:17-alpine`）—— 备份是生产的事。
+#  在开发机上跑要显式指名：`PG_CONTAINER=cortex-postgres-dev just backup`。
+#  指错时 `need_pg_running` 会把这台机器上正在跑的候选列出来，不让人猜。
 #
-#  没有在 #142 里顺手改掉默认值：改它会同时改变生产节点上备份打哪个库，
-#  那是一次要单独验证的改动，不该混在「修 justfile 坏引用」里。
+#  备的是**这一侧的库**（会话 / 消息 / 附件 / 同步流水）。记忆那半归
+#  Cormex 备，它有自己的一套。
+#
+#  > 这段话 2026-08-25 重写过。原文写着「目标容器名还停在拆分之前，
+#  > 默认 `cortex-postgres` 哪个环境都不对，跑 `just backup` 会停在
+#  > 容器没在跑」—— 那在 `adfb941` 就已经修好了，只是没人回来划掉这里。
+#  > 一段说反话的警告比没有警告更贵：它会让人以为**还得先做点什么**
+#  > 才能跑备份，而生产上那次迟迟没跑，这段话是原因之一。
 # ══════════════════════════════════════════════════════════
 
 # Postgres 全量备份（+ WAL 归档已由 compose 常开）

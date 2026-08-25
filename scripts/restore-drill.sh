@@ -155,14 +155,45 @@ wait_s=$(( timeout_s + 45 ))
 [ "$RPO_MODE" = "forced" ] && wait_s=60
 
 log "等待段 $PROBE_WAL 进归档（最多 ${wait_s}s）…"
+
+# ⚠️ **判据不能只是「有个同名文件」。**
+#
+# 2026-08-25 实测撞到：归档目录里躺着一段 8 月 13 日的
+# `000000010000000400000077`，是**上一个数据库**留下的（拆分前那套
+# pgvector 镜像）。而 `archive_command` 见到同名文件就不覆盖，于是
+# 当前这段探针 WAL **根本没进归档** —— `[ -f ]` 照样为真，脚本报
+# 「✔ 段已归档，RPO 1.7 s」，一个完全编出来的数字。
+#
+# 后果不是「少测一项」：整场演练随后在完整性检查那里失败，而失败信息
+# 是「relation cortex_drill.probe does not exist」，指不到这里。
+#
+# 判据改成**这个文件是不是在探针写下之后才出现的**。一段在探针之前就
+# 存在的 WAL，无论它叫什么名字，都不可能装着这条探针。
+# 这是本仓库记过的「验证工具自己造出『通过』」的又一次。
+probe_epoch="$(( t_write_ms / 1000 ))"
 t_archived_ms=""
 for _ in $(seq 1 "$wait_s"); do
-    if [ -f "$BACKUP_DIR/wal/$PROBE_WAL" ]; then
-        t_archived_ms="$(now_ms)"
-        break
+    seg="$BACKUP_DIR/wal/$PROBE_WAL"
+    if [ -f "$seg" ]; then
+        # mtime 早于探针写入 = 陈旧的同名段，不算数。用 `-r` 拿 epoch 秒；
+        # 拿不到（某些 busybox 的 stat 没有 `-c`）时**按不算数处理** ——
+        # 判不出来就别放行，与 fail-closed 同一条
+        seg_epoch="$(stat -c %Y "$seg" 2>/dev/null || echo 0)"
+        if [ "$seg_epoch" -ge "$probe_epoch" ] 2>/dev/null; then
+            t_archived_ms="$(now_ms)"
+            break
+        fi
     fi
     sleep 1
 done
+
+if [ -z "$t_archived_ms" ] && [ -f "$BACKUP_DIR/wal/$PROBE_WAL" ]; then
+    # 说清是哪一种失败：文件在、但它是旧的。不说的话，人对着一个明明
+    # 存在的文件排查不出任何东西
+    warn "归档里那个 $PROBE_WAL 是**旧的**（早于本次探针）。\
+archive_command 不覆盖同名文件，所以这一段没能进去。\
+多半是归档目录里混着上一个数据库的残留 —— 清掉 $BACKUP_DIR/wal 再来一次。"
+fi
 
 if [ -z "$t_archived_ms" ]; then
     fail_check "探针所在的 WAL 段 $PROBE_WAL 在 ${wait_s}s 内没有进归档 —— RPO 无法保证"
@@ -295,11 +326,42 @@ ok "回放结束并已升主，实测 RTO = $(( RTO_MS / 1000 )).$(( (RTO_MS % 1
 step "3 / 完整性检查"
 
 # 3.1 探针 —— 这一条挂了，说明归档 WAL 根本没被回放，PITR 是假的
-probe_found="$(drill_psql "SELECT count(*) FROM cortex_drill.probe WHERE token = '$PROBE_TOKEN'")"
+#
+# ⚠️ 探针表在 `cortex_drill` 这个 schema 里，而它是**探针写入时才建的**。
+# 所以没回放时这条查询是「关系不存在」而不是「0 行」—— `drill_psql`
+# 把 stderr 丢了，于是 `probe_found` 是空串。`${probe_found:-0}` 兜的
+# 正是这一种，别改成 `[ "$probe_found" = 1 ]`
+#
+# ⚠️ **必须带 `|| true`。** 表不存在时 psql 回非零，而 `set -e` 会让
+# 这一句赋值**当场终止整个脚本** —— 于是下面那段「为什么没回放」的诊断
+# 一行都跑不到，用户看到的是「══ 3 / 完整性检查 ══」之后什么都没有。
+# 2026-08-25 实测：第一版的诊断写好了，但永远执行不到。
+probe_found="$(drill_psql "SELECT count(*) FROM cortex_drill.probe WHERE token = '$PROBE_TOKEN'" || true)"
 if [ "${probe_found:-0}" = "1" ]; then
     pass_check "探针已回放（备份 + 归档 WAL 确实把最后一分钟的写入接回来了）"
 else
-    fail_check "探针没找到 —— 恢复只到了全量的时间点，归档 WAL 没有被回放"
+    # 说清**为什么**没回放。PG 把一个失败的 `restore_command` 当成
+    # 「归档到头了」：它会正常结束恢复、升主、一句 error 都不打 ——
+    # 于是这里看到的只是「探针不在」，指不到真正的原因。
+    #
+    # 2026-08-25 实测撞到的那一种：归档文件属主是 uid 999（Debian 版
+    # postgres 写的），而演练容器用 alpine（postgres 是 uid 70），
+    # 0600 权限下 `cp` 直接 Permission denied。两边镜像不同族就会这样。
+    hint=""
+    if MSYS_NO_PATHCONV=1 docker exec "$DRILL_CONTAINER" \
+        su postgres -s /bin/sh -c "cp '$SRC_IN_PG/wal/$PROBE_WAL' /tmp/.probe_seg" \
+        >/dev/null 2>&1; then
+        MSYS_NO_PATHCONV=1 docker exec "$DRILL_CONTAINER" rm -f /tmp/.probe_seg >/dev/null 2>&1 || true
+        hint="段本身读得到，那就是归档里缺了中间某一段（WAL 序列有断口）。"
+    else
+        owner="$(MSYS_NO_PATHCONV=1 docker exec "$DRILL_CONTAINER" \
+            stat -c '%u:%g %a' "$SRC_IN_PG/wal/$PROBE_WAL" 2>/dev/null || echo '（读不到）')"
+        hint="**演练容器读不了归档文件**（属主/权限：$owner，而容器里 postgres 是 $(
+            MSYS_NO_PATHCONV=1 docker exec "$DRILL_CONTAINER" id -u postgres 2>/dev/null || echo '?'
+        )）。写归档的库与演练用的 PG_IMAGE 不是同一族镜像时就会这样 —— \
+alpine 的 postgres 是 uid 70，Debian 的是 999。把 PG_IMAGE 换成与生产库同一个镜像再来。"
+    fi
+    fail_check "探针没找到 —— 恢复只到了全量的时间点，归档 WAL 没有被回放。$hint"
 fi
 
 # 3.2 表齐不齐。
