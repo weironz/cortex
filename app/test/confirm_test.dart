@@ -668,6 +668,10 @@ class _ConfirmApi
   }) => throw UnimplementedError();
 
   @override
+  Future<ChatSession> forkSession(String id, {String? upToEpisodeId}) =>
+      throw UnimplementedError();
+
+  @override
   Future<Episode> episode(String id) => throw UnimplementedError();
 
   @override

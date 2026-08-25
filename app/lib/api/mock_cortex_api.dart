@@ -878,6 +878,67 @@ class MockCortexApi
     return updated;
   }
 
+  /// 与服务端同一套判定：空历史 400、`upToEpisodeId` 指错 400、
+  /// 截断**含**那条；旧会话原样不动。放松任何一条，错误分支就只会在
+  /// 生产上第一次执行 —— 那正是 mock 存在要防的事。
+  @override
+  Future<ChatSession> forkSession(String id, {String? upToEpisodeId}) async {
+    await _latency(240);
+    final index = _sessions.indexWhere((s) => s.id == id);
+    if (index == -1) {
+      throw CortexApiException('session $id 不存在', statusCode: 404);
+    }
+    var all = _episodes.values.where((e) => e.sessionId == id).toList()
+      ..sort(_byOccurrence);
+    if (all.isEmpty) {
+      throw const CortexApiException('这个会话还没有任何消息，没有可分叉的历史', statusCode: 400);
+    }
+    if (upToEpisodeId != null) {
+      final at = all.indexWhere((e) => e.id == upToEpisodeId);
+      if (at == -1) {
+        throw CortexApiException(
+          '消息 $upToEpisodeId 不在这个会话里 —— 「从这里分叉」找不到那个「这里」',
+          statusCode: 400,
+        );
+      }
+      all = all.sublist(0, at + 1);
+    }
+
+    final source = _sessions[index];
+    // 掺进 `_episodes.length`：随机数种子是固定的（可复现的 demo），
+    // 两个实例各分叉一次会生成同一串随机数 —— 而 `_episodes` 是 static，
+    // 同名 id 会互相覆盖
+    final newId = 'ses_fork_${_random.nextInt(1 << 30)}_${_episodes.length}';
+    for (var i = 0; i < all.length; i++) {
+      final e = all[i];
+      final copiedId = '${newId}_ep_$i';
+      _episodes[copiedId] = Episode(
+        id: copiedId,
+        sessionId: newId,
+        role: e.role,
+        text: e.text,
+        occurredAt: e.occurredAt,
+        // 附件与工具轨迹按引用带走 —— 服务端复制的是引用行，字节不动
+        attachments: e.attachments,
+        toolCalls: e.toolCalls,
+        models: e.models,
+      );
+    }
+    final forked = ChatSession(
+      id: newId,
+      title: '${source.title}（分叉）',
+      titleIsCustom: true,
+      createdAt: DateTime.now(),
+      updatedAt: DateTime.now(),
+      messageCount: all.length,
+      preview: all.last.text,
+      // 项目归属跟着走，与服务端一致 —— 落到未分组用户会在项目里找不到它
+      projectId: source.projectId,
+    );
+    _sessions.insert(0, forked);
+    return forked;
+  }
+
   static void _validateWorkspace(String raw) {
     final path = raw.trim();
     final isAbsolute =

@@ -241,6 +241,10 @@ class _FakeApi
   }) => throw UnimplementedError('同步链路不应改会话');
 
   @override
+  Future<ChatSession> forkSession(String id, {String? upToEpisodeId}) =>
+      throw UnimplementedError('同步链路不应分叉会话');
+
+  @override
   Future<BlobRef> uploadBlob({
     required Uint8List bytes,
     String? mime,

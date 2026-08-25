@@ -127,6 +127,82 @@ fn search_hit_dto(h: cortex_store::SessionSearchHit) -> SessionSearchHitDto {
     }
 }
 
+/// `POST /sessions/{id}/fork` —— 分叉：带着历史开一条新会话，旧会话不动。
+///
+/// 复制发生在 store 层的**一个写事务**里（`Store::fork_session`），每一行
+/// 都经正常写入路径记 `sync_log` —— 别的设备靠它才看得见这条新会话。
+/// 这里只做三件事：判 404、拼标题、把 store 的「你这么问不对」翻成 400。
+pub async fn fork(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<cortex_proto::dto::SessionForkRequest>,
+) -> Result<Json<SessionDto>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+    let store = tenant.store()?;
+
+    let digest = store.session_digest(&id).await.map_err(store_err)?;
+    let base_title = match &digest {
+        // 标题口径与列表一致：用户起过名用他起的，否则从首条消息派生 ——
+        // 两处口径不一的话，分叉出来的名字与用户眼里那条会话对不上号
+        Some(d) => d
+            .title
+            .clone()
+            .unwrap_or_else(|| session_title(d.first_user_text.as_deref())),
+        None => {
+            // 与 `detail` 同一条判据：连生命周期事件都没有的才是 404；
+            // 「建了但没说过话」是空历史，分叉不出东西，是 400
+            if store.session_state(&id).await.map_err(store_err)?.is_none() {
+                return Err(CortexError::NotFound {
+                    kind: "session",
+                    id: id.clone(),
+                }
+                .into());
+            }
+            return Err(ApiError::bad_request(
+                "这个会话还没有任何消息，没有可分叉的历史",
+            ));
+        }
+    };
+
+    let outcome = store
+        .fork_session(
+            &id,
+            req.up_to_episode_id.as_deref(),
+            &fork_title(&base_title),
+            DEVICE_ID,
+        )
+        .await
+        .map_err(|e| match e {
+            // 「消息不在这个会话里」这类是调用方的问题，重试无益 —— 400。
+            // 混进 500 的话客户端会当成服务端故障去重试一件永远不会成的事
+            cortex_store::StoreError::Invalid(msg) => ApiError::bad_request(msg),
+            other => store_err(other).into(),
+        })?;
+
+    tracing::info!(
+        source = %id,
+        fork = %outcome.session_id,
+        episodes = outcome.episodes,
+        tool_calls = outcome.tool_calls,
+        attachments = outcome.attachments,
+        "分叉会话"
+    );
+    Ok(Json(session_overview(store, &outcome.session_id).await?))
+}
+
+/// 分叉出来那条叫什么：「原标题（分叉）」。
+///
+/// 后缀**先占预算**再截原标题：原标题顶着 200 字上限时直接拼会超出
+/// schema 的 CHECK —— 那不是「标题长一点」，是**整个分叉事务回滚**，
+/// 而错误信息只说违反约束。
+fn fork_title(base: &str) -> String {
+    const SUFFIX: &str = "（分叉）";
+    let budget = cortex_store::SESSION_TITLE_MAX_CHARS.saturating_sub(SUFFIX.chars().count());
+    let head: String = base.trim().chars().take(budget).collect();
+    format!("{head}{SUFFIX}")
+}
+
 /// `PATCH /sessions/{id}` —— 改名 / 归档 / 解绑工作区 / 移进项目 / 设 runtime。
 ///
 /// 归档走这条而不是 `DELETE /sessions/{id}`：那个动词会让客户端（以及读代码
@@ -773,6 +849,28 @@ mod tests {
             body.get("sessions")
                 .is_some_and(serde_json::Value::is_array),
             "对象里必须有 `sessions` 这个数组字段，实际是：{body}"
+        );
+    }
+
+    /// 分叉标题：「原标题（分叉）」，且**永远不超** schema 那 200 字的 CHECK。
+    ///
+    /// 超了不是标题被截，是**整个分叉事务回滚** —— 用户看到「分叉失败」，
+    /// 而起因只是原标题起得长。
+    #[test]
+    fn a_fork_title_never_exceeds_the_schema_check() {
+        assert_eq!(fork_title("客户方案"), "客户方案（分叉）");
+        assert_eq!(fork_title("  两边带空白  "), "两边带空白（分叉）");
+
+        let long = "记".repeat(cortex_store::SESSION_TITLE_MAX_CHARS);
+        let t = fork_title(&long);
+        assert_eq!(
+            t.chars().count(),
+            cortex_store::SESSION_TITLE_MAX_CHARS,
+            "顶格的原标题拼上后缀必须仍在上限内 —— 超一个字整个分叉事务回滚"
+        );
+        assert!(
+            t.ends_with("（分叉）"),
+            "截的是原标题那头，后缀必须完整保留 —— 它是用户认出这是分叉的唯一标记"
         );
     }
 

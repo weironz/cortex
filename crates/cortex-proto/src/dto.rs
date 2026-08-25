@@ -898,6 +898,21 @@ pub struct SessionPatch {
     pub runtime: Option<SessionRuntimeDto>,
 }
 
+/// `POST /sessions/{id}/fork` 的请求体。
+///
+/// # 为什么截断点是**消息 id**，不是「前 N 条」
+///
+/// 「从这里分叉」的「这里」在用户眼里是屏幕上的某条消息。传序号的话，
+/// 客户端与服务端要对「第 N 条」的口径逐字一致（含不含工具消息？分页
+/// 加载了一半怎么数？），任何一处数错都是静默截错 —— 而消息 id 两边
+/// 本来就有，指错了服务端会明确报 400。
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct SessionForkRequest {
+    /// 截到这条消息（**含**它）。不传 = 整段复制。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up_to_episode_id: Option<String>,
+}
+
 /// 把「字段出现且为 null」与「字段没出现」区分开。
 ///
 /// serde 默认把两者都解成 `None`，而这里必须分得清：前者是「解绑」，
