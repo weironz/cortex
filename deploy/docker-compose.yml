@@ -149,6 +149,21 @@ services:
       - wal_compression=on
       - -c
       - summarize_wal=on
+      # ── 放行来自本网段的复制连接 ────────────────────────────────
+      #
+      # 备份容器的 `pg_basebackup` 开的是一条**复制连接**，而 initdb 生成的
+      # 那份 pg_hba 只对 127.0.0.1 放行复制；官方入口脚本追加的那行
+      # `host all all all scram-sha-256` 里的 `all` **按 pg_hba 的语义不匹配
+      # replication** —— 这不是笔误，是规定。
+      #
+      # 没有这一条的症状是「no pg_hba.conf entry for replication connection」，
+      # 而它只在备份真跑起来时出现，也就是凌晨三点、没人看着的时候。
+      # 2026-08-25 起 hba_file 指到下面那份内联 config。
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    configs:
+      - source: cortex-pg-hba
+        target: /etc/postgresql/pg_hba.conf
     volumes:
       - cortex-db-data:/var/lib/postgresql/data
       # 备份根。`archive_command` 往这儿写，`pg_basebackup` 也往这儿写 ——
@@ -399,6 +414,102 @@ services:
       traefik.http.routers.cortex-web.tls.certresolver: letsencrypt
       traefik.http.routers.cortex-web.priority: "1"
       traefik.http.services.cortex-web.loadbalancer.server.port: "80"
+
+  # ══════════════════════════════════════════════════════════════════════
+  #  备份 —— rustic 备 Postgres，rclone 备 RustFS，都推到阿里云 OSS
+  # ══════════════════════════════════════════════════════════════════════
+  #
+  # 完整说明见 docs/backup.md。这里只写「为什么是这个形状」：
+  #
+  # **opt-in（`profiles: [backup]`）。** 裸 `docker compose up -d` 不会拉起
+  # 它 —— 没配 OSS 凭据的部署（开发机、别人自托管的一份）拉起来只会每天
+  # 失败一次，而那种噪音会让人学会忽略备份告警。
+  #
+  # **只上 default 与 traefik 两张网，绝不上 sandbox。** default 通 cortexdb
+  # （pg_basebackup 从那儿拉），traefik 通 cortex-rustfs（rclone 从那儿读
+  # blobs）—— 与 agentd 走同一条理由，见它那段。沙箱网是 internal 的，
+  # 而且沙箱永远不该看见数据库或备份凭据。
+  #
+  # **挂的是备份根，不是数据卷。** 它读 `/backup/wal`（postgres 的
+  # archive_command 往那儿写）、写 `/backup/base`。**不挂 cortex-db-data**：
+  # 备份进程没有任何理由能碰到活着的数据目录。
+  backup:
+    image: ${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortex-backup:${CORTEX_VERSION:?由部署脚本写入，形如 v0.1.0}
+    container_name: cortex-backup
+    profiles: [backup]
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [default, traefik]
+    depends_on:
+      cortexdb:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # ── 源：这一侧的库 ──
+      CORTEX_PG_HOST: cortexdb
+      CORTEX_PG_USER: ${CORTEX_PG_USER:-cortex}
+      CORTEX_PG_PASSWORD: ${CORTEX_PG_PASSWORD:?部署脚本必须写入，不许留默认口令}
+      CORTEX_PG_DB: ${CORTEX_PG_DB:-cortex}
+      # ── 源：RustFS（blobs）──
+      #
+      # ⚠️ 端点写 `cortex-rustfs` 而不是 `rustfs` —— 与 agentd 那段同一个
+      # 理由：traefik-network 上 mica 的那台也叫 `rustfs`，按短名解析等于
+      # 抛硬币，一半的时候备的是别人的桶
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://cortex-rustfs:9000}
+      S3_BUCKET: ${S3_BUCKET:-cortex-blobs}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      # ⚠️ 名字用 RUSTFS_* 而不是另起一套 S3_* —— agentd 那侧读的就是
+      # 这两个（见上面 296 行附近）。同一把凭据两个名字的话，改一处就是
+      # 「附件能存但备不了」，而那件事没有任何症状
+      S3_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?rclone 要读 RustFS，与 agentd 用同一把}
+      S3_SECRET_KEY: ${RUSTFS_SECRET_KEY:?rclone 要读 RustFS，与 agentd 用同一把}
+      # ── 目标：阿里云 OSS ──
+      #
+      # ⚠️ **这把 key 必须与上面那把 S3_* 是两把不同的。** 用同一把的话，
+      # 一次泄露同时拿到主存储与备份，而备份存在的全部意义正是
+      # 「主存储出事时它还在」。RAM 子账号，只授这一个桶。
+      OSS_BUCKET: ${OSS_BUCKET:?见 docs/backup.md}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:?见 docs/backup.md}
+      OSS_REGION: ${OSS_REGION:-oss-cn-hangzhou}
+      OSS_ROOT: ${OSS_ROOT:-cortex}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:?见 docs/backup.md}
+      OSS_SECRET_ACCESS_KEY: ${OSS_SECRET_ACCESS_KEY:?见 docs/backup.md}
+      # ⚠️ **丢了它就等于丢了整个仓库。** rustic 的加密口令，
+      # 存一份在这台机器之外
+      CORTEX_BACKUP_PASSWORD: ${CORTEX_BACKUP_PASSWORD:?丢了它整个备份仓库就打不开了}
+      # ── 节奏与保留 ──
+      BACKUP_HOUR: ${BACKUP_HOUR:-3}
+      KEEP_DAILY: ${KEEP_DAILY:-7}
+      KEEP_WEEKLY: ${KEEP_WEEKLY:-4}
+      KEEP_MONTHLY: ${KEEP_MONTHLY:-6}
+      CORTEX_BACKUP_CHECK_DOW: ${CORTEX_BACKUP_CHECK_DOW:-7}
+      # 死人开关：成功 ping URL，失败 ping URL/fail。**不配就没有** ——
+      # 它覆盖的是「压根没跑」，而那一类不产生任何退出码
+      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
+    volumes:
+      - ${CORTEX_BACKUP_DIR:-/data/cortex/backup}:/backup
+    # 2 核机器上还跑着别人的四个服务。备份是后台活儿，让它慢没关系，
+    # 让它把机器占满不行
+    deploy:
+      resources:
+        limits:
+          cpus: "${CORTEX_BACKUP_CPU_LIMIT:-0.75}"
+          memory: ${CORTEX_BACKUP_MEM_LIMIT:-512M}
+
+configs:
+  # Postgres 的 pg_hba，**内联**而不是一个要单独送上去的文件。
+  #
+  # ansible 往节点上只 copy 一份 docker-compose.yml（见 deploy.yml）——
+  # 多一个文件就多一个「忘了送」的形状，而那种漏送的症状是容器起不来，
+  # 发生在部署的最后一步。写在这里，它跟着 compose 一起走。
+  #
+  # `include` 那一行把 initdb 生成的、以及官方入口脚本追加的那份原样带进来
+  # （PG16+ 支持）—— 于是我们只**加**一条规则，不接管整份文件。
+  # 接管整份的代价是镜像哪天改了默认，我们这份不会跟着变。
+  cortex-pg-hba:
+    content: |
+      include /var/lib/postgresql/data/pg_hba.conf
+      host replication ${CORTEX_PG_USER:-cortex} all scram-sha-256
 
 networks:
   traefik:

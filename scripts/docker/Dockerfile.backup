@@ -1,0 +1,66 @@
+# Cortex 备份容器 —— rustic 备 Postgres，rclone 备 RustFS。
+#
+#   docker build -f scripts/docker/Dockerfile.backup -t willdockerhub/cortex-backup:vX.Y .
+#
+# ── 为什么底座是 postgres:17-alpine 而不是一个空 alpine ──────────────────────
+#
+# 它自带 `pg_basebackup` / `pg_dump` / `psql`，而且**与生产库同一个镜像标签**。
+# 这一条不是省事，是正确性：pg_basebackup / pg_dump 比服务端旧会直接拒绝
+# （"server version mismatch"），而「备份容器的客户端版本」与「库的版本」
+# 分开维护的话，升一次库就会在下一次凌晨三点炸一次，且没人看着。
+#
+# 同一个标签 = 升库时这个镜像跟着重建，版本永远对得上。
+#
+# ── 两个外部工具，都钉版本 + 钉校验和 ────────────────────────────────────────
+#
+# 静态 musl 构建，所以能直接落进 alpine。`--version` 当冒烟测试：
+# 下坏了要在**镜像构建时**红，而不是在凌晨三点的备份里红。
+
+FROM alpine:3.21 AS rustic
+ARG RUSTIC_VERSION=v0.11.4
+# 2026-08-25 把发布件下下来自己算的，不是从别处抄的常量。
+# 钉住它之后，一次被重写的发布件会让**镜像构建**失败，而不是被信任。
+ARG RUSTIC_SHA256=628b26785f3787fa1d52e61b3289493f483230a1ed6e86a84ae9c76d7a41a81e
+RUN apk add --no-cache curl tar \
+ && curl -fsSL -o /tmp/rustic.tar.gz \
+      "https://github.com/rustic-rs/rustic/releases/download/${RUSTIC_VERSION}/rustic-${RUSTIC_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+ && echo "${RUSTIC_SHA256}  /tmp/rustic.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/rustic.tar.gz -C /tmp \
+ && install -m755 "$(find /tmp -maxdepth 2 -type f -name rustic | head -1)" /usr/local/bin/rustic \
+ && /usr/local/bin/rustic --version
+
+FROM alpine:3.21 AS rclone
+ARG RCLONE_VERSION=v1.68.2
+ARG RCLONE_SHA256=0e6fa18051e67fc600d803a2dcb10ddedb092247fc6eee61be97f64ec080a13c
+# ⚠️ zip 存成**发布件自己的文件名**，不要缩写成 rclone.zip：
+# `sha256sum -c` 从校验行里读文件名再去开那个路径，名字对不上时报的是
+# "No such file or directory" —— 读起来像下载坏了，其实是命名错了。
+RUN apk add --no-cache curl unzip \
+ && zip="rclone-${RCLONE_VERSION}-linux-amd64.zip" \
+ && curl -fsSL -o "/tmp/${zip}" \
+      "https://github.com/rclone/rclone/releases/download/${RCLONE_VERSION}/${zip}" \
+ && echo "${RCLONE_SHA256}  /tmp/${zip}" | sha256sum -c - \
+ && unzip -q "/tmp/${zip}" -d /tmp \
+ && install -m755 "$(find /tmp -maxdepth 2 -type f -name rclone | head -1)" /usr/local/bin/rclone \
+ # ⚠️ `env -u`：rclone 把 RCLONE_<FLAG> 环境变量映射成命令行开关，而上面那个
+ # ARG 在这一层里正好是其中之一 —— 裸跑 `rclone --version` 会去把布尔的
+ # --version 设成 "v1.68.2" 然后死掉。不是假设，mica 那边真炸过一次构建。
+ && env -u RCLONE_VERSION /usr/local/bin/rclone --version
+
+FROM postgres:17-alpine
+# curl：死人开关那一下 ping。tzdata：BACKUP_HOUR 按本地时区算，
+# 不装的话容器里永远是 UTC，而运维看的是本地时间。
+RUN apk add --no-cache ca-certificates curl tzdata
+COPY --from=rustic /usr/local/bin/rustic /usr/local/bin/rustic
+COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
+COPY deploy/backup/ /opt/cortex-backup/
+RUN chmod +x /opt/cortex-backup/*.sh
+
+# ⚠️ **以 postgres 用户跑**，不是 root。
+#
+# pg_basebackup 写出来的数据目录必须是 0700 且属主是启动它的那个用户 ——
+# 用 root 跑出来的备份，恢复时那个临时实例（也跑 postgres 用户）起不来，
+# 报 "data directory has invalid permissions"。而那件事只在**恢复那天**
+# 才发现，正是这一整套要防的。
+USER postgres
+ENTRYPOINT ["/opt/cortex-backup/daemon.sh"]

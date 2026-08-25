@@ -522,6 +522,29 @@ pg-enable-checksums *ARGS:
 backup-status:
     bash scripts/backup-status.sh
 
+# ── 异地备份容器（rustic 备 PG、rclone 备 RustFS → 阿里云 OSS）──
+#
+# 上面那些是**本机**那一套（PITR + 恢复演练）；这几条是**异地**那一半。
+# 两者不是替代关系：本机备份防得住误删，防不住整机丢失；而异地那份的
+# 「读得回来」仍然要靠本机的 `just drill` 去证明。完整说明见 docs/backup.md。
+
+# 本地构建备份镜像（发版由 CI 的镜像矩阵做，这条只给改完想验一下的人）
+backup-image:
+    docker build -f scripts/docker/Dockerfile.backup -t cortex-backup:dev .
+
+# 节点上：立刻跑一次异地备份，不等 BACKUP_HOUR
+backup-now:
+    docker exec cortex-backup /opt/cortex-backup/run.sh
+
+# 节点上：仓库里有哪些快照（按 label 分组 —— pgdata 与 pgdump 两条 lineage）
+backup-snapshots:
+    docker exec cortex-backup rustic snapshots --group-by label
+
+# 节点上：仓库完整性。**对象存储的静默损坏只能靠问才发现** ——
+# 一份坏掉的快照在 snapshots 列表里长得和好的一模一样
+backup-check:
+    docker exec cortex-backup rustic check
+
 # ══════════════════════════════════════════════════════════
 #  Web 端沙箱（docs/sandbox.md）
 # ══════════════════════════════════════════════════════════

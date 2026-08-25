@@ -293,6 +293,12 @@ jobs:
             dockerfile: scripts/docker/Dockerfile.sandbox
           - image: cortex-egress-proxy
             dockerfile: scripts/docker/Dockerfile.egress
+          # 备份容器（rustic 备 PG、rclone 备 RustFS）。与上面两个同理：
+          # 挂在 compose 的 backup profile 上、默认不启用，**镜像仍然每版
+          # 都发** —— 节点上打开异地备份那天要拉得到对应版本，而
+          # 「想开的时候现发一版」不是一条能用的路。
+          - image: cortex-backup
+            dockerfile: scripts/docker/Dockerfile.backup
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3

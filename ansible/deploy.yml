@@ -21,10 +21,13 @@
   gather_facts: true
 
   vars:
-    # 沙箱开着时才有 egress —— profile 没激活的话 compose 根本不认识它，
-    # `docker compose pull egress` 会报 "no such service"
+    # profile 没激活的话 compose 根本不认识那个服务，
+    # `docker compose pull egress` 会报 "no such service"。
+    # 所以两个可选服务都跟着各自的开关进这份清单。
     services: >-
-      {{ deploy_services + (deploy_services_sandbox if cortex_sandbox_enabled else []) }}
+      {{ deploy_services
+         + (deploy_services_sandbox if cortex_sandbox_enabled else [])
+         + (deploy_services_backup if cortex_backup_enabled else []) }}
     compose_cmd: >-
       docker compose --env-file .env --env-file .env.secrets
 

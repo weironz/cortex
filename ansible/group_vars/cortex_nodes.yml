@@ -125,6 +125,21 @@ deploy_services:
 # 沙箱开着时追加（profile 没激活时 compose 根本不认识 egress）
 deploy_services_sandbox:
   - egress
+# 异地备份开着时追加（同上：profile 没激活时 compose 不认识 backup）
+deploy_services_backup:
+  - backup
+
+# 异地备份开不开。**默认关** —— 没配 OSS 凭据的部署拉起它只会每天失败
+# 一次，而那种噪音会让人学会忽略备份告警。
+# 打开之前先把 .env.secrets 里那五个 OSS_* / CORTEX_BACKUP_PASSWORD 填好。
+cortex_backup_enabled: false
+backup_hour: 3
+keep_daily: 7
+keep_weekly: 4
+keep_monthly: 6
+cortex_backup_check_dow: 7
+cortex_backup_cpu_limit: "0.75"
+cortex_backup_mem_limit: 512M
 
 # 明确说明「不归这次部署管」的服务。加进来要写清为什么。
 deploy_unmanaged: []

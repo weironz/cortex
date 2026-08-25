@@ -259,6 +259,22 @@ printf '%s' '你的口令' | ./dc exec -T agentd cortex-agentd --set-password al
 
 **本地同步副本不算备份** —— purge 与损坏会随同步一起传播。
 
+> ### ⚠️ 这一节讲的是**本机**那一套；异地那一半在别处
+>
+> 下面这些脚本（`just backup` / `just drill` / `blob-mirror`）跑在**节点上**，
+> 产物落在 `CORTEX_BACKUP_DIR`。它们防得住误删与损坏，**防不住整机丢失**。
+>
+> 异地那一半 2026-08-25 起是 compose 里一个 `backup` 容器：
+> **rustic 备 Postgres、rclone 备 RustFS，都推到阿里云 OSS**。
+> 配置、恢复步骤与它已经被验到哪一步，全在 [backup.md](backup.md)。
+>
+> 两者不是替代关系，分工是清楚的：
+>
+> * **异地容器**负责「东西还在别的地方」；
+> * **`just drill`** 负责「它读得回来」—— 那是这一节最要紧的一条，
+>   而 `rustic check` 只证明仓库里的字节没坏，证明不了恢复得出一个能起来
+>   的数据库。
+
 ### Postgres：为什么是 pg_basebackup 而不是 pgBackRest
 
 [architecture.md](architecture.md) 写的是「pgBackRest / WAL-G」，那是给正经多机
