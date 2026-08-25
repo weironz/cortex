@@ -69,7 +69,9 @@ class _AppearancePageState extends ConsumerState<AppearancePage>
       children: [
         SettingsSection(
           title: '主题',
-          description: '「跟随系统」会在系统切换深浅色时一起变。顶栏那个图标是同一个设置的快捷方式。',
+          // ⚠️ 别再写「顶栏那个图标」—— 顶栏的主题快捷图标 2026-08-25 撤了
+          //（约束 2：界面只描述当下真的成立的入口）。命令面板那条还在
+          description: '「跟随系统」会在系统切换深浅色时一起变。⌘K 命令面板里的「切换主题」改的是同一个设置。',
           children: [
             SettingsChoice<ThemeMode>(
               value: mode,

@@ -151,6 +151,18 @@ Future<void> _openPicker(WidgetTester tester, String roleLabel) async {
   await tester.pumpAndSettle();
 }
 
+/// 弹层里某个型号那一行能不能点。
+///
+/// 2026-08-25 起选择器是紧凑弹层，行是 `InkWell` 而不是 `ListTile` ——
+/// 「不给选」的落点是 `onTap == null`。取 `.first`：`find.ancestor`
+/// 从最近的祖先往外排，最近那个 InkWell 就是行本身。
+bool _rowEnabled(WidgetTester tester, String name) {
+  final row = tester.widget<InkWell>(
+    find.ancestor(of: find.text(name), matching: find.byType(InkWell)).first,
+  );
+  return row.onTap != null;
+}
+
 void main() {
   testWidgets('三个角色都在，没有第四个', (tester) async {
     final c = _boot(_Api());
@@ -230,14 +242,8 @@ void main() {
     await _pump(tester, c);
     await _openPicker(tester, '绘画模型');
 
-    final tile = tester.widget<ListTile>(
-      find.ancestor(
-        of: find.text('Qwen Image Plus'),
-        matching: find.byType(ListTile),
-      ),
-    );
     expect(
-      tile.enabled,
+      _rowEnabled(tester, 'Qwen Image Plus'),
       isTrue,
       reason:
           '生图模型基本都不支持工具调用。照搬另外两行那条规则的话，'
@@ -251,14 +257,8 @@ void main() {
     await _pump(tester, c);
     await _openPicker(tester, '主模型');
 
-    final tile = tester.widget<ListTile>(
-      find.ancestor(
-        of: find.text('Qwen Image Plus'),
-        matching: find.byType(ListTile),
-      ),
-    );
     expect(
-      tile.enabled,
+      _rowEnabled(tester, 'Qwen Image Plus'),
       isFalse,
       reason:
           '把上一条那个放宽误加到这一行的话，用户能把一个生图模型'
@@ -272,14 +272,8 @@ void main() {
     await _pump(tester, c);
     await _openPicker(tester, '主模型');
 
-    final tile = tester.widget<ListTile>(
-      find.ancestor(
-        of: find.text('qwen-image-2.0'),
-        matching: find.byType(ListTile),
-      ),
-    );
     expect(
-      tile.enabled,
+      _rowEnabled(tester, 'qwen-image-2.0'),
       isFalse,
       reason:
           '它 tool_call 是 null（目录查不到），光靠「不支持工具调用就拦」'
@@ -301,14 +295,8 @@ void main() {
     await _pump(tester, c);
     await _openPicker(tester, '绘画模型');
 
-    final tile = tester.widget<ListTile>(
-      find.ancestor(
-        of: find.text('qwen-image-2.0'),
-        matching: find.byType(ListTile),
-      ),
-    );
     expect(
-      tile.enabled,
+      _rowEnabled(tester, 'qwen-image-2.0'),
       isTrue,
       reason:
           '上一条那个否决只在要跑 agent 时成立。误加到这一行的话，'
