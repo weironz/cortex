@@ -47,6 +47,32 @@ fn is_hop_by_hop(name: &str) -> bool {
     HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(name))
 }
 
+/// 这个 bearer 是不是**本机自己的**凭据（入站或远程接入那把）。
+///
+/// # 契约：入站凭据永远不出这台机器
+///
+/// 入站那把回答的只是「你是不是拉起我的那个桌面端」，它刻意钉死在启动值
+/// （见 `routes::require_auth`），而出站凭据每 15 分钟热替换一次
+/// （`PUT /local/credential`）。**把入站凭据原样转发给远端**曾是「登录被踢」
+/// 的头号根因：access token 过期后，客户端带的钉住旧值让每条反代路由永久
+/// 401，而客户端的续期走直连、次次成功 —— 三次「白续」后熔断，把刚续上的
+/// 用户踢回登录页，每次登录后约 15 分钟稳定复发（2026-08-25 诊断实锤）。
+///
+/// 所以规则是：**等于本机凭据就换成出站现值，其余原样透传**。
+/// 为什么不是「一律替换」：容器形态下入站是 agentd 认证过的委托凭据 ——
+/// 那是这轮云端会话的身份，盲替会把它换成 agent 自己的。
+/// 为什么不是让客户端别带头：入站认证靠的就是这个头，不带在门口就 401。
+pub fn is_machine_bearer(
+    bearer: Option<&str>,
+    inbound: Option<&str>,
+    attach: Option<&str>,
+) -> bool {
+    match bearer {
+        None => false,
+        Some(b) => inbound.is_some_and(|t| t == b) || attach.is_some_and(|t| t == b),
+    }
+}
+
 /// 转发一次请求。
 ///
 /// 响应体**流式**转回，不缓冲：`/blobs/{hash}` 可能是几十兆的视频，
@@ -59,11 +85,30 @@ pub async fn forward(State(st): State<LocalState>, req: Request) -> Response {
         .map_or_else(|| parts.uri.path().to_string(), ToString::to_string);
     let url = st.remote.url(&path_and_query);
 
+    // 带着本机凭据进来的请求，出站要换成出站凭据的**现值**。判据见
+    // [`is_machine_bearer`] —— 入站凭据永远不出这台机器。
+    let machine_credential = is_machine_bearer(
+        parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer ")),
+        st.inbound_token.as_deref(),
+        st.attach_token.as_deref(),
+    );
+
     let mut headers = HeaderMap::new();
     for (k, v) in &parts.headers {
-        if !is_hop_by_hop(k.as_str()) {
-            headers.insert(k, v.clone());
+        if is_hop_by_hop(k.as_str()) {
+            continue;
         }
+        // 本机凭据剥掉：下面按现值补（现值为空就什么都不带，让远端用
+        // 自己的话拒绝 —— 带一把它不认的本机凭据出门，401 会被客户端
+        // 读成「用户凭据失效」而触发一轮毫无意义的续期）
+        if machine_credential && k == header::AUTHORIZATION {
+            continue;
+        }
+        headers.insert(k, v.clone());
     }
     // 客户端没带凭据时，用本地持有的那份补上。
     //
@@ -165,6 +210,31 @@ pub async fn forward_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「是不是本机凭据」的判据 —— 两把钥匙都算，别的都不算。
+    ///
+    /// 这个判据同时被 `forward`（换成出站现值）与 `ws_proxy`（剥掉不补）
+    /// 使用，**只在这里判一次**：两处各写一份的话，漏改的那份不会有任何
+    /// 测试红，而它的症状正是「登录被踢」回归。
+    #[test]
+    fn only_the_machines_own_credentials_count_as_machine_bearer() {
+        let inbound = Some("T0");
+        let attach = Some("A0");
+        assert!(is_machine_bearer(Some("T0"), inbound, attach), "入站那把算");
+        assert!(
+            is_machine_bearer(Some("A0"), inbound, attach),
+            "远程接入那把也算 —— 它同样是本机签的，远端不认识"
+        );
+        assert!(
+            !is_machine_bearer(Some("delegated-xyz"), inbound, attach),
+            "委托凭据（容器形态）必须原样透传 —— 盲替会把云端会话的身份换成 agent 自己的"
+        );
+        assert!(!is_machine_bearer(None, inbound, attach), "没带头不算");
+        assert!(
+            !is_machine_bearer(Some("T0"), None, None),
+            "没配本机凭据时什么都不算 —— 那时进来的头都是调用方自己的"
+        );
+    }
 
     /// 逐跳首部必须被剥掉，尤其是 `transfer-encoding` 与 `host`。
     ///
