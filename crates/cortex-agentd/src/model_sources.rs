@@ -735,7 +735,21 @@ pub async fn fetch_models(
     .map_err(|e| ApiError::bad_request(format!("这条来源建不起供应商：{e}")))?;
 
     let custom = is_custom_endpoint(&source.provider, source.base_url.as_deref());
-    let fetched = match client.fetch_supported_models().await {
+    // ⚠️ **必须设界。** 供应商端点可能整段不可达（实测 Gemini 官方端点在
+    // 国内服务器上是 TCP 黑洞：不拒绝、不回包，一挂几分钟），而底下的
+    // HTTP 客户端没有自己的超时。不设界的话这条请求挂多久，客户端那侧的
+    // 「获取模型列表」按钮就灰多久 —— 用户看到的是整页按钮全灰的死锁。
+    // 超时走与「拉不动」相同的回落：内置清单 + 一句说明，好于挂着。
+    let fetched = match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client.fetch_supported_models(),
+    )
+    .await
+    .unwrap_or_else(|_elapsed| {
+        Err(cortex_llm::ProviderError::RequestFailed(
+            "等了 15 秒没有回音，多半是这个端点从服务器这侧不可达".to_owned(),
+        ))
+    }) {
         Ok(names) if !names.is_empty() => {
             tracing::info!(source = %id, count = names.len(), "拉到了供应商的型号列表");
             FetchedModels {
@@ -895,14 +909,29 @@ pub async fn check(
         .with_max_tokens(Some(1));
 
     let probe = [cortex_llm::Message::user().with_text("hi")];
-    match client.complete(&config, "", &probe, &[]).await {
-        Ok(_) => Ok(Json(CheckResponse {
+    // 与 `fetch_models` 同一个理由要设界：端点不可达时这次探测会挂几分钟，
+    // 而客户端那侧「检查」按钮跟着灰全程。挂着答不出「通不通」——
+    // 20 秒没回音本身就是一个够格的结论
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        client.complete(&config, "", &probe, &[]),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(Json(CheckResponse {
             ok: true,
             detail: format!("通了 —— {model} 用这条来源的密钥与端点调得通"),
         })),
-        Err(e) => Ok(Json(CheckResponse {
+        Ok(Err(e)) => Ok(Json(CheckResponse {
             ok: false,
             detail: diagnose(&e, &model),
+        })),
+        Err(_elapsed) => Ok(Json(CheckResponse {
+            ok: false,
+            detail: format!(
+                "等了 20 秒没有回音 —— {model} 这个端点从服务器这侧多半不可达，\
+                 检查 API 代理地址（被墙的官方端点要换代理）"
+            ),
         })),
     }
 }
