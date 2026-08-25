@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../widgets/panel_header.dart';
+import '../workspace/right_rail.dart'
+    show kRailToggleFilled, kRailToggleOutlined;
 import '../settings/pages/model_picker.dart';
 import '../shell/widgets/sync_indicator.dart';
 import 'session_changes_sheet.dart';
@@ -164,17 +166,19 @@ class ChatPane extends ConsumerWidget {
                 ThemeMode.dark => Icons.dark_mode_rounded,
               }),
             ),
-            // 右栏那两个，放在最右 —— 它们挨着的就是它们控制的那一栏。
+            // 右栏开关，放在最右 —— 它挨着的就是它控制的那一栏。
             //
-            // **文件在前、记忆在后**：记忆紧贴右栏边缘，与它此前独占这个
-            // 位置时一致；对已经形成肌肉记忆的人，那个图标没有挪窝
+            // 图标从「文件夹」换成了侧栏折叠（与左栏那对 menu_open 同一族）：
+            // 右栏已经是三页签（文件 / 本轮改动 / 终端），文件夹只说得出
+            // 三分之一。图标常量在 right_rail.dart —— 栏头「收起」用的必须
+            // 是同一个，见那里的注释
             if (onSelectPanel != null) ...[
               _PanelButton(
                 panel: RightPanel.files,
                 active: activePanel == RightPanel.files,
-                tooltip: '文件',
-                filled: Icons.folder_rounded,
-                outlined: Icons.folder_outlined,
+                tooltip: '右栏',
+                filled: kRailToggleFilled,
+                outlined: kRailToggleOutlined,
                 onSelect: onSelectPanel!,
               ),
             ],
@@ -439,9 +443,10 @@ class _PanelButton extends StatelessWidget {
     return IconButton(
       onPressed: () => onSelect(panel),
       iconSize: 19,
-      // 开着的时候说「隐藏」：同一个按钮既是「给我看」也是「不看了」，
-      // 用户不用去找第二个关闭入口
-      tooltip: active ? '隐藏$tooltip栏' : tooltip,
+      // 开着的时候说「收起」：同一个按钮既是「给我看」也是「不看了」，
+      // 用户不用去找第二个关闭入口。措辞与栏头那个「收起右栏」一致 ——
+      // 它们做的是同一件事
+      tooltip: active ? '收起$tooltip' : '展开$tooltip',
       // 激活态只靠 filled/outlined 图标切换，不上色 —— 「选中」在这个
       // 产品里一律用中性表达，上一版的 teal 会被读成某个含义不明的状态
       icon: Icon(active ? filled : outlined),
