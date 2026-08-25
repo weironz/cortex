@@ -356,7 +356,7 @@ else
     else
         owner="$(MSYS_NO_PATHCONV=1 docker exec "$DRILL_CONTAINER" \
             stat -c '%u:%g %a' "$SRC_IN_PG/wal/$PROBE_WAL" 2>/dev/null || echo '（读不到）')"
-        hint="**演练容器读不了归档文件**（属主/权限：$owner，而容器里 postgres 是 $(
+        hint="**演练容器读不了归档文件**（属主/权限：${owner}，而容器里 postgres 是 $(
             MSYS_NO_PATHCONV=1 docker exec "$DRILL_CONTAINER" id -u postgres 2>/dev/null || echo '?'
         )）。写归档的库与演练用的 PG_IMAGE 不是同一族镜像时就会这样 —— \
 alpine 的 postgres 是 uid 70，Debian 的是 999。把 PG_IMAGE 换成与生产库同一个镜像再来。"

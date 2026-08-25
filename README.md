@@ -196,6 +196,7 @@ app/                 Flutter（桌面 + Web 一套代码）
 | [install.md](docs/install.md) | 拿到产物之后怎么装 |
 | [operations.md](docs/operations.md) | 怎么部署、备份、恢复（含实测 RPO/RTO） |
 | [deploy.md](docs/deploy.md) | 怎么把某个版本放到生产节点上 |
+| [cd-architecture.md](docs/cd-architecture.md) | **持续交付这条流水线是怎么设计的** —— 每条规则背后那次事故。别的项目可以照着搬 |
 | [references.md](docs/references.md) | 同类项目调研与许可证边界 |
 
 schema 的权威版本是 [`migrations/`](migrations/)，文档中的 SQL 片段以它为准。

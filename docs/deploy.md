@@ -2,6 +2,8 @@
 
 **这份文档讲的是「把某个已发布的版本放到那台服务器上」。**
 怎么在自己机器上装见 [install.md](install.md)；怎么备份见 [operations.md](operations.md)。
+整条流水线**为什么这么设计**（以及每条规则背后那次事故）见
+[cd-architecture.md](cd-architecture.md) —— 那一份是写给「想把这套做法搬走的人」的。
 
 > **一句话**：推一个 tag，流水线一路走完 —— 构建、发产物、**上生产**。
 > `release.yml` 的最后一个 job 会调 `deploy.yml`。
