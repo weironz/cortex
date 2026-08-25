@@ -300,3 +300,58 @@ async fn 项目归属跟着分叉走() {
 
     db.cleanup().await;
 }
+
+/// 执行环境与工作区绑定也要跟着分叉走。
+///
+/// 视图对无 `set_runtime` 事件的会话回落 `Cloud` —— 不复制这几个事件的话，
+/// 一个钉在本机目录上的会话分叉出来会**静默变成 cloud 会话**，下一轮跑进
+/// 另一个执行环境，界面上没有任何提示（评审抓到的形状：分叉的语义是
+/// 「带着历史接着聊」，接着聊的地方也得是原来那个）。
+///
+/// 故障注入验证过：把 fork_session 里复制 set_runtime 那段删掉，本测试
+/// 红在 runtime 断言（Cloud != Local）；加回即绿。
+#[tokio::test]
+async fn 执行环境与工作区绑定跟着分叉走() {
+    let Some(db) = common::setup().await else {
+        return;
+    };
+    let store = &db.store;
+    seed_source(store).await;
+
+    let pin = NewSessionEvent::set_runtime(
+        SRC,
+        cortex_store::SessionRuntime::Local,
+        Actor::User,
+        common::DEVICE,
+    );
+    let bind = NewSessionEvent::bind_workspace(SRC, "D:/work/proj", Actor::User, common::DEVICE);
+    store
+        .write_txn(async |tx| {
+            tx.insert_session_event(&pin).await?;
+            tx.insert_session_event(&bind).await
+        })
+        .await
+        .expect("钉 runtime 与绑定不应失败");
+
+    let outcome = store
+        .fork_session(SRC, None, "原会话（分叉）", common::DEVICE)
+        .await
+        .expect("分叉不应失败");
+    let state = store
+        .session_state(&outcome.session_id)
+        .await
+        .expect("读状态不应失败")
+        .expect("新会话应当有生命周期事件");
+    assert_eq!(
+        state.runtime,
+        cortex_store::SessionRuntime::Local,
+        "源会话钉在本机跑，分叉不该静默回落成 cloud —— 那会让下一轮跑进另一个执行环境"
+    );
+    assert_eq!(
+        state.workspace.as_deref(),
+        Some("D:/work/proj"),
+        "工作区绑定要一起带走 —— 分叉出来「接着聊」的下一轮该看得见同一批文件"
+    );
+
+    db.cleanup().await;
+}

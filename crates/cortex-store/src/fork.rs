@@ -71,6 +71,17 @@ impl Store {
         let mut episodes = self
             .episodes_by_session(source_session_id, FORK_READ_MAX)
             .await?;
+        // ⚠️ 读满上限 = 可能被截断了 —— **报错，不带着半段历史继续**。
+        // 上面 FORK_READ_MAX 的文档自己写着「截断一半的分叉比失败更糟」，
+        // 而第一版恰恰在命中上限时静默截断（评审抓到的自相矛盾）。
+        // 十万条的会话现实里几乎不存在，真撞上时一句明确的拒绝
+        // 好过一份看起来完整、实际缺了最新一段的分叉。
+        if episodes.len() as i64 >= FORK_READ_MAX {
+            return Err(StoreError::Invalid(format!(
+                "会话 {source_session_id} 的消息数达到分叉上限（{FORK_READ_MAX} 条），\
+                 无法保证完整复制 —— 这段历史太长，不支持分叉"
+            )));
+        }
         if episodes.is_empty() {
             return Err(StoreError::Invalid(format!(
                 "会话 {source_session_id} 还没有任何消息，没有可分叉的历史"
@@ -88,13 +99,14 @@ impl Store {
         let ids: Vec<String> = episodes.iter().map(|e| e.id.clone()).collect();
         let tool_calls = self.episode_tool_calls_bulk(&ids).await?;
         let attachments = self.episode_attachments_bulk(&ids).await?;
-        // 项目归属跟着走：分叉出来的会话与原件讨论的是同一件事，落到
-        // 未分组会让用户在项目里找不到它。视图已把悬挂归属收敛成 None，
-        // 这里读到什么就是什么，不必再验项目存不存在
-        let project_id = self
-            .session_state(source_session_id)
-            .await?
-            .and_then(|s| s.project_id);
+        // 项目归属、执行环境、工作区绑定都跟着走：分叉的语义是「带着历史
+        // **接着聊**」，而接着聊的下一轮该跑在原来的地方 —— 一个钉在本机
+        // 目录上的会话，分叉出来若静默回落成 cloud（视图对无事件会话的
+        // 默认），下一轮就跑进了另一个执行环境，界面上没有任何提示
+        // （评审抓到的第三条）。视图已把悬挂归属收敛成 None，这里读到
+        // 什么就是什么，不必再验项目存不存在
+        let source_state = self.session_state(source_session_id).await?;
+        let project_id = source_state.as_ref().and_then(|s| s.project_id.clone());
 
         // ── 事务外：映射成新行 ──
         //
@@ -163,6 +175,34 @@ impl Store {
                 Actor::User,
                 device_id,
             ));
+        }
+        if let Some(state) = &source_state {
+            // 非默认的 runtime 才写事件：视图对无事件会话回落 Cloud，
+            // 给 Cloud 会话补一条 set_runtime(Cloud) 是纯噪音
+            if state.runtime != crate::model::SessionRuntime::Cloud {
+                events.push(NewSessionEvent::set_runtime(
+                    &new_session_id,
+                    state.runtime,
+                    Actor::User,
+                    device_id,
+                ));
+            }
+            if let Some(ws) = &state.workspace {
+                events.push(NewSessionEvent::bind_workspace(
+                    &new_session_id,
+                    ws,
+                    Actor::User,
+                    device_id,
+                ));
+            }
+            if let Some(cw) = &state.container_workspace {
+                events.push(NewSessionEvent::set_container_workspace(
+                    &new_session_id,
+                    cw,
+                    Actor::User,
+                    device_id,
+                ));
+            }
         }
 
         // ── 事务内：只剩顺序写。episodes 先行 —— 工具轨迹与附件引用都有

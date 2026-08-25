@@ -10,6 +10,7 @@ import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
 import '../../../models/tool_call.dart';
 import '../../images/widgets/drawing_placeholder.dart';
+import '../../../state/app_providers.dart';
 import '../../../state/chat_controller.dart';
 import '../../../state/model_controller.dart';
 import '../../../state/composer_draft.dart';
@@ -682,10 +683,17 @@ class _ForkHereButton extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final enabled = !busy && episodeId != null;
+    // 离线判据与会话菜单里那条「分叉会话」**同一处**（appConfig.offline）。
+    // 第一版只灰了菜单没灰这里 —— 同一能力的可用性判据落在两处入口中的
+    // 一处，正是 roadmap 表里「判据两处」的镜像形状（评审抓到的）。
+    // 历史的权威在服务器上，离线时按下去只会走一遍网络失败再弹错。
+    final offline = ref.watch(appConfigProvider).offline;
+    final enabled = !busy && !offline && episodeId != null;
     return _BubbleAction(
       icon: Icons.call_split_rounded,
-      tooltip: busy
+      tooltip: offline
+          ? '离线时不能分叉 —— 历史的权威在服务器上'
+          : busy
           ? '这一轮跑完才能分叉'
           : episodeId == null
           ? '这条还没写进历史，稍等片刻再分叉'
