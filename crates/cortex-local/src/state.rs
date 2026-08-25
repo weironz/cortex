@@ -37,4 +37,6 @@ pub struct LocalState {
     ///
     /// 见 `cortex_proto::presence::AttachOffer` 与 `routes::attach_allows`。
     pub attach_token: Option<String>,
+    /// 交互终端的占用簿（每会话同时最多一个）。见 [`crate::terminal`]。
+    pub terminals: crate::terminal::Terminals,
 }

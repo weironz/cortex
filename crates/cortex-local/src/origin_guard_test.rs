@@ -63,6 +63,7 @@ fn state(dir: &Path, exec_env: cortex_agent::ExecEnvironment) -> LocalState {
         // 设了 token 的话这几条就分不清是谁拦下来的
         inbound_token: None,
         attach_token: None,
+        terminals: crate::terminal::Terminals::default(),
     }
 }
 
