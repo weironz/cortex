@@ -16,6 +16,23 @@ printf '  全量    %s 份　最新 %s\n' \
     "$(ls -1 "${d}/base" 2>/dev/null | wc -l | tr -d ' ')" \
     "$(ls -1 "${d}/base" 2>/dev/null | sort | tail -1 || echo 无)"
 printf '  WAL     %s 段\n' "$(ls -1 "${d}/wal" 2>/dev/null | wc -l | tr -d ' ')"
+
+# 半截段。**这一行是 2026-08-25 在开发机上被咬出来的。**
+#
+# 一个被打断的 `cp` 留下一个不足 16 MiB 的段，而 archive_command 里的
+# `test ! -f` 看见「文件在」就拒绝覆盖 —— 归档**永久卡在那一段**。三个
+# 后果一起发生，而三个都不响：PITR 从那一刻断了；活库的 pg_wal 无限涨
+# （没归档成功的段回收不掉，那台机器上堆到 17 GB）；日志里只有一行
+# 「archive command failed with exit code 1」，读起来像权限或盘满。
+#
+# archive_command 已经改成「先写 .tmp 再原子改名」，新的不会再产生。
+# 这一行盯的是**改之前留下的**，以及别的路径写坏的。
+partial="$(find "${d}/wal" -maxdepth 1 -type f -name '0*' \
+    ! -name '*.backup' ! -name '*.tmp' -size -16777216c 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${partial}" != "0" ]; then
+    printf '  ⚠ 半截段 %s 个 —— **归档已经卡死**，删掉它们才会继续：\n' "${partial}"
+    printf '      find %s/wal -maxdepth 1 -type f -name "0*" ! -name "*.backup" ! -name "*.tmp" -size -16777216c -delete\n' "${d}"
+fi
 printf '  逻辑    %s 份\n' "$(ls -1 "${d}/logical" 2>/dev/null | wc -l | tr -d ' ')"
 printf '  最近演练 %s\n' \
     "$(ls -1 "${d}/reports"/restore-drill-*.txt 2>/dev/null | sort | tail -1 || echo '从未演练 —— 这等于没有备份')"

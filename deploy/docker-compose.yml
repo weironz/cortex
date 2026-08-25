@@ -128,7 +128,8 @@ services:
     #
     # `archive_mode` 只能在启动时设，所以写在 command 里而不是 SQL。
     #   archive_timeout=60   没有写入也每 60 秒强制切段 —— **RPO 的上界就是它**
-    #   archive_command      文档里的标准写法：目标已存在就失败，绝不静默覆盖
+    #   archive_command      目标已存在就失败（绝不静默覆盖），
+    #                        **且先写 .tmp 再原子改名** —— 见紧接着那段
     #   summarize_wal=on     PG17 的 WAL summarizer，`pg_basebackup --incremental` 的前置
     #   wal_compression=on   这台机器磁盘比 CPU 紧张
     command:
@@ -140,7 +141,22 @@ services:
       - -c
       - archive_mode=on
       - -c
-      - archive_command=mkdir -p /backup/wal && test ! -f /backup/wal/%f && cp %p /backup/wal/%f
+      # ⚠️ **`cp` 到 .tmp 再 `mv`，不要直接 cp 到最终名字。**
+      #
+      # 2026-08-25 在开发机上实测踩到：一次被打断的 `cp`（容器被杀、宿主
+      # 重启、盘满）留下一个 4 MB 的半截段，而 `test ! -f` 看见「文件在」
+      # 就拒绝覆盖 —— 于是**归档永久卡在那一段**，后面的一段都出不去。
+      #
+      # 代价不是「少了一段」，是三件事一起发生：
+      #   1. PITR 从那一刻起就断了（归档不再前进）；
+      #   2. **活库的 pg_wal 无限涨** —— 没归档成功的段 postgres 不能回收。
+      #      那台开发机上堆到了 17 GB / 1096 段，还在涨；
+      #   3. 日志里只有一行 `archive command failed with exit code 1`，
+      #      读起来像权限或盘满，而真正的原因是「有个半截文件挡着」。
+      #
+      # `mv` 在同一个文件系统上是原子的，所以最终名字要么不存在、要么是
+      # 完整的一段。被打断留下的 `.tmp` 下一次会被直接覆盖。
+      - archive_command=mkdir -p /backup/wal && test ! -f /backup/wal/%f && cp %p /backup/wal/%f.tmp && mv /backup/wal/%f.tmp /backup/wal/%f
       - -c
       - archive_timeout=60
       - -c
