@@ -153,17 +153,12 @@ class ChatPane extends ConsumerWidget {
                 icon: const Icon(Icons.difference_outlined),
               ),
             // 设置搬去了左下角账号菜单（与 Codex 一致）：它与「我是谁」
-            // 是一组，而这一行剩下的都是应用级的显示开关
-            IconButton(
-              onPressed: () => ref.read(themeModeProvider.notifier).cycle(),
-              iconSize: 18,
-              tooltip: '切换主题',
-              icon: Icon(switch (ref.watch(themeModeProvider)) {
-                ThemeMode.system => Icons.brightness_auto_rounded,
-                ThemeMode.light => Icons.light_mode_rounded,
-                ThemeMode.dark => Icons.dark_mode_rounded,
-              }),
-            ),
+            // 是一组，而这一行剩下的都是应用级的显示开关。
+            //
+            // 主题切换 2026-08-25 从这一排撤了：一个循环三档的图标按钮
+            // 既看不出当前是哪档、又常年占着顶栏 —— 而主题是设一次就
+            // 不再碰的偏好，不配一个逐轮可见的位置。入口在设置页「外观」
+            // 与 ⌘K 命令面板，两处都还在
             // 右栏那两个，放在最右 —— 它们挨着的就是它们控制的那一栏。
             //
             // **文件在前、记忆在后**：记忆紧贴右栏边缘，与它此前独占这个
