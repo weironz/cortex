@@ -72,6 +72,45 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   bool _busy = false;
   Object? _error;
 
+  /// 在飞操作的「届」。`_select` 换来源时 +1，异步结果落地前先对一下届数，
+  /// 不一致就只丢**结论**（横幅 / 检查结果 / 抽屉），数据刷新照做。
+  ///
+  /// # 为什么必须有
+  ///
+  /// 换来源只是 setState，**取消不了**已经发出去的请求。没有这道闸的话，
+  /// A 的「获取模型列表」在用户切到 B 之后才回来 —— 报错横幅落在 B 的
+  /// 详情页上、抽屉里开着 A 的型号全集，读起来就是「B 坏了」。
+  /// `_select` 里清横幅挡得住「旧结论留着」，挡不住「旧结论迟到」。
+  int _epoch = 0;
+
+  /// 单次操作最多等多久。
+  ///
+  /// # 为什么客户端也要设界
+  ///
+  /// HTTP 层没有超时，而「获取模型列表」在服务端要去连供应商 ——
+  /// 那个端点可能整段不可达（实测 Gemini 官方端点在国内服务器上是
+  /// TCP 黑洞，一挂几分钟）。此前 `_busy` 会跟着挂满全程：获取按钮、
+  /// 启用开关、保存全灰，页面看起来就是「按钮坏了」。
+  ///
+  /// 服务端已各自设界（拉列表 15s、连通性检查 20s），这里放宽到 45s
+  /// 只兜「服务端太老没有那道界」与「连服务端本身的路挂了」两种情况，
+  /// 正常路径永远先到。
+  static const _opTimeout = Duration(seconds: 45);
+
+  /// 给操作加时限。超时抛的是 [CortexApiException]，让统一的 catch
+  /// 显示一句人话，而不是 `TimeoutException after 0:00:45…`。
+  ///
+  /// 注意：超时**放弃等待**，不等于请求被取消 —— 它可能稍后才回来，
+  /// 所以落结论的地方还要对 [_epoch]。
+  Future<T> _bounded<T>(Future<T> Function() op) => op().timeout(
+    _opTimeout,
+    onTimeout: () => throw const CortexApiException(
+      '等了 45 秒没有回音，先把按钮还给你。'
+      '多半是这个供应商的端点从服务器那侧不可达（被墙 / 网关黑洞），'
+      '换一个 API 代理地址再试。',
+    ),
+  );
+
   /// 「不是失败，但你该知道」那一类的话。
   ///
   /// # 为什么不跟 `_error` 挤一个槽位
@@ -232,6 +271,9 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     _check = null;
     _error = null;
     _note = null;
+    // 在飞的请求这时**作废**（只作废结论，见 [_epoch]）——
+    // 清掉挡不住迟到的那份把上面三样又填回来
+    _epoch++;
   });
 
   Widget _hint(String text, {VoidCallback? onRetry}) => Padding(
@@ -251,18 +293,22 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   /// 统一在这里 catch：每处各写一遍的话，迟早有一处把错误吞了，
   /// 而症状是「点了保存，什么都没发生」。
   Future<void> _run(Future<void> Function() body) async {
+    final epoch = _epoch;
     setState(() {
       _busy = true;
       _error = null;
       _note = null;
     });
     try {
-      await body();
+      await _bounded(body);
       ref.invalidate(modelSourcesProvider);
       // 型号列表变了，选择器也要重拉
       ref.invalidate(modelCatalogProvider);
     } on Object catch (e) {
-      if (mounted) {
+      // 迟到的报错只属于发起它的那一页。用户已经切走的话，横幅落在
+      // 现在这一页上读起来就是「这一条坏了」；失败本身不会静默 ——
+      // 界面画的是服务端数据，保存失败时开关/型号根本不会动
+      if (mounted && epoch == _epoch) {
         setState(() => _error = e is CortexApiException ? e.message : e);
       }
     } finally {
@@ -492,19 +538,29 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   /// 拉列表只动 `catalog`，`models` 一个字都不动，所以选择器里
   /// 仍然只有用户亲手打开的那几个。
   Future<void> _fetch(ModelSource s) async {
+    final epoch = _epoch;
     setState(() {
       _busy = true;
       _error = null;
       _note = null;
     });
     try {
-      final got = await ref.read(cortexApiProvider).fetchSourceModels(s.id);
+      final got = await _bounded(
+        () => ref.read(cortexApiProvider).fetchSourceModels(s.id),
+      );
+      // 服务端把拉到的全集落了库，重拉必须做 —— 即使用户已经切走，
+      // 这份数据也是新的、全局的，扣下它没有任何好处
+      ref.invalidate(modelSourcesProvider);
+      // 下面是**结论**：横幅与抽屉都属于发起这次拉取的那一页。
+      // 用户切走之后才回来的话全部丢掉 —— 在 B 的详情页上弹出 A 的
+      // 型号全集，比什么都不弹更糟
+      if (!mounted || epoch != _epoch) return;
       // 回落时**必须说出来**：那份清单是编译期写死的，可能与这个账号
       // 真正开通的东西毫无关系。
       //
       // 但「部署提供」那条本来就没有 key 可以拿去问，`live` 恒为 false ——
       // 那不是回落，是它的工作方式，所以走中性的 [_note]（见那里的判据）
-      if (mounted && !got.live && got.note != null) {
+      if (!got.live && got.note != null) {
         setState(() {
           if (s.builtin) {
             _note = got.note;
@@ -513,13 +569,12 @@ class _ModelPageState extends ConsumerState<ModelPage> {
           }
         });
       }
-      ref.invalidate(modelSourcesProvider);
       // 拉完**顺手把抽屉打开**：点这个按钮的人要的不是「列表更新了」
       // 这条消息，而是**挑几个加进来**。不开的话他还得再找一次入口，
       // 而界面上除了这个按钮没有别的地方通向那份全集
-      if (mounted) _openPicker(s.id);
+      _openPicker(s.id);
     } on Object catch (e) {
-      if (mounted) {
+      if (mounted && epoch == _epoch) {
         setState(() => _error = e is CortexApiException ? e.message : e);
       }
     } finally {
@@ -546,19 +601,22 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   }
 
   Future<void> _runCheck(ModelSource s, String model) async {
+    final epoch = _epoch;
     setState(() {
       _busy = true;
       _check = null;
     });
     try {
-      final got = await ref
-          .read(cortexApiProvider)
-          .checkModelSource(s.id, model: model);
-      if (mounted) setState(() => _check = got);
+      final got = await _bounded(
+        () => ref.read(cortexApiProvider).checkModelSource(s.id, model: model),
+      );
+      // 检查结论只属于发起它的那条来源 —— 迟到的「通了 / 不通」
+      // 挂在别的来源详情页上，比没有结论更糟（见 [_check] 的注释）
+      if (mounted && epoch == _epoch) setState(() => _check = got);
     } on CortexApiException catch (e) {
       // 端点本身不存在（老服务端）与「检查没通过」是两回事，
       // 分开说 —— 混起来的话用户会去改一把其实没问题的 key
-      if (mounted) {
+      if (mounted && epoch == _epoch) {
         setState(
           () => _check = SourceCheck(
             ok: false,
@@ -567,7 +625,7 @@ class _ModelPageState extends ConsumerState<ModelPage> {
         );
       }
     } on Object catch (e) {
-      if (mounted) {
+      if (mounted && epoch == _epoch) {
         setState(() => _check = SourceCheck(ok: false, detail: '$e'));
       }
     } finally {
@@ -842,14 +900,59 @@ class _DetailState extends State<_Detail> {
   bool _reveal = false;
   bool _dirty = false;
 
+  /// 已存过密钥时，密钥框默认是**掩码态**（`●●●●●●●● + 尾四位`），
+  /// 点一下才进入编辑态。
+  ///
+  /// # 为什么不是一个带 hintText 的空框
+  ///
+  /// 空框的第一读感是「这里没填过东西」—— 实拍反馈里用户就是盯着
+  /// 空白的密钥框怀疑 key 没存上。掩码是**视觉呈现**，不是回显：
+  /// 界面手里从来只有后四位（服务端只回 `key_tail`），点进来编辑时
+  /// 从空白开始重输，与之前的语义完全一致。
+  bool _editingKey = false;
+
+  /// 编辑态的焦点。丢焦点且什么都没输时退回掩码态 ——
+  /// 点开又反悔的人不该留下一个看起来「密钥被清空了」的空框。
+  final _keyFocus = FocusNode();
+
   /// 拿哪个型号去验。空 = 让服务端挑第一个开着的。
   String _probe = '';
+
+  /// 有一把存好的密钥可以拿来显示掩码吗。
+  ///
+  /// 三态里的另外两种都不画掩码：`null`（部署那条，key 不是用户的）
+  /// 与空串（免 key 的来源，如本机 ollama）。
+  bool get _hasStoredKey => widget.source.keyTail?.isNotEmpty ?? false;
+
+  @override
+  void initState() {
+    super.initState();
+    _keyFocus.addListener(() {
+      if (!_keyFocus.hasFocus &&
+          _editingKey &&
+          _key.text.trim().isEmpty &&
+          mounted) {
+        setState(() => _editingKey = false);
+      }
+    });
+  }
 
   @override
   void dispose() {
     _key.dispose();
     _baseUrl.dispose();
+    _keyFocus.dispose();
     super.dispose();
+  }
+
+  /// 从掩码态进入编辑态，并直接把光标放进去 ——
+  /// 点了还要再点一次才能打字，是把一次动作拆成了两次。
+  void _beginEditKey() {
+    setState(() => _editingKey = true);
+    // 等编辑态那个 TextField 建出来再要焦点，不然焦点落在空处
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _keyFocus.requestFocus();
+    });
   }
 
   @override
@@ -858,6 +961,9 @@ class _DetailState extends State<_Detail> {
     final scheme = theme.colorScheme;
     final s = widget.source;
     final official = widget.data.providerOf(s.provider)?.baseUrl ?? '';
+    // 掩码画不画，这一个 build 里问两次（小字提示 + 输入框本体）——
+    // 算一次存下来，两处引用同一个结论，改判据时不会漏一边
+    final masked = _hasStoredKey && !_editingKey;
 
     return ListView(
       children: [
@@ -873,37 +979,67 @@ class _DetailState extends State<_Detail> {
         else ...[
           SettingsField(
             label: 'API 密钥',
-            hint: '留空 = 不改动原来那把',
-            child: TextField(
-              controller: _key,
-              autocorrect: false,
-              enableSuggestions: false,
-              // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的粘贴
-              // 迟早会错一次，且症状要到下一次对话才出现
-              obscureText: !_reveal,
-              onChanged: (_) => setState(() => _dirty = true),
-              decoration: InputDecoration(
-                isDense: true,
-                border: const OutlineInputBorder(),
-                // 界面永远拿不到明文，所以只能显示后四位当占位
-                hintText: '已存 …${s.keyTail}',
-                suffixIcon: IconButton(
-                  onPressed: () => setState(() => _reveal = !_reveal),
-                  iconSize: 18,
-                  icon: Icon(
-                    _reveal
-                        ? Icons.visibility_off_outlined
-                        : Icons.visibility_outlined,
+            hint: masked ? '点一下换一把新的（存好的那把动不了、也看不见）' : '留空 = 不改动原来那把',
+            child: masked
+                // 掩码态：已存过密钥就**长得像已经填了**，而不是一个空框。
+                // 实拍反馈里用户对着空的密钥框（hint 写「已存 …HE60」）
+                // 判断成「key 没存上」—— 占位灰字传达不了「有」。
+                ? InkWell(
+                    key: const ValueKey('field:api-key-masked'),
+                    borderRadius: BorderRadius.circular(4),
+                    onTap: _beginEditKey,
+                    // 键盘也进得来：Tab 到这里按回车 = 点击
+                    onFocusChange: (has) {
+                      if (has) _beginEditKey();
+                    },
+                    child: InputDecorator(
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                        suffixIcon: Icon(Icons.edit_outlined, size: 18),
+                      ),
+                      child: Text(
+                        // 圆点是**画出来的**，不是真密钥的长度 ——
+                        // 长度本身也是不该泄露的信息。尾四位来自服务端，
+                        // 是界面手里唯一的明文
+                        '●●●●●●●●${s.keyTail}',
+                        style: theme.textTheme.bodyMedium,
+                      ),
+                    ),
+                  )
+                : TextField(
+                    key: const ValueKey('field:api-key'),
+                    controller: _key,
+                    focusNode: _keyFocus,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的
+                    // 粘贴迟早会错一次，且症状要到下一次对话才出现
+                    obscureText: !_reveal,
+                    onChanged: (_) => setState(() => _dirty = true),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      border: const OutlineInputBorder(),
+                      // 编辑态从空白开始重输 —— 界面永远拿不到明文，
+                      // 没有「改几个字符」这回事
+                      hintText: _hasStoredKey ? '粘贴新密钥，留空 = 不换' : null,
+                      suffixIcon: IconButton(
+                        onPressed: () => setState(() => _reveal = !_reveal),
+                        iconSize: 18,
+                        icon: Icon(
+                          _reveal
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-              ),
-            ),
           ),
           SettingsField(
             label: 'API 代理地址',
             // 说得出留空会连到哪 ——「用官方的」回答不了「官方的是哪个」，
             // 而那正是想改端点的人要核对的东西
-            hint: official.isEmpty ? '必须包含 http(s)://' : '留空 = $official',
+            hint: official.isEmpty ? '必须包含 http(s)://' : '留空 = 用官方地址',
             child: TextField(
               // 有名字才指得准。这一页上现在有四个输入框（来源搜索、密钥、
               // 端点、型号搜索），按位置找（`byType(TextField).last`）
@@ -914,10 +1050,13 @@ class _DetailState extends State<_Detail> {
               autocorrect: false,
               enableSuggestions: false,
               onChanged: (_) => setState(() => _dirty = true),
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 isDense: true,
-                border: OutlineInputBorder(),
-                hintText: 'https://…',
+                border: const OutlineInputBorder(),
+                // 有官方默认地址的服务商，把**真实地址**摆在占位上 ——
+                // 「https://…」只说了格式，回答不了「留空到底连到哪」，
+                // 而那句答案原本只写在左侧小字里，实拍反馈里没人看见
+                hintText: official.isEmpty ? 'https://…' : official,
               ),
             ),
           ),
@@ -1092,6 +1231,9 @@ class _DetailState extends State<_Detail> {
     setState(() {
       _dirty = false;
       _key.clear();
+      // 存完退回掩码态：编辑已经结束，留一个空的编辑框会读成
+      // 「刚存的密钥没了」。没存过 key 的来源没有掩码态，这一位随它去
+      _editingKey = false;
     });
   }
 }

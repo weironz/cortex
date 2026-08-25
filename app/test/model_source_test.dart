@@ -9,6 +9,8 @@
 ///    这里盯着那份对应关系。
 library;
 
+import 'dart:async';
+
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/settings/pages/model_page.dart';
@@ -83,6 +85,20 @@ class _FakeLocalLlm extends LocalLlmNotifier {
     clears++;
     saved = null;
     state = const AsyncData(LocalLlmConfig.empty);
+  }
+}
+
+/// 拉型号的请求**悬着不回** —— 复刻「供应商端点是 TCP 黑洞」那个形状
+/// （实拍：Gemini 官方端点在国内服务器上不拒绝、不回包，一挂几分钟）。
+/// 什么时候回、回什么由测试用 [pending] 里的 Completer 决定。
+class _HangingFetchApi extends _Api {
+  final pending = <Completer<FetchedModels>>[];
+
+  @override
+  Future<FetchedModels> fetchSourceModels(String id) {
+    final c = Completer<FetchedModels>();
+    pending.add(c);
+    return c.future;
   }
 }
 
@@ -292,11 +308,11 @@ void main() {
             '把一把 key 交出去的人有权知道它落在哪、怎么存的',
       );
       expect(
-        find.textContaining('已存 …5236'),
+        find.text('●●●●●●●●5236'),
         findsOneWidget,
         reason:
-            '界面永远拿不到明文，只能显示后四位当占位 —— '
-            '一个空的密钥框说不出「已经存过一把了」',
+            '界面永远拿不到明文，已存的密钥画成掩码 + 尾四位 —— '
+            '一个空框配一行灰色占位字，实拍反馈里被读成「key 没存上」',
       );
       expect(find.textContaining('不占配额'), findsOneWidget);
     });
@@ -634,6 +650,231 @@ void main() {
         await tester.pump(const Duration(milliseconds: 100));
       }
       expect(find.text('没有匹配的来源'), findsOneWidget);
+    });
+  });
+
+  group('在飞请求', () {
+    TextButton fetchButton(WidgetTester tester) => tester.widget<TextButton>(
+      find.ancestor(of: find.text('获取模型列表'), matching: find.byType(TextButton)),
+    );
+
+    testWidgets('拉列表挂死时按钮与开关最多灰 45 秒，不是永远', (tester) async {
+      final api = _HangingFetchApi();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _open(tester, _kAlibaba);
+
+      await tester.tap(find.text('获取模型列表'));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // 在飞期间禁用是对的 —— 问题从来不是「灰」，是「灰到天荒地老」
+      expect(
+        fetchButton(tester).onPressed,
+        isNull,
+        reason: '请求在飞时按钮该灰，防止连点排出一队请求',
+      );
+      expect(
+        tester.widget<Switch>(find.byType(Switch)).onChanged,
+        isNull,
+        reason: '在飞时开关同样让路（同一个 busy，判据只此一处）',
+      );
+
+      // 供应商端点是黑洞，这个请求**永远不回**。跳过客户端的 45 秒界限
+      await tester.pump(const Duration(seconds: 46));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(
+        fetchButton(tester).onPressed,
+        isNotNull,
+        reason:
+            '端点黑洞（实拍 Gemini 官方端点被墙）会让请求一挂几分钟。'
+            '没有时限的话 busy 永远不落，获取按钮、启用开关全部永久灰死 —— '
+            '这正是实拍截图里那个死锁',
+      );
+      expect(
+        tester.widget<Switch>(find.byType(Switch)).onChanged,
+        isNotNull,
+        reason: '超时后开关必须一起回来，用户至少还能把这条来源关掉',
+      );
+      expect(
+        find.byKey(const ValueKey('banner:error')),
+        findsOneWidget,
+        reason: '按钮悄悄回来还不够 —— 要说清刚才那次拉取没有结果、该去改什么',
+      );
+      expect(find.textContaining('没有回音'), findsOneWidget);
+    });
+
+    testWidgets('迟到的拉取结果不落在后来选中的那条上', (tester) async {
+      final api = _HangingFetchApi();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _open(tester, _kAlibaba);
+
+      await tester.tap(find.text('获取模型列表'));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // 换来源只是 setState，取消不了在飞的请求 —— 然后它回来了
+      await _open(tester, kDeploymentSource);
+      api.pending.single.complete(
+        const FetchedModels(live: false, note: '迟到的回落说明'),
+      );
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(
+        find.byKey(const ValueKey('banner:error')),
+        findsNothing,
+        reason:
+            'alibaba 的回落警示落在「部署提供」的详情页上，'
+            '读起来就是「部署这条坏了」—— 迟到的结论必须作废',
+      );
+      expect(find.byKey(const ValueKey('banner:note')), findsNothing);
+      expect(
+        find.textContaining('添加全部'),
+        findsNothing,
+        reason: '抽屉里开着 A 的型号全集、详情页却是 B —— 挑进去的型号会加错来源',
+      );
+    });
+  });
+
+  group('密钥三态', () {
+    setUp(() {
+      _FakeLocalLlm.saved = null;
+      _FakeLocalLlm.clears = 0;
+    });
+
+    testWidgets('已存密钥：画掩码 + 尾四位，不是空框', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _open(tester, _kAlibaba);
+
+      expect(
+        find.text('●●●●●●●●5236'),
+        findsOneWidget,
+        reason:
+            '已存过密钥的框长得必须像「已经填了」—— 占位灰字传达不了「有」，'
+            '实拍反馈里用户对着空框判断成 key 没存上',
+      );
+      expect(
+        find.byKey(const ValueKey('field:api-key')),
+        findsNothing,
+        reason: '掩码态不该同时摆一个可输入框 —— 两个框会让人猜哪个是真的',
+      );
+    });
+
+    testWidgets('点掩码进入编辑态，从空白重输，保存发的是新密钥', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _open(tester, _kAlibaba);
+
+      await tester.tap(find.byKey(const ValueKey('field:api-key-masked')));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      final field = find.byKey(const ValueKey('field:api-key'));
+      expect(field, findsOneWidget, reason: '点了掩码就该能打字，不该还要再找入口');
+      expect(
+        tester.widget<TextField>(field).controller?.text,
+        isEmpty,
+        reason:
+            '编辑从空白开始 —— 界面手里只有尾四位，把掩码圆点塞进输入框的话，'
+            '一次不小心的保存会把「●●●●…」当成密钥存进服务端',
+      );
+
+      await tester.enterText(field, 'sk-new-key-0001');
+      await tester.pump();
+      await tester.tap(find.text('保存'));
+      for (var i = 0; i < 8; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(
+        api.saves.single['api_key'],
+        'sk-new-key-0001',
+        reason: '保存发出去的必须是刚输入的明文，而不是掩码或空串',
+      );
+      expect(
+        find.byKey(const ValueKey('field:api-key-masked')),
+        findsOneWidget,
+        reason: '存完退回掩码态 —— 留一个空编辑框会读成「刚存的密钥没了」',
+      );
+    });
+
+    testWidgets('编辑态什么都没输、焦点走了就退回掩码', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _open(tester, _kAlibaba);
+
+      await tester.tap(find.byKey(const ValueKey('field:api-key-masked')));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(find.byKey(const ValueKey('field:api-key')), findsOneWidget);
+
+      // 点开又反悔：焦点挪去端点框
+      await tester.tap(find.byKey(const ValueKey('field:base-url')));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(
+        find.byKey(const ValueKey('field:api-key-masked')),
+        findsOneWidget,
+        reason:
+            '空着的编辑框留在那里，看起来就是「密钥被清空了」—— '
+            '而实际上服务端那把一个字都没动',
+      );
+    });
+
+    testWidgets('没存过密钥的来源直接是输入框，没有掩码', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _open(tester, _kOllama);
+
+      expect(
+        find.byKey(const ValueKey('field:api-key-masked')),
+        findsNothing,
+        reason:
+            'keyTail 是空串 = 没存过（三态里的第三种）。给它画掩码等于'
+            '谎称存过一把 key，用户会以为免 key 的 ollama 也配好了密钥',
+      );
+      expect(find.byKey(const ValueKey('field:api-key')), findsOneWidget);
+    });
+  });
+
+  group('端点占位', () {
+    testWidgets('有官方默认地址就摆真地址，不是「https://…」', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _open(tester, _kAlibaba);
+
+      final hint = tester
+          .widget<TextField>(find.byKey(const ValueKey('field:base-url')))
+          .decoration
+          ?.hintText;
+      expect(
+        hint,
+        'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+        reason:
+            '占位写「https://…」的话，留空会连到哪只在左侧小字里 —— '
+            '实拍反馈里没人看见那行小字，用户以为地址没配',
+      );
     });
   });
 }
