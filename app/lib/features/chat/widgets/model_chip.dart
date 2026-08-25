@@ -38,7 +38,15 @@ class ModelChip extends ConsumerWidget {
       message: label.warning ?? '这一轮用哪个模型',
       child: InkWell(
         borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
-        onTap: () => showModelPicker(context, ref),
+        onTap: () {
+          // 把 chip 自己的位置交给弹层当锚点 —— 弹层锚在 chip 上方，
+          // 不盖住正在读的对话。取不到（理论上不会）就退回居中
+          final box = context.findRenderObject() as RenderBox?;
+          final anchor = (box != null && box.attached)
+              ? box.localToGlobal(Offset.zero) & box.size
+              : null;
+          showModelPicker(context, ref, anchor: anchor);
+        },
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
           child: Row(
