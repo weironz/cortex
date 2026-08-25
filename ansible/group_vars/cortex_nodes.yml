@@ -132,7 +132,9 @@ deploy_services_backup:
 # 异地备份开不开。**默认关** —— 没配 OSS 凭据的部署拉起它只会每天失败
 # 一次，而那种噪音会让人学会忽略备份告警。
 # 打开之前先把 .env.secrets 里那五个 OSS_* / CORTEX_BACKUP_PASSWORD 填好。
-cortex_backup_enabled: false
+# 2026-08-25 打开。桶 cortex-backup-cloudcele（深圳），凭据在节点的
+# .env.secrets 里（ansible 从不碰它）。取舍见 docs/backup.md。
+cortex_backup_enabled: true
 backup_hour: 3
 keep_daily: 7
 keep_weekly: 4
