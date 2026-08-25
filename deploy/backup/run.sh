@@ -90,12 +90,46 @@ mkdir -p "$BACKUP_DIR/base" "$BACKUP_DIR/wal" "$DUMP_DIR"
 # 归档那份仍然要备，它买的是「恢复到基础备份之后的任意时刻」。
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
 base_dir="$BACKUP_DIR/base/$ts/pgdata"
+psql_val() {
+    PGPASSWORD="$CORTEX_PG_PASSWORD" psql \
+        -h "${CORTEX_PG_HOST:-cortexdb}" -p "${CORTEX_PG_PORT:-5432}" \
+        -U "${CORTEX_PG_USER:-cortex}" -d "${CORTEX_PG_DB:-cortex}" -Atqc "$1"
+}
+
 pg_base() {
     mkdir -p "$(dirname "$base_dir")" || return 1
+    # 起点 WAL 要在**备份之前**取 —— 备份跑完再取拿到的是结束位置，
+    # 而保留策略用它当 pg_archivecleanup 的基准，取错会把还需要的段剪掉
+    start_wal="$(psql_val 'SELECT pg_walfile_name(pg_current_wal_lsn())')" || return 1
     PGPASSWORD="$CORTEX_PG_PASSWORD" pg_basebackup \
         -h "${CORTEX_PG_HOST:-cortexdb}" -p "${CORTEX_PG_PORT:-5432}" \
         -U "${CORTEX_PG_USER:-cortex}" \
         -D "$base_dir" -Fp -Xs -cfast -P || return 1
+
+    # ⚠️ **meta.env 必须写，而且键要与 scripts/pg-backup.sh 那份一致。**
+    #
+    # `scripts/restore-drill.sh` 直接 `source` 它，靠里面四个键干活：
+    # START_WAL（基准）、PG_VERSION（跨大版本恢复不了，要当场拦）、
+    # DATA_CHECKSUMS（决定跳不跳逐页校验）、SYSTEM_ID（认出「归档里混着
+    # 别的数据库」）。
+    #
+    # 2026-08-25 在生产上撞到：这个容器写的全量**没有 meta.env**，于是
+    # 演练在第 0 步就死在 `No such file or directory` —— 备份看着好好的，
+    # 而**证明它读得回来的那条路根本走不到**。
+    #
+    # 这是「同一件事两处实现」的典型：主机那份脚本与这个容器各写各的全量，
+    # 漏一处不报错。加键时两边都要改，判据是 restore-drill.sh 读了什么。
+    cat > "$(dirname "$base_dir")/meta.env" <<META || return 1
+# 由备份容器（deploy/backup/run.sh）生成，恢复演练读它。
+# 键必须与 scripts/pg-backup.sh 写的那份一致。
+BACKUP_TS='$ts'
+BACKUP_KIND='basebackup-plain'
+START_WAL='$start_wal'
+PG_VERSION='$(psql_val 'SHOW server_version')'
+DATA_CHECKSUMS='$(psql_val 'SHOW data_checksums')'
+SYSTEM_ID='$(psql_val 'SELECT system_identifier FROM pg_control_system()')'
+META
+
     # 立刻验，不留「以为备好了」的空间。带 WAL 一起解析（不加 -n）——
     # 它顺带证明归档/流下来的 WAL 真的覆盖了这次备份的区间
     pg_verifybackup "$base_dir"

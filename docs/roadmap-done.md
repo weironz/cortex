@@ -60,6 +60,88 @@
 
 ---
 
+## 2026-08-25 · 异地备份：从零到在生产上跑起来
+
+rustic 备 Postgres、rclone 备 RustFS，都推到阿里云 OSS。一个 compose
+`backup` 容器，默认不启用。设计与恢复步骤见 [backup.md](backup.md)。
+
+形状取自 [mica](https://github.com/weironz/mica/blob/main/docs/backup.md)，
+**但 PG 那一侧改了**：它只备 `pg_dump`（自己的文档写着 "dump-based DR,
+not PITR"，RPO 一天），而这一侧 WAL 归档一直在跑，RPO 是六十秒。照搬会把它
+悄悄降到 24 小时 —— 对一个存对话的产品那是「丢掉今天说过的每一句话」，
+且**没有任何症状**。所以 rustic 备两条 lineage：`pgdata`（基础备份 + WAL
+归档整棵树，PITR 一并搬到异地）与 `pgdump`（可移植、跨大版本、能只捞一张表）。
+
+blobs 照搬：`rclone copy`，S3→S3，不经 rustic（key 就是内容的 SHA-256，
+去重买不到东西），**永远不带 `--delete`**。
+
+### 桶里两个前缀，不是两个桶
+
+    <bucket>/<OSS_ROOT>/pg        rustic 仓库
+    <bucket>/<OSS_ROOT>/rustfs    blobs 镜像
+
+三个理由：`rustic prune` 会删它自己前缀下的对象（混在一起哪天判断出错就会
+碰到 blobs）；OSS 的生命周期规则按前缀走，而 blobs 适合转归档存储、rustic
+的 pack 文件必须留标准存储；出事那天一眼看得出哪一半坏了。两个桶买不到更多
+—— 同一把 key 照样都能访问。
+
+### 两个明知代价、仍然这么定的取舍
+
+写在 [backup.md](backup.md) 里，**别当成疏漏补上**：key 是账号级的（不是
+只授一个桶的 RAM 子账号）、桶与节点同城（没有地理隔离）。两条各有代价、
+各有接受的理由、各写了「哪天该翻回来」。
+
+### 一路撞出来的坑，一个比一个不响
+
+**① 配置渲染到了没人读的目录。** `postgres` 用户的家是
+`/var/lib/postgresql` 不是 `/home/postgres`。容器照常起来、日志一切正常，
+只有每条 `rustic` 命令回一句「No repository given」。改成走 `$HOME`。
+
+**② 远程 `pg_basebackup` 被 pg_hba 挡住。** 官方镜像追加的
+`host all all all scram-sha-256` 里那个 `all`，按 pg_hba 的语义**不匹配
+replication 连接** —— 是规定不是笔误。compose 用内联 `configs` 加一行
+（`include` 原来那份，只加不接管）。用内联而不是送文件：ansible 只 copy
+一份 compose，多一个文件就多一个「忘了送」的形状。
+
+**③ 一个半截 WAL 段能让归档永久卡死。** 被打断的 `cp` 留下不足 16 MiB 的
+段，`test ! -f` 看见「文件在」就拒绝覆盖。三个后果一起发生、三个都不响：
+PITR 断了；活库 pg_wal 无限涨（开发机上堆到 17 GB）；日志里只有一行
+`archive command failed with exit code 1`。`archive_command` 改成先写 `.tmp`
+再原子 `mv`，`just backup-status` 加一行「半截段 N 个」。
+
+**④ 生产上的 WAL 归档从配上那天起一次都没成功过。**
+`archived=0 / failed=33970`，卡在第一段。根因是 `provision.yml` 把备份根
+建成 `root:root 0755`，而往里写的两个进程（cortexdb 的 `archive_command`、
+备份容器的 `pg_basebackup`）**都是容器里的 uid 70**。修完之后归档器自己活了，
+3.2 GB 的 pg_wal 追完降到 11 段 —— **这台机器上的 PITR 第一次真的成立**。
+
+> 用**数字** 70 不是名字 `postgres`：宿主上没有这个用户。70 是 alpine 版
+> 镜像的 uid，Debian 版是 999 —— 换底座要跟着改，改漏的症状就是上面那三条。
+
+**⑤ 本机验过 ≠ 生产会通。** ④ 之所以本机没抓到，是因为我测试时
+`chown -R postgres` 过挂载目录 —— 那一步恰好把它掩盖了。两者之间这次隔着
+的就是一个 chown。
+
+**⑥ 两处实现，漏一处不报错。** 全量备份有两份实现（主机的
+`scripts/pg-backup.sh` 与容器的 `deploy/backup/run.sh`），而容器那份**没写
+`meta.env`** —— 于是生产上的恢复演练在第 0 步就死在
+`No such file or directory`，而备份本身全绿。加了闸：判据是
+「`restore-drill.sh` 读了哪些键」，两个生产者都得供上。
+
+**⑦ 新镜像进了发版矩阵，却掉进给 web 写的冒烟兜底。** 那个 `else` 分支起
+容器、映射 80 端口、打 `/healthz` —— 备份容器没有 HTTP 服务。加镜像时只顾
+了「有没有人构建它」，漏了「构建完谁验它」。
+
+### 验到哪一步
+
+- **本机**：六条腿全绿；取回的 `pgdata` 经 `pg_verifybackup` 仍然通过
+- **真打阿里云 OSS**：六条腿全绿 46 s；从 OSS 取回后 `pg_verifybackup`
+  仍然通过；`rustic check` 通过；新桶匿名访问 403
+- **生产**：六条腿全绿 85 s，两条 lineage 都在 OSS 上（pgdata 3.2 GiB）
+- **还欠着**：生产上的恢复演练（脚本已随部署送上节点）
+
+---
+
 ## 2026-08-25 · roadmap 归档：五块做完了却还占着待办位的
 
 搬过来的时候顺手核出两处**陈旧到会误导人**的引用：获客钩子 ③ 指着

@@ -115,3 +115,31 @@ if [ "${#docker_users[@]}" -gt 0 ]; then
     exit 1
 fi
 echo "✔ 调 docker 的脚本都关掉了 MSYS 路径改写"
+
+# ── 两份 meta.env 的键必须一致 ────────────────────────────
+#
+# 全量备份有**两处实现**：主机上的 `scripts/pg-backup.sh`，与备份容器里的
+# `deploy/backup/run.sh`。两边都要写 `meta.env`，而 `restore-drill.sh`
+# 直接 `source` 它、靠里面的键干活。
+#
+# 漏一个键不报错 —— 它的症状是**演练在第 0 步就死**，而备份本身看着全绿。
+# 2026-08-25 在生产上撞到过一次：容器那份根本没写 meta.env，于是那台机器上
+# 「证明备份读得回来」的那条路走不到，而每一个信号都说备份是好的。
+#
+# 判据是「演练读了哪些键」——它才是真正的消费者，两个生产者都得供上。
+drill=scripts/restore-drill.sh
+mapfile -t needed < <(
+    grep -oE '\$\{?(START_WAL|PG_VERSION|DATA_CHECKSUMS|SYSTEM_ID)\b' "$drill" |
+        tr -d '${' | sort -u
+)
+[ "${#needed[@]}" -gt 0 ] || { echo "✘ 没从 $drill 里认出任何 meta.env 键 —— 这道闸失效了" >&2; exit 1; }
+for producer in scripts/pg-backup.sh deploy/backup/run.sh; do
+    for k in "${needed[@]}"; do
+        grep -qE "^${k}='" "$producer" || {
+            echo "✘ ${producer} 没写 meta.env 的 ${k}，而 ${drill} 要读它。" >&2
+            echo "  症状是演练在第 0 步就死，而备份本身全绿。" >&2
+            exit 1
+        }
+    done
+done
+echo "✔ 两份 meta.env 都供上了演练要的 ${#needed[@]} 个键"

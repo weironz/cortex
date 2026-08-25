@@ -119,6 +119,45 @@
             group: root
             mode: "0644"
 
+        # ── 恢复演练那两个脚本 ────────────────────────────
+        #
+        # **「没演练过的备份等于没有备份」这条纪律，在生产上此前没有落脚点。**
+        #
+        # 备份本身由容器每天跑，而证明它**读得回来**的是 `restore-drill.sh`：
+        # 真起一个独立实例、真回放归档 WAL、真查那条探针。它此前只在开发机上
+        # 跑过 —— 而开发机的库不是生产的库，演练过的也不是生产那份备份。
+        #
+        # 之前节点上没有它，是因为这两个脚本是 `just` recipe 的一部分，
+        # 而 just recipe 不进发布产物。**送脚本本身**就够了：它只依赖
+        # `lib.sh` 与 docker，容器名默认就是生产的 `cortex-db`。
+        #
+        # 跑法（在节点上，不需要 just）：
+        #     cd /data/cortex && bash scripts/restore-drill.sh
+        # 它对生产库唯一的写入是一条探针（独立 schema `cortex_drill`），
+        # 临时实例 archive_mode=off、不发布端口、跑完自删。
+        # copy 不会自己建父目录 —— 少这一步的症状是四条
+        # "Destination directory does not exist"，然后整次部署回滚
+        - name: scripts 目录
+          ansible.builtin.file:
+            path: "{{ node_dir }}/scripts"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: 送恢复演练脚本
+          ansible.builtin.copy:
+            src: "../scripts/{{ item }}"
+            dest: "{{ node_dir }}/scripts/{{ item }}"
+            owner: root
+            group: root
+            mode: "0755"
+          loop:
+            - lib.sh
+            - restore-drill.sh
+            - pg-backup.sh
+            - backup-status.sh
+
         # ── 闸：compose 里每个服务都必须有归宿 ────────────
         #
         # 「往 compose 里加了服务却没人启动它」这个形状**犯过三次**：
