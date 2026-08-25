@@ -89,6 +89,8 @@ struct Inner {
     tickets: Arc<TicketBook>,
     /// 已签发的 access token。见 [`crate::accounts::AccessBook`]。
     access: Arc<crate::accounts::AccessBook>,
+    /// refresh 轮换的宽限缓存（重复提交幂等）。见 [`crate::accounts::ReplayCache`]。
+    refresh_replay: Arc<crate::accounts::ReplayCache>,
     /// 在线名册。寿命秒级，刻意不进库 —— 见 crate::presence 的模块文档。
     presence: Arc<crate::presence::PresenceBook>,
     /// 认证端点（login / refresh / register）的限流表。
@@ -215,6 +217,7 @@ impl AgentState {
                 auth,
                 tickets: Arc::new(TicketBook::default()),
                 access: Arc::new(crate::accounts::AccessBook::default()),
+                refresh_replay: Arc::new(crate::accounts::ReplayCache::default()),
                 presence: Arc::new(crate::presence::PresenceBook::default()),
                 auth_throttle: Arc::new(crate::rate_limit::AuthThrottle::default()),
                 sync_buses: Arc::new(crate::sync_bus::SyncBuses::default()),
@@ -309,6 +312,12 @@ impl AgentState {
     #[must_use]
     pub fn access_book(&self) -> &crate::accounts::AccessBook {
         &self.inner.access
+    }
+
+    /// refresh 轮换的宽限缓存。
+    #[must_use]
+    pub fn replay_cache(&self) -> &crate::accounts::ReplayCache {
+        &self.inner.refresh_replay
     }
 
     /// 认证端点的限流表。检查与记录都走它，见 [`crate::rate_limit`]。
