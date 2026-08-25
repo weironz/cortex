@@ -291,67 +291,71 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   Widget _nav(BuildContext context, List<int> visible, int index) {
     final theme = Theme.of(context);
-    return Container(
-      width: 216,
-      // 导航是一个**独立表面**（规范第二节）：两个功能区靠底色分开，
-      // 比靠一条线分开省力
+    // 表面用 Material 而不是 Container(color)：ListTile 的选中底色画在
+    // **最近的 Material 祖先**上，中间隔一层着色的 ColoredBox 会把那块
+    // 高亮整个盖掉 —— 表现是选中项看不出选中（测试里框架的
+    // debug 断言抓到的，真机上就是那个样子）
+    return Material(
       color: theme.cortex.sidebar,
-      child: ListView.builder(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-        itemCount: visible.length,
-        itemBuilder: (context, row) {
-          final i = visible[row];
-          final s = _sections[i];
-          final selected = i == index;
-          // 组头：与**可见的**上一项不同组才画。判据是可见序列而不是
-          // 全量序列 —— 一组被闸得只剩没被闸的那项时组头还在；
-          // 整组都被闸掉时组头跟着一起消失，不留一个空标题
-          final newGroup =
-              row == 0 || _sections[visible[row - 1]].group != s.group;
-          final tile = Padding(
-            padding: const EdgeInsets.only(bottom: 2),
-            child: ListTile(
-              dense: true,
-              selected: selected,
-              // **中性**（规范第九节）：「我现在在看哪一页」是位置，不是动作
-              selectedTileColor: theme.cortex.sidebarAccent,
-              // 连文字与图标一起收回中性 —— ListTile 的 `selectedColor`
-              // 默认是 primary，只换底色的话那块紫只是挪到了前景
-              selectedColor: theme.colorScheme.onSurface,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
-              ),
-              leading: Icon(s.icon, size: 20),
-              title: Text(
-                s.label,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  fontWeight: selected ? FontWeight.w600 : null,
+      child: SizedBox(
+        width: 216,
+        child: ListView.builder(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+          itemCount: visible.length,
+          itemBuilder: (context, row) {
+            final i = visible[row];
+            final s = _sections[i];
+            final selected = i == index;
+            // 组头：与**可见的**上一项不同组才画。判据是可见序列而不是
+            // 全量序列 —— 一组被闸得只剩没被闸的那项时组头还在；
+            // 整组都被闸掉时组头跟着一起消失，不留一个空标题
+            final newGroup =
+                row == 0 || _sections[visible[row - 1]].group != s.group;
+            final tile = Padding(
+              padding: const EdgeInsets.only(bottom: 2),
+              child: ListTile(
+                dense: true,
+                selected: selected,
+                // **中性**（规范第九节）：「我现在在看哪一页」是位置，不是动作
+                selectedTileColor: theme.cortex.sidebarAccent,
+                // 连文字与图标一起收回中性 —— ListTile 的 `selectedColor`
+                // 默认是 primary，只换底色的话那块紫只是挪到了前景
+                selectedColor: theme.colorScheme.onSurface,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
                 ),
-              ),
-              subtitle: Text(s.hint, style: theme.textTheme.labelSmall),
-              onTap: () => setState(() => _index = i),
-            ),
-          );
-          if (!newGroup) return tile;
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                // 首组顶部少留：上面已经有 ListView 自己的 padding
-                padding: EdgeInsets.fromLTRB(14, row == 0 ? 2 : 14, 14, 4),
-                child: Text(
-                  s.group.label,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.8,
-                    color: theme.cortex.foregroundTertiary,
+                leading: Icon(s.icon, size: 20),
+                title: Text(
+                  s.label,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight: selected ? FontWeight.w600 : null,
                   ),
                 ),
+                subtitle: Text(s.hint, style: theme.textTheme.labelSmall),
+                onTap: () => setState(() => _index = i),
               ),
-              tile,
-            ],
-          );
-        },
+            );
+            if (!newGroup) return tile;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  // 首组顶部少留：上面已经有 ListView 自己的 padding
+                  padding: EdgeInsets.fromLTRB(14, row == 0 ? 2 : 14, 14, 4),
+                  child: Text(
+                    s.group.label,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.8,
+                      color: theme.cortex.foregroundTertiary,
+                    ),
+                  ),
+                ),
+                tile,
+              ],
+            );
+          },
+        ),
       ),
     );
   }

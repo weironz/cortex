@@ -314,157 +314,166 @@ class _PickerPopoverState extends State<_PickerPopover> {
     // 搜「qwen」还杵着一行「跟随部署」，读起来像它匹配上了
     final filtering = _query.isNotEmpty || _caps.isNotEmpty;
 
-    return Material(
-      // popover 层级的表面：深色下比卡片再亮一档（浮起来的东西更亮，
-      // 见 theme.dart 深色阶那段），浅色下就是白
-      color: dark ? scheme.surfaceContainerHigh : scheme.surface,
-      elevation: 0,
-      borderRadius: BorderRadius.circular(CortexTokens.radiusCard),
-      clipBehavior: Clip.antiAlias,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          border: Border.all(color: scheme.outlineVariant),
-          borderRadius: BorderRadius.circular(CortexTokens.radiusCard),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: dark ? 0.4 : 0.12),
-              blurRadius: 24,
-              offset: const Offset(0, 8),
-            ),
-          ],
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (widget.headline != null)
+    // 阴影在 Material **外面**：Material 带 Clip.antiAlias（列表内容要贴着
+    // 圆角裁掉），而阴影恰恰画在边界外 —— 放在裁剪层里面的阴影会被整个
+    // 裁没，弹层贴在页面上没有任何浮起感（评审抓到的）。边框留在里面：
+    // BorderSide 默认往内画，不会被裁。
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(CortexTokens.radiusCard),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: dark ? 0.4 : 0.12),
+            blurRadius: 24,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Material(
+        // popover 层级的表面：深色下比卡片再亮一档（浮起来的东西更亮，
+        // 见 theme.dart 深色阶那段），浅色下就是白
+        color: dark ? scheme.surfaceContainerHigh : scheme.surface,
+        elevation: 0,
+        borderRadius: BorderRadius.circular(CortexTokens.radiusCard),
+        clipBehavior: Clip.antiAlias,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border.all(color: scheme.outlineVariant),
+            borderRadius: BorderRadius.circular(CortexTokens.radiusCard),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (widget.headline != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+                  child: Text(
+                    widget.headline!,
+                    style: theme.textTheme.titleSmall,
+                  ),
+                ),
               Padding(
-                padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
-                child: Text(
-                  widget.headline!,
-                  style: theme.textTheme.titleSmall,
-                ),
-              ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
-              child: TextField(
-                autofocus: true,
-                onChanged: (v) => setState(() => _query = v.trim()),
-                style: theme.textTheme.bodyMedium,
-                decoration: InputDecoration(
-                  hintText: '搜索模型…',
-                  prefixIcon: const Icon(Icons.search_rounded, size: 17),
-                  prefixIconConstraints: const BoxConstraints(
-                    minWidth: 34,
-                    minHeight: 30,
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 7,
+                padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
+                child: TextField(
+                  autofocus: true,
+                  onChanged: (v) => setState(() => _query = v.trim()),
+                  style: theme.textTheme.bodyMedium,
+                  decoration: InputDecoration(
+                    hintText: '搜索模型…',
+                    prefixIcon: const Icon(Icons.search_rounded, size: 17),
+                    prefixIconConstraints: const BoxConstraints(
+                      minWidth: 34,
+                      minHeight: 30,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 7,
+                    ),
                   ),
                 ),
               ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
-              child: Wrap(
-                spacing: 6,
-                runSpacing: 4,
-                children: [
-                  for (final cap in _Cap.values)
-                    _capChip(
-                      theme,
-                      cap,
-                      active: _caps.contains(cap),
-                      onTap: () => setState(() {
-                        _caps.contains(cap)
-                            ? _caps.remove(cap)
-                            : _caps.add(cap);
-                      }),
-                    ),
-                ],
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    for (final cap in _Cap.values)
+                      _capChip(
+                        theme,
+                        cap,
+                        active: _caps.contains(cap),
+                        onTap: () => setState(() {
+                          _caps.contains(cap)
+                              ? _caps.remove(cap)
+                              : _caps.add(cap);
+                        }),
+                      ),
+                  ],
+                ),
               ),
-            ),
-            const Divider(height: 1),
-            Flexible(
-              child: ListView(
-                shrinkWrap: true,
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                children: [
-                  if (!filtering) ...[
-                    _specialRow(
-                      theme,
-                      icon: Icons.settings_suggest_outlined,
-                      title: widget.firstTitle,
-                      subtitle:
-                          widget.firstSubtitle ??
-                          (widget.catalog.defaultModel.isEmpty
-                              ? '服务端配的那个'
-                              : widget.catalog.defaultModel),
-                      pick: const ModelPick(),
-                    ),
-                    if (widget.allowAuto && widget.catalog.autoAvailable)
+              const Divider(height: 1),
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  children: [
+                    if (!filtering) ...[
                       _specialRow(
                         theme,
-                        icon: Icons.auto_awesome_outlined,
-                        title: '自动',
-                        // 与 `resolve_auto` 对得上：跨**所有来源**挑够用里最便宜的
-                        subtitle: '每轮在所有来源里挑最便宜、又干得了这活的',
-                        pick: const ModelPick(model: kAutoModel),
+                        icon: Icons.settings_suggest_outlined,
+                        title: widget.firstTitle,
+                        subtitle:
+                            widget.firstSubtitle ??
+                            (widget.catalog.defaultModel.isEmpty
+                                ? '服务端配的那个'
+                                : widget.catalog.defaultModel),
+                        pick: const ModelPick(),
                       ),
-                  ],
-                  // 筛完一个不剩的分组整组不画：留一个空组头在那儿，
-                  // 看起来像「这条来源坏了」，而实际只是它没有符合条件的型号
-                  for (final (source, label, models) in groups) ...[
-                    _groupHeader(theme, source, label, models),
-                    for (final m in models) _modelRow(theme, m),
-                  ],
-                  if (groups.isEmpty && filtering)
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Text(
-                        '没有匹配的模型',
-                        textAlign: TextAlign.center,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.cortex.foregroundTertiary,
+                      if (widget.allowAuto && widget.catalog.autoAvailable)
+                        _specialRow(
+                          theme,
+                          icon: Icons.auto_awesome_outlined,
+                          title: '自动',
+                          // 与 `resolve_auto` 对得上：跨**所有来源**挑够用里最便宜的
+                          subtitle: '每轮在所有来源里挑最便宜、又干得了这活的',
+                          pick: const ModelPick(model: kAutoModel),
+                        ),
+                    ],
+                    // 筛完一个不剩的分组整组不画：留一个空组头在那儿，
+                    // 看起来像「这条来源坏了」，而实际只是它没有符合条件的型号
+                    for (final (source, label, models) in groups) ...[
+                      _groupHeader(theme, source, label, models),
+                      for (final m in models) _modelRow(theme, m),
+                    ],
+                    if (groups.isEmpty && filtering)
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Text(
+                          '没有匹配的模型',
+                          textAlign: TextAlign.center,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.cortex.foregroundTertiary,
+                          ),
                         ),
                       ),
-                    ),
-                ],
-              ),
-            ),
-            const Divider(height: 1),
-            // 底部固定入口：想加来源/填 key 的人不该被迫先关掉弹层再翻设置。
-            // 设置页开在第一项，那一项就是「模型服务」
-            InkWell(
-              onTap: () {
-                Navigator.of(context).pop();
-                widget.onConfigure();
-              },
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 10,
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.settings_outlined,
-                      size: 15,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      '配置模型服务',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
                   ],
                 ),
               ),
-            ),
-          ],
+              const Divider(height: 1),
+              // 底部固定入口：想加来源/填 key 的人不该被迫先关掉弹层再翻设置。
+              // 设置页开在第一项，那一项就是「模型服务」
+              InkWell(
+                onTap: () {
+                  Navigator.of(context).pop();
+                  widget.onConfigure();
+                },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.settings_outlined,
+                        size: 15,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '配置模型服务',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

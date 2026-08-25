@@ -14,6 +14,7 @@ library;
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/settings/pages/model_picker.dart';
+import 'package:cortex_app/features/settings/settings_sheet.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/model_controller.dart';
 import 'package:flutter/material.dart';
@@ -27,13 +28,16 @@ class _MockConfig extends AppConfigNotifier {
 }
 
 class _OpenPickerButton extends ConsumerWidget {
-  const _OpenPickerButton();
+  const _OpenPickerButton({this.anchor});
+
+  /// 传了就走锚定路径（chip 的那条），不传就是屏幕中央（错误横幅的那条）。
+  final Rect? anchor;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return Center(
       child: TextButton(
-        onPressed: () => showModelPicker(context, ref),
+        onPressed: () => showModelPicker(context, ref, anchor: anchor),
         child: const Text('开面板'),
       ),
     );
@@ -55,20 +59,40 @@ ProviderContainer _boot() => ProviderContainer(
   ],
 );
 
-Future<void> _pump(WidgetTester tester, ProviderContainer container) async {
+Future<void> _pump(
+  WidgetTester tester,
+  ProviderContainer container, {
+  Rect? anchor,
+}) async {
   tester.view.physicalSize = const Size(1000, 1400);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
   await tester.pumpWidget(
     UncontrolledProviderScope(
       container: container,
-      child: const MaterialApp(home: Scaffold(body: _OpenPickerButton())),
+      child: MaterialApp(
+        home: Scaffold(body: _OpenPickerButton(anchor: anchor)),
+      ),
     ),
   );
   for (var i = 0; i < 8; i++) {
     await tester.pump(const Duration(milliseconds: 100));
   }
 }
+
+/// 弹层的表面矩形（全局坐标）。
+///
+/// 量的是对话框路由里那棵 CustomSingleChildLayout 下第一个 Material ——
+/// 弹层自己的表面。量外层 DecoratedBox 也行，但它是阴影载体，
+/// 阴影不占布局，两者矩形相同；Material 语义上更「是」这个弹层。
+Rect _popoverRect(WidgetTester tester) => tester.getRect(
+  find
+      .descendant(
+        of: find.byType(CustomSingleChildLayout),
+        matching: find.byType(Material),
+      )
+      .first,
+);
 
 Future<void> _open(WidgetTester tester) async {
   await tester.tap(find.text('开面板'));
@@ -113,6 +137,11 @@ void main() {
       find.text('部署提供'),
       findsNothing,
       reason: '筛完一个不剩的分组要整组不画 —— 留一个空组头看起来像「这条来源坏了」',
+    );
+    expect(
+      find.text('跟随部署'),
+      findsNothing,
+      reason: '「跟随部署」不是目录里的型号 —— 搜「qwen」它还杵在那儿，读起来像它匹配上了',
     );
   });
 
@@ -215,6 +244,90 @@ void main() {
       find.text('配置模型服务'),
       findsOneWidget,
       reason: '想加来源/填 key 的人不该被迫先关掉弹层再去翻设置',
+    );
+  });
+
+  testWidgets('点「配置模型服务」：弹层关掉，设置页开出来', (tester) async {
+    final c = _boot();
+    addTearDown(c.dispose);
+    await _pump(tester, c);
+    await _open(tester);
+
+    await tester.tap(find.text('配置模型服务'));
+    for (var i = 0; i < 8; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    expect(
+      find.widgetWithText(TextField, '搜索模型…'),
+      findsNothing,
+      reason: '弹层没关就推设置页，设置页会盖在一个还开着的对话框路由上',
+    );
+    expect(
+      find.byType(SettingsPage),
+      findsOneWidget,
+      reason: '点了入口设置页却没开 —— 这一行就成了一个只会关弹层的假按钮',
+    );
+  });
+
+  // ── 弹层摆位（_PopoverLayout）──
+  //
+  // 委托类是私有的，这三条从**用户看得见的矩形**验它：锚在上方、
+  // 顶上放不下翻到下方、贴边不越界。视口 1000×1400，边距 8（与
+  // _PopoverLayout._margin 同值 —— 它私有，抄一份进测试，漂了这里会红）。
+
+  testWidgets('摆位：锚点上方放得下就摆上方，左缘对齐', (tester) async {
+    final c = _boot();
+    addTearDown(c.dispose);
+    const anchor = Rect.fromLTWH(100, 1200, 200, 32);
+    await _pump(tester, c, anchor: anchor);
+    await _open(tester);
+
+    final r = _popoverRect(tester);
+    expect(
+      r.bottom,
+      moreOrLessEquals(anchor.top - 8),
+      reason: '弹层该贴在锚点（chip）上方 8px 处 —— 不是屏幕中央，也不是盖在 chip 上',
+    );
+    expect(
+      r.left,
+      moreOrLessEquals(anchor.left),
+      reason: '与锚点左对齐（Cherry 的下拉也是这样），错位读起来像弹层不属于这个 chip',
+    );
+  });
+
+  testWidgets('摆位：锚点贴着屏幕顶，上方放不下就翻到下方', (tester) async {
+    final c = _boot();
+    addTearDown(c.dispose);
+    const anchor = Rect.fromLTWH(100, 10, 200, 32);
+    await _pump(tester, c, anchor: anchor);
+    await _open(tester);
+
+    final r = _popoverRect(tester);
+    expect(
+      r.top,
+      moreOrLessEquals(anchor.bottom + 8),
+      reason: '上方放不下要翻到锚点下方 —— 消失或被裁掉一半比翻面更糟',
+    );
+  });
+
+  testWidgets('摆位：锚点贴着右缘，弹层贴边不越界', (tester) async {
+    final c = _boot();
+    addTearDown(c.dispose);
+    const anchor = Rect.fromLTWH(940, 1200, 40, 32);
+    await _pump(tester, c, anchor: anchor);
+    await _open(tester);
+
+    final r = _popoverRect(tester);
+    expect(
+      r.right,
+      lessThanOrEqualTo(1000 - 8 + 0.01),
+      reason: '左对齐会把弹层推出右缘 —— 越界的部分用户看不见也点不到，必须贴边收回来',
+    );
+    expect(
+      r.left,
+      moreOrLessEquals(1000 - 8 - r.width),
+      reason: '收回来的位置该是「右缘留 8px 边距」，而不是随便夹到哪儿',
     );
   });
 }
