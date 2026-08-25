@@ -1,8 +1,25 @@
+import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/core/theme.dart';
 import 'package:cortex_app/features/chat/widgets/message_bubble.dart';
+import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/widgets/markdown/code_block.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+/// [AssistantBlock] 的动作行读 offline 状态（分叉按钮的判据），所以这棵
+/// 树要一个 ProviderScope。**必须用替身**：默认的 build 会排微任务去读
+/// 开发机上真实的 settings.json —— 测试的成败不能取决于跑它的那台机器。
+class _FixedConfig extends AppConfigNotifier {
+  @override
+  AppConfig build() =>
+      const AppConfig(useMock: true, baseUrl: 'http://127.0.0.1:8080');
+}
+
+Widget _scoped(Widget child) => ProviderScope(
+  overrides: [appConfigProvider.overrideWith(_FixedConfig.new)],
+  child: child,
+);
 
 /// Replays a token stream through the real widget tree.
 ///
@@ -42,14 +59,16 @@ void main() {
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
 
-    Widget frame(String text, bool streaming) => MaterialApp(
-      theme: CortexTheme.dark(),
-      home: Scaffold(
-        body: SingleChildScrollView(
-          child: AssistantBlock(
-            text: text,
-            toolCalls: const [],
-            streaming: streaming,
+    Widget frame(String text, bool streaming) => _scoped(
+      MaterialApp(
+        theme: CortexTheme.dark(),
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: AssistantBlock(
+              text: text,
+              toolCalls: const [],
+              streaming: streaming,
+            ),
           ),
         ),
       ),
@@ -128,10 +147,12 @@ void main() {
   /// 要说得更具体，得先让服务端发一条真的阶段事件。
   testWidgets('等首 token 的动效不声称在检索记忆', (tester) async {
     await tester.pumpWidget(
-      MaterialApp(
-        theme: CortexTheme.dark(),
-        home: const Scaffold(
-          body: AssistantBlock(text: '', toolCalls: [], streaming: true),
+      _scoped(
+        MaterialApp(
+          theme: CortexTheme.dark(),
+          home: const Scaffold(
+            body: AssistantBlock(text: '', toolCalls: [], streaming: true),
+          ),
         ),
       ),
     );
