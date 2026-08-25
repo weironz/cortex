@@ -100,6 +100,10 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   /// 给操作加时限。超时抛的是 [CortexApiException]，让统一的 catch
   /// 显示一句人话，而不是 `TimeoutException after 0:00:45…`。
   ///
+  /// **只给要出去连供应商的两条用**（获取模型列表 / 连通性检查）——
+  /// 文案里「供应商端点不可达 / 换代理地址」的诊断只对它们成立。
+  /// 写操作（保存 / 删除 / 开关）的超时是另一种病，在 [_run] 里单独诊断。
+  ///
   /// 注意：超时**放弃等待**，不等于请求被取消 —— 它可能稍后才回来，
   /// 所以落结论的地方还要对 [_epoch]。
   Future<T> _bounded<T>(Future<T> Function() op) => op().timeout(
@@ -292,6 +296,18 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   ///
   /// 统一在这里 catch：每处各写一遍的话，迟早有一处把错误吞了，
   /// 而症状是「点了保存，什么都没发生」。
+  ///
+  /// # 超时不走 [_bounded]，因为写操作的超时是另一种病
+  ///
+  /// [_bounded] 的超时文案说「供应商端点不可达，换一个 API 代理地址」——
+  /// 对「获取模型列表 / 连通性检查」是对的：那两条要经服务端**出去连
+  /// 供应商**。而这里跑的是保存 / 删除 / 开关，只跟我们自己的服务端说话，
+  /// 根本没有供应商那一腿 —— 同一句话落在这里就是误诊，用户会照着去改一个
+  /// 与病无关的地址（评审抓到的）。
+  ///
+  /// 写操作超时还有第二层：**结局未知**。超时只是放弃等待，那次写稍后
+  /// 可能仍然落库 —— 所以超时路径上也要重拉列表，让界面显示库里的真话，
+  /// 而不是停在改之前的样子替「没保存上」背书。
   Future<void> _run(Future<void> Function() body) async {
     final epoch = _epoch;
     setState(() {
@@ -299,12 +315,28 @@ class _ModelPageState extends ConsumerState<ModelPage> {
       _error = null;
       _note = null;
     });
+    var timedOut = false;
     try {
-      await _bounded(body);
+      await body().timeout(
+        _opTimeout,
+        onTimeout: () {
+          timedOut = true;
+          throw const CortexApiException(
+            '等了 45 秒没等到确认，先把按钮还给你。'
+            '这次改动可能已经保存、也可能没有 —— 列表已重新拉了一遍，'
+            '以它现在显示的为准。',
+          );
+        },
+      );
       ref.invalidate(modelSourcesProvider);
       // 型号列表变了，选择器也要重拉
       ref.invalidate(modelCatalogProvider);
     } on Object catch (e) {
+      if (timedOut) {
+        // 见上：结局未知的写，超时后也要让界面重新对齐库里的现状
+        ref.invalidate(modelSourcesProvider);
+        ref.invalidate(modelCatalogProvider);
+      }
       // 迟到的报错只属于发起它的那一页。用户已经切走的话，横幅落在
       // 现在这一页上读起来就是「这一条坏了」；失败本身不会静默 ——
       // 界面画的是服务端数据，保存失败时开关/型号根本不会动
