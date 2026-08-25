@@ -986,7 +986,7 @@ class _DetailState extends State<_Detail> {
                 // 判断成「key 没存上」—— 占位灰字传达不了「有」。
                 ? InkWell(
                     key: const ValueKey('field:api-key-masked'),
-                    borderRadius: BorderRadius.circular(4),
+                    borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
                     onTap: _beginEditKey,
                     // 键盘也进得来：Tab 到这里按回车 = 点击
                     onFocusChange: (has) {
