@@ -107,14 +107,35 @@
     # ── 目录 ──────────────────────────────────────────────
     - name: 部署目录
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ node_dir }}"
         state: directory
         owner: root
         group: root
         mode: "0755"
-      loop:
-        - "{{ node_dir }}"
-        - "{{ cortex_backup_dir }}"
+
+    # ⚠️ **备份根的属主必须是 postgres 那个 uid，不能跟着上面一起 root。**
+    #
+    # 往这个目录里写的有两个进程，**两个都是容器里的 postgres（uid 70）**：
+    #   - cortexdb 的 `archive_command`（每 60 秒一段 WAL）
+    #   - 备份容器的 `pg_basebackup` / `pg_dump`
+    #
+    # 建成 root:root 0755 的后果 2026-08-25 在生产上量到了：
+    # **`archived=0 / failed=33970`** —— 归档从配上那天起一次都没成功过，
+    # 卡在第一段。三件事一起发生，而三件都不响：
+    #   1. PITR 是假的（备份目录空的，只有全量都没有）；
+    #   2. pg_wal 无限涨（没归档成功的段回收不掉，当时已 3.2 GB）；
+    #   3. 日志里只有一行 `archive command failed with exit code 1`。
+    #
+    # 用数字 70 而不是名字 `postgres`：**宿主上没有这个用户**，
+    # 写名字会让这一步直接失败。70 是 alpine 版 postgres 镜像里的 uid
+    # （Debian 版是 999）—— 换底座镜像时这里要跟着改，而症状就是上面那三条。
+    - name: 备份根（属主是容器里 postgres 的 uid，不是 root）
+      ansible.builtin.file:
+        path: "{{ cortex_backup_dir }}"
+        state: directory
+        owner: "{{ cortex_pg_uid }}"
+        group: "{{ cortex_pg_uid }}"
+        mode: "0750"
 
     # ── 部署账号 ──────────────────────────────────────────
     #

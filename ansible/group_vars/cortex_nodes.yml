@@ -135,6 +135,11 @@ deploy_services_backup:
 # 2026-08-25 打开。桶 cortex-backup-cloudcele（深圳），凭据在节点的
 # .env.secrets 里（ansible 从不碰它）。取舍见 docs/backup.md。
 cortex_backup_enabled: true
+
+# 容器里 postgres 的 uid。备份根按它 chown —— 见 provision.yml 那段 ⚠️。
+# 70 = alpine 版 postgres 镜像；Debian 版是 999。换底座就要改这里，
+# 而改漏的症状是「归档一次都没成功过，且没有任何告警」。
+cortex_pg_uid: 70
 backup_hour: 3
 keep_daily: 7
 keep_weekly: 4
