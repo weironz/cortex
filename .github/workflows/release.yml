@@ -393,6 +393,33 @@ jobs:
             done
             docker logs "$cid" 2>&1 | grep -q '出网代理就绪'               || { echo "::error::egress 没有在监听"; docker logs "$cid"; exit 1; }
             docker rm -f "$cid" >/dev/null
+          elif [ "${{ matrix.image }}" = "cortex-backup" ]; then
+            # 备份容器：**三样工具在不在、版本对不对**。
+            #
+            # 不跑 ENTRYPOINT（那是个常驻守护循环，且没有 OSS 凭据就在
+            # render-config 那步以 78/EX_CONFIG 退出）—— 这里要证明的是
+            # 「镜像装对了」，不是「配置齐了」。
+            #
+            # ⚠️ pg 客户端**必须与生产库同大版本**：pg_basebackup 比服务端
+            # 旧会直接拒（"server version mismatch"），而那件事只在凌晨三点
+            # 的备份里暴露。底座就是 postgres:17-alpine，这一条钉住它没被换掉。
+            docker run --rm --entrypoint /bin/sh "$img" -c '
+              set -e
+              rustic --version
+              env -u RCLONE_VERSION rclone --version | head -1
+              pg_basebackup --version
+              pg_dump --version
+              pg_verifybackup --version
+              pg_basebackup --version | grep -q "PostgreSQL) 17\." \
+                || { echo "::error::pg 客户端不是 17.x，与生产库对不上"; exit 1; }
+              # 编排脚本三个都在且可执行 —— COPY 漏了的话容器起来才发现
+              for f in daemon.sh run.sh render-config.sh; do
+                test -x "/opt/cortex-backup/$f" || { echo "::error::缺 $f"; exit 1; }
+              done
+              # 以 postgres 身份跑，因为 pg_basebackup 写出来的数据目录
+              # 必须属于启动它的那个用户（见 Dockerfile 里那段）
+              test "$(id -un)" = postgres || { echo "::error::默认用户不是 postgres"; exit 1; }
+            '
           else
             cid=$(docker run -d -p 18080:80 "$img")
             for _ in $(seq 1 30); do
