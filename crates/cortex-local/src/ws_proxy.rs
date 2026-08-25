@@ -457,6 +457,102 @@ mod tests {
         base.replace("http://", "ws://")
     }
 
+    /// 假 cortexd 的另一形态：把握手请求上的 Authorization 头**记下来**。
+    ///
+    /// 外层 `Option` = 有没有收到握手；内层 = 头在不在。分两层是为了
+    /// 「没连上」与「连上了但没带头」在断言里分得开。
+    type SeenAuth = std::sync::Arc<std::sync::Mutex<Option<Option<String>>>>;
+
+    async fn recording_cortexd(seen: SeenAuth) -> String {
+        async fn ws(
+            axum::extract::State(seen): axum::extract::State<SeenAuth>,
+            headers: axum::http::HeaderMap,
+            upgrade: WebSocketUpgrade,
+        ) -> Response {
+            *seen.lock().expect("测试锁") = Some(
+                headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+            );
+            upgrade.on_upgrade(|_| async {})
+        }
+        let app = Router::new().route("/ws", get(ws)).with_state(seen);
+        serve(app).await
+    }
+
+    /// 同 [`serve_proxy`]，但配了本机入站凭据 —— 剥离逻辑只在这时才有分岔。
+    async fn serve_proxy_with_inbound(remote_base: &str, token: &str) -> String {
+        let st = WsUpstream {
+            http: reqwest::Client::new(),
+            remote: Remote::new(remote_base, None).expect("造 Remote 失败"),
+            inbound_token: Some(token.to_string()),
+            attach_token: None,
+        };
+        let app = Router::new().route("/ws", get(handler)).with_state(st);
+        serve(app).await.replace("http://", "ws://")
+    }
+
+    /// **本机凭据不出这台机器 —— 验的是 ws 握手这条接线，不是谓词单测。**
+    ///
+    /// 评审指出的缺口：`is_machine_bearer` 有单测，但既有 ws 测试的
+    /// fixture 全是 `inbound_token: None`，那种配置下剥不剥行为相同 ——
+    /// 把 `handler` 里那个取反删掉（回退成一律转发）没有任何测试会红。
+    /// 这条测试补的正是那个静默回归的口子。
+    ///
+    /// 两段合在一条测试里是有意的：第二段（陌生 bearer 原样转发）同时是
+    /// 第一段的**对照组** —— 它证明假远端真的看得见 Authorization 头，
+    /// 第一段的「没看见」才有区分力，而不是采集本身是瞎的。
+    #[tokio::test]
+    async fn the_machine_bearer_never_reaches_the_remote_ws_handshake() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+        // 第一段：带本机凭据连 —— 远端收到的握手必须**没有** Authorization
+        let seen: SeenAuth = Default::default();
+        let remote = recording_cortexd(seen.clone()).await;
+        let local = serve_proxy_with_inbound(&remote, "T0").await;
+
+        let mut req = format!("{local}/ws?ticket=abc")
+            .into_client_request()
+            .expect("拼不出握手请求");
+        req.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer T0".parse().expect("拼不出头"),
+        );
+        tokio_tungstenite::connect_async(req)
+            .await
+            .expect("带本机凭据时握手应当照常成功（票在查询串里）");
+        assert_eq!(
+            seen.lock().expect("测试锁").clone(),
+            Some(None),
+            "本机凭据被转发到了远端 —— 它是钉在这台机器上的秘密，出去一次\
+             就多一处能泄露的日志；且远端「先看头后看票」的实现会把这条\
+             本该通的连接判成 401"
+        );
+
+        // 第二段（对照）：陌生 bearer 必须原样转发 —— 顺带证明采集不瞎
+        let seen2: SeenAuth = Default::default();
+        let remote2 = recording_cortexd(seen2.clone()).await;
+        let local2 = serve_proxy_with_inbound(&remote2, "T0").await;
+
+        let mut req2 = format!("{local2}/ws?ticket=abc")
+            .into_client_request()
+            .expect("拼不出握手请求");
+        req2.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer someone-else".parse().expect("拼不出头"),
+        );
+        tokio_tungstenite::connect_async(req2)
+            .await
+            .expect("陌生凭据也不该挡在本地这一跳");
+        assert_eq!(
+            seen2.lock().expect("测试锁").clone(),
+            Some(Some("Bearer someone-else".to_string())),
+            "非本机的 Authorization 要原样转发（函数文档写明的行为）——\
+             这一段同时是上一段的对照组：它证明假远端看得见头"
+        );
+    }
+
     /// **本体**：一条帧真的从远端穿过本地 agent 到达客户端，反向也通。
     ///
     /// 这条测试要是在本轮之前存在，那个 bug 根本出不了门 —— 当时

@@ -1902,11 +1902,24 @@ mod tests {
         // 注册开放与否必须是**公开可查**的：登录页靠它决定摆不摆注册入口。
         // 字段整个不见的话，客户端按「关」处理（保守方向），于是一台开了
         // 注册的部署上入口消失 —— 静默，且只有想注册的人看得见。
-        // 这组用例不改进程环境（并行用例互相踩），所以只钉「默认是关」。
+        //
+        // ⚠️ **不钉具体值，钉「字段在、且与判据函数同源」。**
+        // 第一版断言 == false，被评审当场抓到：justfile 顶上
+        // `set dotenv-load := true`，本机 .env 里 CORTEX_OPEN_REGISTRATION
+        // 是开的 —— 于是开着 dev 的开发机跑 `just ci` 必红在一条与改动
+        // 无关的断言上。这正是仓库记过并根除过一次的「dotenv 假红」形状
+        // （CORTEXD_TOKEN 那次），不能重新引进来。
         assert_eq!(
-            v["open_registration"], false,
-            "health 必须报 open_registration，且默认（没设环境变量）是 false —— \
-             字段缺席时客户端保守地藏掉注册入口，开了注册的部署会静默失去它"
+            v["open_registration"],
+            serde_json::json!(crate::accounts::open_registration()),
+            "health 的 open_registration 必须与 accounts::open_registration() \
+             同源 —— 字段缺席或各读一遍环境变量，登录页摆不摆注册入口就会\
+             与服务端实际收不收注册漂开"
+        );
+        assert!(
+            v["open_registration"].is_boolean(),
+            "必须是布尔 —— 字符串 \"false\" 在客户端的 == true 判断下是假值，\
+             但在人眼里像开着"
         );
     }
 

@@ -580,17 +580,33 @@ pub async fn rotate_in(
                 return Ok(tokens);
             }
             if why == RejectReason::ReplayedInGrace {
+                // ⚠️ 缓存 miss ≠ 该拒。真正并发的输家可能只比赢家的
+                // `remember` 早到几毫秒 —— 那几毫秒里 family 完好、后继
+                // 马上就有。先小睡一次复查；还没有就回 **409 而不是 401**：
+                // 客户端把 refresh 的 401/403 判为「凭据被拒」并删掉本机
+                // 副本，一个毫秒级竞态就把用户登出了（评审抓到的那条）。
+                // 409 落进客户端的 transient 重试，下一次多半命中缓存。
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                if let Some(tokens) = replay.recall(&digest, std::time::Instant::now()) {
+                    tracing::info!(
+                        user = %user_id,
+                        reason = "refresh-replayed-in-grace-late-cache",
+                        "宽限内重放：复查时缓存已被赢家填上，幂等返回同一对"
+                    );
+                    return Ok(tokens);
+                }
                 tracing::warn!(
                     user = %user_id,
                     reason = "refresh-replayed-in-grace-no-cache",
-                    "宽限内的 refresh 重放但缓存没有后继（进程重启过？）：只拒这一次，family 不动"
+                    "宽限内的 refresh 重放但缓存没有后继（进程重启过？）：回 409 让它重试，family 不动"
                 );
+                return Err(ApiError::conflict("续期请求撞在一起了，请稍后重试"));
             }
             Err(ApiError::unauthorized(match why {
                 RejectReason::Expired => "登录已过期，请重新登录",
                 RejectReason::FamilyRevoked => "登录已注销，请重新登录",
-                // 与「查不到」同一句话：对客户端三种拒绝没有区别，分开说
-                // 等于告诉重放者「你差一点就赶上宽限了」
+                // 到不了：上面那支已经 return。留着是为了穷尽匹配 ——
+                // 新增 RejectReason 变体时编译器会把人带回这里
                 RejectReason::ReplayedInGrace => "登录已失效，请重新登录",
             }))
         }

@@ -55,6 +55,20 @@ impl ApiError {
         }
     }
 
+    /// 409：撞上了并发的另一次操作，**重试有意义**。
+    ///
+    /// 与 401 分开是有具体后果的：客户端把 refresh 的 401/403 判为
+    /// 「凭据被拒」并**删掉本机存的凭据**；而并发续期的输家撞进宽限缓存
+    /// 还没被填上的那几毫秒时，凭据链完好、重试一次就能拿到同一对 ——
+    /// 回 401 会让一个毫秒级竞态把用户登出。
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            message: Some(message.into()),
+            inner: cortex_core::CortexError::Store("conflict".into()),
+            status: Some(StatusCode::CONFLICT),
+        }
+    }
+
     /// 404：这个东西不在。
     ///
     /// 与 400 分开是有具体后果的：分享链接被撤销之后再打开，回 400 的话
