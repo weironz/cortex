@@ -79,17 +79,44 @@ blob 的 key 就是内容的 SHA-256：内容不可变、永不覆盖。rustic �
 
 ### 1. 阿里云 OSS
 
-1. **建桶**。2026-08-25 已经建好：`cortex-backup-cloudcele`
-   （`oss-cn-shenzhen`，私有，匿名访问 403 验过）。命名跟着这台机器上
-   已有的两个走（`mica-backup-cloudcele` / `neostor-backup`）。
-   ⚠️ **它与节点同在深圳** —— 也就是**没有地理隔离**。深圳区域整体出事时
-   两边一起没。要买那一层就换一个地域建桶，代价是跨区流量费与更慢的推送。
-2. **建一个只授这个桶的 RAM AccessKey**：
-   `oss:PutObject / GetObject / DeleteObject / ListObjects` + `oss:GetBucket*`。
-   ⚠️ **不要复用 `RUSTFS_*` 那把。** 用同一把的话，一次泄露同时拿到主存储
-   与备份，而备份存在的全部意义正是「主存储出事时它还在」。
-3. **开版本控制或对象锁**。一次跑飞的 `prune`、一把被偷的 key，都能把历史
-   擦干净 —— 只增不减挡不住「有人主动删」。
+**这一节 2026-08-25 已经做完了**，写在这里是为了说清「当时定了什么、
+为什么」—— 换机器重来一遍时照着走，也免得有人把已经权衡过的建议再提一次。
+
+1. **桶**：`cortex-backup-cloudcele`（`oss-cn-shenzhen`，私有，
+   **匿名访问 403 验过**，版本控制已开）。命名跟着这台机器上已有的两个走
+   （`mica-backup-cloudcele` / `neostor-backup`）。
+2. **AccessKey**：复用这台机器上那把**账号级**的（mica / neostor 也在用）。
+3. **版本控制已开** —— 一次跑飞的 `prune`、一把被偷的 key 都能把历史擦干净，
+   而「只增不减」挡不住「有人主动删」。这一条是必须的，不是可选。
+
+### 两个**明知代价、仍然这么定**的取舍
+
+写下来是为了它们不被当成疏漏重新提一遍；也为了哪天不成立了，知道该翻哪一条。
+
+**① key 是账号级的，不是只授这一个桶的 RAM 子账号。**
+
+代价说清楚：这把 key 列得出 `mica-backup-cloudcele` 与 `neostor-backup`，
+所以 **cortex 的备份容器一旦被拿下，同时握着那两个项目的备份**。
+爆炸半径从「一个项目的备份」变成「这台机器上全部三个项目的备份」。
+
+接受它的理由是单机自托管、三个项目同一个人运维，多一套 key 轮换的维护成本
+大于它买到的隔离。**如果哪天这台机器不再是一个人的**，第一件该做的事就是
+换成按桶授权的子账号：
+
+    oss:PutObject / GetObject / DeleteObject / ListObjects
+        → acs:oss:*:*:cortex-backup-cloudcele/*
+    oss:GetBucket* / oss:ListObjects
+        → acs:oss:*:*:cortex-backup-cloudcele
+
+⚠️ 这一条**不影响**另一条仍然成立的规矩：OSS 那把与 `RUSTFS_*` 那把是
+**两把不同的 key**。那防的是「一次泄露同时拿到主存储与备份」，
+与桶级授权是两件事。
+
+**② 桶与节点同在深圳，没有地理隔离。**
+
+深圳区域整体出事时两边一起没。换个地域能买到那一层，代价是跨区流量费与更慢
+的推送。定为：这套备份要防的是盘坏、误删、整机丢失、勒索加密 —— 那四样
+**同城异桶已经全覆盖**；「整个区域没了」不在当前的威胁模型里。
 
 > **OSS 的坑**：它只认 virtual-host 寻址，所以配置里钉死
 > `enable_virtual_host_style = true`。写成 path style 的症状是一句

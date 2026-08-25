@@ -28,7 +28,10 @@ need OSS_SECRET_ACCESS_KEY
 need CORTEX_BACKUP_PASSWORD
 
 OSS_ROOT="${OSS_ROOT:-cortex}"
-OSS_REGION="${OSS_REGION:-oss-cn-hangzhou}"
+# 默认跟着实际那个桶走（深圳），与 compose 里那个默认值**必须一致** ——
+# 两处不一致时，漏配 OSS_REGION 的部署会在这两个默认值之间取一个，
+# 而取到哪个取决于变量有没有被 compose 传进来。那是「配置有两份」的形状
+OSS_REGION="${OSS_REGION:-oss-cn-shenzhen}"
 
 # ⚠️ **走 $HOME，不要写死路径。**
 #

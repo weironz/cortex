@@ -483,10 +483,14 @@ services:
       #
       # ⚠️ **这把 key 必须与上面那把 S3_* 是两把不同的。** 用同一把的话，
       # 一次泄露同时拿到主存储与备份，而备份存在的全部意义正是
-      # 「主存储出事时它还在」。RAM 子账号，只授这一个桶。
+      # 「主存储出事时它还在」。
+      # （「只授一个桶的 RAM 子账号」这一条明知代价地没做，理由见 docs/backup.md）
       OSS_BUCKET: ${OSS_BUCKET:?见 docs/backup.md}
       OSS_ENDPOINT: ${OSS_ENDPOINT:?见 docs/backup.md}
-      OSS_REGION: ${OSS_REGION:-oss-cn-hangzhou}
+      # ⚠️ 默认值跟着**实际那个桶**走（深圳），不是随手写一个杭州。
+      # 有默认值的变量漏配时是**静默**回落 —— 回落到一个错的地域，
+      # 症状是签名校验失败或者一句读不懂的 endpoint 错误
+      OSS_REGION: ${OSS_REGION:-oss-cn-shenzhen}
       # 桶里的顶层前缀。下面再分两个：`<root>/pg`（rustic 仓库）与
       # `<root>/rustfs`（blobs 镜像）—— 为什么分见 render-config.sh。
       # 与别的项目共用一个桶时给自己换一个 root
