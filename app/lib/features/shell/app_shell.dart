@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/attention.dart';
 import '../../core/theme.dart';
 
 import '../../state/app_providers.dart';
@@ -81,6 +84,20 @@ class _AppShellState extends ConsumerState<AppShell> {
           .where((s) => s.id == id)
           .map((s) => s.title)
           .firstOrNull;
+
+      // 把话**送到窗口外面**去。下面那条 SnackBar 只有人正看着这扇窗
+      // 时才看得见，而这个能力想省掉的事恰恰是「隔一会儿点进去看一眼」。
+      //
+      // 两侧都自带「已经在前台就不做」的判据（见 `attention.dart`），
+      // 所以这里无条件调 —— 在这儿再判一次就是同一件事判两处，
+      // 而两处迟早会不一致
+      unawaited(
+        callAttention(
+          title == null ? 'Cortex' : '「$title」跑完了',
+          title == null ? '有一轮跑完了' : '回来看看结果',
+        ),
+      );
+
       final messenger = ScaffoldMessenger.maybeOf(context);
       if (messenger == null) return;
       messenger.showSnackBar(
