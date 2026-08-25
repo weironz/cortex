@@ -137,8 +137,15 @@ PITR 断了；活库 pg_wal 无限涨（开发机上堆到 17 GB）；日志里�
 - **本机**：六条腿全绿；取回的 `pgdata` 经 `pg_verifybackup` 仍然通过
 - **真打阿里云 OSS**：六条腿全绿 46 s；从 OSS 取回后 `pg_verifybackup`
   仍然通过；`rustic check` 通过；新桶匿名访问 403
-- **生产**：六条腿全绿 85 s，两条 lineage 都在 OSS 上（pgdata 3.2 GiB）
-- **还欠着**：生产上的恢复演练（脚本已随部署送上节点）
+- **生产**：六条腿全绿，两条 lineage 都在 OSS 上（pgdata 3.2 GiB）
+- **生产上的恢复演练 PASS**（v0.1.22，2026-08-25）：
+  **RPO 1.044 s（forced）· RTO 5.102 s**、探针回放通过、18 张业务表齐全、
+  行数追平基线、`pg_amcheck` 通过。报告留在节点的
+  `/data/cortex/backup/reports/`。
+  它证明的不是「备份能起」，而是**基础备份 + 归档 WAL 一起能把最后一分钟
+  的写入接回来** —— 而这台机器上的归档在同一天之前一次都没成功过。
+- **还差一样**：`data_checksums=off`，演练里逐页校验是 `skipped`。
+  开它要停一次库（`just pg-enable-checksums`），下一份全量才验得了页级损坏。
 
 ---
 

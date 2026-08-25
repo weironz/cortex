@@ -174,16 +174,28 @@ E ②（中继端到端加密）、H2（工具注册表）、H3（全插件化�
 六条腿全绿。经过与踩到的坑搬去了 [roadmap-done.md](roadmap-done.md)，
 配置与恢复步骤在 [backup.md](backup.md)。
 
-> 留在这里的只有一条**还欠着**的：**生产上的恢复演练**。
-> 备份容器每天跑，`rustic check` 每周跑 —— 但那两样证明的是「字节没坏」，
-> 不是「恢复得出一个能起来的数据库」。演练脚本 2026-08-25 已经随部署送上
-> 节点（`/data/cortex/scripts/restore-drill.sh`），跑法：
->
->     cd /data/cortex && bash scripts/restore-drill.sh
->
-> 它对生产库唯一的写入是一条探针（独立 schema `cortex_drill`），临时实例
-> `archive_mode=off`、不发布端口、跑完自删。**没演练过的备份等于没有备份**
-> —— 这一条在这台机器上还没兑现。
+**生产上的恢复演练也跑过了**（2026-08-25，`PASS`）：
+
+    RPO 1.044 s（forced）· RTO 5.102 s · 探针回放通过
+    18 张业务表齐全 · 行数追平基线 · pg_amcheck 通过
+    报告：/data/cortex/backup/reports/restore-drill-20260825T060550Z.txt
+
+它证明的不是「备份能起」，而是**基础备份 + 归档 WAL 一起能把最后一分钟的
+写入接回来** —— 而这台机器上的归档在同一天之前**一次都没成功过**
+（`archived=0 / failed=33970`，见 roadmap-done）。
+
+演练脚本随部署送上节点，随时可重跑：
+
+    cd /data/cortex && bash scripts/restore-drill.sh
+
+对生产库唯一的写入是一条探针（独立 schema `cortex_drill`），临时实例
+`archive_mode=off`、不发布端口、跑完自删。
+
+> ⚠️ **还差一样：`data_checksums=off`，所以逐页校验被跳过。**
+> 演练里那一步现在是 `skipped` —— 也就是说「页级静默损坏」这一类它验不了
+> （前面那些验的是文件级 SHA256 与堆/索引自洽）。开它要停一次库
+> （`just pg-enable-checksums`），**下一份全量才能被逐页校验**。
+> 排在这里而不是「不做」：它是真缺的一块，只是要一次停机窗口。
 
 ### compose 项目重名：**这一侧已经可以改了，挡路的全在 Cormex**
 
