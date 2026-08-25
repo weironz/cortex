@@ -139,7 +139,7 @@ leg "快照 pgdump（可移植转储）" \
 # 会被后者放过去。内容寻址在这里帮了大忙：key 就是内容的 SHA-256。
 leg "RustFS → OSS（附件与生成图）" \
     rclone copy "rustfs:${S3_BUCKET:-cortex-blobs}" \
-    "oss:${OSS_BUCKET}/${OSS_ROOT:-cortex}-blobs" \
+    "oss:${OSS_BUCKET}/${OSS_ROOT:-cortex}/rustfs" \
     --checksum --transfers 4 --stats-one-line --stats 30s
 
 # ── 5. 保留策略 ───────────────────────────────────────────────────────────

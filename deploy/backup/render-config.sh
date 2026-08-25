@@ -53,7 +53,7 @@ repository = "opendal:s3"
 password = "${CORTEX_BACKUP_PASSWORD}"
 
 [repository.options]
-root = "${OSS_ROOT}"
+root = "${OSS_ROOT}/pg"
 bucket = "${OSS_BUCKET}"
 region = "${OSS_REGION}"
 endpoint = "${OSS_ENDPOINT}"
@@ -67,6 +67,20 @@ EOF
 # 两个 remote：源是这套自己的 RustFS，目标是 OSS 上另一个前缀。
 # **它们必须是两把不同的 key** —— 用同一把的话，一次 key 泄露同时拿到
 # 主存储与备份，而备份存在的全部意义是「主存储出事时它还在」。
+#
+# ── 桶里为什么分两个前缀 ──────────────────────────────────────
+#
+#   ${OSS_ROOT}/pg       rustic 仓库（加密、去重、有保留策略）
+#   ${OSS_ROOT}/rustfs   blobs 镜像（明文对象，只增不减）
+#
+# 三个理由，一个比一个实：
+#
+# 1. **`rustic prune` 会删它自己前缀下的对象。** 两块混在一个前缀里，
+#    哪天 prune 判断出错就会碰到 blobs —— 分前缀是给它划一条边界。
+# 2. **OSS 的生命周期规则按前缀走。** blobs 是只增不减的冷数据，适合过
+#    N 天转低频/归档存储；而 rustic 的 pack 文件恢复与 prune 都要读，
+#    必须留在标准存储。不分前缀就配不出这两条不同的规则。
+# 3. 出事那天一眼看得出哪一半坏了。
 cat > "$CFG/rclone/rclone.conf" <<EOF
 [rustfs]
 type = s3
@@ -86,4 +100,4 @@ endpoint = ${OSS_ENDPOINT}
 region = ${OSS_REGION}
 EOF
 
-echo "配置已渲染：rustic → ${OSS_BUCKET}/${OSS_ROOT}，rclone → ${OSS_BUCKET}/${OSS_ROOT}-blobs"
+echo "配置已渲染：rustic → ${OSS_BUCKET}/${OSS_ROOT}/pg，rclone → ${OSS_BUCKET}/${OSS_ROOT}/rustfs"

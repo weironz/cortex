@@ -107,6 +107,18 @@ services:
       - wal_compression=on
       - -c
       - summarize_wal=on
+      # 与生产那份同一条：备份容器的 `pg_basebackup` 开的是**复制连接**，
+      # 而官方镜像追加的 `host all all all scram-sha-256` 里那个 `all`
+      # 按 pg_hba 的语义**不匹配 replication**。
+      #
+      # dev 这边加它不是为了「跟生产一致」这种洁癖 —— 是为了**能在本机
+      # 验备份容器**。少了它，本机跑一遍备份必然在第一条腿就红，而那时
+      # 人会去怀疑代码，实际是这台库没放行。
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    configs:
+      - source: cortex-dev-pg-hba
+        target: /etc/postgresql/pg_hba.conf
     volumes:
       - cortex_dev_pg:/var/lib/postgresql/data
       - ${CORTEX_BACKUP_DIR:-./data/backup}:/backup
@@ -355,6 +367,14 @@ services:
       - "127.0.0.1:${CORTEX_WEB_DEV_PORT:-5173}:80"
     networks:
       - default
+
+configs:
+  # 见上面 cortexdb 的 hba_file。`include` 把 initdb 生成的那份原样带进来
+  # （PG16+ 支持），我们只**加**一条，不接管整份文件。
+  cortex-dev-pg-hba:
+    content: |
+      include /var/lib/postgresql/data/pg_hba.conf
+      host replication ${CORTEX_PG_USER:-cortex} all trust
 
 volumes:
   # 容器里编出来的 Linux 二进制。宿主看不见它，也不该看见 ——

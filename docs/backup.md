@@ -7,8 +7,29 @@
 | **Postgres** | `rustic`（restic 格式：加密 + 去重 + 保留策略） | 基础备份 + WAL 归档 + 一份逻辑转储 | 丢「最后一分钟」 |
 | **RustFS** | `rclone`（S3 → S3，**只增不减**） | 附件与生成图的字节 | 丢「某几个对象」 |
 
-目标都是**阿里云 OSS**（建议与这台机器不同地域）。两块由 compose 里一个
-`backup` 服务跑，**默认不启用**（`profiles: [backup]`）。
+目标都是**阿里云 OSS**。两块由 compose 里一个 `backup` 服务跑，
+**默认不启用**（`profiles: [backup]`）。
+
+### 桶里长什么样
+
+**一个桶，两个前缀**：
+
+```
+<bucket>/<OSS_ROOT>/pg        rustic 仓库（加密、去重、有保留策略）
+<bucket>/<OSS_ROOT>/rustfs    blobs 镜像（明文对象，只增不减）
+```
+
+分前缀不是为了好看，三个理由：
+
+1. **`rustic prune` 会删它自己前缀下的对象。** 两块混在一个前缀里，
+   哪天 prune 判断出错就会碰到 blobs —— 分前缀是给它划一条边界。
+2. **OSS 的生命周期规则按前缀走。** blobs 是只增不减的冷数据，适合过 N 天
+   转低频/归档存储；而 rustic 的 pack 文件恢复与 prune 都要读，必须留在
+   标准存储。不分前缀就配不出这两条不同的规则。
+3. 出事那天一眼看得出哪一半坏了。
+
+**两个桶**买不到更多：同一把 key 照样都能访问，除非发两把 —— 而那时你要
+维护两套轮换。`OSS_ROOT` 换一个值就能与别的项目共用同一个桶。
 
 > 本机那套脚本（`just backup` / `just drill`）没有被取代：它们是**本机**的
 > PITR 与恢复演练，仍然是判断「备份读不读得回来」的地方。这个容器加的是
@@ -58,7 +79,11 @@ blob 的 key 就是内容的 SHA-256：内容不可变、永不覆盖。rustic �
 
 ### 1. 阿里云 OSS
 
-1. **建桶**（如 `cortex-backups`），**与这台机器不同地域**，地理隔离。
+1. **建桶**。2026-08-25 已经建好：`cortex-backup-cloudcele`
+   （`oss-cn-shenzhen`，私有，匿名访问 403 验过）。命名跟着这台机器上
+   已有的两个走（`mica-backup-cloudcele` / `neostor-backup`）。
+   ⚠️ **它与节点同在深圳** —— 也就是**没有地理隔离**。深圳区域整体出事时
+   两边一起没。要买那一层就换一个地域建桶，代价是跨区流量费与更慢的推送。
 2. **建一个只授这个桶的 RAM AccessKey**：
    `oss:PutObject / GetObject / DeleteObject / ListObjects` + `oss:GetBucket*`。
    ⚠️ **不要复用 `RUSTFS_*` 那把。** 用同一把的话，一次泄露同时拿到主存储
@@ -163,7 +188,7 @@ docker exec cortex-backup sh -c 'pg_verifybackup /tmp/p/backup/base/*/pgdata'
 
 ```bash
 docker exec cortex-backup rclone copy \
-  oss:${OSS_BUCKET}/${OSS_ROOT}-blobs rustfs:${S3_BUCKET} --checksum
+  oss:${OSS_BUCKET}/${OSS_ROOT}/rustfs rustfs:${S3_BUCKET} --checksum
 ```
 
 默认**不覆盖已存在的对象**要自己加 `--ignore-existing`；主存储上已有的那份
@@ -174,16 +199,23 @@ docker exec cortex-backup rclone copy \
 
 ## 它已经被验到哪一步
 
-2026-08-25 在本机整条走过一遍（rustic 仓库换成本地目录，其余原样）：
+2026-08-25 **真打阿里云 OSS 整条走过一遍**（桶 `cortex-backup-cloudcele`，
+自测前缀跑完已清空）：
 
-- 六条腿全绿：全量 + `pg_verifybackup` / 逻辑转储 / 两条 rustic lineage /
-  rclone / `forget --prune`
-- 取回验过：`pgdump` 拿得回；`pgdata` 拿回来之后 **`pg_verifybackup` 仍然
-  通过** —— 基础备份完整穿过 rustic 一个来回
-- `rustic forget --group-by label` 确认两条 lineage 各留各的
+- **六条腿全绿**，耗时 46 s：全量 + `pg_verifybackup` / 逻辑转储 /
+  两条 rustic lineage / rclone / `forget --prune`
+- **从 OSS 取回验过**：`pgdata` 拿回来之后 **`pg_verifybackup` 仍然通过**
+  —— 基础备份完整穿过「rustic 加密去重 → 走公网到 OSS → 取回」一个来回；
+  `pgdump` 取回是 1,453,257 字节 / 237 个 `CREATE TABLE`
+- `rustic check` 通过；`rustic snapshots --group-by label` 确认两条 lineage
+  各留各的（pgdata 116.8 MiB / 2530 个文件，pgdump 1.4 MiB）
+- rclone 那条单独也验了：推上去、列得出、`rclone cat` 取回来内容一字不差
+- 新桶**匿名访问 403**（`You have no right to access this object because of
+  bucket acl`）—— 一个公开可读的备份桶是灾难，这一条要验，不能假设
 
-**没有验的是 OSS 那段传输本身** —— 那要真的 AccessKey。第一次开起来之后
-看一次 `docker logs cortex-backup`，六条腿都是 ✔ 才算数。
+也就是说这条路上现在**没有未经验证的一段**。第一次在生产上开起来之后仍然
+要看一次 `docker logs cortex-backup`，六条腿都是 ✔ 才算数 —— 那时验的是
+**那台机器的**网络与凭据，不是这套代码。
 
 ### 途中撞到的两个坑，都写进代码注释了
 

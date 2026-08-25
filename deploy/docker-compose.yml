@@ -487,6 +487,9 @@ services:
       OSS_BUCKET: ${OSS_BUCKET:?见 docs/backup.md}
       OSS_ENDPOINT: ${OSS_ENDPOINT:?见 docs/backup.md}
       OSS_REGION: ${OSS_REGION:-oss-cn-hangzhou}
+      # 桶里的顶层前缀。下面再分两个：`<root>/pg`（rustic 仓库）与
+      # `<root>/rustfs`（blobs 镜像）—— 为什么分见 render-config.sh。
+      # 与别的项目共用一个桶时给自己换一个 root
       OSS_ROOT: ${OSS_ROOT:-cortex}
       OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:?见 docs/backup.md}
       OSS_SECRET_ACCESS_KEY: ${OSS_SECRET_ACCESS_KEY:?见 docs/backup.md}
