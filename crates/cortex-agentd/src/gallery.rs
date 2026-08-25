@@ -87,34 +87,18 @@ pub async fn gallery(
     };
     // 多取一条来回答「还有没有」。靠「取回来的条数 == limit」去猜的话，
     // 恰好整除时会多翻一页空的 —— 界面上是「加载中…」闪一下。
-    //
-    // 分享那一列来自**全局** schema（`cortex_auth.image_shares`）——
-    // 同一个数据库里的另一个 schema，全限定名就够得着。存两份（这边一列 +
-    // 全局一行）的下场是撤销时漏改一处，症状是界面说「已撤销」而链接
-    // 照样能打开。
-    let rows: Vec<GalleryRow> = sqlx::query_as(
-        "SELECT g.id, g.blob_hash, g.prompt, g.model, g.source, g.size,
-                g.session_id, g.created_at, s.token AS share_token,
-                b.mime AS blob_mime
-           FROM generated_images g
-           JOIN blobs b ON b.hash = g.blob_hash
-           LEFT JOIN cortex_auth.image_shares s
-             ON s.image_id = g.id AND s.schema_name = current_schema()
-          WHERE ($2::TEXT IS NULL OR g.id < $2)
-            AND ($3::TEXT IS NULL OR g.folder_id = $3)
-            AND (NOT $6::BOOLEAN OR g.folder_id IS NULL)
-            AND ($4::TEXT IS NULL OR g.blob_hash = $4)
-          ORDER BY g.id DESC
-          LIMIT $1",
-    )
-    .bind(limit + 1)
-    .bind(q.before.as_deref())
-    .bind(folder_filter)
-    .bind(q.hash.as_deref())
-    .bind(want_unfiled)
-    .fetch_all(store.pool())
-    .await
-    .map_err(|e| ApiError::internal(format!("读画廊失败：{e}")))?;
+    let mut qb = gallery_query(&GalleryFilter {
+        limit_plus_one: limit + 1,
+        before: q.before.as_deref(),
+        folder: folder_filter,
+        want_unfiled,
+        hash: q.hash.as_deref(),
+    });
+    let rows: Vec<GalleryRow> = qb
+        .build_query_as()
+        .fetch_all(store.pool())
+        .await
+        .map_err(|e| ApiError::internal(format!("读画廊失败：{e}")))?;
 
     let has_more = rows.len() as i64 > limit;
     let items: Vec<cortex_proto::llm::GalleryImage> = rows
@@ -132,6 +116,64 @@ pub async fn gallery(
         has_more,
         next_cursor,
     }))
+}
+
+/// 画廊查询的全部过滤条件。
+///
+/// 先收进一个结构再统一生成 SQL：过滤条件是**动态**的（带不带游标、
+/// 按不按文件夹），而散在 handler 里逐个拼会让「占位符数」与「bind 数」
+/// 各自演化 —— 线上那次 `bind message supplies 5 parameters, but prepared
+/// statement requires 6` 正是这么来的（加 `folder_id` 时占位符写到了 `$6`，
+/// bind 还是 5 个，`$5` 一处都没用上）。
+// Copy 是给测试里「同一份基准改一两个字段」用的；字段全是借用与标量，
+// 拷贝没有成本
+#[derive(Clone, Copy)]
+struct GalleryFilter<'a> {
+    /// 已含「多取一条」。上限判断在调用方 —— 这里只管把它绑进 LIMIT。
+    limit_plus_one: i64,
+    /// 从这个 id 之前接着往回翻（不含它）。
+    before: Option<&'a str>,
+    /// 只看这个文件夹。与 [`Self::want_unfiled`] 互斥，由调用方拆好。
+    folder: Option<&'a str>,
+    /// 只看未归档（`folder_id IS NULL`）。
+    want_unfiled: bool,
+    /// 只看这个 blob 哈希对应的行。
+    hash: Option<&'a str>,
+}
+
+/// 把过滤条件翻成一条查询。**占位符与 bind 由同一次 `push_bind` 生成**，
+/// 两者在构造上就不可能错位 —— 数着占位符改数字的做法，下次加条件还会错。
+///
+/// 分享那一列来自**全局** schema（`cortex_auth.image_shares`）——
+/// 同一个数据库里的另一个 schema，全限定名就够得着。存两份（这边一列 +
+/// 全局一行）的下场是撤销时漏改一处，症状是界面说「已撤销」而链接
+/// 照样能打开。
+fn gallery_query(f: &GalleryFilter<'_>) -> sqlx::QueryBuilder<sqlx::Postgres> {
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT g.id, g.blob_hash, g.prompt, g.model, g.source, g.size,
+                g.session_id, g.created_at, s.token AS share_token,
+                b.mime AS blob_mime
+           FROM generated_images g
+           JOIN blobs b ON b.hash = g.blob_hash
+           LEFT JOIN cortex_auth.image_shares s
+             ON s.image_id = g.id AND s.schema_name = current_schema()
+          WHERE TRUE",
+    );
+    if let Some(before) = f.before {
+        qb.push(" AND g.id < ").push_bind(before);
+    }
+    if let Some(folder) = f.folder {
+        qb.push(" AND g.folder_id = ").push_bind(folder);
+    }
+    if f.want_unfiled {
+        qb.push(" AND g.folder_id IS NULL");
+    }
+    if let Some(hash) = f.hash {
+        qb.push(" AND g.blob_hash = ").push_bind(hash);
+    }
+    qb.push(" ORDER BY g.id DESC LIMIT ")
+        .push_bind(f.limit_plus_one);
+    qb
 }
 
 #[derive(sqlx::FromRow)]
@@ -552,6 +594,315 @@ mod tests {
             "生产上 traefik 把 /api 剥掉才转进来 —— agentd 自己看不到那一段，\
              漏了它复制出去的链接就少一截，而对方只会说「打不开」"
         );
+    }
+
+    /// 每条过滤分支的**真库**回归。
+    ///
+    /// # 为什么必须打真库，而不是断言拼出来的 SQL 字符串
+    ///
+    /// 线上那次崩（`bind message supplies 5 parameters, but prepared
+    /// statement requires 6`）恰恰是「SQL 字符串看着都对、逐个数占位符也
+    /// 数得过去」的那种错 —— 只有真的 prepare 一次才炸。断言字符串等于
+    /// 让验证工具自己造出「通过」。
+    ///
+    /// 连不上 `DATABASE_URL` 时跳过（与 cortex-store 的集成测试同一约定）。
+    ///
+    /// 这条测试做过故障注入验证：把 `gallery_query` 里 `want_unfiled` 那支
+    /// 改成 `IS NOT NULL` 后它当场红（未归档一档给出了归档的行），改回即绿。
+    /// 找 `DATABASE_URL`，**不把 .env 灌进进程环境**。
+    ///
+    /// `dotenvy::dotenv()` 会把整份 .env 设成进程环境变量，而同一个测试
+    /// 进程里 `routes::health_reports_...` 断言的恰是「没设环境变量」的
+    /// 默认值（`open_registration == false`）—— 第一版用了它，症状是这条
+    /// 测试单跑绿、全量跑把隔壁测试弄红，看起来完全像随机故障。
+    fn database_url() -> Option<String> {
+        if let Ok(url) = std::env::var("DATABASE_URL")
+            && !url.is_empty()
+        {
+            return Some(url);
+        }
+        let iter = dotenvy::dotenv_iter().ok()?;
+        for item in iter {
+            let (k, v) = item.ok()?;
+            if k == "DATABASE_URL" && !v.is_empty() {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn 画廊的每条过滤分支都能在真库上跑通() {
+        let Some(url) = database_url() else {
+            eprintln!("跳过：未设置 DATABASE_URL");
+            return;
+        };
+        let admin = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("跳过：连不上数据库（{e}）");
+                return;
+            }
+        };
+
+        // 分享那张表在全局 schema。**只探测，不在这里跑全局 migration**：
+        // 开发库的 `cortex_auth._sqlx_migrations` 归真正的部署管，测试去跑
+        // 一遍会在校验和对不上时报 VersionMismatch（实测撞到）——
+        // 那是「测试污染共享状态」的形状。没有这张表就跳过。
+        let shares_table: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('cortex_auth.image_shares')::text")
+                .fetch_one(&admin)
+                .await
+                .expect("探测 image_shares 不应失败");
+        if shares_table.is_none() {
+            eprintln!("跳过：这个库里没有 cortex_auth.image_shares（全局 migration 未跑）");
+            admin.close().await;
+            return;
+        }
+
+        // 清掉上一次 panic 留下的残留：schema 与全局分享行都带独有前缀，
+        // panic 的运行走不到结尾的清理，留下的行会让下一次运行撞约束
+        let stale: Vec<String> = sqlx::query_scalar(
+            "SELECT nspname::text FROM pg_namespace WHERE nspname LIKE 'cortex\\_gal\\_%'",
+        )
+        .fetch_all(&admin)
+        .await
+        .unwrap_or_default();
+        for name in stale {
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP SCHEMA IF EXISTS \"{name}\" CASCADE"
+            )))
+            .execute(&admin)
+            .await;
+        }
+        let _ = sqlx::query(
+            "DELETE FROM cortex_auth.image_shares WHERE schema_name LIKE 'cortex\\_gal\\_%'",
+        )
+        .execute(&admin)
+        .await;
+
+        // 每次一个独立 schema，测试之间互不可见，也不污染开发库
+        let schema = format!(
+            "cortex_gal_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("时钟不早于 1970")
+                .as_millis()
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+            .execute(&admin)
+            .await
+            .expect("建临时 schema 不应失败");
+
+        use std::str::FromStr as _;
+        let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+            .expect("DATABASE_URL 应当是合法连接串")
+            .options([("search_path", format!("{schema},public"))]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await
+            .expect("临时 schema 建好后应当能连上");
+        cortex_store::Store::from_pool(pool.clone())
+            .migrate()
+            .await
+            .expect("租户 migration 应当能跑通");
+
+        // ── 造数据：两个哈希 × 有无文件夹，共四行；其中一行带分享 ──
+        //
+        // id 手写成可比的 ULID 字面量（后缀 01..04），断言顺序才读得懂。
+        let id_of = |i: u32| format!("01AAAAAAAAAAAAAAAAAAAAAA{i:02}");
+        let ha = "a".repeat(64);
+        let hb = "b".repeat(64);
+        for h in [&ha, &hb] {
+            sqlx::query(
+                "INSERT INTO blobs (hash, mime, size_bytes, storage_key)
+                 VALUES ($1, 'image/png', 1, $1)",
+            )
+            .bind(h)
+            .execute(&pool)
+            .await
+            .expect("插 blob 不应失败");
+        }
+        let folder = cortex_core::Id::new().to_string();
+        sqlx::query("INSERT INTO folders (id, name) VALUES ($1, '测试夹')")
+            .bind(&folder)
+            .execute(&pool)
+            .await
+            .expect("插文件夹不应失败");
+        // (序号, 哈希, 文件夹)：1/3 未归档，2/4 在夹子里；1/2 用 ha，3/4 用 hb
+        for (i, hash, in_folder) in [
+            (1, &ha, false),
+            (2, &ha, true),
+            (3, &hb, false),
+            (4, &hb, true),
+        ] {
+            sqlx::query(
+                "INSERT INTO generated_images (id, blob_hash, prompt, model, source, folder_id)
+                 VALUES ($1, $2, 'p', 'm', 'src', $3)",
+            )
+            .bind(id_of(i))
+            .bind(hash)
+            .bind(in_folder.then_some(folder.as_str()))
+            .execute(&pool)
+            .await
+            .expect("插画廊行不应失败");
+        }
+        // token 跟着 schema 名走（每次运行都不同）：写死一个字面量的话，
+        // 一次 panic 掉的运行会把它留在全局表里，下一次运行撞主键
+        let token = format!("test-{schema}");
+        sqlx::query(
+            "INSERT INTO cortex_auth.image_shares (token, schema_name, image_id)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(&token)
+        .bind(&schema)
+        .bind(id_of(2))
+        .execute(&admin)
+        .await
+        .expect("插分享记录不应失败");
+
+        // ── 逐分支断言 ──
+        async fn fetch(pool: &sqlx::PgPool, f: GalleryFilter<'_>) -> Vec<(String, Option<String>)> {
+            let mut qb = gallery_query(&f);
+            let rows: Vec<GalleryRow> = qb
+                .build_query_as()
+                .fetch_all(pool)
+                .await
+                .expect("画廊查询不应失败 —— 失败即是占位符与 bind 又错位了");
+            rows.into_iter().map(|r| (r.id, r.share_token)).collect()
+        }
+        async fn bare(pool: &sqlx::PgPool, f: GalleryFilter<'_>) -> Vec<String> {
+            fetch(pool, f).await.into_iter().map(|(id, _)| id).collect()
+        }
+        let all = GalleryFilter {
+            limit_plus_one: 50,
+            before: None,
+            folder: None,
+            want_unfiled: false,
+            hash: None,
+        };
+
+        // 1. 全部：按 id 倒序，且分享列跟着 (schema, image) 正确挂上
+        let rows = fetch(&pool, all).await;
+        assert_eq!(
+            rows.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+            vec![id_of(4), id_of(3), id_of(2), id_of(1)],
+            "无过滤应当按 id 倒序给全 —— 顺序错说明 ORDER BY 丢了"
+        );
+        assert_eq!(
+            rows.iter().map(|(_, t)| t.is_some()).collect::<Vec<_>>(),
+            vec![false, false, true, false],
+            "只有 2 号分享过；别的行也带 token 说明 JOIN 没按 schema 过滤"
+        );
+
+        // 2. 游标：< 03 只剩 02、01
+        let before3 = id_of(3);
+        assert_eq!(
+            bare(
+                &pool,
+                GalleryFilter {
+                    before: Some(&before3),
+                    ..all
+                }
+            )
+            .await,
+            vec![id_of(2), id_of(1)],
+            "before 是**严格小于**（不含游标本身），否则翻页会重复末条"
+        );
+
+        // 3. 按文件夹
+        assert_eq!(
+            bare(
+                &pool,
+                GalleryFilter {
+                    folder: Some(&folder),
+                    ..all
+                }
+            )
+            .await,
+            vec![id_of(4), id_of(2)],
+            "folder 过滤应当只给那个夹子里的两行"
+        );
+
+        // 4. 未归档（folder=none 那一档）
+        assert_eq!(
+            bare(
+                &pool,
+                GalleryFilter {
+                    want_unfiled: true,
+                    ..all
+                }
+            )
+            .await,
+            vec![id_of(3), id_of(1)],
+            "未归档一档应当只给 folder_id IS NULL 的行 —— 与「全部」必须分得开"
+        );
+
+        // 5. 按哈希（对话里那张图找画廊行那条路）
+        assert_eq!(
+            bare(
+                &pool,
+                GalleryFilter {
+                    hash: Some(&hb),
+                    ..all
+                }
+            )
+            .await,
+            vec![id_of(4), id_of(3)],
+            "hash 过滤应当只给那份字节的行"
+        );
+
+        // 6. LIMIT 真的绑上了
+        assert_eq!(
+            bare(
+                &pool,
+                GalleryFilter {
+                    limit_plus_one: 2,
+                    ..all
+                }
+            )
+            .await
+            .len(),
+            2,
+            "LIMIT 没生效 —— 它也是 push_bind 出来的，错位会一起错"
+        );
+
+        // 7. 组合：游标 + 文件夹（线上崩的那次正是「带 folder 的分页」）
+        let before4 = id_of(4);
+        assert_eq!(
+            bare(
+                &pool,
+                GalleryFilter {
+                    before: Some(&before4),
+                    folder: Some(&folder),
+                    ..all
+                }
+            )
+            .await,
+            vec![id_of(2)],
+            "游标与文件夹叠加应当各自生效"
+        );
+
+        // ── 清理：临时 schema 连同全局那条分享记录 ──
+        sqlx::query("DELETE FROM cortex_auth.image_shares WHERE schema_name = $1")
+            .bind(&schema)
+            .execute(&admin)
+            .await
+            .expect("清理分享记录不应失败");
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
+        )))
+        .execute(&admin)
+        .await
+        .expect("清理临时 schema 不应失败");
+        admin.close().await;
     }
 
     #[test]
