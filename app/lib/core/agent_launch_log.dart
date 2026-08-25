@@ -79,6 +79,27 @@ class AgentLaunchLog {
     if (tail != null && tail.isNotEmpty) 'tail': _lastLines(tail),
   });
 
+  /// 客户端把用户送回了登录页 —— **带 reason code 落盘**。
+  ///
+  /// # 为什么它记在 agent 的启动日志里
+  ///
+  /// 「被踢回登录页」的几条路径在界面上是差不多的一句红字，而病因分属
+  /// 三个家族（本地存储 / 服务端凭据 / 本机 agent 转发链）。2026-08-23
+  /// 用户报「开着不动几十分钟就掉」时，`debugPrint` 跟着进程死了，日志里
+  /// 什么都不剩 —— 这份文件是桌面端唯一跨进程活着的诊断通道，凑一条
+  /// 时间线（agent 何时重启、何时被踢）恰好要它们在同一个文件里。
+  void authGate({
+    required String reason,
+    required String detail,
+    required bool wasReady,
+  }) => _append('auth-gate', {
+    'reason': reason,
+    'detail': detail,
+    // 从「正在用」掉下来才是事故；启动阶段的清场是常态。查日志的人
+    // 靠这一位把两者分开，不然每次冷启动都像一次被踢
+    'was_ready': wasReady,
+  });
+
   /// 起来之后被我们**主动**停掉了（登出、换地址、provider 重建、退出）。
   ///
   /// 此前主动停**什么都不记**（stop() 先撤掉退出监听再 kill，exit 事件
