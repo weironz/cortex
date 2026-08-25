@@ -352,6 +352,99 @@ void main() {
           '在这一屏上就没有任何可点的东西了',
     );
   });
+
+  group('注册入口', () {
+    testWidgets('部署没说开注册：登录页上没有注册入口', (tester) async {
+      // `_health` 里没有 open_registration，/sandbox/health 的补问也拿到
+      // 同一份（role 对不上 → absent → null）—— 两条路都答不出就是关
+      await _pumpLogin(tester, handler: (_) async => _json(_health));
+
+      expect(
+        find.text('注册新账号'),
+        findsNothing,
+        reason:
+            '部署没开注册时不许摆入口 —— 摆一个必然 403 的入口，'
+            '与提示词里写没接的能力是同一个错（约束 2）',
+      );
+    });
+
+    testWidgets('部署开着注册：入口出现，切过去提交打的是 /auth/register', (tester) async {
+      final seen = await _pumpLogin(
+        tester,
+        handler: (req) async {
+          if (req.url.path == '/auth/register') {
+            return _json({
+              'access_token': 'a' * 32,
+              'refresh_token': 'r' * 32,
+              'access_expires_in_secs': 900,
+            });
+          }
+          return _json({..._health, 'open_registration': true});
+        },
+      );
+
+      final entry = find.text('注册新账号');
+      expect(entry, findsOneWidget, reason: '服务端说开了，入口就得在');
+
+      await tester.tap(entry);
+      await tester.pumpAndSettle();
+      expect(find.text('确认密码'), findsOneWidget, reason: '注册表单要求确认一遍密码');
+
+      await tester.enterText(find.widgetWithText(TextField, '用户名'), 'newbie');
+      await tester.enterText(
+        find.widgetWithText(TextField, '密码'),
+        'hunter2-hunter2',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextField, '确认密码'),
+        'hunter2-hunter2',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, '注册并登录'));
+      // 与登录那条同一个理由不用 pumpAndSettle：按钮在转圈
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      final register = seen
+          .where((r) => r.url.path == '/auth/register')
+          .toList();
+      expect(
+        register,
+        hasLength(1),
+        reason: '按下「注册并登录」必须真的打 /auth/register —— 界面与控制器中间那根线要接上',
+      );
+      final body = jsonDecode(register.single.body) as Map<String, dynamic>;
+      expect(body['username'], 'newbie');
+      expect(body['password'], 'hunter2-hunter2');
+    });
+
+    testWidgets('两次密码不一致：本地拦下，一个请求都不发', (tester) async {
+      final seen = await _pumpLogin(
+        tester,
+        handler: (_) async => _json({..._health, 'open_registration': true}),
+      );
+
+      await tester.tap(find.text('注册新账号'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.widgetWithText(TextField, '用户名'), 'newbie');
+      await tester.enterText(
+        find.widgetWithText(TextField, '密码'),
+        'hunter2-hunter2',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextField, '确认密码'),
+        'hunter2-hunter3',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, '注册并登录'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('两次输入的密码不一致。'), findsOneWidget);
+      expect(
+        seen.where((r) => r.url.path == '/auth/register'),
+        isEmpty,
+        reason: '打错字是唯一一条客户端自己判的 —— 不该为它烧一次注册限流额度',
+      );
+    });
+  });
 }
 
 class _LiveConfig extends AppConfigNotifier {

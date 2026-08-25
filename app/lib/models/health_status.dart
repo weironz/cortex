@@ -8,6 +8,7 @@ class HealthStatus {
     required this.database,
     this.auth = authUnknown,
     this.devLogin,
+    this.openRegistration,
     this.commit,
     this.role = roleCortexd,
     this.server,
@@ -87,6 +88,18 @@ class HealthStatus {
   /// 空着用户名密码点「登录」会不会成功。
   bool get allowsBlankLogin => (devLogin ?? '').isNotEmpty;
 
+  /// 这个部署开着注册吗。**三态，null 不是 false**：
+  ///
+  /// - `true` / `false` —— agentd 明确说了开/关，照办。
+  /// - `null` —— **答话的没报这个字段**。两种真实情形：老服务端，或生产上
+  ///   `/health` 被边缘分给了记忆服务（那份响应里没有它）。此时登录页
+  ///   不能直接按「关」收场 —— 要再问一次 `/sandbox/health`（那条在生产上
+  ///   才是 agentd 在答），见 `openRegistrationProvider`。
+  ///
+  /// 把 null 压成 false 正是「三态的 null 漏掉已知事实」那个坑：生产部署
+  /// 开了注册，入口却永远不出现，而且没有任何报错。
+  final bool? openRegistration;
+
   /// A daemon too old to report the field. Treated as "assume a token is
   /// needed": guessing `disabled` would send the user into a UI that then 401s
   /// on every call with no way back to a token prompt.
@@ -125,6 +138,7 @@ class HealthStatus {
     database: asString(json['database'], 'unknown'),
     auth: asString(json['auth'], authUnknown),
     devLogin: json['dev_login'] as String?,
+    openRegistration: json['open_registration'] as bool?,
     commit: json['commit'] as String?,
     role: asString(json['role'], roleCortexd),
     server: json['server'] is Map<String, dynamic>

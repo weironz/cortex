@@ -29,8 +29,8 @@ use cortex_proto::auth::{AuthTokens, LoginRequest, RefreshRequest, RegisterReque
 use sqlx::Row as _;
 
 use crate::credentials::{
-    RefreshRecord, RefreshVerdict, RejectReason, generate_refresh, hash_password, judge_refresh,
-    refresh_digest, verify_password,
+    REPLAY_GRACE_SECS, RefreshRecord, RefreshVerdict, RejectReason, generate_refresh,
+    hash_password, judge_refresh, refresh_digest, verify_password,
 };
 use crate::error::ApiError;
 use crate::rate_limit::{key_prefix, login_key};
@@ -83,7 +83,14 @@ pub fn dev_login_user() -> Option<String> {
 const OPEN_REGISTRATION_ENV: &str = "CORTEX_OPEN_REGISTRATION";
 const OPEN_REGISTRATION_ON: &str = "enabled";
 
-fn open_registration() -> bool {
+/// 这个部署开着注册吗。
+///
+/// `pub` 是因为它有**两个**消费方，而两边必须是同一个判据：
+/// `POST /auth/register` 的那道 403，与 `/health` 里报给登录页的
+/// `open_registration` 字段。各自读一遍环境变量的话，写法漂开的症状是
+/// 「登录页摆着注册入口、点进去 403」—— 恰好是约束 2 说的那种谎。
+#[must_use]
+pub fn open_registration() -> bool {
     std::env::var(OPEN_REGISTRATION_ENV).is_ok_and(|v| v.trim() == OPEN_REGISTRATION_ON)
 }
 
@@ -382,124 +389,279 @@ impl AgentState {
         create_account_in(self.accounts()?, username, password).await
     }
 
-    /// 签一对新令牌。`family` 为 `None` 时开一条新链（登录）。
+    /// 签一对新令牌。实现在 [`issue_in`]。
     async fn issue(
         &self,
         user_id: &str,
         family: Option<String>,
         device: Option<&str>,
     ) -> Result<AuthTokens, ApiError> {
-        let (plain, digest) = generate_refresh();
-        let family = family.unwrap_or_else(|| cortex_core::Id::new().to_string());
-        let expires = Utc::now() + REFRESH_TTL;
-
-        sqlx::query(
-            "INSERT INTO cortex_auth.auth_tokens
-                 (id, user_id, token_sha256, family_id, expires_at, device_label)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+        issue_in(
+            self.accounts()?,
+            self.access_book(),
+            user_id,
+            family,
+            device,
         )
-        .bind(cortex_core::Id::new().to_string())
-        .bind(user_id)
-        .bind(&digest)
-        .bind(&family)
-        .bind(expires)
-        .bind(device)
-        .execute(&self.accounts()?.pool)
         .await
-        .map_err(|e| ApiError::internal(format!("签发令牌失败：{e}")))?;
-
-        Ok(AuthTokens {
-            access_token: self.access_book().issue(
-                user_id,
-                std::time::Duration::from_secs(
-                    u64::try_from(ACCESS_TTL.num_seconds()).unwrap_or(900),
-                ),
-            ),
-            access_expires_in_secs: u64::try_from(ACCESS_TTL.num_seconds()).unwrap_or(900),
-            refresh_token: plain,
-            refresh_expires_in_secs: u64::try_from(REFRESH_TTL.num_seconds()).unwrap_or(2_592_000),
-            user_id: user_id.to_owned(),
-        })
     }
 
-    /// 用 refresh token 换一对新的，并把旧的标记为已轮转。
+    /// 用 refresh token 换一对新的。实现在 [`rotate_in`] —— 拆成自由函数是
+    /// 为了让并发轮换那条不变式能在只有一条数据库连接的测试里被钉住，
+    /// 不必装配整个 `AgentState`（那要一个 docker runner）。
     ///
     /// # Errors
-    /// 令牌不认识、已过期、已作废，或者**被重放**（此时整条 family 作废）。
+    /// 令牌不认识、已过期、已作废，或者**被重放**（宽限之外时整条 family 作废）。
     pub async fn rotate(&self, plain: &str) -> Result<AuthTokens, ApiError> {
-        let digest = refresh_digest(plain);
-        let row = sqlx::query(
-            "SELECT id, user_id, family_id, rotated_at IS NOT NULL AS rotated,
-                    revoked_at IS NOT NULL AS revoked, expires_at < now() AS expired
-               FROM cortex_auth.auth_tokens WHERE token_sha256 = $1",
+        rotate_in(
+            self.accounts()?,
+            self.access_book(),
+            self.replay_cache(),
+            plain,
         )
-        .bind(&digest)
-        .fetch_optional(&self.accounts()?.pool)
         .await
-        .map_err(|e| ApiError::internal(format!("查令牌失败：{e}")))?;
+    }
+}
 
-        // 查不到就是查不到。**不要**告诉客户端「这个令牌不存在」与
-        // 「这个令牌过期了」的区别 —— 那等于给爆破者一个进度条
-        let Some(row) = row else {
-            return Err(ApiError::unauthorized("登录已失效，请重新登录"));
-        };
+/// 签一对新令牌。`family` 为 `None` 时开一条新链（登录）。
+///
+/// 自由函数的理由与 [`create_account_in`] 相同：调用方有 HTTP 路由，也有
+/// 只握着连接池的测试 —— 各写一遍「怎么签」正是这个仓库反复咬人的形状。
+///
+/// # Errors
+/// 库写不动。
+pub async fn issue_in(
+    accounts: &Accounts,
+    access: &AccessBook,
+    user_id: &str,
+    family: Option<String>,
+    device: Option<&str>,
+) -> Result<AuthTokens, ApiError> {
+    let (plain, digest) = generate_refresh();
+    let family = family.unwrap_or_else(|| cortex_core::Id::new().to_string());
+    let expires = Utc::now() + REFRESH_TTL;
 
-        let family_raw: String = row.get("family_id");
-        let record = RefreshRecord {
-            family: family_raw
-                .parse()
-                .map_err(|_| ApiError::internal("库里的 family_id 不是合法 ULID"))?,
-            rotated: row.get("rotated"),
-            revoked: row.get("revoked"),
-            expired: row.get("expired"),
-        };
+    sqlx::query(
+        "INSERT INTO cortex_auth.auth_tokens
+             (id, user_id, token_sha256, family_id, expires_at, device_label)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(cortex_core::Id::new().to_string())
+    .bind(user_id)
+    .bind(&digest)
+    .bind(&family)
+    .bind(expires)
+    .bind(device)
+    .execute(&accounts.pool)
+    .await
+    .map_err(|e| ApiError::internal(format!("签发令牌失败：{e}")))?;
+
+    Ok(AuthTokens {
+        access_token: access.issue(
+            user_id,
+            std::time::Duration::from_secs(u64::try_from(ACCESS_TTL.num_seconds()).unwrap_or(900)),
+        ),
+        access_expires_in_secs: u64::try_from(ACCESS_TTL.num_seconds()).unwrap_or(900),
+        refresh_token: plain,
+        refresh_expires_in_secs: u64::try_from(REFRESH_TTL.num_seconds()).unwrap_or(2_592_000),
+        user_id: user_id.to_owned(),
+    })
+}
+
+/// 用 refresh token 换一对新的，并把旧的标记为已轮转。
+///
+/// # 轮换是一条**原子认领**，不是「先查再改」
+///
+/// 此前的写法是 SELECT → `judge_refresh` → UPDATE，三步之间没有事务也没有
+/// 行锁。同一枚并发双发时，两个请求都在自己的快照上判成 `Rotate`……并不 ——
+/// 实测（dev，2026-08-25）是 A 先完成轮换，B 的 SELECT 已经看到 `rotated`，
+/// 于是 B 被判成**重放**，把 A 刚拿到的后继连坐作废：一次边缘代理的重复
+/// POST 就烧掉 30 天的凭据全家。
+///
+/// 现在第一步是单条带条件的 UPDATE（`WHERE rotated_at IS NULL …`）：
+/// 并发之下**恰好一个**请求认领成功并签出后继；没抢到的再去查明原因，
+/// 落进 [`judge_refresh`] 的宽限分支。为什么不是事务 + `FOR UPDATE`：
+/// 条件 UPDATE 天然原子且少一次往返，判定逻辑原样留给「没抢到」的分支。
+///
+/// # Errors
+/// 令牌不认识、已过期、已作废、或宽限之外的重放（此时整条 family 作废）。
+pub async fn rotate_in(
+    accounts: &Accounts,
+    access: &AccessBook,
+    replay: &ReplayCache,
+    plain: &str,
+) -> Result<AuthTokens, ApiError> {
+    let digest = refresh_digest(plain);
+
+    // ── 原子认领 ──
+    let claimed = sqlx::query(
+        "UPDATE cortex_auth.auth_tokens SET rotated_at = now()
+          WHERE token_sha256 = $1 AND rotated_at IS NULL
+            AND revoked_at IS NULL AND expires_at > now()
+          RETURNING user_id, family_id",
+    )
+    .bind(&digest)
+    .fetch_optional(&accounts.pool)
+    .await
+    .map_err(|e| ApiError::internal(format!("轮转令牌失败：{e}")))?;
+
+    if let Some(row) = claimed {
         let user_id: String = row.get("user_id");
-        let token_id: String = row.get("id");
-
-        match judge_refresh(&record) {
-            RefreshVerdict::RevokeFamily { family } => {
-                // 这一条已经被换过了，而合法客户端手上只有最新那个 ——
-                // 所以这次请求来自别人。整条链作废，两边都得重新登录
-                let family = family.to_string();
-                let n = self.revoke_family(&family).await;
-                tracing::warn!(
-                    user = %user_id,
-                    family = %family,
-                    revoked = n,
-                    "检测到 refresh token 重放，已作废整条链"
-                );
-                Err(ApiError::unauthorized(
-                    "这个登录凭据已经被使用过了。出于安全，该设备上的所有会话都已注销，请重新登录",
-                ))
-            }
-            RefreshVerdict::Reject(why) => Err(ApiError::unauthorized(match why {
-                RejectReason::Expired => "登录已过期，请重新登录",
-                RejectReason::FamilyRevoked => "登录已注销，请重新登录",
-            })),
-            RefreshVerdict::Rotate => {
-                sqlx::query("UPDATE cortex_auth.auth_tokens SET rotated_at = now() WHERE id = $1")
-                    .bind(&token_id)
-                    .execute(&self.accounts()?.pool)
-                    .await
-                    .map_err(|e| ApiError::internal(format!("轮转令牌失败：{e}")))?;
-                self.issue(&user_id, Some(record.family.to_string()), None)
-                    .await
-            }
-        }
+        let family: String = row.get("family_id");
+        let tokens = issue_in(accounts, access, &user_id, Some(family), None).await?;
+        // 后继留一份在宽限缓存里：同一枚在宽限内重放时幂等地还它同一对，
+        // 而不是拒绝 —— 边缘重试拿到的响应因此与第一次完全一样
+        replay.remember(&digest, &tokens, std::time::Instant::now());
+        return Ok(tokens);
     }
 
-    /// 作废整条链，返回作废了几条。
-    async fn revoke_family(&self, family: &str) -> u64 {
-        let Ok(acc) = self.accounts() else { return 0 };
-        sqlx::query(
-            "UPDATE cortex_auth.auth_tokens SET revoked_at = now()
-              WHERE family_id = $1 AND revoked_at IS NULL",
-        )
-        .bind(family)
-        .execute(&acc.pool)
-        .await
-        .map(|r| r.rows_affected())
-        .unwrap_or(0)
+    // ── 没抢到：查明原因 ──
+    let row = sqlx::query(
+        "SELECT user_id, family_id, rotated_at IS NOT NULL AS rotated,
+                COALESCE(rotated_at > now() - ($2 * interval '1 second'), false)
+                    AS rotated_recently,
+                revoked_at IS NOT NULL AS revoked, expires_at < now() AS expired
+           FROM cortex_auth.auth_tokens WHERE token_sha256 = $1",
+    )
+    .bind(&digest)
+    .bind(REPLAY_GRACE_SECS)
+    .fetch_optional(&accounts.pool)
+    .await
+    .map_err(|e| ApiError::internal(format!("查令牌失败：{e}")))?;
+
+    // 查不到就是查不到。**不要**告诉客户端「这个令牌不存在」与
+    // 「这个令牌过期了」的区别 —— 那等于给爆破者一个进度条
+    let Some(row) = row else {
+        return Err(ApiError::unauthorized("登录已失效，请重新登录"));
+    };
+
+    let family_raw: String = row.get("family_id");
+    let record = RefreshRecord {
+        family: family_raw
+            .parse()
+            .map_err(|_| ApiError::internal("库里的 family_id 不是合法 ULID"))?,
+        rotated: row.get("rotated"),
+        rotated_recently: row.get("rotated_recently"),
+        revoked: row.get("revoked"),
+        expired: row.get("expired"),
+    };
+    let user_id: String = row.get("user_id");
+
+    match judge_refresh(&record) {
+        RefreshVerdict::RevokeFamily { family } => {
+            // 这一条已经被换过了（且过了宽限），而合法客户端手上只有最新
+            // 那个 —— 所以这次请求来自别人。整条链作废，两边都得重新登录
+            let family = family.to_string();
+            let n = revoke_family_in(&accounts.pool, &family).await;
+            tracing::warn!(
+                user = %user_id,
+                family = %family,
+                revoked = n,
+                reason = "refresh-replayed",
+                "检测到 refresh token 重放，已作废整条链"
+            );
+            Err(ApiError::unauthorized(
+                "这个登录凭据已经被使用过了。出于安全，该设备上的所有会话都已注销，请重新登录",
+            ))
+        }
+        RefreshVerdict::Reject(why) => {
+            // 宽限内的重放先问后继缓存：命中就幂等地还同一对 —— 重复提交
+            // 的第二个响应与第一个完全一样，客户端那侧什么都不用特判。
+            // 缓存只在内存里（与 AccessBook 同一个取舍），进程重启后宽限
+            // 内的重放退化成「拒这一次」—— family 仍然不动，安全性质不变
+            if why == RejectReason::ReplayedInGrace
+                && let Some(tokens) = replay.recall(&digest, std::time::Instant::now())
+            {
+                tracing::info!(
+                    user = %user_id,
+                    reason = "refresh-replayed-in-grace",
+                    "宽限内的 refresh 重放：返回同一对后继（幂等），family 不动"
+                );
+                return Ok(tokens);
+            }
+            if why == RejectReason::ReplayedInGrace {
+                tracing::warn!(
+                    user = %user_id,
+                    reason = "refresh-replayed-in-grace-no-cache",
+                    "宽限内的 refresh 重放但缓存没有后继（进程重启过？）：只拒这一次，family 不动"
+                );
+            }
+            Err(ApiError::unauthorized(match why {
+                RejectReason::Expired => "登录已过期，请重新登录",
+                RejectReason::FamilyRevoked => "登录已注销，请重新登录",
+                // 与「查不到」同一句话：对客户端三种拒绝没有区别，分开说
+                // 等于告诉重放者「你差一点就赶上宽限了」
+                RejectReason::ReplayedInGrace => "登录已失效，请重新登录",
+            }))
+        }
+        RefreshVerdict::Rotate => {
+            // 认领没抢到、复查却说「还能轮转」—— 理论上到不了：认领的
+            // WHERE 与判定读的是同一组列。真到了只可能是并发窗口里状态
+            // 又变了一次，按「这次没成」处理，别在这儿再抢一次
+            tracing::warn!(user = %user_id, reason = "refresh-claim-lost",
+                "轮转认领失败但复查判成可轮转 —— 并发窗口里的第三种状态变化");
+            Err(ApiError::unauthorized("登录已失效，请重新登录"))
+        }
+    }
+}
+
+/// 作废整条链，返回作废了几条。
+async fn revoke_family_in(pool: &sqlx::PgPool, family: &str) -> u64 {
+    sqlx::query(
+        "UPDATE cortex_auth.auth_tokens SET revoked_at = now()
+          WHERE family_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(family)
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0)
+}
+
+/// 轮换后继的**宽限缓存**：旧 token 摘要 → 它换出的那对新令牌。
+///
+/// 只服务一件事：同一枚 refresh token 在 [`REPLAY_GRACE_SECS`] 内被重放时
+/// （边缘代理重试 POST、网络层重发），幂等地返回同一对，而不是拒绝 ——
+/// 更不是作废全家。
+///
+/// # 为什么敢把后继（含 refresh token 明文）放在内存里
+///
+/// 与 [`AccessBook`] 同一个论证：单进程部署，不落库、不出进程。寿命只有
+/// 宽限那几十秒，`remember` 顺手清过期项。进程重启丢掉它的后果只是
+/// 「宽限内的重放退化成拒这一次」—— family 仍然不动。
+///
+/// # 安全权衡（与 [`REPLAY_GRACE_SECS`] 上那段一起读）
+///
+/// 一个在合法轮换后几十秒内重放旧 token 的攻击者，会拿到与合法客户端
+/// **相同**的那对 —— 不是新的一对。他因此没有拿到任何合法客户端没有的
+/// 东西；而两方共持同一对的局面，在下一次轮换后的第二次使用时按重放
+/// 检测（宽限外）作废全家 —— 检测从「即刻」推迟到「最多一个窗口」。
+#[derive(Default)]
+pub struct ReplayCache {
+    inner: std::sync::Mutex<std::collections::HashMap<String, (AuthTokens, std::time::Instant)>>,
+}
+
+impl ReplayCache {
+    /// 宽限时长。与判定侧的 [`REPLAY_GRACE_SECS`] 是同一个数 ——
+    /// 两边不一致的话，会出现「判定说在宽限内、缓存却已经清了」的窗口。
+    fn grace() -> std::time::Duration {
+        std::time::Duration::from_secs(u64::try_from(REPLAY_GRACE_SECS).unwrap_or(30))
+    }
+
+    /// 记下这次轮换的后继。`now` 由调用方给，纯为可测（与 `expired` 同理）。
+    pub fn remember(&self, digest: &str, tokens: &AuthTokens, now: std::time::Instant) {
+        let mut g = self.inner.lock().expect("宽限缓存的锁不该中毒");
+        // 顺手清过期项 —— 与 AccessBook 同款：这条路本来就低频，不值一个定时器
+        g.retain(|_, (_, at)| now.duration_since(*at) < Self::grace());
+        g.insert(digest.to_owned(), (tokens.clone(), now));
+    }
+
+    /// 宽限内的话，取回同一对。过期或没有都还 `None`。
+    #[must_use]
+    pub fn recall(&self, digest: &str, now: std::time::Instant) -> Option<AuthTokens> {
+        let g = self.inner.lock().expect("宽限缓存的锁不该中毒");
+        let (tokens, at) = g.get(digest)?;
+        (now.duration_since(*at) < Self::grace()).then(|| tokens.clone())
     }
 }
 
@@ -1028,6 +1190,179 @@ mod tests {
             ACCESS_TTL < REFRESH_TTL,
             "access 必须比 refresh 短得多，否则短命令牌那一层就没意义了"
         );
+    }
+}
+
+#[cfg(test)]
+mod replay_cache_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn pair(suffix: &str) -> AuthTokens {
+        AuthTokens {
+            access_token: format!("a-{suffix}"),
+            access_expires_in_secs: 900,
+            refresh_token: format!("r-{suffix}"),
+            refresh_expires_in_secs: 2_592_000,
+            user_id: "u1".into(),
+        }
+    }
+
+    /// 宽限内重放拿回**同一对** —— 幂等是这个缓存存在的全部理由。
+    #[test]
+    fn a_replay_within_grace_recalls_the_same_pair() {
+        let cache = ReplayCache::default();
+        let now = Instant::now();
+        cache.remember("digest-1", &pair("1"), now);
+
+        let got = cache
+            .recall("digest-1", now + Duration::from_secs(5))
+            .expect("宽限内必须命中");
+        assert_eq!(
+            got.refresh_token, "r-1",
+            "重放拿到的必须是同一对 —— 换一对新的等于每次重复提交都在延长凭据"
+        );
+        assert!(
+            cache.recall("digest-other", now).is_none(),
+            "别的摘要不能串 —— 串了就是把 A 的凭据发给 B"
+        );
+    }
+
+    /// 宽限一过缓存必须失效 —— 否则「30 秒宽限」实际是永久宽限，
+    /// 重放检测整个被架空。
+    #[test]
+    fn the_cache_expires_with_the_grace_window() {
+        let cache = ReplayCache::default();
+        let now = Instant::now();
+        cache.remember("digest-1", &pair("1"), now);
+
+        let after =
+            now + Duration::from_secs(u64::try_from(REPLAY_GRACE_SECS).expect("宽限是正数") + 1);
+        assert!(
+            cache.recall("digest-1", after).is_none(),
+            "宽限外必须 miss —— 此时的重放该走重放检测（作废全家），不是拿糖"
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_rotation_tests {
+    //! 并发轮换的**真库**测试。CI 上没有 Postgres，所以 `#[ignore]` ——
+    //! 本机起着 dev 环境时用
+    //! `CORTEX_DATABASE_URL=… cargo test -p cortex-agentd -- --ignored` 跑。
+    //!
+    //! 它守的性质单测守不了：原子认领靠的是 Postgres 对单条条件 UPDATE 的
+    //! 语义，替身模拟不出「两个连接同时 UPDATE 同一行」。
+
+    use super::*;
+
+    /// **同一枚 refresh token 并发 8 发：恰好一对后继、family 不被烧。**
+    ///
+    /// 修复前的形状（dev 实测）：A:200 / B:401「已被使用过」，且 A 刚拿到
+    /// 的后继被连坐作废 —— 本条最后那次「拿后继再续一次」就是抓它的钩子。
+    /// 故障注入验证：把 rotate_in 里 rotated_recently 强制成 false（等于
+    /// 删掉宽限）再跑，这条当场红在最后那个断言上。
+    #[tokio::test]
+    #[ignore = "要真的 Postgres（读 CORTEX_DATABASE_URL）。本机 dev 起着时手动跑"]
+    async fn concurrent_rotation_leaves_exactly_one_living_successor() {
+        let url = std::env::var("CORTEX_DATABASE_URL")
+            .expect("这条测试要 CORTEX_DATABASE_URL（dev 库：postgres://cortex:cortex@127.0.0.1:5532/cortex）");
+        // **不走 `Accounts::connect`** —— 那条路会先跑全局 migration。一条
+        // 测试不该去迁移一片共享的 dev 库；而且 sqlx 的 checksum 是按文件
+        // 字节算的，另一个 checkout 用 CRLF 迁移过的库会把这里的 LF 判成
+        // 「migration 被改过」—— 一个与被测性质毫无关系的假红（实测撞过）。
+        // 这里假定 schema 已经在（dev 环境起过就在）。
+        let options: sqlx::postgres::PgConnectOptions = url
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .expect("CORTEX_DATABASE_URL 不合法")
+            .options([("search_path", "cortex_auth,public")]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            // 8 个并发认领要真的并发起来，池子得比它大 —— 池只有 2 条时
+            // 认领会被连接排队串行化，测的就不再是数据库层的竞态
+            .max_connections(12)
+            .connect_with(options)
+            .await
+            .expect("连不上测试库 —— dev 环境起着吗？");
+        let accounts = Accounts {
+            pool,
+            tenants: std::sync::Arc::new(cortex_store::TenantPools::new(&url)),
+        };
+        let access = AccessBook::default();
+        let replay = std::sync::Arc::new(ReplayCache::default());
+
+        // 一次性用户，测试完删掉。不走 create_account_in —— 那会给他开一片
+        // 租户 schema，而这条测试只关心 auth_tokens 这一张表
+        let user_id = cortex_core::Id::new().to_string();
+        let username = format!("t{}", user_id.to_lowercase());
+        // schema_name 有唯一约束且形状被 CHECK 钉死（`u_<26 位小写 ulid>`）。
+        // 只是占位 —— 这条测试从不碰租户库，schema 本身不会被创建
+        let schema = format!("u_{}", user_id.to_lowercase());
+        sqlx::query(
+            "INSERT INTO cortex_auth.users (id, username, password_hash, schema_name)
+             VALUES ($1, $2, 'not-a-real-hash', $3)",
+        )
+        .bind(&user_id)
+        .bind(&username)
+        .bind(&schema)
+        .execute(&accounts.pool)
+        .await
+        .expect("插不进测试用户");
+
+        let first = issue_in(&accounts, &access, &user_id, None, None)
+            .await
+            .expect("签不出初始令牌");
+
+        // ── 8 个并发拿同一枚来换 ──
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let accounts = accounts.clone();
+            let replay = std::sync::Arc::clone(&replay);
+            let plain = first.refresh_token.clone();
+            tasks.push(tokio::spawn(async move {
+                let access = AccessBook::default();
+                rotate_in(&accounts, &access, &replay, &plain).await
+            }));
+        }
+        let mut successors: Vec<String> = Vec::new();
+        for t in tasks {
+            if let Ok(Ok(tokens)) = t.await {
+                successors.push(tokens.refresh_token);
+            }
+        }
+
+        assert!(
+            !successors.is_empty(),
+            "8 个并发里至少要有 1 个换成 —— 全失败说明认领那条 UPDATE 写坏了"
+        );
+        successors.dedup();
+        assert_eq!(
+            successors.len(),
+            1,
+            "所有成功者拿到的必须是**同一对**后继（赢家一对 + 宽限缓存幂等）。\
+             出现第二对 = 同一枚被轮换了两次，链上从此有两个「最新」"
+        );
+
+        // ── 最要紧的断言：后继还活着 ──
+        let again = rotate_in(&accounts, &access, &replay, &successors[0]).await;
+        assert!(
+            again.is_ok(),
+            "并发重放不许把 family 烧掉 —— 后继再续一次必须成功。\
+             失败 = 修复前那个形状：一次边缘重试就让 30 天的凭据全家作废。\
+             实际：{:?}",
+            again.err().map(|e| e.message().to_owned()),
+        );
+
+        // 清场：先删 token（外键指向 users），再删用户
+        sqlx::query("DELETE FROM cortex_auth.auth_tokens WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&accounts.pool)
+            .await
+            .expect("清不掉测试令牌");
+        sqlx::query("DELETE FROM cortex_auth.users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&accounts.pool)
+            .await
+            .expect("清不掉测试用户");
     }
 }
 

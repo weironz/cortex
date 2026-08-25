@@ -524,6 +524,14 @@ async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
         // 报出用户名而不是一个布尔：运维扫一眼就知道那扇门后面是谁，
         // 而一个 `true` 还要再去翻环境变量
         "dev_login": crate::accounts::dev_login_user(),
+        // 这个部署开着注册吗。登录页据此决定**摆不摆**「注册」入口 ——
+        // 摆一个必然 403 的入口比没有更糟（约束 2）。与 `/auth/register`
+        // 里那道门是同一个函数，判据只算一处。
+        //
+        // ⚠️ 这个 handler 同时挂在 `/health` 与 `/sandbox/health` 上，而生产
+        // 边缘把 `/api/health` 让给了记忆服务 —— 登录页在生产上要从
+        // `/sandbox/health` 才读得到这个字段（客户端已按此回落）
+        "open_registration": crate::accounts::open_registration(),
         "live_scopes": st.scopes().len(),
     }))
 }
@@ -1890,6 +1898,15 @@ mod tests {
         assert!(
             v.get("memory_reachable").is_none() && v.get("memory").is_none(),
             "记忆 2026-08-17 整个去掉了 —— 健康里再报「记忆可达」就是一句谎，             而它恰好是运维最愿意相信的那一句"
+        );
+        // 注册开放与否必须是**公开可查**的：登录页靠它决定摆不摆注册入口。
+        // 字段整个不见的话，客户端按「关」处理（保守方向），于是一台开了
+        // 注册的部署上入口消失 —— 静默，且只有想注册的人看得见。
+        // 这组用例不改进程环境（并行用例互相踩），所以只钉「默认是关」。
+        assert_eq!(
+            v["open_registration"], false,
+            "health 必须报 open_registration，且默认（没设环境变量）是 false —— \
+             字段缺席时客户端保守地藏掉注册入口，开了注册的部署会静默失去它"
         );
     }
 

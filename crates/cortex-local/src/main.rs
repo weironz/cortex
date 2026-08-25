@@ -58,6 +58,11 @@ mod local_mcp_routes_test;
 #[cfg(test)]
 mod origin_guard_test;
 
+/// 反代出站凭据的不变式：入站凭据永远不出这台机器（这几条要开回环端口，
+/// 因为被测的正是「转发出去的请求带了什么头」）。
+#[cfg(test)]
+mod proxy_credential_test;
+
 use std::sync::Arc;
 use std::time::Duration;
 

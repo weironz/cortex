@@ -299,6 +299,12 @@ pub struct RefreshRecord {
     pub family: Id,
     /// 已经被用过一次，并且轮转出了后继。
     pub rotated: bool,
+    /// 轮转发生在**并发宽限窗口**（[`REPLAY_GRACE_SECS`]）之内。
+    ///
+    /// [`Self::rotated`] 为 false 时它没有意义（调用方应传 false）。
+    /// 与 [`Self::expired`] 一样是已经算好的布尔 —— 判定是纯函数，
+    /// 让它去读 `Utc::now()` 就等于让它不可测。
+    pub rotated_recently: bool,
     /// 整条 family 已经被作废（本条或它的兄弟触发过一次重放检测）。
     pub revoked: bool,
     /// 绝对过期时刻已过。
@@ -307,6 +313,27 @@ pub struct RefreshRecord {
     /// 让它去读 `Utc::now()` 就等于让它不可测。
     pub expired: bool,
 }
+
+/// 重放的并发宽限窗口，单位秒。
+///
+/// # 为什么要有这个窗口（安全权衡，读完再改）
+///
+/// 边缘代理的重复 POST、网络层的重发、第二个共享凭据库的客户端 —— 这些
+/// 「同一枚 refresh token 在几秒内出现两次」的情形，与真正的凭据窃取在
+/// 窗口内**不可区分**。而没有宽限时代价严重不对称：误判一次 = 30 天的
+/// 凭据整条 family 作废 + 客户端删掉存储副本 = 用户被彻底登出且下次启动
+/// 自动续期也失败。dev 实测（2026-08-25）：同一枚并发双发，A:200 / B:401，
+/// 随后 A 刚拿到的后继也被连带作废。
+///
+/// **放弃的安全性质要写清楚**：窗口内的重放不再立刻作废 family，于是一个
+/// 恰好在合法轮换后 30 秒内重放的攻击者不会被当场检测。但他手上那枚旧
+/// token 换不出新东西（宽限内重放对同一枚是幂等的 —— 拿到的是合法客户端
+/// 已经拿走的那对，或干脆被拒），而他一旦在窗口**外**再用任何一枚旧 token，
+/// 重放检测照旧把整条链作废。检测只是从「即刻」推迟到「最多一个窗口」。
+///
+/// 30 秒：覆盖边缘重试与推送延迟绰绰有余，又远小于 access token 的
+/// 15 分钟 —— 攻击者靠这个窗口拿不到比一次正常轮换更多的东西。
+pub const REPLAY_GRACE_SECS: i64 = 30;
 
 /// 为什么被拒 —— 只进日志与指标，**绝不进 HTTP 响应体**。
 ///
@@ -318,6 +345,12 @@ pub enum RejectReason {
     FamilyRevoked,
     /// 过了绝对有效期。
     Expired,
+    /// 在并发宽限窗口内重放（多半是重复提交，不是窃取）。
+    ///
+    /// 只拒这一次，**family 不动** —— 权衡见 [`REPLAY_GRACE_SECS`]。
+    /// 调用方（`accounts::rotate`）在拒之前还会先查后继缓存：缓存命中时
+    /// 幂等地返回同一对，根本走不到这个拒绝。
+    ReplayedInGrace,
 }
 
 /// 判定结果。**三态，不能塌成布尔。**
@@ -369,6 +402,12 @@ pub fn judge_refresh(record: &RefreshRecord) -> RefreshVerdict {
         return RefreshVerdict::Reject(RejectReason::FamilyRevoked);
     }
     if record.rotated {
+        // 并发宽限：刚轮转过的那几十秒里，同一枚再次出现多半是重复提交
+        // （边缘重试 / 双客户端），不是窃取 —— 只拒这一次，family 不动。
+        // 权衡与放弃的性质写在 [`REPLAY_GRACE_SECS`] 上。
+        if record.rotated_recently {
+            return RefreshVerdict::Reject(RejectReason::ReplayedInGrace);
+        }
         return RefreshVerdict::RevokeFamily {
             family: record.family,
         };
@@ -544,9 +583,66 @@ mod tests {
         RefreshRecord {
             family: Id::new(),
             rotated: false,
+            rotated_recently: false,
             revoked: false,
             expired: false,
         }
+    }
+
+    /// **宽限窗口内的重放只拒这一次，不烧 family。**
+    ///
+    /// 没有宽限时，边缘代理的一次重复 POST 就把 30 天的凭据整条作废 ——
+    /// dev 实测过：并发双发同一枚，A:200 / B:401，A 刚拿到的后继也被连带
+    /// 作废，客户端下一次续期 401 → 删存储副本 → 「登录已过期」。
+    #[test]
+    fn a_replay_within_the_grace_window_is_rejected_without_burning_the_family() {
+        let rec = RefreshRecord {
+            rotated: true,
+            rotated_recently: true,
+            ..fresh()
+        };
+        assert_eq!(
+            judge_refresh(&rec),
+            RefreshVerdict::Reject(RejectReason::ReplayedInGrace),
+            "窗口内的重放与重复提交不可区分，而误判的代价是全家作废 + 存储副本被删。\
+             只拒这一次：真正的窃取者在窗口外一露头照旧全家作废"
+        );
+    }
+
+    /// **宽限不能被改成永久** —— 窗口外的重放照旧作废整条 family。
+    ///
+    /// 这条与上一条成对：只有上一条的话，谁把 `rotated_recently` 恒填 true
+    /// （或把窗口改成无穷大），重放检测就整个失效了，而所有测试照绿。
+    #[test]
+    fn a_replay_after_the_grace_window_still_takes_down_the_family() {
+        let rec = RefreshRecord {
+            rotated: true,
+            rotated_recently: false,
+            ..fresh()
+        };
+        assert_eq!(
+            judge_refresh(&rec),
+            RefreshVerdict::RevokeFamily { family: rec.family },
+            "宽限只覆盖并发那几十秒。窗口外拿旧 token 来换 = 手上有历史副本，\
+             重放检测的全部价值就在这一刻 —— 宽限变永久等于删掉了重放检测"
+        );
+    }
+
+    /// 已死的 family 不因为「最近轮转过」而复活 —— revoked 仍然排最前。
+    #[test]
+    fn grace_does_not_resurrect_a_revoked_family() {
+        let rec = RefreshRecord {
+            rotated: true,
+            rotated_recently: true,
+            revoked: true,
+            ..fresh()
+        };
+        assert_eq!(
+            judge_refresh(&rec),
+            RefreshVerdict::Reject(RejectReason::FamilyRevoked),
+            "family 已作废时宽限没有话语权 —— 宽限只是「别把重复提交当窃取」，\
+             不是「作废之后还能再用一会儿」"
+        );
     }
 
     #[test]

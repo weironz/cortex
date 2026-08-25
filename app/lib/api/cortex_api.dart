@@ -398,6 +398,13 @@ abstract interface class CortexApi {
   /// 调用方必须把它存进平台的凭据库（见 `app/lib/auth/`）。
   Future<AuthTokens> login(String username, String password);
 
+  /// `POST /auth/register` —— 开号并直接换回一对令牌（注册即登录）。
+  ///
+  /// 只在部署开着注册（`/health` 的 `open_registration`）时才该被调用 ——
+  /// 关着的部署回 403，正文里写着管理员该怎么开。界面靠那个字段决定
+  /// **摆不摆**入口；这条本身不做那个判断。
+  Future<AuthTokens> register(String username, String password);
+
   /// `POST /auth/refresh` —— 用长效凭据换一对新的。
   ///
   /// 每次都会**轮转**：服务端把旧的作废并签一个新的。所以调用方必须

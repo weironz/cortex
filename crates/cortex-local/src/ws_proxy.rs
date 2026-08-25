@@ -66,14 +66,24 @@ use crate::state::LocalState;
 pub struct WsUpstream {
     http: reqwest::Client,
     remote: Remote,
+    /// 本机的两把凭据 —— 只用来判「客户端带的 Authorization 是不是本机的」。
+    ///
+    /// 入站凭据永远不出这台机器（契约见 [`crate::proxy::is_machine_bearer`]）：
+    /// 桌面端的 HTTP 层给**每个**请求都挂上钉住的本机凭据，`/ws` 也不例外，
+    /// 而验票的权威在远端 —— 把这把远端不认识的凭据转出去没有任何意义，
+    /// 只会在远端日志里堆一串无解的 401 素材。
+    inbound_token: Option<String>,
+    attach_token: Option<String>,
 }
 
-/// 让 `handler` 挂在 `Router<LocalState>` 上时自动取到这两样。
+/// 让 `handler` 挂在 `Router<LocalState>` 上时自动取到这几样。
 impl FromRef<LocalState> for WsUpstream {
     fn from_ref(st: &LocalState) -> Self {
         Self {
             http: st.http.clone(),
             remote: st.remote.clone(),
+            inbound_token: st.inbound_token.clone(),
+            attach_token: st.attach_token.clone(),
         }
     }
 }
@@ -157,8 +167,19 @@ async fn connect_upstream(
         .header(header::UPGRADE, "websocket")
         .header(header::SEC_WEBSOCKET_VERSION, "13")
         .header(header::SEC_WEBSOCKET_KEY, &key);
-    // 客户端自己带了就原样转，没带就只有查询串里那张票。见函数文档
-    if let Some(v) = from_client.get(header::AUTHORIZATION) {
+    // 客户端自己带了就原样转，没带就只有查询串里那张票。见函数文档。
+    //
+    // **例外：本机凭据不转**（剥掉、也不补 —— 补的话就是上面说的提权）。
+    // 桌面端的 HTTP 层给每个请求都挂上钉住的本机凭据，这把远端不认识；
+    // 真正的认证是查询串里那张远端签的票，转发本机凭据只会制造噪音，
+    // 还会在「远端顺手先看头再看票」的实现下把一条本该通的连接弄成 401。
+    if let Some(v) = from_client.get(header::AUTHORIZATION)
+        && !crate::proxy::is_machine_bearer(
+            v.to_str().ok().and_then(|v| v.strip_prefix("Bearer ")),
+            st.inbound_token.as_deref(),
+            st.attach_token.as_deref(),
+        )
+    {
         rb = rb.header(header::AUTHORIZATION, v);
     }
 
@@ -428,6 +449,8 @@ mod tests {
         let st = WsUpstream {
             http: reqwest::Client::new(),
             remote: Remote::new(remote_base, None).expect("造 Remote 失败"),
+            inbound_token: None,
+            attach_token: None,
         };
         let app = Router::new().route("/ws", get(handler)).with_state(st);
         let base = serve(app).await;

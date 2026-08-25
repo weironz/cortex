@@ -1127,6 +1127,32 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   }
 });
 
+/// [AuthController] 够得到的、关于本机 agent 的两个动作。
+///
+/// # 为什么要绕这一圈，而不是让它直接 read `localAgentOriginProvider`
+///
+/// 那个 provider **watch 着 `authControllerProvider`**（token 有无、
+/// requiresToken 都是它的输入）。AuthController 反过来 read 它，就是
+/// 依赖图上的一个环 —— riverpod 的循环依赖断言当场抛
+/// `CircularDependencyError`（实测：白续裁决第一版就这么写，被既有的
+/// futile 测试抓住）。这个网关自己**零依赖**：动作发生在调用时刻、
+/// 用的是网关自己的 ref，不进 AuthController 的依赖图。
+final localAgentGatewayProvider = Provider<LocalAgentGateway>(
+  LocalAgentGateway.new,
+);
+
+class LocalAgentGateway {
+  LocalAgentGateway(this._ref);
+
+  final Ref _ref;
+
+  /// 此刻活着的本机 agent 的地址；没有（Web / 还没就绪 / 起不来）是 null。
+  String? get origin => _ref.read(localAgentOriginProvider).value;
+
+  /// 重启它。invalidate 是懒生效的 —— 下一个读它的人拿到新一轮的构建。
+  void restart() => _ref.invalidate(localAgentOriginProvider);
+}
+
 /// The single place that knows whether we are on mock or live data.
 ///
 /// Rebuilt whenever [appConfigProvider] changes, which cascades an invalidation

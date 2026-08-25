@@ -82,7 +82,15 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
   late final TextEditingController _urlController;
   final TextEditingController _userController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _confirmController = TextEditingController();
   bool _revealPassword = false;
+
+  /// 这一屏此刻是注册表单吗。
+  ///
+  /// 只有在部署**开着注册**时才可能为真（入口本身按 `openRegistrationProvider`
+  /// 摆放）；万一开关在中途关掉（切换了部署地址），build 里会把它按登录
+  /// 表单画 —— 判据是 `_registerMode && openRegistration`，不是这个布尔单独。
+  bool _registerMode = false;
 
   /// 地址字段展开了吗。
   ///
@@ -117,10 +125,11 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
     _urlController.dispose();
     _userController.dispose();
     _passwordController.dispose();
+    _confirmController.dispose();
     super.dispose();
   }
 
-  Future<void> _submit() async {
+  Future<void> _submit({bool register = false}) async {
     final auth = ref.read(authControllerProvider.notifier);
     final url = _urlController.text.trim();
     if (url.isNotEmpty && url != ref.read(appConfigProvider).baseUrl) {
@@ -132,6 +141,19 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
       // The new daemon may not want a token at all, in which case the probe has
       // already opened the door and there is nothing to sign in with.
       if (ref.read(authControllerProvider).isReady) return;
+    }
+    if (register) {
+      // 「两次输入不一致」是唯一一条客户端自己判的：它防的是打错字，
+      // 而不是复刻服务端规则 —— 长度等规则由服务端的拒绝文案说话
+      if (_passwordController.text != _confirmController.text) {
+        auth.reportFormError('两次输入的密码不一致。');
+        return;
+      }
+      await auth.signUpWithPassword(
+        _userController.text,
+        _passwordController.text,
+      );
+      return;
     }
     await auth.signInWithPassword(
       _userController.text,
@@ -145,6 +167,11 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
     final scheme = theme.colorScheme;
     final state = ref.watch(authControllerProvider);
     final unreachable = state.phase == AuthPhase.unreachable;
+    // 只有部署明确说开了才摆注册入口 —— 摆一个必然 403 的入口比没有更糟
+    // （约束 2）。加载中 / 探测失败都按关闭画，判据统一在
+    // `openRegistrationProvider`，这里只消费
+    final openRegistration = ref.watch(openRegistrationProvider).value ?? false;
+    final registering = _registerMode && openRegistration;
     // 连不上时**强制展开**：那一刻地址就是最可疑的东西，而它默认是
     // `127.0.0.1:8080`。用 `||` 而不是在 setState 里改 `_showEndpoint` ——
     // 后者要在 build 里改状态，而且连上之后还得记得收回去
@@ -189,7 +216,7 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                 ),
                 const SizedBox(height: 18),
                 Text(
-                  '登录 Cortex',
+                  registering ? '注册 Cortex 账号' : '登录 Cortex',
                   textAlign: TextAlign.center,
                   style: theme.textTheme.headlineSmall?.copyWith(
                     fontWeight: FontWeight.w600,
@@ -288,7 +315,7 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                     labelText: '用户名',
                     prefixIcon: Icon(Icons.person_outline_rounded, size: 18),
                   ),
-                  onSubmitted: (_) => _submit(),
+                  onSubmitted: (_) => _submit(register: registering),
                 ),
                 const SizedBox(height: 12),
                 TextField(
@@ -300,6 +327,9 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                   autofillHints: const [AutofillHints.password],
                   decoration: InputDecoration(
                     labelText: '密码',
+                    // 注册时把服务端唯一的硬规则提前说出来 —— 让用户输完
+                    // 才被 400 打回，是把一次校验的成本换成一次全程重来
+                    helperText: registering ? '至少 12 个字符，不要求大小写或符号组合' : null,
                     prefixIcon: const Icon(
                       Icons.lock_outline_rounded,
                       size: 18,
@@ -316,8 +346,23 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                       ),
                     ),
                   ),
-                  onSubmitted: (_) => _submit(),
+                  onSubmitted: (_) => _submit(register: registering),
                 ),
+                if (registering) ...[
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _confirmController,
+                    obscureText: !_revealPassword,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    enabled: !state.busy,
+                    decoration: const InputDecoration(
+                      labelText: '确认密码',
+                      prefixIcon: Icon(Icons.lock_reset_rounded, size: 18),
+                    ),
+                    onSubmitted: (_) => _submit(register: true),
+                  ),
+                ],
 
                 // 「凭据存在哪儿」那一大段说明**删掉了**：它讲的是 token 那条路
                 // 的存储权衡，而 token 登录已经不在这个界面上了。密码登录换回来的
@@ -358,7 +403,9 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
 
                 const SizedBox(height: 20),
                 FilledButton(
-                  onPressed: state.busy ? null : _submit,
+                  onPressed: state.busy
+                      ? null
+                      : () => _submit(register: registering),
                   style: FilledButton.styleFrom(
                     minimumSize: const Size.fromHeight(46),
                   ),
@@ -373,8 +420,26 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                             color: Colors.white,
                           ),
                         )
-                      : const Text('登录'),
+                      : Text(registering ? '注册并登录' : '登录'),
                 ),
+
+                // ── 注册入口 ──
+                //
+                // **仅当部署开着注册**（openRegistrationProvider，服务端说了
+                // 算）才出现 —— 关着的部署上摆这个入口，点进去只能收获一个
+                // 403，那正是约束 2 说的「界面替部署撒谎」。
+                if (openRegistration) ...[
+                  const SizedBox(height: 4),
+                  Align(
+                    child: TextButton(
+                      onPressed: state.busy
+                          ? null
+                          : () =>
+                                setState(() => _registerMode = !_registerMode),
+                      child: Text(registering ? '已有账号？直接登录' : '注册新账号'),
+                    ),
+                  ),
+                ],
 
                 // 自托管的那条出路。**措辞抄 LobeHub**：说「连接到你自己的
                 // 部署」而不是「修改服务器地址」—— 前者描述的是一类用户

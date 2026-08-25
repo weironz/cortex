@@ -20,9 +20,21 @@ import 'json.dart';
 /// 形态。所以这里分成三档而不是一个布尔：把 [CloudChatStatus.absent] 与
 /// [CloudChatStatus.blocked] 并成一个「不可用」，用户会去修一个没坏的东西。
 class SandboxHealth {
-  const SandboxHealth({required this.status, this.version, this.reason});
+  const SandboxHealth({
+    required this.status,
+    this.version,
+    this.reason,
+    this.openRegistration,
+  });
 
   final CloudChatStatus status;
+
+  /// 这个部署开着注册吗（agentd 的 health 同时挂在 `/sandbox/health` 上）。
+  ///
+  /// 登录页在 `/health` 答不出这个字段时（生产边缘把那条分给了记忆服务）
+  /// 从这里补问。`null` = 答话的不是 agentd 或版本太老 —— 按关闭处理，
+  /// 保守方向：藏一个开着的入口，好过摆一个必然 403 的入口。
+  final bool? openRegistration;
 
   /// agent 编排服务自己的版本号。
   ///
@@ -57,6 +69,7 @@ class SandboxHealth {
   factory SandboxHealth.fromJson(Map<String, dynamic> json) {
     if (asString(json['role']) != _orchestratorRole) return absent;
     final version = asStringOrNull(json['version']);
+    final openRegistration = json['open_registration'] as bool?;
 
     // 下面这个字段是**服务端自己去打过**的结果，不是它的自我感觉
     // （见 cortex-agentd 的 health handler）。缺字段一律当成通：
@@ -67,9 +80,14 @@ class SandboxHealth {
         status: CloudChatStatus.blocked,
         version: version,
         reason: '沙箱容器回连不到 agent 编排服务，每一轮都会在中途断掉。',
+        openRegistration: openRegistration,
       );
     }
-    return SandboxHealth(status: CloudChatStatus.ready, version: version);
+    return SandboxHealth(
+      status: CloudChatStatus.ready,
+      version: version,
+      openRegistration: openRegistration,
+    );
   }
 }
 

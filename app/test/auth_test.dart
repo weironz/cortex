@@ -69,6 +69,8 @@ void main() {
   // 断言不过**，真因藏在输出里
   TestWidgetsFlutterBinding.ensureInitialized();
   _sessionTests();
+  _resilienceTests();
+  _registerTests();
   group('/health 的 auth 字段', () {
     test('token 表示必须带凭据', () {
       final health = HealthStatus.fromJson(_health);
@@ -573,6 +575,11 @@ class _GateApi
   }
 
   @override
+  Future<AuthTokens> register(String username, String password) async {
+    throw const CortexApiException('这个数据源不支持账号注册', statusCode: 501);
+  }
+
+  @override
   Future<AuthTokens> refreshSession(String refreshToken) async {
     throw const CortexApiException('这个数据源不支持账号登录', statusCode: 501);
   }
@@ -816,6 +823,286 @@ class _SessionApi extends _GateApi {
   Future<void> logout(String refreshToken) async {
     logoutCalls++;
     lastRefreshSent = refreshToken;
+  }
+}
+
+/// 探针可以按开关拒绝 —— 白续裁决那组用例要「续期一直成功、直连探测
+/// 却各有说法」这个组合，[_SessionApi] 自己给不出来。
+class _FutileProbeApi extends _SessionApi {
+  bool ticketRejects = false;
+
+  @override
+  Future<AuthTicket> issueTicket() {
+    if (ticketRejects) {
+      throw const CortexApiException('未认证', statusCode: 401);
+    }
+    return super.issueTicket();
+  }
+}
+
+void _resilienceTests() {
+  group('续期的计账与裁决', () {
+    /// **429 不消耗 transient 预算。**
+    ///
+    /// 发版重启风暴里 5xx 与自家限流的 429 交替出现：全体客户端同时涌向
+    /// /auth/refresh，按 token 摘要的每分钟 5 次限流必然掐掉一部分。429
+    /// 混进 3 次的 transient 预算里，一次不算长的抖动就把人送回登录页。
+    test('连续 429：不吃 transient 预算，前 7 次都不踢', () async {
+      final api = _SessionApi();
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await ctrl.restoreSession('refresh-old');
+      expect(c.read(authControllerProvider).isReady, isTrue);
+
+      api.refreshFails = true;
+      api.refreshStatusCode = 429;
+
+      // 老行为下第 3 次就 gate（429 被记成 transient）—— 这里 7 次都得稳住
+      for (var i = 1; i <= 7; i++) {
+        await ctrl.onUnauthorized();
+        expect(
+          c.read(authControllerProvider).isReady,
+          isTrue,
+          reason:
+              '第 $i 次 429 就被踢了 —— 429 是「等等再来」，不是服务端抖动，'
+              '混进 3 次的 transient 预算等于发版重启必踢人',
+        );
+      }
+
+      // 但它不是免死金牌：自己的预算（8 次）用完照样收口 —— 凭据留着
+      await ctrl.onUnauthorized();
+      final st = c.read(authControllerProvider);
+      expect(
+        st.phase,
+        AuthPhase.needsToken,
+        reason: '永远 429 的续期循环必须有出口，否则就是台永动机',
+      );
+      expect(
+        st.refreshToken,
+        isNotNull,
+        reason: '429 不是凭据的错，收口也不许删凭据 —— 下次启动要拿它续',
+      );
+    });
+
+    /// **白续收口前先裁决：直连通就重启 agent，不登出。**
+    ///
+    /// 桌面端的请求全经本机 agent 反代 —— 它的转发链坏掉时，远端 401 与
+    /// 「服务端不认新凭据」在客户端看来一模一样，而续期走直连、次次成功。
+    /// 老行为把这一族一律判成 refreshFutile 踢回登录页：**误杀**，因为
+    /// 服务端明明认这把凭据。裁决探测（直连打 /auth/ticket）把两族分开。
+    test('白续三次但直连裁决通过：重启 agent，不掉登录页', () async {
+      final api = _FutileProbeApi();
+      var agentBuilds = 0;
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+          // 假装本机 agent 在场 —— 裁决只有「请求经过 agent」时才有意义
+          localAgentOriginProvider.overrideWith((ref) async {
+            agentBuilds++;
+            return 'http://127.0.0.1:9';
+          }),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await c.read(localAgentOriginProvider.future);
+      await ctrl.restoreSession('refresh-old');
+      expect(c.read(authControllerProvider).isReady, isTrue);
+
+      // 拨表：出 3 秒 cooloff、留在 60 秒 futile 窗口内
+      var now = DateTime(2026, 8, 25, 12, 0, 0);
+      ctrl.clock = () => now;
+
+      await ctrl.onUnauthorized(); // 第一次：正常续上
+      for (var round = 1; round <= 3; round++) {
+        now = now.add(const Duration(seconds: 5));
+        await ctrl.onUnauthorized(); // 续期又「成功」—— 白续
+      }
+
+      expect(
+        c.read(authControllerProvider).isReady,
+        isTrue,
+        reason:
+            '直连裁决通过 = 服务端认这把新凭据，坏的是本机 agent 链路 —— '
+            '此时回登录页是误杀（正是「每 15 分钟被踢」的收口点）',
+      );
+      // invalidate 是懒生效的：下一次读才真的重建
+      await c.read(localAgentOriginProvider.future);
+      expect(
+        agentBuilds,
+        2,
+        reason: '裁决通过必须重启一次本机 agent —— 不重启的话链路还是坏的，下一轮照旧白续',
+      );
+    });
+
+    /// 裁决探测也 401 —— 真是服务端不认，照旧收口回登录页。
+    ///
+    /// 这半边不能丢：futile 熔断防的「多实例验签不同步」真实存在
+    /// （AccessBook 在内存），裁决只是把误杀分出去，不是把熔断删掉。
+    test('白续三次且直连也 401：照旧收口，agent 不背锅', () async {
+      final api = _FutileProbeApi()..ticketRejects = true;
+      var agentBuilds = 0;
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+          localAgentOriginProvider.overrideWith((ref) async {
+            agentBuilds++;
+            return 'http://127.0.0.1:9';
+          }),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await c.read(localAgentOriginProvider.future);
+      await ctrl.restoreSession('refresh-old');
+
+      var now = DateTime(2026, 8, 25, 12, 0, 0);
+      ctrl.clock = () => now;
+
+      await ctrl.onUnauthorized();
+      for (var round = 1; round <= 3; round++) {
+        now = now.add(const Duration(seconds: 5));
+        await ctrl.onUnauthorized();
+      }
+
+      final st = c.read(authControllerProvider);
+      expect(
+        st.phase,
+        AuthPhase.needsToken,
+        reason: '直连也不认 = 病根在服务端，熔断必须照旧收口 —— 删掉它那族回到静默坏死',
+      );
+      expect(st.error, contains('配置'), reason: '红字要指向服务端，不是让用户怀疑密码');
+      await c.read(localAgentOriginProvider.future);
+      expect(agentBuilds, 1, reason: '服务端的问题不许拿 agent 撒气 —— 重启治不了它');
+    });
+  });
+}
+
+void _registerTests() {
+  group('注册', () {
+    /// 注册即登录：拿回的令牌直接进主界面，不再让用户「现在去登录」。
+    test('注册成功后自动登录，refresh token 已在手上', () async {
+      final api = _RegisterApi();
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await ctrl.signUpWithPassword('newbie', 'hunter2-hunter2');
+
+      final st = c.read(authControllerProvider);
+      expect(st.phase, AuthPhase.ready, reason: '注册成功就该直接进主界面');
+      expect(st.token, 'access-1');
+      expect(
+        st.refreshToken,
+        'refresh-1',
+        reason: '注册换回的 refresh token 必须留在手上 —— 否则第一次 401 就被踢',
+      );
+      expect(api.registerCalls, 1);
+    });
+
+    /// 部署没开注册时，403 的原话（含管理员怎么开）要到用户眼前。
+    test('注册被 403 拒时，服务端的原话原样显示', () async {
+      final api = _RegisterApi()..rejectRegister = true;
+      final c = ProviderContainer(
+        overrides: [
+          authProbeApiProvider.overrideWithValue((_) => api),
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final ctrl = c.read(authControllerProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await ctrl.signUpWithPassword('newbie', 'hunter2-hunter2');
+
+      final st = c.read(authControllerProvider);
+      expect(st.isReady, isFalse);
+      expect(
+        st.error,
+        contains('没有开放注册'),
+        reason: '403 正文写着管理员该怎么开 —— 吞掉它用户只能来问我们',
+      );
+    });
+
+    /// `open_registration` 是三态：缺字段是 null（要去 /sandbox/health
+    /// 补问），不是 false（那会把生产上开着注册的部署静默藏掉入口）。
+    test('health 的 open_registration 解析成三态', () {
+      expect(
+        HealthStatus.fromJson({
+          ..._health,
+          'open_registration': true,
+        }).openRegistration,
+        isTrue,
+      );
+      expect(
+        HealthStatus.fromJson({
+          ..._health,
+          'open_registration': false,
+        }).openRegistration,
+        isFalse,
+      );
+      expect(
+        HealthStatus.fromJson(_health).openRegistration,
+        isNull,
+        reason:
+            '缺字段 ≠ 关。生产边缘把 /health 分给了记忆服务，那份响应里没有'
+            '这个字段 —— 压成 false 的话，开着注册的生产部署永远不出现入口',
+      );
+    });
+  });
+}
+
+/// 注册用的假后端。
+class _RegisterApi extends _GateApi {
+  int registerCalls = 0;
+  bool rejectRegister = false;
+
+  @override
+  Future<AuthTokens> register(String username, String password) async {
+    registerCalls++;
+    if (rejectRegister) {
+      throw const CortexApiException(
+        '这个部署没有开放注册。管理员可以设 CORTEX_OPEN_REGISTRATION=enabled 打开。',
+        statusCode: 403,
+      );
+    }
+    return AuthTokens(
+      accessToken: 'access-1',
+      accessExpiresInSecs: 900,
+      refreshToken: 'refresh-1',
+      refreshExpiresInSecs: 2592000,
+      userId: 'u-new',
+    );
   }
 }
 
