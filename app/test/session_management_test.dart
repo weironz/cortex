@@ -101,7 +101,7 @@ void main() {
   ///
   /// （「新建工作区」是**草稿**才有的那一档：只有还没开口的会话，才谈得上
   /// 「发出第一句话时给你开一个」。）
-  testWidgets('输入框底下的工作区入口：没绑本机的会话照实说它在云端', (tester) async {
+  testWidgets('输入框底下的工作区入口：没绑本机的会话说它已经派出去了', (tester) async {
     await boot(tester);
 
     final container = ProviderScope.containerOf(
@@ -115,15 +115,17 @@ void main() {
     await tester.pump(const Duration(milliseconds: 600));
 
     expect(
-      find.text('云端'),
+      find.text('已派出去'),
       findsOneWidget,
       reason:
-          '这条会话没有本机绑定，那它的每一轮就是在云端容器里跑的。'
+          '这条会话没有本机绑定，那它的每一轮就是在远端容器里跑的。'
           '入口要照实说它现在在哪儿 —— 说「未绑定」只描述了缺什么，'
-          '没回答用户真正要问的「我的文件在哪」',
+          '没回答用户真正要问的「我的文件在哪」。'
+          '而它叫「已派出去」不叫「云端」：后者是一个存储位置的名字，'
+          '于是这个能力没有名字，只能被碰巧发现',
     );
 
-    await tester.tap(find.text('云端'));
+    await tester.tap(find.text('已派出去'));
     // Explicit pumps rather than `pumpAndSettle`: the shell keeps indeterminate
     // progress indicators alive (the workspace tree spins while it lists a
     // directory), and those never let the frame queue drain.
@@ -136,6 +138,13 @@ void main() {
       find.text('选择其他文件夹…'),
       findsOneWidget,
       reason: '默认工作空间之外的任意目录仍然要有一条路进得去',
+    );
+    expect(
+      find.text('派出去跑'),
+      findsOneWidget,
+      reason:
+          '清单里那一条与 chip 上的标签必须是同一个名字 —— 不同名的话，'
+          '用户在清单里选了「派出去跑」，回来看见 chip 写着别的，会以为点错了',
     );
   });
 

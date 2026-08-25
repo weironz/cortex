@@ -1114,6 +1114,31 @@ class MockCortexApi
   Future<Uint8List> sandboxWorkspaceTar({String? sessionId}) async =>
       throw const CortexApiException('Mock 数据源没有云沙箱', statusCode: 501);
 
+  /// 导出在 mock 上**真的给一份 NDJSON**，不像上面那条抛 501。
+  ///
+  /// 因为它导的是 mock 自己就有的东西（会话与消息），给得出来。抛 501 的
+  /// 那些是「这个数据源根本没有那个后端」—— 两种情形不该长一个样。
+  @override
+  Future<Uint8List> exportSessions() async {
+    final lines = <String>[
+      jsonEncode({
+        'type': 'header',
+        'format': 'cortex-sessions-ndjson',
+        'version': 1,
+        'session_count': _sessions.length,
+      }),
+      for (final s in _sessions)
+        jsonEncode({
+          'type': 'session',
+          'id': s.id,
+          'title': s.title,
+          'archived': s.archived,
+        }),
+      jsonEncode({'type': 'footer', 'sessions': _sessions.length}),
+    ];
+    return Uint8List.fromList(utf8.encode('${lines.join('\n')}\n'));
+  }
+
   // ----------------------------------------------------------- sandbox files
 
   /// 一份**平的**文件表：键是绝对路径，目录由键前缀推出来。

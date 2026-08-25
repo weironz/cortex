@@ -759,6 +759,16 @@ abstract interface class CortexApi {
   /// —— 那不是数据丢了，而两者在界面上必须分得开。
   Future<Uint8List> sandboxWorkspaceTar({String? sessionId});
 
+  /// `GET /sessions/export` —— 把这个账号的全部会话导成一份 NDJSON。
+  ///
+  /// **导的是会话，不是记忆**：facts / 时间轴在 Cormex 那个服务里，
+  /// 这一侧一列都没有。界面上必须说清这一点 —— 一个写着「导出我的数据」
+  /// 的按钮如果只给一半，用户会以为另一半不存在。
+  ///
+  /// 附件只有 hash 与文件名，字节走 `/blobs/{hash}` —— 内联的话一份导出
+  /// 可能有几个 GB。
+  Future<Uint8List> exportSessions();
+
   /// `GET /sandbox/files?path=` —— 云沙箱工作区的**一层**目录。
   ///
   /// 一层而不是整棵树：`node_modules` / `target` 走一遍要好几秒，而用户第一眼

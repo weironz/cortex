@@ -9,6 +9,13 @@
 /// 其余：工具调用不能丢（少了它们，「agent 帮我改了三个文件」的存档里
 /// 只剩「好的，改完了」）、文件名里的路径分隔符要处理掉、
 /// 翻到上限还没到头要**当场说**。
+///
+/// # 两条导出，别混起来
+///
+/// 上面这些说的是**按会话**导出（左栏右键，Markdown / JSON）。
+/// 最后那一组测的是**整个账号**导出（设置 → 数据 → 导出，NDJSON，
+/// 服务端 `GET /sessions/export` 流式给）。两条互补：前者是「把这段对话
+/// 发给同事」，后者是「把我的数据带走」。
 library;
 
 import 'package:cortex_app/api/mock_cortex_api.dart';
@@ -296,6 +303,46 @@ void main() {
       final state = container.read(exportControllerProvider);
       expect(state.savedName, isNull);
       expect(state.error, isNull, reason: '取消是用户自己按的，弹一句红字会让他以为哪儿坏了');
+    });
+  });
+
+  group('整个账号导出（设置 → 数据）', () {
+    test('拿到的是 NDJSON：每一行单独成立，头尾都在', () async {
+      final api = MockCortexApi();
+      final bytes = await api.exportSessions();
+      final text = utf8.decode(bytes);
+
+      expect(text.endsWith('\n'), isTrue, reason: '最后一行也要有换行 —— 逐行读的工具才不会漏掉它');
+
+      final lines = const LineSplitter().convert(text);
+      expect(
+        lines.length,
+        greaterThanOrEqualTo(2),
+        reason: '至少要有 header 与 footer',
+      );
+
+      // **每一行单独解析**。这正是 NDJSON 相对一个大 JSON 的全部好处：
+      // 断在半路时坏的只有最后一行，而不是整份文件变成语法错误
+      for (final l in lines) {
+        expect(
+          () => jsonDecode(l),
+          returnsNormally,
+          reason: '这一行不是合法 JSON，整份导出就没法逐行读了：$l',
+        );
+      }
+
+      expect(
+        jsonDecode(lines.first)['type'],
+        'header',
+        reason: '第一行说清这是什么格式、不含什么 —— 拿到文件的人得看得懂',
+      );
+      expect(
+        jsonDecode(lines.last)['type'],
+        'footer',
+        reason:
+            '最后一行同时是「导完了」的判据。没有它就是断在半路，'
+            '而那件事必须看得出来 —— 一份少了一半的存档看起来和完整的一样',
+      );
     });
   });
 }

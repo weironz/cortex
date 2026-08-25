@@ -1863,6 +1863,9 @@ class HttpCortexApi implements CortexApi {
       _sandboxBytes('/sandbox/workspace.tar', _scoped(null, sessionId));
 
   @override
+  Future<Uint8List> exportSessions() => _sandboxBytes('/sessions/export');
+
+  @override
   Future<Uint8List> sandboxReadFile(String path, {String? sessionId}) =>
       _sandboxBytes('/sandbox/files/raw', _scoped(path, sessionId));
 

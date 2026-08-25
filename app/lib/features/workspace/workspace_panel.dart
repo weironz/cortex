@@ -636,10 +636,13 @@ class WorkspaceChip extends ConsumerWidget {
         '新建工作区',
         '发出第一句话时，会在默认工作空间下建一个以当前时间命名的文件夹。\n点击改成别的。',
       ),
+      // 与清单里那一条同名 —— 两处不同名的话，用户在清单里选了
+      // 「派出去跑」，回来看见 chip 上写着「云端」，会以为点错了
       (null, _) => (
-        Icons.cloud_outlined,
-        '云端',
-        '这次对话跑在远端 agent 的容器里，任何设备上都能接着聊。\n点击改成本机目录。',
+        Icons.rocket_launch_outlined,
+        '已派出去',
+        '这一轮交给远端 agent 跑。关掉这台电脑它也照跑，'
+            '任何设备上都能接着看。\n点击改成本机目录。',
       ),
     };
 
@@ -867,10 +870,19 @@ class _WorkspaceSheet extends StatelessWidget {
                     : null,
                 onTap: () => Navigator.of(context).pop(const _Auto()),
               ),
+            // ⚠️ **这一条不叫「云端」。**
+            //
+            // 机制上它确实是「文件放在远端容器的卷里」，而那正是从前的
+            // 名字。代价是这个能力**没有名字**：用户想「让它自己跑一段
+            // 时间，我关掉电脑」的时候，不会去翻一个叫「工作区」的菜单。
+            // 于是产品里最贵的那件事只能被碰巧发现。
+            //
+            // 名字改成它买到的东西，副标题写清那个承诺 —— 机制一个字
+            // 没动，这一条就从「一个存储位置」变回「一个能力」。
             ListTile(
-              leading: const Icon(Icons.cloud_outlined),
-              title: const Text('云端'),
-              subtitle: const Text('跑在远端 agent 的容器里，任何设备上都能接着聊'),
+              leading: const Icon(Icons.rocket_launch_outlined),
+              title: const Text('派出去跑'),
+              subtitle: const Text('交给远端 agent。关掉这台电脑它也照跑，回来就看得见结果'),
               onTap: () => Navigator.of(context).pop(const _Cloud()),
             ),
             if (named.isNotEmpty) ...[

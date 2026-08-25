@@ -119,6 +119,9 @@ protected_routes! {
     // 但 `search` 与一个 id 长得一样，写反了的症状是搜索被当成
     // 「打开一个叫 search 的会话」并回 404
     "/sessions/search" [GET] => get(crate::sessions::search),
+    // 同上 —— **也必须排在 `/sessions/{id}` 前面**，否则「导出」会被当成
+    // 「打开一个叫 export 的会话」并回 404
+    "/sessions/export" [GET] => get(crate::export::export),
     "/sessions/{id}" [GET, PATCH] => get(crate::sessions::detail).patch(crate::sessions::patch),
     // ── 一轮对话 ──
     //
@@ -1668,6 +1671,33 @@ mod tests {
             ],
             "过渡清单变了。**只允许变短** —— 边缘把 /auth/* 切过来之后，             这些逐条搬进 protected_routes!，最后连同这个函数一起删掉。             往里加新路由是把临时状态变成永久状态"
         );
+    }
+
+    /// **`/sessions/` 下面那些固定字面量，必须排在 `/sessions/{id}` 前面。**
+    ///
+    /// axum 按注册顺序匹配，而 `search` 与 `export` 长得跟一个会话 id 一样。
+    /// 写反了不会有任何编译错误、也不会有 panic —— 症状是那条路由回 404，
+    /// 而 404 在这里恰好是「没有这个会话」的正常答复，于是它看起来像
+    /// 「你要导出的东西不存在」而不是「路由挂错了」。
+    ///
+    /// 排在源码顺序上做判断，因为清单就是按源码顺序 for 循环注册的。
+    #[test]
+    fn 会话下面的固定路径排在通配前面() {
+        let code = include_str!("routes.rs");
+        let wildcard = code
+            .find("\"/sessions/{id}\"")
+            .expect("找不到 /sessions/{id} —— 它被改名了？这条测试要跟着改");
+        for literal in ["\"/sessions/search\"", "\"/sessions/export\""] {
+            let at = code
+                .find(literal)
+                .unwrap_or_else(|| panic!("找不到 {literal}"));
+            assert!(
+                at < wildcard,
+                "{literal} 排在了 /sessions/{{id}} 后面 —— 它会被当成\
+                 「打开一个叫那个名字的会话」并回 404，而 404 看起来像\
+                 「这个东西不存在」，没人会想到是路由顺序"
+            );
+        }
     }
 
     /// **不许在那三份清单之外注册路由。**

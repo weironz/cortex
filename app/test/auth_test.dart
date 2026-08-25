@@ -740,6 +740,10 @@ class _GateApi
       throw UnimplementedError('这个替身不测云沙箱下载');
 
   @override
+  Future<Uint8List> exportSessions() async =>
+      throw UnimplementedError('这个替身不测会话导出');
+
+  @override
   Future<List<FileNode>> sandboxListFiles(
     String path, {
     String? sessionId,

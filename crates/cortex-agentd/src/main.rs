@@ -34,6 +34,7 @@ mod delegated_token;
 mod env;
 mod episodes;
 mod error;
+mod export;
 mod gallery;
 mod image;
 mod import;
