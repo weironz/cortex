@@ -42,6 +42,10 @@ dotenvy.workspace = true
 # 随机位只有 80，而「窗口很短」不该被算进熵里。见 src/confirm.rs。
 getrandom = "0.3"
 hex = "0.4"
+# 右栏「终端」页签的真 PTY（Windows 走 ConPTY、unix 走 openpty）。
+# wezterm 系、MIT —— 「能搬就不写」里该搬的那种繁琐件：自己封 ConPTY
+# 的坑（EOF 语义、resize、句柄回收）在 src/terminal.rs 里已经见识过一角。
+portable-pty = "0.9.0"
 
 # 父进程存活探测在 unix 上用 kill(pid, 0)。Windows 走 tasklist，不需要它 ——
 # 见 src/supervise.rs 里「为什么不直接调 Win32」

@@ -101,6 +101,10 @@ pub fn router(state: LocalState) -> Router {
         // 两处指的是同一件事，路径前缀由各自的宿主决定
         .route("/runs", get(list_runs))
         .route("/runs/{session_id}", get(attach_run).delete(stop_run))
+        // 交互终端（右栏「终端」页签）。**设备本地能力**：shell 起在这台
+        // 机器上。认证走完整那把（桌面端的 dart:io WS 能带 Authorization
+        // 头），远程接入那把够不到 —— 见 attach_allows 与 crate::terminal
+        .route("/local/terminal/{session_id}", get(crate::terminal::ws))
         // WebSocket 升级走不了普通反代（那条路把 `upgrade` 头当逐跳首部剥了）。
         // 见 [`crate::ws_proxy`]
         .route("/ws", get(ws_proxy::handler))
@@ -844,6 +848,8 @@ mod attach_tests {
             (Method::POST, "/local/mcp/reload"),
             (Method::POST, "/local/import/run"),
             (Method::GET, "/local/workspace-root"),
+            // 在别人机器上开一个任意 shell —— 比上面哪一条都更是机器主人的权限
+            (Method::GET, "/local/terminal/01ABC"),
         ] {
             assert!(
                 !attach_allows(&m, p),

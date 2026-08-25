@@ -44,6 +44,12 @@ dependencies:
   intl: 0.20.3
   fetch_client: 1.2.1
   web_socket_channel: ^3.0.3
+  # 右栏「终端」页签的终端模拟器。选它是因为它是 Flutter 生态的事实标准
+  # （VT100/xterm 转义序列的完整实现 + 自绘渲染，不拉平台 view），
+  # 自己写一个转义序列解析器正是「能搬就不写」里最不该写的那种。
+  # 只在桌面端真的接上 PTY（cortex-local 的 /local/terminal）；Web 端
+  # 没有本地 shell，那个页签退回只读的命令记录，不摆一个连不上的终端。
+  xterm: ^4.0.0
   url_launcher: ^6.3.2
   crypto: ^3.0.7
   file_picker: ^11.0.3

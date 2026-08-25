@@ -42,6 +42,8 @@ mod runs;
 mod self_check;
 mod state;
 mod supervise;
+/// 右栏「终端」页签的真终端：PTY + WS。见模块头。
+mod terminal;
 mod turn;
 mod workspaces;
 mod ws_proxy;
@@ -62,6 +64,10 @@ mod origin_guard_test;
 /// 因为被测的正是「转发出去的请求带了什么头」）。
 #[cfg(test)]
 mod proxy_credential_test;
+
+/// 终端 WS 的端到端断言（真开端口 —— 升级与 409 只有穿过真 HTTP 栈才测得到）。
+#[cfg(test)]
+mod terminal_routes_test;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -434,6 +440,7 @@ async fn main() -> anyhow::Result<()> {
         attach_token: args
             .allow_remote_attach
             .then(|| cortex_core::Id::new().to_string()),
+        terminals: terminal::Terminals::default(),
     };
 
     if state.inbound_token.is_none() {

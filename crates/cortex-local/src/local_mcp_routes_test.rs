@@ -54,6 +54,7 @@ fn state(dir: &Path) -> LocalState {
         standalone_llm: false,
         inbound_token: None,
         attach_token: None,
+        terminals: crate::terminal::Terminals::default(),
     }
 }
 

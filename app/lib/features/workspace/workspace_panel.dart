@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_exception.dart';
 import '../../core/local_agent.dart';
+import '../../core/reveal_in_file_manager.dart';
 import '../../models/attachment.dart' show formatBytes;
 import '../../models/chat_session.dart';
 import '../../models/workspace.dart';
@@ -100,6 +101,18 @@ class WorkspacePanel extends ConsumerWidget {
             color: scheme.secondary,
           ),
           actions: [
+            // 「在资源管理器中打开」—— 只有**桌面端 + 会话绑了本机目录**
+            // 才画。判据与整块面板走哪一支是同一个（`sandboxOnly`），
+            // 外加构建侧的能力位：Web 上没有本机目录也没有文件管理器，
+            // 摆一个点了没反应的按钮就是约束 2 说的那种谎。云端那支的
+            // 文件在容器卷里，这台机器上没有对应目录 —— 同样不画。
+            if (kCanRevealInFileManager && !sandboxOnly)
+              IconButton(
+                onPressed: () => unawaited(revealInFileManager(workspace.root)),
+                iconSize: 17,
+                tooltip: '在资源管理器中打开',
+                icon: const Icon(Icons.open_in_new_rounded),
+              ),
             // 两支各有一个「更换工作区」，**同一个图标、同一个位置**，
             // 但打开的是两个不同的界面 —— 因为它们问的不是同一个问题：
             // 桌面端问「用这台机器上的哪个目录」，云端问「用那个卷里的

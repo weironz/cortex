@@ -13,26 +13,39 @@
 ///
 /// # 「终端」页签是什么
 ///
-/// 这一轮里跑过的每条 shell 命令与它的输出，按时间顺序。不是一个能敲的
-/// 终端 —— 敲命令是模型的事（或者用户自己开真终端）；这里回答的是
-/// 「它刚才到底跑了什么、输出了什么」，长输出在气泡里同样会挤成缝。
+/// **能连上本机 agent 时，是一个真的能敲的终端**（PTY + xterm，见
+/// [InteractiveTerminal]）。连不上（Web、或桌面端 agent 没起来）时退回
+/// 只读的命令记录：这一轮里跑过的每条 shell 命令与它的输出，按时间顺序 ——
+/// 那是「它刚才到底跑了什么」的答案，在没有本地 shell 的构建上依然成立。
+/// 判据在 [_TerminalTab] 一处；两种形态都不撒谎（约束 2）。
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/ansi.dart';
+import '../../core/terminal_channel.dart';
 import '../../core/theme.dart';
 import '../../models/tool_call.dart';
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../chat/session_changes_sheet.dart';
+import 'interactive_terminal.dart';
 import 'workspace_panel.dart';
 
 /// 右栏能内联的最小窗宽。`AppShell` 的三栏断点与「窄屏走底部抽屉」
 /// 共用这一个数 —— 两处各写 1240 的话，迟早一处改了另一处没跟上，
 /// 症状是某个宽度区间里点「在右栏打开」什么都不发生。
 const double kRailInlineBreakpoint = 1240;
+
+/// 右栏开关的图标 —— 顶栏（开/关）与栏头（收起）**必须是同一个**。
+///
+/// 常量放在右栏自己这儿、两处引用，而不是各写一遍：这个开关的语义是
+/// 「侧栏折叠」（与左栏那对 menu_open 一致），两处图标一旦分叉，用户就
+/// 认不出「栏头那个按钮收起去的，就是顶栏那个按钮能叫回来的」。
+/// filled = 右栏开着，outlined = 收着 —— 与顶栏其余开关同一套激活语义。
+const IconData kRailToggleFilled = Icons.view_sidebar_rounded;
+const IconData kRailToggleOutlined = Icons.view_sidebar_outlined;
 
 /// 窄屏上把右栏当**底部抽屉**拉上来。
 ///
@@ -88,12 +101,17 @@ class RightRail extends ConsumerWidget {
                 const SizedBox(width: 4),
               ],
               const Spacer(),
+              // ✕ 改成了折叠语义：这一栏不是弹层，是与左栏对称的一列。
+              // 「关闭」暗示它没了，而它只是收起去了 —— 顶栏保留同一个
+              // 图标随时展开（窄屏的底部抽屉形态下，这里收的是抽屉本身，
+              // 语义同样成立：再点顶栏那个图标它就回来）
               if (onClose != null)
                 IconButton(
+                  key: const ValueKey('rail:collapse'),
                   onPressed: onClose,
                   iconSize: 17,
-                  tooltip: '关闭',
-                  icon: const Icon(Icons.close_rounded),
+                  tooltip: '收起右栏',
+                  icon: const Icon(kRailToggleOutlined),
                 ),
             ],
           ),
@@ -109,7 +127,7 @@ class RightRail extends ConsumerWidget {
               padding: EdgeInsets.fromLTRB(12, 8, 12, 8),
               child: SessionChangesView(),
             ),
-            RailTab.terminal => const _TerminalView(),
+            RailTab.terminal => const _TerminalTab(),
           },
         ),
       ],
@@ -155,7 +173,41 @@ class _TabChip extends StatelessWidget {
   }
 }
 
-/// 这一轮跑过的 shell 命令与输出，按时间顺序。
+/// 「终端」页签画哪一种 —— **判据只在这里一处**。
+///
+/// 交互终端要三样都在：这个构建连得了（`kInteractiveTerminalSupported`，
+/// Web 恒 false）、本机 agent 活着（origin 非 null —— 死了的 agent 上
+/// 摆一个连不上的终端就是约束 2 说的那种谎）、有选中的会话（shell 的
+/// cwd 跟着会话的工作区绑定走）。缺任何一样退回只读的命令记录 ——
+/// 那在所有构建上都是真的。
+///
+/// 按 session 换 key：切会话就销毁重建，旧 shell 随 WS 关闭被收掉，
+/// 新会话拿到自己工作区里的新 shell —— 「生命周期跟着会话走」全在这一个
+/// key 上，不另设状态。
+class _TerminalTab extends ConsumerWidget {
+  const _TerminalTab();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final origin = ref.watch(localAgentOriginProvider).value;
+    final sessionId = ref.watch(
+      chatControllerProvider.select((s) => s.activeSessionId),
+    );
+    if (!kInteractiveTerminalSupported || origin == null || sessionId == null) {
+      return const _TerminalView();
+    }
+    return InteractiveTerminal(
+      key: ValueKey('terminal:$sessionId'),
+      origin: origin,
+      sessionId: sessionId,
+      // read 而不是 watch：这把凭据钉死在 agent 启动那一刻，agent 换代时
+      // origin 必然跟着变，上面那个 watch 已经会重建这里
+      token: ref.read(localAgentHandleProvider).pinnedCredential,
+    );
+  }
+}
+
+/// 这一轮跑过的 shell 命令与输出，按时间顺序 —— 没有本地 shell 时的形态。
 class _TerminalView extends ConsumerWidget {
   const _TerminalView();
 
