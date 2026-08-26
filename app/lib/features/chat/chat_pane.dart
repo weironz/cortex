@@ -33,6 +33,8 @@ class ChatPane extends ConsumerStatefulWidget {
     this.onOpenPanel,
     this.sessionsVisible = false,
     this.activePanel,
+    this.onToggleTerminal,
+    this.terminalActive = false,
   });
 
   /// 收起 / 展开左栏。窄到放不下内联时，由 `AppShell` 换成「开抽屉」。
@@ -52,6 +54,16 @@ class ChatPane extends ConsumerStatefulWidget {
   /// 右侧此刻内联显示着谁（`null` = 收起，或者当前宽度只能开抽屉）。
   /// 决定两个图标里哪一个是实心的。
   final RightPanel? activePanel;
+
+  /// 终端开关。`null` = 这个宿主没有终端（画廊那几页不传）。
+  ///
+  /// 由 `AppShell` 给而不是这里自己调 `terminalPanelProvider.toggle()`：
+  /// 宽窄两种布局下「打开终端」是两件不同的事（右侧一列 / 底部一张纸），
+  /// 而只有 `AppShell` 知道此刻是哪一种。
+  final VoidCallback? onToggleTerminal;
+
+  /// 终端此刻在不在前面 —— 决定图标是实心还是描边。
+  final bool terminalActive;
 
   @override
   ConsumerState<ChatPane> createState() => _ChatPaneState();
@@ -256,6 +268,22 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             // 右栏已经是三页签（文件 / 本轮改动 / 终端），文件夹只说得出
             // 三分之一。图标常量在 right_rail.dart —— 栏头「收起」用的必须
             // 是同一个，见那里的注释
+            // 终端。**摆在右栏开关左边**：它们控制的是同一列，
+            // 而终端是那一列里更常被叫出来的那个
+            if (widget.onToggleTerminal != null)
+              IconButton(
+                key: const ValueKey('chat:terminal'),
+                onPressed: widget.onToggleTerminal,
+                iconSize: 19,
+                tooltip: widget.terminalActive
+                    ? '收起终端 (Ctrl+`)'
+                    : '终端 (Ctrl+`)',
+                icon: Icon(
+                  widget.terminalActive
+                      ? Icons.terminal_rounded
+                      : Icons.terminal_outlined,
+                ),
+              ),
             if (widget.onSelectPanel != null) ...[
               _PanelButton(
                 panel: RightPanel.files,

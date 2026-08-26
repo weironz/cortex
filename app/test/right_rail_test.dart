@@ -1,4 +1,4 @@
-/// 右栏：折叠语义、终端页签的判据、「在资源管理器中打开」的判据。
+/// 右栏与终端面板：折叠语义、终端的判据、「在资源管理器中打开」的判据。
 ///
 /// # 这三组各自盯着什么
 ///
@@ -7,9 +7,10 @@
 ///    顶栏那个能叫回来的」。
 ///
 /// 2. **交互终端只在「本机 agent 活着」时出现**（约束 2）。判据只在
-///    `_TerminalTab` 一处；这里钉住它的两个方向：没有 agent 必须退回只读
+///    `TerminalPanel` 一处；这里钉住它的两个方向：没有 agent 必须退回只读
 ///    记录（摆一个连不上的终端就是在撒谎），有 agent 且有会话必须真的换成
-///    交互终端（否则能力造好了没人接）。
+///    交互终端（否则能力造好了没人接）。终端 2026-08-26 从右栏的页签里
+///    搬了出来，这一组跟着搬。
 ///
 /// 3. **「在资源管理器中打开」只在会话绑了本机目录时画**。云端会话的文件
 ///    在容器卷里，这台机器上没有对应目录 —— 画出来点了只会打开一个不存在
@@ -22,8 +23,10 @@ import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/core/theme.dart';
 import 'package:cortex_app/features/workspace/interactive_terminal.dart';
 import 'package:cortex_app/features/workspace/right_rail.dart';
+import 'package:cortex_app/features/workspace/terminal_panel.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/chat_controller.dart';
+import 'package:cortex_app/state/terminal_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -93,12 +96,22 @@ void main() {
     });
   });
 
-  group('终端页签的判据（只在 _TerminalTab 一处）', () {
-    testWidgets('本机 agent 没起来：不摆交互终端，退回只读命令记录', (tester) async {
-      await tester.pumpWidget(_app());
-      await _settle(tester);
+  group('终端面板的判据（只在 TerminalPanel 一处）', () {
+    /// 面板要连着一条会话才有 cwd（shell 的目录跟着工作区绑定走），
+    /// 而它自己不建会话 —— 所以这里替它建一条草稿。
+    Widget panelApp({String? agentOrigin}) => ProviderScope(
+      overrides: [
+        appConfigProvider.overrideWith(_MockConfig.new),
+        cortexApiProvider.overrideWithValue(MockCortexApi(instant: true)),
+        localAgentOriginProvider.overrideWith(
+          (ref) => Future.value(agentOrigin),
+        ),
+      ],
+      child: const MaterialApp(home: Scaffold(body: TerminalPanel())),
+    );
 
-      await tester.tap(find.text('终端'));
+    testWidgets('本机 agent 没起来：不摆交互终端，退回只读命令记录', (tester) async {
+      await tester.pumpWidget(panelApp());
       await _settle(tester);
 
       expect(
@@ -113,19 +126,23 @@ void main() {
         findsOneWidget,
         reason: '退回的只读记录本身是真的（它显示模型跑过什么），不该一起消失',
       );
+      expect(
+        find.byTooltip('新建终端'),
+        findsNothing,
+        reason: '连不上时那个加号点了什么都不会发生 —— 摆出来就是又一次撒谎',
+      );
     });
 
     testWidgets('agent 活着且有会话：换成真的交互终端', (tester) async {
-      await tester.pumpWidget(_app(agentOrigin: 'http://127.0.0.1:9'));
+      await tester.pumpWidget(panelApp(agentOrigin: 'http://127.0.0.1:9'));
       await _settle(tester);
 
-      // 有会话才有 cwd（跟着工作区绑定走）—— 建一个草稿会话即可
-      _containerOf(
-        tester,
-      ).read(chatControllerProvider.notifier).createSession();
-      await tester.pump();
-
-      await tester.tap(find.text('终端'));
+      final c = ProviderScope.containerOf(
+        tester.element(find.byType(TerminalPanel)),
+      );
+      c.read(chatControllerProvider.notifier).createSession();
+      // 面板不自己开标签 —— 顶栏那个按钮（或 Ctrl+`）才开
+      c.read(terminalPanelProvider.notifier).addTab();
       await _settle(tester);
 
       expect(
@@ -137,6 +154,33 @@ void main() {
       );
       // 测试环境连不上 9 号端口是预期的（flutter_test 挡了真网络）；
       // 这里验的是判据接线，不是握手本身 —— 那在 Rust 侧的测试里
+    });
+
+    /// ⚠️ **切标签不能把没在前面的那个 shell 弄没。**
+    ///
+    /// 每个标签背后是一个真的 shell 子进程，部件一销毁 WS 就关、agent
+    /// 那侧就收掉它。写成「只画当前那个」的话，症状是「切到终端 2 再切
+    /// 回来，终端 1 里跑着的东西没了」—— 而且没有任何报错。
+    testWidgets('开两个标签，两个终端都留在树上', (tester) async {
+      await tester.pumpWidget(panelApp(agentOrigin: 'http://127.0.0.1:9'));
+      await _settle(tester);
+
+      final c = ProviderScope.containerOf(
+        tester.element(find.byType(TerminalPanel)),
+      );
+      c.read(chatControllerProvider.notifier).createSession();
+      final panel = c.read(terminalPanelProvider.notifier);
+      panel.addTab();
+      panel.addTab();
+      await _settle(tester);
+
+      expect(
+        find.byType(InteractiveTerminal, skipOffstage: false),
+        findsNWidgets(2),
+        reason: '第二个标签一开，第一个就被销毁了 —— 它的 shell 随之被收掉',
+      );
+      expect(find.text('终端 1'), findsOneWidget);
+      expect(find.text('终端 2'), findsOneWidget);
     });
   });
 

@@ -22,13 +22,21 @@
 //! 字节都可能出现**，任何带内约定都会被某个程序的输出撞上。WS 本来就有
 //! 两种帧，正好各走各的。
 //!
-//! # 上限：每会话同时最多一个终端
+//! # 一个会话开几个终端：**不设上限**（2026-08-26 起）
 //!
-//! 页签关了重开可以再开一个（不保留历史），但同一会话**同时**只有一个 ——
-//! 两个页签各拿一个 shell 对同一个工作区写东西，用户自己都说不清哪个是哪个；
-//! 而没有上限的话，一个重连风暴能在几分钟里堆出上百个 powershell。
+//! 此前是「每会话同时最多一个」，理由写的是「两个页签各拿一个 shell 对同一个
+//! 工作区写东西，用户自己都说不清哪个是哪个」。界面上了多标签之后这条不成立
+//! 了：每个 shell 在标签栏上有名字、有自己的 ×，谁是谁一目了然 —— 那时的
+//! 「说不清」来自界面上根本没有第二个终端的位置，不是来自并发本身。
+//!
+//! 另一条理由是「重连风暴能堆出上百个 powershell」。它也不成立：客户端
+//! **不自动重连** —— WS 一断就画一句原因加一个「重开一个 shell」的按钮，
+//! 开第二个 shell 永远需要一次人点。
+//!
+//! 所以不再拦，只**记数并在数目反常时记一条 WARN**（见 [`Terminals`]）：
+//! 上限拦得住失控，但也拦得住正当用法；日志两样都看得见，且不挡人。
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -51,43 +59,91 @@ const INITIAL_SIZE: PtySize = PtySize {
     pixel_height: 0,
 };
 
-/// 「哪些会话此刻开着终端」的簿子。整个进程一份，挂在 [`LocalState`] 上。
+/// 「此刻开着几个终端」的簿子。整个进程一份，挂在 [`LocalState`] 上。
 ///
-/// 只记**占用**，不持有 PTY 本身：PTY 的生命周期跟着那条 WS 连接走
-/// （见 [`pump`]），簿子只负责把「同会话第二个终端」拒在升级之前。
+/// 只**记数**，不持有 PTY 本身：PTY 的生命周期跟着那条 WS 连接走
+/// （见 [`pump`]）。它不再拦任何人 —— 上限已经取消，见模块头。
+///
+/// 那为什么还留着它？因为「开了多少个」是唯一能让失控**看得见**的东西。
+/// 一个每秒多一个 shell 的 bug，在没有这本簿子的世界里只表现为
+/// 「这台机器怎么越来越慢」。
 #[derive(Clone, Default)]
 pub struct Terminals {
-    occupied: Arc<Mutex<HashSet<String>>>,
+    live: Arc<Mutex<HashMap<String, usize>>>,
 }
 
+/// 多到该看一眼日志的数目。
+///
+/// 不是上限，是**记一条 WARN 的阈值**。挑 16 是因为「同时用着十几个 shell」
+/// 已经罕见到值得留一行记录，而正常用法（两三个）永远碰不到它。
+const NOISY: usize = 16;
+
 impl Terminals {
-    /// 认领这个会话的终端席位。已被占用时返回 `None` —— 上限就是这里。
+    /// 记一个新终端。返回的 [`Slot`] 是 RAII 的：drop 即销账。
     ///
-    /// 返回的 [`Slot`] 是 RAII 的：drop 即释放。**不提供显式的 release**，
-    /// 因为释放时机与「那条连接结束」必须严格一致 —— 手动释放漏一条
-    /// 提前 return 的路，那个会话的终端就永久开不了了。
-    pub fn try_claim(&self, session_id: &str) -> Option<Slot> {
-        let mut set = self.occupied.lock().ok()?;
-        if !set.insert(session_id.to_string()) {
-            return None;
+    /// **不提供显式的 release**，因为销账时机与「那条连接结束」必须严格
+    /// 一致 —— 手动销账漏一条提前 return 的路，计数就永远偏高，
+    /// 而那正是这本簿子唯一的用处。
+    pub fn open(&self, session_id: &str) -> Slot {
+        let mut n = 0;
+        if let Ok(mut map) = self.live.lock() {
+            let e = map.entry(session_id.to_string()).or_insert(0);
+            *e += 1;
+            n = *e;
         }
-        Some(Slot {
+        tracing::debug!(session = %session_id, live = n, "开了一个终端");
+        if n >= NOISY {
+            tracing::warn!(
+                session = %session_id,
+                live = n,
+                "这个会话同时开着很多终端 —— 上限已取消，这条只是让失控看得见"
+            );
+        }
+        Slot {
             id: session_id.to_string(),
-            occupied: Arc::clone(&self.occupied),
-        })
+            live: Arc::clone(&self.live),
+        }
+    }
+
+    /// 这个会话此刻开着几个。
+    ///
+    /// ⚠️ **只在测试里编译**：生产上这本簿子的出口是日志（开一个记一条
+    /// debug、多到反常记一条 warn），没有第二个读者。留一个没人调的
+    /// public 方法在这儿，下一个人会以为它是某处依赖的接口。
+    #[cfg(test)]
+    #[must_use]
+    pub fn live_for(&self, session_id: &str) -> usize {
+        self.live
+            .lock()
+            .ok()
+            .and_then(|m| m.get(session_id).copied())
+            .unwrap_or(0)
     }
 }
 
-/// 一个会话的终端席位，drop 即归还。
+/// 一个终端的账，drop 即销。
 pub struct Slot {
     id: String,
-    occupied: Arc<Mutex<HashSet<String>>>,
+    live: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        if let Ok(mut set) = self.occupied.lock() {
-            set.remove(&self.id);
+        if let Ok(mut map) = self.live.lock() {
+            // 归零就把这条整个删掉：留着一堆 `= 0` 的条目，等于按会话数
+            // 泄漏内存，而会话是能一直加的
+            let mut left = 0;
+            if let Some(n) = map.get_mut(&self.id) {
+                *n = n.saturating_sub(1);
+                left = *n;
+                if *n == 0 {
+                    map.remove(&self.id);
+                }
+            }
+            // 与开的那条配对。**一直减不回 0 就是账漏了** —— 而账漏的
+            // 唯一后果就是上面那条 WARN 早晚会在没人多开的时候响，
+            // 到那时这两条日志是唯一能对上的东西
+            tracing::debug!(session = %self.id, left, "关掉一个终端");
         }
     }
 }
@@ -258,15 +314,9 @@ pub async fn ws(
         )
             .into_response();
     }
-    // 先占席位再升级：升级之后才发现占不上，客户端看到的是「连上又立刻断」，
-    // 而 409 停在 HTTP 层，原因带得出去
-    let Some(slot) = st.terminals.try_claim(&session_id) else {
-        return (
-            StatusCode::CONFLICT,
-            "这个会话已经开着一个终端了（每会话同时最多一个）。先关掉那个再开。",
-        )
-            .into_response();
-    };
+    // 记一笔账。**不再拦**（上限已取消，见模块头）—— 它只让「开了多少个」
+    // 在日志里看得见
+    let slot = st.terminals.open(&session_id);
     let Some(cwd) = working_dir(st.engine.workspaces.get(&session_id)) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -368,29 +418,38 @@ fn apply_control(sess: &PtySession, raw: &str) {
 mod tests {
     use super::*;
 
-    /// **每会话同时最多一个终端** —— 这个上限就是防跑飞的全部机制。
+    /// **多开不再被拦，但要记得清清楚楚。**
     ///
-    /// 它坏掉的样子：一个重连风暴（客户端断线自动重试）每秒开一个新
-    /// powershell，几分钟就是上百个进程，而没有任何一处会报错。
+    /// 上限 2026-08-26 取消了（理由见模块头：界面上了多标签，而客户端
+    /// 从不自动重连）。取消一道闸的同时必须留下能看见失控的东西 ——
+    /// 否则「这台机器怎么越来越慢」将没有任何线索。
+    ///
+    /// 所以这条钉两件事：多开放行，且计数**准**。计数不准的话这本簿子
+    /// 就只剩误导 —— 一个永远偏高的数字比没有数字更糟。
     #[test]
-    fn a_session_holds_at_most_one_terminal() {
+    fn 同一会话开几个都放行_但账要记准() {
         let terminals = Terminals::default();
 
-        let first = terminals.try_claim("s1");
-        assert!(first.is_some(), "空簿子上第一次认领必须成功");
-        assert!(
-            terminals.try_claim("s1").is_none(),
-            "同一会话的第二个终端必须被拒 —— 放行的话重连风暴会堆出上百个 shell"
-        );
-        assert!(
-            terminals.try_claim("s2").is_some(),
-            "上限是每会话一个，不是全进程一个 —— 别的会话不该被 s1 占着"
+        let a = terminals.open("s1");
+        let b = terminals.open("s1");
+        let c = terminals.open("s2");
+        assert_eq!(terminals.live_for("s1"), 2, "同会话第二个必须放行");
+        assert_eq!(terminals.live_for("s2"), 1, "别的会话各记各的");
+
+        drop(b);
+        assert_eq!(
+            terminals.live_for("s1"),
+            1,
+            "账是 RAII 的：连接结束（Slot drop）就该销掉，             漏一条提前 return 的路计数就永远偏高"
         );
 
-        drop(first);
-        assert!(
-            terminals.try_claim("s1").is_some(),
-            "席位是 RAII 的：连接结束（Slot drop）之后同一会话要能重开"
+        drop(a);
+        drop(c);
+        assert_eq!(terminals.live_for("s1"), 0);
+        assert_eq!(
+            terminals.live_for("s2"),
+            0,
+            "归零的会话要从簿子里整个删掉 —— 留着一堆 0 等于按会话数漏内存"
         );
     }
 

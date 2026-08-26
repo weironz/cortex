@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
-use tokio_tungstenite::tungstenite::{Error as TsError, Message as TsMessage};
+use tokio_tungstenite::tungstenite::Message as TsMessage;
 
 use crate::config::LlmRoute;
 use crate::confirm::ConfirmRegistry;
@@ -143,10 +143,71 @@ async fn keystrokes_cross_the_wire_and_echo_back() {
     );
 }
 
-/// 上限在 HTTP 层说话：同会话第二条连接拿到 **409 + 原因**，
-/// 而第一条断开之后席位回来、能重连。
+/// 收一阵子这条连接的输出，顺手替 PSReadLine 答掉光标位置查询。
+///
+/// # ⚠️ 不答 DSR 就什么都收不到
+///
+/// ConPTY 上 PSReadLine 起步时会问「光标在哪」（`ESC[6n`），**拿不到回答
+/// 就不往下画** —— 表现是只收到一个 `[6n` 然后一直静默。真客户端
+/// （xterm.dart）自动答，测试里得替它答。第一版就是漏了这一步，卡到超时
+/// 才发现，而报错一个字都没提原因。
+///
+/// 返回收到的全部字节。`until` 命中即提前返回。
+async fn collect(
+    sock: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    until: Option<&str>,
+    budget: Duration,
+) -> Vec<u8> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut seen = Vec::new();
+    let mut answered = 0usize;
+    loop {
+        let Ok(frame) = tokio::time::timeout_at(deadline, sock.next()).await else {
+            return seen;
+        };
+        match frame {
+            Some(Ok(TsMessage::Binary(b))) => {
+                seen.extend_from_slice(&b);
+                let asks = seen.windows(4).filter(|w| w == b"[6n").count();
+                while answered < asks {
+                    sock.send(TsMessage::Binary(b"[1;1R".to_vec().into()))
+                        .await
+                        .expect("回答 DSR 失败");
+                    answered += 1;
+                }
+                if let Some(m) = until
+                    && seen.windows(m.len()).any(|w| w == m.as_bytes())
+                {
+                    return seen;
+                }
+            }
+            Some(Ok(_)) => {}
+            Some(Err(_)) | None => return seen,
+        }
+    }
+}
+
+fn contains(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|w| w == needle.as_bytes())
+}
+
+/// **同会话的第二条连接照样通** —— 上限 2026-08-26 取消了。
+///
+/// # 为什么这条测试留着，只是掉了个头
+///
+/// 它从前钉的是「第二条拿 409」。取消上限之后，那句断言反过来才是要守的：
+/// 界面上了多标签，而**每个标签就是一条这样的连接** —— 服务端若还拦着，
+/// 用户点加号会得到一个连上就断的空终端，且看不出为什么。
+///
+/// 两条连接各自是一个独立的 shell（各有自己的 PTY 与子进程），
+/// 所以顺带钉住**互不干扰**：往第一条里敲字，第二条不该看见。
+/// 共用一个 PTY 的话，两个标签会互相吞对方的输入。
 #[tokio::test]
-async fn the_second_terminal_is_a_409_and_the_seat_comes_back() {
+async fn 同会话可以同时开多个终端_且互不干扰() {
     let dir = tempfile::tempdir().expect("临时目录");
     let base = serve(state(dir.path())).await;
     let url = format!("{base}/local/terminal/s1");
@@ -154,36 +215,33 @@ async fn the_second_terminal_is_a_409_and_the_seat_comes_back() {
     let (mut first, _) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("第一条连接该成功");
-
-    let err = tokio_tungstenite::connect_async(&url)
+    let (mut second, _) = tokio_tungstenite::connect_async(&url)
         .await
-        .expect_err("第二条连接必须被拒 —— 每会话同时最多一个终端");
-    let TsError::Http(resp) = err else {
-        panic!(
-            "该是 HTTP 层的 409（升级之前就拒，原因带得出去），实际：{err}。\
-             「连上又立刻断」会被客户端当成网络抖动去无限重试"
-        );
-    };
-    assert_eq!(resp.status(), 409, "状态码就是「已经开着一个」的信号");
+        .expect("第二条必须也成功 —— 上限取消了，多标签靠的就是这个");
 
-    // 别的会话不受牵连
-    let other = tokio_tungstenite::connect_async(format!("{base}/local/terminal/s2")).await;
-    assert!(other.is_ok(), "上限是每会话一个，不是全进程一个");
+    // 两边都先让 shell 起来（顺带答掉各自的 DSR）
+    collect(&mut first, None, Duration::from_secs(3)).await;
+    collect(&mut second, None, Duration::from_secs(3)).await;
+
+    let marker = "cortex-only-in-one";
+    first
+        .send(TsMessage::Binary(marker.as_bytes().to_vec().into()))
+        .await
+        .expect("敲得进去");
+
+    let a = collect(&mut first, Some(marker), Duration::from_secs(20)).await;
+    assert!(
+        contains(&a, marker),
+        "第一条连接自己都没回显 —— 两条连接互相把对方的 PTY 顶掉了。收到：{:?}",
+        String::from_utf8_lossy(&a)
+    );
+
+    let b = collect(&mut second, None, Duration::from_secs(2)).await;
+    assert!(
+        !contains(&b, marker),
+        "第二个终端看见了敲进第一个的东西 —— 它们该是两个独立的 shell"
+    );
 
     first.close(None).await.ok();
-    drop(first);
-
-    // 席位在 pump 结束时释放，而服务端看到断开有一点延迟 —— 轮询重连。
-    // 一直 409 到超时的话，说明 Slot 没随连接归还：那个会话的终端从此
-    // 永久开不了，正是这条测试要挡的回归
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        match tokio_tungstenite::connect_async(&url).await {
-            Ok(_) => break,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err(e) => panic!("第一条断开后席位没有归还，重连一直失败：{e}"),
-        }
-    }
+    second.close(None).await.ok();
 }

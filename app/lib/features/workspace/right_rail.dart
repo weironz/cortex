@@ -1,36 +1,32 @@
-/// 右栏 —— 三页签：文件 / 本轮改动 / 终端。
+/// 右栏 —— 两页签：文件 / 本轮改动。
 ///
 /// # 为什么从「只放文件」改成页签
 ///
 /// 长 diff 从前只能在气泡里看（会把对话挤成一条缝）或点开一个弹层
-/// （挡住对话）。「改动」与「终端输出」都是**看着对话对照读**的东西 ——
-/// 它们需要的是与对话并排的一列，而右栏正好就是那一列。
+/// （挡住对话）。改动是**看着对话对照读**的东西 —— 它需要的是与对话
+/// 并排的一列，而右栏正好就是那一列。
 ///
-/// 三者共用一个入口图标（顶栏的文件图标），页签在栏内切：用户的心智是
-/// 「打开右栏，然后在里面翻」，不是三个独立的栏。页签状态在
-/// [railTabProvider] —— 顶栏「本会话改动」与 diff 卡的「在右栏打开」
-/// 都要能从外面切过来。
+/// 两者共用一个入口图标（顶栏的右栏图标），页签在栏内切：用户的心智是
+/// 「打开右栏，然后在里面翻」，不是两个独立的栏 —— 它们回答的是同一类
+/// 问题（这个会话动了哪些文件）。页签状态在 [railTabProvider] ——
+/// 顶栏「本会话改动」与 diff 卡的「在右栏打开」都要能从外面切过来。
 ///
-/// # 「终端」页签是什么
+/// # 终端去哪了
 ///
-/// **能连上本机 agent 时，是一个真的能敲的终端**（PTY + xterm，见
-/// [InteractiveTerminal]）。连不上（Web、或桌面端 agent 没起来）时退回
-/// 只读的命令记录：这一轮里跑过的每条 shell 命令与它的输出，按时间顺序 ——
-/// 那是「它刚才到底跑了什么」的答案，在没有本地 shell 的构建上依然成立。
-/// 判据在 [_TerminalTab] 一处；两种形态都不撒谎（约束 2）。
+/// 它 2026-08-26 从这里搬走了，成了右侧那一列的另一位住客
+/// （`RightPanel.terminal`，见 `TerminalPanel`）。理由是它不是「看」的
+/// 东西：终端要自己的标签页、开关、快捷键、还要能铺满 —— 这四样在一条
+/// 共用的页签条里一样都摆不下。
+///
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/ansi.dart';
-import '../../core/terminal_channel.dart';
 import '../../core/theme.dart';
-import '../../models/tool_call.dart';
 import '../../state/app_providers.dart';
-import '../../state/chat_controller.dart';
 import '../chat/session_changes_sheet.dart';
-import 'interactive_terminal.dart';
+import 'terminal_panel.dart';
 import 'workspace_panel.dart';
 
 /// 右栏能内联的最小窗宽。`AppShell` 的三栏断点与「窄屏走底部抽屉」
@@ -69,7 +65,17 @@ Future<void> showRightRailSheet(BuildContext context) {
     builder: (sheetContext) => FractionallySizedBox(
       // 86%：顶上留一条看得见对话的缝 —— 全屏会让人忘了自己从哪来
       heightFactor: 0.86,
-      child: RightRail(onClose: () => Navigator.of(sheetContext).pop()),
+      child: Consumer(
+        builder: (ctx, ref, _) =>
+            ref.watch(layoutProvider).rightPanel == RightPanel.terminal
+            // ⚠️ 窄屏上终端的 shell **活不过这张纸**：它挂在弹层里，
+            // 纸一收部件就销毁，WS 随之关闭。宽屏那条路不是这样
+            // （见 `AppShell._terminalLayer`）。
+            // 不做成一样是因为弹层没有「留在树上」的位置，而为它专门
+            // 造一个，代价是窄屏上多一块永远挂着的隐藏区域
+            ? const TerminalPanel(canExpand: false)
+            : RightRail(onClose: () => Navigator.of(sheetContext).pop()),
+      ),
     ),
   );
 }
@@ -127,7 +133,6 @@ class RightRail extends ConsumerWidget {
               padding: EdgeInsets.fromLTRB(12, 8, 12, 8),
               child: SessionChangesView(),
             ),
-            RailTab.terminal => const _TerminalTab(),
           },
         ),
       ],
@@ -169,170 +174,6 @@ class _TabChip extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// 「终端」页签画哪一种 —— **判据只在这里一处**。
-///
-/// 交互终端要三样都在：这个构建连得了（`kInteractiveTerminalSupported`，
-/// Web 恒 false）、本机 agent 活着（origin 非 null —— 死了的 agent 上
-/// 摆一个连不上的终端就是约束 2 说的那种谎）、有选中的会话（shell 的
-/// cwd 跟着会话的工作区绑定走）。缺任何一样退回只读的命令记录 ——
-/// 那在所有构建上都是真的。
-///
-/// 按 session 换 key：切会话就销毁重建，旧 shell 随 WS 关闭被收掉，
-/// 新会话拿到自己工作区里的新 shell —— 「生命周期跟着会话走」全在这一个
-/// key 上，不另设状态。
-class _TerminalTab extends ConsumerWidget {
-  const _TerminalTab();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final origin = ref.watch(localAgentOriginProvider).value;
-    final sessionId = ref.watch(
-      chatControllerProvider.select((s) => s.activeSessionId),
-    );
-    if (!kInteractiveTerminalSupported || origin == null || sessionId == null) {
-      return const _TerminalView();
-    }
-    return InteractiveTerminal(
-      key: ValueKey('terminal:$sessionId'),
-      origin: origin,
-      sessionId: sessionId,
-      // read 而不是 watch：这把凭据钉死在 agent 启动那一刻，agent 换代时
-      // origin 必然跟着变，上面那个 watch 已经会重建这里
-      token: ref.read(localAgentHandleProvider).pinnedCredential,
-    );
-  }
-}
-
-/// 这一轮跑过的 shell 命令与输出，按时间顺序 —— 没有本地 shell 时的形态。
-class _TerminalView extends ConsumerWidget {
-  const _TerminalView();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final messages = ref.watch(
-      chatControllerProvider.select((s) => s.activeTranscript),
-    );
-    final calls = [
-      for (final m in messages)
-        for (final ToolCall c in m.toolCalls)
-          if (c.name == 'shell') c,
-    ];
-
-    if (calls.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.all(16),
-        child: Text(
-          '这个会话还没有跑过命令。',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: scheme.onSurfaceVariant,
-          ),
-        ),
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-      itemCount: calls.length,
-      itemBuilder: (context, i) {
-        final c = calls[i];
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: Container(
-            decoration: BoxDecoration(
-              color: scheme.surfaceContainerHigh,
-              borderRadius: BorderRadius.circular(CortexTokens.radiusRow),
-              border: Border.all(color: scheme.outlineVariant),
-            ),
-            padding: const EdgeInsets.all(10),
-            child: SelectionArea(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        r'$ ',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          fontFamily: 'JetBrains Mono',
-                          fontFamilyFallback: CortexTheme.monoFallback,
-                          color: theme.cortex.foregroundTertiary,
-                        ),
-                      ),
-                      Expanded(
-                        child: Text(
-                          // shellCommand 而不是 arguments：后者是 daemon 的
-                          // `(command=…)` 包装，接在 `$ ` 后面画出来是
-                          // `$ (command=git status)` —— 伪终端的形式感
-                          // 反而放大了内容的不对
-                          c.shellCommand ?? '(命令内容不可用)',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            fontFamily: 'JetBrains Mono',
-                            fontFamilyFallback: CortexTheme.monoFallback,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      if (c.failed)
-                        Text(
-                          '失败',
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: scheme.error,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                    ],
-                  ),
-                  if ((c.result ?? '').isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    // 输出走 ANSI 解析着色：这里放的是真终端的输出，
-                    // cargo / npm / git 一律带色，不解析的话用户看到的是
-                    // `[32m通过[0m` 而不是一个绿色的「通过」。失败时不解析
-                    // —— 整段错误色说的是「这条挂了」，让命令自己的配色
-                    // 盖过它只会把这件事冲淡
-                    if (c.failed)
-                      Text(
-                        stripAnsi(c.result!),
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          fontFamily: 'JetBrains Mono',
-                          fontFamilyFallback: CortexTheme.monoFallback,
-                          height: 1.5,
-                          color: scheme.error,
-                        ),
-                      )
-                    else
-                      Text.rich(
-                        TextSpan(
-                          children: parseAnsi(
-                            c.result!,
-                            base:
-                                (theme.textTheme.bodySmall ?? const TextStyle())
-                                    .copyWith(
-                                      fontFamily: 'JetBrains Mono',
-                                      fontFamilyFallback:
-                                          CortexTheme.monoFallback,
-                                      height: 1.5,
-                                      color: scheme.onSurfaceVariant,
-                                    ),
-                            // 深色主题要亮档色板 —— 不传的话 cargo 的红字
-                            // 在深底上对比度不够，编译报错恰好最读不清
-                            brightness: theme.brightness,
-                          ),
-                        ),
-                      ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        );
-      },
     );
   }
 }
