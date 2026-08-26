@@ -1013,6 +1013,23 @@ fn describe_all(provider: &str, names: &[String], custom_endpoint: bool) -> Vec<
         .iter()
         .map(|id| {
             let info = cortex_llm::catalog::lookup(provider, id);
+            // ⚠️ **目录查不到时回落到供应商定义。**
+            //
+            // 这一位从前只问目录（models.dev 的编译期快照），而**服务端拦不拦
+            // 图问的是定义**（`ensure_can_see` → `provider::vision_support`）——
+            // 两处判据，两个源。今天两边碰巧说法一致，所以没出事；一旦分叉，
+            // 表现是「界面画着『看得懂图』，发出去被自己的服务端拦下」，
+            // 或者反过来「界面说看不懂，发过去其实好好的」。
+            //
+            // 而它必然会分叉：目录是编译期快照，**新模型永远慢一拍**。
+            // 2026-08-26 的实例：DeepSeek 8-21 上线 `deepseek-v4-flash-vision-exp`，
+            // 目录里一条都没有，于是它的 vision 是 null（「不知道」），
+            // 一用「视觉」筛选就消失 —— 而定义里我们已经写明它 vision: true。
+            //
+            // 回落只补目录**说不出来**的那一位，不覆盖目录已有的答案：
+            // 目录知道的是 5000 多个模型的实测能力，定义只知道内置那几家。
+            let declared = cortex_llm::provider::vision_support(provider, id);
+            let vision = info.as_ref().map(|i| i.vision).or(declared.declared());
             // ⚠️ 生图这一位**不能只问目录**：目录里 alibaba 一个
             // `image_output` 都没有，而真实账号上有 19 个。而且它还要
             // 回答「我们调不调得动这家」—— 判据统一在 `is_image_model`
@@ -1024,7 +1041,7 @@ fn describe_all(provider: &str, names: &[String], custom_endpoint: bool) -> Vec<
                     .map_or_else(|| id.clone(), |i| i.display_name.clone()),
                 context: info.as_ref().map(|i| i.context),
                 tool_call: info.as_ref().map(|i| i.tool_call),
-                vision: info.as_ref().map(|i| i.vision),
+                vision,
                 // ⚠️ **只认 `is_image_model`，不回落到目录那一位。**
                 //
                 // 回落的话，`gpt-image-1` 会被报成能生图 —— 目录里它确实
@@ -1485,6 +1502,40 @@ mod tests {
             got.contains("qwen-max"),
             "剩下的多半是「这个型号名这家不认」。不带上名字的话，\
              一个配了 240 个型号的人不知道是哪一个的问题。实际：{got}"
+        );
+    }
+
+    /// **界面上那一位与服务端拦不拦，必须是同一个答案。**
+    ///
+    /// 界面读目录（models.dev 编译期快照），服务端 `ensure_can_see` 读定义
+    /// —— 两个源。目录是快照，**新模型永远慢一拍**：`deepseek-v4-flash-vision-exp`
+    /// 2026-08-21 上线，快照里一条都没有。没有回落的话，它的 vision 是
+    /// null（「不知道」），用户拿「视觉」一筛它就消失 —— 而那恰恰是他手上
+    /// 唯一能看图的模型。
+    ///
+    /// 这条同时钉住反向：目录说得出的，回落不许去覆盖它。
+    #[test]
+    fn 目录不认识的新模型_能力回落到供应商定义() {
+        let got = describe_all(
+            "deepseek",
+            &["deepseek-v4-flash-vision-exp".to_owned()],
+            false,
+        );
+        let m = got.first().expect("应描述出一条");
+        assert_eq!(
+            m.vision,
+            Some(true),
+            "定义里明写 vision:true 的模型，界面这一位不能是「不知道」——\
+             否则「换一个能看图的模型」会把唯一的解藏起来。实际：{:?}",
+            m.vision
+        );
+
+        // 反向：定义说不支持的，也要如实说，不能被回落抹成「不知道」
+        let blind = describe_all("deepseek", &["deepseek-v4-pro".to_owned()], false);
+        assert_eq!(
+            blind.first().expect("应描述出一条").vision,
+            Some(false),
+            "定义与目录都说 deepseek-v4-pro 看不懂图，界面就得说看不懂"
         );
     }
 }

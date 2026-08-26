@@ -246,6 +246,23 @@ impl VisionSupport {
     pub fn allows_images(self) -> bool {
         !matches!(self, Self::Unsupported)
     }
+
+    /// 定义里**明确说了**的那一位；没说给 `None`。
+    ///
+    /// 给界面用：那一层的 `Option<bool>` 与这个三态是同一件事的两种写法
+    /// （`None` = 「不知道」，界面据此不画徽标、也不当成「不行」）。
+    ///
+    /// ⚠️ **不要拿它去判断能不能发** —— 那是 [`Self::allows_images`]，
+    /// 判据不同：发送时「不知道」放行，而界面上「不知道」不能画成「有」。
+    /// 两处判据故意不一样，别去「统一」它们。
+    #[must_use]
+    pub fn declared(self) -> Option<bool> {
+        match self {
+            Self::Supported => Some(true),
+            Self::Unsupported => Some(false),
+            Self::Unknown => None,
+        }
+    }
 }
 
 #[cfg(test)]

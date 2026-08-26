@@ -33,9 +33,20 @@ pub enum LlmError {
     /// 单独立一个变体而不是塞进 `Provider`：**这是唯一能在本地断定的多模态错误**，
     /// 而它的替代结局是最坏的一种 —— 图被静默丢掉，模型回一句
     /// 「我没有看到你附上任何图片」，用户与开发者都不知道发生了什么。
-    #[error(
-        "模型 `{provider}/{model}` 不支持图像输入；请改用支持 vision 的模型（配置 CORTEX_VISION_PROVIDER / CORTEX_VISION_MODEL）"
-    )]
+    ///
+    /// # 这句话为什么不再提 `CORTEX_VISION_PROVIDER`
+    ///
+    /// 它从前写着「配置 CORTEX_VISION_PROVIDER / CORTEX_VISION_MODEL」，
+    /// 而**这个仓库里没有任何代码读这两个变量** —— 它们属于媒体转录
+    /// （把图转成文字好让记忆检索得到），拆分之后那条管线归 Cormex 了。
+    /// 也就是说：用户照着这句话去配，配对了也不会让这里变成可能。
+    ///
+    /// 一条指向死变量的错误比没有提示更糟：它让人以为自己差一步配置，
+    /// 而实际上差的是另一件事（换个模型）。这是 CLAUDE.md 约束 2
+    /// 长在错误文案上的样子。
+    ///
+    /// 所以这句话只说**当下真的能做到的那个动作**：换一个看得懂图的模型。
+    #[error("模型 `{provider}/{model}` 看不懂图。换一个带「视觉」标记的模型再发一次。")]
     VisionUnsupported { provider: String, model: String },
 
     /// 图像 MIME 不在各家 vision API 的交集里。

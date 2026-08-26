@@ -264,7 +264,7 @@ Session    { …, workspace_id: Option<WorkspaceId> }      ← 不再有 runtime
 |---|---|---|---|
 | 渲染工具事件、答工具确认 | ✅ | ✅ | ✅ |
 | **操作你机器上的文件** | ✅ 走本机 cortex-local | ✅ | ⚠️ 默认走**云沙箱**里的 `/workspace`；那台机器开了 `--allow-remote-attach` 时可以真的挂上去 |
-| 上传 / 下载附件、图片理解 | —— | ✅ | ✅（图片理解要配 `CORTEX_VISION_PROVIDER`，线上当前没配） |
+| 上传 / 下载附件、图片理解 | —— | ✅ | ✅（图片理解取决于**选中的模型**看不看得懂图，不需要任何环境变量） |
 | 输出代码（markdown + 高亮） | 终端原样 | ✅ | ✅ |
 | 文件改动 diff | ✅ | ✅ | ✅ |
 | 生成图片 / 生成 Word·PPT·Excel | ❌ | ❌ | ❌ |

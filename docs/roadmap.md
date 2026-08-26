@@ -168,6 +168,50 @@ E ②（中继端到端加密）、H2（工具注册表）、H3（全插件化�
 
 ## 手头挂着的
 
+### 模型能力判定：目录说不出来的那一大片
+
+**病灶**：一个模型能不能看图 / 调工具 / 生图，我们有两个源，而且都会漏。
+
+| 源 | 谁读它 | 漏在哪 |
+|---|---|---|
+| 供应商定义（`crates/cortex-llm/src/definitions/*.json`） | 服务端 `ensure_can_see` | 只覆盖内置那几家，手写 |
+| models.dev 目录（编译期嵌进二进制的 2.97 MB 快照） | 界面徽标与筛选（`describe_all`） | **新模型永远慢一拍**；用户自带的中转站永远不在里面 |
+
+2026-08-26 的实例：DeepSeek 8-21 上线 `deepseek-v4-flash-vision-exp`，
+两个源**都不认识它**。表现是「获取模型列表」里根本没有它（部署那条来源
+只列定义里硬编码的四个名字），而就算实拉到了，能力也全是 null，
+一用「视觉」筛选就消失。
+
+**已经做掉的**（同日）：定义里补了那个模型；`describe_all` 在目录查不到时
+回落到定义。这解了内置那几家，**解不了自带中转站**。
+
+**要单独做一轮的：能力探测三级回落。** 调研过十个同类产品（结论见
+[roadmap-done.md](roadmap-done.md) 那一节），业界一致做法是三件套 ——
+接口能问的先问、问不出来落目录、目录也没有才手动补：
+
+| 供应商 | 接口说不说得出能力 |
+|---|---|
+| OpenRouter | ✅ 最富。`architecture.input_modalities` 给 `["text","image","file"]`，还能服务端筛 `?input_modalities=image`。一家覆盖 400+ 模型 |
+| Ollama | ✅ 但要两步：`/api/tags` 列名 → 逐个 `/api/show` 拿 `capabilities: ["completion","vision","tools","thinking"]` |
+| OpenAI / Anthropic / DeepSeek / 多数 OpenAI 兼容中转站 | ❌ 只有 `id`/`created`/`owned_by` |
+
+⚠️ **第一件事是把接缝拓宽**：goose 的 `fetch_supported_models` 签名就是
+`Vec<String>`，只回名字 —— 即使 OpenRouter 把富元数据给了我们，在这条路上
+也被砍成一串名字。
+
+⚠️ **手动覆盖那一档不能省，也不能只给 vision 开后门**：要连 `tool_call`、
+`image_output` 一起考虑。判据冲突时谁赢也要定死（倾向：手动 > 接口 > 目录，
+因为手动是用户对自己那条来源的一手知识）。
+
+⚠️ 抄一个现成的坑：[openclaw#44647](https://github.com/openclaw/openclaw/issues/44647)
+—— 只调 `/api/tags` 不调 `/api/show`，于是所有 Ollama 模型被打成 text-only，
+用户手改配置每次重启被覆盖。与上面那个实例是同一个形状。
+
+**为什么假阴性比假阳性贵**：所有同类产品 issue 区的主要噪音都是假阴性 ——
+能看图的模型被判成不能，入口消失且不解释。而我们放行的判据是
+「没确认没有」（`vision != false`），筛选的判据才是「确认有」
+（`vision == true`）——**这两处不是同一条，别去「统一」它们。**
+
 ### ~~备份：生产上还没跑过~~ —— 2026-08-25 跑起来了
 
 异地备份容器（rustic 备 PG、rclone 备 RustFS → 阿里云 OSS）在生产上跑通，

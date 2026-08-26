@@ -376,8 +376,22 @@ mod tests {
         assert!(matches!(err, LlmError::VisionUnsupported { .. }));
         let msg = err.to_string();
         assert!(
-            msg.contains("deepseek-v4-pro") && msg.contains("CORTEX_VISION"),
-            "错误必须同时说清是哪个模型、以及怎么改；实际：{msg}"
+            msg.contains("deepseek-v4-pro"),
+            "错误必须说清是**哪个**模型看不懂图 —— 一个配了几十个型号的人\
+             否则不知道该换掉哪一个。实际：{msg}"
+        );
+        assert!(
+            msg.contains("换一个"),
+            "错误必须给出下一步动作。⚠️ 这条断言从前钉的是字面量 CORTEX_VISION，\
+             而那两个环境变量本仓库无任何代码读取（属于 Cormex 那侧的媒体转录）——\
+             于是这条测试的实际作用变成了**保护一句错话不被改掉**：谁想把文案改对，\
+             它当场变红，看起来像是自己写错了。所以这里断言的是「说得出动作」，\
+             不是某个具体变量名。实际：{msg}"
+        );
+        assert!(
+            !msg.contains("CORTEX_VISION"),
+            "不许再指向 CORTEX_VISION_* —— 那两个变量这个仓库不读，\
+             照着配也不会让带图请求变成可能。实际：{msg}"
         );
     }
 
