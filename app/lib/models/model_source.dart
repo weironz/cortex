@@ -23,6 +23,7 @@ const String kDeploymentSource = 'deployment';
 
 class ModelSource {
   const ModelSource({
+    this.canProbe = false,
     required this.id,
     required this.provider,
     this.label = '',
@@ -36,6 +37,7 @@ class ModelSource {
   });
 
   factory ModelSource.fromJson(Map<String, dynamic> json) => ModelSource(
+    canProbe: json['can_probe'] == true,
     id: asString(json['id']),
     provider: asString(json['provider']),
     label: asString(json['label']),
@@ -49,6 +51,13 @@ class ModelSource {
     builtin: json['builtin'] == true,
     freeOfQuota: json['free_of_quota'] == true,
   );
+
+  /// 这家的接口说不说得出模型能力。
+  ///
+  /// 界面据此解释「为什么每一位都是『说不出』」：多数 OpenAI 兼容网关的
+  /// `/v1/models` 只有 id/created/owned_by，一个能力字段都没有。不说的话
+  /// 用户面对一屏「说不出」不知道该等我们修还是自己补 —— 而答案是后者。
+  final bool canProbe;
 
   final String id;
 

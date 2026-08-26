@@ -57,6 +57,7 @@ class ModelCapsEditor extends StatefulWidget {
     super.key,
     required this.model,
     required this.sourceLabel,
+    required this.canProbe,
     required this.busy,
     required this.onSave,
   });
@@ -68,6 +69,12 @@ class ModelCapsEditor extends StatefulWidget {
   /// 这个模型属于哪条来源，画在标题下面。同一个型号名可以在两条来源上
   /// 都有，不说清楚的话用户不知道自己在改哪一个。
   final String sourceLabel;
+
+  /// 这家的接口说不说得出模型能力。
+  ///
+  /// 一屏「说不出」而不解释为什么，用户不知道该等我们修还是自己补 ——
+  /// 而多数 OpenAI 兼容网关的答案永远是后者。
+  final bool canProbe;
 
   final bool busy;
 
@@ -169,8 +176,12 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
                   Padding(
                     padding: const EdgeInsets.only(bottom: 12),
                     child: Text(
-                      '「跟随自动」= 用目录与供应商定义算出来的结论。只有当它说错了才需要改'
-                      '—— 而自带网关的模型，它多半说不出来。',
+                      widget.canProbe
+                          ? '「跟随自动」= 目录、供应商定义，加上拉列表时这家接口自己报的那份。'
+                                '只有当它说错了才需要改。'
+                          : '「跟随自动」= 用目录与供应商定义算出来的结论。'
+                                '这家的接口说不出模型能力（多数 OpenAI 兼容网关都不说），'
+                                '所以下面多半是「说不出」—— 手动补是唯一的办法，不必等。',
                       style: theme.textTheme.labelSmall?.copyWith(
                         color: theme.cortex.foregroundTertiary,
                         height: 1.6,

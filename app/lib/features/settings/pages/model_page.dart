@@ -188,6 +188,7 @@ class _ModelPageState extends ConsumerState<ModelPage> {
               ? ModelCapsEditor(
                   model: editing,
                   sourceLabel: data.nameOf(picking),
+                  canProbe: picking.canProbe,
                   busy: _busy,
                   onSave: (caps) => _saveCaps(picking, editing.id, caps),
                 )

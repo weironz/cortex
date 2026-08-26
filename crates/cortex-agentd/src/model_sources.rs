@@ -162,6 +162,12 @@ pub struct SourceView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     pub enabled: bool,
+    /// 这家的接口**说不说得出模型能力**。
+    ///
+    /// 界面据此解释「为什么每一位都是『说不出』」：多数 OpenAI 兼容网关的
+    /// `/v1/models` 只有 id/created/owned_by，一个能力字段都没有。不说的话
+    /// 用户面对一屏「说不出」不知道该等我们修还是自己补 —— 而答案是后者。
+    pub can_probe: bool,
     pub models: Vec<String>,
     /// 最近一次「获取模型列表」拉到的**全部**型号，配好能力与价目。
     ///
@@ -514,6 +520,7 @@ pub async fn list(
                 let probed: std::collections::HashMap<String, cortex_llm::caps::ProbedCaps> =
                     serde_json::from_value(probed).unwrap_or_default();
                 SourceView {
+                    can_probe: cortex_llm::probe::can_probe(&provider),
                     catalog: describe_all_with(
                         &provider,
                         &catalog_ids,
@@ -562,6 +569,9 @@ fn deployment_view(st: &AgentState, prefs: &DeploymentPrefs) -> SourceView {
         // 恒为空，而每个型号旁边那个开关点下去**什么都不做**
         catalog: describe_all(&provider, &all, false),
         models: prefs.keep(&all),
+        // 部署那条本来就改不了能力（整个齿轮不画），这一位对它没有用；
+        // 如实报这家说不说得出，读的人不必为它记一条特例
+        can_probe: cortex_llm::probe::can_probe(&provider),
         id: DEPLOYMENT_SOURCE_ID.to_owned(),
         provider,
         label: "部署提供".to_owned(),

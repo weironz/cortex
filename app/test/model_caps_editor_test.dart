@@ -48,6 +48,7 @@ Future<CapsOverride?> _open(
         body: ModelCapsEditor(
           model: model,
           sourceLabel: '我的中转站',
+          canProbe: false,
           busy: false,
           onSave: (c) => saved = c,
         ),
@@ -95,6 +96,7 @@ void main() {
           body: ModelCapsEditor(
             model: _model,
             sourceLabel: '我的中转站',
+            canProbe: false,
             busy: false,
             onSave: (c) => saved = c,
           ),
@@ -167,6 +169,7 @@ void main() {
               overridden: CapsOverride(vision: true, displayName: '我改的名字'),
             ),
             sourceLabel: '我的中转站',
+            canProbe: false,
             busy: false,
             onSave: (c) => saved = c,
           ),
