@@ -68,14 +68,14 @@ void main() {
     await _open(tester);
 
     expect(
-      find.text('跟随自动 · 说支持'),
+      find.text('自动算出来：支持'),
       findsOneWidget,
       reason:
           '目录说这个模型能看图，那一档就要把它说出来 —— '
           '不说的话用户没有任何依据判断该不该覆盖它',
     );
     expect(
-      find.text('跟随自动 · 说不出'),
+      find.text('自动算不出来 · 不确定，但不影响使用'),
       findsOneWidget,
       reason:
           '工具那一位目录说不出（null）。这是合法状态（发送时放行），'

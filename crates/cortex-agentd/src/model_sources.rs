@@ -303,6 +303,57 @@ impl AgentState {
             })
             .collect()
     }
+
+    /// 按 id 取**一条**来源的配置 —— **不管它开着还是关着**。
+    ///
+    /// # 为什么不能复用 `model_sources()`
+    ///
+    /// 那个查询带着 `WHERE enabled`，因为它回答的是「**这一轮能用哪些
+    /// 来源**」。而设置页上的动作（拉型号列表、连通性检查、改能力）问的是
+    /// 另一个问题：「**这条来源的配置是什么**」。两者只在「关着」这一点上
+    /// 不同，而那一点恰好是这里最要紧的。
+    ///
+    /// 混用的后果 2026-08-26 在界面上抓到：对一条关着的来源点「获取模型
+    /// 列表」，回的是**「没有这条来源」**—— 而它就明晃晃地列在左边。
+    /// 一个错误身兼两职（不存在 / 只是关着），用户看着屏幕上有、系统说没有。
+    ///
+    /// 而且「关着就不给拉列表」本身是没道理的：**先看看这家有什么再决定开不开**
+    /// 是个正常顺序，拉列表也不会替任何一轮对话花钱。
+    pub async fn model_source_by_id(
+        &self,
+        tenant: &crate::request_tenant::Tenant,
+        id: &str,
+    ) -> Option<ModelSource> {
+        let store = tenant.store().ok()?;
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Vec<u8>,
+                Option<String>,
+                serde_json::Value,
+                serde_json::Value,
+            ),
+        >(
+            "SELECT id, provider, ciphertext, base_url, models, caps_overrides
+               FROM model_sources WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(store.pool())
+        .await
+        .ok()??;
+        let (id, provider, ciphertext, base_url, models, overrides) = row;
+        let api_key = open(&ciphertext).ok()?;
+        Some(ModelSource {
+            id,
+            provider,
+            api_key,
+            base_url,
+            models: serde_json::from_value(models).unwrap_or_default(),
+            caps_overrides: serde_json::from_value(overrides).unwrap_or_default(),
+        })
+    }
 }
 
 /// 改「部署提供」那条：只有总开关与型号可见性两样。
@@ -817,12 +868,13 @@ pub async fn fetch_models(
         }));
     }
 
+    // ⚠️ **按 id 取，不管开关** —— 见 `model_source_by_id`。用带
+    // `WHERE enabled` 的那个查询会让一条关着的来源被报成「没有这条来源」，
+    // 而它就列在界面左边
     let source = st
-        .model_sources(&tenant)
+        .model_source_by_id(&tenant, &id)
         .await
-        .into_iter()
-        .find(|s| s.id == id)
-        .ok_or_else(|| ApiError::bad_request(format!("没有这条来源：{id}（或者它是关着的）")))?;
+        .ok_or_else(|| ApiError::bad_request(format!("没有这条来源：{id}")))?;
 
     let client = cortex_llm::provider::build_with(
         &source.provider,
@@ -1006,12 +1058,13 @@ pub async fn check(
         ));
     }
 
+    // ⚠️ **按 id 取，不管开关** —— 见 `model_source_by_id`。用带
+    // `WHERE enabled` 的那个查询会让一条关着的来源被报成「没有这条来源」，
+    // 而它就列在界面左边
     let source = st
-        .model_sources(&tenant)
+        .model_source_by_id(&tenant, &id)
         .await
-        .into_iter()
-        .find(|s| s.id == id)
-        .ok_or_else(|| ApiError::bad_request(format!("没有这条来源：{id}（或者它是关着的）")))?;
+        .ok_or_else(|| ApiError::bad_request(format!("没有这条来源：{id}")))?;
 
     let model = if req.model.trim().is_empty() {
         source.models.first().cloned().ok_or_else(|| {

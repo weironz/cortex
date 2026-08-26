@@ -32,7 +32,7 @@ import '../../../models/model_source.dart';
 
 /// 一位能力的三种态。
 enum _Tri {
-  auto('跟随自动'),
+  auto('自动'),
   yes('支持'),
   no('不支持');
 
@@ -387,32 +387,56 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
     ),
   );
 
-  /// 三选一。**「跟随自动」那一档把自动的结论说出来** ——
-  /// 不说的话用户没有任何依据判断该不该覆盖它。
+  /// 三选一 + 一行说明。
+  ///
+  /// # ⚠️ chip 上只写**模式**，结论单独一行
+  ///
+  /// 第一版把两件事压进了一个标签：「跟随自动 · 说不出」。用户当场反馈
+  /// 「好难理解，这什么意思呢」—— 对的：「说不出」谁说的、说的是什么，
+  /// 从那五个字里读不出来。那是**我们内部的说法**漏进了界面。
+  ///
+  /// 拆开之后 chip 只回答「用哪个」（自动 / 支持 / 不支持，三个等宽、
+  /// 并列），而「自动此刻算出来的是什么」用下面那行灰字讲人话。
   Widget _triPicker(
     ThemeData theme, {
     required bool? auto,
     required _Tri value,
     required ValueChanged<_Tri> onPick,
   }) {
-    final autoWord = switch (auto) {
-      null => '说不出',
-      true => '说支持',
-      false => '说不支持',
-    };
-    return Wrap(
-      spacing: 6,
-      runSpacing: 6,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final t in _Tri.values)
-          _chip(
-            theme,
-            text: t == _Tri.auto ? '跟随自动 · $autoWord' : t.label,
-            on: value == t,
-            // 「跟随自动」而自动又说不出来时，这一档等于「不知道」——
-            // 那是合法状态（发送时放行），不是错误，所以不画成警告色
-            muted: t == _Tri.auto && auto == null,
-            onTap: widget.busy ? null : () => onPick(t),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            for (final t in _Tri.values)
+              _chip(
+                theme,
+                text: t.label,
+                on: value == t,
+                onTap: widget.busy ? null : () => onPick(t),
+              ),
+          ],
+        ),
+        // 只在「自动」这一档下说 —— 用户已经自己按了支持/不支持时，
+        // 再讲一遍自动会算成什么是噪音
+        if (value == _Tri.auto)
+          Padding(
+            padding: const EdgeInsets.only(top: 5),
+            child: Text(
+              switch (auto) {
+                true => '自动算出来：支持',
+                false => '自动算出来：不支持',
+                // 「不确定」是合法状态，不是故障 —— 而且它**不会拦你**
+                // （发送时放行，与服务端 ensure_can_see 同一条约定）。
+                // 不说这句的话，用户会以为自己必须先填点什么才能用
+                null => '自动算不出来 · 不确定，但不影响使用',
+              },
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.cortex.foregroundTertiary,
+              ),
+            ),
           ),
       ],
     );
@@ -422,7 +446,6 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
     ThemeData theme, {
     required String text,
     required bool on,
-    required bool muted,
     required VoidCallback? onTap,
   }) {
     final scheme = theme.colorScheme;
@@ -441,11 +464,7 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
         child: Text(
           text,
           style: theme.textTheme.labelSmall?.copyWith(
-            color: on
-                ? theme.cortex.accentInk
-                : (muted
-                      ? theme.cortex.foregroundTertiary
-                      : scheme.onSurfaceVariant),
+            color: on ? theme.cortex.accentInk : scheme.onSurfaceVariant,
             fontWeight: on ? FontWeight.w600 : null,
           ),
         ),
