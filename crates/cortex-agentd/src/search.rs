@@ -57,6 +57,41 @@ fn clamp_limit(requested: Option<i64>) -> i64 {
     requested.unwrap_or(MAX_RESULTS).clamp(1, MAX_RESULTS)
 }
 
+/// 检索类别。**这一位决定结果里有没有日期。**
+///
+/// Tavily 的 `topic` 有 `general` / `news` / `finance` 三档，而
+/// `published_date` 只在 `news` 这一档回。所以「今天的新闻」「这个库最近
+/// 出了什么事」这类问题必须走 news —— 走 general 的话模型拿到一串没有
+/// 时间的标题，分不出昨天和 2019 年。
+///
+/// ⚠️ **认不出的值回落到 `general`，不报错。** 模型很可能填 `News`、
+/// `新闻`、甚至 `finance`（我们没接）—— 为一个可选参数让整轮失败不值当，
+/// 而回落到默认档的结果它照样用得上。大小写与空白一并归一。
+fn normalize_topic(raw: Option<&str>) -> &'static str {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("news") => "news",
+        _ => "general",
+    }
+}
+
+/// 只要最近多久的。`None` = 不限。
+///
+/// Tavily 的 `time_range` 收 `day` / `week` / `month` / `year`，也收
+/// 单字母缩写。**两种都认**：模型会照着自己的印象填，而 `d` 与 `day`
+/// 在它眼里是同一件事。
+///
+/// ⚠️ 认不出就回 `None`（这一位整个不发），而不是编一个默认值：
+/// 替用户悄悄加一个时间过滤，会让「搜不到」变成一件他无法解释的事。
+fn normalize_time_range(raw: Option<&str>) -> Option<&'static str> {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("day" | "d") => Some("day"),
+        Some("week" | "w") => Some("week"),
+        Some("month" | "m") => Some("month"),
+        Some("year" | "y") => Some("year"),
+        _ => None,
+    }
+}
+
 /// 上游端点。
 ///
 /// ⚠️ **空串按没设处理**（这个仓库数过八次的形状）：一份写了
@@ -102,6 +137,12 @@ pub struct SearchRequest {
     pub query: String,
     #[serde(default)]
     pub limit: Option<i64>,
+    /// `general` / `news`。见 [`normalize_topic`]。
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// `day` / `week` / `month` / `year`。见 [`normalize_time_range`]。
+    #[serde(default)]
+    pub time_range: Option<String>,
 }
 
 /// 上游回的形状。**每个字段都 `default`** —— 少一个字段不该让整条搜索
@@ -121,6 +162,9 @@ struct UpstreamHit {
     url: String,
     #[serde(default)]
     content: String,
+    /// 发布日期。**只有 `topic: "news"` 会给**（见 `normalize_topic`）。
+    #[serde(default)]
+    published_date: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -129,6 +173,19 @@ pub struct SearchHit {
     pub url: String,
     /// 摘要。Tavily 直接给，所以这里不做抓取。
     pub content: String,
+    /// 什么时候发的。`None` = 上游没说（`topic: "general"` 时通常没有）。
+    ///
+    /// # 为什么这一位值得专门接过来
+    ///
+    /// 模型拿到的是一串标题与摘要，**里面没有任何时间线索**。于是
+    /// 「某个 API 的现状」这类问题上，一条 2019 年的结果和一条昨天的
+    /// 在它眼里一模一样 —— 而那恰恰是这个工具存在的理由（查它不知道
+    /// 或可能已经过时的事实）。
+    ///
+    /// ⚠️ 空值不序列化：给模型一个 `"published_date": null` 不如不给 ——
+    /// 它会认真解释这个 null，而事实只是「上游没说」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_date: Option<String>,
 }
 
 /// `POST /search`
@@ -153,20 +210,14 @@ pub async fn search(
         return Err(ApiError::bad_request("搜索词不能为空"));
     }
     let limit = clamp_limit(req.limit);
+    let topic = normalize_topic(req.topic.as_deref());
+    let time_range = normalize_time_range(req.time_range.as_deref());
     let base = resolve_base(std::env::var(SEARCH_BASE_ENV).ok().as_deref());
 
     let resp = st
         .http()
         .post(format!("{base}/search"))
-        .json(&serde_json::json!({
-            "api_key": key,
-            "query": query,
-            "max_results": limit,
-            // 让上游直接给摘要 —— 不给的话这里要自己去抓每个 URL 的正文，
-            // 而那是另一条出网路径（还得处理反爬、编码、超时）
-            "include_answer": false,
-            "search_depth": "basic",
-        }))
+        .json(&body(&key, query, limit, topic, time_range))
         .send()
         .await
         .map_err(|e| ApiError::internal(format!("搜索请求发不出去：{e}")))?;
@@ -185,6 +236,43 @@ pub async fn search(
     Ok(Json(to_hits(parsed)))
 }
 
+/// 发给上游的请求体。
+///
+/// # ⚠️ `time_range` 为空时**整个键都不发**
+///
+/// `json!({"time_range": None::<&str>})` 拼出来的是 `"time_range": null`,
+/// 而那是一个**显式的空值**，不是「没提这一位」。上游怎么对待一个显式
+/// null 是它的事 —— 有的忽略、有的报参数错误、有的当成「不限」。三种行为
+/// 我们都赌不起，而不发这个键的语义在任何实现上都一样。
+///
+/// 同一条理由让这一段值得是个函数：拼在 handler 里的话，验它就要起一个
+/// 假上游，于是它多半不会被验 —— 而「多发了一个 null」不会有任何报错。
+fn body(
+    key: &str,
+    query: &str,
+    limit: i64,
+    topic: &str,
+    time_range: Option<&str>,
+) -> serde_json::Value {
+    let mut b = serde_json::json!({
+        "api_key": key,
+        "query": query,
+        "max_results": limit,
+        // 让上游直接给摘要 —— 不给的话这里要自己去抓每个 URL 的正文，
+        // 而那是另一条出网路径（还得处理反爬、编码、超时）
+        "include_answer": false,
+        "search_depth": "basic",
+        // 决定结果里有没有 published_date，见 normalize_topic
+        "topic": topic,
+    });
+    if let Some(range) = time_range
+        && let Some(map) = b.as_object_mut()
+    {
+        map.insert("time_range".into(), range.into());
+    }
+    b
+}
+
 /// 上游的形状 → 我们发给 agent 的形状。
 ///
 /// 单独一个函数是为了让「少字段不该让整条失败」测得到 —— 塞在 handler
@@ -196,6 +284,9 @@ fn to_hits(u: Upstream) -> Vec<SearchHit> {
             title: h.title,
             url: h.url,
             content: h.content,
+            // 上游给了就带上；`news` 之外的档通常没有，那时它是 None
+            // 且不会被序列化出去
+            published_date: h.published_date,
         })
         .collect()
 }
@@ -256,6 +347,98 @@ mod tests {
         assert!(
             msg.contains("重启"),
             "设完不重启不生效 —— 少这一句他会以为没设对"
+        );
+    }
+
+    /// ⚠️ **`topic` 决定结果里有没有日期** —— 这一位是整条链上唯一
+    /// 能让模型分出「昨天」与「2019 年」的东西。
+    ///
+    /// 认不出的值回落到 general 而不是报错：模型很可能填 `News`、`新闻`、
+    /// 或者一个我们没接的 `finance`，而为一个可选参数让整轮失败不值当。
+    #[test]
+    fn 类别只认news_其余一律回落到general() {
+        assert_eq!(normalize_topic(Some("news")), "news");
+        assert_eq!(
+            normalize_topic(Some("  NEWS  ")),
+            "news",
+            "大小写与空白要归一"
+        );
+        assert_eq!(normalize_topic(None), "general", "没给 = 默认档");
+        assert_eq!(normalize_topic(Some("general")), "general");
+        assert_eq!(
+            normalize_topic(Some("finance")),
+            "general",
+            "上游有这一档但我们没接 —— 原样转过去的话，行为取决于上游那天支不支持"
+        );
+        assert_eq!(normalize_topic(Some("新闻")), "general");
+        assert_eq!(normalize_topic(Some("")), "general", "空串 = 没给");
+    }
+
+    /// 时间范围认全称也认单字母缩写 —— 模型会照自己的印象填。
+    ///
+    /// ⚠️ 认不出回 `None`（这一位整个不发），**不编默认值**：替用户悄悄
+    /// 加一个时间过滤，会让「搜不到」变成一件他无法解释的事。
+    #[test]
+    fn 时间范围两种写法都认_认不出就整个不发() {
+        assert_eq!(normalize_time_range(Some("day")), Some("day"));
+        assert_eq!(normalize_time_range(Some("d")), Some("day"), "缩写也要认");
+        assert_eq!(normalize_time_range(Some("WEEK")), Some("week"));
+        assert_eq!(normalize_time_range(Some(" m ")), Some("month"));
+        assert_eq!(normalize_time_range(Some("y")), Some("year"));
+        assert_eq!(normalize_time_range(None), None);
+        assert_eq!(normalize_time_range(Some("")), None, "空串 = 没给");
+        assert_eq!(
+            normalize_time_range(Some("最近三天")),
+            None,
+            "认不出就别发 —— 编一个「week」出来会把用户要的结果滤掉，而他不知道为什么"
+        );
+    }
+
+    /// ⚠️ **不限时间时，`time_range` 这个键整个不该出现。**
+    ///
+    /// 发一个显式的 `null` 不等于不提这一位：上游怎么对待 null 是它的事
+    /// （忽略 / 报参数错 / 当成不限），三种我们都赌不起。而这件事**不会有
+    /// 任何报错** —— 多发一个 null 在本地看不出区别，只有上游哪天改了
+    /// 行为才会表现成「搜索突然搜不到东西了」。
+    #[test]
+    fn 不限时间时不发那个键_而不是发一个null() {
+        let none = body("k", "q", 5, "general", None);
+        assert!(
+            none.get("time_range").is_none(),
+            "不限时间时不该出现这个键，实际：{none}"
+        );
+        assert_eq!(none["topic"], "general");
+        assert_eq!(none["max_results"], 5);
+
+        let some = body("k", "q", 3, "news", Some("day"));
+        assert_eq!(some["time_range"], "day");
+        assert_eq!(some["topic"], "news");
+    }
+
+    /// 上游给了日期就带到模型眼前；没给的那条**不出现这个键**。
+    ///
+    /// 序列化成 `"published_date": null` 的话，模型会认真解释这个 null，
+    /// 而事实只是「上游这一档不报日期」。
+    #[test]
+    fn 日期给了就带上_没给的那条整个键都不出现() {
+        let raw = r#"{"results":[
+            {"title":"新闻","url":"https://a.example","content":"摘要",
+             "published_date":"Tue, 26 Aug 2026 10:00:00 GMT"},
+            {"title":"百科","url":"https://b.example","content":"摘要"}
+        ]}"#;
+        let hits = to_hits(serde_json::from_str(raw).expect("解析"));
+
+        assert_eq!(
+            hits[0].published_date.as_deref(),
+            Some("Tue, 26 Aug 2026 10:00:00 GMT"),
+            "日期没接过来的话，模型仍然分不出这条是昨天的还是几年前的"
+        );
+        assert_eq!(hits[1].published_date, None);
+
+        let json = serde_json::to_string(&hits[1]).expect("序列化");
+        assert!(
+            !json.contains("published_date"),
+            "没有日期时整个键都不该出现，实际是：{json}"
         );
     }
 

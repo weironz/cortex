@@ -709,13 +709,26 @@ pub fn mcp_resource_spec() -> ToolSpec {
 pub fn web_search_spec() -> ToolSpec {
     ToolSpec {
         name: "web_search".into(),
-        description: "上网搜一下。回的是搜索结果的标题、链接与摘要 ——                       不是网页正文。用它来查你不知道或可能已经过时的事实                      （新版本号、今天的新闻、某个 API 的现状）"
+        description: "上网搜一下。回的是搜索结果的标题、链接与摘要 ——                       不是网页正文。用它来查你不知道或可能已经过时的事实                       （新版本号、今天的新闻、某个 API 的现状）"
             .into(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "搜索词" },
-                "limit": { "type": "integer", "description": "最多回几条，默认 5，上限 5" }
+                "limit": { "type": "integer", "description": "最多回几条，默认 5，上限 5" },
+                // ⚠️ **这两位的描述要说清「什么时候用」，不只是「有什么值」。**
+                // 只列枚举的话模型永远走默认档，于是它拿到一串没有日期的
+                // 结果，然后把一条 2019 年的当成现状讲给用户。
+                "topic": {
+                    "type": "string",
+                    "enum": ["general", "news"],
+                    "description": "默认 general。问的是新闻、时事、或者「最近发生了什么」时用 news ——                                     只有 news 档的结果会带发布日期，而没有日期你分不出一条结果是昨天的还是几年前的"
+                },
+                "time_range": {
+                    "type": "string",
+                    "enum": ["day", "week", "month", "year"],
+                    "description": "只要这段时间内发布的。不确定就别传 —— 传窄了会把本来搜得到的结果滤掉"
+                }
             },
             "required": ["query"]
         }),
@@ -2194,6 +2207,50 @@ mod tests {
     /// 层，由 agent 循环在更外层拦截分派），2026-08-17 连同长期记忆一起去掉了。
     /// 表留着而不是删掉：下一个要开例外的人得往里加一行并写清楚为什么，
     /// 而不是在 `dispatch_once` 里默默多一条 `else if`。
+    /// ⚠️ **服务端支持一个参数，而工具目录里没有它 = 那个参数不存在。**
+    ///
+    /// 模型只能看见 `parameters` 里写着的东西。服务端把 `topic` /
+    /// `time_range` 认得再好，只要这里没声明，模型永远不会填 —— 于是
+    /// 那一整条链路是死的，而**没有任何一处会报错**：搜索照样返回结果，
+    /// 只是永远没有日期，而模型会把一条 2019 年的结果当成现状讲出来。
+    ///
+    /// 这个仓库反复吃的「造好了没人调用」，在工具目录这一侧就长这样。
+    #[test]
+    fn 联网检索把决定日期的那两位摆进了工具目录() {
+        let spec = web_search_spec();
+        let props = spec.parameters["properties"]
+            .as_object()
+            .expect("参数表该是个对象");
+
+        assert!(props.contains_key("query"), "搜索词");
+        for key in ["topic", "time_range"] {
+            assert!(
+                props.contains_key(key),
+                "`{key}` 在服务端认得，但工具目录里没有 —— 模型永远不会填它"
+            );
+        }
+
+        let topic = &props["topic"];
+        let values: Vec<&str> = topic["enum"]
+            .as_array()
+            .expect("topic 该给枚举")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            values.contains(&"news"),
+            "`news` 是唯一能带出发布日期的那一档，枚举里没有它等于这个能力不存在"
+        );
+
+        // 光有枚举不够：只列值不说「什么时候用」的话，模型永远走默认档。
+        // 这条断言盯的是那句话还在
+        let desc = topic["description"].as_str().unwrap_or_default();
+        assert!(
+            desc.contains("日期"),
+            "topic 的说明要讲清「只有这一档带日期」，否则模型没有理由选它。实际：{desc}"
+        );
+    }
+
     #[test]
     fn every_spec_has_a_handler_and_every_handler_has_a_spec() {
         /// 在更外层拦截、不进 `execute` 的工具。**加进来之前先想清楚为什么。**

@@ -229,10 +229,25 @@ impl Remote {
     }
 
     /// `POST /search` —— 联网检索。key 在服务端，见 `cortex_agentd::search`。
-    pub async fn web_search(&self, query: &str, limit: Option<i64>) -> Result<serde_json::Value> {
+    pub async fn web_search(
+        &self,
+        query: &str,
+        limit: Option<i64>,
+        topic: Option<&str>,
+        time_range: Option<&str>,
+    ) -> Result<serde_json::Value> {
         let resp = self
             .auth(self.http.post(self.url("/search")))
-            .json(&serde_json::json!({ "query": query, "limit": limit }))
+            // 两个可选位**原样透传**，不在这一层归一：判据在服务端
+            // （`normalize_topic` / `normalize_time_range`）。两处各归一
+            // 一次的话，哪天放开一个新值就会漏改一处，而症状是「模型传了
+            // 但没生效」——最难查的那一类
+            .json(&serde_json::json!({
+                "query": query,
+                "limit": limit,
+                "topic": topic,
+                "time_range": time_range,
+            }))
             .send()
             .await
             .map_err(map_transport)?;

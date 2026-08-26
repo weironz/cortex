@@ -1550,7 +1550,23 @@ impl ToolHost for LocalHost {
             return cortex_agent::ToolResult::err("缺少 query 参数（要搜什么）");
         };
         let limit = arguments.get("limit").and_then(serde_json::Value::as_i64);
-        match self.remote.web_search(query.trim(), limit).await {
+        // 空串按「没给」处理 —— 模型偶尔把可选参数填成 ""，
+        // 而那时它想要的显然是默认档，不是「一个叫空串的类别」
+        let opt = |k: &str| {
+            arguments
+                .get(k)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        let topic = opt("topic");
+        let time_range = opt("time_range");
+        match self
+            .remote
+            .web_search(query.trim(), limit, topic.as_deref(), time_range.as_deref())
+            .await
+        {
             Ok(hits) => {
                 let empty = hits.as_array().is_none_or(|a| a.is_empty());
                 if empty {
