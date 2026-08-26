@@ -182,12 +182,21 @@ E ②（中继端到端加密）、H2（工具注册表）、H3（全插件化�
 只列定义里硬编码的四个名字），而就算实拉到了，能力也全是 null，
 一用「视觉」筛选就消失。
 
-**已经做掉的**（同日）：定义里补了那个模型；`describe_all` 在目录查不到时
-回落到定义。这解了内置那几家，**解不了自带中转站**。
+**这一整块 2026-08-26 做完了。** 四级回落已经落地，全仓库只此一处解析
+（`cortex_llm::caps::resolve`），`/llm/models` 与设置页共用它：
 
-**要单独做一轮的：能力探测三级回落。** 调研过十个同类产品（结论见
-[roadmap-done.md](roadmap-done.md) 那一节），业界一致做法是三件套 ——
-接口能问的先问、问不出来落目录、目录也没有才手动补：
+| 优先级 | 来源 | 落点 |
+|---|---|---|
+| 1 | **用户手工覆盖** | `model_sources.caps_overrides`，设置页「编辑模型」面板 |
+| 2 | **接口实时探测** | `model_sources.probed_caps`，`cortex_llm::probe`（OpenRouter / Ollama）|
+| 3 | models.dev 目录 | 编译期快照 |
+| 4 | 供应商定义 | 我们自己写的 JSON（**服务端闸门读的也是它**）|
+
+⚠️ 覆盖不只驱动徽标，它一路走到 `ensure_can_see` —— 只驱动界面的话，
+用户明说了「这个模型能看图」却仍被自己的服务端拦下，那是反方向的同一个谎。
+
+调研过的十个同类产品（结论见 [roadmap-done.md](roadmap-done.md) 那一节）
+一致做法就是这三件套 —— 接口能问的先问、问不出来落目录、目录也没有才手动补：
 
 | 供应商 | 接口说不说得出能力 |
 |---|---|
@@ -195,13 +204,17 @@ E ②（中继端到端加密）、H2（工具注册表）、H3（全插件化�
 | Ollama | ✅ 但要两步：`/api/tags` 列名 → 逐个 `/api/show` 拿 `capabilities: ["completion","vision","tools","thinking"]` |
 | OpenAI / Anthropic / DeepSeek / 多数 OpenAI 兼容中转站 | ❌ 只有 `id`/`created`/`owned_by` |
 
-⚠️ **第一件事是把接缝拓宽**：goose 的 `fetch_supported_models` 签名就是
-`Vec<String>`，只回名字 —— 即使 OpenRouter 把富元数据给了我们，在这条路上
-也被砍成一串名字。
+✅ **接缝已经绕开了**（不是拓宽）：goose 的 `fetch_supported_models` 签名是
+`Vec<String>`，只回名字。改它要动取件自 goose 的 `cortex-providers`，那意味着
+以后每次同步上游都要重打补丁 —— 所以另开了一条只做能力探测的窄路
+（`cortex_llm::probe`），它不参与调模型，失败了回落到目录即可。
 
-⚠️ **手动覆盖那一档不能省，也不能只给 vision 开后门**：要连 `tool_call`、
-`image_output` 一起考虑。判据冲突时谁赢也要定死（倾向：手动 > 接口 > 目录，
-因为手动是用户对自己那条来源的一手知识）。
+✅ **手动覆盖覆盖了四位**（vision / tool_call / reasoning / image_output）
+外加显示名与上下文；优先级定死为 手动 > 接口 > 目录 > 定义。
+
+⚠️ **保存时只写用户真按过的那几位。** 界面上预先选中的多半来自自动结论，
+而选中不等于按过 —— 一并写进去等于把此刻的结论固化成他的断言，而**冻错了
+察觉不到**（症状与「这个模型真的不支持」一模一样）。
 
 ⚠️ 抄一个现成的坑：[openclaw#44647](https://github.com/openclaw/openclaw/issues/44647)
 —— 只调 `/api/tags` 不调 `/api/show`，于是所有 Ollama 模型被打成 text-only，

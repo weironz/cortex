@@ -13,9 +13,22 @@
 /// 不画。二值开关一进来，用户只要打开过这个面板，那些他没意见的位就全被
 /// 按成「不支持」了，而他什么都没点。
 ///
-/// 所以每一位是三选一：**跟随自动 / 支持 / 不支持**，并且「跟随自动」那一档
-/// 要**把自动的结论说出来**（「跟随自动 · 目录说支持」）—— 不说的话用户
-/// 没有任何依据判断该不该覆盖它。
+/// 所以界面上只有两个 chip（支持 / 不支持），但**「一个都没选中」是第三种
+/// 状态**，不是「还没填完」：
+///
+///  * 查得到 → 把查到的那个预先选中，用户不动它就等于认可；
+///  * 查不到 → 两个都不选中，并在下面写明「不选也照样能用」——
+///    不写的话，一对空 chip 看起来像一道必答题，而事实相反。
+///
+/// 早先这里摆的是三个 chip（跟随自动 / 支持 / 不支持）。删掉「跟随自动」的
+/// 理由是用户看不懂它：「跟随自动」讲的是我们内部的**取值来源**，而用户想
+/// 知道的只是「它到底行不行」。来源改用 chip 的样式（淡 = 自动算的、
+/// 实心 = 你按的）加一行小字表达，不再占一个选项位。
+///
+/// ⚠️ 但**只有用户真按过的位才存进覆盖记录**（见 [_current]）：预选中的那个
+/// 值是当下算出来的结论，把它一并存下来等于把此刻的结论冻死 —— 之后目录
+/// 更新了、或者这家接口开始报能力了，都再也顶不动那份冻住的值，而症状
+/// （模型说它不支持）与「真的不支持」一模一样，没有人能发现。
 ///
 /// # 只摆我们真的存得下的那几位
 ///
@@ -30,28 +43,6 @@ import 'package:flutter/services.dart';
 import '../../../core/theme.dart';
 import '../../../models/model_source.dart';
 
-/// 一位能力的三种态。
-enum _Tri {
-  auto('自动'),
-  yes('支持'),
-  no('不支持');
-
-  const _Tri(this.label);
-  final String label;
-
-  static _Tri of(bool? v) => switch (v) {
-    null => _Tri.auto,
-    true => _Tri.yes,
-    false => _Tri.no,
-  };
-
-  bool? get value => switch (this) {
-    _Tri.auto => null,
-    _Tri.yes => true,
-    _Tri.no => false,
-  };
-}
-
 class ModelCapsEditor extends StatefulWidget {
   const ModelCapsEditor({
     super.key,
@@ -62,8 +53,8 @@ class ModelCapsEditor extends StatefulWidget {
     required this.onSave,
   });
 
-  /// 要编辑的那个模型 —— **带着已解析的能力**，好让「跟随自动」那一档
-  /// 说得出自动的结论是什么。
+  /// 要编辑的那个模型 —— **带着已解析的能力**，好让两个 chip 能按当下的
+  /// 结论预先选中一个。
   final FetchedModel model;
 
   /// 这个模型属于哪条来源，画在标题下面。同一个型号名可以在两条来源上
@@ -88,10 +79,15 @@ class ModelCapsEditor extends StatefulWidget {
 class _ModelCapsEditorState extends State<ModelCapsEditor> {
   late final TextEditingController _name;
   late final TextEditingController _ctx;
-  late _Tri _vision;
-  late _Tri _tools;
-  late _Tri _reasoning;
-  late _Tri _imageOut;
+
+  /// 用户按下的那一位。**`null` = 他没按过**（此刻显示的是自动算出来的）。
+  ///
+  /// 这个 `null` 与「他明确按了不支持」必须分得开 —— 保存时只写按过的，
+  /// 没按过的一位都不写。理由见 [_current]。
+  bool? _vision;
+  bool? _tools;
+  bool? _reasoning;
+  bool? _imageOut;
 
   @override
   void initState() {
@@ -99,10 +95,10 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
     final o = widget.model.overridden;
     _name = TextEditingController(text: o.displayName ?? '');
     _ctx = TextEditingController(text: o.context?.toString() ?? '');
-    _vision = _Tri.of(o.vision);
-    _tools = _Tri.of(o.toolCall);
-    _reasoning = _Tri.of(o.reasoning);
-    _imageOut = _Tri.of(o.imageOutput);
+    _vision = o.vision;
+    _tools = o.toolCall;
+    _reasoning = o.reasoning;
+    _imageOut = o.imageOutput;
   }
 
   @override
@@ -114,6 +110,24 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
 
   /// 现在这一屏对应的覆盖记录。
   ///
+  /// # ⚠️ 只写用户**真按过**的那几位
+  ///
+  /// 界面上那些「已经选中」的 chip 多半来自自动结论（目录 / 探测），
+  /// 而**选中不等于他按过**。把它们一并写进覆盖记录，等于把此刻的自动
+  /// 结论固化成他自己的断言。
+  ///
+  /// 那样做今天看不出差别，坏处全在以后：假如它冻在「不支持视觉」而那个
+  /// 模型后来支持了，症状是贴图被拦 + 一句「这个模型看不懂图」——
+  /// **跟一个真的看不懂图的模型长得一模一样**，用户没有任何线索去想到
+  /// 「我几个月前在设置里冻过这一位」。
+  ///
+  /// （反方向没事：冻在「支持」而它后来不支持了，供应商会报错，看得见。
+  /// 两个方向代价不对等，所以往看得见那边倒。）
+  ///
+  /// 「以当前测出来的为准」这个诉求由**探测结果**满足：那份存在
+  /// `probed_caps` 里、点一次「获取模型列表」就刷新，且已经压过目录。
+  /// 不必在这里再抄一遍。
+  ///
   /// ⚠️ 空串 / 填不出数的输入按**没意见**处理，而不是存一个空字符串或 0：
   /// 一个 `context: 0` 会让上下文预算算出零可用空间，而那种失败发生在
   /// 字已经吐给用户之后。
@@ -123,10 +137,10 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
     return CapsOverride(
       displayName: name.isEmpty ? null : name,
       context: (n != null && n > 0) ? n : null,
-      vision: _vision.value,
-      toolCall: _tools.value,
-      reasoning: _reasoning.value,
-      imageOutput: _imageOut.value,
+      vision: _vision,
+      toolCall: _tools,
+      reasoning: _reasoning,
+      imageOutput: _imageOut,
     );
   }
 
@@ -177,11 +191,11 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
                     padding: const EdgeInsets.only(bottom: 12),
                     child: Text(
                       widget.canProbe
-                          ? '「跟随自动」= 目录、供应商定义，加上拉列表时这家接口自己报的那份。'
-                                '只有当它说错了才需要改。'
-                          : '「跟随自动」= 用目录与供应商定义算出来的结论。'
-                                '这家的接口说不出模型能力（多数 OpenAI 兼容网关都不说），'
-                                '所以下面多半是「说不出」—— 手动补是唯一的办法，不必等。',
+                          ? '下面选中的那些，是拉列表时这家接口自己报的。'
+                                '报错了就点一下改过来。'
+                          : '下面选中的那些，是从型号目录里查到的。'
+                                '这家的接口不报能力（多数 OpenAI 兼容网关都不报），'
+                                '所以查不到的那几行两个都不选中 —— 你点一下就补上了。',
                       style: theme.textTheme.labelSmall?.copyWith(
                         color: theme.cortex.foregroundTertiary,
                         height: 1.6,
@@ -324,17 +338,38 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
     ),
   );
 
-  /// 一位能力：左边说是什么，下面三选一。
+  /// 一位能力：上面说是什么，下面两个 chip。
+  ///
+  /// # ⚠️ 没有「自动」这个选项
+  ///
+  /// 第一版有三个 chip：自动 / 支持 / 不支持。用户当场指出它是有歧义的 ——
+  /// **选中「自动」到底是「算出来了」还是「没算出来」，从选中态上读不出来**。
+  ///
+  /// 现在状态由「选了什么」直接表达：
+  ///
+  /// | 情况 | 界面 |
+  /// |---|---|
+  /// | 算出来支持 | 「支持」选中，**浅色**（继承来的） |
+  /// | 算出来不支持 | 「不支持」选中，浅色 |
+  /// | **算不出来** | **两个都不选中** —— 明摆着是「等你说」 |
+  /// | 用户按过 | **实色** + 「你改的」+ 那一行出现「改回自动」 |
+  ///
+  /// 浅色与实色的区别不只是好看：它回答「这个结论是谁下的」，而那正是
+  /// 用户决定要不要改它时唯一需要知道的事。
   Widget _cap(
     ThemeData theme, {
     required IconData icon,
     required String label,
     required String hint,
     required bool? auto,
-    required _Tri value,
-    required ValueChanged<_Tri> onPick,
+    required bool? value,
+    required ValueChanged<bool?> onPick,
   }) {
     final scheme = theme.colorScheme;
+    final mine = value != null;
+    // 此刻这一位到底算什么：他按过就是他的，没按过就是自动的
+    final effective = value ?? auto;
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Column(
@@ -346,7 +381,29 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
               const SizedBox(width: 7),
               Text(label, style: theme.textTheme.bodyMedium),
               const SizedBox(width: 7),
-              if (value != _Tri.auto) _mineBadge(theme),
+              if (mine) ...[
+                _mineBadge(theme),
+                const SizedBox(width: 4),
+                // 改回自动**只在他改过时出现** —— 没改过的时候摆一个
+                // 「改回自动」，用户会问「我改过吗」
+                InkWell(
+                  onTap: widget.busy ? null : () => onPick(null),
+                  borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 1,
+                    ),
+                    child: Text(
+                      '改回自动',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.cortex.foregroundTertiary,
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
           Padding(
@@ -360,7 +417,46 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
           ),
           Padding(
             padding: const EdgeInsets.only(left: 22),
-            child: _triPicker(theme, auto: auto, value: value, onPick: onPick),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    _chip(
+                      theme,
+                      text: '支持',
+                      on: effective == true,
+                      mine: mine,
+                      onTap: widget.busy ? null : () => onPick(true),
+                    ),
+                    _chip(
+                      theme,
+                      text: '不支持',
+                      on: effective == false,
+                      mine: mine,
+                      onTap: widget.busy ? null : () => onPick(false),
+                    ),
+                  ],
+                ),
+                if (!mine)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 5),
+                    child: Text(
+                      auto == null
+                          // 两个都没选中时**必须**说这句：不说的话，一个
+                          // 空着的选择看起来像「你必须先选一个才能用」，
+                          // 而事实相反 —— 不确定是放行的
+                          ? '没查到 —— 你选一个会更准，不选也照样能用'
+                          : '自动判断的，你还没改过',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.cortex.foregroundTertiary,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ],
       ),
@@ -369,7 +465,7 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
 
   /// 「这一位是你改的」。
   ///
-  /// 不标的话，下次打开只看到一个结论，分不清是目录说的还是自己按的，
+  /// 不标的话，下次打开只看到一个结论，分不清是自动算的还是自己按的，
   /// 于是不敢动 —— 而「不敢动」正是这个面板要消除的那种状态。
   Widget _mineBadge(ThemeData theme) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
@@ -387,65 +483,16 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
     ),
   );
 
-  /// 三选一 + 一行说明。
+  /// 一颗 chip。
   ///
-  /// # ⚠️ chip 上只写**模式**，结论单独一行
-  ///
-  /// 第一版把两件事压进了一个标签：「跟随自动 · 说不出」。用户当场反馈
-  /// 「好难理解，这什么意思呢」—— 对的：「说不出」谁说的、说的是什么，
-  /// 从那五个字里读不出来。那是**我们内部的说法**漏进了界面。
-  ///
-  /// 拆开之后 chip 只回答「用哪个」（自动 / 支持 / 不支持，三个等宽、
-  /// 并列），而「自动此刻算出来的是什么」用下面那行灰字讲人话。
-  Widget _triPicker(
-    ThemeData theme, {
-    required bool? auto,
-    required _Tri value,
-    required ValueChanged<_Tri> onPick,
-  }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Wrap(
-          spacing: 6,
-          runSpacing: 6,
-          children: [
-            for (final t in _Tri.values)
-              _chip(
-                theme,
-                text: t.label,
-                on: value == t,
-                onTap: widget.busy ? null : () => onPick(t),
-              ),
-          ],
-        ),
-        // 只在「自动」这一档下说 —— 用户已经自己按了支持/不支持时，
-        // 再讲一遍自动会算成什么是噪音
-        if (value == _Tri.auto)
-          Padding(
-            padding: const EdgeInsets.only(top: 5),
-            child: Text(
-              switch (auto) {
-                true => '自动算出来：支持',
-                false => '自动算出来：不支持',
-                // 「不确定」是合法状态，不是故障 —— 而且它**不会拦你**
-                // （发送时放行，与服务端 ensure_can_see 同一条约定）。
-                // 不说这句的话，用户会以为自己必须先填点什么才能用
-                null => '自动算不出来 · 不确定，但不影响使用',
-              },
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.cortex.foregroundTertiary,
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-
+  /// `mine` 决定选中态画多重：**他按过的是实色，继承来的是浅色**。
+  /// 两者画成一样的话，用户分不出「系统这么认为」和「我这么说过」——
+  /// 而那正是他决定要不要改时唯一需要知道的事。
   Widget _chip(
     ThemeData theme, {
     required String text,
     required bool on,
+    required bool mine,
     required VoidCallback? onTap,
   }) {
     final scheme = theme.colorScheme;
@@ -453,19 +500,25 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
       onTap: onTap,
       borderRadius: BorderRadius.circular(CortexTokens.radiusPill),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
         decoration: BoxDecoration(
-          color: on ? theme.cortex.accentSoft : scheme.surfaceContainerHigh,
+          color: on
+              ? (mine ? theme.cortex.accentSoft : scheme.surfaceContainerHigh)
+              : Colors.transparent,
           borderRadius: BorderRadius.circular(CortexTokens.radiusPill),
           border: Border.all(
-            color: on ? theme.cortex.accentInk : Colors.transparent,
+            color: on
+                ? (mine ? theme.cortex.accentInk : scheme.outlineVariant)
+                : scheme.outlineVariant,
           ),
         ),
         child: Text(
           text,
           style: theme.textTheme.labelSmall?.copyWith(
-            color: on ? theme.cortex.accentInk : scheme.onSurfaceVariant,
-            fontWeight: on ? FontWeight.w600 : null,
+            color: on
+                ? (mine ? theme.cortex.accentInk : scheme.onSurface)
+                : theme.cortex.foregroundTertiary,
+            fontWeight: on && mine ? FontWeight.w600 : null,
           ),
         ),
       ),
@@ -520,20 +573,21 @@ class _ModelCapsEditorState extends State<ModelCapsEditor> {
     padding: const EdgeInsets.fromLTRB(10, 8, 14, 10),
     child: Row(
       children: [
-        // 「全部跟随自动」= 把这个模型的覆盖整条清掉。比让用户把四个 chip
-        // 一个个点回去省事，而那正是他后悔时想做的事
+        // 「全部改回自动」= 把这个模型的覆盖整条清掉。比让用户一行行点
+        // 「改回自动」省事，而那正是他后悔时想做的事。措辞与每行那个
+        // 保持一致 —— 同一个动作两种叫法，用户会以为是两件事
         TextButton(
           onPressed: widget.busy || _current.isEmpty
               ? null
               : () => setState(() {
                   _name.clear();
                   _ctx.clear();
-                  _vision = _Tri.auto;
-                  _tools = _Tri.auto;
-                  _reasoning = _Tri.auto;
-                  _imageOut = _Tri.auto;
+                  _vision = null;
+                  _tools = null;
+                  _reasoning = null;
+                  _imageOut = null;
                 }),
-          child: const Text('全部跟随自动'),
+          child: const Text('全部改回自动'),
         ),
         const Spacer(),
         FilledButton(

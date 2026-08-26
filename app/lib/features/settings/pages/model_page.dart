@@ -137,11 +137,17 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   /// 右侧选型抽屉正在为哪条来源开着。`null` = 没开。
   String? _picking;
 
-  /// 「编辑模型」正开在哪个型号上。`null` = 没开（那时抽屉里是选型列表）。
+  /// 「编辑模型」正开在**哪条来源的哪个型号**上。`null` = 没开。
+  ///
+  /// # 为什么要连来源一起记
+  ///
+  /// 这个面板有两个入口：选型抽屉里的齿轮，以及详情页那份列表上的齿轮。
+  /// 后者开的时候**选型抽屉根本没开**（`_picking` 是 null）——
+  /// 只记型号 id 的话，那条路上面板拿不到它属于哪条来源，画不出来。
   ///
   /// 存 id 而不是那条 `FetchedModel`：保存之后整份来源会重拉，
   /// 存对象的话面板里显示的还是保存前那一份，用户会以为没生效。
-  String? _editing;
+  ({String source, String model})? _editing;
 
   /// 抽屉挂在这个 Scaffold 上。
   ///
@@ -175,23 +181,31 @@ class _ModelPageState extends ConsumerState<ModelPage> {
       data: (data) {
         final current = _selected == null ? null : data.byId(_selected!);
         final picking = _picking == null ? null : data.byId(_picking!);
-        final editing = picking == null ? null : _editingModel(picking);
+        // 编辑面板的来源**独立于选型抽屉**：详情页那份列表上的齿轮开它时，
+        // 选型抽屉根本没开（见 `_editing` 的注释）
+        final editSrc = _editing == null ? null : data.byId(_editing!.source);
+        final editing = editSrc == null
+            ? null
+            : _modelIn(editSrc, _editing!.model);
         return Scaffold(
           key: _scaffold,
           backgroundColor: Colors.transparent,
-          // 编辑面板与选型列表**共用同一个抽屉位置**：它们是同一条动线的
-          // 两步（先挑一个，再改它），左右并排或另开一层都会让人以为
-          // 自己离开了刚才那份列表
-          endDrawer: picking == null
-              ? null
-              : editing != null
+          // 编辑面板与选型列表**共用同一个抽屉位置**：从抽屉里点齿轮时，
+          // 它们是同一条动线的两步（先挑一个，再改它），另开一层会让人
+          // 以为自己离开了刚才那份列表。
+          //
+          // ⚠️ 编辑排在前面且**不要求选型抽屉开着** —— 详情页那个入口
+          // 走的正是这条路
+          endDrawer: editing != null && editSrc != null
               ? ModelCapsEditor(
                   model: editing,
-                  sourceLabel: data.nameOf(picking),
-                  canProbe: picking.canProbe,
+                  sourceLabel: data.nameOf(editSrc),
+                  canProbe: editSrc.canProbe,
                   busy: _busy,
-                  onSave: (caps) => _saveCaps(picking, editing.id, caps),
+                  onSave: (caps) => _saveCaps(editSrc, editing.id, caps),
                 )
+              : picking == null
+              ? null
               : ModelPickerDrawer(
                   title: data.nameOf(picking),
                   provider: picking.provider,
@@ -205,7 +219,9 @@ class _ModelPageState extends ConsumerState<ModelPage> {
                   // 那时**整个按钮不画**而不是画一个点了会失败的
                   onEdit: picking.builtin
                       ? null
-                      : (m) => setState(() => _editing = m.id),
+                      : (m) => setState(
+                          () => _editing = (source: picking.id, model: m.id),
+                        ),
                 ),
           // 抽屉关掉时把那条来源忘掉 —— 留着的话下次点别处的
           // 「获取模型列表」会有一瞬间显示上一条的型号
@@ -282,6 +298,12 @@ class _ModelPageState extends ConsumerState<ModelPage> {
                                   _saveInline(current, apiKey, baseUrl),
                               onDelete: () => _delete(current),
                               onFetch: () => _fetch(current),
+                              // ⚠️ 部署那条整个不画齿轮（key 与型号都在
+                              // 服务端环境变量里），而不是画一个点了会
+                              // 失败的 —— 后者要用户点一次才知道不行
+                              onEditModel: current.builtin
+                                  ? null
+                                  : (m) => _editModel(current, m),
                               onToggleModel: (id, on) =>
                                   _toggleModel(current, id, on),
                               onToggleSource: (on) => _toggle(current, on),
@@ -652,13 +674,24 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   ///
   /// 查不到（型号被移出全集了）当作没在编辑 —— 退回选型列表，
   /// 而不是对着一个不存在的模型开一个空面板。
-  FetchedModel? _editingModel(ModelSource source) {
-    final id = _editing;
-    if (id == null) return null;
+  FetchedModel? _modelIn(ModelSource source, String id) {
     for (final m in source.catalog) {
       if (m.id == id) return m;
     }
     return null;
+  }
+
+  /// 从详情页那份列表上点齿轮。
+  ///
+  /// 与抽屉里那个入口的差别只有一处：**这里不开选型抽屉**。用户要改的
+  /// 是眼前这一个，不该顺带被塞一份几百行的全集。
+  void _editModel(ModelSource source, FetchedModel m) {
+    setState(() => _editing = (source: source.id, model: m.id));
+    // 与 `_openPicker` 同一个理由：`setState` 只标脏，这一刻树还没重建，
+    // Scaffold 手上还没有抽屉，直接开会**什么都不发生**
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scaffold.currentState?.openEndDrawer();
+    });
   }
 
   /// 存下这个模型的能力覆盖。
@@ -671,9 +704,11 @@ class _ModelPageState extends ConsumerState<ModelPage> {
       () => ref.read(cortexApiProvider).saveModelCaps(source.id, modelId, caps),
     );
     if (!mounted) return;
-    // 存完退回选型列表：改完一个再改下一个是常见动线，而停在面板上
-    // 会让人以为还没存进去（面板长得和刚才一模一样）
+    // 存完退出编辑。从抽屉进来的会落回选型列表（改完一个接着改下一个是
+    // 常见动线）；从详情页进来的没有选型列表可落，抽屉整个关掉
+    final fromPicker = _picking != null;
     setState(() => _editing = null);
+    if (!fromPicker) Navigator.of(context).maybePop();
   }
 
   /// 打开右侧的选型抽屉。
@@ -965,6 +1000,7 @@ class _Detail extends StatefulWidget {
     required this.onDelete,
     required this.onFetch,
     required this.onToggleModel,
+    required this.onEditModel,
     required this.onToggleSource,
     required this.onCheck,
     required this.offlineNote,
@@ -978,6 +1014,9 @@ class _Detail extends StatefulWidget {
   final VoidCallback onDelete;
   final VoidCallback onFetch;
   final void Function(String, bool) onToggleModel;
+
+  /// 改某个型号的能力。`null` = 这条来源改不了（部署提供那条）。
+  final void Function(FetchedModel)? onEditModel;
   final ValueChanged<bool> onToggleSource;
   final ValueChanged<String> onCheck;
   final String? offlineNote;
@@ -1202,6 +1241,7 @@ class _DetailState extends State<_Detail> {
           busy: widget.busy,
           onToggle: widget.onToggleModel,
           onFetch: widget.onFetch,
+          onEdit: widget.onEditModel,
         ),
       ],
     );

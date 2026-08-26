@@ -30,6 +30,7 @@ class ModelTable extends StatelessWidget {
     required this.busy,
     required this.onToggle,
     required this.onFetch,
+    this.onEdit,
   });
 
   final ModelSource source;
@@ -40,6 +41,18 @@ class ModelTable extends StatelessWidget {
 
   /// 点「获取模型列表」—— 调用方去拉，然后把抽屉打开。
   final VoidCallback onFetch;
+
+  /// 编辑这个型号的能力。`null` = 这条来源改不了（部署提供那条）。
+  ///
+  /// # 为什么这里必须也有一个入口
+  ///
+  /// 齿轮原本只在「获取模型列表」那个抽屉里。而**这一列才是人真正看模型
+  /// 的地方** —— 它列的是你已经启用、每天在用的那几个；抽屉里是几百行
+  /// 全集，是「去挑一个新的」时才开的。
+  ///
+  /// 只把入口放在抽屉里，等于让用户为了改一个眼前的模型，先去拉一次全集、
+  /// 再在几百行里把同一个型号找出来。2026-08-26 实地点这一页时发现的。
+  final void Function(FetchedModel model)? onEdit;
 
   @override
   Widget build(BuildContext context) {
@@ -198,6 +211,21 @@ class ModelTable extends StatelessWidget {
             ),
           ],
           const SizedBox(width: 2),
+          // 齿轮摆在「−」左边：那一个回答「还要不要它」，这一个回答
+          // 「它是什么」。前者更常用，留在最外侧最好点（与抽屉里那一行
+          // 的顺序一致 —— 同一个动作在两处位置不同，手会记错）
+          if (onEdit case final edit?)
+            IconButton(
+              tooltip: m.overridden.isEmpty ? '改这个模型的能力' : '这个模型的能力被你改过',
+              iconSize: 16,
+              visualDensity: VisualDensity.compact,
+              onPressed: busy ? null : () => edit(m),
+              icon: Icon(
+                Icons.tune_rounded,
+                // 改过的标出来：一列里哪几个是自己动过的要一眼看得见
+                color: m.overridden.isEmpty ? null : theme.cortex.accentInk,
+              ),
+            ),
           // 「−」而不是开关：这一列里的每一个都是**开着**的，
           // 一排恒为「开」的开关不传达任何信息，而它占的宽度不小
           IconButton(

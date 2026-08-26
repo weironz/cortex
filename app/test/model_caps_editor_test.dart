@@ -64,22 +64,21 @@ bool _canSave(WidgetTester tester) =>
     tester.widget<FilledButton>(find.byType(FilledButton)).onPressed != null;
 
 void main() {
-  testWidgets('打开时每一位都停在「跟随自动」，并且把自动的结论说出来', (tester) async {
+  testWidgets('查得到的预先选中（浅色），查不到的两个都不选中', (tester) async {
     await _open(tester);
 
     expect(
-      find.text('自动算出来：支持'),
-      findsOneWidget,
-      reason:
-          '目录说这个模型能看图，那一档就要把它说出来 —— '
-          '不说的话用户没有任何依据判断该不该覆盖它',
+      find.text('自动判断的，你还没改过'),
+      findsWidgets,
+      reason: '选中态得说清是谁下的结论 —— 否则用户不知道该不该动它',
     );
     expect(
-      find.text('自动算不出来 · 不确定，但不影响使用'),
+      find.text('没查到 —— 你选一个会更准，不选也照样能用'),
       findsOneWidget,
       reason:
-          '工具那一位目录说不出（null）。这是合法状态（发送时放行），'
-          '要如实说「说不出」，不能画成「不支持」',
+          '工具那一位查不到（null），两个 chip 都不选中。'
+          '**必须说「不选也能用」**：一个空着的选择看起来像「你必须先选一个」，'
+          '而事实相反 —— 不确定是放行的',
     );
     expect(find.text('你改的'), findsNothing, reason: '一位都没按过，不该有任何「你改的」标记');
     expect(_canSave(tester), isFalse, reason: '什么都没改，保存该是灰的');
@@ -105,9 +104,9 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 50));
 
-    // 只动「工具」那一位。面板顺序是 视觉/工具/思考/生图，所以 at(1)
-    // 是工具那一组 —— **不能用 .first**，那是视觉，而这条测试的全部意义
-    // 就是「没碰过的视觉必须保持 null」
+    // 只动「工具」那一位。面板顺序是 视觉/工具/思考/生图，每位两个 chip，
+    // 所以「支持」的第 2 个（at(1)）是工具那一组 —— **不能用 .first**，
+    // 那是视觉，而这条测试的全部意义就是「没碰过的视觉必须保持 null」
     await tester.tap(find.text('支持').at(1));
     await tester.pump(const Duration(milliseconds: 50));
     expect(_canSave(tester), isTrue, reason: '改过之后保存该亮起来');
@@ -154,7 +153,46 @@ void main() {
     );
   });
 
-  testWidgets('「全部跟随自动」把整条覆盖清掉', (tester) async {
+  testWidgets('改过的那一位能单独「改回自动」', (tester) async {
+    CapsOverride? saved;
+    tester.view.physicalSize = const Size(1000, 1600);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ModelCapsEditor(
+            model: const FetchedModel(
+              id: 'x',
+              vision: false,
+              overridden: CapsOverride(vision: true),
+            ),
+            sourceLabel: '我的中转站',
+            canProbe: false,
+            busy: false,
+            onSave: (c) => saved = c,
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 50));
+
+    await tester.tap(find.text('改回自动'));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.text('你改的'), findsNothing, reason: '点了「改回自动」，那一位就不再是他的断言了');
+
+    await tester.tap(find.byType(FilledButton));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(
+      saved?.vision,
+      isNull,
+      reason:
+          '改回自动 = 这一位交还给自动判断。存成 false 的话，'
+          '它会以「用户说不支持」的身份把自动结论永久压住',
+    );
+  });
+
+  testWidgets('「全部改回自动」把整条覆盖清掉', (tester) async {
     CapsOverride? saved;
     tester.view.physicalSize = const Size(1000, 1600);
     tester.view.devicePixelRatio = 1.0;
@@ -178,7 +216,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 50));
 
-    await tester.tap(find.text('全部跟随自动'));
+    await tester.tap(find.text('全部改回自动'));
     await tester.pump(const Duration(milliseconds: 50));
     await tester.tap(find.byType(FilledButton));
     await tester.pump(const Duration(milliseconds: 50));
@@ -187,7 +225,7 @@ void main() {
       saved?.isEmpty,
       isTrue,
       reason:
-          '「全部跟随自动」之后发出去的必须是一条空记录 —— '
+          '「全部改回自动」之后发出去的必须是一条空记录 —— '
           '服务端据此把整条删掉，而不是存一堆 false',
     );
   });
