@@ -12,8 +12,6 @@
 /// 4. **要给出路，而不只是拦住。** 一行提示 + 一个按钮。
 library;
 
-import 'dart:typed_data';
-
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/features/chat/widgets/message_composer.dart';
