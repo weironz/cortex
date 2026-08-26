@@ -179,16 +179,20 @@ class ChatPane extends ConsumerWidget {
             ],
           ],
         ),
-        // 还没开口的会话：输入框站在页面中央，上面是那块招呼，下面是几个
-        // 起手式。这是 WorkBuddy / ChatGPT / Claude 都在用的形状，理由是
-        // 同一个 —— 空会话里输入框就是全部内容，把它钉在底边等于让用户
-        // 隔着一整屏留白去够它。
+        // 还没开口：输入框站在页面中央，上面是那块招呼，下面是几个起手式。
+        // 这是 WorkBuddy / ChatGPT / Claude 都在用的形状，理由是同一个 ——
+        // 空会话里输入框就是全部内容，把它钉在底边等于让用户隔着一整屏
+        // 留白去够它。
         //
-        // **只有选中了会话才走这一支**。没选中时照旧「提示 + 底部输入框」：
-        // 那一版里输入框是禁用的，但 `ConfirmPanel` 跟着它一起挂在树上，
-        // 而它一挂上就去捞待办确认。不渲染的话那次捞晚发生，
-        // 测试里表现为「树都销毁了还有定时器没停」
-        if (hasSession && empty)
+        // ⚠️ **判据里不能再有 `hasSession`。** 会话惰性化之后（点「新对话」
+        // 不再立刻建会话），白纸上 `activeSessionId` 是 null，于是那一版
+        // 会走进下面的钉底分支 —— 用户看到的是：输入框在底部，敲完回车
+        // 会话兑现的一瞬间跳到居中，然后立刻因为有了消息又跳回底部。
+        // **一次发送闪两下**，而中间那一帧还是空的。
+        //
+        // 现在两种「还没开口」共用同一条路：白纸、以及选中了一条还没说过
+        // 话的会话。它们在用户眼里本来就是同一件事
+        if (empty)
           Expanded(
             child: SingleChildScrollView(
               child: Center(
@@ -209,11 +213,9 @@ class ChatPane extends ConsumerWidget {
             ),
           )
         else ...[
-          Expanded(
-            child: hasSession
-                ? const ConversationView()
-                : const NoSessionState(),
-          ),
+          // 走到这儿必定有会话：`empty` 为假意味着有轮次或者正在流，
+          // 两者都得先有一条会话才谈得上
+          const Expanded(child: ConversationView()),
           composer(centred: false),
         ],
       ],

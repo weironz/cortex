@@ -301,7 +301,12 @@ final railTabProvider = NotifierProvider<RailTabNotifier, RailTab>(
 
 /// 两侧面板的显示状态。
 class LayoutState {
-  const LayoutState({this.leftCollapsed = false, this.rightPanel});
+  const LayoutState({
+    this.leftCollapsed = false,
+    this.rightPanel,
+    this.leftWidth = kLeftPaneDefault,
+    this.rightWidth = kRightPaneDefault,
+  });
 
   /// 会话那一栏。收起时账号栏也跟着不见 —— 与 Codex / Claude
   /// 桌面端一致：收起就是整条侧栏都没了，要用就展开。
@@ -310,12 +315,58 @@ class LayoutState {
   /// 右侧显示谁，`null` = 右侧整个收起。
   final RightPanel? rightPanel;
 
+  /// 左栏宽度（逻辑像素）。见 [kLeftPaneMin]。
+  final double leftWidth;
+
+  /// 右栏宽度（逻辑像素）。上限由窗口宽度决定，见 `AppShell`。
+  final double rightWidth;
+
   /// `rightPanel` 要能被显式置 `null`，所以它**不能**用
   /// `rightPanel ?? this.rightPanel` 那套 —— 那样「收起」永远写不进去。
   /// 于是这个 copyWith 只管左栏，右侧由调用方直接造新的。
-  LayoutState collapseLeft(bool collapsed) =>
-      LayoutState(leftCollapsed: collapsed, rightPanel: rightPanel);
+  LayoutState collapseLeft(bool collapsed) => LayoutState(
+    leftCollapsed: collapsed,
+    rightPanel: rightPanel,
+    leftWidth: leftWidth,
+    rightWidth: rightWidth,
+  );
+
+  /// 只换右侧那一格，别的原样带过去。
+  ///
+  /// ⚠️ 三个改右侧的方法从前各自 `LayoutState(leftCollapsed: …, rightPanel: …)`
+  /// 手写一遍。加宽度字段的那一刻，那种写法会把两个宽度**静默重置成默认值**
+  /// —— 拖过宽度的人一点右栏图标，两侧齐刷刷弹回原宽，而没有任何报错。
+  LayoutState withRight(RightPanel? panel) => LayoutState(
+    leftCollapsed: leftCollapsed,
+    rightPanel: panel,
+    leftWidth: leftWidth,
+    rightWidth: rightWidth,
+  );
 }
+
+/// 左栏宽度的三个数。
+///
+/// # 为什么左右两条的可调幅度差这么多
+///
+/// 左栏装的是**导航**：一列会话标题。再宽也只是让标题少截几个字，而中间
+/// 那栏是真正在读的东西 —— 把导航拉到半屏是纯损失。所以给一个够用的窄区间。
+///
+/// 右栏装的是**内容**：文件树、diff、终端输出。它们与对话是对照着读的，
+/// 「这次我要仔细看 diff」是个正当诉求，那时对话退成一条缝完全合理。
+/// 所以它的上限由窗口宽度定（见 `AppShell`），不在这儿封。
+const double kLeftPaneMin = 200;
+const double kLeftPaneMax = 380;
+const double kLeftPaneDefault = 264;
+
+const double kRightPaneMin = 280;
+const double kRightPaneDefault = 348;
+
+/// 拖到最宽时留给对话的那一条。
+///
+/// 不留 0：一个 0 宽的中间栏会让它内部一串固定宽度的东西（顶栏按钮、
+/// 输入框内边距）报溢出，而那种红黄条纹一旦出现，用户以为整个应用崩了。
+/// 留一条还看得见「对话在这儿」，也还抓得住那根分隔条把它拉回来。
+const double kChatPaneMin = 200;
 
 /// 两侧折叠状态，跨重启记住。
 ///
@@ -332,6 +383,8 @@ class LayoutState {
 class LayoutNotifier extends Notifier<LayoutState> {
   static const String _kLeft = 'left_pane_collapsed';
   static const String _kRight = 'right_panel';
+  static const String _kLeftWidth = 'left_pane_width';
+  static const String _kRightWidth = 'right_pane_width';
 
   /// 上一版的键，只读不写。
   ///
@@ -351,6 +404,24 @@ class LayoutNotifier extends Notifier<LayoutState> {
     state = LayoutState(
       leftCollapsed: saved[_kLeft] == 'true',
       rightPanel: _readRight(saved),
+      // 存坏了（手改过设置、或者某一版写了别的东西）就用默认值，
+      // 而不是让一个 NaN 或者 3 像素的宽度传到布局里去
+      leftWidth: _readWidth(
+        saved[_kLeftWidth],
+        kLeftPaneDefault,
+        kLeftPaneMin,
+        kLeftPaneMax,
+      ),
+      // 上限在这儿放宽到一个不可能的大数：右栏的真上限跟着**窗口宽度**走，
+      // 而恢复的这一刻还不知道窗口多宽。真正的封顶在 `AppShell` 里，
+      // 那儿 `clamp` 一次就够 —— 存的时候封会让人换到小屏再换回来时
+      // 宽度被永久截掉
+      rightWidth: _readWidth(
+        saved[_kRightWidth],
+        kRightPaneDefault,
+        kRightPaneMin,
+        double.infinity,
+      ),
     );
   }
 
@@ -371,6 +442,42 @@ class LayoutNotifier extends Notifier<LayoutState> {
     }
   }
 
+  static double _readWidth(String? raw, double fallback, double lo, double hi) {
+    final v = double.tryParse(raw ?? '');
+    if (v == null || !v.isFinite) return fallback;
+    return v.clamp(lo, hi);
+  }
+
+  /// 拖完了才存 —— 拖动过程中每一帧都写一次的话，一次拖拽就是几十次
+  /// 磁盘写入，而中间那些值没有一个是用户想要的
+  void setLeftWidth(double width) {
+    final w = width.clamp(kLeftPaneMin, kLeftPaneMax);
+    if (w == state.leftWidth) return;
+    state = LayoutState(
+      leftCollapsed: state.leftCollapsed,
+      rightPanel: state.rightPanel,
+      leftWidth: w,
+      rightWidth: state.rightWidth,
+    );
+  }
+
+  void setRightWidth(double width) {
+    if (width == state.rightWidth) return;
+    state = LayoutState(
+      leftCollapsed: state.leftCollapsed,
+      rightPanel: state.rightPanel,
+      leftWidth: state.leftWidth,
+      rightWidth: width,
+    );
+  }
+
+  /// 松手。**存的是最终值**，见 [setLeftWidth]。
+  void persistWidths() {
+    final patch = ref.read(settingsPatcherProvider);
+    unawaited(patch(_kLeftWidth, '${state.leftWidth}'));
+    unawaited(patch(_kRightWidth, '${state.rightWidth}'));
+  }
+
   void toggleLeft() {
     state = state.collapseLeft(!state.leftCollapsed);
     unawaited(
@@ -385,7 +492,7 @@ class LayoutNotifier extends Notifier<LayoutState> {
   /// （面板自己那个 × 仍然在，两条路都通）。
   void selectRight(RightPanel panel) {
     final next = state.rightPanel == panel ? null : panel;
-    state = LayoutState(leftCollapsed: state.leftCollapsed, rightPanel: next);
+    state = state.withRight(next);
     unawaited(ref.read(settingsPatcherProvider)(_kRight, next?.name ?? 'none'));
   }
 
@@ -396,13 +503,13 @@ class LayoutNotifier extends Notifier<LayoutState> {
   /// 而抽屉照样打开，里面画的是记忆。用户点的是文件。
   void showRight(RightPanel panel) {
     if (state.rightPanel == panel) return;
-    state = LayoutState(leftCollapsed: state.leftCollapsed, rightPanel: panel);
+    state = state.withRight(panel);
     unawaited(ref.read(settingsPatcherProvider)(_kRight, panel.name));
   }
 
   /// 面板自己那个关闭按钮。
   void closeRight() {
-    state = LayoutState(leftCollapsed: state.leftCollapsed, rightPanel: null);
+    state = state.withRight(null);
     unawaited(ref.read(settingsPatcherProvider)(_kRight, 'none'));
   }
 }

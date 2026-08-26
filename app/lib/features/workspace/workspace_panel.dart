@@ -621,17 +621,26 @@ class WorkspaceChip extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     if (!kLocalAgentSupported) return const SizedBox.shrink();
 
+    // ⚠️ `session == null` 是**白纸**，不是「没东西可显示」。
+    //
+    // 会话惰性化之后（点「新对话」不再立刻建会话），第一句话之前
+    // `activeSession` 就是 null —— 而那恰恰是最该定工作区的一刻：
+    // 「这次的文件落在哪」要在文件产生**之前**说，说晚了就是搬家。
+    // 上一版在这里直接 shrink，于是新对话里这颗 chip 整个消失，
+    // 用户只能先随便说一句话把会话催出来，再回头改。
     final session = ref.watch(
       chatControllerProvider.select((s) => s.activeSession),
     );
-    if (session == null) return const SizedBox.shrink();
 
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final workspace = session.workspace;
-    final cloud = ref
-        .read(chatControllerProvider.notifier)
-        .isCloudByChoice(session.id);
+    final workspace = session?.workspace;
+    // 白纸永远是「本机 + 还没定」：派出去跑是选出来的，而它还没被选过
+    final cloud =
+        session != null &&
+        ref.read(chatControllerProvider.notifier).isCloudByChoice(session.id);
+    // 白纸与草稿在这颗 chip 上是同一态：都还能自动开一个新工作区
+    final draft = session?.isLocalDraft ?? true;
 
     final (IconData icon, String label, String tip) = switch ((
       workspace,
@@ -644,7 +653,7 @@ class WorkspaceChip extends ConsumerWidget {
       ),
       // 还没定：草稿会在第一句话之前自动开一个按日期时间命名的文件夹，
       // 而**已经开过口**的会话不会 —— 那时说「新建工作区」就是句空话
-      (null, false) when session.isLocalDraft => (
+      (null, false) when draft => (
         Icons.auto_awesome_outlined,
         '新建工作区',
         '发出第一句话时，会在默认工作空间下建一个以当前时间命名的文件夹。\n点击改成别的。',
@@ -703,38 +712,67 @@ class WorkspaceChip extends ConsumerWidget {
     );
   }
 
+  /// [session] 为 `null` = 白纸（还没兑现成会话）。
+  ///
+  /// # ⚠️ 兑现会话的时机是「选完」，不是「点开」
+  ///
+  /// 打开这张清单只是**看看**，用户随时可能划掉。在这一步就把会话建出来，
+  /// 左栏立刻多一行谁也没说过话的「新会话」—— 那正是惰性化要消除的东西
+  /// （见 `ChatController.startNewChat`）。
+  ///
+  /// 所以会话在**做出选择之后**才兑现，且「新建工作区」那一支连兑现都不做：
+  /// 它选的就是默认行为，什么都不用记。
   Future<void> _pick(
     BuildContext context,
     WidgetRef ref,
-    ChatSession session,
+    ChatSession? session,
   ) async {
     final root = await ref.read(localWorkspaceRootProvider.future);
     if (!context.mounted) return;
     final choice = await showModalBottomSheet<_WorkspaceChoice>(
       context: context,
       showDragHandle: true,
-      builder: (ctx) => _WorkspaceSheet(session: session, root: root),
+      builder: (ctx) => _WorkspaceSheet(
+        current: session?.workspace?.root,
+        // 白纸与草稿一样能「新建工作区」
+        draft: session?.isLocalDraft ?? true,
+        root: root,
+      ),
     );
     if (choice == null || !context.mounted) return;
-    if (!await _confirmSwitch(context, ref, session, choice)) return;
+    // 白纸没有轮次，没什么可换的 —— 那道确认只对聊过的会话有意义
+    if (session != null &&
+        !await _confirmSwitch(context, ref, session, choice)) {
+      return;
+    }
     if (!context.mounted) return;
 
     final controller = ref.read(chatControllerProvider.notifier);
+    // 白纸上选了「新建工作区」= 选中了它本来就会做的事，**不建会话**：
+    // 建了就是凭一个空操作在左栏留一行
+    if (session == null && choice is _Auto) return;
+    final id = session?.id ?? controller.materializeSession();
     try {
       switch (choice) {
         case _Cloud():
-          await controller.chooseCloud(session.id);
+          await controller.chooseCloud(id);
         case _Auto():
           // 「新建工作区」= 清掉现在这个绑定，让首轮那一步重新决定。
           // 它只对草稿有意义，所以清单里也只对草稿显示
-          await controller.unbindWorkspace(session.id);
+          await controller.unbindWorkspace(id);
         // 已有的和新建的走同一条：那个端点本来就是「给我这个名字的工作空间
         // 目录，没有就建一个」，分成两条只会多一处能漂开的语义
         case _Folder(:final name) || _NewFolder(:final name):
-          await controller.createLocalWorkspace(session.id, name);
+          await controller.createLocalWorkspace(id, name);
         case _Browse():
-          if (context.mounted) {
-            await showWorkspaceBindingSheet(context, session);
+          // 兑现之后要拿**那一条**会话，不能用外面那个可能为 null 的
+          final bound = ref
+              .read(chatControllerProvider)
+              .sessions
+              .where((s) => s.id == id)
+              .firstOrNull;
+          if (context.mounted && bound != null) {
+            await showWorkspaceBindingSheet(context, bound);
           }
       }
     } on CortexApiException catch (e) {
@@ -853,23 +891,36 @@ class _Browse extends _WorkspaceChoice {
 final _autoNamed = RegExp(r'^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}$');
 
 class _WorkspaceSheet extends StatelessWidget {
-  const _WorkspaceSheet({required this.session, required this.root});
+  const _WorkspaceSheet({
+    required this.current,
+    required this.draft,
+    required this.root,
+  });
 
-  final ChatSession session;
+  /// 现在绑着哪个目录，`null` = 还没定（白纸也是这一态）。
+  final String? current;
+
+  /// 还能不能「新建工作区」—— 已经开过口的会话不行，见 [WorkspaceChip]。
+  ///
+  /// ⚠️ 这两个字段从前是一整个 `ChatSession`。拆开是因为白纸上根本没有
+  /// 会话可传，而这张清单真正要的只有它们两个。
+  final bool draft;
+
   final LocalWorkspaceRoot root;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final named = root.folders.where((f) => !_autoNamed.hasMatch(f)).toList();
-    final current = session.workspace?.root;
+    // 提成局部量：字段读不出类型提升，下面那个 `basenameOf(current)` 会红
+    final current = this.current;
 
     return SafeArea(
       child: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (session.isLocalDraft)
+            if (draft)
               ListTile(
                 leading: const Icon(Icons.auto_awesome_outlined),
                 title: const Text('新建工作区'),

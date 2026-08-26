@@ -19,6 +19,7 @@ library;
 
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
+import 'package:cortex_app/core/theme.dart';
 import 'package:cortex_app/features/workspace/interactive_terminal.dart';
 import 'package:cortex_app/features/workspace/right_rail.dart';
 import 'package:cortex_app/state/app_providers.dart';
@@ -171,6 +172,57 @@ void main() {
         reason:
             '云端会话的文件在容器卷里，这台机器上没有那个目录 —— '
             '按钮画出来点了只会打开一个不存在的路径',
+      );
+    });
+  });
+
+  /// 终端那一块的底色。
+  ///
+  /// # 为什么这值得一条测试
+  ///
+  /// xterm 的 `TerminalThemes.defaultTheme` 是**写死的 VS Code 深色**。
+  /// 不传 `theme:` 编译得过、跑得起来、字也看得见 —— 只是浅色主题下右栏里
+  /// 挖出一块黑，而旁边两个页签（文件 / 本轮改动）跟着主题走。
+  /// 这类「跑得起来但看着像坏了」的东西没有任何自动信号，只能钉住。
+  group('终端跟着主题走', () {
+    test('浅色主题下底色是这一栏的底色，不是那块写死的黑', () {
+      final light = CortexTheme.light();
+      final t = terminalTheme(light);
+
+      expect(
+        t.background,
+        light.cortex.sidebar,
+        reason: '终端住在右栏里，底色不一致就是一块没对齐的方块',
+      );
+      expect(
+        t.background,
+        isNot(const Color(0xFF1E1E1E)),
+        reason: 'xterm 默认那块深灰 —— 这条断言就是冲着「忘了传 theme:」来的',
+      );
+      expect(
+        t.foreground,
+        light.colorScheme.onSurface,
+        reason: '底色跟着主题走了而字没跟，就是浅底上的浅灰字，更糟',
+      );
+    });
+
+    test('深色主题下也跟着走', () {
+      final dark = CortexTheme.dark();
+      expect(terminalTheme(dark).background, dark.cortex.sidebar);
+    });
+
+    /// 16 色**不**跟着主题算：它们是协议规定的语义（`ls` 绿标可执行、
+    /// `git` 红标删除）。按强调色算出来的「绿」会让 `git diff` 读不懂。
+    test('16 色只换深浅两套，不按主题色算', () {
+      expect(
+        terminalTheme(CortexTheme.light()).green,
+        isNot(terminalTheme(CortexTheme.dark()).green),
+        reason: '浅底上要用深一档的绿，否则 ls 的目录名糊在背景里',
+      );
+      expect(
+        terminalTheme(CortexTheme.light()).red,
+        terminalTheme(CortexTheme.dark()).red,
+        reason: '红在两套里本来就同一个值 —— 这里钉的是「它不跟着 primary 变」',
       );
     });
   });

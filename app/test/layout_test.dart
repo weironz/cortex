@@ -217,6 +217,101 @@ void main() {
       );
     });
 
+    /// 宽度是拖出来的，不是点出来的 —— 所以它有一条别的开关没有的失败面：
+    /// **拖动过程中的每一帧都会改状态**，而只有松手那一下该落盘。
+    test('拖动只改状态，松手才落盘', () async {
+      final c = boot();
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+
+      final n = c.read(layoutProvider.notifier);
+      n.setLeftWidth(300);
+      n.setLeftWidth(320);
+      await settle();
+      expect(
+        disk['left_pane_width'],
+        isNull,
+        reason: '拖动中就写盘 = 一次拖拽几十次磁盘写，而中间值没一个是用户要的',
+      );
+
+      n.persistWidths();
+      await settle();
+      expect(disk['left_pane_width'], '320.0');
+    });
+
+    /// 左栏是**导航**，再宽也只是标题少截几个字，而中间那栏才是在读的东西。
+    /// 没有上限的话，一次误拖就能把导航拉到半屏。
+    test('左栏宽度被夹在可用区间里', () async {
+      final c = boot();
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+
+      final n = c.read(layoutProvider.notifier);
+      n.setLeftWidth(9999);
+      expect(c.read(layoutProvider).leftWidth, kLeftPaneMax);
+      n.setLeftWidth(-40);
+      expect(c.read(layoutProvider).leftWidth, kLeftPaneMin);
+    });
+
+    /// ⚠️ 右栏的上限**不在这儿封**：它跟着窗口宽度走，而存的这一刻还不知道
+    /// 窗口多宽。在这儿按某个常数截一刀的后果是：在小窗口上开一次应用，
+    /// 用户在大窗口上调好的宽度就被永久截掉了。
+    test('右栏宽度不被存下来的那一刻封顶', () async {
+      final c = boot();
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+
+      c.read(layoutProvider.notifier).setRightWidth(1600);
+      expect(c.read(layoutProvider).rightWidth, 1600);
+    });
+
+    test('存下来的宽度在启动时被读回来', () async {
+      final c = boot({'left_pane_width': '312.0', 'right_pane_width': '520.0'});
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+
+      expect(c.read(layoutProvider).leftWidth, 312.0);
+      expect(c.read(layoutProvider).rightWidth, 520.0);
+    });
+
+    /// 存坏了（手改过设置、或者某一版写了别的东西）不能把一个 NaN 或者
+    /// 3 像素的宽度传进布局 —— 那是一屏没法用的界面，而用户找不到复位的路。
+    test('存坏的宽度回落到默认，不传一个坏值进布局', () async {
+      final c = boot({'left_pane_width': '不是数', 'right_pane_width': 'NaN'});
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+
+      expect(c.read(layoutProvider).leftWidth, kLeftPaneDefault);
+      expect(c.read(layoutProvider).rightWidth, kRightPaneDefault);
+    });
+
+    /// 加宽度字段之前，改右侧的三个方法各自手写 `LayoutState(...)`。
+    /// 那种写法在加字段的那一刻会把宽度**静默重置成默认值** ——
+    /// 拖过宽度的人一点右栏图标，两侧齐刷刷弹回原宽，且没有任何报错。
+    test('开关右栏不会把拖好的宽度冲掉', () async {
+      final c = boot();
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+
+      final n = c.read(layoutProvider.notifier);
+      n.setLeftWidth(310);
+      n.setRightWidth(500);
+
+      n.selectRight(RightPanel.files);
+      n.showRight(RightPanel.files);
+      n.closeRight();
+      n.toggleLeft();
+
+      expect(c.read(layoutProvider).leftWidth, 310);
+      expect(c.read(layoutProvider).rightWidth, 500);
+    });
+
     test('与权限档互不干扰（两个都用 patcher）', () async {
       final c = boot();
       addTearDown(c.dispose);

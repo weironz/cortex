@@ -58,8 +58,12 @@ class AppShell extends ConsumerStatefulWidget {
 class _AppShellState extends ConsumerState<AppShell> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
-  static const _sessionsWidth = 264.0;
-  static const _rightWidth = 348.0;
+  /// 抽屉形态的左栏宽度。
+  ///
+  /// **不跟着 `layout.leftWidth` 走**：那个是用户为「三栏并排」这个布局
+  /// 调的，而抽屉是盖在内容上的另一回事 —— 窄屏上把它拖到 380 会盖掉
+  /// 整个窗口。这里给一个固定的、放得下会话标题的宽度。
+  static const _drawerWidth = 284.0;
   static const _mediumBreakpoint = 900.0;
 
   @override
@@ -131,6 +135,17 @@ class _AppShellState extends ConsumerState<AppShell> {
         final showSessionsInline = isMedium && !layout.leftCollapsed;
         final showRightInline = isWide && layout.rightPanel != null;
 
+        final leftWidth = layout.leftWidth;
+        // 右栏能拉到多宽由**这一刻的窗口**说了算，所以在这儿算而不是在
+        // notifier 里：把窗口拖窄再拖回来，右栏该回到原来那么宽 ——
+        // 存进去的值被小窗口截过一次就再也回不来了
+        final rightMax =
+            (width - (showSessionsInline ? leftWidth : 0) - kChatPaneMin).clamp(
+              kRightPaneMin,
+              double.infinity,
+            );
+        final rightWidth = layout.rightWidth.clamp(kRightPaneMin, rightMax);
+
         // 右栏画谁。内联与抽屉共用它 —— 两处各写一遍 switch 的话，
         // 加第三个面板时漏改一处不会报错，只是抽屉里画的是另一个
         // 2026-08-24 起右栏是 RightRail（文件 / 本轮改动 / 终端三页签），
@@ -159,7 +174,7 @@ class _AppShellState extends ConsumerState<AppShell> {
             drawer: showSessionsInline
                 ? null
                 : Drawer(
-                    width: _sessionsWidth + 20,
+                    width: _drawerWidth,
                     backgroundColor: tokens.sidebar,
                     child: SafeArea(
                       child: _LeftPane(
@@ -175,7 +190,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                 children: [
                   if (showSessionsInline) ...[
                     SizedBox(
-                      width: _sessionsWidth,
+                      width: leftWidth,
                       child: Container(
                         // 导航区是**独立表面**，不是「浅一点的内容区」。
                         // 抄 Cherry Studio 的 sidebar 那一档：两个功能区靠
@@ -184,7 +199,13 @@ class _AppShellState extends ConsumerState<AppShell> {
                         child: const _LeftPane(collapsible: true),
                       ),
                     ),
-                    VerticalDivider(width: 1, color: tokens.sidebarBorder),
+                    _ResizeHandle(
+                      color: tokens.sidebarBorder,
+                      // 往右拖 = 左栏变宽，所以是加
+                      onDelta: (d) =>
+                          layoutNotifier.setLeftWidth(leftWidth + d),
+                      onDone: layoutNotifier.persistWidths,
+                    ),
                   ],
                   // 中间那一大栏是哪个「地方」。**只有聊天那一支要顶栏
                   // 那堆参数** —— 画廊没有会话、没有右栏面板，把它硬塞进
@@ -250,9 +271,16 @@ class _AppShellState extends ConsumerState<AppShell> {
                     },
                   ),
                   if (showRightInline) ...[
-                    VerticalDivider(width: 1, color: tokens.sidebarBorder),
+                    _ResizeHandle(
+                      color: tokens.sidebarBorder,
+                      // 往右拖 = 右栏变窄，所以是减
+                      onDelta: (d) => layoutNotifier.setRightWidth(
+                        (rightWidth - d).clamp(kRightPaneMin, rightMax),
+                      ),
+                      onDone: layoutNotifier.persistWidths,
+                    ),
                     SizedBox(
-                      width: _rightWidth,
+                      width: rightWidth,
                       child: Container(
                         color: tokens.sidebar,
                         child: rightPane(layoutNotifier.closeRight),
@@ -265,6 +293,83 @@ class _AppShellState extends ConsumerState<AppShell> {
           ),
         );
       },
+    );
+  }
+}
+
+/// 两栏之间那根**能拖的**分隔线。
+///
+/// # 画 1 像素，但能抓 9 像素
+///
+/// 分隔线在视觉上必须细（它是两块内容之间的界，不是第三块内容），而
+/// 1 像素的命中区在任何显示器上都是抓不住的 —— 用户会以为它不能拖。
+/// 所以命中区是 [_hit] 宽的透明块，线画在正中。这一条是所有可拖分隔条
+/// 的通行做法，VS Code / Slack / Cherry Studio 都是这么干的。
+///
+/// # 为什么不用 `Draggable`
+///
+/// 那一套是「拎起来放到别处」，会画拖影、要有放置目标。这里要的是
+/// 「跟着指针走」，`GestureDetector` 的 `onHorizontalDragUpdate` 正好。
+///
+/// # 拖动时不写盘
+///
+/// [onDelta] 每帧都会被叫，[onDone] 只在松手时叫一次。宽度存在设置里，
+/// 每帧写一次等于一次拖拽几十次磁盘写 —— 而中间那些值没有一个是用户
+/// 想留下的。
+class _ResizeHandle extends StatefulWidget {
+  const _ResizeHandle({
+    required this.color,
+    required this.onDelta,
+    required this.onDone,
+  });
+
+  final Color color;
+
+  /// 指针横向移动了多少（逻辑像素，向右为正）。
+  final void Function(double dx) onDelta;
+
+  /// 松手了 —— 该把最终宽度存下来。
+  final VoidCallback onDone;
+
+  @override
+  State<_ResizeHandle> createState() => _ResizeHandleState();
+}
+
+class _ResizeHandleState extends State<_ResizeHandle> {
+  static const double _hit = 9;
+
+  /// 悬停或正在拖时把线描粗一点。
+  ///
+  /// 这是这个控件唯一的「我能拖」信号 —— 鼠标指针的变化在触屏上没有，
+  /// 而且它出现在指针**已经**移过去之后。一条会变化的线让人在移过去的
+  /// 途中就看得出这儿有东西。
+  bool _hot = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeLeftRight,
+      onEnter: (_) => setState(() => _hot = true),
+      onExit: (_) => setState(() => _hot = false),
+      child: GestureDetector(
+        // 透明也要吃点击：不然拖拽落到底下那栏上，表现是「拖不动，
+        // 反而选中了一行会话」
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: (d) => widget.onDelta(d.delta.dx),
+        onHorizontalDragEnd: (_) => widget.onDone(),
+        // 拖到窗口外面松手也算松手 —— 少了这一条，那次拖拽的宽度不会被存下
+        onHorizontalDragCancel: widget.onDone,
+        child: SizedBox(
+          width: _hit,
+          child: Center(
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              width: _hot ? 3 : 1,
+              color: widget.color,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
