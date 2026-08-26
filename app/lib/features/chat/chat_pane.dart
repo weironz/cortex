@@ -16,7 +16,16 @@ import 'widgets/message_composer.dart';
 import '../../core/theme.dart';
 
 /// Centre pane: header, transcript, composer.
-class ChatPane extends ConsumerWidget {
+///
+/// # 为什么它是有状态的：焦点
+///
+/// 对话区里**没有任何可聚焦的东西**（一堆文字与气泡），所以点它一下
+/// 不会把键盘焦点从别处摘走。而「别处」包括右栏那个真终端 —— 于是
+/// 用户在终端里敲完命令、回来点一下对话、接着打字，字**全进了终端**。
+///
+/// 接住那一下的只能是这一层：只有它知道「对话区」的范围，也只有它能
+/// 把焦点交给输入框。所以输入框的焦点节点由它持有（见 [_composerFocus]）。
+class ChatPane extends ConsumerStatefulWidget {
   const ChatPane({
     super.key,
     this.onToggleSessions,
@@ -45,12 +54,58 @@ class ChatPane extends ConsumerWidget {
   final RightPanel? activePanel;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ChatPane> createState() => _ChatPaneState();
+}
+
+class _ChatPaneState extends ConsumerState<ChatPane> {
+  /// 输入框的焦点。**由这一层持有**，理由见 [ChatPane] 的文档。
+  final FocusNode _composerFocus = FocusNode(debugLabel: 'composer');
+
+  /// 「焦点此刻在不在这一栏里」的探针。
+  ///
+  /// 不可聚焦、不参与遍历 —— 它唯一的作用是让 [_reclaimFocus] 问得出
+  /// `hasFocus`（自己或任何后代拿着主焦点）。
+  final FocusNode _paneProbe = FocusNode(
+    debugLabel: 'chat-pane',
+    skipTraversal: true,
+    canRequestFocus: false,
+  );
+
+  @override
+  void dispose() {
+    _composerFocus.dispose();
+    _paneProbe.dispose();
+    super.dispose();
+  }
+
+  /// 在这一栏里按下了指针 —— 把键盘要回来。
+  ///
+  /// # ⚠️ 焦点已经在这一栏里时**什么都不做**
+  ///
+  /// 少了这个判断，每一次在气泡上按下指针都会把焦点抢给输入框，而消息
+  /// 正文是可选中的（`SelectionArea`）—— 选中区在失去焦点时会被清掉，
+  /// 于是「按住拖选一段话」变成选不动。
+  ///
+  /// 判据交给探针节点：它的 `hasFocus` 在任何后代（输入框、气泡上的按钮、
+  /// 选中区）拿着主焦点时为真。
+  ///
+  /// # 为什么是 `Listener` 而不是 `GestureDetector`
+  ///
+  /// 手势要在竞技场里排队，而消息气泡里那些选中区与按钮各有自己的
+  /// 识别器，且它们在里层 —— 一个套在外面的 tap 识别器在**大部分**
+  /// 点击上都会输掉，表现是「点空白处管用、点在字上不管用」。
+  /// `Listener` 不进竞技场，指针一按下就到。
+  void _reclaimFocus(PointerDownEvent _) {
+    if (_paneProbe.hasFocus) return;
+    _composerFocus.requestFocus();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final controller = ref.read(chatControllerProvider.notifier);
     final sessionId = ref.watch(
       chatControllerProvider.select((s) => s.activeSessionId),
     );
-    final hasSession = sessionId != null;
     final title = ref.watch(
       chatControllerProvider.select((s) => s.activeSession?.title),
     );
@@ -96,6 +151,8 @@ class ChatPane extends ConsumerWidget {
           ensureSession: controller.materializeSession,
           streaming: streaming,
           centred: centred,
+          // 焦点节点由这一层给 —— 「点对话区就能接着打字」靠它
+          focusNode: _composerFocus,
           onSend: (text, attachments) =>
               controller.send(text, attachments: attachments),
           onStop: controller.stopGeneration,
@@ -103,6 +160,38 @@ class ChatPane extends ConsumerWidget {
       ],
     );
 
+    // 在这一栏里按下指针就把键盘要回来（除非焦点已经在栏内）。
+    // 探针套在整栏外面，所以「栏内」包括输入框、气泡上的按钮、以及
+    // 消息正文的选中区 —— 见 `_reclaimFocus`
+    return Listener(
+      onPointerDown: _reclaimFocus,
+      child: Focus(
+        focusNode: _paneProbe,
+        canRequestFocus: false,
+        skipTraversal: true,
+        child: _body(
+          context,
+          controller,
+          sessionId,
+          title,
+          streaming,
+          empty,
+          composer,
+        ),
+      ),
+    );
+  }
+
+  Widget _body(
+    BuildContext context,
+    ChatController controller,
+    String? sessionId,
+    String? title,
+    bool streaming,
+    bool empty,
+    Widget Function({required bool centred}) composer,
+  ) {
+    final hasSession = sessionId != null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -113,14 +202,14 @@ class ChatPane extends ConsumerWidget {
           subtitle: hasSession ? null : '通用 AI Agent',
           // 左栏伸缩，**任何宽度都在**。此前它只在窄屏出现（那时叫
           // 「会话列表」），于是宽屏下根本没有收起侧栏这回事
-          leading: onToggleSessions == null
+          leading: widget.onToggleSessions == null
               ? null
               : IconButton(
-                  onPressed: onToggleSessions,
+                  onPressed: widget.onToggleSessions,
                   iconSize: 19,
-                  tooltip: sessionsVisible ? '隐藏会话栏' : '显示会话栏',
+                  tooltip: widget.sessionsVisible ? '隐藏会话栏' : '显示会话栏',
                   icon: Icon(
-                    sessionsVisible
+                    widget.sessionsVisible
                         ? Icons.menu_open_rounded
                         : Icons.menu_rounded,
                   ),
@@ -142,7 +231,7 @@ class ChatPane extends ConsumerWidget {
             if (hasSession)
               IconButton(
                 onPressed: () {
-                  final open = onOpenPanel;
+                  final open = widget.onOpenPanel;
                   if (open == null) {
                     showSessionChanges(context);
                     return;
@@ -167,14 +256,14 @@ class ChatPane extends ConsumerWidget {
             // 右栏已经是三页签（文件 / 本轮改动 / 终端），文件夹只说得出
             // 三分之一。图标常量在 right_rail.dart —— 栏头「收起」用的必须
             // 是同一个，见那里的注释
-            if (onSelectPanel != null) ...[
+            if (widget.onSelectPanel != null) ...[
               _PanelButton(
                 panel: RightPanel.files,
-                active: activePanel == RightPanel.files,
+                active: widget.activePanel == RightPanel.files,
                 tooltip: '右栏',
                 filled: kRailToggleFilled,
                 outlined: kRailToggleOutlined,
-                onSelect: onSelectPanel!,
+                onSelect: widget.onSelectPanel!,
               ),
             ],
           ],

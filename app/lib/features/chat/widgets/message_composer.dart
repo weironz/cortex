@@ -44,6 +44,7 @@ class MessageComposer extends ConsumerStatefulWidget {
     this.sessionId,
     this.enabled = true,
     this.centred = false,
+    this.focusNode,
   });
 
   final void Function(String text, List<Attachment> attachments) onSend;
@@ -77,13 +78,33 @@ class MessageComposer extends ConsumerStatefulWidget {
   /// 上面根本没有对话。开口之后它退回底边，让位给正文。
   final bool centred;
 
+  /// 从外面借来的焦点节点。`null` = 自己造一个自己管。
+  ///
+  /// # 为什么要能从外面给
+  ///
+  /// 「点一下对话区，接着打字」这件事发生在**输入框之外**：对话区里没有
+  /// 任何可聚焦的东西，所以点它不会把焦点从别处（尤其是右栏那个终端）
+  /// 摘走 —— 用户点完对话区继续敲，字全进了终端。
+  ///
+  /// 接住那一下的只能是 `ChatPane`（它才知道「对话区」的范围），而它得
+  /// 够得着输入框的焦点节点。所以节点的所有权可以上移一层。
+  ///
+  /// ⚠️ 一个 `FocusNode` 同时只能挂在一处。给了外面的节点，就得保证同一
+  /// 时刻只有一个 `MessageComposer` 用它 —— `ChatPane` 的两种形态
+  /// （居中 / 钉底）是互斥分支，满足这个条件；画廊那个输入框**不传**，
+  /// 它自己造自己的。
+  final FocusNode? focusNode;
+
   @override
   ConsumerState<MessageComposer> createState() => _MessageComposerState();
 }
 
 class _MessageComposerState extends ConsumerState<MessageComposer> {
   final TextEditingController _controller = TextEditingController();
-  final FocusNode _focusNode = FocusNode();
+
+  /// 自己造的那个 —— 只在外面没给时才有。
+  FocusNode? _owned;
+  FocusNode get _focusNode => widget.focusNode ?? (_owned ??= FocusNode());
   bool _hasText = false;
   bool _dragging = false;
 
@@ -127,7 +148,10 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
   @override
   void dispose() {
     _controller.dispose();
-    _focusNode.dispose();
+    // 只销毁自己造的那个。借来的节点归出借方管 —— 在这儿销毁它，
+    // 下一次这个部件重建（切居中 / 钉底形态就会）就拿到一个已经死掉的
+    // 节点，症状是输入框从此点不亮
+    _owned?.dispose();
     super.dispose();
   }
 

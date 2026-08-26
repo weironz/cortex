@@ -161,4 +161,113 @@ void main() {
       reason: '「新建工作区」= 首轮自己开一个，本来就是白纸的默认行为。为一次空操作建会话是白留一行',
     );
   });
+
+  /// **点一下对话区，接着打字要能打进输入框。**
+  ///
+  /// # 这条为什么在这一组
+  ///
+  /// 起因是右栏那个真终端：它一旦拿到键盘焦点就一直拿着，而对话区里
+  /// **没有任何可聚焦的东西**（一堆文字与气泡），点它不会把焦点摘走。
+  /// 用户在终端里敲完命令、回来点一下对话、接着打字 —— 字全进了终端，
+  /// 而屏幕上没有任何东西提示焦点在哪。
+  ///
+  /// 用一个原本没焦点的节点冒充「别处」：判据是「焦点不在这一栏里就要回来」，
+  /// 谁拿着它并不重要。
+  testWidgets('焦点在别处时，点一下对话区就把键盘交给输入框', (tester) async {
+    final c = _boot();
+    addTearDown(c.dispose);
+    c.read(chatControllerProvider.notifier).startNewChat();
+
+    final elsewhere = FocusNode(debugLabel: '别处');
+    addTearDown(elsewhere.dispose);
+    await _pump(
+      tester,
+      c,
+      Column(
+        children: [
+          // 「右栏那个终端」的替身
+          Focus(focusNode: elsewhere, child: const SizedBox(height: 20)),
+          const Expanded(child: ChatPane()),
+        ],
+      ),
+    );
+
+    elsewhere.requestFocus();
+    await tester.pump();
+    expect(elsewhere.hasPrimaryFocus, isTrue, reason: '前提没成立，后面测的就不是这件事');
+
+    // 按坐标点，不按部件点：招呼那块本身不吃指针事件（它在滚动视图里、
+    // 没有自己的命中区），`tap(find...)` 会警告「点在了别的东西上」。
+    // 而这条测试要的正是「点在对话区的任意一处」，坐标就够了。
+    await tester.tapAt(tester.getCenter(find.byType(ConversationHero)));
+    await tester.pump();
+
+    expect(
+      elsewhere.hasPrimaryFocus,
+      isFalse,
+      reason:
+          '点了对话区，焦点还留在别处 —— 接着敲的字会进那个「别处」，'
+          '而现实里那个别处是右栏的终端',
+    );
+    expect(
+      tester
+          .widget<TextField>(find.byType(TextField).first)
+          .focusNode
+          ?.hasPrimaryFocus,
+      isTrue,
+      reason: '焦点该落到输入框上，而不是随便摘掉了事 —— 摘掉的话字哪儿都不去',
+    );
+  });
+
+  /// ⚠️ **反方向：焦点已经在这一栏里时不许动它。**
+  ///
+  /// 少了这道判断，每一次在气泡上按下指针都会先把焦点抢给输入框。消息正文
+  /// 是可选中的（`SelectionArea`），而选中区在失去焦点时会清掉选中 ——
+  /// 于是「按住拖选一段话」变成选不动，而这个 bug 只有真去拖才看得见。
+  ///
+  /// ⚠️ 对照物必须是**输入框之外**的某个栏内节点。第一版拿输入框自己当
+  /// 对照，结果那条测试是空的：对一个已经拿着焦点的节点再 `requestFocus`
+  /// 什么都不会发生，把判断整条删掉照样绿。这里用真的消息气泡 ——
+  /// 它也正是这道判断要保护的东西。
+  testWidgets('焦点在栏内别的东西上时，点击不把它抢走', (tester) async {
+    final c = _boot();
+    addTearDown(c.dispose);
+
+    await _pump(tester, c, const ChatPane());
+    // 等 mock 那条会话的正文回来 —— 没有气泡就没有对照物
+    for (var i = 0; i < 12; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    final bubbles = find.byType(SelectableRegion);
+    expect(bubbles, findsWidgets, reason: '这条用例要的是真气泡，没有就说明前提没成立');
+
+    final composer = tester
+        .widget<TextField>(find.byType(TextField).first)
+        .focusNode!;
+
+    // 点一下消息正文：选中区拿到焦点（用户拖选的第一下就是这个）
+    await tester.tapAt(tester.getCenter(bubbles.first));
+    await tester.pump();
+    final holder = FocusManager.instance.primaryFocus;
+    expect(
+      holder,
+      isNot(anyOf(isNull, same(composer))),
+      reason: '前提没成立：焦点该落在选中区上，后面测的才是「栏内别的东西」',
+    );
+
+    var stolen = 0;
+    composer.addListener(() => stolen++);
+
+    // 再点一下 —— 这一下就是「拖选的起手」
+    await tester.tapAt(tester.getCenter(bubbles.first));
+    await tester.pump();
+
+    expect(
+      stolen,
+      0,
+      reason:
+          '焦点本来就在栏内（选中区）上，这一下把它抢给了输入框 —— '
+          '选中区一失焦就清掉选中，表现是在消息上按住拖不动',
+    );
+  });
 }
