@@ -99,12 +99,48 @@ pub async fn stream(
     // 顺带一个真实的好处：跨来源挑经常会挑到用户自己那把 key ——
     // 那一轮因此不占配额，而这正是他配 key 的理由。
     let was_auto = matches!(req.model, ModelChoice::Auto);
-    let req = resolve_auto(server, &sources, req);
-    let picked = pick_source(&sources, req.source.as_deref());
 
-    // 「部署提供」还开着吗。**算一次，两条回落路径共用** —— 各查各的话，
+    // 「部署提供」还开着吗。**算一次，三条路共用**（自动档的候选、
+    // 没指名来源时的兜底、以及自动档挑坏了之后的回落）—— 各查各的话，
     // 迟早有一条忘了查，而那条就是开关的漏洞
     let deployment_ok = st.deployment_prefs(&tenant).await.enabled;
+
+    // ⚠️ **自动档要知道部署那条此刻还用不用得了。**
+    //
+    // 不知道的后果实地撞到过（2026-08-26）：部署那条通常最便宜（同价时
+    // 还优先它），于是自动档稳稳挑中它，然后在下面吃一个 429「这个月的
+    // 用量已经用完了」——**而用户手上明明有三条自带 key 的来源，每一条
+    // 都走得通**。他开自动档要的就是「你替我挑一个能用的」，我们却挑了
+    // 唯一一个不能用的。
+    //
+    // 「总开关被关掉」是同一个洞的另一半：那时自动档照样挑中它，然后
+    // 报一句「部署提供被你关掉了」，而他关它的理由正是想走自己那条。
+    //
+    // 两样都只在自动档这一支查 —— 指名了模型的轮次不该为此多付一次
+    // 数据库往返。配额那条是走索引的 `sum()`，比一次 LLM 调用便宜四个
+    // 数量级（见 `enforce_quota` 的文档）。
+    let deployment_usable = if was_auto {
+        // 查不动（没接账号体系、或者库抽风）时按**能用**处理：一次记账
+        // 层面的故障不该把用户的这一轮挡在门外，而真超了的话下面那道
+        // `enforce_quota` 仍然会拦住它 —— 少的只是「换一条来源」这份体贴
+        let over = st.quota_status(&user).await.is_ok_and(|s| s.exceeded());
+        if over || !deployment_ok {
+            tracing::info!(
+                over_quota = over,
+                deployment_off = !deployment_ok,
+                sources = sources.len(),
+                "自动档这一轮把「部署提供」排除在候选之外"
+            );
+        }
+        deployment_ok && !over
+    } else {
+        // 非自动档不看这两样：用户指名了什么就用什么，拦不拦由下面
+        // 那几道闸说了算
+        true
+    };
+
+    let req = resolve_auto(server, &sources, req, deployment_usable);
+    let picked = pick_source(&sources, req.source.as_deref());
 
     if picked.is_none() {
         // ⚠️ **用户把「部署提供」关掉了，就不能再拿它顶上。**
@@ -256,31 +292,39 @@ fn resolve_auto(
     server: &cortex_llm::LlmClient,
     sources: &[crate::model_sources::ModelSource],
     req: LlmStreamRequest,
+    // 部署那条此刻用不用得了（开着 + 配额没超）。见调用点那段。
+    allow_deployment: bool,
 ) -> LlmStreamRequest {
     if !matches!(req.model, ModelChoice::Auto) {
         return req;
     }
     let shape = crate::model_pick::TurnShape::of(&req.system, &req.messages, req.tools.len());
 
-    // 候选：部署那条 + 全部启用的来源。部署那条排最前，
+    // 候选：（用得了的话）部署那条 + 全部启用的来源。部署那条排最前，
     // 于是同价时它赢 —— 用户没配 key 时的行为与从前一致
     //
     // ⚠️ 每条候选都要带上**这条来源上谁说了什么**（用户按下的覆盖、
     // 接口报的探测）。不带的话这一档只看目录，而用户在设置里改过的那几位
     // 白改了 —— 见 `model_pick::Caps` 上那段。
+    //
+    // ⚠️ `allow_deployment` 为假时**它连候选都不是**。挑中一个下一步
+    // 必定被拦下的东西，不叫「挑」—— 见调用点那段。
     let mut candidates: Vec<(
         Option<&str>,
         &str,
         Vec<String>,
         crate::model_sources::SourceCaps<'_>,
-    )> = vec![(
-        None,
-        server.provider_id(),
-        cortex_llm::provider::allowed_models(server.provider_id()).unwrap_or_default(),
-        // 部署那条改不了能力（`set_caps` 明确拒绝），也不走「获取模型
-        // 列表」—— 两份都没有，且不该有
-        crate::model_sources::SourceCaps::none(),
-    )];
+    )> = Vec::new();
+    if allow_deployment {
+        candidates.push((
+            None,
+            server.provider_id(),
+            cortex_llm::provider::allowed_models(server.provider_id()).unwrap_or_default(),
+            // 部署那条改不了能力（`set_caps` 明确拒绝），也不走「获取模型
+            // 列表」—— 两份都没有，且不该有
+            crate::model_sources::SourceCaps::none(),
+        ));
+    }
     for s in sources {
         let list = if s.models.is_empty() {
             cortex_llm::provider::allowed_models(&s.provider).unwrap_or_default()
@@ -1085,7 +1129,7 @@ mod resolve_tests {
     fn 自动档在_resolve_model_之前就已经被解掉() {
         let c = client();
 
-        let picked = resolve_auto(&c, &[], req(ModelChoice::Auto, ModelTier::Main));
+        let picked = resolve_auto(&c, &[], req(ModelChoice::Auto, ModelTier::Main), true);
         assert!(
             matches!(picked.model, ModelChoice::Named(_)),
             "部署那条挑得出东西时该是具体型号，实际是 {:?}",
@@ -1097,7 +1141,7 @@ mod resolve_tests {
             system: "长".repeat(150_000_000),
             ..req(ModelChoice::Auto, ModelTier::Main)
         };
-        let fell_back = resolve_auto(&c, &[], huge);
+        let fell_back = resolve_auto(&c, &[], huge, true);
         assert_eq!(
             fell_back.model,
             ModelChoice::Deployment,
@@ -1242,7 +1286,7 @@ mod resolve_tests {
             "qwen-turbo（{a_score}）该比 deepseek 最便宜那个（{d_score}）还便宜，             不然这条测试分不出「跨来源挑」和「只在部署那条挑」——              目录价目变了的话，换一个更便宜的型号来测"
         );
 
-        let got = resolve_auto(&c, &mine, req(ModelChoice::Auto, ModelTier::Main));
+        let got = resolve_auto(&c, &mine, req(ModelChoice::Auto, ModelTier::Main), true);
         assert_eq!(
             got.source.as_deref(),
             Some("01M0AAA"),
@@ -1272,7 +1316,7 @@ mod resolve_tests {
 
         // 对照组：谁都没按过 —— 带图的一轮挑不出东西
         let bare = [source_of("01M0AAA", "deepseek", &["deepseek-v4-flash"])];
-        let got = resolve_auto(&c, &bare, with_image.clone());
+        let got = resolve_auto(&c, &bare, with_image.clone(), true);
         assert_eq!(
             got.model,
             ModelChoice::Deployment,
@@ -1288,13 +1332,75 @@ mod resolve_tests {
                 ..Default::default()
             },
         );
-        let got = resolve_auto(&c, &[mine], with_image);
+        let got = resolve_auto(&c, &[mine], with_image, true);
         assert_eq!(
             got.model,
             ModelChoice::Named("deepseek-v4-flash".to_owned()),
             "他明说了这个模型能看图，界面也画上了徽标、闸门也放行了，             而自动档还在问目录 —— 同一件事判两处"
         );
         assert_eq!(got.source.as_deref(), Some("01M0AAA"));
+    }
+
+    /// ⚠️ **部署那条用不了的时候，自动档要挑别的，而不是挑中它再被拦下。**
+    ///
+    /// 实地撞到的（2026-08-26）：部署那条通常最便宜（同价时还优先它），
+    /// 于是自动档稳稳挑中它，然后吃一个 429「这个月的用量已经用完了」——
+    /// 而用户手上有三条自带 key 的来源，每一条都走得通。他开自动档要的
+    /// 就是「你替我挑一个能用的」，我们却挑了唯一一个不能用的。
+    ///
+    /// 「总开关被关掉」是同一个洞的另一半：那时报的是「部署提供被你关掉
+    /// 了」，而他关它的理由正是想走自己那条。
+    ///
+    /// 判据在调用点合成（配额 + 开关），这里只认那一个布尔。
+    #[test]
+    fn 部署那条用不了时_自动档挑别人而不是挑它() {
+        let c = client(); // 部署 = deepseek
+        // ⚠️ **这条来源必须与部署那条同价**，否则这条测试没有区分度：
+        // 第一版拿 `qwen-turbo` 当对照，而它本来就比 deepseek 便宜 ——
+        // 于是排不排除部署那条，赢的都是它，把整段 `allow_deployment`
+        // 删掉照样绿。拿 deepseek 自己的列表当「别人」，两边分数必然相同，
+        // 而同价时部署那条赢（它排候选表最前）—— 这样一来，答案变没变
+        // 就只取决于它在不在候选里。
+        let list = allowed();
+        let names: Vec<&str> = list.iter().map(String::as_str).collect();
+        let mine = [source_of("01M0AAA", "deepseek", &names)];
+
+        // 对照组：用得了的时候，同价 → 部署那条赢
+        let ok = resolve_auto(&c, &mine, req(ModelChoice::Auto, ModelTier::Main), true);
+        assert!(
+            ok.source.is_none(),
+            "对照组该挑中部署那条（同价时它赢），实际挑了 {:?}",
+            ok.source
+        );
+
+        let blocked = resolve_auto(&c, &mine, req(ModelChoice::Auto, ModelTier::Main), false);
+        assert_eq!(
+            blocked.source.as_deref(),
+            Some("01M0AAA"),
+            "部署那条用不了，就该走用户自己那条 —— 挑中一个下一步必定被拦下的东西，不叫挑"
+        );
+        assert!(
+            matches!(blocked.model, ModelChoice::Named(_)),
+            "而且要挑出一个具体型号，不是落回「跟随部署」"
+        );
+    }
+
+    /// 但**没有别的来源时仍然要落回部署那条**。
+    ///
+    /// 这一支看起来像是在做无用功（落回去必定被下面那道闸拦下），实际不是：
+    /// 那道闸给的是一句能读懂的话（超了多少、什么时候恢复、怎么继续）。
+    /// 在这里回一个「挑不出来」的话，用户拿到的会是一句泛泛的失败，
+    /// 而真正的原因（配额 / 开关）一个字都不会出现。
+    #[test]
+    fn 部署那条用不了_又没有别的来源_仍然落回它去吃那句能读懂的错() {
+        let c = client();
+        let got = resolve_auto(&c, &[], req(ModelChoice::Auto, ModelTier::Main), false);
+        assert_eq!(
+            got.model,
+            ModelChoice::Deployment,
+            "该落回「跟随部署」，让下游那道闸把真正的原因说出来"
+        );
+        assert!(got.source.is_none());
     }
 
     /// 同价时部署那条赢 —— 没配 key 的人行为与从前一致。
@@ -1305,7 +1411,7 @@ mod resolve_tests {
         let list = allowed();
         let names: Vec<&str> = list.iter().map(String::as_str).collect();
         let tie = [source_of("01M0TIE", "deepseek", &names)];
-        let got = resolve_auto(&c, &tie, req(ModelChoice::Auto, ModelTier::Main));
+        let got = resolve_auto(&c, &tie, req(ModelChoice::Auto, ModelTier::Main), true);
         assert!(
             got.source.is_none(),
             "同价却挑了别的来源（{:?}）—— 那会让一个没配过 key 的人的行为             跟着「他碰巧加过一条同样的来源」变，而两者本该没区别",
@@ -1318,7 +1424,7 @@ mod resolve_tests {
     fn 还没拉过型号的来源在自动档里退回供应商定义() {
         let c = client();
         let empty = [source_of("01M0EMPTY", "alibaba", &[])];
-        let got = resolve_auto(&c, &empty, req(ModelChoice::Auto, ModelTier::Main));
+        let got = resolve_auto(&c, &empty, req(ModelChoice::Auto, ModelTier::Main), true);
         assert!(
             matches!(got.model, ModelChoice::Named(_)),
             "空列表该退回供应商定义那份，而不是让自动档挑不出东西"
@@ -1336,7 +1442,7 @@ mod resolve_tests {
         ] {
             let mut r = req(choice.clone(), ModelTier::Main);
             r.source = Some("01M0AAA".to_owned());
-            let got = resolve_auto(&c, &mine, r);
+            let got = resolve_auto(&c, &mine, r, true);
             assert_eq!(got.model, choice, "用户明确选的档不该被改");
             assert_eq!(
                 got.source.as_deref(),
