@@ -728,18 +728,62 @@ pub async fn fetch_models(
 ) -> Result<Json<FetchedModels>, ApiError> {
     let tenant = st.tenant(&headers).await?;
 
-    // 部署那条：它的型号来自定义文件，没有 key 可以拿去问
+    // ── 部署那条：**也去问**，它的 key 就在服务端手上 ──
+    //
+    // 这里从前直接返回定义里硬编码的那几个名字，注释写着「没有 key 可以
+    // 拿去问」——**那是错的**：`st.llm()` 攥着的正是一个用那把 key 建好的
+    // 供应商客户端。真正的理由在 `allowed_models` 的文档里（那份列表是
+    // 有意的白名单），但白名单与实拉不是二选一。
+    //
+    // 不问的代价 2026-08-26 撞上了：DeepSeek 8-21 上线
+    // `deepseek-v4-flash-vision-exp`，而这个按钮叫「获取模型列表」——
+    // 它承诺的是去问一下。用户点十次也不会有新模型，只能等我们改代码
+    // 补一行 JSON。
+    //
+    // 拉不动就回落到定义里那份，并**明说是回落**。
     if id == DEPLOYMENT_SOURCE_ID {
-        let provider = st
+        let client = st
             .llm()
-            .map(|c| c.provider_id().to_owned())
             .map_err(|_| ApiError::unsupported("这个部署没配模型，问不出型号"))?;
-        let names = cortex_llm::provider::allowed_models(&provider).unwrap_or_default();
-        return Ok(Json(FetchedModels {
-            // 部署那条走的是服务端自己配的供应商，不是自定义端点
-            models: describe_all(&provider, &names, false),
-            live: false,
-            note: Some("这条是服务端配的，型号来自它的供应商定义".to_owned()),
+        let provider = client.provider_id().to_owned();
+        let builtin = cortex_llm::provider::allowed_models(&provider).unwrap_or_default();
+
+        // ⚠️ 必须设界，理由与下面自带来源那次一模一样：端点可能整段不可达
+        // （实测 Gemini 官方端点在国内服务器上是 TCP 黑洞），而底下的 HTTP
+        // 客户端没有自己的超时。挂多久，客户端那个按钮就灰多久
+        let fetched = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            client.provider().fetch_supported_models(),
+        )
+        .await
+        .map_err(|_| "等了 15 秒没有回音".to_owned())
+        .and_then(|r| r.map_err(|e| e.to_string()));
+
+        return Ok(Json(match fetched {
+            Ok(names) if !names.is_empty() => {
+                tracing::info!(count = names.len(), "部署那条来源实拉到型号列表");
+                FetchedModels {
+                    // 部署那条走的是服务端自己配的供应商，不是自定义端点
+                    models: describe_all(&provider, &names, false),
+                    live: true,
+                    note: Some("型号是刚从供应商那里问到的。能开哪些由部署方的账号决定".to_owned()),
+                }
+            }
+            // 空列表与拉不动同样处理：一个回了 200 但没有内容的
+            // `/v1/models` 与问不到没有区别
+            other => {
+                if let Err(e) = &other {
+                    tracing::warn!(error = %e, "部署那条拉不到型号列表，回落到内置定义");
+                }
+                FetchedModels {
+                    models: describe_all(&provider, &builtin, false),
+                    live: false,
+                    note: Some(
+                        "问不到这家的型号列表，下面是服务端定义里那份 —— 它未必与部署方账号真正开通的一致"
+                            .to_owned(),
+                    ),
+                }
+            }
         }));
     }
 
