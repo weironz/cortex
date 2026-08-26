@@ -448,6 +448,30 @@ class LayoutNotifier extends Notifier<LayoutState> {
     return v.clamp(lo, hi);
   }
 
+  /// 指针横向挪了 `dx` —— **在当下的宽度上累加**。
+  ///
+  /// # ⚠️ 为什么不能让调用方算好宽度传进来
+  ///
+  /// `onHorizontalDragUpdate` 一帧可能来好几次（高回报率鼠标、Debug 构建
+  /// 掉帧时更明显），而界面**一帧只重建一次**。调用方写成
+  /// `setLeftWidth(当前宽度 + dx)` 的话，那个「当前宽度」是 build 时捕获
+  /// 进闭包的旧值 —— 同一帧里的几次更新全基于同一个起点算，只有最后一次
+  /// 生效，其余的位移**凭空丢掉**。
+  ///
+  /// 症状不是报错，是**手感**：鼠标挪了 10 像素，栏只跟了 3 像素，
+  /// 而且越卡越慢。所以累加这一步必须发生在这里 —— `state` 在这儿永远
+  /// 是最新的。
+  void nudgeLeftWidth(double dx) => setLeftWidth(state.leftWidth + dx);
+
+  /// 同上。`max` 由调用方给：右栏的上限跟着**窗口宽度**走，
+  /// 而这一层不知道窗口多宽。
+  void nudgeRightWidth(double dx, double max) {
+    // 先把存着的值收进当下这个窗口允许的区间，再累加：窗口被拖窄过之后
+    // state 里可能留着一个比 max 大的值，直接减 dx 会让第一下跳一大截
+    final now = state.rightWidth.clamp(kRightPaneMin, max);
+    setRightWidth((now - dx).clamp(kRightPaneMin, max));
+  }
+
   /// 拖完了才存 —— 拖动过程中每一帧都写一次的话，一次拖拽就是几十次
   /// 磁盘写入，而中间那些值没有一个是用户想要的
   void setLeftWidth(double width) {

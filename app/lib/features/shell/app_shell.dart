@@ -201,9 +201,10 @@ class _AppShellState extends ConsumerState<AppShell> {
                     ),
                     _ResizeHandle(
                       color: tokens.sidebarBorder,
-                      // 往右拖 = 左栏变宽，所以是加
-                      onDelta: (d) =>
-                          layoutNotifier.setLeftWidth(leftWidth + d),
+                      // 往右拖 = 左栏变宽。⚠️ 传的是**位移**不是算好的
+                      // 宽度：一帧可能来好几次 update，而闭包里那个
+                      // `leftWidth` 是 build 时的旧值 —— 见 nudgeLeftWidth
+                      onDelta: layoutNotifier.nudgeLeftWidth,
                       onDone: layoutNotifier.persistWidths,
                     ),
                   ],
@@ -273,10 +274,9 @@ class _AppShellState extends ConsumerState<AppShell> {
                   if (showRightInline) ...[
                     _ResizeHandle(
                       color: tokens.sidebarBorder,
-                      // 往右拖 = 右栏变窄，所以是减
-                      onDelta: (d) => layoutNotifier.setRightWidth(
-                        (rightWidth - d).clamp(kRightPaneMin, rightMax),
-                      ),
+                      // 往右拖 = 右栏变窄（在 nudge 里减）。同上：传位移
+                      onDelta: (d) =>
+                          layoutNotifier.nudgeRightWidth(d, rightMax),
                       onDone: layoutNotifier.persistWidths,
                     ),
                     SizedBox(

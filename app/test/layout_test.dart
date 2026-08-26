@@ -240,6 +240,59 @@ void main() {
       expect(disk['left_pane_width'], '320.0');
     });
 
+    /// ⚠️ **一帧里来几次位移，要一次不落地全算上。**
+    ///
+    /// `onHorizontalDragUpdate` 一帧可能来好几次（高回报率鼠标、Debug
+    /// 构建掉帧时更明显），而界面一帧只重建一次。调用方若写成
+    /// `setLeftWidth(当前宽度 + dx)`，那个「当前宽度」是 build 时捕获进
+    /// 闭包的旧值 —— 同一帧里的几次更新全基于同一个起点算，只有最后一次
+    /// 生效。
+    ///
+    /// 它不报错，只是**手感**：鼠标挪了 10 像素，栏只跟了 3 像素。
+    /// 用户的原话是「拖动侧边栏调整宽度移动的非常慢」。
+    ///
+    /// 这条用例不重建界面就连发三次，正是那个场景。
+    test('同一帧里的多次位移全部累加，一次都不丢', () async {
+      final c = boot();
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+
+      final n = c.read(layoutProvider.notifier);
+      final before = c.read(layoutProvider).leftWidth;
+      n.nudgeLeftWidth(10);
+      n.nudgeLeftWidth(10);
+      n.nudgeLeftWidth(10);
+
+      expect(
+        c.read(layoutProvider).leftWidth,
+        before + 30,
+        reason: '三次各 10 像素只走了一部分 —— 丢掉的那些就是「拖不动」的手感',
+      );
+    });
+
+    /// 右栏同理，外加一件只有它有的事：上限跟着窗口宽度走。
+    test('右栏的位移也累加，且夹在当下窗口给的上限里', () async {
+      final c = boot();
+      addTearDown(c.dispose);
+      c.read(layoutProvider);
+      await settle();
+
+      final n = c.read(layoutProvider.notifier);
+      final before = c.read(layoutProvider).rightWidth;
+      // 往左拖 = 变宽，所以位移是负的
+      n.nudgeRightWidth(-10, 900);
+      n.nudgeRightWidth(-10, 900);
+      expect(c.read(layoutProvider).rightWidth, before + 20);
+
+      n.nudgeRightWidth(-5000, 900);
+      expect(
+        c.read(layoutProvider).rightWidth,
+        900,
+        reason: '拖过头要停在这个窗口给得起的最宽处，而不是把对话挤没',
+      );
+    });
+
     /// 左栏是**导航**，再宽也只是标题少截几个字，而中间那栏才是在读的东西。
     /// 没有上限的话，一次误拖就能把导航拉到半屏。
     test('左栏宽度被夹在可用区间里', () async {
