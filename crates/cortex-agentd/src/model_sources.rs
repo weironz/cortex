@@ -472,10 +472,11 @@ pub async fn list(
                 serde_json::Value,
                 serde_json::Value,
                 serde_json::Value,
+                serde_json::Value,
             ),
         >(
             "SELECT id, provider, label, key_tail, base_url, enabled, models, catalog,
-                    caps_overrides
+                    caps_overrides, probed_caps
                FROM model_sources ORDER BY created_at",
         )
         .fetch_all(store.pool())
@@ -483,7 +484,18 @@ pub async fn list(
         .map_err(|e| ApiError::internal(format!("查不出模型来源：{e}")))?;
 
         sources.extend(rows.into_iter().map(
-            |(id, provider, label, key_tail, base_url, enabled, models, catalog, overrides)| {
+            |(
+                id,
+                provider,
+                label,
+                key_tail,
+                base_url,
+                enabled,
+                models,
+                catalog,
+                overrides,
+                probed,
+            )| {
                 let models: Vec<String> = serde_json::from_value(models).unwrap_or_default();
                 let catalog_ids: Vec<String> = serde_json::from_value(catalog).unwrap_or_default();
                 // 还没拉过列表的老来源：拿已启用的那些当全集。
@@ -499,8 +511,16 @@ pub async fn list(
                 // 服务端新的版本写进去的。一条读不懂的偏好不该让整页打不开
                 let overrides: std::collections::HashMap<String, cortex_llm::caps::CapsOverride> =
                     serde_json::from_value(overrides).unwrap_or_default();
+                let probed: std::collections::HashMap<String, cortex_llm::caps::ProbedCaps> =
+                    serde_json::from_value(probed).unwrap_or_default();
                 SourceView {
-                    catalog: describe_all_with(&provider, &catalog_ids, custom, &overrides),
+                    catalog: describe_all_with(
+                        &provider,
+                        &catalog_ids,
+                        custom,
+                        &overrides,
+                        &probed,
+                    ),
                     id,
                     provider,
                     label,
@@ -849,19 +869,50 @@ pub async fn fetch_models(
     //
     // 写失败只吞成一条 warn：用户要的是这份名单，为一次缓存写失败
     // 把它整个作废不成比例 —— 下次再点一下就补上了
+    // ── 顺手问一次「这些模型能干什么」 ──
+    //
+    // 只有 OpenRouter 与 Ollama 答得出（见 `cortex_llm::probe`）；其余几家的
+    // `/v1/models` 一个能力字段都没有，那时这里回空表，一切照旧落回目录。
+    //
+    // **跟着这一次拉一起做**而不是每次列来源时现问：列来源是打开设置页就
+    // 发的请求，而这些位一年也变不了几次 —— 现问等于每次打开设置页都多等
+    // 几百毫秒到几秒（Ollama 那条要逐个模型问）。
+    //
+    // 拉不动那一支（`live == false`）**不探测**：那时手上这份名单是编译期
+    // 写死的清单，拿它去问一个刚刚证明连不上的端点没有意义。
+    let probed = if fetched.live {
+        let names: Vec<String> = fetched.models.iter().map(|m| m.id.clone()).collect();
+        cortex_llm::probe::probe(
+            &source.provider,
+            source.base_url.as_deref(),
+            &source.api_key,
+            &names,
+        )
+        .await
+    } else {
+        Default::default()
+    };
+    if !probed.is_empty() {
+        tracing::info!(source = %id, count = probed.len(), "供应商自己报出了模型能力");
+    }
+
     if let Ok(store) = tenant.store() {
         let ids: Vec<&str> = fetched.models.iter().map(|m| m.id.as_str()).collect();
+        // 探测结果与 catalog 同一刻写：两者要么一起新、要么一起旧，
+        // 不会出现「型号是新的、能力是旧的」那种最难查的组合
+        let probed_json = serde_json::to_value(&probed).unwrap_or_else(|_| serde_json::json!({}));
         match serde_json::to_value(&ids) {
             Ok(json) => {
                 if let Err(e) = sqlx::query(
                     "UPDATE model_sources
-                        SET catalog = $1, updated_at = now()
+                        SET catalog = $1, probed_caps = $4, updated_at = now()
                       WHERE id = $2
                         AND ($3 OR jsonb_array_length(catalog) = 0)",
                 )
                 .bind(json)
                 .bind(&id)
                 .bind(fetched.live)
+                .bind(probed_json)
                 .execute(store.pool())
                 .await
                 {
@@ -1162,7 +1213,13 @@ pub(crate) fn describe_all_for_test(
 }
 
 fn describe_all(provider: &str, names: &[String], custom_endpoint: bool) -> Vec<FetchedModel> {
-    describe_all_with(provider, names, custom_endpoint, &Default::default())
+    describe_all_with(
+        provider,
+        names,
+        custom_endpoint,
+        &Default::default(),
+        &Default::default(),
+    )
 }
 
 /// 同上，但带着这条来源的手动覆盖。
@@ -1175,12 +1232,18 @@ fn describe_all_with(
     names: &[String],
     custom_endpoint: bool,
     overrides: &std::collections::HashMap<String, cortex_llm::caps::CapsOverride>,
+    probed: &std::collections::HashMap<String, cortex_llm::caps::ProbedCaps>,
 ) -> Vec<FetchedModel> {
     names
         .iter()
         .map(|id| {
-            let c =
-                cortex_llm::caps::resolve(provider, id, custom_endpoint, overrides.get(id), None);
+            let c = cortex_llm::caps::resolve(
+                provider,
+                id,
+                custom_endpoint,
+                overrides.get(id),
+                probed.get(id),
+            );
             FetchedModel {
                 id: id.clone(),
                 display_name: c.display_name,

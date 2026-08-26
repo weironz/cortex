@@ -92,12 +92,17 @@ impl CapsOverride {
 /// 与 [`CapsOverride`] 同形但语义不同：这是机器答的，所以排在用户之后。
 /// 说不出的那几位一律 `None` —— 探测器**不许猜**，猜出来的答案会
 /// 盖住目录里那份实测数据。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProbedCaps {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_output: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
 }
 
