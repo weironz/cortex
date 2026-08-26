@@ -1276,7 +1276,19 @@ class ChatController extends Notifier<ChatState> {
     }
     state = state.copyWith(
       streaming: null,
-      sendError: error,
+      // ⚠️ **不再同时写 `sendError`。**
+      //
+      // 这个 `error` 上一行已经挂在 `message` 上了，会画成气泡里那条错误行。
+      // 再写一份进 `sendError`，底部横幅会把**同一句话**再画一遍 —— 用户
+      // 得比对两处才敢确定它们说的是一件事（见用户 2026-08-26 的截图：
+      // 一条 vision 报错在屏幕上出现了两次）。
+      //
+      // `sendError` 留给**没有归属轮次**的失败（开不出工作目录、会话建不
+      // 出来这类）：那些没有气泡可挂，横幅是它们唯一的去处。
+      //
+      // 横幅上那个「换模型」跟着搬进了气泡里那条错误行 —— 撤掉重复的
+      // 呈现不该顺手撤掉一条出路。
+      sendError: null,
       // 见到收尾了就把徽章撤掉。**出错那一轮也撤** —— 它同样不再跑了，
       // 而一个撤不掉的「正在跑」比没有徽章更糟
       unfinished: {...state.unfinished}..remove(turn.sessionId),

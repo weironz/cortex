@@ -244,10 +244,23 @@ void main() {
     await ctrl.send('会失败的一句');
     await _idle(container);
 
-    final failedTurn = container
-        .read(chatControllerProvider)
-        .activeTranscript
-        .length;
+    // **同一句错误不许画两遍。**
+    //
+    // 从前 `_finish` 把 error 同时挂在 message 上（气泡里那条错误行）
+    // 和 `sendError` 上（底部横幅），于是一次失败在屏幕上出现两次 ——
+    // 用户得比对两处才敢确定它们说的是一件事（2026-08-26 的用户截图）。
+    //
+    // 归属轮次的失败归气泡；`sendError` 留给没有气泡可挂的那些
+    // （开不出工作目录、会话建不出来）。
+    final failed = container.read(chatControllerProvider);
+    expect(
+      failed.activeTranscript.last.error,
+      isNotNull,
+      reason: '失败要挂在那一轮的气泡上 —— 它属于那一轮，该跟着它一起滚动、一起留在历史里',
+    );
+    expect(failed.sendError, isNull, reason: '气泡里已经画了这句话，横幅再画一遍就是同一条错误出现两次');
+
+    final failedTurn = failed.activeTranscript.length;
 
     await ctrl.retryLast();
     await _idle(container);

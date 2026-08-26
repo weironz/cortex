@@ -10,6 +10,7 @@ import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
 import '../../../models/tool_call.dart';
 import '../../images/widgets/drawing_placeholder.dart';
+import '../../settings/pages/model_picker.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/chat_controller.dart';
 import '../../../state/model_controller.dart';
@@ -493,6 +494,26 @@ class _ErrorNote extends ConsumerWidget {
               ),
             ),
           ],
+          // 失败的第二条出路：**换一个再试**。失败往往是这个模型的事
+          // （配额、超时、看不懂图、这家供应商挂了），换一个立刻能走 ——
+          // 只给「重试」等于让人对着同一堵墙撞第二次。
+          //
+          // 它从前只在底部那条横幅上，而那条横幅显示的是**同一句错误**
+          // （见 `ChatController._finish`：error 同时进 message 和 sendError）。
+          // 一句话画两遍，用户得比对两处才敢确定它们说的是一件事。
+          // 横幅撤了，它带着的这条出路搬到这里 —— 出路不能跟着一起没。
+          const SizedBox(width: 4),
+          TextButton(
+            onPressed: busy ? null : () => showModelPicker(context, ref),
+            style: TextButton.styleFrom(
+              foregroundColor: scheme.error,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              visualDensity: VisualDensity.compact,
+            ),
+            child: const Text('换模型'),
+          ),
         ],
       ),
     );
