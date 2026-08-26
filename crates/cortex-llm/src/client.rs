@@ -337,7 +337,9 @@ mod tests {
         let client = LlmClient::from_config(&config(), "test-key").expect("应构造成功");
         assert_eq!(client.provider_id(), "deepseek");
         assert_eq!(client.model().model_name, "deepseek-v4-pro");
-        assert_eq!(client.cheap_model().context_limit(), 128_000);
+        // 1M 而不是 128_000：后者是 goose 的 DEFAULT_CONTEXT_LIMIT，
+        // 断言它等于说「读没读到定义都算过」（见 provider.rs 那条同名测试）
+        assert_eq!(client.cheap_model().context_limit(), 1_048_576);
     }
 
     #[test]

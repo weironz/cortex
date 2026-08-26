@@ -710,10 +710,23 @@ mod tests {
         assert!(err.to_string().contains("deepseek"));
     }
 
+    /// 上下文长度取自定义 JSON，**不是** goose 的编译期默认值。
+    ///
+    /// ⚠️ 这条从前断言 `128_000`，而 goose 的 `DEFAULT_CONTEXT_LIMIT`
+    /// **正好也是 128_000** —— 也就是说定义读没读到，它都绿：一条自己
+    /// 造出「通过」的测试（仓库里反复出现的那个形状）。2026-08-26 把
+    /// DeepSeek 改成 1M 之后它才第一次真的在验证：这个数只可能来自定义。
+    ///
+    /// 所以**这里的期望值必须与 goose 的默认值不同**，否则这条测试又变回
+    /// 装饰品。换供应商或改数时留意这一点。
     #[test]
     fn context_limit_comes_from_definition() {
         let config = model_config("deepseek", "deepseek-v4-flash").expect("应构造成功");
-        assert_eq!(config.context_limit(), 128_000);
+        assert_eq!(
+            config.context_limit(),
+            1_048_576,
+            "取到的是 goose 的默认值 128_000 的话，说明定义根本没被读到"
+        );
     }
 
     #[test]
