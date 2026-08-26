@@ -1008,83 +1008,50 @@ pub fn is_custom_endpoint(provider: &str, base_url: Option<&str>) -> bool {
 /// 那次它甚至偷偷把型号换成了 `gpt-image-2-vip`。
 ///
 /// 所以这一位一为真，界面就**不拦、不下断言**，只把目录里的话当提醒说。
+/// 只给 `llm.rs` 那条一致性测试用 —— 它要拿两条路的结果对着比，
+/// 而 `describe_all` 是私有的。
+#[cfg(test)]
+pub(crate) fn describe_all_for_test(
+    provider: &str,
+    names: &[String],
+    custom_endpoint: bool,
+) -> Vec<FetchedModel> {
+    describe_all(provider, names, custom_endpoint)
+}
+
 fn describe_all(provider: &str, names: &[String], custom_endpoint: bool) -> Vec<FetchedModel> {
+    describe_all_with(provider, names, custom_endpoint, &Default::default())
+}
+
+/// 同上，但带着这条来源的手动覆盖。
+///
+/// ⚠️ **能力解析本身不在这里** —— 它在 `cortex_llm::caps::resolve`，
+/// 与 `/llm/models` 共用同一个函数。此前这两处各算一遍，注释里写着
+/// 「一字不差」，而它已经漂过一次（回落定义只加在了这一份）。
+fn describe_all_with(
+    provider: &str,
+    names: &[String],
+    custom_endpoint: bool,
+    overrides: &std::collections::HashMap<String, cortex_llm::caps::CapsOverride>,
+) -> Vec<FetchedModel> {
     names
         .iter()
         .map(|id| {
-            let info = cortex_llm::catalog::lookup(provider, id);
-            // ⚠️ **目录查不到时回落到供应商定义。**
-            //
-            // 这一位从前只问目录（models.dev 的编译期快照），而**服务端拦不拦
-            // 图问的是定义**（`ensure_can_see` → `provider::vision_support`）——
-            // 两处判据，两个源。今天两边碰巧说法一致，所以没出事；一旦分叉，
-            // 表现是「界面画着『看得懂图』，发出去被自己的服务端拦下」，
-            // 或者反过来「界面说看不懂，发过去其实好好的」。
-            //
-            // 而它必然会分叉：目录是编译期快照，**新模型永远慢一拍**。
-            // 2026-08-26 的实例：DeepSeek 8-21 上线 `deepseek-v4-flash-vision-exp`，
-            // 目录里一条都没有，于是它的 vision 是 null（「不知道」），
-            // 一用「视觉」筛选就消失 —— 而定义里我们已经写明它 vision: true。
-            //
-            // 回落只补目录**说不出来**的那一位，不覆盖目录已有的答案：
-            // 目录知道的是 5000 多个模型的实测能力，定义只知道内置那几家。
-            let declared = cortex_llm::provider::vision_support(provider, id);
-            let vision = info.as_ref().map(|i| i.vision).or(declared.declared());
-            // ⚠️ 生图这一位**不能只问目录**：目录里 alibaba 一个
-            // `image_output` 都没有，而真实账号上有 19 个。而且它还要
-            // 回答「我们调不调得动这家」—— 判据统一在 `is_image_model`
-            let draws = cortex_llm::image::is_image_model(provider, id, custom_endpoint);
+            let c =
+                cortex_llm::caps::resolve(provider, id, custom_endpoint, overrides.get(id), None);
             FetchedModel {
                 id: id.clone(),
-                display_name: info
-                    .as_ref()
-                    .map_or_else(|| id.clone(), |i| i.display_name.clone()),
-                context: info.as_ref().map(|i| i.context),
-                tool_call: info.as_ref().map(|i| i.tool_call),
-                vision,
-                // ⚠️ **只认 `is_image_model`，不回落到目录那一位。**
-                //
-                // 回落的话，`gpt-image-1` 会被报成能生图 —— 目录里它确实
-                // 是（它真的能生图），可我们没接 OpenAI 的生图协议。
-                // 这一位在界面上的含义是「点了能不能出图」，不是
-                // 「这个模型理论上会不会画画」。
-                //
-                // 目录查不到、判据也不认的 → `None`（不知道），
-                // 而不是 `Some(false)`：那条来源可能只是我们还没核实过。
-                image_output: if draws {
-                    Some(true)
-                } else if info.is_some() {
-                    Some(false)
-                } else {
-                    None
-                },
-                // 「它会画，但我们调不动」—— 上面那一位把这种情况压成了
-                // `false`，而 `false` 在界面上读作「这模型不会画画」，
-                // 是**错的**，且把责任推给了模型。
-                //
-                // 2026-08-20 的实例：用户搜 `image` 搜出一屏
-                // `gemini-*-image`，筛选栏却写着「能生图 0」—— 他只能来问
-                // 为什么。差的就是这一位：说清楚是**我们**还没接这家。
-                //
-                // 只认目录说是的那些。按名字猜「这个大概是生图模型」再报
-                // 「没接」，猜错的表现是给一个正常的对话模型挂上一句
-                // 莫名其妙的话
-                // ⚠️ 自定义端点上**不说这句话**：「我们还没接这家」讲的是
-                // 厂商官方的生图接口，而中转站可能压根就走聊天协议出图 ——
-                // 那种情况下没有「接」这回事，它已经能用了
-                image_unwired: !custom_endpoint
-                    && info.as_ref().is_some_and(|i| i.image_output)
-                    && !draws,
+                display_name: c.display_name,
+                context: c.context,
+                tool_call: c.tool_call,
+                vision: c.vision,
+                image_output: c.image_output,
+                image_unwired: c.image_unwired,
                 custom_endpoint,
-                reasoning: info.as_ref().map(|i| i.reasoning),
-                input_micros_per_mtok: info
-                    .as_ref()
-                    .and_then(|i| i.cost)
-                    .map(|c| c.input_micros_per_mtok),
-                output_micros_per_mtok: info
-                    .as_ref()
-                    .and_then(|i| i.cost)
-                    .map(|c| c.output_micros_per_mtok),
+                reasoning: c.reasoning,
+                input_micros_per_mtok: c.input_micros_per_mtok,
+                output_micros_per_mtok: c.output_micros_per_mtok,
+                overridden: overrides.get(id).cloned().unwrap_or_default(),
             }
         })
         .collect()

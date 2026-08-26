@@ -446,6 +446,18 @@ pub struct FetchedModel {
     pub input_micros_per_mtok: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_micros_per_mtok: Option<i64>,
+    /// 用户在这条来源上**手工按下**的那几位。
+    ///
+    /// 发到线上是为了让界面画得出「这一位是你自己改的」——
+    /// 不带这个的话，一个改过 vision 的人下次打开只看到一个 `true`，
+    /// 分不清那是目录说的还是他自己按的，于是不敢动。
+    #[serde(default, skip_serializing_if = "cortex_llm_caps_is_empty")]
+    pub overridden: cortex_llm::caps::CapsOverride,
+}
+
+/// `skip_serializing_if` 只收函数路径，收不了方法调用。
+fn cortex_llm_caps_is_empty(o: &cortex_llm::caps::CapsOverride) -> bool {
+    o.is_empty()
 }
 
 #[cfg(test)]
@@ -472,6 +484,7 @@ mod fetched_model_tests {
             reasoning: None,
             input_micros_per_mtok: None,
             output_micros_per_mtok: None,
+            overridden: Default::default(),
         };
         let json = serde_json::to_string(&m).expect("序列化");
         assert!(

@@ -740,44 +740,95 @@ fn describe(
     free_of_quota: bool,
     custom_endpoint: bool,
 ) -> Vec<ModelOption> {
+    describe_with(
+        provider,
+        models,
+        source,
+        source_label,
+        free_of_quota,
+        custom_endpoint,
+        &Default::default(),
+    )
+}
+
+/// 同上，但带着这条来源的手动覆盖。
+///
+/// ⚠️ **能力解析在 `cortex_llm::caps::resolve`，与设置页那条路共用。**
+/// 此前这里自己算一遍，注释写着「与 describe_all 一字不差」—— 而它已经
+/// 漂了：2026-08-26 给设置页那份加了「目录查不到回落定义」，这一份没跟上，
+/// 于是同一个模型在设置页说得出「看得懂图」、在聊天的选择器里却是「不知道」，
+/// **而后者才是用户每天点的那个**。
+fn describe_with(
+    provider: &str,
+    models: &[String],
+    source: &str,
+    source_label: &str,
+    free_of_quota: bool,
+    custom_endpoint: bool,
+    overrides: &std::collections::HashMap<String, cortex_llm::caps::CapsOverride>,
+) -> Vec<ModelOption> {
     models
         .iter()
         .map(|id| {
-            let info = cortex_llm::catalog::lookup(provider, id);
+            let c =
+                cortex_llm::caps::resolve(provider, id, custom_endpoint, overrides.get(id), None);
             ModelOption {
                 id: id.clone(),
                 source: source.to_owned(),
                 source_label: source_label.to_owned(),
                 free_of_quota,
                 custom_endpoint,
-                display_name: info
-                    .as_ref()
-                    .map_or_else(|| id.clone(), |i| i.display_name.clone()),
-                context: info.as_ref().map(|i| i.context),
-                tool_call: info.as_ref().map(|i| i.tool_call),
-                vision: info.as_ref().map(|i| i.vision),
-                // 三态，与 `model_sources::describe_all` 一字不差：
-                // 画得出 = true；目录认得它但画不出 = false；
-                // 目录里根本没有它 = 不知道（`None`），界面据此不画徽标
-                image_output: if cortex_llm::image::is_image_model(provider, id, custom_endpoint) {
-                    Some(true)
-                } else if info.is_some() {
-                    Some(false)
-                } else {
-                    None
-                },
-                reasoning: info.as_ref().map(|i| i.reasoning),
-                input_micros_per_mtok: info
-                    .as_ref()
-                    .and_then(|i| i.cost)
-                    .map(|c| c.input_micros_per_mtok),
-                output_micros_per_mtok: info
-                    .as_ref()
-                    .and_then(|i| i.cost)
-                    .map(|c| c.output_micros_per_mtok),
+                display_name: c.display_name,
+                context: c.context,
+                tool_call: c.tool_call,
+                vision: c.vision,
+                image_output: c.image_output,
+                reasoning: c.reasoning,
+                input_micros_per_mtok: c.input_micros_per_mtok,
+                output_micros_per_mtok: c.output_micros_per_mtok,
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod caps_parity_tests {
+    /// **两条路对同一个模型必须说同一句话。**
+    ///
+    /// `/llm/models`（聊天的模型选择器读它）与 `describe_all`（设置页读它）
+    /// 从前各算一遍能力三态，后者的注释里写着「与 describe_all 一字不差」——
+    /// 一份靠人手工同步的副本。而它**已经漂过一次**：2026-08-26 给设置页
+    /// 那份加了「目录查不到就回落到供应商定义」，这一份没跟上，于是
+    /// `deepseek-v4-flash-vision-exp` 在设置页说得出「看得懂图」，
+    /// 在聊天选择器里却是「不知道」——**而后者才是用户每天点的那个**。
+    ///
+    /// 现在两处都调 `cortex_llm::caps::resolve`。这条测试盯的是它们**没有
+    /// 再各自长出一份**：拿一个只有定义说得出、目录说不出的模型去问，
+    /// 两边答案必须一致。
+    #[test]
+    fn 聊天目录与设置页对同一个模型给出同一个答案() {
+        let id = "deepseek-v4-flash-vision-exp".to_owned();
+        let names = [id.clone()];
+
+        let chat = super::describe("deepseek", &names, "src-1", "DeepSeek", false, false);
+        let settings = crate::model_sources::describe_all_for_test("deepseek", &names, false);
+
+        let c = chat.first().expect("一条");
+        let s = settings.first().expect("一条");
+
+        assert_eq!(
+            (c.vision, c.tool_call, c.image_output, c.reasoning),
+            (s.vision, s.tool_call, s.image_output, s.reasoning),
+            "两条路的能力判定分叉了 —— 用户会在设置页看到一个能力，             在聊天选择器里看到另一个，而他不知道该信哪个"
+        );
+        assert_eq!(c.context, s.context, "上下文也要一致");
+        assert_eq!(c.display_name, s.display_name, "显示名也要一致");
+        assert_eq!(
+            c.vision,
+            Some(true),
+            "这个模型正是当初暴露分叉的那个：目录里没有它，定义里明写 vision:true"
+        );
+    }
 }
 
 #[cfg(test)]

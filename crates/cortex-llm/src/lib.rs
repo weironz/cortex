@@ -36,6 +36,7 @@
 //! ```
 
 /// 模型目录：一个模型能干什么、多少钱。见模块文档。
+pub mod caps;
 pub mod catalog;
 pub mod client;
 pub mod error;
