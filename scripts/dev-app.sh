@@ -107,3 +107,41 @@ cp -f target/debug/cortex-local.exe "$(dirname "${EXE}")/"
 echo "── 启动（版本号：${VERSION:-未设置，更新功能关闭}）"
 powershell -NoProfile -Command "Start-Process -FilePath './${EXE}'"
 echo "已拉起。改完再跑一次 just app 即可。"
+
+# ── 它要连哪个部署？**说出来。** ────────────────────────────
+#
+# 这份 debug 构建与装好的正式版**共用同一份 settings.json**
+# （`%LOCALAPPDATA%\cortex`）。共用是有意的：不共用的话每次 just app 都要
+# 重新登录一遍，那会让人干脆不用它。
+#
+# 但代价是：`just app` 构建的是**未发布的代码**，而它连的是「你上次用的
+# 那个地址」—— 那完全可能是**生产**。
+#
+# 2026-08-26 实测撞上：拿一个带着两条新迁移的客户端去连生产（生产上那些
+# 路由根本不存在），全程没有任何提示，于是「做的东西没生效」看起来像
+# 代码有 bug，而实际上只是连错了地方。
+#
+# 刻意**不强制切到 dev**：拿本地构建去复现生产上的问题是个合法用途，
+# 而且那等于替用户改他自己的配置。缺的从来只是一句话。
+#
+# ⚠️ 读法与 app-status.sh 一致，**不要用 python** —— 那边注释里写了为什么
+# （MSIX 重定向会读到一个看着很像真的旧地址）。
+SETTINGS="${LOCALAPPDATA:-}/cortex/settings.json"
+if [ -n "${LOCALAPPDATA:-}" ] && [ -f "${SETTINGS}" ]; then
+    BASE="$(grep -o '"base_url"[[:space:]]*:[[:space:]]*"[^"]*"' "${SETTINGS}"         | head -n 1 | sed 's/.*:[[:space:]]*"//; s/"$//')"
+    case "${BASE}" in
+        ""|http://127.0.0.1:*|http://localhost:*)
+            echo "   连的部署：${BASE:-(没存过，用编译期默认值)}"
+            ;;
+        *)
+            # 非本机地址一律当成「可能是生产」提醒一次。判据故意宽松：
+            # 漏报（真是生产却不说）的代价远大于误报（连的是别人的测试环境
+            # 也提醒一句）
+            echo ""
+            echo "   ⚠️  连的部署：${BASE}"
+            echo "      这不是本机地址 —— 这份**未发布**的构建正在连一个远端部署。"
+            echo "      要连本地：设置 → 连接 → 改成 http://127.0.0.1:5173（just dev 起的那个）"
+            echo ""
+            ;;
+    esac
+fi
