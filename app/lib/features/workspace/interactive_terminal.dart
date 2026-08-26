@@ -204,6 +204,17 @@ class _InteractiveTerminalState extends State<InteractiveTerminal> {
           // 而 shell 命令基本是 ASCII —— 拿「中文注释敲不进 PowerShell」
           // 换「一个字都敲不进去」是划算的。真要中文，先粘贴到别处。
           hardwareKeyboardOnly: true,
+          // ⚠️ **只覆盖 `fontFamily`，不传 `fontFamilyFallback`。**
+          //
+          // xterm 自带的那条回落链比我们的 `CortexTheme.monoFallback` 更适合
+          // 这里：它带着四个 `Noto Sans Mono CJK`（简/繁/日/韩）。终端里
+          // 中文输出是常态（`cargo` 的中文报错、`git` 的中文提交信息），
+          // 换成我们那条链，缺字时会回落到比例字体 —— 而比例字体在一个
+          // 按字符格排版的终端里会让整屏错位。
+          //
+          // 它的链里也带了 Linux 常见的 `Liberation Mono` 与末位的
+          // `monospace`，所以 JetBrains Mono 装不上的机器（多数 Linux）
+          // 照样是等宽的。
           textStyle: const TerminalStyle(
             fontSize: 12,
             fontFamily: 'JetBrains Mono',

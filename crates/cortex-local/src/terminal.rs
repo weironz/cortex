@@ -151,17 +151,30 @@ impl Drop for Slot {
 /// 起哪个 shell。Windows 是 powershell，其余按 `$SHELL`、回落 `/bin/bash`。
 ///
 /// 不做成配置项：这个终端的定位是「顺手看一眼、跑两条命令」，要更讲究的
-/// shell 的人自己会开真终端。空串按没设处理 —— 空串顶掉默认值是这个仓库
-/// 数过六次的形状。
+/// shell 的人自己会开真终端。
 fn default_shell() -> String {
+    shell_from(std::env::var("SHELL").ok().as_deref())
+}
+
+/// 上面那个的纯函数版本 —— **`$SHELL` 的值从参数进来**。
+///
+/// # 为什么要拆开
+///
+/// 「`$SHELL` 是空串时回落 `/bin/bash`」这一支在任何一台机器上都跑不到：
+/// 开发机与 CI 的 `$SHELL` 都是设好的，而 edition 2024 里 `set_var` 是
+/// unsafe，为一条测试去改进程环境不划算。拆出来之后两支都测得到。
+///
+/// 空串按没设处理 —— **空串顶掉默认值是这个仓库数过七次的形状**：
+/// 一个 `SHELL=` 的环境（systemd 起的服务、某些容器）会让 agent 去执行
+/// 一个名字为空的程序，报错是「找不到文件」，而没有一个字提到 `$SHELL`。
+fn shell_from(env_shell: Option<&str>) -> String {
     if cfg!(windows) {
-        "powershell.exe".to_string()
-    } else {
-        std::env::var("SHELL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "/bin/bash".to_string())
+        return "powershell.exe".to_string();
     }
+    env_shell
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| "/bin/bash".to_string(), str::to_owned)
 }
 
 /// shell 起在哪：绑了本机工作区就是那个目录，否则用户主目录。
@@ -539,5 +552,31 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(shell, "powershell.exe", "Windows 上按任务定义用 powershell");
         }
+    }
+
+    /// unix 上按 `$SHELL` 走，**空串与没设一样回落 `/bin/bash`**。
+    ///
+    /// 这一支在真机上跑不到（开发机与 CI 的 `$SHELL` 都设好了），所以它
+    /// 只能在纯函数上测。跑不到不等于遇不到：`SHELL=` 的环境是真的存在
+    /// （systemd 起的服务、某些精简容器），而那时的报错是「找不到文件」，
+    /// 一个字都不提 `$SHELL`。
+    #[test]
+    fn unix_上按_shell_走_空串回落到_bash() {
+        if cfg!(windows) {
+            // Windows 上这个函数根本不看参数 —— 那也正是要钉的一件事：
+            // 一个装了 WSL、`$SHELL` 指向 bash 的 Windows 机器，
+            // 终端仍然该是 powershell
+            assert_eq!(shell_from(Some("/bin/zsh")), "powershell.exe");
+            return;
+        }
+        assert_eq!(shell_from(Some("/bin/zsh")), "/bin/zsh", "设了就用他的");
+        assert_eq!(shell_from(Some("  ")), "/bin/bash", "全是空白 = 没设");
+        assert_eq!(shell_from(Some("")), "/bin/bash", "空串 = 没设");
+        assert_eq!(shell_from(None), "/bin/bash", "没这个变量");
+        assert_eq!(
+            shell_from(Some(" /usr/bin/fish ")),
+            "/usr/bin/fish",
+            "两头的空白要去掉 —— 留着的话执行的是一个带空格的路径，必定找不到"
+        );
     }
 }
