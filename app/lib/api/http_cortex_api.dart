@@ -581,6 +581,23 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
+  Future<ModelSources> saveModelCaps(
+    String sourceId,
+    String modelId,
+    CapsOverride caps,
+  ) async {
+    // 型号名进路径，必须转义：ollama 的名字带冒号（`llama3:8b`），
+    // 中转站的还带斜杠（`deepseek/deepseek-v4-pro`）—— 不转义的话
+    // 后者会被路由当成多出来的一段，表现是 404 而不是保存失败
+    final body = await _sourcesRaw(
+      'PUT',
+      '/$sourceId/models/${Uri.encodeComponent(modelId)}',
+      caps.toJson(),
+    );
+    return ModelSources.fromJson(body);
+  }
+
+  @override
   Future<SourceCheck> checkModelSource(String id, {String model = ''}) async {
     final body = await _sourcesRaw('POST', '/$id/check', {'model': model});
     return SourceCheck.fromJson(body);

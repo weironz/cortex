@@ -212,6 +212,87 @@ class ModelSources {
 /// 能力字段一律可空：**「不知道」与「不行」是两回事**。目录里查不到的
 /// 型号三个字段都是 null，界面据此说「不知道」，而不是画一个看起来像
 /// 「不支持」的灰徽标。
+/// 用户在这条来源上**手工按下**的能力位。
+///
+/// # 为什么每一位都是三态
+///
+/// `null` = 「这一位我没意见，按自动的来」，与「我明确说了不支持」必须
+/// 分得开。混在一起的话，一个只想改 vision 的人会把其余几位一起按成
+/// 「不支持」—— 而那正是这个开关要解决的问题的反面。
+///
+/// Cherry Studio 那一版的能力 chip 是**二值**的（点亮 = 支持，不亮 = 不支持）。
+/// 我们不能照抄：这个仓库为了「不知道 ≠ 不支持」这条约定改过三处判据
+/// （放行、筛选、徽标），二值开关会把它整个抹掉。
+class CapsOverride {
+  const CapsOverride({
+    this.displayName,
+    this.context,
+    this.toolCall,
+    this.vision,
+    this.imageOutput,
+    this.reasoning,
+  });
+
+  factory CapsOverride.fromJson(Map<String, dynamic> json) => CapsOverride(
+    displayName: json['display_name'] as String?,
+    context: asIntOrNull(json['context']),
+    toolCall: json['tool_call'] as bool?,
+    vision: json['vision'] as bool?,
+    imageOutput: json['image_output'] as bool?,
+    reasoning: json['reasoning'] as bool?,
+  );
+
+  final String? displayName;
+  final int? context;
+  final bool? toolCall;
+  final bool? vision;
+  final bool? imageOutput;
+  final bool? reasoning;
+
+  /// 一位都没按 —— 服务端据此把整条删掉而不是留个空壳。
+  bool get isEmpty =>
+      displayName == null &&
+      context == null &&
+      toolCall == null &&
+      vision == null &&
+      imageOutput == null &&
+      reasoning == null;
+
+  /// ⚠️ **只发按过的那几位。** 把 null 也发上去的话，服务端分不出
+  /// 「没意见」与「明确说不支持」—— 而那两件事在这个仓库里差得很远。
+  Map<String, Object?> toJson() => {
+    if (displayName != null) 'display_name': displayName,
+    if (context != null) 'context': context,
+    if (toolCall != null) 'tool_call': toolCall,
+    if (vision != null) 'vision': vision,
+    if (imageOutput != null) 'image_output': imageOutput,
+    if (reasoning != null) 'reasoning': reasoning,
+  };
+
+  CapsOverride copyWith({
+    Object? displayName = _keep,
+    Object? context = _keep,
+    Object? toolCall = _keep,
+    Object? vision = _keep,
+    Object? imageOutput = _keep,
+    Object? reasoning = _keep,
+  }) => CapsOverride(
+    displayName: displayName == _keep
+        ? this.displayName
+        : displayName as String?,
+    context: context == _keep ? this.context : context as int?,
+    toolCall: toolCall == _keep ? this.toolCall : toolCall as bool?,
+    vision: vision == _keep ? this.vision : vision as bool?,
+    imageOutput: imageOutput == _keep ? this.imageOutput : imageOutput as bool?,
+    reasoning: reasoning == _keep ? this.reasoning : reasoning as bool?,
+  );
+}
+
+/// `copyWith` 的哨兵：**要能把一位改回 null**（「没意见」），
+/// 而默认参数为 null 的写法表达不了「传了 null」与「没传」的区别 ——
+/// 那正是这个类型存在的全部理由，在它自己的 copyWith 上栽了就很讽刺。
+const Object _keep = Object();
+
 class FetchedModel {
   const FetchedModel({
     required this.id,
@@ -225,6 +306,7 @@ class FetchedModel {
     this.reasoning,
     this.inputMicrosPerMtok,
     this.outputMicrosPerMtok,
+    this.overridden = const CapsOverride(),
   });
 
   factory FetchedModel.fromJson(Map<String, dynamic> json) => FetchedModel(
@@ -239,6 +321,9 @@ class FetchedModel {
     reasoning: json['reasoning'] as bool?,
     inputMicrosPerMtok: asIntOrNull(json['input_micros_per_mtok']),
     outputMicrosPerMtok: asIntOrNull(json['output_micros_per_mtok']),
+    overridden: CapsOverride.fromJson(
+      json['overridden'] as Map<String, dynamic>? ?? const {},
+    ),
   );
 
   final String id;
@@ -277,6 +362,11 @@ class FetchedModel {
   final bool? reasoning;
   final int? inputMicrosPerMtok;
   final int? outputMicrosPerMtok;
+
+  /// 这个模型上用户手工按过的那几位。界面据此画出「这一位是你改的」——
+  /// 不带的话，一个改过 vision 的人下次打开只看到一个 `true`，分不清
+  /// 那是目录说的还是他自己按的，于是不敢动。
+  final CapsOverride overridden;
 
   String get label => displayName.isEmpty ? id : displayName;
 }

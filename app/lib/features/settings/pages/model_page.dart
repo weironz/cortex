@@ -42,6 +42,7 @@ import '../../../core/theme.dart';
 import '../../../models/model_source.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/model_controller.dart';
+import '../widgets/model_caps_editor.dart';
 import '../widgets/model_picker_drawer.dart';
 import '../widgets/model_table.dart';
 import '../widgets/provider_mark.dart';
@@ -136,6 +137,12 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   /// 右侧选型抽屉正在为哪条来源开着。`null` = 没开。
   String? _picking;
 
+  /// 「编辑模型」正开在哪个型号上。`null` = 没开（那时抽屉里是选型列表）。
+  ///
+  /// 存 id 而不是那条 `FetchedModel`：保存之后整份来源会重拉，
+  /// 存对象的话面板里显示的还是保存前那一份，用户会以为没生效。
+  String? _editing;
+
   /// 抽屉挂在这个 Scaffold 上。
   ///
   /// **这一页自己带一个 Scaffold**，而不是借设置页那个：抽屉是
@@ -168,11 +175,22 @@ class _ModelPageState extends ConsumerState<ModelPage> {
       data: (data) {
         final current = _selected == null ? null : data.byId(_selected!);
         final picking = _picking == null ? null : data.byId(_picking!);
+        final editing = picking == null ? null : _editingModel(picking);
         return Scaffold(
           key: _scaffold,
           backgroundColor: Colors.transparent,
+          // 编辑面板与选型列表**共用同一个抽屉位置**：它们是同一条动线的
+          // 两步（先挑一个，再改它），左右并排或另开一层都会让人以为
+          // 自己离开了刚才那份列表
           endDrawer: picking == null
               ? null
+              : editing != null
+              ? ModelCapsEditor(
+                  model: editing,
+                  sourceLabel: data.nameOf(picking),
+                  busy: _busy,
+                  onSave: (caps) => _saveCaps(picking, editing.id, caps),
+                )
               : ModelPickerDrawer(
                   title: data.nameOf(picking),
                   provider: picking.provider,
@@ -182,11 +200,23 @@ class _ModelPageState extends ConsumerState<ModelPage> {
                   onToggle: (id, on) => _toggleModel(picking, id, on),
                   onAddAll: (ids) =>
                       _toggleModels(picking, [...picking.models, ...ids]),
+                  // ⚠️ 部署那条改不了（key 与型号都在服务端的环境变量里），
+                  // 那时**整个按钮不画**而不是画一个点了会失败的
+                  onEdit: picking.builtin
+                      ? null
+                      : (m) => setState(() => _editing = m.id),
                 ),
           // 抽屉关掉时把那条来源忘掉 —— 留着的话下次点别处的
           // 「获取模型列表」会有一瞬间显示上一条的型号
           onEndDrawerChanged: (open) {
-            if (!open && mounted) setState(() => _picking = null);
+            if (!open && mounted) {
+              setState(() {
+                _picking = null;
+                // 编辑状态也要清 —— 留着的话下次打开选型列表会直接
+                // 落在上一次编辑的那个模型上
+                _editing = null;
+              });
+            }
           },
           body: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -612,6 +642,37 @@ class _ModelPageState extends ConsumerState<ModelPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// 正在编辑的那个模型 —— 从**当前这份数据**里现查。
+  ///
+  /// 不缓存对象：保存之后整份来源会重拉，缓存的话面板里显示的还是保存前
+  /// 那一份，用户按了保存却看不到「你改的」标记，会以为没生效。
+  ///
+  /// 查不到（型号被移出全集了）当作没在编辑 —— 退回选型列表，
+  /// 而不是对着一个不存在的模型开一个空面板。
+  FetchedModel? _editingModel(ModelSource source) {
+    final id = _editing;
+    if (id == null) return null;
+    for (final m in source.catalog) {
+      if (m.id == id) return m;
+    }
+    return null;
+  }
+
+  /// 存下这个模型的能力覆盖。
+  Future<void> _saveCaps(
+    ModelSource source,
+    String modelId,
+    CapsOverride caps,
+  ) async {
+    await _run(
+      () => ref.read(cortexApiProvider).saveModelCaps(source.id, modelId, caps),
+    );
+    if (!mounted) return;
+    // 存完退回选型列表：改完一个再改下一个是常见动线，而停在面板上
+    // 会让人以为还没存进去（面板长得和刚才一模一样）
+    setState(() => _editing = null);
   }
 
   /// 打开右侧的选型抽屉。

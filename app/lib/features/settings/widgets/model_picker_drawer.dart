@@ -34,6 +34,7 @@ class ModelPickerDrawer extends StatefulWidget {
     required this.busy,
     required this.onToggle,
     required this.onAddAll,
+    this.onEdit,
   });
 
   /// 抽屉标题，如「OpenAI 模型」。
@@ -55,6 +56,13 @@ class ModelPickerDrawer extends StatefulWidget {
 
   /// 把当前筛选下**看得见的那些**一次全加进来。
   final void Function(List<String> ids) onAddAll;
+
+  /// 打开「编辑模型」——手工按下这个模型能干什么。
+  ///
+  /// `null` = 这条来源改不了（部署提供那条：key 与型号都在服务端的环境
+  /// 变量里）。那时**整个按钮不画**，而不是画一个点了会失败的 ——
+  /// 后者要用户点一次才知道不行。
+  final void Function(FetchedModel model)? onEdit;
 
   @override
   State<ModelPickerDrawer> createState() => _ModelPickerDrawerState();
@@ -339,6 +347,22 @@ class _ModelPickerDrawerState extends State<ModelPickerDrawer> {
             ),
           ],
           const SizedBox(width: 4),
+          // 齿轮：手工按下这个模型能干什么。摆在「加/移」左边 ——
+          // 那一个回答「要不要它」，这一个回答「它是什么」，
+          // 前者是更常用的动作，留在最外侧最好点
+          if (widget.onEdit case final edit?)
+            IconButton(
+              tooltip: m.overridden.isEmpty ? '编辑这个模型的能力' : '这个模型的能力被你改过',
+              iconSize: 16,
+              visualDensity: VisualDensity.compact,
+              onPressed: widget.busy ? null : () => edit(m),
+              icon: Icon(
+                Icons.tune_rounded,
+                // 改过的标出来：一屏几十行里，哪几个是自己动过的
+                // 要一眼看得见，否则用户不记得自己改过什么
+                color: m.overridden.isEmpty ? null : theme.cortex.accentInk,
+              ),
+            ),
           // 加过的显示「−」（移除），没加的显示「+」。**同一个位置**，
           // 因为它回答的是同一个问题：这个型号在不在我的列表里
           IconButton(

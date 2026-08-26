@@ -450,6 +450,22 @@ abstract interface class CortexApi {
   /// 拉不动时服务端回落到内置定义并把 `live` 置 false —— 界面要说出来。
   Future<FetchedModels> fetchSourceModels(String id);
 
+  /// 手工按下某个模型的能力位。
+  ///
+  /// # 为什么需要人来按
+  ///
+  /// **OpenAI 的 `/v1/models` 一个能力字段都不返回**，而绝大多数
+  /// OpenAI 兼容中转站照抄这个形状。也就是说自带网关的人，他那些模型
+  /// 能不能看图、能不能调工具，没有任何自动来源说得出来。
+  ///
+  /// 传一份**完整的**覆盖记录（缺省的位 = 「这一位我没意见」）。
+  /// 一位都没按时服务端会把整条删掉。
+  Future<ModelSources> saveModelCaps(
+    String sourceId,
+    String modelId,
+    CapsOverride caps,
+  );
+
   /// 拿这条来源存下来的 key 真发一次请求，验「我填对了没有」。
   ///
   /// **不能在客户端做**：明文 key 从不下发（服务端只回后 4 位），
@@ -1103,6 +1119,12 @@ mixin ModelSourcesUnsupported {
 
   Future<SourceCheck> checkModelSource(String id, {String model = ''}) async =>
       const SourceCheck(ok: false, detail: '这个部署不支持连通性检查');
+
+  Future<ModelSources> saveModelCaps(
+    String sourceId,
+    String modelId,
+    CapsOverride caps,
+  ) async => const ModelSources();
 
   Future<RoleAssignments> modelRoles() async => const RoleAssignments();
 
