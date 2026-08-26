@@ -341,6 +341,7 @@ mod tests {
             api_key: "test-key".to_owned(),
             base_url: None,
             models: models.iter().map(|m| (*m).to_string()).collect(),
+            caps_overrides: Default::default(),
         }
     }
 

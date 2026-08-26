@@ -33,6 +33,19 @@ pub struct LlmClient {
     provider_id: String,
     model: ModelConfig,
     cheap_model: ModelConfig,
+    /// 用户手工按下的 vision 位，模型名 → 他说的那个答案。
+    ///
+    /// # 为什么闸门必须认它
+    ///
+    /// [`Self::ensure_can_see`] 是**本地**的一道闸：它读供应商定义，在
+    /// 请求发出之前拦下带图的消息。定义只覆盖内置那几家，而一个自带
+    /// 中转站的人，他那个端点后面接的是什么只有他知道。
+    ///
+    /// 不认这一位的后果不是「少了个功能」，是**这个开关整个是假的**：
+    /// 用户在设置里明说了「这个模型能看图」，界面也画上了徽标，
+    /// 发出去却被我们自己的闸门拦下 —— 而错误信息还告诉他去换个模型。
+    /// 那是反方向的同一个谎（能力说没有、实际有）。
+    vision_overrides: std::collections::HashMap<String, bool>,
 }
 
 impl LlmClient {
@@ -45,6 +58,7 @@ impl LlmClient {
             provider: Arc::from(provider),
             model: provider::model_config(&cfg.provider, &cfg.model)?,
             cheap_model: provider::model_config(&cfg.provider, &cfg.cheap_model)?,
+            vision_overrides: std::collections::HashMap::new(),
             provider_id: cfg.provider.clone(),
         })
     }
@@ -123,7 +137,18 @@ impl LlmClient {
             provider_id: provider_id.into(),
             model,
             cheap_model,
+            vision_overrides: std::collections::HashMap::new(),
         }
+    }
+
+    /// 带上用户手工按下的 vision 位。见 [`Self::vision_overrides`] 那段。
+    #[must_use]
+    pub fn with_vision_overrides(
+        mut self,
+        overrides: std::collections::HashMap<String, bool>,
+    ) -> Self {
+        self.vision_overrides = overrides;
+        self
     }
 
     /// 换一个主模型，其余照旧。
@@ -139,6 +164,9 @@ impl LlmClient {
             provider_id: self.provider_id.clone(),
             model,
             cheap_model: self.cheap_model.clone(),
+            // ⚠️ 覆盖要跟着走。逐轮换模型正是**最需要它**的那一刻 ——
+            // 用户挑的往往就是那个他自己标过「能看图」的中转站模型
+            vision_overrides: self.vision_overrides.clone(),
         }
     }
 
@@ -181,8 +209,18 @@ impl LlmClient {
     }
 
     /// 某个模型能不能看图。见 [`VisionSupport`]。
+    ///
+    /// **用户按过的那一位优先**，理由见 [`Self::vision_overrides`]：
+    /// 定义只覆盖内置那几家，而中转站后面接的是什么只有他知道。
     #[must_use]
     pub fn vision_support(&self, model: &ModelConfig) -> VisionSupport {
+        if let Some(&said) = self.vision_overrides.get(&model.model_name) {
+            return if said {
+                VisionSupport::Supported
+            } else {
+                VisionSupport::Unsupported
+            };
+        }
         provider::vision_support(&self.provider_id, &model.model_name)
     }
 
@@ -458,5 +496,94 @@ mod tests {
             LlmClient::from_config(&cfg, "k"),
             Err(LlmError::UnknownProvider { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod vision_override_tests {
+    use super::*;
+    use crate::vision::MessageImageExt;
+
+    /// 最小合法 PNG：1×1 全透明。
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    fn client() -> LlmClient {
+        let cfg = LlmConfig {
+            provider: "deepseek".to_owned(),
+            model: "deepseek-v4-pro".to_owned(),
+            cheap_model: "deepseek-v4-flash".to_owned(),
+            base_url: None,
+        };
+        LlmClient::from_config(&cfg, "k").expect("应构造成功")
+    }
+
+    fn with_image() -> Message {
+        Message::user()
+            .with_text("这张图里有什么")
+            .with_image_bytes(PNG_1X1, "image/png")
+            .expect("合法 PNG")
+    }
+
+    /// **用户按下「这个模型能看图」之后，闸门必须放行。**
+    ///
+    /// 不放行的话这个开关整个是假的：设置页画着徽标、筛选也把它列出来，
+    /// 而真发一张图仍被我们自己拦下，错误还叫他去换个模型。那是
+    /// 「能力说没有、实际有」——与「说有、实际没有」同一类谎，方向相反。
+    ///
+    /// 这是自带中转站的人唯一的出路：OpenAI 的 `/v1/models` 一个能力字段
+    /// 都不返回，那些端点也永远不在 models.dev 目录里。
+    #[test]
+    fn 用户按下能看图之后_闸门放行() {
+        let base = client();
+        base.ensure_can_see(base.model(), &[with_image()])
+            .expect_err("没按之前，定义说 vision:false，本来就该拦");
+
+        let overridden = base
+            .with_vision_overrides([("deepseek-v4-pro".to_owned(), true)].into_iter().collect());
+        overridden
+            .ensure_can_see(overridden.model(), &[with_image()])
+            .expect("用户明说了它能看图，就不该再被我们自己的定义否掉");
+    }
+
+    /// 反向也要认：用户按了「不能」，即使定义说能也拦。
+    ///
+    /// 中转站把一个 vision 模型换成了别的（实测见过），只有用户知道。
+    #[test]
+    fn 用户按下不能看图之后_闸门拦住() {
+        let c = client().with_vision_overrides(
+            [("deepseek-v4-flash-vision-exp".to_owned(), false)]
+                .into_iter()
+                .collect(),
+        );
+        let model = c
+            .model_config("deepseek-v4-flash-vision-exp")
+            .expect("定义里有它");
+        assert_eq!(
+            crate::provider::vision_support("deepseek", "deepseek-v4-flash-vision-exp"),
+            VisionSupport::Supported,
+            "前提：定义说它能看图 —— 这条测试要的正是「用户的话压过定义」",
+        );
+        c.ensure_can_see(&model, &[with_image()])
+            .expect_err("用户明说了这个端点后面那个模型看不懂图，就该拦");
+    }
+
+    /// **逐轮换模型时覆盖要跟着走。**
+    ///
+    /// `with_model` 是每轮都会走的路（逐轮选模型），而用户挑的往往正是
+    /// 那个他自己标过的中转站模型。丢了的话表现最怪：设置页里好好的，
+    /// 一到对话里就被拦。
+    #[test]
+    fn 逐轮换模型时覆盖跟着走() {
+        let c = client()
+            .with_vision_overrides([("deepseek-v4-pro".to_owned(), true)].into_iter().collect());
+        let next = c.with_model(c.model().clone());
+        next.ensure_can_see(next.model(), &[with_image()])
+            .expect("换一轮模型不该把用户按下的那一位丢掉");
     }
 }

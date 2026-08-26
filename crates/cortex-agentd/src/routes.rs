@@ -225,6 +225,12 @@ protected_routes! {
     // 而这三件事都不该挡住「把一条来源存下来」。Cherry Studio 的
     // 「获取模型列表」也是一个独立按钮，同一个理由
     "/settings/model-sources/{id}/models" [POST] => post(crate::model_sources::fetch_models),
+    // 手工按下某个模型的能力位。**这是自带中转站的人唯一的出路** ——
+    // OpenAI 的 /v1/models 一个能力字段都不返回，那些端点也永远不在
+    // models.dev 目录里，所以「这个模型能不能看图」没有任何自动来源
+    // 说得出来。见 `model_sources::set_caps`
+    "/settings/model-sources/{id}/models/{model}" [PUT] =>
+        axum::routing::put(crate::model_sources::set_caps),
     // 拿存下来的 key 真发一次请求，验「我填对了没有」。
     //
     // **必须在服务端**：明文 key 从不下发，客户端没有东西可以拿去试。

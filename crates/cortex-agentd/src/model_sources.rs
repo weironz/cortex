@@ -136,6 +136,13 @@ pub struct ModelSource {
     pub base_url: Option<String>,
     /// 这条来源开放哪些型号。空 = 还没拉过。
     pub models: Vec<String>,
+    /// 用户手工按下的能力位，模型 id → 部分记录。
+    ///
+    /// ⚠️ **必须跟着这条来源一路走到 `LlmClient`**：闸门
+    /// （`ensure_can_see`）读的是供应商定义，而定义只覆盖内置那几家。
+    /// 不带过去的话，用户在设置里明说了「这个模型能看图」、界面也画上了
+    /// 徽标，发出去仍被我们自己拦下 —— 那个开关整个是假的。
+    pub caps_overrides: std::collections::HashMap<String, cortex_llm::caps::CapsOverride>,
 }
 
 /// 下发给界面的形状 —— **只有尾巴**，永远不回明文。
@@ -245,9 +252,16 @@ impl AgentState {
         };
         let rows = match sqlx::query_as::<
             _,
-            (String, String, Vec<u8>, Option<String>, serde_json::Value),
+            (
+                String,
+                String,
+                Vec<u8>,
+                Option<String>,
+                serde_json::Value,
+                serde_json::Value,
+            ),
         >(
-            "SELECT id, provider, ciphertext, base_url, models
+            "SELECT id, provider, ciphertext, base_url, models, caps_overrides
                FROM model_sources WHERE enabled ORDER BY created_at",
         )
         .fetch_all(store.pool())
@@ -261,7 +275,7 @@ impl AgentState {
         };
 
         rows.into_iter()
-            .filter_map(|(id, provider, ciphertext, base_url, models)| {
+            .filter_map(|(id, provider, ciphertext, base_url, models, overrides)| {
                 match open(&ciphertext) {
                     Ok(api_key) => Some(ModelSource {
                         id,
@@ -269,6 +283,9 @@ impl AgentState {
                         api_key,
                         base_url,
                         models: serde_json::from_value(models).unwrap_or_default(),
+                        // 读不懂的覆盖丢掉而不是让整条来源失效 —— 一条
+                        // 读不懂的偏好不该把一把好好的 key 一起废掉
+                        caps_overrides: serde_json::from_value(overrides).unwrap_or_default(),
                     }),
                     Err(e) => {
                         // 解不开的那一条跳过而不是整体失败 —— 一条坏行
@@ -454,9 +471,11 @@ pub async fn list(
                 bool,
                 serde_json::Value,
                 serde_json::Value,
+                serde_json::Value,
             ),
         >(
-            "SELECT id, provider, label, key_tail, base_url, enabled, models, catalog
+            "SELECT id, provider, label, key_tail, base_url, enabled, models, catalog,
+                    caps_overrides
                FROM model_sources ORDER BY created_at",
         )
         .fetch_all(store.pool())
@@ -464,7 +483,7 @@ pub async fn list(
         .map_err(|e| ApiError::internal(format!("查不出模型来源：{e}")))?;
 
         sources.extend(rows.into_iter().map(
-            |(id, provider, label, key_tail, base_url, enabled, models, catalog)| {
+            |(id, provider, label, key_tail, base_url, enabled, models, catalog, overrides)| {
                 let models: Vec<String> = serde_json::from_value(models).unwrap_or_default();
                 let catalog_ids: Vec<String> = serde_json::from_value(catalog).unwrap_or_default();
                 // 还没拉过列表的老来源：拿已启用的那些当全集。
@@ -476,8 +495,12 @@ pub async fn list(
                     catalog_ids
                 };
                 let custom = is_custom_endpoint(&provider, base_url.as_deref());
+                // 认不出的覆盖**整份丢掉而不是报错**：那多半是一个比这个
+                // 服务端新的版本写进去的。一条读不懂的偏好不该让整页打不开
+                let overrides: std::collections::HashMap<String, cortex_llm::caps::CapsOverride> =
+                    serde_json::from_value(overrides).unwrap_or_default();
                 SourceView {
-                    catalog: describe_all(&provider, &catalog_ids, custom),
+                    catalog: describe_all_with(&provider, &catalog_ids, custom, &overrides),
                     id,
                     provider,
                     label,
@@ -1008,6 +1031,81 @@ pub fn is_custom_endpoint(provider: &str, base_url: Option<&str>) -> bool {
 /// 那次它甚至偷偷把型号换成了 `gpt-image-2-vip`。
 ///
 /// 所以这一位一为真，界面就**不拦、不下断言**，只把目录里的话当提醒说。
+/// `PUT /settings/model-sources/{id}/models/{model}` —— 手工按下某个模型的能力位。
+///
+/// # 为什么需要人来按
+///
+/// **OpenAI 的 `/v1/models` 一个能力字段都不返回**（只有 id / created /
+/// owned_by），而绝大多数 OpenAI 兼容中转站照抄这个形状。也就是说：一个
+/// 自带网关的人，他那些模型能不能看图、能不能调工具，**没有任何自动来源
+/// 说得出来** —— 目录里没有它们，接口也不说。
+///
+/// 十个同类产品的 issue 区里最大的一类噪音正是这个：能看图的模型被判成
+/// 不能，附件入口消失且不给解释。业界一致的解法是三件套 —— 接口能问的先问、
+/// 问不出来落目录、目录也没有才手动补。这条路是最后那一档。
+///
+/// # 整条替换，不是打补丁
+///
+/// 请求体就是这个模型的**完整覆盖记录**，缺省的位 = 「这一位我没意见」。
+/// 增量协议要多一套「怎么把一位改回没意见」的表达，而界面上那就是
+/// 再点一下那个开关 —— 整条发过来最省。
+///
+/// 一位都没按（空记录）时**整条删掉**而不是存个空壳：留着的话
+/// `caps_overrides` 会随着用户来回点开点关无限长大，而它每次列来源都要读。
+///
+/// # Errors
+/// 没有这条来源；这个模型不在它的全集里；写不进去。
+pub async fn set_caps(
+    State(st): State<AgentState>,
+    headers: axum::http::HeaderMap,
+    Path((id, model)): Path<(String, String)>,
+    Json(req): Json<cortex_llm::caps::CapsOverride>,
+) -> Result<Json<SourcesResponse>, ApiError> {
+    let tenant = st.tenant(&headers).await?;
+    let store = tenant
+        .store()
+        .map_err(|e| ApiError::unsupported(format!("这个部署存不了模型来源：{e}")))?;
+
+    // ⚠️ **部署那条来源改不了。** 它的 key 与型号都在服务端的环境变量里，
+    // 而这张表里根本没有它的行 —— 不拦的话下面那条 UPDATE 影响 0 行，
+    // 用户点了开关、界面回滚、没有任何解释
+    if id == DEPLOYMENT_SOURCE_ID {
+        return Err(ApiError::bad_request(
+            "「部署提供」那条是服务端配的，改不了它的模型能力。             要自己说了算，在设置里加一条你自己的来源",
+        ));
+    }
+
+    let empty = req.is_empty();
+    let patch = serde_json::to_value(&req)
+        .map_err(|e| ApiError::internal(format!("覆盖记录序列化失败：{e}")))?;
+
+    // 一次 UPDATE 里完成「有就改、空就删」：读出来再写回去会与另一个窗口
+    // 的同类改动互相覆盖，而这两条路都很短，撞上完全可能
+    let affected = sqlx::query(
+        "UPDATE model_sources
+            SET caps_overrides = CASE WHEN $3
+                    THEN caps_overrides - $2::text
+                    ELSE jsonb_set(caps_overrides, ARRAY[$2::text], $4, true)
+                END,
+                updated_at = now()
+          WHERE id = $1",
+    )
+    .bind(&id)
+    .bind(&model)
+    .bind(empty)
+    .bind(&patch)
+    .execute(store.pool())
+    .await
+    .map_err(|e| ApiError::internal(format!("存不下模型能力：{e}")))?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(ApiError::bad_request(format!("没有这条来源：{id}")));
+    }
+
+    list(State(st), headers).await
+}
+
 /// 只给 `llm.rs` 那条一致性测试用 —— 它要拿两条路的结果对着比，
 /// 而 `describe_all` 是私有的。
 #[cfg(test)]

@@ -451,6 +451,17 @@ async fn upstream(
         &source.provider,
         default_model.clone(),
         default_model,
+    )
+    // ⚠️ **这一步不能省。** `ensure_can_see` 在 `stream` 里面拦带图的请求，
+    // 而它读的是供应商定义 —— 定义只覆盖内置那几家。不把用户按下的那一位
+    // 交过去的话，他在设置里明说了「这个模型能看图」、界面也画上了徽标，
+    // 发出去仍被我们自己拦下，错误还叫他换个模型。那是反方向的同一个谎。
+    .with_vision_overrides(
+        source
+            .caps_overrides
+            .iter()
+            .filter_map(|(id, o)| o.vision.map(|v| (id.clone(), v)))
+            .collect(),
     );
     // 白名单是**这条来源自己的**列表；还没拉过时退回供应商定义里那份
     let allowed = if source.models.is_empty() {
@@ -974,6 +985,7 @@ mod resolve_tests {
             api_key: "test-key".to_owned(),
             base_url: None,
             models: models.iter().map(|m| (*m).to_string()).collect(),
+            caps_overrides: Default::default(),
         }
     }
 
@@ -1157,6 +1169,7 @@ mod resolve_tests {
             api_key: "test-key".to_owned(),
             base_url: None,
             models: models.iter().map(|m| (*m).to_string()).collect(),
+            caps_overrides: Default::default(),
         }
     }
 
