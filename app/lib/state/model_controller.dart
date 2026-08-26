@@ -162,6 +162,37 @@ final selectedModelVisionProvider = Provider.autoDispose<bool?>((ref) {
   return m?.vision;
 });
 
+/// 这一轮选中的模型**已知**看不懂图吗。
+///
+/// `vision == false` 才算，`null`（不知道）不算 —— 与服务端
+/// `ensure_can_see` 完全同一条判据：只在**显式声明**不支持时拦。
+///
+/// # ⚠️ 这与选择器里那个「视觉」筛选 chip 不是同一条，别去「统一」它们
+///
+/// 筛选问的是「**确认有**」（`vision == true`），放行问的是
+/// 「**没确认没有**」（`vision != false`）。两者对「不知道」的态度必须相反：
+///
+/// - 筛选把「不知道」算成有 → 界面替目录撒谎（CLAUDE.md 约束 2）
+/// - 放行把「不知道」算成没有 → 目录慢一拍的新模型全被挡在外面
+///
+/// 后者是实打实踩过的：DeepSeek 2026-08-21 上线的
+/// `deepseek-v4-flash-vision-exp`，models.dev 的编译期快照里一条都没有，
+/// 于是它的 `vision` 是 null。要是「换一个能看图的模型」按 `== true` 去筛，
+/// **唯一能解决问题的那个模型会被藏起来**。
+final selectedModelIsBlindProvider = Provider.autoDispose<bool>(
+  (ref) => ref.watch(selectedModelVisionProvider) == false,
+);
+
+/// 目录里有没有**可能**看得懂图的模型（`vision != false`）。
+///
+/// 给「换一个能看图的模型」那个入口用：一个都没有的时候不该开一个空弹层，
+/// 而该告诉用户去设置里加一条来源。
+final anySeeingModelProvider = Provider.autoDispose<bool>((ref) {
+  final catalog = ref.watch(modelCatalogProvider).value;
+  if (catalog == null) return true; // 还没拉到 —— 不要在这一刻断言「没有」
+  return catalog.models.any((m) => m.vision != false);
+});
+
 /// 这一轮**真的**能操作电脑吗 —— 开关 × 模型看不看得懂图。
 ///
 /// # 为什么要把这两件事合成一个值

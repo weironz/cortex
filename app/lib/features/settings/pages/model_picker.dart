@@ -51,16 +51,25 @@ import '../settings_sheet.dart';
 ///
 /// [anchor]：弹层锚在哪个矩形上方（全局坐标）。chip 传自己的位置；
 /// 没有锚点的入口不传，弹层落在屏幕中央。
+///
+/// [where]：只列符合条件的。给「贴了图但这个模型看不懂图」那条出路用 ——
+/// 它传的是 `vision != false`（**不是** `== true`，理由见
+/// `selectedModelIsBlindProvider`）。不传 = 全都列。
 Future<void> showModelPicker(
   BuildContext context,
   WidgetRef ref, {
   Rect? anchor,
+  bool Function(ModelOption)? where,
 }) async {
   final picked = await pickModel(
     context,
     ref,
     current: ref.read(selectedModelProvider),
     anchor: anchor,
+    where: where,
+    // 筛过的那次不摆「自动」：自动是跨**所有来源**挑最便宜的，它挑出来的
+    // 那个未必符合这次的条件 —— 摆出来点了等于没换，而用户以为换了
+    allowAuto: where == null,
   );
   if (picked == null || !context.mounted) return;
   ref.read(selectedModelProvider.notifier).select(picked.pick);
@@ -172,6 +181,16 @@ Future<({ModelPick pick})?> pickModel(
       ),
     ),
   );
+}
+
+/// 这个模型过不过得了筛子。
+///
+/// `m == null`（目录里查不到部署配的那个）一律**不过** —— 与 `where` 的
+/// 语义一致：调用方给筛子，是因为他要的是「确定符合条件的那些」，
+/// 而一个查不到的型号连它是什么都说不出来。
+bool _passes(ModelOption? m, bool Function(ModelOption)? where) {
+  if (where == null) return true;
+  return m != null && where(m);
 }
 
 /// 把弹层摆到锚点上方；放不下就摆到下方；没有锚点就居中。
@@ -313,6 +332,15 @@ class _PickerPopoverState extends State<_PickerPopover> {
     // 「跟随部署」「自动」不是目录里的型号：搜索/筛选一开就收起来 ——
     // 搜「qwen」还杵着一行「跟随部署」，读起来像它匹配上了
     final filtering = _query.isNotEmpty || _caps.isNotEmpty;
+    // ⚠️ 调用方带了 `where` 时（「换一个能看图的模型」那条出路），
+    // 「跟随部署」只在**部署配的那个真的符合条件**时才摆。
+    //
+    // 不判的话它是一条死路：用户正是因为当前模型看不懂图才走到这儿，
+    // 而当前模型很可能就是部署配的那个 —— 点下去等于原地不动，
+    // 而界面看起来像他已经换过了。
+    final deploymentQualifies =
+        widget.where == null ||
+        _passes(widget.catalog.byId(widget.catalog.defaultModel), widget.where);
 
     // 阴影在 Material **外面**：Material 带 Clip.antiAlias（列表内容要贴着
     // 圆角裁掉），而阴影恰恰画在边界外 —— 放在裁剪层里面的阴影会被整个
@@ -399,7 +427,7 @@ class _PickerPopoverState extends State<_PickerPopover> {
                   shrinkWrap: true,
                   padding: const EdgeInsets.symmetric(vertical: 4),
                   children: [
-                    if (!filtering) ...[
+                    if (!filtering && deploymentQualifies) ...[
                       _specialRow(
                         theme,
                         icon: Icons.settings_suggest_outlined,

@@ -12,6 +12,8 @@ import '../../../state/attachment_controller.dart';
 import '../../../state/composer_draft.dart';
 import '../../../state/file_mention_controller.dart';
 import '../../../state/model_controller.dart';
+import '../../settings/pages/model_picker.dart';
+import '../../settings/settings_sheet.dart';
 import '../../workspace/workspace_panel.dart';
 import 'attachment_views.dart';
 import 'assistant_chip.dart';
@@ -267,6 +269,13 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
     final attachments = queue.readyFor(sessionId);
     final text = _controller.text.trim();
     if (text.isEmpty && attachments.isEmpty) return;
+    // ⚠️ 判据要在**这里**也判一次，不能只靠按钮灰掉：Enter 直接走到这条路，
+    // 绕开了按钮。这正是「判据两处只落一处」的形状 —— 而漏掉的那一处
+    // （回车发送）恰恰是绝大多数人真正用的那个
+    if (attachments.any((a) => a.isImage) &&
+        ref.read(selectedModelIsBlindProvider)) {
+      return;
+    }
 
     _controller.clear();
     if (sessionId != null) queue.clear(sessionId);
@@ -288,10 +297,25 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
         : (tray[sessionId] ?? const <PendingAttachment>[]);
     final uploading = pending.any((p) => p.status == UploadStatus.uploading);
     final hasReady = pending.any((p) => p.status == UploadStatus.ready);
+    // ── 贴了图，而这一轮的模型已知看不懂图 ──
+    //
+    // 拦在**发送之前**。不拦的话这一轮必然失败，而失败要等一次完整往返，
+    // 且报错来自服务端 —— 用户看到的是一条红字，看不出是自己选错了模型。
+    //
+    // **禁用并说明，不是把附件入口藏起来**：Jan 把它从置灰改成隐藏之后，
+    // 直接多出一类「你们根本不支持贴图吧」的 issue（jan#8176 / #6972）。
+    // 藏起来的东西用户没法判断是不支持还是自己没找到。
+    //
+    // 也**不清空已经贴好的图**（NextChat 是那么做的）：那会丢掉用户已经
+    // 选好的文件，而他真正要做的只是换个模型。拦住 + 指路即可。
+    final blocked =
+        pending.any((p) => p.isImage) &&
+        ref.watch(selectedModelIsBlindProvider);
     // An upload still in flight blocks send: the daemon rejects a hash it has
     // not registered, so sending now would fail the whole turn rather than just
     // drop the attachment.
-    final canSend = widget.enabled && !uploading && (_hasText || hasReady);
+    final canSend =
+        widget.enabled && !uploading && !blocked && (_hasText || hasReady);
 
     return DropTarget(
       // ⚠️ 不再要求 `sessionId != null`：白纸上拖图进来是合法的，
@@ -328,6 +352,7 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
               children: [
                 if (sessionId != null)
                   PendingAttachmentTray(sessionId: sessionId),
+                if (blocked) const _BlindModelNotice(),
                 if (_mention != null)
                   _MentionList(
                     index: ref.watch(fileMentionProvider),
@@ -840,6 +865,77 @@ enum PasteChoice { text, image, nothing }
 PasteChoice choosePaste({required String? text, required bool hasImage}) {
   if (text != null && text.isNotEmpty) return PasteChoice.text;
   return hasImage ? PasteChoice.image : PasteChoice.nothing;
+}
+
+/// 「你贴了图，可这个模型看不懂图」那一行。
+///
+/// # 为什么是一行提示 + 一个按钮，而不是一句红字
+///
+/// 用户此刻要做的是一个**具体动作**（换个模型），而不是知道自己错了。
+/// 只写「当前模型不支持图片」等于把找模型这件事整个丢回给他 —— 而他
+/// 未必知道哪些模型看得懂图，那正是我们手上有目录、他没有的东西。
+class _BlindModelNotice extends ConsumerWidget {
+  const _BlindModelNotice();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    // 一个**可能**看得懂图的模型都没有时，「换一个」是死路 ——
+    // 开一个空弹层比不给按钮更糟，那时该指的是设置页
+    final hasCandidate = ref.watch(anySeeingModelProvider);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+        decoration: BoxDecoration(
+          // 中性提示底，不用 error：这不是失败，是「换个模型就能走」
+          color: scheme.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.visibility_off_outlined,
+              size: 16,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                hasCandidate
+                    ? '这个模型看不懂图。换一个能看图的，再发。'
+                    : '这个模型看不懂图，而你配的来源里没有能看图的 —— 去设置里加一条。',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: () {
+                if (hasCandidate) {
+                  // ⚠️ 预筛用 `vision != false`（不是已知瞎的），**不是**
+                  // 选择器那个「视觉」chip 的 `== true`：刚发布的模型能力
+                  // 是 null，按 `== true` 筛会把唯一能解决问题的那个藏起来。
+                  // 判据与服务端 `ensure_can_see` 同一条
+                  showModelPicker(
+                    context,
+                    ref,
+                    where: (m) => m.vision != false,
+                  );
+                } else {
+                  showSettingsSheet(context);
+                }
+              },
+              child: Text(hasCandidate ? '换模型' : '去设置'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _RoundButton extends StatelessWidget {
