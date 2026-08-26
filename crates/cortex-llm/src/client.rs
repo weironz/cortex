@@ -478,12 +478,25 @@ mod tests {
             .expect("未声明能力应放行，由 Ollama 自己报错");
     }
 
+    /// 能为**主模型之外**的同门模型组装配置（转录 / 逐轮换模型都要它）。
+    ///
+    /// ⚠️ 举例用的是 `deepseek-v4-flash-vision-exp` 而不是从前那个
+    /// `deepseek-reasoner`：后者 2026-08-26 从 DeepSeek 的实拉列表里消失了
+    /// （官方定价页也不再列），已从定义里删掉。
+    ///
+    /// 期望值 1_048_576 **刻意不等于** goose 的 `DEFAULT_CONTEXT_LIMIT`
+    /// （128_000）—— 相等的话，这条断言在定义根本没被读到时也会绿，
+    /// 就成了一条装饰品（provider.rs 里那条同名测试栽过一次）。
     #[test]
     fn model_config_can_name_a_sibling_model() {
         let client = LlmClient::from_config(&config(), "k").unwrap();
-        let cfg = client.model_config("deepseek-reasoner").unwrap();
-        assert_eq!(cfg.model_name, "deepseek-reasoner");
-        assert_eq!(cfg.context_limit(), 128_000);
+        let cfg = client.model_config("deepseek-v4-flash-vision-exp").unwrap();
+        assert_eq!(cfg.model_name, "deepseek-v4-flash-vision-exp");
+        assert_eq!(
+            cfg.context_limit(),
+            1_048_576,
+            "取到 128_000 的话说明定义没被读到 —— 那是 goose 的默认值"
+        );
     }
 
     #[test]

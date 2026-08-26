@@ -439,6 +439,39 @@ struct VisionModel {
     vision: Option<bool>,
 }
 
+/// 定义 JSON 里**明写**的上下文上限。查不到给 `None`。
+///
+/// # 为什么不能用 `model_config`
+///
+/// 那条路对定义里没有的模型会回落到 goose 的 canonical 表，再回落到
+/// `DEFAULT_CONTEXT_LIMIT`（128_000）—— 也就是说它**永远给得出一个数**。
+///
+/// 拿它当「定义说了什么」用，等于给一个谁都不认识的型号编一个上下文。
+/// 2026-08-26 实测撞到：`describe_all` 用 `model_config` 补上下文之后，
+/// 一个「还没进目录的型号」从「不知道」变成了「128000」，而那个数纯属
+/// 虚构 —— 上下文预算按它算，超了之后供应商在字已经吐出去时才拒。
+///
+/// 所以这里只读定义本身：说了就是说了，没说就是没说。
+#[must_use]
+pub fn declared_context(provider: &str, model: &str) -> Option<usize> {
+    #[derive(serde::Deserialize)]
+    struct View {
+        models: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        name: String,
+        #[serde(default)]
+        context_limit: Option<usize>,
+    }
+    let json = definition(provider)?;
+    let view: View = serde_json::from_str(json).ok()?;
+    view.models
+        .into_iter()
+        .find(|m| m.name == model)?
+        .context_limit
+}
+
 /// 查某个 `provider/model` 能不能看图。
 ///
 /// 判据只有定义 JSON 里的 `vision` 字段。查不到供应商、查不到模型、

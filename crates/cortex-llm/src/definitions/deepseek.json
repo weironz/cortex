@@ -32,25 +32,6 @@
       "currency": null,
       "supports_cache_control": null,
       "vision": true
-    },
-    {
-      "name": "deepseek-chat",
-      "context_limit": 128000,
-      "input_token_cost": null,
-      "output_token_cost": null,
-      "currency": null,
-      "supports_cache_control": null,
-      "vision": false
-    },
-    {
-      "name": "deepseek-reasoner",
-      "context_limit": 128000,
-      "input_token_cost": null,
-      "output_token_cost": null,
-      "currency": null,
-      "supports_cache_control": null,
-      "reasoning": true,
-      "vision": false
     }
   ],
   "headers": null,

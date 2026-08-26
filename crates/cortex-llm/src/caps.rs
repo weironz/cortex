@@ -163,10 +163,25 @@ pub fn resolve(
             .and_then(|o| o.display_name.clone())
             .or_else(|| info.as_ref().map(|i| i.display_name.clone()))
             .unwrap_or_else(|| model_id.to_owned()),
+        // ⚠️ 上下文也要回落到定义，理由与 vision 那一位完全相同。
+        //
+        // 2026-08-26 实测抓到：`deepseek-v4-flash-vision-exp` 实拉回来之后
+        // 界面上写着「上下文：查不到」，而我们自己的定义里明写着 1048576 ——
+        // 只给 vision 补了回落，漏了这一位。一个「查不到上下文」的模型在
+        // 选择器里读起来像半个残废，而那个数我们手上就有。
+        //
+        // ⚠️ 读的是 `declared_context`（只看定义里明写的），**不是**
+        // `model_config` —— 后者对定义里没有的模型会回落到 goose 的
+        // `DEFAULT_CONTEXT_LIMIT`，也就是**永远给得出一个数**。
+        // 拿它当「定义说了什么」用，等于给一个谁都不认识的型号编一个
+        // 上下文，而按编出来的数算预算，超了之后供应商会在字已经吐出去
+        // 时才拒。这个错法当场被 `目录查不到的型号留着_能力是不知道而不是不行`
+        // 抓住了。
         context: over
             .and_then(|o| o.context)
             .or_else(|| probed.and_then(|p| p.context))
-            .or_else(|| info.as_ref().map(|i| i.context)),
+            .or_else(|| info.as_ref().map(|i| i.context))
+            .or_else(|| crate::provider::declared_context(provider, model_id)),
         tool_call: pick(
             over.and_then(|o| o.tool_call),
             probed.and_then(|p| p.tool_call),
@@ -231,6 +246,47 @@ mod tests {
             c.vision,
             Some(true),
             "定义里明写 vision:true 的模型解析不出来，等于把唯一的解藏起来"
+        );
+    }
+
+    /// **上下文也要能从定义补上。**
+    ///
+    /// 现场：`deepseek-v4-flash-vision-exp` 实拉回来之后，界面上写着
+    /// 「上下文：查不到」—— 而定义里明写着 1048576。只给 vision 加了
+    /// 回落、漏了这一位，表现是一个刚发布的模型在选择器里像半个残废。
+    #[test]
+    fn 目录不认识的新模型_上下文也从定义补上() {
+        let c = resolve(
+            "deepseek",
+            "deepseek-v4-flash-vision-exp",
+            false,
+            None,
+            None,
+        );
+        assert_eq!(
+            c.context,
+            Some(1_048_576),
+            "定义里写着上下文，就不该在界面上说「查不到」"
+        );
+    }
+
+    /// **谁都不认识的型号，上下文必须是「不知道」，不许编一个。**
+    ///
+    /// 第一版这里用了 `model_config`，而它对未知模型回落到 goose 的
+    /// 128_000 —— 于是一个刚发布、还没进任何目录的型号会被安上一个虚构的
+    /// 上下文。按它算预算，超了之后供应商在字已经吐给用户时才拒。
+    #[test]
+    fn 谁都不认识的型号_上下文是不知道而不是编一个() {
+        let c = resolve(
+            "deepseek",
+            "某个还没进目录也不在定义里的型号",
+            false,
+            None,
+            None,
+        );
+        assert_eq!(
+            c.context, None,
+            "定义里没有它就该说不知道 —— 给一个 goose 的默认值等于凭空编数"
         );
     }
 

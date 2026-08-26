@@ -1214,6 +1214,22 @@ pub async fn set_caps(
 /// 只给 `llm.rs` 那条一致性测试用 —— 它要拿两条路的结果对着比，
 /// 而 `describe_all` 是私有的。
 #[cfg(test)]
+pub(crate) fn describe_all_with_for_test(
+    provider: &str,
+    names: &[String],
+    custom_endpoint: bool,
+    overrides: &std::collections::HashMap<String, cortex_llm::caps::CapsOverride>,
+) -> Vec<FetchedModel> {
+    describe_all_with(
+        provider,
+        names,
+        custom_endpoint,
+        overrides,
+        &Default::default(),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn describe_all_for_test(
     provider: &str,
     names: &[String],

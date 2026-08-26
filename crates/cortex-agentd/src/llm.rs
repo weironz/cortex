@@ -680,6 +680,11 @@ pub async fn models(
         false,
         // 部署那条走的是服务端自己配的供应商，不是自定义端点
         false,
+        // 部署那条**没有**用户覆盖，也不该有：它的 key 与型号都在服务端的
+        // 环境变量里，界面上整个齿轮都不画（见 `set_caps` 那道拦截）。
+        // 显式传一份空的，而不是靠一个省掉这个参数的重载 —— 那条捷径正是
+        // 上面文档里说的那个 bug 的来源
+        &Default::default(),
     ));
 
     // ── 用户自己加的那些 ────────────────────────────────
@@ -696,6 +701,14 @@ pub async fn models(
             .into_iter()
             .find(|p| p.id == src.provider)
             .map_or_else(|| src.provider.clone(), |p| p.display_name);
+        // ⚠️ **用户按下的那几位必须走这一条路。**
+        //
+        // 2026-08-26 实地走动线时抓到：设置页里改了「这个模型看不懂图」，
+        // 而聊天的模型选择器仍然说它看得懂 —— 因为这里从前传的是一份空
+        // 覆盖表。合并解析函数只保证了「自动那几档一致」，覆盖是新加的
+        // 第五档，它得自己接过来。
+        //
+        // 症状最难查的地方在于：设置页看起来完全生效了。
         models.extend(describe(
             &src.provider,
             &list,
@@ -703,6 +716,7 @@ pub async fn models(
             &label,
             true,
             crate::model_sources::is_custom_endpoint(&src.provider, src.base_url.as_deref()),
+            &src.caps_overrides,
         ));
     }
 
@@ -743,33 +757,24 @@ fn warn_on_reserved(provider: &str, models: &[String]) {
 ///
 /// 查不到的**不丢掉**，三个能力字段留空 —— 那多半是刚发布的新型号，
 /// 丢了比留着更糟；留着，界面会说「不知道」。
-fn describe(
-    provider: &str,
-    models: &[String],
-    source: &str,
-    source_label: &str,
-    free_of_quota: bool,
-    custom_endpoint: bool,
-) -> Vec<ModelOption> {
-    describe_with(
-        provider,
-        models,
-        source,
-        source_label,
-        free_of_quota,
-        custom_endpoint,
-        &Default::default(),
-    )
-}
-
-/// 同上，但带着这条来源的手动覆盖。
+/// 把一条来源的型号铺成 `ModelOption`。
+///
+/// # ⚠️ `overrides` 是必填的，这是有意的
+///
+/// 这里从前有一个不带覆盖的便利包装 `describe()`，而按源列型号那条路
+/// 正好调了它 —— 于是**用户在设置页按下的能力位到不了聊天的模型选择器**。
+/// 症状最难查：设置页看起来完全生效了，而他每天点的那个下拉说着另一套。
+///
+/// 2026-08-26 实地走动线时抓到。补一条测试挡不住它（测试直接调这个函数，
+/// 绕开了出错的那处接线，注入原样的 bug 它照样绿）—— 所以把那条捷径
+/// **删掉**：现在每个调用方都必须显式决定传什么，忘不掉。
 ///
 /// ⚠️ **能力解析在 `cortex_llm::caps::resolve`，与设置页那条路共用。**
 /// 此前这里自己算一遍，注释写着「与 describe_all 一字不差」—— 而它已经
 /// 漂了：2026-08-26 给设置页那份加了「目录查不到回落定义」，这一份没跟上，
 /// 于是同一个模型在设置页说得出「看得懂图」、在聊天的选择器里却是「不知道」，
 /// **而后者才是用户每天点的那个**。
-fn describe_with(
+fn describe(
     provider: &str,
     models: &[String],
     source: &str,
@@ -816,12 +821,60 @@ mod caps_parity_tests {
     /// 现在两处都调 `cortex_llm::caps::resolve`。这条测试盯的是它们**没有
     /// 再各自长出一份**：拿一个只有定义说得出、目录说不出的模型去问，
     /// 两边答案必须一致。
+    /// **用户按下的覆盖也要在两条路上一致。**
+    ///
+    /// 上面那条只比了「自动那几档」，而覆盖是第五档 —— 它由调用方传进
+    /// 解析函数，所以合并解析**并不能**自动保证它两边都到。
+    ///
+    /// 实地走动线时抓到的正是这个：设置页里改了「这个模型看不懂图」，
+    /// 聊天的模型选择器仍然说它看得懂，因为 `/llm/models` 那条传的是一份
+    /// 空覆盖表。症状最难查的地方在于**设置页看起来完全生效了**。
+    #[test]
+    fn 用户按下的覆盖在两条路上都生效() {
+        use std::collections::HashMap;
+
+        let id = "deepseek-v4-pro".to_owned();
+        let names = [id.clone()];
+        // 定义与目录都说它看不懂图 —— 用户偏说能，那就该是能
+        let mut over: HashMap<String, cortex_llm::caps::CapsOverride> = HashMap::new();
+        over.insert(
+            id.clone(),
+            cortex_llm::caps::CapsOverride {
+                vision: Some(true),
+                ..Default::default()
+            },
+        );
+
+        let chat = super::describe("deepseek", &names, "src-1", "DeepSeek", false, false, &over);
+        let settings =
+            crate::model_sources::describe_all_with_for_test("deepseek", &names, false, &over);
+
+        assert_eq!(
+            chat.first().expect("一条").vision,
+            Some(true),
+            "聊天目录没认用户按下的那一位 —— 而那正是他每天点的那个选择器"
+        );
+        assert_eq!(
+            settings.first().expect("一条").vision,
+            Some(true),
+            "设置页没认用户按下的那一位"
+        );
+    }
+
     #[test]
     fn 聊天目录与设置页对同一个模型给出同一个答案() {
         let id = "deepseek-v4-flash-vision-exp".to_owned();
         let names = [id.clone()];
 
-        let chat = super::describe("deepseek", &names, "src-1", "DeepSeek", false, false);
+        let chat = super::describe(
+            "deepseek",
+            &names,
+            "src-1",
+            "DeepSeek",
+            false,
+            false,
+            &Default::default(),
+        );
         let settings = crate::model_sources::describe_all_for_test("deepseek", &names, false);
 
         let c = chat.first().expect("一条");
@@ -1233,7 +1286,15 @@ mod resolve_tests {
     #[test]
     fn 目录里的能生图位与保存时的校验用同一个判据() {
         let list = ["qwen-image-plus".to_owned(), "qwen-turbo".to_owned()];
-        let out = describe("alibaba", &list, "01M0AAA", "通义千问", true, false);
+        let out = describe(
+            "alibaba",
+            &list,
+            "01M0AAA",
+            "通义千问",
+            true,
+            false,
+            &Default::default(),
+        );
 
         for m in &out {
             assert_eq!(
@@ -1258,7 +1319,15 @@ mod resolve_tests {
             "deepseek-chat".to_owned(),
             "某个还没进目录的新型号".to_owned(),
         ];
-        let out = describe("deepseek", &list, "deployment", "部署提供", false, false);
+        let out = describe(
+            "deepseek",
+            &list,
+            "deployment",
+            "部署提供",
+            false,
+            false,
+            &Default::default(),
+        );
 
         let known = out
             .iter()
