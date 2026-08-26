@@ -289,7 +289,10 @@ class _ToolToggles extends ConsumerWidget {
     (['shell'], '执行命令'),
     (['grep', 'glob'], '搜索文件'),
     (['tree'], '看目录结构'),
-    (['web_search'], '联网检索'),
+    // ⚠️ 搜索与抓取**一格管两个**。它们在用户眼里是同一件事（上网找东西），
+    // 共用服务端那把 key，风险等级也一样（都把内容发给同一个第三方）。
+    // 拆成两格等于造出一个「能搜不能读」的权限区分，而没有人要过它
+    (['web_search', 'web_fetch'], '联网检索'),
     (['generate_image'], '画图'),
   ];
 

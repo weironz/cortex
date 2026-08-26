@@ -29,7 +29,7 @@ use crate::state::AgentState;
 pub const SEARCH_KEY_ENV: &str = "CORTEX_SEARCH_API_KEY";
 
 /// 端点覆盖。兼容 Tavily 协议的自建服务用它。
-const SEARCH_BASE_ENV: &str = "CORTEX_SEARCH_BASE_URL";
+pub(crate) const SEARCH_BASE_ENV: &str = "CORTEX_SEARCH_BASE_URL";
 
 const DEFAULT_BASE: &str = "https://api.tavily.com";
 
@@ -39,13 +39,25 @@ const DEFAULT_BASE: &str = "https://api.tavily.com";
 /// 一个事实要读一整页搜索结果，而它本来就该只看前几条。
 const MAX_RESULTS: i64 = 5;
 
+/// 这个部署那把搜索 key。`None` = 没配。
+///
+/// 抽出来是因为**搜索与抓取共用同一把** —— 两处各读一次环境变量的话，
+/// 改了变量名总有一处跟不上，而症状是「搜索能用，抓取说没配」。
+#[must_use]
+pub(crate) fn api_key() -> Option<String> {
+    std::env::var(SEARCH_KEY_ENV)
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
 /// 这个部署配了联网检索没有。
 ///
 /// **在装配工具目录之前问** —— 摆一个必然失败的工具比没有这个工具更糟
 /// （CLAUDE.md 约束 2）。
 #[must_use]
 pub fn configured() -> bool {
-    std::env::var(SEARCH_KEY_ENV).is_ok_and(|v| !v.trim().is_empty())
+    api_key().is_some()
 }
 
 /// 这一次回几条。
@@ -98,7 +110,7 @@ fn normalize_time_range(raw: Option<&str>) -> Option<&'static str> {
 /// `CORTEX_SEARCH_BASE_URL=` 的 `.env` 会让请求打到 `/search` 这个相对
 /// 路径上去，报错是「URL 无效」，一个字都不提那个变量。
 /// 尾斜杠也要去掉 —— 留着就是 `https://api.tavily.com//search`。
-fn resolve_base(raw: Option<&str>) -> String {
+pub(crate) fn resolve_base(raw: Option<&str>) -> String {
     raw.map(|v| v.trim().trim_end_matches('/'))
         .filter(|v| !v.is_empty())
         .map_or_else(|| DEFAULT_BASE.to_string(), str::to_owned)
@@ -112,7 +124,7 @@ fn resolve_base(raw: Option<&str>) -> String {
 ///
 /// 变量名从常量里取，不手写 —— 手写的那份在有人改名时不会跟着变，
 /// 而症状是用户照着一个不存在的变量名去改 `.env`。
-fn not_configured_message() -> String {
+pub(crate) fn not_configured_message() -> String {
     format!(
         "这个部署没有配联网检索的 key。告诉用户：在服务端的 .env 里设          {SEARCH_KEY_ENV}（Tavily 或兼容它的服务）之后重启即可。"
     )
@@ -125,7 +137,7 @@ fn not_configured_message() -> String {
 ///
 /// ⚠️ 截断按**字符**不按字节：上游的错误正文完全可能是中文，
 /// 按字节切会在多字节字符中间断开，直接 panic。
-fn upstream_failed_message(code: axum::http::StatusCode, body: &str) -> String {
+pub(crate) fn upstream_failed_message(code: axum::http::StatusCode, body: &str) -> String {
     format!(
         "搜索服务回了 {code}：{}",
         body.chars().take(300).collect::<String>()
@@ -200,10 +212,7 @@ pub async fn search(
     // 认证照走 —— 搜索会花钱（按次计费），不能是个匿名可打的口子
     let _ = st.tenant(&headers).await?;
 
-    let key = std::env::var(SEARCH_KEY_ENV)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| ApiError::unsupported(not_configured_message()))?;
+    let key = api_key().ok_or_else(|| ApiError::unsupported(not_configured_message()))?;
 
     let query = req.query.trim();
     if query.is_empty() {
@@ -220,18 +229,18 @@ pub async fn search(
         .json(&body(&key, query, limit, topic, time_range))
         .send()
         .await
-        .map_err(|e| ApiError::internal(format!("搜索请求发不出去：{e}")))?;
+        .map_err(|e| ApiError::upstream(format!("搜索请求发不出去：{e}")))?;
 
     if !resp.status().is_success() {
         let code = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(ApiError::internal(upstream_failed_message(code, &body)));
+        return Err(ApiError::upstream(upstream_failed_message(code, &body)));
     }
 
     let parsed: Upstream = resp
         .json()
         .await
-        .map_err(|e| ApiError::internal(format!("解析搜索结果失败：{e}")))?;
+        .map_err(|e| ApiError::upstream(format!("解析搜索结果失败：{e}")))?;
 
     Ok(Json(to_hits(parsed)))
 }

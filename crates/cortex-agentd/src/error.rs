@@ -115,6 +115,31 @@ impl ApiError {
         cortex_core::CortexError::Store(message.into()).into()
     }
 
+    /// 502：**上游**出了问题，不是我们。
+    ///
+    /// # 为什么不复用 [`Self::internal`]
+    ///
+    /// 两点差别，都是有意的：
+    ///
+    /// 1. **`message` 显式给**，于是 [`Self::message`] 直接回它，不走
+    ///    `inner.to_string()` 那条回落。`internal` 底下是
+    ///    `CortexError::Store`，它的 `Display` 前缀是「存储错误：」——
+    ///    于是一次抓不到网页变成「存储错误：抓不到 https://…」。
+    ///    这句话经由工具结果到模型手里、再由模型转达给用户，
+    ///    而它会让人以为数据库出了问题。2026-08-27 实地撞到
+    ///    （`web_fetch` 打一个付费墙站点时）。
+    /// 2. **502 而不是 500**。500 是「我们崩了」，而上游拒绝抓取是它正常
+    ///    工作的结果 —— 客户端据此不必怀疑我们这边的健康。
+    ///
+    /// `inner` 用 `Unavailable` 只影响那一行日志（状态码是显式给的）。
+    pub fn upstream(message: impl Into<String>) -> Self {
+        Self {
+            message: Some(message.into()),
+            inner: cortex_core::CortexError::Unavailable("upstream".into()),
+            status: Some(StatusCode::BAD_GATEWAY),
+        }
+    }
+
     /// 501：请求本身没错，是这个部署形态**永远**提供不了这个能力。
     ///
     /// 客户端把 501 当成「这条路不会开」，据此把功能降级掉并且**不重试**

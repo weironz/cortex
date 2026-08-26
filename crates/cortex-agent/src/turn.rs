@@ -422,6 +422,17 @@ pub trait ToolHost: Send + Sync {
         )
     }
 
+    /// 把一个网页读回来。**由宿主执行**，理由与 [`Self::web_search`] 同一条。
+    ///
+    /// 默认实现同样是「上不了网」而不是编内容 —— 而这一条比搜索更要紧：
+    /// 编一段网页正文出来，模型会把它当成引用过的事实讲给用户，
+    /// 而用户手上有那个链接，会以为我们真读过。
+    async fn web_fetch(&self, _arguments: &serde_json::Value) -> ToolResult {
+        ToolResult::err(
+            "这个 agent 进程上不了网（它没有可打的服务端）。             不要凭记忆编造这个网页的内容 —— 告诉用户这条路在当前环境下不可用。",
+        )
+    }
+
     /// 列 / 读 MCP server 提供的 resource。**由宿主执行** —— hub 在宿主手里。
     ///
     /// # 默认实现是「这个宿主没有 MCP」，不是回一份空清单
@@ -1235,6 +1246,8 @@ impl Turn {
             }
         } else if spec.name == "web_search" {
             host.web_search(&call.arguments).await
+        } else if spec.name == "web_fetch" {
+            host.web_fetch(&call.arguments).await
         } else if spec.name == "mcp_resource" {
             host.mcp_resource(&call.arguments).await
         } else if tools::is_library_tool(&spec.name) {

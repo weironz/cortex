@@ -35,6 +35,7 @@ mod env;
 mod episodes;
 mod error;
 mod export;
+mod fetch;
 mod gallery;
 mod image;
 mod import;
@@ -62,7 +63,6 @@ mod state;
 mod sync;
 mod sync_bus;
 mod sync_payload;
-mod url_guard;
 mod watch;
 mod ws;
 

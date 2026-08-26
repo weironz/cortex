@@ -257,6 +257,22 @@ impl Remote {
             .map_err(|e| CortexError::Invalid(format!("解析搜索结果失败：{e}")))
     }
 
+    /// `POST /fetch` —— 把一个网页读回来。key 在服务端，见 `cortex_agentd::fetch`。
+    ///
+    /// `offset` 用来分段读长页面：上一次结果里的 `next_offset` 原样传回来。
+    pub async fn web_fetch(&self, url: &str, offset: Option<i64>) -> Result<serde_json::Value> {
+        let resp = self
+            .auth(self.http.post(self.url("/fetch")))
+            .json(&serde_json::json!({ "url": url, "offset": offset }))
+            .send()
+            .await
+            .map_err(map_transport)?;
+        let resp = checked(resp).await?;
+        resp.json()
+            .await
+            .map_err(|e| CortexError::Invalid(format!("解析抓取结果失败：{e}")))
+    }
+
     /// `POST /library/search` —— 资料库全文检索。
     ///
     /// 回的是 `[{item_id, item_name, ord, body, rank}]`。**原样透传**给

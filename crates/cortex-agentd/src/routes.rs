@@ -196,6 +196,7 @@ protected_routes! {
     // 联网检索。**不在 /llm 下面** —— 它打的是搜索服务不是模型，
     // 与画廊那条同一个理由
     "/search" [POST] => post(crate::search::search),
+    "/fetch" [POST] => post(crate::fetch::fetch),
     // 资料库 —— 与会话无关的材料。**不在 /images 下面**：图片是产物，
     // 资料库是材料，两者的生命周期与归档方式都不同（相册可重叠，
     // 文件夹排他），见 library 模块头
@@ -512,6 +513,10 @@ async fn health(State(st): State<AgentState>) -> Json<serde_json::Value> {
         // 这个部署配没配联网检索。**客户端据此决定摆不摆那个工具** ——
         // 摆一个必然回 501 的工具比没有它更糟（约束 2）
         "web_search": crate::search::configured(),
+        // 抓取与搜索**共用同一把 key**，所以判据同源。分成两个字段而不是
+        // 一个，是因为客户端摆的是两个工具 —— 哪天抓取换了别家（或者
+        // 需要单独的 key），这里改一处，客户端不用动
+        "web_fetch": crate::search::configured(),
         "callback": st.runner().callback(),
         "callback_visible_to_sandbox": callback_visible,
         "database": database,
