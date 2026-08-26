@@ -361,6 +361,39 @@ fn can_generate_images(llm: &cortex_llm::LlmClient) -> bool {
     llm.provider_id() == crate::llm::PROXY_PROVIDER_ID
 }
 
+/// 把历史轮次铺成消息。
+///
+/// # 不变量：**只产出纯文本消息，永远不带 Image 块**
+///
+/// 这不只是省钱（历史附件每轮重取重编码会打穿前缀缓存），**它还是这一侧
+/// 唯一挡住一整类 bug 的东西**，而那类 bug 在同类产品里至今开着 issue：
+///
+/// `LlmClient::ensure_can_see` 数的是**整个消息列表**的图。所以只要历史
+/// 里带着图，一条「贴过图的会话」在切到看不懂图的模型之后，**后续每一轮
+/// 纯文本对话都会被拦下** —— 用户完全不知道为什么，也没有任何出路，
+/// 因为那张图已经在历史里了，删不掉。
+///
+/// （Chatbox 的 #2496 / #2580 至今 OPEN 就是这个；Open WebUI 那道发送前
+/// 检查只弹 toast 不真拦，也是被它逼的；Cherry Studio 专门写了个
+/// `omittedMediaNote()` 才绕开。我们躲开它靠的是两条：历史轮次在类型上
+/// 就是 [`cortex_core::history::HistoryTurn`]（`is_user` + `text`，装不下
+/// 图），以及这里只调 `with_text`。）
+///
+/// ⚠️ 所以「让模型看得见历史里的图」听起来像个改进，实际是把上面那一整类
+/// bug 一起搬进来。真要做，得先解决「切到瞎模型之后这条会话怎么办」。
+fn history_messages(turns: &[cortex_core::history::HistoryTurn]) -> Vec<cortex_llm::Message> {
+    turns
+        .iter()
+        .map(|t| {
+            if t.is_user {
+                cortex_llm::Message::user().with_text(&t.text)
+            } else {
+                cortex_llm::Message::assistant().with_text(&t.text)
+            }
+        })
+        .collect()
+}
+
 /// 没绑工作区那条会话的 `Turn`：沙箱封闭，但**外来工具照给**。
 ///
 /// # 为什么必须现搭，而不是启动时建一份存进 `Engine`
@@ -879,17 +912,7 @@ impl Engine {
         let bridge_tx = tx.clone();
         let bridge = tokio::spawn(async move { bridge_events(&mut arx, &bridge_tx).await });
 
-        let mut messages: Vec<cortex_llm::Message> = history
-            .turns
-            .iter()
-            .map(|t| {
-                if t.is_user {
-                    cortex_llm::Message::user().with_text(&t.text)
-                } else {
-                    cortex_llm::Message::assistant().with_text(&t.text)
-                }
-            })
-            .collect();
+        let mut messages: Vec<cortex_llm::Message> = history_messages(&history.turns);
         if history.dropped > 0 {
             tracing::info!(
                 session = %req.session_id,
@@ -1757,6 +1780,55 @@ impl ToolHost for LocalHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **贴过图的会话，切到看不懂图的模型之后还能继续聊。**
+    ///
+    /// 这条盯的是 [`history_messages`] 那条不变量，而它挡住的是一整类在
+    /// 同类产品里至今没修好的 bug（chatbox#2496 / #2580 仍 OPEN）：
+    /// `ensure_can_see` 数的是整个消息列表的图，所以历史里只要留着一张，
+    /// 这条会话在瞎模型下**每一轮都会被拦**，包括纯文本那些 —— 而用户
+    /// 没有任何出路，图已经在历史里了。
+    ///
+    /// 断言直接打在 `ensure_can_see` 上而不是「数一数有几张图」：判据要与
+    /// 线上真正拦人的那一处是同一个，否则改了那边这边还绿。
+    #[test]
+    fn 历史里贴过图_之后用瞎模型继续纯文本对话不会被拦() {
+        use cortex_core::history::HistoryTurn;
+
+        // 一条「那一轮带过图」的历史 —— 文本里带的是 history_note 的注记，
+        // 与 remote.rs 真正塞进去的形状一致
+        let turns = vec![
+            HistoryTurn {
+                is_user: true,
+                text: "看看这张图
+[当时附带的文件：设计稿.png（image/png）]"
+                    .to_owned(),
+            },
+            HistoryTurn {
+                is_user: false,
+                text: "这是一张设计稿。".to_owned(),
+            },
+        ];
+        let mut messages = history_messages(&turns);
+        // 这一轮用户只说了句话，没有任何附件
+        messages.push(cortex_llm::Message::user().with_text("那第二点呢"));
+
+        let cfg = cortex_core::config::LlmConfig {
+            provider: "deepseek".to_owned(),
+            // 定义里明写 vision:false —— 也就是会真的拦人的那一档
+            model: "deepseek-v4-pro".to_owned(),
+            cheap_model: "deepseek-v4-flash".to_owned(),
+            base_url: None,
+        };
+        let client = cortex_llm::LlmClient::from_config(&cfg, "k").expect("应构造成功");
+        assert!(
+            !client.supports_vision(),
+            "这条测试要的就是一个**已知看不懂图**的模型；             deepseek-v4-pro 哪天出了 vision 版本，换一个仍然 vision:false 的来测"
+        );
+        client
+            .ensure_can_see(client.model(), &messages)
+            .expect("历史里贴过图，不该让之后每一轮纯文本对话都失败");
+    }
 
     /// 造一个假的外来工具。名字与 `ToolSpec::external` 出来的同形。
     fn fake_external(server: &str, tool: &str) -> cortex_agent::ToolSpec {
