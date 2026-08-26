@@ -186,6 +186,24 @@ class _InteractiveTerminalState extends State<InteractiveTerminal> {
           _terminal,
           focusNode: _focus,
           theme: terminalTheme(theme),
+          // ⚠️ **桌面上必须走硬件键盘那条路，否则一个字都敲不进去。**
+          //
+          // xterm 默认（`false`）把可打印字符交给**平台文本输入通道**
+          // （`TextInput.attach`，为手机软键盘设计的那条）：`_handleKeyEvent`
+          // 对普通字母一律回 `ignored`，字要靠 `TextInputClient` 的编辑状态
+          // 变化才送进来。桌面端那条通道在这里不出字，于是症状极具误导性 ——
+          // 终端画得好好的、输出在流、resize 也生效，只有敲字没反应，
+          // 看起来像焦点问题（我第一轮就是这么猜错的）。
+          //
+          // `true` 换成 `CustomKeyboardListener`：先让终端认功能键
+          // （方向键、Ctrl-C、F1…），认不出且 `event.character` 有值就当
+          // 普通字符送出去。
+          //
+          // 代价说清楚：这条路**不过 IME**，所以终端里打不了中文。
+          // 这个构建只在桌面上出现（Web 端的终端页签是只读的命令记录），
+          // 而 shell 命令基本是 ASCII —— 拿「中文注释敲不进 PowerShell」
+          // 换「一个字都敲不进去」是划算的。真要中文，先粘贴到别处。
+          hardwareKeyboardOnly: true,
           textStyle: const TerminalStyle(
             fontSize: 12,
             fontFamily: 'JetBrains Mono',

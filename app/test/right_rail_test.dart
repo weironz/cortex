@@ -25,8 +25,10 @@ import 'package:cortex_app/features/workspace/right_rail.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/chat_controller.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:xterm/xterm.dart';
 
 class _MockConfig extends AppConfigNotifier {
   @override
@@ -223,6 +225,104 @@ void main() {
         terminalTheme(CortexTheme.light()).red,
         terminalTheme(CortexTheme.dark()).red,
         reason: '红在两套里本来就同一个值 —— 这里钉的是「它不跟着 primary 变」',
+      );
+    });
+  });
+
+  /// **终端要真的能敲进去。**
+  ///
+  /// # 这条测试为什么必须存在
+  ///
+  /// 敲不进去这件事有一个**极具误导性的症状**：终端画得好好的、shell 的
+  /// 首屏在流、resize 也生效（说明 WS 双向都通），只有键盘没反应。看起来
+  /// 像焦点问题，而实际是 xterm 默认把可打印字符交给**平台文本输入通道**
+  /// （为手机软键盘设计的那条），`_handleKeyEvent` 对普通字母一律回
+  /// `ignored`。桌面上那条通道不出字。
+  ///
+  /// 我按「焦点」猜过一轮，改完仍然敲不进去 —— 一次白跑的实机验证。
+  /// 这条测试把判据从「看起来对不对」变成「字节有没有出来」。
+  ///
+  /// 它直接驱动 `TerminalView`（不是整条右栏）：这里要钉的是**键怎么走到
+  /// 终端**，而 WS、PTY、会话那几层各有自己的测试，混进来只会让这条在
+  /// 别处改动时变红。
+  group('终端敲得进字', () {
+    /// 起一个只连着 `onOutput` 的终端，返回它吐出去的字节。
+    Future<List<String>> pumpTerminal(WidgetTester tester) async {
+      final out = <String>[];
+      final terminal = Terminal()..onOutput = out.add;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: TerminalView(
+              terminal,
+              autofocus: true,
+              hardwareKeyboardOnly: true,
+              theme: terminalTheme(CortexTheme.light()),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      return out;
+    }
+
+    testWidgets('敲一个普通字母，它出现在发给 shell 的字节里', (tester) async {
+      final out = await pumpTerminal(tester);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyL);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyS);
+      await tester.pump();
+
+      expect(
+        out.join(),
+        'ls',
+        reason:
+            '普通字母没被送出去 —— 这正是「终端画出来了、输出在流、'
+            '但敲什么都没反应」那个症状。默认那条路要平台文本输入通道给字，'
+            '而桌面上它不给',
+      );
+    });
+
+    testWidgets('回车与控制键也要走同一条路出去', (tester) async {
+      final out = await pumpTerminal(tester);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(out.join(), '\r', reason: '回车没发出去的话，命令永远不会被执行');
+
+      out.clear();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      expect(out.join(), '\x03', reason: 'Ctrl-C 是终端里最要紧的一个键 —— 跑飞了的命令只能靠它停下');
+    });
+
+    /// ⚠️ **上面两条钉的是判据，这一条钉的是接线。**
+    ///
+    /// 它们自己造 `TerminalView`，所以把 `InteractiveTerminal` 里那一行
+    /// 删掉照样全绿 —— 而那一行正是修复本身。同一个「函数对、接线断」的
+    /// 形状这个仓库已经吃过三次。
+    testWidgets('右栏那个终端真的用了这条路，不只是测试里用了', (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: InteractiveTerminal(
+              // 连不上的地址：这条用例只看**建出来的部件长什么样**，
+              // 而那一帧在连接失败之前就画出来了
+              origin: 'http://127.0.0.1:1',
+              sessionId: '01M0SESSIONAAAAAAAAAAAAAAA',
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final view = tester.widget<TerminalView>(find.byType(TerminalView));
+      expect(
+        view.hardwareKeyboardOnly,
+        isTrue,
+        reason: '右栏的终端没走硬件键盘那条路 —— 那就是一个字都敲不进去的终端',
       );
     });
   });
