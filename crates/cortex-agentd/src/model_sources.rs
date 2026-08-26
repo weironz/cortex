@@ -143,6 +143,101 @@ pub struct ModelSource {
     /// 不带过去的话，用户在设置里明说了「这个模型能看图」、界面也画上了
     /// 徽标，发出去仍被我们自己拦下 —— 那个开关整个是假的。
     pub caps_overrides: std::collections::HashMap<String, cortex_llm::caps::CapsOverride>,
+    /// 最近一次「获取模型列表」时供应商接口自己报的能力，模型 id → 能力位。
+    ///
+    /// ⚠️ **与 `caps_overrides` 一样必须跟着这条来源走完全程。** 它排在
+    /// 覆盖之后、目录之前（见 `cortex_llm::caps::resolve`），而读它的地方
+    /// 有三处：设置页、聊天的模型选择器、自动档挑模型。少喂给其中任何
+    /// 一处，那一处就退回到目录 —— 症状是同一个模型在三个界面上说三句话。
+    pub probed_caps: std::collections::HashMap<String, cortex_llm::caps::ProbedCaps>,
+}
+
+/// 一条来源上「谁说了什么」—— 用户按下的覆盖 + 接口报的探测 + 是不是
+/// 自定义端点。三样一起走，**因为漏掉其中任何一样都不会报错**。
+///
+/// # 为什么是一个结构，而不是三个参数
+///
+/// 这三样要喂给 `cortex_llm::caps::resolve` 的地方有三处：设置页、
+/// 聊天的模型选择器（`/llm/models`）、自动档挑模型。散成三个参数时，
+/// 每一处都可以「只传两个、第三个填个空表」而编译通过 —— 而那正是
+/// 2026-08-26 连着犯两次的错：先是覆盖没接到选择器上，接着是探测。
+/// 症状一模一样：另外那处看起来完全正常。
+///
+/// 所以字段私有，只有两条路造得出来：[`Self::of`]（从一条真来源，
+/// 三样一次带齐）与 [`Self::none`]（明写「这里没有任何来源上下文」）。
+/// 想少带一样，得先说服自己写下 `none()`。
+#[derive(Clone, Copy)]
+pub struct SourceCaps<'a> {
+    overrides: Option<&'a std::collections::HashMap<String, cortex_llm::caps::CapsOverride>>,
+    probed: Option<&'a std::collections::HashMap<String, cortex_llm::caps::ProbedCaps>>,
+    custom_endpoint: bool,
+}
+
+impl<'a> SourceCaps<'a> {
+    /// 从一条来源上取 —— **三样一次带齐**。
+    #[must_use]
+    pub fn of(src: &'a ModelSource) -> Self {
+        Self {
+            overrides: Some(&src.caps_overrides),
+            probed: Some(&src.probed_caps),
+            custom_endpoint: is_custom_endpoint(&src.provider, src.base_url.as_deref()),
+        }
+    }
+
+    /// 没有来源上下文。
+    ///
+    /// 用在**部署那条**：它的 key 与型号都在服务端环境变量里，改不了能力
+    /// （`set_caps` 明确拒绝），也不走「获取模型列表」—— 两份都没有，
+    /// 且不该有。别拿它当「我懒得传」的捷径。
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            overrides: None,
+            probed: None,
+            custom_endpoint: false,
+        }
+    }
+
+    /// 手上只有几张散表时（列来源那条路直接从数据库行反序列化出来，
+    /// 没有 [`ModelSource`] 可用）。**三样仍然一次给全。**
+    #[must_use]
+    pub fn from_parts(
+        overrides: &'a std::collections::HashMap<String, cortex_llm::caps::CapsOverride>,
+        probed: &'a std::collections::HashMap<String, cortex_llm::caps::ProbedCaps>,
+        custom_endpoint: bool,
+    ) -> Self {
+        Self {
+            overrides: Some(overrides),
+            probed: Some(probed),
+            custom_endpoint,
+        }
+    }
+
+    #[must_use]
+    pub fn custom_endpoint(&self) -> bool {
+        self.custom_endpoint
+    }
+
+    /// 用户在这个模型上按下的那几位（界面据此标「你改的」）。
+    #[must_use]
+    pub fn overridden(&self, model: &str) -> cortex_llm::caps::CapsOverride {
+        self.overrides
+            .and_then(|m| m.get(model))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 解析一个模型的能力 —— 四级回落那一份，全仓库只此一处。
+    #[must_use]
+    pub fn resolve(&self, provider: &str, model: &str) -> cortex_llm::caps::ResolvedCaps {
+        cortex_llm::caps::resolve(
+            provider,
+            model,
+            self.custom_endpoint,
+            self.overrides.and_then(|m| m.get(model)),
+            self.probed.and_then(|m| m.get(model)),
+        )
+    }
 }
 
 /// 下发给界面的形状 —— **只有尾巴**，永远不回明文。
@@ -265,9 +360,10 @@ impl AgentState {
                 Option<String>,
                 serde_json::Value,
                 serde_json::Value,
+                serde_json::Value,
             ),
         >(
-            "SELECT id, provider, ciphertext, base_url, models, caps_overrides
+            "SELECT id, provider, ciphertext, base_url, models, caps_overrides, probed_caps
                FROM model_sources WHERE enabled ORDER BY created_at",
         )
         .fetch_all(store.pool())
@@ -281,26 +377,29 @@ impl AgentState {
         };
 
         rows.into_iter()
-            .filter_map(|(id, provider, ciphertext, base_url, models, overrides)| {
-                match open(&ciphertext) {
-                    Ok(api_key) => Some(ModelSource {
-                        id,
-                        provider,
-                        api_key,
-                        base_url,
-                        models: serde_json::from_value(models).unwrap_or_default(),
-                        // 读不懂的覆盖丢掉而不是让整条来源失效 —— 一条
-                        // 读不懂的偏好不该把一把好好的 key 一起废掉
-                        caps_overrides: serde_json::from_value(overrides).unwrap_or_default(),
-                    }),
-                    Err(e) => {
-                        // 解不开的那一条跳过而不是整体失败 —— 一条坏行
-                        // 不该让另外几条能用的来源一起失效
-                        tracing::warn!(source = %id, error = ?e, "这条来源的 key 解不开，跳过");
-                        None
+            .filter_map(
+                |(id, provider, ciphertext, base_url, models, overrides, probed)| {
+                    match open(&ciphertext) {
+                        Ok(api_key) => Some(ModelSource {
+                            id,
+                            provider,
+                            api_key,
+                            base_url,
+                            models: serde_json::from_value(models).unwrap_or_default(),
+                            // 读不懂的覆盖丢掉而不是让整条来源失效 —— 一条
+                            // 读不懂的偏好不该把一把好好的 key 一起废掉
+                            caps_overrides: serde_json::from_value(overrides).unwrap_or_default(),
+                            probed_caps: serde_json::from_value(probed).unwrap_or_default(),
+                        }),
+                        Err(e) => {
+                            // 解不开的那一条跳过而不是整体失败 —— 一条坏行
+                            // 不该让另外几条能用的来源一起失效
+                            tracing::warn!(source = %id, error = ?e, "这条来源的 key 解不开，跳过");
+                            None
+                        }
                     }
-                }
-            })
+                },
+            )
             .collect()
     }
 
@@ -334,16 +433,17 @@ impl AgentState {
                 Option<String>,
                 serde_json::Value,
                 serde_json::Value,
+                serde_json::Value,
             ),
         >(
-            "SELECT id, provider, ciphertext, base_url, models, caps_overrides
+            "SELECT id, provider, ciphertext, base_url, models, caps_overrides, probed_caps
                FROM model_sources WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(store.pool())
         .await
         .ok()??;
-        let (id, provider, ciphertext, base_url, models, overrides) = row;
+        let (id, provider, ciphertext, base_url, models, overrides, probed) = row;
         let api_key = open(&ciphertext).ok()?;
         Some(ModelSource {
             id,
@@ -352,6 +452,7 @@ impl AgentState {
             base_url,
             models: serde_json::from_value(models).unwrap_or_default(),
             caps_overrides: serde_json::from_value(overrides).unwrap_or_default(),
+            probed_caps: serde_json::from_value(probed).unwrap_or_default(),
         })
     }
 }
@@ -575,9 +676,7 @@ pub async fn list(
                     catalog: describe_all_with(
                         &provider,
                         &catalog_ids,
-                        custom,
-                        &overrides,
-                        &probed,
+                        SourceCaps::from_parts(&overrides, &probed, custom),
                     ),
                     id,
                     provider,
@@ -1272,13 +1371,12 @@ pub(crate) fn describe_all_with_for_test(
     names: &[String],
     custom_endpoint: bool,
     overrides: &std::collections::HashMap<String, cortex_llm::caps::CapsOverride>,
+    probed: &std::collections::HashMap<String, cortex_llm::caps::ProbedCaps>,
 ) -> Vec<FetchedModel> {
     describe_all_with(
         provider,
         names,
-        custom_endpoint,
-        overrides,
-        &Default::default(),
+        SourceCaps::from_parts(overrides, probed, custom_endpoint),
     )
 }
 
@@ -1291,13 +1389,19 @@ pub(crate) fn describe_all_for_test(
     describe_all(provider, names, custom_endpoint)
 }
 
+/// 没有来源上下文的那一档 —— 只有目录与供应商定义说得上话。
+///
+/// ⚠️ `custom_endpoint` 仍然要给：它不是「谁说了什么」，是这条来源指着
+/// 哪儿，而生图那两位靠它判断。
 fn describe_all(provider: &str, names: &[String], custom_endpoint: bool) -> Vec<FetchedModel> {
     describe_all_with(
         provider,
         names,
-        custom_endpoint,
-        &Default::default(),
-        &Default::default(),
+        SourceCaps {
+            overrides: None,
+            probed: None,
+            custom_endpoint,
+        },
     )
 }
 
@@ -1306,23 +1410,11 @@ fn describe_all(provider: &str, names: &[String], custom_endpoint: bool) -> Vec<
 /// ⚠️ **能力解析本身不在这里** —— 它在 `cortex_llm::caps::resolve`，
 /// 与 `/llm/models` 共用同一个函数。此前这两处各算一遍，注释里写着
 /// 「一字不差」，而它已经漂过一次（回落定义只加在了这一份）。
-fn describe_all_with(
-    provider: &str,
-    names: &[String],
-    custom_endpoint: bool,
-    overrides: &std::collections::HashMap<String, cortex_llm::caps::CapsOverride>,
-    probed: &std::collections::HashMap<String, cortex_llm::caps::ProbedCaps>,
-) -> Vec<FetchedModel> {
+fn describe_all_with(provider: &str, names: &[String], caps: SourceCaps<'_>) -> Vec<FetchedModel> {
     names
         .iter()
         .map(|id| {
-            let c = cortex_llm::caps::resolve(
-                provider,
-                id,
-                custom_endpoint,
-                overrides.get(id),
-                probed.get(id),
-            );
+            let c = caps.resolve(provider, id);
             FetchedModel {
                 id: id.clone(),
                 display_name: c.display_name,
@@ -1331,11 +1423,11 @@ fn describe_all_with(
                 vision: c.vision,
                 image_output: c.image_output,
                 image_unwired: c.image_unwired,
-                custom_endpoint,
+                custom_endpoint: caps.custom_endpoint(),
                 reasoning: c.reasoning,
                 input_micros_per_mtok: c.input_micros_per_mtok,
                 output_micros_per_mtok: c.output_micros_per_mtok,
-                overridden: overrides.get(id).cloned().unwrap_or_default(),
+                overridden: caps.overridden(id),
             }
         })
         .collect()

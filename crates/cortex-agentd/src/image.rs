@@ -342,6 +342,7 @@ mod tests {
             base_url: None,
             models: models.iter().map(|m| (*m).to_string()).collect(),
             caps_overrides: Default::default(),
+            probed_caps: Default::default(),
         }
     }
 

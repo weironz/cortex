@@ -30,7 +30,10 @@
 //! 什么都做不了。回落到默认模型至少给了供应商一个机会（它可能有比目录
 //! 记录的更大的上下文）。WARN 让运维看得见「自动档在这个部署上挑不出东西」。
 
-use cortex_llm::catalog::{self, ModelInfo};
+use cortex_llm::caps::ResolvedCaps;
+use cortex_llm::catalog;
+
+use crate::model_sources::SourceCaps;
 // 走 cortex-llm 转出来的那份 —— agentd 不直接依赖 cortex-providers，
 // 那条注释在它的 Cargo.toml 里（依赖解析会当场失败）
 use cortex_llm::{Message, MessageContent};
@@ -84,65 +87,103 @@ impl TurnShape {
     }
 
     /// 这个模型干得了这一轮吗。
-    fn fits(&self, m: &ModelInfo) -> bool {
-        if self.needs_tools && !m.tool_call {
+    ///
+    /// # ⚠️ 这里「不知道」= 不选，与发送闸门的三态**故意相反**
+    ///
+    /// `ensure_can_see` 那边 `vision == None` 放行，理由是那个模型是**用户
+    /// 自己选的**：我们不知道它行不行，没有立场替他拦下。
+    ///
+    /// 自动档反过来 —— 挑的是**我们**。在一堆有确凿把握的候选里挑一个
+    /// 我们心里没底的，出了事是我们替他选错了；而排除它的代价只是这一轮
+    /// 少了一个候选。模块头那句「自动档挑中一个不知道支不支持工具的模型，
+    /// 正是这一档最不该做的事」说的就是这一条。
+    ///
+    /// 实践上这两态很少出现在这里：能进到比价这一步的模型都得有价目，
+    /// 而价目只有目录说得出，说得出价目的它也说得出能力。真正会走到
+    /// 「不知道」的是**用户只按了一位覆盖**的那种（比如只说了「能看图」，
+    /// 没说工具）—— 那时按「不知道 = 不选」处理是对的。
+    fn fits(&self, c: &ResolvedCaps) -> bool {
+        if self.needs_tools && c.tool_call != Some(true) {
             return false;
         }
-        if self.has_image && !m.vision {
+        if self.has_image && c.vision != Some(true) {
             return false;
         }
         // 留出回答的余量：上下文是「输入 + 输出」共用的，顶着输入上限挑
         // 会让模型没地方写答案
-        m.context >= self.input_tokens.saturating_add(RESERVE_FOR_OUTPUT)
+        c.context
+            .is_some_and(|ctx| ctx >= self.input_tokens.saturating_add(RESERVE_FOR_OUTPUT))
     }
 }
 
 /// 给回答留的余量（token）。
 const RESERVE_FOR_OUTPUT: usize = 8_000;
 
-/// 在 `allowed` 里挑一个能干这活、且最便宜的。
+/// 在 `allowed` 里挑一个能干这活、且最便宜的，**连分数一起给**。
 ///
 /// `None` = 一个都不合适。调用方应当回落到部署默认并记一条 WARN。
-#[must_use]
-pub fn pick(provider: &str, allowed: &[String], shape: TurnShape) -> Option<String> {
-    cheapest(provider, allowed, shape).map(|(_, id)| id)
-}
-
-/// 同上，但**连分数一起给**。
 ///
-/// 跨来源比价要用它：`pick` 只回名字，而两条来源各自的赢家还得再比一次。
 /// 分数是「一次典型调用」的微元成本，不同供应商之间可直接比 ——
-/// 它们的价目在目录里是同一个单位（美元微元 / 百万 token）。
+/// 它们的价目在目录里是同一个单位（美元微元 / 百万 token）。跨来源比价
+/// 要用到它：每条来源各自的赢家还得再比一次。
+///
+/// # 只回名字的那个包装（`pick`）删掉了
+///
+/// 它的唯一调用点是 `resolve_model` 里那支自动档，而那支本身就是第二份
+/// 实现（见那里的注释）。留着一个没人调的 `pick`，只会让下一个人以为
+/// 「挑模型」有两个入口可选，而其中一个不接受来源上下文。
 #[must_use]
-pub fn cheapest(provider: &str, allowed: &[String], shape: TurnShape) -> Option<(i64, String)> {
-    let mut best: Option<(i64, ModelInfo)> = None;
+pub fn cheapest(
+    provider: &str,
+    allowed: &[String],
+    shape: TurnShape,
+    caps: SourceCaps<'_>,
+) -> Option<(i64, String)> {
+    let mut best: Option<(i64, String)> = None;
     for name in allowed {
-        // 目录里查不到的**跳过**，不是当成「便宜」。
-        // 当成便宜的话，一个我们一无所知的模型会永远赢 —— 而自动档挑中
-        // 一个不知道支不支持工具的模型，正是这一档最不该做的事。
-        let Some(info) = catalog::lookup(provider, name) else {
-            continue;
-        };
-        if !shape.fits(&info) {
+        let c = caps.resolve(provider, name);
+        if !shape.fits(&c) {
             continue;
         }
-        // 没有价目的同样跳过：比价的时候把「不知道多少钱」当成 0，
-        // 会让它稳赢每一次
-        let Some(cost) = info.cost else { continue };
+        // 没有价目的**跳过**，不是当成便宜。
+        //
+        // 价目只有目录说得出（`resolve` 不让用户编价格），所以这一条同时
+        // 顶替了从前那句「目录里查不到的跳过」：查不到就没有价目。
+        // 当成 0 的话，一个我们一无所知的模型会稳赢每一次比价。
+        //
+        // ⚠️ 这也意味着**光按覆盖开关救不活一个目录不认识的模型** ——
+        // 用户说它能看图，自动档仍然不会选它，因为不知道它多少钱，
+        // 而这一档的全部意义就是比价。他指名选它照常能用。
+        //
+        // 价目仍然直接问目录，而不是从 `ResolvedCaps` 上那两个字段拼回一个
+        // `ModelCost`：算钱的公式（含缓存那两档）只该有一份，拼一个残缺的
+        // 结构出来等于在这里复制它的一部分。
+        let Some(cost) = catalog::lookup(provider, name).and_then(|i| i.cost) else {
+            continue;
+        };
         // 按「一次典型调用」比价，而不是只比输入价：输出通常比输入贵
         // 好几倍，只比输入会挑中一个输出极贵的
         let score = cost.cost_micros(shape.input_tokens as i64, 1_000);
         match &best {
             Some((best_score, _)) if *best_score <= score => {}
-            _ => best = Some((score, info)),
+            _ => best = Some((score, name.clone())),
         }
     }
-    best.map(|(score, m)| (score, m.id))
+    best
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cortex_llm::caps::{CapsOverride, ProbedCaps};
+    use std::collections::HashMap;
+
+    /// 不带任何来源上下文地挑一个 —— 「用户什么都没改过」那一档。
+    ///
+    /// 覆盖生效与否单独有用例，见下面那一组。
+    fn picked(provider: &str, allowed: &[String], shape: TurnShape) -> Option<String> {
+        cheapest(provider, allowed, shape, SourceCaps::none()).map(|(_, id)| id)
+    }
 
     fn shape(tools: bool, image: bool, tokens: usize) -> TurnShape {
         TurnShape {
@@ -159,7 +200,7 @@ mod tests {
 
     #[test]
     fn 够用的里面挑最便宜的() {
-        let got = pick("deepseek", &deepseek(), shape(true, false, 1_000));
+        let got = picked("deepseek", &deepseek(), shape(true, false, 1_000));
         assert_eq!(
             got.as_deref(),
             Some("deepseek-v4-flash"),
@@ -173,7 +214,7 @@ mod tests {
         // 造一个一定不支持工具的：目录里查不到的会被跳过，所以用一个
         // 真实存在但不支持工具调用的模型名不好找 —— 这里验的是
         // 「查不到的一律跳过」这条更强的规则
-        let got = pick(
+        let got = picked(
             "deepseek",
             &["这个模型目录里没有".to_owned()],
             shape(true, false, 100),
@@ -187,7 +228,7 @@ mod tests {
 
     #[test]
     fn 装不下就不挑它() {
-        let got = pick("deepseek", &deepseek(), shape(false, false, 50_000_000));
+        let got = picked("deepseek", &deepseek(), shape(false, false, 50_000_000));
         assert_eq!(got, None, "五千万 token 没有模型装得下，该老实回 None");
     }
 
@@ -195,10 +236,149 @@ mod tests {
     fn 给回答留了余量() {
         // 上下文正好等于输入长度时不该被选中 —— 那样模型没地方写答案
         let just_at_limit = 1_000_000 - RESERVE_FOR_OUTPUT + 1;
-        let got = pick("deepseek", &deepseek(), shape(false, false, just_at_limit));
+        let got = picked("deepseek", &deepseek(), shape(false, false, just_at_limit));
         assert_eq!(
             got, None,
             "顶着上限挑会让模型没地方写答案，而那一轮会在**吐了一半字之后**失败"
+        );
+    }
+
+    /// 一位覆盖，模型 id → 那一位。
+    fn over(model: &str, o: CapsOverride) -> HashMap<String, CapsOverride> {
+        let mut m = HashMap::new();
+        m.insert(model.to_owned(), o);
+        m
+    }
+
+    /// **用户按下的那一位要参与挑模型。**
+    ///
+    /// 现场：`deepseek-v4-pro` 在目录里 `vision: false`（那是对的，官方那个
+    /// 确实不看图）。假设用户接的是一条中转站，后面挂的其实是能看图的版本，
+    /// 于是他在设置里按下了「支持视觉」—— 徽标画上了、发送闸门也认了。
+    ///
+    /// 而 2026-08-26 之前，自动档仍然当它看不懂：贴着图开自动档，
+    /// 这个模型永远不会被选中，**而用户以为自己已经把这件事说过了**。
+    #[test]
+    fn 贴了图时_用户按下的视觉那一位算数() {
+        let list = vec!["deepseek-v4-pro".to_owned()];
+        let img = shape(false, true, 1_000);
+
+        assert_eq!(
+            cheapest("deepseek", &list, img, SourceCaps::none()).map(|(_, id)| id),
+            None,
+            "谁都没说它能看图时，带图的这一轮不该挑它 —— 这是改之前就对的那一半"
+        );
+
+        let o = over(
+            "deepseek-v4-pro",
+            CapsOverride {
+                vision: Some(true),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            cheapest(
+                "deepseek",
+                &list,
+                img,
+                SourceCaps::from_parts(&o, &Default::default(), false)
+            )
+            .map(|(_, id)| id)
+            .as_deref(),
+            Some("deepseek-v4-pro"),
+            "用户明说了它能看图，而自动档还在问目录 ——              同一件事判两处，且他没有任何办法发现自动档没听他的"
+        );
+    }
+
+    /// 反方向同样要认：他说不行就是不行。
+    ///
+    /// 这一半比上一半更该有：说「能」而其实不能，供应商会报错，看得见；
+    /// 说「不能」而我们照挑，那一轮悄悄用了一个他明确排除掉的模型。
+    #[test]
+    fn 用户说这个模型不支持工具时_带工具的轮次不挑它() {
+        let list = vec!["deepseek-v4-flash".to_owned()];
+        let with_tools = shape(true, false, 1_000);
+        assert!(
+            cheapest("deepseek", &list, with_tools, SourceCaps::none()).is_some(),
+            "目录说它支持工具 —— 这是对照组"
+        );
+
+        let o = over(
+            "deepseek-v4-flash",
+            CapsOverride {
+                tool_call: Some(false),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            cheapest(
+                "deepseek",
+                &list,
+                with_tools,
+                SourceCaps::from_parts(&o, &Default::default(), false)
+            ),
+            None,
+            "他明说了这个模型调不动工具，自动档还是挑了它 ——              那一轮会流畅地回答而一个工具都不调，界面上看不出区别"
+        );
+    }
+
+    /// 接口报的那份同样参与（OpenRouter / Ollama 说得出）。
+    ///
+    /// 它排在覆盖之后、目录之前 —— 这条钉的是「它真的接进来了」，
+    /// 而不是像 `describe` 从前那样写死传 `None`。
+    #[test]
+    fn 接口探测出来的那份也算数() {
+        let list = vec!["deepseek-v4-pro".to_owned()];
+        let mut probed = HashMap::new();
+        probed.insert(
+            "deepseek-v4-pro".to_owned(),
+            ProbedCaps {
+                vision: Some(true),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            cheapest(
+                "deepseek",
+                &list,
+                shape(false, true, 1_000),
+                SourceCaps::from_parts(&Default::default(), &probed, false)
+            )
+            .map(|(_, id)| id)
+            .as_deref(),
+            Some("deepseek-v4-pro"),
+        );
+    }
+
+    /// ⚠️ **光按覆盖救不活一个目录不认识的模型。**
+    ///
+    /// 这一档的全部意义是比价，而价目只有目录说得出（`resolve` 不让用户
+    /// 编价格，理由见那里）。所以一个查不到价的模型即使能力齐全也不参与
+    /// —— 不然它会以「零成本」稳赢每一次比价。
+    ///
+    /// 这条写下来是因为它读起来像 bug：用户明明按了开关。他指名选它
+    /// 照常能用，只是自动档不替他挑。
+    #[test]
+    fn 目录不认识的模型_按了覆盖也仍然不参与比价() {
+        let list = vec!["某个中转站上的型号".to_owned()];
+        let o = over(
+            "某个中转站上的型号",
+            CapsOverride {
+                vision: Some(true),
+                tool_call: Some(true),
+                context: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            cheapest(
+                "deepseek",
+                &list,
+                shape(true, true, 1_000),
+                SourceCaps::from_parts(&o, &Default::default(), false)
+            ),
+            None,
+            "不知道多少钱的模型进了比价，就会以零成本稳赢每一次"
         );
     }
 

@@ -264,10 +264,22 @@ fn resolve_auto(
 
     // 候选：部署那条 + 全部启用的来源。部署那条排最前，
     // 于是同价时它赢 —— 用户没配 key 时的行为与从前一致
-    let mut candidates: Vec<(Option<&str>, &str, Vec<String>)> = vec![(
+    //
+    // ⚠️ 每条候选都要带上**这条来源上谁说了什么**（用户按下的覆盖、
+    // 接口报的探测）。不带的话这一档只看目录，而用户在设置里改过的那几位
+    // 白改了 —— 见 `model_pick::Caps` 上那段。
+    let mut candidates: Vec<(
+        Option<&str>,
+        &str,
+        Vec<String>,
+        crate::model_sources::SourceCaps<'_>,
+    )> = vec![(
         None,
         server.provider_id(),
         cortex_llm::provider::allowed_models(server.provider_id()).unwrap_or_default(),
+        // 部署那条改不了能力（`set_caps` 明确拒绝），也不走「获取模型
+        // 列表」—— 两份都没有，且不该有
+        crate::model_sources::SourceCaps::none(),
     )];
     for s in sources {
         let list = if s.models.is_empty() {
@@ -275,12 +287,17 @@ fn resolve_auto(
         } else {
             s.models.clone()
         };
-        candidates.push((Some(s.id.as_str()), s.provider.as_str(), list));
+        candidates.push((
+            Some(s.id.as_str()),
+            s.provider.as_str(),
+            list,
+            crate::model_sources::SourceCaps::of(s),
+        ));
     }
 
     let mut best: Option<(i64, Option<String>, String)> = None;
-    for (source, provider, list) in &candidates {
-        let Some((score, model)) = crate::model_pick::cheapest(provider, list, shape) else {
+    for (source, provider, list, caps) in &candidates {
+        let Some((score, model)) = crate::model_pick::cheapest(provider, list, shape, *caps) else {
             continue;
         };
         // 严格小于：同价时先来的赢，也就是部署那条
@@ -508,27 +525,23 @@ fn resolve_model(
 
     match &req.model {
         ModelChoice::Deployment => Ok(fallback()),
+        // ⚠️ **走不到这儿，而这正是要的。**
+        //
+        // 自动档在 `stream` 的最前面就被 [`resolve_auto`] 就地解成了
+        // `Named(...)` 或 `Deployment` —— 那是全仓库**唯一**一份挑模型的
+        // 实现，也是唯一读得到用户覆盖与接口探测的那一份。
+        //
+        // 这里从前有第二份（`model_pick::pick(provider, allowed, …)`）。
+        // 它只在部署那条来源的白名单里挑、且只看目录，与上面那份能给出
+        // 不同的答案 —— 一个静默的分叉，靠「反正到不了」维持正确。
+        // 删掉之后类型仍然要求这一支存在，所以留一条 WARN：真有一天
+        // 有人绕开 `resolve_auto` 调进来，日志里说得出为什么变成了默认模型。
         ModelChoice::Auto => {
-            let shape =
-                crate::model_pick::TurnShape::of(&req.system, &req.messages, req.tools.len());
-            match crate::model_pick::pick(provider, allowed, shape) {
-                Some(name) => Ok(cortex_llm::provider::model_config(provider, &name)
-                    .unwrap_or_else(|_| fallback())),
-                None => {
-                    // 不报错：用户开着自动档，而这一轮恰好没有模型合适。
-                    // 报错等于让他什么都做不了；回落至少给供应商一个机会
-                    // （它的真实上下文可能比目录记的大）。
-                    // WARN 让运维看得见「自动档在这个部署上挑不出东西」
-                    tracing::warn!(
-                        provider,
-                        candidates = allowed.len(),
-                        input_tokens = shape.input_tokens,
-                        needs_tools = shape.needs_tools,
-                        "自动档没挑出模型，回落到部署默认"
-                    );
-                    Ok(fallback())
-                }
-            }
+            tracing::warn!(
+                provider,
+                "自动档没经过 resolve_auto 就走到了 resolve_model —— 回落到部署默认"
+            );
+            Ok(fallback())
         }
         ModelChoice::Named(name) => {
             if !allowed.iter().any(|m| m == name) {
@@ -671,21 +684,7 @@ pub async fn models(
         Vec::new()
     };
     warn_on_reserved(&provider, &deployment);
-    models.extend(describe(
-        &provider,
-        &deployment,
-        crate::model_sources::DEPLOYMENT_SOURCE_ID,
-        "部署提供",
-        // 部署那把 key 是我们付钱，所以它**要**计配额
-        false,
-        // 部署那条走的是服务端自己配的供应商，不是自定义端点
-        false,
-        // 部署那条**没有**用户覆盖，也不该有：它的 key 与型号都在服务端的
-        // 环境变量里，界面上整个齿轮都不画（见 `set_caps` 那道拦截）。
-        // 显式传一份空的，而不是靠一个省掉这个参数的重载 —— 那条捷径正是
-        // 上面文档里说的那个 bug 的来源
-        &Default::default(),
-    ));
+    models.extend(describe(&deployment, &Listing::deployment(&provider)));
 
     // ── 用户自己加的那些 ────────────────────────────────
     for src in st.model_sources(&tenant).await {
@@ -708,16 +707,10 @@ pub async fn models(
         // 覆盖表。合并解析函数只保证了「自动那几档一致」，覆盖是新加的
         // 第五档，它得自己接过来。
         //
-        // 症状最难查的地方在于：设置页看起来完全生效了。
-        models.extend(describe(
-            &src.provider,
-            &list,
-            &src.id,
-            &label,
-            true,
-            crate::model_sources::is_custom_endpoint(&src.provider, src.base_url.as_deref()),
-            &src.caps_overrides,
-        ));
+        // 症状最难查的地方在于：设置页看起来完全生效了。同一个错法
+        // 2026-08-26 犯了第二次（探测那一份），所以现在身份与上下文
+        // 一起由 `Listing::own` 从同一条来源上取 —— 见那里。
+        models.extend(describe(&list, &Listing::own(&src, &label)));
     }
 
     // 自动档要挑得动才摆出来：候选不足两个时它与默认档没有区别
@@ -774,26 +767,83 @@ fn warn_on_reserved(provider: &str, models: &[String]) {
 /// 漂了：2026-08-26 给设置页那份加了「目录查不到回落定义」，这一份没跟上，
 /// 于是同一个模型在设置页说得出「看得懂图」、在聊天的选择器里却是「不知道」，
 /// **而后者才是用户每天点的那个**。
-fn describe(
-    provider: &str,
-    models: &[String],
-    source: &str,
-    source_label: &str,
+/// 一条**要列出来的来源**：它是谁、怎么计费、以及它身上谁说了什么。
+///
+/// # 为什么把这几样绑在一个类型里
+///
+/// 它们从前是 `describe` 的六个平行参数，于是「来源 id 填 `src.id`、
+/// 覆盖却传一份空表」是一个编译得过的组合 —— 而那正是 2026-08-26 连着
+/// 犯的两次错（先漏覆盖，再漏探测）。两次的症状都一样：设置页看起来
+/// 完全正常，只有聊天那个选择器在说另一句话。
+///
+/// 现在只有两条路造得出来，[`Self::deployment`] 与 [`Self::own`]，
+/// 而后者的每一样都从同一条 [`ModelSource`] 上取。填错要先把这个
+/// 构造函数改了。
+struct Listing<'a> {
+    provider: &'a str,
+    source_id: &'a str,
+    label: &'a str,
+    /// 这条来源的调用**不占配额**（用户自己的 key，他自己付钱）。
     free_of_quota: bool,
-    custom_endpoint: bool,
-    overrides: &std::collections::HashMap<String, cortex_llm::caps::CapsOverride>,
-) -> Vec<ModelOption> {
+    caps: crate::model_sources::SourceCaps<'a>,
+}
+
+impl<'a> Listing<'a> {
+    /// 部署那条：我们付钱，所以计配额；改不了能力（`set_caps` 明确拒绝）、
+    /// 也不走「获取模型列表」，所以没有任何来源上下文。
+    fn deployment(provider: &'a str) -> Self {
+        Self {
+            provider,
+            source_id: crate::model_sources::DEPLOYMENT_SOURCE_ID,
+            label: "部署提供",
+            free_of_quota: false,
+            caps: crate::model_sources::SourceCaps::none(),
+        }
+    }
+
+    /// 用户自己加的一条。
+    fn own(src: &'a crate::model_sources::ModelSource, label: &'a str) -> Self {
+        Self {
+            provider: &src.provider,
+            source_id: &src.id,
+            label,
+            free_of_quota: true,
+            caps: crate::model_sources::SourceCaps::of(src),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<'a> Listing<'a> {
+    /// 测试专用：直接给一份来源上下文。
+    ///
+    /// 为了测一个判据先造一条完整的 [`ModelSource`]（带 key、端点、型号表）
+    /// 会让用例读起来全是与判据无关的噪音。
+    ///
+    /// ⚠️ 生产代码里**没有**这条路 —— 「身份与上下文必须来自同一条来源」
+    /// 那条保证靠的就是只有 `deployment` / `own` 两个构造函数。
+    fn for_test(provider: &'a str, caps: crate::model_sources::SourceCaps<'a>) -> Self {
+        Self {
+            provider,
+            source_id: "src-1",
+            label: "测试来源",
+            free_of_quota: false,
+            caps,
+        }
+    }
+}
+
+fn describe(models: &[String], listing: &Listing<'_>) -> Vec<ModelOption> {
     models
         .iter()
         .map(|id| {
-            let c =
-                cortex_llm::caps::resolve(provider, id, custom_endpoint, overrides.get(id), None);
+            let c = listing.caps.resolve(listing.provider, id);
             ModelOption {
                 id: id.clone(),
-                source: source.to_owned(),
-                source_label: source_label.to_owned(),
-                free_of_quota,
-                custom_endpoint,
+                source: listing.source_id.to_owned(),
+                source_label: listing.label.to_owned(),
+                free_of_quota: listing.free_of_quota,
+                custom_endpoint: listing.caps.custom_endpoint(),
                 display_name: c.display_name,
                 context: c.context,
                 tool_call: c.tool_call,
@@ -845,9 +895,20 @@ mod caps_parity_tests {
             },
         );
 
-        let chat = super::describe("deepseek", &names, "src-1", "DeepSeek", false, false, &over);
-        let settings =
-            crate::model_sources::describe_all_with_for_test("deepseek", &names, false, &over);
+        let chat = super::describe(
+            &names,
+            &super::Listing::for_test(
+                "deepseek",
+                crate::model_sources::SourceCaps::from_parts(&over, &Default::default(), false),
+            ),
+        );
+        let settings = crate::model_sources::describe_all_with_for_test(
+            "deepseek",
+            &names,
+            false,
+            &over,
+            &Default::default(),
+        );
 
         assert_eq!(
             chat.first().expect("一条").vision,
@@ -867,13 +928,8 @@ mod caps_parity_tests {
         let names = [id.clone()];
 
         let chat = super::describe(
-            "deepseek",
             &names,
-            "src-1",
-            "DeepSeek",
-            false,
-            false,
-            &Default::default(),
+            &super::Listing::for_test("deepseek", crate::model_sources::SourceCaps::none()),
         );
         let settings = crate::model_sources::describe_all_for_test("deepseek", &names, false);
 
@@ -1011,22 +1067,41 @@ mod resolve_tests {
             got.map(|m| m.model_name)
         );
     }
-
+    /// **`resolve_model` 永远不会看到自动档 —— 这是全仓库只有一份挑模型
+    /// 实现的那条保证。**
+    ///
+    /// 从前这里有第二份实现：`resolve_model` 自己调 `model_pick::pick`，
+    /// 只在部署那条的白名单里挑、且只看目录，与 `resolve_auto` 能给出不同
+    /// 的答案。它靠「反正走不到」维持正确 —— 而那种正确没有任何东西守着。
+    ///
+    /// 现在那一支删了，改成 WARN + 回落。于是这条测试也换了钉子：
+    /// 不再是「自动档挑得出模型」（那句话现在由 `resolve_auto` 那几条负责），
+    /// 而是**自动档在进 `resolve_model` 之前必定已经不是自动档了**。
+    ///
+    /// ⚠️ 两种结局都要钉：挑得出时变成 `Named`，挑不出时变成 `Deployment`。
+    /// 只钉前者的话，「挑不出就原样返回 Auto」这个错法会一路滑到
+    /// `resolve_model` 的那条 WARN 上 —— 而用户看到的是默认模型，没有报错。
     #[test]
-    fn 自动档挑得出一个允许列表里的模型() {
+    fn 自动档在_resolve_model_之前就已经被解掉() {
         let c = client();
-        let got = resolve_model(
-            "deepseek",
-            &allowed(),
-            &c,
-            &req(ModelChoice::Auto, ModelTier::Main),
-        )
-        .expect("自动档挑不出来时也该回落，不该失败");
-        let allowed = cortex_llm::provider::allowed_models("deepseek").unwrap();
+
+        let picked = resolve_auto(&c, &[], req(ModelChoice::Auto, ModelTier::Main));
         assert!(
-            allowed.contains(&got.model_name),
-            "自动档挑出来的必须在允许列表里，实际挑了 {}",
-            got.model_name
+            matches!(picked.model, ModelChoice::Named(_)),
+            "部署那条挑得出东西时该是具体型号，实际是 {:?}",
+            picked.model
+        );
+
+        // 挑不出来的一轮：五千万 token，没有模型装得下
+        let huge = LlmStreamRequest {
+            system: "长".repeat(150_000_000),
+            ..req(ModelChoice::Auto, ModelTier::Main)
+        };
+        let fell_back = resolve_auto(&c, &[], huge);
+        assert_eq!(
+            fell_back.model,
+            ModelChoice::Deployment,
+            "一个都挑不出时要落到「跟随部署」，而不是把 Auto 原样丢给下游"
         );
     }
 
@@ -1039,6 +1114,7 @@ mod resolve_tests {
             base_url: None,
             models: models.iter().map(|m| (*m).to_string()).collect(),
             caps_overrides: Default::default(),
+            probed_caps: Default::default(),
         }
     }
 
@@ -1147,11 +1223,20 @@ mod resolve_tests {
         let shape = crate::model_pick::TurnShape::of("你是助手", &[], 0);
 
         // 先证明这条测试有区分度：那条来源确实更便宜
-        let (d_score, _) = crate::model_pick::cheapest("deepseek", &allowed(), shape)
-            .expect("deepseek 该挑得出东西");
-        let (a_score, a_model) =
-            crate::model_pick::cheapest("alibaba", &["qwen-turbo".to_owned()], shape)
-                .expect("alibaba 该挑得出东西");
+        let (d_score, _) = crate::model_pick::cheapest(
+            "deepseek",
+            &allowed(),
+            shape,
+            crate::model_sources::SourceCaps::none(),
+        )
+        .expect("deepseek 该挑得出东西");
+        let (a_score, a_model) = crate::model_pick::cheapest(
+            "alibaba",
+            &["qwen-turbo".to_owned()],
+            shape,
+            crate::model_sources::SourceCaps::none(),
+        )
+        .expect("alibaba 该挑得出东西");
         assert!(
             a_score < d_score,
             "qwen-turbo（{a_score}）该比 deepseek 最便宜那个（{d_score}）还便宜，             不然这条测试分不出「跨来源挑」和「只在部署那条挑」——              目录价目变了的话，换一个更便宜的型号来测"
@@ -1164,6 +1249,52 @@ mod resolve_tests {
             "更便宜的那条来源没被挑中 —— 自动档没看别的来源"
         );
         assert_eq!(got.model, ModelChoice::Named(a_model));
+    }
+
+    /// ⚠️ **用户按下的那几位要真的走到 `resolve_auto` 里。**
+    ///
+    /// 这条与 `model_pick` 那一组不是重复：那边直接喂 `Caps` 给 `cheapest`，
+    /// 证明的是**判据**对；这边走 `resolve_auto`，证明的是**接线**通 ——
+    /// 而 2026-08-26 那次 bug 恰恰是判据对、接线断（`describe` 写死传
+    /// `None`）。只测判据的话，把这里的 `Caps { overrides: ... }` 换回
+    /// `Caps::default()` 照样全绿。
+    ///
+    /// 场景：带图的一轮。deepseek 那几个目录里全是 `vision: false`，
+    /// 所以谁都没说话时自动档挑不出东西、回落到部署默认。用户在自己那条
+    /// 来源上按下「这个能看图」之后，它必须被挑中。
+    #[test]
+    fn 自动档读得到用户在那条来源上按下的能力() {
+        let c = client(); // 部署 = deepseek
+        let with_image = LlmStreamRequest {
+            messages: vec![cortex_llm::Message::user().with_image("ZmFrZQ==", "image/png")],
+            ..req(ModelChoice::Auto, ModelTier::Main)
+        };
+
+        // 对照组：谁都没按过 —— 带图的一轮挑不出东西
+        let bare = [source_of("01M0AAA", "deepseek", &["deepseek-v4-flash"])];
+        let got = resolve_auto(&c, &bare, with_image.clone());
+        assert_eq!(
+            got.model,
+            ModelChoice::Deployment,
+            "目录说这几个都看不懂图，而谁都没说别的 —— 该老实回落"
+        );
+
+        // 用户在他自己那条来源上按下了「这个能看图」
+        let mut mine = source_of("01M0AAA", "deepseek", &["deepseek-v4-flash"]);
+        mine.caps_overrides.insert(
+            "deepseek-v4-flash".to_owned(),
+            cortex_llm::caps::CapsOverride {
+                vision: Some(true),
+                ..Default::default()
+            },
+        );
+        let got = resolve_auto(&c, &[mine], with_image);
+        assert_eq!(
+            got.model,
+            ModelChoice::Named("deepseek-v4-flash".to_owned()),
+            "他明说了这个模型能看图，界面也画上了徽标、闸门也放行了，             而自动档还在问目录 —— 同一件事判两处"
+        );
+        assert_eq!(got.source.as_deref(), Some("01M0AAA"));
     }
 
     /// 同价时部署那条赢 —— 没配 key 的人行为与从前一致。
@@ -1223,6 +1354,7 @@ mod resolve_tests {
             base_url: None,
             models: models.iter().map(|m| (*m).to_string()).collect(),
             caps_overrides: Default::default(),
+            probed_caps: Default::default(),
         }
     }
 
@@ -1287,13 +1419,8 @@ mod resolve_tests {
     fn 目录里的能生图位与保存时的校验用同一个判据() {
         let list = ["qwen-image-plus".to_owned(), "qwen-turbo".to_owned()];
         let out = describe(
-            "alibaba",
             &list,
-            "01M0AAA",
-            "通义千问",
-            true,
-            false,
-            &Default::default(),
+            &Listing::for_test("alibaba", crate::model_sources::SourceCaps::none()),
         );
 
         for m in &out {
@@ -1319,15 +1446,7 @@ mod resolve_tests {
             "deepseek-chat".to_owned(),
             "某个还没进目录的新型号".to_owned(),
         ];
-        let out = describe(
-            "deepseek",
-            &list,
-            "deployment",
-            "部署提供",
-            false,
-            false,
-            &Default::default(),
-        );
+        let out = describe(&list, &Listing::deployment("deepseek"));
 
         let known = out
             .iter()
