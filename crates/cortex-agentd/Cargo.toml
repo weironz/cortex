@@ -49,6 +49,9 @@ cortex-llm.workspace = true
 bollard.workspace = true
 # 反代进容器，以及向 cortexd 要委托凭据
 reqwest.workspace = true
+# `web_fetch` 那道闸要按 URL 规范解析主机（十进制/八进制写的 IP 由它归一，
+# 见 url_guard 里那条测试）。与 cortex-blob / cortex-providers 同一版本
+url = "2.5"
 # 解 / 造 tar：文件端点全部经 docker 的 archive API，而那条端点的载荷就是
 # tar。**不开默认 feature** —— 我们不需要它碰宿主文件系统
 tar = { version = "0.4", default-features = false }
