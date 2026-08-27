@@ -320,8 +320,11 @@ impl Runs {
         // 用 Error 而不是 Done —— 什么都没落库，报成正常完成是句假话
         RunSink::new(run)
             .send(ChatEvent::Error {
-                message: "已停止。这一轮没有写进历史 —— 半截回答留着会被当成事实。                          已经改过的文件不会退回去。"
-                    .into(),
+                message: concat!(
+                    "已停止。这一轮没有写进历史 —— 半截回答留着会被当成事实。",
+                    "已经改过的文件不会退回去。",
+                )
+                .into(),
             })
             .await;
         true

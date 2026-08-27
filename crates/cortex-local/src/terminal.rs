@@ -453,7 +453,10 @@ mod tests {
         assert_eq!(
             terminals.live_for("s1"),
             1,
-            "账是 RAII 的：连接结束（Slot drop）就该销掉，             漏一条提前 return 的路计数就永远偏高"
+            concat!(
+                "账是 RAII 的：连接结束（Slot drop）就该销掉，",
+                "漏一条提前 return 的路计数就永远偏高",
+            )
         );
 
         drop(a);

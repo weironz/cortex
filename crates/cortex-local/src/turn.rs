@@ -1493,8 +1493,12 @@ impl ToolHost for LocalHost {
         }
         if tasks.len() > MAX_AGENTS {
             return cortex_agent::ToolResult::err(format!(
-                "一次最多派 {MAX_AGENTS} 个（收到 {}）。每个子 agent 都是一次完整的多轮对话 ——                  挑最要紧的几件，或者分两次派。",
-                tasks.len()
+                concat!(
+                    "一次最多派 {MAX_AGENTS} 个（收到 {}）。每个子 agent 都是一次完整的多轮对话 —— ",
+                    "挑最要紧的几件，或者分两次派。",
+                ),
+                tasks.len(),
+                MAX_AGENTS = MAX_AGENTS,
             ));
         }
         let Some(turn) = self.subagent_turn.clone() else {
@@ -1518,13 +1522,23 @@ impl ToolHost for LocalHost {
                 let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
                 let host = SubagentHost;
                 let mut messages = vec![cortex_llm::Message::user().with_text(&task)];
-                let system = "你是一个只负责**查清一件事**的子 agent。                     你只有只读工具，不能改文件也不能执行命令。                     查完之后直接给结论 —— 不要复述你做了哪些步骤，                     不要建议下一步做什么（那是主 agent 的事）。                     查不到就说查不到，不要猜。";
+                let system = concat!(
+                    "你是一个只负责**查清一件事**的子 agent。",
+                    "你只有只读工具，不能改文件也不能执行命令。",
+                    "查完之后直接给结论 —— 不要复述你做了哪些步骤，",
+                    "不要建议下一步做什么（那是主 agent 的事）。",
+                    "查不到就说查不到，不要猜。",
+                );
                 let outcome = turn.run(&llm, system, &mut messages, &host, &tx).await;
                 drop(tx);
                 let _ = drain.await;
                 match outcome {
-                    Ok(o) => format!("【子 agent {}：{task}】
-{}", i + 1, o.reply.trim()),
+                    Ok(o) => format!(
+                        "【子 agent {}：{task}】
+{}",
+                        i + 1,
+                        o.reply.trim()
+                    ),
                     // 一个失败不影响别的 —— 照实说是哪一个失败了，
                     // 主 agent 可以决定要不要自己补上那一块
                     Err(e) => format!("【子 agent {}：{task}】没查成：{e}", i + 1),
@@ -1650,7 +1664,12 @@ impl ToolHost for LocalHost {
                             // 后者是模型最容易得出的错误结论，而它会照着那句
                             // 断言往下说 —— 用户明明传过那份文档
                             cortex_agent::ToolResult::ok(format!(
-                                "资料库里没有匹配「{query}」的段落。这是关键词检索：                                 换文档里可能出现的原词再试一次，                                 别据此断定用户没有相关材料。"
+                                concat!(
+                                    "资料库里没有匹配「{query}」的段落。这是关键词检索：",
+                                    "换文档里可能出现的原词再试一次，",
+                                    "别据此断定用户没有相关材料。",
+                                ),
+                                query = query
                             ))
                         } else {
                             cortex_agent::ToolResult::ok(hits.to_string())
@@ -1698,10 +1717,20 @@ impl ToolHost for LocalHost {
             // 取到了但正文是空的。当成成功的话，模型会以为「这个技能没内容」
             // 而退回去照着说明脑补 —— 与取不回来是同一种坏结果
             Ok(_) => cortex_agent::ToolResult::err(format!(
-                "技能「{name}」还没写正文。不要照着目录里那句说明去做 ——                  那只是索引。告诉用户去设置 → 技能里把它补上。"
+                concat!(
+                    "技能「{name}」还没写正文。不要照着目录里那句说明去做 —— ",
+                    "那只是索引。告诉用户去设置 → 技能里把它补上。",
+                ),
+                name = name
             )),
             Err(e) => cortex_agent::ToolResult::err(format!(
-                "取不回技能「{name}」：{e}。                 **不要**照着目录里那句说明去做 —— 那只是索引，不是做法。                 换个做法，或者告诉用户这条技能取不回来。"
+                concat!(
+                    "取不回技能「{name}」：{e}。",
+                    "**不要**照着目录里那句说明去做 —— 那只是索引，不是做法。",
+                    "换个做法，或者告诉用户这条技能取不回来。",
+                ),
+                name = name,
+                e = e
             )),
         }
     }
@@ -1852,7 +1881,14 @@ fn render_page(page: &serde_json::Value) -> String {
     let read_to = offset + i64::try_from(content.chars().count()).unwrap_or(0);
     let progress = match next {
         Some(n) => format!(
-            "这是第 {offset}–{read_to} 个字符，整页共 {total} 个。             还没读完 —— 要接着读，再调一次 web_fetch，url 不变，offset 传 {n}。"
+            concat!(
+                "这是第 {offset}–{read_to} 个字符，整页共 {total} 个。",
+                "还没读完 —— 要接着读，再调一次 web_fetch，url 不变，offset 传 {n}。",
+            ),
+            offset = offset,
+            read_to = read_to,
+            total = total,
+            n = n
         ),
         None if offset > 0 => {
             format!("这是第 {offset}–{read_to} 个字符，也是最后一段（整页共 {total} 个）。")
@@ -1918,7 +1954,10 @@ mod tests {
         let client = cortex_llm::LlmClient::from_config(&cfg, "k").expect("应构造成功");
         assert!(
             !client.supports_vision(),
-            "这条测试要的就是一个**已知看不懂图**的模型；             deepseek-v4-pro 哪天出了 vision 版本，换一个仍然 vision:false 的来测"
+            concat!(
+                "这条测试要的就是一个**已知看不懂图**的模型；",
+                "deepseek-v4-pro 哪天出了 vision 版本，换一个仍然 vision:false 的来测",
+            )
         );
         client
             .ensure_can_see(client.model(), &messages)
@@ -2004,7 +2043,10 @@ mod tests {
         let direct = chat_turn_for(8, &[fake_external("docs", "search")], Caps::default(), &[]);
         assert!(
             !direct.tool_names().contains(&"generate_image"),
-            "直连模式没有可打的服务端。摆出来的话，模型会答应画图然后失败 ——              而那条失败用户什么都做不了。实际：{:?}",
+            concat!(
+                "直连模式没有可打的服务端。摆出来的话，模型会答应画图然后失败 —— ",
+                "而那条失败用户什么都做不了。实际：{:?}",
+            ),
             direct.tool_names()
         );
     }
@@ -2176,7 +2218,10 @@ mod tests {
         let direct = chat_turn_for(8, &[fake_external("docs", "search")], Caps::default(), &[]);
         assert!(
             !direct.tool_names().contains(&"library_search"),
-            "直连模式没有可打的服务端。摆出来的话模型会去查一个查不到的库，             然后告诉用户「你没有这份材料」—— 而他明明传过。实际：{:?}",
+            concat!(
+                "直连模式没有可打的服务端。摆出来的话模型会去查一个查不到的库，",
+                "然后告诉用户「你没有这份材料」—— 而他明明传过。实际：{:?}",
+            ),
             direct.tool_names()
         );
     }
@@ -2198,7 +2243,10 @@ mod tests {
         let none = chat_turn_for(8, &external, Caps::default(), &[]);
         assert!(
             !none.tool_names().contains(&"load_skill"),
-            "一条技能都没有时不该摆这个工具：模型会拿一个提示词里读不到的名字去调，             收到「没有这个技能」—— 一次白白浪费的往返，读起来还像出了故障。实际：{:?}",
+            concat!(
+                "一条技能都没有时不该摆这个工具：模型会拿一个提示词里读不到的名字去调，",
+                "收到「没有这个技能」—— 一次白白浪费的往返，读起来还像出了故障。实际：{:?}",
+            ),
             none.tool_names()
         );
         assert!(
@@ -2660,7 +2708,10 @@ mod tests {
         assert_eq!(edits.confirm_at, Risk::Execute, "写文件不问，执行才问");
         assert!(
             !edits.bypass,
-            "「自动改文件」档下越界仍然要问。开了 bypass 的话，用户以为自己             只省掉了「要不要改这个文件」的点击，实际上把桌面也一起交出去了"
+            concat!(
+                "「自动改文件」档下越界仍然要问。开了 bypass 的话，用户以为自己",
+                "只省掉了「要不要改这个文件」的点击，实际上把桌面也一起交出去了",
+            )
         );
 
         let bypass = policy_for(PermissionMode::Bypass, local);
@@ -2681,7 +2732,10 @@ mod tests {
         let default = policy_for(PermissionMode::Ask, c);
         assert!(
             default.bypass,
-            "容器里的默认档必须免确认 —— 浏览器另一头那个人不会看到、             也答不了容器里弹出来的确认"
+            concat!(
+                "容器里的默认档必须免确认 —— 浏览器另一头那个人不会看到、",
+                "也答不了容器里弹出来的确认",
+            )
         );
         assert_eq!(default.confirm_at, Risk::Execute);
 
@@ -2700,7 +2754,10 @@ mod tests {
         assert_eq!(
             PermissionMode::default(),
             PermissionMode::Ask,
-            "一个从别处抄来的配置、一个忘了传的字段，都不该让 agent 静默             拿到无人值守的执行权"
+            concat!(
+                "一个从别处抄来的配置、一个忘了传的字段，都不该让 agent 静默",
+                "拿到无人值守的执行权",
+            )
         );
     }
 }

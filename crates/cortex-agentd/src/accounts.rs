@@ -992,9 +992,11 @@ pub async fn change_password(
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default();
     let Some(user_id) = st.access_book().resolve(bearer) else {
-        return Err(ApiError::forbidden(
-            "改口令要用**你自己登录换来的** access token。             这次请求带的认不出是谁（多半是部署的预共享 token）——              先 `cortex login`（或在客户端登录一次）再来改。",
-        ));
+        return Err(ApiError::forbidden(concat!(
+            "改口令要用**你自己登录换来的** access token。",
+            "这次请求带的认不出是谁（多半是部署的预共享 token）—— ",
+            "先 `cortex login`（或在客户端登录一次）再来改。",
+        )));
     };
 
     // 限流用登录那道闸，键是用户 id：这条路上「敲得太密」与猜密码是同一个
@@ -1169,7 +1171,12 @@ mod tests {
         let head: String = gate.chars().take(2000).collect();
         assert!(
             !head.contains("user_count"),
-            "register 里又数起用户数了 —— 那通常意味着「第一个账号特殊对待」             这条特例回来了，而它带着一个公网上的抢主人窗口。             第一个账号走的是不经过公网的两条：ensure_admin（.env，监听之前）             与 --create-user"
+            concat!(
+                "register 里又数起用户数了 —— 那通常意味着「第一个账号特殊对待」",
+                "这条特例回来了，而它带着一个公网上的抢主人窗口。",
+                "第一个账号走的是不经过公网的两条：ensure_admin（.env，监听之前）",
+                "与 --create-user",
+            )
         );
     }
 
@@ -1393,7 +1400,10 @@ mod account_schema_tests {
         assert_eq!(
             schema_for_new_account(&id, true).unwrap().as_str(),
             "public",
-            "第一个账号必须落在 public 上。落在别处的话，一个用了几个月才建号的人             建完号一登录，全部记忆消失 —— 而且不报错，会话列表就是空的"
+            concat!(
+                "第一个账号必须落在 public 上。落在别处的话，一个用了几个月才建号的人",
+                "建完号一登录，全部记忆消失 —— 而且不报错，会话列表就是空的",
+            )
         );
         let second = schema_for_new_account(&id, false).unwrap();
         assert!(

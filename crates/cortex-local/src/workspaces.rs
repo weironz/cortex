@@ -196,8 +196,11 @@ impl Workspaces {
     pub fn container_subdir(&self, name: &str) -> Result<String> {
         let root = self.default_root.as_deref().ok_or_else(|| {
             CortexError::Invalid(
-                "这个 agent 没有容器工作区卷（没给 --default-workspace），                 命名工作区只在容器里有意义"
-                    .into(),
+                concat!(
+                    "这个 agent 没有容器工作区卷（没给 --default-workspace），",
+                    "命名工作区只在容器里有意义",
+                )
+                .into(),
             )
         })?;
         let ok = !name.is_empty()
@@ -208,7 +211,11 @@ impl Workspaces {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
         if !ok {
             return Err(CortexError::Invalid(format!(
-                "工作区名 {name:?} 不合格：只允许一段字母数字与 . _ -，                 必须以字母或数字开头，长度 1~64"
+                concat!(
+                    "工作区名 {name:?} 不合格：只允许一段字母数字与 . _ -，",
+                    "必须以字母或数字开头，长度 1~64",
+                ),
+                name = name
             )));
         }
         let dir = std::path::Path::new(root).join(name);
@@ -576,7 +583,10 @@ mod tests {
         let dir = ws.container_subdir("client-a").expect("正常名字该过");
         assert!(
             std::path::Path::new(&dir).is_dir(),
-            "第一次用到时要把目录建出来 —— 不建的话 Sandbox::new 会在             「目录不存在」上失败，而那读起来像配置错了"
+            concat!(
+                "第一次用到时要把目录建出来 —— 不建的话 Sandbox::new 会在",
+                "「目录不存在」上失败，而那读起来像配置错了",
+            )
         );
         assert!(
             std::path::Path::new(&dir).starts_with(vol.path()),

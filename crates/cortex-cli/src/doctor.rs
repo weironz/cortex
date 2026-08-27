@@ -883,7 +883,10 @@ mod tests {
         assert_eq!(c.level, Level::Warn, "版本不一致必须上浮到 Notes 区");
         assert!(
             c.detail.contains("0.1.13") && c.detail.contains("0.1.14"),
-            "**两个版本号都要报出来** —— 只说「不一致」的话，             用户不知道该信哪个、也不知道差多远：{}",
+            concat!(
+                "**两个版本号都要报出来** —— 只说「不一致」的话，",
+                "用户不知道该信哪个、也不知道差多远：{}",
+            ),
             c.detail
         );
         assert!(c.fix.is_some(), "要说清怎么办");
@@ -1098,7 +1101,10 @@ mod tests {
         assert_eq!(
             judge_launch_log(&rows, "P").level,
             Level::Ok,
-            "一天开关几次应用是常态。误报的话所有人的 doctor 都是红的，             于是真红的那次没人看"
+            concat!(
+                "一天开关几次应用是常态。误报的话所有人的 doctor 都是红的，",
+                "于是真红的那次没人看",
+            )
         );
     }
 
@@ -1110,7 +1116,10 @@ mod tests {
         assert_eq!(
             judge_launch_log(&tail, "P").level,
             Level::Ok,
-            "每个正常关一次应用的人都会留下一条 stopped。报警的话，             所有人的 doctor 都是红的，于是没人再看它"
+            concat!(
+                "每个正常关一次应用的人都会留下一条 stopped。报警的话，",
+                "所有人的 doctor 都是红的，于是没人再看它",
+            )
         );
     }
 

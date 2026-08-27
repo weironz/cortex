@@ -256,7 +256,10 @@ mod tests {
         assert_eq!(
             book.why_not_attachable("alice", "S1"),
             Some(("mbp".to_owned(), WhyNot::NotOffered)),
-            "那句 409 要点出是哪一台，以及**为什么**接不了 ——              这台没开远程接入，所以是 NotOffered 而不是「连不上」"
+            concat!(
+                "那句 409 要点出是哪一台，以及**为什么**接不了 —— ",
+                "这台没开远程接入，所以是 NotOffered 而不是「连不上」",
+            )
         );
     }
 
@@ -337,7 +340,10 @@ mod tests {
         assert_eq!(
             book.why_not_attachable("alice", "S1"),
             Some(("mbp".to_owned(), WhyNot::Unreachable)),
-            "问「为什么接不了」时也要看最新那条 —— 虽然这一档实际能接，             这里断言的是它没有回到那条陈旧的 NotOffered 上"
+            concat!(
+                "问「为什么接不了」时也要看最新那条 —— 虽然这一档实际能接，",
+                "这里断言的是它没有回到那条陈旧的 NotOffered 上",
+            )
         );
     }
 

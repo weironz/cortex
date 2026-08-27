@@ -221,7 +221,11 @@ mod tests {
             assert_eq!(
                 l.judge(h, 443),
                 Verdict::Allow,
-                "`*` 该匹配 {h}。写成 `*.` 那套后缀逻辑的话，裸 `*` 会被当成一个                 叫 `*` 的域名，谁都匹配不上 —— 而配置看着像是全放行了"
+                concat!(
+                    "`*` 该匹配 {h}。写成 `*.` 那套后缀逻辑的话，裸 `*` 会被当成一个",
+                    "叫 `*` 的域名，谁都匹配不上 —— 而配置看着像是全放行了",
+                ),
+                h = h,
             );
         }
         assert_eq!(
@@ -238,11 +242,17 @@ mod tests {
 
         assert!(
             !l.names_explicitly("postgres", 5432),
-            "postgres 只是被 `*` 捎上的。算成指名道姓的话，一份 ALLOW=*              就把数据库对沙箱敞开了 —— 而那正是这条防护要拦的东西"
+            concat!(
+                "postgres 只是被 `*` 捎上的。算成指名道姓的话，一份 ALLOW=* ",
+                "就把数据库对沙箱敞开了 —— 而那正是这条防护要拦的东西",
+            )
         );
         assert!(
             l.names_explicitly("host.docker.internal", 8080),
-            "写进清单的内网地址必须放行：那是一次**有意的**配置动作，             开发机上沙箱回调 cortexd 就靠它"
+            concat!(
+                "写进清单的内网地址必须放行：那是一次**有意的**配置动作，",
+                "开发机上沙箱回调 cortexd 就靠它",
+            )
         );
         assert!(
             l.names_explicitly("a.corp.example", 443),
@@ -250,7 +260,10 @@ mod tests {
         );
         assert!(
             !l.names_explicitly("corp.example", 443),
-            "但 `*.corp.example` 不含裸域，这条与 judge 的语义必须一致 ——              两处对同一个域名给出不同答案是最难查的一类不一致"
+            concat!(
+                "但 `*.corp.example` 不含裸域，这条与 judge 的语义必须一致 —— ",
+                "两处对同一个域名给出不同答案是最难查的一类不一致",
+            )
         );
     }
 

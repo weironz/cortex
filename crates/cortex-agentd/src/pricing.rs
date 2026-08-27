@@ -356,7 +356,10 @@ mod tests {
         assert!(total > 0, "目录里有 deepseek-v4-pro 的价目，金额该算得出来");
         assert_eq!(
             unpriced, 1_000_000,
-            "没有价目的那 100 万 token 要单独报出来 ——              按 0 计入的话界面上会写「用了 100 万 token，花了 ¥0.00」"
+            concat!(
+                "没有价目的那 100 万 token 要单独报出来 —— ",
+                "按 0 计入的话界面上会写「用了 100 万 token，花了 ¥0.00」",
+            )
         );
         let unknown = rows
             .iter()

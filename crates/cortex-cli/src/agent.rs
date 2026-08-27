@@ -408,7 +408,10 @@ mod tests {
         assert_eq!(
             args[i + 1],
             "127.0.0.1:0",
-            "猜一个固定端口的失败方式是最坏的那种：连到一个碰巧在听的别的             东西上。实测撞到过 —— 8090 上是另一个应用的 web 客户端"
+            concat!(
+                "猜一个固定端口的失败方式是最坏的那种：连到一个碰巧在听的别的",
+                "东西上。实测撞到过 —— 8090 上是另一个应用的 web 客户端",
+            )
         );
         assert!(
             args.iter().any(|a| a == "--addr-file"),
@@ -429,7 +432,10 @@ mod tests {
         );
         assert_ne!(
             TOKEN_ENV, "CORTEXD_TOKEN",
-            "这两个名字本来就不同（agent 读 CORTEX_TOKEN，CLI 读 CORTEXD_TOKEN）。             写成一样的话，靠继承环境就够了 —— 而实测证明不够"
+            concat!(
+                "这两个名字本来就不同（agent 读 CORTEX_TOKEN，CLI 读 CORTEXD_TOKEN）。",
+                "写成一样的话，靠继承环境就够了 —— 而实测证明不够",
+            )
         );
     }
 
@@ -492,7 +498,10 @@ mod tests {
         assert_eq!(
             find_live(d.path(), "https://x", Some("abc")).await,
             None,
-            "同一台 cortexd，但那个 agent 握的是**另一个账号**的凭据 ——              复用它就是拿别人的身份读写"
+            concat!(
+                "同一台 cortexd，但那个 agent 握的是**另一个账号**的凭据 —— ",
+                "复用它就是拿别人的身份读写",
+            )
         );
     }
 
@@ -506,7 +515,10 @@ mod tests {
         assert_eq!(find_live(d.path(), "https://x", None).await, None);
         assert!(
             !p.exists(),
-            "探不通的指针要顺手删掉，否则每次 `cortex` 都要为一个早就死了的             进程等一次探活超时"
+            concat!(
+                "探不通的指针要顺手删掉，否则每次 `cortex` 都要为一个早就死了的",
+                "进程等一次探活超时",
+            )
         );
     }
 }

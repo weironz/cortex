@@ -1818,7 +1818,13 @@ mod tests {
             assert_eq!(
                 sub.mtime,
                 Some(dir_mtime.cast_signed()),
-                "[{label}] 目录的 mtime 必须来自它自己那条记录（{dir_mtime}），                 不是子项的（{child_mtime}）—— 否则同一个目录的时间会随内容变化乱跳"
+                concat!(
+                    "[{label}] 目录的 mtime 必须来自它自己那条记录（{dir_mtime}），",
+                    "不是子项的（{child_mtime}）—— 否则同一个目录的时间会随内容变化乱跳",
+                ),
+                child_mtime = child_mtime,
+                dir_mtime = dir_mtime,
+                label = label,
             );
             assert_eq!(got.len(), 1, "[{label}] 只列一层，子项不该冒出来");
         }
@@ -1856,7 +1862,10 @@ mod tests {
         assert_eq!(
             by_name(&got, "x.txt").mtime,
             Some(0),
-            "0 原样透出 —— 界面那侧负责把它当成「未知」而不是 1970 年，             这里不做任何加工，因为 tar 里 0 与「字段缺失」本来就分不开"
+            concat!(
+                "0 原样透出 —— 界面那侧负责把它当成「未知」而不是 1970 年，",
+                "这里不做任何加工，因为 tar 里 0 与「字段缺失」本来就分不开",
+            )
         );
     }
 

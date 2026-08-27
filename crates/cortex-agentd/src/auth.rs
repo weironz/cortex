@@ -597,12 +597,19 @@ mod tests {
         };
         assert!(
             !mode.verify(&issued),
-            "刚签发的 access token 与预共享 token 无关，`verify` 当然认不出它 ——              所以 `require` 里**必须**另有一支去问 AccessBook。             这条断言本身不会红；它在这里是为了让下一条的意思清楚"
+            concat!(
+                "刚签发的 access token 与预共享 token 无关，`verify` 当然认不出它 —— ",
+                "所以 `require` 里**必须**另有一支去问 AccessBook。",
+                "这条断言本身不会红；它在这里是为了让下一条的意思清楚",
+            )
         );
         assert_eq!(
             book.resolve(&issued).as_deref(),
             Some("01ABCDEF"),
-            "簿子必须认得出自己签发的 token。这条红了，说明账号体系又断在同一个地方：             登录成功但每个后续请求 401"
+            concat!(
+                "簿子必须认得出自己签发的 token。这条红了，说明账号体系又断在同一个地方：",
+                "登录成功但每个后续请求 401",
+            )
         );
     }
 }

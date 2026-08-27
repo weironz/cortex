@@ -98,7 +98,10 @@ pub fn adopt_pending(base: &Path, user_id: &str) {
     if !target_empty {
         tracing::warn!(
             pending = %pending.display(),
-            "首次离线运行排的队没法自动认领：这个账号已经有本地状态了。             两边合并需要逐条判断归属，不猜 —— 那片目录原地留着"
+            concat!(
+                "首次离线运行排的队没法自动认领：这个账号已经有本地状态了。",
+                "两边合并需要逐条判断归属，不猜 —— 那片目录原地留着",
+            )
         );
         return;
     }

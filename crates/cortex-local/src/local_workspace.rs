@@ -223,7 +223,10 @@ async fn announce_runtime(st: &LocalState, session_id: &str, bound: bool) {
     if let Err(e) = st.remote.set_session_runtime(session_id, bound).await {
         tracing::warn!(
             session = %session_id, error = %e,
-            "执行归属没同步上去：别的设备会把这个会话当成云端会话。             本机这侧不受影响 —— 绑定的权威是 workspaces.json"
+            concat!(
+                "执行归属没同步上去：别的设备会把这个会话当成云端会话。",
+                "本机这侧不受影响 —— 绑定的权威是 workspaces.json",
+            )
         );
     }
 }

@@ -367,7 +367,10 @@ mod tests {
         assert_eq!(
             s.as_str(),
             "u_01arz3ndektsv4rrffq69g5fav",
-            "派生出大写名字的话，search_path 会指向一个不存在的 schema ——              而 Postgres 对此是静默跳过的，实测后果是写进了别人的库"
+            concat!(
+                "派生出大写名字的话，search_path 会指向一个不存在的 schema —— ",
+                "而 Postgres 对此是静默跳过的，实测后果是写进了别人的库",
+            )
         );
         assert!(
             SchemaName::new(s.as_str()).is_ok(),

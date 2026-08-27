@@ -531,11 +531,17 @@ mod base_url_tests {
         assert_eq!(
             api_key_env("ollama").expect("内置定义"),
             "",
-            "免鉴权的供应商必须回空串。回一个假的变量名会让调用方去读它，             而那个变量永远不会被设"
+            concat!(
+                "免鉴权的供应商必须回空串。回一个假的变量名会让调用方去读它，",
+                "而那个变量永远不会被设",
+            )
         );
         assert!(
             !api_key_env("deepseek").expect("内置定义").is_empty(),
-            "要鉴权的供应商必须给出变量名，否则调用方会以为它免鉴权、             用空 key 去调，然后拿一条 401"
+            concat!(
+                "要鉴权的供应商必须给出变量名，否则调用方会以为它免鉴权、",
+                "用空 key 去调，然后拿一条 401",
+            )
         );
     }
 
@@ -583,7 +589,11 @@ mod base_url_tests {
         for empty in ["", "   ", "	"] {
             assert!(
                 Some(str::trim(empty)).filter(|u| !u.is_empty()).is_none(),
-                "空串 {empty:?} 被当成了合法 URL —— 那会让 base_url 变成空，                 而请求会打到一个拼不出来的地址上"
+                concat!(
+                    "空串 {empty:?} 被当成了合法 URL —— 那会让 base_url 变成空，",
+                    "而请求会打到一个拼不出来的地址上",
+                ),
+                empty = empty,
             );
         }
     }
@@ -632,7 +642,10 @@ mod tests {
         // 它的 engine 声明式解析器不认 —— 这正是它必须走专用分支的原因
         assert!(
             config_of("google").is_err(),
-            "google 若能被声明式解析，说明有人把 engine 改成了 openai ——              那条路透不出 thinking 块"
+            concat!(
+                "google 若能被声明式解析，说明有人把 engine 改成了 openai —— ",
+                "那条路透不出 thinking 块",
+            )
         );
         // 但它必须建得起来、也必须列得出模型
         assert!(build_with("google", "k", None).is_ok());
@@ -814,7 +827,11 @@ mod tests {
             // 两家都靠 `dynamic_models` 去实拉
             assert!(
                 !config.models.is_empty() || matches!(name, "ollama" | "custom"),
-                "{name} 一个内置型号都没有 —— 那样选择器里它是空的，                 而用户看不出是「这家没型号」还是「我们漏配了」"
+                concat!(
+                    "{name} 一个内置型号都没有 —— 那样选择器里它是空的，",
+                    "而用户看不出是「这家没型号」还是「我们漏配了」",
+                ),
+                name = name,
             );
         }
     }

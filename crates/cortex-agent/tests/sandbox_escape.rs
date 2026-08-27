@@ -441,8 +441,10 @@ async fn cargo_can_build_with_a_real_dependency_offline() {
     let r = shell(&sb, "env -u CARGO_TARGET_DIR cargo build --offline 2>&1").await;
     assert!(
         r.ok,
-        "带依赖的离线构建在沙箱里失败了。最可能的原因是 $CARGO_HOME 只读\
-         而 cargo 要写 .package-cache —— 那意味着放行清单要重新权衡。输出：{}",
+        concat!(
+            "带依赖的离线构建在沙箱里失败了。最可能的原因是 $CARGO_HOME 只读",
+            "而 cargo 要写 .package-cache —— 那意味着放行清单要重新权衡。输出：{}",
+        ),
         r.content
     );
 }

@@ -1367,14 +1367,23 @@ mod tests {
             let unsupported = [Method::DELETE, Method::PUT, Method::PATCH]
                 .into_iter()
                 .find(|m| !methods.contains(m))
-                .expect(
-                    "DELETE / PUT / PATCH 全被这条路由占了 ——                      换一个它没声明的方法当探针，或给它单独写一条测试",
-                );
+                .expect(concat!(
+                    "DELETE / PUT / PATCH 全被这条路由占了 —— ",
+                    "换一个它没声明的方法当探针，或给它单独写一条测试",
+                ));
             let routed = status_of(&app, &unsupported, &path, Some(&token)).await;
             assert_eq!(
                 routed,
                 StatusCode::METHOD_NOT_ALLOWED,
-                "探针路径 {path}（来自 {pattern}）用未声明的 {unsupported} 打过去得到 {routed}，                 预期 405。405 说明路径匹配上了、只是方法不对；404 说明这条探针根本没打到路由，                 此时下面那条 401 断言是空的"
+                concat!(
+                    "探针路径 {path}（来自 {pattern}）用未声明的 {unsupported} 打过去得到 {routed}，",
+                    "预期 405。405 说明路径匹配上了、只是方法不对；404 说明这条探针根本没打到路由，",
+                    "此时下面那条 401 断言是空的",
+                ),
+                path = path,
+                pattern = pattern,
+                routed = routed,
+                unsupported = unsupported,
             );
 
             for method in *methods {
@@ -1382,7 +1391,14 @@ mod tests {
                 assert_eq!(
                     anon,
                     StatusCode::UNAUTHORIZED,
-                    "{method} {pattern} 在没有凭据时返回了 {anon} 而不是 401 ——                      这条路由不在认证中间件后面。检查它是不是被加进了公开清单，                     或者被加在了 route_layer 之后"
+                    concat!(
+                        "{method} {pattern} 在没有凭据时返回了 {anon} 而不是 401 —— ",
+                        "这条路由不在认证中间件后面。检查它是不是被加进了公开清单，",
+                        "或者被加在了 route_layer 之后",
+                    ),
+                    anon = anon,
+                    method = method,
+                    pattern = pattern,
                 );
 
                 let authed = status_of(&app, method, &path, Some(&token)).await;
@@ -1531,7 +1547,12 @@ mod tests {
             assert_eq!(
                 status,
                 StatusCode::NOT_IMPLEMENTED,
-                "第 {i} 次刷新还在额度内，应当走到「没接库」的 501 而不是 {status} ——                  提前 429 说明实际阈值比 REFRESH_PER_TOKEN 紧"
+                concat!(
+                    "第 {i} 次刷新还在额度内，应当走到「没接库」的 501 而不是 {status} —— ",
+                    "提前 429 说明实际阈值比 REFRESH_PER_TOKEN 紧",
+                ),
+                i = i,
+                status = status,
             );
         }
 
@@ -1539,7 +1560,10 @@ mod tests {
         assert_eq!(
             status,
             StatusCode::TOO_MANY_REQUESTS,
-            "第 {} 次必须 429。仍是 501 说明限流没生效，或检查被排到了碰库之后；             403 会被客户端当成「凭据废了」触发登出 —— 语义必须是「等等再来」",
+            concat!(
+                "第 {} 次必须 429。仍是 501 说明限流没生效，或检查被排到了碰库之后；",
+                "403 会被客户端当成「凭据废了」触发登出 —— 语义必须是「等等再来」",
+            ),
             crate::rate_limit::REFRESH_PER_TOKEN + 1
         );
         assert!(
@@ -1573,7 +1597,10 @@ mod tests {
         assert_eq!(
             status,
             StatusCode::NOT_IMPLEMENTED,
-            "另一把 token 一次都没刷过，应当照常走到「没接库」的 501 ——              被连坐说明键混了（成了全局一份额度，或按连接来源计了）"
+            concat!(
+                "另一把 token 一次都没刷过，应当照常走到「没接库」的 501 —— ",
+                "被连坐说明键混了（成了全局一份额度，或按连接来源计了）",
+            )
         );
     }
 
@@ -1608,7 +1635,10 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::FORBIDDEN,
-            "认不出身份就必须拒。回 501（没接库）说明它先去碰库了 ——              那意味着身份判断排在库后面，而这条路上身份是第一件事"
+            concat!(
+                "认不出身份就必须拒。回 501（没接库）说明它先去碰库了 —— ",
+                "那意味着身份判断排在库后面，而这条路上身份是第一件事",
+            )
         );
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
@@ -1648,7 +1678,10 @@ mod tests {
         assert_ne!(
             status,
             StatusCode::NOT_FOUND,
-            "没有库时该是 501；回 404 说明 handler 在碰库之前就按「没有消息」             早退了 —— 那正是容器取不到工作区名的那个 bug"
+            concat!(
+                "没有库时该是 501；回 404 说明 handler 在碰库之前就按「没有消息」",
+                "早退了 —— 那正是容器取不到工作区名的那个 bug",
+            )
         );
     }
 
@@ -1704,7 +1737,11 @@ mod tests {
                 "/auth/register",
                 "/s/{token}/{filename}",
             ],
-            "免认证清单变了。**每一条都要能单独说出「为什么它不能要凭据」** ——              探针配不了首部、登录时还没有凭据，就这两类。             说不出来的那一条，属于 protected_routes!"
+            concat!(
+                "免认证清单变了。**每一条都要能单独说出「为什么它不能要凭据」** —— ",
+                "探针配不了首部、登录时还没有凭据，就这两类。",
+                "说不出来的那一条，属于 protected_routes!",
+            )
         );
     }
 
@@ -1729,7 +1766,11 @@ mod tests {
                 "/sandbox/snapshots",
                 "/sandbox/snapshots/{id}/restore",
             ],
-            "过渡清单变了。**只允许变短** —— 边缘把 /auth/* 切过来之后，             这些逐条搬进 protected_routes!，最后连同这个函数一起删掉。             往里加新路由是把临时状态变成永久状态"
+            concat!(
+                "过渡清单变了。**只允许变短** —— 边缘把 /auth/* 切过来之后，",
+                "这些逐条搬进 protected_routes!，最后连同这个函数一起删掉。",
+                "往里加新路由是把临时状态变成永久状态",
+            )
         );
     }
 
@@ -1785,8 +1826,16 @@ mod tests {
 
         let registrations = body.matches(".route(").count();
         assert_eq!(
-            registrations, 2,
-            "router() 的函数体里出现了 {registrations} 处 `.route(`，应当只有两处             （public_routes 与 pending_cutover_routes 各一个循环）。             多出来的那条**没有认证** —— 写在这里的路由要么进了公开侧，             要么排在 route_layer 之后，两种都不认证。             正确的位置是 protected_routes! 那份清单。"
+            registrations,
+            2,
+            concat!(
+                "router() 的函数体里出现了 {registrations} 处 `.route(`，应当只有两处",
+                "（public_routes 与 pending_cutover_routes 各一个循环）。",
+                "多出来的那条**没有认证** —— 写在这里的路由要么进了公开侧，",
+                "要么排在 route_layer 之后，两种都不认证。",
+                "正确的位置是 protected_routes! 那份清单。",
+            ),
+            registrations = registrations,
         );
     }
 
@@ -1893,7 +1942,11 @@ mod tests {
             assert_eq!(
                 resp.status(),
                 StatusCode::NOT_FOUND,
-                "{path} 不该由 agentd 应答 —— 要么它是记忆那一侧的路由（由边缘直转），                 要么它还没搬过来。真搬过来了就把它从这份名单里删掉"
+                concat!(
+                    "{path} 不该由 agentd 应答 —— 要么它是记忆那一侧的路由（由边缘直转），",
+                    "要么它还没搬过来。真搬过来了就把它从这份名单里删掉",
+                ),
+                path = path,
             );
         }
     }
@@ -1949,7 +2002,10 @@ mod tests {
         );
         assert!(
             v.get("memory_reachable").is_none() && v.get("memory").is_none(),
-            "记忆 2026-08-17 整个去掉了 —— 健康里再报「记忆可达」就是一句谎，             而它恰好是运维最愿意相信的那一句"
+            concat!(
+                "记忆 2026-08-17 整个去掉了 —— 健康里再报「记忆可达」就是一句谎，",
+                "而它恰好是运维最愿意相信的那一句",
+            )
         );
         // 注册开放与否必须是**公开可查**的：登录页靠它决定摆不摆注册入口。
         // 字段整个不见的话，客户端按「关」处理（保守方向），于是一台开了
@@ -2139,7 +2195,11 @@ mod tests {
         assert_eq!(
             skill_body,
             StatusCode::NOT_IMPLEMENTED,
-            "取技能正文那条拿委托令牌打过去得到 {skill_body}。403 说明白名单漏了它 ——              云端会话里的技能会静默地全部取不回来，而桌面端一切正常"
+            concat!(
+                "取技能正文那条拿委托令牌打过去得到 {skill_body}。403 说明白名单漏了它 —— ",
+                "云端会话里的技能会静默地全部取不回来，而桌面端一切正常",
+            ),
+            skill_body = skill_body,
         );
 
         // 够不着：整张技能表（含所有正文）是**设置页**的路。容器里没有任何
@@ -2148,7 +2208,11 @@ mod tests {
         assert_eq!(
             whole_table,
             StatusCode::FORBIDDEN,
-            "沙箱拿委托令牌拉整张技能表得到 {whole_table}，预期 403 ——              放行它等于让不可信代码一次拿走所有正文，而分层的意义正是不这么做"
+            concat!(
+                "沙箱拿委托令牌拉整张技能表得到 {whole_table}，预期 403 —— ",
+                "放行它等于让不可信代码一次拿走所有正文，而分层的意义正是不这么做",
+            ),
+            whole_table = whole_table,
         );
 
         // 够不着，而且是最要紧的那一条：`/confirmations` 放行会让 agentd 把

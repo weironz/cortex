@@ -983,7 +983,10 @@ mod caps_parity_tests {
         assert_eq!(
             (c.vision, c.tool_call, c.image_output, c.reasoning),
             (s.vision, s.tool_call, s.image_output, s.reasoning),
-            "两条路的能力判定分叉了 —— 用户会在设置页看到一个能力，             在聊天选择器里看到另一个，而他不知道该信哪个"
+            concat!(
+                "两条路的能力判定分叉了 —— 用户会在设置页看到一个能力，",
+                "在聊天选择器里看到另一个，而他不知道该信哪个",
+            )
         );
         assert_eq!(c.context, s.context, "上下文也要一致");
         assert_eq!(c.display_name, s.display_name, "显示名也要一致");
@@ -1180,7 +1183,11 @@ mod resolve_tests {
         let all = [source("01M0AAA", &["qwen-flash"])];
         assert!(
             pick_source(&all, Some("01M0GONE")).is_none(),
-            "来源可以在另一台设备上被删。这时候报错等于让一个不知道自己             选过什么的人发不出话 —— 回落到部署那条至少能聊，             而选择器下次刷新会自己纠正"
+            concat!(
+                "来源可以在另一台设备上被删。这时候报错等于让一个不知道自己",
+                "选过什么的人发不出话 —— 回落到部署那条至少能聊，",
+                "而选择器下次刷新会自己纠正",
+            )
         );
     }
 
@@ -1230,7 +1237,11 @@ mod resolve_tests {
         );
         assert!(
             rejected.is_err(),
-            "这条来源只开放了 qwen-flash。放过 qwen-turbo 说明白名单查的是             供应商定义而不是这条来源 —— 那正是「用户这个账号没开通的型号             也进了选择器」的来路"
+            concat!(
+                "这条来源只开放了 qwen-flash。放过 qwen-turbo 说明白名单查的是",
+                "供应商定义而不是这条来源 —— 那正是「用户这个账号没开通的型号",
+                "也进了选择器」的来路",
+            )
         );
 
         // 另一半：别家的型号更不该能用在这把 key 上
@@ -1283,7 +1294,13 @@ mod resolve_tests {
         .expect("alibaba 该挑得出东西");
         assert!(
             a_score < d_score,
-            "qwen-turbo（{a_score}）该比 deepseek 最便宜那个（{d_score}）还便宜，             不然这条测试分不出「跨来源挑」和「只在部署那条挑」——              目录价目变了的话，换一个更便宜的型号来测"
+            concat!(
+                "qwen-turbo（{a_score}）该比 deepseek 最便宜那个（{d_score}）还便宜，",
+                "不然这条测试分不出「跨来源挑」和「只在部署那条挑」—— ",
+                "目录价目变了的话，换一个更便宜的型号来测",
+            ),
+            a_score = a_score,
+            d_score = d_score,
         );
 
         let got = resolve_auto(&c, &mine, req(ModelChoice::Auto, ModelTier::Main), true);
@@ -1336,7 +1353,10 @@ mod resolve_tests {
         assert_eq!(
             got.model,
             ModelChoice::Named("deepseek-v4-flash".to_owned()),
-            "他明说了这个模型能看图，界面也画上了徽标、闸门也放行了，             而自动档还在问目录 —— 同一件事判两处"
+            concat!(
+                "他明说了这个模型能看图，界面也画上了徽标、闸门也放行了，",
+                "而自动档还在问目录 —— 同一件事判两处",
+            )
         );
         assert_eq!(got.source.as_deref(), Some("01M0AAA"));
     }
@@ -1414,7 +1434,10 @@ mod resolve_tests {
         let got = resolve_auto(&c, &tie, req(ModelChoice::Auto, ModelTier::Main), true);
         assert!(
             got.source.is_none(),
-            "同价却挑了别的来源（{:?}）—— 那会让一个没配过 key 的人的行为             跟着「他碰巧加过一条同样的来源」变，而两者本该没区别",
+            concat!(
+                "同价却挑了别的来源（{:?}）—— 那会让一个没配过 key 的人的行为",
+                "跟着「他碰巧加过一条同样的来源」变，而两者本该没区别",
+            ),
             got.source
         );
     }

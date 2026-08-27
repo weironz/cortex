@@ -478,8 +478,11 @@ pub(crate) async fn patch_session(
         return Err(CortexError::Invalid(
             // 清单要跟着字段涨。漏一个的症状是「明明改了却报没改」——
             // 而那条错误信息本身就是排查这件事时唯一的线索
-            "请求体里没有任何要改的字段（title / archived / pinned / workspace /              container_workspace / project_id / runtime）"
-                .into(),
+            concat!(
+                "请求体里没有任何要改的字段（title / archived / pinned / workspace / ",
+                "container_workspace / project_id / runtime）",
+            )
+            .into(),
         ));
     }
 
@@ -576,7 +579,13 @@ fn container_workspace_patch(
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
     if !ok {
         return Err(CortexError::Invalid(format!(
-            "工作区名 {name:?} 不合格。它是容器工作区卷里的**一段目录名**，             只允许字母、数字与 . _ -，必须以字母或数字开头，长度 1~64。             想指向别的地方是做不到的：那一轮的根是 /workspace/<名字>，             而带分隔符或 .. 的名字会把根挪到卷外面去。"
+            concat!(
+                "工作区名 {name:?} 不合格。它是容器工作区卷里的**一段目录名**，",
+                "只允许字母、数字与 . _ -，必须以字母或数字开头，长度 1~64。",
+                "想指向别的地方是做不到的：那一轮的根是 /workspace/<名字>，",
+                "而带分隔符或 .. 的名字会把根挪到卷外面去。",
+            ),
+            name = name
         )));
     }
     Ok(Some(Some(name)))
@@ -843,7 +852,10 @@ mod tests {
 
         assert!(
             body.is_object(),
-            "顶层必须是对象 —— 客户端按 json['sessions'] 解，裸数组会被判成             「返回了非对象 JSON」而整个侧栏空掉"
+            concat!(
+                "顶层必须是对象 —— 客户端按 json['sessions'] 解，裸数组会被判成",
+                "「返回了非对象 JSON」而整个侧栏空掉",
+            )
         );
         assert!(
             body.get("sessions")

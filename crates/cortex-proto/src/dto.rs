@@ -1269,7 +1269,10 @@ mod tests {
         assert_eq!(
             nulled.container_workspace,
             Some(None),
-            "container_workspace: null 是「回到卷根」—— 解成 None 会让这条 PATCH              报「没有任何要改的字段」"
+            concat!(
+                "container_workspace: null 是「回到卷根」—— 解成 None 会让这条 PATCH ",
+                "报「没有任何要改的字段」",
+            )
         );
     }
 

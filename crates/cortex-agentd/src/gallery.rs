@@ -576,7 +576,10 @@ mod tests {
         assert_eq!(
             public_base(&h),
             "http://127.0.0.1:5173",
-            "nginx 的 `$host` 不带端口 —— 只认它的话 dev 上拼出来的链接             少一个 `:5173`，复制出去谁都打不开。实跑撞到过"
+            concat!(
+                "nginx 的 `$host` 不带端口 —— 只认它的话 dev 上拼出来的链接",
+                "少一个 `:5173`，复制出去谁都打不开。实跑撞到过",
+            )
         );
 
         // 没有 X-Forwarded-Host 时退回 Host

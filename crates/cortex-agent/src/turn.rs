@@ -323,9 +323,10 @@ pub trait ToolHost: Send + Sync {
     /// 默认回一条说得清的失败，而不是让模型以为成功了 ——
     /// 它会接着说「图已经生成好了」，而根本没有图。
     async fn generate_image(&self, _arguments: &serde_json::Value) -> ToolResult {
-        ToolResult::err(
-            "这个 agent 进程连不到能生图的服务端（本机直连模式没有这条路）。             告诉用户：生图需要连着 Cortex 服务端使用。",
-        )
+        ToolResult::err(concat!(
+            "这个 agent 进程连不到能生图的服务端（本机直连模式没有这条路）。",
+            "告诉用户：生图需要连着 Cortex 服务端使用。",
+        ))
     }
 
     /// 看屏幕、动鼠标键盘。**由宿主执行，不走 `tools::execute`。**
@@ -359,9 +360,11 @@ pub trait ToolHost: Send + Sync {
     /// ⚠️ 回失败，别回空串。空串会被模型读成「这个技能没有内容」，
     /// 于是它照着那句一句话说明脑补着做 —— 而那次失败没有任何征兆。
     async fn load_skill(&self, _arguments: &serde_json::Value) -> ToolResult {
-        ToolResult::err(
-            "这个 agent 进程取不回技能正文（它没有可打的服务端）。             不要照着目录里那句说明去做 —— 那只是索引，不是做法。             告诉用户：技能需要连着 Cortex 服务端使用。",
-        )
+        ToolResult::err(concat!(
+            "这个 agent 进程取不回技能正文（它没有可打的服务端）。",
+            "不要照着目录里那句说明去做 —— 那只是索引，不是做法。",
+            "告诉用户：技能需要连着 Cortex 服务端使用。",
+        ))
     }
 
     /// 记下模型自己维护的任务清单。**由宿主执行** —— 清单跟着会话走，
@@ -384,9 +387,10 @@ pub trait ToolHost: Send + Sync {
     /// 假装派了是这一组默认实现里最贵的一种：模型会照着几段**它自己
     /// 编出来的**调查结论往下做。
     async fn spawn_agents(&self, _arguments: &serde_json::Value) -> ToolResult {
-        ToolResult::err(
-            "这个 agent 进程派不出子 agent（它没有可用的模型客户端）。             不要编造调查结果 —— 自己一个个查，或者告诉用户这条路在当前环境下不可用。",
-        )
+        ToolResult::err(concat!(
+            "这个 agent 进程派不出子 agent（它没有可用的模型客户端）。",
+            "不要编造调查结果 —— 自己一个个查，或者告诉用户这条路在当前环境下不可用。",
+        ))
     }
 
     /// 用户配的 hooks。空 = 没配（也是绝大多数会话的形态）。
@@ -417,9 +421,10 @@ pub trait ToolHost: Send + Sync {
     /// 编结果是这一组默认实现里最危险的一种：模型会把编出来的 URL
     /// 当成真的引用给用户。
     async fn web_search(&self, _arguments: &serde_json::Value) -> ToolResult {
-        ToolResult::err(
-            "这个 agent 进程上不了网（它没有可打的服务端）。             不要凭记忆编造搜索结果或链接 —— 告诉用户这条路在当前环境下不可用。",
-        )
+        ToolResult::err(concat!(
+            "这个 agent 进程上不了网（它没有可打的服务端）。",
+            "不要凭记忆编造搜索结果或链接 —— 告诉用户这条路在当前环境下不可用。",
+        ))
     }
 
     /// 把一个网页读回来。**由宿主执行**，理由与 [`Self::web_search`] 同一条。
@@ -428,9 +433,10 @@ pub trait ToolHost: Send + Sync {
     /// 编一段网页正文出来，模型会把它当成引用过的事实讲给用户，
     /// 而用户手上有那个链接，会以为我们真读过。
     async fn web_fetch(&self, _arguments: &serde_json::Value) -> ToolResult {
-        ToolResult::err(
-            "这个 agent 进程上不了网（它没有可打的服务端）。             不要凭记忆编造这个网页的内容 —— 告诉用户这条路在当前环境下不可用。",
-        )
+        ToolResult::err(concat!(
+            "这个 agent 进程上不了网（它没有可打的服务端）。",
+            "不要凭记忆编造这个网页的内容 —— 告诉用户这条路在当前环境下不可用。",
+        ))
     }
 
     /// 列 / 读 MCP server 提供的 resource。**由宿主执行** —— hub 在宿主手里。
@@ -1234,9 +1240,10 @@ impl Turn {
             match host.background_tasks() {
                 // 说清是「这个环境不支持」而不是「命令失败」—— 后者会让
                 // 模型去改命令再试一次，而改什么都不会成
-                None => ToolResult::err(
-                    "这个环境不支持后台命令。用 shell 跑（它有超时上限），                     或者告诉用户这条路在当前环境下不可用。",
-                ),
+                None => ToolResult::err(concat!(
+                    "这个环境不支持后台命令。用 shell 跑（它有超时上限），",
+                    "或者告诉用户这条路在当前环境下不可用。",
+                )),
                 Some(tasks) => {
                     // 与上面 `tools::execute` 同一条：**重新问一次宿主**，
                     // 用刚批准过的那份清单去起进程
@@ -1947,7 +1954,10 @@ mod tests {
         assert_eq!(
             crate::ExecEnvironment::default(),
             crate::ExecEnvironment::None,
-            "默认值一旦倒向 LocalMachine，任何漏写 env 的宿主都会静默拿到             整台机器的文件访问能力，而代码读起来毫无异样"
+            concat!(
+                "默认值一旦倒向 LocalMachine，任何漏写 env 的宿主都会静默拿到",
+                "整台机器的文件访问能力，而代码读起来毫无异样",
+            )
         );
         assert!(!crate::ExecEnvironment::None.has_filesystem());
         assert!(!crate::ExecEnvironment::None.allows_escape_prompt());
@@ -1962,7 +1972,10 @@ mod tests {
                 .expect("临时目录是合法根")
                 .env(),
             crate::ExecEnvironment::LocalMachine,
-            "名字里写着 local_machine 的构造函数必须真的声明这件事 ——              它就是为了让 cortexd 那种调用一眼看出是错的"
+            concat!(
+                "名字里写着 local_machine 的构造函数必须真的声明这件事 —— ",
+                "它就是为了让 cortexd 那种调用一眼看出是错的",
+            )
         );
         assert_eq!(
             Turn::sealed().env(),
@@ -2140,7 +2153,10 @@ mod tests {
         assert_eq!(
             host.asked(),
             1,
-            "只读工具越界必须问。风险档与越界是两个独立的提问理由，             合并判断会让这一条静默通过"
+            concat!(
+                "只读工具越界必须问。风险档与越界是两个独立的提问理由，",
+                "合并判断会让这一条静默通过",
+            )
         );
         assert!(r.ok, "批准之后就该真的读到：{}", r.content);
     }
@@ -2214,9 +2230,10 @@ mod tests {
         )
         .await;
 
-        let scope = host.scopes.lock().unwrap()[0]
-            .clone()
-            .expect("越界确认必须带上 scope —— 只给工具名和参数，用户没法判断                     那个 path 相对于哪儿，而那正是他此刻最需要知道的");
+        let scope = host.scopes.lock().unwrap()[0].clone().expect(concat!(
+            "越界确认必须带上 scope —— 只给工具名和参数，用户没法判断",
+            "那个 path 相对于哪儿，而那正是他此刻最需要知道的",
+        ));
         assert!(
             scope.is_absolute(),
             "给用户看的必须是绝对路径，实际：{}",
@@ -2244,7 +2261,10 @@ mod tests {
 
         assert!(
             host.granted.lock().unwrap().is_empty(),
-            "用户说了不准，却把那个目录记进了放行清单 —— 下一次就不问了，             而他从头到尾只表达过拒绝"
+            concat!(
+                "用户说了不准，却把那个目录记进了放行清单 —— 下一次就不问了，",
+                "而他从头到尾只表达过拒绝",
+            )
         );
     }
 
@@ -2274,7 +2294,10 @@ mod tests {
         assert_eq!(
             host.asked(),
             0,
-            "完全放行档还在问，那这个开关就是名不副实的 ——              用户以为自己关掉了所有打扰"
+            concat!(
+                "完全放行档还在问，那这个开关就是名不副实的 —— ",
+                "用户以为自己关掉了所有打扰",
+            )
         );
         assert!(r.ok, "不问就该直接执行：{}", r.content);
         drop(dir);
@@ -2297,7 +2320,12 @@ mod tests {
             };
             assert!(
                 !attended_conflict(true, &p),
-                "confirm_at={confirm_at:?} 竟然让 Execute 自动放行了 ——                  「Execute 是最高档」这条不变式被破坏，而整个「有人在场」的                 依据正建立在它上面"
+                concat!(
+                    "confirm_at={confirm_at:?} 竟然让 Execute 自动放行了 —— ",
+                    "「Execute 是最高档」这条不变式被破坏，而整个「有人在场」的",
+                    "依据正建立在它上面",
+                ),
+                confirm_at = confirm_at,
             );
         }
 
@@ -2307,7 +2335,11 @@ mod tests {
         };
         assert!(
             !attended_conflict(true, &bypass),
-            "完全放行档是用户在界面上亲手选的一档，选的时候有过一次单独确认。             把它按「配置矛盾」拒掉，用户会看到一个自己刚刚明确选过的东西             报错说它自相矛盾"
+            concat!(
+                "完全放行档是用户在界面上亲手选的一档，选的时候有过一次单独确认。",
+                "把它按「配置矛盾」拒掉，用户会看到一个自己刚刚明确选过的东西",
+                "报错说它自相矛盾",
+            )
         );
         assert!(
             !attended_conflict(false, &ApprovalPolicy::default()),

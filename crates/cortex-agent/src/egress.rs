@@ -135,8 +135,10 @@ mod tests {
     fn 空串不算配了代理() {
         assert!(
             proxy_addr_from(env_of(&[("HTTPS_PROXY", "   ")])).is_none(),
-            "compose 里 `${{VAR:-}}` 展开出来是空串而不是「未设置」。\
-             拿空串去 connect 会以一句看不懂的解析错误失败"
+            concat!(
+                "compose 里 `${{VAR:-}}` 展开出来是空串而不是「未设置」。",
+                "拿空串去 connect 会以一句看不懂的解析错误失败",
+            )
         );
         assert_eq!(
             proxy_addr_from(env_of(&[

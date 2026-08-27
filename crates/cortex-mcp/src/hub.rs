@@ -696,7 +696,10 @@ mod tests {
         assert_eq!(
             guard.reconnects.get("dead"),
             Some(&McpHub::MAX_RECONNECTS),
-            "预算用完之后连计数都不该再涨 —— 涨了说明那次连接真的发出去了，             而每一次都要等一个完整的连接超时"
+            concat!(
+                "预算用完之后连计数都不该再涨 —— 涨了说明那次连接真的发出去了，",
+                "而每一次都要等一个完整的连接超时",
+            )
         );
         assert!(
             guard.failures.is_empty(),

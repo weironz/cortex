@@ -8,6 +8,18 @@
 //! 每个工具声明自己的 [`Risk`]，由上层决定是直接执行、询问、还是拒绝。
 //! 不在工具内部弹确认 —— CLI、桌面、Web 的确认方式完全不同，
 //! 决策权必须留给调用方。
+//!
+//! # 多行的描述文字一律用 `concat!`，**不要写反斜杠续行**
+//!
+//! `"第一段 \` + 换行 + 缩进 + `第二段"` 在源码里是对的（Rust 会吃掉换行
+//! 和后面的缩进），但 `cargo fmt` 会把它压成一行，**并且把那段缩进留成字面
+//! 空格**。于是运行时的字符串里夹着十几到几十个连续空格 —— 而这些字符串
+//! 正是工具描述、系统提示词、给模型看的错误消息，那串空格直接进模型的
+//! 上下文，白烧 token 还让文本读起来像坏掉的。
+//!
+//! 这个坑不会有任何编译或测试报红：改完看着对，`cargo fmt` 一跑又回来了。
+//! `concat!` 的每一段是独立的字面量，fmt 不会去动，拼接处该不该留空格
+//! 由写的人明确决定（中文之间不留，英文单词之间留一个）。
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -511,14 +523,20 @@ impl Sandbox {
 pub fn image_spec() -> ToolSpec {
     ToolSpec {
         name: "generate_image".into(),
-        description: "按文字描述生成图片。生成的图会直接出现在回复里，                      不需要再写文件。适合用户说「画一张…」「生成一张…」的时候"
-            .into(),
+        description: concat!(
+            "按文字描述生成图片。生成的图会直接出现在回复里，",
+            "不需要再写文件。适合用户说「画一张…」「生成一张…」的时候",
+        )
+        .into(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "画什么。写得具体些：主体、场景、光线、风格。                                    英文与中文都可以"
+                    "description": concat!(
+                        "画什么。写得具体些：主体、场景、光线、风格。",
+                        "英文与中文都可以",
+                    )
                 },
                 "size": {
                     "type": "string",
@@ -558,8 +576,12 @@ pub fn image_spec() -> ToolSpec {
 pub fn subagent_spec() -> ToolSpec {
     ToolSpec {
         name: "spawn_agents".into(),
-        description: "派几个子 agent **并行**去查东西，各自独立看资料再把结论带回来。                      它们只能读（读文件、看目录、检索资料库、联网搜），不能改也不能执行 ——                       写代码和跑命令是你自己的事。适合「同时了解好几处」这种活儿"
-            .into(),
+        description: concat!(
+            "派几个子 agent **并行**去查东西，各自独立看资料再把结论带回来。",
+            "它们只能读（读文件、看目录、检索资料库、联网搜），不能改也不能执行 —— ",
+            "写代码和跑命令是你自己的事。适合「同时了解好几处」这种活儿",
+        )
+        .into(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -606,8 +628,12 @@ pub fn background_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "background_run".into(),
-            description: "在后台起一条命令，**不等它跑完**。用于 dev server、                          watch 模式的测试、大构建这类长命令。                          回一个任务编号 —— 之后用 background_output 看输出"
-                .into(),
+            description: concat!(
+                "在后台起一条命令，**不等它跑完**。用于 dev server、",
+                "watch 模式的测试、大构建这类长命令。",
+                "回一个任务编号 —— 之后用 background_output 看输出",
+            )
+            .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -709,8 +735,12 @@ pub fn mcp_resource_spec() -> ToolSpec {
 pub fn web_search_spec() -> ToolSpec {
     ToolSpec {
         name: "web_search".into(),
-        description: "上网搜一下。回的是搜索结果的标题、链接与摘要 ——                       不是网页正文。用它来查你不知道或可能已经过时的事实                       （新版本号、今天的新闻、某个 API 的现状）"
-            .into(),
+        description: concat!(
+            "上网搜一下。回的是搜索结果的标题、链接与摘要 —— ",
+            "不是网页正文。用它来查你不知道或可能已经过时的事实",
+            "（新版本号、今天的新闻、某个 API 的现状）",
+        )
+        .into(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -722,7 +752,10 @@ pub fn web_search_spec() -> ToolSpec {
                 "topic": {
                     "type": "string",
                     "enum": ["general", "news"],
-                    "description": "默认 general。问的是新闻、时事、或者「最近发生了什么」时用 news ——                                     只有 news 档的结果会带发布日期，而没有日期你分不出一条结果是昨天的还是几年前的"
+                    "description": concat!(
+                        "默认 general。问的是新闻、时事、或者「最近发生了什么」时用 news —— ",
+                        "只有 news 档的结果会带发布日期，而没有日期你分不出一条结果是昨天的还是几年前的",
+                    )
                 },
                 "time_range": {
                     "type": "string",
@@ -749,8 +782,12 @@ pub fn web_search_spec() -> ToolSpec {
 pub fn web_fetch_spec() -> ToolSpec {
     ToolSpec {
         name: "web_fetch".into(),
-        description: "把一个网页读回来（正文，markdown）。搜索只给标题和摘要 ——                       要看细节（API 参数、完整步骤、代码示例）就用这个。                      长页面会分段：结果里带着整页多长、下一段从哪开始"
-            .into(),
+        description: concat!(
+            "把一个网页读回来（正文，markdown）。搜索只给标题和摘要 —— ",
+            "要看细节（API 参数、完整步骤、代码示例）就用这个。",
+            "长页面会分段：结果里带着整页多长、下一段从哪开始",
+        )
+        .into(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -760,7 +797,10 @@ pub fn web_fetch_spec() -> ToolSpec {
                 // 第一段，然后拿着半篇文档回答
                 "offset": {
                     "type": "integer",
-                    "description": "从整页的第几个字符接着读。上一次结果里的 next_offset 原样填进来，                                    就能读下一段；第一次不用传"
+                    "description": concat!(
+                        "从整页的第几个字符接着读。上一次结果里的 next_offset 原样填进来，",
+                        "就能读下一段；第一次不用传",
+                    )
                 }
             },
             "required": ["url"]
@@ -989,8 +1029,12 @@ pub fn is_computer_tool(name: &str) -> bool {
 pub fn skill_spec() -> ToolSpec {
     ToolSpec {
         name: "load_skill".into(),
-        description: "把一份技能的完整做法取回来。系统提示词里只列了技能的                      名字和一句话说明 —— 判断某一条与当前任务相关时，先用                      这个工具取回正文，再照着做"
-            .into(),
+        description: concat!(
+            "把一份技能的完整做法取回来。系统提示词里只列了技能的",
+            "名字和一句话说明 —— 判断某一条与当前任务相关时，先用",
+            "这个工具取回正文，再照着做",
+        )
+        .into(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -1045,8 +1089,12 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit_file".into(),
-            description: "在文件里做一次精确替换：把 before 换成 after。                          before 必须在文件里**唯一**出现（带上足够的上下文行）；                          改动大半个文件时用 write_file 整体重写更直接"
-                .into(),
+            description: concat!(
+                "在文件里做一次精确替换：把 before 换成 after。",
+                "before 必须在文件里**唯一**出现（带上足够的上下文行）；",
+                "改动大半个文件时用 write_file 整体重写更直接",
+            )
+            .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1074,8 +1122,12 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "grep".into(),
-            description: "在工作区里**按内容**搜（正则）。找「哪里用到了这个函数」                          「这个报错是从哪抛的」用它 —— 比 list_dir 逐个读快得多。                          尊重 .gitignore"
-                .into(),
+            description: concat!(
+                "在工作区里**按内容**搜（正则）。找「哪里用到了这个函数」",
+                "「这个报错是从哪抛的」用它 —— 比 list_dir 逐个读快得多。",
+                "尊重 .gitignore",
+            )
+            .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1091,8 +1143,11 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "glob".into(),
-            description: "在工作区里**按文件名**找。`*` 不跨目录、`**` 跨。                          尊重 .gitignore"
-                .into(),
+            description: concat!(
+                "在工作区里**按文件名**找。`*` 不跨目录、`**` 跨。",
+                "尊重 .gitignore",
+            )
+            .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1107,8 +1162,11 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "tree".into(),
-            description: "看一个目录的整体结构（带每个文件的行数）。认识一个项目                          先用它，别 list_dir 逐层摸。尊重 .gitignore"
-                .into(),
+            description: concat!(
+                "看一个目录的整体结构（带每个文件的行数）。认识一个项目",
+                "先用它，别 list_dir 逐层摸。尊重 .gitignore",
+            )
+            .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1123,8 +1181,12 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "todo_write".into(),
-            description: "维护你自己的任务清单（markdown checklist），**整体覆写**。                          多步任务开工前先写下计划，每完成一步就更新 ——                           清单会每轮出现在你的上下文里，防止跑到第 6 轮忘了要干什么"
-                .into(),
+            description: concat!(
+                "维护你自己的任务清单（markdown checklist），**整体覆写**。",
+                "多步任务开工前先写下计划，每完成一步就更新 —— ",
+                "清单会每轮出现在你的上下文里，防止跑到第 6 轮忘了要干什么",
+            )
+            .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1386,9 +1448,10 @@ pub async fn spawn_background(
         Err(e) => return ToolResult::err(e),
     };
     let Some(cwd) = sandbox.root() else {
-        return ToolResult::err(
-            "本会话没有绑定工作区，不能执行命令：             未绑定的会话可访问的文件范围是空集，没有可用的工作目录。",
-        );
+        return ToolResult::err(concat!(
+            "本会话没有绑定工作区，不能执行命令：",
+            "未绑定的会话可访问的文件范围是空集，没有可用的工作目录。",
+        ));
     };
     let prepared = match crate::sandbox::prepare(sandbox.exec_policy(), &argv, cwd) {
         Ok(p) => p,
@@ -2154,7 +2217,10 @@ mod tests {
         let granted = sb.with_grants(vec![outside.path().canonicalize().unwrap()]);
         assert!(
             !granted.classify(&raw).unwrap().is_outside(),
-            "批准过的目录之后不该再问。每个文件弹一次的话，人的反应是直接去开             完全放行 —— 被关掉的闸门等于没有闸门"
+            concat!(
+                "批准过的目录之后不该再问。每个文件弹一次的话，人的反应是直接去开",
+                "完全放行 —— 被关掉的闸门等于没有闸门",
+            )
         );
         // 同一个目录下的**另一个**文件同样不再问 —— 记的是目录不是文件
         let sibling = outside.path().join("y.txt");
@@ -2163,7 +2229,10 @@ mod tests {
                 .classify(&sibling.to_string_lossy())
                 .unwrap()
                 .is_outside(),
-            "放行的粒度是目录。只放行单个文件的话，agent 改一个目录里的十个             文件就要弹十次"
+            concat!(
+                "放行的粒度是目录。只放行单个文件的话，agent 改一个目录里的十个",
+                "文件就要弹十次",
+            )
         );
     }
 
@@ -2182,7 +2251,10 @@ mod tests {
         let granted = sb.with_grants(vec![d.clone()]);
         assert!(
             granted.exec_policy().writable_roots.contains(&d),
-            "批准的目录没进 writable_roots —— shell 会在内核那一层被拦，             而用户刚刚亲手批准过，他不会想到还有第三道闸"
+            concat!(
+                "批准的目录没进 writable_roots —— shell 会在内核那一层被拦，",
+                "而用户刚刚亲手批准过，他不会想到还有第三道闸",
+            )
         );
         assert_eq!(
             granted.exec_policy().writable_roots.len(),
@@ -2198,7 +2270,11 @@ mod tests {
         for p in [".", "", "/etc/passwd", "a.txt"] {
             assert!(
                 sb.classify(p).is_err(),
-                "封闭沙箱对 {p:?} 竟然给出了归类 —— 空集里没有「在外面」这回事，                 归成 Outside 就意味着它可以被一次确认放行"
+                concat!(
+                    "封闭沙箱对 {p:?} 竟然给出了归类 —— 空集里没有「在外面」这回事，",
+                    "归成 Outside 就意味着它可以被一次确认放行",
+                ),
+                p = p,
             );
         }
     }
@@ -2216,7 +2292,11 @@ mod tests {
         assert_eq!(
             by("shell").path_arg,
             None,
-            "shell 要碰的路径藏在命令文本里。声明一个 path_arg 会让越界确认             只覆盖到那一个参数，而命令里其余路径静默通过 —— 比不覆盖更糟，             因为它看起来是覆盖了的"
+            concat!(
+                "shell 要碰的路径藏在命令文本里。声明一个 path_arg 会让越界确认",
+                "只覆盖到那一个参数，而命令里其余路径静默通过 —— 比不覆盖更糟，",
+                "因为它看起来是覆盖了的",
+            )
         );
     }
 
@@ -2309,7 +2389,10 @@ mod tests {
         assert_eq!(
             spec.risk,
             Risk::Write,
-            "它把完整 URL 发到第三方 —— `?x=<上下文里的密钥>` 就是一次外泄，             而它长得和一次正常抓取一模一样"
+            concat!(
+                "它把完整 URL 发到第三方 —— `?x=<上下文里的密钥>` 就是一次外泄，",
+                "而它长得和一次正常抓取一模一样",
+            )
         );
     }
 
@@ -2345,7 +2428,11 @@ mod tests {
             }
             assert!(
                 arms.contains(name),
-                "工具 {name} 有规格但 execute 里没有对应的臂 —— 模型会调它然后拿回             「未知工具」，而那读起来像模型不会用，不像我们漏了一半"
+                concat!(
+                    "工具 {name} 有规格但 execute 里没有对应的臂 —— 模型会调它然后拿回",
+                    "「未知工具」，而那读起来像模型不会用，不像我们漏了一半",
+                ),
+                name = name,
             );
         }
 
@@ -2356,7 +2443,11 @@ mod tests {
         for arm in &arms {
             assert!(
                 names.contains(arm),
-                "execute 里有 {arm} 的分支，但 builtin_specs 里没有它 ——             那段代码永远跑不到，而 dead_code 检查不出来"
+                concat!(
+                    "execute 里有 {arm} 的分支，但 builtin_specs 里没有它 —— ",
+                    "那段代码永远跑不到，而 dead_code 检查不出来",
+                ),
+                arm = arm,
             );
         }
     }

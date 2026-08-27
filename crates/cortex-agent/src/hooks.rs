@@ -122,8 +122,13 @@ pub async fn run_pre(hooks: &[Hook], tool: &str, path: Option<&Path>, cwd: &Path
             Err(e) => {
                 tracing::warn!(hook = %h.command, error = %e, "PreToolUse hook 没跑成，按拦下处理");
                 return PreOutcome::Deny(format!(
-                    "一条 PreToolUse hook 没能跑起来（{e}）：{}。                     用户配的这条规矩此刻验不了，所以这次调用不放行 ——                      告诉用户去检查这条 hook。",
-                    h.command
+                    concat!(
+                        "一条 PreToolUse hook 没能跑起来（{e}）：{}。",
+                        "用户配的这条规矩此刻验不了，所以这次调用不放行 —— ",
+                        "告诉用户去检查这条 hook。",
+                    ),
+                    h.command,
+                    e = e,
                 ));
             }
         }
