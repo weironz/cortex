@@ -339,9 +339,7 @@ async fn set_credential(
 /// （与 `AgentPresenceDto` 只回一个布尔同一条纪律）。界面要显示的就是
 /// 开关的位置，多给一个字符串只会多一个可能泄露的地方。
 async fn attach_state(State(st): State<LocalState>) -> Json<AttachState> {
-    Json(AttachState {
-        enabled: st.attach.is_on(),
-    })
+    Json(AttachState::of(&st))
 }
 
 /// `PUT /local/attach` —— 拨动远程接入，**不重启这个进程**。
@@ -374,14 +372,32 @@ async fn set_attach(
         st.attach.turn_off();
         tracing::info!("远程接入已关闭");
     }
-    Json(AttachState {
-        enabled: st.attach.is_on(),
-    })
+    Json(AttachState::of(&st))
 }
 
 #[derive(serde::Serialize)]
 struct AttachState {
     enabled: bool,
+    /// 这台机器叫什么 —— **只为让界面上那张卡片认得出自己**。
+    ///
+    /// 「我的机器」那一页同时画着这张卡片和整张在线名册，而名册里也有这一台。
+    /// 不报名字的话，卡片写「这台机器」、名册里写「WILLOPTPC」，用户看不出
+    /// 它们是同一台（实机上看了一眼才发现的）。
+    ///
+    /// ⚠️ **不拿它去认名册里的哪一行。** `machine_hint` 是提示不是身份
+    /// （见 `cortex_proto::presence` 模块头）—— 两台机器重名时那种「标记
+    /// 出是哪一行」的做法会指错，而它指错的时候没有任何征兆。
+    /// 这里只把名字印在卡片上，由人自己对上。
+    machine_hint: String,
+}
+
+impl AttachState {
+    fn of(st: &LocalState) -> Self {
+        Self {
+            enabled: st.attach.is_on(),
+            machine_hint: crate::state::hostname_or_fallback(),
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]

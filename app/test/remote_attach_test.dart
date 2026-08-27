@@ -24,20 +24,21 @@ import 'package:flutter_test/flutter_test.dart';
 /// 一个不认识这条路的后端（Web 端、纯 cortexd、比它旧的本地 agent）。
 class _NoAttachApi extends MockCortexApi {
   @override
-  Future<bool> localAttach() =>
+  Future<LocalAttach> localAttach() =>
       Future.error(const CortexApiException('这个后端没有远程接入开关。', statusCode: 404));
 
   @override
-  Future<bool> setLocalAttach(bool enabled) => localAttach();
+  Future<LocalAttach> setLocalAttach(bool enabled) => localAttach();
 }
 
 /// 拨动会失败的后端 —— 用来验「失败不许被吞掉」。
 class _FailingApi extends MockCortexApi {
   @override
-  Future<bool> localAttach() async => false;
+  Future<LocalAttach> localAttach() async =>
+      const LocalAttach(enabled: false, machineHint: 'WILLOPTPC');
 
   @override
-  Future<bool> setLocalAttach(bool enabled) =>
+  Future<LocalAttach> setLocalAttach(bool enabled) =>
       Future.error(const CortexApiException('本机 agent 没应答。'));
 }
 
@@ -78,7 +79,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
 
     expect(
-      find.text('这台机器 · 远程接入'),
+      find.textContaining('这台机器'),
       findsNothing,
       reason:
           '画一个永远关着的开关比不画更糟 —— 用户会以为自己关着，'

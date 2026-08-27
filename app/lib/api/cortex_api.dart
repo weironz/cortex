@@ -442,7 +442,7 @@ abstract interface class CortexApi {
   /// 只有本机 agent 答得出：Web 端与纯 cortexd 会 404/405，
   /// 调用方据此**整个不画那个开关**（做不到就别摆出来，与电脑操作那节
   /// 同一条纪律）。
-  Future<bool> localAttach();
+  Future<LocalAttach> localAttach();
 
   /// `PUT /local/attach` —— 拨动它，回落定之后的状态。
   ///
@@ -450,7 +450,7 @@ abstract interface class CortexApi {
   /// 接入面里 `POST /chat` 与 `POST /confirmations` 并存，接进来的一方
   /// 能发起一轮并自己批准工具确认。界面文案不许把这句写软成
   /// 「允许远程查看」（安全不变量 4）。
-  Future<bool> setLocalAttach(bool enabled);
+  Future<LocalAttach> setLocalAttach(bool enabled);
 
   /// `GET /settings/search` —— 联网检索的配置。
   ///
@@ -1004,9 +1004,9 @@ mixin AgentsUnsupported {
 /// 「关着」的话，一个**真的开着**远程接入的机器会在界面上显示成关着 ——
 /// 用户以为自己没开，而云端接得进来。
 mixin LocalAttachUnsupported {
-  Future<bool> localAttach() =>
+  Future<LocalAttach> localAttach() =>
       Future.error(const CortexApiException('这个后端没有远程接入开关。', statusCode: 404));
-  Future<bool> setLocalAttach(bool enabled) =>
+  Future<LocalAttach> setLocalAttach(bool enabled) =>
       Future.error(const CortexApiException('这个后端没有远程接入开关。', statusCode: 404));
 }
 
@@ -1215,4 +1215,22 @@ mixin ModelSourcesUnsupported {
   Future<RoleAssignments> modelRoles() async => const RoleAssignments();
 
   Future<RoleAssignments> saveModelRoles(RoleAssignments roles) async => roles;
+}
+
+/// `GET/PUT /local/attach` 的回答。
+class LocalAttach {
+  const LocalAttach({required this.enabled, required this.machineHint});
+
+  /// 这台机器现在接不接受远程接入。
+  final bool enabled;
+
+  /// 这台机器叫什么 —— **只为让那张卡片认得出自己**。
+  ///
+  /// 「我的机器」那一页同时画着这张卡片和整张在线名册，而名册里也有这一台。
+  /// 不带名字的话，卡片写「这台机器」、名册里写「WILLOPTPC」，用户看不出
+  /// 它们是同一台（实机上看了一眼才发现的）。
+  ///
+  /// ⚠️ **不拿它去认名册里的哪一行**：`machine_hint` 是提示不是身份，
+  /// 两台机器重名时那种「标出是哪一行」的做法会指错，且指错时没有征兆。
+  final String machineHint;
 }

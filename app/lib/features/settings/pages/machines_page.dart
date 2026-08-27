@@ -50,7 +50,6 @@ import '../../../models/agent_presence.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/remote_attach_controller.dart';
 import '../../../widgets/empty_state.dart';
-import '../../../widgets/panel_header.dart';
 
 /// 名册多久重拉一次。
 ///
@@ -90,7 +89,6 @@ class MachinesPage extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const PanelHeader(title: '我的机器', subtitle: '在线的 agent · 能不能远程接入'),
         Expanded(
           child: machines.when(
             // 轮询会不断产出新值，不 skip 的话每 10 秒闪一次转圈
@@ -303,8 +301,9 @@ class _ThisMachineCard extends ConsumerWidget {
     final attach = ref.watch(remoteAttachProvider);
     // loading 与 error 都不画：loading 一闪而过，而 error 的意思就是
     // 「这个后端没有这个能力」
-    final enabled = attach.value;
-    if (enabled == null) return const SizedBox.shrink();
+    final info = attach.value;
+    if (info == null) return const SizedBox.shrink();
+    final enabled = info.enabled;
 
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
@@ -340,7 +339,11 @@ class _ThisMachineCard extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '这台机器 · 远程接入',
+                      // 名字印在这儿，是为了让用户认得出下面名册里的哪一行
+                      // 说的是同一台。**不去标记那一行**，理由见 `LocalAttach`
+                      info.machineHint.isEmpty
+                          ? '这台机器 · 远程接入'
+                          : '这台机器（${info.machineHint}）· 远程接入',
                       style: theme.textTheme.bodyMedium?.copyWith(
                         fontWeight: FontWeight.w600,
                       ),

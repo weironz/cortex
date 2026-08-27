@@ -19,6 +19,8 @@ library;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../api/cortex_api.dart';
+
 import 'app_providers.dart';
 
 /// 设置里那个键。**只是启动默认值**，见库文档。
@@ -26,13 +28,13 @@ const String kRemoteAttachSetting = 'remote_attach';
 
 /// 这台机器现在开着没有。error = 这个后端答不出（见库文档）。
 final remoteAttachProvider =
-    AsyncNotifierProvider<RemoteAttachController, bool>(
+    AsyncNotifierProvider<RemoteAttachController, LocalAttach>(
       RemoteAttachController.new,
     );
 
-class RemoteAttachController extends AsyncNotifier<bool> {
+class RemoteAttachController extends AsyncNotifier<LocalAttach> {
   @override
-  Future<bool> build() async {
+  Future<LocalAttach> build() async {
     // 换后端 / 换 agent 之后要重问：开关是**那台机器**的属性
     final api = ref.watch(cortexApiProvider);
     return api.localAttach();
@@ -51,9 +53,9 @@ class RemoteAttachController extends AsyncNotifier<bool> {
     // 落盘的是**落定之后**那个值，不是用户点的那个：服务端才是权威
     await ref.read(settingsPatcherProvider)(
       kRemoteAttachSetting,
-      settled ? 'true' : 'false',
+      settled.enabled ? 'true' : 'false',
     );
-    return settled;
+    return settled.enabled;
   }
 }
 

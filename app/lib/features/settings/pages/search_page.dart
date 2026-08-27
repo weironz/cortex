@@ -26,7 +26,6 @@ import '../../../api/api_exception.dart';
 import '../../../core/theme.dart';
 import '../../../models/search_prefs.dart';
 import '../../../state/app_providers.dart';
-import '../../../widgets/panel_header.dart';
 
 /// 这个部署的检索配置。
 ///
@@ -55,7 +54,6 @@ class SearchPage extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const PanelHeader(title: '联网检索', subtitle: '服务商 · key · 检索深度'),
         Expanded(
           child: prefs.when(
             skipLoadingOnReload: true,

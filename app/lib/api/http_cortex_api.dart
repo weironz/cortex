@@ -968,7 +968,7 @@ class HttpCortexApi implements CortexApi {
       );
 
   @override
-  Future<bool> localAttach() => _attachCall(
+  Future<LocalAttach> localAttach() => _attachCall(
     () => _client.get(
       _uri('/local/attach'),
       headers: _headers(const {'accept': 'application/json'}),
@@ -976,7 +976,7 @@ class HttpCortexApi implements CortexApi {
   );
 
   @override
-  Future<bool> setLocalAttach(bool enabled) => _attachCall(
+  Future<LocalAttach> setLocalAttach(bool enabled) => _attachCall(
     () => _client.put(
       _uri('/local/attach'),
       headers: _headers(const {
@@ -989,7 +989,7 @@ class HttpCortexApi implements CortexApi {
 
   /// 两条开关路由的共同外壳。读与写回的是同一个形状（落定之后的状态）——
   /// 写完不用再读一次，也就没有「读到的是改之前那一份」这种缝。
-  Future<bool> _attachCall(Future<http.Response> Function() send) async {
+  Future<LocalAttach> _attachCall(Future<http.Response> Function() send) async {
     final http.Response response;
     try {
       response = await send();
@@ -1022,7 +1022,12 @@ class HttpCortexApi implements CortexApi {
     if (enabled is! bool) {
       throw const CortexApiException('远程接入开关的响应看不懂。', statusCode: 502);
     }
-    return enabled;
+    return LocalAttach(
+      enabled: enabled,
+      // 名字缺了不是故障（老一点的 agent 没有这个字段）—— 卡片少一行字，
+      // 而开关照常能用。为它把整条路判成「答不出」是不成比例的
+      machineHint: asStringOrNull(body['machine_hint']) ?? '',
+    );
   }
 
   /// 两条根目录路由的共同外壳：读、写回的是同一个形状。

@@ -436,8 +436,10 @@ class _RemoteAttachBadge extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // 答不出来（Web 端、老 agent）与关着，都不画
-    if (ref.watch(remoteAttachProvider).value != true) {
+    // 答不出来（Web 端、老 agent）与关着，都不画。
+    // ⚠️ 判据是 `?.enabled != true` 而不是 `!= false`：三态里的 `null`
+    // 是「不知道」，而这颗标记说的是「确认开着」
+    if (ref.watch(remoteAttachProvider).value?.enabled != true) {
       return const SizedBox.shrink();
     }
     final theme = Theme.of(context);

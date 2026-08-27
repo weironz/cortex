@@ -123,12 +123,13 @@ class MockCortexApi
   bool _attach = true;
 
   @override
-  Future<bool> localAttach() async => _attach;
+  Future<LocalAttach> localAttach() async =>
+      LocalAttach(enabled: _attach, machineHint: 'WILLOPTPC');
 
   @override
-  Future<bool> setLocalAttach(bool enabled) async {
+  Future<LocalAttach> setLocalAttach(bool enabled) async {
     _attach = enabled;
-    return _attach;
+    return localAttach();
   }
 
   /// 没实现（`_search` 上面那段同一个理由）。

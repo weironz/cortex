@@ -109,6 +109,14 @@ async fn 拨开之后接入钥匙才有效_拨关之后当场失效() {
         body.contains("false"),
         "默认必须是关的 —— 「装上就有」正是安全不变量 3 盯防的那件事：{body}"
     );
+    assert!(
+        body.contains("machine_hint"),
+        concat!(
+            "响应里没有机器名 —— 「我的机器」那一页会同时画着这张卡片和整张名册，",
+            "而名册里也有这一台；卡片认不出自己的话，用户看不出它们是同一台：{body}"
+        ),
+        body = body
+    );
     assert!(st.attach.key().is_none(), "关着却有钥匙");
 
     // ── 拨开 ──
