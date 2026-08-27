@@ -576,10 +576,15 @@ pub fn image_spec() -> ToolSpec {
 pub fn subagent_spec() -> ToolSpec {
     ToolSpec {
         name: "spawn_agents".into(),
+        // ⚠️ 这里列的能力必须与 `readonly_specs` 给出的一致。此前写着
+        // 「检索资料库、联网搜」而那两样根本不在子 agent 的目录里 ——
+        // 模型于是替子 agent 承诺它做不到的事（约束 2 的现行违例，
+        // 2026-08-27 调研时发现）。要加能力，先加进目录再改这句。
         description: concat!(
             "派几个子 agent **并行**去查东西，各自独立看资料再把结论带回来。",
-            "它们只能读（读文件、看目录、检索资料库、联网搜），不能改也不能执行 —— ",
-            "写代码和跑命令是你自己的事。适合「同时了解好几处」这种活儿",
+            "它们只能读工作区里的文件（读、列目录、按内容与文件名检索），",
+            "不能改、不能执行、也不能联网 —— 写代码和跑命令是你自己的事。",
+            "适合「同时了解好几处代码」这种活儿",
         )
         .into(),
         parameters: serde_json::json!({
@@ -1822,6 +1827,39 @@ fn arg_str(v: &serde_json::Value, key: &str) -> std::result::Result<String, Stri
 
 #[cfg(test)]
 mod tests {
+    /// ⚠️ **工具描述不许承诺目录里没有的能力。**
+    ///
+    /// 这句描述是模型对子 agent 能力的唯一认知：它写什么，模型就会派
+    /// 什么活。此前写着「检索资料库、联网搜」而那两样根本不在
+    /// `readonly_specs` 里 —— 模型派出去的子 agent 答「我没有这个工具」，
+    /// 或者更糟：编一个答案（约束 2）。
+    #[test]
+    fn 子agent的描述不承诺目录里没有的能力() {
+        let desc = super::subagent_spec().description;
+        let names: Vec<String> = super::readonly_specs()
+            .into_iter()
+            .map(|s| s.name.into_owned())
+            .collect();
+
+        // 判据认**承诺短语**，不认裸词：新描述里的「不能联网」也含
+        // 「联网」二字，而那是否定不是承诺 —— 第一版按裸词判，
+        // 当场把自己的修复咬红了
+        for (claim, tool) in [("检索资料库", "library_search"), ("联网搜", "web_search")] {
+            if desc.contains(claim) {
+                assert!(
+                    names.iter().any(|n| n == tool),
+                    "描述里承诺了「{claim}」，而目录里没有 {tool} ——                      模型会替子 agent 答应它做不到的事"
+                );
+            }
+        }
+        // 描述必须把「不能什么」说出来：不说的话模型会按主 agent 的
+        // 能力想象子 agent
+        assert!(
+            desc.contains("不能"),
+            "描述要写清子 agent 的边界，此刻的描述：{desc}"
+        );
+    }
+
     use super::*;
 
     /// 运行期名字塞得进 [`ToolSpec`]，而内置的仍然不分配。
