@@ -276,7 +276,13 @@ codex 的 `windows-sandbox-rs` 是 20,501 行，但它不是一整块 —— 分
 不是文件本身。这与「能搬就不写」不冲突：那条纪律说的是别重新发明，
 不是别读懂。
 
-### 顺手核出来的一处泄漏（不是借鉴，是核代码时撞到的）
+### 顺手核出来的两处「只增不删」（不是借鉴，是核代码时撞到的）
+
+**① `request_tenant` 的测试往真库插用户，从不删** —— 每次 `just ci`
+攒 2 行，数出来时 dev 库里 610 个用户有 604 个是 `probe-<ULID>`。
+已修（`31a17ce`）：测试自己收拾，只删自己这一轮插的 id。
+
+**② `BackgroundBooks` 只增不删** —— 见下。
 
 **`BackgroundBooks` 只增不删。** 它是 `HashMap<session_id, Tasks>`，
 `for_session` 用 `entry().or_default()`，而**整个仓库没有任何地方删过条目**。
