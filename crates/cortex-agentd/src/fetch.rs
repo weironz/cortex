@@ -124,29 +124,39 @@ pub async fn fetch(
     Json(req): Json<FetchRequest>,
 ) -> Result<Json<FetchedPage>, ApiError> {
     // 认证照走 —— 抓取会花钱（按次计费），不能是个匿名可打的口子
-    let _ = st.tenant(&headers).await?;
+    let tenant = st.tenant(&headers).await?;
 
-    let key = crate::search::api_key().ok_or_else(|| {
-        // 与搜索共用一把 key，所以也共用那句话 —— 两处各写一遍的话，
-        // 改了变量名总有一处跟不上（`search` 那条测试盯的就是这个）
-        ApiError::unsupported(crate::search::not_configured_message())
-    })?;
+    let prefs = st.search_prefs(&tenant).await;
+    let Some(cfg) = prefs.resolve(crate::search::api_key()) else {
+        return Err(ApiError::unsupported(
+            crate::search::not_configured_message(),
+        ));
+    };
+    // ⚠️ **不是每家都抓得了正文。**
+    //
+    // 用户可以把搜索切到只做搜索的那一家（比如博查），而抓取这条路那时
+    // 没有可打的上游。悄悄回落到 Tavily 是错的：他未必配了 Tavily 的 key，
+    // 而就算配了，用另一家的额度做他没要求的事也不该。
+    //
+    // 界面上那个「URL 获取服务商」下拉框只列 `can_fetch` 为真的几家，
+    // 所以正常路径上走不到这里 —— 这一条挡的是「搜索换了家、抓取没跟上」。
+    if !cfg.provider.can_fetch() {
+        return Err(ApiError::unsupported(format!(
+            "你选的搜索服务商（{}）不提供网页抓取。             去 设置 → 联网检索 换一个支持抓取的，或者告诉用户这条路现在用不了。",
+            cfg.provider.display_name()
+        )));
+    }
 
     let url = req.url.trim();
     if url.is_empty() {
         return Err(ApiError::bad_request("要抓的链接不能为空"));
     }
 
-    let base = crate::search::resolve_base(
-        std::env::var(crate::search::SEARCH_BASE_ENV)
-            .ok()
-            .as_deref(),
-    );
     let resp = st
         .http()
-        .post(format!("{base}/extract"))
+        .post(format!("{}/extract", cfg.base))
         .json(&serde_json::json!({
-            "api_key": key,
+            "api_key": cfg.key,
             "urls": url,
             "format": "markdown",
             // 见模块头那张表：这三个默认值都是实测定的

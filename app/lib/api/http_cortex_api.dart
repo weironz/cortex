@@ -13,6 +13,7 @@ import '../models/account.dart';
 import '../models/auth_tokens.dart';
 import '../models/library_item.dart';
 import '../models/model_source.dart';
+import '../models/search_prefs.dart';
 import '../models/model_role.dart';
 import '../models/mcp.dart';
 import '../models/assistant.dart';
@@ -542,6 +543,35 @@ class HttpCortexApi implements CortexApi {
     return AuthTokens.fromJson(
       _decodeObject(path, utf8.decode(response.bodyBytes)),
     );
+  }
+
+  @override
+  Future<SearchPrefs> searchPrefs() async =>
+      SearchPrefs.fromJson(await _getJson('/settings/search'));
+
+  @override
+  Future<SearchPrefs> saveSearchPrefs({
+    String? provider,
+    String? apiKey,
+    String? baseUrl,
+    int? maxResults,
+    String? depth,
+    int? cutoffLimit,
+    List<String>? excludeDomains,
+  }) async {
+    // ⚠️ **每一位缺省 = 不动**，所以这里只放真的要改的那几个。
+    // 全都发一遍的话，「只改结果个数」会把 key 一起写成空串（界面手上
+    // 没有明文），而那等于替用户清掉了它
+    final body = <String, dynamic>{
+      'provider': ?provider,
+      'api_key': ?apiKey,
+      'base_url': ?baseUrl,
+      'max_results': ?maxResults,
+      'depth': ?depth,
+      'cutoff_limit': ?cutoffLimit,
+      'exclude_domains': ?excludeDomains,
+    };
+    return SearchPrefs.fromJson(await _patchJson('/settings/search', body));
   }
 
   @override

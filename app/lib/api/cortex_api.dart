@@ -7,6 +7,7 @@ import '../models/account.dart';
 import '../models/auth_tokens.dart';
 import '../models/library_item.dart';
 import '../models/model_source.dart';
+import '../models/search_prefs.dart';
 import '../models/model_role.dart';
 import '../models/mcp.dart';
 import '../models/attachment.dart';
@@ -424,6 +425,26 @@ abstract interface class CortexApi {
   /// 与「本地删掉副本」不是一回事：本地删除只让这台机器忘了，
   /// 而已经泄露出去的那一份照样能用到 30 天后。
   Future<void> logout(String refreshToken);
+
+  /// `GET /settings/search` —— 联网检索的配置。
+  ///
+  /// 回的东西里**没有明文 key**（只有后四位），与模型来源同一条约定。
+  Future<SearchPrefs> searchPrefs();
+
+  /// `PATCH /settings/search` —— 改配置。
+  ///
+  /// ⚠️ **每一位都可缺省，缺省 = 不动。** 只想改「结果个数」的人不该被要求
+  /// 重填一遍 key —— 而界面手上根本没有明文。`apiKey` 传空串 = **清掉**，
+  /// 与「没提这一位」是两回事。
+  Future<SearchPrefs> saveSearchPrefs({
+    String? provider,
+    String? apiKey,
+    String? baseUrl,
+    int? maxResults,
+    String? depth,
+    int? cutoffLimit,
+    List<String>? excludeDomains,
+  });
 
   /// `GET /settings/model-sources` —— 全部模型来源（含部署提供的那条）。
   Future<ModelSources> modelSources();
@@ -1100,6 +1121,20 @@ mixin SandboxHealthUnsupported {
 
 mixin ModelSourcesUnsupported {
   Future<ModelSources> modelSources() async => const ModelSources();
+
+  /// 联网检索的配置也在这个 mixin 里 —— 它与模型来源同一族（都是
+  /// 「这个部署配了什么」），而各家测试替身没有理由分别关掉其中一个。
+  Future<SearchPrefs> searchPrefs() async => const SearchPrefs();
+
+  Future<SearchPrefs> saveSearchPrefs({
+    String? provider,
+    String? apiKey,
+    String? baseUrl,
+    int? maxResults,
+    String? depth,
+    int? cutoffLimit,
+    List<String>? excludeDomains,
+  }) async => const SearchPrefs();
 
   Future<ModelSources> saveModelSource({
     String? id,

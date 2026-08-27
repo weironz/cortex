@@ -72,7 +72,7 @@ fn kek() -> Result<LessSafeKey, ApiError> {
 }
 
 /// 加密：`nonce(12) || 密文`。
-fn seal(plain: &str) -> Result<Vec<u8>, ApiError> {
+pub(crate) fn seal(plain: &str) -> Result<Vec<u8>, ApiError> {
     seal_with(&kek()?, plain)
 }
 
@@ -98,7 +98,7 @@ fn seal_with(key: &LessSafeKey, plain: &str) -> Result<Vec<u8>, ApiError> {
 }
 
 /// 解密。
-fn open(blob: &[u8]) -> Result<String, ApiError> {
+pub(crate) fn open(blob: &[u8]) -> Result<String, ApiError> {
     open_with(&kek()?, blob)
 }
 
@@ -1443,7 +1443,7 @@ fn requires_auth(provider: &str) -> bool {
 }
 
 /// 明文 key 的后 4 位。空串给空串（免鉴权的来源）。
-fn tail_of(key: &str) -> String {
+pub(crate) fn tail_of(key: &str) -> String {
     key.chars()
         .rev()
         .take(4)

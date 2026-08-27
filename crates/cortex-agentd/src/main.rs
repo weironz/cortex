@@ -55,6 +55,8 @@ mod routes;
 mod runner;
 mod sandbox_proxy;
 mod search;
+mod search_prefs;
+mod search_provider;
 mod sessions;
 mod skills;
 mod snapshot;

@@ -216,6 +216,10 @@ protected_routes! {
     // `unsupported` 的挑选逻辑：候选被占光时它会 panic，而那正是它该做的
     "/settings/model-sources" [GET, POST] => get(crate::model_sources::list)
         .post(crate::model_sources::create),
+    // 联网检索的配置。**与模型来源同一族** —— key 加密存、只回尾四位、
+    // 端点可覆盖；差别是它是单例（搜索同一时刻只用一家）
+    "/settings/search" [GET, PATCH] => get(crate::search_prefs::get)
+        .patch(crate::search_prefs::patch),
     // 改一条 / 删一条。**必须排在上面那条之后**没关系（路径不同段数），
     // 但要与 `/sessions/{id}` 一样注意：axum 按具体度匹配
     "/settings/model-sources/{id}" [PUT, DELETE] => axum::routing::put(crate::model_sources::update)

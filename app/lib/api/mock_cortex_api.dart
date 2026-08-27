@@ -5,6 +5,7 @@ import '../models/account.dart';
 import '../models/auth_tokens.dart';
 import '../models/library_item.dart';
 import '../models/model_source.dart';
+import '../models/search_prefs.dart';
 import 'package:cortex_app/models/import_plan.dart';
 import 'package:cortex_app/import/import_source.dart';
 import 'dart:math';
@@ -77,6 +78,55 @@ class MockCortexApi
   ///
   /// 三条足够：部署提供的那条（内置、计配额）、一条自带 key 的、
   /// 一条关着的。
+  /// mock 上「没配过、部署也没有 key」—— 于是设置页画的是「还没接」那一态，
+  /// 而那正是一个新用户第一次打开它时看到的
+  SearchPrefs _search = const SearchPrefs(
+    providers: [
+      SearchProviderInfo(
+        id: 'tavily',
+        name: 'Tavily',
+        defaultBase: 'https://api.tavily.com',
+        canFetch: true,
+      ),
+      SearchProviderInfo(
+        id: 'bocha',
+        name: '博查',
+        defaultBase: 'https://api.bochaai.com',
+        canFetch: false,
+      ),
+    ],
+  );
+
+  @override
+  Future<SearchPrefs> searchPrefs() async => _search;
+
+  @override
+  Future<SearchPrefs> saveSearchPrefs({
+    String? provider,
+    String? apiKey,
+    String? baseUrl,
+    int? maxResults,
+    String? depth,
+    int? cutoffLimit,
+    List<String>? excludeDomains,
+  }) async {
+    _search = SearchPrefs(
+      provider: provider ?? _search.provider,
+      // 与服务端同一条约定：空串 = 清掉，缺省 = 不动
+      keyTail: apiKey == null
+          ? _search.keyTail
+          : (apiKey.length < 4 ? '' : apiKey.substring(apiKey.length - 4)),
+      baseUrl: baseUrl ?? _search.baseUrl,
+      maxResults: maxResults ?? _search.maxResults,
+      depth: depth ?? _search.depth,
+      cutoffLimit: cutoffLimit ?? _search.cutoffLimit,
+      excludeDomains: excludeDomains ?? _search.excludeDomains,
+      deploymentKey: _search.deploymentKey,
+      providers: _search.providers,
+    );
+    return _search;
+  }
+
   @override
   Future<ModelSources> modelSources() async {
     await _latency(90);

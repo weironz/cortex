@@ -8,6 +8,7 @@ import 'pages/notifications_page.dart';
 import 'pages/permissions_page.dart';
 import 'pages/computer_use_page.dart';
 import 'pages/computer_use_section.dart';
+import 'pages/search_page.dart';
 import 'pages/skills_page.dart';
 import 'pages/usage_page.dart';
 import 'pages/connection_page.dart';
@@ -128,6 +129,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       hint: '写好的做法 · 按需取用',
       icon: Icons.auto_stories_outlined,
       page: const SkillsPage(),
+      group: _NavGroup.tools,
+      gate: null,
+    ),
+    // 联网检索排在技能与连接器之间：它与它们同一类（模型手上多了什么），
+    // 而它比连接器更常被找 —— 「怎么让它能上网」是新用户最早问的几件事之一
+    (
+      label: '联网检索',
+      hint: '服务商 · key · 检索深度',
+      icon: Icons.travel_explore_outlined,
+      page: const SearchPage(),
       group: _NavGroup.tools,
       gate: null,
     ),
