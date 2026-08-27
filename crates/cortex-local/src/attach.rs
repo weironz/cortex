@@ -194,6 +194,33 @@ mod tests {
             .expect("发送端还活着");
     }
 
+    /// **拨动要叫醒的不止隧道 —— 心跳也在等。**
+    ///
+    /// 一个 `generation()` 被两个循环订阅（隧道 + 心跳），少订一处的症状
+    /// 很贴脸：用户在这台机器上按下开关，转头去手机上看，那边最长 30 秒
+    /// 仍然说「接不进来」。
+    ///
+    /// 有隧道时这条到不了（隧道一建起来 controller 自己就来拉名册），
+    /// 所以它守的是**没有隧道**那条路 —— 而那正是「只在某条路上才跑的
+    /// 代码，没人验就等于没写」。
+    #[tokio::test]
+    async fn 一次拨动能叫醒多个订阅者() {
+        let sw = AttachSwitch::new(false);
+        let mut tunnel = sw.generation();
+        let mut heartbeat = sw.generation();
+        tunnel.mark_unchanged();
+        heartbeat.mark_unchanged();
+
+        sw.turn_on();
+
+        for (who, mut rx) in [("隧道", tunnel), ("心跳", heartbeat)] {
+            tokio::time::timeout(std::time::Duration::from_secs(1), rx.changed())
+                .await
+                .unwrap_or_else(|_| panic!("{who}没被叫醒 —— 它会睡满自己那一轮"))
+                .expect("发送端还活着");
+        }
+    }
+
     /// **重复按「开」不许换钥匙。**
     ///
     /// 换了的话，此刻已经建好的隧道与云端名册里那份 offer 一起作废 ——

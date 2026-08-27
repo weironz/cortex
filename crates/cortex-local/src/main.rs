@@ -250,7 +250,15 @@ struct Args {
     /// ⚠️ **反向隧道之后这个参数是可选的优化，不是前提。** 不给它照样能被
     /// 接入（走隧道）；给它是为了同网段直拨少绕一跳。灰度期两条路并存，
     /// 隧道全量后直拨整条退役 —— 见 `docs/controller-worker.md`。
-    #[arg(long, requires = "allow_remote_attach")]
+    ///
+    /// ⚠️ **不再强制要 `--allow-remote-attach`**（2026-08-27）。接入开关已经
+    /// 是运行时的了，于是「起来时关着、之后在界面上拨开」是正常路径 ——
+    /// 而 clap 那道 `requires` 会把「起来时关着，但先把通告地址备好」这个
+    /// 完全合理的组合当成用法错误顶回去。
+    ///
+    /// 关着的时候它就是没用武之地（心跳里根本没有 offer 可带），
+    /// **没用不等于用错**。
+    #[arg(long)]
     attach_addr: Option<String>,
 }
 
@@ -620,6 +628,13 @@ async fn main() -> anyhow::Result<()> {
         );
         // 绑定一变就补一条心跳，不等这一轮的 30 秒睡完，见 `Workspaces::changed`
         let bindings_changed = engine.workspaces.changed();
+        // 开关一拨也补一条 —— 同一个理由，而这一条更贴脸：用户在这台机器上
+        // 按下开关，转头去手机上看，那边最长 30 秒仍然说「接不进来」。
+        //
+        // 有隧道时这条其实到不了（隧道一建起来 controller 自己就来拉名册，
+        // 实测 0.5 秒）。它守的是**没有隧道**那条路：只走直拨的内网、
+        // 以及灰度期还不支持隧道的老 agentd
+        let mut attach_switched = state.attach.generation();
         tokio::spawn(async move {
             // 默认间隔在服务端第一次回执之前用；之后按它说的走
             let mut interval = std::time::Duration::from_secs(30);
@@ -646,6 +661,12 @@ async fn main() -> anyhow::Result<()> {
                 tokio::select! {
                     () = tokio::time::sleep(interval) => {}
                     () = bindings_changed.notified() => {}
+                    r = attach_switched.changed() => {
+                        // 发送端没了 = 进程在退出，别忙着再报一条
+                        if r.is_err() {
+                            return;
+                        }
+                    }
                 }
             }
         });
