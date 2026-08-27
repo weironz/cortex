@@ -53,7 +53,7 @@ fn state(dir: &Path) -> LocalState {
         http: reqwest::Client::new(),
         standalone_llm: false,
         inbound_token: None,
-        attach_token: None,
+        attach: crate::attach::AttachSwitch::default(),
         terminals: crate::terminal::Terminals::default(),
     }
 }

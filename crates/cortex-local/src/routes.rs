@@ -75,6 +75,9 @@ pub fn router(state: LocalState) -> Router {
         // 桌面端的 access token 每 15 分钟轮换一次，而这个进程的出站凭据
         // 原本烧在启动参数里 —— 见 `set_credential` 的文档
         .route("/local/credential", put(set_credential))
+        // 远程接入的开关。**入站凭据那一档**，接入钥匙够不到它 ——
+        // 够得到的话，接进来的一方就能自己给自己续命。见 `attach_allows`
+        .route("/local/attach", get(attach_state).put(set_attach))
         // 「新建会话时没选工作区」那一档：按日期时间开一个文件夹并绑上。
         // 为什么由客户端来要而不是 agent 自己看着办，见 handler
         .route(
@@ -208,7 +211,8 @@ async fn require_auth(State(st): State<LocalState>, req: Request, next: Next) ->
     let full = bearer.is_some_and(|t| bytes_eq(t.as_bytes(), expected.as_bytes()));
     // 远程接入那把：**只在接入面上有效**。见 `attach_allows`
     let attach = st
-        .attach_token
+        .attach
+        .key()
         .as_deref()
         .is_some_and(|k| bearer.is_some_and(|t| bytes_eq(t.as_bytes(), k.as_bytes())))
         && attach_allows(req.method(), req.uri().path());
@@ -327,6 +331,62 @@ async fn set_credential(
     st.remote.set_token(body.token);
     // 不回声任何凭据内容：这条响应会进代理日志
     StatusCode::NO_CONTENT
+}
+
+/// `GET /local/attach` —— 现在开着没有。
+///
+/// **不回钥匙**，只回一个布尔：钥匙是给云端名册的，不是给界面的
+/// （与 `AgentPresenceDto` 只回一个布尔同一条纪律）。界面要显示的就是
+/// 开关的位置，多给一个字符串只会多一个可能泄露的地方。
+async fn attach_state(State(st): State<LocalState>) -> Json<AttachState> {
+    Json(AttachState {
+        enabled: st.attach.is_on(),
+    })
+}
+
+/// `PUT /local/attach` —— 拨动远程接入，**不重启这个进程**。
+///
+/// # 为什么必须是热的
+///
+/// 重启换来的代价这个仓库已经付过一次（见 `Remote::set_token`）：跑着的
+/// 轮次被拦腰砍断、监听端口换一个、旧进程用退位的凭据答 401 把用户踢回
+/// 登录页。一次拨开关不该有这些。
+///
+/// # 谁能调它
+///
+/// 能出示**入站凭据**的人 —— 也就是拉起这个 agent 的那个桌面端。
+/// 接入钥匙够不到（`attach_allows` 里没有这条），否则接进来的一方
+/// 就能自己保证自己接得进来，而机器主人关不掉。
+///
+/// # 关掉是当场生效的
+///
+/// 钥匙立刻作废（此后经隧道来的请求 401）、在飞的那条隧道当场断开
+/// （见 [`crate::tunnel`]）、下一拍心跳不再带 offer。三处都要，
+/// 少一处就是一个假开关。
+async fn set_attach(
+    State(st): State<LocalState>,
+    Json(body): Json<AttachUpdate>,
+) -> Json<AttachState> {
+    if body.enabled {
+        st.attach.turn_on();
+        tracing::info!("远程接入已打开 —— 云端可经模型在这台机器上执行命令");
+    } else {
+        st.attach.turn_off();
+        tracing::info!("远程接入已关闭");
+    }
+    Json(AttachState {
+        enabled: st.attach.is_on(),
+    })
+}
+
+#[derive(serde::Serialize)]
+struct AttachState {
+    enabled: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct AttachUpdate {
+    enabled: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -932,6 +992,9 @@ mod attach_tests {
         assert!(!attach_allows(&Method::DELETE, "/runs"));
         // 换凭据、绑目录、改 MCP 那三样永远在名单外，方法换成什么都一样
         assert!(!attach_allows(&Method::DELETE, "/local/credential"));
+        // 开关本身：接进来的一方不许给自己续命，也不许替机器主人关掉
+        assert!(!attach_allows(&Method::PUT, "/local/attach"));
+        assert!(!attach_allows(&Method::GET, "/local/attach"));
         assert!(!attach_allows(&Method::PUT, "/local/workspaces/01ABC"));
         // 名册那条是只读的。写方法进白名单等于凭空多一个可写面
         assert!(!attach_allows(&Method::POST, "/agents/state"));

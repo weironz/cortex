@@ -83,7 +83,7 @@ impl FromRef<LocalState> for WsUpstream {
             http: st.http.clone(),
             remote: st.remote.clone(),
             inbound_token: st.inbound_token.clone(),
-            attach_token: st.attach_token.clone(),
+            attach_token: st.attach.key(),
         }
     }
 }

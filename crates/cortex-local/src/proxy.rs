@@ -94,7 +94,7 @@ pub async fn forward(State(st): State<LocalState>, req: Request) -> Response {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer ")),
         st.inbound_token.as_deref(),
-        st.attach_token.as_deref(),
+        st.attach.key().as_deref(),
     );
 
     let mut headers = HeaderMap::new();

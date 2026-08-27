@@ -29,14 +29,15 @@ pub struct LocalState {
     /// **不认证只该出现在没有远端 token 的开发场景**。它绑在 loopback 上
     /// 但能跑 shell，同机任意进程都够得着。
     pub inbound_token: Option<String>,
-    /// 远程接入专用的钥匙。`None` = 这台机器不接受远程接入（**默认**）。
+    /// 这台机器接不接受远程接入（**默认不**），以及开着时那把钥匙。
     ///
     /// 与 [`Self::inbound_token`] 是两把不同的钥匙，权限差别很大：入站那把
     /// 能换出站凭据、绑工作区、改 MCP 配置（那是「拉起我的那个桌面端」的
     /// 权限）；这把只在**接入面**上有效，其余一律 401。
     ///
+    /// **运行时可拨动** —— 理由与「关掉要真的断开」见 [`crate::attach`]。
     /// 见 `cortex_proto::presence::AttachOffer` 与 `routes::attach_allows`。
-    pub attach_token: Option<String>,
+    pub attach: crate::attach::AttachSwitch,
     /// 交互终端的占用簿（每会话同时最多一个）。见 [`crate::terminal`]。
     pub terminals: crate::terminal::Terminals,
 }

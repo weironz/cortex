@@ -133,7 +133,7 @@ fn state(dir: &Path, remote_base: &str, inbound: Option<&str>) -> LocalState {
         terminals: crate::terminal::Terminals::default(),
         standalone_llm: false,
         inbound_token: inbound.map(ToOwned::to_owned),
-        attach_token: None,
+        attach: crate::attach::AttachSwitch::default(),
     }
 }
 

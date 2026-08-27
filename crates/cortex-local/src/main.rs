@@ -18,6 +18,7 @@
 //! 对话排进本地队列（[`outbox`]），恢复连接后自动补写。
 //! 界面上会明说「记忆未连接」：不说的话，用户只会觉得它突然变笨了。
 
+mod attach;
 mod attachments;
 mod checkpoint;
 mod computer;
@@ -48,6 +49,10 @@ mod tunnel;
 mod turn;
 mod workspaces;
 mod ws_proxy;
+
+/// 远程接入开关的端到端断言：拨开接入面才活，拨关当场死（不开端口）。
+#[cfg(test)]
+mod attach_routes_test;
 
 /// 四条本地工作空间路由的端到端断言（不开端口，见文件头）。
 #[cfg(test)]
@@ -451,7 +456,7 @@ async fn main() -> anyhow::Result<()> {
         // 桌面端离线模式传的正是 `token ?? ''` —— 结果是它被自己拉起的
         // agent 全程 401，而日志里没有任何一行说明为什么
         inbound_token: args.token.clone().filter(|t| !t.trim().is_empty()),
-        attach_token: attach_key(args.allow_remote_attach),
+        attach: attach::AttachSwitch::new(args.allow_remote_attach),
         terminals: terminal::Terminals::default(),
     };
 
@@ -577,14 +582,21 @@ async fn main() -> anyhow::Result<()> {
         // 的后果是**诊断说谎**：隧道断掉之后 agentd 探不通那个地址，
         // 于是那句 409 说「查一下它 --bind 的地址」，而真相是这台机器休眠了。
         // 报 `None` 才让服务端分得清「地址配错了」与「隧道断了」。
-        let attach_offer =
-            state
-                .attach_token
-                .as_ref()
+        // ⚠️ **每一拍现算，不是启动时算一次。**
+        //
+        // 开关是运行时可拨动的（见 [`attach`]）：拨到关之后心跳还带着
+        // offer 的话，云端名册里这台机器仍然写着「可接入」，而它已经
+        // 不接了 —— 用户在 Web 上点进去，拿到的是一个没人解释得了的失败。
+        let attach_switch = state.attach.clone();
+        let attach_addr = args.attach_addr.clone();
+        let attach_offer = move || {
+            attach_switch
+                .key()
                 .map(|token| cortex_proto::presence::AttachOffer {
-                    addr: args.attach_addr.clone(),
-                    token: token.clone(),
-                });
+                    addr: attach_addr.clone(),
+                    token,
+                })
+        };
         // agent_id 每次启动换一把即可：名册按 (owner, agent_id) 存，旧的那条
         // 会因为不再有心跳而在 TTL 之后自然消失。不必持久化一个「机器 id」——
         // 而且**刻意不持久化**：那种 id 在重装或克隆之后会骗人，
@@ -593,18 +605,19 @@ async fn main() -> anyhow::Result<()> {
 
         // ── 反向隧道（controller+worker 阶段 1）──
         //
-        // 只在开了远程接入时建：隧道的唯一用途是把请求送进 attach 面。
-        // 只为「被看见」的话心跳就够了 —— 于是 `--allow-remote-attach`
-        // 这道「显式交出执行能力」的闸原样保留（安全不变量 3）。
-        if let Some(attach_token) = state.attach_token.clone() {
-            tunnel::spawn(
-                state.http.clone(),
-                engine.remote.clone(),
-                app.clone(),
-                agent_id.clone(),
-                attach_token,
-            );
-        }
+        // 隧道任务**常驻**，但开关关着时它只是等着 —— 一个字节都不发。
+        //
+        // 从前这里是 `if let Some(key) = …`：启动时关着就永远不建，用户
+        // 之后拨开也没用。而隧道的唯一用途仍然是把请求送进 attach 面，
+        // 所以「关着不拨号」这条纪律一个字不改（安全不变量 3），
+        // 变的只是**这个判断挪进了循环**。见 `tunnel::spawn`。
+        tunnel::spawn(
+            state.http.clone(),
+            engine.remote.clone(),
+            app.clone(),
+            agent_id.clone(),
+            state.attach.clone(),
+        );
         // 绑定一变就补一条心跳，不等这一轮的 30 秒睡完，见 `Workspaces::changed`
         let bindings_changed = engine.workspaces.changed();
         tokio::spawn(async move {
@@ -615,7 +628,7 @@ async fn main() -> anyhow::Result<()> {
                     agent_id: agent_id.clone(),
                     machine_hint: machine_hint.clone(),
                     sessions: engine.workspaces.bound_sessions(),
-                    attach: attach_offer.clone(),
+                    attach: attach_offer(),
                 };
                 match engine.remote.heartbeat(&hb).await {
                     // TTL 的三分之一 —— 掉一条心跳还来得及补上第二条，
@@ -693,53 +706,9 @@ fn write_addr_file(path: &std::path::Path, addr: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// 接入钥匙 —— **开了远程接入才有，且每次启动现铸**。
-///
-/// # 它同时是「建不建隧道」的判据（安全不变量 3）
-///
-/// `None` 一路传下去：没有钥匙 → `tunnel::spawn` 那个 `if let` 走不到 →
-/// 不建隧道。两件事共用同一个 `Option` 是有意的 —— 拆成两个开关的话，
-/// 「建了隧道但没开接入」这个组合就成立了，而隧道的唯一用途正是把请求
-/// 送进接入面：那会变成一条谁都不需要、也没人验的常驻长连。
-///
-/// # 为什么现铸，不复用入站凭据
-///
-/// 入站凭据（`--token`）能换出站身份、绑工作区、改 MCP、开终端 ——
-/// 那是「拉起我的那个桌面端」的权限。把它当接入钥匙用是**最省事的写法**，
-/// 也是安全不变量 2 说的那件不许做的事：controller 从此持有了它。
-///
-/// 也不持久化：钥匙的寿命就是这个进程的寿命，而落盘的钥匙是一件需要被
-/// 保管、轮换、清理的东西。
-fn attach_key(allow_remote_attach: bool) -> Option<String> {
-    allow_remote_attach.then(|| cortex_core::Id::new().to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// **安全不变量 3 的 worker 半边：没开远程接入 = 没有钥匙 = 不建隧道。**
-    ///
-    /// 顺带钉住不变量 2 的一半：钥匙是现铸的，不是从别处（尤其不是从入站
-    /// 凭据）派生的 —— 两次调用必须给出两把不同的。
-    #[test]
-    fn 没开远程接入就没有接入钥匙() {
-        assert_eq!(
-            attach_key(false),
-            None,
-            "没开 --allow-remote-attach 却铸出了钥匙 —— 隧道会跟着建起来，             而「这个进程能跑 shell」这件事的主人从没同意过"
-        );
-        let a = attach_key(true).expect("开了就该有");
-        let b = attach_key(true).expect("开了就该有");
-        assert_ne!(
-            a, b,
-            "两次启动铸出同一把钥匙 = 它是派生的而不是现铸的；             一旦派生自入站凭据，controller 就等于拿到了那把机器主人的钥匙"
-        );
-        assert!(
-            !a.trim().is_empty(),
-            "空串钥匙会让「有没有开」这件事失去意义"
-        );
-    }
 
     /// **安全不变量 4：开关文案必须说破「远程侧可经模型触发本机执行」。**
     ///

@@ -64,18 +64,28 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// 起隧道维持任务。只在 `--allow-remote-attach` 且本机模式时调（main.rs）。
+/// 起隧道维持任务。本机模式下**常驻**（main.rs），拨号与否看开关。
+///
+/// # 为什么是常驻任务 + 循环里判断，而不是「开着才 spawn」
+///
+/// 后者是从前的写法，它把「开关」钉死成了启动参数：启动时关着，之后用户
+/// 在界面上拨开也没有任何效果，而**不会有任何报错**。
+///
+/// 纪律一个字不改：关着就一个字节都不发（安全不变量 3）——
+/// 变的只是这个判断挪进了循环。
 pub fn spawn(
     http: reqwest::Client,
     remote: Remote,
     router: axum::Router,
     agent_id: String,
-    attach_token: String,
+    attach: crate::attach::AttachSwitch,
 ) {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         // 「凭据换过了」的订阅。见下面 `Denied` 那一支
         let mut fresh_credential = remote.token_generation();
+        // 「开关被拨动了」的订阅
+        let mut switched = attach.generation();
         // 上一轮的结局，用来只在**状态变化**时说话：每 10 分钟一条
         // 「还是 401」会把日志淹掉，而第一条才是要紧的
         let mut last_outcome = String::new();
@@ -84,6 +94,21 @@ pub fn spawn(
             // 401 之后的话，「拨号被拒 → 新凭据推来 → 才开始等」这个缝里
             // 的那一次推送会被当成旧闻，于是白等十分钟
             fresh_credential.mark_unchanged();
+            // 同理必须在读开关之前：读到「关」之后才开始等的话，
+            // 这中间那一次拨动会被当成旧闻，于是用户按了开关没反应
+            switched.mark_unchanged();
+            let Some(attach_token) = attach.key() else {
+                // 关着 —— 一个字节都不发，等被拨开
+                if last_outcome != "off" {
+                    tracing::info!("远程接入关着，不建隧道");
+                    last_outcome = "off".to_owned();
+                }
+                if switched.changed().await.is_err() {
+                    return; // 开关没了 = 进程在退出
+                }
+                backoff = Duration::from_secs(1);
+                continue;
+            };
             match connect(&http, &remote, &agent_id, &attach_token).await {
                 Ok(ws) => {
                     if !last_outcome.is_empty() {
@@ -93,7 +118,29 @@ pub fn spawn(
                         tracing::info!("反向隧道已建立");
                     }
                     backoff = Duration::from_secs(1);
-                    let deliberate = serve(ws, router.clone()).await;
+                    // ⚠️ **拨到关必须拆掉这条在飞的连接**，不只是以后不再拨号。
+                    //
+                    // 只管重连的话，关掉之后这条已经建好的隧道还在服务请求 ——
+                    // 界面上写着关，云端照样接得进来。那是一个**假开关**，
+                    // 而假开关比没有开关坏：用户以为自己关了。
+                    //
+                    // 打断的是传输层。worker 上正在跑的那一轮是 detached 的
+                    // （`runs.rs`），结果照样落进历史 —— 断的是「再接进来」。
+                    let deliberate = tokio::select! {
+                        d = serve(ws, router.clone()) => d,
+                        r = switched.changed() => {
+                            if r.is_ok() && !attach.is_on() {
+                                tracing::info!("远程接入被关掉，隧道当场断开");
+                            }
+                            // 当成「有意关闭」：这不是故障，不该进退避曲线。
+                            // 下一圈开头会重新读开关 —— 关着就等着，
+                            // 开着（拨了两下）就立刻重连
+                            true
+                        }
+                    };
+                    if !attach.is_on() {
+                        continue;
+                    }
                     if deliberate {
                         // 对端体面关闭 —— 多半是 agentd 发版。快回去，
                         // 别让一次日常发版把这台机器晾进退避曲线

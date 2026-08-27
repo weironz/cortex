@@ -62,7 +62,7 @@ fn state(dir: &Path, exec_env: cortex_agent::ExecEnvironment) -> LocalState {
         // **刻意不设**：不认证的形态正是这道防线唯一的守卫者，
         // 设了 token 的话这几条就分不清是谁拦下来的
         inbound_token: None,
-        attach_token: None,
+        attach: crate::attach::AttachSwitch::default(),
         terminals: crate::terminal::Terminals::default(),
     }
 }
