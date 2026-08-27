@@ -117,6 +117,20 @@ class MockCortexApi
   ///
   /// 回空列表会让「我的机器」那一页在离线演示里是一片空白 —— 而空白与
   /// 「这个部署没有任何机器」长得一模一样，看到的人分不出是没数据还是
+  /// 夹具里这台机器的开关状态。**开着** —— 那一档才是要看的：
+  /// 关着长什么样一目了然，而「开着时界面有没有把那句话说破」
+  /// 才是需要盯着看的（安全不变量 4）。
+  bool _attach = true;
+
+  @override
+  Future<bool> localAttach() async => _attach;
+
+  @override
+  Future<bool> setLocalAttach(bool enabled) async {
+    _attach = enabled;
+    return _attach;
+  }
+
   /// 没实现（`_search` 上面那段同一个理由）。
   ///
   /// 两行：一台开了远程接入的（常态），一台没开的（那一档的样子也要看得见）。

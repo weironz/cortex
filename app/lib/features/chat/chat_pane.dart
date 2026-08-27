@@ -3,10 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
+import '../../state/remote_attach_controller.dart';
 import '../../widgets/panel_header.dart';
 import '../workspace/right_rail.dart'
     show kRailToggleFilled, kRailToggleOutlined;
 import '../settings/pages/model_picker.dart';
+import '../settings/settings_sheet.dart';
 import '../shell/widgets/sync_indicator.dart';
 import 'session_changes_sheet.dart';
 import 'widgets/awaiting_confirm_pill.dart';
@@ -237,6 +239,11 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             // 以为工作区也是「看不看」而不是「跑在哪」
             const SyncIndicator(),
             const _BackendBadge(),
+            // 「这台机器现在对云端开着」——**只在开着时画**。
+            //
+            // 它不是显示开关，是**状态**，与 `_BackendBadge` 同一类：
+            // 那一排里唯一被赶出去的是「跑在哪」那种发送前要定的事。
+            const _RemoteAttachBadge(),
             // 本会话改动。右栏能开时开到「本轮改动」页签 —— 改动是
             // **对照着对话读**的，弹层会把对话挡住；右栏开不了的场景
             // 退回弹层
@@ -405,6 +412,65 @@ class _BackendBadge extends ConsumerWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 远程接入开着时那颗标记。
+///
+/// # 为什么开着才画
+///
+/// 与 `_BackendBadge` 同一条论证：一枚恒在的章只会训练人忽略那个位置。
+/// 而这里还多一层 —— **关着是常态、开着是一个提高了风险的状态**，
+/// 只有后者需要被看见。
+///
+/// # 为什么它非在顶栏不可
+///
+/// 「我的机器现在能被远程接进来」是一个安全状态。把它只放在设置页里，
+/// 等于要求用户记得自己什么时候开过 —— 而这个开关最坏的失败模式正是
+/// 「以为关了其实开着」。所以它必须在任何滚动位置都看得见，点一下直达。
+class _RemoteAttachBadge extends ConsumerWidget {
+  const _RemoteAttachBadge();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // 答不出来（Web 端、老 agent）与关着，都不画
+    if (ref.watch(remoteAttachProvider).value != true) {
+      return const SizedBox.shrink();
+    }
+    final theme = Theme.of(context);
+    final color = theme.colorScheme.primary;
+    return Tooltip(
+      message: '远程接入开着 —— 其他设备可以接进这台机器并经模型执行命令。点开管理',
+      child: InkWell(
+        onTap: () => showSettingsSheet(context, at: '我的机器'),
+        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
+            border: Border.all(color: color.withValues(alpha: 0.35)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.cloud_done_outlined, size: 12, color: color),
+              const SizedBox(width: 5),
+              Text(
+                '远程接入',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.4,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

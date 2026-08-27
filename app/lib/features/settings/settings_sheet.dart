@@ -22,10 +22,12 @@ import 'pages/model_roles_page.dart';
 ///
 /// 名字与文件名保留了旧的（`settings_sheet.dart` / `showSettingsSheet`）：
 /// 唯一的调用点在账号栏，改名要动一个与这次无关的文件，而收益是零。
-Future<void> showSettingsSheet(BuildContext context) {
+/// `at` 给了的话直接落在那一页（按 `label` 找）。找不到就落回第一页 ——
+/// 一个打不开的深链不该把设置整个弄挂。
+Future<void> showSettingsSheet(BuildContext context, {String? at}) {
   return Navigator.of(context).push(
     MaterialPageRoute<void>(
-      builder: (_) => const SettingsPage(),
+      builder: (_) => SettingsPage(at: at),
       // 设置不是「对话的一部分」，它是另一个地方 —— 全屏路由而不是弹层，
       // 这样返回键、手势返回、以及窗口缩放都按平台的规矩走
       fullscreenDialog: false,
@@ -59,7 +61,10 @@ Future<void> showSettingsSheet(BuildContext context) {
 /// 上一版写着「只有八项不分组」—— 现在十项了，每组两三条，组标题开始
 /// 挣回它占的那一行：想改模型的人不必扫过技能和用量。
 class SettingsPage extends ConsumerStatefulWidget {
-  const SettingsPage({super.key});
+  const SettingsPage({super.key, this.at});
+
+  /// 直接落在哪一页（按 [_Section.label] 找）。`null` = 第一页。
+  final String? at;
 
   @override
   ConsumerState<SettingsPage> createState() => _SettingsPageState();
@@ -99,7 +104,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   /// 差别在闸会变：`/health` 还没回来时电脑操作那一项不摆，回来之后摆上。
   /// 存可见序号的话，那一刻用户选中的页会**悄悄换成另一页** —— 而他什么
   /// 都没点。存全量索引则天然不受影响。
-  int _index = 0;
+  late int _index = _initialIndex();
+
+  /// 深链落点。找不到就第一页 —— 一个拼错的 label 不该把设置弄挂。
+  int _initialIndex() {
+    final at = widget.at;
+    if (at == null) return 0;
+    final i = _sections.indexWhere((s) => s.label == at);
+    return i < 0 ? 0 : i;
+  }
 
   // 组内排序沿用原则「按我要改什么，不按它属于哪个模块」；
   // 组间顺序 = _NavGroup 声明顺序。列表按组连续排，组头在渲染时

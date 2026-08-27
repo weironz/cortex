@@ -23,11 +23,20 @@
 /// 于是它落在设置页的「系统」组，与「连接」并列 —— 那一组回答的正是
 /// 「这套东西现在连着什么」。
 ///
-/// # 这一页只读
+/// # 只有**这台**机器的开关在这里
 ///
-/// 开不开放远程接入是**那台机器上**的决定（`--allow-remote-attach`），
-/// 不是这里点一下就能改的 —— 让云端够到一个能跑 shell 的进程，必须是
-/// 机器主人在那台机器上的一次显式选择。所以这里只答「有哪些、够不够得着」。
+/// 开不开放远程接入必须是**那台机器上**的一次显式决定 —— 让云端够到一个
+/// 能跑 shell 的进程，不该是别处点一下就成的事。
+///
+/// 而桌面端**就跑在这台机器上**，所以「本机」那一档正好满足这个条件：
+/// 页面顶上那张卡片拨的是本进程拉起的那个 agent（`PUT /local/attach`），
+/// 走的是入站凭据那一档，接入钥匙够不到（安全不变量 3）。
+///
+/// 列表里**别人家那几台仍然只读**：那条论证一个字没变。
+///
+/// ⚠️ 2026-08-27 之前这一页整个只读，而开关只能从命令行传 ——
+/// 桌面端**从来没传过**。也就是说反向隧道整条路对桌面端用户等于不存在
+/// （这个仓库榜首那个形状）。这张卡片是它的补丁。
 library;
 
 import 'dart:async';
@@ -39,6 +48,7 @@ import '../../../api/api_exception.dart';
 import '../../../core/theme.dart';
 import '../../../models/agent_presence.dart';
 import '../../../state/app_providers.dart';
+import '../../../state/remote_attach_controller.dart';
 import '../../../widgets/empty_state.dart';
 import '../../../widgets/panel_header.dart';
 
@@ -104,12 +114,20 @@ class MachinesPage extends ConsumerWidget {
               ),
             ),
             data: (list) => list.isEmpty
-                ? const _Nobody()
+                // ⚠️ 空名册时**也要画那张卡片**：名册空最常见的原因正是
+                // 「这台机器还没开远程接入所以没什么可看的」，而这时候把
+                // 唯一能改变现状的开关藏起来，用户就只剩一句「现在没有
+                // 在线的机器」可看
+                ? ListView(
+                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+                    children: const [_ThisMachineCard(), _Nobody()],
+                  )
                 : ListView(
                     padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
                     children: [
                       const _Intro(),
                       const SizedBox(height: 12),
+                      const _ThisMachineCard(),
                       for (final m in list) _MachineRow(machine: m),
                     ],
                   ),
@@ -265,5 +283,127 @@ class _AttachBadge extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// 「这台机器」——**唯一一张能拨的卡片**。
+///
+/// 见库文档：它拨的是本进程拉起的那个 agent，而桌面端就跑在这台机器上，
+/// 所以「机器主人在那台机器上的一次显式选择」这个条件是满足的。
+///
+/// # 答不出来时整节不画
+///
+/// Web 端、纯 cortexd、比这条路由旧的本地 agent 都会 404。那时**不画** ——
+/// 不是画一个永远关着的开关（做不到就别摆出来，与「电脑操作」同一条纪律）。
+class _ThisMachineCard extends ConsumerWidget {
+  const _ThisMachineCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final attach = ref.watch(remoteAttachProvider);
+    // loading 与 error 都不画：loading 一闪而过，而 error 的意思就是
+    // 「这个后端没有这个能力」
+    final enabled = attach.value;
+    if (enabled == null) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final tokens = theme.cortex;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
+        border: Border.all(
+          // 开着是一个**提高了风险**的状态，边框跟着变 —— 但用的是
+          // 主题色不是错误色：这不是故障，是一个用户自己选的状态
+          color: enabled
+              ? scheme.primary.withValues(alpha: 0.45)
+              : scheme.outlineVariant,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                enabled ? Icons.cloud_done_outlined : Icons.computer_outlined,
+                size: 18,
+                color: enabled ? scheme.primary : tokens.foregroundTertiary,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '这台机器 · 远程接入',
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      enabled
+                          ? '开着 —— 其他设备可以接进来'
+                          : '关着 —— 只有这台机器上的 Cortex 用得到它',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: tokens.foregroundTertiary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Switch(
+                value: enabled,
+                // 拨动期间不许再拨：两次点击会发出两个相反的请求，
+                // 而先回来的那个未必是后点的那个
+                onChanged: attach.isLoading
+                    ? null
+                    : (want) => unawaited(_toggle(context, ref, want)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            // ⚠️ 这一段由 `remote_attach_wording_test.dart` 守着 ——
+            // 它必须说破「可经模型在这台机器上执行命令」（安全不变量 4）
+            kRemoteAttachExplainer,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: tokens.foregroundTertiary,
+              height: 1.6,
+            ),
+          ),
+          if (enabled) ...[
+            const SizedBox(height: 6),
+            Text(
+              kRemoteAttachOffNote,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: tokens.foregroundTertiary,
+                height: 1.6,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 失败要说出来。
+  ///
+  /// 静默失败在这个开关上格外贵：用户以为自己关了，而云端接得进来。
+  /// 所以不乐观更新（见 `RemoteAttachController.set`），失败就弹一条。
+  Future<void> _toggle(BuildContext context, WidgetRef ref, bool want) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    try {
+      await ref.read(remoteAttachProvider.notifier).set(want);
+    } on Object catch (e) {
+      messenger?.showSnackBar(
+        SnackBar(content: Text('${want ? '打开' : '关闭'}远程接入失败：$e')),
+      );
+    }
   }
 }

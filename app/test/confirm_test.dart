@@ -494,7 +494,8 @@ class _ConfirmApi
         SessionSearchUnsupported,
         UsageUnsupported,
         SandboxHealthUnsupported,
-        AgentsUnsupported
+        AgentsUnsupported,
+        LocalAttachUnsupported
     implements CortexApi {
   _ConfirmApi({
     this.accept = true,

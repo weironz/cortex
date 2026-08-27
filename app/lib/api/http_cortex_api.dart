@@ -967,6 +967,64 @@ class HttpCortexApi implements CortexApi {
         ),
       );
 
+  @override
+  Future<bool> localAttach() => _attachCall(
+    () => _client.get(
+      _uri('/local/attach'),
+      headers: _headers(const {'accept': 'application/json'}),
+    ),
+  );
+
+  @override
+  Future<bool> setLocalAttach(bool enabled) => _attachCall(
+    () => _client.put(
+      _uri('/local/attach'),
+      headers: _headers(const {
+        'content-type': 'application/json',
+        'accept': 'application/json',
+      }),
+      body: jsonEncode({'enabled': enabled}),
+    ),
+  );
+
+  /// 两条开关路由的共同外壳。读与写回的是同一个形状（落定之后的状态）——
+  /// 写完不用再读一次，也就没有「读到的是改之前那一份」这种缝。
+  Future<bool> _attachCall(Future<http.Response> Function() send) async {
+    final http.Response response;
+    try {
+      response = await send();
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    // Web 端、纯 cortexd、以及比这条路由旧的本地 agent。调用方据此
+    // **整个不画那个开关**，而不是画一个永远关着的
+    if (response.statusCode == 404 || response.statusCode == 405) {
+      throw _failure(
+        response.statusCode,
+        '这个后端没有远程接入开关。',
+        headers: response.headers,
+      );
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(
+        response.statusCode,
+        _errorMessage(response),
+        headers: response.headers,
+      );
+    }
+    final body = _decodeObject(
+      '/local/attach',
+      utf8.decode(response.bodyBytes),
+    );
+    // 缺字段当成「关着」是**错的**：那会把一台开着的机器画成关着。
+    // 读不懂就当这个后端答不出来，走上面那条「整个不画」
+    final enabled = body['enabled'];
+    if (enabled is! bool) {
+      throw const CortexApiException('远程接入开关的响应看不懂。', statusCode: 502);
+    }
+    return enabled;
+  }
+
   /// 两条根目录路由的共同外壳：读、写回的是同一个形状。
   Future<LocalWorkspaceRoot> _rootCall(
     Future<http.Response> Function() send,

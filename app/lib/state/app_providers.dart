@@ -56,6 +56,7 @@ import 'auth_controller.dart';
 // 而把 MainView 那套挪去 chat_controller 会让「我在哪个地方」跟对话状态
 // 绑在一起，那正是它当初没塞进 LayoutState 的同一个理由
 import 'chat_controller.dart';
+import 'remote_attach_controller.dart';
 
 /// Mutable runtime config. Seeded from `--dart-define`, editable in settings.
 /// 读取跨重启的非密设置。做成 provider 是为了能在测试里换掉 ——
@@ -105,6 +106,20 @@ final settingsPatcherProvider = Provider<Future<void> Function(String, String)>(
     };
   },
 );
+
+/// 上次拨到「开」了吗 —— **只用来决定这次启动传不传 flag**。
+///
+/// 权威是运行时那个开关（`remoteAttachProvider`），见它的库文档。
+/// 读不到 / 读不懂一律当**关**：这个方向的默认值不对称，
+/// 「该开的没开」用户点一下就好了，「该关的开着」他不会发现。
+Future<bool> _savedRemoteAttach(Ref ref) async {
+  try {
+    final saved = await ref.read(settingsReaderProvider)();
+    return saved[kRemoteAttachSetting] == 'true';
+  } on Object catch (_) {
+    return false;
+  }
+}
 
 class AppConfigNotifier extends Notifier<AppConfig> {
   /// 上一次用的地址在**磁盘**上，读它要异步；而 `build` 是同步的。
@@ -1228,6 +1243,10 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
       // 离线模式必须本地直连模型：代理那条路要经 cortexd，而它不存在。
       // 传 null 表示「不干预」，让 agent 自己按环境变量决定
       llmRoute: offline ? 'direct' : null,
+      // 上次拨到「开」就照旧开着。**只是启动默认值** —— 权威是运行时那个
+      // 开关（见 `remoteAttachProvider`）。存这一份是为了让「我开过了」
+      // 活过一次重启，而不是让它成为第二个真相
+      allowRemoteAttach: await _savedRemoteAttach(ref),
       // 只在离线模式下注入：连着服务器时模型是 cortexd 的事，
       // 把本机那份塞进去只会让两处配置打架
       extraEnv: offline ? localLlm?.toEnvironment() : null,

@@ -550,7 +550,8 @@ class _GateApi
         SessionSearchUnsupported,
         UsageUnsupported,
         SandboxHealthUnsupported,
-        AgentsUnsupported
+        AgentsUnsupported,
+        LocalAttachUnsupported
     implements CortexApi {
   _GateApi({
     this.auth = 'token',

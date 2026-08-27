@@ -144,6 +144,7 @@ class LocalAgent {
     required String remote,
     required String token,
     String? llmRoute,
+    bool allowRemoteAttach = false,
     Map<String, String>? extraEnv,
     Duration timeout = const Duration(seconds: 20),
     void Function(int code, String logTail)? onExit,
@@ -209,6 +210,13 @@ class LocalAgent {
         '$pid',
         '--addr-file',
         addrFile.path,
+        // 上次拨到「开」的话，这次起来就是开着的。
+        //
+        // ⚠️ **只是启动默认值。** 权威是运行时那个开关
+        // （`PUT /local/attach`）—— 界面显示的、拨动的都是它。
+        // 这里读的那份设置只回答「这个进程起来时是开还是关」，
+        // 两者短暂不一致时**以运行时那份为准**（它才是真的）。
+        if (allowRemoteAttach) '--allow-remote-attach',
       ], environment: env);
     } on ProcessException catch (e) {
       _launchLog.failed(why: '启动本地 agent 失败：${e.message}');
