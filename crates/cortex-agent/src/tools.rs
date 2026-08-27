@@ -1827,6 +1827,60 @@ fn arg_str(v: &serde_json::Value, key: &str) -> std::result::Result<String, Stri
 
 #[cfg(test)]
 mod tests {
+
+    /// **工具描述里不许出现连续空格。**
+    ///
+    /// 连续空格在这里只有一个来源：一段本来分行写的说明被 `cargo fmt`
+    /// 压成了一行，而每行开头的缩进原样留了下来。模型收到的于是是
+    /// 「不提供网页抓取。         去 设置」这种东西 —— 读起来还能懂，
+    /// 但那是运气，而且每一个空格都在花 token。
+    ///
+    /// `b413dc6` 手工扫过一遍全仓库（131 处），这条是让那次清扫**守得住**。
+    /// 手工扫的东西没有闸的话，下一个人加一条多行描述就把它扫回来了 ——
+    /// 2026-08-28 就发现 `prompt.rs` 的 `skills_note` 是漏网的那一处
+    /// （不是反斜杠续行，是裸的多行字面量，同一个后果、另一个成因）。
+    ///
+    /// # 写多行描述的正确姿势
+    ///
+    /// `concat!` 逐行拼，每行自己带空格或 `\n`。**别写跨行的裸字符串，
+    /// 也别用反斜杠续行** —— 前者把缩进原样带进去，后者会被 fmt 压扁。
+    #[test]
+    fn 工具描述里没有被压扁的痕迹() {
+        // ⚠️ **把每一个构造器都列进来，不是只查 `builtin_specs()`。**
+        //
+        // 第一版只查了那一个 —— 而 `spawn_agents`、生图、联网、资料库、
+        // 电脑操作、技能全都在别的构造器里，一条都没被盖住。
+        // 故障注入当场看出来的：往 `spawn_agents` 的描述里插一串空格，
+        // 测试照样绿。**一道漏了一半目标的闸，给的是虚假的安心。**
+        let mut all = builtin_specs();
+        all.push(image_spec());
+        all.push(subagent_spec());
+        all.extend(background_specs());
+        all.push(mcp_resource_spec());
+        all.push(web_search_spec());
+        all.push(web_fetch_spec());
+        all.extend(library_specs());
+        all.extend(computer_specs());
+        all.push(skill_spec());
+        for spec in all {
+            assert!(
+                !spec.description.contains("  "),
+                "{} 的描述里有连续空格 —— 多半是多行说明被 cargo fmt 压成了一行，\
+                 而缩进留成了字面空格。用 concat! 逐行拼：{:?}",
+                spec.name,
+                spec.description
+            );
+            for line in spec.description.lines() {
+                let indent = line.len() - line.trim_start().len();
+                assert!(
+                    indent < 4 || line.trim().is_empty(),
+                    "{} 的描述有 {indent} 个前导空格的一行 —— 那在 markdown 里是代码块：{line:?}",
+                    spec.name
+                );
+            }
+        }
+    }
+
     /// ⚠️ **工具描述不许承诺目录里没有的能力。**
     ///
     /// 这句描述是模型对子 agent 能力的唯一认知：它写什么，模型就会派
