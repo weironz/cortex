@@ -204,6 +204,13 @@ struct Args {
     /// 这个进程能跑 shell。让云端够到它，是把「我笔记本上的执行能力」交出去的
     /// 一部分 —— 那不该是「装上就有」。
     ///
+    /// ⚠️ **说破一句**（安全不变量 4）：接入面里 `POST /chat` 与
+    /// `POST /confirmations` 是并存的，也就是说接进来的一方能发起一轮、
+    /// 并**自己批准**那一轮弹出的工具确认。所以打开它等于同意
+    /// **远程侧可经模型在这台机器上执行命令与读写文件** ——
+    /// 不是「允许远程查看」。这句话不许被简化掉：它一旦被写软，
+    /// 用户按下的就是一个他没读懂的开关。
+    ///
     /// 钥匙是**另铸的**，只在接入面上有效（`POST /chat`、`GET /runs/*`、
     /// `POST /confirmations`、`/health`），换凭据 / 绑目录 / 改 MCP 一律 401。
     /// 也就是说：**开放远程接入不等于交出机器**。见 `routes::attach_allows`。
@@ -444,11 +451,7 @@ async fn main() -> anyhow::Result<()> {
         // 桌面端离线模式传的正是 `token ?? ''` —— 结果是它被自己拉起的
         // agent 全程 401，而日志里没有任何一行说明为什么
         inbound_token: args.token.clone().filter(|t| !t.trim().is_empty()),
-        // 每次启动现铸一把，**不持久化**：它的寿命就是这个进程的寿命，
-        // 而落盘的钥匙是一件需要被保管、轮换、清理的东西。
-        attach_token: args
-            .allow_remote_attach
-            .then(|| cortex_core::Id::new().to_string()),
+        attach_token: attach_key(args.allow_remote_attach),
         terminals: terminal::Terminals::default(),
     };
 
@@ -688,4 +691,86 @@ fn write_addr_file(path: &std::path::Path, addr: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("addr.tmp");
     std::fs::write(&tmp, addr)?;
     std::fs::rename(&tmp, path)
+}
+
+/// 接入钥匙 —— **开了远程接入才有，且每次启动现铸**。
+///
+/// # 它同时是「建不建隧道」的判据（安全不变量 3）
+///
+/// `None` 一路传下去：没有钥匙 → `tunnel::spawn` 那个 `if let` 走不到 →
+/// 不建隧道。两件事共用同一个 `Option` 是有意的 —— 拆成两个开关的话，
+/// 「建了隧道但没开接入」这个组合就成立了，而隧道的唯一用途正是把请求
+/// 送进接入面：那会变成一条谁都不需要、也没人验的常驻长连。
+///
+/// # 为什么现铸，不复用入站凭据
+///
+/// 入站凭据（`--token`）能换出站身份、绑工作区、改 MCP、开终端 ——
+/// 那是「拉起我的那个桌面端」的权限。把它当接入钥匙用是**最省事的写法**，
+/// 也是安全不变量 2 说的那件不许做的事：controller 从此持有了它。
+///
+/// 也不持久化：钥匙的寿命就是这个进程的寿命，而落盘的钥匙是一件需要被
+/// 保管、轮换、清理的东西。
+fn attach_key(allow_remote_attach: bool) -> Option<String> {
+    allow_remote_attach.then(|| cortex_core::Id::new().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **安全不变量 3 的 worker 半边：没开远程接入 = 没有钥匙 = 不建隧道。**
+    ///
+    /// 顺带钉住不变量 2 的一半：钥匙是现铸的，不是从别处（尤其不是从入站
+    /// 凭据）派生的 —— 两次调用必须给出两把不同的。
+    #[test]
+    fn 没开远程接入就没有接入钥匙() {
+        assert_eq!(
+            attach_key(false),
+            None,
+            "没开 --allow-remote-attach 却铸出了钥匙 —— 隧道会跟着建起来，             而「这个进程能跑 shell」这件事的主人从没同意过"
+        );
+        let a = attach_key(true).expect("开了就该有");
+        let b = attach_key(true).expect("开了就该有");
+        assert_ne!(
+            a, b,
+            "两次启动铸出同一把钥匙 = 它是派生的而不是现铸的；             一旦派生自入站凭据，controller 就等于拿到了那把机器主人的钥匙"
+        );
+        assert!(
+            !a.trim().is_empty(),
+            "空串钥匙会让「有没有开」这件事失去意义"
+        );
+    }
+
+    /// **安全不变量 4：开关文案必须说破「远程侧可经模型触发本机执行」。**
+    ///
+    /// 这是提示词那条纪律（「只能写当下真的成立的能力」）的另一面：
+    /// 用户对一个开关的全部理解就是它旁边那段话。写软成「允许远程查看」
+    /// 的话，他按下的是一个自己没读懂的开关，而这里**没有任何东西会报错**。
+    ///
+    /// 桌面端把它做成图形开关时，那段文案要过同一组词
+    /// （见 `docs/roadmap.md` 的「另外三件」第 1 条）。
+    #[test]
+    fn 开放接入的说明必须说破它交出了什么() {
+        use clap::CommandFactory as _;
+        let help = Args::command().render_long_help().to_string();
+        let flag = help
+            .split("--allow-remote-attach")
+            .nth(1)
+            .expect("这个开关本身不见了");
+        // 下一个开关开始的地方就是这一段的边界
+        let section = flag.split("--attach-addr").next().unwrap_or(flag);
+
+        for must in ["执行", "确认", "默认关"] {
+            assert!(
+                section.contains(must),
+                concat!(
+                    "--allow-remote-attach 的说明里没有「{}」—— 用户对一个开关的",
+                    "全部理解就是它旁边这段话，写软了他按下的就是一个没读懂的开关：
+{}"
+                ),
+                must,
+                section
+            );
+        }
+    }
 }

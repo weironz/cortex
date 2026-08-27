@@ -467,6 +467,50 @@ mod tests {
         );
     }
 
+    /// **安全不变量 5 的绊线：绑定是 worker 自陈，不是密码学证明。**
+    ///
+    /// 这条测试断言的是一个**已知的弱点**，不是一个想要的性质：同 owner
+    /// 名下任意一台机器，只要在心跳里申领某个 session，就能赢得那一轮的路由
+    /// —— 服务端一个字都不核实。今天压着它的是网络闸（那台机器得先被
+    /// 攻陷、且持有该用户的凭据），而隧道把网络闸拆掉了。
+    ///
+    /// 所以它在这里是一根**绊线**：哪天有人给绑定加上了可验证凭据，
+    /// 这条会红 —— 那时该做的不是把断言改过来，而是**同时**去更新
+    /// `docs/controller-worker.md` 的威胁模型与不变量 5 的措辞。
+    /// 「写在明处」这四个字靠一段散文是守不住的。
+    ///
+    /// ⚠️ **owner 那道边界不在绊线里，它是真的必须成立**，
+    /// 由 `one_users_machines_never_show_up_for_another` 与
+    /// `a_tunnel_only_machine_enters_the_roster_without_any_heartbeat` 守着。
+    #[test]
+    fn a_worker_can_claim_any_session_of_its_owner_and_win() {
+        let book = PresenceBook::default();
+        let mut liar = hb("a1", "随便哪台机器", &["从没在这台机器上绑过的会话"]);
+        liar.attach = Some(AttachOffer {
+            addr: None,
+            token: "k".into(),
+        });
+        book.record("alice", &liar, false);
+
+        assert!(
+            book.attach_route("alice", "从没在这台机器上绑过的会话", &|_| {
+                true
+            })
+            .is_some(),
+            concat!(
+                "自陈的绑定不再赢得路由 —— 如果这是有意加的校验，",
+                "去更新 docs/controller-worker.md 的不变量 5 与威胁模型，",
+                "别只把这条断言改过来"
+            )
+        );
+        // 跨 owner 那道边界**不是**弱点，它必须成立
+        assert!(
+            book.attach_route("bob", "从没在这台机器上绑过的会话", &|_| true)
+                .is_none(),
+            "跨 owner 也认自陈了 —— 这是真的漏洞，不是已知弱点"
+        );
+    }
+
     /// 同一个 agent 再报是覆盖，不是追加。
     #[test]
     fn a_second_heartbeat_replaces_the_first() {
