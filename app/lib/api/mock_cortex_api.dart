@@ -13,6 +13,7 @@ import 'dart:typed_data';
 
 import '../core/hashing.dart';
 import '../models/assistant.dart';
+import '../models/agent_presence.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
 import '../models/image_prefs.dart';
@@ -111,6 +112,34 @@ class MockCortexApi
 
   @override
   Future<SearchPrefs> searchPrefs() async => _search;
+
+  /// mock 形态下**这台机器在线且可接入**。
+  ///
+  /// 回空列表会让「我的机器」那一页在离线演示里是一片空白 —— 而空白与
+  /// 「这个部署没有任何机器」长得一模一样，看到的人分不出是没数据还是
+  /// 没实现（`_search` 上面那段同一个理由）。
+  ///
+  /// 两行：一台开了远程接入的（常态），一台没开的（那一档的样子也要看得见）。
+  @override
+  Future<List<AgentPresence>> agents({String? session}) async {
+    return [
+      AgentPresence(
+        agentId: 'mock-a1',
+        machineHint: 'WILLOPTPC',
+        lastSeenSecs: 3,
+        sessionCount: 12,
+        hasSession: session == null ? null : true,
+        attachable: true,
+      ),
+      AgentPresence(
+        agentId: 'mock-a2',
+        machineHint: 'macbook-air',
+        lastSeenSecs: 41,
+        sessionCount: 2,
+        hasSession: session == null ? null : false,
+      ),
+    ];
+  }
 
   @override
   Future<SearchPrefs> saveSearchPrefs({

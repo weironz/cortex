@@ -17,6 +17,7 @@ import '../models/search_prefs.dart';
 import '../models/model_role.dart';
 import '../models/mcp.dart';
 import '../models/assistant.dart';
+import '../models/agent_presence.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
 import '../models/image_prefs.dart';
@@ -550,6 +551,18 @@ class HttpCortexApi implements CortexApi {
     return AuthTokens.fromJson(
       _decodeObject(path, utf8.decode(response.bodyBytes)),
     );
+  }
+
+  @override
+  Future<List<AgentPresence>> agents({String? session}) async {
+    final path = session == null || session.isEmpty
+        ? '/agents'
+        : '/agents?session=${Uri.encodeQueryComponent(session)}';
+    final json = await _getJson(path);
+    return [
+      for (final a in (json['agents'] as List? ?? const []))
+        AgentPresence.fromJson(a as Map<String, dynamic>),
+    ];
   }
 
   @override

@@ -12,6 +12,7 @@ import 'pages/search_page.dart';
 import 'pages/skills_page.dart';
 import 'pages/usage_page.dart';
 import 'pages/connection_page.dart';
+import 'pages/machines_page.dart';
 import 'pages/data_page.dart';
 import 'pages/mcp_page.dart';
 import 'pages/model_page.dart';
@@ -200,6 +201,19 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       hint: '数据源 · 后端状态',
       icon: Icons.cable_rounded,
       page: const ConnectionPage(),
+      group: _NavGroup.system,
+      gate: null,
+    ),
+    // 「我的机器」紧挨着「连接」：那一组回答的都是「这套东西现在连着什么」。
+    //
+    // ⚠️ **恒摆，不加闸。** 一台在线机器都没有时它照样在 —— 那一页的空态
+    // 说的正是「现在没有在线的机器」，而那句话本身就是用户要的答案。
+    // 加闸的话，最需要这一页的那一刻（机器全关着、会话打不开）它恰好不见了。
+    (
+      label: '我的机器',
+      hint: '在线的 agent · 远程接入',
+      icon: Icons.devices_other_outlined,
+      page: const MachinesPage(),
       group: _NavGroup.system,
       gate: null,
     ),

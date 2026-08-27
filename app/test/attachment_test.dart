@@ -47,7 +47,8 @@ class _BlobApi
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
-        SandboxHealthUnsupported
+        SandboxHealthUnsupported,
+        AgentsUnsupported
     implements CortexApi {
   _BlobApi({this.presignSupported = true, this.alreadyUploaded = false});
 

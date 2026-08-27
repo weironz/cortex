@@ -49,7 +49,8 @@ class _FakeApi
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
-        SandboxHealthUnsupported
+        SandboxHealthUnsupported,
+        AgentsUnsupported
     implements CortexApi {
   int connectCount = 0;
 

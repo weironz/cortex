@@ -51,7 +51,8 @@ class ReplayApi
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
-        SandboxHealthUnsupported
+        SandboxHealthUnsupported,
+        AgentsUnsupported
     implements CortexApi {
   ReplayApi({
     required this.episodeCount,

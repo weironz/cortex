@@ -191,7 +191,12 @@ void main() {
         '流式结束',
       );
 
-      final last = container.read(chatControllerProvider).activeTranscript.last;
+      final t = container.read(chatControllerProvider).activeTranscript;
+      // ignore: avoid_print
+      print(
+        'TRANSCRIPT: ${t.map((m) => "${m.role}/err=${m.error != null}").toList()}',
+      );
+      final last = t.last;
       expect(last.error, isNotNull, reason: '这一轮该是失败的');
       expect(
         last.errorIsDeterministic,

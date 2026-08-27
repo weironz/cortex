@@ -549,7 +549,8 @@ class _GateApi
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
-        SandboxHealthUnsupported
+        SandboxHealthUnsupported,
+        AgentsUnsupported
     implements CortexApi {
   _GateApi({
     this.auth = 'token',

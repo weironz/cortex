@@ -10,6 +10,7 @@ import '../models/model_source.dart';
 import '../models/search_prefs.dart';
 import '../models/model_role.dart';
 import '../models/mcp.dart';
+import '../models/agent_presence.dart';
 import '../models/attachment.dart';
 import '../models/blob.dart';
 import '../models/generated_image.dart';
@@ -425,6 +426,16 @@ abstract interface class CortexApi {
   /// 与「本地删掉副本」不是一回事：本地删除只让这台机器忘了，
   /// 而已经泄露出去的那一份照样能用到 30 天后。
   Future<void> logout(String refreshToken);
+
+  /// `GET /agents` —— 我名下**此刻在线**的机器。
+  ///
+  /// 离线的不在列表里（服务端只回 TTL 内的），所以这个列表**每次都要现拉**：
+  /// presence 刻意不进库、也不进 `sync_log`（心跳每 30 秒一行写入会挤满
+  /// 同步流水并下发给所有设备），于是它没有「变了会通知你」这条路。
+  ///
+  /// `session` 给了的话，每行多一个 `hasSession` —— 「这个会话在哪台机器上」
+  /// 就是靠它答的。
+  Future<List<AgentPresence>> agents({String? session});
 
   /// `GET /settings/search` —— 联网检索的配置。
   ///
@@ -957,6 +968,19 @@ mixin SessionSearchUnsupported {
     String query, {
     bool includeArchived = false,
   }) => Future.error(const CortexApiException('这个后端不支持搜索。', statusCode: 404));
+}
+
+/// 给测试替身用：这个后端答不出在线名册。
+///
+/// ⚠️ **不要用在真实客户端上**（与这一族其余的同一条禁令）：用了之后
+/// `HttpCortexApi` 漏实现这个方法不会编译报错，而是静默退化成
+/// 「一台在线的机器都没有」—— 而那与「机器真的都关着」长得一模一样，
+/// 于是「我的机器」那一页永远空着，没人看得出是没实现。
+///
+/// 回**抛错**而不是空列表，正是为了让这个区别留在屏幕上。
+mixin AgentsUnsupported {
+  Future<List<AgentPresence>> agents({String? session}) =>
+      Future.error(const CortexApiException('这个后端答不出在线名册。', statusCode: 404));
 }
 
 /// 给测试替身用：这个后端没有用量端点。

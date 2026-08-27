@@ -493,7 +493,8 @@ class _ConfirmApi
         LlmModelsUnsupported,
         SessionSearchUnsupported,
         UsageUnsupported,
-        SandboxHealthUnsupported
+        SandboxHealthUnsupported,
+        AgentsUnsupported
     implements CortexApi {
   _ConfirmApi({
     this.accept = true,
