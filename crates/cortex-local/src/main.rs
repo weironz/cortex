@@ -564,18 +564,22 @@ async fn main() -> anyhow::Result<()> {
         // 所以这一段必须在 listener 起来之后 —— 这也是它从原来的位置挪到
         // 这里的原因（今天已经因为「顺序」咬过两次：项目要在第一轮之前落地、
         // 会话名要在第一轮读得到）。
-        // 通告地址：显式给的优先，否则用**实际**绑到的那个（`:0` 时端口由内核
-        // 挑，所以必须等 listener 起来 —— 这也是这一整段挪到这里的原因）。
-        let advertised = args
-            .attach_addr
-            .clone()
-            .unwrap_or_else(|| actual.to_string());
+        // ⚠️ **只报显式给的 `--attach-addr`，没给就报 `None`。**
+        //
+        // 从前这里是 `attach_addr.unwrap_or(actual)` —— 桌面端绑 loopback，
+        // 于是报出去的是 `127.0.0.1:x`，云端打过去是打到它自己身上。
+        // 那时靠「loopback 绑定与 --allow-remote-attach 互斥」堵住。
+        //
+        // 隧道之后那条互斥放宽了（可达性来自出站连接），继续报实际绑定地址
+        // 的后果是**诊断说谎**：隧道断掉之后 agentd 探不通那个地址，
+        // 于是那句 409 说「查一下它 --bind 的地址」，而真相是这台机器休眠了。
+        // 报 `None` 才让服务端分得清「地址配错了」与「隧道断了」。
         let attach_offer =
             state
                 .attach_token
                 .as_ref()
                 .map(|token| cortex_proto::presence::AttachOffer {
-                    addr: advertised.clone(),
+                    addr: args.attach_addr.clone(),
                     token: token.clone(),
                 });
         // agent_id 每次启动换一把即可：名册按 (owner, agent_id) 存，旧的那条

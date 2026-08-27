@@ -654,7 +654,12 @@ async fn heartbeat(
     // 接下来反代过去时那把钥匙认不认 —— 而认不认由**那台机器**说。
     let attach_reachable = match hb.attach.as_ref() {
         None => false,
-        Some(offer) => crate::sandbox_proxy::probe_health(st.http(), &offer.addr).await,
+        // 只对**显式报了直拨地址**的做探活。没报地址 = 它只靠隧道可达，
+        // 而隧道通不通由隧道簿说 —— 去探一个不存在的地址只会浪费 1.5 秒
+        Some(offer) => match offer.addr.as_deref() {
+            Some(addr) => crate::sandbox_proxy::probe_health(st.http(), addr).await,
+            None => false,
+        },
     };
     st.presence().record(&owner, &hb, attach_reachable);
     Json(cortex_proto::presence::HeartbeatAck {
@@ -909,40 +914,11 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
         //
         // `concat!` 加显式换行不依赖源文件怎么写，于是「这句话长什么样」
         // 只由这几行本身决定。用户可见的文案值得这个。
-        let msg = match st
-            .presence()
-            .why_not_attachable(&d.owner, &parsed.session_id)
-        {
-            // 在线，但机器主人没开远程接入。**这不是故障** —— 所以话要说成
-            // 「它没同意」而不是「连不上」，否则用户会去查网络
-            Some((machine, crate::presence::WhyNot::NotOffered)) => format!(
-                concat!(
-                    "这个会话绑在 {machine} 上的一个目录里，它的文件只在那儿。\n",
-                    "那台机器**在线**，但它没有开放远程接入 —— 要在这里继续聊，",
-                    "在那台机器上用 `--allow-remote-attach` 起 agent；\n",
-                    "或者直接到它上面打开这个会话。"
-                ),
-                machine = machine
-            ),
-            // 开放了却打不通。多半是地址报错了或网络不通 —— 这条要把
-            // 「它同意了」说在前面，否则用户会以为自己没开对开关
-            Some((machine, crate::presence::WhyNot::Unreachable)) => format!(
-                concat!(
-                    "这个会话绑在 {machine} 上的一个目录里。\n",
-                    "那台机器**开放了远程接入，但这边打不通它报的地址** —— ",
-                    "查一下它 `--bind` 的地址是不是这台服务器够得到的",
-                    "（VPN / tailnet 网卡地址，而不是 127.0.0.1 或 0.0.0.0）。"
-                ),
-                machine = machine
-            ),
-            None => concat!(
-                "这个会话绑在某台机器上的一个目录里，它的文件只在那儿。\n",
-                "而现在**没有任何在线的 agent** 报告持有它的绑定 —— ",
-                "那台机器多半没开，或者上面没在跑 Cortex。\n",
-                "`GET /agents` 能看到当前在线的机器。"
-            )
-            .to_owned(),
-        };
+        let msg = attach_failure_message(st.presence().why_not_attachable(
+            &d.owner,
+            &parsed.session_id,
+            &|id| st.tunnels().is_live(&d.owner, id),
+        ));
         return err(StatusCode::CONFLICT, &msg);
     }
 
@@ -987,6 +963,77 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
 /// 容器不在与「这条路由压根没挂上」在状态码上都是 404，所以
 /// `the_attach_route_is_actually_mounted` 只能靠正文分辨这两者。
 const ATTACH_NO_RUN: &str = "这个会话现在没有正在跑的轮次。";
+
+/// 那一轮接不过去时对用户说的话。**按 [`crate::presence::WhyNot`] 分三档
+/// 加一个「压根不在线」**，因为用户该做的事完全不同。
+///
+/// # ⚠️ 这几句里不许有 markdown
+///
+/// 它们最终落在客户端 `_ErrorNote` 那个红框里，而那个框用的是裸 `Text` ——
+/// `**强调**` 会带着星号原样显示，`` `--flag` `` 会带着反引号。
+/// 2026-08-27 实测：这几句原本按 markdown 写，屏幕上是
+/// 「那台机器**在线**，但它没有开放远程接入」。
+///
+/// 修在源头而不是让客户端去渲染：这几句的读者不只有 Flutter（CLI 直接
+/// 打印，将来还有别的客户端），而「谁渲染」是每个客户端自己的事 ——
+/// 「这句话长什么样」不该取决于它。有测试钉着。
+///
+/// # 也不许把用户支使去敲命令
+///
+/// 这里曾经写着「`GET /agents` 能看到当前在线的机器」—— 一句**在错误提示里
+/// 教用户发 HTTP 请求**的话。它之所以写得出来，是因为界面上没有那个东西；
+/// 而正确的修法是把出路说成用户在**界面上或那台机器上**能做的动作。
+///
+/// 提成自由函数只为一件事：让测试读得到这几句话。留在 handler 里的话，
+/// 要断言它们就得起一个带库、带名册、带认证的服务端 —— 那种测试没人会写。
+fn attach_failure_message(why: Option<(String, crate::presence::WhyNot)>) -> String {
+    match why {
+        // 在线，但机器主人没开远程接入。**这不是故障** —— 所以话要说成
+        // 「它没同意」而不是「连不上」，否则用户会去查网络
+        Some((machine, crate::presence::WhyNot::NotOffered)) => format!(
+            concat!(
+                "这个会话绑在 {machine} 上的一个目录里，它的文件只在那儿。\n",
+                "那台机器在线，但没有开放远程接入。\n",
+                "要在这里继续聊：到那台机器上，用 --allow-remote-attach 重新起 agent；\n",
+                "或者直接在它上面打开这个会话。"
+            ),
+            machine = machine
+        ),
+        // 开放了、给了直拨地址，却打不通。**地址的问题** —— 这条要把
+        // 「它同意了」说在前面，否则用户会以为自己没开对开关
+        Some((machine, crate::presence::WhyNot::Unreachable)) => format!(
+            concat!(
+                "这个会话绑在 {machine} 上的一个目录里。\n",
+                "那台机器开放了远程接入，但这边打不通它报的 --attach-addr。\n",
+                "查一下那个地址是不是这台服务器够得到的",
+                "（VPN / tailnet 网卡地址，而不是 127.0.0.1 或 0.0.0.0）；\n",
+                "也可以干脆去掉那个参数 —— 反向隧道不需要可直拨的地址。"
+            ),
+            machine = machine
+        ),
+        // 只靠隧道可达，而隧道此刻不在 —— 那台机器刚离开。
+        // 与上一档的区别是：**这里用户什么都不用改**，所以那句话要说出来，
+        // 否则他会照着上一档的经验去查地址。
+        //
+        // 这个组合（心跳还在 TTL 内、隧道已断）几乎只有一种成因：隧道靠
+        // h2 PING 几秒内就发现断开，而心跳要 90 秒才过期。
+        Some((machine, crate::presence::WhyNot::TunnelDown)) => format!(
+            concat!(
+                "这个会话绑在 {machine} 上的一个目录里。\n",
+                "那台机器刚才还连着，现在断开了 —— 多半是它休眠、关机或断网了。\n",
+                "不用改任何设置：它一回来，这个会话就能接着聊。"
+            ),
+            machine = machine
+        ),
+        None => concat!(
+            "这个会话绑在某台机器上的一个目录里，它的文件只在那儿。\n",
+            "而现在没有任何在线的 agent 报告持有它的绑定 —— ",
+            "那台机器多半没开，或者上面没在跑 Cortex。\n",
+            "把它打开、并确认上面的 Cortex 在跑，这个会话就会回来。"
+        )
+        .to_owned(),
+    }
+}
 
 /// 把一个已组好的请求送到 `route` 指的那台机器：隧道优先，直拨兜底。
 ///
@@ -2201,6 +2248,88 @@ mod tests {
     /// 「容器不在」与「这条路由没挂上」如今都是 404 —— 前者是这个 handler
     /// 自己给的（见 [`ATTACH_NO_RUN`]），后者是 axum 的兜底。只比状态码的话
     /// 这条测试恒绿，而它要抓的恰恰是后者。
+    /// ⚠️ **这几句话里不许有 markdown，也不许支使用户去敲命令。**
+    ///
+    /// 它们落在客户端 `_ErrorNote` 那个红框里，而那个框用的是**裸 `Text`**
+    /// （`message_bubble.dart`）—— `**强调**` 会带着星号原样显示、
+    /// `` `--flag` `` 会带着反引号。2026-08-27 实测：屏幕上是
+    /// 「那台机器**在线**，但它没有开放远程接入」。
+    ///
+    /// 修在源头是因为读者不只有 Flutter（CLI 直接打印），
+    /// 而「谁渲染」是每个客户端自己的事。
+    ///
+    /// 第二条断言挡的是另一个形状：那句 `None` 分支曾经写着
+    /// 「`GET /agents` 能看到当前在线的机器」—— **在错误提示里教用户发
+    /// HTTP 请求**。它写得出来是因为界面上没有那个东西，而那不是用户的错。
+    #[test]
+    fn the_attach_failure_messages_carry_no_markdown() {
+        use crate::presence::WhyNot;
+        let cases = [
+            Some(("WILLOPTPC".to_owned(), WhyNot::NotOffered)),
+            Some(("WILLOPTPC".to_owned(), WhyNot::Unreachable)),
+            Some(("WILLOPTPC".to_owned(), WhyNot::TunnelDown)),
+            None,
+        ];
+        for why in cases {
+            let label = format!("{why:?}");
+            let msg = super::attach_failure_message(why);
+
+            assert!(
+                !msg.contains("**"),
+                "{label}：这句话里有 `**` —— 客户端用裸 Text 画它，\
+                 用户看到的是带星号的原文：{msg}"
+            );
+            assert!(!msg.contains('`'), "{label}：这句话里有反引号，同上：{msg}");
+            // 支使用户敲 HTTP 请求 = 界面缺东西，而代价被转嫁给了用户
+            for bad in ["GET /", "POST /", "curl"] {
+                assert!(
+                    !msg.contains(bad),
+                    "{label}：错误提示里出现了 `{bad}` —— \
+                     出路要说成用户在界面上或那台机器上做得到的动作：{msg}"
+                );
+            }
+        }
+    }
+
+    /// **三档「接不了」说的不能是同一件事。**
+    ///
+    /// 合成一句的话：没开开关的那台会被当成网络故障（用户去查防火墙），
+    /// 而休眠的笔记本会被当成地址配错（用户去改一个没错的参数）。
+    #[test]
+    fn each_attach_failure_reason_says_something_different() {
+        use crate::presence::WhyNot;
+        let m = |w| super::attach_failure_message(Some(("MBP".to_owned(), w)));
+        let not_offered = m(WhyNot::NotOffered);
+        let unreachable = m(WhyNot::Unreachable);
+        let tunnel_down = m(WhyNot::TunnelDown);
+
+        // 每一档都要点出是哪一台 —— 不说的话用户只能挨个试
+        for msg in [&not_offered, &unreachable, &tunnel_down] {
+            assert!(msg.contains("MBP"), "没说是哪一台：{msg}");
+        }
+
+        assert!(
+            not_offered.contains("--allow-remote-attach"),
+            "没开开关那一档要给出开关名，否则用户不知道该做什么：{not_offered}"
+        );
+        assert!(
+            unreachable.contains("--attach-addr"),
+            "地址那一档要点名是哪个参数：{unreachable}"
+        );
+        // ⚠️ 最要紧的一条：机器刚离开时**什么都不用改**
+        assert!(
+            tunnel_down.contains("不用改"),
+            "机器刚离开那一档必须说清不用改设置，否则用户会照上一档去查地址：{tunnel_down}"
+        );
+        assert!(
+            !tunnel_down.contains("--attach-addr") && !tunnel_down.contains("--bind"),
+            "机器刚离开时提任何地址参数，都是把用户送去改一个没错的东西：{tunnel_down}"
+        );
+
+        assert_ne!(not_offered, unreachable);
+        assert_ne!(unreachable, tunnel_down);
+    }
+
     #[tokio::test]
     async fn the_attach_route_is_actually_mounted() {
         let resp = router(topology_state())

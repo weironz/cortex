@@ -77,12 +77,28 @@ pub struct AttachRoute {
 }
 
 /// 那台机器在线，但这一轮接不过去 —— 为什么。
+///
+/// 三档而不是一句「接不了」：**用户该做的事完全不同**。合成一句的话，
+/// 没开开关的那台会被当成网络故障（去查防火墙），而隧道断了的那台会被
+/// 当成地址配错（去改一个没错的参数）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhyNot {
     /// 它没开远程接入（默认状态）。**这不是故障，是它没同意。**
     NotOffered,
-    /// 它开了，但服务端上一次心跳时探不通那个地址。
+    /// 它开了，也给了一个可直拨的地址，但服务端上一次心跳时探不通那个地址。
+    /// **地址配错了**（或中间网络不通）—— 用户该去改 `--attach-addr`。
     Unreachable,
+    /// 它开了，而且只靠反向隧道可达（没给 `--attach-addr`），
+    /// 但**此刻隧道不在**。
+    ///
+    /// 心跳还在 TTL 内（≤90 秒）而隧道已断，这个组合的典型成因是
+    /// **那台机器刚休眠 / 关机 / 断网** —— 隧道在几秒内就断（h2 PING），
+    /// 而心跳要等 90 秒才过期。用户什么都不用改，等它回来即可。
+    ///
+    /// 这一档 2026-08-27 补上：在它之前这种情况落进 [`Self::Unreachable`]，
+    /// 于是 409 说「查一下它 `--bind` 的地址是不是够得到的」——
+    /// 而那台机器根本没有配错任何东西。实测撞到过。
+    TunnelDown,
 }
 
 /// 名册。按 `(owner, agent_id)` 存 —— **owner 必须在键里**：
@@ -158,7 +174,12 @@ impl PresenceBook {
     ///
     /// 合成一句「接不了」的话，第二种与第三种长得一样，而它们一个要改命令行、
     /// 一个要查网络。
-    pub fn why_not_attachable(&self, owner: &str, session_id: &str) -> Option<(String, WhyNot)> {
+    pub fn why_not_attachable(
+        &self,
+        owner: &str,
+        session_id: &str,
+        tunneled: &dyn Fn(&str) -> bool,
+    ) -> Option<(String, WhyNot)> {
         let g = self.lock();
         g.iter()
             .filter(|((o, _), e)| o == owner && e.last_seen.elapsed() < TTL)
@@ -169,11 +190,17 @@ impl PresenceBook {
             // 于是用户刚加上 `--allow-remote-attach` 重启，却被告知「它没开放」。
             // 实测撞到过：名册里并排两条 WILLOPTPC，一条 attachable、一条不是。
             .min_by_key(|(_, e)| e.last_seen.elapsed())
-            .map(|(_, e)| {
-                let why = if e.attach.is_none() {
-                    WhyNot::NotOffered
-                } else {
-                    WhyNot::Unreachable
+            .map(|((_, id), e)| {
+                let why = match e.attach.as_ref() {
+                    // 没开远程接入
+                    None => WhyNot::NotOffered,
+                    // 开了、给了直拨地址、但探不通 → 地址的问题
+                    Some(offer) if offer.addr.is_some() => WhyNot::Unreachable,
+                    // 开了、只靠隧道，而隧道此刻不在 → 那台机器刚离开
+                    Some(_) if !tunneled(id) => WhyNot::TunnelDown,
+                    // 开了、隧道也在 —— 走到这儿说明它没有这个会话的绑定，
+                    // 而上面的 filter 已经排除了那种情况。保守按隧道断处理
+                    Some(_) => WhyNot::TunnelDown,
                 };
                 (e.machine_hint.clone(), why)
             })
@@ -215,7 +242,7 @@ impl PresenceBook {
                     .attach
                     .as_ref()
                     .filter(|_| e.attach_reachable)
-                    .map(|a| (a.addr.clone(), a.token.clone()));
+                    .and_then(|a| a.addr.clone().map(|addr| (addr, a.token.clone())));
                 AttachRoute {
                     agent_id: id.clone(),
                     tunneled: tunneled(id),
@@ -261,7 +288,7 @@ mod tests {
             .collect();
         assert_eq!(seen, vec!["alice-mbp"], "只该看到自己的机器");
         assert_eq!(
-            book.why_not_attachable("alice", "S2"),
+            book.why_not_attachable("alice", "S2", &|_| false),
             None,
             "别人的会话绑在别人机器上，与我无关"
         );
@@ -298,7 +325,7 @@ mod tests {
              「没有」与「这次没问」"
         );
         assert_eq!(
-            book.why_not_attachable("alice", "S1"),
+            book.why_not_attachable("alice", "S1", &|_| false),
             Some(("mbp".to_owned(), WhyNot::NotOffered)),
             concat!(
                 "那句 409 要点出是哪一台，以及**为什么**接不了 —— ",
@@ -319,7 +346,7 @@ mod tests {
         // ① 没开远程接入 —— attach 是 None
         book.record("alice", &hb("a1", "mbp", &["S1"]), false);
         assert_eq!(
-            book.why_not_attachable("alice", "S1"),
+            book.why_not_attachable("alice", "S1", &|_| false),
             Some(("mbp".to_owned(), WhyNot::NotOffered))
         );
         assert!(
@@ -334,12 +361,12 @@ mod tests {
         // ② 开了但探不通
         let mut offered = hb("a2", "desktop", &["S2"]);
         offered.attach = Some(AttachOffer {
-            addr: "10.0.0.9:8090".into(),
+            addr: Some("10.0.0.9:8090".into()),
             token: "k".into(),
         });
         book.record("alice", &offered, false);
         assert_eq!(
-            book.why_not_attachable("alice", "S2"),
+            book.why_not_attachable("alice", "S2", &|_| false),
             Some(("desktop".to_owned(), WhyNot::Unreachable))
         );
         assert!(
@@ -368,7 +395,80 @@ mod tests {
         );
 
         // ④ 压根没在线
-        assert_eq!(book.why_not_attachable("alice", "S404"), None);
+        assert_eq!(book.why_not_attachable("alice", "S404", &|_| false), None);
+    }
+
+    /// ⚠️ **「地址配错了」与「那台机器刚离开」必须分得开。**
+    ///
+    /// 两者用户该做的事完全相反：前者要去改 `--attach-addr`，后者什么都不用
+    /// 改（等它回来）。合成一句的话，休眠的笔记本会把用户送去查一个没错的
+    /// 参数 —— 2026-08-27 隧道上线当天实测撞到的正是这个。
+    ///
+    /// 分辨的依据是 **worker 报没报可直拨的地址**：
+    /// 报了 → 探不通就是地址的问题；没报 → 它只靠隧道，那就是隧道断了。
+    #[test]
+    fn 地址配错与机器刚离开是两回事() {
+        let book = PresenceBook::default();
+
+        // ① 只靠隧道的 worker（没给 --attach-addr），隧道断了
+        let mut tunnel_only = hb("t1", "laptop", &["S1"]);
+        tunnel_only.attach = Some(AttachOffer {
+            addr: None,
+            token: "k".into(),
+        });
+        book.record("alice", &tunnel_only, false);
+        assert_eq!(
+            book.why_not_attachable("alice", "S1", &|_| false),
+            Some(("laptop".to_owned(), WhyNot::TunnelDown)),
+            "只靠隧道的机器断线时说「地址配错了」，会把用户送去改一个没错的参数"
+        );
+        // 隧道还在时它压根不该出现在「接不了」里 —— 由 attach_route 接走
+        assert!(
+            book.attach_route("alice", "S1", &|_| true).is_some(),
+            "隧道在就该能接"
+        );
+
+        // ② 给了直拨地址却探不通 —— 这才是地址的问题
+        let mut with_addr = hb("t2", "server", &["S2"]);
+        with_addr.attach = Some(AttachOffer {
+            addr: Some("10.0.0.9:8090".into()),
+            token: "k".into(),
+        });
+        book.record("alice", &with_addr, false);
+        assert_eq!(
+            book.why_not_attachable("alice", "S2", &|_| false),
+            Some(("server".to_owned(), WhyNot::Unreachable)),
+            "报了地址却探不通 = 地址的问题，这一档要保留"
+        );
+
+        // ③ 没开远程接入 —— 与前两档都不同
+        book.record("alice", &hb("t3", "desktop", &["S3"]), false);
+        assert_eq!(
+            book.why_not_attachable("alice", "S3", &|_| false),
+            Some(("desktop".to_owned(), WhyNot::NotOffered))
+        );
+    }
+
+    /// 只靠隧道的 worker **不给出直拨路** —— 给了调用方会去拨一个不存在的地址。
+    #[test]
+    fn 没报地址的worker不产生直拨路() {
+        let book = PresenceBook::default();
+        let mut tunnel_only = hb("t1", "laptop", &["S1"]);
+        tunnel_only.attach = Some(AttachOffer {
+            addr: None,
+            token: "k".into(),
+        });
+        // 就算 attach_reachable 被误置成 true 也不该冒出一个地址来
+        book.record("alice", &tunnel_only, true);
+
+        let route = book
+            .attach_route("alice", "S1", &|_| true)
+            .expect("隧道在，该能接");
+        assert!(route.tunneled);
+        assert_eq!(
+            route.direct, None,
+            "它根本没报地址，凭空造一个出来的话调用方会去拨它"
+        );
     }
 
     /// **同一台机器有新旧两条时，要报最新那条。**
@@ -385,7 +485,7 @@ mod tests {
         // 新的那条：开了而且探通了
         let mut fresh = hb("new", "mbp", &["S1"]);
         fresh.attach = Some(AttachOffer {
-            addr: "10.0.0.9:8090".into(),
+            addr: Some("10.0.0.9:8090".into()),
             token: "k".into(),
         });
         book.record("alice", &fresh, true);
@@ -404,7 +504,7 @@ mod tests {
             "该按最新那条接进去"
         );
         assert_eq!(
-            book.why_not_attachable("alice", "S1"),
+            book.why_not_attachable("alice", "S1", &|_| false),
             Some(("mbp".to_owned(), WhyNot::Unreachable)),
             concat!(
                 "问「为什么接不了」时也要看最新那条 —— 虽然这一档实际能接，",
@@ -425,7 +525,7 @@ mod tests {
         let book = PresenceBook::default();
         let mut offered = hb("a1", "mbp", &["S1"]);
         offered.attach = Some(AttachOffer {
-            addr: "10.0.0.9:8090".into(),
+            addr: Some("10.0.0.9:8090".into()),
             token: "super-secret-key".into(),
         });
         book.record("alice", &offered, true);

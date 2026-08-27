@@ -79,12 +79,25 @@ pub struct AgentHeartbeat {
 /// 有一个布尔）。下发它等于让任何一个登录过的设备都能直连别人的笔记本。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachOffer {
-    /// agentd 该打哪儿。**必须是 agentd 够得到的地址** —— 绑在 loopback 上的
-    /// agent 报一个 `127.0.0.1:x` 出来，云端打过去是打到它自己身上。
+    /// agentd 可以**直拨**的地址。`None` = 只能经反向隧道够到我。
     ///
-    /// 所以 `--allow-remote-attach` 与 loopback 绑定**互斥**，本地那侧启动时
-    /// 就拒绝，而不是让名册里出现一个「可接入但打不通」的谎。
-    pub addr: String,
+    /// # 为什么可以是 `None`
+    ///
+    /// 反向隧道（2026-08-27）之前这里必须有值，而 worker 在没有
+    /// `--attach-addr` 时报的是自己**实际绑到**的那个地址 —— 桌面端绑的正是
+    /// `127.0.0.1:x`，云端打过去是打到它自己身上。当时靠「`--allow-remote-attach`
+    /// 与 loopback 绑定互斥、启动即拒」堵住。
+    ///
+    /// 有了隧道之后那条互斥被放宽（可达性来自出站连接），于是**必须让这里
+    /// 能说「我没有可直拨的地址」**。继续报 `127.0.0.1:x` 的后果不是安全
+    /// 问题而是**诊断说谎**：隧道断掉之后，agentd 探不通那个地址，于是那句
+    /// 409 会说「查一下它 --bind 的地址是不是够得到的」，而真相是那台机器
+    /// 休眠了。实测撞到过。
+    ///
+    /// 只有用户**显式**给了 `--attach-addr` 时这里才有值 —— 那是他明确说
+    /// 「云端请拨这个」，而他比代码更清楚自己的拓扑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addr: Option<String>,
     /// 接入面专用的钥匙。见结构体文档。
     pub token: String,
 }
