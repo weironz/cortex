@@ -23,6 +23,73 @@ void main() {
   final exe = _findAgent();
 
   group('LocalAgent', () {
+    /// **一台连上就装死的 MCP server 不许挡着 agent 起来。**
+    ///
+    /// 2026-08-28 真机撞到：`McpHub::connect` 当时在启动路径上 `.await`，
+    /// 而端口是在它之后才绑的。于是 agent 的就绪被「连上每一台第三方
+    /// MCP server」挡着 —— 每台上限 60 秒且串行。拉起它的桌面端只等 20 秒，
+    /// 超时就把「本地 agent 启动失败」给用户看，**而 agent 好好的**。
+    ///
+    /// 那次是靠开发机上真实的 MCP server 偶然撞出来的，红不红取决于机器
+    /// 状态。这条把它变成确定的：一个「接了连接就一个字节都不回」的
+    /// 监听器扮演那台 server —— 那正是最坏的情况，连得上，然后永远沉默。
+    test(
+      '一台装死的 MCP server 不挡启动',
+      skip: exe == null
+          ? '找不到 cortex-local 二进制，先 cargo build -p cortex-local'
+          : null,
+      () async {
+        final stateDir = Directory.systemTemp.createTempSync(
+          'cortex-mcp-hang-',
+        );
+        addTearDown(() => stateDir.deleteSync(recursive: true));
+
+        // 接了就攥着不放，一个字节都不回
+        final mute = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        final held = <Socket>[];
+        mute.listen(held.add);
+        addTearDown(() async {
+          for (final s in held) {
+            s.destroy();
+          }
+          await mute.close();
+        });
+
+        final cfg = File('${stateDir.path}${Platform.pathSeparator}mcp.json')
+          ..writeAsStringSync(
+            '{"mcpServers":{"mute":'
+            '{"type":"http","url":"http://127.0.0.1:${mute.port}/mcp"}}}',
+          );
+
+        final agent = LocalAgent(executable: exe!, stateDir: stateDir.path);
+        addTearDown(agent.stop);
+
+        final started = DateTime.now();
+        final origin = await agent.start(
+          remote: 'http://127.0.0.1:1',
+          token: 'test-token-not-a-real-credential',
+          extraEnv: {'CORTEX_MCP_CONFIG': cfg.path},
+        );
+        final waited = DateTime.now().difference(started);
+
+        expect(origin, startsWith('http://127.0.0.1:'));
+        // MCP 的连接上限是 60 秒（`CORTEX_MCP_TIMEOUT_SECS`）。就绪必须
+        // 远早于它 —— 否则说明启动又被挂回那条路上了
+        expect(
+          waited.inSeconds,
+          lessThan(15),
+          reason:
+              '起来花了 $waited —— MCP 连接又挡在启动路径上了。'
+              '桌面端只等 20 秒，超时会把「本地 agent 启动失败」给用户看，'
+              '而 agent 其实好好的，只是在等一台别人的进程',
+        );
+
+        // 而且它真的在服务，不是「早早报了个地址然后自己还没好」
+        final res = await http.get(Uri.parse('$origin/health'));
+        expect(res.statusCode, 200);
+      },
+    );
+
     test(
       'starts the real binary and reports the port it bound',
       skip: exe == null
