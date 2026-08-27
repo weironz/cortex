@@ -61,6 +61,9 @@ sha2 = "0.10"
 hex = "0.4"
 
 axum.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
 # runner 的 trait 是 async trait
 async-trait.workspace = true
 tokio.workspace = true
@@ -98,3 +101,5 @@ tempfile = "3"
 # 这台开发机上新编出来的 exe 入站会被静默丢弃，绑端口的测试跑不了
 tower = { version = "0.5", features = ["util"] }
 tokio = { workspace = true, features = ["test-util"] }
+# 隧道集成测试的客户端半边（worker 侧在另一个 crate，测试里要一个最小镜像）
+tokio-tungstenite.workspace = true

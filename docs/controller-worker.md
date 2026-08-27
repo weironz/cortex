@@ -127,10 +127,19 @@ await 栈连坐取消 —— 今天怎样，以后还怎样）。
 
 ## 反向隧道（阶段 1，用户已拍板）
 
-**选型：worker 出站 WSS 长连到 controller + yamux 多路复用**
-（[rust-yamux](https://github.com/libp2p/rust-yamux)：每流独立流控，
-初始 256 KiB 窗口，慢流只堵自己 —— 评审专门攻过这条，攻不破）。
-每轮 SSE 一条子流，心跳并入隧道。落选者一行带过：russh SSH-over-WS
+**选型：worker 出站 WSS 长连到 controller，隧道内跑 HTTP/2 多路复用。**
+每轮 SSE 一条 h2 流，心跳并入隧道。
+
+⚠️ **实现时把 yamux 换成了 h2**（设计定稿写的是 yamux）。两者在这个场景
+语义等价（多路复用 + 逐流流控，评审攻过「慢流堵死整条隧道」，两者都
+攻不破），而 h2 多买到两样：hyper 本来就在依赖树里（axum 底下就是它），
+不必新引一个 crate 再在上面自写每流 HTTP/1.1；h2 的 PING 帧让
+「在线判据 = ping/pong deadline」直接是两个配置项，而不是自己写一套
+心跳。**代价是一个必须知道的坑**：hyper 的 keep-alive 要显式
+`.timer()`，不挂第一次 PING 调度时当场 panic —— 集成测试抓出来的，
+不是防御性配置。
+
+落选者一行带过：russh SSH-over-WS
 多买的端到端加密在当前拓扑下买不到（见下）；rathole/frp/chisel 加密
 终结在中继（伪 e2e）且嵌不进单二进制；WireGuard/libp2p 杀鸡用牛刀；
 QUIC/WebTransport 未生产就绪。完整对比在调研档案。
@@ -227,11 +236,11 @@ agentd，那是另一个数量级。隧道分帧留插层位置；做的判据�
 **阶段 0 —— 已做（与本文同一批提交）**：子 agent 工具描述与实际能力
 对齐 + 测试钉住「承诺 ⊆ 目录」。
 
-**阶段 1 —— 反向隧道**（唯一的新建设阶段）：
+**阶段 1 —— 反向隧道** ✅ **主干做完（2026-08-27）**，见下方「已落地」。
 
 交付物（评审要求逐项有真实调用方，不留「等另一半」空转期）：
 
-1. `cortex-local` 出站 WSS + yamux；agentd 侧隧道终结接进现有
+1. `cortex-local` 出站 WSS + h2；agentd 侧隧道终结接进现有
    `sandbox_proxy::forward`（三条纪律原样：纯字节透传、不压缩、
    显式路由清单）
 2. 心跳并入隧道 + ping/pong deadline 在线判据
@@ -253,6 +262,40 @@ agentd，那是另一个数量级。隧道分帧留插层位置；做的判据�
 **阶段 1 之后没有预排的阶段。** 上表每条「触发判据」满足时，
 拿着判据回来提案 —— 这不是搁置，是这个仓库对「造好没人调用」
 （13+ 次，榜首）的正面回应。
+
+### 阶段 1 已落地的部分（2026-08-27）
+
+`cortex-local` 出站 WSS（`GET /agents/tunnel`）→ WS 二进制帧 → h2。
+里面跑 **HTTP/2 而不是 yamux**：多路复用与逐流流控语义等价，hyper 本来
+就在依赖树里，而 h2 的 PING 让「在线判据 = ping/pong deadline」直接是
+两个配置项（15s 间隔 / 20s 窗口 → 死连接 ≤35 秒自毁）。
+
+- `sandbox_proxy::forward_tunneled` 与 `forward` **共用 `outbound()`**
+  剥头 —— 剥头是安全边界，两条路各写一遍漂开的那天没有症状
+- `UpstreamKind` 让合成错误文案按目标分叉：桌面 worker 断连时说
+  「不要重发」（那一轮还在跑，`ChatRequest` 无幂等键）
+- `presence::attach_route` 隧道优先于直拨；`--attach-addr` 降为可选优化
+- `attach_run` / `confirmations` 补上 Local 分支（此前只查容器 ——
+  web 对桌面会话答确认会落到指错路的 409）
+- `GET /confirmations` 进 attach 白名单（重放缓冲刻意不存 Confirm 事件，
+  断线重连只能现拉）
+- 重连纪律：401/403 **不自杀**（长退避无限重试）、Close 帧快重连、
+  换代计数、`timer()` 必须挂（不挂 hyper 第一次 PING 就 panic ——
+  集成测试抓出来的）
+- 放宽 `--allow-remote-attach` 与 loopback 绑定互斥：可达性来自隧道，
+  与绑哪个地址无关。仍拦**显式**给的 loopback/通配 `--attach-addr`
+
+**实地验证**：worker 绑 `127.0.0.1:0`、不给 `--attach-addr`、agentd 在
+容器里够不到它 —— 隧道建立后 web 端 `/chat` 到一个 `runtime=local` 的会话，
+agent 在**本机目录**上跑了 `list_dir`/`tree` 并流式回答；杀掉 worker 后
+**4 秒**内隧道注销、名册 `attachable` 转 false、`/chat` 回带机器名的 409。
+
+四次故障注入验红：隧道不剥凭据、注销不判代号、隧道键不带 owner、
+有隧道就接（绕过 `--allow-remote-attach`）。
+
+**还欠的**（不阻塞，按序）：presence UI（`GET /agents` 至今 0 消费者）、
+掉线后 90 秒窗口里那句 409 仍说「查 --bind 地址」而其实是机器下线了、
+桌面端壳子把 `--allow-remote-attach` 做成一个开关。
 
 ## 与既有文档的清算
 

@@ -44,6 +44,7 @@ mod state;
 mod supervise;
 /// 右栏「终端」页签的真终端：PTY + WS。见模块头。
 mod terminal;
+mod tunnel;
 mod turn;
 mod workspaces;
 mod ws_proxy;
@@ -207,11 +208,15 @@ struct Args {
     /// `POST /confirmations`、`/health`），换凭据 / 绑目录 / 改 MCP 一律 401。
     /// 也就是说：**开放远程接入不等于交出机器**。见 `routes::attach_allows`。
     ///
-    /// # 与 loopback 绑定互斥
+    /// # 它同时也是「建不建反向隧道」的开关
     ///
-    /// 绑在 `127.0.0.1` 上的 agent 报一个 `127.0.0.1:x` 出去，云端打过去是打到
-    /// **它自己**身上。所以两个一起给会拒绝启动，而不是让名册里出现一个
-    /// 「可接入但打不通」的谎 —— 那种谎的症状是「点了继续，转圈然后超时」。
+    /// 打开之后本进程会主动拨一条长连到 cortexd（见 [`tunnel`]），于是
+    /// **绑 loopback 也能被接入** —— 可达性来自那条出站连接，与绑哪个地址
+    /// 无关。这一条 2026-08-27 之前不成立：那时唯一的可达手段是云端拨
+    /// `--attach-addr`，所以 loopback 绑定会被拒绝启动。
+    ///
+    /// 隧道只在这个开关打开时建，不是「跑起来就有」：隧道的唯一用途是把请求
+    /// 送进接入面，只想「被看见」的话心跳就够了。**这道显式的闸原样保留。**
     #[arg(long)]
     allow_remote_attach: bool,
 
@@ -227,8 +232,12 @@ struct Args {
     /// 网的网关地址宿主绑不上，而通配又被自己拦住）。
     ///
     /// 给了这个参数就不再管 `--bind` 是不是通配 —— **通告地址是用户明确说的，
-    /// 而他比这段代码更清楚自己的拓扑**。仍然拦 loopback：那个值无论怎么解释
-    /// 都是「打到云端自己身上」。
+    /// 而他比这段代码更清楚自己的拓扑**。仍然拦 loopback 与通配：那两个值
+    /// 无论怎么解释都拨不出去。
+    ///
+    /// ⚠️ **反向隧道之后这个参数是可选的优化，不是前提。** 不给它照样能被
+    /// 接入（走隧道）；给它是为了同网段直拨少绕一跳。灰度期两条路并存，
+    /// 隧道全量后直拨整条退役 —— 见 `docs/controller-worker.md`。
     #[arg(long, requires = "allow_remote_attach")]
     attach_addr: Option<String>,
 }
@@ -484,55 +493,39 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // ── 远程接入与 loopback 绑定互斥 ──
+    // ── 通告地址的校验（反向隧道之后收窄）──
     //
-    // 绑在 127.0.0.1 上的 agent 报一个 `127.0.0.1:x` 给云端，而云端打过去是打到
-    // **它自己**身上。放过去的后果是名册里出现一个「可接入」的谎，而用户看到的
-    // 是「点了继续，转圈然后超时」——**拒绝启动**，并且把该怎么办说出来。
+    // ⚠️ **只校验显式给的 `--attach-addr`，不再拦 loopback 绑定。**
     //
-    // 判的是 `--bind` 的字面值而不是解析后的 IP：`localhost` 也要拦住，
-    // 而它解析出来可能是 ::1。
-    if args.allow_remote_attach {
-        // 校验**通告地址**：给了 `--attach-addr` 就校它，否则退回 `--bind`。
-        // 校错对象的后果是「绑通配 + 通告一个具体地址」这种完全正常的拓扑
-        // 被拒绝启动 —— 而那正是第一版的样子。
-        let advertised = args.attach_addr.as_deref().unwrap_or(&args.bind);
-        let host = advertised
+    // 反向隧道（controller+worker 阶段 1）之前，`--allow-remote-attach` 唯一
+    // 的可达手段是「云端拨那个通告地址」，所以 loopback / 通配绑定必须拒 ——
+    // 否则名册显示「可接入」而用户点了继续只会转圈超时。
+    //
+    // 有了隧道之后，可达性来自 worker 主动拨出的那条连接，**与绑哪个地址
+    // 无关**。桌面端绑的正是 127.0.0.1，而隧道让它照样能被 web 接入 ——
+    // 这正是这一步要买到的东西。所以继续拦 loopback 绑定等于把隧道最主要的
+    // 用户挡在门外。
+    //
+    // 但**显式**给一个 loopback / 通配的 `--attach-addr` 仍然是明确的错误：
+    // 那是在说「云端请拨这个地址」而指向了它自己（或一个不是地址的通配）。
+    // 直拨（灰度期的老 worker、同网段优化）会真去拨它。这种自相矛盾当场拦下。
+    if let Some(addr) = args.attach_addr.as_deref() {
+        let host = addr
             .rsplit_once(':')
-            .map_or(advertised, |(h, _)| h)
+            .map_or(addr, |(h, _)| h)
             .trim_matches(['[', ']']);
-        // 两类都不能用，而**原因不同**：
-        //
-        // - loopback：云端打过去是打到它自己身上
-        // - 通配（0.0.0.0 / ::）：`local_addr()` 回的就是通配本身，
-        //   报给云端等于报了一个拨不出去的地址
-        //
-        // 后者尤其要拦：它「看起来像个地址」，于是名册会显示「可接入」，
-        // 而用户看到的是「点了继续，转圈然后超时」。
-        //
-        // 不去靠 `X-Forwarded-For` 反推源 IP：反代后面那个值取决于中间有几层、
-        // 每层配没配，而猜错的表现同样是超时。**要一个具体地址，
-        // 由知道自己拓扑的人给。**
-        let why = match host {
-            "127.0.0.1" | "::1" | "localhost" => Some("云端打这个地址会打到它自己身上"),
-            // 只有**没给** `--attach-addr` 时通配才是问题：那时通告的就是它本身
-            "0.0.0.0" | "::" | "" if args.attach_addr.is_none() => {
-                Some("通配地址拨不出去 —— 用 --attach-addr 告诉云端该打哪个地址")
-            }
-            _ => None,
-        };
-        if let Some(why) = why {
+        if matches!(
+            host,
+            "127.0.0.1" | "::1" | "localhost" | "0.0.0.0" | "::" | ""
+        ) {
             anyhow::bail!(
                 concat!(
-                    "--allow-remote-attach 与通告地址 {addr} 冲突：{why}。\n",
-                    "给一个云端**够得到的具体地址** —— 比如这台机器在 VPN / tailnet 上的地址：\n",
-                    "    cortex-local --bind 0.0.0.0:8090 --allow-remote-attach \\\n",
-                    "                 --attach-addr 100.x.y.z:8090\n",
-                    "⚠️ 那个端口对同网段是开着的，而这个进程能跑命令。接入面另有一把\n",
-                    "只在 /chat、/runs、/confirmations 上有效的钥匙，但端口本身是暴露的。"
+                    "--attach-addr {addr} 指向的是一个拨不出去的地址 —— ",
+                    "loopback 打到 worker 自己身上，通配根本不是一个地址。\n",
+                    "要么给一个云端够得到的具体地址（VPN / tailnet / 端口映射后的公网），",
+                    "要么**干脆不给** —— 反向隧道会负责可达性，绑 127.0.0.1 也能被接入。"
                 ),
-                addr = advertised,
-                why = why
+                addr = addr
             );
         }
     }
@@ -552,6 +545,10 @@ async fn main() -> anyhow::Result<()> {
     //
     // 它**报不上去也不是靠自觉**：沙箱那把委托令牌的白名单里没有这条路。
     // 这里的判断是为了不去做一件必然被 403 的事，顺带少一条每 30 秒的 WARN。
+    // 路由先建：`serve` 用它，反向隧道也用**同一个** —— 隧道上服务的必须
+    // 是同一套 Router（含 `require_auth`），一层不减（安全不变量 1）
+    let app = routes::router(state.clone());
+
     if args.exec_env == cortex_agent::ExecEnvironment::LocalMachine {
         let engine = Arc::clone(&engine);
         // 机器名给人看，用来在别的设备上认出「是哪一台」。
@@ -586,6 +583,21 @@ async fn main() -> anyhow::Result<()> {
         // 而且**刻意不持久化**：那种 id 在重装或克隆之后会骗人，
         // 见 `cortex_store::SessionRuntime` 的那段论证。
         let agent_id = cortex_core::Id::new().to_string();
+
+        // ── 反向隧道（controller+worker 阶段 1）──
+        //
+        // 只在开了远程接入时建：隧道的唯一用途是把请求送进 attach 面。
+        // 只为「被看见」的话心跳就够了 —— 于是 `--allow-remote-attach`
+        // 这道「显式交出执行能力」的闸原样保留（安全不变量 3）。
+        if let Some(attach_token) = state.attach_token.clone() {
+            tunnel::spawn(
+                state.http.clone(),
+                engine.remote.clone(),
+                app.clone(),
+                agent_id.clone(),
+                attach_token,
+            );
+        }
         // 绑定一变就补一条心跳，不等这一轮的 30 秒睡完，见 `Workspaces::changed`
         let bindings_changed = engine.workspaces.changed();
         tokio::spawn(async move {
@@ -654,7 +666,7 @@ async fn main() -> anyhow::Result<()> {
     supervise::exit_with_parent(args.parent_pid);
     tracing::info!(bind = %actual, "本地 agent 已就绪");
 
-    axum::serve(listener, routes::router(state))
+    axum::serve(listener, app)
         .await
         .context("HTTP 服务异常退出")?;
     Ok(())

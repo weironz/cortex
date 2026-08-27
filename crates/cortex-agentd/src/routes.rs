@@ -102,6 +102,9 @@ protected_routes! {
     // 委托令牌够不到它 —— 白名单里没有，默认拒绝。
     "/agents" [GET] => get(list_agents),
     "/agents/heartbeat" [POST] => post(heartbeat),
+    // 反向隧道的入口：worker 出站拨到这儿，WS 升级后里面跑 h2。
+    // 与心跳同一道门（用户 bearer），委托令牌照样够不到
+    "/agents/tunnel" [GET] => get(agent_tunnel),
     // ── 实时同步 ──
     //
     // `/sync` 是底线：轮询补拉，不依赖推送。`/ws` 只推「有变化了」这个信号，
@@ -659,6 +662,50 @@ async fn heartbeat(
     })
 }
 
+/// `GET /agents/tunnel` —— 反向隧道的升级点（roadmap：controller+worker 阶段 1）。
+///
+/// worker 用**用户 bearer** 认证这次升级（与心跳同一道门）；元数据走请求头
+/// —— 失败要停留在 HTTP 层（400/401 带原因），升级完再谈判的话，
+/// 错误只能是一次没头没脑的连接关闭。
+///
+/// ⚠️ **升级请求的认证只建立传输身份。** 此后经这条隧道转发的每个请求
+/// 仍带 attach token、由 worker 侧逐个把关（安全不变量 1）——
+/// 这里绝不把「隧道已认证」翻译成任何 HTTP 授权。
+async fn agent_tunnel(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let owner = crate::accounts::current_user(&st, &headers).await;
+    let hdr = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    let Some(agent_id) = hdr(crate::tunnel::AGENT_ID_HEADER) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "隧道升级缺少 x-cortex-agent-id —— worker 版本太旧或请求不是 worker 发的",
+        );
+    };
+    let Some(attach_token) = hdr(crate::tunnel::ATTACH_TOKEN_HEADER) else {
+        // 没开 `--allow-remote-attach` 就没有这把钥匙，也就不该来建隧道：
+        // 隧道的唯一用途是把请求送进 attach 面（不变量 3：隧道 ≠ 开放接入，
+        // 但反过来「没开放接入就不建隧道」成立 —— 只为被看见的话心跳就够了）
+        return err(
+            StatusCode::BAD_REQUEST,
+            "隧道升级缺少接入钥匙 —— 没开 --allow-remote-attach 的话不需要隧道",
+        );
+    };
+    let tunnels = std::sync::Arc::clone(st.tunnels_arc());
+    ws.on_upgrade(move |sock| async move {
+        crate::tunnel::run(&tunnels, owner, agent_id, attach_token, sock).await;
+    })
+}
+
 /// `GET /agents[?session=]` —— 我名下哪些机器现在在线。
 ///
 /// 过期的**不出现**，而不是带一个 `online: false`：「不在名册里」与「在名册里
@@ -671,7 +718,9 @@ async fn list_agents(
 ) -> Json<cortex_proto::presence::AgentsResponse> {
     let owner = crate::accounts::current_user(&st, &headers).await;
     Json(cortex_proto::presence::AgentsResponse {
-        agents: st.presence().list(&owner, q.session.as_deref()),
+        agents: st.presence().list(&owner, q.session.as_deref(), &|id| {
+            st.tunnels().is_live(&owner, id)
+        }),
     })
 }
 
@@ -825,11 +874,12 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
         // 复用 `sandbox_proxy::forward` 而不是另写一份：它已经把「剥掉一切
         // 凭据再换上这条路自己的钥匙」做对了，而那一处正是安全边界。
         // 抄第二份的后果是两处剥离规则漂开，且漂开的那一天没人看得出来。
-        if let Some((addr, key)) = st.presence().attach_for(&d.owner, &parsed.session_id) {
-            tracing::debug!(
-                owner = %d.owner, session = %parsed.session_id, %addr,
-                "本轮接到那台机器上的本地 agent"
-            );
+        let route = st
+            .presence()
+            .attach_route(&d.owner, &parsed.session_id, &|id| {
+                st.tunnels().is_live(&d.owner, id)
+            });
+        if let Some(route) = route {
             let mut proxied = Request::new(axum::body::Body::from(bytes));
             *proxied.method_mut() = axum::http::Method::POST;
             *proxied.uri_mut() = "/chat".parse().expect("常量路径可解析");
@@ -837,14 +887,11 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
                 header::CONTENT_TYPE,
                 axum::http::HeaderValue::from_static("application/json"),
             );
-            return crate::sandbox_proxy::forward(
-                st.http(),
-                &format!("http://{addr}"),
-                &key,
-                None,
-                proxied,
-            )
-            .await;
+            if let Some(resp) = attach_forward(&st, &d.owner, &route, proxied).await {
+                return resp;
+            }
+            // 走到这儿 = 隧道在「取句柄」与「开流」之间断了，且没有直拨可回落。
+            // 落进下面那句 409 —— 它会说清在哪一台、该怎么办
         }
 
         // ── 接不过去：说出**是哪一台**，以及为什么接不了 ──
@@ -929,6 +976,7 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
         handle.addr.endpoint(),
         &d.token,
         handle.addr.route_target(),
+        crate::sandbox_proxy::UpstreamKind::Container,
         proxied,
     )
     .await
@@ -939,6 +987,46 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
 /// 容器不在与「这条路由压根没挂上」在状态码上都是 404，所以
 /// `the_attach_route_is_actually_mounted` 只能靠正文分辨这两者。
 const ATTACH_NO_RUN: &str = "这个会话现在没有正在跑的轮次。";
+
+/// 把一个已组好的请求送到 `route` 指的那台机器：隧道优先，直拨兜底。
+///
+/// 回 `None` = 两条路都开不出去（隧道刚断、又没有可达的直拨地址）——
+/// 调用方落回自己的「接不了」分支。
+///
+/// # 为什么隧道优先
+///
+/// 直拨的「可达」是上一次心跳时的旧闻（最长 30 秒前），隧道的「活着」是
+/// h2 PING 盯着的现在。灰度期两者并存；老 worker（无隧道能力）只有直拨，
+/// 新 worker 在 NAT 后只有隧道 —— 这个函数对两代都成立。
+/// 隧道全量后直拨整条退役（设计稿：不留一条无人探活的半死路径）。
+async fn attach_forward(
+    st: &AgentState,
+    owner: &str,
+    route: &crate::presence::AttachRoute,
+    req: Request,
+) -> Option<Response> {
+    if route.tunneled
+        && let Some(handle) = st.tunnels().get(owner, &route.agent_id)
+    {
+        tracing::debug!(agent = %route.agent_id, "经反向隧道接到那台机器");
+        return Some(crate::sandbox_proxy::forward_tunneled(handle, req).await);
+    }
+    if let Some((addr, key)) = &route.direct {
+        tracing::debug!(agent = %route.agent_id, %addr, "直拨那台机器（灰度期）");
+        return Some(
+            crate::sandbox_proxy::forward(
+                st.http(),
+                &format!("http://{addr}"),
+                key,
+                None,
+                crate::sandbox_proxy::UpstreamKind::LocalAgent,
+                req,
+            )
+            .await,
+        );
+    }
+    None
+}
 
 /// `GET /sandbox/runs/{session_id}` —— 挂上容器里那一轮。
 ///
@@ -964,6 +1052,31 @@ async fn attach_run(
     // 钥匙还是要要一次：`scope_key` 由 owner 与项目派生，而这条路由要拿它去问
     // 「那个容器在不在」。**没派上用场也不作废**，理由见 `ensure_sandbox`
     let d = issue_delegation(&st, &headers, &session_id).await;
+
+    // ── 钉在某台机器上的会话：这一轮（若在跑）在**那台机器**上 ──
+    //
+    // 此前这条只查容器，于是 web 端刷新页面想重挂桌面上正在跑的一轮，
+    // 拿到的是 404「没有正在跑的轮次」，而桌面明明在跑（对抗评审点名的
+    // 阶段 1 前置洞）。机器够不着时仍回 404 —— 客户端把它当「拉历史」
+    // 处理，与「轮次真的不在跑」同一条路径，这正是想要的降级
+    if matches!(d.runtime, SessionRuntimeDto::Local) {
+        let route = st.presence().attach_route(&d.owner, &session_id, &|id| {
+            st.tunnels().is_live(&d.owner, id)
+        });
+        if let Some(route) = route {
+            let (parts, _) = req.into_parts();
+            let method = parts.method.clone();
+            let mut proxied = Request::from_parts(parts, axum::body::Body::empty());
+            *proxied.method_mut() = method;
+            *proxied.uri_mut() = format!("/runs/{session_id}")
+                .parse()
+                .unwrap_or_else(|_| "/runs".parse().expect("常量路径可解析"));
+            if let Some(resp) = attach_forward(&st, &d.owner, &route, proxied).await {
+                return resp;
+            }
+        }
+        return err(StatusCode::NOT_FOUND, ATTACH_NO_RUN);
+    }
 
     let handle = match st.runner().status(&d.scope_key).await {
         Ok(Some(h)) => h,
@@ -991,6 +1104,7 @@ async fn attach_run(
         handle.addr.endpoint(),
         &d.token,
         handle.addr.route_target(),
+        crate::sandbox_proxy::UpstreamKind::Container,
         proxied,
     )
     .await
@@ -1068,6 +1182,7 @@ async fn confirmations(
         handle.addr.endpoint(),
         &d.token,
         handle.addr.route_target(),
+        crate::sandbox_proxy::UpstreamKind::Container,
         req,
     )
     .await

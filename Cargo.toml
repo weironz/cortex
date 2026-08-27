@@ -98,6 +98,19 @@ bollard = { version = "0.21", default-features = false, features = ["pipe"] }
 # 两份共存会让 `bytes::Bytes` 之外的类型对不上，报错在转换处而不在依赖处。
 tokio-tungstenite = "0.29"
 
+# 反向隧道（docs/controller-worker.md 阶段 1）。
+#
+# 隧道内跑的是 **HTTP/2**，不是 yamux：h2 的多路复用与逐流流控语义等价
+# （设计稿选型时两者并列），而 hyper 已经在依赖树里（axum 底下就是它），
+# 且 h2 的 PING 帧自带 keep_alive_interval/timeout —— 「ping/pong deadline
+# 在线判据」直接是配置项，不用自己写。yamux 要多一个 crate 加一层
+# 自写的每流 HTTP/1.1。
+# 直接依赖 hyper 是为了 `client::conn` / `server::conn` 这层低级 API ——
+# 隧道是一条已经建立的字节流，reqwest/axum 的高层封装都只认「地址」。
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+http-body-util = "0.1"
+
 # OS 级沙箱（仅 Linux 目标启用）。
 # 取件自 codex（Apache-2.0）的选型：它的 linux-sandbox 就是这两个 crate 的编排。
 # codex 自身的 crate 未发布到 crates.io 且深度耦合 codex-protocol，只能取底座 + 取策略。

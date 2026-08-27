@@ -52,6 +52,56 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// timeout（seanmonstar/reqwest#2839），所以日志与给用户的话别按字面转发。
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// 上游是谁 —— 决定合成错误的文案怎么说。
+///
+/// # 为什么文案要分叉
+///
+/// 这两句话此前只有容器版。桌面 worker 断连时那一轮**还在那台机器上跑**，
+/// 而容器版文案说「重新发一次会自动把它拉起来」—— 用户照着重发，
+/// `ChatRequest` 没有幂等键，第二条排进 FIFO，**同一指令跑两遍、文件改
+/// 两遍**。同理 401→409 那句「下一次对话会把它换掉」只有容器 rebuild
+/// 路径兑现承诺，桌面 worker 没有 rebuild。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UpstreamKind {
+    /// 云端沙箱容器：可弃、可重建，「重发拉起」是真的。
+    Container,
+    /// 用户机器上的本机 agent：那一轮 detached 地继续跑，绝不许诱导重发。
+    LocalAgent,
+}
+
+impl UpstreamKind {
+    /// 上游流中断时补的那帧 SSE。
+    fn stream_broken(self) -> &'static str {
+        match self {
+            Self::Container => concat!(
+                "data: {\"type\":\"error\",\"message\":\"与沙箱的连接中断了。",
+                "沙箱可能被回收或超出了内存上限 —— 重新发一次会自动把它拉起来。\"}\n\n"
+            ),
+            Self::LocalAgent => concat!(
+                "data: {\"type\":\"error\",\"message\":\"与那台机器的连接断开了。",
+                "这一轮还在它上面继续跑 —— 不要重发，",
+                "连接恢复后重新打开这个会话就能接上结果。\"}\n\n"
+            ),
+        }
+    }
+
+    /// 上游 401 时改写成 409 的正文。
+    fn upstream_401(self) -> &'static str {
+        match self {
+            Self::Container => concat!(
+                "这一端不认当前的凭据了 —— 多半是服务端重启过，",
+                "而那个沙箱容器还认着上一代的令牌。\n",
+                "**你的登录没有问题**：下一次对话会把它换掉，稍后重试即可。"
+            ),
+            Self::LocalAgent => concat!(
+                "那台机器不认当前的接入钥匙了 —— 多半是它刚重启过，",
+                "新钥匙随它的下一次连接送到。\n",
+                "**你的登录没有问题**：稍等几秒再试即可，不用重发消息。"
+            ),
+        }
+    }
+}
+
 /// 反代专用的 HTTP 客户端。
 ///
 /// 与别处那个分开，就为了这两个超时和**禁用连接池**：容器重启（快照重建、
@@ -97,6 +147,33 @@ fn is_credential(name: &str) -> bool {
     )
 }
 
+/// 出站首部：剥两类（逐跳的、**一切凭据**）再换上这条路自己的钥匙。
+///
+/// [`forward`]（reqwest 直拨/中继）与 [`forward_tunneled`]（隧道 h2）共用
+/// **这同一个函数** —— 剥头是安全边界，两条路各写一遍的话，漂开的那天
+/// 没有任何症状。
+fn outbound(src: &HeaderMap, token: &str, route_to: Option<&str>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for (k, v) in src {
+        // 剥两类：逐跳的（协议要求），以及**一切凭据**（这一处是安全边界）
+        if !is_hop_by_hop(k.as_str()) && !is_credential(k.as_str()) {
+            headers.insert(k, v.clone());
+        }
+    }
+    // 换上这条路自己那把。上游认的就是它 —— 用户的 token 到此为止
+    if let Ok(v) = format!("Bearer {token}").parse() {
+        headers.insert(header::AUTHORIZATION, v);
+    }
+    // 走中继时告诉它转给谁。注意这一句在剥头的循环**之后** ——
+    // 客户端要是自己带了一个同名头，会被这里覆盖掉，而不是反过来
+    if let Some(name) = route_to
+        && let Ok(v) = name.parse()
+    {
+        headers.insert(ROUTE_HEADER, v);
+    }
+    headers
+}
+
 /// 走中继时告诉它转给哪个容器。值是容器名。
 ///
 /// 与 `cortex-egress-proxy` 的 `inbound::TARGET_HEADER` 必须逐字相同 ——
@@ -138,6 +215,7 @@ pub async fn forward(
     base_url: &str,
     token: &str,
     route_to: Option<&str>,
+    kind: UpstreamKind,
     req: Request,
 ) -> Response {
     let (parts, body) = req.into_parts();
@@ -147,24 +225,7 @@ pub async fn forward(
         .map_or_else(|| parts.uri.path().to_string(), ToString::to_string);
     let url = format!("{}{}", base_url.trim_end_matches('/'), path_and_query);
 
-    let mut headers = HeaderMap::new();
-    for (k, v) in &parts.headers {
-        // 剥两类：逐跳的（协议要求），以及**一切凭据**（这一处是安全边界）
-        if !is_hop_by_hop(k.as_str()) && !is_credential(k.as_str()) {
-            headers.insert(k, v.clone());
-        }
-    }
-    // 换上沙箱自己那把。容器认的就是它 —— 用户的 token 到此为止
-    if let Ok(v) = format!("Bearer {token}").parse() {
-        headers.insert(header::AUTHORIZATION, v);
-    }
-    // 走中继时告诉它转给谁。注意这一句在剥头的循环**之后** ——
-    // 客户端要是自己带了一个同名头，会被这里覆盖掉，而不是反过来
-    if let Some(name) = route_to
-        && let Ok(v) = name.parse()
-    {
-        headers.insert(ROUTE_HEADER, v);
-    }
+    let headers = outbound(&parts.headers, token, route_to);
 
     let stream = body
         .into_data_stream()
@@ -206,13 +267,7 @@ pub async fn forward(
                 );
                 return (
                     StatusCode::CONFLICT,
-                    axum::Json(serde_json::json!({
-                        "error": concat!(
-                            "这一端不认当前的凭据了 —— 多半是服务端重启过，",
-                            "而那个沙箱容器还认着上一代的令牌。\n",
-                            "**你的登录没有问题**：下一次对话会把它换掉，稍后重试即可。"
-                        )
-                    })),
+                    axum::Json(serde_json::json!({ "error": kind.upstream_401() })),
                 )
                     .into_response();
             }
@@ -228,16 +283,13 @@ pub async fn forward(
             // 不补的话客户端只看到连接被掐（HTTP/1.1 chunked 没有终止块），
             // 而那与网络抖动长得一模一样。**拼一帧不需要解析上游** ——
             // payload 本来就是 SSE 文本，这里只是在末尾追加一段
-            let tail = resp.bytes_stream().map(|chunk| match chunk {
+            let tail = resp.bytes_stream().map(move |chunk| match chunk {
                 Ok(b) => Ok::<_, std::convert::Infallible>(b),
                 Err(e) => {
-                    tracing::warn!(error = %e, "沙箱的响应流中断");
+                    tracing::warn!(error = %e, "上游的响应流中断");
                     // 注意 reqwest 的 read_timeout 到期时这条错误的文案是
                     // 「error decoding response body」，别原样转给用户
-                    Ok(axum::body::Bytes::from(
-                        "data: {\"type\":\"error\",\"message\":\"与沙箱的连接中断了。\
-                         沙箱可能被回收或超出了内存上限 —— 重新发一次会自动把它拉起来。\"}\n\n",
-                    ))
+                    Ok(axum::body::Bytes::from(kind.stream_broken()))
                 }
             });
             out.body(Body::from_stream(tail))
@@ -249,6 +301,79 @@ pub async fn forward(
             StatusCode::BAD_GATEWAY,
             axum::Json(cortex_proto::dto::ErrorBody {
                 error: format!("连不上沙箱（{base_url}）：{e}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// 把 `req` 经反向隧道转给那台机器，响应流式转回。
+///
+/// 与 [`forward`] 是同一套安全规则（同一个 `outbound` 剥头、同一个
+/// 401→409 改写、同一个断流补帧），只是发送走的是隧道里的 h2 流而不是
+/// reqwest。**剥头逻辑绝不第二份** —— 两条路各写一遍的话，漂开的那天
+/// 没人看得出来（评审点名的第一硬伤）。
+pub async fn forward_tunneled(handle: crate::tunnel::Handle, req: Request) -> Response {
+    let kind = UpstreamKind::LocalAgent;
+    let (parts, body) = req.into_parts();
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map_or_else(|| parts.uri.path().to_string(), ToString::to_string);
+
+    // h2 的伪首部要有 scheme 与 authority；worker 那侧的 axum 不看它们。
+    let uri: axum::http::Uri = match format!("http://worker{path_and_query}").parse() {
+        Ok(u) => u,
+        Err(e) => return internal(&format!("拼不出隧道请求的 URI：{e}")),
+    };
+    let mut out = axum::http::Request::builder().method(parts.method).uri(uri);
+    if let Some(h) = out.headers_mut() {
+        *h = outbound(&parts.headers, &handle.attach_token, None);
+    }
+    let Ok(hreq) = out.body(Body::new(body)) else {
+        return internal("组装隧道请求失败");
+    };
+
+    let mut send = handle.send;
+    match send.send_request(hreq).await {
+        Ok(resp) => {
+            let status = resp.status();
+            if status == StatusCode::UNAUTHORIZED {
+                tracing::warn!("那台机器拒绝了接入钥匙（401）—— 多半是它重启后钥匙换代");
+                return (
+                    StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({ "error": kind.upstream_401() })),
+                )
+                    .into_response();
+            }
+            let mut builder = Response::builder().status(status);
+            for (k, v) in resp.headers() {
+                if !is_hop_by_hop(k.as_str()) {
+                    builder = builder.header(k, v);
+                }
+            }
+            use http_body_util::BodyExt as _;
+            let tail = resp.into_body().into_data_stream().map(move |chunk| {
+                chunk.map_or_else(
+                    |e| {
+                        tracing::warn!(error = %e, "隧道里的响应流中断");
+                        Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(
+                            kind.stream_broken(),
+                        ))
+                    },
+                    Ok,
+                )
+            });
+            builder
+                .body(Body::from_stream(tail))
+                .unwrap_or_else(|e| internal(&format!("组装隧道响应失败：{e}")))
+        }
+        // 502：隧道在簿子里但流开不出去（刚断、还没被 PING 判死的窗口）。
+        // 客户端据此分得清「agentd 挂了」与「那台机器够不着」
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(cortex_proto::dto::ErrorBody {
+                error: format!("经隧道连不上那台机器：{e}"),
             }),
         )
             .into_response(),
@@ -344,6 +469,7 @@ mod upstream_401_tests {
             &format!("http://{addr}"),
             "一把上游不认的钥匙",
             None,
+            UpstreamKind::Container,
             req,
         )
         .await;

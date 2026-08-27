@@ -93,6 +93,9 @@ struct Inner {
     refresh_replay: Arc<crate::accounts::ReplayCache>,
     /// 在线名册。寿命秒级，刻意不进库 —— 见 crate::presence 的模块文档。
     presence: Arc<crate::presence::PresenceBook>,
+    /// 反向隧道簿。与 presence 是两本：那本记「机器说了什么」（自陈），
+    /// 这本记「到机器的活连接」（事实）。见 [`crate::tunnel`]。
+    tunnels: Arc<crate::tunnel::Tunnels>,
     /// 认证端点（login / refresh / register）的限流表。
     ///
     /// 与 [`Inner::tickets`] / [`Inner::access`] 同款的进程内簿子。它挂在
@@ -219,6 +222,7 @@ impl AgentState {
                 access: Arc::new(crate::accounts::AccessBook::default()),
                 refresh_replay: Arc::new(crate::accounts::ReplayCache::default()),
                 presence: Arc::new(crate::presence::PresenceBook::default()),
+                tunnels: Arc::new(crate::tunnel::Tunnels::default()),
                 auth_throttle: Arc::new(crate::rate_limit::AuthThrottle::default()),
                 sync_buses: Arc::new(crate::sync_bus::SyncBuses::default()),
                 delegations: Arc::new(crate::delegated_token::DelegatedTokens::default()),
@@ -341,6 +345,18 @@ impl AgentState {
     #[must_use]
     pub fn runner(&self) -> &Arc<dyn SandboxRunner> {
         &self.inner.runner
+    }
+
+    /// 反向隧道簿。见 [`crate::tunnel`]。
+    #[must_use]
+    pub fn tunnels(&self) -> &crate::tunnel::Tunnels {
+        &self.inner.tunnels
+    }
+
+    /// 隧道簿的 `Arc` —— 给要活过本次请求的任务（`on_upgrade` 回调）用。
+    #[must_use]
+    pub fn tunnels_arc(&self) -> &Arc<crate::tunnel::Tunnels> {
+        &self.inner.tunnels
     }
 
     /// 在线名册。**只报不判** —— 见 `crate::presence` 的模块文档。

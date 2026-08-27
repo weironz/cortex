@@ -64,6 +64,18 @@ struct Entry {
     attach_reachable: bool,
 }
 
+/// `/chat` 该把这一轮送到哪儿。
+///
+/// `tunneled` 与 `direct` 至少有一个成立（否则 [`PresenceBook::attach_route`]
+/// 回 `None`）。都成立时调用方走隧道，理由见那边的文档。
+pub struct AttachRoute {
+    pub agent_id: String,
+    /// 有活的反向隧道。钥匙在隧道簿里（那条连接自己报的），不在这儿。
+    pub tunneled: bool,
+    /// 灰度期的直拨路：`(addr, attach_token)`。
+    pub direct: Option<(String, String)>,
+}
+
 /// 那台机器在线，但这一轮接不过去 —— 为什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhyNot {
@@ -106,7 +118,16 @@ impl PresenceBook {
     /// 这个人名下还在线的 agent。
     ///
     /// `session` 给了的话，每行多一个「这台机器有没有它的绑定」。
-    pub fn list(&self, owner: &str, session: Option<&str>) -> Vec<AgentPresenceDto> {
+    ///
+    /// `tunneled(agent_id)` 回答「这台机器现在有没有活的反向隧道」——
+    /// 由调用方从隧道簿里查（两本簿子刻意分开，见 `crate::tunnel`）。
+    /// 有隧道时地址探不探得通无所谓：请求根本不走那个地址。
+    pub fn list(
+        &self,
+        owner: &str,
+        session: Option<&str>,
+        tunneled: &dyn Fn(&str) -> bool,
+    ) -> Vec<AgentPresenceDto> {
         let g = self.lock();
         let mut out: Vec<AgentPresenceDto> = g
             .iter()
@@ -117,7 +138,7 @@ impl PresenceBook {
                 last_seen_secs: e.last_seen.elapsed().as_secs(),
                 session_count: e.sessions.len(),
                 has_session: session.map(|s| e.sessions.iter().any(|x| x == s)),
-                attachable: e.attach.is_some() && e.attach_reachable,
+                attachable: e.attach.is_some() && (e.attach_reachable || tunneled(agent_id)),
             })
             .collect();
         // 稳定顺序：界面上一列机器每次刷新换位置，会让人以为是别的机器
@@ -160,24 +181,47 @@ impl PresenceBook {
 
     /// 这个会话该接到哪儿去 —— 给 `/chat` 那条路由用。
     ///
-    /// 返回 `(地址, 钥匙)`。**只在「持有这个会话的绑定」且「探通了」时给**：
+    /// **只在「持有这个会话的绑定」且「够得着」时给**，够得着 = 有活隧道，
+    /// 或（灰度期的老 worker）直拨地址刚探通过：
     ///
     /// - 没开远程接入 → `None`（那台机器只同意被看见，不同意被接入）
-    /// - 开了但探不通 → `None`（报一个拨不出去的地址是常见的误配）
+    /// - 开了但既无隧道也探不通 → `None`
     ///
     /// 两种都回 `None`，因为对调用方来说该做的事一样：不要接，去说那句 409。
     /// 而**为什么**不接由 [`Self::list`] 那边的 `attachable` 让用户看见。
-    pub fn attach_for(&self, owner: &str, session_id: &str) -> Option<(String, String)> {
+    ///
+    /// # 隧道优先于直拨
+    ///
+    /// 两者都在时走隧道：直拨的「可达」是上一次心跳时的旧闻（最长 30 秒前），
+    /// 隧道的「活着」是 h2 PING 盯着的现在。等隧道全量后直拨整条退役
+    /// （设计稿：不留一条无人探活的半死路径）。
+    pub fn attach_route(
+        &self,
+        owner: &str,
+        session_id: &str,
+        tunneled: &dyn Fn(&str) -> bool,
+    ) -> Option<AttachRoute> {
         let g = self.lock();
         g.iter()
             .filter(|((o, _), e)| o == owner && e.last_seen.elapsed() < TTL)
-            .filter(|(_, e)| e.attach_reachable)
+            .filter(|(_, e)| e.attach.is_some())
+            .filter(|((_, id), e)| e.attach_reachable || tunneled(id))
             .filter(|(_, e)| e.sessions.iter().any(|s| s == session_id))
             // 同上取最新的：一台机器换了通告地址重启之后，陈旧那条上的地址
             // 可能已经打不通了，而它「上次探通过」
             .min_by_key(|(_, e)| e.last_seen.elapsed())
-            .and_then(|(_, e)| e.attach.as_ref())
-            .map(|a| (a.addr.clone(), a.token.clone()))
+            .map(|((_, id), e)| {
+                let direct = e
+                    .attach
+                    .as_ref()
+                    .filter(|_| e.attach_reachable)
+                    .map(|a| (a.addr.clone(), a.token.clone()));
+                AttachRoute {
+                    agent_id: id.clone(),
+                    tunneled: tunneled(id),
+                    direct,
+                }
+            })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), Entry>> {
@@ -211,7 +255,7 @@ mod tests {
         book.record("bob", &hb("b1", "bob-pc", &["S2"]), false);
 
         let seen: Vec<String> = book
-            .list("alice", None)
+            .list("alice", None, &|_| false)
             .into_iter()
             .map(|a| a.machine_hint)
             .collect();
@@ -229,7 +273,7 @@ mod tests {
         let book = PresenceBook::default();
         book.record("alice", &hb("a1", "alice-mbp", &["S1"]), false);
         book.record("alice", &hb("a1", "alice-mbp", &["S1", "S2"]), false);
-        let list = book.list("alice", None);
+        let list = book.list("alice", None, &|_| false);
         assert_eq!(list.len(), 1, "同一个 agent 只该有一行");
         assert_eq!(list[0].session_count, 2, "末态是最后那条心跳");
     }
@@ -240,7 +284,7 @@ mod tests {
         let book = PresenceBook::default();
         book.record("alice", &hb("a1", "mbp", &["S1"]), false);
         book.record("alice", &hb("a2", "desktop", &["S9"]), false);
-        let list = book.list("alice", Some("S1"));
+        let list = book.list("alice", Some("S1"), &|_| false);
         let mbp = list.iter().find(|a| a.machine_hint == "mbp").expect("mbp");
         let desk = list
             .iter()
@@ -278,7 +322,14 @@ mod tests {
             book.why_not_attachable("alice", "S1"),
             Some(("mbp".to_owned(), WhyNot::NotOffered))
         );
-        assert_eq!(book.attach_for("alice", "S1"), None, "没同意就不该被接入");
+        assert!(
+            book.attach_route("alice", "S1", &|_| false).is_none(),
+            "没同意就不该被接入"
+        );
+        assert!(
+            book.attach_route("alice", "S1", &|_| true).is_none(),
+            "⚠️ 就算有活隧道也一样 —— 隧道 ≠ 开放接入（安全不变量 3）：             attach 为 None 的机器只同意被看见"
+        );
 
         // ② 开了但探不通
         let mut offered = hb("a2", "desktop", &["S2"]);
@@ -291,16 +342,28 @@ mod tests {
             book.why_not_attachable("alice", "S2"),
             Some(("desktop".to_owned(), WhyNot::Unreachable))
         );
+        assert!(
+            book.attach_route("alice", "S2", &|_| false).is_none(),
+            "既没隧道又探不通就不该接 —— 接过去只会让用户看着转圈然后超时"
+        );
+        // ②′ 探不通但有活隧道 —— NAT 后的常态。走隧道接
+        let via_tunnel = book
+            .attach_route("alice", "S2", &|id| id == "a2")
+            .expect("有隧道就该接");
+        assert!(via_tunnel.tunneled, "该标记为走隧道");
         assert_eq!(
-            book.attach_for("alice", "S2"),
-            None,
-            "探不通就不该接 —— 接过去只会让用户看着转圈然后超时"
+            via_tunnel.direct, None,
+            "探不通的直拨地址不该给出来 —— 给了调用方会去拨一个死地址"
         );
 
-        // ③ 开了而且探通了 —— 这一档才给地址与钥匙
+        // ③ 开了而且探通了 —— 直拨可用（灰度期的老 worker 只有这条）
         book.record("alice", &offered, true);
+        let direct = book
+            .attach_route("alice", "S2", &|_| false)
+            .expect("探通了就该接");
+        assert!(!direct.tunneled);
         assert_eq!(
-            book.attach_for("alice", "S2"),
+            direct.direct,
             Some(("10.0.0.9:8090".to_owned(), "k".to_owned()))
         );
 
@@ -328,12 +391,15 @@ mod tests {
         book.record("alice", &fresh, true);
 
         assert_eq!(
-            book.list("alice", None).len(),
+            book.list("alice", None, &|_| false).len(),
             2,
             "TTL 窗口里两行都在 —— 这是设计如此，不是要修的地方"
         );
+        let route = book
+            .attach_route("alice", "S1", &|_| false)
+            .expect("该按最新那条接进去");
         assert_eq!(
-            book.attach_for("alice", "S1"),
+            route.direct,
             Some(("10.0.0.9:8090".to_owned(), "k".to_owned())),
             "该按最新那条接进去"
         );
@@ -364,7 +430,8 @@ mod tests {
         });
         book.record("alice", &offered, true);
 
-        let json = serde_json::to_string(&book.list("alice", Some("S1"))).expect("序列化");
+        let json =
+            serde_json::to_string(&book.list("alice", Some("S1"), &|_| false)).expect("序列化");
         assert!(
             !json.contains("super-secret-key"),
             "钥匙漏进了下发的那份：{json}"
@@ -387,6 +454,6 @@ mod tests {
     fn not_asking_means_no_answer() {
         let book = PresenceBook::default();
         book.record("alice", &hb("a1", "mbp", &["S1"]), false);
-        assert_eq!(book.list("alice", None)[0].has_session, None);
+        assert_eq!(book.list("alice", None, &|_| false)[0].has_session, None);
     }
 }

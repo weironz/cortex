@@ -65,6 +65,7 @@ mod state;
 mod sync;
 mod sync_bus;
 mod sync_payload;
+mod tunnel;
 mod watch;
 mod ws;
 

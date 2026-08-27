@@ -23,6 +23,8 @@ cortex-proto.workspace = true
 cortex-import.workspace = true
 
 axum.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true

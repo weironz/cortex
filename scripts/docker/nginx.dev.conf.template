@@ -197,6 +197,25 @@ server {
         proxy_read_timeout 1800s;
     }
 
+    # ── 反向隧道（controller+worker 阶段 1）─────────────────
+    #
+    # 也是一次 101 升级，所以不能落进上面那段 `/agents` 的大 location ——
+    # 那段不带 Upgrade 头，症状与 /ws 注释里写的一样：握手回 200 而不是
+    # 101，worker 一直在重连而日志里没有任何错误。
+    # `location =`（精确匹配）优先级高于正则，所以这段放哪儿都赢，
+    # 但挨着 /ws 放，读的人一眼看到「升级类路由都在这儿」。
+    # 读超时给 1 小时：隧道是常驻长连，h2 PING 每 15 秒都有流量，
+    # 真正到期的只有「worker 侧僵死」那一种。
+    location = /agents/tunnel {
+        proxy_pass http://agentd;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host       $host;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
     # ── 静态 ─────────────────────────────────────────────
     #
     # Flutter Web 是单页应用：深链接在磁盘上没有对应文件，回落 index.html。

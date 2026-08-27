@@ -264,6 +264,11 @@ fn attach_allows(method: &axum::http::Method, path: &str) -> bool {
         (&Method::DELETE, p) if p.starts_with("/runs/") => true,
         // 工具确认：不放行的话，一个需要确认的工具会把远程那一轮永久挂住
         (&Method::POST, "/confirmations") => true,
+        // 补拉待确认列表。重放缓冲**刻意不存** Confirm 事件（一次性凭据，
+        // 重放会弹一个点了就 404 的框，见 runs.rs），所以断线重连后客户端
+        // 只能现拉 —— 不放行的话，web 端重挂桌面会话时确认框永远补不回来，
+        // 那一轮看起来就是「挂住了」。只读，不消费任何凭据
+        (&Method::GET, "/confirmations") => true,
         _ => false,
     }
 }
@@ -875,6 +880,8 @@ mod attach_tests {
             (Method::GET, "/runs"),
             (Method::GET, "/runs/01ABC"),
             (Method::POST, "/confirmations"),
+            // 重连后的补拉：重放缓冲刻意不存 Confirm 事件，只能现拉
+            (Method::GET, "/confirmations"),
         ] {
             assert!(attach_allows(&m, p), "{m} {p} 是远程那一轮要用的");
         }
