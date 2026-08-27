@@ -92,9 +92,28 @@ fi
 #
 # 这两样都没有任何技术症状 —— 装的人拉到产物，翻 CHANGELOG 看不到自己
 # 装的这一版改了什么。
+#
+# ⚠️ **`## [未发布]` 在本地是允许的，发版时不允许。**
+#
+# 这条闸的第一版不分模式，于是它把仓库里既有的做法禁掉了：平时把变更
+# 攒在 `## [未发布]` 下、发版那天改名。禁掉的后果不是「更严格」——
+# 是**逼着每笔改动都去猜下一个版本号**，或者干脆不写 CHANGELOG。
+#
+# 所以：没有 `--tag`（本地）时，顶上是 `未发布` 算通过；有 `--tag`
+# （流水线，真的要发了）时，它必须已经改成版本号。
 first_entry="$(grep -m1 -E '^## \[' CHANGELOG.md 2>/dev/null || true)"
+draft=false
+if printf '%s' "$first_entry" | grep -qE '^## \[(未发布|Unreleased)\]'; then
+    draft=true
+fi
 if [ -z "$first_entry" ]; then
     fail "CHANGELOG.md 里一条 '## [...]' 都没有"
+elif [ "$draft" = true ] && [ -z "$TAG" ]; then
+    pass "CHANGELOG 顶上是「未发布」草稿（本地模式；发版前要改成版本号）"
+elif [ "$draft" = true ]; then
+    fail "要发 ${VERSION} 了，而 CHANGELOG 顶上还写着「未发布」"
+    printf '      %s发出去的版本在变更日志里写着「未发布」—— 把那一行改成 ## [%s] - <日期>。%s\n' \
+        "$_C_YEL" "$VERSION" "$_C_OFF"
 elif ! printf '%s' "$first_entry" | grep -qF "[$VERSION]"; then
     fail "CHANGELOG 顶上第一条不是 ${VERSION}，而是：$first_entry"
     printf '      %s补写一条旧版本的条目也能满足「有这个版本」那一条 —— 所以这里查的是顺序。%s
