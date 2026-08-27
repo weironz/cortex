@@ -274,6 +274,29 @@ pub fn config_path(
     user_dir: &Path,
     workspace: Option<&Path>,
 ) -> std::path::PathBuf {
+    // ⚠️ **显式指定的那一份压倒一切**，包括执行环境的判断。
+    //
+    // 两个用处，都不是「配置项」：
+    //
+    // 1. **测试的隔离。** `local_agent_test` 起的是**真的** cortex-local，
+    //    而它会去读**开发机上那份真实的 mcp.json** —— 于是那条测试的耗时
+    //    取决于这台机器上装了哪些 MCP server。2026-08-28 它就这么红过一次
+    //    （一台 server 卡住，agent 20 秒没就绪）。指一份自己的配置，
+    //    那条测试才是自足的。
+    // 2. **运维的逃生口。** 一台 MCP server 让 agent 起不来时，
+    //    `CORTEX_MCP_CONFIG` 指一个空文件就能先把它拉起来看日志 ——
+    //    而不必去猜哪一台、也不必手改用户目录里那份。
+    //
+    // 空串**不算配置过**：那是 `VAR=` 被读成「配过了」那个形状
+    //（本仓库 7 次），而这里猜错的方向是「读了一个根本不存在的路径，
+    // 于是所有 MCP server 静默消失」。
+    if let Some(explicit) = std::env::var("CORTEX_MCP_CONFIG")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+    {
+        return std::path::PathBuf::from(explicit);
+    }
     match (env, workspace) {
         (cortex_agent::ExecEnvironment::Container, Some(ws)) => ws.join(PROJECT_FILE),
         _ => user_dir.join(USER_FILE),
@@ -341,6 +364,44 @@ impl McpConfig {
 
 #[cfg(test)]
 mod tests {
+
+    /// **显式指定的配置压倒执行环境的判断，而空串不算指定。**
+    ///
+    /// 这一位存在的理由见 `config_path` 上那段：没有它，起真 agent 的那条
+    /// 测试会去读开发机上真实的 `mcp.json`，于是它红不红取决于这台机器上
+    /// 装了哪些 MCP server（2026-08-28 就这么红过一次）。
+    #[test]
+    fn 显式指定的配置压倒一切_而空串不算指定() {
+        let user = std::path::Path::new("/u");
+        let ws = std::path::Path::new("/w");
+        let container = cortex_agent::ExecEnvironment::Container;
+
+        // 没设：照旧按执行环境挑
+        unsafe { std::env::remove_var("CORTEX_MCP_CONFIG") };
+        assert_eq!(
+            config_path(container, user, Some(ws)),
+            ws.join(PROJECT_FILE)
+        );
+
+        // 设了：连「容器读工作区那份」也压得掉 —— 逃生口就得压得掉
+        unsafe { std::env::set_var("CORTEX_MCP_CONFIG", "/tmp/mine.json") };
+        assert_eq!(
+            config_path(container, user, Some(ws)),
+            std::path::PathBuf::from("/tmp/mine.json")
+        );
+
+        // 空串与纯空白**不算配置过**。猜错的方向是「读一个不存在的路径，
+        // 于是所有 MCP server 静默消失」——「空串顶掉默认值」这仓库 7 次了
+        for blank in ["", "   "] {
+            unsafe { std::env::set_var("CORTEX_MCP_CONFIG", blank) };
+            assert_eq!(
+                config_path(container, user, Some(ws)),
+                ws.join(PROJECT_FILE),
+                "{blank:?} 被当成了一份配置 —— 那会让所有 MCP server 静默消失"
+            );
+        }
+        unsafe { std::env::remove_var("CORTEX_MCP_CONFIG") };
+    }
     use super::*;
 
     /// Claude Code 那份配置能原样读进来。

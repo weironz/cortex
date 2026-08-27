@@ -35,12 +35,26 @@ void main() {
         final agent = LocalAgent(executable: exe!, stateDir: stateDir.path);
         addTearDown(agent.stop);
 
+        // ⚠️ **把 MCP 指到一份空配置上。**
+        //
+        // 不指的话，这个 agent 会去读**开发机上那份真实的 `mcp.json`** ——
+        // 于是这条测试的耗时取决于「这台机器上装了哪些 MCP server、
+        // 它们今天快不快」。2026-08-28 它就这么红过一次：一台 server 卡住，
+        // agent 20 秒没报出地址，而代码一个字都没错。
+        //
+        // 一条会因为**机器状态**变红的测试，比没有这条测试更糟：
+        // 它红的时候没人信，绿的时候也证明不了什么。
+        final emptyMcp = File(
+          '${stateDir.path}${Platform.pathSeparator}mcp.json',
+        )..writeAsStringSync('{"mcpServers":{}}');
+
         // A remote that will never answer. The agent must still come up —
         // its whole offline story depends on that, and it means this test
         // needs no cortexd.
         final origin = await agent.start(
           remote: 'http://127.0.0.1:1',
           token: 'test-token-not-a-real-credential',
+          extraEnv: {'CORTEX_MCP_CONFIG': emptyMcp.path},
         );
 
         expect(
