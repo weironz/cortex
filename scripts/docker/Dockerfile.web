@@ -16,7 +16,14 @@
 # 到发布链路里。
 FROM debian:trixie-slim AS builder
 
-ARG FLUTTER_VERSION=3.44.1
+# ⚠️ **必须与 `app/pubspec.yaml` 的 `environment.flutter` 一致。**
+# 不一致时 `flutter pub get` 在这一层当场失败（版本求解失败），
+# 由 `scripts/check-toolchain.sh` 提前到本地拦下 —— 见那个脚本。
+#
+# 2026-08-27 之前这里是 3.44.1 而 CI 用的是浮动的 stable（那时是 3.47.x）：
+# **线上那份 Web 包和 CI 测过的那份不是同一个 SDK 编出来的**，而且没有任何
+# 症状。钉死 pubspec 那一行之后它才现形 —— 在发布流水线里红了一次。
+ARG FLUTTER_VERSION=3.47.1
 
 RUN set -eux; \
     apt-get update; \

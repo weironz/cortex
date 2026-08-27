@@ -32,7 +32,7 @@ cd "$REPO_ROOT"
 if [ -t 2 ]; then
     _C_RED=$'\033[31m'; _C_GRN=$'\033[32m'; _C_BLD=$'\033[1m'; _C_OFF=$'\033[0m'
 else
-    _C_RED=''; _C_GRN=''; _C_BLD=''; _C_OFF=''
+    _C_RED=''; _C_GRN=''; _C_YEL=''; _C_BLD=''; _C_OFF=''
 fi
 RC=0
 pass() { printf '  %s✔%s %s\n' "$_C_GRN" "$_C_OFF" "$*"; }
@@ -88,6 +88,23 @@ else
             fail "${f} 没有用 flutter-version-file —— 它会跟着上游 stable 漂"
         fi
     done
+    # ⚠️ **Web 镜像自带一份 Flutter SDK**，它读不了 pubspec —— 得写死版本号。
+    #
+    # 这一条是 2026-08-27 发布流水线红了一次之后补的：这个脚本第一版只查了
+    # 两条流水线，而 Flutter 的引用点有**三个**。漏掉的那个当时钉在 3.44.1，
+    # 也就是说**线上那份 Web 包与 CI 测过的那份不是同一个 SDK 编出来的**，
+    # 而且没有任何症状 —— 一道漏了引用点的闸，给的是虚假的安心。
+    webdf=scripts/docker/Dockerfile.web
+    webver="$(grep -oE 'ARG FLUTTER_VERSION=[0-9]+\.[0-9]+\.[0-9]+' "$webdf"               | sed 's/.*=//' | head -1 || true)"
+    if [ -z "$webver" ]; then
+        fail "${webdf} 里找不到 ARG FLUTTER_VERSION=X.Y.Z"
+    elif [ "$webver" = "$FLUTTER" ]; then
+        pass "${webdf} → ${webver}"
+    else
+        fail "${webdf} → ${webver}，与权威的 ${FLUTTER} 不一致"
+        printf '      %s不一致时 flutter pub get 会在镜像构建里当场失败 —— 那已经是发布流水线了。%s
+'             "$_C_YEL" "$_C_OFF"
+    fi
 fi
 
 printf '\n'
