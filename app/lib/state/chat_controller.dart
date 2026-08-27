@@ -1222,7 +1222,13 @@ class ChatController extends Notifier<ChatState> {
           '服务端那一轮仍在继续并会正常存档 —— 连上之后刷新这条会话就能看到全部，'
           '不用重发。';
     }
-    _commit(error: message);
+    // ⚠️ 这一位要跟着走到气泡上。丢了的话红框仍会摆出两个点了没用的按钮，
+    // 而这次失败明说了「重发不会有不同结果」
+    _commit(
+      error: message,
+      errorIsDeterministic:
+          error is CortexApiException && error.isDeterministic,
+    );
   }
 
   void _onDone() {
@@ -1234,6 +1240,7 @@ class ChatController extends Notifier<ChatState> {
   void _commit({
     String? episodeId,
     String? error,
+    bool errorIsDeterministic = false,
     List<String> models = const [],
     List<Attachment> attachments = const [],
   }) {
@@ -1259,6 +1266,7 @@ class ChatController extends Notifier<ChatState> {
       attachments: attachments,
       episodeId: episodeId,
       error: error,
+      errorIsDeterministic: errorIsDeterministic,
       models: models,
     );
 

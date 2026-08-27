@@ -299,9 +299,9 @@ pub async fn forward(
         // 「cortexd 活着但沙箱够不着」，而后者界面上该说的话完全不同
         Err(e) => (
             StatusCode::BAD_GATEWAY,
-            axum::Json(cortex_proto::dto::ErrorBody {
-                error: format!("连不上沙箱（{base_url}）：{e}"),
-            }),
+            axum::Json(cortex_proto::dto::ErrorBody::new(format!(
+                "连不上沙箱（{base_url}）：{e}"
+            ))),
         )
             .into_response(),
     }
@@ -372,9 +372,9 @@ pub async fn forward_tunneled(handle: crate::tunnel::Handle, req: Request) -> Re
         // 客户端据此分得清「agentd 挂了」与「那台机器够不着」
         Err(e) => (
             StatusCode::BAD_GATEWAY,
-            axum::Json(cortex_proto::dto::ErrorBody {
-                error: format!("经隧道连不上那台机器：{e}"),
-            }),
+            axum::Json(cortex_proto::dto::ErrorBody::new(format!(
+                "经隧道连不上那台机器：{e}"
+            ))),
         )
             .into_response(),
     }

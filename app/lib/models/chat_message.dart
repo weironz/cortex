@@ -18,6 +18,7 @@ class ChatMessage {
     this.attachments = const [],
     this.episodeId,
     this.error,
+    this.errorIsDeterministic = false,
     this.models = const [],
   });
 
@@ -56,12 +57,25 @@ class ChatMessage {
   /// Non-null when the turn failed; rendered inline instead of a bubble body.
   final String? error;
 
+  /// 这次失败是**确定性**的吗 —— 重发这一模一样的请求必定同样的结果。
+  ///
+  /// 由服务端说（`ErrorBody.retryable == false`），界面据此把「重试」与
+  /// 「换模型」两个按钮收掉：它们是给「这个模型这一次不行」准备的出路，
+  /// 而确定性失败里它们只是两堵一样的墙。
+  ///
+  /// 典型场景：会话钉在一台关着的电脑上。真正的出路（把它唤醒 / 在它上面
+  /// 开 agent）没有一件做得到在这个屏幕上，而**一个摆在那儿的按钮本身就在
+  /// 说「点我可能有用」** —— 用户点完开始怀疑自己网不好，真正该做的事
+  /// 反被挡住了视线。
+  final bool errorIsDeterministic;
+
   ChatMessage copyWith({
     String? text,
     List<ToolCall>? toolCalls,
     List<Attachment>? attachments,
     String? episodeId,
     String? error,
+    bool? errorIsDeterministic,
   }) => ChatMessage(
     id: id,
     role: role,
@@ -71,5 +85,6 @@ class ChatMessage {
     attachments: attachments ?? this.attachments,
     episodeId: episodeId ?? this.episodeId,
     error: error ?? this.error,
+    errorIsDeterministic: errorIsDeterministic ?? this.errorIsDeterministic,
   );
 }

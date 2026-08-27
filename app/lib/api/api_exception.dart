@@ -2,11 +2,35 @@
 /// UI never has to pattern-match on platform-specific socket/JS exceptions
 /// (which differ between dart:io and the browser fetch stack).
 class CortexApiException implements Exception {
-  const CortexApiException(this.message, {this.statusCode, this.cause});
+  const CortexApiException(
+    this.message, {
+    this.statusCode,
+    this.cause,
+    this.retryable,
+  });
 
   final String message;
   final int? statusCode;
   final Object? cause;
+
+  /// 重发**这一模一样的请求**有没有可能得到不同结果 —— 由服务端说
+  /// （`ErrorBody.retryable`）。`null` = 它没说，按「可能有用」对待。
+  ///
+  /// # 为什么不能在客户端自己判
+  ///
+  /// 手上只有状态码和一句中文，而 409 在这条路上身兼数职：「沙箱刚被回收
+  /// 了」（重发会把它拉起来）、「那一端认着上一代令牌」（下一轮换掉）、
+  /// 「你的会话钉在一台关着的电脑上」（**没有任何按钮帮得上忙**）。
+  /// 只看状态码分不出来，按文案关键词猜是那种「改一个字就静默失效」的判据。
+  final bool? retryable;
+
+  /// 确定性失败：服务端明说了重发不会有不同结果。
+  ///
+  /// 界面据此把「重试」与「换模型」收掉 —— 它们是给「这个模型这一次不行」
+  /// 准备的出路（配额、超时、供应商挂了），而这里它们只是两堵一样的墙。
+  /// **一个摆在那儿的按钮本身就在说「点我可能有用」**：用户点完开始怀疑
+  /// 自己网不好，而真正该做的事（把那台电脑唤醒）反被挡住了视线。
+  bool get isDeterministic => retryable == false;
 
   /// True when the request never reached the server (daemon down, wrong port,
   /// CORS refusal). Worth a distinct hint in the UI: "start cortexd or switch

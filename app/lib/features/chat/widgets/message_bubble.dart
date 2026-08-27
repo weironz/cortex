@@ -72,6 +72,7 @@ class MessageBubble extends StatelessWidget {
             createdAt: message.createdAt,
             episodeId: message.episodeId,
             error: message.error,
+            errorIsDeterministic: message.errorIsDeterministic,
             busy: busy,
             retryTarget: retryTarget,
             models: message.models,
@@ -229,6 +230,7 @@ class AssistantBlock extends StatelessWidget {
     this.createdAt,
     this.episodeId,
     this.error,
+    this.errorIsDeterministic = false,
     this.streaming = false,
     this.queuedAhead,
     this.busy = false,
@@ -242,6 +244,10 @@ class AssistantBlock extends StatelessWidget {
   final DateTime? createdAt;
   final String? episodeId;
   final String? error;
+
+  /// 这次失败是确定性的 —— 红框里不给出路按钮。见 [`_ErrorNote`]。
+  final bool errorIsDeterministic;
+
   final bool streaming;
 
   /// 这一轮还排在队里，前面有几轮。`null` = 没排队（绝大多数情况）。
@@ -358,6 +364,7 @@ class AssistantBlock extends StatelessWidget {
                         error: error!,
                         busy: busy,
                         retryTarget: retryTarget,
+                        deterministic: errorIsDeterministic,
                       ),
                     TurnDrawer(toolCalls: toolCalls, streaming: streaming),
                     // 这一行动作 + 元信息，贴在回答**底部左侧**。
@@ -440,10 +447,35 @@ class _CopyButtonState extends State<_CopyButton> {
   }
 }
 
+/// 「这一轮失败了」那个红框。
+///
+/// # 为什么按钮是有条件的
+///
+/// 「重试」与「换模型」是给**这个模型这一次不行**准备的出路（配额、超时、
+/// 看不懂图、这家供应商挂了）—— 那些情况下它们确实管用。
+///
+/// 但有一类失败它们一件都帮不上：会话钉在一台关着的电脑上、那台机器没开
+/// 远程接入。重发一万次是同一句话，换个模型也不会把那台电脑唤醒。
+/// 真正的出路在**别的屏幕上**，而红框里那三行字已经把它说清了。
+///
+/// **一个摆在那儿的按钮本身就在说「点我可能有用」**：用户点完还是同一句话，
+/// 于是开始怀疑是不是自己网不好、要不要多等等 —— 真正该做的事反被这两个
+/// 按钮挡住了视线。所以这类失败**一个按钮都不给**。
+///
+/// 判据由**服务端**给（`ErrorBody.retryable == false`），不在这儿猜：
+/// 客户端手上只有状态码和一句中文，而 409 在这条路上身兼数职。
 class _ErrorNote extends ConsumerWidget {
-  const _ErrorNote({required this.error, this.busy = false, this.retryTarget});
+  const _ErrorNote({
+    required this.error,
+    this.busy = false,
+    this.retryTarget,
+    this.deterministic = false,
+  });
   final String error;
   final bool busy;
+
+  /// 服务端明说了「重发不会有不同结果」。见类文档。
+  final bool deterministic;
 
   /// 找得到对应的那句用户消息才给「重试」。找不到（历史翻页翻掉了、
   /// 或者这一块前面压根没有用户消息）时不给一个点下去什么都不发生的按钮。
@@ -475,7 +507,7 @@ class _ErrorNote extends ConsumerWidget {
               ),
             ),
           ),
-          if (target != null) ...[
+          if (target != null && !deterministic) ...[
             const SizedBox(width: 8),
             TextButton.icon(
               onPressed: busy
@@ -502,18 +534,20 @@ class _ErrorNote extends ConsumerWidget {
           // （见 `ChatController._finish`：error 同时进 message 和 sendError）。
           // 一句话画两遍，用户得比对两处才敢确定它们说的是一件事。
           // 横幅撤了，它带着的这条出路搬到这里 —— 出路不能跟着一起没。
-          const SizedBox(width: 4),
-          TextButton(
-            onPressed: busy ? null : () => showModelPicker(context, ref),
-            style: TextButton.styleFrom(
-              foregroundColor: scheme.error,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              minimumSize: Size.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              visualDensity: VisualDensity.compact,
+          if (!deterministic) ...[
+            const SizedBox(width: 4),
+            TextButton(
+              onPressed: busy ? null : () => showModelPicker(context, ref),
+              style: TextButton.styleFrom(
+                foregroundColor: scheme.error,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+              ),
+              child: const Text('换模型'),
             ),
-            child: const Text('换模型'),
-          ),
+          ],
         ],
       ),
     );

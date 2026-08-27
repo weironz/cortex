@@ -188,12 +188,6 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let code = self.status();
         tracing::warn!(error = %self.inner, status = code.as_u16(), "请求失败");
-        (
-            code,
-            Json(ErrorBody {
-                error: self.message(),
-            }),
-        )
-            .into_response()
+        (code, Json(ErrorBody::new(self.message()))).into_response()
     }
 }

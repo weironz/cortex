@@ -204,6 +204,7 @@ class HttpCortexApi implements CortexApi {
     int status,
     String message, {
     Map<String, String>? headers,
+    bool? retryable,
   }) {
     if (status == 401) {
       // 按「谁拒的」分铃。头是 agent 侧打的（routes.rs 的 require_auth），
@@ -220,7 +221,11 @@ class HttpCortexApi implements CortexApi {
         scheduleMicrotask(bell);
       }
     }
-    return CortexApiException(message, statusCode: status);
+    return CortexApiException(
+      message,
+      statusCode: status,
+      retryable: retryable,
+    );
   }
 
   @override
@@ -432,6 +437,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     // 回的是 `{}`，没有可读的东西 —— 不解析，省得哪天服务端改成 204
@@ -538,6 +544,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     return AuthTokens.fromJson(
@@ -666,6 +673,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     return _decodeObject(path, utf8.decode(response.bodyBytes));
@@ -708,6 +716,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     return _decodeObject(path, utf8.decode(response.bodyBytes));
@@ -738,6 +747,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     final body = _decodeObject(
@@ -777,6 +787,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     return ImportEstimate.fromJson(
@@ -912,6 +923,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     final body = _decodeObject(
@@ -966,6 +978,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     final body = _decodeObject(
@@ -1009,6 +1022,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     final body = _decodeObject(
@@ -1041,6 +1055,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     final body = _decodeObject(
@@ -1143,6 +1158,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     return jsonDecode(utf8.decode(response.bodyBytes)) as Object?;
@@ -1347,6 +1363,21 @@ class HttpCortexApi implements CortexApi {
   /// —— 连那几行给 IE 凑字数的注释都照单全收。**一个网关的 HTML 错误页对
   /// 用户不是线索，是噪音**：它唯一有用的信息（502）已经在状态码里了，
   /// 而调用方按状态码编的那句话比它清楚得多。
+  /// 错误体里那一位「重发有没有用」（`ErrorBody.retryable`）。
+  ///
+  /// 没有这一位就是 `null` —— 绝大多数错误都是，界面照旧给出路。
+  /// **只认服务端说的**：客户端自己按状态码或文案猜是那种「改一个字就
+  /// 静默失效」的判据，见 [CortexApiException.retryable]。
+  bool? _unwrapRetryable(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) return decoded['retryable'] as bool?;
+    } on Object {
+      // 不是 JSON —— 那就没有这一位
+    }
+    return null;
+  }
+
   String? _unwrapError(String body) {
     try {
       final decoded = jsonDecode(body);
@@ -1469,6 +1500,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
   }
@@ -1515,6 +1547,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _unwrapError(body) ?? _statusFallback(response.statusCode, label),
         headers: response.headers,
+        retryable: _unwrapRetryable(body),
       );
     }
 
@@ -1988,6 +2021,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     return response.bodyBytes;
@@ -2065,6 +2099,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     final json = _decodeObject(
@@ -2095,6 +2130,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     return _decodeObject(path, utf8.decode(response.bodyBytes));
@@ -2123,6 +2159,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     return _decodeObject(path, utf8.decode(response.bodyBytes));
@@ -2156,6 +2193,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     return _decodeObject(path, utf8.decode(response.bodyBytes));
@@ -2233,6 +2271,7 @@ class HttpCortexApi implements CortexApi {
         response.statusCode,
         _errorMessage(response),
         headers: response.headers,
+        retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
     return _decodeObject(path, utf8.decode(response.bodyBytes));

@@ -820,7 +820,20 @@ async fn ensure_sandbox(
 }
 
 fn err(code: StatusCode, message: &str) -> Response {
-    (code, Json(serde_json::json!({ "error": message }))).into_response()
+    (code, Json(cortex_proto::dto::ErrorBody::new(message))).into_response()
+}
+
+/// 与 [`err`] 一样，但告诉客户端**重发这一模一样的请求不会有不同结果**。
+///
+/// 客户端据此把「重试」与「换模型」两个按钮收掉 —— 见
+/// `ErrorBody::retryable` 的文档。用在「这次拒绝不是这一步出了岔子、
+/// 而是世界的状态不允许」的那些地方。
+fn err_deterministic(code: StatusCode, message: &str) -> Response {
+    (
+        code,
+        Json(cortex_proto::dto::ErrorBody::deterministic(message)),
+    )
+        .into_response()
 }
 
 // ──────────────────────────── /chat ────────────────────────────
@@ -919,7 +932,11 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
             &parsed.session_id,
             &|id| st.tunnels().is_live(&d.owner, id),
         ));
-        return err(StatusCode::CONFLICT, &msg);
+        // ⚠️ **确定性失败**：那台机器不上线之前，重发一万次是同一句话。
+        // 而真正的出路（把它唤醒 / 在它上面开 agent / 换掉这条会话的工作区
+        // 绑定）没有一件做得到在这个屏幕上 —— 所以这里明说「别给按钮」，
+        // 上面那三句话本身就是全部的出路
+        return err_deterministic(StatusCode::CONFLICT, &msg);
     }
 
     // **不走 `ensure_sandbox`**：那个函数自己要一次钥匙，而这一条上面已经要过

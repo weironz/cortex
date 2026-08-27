@@ -351,9 +351,9 @@ pub async fn require(State(st): State<AgentState>, req: Request, next: Next) -> 
             );
             return (
                 StatusCode::FORBIDDEN,
-                axum::Json(cortex_proto::dto::ErrorBody {
-                    error: format!("这把委托凭据不允许访问 {method} {path}"),
-                }),
+                axum::Json(cortex_proto::dto::ErrorBody::new(format!(
+                    "这把委托凭据不允许访问 {method} {path}"
+                ))),
             )
                 .into_response();
         }
@@ -372,11 +372,10 @@ pub async fn require(State(st): State<AgentState>, req: Request, next: Next) -> 
     (
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, "Bearer realm=\"cortexd\"")],
-        axum::Json(cortex_proto::dto::ErrorBody {
-            error: "未认证：请带上 Authorization: Bearer <token>，\
-                    或对加不了请求头的连接使用 POST /auth/ticket 换到的 ?ticket="
-                .into(),
-        }),
+        axum::Json(cortex_proto::dto::ErrorBody::new(
+            "未认证：请带上 Authorization: Bearer <token>，\
+             或对加不了请求头的连接使用 POST /auth/ticket 换到的 ?ticket=",
+        )),
     )
         .into_response()
 }
