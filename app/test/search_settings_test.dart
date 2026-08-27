@@ -40,6 +40,12 @@ const _bocha = SearchProviderInfo(
   defaultBase: 'https://api.bochaai.com',
   canFetch: false,
 );
+const _exa = SearchProviderInfo(
+  id: 'exa',
+  name: 'Exa',
+  defaultBase: 'https://api.exa.ai',
+  canFetch: true,
+);
 
 Future<void> _pump(WidgetTester tester, SearchPrefs prefs) async {
   await tester.pumpWidget(
@@ -152,6 +158,71 @@ void main() {
         find.textContaining('Tavily'),
         findsWidgets,
         reason: '要说清换成哪家才抓得了 —— 只说「不行」等于把问题丢回去',
+      );
+    });
+
+    /// ⚠️ **换了下拉框但还没点保存时，说的必须是新选的那家。**
+    ///
+    /// 2026-08-27 在桌面端实地撞到：这一节按**草稿** id 判断「选了没有」，
+    /// 却按**已保存**的 id 去查那一家的能力。两者不一致时查不到，于是回落成
+    /// 「原始 id + 抓不了」——屏幕上是
+    /// 「⚠️ exa 只做搜索，不抓正文……要抓正文的话，换成：Tavily、Exa」，
+    /// **同一句话既说它不行又叫你换成它**。
+    testWidgets('刚换下拉框还没保存时，说的是新选的那家', (tester) async {
+      await _pump(
+        tester,
+        const SearchPrefs(
+          deploymentKey: true,
+          providers: [_tavily, _bocha, _exa],
+        ),
+      );
+
+      // 从「部署提供」切到 Exa，**不点保存**
+      await tester.tap(find.text('部署提供').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Exa').last);
+      await tester.pumpAndSettle();
+
+      await _toBottom(tester);
+      expect(
+        find.textContaining('只做搜索，不抓正文'),
+        findsNothing,
+        reason: 'Exa 有 /contents，抓得了 —— 这句话是照着「已保存」那个 id 查空之后的回落',
+      );
+      expect(
+        find.textContaining('exa 只做搜索'),
+        findsNothing,
+        reason: '小写的原始 id 本身就是「查空了」的痕迹：认出来的话该显示「Exa」',
+      );
+      expect(
+        find.textContaining('Exa 抓得了网页正文'),
+        findsOneWidget,
+        reason: '要说清换过去之后 web_fetch 还能用',
+      );
+    });
+
+    /// 换到只做搜索的那家时，同样要按**新选的**那家说 —— 方向相反的一条，
+    /// 防的是「干脆一律说抓得了」这种把上面那条骗过去的改法。
+    testWidgets('刚换到只做搜索的那家，警告立刻出现', (tester) async {
+      await _pump(
+        tester,
+        const SearchPrefs(
+          provider: 'tavily',
+          keyTail: 'abcd',
+          providers: [_tavily, _bocha, _exa],
+        ),
+      );
+
+      await tester.tap(find.text('Tavily').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('博查').last);
+      await tester.pumpAndSettle();
+
+      await _toBottom(tester);
+      expect(
+        find.textContaining('博查 只做搜索，不抓正文'),
+        findsOneWidget,
+        reason: '还没保存也要按新选的那家说，否则用户是照着旧状态做决定',
       );
     });
 

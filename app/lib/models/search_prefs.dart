@@ -96,13 +96,23 @@ class SearchPrefs {
   List<SearchProviderInfo> get fetchers =>
       providers.where((p) => p.canFetch).toList();
 
-  /// 当前选的那家（`null` = 用部署提供的）。
-  SearchProviderInfo? get current {
+  /// 按 id 找一家。找不到回 `null`。
+  ///
+  /// ⚠️ **界面上问「我选的这家能干什么」时，一律走它，不要走 [current]。**
+  /// [current] 认的是**已保存**的那个 id，而设置页上还有一个**草稿** id
+  /// （用户刚在下拉框里选的、还没点保存）。两者不一致时 [current] 回 `null`，
+  /// 于是调用方回落到「不知道」—— 2026-08-27 的现场是：下拉框选到 Exa，
+  /// 下面那行写着「⚠️ exa 只做搜索，不抓正文……要抓正文的话，换成：Tavily、Exa」，
+  /// 同一句话既说它不行又叫你换成它。
+  SearchProviderInfo? byId(String id) {
     for (final p in providers) {
-      if (p.id == provider) return p;
+      if (p.id == id) return p;
     }
     return null;
   }
+
+  /// 当前**已保存**的那家（`null` = 用部署提供的，或者认不出这个 id）。
+  SearchProviderInfo? get current => byId(provider);
 
   /// 这一刻到底能不能搜。
   ///

@@ -222,7 +222,9 @@ class _FormState extends ConsumerState<_Form> {
               enabled: !_busy,
               decoration: InputDecoration(
                 isDense: true,
-                hintText: p.current?.defaultBase ?? '',
+                // 同上：要的是**当下选的**那家的官方地址。用 `p.current`
+                // 的话，刚换过下拉框时这里显示的还是上一家的地址
+                hintText: p.byId(_provider)?.defaultBase ?? '',
               ),
             ),
           ),
@@ -450,12 +452,20 @@ class _FetchProviders extends StatelessWidget {
     final theme = Theme.of(context);
     final names = prefs.fetchers.map((f) => f.name).join('、');
 
+    // ⚠️ 按 [chosen]（下拉框里**当下**选的那个）去查，不是 `prefs.current`
+    // （**已保存**的那个）。混着用的话，改了下拉框还没点保存时查不到，
+    // 于是回落成「原始 id + 抓不了」—— 屏幕上就是
+    // 「⚠️ exa 只做搜索……要抓正文的话，换成：Tavily、Exa」，
+    // 同一句话既说它不行又叫你换成它。
+    final picked = prefs.byId(chosen);
     final current = chosen.isEmpty
         // 部署那一档走的是服务端配的那家（目前必定是 Tavily），它抓得了
         ? (able: true, who: '部署提供的那一份')
         : (
-            able: prefs.current?.canFetch ?? false,
-            who: prefs.current?.name ?? chosen,
+            // 认不出这个 id 时按「抓不了」说 —— 下拉框是拿 providers 画的，
+            // 走不到这里；真走到了也是保守的那一边
+            able: picked?.canFetch ?? false,
+            who: picked?.name ?? chosen,
           );
 
     return Padding(
