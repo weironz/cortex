@@ -105,13 +105,24 @@ pub fn skills_note(catalog: &[(&str, &str)]) -> Option<String> {
     if catalog.is_empty() {
         return None;
     }
-    let mut out = String::from(
-        "# 可用技能
-
-         下面每一条都是用户写好的一份做法，这里只列名字和用途。         判断某一条与当前任务相关时，**先用 `load_skill` 把正文取回来，再照着做** ——         不要拿这里的一句话说明当作技能本身，它只是索引。
-
-",
-    );
+    // ⚠️ **`concat!` 而不是跨行的裸字符串。**
+    //
+    // 这里从前是一个多行字面量，于是每行开头那 9 个缩进空格**是字符串的
+    // 一部分**。而 markdown 里 4 个以上前导空格就是**缩进代码块** ——
+    // 这段本该被当成指令读的话，模型看到的是一段示例代码。
+    //
+    // 更糟的是 `cargo fmt` 把原本分行的三句压成了一行，句与句之间留下
+    // 9 空格的空档（2026-08-28 扫出来的；`b413dc6` 那次清扫漏了这一处）。
+    // 也就是说这段**唯一要说的事**——「别拿一句话说明当技能本身，先
+    // `load_skill` 把正文取回来」——是以代码块的形式讲的。
+    let mut out = String::from(concat!(
+        "# 可用技能\n",
+        "\n",
+        "下面每一条都是用户写好的一份做法，这里只列名字和用途。\n",
+        "判断某一条与当前任务相关时，**先用 `load_skill` 把正文取回来，",
+        "再照着做** —— 不要拿这里的一句话说明当作技能本身，它只是索引。\n",
+        "\n",
+    ));
     for (name, description) in catalog {
         let name = name.trim();
         if name.is_empty() {
@@ -173,6 +184,48 @@ pub fn computer_note(width: u32, height: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **给模型看的每一段都不许有 4 空格以上的前导缩进。**
+    ///
+    /// markdown 里 4 个以上前导空格是**缩进代码块**。一段本该被当成指令
+    /// 读的散文，缩进之后模型看到的是一段示例代码 —— 而它不会照着示例
+    /// 代码改变行为。
+    ///
+    /// 这不是假想：`skills_note` 从前是一个跨行的裸字符串，每行开头那
+    /// 9 个空格是字符串的一部分，于是「先用 `load_skill` 把正文取回来」
+    /// 这句**唯一要紧的话**是以代码块的形式讲的（2026-08-28 扫出来的）。
+    ///
+    /// 这条盖住所有在这个文件里拼出来的提示词段。写新的那一段时，
+    /// 用 `concat!` 逐行拼，别写跨行的裸字符串 —— `cargo fmt` 还会把
+    /// 反斜杠续行压成一行并把缩进留成字面空格，那是同一个坑的另一面。
+    #[test]
+    fn 给模型看的每一段都不带markdown会当成代码块的缩进() {
+        let mut notes: Vec<(&str, String)> = vec![
+            (
+                "skills_note",
+                skills_note(&[("a", "用途一"), ("b", "用途二")]).expect("非空目录该有"),
+            ),
+            (
+                "egress_note",
+                egress_note(ExecEnvironment::Container)
+                    .expect("容器该有")
+                    .to_string(),
+            ),
+        ];
+        notes.push(("computer_note", computer_note(1920, 1080)));
+
+        for (which, text) in notes {
+            for (n, line) in text.lines().enumerate() {
+                let indent = line.len() - line.trim_start().len();
+                assert!(
+                    indent < 4 || line.trim().is_empty(),
+                    "{which} 第 {} 行有 {indent} 个前导空格 —— markdown 会把它当成代码块，\
+                     而模型不会照着示例代码改变行为：{line:?}",
+                    n + 1
+                );
+            }
+        }
+    }
 
     /// 桌面端印这段话就是撒谎，而撒的这个谎会让模型放弃重试一次**真的**故障。
     #[test]
