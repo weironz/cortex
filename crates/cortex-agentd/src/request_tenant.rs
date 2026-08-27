@@ -227,6 +227,29 @@ mod tests {
         id
     }
 
+    /// 把 [`make_user`] 插进去的那些删掉。
+    ///
+    /// # 为什么必须有
+    ///
+    /// 这几条测试插的是**真库**（有 `DATABASE_URL` 时才跑），而它们从不
+    /// 收拾。于是每跑一次 `just ci` 就多几行 —— 2026-08-28 数了一下：
+    /// **dev 库里 610 个用户，604 个是 `probe-<ULID>`**。
+    ///
+    /// 危害不在那几行本身，在于它把「这个部署有多少用户」这个数变成了
+    /// 噪音，而那是排查线上问题时第一眼要看的东西之一。同一个形状今晚
+    /// 还撞到一次（`BackgroundBooks` 只增不删）。
+    ///
+    /// 只删自己这一轮插的 id，**不按 `probe-%` 批量删** —— 一条测试顺手
+    /// 清理别人的数据是另一类事故，而且并行跑的另一条测试可能正用着它。
+    async fn drop_users(pool: &sqlx::PgPool, ids: &[&str]) {
+        for id in ids {
+            let _ = sqlx::query("DELETE FROM cortex_auth.users WHERE id = $1")
+                .bind(id)
+                .execute(pool)
+                .await;
+        }
+    }
+
     /// 两个账号解析到**各自**的 schema。
     ///
     /// 这条如果错了，两个人读写同一片库 —— 而那不会报任何错。
@@ -250,9 +273,10 @@ mod tests {
             rb.as_str(),
             "两个账号解析到了同一个 schema —— 这就是「登录了两个人，读的是同一片库」"
         );
+
+        drop_users(&pool, &[&a, &b]).await;
     }
 
-    /// 认不出的用户回落到 `public` —— 老的预共享 token 那条路要继续能用。
     #[tokio::test]
     async fn an_unknown_caller_is_the_legacy_token_path() {
         let Some(pool) = pool().await else { return };
