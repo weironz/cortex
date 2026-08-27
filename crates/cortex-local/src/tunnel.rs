@@ -74,10 +74,16 @@ pub fn spawn(
 ) {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
+        // 「凭据换过了」的订阅。见下面 `Denied` 那一支
+        let mut fresh_credential = remote.token_generation();
         // 上一轮的结局，用来只在**状态变化**时说话：每 10 分钟一条
         // 「还是 401」会把日志淹掉，而第一条才是要紧的
         let mut last_outcome = String::new();
         loop {
+            // 记下这一轮用的是哪一代凭据。**必须在拨号之前** —— 放在
+            // 401 之后的话，「拨号被拒 → 新凭据推来 → 才开始等」这个缝里
+            // 的那一次推送会被当成旧闻，于是白等十分钟
+            fresh_credential.mark_unchanged();
             match connect(&http, &remote, &agent_id, &attach_token).await {
                 Ok(ws) => {
                     if !last_outcome.is_empty() {
@@ -109,7 +115,7 @@ pub fn spawn(
                         );
                         last_outcome = why;
                     }
-                    tokio::time::sleep(AUTH_RETRY).await;
+                    wait_for_retry_or_new_credential(&mut fresh_credential).await;
                 }
                 Err(ConnectError::Unsupported(why)) => {
                     // 老 agentd 没有这条路由（灰度混版期）。安静地慢试：
@@ -131,6 +137,38 @@ pub fn spawn(
             }
         }
     });
+}
+
+/// 401 之后等下一次重试：**要么十分钟到了，要么凭据换了**。
+///
+/// # 为什么这一下非有不可
+///
+/// agentd 的 access token 是内存簿（见它那边 `AccessBook` 的文档），
+/// **一重启全部失效** —— 这是有意的取舍，客户端撞一次 401 就用 refresh
+/// 换新的。于是每一次发版，worker 手上那把 bearer 都是死的，隧道握手 401。
+///
+/// 只睡 [`AUTH_RETRY`] 的话，桌面端几秒后就把新凭据推了进来（`ref.listen`
+/// → `PUT /local/credential` → [`Remote::set_token`]），而这个循环还要再
+/// 睡十分钟才肯用它 —— **一台开着的机器在一次日常发版之后离线十分钟**。
+///
+/// 那正好把「关停时先说一声」买到的东西全部抵消掉：那一下让 worker 在
+/// 两秒内回来重拨，而重拨用的是一把刚死的钥匙。两件事必须一起做。
+///
+/// 十分钟这个上限**留着**：凭据一直没换（用户真的登出了）时，
+/// 它是那条「不自杀、慢慢试」的底线。
+async fn wait_for_retry_or_new_credential(fresh: &mut tokio::sync::watch::Receiver<u64>) {
+    tokio::select! {
+        () = tokio::time::sleep(AUTH_RETRY) => {}
+        r = fresh.changed() => {
+            if r.is_ok() {
+                tracing::info!("出站凭据换了，隧道立刻重拨");
+            } else {
+                // 发送端没了 = 整个 Remote 被丢弃，这个进程正在退出。
+                // 别忙着重拨，也别忙等：退回定时那条路等着被一起收掉
+                tokio::time::sleep(AUTH_RETRY).await;
+            }
+        }
+    }
 }
 
 enum ConnectError {

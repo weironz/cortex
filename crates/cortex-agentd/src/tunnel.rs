@@ -360,20 +360,49 @@ struct WsIo {
     /// 上一帧没读完的部分。h2 的读缓冲比我们的帧小是常态。
     readbuf: Vec<u8>,
     offset: usize,
-    /// 「我要重启了」——`Tunnels::shutdown_all` 拨动它。
-    goodbye: tokio::sync::watch::Receiver<bool>,
-    /// Close 帧已经发过了，别发第二次。
-    said_goodbye: bool,
+    /// 关停这件事走到哪一步了。见 [`Goodbye`]。
+    goodbye: Goodbye,
+}
+
+/// 「我要重启了」这句话的三个状态。
+///
+/// # 为什么是一个状态机，而不是一个 `bool` + 一次 `borrow()`
+///
+/// 第一版就是那么写的：`poll_read` 进来先看一眼
+/// `*goodbye.borrow()`，是 true 就发 Close 帧。**它在真机上一次都没发出去。**
+///
+/// 两处都错了，而且都不会有任何报错：
+///
+/// 1. **没人叫醒这个任务。** 隧道空闲时 `poll_read` 停在
+///    `ws.poll_next` 的 Pending 上；`watch` 只是被读了一眼，没登记 waker。
+///    于是关停信号来了也没人再 poll 一次 —— 那一眼永远看不到。
+/// 2. **帧没冲出去。** `poll_flush` 回 Pending 时被 `let _ =` 吃掉，
+///    紧接着返回 EOF，h2 收摊、socket 落地，缓冲里那个 Close 帧一起没了。
+///
+/// 症状是「修好了但没生效」：worker 侧照旧走出错断线那条路（实测日志里
+/// 是 `隧道 h2 出错结束` + 1 秒退避），而两边代码看着都对。
+///
+/// 所以这里存的是一个**能被 poll 的 future**（登记 waker）加一个
+/// **冲刷阶段**（Pending 就老实回 Pending，等下一次被叫醒）。
+enum Goodbye {
+    /// 还没接到通知。里面那个 future 在被 poll 时登记 waker。
+    Waiting(Pin<Box<dyn std::future::Future<Output = ()> + Send>>),
+    /// Close 帧已经交给 sink，正在冲。
+    Flushing,
+    /// 冲完了（或冲不动了）。此后 `poll_read` 一律回 EOF。
+    Done,
 }
 
 impl WsIo {
-    fn new(ws: WebSocket, goodbye: tokio::sync::watch::Receiver<bool>) -> Self {
+    fn new(ws: WebSocket, mut goodbye: tokio::sync::watch::Receiver<bool>) -> Self {
         Self {
             ws,
             readbuf: Vec::new(),
             offset: 0,
-            goodbye,
-            said_goodbye: false,
+            goodbye: Goodbye::Waiting(Box::pin(async move {
+                // 发送端先没了也算「该收摊了」：那说明隧道簿已经被丢弃
+                let _ = goodbye.changed().await;
+            })),
         }
     }
 }
@@ -393,16 +422,44 @@ impl AsyncRead for WsIo {
         //
         // 发在 WS 这一层而不是 h2：h2 里 agentd 是**客户端**，GOAWAY 是服务端
         // 发的，方向反着。对端认 Close 帧（见 cortex-local 的镜像实现）。
-        if !self.said_goodbye && *self.goodbye.borrow() {
-            self.said_goodbye = true;
-            use futures::Sink;
-            if Pin::new(&mut self.ws).poll_ready(cx).is_ready() {
-                let bye = Message::Close(None);
-                let _ = Pin::new(&mut self.ws).start_send(bye);
-                let _ = Pin::new(&mut self.ws).poll_flush(cx);
+        //
+        // 这一段**必须在读之前**：读通常停在 Pending 上，放在后面就永远
+        // 走不到。三个状态各自的理由见 [`Goodbye`]。
+        use futures::Sink;
+        loop {
+            match &mut self.goodbye {
+                Goodbye::Waiting(fut) => {
+                    if fut.as_mut().poll(cx).is_pending() {
+                        break;
+                    }
+                    // 通知到了：把 Close 帧交给 sink。
+                    // sink 没准备好就直接进冲刷阶段 —— 那时它自己会先冲
+                    if Pin::new(&mut self.ws).poll_ready(cx).is_ready() {
+                        let _ = Pin::new(&mut self.ws).start_send(Message::Close(None));
+                    }
+                    self.goodbye = Goodbye::Flushing;
+                }
+                Goodbye::Flushing => {
+                    // ⚠️ Pending 时**回 Pending**，不是往下走。
+                    // 往下走等于返回 EOF，h2 立刻收摊、socket 落地，
+                    // 缓冲里那个 Close 帧跟着没了 —— 那正是第一版的 bug
+                    match Pin::new(&mut self.ws).poll_flush(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(_) => self.goodbye = Goodbye::Done,
+                    }
+                }
+                // ⚠️ **话说完了也不许在这里伪造 EOF。**
+                //
+                // 伪造的话 h2 立刻收摊、`run` 返回、axum 的 WS 被丢弃，
+                // socket 随之关闭 —— 而对端很可能还没来得及把那个 Close
+                // 帧**读出来**。实测就是这样：帧发出去了、也冲干净了，
+                // 对端却什么都没收到（关闭抢在读取前面）。
+                //
+                // 正确的收尾是照常读下去：对端读到 Close 会把这条流当成
+                // 结束、自己收摊，我们这边随之读到 EOF。也就是让**对端**
+                // 决定什么时候断，而不是抢在它前面。
+                Goodbye::Done => break,
             }
-            // 说完就当读到了 EOF：h2 随之收摊，`run` 那边的 timeout 兜底
-            return Poll::Ready(Ok(()));
         }
         loop {
             // 先把上一帧剩下的吐完
@@ -690,6 +747,89 @@ mod tests {
         }
     }
 
+    /// **关停时那句「我要重启了」必须真的到达对端。**
+    ///
+    /// # 这条测试是补出来的，而且它抓到过东西
+    ///
+    /// 第一版的 `WsIo` 在 `poll_read` 里读一眼 `watch`、发帧、立刻返回 EOF。
+    /// 单测测不到（没有真 socket），而它在真机上**一次都没发出去** ——
+    /// 没人叫醒那个停在 Pending 上的任务，就算叫醒了 `poll_flush` 的
+    /// Pending 也被吞掉、缓冲随 socket 一起落地。
+    ///
+    /// 症状是「修好了但没生效」：worker 侧照旧走出错断线 + 退避那条路，
+    /// 而两边代码看着都对。**只在关停路径上跑的代码，没人验就等于没写。**
+    ///
+    /// ⚠️ **这条测试只盖得住其中一半。** 它钉住的是「帧真的到得了对端」
+    /// （冲刷 + 不抢在对端读完之前关 socket）—— 把 `Goodbye::Done` 改回
+    /// 「立刻返回 EOF」这条当场红。
+    ///
+    /// 另一半（waker 登记）它盖不住：测试里这条连接被 poll 得比生产频繁，
+    /// 把 waker 换成 noop 它照样绿。那一半是从真机日志里看出来的
+    /// （`docker restart` 之后 worker 记的是 `隧道 h2 出错结束` + 退避），
+    /// 也只能回到真机上验 —— 写在这里，免得下一个人以为它有覆盖。
+    #[tokio::test]
+    async fn 关停时对端真的收得到close帧() {
+        let tunnels = std::sync::Arc::new(Tunnels::default());
+        let presence = std::sync::Arc::new(crate::presence::PresenceBook::default());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("绑随机端口");
+        let addr = listener.local_addr().expect("拿地址");
+        let t2 = std::sync::Arc::clone(&tunnels);
+        let p2 = std::sync::Arc::clone(&presence);
+        let app = axum::Router::new().route(
+            "/t",
+            axum::routing::get(move |ws: axum::extract::ws::WebSocketUpgrade| async move {
+                ws.on_upgrade(move |sock| async move {
+                    run(&t2, p2, "alice".into(), "A1".into(), "k".into(), sock).await;
+                })
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/t"))
+            .await
+            .expect("WS 握手");
+        let io = TestWsIo::new(ws);
+        let saw_close = std::sync::Arc::clone(&io.saw_close);
+        let svc = hyper::service::service_fn(|_req: hyper::Request<hyper::body::Incoming>| async {
+            Ok::<_, std::convert::Infallible>(hyper::Response::new(http_body_util::Full::new(
+                axum::body::Bytes::from_static(b"ok"),
+            )))
+        });
+        let served = tokio::spawn(async move {
+            hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .serve_connection(hyper_util::rt::TokioIo::new(io), svc)
+                .await
+                .ok();
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !tunnels.is_live("alice", "A1") {
+            assert!(tokio::time::Instant::now() < deadline, "隧道没在期限内入簿");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // ── 关停 ──
+        tunnels.shutdown_all();
+
+        // 对端的服务任务该结束（读到 Close = 流结束）
+        tokio::time::timeout(Duration::from_secs(5), served)
+            .await
+            .expect("关停之后对端还挂着 —— 那台机器要等 PING 超时才发现")
+            .expect("对端任务没 panic");
+        assert!(
+            saw_close.load(std::sync::atomic::Ordering::Relaxed),
+            concat!(
+                "对端没收到 Close 帧 —— 于是一次日常发版被它读成「连接毫无征兆地断了」，",
+                "各台机器各自进指数退避（最长 60 秒），而 agentd 三秒就起来了"
+            )
+        );
+    }
+
     /// worker 侧适配器的最小镜像（真身在 cortex-local/src/tunnel.rs）。
     /// 语义必须一致：二进制帧 = 载荷，Ping/Pong 跳过，Close/EOF = 流结束。
     struct TestWsIo {
@@ -698,6 +838,9 @@ mod tests {
         >,
         readbuf: Vec<u8>,
         offset: usize,
+        /// 对端发过 Close 帧 —— 真身在 `cortex-local` 里叫 `deliberate`，
+        /// 那边靠它把「发版」与「断线」分开。
+        saw_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl TestWsIo {
@@ -710,6 +853,7 @@ mod tests {
                 ws,
                 readbuf: Vec::new(),
                 offset: 0,
+                saw_close: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
     }
@@ -735,7 +879,14 @@ mod tests {
                         self.offset = 0;
                     }
                     Poll::Ready(Some(Ok(TsMessage::Ping(_) | TsMessage::Pong(_)))) => {}
-                    Poll::Ready(Some(Ok(_)) | None) => return Poll::Ready(Ok(())),
+                    Poll::Ready(Some(Ok(m))) => {
+                        if matches!(m, TsMessage::Close(_)) {
+                            self.saw_close
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        return Poll::Ready(Ok(()));
+                    }
+                    Poll::Ready(None) => return Poll::Ready(Ok(())),
                     Poll::Ready(Some(Err(e))) => {
                         return Poll::Ready(Err(std::io::Error::other(e.to_string())));
                     }

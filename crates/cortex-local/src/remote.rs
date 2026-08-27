@@ -50,6 +50,11 @@ pub struct Remote {
     /// 共享一格而不是各克隆一份：`Remote` 被克隆进 `LocalState`、进每一个
     /// 轮次的 host —— 各存各的话，换了凭据只有换的那一份知道。
     token: Arc<RwLock<Option<String>>>,
+    /// 凭据换过几次。**只用来叫醒等着的人**，值本身没有意义。
+    ///
+    /// 存在的理由见 [`Self::token_generation`]：有一条路在 401 之后要睡
+    /// 十分钟，而新凭据往往几秒后就到了。
+    token_generation: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl std::fmt::Debug for Remote {
@@ -88,6 +93,7 @@ impl Remote {
             http,
             base: base.into().trim_end_matches('/').to_string(),
             token: Arc::new(RwLock::new(token)),
+            token_generation: Arc::new(tokio::sync::watch::channel(0).0),
         })
     }
 
@@ -119,6 +125,24 @@ impl Remote {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *g = token.filter(|t| !t.trim().is_empty());
+        // 先放锁再叫人：唤醒的那一方第一件事就是读凭据，
+        // 在锁里叫等于让它立刻撞上自己这把写锁
+        drop(g);
+        self.token_generation
+            .send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// 订阅「凭据换了」。见 `crate::tunnel` 里那处 `select!`。
+    ///
+    /// # 为什么是 `watch` 而不是 `Notify`
+    ///
+    /// `Notify::notify_waiters` 只叫醒**此刻正在等**的人，而这里的竞态恰好
+    /// 落在那个缝里：隧道拨号被 401 拒绝 → （桌面端推来新凭据）→ 隧道才
+    /// 开始睡。用 `Notify` 的话这一下丢了，机器要多离线十分钟；`watch`
+    /// 记的是代号，等的人一 `changed()` 就发现自己落后了，不管先后。
+    #[must_use]
+    pub fn token_generation(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.token_generation.subscribe()
     }
 
     fn read_token(&self) -> Option<String> {
@@ -648,6 +672,39 @@ mod tests {
             Some("new"),
             "克隆出去的那份还拿着旧凭据 —— 轮换之后它发的每个请求都会 401"
         );
+    }
+
+    /// **换凭据要能把睡着的人叫醒，而且不许漏掉「拨号与开睡之间」那一下。**
+    ///
+    /// 这一位服务的是隧道那条路：agentd 的 access token 一重启全部失效
+    /// （有意的取舍），于是每次发版 worker 握手都 401，然后睡十分钟。
+    /// 桌面端几秒后就把新凭据推了进来 —— 收不到这一声的话，一台开着的
+    /// 机器在一次日常发版之后离线十分钟。
+    #[tokio::test]
+    async fn a_credential_push_wakes_whoever_is_waiting_on_it() {
+        let r = Remote::new("http://127.0.0.1:1", Some("old".into())).unwrap();
+        let mut seen = r.token_generation();
+        seen.mark_unchanged();
+
+        // ── 竞态那一支：**先推，后等** ──
+        //
+        // 时序是「拨号被 401 拒 →（推）→ 才开始等」。用 `Notify` 写的话
+        // 这一下会丢，而这条测试正是钉住它不许退化成 `Notify`
+        r.set_token(Some("new".into()));
+        tokio::time::timeout(std::time::Duration::from_secs(1), seen.changed())
+            .await
+            .expect("推在等之前，这一声不许丢 —— 丢了就白等十分钟")
+            .expect("发送端还活着");
+
+        // ── 正常那一支：先等，后推 ──
+        seen.mark_unchanged();
+        let waiter = tokio::spawn(async move { seen.changed().await });
+        r.set_token(Some("newer".into()));
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("推来的凭据必须当场叫醒等着的人")
+            .expect("任务没 panic")
+            .expect("发送端还活着");
     }
 
     /// 空串必须落成「没有凭据」而不是「凭据是空串」。
