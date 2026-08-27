@@ -392,8 +392,35 @@ async fn main() -> anyhow::Result<()> {
         workspaces.default_root().map(std::path::Path::new),
     );
     tracing::debug!(path = %mcp_path.display(), "MCP 配置");
-    let mcp = cortex_mcp::McpConfig::load(&mcp_path)?;
-    let mcp = Arc::new(cortex_mcp::McpHub::connect(&mcp).await);
+    let mcp_cfg = cortex_mcp::McpConfig::load(&mcp_path)?;
+    // ⚠️ **在后台连，不挡启动。**
+    //
+    // 这里从前是 `McpHub::connect(&cfg).await` —— 于是 agent 的就绪被
+    // 「连上每一台第三方 MCP server」挡着：端口在这之后才绑，地址文件更晚。
+    // 每台的连接上限是 60 秒，而 `Inner::build` 是**串行**的，所以 N 台
+    // 慢 server 就是 N×60 秒。
+    //
+    // 而拉起它的桌面端只等 20 秒（`LocalAgent.start`）—— 它会判成
+    // 「本地 agent 启动失败」并把那句话给用户看，**而 agent 好好的，
+    // 只是在等一台别人的进程**。2026-08-28 真机撞到：一台 server 打了
+    // 一句「系统找不到指定的路径」，整个 agent 就没起来。
+    //
+    // 后台连之后，第一轮对话可能还看不到 MCP 工具 —— 那是**对的**：
+    // 没连上的能力本来就不该出现在工具目录里（CLAUDE.md 约束 2）。
+    // 用「起不来」换「头几秒工具少几个」，方向反了。
+    let mcp = Arc::new(cortex_mcp::McpHub::empty());
+    {
+        let hub = Arc::clone(&mcp);
+        tokio::spawn(async move {
+            let st = hub.reload(&mcp_cfg).await;
+            let bad = st.iter().filter(|s| !s.connected).count();
+            tracing::info!(
+                total = st.len(),
+                failed = bad,
+                "MCP 后台连接完成（连不上的那些在设置页里带着原因）"
+            );
+        });
+    }
 
     // hooks：**只读用户目录**，不读工作区。
     //
