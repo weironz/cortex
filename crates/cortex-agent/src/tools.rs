@@ -1828,6 +1828,49 @@ fn arg_str(v: &serde_json::Value, key: &str) -> std::result::Result<String, Stri
 #[cfg(test)]
 mod tests {
 
+    /// **子 agent 手上不许有一个非 `Safe` 的工具。**
+    ///
+    /// 今天这条是结构性成立的（`readonly_specs()` 按 `risk == Safe` 筛），
+    /// 而这个测试守的是**它哪天不再按风险筛**：改成一份写死的名字清单
+    /// 看着更直白，也是最容易被想到的「优化」—— 而那份清单会慢慢与真相
+    /// 脱节，脱节的方向恰好是「多给了一个」。
+    ///
+    /// 后果是双份的：子 agent 拿到一个能写盘或能执行的工具，**而它跑在
+    /// 一个没有确认回路的上下文里**（派出去的 agent 背后没有人坐着）。
+    ///
+    /// 同时钉住「不许套娃」：`spawn_agents` 自己是 `Write`，所以它天然
+    /// 进不了这份清单 —— 一次「派 5 个」不会炸成 5ⁿ。
+    #[test]
+    fn 子agent只拿得到只读工具() {
+        let ro = readonly_specs();
+        assert!(!ro.is_empty(), "一个工具都不给的话，子 agent 什么也做不了");
+
+        for spec in &ro {
+            assert_eq!(
+                spec.risk,
+                Risk::Safe,
+                "{} 进了子 agent 的目录，而它是 {:?} —— \
+                 派出去的 agent 背后没有人坐着，没有确认回路兜底",
+                spec.name,
+                spec.risk
+            );
+        }
+
+        assert!(
+            !ro.iter().any(|s| s.name == "spawn_agents"),
+            "子 agent 拿到了 spawn_agents —— 一次「派 5 个」会炸成 5ⁿ"
+        );
+
+        // 正面确认它确实给了有用的东西，否则上面那条断言可以靠「返回空表」
+        // 廉价满足 —— 那是「验证工具自己造出通过」那个形状
+        for must in ["read_file", "list_dir", "grep"] {
+            assert!(
+                ro.iter().any(|s| s.name == must),
+                "子 agent 连 {must} 都没有，那它没法「各自独立看资料」"
+            );
+        }
+    }
+
     /// **工具描述里不许出现连续空格。**
     ///
     /// 连续空格在这里只有一个来源：一段本来分行写的说明被 `cargo fmt`
