@@ -26,7 +26,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use cortex_proto::presence::{AgentHeartbeat, AgentPresenceDto, AttachOffer};
+use cortex_proto::presence::{
+    AgentHeartbeat, AgentPresenceDto, AgentState as AgentStateDto, AttachOffer,
+};
 
 /// agent 每多少秒报一次。
 ///
@@ -103,12 +105,98 @@ pub enum WhyNot {
 
 /// 名册。按 `(owner, agent_id)` 存 —— **owner 必须在键里**：
 /// 少了它，A 的机器会出现在 B 的 `GET /agents` 里。
-#[derive(Default)]
 pub struct PresenceBook {
     inner: Mutex<HashMap<(String, String), Entry>>,
+    /// 这本簿子是什么时候建起来的（= 进程启动）。见 [`Self::rebuilding`]。
+    born: Instant,
 }
 
+impl Default for PresenceBook {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            born: Instant::now(),
+        }
+    }
+}
+
+/// 重启之后多久之内，「名册里没有」要说成「还不知道」。
+///
+/// 心跳间隔是 30 秒，所以一台开着的机器**最迟 30 秒**会重新报到。
+/// 40 秒给一点余量（网络抖动、启动时的拥挤），再长就变成拖着用户等。
+const REBUILD_GRACE: std::time::Duration = std::time::Duration::from_secs(40);
+
 impl PresenceBook {
+    /// 进程刚起来、名册还在重建吗。
+    ///
+    /// # 为什么这一位必须存在
+    ///
+    /// 名册是纯内存的（`presence` 模块头写了为什么不进库），**agentd 一重启
+    /// 就是空的**。而空名册与「你的机器全关着」在下游长得一模一样 ——
+    /// 于是每次发版都会给所有人看一句「没有任何在线的 agent 持有它」，
+    /// 而他们的机器一直开着。
+    ///
+    /// 模块头那句「刻意不让任何判断依赖它」在这一位出现之前是靠**没有人
+    /// 依赖它**维持的；`/chat` 的 409 文案依赖了，所以这里补上这一位，
+    /// 让那句话在窗口内说「还不知道」而不是「没有」。
+    #[must_use]
+    pub fn rebuilding(&self) -> bool {
+        self.born.elapsed() < REBUILD_GRACE
+    }
+
+    /// 经**反向隧道拉**回来的那一份状态。见 [`crate::tunnel::poll_state`]。
+    ///
+    /// # 为什么不能直接复用 [`Self::record`]
+    ///
+    /// 拉回来的东西里**没有 `attach`**：钥匙是那条连接自己报的，住在隧道簿
+    /// 里。若照 `record` 的写法把 `attach` 写成 `None`，一台**同时**给了
+    /// `--attach-addr` 的机器会在第一次轮询时把自己的直拨地址擦掉 ——
+    /// 于是灰度期那条回退路径**在隧道好好的时候悄悄消失**，等隧道断了才发现
+    /// 无路可走。所以这里的规则是：**只覆盖拉得到的字段，attach 原样留着。**
+    ///
+    /// `attach_reachable` 同理不动：它是外拨探活的结论，这条路没探过。
+    ///
+    /// # 为什么还是要造一个 `AttachOffer`（地址为空）
+    ///
+    /// 因为 [`Self::attach_route`] 的第一道筛子就是 `attach.is_some()`，
+    /// 而那道筛子问的是「**这台机器同不同意被接入**」——一个只经隧道进名册
+    /// 的条目写成 `None` 的话，隧道好端端连着却路由不过去，**正是这条路
+    /// 要修的那个 bug 本身**。
+    ///
+    /// 写成 `Some` 是老实的：能建起隧道就说明它开了 `--allow-remote-attach`
+    /// （没有接入钥匙的升级请求在 `agent_tunnel` 那里就被 400 挡了）。
+    /// `addr: None` 同样老实 —— 它没给直拨地址，可达性来自那条连接。
+    pub fn record_tunnel(
+        &self,
+        owner: &str,
+        agent_id: &str,
+        st: &AgentStateDto,
+        attach_token: &str,
+    ) {
+        let mut g = self.lock();
+        let key = (owner.to_owned(), agent_id.to_owned());
+        let e = g.entry(key).or_insert_with(|| Entry {
+            machine_hint: st.machine_hint.clone(),
+            sessions: st.sessions.clone(),
+            last_seen: Instant::now(),
+            attach: None,
+            // 没探过就是没探过。隧道那条路的可达性由 `tunneled(id)` 给，
+            // 不借这个字段 —— 借了的话「探通过」会在下游被当成直拨可用
+            attach_reachable: false,
+        });
+        e.machine_hint.clone_from(&st.machine_hint);
+        e.sessions.clone_from(&st.sessions);
+        e.last_seen = Instant::now();
+        // 只在**本来没有**时补一个。心跳给过的那份带着 addr，
+        // 覆盖掉等于在隧道还活着的时候悄悄拆掉直拨那条回退路
+        if e.attach.is_none() {
+            e.attach = Some(AttachOffer {
+                addr: None,
+                token: attach_token.to_owned(),
+            });
+        }
+    }
+
     /// 收一条心跳。同一个 (owner, agent_id) 再来就是覆盖。
     ///
     /// `attach_reachable` 由调用方**探过之后**给 —— 探活是异步的，
@@ -294,6 +382,91 @@ mod tests {
         );
     }
 
+    /// **隧道拉回来的状态不许把直拨地址擦掉。**
+    ///
+    /// 灰度期一台机器可以两条路都有：给了 `--attach-addr`（直拨），同时也
+    /// 建了隧道。名册轮询拉回来的东西里没有 `attach` —— 钥匙住在隧道簿里 ——
+    /// 所以若照心跳那样整条覆盖，直拨那条回退路会在隧道**好好的时候**悄悄
+    /// 消失，等隧道断了才发现无路可走。那正是「实现细节漏成选项」的反面：
+    /// 一个字段的缺席被当成了一次撤销。
+    #[test]
+    fn a_tunnel_poll_must_not_erase_the_direct_dial_offer() {
+        let book = PresenceBook::default();
+        let mut with_addr = hb("a1", "alice-mbp", &["S1"]);
+        with_addr.attach = Some(AttachOffer {
+            addr: Some("10.0.0.7:8099".into()),
+            token: "k".into(),
+        });
+        book.record("alice", &with_addr, true);
+
+        book.record_tunnel(
+            "alice",
+            "a1",
+            &AgentStateDto {
+                machine_hint: "alice-mbp".into(),
+                sessions: vec!["S1".into(), "S2".into()],
+            },
+            "k",
+        );
+
+        // 拉得到的字段跟着走
+        let route = book
+            .attach_route("alice", "S2", &|_| false)
+            .expect("轮询带回来的新绑定要立刻能路由");
+        // 拉不到的字段原样留着 —— 隧道不在时仍然能直拨
+        assert_eq!(
+            route.direct,
+            Some(("10.0.0.7:8099".into(), "k".into())),
+            "隧道轮询把直拨地址擦掉了 —— 隧道一断这台机器就彻底不可达"
+        );
+    }
+
+    /// 只有隧道的机器，头一次报到就该进名册。
+    ///
+    /// 这一条盯的是 `record_tunnel` 的另一半：一台**从没打过出站心跳**的
+    /// 机器（心跳带的用户凭据正 401 着）也必须因为隧道连着而在名册里。
+    #[test]
+    fn a_tunnel_only_machine_enters_the_roster_without_any_heartbeat() {
+        let book = PresenceBook::default();
+        book.record_tunnel(
+            "alice",
+            "a1",
+            &AgentStateDto {
+                machine_hint: "willoptpc".into(),
+                sessions: vec!["S1".into()],
+            },
+            "tunnel-key",
+        );
+        let seen = book.list("alice", None, &|_| true);
+        assert_eq!(seen.len(), 1, "隧道拉回来的机器没进名册");
+        assert_eq!(seen[0].machine_hint, "willoptpc");
+        assert!(
+            book.list("bob", None, &|_| true).is_empty(),
+            "owner 隔离对这条路同样成立"
+        );
+
+        // ⚠️ **进名册还不够，得真能路由过去。**
+        //
+        // 这一条盯的是一个写起来极自然的错：拉回来的东西里没有 attach，
+        // 于是照着字段抄成 `None` —— 而 `attach_route` 的第一道筛子正是
+        // `attach.is_some()`。症状是隧道连着、名册里看得见那台机器，
+        // 而 `/chat` 仍然回「没有任何在线的 agent 持有它」。
+        let route = book
+            .attach_route("alice", "S1", &|_| true)
+            .expect("隧道活着、名册里也有它，这一轮必须能路由过去");
+        assert!(route.tunneled, "该走隧道");
+        assert_eq!(route.direct, None, "它没给直拨地址，别编一个出来");
+
+        // 隧道断了之后要说「那台机器刚离开」，不是「它没开远程接入」——
+        // 后者会让用户跑去改一个他早就开好的开关
+        assert_eq!(
+            book.why_not_attachable("alice", "S1", &|_| false)
+                .map(|(_, why)| why),
+            Some(WhyNot::TunnelDown),
+            "只经隧道进名册的机器，隧道一断该说的是「刚离开」"
+        );
+    }
+
     /// 同一个 agent 再报是覆盖，不是追加。
     #[test]
     fn a_second_heartbeat_replaces_the_first() {
@@ -396,6 +569,27 @@ mod tests {
 
         // ④ 压根没在线
         assert_eq!(book.why_not_attachable("alice", "S404", &|_| false), None);
+    }
+
+    /// 刚起来的簿子要承认自己还不知道；过了窗口才敢说「没有」。
+    ///
+    /// 这一位存在的全部理由：名册是纯内存的，agentd 一重启就是空的，
+    /// 而空名册与「用户的机器全关着」在下游长得一模一样。
+    #[test]
+    fn 刚起来的名册承认自己还不知道() {
+        let book = PresenceBook::default();
+        assert!(
+            book.rebuilding(),
+            "刚 new 出来的簿子必须承认自己还在重建 —— 否则发版那一刻\
+             所有人都会被告知机器关着"
+        );
+        // 窗口本身要与心跳间隔对得上：比 30 秒短的话，一台正常的机器
+        // 还没来得及报到就被判成「没有」
+        assert!(
+            REBUILD_GRACE >= std::time::Duration::from_secs(30),
+            "窗口 {REBUILD_GRACE:?} 比心跳间隔（30 秒）还短 —— \
+             一台开着的机器会在报到之前就被判死"
+        );
     }
 
     /// ⚠️ **「地址配错了」与「那台机器刚离开」必须分得开。**

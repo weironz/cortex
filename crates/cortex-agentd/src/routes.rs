@@ -706,8 +706,9 @@ async fn agent_tunnel(
         );
     };
     let tunnels = std::sync::Arc::clone(st.tunnels_arc());
+    let presence = std::sync::Arc::clone(st.presence_arc());
     ws.on_upgrade(move |sock| async move {
-        crate::tunnel::run(&tunnels, owner, agent_id, attach_token, sock).await;
+        crate::tunnel::run(&tunnels, presence, owner, agent_id, attach_token, sock).await;
     })
 }
 
@@ -927,11 +928,13 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
         //
         // `concat!` 加显式换行不依赖源文件怎么写，于是「这句话长什么样」
         // 只由这几行本身决定。用户可见的文案值得这个。
-        let msg = attach_failure_message(st.presence().why_not_attachable(
-            &d.owner,
-            &parsed.session_id,
-            &|id| st.tunnels().is_live(&d.owner, id),
-        ));
+        let msg = attach_failure_message(
+            st.presence()
+                .why_not_attachable(&d.owner, &parsed.session_id, &|id| {
+                    st.tunnels().is_live(&d.owner, id)
+                }),
+            st.presence().rebuilding(),
+        );
         // ⚠️ **确定性失败**：那台机器不上线之前，重发一万次是同一句话。
         // 而真正的出路（把它唤醒 / 在它上面开 agent / 换掉这条会话的工作区
         // 绑定）没有一件做得到在这个屏幕上 —— 所以这里明说「别给按钮」，
@@ -1003,7 +1006,10 @@ const ATTACH_NO_RUN: &str = "这个会话现在没有正在跑的轮次。";
 ///
 /// 提成自由函数只为一件事：让测试读得到这几句话。留在 handler 里的话，
 /// 要断言它们就得起一个带库、带名册、带认证的服务端 —— 那种测试没人会写。
-fn attach_failure_message(why: Option<(String, crate::presence::WhyNot)>) -> String {
+fn attach_failure_message(
+    why: Option<(String, crate::presence::WhyNot)>,
+    rebuilding: bool,
+) -> String {
     match why {
         // 在线，但机器主人没开远程接入。**这不是故障** —— 所以话要说成
         // 「它没同意」而不是「连不上」，否则用户会去查网络
@@ -1042,6 +1048,20 @@ fn attach_failure_message(why: Option<(String, crate::presence::WhyNot)>) -> Str
             ),
             machine = machine
         ),
+        // ⚠️ **名册刚重建时不许说「没有」。**
+        //
+        // 名册是纯内存的（见 `presence` 模块头），agentd 一重启就是空的，
+        // 而一台开着的机器最迟 30 秒才会重新报到。这个窗口里说「没有任何
+        // 在线的 agent」等于**每次发版都告诉所有人他们的机器关着**，
+        // 而它们一直开着。
+        //
+        // 这一支必须排在下面那个 `None` 之前 —— match 从上往下匹配，
+        // 排反了它永远走不到。
+        None if rebuilding => concat!(
+            "服务端刚重启，在线名册还在重建（最多半分钟）。\n",
+            "这个会话绑在你的一台机器上 —— 稍等一下再试，不用改任何设置。"
+        )
+        .to_owned(),
         None => concat!(
             "这个会话绑在某台机器上的一个目录里，它的文件只在那儿。\n",
             "而现在没有任何在线的 agent 报告持有它的绑定 —— ",
@@ -1225,6 +1245,35 @@ async fn confirmations(
 ) -> Response {
     let session_id = q.session_id.as_deref().unwrap_or_default();
     let d = issue_delegation(&st, &headers, session_id).await;
+
+    // ── 钉在某台机器上的会话：确认簿在**那台机器**的 cortex-local 里 ──
+    //
+    // 少了这一支，一个绑在本机目录上的会话在 Web 上永远确认不了：这里会
+    // 拿它的 scope 去问「有没有容器」，而那个 scope 下要么没有容器（回一句
+    // 指错路的 409「重新发一条消息会把沙箱拉起来」——**桌面上那一轮明明
+    // 正在等**），要么恰好有一个别的容器，于是**回一份空的待确认列表**，
+    // 而那一轮就在屏幕上无限等下去。
+    //
+    // ⚠️ 2026-08-27 实测：worker 侧 `GET /confirmations` 拿得到那条待确认，
+    // 而经云端同一时刻拿到的是 `{"pending":[]}`。
+    if matches!(d.runtime, SessionRuntimeDto::Local) {
+        let route = st.presence().attach_route(&d.owner, session_id, &|id| {
+            st.tunnels().is_live(&d.owner, id)
+        });
+        if let Some(route) = route
+            && let Some(resp) = attach_forward(&st, &d.owner, &route, req).await
+        {
+            return resp;
+        }
+        // 够不着那台机器。**文案要按「机器」说，不按「沙箱」说** ——
+        // 容器版那句「重新发一条消息会把沙箱拉起来」在这里是彻头彻尾的
+        // 误导：没有沙箱可拉，而重发只会再排一轮等不到确认的对话
+        return err(
+            StatusCode::CONFLICT,
+            "这个会话钉在你的一台机器上，而它现在够不着 —— 确认没能送过去。\n\
+             等那台机器重新在线之后再试；这一轮在它上面会因为等不到回答而超时。",
+        );
+    }
 
     let handle = match st.runner().status(&d.scope_key).await {
         Ok(Some(h)) => h,
@@ -2289,7 +2338,7 @@ mod tests {
         ];
         for why in cases {
             let label = format!("{why:?}");
-            let msg = super::attach_failure_message(why);
+            let msg = super::attach_failure_message(why, false);
 
             assert!(
                 !msg.contains("**"),
@@ -2308,6 +2357,34 @@ mod tests {
         }
     }
 
+    /// ⚠️ **名册刚重建时不许说「你的机器都关着」。**
+    ///
+    /// 名册是纯内存的（见 `presence` 模块头），agentd 一重启就是空的，
+    /// 而一台开着的机器最迟 30 秒才会重新报到。这个窗口里说「没有任何
+    /// 在线的 agent」等于**每次发版都告诉所有人他们的机器关着** ——
+    /// 而它们一直开着。
+    #[test]
+    fn a_rebuilding_roster_never_claims_the_machines_are_off() {
+        let fresh = super::attach_failure_message(None, true);
+        assert!(
+            fresh.contains("刚重启") && fresh.contains("名册"),
+            "窗口内要说清是服务端自己刚起来，不是用户的机器出了事：{fresh}"
+        );
+        assert!(
+            fresh.contains("不用改"),
+            "还要说清用户什么都不用做 —— 否则他会去开一台本来就开着的机器：{fresh}"
+        );
+
+        // 窗口外仍然要老实说「没有」——否则一台真关着的机器会被永远说成
+        // 「稍等一下」，而用户等不到任何东西
+        let settled = super::attach_failure_message(None, false);
+        assert!(
+            settled.contains("没有任何在线的 agent"),
+            "窗口外要说实话：{settled}"
+        );
+        assert_ne!(fresh, settled);
+    }
+
     /// **三档「接不了」说的不能是同一件事。**
     ///
     /// 合成一句的话：没开开关的那台会被当成网络故障（用户去查防火墙），
@@ -2315,7 +2392,7 @@ mod tests {
     #[test]
     fn each_attach_failure_reason_says_something_different() {
         use crate::presence::WhyNot;
-        let m = |w| super::attach_failure_message(Some(("MBP".to_owned(), w)));
+        let m = |w| super::attach_failure_message(Some(("MBP".to_owned(), w)), false);
         let not_offered = m(WhyNot::NotOffered);
         let unreachable = m(WhyNot::Unreachable);
         let tunnel_down = m(WhyNot::TunnelDown);

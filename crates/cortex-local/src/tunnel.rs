@@ -231,13 +231,21 @@ async fn serve(ws: WebSocketStream<reqwest::Upgraded>, router: axum::Router) -> 
         .keep_alive_interval(KEEP_ALIVE_INTERVAL)
         .keep_alive_timeout(KEEP_ALIVE_TIMEOUT);
     let svc = hyper_util::service::TowerToHyperService::new(router);
-    if let Err(e) = builder
+    // ⚠️ **h2 干净结束 = 对端体面关闭**，出错才算断线。
+    //
+    // agentd 关停时对隧道调 `graceful_shutdown`，那会发一个 GOAWAY，
+    // 这里的 `serve_connection` 于是**正常返回**；而网络断、进程被 SIGKILL
+    // 是 RST / 半截帧，返回的是 Err。两者要走不同的路：前者是日常发版，
+    // 睡 2 秒就回去；后者才该进指数退避。
+    //
+    // 不靠 WS Close 帧判：h2 跑在 WS 之内，GOAWAY 到达时那一层还没关，
+    // 只看 Close 帧的话每次发版都会被判成断线并晾进退避曲线。
+    let clean = builder
         .serve_connection(hyper_util::rt::TokioIo::new(io), svc)
         .await
-    {
-        tracing::debug!(error = %e, "隧道 h2 结束");
-    }
-    deliberate.load(std::sync::atomic::Ordering::Relaxed)
+        .inspect_err(|e| tracing::debug!(error = %e, "隧道 h2 出错结束"))
+        .is_ok();
+    clean || deliberate.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 // ─────────────────── WebSocket → 字节流适配 ───────────────────

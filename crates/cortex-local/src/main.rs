@@ -556,7 +556,7 @@ async fn main() -> anyhow::Result<()> {
         // 拿不到 hostname 时回落到一个**明显是回落**的字符串，而不是编一个
         // 像真名字的东西：界面上写着「未命名机器」，用户知道该去配主机名；
         // 写成 "localhost" 的话三台机器长得一模一样。
-        let machine_hint = hostname_or_fallback();
+        let machine_hint = state::hostname_or_fallback();
         // 「你可以从这个地址接进来，用这把钥匙」。只在 `--allow-remote-attach`
         // 打开时存在。
         //
@@ -688,17 +688,4 @@ fn write_addr_file(path: &std::path::Path, addr: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("addr.tmp");
     std::fs::write(&tmp, addr)?;
     std::fs::rename(&tmp, path)
-}
-
-/// 这台机器叫什么 —— 只给人看。
-///
-/// 回落成 `未命名机器` 而不是 `localhost`：后者会让三台机器在界面上长得
-/// 一模一样，而用户要做的判断恰恰是「是哪一台」。前者至少提示他去配主机名。
-fn hostname_or_fallback() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok()
-        .map(|h| h.trim().to_owned())
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "未命名机器".to_owned())
 }

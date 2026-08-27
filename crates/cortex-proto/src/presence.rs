@@ -102,6 +102,25 @@ pub struct AttachOffer {
     pub token: String,
 }
 
+/// `GET /agents/state` 的响应 —— controller 经反向隧道**拉**的那一份。
+///
+/// 与 [`AgentHeartbeat`] 带的是同样的东西，少了 `agent_id`（问的人已经知道
+/// 自己在问哪条隧道）与 `attach`（钥匙是那条连接自己报的）。
+///
+/// # 为什么拉比推好
+///
+/// 推（心跳）用的是**用户凭据**，每 15 分钟轮换一次；它短暂失效时名册里
+/// 这台机器会在 90 秒后过期，于是隧道好端端连着而会话被判成「没有任何在线
+/// 的 agent 持有它」。拉走的是隧道本身，那条连接就是「在线」的证据。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentState {
+    /// 给人看的机器名。**不做任何判断**，见模块文档。
+    pub machine_hint: String,
+    /// 这台机器上绑过本机目录的会话 id。
+    #[serde(default)]
+    pub sessions: Vec<String>,
+}
+
 /// 心跳的回执。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatAck {

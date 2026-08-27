@@ -467,7 +467,47 @@ async fn main() -> anyhow::Result<()> {
     let addr = listener.local_addr().context("取本机地址失败")?;
     tracing::info!(%addr, "cortex-agentd 已就绪");
 
+    // ── 收到关停信号时，先跟每台 worker 说一声 ──
+    //
+    // 不说的话，一次日常发版对它们都表现为「连接毫无征兆地断了」——
+    // 各自进指数退避，而这个进程三秒就回来了。见 `tunnel::Tunnels::shutdown_all`。
+    let tunnels = std::sync::Arc::clone(state.tunnels_arc());
     axum::serve(listener, routes::router(state))
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            tunnels.shutdown_all();
+            // 给那几帧 Close 一点出门的时间。**很短** —— 关停不能被它按住，
+            // 而对端就算没收到也只是多退避一次
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        })
         .await
         .context("HTTP 服务退出")
+}
+
+/// 等一个关停信号（Ctrl-C，或容器里的 SIGTERM）。
+///
+/// 容器停机走的是 SIGTERM 而不是 Ctrl-C —— 只听 Ctrl-C 的话，
+/// `docker stop` / 滚动发版时这条路**一次都不会走到**，而那正是它唯一要
+/// 服务的场景。这个仓库记着「只在故障 / 离场路径上跑的代码，没人验就等于
+/// 没写」，所以这一条写在这儿提醒下一个人：改完要真的 `docker stop` 一次。
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c().await.ok();
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            sig.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
+    tracing::info!("收到关停信号");
 }

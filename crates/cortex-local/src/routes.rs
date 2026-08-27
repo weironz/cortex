@@ -42,6 +42,8 @@ use crate::ws_proxy;
 pub fn router(state: LocalState) -> Router {
     Router::new()
         .route("/health", get(health))
+        // controller 经**反向隧道**来拉这台机器的名册状态。见 `agent_state`
+        .route("/agents/state", get(agent_state))
         .route("/chat", post(chat))
         .route(
             "/confirmations",
@@ -235,6 +237,28 @@ async fn require_auth(State(st): State<LocalState>, req: Request, next: Next) ->
     }
 }
 
+/// `GET /agents/state` —— 「我是谁、我手上有哪些会话的绑定」。
+///
+/// # 为什么要有这条路，而不是继续只靠出站心跳
+///
+/// 心跳是这台机器**主动打出去**的 HTTP（每 30 秒一条），带的是同样两样东西。
+/// 它有一个躲不掉的失败模式：**用户凭据每 15 分钟轮换**，而心跳用的正是它 ——
+/// 一旦它短暂失效（服务端发版、轮换的缝），心跳连着 401，名册里这台机器
+/// 在 90 秒后过期，于是**隧道好端端连着，会话却被判成「没有任何在线的
+/// agent 持有它」**。
+///
+/// 经隧道拉就没有这个问题：那条连接自己就是「这台机器在线」的证据，
+/// 而它认的是接入钥匙，不是每 15 分钟换一次的用户凭据。
+///
+/// 出站心跳**留着**：没有隧道的部署（灰度期的老 worker、只走直拨的内网）
+/// 仍然靠它。两条路都写进名册的同一张表，后到的覆盖先到的。
+async fn agent_state(State(st): State<LocalState>) -> Json<cortex_proto::presence::AgentState> {
+    Json(cortex_proto::presence::AgentState {
+        machine_hint: crate::state::hostname_or_fallback(),
+        sessions: st.engine.workspaces.bound_sessions(),
+    })
+}
+
 /// 远程接入那把钥匙够得到哪些路由。**白名单 + 默认拒绝。**
 ///
 /// # 为什么是白名单
@@ -256,6 +280,9 @@ fn attach_allows(method: &axum::http::Method, path: &str) -> bool {
     use axum::http::Method;
     match (method, path) {
         (&Method::GET, "/health") => true,
+        // controller 拉名册状态。只读、只回机器名与绑定的会话 id ——
+        // 那两样它经心跳本来就拿得到，这条只是换了个方向
+        (&Method::GET, "/agents/state") => true,
         (&Method::POST, "/chat") => true,
         // 断线重连要能接回正在跑的那一轮
         (&Method::GET, p) if p.starts_with("/runs") => true,
@@ -882,6 +909,10 @@ mod attach_tests {
             (Method::POST, "/confirmations"),
             // 重连后的补拉：重放缓冲刻意不存 Confirm 事件，只能现拉
             (Method::GET, "/confirmations"),
+            // controller 经隧道拉名册。漏了它的症状最难查：隧道好端端连着，
+            // 轮询一路 401，名册 90 秒后过期，于是这台机器被说成「离线」——
+            // 而它正连着，且直拨也不一定有
+            (Method::GET, "/agents/state"),
         ] {
             assert!(attach_allows(&m, p), "{m} {p} 是远程那一轮要用的");
         }
@@ -902,6 +933,8 @@ mod attach_tests {
         // 换凭据、绑目录、改 MCP 那三样永远在名单外，方法换成什么都一样
         assert!(!attach_allows(&Method::DELETE, "/local/credential"));
         assert!(!attach_allows(&Method::PUT, "/local/workspaces/01ABC"));
+        // 名册那条是只读的。写方法进白名单等于凭空多一个可写面
+        assert!(!attach_allows(&Method::POST, "/agents/state"));
     }
 }
 

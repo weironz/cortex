@@ -365,6 +365,12 @@ impl AgentState {
         &self.inner.presence
     }
 
+    /// 名册的 `Arc` —— 给要活过本次请求的任务（隧道的名册轮询）用。
+    #[must_use]
+    pub fn presence_arc(&self) -> &Arc<crate::presence::PresenceBook> {
+        &self.inner.presence
+    }
+
     #[must_use]
     pub fn http(&self) -> &reqwest::Client {
         &self.inner.http

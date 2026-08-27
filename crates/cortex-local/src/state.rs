@@ -40,3 +40,22 @@ pub struct LocalState {
     /// 交互终端的占用簿（每会话同时最多一个）。见 [`crate::terminal`]。
     pub terminals: crate::terminal::Terminals,
 }
+
+/// 给人看的机器名（通常是主机名）。
+///
+/// 拿不到时回落到一个**明显是回落**的字符串，而不是编一个像真名字的东西：
+/// 界面上写着「未命名机器」，用户知道该去配主机名；写成 "localhost" 的话
+/// 三台机器长得一模一样。
+///
+/// ⚠️ 它是**提示，不是身份** —— `cortex-store` 里那条论证不变：
+/// 本机绑定存在这台机器的 `workspaces.json` 里，「这台机器有没有这个会话的
+/// 绑定」本身就是设备检查，比一个 id 更硬。
+#[must_use]
+pub fn hostname_or_fallback() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .map(|h| h.trim().to_owned())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "未命名机器".to_owned())
+}
