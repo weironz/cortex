@@ -1100,7 +1100,22 @@ async fn attach_forward(
         return Some(crate::sandbox_proxy::forward_tunneled(handle, req).await);
     }
     if let Some((addr, key)) = &route.direct {
-        tracing::debug!(agent = %route.agent_id, %addr, "直拨那台机器（灰度期）");
+        // ⚠️ **这一行就是「直拨还能不能退役」的量具。**
+        //
+        // 直拨是灰度期的回退路：隧道 2026-08-27 才随 v0.1.25 发出去，
+        // 在那之前**所有** worker 都不会拨隧道。要撤掉它的判据是
+        // 「线上不再有拨不起隧道的 worker」——而那句话此前没有任何东西
+        // 答得了，它是个感觉。
+        //
+        // 所以升到 `info!` 并给一句好 grep 的话：一段时间里生产日志上
+        // 一条都不出现，那个判据才算真的满足。三个调用点（发一轮、
+        // 重连、批确认）都是**每次用户动作**一次，不是轮询，所以不会淹。
+        //
+        // 撤掉它的时候，这一行跟着一起撤。
+        tracing::info!(
+            agent = %route.agent_id, %addr,
+            "attach-fallback-direct：这台机器没有隧道，走了直拨（灰度期回退路）"
+        );
         return Some(
             crate::sandbox_proxy::forward(
                 st.http(),
