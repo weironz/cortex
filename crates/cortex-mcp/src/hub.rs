@@ -373,7 +373,19 @@ impl McpHub {
             params = params.with_arguments(a);
         }
 
-        match server.service.call_tool(params).await {
+        // ⚠️ **必须有超时。** 见 [`with_call_deadline`]。
+        let called = match with_call_deadline(
+            server_name,
+            tool,
+            call_timeout(),
+            server.service.call_tool(params),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(timed_out) => return timed_out,
+        };
+        match called {
             Ok(res) => {
                 let text = flatten(&res);
                 // 对端自己说这次失败了 —— 照它说的报，别把失败当成功
@@ -477,6 +489,69 @@ fn connect_timeout() -> std::time::Duration {
         .filter(|v| *v > 0)
         .unwrap_or(DEFAULT);
     std::time::Duration::from_secs(secs)
+}
+
+/// 一次**工具调用**最多花多久。
+///
+/// # 它与 [`connect_timeout`] 是两件事
+///
+/// 那个管「连不连得上」，这个管「连上了答不答得出来」。一台连着的
+/// server 完全可能在某一次调用上卡死：对端在等一个永远不来的网络响应、
+/// 子进程死锁、或者它自己在等一个没人会给的输入。
+///
+/// # 没有它的时候会怎样
+///
+/// `call_tool().await` 没有上限 —— **整轮对话永久挂在这里**。而且没有
+/// 任何一道现成的闸兜得住：`max_rounds` 要等这一轮返回才数得上，
+/// 确认超时只管弹过确认框的那些，而 MCP 工具走的是同一个风险档、
+/// 批准之后就再没有第二个期限。用户看到的是「它不动了」。
+///
+/// # 为什么是 120 秒
+///
+/// 比连接那 60 秒宽：工具本身可以是慢活（跑一次查询、抓一个页面），
+/// 而这里砍早了会把正常的慢当成故障。但它必须**有限** —— 这道闸买的
+/// 不是「快」，是「一定会结束」。
+///
+/// 与 shell 那条不同：`shell` 的超时由模型逐次给（`timeout_ms`），
+/// 因为它知道自己要跑多久；MCP 那侧是第三方进程，没人问得出这个数。
+fn call_timeout() -> std::time::Duration {
+    const DEFAULT: u64 = 120;
+    let secs = std::env::var("CORTEX_MCP_CALL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT);
+    std::time::Duration::from_secs(secs)
+}
+
+/// 给一次工具调用套上 [`call_timeout`]，超时就换成一条模型读得懂的失败。
+///
+/// # 为什么抽成函数
+///
+/// 内联写成 `tokio::time::timeout(...)` 也能跑，但那样**没有测试够得着
+/// 它** —— 要测就得先造一台完成握手、然后在某一次调用上装死的 MCP
+/// server，那是另一件工程。抽出来之后机制本身测得到（喂一个永不完成的
+/// future），没被覆盖的只剩「调用点用了它」这一行。
+///
+/// 这不是「为了测试而抽象」：这一层的语义（有界 + 失败要说清是哪台
+/// server 的哪个工具）本来就值一个名字。
+///
+/// ⚠️ **期限是参数，不是在里面读 env。** 读 env 的第一版让两条测试抢同一个
+/// 变量（Rust 的测试默认并行跑）—— 另一条把它设成 600 之后，这条就真的
+/// 等了十分钟。共享的可变全局在测试里就是这样咬人的：两条各自都对，
+/// 合起来是错的。
+async fn with_call_deadline<T>(
+    server_name: &str,
+    tool: &str,
+    limit: std::time::Duration,
+    fut: impl std::future::Future<Output = T>,
+) -> Result<T, ToolResult> {
+    match tokio::time::timeout(limit, fut).await {
+        Ok(v) => Ok(v),
+        Err(_) => Err(ToolResult::err(format!(
+            "MCP server {server_name} 的 {tool} 在 {limit:?} 内没有返回，已放弃这一次调用。             那台 server 还连着，只是这次没答上来 —— 换个工具，或者让用户去设置页重连它。             可用 CORTEX_MCP_CALL_TIMEOUT_SECS 放宽"
+        ))),
+    }
 }
 
 /// [`connect_one`] 加一道**必须存在**的超时。
@@ -828,6 +903,73 @@ mod tests {
             hub.status().await.is_empty(),
             "reload 的返回值与后续查询必须一致"
         );
+    }
+
+    /// **一次卡住的工具调用不许把整轮挂死。**
+    ///
+    /// # 这道闸补的是一个真空
+    ///
+    /// 连接那道超时管的是「连不连得上」；连上之后每一次 `call_tool` 的
+    /// `.await` **没有任何上限**。而没有一道现成的闸兜得住它：
+    /// `max_rounds` 要等这一轮返回才数得上，确认超时只管弹过确认框的
+    /// 那些，MCP 工具批准之后就再没有第二个期限。
+    ///
+    /// 用户看到的是「它不动了」，而 server 在设置页里显示**连接正常**。
+    ///
+    /// 喂一个永不完成的 future —— 那正是「对端在等一个永远不来的响应」。
+    #[tokio::test]
+    async fn 卡住的工具调用会在期限内放弃而不是永久挂着() {
+        // 期限直接给，不碰 env —— 见 `with_call_deadline` 上那段 ⚠️
+        let started = tokio::time::Instant::now();
+        let r: Result<(), ToolResult> = with_call_deadline(
+            "wedged",
+            "do_thing",
+            std::time::Duration::from_millis(50),
+            std::future::pending::<()>(),
+        )
+        .await;
+        let waited = started.elapsed();
+
+        let err = r.expect_err("永不完成的调用必须被期限打断");
+        assert!(
+            waited < std::time::Duration::from_secs(5),
+            "调用必须有上界，实际等了 {waited:?} —— 没有上界就是整轮永久挂住"
+        );
+        assert!(!err.ok);
+        // 失败要说清是**哪台 server 的哪个工具** —— 只说「超时了」的话，
+        // 装了五台 server 的用户不知道该去重连谁
+        assert!(
+            err.content.contains("wedged") && err.content.contains("do_thing"),
+            "要点名是谁卡住了：{}",
+            err.content
+        );
+        assert!(
+            err.content.contains("还连着"),
+            "要说清它没断线 —— 否则用户会去查一个没有的连接问题：{}",
+            err.content
+        );
+    }
+
+    /// 期限可调，且**调不出一个没有期限的配置**。
+    #[test]
+    fn 调用期限可以放宽但不能关掉() {
+        unsafe { std::env::remove_var("CORTEX_MCP_CALL_TIMEOUT_SECS") };
+        assert_eq!(call_timeout(), std::time::Duration::from_secs(120));
+
+        unsafe { std::env::set_var("CORTEX_MCP_CALL_TIMEOUT_SECS", "600") };
+        assert_eq!(call_timeout(), std::time::Duration::from_secs(600));
+
+        // 0 与垃圾值都回落到默认，**不是**「没有超时」——
+        // 这道闸买的不是「快」，是「一定会结束」
+        for bad in ["0", "-1", "abc", ""] {
+            unsafe { std::env::set_var("CORTEX_MCP_CALL_TIMEOUT_SECS", bad) };
+            assert_eq!(
+                call_timeout(),
+                std::time::Duration::from_secs(120),
+                "{bad:?} 应当回落到默认，而不是把期限关掉"
+            );
+        }
+        unsafe { std::env::remove_var("CORTEX_MCP_CALL_TIMEOUT_SECS") };
     }
 
     /// 派给一台不存在的 server 时，回一条模型读得懂的失败。
