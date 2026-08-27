@@ -20,7 +20,7 @@
 # 与 Dockerfile.cortexd 同一个 base：glibc 版本必须与运行阶段对得上。
 # 但**不开** local-embed —— cortex-local 不依赖 cortex-memory，
 # 没有 fastembed / ONNX Runtime，所以这一侧比 cortexd 轻得多。
-FROM rust:1.97.1-trixie AS builder
+FROM rust:1.98.0-trixie AS builder
 
 WORKDIR /build
 

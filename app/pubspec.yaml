@@ -23,6 +23,17 @@ version: 0.1.24+24
 
 environment:
   sdk: ^3.12.1
+  # ⚠️ **写死，不是范围。** 这一行是 Flutter 版本的**唯一来源**：
+  # CI 与 release 两条流水线都用 `flutter-version-file: app/pubspec.yaml`
+  # 读它（`subosito/flutter-action` 要求这里是精确版本，写成范围它会拒绝）。
+  #
+  # 而且它在**本机**也拦得住：Flutter 版本对不上时 `flutter pub get` 当场
+  # 报错 —— 于是「本机与 CI 漂开」这件事在写代码时就撞到，而不是等
+  # 二十多分钟的发布流水线在 `dart format` 上红一次。
+  #
+  # 升级的做法：`flutter upgrade` → 改这一行 → 跑 `just ci`（`dart format`
+  # 的排法在小版本间会变，那一笔只有格式改动，单独提交）。
+  flutter: 3.47.1
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions

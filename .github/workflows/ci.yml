@@ -244,28 +244,25 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # `channel: stable` 而不是钉死版本号，**与 release.yml 保持一致**。
+      # ⚠️ **钉死版本，不用 `channel: stable`。**
       #
-      # 钉版本能让 CI 不受上游发版影响，代价更大：这道门就会在一个与打包
-      # 用的 SDK 不同的版本上跑 —— 于是它能全绿，而 release 那边编不过。
-      # 一道拦不住发布失败的门没有意义。
+      # 这里从前是 `channel: stable`，理由是「CI 与 release 必须用同一个
+      # SDK，否则这道门能全绿而 release 编不过」——那条约束没变，
+      # **变的是满足它的方式**：两条流水线现在读同一个
+      # `app/pubspec.yaml` 的 `environment.flutter`，于是它们必然同版本，
+      # 而且那个版本是仓库里写着的，不是「今天上游发到哪儿」。
       #
-      # ⚠️ **代价 2026-08-16 兑现了一次，值得写下来。** 上游 stable 走到
-      # 3.47.0（Dart 3.13）之后，`dart format` 对 record 字面量的排法变了，
-      # 于是 `test/history_replay_test.dart` 在**没有任何人改过它**的情况下
-      # 让 CI 变红 —— 上一次绿的那笔提交也没动过它。
+      # 浮动的代价 2026-08-16 兑现过一次：上游 stable 走到 3.47.0 之后
+      # `dart format` 对 record 字面量的排法变了，于是
+      # `test/history_replay_test.dart` 在**没有任何人改过它**的情况下
+      # 让 CI 变红 —— 红灯与代码改动无关，查的人会先去翻自己那几笔。
       #
-      # 这就是浮动版本的形状：**红灯与代码改动无关**，查的人会先去翻自己
-      # 那几笔。看到 `dart format` 红而 diff 里没有 .dart 文件时，先对一下
-      # 本机与 CI 的 Flutter 版本（本机 `flutter --version`，CI 日志里搜
-      # `stable-`），八成就是这条。
-      #
-      # 跟上游的做法是**升本机**，不是钉 CI：两边一起浮动才保住上面那条
-      # 「CI 与 release 用同一个 SDK」。升的时候顺手全量重排一遍格式，
-      # 那一笔只有格式改动，单独提交。
+      # 升级从此是一次**明确的提交**：`flutter upgrade` → 改 pubspec 那一行
+      # → 跑 `just ci`。不兼容当场看得见，而不是某天早上突然红。
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version-file: app/pubspec.yaml
           cache: true
 
       - name: flutter pub get

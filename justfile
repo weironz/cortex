@@ -419,7 +419,7 @@ lint-compose-env:
 # 依赖链，CI 加了一步而这里没跟上就红（那件事 2026-08-20 与 08-22 各发生过
 # 一次，两次都是本机全绿、推上去才知道）。加 recipe 时连同
 # `scripts/check-ci-parity.py` 的 COVERED 一起改。
-ci: fmt-check lint check test docs-check lint-sh lint-py lint-edge release-check evals-baseline lint-compose-env lint-ci-parity flutter-check
+ci: fmt-check lint check test docs-check lint-sh lint-py lint-edge toolchain-check release-check evals-baseline lint-compose-env lint-ci-parity flutter-check
     @echo "全部检查通过"
 
 # ══════════════════════════════════════════════════════════
@@ -668,6 +668,10 @@ clean:
 # 版本号一致性：Cargo.toml / pubspec.yaml /（可选）tag。CI 每次都跑
 version-check *ARGS:
     bash scripts/check-version.sh {{ ARGS }}
+
+# 工具链版本处处一致（rust 六处、flutter 两条流水线）。见脚本头
+toolchain-check:
+    bash scripts/check-toolchain.sh
 
 # 发版前置闸门：版本一致 + 随包文件齐全 + CHANGELOG 有条目
 #   + 没有未被忽略的凭据文件 + Cargo.lock 同步

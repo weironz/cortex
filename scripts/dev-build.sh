@@ -9,7 +9,7 @@
 #  ── 为什么不用宿主编好的 ──────────────────────────────────
 #
 #  开发机是 Windows：`cargo build` 产出 PE 格式的 `.exe`，Linux 容器里
-#  跑不了（症状是 `exec format error`）。所以在 `rust:1.97.1-trixie` 里编，
+#  跑不了（症状是 `exec format error`）。所以在 `rust:1.98.0-trixie` 里编，
 #  glibc 与运行底座（debian:trixie-slim）对得上。
 #
 #  ── 三个卷各自的理由 ──────────────────────────────────────
@@ -56,7 +56,7 @@ docker run --rm \
     -v cortex_dev_bin:/out \
     -w /src \
     -e CARGO_TARGET_DIR=/target \
-    rust:1.97.1-trixie \
+    rust:1.98.0-trixie \
     bash -ec '
         # **只编 agentd。**
         #

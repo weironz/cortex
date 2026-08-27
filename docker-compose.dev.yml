@@ -32,7 +32,7 @@
 #
 #  代价是**宿主编出来的东西用不了**：这台机器是 Windows，`cargo build`
 #  产出的是 PE 格式的 `.exe`，Linux 容器里跑不了。所以 `just dev-build`
-#  在一个 `rust:1.97.1-trixie` 容器里编，产物落进 named volume
+#  在一个 `rust:1.98.0-trixie` 容器里编，产物落进 named volume
 #  `cortex_dev_bin`，运行容器再挂那个卷。
 #
 #  target 目录用 named volume 而不是 bind mount：Windows 的 bind mount

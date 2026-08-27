@@ -808,7 +808,7 @@ async fn ensure_sandbox(
     st: &AgentState,
     headers: &HeaderMap,
     session_id: &str,
-) -> Result<(Delegation, crate::runner::SandboxHandle), Response> {
+) -> Result<(Delegation, crate::runner::SandboxHandle), Box<Response>> {
     let d = issue_delegation(st, headers, session_id).await;
     match st.runner().ensure(&d.scope_key, &d.token, "v1").await {
         Ok(h) => {
@@ -816,7 +816,11 @@ async fn ensure_sandbox(
             st.touch(&d.scope_key);
             Ok((d, h))
         }
-        Err(e) => Err(err(StatusCode::BAD_GATEWAY, &e.to_string())),
+        // ⚠️ **装箱**：`Response` 有 128 字节，而这个 `Result` 在六个调用点上
+        // 按值传。不装的话每一次**成功**的调用也要为那个失败分支腾出同样大的
+        // 栈空间 —— clippy 的 `result_large_err` 说的就是这件事
+        // （Rust 1.98 把它打开在这条上）。
+        Err(e) => Err(Box::new(err(StatusCode::BAD_GATEWAY, &e.to_string()))),
     }
 }
 
@@ -1330,7 +1334,7 @@ async fn list_files(
 ) -> Response {
     let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let path = q.or_root();
     match st.runner().list_dir(&d.scope_key, path).await {
@@ -1352,7 +1356,7 @@ async fn read_file(
     };
     let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match st.runner().read_file(&d.scope_key, &path).await {
         Ok(bytes) => (
@@ -1390,7 +1394,7 @@ async fn put_file(
     };
     let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let size = body.len();
     match st.runner().write_file(&d.scope_key, &path, body).await {
@@ -1412,7 +1416,7 @@ async fn download_workspace(
 ) -> Response {
     let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match st.runner().export_workspace(&d.scope_key).await {
         Ok(tar) => (
@@ -1461,7 +1465,7 @@ async fn take_snapshot(
 ) -> Response {
     let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match crate::snapshot::capture(&st, &d.owner, &d.scope_key).await {
         Ok(Some(row)) => Json(serde_json::json!({ "snapshot": row })).into_response(),
@@ -1486,7 +1490,7 @@ async fn restore_snapshot(
     // 恢复是用户「刚丢了东西」才走的路，最不该在这里让他先去把容器拉起来
     let (d, _) = match ensure_sandbox(&st, &headers, q.session()).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     match crate::snapshot::restore(&st, &d.owner, &d.scope_key, &id).await {
         Ok(()) => Json(serde_json::json!({

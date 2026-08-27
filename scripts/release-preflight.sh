@@ -16,6 +16,8 @@
 #    3. CHANGELOG 里真的有这个版本的条目
 #    4. **仓库里没有既未被 git 跟踪、又未被 gitignore 的疑似凭据文件**
 #    5. Cargo.lock 与 Cargo.toml 一致（--locked 能过）
+#    6. CHANGELOG 顶上第一条**就是**要发的这一版，日期合法且不倒流
+#    7. 版本号比已有的最高 tag 严格大（不许原地重发、不许倒退）
 #
 #  第 4 条不是假想。写这个脚本的时候，仓库根就躺着一个 `secrets.env`
 #  （registry 凭据），既没被跟踪也没被 .gitignore 匹配上 ——
@@ -79,6 +81,82 @@ if grep -qE "^##[[:space:]]+\[?${VERSION//./\\.}\]?" CHANGELOG.md 2>/dev/null; t
     pass "CHANGELOG.md 有 $VERSION 的条目"
 else
     fail "CHANGELOG.md 里找不到 $VERSION 的条目（应形如 '## [$VERSION]'）"
+fi
+
+# ── 3b. CHANGELOG 顶上第一条就是这一版，且日期站得住 ──────
+#
+# 第 3 条只问「有没有这个版本的条目」，那有一个很自然的漏法：**补写一条
+# 旧版本的条目也能满足它**，而要发的这一版在 CHANGELOG 里根本没有。
+# 还有一个更常见的：上一轮留下的 `## [未发布]` 忘了改名，于是发出去的
+# 版本在变更日志里写着「未发布」。
+#
+# 这两样都没有任何技术症状 —— 装的人拉到产物，翻 CHANGELOG 看不到自己
+# 装的这一版改了什么。
+first_entry="$(grep -m1 -E '^## \[' CHANGELOG.md 2>/dev/null || true)"
+if [ -z "$first_entry" ]; then
+    fail "CHANGELOG.md 里一条 '## [...]' 都没有"
+elif ! printf '%s' "$first_entry" | grep -qF "[$VERSION]"; then
+    fail "CHANGELOG 顶上第一条不是 ${VERSION}，而是：$first_entry"
+    printf '      %s补写一条旧版本的条目也能满足「有这个版本」那一条 —— 所以这里查的是顺序。%s
+' "$_C_YEL" "$_C_OFF"
+else
+    # 日期：必须是 ISO 且不早于下一条（也就是上一版）的日期。
+    # 倒流的典型成因是复制上一条改版本号忘了改日期
+    d_new="$(printf '%s' "$first_entry" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || true)"
+    d_prev="$(grep -E '^## \[' CHANGELOG.md | sed -n 2p | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || true)"
+    if [ -z "$d_new" ]; then
+        fail "CHANGELOG 顶上那条没有日期（应形如 '## [$VERSION] - 2026-01-31'）"
+    elif [ -n "$d_prev" ] && [ "$d_new" \< "$d_prev" ]; then
+        fail "CHANGELOG 日期倒流了：$VERSION 是 ${d_new}，而上一版是 $d_prev"
+    else
+        pass "CHANGELOG 顶上第一条就是 ${VERSION}（${d_new}）"
+    fi
+fi
+
+# ── 3c. 版本号必须比已有的最高 tag 大 ─────────────────────
+#
+# 第 1 条只保证「三处写的是同一个数」。原地重发（tag 已存在）与版本号
+# 倒退（改回上一版重打一次 tag）它都拦不住 —— 而产物文件名与镜像 tag
+# 都从版本号派生，重发意味着**同一个名字下的内容变了**，而已经拉走的人
+# 永远不会知道。
+# ⚠️ **两种模式，判据不同，而且要说出来自己在哪种模式。**
+#
+#   本地准备（没有 --tag）：tag 还不存在，所以要求严格大于**每一个**已有
+#   tag —— 这条抓的是真正会发生的人为错误：把同一个版本号又准备了一遍。
+#
+#   流水线（有 --tag）：那个 tag 已经存在（正是它触发了这次构建），
+#   拿它自己比必然失败，所以只能排除它再比。**代价写在明处**：这种模式下
+#   「删掉 tag、改完再打同一个」看起来与一次正常发布毫无区别 ——
+#   从 git 状态里分不出来，所以那道防线在本地那一侧。
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    if [ -n "$TAG" ]; then
+        highest="$(git tag --list 'v*' --sort=-v:refname | grep -vx "v${VERSION}" | head -1 || true)"
+        mode="流水线模式：已排除正在发的 v${VERSION}"
+    else
+        highest="$(git tag --list 'v*' --sort=-v:refname | head -1 || true)"
+        mode="本地模式"
+    fi
+    newest="$(printf '%s
+%s
+' "${highest#v}" "$VERSION" | sort -V | tail -1)"
+    if [ -z "$highest" ]; then
+        # 浅克隆 / 全新仓库 —— 说清楚是「没查」而不是「查过没问题」
+        warn "本地没有可比的 tag（浅克隆？），跳过版本检查"
+    elif [ "${highest#v}" = "$VERSION" ]; then
+        # **相等是常态，不是错**：发完 v0.1.24 之后 Cargo.toml 就一直是
+        # 0.1.24，直到下一次 bump。在这里判错的话，发版之间的**每一个提交**
+        # 都会红 —— 一道天天红的闸，第二天就没人看了。
+        #
+        # 「同一个版本又发一遍」由 git 自己挡着（tag 已存在时 `git tag` 直接
+        # 失败）。这里管的是另一件事：版本号**倒退**。
+        pass "版本未倒退：${VERSION}（= 最新 tag ${highest}，还没 bump）"
+    elif [ "$newest" = "$VERSION" ]; then
+        pass "版本递增：${VERSION} > ${highest}（${mode}）"
+    else
+        fail "版本倒退了：${VERSION} 小于已有的 ${highest}（${mode}）"
+        printf '      %s产物名与镜像 tag 都从版本号派生 —— 倒退等于同一个名字下换了内容。%s
+'             "$_C_YEL" "$_C_OFF"
+    fi
 fi
 
 # ── 4. 疑似凭据文件既没被跟踪也没被忽略 ───────────────────

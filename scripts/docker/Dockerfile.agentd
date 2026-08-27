@@ -30,7 +30,7 @@
 #
 # 构建与运行底座**必须同一个 debian 代号**：二进制动态链 glibc，
 # 新 glibc 编的东西放进老底座会在启动时报 `GLIBC_2.xx not found`。
-FROM rust:1.97.1-trixie AS builder
+FROM rust:1.98.0-trixie AS builder
 
 WORKDIR /build
 

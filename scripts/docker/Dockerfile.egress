@@ -14,7 +14,7 @@
 #    docker build -f scripts/docker/Dockerfile.egress -t cortex/egress-proxy .
 # ══════════════════════════════════════════════════════════
 
-FROM rust:1.97.1-trixie AS builder
+FROM rust:1.98.0-trixie AS builder
 
 # **静态链 musl，运行阶段才能是 scratch。** 理由见下面运行阶段那段。
 # musl-tools 给的是链接期要的 musl-gcc，rustup 那行给的是交叉标准库。

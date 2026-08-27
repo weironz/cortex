@@ -219,9 +219,25 @@ jobs:
       CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
+      # ⚠️ **钉死版本，不用 `channel: stable`。**
+      #
+      # 这里从前是 `channel: stable`，理由是「CI 与 release 必须用同一个
+      # SDK，否则这道门能全绿而 release 编不过」——那条约束没变，
+      # **变的是满足它的方式**：两条流水线现在读同一个
+      # `app/pubspec.yaml` 的 `environment.flutter`，于是它们必然同版本，
+      # 而且那个版本是仓库里写着的，不是「今天上游发到哪儿」。
+      #
+      # 浮动的代价 2026-08-16 兑现过一次：上游 stable 走到 3.47.0 之后
+      # `dart format` 对 record 字面量的排法变了，于是
+      # `test/history_replay_test.dart` 在**没有任何人改过它**的情况下
+      # 让 CI 变红 —— 红灯与代码改动无关，查的人会先去翻自己那几笔。
+      #
+      # 升级从此是一次**明确的提交**：`flutter upgrade` → 改 pubspec 那一行
+      # → 跑 `just ci`。不兼容当场看得见，而不是某天早上突然红。
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version-file: app/pubspec.yaml
           cache: true
 
       # 这个作业**此前一点 cargo 缓存都没有**，而它要编 `cortex-local`
