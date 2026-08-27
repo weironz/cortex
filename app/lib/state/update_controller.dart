@@ -36,6 +36,7 @@ class UpdateState {
     this.error,
     this.installerPath,
     this.waitingForTurn = false,
+    this.checkedAt,
   });
 
   final UpdatePhase phase;
@@ -49,6 +50,21 @@ class UpdateState {
   /// 下好了，但正在流式回答，安装推迟到这一轮结束。
   final bool waitingForTurn;
 
+  /// **这一次运行里查过更新没有**，`null` = 没查过。
+  ///
+  /// # 为什么单开一位，而不是让界面看 `phase`
+  ///
+  /// [UpdatePhase.idle] 身兼三职：「这份构建不谈更新」「查过了，已是最新」
+  /// 「还没查」。界面把三者都写成「已是最新」—— 而第三种情况下那句话
+  /// **是没有依据的断言**：一个还没查过的 0.1.24 被告知自己是最新的，
+  /// 然后他就关掉了那一页。
+  ///
+  /// 2026-08-28 实测：本机自称 0.1.0、线上摆着 0.1.25，「关于」页照样写
+  /// 「已是最新」——因为 24 小时节流让这次启动跳过了检查。
+  ///
+  /// 这是 CLAUDE.md 约束 2 落在界面上的同一件事：**只能写当下真的成立的**。
+  final DateTime? checkedAt;
+
   bool get hasUpdate =>
       phase == UpdatePhase.available ||
       phase == UpdatePhase.downloading ||
@@ -61,6 +77,7 @@ class UpdateState {
     String? error,
     String? installerPath,
     bool? waitingForTurn,
+    DateTime? checkedAt,
     bool clearProgress = false,
     bool clearError = false,
   }) => UpdateState(
@@ -70,6 +87,7 @@ class UpdateState {
     error: clearError ? null : (error ?? this.error),
     installerPath: installerPath ?? this.installerPath,
     waitingForTurn: waitingForTurn ?? this.waitingForTurn,
+    checkedAt: checkedAt ?? this.checkedAt,
   );
 }
 
@@ -128,7 +146,12 @@ class UpdateController extends Notifier<UpdateState> {
     );
     try {
       final latest = await fetchLatestRelease(_http, feedUrl);
-      if (!ref.mounted || latest == null) return;
+      if (!ref.mounted) return;
+      // 记在**拿到答案之后**，不是发请求之前：连不上时这一位仍然是
+      // 「没查过」，于是界面继续说「还没查过」而不是「已是最新」。
+      // 上面那次 `_kLastCheck` 落盘是节流用的，与「答案可信没有」是两件事
+      state = state.copyWith(checkedAt: DateTime.now());
+      if (latest == null) return;
       if (!isNewer(current: AppConfig.appVersion, latest: latest.version)) {
         return;
       }

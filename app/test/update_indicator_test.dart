@@ -6,6 +6,7 @@ library;
 
 import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/core/update_feed.dart';
+import 'package:cortex_app/features/settings/pages/about_page.dart';
 import 'package:cortex_app/features/shell/widgets/update_indicator.dart';
 import 'package:cortex_app/state/update_controller.dart';
 import 'package:flutter/material.dart';
@@ -54,6 +55,8 @@ Future<void> _pump(WidgetTester tester, [_Fake? fake]) => tester.pumpWidget(
 );
 
 void main() {
+  _aboutSubtitleTests();
+
   testWidgets('没有版本号的构建：图标在，但不带小红点，也不该提示更新', (tester) async {
     // 这个测试进程没有 `--dart-define=CORTEX_APP_VERSION`，也就是
     // 「开发构建」那条路 —— 与用户手上任何一份正式产物都不同
@@ -145,6 +148,47 @@ void main() {
       reason:
           '安装会把应用关掉。正在流式回答时关掉它，那一轮就丢在半路上了 —— '
           '而用户只知道自己点了「更新」，不知道为什么要等',
+    );
+  });
+}
+
+/// **「关于」那一页不许说一句它没验证过的话。**
+///
+/// `UpdatePhase.idle` 同时是「查过了，已是最新」与「还没查」。把后一种也
+/// 写成「已是最新」，一个 0.1.24 的用户打开这一页会被告知自己是最新的 ——
+/// 然后他就关掉了。**而线上摆着 0.1.25。**
+///
+/// 2026-08-28 真机实测撞到的：本机自称 0.1.0、release 页上是 0.1.25，
+/// 这一页写着「已是最新」，因为 24 小时节流让那次启动跳过了检查。
+void _aboutSubtitleTests() {
+  Future<void> pump(WidgetTester tester, UpdateState seed) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [updateControllerProvider.overrideWith(() => _Fake(seed))],
+        child: const MaterialApp(home: Scaffold(body: AboutTile())),
+      ),
+    );
+    await tester.pump();
+  }
+
+  testWidgets('没查过的时候不许说「已是最新」', (tester) async {
+    await pump(tester, const UpdateState());
+    expect(
+      find.text('已是最新'),
+      findsNothing,
+      reason:
+          '还没查过就断言「已是最新」—— 那句话没有任何依据，'
+          '而它恰好长得像一句好消息',
+    );
+    expect(find.text('还没检查过'), findsOneWidget);
+  });
+
+  testWidgets('查过且确实是最新，才说「已是最新」', (tester) async {
+    await pump(tester, UpdateState(checkedAt: DateTime(2026, 8, 28)));
+    expect(
+      find.text('已是最新'),
+      findsOneWidget,
+      reason: '查过了就该说结论 —— 否则用户永远看不到「好了，你是最新的」',
     );
   });
 }

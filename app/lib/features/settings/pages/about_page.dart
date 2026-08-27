@@ -47,6 +47,13 @@ class AboutTile extends ConsumerWidget {
         UpdatePhase.downloading => '正在下载新版本…',
         UpdatePhase.ready => '已下载，即将安装',
         UpdatePhase.failed => '上次更新失败：${update.error}',
+        // ⚠️ **idle 同时是「查过了，已是最新」与「还没查」。**
+        //    把后一种也写成「已是最新」是一句**没有依据的断言** ——
+        //    2026-08-28 实测：本机 0.1.0、线上摆着 0.1.25，这里照样写
+        //    「已是最新」，因为 24 小时节流让那次启动跳过了检查。
+        //    （「这份构建不谈更新」不在这里 —— 上面 `!notifier.enabled`
+        //    那一支已经单独说了，写进来是条走不到的分支。）
+        UpdatePhase.idle when update.checkedAt == null => '还没检查过',
         UpdatePhase.idle => '已是最新',
       };
     }
