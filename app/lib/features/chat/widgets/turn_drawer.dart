@@ -210,7 +210,9 @@ class _ToolRowState extends State<_ToolRow> {
       // 同族），同一个语义在这里换个颜色，读的人要多背一条对照
       icon = scheme.primary;
     } else {
-      icon = scheme.onSurfaceVariant;
+      // 第三级：图标在这一行里只说明「这是一次工具调用」，
+      // 而那件事整行的样式已经说过一遍了
+      icon = theme.cortex.foregroundTertiary;
     }
 
     final path = call.path;
@@ -246,7 +248,11 @@ class _ToolRowState extends State<_ToolRow> {
                       fontFamily: 'JetBrains Mono',
                       fontFamilyFallback: CortexTheme.monoFallback,
                       fontWeight: FontWeight.w600,
-                      color: scheme.onSurface,
+                      // ⚠️ 曾经是 onSurface —— **与回答正文同一档**。
+                      // 工具调用是过程，回答才是结论，两者一样黑的时候
+                      // 眼睛分不出该先读哪个。整块退到第二级，
+                      // 行内的层次改由**字重**承担（见下面参数与结果那两档）
+                      color: scheme.onSurfaceVariant,
                     ),
                   ),
                   // The file a file-tool touched gets the emphasis the rest of
@@ -260,14 +266,25 @@ class _ToolRowState extends State<_ToolRow> {
                       style: labelStyle.copyWith(
                         fontFamily: 'JetBrains Mono',
                         fontFamilyFallback: CortexTheme.monoFallback,
-                        // accentInk（品牌色的文字档）而不是 secondary：
-                        // 路径是这行里要被认出来的对象，用全产品统一的
-                        // 强调文字色；secondary 在这里没有语义，只是 teal
-                        color: theme.cortex.accentInk,
+                        // ⚠️ 曾经是 accentInk（品牌色）。路径确实是这行里
+                        // 要被认出来的对象，但**用彩色去做这件事**会让每一条
+                        // 工具行都挂着一块品牌色，整段过程于是比结论还显眼。
+                        // 色彩只表达动作或含义（见 theme.dart 第一节）——
+                        // 「这是个路径」两者都不是。改由字重区分：
+                        // 路径 w500，参数与结果不加重
+                        color: scheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w500,
                       ),
                     )
                   else if (call.arguments != null)
-                    TextSpan(text: '  ${call.arguments}'),
+                    // 参数是这一行里最不重要的一截：它常是被截断的，
+                    // 读它不如读结果。压到第三级
+                    TextSpan(
+                      text: '  ${call.arguments}',
+                      style: labelStyle.copyWith(
+                        color: theme.cortex.foregroundTertiary,
+                      ),
+                    ),
                   // 工具输出走 ANSI 解析：`shell` 跑的是真终端命令，
                   // cargo / npm / git 一律带色。不解析的话那些序列**原样**
                   // 进界面，用户看到的是 `[32m通过[0m` 而不是一个绿色的
@@ -283,13 +300,13 @@ class _ToolRowState extends State<_ToolRow> {
                       TextSpan(
                         text: '  · ',
                         style: labelStyle.copyWith(
-                          color: scheme.onSurfaceVariant,
+                          color: theme.cortex.foregroundTertiary,
                         ),
                       ),
                       ...parseAnsi(
                         call.result!,
                         base: labelStyle.copyWith(
-                          color: scheme.onSurfaceVariant,
+                          color: theme.cortex.foregroundTertiary,
                         ),
                         // 深色主题要亮档色板 —— 不传的话 cargo 的红字
                         // 在深底上只有 3.5:1，编译报错恰好最读不清
@@ -300,6 +317,19 @@ class _ToolRowState extends State<_ToolRow> {
               ),
             ),
           ),
+          // 「这次改了多少」贴在行尾。
+          //
+          // 它是看到一行 `write_file src/x.rs` 时的第一个问题，而回答它
+          // 此前要先点开箭头、再目测一屏绿红。**这是整行里唯一保留彩色的
+          // 东西** —— 增删是含义不是装饰，而且这两个数字正是用来决定
+          // 「要不要点开」的。GitHub 与 Claude Code 都把它放在文件名旁边
+          if (call.diff case final diff?) ...[
+            const SizedBox(width: 8),
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: DiffStat(diff),
+            ),
+          ],
           // 有东西可展开才给箭头 —— 一个点下去什么都不展开的箭头，
           // 比没有箭头更让人困惑。可展开的两种：改动（diff）、
           // 失败的完整输出（行内被压成一行，真正的报错常在后半段）

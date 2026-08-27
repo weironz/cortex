@@ -142,5 +142,81 @@ void main() {
       final ctx = tester.widget<Text>(find.text(' tail')).style!.color;
       expect(meta, isNot(ctx));
     });
+
+    /// ⚠️ **增删行还要垫一层底色。**
+    ///
+    /// 只染字的话，一行中文改动里 `+` 后面跟的全是全角字，得逐字扫颜色
+    /// 才认得出增删。但两条线索都要留 —— 只垫底色的话，高对比模式与
+    /// 红绿色盲下那点淡色是没有的（上面那条测试盯着文字色那一半）。
+    testWidgets('增删行垫一层淡底色，上下文行不垫', (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: DiffView(_diff))),
+      );
+
+      // `.first` = **最近**的那个祖先。不加的话会连 DiffView 自己那个
+      // 外框 Container 一起匹配到，报「Too many elements」
+      Color? bgOf(String text) => tester
+          .widget<Container>(
+            find
+                .ancestor(of: find.text(text), matching: find.byType(Container))
+                .first,
+          )
+          .color;
+
+      final theme = Theme.of(tester.element(find.byType(DiffView)));
+      expect(
+        bgOf('+new line'),
+        isNotNull,
+        reason: '新增行没有底色的话，一屏中文 diff 只能逐字扫颜色',
+      );
+      expect(bgOf('-old line'), isNotNull);
+      expect(bgOf('+new line'), isNot(bgOf('-old line')), reason: '增删同色等于没有底色');
+      expect(bgOf(' keep this'), isNull, reason: '上下文行也垫底色的话，整块就是一片色，增删又淹没了');
+      // 很淡的一层 —— 浓了的话一屏全是色块，又回到「看不出重点」
+      expect(bgOf('+new line')!.a, lessThan(0.25), reason: '底色是给余光用的，不是给眼睛读的');
+      expect(
+        bgOf('+new line')!.r,
+        closeTo(theme.cortex.success.r, 0.001),
+        reason: '底色要与文字色同源，各配各的迟早漂成两种绿',
+      );
+    });
+  });
+
+  group('DiffStat', () {
+    /// 「这次改动大不大」是看到一行 `write_file src/x.rs` 时的第一个问题，
+    /// 而回答它此前要先点开箭头、再目测一屏绿红。
+    testWidgets('把增删数摆在行上，两个数字各用各的颜色', (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: DiffStat(_diff))),
+      );
+
+      final spans = <InlineSpan>[];
+      tester.widget<RichText>(find.byType(RichText)).text.visitChildren((s) {
+        spans.add(s);
+        return true;
+      });
+      final texts = [
+        for (final s in spans)
+          if (s is TextSpan && s.text != null) s.text!,
+      ];
+      expect(texts, contains('+1'));
+      expect(
+        texts,
+        contains('−1'),
+        reason: '用 U+2212 减号而不是连字符 —— 等宽字体里它才与 + 对得齐',
+      );
+
+      final theme = Theme.of(tester.element(find.byType(DiffStat)));
+      Color colorOf(String t) =>
+          (spans.firstWhere((s) => s is TextSpan && s.text == t) as TextSpan)
+              .style!
+              .color!;
+      expect(colorOf('+1'), theme.cortex.success);
+      expect(
+        colorOf('−1'),
+        theme.colorScheme.error,
+        reason: '两个数字一个颜色的话，还得读加减号才知道哪个是哪个',
+      );
+    });
   });
 }
