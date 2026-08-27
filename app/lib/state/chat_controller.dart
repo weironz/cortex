@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_exception.dart';
@@ -790,10 +791,38 @@ class ChatController extends Notifier<ChatState> {
   }
 
   /// Fetches the **newest** page of a session.
+  ///
+  /// # ⚠️ 尾部是一轮**失败**时整个不重载
+  ///
+  /// 这个函数会拿服务端那份**整份替换**本地的 messages。绝大多数时候这是
+  /// 对的（服务端是会话的权威），但有一种东西服务端**永远不会有**：
+  /// 一轮失败的对话。
+  ///
+  /// 具体地：`/chat` 回 409（会话钉在一台关着的机器上）时，那个请求根本
+  /// 没到任何 worker，于是**用户刚敲的那句话与那条报错都没有 episode**。
+  /// 而同步信号一来（`sync_controller` 收到 bump 就重载活跃会话），
+  /// 替换把两者一起抹掉 —— 用户看到的是「我刚发的话没了，报错也没了」。
+  ///
+  /// 那边本来有一道守卫（`streaming?.sessionId != active`），护的是**在飞**
+  /// 的那一轮；而失败的一轮已经把 streaming 清空了，护不到。2026-08-27
+  /// 实测复现：`[user, assistant/err]` 重载之后变成 `[]`。
+  ///
+  /// 判据**直接推导**（最后一条带不带 error），不新存一个字段：存下来的
+  /// 状态迟早与真相漂开，而这里推导得出来。
+  ///
+  /// 代价写在明处：这条会话在用户再发一句话之前**不会跟着别的设备刷新**。
+  /// 换来的是「他刚敲的那句话还在屏幕上」—— 两者之中后者重得多。
+  /// 用户下一次 `send` 会把尾部换成一条正常的用户消息，重载随即恢复。
   Future<void> loadTranscript(String id) async {
     if (!ref.mounted) return;
     final current = state.transcripts[id] ?? const Transcript();
     if (current.loading) return;
+    if (current.messages.lastOrNull?.error != null) {
+      // debug 不 warn：这是正常的守卫命中，不是故障。而每次 bump 一条 WARN
+      // 会把日志淹掉
+      debugPrint('[chat] 尾部是一轮失败，跳过重载（$id）—— 那一轮服务端没有 episode');
+      return;
+    }
     final seq = _requestSeq;
     _putTranscript(id, current.copyWith(loading: true, error: null));
 

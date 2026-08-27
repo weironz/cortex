@@ -191,12 +191,7 @@ void main() {
         '流式结束',
       );
 
-      final t = container.read(chatControllerProvider).activeTranscript;
-      // ignore: avoid_print
-      print(
-        'TRANSCRIPT: ${t.map((m) => "${m.role}/err=${m.error != null}").toList()}',
-      );
-      final last = t.last;
+      final last = container.read(chatControllerProvider).activeTranscript.last;
       expect(last.error, isNotNull, reason: '这一轮该是失败的');
       expect(
         last.errorIsDeterministic,
@@ -238,6 +233,128 @@ void main() {
         last.errorIsDeterministic,
         isFalse,
         reason: '一律点亮的话，配额/超时这些真能靠换模型走通的失败也没了出路',
+      );
+    });
+  });
+
+  /// ⚠️ **一轮失败之后，一次同步重载不许把它抹掉。**
+  ///
+  /// `loadTranscript` 拿服务端那份**整份替换**本地 messages。而 `/chat` 回
+  /// 409 时那个请求根本没到任何 worker —— **用户刚敲的那句话与那条报错
+  /// 都没有 episode**。同步信号一来（`sync_controller` 收到 bump 就重载
+  /// 活跃会话），替换把两者一起抹掉：用户看到「我刚发的话没了，报错也没了」。
+  ///
+  /// 那边本来那道守卫（`streaming?.sessionId != active`）护的是**在飞**的
+  /// 一轮，而失败的一轮已经把 streaming 清空了，护不到。
+  ///
+  /// 2026-08-27 实测复现：`[user, assistant/err]` 重载之后变成 `[]`。
+  group('失败的一轮不会被同步重载抹掉', () {
+    test('重载之后：那句话和那条报错都还在', () async {
+      final container = ProviderContainer(
+        overrides: [
+          appConfigProvider.overrideWith(_MockConfig.new),
+          cortexApiProvider.overrideWithValue(
+            _FailingApi(
+              const CortexApiException(
+                '这个会话绑在 WILLOPTPC 上的一个目录里。',
+                statusCode: 409,
+                retryable: false,
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.listen(
+        chatControllerProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+
+      final ctrl = container.read(chatControllerProvider.notifier);
+      await _untilTrue(
+        () => !container.read(chatControllerProvider).sessionsLoading,
+        '会话列表',
+      );
+      await ctrl.send('这句话不能消失');
+      await _untilTrue(
+        () => container.read(chatControllerProvider).streaming == null,
+        '流式结束',
+      );
+
+      final before = container.read(chatControllerProvider).activeTranscript;
+      expect(before.last.error, isNotNull, reason: '这一轮该是失败的');
+      expect(
+        before.any((m) => m.text == '这句话不能消失'),
+        isTrue,
+        reason: '前提：用户那句话此刻在屏幕上',
+      );
+
+      // 模拟 sync_controller 收到 bump 之后那次重载
+      await ctrl.loadTranscript(
+        container.read(chatControllerProvider).activeSessionId!,
+      );
+
+      final after = container.read(chatControllerProvider).activeTranscript;
+      expect(
+        after.any((m) => m.text == '这句话不能消失'),
+        isTrue,
+        reason:
+            '**用户刚敲的那句话被一次同步重载抹掉了** —— 而它在服务端'
+            '没有 episode（409 根本没到 worker），抹掉就是彻底没了',
+      );
+      expect(
+        after.any((m) => m.error != null),
+        isTrue,
+        reason:
+            '那条报错也不能跟着消失 —— 否则屏幕上什么都没发生过，'
+            '而用户明明按了发送',
+      );
+    });
+
+    /// ⚠️ **反方向：正常的会话照旧重载。** 只测「失败时不重载」的话，
+    /// 一刀切掉整个 `loadTranscript` 也能让上面那条绿 —— 而那会把跨设备
+    /// 同步整个废掉（`sync_controller` 那段注释记着的正是这个缺口：
+    /// 「侧栏已经变成刚刚，对话却停在几分钟前」）。
+    test('尾部正常时照旧重载', () async {
+      final container = ProviderContainer(
+        overrides: [appConfigProvider.overrideWith(_MockConfig.new)],
+      );
+      addTearDown(container.dispose);
+      container.listen(
+        chatControllerProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+
+      final ctrl = container.read(chatControllerProvider.notifier);
+      await _untilTrue(
+        () => !container.read(chatControllerProvider).sessionsLoading,
+        '会话列表',
+      );
+      // 用一个**还没被加载过**的会话：活跃那个的初次加载此刻可能还在飞，
+      // 而 `loadTranscript` 开头有一道 `if (current.loading) return` ——
+      // 撞上它的话这条测试测的是那个竞争，不是守卫
+      final other = container
+          .read(chatControllerProvider)
+          .sessions
+          .firstWhere(
+            (x) =>
+                x.id != container.read(chatControllerProvider).activeSessionId,
+          );
+      await ctrl.loadTranscript(other.id);
+
+      // 判据是 `loadedFromServer` 而不是「消息非空」：后者依赖 mock 里那个
+      // 会话恰好有历史。守卫命中时这一位不会被置真，正好分得开两者。
+      expect(
+        container
+            .read(chatControllerProvider)
+            .transcripts[other.id]
+            ?.loadedFromServer,
+        isTrue,
+        reason:
+            '没有失败的一轮时，重载必须照常发生（真的去服务端拉过）—— '
+            '否则跨设备同步整个没了',
       );
     });
   });
