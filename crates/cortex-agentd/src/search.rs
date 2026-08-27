@@ -71,6 +71,39 @@ pub fn configured() -> bool {
     api_key().is_some()
 }
 
+/// 按这一家的规矩把请求发出去。
+///
+/// # 为什么发送这一步也要共用
+///
+/// 四家有三种认证方式、两种发法（POST JSON / GET query）。在
+/// `search` 与 `fetch` 各写一遍的话，加第五家时漏改一处不会报错 ——
+/// 症状是「搜索能用，抓取 401」。
+pub(crate) async fn send(
+    st: &AgentState,
+    provider: crate::search_provider::Provider,
+    key: &str,
+    wire: crate::search_provider::Wire,
+) -> Result<reqwest::Response, reqwest::Error> {
+    use crate::search_provider::{Auth, Wire};
+    // 打的是哪个地址要记一句。端点是用户可改的（自建/中转），而配错时
+    // 上游回的 404 里没有一个字提到「你把 Exa 的 key 发到了 Tavily 的
+    // 地址上」—— 那种排查全靠这一行。
+    // ⚠️ **只记 URL，绝不记 key**：它在请求体或请求头里，而日志会被
+    // 打包发给我们看
+    tracing::debug!(provider = provider.id(), url = wire.url(), "联网检索：出网");
+    let mut req = match wire {
+        Wire::Post { url, body } => st.http().post(url).json(&body),
+        Wire::Get { url, query } => st.http().get(url).query(&query),
+    };
+    req = match provider.auth() {
+        // key 已经在请求体里了，不再加头
+        Auth::InBody => req,
+        Auth::Bearer => req.bearer_auth(key),
+        Auth::Header(name) => req.header(name, key),
+    };
+    req.send().await
+}
+
 /// 这一次回几条。
 ///
 /// 没说就给上限；说了个荒唐数字（0、负数、99）就夹回区间 —— **不报错**：
@@ -140,7 +173,12 @@ pub(crate) fn resolve_base(raw: Option<&str>) -> String {
 /// 而症状是用户照着一个不存在的变量名去改 `.env`。
 pub(crate) fn not_configured_message() -> String {
     format!(
-        "这个部署没有配联网检索的 key。告诉用户：在服务端的 .env 里设          {SEARCH_KEY_ENV}（Tavily 或兼容它的服务）之后重启即可。"
+        concat!(
+            "这个部署没有配联网检索的 key。告诉用户两条路：",
+            "去 设置 → 联网检索 选一家（Tavily / 博查 / Exa / Brave）并填自己的 key；",
+            "或者在服务端的 .env 里设 {} 之后重启（那一档走 Tavily）。"
+        ),
+        SEARCH_KEY_ENV
     )
 }
 
@@ -231,21 +269,26 @@ pub async fn search(
         time_range,
         depth: &prefs.depth,
         exclude_domains: &prefs.exclude_domains,
+        // 支持上游截断的那几家（Exa）据此少传一截 —— 0（不截）时给一个
+        // 保守的上限，不然它会把整页正文都塞回来
+        text_chars: if prefs.cutoff_limit > 0 {
+            prefs.cutoff_limit
+        } else {
+            4_000
+        },
+        // ⚠️ 从这里传进去，不在 provider 层里取 —— 那样 Exa 的
+        // 「一周前是哪天」永远测不了。见 `Query::now`
+        now: chrono::Utc::now(),
     };
 
-    let mut request = st
-        .http()
-        .post(cfg.provider.search_url(&cfg.base))
-        .json(&cfg.provider.body(&cfg.key, &q));
-    // 各家认证方式不同 —— 统一成一种要么发一个它不看的头，要么漏掉认证
-    if cfg.provider.uses_bearer() {
-        request = request.bearer_auth(&cfg.key);
-    }
-
-    let resp = request
-        .send()
-        .await
-        .map_err(|e| ApiError::upstream(format!("搜索请求发不出去：{e}")))?;
+    let resp = send(
+        &st,
+        cfg.provider,
+        &cfg.key,
+        cfg.provider.search_wire(&cfg.base, &cfg.key, &q),
+    )
+    .await
+    .map_err(|e| ApiError::upstream(format!("搜索请求发不出去：{e}")))?;
 
     if !resp.status().is_success() {
         let code = resp.status();

@@ -94,6 +94,18 @@ class MockCortexApi
         defaultBase: 'https://api.bochaai.com',
         canFetch: false,
       ),
+      SearchProviderInfo(
+        id: 'exa',
+        name: 'Exa',
+        defaultBase: 'https://api.exa.ai',
+        canFetch: true,
+      ),
+      SearchProviderInfo(
+        id: 'brave',
+        name: 'Brave',
+        defaultBase: 'https://api.search.brave.com',
+        canFetch: false,
+      ),
     ],
   );
 

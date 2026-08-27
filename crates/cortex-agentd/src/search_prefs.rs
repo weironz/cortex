@@ -178,6 +178,12 @@ impl PrefsPatch {
     /// 约束名（`search_prefs_depth_known`），用户看不懂。在这里拦是为了
     /// 说人话。**两道都要有**：只靠这一道的话，一次手改数据库就能让每轮
     /// 搜索都在上游那侧失败。
+    ///
+    /// ⚠️ 服务商那一列是个例外：**表上故意没有 CHECK 约束**，只有这一道。
+    /// 加了的话，接第五家时要写一条迁移去改约束 —— 而已经跑过的迁移
+    /// 改不得（改一个字符，校验和就对不上，服务下次启动直接拒绝跑），
+    /// 于是那条新迁移漏写的症状是「界面上选得了、保存时 500」。
+    /// 认不认得出由 `Provider::from_id` 判，那是唯一一处知道全集的地方。
     pub fn validated(&self) -> Result<(), ApiError> {
         if let Some(p) = &self.provider
             && !p.trim().is_empty()
@@ -486,13 +492,13 @@ mod tests {
     #[test]
     fn 不认识的服务商被拦下并列出支持的() {
         let patch = PrefsPatch {
-            provider: Some("exa".into()),
+            provider: Some("perplexity".into()),
             ..Default::default()
         };
         let err = patch.validated().expect_err("该被拦下");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("tavily") && msg.contains("bocha"),
+            msg.contains("tavily") && msg.contains("brave"),
             "要列出支持哪几家：{msg}"
         );
     }

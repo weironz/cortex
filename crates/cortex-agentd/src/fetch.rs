@@ -14,9 +14,14 @@
 //!    导航、侧栏、页脚会把预算吃掉。
 //! 3. **JS 渲染的页面**根本抓不到。
 //!
-//! 而 Tavily 的 `/extract` 三件全做了，且**我们已经有它的 key 与那条路**
-//! （`web_search` 用的是同一把）。走它等于：零新依赖、零 SSRF 面
-//! （我们打的还是那个固定上游），提取质量还更好。
+//! 而 Tavily 的 `/extract`（以及 Exa 的 `/contents`）三件全做了，且
+//! **我们已经有它的 key 与那条路**（`web_search` 用的是同一把）。走它等于：
+//! 零新依赖、零 SSRF 面（我们打的还是那个固定上游），提取质量还更好。
+//!
+//! ⚠️ **不是每家搜索服务商都抓得了正文**（博查与 Brave 只做搜索）。
+//! 请求怎么发、正文藏在哪个字段，都在 `search_provider` 那一层 ——
+//! 在这里再写一遍的话，加第五家时漏改一处不会报错，症状是「搜索能用、
+//! 抓取回来是空的」。
 //!
 //! # 实测决定的三个默认值（2026-08-27）
 //!
@@ -141,10 +146,7 @@ pub async fn fetch(
     // 界面上那个「URL 获取服务商」下拉框只列 `can_fetch` 为真的几家，
     // 所以正常路径上走不到这里 —— 这一条挡的是「搜索换了家、抓取没跟上」。
     if !cfg.provider.can_fetch() {
-        return Err(ApiError::unsupported(format!(
-            "你选的搜索服务商（{}）不提供网页抓取。             去 设置 → 联网检索 换一个支持抓取的，或者告诉用户这条路现在用不了。",
-            cfg.provider.display_name()
-        )));
+        return Err(ApiError::unsupported(no_fetch_message(cfg.provider)));
     }
 
     let url = req.url.trim();
@@ -152,18 +154,16 @@ pub async fn fetch(
         return Err(ApiError::bad_request("要抓的链接不能为空"));
     }
 
-    let resp = st
-        .http()
-        .post(format!("{}/extract", cfg.base))
-        .json(&serde_json::json!({
-            "api_key": cfg.key,
-            "urls": url,
-            "format": "markdown",
-            // 见模块头那张表：这三个默认值都是实测定的
-            "extract_depth": "basic",
-            "timeout": TIMEOUT_SECS,
-        }))
-        .send()
+    let Some(wire) = cfg
+        .provider
+        .fetch_wire(&cfg.base, &cfg.key, url, TIMEOUT_SECS)
+    else {
+        // 上面那道闸已经挡过一次；这里是同一件事的第二处判断，
+        // 两处必须一致（`search_provider` 里有一条测试钉着）
+        return Err(ApiError::unsupported(no_fetch_message(cfg.provider)));
+    };
+
+    let resp = crate::search::send(&st, cfg.provider, &cfg.key, wire)
         .await
         .map_err(|e| ApiError::upstream(format!("抓取请求发不出去：{e}")))?;
 
@@ -175,64 +175,51 @@ pub async fn fetch(
         )));
     }
 
-    let parsed: Upstream = resp
+    let parsed: serde_json::Value = resp
         .json()
         .await
         .map_err(|e| ApiError::upstream(format!("解析抓取结果失败：{e}")))?;
 
-    let Some(hit) = parsed.results.into_iter().next() else {
-        // 抓不到与「抓到了但是空的」在用户那儿是同一件事，但**原因要说清**：
-        // 上游会在 `failed_results` 里给理由（403、超时、robots），
-        // 而一句「抓取失败」会让模型换个写法重试三次
-        let why = parsed
-            .failed_results
-            .into_iter()
-            .next()
-            .map_or_else(|| "上游没说原因".to_owned(), |f| f.error);
-        return Err(ApiError::upstream(format!(
-            "抓不到 {url}：{why}。\
-             很多站点会挡住自动抓取（付费墙、反爬、robots）—— \
-             告诉用户这一条打不开，别换个写法重试。"
-        )));
-    };
+    // 抓不到与「抓到了但是空的」在用户那儿是同一件事，但**原因要说清**：
+    // 上游会给理由（403、超时、robots），而一句「抓取失败」会让模型
+    // 换个写法重试三次
+    let page = cfg.provider.parse_page(&parsed).map_err(|why| {
+        ApiError::upstream(format!(
+            concat!(
+                "抓不到 {}：{}。",
+                "很多站点会挡住自动抓取（付费墙、反爬、robots）——",
+                "告诉用户这一条打不开，别换个写法重试。"
+            ),
+            url, why
+        ))
+    })?;
 
     Ok(Json(slice_page(
-        &hit.url,
-        &hit.title,
-        &hit.raw_content,
+        &page.url,
+        &page.title,
+        &page.content,
         req.offset.unwrap_or(0),
     )))
 }
 
-/// 上游回的形状。
+/// 选了一家不抓正文的服务商时说什么。
 ///
-/// ⚠️ 正文的字段名是 **`raw_content`**，不是 `content`。上游的 REST 文档
-/// 里写的是 `content`，而实际返回的是 `raw_content`（2026-08-27 实测）。
-/// 照文档写的话这里恒为空串，而**不会有任何报错** —— 模型拿到一个抓成功
-/// 但正文是空的页面。测试里钉住了这个字段名。
-#[derive(Deserialize, Default)]
-struct Upstream {
-    #[serde(default)]
-    results: Vec<UpstreamHit>,
-    /// 抓不到的那些，带原因。
-    #[serde(default)]
-    failed_results: Vec<UpstreamFailure>,
-}
-
-#[derive(Deserialize)]
-struct UpstreamHit {
-    #[serde(default)]
-    url: String,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    raw_content: String,
-}
-
-#[derive(Deserialize)]
-struct UpstreamFailure {
-    #[serde(default)]
-    error: String,
+/// 这句话是**给模型看的**：它要知道「这不是坏了，是配置如此」，
+/// 并且能把「去哪儿改」转达给用户。一句「不支持」会让它重试。
+///
+/// ⚠️ **用 `concat!` 拼，不要写反斜杠续行。** 反斜杠续行在源码里是对的
+/// （Rust 会吃掉换行与缩进），但 `cargo fmt` 会把它压成一行**并把缩进
+/// 留成字面空格** —— 于是模型收到的是「不提供网页抓取。         去 设置」。
+/// 这个仓库里已有的多行工具描述几乎每一条都带着这种空格串。
+fn no_fetch_message(p: crate::search_provider::Provider) -> String {
+    format!(
+        concat!(
+            "你选的搜索服务商（{}）不提供网页抓取。",
+            "去 设置 → 联网检索 换一个支持抓取的（Tavily、Exa），",
+            "或者告诉用户这条路现在用不了。"
+        ),
+        p.display_name()
+    )
 }
 
 #[cfg(test)]
@@ -323,21 +310,21 @@ mod tests {
     /// （2026-08-27 实测）。照文档写的话这里恒为空串，而**不会有任何
     /// 报错** —— 模型拿到一个「抓成功但正文是空的」页面，然后开始编。
     #[test]
-    fn 上游正文字段是_raw_content_照文档写会恒为空() {
-        let raw = r#"{"results":[{"url":"https://x/","title":"标题","raw_content":"正文在这儿"}]}"#;
-        let u: Upstream = serde_json::from_str(raw).expect("解析");
-        assert_eq!(
-            u.results[0].raw_content, "正文在这儿",
-            "字段名对不上的话，正文恒为空且没有任何报错"
-        );
-
-        // 文档里那个名字**不该**被认成正文
-        let doc_shape =
-            r#"{"results":[{"url":"https://x/","title":"标题","content":"正文在这儿"}]}"#;
-        let u2: Upstream = serde_json::from_str(doc_shape).expect("多余的键要忽略掉");
+    fn 抓不了正文的那几家_这条路要说清而不是回落() {
+        use crate::search_provider::Provider;
+        let msg = no_fetch_message(Provider::Bocha);
+        assert!(msg.contains("博查"), "要说清是哪一家，实际：{msg}");
         assert!(
-            u2.results[0].raw_content.is_empty(),
-            "这一条是提醒：哪天上游改成 content，这里会静默变空"
+            msg.contains("设置") && msg.contains("Tavily"),
+            "只说「不支持」等于把问题丢回给模型，它会重试；             要说清去哪儿改、换成哪家，实际：{msg}"
+        );
+        // ⚠️ 悄悄回落到 Tavily 是错的：用户未必配了它的 key，
+        // 而就算配了，用另一家的额度做他没要求的事也不该
+        assert!(
+            Provider::Bocha
+                .fetch_wire("https://x", "k", "https://a/", 15.0)
+                .is_none(),
+            "回落的话，这里会拼出一个打 Tavily 的请求"
         );
     }
 
@@ -371,13 +358,22 @@ mod tests {
         );
     }
 
-    /// 抓不到时上游在 `failed_results` 里给原因，那句话要带到模型眼前。
+    /// 抓不到时上游给的原因，那句话要带到模型眼前。
+    ///
+    /// 正文字段名那条（`raw_content` 而不是文档里的 `content`）与这一条
+    /// 一起搬到了 `search_provider` —— 解析在那儿，测试就该在那儿，
+    /// 否则改了解析而这边的测试仍然绿。
     #[test]
-    fn 抓不到时上游的原因解析得出来() {
-        let raw =
-            r#"{"results":[],"failed_results":[{"url":"https://x/","error":"403 Forbidden"}]}"#;
-        let u: Upstream = serde_json::from_str(raw).expect("解析");
-        assert!(u.results.is_empty());
-        assert_eq!(u.failed_results[0].error, "403 Forbidden");
+    fn 抓不到时上游的原因带得出来() {
+        let raw = serde_json::json!({
+            "results": [],
+            "failed_results": [{"url": "https://x/", "error": "403 Forbidden"}],
+        });
+        assert_eq!(
+            crate::search_provider::Provider::Tavily
+                .parse_page(&raw)
+                .expect_err("该是错"),
+            "403 Forbidden"
+        );
     }
 }
