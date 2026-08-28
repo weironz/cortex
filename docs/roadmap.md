@@ -314,7 +314,7 @@ SID 派生、工作区授权、`SECURITY_CAPABILITIES` + helper 进程
 |---|---|---|
 | a | **`git` 在 Windows 沙箱里用不了**，`dir` / `vol` 也不行 | 根因是 AppContainer 打不开卷根。唯一的解法是在 `C:\` / `D:\` 上给容器 SID 一条读+执行的 ACE，**那要一次管理员**。而「不要管理员」正是当初选 AppContainer 而不是 codex 那条独立用户路的理由 —— 所以这是把当初的取舍重新摆上桌，**要人决定**。在决定之前，一个编码 agent 在 Windows 上跑不了 git |
 | b | **CI 上一条 Windows 测试都不跑** —— `ci.yml` 的 windows-latest 只编译 | 加一条测试腿要 CI 分钟数。在此之前，改 `sandbox/windows.rs` 必须本机跑一遍 |
-| c | 首次绑定一个**已经建过**的大仓库要等一两分钟，期间没有进度 | `TreeSetNamedSecurityInfoW` 带进度回调，是这一步的解法 |
+| c | 首次绑定一个**已经建过**的大仓库要等一两分钟 | 现在**至少有一行日志说得清**（只在真的要写时打，靠 `grant_to_container` 的回值分辨）。真正的进度条要 `TreeSetNamedSecurityInfoW` 的回调，而进度往哪儿送在当前这条路上还没有出口 —— `prepare` 回的是一个待起的 `Command`，不是一条能追加文字的结果 |
 | d | ~~`%TEMP%` 没给~~ | **不用给**：AppContainer 自动把 `%TEMP%` 重定向到容器私有目录（`…\Packages\<容器>\AC\Temp`），实测可写。上一版把它列成待办是想当然 |
 | e | `NetworkPolicy::Allowed` 在这一层是**全开**，没有白名单 | Linux 侧走 `cortex-egress-proxy` 的 CONNECT 白名单。要对齐，得让沙箱里的进程走代理 —— 而 AppContainer 没有「只许连这个代理」这一档，只能靠约定 |
 | f | 配置失败时**不能让用户在不知情的情况下从「有沙箱」掉回「逐条确认」** | 现行是 `capability()` 如实报，但这条纪律还没有测试守着 |

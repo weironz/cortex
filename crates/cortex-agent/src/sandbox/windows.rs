@@ -290,7 +290,7 @@ unsafe fn already_granted(dacl: *const ACL, sid: *mut c_void) -> bool {
     false
 }
 
-unsafe fn grant_to_container(dir: &Path, sid: *mut c_void) -> Result<()> {
+unsafe fn grant_to_container(dir: &Path, sid: *mut c_void) -> Result<bool> {
     use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
 
     let mut path = wide(&dir.display().to_string());
@@ -317,7 +317,7 @@ unsafe fn grant_to_container(dir: &Path, sid: *mut c_void) -> Result<()> {
 
     // 已经授过就直接回 —— 见 `already_granted`：省掉的是一整趟子树遍历
     if already_granted(old_dacl, sid) {
-        return Ok(());
+        return Ok(false);
     }
 
     let ea = EXPLICIT_ACCESS_W {
@@ -356,7 +356,7 @@ unsafe fn grant_to_container(dir: &Path, sid: *mut c_void) -> Result<()> {
             dir.display()
         )));
     }
-    Ok(())
+    Ok(true)
 }
 
 /// 探测：这台机器上 AppContainer 能不能用。
@@ -636,9 +636,24 @@ fn grant_workspace(policy: &SandboxPolicy, cwd: &Path) -> Result<()> {
         let sid = container_sid()?;
         let mut err = None;
         for dir in &dirs {
-            if let Err(e) = grant_to_container(Path::new(dir), sid) {
-                err = Some(e);
-                break;
+            // ⚠️ **这里可能要几分钟。**
+            //
+            // 只在第一次绑定一个**已经建过**的大仓库时发生（实测 793k 文件
+            // 的仓库 153.8 秒），之后 `already_granted` 直接短路。但那几分钟
+            // 里外面看不到任何动静 —— 模型在等一条 `type a.txt`，用户在等
+            // 模型。所以真的要写的时候吼一声，别让它成为一段无法解释的停顿。
+            let t = std::time::Instant::now();
+            match grant_to_container(Path::new(dir), sid) {
+                Ok(true) => tracing::info!(
+                    dir = %dir,
+                    elapsed_ms = t.elapsed().as_millis(),
+                    "首次为工作区授权沙箱访问（这一步跨重启只做一次；                     大仓库要几分钟，因为 Windows 会把权限铺满整棵子树）"
+                ),
+                Ok(false) => {}
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
             }
         }
         FreeSid(sid);
@@ -883,11 +898,18 @@ mod tests {
                 !read_dacl_and_check(dir.path(), sid),
                 "刚建的目录不该被认为已经授过"
             );
-            grant_to_container(dir.path(), sid).expect("授得下去");
+            let 第一次 = grant_to_container(dir.path(), sid).expect("授得下去");
+            assert!(第一次, "第一次必须真的写下去");
+
             assert!(
                 read_dacl_and_check(dir.path(), sid),
                 "授过之后必须认得出来，否则每条命令都要重铺一遍整棵子树"
             );
+            // 回值就是「这次是不是真的写了」—— 那条「首次授权可能要几分钟」
+            // 的日志靠它分辨该不该吼。恒真的话每条命令都吼一遍，
+            // 而那种日志三天之内就会被人当噪音略过
+            let 第二次 = grant_to_container(dir.path(), sid).expect("再授一次不该失败");
+            assert!(!第二次, "第二次不该再写 —— 那意味着又铺了一遍整棵子树");
             FreeSid(sid);
         }
     }
