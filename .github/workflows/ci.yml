@@ -347,8 +347,9 @@ jobs:
       # 只跑这两个目标，不跑整个 workspace：这条腿的作用是**守住边界**，
       # 不是第二遍跑全量测试（那要再花十几分钟，而 ubuntu 那边已经跑过了）。
       #
-      # `sandbox_escape_windows` 是 `harness = false` 的：那个测试二进制
-      # 自己就是沙箱 helper，所以它验的必然是刚编出来的这份代码。
+      # 两个后端各有一份逃逸测试，**都要跑**：漏掉哪个，那个后端的边界就
+      # 只剩开发者本机验证过一次。两份都是 `harness = false` 的——那个测试
+      # 二进制自己就是沙箱 helper，所以验的必然是刚编出来的这份代码。
       #
       # 带 `--target` 的理由与上面那条 build 一样：不带的话输出目录不同，
       # 依赖树要重编一遍。
@@ -357,3 +358,4 @@ jobs:
         run: |
           cargo test -p cortex-agent --target x86_64-pc-windows-msvc --lib sandbox
           cargo test -p cortex-agent --target x86_64-pc-windows-msvc --test sandbox_escape_windows
+          cargo test -p cortex-agent --target x86_64-pc-windows-msvc --test sandbox_restricted_windows
