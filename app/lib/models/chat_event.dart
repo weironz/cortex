@@ -181,6 +181,24 @@ final class ChatErrorEvent extends ChatEvent {
   final String message;
 }
 
+/// 服务端还活着 —— SSE 的 keep-alive 注释帧（`: ping`，每 15 秒一次）。
+///
+/// # 为什么它要一路走到 controller
+///
+/// 线上没有这个 `type`，[ChatEvent.fromJson] 永远不会造出它；它由
+/// `HttpCortexApi._events` 就地合成。这是有意的：**判活的证据只有它**。
+///
+/// 数据帧之间可以合法地静默很久 —— agent 在跑一条十分钟的命令、或者这一轮
+/// 排在别人后面（[ChatQueuedEvent]）—— 所以「多久没有 delta」判不了死活，
+/// 拿它当判据只会误杀正在干活的那一轮。心跳不一样：它是「服务端确实还在
+/// 往这条连接上写字节」的直接证据，停了就是真停了。
+///
+/// 不进转录、不改任何状态，唯一的作用是把 `ChatController` 那条空转看门狗
+/// 的表拨回去。
+final class ChatHeartbeatEvent extends ChatEvent {
+  const ChatHeartbeatEvent();
+}
+
 /// Forward-compatibility escape hatch.
 final class ChatUnknownEvent extends ChatEvent {
   const ChatUnknownEvent(this.type, this.raw);

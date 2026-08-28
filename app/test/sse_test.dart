@@ -65,6 +65,50 @@ void main() {
     expect(events.single.data, 'tail');
   });
 
+  group('keepAlive: true —— 判活的那条路', () {
+    test('心跳浮上来，且带着「我不是数据」的标记', () async {
+      final events = await decodeSse(
+        chunks([':ping\n\n', 'data: {"x":1}\n\n', ': another\n\n']),
+        keepAlive: true,
+      ).toList();
+
+      expect(
+        events.map((e) => e.isKeepAlive).toList(),
+        [true, false, true],
+        reason:
+            '心跳与数据必须分得开 —— 混起来的话，判活会把一条 `: ping` '
+            '当成模型回了一个字',
+      );
+      expect(
+        events.where((e) => !e.isKeepAlive).single.data,
+        '{"x":1}',
+        reason: '打开判活不该改变数据帧本身的解析',
+      );
+      expect(
+        events.where((e) => e.isKeepAlive).every((e) => e.data.isEmpty),
+        isTrue,
+        reason: '心跳没有 data —— 有的话调用方那句 `data.isEmpty` 就漏它过去了',
+      );
+    });
+
+    test('默认仍然一个心跳都不发 —— 别的调用方（导入）不受影响', () async {
+      final events = await decodeSse(chunks([':ping\n\n'])).toList();
+      expect(events, isEmpty, reason: '不显式要的话，注释按规范就该被丢掉');
+    });
+
+    test('夹在一帧中间的心跳不会吃掉那一帧', () async {
+      // 规范允许注释出现在帧内部。心跳会排到那一帧**前面**（它是立刻发的），
+      // 判活不在乎顺序 —— 但数据一个字节都不能少
+      final events = await decodeSse(
+        chunks(['data: a\n:ping\ndata: b\n\n']),
+        keepAlive: true,
+      ).toList();
+
+      expect(events.map((e) => e.isKeepAlive).toList(), [true, false]);
+      expect(events.last.data, 'a\nb');
+    });
+  });
+
   test('carries multi-byte UTF-8 split across chunks', () async {
     // '记' is 3 bytes; splitting it must not produce a replacement char.
     final bytes = utf8.encode('data: {"t":"记忆"}\n\n');

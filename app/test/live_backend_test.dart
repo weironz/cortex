@@ -172,6 +172,11 @@ void main() {
         // 静静接住比 `ChatUnknownEvent` 那条 `fail` 好
         case ChatQueuedEvent():
           break;
+        // 心跳（`: ping`）。**不断言它一定出现**：这一轮多半十几秒就跑完，
+        // 而服务端 15 秒才发一条 —— 要求它到场会做出一条看运气的红。
+        // 它自己的契约由 stream_idle_test 守着
+        case ChatHeartbeatEvent():
+          break;
         case ChatDoneEvent():
           break;
         case ChatErrorEvent(:final message):
