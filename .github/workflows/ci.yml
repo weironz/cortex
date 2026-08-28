@@ -336,3 +336,24 @@ jobs:
       - name: cargo build --release（三元组对齐发版）
         if: matrix.os == 'windows-latest'
         run: cargo build --workspace --release --target x86_64-pc-windows-msvc
+
+      # ⚠️ **这是 Windows 沙箱唯一的 CI 覆盖。**
+      #
+      # 上面那个 `test` 作业只跑 ubuntu，而 `sandbox/windows.rs` 是
+      # `#[cfg(windows)]` 的 —— 也就是说 AppContainer 后端与它那七条逃逸测试
+      # 在 CI 上**一行都没被执行过**。一个只在开发者本机被验证过的安全边界，
+      # 迟早会在某次「顺手改一下」之后静默失效。
+      #
+      # 只跑这两个目标，不跑整个 workspace：这条腿的作用是**守住边界**，
+      # 不是第二遍跑全量测试（那要再花十几分钟，而 ubuntu 那边已经跑过了）。
+      #
+      # `sandbox_escape_windows` 是 `harness = false` 的：那个测试二进制
+      # 自己就是沙箱 helper，所以它验的必然是刚编出来的这份代码。
+      #
+      # 带 `--target` 的理由与上面那条 build 一样：不带的话输出目录不同，
+      # 依赖树要重编一遍。
+      - name: 沙箱逃逸测试（Windows）
+        if: matrix.os == 'windows-latest'
+        run: |
+          cargo test -p cortex-agent --target x86_64-pc-windows-msvc --lib sandbox
+          cargo test -p cortex-agent --target x86_64-pc-windows-msvc --test sandbox_escape_windows
