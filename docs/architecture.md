@@ -532,24 +532,49 @@ agent）显示运行时那份 —— 反过来就是「界面写着关，云端�
 |---|---|
 | 「每次工具调用都要远程查记忆，RTT 会成瓶颈」 | 记忆检索是**每轮对话一次**，不是每次工具调用。一轮 = 「取记忆 + 写回」两次 RTT。**建议的「批量异步写回」刻意不做** —— append-only 的「写入不丢」要求写及时，攒着批量正是丢数据的形状 |
 | 「读了大文件会把大量文本传回服务端」 | 工具输出的**原始字节已定案不存**（`cortex_memory::trace::safe_text` 负责剪掉）。进记忆的只有 `name / path / ok / summary` |
-| 「Windows 缺沙箱，工具会裸奔」 | 方向反了。`Capability::Unavailable` 时**默认拒绝执行**，除非把 `CORTEX_SANDBOX=unsandboxed` 显式写进环境。见下面「Windows 上跑不了命令」 |
+| 「Windows 缺沙箱，工具会裸奔」 | 2026-08-28 起 Windows 上是 **AppContainer**，文件边界成立（见下面那一节）。真的探测不到时**默认拒绝执行**，除非把 `CORTEX_SANDBOX=unsandboxed` 显式写进环境 |
 | 「`/llm/stream` 代理会泄露 API key，应当移除」 | **key 本来就必须在服务端** —— 抽取要调 LLM，这与代理无关。移除代理不会让 key 离开服务器。留一条本地直连的理由是**配置便利**，不是安全 |
 
-### ⚠️ Windows 上跑不了命令 —— 两个决定的直接冲突
+### Windows 上的沙箱：AppContainer（2026-08-28 起）
 
-- 桌面安装程序**只发 Windows**（理由是 SmartScreen 是警告而 Gatekeeper 是硬拒绝）
-- 而 Windows **没有** landlock / seatbelt 的对应物，`Capability::Unavailable`
+Windows 没有 landlock / seatbelt 的对应物，这一条曾经的结论是
+`Capability::Unavailable` —— **现在不成立了**。三条候选实测比过：
 
-**影响范围**（2026-08-08 在 Windows 上实测；更早的版本把它写大了，
-说成「一个文件都不肯写」，那是错的）：
+| 机制 | 要管理员 | .NET / PowerShell | |
+|---|---|---|---|
+| 受限令牌 `CreateRestrictedToken` | 不要 | **CLR 起不来** | ✗ |
+| 独立本地用户（codex 的做法） | **要**（一次） | 正常 | 可行但贵 |
+| **AppContainer** | **不要** | 正常 | ✓ |
 
-| | Windows 上 | 为什么 |
+后端在 `crates/cortex-agent/src/sandbox/windows.rs`。两个必须知道的实现事实：
+
+1. **要一个 helper 进程。** AppContainer 靠 `STARTUPINFOEXW` 上的
+   `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` 生效，而
+   `std::process::Command` 在 stable Rust 上设不了 proc-thread 属性。所以
+   `prepare` 回的是「`cortex-local --win-sandbox-exec <计划>`」，由它用
+   `CreateProcessW` 起真命令。stdio 靠继承，不必自己铺管道。
+2. **授权是磁盘上的、持久的、递归的。** 访问检查要求对象 DACL 上有容器
+   SID 的 ACE；带继承标志写 DACL 会铺满整棵已有子树。实测一个 793k 文件的
+   仓库首次 **153.8 秒**，之后每条命令 **201 毫秒**（空工作区 60 毫秒）。
+   因此：只授工作区子树、授过不再授、授权在父进程做（helper 跑在命令超时
+   里面，放那儿的话大仓库第一条命令会假报「命令超时」）。
+
+**边界的成色**：
+
+| | Windows 上 | |
 |---|---|---|
-| 文件读 / 写 / 列目录 | ✅ 正常 | `ToolSandbox::resolve` 的围栏是纯路径逻辑，不依赖内核 |
-| `shell` 执行命令 | ⚠️ 要人确认 | 本地那侧把 `Risk::Execute` 接到了已有的确认回路 —— 换一种保证：**人在场** |
+| 文件读 / 写 / 列目录 | ✅ 正常 | `ToolSandbox::resolve` 是纯路径逻辑，不依赖内核 |
+| `shell` 读用户目录 | ✅ **挡住** | AppContainer 的 DACL 检查 |
+| `shell` 写用户目录 | ✅ **挡住** | 同上 |
+| **网络** | ❌ **没挡** | 默认无 capability ⇒ 恰好断网，但那是副作用不是设计。要 `git clone` 的人一给 capability 就全开了。阶段 2 对齐 `cortex-egress-proxy` |
+| 桌面 / 剪贴板 | ❌ 没挡 | 阶段 2 |
 
-远端触发的执行没有「人在场」这个前提，所以**容器那一侧不走这条路**：
-沙箱容器里越界路径直接拒绝，不问。
+⚠️ **CI 上一条 Windows 测试都不跑**（`ci.yml` 的 windows-latest 只编译），
+所以改 `sandbox/windows.rs` 之后必须本机跑
+`cargo test -p cortex-agent`。逃逸测试在
+`crates/cortex-agent/tests/sandbox_escape_windows.rs`，它是
+`harness = false` 的 —— **那个测试二进制自己就是 helper**，否则验的是
+`target/debug/cortex-local.exe` 那个旧的。
 
 ### 拆成两个进程带来的四类新问题 —— 各自是怎么解决的
 

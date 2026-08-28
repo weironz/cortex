@@ -151,10 +151,14 @@ pub async fn run_post(hooks: &[Hook], tool: &str, path: Option<&Path>, cwd: &Pat
 /// 跑一条，回退出码。
 async fn run_one(h: &Hook, tool: &str, path: Option<&Path>, cwd: &Path) -> Result<i32, String> {
     let argv = crate::tools::shell_argv(&h.command)?;
-    let (program, rest) = argv.split_first().ok_or("hook 命令是空的")?;
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(rest)
-        .current_dir(cwd)
+    if argv.is_empty() {
+        return Err("hook 命令是空的".into());
+    }
+    // 走 `command_from_argv` 而不是 `args(rest)`：Windows 上 `cmd /C` 后面那段
+    // 必须原样传，理由见那个函数。hook 的命令与 shell 工具走的是同一个
+    // `shell_argv`，只在其中一处修等于留一半的坑
+    let mut cmd = tokio::process::Command::from(crate::sandbox::command_from_argv(&argv));
+    cmd.current_dir(cwd)
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         // 输出丢掉：hook 是背景动作，它的 stdout 不该进模型上下文

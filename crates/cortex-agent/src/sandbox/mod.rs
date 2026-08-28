@@ -27,7 +27,7 @@
 //! |---|---|---|
 //! | Linux | landlock（文件系统）+ seccomp（syscall） | 需内核 5.13+，ABI 越高能拦的越多 |
 //! | macOS | Seatbelt（`/usr/bin/sandbox-exec`） | Apple 标 deprecated 但仍可用 |
-//! | Windows | **无对等物** | AppContainer / Job Object 只能做一部分 |
+//! | Windows | **AppContainer** | 只做文件系统边界；网络与桌面未隔离，见 [`windows`] |
 //!
 //! # 没有沙箱能力时默认拒绝
 //!
@@ -79,6 +79,8 @@ pub use policy::{NetworkPolicy, SandboxPolicy};
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(windows)]
+pub mod windows;
 
 // 后端只有一个入口名字。用 `cfg` 切函数而不是在 [`prepare`] 里切代码块：
 // 后者在没有后端的平台上会留下一段编译器判定不可达的死代码，
@@ -87,13 +89,15 @@ mod macos;
 use linux::prepare as prepare_backend;
 #[cfg(target_os = "macos")]
 use macos::prepare as prepare_backend;
+#[cfg(windows)]
+use windows::prepare as prepare_backend;
 
 /// 没有后端的平台。
 ///
 /// 走到这里说明 [`capability`] 报了可用却没有实现，是内部不一致。
 /// 返回错误而不是 `unreachable!()`：「沙箱代码 panic」比「沙箱代码报错」
 /// 难查得多，而这一层出问题时人最需要的是一句能读的话。
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn prepare_backend(
     _policy: &SandboxPolicy,
     _argv: &[String],
@@ -156,6 +160,9 @@ pub enum Backend {
     Landlock,
     /// `/usr/bin/sandbox-exec`
     Seatbelt,
+    /// Windows AppContainer。见 [`windows`] 的模块文档 —— 它**只做文件
+    /// 系统边界**，网络与桌面没有隔离。
+    AppContainer,
 }
 
 impl Backend {
@@ -164,6 +171,7 @@ impl Backend {
         match self {
             Self::Landlock => "landlock+seccomp",
             Self::Seatbelt => "seatbelt",
+            Self::AppContainer => "appcontainer",
         }
     }
 }
@@ -218,14 +226,14 @@ fn detect() -> Capability {
     {
         macos::detect()
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        windows::detect()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         Capability::Unavailable {
-            reason: format!(
-                "{} 上没有可用的进程级沙箱（Windows 的 AppContainer / Job Object 不足以\
-                 等价替代 landlock 或 Seatbelt）",
-                std::env::consts::OS
-            ),
+            reason: format!("{} 上没有可用的进程级沙箱", std::env::consts::OS),
         }
     }
 }
@@ -286,6 +294,38 @@ pub struct Prepared {
 ///
 /// 沙箱不可用且未显式降级时返回 [`CortexError::Invalid`]。**这是设计上的
 /// 主要出口**，不是异常路径：见模块文档「默认拒绝」。
+/// 把 argv 装成一个待起的进程。**Windows 上不能直接 `args()`。**
+///
+/// `shell_argv` 在 Windows 上回的是 `["cmd.exe", "/C", <整条命令>]`，而 Rust 的
+/// `Command::arg` 按 `CommandLineToArgvW` 的规则加引号、把内层引号转义成
+/// `\"`。**`cmd.exe` 不认那套转义** —— 对它反斜杠就是个普通字符。于是
+/// `type "C:\a b\c.txt"` 到了 cmd 手里变成 `type \"C:\a b\c.txt\"`，
+/// 报「文件名、目录名或卷标语法不正确」。
+///
+/// 这不是推理，是实测：`Command::new("cmd.exe").arg("/C").arg(r#"type "…""#)`
+/// 当场失败。也就是说 **Windows 上任何带引号路径的命令一直是坏的**，
+/// 与沙箱无关 —— 而带引号的路径在 Windows 上是常态（`C:\Program Files\…`）。
+/// 它是靠沙箱的逃逸测试才浮出来的：那条「读不到用户目录」的测试
+/// **把沙箱整个关掉也照样绿**，因为命令根本没跑起来。
+///
+/// 正确的做法是 `raw_arg`：`/C` 之后的部分**原样**交给 cmd，由它按自己的
+/// 规则解析 —— 与用户在控制台里敲进去的完全一致。
+pub(crate) fn command_from_argv(argv: &[String]) -> std::process::Command {
+    let mut cmd = std::process::Command::new(&argv[0]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if let [_, flag, rest] = argv
+            && flag.eq_ignore_ascii_case("/c")
+        {
+            cmd.arg(flag).raw_arg(rest);
+            return cmd;
+        }
+    }
+    cmd.args(&argv[1..]);
+    cmd
+}
+
 pub fn prepare(policy: &SandboxPolicy, argv: &[String], cwd: &Path) -> Result<Prepared> {
     let Some(program) = argv.first() else {
         return Err(CortexError::Invalid("命令为空".into()));
@@ -314,8 +354,8 @@ pub fn prepare(policy: &SandboxPolicy, argv: &[String], cwd: &Path) -> Result<Pr
             capability = %cap,
             "⚠ 无沙箱执行（{reason}）"
         );
-        let mut command = std::process::Command::new(program);
-        command.args(&argv[1..]).current_dir(cwd);
+        let mut command = command_from_argv(argv);
+        command.current_dir(cwd);
         return Ok(Prepared {
             command,
             enforced: false,
@@ -348,6 +388,32 @@ mod tests {
         }
         assert!("unsandboxed".trim() == UNSANDBOXED_VALUE);
         assert!("1".trim() != UNSANDBOXED_VALUE, "数字 1 绝不能打开降级");
+    }
+
+    /// 走一整条真路：装配 → 起进程 → 读回内容。
+    ///
+    /// 断言字符串拼法是不够的 —— 真正要证的是「cmd 收到之后能用」，
+    /// 而那只有把它跑一遍才知道。这条如果只钉命令行文本，第一版那种
+    /// `\"` 转义照样可以被写成「预期值」。
+    #[cfg(windows)]
+    #[test]
+    fn windows_上带引号路径的命令跑得起来() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        // 目录名带空格 —— 这正是 Windows 上必须加引号的情形
+        let sub = dir.path().join("a b");
+        std::fs::create_dir(&sub).expect("建得出");
+        let file = sub.join("c.txt");
+        std::fs::write(&file, "OKOK").expect("写得进去");
+
+        let argv = crate::tools::shell_argv(&format!("type \"{}\"", file.display()))
+            .expect("Windows 上必有 cmd");
+        let out = command_from_argv(&argv).output().expect("起得来");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("OKOK"),
+            "带引号路径的命令没跑通 —— stdout={:?} stderr={:?}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

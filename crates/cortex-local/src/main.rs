@@ -199,6 +199,18 @@ struct Args {
     #[arg(long = "sandbox-probe", hide = true)]
     sandbox_probe: bool,
 
+    /// 隐藏：**Windows 沙箱的 helper 模式**。不是给人敲的。
+    ///
+    /// AppContainer 靠 `STARTUPINFOEXW` 上的 proc-thread 属性生效，而
+    /// `std::process::Command` 在 stable Rust 上设不了那个属性。所以
+    /// `sandbox::prepare` 在 Windows 上回的是「本程序 + 这个开关 + 一段
+    /// JSON」，由本进程用 `CreateProcessW` 把真命令起在容器里。
+    ///
+    /// 值是那段 JSON（要授权的目录、argv、cwd）。见
+    /// `cortex_agent::sandbox::windows`。
+    #[arg(long = "win-sandbox-exec", hide = true, value_name = "JSON")]
+    win_sandbox_exec: Option<String>,
+
     /// 允许云端**远程接入**这个 agent（默认关）。
     ///
     /// 打开之后心跳里会多带一个「你可以从这个地址接进来，用这把钥匙」，
@@ -294,6 +306,26 @@ async fn main() -> anyhow::Result<()> {
     // 毫无关系，只会把结论搅浑
     if args.sandbox_probe {
         self_check::probe();
+    }
+
+    // ── Windows 沙箱的 helper 模式：起完真命令就用它的退出码退 ──
+    //
+    // 与探针模式同样排在最前：它是 `sandbox::prepare` 起的子进程，
+    // 唯一的工作就是把真命令放进 AppContainer。往下走一步会去碰状态目录
+    // 与远端，而那些与它要做的事毫无关系。
+    if let Some(plan) = args.win_sandbox_exec.as_deref() {
+        #[cfg(windows)]
+        {
+            cortex_agent::sandbox::windows::exec_in_container(plan);
+        }
+        // 别的平台上这个开关不该存在。**明确失败而不是静默忽略** ——
+        // 静默忽略的话，一条本该被沙箱包住的命令会以「什么都没发生」
+        // 收场，而调用方拿到的是成功
+        #[cfg(not(windows))]
+        {
+            let _ = plan;
+            anyhow::bail!("--win-sandbox-exec 只在 Windows 上有意义");
+        }
     }
 
     // ── 自检：装配沙箱、起探针、报结论，然后退 ────────────────

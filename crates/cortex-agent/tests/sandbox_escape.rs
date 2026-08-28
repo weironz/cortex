@@ -52,6 +52,22 @@ fn secret_outside() -> std::path::PathBuf {
 
 // ───────────────────── 前置：这台机器到底有没有沙箱 ─────────────────────
 
+/// 这一份逃逸测试跑不跑得起来。
+///
+/// **两个条件缺一不可**，而它一度只写了前一个：
+///
+/// 1. 本机有沙箱能力 —— 没有的话下面验的是「默认拒绝」，不是「内核拦得住」；
+/// 2. 本机是 Unix —— 这里的命令是 `cat` / `ls` / `sleep`，Windows 上没有。
+///
+/// 第 2 条以前是**靠第 1 条顺带成立的**：Windows 上没有沙箱，于是整份文件
+/// 静默跳过。2026-08-28 Windows 接上 AppContainer 之后那个巧合没了，这七条
+/// 当场全红 —— 判据的语义被脚下换掉了，而它自己不知道。
+///
+/// Windows 那侧的同一件事在 `sandbox_escape_windows.rs`。
+fn 跳过() -> bool {
+    !sandbox::capability().is_available() || !cfg!(unix)
+}
+
 /// 元测试：不允许「全绿但一条逃逸测试都没真跑」。
 ///
 /// 没有这条，在一个 landlock 不可用的容器里跑完整套测试会全部跳过并显示
@@ -103,7 +119,7 @@ async fn without_a_sandbox_execution_is_refused_by_default() {
 /// 全部通过，却毫无价值 —— 而且用户第一天就会把它关掉。
 #[tokio::test]
 async fn inside_the_workspace_read_and_write_still_work() {
-    if !sandbox::capability().is_available() {
+    if 跳过() {
         return;
     }
     let (_d, sb) = workspace();
@@ -126,7 +142,7 @@ async fn inside_the_workspace_read_and_write_still_work() {
 /// 读围栏外的文件必须失败。
 #[tokio::test]
 async fn reading_outside_the_fence_fails() {
-    if !sandbox::capability().is_available() {
+    if 跳过() {
         return;
     }
     let (_d, sb) = workspace();
@@ -173,7 +189,7 @@ async fn reading_outside_the_fence_fails() {
 /// 写围栏外的路径必须失败。
 #[tokio::test]
 async fn writing_outside_the_fence_fails() {
-    if !sandbox::capability().is_available() {
+    if 跳过() {
         return;
     }
     let (_d, sb) = workspace();
@@ -202,7 +218,7 @@ async fn writing_outside_the_fence_fails() {
 /// 家目录本身不可列举 —— 这是「只能加白名单」那条约束的直接后果。
 #[tokio::test]
 async fn the_home_directory_is_not_listable() {
-    if !sandbox::capability().is_available() {
+    if 跳过() {
         return;
     }
     let Some(home) = std::env::var_os("HOME") else {
@@ -224,7 +240,7 @@ async fn the_home_directory_is_not_listable() {
 /// 默认策略下对外连接必须失败。
 #[tokio::test]
 async fn outbound_network_is_blocked_by_default() {
-    if !sandbox::capability().is_available() {
+    if 跳过() {
         return;
     }
     let (_d, sb) = workspace();
@@ -254,7 +270,7 @@ async fn outbound_network_is_blocked_by_default() {
 /// 放开一个不能顺带放开另一个。
 #[tokio::test]
 async fn allowing_network_does_not_relax_the_filesystem() {
-    if !sandbox::capability().is_available() {
+    if 跳过() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -304,7 +320,7 @@ async fn allowing_network_does_not_relax_the_filesystem() {
 /// `ptrace` 恒被拦 —— 它与网络策略无关，是沙箱自身的逃逸面。
 #[tokio::test]
 async fn ptrace_is_blocked_even_with_network_allowed() {
-    if !sandbox::capability().is_available() || !cfg!(target_os = "linux") {
+    if 跳过() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -325,7 +341,7 @@ async fn ptrace_is_blocked_even_with_network_allowed() {
 /// 命令超时必须被杀掉，而不是把整轮对话挂住。
 #[tokio::test]
 async fn a_hanging_command_is_killed() {
-    if !sandbox::capability().is_available() {
+    if 跳过() {
         return;
     }
     let (_d, sb) = workspace();
@@ -344,7 +360,7 @@ async fn a_hanging_command_is_killed() {
 /// 构建工具链能跑 —— 太紧的沙箱会被用户关掉，而被关掉的沙箱等于没有。
 #[tokio::test]
 async fn a_realistic_toolchain_command_still_runs() {
-    if !sandbox::capability().is_available() {
+    if 跳过() {
         return;
     }
     let (_d, sb) = workspace();
@@ -367,7 +383,7 @@ async fn a_realistic_toolchain_command_still_runs() {
 /// 真正编译一个 crate —— 比 `--version` 有说服力得多。
 #[tokio::test]
 async fn cargo_can_build_inside_the_workspace() {
-    if !sandbox::capability().is_available() {
+    if 跳过() {
         return;
     }
     let (d, sb) = workspace();
@@ -408,7 +424,7 @@ async fn cargo_can_build_inside_the_workspace() {
 /// （离线 CI）就跳过 —— 跳过时会打印一行，不装作验过。
 #[tokio::test]
 async fn cargo_can_build_with_a_real_dependency_offline() {
-    if !sandbox::capability().is_available() {
+    if 跳过() {
         return;
     }
     let (d, sb) = workspace();
