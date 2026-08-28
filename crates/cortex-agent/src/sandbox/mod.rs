@@ -81,6 +81,8 @@ mod linux;
 mod macos;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+pub mod windows_restricted;
 
 // 后端只有一个入口名字。用 `cfg` 切函数而不是在 [`prepare`] 里切代码块：
 // 后者在没有后端的平台上会留下一段编译器判定不可达的死代码，
@@ -89,8 +91,30 @@ pub mod windows;
 use linux::prepare as prepare_backend;
 #[cfg(target_os = "macos")]
 use macos::prepare as prepare_backend;
+// Windows 有两个后端：默认 AppContainer（强隔离，跑不了完整工具链），
+// 以及受限令牌（能跑 cargo build，但读边界较弱）。用环境变量选，因为
+// 「哪个会话要跑工具链」是运行期才知道的事，而两个后端的边界语义不同、
+// 都要如实写进提示词——env 让上层能显式选并据此描述。
 #[cfg(windows)]
-use windows::prepare as prepare_backend;
+fn prepare_backend(
+    policy: &SandboxPolicy,
+    argv: &[String],
+    cwd: &Path,
+) -> Result<std::process::Command> {
+    if windows_backend_is_restricted() {
+        windows_restricted::prepare(policy, argv, cwd)
+    } else {
+        windows::prepare(policy, argv, cwd)
+    }
+}
+
+/// 本机是不是选了受限令牌后端。**空串不算选**（老形状：`VAR=` 顶掉默认）。
+#[cfg(windows)]
+pub fn windows_backend_is_restricted() -> bool {
+    std::env::var("CORTEX_WIN_BACKEND")
+        .map(|v| v.trim().eq_ignore_ascii_case("restricted"))
+        .unwrap_or(false)
+}
 
 /// 没有后端的平台。
 ///
@@ -160,9 +184,14 @@ pub enum Backend {
     Landlock,
     /// `/usr/bin/sandbox-exec`
     Seatbelt,
-    /// Windows AppContainer。见 [`windows`] 的模块文档 —— 它**只做文件
-    /// 系统边界**，网络与桌面没有隔离。
+    /// Windows AppContainer。见 [`windows`] 的模块文档 —— 文件与网络边界，
+    /// 桌面没有隔离。读默认拒绝（强），但**跑不了完整工具链**（`cargo build`
+    /// 的链接步在容器里挂）。
     AppContainer,
+    /// Windows 受限令牌。见 [`windows_restricted`] —— **能跑完整工具链**
+    /// （`cargo build` 出 .exe），写只限工作区，但**不挡读**：读身份就是用户
+    /// 本人，读什么都能读。两个后端是两种取舍，不是强弱关系。
+    RestrictedToken,
 }
 
 impl Backend {
@@ -172,6 +201,7 @@ impl Backend {
             Self::Landlock => "landlock+seccomp",
             Self::Seatbelt => "seatbelt",
             Self::AppContainer => "appcontainer",
+            Self::RestrictedToken => "restricted-token",
         }
     }
 }
@@ -228,7 +258,17 @@ fn detect() -> Capability {
     }
     #[cfg(windows)]
     {
-        windows::detect()
+        // **报的必须是这一轮真正会用的后端。**（CLAUDE.md 约束 2）
+        //
+        // 两个后端的边界语义不同：AppContainer 读默认拒绝、跑不了完整工具链；
+        // 受限令牌能跑 `cargo build` 但不挡读。报错了后端，`status_line`、
+        // `/health`、以及跟着它走的 `shell` 工具描述就会整串跟着说谎 ——
+        // 用户与模型都会以为自己在另一个边界里。
+        if windows_backend_is_restricted() {
+            windows_restricted::detect()
+        } else {
+            windows::detect()
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {

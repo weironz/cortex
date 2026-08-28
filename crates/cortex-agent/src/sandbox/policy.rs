@@ -246,7 +246,7 @@ impl SandboxPolicy {
     }
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(super) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)

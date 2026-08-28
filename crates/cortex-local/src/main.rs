@@ -211,6 +211,10 @@ struct Args {
     #[arg(long = "win-sandbox-exec", hide = true, value_name = "JSON")]
     win_sandbox_exec: Option<String>,
 
+    /// 受限令牌 helper 模式。同 `--win-sandbox-exec`，但走第二后端。
+    #[arg(long = "win-restricted-exec", hide = true, value_name = "JSON")]
+    win_restricted_exec: Option<String>,
+
     /// 允许云端**远程接入**这个 agent（默认关）。
     ///
     /// 打开之后心跳里会多带一个「你可以从这个地址接进来，用这把钥匙」，
@@ -313,6 +317,17 @@ async fn main() -> anyhow::Result<()> {
     // 与探针模式同样排在最前：它是 `sandbox::prepare` 起的子进程，
     // 唯一的工作就是把真命令放进 AppContainer。往下走一步会去碰状态目录
     // 与远端，而那些与它要做的事毫无关系。
+    if let Some(plan) = args.win_restricted_exec.as_deref() {
+        #[cfg(windows)]
+        {
+            cortex_agent::sandbox::windows_restricted::exec_restricted(plan);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = plan;
+            anyhow::bail!("--win-restricted-exec 只在 Windows 上有意义");
+        }
+    }
     if let Some(plan) = args.win_sandbox_exec.as_deref() {
         #[cfg(windows)]
         {

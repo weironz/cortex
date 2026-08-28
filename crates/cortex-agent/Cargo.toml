@@ -56,10 +56,18 @@ features = [
     "Win32_System_SystemServices",
     "Win32_Security_Isolation",
     "Win32_System_Memory",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Environment",
+    "Win32_Graphics_Gdi",
+    "Win32_System_SystemInformation",
 ]
 
 # 这个测试目标自己写 `main`：它同时是**测试**和**沙箱 helper**，
 # 这样跑的必然是当前这份代码编出来的 helper。理由写在文件头
 [[test]]
 name = "sandbox_escape_windows"
+harness = false
+
+[[test]]
+name = "sandbox_restricted_windows"
 harness = false

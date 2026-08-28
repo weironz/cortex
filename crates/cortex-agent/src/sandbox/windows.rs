@@ -174,7 +174,7 @@ const CONTAINER_NAME: &str = "cortex.agent.sandbox";
 ///
 /// 名字里带 `win`：它在别的平台上不存在，写成通用名字会让人以为
 /// 三个平台都有这条路。
-pub const HELPER_FLAG: &str = "--win-sandbox-exec";
+pub(super) const HELPER_FLAG: &str = "--win-sandbox-exec";
 
 /// 去掉 Windows 的 \\?\ verbatim 前缀。
 ///
@@ -185,14 +185,14 @@ pub const HELPER_FLAG: &str = "--win-sandbox-exec";
 /// `workspace::display` 里为「入库与回显」做过同一件事；这里是为
 /// 「传给 CreateProcessW」再做一次。两处用途不同，合成一个公共函数会让
 /// 那边的文档说不清自己在讲什么。
-fn strip_verbatim(s: &str) -> String {
+pub(super) fn strip_verbatim(s: &str) -> String {
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{rest}");
     }
     s.strip_prefix(r"\\?\").unwrap_or(s).to_string()
 }
 
-fn wide(s: &str) -> Vec<u16> {
+pub(super) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
@@ -250,11 +250,11 @@ unsafe fn container_sid() -> Result<*mut c_void> {
 /// `WRITE_DAC`，目录的属主天然就有）。
 /// `OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE`。不给继承的话，目录本身进得去
 /// 而里面新建的文件进不去。
-const INHERIT_ALL: u32 = 3;
+pub(super) const INHERIT_ALL: u32 = 3;
 /// 不继承：这条 ACE 只作用在这个目录本身，一个子项都不碰。
 const INHERIT_NONE: u32 = 0;
 /// `FILE_ALL_ACCESS`。
-const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
+pub(super) const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
 /// 「能穿过去，也能看见这一层有哪些名字」——
 /// `FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE`。
 ///
@@ -311,7 +311,7 @@ unsafe fn already_granted(dacl: *const ACL, sid: *mut c_void, inherit: u32, mask
     false
 }
 
-unsafe fn grant_to_container(
+pub(super) unsafe fn grant_to_container(
     dir: &Path,
     sid: *mut c_void,
     inherit: u32,
@@ -510,7 +510,7 @@ pub(super) fn detect() -> Capability {
 /// 覆盖 helper 的路径。**给测试用**，不是配置项。
 ///
 /// 见 [`helper_path`]：本进程未必就是那个实现了 helper 模式的二进制。
-pub const HELPER_ENV: &str = "CORTEX_WIN_SANDBOX_HELPER";
+pub(super) const HELPER_ENV: &str = "CORTEX_WIN_SANDBOX_HELPER";
 
 /// `internetClient` —— AppContainer 里「可以往外拨」的那一个 capability。
 ///
@@ -531,7 +531,7 @@ const INTERNET_CLIENT_SID: &str = "S-1-15-3-1";
 /// helper 模式的是 `cortex-local`。
 ///
 /// 顺序：显式覆盖 → 本程序旁边的 `cortex-local.exe` → 本程序自己。
-fn helper_path() -> Result<std::path::PathBuf> {
+pub(super) fn helper_path() -> Result<std::path::PathBuf> {
     if let Some(p) = std::env::var_os(HELPER_ENV) {
         let p = std::path::PathBuf::from(p);
         if p.is_file() {
@@ -601,7 +601,7 @@ fn helper_path() -> Result<std::path::PathBuf> {
 /// **代价要说清楚**：沙箱里的 `cargo build` 写不了 `~/.cargo/registry`，
 /// 需要下载依赖的构建会失败。解法不是把它授出去，而是给容器一份工作区内的
 /// `CARGO_HOME`（阶段 2），那样缓存跟着工作区走、也不碰宿主机。
-fn writable_under_cwd(policy: &SandboxPolicy, cwd: &Path) -> Vec<String> {
+pub(super) fn writable_under_cwd(policy: &SandboxPolicy, cwd: &Path) -> Vec<String> {
     // 与 `existing_writable` 用同一种规范化形式，否则 `starts_with` 会在
     // 「verbatim 前缀 vs 普通路径」上永远不相等，结果是一个都不授
     let base = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
@@ -980,7 +980,7 @@ fn grant_workspace(policy: &SandboxPolicy, cwd: &Path) -> Result<Option<std::pat
 /// 引号前面的反斜杠要成对翻倍（`a\` → `"a\\"`），否则末尾那个反斜杠会
 /// 把收尾的引号转义掉，命令行就此串行。这是 `CommandLineToArgvW` 的
 /// 规定，多数命令行解析器（含 Rust 自己的 `Command`）都照它来。
-fn command_line(argv: &[String]) -> String {
+pub(super) fn command_line(argv: &[String]) -> String {
     // `cmd.exe /C <整条命令>`：`/C` 后面那段**原样**拼进去，一个引号都不加。
     // 理由与 [`crate::sandbox::command_from_argv`] 完全相同 —— cmd 不认
     // `CommandLineToArgvW` 那套转义，替它加引号只会把命令弄坏。

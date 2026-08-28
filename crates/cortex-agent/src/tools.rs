@@ -1080,19 +1080,37 @@ fn shell_description() -> std::borrow::Cow<'static, str> {
         "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里：",
         "只能读写工作区与构建缓存，默认不能联网",
     );
-    if cfg!(windows) && crate::sandbox::capability().is_available() {
-        concat!(
-            "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里：",
-            "只能读写工作区与构建缓存，默认不能联网。",
-            "⚠ 本机的沙箱是 Windows AppContainer，其中 **`dir` 与 `vol` 用不了**",
-            "（会报「拒绝访问」）—— 那是沙箱的限制，不是命令写错了，换写法重试",
-            "没有用。要看目录内容请用 `list_dir` 工具，或 cmd 的 `for %f in (*)`。",
-            "另外，工作区如果在用户主目录底下（`C:/Users/…`），`git` 也用不了，",
-            "同样是沙箱的限制。",
-        )
-        .into()
-    } else {
-        BASE.into()
+    // AppContainer 那一档：读默认拒绝，但 dir/vol 用不了，主目录下的工作区
+    // git 也用不了。这些是模型必须知道的，否则它会换十种写法反复撞。
+    const APPCONTAINER: &str = concat!(
+        "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里：",
+        "只能读写工作区与构建缓存，默认不能联网。",
+        "⚠ 本机的沙箱是 Windows AppContainer，其中 **`dir` 与 `vol` 用不了**",
+        "（会报「拒绝访问」）—— 那是沙箱的限制，不是命令写错了，换写法重试",
+        "没有用。要看目录内容请用 `list_dir` 工具，或 cmd 的 `for %f in (*)`。",
+        "另外，工作区如果在用户主目录底下（`C:/Users/…`），`git` 也用不了；",
+        "**完整构建（如 `cargo build` 生成 .exe）也跑不了** —— 链接步在这一档里挂，",
+        "`cargo check` / `clippy` 这类不产出可执行文件的命令则正常。",
+    );
+    // 受限令牌那一档：工具链全可用，但**不挡读**。后者同样要说 ——
+    // 模型据此判断「这里能不能放心处理敏感内容」，说反了比不说更糟。
+    const RESTRICTED: &str = concat!(
+        "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里。",
+        "本机这一档是 Windows 受限令牌：**写只落在工作区**（写工作区以外会被拒），",
+        "完整工具链可用 —— `cargo build`、`git`、`dir` 都正常。",
+        "⚠ 但这一档**不限制读取**：它读得到当前用户能读的任何文件。",
+        "所以不要把它当成「关住不受信代码」的边界；处理敏感文件时照常谨慎。",
+    );
+    if !cfg!(windows) || !crate::sandbox::capability().is_available() {
+        return BASE.into();
+    }
+    match crate::sandbox::capability() {
+        crate::sandbox::Capability::Available { backend, .. }
+            if backend.as_str() == "restricted-token" =>
+        {
+            RESTRICTED.into()
+        }
+        _ => APPCONTAINER.into(),
     }
 }
 
@@ -2178,27 +2196,53 @@ mod tests {
     /// 同一堵墙 —— 它看到的只有「拒绝访问」，于是当成命令写错了，换写法重试，
     /// 一轮烧完。
     ///
-    /// 断言钉在 `git` 这个词上：它是这几样里唯一**有条件**的，也是最容易
-    /// 在下一次改动里被顺手删掉的一句。
+    /// **两档各自断言自己那句要紧的话**：AppContainer 档要说清 dir/vol 与
+    /// 完整构建用不了；受限令牌档要说清**不挡读**。后者尤其不能漏 ——
+    /// 一个「说自己能关住不受信代码、实际读什么都能读」的沙箱描述，
+    /// 比不描述危险得多。
     ///
     /// 判据跟着 `capability()` 走：降级或有人在场时命令跑在宿主上，
     /// git 是好的，那时候写那句话反而成了另一种「说得不对」。
     #[cfg(windows)]
     #[test]
-    fn windows_上_shell_的描述要说清_git_用不了() {
+    fn windows_上_shell_的描述要跟着后端翻面() {
         let spec = builtin_specs()
             .into_iter()
             .find(|s| s.name == "shell")
             .expect("shell 必须在工具目录里");
-        let 有沙箱 = crate::sandbox::capability().is_available();
-        assert_eq!(
-            spec.description.contains("git"),
-            有沙箱,
-            "描述与本机成色对不上（有沙箱={有沙箱}）——
-             有沙箱却不说 git 用不了，模型会一直撞；
-             没沙箱还说，那是另一种说得不对。实际描述：{}",
-            spec.description
-        );
+        let d = &spec.description;
+        match crate::sandbox::capability() {
+            crate::sandbox::Capability::Available { backend, .. }
+                if backend.as_str() == "restricted-token" =>
+            {
+                assert!(
+                    d.contains("不限制读取"),
+                    "受限令牌档**不挡读**，而描述没说 —— 模型会以为这里能关住不受信代码，
+                     那正是最危险的那种说反。实际：{d}"
+                );
+                assert!(
+                    !d.contains("`dir` 与 `vol` 用不了"),
+                    "这一档 dir/vol 是好的，描述却写着用不了 —— 模型会绕开本来能用的命令。实际：{d}"
+                );
+            }
+            crate::sandbox::Capability::Available { .. } => {
+                assert!(
+                    d.contains("`dir` 与 `vol` 用不了"),
+                    "AppContainer 档 dir/vol 确实用不了，不说模型就会一直撞。实际：{d}"
+                );
+                assert!(
+                    d.contains("完整构建"),
+                    "AppContainer 档跑不了完整构建（链接步挂），这一条不说，
+                     模型会把 `cargo build` 的失败当成代码问题去改。实际：{d}"
+                );
+            }
+            crate::sandbox::Capability::Unavailable { .. } => {
+                assert!(
+                    !d.contains("AppContainer") && !d.contains("受限令牌"),
+                    "本机没有沙箱，描述却在讲某个后端的限制 —— 另一种说得不对。实际：{d}"
+                );
+            }
+        }
     }
 
     /// **降级执行必须带那句告警。**
