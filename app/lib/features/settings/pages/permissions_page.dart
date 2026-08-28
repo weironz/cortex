@@ -18,6 +18,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/permission_mode.dart';
 import '../../../core/theme.dart';
 import '../../../state/app_providers.dart';
+import '../../../state/sandbox_backend_controller.dart';
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import '../widgets/settings_layout.dart';
 
 class PermissionsPage extends ConsumerWidget {
@@ -81,6 +84,72 @@ class PermissionsPage extends ConsumerWidget {
               ),
             ),
           ],
+        ),
+        if (_showBackendChoice) _backendSection(context, ref),
+      ],
+    );
+  }
+
+  /// 只在 **Windows 桌面端**画后端选择：别的平台没有这两档，Web 没有本机
+  /// agent。判据放在这里而不是 provider 里 —— 它是纯平台事实，不必绕一层。
+  bool get _showBackendChoice => !kIsWeb && Platform.isWindows;
+
+  Widget _backendSection(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final restricted = ref.watch(sandboxBackendProvider);
+    return SettingsSection(
+      title: 'Windows 沙箱后端',
+      description: '两档是两种取舍，不是强弱。换档会重启本机 agent。',
+      children: [
+        SettingsCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SwitchListTile(
+                key: const ValueKey('sandbox:restricted'),
+                contentPadding: EdgeInsets.zero,
+                value: restricted,
+                onChanged: (v) =>
+                    ref.read(sandboxBackendProvider.notifier).setRestricted(v),
+                title: const Text('受限令牌档（完整工具链）'),
+                subtitle: Text(
+                  '开：cargo 拉依赖 / git / curl 全通，能跑完整构建。'
+                  '关（默认）：AppContainer，读默认拒绝、能防不受信代码偷读，'
+                  '但 dir/vol 与含 cl.exe 的 C/C++ 构建跑不了。',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.cortex.foregroundTertiary,
+                    height: 1.5,
+                  ),
+                ),
+              ),
+              if (restricted)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.gpp_maybe_outlined,
+                        size: 16,
+                        color: theme.cortex.warning,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          // 这一档最要紧的一句，必须摆在开着的时候：不挡读。
+                          '这一档不挡读 —— 沙箱里的命令读得到你能读的任何文件'
+                          '（写仍只限工作区）。要防不受信代码偷读，用默认那档。',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: theme.cortex.warning,
+                            height: 1.5,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
         ),
       ],
     );

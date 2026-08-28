@@ -655,6 +655,13 @@ pub(super) fn prepare(
     if let Some(cfg) = git_cfg {
         cmd.env("GIT_CONFIG_GLOBAL", cfg);
     }
+    // cargo build 的三件套（工具链只读授权 / lld 拷贝 / LIB 注入）。
+    // SAFETY: sid 在本作用域内有效，用完释放
+    unsafe {
+        let sid = container_sid()?;
+        super::windows_rust_build::setup(&mut cmd, sid, cwd);
+        FreeSid(sid);
+    }
     Ok(cmd)
 }
 

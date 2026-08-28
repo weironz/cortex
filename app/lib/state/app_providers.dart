@@ -57,6 +57,7 @@ import 'auth_controller.dart';
 // 绑在一起，那正是它当初没塞进 LayoutState 的同一个理由
 import 'chat_controller.dart';
 import 'remote_attach_controller.dart';
+import 'sandbox_backend_controller.dart';
 
 /// Mutable runtime config. Seeded from `--dart-define`, editable in settings.
 /// 读取跨重启的非密设置。做成 provider 是为了能在测试里换掉 ——
@@ -1247,9 +1248,13 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
       // 开关（见 `remoteAttachProvider`）。存这一份是为了让「我开过了」
       // 活过一次重启，而不是让它成为第二个真相
       allowRemoteAttach: await _savedRemoteAttach(ref),
-      // 只在离线模式下注入：连着服务器时模型是 cortexd 的事，
-      // 把本机那份塞进去只会让两处配置打架
-      extraEnv: offline ? localLlm?.toEnvironment() : null,
+      // 注入的环境变量，两个来源合一：
+      //   - 本机模型配置（仅离线模式；连着服务器时模型是 cortexd 的事）
+      //   - Windows 沙箱后端选择（任何模式都可能选受限令牌档）
+      extraEnv: {
+        if (offline) ...?localLlm?.toEnvironment(),
+        ...await savedSandboxBackendEnv(ref),
+      },
       // Unexpected death only — a deliberate `stop()` never lands here, so
       // signing out cannot be mistaken for a crash.
       //

@@ -272,6 +272,82 @@ mod win {
     /// 上一版把这件事写成「默认没有 capability，于是恰好断网」——
     /// 描述是对的，但那是副作用不是设计，而副作用会在有人为了别的目的
     /// 加一个 capability 时无声消失。
+    /// **`cargo build` 在 AppContainer 里出可运行的 .exe。**
+    ///
+    /// 这曾被断言为「结构性跑不了」—— 2026-08-29 被实验推翻（老实验给
+    /// `.rustup` 的授权没传播到文件本体）。三件套见
+    /// `sandbox::windows_rust_build` 的模块文档：工具链只读授权、
+    /// lld 拷出来用、注入 LIB。这条测试钉住整条链：任何一件掉了，
+    /// 都会退回 `0xC0000142` 或 `could not open 'kernel32.lib'`。
+    ///
+    /// 无依赖的 hello —— 拉依赖在这一档受网络策略管，不是这条链的事。
+    /// 没装 cargo 就跳过（有正对照「探测到的是_appcontainer」守着空转）。
+    ///
+    /// ⚠️ 首次跑要给 `.cargo`/`.rustup` 铺只读 ACL，实测合计约 4 分钟；
+    /// 之后 `already_granted` 短路到毫秒级。
+    pub async fn cargo_build_出_exe() {
+        let has_cargo = std::process::Command::new("cmd")
+            .args(["/C", "where cargo"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !has_cargo {
+            println!("  [跳过] 本机没有 cargo");
+            return;
+        }
+        let Some(root) = 祖先链完整的临时工作区() else {
+            println!("  [跳过] 系统盘根下建不了目录");
+            return;
+        };
+        let sb = Sandbox::new(&root).expect("合法沙箱根");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            concat!(
+                "[package]
+",
+                "name = \"h\"
+",
+                "version = \"0.0.0\"
+",
+                "edition = \"2021\"
+",
+                "[[bin]]
+",
+                "name = \"h\"
+",
+                "path = \"src/main.rs\"
+",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            r#"fn main(){println!("BUILT-OK");}"#,
+        )
+        .unwrap();
+        // exe 用绝对路径跑：`.	arget\...` 在 `&` 链里被 cmd 拆坏（`'.' 不是命令`），
+        // 与本测试要验的链接步无关。绝对路径的 h.exe 在工作区内（继承容器 FULL），
+        // AppContainer 加载得动
+        let exe = root.join("target").join("debug").join("h.exe");
+        let r = shell(
+            &sb,
+            &format!(
+                "cargo build 2>&1 & echo RC=%errorlevel% & \"{}\" 2>&1",
+                exe.display()
+            ),
+        )
+        .await;
+        let built = root.join("target/debug/h.exe").exists();
+        let ran = r.content.contains("BUILT-OK");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            built && ran,
+            "AppContainer 里 cargo build 没出可运行的 .exe —— 三件套断了一件？             （0xC0000142 = lld 没被注入或没执行权；kernel32.lib = LIB 没注入；             'cargo' 不是命令 = 工具链只读授权没铺上）。
+输出：{}",
+            r.content
+        );
+    }
+
     pub async fn 默认不出网() {
         if !宿主有外网() {
             println!("  [跳过] 这台机器本身没有外网，验不了「沙箱里出不去」");
@@ -415,6 +491,9 @@ fn main() {
     });
     run("链断了就不再往下授", &|| {
         rt.block_on(win::链断了就不再往下授())
+    });
+    run("cargo_build_出_exe", &|| {
+        rt.block_on(win::cargo_build_出_exe())
     });
     run("默认不出网", &|| rt.block_on(win::默认不出网()));
     run("放开网络不放开文件", &|| {

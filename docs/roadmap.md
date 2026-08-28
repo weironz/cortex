@@ -382,7 +382,7 @@ cmd 的 `for` 通配、.NET 的 `Directory.GetFiles` 都不需要。要不要做
 
 #### 第二后端：受限令牌（2026-08-28，env 门控、默认关）
 
-AppContainer 那一档跑不了完整构建 —— `cargo check` / `clippy` / rustc 都通，
+AppContainer 那一档**当时**被判「跑不了完整构建」—— 2026-08-29 用三件套修好了（见 [windows-sandbox.md](windows-sandbox.md) 5.8）。`cargo check` / `clippy` / rustc 一直都通，
 但 `cargo build` 的**链接步**挂：MSVC `link.exe` 回 `0xC0000142`，换 `rust-lld`
 则从主目录树 mmap 自身镜像被拒（FULL 授权也没用，是 LowBox 对对象命名空间的
 隔离，ACL 够不着）。

@@ -42,7 +42,7 @@ let reason = if policy.attended.is_attended() {
 | 写 | 只有工作区 | 只有工作区（`WRITE_RESTRICTED` + 只授工作区的 logon SID） |
 | 网络 | capability 控制，**默认断** | 未隔离（明文出得去） |
 | 桌面 | 未隔离 | 私有桌面（挡屏幕抓取 / 输入注入） |
-| `cargo build` 出 .exe | ❌ 链接步挂 | ✅ |
+| `cargo build` 出 .exe | ✅（2026-08-29 起，见 5.8） | ✅ |
 | `git` clone/fetch/push | ⚠️ 受 8.3 与卷根限制 | ✅ |
 | `dir` / `vol` | ❌ 要卷根 ACE（一次管理员） | ✅ |
 | `cargo` 拉**新**依赖 | ❌ | ✅（走本机明文回环镜像，见 4.4） |
@@ -318,16 +318,47 @@ AppContainer 里 `std::fs::canonicalize` 回 `os error 5`
 
 **教训**：「某个底层 API 失败」不等于「用它的工具挂了」。要测真实工作负载。
 
-### 5.8 AppContainer 真正跑不了的是**链接**
+### 5.8 「AppContainer 跑不了链接」是错的 —— 我把「结构性」当成了结论
 
-`cargo build` 挂在最后一步：
+`cargo build` 当时挂在最后一步，我据此下了「结构性跑不了、只能做第二个后端」
+的结论。**2026-08-29 被实验推翻。** 三件套补齐后 `cargo build`（含依赖、含
+build script）在 AppContainer 里出了能跑的 .exe，全部实测。
 
-- MSVC `link.exe` → `0xC0000142`
-- `rust-lld` → 从 `.rustup`（主目录树）跑报 `permission denied`，**从工作区拷一份跑却完全正常**
-  （FULL 授权也没救）——差别是**位置**：LLD 要 mmap 自己的镜像和 sysroot 库（创建 section），
-  而 AppContainer 拒绝从那些位置创建 section。
+两个错都值得记：
 
-这是 structural 的，不是 ACL 能调的。**这才是做第二个后端的直接原因。**
+**错一：把 `link.exe` 与 `rust-lld` 混成「链接步整体挂」。** 它们是两族：
+
+- MSVC `link.exe` → `0xC0000142`（它的 DLL 群在 VS 目录里，那是另一个坑）——
+  **不修**，换 `rust-lld` 绕开。
+- `rust-lld` → 可修。当时的观察是「`.rustup` 原位报 permission denied、工作区
+  拷贝却正常，FULL 授权也没救」，我读成「结构性拒绝从这些位置创建 section」。
+
+**错二：把「位置」读成了文件本体的 ACE。** 真相是**祖先链穿透** —— AppContainer
+加载映像要求从卷根到文件每一级容器都能穿过。`.rustup`（在 `C:\Users\<你>` 下）
+那条链有一层容器穿不过（`C:\Users\<你>` 改不动 DACL，同 5.4 的 8.3 墙）；工作区
+的祖先链 `grant_ancestors` 授穿了，所以工作区里的拷贝能跑。当年给 `.rustup` 的
+FULL「没救」，是因为授权走的不传播路、文件本体从没拿到 ACE —— 与穿透是两件事，
+我把它们混成一件了。
+
+三件套（`sandbox::windows_rust_build`）：
+
+1. **`.cargo` / `.rustup` 授容器只读**（可继承）—— 没有它连 `cargo` 都找不到。
+   一次性代价实测 `.cargo` 60 秒、`.rustup` 182 秒。
+2. **`rust-lld` 拷进 `<工作区>\target\.cortex\`** —— 祖先链已授穿、`target`
+   几乎总在 gitignore（不污染 `git status`）、继承工作区的容器 FULL。
+3. **注入 `LIB`** —— 换掉链接器后 rustc 不再替你定位 MSVC/SDK 的导入库，lld 会
+   挂在 `could not open 'kernel32.lib'`。SDK 目录自带 `ALL APPLICATION PACKAGES`
+   继承 RX，容器读得到。
+
+**新的边界**：`cc` crate 那类调 `cl.exe` 的 C/C++ 构建仍跑不了（`cl.exe` 与
+`link.exe` 同族）；拉新依赖照旧受网络策略管（这一档默认断网，带 `Cargo.lock`
+且缓存齐的项目才编得动）。要编 ring/openssl-sys 这类，或要联网拉依赖，
+换受限令牌档。
+
+> **教训**：给一个观察贴上「结构性」标签，等于宣布停止追问 —— 而这里「结构性」
+> 底下藏着一个可修的授权/路径问题。「暂时没找到怎么修」与「结构上不可能」是
+> 两回事，混起来的代价是一个本可省掉的第二后端（受限令牌那档另有其价值，
+> 但它不该是被这个错误逼出来的）。
 
 ### 5.9 受限令牌下没法只对沙箱拒读——我拿用户的 `~/.ssh` 和 `~/.docker` 证明了
 

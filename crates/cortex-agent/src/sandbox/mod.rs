@@ -89,6 +89,9 @@ mod windows_cargo_mirror;
 // 受限令牌那一档 `curl https://` 必需的 LibreSSL 版 curl。理由在模块文档里。
 #[cfg(windows)]
 mod windows_curl;
+// AppContainer 档跑 cargo build 的三件套。理由在模块文档里。
+#[cfg(windows)]
+mod windows_rust_build;
 
 // 后端只有一个入口名字。用 `cfg` 切函数而不是在 [`prepare`] 里切代码块：
 // 后者在没有后端的平台上会留下一段编译器判定不可达的死代码，

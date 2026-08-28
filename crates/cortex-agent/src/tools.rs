@@ -1100,9 +1100,10 @@ fn shell_description_for(cap: &crate::sandbox::Capability) -> std::borrow::Cow<'
         "⚠ 本机的沙箱是 Windows AppContainer，其中 **`dir` 与 `vol` 用不了**",
         "（会报「拒绝访问」）—— 那是沙箱的限制，不是命令写错了，换写法重试",
         "没有用。要看目录内容请用 `list_dir` 工具，或 cmd 的 `for %f in (*)`。",
-        "另外，工作区如果在用户主目录底下（`C:/Users/…`），`git` 也用不了；",
-        "**完整构建（如 `cargo build` 生成 .exe）也跑不了** —— 链接步在这一档里挂，",
-        "`cargo check` / `clippy` 这类不产出可执行文件的命令则正常。",
+        "另外，工作区如果在用户主目录底下（`C:/Users/…`），`git` 也用不了。",
+        "`cargo build`（含依赖、含 build script）**能出可运行的 .exe** —— 沙箱替你",
+        "换了链接器（MSVC link.exe 在这一档起不来）。但 `cc` crate 那类要调 `cl.exe`",
+        "的 C/C++ 构建步骤仍然跑不了（同一个 link.exe 族），要编那种依赖换受限令牌档。",
     );
     // 受限令牌那一档：工具链全可用，但**不挡读**。后者同样要说 ——
     // 模型据此判断「这里能不能放心处理敏感内容」，说反了比不说更糟。
@@ -2280,10 +2281,18 @@ mod tests {
             d.contains("`dir` 与 `vol` 用不了"),
             "AppContainer 档 dir/vol 确实用不了，不说模型就会一直撞。实际：{d}"
         );
+        // 曾断言「AppContainer 档跑不了完整构建」—— 2026-08-29 推翻了
+        // （换 lld + 授工具链 + 注 LIB，见 sandbox::windows_rust_build）。
+        // 现在钉住的是**新的边界**：cargo build 能出 .exe，但 cl.exe 那族不行。
         assert!(
-            d.contains("完整构建"),
-            "AppContainer 档跑不了完整构建（链接步挂），这一条不说，
-             模型会把 `cargo build` 的失败当成代码问题去改。实际：{d}"
+            d.contains("cargo build") && d.contains(".exe"),
+            "AppContainer 档现在能 cargo build 出 .exe，描述要说 —— 不说模型会
+             以为这一档跑不了构建，白白退回受限令牌档。实际：{d}"
+        );
+        assert!(
+            d.contains("cl.exe") || d.contains("C/C++"),
+            "cargo build 能跑不等于什么都能编：cl.exe（cc crate）那族仍挂。
+             不说清这条边界，模型撞上 ring/openssl-sys 会反复重试。实际：{d}"
         );
         assert!(
             !d.contains("不限制读取"),
