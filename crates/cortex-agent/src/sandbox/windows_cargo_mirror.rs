@@ -91,7 +91,7 @@ pub(super) fn ensure_running() -> Result<bool> {
         }
         // 端口被占：可能是同机另一个 Cortex 进程的镜像（无状态，复用即可），
         // 也可能是别的什么东西。**必须验明正身**。
-        Err(_) => probe_is_ours_at(PORT),
+        Err(_) => probe_is_ours_at(PORT, 800),
     };
     Ok(*ONCE.get_or_init(|| ok))
 }
@@ -105,13 +105,18 @@ pub(super) fn registry_url() -> String {
 ///
 /// 端口是参数而不是常量，**是为了能被测到**：拿固定端口测就得先把它占了，
 /// 而那会和同进程里真的跑着的镜像打架。
-fn probe_is_ours_at(port: u16) -> bool {
-    let Ok(mut s) =
-        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(800))
-    else {
+/// 超时是参数，同一个理由再乘一次：生产给 800ms（占着端口又不应答的东西
+/// 不值得等），测试给长的，免得在 CI 的慢机器上赌调度。
+/// ⚠️ 别把超时当成这条测试曾经 flake 的根因 —— 实测 10 秒照样挂，真正的
+/// 竞态是假服务器不读请求就关连接（见测试里那段注释）。
+fn probe_is_ours_at(port: u16, timeout_ms: u64) -> bool {
+    let Ok(mut s) = TcpStream::connect_timeout(
+        &([127, 0, 0, 1], port).into(),
+        Duration::from_millis(timeout_ms),
+    ) else {
         return false;
     };
-    let _ = s.set_read_timeout(Some(Duration::from_millis(800)));
+    let _ = s.set_read_timeout(Some(Duration::from_millis(timeout_ms)));
     let req = format!("GET {PROBE_PATH} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
     if s.write_all(req.as_bytes()).is_err() {
         return false;
@@ -355,6 +360,22 @@ mod tests {
             let body = 答什么.to_string();
             let h = std::thread::spawn(move || {
                 if let Ok((mut s, _)) = l.accept() {
+                    // ⚠️ **必须先把请求读完再应答。** 第一版 accept 完直接写、
+                    // 写完线程结束把套接字带着**未读的请求**一起关掉 —— Windows
+                    // 上那会发 RST，探针那头的 write/read 就间歇性吃
+                    // ECONNRESET 返回 false。这不是超时问题（把探针超时放到
+                    // 10 秒照样复现），真镜像也确实是读完请求才答的。
+                    let mut req = Vec::new();
+                    let mut b = [0u8; 256];
+                    while let Ok(n) = s.read(&mut b) {
+                        if n == 0 {
+                            break;
+                        }
+                        req.extend_from_slice(&b[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
                         body.len()
@@ -362,7 +383,7 @@ mod tests {
                     let _ = s.write_all(resp.as_bytes());
                 }
             });
-            let got = probe_is_ours_at(port);
+            let got = probe_is_ours_at(port, 10_000);
             let _ = h.join();
             assert_eq!(
                 got,
