@@ -142,7 +142,30 @@ fi
 # 全部 crate 都该 `version.workspace = true`。有人手写一行 `version = "0.1.0"`
 # 时，今天恰好是对的，下一次改版本它就会安静地留在原地 ——
 # 而它编译得过、测试也过。
-stray="$(grep -l '^version[[:space:]]*=[[:space:]]*"' crates/*/Cargo.toml evals/Cargo.toml 2>/dev/null || true)"
+#
+# ⚠️ **只看 `[package]` 段里的那一行。**
+#
+# 第一版是 `grep -l '^version = "'`，扫整份文件 —— 于是任何一个**独立的
+# 依赖表**都会误报：
+#
+#     [target.'cfg(windows)'.dependencies.windows-sys]
+#     version = "0.61"
+#
+# 那是依赖的版本号，与这个 crate 自己的版本号毫无关系。2026-08-28 加
+# Windows 沙箱依赖时撞上：`just ci` 红了，而红的理由是错的。
+#
+# 之所以拖到那天才现形：在此之前每个依赖都写成了行内表
+# （`foo = { version = "1" }`），一行都不以 `version` 开头。**闸没被触发过，
+# 不等于闸是对的。**
+stray="$(
+    for f in crates/*/Cargo.toml evals/Cargo.toml; do
+        [ -f "$f" ] || continue
+        awk -v file="$f" '
+            /^\[/ { in_pkg = ($0 ~ /^\[package\]/); next }
+            in_pkg && /^version[[:space:]]*=[[:space:]]*"/ { print file; exit }
+        ' "$f"
+    done
+)"
 if [ -n "$stray" ]; then
     printf '  %s✘%s %s\n' "$_C_RED" "$_C_OFF" "下列 crate 写死了版本号，应改用 version.workspace = true："
     printf '      %s\n' $stray
