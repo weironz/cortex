@@ -126,9 +126,12 @@ mod win {
         )
         .unwrap();
 
+        // CARGO_TERM_COLOR=never：CI 全局设了 always，颜色码会夹在
+        // `Downloaded` 与 `anyhow` 之间（ESC[0m），子串匹配就断不上 ——
+        // 值是对的、匹配的形状错了。锁死成 never，本机与 CI 才看同一份输出。
         let r = shell(
             &sb,
-            r"cargo build 2>&1 & echo RC=%errorlevel% & .\target\debug\h.exe 2>&1",
+            r"set CARGO_TERM_COLOR=never& cargo build 2>&1 & echo RC=%errorlevel% & .\target\debug\h.exe 2>&1",
         )
         .await;
         let built = root.join("target/debug/h.exe").exists();

@@ -1356,22 +1356,41 @@ mod tests {
     /// 不该是实现的镜像。
     #[test]
     fn 不继承的授权不会压扁继承标记() {
-        let dir = tempfile::tempdir().expect("临时目录");
-        let 之前 = icacls_继承条目数(dir.path());
+        // 前置条件（目录上有继承来的条目）**自己构造，不赌环境**：
+        // 第一版直接拿 %TEMP% 下的临时目录，赌它天然带继承条目 ——
+        // 本机成立，windows-latest 的镜像一漂（TEMP 挪到了一个没有可继承
+        // ACE 的位置）就当场炸在前置断言上。做法：父目录上种一条可继承的
+        // Everyone 读权限（临时目录，用完即删），再在里面建子目录 ——
+        // 子目录必然带着一条 (I)。
+        let parent = tempfile::tempdir().expect("临时目录");
+        let planted = std::process::Command::new("icacls")
+            .arg(parent.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)(RX)"])
+            .output()
+            .expect("跑得起 icacls");
+        assert!(
+            planted.status.success(),
+            "种不下可继承条目：{}",
+            String::from_utf8_lossy(&planted.stdout)
+        );
+        let child = parent.path().join("child");
+        std::fs::create_dir(&child).expect("建得出子目录");
+        let dir_path = child.as_path();
+        let 之前 = icacls_继承条目数(dir_path);
         assert!(
             之前 > 0,
-            "临时目录本来就该有继承自父目录的条目，否则这条测试验不到东西"
+            "子目录该继承到刚种下的条目，否则这条测试验不到东西"
         );
 
         // SAFETY: SID 只在本作用域内使用，用完就释放
         unsafe {
             let sid = container_sid().expect("拿得到容器 SID");
-            grant_to_container(dir.path(), sid, INHERIT_NONE, LIST_ONLY).expect("授得下去");
+            grant_to_container(dir_path, sid, INHERIT_NONE, LIST_ONLY).expect("授得下去");
             FreeSid(sid);
         }
 
         assert_eq!(
-            icacls_继承条目数(dir.path()),
+            icacls_继承条目数(dir_path),
             之前,
             "带 (I) 的条目数变了 —— 继承来的条目在写回时被压扁成显式条目了。
              症状要很久以后才出现：父目录的权限改动传不下来"
