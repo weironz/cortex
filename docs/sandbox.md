@@ -1,5 +1,9 @@
 # 云端沙箱：Web 端的执行环境
 
+> 这份是**云端容器沙箱**（Linux / runc / landlock / egress-proxy）。
+> 桌面端本机那一支（Windows 上的 AppContainer 与受限令牌）在
+> **[windows-sandbox.md](windows-sandbox.md)**，是另一件事。
+
 Web 端的 agent 一直没有**可执行的地方** —— 浏览器标签页没有文件系统，
 而让 cortexd 代跑工具等于把一个远端用户的 `read_file` 指向生产机
 （[roadmap.md](roadmap.md) 的权限模型一节把那条路显式关掉了）。

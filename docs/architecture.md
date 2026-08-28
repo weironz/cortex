@@ -535,18 +535,28 @@ agent）显示运行时那份 —— 反过来就是「界面写着关，云端�
 | 「Windows 缺沙箱，工具会裸奔」 | 2026-08-28 起 Windows 上是 **AppContainer**，文件边界成立（见下面那一节）。真的探测不到时**默认拒绝执行**，除非把 `CORTEX_SANDBOX=unsandboxed` 显式写进环境 |
 | 「`/llm/stream` 代理会泄露 API key，应当移除」 | **key 本来就必须在服务端** —— 抽取要调 LLM，这与代理无关。移除代理不会让 key 离开服务器。留一条本地直连的理由是**配置便利**，不是安全 |
 
-### Windows 上的沙箱：AppContainer（2026-08-28 起）
+### Windows 上的沙箱：两个后端（2026-08-28 起）
+
+> 完整版（含全部实测数据与踩过的坑）在 **[windows-sandbox.md](windows-sandbox.md)**。
+> 这里只留一张选型表和边界成色。
 
 Windows 没有 landlock / seatbelt 的对应物，这一条曾经的结论是
-`Capability::Unavailable` —— **现在不成立了**。三条候选实测比过：
+`Capability::Unavailable` —— **现在不成立了**。四条候选实测比过：
 
-| 机制 | 要管理员 | .NET / PowerShell | |
+| 机制 | 要管理员 | 结果 | |
 |---|---|---|---|
-| 受限令牌 `CreateRestrictedToken` | 不要 | **CLR 起不来** | ✗ |
-| 独立本地用户（codex 的做法） | **要**（一次） | 正常 | 可行但贵 |
-| **AppContainer** | **不要** | 正常 | ✓ |
+| 受限令牌，**裸用** | 不要 | .NET / node / `link.exe` 全 `0xC0000142` | ✗ |
+| 受限令牌 **+ 令牌默认 DACL 等四件套** | 不要 | 全正常，**能出 .exe** | ✓ 第二后端 |
+| 独立本地用户（codex 的做法） | **要**（而且不止一次） | 正常 | 可行但贵，见完整版 |
+| **AppContainer** | **不要** | 读默认拒绝，但链接步跑不了 | ✓ **默认后端** |
 
-后端在 `crates/cortex-agent/src/sandbox/windows.rs`。两个必须知道的实现事实：
+**两个后端是两种取舍，不是强弱**：AppContainer 读默认拒绝（强边界）但跑不了
+完整构建；受限令牌（`CORTEX_WIN_BACKEND=restricted`）能跑完整工具链与 git，
+但**不挡读**（`WRITE_RESTRICTED` 下读身份就是用户本人，没有能区分沙箱的 SID）。
+这两点不可兼得是 Windows 原生沙箱的结构现实。
+
+默认后端在 `crates/cortex-agent/src/sandbox/windows.rs`，第二后端在
+`windows_restricted.rs`。两个必须知道的实现事实：
 
 1. **要一个 helper 进程。** AppContainer 靠 `STARTUPINFOEXW` 上的
    `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` 生效，而
