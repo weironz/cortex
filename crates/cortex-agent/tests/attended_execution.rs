@@ -16,26 +16,24 @@
 //! 保证来自类型系统，不是来自哪一道运行期检查。有人给 `Risk` 加一个更高的
 //! 档位时，那条测试会先红，并在注释里说清为什么不能那么加。
 
-use cortex_agent::sandbox::{self, Attended, SandboxPolicy};
+use cortex_agent::sandbox::{self, Attended, Capability, SandboxPolicy};
 use cortex_agent::{ApprovalPolicy, Gate, Risk, Turn};
 
-/// 本机沙箱可用时，这一组里的「无沙箱」断言无从谈起 —— 跳过。
+/// 「这台机器上没有沙箱」—— 由测试**指定**，不靠碰运气。
 ///
-/// 与 `sandbox_escape.rs` 里那条元测试同一个道理：不允许「全绿但一条都没跑」。
-/// 所以跳过时**打一行出来**，让人在 Linux CI 的日志里看得见这几条没跑。
-fn skip_when_sandboxed(what: &str) -> bool {
-    if sandbox::capability().is_available() {
-        eprintln!(
-            "跳过 {what}：本机沙箱可用（{}），无沙箱那一支跑不到",
-            sandbox::status_line()
-        );
-        return true;
+/// # 这几条曾经在哪儿都不跑
+///
+/// 上一版的判据是 `if capability().is_available() { 跳过 }`。而三个平台
+/// 如今都有沙箱：Linux landlock、macOS seatbelt、Windows AppContainer
+/// （2026-08-28 接上）。Windows 是它们**最后一个还能执行的地方** ——
+/// 那天之后这一组在整个仓库里失去了执行环境，**而没有任何东西变红**。
+///
+/// 一条「本机恰好如此才跑」的测试，迟早会变成一条谁也没跑过的测试。
+/// 所以现在用 [`sandbox::prepare_with`] 把那个世界直接构造出来。
+fn 无沙箱() -> Capability {
+    Capability::Unavailable {
+        reason: "测试构造：假装这台机器上没有进程级沙箱".into(),
     }
-    if sandbox::degraded_allowed() {
-        eprintln!("跳过 {what}：环境里开了显式降级，两条放行理由分不开");
-        return true;
-    }
-    false
 }
 
 /// 默认（没人在场）必须继续硬拒。
@@ -44,15 +42,17 @@ fn skip_when_sandboxed(what: &str) -> bool {
 /// cortexd 也生效 —— 那边的批准者可能在另一个城市，而命令跑在服务器上。
 #[test]
 fn without_attended_the_refusal_stands() {
-    if skip_when_sandboxed("without_attended_the_refusal_stands") {
-        return;
-    }
     let dir = tempfile::tempdir().expect("临时目录");
     let policy = SandboxPolicy::workspace(dir.path());
     assert_eq!(policy.attended, Attended::No, "默认必须是「没人在场」");
 
-    let err = sandbox::prepare(&policy, &["echo".into(), "hi".into()], dir.path())
-        .expect_err("没人在场且本机无沙箱时必须拒绝");
+    let err = sandbox::prepare_with(
+        &无沙箱(),
+        &policy,
+        &["echo".into(), "hi".into()],
+        dir.path(),
+    )
+    .expect_err("没人在场且本机无沙箱时必须拒绝");
     let msg = err.to_string();
     assert!(
         msg.contains("拒绝执行") && msg.contains(sandbox::UNSANDBOXED_VALUE),
@@ -66,14 +66,16 @@ fn without_attended_the_refusal_stands() {
 /// 以外的东西。放行不等于假装有围栏。
 #[test]
 fn attended_execution_is_allowed_but_marked_unenforced() {
-    if skip_when_sandboxed("attended_execution_is_allowed_but_marked_unenforced") {
-        return;
-    }
     let dir = tempfile::tempdir().expect("临时目录");
     let policy = SandboxPolicy::workspace(dir.path()).attended();
 
-    let prepared = sandbox::prepare(&policy, &["echo".into(), "hi".into()], dir.path())
-        .expect("有人在场时应当放行 —— 否则桌面端的终端那半永远用不了");
+    let prepared = sandbox::prepare_with(
+        &无沙箱(),
+        &policy,
+        &["echo".into(), "hi".into()],
+        dir.path(),
+    )
+    .expect("有人在场时应当放行 —— 否则桌面端的终端那半永远用不了");
     assert!(
         !prepared.enforced,
         "放行不等于有围栏。enforced 谎报成 true 会让上层以为这条命令被内核限制住了"

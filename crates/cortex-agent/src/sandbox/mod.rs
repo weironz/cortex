@@ -327,11 +327,33 @@ pub(crate) fn command_from_argv(argv: &[String]) -> std::process::Command {
 }
 
 pub fn prepare(policy: &SandboxPolicy, argv: &[String], cwd: &Path) -> Result<Prepared> {
+    prepare_with(capability(), policy, argv, cwd)
+}
+
+/// 与 [`prepare`] 相同，但**由调用方指定本机的沙箱能力**。
+///
+/// # 为什么要这么一个入口
+///
+/// 「没有沙箱时怎么办」是这一层最重要的几条纪律（没人在场就拒、有人在场
+/// 放行但标记 `enforced = false`），而它们只有在**本机真的没有沙箱**时
+/// 才跑得到。三个平台如今都有沙箱了 —— Linux landlock、macOS seatbelt、
+/// Windows AppContainer（2026-08-28 接上）—— 于是那几条测试在**哪儿都不跑**。
+///
+/// 这不是假设：Windows 曾经是它们唯一还能执行的地方，`sandbox/windows.rs`
+/// 落地的那一刻，那组断言在整个仓库里失去了执行环境，而**没有任何东西变红**。
+///
+/// 所以把「哪个能力」变成参数。**不做成环境变量**：那会在生产里多开一扇
+/// 通往同一个房间的门，而这个仓库记过「配置有两份、改了一处」（3 次）。
+pub fn prepare_with(
+    cap: &Capability,
+    policy: &SandboxPolicy,
+    argv: &[String],
+    cwd: &Path,
+) -> Result<Prepared> {
     let Some(program) = argv.first() else {
         return Err(CortexError::Invalid("命令为空".into()));
     };
 
-    let cap = capability();
     if !cap.is_available() {
         // 两条各自独立的放行理由。**不合并成一个 bool** —— 它们的日志
         // 措辞不同，而「为什么这条命令没有被沙箱保护」是排障时要能一眼

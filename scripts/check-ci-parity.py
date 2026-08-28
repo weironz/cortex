@@ -71,6 +71,12 @@ COVERED = {
     "边缘转得到每条路由": "lint-edge",
     "代码读的环境变量，compose 都设得了": "lint-compose-env",
     "本机 just ci 跑得到 CI 的每一步": "lint-ci-parity",
+    # Windows 那条腿。本机（Windows 开发机）上 `cargo test --workspace` 就跑了
+    # 这两组 —— `sandbox/windows.rs` 与 `sandbox_escape_windows.rs` 都是
+    # `#[cfg(windows)]`，所以在 Linux / macOS 上它们**不存在**，没有可跑的东西。
+    # 也就是说这一条的覆盖是随平台的：谁在 Windows 上跑 `just ci`，
+    # 谁就跑到了；而 CI 上那条腿保证它在别人不跑的时候也有人跑。
+    "沙箱逃逸测试（Windows）": "test",
     "dart format": "flutter-check",
     "flutter analyze": "flutter-check",
     "flutter test": "flutter-check",

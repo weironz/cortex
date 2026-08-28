@@ -1569,6 +1569,41 @@ pub async fn spawn_background(
     ))
 }
 
+/// 降级执行的告警。**这一行同时进模型上下文与用户可见的结果** ——
+/// 「有没有被保护」不该只有翻日志才知道。
+pub(crate) const UNENFORCED_MARK: &str = "⚠ 本次执行没有 OS 沙箱保护";
+
+/// 把一条命令的输出拼成工具结果的正文。
+///
+/// # 为什么单独拆出来
+///
+/// 里面那句 [`UNENFORCED_MARK`] 是**安全可见性**的东西，而它只在本机
+/// 没有沙箱时才出现 —— 三个平台如今都有沙箱（Windows 2026-08-28 接上
+/// AppContainer 之后是最后一个），于是它在 CI 与开发机上**都跑不到**。
+///
+/// 一段谁也执行不到的安全提示，删掉它不会有任何测试红。拆成一个纯函数
+/// 之后，它至少有一条测试钉着「`enforced == false` 时必须带这句话」。
+fn shell_body(enforced: bool, stdout: &[u8], stderr: &[u8]) -> String {
+    let mut body = String::new();
+    if !enforced {
+        body.push_str(UNENFORCED_MARK);
+        body.push('\n');
+    }
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    if !stdout.is_empty() {
+        body.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !body.is_empty() && !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push_str("[stderr]\n");
+        body.push_str(&stderr);
+    }
+    body
+}
+
 async fn run_shell(sandbox: &Sandbox, command: &str, timeout_ms: u64) -> ToolResult {
     let argv = match shell_argv(command) {
         Ok(v) => v,
@@ -1614,24 +1649,7 @@ async fn run_shell(sandbox: &Sandbox, command: &str, timeout_ms: u64) -> ToolRes
         Ok(Ok(o)) => o,
     };
 
-    let mut body = String::new();
-    if !prepared.enforced {
-        // 降级模式下这一行同时进模型上下文与用户可见的工具结果。
-        // 「有没有被保护」不该只有翻日志才知道
-        body.push_str("⚠ 本次执行没有 OS 沙箱保护\n");
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !stdout.is_empty() {
-        body.push_str(&stdout);
-    }
-    if !stderr.is_empty() {
-        if !body.is_empty() && !body.ends_with('\n') {
-            body.push('\n');
-        }
-        body.push_str("[stderr]\n");
-        body.push_str(&stderr);
-    }
+    let mut body = shell_body(prepared.enforced, &out.stdout, &out.stderr);
     // ── 被出网代理拦了的话，把理由拼进来 ──────────────────
     //
     // 只在**非零退出**时问，且只在配了代理时才真的发请求（桌面端两条都不成立，
@@ -2176,6 +2194,26 @@ mod tests {
              没沙箱还说，那是另一种说得不对。实际描述：{}",
             spec.description
         );
+    }
+
+    /// **降级执行必须带那句告警。**
+    ///
+    /// 它只在本机没有沙箱时出现，而三个平台如今都有沙箱 —— 也就是说这句话
+    /// 在 CI 与开发机上一次都不会被生成。删掉它不会有任何东西变红，
+    /// 而后果是用户与模型都以为这条命令被保护着。
+    #[test]
+    fn 降级执行的结果里必须带告警() {
+        let 有围栏 = shell_body(true, b"hi", b"");
+        let 没围栏 = shell_body(false, b"hi", b"");
+        assert!(
+            !有围栏.contains(UNENFORCED_MARK),
+            "有沙箱时不该报警 —— 那会让人对真正的告警脱敏：{有围栏}"
+        );
+        assert!(
+            没围栏.starts_with(UNENFORCED_MARK),
+            "降级执行的告警必须在**第一行**，往后挪就会被长输出顶走：{没围栏}"
+        );
+        assert!(没围栏.contains("hi"), "命令输出不能被告警挤掉：{没围栏}");
     }
 
     /// 封闭策略不能顺手把系统只读目录放出去。
