@@ -359,3 +359,5 @@ jobs:
           cargo test -p cortex-agent --target x86_64-pc-windows-msvc --lib sandbox
           cargo test -p cortex-agent --target x86_64-pc-windows-msvc --test sandbox_escape_windows
           cargo test -p cortex-agent --target x86_64-pc-windows-msvc --test sandbox_restricted_windows
+          # attended_execution 里「装配失败不许降级裸跑」那条是 cfg(windows) —— 只有这条腿跑得到
+          cargo test -p cortex-agent --target x86_64-pc-windows-msvc --test attended_execution

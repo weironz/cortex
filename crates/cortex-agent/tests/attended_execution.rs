@@ -82,6 +82,53 @@ fn attended_execution_is_allowed_but_marked_unenforced() {
     );
 }
 
+/// **探测说有沙箱、装配却失败时：必须报错，不许降级裸跑 —— 人在场也不行。**
+///
+/// 这是 roadmap 里那条「配置失败时不能让用户在不知情的情况下从『有沙箱』
+/// 掉回『逐条确认』」的测试。守的是 `prepare_with` 里
+/// `prepare_backend(...)?` 那一个问号：哪天有人「好心」把它改成
+/// `Err(_) => 裸跑并标记 enforced=false`，用户看到的仍是那套熟悉的确认
+/// 弹窗，完全不知道这一次与往常的区别 —— 往常是「这台机器上根本没有
+/// 沙箱」（一开始就知道），这一次是「有沙箱、但它坏了」（该修，而不是绕）。
+///
+/// 特意在 `attended` 打开的情况下断言：`attended` 放的是「本机**没有**
+/// 沙箱能力」那条路，不是「有能力但装配失败」这条 —— 两者的区别正是
+/// 这条测试存在的理由。
+///
+/// 失败注入用 `CORTEX_WIN_SANDBOX_HELPER` 指向不存在的文件（`helper_path`
+/// 对此显式报错），所以只在 Windows 上跑 —— 但被守的那行代码是三个平台
+/// 共用的。
+#[cfg(windows)]
+#[test]
+fn 装配失败必须报错_不许降级裸跑() {
+    use cortex_agent::sandbox::Backend;
+
+    // SAFETY: 本测试二进制里没有别的测试读写这个变量（其余测试全走
+    // `无沙箱()`，在碰到后端之前就返回了）
+    unsafe {
+        std::env::set_var("CORTEX_WIN_SANDBOX_HELPER", r"C:\不存在\cortex-helper.exe");
+    }
+    let dir = tempfile::tempdir().expect("临时目录");
+    let policy = SandboxPolicy::workspace(dir.path()).attended();
+    let cap = Capability::Available {
+        backend: Backend::AppContainer,
+        detail: "测试构造：能力在、装配会失败".into(),
+    };
+    let r = sandbox::prepare_with(
+        &cap,
+        &policy,
+        &["cmd".into(), "/C".into(), "echo hi".into()],
+        dir.path(),
+    );
+    unsafe {
+        std::env::remove_var("CORTEX_WIN_SANDBOX_HELPER");
+    }
+    assert!(
+        r.is_err(),
+        "探测说有沙箱、装配失败 —— 必须报错。放行（无论 enforced 标成什么）         都是把「沙箱坏了」伪装成「一切如常」"
+    );
+}
+
 /// **「有人在场」安全的全部依据：`Execute` 是最高风险档。**
 ///
 /// [`ApprovalPolicy::decide`] 只在 `risk < confirm_at` 时放行。`Execute` 是
