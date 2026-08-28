@@ -32,19 +32,31 @@
 //!
 //! 实测（2026-08-28）：
 //!
+//! **根因（已定位）**：受限令牌下**证书系统存储只能只读打开**。
+//! `CertOpenSystemStore`（读写）回 `ERROR_ACCESS_DENIED`，而同一个存储加
+//! `CERT_STORE_READONLY_FLAG` 开得开 —— 而 schannel 内部按读写开，于是
+//! `AcquireCredentialsHandle` 回 `SEC_E_NO_CREDENTIALS`。
+//!
+//! 这不是我们漏授：证书存储的注册表键上明写着
+//! `NT AUTHORITY\RESTRICTED: ReadKey` —— **Windows 对受限令牌的既定语义**。
+//! （试过把用户 SID 加进令牌默认 DACL，没用，已回滚。）
+//!
+//! **修法：不去要写权限，而是让程序绕开 schannel。** 现状：
+//!
 //! | | 结果 |
 //! |---|---|
-//! | `curl http://…`（明文） | **200，出得去** |
-//! | `curl https://…` | 退出码 35：`schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS` |
-//! | `git ls-remote https://…` | 同一个错，`fatal` |
-//! | PowerShell `iwr https://…` | 同样失败 |
+//! | `git`（`clone` / `fetch` / `push` / `ls-remote`） | ✅ **通** —— 注入 `http.sslBackend=openssl`，走 git 自带 ca-bundle |
+//! | `cargo` 更新索引 | ✅ 通 —— `CARGO_NET_GIT_FETCH_WITH_CLI` + 索引走 git 协议 |
+//! | `cargo` 下载 `.crate` | ❌ 仍挂 —— 走 cargo 内建 libcurl（只编了 Schannel），没有开关能换 |
+//! | `curl https://` | ❌ 仍挂 —— 这个构建只编了 Schannel |
+//! | `curl http://`（明文） | 通 |
 //!
-//! 所以这一档在网络上是**两头不讨好**：不构成边界（明文能外发），又坏了
-//! 可用性（`git clone/fetch/push`、`cargo` 拉依赖全废）。
+//! 规律是：**凡是能改走 git CLI 的都修好了；凡是进程自己链了 Schannel 的
+//! 都换不掉**。给它们 CA 文件（`--cacert` / `CARGO_HTTP_CAINFO`）没用 ——
+//! 那只换验证用的根，不换 TLS 后端。
 //!
-//! 根因是受限令牌下 schannel 建不出凭据句柄。试过把用户 SID 加进令牌的
-//! 默认 DACL —— **没用**，已回滚。要修得先查清 schannel 到底缺什么
-//! （lsass RPC 权限？密钥容器 ACL？），那是独立的一块活。
+//! 所以这一档**不构成网络边界**（明文出得去），但可用性上已经能干活：
+//! git 全通，依赖在本地缓存时构建正常，只有「拉新依赖」要在沙箱外先做。
 //!
 //! **零管理员做不到真封网**，这一点也实测过：`FwpmEngineOpen0` 能开（只读），
 //! 但 `FwpmTransactionBegin0` 回 `ERROR_ACCESS_DENIED` —— WFP 写规则要管理员，
@@ -591,6 +603,46 @@ unsafe fn spawn_restricted(argv: &[String], cwd: &str) -> Result<u32> {
             return Err(e);
         }
     };
+
+    // ── git 的 HTTPS：换掉 schannel ─────────────────────────────
+    //
+    // 受限令牌下 schannel 建不出凭据（`SEC_E_NO_CREDENTIALS`），根因实测是
+    // **证书系统存储只能只读打开**：`CertOpenSystemStore`（读写）回
+    // `ERROR_ACCESS_DENIED`，而同一个存储用 `CERT_STORE_READONLY_FLAG` 开
+    // 得开。那不是我们漏授 —— 证书存储的注册表键上明写着
+    // `NT AUTHORITY\RESTRICTED: ReadKey`，是 Windows 对受限令牌的既定语义。
+    //
+    // 所以不去要写权限，而是让 git 不走 schannel：`http.sslBackend=openssl`
+    // 用 git 自带的 ca-bundle 验证，不碰证书存储。实测在沙箱里 `git ls-remote`
+    // 从 `fatal` 变成拿到真实 HEAD。
+    //
+    // 用 `GIT_CONFIG_COUNT/KEY/VALUE` 注入而不是改用户的 `~/.gitconfig` ——
+    // 那是用户的文件，沙箱不该往里写东西；而且这条只该在沙箱内生效。
+    //
+    // ⚠️ **只解决走 git CLI 的那条路**。凡是进程自己链了 Schannel 的都换不掉：
+    // `curl`（`curl --version` 里写着 Schannel）、以及 cargo 下载 `.crate` 时
+    // 用的内建 libcurl。给它们 CA 文件（`--cacert` / `CARGO_HTTP_CAINFO`）也没用 ——
+    // 那只换验证用的根，不换 TLS 后端。工具描述里如实写着哪些能、哪些不能。
+    {
+        use windows_sys::Win32::System::Environment::SetEnvironmentVariableW;
+        for (k, v) in [
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "http.sslBackend"),
+            ("GIT_CONFIG_VALUE_0", "openssl"),
+            // cargo 的索引也改走 git CLI —— 那条路现在是通的。
+            // ⚠️ **只解决索引，解决不了 `.crate` 文件的下载**：那一步走 cargo
+            // 自己链进去的 libcurl（同样只编了 Schannel），cargo 没有把下载
+            // 也交给 git 的开关。实测：加了这两个之后 `Updating crates.io index`
+            // 过得去，随后卡在 `failed to download from https://static.crates.io/…`。
+            // 留着它们是因为**索引更新本身也常是失败点**，能过一步是一步。
+            ("CARGO_NET_GIT_FETCH_WITH_CLI", "true"),
+            ("CARGO_REGISTRIES_CRATES_IO_PROTOCOL", "git"),
+        ] {
+            let kw = wide(k);
+            let vw = wide(v);
+            SetEnvironmentVariableW(kw.as_ptr(), vw.as_ptr());
+        }
+    }
 
     // %TEMP% 指进工作区。受限令牌下真 %TEMP%（授的是用户、非 logon/Everyone）
     // 写不进，而 rustc/link 到处用它。子进程继承 helper 的环境，所以在这里

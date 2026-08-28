@@ -413,8 +413,20 @@ AppContainer 那一档跑不了完整构建 —— `cargo check` / `clippy` / ru
 
 两件事要分开做，都还没做：
 
-1. **修 HTTPS**（真 bug，影响可用性）——受限令牌下 schannel 建不出凭据句柄。
-   试过把用户 SID 加进令牌默认 DACL，**没用**，已回滚。要查清 schannel 缺什么。
+1. ~~**修 HTTPS**~~ —— **做了一半，且那一半是最要紧的**（2026-08-28）。
+   根因定位到「受限令牌下证书存储只能只读打开」（注册表键上明写
+   `NT AUTHORITY\RESTRICTED: ReadKey`，是系统既定语义，不是漏授）。
+   解法是绕开 schannel 而不是要写权限：
+
+   | | 现状 |
+   |---|---|
+   | `git`（clone/fetch/push） | ✅ 通 —— 注入 `http.sslBackend=openssl` |
+   | `cargo` 更新索引 | ✅ 通 —— 走 git 协议 |
+   | `cargo` 下载 `.crate` | ❌ 挂 —— cargo 内建 libcurl 只编了 Schannel，无开关可换 |
+   | `curl https://` | ❌ 挂 —— 同上 |
+
+   规律：**能改走 git CLI 的都好了，进程自己链了 Schannel 的都换不掉**。
+   剩下那半要么等上游给开关，要么在沙箱里放一份 openssl 版 curl。
 2. **真封网**要么一次管理员（WFP 按 SID，codex 的形状），要么把需要出网控制的
    场景交给云沙箱（那边有 `cortex-egress-proxy` 白名单）。
 

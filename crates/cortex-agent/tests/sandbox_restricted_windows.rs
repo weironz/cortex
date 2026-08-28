@@ -111,6 +111,54 @@ mod win {
         );
     }
 
+    /// **`git` 走 HTTPS 要通。**
+    ///
+    /// 受限令牌下 schannel 建不出凭据（`SEC_E_NO_CREDENTIALS`）—— 根因实测是
+    /// 证书系统存储只能**只读**打开，而那是 Windows 对受限令牌的既定语义
+    /// （证书存储的注册表键上明写 `NT AUTHORITY\RESTRICTED: ReadKey`），
+    /// 不是我们漏授。解法是让 git 不走 schannel：注入
+    /// `http.sslBackend=openssl`，用 git 自带的 ca-bundle 验证。
+    ///
+    /// 这条测试钉住那个注入 —— 删掉它，`git clone` / `fetch` / `push` 会静默
+    /// 退回 `fatal: ... SEC_E_NO_CREDENTIALS`，而那看起来像网络故障。
+    ///
+    /// 需要外网；没有就跳过（有正对照，不会静默变成空测）。
+    pub async fn git_走_https_能通() {
+        if !宿主有外网() {
+            println!("  [跳过] 这台机器没有外网");
+            return;
+        }
+        let (_d, sb) = workspace();
+        let r = shell(
+            &sb,
+            "git ls-remote https://github.com/rust-lang/cargo HEAD 2>&1",
+        )
+        .await;
+        cleanup(&sb);
+        assert!(
+            !r.content.contains("SEC_E_NO_CREDENTIALS"),
+            "git 的 HTTPS 又退回 schannel 了 —— `http.sslBackend=openssl` 的注入没生效。
+             症状会被当成网络故障。实际：{}",
+            r.content
+        );
+        assert!(
+            r.content.contains("HEAD"),
+            "git ls-remote 没拿到 HEAD。实际：{}",
+            r.content
+        );
+    }
+
+    /// 宿主机自己有没有外网 —— 上面那条的正对照。
+    fn 宿主有外网() -> bool {
+        use std::net::ToSocketAddrs;
+        let Ok(mut a) = ("github.com", 443).to_socket_addrs() else {
+            return false;
+        };
+        a.any(|x| {
+            std::net::TcpStream::connect_timeout(&x, std::time::Duration::from_secs(5)).is_ok()
+        })
+    }
+
     /// 写不进主目录 —— `WRITE_RESTRICTED` + 只授工作区的 logon SID。
     pub async fn 写不进主目录() {
         let (_d, sb) = workspace();
@@ -199,6 +247,9 @@ fn main() {
     run("能力可用", &win::能力可用);
     run("cargo_build_出_exe", &|| {
         rt.block_on(win::cargo_build_出_exe())
+    });
+    run("git 走 https 能通", &|| {
+        rt.block_on(win::git_走_https_能通())
     });
     run("写不进主目录", &|| rt.block_on(win::写不进主目录()));
     run("工作区外非秘密可读是已知取舍", &|| {

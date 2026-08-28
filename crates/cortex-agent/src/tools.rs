@@ -1097,10 +1097,11 @@ fn shell_description() -> std::borrow::Cow<'static, str> {
     const RESTRICTED: &str = concat!(
         "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里。",
         "本机这一档是 Windows 受限令牌：**写只落在工作区**（写工作区以外会被拒），",
-        "本地工具链可用 —— `cargo build`、`dir`、本地 `git` 操作都正常。",
-        "⚠ **HTTPS 在这一档里用不了**（schannel 拿不到凭据）：`git clone` / `fetch` / ",
-        "`push` 走 https 会失败，`cargo` 也拉不了依赖。那是沙箱的限制，不是网络故障，",
-        "换写法或重试都没有用 —— 需要联网拉取时请告诉用户，让他在沙箱外做。",
+        "工具链可用 —— `cargo build`、`dir`、`git`（含 `clone` / `fetch` / `push`）都正常。",
+        "⚠ 但 **`cargo` 拉不了新依赖**：下载 `.crate` 那一步走的 TLS 在这一档里",
+        "拿不到凭据，会报 `SSL connect error ... SEC_E_NO_CREDENTIALS`。那是沙箱的限制，",
+        "不是网络故障，重试没有用 —— 依赖已在本地缓存时构建正常；需要拉新依赖时",
+        "请告诉用户，让他在沙箱外先 `cargo fetch`。`curl https://` 同理不通（用 git 代替）。",
         "⚠ 这一档**不限制读取**：它读得到当前用户能读的任何文件；明文 HTTP 也出得去。",
         "所以不要把它当成「关住不受信代码」的边界；处理敏感文件时照常谨慎。",
     );
