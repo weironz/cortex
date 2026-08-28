@@ -162,11 +162,7 @@ fn system_prompt_for(
     // 项目指引（AGENTS.md / CLAUDE.md）。跟着工作区走：没绑定就没有
     // 「项目」这个概念。为什么自动读而不问一次，见 `project_guide`
     if let Some(guide) = workspace.and_then(cortex_agent::workspace::project_guide) {
-        prompt.push_str(
-            "
-
-",
-        );
+        prompt.push_str("\n\n");
         prompt.push_str(&guide);
     }
     // 技能目录。空清单一律不印 —— 而且**同一个判据**决定了 `load_skill`
@@ -188,11 +184,7 @@ fn system_prompt_for(
     // 「这台机器的 shell 是哪一族」。接在出网说明前面：两段都是整会话稳定的
     // 事实，一起进可缓存前缀。Unix 上返回 None，所以这一段只在 Windows 出现
     if let Some(note) = cortex_agent::prompt::shell_dialect_note() {
-        prompt.push_str(
-            "
-
-",
-        );
+        prompt.push_str("\n\n");
         prompt.push_str(note);
     }
     if let Some(note) = cortex_agent::prompt::egress_note(env) {
@@ -2634,6 +2626,37 @@ mod tests {
                  模型会照着它放弃重试一次真实的网络故障：{desktop}",
                 env.as_str()
             );
+        }
+    }
+
+    /// 那段「这台机器的 shell 是哪一族」必须真的进到组装好的提示词里。
+    ///
+    /// `prompt.rs` 那边有一条测试钉着**这段话本身**说得对不对，但那证明不了
+    /// 它被用上了 —— 这个仓库的头号故障形状就是「造好了但没人调用」（7 次）。
+    /// 少一行 `push_str` 不会有任何东西变红，而症状是 Windows 上的模型
+    /// 继续拿 bash 的写法去撞墙。
+    ///
+    /// 判据跟着平台走：Unix 上那段本来就该是空的，硬要它出现才是说错话。
+    #[test]
+    fn shell_方言说明会进到提示词里() {
+        let prompt = system_prompt_for(
+            "底座",
+            "",
+            cortex_agent::ExecEnvironment::LocalMachine,
+            Some("/ws"),
+            None,
+            &[],
+            false,
+        );
+        match cortex_agent::prompt::shell_dialect_note() {
+            Some(note) => assert!(
+                prompt.contains(note),
+                "方言说明造出来了却没接进提示词 —— 模型看不到它：{prompt}"
+            ),
+            None => assert!(
+                !prompt.contains("cmd.exe /C"),
+                "这台机器不是 Windows，提示词里不该出现 cmd：{prompt}"
+            ),
         }
     }
 
