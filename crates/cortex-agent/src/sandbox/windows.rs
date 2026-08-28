@@ -145,7 +145,8 @@ use windows_sys::Win32::Security::Isolation::{
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, FreeSid, GetAce,
-    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+    InitializeSecurityDescriptor, SECURITY_CAPABILITIES, SECURITY_DESCRIPTOR, SID_AND_ATTRIBUTES,
+    SetFileSecurityW, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
 };
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
@@ -361,6 +362,54 @@ unsafe fn grant_to_container(
     let rc = SetEntriesInAclW(1, &ea, old_dacl, &mut new_dacl);
     if rc != 0 {
         return Err(CortexError::Invalid(format!("合并权限表失败（错误 {rc}）")));
+    }
+
+    // ── 写回。**两条路，按继承与否分。** ─────────────────────────
+    //
+    // `SetNamedSecurityInfoW` 会做「自动继承传播」：把这个容器的可继承 ACE
+    // 重新算一遍铺到**每一个子项**上。工作区那次必须走它 —— 子项本来就要
+    // 拿到权限。而祖先目录那些 ACE 是**不继承**的，子项什么都不会变，
+    // 那一趟遍历纯属白跑。
+    //
+    // 实测（2026-08-28，797 381 个文件的目录，加一条不继承的 ACE）：
+    //
+    // | | 耗时 |
+    // |---|---|
+    // | `SetNamedSecurityInfoW` | **198.9 s** |
+    // | `SetFileSecurityW` | **0.38 ms** |
+    //
+    // 差五个数量级。`SetFileSecurityW` 是被前者取代的老接口，它**不做**
+    // 继承传播 —— 正因如此它在这里是对的那一个。
+    //
+    // ⚠️ 一个必须验的点：这么写会不会把「继承来的」条目压扁成显式条目
+    // （那是破坏性的）。实测不会 —— 写回之后 `icacls` 里那些条目仍然带
+    // `(I)`。ACE 自己的 `INHERITED_ACE` 标志位在合并时原样保留，
+    // 而 `SE_DACL_AUTO_INHERITED` 由下面那行显式置上。
+    if inherit == INHERIT_NONE {
+        let mut sd: SECURITY_DESCRIPTOR = std::mem::zeroed();
+        let sdp: *mut c_void = std::ptr::from_mut(&mut sd).cast();
+        if InitializeSecurityDescriptor(sdp, 1) == 0
+            || SetSecurityDescriptorDacl(sdp, 1, new_dacl, 0) == 0
+        {
+            return Err(last_error("组装安全描述符"));
+        }
+        // `SE_DACL_AUTO_INHERITED` —— 告诉系统这份 DACL 是按自动继承算出来
+        // 的。不置的话它可能被当成「手工维护的老式 DACL」，日后父目录的权限
+        // 变化就传不下来了。
+        //
+        // ⚠️ **这一位没有测试守着**，因为它观察不到：`icacls` 不显示它，
+        // `Get-Acl` 露出来的 `AreAccessRulesProtected` 是另一位。实测删掉这
+        // 一行，`不继承的授权不会压扁继承标记` 照样绿。留着是便宜的保险，
+        // 但别以为它被验过了。
+        SetSecurityDescriptorControl(sdp, 0x0400, 0x0400);
+        if SetFileSecurityW(path.as_ptr(), DACL_SECURITY_INFORMATION, sdp) == 0 {
+            return Err(CortexError::Invalid(format!(
+                "写不回 {} 的权限表（{}）—— 需要对这个目录有 WRITE_DAC",
+                dir.display(),
+                last_error("SetFileSecurityW")
+            )));
+        }
+        return Ok(true);
     }
 
     let rc = SetNamedSecurityInfoW(
@@ -1262,6 +1311,60 @@ mod tests {
             )
         };
         assert_eq!(rc, 0, "写不回权限表（错误 {rc}）");
+    }
+
+    /// **不继承的那条路不能把「继承来的」条目压扁成显式条目。**
+    ///
+    /// 祖先目录的授权走的是 `SetFileSecurityW`（老接口，不做继承传播）——
+    /// 那是它比 `SetNamedSecurityInfoW` 快五个数量级的原因（797k 文件的目录
+    /// 上 0.38 ms vs 198.9 s）。代价是它把整份 DACL 原样写回去，所以必须验
+    /// 一件事：**原先标着「继承自父目录」的那些条目，写回之后还标着吗。**
+    ///
+    /// 压扁了的话不会有任何症状 —— 直到某天有人改了父目录的权限，发现改动
+    /// 传不下来，而那时离这里已经隔了很远。
+    ///
+    /// ⚠️ **这条测试盖不住 `SE_DACL_AUTO_INHERITED`。** 那一位也是为同一个
+    /// 目的置的，但它在 `icacls` 里看不见，`Get-Acl` 露出来的也只有
+    /// `AreAccessRulesProtected`（那是另一位）。实测把置位那行删掉，这条
+    /// 测试照样绿 —— 所以别把它当成「那一位有人守着」的证据。
+    /// 它守的是**逐条 ACE 的 `INHERITED_ACE` 标志**，那一半是能观察的。
+    ///
+    /// 用 `icacls` 读而不是再写一遍 Win32：测试要能独立读懂失败原因，
+    /// 不该是实现的镜像。
+    #[test]
+    fn 不继承的授权不会压扁继承标记() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let 之前 = icacls_继承条目数(dir.path());
+        assert!(
+            之前 > 0,
+            "临时目录本来就该有继承自父目录的条目，否则这条测试验不到东西"
+        );
+
+        // SAFETY: SID 只在本作用域内使用，用完就释放
+        unsafe {
+            let sid = container_sid().expect("拿得到容器 SID");
+            grant_to_container(dir.path(), sid, INHERIT_NONE, LIST_ONLY).expect("授得下去");
+            FreeSid(sid);
+        }
+
+        assert_eq!(
+            icacls_继承条目数(dir.path()),
+            之前,
+            "带 (I) 的条目数变了 —— 继承来的条目在写回时被压扁成显式条目了。
+             症状要很久以后才出现：父目录的权限改动传不下来"
+        );
+    }
+
+    /// DACL 里有多少条标着 `(I)`（继承自父目录）。
+    fn icacls_继承条目数(dir: &Path) -> usize {
+        let out = std::process::Command::new("icacls")
+            .arg(dir)
+            .output()
+            .expect("跑得起 icacls");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains("(I)"))
+            .count()
     }
 
     /// **`cmd /C` 后面那段一个引号都不加。**
