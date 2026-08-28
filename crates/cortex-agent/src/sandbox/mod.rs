@@ -27,7 +27,7 @@
 //! |---|---|---|
 //! | Linux | landlock（文件系统）+ seccomp（syscall） | 需内核 5.13+，ABI 越高能拦的越多 |
 //! | macOS | Seatbelt（`/usr/bin/sandbox-exec`） | Apple 标 deprecated 但仍可用 |
-//! | Windows | **AppContainer** | 只做文件系统边界；网络与桌面未隔离，见 [`windows`] |
+//! | Windows | **AppContainer** | 文件与网络边界；桌面未隔离。⚠️ 网络这一层**没有白名单**，`Allowed` 就是整个互联网，与 Linux 侧不同 —— 见 [`windows`] |
 //!
 //! # 没有沙箱能力时默认拒绝
 //!

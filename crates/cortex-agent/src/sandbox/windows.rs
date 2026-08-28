@@ -32,15 +32,59 @@
 //!
 //! **挡不住，一条都不许含糊：**
 //!
-//! 1. **网络。** 这一版**不设**任何 capability，而 AppContainer 默认无网 ——
-//!    也就是说出网**恰好**是断的。但这是副作用不是设计：需要 `git clone`
-//!    的人会立刻撞上它，而那时的正确做法是给一个 capability 加一层
-//!    出网代理（对齐 Linux 侧 `cortex-egress-proxy`），不是把这一层拆掉。
-//!    见 `NetworkPolicy` 的处理。
+//! 1. ~~网络~~ —— **现在挡住了**，见下面「网络」那一节。留一句在这里是因为
+//!    它挡的方式与 Linux 那侧**不一样**：这边没有白名单，只有全开与全关。
 //! 2. **`ALL APPLICATION PACKAGES` 可读的系统路径**（`C:\Windows`、
 //!    `Program Files` 的大部分）。那里没有用户的秘密，但也不是「什么都
 //!    碰不到」。
 //! 3. **把工作区里的东西发出去** —— 那是网络那一层的事。
+//!
+//! # 网络：一个 capability 的事
+//!
+//! 实测（2026-08-28，同一条 `curl -m 8 https://example.com` 两跑）：
+//!
+//! | | HTTP | DNS |
+//! |---|---|---|
+//! | 不给 capability | 退出码 6，域名都解析不出来 | 失败 |
+//! | 给 `internetClient`（`S-1-15-3-1`） | **200** | 通 |
+//!
+//! 所以 [`NetworkPolicy`] 在这一层是个干净的二元开关。
+//!
+//! ⚠️ **两边的 `Allowed` 不是同一个东西。** Linux 侧 `Allowed` 走
+//! `cortex-egress-proxy` 的 CONNECT 白名单；这边一放就是整个互联网。
+//! 把它们当成一回事，就会以为工作区里的东西发不出去。
+//!
+//! 顺带：loopback 仍然断着（AppContainer 一贯如此），所以沙箱里的命令
+//! **连不上本机跑着的开发服务器**。那是这一层免费送的，不是我们设的 ——
+//! 逃逸测试里有一条盯着它，为的是「它哪天变了我们要知道」。
+//!
+//! # 这一层挡得住边界，却挡掉了一些正常的活
+//!
+//! 实测（2026-08-28）：`type`、`echo >`、cmd 的 `for %f in (*)` 通配、
+//! .NET 的 `Directory.GetFiles`、起可执行文件 —— **都正常**。而这三样**不行**：
+//!
+//! | | 症状 |
+//! |---|---|
+//! | `dir` | 「拒绝访问。」 |
+//! | `vol` / `fsutil volume` | 同上 |
+//! | **`git`（任何子命令）** | `fatal: unable to get current working directory: Permission denied` |
+//!
+//! 根因是同一个：**AppContainer 打不开卷根**（`C:/`、`D:/`）。`dir` 要取卷
+//! 信息；git 的 `mingw_getcwd` 在 `GetLongPathNameW` 失败后回落到
+//! `GetFinalPathNameByHandleW`，那一步要解析卷。
+//!
+//! 排除过的两条：
+//!
+//! - **不是祖先目录穿不过去** —— 把工作区放进容器自己的
+//!   `AppData/Local/Packages/<容器>/AC/Temp` 里（整条链都对容器开放），
+//!   症状一模一样。
+//! - **给祖先加列举权也不管用** —— 从 `C:/Users/<你>` 往下每一级都授
+//!   `FILE_LIST_DIRECTORY`，git 的错误一个字没变。所以那个授权被撤掉了：
+//!   它让容器能列出你主目录里有哪些东西，而什么都没换来。
+//!
+//! 唯一的解法是在**卷根**上给容器 SID 一条读+执行的 ACE，而那要管理员
+//! （实测 `SetNamedSecurityInfoW("C:/")` 回错误 5）。**是否要那一次提权，
+//! 是个产品决定，不是技术决定** —— 记在 `docs/roadmap.md` 里等人拍板。
 //!
 //! # 授权的代价：一次性的，但那一次可能很贵
 //!
@@ -84,17 +128,18 @@ use std::ffi::c_void;
 use std::path::Path;
 
 use cortex_core::{CortexError, Result};
+use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
 use windows_sys::Win32::Security::Authorization::{
-    EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
-    TRUSTEE_IS_SID, TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SE_FILE_OBJECT, SetEntriesInAclW,
+    SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, FreeSid, GetAce,
-    SECURITY_CAPABILITIES,
+    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
 };
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
@@ -102,7 +147,7 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_INFORMATION, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
-use super::{Backend, Capability, SandboxPolicy};
+use super::{Backend, Capability, NetworkPolicy, SandboxPolicy};
 
 /// 这个装机用哪个 AppContainer。
 ///
@@ -353,6 +398,9 @@ pub(super) fn detect() -> Capability {
     let probe = HelperPlan {
         argv: vec!["cmd.exe".into(), "/c".into(), "exit".into(), "0".into()],
         cwd: std::env::temp_dir().display().to_string(),
+        // 探针不需要网 —— 而且给了的话，「能不能起进程」这个问题就掺进了
+        // 「能不能出网」，探测失败时分不清是哪一个
+        network: false,
     };
     let Ok(json) = serde_json::to_string(&probe) else {
         return Capability::Unavailable {
@@ -370,7 +418,7 @@ pub(super) fn detect() -> Capability {
     {
         Ok(out) if out.status.success() => Capability::Available {
             backend: Backend::AppContainer,
-            detail: format!("AppContainer（{CONTAINER_NAME}）· 文件系统边界；网络与桌面未隔离"),
+            detail: format!("AppContainer（{CONTAINER_NAME}）· 文件与网络边界；桌面未隔离"),
         },
         Ok(out) => Capability::Unavailable {
             reason: format!(
@@ -388,14 +436,16 @@ pub(super) fn detect() -> Capability {
     }
 }
 
-/// 装配一条待执行的命令。
-///
-/// 回的是**本程序 + [`HELPER_FLAG`] + 一段 JSON**，不是真命令 ——
-/// 理由见模块文档。
 /// 覆盖 helper 的路径。**给测试用**，不是配置项。
 ///
 /// 见 [`helper_path`]：本进程未必就是那个实现了 helper 模式的二进制。
 pub const HELPER_ENV: &str = "CORTEX_WIN_SANDBOX_HELPER";
+
+/// `internetClient` —— AppContainer 里「可以往外拨」的那一个 capability。
+///
+/// 写字面量而不是查名字：这个 SID 是 Windows 钉死的众所周知值，
+/// 而按名字派生要多一次可能失败的调用，失败时的回落是「静默无网」。
+const INTERNET_CLIENT_SID: &str = "S-1-15-3-1";
 
 /// 哪个二进制来当 helper。
 ///
@@ -497,6 +547,10 @@ fn writable_under_cwd(policy: &SandboxPolicy, cwd: &Path) -> Vec<String> {
         .collect()
 }
 
+/// 装配一条待执行的命令。
+///
+/// 回的是**本程序 + [`HELPER_FLAG`] + 一段 JSON**，不是真命令 ——
+/// 理由见模块文档。
 pub(super) fn prepare(
     policy: &SandboxPolicy,
     argv: &[String],
@@ -519,6 +573,7 @@ pub(super) fn prepare(
     let plan = HelperPlan {
         argv: argv.to_vec(),
         cwd: strip_verbatim(&cwd.display().to_string()),
+        network: matches!(policy.network, NetworkPolicy::Allowed),
     };
     let json = serde_json::to_string(&plan)
         .map_err(|e| CortexError::Invalid(format!("装配沙箱计划失败：{e}")))?;
@@ -533,6 +588,10 @@ pub(super) fn prepare(
 pub struct HelperPlan {
     argv: Vec<String>,
     cwd: String,
+    /// 这条命令允不允许出网。**默认 false** —— serde 的默认值在这里是
+    /// 安全的那一侧：旧计划（没有这个字段）落到「不给网」，而不是「给网」
+    #[serde(default)]
+    network: bool,
 }
 
 /// helper 模式的主体：在容器里起真命令，用它的退出码结束本进程。
@@ -560,7 +619,7 @@ fn run_helper(plan_json: &str) -> Result<u32> {
     // 要么来自本函数栈上的缓冲，生命周期都覆盖调用
     unsafe {
         let sid = container_sid()?;
-        let rc = spawn_in_container(sid, &plan.argv, &plan.cwd);
+        let rc = spawn_in_container(sid, &plan.argv, &plan.cwd, plan.network);
         FreeSid(sid);
         rc
     }
@@ -660,11 +719,50 @@ fn quote_arg(arg: &str) -> String {
     out
 }
 
-unsafe fn spawn_in_container(sid: *mut c_void, argv: &[String], cwd: &str) -> Result<u32> {
+unsafe fn spawn_in_container(
+    sid: *mut c_void,
+    argv: &[String],
+    cwd: &str,
+    network: bool,
+) -> Result<u32> {
+    // **网络就是这一个 capability。** 实测（2026-08-28，同一条命令两跑）：
+    //
+    // | | `curl -m 8 https://example.com` | DNS |
+    // |---|---|---|
+    // | 不给 | 退出码 6 —— 域名都解析不出来 | 失败 |
+    // | 给 `internetClient` | **200** | 通 |
+    //
+    // 所以这一层的网络是个**干净的二元开关**，与 `NetworkPolicy` 一一对应。
+    // 上一版把「默认没有 capability 于是恰好断网」写成副作用，那是对的
+    // 描述但不是设计；现在它是设计。
+    //
+    // ⚠️ **只有全开与全关两档，没有白名单。** Linux 那侧的
+    // `NetworkPolicy::Allowed` 走 `cortex-egress-proxy` 的 CONNECT 白名单，
+    // 这边一旦放开就是整个互联网。**两边的 `Allowed` 不是同一个东西** ——
+    // 谁把它们当成一回事，谁就会以为工作区里的东西发不出去。
+    //
+    // 顺带记一笔：loopback 仍然断着（AppContainer 的老规矩），所以沙箱里
+    // 的命令连不上本机的开发服务器 —— 那是这一层免费送的，不是我们设的。
+    let mut internet_client: *mut c_void = std::ptr::null_mut();
+    let mut cap_attrs: Vec<SID_AND_ATTRIBUTES> = Vec::new();
+    if network {
+        let w = wide(INTERNET_CLIENT_SID);
+        if ConvertStringSidToSidW(w.as_ptr(), &mut internet_client) != 0 {
+            cap_attrs.push(SID_AND_ATTRIBUTES {
+                Sid: internet_client,
+                // SE_GROUP_ENABLED —— 不置位的话它在令牌里但不生效
+                Attributes: 4,
+            });
+        }
+    }
     let mut caps = SECURITY_CAPABILITIES {
         AppContainerSid: sid,
-        Capabilities: std::ptr::null_mut(),
-        CapabilityCount: 0,
+        Capabilities: if cap_attrs.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            cap_attrs.as_mut_ptr()
+        },
+        CapabilityCount: u32::try_from(cap_attrs.len()).unwrap_or(0),
         Reserved: 0,
     };
 
@@ -726,6 +824,9 @@ unsafe fn spawn_in_container(sid: *mut c_void, argv: &[String], cwd: &str) -> Re
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     DeleteProcThreadAttributeList(attrs);
+    if !internet_client.is_null() {
+        LocalFree(internet_client);
+    }
     Ok(code)
 }
 

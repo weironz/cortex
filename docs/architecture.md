@@ -559,15 +559,44 @@ Windows 没有 landlock / seatbelt 的对应物，这一条曾经的结论是
    因此：只授工作区子树、授过不再授、授权在父进程做（helper 跑在命令超时
    里面，放那儿的话大仓库第一条命令会假报「命令超时」）。
 
-**边界的成色**：
+**边界的成色**（每一格都是实测，不是推断）：
 
 | | Windows 上 | |
 |---|---|---|
-| 文件读 / 写 / 列目录 | ✅ 正常 | `ToolSandbox::resolve` 是纯路径逻辑，不依赖内核 |
-| `shell` 读用户目录 | ✅ **挡住** | AppContainer 的 DACL 检查 |
-| `shell` 写用户目录 | ✅ **挡住** | 同上 |
-| **网络** | ❌ **没挡** | 默认无 capability ⇒ 恰好断网，但那是副作用不是设计。要 `git clone` 的人一给 capability 就全开了。阶段 2 对齐 `cortex-egress-proxy` |
+| 文件读 / 写 / 列目录（`fs_*` 工具） | ✅ 正常 | `ToolSandbox::resolve` 是纯路径逻辑，不依赖内核 |
+| `shell` 读 / 写用户目录 | ✅ **挡住** | AppContainer 的 DACL 检查 |
+| `shell` 出网 | ✅ **默认挡住** | 不给 capability 时连 DNS 都不通（实测 `curl` 退出码 6） |
+| `NetworkPolicy::Allowed` | ⚠️ **全开，没有白名单** | 给 `internetClient`（`S-1-15-3-1`）就是整个互联网。Linux 侧的 `Allowed` 走 `cortex-egress-proxy` 的 CONNECT 白名单 —— **两边的 `Allowed` 不是同一个东西** |
+| 连本机的开发服务器 | ❌ 连不上 | AppContainer 一贯封 loopback。不是我们设的，但用户会撞上 |
 | 桌面 / 剪贴板 | ❌ 没挡 | 阶段 2 |
+
+### ⚠️ 挡住了边界，也挡掉了一些正常的活
+
+实测（2026-08-28）：`type`、`echo >`、cmd 的 `for %f in (*)` 通配、
+.NET 的 `Directory.GetFiles`、起可执行文件 —— 都正常。而这三样**不行**：
+
+| | 症状 |
+|---|---|
+| `dir` | 「拒绝访问。」 |
+| `vol` / `fsutil volume` | 同上 |
+| **`git`（任何子命令）** | `fatal: unable to get current working directory: Permission denied` |
+
+根因是同一个：**AppContainer 打不开卷根**（`C:\`、`D:\`）。`dir` 要取卷信息；
+git 的 `mingw_getcwd` 在 `GetLongPathNameW` 失败后回落到
+`GetFinalPathNameByHandleW`，那一步要解析卷。
+
+排除过的两条（写下来免得重查）：
+
+- **不是祖先目录穿不过去**：把工作区放进容器自己的
+  `AppData\Local\Packages\<容器>\AC\Temp`（整条链都对容器开放），症状一样。
+- **给祖先加列举权也不管用**：从 `C:\Users\<你>` 往下每一级都授
+  `FILE_LIST_DIRECTORY`，git 的错误一个字没变。所以那次授权被撤掉了 ——
+  它让容器能列出你主目录里有什么，而什么都没换来。
+
+唯一的解法是在**卷根**上给容器 SID 一条读+执行的 ACE，而那要管理员
+（实测 `SetNamedSecurityInfoW("C:\")` 回错误 5）。**要不要那一次提权是产品
+决定**，记在 [roadmap.md](roadmap.md) 里等人拍板 —— 而在拍板之前，
+`git` 在 Windows 沙箱里是不能用的，这句话必须对用户说破。
 
 ⚠️ **CI 上一条 Windows 测试都不跑**（`ci.yml` 的 windows-latest 只编译），
 所以改 `sandbox/windows.rs` 之后必须本机跑

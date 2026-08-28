@@ -33,7 +33,7 @@ fn main() {}
 
 #[cfg(windows)]
 mod win {
-    use cortex_agent::sandbox::{self, Capability};
+    use cortex_agent::sandbox::{self, Capability, NetworkPolicy, SandboxPolicy};
     use cortex_agent::tools::{Sandbox, ToolCall, ToolResult, execute};
 
     pub async fn shell(sb: &Sandbox, command: &str) -> ToolResult {
@@ -127,6 +127,131 @@ mod win {
         let _ = std::fs::remove_file(&target);
         assert!(!wrote, "**沙箱被绕过了**：命令在用户目录里写出了文件");
     }
+
+    /// 宿主机自己有没有外网 —— 下面两条的**正对照**。
+    ///
+    /// 没有它的话，「沙箱里出不去」在一台断网的机器上恒成立，那条断言
+    /// 就永远是绿的而什么都没验（本仓库记过 3 次「验证工具自己造出通过」）。
+    fn 宿主有外网() -> bool {
+        use std::net::ToSocketAddrs;
+        let Ok(mut addrs) = ("example.com", 443).to_socket_addrs() else {
+            return false;
+        };
+        addrs.any(|a| {
+            std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_secs(5)).is_ok()
+        })
+    }
+
+    /// 探一条出网。回 `true` 表示真的出去了。
+    async fn 出得去(sb: &Sandbox) -> (bool, String) {
+        let r = shell(
+            sb,
+            "curl -s -m 8 -o nul -w %{http_code} https://example.com",
+        )
+        .await;
+        (r.content.contains("200"), r.content)
+    }
+
+    /// **默认不出网。**
+    ///
+    /// 上一版把这件事写成「默认没有 capability，于是恰好断网」——
+    /// 描述是对的，但那是副作用不是设计，而副作用会在有人为了别的目的
+    /// 加一个 capability 时无声消失。
+    pub async fn 默认不出网() {
+        if !宿主有外网() {
+            println!("  [跳过] 这台机器本身没有外网，验不了「沙箱里出不去」");
+            return;
+        }
+        let (_dir, sb) = workspace();
+        let (通了, out) = 出得去(&sb).await;
+        assert!(
+            !通了,
+            "**沙箱默认出网了**。而这一层没有白名单，出网就是整个互联网。\n输出：{out}"
+        );
+    }
+
+    /// 放开网络**只放开网络** —— 文件边界一动不动。
+    ///
+    /// 与 Linux 那侧的 `allowing_network_does_not_relax_the_filesystem`
+    /// 同一条判据：分级如果是假的（放开网络顺带把文件也放了），
+    /// 那这个「分级」比不分级更危险，因为它让人以为还有边界。
+    pub async fn 放开网络不放开文件() {
+        let dir = tempfile::tempdir().expect("应能建临时工作区");
+        let policy = SandboxPolicy::workspace(dir.path()).with_network(NetworkPolicy::Allowed);
+        let sb = Sandbox::new(dir.path())
+            .expect("临时目录应当是合法沙箱根")
+            .with_exec_policy(policy);
+
+        if 宿主有外网() {
+            let (通了, out) = 出得去(&sb).await;
+            assert!(
+                通了,
+                "NetworkPolicy::Allowed 没能放开网络 —— 分级是假的：{out}"
+            );
+        } else {
+            println!("  [跳过] 这台机器本身没有外网，「放开」的效果未验证");
+        }
+
+        // 文件那一半照旧
+        let home = std::env::var("USERPROFILE").expect("Windows 上必有");
+        let secret = std::path::Path::new(&home).join("cortex-net-probe.txt");
+        std::fs::write(&secret, "SECRET-DO-NOT-LEAK").expect("造得出探针文件");
+        let r = shell(&sb, &format!("type \"{}\"", secret.display())).await;
+        let leaked = r.content.contains("SECRET-DO-NOT-LEAK");
+        let _ = std::fs::remove_file(&secret);
+        assert!(
+            !leaked,
+            "**放开网络把文件边界也放开了**，那这个分级比不分级更危险。\n输出：{}",
+            r.content
+        );
+    }
+
+    /// 即使放开网络，**也连不上本机**。
+    ///
+    /// 这是 AppContainer 的老规矩，不是我们设的 —— 但用户会撞上：
+    /// 沙箱里的命令**连不上你本机跑着的开发服务器**。写成测试是为了
+    /// 「它哪天变了我们要知道」，而不是因为它是我们想要的。
+    ///
+    /// 不需要外网，所以它在任何机器上都真的在跑。
+    pub async fn 放开网络也连不上本机() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑得上 loopback");
+        let port = listener.local_addr().expect("拿得到端口").port();
+        // 应答一句最简单的 HTTP，让「连不上」与「连上了但没人说话」分得开
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().take(4).flatten() {
+                use std::io::Write;
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi");
+            }
+        });
+
+        // 正对照：宿主自己连得上，否则下面那条断言什么都没验
+        assert!(
+            std::net::TcpStream::connect_timeout(
+                &format!("127.0.0.1:{port}").parse().expect("合法地址"),
+                std::time::Duration::from_secs(3),
+            )
+            .is_ok(),
+            "宿主自己都连不上这个监听器 —— 下面那条断言没有意义"
+        );
+
+        let dir = tempfile::tempdir().expect("应能建临时工作区");
+        let policy = SandboxPolicy::workspace(dir.path()).with_network(NetworkPolicy::Allowed);
+        let sb = Sandbox::new(dir.path())
+            .expect("临时目录应当是合法沙箱根")
+            .with_exec_policy(policy);
+
+        let r = shell(
+            &sb,
+            &format!("curl -s -m 5 -o nul -w %{{http_code}} http://127.0.0.1:{port}/"),
+        )
+        .await;
+        assert!(
+            !r.content.contains("200"),
+            "沙箱里连上本机了 —— 这与 AppContainer 一贯的 loopback 规则不符，\
+             说明这一层的行为变了，得重新核一遍边界。输出：{}",
+            r.content
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -169,6 +294,13 @@ fn main() {
     });
     run("写不进用户目录", &|| {
         rt.block_on(win::写不进用户目录())
+    });
+    run("默认不出网", &|| rt.block_on(win::默认不出网()));
+    run("放开网络不放开文件", &|| {
+        rt.block_on(win::放开网络不放开文件())
+    });
+    run("放开网络也连不上本机", &|| {
+        rt.block_on(win::放开网络也连不上本机())
     });
 
     if failed > 0 {
