@@ -129,6 +129,25 @@
     # 用数字 70 而不是名字 `postgres`：**宿主上没有这个用户**，
     # 写名字会让这一步直接失败。70 是 alpine 版 postgres 镜像里的 uid
     # （Debian 版是 999）—— 换底座镜像时这里要跟着改，而症状就是上面那三条。
+    # ── swappiness ────────────────────────────────────────
+    #
+    # 云镜像默认 vm.swappiness=0：**内核永远不把匿名页换出去**，哪怕 swap
+    # 整块闲着。这台 3.5G 的机器上后果是实测过的（2026-08-29 凌晨）：
+    # 一个睡到 03:00 的备份容器占着 508MB 匿名页不动，page cache 被挤到
+    # 所有进程互相把工作集踢出缓存、循环重读磁盘 —— iowait 66%、
+    # load 44、healthcheck 全部超时，**发版恰好撞进去被判死**。
+    # 而 4G swap 从头到尾用量为零。
+    #
+    # 10 是保守值：只有真到内存压力时才把闲置匿名页挪去 swap，
+    # 正常运行没有任何行为变化。当晚手改过一次当场把 load 从 37 拉回 5；
+    # 写在这里是让重启之后它还在。
+    - name: 允许内核在压力下使用 swap
+      ansible.posix.sysctl:
+        name: vm.swappiness
+        value: "10"
+        state: present
+        sysctl_set: true
+
     - name: 备份根（属主是容器里 postgres 的 uid，不是 root）
       ansible.builtin.file:
         path: "{{ cortex_backup_dir }}"

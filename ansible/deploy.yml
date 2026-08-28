@@ -258,6 +258,10 @@
               这多半是首次部署失败 —— 服务的状态需要人去看一眼。
           when: not prev_version
 
+        # ⚠️ 变量名**不能**叫 `version`：CI 传的 -e version= 是 extra-vars，
+        # 任务级 vars 盖不过它（Ansible 优先级里 extra-vars 最高）。2026-08-28
+        # 实测踩过：模板重渲染出失败的那个新版本，compose 无事可做答 ok，
+        # 而回滚消息照样宣称「已还原」—— 一次没有发生过的回滚。
         - name: 把 .env 还原到上一版
           ansible.builtin.template:
             src: templates/env.j2
@@ -266,10 +270,14 @@
             group: root
             mode: "0644"
           vars:
-            version: "{{ prev_version }}"
+            rollback_version: "{{ prev_version }}"
+          register: rollback_env
 
         # 尽力而为：把上一版拉回来。它的镜像本来就在本地，很快，
         # 而且不需要 registry —— 那正是下面「保留最新 N 个版本」要留着它的理由
+        # ignore_errors 而不是 failed_when:false：后者把失败**改写**成 ok，
+        # register 里就再也读不出「回滚其实没起来」这件事 —— 而下面那条
+        # 消息正要靠它说真话。
         - name: 把上一版起回来
           community.docker.docker_compose_v2:
             project_src: "{{ node_dir }}"
@@ -280,12 +288,18 @@
             dependencies: false
             wait: true
             wait_timeout: 300
-          failed_when: false
+          register: rollback_up
+          ignore_errors: true
 
+        # 回滚的成色必须如实报：**「已还原」只有在回滚真的动了手且起健康了
+        # 才许说** —— 上面那次空转正是被一句无条件的「已还原」盖过去的。
         - name: 报清楚失败了什么
           ansible.builtin.fail:
             msg: >-
-              部署 {{ version }} 失败，已还原到 {{ prev_version }}。
+              部署 {{ version }} 失败。回滚到 {{ prev_version }}：
+              {{ '成功' if (rollback_up is success and (rollback_up.changed or rollback_env.changed))
+                 else ('**回滚没有生效**（compose 认为无事可做 —— 检查 .env 与容器的实际版本）' if rollback_up is success
+                 else '**回滚也失败了**（服务可能停在中间态，要人上去看）') }}。
               ⚠️ **数据库 schema 不会回滚** —— sqlx 的 migration 只前滚。
               带数据变更的发布出事时看 docs/operations.md 的恢复那一节。
 
