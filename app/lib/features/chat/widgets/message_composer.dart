@@ -47,7 +47,10 @@ class MessageComposer extends ConsumerStatefulWidget {
     this.focusNode,
   });
 
-  final void Function(String text, List<Attachment> attachments) onSend;
+  /// 回 `true` = 消息被收下。`false` = 被拒收（原因在 sendError 横幅里），
+  /// composer 会把文字**还回输入框** —— 我们是先清空再发的，不还回去，
+  /// 拒收就变成「消息静默消失」（2026-08-29 用户报过，正是这个形状）。
+  final Future<bool> Function(String text, List<Attachment> attachments) onSend;
   final VoidCallback onStop;
   final bool streaming;
 
@@ -303,7 +306,18 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
 
     _controller.clear();
     if (sessionId != null) queue.clear(sessionId);
-    widget.onSend(text, attachments);
+    // 先清再发（发送要走网络，清空不能等它）；**拒收就还回去** ——
+    // 只在用户还没接着打新内容时还，别把人家刚敲的半句顶掉
+    unawaited(
+      widget.onSend(text, attachments).then((accepted) {
+        if (!accepted && mounted && _controller.text.trim().isEmpty) {
+          _controller.value = TextEditingValue(
+            text: text,
+            selection: TextSelection.collapsed(offset: text.length),
+          );
+        }
+      }),
+    );
     _focusNode.requestFocus();
   }
 

@@ -34,7 +34,7 @@ void main() {
     await tester.pumpWidget(
       _wrap(
         MessageComposer(
-          onSend: (_, _) {},
+          onSend: (_, _) async => true,
           onStop: () {},
           streaming: false,
           // 这条用例只看输入框上的文案，不碰附件那条路

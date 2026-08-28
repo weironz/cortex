@@ -71,7 +71,7 @@ Future<void> _pumpComposer(
               // 真被调到说明有人改坏了兜底 —— 所以抛而不是给个假 id
               ensureSession: () => throw StateError('已经有会话了，不该兑现白纸'),
               streaming: false,
-              onSend: (_, _) {},
+              onSend: (_, _) async => true,
               onStop: () {},
             ),
           ),

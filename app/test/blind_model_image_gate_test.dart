@@ -116,7 +116,10 @@ Future<List<(String, List<Attachment>)>> _pump(
         home: Scaffold(
           body: MessageComposer(
             sessionId: _session,
-            onSend: (t, a) => sent.add((t, a)),
+            onSend: (t, a) async {
+              sent.add((t, a));
+              return true;
+            },
             onStop: () {},
             streaming: false,
             ensureSession: () => _session,

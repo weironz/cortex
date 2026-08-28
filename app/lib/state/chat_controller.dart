@@ -986,14 +986,34 @@ class ChatController extends Notifier<ChatState> {
 
   // -------------------------------------------------------------------- send
 
-  Future<void> send(
+  /// 回 `true` = 这条消息真的上路了（进了转录、流已挂上）。
+  ///
+  /// `false` = **被拒收**，且原因已写进 `sendError`。调用方（composer）靠它
+  /// 把用户的文字还回输入框 —— composer 是先清空再调 send 的，拒收路径不
+  /// 还回去，症状就是 2026-08-29 用户报的那个：「发都发不出去，直接静默
+  /// 消失」。当时的组合是：另一条会话的流没收尾（生产恰好在 IO 风暴里，
+  /// SSE 挂着不吐事件），composer 的闸只看**当前会话**（isStreamingActive，
+  /// 白纸上恒 false）、这里的闸看**全局** —— 两处判据不一致，中间那条缝
+  /// 就是用户的消息无声消失的地方。
+  Future<bool> send(
     String rawText, {
     List<Attachment> attachments = const [],
   }) async {
     final text = rawText.trim();
     // An attachment with no words is a legitimate message ("看这张图")…
-    if (text.isEmpty && attachments.isEmpty) return;
-    if (state.streaming != null) return; // one generation at a time
+    if (text.isEmpty && attachments.isEmpty) return false;
+    // 一次只跑一轮。**拒收必须出声**：这一支从前是静默 return —— 而它
+    // 拦的多半是「在别的会话里还有一轮在跑」，用户眼前（白纸/另一条会话）
+    // 没有任何在跑的迹象，静默就等于把消息凭空吞掉。
+    if (state.streaming != null) {
+      final busyId = state.streaming!.sessionId;
+      final busy = state.sessions.firstWhereOrNull((s) => s.id == busyId);
+      final where = busy == null || busyId == state.activeSessionId
+          ? ''
+          : '（在「${busy.title}」里）';
+      state = state.copyWith(sendError: '上一条回答还在生成$where —— 等它结束，或到那条会话里停掉它。');
+      return false;
+    }
 
     // **白纸状态在这里落地成一条真的会话。**
     //
@@ -1003,11 +1023,11 @@ class ChatController extends Notifier<ChatState> {
 
     // 工作目录要在**这一轮开始之前**定下来：`routes::chat` 拿「有没有本地
     // 绑定」分流，等 turn 造好再绑就晚了，那一轮已经送去云端了
-    if (!await _ensureLocalWorkspace(sessionId)) return;
-    if (!ref.mounted) return;
+    if (!await _ensureLocalWorkspace(sessionId)) return false;
+    if (!ref.mounted) return false;
     // 同上：项目决定沙箱容器与工作区卷，服务端在收到 /chat 那一刻就要读到它
-    if (!await _flushPendingProject(sessionId)) return;
-    if (!ref.mounted) return;
+    if (!await _flushPendingProject(sessionId)) return false;
+    if (!ref.mounted) return false;
 
     final userMessage = ChatMessage(
       id: Ulid.generate(),
@@ -1073,6 +1093,7 @@ class ChatController extends Notifier<ChatState> {
       onDone: _onDone,
       cancelOnError: true,
     );
+    return true;
   }
 
   /// 这条会话要带的人设。
