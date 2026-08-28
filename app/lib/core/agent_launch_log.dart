@@ -100,6 +100,19 @@ class AgentLaunchLog {
     'was_ready': wasReady,
   });
 
+  /// 启动时拿 refresh token 换会话的**结果** —— 成功也记。
+  ///
+  /// # 为什么成功也要一条
+  ///
+  /// 「被踢」只在中途 401 那条链上落盘（[authGate]），而用户报的
+  /// 「登录很快过期」更可能是**第二天打开又要登录** —— 那条路此前只有
+  /// `debugPrint`，进程一换就什么都不剩。于是诊断陷入两难：日志里零条
+  /// auth-gate，既可能是「续期都成功了」，也可能是「启动路径的失败根本
+  /// 没被记」。每次启动记一条结果（每天十来条，文件自己轮转），
+  /// 「零踢出」才从「可能没看见」变成「续期在跑且都成功」的定论。
+  void authRestore({required String outcome, required String detail}) =>
+      _append('auth-restore', {'outcome': outcome, 'detail': detail});
+
   /// 起来之后被我们**主动**停掉了（登出、换地址、provider 重建、退出）。
   ///
   /// 此前主动停**什么都不记**（stop() 先撤掉退出监听再 kill，exit 事件

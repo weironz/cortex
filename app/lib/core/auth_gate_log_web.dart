@@ -7,3 +7,6 @@ void logAuthGate({
   required String detail,
   required bool wasReady,
 }) {}
+
+/// 同上：Web 侧不落盘。
+void logAuthRestore({required String outcome, required String detail}) {}

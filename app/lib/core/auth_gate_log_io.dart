@@ -26,3 +26,11 @@ void logAuthGate({
     dir,
   ).authGate(reason: reason, detail: detail, wasReady: wasReady);
 }
+
+/// 启动时续会话的结果，落进同一份诊断文件。守卫与 [logAuthGate] 相同。
+void logAuthRestore({required String outcome, required String detail}) {
+  if (Platform.environment['FLUTTER_TEST'] == 'true') return;
+  final dir = stateDir();
+  if (dir == null) return;
+  AgentLaunchLog.inStateDir(dir).authRestore(outcome: outcome, detail: detail);
+}

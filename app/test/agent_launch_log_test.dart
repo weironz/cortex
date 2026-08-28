@@ -32,6 +32,25 @@ void main() {
     expect(read().single['ev'], 'spawn');
   });
 
+  test('auth-restore 记录 outcome 与 detail —— 启动那半条时间线靠它', () {
+    // 「登录很快过期」的诊断此前只盖住中途被踢（auth-gate），启动时
+    // restore 失败什么都不落 —— 于是日志里零条 auth-gate 读不出结论。
+    // 这条钉住记录形状：查日志的人要靠 outcome 分家族（rejected 删凭据 /
+    // transient 等着就好），靠 detail 里的状态码定位到服务端那次答复。
+    log.authRestore(
+      outcome: 'transient',
+      detail: 'status=502 unreachable=false',
+    );
+    final row = read().single;
+    expect(row['ev'], 'auth-restore');
+    expect(row['outcome'], 'transient', reason: 'outcome 丢了就分不出病因家族');
+    expect(
+      row['detail'],
+      contains('status=502'),
+      reason: '状态码不落盘，日志里就只剩「transient」一个词，502 与 429 的修法不同',
+    );
+  });
+
   test('每条都带时间戳，且是追加不是覆盖', () {
     log.spawn(exe: 'a', pid: 1, remote: 'r', llm: 'proxy');
     log.ready(origin: 'http://127.0.0.1:7499', ms: 800);

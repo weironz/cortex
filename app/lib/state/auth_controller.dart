@@ -284,7 +284,19 @@ class AuthController extends Notifier<AuthState> {
       //
       // 所以只认「除它之外还有人动过」：恰好多一次就是它自己。
       final before = _generation;
-      if (await restoreSession(remembered) == RefreshOutcome.ok) return;
+      final outcome = await restoreSession(remembered);
+      // **启动这半条时间线此前是盲的。** 中途被踢有 auth-gate 落盘，而
+      // 「第二天打开又要登录」—— 用户报「登录很快过期」更可能的形状 ——
+      // 只有一句随进程死掉的 debugPrint。成功也记：日志里零条 auth-gate
+      // 要能读成「续期在跑且都成功」，得先证明续期在跑。
+      // superseded 除外 —— 那是用户自己换了地址/重新登录，不是这条链的事。
+      if (outcome != RefreshOutcome.superseded) {
+        logAuthRestore(
+          outcome: outcome.name,
+          detail: outcome == RefreshOutcome.ok ? '' : (_lastRefreshError ?? ''),
+        );
+      }
+      if (outcome == RefreshOutcome.ok) return;
       if (_generation != before + 1) return;
       mine = _generation;
     }
@@ -573,6 +585,7 @@ class AuthController extends Notifier<AuthState> {
         error: null,
         remember: true,
       );
+      _lastRefreshError = null;
       return RefreshOutcome.ok;
     } on CortexApiException catch (e) {
       if (!_alive(generation)) return RefreshOutcome.superseded;
@@ -584,6 +597,8 @@ class AuthController extends Notifier<AuthState> {
         '续期没成：status=${e.statusCode} unreachable=${e.isUnreachable} '
         'msg=${e.message}',
       );
+      _lastRefreshError =
+          'status=${e.statusCode} unreachable=${e.isUnreachable}';
       // **只有 401/403 才算凭据失效。** 这里曾经写成「只要不是连不上就删」，
       // 于是 502（发版重启的那几秒）、429（自家限流）、501（打到一个没有
       // 账号功能的后端）都把 30 天的凭据删了 —— 一次服务端抖动就变成
@@ -600,6 +615,7 @@ class AuthController extends Notifier<AuthState> {
       // 不接住的话异常会从 `onUnauthorized` 的微任务里穿出去成为 uncaught，
       // 而凭据的命运悬在半空 —— 按「暂时没成」处理，最坏也就是下次再试。
       if (_alive(generation)) debugPrint('续期没跑完（$e），按暂时失败处理');
+      _lastRefreshError = '$e'.split('\n').first;
       return RefreshOutcome.transient;
     } finally {
       api.dispose();
@@ -792,6 +808,13 @@ class AuthController extends Notifier<AuthState> {
   ///
   /// 所以判据是：刚续过还 401 = 续期解决不了这个问题 = 回登录页。
   DateTime? _lastRefreshOk;
+
+  /// 最近一次续期**失败**时服务端的答复（状态码 / 连不上），成功时清空。
+  ///
+  /// 只为诊断日志存在：启动路径把 outcome 落盘时（[logAuthRestore]），
+  /// 状态码只在 `restoreSession` 的 catch 里见过一面 —— 不存下来，
+  /// 日志里就只有「transient」这一个词，而 502 与 429 的修法不同。
+  String? _lastRefreshError;
 
   /// 续期成功之后，多久之内再收到 401 就认定「续了也没用」。
   ///
