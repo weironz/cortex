@@ -45,7 +45,8 @@ let reason = if policy.attended.is_attended() {
 | `cargo build` 出 .exe | ❌ 链接步挂 | ✅ |
 | `git` clone/fetch/push | ⚠️ 受 8.3 与卷根限制 | ✅ |
 | `dir` / `vol` | ❌ 要卷根 ACE（一次管理员） | ✅ |
-| `cargo` 拉**新**依赖 | ❌ | ❌（索引通了，`.crate` 下载不通） |
+| `cargo` 拉**新**依赖 | ❌ | ✅（走本机明文回环镜像，见 4.4） |
+| `curl https://` | ✅ | ❌（自己链了 Schannel，换不掉） |
 | 管理员 | 不要 | 不要 |
 
 **用途因此是分开的**：
@@ -147,6 +148,50 @@ stdio 靠继承，不必自己铺管道。
 
 真 `%TEMP%` 授的是用户本人、不是 logon SID，写不进，而 rustc / link 到处用它。
 helper 在起进程前把 `TMP` / `TEMP` 指进工作区内。
+
+### 4.4 cargo 要两样东西：自己的 `CARGO_HOME`，和一个明文回环镜像
+
+**（1）`CARGO_HOME` 必须换掉。** 用户真实的 `~/.cargo` 沙箱写不进（写只授了
+工作区），而 cargo 第一件事就是往 `registry/index/…` 里建目录。**这一步比 TLS
+更靠前**：实测哪怕依赖全在缓存里，默认 `CARGO_HOME` 下也当场
+
+```
+failed to create directory `C:\Users\…\.cargo\registry\index\…`
+拒绝访问。 (os error 5)
+```
+
+所以这一档把 `CARGO_HOME` 指到 `%LOCALAPPDATA%\Cortex\win-sandbox\cargo-home`，
+授 **Everyone**（不是 logon SID —— 这个目录跨登录会话长期存在，按 logon SID
+授会每登录一次攒一条永不再匹配的 ACE）。
+
+⚠️ **「Everyone 在 `%LOCALAPPDATA%` 底下等于只有本人」这句话是有条件的**，
+而条件在这台机器上就不完全成立：实测 `%LOCALAPPDATA%` 上带着一条
+`CodexSandboxUsers:(I)(OI)(CI)(RX)`（用户装的 codex 建的本地组），同机另一套
+沙箱够得到这里，而这条 Everyone 让它还写得进。兜底是 cargo 自己的校验和 ——
+`.crate` 的 sha256 来自索引、有锁文件时来自锁文件，塞进来的东西过不了那一关。
+选它是因为另外两条更差：授用户真实的 `~/.cargo` 等于让沙箱污染**沙箱外**的
+构建（真正的逃逸），按 logon SID 授则每次登录攒一条死 ACE。
+
+**为什么不干脆把 `~/.cargo` 授给沙箱写**：沙箱里的代码就能往用户的 crate 缓存
+里塞东西，而**下一次不在沙箱里的构建会照单编译它**。那是一条真正的逃逸路径。
+
+代价如实写在工具描述里：第一次构建会重新下载依赖，之后各工作区共用这一份。
+
+**（2）`.crate` 的下载走本机镜像。** 受限令牌下 schannel 建不出 TLS 客户端凭据
+（5.10），而 cargo 把 libcurl 静态链进去且只编了 Schannel，**没有任何开关**。
+唯一剩下的形状是让 cargo 那一侧只说明文：宿主进程（未受限，TLS 正常）在回环上
+开一个镜像，沙箱里的 cargo 用 `source.crates-io.replace-with` 指过来。
+
+代码在 `crates/cortex-agent/src/sandbox/windows_cargo_mirror.rs`。三条路由：
+`/index/config.json`（合成）、`/index/*`（转发 index.crates.io）、
+`/dl/<name>/<ver>/download`（转发 static.crates.io）。
+
+| 设计点 | 为什么 |
+|---|---|
+| **完整性没变弱** | cargo 校验 `.crate` 的 sha256，校验值来自索引；索引与文件都由镜像原样转发。有 `Cargo.lock` 时校验值来自锁文件，是端到端的 |
+| **固定端口 47823** | source replacement **只能写配置文件，没有环境变量**（实测：`CARGO_SOURCE_CRATES_IO_REPLACE_WITH` 被 cargo 完全无视）。配置是所有沙箱命令共用的一份，URL 必须恒定 |
+| **端口被占时先验明正身** | 打一次 `/cortex-mirror` 看标记。是自己人就复用（镜像无状态，谁起的都一样）；不是就**不写那段配置** —— 宁可让 cargo 报原来的错，也不能把它指到来路不明的 registry 上 |
+| **镜像开在父进程** | helper 每条命令起一次；让它持端口的话，先结束的那条会把还在下载的那条掐断 |
 
 ---
 
@@ -297,11 +342,13 @@ AppContainer 里 `std::fs::canonicalize` 回 `os error 5`
 |---|---|
 | `git`（clone / fetch / push / ls-remote） | ✅ 通——注入 `http.sslBackend=openssl`，走 git 自带 ca-bundle |
 | `cargo` 更新索引 | ✅ 通——`CARGO_NET_GIT_FETCH_WITH_CLI` + 索引走 git 协议 |
-| `cargo` 下载 `.crate` | ❌ 挂——走 cargo 内建 libcurl（只编了 Schannel），没有开关能换 |
-| `curl https://` | ❌ 挂——同上 |
+| `cargo` 下载 `.crate` | ✅ 通——**绕开 TLS**：走本机的明文回环镜像（4.4） |
+| `curl https://` | ❌ 挂——自己链了 Schannel，既换不掉也没有第二条路 |
 
-规律：**能改走 git CLI 的都修好了，进程自己链了 Schannel 的都换不掉**。给它们 CA 文件
-（`--cacert` / `CARGO_HTTP_CAINFO`）没用——那只换验证用的根，不换 TLS 后端。
+规律：**能换掉 TLS 后端、或能被换成明文的都修好了；剩下的是自己链了 Schannel
+又没有替代通道的那些**。给它们 CA 文件（`--cacert` / `CARGO_HTTP_CAINFO`）没用——
+那只换验证用的根，不换 TLS 后端；而且失败发生在**建凭据**，比验证更靠前，
+所以本地 MITM 代理 + 自签 CA 一样没戏。
 
 （先猜过「把用户 SID 加进令牌默认 DACL」，没用，已回滚。**猜不如量。**）
 
@@ -335,6 +382,40 @@ spawn `self --win-sandbox-exec`——那个子进程没被拦就重跑整个测�
 **规矩**：只授权不拒绝；杀进程只杀自己造的、名字唯一的；改用户主目录或盘符根的 ACL、
 动 docker / 全局服务之前先说一声。
 
+### 5.14 测试替被测对象把环境铺好了
+
+`cargo build 出 .exe` 那条测试从第一天起就绿，而它的命令是：
+
+```
+set "CARGO_HOME=%CD%\.cargo-home" & cargo build
+```
+
+那一句是**测试自己加的**。真实用户的项目里没有它，于是 cargo 走默认
+`CARGO_HOME`，第一步就死在「拒绝访问 (os error 5)」——比 TLS 更靠前的一堵墙，
+而测试从来没撞到过。文档、`shell` 工具描述、roadmap 三处都据此写着
+「这一档能 `cargo build`」，**说得到做不到**（CLAUDE.md 硬约束第 2 条）。
+
+自查：**测试里每一句「为了让它跑起来」而加的环境设置，都要问一遍
+「用户那边谁来加这一句」。** 没人加，那这条测试验的就是另一个世界。
+
+### 5.15 判据落在了另一支上，而那一支也有断言
+
+`windows_上_shell_的描述要跟着后端翻面` 是守硬约束第 2 条的那条测试。它按
+`capability()` 分三支断言：受限令牌 / AppContainer / 无沙箱。
+
+而 `cargo test --lib` 里 helper 二进制（`cortex-local.exe`）在那个 target 目录
+下**不存在**，探测于是报「不可用」——测试一路落到「无沙箱」那一支，两个
+Windows 后端的断言**一条都没跑过**。把描述里的关键句整个删掉，它照样绿。
+
+这与 5.3 是同一族，但更难发现：5.3 那两处是**跳过**，至少还能从「跑了几条」
+看出来；这里是**走了另一支，而那一支也有断言、也通过**，输出里一切正常。
+
+修法是把判据从环境里拿走：描述改成能力的**纯函数**
+（`shell_description_for(&cap)`），测试自己构造三种能力，一次运行验三支。
+
+> **通用自查**：`match 环境 { ... }` 形状的测试，问一句「本机此刻走的是哪一支，
+> 另外几支谁来跑」。答案通常是「没人」。
+
 ---
 
 ## 六、还欠什么
@@ -342,7 +423,7 @@ spawn `self --win-sandbox-exec`——那个子进程没被拦就重跑整个测�
 | | 欠什么 | 为什么还没做 |
 |---|---|---|
 | a | AppContainer 档的 `dir` / `vol`，以及短名目录下的 `git` | 要**卷根一条 ACE**，那需要一次管理员。是产品决定不是技术阻塞——而且「不要管理员」正是当初选 AppContainer 的理由，所以要人拍板 |
-| b | `cargo` 拉**新**依赖 | cargo 内建 libcurl 只编了 Schannel。要么等上游给开关，要么在沙箱里放一份 openssl 版 curl |
+| b | `curl https://`、以及任何自己链了 Schannel 又没有替代通道的程序 | 换不掉后端。cargo 能修是因为它的下载可以被换成明文（4.4），`curl` 没有这一层 |
 | c | 真封网 | 零管理员做不到（5.11）。要么一次管理员上 WFP，要么把需要出网控制的场景交给云沙箱（那边有 `cortex-egress-proxy` 白名单） |
 | d | 受限令牌档的读边界 | 机制上做不到（5.9）。要强读边界就用 AppContainer 档 |
 | e | 桌面隔离（AppContainer 档） | 受限令牌档有私有桌面，AppContainer 档还没有 |

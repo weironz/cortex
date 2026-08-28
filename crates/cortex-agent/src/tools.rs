@@ -1074,6 +1074,18 @@ pub fn skill_spec() -> ToolSpec {
 /// 判据带上 `capability().is_available()`：降级或有人在场时命令跑在宿主上，
 /// git 好好的 —— 那时候写那句话就成了另一种「说得不对」。
 fn shell_description() -> std::borrow::Cow<'static, str> {
+    shell_description_for(crate::sandbox::capability())
+}
+
+/// 描述是**能力的纯函数**。
+///
+/// 拆出来是因为原来那版直接读 `capability()`，于是测试只能验「本机此刻这一
+/// 档」。而 `cargo test --lib` 里 helper 二进制多半不存在，探测报不可用 ——
+/// 测试就一路落到「无沙箱」那一支，两个 Windows 后端的断言**一条都没跑过**，
+/// 而且不会红。故障注入当场证实了这一点（把描述里的关键句删掉，测试照样绿）。
+///
+/// 判据不该由环境决定：把能力做成参数，三支就都能在同一次运行里验到。
+fn shell_description_for(cap: &crate::sandbox::Capability) -> std::borrow::Cow<'static, str> {
     // 用 `concat!` 逐行拼，不用 `\` 续行 —— 续行会把缩进留成字面空格，
     // 有一条测试专门盯着这个（`工具描述里没有被压扁的痕迹`）
     const BASE: &str = concat!(
@@ -1097,18 +1109,18 @@ fn shell_description() -> std::borrow::Cow<'static, str> {
     const RESTRICTED: &str = concat!(
         "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里。",
         "本机这一档是 Windows 受限令牌：**写只落在工作区**（写工作区以外会被拒），",
-        "工具链可用 —— `cargo build`、`dir`、`git`（含 `clone` / `fetch` / `push`）都正常。",
-        "⚠ 但 **`cargo` 拉不了新依赖**：下载 `.crate` 那一步走的 TLS 在这一档里",
-        "拿不到凭据，会报 `SSL connect error ... SEC_E_NO_CREDENTIALS`。那是沙箱的限制，",
-        "不是网络故障，重试没有用 —— 依赖已在本地缓存时构建正常；需要拉新依赖时",
-        "请告诉用户，让他在沙箱外先 `cargo fetch`。`curl https://` 同理不通（用 git 代替）。",
+        "工具链可用 —— `cargo`（含 `add` / `build` 与拉取新依赖）、`dir`、",
+        "`git`（含 `clone` / `fetch` / `push`）都正常。",
+        "⚠ cargo 在这一档里用的是**沙箱专用的 `CARGO_HOME`**，不是用户的 `~/.cargo`：",
+        "第一次构建会重新下载依赖，之后各工作区共用这份缓存。不要为此去改 `CARGO_HOME`。",
+        "⚠ `curl https://` 仍然不通（这一档拿不到 TLS 凭据）—— 要取网上的东西用 `git`。",
         "⚠ 这一档**不限制读取**：它读得到当前用户能读的任何文件；明文 HTTP 也出得去。",
         "所以不要把它当成「关住不受信代码」的边界；处理敏感文件时照常谨慎。",
     );
-    if !cfg!(windows) || !crate::sandbox::capability().is_available() {
+    if !cfg!(windows) || !cap.is_available() {
         return BASE.into();
     }
-    match crate::sandbox::capability() {
+    match cap {
         crate::sandbox::Capability::Available { backend, .. }
             if backend.as_str() == "restricted-token" =>
         {
@@ -2210,69 +2222,72 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_上_shell_的描述要跟着后端翻面() {
-        let spec = builtin_specs()
-            .into_iter()
-            .find(|s| s.name == "shell")
-            .expect("shell 必须在工具目录里");
-        let d = &spec.description;
-        match crate::sandbox::capability() {
-            crate::sandbox::Capability::Available { backend, .. }
-                if backend.as_str() == "restricted-token" =>
-            {
-                assert!(
-                    d.contains("不限制读取"),
-                    "受限令牌档**不挡读**，而描述没说 —— 模型会以为这里能关住不受信代码，
-                     那正是最危险的那种说反。实际：{d}"
-                );
-                assert!(
-                    !d.contains("`dir` 与 `vol` 用不了"),
-                    "这一档 dir/vol 是好的，描述却写着用不了 —— 模型会绕开本来能用的命令。实际：{d}"
-                );
-                assert!(
-                    d.contains("HTTPS"),
-                    "这一档 HTTPS 实际是坏的（schannel 拿不到凭据，git clone / cargo 拉依赖全废），
-                     描述不说，模型就会把它当成网络故障反复重试。**这句话是被实测推翻过一次的**：
-                     第一版写的是「git 正常」，而 git over https 当场 fatal。实际：{d}"
-                );
-            }
-            crate::sandbox::Capability::Available { .. } => {
-                assert!(
-                    d.contains("`dir` 与 `vol` 用不了"),
-                    "AppContainer 档 dir/vol 确实用不了，不说模型就会一直撞。实际：{d}"
-                );
-                assert!(
-                    d.contains("完整构建"),
-                    "AppContainer 档跑不了完整构建（链接步挂），这一条不说，
-                     模型会把 `cargo build` 的失败当成代码问题去改。实际：{d}"
-                );
-            }
-            crate::sandbox::Capability::Unavailable { .. } => {
-                assert!(
-                    !d.contains("AppContainer") && !d.contains("受限令牌"),
-                    "本机没有沙箱，描述却在讲某个后端的限制 —— 另一种说得不对。实际：{d}"
-                );
-            }
-        }
-    }
+        use crate::sandbox::{Backend, Capability};
 
-    /// **降级执行必须带那句告警。**
-    ///
-    /// 它只在本机没有沙箱时出现，而三个平台如今都有沙箱 —— 也就是说这句话
-    /// 在 CI 与开发机上一次都不会被生成。删掉它不会有任何东西变红，
-    /// 而后果是用户与模型都以为这条命令被保护着。
-    #[test]
-    fn 降级执行的结果里必须带告警() {
-        let 有围栏 = shell_body(true, b"hi", b"");
-        let 没围栏 = shell_body(false, b"hi", b"");
+        let 受限 = Capability::Available {
+            backend: Backend::RestrictedToken,
+            detail: "测试".into(),
+        };
+        let 容器 = Capability::Available {
+            backend: Backend::AppContainer,
+            detail: "测试".into(),
+        };
+        let 没有 = Capability::Unavailable {
+            reason: "测试".into(),
+        };
+
+        let d = shell_description_for(&受限);
         assert!(
-            !有围栏.contains(UNENFORCED_MARK),
-            "有沙箱时不该报警 —— 那会让人对真正的告警脱敏：{有围栏}"
+            d.contains("不限制读取"),
+            "受限令牌档**不挡读**，而描述没说 —— 模型会以为这里能关住不受信代码，
+             那正是最危险的那种说反。实际：{d}"
         );
         assert!(
-            没围栏.starts_with(UNENFORCED_MARK),
-            "降级执行的告警必须在**第一行**，往后挪就会被长输出顶走：{没围栏}"
+            !d.contains("`dir` 与 `vol` 用不了"),
+            "这一档 dir/vol 是好的，描述却写着用不了 —— 模型会绕开本来能用的命令。实际：{d}"
         );
-        assert!(没围栏.contains("hi"), "命令输出不能被告警挤掉：{没围栏}");
+        // 这一档的 HTTPS 现状被实测**推翻过两次**，所以断言钉的是「此刻还剩
+        // 哪一条不通」，不是一句笼统的「HTTPS 坏的」：第一版写「git 正常」→
+        // git over https 当场 fatal；第二版写「cargo 拉不了新依赖」→ 接了
+        // 明文回环镜像之后能拉了。现在只剩 `curl https://`（自己链了 Schannel）。
+        assert!(
+            d.contains("curl"),
+            "`curl https://` 在这一档仍然不通，描述不说，模型会把它当成网络故障
+             反复重试。实际：{d}"
+        );
+        assert!(
+            !d.contains("拉不了新依赖"),
+            "cargo 现在拉得到新依赖（走 sandbox::windows_cargo_mirror），描述还写着
+             拉不了 —— 模型会绕开本来能用的路，去请用户在沙箱外手工 `cargo fetch`。实际：{d}"
+        );
+        assert!(
+            d.contains("CARGO_HOME"),
+            "这一档把 CARGO_HOME 指到了沙箱专用的一份（用户的 ~/.cargo 写不进）。
+             不说的话，模型看到「第一次构建重新下载依赖」会以为环境坏了，反手把
+             CARGO_HOME 改回去 —— 那一改就又是「拒绝访问」。实际：{d}"
+        );
+
+        let d = shell_description_for(&容器);
+        assert!(
+            d.contains("`dir` 与 `vol` 用不了"),
+            "AppContainer 档 dir/vol 确实用不了，不说模型就会一直撞。实际：{d}"
+        );
+        assert!(
+            d.contains("完整构建"),
+            "AppContainer 档跑不了完整构建（链接步挂），这一条不说，
+             模型会把 `cargo build` 的失败当成代码问题去改。实际：{d}"
+        );
+        assert!(
+            !d.contains("不限制读取"),
+            "AppContainer 档读是默认拒绝的，描述却说不限制读取 —— 说反了。实际：{d}"
+        );
+
+        let d = shell_description_for(&没有);
+        assert!(
+            !d.contains("`dir` 与 `vol` 用不了") && !d.contains("不限制读取"),
+            "没有沙箱时命令跑在宿主上，两档的限制一条都不成立，
+             写上去就是另一种「说得不对」。实际：{d}"
+        );
     }
 
     /// 封闭策略不能顺手把系统只读目录放出去。

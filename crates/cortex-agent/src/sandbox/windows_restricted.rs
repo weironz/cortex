@@ -230,7 +230,110 @@ pub(super) fn prepare(
     let me = helper_path()?;
     let mut cmd = std::process::Command::new(me);
     cmd.arg(HELPER_FLAG).arg(json);
+    // CARGO_HOME 在父进程这一侧定：镜像要开在长命的进程里（helper 每条命令
+    // 起一次，让它持有端口的话，先结束的那条会把还在下载的那条掐断），
+    // 而 ACL 与配置文件也只该写一次。helper 把环境原样传给子进程。
+    if let Some(home) = setup_cargo_home() {
+        cmd.env("CARGO_HOME", home);
+    }
     Ok(cmd)
+}
+
+/// 沙箱专用 `CARGO_HOME` 的路径。**只算路径，不建目录、不授权。**
+///
+/// 单独拿出来是给测试用的：要证明「新依赖真的下载得下来」，就得先把这份
+/// 缓存清掉，而测试里再写一遍这个路径就是两份会各自漂的常量。
+#[must_use]
+pub fn sandbox_cargo_home() -> Option<std::path::PathBuf> {
+    let local = std::env::var("LOCALAPPDATA").ok()?;
+    Some(
+        Path::new(&local)
+            .join("Cortex")
+            .join("win-sandbox")
+            .join("cargo-home"),
+    )
+}
+
+/// 备好一个**沙箱写得进**的 `CARGO_HOME`，并把 crates.io 指到本机镜像。
+///
+/// # 为什么必须换掉 CARGO_HOME
+///
+/// 用户真实的 `~/.cargo` 沙箱写不进（写只授了工作区），而 cargo 第一件事
+/// 就是往 `registry/index/…` 里建目录。**这一步比 TLS 更靠前**：实测哪怕
+/// 依赖全在缓存里，默认 `CARGO_HOME` 下也会当场
+/// 「failed to create directory … 拒绝访问 (os error 5)」。
+///
+/// 那为什么不干脆把 `~/.cargo` 授给沙箱写？因为沙箱里的代码就能往用户的
+/// crate 缓存里塞东西，而**下一次不在沙箱里的构建会照单编译它** ——
+/// 那是一条真正的逃逸路径，不是洁癖。
+///
+/// # 为什么授的是 Everyone
+///
+/// `WRITE_RESTRICTED` 要求目标 DACL 授了某个 restricting SID，可选的只有
+/// logon SID 与 Everyone。工作区那边用 logon SID（作用域正好是一次登录），
+/// 这里不行：这个目录**跨登录会话长期存在**，按 logon SID 授会每登录一次
+/// 攒一条永远不再匹配的 ACE。
+///
+/// 目录放在 `%LOCALAPPDATA%` 底下，靠父目录的 DACL 把别的**普通用户**挡在
+/// 外面 —— 所以位置不能随便挪。
+///
+/// ⚠️ **这一条只到「普通用户」为止，别把它当成强边界。** 实测这台机器上
+/// `%LOCALAPPDATA%` 还带着一条 `CodexSandboxUsers:(I)(OI)(CI)(RX)`（用户装的
+/// codex 建的本地组），也就是说同机另一套沙箱够得到这里，而我们这条 Everyone
+/// 让它还写得进。兜底是 cargo 自己的校验和：`.crate` 的 sha256 来自索引、
+/// 有锁文件时来自锁文件，塞进来的东西过不了那一关。
+///
+/// 之所以仍然选它，是因为另外两条更差：授给用户真实的 `~/.cargo` 等于让沙箱
+/// 污染**沙箱外**的构建（真正的逃逸）；按 logon SID 授则每登录一次攒一条
+/// 永不再匹配的 ACE。
+///
+/// 出任何岔子都回 `None`：那时行为退回改动之前（cargo 照旧报它自己的错），
+/// 而不是把命令拦下来 —— 绝大多数命令根本不碰 cargo。
+fn setup_cargo_home() -> Option<std::path::PathBuf> {
+    let home = sandbox_cargo_home()?;
+    if let Err(e) = std::fs::create_dir_all(&home) {
+        tracing::warn!(error = %e, "建不出沙箱专用的 CARGO_HOME");
+        return None;
+    }
+    // SAFETY: SID 由 ConvertStringSidToSidW 造，用完 LocalFree；
+    // grant_to_container 是已验证的封装，幂等（授过就不再写）。
+    unsafe {
+        let sid = sid_from_string(WORLD_SID).ok()?;
+        let r = grant_to_container(&home, sid, INHERIT_ALL, FILE_ALL_ACCESS);
+        LocalFree(sid.cast());
+        if let Err(e) = r {
+            tracing::warn!(error = %e, "沙箱专用 CARGO_HOME 授权失败");
+            return None;
+        }
+    }
+
+    // 镜像起不来（或端口被一个不是我们的服务占着）时，**不写那段配置**：
+    // 指向一个来路不明的 registry 比下载失败危险得多。
+    let cfg = home.join("config.toml");
+    match super::windows_cargo_mirror::ensure_running() {
+        Ok(true) => {
+            let body = format!(
+                concat!(
+                    "# 这个文件由 Cortex 的 Windows 受限令牌沙箱生成，每次执行都会重写。\n",
+                    "# 手工改它没有意义。为什么要有它，见 sandbox::windows_cargo_mirror。\n",
+                    "[source.crates-io]\n",
+                    "replace-with = \"cortex-mirror\"\n",
+                    "\n",
+                    "[source.cortex-mirror]\n",
+                    "registry = \"{}\"\n",
+                ),
+                super::windows_cargo_mirror::registry_url()
+            );
+            if let Err(e) = std::fs::write(&cfg, body) {
+                tracing::warn!(error = %e, "写不出沙箱的 cargo 配置");
+            }
+        }
+        _ => {
+            tracing::warn!("cargo 的回环镜像不可用，沙箱里拉新依赖会失败");
+            let _ = std::fs::remove_file(&cfg);
+        }
+    }
+    Some(home)
 }
 
 /// 把工作区可写子树授给**写作用域 SID = 当前登录会话的 logon SID**。

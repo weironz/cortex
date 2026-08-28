@@ -1169,6 +1169,7 @@ dependencies = [
  "landlock",
  "libc",
  "regex",
+ "reqwest",
  "rmcp",
  "seccompiler",
  "serde",

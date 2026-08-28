@@ -72,41 +72,95 @@ mod win {
         );
     }
 
-    /// **核心：`cargo build` 出 .exe。** 这是这个后端存在的全部理由。
+    /// **核心：`cargo build` 出 .exe，而且是拉着一个新依赖出的。**
+    /// 这是这个后端存在的全部理由。
     ///
-    /// 没有 cargo 就跳过（CI 之外的开发机不一定装）。断言到「.exe 真的
-    /// 生成并跑得起来」，不是到「cargo 没报错」——链接步（四件套修的那个
-    /// `0xC0000142`）只有走到出 .exe 才验得到。
-    pub async fn cargo_build_出_exe() {
+    /// ⚠️ **不要在命令里设 `CARGO_HOME`。** 老版本设了私有的一份，于是这条
+    /// 测试绿着，而真实用户的项目里 cargo 第一步就死在
+    /// 「failed to create directory …\\.cargo\\registry\\index\\… 拒绝访问」——
+    /// 用户的 `~/.cargo` 沙箱写不进，那比 TLS 更靠前。测试替被测对象把环境
+    /// 铺好，铺的就不再是用户会遇到的那个环境。
+    ///
+    /// 断言到「.exe 真的生成并跑得起来」而不是「cargo 没报错」：链接步
+    /// （四件套修的那个 `0xC0000142`）只有走到出 .exe 才验得到。
+    ///
+    /// 依赖用 `anyhow` 而不是纯本地代码，是要连**下载**一起验 —— 受限令牌
+    /// 下 schannel 建不出 TLS 凭据，`.crate` 得走本机的明文回环镜像
+    /// （`sandbox::windows_cargo_mirror`）。开跑前把沙箱那份 registry 缓存
+    /// 清掉，否则第二次起就是从缓存读，下载那条路白测。
+    pub async fn cargo_build_出_exe_并拉到新依赖() {
         if which_cargo().is_none() {
             println!("  [跳过] 本机没有 cargo");
             return;
+        }
+        if !宿主有外网() {
+            println!("  [跳过] 这台机器没有外网");
+            return;
+        }
+        // 清掉沙箱专用 CARGO_HOME 的缓存 —— 那是 Cortex 自己的目录，
+        // 不碰用户的 ~/.cargo。
+        if let Some(h) = cortex_agent::sandbox::windows_restricted::sandbox_cargo_home() {
+            let _ = std::fs::remove_dir_all(h.join("registry"));
         }
         let (_d, sb) = workspace();
         let root = sb.root().expect("有根").to_path_buf();
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(
             root.join("Cargo.toml"),
-            "[package]\nname=\"h\"\nversion=\"0.0.0\"\nedition=\"2021\"\n[[bin]]\nname=\"h\"\npath=\"src/main.rs\"\n",
+            concat!(
+                "[package]\n",
+                "name = \"h\"\n",
+                "version = \"0.0.0\"\n",
+                "edition = \"2021\"\n",
+                "[dependencies]\n",
+                "anyhow = \"1\"\n",
+                "[[bin]]\n",
+                "name = \"h\"\n",
+                "path = \"src/main.rs\"\n",
+            ),
         )
         .unwrap();
         std::fs::write(
             root.join("src/main.rs"),
-            "fn main(){println!(\"BUILT-OK\");}",
+            r#"fn main(){ println!("BUILT-OK {}", anyhow::anyhow!("x")); }"#,
         )
         .unwrap();
 
         let r = shell(
             &sb,
-            "set \"CARGO_HOME=%CD%\\.cargo-home\" & cargo build 2>&1 & echo RC=%errorlevel% & .\\target\\debug\\h.exe 2>&1",
+            r"cargo build 2>&1 & echo RC=%errorlevel% & .\target\debug\h.exe 2>&1",
         )
         .await;
         let built = root.join("target/debug/h.exe").exists();
         let ran = r.content.contains("BUILT-OK");
+        let downloaded = r.content.contains("Downloaded anyhow");
         cleanup(&sb);
         assert!(
+            downloaded,
+            "没看到 `Downloaded anyhow` —— 依赖没有真的下载，这一轮没验到 \
+             `.crate` 那条路（回环镜像没起来？缓存没清干净？）。\n输出：{}",
+            r.content
+        );
+        assert!(
             built && ran,
-            "cargo build 没能出可运行的 .exe —— 多半是四件套没配齐、链接步挂了。\n输出：{}",
+            "cargo build 没能出可运行的 .exe。\n输出：{}",
+            r.content
+        );
+    }
+
+    /// `CARGO_HOME` 必须被指到 Cortex 自己那份，且**不是**用户的 `~/.cargo`。
+    ///
+    /// 单独一条，因为上面那条即使这里错了也可能碰巧绿（比如用户手工把
+    /// `~/.cargo` 授出去过）。这条直接看环境变量，判据唯一。
+    pub async fn cargo_home_指向沙箱自己那份() {
+        let (_d, sb) = workspace();
+        let r = shell(&sb, "echo %CARGO_HOME%").await;
+        cleanup(&sb);
+        let got = r.content.to_lowercase();
+        assert!(
+            got.contains("win-sandbox") && got.contains("cargo-home"),
+            "CARGO_HOME 没指到沙箱专用的那份 —— cargo 会去写用户的 ~/.cargo，\
+             而那里沙箱写不进，症状是「拒绝访问 (os error 5)」。实际：{}",
             r.content
         );
     }
@@ -245,8 +299,11 @@ fn main() {
     };
 
     run("能力可用", &win::能力可用);
-    run("cargo_build_出_exe", &|| {
-        rt.block_on(win::cargo_build_出_exe())
+    run("cargo_build_出_exe_并拉到新依赖", &|| {
+        rt.block_on(win::cargo_build_出_exe_并拉到新依赖())
+    });
+    run("cargo_home_指向沙箱自己那份", &|| {
+        rt.block_on(win::cargo_home_指向沙箱自己那份())
     });
     run("git 走 https 能通", &|| {
         rt.block_on(win::git_走_https_能通())

@@ -45,6 +45,11 @@ tempfile = "3"
 # 用 `windows-sys` 而不是 `windows`：这一层只调十来个原始 Win32 函数，
 # 不需要 COM 包装与 RAII 类型，而 `windows` 会把编译时间拉长一个量级。
 # 版本跟着依赖树里已有的那份（0.61），避免两份 windows-sys 共存。
+# 受限令牌沙箱里那个 crates.io 明文回环镜像的上游客户端。
+# 只在 Windows 上要 —— 别的平台没有「沙箱里做不了 TLS」这个问题。
+[target.'cfg(windows)'.dependencies]
+reqwest.workspace = true
+
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"
 features = [

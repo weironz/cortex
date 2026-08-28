@@ -24,7 +24,8 @@ clippy、类型检查都正常，可 `cargo build` 生成 .exe 的最后一步�
 
 所以多了一档，用环境变量 `CORTEX_WIN_BACKEND=restricted` 打开：
 
-- **`cargo build` 能出 .exe 了**，`git`、`dir` 也全部正常，**不需要管理员**。
+- **`cargo build` 能出 .exe 了**（含拉取新依赖），`git`、`dir` 也全部正常，
+  **不需要管理员**。
 - **写还是只能写工作区**，写工作区以外会被拒。
 - 沙箱里的程序跑在一个独立桌面上，看不见也动不了你桌面上的窗口。
 
@@ -36,10 +37,18 @@ clippy、类型检查都正常，可 `cargo build` 生成 .exe 的最后一步�
 的默认 TLS 拿不到凭据（证书存储在受限令牌下只能只读打开，是系统的既定规则），
 沙箱会自动让 git 改用它自带的证书包绕开。
 
-⚠️ **但 `cargo` 拉不了新依赖**：下载 crate 那一步用的是 cargo 自己链进去的
-TLS，换不掉。依赖已经在本地缓存时构建正常；要拉新依赖，先在沙箱外
-`cargo fetch` 一次。`curl https://` 同理不通（用 `git` 代替）。模型已经被
-告知这些，不会把它当成网络故障反复重试。
+**`cargo` 拉新依赖也通了**（`cargo add` / 新 `Cargo.toml` 都能用）。下载
+crate 那一步用的是 cargo 自己链进去的 TLS，换不掉 —— 所以改成让它不走 TLS：
+Cortex 在本机回环上开一个 crates.io 镜像，TLS 由 Cortex 这一侧做。crate 的
+校验和照常验，端到端没有变松。
+
+⚠️ **这一档下 cargo 用的是它自己那份缓存目录**，不是你的 `~/.cargo` ——
+沙箱写不进你的，而把你的授出去意味着沙箱里的代码能往你的 crate 缓存里塞
+东西、下次在沙箱外构建时被照单编译。代价是**第一次构建会重新下载依赖**，
+之后各工作区共用这一份。不要为此去改 `CARGO_HOME`。
+
+⚠️ `curl https://` 仍然不通（用 `git` 代替）。模型已经被告知这一条，
+不会把它当成网络故障反复重试。
 
 所以两档的用途不一样，按需要选：
 
@@ -48,7 +57,7 @@ TLS，换不掉。依赖已经在本地缓存时构建正常；要拉新依赖�
 | 让 agent 读代码、分析、跑 check / lint | 默认那档（读得严） |
 | 让 agent 跑**本地**构建、本地 git 操作 | `CORTEX_WIN_BACKEND=restricted` |
 | `git clone` / `fetch` / `push` | `CORTEX_WIN_BACKEND=restricted` 可用 |
-| `cargo` 拉**新**依赖 | 两档都不行，先在沙箱外 `cargo fetch` |
+| `cargo` 拉**新**依赖 | `CORTEX_WIN_BACKEND=restricted` 可用 |
 | 跑**完全不信任**的代码 | 默认那档 —— 第二档挡不住偷读 |
 
 两档都**还没有隔离网络**。

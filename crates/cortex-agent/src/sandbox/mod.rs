@@ -83,6 +83,9 @@ mod macos;
 pub mod windows;
 #[cfg(windows)]
 pub mod windows_restricted;
+// 受限令牌那一档跑 cargo 必需的明文回环镜像。理由写在模块文档里。
+#[cfg(windows)]
+mod windows_cargo_mirror;
 
 // 后端只有一个入口名字。用 `cfg` 切函数而不是在 [`prepare`] 里切代码块：
 // 后者在没有后端的平台上会留下一段编译器判定不可达的死代码，

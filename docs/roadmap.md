@@ -409,15 +409,16 @@ AppContainer 那一档跑不了完整构建 —— `cargo check` / `clippy` / ru
 | | 实测 |
 |---|---|
 | 明文 `http://` | **200，出得去** —— 所以不构成边界 |
-| `https://`（curl / git / PowerShell） | **全挂**在 `SEC_E_NO_CREDENTIALS` —— 所以也坏了可用性 |
+| `https://`（curl / git / PowerShell） | 当时**全挂**在 `SEC_E_NO_CREDENTIALS` —— 所以也坏了可用性。git 与 cargo 已修，见下 |
 | 零管理员封网 | **做不到**：`FwpmEngineOpen0` 只读，写事务回 `ERROR_ACCESS_DENIED`；Job object 网络限速设不了（err 87） |
 
-也就是说：**这一档既拦不住外发，又拉不了依赖。** codex 的 WFP 封锁同样只在
-它的提权档，非提权档只是设 `HTTP_PROXY` 环境变量劝退。
+也就是说：**这一档既拦不住外发，又拉不了依赖。**（后半句已经不成立了 ——
+2026-08-28 当天把 git 与 cargo 两条路都修通了，见下。前半句仍然成立。）
+codex 的 WFP 封锁同样只在它的提权档，非提权档只是设 `HTTP_PROXY` 环境变量劝退。
 
 两件事要分开做，都还没做：
 
-1. ~~**修 HTTPS**~~ —— **做了一半，且那一半是最要紧的**（2026-08-28）。
+1. ~~**修 HTTPS**~~ —— **开发路径已经全通**（2026-08-28）。
    根因定位到「受限令牌下证书存储只能只读打开」（注册表键上明写
    `NT AUTHORITY\RESTRICTED: ReadKey`，是系统既定语义，不是漏授）。
    解法是绕开 schannel 而不是要写权限：
@@ -426,11 +427,19 @@ AppContainer 那一档跑不了完整构建 —— `cargo check` / `clippy` / ru
    |---|---|
    | `git`（clone/fetch/push） | ✅ 通 —— 注入 `http.sslBackend=openssl` |
    | `cargo` 更新索引 | ✅ 通 —— 走 git 协议 |
-   | `cargo` 下载 `.crate` | ❌ 挂 —— cargo 内建 libcurl 只编了 Schannel，无开关可换 |
-   | `curl https://` | ❌ 挂 —— 同上 |
+   | `cargo` 下载 `.crate` | ✅ 通（2026-08-28）—— 绕开 TLS：本机明文回环镜像 + 沙箱专用 `CARGO_HOME`，见 [windows-sandbox.md](windows-sandbox.md) 的 4.4 |
+   | `curl https://` | ❌ 挂 —— 自己链了 Schannel，又没有能换成明文的通道 |
 
-   规律：**能改走 git CLI 的都好了，进程自己链了 Schannel 的都换不掉**。
-   剩下那半要么等上游给开关，要么在沙箱里放一份 openssl 版 curl。
+   规律：**能换掉 TLS 后端、或能被换成明文的都通了**。cargo 属于后者：
+   它的 libcurl 静态链且只编了 Schannel，没有开关 —— 但它的**下载源**可以
+   用 `source.crates-io.replace-with` 换成本机的明文回环镜像，TLS 由宿主
+   这一侧做。`curl` 没有这一层，所以留着。
+
+   ⚠️ 同一轮还发现一堵**比 TLS 更靠前的墙**：用户真实的 `~/.cargo` 沙箱写不进，
+   默认 `CARGO_HOME` 下 cargo 第一步就「拒绝访问 (os error 5)」，哪怕依赖全
+   在缓存里。此前之所以没被发现，是因为那条测试自己设了私有 `CARGO_HOME`
+   —— 测试替被测对象把环境铺好了。现在这一档把 `CARGO_HOME` 指到
+   Cortex 自己的目录，代价是第一次构建重新下载依赖（如实写进了工具描述）。
 2. **真封网**要么一次管理员（WFP 按 SID，codex 的形状），要么把需要出网控制的
    场景交给云沙箱（那边有 `cortex-egress-proxy` 白名单）。
 
@@ -441,7 +450,7 @@ AppContainer 那一档跑不了完整构建 —— `cargo check` / `clippy` / ru
 | | 欠什么 | 现在怎么样 |
 |---|---|---|
 | a | ~~`git` 用不了~~ **已解决**（见上一节）。剩下的是 `dir` / `vol`，以及「工作区在主目录底下时 git 仍然不行」 | 前者要卷根一条 ACE（一次管理员，只买这两个命令）；后者要 `C:\Users` 上一条 ACE，同样要管理员。两条都不阻塞主线 |
-| b | **CI 上一条 Windows 测试都不跑** —— `ci.yml` 的 windows-latest 只编译 | 加一条测试腿要 CI 分钟数。在此之前，改 `sandbox/windows.rs` 必须本机跑一遍 |
+| b | ~~**CI 上一条 Windows 测试都不跑**~~ | **已解决**：`ci.yml` 的 windows-latest 腿现在跑 `--lib sandbox` 与两份逃逸测试。仍然只是那几条 —— 改 `windows*.rs` 之后**本机跑一遍**这条纪律不变 |
 | c | 首次绑定一个**已经建过**的大仓库要等一两分钟 | 现在**至少有一行日志说得清**（只在真的要写时打，靠 `grant_to_container` 的回值分辨）。真正的进度条要 `TreeSetNamedSecurityInfoW` 的回调，而进度往哪儿送在当前这条路上还没有出口 —— `prepare` 回的是一个待起的 `Command`，不是一条能追加文字的结果 |
 | d | ~~`%TEMP%` 没给~~ | **不用给**：AppContainer 自动把 `%TEMP%` 重定向到容器私有目录（`…\Packages\<容器>\AC\Temp`），实测可写。上一版把它列成待办是想当然 |
 | e | `NetworkPolicy::Allowed` 在这一层是**全开**，没有白名单 | Linux 侧走 `cortex-egress-proxy` 的 CONNECT 白名单。要对齐，得让沙箱里的进程走代理 —— 而 AppContainer 没有「只许连这个代理」这一档，只能靠约定 |
