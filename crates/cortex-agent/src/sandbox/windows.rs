@@ -58,33 +58,39 @@
 //! **连不上本机跑着的开发服务器**。那是这一层免费送的，不是我们设的 ——
 //! 逃逸测试里有一条盯着它，为的是「它哪天变了我们要知道」。
 //!
-//! # 这一层挡得住边界，却挡掉了一些正常的活
+//! # git 能用，但有一条位置上的前提
 //!
-//! 实测（2026-08-28）：`type`、`echo >`、cmd 的 `for %f in (*)` 通配、
-//! .NET 的 `Directory.GetFiles`、起可执行文件 —— **都正常**。而这三样**不行**：
+//! git 每条子命令开头都要 `getcwd`。Windows 上那是 `GetLongPathNameW`，
+//! 它要**在每一级的上级目录里把这一级的名字查出来** —— 也就是要
+//! `FILE_LIST_DIRECTORY`。少一级，整条调用 `ERROR_ACCESS_DENIED`，git 报
+//! `fatal: unable to get current working directory: Permission denied`。
 //!
-//! | | 症状 |
-//! |---|---|
-//! | `dir` | 「拒绝访问。」 |
-//! | `vol` / `fsutil volume` | 同上 |
-//! | **`git`（任何子命令）** | `fatal: unable to get current working directory: Permission denied` |
+//! 所以 [`grant_ancestors`] 会把工作区的每一级上级目录都授上「可列举」。
+//! 卷根（`C:/`、`D:/`）**不需要**，实测 `D:/` 一条 ACE 都没有时 git 全通。
 //!
-//! 根因是同一个：**AppContainer 打不开卷根**（`C:/`、`D:/`）。`dir` 要取卷
-//! 信息；git 的 `mingw_getcwd` 在 `GetLongPathNameW` 失败后回落到
-//! `GetFinalPathNameByHandleW`，那一步要解析卷。
+//! **改不动的那一级就是天花板。** `C:/Users` 归 SYSTEM，普通用户没有
+//! `WRITE_DAC` —— 所以工作区放在 `C:/Users/<你>/…` 底下时，沙箱里的 git
+//! 用不了。放在别处（用户自己建的目录）则零提权可用。
 //!
-//! 排除过的两条：
+//! 另外 git 还要读 `~/.gitconfig`，而那在主目录里、沙箱按设计读不到，
+//! 且 git 把「读不了全局配置」当**致命错**。所以 [`synth_git_config`]
+//! 合成一份只带身份的配置交给它 —— 见那个函数为什么不是「放行原文件」。
 //!
-//! - **不是祖先目录穿不过去** —— 把工作区放进容器自己的
-//!   `AppData/Local/Packages/<容器>/AC/Temp` 里（整条链都对容器开放），
-//!   症状一模一样。
-//! - **给祖先加列举权也不管用** —— 从 `C:/Users/<你>` 往下每一级都授
-//!   `FILE_LIST_DIRECTORY`，git 的错误一个字没变。所以那个授权被撤掉了：
-//!   它让容器能列出你主目录里有哪些东西，而什么都没换来。
+//! # 还挡掉的两样
 //!
-//! 唯一的解法是在**卷根**上给容器 SID 一条读+执行的 ACE，而那要管理员
-//! （实测 `SetNamedSecurityInfoW("C:/")` 回错误 5）。**是否要那一次提权，
-//! 是个产品决定，不是技术决定** —— 记在 `docs/roadmap.md` 里等人拍板。
+//! `dir` 与 `vol` 要卷信息，那要**卷根上一条 ACE**，而卷根归 SYSTEM ——
+//! 那一条是唯一需要管理员的东西，且**只买这两个命令**（`git` 不需要它，
+//! `list_dir` 工具、cmd 的 `for` 通配、.NET 的 `Directory.GetFiles` 都不需要）。
+//! 没有它时 PowerShell 的当前位置也会回落成 `C:/`。
+//!
+//! 排除掉的两条，写下来免得重查：
+//!
+//! - **不是祖先目录「穿不过去」。** 只给 `FILE_TRAVERSE` 不给
+//!   `FILE_LIST_DIRECTORY` 时 git 的错误一个字不变 —— 它要的是查名字。
+//! - **git 的回落那条路走不通。** `GetLongPathNameW` 失败后 git 会试
+//!   `GetFinalPathNameByHandleW(..., VOLUME_NAME_DOS)`，而把设备路径映射回
+//!   盘符对 AppContainer 是拒绝的（同一个句柄换 `VOLUME_NAME_NT` 立刻就通）。
+//!   那是对象管理器的东西，文件 ACL 够不着。
 //!
 //! # 授权的代价：一次性的，但那一次可能很贵
 //!
@@ -241,6 +247,20 @@ unsafe fn container_sid() -> Result<*mut c_void> {
 /// # Errors
 /// 目录不存在、或调用方没有改这个目录 DACL 的权限（改 DACL 要
 /// `WRITE_DAC`，目录的属主天然就有）。
+/// `OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE`。不给继承的话，目录本身进得去
+/// 而里面新建的文件进不去。
+const INHERIT_ALL: u32 = 3;
+/// 不继承：这条 ACE 只作用在这个目录本身，一个子项都不碰。
+const INHERIT_NONE: u32 = 0;
+/// `FILE_ALL_ACCESS`。
+const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
+/// 「能穿过去，也能看见这一层有哪些名字」——
+/// `FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE`。
+///
+/// **不含读文件内容**：拿到它的进程能列出这个目录里有哪些条目，但打不开
+/// 其中任何一个（那些各自有自己的 ACL，上面没有容器 SID）。
+const LIST_ONLY: u32 = 1 | 0x20 | 0x80 | 0x2_0000 | 0x10_0000;
+
 /// `ACCESS_ALLOWED_ACE_TYPE`。`windows-sys` 没有导出它（那一族 ACE 类型常量
 /// 都没导），而它是 winnt.h 里钉死的 0，不是版本相关的东西。
 const ACE_TYPE_ALLOWED: u8 = 0;
@@ -257,7 +277,7 @@ const ACE_TYPE_ALLOWED: u8 = 0;
 /// SID 就会把它当成已完成，症状是「第一次能用，之后莫名其妙读不到文件」。
 ///
 /// 拿不准时一律回 `false`：多写一次只是慢，漏写一次是功能坏掉。
-unsafe fn already_granted(dacl: *const ACL, sid: *mut c_void) -> bool {
+unsafe fn already_granted(dacl: *const ACL, sid: *mut c_void, inherit: u32, mask: u32) -> bool {
     // DACL 为空指针意味着「没有 DACL」= 人人可访问。那种目录不该出现在
     // 工作区里，但真出现时也轮不到这里处理，照常走授权那条路
     if dacl.is_null() {
@@ -275,11 +295,11 @@ unsafe fn already_granted(dacl: *const ACL, sid: *mut c_void) -> bool {
             continue;
         }
         // 继承标志必须**两个都在**，理由见函数头
-        if unsafe { (*header).AceFlags } & 3 != 3 {
+        if u32::from(unsafe { (*header).AceFlags }) & inherit != inherit {
             continue;
         }
         let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
-        if unsafe { (*allowed).Mask } & 0x001F_01FF != 0x001F_01FF {
+        if unsafe { (*allowed).Mask } & mask != mask {
             continue;
         }
         let ace_sid = unsafe { std::ptr::addr_of!((*allowed).SidStart) }.cast::<c_void>();
@@ -290,7 +310,12 @@ unsafe fn already_granted(dacl: *const ACL, sid: *mut c_void) -> bool {
     false
 }
 
-unsafe fn grant_to_container(dir: &Path, sid: *mut c_void) -> Result<bool> {
+unsafe fn grant_to_container(
+    dir: &Path,
+    sid: *mut c_void,
+    inherit: u32,
+    mask: u32,
+) -> Result<bool> {
     use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
 
     let mut path = wide(&dir.display().to_string());
@@ -316,17 +341,14 @@ unsafe fn grant_to_container(dir: &Path, sid: *mut c_void) -> Result<bool> {
     }
 
     // 已经授过就直接回 —— 见 `already_granted`：省掉的是一整趟子树遍历
-    if already_granted(old_dacl, sid) {
+    if already_granted(old_dacl, sid, inherit, mask) {
         return Ok(false);
     }
 
     let ea = EXPLICIT_ACCESS_W {
-        // FILE_ALL_ACCESS
-        grfAccessPermissions: 0x001F_01FF,
+        grfAccessPermissions: mask,
         grfAccessMode: GRANT_ACCESS,
-        // OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE —— 不给继承的话，
-        // 目录本身进得去而里面新建的文件进不去
-        grfInheritance: 3,
+        grfInheritance: inherit,
         Trustee: TRUSTEE_W {
             pMultipleTrustee: std::ptr::null_mut(),
             MultipleTrusteeOperation: 0,
@@ -568,7 +590,7 @@ pub(super) fn prepare(
     // 而重试一次又会从头再来。
     //
     // `prepare` 跑在超时开始**之前**，所以这笔账花在它该花的地方。
-    grant_workspace(policy, cwd)?;
+    let git_cfg = grant_workspace(policy, cwd)?;
 
     let plan = HelperPlan {
         argv: argv.to_vec(),
@@ -580,6 +602,10 @@ pub(super) fn prepare(
 
     let mut cmd = std::process::Command::new(me);
     cmd.arg(HELPER_FLAG).arg(json);
+    // helper 继承这份环境，真命令再继承一层 —— 于是 git 看到的就是这里设的
+    if let Some(cfg) = git_cfg {
+        cmd.env("GIT_CONFIG_GLOBAL", cfg);
+    }
     Ok(cmd)
 }
 
@@ -625,16 +651,218 @@ fn run_helper(plan_json: &str) -> Result<u32> {
     }
 }
 
+/// 合成一份最小的 git 全局配置，回 `(GIT_CONFIG_GLOBAL 的路径)`。
+///
+/// # 为什么必须有这一步
+///
+/// git 每次启动都要读 `~/.gitconfig`。那个文件在**主目录**里，而不让容器
+/// 看见主目录正是这个沙箱存在的理由 —— 于是 git 拿到 `Permission denied`，
+/// 并且**把它当致命错**：
+///
+/// ```text
+/// warning: unable to access 'C:/Users/x/.gitconfig': Permission denied
+/// fatal: unknown error occurred while reading the configuration files
+/// ```
+///
+/// # 为什么是「合成」而不是「把 .gitconfig 放行」
+///
+/// 放行一条 ACE 就完事，但 `~/.gitconfig` 里可以有
+/// `[credential]` 的 helper、`url.*.insteadOf` 里嵌的令牌、
+/// `user.signingkey`。沙箱里的进程拿到那些，等于把凭据交出去了。
+///
+/// 所以这里**只抄身份**：`user.name` / `user.email`，外加两个影响正确性的
+/// （换行处理、默认分支名）。别的一律不带 —— 拿不准的就是不带。
+///
+/// 读法走 `git config --get` 而不是自己解析文件：git 自己的优先级
+/// （system → global → include）比我们复现的任何版本都准，而复现错了
+/// 的症状是「提交的作者名跟平时不一样」，几乎不会有人归因到这里。
+///
+/// # 放在哪
+///
+/// `%LOCALAPPDATA%/cortex/sandbox/` 下，并**只把那两个文件**授给容器。
+/// 不需要给目录列举权：git 是按完整路径打开它的，不用先列目录。
+fn synth_git_config(sid: *mut c_void) -> Option<std::path::PathBuf> {
+    // **进程内只做一次。** 里面要起四个 `git config` 子进程，而这条路每条
+    // 命令都走 —— 不缓存的话，为了一份整会话不变的配置，每条命令多付四次
+    // 进程启动（Windows 上不便宜），把 60 毫秒的开销直接翻几倍。
+    //
+    // 代价说清楚：agent 跑着的时候你改了 `~/.gitconfig`，要重启才生效。
+    // 那是「改身份」这种一年一次的事，换每条命令都快得多，值。
+    static CACHE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| synth_git_config_uncached(sid)).clone()
+}
+
+fn synth_git_config_uncached(sid: *mut c_void) -> Option<std::path::PathBuf> {
+    fn get(key: &str) -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(["config", "--get", key])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let v = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        (!v.is_empty()).then_some(v)
+    }
+
+    let dir = dirs_local_app_data()?.join("cortex").join("sandbox");
+    std::fs::create_dir_all(&dir).ok()?;
+    let cfg = dir.join("gitconfig");
+    let ignore = dir.join("gitignore");
+
+    let mut body =
+        String::from("# 由 Cortex 沙箱生成：只抄身份，不带你的 credential helper 与令牌\n");
+    let name = get("user.name");
+    let email = get("user.email");
+    if name.is_none() && email.is_none() {
+        // 连 git 都没有，或者用户没配身份。那就不写配置、也不设环境变量 ——
+        // 设了反而会把「git 不存在」变成一条更难懂的错
+        return None;
+    }
+    body.push_str("[user]\n");
+    if let Some(v) = name {
+        body.push_str(&format!("\tname = {v}\n"));
+    }
+    if let Some(v) = email {
+        body.push_str(&format!("\temail = {v}\n"));
+    }
+    body.push_str("[core]\n");
+    if let Some(v) = get("core.autocrlf") {
+        body.push_str(&format!("\tautocrlf = {v}\n"));
+    }
+    // 指一份空的忽略文件。不指的话 git 每条命令都要抱怨一次读不到
+    // `~/.config/git/ignore` —— 那是警告不是错误，但它会跟着每一条命令进
+    // 模型上下文，而模型会试图去「修」一个根本不该它管的问题
+    body.push_str(&format!(
+        "\texcludesFile = {}\n",
+        ignore.display().to_string().replace('\\', "/")
+    ));
+    if let Some(v) = get("init.defaultBranch") {
+        body.push_str(&format!("[init]\n\tdefaultBranch = {v}\n"));
+    }
+
+    // 内容没变就不重写：这条路每条命令都走一遍
+    if std::fs::read_to_string(&cfg).ok().as_deref() != Some(body.as_str()) {
+        std::fs::write(&cfg, &body).ok()?;
+    }
+    if !ignore.exists() {
+        std::fs::write(&ignore, "").ok()?;
+    }
+    // FILE_GENERIC_READ。**只读**，且只给这两个文件 —— 目录不授
+    const READ_ONLY: u32 = 0x0012_0089;
+    for f in [&cfg, &ignore] {
+        // SAFETY: sid 来自调用方，活过整个循环
+        let _ = unsafe { grant_to_container(f, sid, INHERIT_NONE, READ_ONLY) };
+    }
+    Some(cfg)
+}
+
+/// `%LOCALAPPDATA%`。不引 `dirs` crate：这一处的需求就是读一个环境变量。
+fn dirs_local_app_data() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
+}
+
+/// 给工作区的**每一级祖先**授「能穿过去、能看见这一层的名字」。
+///
+/// # 为什么必须有这一步：git 没有它一步都走不了
+///
+/// git 每条子命令开头都要 `getcwd`。Windows 上那是
+/// `GetLongPathNameW(当前目录)` —— 而它要**在每一级的父目录里把这一级的
+/// 名字查出来**，也就是要 `FILE_LIST_DIRECTORY`。少一级，整条调用就
+/// `ERROR_ACCESS_DENIED`，git 报的是
+/// `fatal: unable to get current working directory: Permission denied`，
+/// 或者 `fatal: Invalid path '<父目录>': Permission denied`。
+///
+/// 实测（2026-08-28）：`D:/cortex-probe/ws` 这个工作区，**只**给
+/// `D:/cortex-probe` 加上这一条之后，`git init` / `add` / `commit` / `log`
+/// 全部通过；不加则第一条就死。
+///
+/// # 排除掉的三条，写下来免得重查
+///
+/// - **不是卷根。** 卷根那条 ACE（要管理员）只影响 `dir` / `vol` /
+///   PowerShell 的当前位置 —— D 盘卷根没授权时 git 照样全通。
+/// - **不是「穿行权」不够。** 只给 `FILE_TRAVERSE` 不给
+///   `FILE_LIST_DIRECTORY` 时 git 的错误一个字不变：它要的是**查名字**，
+///   不是「路过」。
+/// - **回落那条路走不通。** git 在 `GetLongPathNameW` 失败后会回落到
+///   `GetFinalPathNameByHandleW(..., VOLUME_NAME_DOS)`，而那一步要把设备
+///   路径映射回盘符，对 AppContainer 是拒绝的（同一个句柄换
+///   `VOLUME_NAME_NT` 立刻就通）。那是对象管理器的东西，文件 ACL 够不着。
+///
+/// # 它放宽了什么
+///
+/// [`LIST_ONLY`] **不含读文件内容**。容器能列出工作区上面每一级有哪些
+/// 条目，但打不开其中任何一个 —— 逃逸测试里「读不到 / 写不进用户目录」
+/// 那两条守的就是这一点。
+///
+/// ⚠️ 代价最实的一处：工作区在 `C:/Users/<你>/…` 底下时，这一步会给**你的
+/// 主目录**加上列举权，也就是容器能看见你主目录里有哪些文件名（读不到内容）。
+/// 换来的是 git 能用。工作区在别的盘上时完全不涉及主目录。
+///
+/// # 改不动的一律跳过
+///
+/// `C:/`、`C:/Users` 归 SYSTEM，普通用户没有 `WRITE_DAC`（实测错误 5）。
+/// 为它们失败的话每条命令都会以「写不回权限表」收场，而那既不是用户的错、
+/// 也不是我们能修的。跳过是安全的：**授不上只会更严，不会更松**。
+fn grant_ancestors(workspace: &Path, sid: *mut c_void) -> Result<()> {
+    let mut chain: Vec<&Path> = workspace.ancestors().skip(1).collect();
+    chain.reverse();
+    // 卷根（`C:/`、`D:/`）不授也不算断链 —— 实测 `D:/` 一条 ACE 都没有时
+    // git 照样全通。它只影响 `dir` / `vol`（那两个要卷信息），而卷根归
+    // SYSTEM，授它要管理员
+    let from_root = if chain.first().is_some_and(|p| p.parent().is_none()) {
+        1
+    } else {
+        0
+    };
+    for a in chain.into_iter().skip(from_root) {
+        if !a.is_dir() {
+            continue;
+        }
+        // SAFETY: sid 来自调用方刚拿到的容器 SID，活过整个循环
+        match unsafe { grant_to_container(a, sid, INHERIT_NONE, LIST_ONLY) } {
+            Ok(true) => tracing::info!(
+                dir = %a.display(),
+                "给工作区的上级目录加了「可列举」—— git 的 getcwd 需要它。容器由此能看见这一层有哪些名字，但读不到其中任何一个文件"
+            ),
+            Ok(false) => {}
+            // ⚠️ **一断即止，不是「跳过继续」。**
+            //
+            // 祖先链是一条**链**：中间少一级，`GetLongPathNameW` 就整条失败，
+            // 下面授得再多也没用。而「授了却没用」不是白干，是**白付代价** ——
+            // 每一级列举权都让容器多看见一层文件名。
+            //
+            // 这个错误真实发生过：`D:/codes` 归一个解析不出名字的 SID，
+            // 授不上；旧写法继续往下授，于是这台机器的**主目录**被加上了
+            // 列举权（`.ssh`、`.git-credentials` 的文件名都露出来了），
+            // 而 git 依然一步都走不了。
+            Err(e) => {
+                tracing::warn!(
+                    dir = %a.display(),
+                    error = %e,
+                    "这一级的权限表改不动（多半不归当前用户），                     沙箱里的 git 用不了 —— 更下面几级就不授了，授了也没用"
+                );
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 把工作区授给容器 —— 在**父进程**里做，理由见 `prepare` 里那段。
 ///
 /// 每次执行都调，靠 `already_granted` 短路：ACL 住在磁盘上，跨进程跨重启
 /// 都在，所以第二条命令开始这里就是一次读权限表的开销。
-fn grant_workspace(policy: &SandboxPolicy, cwd: &Path) -> Result<()> {
+fn grant_workspace(policy: &SandboxPolicy, cwd: &Path) -> Result<Option<std::path::PathBuf>> {
     let dirs = writable_under_cwd(policy, cwd);
     // SAFETY: 同上，指针来自刚拿到的 SID 与栈上缓冲
     unsafe {
         let sid = container_sid()?;
         let mut err = None;
+        // 祖先链先授 —— 没有它 git 一步都走不了，见 `grant_ancestors`
+        let _ = grant_ancestors(cwd, sid);
+        let git_cfg = synth_git_config(sid);
         for dir in &dirs {
             // ⚠️ **这里可能要几分钟。**
             //
@@ -643,11 +871,11 @@ fn grant_workspace(policy: &SandboxPolicy, cwd: &Path) -> Result<()> {
             // 里外面看不到任何动静 —— 模型在等一条 `type a.txt`，用户在等
             // 模型。所以真的要写的时候吼一声，别让它成为一段无法解释的停顿。
             let t = std::time::Instant::now();
-            match grant_to_container(Path::new(dir), sid) {
+            match grant_to_container(Path::new(dir), sid, INHERIT_ALL, FILE_ALL_ACCESS) {
                 Ok(true) => tracing::info!(
                     dir = %dir,
                     elapsed_ms = t.elapsed().as_millis(),
-                    "首次为工作区授权沙箱访问（这一步跨重启只做一次；                     大仓库要几分钟，因为 Windows 会把权限铺满整棵子树）"
+                    "首次为工作区授权沙箱访问（跨重启只做一次；大仓库要几分钟，因为 Windows 会把权限铺满整棵子树）"
                 ),
                 Ok(false) => {}
                 Err(e) => {
@@ -659,7 +887,7 @@ fn grant_workspace(policy: &SandboxPolicy, cwd: &Path) -> Result<()> {
         FreeSid(sid);
         match err {
             Some(e) => Err(e),
-            None => Ok(()),
+            None => Ok(git_cfg),
         }
     }
 }
@@ -895,27 +1123,29 @@ mod tests {
         unsafe {
             let sid = container_sid().expect("拿得到容器 SID");
             assert!(
-                !read_dacl_and_check(dir.path(), sid),
+                !read_dacl_and_check(dir.path(), sid, INHERIT_ALL, FILE_ALL_ACCESS),
                 "刚建的目录不该被认为已经授过"
             );
-            let 第一次 = grant_to_container(dir.path(), sid).expect("授得下去");
+            let 第一次 = grant_to_container(dir.path(), sid, INHERIT_ALL, FILE_ALL_ACCESS)
+                .expect("授得下去");
             assert!(第一次, "第一次必须真的写下去");
 
             assert!(
-                read_dacl_and_check(dir.path(), sid),
+                read_dacl_and_check(dir.path(), sid, INHERIT_ALL, FILE_ALL_ACCESS),
                 "授过之后必须认得出来，否则每条命令都要重铺一遍整棵子树"
             );
             // 回值就是「这次是不是真的写了」—— 那条「首次授权可能要几分钟」
             // 的日志靠它分辨该不该吼。恒真的话每条命令都吼一遍，
             // 而那种日志三天之内就会被人当噪音略过
-            let 第二次 = grant_to_container(dir.path(), sid).expect("再授一次不该失败");
+            let 第二次 = grant_to_container(dir.path(), sid, INHERIT_ALL, FILE_ALL_ACCESS)
+                .expect("再授一次不该失败");
             assert!(!第二次, "第二次不该再写 —— 那意味着又铺了一遍整棵子树");
             FreeSid(sid);
         }
     }
 
     /// 只给上面那条测试用：读一次 DACL 再问 [`already_granted`]。
-    unsafe fn read_dacl_and_check(dir: &Path, sid: *mut c_void) -> bool {
+    unsafe fn read_dacl_and_check(dir: &Path, sid: *mut c_void, inherit: u32, mask: u32) -> bool {
         use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
         let path = wide(&dir.display().to_string());
         let mut dacl: *mut ACL = std::ptr::null_mut();
@@ -933,7 +1163,7 @@ mod tests {
             )
         };
         assert_eq!(rc, 0, "读不到权限表（错误 {rc}）");
-        unsafe { already_granted(dacl, sid) }
+        unsafe { already_granted(dacl, sid, inherit, mask) }
     }
 
     /// **没有继承标志的 ACE 不算「已经授过」。**
@@ -951,9 +1181,9 @@ mod tests {
         // SAFETY: SID 与 DACL 指针都在本作用域内使用，用完就释放
         unsafe {
             let sid = container_sid().expect("拿得到容器 SID");
-            grant_raw(dir.path(), sid, 0, 0x001F_01FF);
+            grant_raw(dir.path(), sid, 0, FILE_ALL_ACCESS);
             assert!(
-                !read_dacl_and_check(dir.path(), sid),
+                !read_dacl_and_check(dir.path(), sid, INHERIT_ALL, FILE_ALL_ACCESS),
                 "只授了目录本身、没授子项，不能算「已经授过」                 —— 认了的话里面的文件永远读不到"
             );
             FreeSid(sid);
@@ -975,7 +1205,7 @@ mod tests {
             // FILE_GENERIC_READ | FILE_GENERIC_EXECUTE，没有写
             grant_raw(dir.path(), sid, 3, 0x0012_01BF);
             assert!(
-                !read_dacl_and_check(dir.path(), sid),
+                !read_dacl_and_check(dir.path(), sid, INHERIT_ALL, FILE_ALL_ACCESS),
                 "只读的 ACE 不能算「已经授过」——沙箱里的命令要写得进工作区"
             );
             FreeSid(sid);

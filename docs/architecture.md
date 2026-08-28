@@ -568,35 +568,44 @@ Windows 没有 landlock / seatbelt 的对应物，这一条曾经的结论是
 | `shell` 出网 | ✅ **默认挡住** | 不给 capability 时连 DNS 都不通（实测 `curl` 退出码 6） |
 | `NetworkPolicy::Allowed` | ⚠️ **全开，没有白名单** | 给 `internetClient`（`S-1-15-3-1`）就是整个互联网。Linux 侧的 `Allowed` 走 `cortex-egress-proxy` 的 CONNECT 白名单 —— **两边的 `Allowed` 不是同一个东西** |
 | 连本机的开发服务器 | ❌ 连不上 | AppContainer 一贯封 loopback。不是我们设的，但用户会撞上 |
+| `git` | ✅ 能用（工作区不在主目录底下时） | 见下一节 |
+| `dir` / `vol` | ⚠️ 要一次管理员 | 见下一节；不加也能用，只是这两个命令不行 |
 | 桌面 / 剪贴板 | ❌ 没挡 | 阶段 2 |
 
-### ⚠️ 挡住了边界，也挡掉了一些正常的活
+### ⚠️ git 能用，但工作区不能放在主目录底下
 
-实测（2026-08-28）：`type`、`echo >`、cmd 的 `for %f in (*)` 通配、
-.NET 的 `Directory.GetFiles`、起可执行文件 —— 都正常。而这三样**不行**：
+git 每条子命令开头都要 `getcwd`；Windows 上那要**在每一级上级目录里把这一级
+的名字查出来**。所以沙箱会自动给工作区的每一级上级授「可列举」（只看得见
+名字，读不到内容），**不需要管理员** —— 前提是那些目录归当前用户。
 
-| | 症状 |
+`C:\Users` 归 SYSTEM，普通用户改不动它的权限表。所以：
+
+| 工作区在哪 | 沙箱里的 git |
 |---|---|
-| `dir` | 「拒绝访问。」 |
-| `vol` / `fsutil volume` | 同上 |
-| **`git`（任何子命令）** | `fatal: unable to get current working directory: Permission denied` |
+| `D:\proj\...`、`C:\work\...`（你自己建的目录） | ✅ 能用，零提权 |
+| `C:\Users\<你>\...`（含 `%TEMP%`、桌面、文档） | ❌ 用不了 |
 
-根因是同一个：**AppContainer 打不开卷根**（`C:\`、`D:\`）。`dir` 要取卷信息；
-git 的 `mingw_getcwd` 在 `GetLongPathNameW` 失败后回落到
-`GetFinalPathNameByHandleW`，那一步要解析卷。
+**链断了就不再往下授。** 中间少一级，`GetLongPathNameW` 整条失败，下面授得
+再多也没用 —— 而每一级列举权都让容器多看见一层文件名。所以 `C:\Users` 授
+不上时，主目录**不会**被授（这一条有测试守着：`链断了就不再往下授`）。
 
-排除过的两条（写下来免得重查）：
+`~/.gitconfig` 在主目录里，沙箱读不到，而 git 把它当致命错。所以沙箱**合成**
+一份只带 `user.name` / `user.email` 的配置给它 —— 你的 credential helper、
+`url.*.insteadOf` 里的令牌、签名密钥一个都不进沙箱。
 
-- **不是祖先目录穿不过去**：把工作区放进容器自己的
-  `AppData\Local\Packages\<容器>\AC\Temp`（整条链都对容器开放），症状一样。
-- **给祖先加列举权也不管用**：从 `C:\Users\<你>` 往下每一级都授
-  `FILE_LIST_DIRECTORY`，git 的错误一个字没变。所以那次授权被撤掉了 ——
-  它让容器能列出你主目录里有什么，而什么都没换来。
+### `dir` / `vol` 要一次管理员，而且只买这两个
 
-唯一的解法是在**卷根**上给容器 SID 一条读+执行的 ACE，而那要管理员
-（实测 `SetNamedSecurityInfoW("C:\")` 回错误 5）。**要不要那一次提权是产品
-决定**，记在 [roadmap.md](roadmap.md) 里等人拍板 —— 而在拍板之前，
-`git` 在 Windows 沙箱里是不能用的，这句话必须对用户说破。
+它们要卷信息，那要在**卷根**（`C:\`、`D:\`）上给容器 SID 一条 ACE，而卷根
+归 SYSTEM。这是整套里唯一需要管理员的东西：
+
+```
+icacls C:\ /grant "*<容器 SID>:(RX)"
+```
+
+**不带 `/T`、不带 `(OI)(CI)`** —— 只作用在卷根这个目录对象本身，不递归。
+不加也能用：`git` 不需要它，`list_dir` 工具、cmd 的 `for` 通配、.NET 的
+`Directory.GetFiles` 都不需要。代价只是模型写 `dir` 时会拿到「拒绝访问」，
+而 `shell` 的工具描述里已经写清了这一点。
 
 ⚠️ **CI 上一条 Windows 测试都不跑**（`ci.yml` 的 windows-latest 只编译），
 所以改 `sandbox/windows.rs` 之后必须本机跑

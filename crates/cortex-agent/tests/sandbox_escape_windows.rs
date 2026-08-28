@@ -128,6 +128,121 @@ mod win {
         assert!(!wrote, "**沙箱被绕过了**：命令在用户目录里写出了文件");
     }
 
+    /// **git 在沙箱里能真的干活** —— 前提是祖先链完整。
+    ///
+    /// 这是 2026-08-28 那一轮的落点。曾经它一步都走不了：
+    /// `fatal: unable to get current working directory: Permission denied`。
+    /// 两件事凑齐才通：工作区**每一级上级目录**的列举权（git 的 getcwd 走
+    /// `GetLongPathNameW`，那要在上一级里把这一级的名字查出来），以及一份
+    /// **合成的**全局配置（真的那份在主目录里，沙箱按设计读不到，而 git 把
+    /// 「读不了全局配置」当致命错）。
+    ///
+    /// ⚠️ 工作区**不能**放在 `%TEMP%` 之类主目录底下的地方 —— 那条链在
+    /// `C:/Users` 断掉（归 SYSTEM，普通用户改不了它的权限表）。所以这条
+    /// 测试自己在系统盘根下建工作区，那是当前用户建得出、也授得动的地方。
+    pub async fn git_在沙箱里能干活() {
+        let Some(email) = 宿主的_git_身份() else {
+            println!("  [跳过] 这台机器没有 git 或没配 user.email，验不了身份那一半");
+            return;
+        };
+        let Some(root) = 祖先链完整的临时工作区() else {
+            println!("  [跳过] 系统盘根下建不了目录，构造不出「祖先链完整」的工作区");
+            return;
+        };
+        let sb = Sandbox::new(&root).expect("合法沙箱根");
+        std::fs::write(root.join("a.txt"), "A").expect("写得进去");
+
+        let r = shell(&sb, "git init -q . 2>&1 && echo INIT-OK").await;
+        let init_ok = r.content.contains("INIT-OK");
+        let r2 = if init_ok {
+            shell(
+                &sb,
+                "git add a.txt && git commit -q -m x 2>&1 && git log -1 --format=%ae 2>&1",
+            )
+            .await
+        } else {
+            r.clone()
+        };
+        let _ = std::fs::remove_dir_all(root.parent().unwrap_or(&root));
+
+        assert!(
+            init_ok,
+            "git 连 init 都跑不了 —— 多半是上级目录的列举权没授上：{}",
+            r.content
+        );
+        assert!(
+            r2.content.contains(&email),
+            "提交没带上你的身份（期望 {email}）—— 合成配置没生效，
+             而没有身份的 git 会以「Please tell me who you are」失败。实际：{}",
+            r2.content
+        );
+    }
+
+    /// 宿主机自己的 git 身份 —— 上面那条的正对照。
+    fn 宿主的_git_身份() -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(["config", "--get", "user.email"])
+            .output()
+            .ok()?;
+        let v = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        (out.status.success() && !v.is_empty()).then_some(v)
+    }
+
+    /// 在**系统盘根下**建一个临时工作区。
+    ///
+    /// `%TEMP%` 不行：它在主目录底下，而那条链在 `C:/Users` 就断了。
+    /// 系统盘根对 `Authenticated Users` 有 `(AD)`（建子目录），建出来的目录
+    /// 归当前用户，所以沙箱授得动它。
+    fn 祖先链完整的临时工作区() -> Option<std::path::PathBuf> {
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        let p = std::path::PathBuf::from(format!(
+            "{drive}\\cortex-sandbox-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        // **多套一层**。直接建在卷根下面的话，上级就是卷根本身，而卷根未必
+        // 需要我们授（这台机器上它已经有 ACE 了）—— 那样这条测试就绕过了
+        // `grant_ancestors`，而它恰恰是这条测试要验的东西。
+        // 实测：少这一层时，把祖先链授权整个删掉，这条测试照样绿。
+        std::fs::create_dir_all(p.join("ws")).ok()?;
+        Some(p.join("ws"))
+    }
+
+    /// **链断了就不要往下授** —— 授了也没用，只白白多露一层文件名。
+    ///
+    /// 祖先链是一条链：中间少一级，`GetLongPathNameW` 整条失败，下面授得
+    /// 再多也没用。而每一级列举权都让容器多看见一层文件名。
+    ///
+    /// 这个错真实发生过：旧写法是「授不上就跳过、继续往下」，于是在一台
+    /// `C:/Users` 授不上的机器上（那是常态，它归 SYSTEM），**主目录**被加上
+    /// 了列举权 —— `.ssh`、`.git-credentials` 的文件名全露出来，而 git
+    /// 依然一步都走不了。**白付代价。**
+    pub async fn 链断了就不再往下授() {
+        let (_dir, sb) = workspace();
+        // 先让它真的跑一条命令，授权那一步才会发生
+        let r = shell(&sb, "echo hi").await;
+        assert!(r.ok, "命令都没跑起来，下面的断言没有意义：{}", r.content);
+
+        let home = std::env::var("USERPROFILE").expect("Windows 上必有");
+        let 主目录被授了 = 有容器_ace(std::path::Path::new(&home));
+        let users_可授 = 有容器_ace(std::path::Path::new(&home).parent().expect("C:/Users"));
+        assert!(
+            !主目录被授了 || users_可授,
+            "上一级（{}）没有容器 ACE，主目录却被授了 —— 这一层列举权买不到任何东西，
+             只是把你主目录里的文件名露给了沙箱。`grant_ancestors` 必须一断即止。",
+            std::path::Path::new(&home).parent().expect("p").display()
+        );
+    }
+
+    /// 这个目录上有没有本容器的 ACE。用 `icacls` 读，避免在测试里再写一遍
+    /// 那串 Win32 —— 测试要能独立读懂，不该是实现的镜像。
+    fn 有容器_ace(dir: &std::path::Path) -> bool {
+        let Ok(out) = std::process::Command::new("icacls").arg(dir).output() else {
+            return false;
+        };
+        String::from_utf8_lossy(&out.stdout).contains("S-1-15-2-")
+    }
+
     /// 宿主机自己有没有外网 —— 下面两条的**正对照**。
     ///
     /// 没有它的话，「沙箱里出不去」在一台断网的机器上恒成立，那条断言
@@ -294,6 +409,12 @@ fn main() {
     });
     run("写不进用户目录", &|| {
         rt.block_on(win::写不进用户目录())
+    });
+    run("git 在沙箱里能干活", &|| {
+        rt.block_on(win::git_在沙箱里能干活())
+    });
+    run("链断了就不再往下授", &|| {
+        rt.block_on(win::链断了就不再往下授())
     });
     run("默认不出网", &|| rt.block_on(win::默认不出网()));
     run("放开网络不放开文件", &|| {
