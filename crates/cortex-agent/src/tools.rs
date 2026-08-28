@@ -1060,6 +1060,41 @@ pub fn skill_spec() -> ToolSpec {
 
 /// 内置工具目录。
 #[must_use]
+/// `shell` 的描述**随本机的沙箱成色变**。
+///
+/// 仓库的硬约束之一是「提示词与工具目录只能写当下真的成立的能力」。
+/// 它的反面同样成立：一个**写着能用、实际不能用**的工具会让模型一次次
+/// 撞同一堵墙 —— 它看到的只是一句「拒绝访问」，于是把它当成仓库或命令
+/// 有问题，换十种写法重试，一轮就这么烧完。
+///
+/// Windows 的 AppContainer 沙箱里 `git`（任何子命令）与 `dir` / `vol`
+/// 跑不起来，根因见 [`crate::sandbox::windows`] 的模块文档。这不是我们
+/// 选的，但**是模型必须知道的**。
+///
+/// 判据带上 `capability().is_available()`：降级或有人在场时命令跑在宿主上，
+/// git 好好的 —— 那时候写那句话就成了另一种「说得不对」。
+fn shell_description() -> std::borrow::Cow<'static, str> {
+    // 用 `concat!` 逐行拼，不用 `\` 续行 —— 续行会把缩进留成字面空格，
+    // 有一条测试专门盯着这个（`工具描述里没有被压扁的痕迹`）
+    const BASE: &str = concat!(
+        "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里：",
+        "只能读写工作区与构建缓存，默认不能联网",
+    );
+    if cfg!(windows) && crate::sandbox::capability().is_available() {
+        concat!(
+            "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里：",
+            "只能读写工作区与构建缓存，默认不能联网。",
+            "⚠ 本机的沙箱是 Windows AppContainer，其中 **`git`（任何子命令）",
+            "与 `dir`、`vol` 用不了**，会报「拒绝访问 / Permission denied」——",
+            "那是沙箱的限制，不是仓库或命令有问题，换写法重试没有用。",
+            "要看目录内容请用 `list_dir` 工具。",
+        )
+        .into()
+    } else {
+        BASE.into()
+    }
+}
+
 pub fn builtin_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
@@ -1208,9 +1243,7 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "shell".into(),
-            description: "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里：\
-                          只能读写工作区与构建缓存，默认不能联网"
-                .into(),
+            description: shell_description(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2116,6 +2149,32 @@ mod tests {
             r.content.contains("没有绑定工作区"),
             "拒绝理由必须是「没绑工作区」，而不是「沙箱不可用」之类的巧合，实际：{}",
             r.content
+        );
+    }
+
+    /// **工具目录不许写「造好了没人接」的能力**（仓库硬约束第 2 条）。
+    ///
+    /// 这里守的是它的反面：Windows 沙箱里 `git` 跑不起来，而 `shell` 的
+    /// 描述如果不说，模型就会一次次撞同一堵墙 —— 它看到的只有「拒绝访问」，
+    /// 于是当成仓库有问题，换写法重试，一轮烧完。
+    ///
+    /// 判据跟着 `capability()` 走：降级或有人在场时命令跑在宿主上，
+    /// git 是好的，那时候写那句话反而成了另一种「说得不对」。
+    #[cfg(windows)]
+    #[test]
+    fn windows_上_shell_的描述要说清_git_用不了() {
+        let spec = builtin_specs()
+            .into_iter()
+            .find(|s| s.name == "shell")
+            .expect("shell 必须在工具目录里");
+        let 有沙箱 = crate::sandbox::capability().is_available();
+        assert_eq!(
+            spec.description.contains("git"),
+            有沙箱,
+            "描述与本机成色对不上（有沙箱={有沙箱}）——
+             有沙箱却不说 git 用不了，模型会一直撞；
+             没沙箱还说，那是另一种说得不对。实际描述：{}",
+            spec.description
         );
     }
 
