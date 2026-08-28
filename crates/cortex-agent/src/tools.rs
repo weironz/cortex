@@ -1097,8 +1097,11 @@ fn shell_description() -> std::borrow::Cow<'static, str> {
     const RESTRICTED: &str = concat!(
         "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里。",
         "本机这一档是 Windows 受限令牌：**写只落在工作区**（写工作区以外会被拒），",
-        "完整工具链可用 —— `cargo build`、`git`、`dir` 都正常。",
-        "⚠ 但这一档**不限制读取**：它读得到当前用户能读的任何文件。",
+        "本地工具链可用 —— `cargo build`、`dir`、本地 `git` 操作都正常。",
+        "⚠ **HTTPS 在这一档里用不了**（schannel 拿不到凭据）：`git clone` / `fetch` / ",
+        "`push` 走 https 会失败，`cargo` 也拉不了依赖。那是沙箱的限制，不是网络故障，",
+        "换写法或重试都没有用 —— 需要联网拉取时请告诉用户，让他在沙箱外做。",
+        "⚠ 这一档**不限制读取**：它读得到当前用户能读的任何文件；明文 HTTP 也出得去。",
         "所以不要把它当成「关住不受信代码」的边界；处理敏感文件时照常谨慎。",
     );
     if !cfg!(windows) || !crate::sandbox::capability().is_available() {
@@ -2223,6 +2226,12 @@ mod tests {
                 assert!(
                     !d.contains("`dir` 与 `vol` 用不了"),
                     "这一档 dir/vol 是好的，描述却写着用不了 —— 模型会绕开本来能用的命令。实际：{d}"
+                );
+                assert!(
+                    d.contains("HTTPS"),
+                    "这一档 HTTPS 实际是坏的（schannel 拿不到凭据，git clone / cargo 拉依赖全废），
+                     描述不说，模型就会把它当成网络故障反复重试。**这句话是被实测推翻过一次的**：
+                     第一版写的是「git 正常」，而 git over https 当场 fatal。实际：{d}"
                 );
             }
             crate::sandbox::Capability::Available { .. } => {

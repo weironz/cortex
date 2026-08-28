@@ -15,7 +15,7 @@
 //! | 读 | 默认拒绝（allow-list，强） | **不设界**（读什么都能读，等同用户本人） |
 //! | 写 | 只有工作区 | 只有工作区（`WRITE_RESTRICTED` + 一个只在工作区被授的 SID） |
 //! | `cargo build` 出 .exe | ✗ | **✓** |
-//! | 网络 | 一个 capability | 未隔离（本版） |
+//! | 网络 | 一个 capability，默认断 | **未隔离，且 HTTPS 实际不可用**（见下） |
 //!
 //! **读边界基本不存在，必须如实标注**（CLAUDE.md 约束 2）。
 //!
@@ -27,6 +27,30 @@
 //! 这划定了它的用途：**「防误写/防篡改地跑我信得过的工具链」**，不是
 //! 「关不受信代码防它偷秘密」。要防偷读，用 AppContainer（读默认拒绝）——
 //! 但它跑不了完整工具链。两者不可兼得，这是 Windows 原生沙箱的结构现实。
+//!
+//! # ⚠️ 网络：不隔离，而且 HTTPS 是坏的
+//!
+//! 实测（2026-08-28）：
+//!
+//! | | 结果 |
+//! |---|---|
+//! | `curl http://…`（明文） | **200，出得去** |
+//! | `curl https://…` | 退出码 35：`schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS` |
+//! | `git ls-remote https://…` | 同一个错，`fatal` |
+//! | PowerShell `iwr https://…` | 同样失败 |
+//!
+//! 所以这一档在网络上是**两头不讨好**：不构成边界（明文能外发），又坏了
+//! 可用性（`git clone/fetch/push`、`cargo` 拉依赖全废）。
+//!
+//! 根因是受限令牌下 schannel 建不出凭据句柄。试过把用户 SID 加进令牌的
+//! 默认 DACL —— **没用**，已回滚。要修得先查清 schannel 到底缺什么
+//! （lsass RPC 权限？密钥容器 ACL？），那是独立的一块活。
+//!
+//! **零管理员做不到真封网**，这一点也实测过：`FwpmEngineOpen0` 能开（只读），
+//! 但 `FwpmTransactionBegin0` 回 `ERROR_ACCESS_DENIED` —— WFP 写规则要管理员，
+//! 所以 codex 的 WFP 封锁也只在它的提权档。Job object 的网络限速同样设不了
+//! （`ERROR_INVALID_PARAMETER`）。要真封网，只能走一次管理员授权，或者把
+//! 需要出网控制的场景交给云沙箱（那边有 `cortex-egress-proxy` 的白名单）。
 //!
 //! # 机制：`WRITE_RESTRICTED` 受限令牌 + 四件套
 //!
