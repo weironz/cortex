@@ -1113,7 +1113,8 @@ fn shell_description_for(cap: &crate::sandbox::Capability) -> std::borrow::Cow<'
         "`git`（含 `clone` / `fetch` / `push`）都正常。",
         "⚠ cargo 在这一档里用的是**沙箱专用的 `CARGO_HOME`**，不是用户的 `~/.cargo`：",
         "第一次构建会重新下载依赖，之后各工作区共用这份缓存。不要为此去改 `CARGO_HOME`。",
-        "⚠ `curl https://` 仍然不通（这一档拿不到 TLS 凭据）—— 要取网上的东西用 `git`。",
+        "`curl` 也可用（HTTPS 正常，沙箱备了自己的一份）。",
+        "⚠ PowerShell 的 `Invoke-WebRequest` / .NET 的 HTTPS 走不了 —— 用 `curl` 或 `git` 代替。",
         "⚠ 这一档**不限制读取**：它读得到当前用户能读的任何文件；明文 HTTP 也出得去。",
         "所以不要把它当成「关住不受信代码」的边界；处理敏感文件时照常谨慎。",
     );
@@ -2250,10 +2251,17 @@ mod tests {
         // 哪一条不通」，不是一句笼统的「HTTPS 坏的」：第一版写「git 正常」→
         // git over https 当场 fatal；第二版写「cargo 拉不了新依赖」→ 接了
         // 明文回环镜像之后能拉了。现在只剩 `curl https://`（自己链了 Schannel）。
+        // 第三次翻面：连 curl 也通了（沙箱备了 LibreSSL 版）。此刻还剩的
+        // 是 PowerShell / .NET 的 HTTPS（SSPI，换不掉）—— 断言钉住这一条，
+        // 并且反向钉住「curl 不通」的旧话不许回来。
         assert!(
-            d.contains("curl"),
-            "`curl https://` 在这一档仍然不通，描述不说，模型会把它当成网络故障
-             反复重试。实际：{d}"
+            d.contains("Invoke-WebRequest"),
+            "PowerShell 的 HTTPS 在这一档走不了，描述不说，模型会把它当成
+             网络故障反复重试。实际：{d}"
+        );
+        assert!(
+            !d.contains("仍然不通"),
+            "curl 现在通了（sandbox::windows_curl），描述还留着旧话。实际：{d}"
         );
         assert!(
             !d.contains("拉不了新依赖"),

@@ -205,6 +205,42 @@ mod win {
         );
     }
 
+    /// **`curl https://` 要通。**
+    ///
+    /// 系统和 Git 自带的 curl 都只编了 Schannel，受限令牌下必挂在
+    /// `SEC_E_NO_CREDENTIALS`。沙箱为此在 PATH 前缀里放了一份 LibreSSL 版
+    /// curl（`sandbox::windows_curl`，首次使用时下载、SHA-256 钉死）并把
+    /// `CURL_CA_BUNDLE` 指到随包的 bundle。这条测试**裸敲 `curl`**，钉住的
+    /// 是整条注入链：PATH 前缀没生效的话，解析到的就是 Schannel 版，当场红。
+    ///
+    /// ⚠️ 上游 curl.se 只保留最近几个版本的下载目录，发新版后钉死的 URL 会
+    /// 404 —— 那时这条会红，去 `windows_curl.rs` 同时换 URL 和哈希。
+    ///
+    /// 需要外网；没有就跳过（有正对照，不会静默变成空测）。
+    pub async fn curl_走_https_能通() {
+        if !宿主有外网() {
+            println!("  [跳过] 这台机器没有外网");
+            return;
+        }
+        let (_d, sb) = workspace();
+        let r = shell(
+            &sb,
+            r#"curl -sS -o NUL -w "HTTP=%{http_code}" https://example.com 2>&1"#,
+        )
+        .await;
+        cleanup(&sb);
+        assert!(
+            !r.content.contains("SEC_E_NO_CREDENTIALS"),
+            "curl 还是 Schannel 那份 —— LibreSSL 版没备好或 PATH 前缀没注入。实际：{}",
+            r.content
+        );
+        assert!(
+            r.content.contains("HTTP=200"),
+            "curl 打 https://example.com 没拿到 200。实际：{}",
+            r.content
+        );
+    }
+
     /// 宿主机自己有没有外网 —— 上面那条的正对照。
     fn 宿主有外网() -> bool {
         use std::net::ToSocketAddrs;
@@ -310,6 +346,9 @@ fn main() {
     });
     run("git 走 https 能通", &|| {
         rt.block_on(win::git_走_https_能通())
+    });
+    run("curl 走 https 能通", &|| {
+        rt.block_on(win::curl_走_https_能通())
     });
     run("写不进主目录", &|| rt.block_on(win::写不进主目录()));
     run("工作区外非秘密可读是已知取舍", &|| {

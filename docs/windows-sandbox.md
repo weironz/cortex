@@ -46,7 +46,7 @@ let reason = if policy.attended.is_attended() {
 | `git` clone/fetch/push | ⚠️ 受 8.3 与卷根限制 | ✅ |
 | `dir` / `vol` | ❌ 要卷根 ACE（一次管理员） | ✅ |
 | `cargo` 拉**新**依赖 | ❌ | ✅（走本机明文回环镜像，见 4.4） |
-| `curl https://` | ✅ | ❌（自己链了 Schannel，换不掉） |
+| `curl https://` | ✅ | ✅（沙箱备一份 LibreSSL 版 curl，见 4.5） |
 | 管理员 | 不要 | 不要 |
 
 **用途因此是分开的**：
@@ -192,6 +192,34 @@ failed to create directory `C:\Users\…\.cargo\registry\index\…`
 | **固定端口 47823** | source replacement **只能写配置文件，没有环境变量**（实测：`CARGO_SOURCE_CRATES_IO_REPLACE_WITH` 被 cargo 完全无视）。配置是所有沙箱命令共用的一份，URL 必须恒定 |
 | **端口被占时先验明正身** | 打一次 `/cortex-mirror` 看标记。是自己人就复用（镜像无状态，谁起的都一样）；不是就**不写那段配置** —— 宁可让 cargo 报原来的错，也不能把它指到来路不明的 registry 上 |
 | **镜像开在父进程** | helper 每条命令起一次；让它持端口的话，先结束的那条会把还在下载的那条掐断 |
+
+### 4.5 `curl` 换成 LibreSSL 版 —— 与 git 的修法同形状
+
+系统的 curl 和 Git 自带的 curl **都只编了 Schannel**（版本串一模一样），没有
+运行时开关。而 curl 官方的 Windows 构建（curl.se/windows，curl-for-win 项目）
+用的是 **LibreSSL**，不碰证书存储 —— 实测在受限令牌沙箱里 HTTPS 全通。
+
+代码在 `crates/cortex-agent/src/sandbox/windows_curl.rs`：首次使用时下载
+（URL 与 **SHA-256 钉死在源码里**，哈希不符拒绝解压）、解到
+`%LOCALAPPDATA%\Cortex\win-sandbox\tools\`，之后每条命令注入 PATH 前缀 +
+`CURL_CA_BUNDLE`。
+
+两个非显然点：
+
+- **`CURL_CA_BUNDLE` 必须一起给。** 这份构建带 NativeCA 特性，默认去读
+  Windows 证书存储做验证 —— 沙箱里握手能过、验证挂在 unable to get local
+  issuer 上。指到随包的 `curl-ca-bundle.crt` 才全通。
+- **下载、算哈希、解压全用系统自带工具，按绝对路径调**（`System32` 的
+  curl / certutil / tar）。裸敲 `tar` 在 Git Bash 环境里解析到 GNU tar，
+  它不认 zip（实测踩过）。
+
+⚠️ 维护成本如实写下：curl.se 只保留最近几个版本的下载目录，上游发新版后
+钉死的 URL 会 404。那时下载失败 → WARN → 不注入 PATH → curl 退回 Schannel
+的老报错（诚实回落），逃逸测试那条 `curl 走 https 能通` 会红，提醒同时换
+URL 和哈希。
+
+这条修不了 PowerShell：`Invoke-WebRequest` / .NET 的 HTTPS 走 SSPI，
+没有可换的后端 —— 工具描述里让模型用 `curl` / `git` 代替。
 
 ---
 
@@ -343,7 +371,8 @@ AppContainer 里 `std::fs::canonicalize` 回 `os error 5`
 | `git`（clone / fetch / push / ls-remote） | ✅ 通——注入 `http.sslBackend=openssl`，走 git 自带 ca-bundle |
 | `cargo` 更新索引 | ✅ 通——`CARGO_NET_GIT_FETCH_WITH_CLI` + 索引走 git 协议 |
 | `cargo` 下载 `.crate` | ✅ 通——**绕开 TLS**：走本机的明文回环镜像（4.4） |
-| `curl https://` | ❌ 挂——自己链了 Schannel，既换不掉也没有第二条路 |
+| `curl https://` | ✅ 通——沙箱备一份 LibreSSL 版 curl（4.5） |
+| PowerShell `Invoke-WebRequest` / .NET | ❌ 挂——SSPI，没有可换的后端 |
 
 规律：**能换掉 TLS 后端、或能被换成明文的都修好了；剩下的是自己链了 Schannel
 又没有替代通道的那些**。给它们 CA 文件（`--cacert` / `CARGO_HTTP_CAINFO`）没用——
@@ -423,7 +452,7 @@ Windows 后端的断言**一条都没跑过**。把描述里的关键句整个�
 | | 欠什么 | 为什么还没做 |
 |---|---|---|
 | a | AppContainer 档的 `dir` / `vol`，以及短名目录下的 `git` | 要**卷根一条 ACE**，那需要一次管理员。是产品决定不是技术阻塞——而且「不要管理员」正是当初选 AppContainer 的理由，所以要人拍板 |
-| b | `curl https://`、以及任何自己链了 Schannel 又没有替代通道的程序 | 换不掉后端。cargo 能修是因为它的下载可以被换成明文（4.4），`curl` 没有这一层 |
+| b | PowerShell `Invoke-WebRequest` / .NET 的 HTTPS | SSPI 没有可换的后端。curl 已用「换一份二进制」修掉（4.5），.NET 没有对应物 —— 模型被告知用 `curl` / `git` 代替 |
 | c | 真封网 | 零管理员做不到（5.11）。要么一次管理员上 WFP，要么把需要出网控制的场景交给云沙箱（那边有 `cortex-egress-proxy` 白名单） |
 | d | 受限令牌档的读边界 | 机制上做不到（5.9）。要强读边界就用 AppContainer 档 |
 | e | 桌面隔离（AppContainer 档） | 受限令牌档有私有桌面，AppContainer 档还没有 |

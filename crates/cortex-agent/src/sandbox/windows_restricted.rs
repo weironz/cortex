@@ -236,6 +236,19 @@ pub(super) fn prepare(
     if let Some(home) = setup_cargo_home() {
         cmd.env("CARGO_HOME", home);
     }
+    // 同理在父进程侧备 curl（下载与校验只该做一次，helper 每条命令一个）。
+    // PATH 前缀让沙箱里裸敲的 `curl` 解析到 LibreSSL 版；CURL_CA_BUNDLE
+    // 必须一起给 —— 这份构建默认走 Windows 证书存储验证（NativeCA），
+    // 而那条路在沙箱里走不通，握手能过、验证挂在 local issuer 上。
+    if let Some(bin) = super::windows_curl::ensure_curl() {
+        if let Some(path) = std::env::var_os("PATH") {
+            let mut joined = std::ffi::OsString::from(bin);
+            joined.push(";");
+            joined.push(path);
+            cmd.env("PATH", joined);
+        }
+        cmd.env("CURL_CA_BUNDLE", bin.join("curl-ca-bundle.crt"));
+    }
     Ok(cmd)
 }
 

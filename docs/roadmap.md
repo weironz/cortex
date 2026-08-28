@@ -428,7 +428,8 @@ codex 的 WFP 封锁同样只在它的提权档，非提权档只是设 `HTTP_PR
    | `git`（clone/fetch/push） | ✅ 通 —— 注入 `http.sslBackend=openssl` |
    | `cargo` 更新索引 | ✅ 通 —— 走 git 协议 |
    | `cargo` 下载 `.crate` | ✅ 通（2026-08-28）—— 绕开 TLS：本机明文回环镜像 + 沙箱专用 `CARGO_HOME`，见 [windows-sandbox.md](windows-sandbox.md) 的 4.4 |
-   | `curl https://` | ❌ 挂 —— 自己链了 Schannel，又没有能换成明文的通道 |
+   | `curl https://` | ✅ 通（2026-08-28）—— 沙箱备一份 LibreSSL 版 curl（下载 + SHA-256 钉死），见 [windows-sandbox.md](windows-sandbox.md) 的 4.5 |
+   | PowerShell `Invoke-WebRequest` / .NET | ❌ 挂 —— SSPI，没有可换的后端；模型被告知用 curl / git 代替 |
 
    规律：**能换掉 TLS 后端、或能被换成明文的都通了**。cargo 属于后者：
    它的 libcurl 静态链且只编了 Schannel，没有开关 —— 但它的**下载源**可以
