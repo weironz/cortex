@@ -90,9 +90,17 @@ void main() {
 
   group('composer 在拒收时把文字还回输入框', () {
     testWidgets('onSend 回 false → 文本回来；回 true → 保持清空', (tester) async {
+      // ⚠️ 不用裸 ProviderScope：那会把真的 auth bootstrap 拉起来，
+      // rememberedTokenProvider 留一个 3 秒 timer，CI 上稳定红在
+      // 「A Timer is still pending」（本机因 secure storage 插件缺失时序
+      // 不同，恰好绿 —— 别信本机）。与 blind_model_image_gate_test 同款：
+      // mock 配置的容器。
       for (final (accepted, expectAfter) in [(false, '要还回来的话'), (true, '')]) {
+        final c = _boot();
+        addTearDown(c.dispose);
         await tester.pumpWidget(
-          ProviderScope(
+          UncontrolledProviderScope(
+            container: c,
             child: MaterialApp(
               home: Scaffold(
                 body: MessageComposer(
@@ -110,6 +118,17 @@ void main() {
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 20));
         final field = tester.widget<TextField>(find.byType(TextField));
+        // mock 数据源带仿真延迟且一环扣一环（列表→详情→…），单补一次
+        // pump 是打地鼠。把假时钟连推若干拍直到它们全走完 —— 不然测试
+        // 结束时还挂着 pending timer，红在与本测试无关的一句断言上
+        for (var i = 0; i < 8; i++) {
+          await tester.pump(const Duration(milliseconds: 400));
+        }
+        // 主动卸载这一轮的树并补两拍：riverpod 在卸载时排一个 0ms 的
+        // dispose 任务，不给它一拍就悬在测试结束的那道 timer 断言上
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await tester.pump();
         expect(
           field.controller?.text ?? '',
           expectAfter,
