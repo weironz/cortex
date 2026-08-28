@@ -185,6 +185,16 @@ fn system_prompt_for(
         prompt.push_str("\n\n");
         prompt.push_str(&cortex_agent::prompt::computer_note(w, h));
     }
+    // 「这台机器的 shell 是哪一族」。接在出网说明前面：两段都是整会话稳定的
+    // 事实，一起进可缓存前缀。Unix 上返回 None，所以这一段只在 Windows 出现
+    if let Some(note) = cortex_agent::prompt::shell_dialect_note() {
+        prompt.push_str(
+            "
+
+",
+        );
+        prompt.push_str(note);
+    }
     if let Some(note) = cortex_agent::prompt::egress_note(env) {
         prompt.push_str("\n\n");
         prompt.push_str(note);

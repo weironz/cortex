@@ -18,6 +18,52 @@
 
 use crate::ExecEnvironment;
 
+/// 「这台机器上的 shell 是哪一种方言」。**Unix 一律返回 `None`。**
+///
+/// # 这段话防的是哪次浪费
+///
+/// 与 [`egress_note`] 同一条理由：模型只看得见一条命令失败了。而 Windows
+/// 上失败的方式尤其误导 —— `ls` 报的是「'ls' 不是内部或外部命令」，
+/// 读起来像「这台机器没装那个工具」，于是模型去 `where ls`、去 `npm i -g`，
+/// 而真相是**这个 shell 根本不是那一族**。
+///
+/// 更具体的一条：Windows 上模型最容易猜的是 **PowerShell**（现代 Windows 的
+/// 默认 shell，而且 `ls` 在那里是别名，能跑）。而这里跑的是 `cmd.exe /C`。
+/// 于是 `Get-ChildItem`、`$env:PATH`、`-Path xxx` 全都失败，且失败信息
+/// 一句也不提「你猜错 shell 了」。
+///
+/// # 为什么不写「这里没有 git」
+///
+/// 那句话属于 `shell` 工具的描述（`tools::shell_description`），因为它
+/// **取决于沙箱有没有生效**，而这一段是纯平台事实、整会话不变。两处都写
+/// 就是两份会漂的说明 —— 这个仓库记过「配置有两份、改了一处」。
+///
+/// # 为什么与 `shell_argv` 有一条测试拴着
+///
+/// 这段话的每一句都是在描述 `tools::shell_argv` 的返回值。哪天那边换了
+/// （比如改用 PowerShell），这里不跟着改的话，提示词就开始骗人 ——
+/// 而那是本仓库硬约束第 2 条明写的最坏情况。
+#[must_use]
+pub const fn shell_dialect_note() -> Option<&'static str> {
+    if !cfg!(windows) {
+        return None;
+    }
+    // 用 `concat!` 逐行拼，不用 `\` 续行 —— 续行会把缩进留成字面空格，
+    // 而这段话是要进模型上下文的（同 `tools::shell_description`）
+    Some(concat!(
+        "关于命令行：这台机器是 Windows，`shell` 工具跑的是 `cmd.exe /C` ——",
+        "**不是 PowerShell，也不是 bash**。\n",
+        "- Unix 的那套命令一个都没有：`ls` / `cat` / `grep` / `which` / `rm` / `mv`，",
+        "对应的是 `dir` / `type` / `findstr` / `where` / `del` / `move`。\n",
+        "- PowerShell 的写法同样不认：`Get-ChildItem`、`$env:VAR`、`-Path` 这类",
+        "参数都会失败。确实要用 PowerShell 就显式写 `powershell -NoProfile -Command \"...\"`。\n",
+        "- 环境变量是 `%VAR%`，路径分隔符是反斜杠，多条命令用 `&&` 串联。\n",
+        "- 路径带空格要加引号 —— Windows 上这是常态（`C:\\Program Files\\...`）。\n",
+        "- 读文件、列目录优先用 `read_file` / `list_dir` 工具，别绕道命令行：",
+        "那两个工具跨平台，写法只有一种。",
+    ))
+}
+
 /// 容器里那层出网代理的说明。**非容器一律返回 `None`。**
 ///
 /// # 这段话防的是哪次浪费
@@ -362,5 +408,54 @@ mod tests {
                 "电脑操作说明里少了 {needle:?}：{why}。实际内容：{note}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod dialect_tests {
+    use super::*;
+
+    /// **这段话描述的是 `shell_argv` 的返回值，两者不许漂。**
+    ///
+    /// 提示词是模型对自己环境的唯一描述（仓库硬约束第 2 条）。哪天
+    /// `shell_argv` 改成起 PowerShell 而这里没跟着改，模型会照着一段
+    /// 过期的说明去写命令 —— 而**它会全部失败，且失败信息一句也不提
+    /// 「你看的说明是旧的」**。
+    #[test]
+    fn 方言说明与_shell_argv_对得上() {
+        let argv = crate::tools::shell_argv("echo hi").expect("本机总该有个 shell");
+        let program = argv[0].to_ascii_lowercase();
+        match shell_dialect_note() {
+            Some(note) => {
+                assert!(
+                    program.contains("cmd"),
+                    "印了「跑的是 cmd」，而 shell_argv 起的是 {program}"
+                );
+                assert!(
+                    note.contains("cmd.exe /C"),
+                    "说明里必须写清是哪一个 shell，否则模型只能猜：{note}"
+                );
+                assert!(
+                    note.contains("不是 PowerShell"),
+                    "最容易猜错的就是 PowerShell（那边 `ls` 是别名，能跑）——                     不点破这一条，这段话就少了一半用处"
+                );
+            }
+            None => assert!(
+                !program.contains("cmd"),
+                "shell_argv 起的是 {program}，却一句方言说明都没印 ——                 模型会拿 bash 的写法去撞墙"
+            ),
+        }
+    }
+
+    /// 空格是被压扁的多行说明留下的痕迹，与 `tools` 里那条同一个理由。
+    #[test]
+    fn 方言说明里没有被压扁的痕迹() {
+        let Some(note) = shell_dialect_note() else {
+            return;
+        };
+        assert!(
+            !note.contains("  "),
+            "说明里有连续空格 —— 多半是多行字符串被续行压成一行、缩进留成了字面空格。用 concat! 逐行拼：{note}"
+        );
     }
 }
