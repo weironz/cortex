@@ -154,3 +154,19 @@ deploy_unmanaged: []
 # 镜像清理：保留最新几个**版本**（不是几个镜像）。
 # 上一版必须留着 —— 回滚要用它，而它已经在本地，不需要 registry
 keep_versions: 3
+
+# ── 发信（阿里云邮件推送）──────────────────────────────
+#
+# 只用来发「绑定邮箱」的验证码。**留空 = 这个部署不发信**，绑定邮箱那条路
+# 在界面上根本不出现（宁可少一个功能，不要一个点了必然失败的按钮）。
+#
+# ⚠️ 两个凭据不在这里，也不在任何被 git 跟踪的文件里 —— 人工写进节点的
+# .env.secrets。这里只放非敏感的那几个。
+#
+# 发信地址要先在邮件推送控制台建好、域名验过 SPF/DKIM。
+cortex_mail_from: ""
+cortex_mail_from_alias: "Cortex"
+# 邮件推送没有深圳节点：只有 cn-hangzhou（dm.aliyuncs.com）与四个海外。
+# 留空即用默认值
+cortex_mail_endpoint: ""
+cortex_mail_region: ""

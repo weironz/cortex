@@ -115,6 +115,46 @@ void main() {
     await _settleAndDispose(tester, c);
   });
 
+  testWidgets('没配发信通道：邮箱那一节整个不画（不是画一个禁用按钮）', (tester) async {
+    final api = _SpyApi();
+    final c = ProviderContainer(
+      overrides: [cortexApiProvider.overrideWithValue(api)],
+    );
+    addTearDown(c.dispose);
+    // 默认就是没配（mailAvailable=false、email=null）
+    await _pump(tester, c);
+
+    expect(
+      find.text('邮箱'),
+      findsNothing,
+      reason:
+          'CLAUDE.md 约束 2 的界面版：能力不成立时，入口跟着下线。'
+          '摆一个点了必然 501 的按钮比没有这个按钮糟得多',
+    );
+    await _settleAndDispose(tester, c);
+  });
+
+  testWidgets('配了发信通道：邮箱一节出现，且没绑时说得清', (tester) async {
+    final api = _SpyApi();
+    final c = ProviderContainer(
+      overrides: [cortexApiProvider.overrideWithValue(api)],
+    );
+    addTearDown(c.dispose);
+    api.setProfileForTest(
+      const Profile(userId: 'mock-user', username: 'demo', mailAvailable: true),
+    );
+    await _pump(tester, c);
+
+    expect(find.text('邮箱'), findsOneWidget);
+    expect(find.text('还没有绑定邮箱'), findsOneWidget);
+    expect(
+      find.widgetWithText(OutlinedButton, '绑定'),
+      findsOneWidget,
+      reason: '没绑时按钮该是「绑定」；绑过之后才是「换绑」',
+    );
+    await _settleAndDispose(tester, c);
+  });
+
   testWidgets('排期删除时，「撤销只有 15 分钟」必须写在脸上', (tester) async {
     final api = _SpyApi();
     final c = ProviderContainer(

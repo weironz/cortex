@@ -393,6 +393,23 @@ class MockCortexApi
     return bytes;
   }
 
+  // 邮箱那三条一律 501：mock 里没有发信通道，假装成功会让人以为验过了
+  // 那条路 —— 而绑定邮箱恰恰是「只有真发出去才算数」的那一类
+  @override
+  Future<void> startEmailBinding(String email) async {
+    throw const CortexApiException('这个数据源不支持发信', statusCode: 501);
+  }
+
+  @override
+  Future<Profile> verifyEmail(String code) async {
+    throw const CortexApiException('这个数据源不支持发信', statusCode: 501);
+  }
+
+  @override
+  Future<Profile> unbindEmail(String password) async {
+    throw const CortexApiException('这个数据源不支持发信', statusCode: 501);
+  }
+
   @override
   Future<void> changePassword(String oldPassword, String newPassword) async {
     throw const CortexApiException('这个数据源不支持改口令', statusCode: 501);

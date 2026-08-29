@@ -65,6 +65,8 @@ class Profile {
     this.nickname,
     this.hasAvatar = false,
     this.avatarVersion,
+    this.email,
+    this.mailAvailable = false,
     this.purgeAfter,
   });
 
@@ -85,6 +87,17 @@ class Profile {
   /// 头像的版本戳。换了头像它就变 —— 界面拿它当缓存键，不然换完还显示旧的。
   final int? avatarVersion;
 
+  /// 绑定的邮箱。`null` = 没绑。
+  ///
+  /// **只有验证通过的地址才会出现在这里** —— 没有「已填未验证」的中间态。
+  final String? email;
+
+  /// 这个部署能不能发信。`false` = 没配邮件通道，绑定入口整个不该画。
+  ///
+  /// 与 [email] 分开：一个已经绑过邮箱的人，在一台没配发信的部署上仍然
+  /// 看得到自己绑的是哪个地址，但换绑不了。两个字段各答一半。
+  final bool mailAvailable;
+
   /// 这个号正在等着被删，到点真删。`null` = 一切正常。
   ///
   /// 必须显示出来：一个「我以为删掉了」或「我以为撤销了」的误会，
@@ -101,6 +114,8 @@ class Profile {
     nickname: asStringOrNull(json['nickname']),
     hasAvatar: json['has_avatar'] == true,
     avatarVersion: asIntOrNull(json['avatar_version']),
+    email: asStringOrNull(json['email']),
+    mailAvailable: json['mail_available'] == true,
     purgeAfter: switch (asStringOrNull(json['purge_after'])) {
       final s? => DateTime.tryParse(s),
       _ => null,

@@ -245,6 +245,48 @@ class _BodyState extends ConsumerState<_Body> {
             ),
           ],
         ),
+        // ── 邮箱 ──
+        //
+        // 这个部署没配发信通道时**整节不画**（不是画一个禁用的按钮）：
+        // 与「电脑操作」同一条纪律。已经绑过的人例外 —— 他仍然看得到
+        // 自己绑的是哪个地址，只是换不了
+        if (p.mailAvailable || p.email != null)
+          SettingsSection(
+            title: '邮箱',
+            description: p.mailAvailable
+                ? '绑定后可以用它接收账号相关的通知。换绑就是再验一次新地址。'
+                : '这个部署没有配邮件通道，改不了 —— 下面是你之前绑的地址。',
+            children: [
+              SettingsCard(
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        p.email ?? '还没有绑定邮箱',
+                        style: p.email == null
+                            ? theme.textTheme.bodySmall?.copyWith(
+                                color: theme.cortex.foregroundTertiary,
+                              )
+                            : theme.textTheme.bodyMedium,
+                      ),
+                    ),
+                    if (p.mailAvailable)
+                      OutlinedButton(
+                        onPressed: () => _showBindEmail(context, ref),
+                        child: Text(p.email == null ? '绑定' : '换绑'),
+                      ),
+                    if (p.email != null) ...[
+                      const SizedBox(width: 8),
+                      TextButton(
+                        onPressed: () => _showUnbindEmail(context, ref),
+                        child: const Text('解绑'),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
         SettingsSection(
           title: '口令',
           // 这句话必须在按钮**之前**：改完才发现被登出，会被当成 bug
@@ -474,6 +516,163 @@ Future<void> _showChangePassword(BuildContext context, WidgetRef ref) async {
   oldCtl.dispose();
   newCtl.dispose();
   again.dispose();
+}
+
+/// 绑定 / 换绑：一屏两步（先要码，再验码）。
+///
+/// 不做成两个页面：中间那一步（"码已发出"）没有任何要用户决定的东西，
+/// 而多一次跳转会让人以为流程断了。
+Future<void> _showBindEmail(BuildContext context, WidgetRef ref) async {
+  final email = TextEditingController();
+  final code = TextEditingController();
+  String? error;
+  String? sentTo;
+  var busy = false;
+
+  await showDialog<void>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) => AlertDialog(
+        title: Text(sentTo == null ? '绑定邮箱' : '输入验证码'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (sentTo == null)
+              TextField(
+                controller: email,
+                autofocus: true,
+                keyboardType: TextInputType.emailAddress,
+                decoration: const InputDecoration(labelText: '邮箱地址'),
+              )
+            else ...[
+              Text('验证码已发到 $sentTo，10 分钟内有效。'),
+              const SizedBox(height: 10),
+              TextField(
+                controller: code,
+                autofocus: true,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: '六位验证码'),
+              ),
+            ],
+            if (error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text(
+                  error!,
+                  style: TextStyle(color: Theme.of(ctx).colorScheme.error),
+                ),
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: busy ? null : () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: busy
+                ? null
+                : () async {
+                    setState(() {
+                      busy = true;
+                      error = null;
+                    });
+                    try {
+                      final ctl = ref.read(profileProvider.notifier);
+                      if (sentTo == null) {
+                        final to = email.text.trim();
+                        await ctl.startEmailBinding(to);
+                        setState(() {
+                          sentTo = to;
+                          busy = false;
+                        });
+                      } else {
+                        await ctl.verifyEmail(code.text.trim());
+                        if (ctx.mounted) Navigator.of(ctx).pop();
+                      }
+                    } on Object catch (e) {
+                      setState(() {
+                        busy = false;
+                        error = '$e';
+                      });
+                    }
+                  },
+            child: Text(busy ? '提交中…' : (sentTo == null ? '发送验证码' : '确定')),
+          ),
+        ],
+      ),
+    ),
+  );
+  email.dispose();
+  code.dispose();
+}
+
+/// 解绑要密码 —— 邮箱是找回账号的凭据之一，摘掉它是削弱账号安全的动作。
+Future<void> _showUnbindEmail(BuildContext context, WidgetRef ref) async {
+  final pwd = TextEditingController();
+  String? error;
+  var busy = false;
+
+  await showDialog<void>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) => AlertDialog(
+        title: const Text('解绑邮箱'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('解绑之后，这个账号就少了一条找回的路。'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: pwd,
+              obscureText: true,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: '输入口令以确认'),
+            ),
+            if (error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text(
+                  error!,
+                  style: TextStyle(color: Theme.of(ctx).colorScheme.error),
+                ),
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: busy ? null : () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: busy
+                ? null
+                : () async {
+                    setState(() {
+                      busy = true;
+                      error = null;
+                    });
+                    try {
+                      await ref
+                          .read(profileProvider.notifier)
+                          .unbindEmail(pwd.text);
+                      if (ctx.mounted) Navigator.of(ctx).pop();
+                    } on Object catch (e) {
+                      setState(() {
+                        busy = false;
+                        error = '$e';
+                      });
+                    }
+                  },
+            child: Text(busy ? '提交中…' : '解绑'),
+          ),
+        ],
+      ),
+    ),
+  );
+  pwd.dispose();
 }
 
 Future<void> _showDeleteAccount(BuildContext context, WidgetRef ref) async {

@@ -113,6 +113,13 @@ protected_routes! {
     // 见 `crate::profile` 的模块文档纪律 1
     "/auth/account" [DELETE] => delete(crate::profile::delete_account),
     "/auth/account/restore" [POST] => post(crate::profile::restore_account),
+    // 绑定 / 换绑邮箱。**两件事共用这一条路** —— 换绑就是再验一次新地址，
+    // 分成两条的话限流、过期、试错上限要各写一份，而它们本该完全一致。
+    // 没配邮件通道的部署上这条回 501，且界面据 `/health` 根本不摆入口
+    "/auth/email/start" [POST] => post(crate::profile::start_email_binding),
+    "/auth/email/verify" [POST] => post(crate::profile::verify_email),
+    // 解绑要密码：邮箱将来是找回账号的凭据，摘掉它是削弱账号安全的动作
+    "/auth/email" [DELETE] => delete(crate::profile::unbind_email),
     // ── 在线名册（roadmap E 的阶段 3）──
     //
     // **只报不判。** 心跳里的东西只用于拼一句给人看的话与这个列表 ——

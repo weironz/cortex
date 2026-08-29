@@ -41,6 +41,7 @@ mod image;
 mod import;
 mod library;
 mod llm;
+mod mailer;
 mod model_pick;
 mod model_roles;
 mod model_sources;

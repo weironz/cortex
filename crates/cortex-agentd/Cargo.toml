@@ -58,6 +58,14 @@ tar = { version = "0.4", default-features = false }
 bytes = "1"
 # 缓存标签与 spec hash（见 env.rs）
 sha2 = "0.10"
+# 阿里云邮件推送的 RPC V1 签名（HMAC-SHA1）。
+#
+# ⚠️ 版本要与 sha1 配对：`hmac` 0.13 走 digest 0.11，而 `sha1` 0.10 走
+# digest 0.10 —— 混用编不过，且报错指向 digest 内部，看不出是版本没对上。
+# 0.12 + 0.10 是同一代（digest 0.10）。
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
 hex = "0.4"
 
 axum.workspace = true

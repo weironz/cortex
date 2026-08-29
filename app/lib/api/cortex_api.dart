@@ -438,6 +438,22 @@ abstract interface class CortexApi {
   /// 没有头像时抛 404（`isNotFound`）—— 调用方据此画默认头像。
   Future<Uint8List> avatarBytes(String userId);
 
+  /// `POST /auth/email/start` —— 往这个地址发一封验证码。
+  ///
+  /// **绑定与换绑是同一条路**：换绑就是「再验一次新地址」。
+  /// 这个部署没配邮件通道时回 501 —— 界面靠 [Profile.mailAvailable]
+  /// 决定摆不摆入口，不该走到这里才发现。
+  Future<void> startEmailBinding(String email);
+
+  /// `POST /auth/email/verify` —— 把验证码换成一次真正的绑定。
+  Future<Profile> verifyEmail(String code);
+
+  /// `DELETE /auth/email` —— 解绑，要密码。
+  ///
+  /// 邮箱将来是找回账号的凭据之一，摘掉它是**削弱账号安全**的动作 ——
+  /// 与删号同一族，所以不能只凭 token。
+  Future<Profile> unbindEmail(String password);
+
   /// `POST /auth/password` —— 改口令。
   ///
   /// ⚠️ 服务端这条路 2026-08 就有了，**而客户端一直没接** —— 于是设置里
@@ -1009,6 +1025,12 @@ mixin AccountUnsupported {
   Future<Profile> deleteAccount(String password) async => throw _absent;
 
   Future<Profile> restoreAccount() async => throw _absent;
+
+  Future<void> startEmailBinding(String email) async => throw _absent;
+
+  Future<Profile> verifyEmail(String code) async => throw _absent;
+
+  Future<Profile> unbindEmail(String password) async => throw _absent;
 }
 
 /// 同上，给四条本地工作空间路由用。

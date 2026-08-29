@@ -115,7 +115,7 @@ pub async fn get_profile(
     let user_id = caller(&st, &headers)?;
     let pool = &st.accounts()?.pool;
     let row = sqlx::query(
-        "SELECT username, nickname, avatar_mime, avatar_updated_at, purge_after
+        "SELECT username, nickname, avatar_mime, avatar_updated_at, purge_after, email
            FROM cortex_auth.users WHERE id = $1",
     )
     .bind(&user_id)
@@ -132,6 +132,9 @@ pub async fn get_profile(
         nickname: row.get("nickname"),
         has_avatar: row.get::<Option<String>, _>("avatar_mime").is_some(),
         avatar_version: avatar_updated.map(|t| t.timestamp()),
+        email: row.get("email"),
+        // 从 state 读，不是从库读：能不能发信是**这个部署**的属性
+        mail_available: st.mailer().is_some(),
         purge_after: purge.map(|t| t.to_rfc3339()),
     }))
 }
@@ -379,6 +382,269 @@ pub fn spawn_purge(st: AgentState) {
         grace_days = PURGE_GRACE.num_days(),
         "账号删除的冷静期清理已启动"
     );
+}
+
+/// 验证码多久过期。
+///
+/// 10 分钟：够一个人切到邮箱客户端、等一封信到、把码抄回来；短到一封被
+/// 转发出去的旧邮件不再是一把钥匙。
+const CODE_TTL: chrono::Duration = chrono::Duration::minutes(10);
+
+/// 一个码最多能试几次。
+///
+/// 六位数字只有一百万种，不设上限的话暴力试是几分钟的事。5 次之后作废，
+/// 逼对方重新要一封 —— 而要信那条路自己有限流。
+const CODE_MAX_ATTEMPTS: i32 = 5;
+
+/// 验证码的摘要。**不是慢 KDF。**
+///
+/// 慢 KDF 防的是「低熵秘密被离线爆破」，而这里的秘密确实低熵（六位数字）——
+/// 但它只活 10 分钟、只能试 5 次，离线爆破一百万种组合拿到的是一个早就
+/// 过期的码。代价那一侧却是实打实的：每次验证多几百毫秒。
+///
+/// 加盐是为了让「同一个码在两个账号上摘要相同」这件事不成立 —— 否则
+/// 读到库的人能看出谁和谁的码一样。
+fn hash_code(user_id: &str, code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(user_id.as_bytes());
+    h.update(b":");
+    h.update(code.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// 六位数字。**用内核熵源**，不是 `rand` 的默认 seed —— 一个可预测的
+/// 验证码等于没有验证码。
+fn new_code() -> String {
+    let mut buf = [0u8; 4];
+    getrandom::fill(&mut buf).expect("内核熵源不可用，拒绝签发可预测的验证码");
+    format!("{:06}", u32::from_be_bytes(buf) % 1_000_000)
+}
+
+/// 邮箱地址的形状。**只做最起码的检查**。
+///
+/// 不写正则去逼近 RFC 5322：那份文法允许的东西远超所有人的直觉，而写得
+/// 越细，被误拒的真实地址越多。真正的验证是**那封信能不能收到** ——
+/// 这里只挡住明显不是地址的输入，别的交给验证码。
+fn clean_email(raw: &str) -> Result<String, ApiError> {
+    let e = raw.trim();
+    if e.len() > 254 {
+        return Err(ApiError::bad_request("邮箱地址太长了"));
+    }
+    let Some((local, domain)) = e.split_once('@') else {
+        return Err(ApiError::bad_request("这不像一个邮箱地址（没有 @）"));
+    };
+    if local.is_empty() || !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.')
+    {
+        return Err(ApiError::bad_request("这不像一个邮箱地址"));
+    }
+    if e.chars().any(char::is_whitespace) {
+        return Err(ApiError::bad_request("邮箱地址里不能有空格"));
+    }
+    // 小写存：唯一索引是 `lower(email)`，而回给用户看的也该是规范化之后的
+    Ok(e.to_ascii_lowercase())
+}
+
+/// `POST /auth/email/start` —— 往目标地址发一封验证码。
+///
+/// **绑定与换绑是同一条路**：换绑就是「再验一次新地址」，没有独立的
+/// 「换绑」端点。分成两条的话，两边的限流、过期、试错上限要各写一份，
+/// 而它们本该完全一致。
+pub async fn start_email_binding(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Json(req): Json<cortex_proto::auth::StartEmailRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = caller(&st, &headers)?;
+    let Some(mailer) = st.mailer() else {
+        // 没配发信通道 —— 这条路**本就不该被调到**（界面据 `/health` 不摆
+        // 入口）。说清是部署没配，而不是「你填错了」
+        return Err(ApiError::unsupported(
+            "这个部署没有配邮件通道，绑不了邮箱。管理员配好 CORTEX_MAIL_* 之后这条路才可用。",
+        ));
+    };
+    let email = clean_email(&req.email)?;
+
+    // 与登录同一道闸、键是用户 id：发信是要花钱的动作，而「连点十次」
+    // 与「拿它当发信机」是同一个形状
+    if let Err(wait) = st.auth_throttle().check_login(&user_id) {
+        return Err(ApiError::too_many_requests(format!(
+            "验证码要得太密，请等 {wait} 秒"
+        )));
+    }
+
+    let pool = &st.accounts()?.pool;
+    // 这个地址已经被别人绑走了 —— **在发信之前挡**：发出去再说「绑不了」
+    // 等于替对方给一个不相干的人发骚扰邮件
+    let taken = sqlx::query(
+        "SELECT 1 AS hit FROM cortex_auth.users
+          WHERE lower(email) = lower($1) AND id <> $2",
+    )
+    .bind(&email)
+    .bind(&user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ApiError::internal(format!("查邮箱失败：{e}")))?;
+    if taken.is_some() {
+        return Err(ApiError::bad_request("这个邮箱已经绑在另一个账号上了"));
+    }
+
+    let code = new_code();
+    let expires = chrono::Utc::now() + CODE_TTL;
+    sqlx::query(
+        "INSERT INTO cortex_auth.email_codes (user_id, email, code_hash, expires_at, attempts)
+         VALUES ($1, $2, $3, $4, 0)
+         ON CONFLICT (user_id) DO UPDATE
+            SET email = EXCLUDED.email,
+                code_hash = EXCLUDED.code_hash,
+                expires_at = EXCLUDED.expires_at,
+                attempts = 0,
+                created_at = clock_timestamp()",
+    )
+    .bind(&user_id)
+    .bind(&email)
+    .bind(hash_code(&user_id, &code))
+    .bind(expires)
+    .execute(pool)
+    .await
+    .map_err(|e| ApiError::internal(format!("存验证码失败：{e}")))?;
+
+    // 发信失败**要如实说**，并且把那条记录删掉：留着的话用户会盯着一个
+    // 永远等不到的验证码输入框
+    if let Err(e) = mailer
+        .send_code(&email, &code, CODE_TTL.num_minutes())
+        .await
+    {
+        tracing::error!(error = %e, "发验证码失败");
+        let _ = sqlx::query("DELETE FROM cortex_auth.email_codes WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(pool)
+            .await;
+        // ⚠️ 不把服务端那句话透给用户：它可能带着发信地址、配额、账号细节
+        return Err(ApiError::internal(
+            "验证码没发出去。稍后再试一次；一直不行的话是这个部署的邮件配置有问题。",
+        ));
+    }
+    st.auth_throttle().record_login_failure(&user_id);
+    Ok(Json(serde_json::json!({
+        "sent_to": email,
+        "expires_in_secs": CODE_TTL.num_seconds(),
+    })))
+}
+
+/// `POST /auth/email/verify` —— 把码换成一次真正的绑定。
+pub async fn verify_email(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Json(req): Json<cortex_proto::auth::VerifyEmailRequest>,
+) -> Result<Json<Profile>, ApiError> {
+    let user_id = caller(&st, &headers)?;
+    let pool = &st.accounts()?.pool;
+
+    let row = sqlx::query(
+        "SELECT email, code_hash, attempts, expires_at
+           FROM cortex_auth.email_codes WHERE user_id = $1",
+    )
+    .bind(&user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ApiError::internal(format!("查验证码失败：{e}")))?
+    .ok_or_else(|| ApiError::bad_request("没有待验证的邮箱 —— 先要一封验证码"))?;
+
+    let expires: chrono::DateTime<chrono::Utc> = row.get("expires_at");
+    if expires < chrono::Utc::now() {
+        let _ = sqlx::query("DELETE FROM cortex_auth.email_codes WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(pool)
+            .await;
+        return Err(ApiError::bad_request("验证码过期了，重新要一封"));
+    }
+    let attempts: i32 = row.get("attempts");
+    if attempts >= CODE_MAX_ATTEMPTS {
+        let _ = sqlx::query("DELETE FROM cortex_auth.email_codes WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(pool)
+            .await;
+        return Err(ApiError::bad_request(
+            "试太多次了，这个码已作废，重新要一封",
+        ));
+    }
+
+    let expected: String = row.get("code_hash");
+    if hash_code(&user_id, req.code.trim()) != expected {
+        // **先记一次失败再回错**：反过来的话进程一崩就把这次尝试白送了
+        let _ = sqlx::query(
+            "UPDATE cortex_auth.email_codes SET attempts = attempts + 1 WHERE user_id = $1",
+        )
+        .bind(&user_id)
+        .execute(pool)
+        .await;
+        return Err(ApiError::bad_request(format!(
+            "验证码不对（还能试 {} 次）",
+            CODE_MAX_ATTEMPTS - attempts - 1
+        )));
+    }
+
+    let email: String = row.get("email");
+    // 两列一起写 —— 那条 CHECK 要求它们同进同退
+    sqlx::query(
+        "UPDATE cortex_auth.users
+            SET email = $1, email_verified_at = now()
+          WHERE id = $2",
+    )
+    .bind(&email)
+    .bind(&user_id)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        // 唯一索引撞了 = 这个地址在「要码」与「验码」之间被别人绑走了。
+        // 窄，但真会发生（两个人同时绑同一个地址）
+        ApiError::bad_request(format!("绑不上这个邮箱（可能刚被别人绑走了）：{e}"))
+    })?;
+    let _ = sqlx::query("DELETE FROM cortex_auth.email_codes WHERE user_id = $1")
+        .bind(&user_id)
+        .execute(pool)
+        .await;
+    tracing::info!(user = %user_id, "邮箱已绑定");
+
+    get_profile(State(st), headers).await
+}
+
+/// `DELETE /auth/email` —— 解绑。要密码。
+///
+/// 为什么要密码：邮箱将来是找回账号的凭据之一。**解绑是削弱账号安全的
+/// 动作**，与删号同一族 —— 拿到 token 就能解绑的话，一次借来的电脑
+/// 就能把账号的找回通道摘掉。
+pub async fn unbind_email(
+    State(st): State<AgentState>,
+    headers: HeaderMap,
+    Json(req): Json<DeleteAccountRequest>,
+) -> Result<Json<Profile>, ApiError> {
+    let user_id = caller(&st, &headers)?;
+    if let Err(wait) = st.auth_throttle().check_login(&user_id) {
+        return Err(ApiError::too_many_requests(format!(
+            "尝试太密，请等 {wait} 秒"
+        )));
+    }
+    let pool = &st.accounts()?.pool;
+    let row = sqlx::query("SELECT password_hash FROM cortex_auth.users WHERE id = $1")
+        .bind(&user_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| ApiError::internal(format!("查用户失败：{e}")))?
+        .ok_or_else(|| ApiError::forbidden("这把凭据指向的账号已经不在了"))?;
+    if !crate::credentials::verify_password(&req.password, &row.get::<String, _>("password_hash")) {
+        st.auth_throttle().record_login_failure(&user_id);
+        return Err(ApiError::unauthorized("密码不对"));
+    }
+    sqlx::query(
+        "UPDATE cortex_auth.users SET email = NULL, email_verified_at = NULL WHERE id = $1",
+    )
+    .bind(&user_id)
+    .execute(pool)
+    .await
+    .map_err(|e| ApiError::internal(format!("解绑失败：{e}")))?;
+    get_profile(State(st), headers).await
 }
 
 /// 到期的账号真删 —— 由 [`spawn_purge`] 定期叫。

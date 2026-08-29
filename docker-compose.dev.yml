@@ -199,6 +199,15 @@ services:
       # 服务端那把 key 烧钱，而生产是一台 2 核 3.5G 的机器。
       # 取值必须正好是 `enabled`，手滑写成 1 不会把门打开。
       CORTEX_OPEN_REGISTRATION: ${CORTEX_OPEN_REGISTRATION:-}
+      # 发信（阿里云邮件推送）。dev 上基本不会配 —— 那时绑定邮箱那条路
+      # 回 501，界面据 `Profile.mail_available` 整节不画。透出来是为了
+      # 「想在本机验一次真发信」时不用改 compose
+      CORTEX_MAIL_ACCESS_KEY_ID: ${CORTEX_MAIL_ACCESS_KEY_ID:-}
+      CORTEX_MAIL_ACCESS_KEY_SECRET: ${CORTEX_MAIL_ACCESS_KEY_SECRET:-}
+      CORTEX_MAIL_FROM: ${CORTEX_MAIL_FROM:-}
+      CORTEX_MAIL_FROM_ALIAS: ${CORTEX_MAIL_FROM_ALIAS:-}
+      CORTEX_MAIL_ENDPOINT: ${CORTEX_MAIL_ENDPOINT:-}
+      CORTEX_MAIL_REGION: ${CORTEX_MAIL_REGION:-}
       # 开发机免密登录：留空用户名与密码点「登录」，直接进成这个人。
       #
       # 值是**登成谁**而不是一个 `true`：布尔答不出「那我进去是谁」，

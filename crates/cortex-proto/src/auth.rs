@@ -98,6 +98,16 @@ pub struct Profile {
     pub has_avatar: bool,
     /// 头像的版本戳，拼进 URL 做缓存击穿（`?v=…`）。没有头像时为 `None`。
     pub avatar_version: Option<i64>,
+    /// 绑定的邮箱。`None` = 没绑。
+    ///
+    /// **只有验证通过的地址才会出现在这里** —— 没有「已填未验证」这种
+    /// 中间态（那种状态既不能用来找回账号，又让界面看起来绑好了）。
+    pub email: Option<String>,
+    /// 这个部署到底能不能发信。`false` = 没配邮件通道，绑定入口整个不该画。
+    ///
+    /// **与 `email` 分开**：一个已经绑过邮箱的人，在一台没配发信的部署上
+    /// 仍然看得到自己绑的是哪个地址，但换绑不了。两个字段各答一半。
+    pub mail_available: bool,
     /// 这个号正在等着被删，到点就真删。`None` = 一切正常。
     ///
     /// 下发出来是因为**用户必须看得见那个倒计时** —— 一个「我以为删掉了」
@@ -122,4 +132,16 @@ pub struct UpdateProfileRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteAccountRequest {
     pub password: String,
+}
+
+/// 要一封验证码。**绑定与换绑是同一条路** —— 换绑就是「再验一次新地址」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartEmailRequest {
+    pub email: String,
+}
+
+/// 把码换成一次真正的绑定。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyEmailRequest {
+    pub code: String,
 }

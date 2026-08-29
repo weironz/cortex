@@ -68,6 +68,20 @@ class ProfileController extends AsyncNotifier<Profile> {
     ref.invalidate(avatarBytesProvider);
   }
 
+  /// 往这个地址发一封验证码。绑定与换绑同一条路。
+  Future<void> startEmailBinding(String email) =>
+      ref.read(cortexApiProvider).startEmailBinding(email);
+
+  Future<void> verifyEmail(String code) async {
+    final api = ref.read(cortexApiProvider);
+    state = AsyncData(await api.verifyEmail(code));
+  }
+
+  Future<void> unbindEmail(String password) async {
+    final api = ref.read(cortexApiProvider);
+    state = AsyncData(await api.unbindEmail(password));
+  }
+
   /// 排期删号。回冷静期的终点。
   Future<DateTime?> requestDeletion(String password) async {
     final api = ref.read(cortexApiProvider);

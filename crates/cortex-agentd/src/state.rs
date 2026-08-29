@@ -62,6 +62,12 @@ struct Inner {
     ///
     /// `None` 与 `store` 同进同退：没给数据库地址就两个都没有。
     accounts: Option<Accounts>,
+    /// 发信通道（阿里云邮件推送）。`None` = 没配 —— 那时绑定邮箱那条路
+    /// **在界面上根本不出现**（`/health` 如实报），见 [`crate::mailer`]。
+    ///
+    /// 从环境里读一次就定了：它没有可变的部分，而每次用时重读会让
+    /// 「配没配」在一次运行里有两个答案。
+    mailer: Option<crate::mailer::Mailer>,
     /// 服务端那把 LLM key 组装出来的客户端。`POST /llm/stream` 用它。
     ///
     /// # 为什么它是 `Option` 而不是必填
@@ -215,6 +221,8 @@ impl AgentState {
                 http,
                 store,
                 accounts,
+                // 读一次就定。没配就是 None，调用方据此不摆入口
+                mailer: crate::mailer::Mailer::from_env(),
                 llm,
                 blobs,
                 auth,
@@ -265,6 +273,15 @@ impl AgentState {
                 "这个部署没有接数据库（CORTEX_DATABASE_URL 为空），账号功能不可用",
             )
         })
+    }
+
+    /// 发信通道。`None` = 这个部署没配邮件推送。
+    ///
+    /// **调用方必须处理 `None`，而不是 unwrap**：没配是常态（自托管、
+    /// 开发环境都不会配），而那时正确的行为是「这条路整个不存在」。
+    #[must_use]
+    pub fn mailer(&self) -> Option<&crate::mailer::Mailer> {
+        self.inner.mailer.as_ref()
     }
 
     /// 服务端那把 key 组装出来的 LLM 客户端。

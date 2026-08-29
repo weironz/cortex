@@ -267,6 +267,24 @@ services:
       # 服务端那把 key 烧钱，而生产是一台 2 核 3.5G 的机器。
       # 取值必须正好是 `enabled`，手滑写成 1 不会把门打开。
       CORTEX_OPEN_REGISTRATION: ${CORTEX_OPEN_REGISTRATION:-}
+      # ── 发信（阿里云邮件推送）──
+      #
+      # 三个都给了才算配好，缺一个就当没配 —— 那时绑定邮箱那条路回 501，
+      # 而界面据 `Profile.mail_available` **根本不摆入口**。配一半最糟：
+      # 摆出一个点了必然失败的按钮。
+      #
+      # ⚠️ 两个凭据在人工维护的 .env.secrets 里，ansible 从不碰。
+      # 值可以与 OSS_ACCESS_KEY_ID 那对相同（同一把阿里云 AK），但**名字
+      # 故意不共用**：给备份轮换密钥时会连带改掉发信的，而那不报错，
+      # 只是某天开始收不到验证码。
+      CORTEX_MAIL_ACCESS_KEY_ID: ${CORTEX_MAIL_ACCESS_KEY_ID:-}
+      CORTEX_MAIL_ACCESS_KEY_SECRET: ${CORTEX_MAIL_ACCESS_KEY_SECRET:-}
+      CORTEX_MAIL_FROM: ${CORTEX_MAIL_FROM:-}
+      CORTEX_MAIL_FROM_ALIAS: ${CORTEX_MAIL_FROM_ALIAS:-}
+      # 邮件推送**没有深圳节点** —— 区域只有杭州与四个海外，所以深圳的
+      # 机器走公网到 dm.aliyuncs.com。VPC 端点（dm-vpc.*）在这里用不了。
+      CORTEX_MAIL_ENDPOINT: ${CORTEX_MAIL_ENDPOINT:-}
+      CORTEX_MAIL_REGION: ${CORTEX_MAIL_REGION:-}
       # ── 模型 ──
       #
       # `/llm/stream` 搬过来之后，**这个进程是花钱的那一方**：服务端那把 key

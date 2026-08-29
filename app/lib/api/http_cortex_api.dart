@@ -560,6 +560,24 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
+  Future<void> startEmailBinding(String email) async {
+    await _postJson('/auth/email/start', {'email': email});
+  }
+
+  @override
+  Future<Profile> verifyEmail(String code) async =>
+      Profile.fromJson(await _postJson('/auth/email/verify', {'code': code}));
+
+  @override
+  Future<Profile> unbindEmail(String password) async {
+    // DELETE 带 body —— `_deleteJson` 不带，走 `_sendJson`
+    final req = http.Request('DELETE', _uri('/auth/email'))
+      ..headers.addAll(_headers({'content-type': 'application/json'}))
+      ..body = jsonEncode({'password': password});
+    return Profile.fromJson(await _sendJson(req, '解绑邮箱'));
+  }
+
+  @override
   Future<void> changePassword(String oldPassword, String newPassword) async {
     await _postJson('/auth/password', {
       'old_password': oldPassword,
