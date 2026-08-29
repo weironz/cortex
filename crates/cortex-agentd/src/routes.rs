@@ -33,7 +33,7 @@
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use cortex_proto::delegate::Delegation;
 use cortex_proto::dto::{ChatRequest, SessionRuntimeDto};
@@ -92,6 +92,27 @@ protected_routes! {
     "/auth/password" [POST] => post(crate::accounts::change_password),
     // 加不了请求头的连接（WebSocket、<img src>）拿它换一个 60 秒的 `?ticket=`
     "/auth/ticket" [POST] => post(issue_ticket),
+    // ── 账号资料（见 `crate::profile`）──
+    //
+    // 与上面几条同一条判据：都要**自己登录换来的** access token，预共享
+    // token 认不出具体是谁，而这里每一条都在改某个人的东西
+    // ⚠️ 同一条路径的多个方法要写在**一行**里。拆成两行的话
+    // `every_protected_route_rejects_anonymous_requests` 会红：它挑一个
+    // 「这条声明里没有的方法」当探针去证明路径可达，而另一行注册的方法
+    // 恰好就是它挑中的那个 —— 探针于是打到了真 handler 上
+    "/auth/profile" [GET, PATCH] => get(crate::profile::get_profile)
+        .patch(crate::profile::update_profile),
+    "/auth/avatar" [PUT, DELETE] => put(crate::profile::put_avatar)
+        .delete(crate::profile::delete_avatar),
+    // 取头像**也要凭据**。`<img src>` 带不了首部，走 `/auth/ticket` 换的
+    // 那张 60 秒短票（`?ticket=`）—— 与 WebSocket 同一条路。
+    // 不放进免认证清单：那份清单要求每一条都能说出「为什么它不能要凭据」，
+    // 而头像说不出来，它只是「带不了首部」，那已经有解了
+    "/auth/avatar/{user_id}" [GET] => get(crate::profile::get_avatar),
+    // 删号是**排期**，不是当场删；冷静期内可撤销。两条都要密码那一层，
+    // 见 `crate::profile` 的模块文档纪律 1
+    "/auth/account" [DELETE] => delete(crate::profile::delete_account),
+    "/auth/account/restore" [POST] => post(crate::profile::restore_account),
     // ── 在线名册（roadmap E 的阶段 3）──
     //
     // **只报不判。** 心跳里的东西只用于拼一句给人看的话与这个列表 ——

@@ -508,6 +508,79 @@ class HttpCortexApi implements CortexApi {
   }
 
   @override
+  Future<Profile> profile() async =>
+      Profile.fromJson(await _getJson('/auth/profile'));
+
+  @override
+  Future<Profile> updateProfile({Patch<String?>? nickname}) async {
+    // **只放进这次真的要改的字段。** 字段缺席 = 服务端不动它；
+    // 无脑把所有字段都发出去的话，一次「只改昵称」会把别的字段一起重写成
+    // 界面上那份可能已经过期的副本
+    final body = <String, dynamic>{
+      if (nickname != null) 'nickname': nickname.value,
+    };
+    return Profile.fromJson(await _patchJson('/auth/profile', body));
+  }
+
+  @override
+  Future<Profile> putAvatar(Uint8List bytes) async {
+    // body 是原始字节，不是 multipart：这条路只上传一个文件、没有别的字段，
+    // multipart 会多一层双方都要维护的解析
+    final req = http.Request('PUT', _uri('/auth/avatar'))
+      ..headers.addAll(_headers({'content-type': 'application/octet-stream'}))
+      ..bodyBytes = bytes;
+    return Profile.fromJson(await _sendJson(req, '上传头像'));
+  }
+
+  @override
+  Future<Profile> deleteAvatar() async =>
+      Profile.fromJson(await _deleteJson('/auth/avatar'));
+
+  @override
+  Future<Uint8List> avatarBytes(String userId) async {
+    // 与 `blobBytes` 同一条路：自己取字节、自己渲染。不用 `Image.network`
+    // ——它带不了 Authorization，而 mock 数据源也答不出一个 URL
+    final http.Response response;
+    try {
+      response = await _client.get(
+        _uri('/auth/avatar/${Uri.encodeComponent(userId)}'),
+        headers: _headers(),
+      );
+    } on Object catch (e) {
+      throw CortexApiException(_unreachableMessage(e), cause: e);
+    }
+    if (response.statusCode >= 400) {
+      throw _failure(
+        response.statusCode,
+        _trim(response.body),
+        headers: response.headers,
+      );
+    }
+    return response.bodyBytes;
+  }
+
+  @override
+  Future<void> changePassword(String oldPassword, String newPassword) async {
+    await _postJson('/auth/password', {
+      'old_password': oldPassword,
+      'new_password': newPassword,
+    });
+  }
+
+  @override
+  Future<Profile> deleteAccount(String password) async {
+    // DELETE 带 body —— `_deleteJson` 不带，所以走 `_sendJson`
+    final req = http.Request('DELETE', _uri('/auth/account'))
+      ..headers.addAll(_headers({'content-type': 'application/json'}))
+      ..body = jsonEncode({'password': password});
+    return Profile.fromJson(await _sendJson(req, '删除账号'));
+  }
+
+  @override
+  Future<Profile> restoreAccount() async =>
+      Profile.fromJson(await _postJson('/auth/account/restore', const {}));
+
+  @override
   Future<void> logout(String refreshToken) async {
     try {
       await _client.post(

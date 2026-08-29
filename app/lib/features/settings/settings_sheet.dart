@@ -6,6 +6,7 @@ import 'pages/about_page.dart';
 import 'pages/appearance_page.dart';
 import 'pages/notifications_page.dart';
 import 'pages/permissions_page.dart';
+import 'pages/account_page.dart';
 import 'pages/computer_use_page.dart';
 import 'pages/computer_use_section.dart';
 import 'pages/search_page.dart';
@@ -207,6 +208,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       icon: Icons.folder_outlined,
       page: const DataPage(),
       group: _NavGroup.prefs,
+      gate: null,
+    ),
+    // 账号排在系统组第一个：出问题时人第一个想看的是「我是谁、还登着吗」。
+    // **恒摆，不加闸** —— 没有账号体系的部署（预共享 token、老服务端）
+    // 由页面自己说清楚，而那句解释正是那种部署的用户要的答案。
+    // 加闸的话，最想问「为什么改不了密码」的那个人恰好看不到解释
+    (
+      label: '账号',
+      hint: '昵称 · 头像 · 口令',
+      icon: Icons.account_circle_outlined,
+      page: const AccountPage(),
+      group: _NavGroup.system,
       gate: null,
     ),
     (

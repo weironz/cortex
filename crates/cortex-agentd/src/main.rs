@@ -46,6 +46,7 @@ mod model_roles;
 mod model_sources;
 mod presence;
 mod pricing;
+mod profile;
 mod projects;
 mod quota;
 mod rate_limit;
@@ -458,6 +459,7 @@ async fn main() -> anyhow::Result<()> {
     // 后台三件：回收闲置容器、盯 OOM、盯卷配额。
     // 快照那条定时任务**没有跟过来** —— 见下面那段
     reaper::spawn(state.clone());
+    profile::spawn_purge(state.clone());
     watch::spawn_oom_watch(state.clone());
     watch::spawn_quota_watch(state.clone());
 

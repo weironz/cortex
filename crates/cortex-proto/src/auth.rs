@@ -79,3 +79,47 @@ pub struct WhoAmI {
     /// 在多租户里是个会被真的问出口的问题。
     pub schema_name: String,
 }
+
+/// 账号资料。**与 [`WhoAmI`] 分开**：那一条回答「我是谁、我的库在哪」，
+/// 每次启动都要问；这一条回答「我叫什么、长什么样」，只有账号页要。
+/// 合成一条的话，每次冷启动都要多读一次头像的元信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profile {
+    pub user_id: String,
+    /// 登录名。**不可改** —— 它是别人引用你的方式，改了等于换了个人。
+    pub username: String,
+    /// 显示名。`None` = 没设过，界面上回落到 [`Self::username`]。
+    ///
+    /// 服务端不替客户端做这个回落：回落之后客户端就分不出「他设了一个
+    /// 恰好等于用户名的昵称」和「他没设过」，而清空昵称这个操作要那个区别。
+    pub nickname: Option<String>,
+    /// 有没有头像。**不带图片本身** —— 那是 `GET /auth/avatar/{user_id}`
+    /// 的事，走单独一条路才有缓存（这一条每次都要新鲜）。
+    pub has_avatar: bool,
+    /// 头像的版本戳，拼进 URL 做缓存击穿（`?v=…`）。没有头像时为 `None`。
+    pub avatar_version: Option<i64>,
+    /// 这个号正在等着被删，到点就真删。`None` = 一切正常。
+    ///
+    /// 下发出来是因为**用户必须看得见那个倒计时** —— 一个「我以为删掉了」
+    /// 或「我以为撤销了」的误会，代价是全部历史。
+    pub purge_after: Option<String>,
+}
+
+/// 改资料。**每一项都用 `Option` 包一层「不动」与「清空」的区别**：
+/// `None` = 这次不动它，`Some(None)` = 清空。少了这一层，「清空昵称」
+/// 与「这次没提昵称」在线上长得一模一样。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateProfileRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<Option<String>>,
+}
+
+/// 删除账号 —— 要密码，不要别的。
+///
+/// 为什么要密码：这个动作会销毁整片 schema。而拿到 access token 的路子
+/// （借来的电脑、没锁屏、XSS）比拿到密码多得多，光凭 token 就能删号，
+/// 等于把不可逆操作放在最低的那道门后面。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteAccountRequest {
+    pub password: String,
+}

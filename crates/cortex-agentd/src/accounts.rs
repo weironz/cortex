@@ -1042,6 +1042,11 @@ pub async fn change_password(
 ///
 /// 失败不往上抛：口令已经改成功了，此时报错会让调用方以为整件事没成功而
 /// 拿旧口令重试 —— 而那时旧口令已经不好使了。日志留一条，让运维看得见。
+/// 同 [`revoke_all_sessions`]，给别的模块用（删号那条要它）。
+pub(crate) async fn revoke_all_sessions_for(pool: &sqlx::PgPool, user_id: &str) -> u64 {
+    revoke_all_sessions(pool, user_id).await
+}
+
 async fn revoke_all_sessions(pool: &sqlx::PgPool, user_id: &str) -> u64 {
     match sqlx::query(
         "UPDATE cortex_auth.auth_tokens SET revoked_at = now()

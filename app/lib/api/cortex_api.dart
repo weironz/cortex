@@ -407,6 +407,62 @@ abstract interface class CortexApi {
   /// **摆不摆**入口；这条本身不做那个判断。
   Future<AuthTokens> register(String username, String password);
 
+  /// `GET /auth/profile` —— 昵称、头像有没有、以及删号的倒计时。
+  ///
+  /// 与 `whoami` 分开：那一条每次启动都问（我是谁、库在哪），这一条只有
+  /// 账号页要。合成一条会让每次冷启动多读一次头像的元信息。
+  Future<Profile> profile();
+
+  /// `PATCH /auth/profile` —— 目前只有昵称。
+  ///
+  /// [nickname] 用 `Option` 的两层语义：**不传** = 这次不动它，
+  /// 传 `null`（即 `const Nullable(null)`）= 清空。Dart 没有
+  /// `Option<Option<T>>`，所以这里用一个显式的包装类 [Patch]。
+  Future<Profile> updateProfile({Patch<String?>? nickname});
+
+  /// `PUT /auth/avatar` —— body 就是图片字节。
+  ///
+  /// 服务端按**魔数**认 PNG / JPEG / WebP，不看这里说什么，也不收 SVG
+  /// （它能带脚本，而头像会被当图片直接渲染）。上限 256 KiB。
+  Future<Profile> putAvatar(Uint8List bytes);
+
+  /// `DELETE /auth/avatar`
+  Future<Profile> deleteAvatar();
+
+  /// `GET /auth/avatar/{userId}` —— 取头像的字节。
+  ///
+  /// **回字节而不是 URL**，与 [blobBytes] 同一条理由：界面从自己取到的
+  /// 字节渲染，`Image.network` 那条路 mock 数据源答不出来，而且带不了
+  /// `Authorization`。
+  ///
+  /// 没有头像时抛 404（`isNotFound`）—— 调用方据此画默认头像。
+  Future<Uint8List> avatarBytes(String userId);
+
+  /// `POST /auth/password` —— 改口令。
+  ///
+  /// ⚠️ 服务端这条路 2026-08 就有了，**而客户端一直没接** —— 于是设置里
+  /// 根本没有改密码的入口。典型的「造好没人接」。
+  ///
+  /// 成功之后**所有设备都会被登出**（服务端作废整个 refresh 家族），
+  /// 包括这一台。调用方要据此把人送回登录页，而不是假装什么都没发生。
+  Future<void> changePassword(String oldPassword, String newPassword);
+
+  /// `DELETE /auth/account` —— **排期**删除，不是当场删。
+  ///
+  /// 要密码：这个动作会销毁整片 schema（全部会话、消息、附件）。拿到
+  /// access token 的路子比拿到密码多得多，光凭 token 就能删号等于把
+  /// 不可逆操作放在最低的那道门后面。
+  ///
+  /// 回的 [Profile] 里带着 `purgeAfter` —— 那是冷静期的终点，界面要显示它。
+  Future<Profile> deleteAccount(String password);
+
+  /// `POST /auth/account/restore` —— 冷静期内反悔。
+  ///
+  /// ⚠️ 排期期间**登录是被拒的**，所以只有排期那一刻还没过期的那把 access
+  /// token 能撤销（15 分钟）。超过就要管理员帮忙 —— 界面必须把这一条
+  /// 说清楚，否则用户会以为「随时能反悔」。
+  Future<Profile> restoreAccount();
+
   /// `POST /auth/refresh` —— 用长效凭据换一对新的。
   ///
   /// 每次都会**轮转**：服务端把旧的作废并签一个新的。所以调用方必须
@@ -928,6 +984,31 @@ abstract interface class CortexApi {
 /// 与那边同一条禁令：**不要用在真实客户端上**。
 mixin AccountUnsupported {
   Future<Account?> whoAmI() async => null;
+
+  /// 账号资料那几条一律 404 —— 与 `whoAmI()` 回 null 是同一句话的两种说法：
+  /// **这个后端没有账号体系**。
+  ///
+  /// 抛 404 而不是回一个空 [Profile]：空资料会让账号页画出一堆点了没反应的
+  /// 输入框，而 404 会让它显示那句解释（见 `AccountPage`）。
+  static const _absent = CortexApiException('这个后端没有账号体系。', statusCode: 404);
+
+  Future<Profile> profile() async => throw _absent;
+
+  Future<Profile> updateProfile({Patch<String?>? nickname}) async =>
+      throw _absent;
+
+  Future<Profile> putAvatar(Uint8List bytes) async => throw _absent;
+
+  Future<Profile> deleteAvatar() async => throw _absent;
+
+  Future<Uint8List> avatarBytes(String userId) async => throw _absent;
+
+  Future<void> changePassword(String oldPassword, String newPassword) async =>
+      throw _absent;
+
+  Future<Profile> deleteAccount(String password) async => throw _absent;
+
+  Future<Profile> restoreAccount() async => throw _absent;
 }
 
 /// 同上，给四条本地工作空间路由用。
