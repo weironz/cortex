@@ -1627,7 +1627,14 @@ class HttpCortexApi implements CortexApi {
       );
     }
 
-    await for (final frame in decodeSse(response.stream)) {
+    // `keepAlive: true` —— 心跳要一路送到 `ChatController`，见
+    // [ChatHeartbeatEvent]。丢在这一层的话，上面那条空转看门狗就只剩
+    // 「多久没有 delta」可判，而那会把跑长命令的那一轮当场误杀。
+    await for (final frame in decodeSse(response.stream, keepAlive: true)) {
+      if (frame.isKeepAlive) {
+        yield const ChatHeartbeatEvent();
+        continue;
+      }
       if (frame.data.isEmpty) continue;
       // Some servers terminate SSE with the literal sentinel `[DONE]`.
       if (frame.data == '[DONE]') {

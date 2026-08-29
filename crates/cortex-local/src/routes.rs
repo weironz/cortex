@@ -1022,6 +1022,47 @@ mod sse_tests {
     use super::*;
     use cortex_proto::dto::ChatEvent;
 
+    /// 空闲的聊天流必须一直发 `: ping`。**那是客户端判活的唯一证据。**
+    ///
+    /// # 为什么值得单独一条
+    ///
+    /// 桌面端 2026-08-29 之后按心跳判这条流的死活
+    /// （`ChatController.idleTimeout`，75 秒）。判据只能是心跳：数据帧之间
+    /// 可以合法地静默十分钟 —— agent 在跑一条长命令、这一轮排在别人后面、
+    /// 或者停在一个等人点的确认上。
+    ///
+    /// 于是 `.keep_alive()` 从「一个防反代读超时的好习惯」变成了**契约的
+    /// 一部分**：谁哪天顺手把它删了或者把间隔调大，这里一个字都不会报，
+    /// 症状是用户那侧「跑长命令跑到一半，回答凭空断掉」。
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_chat_stream_keeps_pinging() {
+        // 发送端拿在手里不放：这一轮**在跑**，只是此刻一个字都没有 ——
+        // 丢掉它的话流会因为广播端关闭而结束，测的就成了另一回事
+        let (_tx, rx) = tokio::sync::broadcast::channel::<ChatEvent>(4);
+        let mut body = sse(Vec::new(), rx)
+            .into_response()
+            .into_body()
+            .into_data_stream();
+
+        // 连着要三条：只验第一条的话，「发一次就不发了」照样绿
+        for nth in 1..=3 {
+            let frame =
+                tokio::time::timeout(Duration::from_secs(60), futures::StreamExt::next(&mut body))
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("第 {nth} 条心跳 60 秒还没到 —— 客户端 75 秒就断线了")
+                    })
+                    .expect("流不该在这里结束：这一轮还在跑")
+                    .expect("读心跳出错");
+            let text = String::from_utf8_lossy(&frame);
+            assert!(
+                text.starts_with(':'),
+                "心跳必须是 SSE 注释行（`:` 开头），否则客户端会把它当成一个数据帧，\
+                 拿到的却是 {text:?}"
+            );
+        }
+    }
+
     /// **`done` 之后这条流必须自己结束。**
     ///
     /// 广播的发送端活在 `Runs` 的表里，跑完还留 5 分钟（为的是断线重挂）。

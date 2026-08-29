@@ -41,6 +41,37 @@ class ChatController extends Notifier<ChatState> {
   Timer? _flushTimer;
   static const _flushInterval = Duration(milliseconds: 16);
 
+  /// 空转看门狗：这条流上多久没有任何动静就判它死了。
+  ///
+  /// # 为什么必须有它（2026-08-29 的案发现场）
+  ///
+  /// 生产在 IO 风暴里，一条聊天 SSE 挂着**既不吐事件也不报错**。于是
+  /// [ChatState.streaming] 永久占线，「一次只跑一轮」那道闸从此拦下所有后续
+  /// 发送 —— 用户唯一的出路是重启 app。一条永远不结束也永远不报错的流，
+  /// 比一条报错的流坏得多：报错至少能收尾。
+  ///
+  /// # 判据是**心跳**，不是「多久没有回答」
+  ///
+  /// 数据帧之间可以合法地静默很久：agent 在跑一条十分钟的命令、这一轮排在
+  /// 别人后面、或者停在一个等人点的确认上。拿「多久没有 delta」当判据，
+  /// 阈值要放宽到十几分钟才不误杀，而那时它已经救不了人了。
+  ///
+  /// 服务端每 15 秒发一条 `: ping`（`cortex-local` 的 `routes::sse`），
+  /// 那才是「它还在往这条连接上写字节」的直接证据。所以这里等的是
+  /// [ChatHeartbeatEvent]。
+  ///
+  /// # 为什么是 75 秒
+  ///
+  /// 下界：必须**远大于** 15 秒的 ping 间隔，否则一次 GC 停顿或网络抖动就把
+  /// 正在干活的一轮判死（服务端那侧同一条帐算过一遍，见 agentd
+  /// `sandbox_proxy` 的 `the_read_timeout_leaves_room_for_the_keepalive_ping`）。
+  ///
+  /// 上界：要**大于** agentd 那个 60 秒的 `READ_TIMEOUT`。云端那条路上，
+  /// 沙箱僵死时先发现的应该是代理，它会把连接断掉并给出一个说得清是谁的
+  /// 错的报错。抢在它前面开口，用户拿到的就是一句更含糊的「空转」。
+  static const idleTimeout = Duration(seconds: 75);
+  Timer? _idleTimer;
+
   /// 作废序号：换后端时 +1，让在飞的请求的结果（尤其是**尸体**）被丢掉。
   int _requestSeq = 0;
 
@@ -54,6 +85,7 @@ class ChatController extends Notifier<ChatState> {
   ChatState build() {
     ref.onDispose(() {
       _flushTimer?.cancel();
+      _idleTimer?.cancel();
       _subscription?.cancel();
     });
     // Re-hydrate whenever the data source flips (mock ↔ live).
@@ -247,10 +279,31 @@ class ChatController extends Notifier<ChatState> {
     // 永远转圈的「正在生成」
     late final StreamSubscription<ChatEvent> sub;
     var started = false;
+    // 连上了却一个字节都不回的重挂，也要有个尽头。
+    //
+    // 这一段还没有 streaming 状态可占，所以它不会像发送那条一样把界面卡住
+    // ——漏掉的是一条永远挂着的连接。**静悄悄地收掉**：挂不上本来就是常态，
+    // 见方法文档那三种。第一条事件到了之后交给全局那条看门狗
+    Timer? firstEvent;
+    firstEvent = Timer(idleTimeout, () {
+      if (!started) sub.cancel();
+    });
     sub = stream.listen(
       (event) {
-        if (!started) {
+        // ⚠️ **心跳不算「它确实在跑」。**
+        //
+        // 心跳现在会浮到这一层（判活要它），而它只说明连接开着 —— 说明不了
+        // 这一轮有内容。拿它提升 `started` 的话：重挂到一条「已注册但永不
+        // 产出」的 run 时，界面会转圈，流结束时 `_commit` 还会落一条空的
+        // 助手气泡（那一层没有空内容保护）。
+        //
+        // 让心跳直接落到下面的 `_onEvent`：`streaming` 还是 null，那里会
+        // 直接返回，纯 ping 的连接于是被 `firstEvent` 那条定时器静悄悄收掉
+        // —— 正是这条路本来的设计（挂不上是常态，不该弹错）。
+        if (!started && event is! ChatHeartbeatEvent) {
           started = true;
+          firstEvent?.cancel();
+          firstEvent = null;
           // 重挂拿到的第一条事件就意味着「它确实在跑」。这时才建 streaming
           // 状态，`_onEvent` 后面那一串才有东西可改
           state = state.copyWith(
@@ -267,9 +320,11 @@ class ChatController extends Notifier<ChatState> {
       },
       // 挂不上（404 / 旧后端 / 断网）一律当成「没在跑」，见方法文档
       onError: (Object e, StackTrace st) {
+        firstEvent?.cancel();
         if (started) _onError(e, st);
       },
       onDone: () {
+        firstEvent?.cancel();
         if (started) _onDone();
       },
       cancelOnError: true,
@@ -1093,6 +1148,9 @@ class ChatController extends Notifier<ChatState> {
       onDone: _onDone,
       cancelOnError: true,
     );
+    // 从**发出去**那一刻开始算，不是从第一条事件开始算：一条连上了却一个
+    // 字节都不回的流，正是 2026-08-29 那次占线的样子
+    _armIdleWatchdog();
     return true;
   }
 
@@ -1157,8 +1215,16 @@ class ChatController extends Notifier<ChatState> {
   void _onEvent(ChatEvent event) {
     final turn = state.streaming;
     if (turn == null) return;
+    // 收到**任何**东西就把看门狗的表拨回去 —— 包括心跳，那正是长命令期间
+    // 唯一会到的东西。放在 switch 之前：终态那两条也会走到这里，而它们
+    // 后面的 `_commit` 会把表撤掉，多拨这一次不花钱
+    _armIdleWatchdog();
 
     switch (event) {
+      // 心跳。判活用完就丢 —— 它不进转录，也不改任何状态
+      case ChatHeartbeatEvent():
+        break;
+
       // 排在别人后面。**不是终态** —— 同一条流接着会送这一轮自己的内容。
       // 记下来只为在气泡里说一句话：排队期间流上除了 keepalive 什么都没有，
       // 不说的话屏幕上就是一个转了几分钟的圈
@@ -1222,6 +1288,30 @@ class ChatController extends Notifier<ChatState> {
         // Forward compatibility: ignore quietly rather than break the turn.
         break;
     }
+  }
+
+  /// 把空转看门狗的表拨回 [idleTimeout]。发流时上一次，之后每条事件一次。
+  void _armIdleWatchdog() {
+    _idleTimer?.cancel();
+    _idleTimer = Timer(idleTimeout, _onIdleTimeout);
+  }
+
+  /// 这条流空转到期了。**当成一次连接失败收尾**，不是当成这一轮出错。
+  ///
+  /// 措辞要如实：断的只是「看着它跑」这条线，服务端那一轮照跑照存档 ——
+  /// 剩下那半话由 [_onError] 的 `isUnreachable` 分支补上（它同时会说清
+  /// 「已经流回来的文字保留在下面」），所以这里造的异常**不带状态码**。
+  void _onIdleTimeout() {
+    _idleTimer = null;
+    // 没有在跑的轮次 = 表该撤而没撤干净。什么都不做，别凭空造一条错误
+    if (state.streaming == null) return;
+    _onError(
+      CortexApiException(
+        '连接空转 —— 已经 ${idleTimeout.inSeconds} 秒没收到任何东西，'
+        '连服务端每 15 秒一次的心跳都没有，先把这条流断开。',
+      ),
+      StackTrace.current,
+    );
   }
 
   /// 收到本轮自己的第一条内容就不再是「排队中」了。
@@ -1296,6 +1386,8 @@ class ChatController extends Notifier<ChatState> {
   }) {
     _flushTimer?.cancel();
     _flushTimer = null;
+    _idleTimer?.cancel();
+    _idleTimer = null;
     _flushPending();
 
     final turn = state.streaming;
@@ -1392,6 +1484,8 @@ class ChatController extends Notifier<ChatState> {
   Future<void> _cancelStream() async {
     _flushTimer?.cancel();
     _flushTimer = null;
+    _idleTimer?.cancel();
+    _idleTimer = null;
     _pending.clear();
     await _subscription?.cancel();
     _subscription = null;
