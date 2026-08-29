@@ -341,7 +341,10 @@ class _PaletteState extends ConsumerState<_Palette> {
           color: scheme.surfaceContainer,
           borderRadius: BorderRadius.circular(CortexTokens.radiusWindow),
           border: Border.all(color: scheme.outline),
-          boxShadow: kElevationToShadow[12],
+          // 设计稿的**悬空**档（--sh3）。此前取的是 Material 的
+          // `kElevationToShadow[12]` —— 那张表是按 M2 的 elevation 推的，
+          // 与这套设计的三档投影不同源，深色下尤其偏淡
+          boxShadow: tokens.shadow3,
         ),
         clipBehavior: Clip.antiAlias,
         child: Shortcuts(

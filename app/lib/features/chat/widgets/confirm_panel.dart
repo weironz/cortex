@@ -98,8 +98,15 @@ class _ConfirmCard extends ConsumerWidget {
     // ── 边框强度按**爆炸半径**分三档，不是统一样式 ──
     //
     // 判据是「批错了能坏到哪」，不是「错误多严重」：读（越界看一眼，
-    // 半径最小）→ 琥珀细框；写入（改文件，能回滚）→ 中等红框；
+    // 撤得回来）→ 中性灰细框；写入（改文件，能回滚）→ 琥珀框；
     // 执行（shell，什么都可能发生）→ 最重的红框。
+    //
+    // ⚠️ 2026-08-28 整档**降一级**，对齐设计稿的 `--risk`
+    // （读 `#63636C` 中性灰 / 写 `#7C500A` 琥珀 / 执行 `--del` 红）。
+    // 此前最低档就是琥珀 —— 于是「读取」这个每天要点十几次、而且
+    // 撤得回来的动作常年挂着警告色。那正是下面担心的脱敏，只是脱的
+    // 是琥珀：琥珀天天见，真正该紧张的「执行」就不再显眼。
+    // 中性灰不是「不重要」，是**「这一档不需要你紧张」**。
     // 统一样式的代价是人对确认框脱敏 —— 每天点十个「读取」之后，
     // 那个真正危险的「执行」看起来毫无区别。
     // 未知档按最重画：一个新长出来的风险等级绝不能被画成最轻的
@@ -115,16 +122,16 @@ class _ConfirmCard extends ConsumerWidget {
       Color accent,
     ) = switch (request.risk) {
       'safe' => (
-        theme.cortex.warning.withValues(alpha: 0.55),
+        theme.cortex.foregroundTertiary.withValues(alpha: 0.42),
         1.0,
-        theme.cortex.warning.withValues(alpha: 0.06),
-        theme.cortex.warning,
+        theme.cortex.foregroundTertiary.withValues(alpha: 0.05),
+        theme.cortex.foregroundTertiary,
       ),
       'write' => (
-        scheme.error.withValues(alpha: 0.45),
+        theme.cortex.warning.withValues(alpha: 0.55),
         1.0,
-        scheme.errorContainer.withValues(alpha: 0.30),
-        scheme.error,
+        theme.cortex.warning.withValues(alpha: 0.08),
+        theme.cortex.warning,
       ),
       _ => (
         scheme.error.withValues(alpha: 0.70),
@@ -141,6 +148,10 @@ class _ConfirmCard extends ConsumerWidget {
         color: fillColor,
         borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
         border: Border.all(color: borderColor, width: borderWidth),
+        // **浮起**档（--sh2）。确认卡是对话流里唯一一个「拦住你、等你答」
+        // 的东西，设计稿给它的正是这一档：它得看着比消息气泡高一层，
+        // 否则滚动时会被读成又一条普通消息而被划过去
+        boxShadow: theme.cortex.shadow2,
       ),
       padding: const EdgeInsets.fromLTRB(14, 11, 14, 11),
       child: Column(

@@ -992,9 +992,13 @@ class _RoundButton extends StatelessWidget {
   final Color background;
   final Color foreground;
 
-  /// 画成品牌渐变（acc → accInk，180°）。**整个产品里只有可发送状态的
+  /// 画成品牌渐变（acc → acc2，180°）。**整个产品里只有可发送状态的
   /// 发送键是 true** —— 设计稿的原话是「渐变只留发送键一处」：渐变一多，
   /// 「主要动作」就不再突出，这一处的辨识度正是靠别处都没有换来的。
+  ///
+  /// 终点从前取 `accentInk`（#4348DE，同一支靛蓝压深），出来是「靛蓝到
+  /// 更暗的靛蓝」—— 看着像纯色没渲染完。设计稿的 `--acc2` 是**往紫偏**
+  /// 的 #8A62F4，两色拉得开，渐变才有分量。
   final bool accent;
 
   @override
@@ -1012,7 +1016,7 @@ class _RoundButton extends StatelessWidget {
                   gradient: LinearGradient(
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
-                    colors: [background, tokens.accentInk],
+                    colors: [background, tokens.accentGradientEnd],
                   ),
                 )
               : null,

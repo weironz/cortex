@@ -27,6 +27,9 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     required this.hover,
     required this.accentSoft,
     required this.accentInk,
+    required this.accentGradientEnd,
+    required this.shadow2,
+    required this.shadow3,
   });
 
   /// 导航区那一整块。**与内容区是两个表面** —— 这是 Cherry Studio
@@ -79,6 +82,36 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
   /// 主色是为按钮底调的，直接当文字用对比度不够（设计稿 `--accInk`）。
   final Color accentInk;
 
+  /// 渐变的**第二色**（设计稿 `--acc2`）。全产品只有发送键用它。
+  ///
+  /// # 为什么不是 [accentInk]
+  ///
+  /// 两者方向不同：`accentInk` 是同一支靛蓝**压深**（#4348DE），为的是当
+  /// 文字时对比度够；`acc2` 是**往紫偏**（#8A62F4）。拿 accentInk 当渐变
+  /// 终点，出来的是「靛蓝到更暗的靛蓝」—— 看着像没渲染完的纯色，那个
+  /// 「唯一的主要动作」的分量就没了。
+  final Color accentGradientEnd;
+
+  /// 两档浮层投影（设计稿 `--sh2/--sh3`）：浮起 / 悬空。
+  ///
+  /// # 为什么不用 Material 的 elevation
+  ///
+  /// M3 的 elevation 在深色下是**加一层半透明白**来表达「更高」，而这套
+  /// 设计的深色阶已经靠表面自己变亮做了分层（win → card → fill）。两者
+  /// 叠在一起，浮起来的东西会白得发灰。这三档是纯投影，不动表面色。
+  ///
+  /// 深色的投影**更黑更散**（0.45→0.55、blur 更大）：深色背景上淡投影
+  /// 根本看不见，照抄浅色的值等于没有投影。
+  ///
+  /// # 为什么没有设计稿那个 `--sh1`
+  ///
+  /// 它是「贴合」档，设计稿拿它给**并排的小卡片**描边式地垫一层。而这一
+  /// 侧的既定约定是**相邻表面用边框分隔、只有浮层才用阴影**（卡片一律
+  /// `side: BorderSide(outlineVariant)`）。两种做法混用会让同一屏里的卡片
+  /// 有的带影有的不带 —— 收一档比硬塞一个消费者干净。
+  final List<BoxShadow> shadow2;
+  final List<BoxShadow> shadow3;
+
   /// 没挂扩展时从 `ColorScheme` 现推一份。见 [CortexTokensX.cortex]。
   factory CortexTokens.fallbackFor(ColorScheme s) => CortexTokens(
     sidebar: s.surfaceContainerLow,
@@ -91,7 +124,24 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     hover: s.onSurface.withValues(alpha: 0.045),
     accentSoft: s.primary.withValues(alpha: 0.10),
     accentInk: s.primary,
+    // 推出来的那份不追求好看：没有第二支品牌色可推，渐变退化成纯色
+    accentGradientEnd: s.primary,
+    shadow2: _fallbackShadow(s, 4, 14, 0.10),
+    shadow3: _fallbackShadow(s, 10, 34, 0.16),
   );
+
+  static List<BoxShadow> _fallbackShadow(
+    ColorScheme s,
+    double dy,
+    double blur,
+    double alpha,
+  ) => [
+    BoxShadow(
+      offset: Offset(0, dy),
+      blurRadius: blur,
+      color: s.shadow.withValues(alpha: alpha),
+    ),
+  ];
 
   /// 圆角阶 —— 2026-08-24 起对齐设计稿的五档体系。
   ///
@@ -127,6 +177,9 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     Color? hover,
     Color? accentSoft,
     Color? accentInk,
+    Color? accentGradientEnd,
+    List<BoxShadow>? shadow2,
+    List<BoxShadow>? shadow3,
   }) => CortexTokens(
     sidebar: sidebar ?? this.sidebar,
     sidebarAccent: sidebarAccent ?? this.sidebarAccent,
@@ -138,6 +191,9 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     hover: hover ?? this.hover,
     accentSoft: accentSoft ?? this.accentSoft,
     accentInk: accentInk ?? this.accentInk,
+    accentGradientEnd: accentGradientEnd ?? this.accentGradientEnd,
+    shadow2: shadow2 ?? this.shadow2,
+    shadow3: shadow3 ?? this.shadow3,
   );
 
   @override
@@ -158,6 +214,15 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
       hover: Color.lerp(hover, other.hover, t)!,
       accentSoft: Color.lerp(accentSoft, other.accentSoft, t)!,
       accentInk: Color.lerp(accentInk, other.accentInk, t)!,
+      accentGradientEnd: Color.lerp(
+        accentGradientEnd,
+        other.accentGradientEnd,
+        t,
+      )!,
+      // BoxShadow.lerpList 处理两侧长度不等的情况（短的那边补透明），
+      // 自己按下标配对会在换主题时漏掉一层
+      shadow2: BoxShadow.lerpList(shadow2, other.shadow2, t)!,
+      shadow3: BoxShadow.lerpList(shadow3, other.shadow3, t)!,
     );
   }
 }
@@ -339,6 +404,42 @@ abstract final class CortexTheme {
           accentSoft: dark ? const Color(0x2E7C82FF) : const Color(0x1A5B62F4),
           // 品牌色文字（--accInk）：链接、彩色数字
           accentInk: dark ? const Color(0xFFA5A9FF) : const Color(0xFF4348DE),
+          // 渐变第二色（--acc2）：往**紫**偏，不是把靛蓝压深
+          accentGradientEnd: dark
+              ? const Color(0xFFA78BFA)
+              : const Color(0xFF8A62F4),
+          // 三档投影（--sh1/2/3）。CSS 的 `0 Ypx Bpx rgba(...)` 逐项对应
+          // offset.dy / blurRadius / color，没有 spread 那一项
+          shadow2: dark
+              ? const [
+                  BoxShadow(
+                    offset: Offset(0, 4),
+                    blurRadius: 16,
+                    color: Color.fromRGBO(0, 0, 0, 0.45),
+                  ),
+                ]
+              : const [
+                  BoxShadow(
+                    offset: Offset(0, 4),
+                    blurRadius: 14,
+                    color: Color.fromRGBO(16, 16, 24, 0.08),
+                  ),
+                ],
+          shadow3: dark
+              ? const [
+                  BoxShadow(
+                    offset: Offset(0, 12),
+                    blurRadius: 38,
+                    color: Color.fromRGBO(0, 0, 0, 0.55),
+                  ),
+                ]
+              : const [
+                  BoxShadow(
+                    offset: Offset(0, 10),
+                    blurRadius: 34,
+                    color: Color.fromRGBO(16, 16, 24, 0.12),
+                  ),
+                ],
         ),
       ],
       dividerTheme: DividerThemeData(

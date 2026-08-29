@@ -349,13 +349,10 @@ class _PickerPopoverState extends State<_PickerPopover> {
     return DecoratedBox(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(CortexTokens.radiusCard),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: dark ? 0.4 : 0.12),
-            blurRadius: 24,
-            offset: const Offset(0, 8),
-          ),
-        ],
+        // 同为**悬空**档（--sh3），与命令面板共用一个 token。
+        // 此前是就地手调的一组值（blur 24 / dy 8），与设计稿的
+        // 34 / 10 差着一档 —— 两个同层级的弹层因此浮得不一样高
+        boxShadow: theme.cortex.shadow3,
       ),
       child: Material(
         // popover 层级的表面：深色下比卡片再亮一档（浮起来的东西更亮，
