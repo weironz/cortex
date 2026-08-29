@@ -27,6 +27,11 @@ Justfile text eol=lf
 # CORTEX_VERSION=v0.1.18 会让 docker 去拉一个不存在的 tag
 *.j2 text eol=lf
 *.cfg text eol=lf
+
+# CI 里的检查脚本。带 shebang 直接执行时，CRLF 会让解释器行变成
+# `#!/usr/bin/env python3`，报的错是「没有那个文件或目录」而指着一个
+# 明明存在的解释器 —— 与上面 *.sh 那条同一个坑
+*.py text eol=lf
 .env.example text eol=lf
 
 # 二进制别碰
