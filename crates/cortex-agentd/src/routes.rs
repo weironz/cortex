@@ -1125,21 +1125,32 @@ async fn attach_forward(
         && let Some(handle) = st.tunnels().get(owner, &route.agent_id)
     {
         tracing::debug!(agent = %route.agent_id, "经反向隧道接到那台机器");
+        // **正对照。** 只数直拨的话，`direct = 0` 分不清「没人再走回退路」
+        // 与「这段时间根本没人用远程接入」—— 见 `attach_stats` 的模块文档
+        st.attach_stats().hit_tunnel();
         return Some(crate::sandbox_proxy::forward_tunneled(handle, req).await);
     }
     if let Some((addr, key)) = &route.direct {
-        // ⚠️ **这一行就是「直拨还能不能退役」的量具。**
+        // ⚠️ **「直拨还能不能退役」的量具在这里。**
         //
-        // 直拨是灰度期的回退路：隧道 2026-08-27 才随 v0.1.25 发出去，
-        // 在那之前**所有** worker 都不会拨隧道。要撤掉它的判据是
-        // 「线上不再有拨不起隧道的 worker」——而那句话此前没有任何东西
-        // 答得了，它是个感觉。
+        // 直拨是灰度期的回退路：隧道 2026-08-27 才随 v0.1.25 发出去，在那
+        // 之前**所有** worker 都不会拨隧道。撤掉它的判据是「线上不再有拨不
+        // 起隧道的 worker」，而观察窗口要一周量级。
         //
-        // 所以升到 `info!` 并给一句好 grep 的话：一段时间里生产日志上
-        // 一条都不出现，那个判据才算真的满足。三个调用点（发一轮、
-        // 重连、批确认）都是**每次用户动作**一次，不是轮询，所以不会淹。
+        // **判据落在库里，不落在这行日志上**（`crate::attach_stats`）。
+        // 原来是靠 grep 这行 info 数的，2026-08-29 实测到那不成立：agentd
+        // 没有任何卷，日志随容器走 —— 那天为了让它读到邮件配置重建了两次
+        // 容器，观察窗口从「攒了一天」变回 20 分钟，而这件事没有任何提示。
+        // 发一次版也是同样的效果。
         //
-        // 撤掉它的时候，这一行跟着一起撤。
+        // 现在怎么判：
+        //     SELECT * FROM cortex_auth.attach_route_stats;
+        // tunnel.count 明显 > 0（证明这段时间真有人接入）且 direct.last_seen
+        // 在一周前 —— 那时才算满足。
+        //
+        // 日志这行留着，它对**当场排障**仍然有用（哪台机器、什么地址）。
+        // 撤掉直拨时，这一行与那张表一起撤。
+        st.attach_stats().hit_direct();
         tracing::info!(
             agent = %route.agent_id, %addr,
             "attach-fallback-direct：这台机器没有隧道，走了直拨（灰度期回退路）"
