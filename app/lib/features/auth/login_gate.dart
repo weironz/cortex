@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/app_config.dart';
 import '../../core/local_agent.dart';
 import '../../state/app_providers.dart';
 import '../../state/auth_controller.dart';
@@ -222,6 +223,27 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                // ── 你正在连哪 ──
+                //
+                // **常驻，不是出错才说。** 用户 2026-08-29 的原话：
+                // 「关键是这个页面没有告诉我我连的是哪个环境啊，我没有点连
+                // 自己的服务器，默认就应该永远连官方的服务器地址才对啊」。
+                //
+                // 那次的现场是：地址被之前调试 dev 时存下来了（127.0.0.1:5173），
+                // 而登录页从头到尾没提过一个字 —— 直到点了登录，才从一行
+                // Dart 的 SocketException 里露出来。
+                //
+                // 非官方地址用琥珀色：那不是错误（自托管是正常用法），
+                // 但**是一件你该在动手前知道的事**。
+                if (!kIsWeb) ...[
+                  const SizedBox(height: 10),
+                  _EndpointBanner(
+                    url: _urlController.text.trim(),
+                    onSwitch: (u) => setState(() => _urlController.text = u),
+                    known: ref.watch(appConfigProvider).knownBaseUrls,
+                    officialUrl: AppConfig.defaultBaseUrl,
+                  ),
+                ],
                 // 这里曾有一句常驻副标题「登录状态会记住 30 天，关掉再打开
                 // 不用重来」。删了：记住登录是行业默认预期，不值得占登录页
                 // 视觉中心一行（Claude / ChatGPT 的登录页都不写）；而只要
@@ -565,6 +587,123 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
 /// 在一个小按钮上会被截断成 `https://cortex.exa…`，而被截掉的恰恰是
 /// **区分两个部署的那一半**。同一台机器上的两个端口也要分得开，
 /// 所以端口不能一起丢。
+/// 这个地址属于哪一类。**判据只看 URL 本身**，不看「用户有没有点过
+/// 那个按钮」—— 后者是个会被存档、被遗忘的历史事实，而人问的是「我现在
+/// 连的是哪」。
+enum EndpointKind {
+  /// 与这份构建编译进去的官方地址一致。
+  official,
+
+  /// 回环地址：本机 dev / 自己跑的一份。
+  loopback,
+
+  /// 别的什么地方 —— 自托管部署。
+  custom,
+}
+
+/// 分类。**纯函数，好测** —— 这一行的全部价值在于它说的是实话。
+EndpointKind classifyEndpoint(String url, {required String officialUrl}) {
+  final u = Uri.tryParse(url);
+  if (u == null || u.host.isEmpty) return EndpointKind.custom;
+  final host = u.host.toLowerCase();
+  if (host == '127.0.0.1' || host == 'localhost' || host == '::1') {
+    return EndpointKind.loopback;
+  }
+  final official = Uri.tryParse(officialUrl);
+  if (official != null && official.host.toLowerCase() == host) {
+    return EndpointKind.official;
+  }
+  return EndpointKind.custom;
+}
+
+/// 登录页上那一行「你正在连哪」。
+class _EndpointBanner extends StatelessWidget {
+  const _EndpointBanner({
+    required this.url,
+    required this.known,
+    required this.onSwitch,
+    required this.officialUrl,
+  });
+
+  final String url;
+  final List<String> known;
+  final void Function(String) onSwitch;
+
+  /// 这份构建认的「官方」是哪个地址。
+  ///
+  /// **注入而不是直接读 `AppConfig.defaultBaseUrl`**：那是个编译期常量，
+  /// 测试里改不了，于是「连着 dev 时要摆出换回官方的按钮」这条断言在测试
+  /// 环境里永远为假 —— 而那正是这个组件最该被验到的一条。
+  final String officialUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final kind = classifyEndpoint(url, officialUrl: officialUrl);
+    final (icon, label, tone) = switch (kind) {
+      EndpointKind.official => (
+        Icons.verified_outlined,
+        '官方服务器',
+        theme.cortex.foregroundTertiary,
+      ),
+      EndpointKind.loopback => (
+        Icons.developer_board_outlined,
+        '本机（开发环境）',
+        theme.cortex.warning,
+      ),
+      EndpointKind.custom => (
+        Icons.dns_outlined,
+        '你自己的部署',
+        theme.cortex.warning,
+      ),
+    };
+
+    // 官方地址里**能切回去的那一个**。没有就不摆按钮 —— 一个点了没地方
+    // 去的「换回官方」比没有更糟
+    String? official;
+    for (final u in [officialUrl, ...known]) {
+      if (u.isNotEmpty &&
+          classifyEndpoint(u, officialUrl: officialUrl) ==
+              EndpointKind.official) {
+        official = u;
+        break;
+      }
+    }
+
+    // 已经在官方上就不摆按钮 —— 一个「换回你已经在的地方」的按钮是噪音
+    final switchTarget = kind == EndpointKind.official ? null : official;
+
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 14, color: tone),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                '$label · ${_shortHost(url)}',
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.labelSmall?.copyWith(color: tone),
+              ),
+            ),
+          ],
+        ),
+        if (switchTarget != null)
+          TextButton(
+            onPressed: () => onSwitch(switchTarget),
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+            ),
+            child: const Text('换回官方服务器'),
+          ),
+      ],
+    );
+  }
+}
+
 String _shortHost(String url) {
   final u = Uri.tryParse(url);
   if (u == null || u.host.isEmpty) return url;

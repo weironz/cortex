@@ -65,6 +65,17 @@ die()  { printf '%s打包失败%s %s\n' "${_C_RED}" "${_C_OFF}" "$*" >&2; exit 1
 # ── 参数 ──────────────────────────────────────────────────
 OUT_DIR="dist"
 VERSION=""
+# 发出去的安装包默认连哪。
+#
+# ⚠️ **这个默认值必须是官方部署**，不能留给 `AppConfig.defaultBaseUrl` 的
+# 编译期兜底（那是 `http://127.0.0.1:8080`，「本机自托管记忆服务」的地址）——
+# 普通用户机器上没有那个东西，装完第一次打开就是死胡同。
+#
+# 与 `release.yml` 里给 web 用的 `CORTEX_WEB_API_BASE` 是同一个值。两处
+# 各写一份是明知的重复：CI 那份要能被 workflow 的 env 覆盖，而本机打包
+# 时没有那个 env。**改一处就要改另一处** —— 下面那条断言只保证
+# 「传进去了」，保证不了「传的是对的那个」。
+BASE_URL="${CORTEX_BASE_URL:-https://cortex.cloudcele.com/api}"
 SKIP_BUILD=0
 NO_EXEC=0
 ISCC=""
@@ -75,6 +86,8 @@ while [ $# -gt 0 ]; do
         --out=*)     OUT_DIR="${1#*=}"; shift ;;
         --version)   VERSION="${2:-}"; shift 2 ;;
         --version=*) VERSION="${1#*=}"; shift ;;
+        --base-url)  BASE_URL="${2:-}"; shift 2 ;;
+        --base-url=*) BASE_URL="${1#*=}"; shift ;;
         --iscc)      ISCC="${2:-}"; shift 2 ;;
         --iscc=*)    ISCC="${1#*=}"; shift ;;
         --skip-build) SKIP_BUILD=1; shift ;;
@@ -123,7 +136,8 @@ else
     # 与这个 dart-define 是两条独立的路，测不到它
     ( cd app && flutter pub get >/dev/null \
         && flutter build windows --release \
-            --dart-define=CORTEX_APP_VERSION="${VERSION}" ) \
+            --dart-define=CORTEX_APP_VERSION="${VERSION}" \
+            --dart-define=CORTEX_BASE_URL="${BASE_URL}" ) \
         || die "flutter build windows 失败（原因在上面 flutter 自己的输出里）"
 fi
 
@@ -160,6 +174,24 @@ if [ -f "${AOT}" ]; then
     fi
 else
     warn "找不到 ${AOT}，跳过 dart-define 断言"
+fi
+
+# `--dart-define=CORTEX_BASE_URL` 也要验一遍。
+#
+# **这一条 2026-08-29 之前根本不存在，而它漏掉的后果是最响的一种沉默：**
+# 发出去的安装包默认连 `http://127.0.0.1:8080`（`AppConfig.defaultBaseUrl`
+# 的编译期兜底，那是「本机自托管记忆服务」的地址）。普通用户机器上没有
+# 那个东西，于是**第一次打开就连不上**，而登录页在那之前一个字都不说。
+#
+# web 那份一直传着（`release.yml` 的 build-args 里 `CORTEX_BASE_URL`），
+# 桌面这份漏了 —— 两条路各写一份的经典后果。
+if [ -f "${AOT}" ]; then
+    if grep -aqF "${BASE_URL}" "${AOT}"; then
+        ok "CORTEX_BASE_URL=${BASE_URL} 已编进 Dart 快照"
+    else
+        die "app.so 里找不到 ${BASE_URL} —— --dart-define=CORTEX_BASE_URL 没生效。
+这份产物装出去会默认连 127.0.0.1:8080（没人在那儿），用户第一次打开就是死胡同"
+    fi
 fi
 
 # ── 2. 组装目录 ───────────────────────────────────────────
