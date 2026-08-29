@@ -290,7 +290,17 @@ class ChatController extends Notifier<ChatState> {
     });
     sub = stream.listen(
       (event) {
-        if (!started) {
+        // ⚠️ **心跳不算「它确实在跑」。**
+        //
+        // 心跳现在会浮到这一层（判活要它），而它只说明连接开着 —— 说明不了
+        // 这一轮有内容。拿它提升 `started` 的话：重挂到一条「已注册但永不
+        // 产出」的 run 时，界面会转圈，流结束时 `_commit` 还会落一条空的
+        // 助手气泡（那一层没有空内容保护）。
+        //
+        // 让心跳直接落到下面的 `_onEvent`：`streaming` 还是 null，那里会
+        // 直接返回，纯 ping 的连接于是被 `firstEvent` 那条定时器静悄悄收掉
+        // —— 正是这条路本来的设计（挂不上是常态，不该弹错）。
+        if (!started && event is! ChatHeartbeatEvent) {
           started = true;
           firstEvent?.cancel();
           firstEvent = null;

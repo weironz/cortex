@@ -42,6 +42,13 @@ class _StalledApi extends MockCortexApi {
 
   final sent = StreamController<ChatEvent>.broadcast();
 
+  /// 重挂那条路的流。与 [sent] 分开：重挂验的是「还没有 streaming 状态」
+  /// 那一段，混用会把两条路的事件搅在一起。
+  final attached = StreamController<ChatEvent>.broadcast();
+
+  @override
+  Stream<ChatEvent> attachChat(String sessionId) => attached.stream;
+
   @override
   Stream<ChatEvent> chat({
     required String sessionId,
@@ -221,6 +228,53 @@ void main() {
             '早于 agentd 的读超时开口，用户拿到的是一句更含糊的「空转」，'
             '而真正的原因（沙箱僵死）被盖住了',
       );
+    });
+    testWidgets('重挂：只有心跳不算「它在跑」—— 不转圈，也不落空气泡', (tester) async {
+      final (c, ctrl, api) = await boot(tester);
+
+      // ⚠️ 建**两条**再切回来：`createSession` 已经把新建的那条设成当前，
+      // 而 `selectSession` 对同一个 id 直接 return —— 只建一条的话根本
+      // 走不到 `_tryAttach`（第一版就是这样，测试因此是空的）
+      final id = ctrl.createSession();
+      ctrl.createSession();
+      ctrl.selectSession(id);
+      // `_tryAttach` 是 unawaited 的：等它真的订上再喂，别数轮次
+      for (var i = 0; i < 10 && !api.attached.hasListener; i++) {
+        await tester.pump();
+      }
+      // **正对照**：`_tryAttach` 是 unawaited 的，而 `attached` 是广播流 ——
+      // 没订上就 add，事件被静默丢弃，这条测试会变成一条永远绿的空测。
+      // （第一版就是这样：把被测的判断整个去掉，它照样通过。）
+      expect(
+        api.attached.hasListener,
+        isTrue,
+        reason: '重挂还没订上流，下面喂的心跳会被广播流丢掉 —— 这条验不到东西',
+      );
+
+      // 重挂连上了，但这条 run 只吐心跳、永远没有内容
+      for (var i = 0; i < 3; i++) {
+        api.attached.add(const ChatHeartbeatEvent());
+        await tester.pump(const Duration(seconds: 15));
+      }
+      expect(
+        c.read(chatControllerProvider).streaming,
+        isNull,
+        reason:
+            '心跳只说明连接开着，说明不了这一轮有内容。拿它提升 started 的话，'
+            '界面会为一条永不产出的 run 转圈',
+      );
+
+      // 到点之后那条连接被静悄悄收掉，转录里不许多出一条空气泡
+      await tester.pump(ChatController.idleTimeout);
+      await tester.pump();
+      final s = c.read(chatControllerProvider);
+      expect(s.streaming, isNull);
+      expect(
+        (s.transcripts[id]?.messages ?? const []).where((m) => m.text.isEmpty),
+        isEmpty,
+        reason: '纯心跳的重挂不该在转录里落下一条空的助手消息',
+      );
+      c.dispose();
     });
   });
 
