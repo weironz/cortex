@@ -311,7 +311,7 @@ async fn 项目归属跟着分叉走() {
 /// 故障注入验证过：把 fork_session 里复制 set_runtime 那段删掉，本测试
 /// 红在 runtime 断言（Cloud != Local）；加回即绿。
 #[tokio::test]
-async fn 执行环境与工作区绑定跟着分叉走() {
+async fn 执行环境跟着分叉走_而本机路径不跟() {
     let Some(db) = common::setup().await else {
         return;
     };
@@ -347,10 +347,18 @@ async fn 执行环境与工作区绑定跟着分叉走() {
         cortex_store::SessionRuntime::Local,
         "源会话钉在本机跑，分叉不该静默回落成 cloud —— 那会让下一轮跑进另一个执行环境"
     );
+    // ⚠️ **这条断言 2026-08-30 翻了面**，原来要求「工作区绑定一起带走」。
+    //
+    // `workspace` 那一列装的是桌面端的**本机绝对路径**，而它早在退役：
+    // 路径是设备本地状态（走 `PUT /local/workspaces/{id}`），HTTP 面的
+    // `workspace_patch` 只允许解绑、明确拒绝绑定。分叉却照旧复制它 ——
+    // 于是它成了绕过那道闸把宿主机路径写进库的唯一入口。
+    //
+    // 用户没有损失：新会话在**那台机器上**绑目录本来就走本地那条路；
+    // 而把别的设备上的路径复制过来，在这台机器上多半根本不存在。
     assert_eq!(
-        state.workspace.as_deref(),
-        Some("D:/work/proj"),
-        "工作区绑定要一起带走 —— 分叉出来「接着聊」的下一轮该看得见同一批文件"
+        state.workspace, None,
+        "分叉**不该**复制这个本机路径 —— HTTP 面已经拒绝写它了，         这条路复制过去就是绕过那道闸的后门"
     );
 
     db.cleanup().await;

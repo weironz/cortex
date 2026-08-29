@@ -187,14 +187,21 @@ impl Store {
                     device_id,
                 ));
             }
-            if let Some(ws) = &state.workspace {
-                events.push(NewSessionEvent::bind_workspace(
-                    &new_session_id,
-                    ws,
-                    Actor::User,
-                    device_id,
-                ));
-            }
+            // ⚠️ **不复制 `workspace`。**
+            //
+            // 那一列装的是**桌面端的本机绝对路径**，而它早已在退役：路径
+            // 是设备本地状态（走 `PUT /local/workspaces/{id}`，存在那台机器
+            // 的 `workspaces.json` 里），HTTP 面的 `workspace_patch` 只允许
+            // 解绑、**明确拒绝绑定**。
+            //
+            // 而分叉这条路原本照旧写 `bind_workspace` —— 于是它成了绕过那道
+            // 闸把宿主机路径写进库的唯一入口。生产库里 `bind_workspace`
+            // 一条都没有（2026-08-30 实查），所以这一段从来没真的跑过，
+            // 但它是一条开着的门。
+            //
+            // 少复制这一项对用户没有损失：新会话在**那台机器上**绑目录本来
+            // 就走本地那条路，而把一个别的设备上的路径复制过来，在这台机器上
+            // 多半根本不存在 —— 客户端还得按「未绑定」处理。
             if let Some(cw) = &state.container_workspace {
                 events.push(NewSessionEvent::set_container_workspace(
                     &new_session_id,
