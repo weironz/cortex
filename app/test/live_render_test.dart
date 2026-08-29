@@ -11,6 +11,7 @@ import 'package:cortex_app/models/chat_event.dart';
 import 'package:cortex_app/models/tool_call.dart';
 import 'package:cortex_app/widgets/markdown/code_block.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Renders a **real** `cortexd` reply through the real widget tree.
@@ -143,14 +144,19 @@ void main() {
 
     expect(deltas.length, greaterThan(5), reason: '必须是真流式，不是一次性整段');
 
-    Widget frame(String text, bool streaming) => MaterialApp(
-      theme: CortexTheme.dark(),
-      home: Scaffold(
-        body: SingleChildScrollView(
-          child: AssistantBlock(
-            text: text,
-            toolCalls: toolCalls,
-            streaming: streaming,
+    // 包一层 ProviderScope：气泡里的「从这里分叉」是个 Consumer，
+    // 没有作用域会在 build 时抛 `No ProviderScope found`。这里不覆写任何
+    // provider —— 这个用例验的是渲染，不是分叉行为，默认实现就够
+    Widget frame(String text, bool streaming) => ProviderScope(
+      child: MaterialApp(
+        theme: CortexTheme.dark(),
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: AssistantBlock(
+              text: text,
+              toolCalls: toolCalls,
+              streaming: streaming,
+            ),
           ),
         ),
       ),
