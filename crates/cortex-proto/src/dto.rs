@@ -450,6 +450,20 @@ pub struct SessionSearchResponse {
 /// 老服务端不下发这个字段。那时按 `Result` 走 = **不画进行中的占位**，
 /// 而按 `Call` 走 = 画一个**永远不会消失**的占位（因为那台服务端也不会
 /// 发第二条来撤它）。少一个动画，好过界面上永久卡着一块「正在生成」。
+/// 一行工具调用属于哪个子 agent。
+///
+/// 带 `task` 而不只带序号：界面上要显示的是「子 agent 2：查一下 X 怎么配」，
+/// 而不是「子 agent 2」——后者要用户自己回想主 agent 派了什么，
+/// 而那句话可能已经滚出屏幕了。
+///
+/// `index` 从 1 开始，与主 agent 给模型看的编号一致（`【子 agent 1：…】`）。
+/// 两处不一致的话，用户在界面上看到的编号与结论里的编号对不上号。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentTag {
+    pub index: u32,
+    pub task: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolPhase {
@@ -518,6 +532,27 @@ pub enum ChatEvent {
         /// 要么永远不消失。
         #[serde(default)]
         phase: ToolPhase,
+        /// 这一行是**哪个子 agent** 干的。`None` = 主 agent 自己。
+        ///
+        /// # 为什么只到工具行，不到 delta
+        ///
+        /// 设计定案（`docs/controller-worker.md`「子 agent」一节）：四路并行
+        /// 吐字进同一条流，要么混成谁也读不懂的一团（drain 当初防的正是
+        /// 这个），要么按子 agent 分列 —— 而分列会让重放缓冲赖以成立的
+        /// 「相邻 Delta 合并」失效，缓冲从每轮几十条涨回上万条，attach 时
+        /// 在锁内 clone 它会把整轮事件管道停住。
+        ///
+        /// 所以子 agent 在界面上是**工具行的形状**：一行「子 agent N：
+        /// 任务 · 状态」，它内部调的每个只读工具再挂在它下面。
+        ///
+        /// # 为什么是结构化字段而不是拼进 summary
+        ///
+        /// 与 `path` / `diff` / `phase` 同一条理由：summary 是给人看的一句
+        /// 话，措辞随时会改；客户端一旦从里面正则切「这是第几个子 agent」，
+        /// 改一次措辞就是**静默归错组** —— 不报错，只是把 B 的工具挂到了
+        /// A 名下。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<SubagentTag>,
     },
     /// **需要用户确认一次高风险工具调用。这一轮已经挂起，在等回执。**
     ///

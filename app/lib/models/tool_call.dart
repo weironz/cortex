@@ -33,6 +33,7 @@ class ToolCall {
     this.result,
     this.failed = false,
     this.diff,
+    this.subagent,
   });
 
   /// A call read back from `GET /sessions/{id}`. Already terminal — the row is
@@ -54,6 +55,12 @@ class ToolCall {
   /// 只有 `write_file` 会有：只有它手上同时握着旧内容与新内容。shell 跑完
   /// 之后文件变成什么样，agent 并不知道。
   final String? diff;
+
+  /// 这一行是**哪个子 agent** 干的。`null` = 主 agent 自己。
+  ///
+  /// 界面据它分组缩进；[merge] 也据它配对 —— 见那里的说明，
+  /// 四路并行时不看这个字段会把 A 的结果接到 B 的调用上。
+  final SubagentTag? subagent;
 
   /// e.g. `memory_search`.
   final String name;
@@ -128,6 +135,8 @@ class ToolCall {
     result: result ?? this.result,
     failed: failed ?? this.failed,
     diff: diff ?? this.diff,
+    // copyWith 不改它 —— 一行工具属于谁，从它被创建那一刻起就定了
+    subagent: subagent,
   );
 
   /// Folds one `tool` event into [calls], returning a new list.
@@ -152,26 +161,39 @@ class ToolCall {
     String? path,
     String? diff,
     ToolPhase phase = ToolPhase.result,
+    SubagentTag? subagent,
   }) {
-    if (phase == ToolPhase.result &&
-        calls.isNotEmpty &&
-        calls.last.name == name &&
-        calls.last.pending) {
-      final result = _stripPrefix(summary, '$name ');
-      return [
-        ...calls.take(calls.length - 1),
-        calls.last.copyWith(
-          // The daemon repeats `path` on the result event, but a build that
-          // only sent it on dispatch must not make the path disappear halfway
-          // through the row's life.
-          path: path,
-          // diff 只随**结果**那条事件到达（调用那一刻还没执行），
-          // 所以在这里合进去，而不是开行的时候
-          diff: diff,
-          result: result ?? '已完成',
-          failed: result != null && result.startsWith('失败'),
-        ),
-      ];
+    if (phase == ToolPhase.result) {
+      // ⚠️ **倒着找，而且要比对 subagent —— 不能只看 `calls.last`。**
+      //
+      // 子 agent 是**四路并行**的：A 开工、B 开工、A 收工、B 收工 是常态。
+      // 只看最后一条的话，A 的结果会接到 B 那条待完成的调用上 —— 而那
+      // 不报错，只是把一个工具的结果显示在另一个工具名下。
+      //
+      // 主 agent 自己那些行照旧（`subagent` 两边都是 null 时判等成立），
+      // 而它本来就是串行的，倒着找第一条就是原来的 `calls.last`。
+      for (var i = calls.length - 1; i >= 0; i--) {
+        final c = calls[i];
+        if (c.name != name || !c.pending || !_sameAgent(c.subagent, subagent)) {
+          continue;
+        }
+        final result = _stripPrefix(summary, '$name ');
+        return [
+          ...calls.take(i),
+          c.copyWith(
+            // The daemon repeats `path` on the result event, but a build that
+            // only sent it on dispatch must not make the path disappear halfway
+            // through the row's life.
+            path: path,
+            // diff 只随**结果**那条事件到达（调用那一刻还没执行），
+            // 所以在这里合进去，而不是开行的时候
+            diff: diff,
+            result: result ?? '已完成',
+            failed: result != null && result.startsWith('失败'),
+          ),
+          ...calls.skip(i + 1),
+        ];
+      }
     }
     return [
       ...calls,
@@ -179,9 +201,18 @@ class ToolCall {
         name: name,
         path: path,
         arguments: _stripPrefix(summary, '调用 $name '),
+        subagent: subagent,
       ),
     ];
   }
+
+  /// 两条事件是不是同一个 agent 发的。
+  ///
+  /// 只比 `index`：`task` 是同一次派发里带的同一串，比它只是多一次字符串
+  /// 比较；而万一主 agent 改了措辞重发，按 task 比会配不上对，表现是
+  /// 那一行永远停在「进行中」。
+  static bool _sameAgent(SubagentTag? a, SubagentTag? b) =>
+      a?.index == b?.index;
 
   /// The daemon inlines the tool name in both summaries because the CLI prints
   /// them as standalone lines. Paired into one row it is redundant, so it goes.

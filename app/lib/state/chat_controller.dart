@@ -1244,6 +1244,7 @@ class ChatController extends Notifier<ChatState> {
         :final path,
         :final diff,
         :final phase,
+        :final subagent,
       ):
         _leaveQueue();
         _flushPending();
@@ -1260,6 +1261,7 @@ class ChatController extends Notifier<ChatState> {
               path: path,
               diff: diff,
               phase: phase,
+              subagent: subagent,
             ),
           ),
         );

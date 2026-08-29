@@ -217,8 +217,16 @@ class _ToolRowState extends State<_ToolRow> {
 
     final path = call.path;
 
+    // 子 agent 干的活往里缩一格。
+    //
+    // 不做成「分组折叠块」是有意的：四路并行时事件是**交错**到达的，
+    // 分组要么等全部收工再画（那期间界面上什么都没有，而用户正等着看
+    // 它在干嘛），要么每来一条就重排一次列表（行会跳）。缩进不需要重排，
+    // 而层级关系照样一眼看得出。
+    final indent = call.subagent == null ? 7.0 : 22.0;
+
     final row = Padding(
-      padding: const EdgeInsets.only(left: 7, bottom: 8),
+      padding: EdgeInsets.only(left: indent, bottom: 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -242,6 +250,16 @@ class _ToolRowState extends State<_ToolRow> {
               text: TextSpan(
                 style: labelStyle,
                 children: [
+                  // 哪个子 agent 干的。**要写出来，不能只靠缩进** ——
+                  // 四路并行时缩进一样深，光看缩进分不出这一行属于谁，
+                  // 而「A 的结果显示在 B 名下」正是这个功能最容易犯的错
+                  if (call.subagent case final tag?)
+                    TextSpan(
+                      text: '子 ${tag.index} · ',
+                      style: labelStyle.copyWith(
+                        color: theme.cortex.foregroundTertiary,
+                      ),
+                    ),
                   TextSpan(
                     text: call.name,
                     style: labelStyle.copyWith(

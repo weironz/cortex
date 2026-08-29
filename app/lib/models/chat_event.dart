@@ -32,6 +32,7 @@ sealed class ChatEvent {
         path: asStringOrNull(json['path']),
         diff: asStringOrNull(json['diff']),
         phase: ToolPhase.fromWire(json['phase']),
+        subagent: SubagentTag.fromJson(json['subagent']),
       ),
       'confirm' => ChatConfirmEvent(
         PendingConfirmation(
@@ -106,6 +107,28 @@ enum ToolPhase {
       v == 'call' ? ToolPhase.call : ToolPhase.result;
 }
 
+/// 一行工具调用属于哪个子 agent。
+///
+/// 带 `task` 而不只带序号：界面要显示的是「子 agent 2：查一下 X」，
+/// 而不是「子 agent 2」—— 后者要用户回想主 agent 派了什么，
+/// 而那句话可能已经滚出屏幕了。
+class SubagentTag {
+  const SubagentTag({required this.index, required this.task});
+
+  /// 从 1 开始，与模型看到的编号（`【子 agent 1：…】`）一致 ——
+  /// 两处不一致的话，用户在界面上看到的编号与结论里的对不上号。
+  final int index;
+  final String task;
+
+  /// `null` 进 `null` 出：老服务端不下发这个字段。
+  static SubagentTag? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final i = asIntOrNull(raw['index']);
+    if (i == null) return null;
+    return SubagentTag(index: i, task: asString(raw['task']));
+  }
+}
+
 final class ChatToolEvent extends ChatEvent {
   const ChatToolEvent({
     required this.name,
@@ -113,6 +136,7 @@ final class ChatToolEvent extends ChatEvent {
     this.path,
     this.diff,
     this.phase = ToolPhase.result,
+    this.subagent,
   });
   final String name;
   final String? summary;
@@ -123,6 +147,12 @@ final class ChatToolEvent extends ChatEvent {
   /// 理由：summary 是给人看的一句话，措辞随时会改，而这里猜错的表现是
   /// 「正在生成」那块占位要么永远不出现、要么永远不消失。
   final ToolPhase phase;
+
+  /// 这一行是**哪个子 agent** 干的。`null` = 主 agent 自己。
+  ///
+  /// 界面据它把子 agent 的工具行归到一组、缩进显示。老服务端不下发这个
+  /// 字段 —— 那时一切照旧（全部当成主 agent 的），不是画一堆归不了组的行。
+  final SubagentTag? subagent;
 
   /// The file this call touched, or null for a tool that touches none.
   /// Optional in the contract precisely so that a tool touching no file can

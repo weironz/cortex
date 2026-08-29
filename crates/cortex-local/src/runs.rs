@@ -418,6 +418,7 @@ mod tests {
             path: None,
             diff: None,
             phase: cortex_proto::dto::ToolPhase::Result,
+            subagent: None,
         }
     }
 
