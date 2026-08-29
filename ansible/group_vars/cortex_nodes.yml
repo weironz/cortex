@@ -164,7 +164,7 @@ keep_versions: 3
 # .env.secrets。这里只放非敏感的那几个。
 #
 # 发信地址要先在邮件推送控制台建好、域名验过 SPF/DKIM。
-cortex_mail_from: "no-reply@mail.cloudcele.com"
+cortex_mail_from: "noreply@mail.cloudcele.com"
 cortex_mail_from_alias: "Cortex"
 # 邮件推送没有深圳节点：只有 cn-hangzhou（dm.aliyuncs.com）与四个海外。
 # 留空即用默认值
