@@ -61,11 +61,57 @@ class _ConversationViewState extends ConsumerState<ConversationView> {
     }
   }
 
+  /// 最多追几帧。见 [_pinToBottom] —— **必须有上限**：没有上限的自愈动作
+  /// 在判据不收敛时就是个永动机（这个仓库为此吃过亏）。12 帧 ≈ 200ms，
+  /// 足够一屏一屏排完一页历史，而排不完时停下来也只是「没到最底」，
+  /// 不是卡死。
+  static const int _maxPinFrames = 12;
+
   void _scheduleScrollToBottom({bool force = false}) {
     if (!force && !_follow) return;
+    _pinToBottom(0, -1);
+  }
+
+  /// 贴到最底 —— **一帧是不够的，要追到 `maxScrollExtent` 不再长**。
+  ///
+  /// # 为什么单跳一次会停在半路
+  ///
+  /// 这是个懒构建、变高条目的 `ListView.builder`：没排过版的条目它没法知道
+  /// 多高，于是 `maxScrollExtent` 是**按已排版部分外推的估算值**。列表刚换成
+  /// 另一个会话时只排了一屏，那个估算远小于真实高度 —— 跳过去、更多条目
+  /// 跟着排版、extent 变大，而位置留在原地，看起来就是**停在靠上的地方**。
+  ///
+  /// 2026-08-30 实报：「切换对话后再回去，滚动条不在最下面」。切**回**旧会话
+  /// 最容易中招：transcript 已经缓存着，`activeTranscript.last.id` 不变，
+  /// 于是那条按最新消息触发的 force 监听**不响**，只剩会话切换这一条跳一次。
+  /// 首次打开时消息是异步到的，`last.id` 变化会再触发几次，反而蒙对了 ——
+  /// 「有时对有时不对」的来源就在这儿。
+  ///
+  /// # 为什么不改成 `reverse: true`
+  ///
+  /// 那是结构上更对的解法（底部即 offset 0，不需要任何估算），但它会把条目
+  /// 顺序反过来，而 `_loadEarlier` 的位置补偿、页头那个「加载更早」的槽位
+  /// 都是按正序写的。为一个滚动位置去翻转整块渲染，换来的风险比买到的多。
+  /// [lastExtent] 是**上一帧**看到的 `maxScrollExtent`；`-1` = 还没看过。
+  ///
+  /// ⚠️ **判「长没长」必须跨帧，不能在 `jumpTo` 之后当场判。**
+  /// 第一版就是当场判的：那一刻新的排版还没跑，`pixels` 恰好等于当时的
+  /// extent，于是看起来永远「已经到底」，追一次就停 —— 与只跳一帧没有区别。
+  /// 实测里第一次打开就差 7440 像素，是这条测试把它抓出来的。
+  void _pinToBottom(int attempt, double lastExtent) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scroll.hasClients) return;
-      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      if (!mounted || !_scroll.hasClients) return;
+      final extent = _scroll.position.maxScrollExtent;
+      // 与上一帧比：不再长了、而且人已经在底上 —— 到位了，收工
+      final settled =
+          extent == lastExtent && _scroll.position.pixels >= extent - 1;
+      if (settled) return;
+      if (_scroll.position.pixels < extent) {
+        _scroll.jumpTo(extent);
+      }
+      if (attempt + 1 < _maxPinFrames) {
+        _pinToBottom(attempt + 1, extent);
+      }
     });
   }
 
