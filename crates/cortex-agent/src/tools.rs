@@ -226,6 +226,58 @@ pub struct ToolImage {
     pub mime: String,
 }
 
+/// 给界面看的输出上限。
+///
+/// 2 KB：够看清一次 `read_file` 的开头结尾、一条 shell 的完整输出，而按一轮
+/// 20 次调用算每轮多 40 KB —— 重放缓冲扛得住（那本账在子 agent 那次算过：
+/// attach 时要在锁内 clone 整个缓冲，涨一个量级会把事件管道停住）。
+pub const UI_OUTPUT_LIMIT: usize = 2 * 1024;
+
+/// 把工具输出裁到 [`UI_OUTPUT_LIMIT`]，**头尾都留**。
+///
+/// # 为什么不是从头切一刀
+///
+/// 从头切的话，一次 `shell` 的输出正好丢掉最要紧的那一半 —— 报错、退出码、
+/// 结论都在结尾。而只留结尾又看不出它到底在干什么。头尾各留一半，中间写清
+/// **省略了多少字节**：一个没有说明的省略号会让人以为输出就那么长。
+///
+/// # 边界按字符而不是字节切
+///
+/// 中文一个字三字节，按字节切会把一个字劈成半个，落到界面上是替换字符。
+/// `char_indices` 保证切点永远在字符边界上。
+#[must_use]
+pub fn clip_for_ui(content: &str) -> Option<String> {
+    let content = content.trim_end();
+    if content.is_empty() {
+        return None;
+    }
+    if content.len() <= UI_OUTPUT_LIMIT {
+        return Some(content.to_string());
+    }
+    let half = UI_OUTPUT_LIMIT / 2;
+    let head_end = content
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|i| *i <= half)
+        .last()
+        .unwrap_or(0);
+    let tail_start = content
+        .char_indices()
+        .map(|(i, _)| i)
+        .find(|i| *i >= content.len() - half)
+        .unwrap_or(content.len());
+    let omitted = tail_start - head_end;
+    Some(format!(
+        "{}
+
+… 中间省略 {omitted} 字节 …
+
+{}",
+        &content[..head_end],
+        &content[tail_start..]
+    ))
+}
+
 impl ToolResult {
     pub fn ok(content: impl Into<String>) -> Self {
         Self {
@@ -1927,6 +1979,48 @@ fn arg_str(v: &serde_json::Value, key: &str) -> std::result::Result<String, Stri
 
 #[cfg(test)]
 mod tests {
+
+    /// **截断要头尾都留，而且不许劈开一个字。**
+    #[test]
+    fn 给界面的输出裁到上限且头尾都在() {
+        // 短的原样过 —— 绝大多数调用走这条
+        assert_eq!(
+            super::clip_for_ui("就这么点"),
+            Some("就这么点".to_string()),
+            "没超上限的输出被动过了"
+        );
+        // 空的不给（界面据此决定给不给展开箭头）
+        assert_eq!(
+            super::clip_for_ui(
+                "   
+  "
+            ),
+            None,
+            "空输出该回 None —— 否则界面会给一个点开空空如也的箭头"
+        );
+
+        // ⚠️ 从头切一刀的话，一条 shell 最要紧的结尾（报错、退出码）正好丢掉
+        let long = format!("开头标记{}结尾标记", "x".repeat(super::UI_OUTPUT_LIMIT * 2));
+        let clipped = super::clip_for_ui(&long).expect("有内容");
+        assert!(clipped.contains("开头标记"), "开头丢了");
+        assert!(
+            clipped.contains("结尾标记"),
+            "**结尾丢了** —— 一条命令的报错与退出码都在结尾，从头切一刀等于把最要紧的一半扔掉"
+        );
+        assert!(
+            clipped.contains("中间省略"),
+            "省略了却没说 —— 一个没有说明的省略会让人以为输出就这么长"
+        );
+        assert!(clipped.len() < long.len(), "根本没裁");
+
+        // 中文一个字三字节：按字节切会劈出半个字，落到界面上是替换字符
+        let cn = "中".repeat(super::UI_OUTPUT_LIMIT);
+        let clipped = super::clip_for_ui(&cn).expect("有内容");
+        assert!(
+            !clipped.contains(char::REPLACEMENT_CHARACTER),
+            "切点落在了字符中间 —— 界面上会出现替换字符"
+        );
+    }
 
     /// **子 agent 手上不许有一个非 `Safe` 的工具。**
     ///

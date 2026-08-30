@@ -1244,6 +1244,7 @@ class ChatController extends Notifier<ChatState> {
         :final summary,
         :final path,
         :final diff,
+        :final output,
         :final phase,
         :final subagent,
       ):
@@ -1261,6 +1262,7 @@ class ChatController extends Notifier<ChatState> {
               summary,
               path: path,
               diff: diff,
+              output: output,
               phase: phase,
               subagent: subagent,
             ),

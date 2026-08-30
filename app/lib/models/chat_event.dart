@@ -31,6 +31,7 @@ sealed class ChatEvent {
         summary: asStringOrNull(json['summary']),
         path: asStringOrNull(json['path']),
         diff: asStringOrNull(json['diff']),
+        output: asStringOrNull(json['output']),
         phase: ToolPhase.fromWire(json['phase']),
         subagent: SubagentTag.fromJson(json['subagent']),
       ),
@@ -136,11 +137,16 @@ final class ChatToolEvent extends ChatEvent {
     this.summary,
     this.path,
     this.diff,
+    this.output,
     this.phase = ToolPhase.result,
     this.subagent,
   });
   final String name;
   final String? summary;
+
+  /// 这次调用的**真实输出**，服务端已截到 2 KB。null = 没有正文可看，
+  /// 或者这是「要调了」那一半，或者服务端是不发这个字段的旧版本。
+  final String? output;
 
   /// 要调了，还是调完了。
   ///

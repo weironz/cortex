@@ -33,6 +33,7 @@ class ToolCall {
     this.result,
     this.failed = false,
     this.diff,
+    this.output,
     this.subagent,
   });
 
@@ -49,6 +50,17 @@ class ToolCall {
       diff: asStringOrNull(json['diff']),
     );
   }
+
+  /// 这次调用的**真实输出**，服务端已截到 2 KB（头尾各留，中间注明省略了
+  /// 多少）。null = 没有正文可看。
+  ///
+  /// 界面据它决定给不给展开箭头 —— 一个点下去空空如也的箭头比没有箭头更让人
+  /// 困惑（`_ToolRow` 里对 diff 与报错是同一套判断）。
+  ///
+  /// ⚠️ **回放拿不到它**：`episode_tool_calls` 里没有这一列，所以打开一个旧
+  /// 会话时工具行只有摘要。这是有意的取舍，不是漏了 —— 存它要一次 schema
+  /// 迁移，而按一轮 20 次调用算是每轮 40 KB 的历史数据。
+  final String? output;
 
   /// 这次写入改了什么（统一 diff，已截断）。null = 没有可看的改动。
   ///
@@ -128,6 +140,7 @@ class ToolCall {
     String? result,
     bool? failed,
     String? diff,
+    String? output,
   }) => ToolCall(
     name: name,
     path: path ?? this.path,
@@ -135,6 +148,7 @@ class ToolCall {
     result: result ?? this.result,
     failed: failed ?? this.failed,
     diff: diff ?? this.diff,
+    output: output ?? this.output,
     // copyWith 不改它 —— 一行工具属于谁，从它被创建那一刻起就定了
     subagent: subagent,
   );
@@ -160,6 +174,7 @@ class ToolCall {
     String? summary, {
     String? path,
     String? diff,
+    String? output,
     ToolPhase phase = ToolPhase.result,
     SubagentTag? subagent,
   }) {
@@ -185,9 +200,10 @@ class ToolCall {
             // only sent it on dispatch must not make the path disappear halfway
             // through the row's life.
             path: path,
-            // diff 只随**结果**那条事件到达（调用那一刻还没执行），
-            // 所以在这里合进去，而不是开行的时候
+            // diff 与 output 都只随**结果**那条事件到达（调用那一刻还没
+            // 执行完），所以在这里合进去，而不是开行的时候
             diff: diff,
+            output: output,
             result: result ?? '已完成',
             failed: result != null && result.startsWith('失败'),
           ),

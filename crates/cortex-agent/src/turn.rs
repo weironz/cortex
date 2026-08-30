@@ -75,6 +75,23 @@ pub enum AgentEvent {
         /// 拼在一起，客户端就得从措辞里把它切回来 —— 那正是 `path`
         /// 当初从 summary 里拆出来的原因。
         diff: Option<String>,
+        /// 工具的**真实输出**，截断过。`None` = 没有可看的正文。
+        ///
+        /// # 为什么值得单独送一份
+        ///
+        /// 界面上原来只有一句 `read_file 返回 28 行 / 815 字符` —— 用户看得见
+        /// 它读了什么文件、读了多少，就是看不见**读到了什么**。想确认 agent
+        /// 有没有看错地方，只能再问它一遍。
+        ///
+        /// # 为什么必须截断，且截断发生在这里
+        ///
+        /// 这条事件要走 SSE，还要进每轮的重放缓冲（attach 时在锁内 clone 它）。
+        /// 一次 `read_file` 拉一个 3 MB 的文件是完全正常的事，不截断的话
+        /// 那 3 MB 会原样进缓冲 —— 子 agent 那次已经为同一本账算过。
+        ///
+        /// 截在**产生处**而不是客户端：客户端截只能减少渲染量，管道里那几段
+        /// 已经付过代价了。见 [`crate::tools::clip_for_ui`]。
+        output: Option<String>,
     },
 }
 
@@ -1012,6 +1029,7 @@ impl Turn {
                         ok: result.ok,
                         summary: summarize(&result),
                         diff: result.diff.clone(),
+                        output: crate::tools::clip_for_ui(&result.content),
                     })
                     .await
                     .ok();

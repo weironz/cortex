@@ -418,6 +418,7 @@ mod tests {
             summary: String::new(),
             path: None,
             diff: None,
+            output: None,
             phase: cortex_proto::dto::ToolPhase::Result,
             subagent: None,
         }

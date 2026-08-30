@@ -44,16 +44,60 @@ class TurnDrawer extends StatefulWidget {
 class _TurnDrawerState extends State<TurnDrawer> {
   late bool _expanded = widget.initiallyExpanded;
 
+  /// 这一轮还在飞时，前面那些已完成的调用摊没摊开。
+  bool _liveExpanded = false;
+
+  /// 跑着的时候，末尾始终留几条完成的可见。
+  ///
+  /// 全折起来的话界面上只剩一个「已完成 N 次」在跳数字，看不出它在往哪个
+  /// 方向走；而全摊开就是用户报的那个「直接平铺出来了」—— 一次十几二十
+  /// 次调用把回答挤出屏幕。留 2 条是「刚做了什么」与「别刷屏」的折中。
+  static const int _tailVisible = 2;
+
+  /// 少于这个数就不折 —— 折起 1、2 行换来一行「已完成 N 次」，
+  /// 净收益是零，还多一次点击。
+  static const int _foldThreshold = 3;
+
   @override
   Widget build(BuildContext context) {
     if (widget.toolCalls.isEmpty) return const SizedBox.shrink();
 
     if (widget.streaming) {
+      // ── 跑着的时候：完成的收起来，正在跑的留着 ──
+      //
+      // 从前这里是**整个摊平**。一轮二十次调用的话，二十行工具把回答本身
+      // 挤出了屏幕，而那二十行里用户真正在看的只有最后一两条 ——
+      // 2026-08-30 实报：「直接平铺出来了」。
+      //
+      // 折的是**前面那些已完成的**：正在跑的那条必须一直可见（它是唯一
+      // 说明「此刻在等什么」的东西），末尾几条完成的也留着（只剩一个跳
+      // 数字的计数器，看不出它在往哪个方向走）。
+      final done = widget.toolCalls.where((c) => !c.pending).toList();
+      final live = widget.toolCalls.where((c) => c.pending).toList();
+      final foldCount = done.length - _tailVisible;
+      final folded = foldCount >= _foldThreshold;
+      final hidden = folded
+          ? done.take(foldCount).toList()
+          : const <ToolCall>[];
+      final shown = folded ? done.skip(foldCount).toList() : done;
+
       return Padding(
         padding: const EdgeInsets.only(top: 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: [for (final call in widget.toolCalls) _ToolRow(call: call)],
+          children: [
+            if (folded) ...[
+              _Toggle(
+                expanded: _liveExpanded,
+                label: '已完成 ${hidden.length} 次',
+                onTap: () => setState(() => _liveExpanded = !_liveExpanded),
+              ),
+              if (_liveExpanded)
+                for (final call in hidden) _ToolRow(call: call),
+            ],
+            for (final call in shown) _ToolRow(call: call),
+            for (final call in live) _ToolRow(call: call),
+          ],
         ),
       );
     }
@@ -349,9 +393,17 @@ class _ToolRowState extends State<_ToolRow> {
             ),
           ],
           // 有东西可展开才给箭头 —— 一个点下去什么都不展开的箭头，
-          // 比没有箭头更让人困惑。可展开的两种：改动（diff）、
-          // 失败的完整输出（行内被压成一行，真正的报错常在后半段）
-          if (call.diff != null || (call.failed && call.result != null))
+          // 比没有箭头更让人困惑。可展开的三种：改动（diff）、失败的完整
+          // 输出（行内被压成一行，真正的报错常在后半段）、以及这次调用的
+          // **真实输出**。
+          //
+          // ⚠️ 第三种只有**这一轮在看的时候**才有：`output` 随事件到达，
+          // 而 `episode_tool_calls` 里没有这一列。打开一个旧会话时它是 null，
+          // 于是那些行就没有箭头 —— 这正是「有东西可展开才给箭头」要的，
+          // 不是漏了
+          if (call.diff != null ||
+              call.output != null ||
+              (call.failed && call.result != null))
             InkResponse(
               onTap: () => setState(() => _open = !_open),
               radius: 12,
@@ -386,12 +438,15 @@ class _ToolRowState extends State<_ToolRow> {
     );
 
     final failedDetail = call.failed && call.result != null;
-    if (!_open || (call.diff == null && !failedDetail)) return row;
+    // 失败时优先给报错（那是用户要找的东西），否则给这次调用的真实输出
+    final body = failedDetail ? stripAnsi(call.result!) : call.output;
+    if (!_open || (call.diff == null && body == null)) return row;
 
     // 失败展开：完整 stderr（等宽、可选中）+「让它自己修」。
     // 修不是玄学 —— 就是把失败的命令与输出发回去当下一条消息，
     // 模型看得到全文，比用户手动复述「刚才那个报错」强得多
     if (call.diff == null) {
+      final text = body!;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -411,7 +466,7 @@ class _ToolRowState extends State<_ToolRow> {
                 children: [
                   SelectionArea(
                     child: Text(
-                      stripAnsi(call.result!),
+                      text,
                       style: theme.textTheme.bodySmall?.copyWith(
                         fontFamily: 'JetBrains Mono',
                         fontFamilyFallback: CortexTheme.monoFallback,
@@ -419,26 +474,29 @@ class _ToolRowState extends State<_ToolRow> {
                       ),
                     ),
                   ),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: Consumer(
-                      builder: (context, ref, _) => TextButton.icon(
-                        style: TextButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                          textStyle: const TextStyle(fontSize: 11),
+                  // 「让它自己修」只在**失败**时给。成功那次给一个「修」的
+                  // 按钮，是在暗示它出了问题
+                  if (failedDetail)
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Consumer(
+                        builder: (context, ref, _) => TextButton.icon(
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            textStyle: const TextStyle(fontSize: 11),
+                          ),
+                          onPressed: () => ref
+                              .read(chatControllerProvider.notifier)
+                              .send(
+                                '刚才 ${call.name} 失败了：\n\n'
+                                '```\n${stripAnsi(call.result!)}\n```\n\n'
+                                '请自己修复这个问题，然后重试。',
+                              ),
+                          icon: const Icon(Icons.build_outlined, size: 13),
+                          label: const Text('让它自己修'),
                         ),
-                        onPressed: () => ref
-                            .read(chatControllerProvider.notifier)
-                            .send(
-                              '刚才 ${call.name} 失败了：\n\n'
-                              '```\n${stripAnsi(call.result!)}\n```\n\n'
-                              '请自己修复这个问题，然后重试。',
-                            ),
-                        icon: const Icon(Icons.build_outlined, size: 13),
-                        label: const Text('让它自己修'),
                       ),
                     ),
-                  ),
                 ],
               ),
             ),

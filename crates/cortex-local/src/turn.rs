@@ -1210,6 +1210,8 @@ async fn bridge_events(
                     // 「即将调用」这一刻还没有结果，也就还没有 diff。
                     // 它随 ToolResult 那一条到达
                     diff: None,
+                    // 还没调完，自然没有输出
+                    output: None,
                     phase: cortex_proto::dto::ToolPhase::Call,
                     // 主 agent 自己干的
                     subagent: None,
@@ -1220,6 +1222,7 @@ async fn bridge_events(
                 ok,
                 summary,
                 diff,
+                output,
             } => {
                 let path = pending_path.remove(&name).flatten();
                 recorded.push(ToolCallInput {
@@ -1234,6 +1237,7 @@ async fn bridge_events(
                     name,
                     path,
                     diff,
+                    output,
                     phase: cortex_proto::dto::ToolPhase::Result,
                     subagent: None,
                 }
@@ -1263,6 +1267,7 @@ fn subagent_tool_line(
             name: name.clone(),
             path: tool_path(arguments),
             diff: None,
+            output: None,
             phase: cortex_proto::dto::ToolPhase::Call,
             subagent: Some(tag.clone()),
         }),
@@ -1270,6 +1275,7 @@ fn subagent_tool_line(
             name,
             summary,
             diff,
+            output,
             ..
         } => Some(ChatEvent::Tool {
             summary: format!("{name} {summary}"),
@@ -1283,6 +1289,7 @@ fn subagent_tool_line(
             // 把 path 从 summary 里拆出来过。
             path: None,
             diff: diff.clone(),
+            output: output.clone(),
             phase: cortex_proto::dto::ToolPhase::Result,
             subagent: Some(tag.clone()),
         }),
@@ -1305,6 +1312,8 @@ fn subagent_marker(
         name: "subagent".into(),
         path: None,
         diff: None,
+        // 首尾那两行是**标记**不是调用，没有输出可看
+        output: None,
         phase,
         subagent: Some(tag.clone()),
     }
@@ -3178,6 +3187,7 @@ mod subagent_event_tests {
             ok: true,
             summary: "读了 30 行".into(),
             diff: None,
+            output: Some("文件正文".into()),
         };
         let Some(ChatEvent::Tool { path, phase, .. }) = subagent_tool_line(&ev, &tag()) else {
             panic!("结果也要上界面 —— 不然那个「进行中」永远撤不掉");
