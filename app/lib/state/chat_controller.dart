@@ -18,6 +18,7 @@ import '../models/workspace.dart';
 import 'app_providers.dart';
 import '../models/assistant.dart';
 import 'assistant_controller.dart';
+import 'auth_controller.dart';
 import 'skill_controller.dart';
 import 'chat_state.dart';
 import 'notify_prefs.dart';
@@ -1283,7 +1284,17 @@ class ChatController extends Notifier<ChatState> {
       case ChatDoneEvent(:final episodeId, :final models, :final attachments):
         _commit(episodeId: episodeId, models: models, attachments: attachments);
 
-      case ChatErrorEvent(:final message):
+      case ChatErrorEvent(:final message, :final needsReauth):
+        // ★ 凭据被拒 —— **摇过期那个铃**，否则没人会去续期。
+        //
+        // 续期成功会换出一把新的 access token，而 `localAgentOriginProvider`
+        // 里那个 `ref.listen` 会把它热推给本机 agent（`PUT /local/credential`）。
+        // 这一轮**不自动重发**：401 可能发生在这一轮的任何位置，工具也许
+        // 已经建过文件了，重发会把副作用再做一遍。修好凭据之后红框上的
+        // 「重试」才是用户自己决定的那一次。
+        if (needsReauth) {
+          unawaited(ref.read(authControllerProvider.notifier).onUnauthorized());
+        }
         _commit(error: message);
 
       case ChatUnknownEvent():

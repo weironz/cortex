@@ -27,6 +27,21 @@ pub enum CortexError {
     #[error("非法输入：{0}")]
     Invalid(String),
 
+    /// **上游拒绝了我们手上这把凭据**（401/403）。
+    ///
+    /// 从 [`Self::Invalid`] 里单拎出来，因为调用方该做的事完全不同：
+    /// `Invalid` 是「你发的东西不对」，重发一万次还是同一句话；这一档是
+    /// 「换一把钥匙再来」，而那把钥匙**本进程自己换不了** —— 出站凭据由
+    /// 拉起它的桌面端推进来（`PUT /local/credential`）。
+    ///
+    /// 混在 `Invalid` 里的后果是实测过的：本机 agent 手上那把 access token
+    /// 15 分钟过期之后，出站 401 被归成「非法输入」，以一段纯文本混在
+    /// 事件流里回到界面上。桌面端的过期探测只接了**它自己发的 HTTP** 那条线
+    /// （`_failure` 里那个 401 分支），看不见这条 —— 于是不续期、不推新凭据，
+    /// 本机 agent 抱着一把死 token 用到天荒地老，**要重启应用才恢复**。
+    #[error("凭据被拒：{0}")]
+    Unauthorized(String),
+
     /// 这件事**现在**做不了 —— 与「出错了」不同，调用方该等一等或去改配置，
     /// 而不是把它当成一次失败的操作。
     ///
@@ -50,6 +65,7 @@ impl CortexError {
     pub fn http_status(&self) -> u16 {
         match self {
             Self::NotFound { .. } => 404,
+            Self::Unauthorized(_) => 401,
             Self::Invalid(_) | Self::Config(_) => 400,
             Self::Provider(_) => 502,
             Self::Unavailable(_) => 503,

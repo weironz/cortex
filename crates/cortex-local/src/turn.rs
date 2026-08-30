@@ -649,8 +649,10 @@ impl Engine {
                 run.await
             };
             if let Err(e) = outcome {
+                let needs_reauth = needs_reauth(&e);
                 tx.send(ChatEvent::Error {
                     message: e.to_string(),
+                    needs_reauth,
                 })
                 .await;
             }
@@ -1037,6 +1039,7 @@ impl Engine {
             Err(e) => {
                 tx.send(ChatEvent::Error {
                     message: format!("模型返回出错：{e}"),
+                    needs_reauth: false,
                 })
                 .await;
                 // 半截回答不落库：它下一轮会被当成事实抽取
@@ -1118,6 +1121,9 @@ impl Engine {
     ) -> Result<()> {
         self.outbox.push(ep)?;
         tx.send(ChatEvent::Error {
+            // 这一轮**照常跑完了**，只是没写进记忆。摇续期那个铃没有意义，
+            // 而且会让用户以为是登录出了问题
+            needs_reauth: false,
             message: format!(
                 "记忆未连接（{cause}）。这一轮照常执行，但**没有注入记忆**；\
                  对话已排进本地队列，恢复连接后会自动补写。当前待补 {} 条。",
@@ -2019,8 +2025,48 @@ fn render_page(page: &serde_json::Value) -> String {
     )
 }
 
+/// 这一轮的失败该不该让客户端去**换一把凭据再来**。
+///
+/// # 为什么单拎出来
+///
+/// 它是一个契约：摇了这个铃，桌面端就会去续期并把新凭据热推给本进程
+/// （`PUT /local/credential`）—— 本进程自己换不了那把钥匙。
+///
+/// 而**摇错了铃比不摇更糟**：一次供应商超时被说成凭据问题，用户会跑去
+/// 重新登录，然后发现还是不行。所以这里只认一档，且有测试钉着。
+fn needs_reauth(e: &CortexError) -> bool {
+    matches!(e, CortexError::Unauthorized(_))
+}
+
 #[cfg(test)]
 mod tests {
+    /// **只有凭据被拒才摇那个铃。**
+    ///
+    /// 摇了它桌面端会去续期 —— 一次供应商超时或一句非法输入被摇成凭据问题，
+    /// 用户会跑去重新登录，回来发现还是不行，而真正的原因反被这一步掩盖。
+    #[test]
+    fn 只有凭据被拒才让客户端去续期() {
+        use cortex_core::CortexError;
+        assert!(
+            super::needs_reauth(&CortexError::Unauthorized("cortexd 401".into())),
+            "凭据被拒必须摇铃 —— 不摇的话没人会去续期，本机 agent 抱着一把             死 token 用到应用重启（2026-08-30 用户实报的那个）"
+        );
+        for e in [
+            CortexError::Invalid("你发的东西不对".into()),
+            CortexError::Unavailable("供应商超时".into()),
+            CortexError::Provider("模型拒了这张图".into()),
+            CortexError::NotFound {
+                kind: "会话",
+                id: "abc".into(),
+            },
+        ] {
+            assert!(
+                !super::needs_reauth(&e),
+                "{e:?} 被摇成了凭据问题 —— 用户会跑去重新登录，然后发现还是不行"
+            );
+        }
+    }
+
     use super::*;
 
     /// **贴过图的会话，切到看不懂图的模型之后还能继续聊。**

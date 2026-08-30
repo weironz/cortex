@@ -325,6 +325,7 @@ impl Runs {
                     "已经改过的文件不会退回去。",
                 )
                 .into(),
+                needs_reauth: false,
             })
             .await;
         true

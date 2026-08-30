@@ -637,6 +637,7 @@ fn sse(
         Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
             Some(ChatEvent::Error {
                 message: format!("跟不上这一轮的输出，漏了 {n} 条事件。重新打开这个会话可以补齐。"),
+                needs_reauth: false,
             })
         }
     });
@@ -673,6 +674,7 @@ fn sse(
         let json = serde_json::to_string(&ev).unwrap_or_else(|e| {
             serde_json::to_string(&ChatEvent::Error {
                 message: format!("事件序列化失败：{e}"),
+                needs_reauth: false,
             })
             .unwrap_or_else(|_| r#"{"type":"error","message":"internal"}"#.to_string())
         });

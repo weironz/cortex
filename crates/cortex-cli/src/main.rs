@@ -841,8 +841,19 @@ async fn one_turn(
                 };
                 println!("{}", render::dim(&format!("— {episode_id}{who}"), color));
             }
-            Ok(ChatEvent::Error { message }) => {
+            Ok(ChatEvent::Error {
+                message,
+                needs_reauth,
+            }) => {
                 eprintln!("\n{}", render::error(&message, color));
+                if needs_reauth {
+                    // CLI 没有「热推凭据」那条路 —— 它自己就是持凭据的那个。
+                    // 不说这一句的话，用户看到的是一句 401，而不知道该去重登
+                    eprintln!(
+                        "{}",
+                        render::dim("凭据已过期 —— `cortex login` 重新登录后再试。", color)
+                    );
+                }
             }
             Err(e) => {
                 eprintln!("\n{}", render::error(&e.to_string(), color));

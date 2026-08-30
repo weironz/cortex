@@ -674,6 +674,15 @@ fn classify(status: reqwest::StatusCode, detail: String) -> CortexError {
             id: detail,
         };
     }
+    // ★ **401/403 单拎出来，不归 Invalid。**
+    //
+    // 出站凭据是桌面端推进来的（access token，15 分钟过期），本进程自己换
+    // 不了。归进 `Invalid` 的话它以一段纯文本混在事件流里回到界面，而桌面端
+    // 的过期探测只接它自己那条 HTTP 线 —— 看不见，于是不续期、不推新凭据，
+    // 这个进程抱着一把死 token 一直用下去，**要重启应用才恢复**。实测过。
+    if matches!(status.as_u16(), 401 | 403) {
+        return CortexError::Unauthorized(format!("cortexd {status}：{detail}"));
+    }
     CortexError::Invalid(format!("cortexd {status}：{detail}"))
 }
 
@@ -744,9 +753,10 @@ mod tests {
     use super::*;
     use reqwest::StatusCode;
 
-    /// 三档的分界。**这是契约**：调用方按种类决定排队重试还是当场放弃。
+    /// 四档的分界。**这是契约**：调用方按种类决定排队重试、当场放弃、
+    /// 还是去换一把凭据。
     #[test]
-    fn 状态码分成该重试_不存在_与你发错了三档() {
+    fn 状态码分成该重试_不存在_凭据被拒_与你发错了四档() {
         let retryable = [500, 502, 503, 408, 429];
         for code in retryable {
             let e = classify(StatusCode::from_u16(code).unwrap(), "x".into());
@@ -763,11 +773,25 @@ mod tests {
              而那时候空历史是正确答案、不是失败。实际 {e:?}"
         );
 
-        for code in [400, 401, 403, 409, 422] {
+        for code in [400, 409, 422] {
             let e = classify(StatusCode::from_u16(code).unwrap(), "x".into());
             assert!(
                 matches!(e, CortexError::Invalid(_)),
                 "{code} 该是 Invalid（你发的东西不对，重试没用），实际 {e:?}"
+            );
+        }
+
+        // ★ **401/403 必须与 400 那族分开。**
+        //
+        // 归进 Invalid 的话，出站凭据过期以后就只是「一句非法输入」混在
+        // 事件流里 —— 桌面端的过期探测只接它自己那条 HTTP 线，看不见这条，
+        // 于是不续期、不推新凭据，本机 agent 抱着死 token 用到应用重启。
+        // 那正是 2026-08-30 用户报的「过一会儿就不能用了」。
+        for code in [401, 403] {
+            let e = classify(StatusCode::from_u16(code).unwrap(), "x".into());
+            assert!(
+                matches!(e, CortexError::Unauthorized(_)),
+                "{code} 该是 Unauthorized（换一把凭据再来），实际 {e:?} ——                  归进 Invalid 的话客户端没有任何线索去续期",
             );
         }
     }
@@ -782,6 +806,7 @@ mod tests {
         let before_and_after = [
             classify(StatusCode::NOT_FOUND, "x".into()),
             classify(StatusCode::BAD_REQUEST, "x".into()),
+            classify(StatusCode::UNAUTHORIZED, "x".into()),
         ];
         for e in before_and_after {
             assert!(

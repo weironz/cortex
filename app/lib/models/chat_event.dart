@@ -64,6 +64,7 @@ sealed class ChatEvent {
       ),
       'error' => ChatErrorEvent(
         asStringOrNull(json['message']) ?? '服务端返回了一个未描述的错误',
+        needsReauth: json['needs_reauth'] == true,
       ),
       final other => ChatUnknownEvent(other, json),
     };
@@ -207,8 +208,23 @@ final class ChatDoneEvent extends ChatEvent {
 
 /// Terminal frame carrying a server-side failure.
 final class ChatErrorEvent extends ChatEvent {
-  const ChatErrorEvent(this.message);
+  const ChatErrorEvent(this.message, {this.needsReauth = false});
   final String message;
+
+  /// **这一轮是因为凭据被拒才失败的。**
+  ///
+  /// 本机 agent 的出站凭据（access token）15 分钟过期，而它自己换不了 ——
+  /// 那把钥匙由拉起它的桌面端推进来。而桌面端的过期探测接的是**它自己发的
+  /// HTTP 的 401**（`HttpCortexApi._failure`），这条失败却是以一段文本混在
+  /// 一条**成功的** SSE 流里回来的，那条线上根本没有状态码。
+  ///
+  /// 于是从前没人续期、没人推新凭据，本机 agent 抱着一把死 token 用到应用
+  /// 重启为止 —— 用户看到的是「过一会儿就不能用了，重启才好」。
+  ///
+  /// 判据由服务端给（`needs_reauth`），**不在这儿 `contains('401')` 猜**：
+  /// 那句话是给人看的，改一次文案就把判断悄悄弄坏，而它坏掉的样子与这个
+  /// bug 一模一样。老服务端不发这个字段 = `false` = 维持从前的行为。
+  final bool needsReauth;
 }
 
 /// 服务端还活着 —— SSE 的 keep-alive 注释帧（`: ping`，每 15 秒一次）。
