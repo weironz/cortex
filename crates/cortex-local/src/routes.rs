@@ -852,23 +852,105 @@ async fn patch_session(State(st): State<LocalState>, req: Request) -> Response {
     // 改成 null 同时也是**语义上正确**的：本地 agent 在场时工具跑在这台机器上，
     // 服务端那侧的工作区就该是空的。留一个陈旧的服务器路径，会让直连 cortexd
     // 的 Web 客户端以为它能在那个目录里执行东西。
-    let mut forwarded = serde_json::Map::new();
-    if let Some(t) = &patch.title {
-        forwarded.insert("title".into(), serde_json::json!(t));
-    }
-    if let Some(a) = patch.archived {
-        forwarded.insert("archived".into(), serde_json::json!(a));
-    }
-    if patch.workspace.is_some() {
+    proxy::forward_json(
+        &st,
+        reqwest::Method::PATCH,
+        &parts.uri,
+        forwarded_patch_body(&bytes),
+    )
+    .await
+}
+
+/// 转发给 cortexd 的请求体：**原样透传，只把 `workspace` 改写成 null**。
+///
+/// # 为什么不是一份允许清单
+///
+/// 这里从前是三行 `if`（title / archived / workspace 各一行），于是每加一个
+/// 会话字段都要记得回来补一行 —— 而**漏掉的那一个不会报错**：它被静默丢掉，
+/// 转过去成了个空 patch，cortexd 回 400「没有任何要改的字段」，客户端把那个
+/// 400 读成「这个部署还不支持…，**它是个老版本的服务端**」。服务端是好的，
+/// 字段是在这一跳被吃掉的 —— 而那句话把人送去查完全错的地方。
+///
+/// 2026-08-30 实报：`pinned` 就这么漏了（置顶一按就说服务端太老），而同一份
+/// 清单里 `project_id` 也漏着 —— 一个坑同时开着两个口，且都没有任何症状。
+///
+/// 透传之后新字段自动跟着走。多转几个 cortexd 不认识的键是安全的：那侧按
+/// `SessionPatch` 反序列化，不认识的键本来就忽略。
+///
+/// 剩下的唯一改写是 `workspace` → `null`。**是改写而不是删掉**：删掉的话，
+/// 一次「只绑目录」的请求转过去就是个空 patch，于是绑定明明成功了，用户看到
+/// 的却是失败（这也是实测撞到的）。
+fn forwarded_patch_body(raw: &[u8]) -> Vec<u8> {
+    let mut forwarded: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(raw).unwrap_or_default();
+    if forwarded.contains_key("workspace") {
         forwarded.insert("workspace".into(), serde_json::Value::Null);
     }
-    let body = serde_json::to_vec(&forwarded).unwrap_or_else(|_| b"{}".to_vec());
-    proxy::forward_json(&st, reqwest::Method::PATCH, &parts.uri, body).await
+    serde_json::to_vec(&forwarded).unwrap_or_else(|_| b"{}".to_vec())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **会话字段不许在这一跳被吃掉。**
+    ///
+    /// 2026-08-30 实报：点置顶 → 「这个部署还不支持置顶会话 —— 它是个老版本
+    /// 的服务端」。而服务端是好的：本机 agent 用一份允许清单重建请求体，
+    /// `pinned` 不在清单里，于是转过去是个空 patch，cortexd 回 400，
+    /// 客户端把那个 400 读成「服务端太老」。
+    #[test]
+    fn 转发的会话补丁不丢字段() {
+        let body = |v: serde_json::Value| {
+            let out = super::forwarded_patch_body(v.to_string().as_bytes());
+            serde_json::from_slice::<serde_json::Value>(&out).expect("转发的是合法 JSON")
+        };
+
+        assert_eq!(
+            body(serde_json::json!({"pinned": true})),
+            serde_json::json!({"pinned": true}),
+            "pinned 被吃掉了 —— 转过去是空 patch，cortexd 回 400，             而客户端会把它说成「老版本的服务端」"
+        );
+        assert_eq!(
+            body(serde_json::json!({"project_id": "01J"})),
+            serde_json::json!({"project_id": "01J"}),
+            "project_id 被吃掉了 —— 把会话移进项目会静默失败"
+        );
+        assert_eq!(
+            body(serde_json::json!({"title": "新标题", "archived": true})),
+            serde_json::json!({"title": "新标题", "archived": true}),
+            "标题与归档这两个老字段也得照旧过去"
+        );
+    }
+
+    /// **`workspace` 是唯一被改写的那一项，而且是改写不是删掉。**
+    ///
+    /// 删掉的话，一次「只绑目录」的请求转过去就是个空 patch —— 绑定明明成功
+    /// 了，用户看到的却是 400。改成 null 同时也是语义正确的：本地 agent 在场
+    /// 时工具跑在这台机器上，服务端那侧的工作区就该是空的。
+    #[test]
+    fn 工作区被改写成null而不是删掉() {
+        let out = super::forwarded_patch_body(
+            serde_json::json!({"workspace": "D:/codes/x"})
+                .to_string()
+                .as_bytes(),
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("合法 JSON");
+        assert_eq!(
+            v,
+            serde_json::json!({"workspace": null}),
+            "本地路径原样转给了服务端，或者整条被删成了空 patch"
+        );
+
+        // 与别的字段同时出现时，别的字段不受影响
+        let out = super::forwarded_patch_body(
+            serde_json::json!({"title": "t", "workspace": null})
+                .to_string()
+                .as_bytes(),
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("合法 JSON");
+        assert_eq!(v, serde_json::json!({"title": "t", "workspace": null}));
+    }
 
     /// `?ticket=` 的识别必须逐参数比对，不能拿整串做子串匹配。
     ///

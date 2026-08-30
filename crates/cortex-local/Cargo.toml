@@ -81,3 +81,14 @@ tokio = { workspace = true, features = ["test-util"] }
 # 这台开发机上新编出来的 exe 入站会被静默丢弃，绑端口的测试跑不了；
 # 而路由拼错、字段名写错这类事恰恰只有过一遍 Router 才看得出来
 tower = { version = "0.5", features = ["util"] }
+
+# 看门狗要问「父进程还在不在」。**必须是直接问内核，不能起子进程** ——
+# 从前那版每 2 秒跑一次 `tasklist` 并 `.output()` 阻塞等它，2026-08-30 在
+# 生产上撞到：其中一次 tasklist 的 conhost 卡住，整个循环永久停在那一行，
+# 于是桌面端退出之后 agent 还监听着端口、还连着生产、还握着 token，
+# 12 分钟没死。见 `supervise` 的模块文档。
+#
+# 版本跟 cortex-agent 那份一致（0.61），避免两份 windows-sys 共存。
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = ["Win32_Foundation", "Win32_System_Threading"]

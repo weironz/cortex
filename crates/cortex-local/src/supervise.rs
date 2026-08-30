@@ -49,33 +49,73 @@ pub fn exit_with_parent(pid: Option<u32>) {
 
 /// 这个 pid 还活着吗。
 ///
-/// # Windows
+/// # Windows：直接问内核，**不许起子进程**
 ///
 /// `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 拿得到句柄就算活着。
 /// 不用 `GetExitCodeProcess`：那个对已退出但句柄仍被持有的进程返回
-/// `STILL_ACTIVE`(259) 与「退出码恰好是 259」无法区分 —— 一个真实存在的坑。
+/// `STILL_ACTIVE`(259)，与「退出码恰好是 259」无法区分。
 ///
-/// 这里靠 `tasklist` 而不是直接调 Win32：为一个每 2 秒一次的探测引入
-/// `windows-sys` 依赖（连同它在别的平台上的 cfg 分叉）不划算。
-/// 进程创建的开销在 2 秒周期上完全无感。
+/// ## 这里从前跑的是 `tasklist`，那是个真实的生产 bug
+///
+/// 原来的实现每 2 秒 `Command::new("tasklist").output()`，理由写着「为一个
+/// 每 2 秒一次的探测引入 windows-sys 不划算，进程创建的开销完全无感」。
+/// 开销确实无感，**但它有一个没被算进去的失败模式**：
+///
+/// 2026-08-30 在生产上撞到 —— 其中一次 `tasklist` 的 `conhost.exe` 卡住，
+/// 而 `.output()` 是**没有超时的阻塞调用**，于是整个循环永久停在那一行，
+/// 再也不去看第二眼。表现：用户退出桌面端 12 分钟之后，`cortex-local`
+/// 仍然 `LISTENING`、仍然与生产保持着 TLS 连接、仍然握着用户的 token，
+/// 而 `/health` 照答 200（runtime 是好的，只有看门狗那条腿断了）。
+///
+/// 判据本身一直是对的（对一个已死的 pid，tasklist 确实报「无匹配」）——
+/// **坏的是取得判据的方式**：一次外部进程调用，没有超时，也没有第二次机会。
+/// 一个每 2 秒重复一次的检查，只要有一次能永久卡住，它就等于不存在。
+///
+/// 换成一次系统调用之后，这条路上不再有进程、没有控制台、没有可卡的东西。
 #[cfg(windows)]
 fn is_alive(pid: u32) -> bool {
-    use std::process::Command;
-    // /NH 去表头、/FI 过滤。命中时输出里有那个 pid；不命中时
-    // tasklist 打的是「没有运行的任务匹配指定标准」——两者都不是错误码，
-    // 所以判断只能看 stdout 里有没有那个数字
-    let out = Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-        .output();
-    match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()),
-        // 查不了就当它活着。**方向是刻意的**：误判为「死了」会让本地 agent
-        // 在监护人好好的时候自杀，而那是个没有任何提示的功能消失
-        Err(e) => {
-            tracing::warn!(error = %e, "查不到父进程状态，按仍在运行处理");
-            true
-        }
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
+    };
+
+    /// 标准访问权之一，`WaitForSingleObject` 要它。
+    ///
+    /// 写字面量而不是从 windows-sys 里 use：那个常量被归在
+    /// `Win32_Storage_FileSystem` 这个 feature 下（它在那儿的类型是
+    /// `FILE_ACCESS_RIGHTS`），为一个数字把整个文件系统模块拉进来不值。
+    /// 这个值三十年没变过，且 winnt.h 里就是这么写的。
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+
+    // SAFETY: 只传一个 pid 进去，拿回来的句柄要么为空要么有效。
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        // 打不开有两种：**没有这个 pid**（真的死了），或者有但我们无权查看
+        // （换个用户跑的 GUI）。后者判成死的会让本地 agent 在监护人好好跑着
+        // 的时候自杀 —— 那是个没有任何提示的功能消失。
+        //
+        // SAFETY: 紧跟在失败的那次调用之后读线程最后的错误码。
+        let err = unsafe { GetLastError() };
+        return err != ERROR_INVALID_PARAMETER;
     }
+
+    // ★ **拿到句柄不等于它还活着，所以必须再问一次。**
+    //
+    // 一个已经退出、但句柄仍被别人持有的进程，PID 条目会一直留着，
+    // `OpenProcess` 对它**照样成功** —— 第一版就是这么写的，实测里
+    // 「杀掉父进程 8 秒后 agent 还在」，因为测试脚本自己握着那个句柄。
+    // 这与文档里为 `GetExitCodeProcess` 记下的是同一个坑，只是换了个门进来。
+    //
+    // `WaitForSingleObject(…, 0)` 没有这个歧义：进程对象在**退出那一刻**
+    // 被激发，与谁还握着句柄无关。超时（还没激发）才是「活着」。
+    //
+    // SAFETY: 上面刚拿到的有效句柄；0 毫秒超时，不阻塞。
+    let signaled = unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0;
+    // SAFETY: 同上，用完即关，不外泄。
+    unsafe { CloseHandle(handle) };
+    !signaled
 }
 
 #[cfg(unix)]
@@ -238,6 +278,34 @@ mod tests {
             is_alive(std::process::id()),
             "探测把自己判成了死的 —— 那会让本地 agent 在监护人正常时自杀"
         );
+    }
+
+    /// **已退出、但句柄还被别人握着的进程，不算活着。**
+    ///
+    /// 这一条钉住的是 2026-08-30 修这个 bug 时**当场栽过的那一版**：
+    /// 头一个修法只调 `OpenProcess`，而一个已退出的进程只要还有人握着它的
+    /// 句柄，PID 条目就一直留着，`OpenProcess` 对它照样成功 —— 于是「父进程
+    /// 死了」永远判不出来，孤儿照活不误。真机验证里它一次都没退。
+    ///
+    /// 这与文档里为 `GetExitCodeProcess` 记下的是**同一个坑**，只是换了扇门
+    /// 进来。所以这条测试不测 API，测的是那个状态本身：`Child` 在作用域里
+    /// 一直握着句柄，而进程已经 `wait` 过了。
+    #[cfg(windows)]
+    #[test]
+    fn 已退出但句柄还被握着的进程不算活着() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .expect("起得来一个立刻退出的进程");
+        let pid = child.id();
+        child.wait().expect("等得到它退出");
+        // ⚠️ `child` **故意留在作用域里**：Rust 的 `Child` 直到被 drop 才关掉
+        // 句柄，而句柄没关正是要复现的那个状态。
+        assert!(
+            !is_alive(pid),
+            "把一个已经退出的进程判成了活着 —— 只要还有人握着它的句柄，             PID 条目就在，光靠 OpenProcess 是分不出来的。             这会让本地 agent 在桌面端退出之后继续监听端口、继续握着 token"
+        );
+        drop(child);
     }
 
     /// 不存在的 pid 必须判成死的。
