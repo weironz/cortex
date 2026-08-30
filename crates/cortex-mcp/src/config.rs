@@ -365,6 +365,28 @@ impl McpConfig {
 #[cfg(test)]
 mod tests {
 
+    /// 摸 `CORTEX_MCP_CONFIG` 的那几条测试**必须串行**。
+    ///
+    /// `config_path` 读的是**进程级**环境变量，而 Rust 的测试在同一个进程里
+    /// 并行跑 —— 设它的那条会漏进另外两条。2026-08-30 实际红过：
+    /// `a_container_without_a_workspace…` 拿到了 `/tmp/mine.json`（另一条
+    /// 设的），而它期待的是默认路径。
+    ///
+    /// 这种红**随机出现、重跑就绿**，于是最可能的下场是被当成「偶发」重跑
+    /// 掉而不是被修 —— 一条会说谎的测试比没有这条测试更糟。
+    ///
+    /// 不用 `--test-threads=1`（那会拖慢整个 crate），也不给每条测试各自
+    /// 存取一遍环境变量（存与取之间仍有窗口）—— 只把这几条排成一队。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 拿队列的锁。**中毒也照用**：一条测试 panic 会毒化这把锁，而那会让
+    /// 剩下几条一起失败并报「锁中毒」—— 掩盖掉真正那条失败原因。
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// **显式指定的配置压倒执行环境的判断，而空串不算指定。**
     ///
     /// 这一位存在的理由见 `config_path` 上那段：没有它，起真 agent 的那条
@@ -372,6 +394,7 @@ mod tests {
     /// 装了哪些 MCP server（2026-08-28 就这么红过一次）。
     #[test]
     fn 显式指定的配置压倒一切_而空串不算指定() {
+        let _serial = env_guard();
         let user = std::path::Path::new("/u");
         let ws = std::path::Path::new("/w");
         let container = cortex_agent::ExecEnvironment::Container;
@@ -486,6 +509,7 @@ mod tests {
     /// 而那会让桌面端用户自己那份 `mcp.json` 静默失效。
     #[test]
     fn a_container_reads_the_workspace_and_a_desktop_reads_the_user_dir() {
+        let _serial = env_guard();
         use cortex_agent::ExecEnvironment::{Container, LocalMachine, None as NoEnv};
         let user = Path::new("/home/u/.cortex/01J");
         let ws = Path::new("/workspace");
@@ -509,6 +533,7 @@ mod tests {
     /// 容器里没有工作区 = 配置错误，回落成「没有 MCP」而不是起不来。
     #[test]
     fn a_container_without_a_workspace_degrades_instead_of_failing() {
+        let _serial = env_guard();
         use cortex_agent::ExecEnvironment::Container;
         let user = Path::new("/tmp/ephemeral");
         assert_eq!(config_path(Container, user, None), user.join(USER_FILE));
