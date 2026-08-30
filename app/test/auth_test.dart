@@ -299,6 +299,71 @@ void main() {
       expect(state.serverAuthDisabled, isTrue);
     });
 
+    /// **「我改回官方服务器了，为什么还是离线」** —— 2026-08-30 实报。
+    ///
+    /// 离线是开机探测失败时自动兜上的，而它一旦为真 `probe()` 就在短路上
+    /// 直接返回。改地址此前完全不碰这个标记，于是那个动作是空转的：
+    /// 地址真换了、也真重探了，探测却停在短路上，界面一动不动。
+    test('改地址会解除离线 —— 否则改了也一动不动', () async {
+      final container = _boot(_GateApi(healthThrows: true));
+      addTearDown(container.dispose);
+      await _settle(container);
+      expect(
+        container.read(appConfigProvider).offline,
+        isTrue,
+        reason: '前提：开机连不上，先落进离线',
+      );
+
+      container
+          .read(appConfigProvider.notifier)
+          .setBaseUrl('http://127.0.0.1:9999');
+      await _settle(container);
+
+      expect(
+        container.read(appConfigProvider).offline,
+        isFalse,
+        reason:
+            '显式给出一个地址就是「连这里」。不解除的话，用户唯一的出路是'
+            '聊天页横幅上那个「去连接」—— 而一个知道自己连错环境的人'
+            '会去改地址，不会去点那里',
+      );
+      expect(
+        container.read(authControllerProvider).phase,
+        AuthPhase.unreachable,
+        reason:
+            '这一条是**正对照**：探测必须真的打出去了。停在离线短路上的话'
+            'phase 会是 ready，而那正是这个 bug 的表现 —— 看起来什么都没发生',
+      );
+      expect(
+        container.read(authControllerProvider).error,
+        isNotNull,
+        reason:
+            '这一次是他主动去连的，失败原因要摆在他正在改的输入框上面，'
+            '而不是再一次静默变回离线',
+      );
+    });
+
+    /// 同一个地址不能短路掉：开机那一刻服务器恰好抽风的人，地址本来就是
+    /// 对的，他能做的「重新连一下」正是原样再给一次。
+    test('人在离线时，重新给一次同样的地址也要放行', () async {
+      final container = _boot(_GateApi(healthThrows: true));
+      addTearDown(container.dispose);
+      await _settle(container);
+      expect(container.read(appConfigProvider).offline, isTrue);
+
+      final same = container.read(appConfigProvider).baseUrl;
+      container.read(appConfigProvider.notifier).setBaseUrl(same);
+      await _settle(container);
+
+      expect(
+        container.read(appConfigProvider).offline,
+        isFalse,
+        reason:
+            '按地址短路等于把「地址本来就没错」的那个人锁死在离线里 —— '
+            '他改成别的再改回来才出得去，而没有人猜得到要这么做',
+      );
+    });
+
     test('服务端开着认证而手上没有凭据时停在登录态', () async {
       final container = _boot(_GateApi());
       addTearDown(container.dispose);

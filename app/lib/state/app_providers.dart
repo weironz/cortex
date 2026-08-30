@@ -216,14 +216,43 @@ class AppConfigNotifier extends Notifier<AppConfig> {
     state = state.copyWith(useMock: value);
   }
 
+  /// 换后端地址。**这个动作同时解除离线模式。**
+  ///
+  /// # 为什么在这里解除
+  ///
+  /// 离线**不是用户选的**：开机探测失败时 `AuthController._unreachable`
+  /// 自动兜上它。而它一旦为真，`probe()` 就在离线那条短路上直接返回，
+  /// **再也不碰网络**。
+  ///
+  /// 于是 2026-08-30 之前，「去设置里把地址改回官方服务器」是一个空转的
+  /// 动作：地址真的换了、listener 也真的重探了，探测却停在短路上 ——
+  /// 界面纹丝不动，而用户手上没有任何线索说明为什么。
+  ///
+  /// 解除离线原本全仓库只有一个入口（聊天页横幅上的「去连接」），而那
+  /// 恰恰不是一个「我连错环境了」的人会去点的东西 —— 他会去改地址。
+  /// **一个状态只有一条退出路径时，要确认那条路径是用户真的会走的那条。**
+  ///
+  /// # 解除是安全的
+  ///
+  /// 这一次重探不带 `fallBackToOffline`，所以新地址要是也连不上，落进的是
+  /// [AuthPhase.unreachable] —— 失败原因摆在他正在改的那个输入框上面，
+  /// 而不是再一次静默变回离线。
   void setBaseUrl(String value) {
     final trimmed = value.trim();
-    if (trimmed.isEmpty || state.baseUrl == trimmed) return;
+    if (trimmed.isEmpty) return;
+    // 地址一样、而且本来就在线 —— 这一次是真的没事可做。
+    // ⚠️ 不能只判地址：**人在离线时，重新给一次同样的地址也必须放行**。
+    // 开机那一刻官方服务器恰好抽风的人，地址本来就是对的，他能做的
+    // 「重新连一下」正是原样再给一次 —— 按地址短路等于把他锁死在离线里。
+    final sameUrl = state.baseUrl == trimmed;
+    if (sameUrl && !state.offline) return;
     state = state.copyWith(
       baseUrl: trimmed,
+      offline: false,
       knownBaseUrls: AppConfig.remember(state.knownBaseUrls, trimmed),
     );
-    _persist();
+    // 地址没变就没有新东西要落盘
+    if (!sameUrl) _persist();
   }
 
   /// 进／出离线模式。
