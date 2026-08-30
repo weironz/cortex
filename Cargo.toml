@@ -19,7 +19,7 @@ members = [
 [workspace.package]
 # 版本号的权威所在。app/pubspec.yaml、git tag、docker 镜像 tag 都必须跟它一致，
 # 由 `just version-check`（= scripts/check-version.sh）在 CI 与发布流水线里把关。
-version = "0.1.29"
+version = "0.1.30"
 edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0"
