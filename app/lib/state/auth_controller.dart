@@ -822,6 +822,32 @@ class AuthController extends Notifier<AuthState> {
   /// 过期（相隔 15 分钟）误判成同一次。
   static const Duration _refreshCooloff = Duration(seconds: 3);
 
+  /// 抖动预算烧完之后，**多久之内不再试**。
+  ///
+  /// # 它取代了「烧完就把人踢回登录页」
+  ///
+  /// 那个预算存在的理由是防永动机 —— 防的是**无限重试**。而它选的终止方式
+  /// 是回登录页，那两件事之间没有必然联系：可以停止重试，而不销毁任何东西。
+  ///
+  /// 2026-08-30 用户实报：「我输入会话内容，整个会话丢失，窗口闪一下全部
+  /// 重置了」。诊断文件里那一条写得很清楚：
+  ///
+  /// ```json
+  /// {"reason":"refreshStalled","was_ready":true,
+  ///  "detail":"连续几次续期都没换成（服务端 5xx / 限流 / 网络）—— 凭据留着，稍后能自动续"}
+  /// ```
+  ///
+  /// **它自己都说凭据留着、稍后能自动续，然后把人踢了。** 时间点正是一次
+  /// 发版：agentd 重启几秒，几个在飞的续期一起 5xx，预算烧完。
+  ///
+  /// 现在烧完只是**歇 30 秒**：凭据留着、界面留着、用户敲了一半的话也留着，
+  /// 服务端缓过来之后下一条 401 自然把它续上。永动机照样防住了 ——
+  /// 30 秒一次不是永动机。
+  static const Duration _stalledBackoff = Duration(seconds: 30);
+
+  /// 歇到什么时候。null = 没在歇。
+  DateTime? _refreshBackoffUntil;
+
   /// 凭据在半路失效了 —— **先自己续，续不动才回登录页**。
   ///
   /// Called from any 401, from anywhere, via `HttpCortexApi.onUnauthorized`.
@@ -861,6 +887,14 @@ class AuthController extends Notifier<AuthState> {
       return;
     }
 
+    // 正在歇（上一轮抖动预算刚烧完）—— 这条 401 让它失败就好，别再去撞。
+    // **尤其不能在这里踢人**：歇着正是因为服务端此刻答不上来
+    final backoff = _refreshBackoffUntil;
+    if (backoff != null) {
+      if (clock().isBefore(backoff)) return;
+      _refreshBackoffUntil = null;
+    }
+
     final refresh = state.refreshToken;
     if (refresh == null) {
       _fallBackToGate(_GateReason.noRefreshToken);
@@ -897,6 +931,7 @@ class AuthController extends Notifier<AuthState> {
         _lastRefreshOk = clock();
         _transientRefreshes = 0;
         _throttledRefreshes = 0;
+        _refreshBackoffUntil = null;
         // 上一对 token 没活过 [_futileWindow] 就又被叫来续 —— 续是续上了，
         // 但显然没解决问题。连着几次就收口：refresh 路由永远答应的话，
         // rejected 与 stalled 都到不了，这里是这一族唯一的终态
@@ -921,7 +956,10 @@ class AuthController extends Notifier<AuthState> {
         // 预算见 `_transientRefreshes`：不设上限的话这就是台永动机。
         if (++_transientRefreshes >= _maxTransientRefreshes) {
           _transientRefreshes = 0;
-          _fallBackToGate(_GateReason.refreshStalled);
+          // ★ **不踢人。** 见 [_stalledBackoff]：预算防的是无限重试，
+          // 而回登录页会连用户敲了一半的话一起销毁 —— 那两件事没有关系
+          _refreshBackoffUntil = clock().add(_stalledBackoff);
+          debugPrint('续期连着没成 —— 歇 ${_stalledBackoff.inSeconds} 秒再试，凭据与界面都留着');
         } else {
           debugPrint('续期暂时没成（第 $_transientRefreshes 次）—— 凭据留着，这条 401 放过');
         }
@@ -931,7 +969,9 @@ class AuthController extends Notifier<AuthState> {
         // 自己的（更宽的）预算兜住「永远 429」那台永动机。
         if (++_throttledRefreshes >= _maxThrottledRefreshes) {
           _throttledRefreshes = 0;
-          _fallBackToGate(_GateReason.refreshStalled);
+          // 同上：限流是服务端此刻忙，不是「你的登录坏了」
+          _refreshBackoffUntil = clock().add(_stalledBackoff);
+          debugPrint('续期一直被限流 —— 歇 ${_stalledBackoff.inSeconds} 秒再试，凭据与界面都留着');
         } else {
           debugPrint('续期被限流（第 $_throttledRefreshes 次 429）—— 凭据留着，不计入抖动预算');
         }

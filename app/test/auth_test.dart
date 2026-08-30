@@ -950,18 +950,30 @@ void _resilienceTests() {
         );
       }
 
-      // 但它不是免死金牌：自己的预算（8 次）用完照样收口 —— 凭据留着
+      // 但它不是免死金牌：自己的预算（8 次）用完之后**歇一会儿** ——
+      // 出口是「停止重试」，不是「把人踢出去」
       await ctrl.onUnauthorized();
       final st = c.read(authControllerProvider);
       expect(
-        st.phase,
-        AuthPhase.needsToken,
-        reason: '永远 429 的续期循环必须有出口，否则就是台永动机',
+        st.isReady,
+        isTrue,
+        reason:
+            '429 是「等等再来」，把人踢回登录页等于让服务端的一次忙碌'
+            '销毁用户敲了一半的话',
       );
       expect(
         st.refreshToken,
         isNotNull,
-        reason: '429 不是凭据的错，收口也不许删凭据 —— 下次启动要拿它续',
+        reason: '429 不是凭据的错，不许删凭据 —— 下一条 401 就能续上',
+      );
+      final calls = api.refreshCalls;
+      await ctrl.onUnauthorized();
+      expect(
+        api.refreshCalls,
+        calls,
+        reason:
+            '永远 429 的续期循环必须有出口，否则就是台永动机 —— '
+            '出口是歇着，不是登出',
       );
     });
 
@@ -1533,14 +1545,26 @@ void _sessionTests() {
             '第 3 个等待者就把人踢了 —— 发版重启踢人根本没修掉',
       );
 
-      // 后续两次独立的 transient 才耗尽预算
+      // 后续两次独立的 transient 耗尽预算 —— 而**耗尽不等于踢人**
       await ctrl.onUnauthorized();
       expect(c.read(authControllerProvider).isReady, isTrue);
       await ctrl.onUnauthorized();
       expect(
-        c.read(authControllerProvider).phase,
-        AuthPhase.needsToken,
-        reason: '第三次独立失败才收口 —— 预算数的是续期次数，不是等待者',
+        c.read(authControllerProvider).isReady,
+        isTrue,
+        reason:
+            '⚠️ 预算烧完把人踢回了登录页。抖动是**服务端此刻答不上来**，'
+            '凭据好好的（那条日志自己都写着「凭据留着，稍后能自动续」）'
+            '—— 而回登录页会连用户敲了一半的话一起销毁',
+      );
+
+      // 预算防的是**无限重试**，那个仍然要成立：歇着的时候不再去撞
+      final afterBudget = api.refreshCalls;
+      await ctrl.onUnauthorized();
+      expect(
+        api.refreshCalls,
+        afterBudget,
+        reason: '烧完预算之后还在继续撞服务端 —— 那就是当初要防的永动机',
       );
     });
 
@@ -1641,7 +1665,7 @@ void _sessionTests() {
     /// transient 不踢单独存在就是台永动机（服务端持续 5xx 时每条 401 都
     /// 「续一下 → 没成 → 算了」，循环永不收敛）—— 与「agent 被 1 秒一次
     /// 杀了 730 次」同形状：没有上限的自愈不是自愈。
-    test('续期连续 transient：前两次忍住，第三次回登录页且红字不说「过期」', () async {
+    test('续期连续 transient：预算烧完也不踢人，只是歇一会儿', () async {
       final api = _SessionApi();
       final c = ProviderContainer(
         overrides: [
@@ -1673,14 +1697,30 @@ void _sessionTests() {
 
       await ctrl.onUnauthorized(); // 第 3 次：预算用完
       final st = c.read(authControllerProvider);
-      expect(st.phase, AuthPhase.needsToken, reason: '连着三次都换不成就该老实回登录页，而不是永动');
       expect(
-        st.error,
-        isNot(contains('已过期')),
-        reason: '凭据好好的，是服务端答不上来 —— 说「过期」会让用户以为登录坏了',
+        st.isReady,
+        isTrue,
+        reason:
+            '⚠️ **预算烧完不该踢人。** 2026-08-30 用户实报「输入会话内容，'
+            '整个会话丢失，窗口闪一下全部重置」，诊断文件里正是这一条 '
+            'refreshStalled，而它的 detail 自己写着「凭据留着，稍后能自动续」。'
+            '停止重试与销毁用户的工作是两件事，预算只该做前一件',
       );
-      expect(st.error, contains('稍等'));
-      expect(st.refreshToken, isNotNull, reason: '凭据必须留着：服务端缓过来之后，下次启动要拿它无感续上');
+      expect(
+        st.refreshToken,
+        isNotNull,
+        reason: '凭据必须留着：服务端缓过来之后下一条 401 就能无感续上',
+      );
+
+      // 而「防永动机」那一半仍然要成立：歇着的时候不再去撞服务端
+      final calls = api.refreshCalls;
+      await ctrl.onUnauthorized();
+      await ctrl.onUnauthorized();
+      expect(
+        api.refreshCalls,
+        calls,
+        reason: '烧完预算之后还在一条 401 撞一次 —— 那就是当初立这道预算要防的',
+      );
     });
 
     /// **未登录阶段的杂散 401 不许在登录页压红字。**
