@@ -1190,8 +1190,9 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             description: "列出目录条目。工作区外的路径用绝对路径，会请用户当场批准".into(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"]
+                // path 同 `tree`：不传就是工作区根，那是最常见的一次调用
+                "properties": { "path": { "type": "string", "description": "可选。默认工作区根" } },
+                "required": []
             }),
             risk: Risk::Safe,
             path_arg: Some("path"),
@@ -1247,10 +1248,19 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "相对工作区根的路径，或工作区外的绝对路径" },
+                    "path": { "type": "string", "description": "可选。相对工作区根的路径，或工作区外的绝对路径。**默认工作区根** —— 认识一个项目时不用传" },
                     "depth": { "type": "integer", "description": "最多几层，默认 2；0 = 不限" }
                 },
-                "required": ["path"]
+                // ⚠️ **path 刻意不必填。**
+                //
+                // 这个工具的描述就写着「认识一个项目先用它」，而那一次的目标
+                // 必然是工作区根 —— 把最常见的那次调用做成必填，等于要求模型
+                // 为它多打一个 "."，而漏掉时用户看到的是一次**失败的工具调用**
+                // （2026-08-30 实报：一次对话的第一行就是「失败：缺少参数 path」）。
+                //
+                // 旁边的 `glob` 早就是可选的（「默认整个工作区」），两者不一致
+                // 本身就是这个坑的来源。`list_dir` 同批改。
+                "required": []
             }),
             risk: Risk::Safe,
             path_arg: Some("path"),
@@ -1426,9 +1436,9 @@ pub async fn execute(sandbox: &Sandbox, call: &ToolCall) -> ToolResult {
             }
         }
 
-        "list_dir" => match arg_str(&call.arguments, "path") {
-            Err(e) => ToolResult::err(e),
-            Ok(p) => match sandbox.resolve(&p) {
+        "list_dir" => {
+            let p = arg_str(&call.arguments, "path").unwrap_or_else(|_| ".".to_string());
+            match sandbox.resolve(&p) {
                 Err(e) => ToolResult::err(e.to_string()),
                 Ok(path) => match std::fs::read_dir(&path) {
                     Err(e) => ToolResult::err(format!("列目录失败：{e}")),
@@ -1447,8 +1457,8 @@ pub async fn execute(sandbox: &Sandbox, call: &ToolCall) -> ToolResult {
                         ToolResult::ok(listing)
                     }
                 },
-            },
-        },
+            }
+        }
 
         "shell" => match arg_str(&call.arguments, "command") {
             Err(e) => ToolResult::err(e),
@@ -1470,9 +1480,11 @@ pub async fn execute(sandbox: &Sandbox, call: &ToolCall) -> ToolResult {
         "grep" => search_tool(sandbox, call, true),
         "glob" => search_tool(sandbox, call, false),
 
-        "tree" => match arg_str(&call.arguments, "path") {
-            Err(e) => ToolResult::err(e),
-            Ok(p) => {
+        "tree" => {
+            // 不传就看工作区根。`resolve(".")` 走的是与别的文件工具**同一条**
+            // 路径解析 —— 越界与授权因此自动一致（与 `search_tool` 同款）
+            let p = arg_str(&call.arguments, "path").unwrap_or_else(|_| ".".to_string());
+            {
                 let depth = call
                     .arguments
                     .get("depth")
@@ -1486,7 +1498,7 @@ pub async fn execute(sandbox: &Sandbox, call: &ToolCall) -> ToolResult {
                     },
                 }
             }
-        },
+        }
 
         // 防御：todo_write 由宿主执行（状态在会话侧），`Turn::dispatch`
         // 在进这里之前就该拦走。走到了说明分派漏了分支 —— 说清，别报
@@ -2409,6 +2421,74 @@ mod tests {
             )
             .await;
             assert!(!r.ok, "绝对路径 {abs} 竟然被允许了");
+        }
+    }
+
+    /// **`tree` / `list_dir` 不传 path 就看工作区根。**
+    ///
+    /// 2026-08-30 用户实报：一次对话的第一行就是
+    /// `tree 调用 tree · 失败：缺少参数 path`，下一行才是 `tree .`。
+    ///
+    /// 那不是模型笨 —— 是规格逼它猜。`tree` 自己的描述写着「认识一个项目先用
+    /// 它」，而那一次的目标必然是工作区根；把最常见的那次调用做成必填，等于
+    /// 要求模型为它多打一个 `"."`，漏掉时用户看到的是一次**失败的工具调用**。
+    /// 旁边的 `glob` 早就是「不传就搜整个工作区」，两者不一致本身就是坑的来源。
+    #[tokio::test]
+    async fn 看目录结构不传路径就是工作区根() {
+        let (_d, sb) = temp_sandbox();
+        let root = sb.root().expect("这个沙箱有根").to_path_buf();
+        std::fs::create_dir_all(root.join("backend/src")).expect("造目录");
+        std::fs::write(
+            root.join("backend/src/main.rs"),
+            "fn main() {}
+",
+        )
+        .expect("造文件");
+
+        for name in ["tree", "list_dir"] {
+            let r = execute(
+                &sb,
+                &ToolCall {
+                    name: name.into(),
+                    arguments: serde_json::json!({}),
+                },
+            )
+            .await;
+            assert!(
+                r.ok,
+                "{name} 不传 path 就失败了 —— 那正是用户看到的那一行                 「失败：缺少参数 path」。内容：{}",
+                r.content
+            );
+            assert!(
+                r.content.contains("backend"),
+                "{name} 没传 path 时看的不是工作区根：{}",
+                r.content
+            );
+        }
+    }
+
+    /// **那个默认值不许成为越界的旁路。**
+    ///
+    /// 默认走的是 `resolve(".")` —— 与别的文件工具**同一条**路径解析，
+    /// 所以越界与授权自动一致。这一条把它钉住：显式传一个越界路径照样被拒，
+    /// 不会因为「path 现在是可选的」而漏进去。
+    #[tokio::test]
+    async fn 路径可选没有放宽越界检查() {
+        let (_d, sb) = temp_sandbox();
+        for name in ["tree", "list_dir"] {
+            let r = execute(
+                &sb,
+                &ToolCall {
+                    name: name.into(),
+                    arguments: serde_json::json!({"path": "../../../.."}),
+                },
+            )
+            .await;
+            assert!(
+                !r.ok,
+                "{name} 放行了一个越出工作区的路径 —— 默认值把闸门带松了：{}",
+                r.content
+            );
         }
     }
 
