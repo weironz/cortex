@@ -68,9 +68,6 @@ struct Inner {
     /// 从环境里读一次就定了：它没有可变的部分，而每次用时重读会让
     /// 「配没配」在一次运行里有两个答案。
     mailer: Option<crate::mailer::Mailer>,
-    /// 远程接入走了哪条路的计数。见 [`crate::attach_stats`] —— 它存在的
-    /// 唯一理由是让「直拨还能不能撤」有个**扛得住重建**的判据。
-    attach_stats: crate::attach_stats::Shared,
     /// 服务端那把 LLM key 组装出来的客户端。`POST /llm/stream` 用它。
     ///
     /// # 为什么它是 `Option` 而不是必填
@@ -226,7 +223,6 @@ impl AgentState {
                 accounts,
                 // 读一次就定。没配就是 None，调用方据此不摆入口
                 mailer: crate::mailer::Mailer::from_env(),
-                attach_stats: std::sync::Arc::new(crate::attach_stats::AttachStats::default()),
                 llm,
                 blobs,
                 auth,
@@ -277,12 +273,6 @@ impl AgentState {
                 "这个部署没有接数据库（CORTEX_DATABASE_URL 为空），账号功能不可用",
             )
         })
-    }
-
-    /// 远程接入的路由计数。见 [`crate::attach_stats`]。
-    #[must_use]
-    pub fn attach_stats(&self) -> &crate::attach_stats::AttachStats {
-        &self.inner.attach_stats
     }
 
     /// 发信通道。`None` = 这个部署没配邮件推送。

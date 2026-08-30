@@ -675,21 +675,9 @@ async fn heartbeat(
     Json(hb): Json<cortex_proto::presence::AgentHeartbeat>,
 ) -> Json<cortex_proto::presence::HeartbeatAck> {
     let owner = crate::accounts::current_user(&st, &headers).await;
-    // 探一次它报的那个地址。**在这里探而不是在每次 GET /agents 时探**：
-    // 后者会让一次列表请求变成 N 次外发 HTTP，而心跳本来就是每 30 秒一次。
-    //
-    // 探通 ≠ 能接入：那只说明那个端口上有个答 /health 的东西。真正的判据是
-    // 接下来反代过去时那把钥匙认不认 —— 而认不认由**那台机器**说。
-    let attach_reachable = match hb.attach.as_ref() {
-        None => false,
-        // 只对**显式报了直拨地址**的做探活。没报地址 = 它只靠隧道可达，
-        // 而隧道通不通由隧道簿说 —— 去探一个不存在的地址只会浪费 1.5 秒
-        Some(offer) => match offer.addr.as_deref() {
-            Some(addr) => crate::sandbox_proxy::probe_health(st.http(), addr).await,
-            None => false,
-        },
-    };
-    st.presence().record(&owner, &hb, attach_reachable);
+    // ⚠️ 这里曾经先外拨探一次它报的直拨地址。2026-08-30 随直拨删掉 ——
+    // 可达性现在只有一个来源：那条反向隧道还在不在，而那由隧道簿说。
+    st.presence().record(&owner, &hb);
     Json(cortex_proto::presence::HeartbeatAck {
         ttl_secs: crate::presence::HEARTBEAT_SECS * 3,
     })
@@ -962,9 +950,7 @@ async fn chat(State(st): State<AgentState>, req: Request) -> Response {
         // 只由这几行本身决定。用户可见的文案值得这个。
         let msg = attach_failure_message(
             st.presence()
-                .why_not_attachable(&d.owner, &parsed.session_id, &|id| {
-                    st.tunnels().is_live(&d.owner, id)
-                }),
+                .why_not_attachable(&d.owner, &parsed.session_id),
             st.presence().rebuilding(),
         );
         // ⚠️ **确定性失败**：那台机器不上线之前，重发一万次是同一句话。
@@ -1056,22 +1042,6 @@ fn attach_failure_message(
         ),
         // 开放了、给了直拨地址，却打不通。**地址的问题** —— 这条要把
         // 「它同意了」说在前面，否则用户会以为自己没开对开关
-        Some((machine, crate::presence::WhyNot::Unreachable)) => format!(
-            concat!(
-                "这个会话绑在 {machine} 上的一个目录里。\n",
-                "那台机器开放了远程接入，但这边打不通它报的 --attach-addr。\n",
-                "查一下那个地址是不是这台服务器够得到的",
-                "（VPN / tailnet 网卡地址，而不是 127.0.0.1 或 0.0.0.0）；\n",
-                "也可以干脆去掉那个参数 —— 反向隧道不需要可直拨的地址。"
-            ),
-            machine = machine
-        ),
-        // 只靠隧道可达，而隧道此刻不在 —— 那台机器刚离开。
-        // 与上一档的区别是：**这里用户什么都不用改**，所以那句话要说出来，
-        // 否则他会照着上一档的经验去查地址。
-        //
-        // 这个组合（心跳还在 TTL 内、隧道已断）几乎只有一种成因：隧道靠
-        // h2 PING 几秒内就发现断开，而心跳要 90 秒才过期。
         Some((machine, crate::presence::WhyNot::TunnelDown)) => format!(
             concat!(
                 "这个会话绑在 {machine} 上的一个目录里。\n",
@@ -1104,70 +1074,36 @@ fn attach_failure_message(
     }
 }
 
-/// 把一个已组好的请求送到 `route` 指的那台机器：隧道优先，直拨兜底。
+/// 把一个已组好的请求经**反向隧道**送到 `route` 指的那台机器。
 ///
-/// 回 `None` = 两条路都开不出去（隧道刚断、又没有可达的直拨地址）——
+/// 回 `None` = 隧道刚断（名册里还在 TTL 内，而那条连接已经没了）——
 /// 调用方落回自己的「接不了」分支。
 ///
-/// # 为什么隧道优先
+/// # 这里曾经有一条直拨兜底
 ///
-/// 直拨的「可达」是上一次心跳时的旧闻（最长 30 秒前），隧道的「活着」是
-/// h2 PING 盯着的现在。灰度期两者并存；老 worker（无隧道能力）只有直拨，
-/// 新 worker 在 NAT 后只有隧道 —— 这个函数对两代都成立。
-/// 隧道全量后直拨整条退役（设计稿：不留一条无人探活的半死路径）。
+/// 灰度期（隧道 2026-08-27 随 v0.1.25 发出去）老 worker 不会拨隧道，所以
+/// 留了一条「按心跳里报的地址直接打过去」的回退路，并配了一个量具去回答
+/// 「还能不能撤」。2026-08-30 撤掉了，判据是三条一起成立：
+///
+/// - `cortex_auth.attach_route_stats` **一行都没有** —— 那张表零计数时
+///   主动不写，所以空表就是「没人接入过」
+/// - 生产上远程接入**一次都没被启用过**（两个 agent 都没带
+///   `--allow-remote-attach`），而桌面端本来就从不传 `--attach-addr`，
+///   于是它**根本产生不出**直拨路
+/// - 隧道那条有全链路测试盯着（`tunnel::tests::全链路_…`），每次构建都跑
+///
+/// 撤掉它买到的不是「少一条用户在走的路」，而是**少一条从没被人走过的
+/// 回退路** —— 这个仓库反复吃亏的形状正是「只在故障路径上跑的代码，
+/// 没人验就等于没写」：真到隧道断掉那天，那条路多半也是坏的。
 async fn attach_forward(
     st: &AgentState,
     owner: &str,
     route: &crate::presence::AttachRoute,
     req: Request,
 ) -> Option<Response> {
-    if route.tunneled
-        && let Some(handle) = st.tunnels().get(owner, &route.agent_id)
-    {
-        tracing::debug!(agent = %route.agent_id, "经反向隧道接到那台机器");
-        // **正对照。** 只数直拨的话，`direct = 0` 分不清「没人再走回退路」
-        // 与「这段时间根本没人用远程接入」—— 见 `attach_stats` 的模块文档
-        st.attach_stats().hit_tunnel();
-        return Some(crate::sandbox_proxy::forward_tunneled(handle, req).await);
-    }
-    if let Some((addr, key)) = &route.direct {
-        // ⚠️ **「直拨还能不能退役」的量具在这里。**
-        //
-        // 直拨是灰度期的回退路：隧道 2026-08-27 才随 v0.1.25 发出去，在那
-        // 之前**所有** worker 都不会拨隧道。撤掉它的判据是「线上不再有拨不
-        // 起隧道的 worker」，而观察窗口要一周量级。
-        //
-        // **判据落在库里，不落在这行日志上**（`crate::attach_stats`）。
-        // 原来是靠 grep 这行 info 数的，2026-08-29 实测到那不成立：agentd
-        // 没有任何卷，日志随容器走 —— 那天为了让它读到邮件配置重建了两次
-        // 容器，观察窗口从「攒了一天」变回 20 分钟，而这件事没有任何提示。
-        // 发一次版也是同样的效果。
-        //
-        // 现在怎么判：
-        //     SELECT * FROM cortex_auth.attach_route_stats;
-        // tunnel.count 明显 > 0（证明这段时间真有人接入）且 direct.last_seen
-        // 在一周前 —— 那时才算满足。
-        //
-        // 日志这行留着，它对**当场排障**仍然有用（哪台机器、什么地址）。
-        // 撤掉直拨时，这一行与那张表一起撤。
-        st.attach_stats().hit_direct();
-        tracing::info!(
-            agent = %route.agent_id, %addr,
-            "attach-fallback-direct：这台机器没有隧道，走了直拨（灰度期回退路）"
-        );
-        return Some(
-            crate::sandbox_proxy::forward(
-                st.http(),
-                &format!("http://{addr}"),
-                key,
-                None,
-                crate::sandbox_proxy::UpstreamKind::LocalAgent,
-                req,
-            )
-            .await,
-        );
-    }
-    None
+    let handle = st.tunnels().get(owner, &route.agent_id)?;
+    tracing::debug!(agent = %route.agent_id, "经反向隧道接到那台机器");
+    Some(crate::sandbox_proxy::forward_tunneled(handle, req).await)
 }
 
 /// `GET /sandbox/runs/{session_id}` —— 挂上容器里那一轮。
@@ -2510,7 +2446,6 @@ mod tests {
         use crate::presence::WhyNot;
         let cases = [
             Some(("WILLOPTPC".to_owned(), WhyNot::NotOffered)),
-            Some(("WILLOPTPC".to_owned(), WhyNot::Unreachable)),
             Some(("WILLOPTPC".to_owned(), WhyNot::TunnelDown)),
             None,
         ];
@@ -2566,27 +2501,25 @@ mod tests {
     /// **三档「接不了」说的不能是同一件事。**
     ///
     /// 合成一句的话：没开开关的那台会被当成网络故障（用户去查防火墙），
-    /// 而休眠的笔记本会被当成地址配错（用户去改一个没错的参数）。
+    /// 而休眠的笔记本会被当成「没开开关」（用户去加一个他早就加了的参数）。
+    ///
+    /// ⚠️ 这里原来有第三档 `Unreachable`（「去改 `--attach-addr`」），
+    /// 2026-08-30 随直拨删掉。
     #[test]
     fn each_attach_failure_reason_says_something_different() {
         use crate::presence::WhyNot;
         let m = |w| super::attach_failure_message(Some(("MBP".to_owned(), w)), false);
         let not_offered = m(WhyNot::NotOffered);
-        let unreachable = m(WhyNot::Unreachable);
         let tunnel_down = m(WhyNot::TunnelDown);
 
         // 每一档都要点出是哪一台 —— 不说的话用户只能挨个试
-        for msg in [&not_offered, &unreachable, &tunnel_down] {
+        for msg in [&not_offered, &tunnel_down] {
             assert!(msg.contains("MBP"), "没说是哪一台：{msg}");
         }
 
         assert!(
             not_offered.contains("--allow-remote-attach"),
             "没开开关那一档要给出开关名，否则用户不知道该做什么：{not_offered}"
-        );
-        assert!(
-            unreachable.contains("--attach-addr"),
-            "地址那一档要点名是哪个参数：{unreachable}"
         );
         // ⚠️ 最要紧的一条：机器刚离开时**什么都不用改**
         assert!(
@@ -2598,8 +2531,7 @@ mod tests {
             "机器刚离开时提任何地址参数，都是把用户送去改一个没错的东西：{tunnel_down}"
         );
 
-        assert_ne!(not_offered, unreachable);
-        assert_ne!(unreachable, tunnel_down);
+        assert_ne!(not_offered, tunnel_down);
     }
 
     #[tokio::test]

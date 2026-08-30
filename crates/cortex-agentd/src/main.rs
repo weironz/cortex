@@ -26,7 +26,6 @@
 
 mod accounts;
 mod assistants;
-mod attach_stats;
 mod auth;
 mod blobs;
 mod credentials;
@@ -462,7 +461,6 @@ async fn main() -> anyhow::Result<()> {
     // 快照那条定时任务**没有跟过来** —— 见下面那段
     reaper::spawn(state.clone());
     profile::spawn_purge(state.clone());
-    attach_stats::spawn(state.clone());
     watch::spawn_oom_watch(state.clone());
     watch::spawn_quota_watch(state.clone());
 

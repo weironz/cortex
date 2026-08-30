@@ -59,23 +59,18 @@ struct Entry {
     /// **只留在这本内存簿子里，从不下发给客户端**：`AgentPresenceDto` 只有一个
     /// 布尔。下发它等于让任何一个登录过的设备都能直连别人的笔记本。
     attach: Option<AttachOffer>,
-    /// 服务端**刚才真的探通了**那个地址。
-    ///
-    /// 与「它同意接入」分开记，但对外合成一个布尔：分成两个字段的话，客户端要
-    /// 自己判断「同意但探不通」该显示什么，而那个判断迟早与服务端的漂开。
-    attach_reachable: bool,
 }
 
 /// `/chat` 该把这一轮送到哪儿。
 ///
-/// `tunneled` 与 `direct` 至少有一个成立（否则 [`PresenceBook::attach_route`]
-/// 回 `None`）。都成立时调用方走隧道，理由见那边的文档。
+/// 拿得到它就意味着**有一条活的反向隧道**（钥匙在隧道簿里，那条连接自己
+/// 报的，不在这儿）。
+///
+/// 2026-08-30 之前这里还有一个 `direct`（灰度期的直拨回退路）与一个
+/// `tunneled` 布尔。直拨整条删掉之后 `tunneled` 恒为真，于是一起收掉 ——
+/// 一个永远是 `true` 的字段只会让读的人以为还有另一种可能。
 pub struct AttachRoute {
     pub agent_id: String,
-    /// 有活的反向隧道。钥匙在隧道簿里（那条连接自己报的），不在这儿。
-    pub tunneled: bool,
-    /// 灰度期的直拨路：`(addr, attach_token)`。
-    pub direct: Option<(String, String)>,
 }
 
 /// 那台机器在线，但这一轮接不过去 —— 为什么。
@@ -87,9 +82,9 @@ pub struct AttachRoute {
 pub enum WhyNot {
     /// 它没开远程接入（默认状态）。**这不是故障，是它没同意。**
     NotOffered,
-    /// 它开了，也给了一个可直拨的地址，但服务端上一次心跳时探不通那个地址。
-    /// **地址配错了**（或中间网络不通）—— 用户该去改 `--attach-addr`。
-    Unreachable,
+    // ⚠️ 这里曾经有第三档 `Unreachable`（「给了直拨地址但探不通，去改
+    // `--attach-addr`」），2026-08-30 随直拨整条删掉：没有直拨地址，
+    // 也就没有地址可配错。剩下两档各自仍然对应一个完全不同的用户动作。
     /// 它开了，而且只靠反向隧道可达（没给 `--attach-addr`），
     /// 但**此刻隧道不在**。
     ///
@@ -154,7 +149,6 @@ impl PresenceBook {
     /// 于是灰度期那条回退路径**在隧道好好的时候悄悄消失**，等隧道断了才发现
     /// 无路可走。所以这里的规则是：**只覆盖拉得到的字段，attach 原样留着。**
     ///
-    /// `attach_reachable` 同理不动：它是外拨探活的结论，这条路没探过。
     ///
     /// # 为什么还是要造一个 `AttachOffer`（地址为空）
     ///
@@ -182,16 +176,15 @@ impl PresenceBook {
             attach: None,
             // 没探过就是没探过。隧道那条路的可达性由 `tunneled(id)` 给，
             // 不借这个字段 —— 借了的话「探通过」会在下游被当成直拨可用
-            attach_reachable: false,
         });
         e.machine_hint.clone_from(&st.machine_hint);
         e.sessions.clone_from(&st.sessions);
         e.last_seen = Instant::now();
-        // 只在**本来没有**时补一个。心跳给过的那份带着 addr，
-        // 覆盖掉等于在隧道还活着的时候悄悄拆掉直拨那条回退路
+        // 只在**本来没有**时补一个。直拨还在的年代，这条规则挡的是
+        // 「隧道轮询把心跳报过的直拨地址覆盖掉」；直拨删掉之后它仍然要留着 ——
+        // 覆盖会换掉那把接入钥匙，而心跳给的那把是当前有效的
         if e.attach.is_none() {
             e.attach = Some(AttachOffer {
-                addr: None,
                 token: attach_token.to_owned(),
             });
         }
@@ -199,9 +192,9 @@ impl PresenceBook {
 
     /// 收一条心跳。同一个 (owner, agent_id) 再来就是覆盖。
     ///
-    /// `attach_reachable` 由调用方**探过之后**给 —— 探活是异步的，
+    /// ⚠️ 这个方法曾经还收一个 `attach_reachable`（外拨探活的结论）——
     /// 而这本簿子在锁里。
-    pub fn record(&self, owner: &str, hb: &AgentHeartbeat, attach_reachable: bool) {
+    pub fn record(&self, owner: &str, hb: &AgentHeartbeat) {
         let mut g = self.lock();
         g.insert(
             (owner.to_owned(), hb.agent_id.clone()),
@@ -210,7 +203,6 @@ impl PresenceBook {
                 sessions: hb.sessions.clone(),
                 last_seen: Instant::now(),
                 attach: hb.attach.clone(),
-                attach_reachable,
             },
         );
         // 顺手把过期的清掉。单独起一个后台任务去扫是另一种做法，但这张表的
@@ -242,7 +234,7 @@ impl PresenceBook {
                 last_seen_secs: e.last_seen.elapsed().as_secs(),
                 session_count: e.sessions.len(),
                 has_session: session.map(|s| e.sessions.iter().any(|x| x == s)),
-                attachable: e.attach.is_some() && (e.attach_reachable || tunneled(agent_id)),
+                attachable: e.attach.is_some() && tunneled(agent_id),
             })
             .collect();
         // 稳定顺序：界面上一列机器每次刷新换位置，会让人以为是别的机器
@@ -258,16 +250,15 @@ impl PresenceBook {
     /// |---|---|
     /// | `None` | 去把那台机器打开（或在它上面起 Cortex） |
     /// | `Some((机器, `NotOffered`))` | 在那台机器上加 `--allow-remote-attach` |
-    /// | `Some((机器, `Unreachable`))` | 它开放了但云端打不通 —— 查地址与网络 |
+    /// | `Some((机器, `TunnelDown`))` | 什么都不用改，等那台机器回来 |
     ///
-    /// 合成一句「接不了」的话，第二种与第三种长得一样，而它们一个要改命令行、
-    /// 一个要查网络。
-    pub fn why_not_attachable(
-        &self,
-        owner: &str,
-        session_id: &str,
-        tunneled: &dyn Fn(&str) -> bool,
-    ) -> Option<(String, WhyNot)> {
+    /// 合成一句「接不了」的话，后两种长得一样，而它们一个要改命令行、
+    /// 一个只需要等。
+    ///
+    /// ⚠️ 这个方法曾经还收一个 `tunneled` 闭包，用来区分「地址探不通」与
+    /// 「隧道刚断」。直拨删掉之后只剩后者，参数一并去掉 —— 留着一个不参与
+    /// 任何判断的入参，下一个人会以为它还在被考虑。
+    pub fn why_not_attachable(&self, owner: &str, session_id: &str) -> Option<(String, WhyNot)> {
         let g = self.lock();
         g.iter()
             .filter(|((o, _), e)| o == owner && e.last_seen.elapsed() < TTL)
@@ -278,16 +269,16 @@ impl PresenceBook {
             // 于是用户刚加上 `--allow-remote-attach` 重启，却被告知「它没开放」。
             // 实测撞到过：名册里并排两条 WILLOPTPC，一条 attachable、一条不是。
             .min_by_key(|(_, e)| e.last_seen.elapsed())
-            .map(|((_, id), e)| {
+            .map(|((_, _id), e)| {
                 let why = match e.attach.as_ref() {
                     // 没开远程接入
                     None => WhyNot::NotOffered,
-                    // 开了、给了直拨地址、但探不通 → 地址的问题
-                    Some(offer) if offer.addr.is_some() => WhyNot::Unreachable,
-                    // 开了、只靠隧道，而隧道此刻不在 → 那台机器刚离开
-                    Some(_) if !tunneled(id) => WhyNot::TunnelDown,
-                    // 开了、隧道也在 —— 走到这儿说明它没有这个会话的绑定，
-                    // 而上面的 filter 已经排除了那种情况。保守按隧道断处理
+                    // 开了，但隧道此刻不在 → 那台机器刚离开。
+                    //
+                    // 隧道在的话走不到这儿：那说明它没有这个会话的绑定，
+                    // 而上面的 filter 已经排除了那种情况。仍然按隧道断处理 ——
+                    // 保守的那一档告诉用户「等它回来」，而不是让他去改一个
+                    // 没错的配置
                     Some(_) => WhyNot::TunnelDown,
                 };
                 (e.machine_hint.clone(), why)
@@ -297,19 +288,21 @@ impl PresenceBook {
     /// 这个会话该接到哪儿去 —— 给 `/chat` 那条路由用。
     ///
     /// **只在「持有这个会话的绑定」且「够得着」时给**，够得着 = 有活隧道，
-    /// 或（灰度期的老 worker）直拨地址刚探通过：
+    /// **够得着 = 有活的反向隧道**（2026-08-30 之前还有「直拨地址刚探通过」
+    /// 这一支，随直拨删掉）：
     ///
     /// - 没开远程接入 → `None`（那台机器只同意被看见，不同意被接入）
-    /// - 开了但既无隧道也探不通 → `None`
+    /// - 开了但此刻没有隧道 → `None`
     ///
     /// 两种都回 `None`，因为对调用方来说该做的事一样：不要接，去说那句 409。
     /// 而**为什么**不接由 [`Self::list`] 那边的 `attachable` 让用户看见。
     ///
-    /// # 隧道优先于直拨
+    /// # 为什么只剩隧道
     ///
-    /// 两者都在时走隧道：直拨的「可达」是上一次心跳时的旧闻（最长 30 秒前），
-    /// 隧道的「活着」是 h2 PING 盯着的现在。等隧道全量后直拨整条退役
-    /// （设计稿：不留一条无人探活的半死路径）。
+    /// 直拨的「可达」是上一次心跳时的旧闻（最长 30 秒前），隧道的「活着」是
+    /// h2 PING 盯着的现在。灰度期两者并存、隧道优先；2026-08-30 直拨整条
+    /// 退役 —— 设计稿早就写着「不留一条无人探活的半死路径」，而那条路确实
+    /// 从来没有被人走过（生产上远程接入一次都没被启用）。
     pub fn attach_route(
         &self,
         owner: &str,
@@ -320,22 +313,13 @@ impl PresenceBook {
         g.iter()
             .filter(|((o, _), e)| o == owner && e.last_seen.elapsed() < TTL)
             .filter(|(_, e)| e.attach.is_some())
-            .filter(|((_, id), e)| e.attach_reachable || tunneled(id))
+            .filter(|((_, id), _)| tunneled(id))
             .filter(|(_, e)| e.sessions.iter().any(|s| s == session_id))
             // 同上取最新的：一台机器换了通告地址重启之后，陈旧那条上的地址
             // 可能已经打不通了，而它「上次探通过」
             .min_by_key(|(_, e)| e.last_seen.elapsed())
-            .map(|((_, id), e)| {
-                let direct = e
-                    .attach
-                    .as_ref()
-                    .filter(|_| e.attach_reachable)
-                    .and_then(|a| a.addr.clone().map(|addr| (addr, a.token.clone())));
-                AttachRoute {
-                    agent_id: id.clone(),
-                    tunneled: tunneled(id),
-                    direct,
-                }
+            .map(|((_, id), _)| AttachRoute {
+                agent_id: id.clone(),
             })
     }
 
@@ -366,8 +350,8 @@ mod tests {
     #[test]
     fn one_users_machines_never_show_up_for_another() {
         let book = PresenceBook::default();
-        book.record("alice", &hb("a1", "alice-mbp", &["S1"]), false);
-        book.record("bob", &hb("b1", "bob-pc", &["S2"]), false);
+        book.record("alice", &hb("a1", "alice-mbp", &["S1"]));
+        book.record("bob", &hb("b1", "bob-pc", &["S2"]));
 
         let seen: Vec<String> = book
             .list("alice", None, &|_| false)
@@ -376,28 +360,28 @@ mod tests {
             .collect();
         assert_eq!(seen, vec!["alice-mbp"], "只该看到自己的机器");
         assert_eq!(
-            book.why_not_attachable("alice", "S2", &|_| false),
+            book.why_not_attachable("alice", "S2"),
             None,
             "别人的会话绑在别人机器上，与我无关"
         );
     }
 
-    /// **隧道拉回来的状态不许把直拨地址擦掉。**
+    /// **隧道拉回来的状态不许覆盖已有的 `attach`。**
     ///
-    /// 灰度期一台机器可以两条路都有：给了 `--attach-addr`（直拨），同时也
-    /// 建了隧道。名册轮询拉回来的东西里没有 `attach` —— 钥匙住在隧道簿里 ——
-    /// 所以若照心跳那样整条覆盖，直拨那条回退路会在隧道**好好的时候**悄悄
-    /// 消失，等隧道断了才发现无路可走。那正是「实现细节漏成选项」的反面：
-    /// 一个字段的缺席被当成了一次撤销。
+    /// 轮询拉回来的东西里没有 `attach` —— 那把接入钥匙住在隧道簿里 ——
+    /// 所以若照心跳那样整条覆盖，会把心跳刚报的那把有效钥匙换掉。
+    ///
+    /// 这条测试原来盯的是「直拨地址被擦掉」（灰度期一台机器可以两条路都有）。
+    /// 直拨 2026-08-30 删掉之后**这个不变量仍然成立**，只是主语从地址变成了
+    /// 钥匙 —— 那正是「一个字段的缺席被当成一次撤销」这个形状，与直拨无关。
     #[test]
-    fn a_tunnel_poll_must_not_erase_the_direct_dial_offer() {
+    fn a_tunnel_poll_must_not_overwrite_the_attach_key() {
         let book = PresenceBook::default();
-        let mut with_addr = hb("a1", "alice-mbp", &["S1"]);
-        with_addr.attach = Some(AttachOffer {
-            addr: Some("10.0.0.7:8099".into()),
-            token: "k".into(),
+        let mut offered = hb("a1", "alice-mbp", &["S1"]);
+        offered.attach = Some(AttachOffer {
+            token: "心跳报的那把".into(),
         });
-        book.record("alice", &with_addr, true);
+        book.record("alice", &offered);
 
         book.record_tunnel(
             "alice",
@@ -406,18 +390,24 @@ mod tests {
                 machine_hint: "alice-mbp".into(),
                 sessions: vec!["S1".into(), "S2".into()],
             },
-            "k",
+            "隧道那把",
         );
 
         // 拉得到的字段跟着走
-        let route = book
-            .attach_route("alice", "S2", &|_| false)
-            .expect("轮询带回来的新绑定要立刻能路由");
-        // 拉不到的字段原样留着 —— 隧道不在时仍然能直拨
+        assert!(
+            book.attach_route("alice", "S2", &|_| true).is_some(),
+            "轮询带回来的新绑定要立刻能路由"
+        );
+        // 拉不到的字段原样留着
+        let g = book.lock();
+        let key = g
+            .get(&("alice".to_owned(), "a1".to_owned()))
+            .and_then(|e| e.attach.as_ref())
+            .map(|a| a.token.clone());
         assert_eq!(
-            route.direct,
-            Some(("10.0.0.7:8099".into(), "k".into())),
-            "隧道轮询把直拨地址擦掉了 —— 隧道一断这台机器就彻底不可达"
+            key.as_deref(),
+            Some("心跳报的那把"),
+            "隧道轮询把心跳报的接入钥匙覆盖掉了 —— 接进来时会用错那把"
         );
     }
 
@@ -454,14 +444,13 @@ mod tests {
         let route = book
             .attach_route("alice", "S1", &|_| true)
             .expect("隧道活着、名册里也有它，这一轮必须能路由过去");
-        assert!(route.tunneled, "该走隧道");
-        assert_eq!(route.direct, None, "它没给直拨地址，别编一个出来");
+        let _ = route;
 
+        // 隧道断了之后要说
         // 隧道断了之后要说「那台机器刚离开」，不是「它没开远程接入」——
         // 后者会让用户跑去改一个他早就开好的开关
         assert_eq!(
-            book.why_not_attachable("alice", "S1", &|_| false)
-                .map(|(_, why)| why),
+            book.why_not_attachable("alice", "S1").map(|(_, why)| why),
             Some(WhyNot::TunnelDown),
             "只经隧道进名册的机器，隧道一断该说的是「刚离开」"
         );
@@ -486,11 +475,8 @@ mod tests {
     fn a_worker_can_claim_any_session_of_its_owner_and_win() {
         let book = PresenceBook::default();
         let mut liar = hb("a1", "随便哪台机器", &["从没在这台机器上绑过的会话"]);
-        liar.attach = Some(AttachOffer {
-            addr: None,
-            token: "k".into(),
-        });
-        book.record("alice", &liar, false);
+        liar.attach = Some(AttachOffer { token: "k".into() });
+        book.record("alice", &liar);
 
         assert!(
             book.attach_route("alice", "从没在这台机器上绑过的会话", &|_| {
@@ -515,8 +501,8 @@ mod tests {
     #[test]
     fn a_second_heartbeat_replaces_the_first() {
         let book = PresenceBook::default();
-        book.record("alice", &hb("a1", "alice-mbp", &["S1"]), false);
-        book.record("alice", &hb("a1", "alice-mbp", &["S1", "S2"]), false);
+        book.record("alice", &hb("a1", "alice-mbp", &["S1"]));
+        book.record("alice", &hb("a1", "alice-mbp", &["S1", "S2"]));
         let list = book.list("alice", None, &|_| false);
         assert_eq!(list.len(), 1, "同一个 agent 只该有一行");
         assert_eq!(list[0].session_count, 2, "末态是最后那条心跳");
@@ -526,8 +512,8 @@ mod tests {
     #[test]
     fn asking_about_one_session_answers_per_machine() {
         let book = PresenceBook::default();
-        book.record("alice", &hb("a1", "mbp", &["S1"]), false);
-        book.record("alice", &hb("a2", "desktop", &["S9"]), false);
+        book.record("alice", &hb("a1", "mbp", &["S1"]));
+        book.record("alice", &hb("a2", "desktop", &["S9"]));
         let list = book.list("alice", Some("S1"), &|_| false);
         let mbp = list.iter().find(|a| a.machine_hint == "mbp").expect("mbp");
         let desk = list
@@ -542,7 +528,7 @@ mod tests {
              「没有」与「这次没问」"
         );
         assert_eq!(
-            book.why_not_attachable("alice", "S1", &|_| false),
+            book.why_not_attachable("alice", "S1"),
             Some(("mbp".to_owned(), WhyNot::NotOffered)),
             concat!(
                 "那句 409 要点出是哪一台，以及**为什么**接不了 —— ",
@@ -551,19 +537,22 @@ mod tests {
         );
     }
 
-    /// **三种「接不了」必须分得开**，因为用户该做的事完全不同。
+    /// **两种「接不了」必须分得开**，因为用户该做的事完全相反。
     ///
     /// 合成一句「接不了」的话：没开放接入的那台会被当成网络故障（用户去查
-    /// 防火墙），而探不通的那台会被当成「没开开关」（用户去加一个已经加了的
+    /// 防火墙），而刚休眠的那台会被当成「没开开关」（用户去加一个已经加了的
     /// 参数）。两种都是把人送去错的方向。
+    ///
+    /// ⚠️ 这里原来有第三档 `Unreachable`（「给了直拨地址但探不通」），
+    /// 2026-08-30 随直拨删掉 —— 没有直拨地址，也就没有地址可配错。
     #[test]
-    fn the_three_reasons_it_cannot_attach_stay_distinguishable() {
+    fn the_two_reasons_it_cannot_attach_stay_distinguishable() {
         let book = PresenceBook::default();
 
         // ① 没开远程接入 —— attach 是 None
-        book.record("alice", &hb("a1", "mbp", &["S1"]), false);
+        book.record("alice", &hb("a1", "mbp", &["S1"]));
         assert_eq!(
-            book.why_not_attachable("alice", "S1", &|_| false),
+            book.why_not_attachable("alice", "S1"),
             Some(("mbp".to_owned(), WhyNot::NotOffered))
         );
         assert!(
@@ -575,44 +564,26 @@ mod tests {
             "⚠️ 就算有活隧道也一样 —— 隧道 ≠ 开放接入（安全不变量 3）：             attach 为 None 的机器只同意被看见"
         );
 
-        // ② 开了但探不通
+        // ② 开了，但此刻没有隧道 —— 那台机器刚离开，用户什么都不用改
         let mut offered = hb("a2", "desktop", &["S2"]);
-        offered.attach = Some(AttachOffer {
-            addr: Some("10.0.0.9:8090".into()),
-            token: "k".into(),
-        });
-        book.record("alice", &offered, false);
+        offered.attach = Some(AttachOffer { token: "k".into() });
+        book.record("alice", &offered);
         assert_eq!(
-            book.why_not_attachable("alice", "S2", &|_| false),
-            Some(("desktop".to_owned(), WhyNot::Unreachable))
+            book.why_not_attachable("alice", "S2"),
+            Some(("desktop".to_owned(), WhyNot::TunnelDown))
         );
         assert!(
             book.attach_route("alice", "S2", &|_| false).is_none(),
-            "既没隧道又探不通就不该接 —— 接过去只会让用户看着转圈然后超时"
+            "没有隧道就不该接 —— 接过去只会让用户看着转圈然后超时"
         );
-        // ②′ 探不通但有活隧道 —— NAT 后的常态。走隧道接
-        let via_tunnel = book
-            .attach_route("alice", "S2", &|id| id == "a2")
-            .expect("有隧道就该接");
-        assert!(via_tunnel.tunneled, "该标记为走隧道");
-        assert_eq!(
-            via_tunnel.direct, None,
-            "探不通的直拨地址不该给出来 —— 给了调用方会去拨一个死地址"
+        // ②′ 隧道在 —— 这才是能接的那一种
+        assert!(
+            book.attach_route("alice", "S2", &|id| id == "a2").is_some(),
+            "有隧道就该接"
         );
 
-        // ③ 开了而且探通了 —— 直拨可用（灰度期的老 worker 只有这条）
-        book.record("alice", &offered, true);
-        let direct = book
-            .attach_route("alice", "S2", &|_| false)
-            .expect("探通了就该接");
-        assert!(!direct.tunneled);
-        assert_eq!(
-            direct.direct,
-            Some(("10.0.0.9:8090".to_owned(), "k".to_owned()))
-        );
-
-        // ④ 压根没在线
-        assert_eq!(book.why_not_attachable("alice", "S404", &|_| false), None);
+        // ③ 压根没在线
+        assert_eq!(book.why_not_attachable("alice", "S404"), None);
     }
 
     /// 刚起来的簿子要承认自己还不知道；过了窗口才敢说「没有」。
@@ -636,29 +607,27 @@ mod tests {
         );
     }
 
-    /// ⚠️ **「地址配错了」与「那台机器刚离开」必须分得开。**
+    /// ⚠️ **「那台机器刚离开」与「它没开远程接入」必须分得开。**
     ///
-    /// 两者用户该做的事完全相反：前者要去改 `--attach-addr`，后者什么都不用
-    /// 改（等它回来）。合成一句的话，休眠的笔记本会把用户送去查一个没错的
-    /// 参数 —— 2026-08-27 隧道上线当天实测撞到的正是这个。
+    /// 两者用户该做的事完全相反：前者什么都不用改（等它回来），后者要去那台
+    /// 机器上加 `--allow-remote-attach`。合成一句的话，休眠的笔记本会把用户
+    /// 送去改一个他早就开好的开关。
     ///
-    /// 分辨的依据是 **worker 报没报可直拨的地址**：
-    /// 报了 → 探不通就是地址的问题；没报 → 它只靠隧道，那就是隧道断了。
+    /// ⚠️ 这条测试原来还有第三档「给了直拨地址却探不通」，2026-08-30 随直拨
+    /// 删掉。留下的两档恰恰是当初最容易被合成一句的那两档 ——
+    /// 2026-08-27 隧道上线当天实测撞到的就是它。
     #[test]
-    fn 地址配错与机器刚离开是两回事() {
+    fn 机器刚离开与没开远程接入是两回事() {
         let book = PresenceBook::default();
 
-        // ① 只靠隧道的 worker（没给 --attach-addr），隧道断了
-        let mut tunnel_only = hb("t1", "laptop", &["S1"]);
-        tunnel_only.attach = Some(AttachOffer {
-            addr: None,
-            token: "k".into(),
-        });
-        book.record("alice", &tunnel_only, false);
+        // ① 开了远程接入，但隧道此刻不在 —— 它刚休眠 / 断网
+        let mut offered = hb("t1", "laptop", &["S1"]);
+        offered.attach = Some(AttachOffer { token: "k".into() });
+        book.record("alice", &offered);
         assert_eq!(
-            book.why_not_attachable("alice", "S1", &|_| false),
+            book.why_not_attachable("alice", "S1"),
             Some(("laptop".to_owned(), WhyNot::TunnelDown)),
-            "只靠隧道的机器断线时说「地址配错了」，会把用户送去改一个没错的参数"
+            "断线时说「它没开放接入」，会把用户送去改一个他早就开好的开关"
         );
         // 隧道还在时它压根不该出现在「接不了」里 —— 由 attach_route 接走
         assert!(
@@ -666,48 +635,18 @@ mod tests {
             "隧道在就该能接"
         );
 
-        // ② 给了直拨地址却探不通 —— 这才是地址的问题
-        let mut with_addr = hb("t2", "server", &["S2"]);
-        with_addr.attach = Some(AttachOffer {
-            addr: Some("10.0.0.9:8090".into()),
-            token: "k".into(),
-        });
-        book.record("alice", &with_addr, false);
+        // ② 没开远程接入 —— 与上面那档完全不同
+        book.record("alice", &hb("t3", "desktop", &["S3"]));
         assert_eq!(
-            book.why_not_attachable("alice", "S2", &|_| false),
-            Some(("server".to_owned(), WhyNot::Unreachable)),
-            "报了地址却探不通 = 地址的问题，这一档要保留"
-        );
-
-        // ③ 没开远程接入 —— 与前两档都不同
-        book.record("alice", &hb("t3", "desktop", &["S3"]), false);
-        assert_eq!(
-            book.why_not_attachable("alice", "S3", &|_| false),
+            book.why_not_attachable("alice", "S3"),
             Some(("desktop".to_owned(), WhyNot::NotOffered))
         );
     }
 
-    /// 只靠隧道的 worker **不给出直拨路** —— 给了调用方会去拨一个不存在的地址。
-    #[test]
-    fn 没报地址的worker不产生直拨路() {
-        let book = PresenceBook::default();
-        let mut tunnel_only = hb("t1", "laptop", &["S1"]);
-        tunnel_only.attach = Some(AttachOffer {
-            addr: None,
-            token: "k".into(),
-        });
-        // 就算 attach_reachable 被误置成 true 也不该冒出一个地址来
-        book.record("alice", &tunnel_only, true);
-
-        let route = book
-            .attach_route("alice", "S1", &|_| true)
-            .expect("隧道在，该能接");
-        assert!(route.tunneled);
-        assert_eq!(
-            route.direct, None,
-            "它根本没报地址，凭空造一个出来的话调用方会去拨它"
-        );
-    }
+    // ⚠️ 这里曾经有一条 `没报地址的worker不产生直拨路`。它盯的是
+    // 「`attach_reachable` 被误置成 true 时也不该凭空造出一个地址」——
+    // 2026-08-30 直拨整条删掉之后，`AttachRoute` 里已经没有地址这个字段，
+    // 那个错误从形状上不可能再犯，所以这条测试一并删掉而不是改断言。
 
     /// **同一台机器有新旧两条时，要报最新那条。**
     ///
@@ -719,14 +658,11 @@ mod tests {
     fn a_restarted_agent_does_not_get_judged_by_its_stale_entry() {
         let book = PresenceBook::default();
         // 旧的那条：没开远程接入
-        book.record("alice", &hb("old", "mbp", &["S1"]), false);
+        book.record("alice", &hb("old", "mbp", &["S1"]));
         // 新的那条：开了而且探通了
         let mut fresh = hb("new", "mbp", &["S1"]);
-        fresh.attach = Some(AttachOffer {
-            addr: Some("10.0.0.9:8090".into()),
-            token: "k".into(),
-        });
-        book.record("alice", &fresh, true);
+        fresh.attach = Some(AttachOffer { token: "k".into() });
+        book.record("alice", &fresh);
 
         assert_eq!(
             book.list("alice", None, &|_| false).len(),
@@ -734,23 +670,15 @@ mod tests {
             "TTL 窗口里两行都在 —— 这是设计如此，不是要修的地方"
         );
         let route = book
-            .attach_route("alice", "S1", &|_| false)
+            .attach_route("alice", "S1", &|_| true)
             .expect("该按最新那条接进去");
         assert_eq!(
-            route.direct,
-            Some(("10.0.0.9:8090".to_owned(), "k".to_owned())),
-            "该按最新那条接进去"
-        );
-        assert_eq!(
-            book.why_not_attachable("alice", "S1", &|_| false),
-            Some(("mbp".to_owned(), WhyNot::Unreachable)),
-            concat!(
-                "问「为什么接不了」时也要看最新那条 —— 虽然这一档实际能接，",
-                "这里断言的是它没有回到那条陈旧的 NotOffered 上",
-            )
+            route.agent_id, "new",
+            "取到了那条陈旧的 —— 用户刚开好开关重启，却被按旧状态判"
         );
     }
 
+    /// **钥匙不许出现在下发给客户端的那份里。**
     /// **钥匙不许出现在下发给客户端的那份里。**
     ///
     /// 下发它等于让任何一个登录过的设备都能直连别人的笔记本 —— 而那把钥匙
@@ -763,25 +691,24 @@ mod tests {
         let book = PresenceBook::default();
         let mut offered = hb("a1", "mbp", &["S1"]);
         offered.attach = Some(AttachOffer {
-            addr: Some("10.0.0.9:8090".into()),
             token: "super-secret-key".into(),
         });
-        book.record("alice", &offered, true);
+        book.record("alice", &offered);
 
+        // 隧道在 —— 这样 `attachable` 才是 true，断言才落在「有东西可漏
+        // 的时候没漏」上，而不是落在一行没什么可说的 false 上
         let json =
-            serde_json::to_string(&book.list("alice", Some("S1"), &|_| false)).expect("序列化");
+            serde_json::to_string(&book.list("alice", Some("S1"), &|_| true)).expect("序列化");
         assert!(
             !json.contains("super-secret-key"),
             "钥匙漏进了下发的那份：{json}"
         );
         assert!(
-            !json.contains("10.0.0.9"),
-            "连地址都不该下发 —— 它是内网拓扑：{json}"
-        );
-        assert!(
             json.contains("\"attachable\":true"),
             "只该下发一个布尔：{json}"
         );
+        // ⚠️ 这里原来还断言「连直拨地址都不该下发」。那个字段 2026-08-30
+        // 随直拨删掉了，断言随之恒真 —— 留着它就是一条永远绿的假守卫。
     }
 
     /// 不带 `?session=` 时**不许**冒出一个 `has_session`。
@@ -791,7 +718,7 @@ mod tests {
     #[test]
     fn not_asking_means_no_answer() {
         let book = PresenceBook::default();
-        book.record("alice", &hb("a1", "mbp", &["S1"]), false);
+        book.record("alice", &hb("a1", "mbp", &["S1"]));
         assert_eq!(book.list("alice", None, &|_| false)[0].has_session, None);
     }
 }
