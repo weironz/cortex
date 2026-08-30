@@ -48,7 +48,21 @@ class AuthState {
     this.busy = false,
     this.remember = false,
     this.refreshToken,
+    this.reauth = false,
   });
+
+  /// **用着用着掉出来的**，不是冷启动就没登录。
+  ///
+  /// 两者对用户是完全不同的两件事：冷启动时他手上什么都没有，一张登录页
+  /// 是对的；而用着用着被掉出来时，屏幕上有他正在看的对话、输入框里可能
+  /// 有他敲了一半的话 —— 那时把整个界面换成登录页，等于**替他把工作丢掉**。
+  ///
+  /// 2026-08-30 实报：「我输入会话内容，整个会话丢失，窗口闪一下全部重置了，
+  /// 需要重新输入重来」。
+  ///
+  /// 界面据它决定：`true` 时登录卡片盖在 [AppShell] 上（下面的东西原样留着），
+  /// `false` 时才是整页的登录屏。
+  final bool reauth;
 
   final AuthPhase phase;
 
@@ -94,6 +108,7 @@ class AuthState {
     bool? busy,
     bool? remember,
     Object? refreshToken = _sentinel,
+    bool? reauth,
   }) => AuthState(
     phase: phase ?? this.phase,
     token: token == _sentinel ? this.token : token as String?,
@@ -104,6 +119,7 @@ class AuthState {
     refreshToken: refreshToken == _sentinel
         ? this.refreshToken
         : refreshToken as String?,
+    reauth: reauth ?? this.reauth,
   );
 
   static const Object _sentinel = Object();
@@ -1081,6 +1097,10 @@ class AuthController extends Notifier<AuthState> {
     state = state.copyWith(
       phase: AuthPhase.needsToken,
       token: null,
+      // **从「正在用」掉下来的才算 reauth。** 界面据它把登录卡片盖在
+      // AppShell 上而不是整页替换 —— 见 [AuthState.reauth]。
+      // 冷启动那次 `wasReady` 是 false，照旧走整页登录屏
+      reauth: wasReady,
       // stalled 那条**不许说「已过期」**：凭据好好的，是服务端此刻答不上
       // 来。说过期会让用户以为自己的登录坏了，而他该做的只是等一等
       error: !wasReady
@@ -1121,6 +1141,9 @@ class AuthController extends Notifier<AuthState> {
       refreshToken: null,
       error: null,
       remember: false,
+      // 主动登出 = 整页登录屏，不是盖一层。他要的就是离开这个账号，
+      // 把上一个人的对话留在覆盖层底下既没用也不该
+      reauth: false,
     );
   }
 

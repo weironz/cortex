@@ -1536,6 +1536,12 @@ bool shouldForwardUnauthorized({
 /// [CortexApi] 有几十个方法且还在长。逐个写 `throw` 意味着每加一个方法
 /// 都要记得来这里补一刀 —— 忘了的那一个会在门关着时真的发请求。
 /// `noSuchMethod` 让「新方法默认被拦」成为不需要人记得的事。
+/// 这一份 api 是「登录门没开」的那个桩吗。
+///
+/// 导出一个判定而不是把 [GateClosedApi] 本身放开：调用方要判断的是**状态**
+/// （此刻有没有可用的凭据），不是要拿到那个类去做别的事。
+bool isGateClosed(CortexApi api) => api is GateClosedApi;
+
 @visibleForTesting
 class GateClosedApi implements CortexApi {
   static const _closed = CortexApiException(

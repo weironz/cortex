@@ -104,8 +104,27 @@ class ChatController extends Notifier<ChatState> {
     //
     // 这条路径比记忆面板那条命中得更早：会话列表与首个会话的消息是
     // **开机就发**的，凭据一续上（或本地 agent 一就绪）就正好撞上。
-    ref.listen(cortexApiProvider, (_, _) {
+    ref.listen(cortexApiProvider, (_, next) {
       _requestSeq++;
+      // ★ **凭据没了 ≠ 换了后端。**
+      //
+      // 这条监听的本意是「数据源翻了（mock ↔ 真后端、换了部署地址）就
+      // 重新拉一遍」，而 `_reload()` 的第一件事是 `state = ChatState(...)`
+      // —— 把会话列表、当前这条对话的全部消息清成空。
+      //
+      // 掉回登录门时 `cortexApiProvider` 也会换代（换成 GateClosedApi），
+      // 于是同一条监听把用户**正在看的那整段对话**一起清掉了。2026-08-30
+      // 用户实报：「我输入会话内容，整个会话丢失，窗口闪一下全部重置了，
+      // 需要重新输入重来」—— 那个「全部重置」有一半是在这里发生的
+      // （另一半是 AppShell 被登录页整个替换）。
+      //
+      // 没有凭据时该做的只有一件：把在飞的请求作废（它们必然 401）。
+      // 屏幕上的东西原样留着，重新登录之后凭据回来、api 再换一代，
+      // 那时才走 `_reload()` 把它们刷新。
+      if (isGateClosed(next)) {
+        unawaited(_cancelStream());
+        return;
+      }
       _reload();
     });
     Future.microtask(_reload);

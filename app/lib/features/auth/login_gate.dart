@@ -22,6 +22,7 @@ class LoginGate extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final phase = ref.watch(authControllerProvider.select((s) => s.phase));
+    final reauth = ref.watch(authControllerProvider.select((s) => s.reauth));
 
     return switch (phase) {
       AuthPhase.ready => const AppShell(),
@@ -29,7 +30,30 @@ class LoginGate extends ConsumerWidget {
       // case; a full-screen spinner is right for something that resolves in
       // milliseconds and gates everything behind it.
       AuthPhase.probing => const _Probing(),
-      AuthPhase.needsToken || AuthPhase.unreachable => const _LoginScreen(),
+      // ★ **用着用着掉出来的，盖一层就好，别把界面换掉。**
+      //
+      // 从前这里两种情形共用一个整页登录屏。冷启动时那是对的（用户手上
+      // 什么都没有），但**用着用着被掉出来**时，屏幕上有他正在看的对话、
+      // 输入框里可能有他敲了一半的话 —— 整页替换等于替他把工作丢掉。
+      //
+      // 2026-08-30 实报：「我输入会话内容，整个会话丢失，窗口闪一下全部
+      // 重置了，需要重新输入重来」。
+      //
+      // AppShell 留在底下：它的 widget 树不被拆，输入框里的字、滚动位置
+      // 都在。会话内容那一半在 `ChatController` 里（凭据没了不再清空，
+      // 见那边的 `isGateClosed` 分支）—— 两处都改了才真的留得住。
+      AuthPhase.needsToken || AuthPhase.unreachable =>
+        reauth
+            ? const Stack(
+                children: [
+                  AppShell(),
+                  // 挡住底下的交互，但**看得见** —— 用户要能确认自己的东西
+                  // 还在，那正是这次改动要买到的
+                  ModalBarrier(dismissible: false, color: Color(0x8A000000)),
+                  _LoginScreen(overlay: true),
+                ],
+              )
+            : const _LoginScreen(),
     };
   }
 }
@@ -62,7 +86,10 @@ bool shouldShowEndpointField({
 }) => !isWeb && (expanded || unreachable);
 
 class _LoginScreen extends ConsumerStatefulWidget {
-  const _LoginScreen();
+  const _LoginScreen({this.overlay = false});
+
+  /// 盖在 [AppShell] 上，而不是占满整屏。见 [LoginGate] 里那段。
+  final bool overlay;
 
   @override
   ConsumerState<_LoginScreen> createState() => _LoginScreenState();
@@ -189,6 +216,9 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
         .toList();
 
     return Scaffold(
+      // 覆盖形态下背景要透明，否则底下那层就白留了 —— 用户看不见自己的
+      // 东西还在，这次改动的一半价值就没了
+      backgroundColor: widget.overlay ? Colors.transparent : null,
       body: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 40),
@@ -217,12 +247,34 @@ class _LoginScreenState extends ConsumerState<_LoginScreen> {
                 ),
                 const SizedBox(height: 18),
                 Text(
-                  registering ? '注册 Cortex 账号' : '登录 Cortex',
+                  registering
+                      ? '注册 Cortex 账号'
+                      : widget.overlay
+                      ? '重新登录以继续'
+                      : '登录 Cortex',
                   textAlign: TextAlign.center,
                   style: theme.textTheme.headlineSmall?.copyWith(
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                // ⚠️ **必须明说「东西没丢」。**
+                //
+                // 底下那一层是看得见的，但一张登录卡片弹出来的时候，人的
+                // 第一反应是「完了，白敲了」—— 而这次改动买到的恰恰是没白敲。
+                // 不说的话，用户仍然会先去把话复制走再登录，那这层覆盖等于
+                // 只换了个样子
+                if (widget.overlay && !registering) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    '登录状态需要刷新。你的对话与还没发出去的内容都留着，'
+                    '登录完就接着刚才的地方。',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                      height: 1.5,
+                    ),
+                  ),
+                ],
                 // ── 你正在连哪 ──
                 //
                 // **常驻，不是出错才说。** 用户 2026-08-29 的原话：
