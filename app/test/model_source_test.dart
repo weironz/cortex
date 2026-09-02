@@ -856,6 +856,61 @@ void main() {
     });
   });
 
+  group('改名', () {
+    /// **名字要能改。**
+    ///
+    /// 2026-09-02 用户实报：「自定义服务商名字不能修改」。
+    ///
+    /// 这一位（`model_sources.label`）在库里、在 DTO 里、在 HTTP 上、在 Dart
+    /// 模型里**一直都有**，添加对话框里也有「备注名」那一格，连「空就用供应商
+    /// 显示名」的回落都写好了 —— 缺的只有详情页那个输入框，以及保存时把它
+    /// 真的发出去（那里从前原样回传 `s.label`）。
+    ///
+    /// 判据落在**发出去的那一笔**上，不是「框画出来了」：只加框不改保存的话，
+    /// 用户能打字、能点保存、界面毫无异样，而名字一个字都没变。
+    testWidgets('改完保存，新名字真的发出去了', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _open(tester, _kAlibaba);
+
+      final field = find.byKey(const ValueKey('field:source-label'));
+      expect(field, findsOneWidget, reason: '详情页上根本没有可以改名字的地方');
+
+      await tester.enterText(field, '公司网关');
+      await tester.pump();
+      await tester.tap(find.text('保存'));
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(
+        api.saves.map((s) => s['label']),
+        contains('公司网关'),
+        reason:
+            '框有了、字打进去了、按钮也点了，而发出去的仍是旧名字 —— '
+            '那正是保存路径上原样回传 s.label 的样子，界面上看不出任何异常',
+      );
+    });
+
+    /// 清空 = 回落到供应商的显示名。占位要把那个名字**摆出来**。
+    testWidgets('留空时占位就是供应商的默认名', (tester) async {
+      final api = _Api();
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+      await _open(tester, _kAlibaba);
+
+      final hint = tester
+          .widget<TextField>(find.byKey(const ValueKey('field:source-label')))
+          .decoration
+          ?.hintText;
+      expect(hint, isNotNull, reason: '不摆出默认名的话，用户看着一个空框不知道留空会变成什么');
+      expect(hint, isNot(''));
+    });
+  });
+
   group('端点占位', () {
     testWidgets('有官方默认地址就摆真地址，不是「https://…」', (tester) async {
       final api = _Api();

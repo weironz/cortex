@@ -294,8 +294,17 @@ class _ModelPageState extends ConsumerState<ModelPage> {
                               source: current,
                               busy: _busy,
                               check: _check,
-                              onSave: ({required apiKey, required baseUrl}) =>
-                                  _saveInline(current, apiKey, baseUrl),
+                              onSave:
+                                  ({
+                                    required apiKey,
+                                    required baseUrl,
+                                    required label,
+                                  }) => _saveInline(
+                                    current,
+                                    apiKey,
+                                    baseUrl,
+                                    label,
+                                  ),
                               onDelete: () => _delete(current),
                               onFetch: () => _fetch(current),
                               // ⚠️ 部署那条整个不画齿轮（key 与型号都在
@@ -486,7 +495,12 @@ class _ModelPageState extends ConsumerState<ModelPage> {
   /// 弹窗版每次想核对一眼端点都要点开、关掉。而端点恰恰是最常需要核对的
   /// 一项 —— 那把 alibaba key 的 401 就是端点错了（内置默认国际站），
   /// 而弹窗把它藏在了两次点击之后。
-  Future<void> _saveInline(ModelSource s, String apiKey, String baseUrl) async {
+  Future<void> _saveInline(
+    ModelSource s,
+    String apiKey,
+    String baseUrl,
+    String label,
+  ) async {
     await _run(
       () => ref
           .read(cortexApiProvider)
@@ -494,7 +508,9 @@ class _ModelPageState extends ConsumerState<ModelPage> {
             id: s.id,
             provider: s.provider,
             apiKey: apiKey,
-            label: s.label,
+            // 用**表单里那个**，不是 `s.label`。从前这里原样回传旧值 ——
+            // 那正是「字段一路都在、就是改不了」的最后一环
+            label: label,
             baseUrl: baseUrl,
           ),
     );
@@ -502,7 +518,7 @@ class _ModelPageState extends ConsumerState<ModelPage> {
       _SourceForm(
         provider: s.provider,
         apiKey: apiKey,
-        label: s.label,
+        label: label,
         baseUrl: baseUrl,
       ),
     );
@@ -1010,7 +1026,12 @@ class _Detail extends StatefulWidget {
   final ModelSource source;
   final bool busy;
   final SourceCheck? check;
-  final void Function({required String apiKey, required String baseUrl}) onSave;
+  final void Function({
+    required String apiKey,
+    required String baseUrl,
+    required String label,
+  })
+  onSave;
   final VoidCallback onDelete;
   final VoidCallback onFetch;
   final void Function(String, bool) onToggleModel;
@@ -1027,6 +1048,17 @@ class _Detail extends StatefulWidget {
 
 class _DetailState extends State<_Detail> {
   final _key = TextEditingController();
+
+  /// 用户给这条起的名字。空 = 回落到供应商的显示名。
+  ///
+  /// 这一位在库里（`model_sources.label`）、在 DTO 里、在 HTTP 上、在 Dart
+  /// 模型里**一直都有**，连「空就用供应商名」的回落都写好了 —— 缺的只有
+  /// 这个输入框。2026-09-02 用户实报：「自定义服务商名字不能修改」。
+  ///
+  /// 这就是这个仓库的头号形状：造好了没人调用。一条从库到界面全程通着的
+  /// 路，因为最后 30 行没写，在产品里等于不存在。
+  late final _label = TextEditingController(text: widget.source.label);
+
   late final _baseUrl = TextEditingController(
     text: widget.source.baseUrl ?? '',
   );
@@ -1073,6 +1105,7 @@ class _DetailState extends State<_Detail> {
   @override
   void dispose() {
     _key.dispose();
+    _label.dispose();
     _baseUrl.dispose();
     _keyFocus.dispose();
     super.dispose();
@@ -1110,6 +1143,31 @@ class _DetailState extends State<_Detail> {
             ),
           )
         else ...[
+          // 名字排在密钥前面：它是这条来源的**身份**，而密钥是它的凭据。
+          // 同一家配两条（两个中转站、两个账号）时，这一格是唯一分得清
+          // 谁是谁的东西 —— 不填的话两条都叫「自定义（OpenAI 兼容）」
+          SettingsField(
+            label: '名称',
+            hint:
+                '留空 = 用供应商的默认名（${widget.data.providerOf(s.provider)?.displayName ?? s.provider}）',
+            child: TextField(
+              // 按名字找，不按位置 —— 这一页上的输入框数量一直在变，
+              // `byType(TextField).last` 会随着加一个框悄悄指到别处
+              key: const ValueKey('field:source-label'),
+              controller: _label,
+              autocorrect: false,
+              enableSuggestions: false,
+              onChanged: (_) => setState(() => _dirty = true),
+              decoration: InputDecoration(
+                isDense: true,
+                border: const OutlineInputBorder(),
+                hintText:
+                    widget.data.providerOf(s.provider)?.displayName ??
+                    s.provider,
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
           SettingsField(
             label: 'API 密钥',
             hint: masked ? '点一下换一把新的（存好的那把动不了、也看不见）' : '留空 = 不改动原来那把',
@@ -1361,7 +1419,11 @@ class _DetailState extends State<_Detail> {
   }
 
   void _save() {
-    widget.onSave(apiKey: _key.text.trim(), baseUrl: _baseUrl.text.trim());
+    widget.onSave(
+      apiKey: _key.text.trim(),
+      baseUrl: _baseUrl.text.trim(),
+      label: _label.text.trim(),
+    );
     setState(() {
       _dirty = false;
       _key.clear();
