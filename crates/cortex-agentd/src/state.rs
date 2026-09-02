@@ -179,10 +179,68 @@ impl Accounts {
             .await
             .map_err(|e| cortex_core::CortexError::Store(format!("连 cortex_auth 失败：{e}")))?;
 
-        Ok(Self {
+        let me = Self {
             pool,
             tenants: Arc::new(cortex_store::TenantPools::new(database_url)),
-        })
+        };
+        me.migrate_tenants().await;
+        Ok(me)
+    }
+
+    /// 把**已有的每个租户** schema 迁到最新。
+    ///
+    /// # 为什么非有这一步不可
+    ///
+    /// 租户 schema 此前只在 [`crate::accounts`] 建号那一刻迁移一次
+    /// （`cortex_store::provision`）。之后加的每一条 migration 都到不了
+    /// 已经存在的用户 —— 2026-09-02 实测：`public` 在 `20260902000001`，
+    /// 而当天建的那个真实用户停在 `20260830000001`。
+    ///
+    /// 症状极其难查，因为它**只对一部分用户发生**：加一个列之后，新注册的人
+    /// 一切正常，老用户撞一片「column does not exist」，而两边跑的是同一份
+    /// 二进制。发现它纯属偶然 —— 一条纯数据的回填迁移没生效。
+    ///
+    /// `cortex_store::migrate_all` 本来就是为这件事写的（它的文档写着
+    /// 「慢几秒换一个能起来的服务」），而它**一个调用点都没有**。
+    ///
+    /// # 为什么失败不让进程起不来
+    ///
+    /// 一个租户的库坏了不该让所有人下线 —— 那正是 `migrate_all` 逐个记录
+    /// 失败而不是抛出去的理由。坏掉的那个用户会在自己的请求上撞到零散的
+    /// SQL 错误，而日志里有一行 error 说清是谁。
+    async fn migrate_tenants(&self) {
+        let schemas: Vec<String> = match sqlx::query_scalar(
+            "SELECT DISTINCT schema_name FROM cortex_auth.users ORDER BY schema_name",
+        )
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(error = %e, "列不出租户 schema，跳过启动迁移");
+                return;
+            }
+        };
+        let names: Vec<cortex_store::SchemaName> = schemas
+            .iter()
+            .filter_map(|raw| match cortex_store::SchemaName::new(raw) {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    tracing::error!(schema = %raw, error = %e, "users 里有个 schema 名不合法");
+                    None
+                }
+            })
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        let report = cortex_store::migrate_all(&self.tenants, &names).await;
+        let failed = report.iter().filter(|r| r.failure.is_some()).count();
+        tracing::info!(
+            tenants = report.len(),
+            failed,
+            "启动时把租户 schema 迁到最新"
+        );
     }
 }
 
@@ -429,5 +487,172 @@ impl AgentState {
             .last_use
             .lock()
             .map_or_else(|_| Vec::new(), |g| g.keys().cloned().collect())
+    }
+}
+
+#[cfg(test)]
+mod migrate_tenants_tests {
+    use super::*;
+
+    /// 找 `DATABASE_URL`，**不把 .env 灌进进程环境**（`dotenvy::dotenv()` 会把
+    /// 整份 .env 设成进程环境变量，而同一个进程里别的测试断言的恰是「没设
+    /// 环境变量」的默认值 —— 症状是单跑绿、全量跑把隔壁弄红）。
+    fn database_url() -> Option<String> {
+        if let Ok(url) = std::env::var("DATABASE_URL")
+            && !url.is_empty()
+        {
+            return Some(url);
+        }
+        let iter = dotenvy::dotenv_iter().ok()?;
+        for item in iter {
+            let (k, v) = item.ok()?;
+            if k == "DATABASE_URL" && !v.is_empty() {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// **已经存在的租户要在启动时被迁到最新。**
+    ///
+    /// 这条守的是 2026-09-02 那个 bug：租户 schema 此前只在建号那一刻迁移
+    /// 一次，之后加的每条 migration 都到不了已有用户。实测 `public` 在
+    /// `20260902000001` 而当天建的真实用户停在 `20260830000001`。
+    ///
+    /// 它**只对一部分用户发生**，这是最难查的地方：加一个列之后，新注册的人
+    /// 一切正常，老用户撞一片「column does not exist」，两边跑的是同一份二进制。
+    ///
+    /// 造的场景就是那个形状：schema 建出来了，但一条 migration 都没跑过 ——
+    /// 一个「落后于代码」的租户。启动之后它必须追上。
+    ///
+    /// 连不上 `DATABASE_URL` 时跳过（与别的集成测试同一约定）。
+    #[tokio::test]
+    async fn 启动时把落后的租户迁到最新() {
+        let Some(url) = database_url() else {
+            eprintln!("跳过：未设置 DATABASE_URL");
+            return;
+        };
+        let admin = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("跳过：连不上数据库（{e}）");
+                return;
+            }
+        };
+
+        // 全局那套表要在（`cortex_auth.users`）。这里**不跑全局 migration** ——
+        // 开发库那份归真正的部署管，测试去跑一遍会在校验和对不上时报
+        // VersionMismatch（画廊那条测试实测撞到过）。没有就跳过。
+        let users_table: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('cortex_auth.users')::text")
+                .fetch_one(&admin)
+                .await
+                .expect("探测 cortex_auth.users 不应失败");
+        if users_table.is_none() {
+            eprintln!("跳过：这个库里没有 cortex_auth.users（全局 migration 未跑）");
+            admin.close().await;
+            return;
+        }
+
+        // 名字要过 `SchemaName::new` 的白名单：`u_` + 26 位小写 ULID 字母表
+        // （没有 i l o u）。用固定前缀 + 时间戳凑，且带独有前缀便于清理
+        let stamp = format!(
+            "{:026}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("时钟不早于 1970")
+                .as_nanos()
+                % 10_u128.pow(20)
+        );
+        let schema = format!("u_{stamp}");
+        // 26 位数字既过 ULID 域的 Crockford 字母表，也过 schema 名那套白名单
+        // —— 一份材料两处用，省掉「两个名字对不上」这一类问题
+        let user_id = stamp.clone();
+
+        // 残留清理：上一次 panic 走不到结尾
+        let _ = sqlx::query("DELETE FROM cortex_auth.users WHERE username LIKE 'migtest\\_%'")
+            .execute(&admin)
+            .await;
+
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{schema}\""
+        )))
+        .execute(&admin)
+        .await
+        .expect("建租户 schema 不应失败");
+        // ★ **故意不跑迁移** —— 这就是「落后于代码的租户」那个形状
+        sqlx::query(
+            "INSERT INTO cortex_auth.users (id, username, password_hash, schema_name)
+             VALUES ($1, $2, 'x', $3)",
+        )
+        .bind(&user_id)
+        .bind(format!("migtest_{stamp}"))
+        .bind(&schema)
+        .execute(&admin)
+        .await
+        .expect("写 users 行不应失败");
+
+        let before: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT to_regclass('{schema}.library_items')::text"
+        )))
+        .fetch_one(&admin)
+        .await
+        .expect("探测不应失败");
+        assert!(
+            before.is_none(),
+            "前提没成立：这片 schema 已经有表了，测不出「落后的租户会不会被追上」"
+        );
+
+        // ── 被测的那一步 ──
+        //
+        // **不走 `Accounts::connect`**：它会先跑一遍全局 migration，而开发库
+        // 那份归真正的部署管 —— 校验和对不上时报 `VersionMismatch`，测试就
+        // 变成了在验开发库的状态而不是验这段代码（画廊那条测试的注释里
+        // 记着同一个坑）。这里直接把 `Accounts` 拼出来，只跑要测的那一步。
+        let pool = {
+            use std::str::FromStr as _;
+            let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+                .expect("DATABASE_URL 应当是合法连接串")
+                .options([("search_path", "cortex_auth,public")]);
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect_with(options)
+                .await
+                .expect("连 cortex_auth 不应失败")
+        };
+        let accounts = Accounts {
+            pool,
+            tenants: Arc::new(cortex_store::TenantPools::new(&url)),
+        };
+        accounts.migrate_tenants().await;
+
+        let after: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT to_regclass('{schema}.library_items')::text"
+        )))
+        .fetch_one(&admin)
+        .await
+        .expect("探测不应失败");
+
+        // 先清理再断言：断言失败会 panic，而残留会让下一次运行的前提不成立
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
+        )))
+        .execute(&admin)
+        .await;
+        let _ = sqlx::query("DELETE FROM cortex_auth.users WHERE id = $1")
+            .bind(&user_id)
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        assert!(
+            after.is_some(),
+            "启动之后这个租户**还是**没有表 —— 那正是那个 bug：\
+             migration 只在建号那一刻跑，之后加的每一条都到不了已有用户。\
+             症状只对老用户发生，而两边跑的是同一份二进制"
+        );
     }
 }
