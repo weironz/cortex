@@ -138,6 +138,39 @@ void main() {
     );
   });
 
+  /// **内联的工具行不许带「本轮工具调用」那行标题。**
+  ///
+  /// 骨架里每个工具块如果各裹一层 `TurnDrawer`，一轮二十次调用就会画出
+  /// 二十行「本轮工具调用 · 1 次」—— 而「本轮」这个词用在单独一次调用上
+  /// 本身也是错的。
+  ///
+  /// ⚠️ 这条是补的：上一版只验了**顺序**，而顺序是对的、标题也一行行地
+  /// 冒出来了。流式期间还看不见（那一支不画标题），**跑完收尾才露出来**。
+  testWidgets('内联的工具行不带抽屉标题', (tester) async {
+    await _pump(
+      tester,
+      AssistantBlock(
+        text: '两次调用。',
+        toolCalls: tools,
+        blocks: const [TextBlock('两次调用。'), ToolBlock(0), ToolBlock(1)],
+        createdAt: DateTime.utc(2026, 9, 2),
+      ),
+    );
+    expect(
+      find.textContaining('本轮工具调用'),
+      findsNothing,
+      reason:
+          '内联的工具行裹了 TurnDrawer —— 每一次调用都带出一行标题，'
+          '一轮二十次就是二十行「本轮工具调用 · 1 次」',
+    );
+    // 正对照：行本身还在，不是被一起删掉了
+    expect(
+      find.textContaining('read_file', findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.textContaining('grep', findRichText: true), findsOneWidget);
+  });
+
   /// **下标越界什么都不画。**
   ///
   /// 骨架与工具列表对不上是真实存在的（拼过列表的那种历史消息、老数据）。

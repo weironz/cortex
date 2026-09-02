@@ -93,10 +93,10 @@ class _TurnDrawerState extends State<TurnDrawer> {
                 onTap: () => setState(() => _liveExpanded = !_liveExpanded),
               ),
               if (_liveExpanded)
-                for (final call in hidden) _ToolRow(call: call),
+                for (final call in hidden) ToolRow(call: call),
             ],
-            for (final call in shown) _ToolRow(call: call),
-            for (final call in live) _ToolRow(call: call),
+            for (final call in shown) ToolRow(call: call),
+            for (final call in live) ToolRow(call: call),
           ],
         ),
       );
@@ -127,7 +127,7 @@ class _TurnDrawerState extends State<TurnDrawer> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         for (final call in widget.toolCalls)
-                          _ToolRow(call: call),
+                          ToolRow(call: call),
                       ],
                     ),
                   )
@@ -227,16 +227,22 @@ class _Toggle extends StatelessWidget {
 ///
 /// 默认**收着**：一轮里可能有五六次写入，全部摊开会把这一段变成一片
 /// 看不完的绿红，而抽屉本来是「扫一眼这轮干了什么」用的。
-class _ToolRow extends StatefulWidget {
-  const _ToolRow({required this.call});
+/// 一次工具调用的**那一行**，不带任何标题或外框。
+///
+/// 公开是为了**骨架内联**用（见 `AssistantBlock` 里那段）：块把工具画进正文
+/// 中间时，要的就是这一行本身。裹一层 [TurnDrawer] 的话会带出它那行
+/// 「本轮工具调用 · N 次」的标题 —— 一轮二十次调用就是二十行「· 1 次」，
+/// 而「本轮」这个词用在单独一次调用上本身也是错的。
+class ToolRow extends StatefulWidget {
+  const ToolRow({super.key, required this.call});
 
   final ToolCall call;
 
   @override
-  State<_ToolRow> createState() => _ToolRowState();
+  State<ToolRow> createState() => _ToolRowState();
 }
 
-class _ToolRowState extends State<_ToolRow> {
+class _ToolRowState extends State<ToolRow> {
   bool _open = false;
 
   @override

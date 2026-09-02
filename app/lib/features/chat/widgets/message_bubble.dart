@@ -369,13 +369,12 @@ class AssistantBlock extends StatelessWidget {
                           // 序号越界 = 骨架与工具列表对不上（拼过列表、
                           // 或者老数据）。**什么都不画**，别画一个占位：
                           // 正文中间冒出一个「未知工具」比少一行更糟
+                          // 直接画那一行，**不裹 TurnDrawer** —— 裹了会带出
+                          // 它那行「本轮工具调用 · N 次」的标题，一轮二十次
+                          // 调用就是二十行「· 1 次」
                           ToolBlock(:final ordinal)
                               when ordinal >= 0 && ordinal < toolCalls.length =>
-                            TurnDrawer(
-                              toolCalls: [toolCalls[ordinal]],
-                              streaming: streaming,
-                              initiallyExpanded: true,
-                            ),
+                            ToolRow(call: toolCalls[ordinal]),
                           _ => const SizedBox.shrink(),
                         }
                     else if (text.isNotEmpty)
