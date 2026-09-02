@@ -21,6 +21,8 @@ import '../../../core/save_file.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/blob_bytes.dart';
 import '../../../state/image_controller.dart';
+import '../../../state/library_controller.dart';
+import '../../../state/library_save.dart';
 import 'folder_picker.dart';
 
 /// 做完一件事之后要对用户说的那句话。
@@ -195,6 +197,36 @@ class ImageActions {
     }
   }
 
+  /// 收进资料库。**图片不切分**，所以要说清模型检索不到它。
+  ///
+  /// # 为什么这一项在这里，而不是在资料库那一页
+  ///
+  /// 资料库那一屏的空态一直写着「画出来的图也可以从图片页收进来」——
+  /// 而图片页上**从来没有过这个入口**，`addToLibrary()` 三处都写了却零个
+  /// 调用点。2026-09-02 用户实报「生成的图片为什么不会显示在资料库里」，
+  /// 问的正是这句话答应了却没做的事。
+  ///
+  /// # 为什么那句提示不能省
+  ///
+  /// 服务端对 `image/*` 直接落 `chunk_state = 'unsupported'`（见
+  /// `library::add`）：图没有正文可切，`library_search` 永远找不到它。
+  /// 不说的话，用户收进去之后会问「模型怎么查不到我给它的图」，
+  /// 而那不是故障 —— 是这件事本来就只是「留个位置」。
+  Future<void> saveToLibrary() async {
+    final name = libraryNameFor(hash: hash, label: prompt);
+    try {
+      await ref
+          .read(cortexApiProvider)
+          .addToLibrary(blobHash: hash, name: name, origin: 'generated');
+      ref.invalidate(libraryControllerProvider);
+      said('已收进资料库（图片不切分，模型检索不到它 —— 那里存的是位置，不是正文）。');
+    } on CortexApiException catch (e) {
+      said(e.isUnsupported ? '这个部署没有资料库。' : e.message);
+    } on Object catch (e) {
+      said('$e');
+    }
+  }
+
   /// 从图库移除。**blob 不动**，对话里那张照常显示。
   Future<void> removeFromGallery() async {
     final id = await _id();
@@ -267,6 +299,9 @@ Future<void> showImageContextMenu(
     items: [
       PopupMenuItem(onTap: actions.copyImage, child: const Text('复制图片')),
       PopupMenuItem(onTap: actions.saveAs, child: const Text('另存为…')),
+      // **不挂在 `inGallery` 下面。** 收进资料库只要一个哈希，
+      // 对话里那张（没有图库行）照样能收 —— 而那正是用户手上最多的那种
+      PopupMenuItem(onTap: actions.saveToLibrary, child: const Text('存进资料库')),
       if (actions.inGallery)
         PopupMenuItem(
           onTap: actions.copyLink,

@@ -3,9 +3,13 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../api/api_exception.dart';
 import '../../../models/attachment.dart';
+import '../../../models/library_item.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/attachment_controller.dart';
+import '../../../state/library_controller.dart';
+import '../../../state/library_save.dart';
 import '../../../core/theme.dart';
 import '../../images/widgets/image_actions.dart';
 import '../../images/widgets/image_thumb.dart' show decodeWidthFor;
@@ -62,7 +66,7 @@ class AttachmentStrip extends StatelessWidget {
   }
 }
 
-class _CommittedAttachment extends StatelessWidget {
+class _CommittedAttachment extends ConsumerWidget {
   const _CommittedAttachment({required this.attachment, required this.extent});
 
   final Attachment attachment;
@@ -71,21 +75,101 @@ class _CommittedAttachment extends StatelessWidget {
   final double extent;
 
   @override
-  Widget build(BuildContext context) {
-    return attachment.isImage
-        ? _ImageThumb(
+  Widget build(BuildContext context, WidgetRef ref) {
+    // 图那一支的右键菜单在 `_ImageThumb` 里（与图库共用 `ImageActions`），
+    // 这里只补文件那一支
+    if (attachment.isImage) {
+      return _ImageThumb(
+        hash: attachment.hash,
+        label: attachment.displayName,
+        extent: extent,
+      );
+    }
+    return GestureDetector(
+      onSecondaryTapDown: (d) =>
+          _showFileMenu(context, ref, d.globalPosition, attachment),
+      // 触摸设备上没有右键 —— 长按是同一个动作的另一只手
+      onLongPressStart: (d) =>
+          _showFileMenu(context, ref, d.globalPosition, attachment),
+      child: _FileCard(
+        title: attachment.displayName,
+        subtitle: [
+          kindLabel(attachment.kind),
+          if (attachment.sizeBytes != null) formatBytes(attachment.sizeBytes),
+        ].join(' · '),
+      ),
+    );
+  }
+}
+
+/// 文件附件的右键菜单 —— 现在只有一项。
+///
+/// # 为什么要有这个入口
+///
+/// 资料库那一屏的空态写着「把文件拖进对话里发出去，它就会进资料库」，
+/// 而附件那条路**一行都没有碰过 library**：`addToLibrary()` 在接口、
+/// HTTP 实现、mock 里各写了一遍，零个调用点。于是生产上跑了一周多，
+/// `library_items` 是 0 行 —— 一个只能看、进不去东西的资料库。
+///
+/// # 为什么是「手动收」而不是发出去就自动进
+///
+/// 那句空态描述的是自动进，但这个文件顶上的分工说的是另一回事：
+/// **附件属于那一条消息，资料库属于你**。自动进的下场是资料库被一次性
+/// 的截图和日志灌满，而它存在的理由正是「每一轮都可能被取用的背景材料」。
+/// 所以留下手动这一档，并把那句空态改成实话。
+Future<void> _showFileMenu(
+  BuildContext context,
+  WidgetRef ref,
+  Offset at,
+  Attachment attachment,
+) async {
+  final overlay = Overlay.of(context).context.findRenderObject()! as RenderBox;
+  await showMenu<void>(
+    context: context,
+    position: RelativeRect.fromRect(
+      at & const Size(1, 1),
+      Offset.zero & overlay.size,
+    ),
+    items: [
+      PopupMenuItem(
+        onTap: () => _saveFileToLibrary(context, ref, attachment),
+        child: const Text('存进资料库'),
+      ),
+    ],
+  );
+}
+
+Future<void> _saveFileToLibrary(
+  BuildContext context,
+  WidgetRef ref,
+  Attachment attachment,
+) async {
+  void said(String m) => ScaffoldMessenger.maybeOf(
+    context,
+  )?.showSnackBar(SnackBar(content: Text(m)));
+  try {
+    final item = await ref
+        .read(cortexApiProvider)
+        .addToLibrary(
+          blobHash: attachment.hash,
+          name: libraryNameFor(
             hash: attachment.hash,
             label: attachment.displayName,
-            extent: extent,
-          )
-        : _FileCard(
-            title: attachment.displayName,
-            subtitle: [
-              kindLabel(attachment.kind),
-              if (attachment.sizeBytes != null)
-                formatBytes(attachment.sizeBytes),
-            ].join(' · '),
-          );
+          ),
+        );
+    ref.invalidate(libraryControllerProvider);
+    // **切不出正文的要当场说。** pdf/docx/图片落的是 `unsupported`，
+    // 不说的话用户以为收进去就能被检索到，然后因为模型查不到而认定
+    // 资料库坏了 —— 资料库那一屏为这件事专门用了琥珀色，这里不能更含糊
+    said(
+      item.chunkState == ChunkState.unsupported
+          ? '已收进资料库。不过这类文件还提不出正文，模型检索不到它。'
+          : '已收进资料库，模型需要时会自己去检索它。',
+    );
+  } on CortexApiException catch (e) {
+    said(e.isUnsupported ? '这个部署没有资料库。' : e.message);
+  } on Object catch (e) {
+    said('$e');
   }
 }
 

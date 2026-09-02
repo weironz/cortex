@@ -99,12 +99,19 @@ void main() {
     await _pump(tester, c);
 
     expect(find.text('资料库还是空的'), findsOneWidget);
+    // ⚠️ 这条断言改过一次。原来它钉的是「拖进对话里」——
+    // 而那条路**不存在**：附件发出去一行都没碰过 library，
+    // 生产上 `library_items` 一直是 0 行。于是这条测试把一句
+    // **做不到的话**钉在了界面上，而它一直是绿的 ——
+    // 2026-09-02 用户实报「生成的图片为什么不会显示在资料库里」
+    // 才翻出来。入口现在真的有了（右键 →「存进资料库」），
+    // 它能不能用由 `save_to_library_test.dart` 盯。
     expect(
-      find.textContaining('拖进对话里'),
+      find.textContaining('存进资料库'),
       findsOneWidget,
       reason:
-          '材料不是从这一页上传的，是从对话里拖进去的 —— 不说的话，'
-          '用户在这一页上找不到任何入口，会以为功能没做完',
+          '材料不是从这一页上传的，是在对话里的文件上右键收进去的 ——'
+          '不说的话，用户在这一页上找不到任何入口，会以为功能没做完',
     );
     expect(tester.takeException(), isNull);
   });
