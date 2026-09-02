@@ -140,7 +140,7 @@ fn system_prompt_for(
     workspace: Option<&str>,
     assistant: Option<&cortex_proto::assistants::AssistantBrief>,
     skills: &[(&str, &str)],
-    can_use_computer: bool,
+    caps: Caps,
 ) -> String {
     let mut base = String::new();
     match assistant.filter(|a| a.is_meaningful()) {
@@ -174,12 +174,19 @@ fn system_prompt_for(
     // 电脑操作那段说明。与工具目录同生共死 —— 判据是同一个 `can_use_computer`。
     // 摆了工具不讲坐标系，模型会一直点偏；讲了坐标系却没有工具，
     // 它会承诺一件做不到的事
-    if can_use_computer {
+    if caps.can_use_computer {
         // 屏幕尺寸问不到就按一个常见的写。**不能因此不印这一段**：缺了它
         // 模型不知道要先截图、也不知道坐标可以直接用，于是每一次都点偏
         let (w, h) = crate::computer::Computer::screen_size().unwrap_or((1920, 1080));
         prompt.push_str("\n\n");
         prompt.push_str(&cortex_agent::prompt::computer_note(w, h));
+    }
+    // 「做完了要交出去」。与 `deliver_file` 同生共死 —— 判据是同一个
+    // `can_deliver`。讲了却没有工具，模型会答应发文件然后什么都不发生；
+    // 摆了工具却不讲，它写完一份方案的默认动作是把正文抄进回复里
+    if caps.can_deliver {
+        prompt.push_str("\n\n");
+        prompt.push_str(cortex_agent::prompt::deliver_note());
     }
     // 「这台机器的 shell 是哪一族」。接在出网说明前面：两段都是整会话稳定的
     // 事实，一起进可缓存前缀。Unix 上返回 None，所以这一段只在 Windows 出现
@@ -243,6 +250,13 @@ struct Caps {
     /// 答案，不是骗人。
     can_use_library: bool,
 
+    /// 交得出文件不。**两个条件都要**：有工作区（才有文件可交）、
+    /// 够得着服务端（才上传得了）。
+    ///
+    /// 少任何一个，模型每次调都拿到同一句失败 —— 而它会以为是自己路径写错了，
+    /// 于是换个路径再试，一轮里试上五次。
+    can_deliver: bool,
+
     /// 连着的 MCP server 里**有没有 resource**。
     ///
     /// 判据是「真的有」而不是「有没有连 server」—— 与技能那条同源：
@@ -272,6 +286,7 @@ impl Caps {
             can_search,
             can_use_library,
             has_mcp_resources,
+            can_deliver,
         } = self;
         can_draw
             || has_skills
@@ -281,6 +296,7 @@ impl Caps {
             || can_search
             || can_use_library
             || has_mcp_resources
+            || can_deliver
     }
 }
 
@@ -327,6 +343,11 @@ fn with_external(
     }
     if caps.has_mcp_resources {
         specs.push(cortex_agent::tools::mcp_resource_spec());
+    }
+    // 交付那一个。⚠️ **与提示词里那段同生共死**（CLAUDE.md 约束 2）：
+    // 摆出来而交不出去，模型会答应「我把方案发给你」然后每次都失败
+    if caps.can_deliver {
+        specs.push(cortex_agent::tools::deliver_spec());
     }
     if caps.can_background {
         specs.extend(cortex_agent::tools::background_specs());
@@ -851,6 +872,10 @@ impl Engine {
             // 问的是「连着的那些 server 里真的有 resource 吗」，不是
             // 「连着 server 吗」—— 绝大多数 server 只提供工具
             has_mcp_resources: self.mcp.has_resources().await,
+            // 交付要**两样都有**：工作区（才有文件可交）与服务端（才传得上去）。
+            // `can_draw` 在这里当的是「够不够得着服务端」，与 can_search /
+            // can_use_library 复用同一个判据 —— 各写一遍的话总有一处会漏
+            can_deliver: bound.is_some() && can_draw,
         };
         // 这个智能体关掉了哪些工具。**与提示词同源**：换的人设与关掉的
         // 工具来自同一个 brief，各取各的话会出现「人设是大厨、工具却是
@@ -913,7 +938,7 @@ impl Engine {
             workspace_turn.as_ref().and(bound.as_deref()),
             req.assistant.as_ref(),
             &catalog,
-            caps.can_use_computer,
+            caps,
         );
 
         // ── 4. agent 循环。工具在**这台机器**上执行 ──
@@ -1512,6 +1537,47 @@ impl LocalHost {
     }
 }
 
+/// 后缀 → MIME。**只认那几类真的会被交付的**，其余给
+/// `application/octet-stream` —— 猜错的代价是浏览器把一份 xlsx 当文本打开。
+///
+/// 不引 `mime_guess`：那个 crate 带着一整张 IANA 表，而这里要的是十来行。
+fn mime_of(name: &str) -> &'static str {
+    let ext = std::path::Path::new(name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "md" | "markdown" => "text/markdown",
+        "txt" | "log" => "text/plain",
+        "html" | "htm" => "text/html",
+        "zip" => "application/zip",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// MIME → 附件的语义档（`image` / `audio` / `video` / `document`）。
+///
+/// 界面按它决定画缩略图还是画一张卡片。判错的表现是一份 xlsx 被当成图去
+/// 解码，然后那一格永远转圈。
+fn kind_of(mime: &str) -> &'static str {
+    match mime.split('/').next().unwrap_or("") {
+        "image" => "image",
+        "audio" => "audio",
+        "video" => "video",
+        _ => "document",
+    }
+}
+
 /// MIME → 后缀。名字要给人看的，`生成的图.png` 比一串哈希强。
 fn ext_of(mime: &str) -> &'static str {
     match mime {
@@ -1893,6 +1959,107 @@ impl ToolHost for LocalHost {
     ///
     /// 结果里也**明说别再写文件**：不说的话模型会顺手 `write_file` 一份，
     /// 而那份是它编出来的假图（它手上根本没有字节）。
+    /// 交付一个文件：读 → 上传 → 挂成本轮 assistant 消息的附件。
+    ///
+    /// 挂成附件之后剩下的路**一条都不用新写**：渲染、下载、跨设备同步走
+    /// 与用户自己上传的附件同一条；进资料库走服务端在 `POST /episodes` 上
+    /// 那一步（`episodes::collect_attachments`，assistant 那一轮记
+    /// `generated`）。这正是 `generate_image` 当初选的形状。
+    async fn deliver_file(
+        &self,
+        arguments: &serde_json::Value,
+        sandbox: &cortex_agent::Sandbox,
+    ) -> cortex_agent::ToolResult {
+        /// 一次最多交多大。
+        ///
+        /// 服务端直传上限是 32 MB（`blobs::DIRECT_UPLOAD_LIMIT`），这里卡在
+        /// 它下面一档：撞服务端的话模型看到的是一句 413，然后它会重试 ——
+        /// 而重试一百次也不会变小。在这儿拦，说的是一句它能处理的话。
+        const MAX_DELIVER_BYTES: u64 = 24 * 1024 * 1024;
+
+        let Some(path) = arguments.get("path").and_then(|v| v.as_str()) else {
+            return cortex_agent::ToolResult::err("缺少 path 参数");
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            return cortex_agent::ToolResult::err("path 不能为空");
+        }
+
+        // 路径安全走沙箱那一份，不自己拼 —— 自己拼的那天，`../` 就出去了
+        let resolved = match sandbox.resolve(path) {
+            Ok(p) => p,
+            Err(e) => return cortex_agent::ToolResult::err(format!("{e}")),
+        };
+
+        let meta = match std::fs::metadata(&resolved) {
+            Ok(m) => m,
+            Err(e) => {
+                return cortex_agent::ToolResult::err(format!(
+                    "读不到 {path}：{e}。先确认它真的写出来了（可以用 list_dir 看一眼）"
+                ));
+            }
+        };
+        if meta.is_dir() {
+            return cortex_agent::ToolResult::err(format!(
+                "{path} 是一个目录。一次交一个文件 —— 要交一整份材料就先打包成一个文件"
+            ));
+        }
+        if meta.len() == 0 {
+            return cortex_agent::ToolResult::err(format!(
+                "{path} 是空文件。空文件交给用户没有意义，先确认它真的写完了"
+            ));
+        }
+        if meta.len() > MAX_DELIVER_BYTES {
+            return cortex_agent::ToolResult::err(format!(
+                "{path} 有 {:.1} MB，超过 {} MB 的上限。\
+                 告诉用户这份东西太大，或者拆成几份分别交",
+                meta.len() as f64 / (1024.0 * 1024.0),
+                MAX_DELIVER_BYTES / (1024 * 1024),
+            ));
+        }
+
+        let bytes = match std::fs::read(&resolved) {
+            Ok(b) => b,
+            Err(e) => return cortex_agent::ToolResult::err(format!("读 {path} 失败：{e}")),
+        };
+
+        // 显示名属于**这一次引用**而不是内容（同 `episode_blobs.filename`），
+        // 所以模型可以给它起个用户认得出的名字
+        let display = arguments
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map_or_else(
+                || {
+                    std::path::Path::new(path)
+                        .file_name()
+                        .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned())
+                },
+                str::to_owned,
+            );
+
+        let mime = mime_of(&display);
+        let hash = match self.remote.upload_blob(bytes, mime).await {
+            Ok(h) => h,
+            Err(e) => return cortex_agent::ToolResult::err(format!("交付失败：{e}")),
+        };
+
+        // 与画出来的图共用同一个筐 —— 轮次结束时一起挂到 assistant episode 上
+        if let Ok(mut d) = self.drawn.lock() {
+            d.push(cortex_proto::dto::AttachmentRef {
+                hash,
+                kind: Some(kind_of(mime).into()),
+                filename: Some(display.clone()),
+            });
+        }
+
+        cortex_agent::ToolResult::ok(format!(
+            "已交付「{display}」—— 它作为附件出现在这一条回复里，用户能直接下载，\
+             也已经进了资料库。**不要**再把文件内容抄进回复里。"
+        ))
+    }
+
     async fn generate_image(&self, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
         let Some(prompt) = arguments.get("prompt").and_then(|v| v.as_str()) else {
             return cortex_agent::ToolResult::err("缺少 prompt 参数");
@@ -2458,6 +2625,83 @@ mod tests {
         );
     }
 
+    /// ⚠️ **交付那个工具与「做完了要交出去」那段说明也是同生共死的。**
+    ///
+    /// 两个方向的症状都不报错，而且都很难查：
+    ///
+    /// - **有工具没说明** → 模型写完一份方案的默认动作是把正文抄进回复里。
+    ///   一份三千字的方案糊在聊天框里，用户拿不到文件，也不会进资料库 ——
+    ///   而工具就摆在那儿，它只是没想起来用。
+    /// - **有说明没工具** → 它答应「我把方案发给你」，然后什么都没发生。
+    ///
+    /// 判据必须是同一个 `Caps::can_deliver`，不能两处各算一遍。
+    #[test]
+    fn 交付的工具与说明一起出现一起消失() {
+        // 要带一个外来工具：`with_external` 在能力全空时提前 return，
+        // 「不该加却加了」那条代码根本走不到 —— 生图那条测试踩过这个坑
+        let external = [fake_external("docs", "search")];
+
+        let off = chat_turn_for(8, &external, Caps::default(), &[]);
+        assert!(
+            !off.tool_names().contains(&"deliver_file"),
+            "交不出去的时候不该摆出这个工具：模型每次调都拿到同一句失败，\
+             而它会以为是自己路径写错了，于是换个路径再试。实际：{:?}",
+            off.tool_names()
+        );
+
+        let on = chat_turn_for(
+            8,
+            &external,
+            Caps {
+                can_deliver: true,
+                ..Caps::default()
+            },
+            &[],
+        );
+        assert!(
+            on.tool_names().contains(&"deliver_file"),
+            "能交付却没有这个工具 —— 提示词里那段说明就成了空头支票。实际：{:?}",
+            on.tool_names()
+        );
+
+        // ── 说明那一半 ──
+        let with_note = system_prompt_for(
+            "底座",
+            "",
+            cortex_agent::ExecEnvironment::LocalMachine,
+            Some("/workspace"),
+            None,
+            &[],
+            Caps {
+                can_deliver: true,
+                ..Caps::default()
+            },
+        );
+        assert!(
+            with_note.contains("deliver_file"),
+            "摆了工具却不讲怎么用 —— 模型会把文件正文抄进回复里"
+        );
+        assert!(
+            with_note.contains("只交最终产物"),
+            "没说清过程文件不要交。模型对「这是不是交付物」一贯偏松，\
+             一次任务的二十个中间文件会被一起交上来，资料库跟着灌满"
+        );
+
+        let without = system_prompt_for(
+            "底座",
+            "",
+            cortex_agent::ExecEnvironment::LocalMachine,
+            Some("/workspace"),
+            None,
+            &[],
+            Caps::default(),
+        );
+        assert!(
+            !without.contains("deliver_file"),
+            "交不出去却讲了那一段 —— 模型会答应把文件发给用户，然后什么都不发生"
+        );
+    }
+
     /// ⚠️ **电脑操作的工具与那段说明也是同生共死的。**
     ///
     /// 与技能那条同一个形状，但后果更重：这一组没有围栏（它动的是用户整台
@@ -2506,7 +2750,11 @@ mod tests {
             None,
             None,
             &[],
-            true,
+            Caps {
+                can_use_computer: true,
+                can_deliver: false,
+                ..Caps::default()
+            },
         );
         assert!(
             with_note.contains("先 `screenshot`") && with_note.contains("密码"),
@@ -2519,7 +2767,11 @@ mod tests {
             None,
             None,
             &[],
-            false,
+            Caps {
+                can_use_computer: false,
+                can_deliver: false,
+                ..Caps::default()
+            },
         );
         assert!(
             !without.contains("操作这台电脑"),
@@ -2561,7 +2813,11 @@ mod tests {
             None,
             None,
             &[("周报", "按公司模板写周报")],
-            false,
+            Caps {
+                can_use_computer: false,
+                can_deliver: false,
+                ..Caps::default()
+            },
         );
         assert!(
             prompt.contains("周报"),
@@ -2584,7 +2840,11 @@ mod tests {
             None,
             None,
             &[],
-            false,
+            Caps {
+                can_use_computer: false,
+                can_deliver: false,
+                ..Caps::default()
+            },
         );
         assert!(
             !bare.contains("load_skill") && !bare.contains("可用技能"),
@@ -2726,7 +2986,11 @@ mod tests {
             Some("/w"),
             Some(&chef),
             &[],
-            false,
+            Caps {
+                can_use_computer: false,
+                can_deliver: false,
+                ..Caps::default()
+            },
         );
 
         assert!(prompt.contains("资深大厨"), "人设本身要在：{prompt}");
@@ -2767,7 +3031,11 @@ mod tests {
                 None,
                 agent,
                 &[],
-                false,
+                Caps {
+                    can_use_computer: false,
+                    can_deliver: false,
+                    ..Caps::default()
+                },
             );
             assert!(
                 prompt.contains("你是 Cortex"),
@@ -2790,7 +3058,11 @@ mod tests {
             Some("/workspace"),
             None,
             &[],
-            false,
+            Caps {
+                can_use_computer: false,
+                can_deliver: false,
+                ..Caps::default()
+            },
         );
         assert!(
             container.contains("CONNECT tunnel failed, response 403"),
@@ -2805,7 +3077,19 @@ mod tests {
             cortex_agent::ExecEnvironment::LocalMachine,
             cortex_agent::ExecEnvironment::None,
         ] {
-            let desktop = system_prompt_for("底座", "", env, Some("/workspace"), None, &[], false);
+            let desktop = system_prompt_for(
+                "底座",
+                "",
+                env,
+                Some("/workspace"),
+                None,
+                &[],
+                Caps {
+                    can_use_computer: false,
+                    can_deliver: false,
+                    ..Caps::default()
+                },
+            );
             assert!(
                 !desktop.contains("CORTEX_EGRESS_ALLOW"),
                 "{} 上没有出网代理，这段话就是假话 —— \
@@ -2832,7 +3116,11 @@ mod tests {
             Some("/ws"),
             None,
             &[],
-            false,
+            Caps {
+                can_use_computer: false,
+                can_deliver: false,
+                ..Caps::default()
+            },
         );
         match cortex_agent::prompt::shell_dialect_note() {
             Some(note) => assert!(
@@ -2862,7 +3150,11 @@ mod tests {
             Some("/workspace"),
             None,
             &[],
-            false,
+            Caps {
+                can_use_computer: false,
+                can_deliver: false,
+                ..Caps::default()
+            },
         );
         assert!(
             with_note.starts_with(&plain),
@@ -2879,7 +3171,11 @@ mod tests {
             None,
             None,
             &[],
-            false,
+            Caps {
+                can_use_computer: false,
+                can_deliver: false,
+                ..Caps::default()
+            },
         );
         assert!(
             unbound.contains("只有那个目录本身"),

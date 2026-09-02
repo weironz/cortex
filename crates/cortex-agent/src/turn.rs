@@ -437,6 +437,21 @@ pub trait ToolHost: Send + Sync {
     /// 直连模式的 agent 没有可打的服务端，评测 harness 也没有。
     /// 默认回一条说得清的失败，而不是让模型以为成功了 ——
     /// 它会接着说「图已经生成好了」，而根本没有图。
+    /// 把工作区里的一个文件交付给用户（读文件 + 上传 + 挂成本轮附件）。
+    ///
+    /// 与 [`Self::generate_image`] 同一个理由不走 `tools::execute`：那条路
+    /// 是文件系统与 shell，没有 HTTP 客户端也不知道服务端在哪。
+    ///
+    /// 默认做不到 —— 一个没有服务端的宿主交不出去。说清是「这个环境不支持」
+    /// 而不是「失败了」：后者会让模型换个路径再试一次，而换什么都不会成。
+    async fn deliver_file(
+        &self,
+        _arguments: &serde_json::Value,
+        _sandbox: &crate::Sandbox,
+    ) -> ToolResult {
+        ToolResult::err("这个环境交付不了文件（没有可打的服务端）")
+    }
+
     async fn generate_image(&self, _arguments: &serde_json::Value) -> ToolResult {
         ToolResult::err(concat!(
             "这个 agent 进程连不到能生图的服务端（本机直连模式没有这条路）。",
@@ -1355,6 +1370,14 @@ impl Turn {
             // 内置，但**不走 `tools::execute`** —— 那条路是文件系统与 shell，
             // 没有 HTTP 客户端也不知道服务端在哪。见 `ToolHost::generate_image`
             host.generate_image(&call.arguments).await
+        } else if spec.name == "deliver_file" {
+            // 同上：要读文件**并且**要把字节发给服务端，`tools::execute`
+            // 两样只有前一样
+            // 沙箱从这儿传过去：宿主手上没有它，而路径安全**只能**用
+            // 这一份判断。宿主自己拼路径的那天，`../` 就出去了。
+            // 与后台命令那条同一个写法：重新问一次宿主要授权目录
+            let sandbox = self.sandbox.clone().with_grants(host.granted_roots());
+            host.deliver_file(&call.arguments, &sandbox).await
         } else if spec.name == "load_skill" {
             // 同上：正文在服务端的库里，不在文件系统上
             host.load_skill(&call.arguments).await

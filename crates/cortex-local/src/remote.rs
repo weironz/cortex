@@ -515,6 +515,36 @@ impl Remote {
         checked(resp).await.map(|_| ())
     }
 
+    /// 把一份字节登记成 blob（`POST /blobs`），回它的哈希。
+    ///
+    /// # 为什么走直传而不是 presign
+    ///
+    /// presign 那条路要客户端**先算好哈希**再要一张 URL，为的是「这份内容
+    /// 可能早就在了」——那在手机上转发同一张图时值。而这里交的是刚生成的
+    /// 文件，几乎必然是新的，多一次往返换不到什么。
+    ///
+    /// 32 MB 那道上限在服务端（`blobs::DIRECT_UPLOAD_LIMIT`）。调用方
+    /// 应当**先**自己拦一道并说人话，见 `deliver_file` —— 让它撞到服务端
+    /// 的话，模型看到的是一句 413，然后它会去重试。
+    pub async fn upload_blob(&self, bytes: Vec<u8>, mime: &str) -> Result<String> {
+        let resp = self
+            .auth(self.http.post(self.url("/blobs")))
+            .header(reqwest::header::CONTENT_TYPE, mime)
+            .body(bytes)
+            .send()
+            .await
+            .map_err(map_transport)?;
+        let resp = checked(resp).await?;
+        let dto: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| CortexError::Invalid(format!("解析 /blobs 响应失败：{e}")))?;
+        dto.get("hash")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| CortexError::Invalid("/blobs 没回 hash".into()))
+    }
+
     /// 取一个已登记附件的字节流（`GET /blobs/{hash}`）。
     ///
     /// 返回原始响应而不是字节：调用方要先看头（MIME、Content-Length）
