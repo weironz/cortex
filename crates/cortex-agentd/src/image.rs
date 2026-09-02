@@ -170,6 +170,9 @@ pub async fn generate(
         {
             tracing::warn!(error = %e, hash = %img.hash, "图画出来了，但没进画廊");
         }
+        if let Err(e) = record_in_library(store.pool(), img, prompt).await {
+            tracing::warn!(error = %e, hash = %img.hash, "图进了画廊，但没收进资料库");
+        }
     }
 
     tracing::info!(
@@ -183,6 +186,60 @@ pub async fn generate(
         model,
         source: source.id.clone(),
     }))
+}
+
+/// 把刚画出来的那张**自动收进资料库**。
+///
+/// # 为什么是自动，而不是让用户右键收
+///
+/// 2026-09-02 用户先问「生成的图片为什么不会显示在资料库里」，
+/// 得到手动入口之后又问「不会自动存吗，ChatGPT 和 Gemini 都是
+/// 自动的吧」—— 他是对的。`library_items.origin` 本来就有
+/// `'generated'` 这一档，而一个只能靠人手动右键才会出现的值，
+/// 等于把建表时就想好的事交给了用户去做。
+///
+/// “自动收会把库灌满”那个担心针对的是**聊天附件**（随手贴的截图、
+/// 日志），对生成的图不成立：那是用户花了钱、专门叫出来的东西。
+/// 所以只有这一条自动，附件那一条仍然是手动右键。
+///
+/// # 为什么不切分、也不报错
+///
+/// 图没有正文可切，直接落 `unsupported`（与 [`crate::library::add`]
+/// 同一个判据）。而写不进去**不让整次生成失败** ——
+/// 与上面那条画廊记录同一个理由：图已经画出来也入库了，钱花掉了。
+async fn record_in_library(
+    pool: &sqlx::PgPool,
+    img: &GeneratedImageRef,
+    prompt: &str,
+) -> Result<(), sqlx::Error> {
+    // 名字用画它的那句话：一屏缩略图里「一只戴眼镜的柯基」比
+    // `cortex-3f8a1c2d` 有用得多。按**字符**截而不是字节 ——
+    // `&s[..60]` 在中文上会直接 panic（切在了一个码点中间）
+    let trimmed = prompt.trim();
+    let name = if trimmed.is_empty() {
+        format!("cortex-{}", &img.hash[..8])
+    } else if trimmed.chars().count() > 60 {
+        format!("{}…", trimmed.chars().take(60).collect::<String>())
+    } else {
+        trimmed.to_owned()
+    };
+
+    // `ON CONFLICT DO NOTHING`：同一句提示词画出完全相同的字节时
+    // 哈希也相同，而 `UNIQUE (blob_hash)` 说一份内容只能有一条。
+    // 不写这一句的症状是日志里一行看着像真错的 WARN
+    sqlx::query(
+        "INSERT INTO library_items
+             (id, blob_hash, name, mime, size_bytes, origin, chunk_state, chunk_count)
+         SELECT $1, $2, $3, b.mime, b.size_bytes, 'generated', 'unsupported', 0
+           FROM blobs b WHERE b.hash = $2
+         ON CONFLICT (blob_hash) DO NOTHING",
+    )
+    .bind(cortex_core::Id::new().to_string())
+    .bind(&img.hash)
+    .bind(&name)
+    .execute(pool)
+    .await
+    .map(|_| ())
 }
 
 /// 挑一条能生图的来源与一个型号。
@@ -391,5 +448,243 @@ mod tests {
         assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 "), "image/webp");
         // 认不出来给 png，不给 octet-stream —— 后者会让浏览器下载而不是显示
         assert_eq!(sniff(b"whatever"), "image/png");
+    }
+
+    /// 找 `DATABASE_URL`，**不把 .env 灌进进程环境**（同 `gallery` 那条的
+    /// 理由：`dotenvy::dotenv()` 会污染同进程里断言默认值的别的测试）。
+    fn database_url() -> Option<String> {
+        if let Ok(url) = std::env::var("DATABASE_URL")
+            && !url.is_empty()
+        {
+            return Some(url);
+        }
+        let iter = dotenvy::dotenv_iter().ok()?;
+        for item in iter {
+            let (k, v) = item.ok()?;
+            if k == "DATABASE_URL" && !v.is_empty() {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// **画出来的图要自动躺进资料库。**
+    ///
+    /// 这条必须打真库：`record_in_library` 的整个正确性都在那句 SQL 上 ——
+    /// 列名、`SELECT … FROM blobs` 那一跳、`ON CONFLICT` 的目标。断言字符串
+    /// 等于让验证工具自己造出「通过」，只有真的执行一次才炸。
+    ///
+    /// 连不上 `DATABASE_URL` 时跳过（与 cortex-store 的集成测试同一约定）。
+    #[tokio::test]
+    async fn 画出来的图自动收进资料库() {
+        let Some(url) = database_url() else {
+            eprintln!("跳过：未设置 DATABASE_URL");
+            return;
+        };
+        let admin = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("跳过：连不上数据库（{e}）");
+                return;
+            }
+        };
+
+        // 上一次 panic 留下的 schema（走不到结尾的清理）
+        let stale: Vec<String> = sqlx::query_scalar(
+            "SELECT nspname::text FROM pg_namespace WHERE nspname LIKE 'cortex\\_autolib\\_%'",
+        )
+        .fetch_all(&admin)
+        .await
+        .unwrap_or_default();
+        for name in stale {
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP SCHEMA IF EXISTS \"{name}\" CASCADE"
+            )))
+            .execute(&admin)
+            .await;
+        }
+
+        let schema = format!(
+            "cortex_autolib_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("时钟不早于 1970")
+                .as_millis()
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+            .execute(&admin)
+            .await
+            .expect("建临时 schema 不应失败");
+
+        use std::str::FromStr as _;
+        let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+            .expect("DATABASE_URL 应当是合法连接串")
+            .options([("search_path", format!("{schema},public"))]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await
+            .expect("临时 schema 建好后应当能连上");
+        cortex_store::Store::from_pool(pool.clone())
+            .migrate()
+            .await
+            .expect("租户 migration 应当能跑通");
+
+        let hash = "c".repeat(64);
+        sqlx::query(
+            "INSERT INTO blobs (hash, mime, size_bytes, storage_key)
+             VALUES ($1, 'image/png', 4096, $1)",
+        )
+        .bind(&hash)
+        .execute(&pool)
+        .await
+        .expect("造 blob 不应失败");
+
+        let img = GeneratedImageRef {
+            hash: hash.clone(),
+            mime: "image/png".to_owned(),
+        };
+        record_in_library(&pool, &img, "  一只戴眼镜的柯基  ")
+            .await
+            .expect("第一次收就报错 —— 那句 SQL 本身就不对");
+
+        let row: Option<(String, String, String, String, i64)> = sqlx::query_as(
+            "SELECT name, origin, chunk_state, mime, size_bytes
+               FROM library_items WHERE blob_hash = $1",
+        )
+        .bind(&hash)
+        .fetch_optional(&pool)
+        .await
+        .expect("读资料库不应失败");
+
+        let (name, origin, state, mime, size) =
+            row.expect("画出来的图没有进资料库 —— 那正是用户报的那一条");
+        assert_eq!(
+            name, "一只戴眼镜的柯基",
+            "名字该是画它的那句话（去掉首尾空白）—— 一屏缩略图里哈希谁也认不出来"
+        );
+        assert_eq!(
+            origin, "generated",
+            "origin 不是 generated 的话，资料库那一格会画成「已上传」，\
+             而建表时专门为这一档留的值就永远没人用得到"
+        );
+        assert_eq!(
+            state, "unsupported",
+            "图没有正文可切。落成 ready 会让界面显示「0 段」，\
+             读起来像切分丢了东西 —— 与 library::add 同一个判据"
+        );
+        assert_eq!(mime, "image/png", "mime 该从 blobs 那一行取，不是猜的");
+        assert_eq!(size, 4096, "size_bytes 该从 blobs 那一行取");
+
+        // ★ **再收一次不许炸也不许多一行。** `UNIQUE (blob_hash)` 说一份内容
+        // 只能有一条；没有 `ON CONFLICT DO NOTHING` 的话，同一句提示词画出
+        // 完全相同的字节时日志里会多一行看着像真错的 WARN
+        record_in_library(&pool, &img, "换个名字再收一次")
+            .await
+            .expect(
+                "同一份内容再收一次报了错 —— `UNIQUE (blob_hash)`                  撞上了，而那在生产上只会留下一行看着像真错的 WARN；                 它只能靠 `ON CONFLICT DO NOTHING` 接住",
+            );
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM library_items WHERE blob_hash = $1")
+                .bind(&hash)
+                .fetch_one(&pool)
+                .await
+                .expect("数行数不应失败");
+        assert_eq!(
+            count, 1,
+            "同一份内容在资料库里出现了两条 —— 「删哪一张」立刻有了两套答案"
+        );
+
+        // 名字要保持第一次那个：`DO NOTHING` 不是 `DO UPDATE`
+        let again: String =
+            sqlx::query_scalar("SELECT name FROM library_items WHERE blob_hash = $1")
+                .bind(&hash)
+                .fetch_one(&pool)
+                .await
+                .expect("读名字不应失败");
+        assert_eq!(
+            again, "一只戴眼镜的柯基",
+            "第二次收把名字改掉了 —— 用户改过的名字会被下一次生成覆盖"
+        );
+
+        // 提示词为空时退回哈希前八位，而不是写一个空名字
+        // （`name` 上有 `CHECK (length(btrim(name)) BETWEEN 1 AND 255)`，
+        // 空名字会被约束挡下，症状是日志里一行 WARN 而图静默不进库）
+        let h2 = "d".repeat(64);
+        sqlx::query(
+            "INSERT INTO blobs (hash, mime, size_bytes, storage_key)
+             VALUES ($1, 'image/png', 8, $1)",
+        )
+        .bind(&h2)
+        .execute(&pool)
+        .await
+        .expect("造第二个 blob 不应失败");
+        record_in_library(
+            &pool,
+            &GeneratedImageRef {
+                hash: h2.clone(),
+                mime: "image/png".to_owned(),
+            },
+            "   ",
+        )
+        .await
+        .expect("空提示词那一条没写进去");
+        let n2: Option<String> =
+            sqlx::query_scalar("SELECT name FROM library_items WHERE blob_hash = $1")
+                .bind(&h2)
+                .fetch_optional(&pool)
+                .await
+                .expect("读第二条不应失败");
+        assert_eq!(
+            n2.as_deref(),
+            Some("cortex-dddddddd"),
+            "空提示词该退回哈希前八位；写空名字会被 CHECK 挡下，\
+             而那条路上只有一行 WARN，图就静默不进库了"
+        );
+
+        // 超长的按**字符**截，不按字节 —— `&s[..60]` 在中文上直接 panic
+        let h3 = "e".repeat(64);
+        sqlx::query(
+            "INSERT INTO blobs (hash, mime, size_bytes, storage_key)
+             VALUES ($1, 'image/png', 8, $1)",
+        )
+        .bind(&h3)
+        .execute(&pool)
+        .await
+        .expect("造第三个 blob 不应失败");
+        let long = "很长的一句提示词".repeat(20);
+        record_in_library(
+            &pool,
+            &GeneratedImageRef {
+                hash: h3.clone(),
+                mime: "image/png".to_owned(),
+            },
+            &long,
+        )
+        .await
+        .expect("超长提示词那一条没写进去");
+        let n3: String = sqlx::query_scalar("SELECT name FROM library_items WHERE blob_hash = $1")
+            .bind(&h3)
+            .fetch_one(&pool)
+            .await
+            .expect("读第三条不应失败");
+        assert_eq!(
+            n3.chars().count(),
+            61,
+            "60 个字 + 一个省略号。按字节截的话这里根本走不到断言 —— 会 panic"
+        );
+
+        pool.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
+        )))
+        .execute(&admin)
+        .await;
+        admin.close().await;
     }
 }
