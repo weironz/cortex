@@ -1769,6 +1769,7 @@ class MockCortexApi
     String? before,
     String? folder,
     String? tab,
+    String? sort,
   }) async {
     await _latency(70);
     var items = switch (folder) {

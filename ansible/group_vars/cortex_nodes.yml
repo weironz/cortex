@@ -45,6 +45,16 @@ cortex_domain: cortex.cloudcele.com
 # 2026-08-23 差点踩进去：第一版这里填的就是那个看起来天经地义的值。
 cortex_public_url: ""
 
+# 资料库能占多少字节。0 = 不限。
+#
+# 附件与 agent 交付的产物是**自动**收进资料库的（判据见
+# docs/library-content.md：不判断值不值得收，漏收补救不了、膨胀补救得了）。
+# 那条路的前提是膨胀有办法管 —— 而办法就是这个上限，加上界面里
+# 「按大小看和清」。少了它，「全收」就成了「无限长」。
+#
+# 20 GB 与 ChatGPT Plus 那一档对齐。字节在对象存储上，不占节点那 3.5G 内存。
+cortex_library_quota_bytes: 21474836480
+
 # ── 镜像 ──────────────────────────────────────────────────
 cortex_registry: registry.cn-shenzhen.aliyuncs.com/willspace
 

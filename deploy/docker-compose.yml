@@ -355,6 +355,7 @@ services:
       # ⚠️ 空串是安全的：`public_base` 判了 `is_empty()` 才回落到头，
       # 不像这个仓库栽过的那些「空串顶掉默认值」。
       CORTEX_PUBLIC_URL: ${CORTEX_PUBLIC_URL:-}
+      CORTEX_LIBRARY_QUOTA_BYTES: ${CORTEX_LIBRARY_QUOTA_BYTES:-}
       RUST_LOG: ${AGENTD_LOG:-cortex_agentd=info,warn}
     volumes:
       # 起沙箱要 docker API。**这是把宿主 root 交给它** —— 论证的另一半是

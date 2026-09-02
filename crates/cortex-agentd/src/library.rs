@@ -278,6 +278,87 @@ pub struct LibraryPage {
     pub folders: Vec<cortex_proto::llm::Folder>,
     /// 还有更多 —— 界面据此决定要不要再翻一页
     pub has_more: bool,
+    /// 占了多少、上限多少。**跟着列表一起回**，见 [`read_usage`]
+    pub usage: LibraryUsage,
+}
+
+/// 资料库能占多少字节。`0` = 不限。
+///
+/// # 为什么要有上限
+///
+/// 附件与交付物现在是**自动**收进资料库的（判据见
+/// `docs/library-content.md`：不判断「这是不是值得收的东西」）。那条路的
+/// 前提是**膨胀有办法管** —— 而办法就是配额加上「看得见、删得掉」。
+/// 少了这一半，「全收」就成了「无限长」。
+///
+/// 20 GB 与 ChatGPT Plus 那一档对齐。生产那台是 2 核 3.5G 的小机器，
+/// 但字节在对象存储上，不占它的内存。
+///
+/// 设成 0 的场合是本机开发：一个刚起的空库撞不到上限，而给它一个上限只会
+/// 在跑集成测试造数据时碍事。
+fn quota_bytes() -> i64 {
+    std::env::var("CORTEX_LIBRARY_QUOTA_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|v| *v >= 0)
+        .unwrap_or(20 * 1024 * 1024 * 1024)
+}
+
+/// 这个租户的资料库占了多少、上限多少。
+#[derive(Debug, Serialize, Clone, Copy)]
+pub struct LibraryUsage {
+    /// 已占字节数。
+    pub bytes: i64,
+    /// 上限。`0` = 不限。
+    pub quota_bytes: i64,
+    /// 一共几条。界面上那句「共 128 项」。
+    pub items: i64,
+}
+
+impl LibraryUsage {
+    /// 再放 `more` 字节会不会超。上限为 0（不限）时永远不会。
+    ///
+    /// ⚠️ 判据是「加上这一份会不会超」，**不是**「现在满没满」。第一版写的是
+    /// 后者，理由写着「前者要先知道这一份多大」—— 而那是错的：大小就在
+    /// 调用点上一行刚从 `blobs` 查出来。用「现在满没满」的代价是库可以被
+    /// 最后一份撑过线，而单份最大 32 MB（`blobs::DIRECT_UPLOAD_LIMIT`），
+    /// 于是「上限」这个词对用户就成了一句约等于。
+    const fn would_exceed(self, more: i64) -> bool {
+        self.quota_bytes > 0 && self.bytes + more > self.quota_bytes
+    }
+}
+
+/// 读一次占用。
+///
+/// # 为什么跟着列表一起回，而不是单开一条路由
+///
+/// 界面上那一行「已用 1.2 GB / 20 GB」与列表是同时出现的。分成两条的话，
+/// 打开资料库要两次往返，而其中一条失败时那一行会空着 —— 用户看到的是
+/// 「配额算不出来」，而他根本不知道那是第二个请求。
+async fn read_usage(pool: &sqlx::PgPool) -> Result<LibraryUsage, ApiError> {
+    read_usage_raw(pool)
+        .await
+        .map_err(|e| ApiError::internal(format!("算资料库占用失败：{e}")))
+}
+
+/// 同上，但回 `sqlx::Error` —— [`insert_item`] 那条路上没有 `ApiError`
+/// （它是三个调用点共用的那句 INSERT，其中两个的失败只记 WARN）。
+async fn read_usage_raw(pool: &sqlx::PgPool) -> Result<LibraryUsage, sqlx::Error> {
+    // `COALESCE`：空库时 `SUM` 回 NULL，不是 0
+    let (bytes, items): (i64, i64) = sqlx::query_as(
+        // ⚠️ ** 不能省。** PostgreSQL 的 `SUM(bigint)` 回的是
+        // NUMERIC（防溢出），而这一侧解成 i64 —— 不转的话运行时报
+        // `mismatched types` 而编译期一点征兆都没有。这条路挂在
+        // `GET /library` 上，症状是整个资料库列表打不开
+        "SELECT COALESCE(SUM(size_bytes), 0)::BIGINT, COUNT(*) FROM library_items",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(LibraryUsage {
+        bytes,
+        quota_bytes: quota_bytes(),
+        items,
+    })
 }
 
 #[derive(Deserialize)]
@@ -292,6 +373,13 @@ pub struct ListQuery {
     /// `all` / `images` / `files` —— 设计稿那三个页签
     #[serde(default)]
     pub tab: Option<String>,
+    /// `size` = 按大小从大到小。不传按 id 倒序（新→旧）。
+    ///
+    /// 这是「按大小看和清」那件事的服务端一半：库满了要腾地方时，用户要问的
+    /// 是「哪几份最占地方」，而按时间排的列表答不了 —— 一份 300 MB 的日志
+    /// 可能在第八页。
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 /// `GET /library`
@@ -316,6 +404,15 @@ pub async fn list(
         other => (other, false),
     };
     let tab = q.tab.as_deref().unwrap_or("all");
+    // 「按大小」是给腾地方用的：库满了要问的是「哪几份最占地方」，而按时间
+    // 排的列表答不了 —— 一份 300 MB 的日志可能在第八页。
+    //
+    // ⚠️ **这一档不翻页**，而且是有意的：按大小做游标要 `(size, id)` 复合
+    // 游标（单看 size 会在同尺寸的行上漏或重）。而这个视图的用处是「看最大
+    // 的那几十份」—— 翻到第五页时早就不是「最占地方的」了。所以下面直接把
+    // `before` 忽略掉并回 `has_more: false`，而不是给一个走不通的游标：
+    // 那样界面会一直「加载更多」，每次拿回同一批
+    let by_size = q.sort.as_deref() == Some("size");
 
     let mut rows: Vec<LibraryItem> = sqlx::query_as(
         "SELECT id, blob_hash, name, mime, size_bytes, origin, folder_id,
@@ -327,19 +424,22 @@ pub async fn list(
             AND ($5 = 'all'
                  OR ($5 = 'images' AND mime LIKE 'image/%')
                  OR ($5 = 'files'  AND mime NOT LIKE 'image/%'))
-          ORDER BY id DESC
+          ORDER BY
+            CASE WHEN $6::BOOLEAN THEN size_bytes ELSE NULL END DESC NULLS LAST,
+            id DESC
           LIMIT $1",
     )
     .bind(limit + 1)
-    .bind(q.before.as_deref())
+    .bind(if by_size { None } else { q.before.as_deref() })
     .bind(folder_filter)
     .bind(want_unfiled)
     .bind(tab)
+    .bind(by_size)
     .fetch_all(store.pool())
     .await
     .map_err(|e| ApiError::internal(format!("读资料库失败：{e}")))?;
 
-    let has_more = rows.len() as i64 > limit;
+    let has_more = !by_size && rows.len() as i64 > limit;
     rows.truncate(limit as usize);
 
     // 文件夹只在第一页给 —— 翻页时它们不会变，每页都带一遍是白费带宽
@@ -353,6 +453,7 @@ pub async fn list(
         items: rows,
         folders,
         has_more,
+        usage: read_usage(store.pool()).await?,
     }))
 }
 
@@ -533,6 +634,24 @@ pub(crate) async fn insert_item(
     else {
         return Ok(None);
     };
+
+    // ── 配额 ──
+    //
+    // 在**写之前**看一眼。自动收那条路上没有人点确认，所以这道闸是唯一
+    // 拦得住无限增长的东西 —— 而「全收不判断」这个决定（见
+    // `docs/library-content.md`）正是以它为前提才成立的。
+    //
+    // 判据是「已经满了」而不是「加上这一份会不会超」：后者要先知道这一份多大
+    // 才答得出，而那正是下面刚查出来的 `size_bytes`。用前者的代价是最后一份
+    // 可以把库撑过线一点点，收益是这句话在任何调用点上都一样 —— 不必让每个
+    // 调用方自己去算「加上我会不会超」。
+    let usage = read_usage_raw(pool).await?;
+    if usage.would_exceed(size_bytes) {
+        return Err(sqlx::Error::Protocol(format!(
+            "资料库放不下了：已占 {} 字节，上限 {}，这一份 {}。             在资料库里按大小清掉一些再试",
+            usage.bytes, usage.quota_bytes, size_bytes
+        )));
+    }
 
     // 图片不切分：它没有正文。状态记 unsupported 而不是 ready —— ready 会让
     // 界面显示「0 段」，读起来像切分丢了东西。
@@ -1275,5 +1394,150 @@ mod tests {
             !cut.contains('\u{FFFD}'),
             "截在了码点中间，末尾成了替换字符"
         );
+    }
+
+    /// **配额要真的拦住写入，不能只是个显示出来的数字。**
+    ///
+    /// 自动收那条路上没有人点确认（判据见 `docs/library-content.md`：
+    /// 不判断这是不是值得收的东西）。那个决定成立的**唯一**前提是膨胀有办法
+    /// 管 —— 而这道闸就是那个办法。它只显示不拦的话，「全收」就是「无限长」。
+    ///
+    /// 这条必须打真库：整个正确性在那句 `SUM` 与它前面那个判断上。
+    #[tokio::test]
+    async fn 配额满了就不再往里收() {
+        let Some(url) = database_url() else {
+            eprintln!("跳过：未设置 DATABASE_URL");
+            return;
+        };
+        let admin = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("跳过：连不上数据库（{e}）");
+                return;
+            }
+        };
+        let stale: Vec<String> = sqlx::query_scalar(
+            "SELECT nspname::text FROM pg_namespace WHERE nspname LIKE 'cortex\\_quota\\_%'",
+        )
+        .fetch_all(&admin)
+        .await
+        .unwrap_or_default();
+        for name in stale {
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP SCHEMA IF EXISTS \"{name}\" CASCADE"
+            )))
+            .execute(&admin)
+            .await;
+        }
+        let schema = format!(
+            "cortex_quota_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("时钟不早于 1970")
+                .as_millis()
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+            .execute(&admin)
+            .await
+            .expect("建临时 schema 不应失败");
+        use std::str::FromStr as _;
+        let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+            .expect("DATABASE_URL 应当是合法连接串")
+            .options([("search_path", format!("{schema},public"))]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await
+            .expect("临时 schema 建好后应当能连上");
+        cortex_store::Store::from_pool(pool.clone())
+            .migrate()
+            .await
+            .expect("租户 migration 应当能跑通");
+
+        // 两份 600 字节的内容。上限设成 1000：第一份进得去，第二份撞墙
+        let a = "7".repeat(64);
+        let b = "8".repeat(64);
+        for h in [&a, &b] {
+            sqlx::query(
+                "INSERT INTO blobs (hash, mime, size_bytes, storage_key)
+                 VALUES ($1, 'text/plain', 600, $1)",
+            )
+            .bind(h)
+            .execute(&pool)
+            .await
+            .expect("造 blob 不应失败");
+        }
+
+        // ⚠️ 这个测试改进程级环境变量。**上一次栽在这上面**：三条测试共用
+        // `CORTEX_MCP_CONFIG`，单跑绿、全量跑随机红。这里用同一把锁串起来
+        let _guard = quota_env_guard().await;
+        // SAFETY: 由上面那把锁串行化；同一进程里没有别的读者在并发读它
+        unsafe { std::env::set_var("CORTEX_LIBRARY_QUOTA_BYTES", "1000") };
+
+        let first = insert_item(&pool, &a, "第一份", Origin::Uploaded)
+            .await
+            .expect("还没满就该收得进去");
+        assert!(first.is_some(), "库是空的，第一份必须进得去");
+
+        let second = insert_item(&pool, &b, "第二份", Origin::Uploaded).await;
+        assert!(
+            second.is_err(),
+            "已经占了 600 / 1000，再收一份 600 字节的却成功了 —— \
+             这道闸只显示不拦的话，「不判断值不值得收」那个决定就没有前提了"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM library_items")
+            .fetch_one(&pool)
+            .await
+            .expect("数行数不应失败");
+        assert_eq!(count, 1, "被拦住的那一份还是写进去了");
+
+        // ── 上限为 0 = 不限（本机开发那一档）──
+        // SAFETY: 同上，由那把锁串行化
+        unsafe { std::env::set_var("CORTEX_LIBRARY_QUOTA_BYTES", "0") };
+        let unlimited = insert_item(&pool, &b, "第二份", Origin::Uploaded)
+            .await
+            .expect("上限为 0 时不该有任何拦截");
+        assert!(
+            unlimited.is_some(),
+            "上限设成 0（不限）之后还在拦 —— 本机开发跑集成测试造几行数据就会撞墙"
+        );
+
+        // SAFETY: 同上
+        unsafe { std::env::remove_var("CORTEX_LIBRARY_QUOTA_BYTES") };
+        drop(_guard);
+
+        // ── 占用要算得对 ──
+        let usage = read_usage_raw(&pool).await.expect("读占用不应失败");
+        assert_eq!(usage.bytes, 1200, "占用不是两份 600 —— 那一行会报错数");
+        assert_eq!(usage.items, 2);
+
+        pool.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
+        )))
+        .execute(&admin)
+        .await;
+        admin.close().await;
+    }
+
+    /// 改进程级环境变量的测试要排队。
+    ///
+    /// 上一次的教训（`cortex-mcp` 那三条共用 `CORTEX_MCP_CONFIG`）：不串起来
+    /// 的话，症状是单跑绿、全量跑随机红，而失败信息看起来完全像被测的行为
+    /// 坏了。
+    ///
+    /// **用 tokio 的锁而不是 `std::sync::Mutex`**：这把锁要跨 `.await` 拿着
+    /// （中间有好几次数据库往返），而 std 那个拿着不放会把整个 worker 线程
+    /// 堵住 —— clippy 的 `await_holding_lock` 说的就是这件事。
+    /// tokio 的锁也不会毒化，所以不必写 `PoisonError::into_inner`。
+    fn quota_env_guard() -> impl std::future::Future<Output = tokio::sync::MutexGuard<'static, ()>>
+    {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        LOCK.lock()
     }
 }

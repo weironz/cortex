@@ -37,6 +37,7 @@ class _LibApi extends MockCortexApi {
     String? before,
     String? folder,
     String? tab,
+    String? sort,
   }) async {
     calls.add((folder: folder, tab: tab));
     final filtered = switch (tab) {
@@ -215,5 +216,6 @@ class _UnsupportedApi extends MockCortexApi {
     String? before,
     String? folder,
     String? tab,
+    String? sort,
   }) async => throw Exception('这个部署没有资料库：501');
 }

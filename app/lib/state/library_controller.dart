@@ -36,6 +36,8 @@ class LibraryState {
     this.error,
     this.unsupported = false,
     this.selected = const {},
+    this.usage = const LibraryUsage(),
+    this.bySize = false,
   });
 
   final List<LibraryItem> items;
@@ -56,6 +58,15 @@ class LibraryState {
 
   final Set<String> selected;
 
+  /// 占了多少、上限多少。跟着列表一起回来的。
+  final LibraryUsage usage;
+
+  /// 现在按大小排着。
+  ///
+  /// 这一档**不翻页**（服务端忽略游标并回 `has_more: false`）——
+  /// 它的用处是「库满了，哪几份最占地方」，翻到第五页时早就不是最占的了。
+  final bool bySize;
+
   /// 未归档的那些（界面上单独一段）。
   List<LibraryItem> get unfiled =>
       items.where((i) => i.folderId == null).toList(growable: false);
@@ -69,6 +80,8 @@ class LibraryState {
     Object? error = _sentinel,
     bool? unsupported,
     Set<String>? selected,
+    LibraryUsage? usage,
+    bool? bySize,
   }) => LibraryState(
     items: items ?? this.items,
     folders: folders ?? this.folders,
@@ -78,6 +91,8 @@ class LibraryState {
     error: error == _sentinel ? this.error : error as String?,
     unsupported: unsupported ?? this.unsupported,
     selected: selected ?? this.selected,
+    usage: usage ?? this.usage,
+    bySize: bySize ?? this.bySize,
   );
 
   static const Object _sentinel = Object();
@@ -103,10 +118,15 @@ class LibraryController extends Notifier<LibraryState> {
     try {
       final page = await ref
           .read(cortexApiProvider)
-          .library(folder: state.folder, tab: state.tab.wire);
+          .library(
+            folder: state.folder,
+            tab: state.tab.wire,
+            sort: state.bySize ? 'size' : null,
+          );
       state = state.copyWith(
         items: page.items,
         folders: page.folders.map(Folder.fromJson).toList(growable: false),
+        usage: page.usage,
         loading: false,
         error: null,
         unsupported: false,
@@ -128,6 +148,15 @@ class LibraryController extends Notifier<LibraryState> {
   Future<void> setTab(LibraryTab tab) async {
     if (state.tab == tab) return;
     state = state.copyWith(tab: tab, selected: const {});
+    await refresh();
+  }
+
+  /// 换排序。**重取，不是把手上这些重排** —— 手上只有第一页，本地排出来的
+  /// 「最大的几份」只是「这一页里最大的几份」，而库满时最大的那份大概率
+  /// 不在第一页。这与 `setTab` 是同一个坑。
+  Future<void> setBySize(bool on) async {
+    if (state.bySize == on) return;
+    state = state.copyWith(bySize: on, selected: const {});
     await refresh();
   }
 

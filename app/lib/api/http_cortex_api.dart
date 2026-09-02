@@ -2084,12 +2084,14 @@ class HttpCortexApi implements CortexApi {
     String? before,
     String? folder,
     String? tab,
+    String? sort,
   }) async => LibraryPage.fromJson(
     await _getJson('/library', {
       'limit': '$limit',
       'before': ?before,
       'folder': ?folder,
       'tab': ?tab,
+      'sort': ?sort,
     }),
   );
 

@@ -98,11 +98,44 @@ String _humanSize(int bytes) {
 }
 
 /// `GET /library` 的一页。
+/// 资料库占了多少、上限多少。
+///
+/// # 为什么它必须画出来
+///
+/// 附件与 agent 交付的产物是**自动**收进资料库的，判据是「不判断值不值得收」
+/// （见 `docs/library-content.md`）。那个决定成立的前提是**膨胀有办法管** ——
+/// 而办法就是配额加上「看得见、删得掉」。不画出来的话，用户第一次知道有上限
+/// 是在它满了、东西收不进去的那一刻。
+class LibraryUsage {
+  const LibraryUsage({this.bytes = 0, this.quotaBytes = 0, this.items = 0});
+
+  factory LibraryUsage.fromJson(Map<String, dynamic> json) => LibraryUsage(
+    bytes: asInt(json['bytes']),
+    quotaBytes: asInt(json['quota_bytes']),
+    items: asInt(json['items']),
+  );
+
+  final int bytes;
+
+  /// `0` = 不限（本机开发默认这么设）。
+  final int quotaBytes;
+  final int items;
+
+  /// 有没有上限这回事。没有就不画那条进度条 —— 一条永远填不满的条子
+  /// 只会让人猜它是什么意思。
+  bool get hasQuota => quotaBytes > 0;
+
+  /// 用掉的比例，0..1。没有上限时回 0。
+  double get ratio =>
+      hasQuota ? (bytes / quotaBytes).clamp(0.0, 1.0).toDouble() : 0;
+}
+
 class LibraryPage {
   const LibraryPage({
     this.items = const [],
     this.folders = const [],
     this.hasMore = false,
+    this.usage = const LibraryUsage(),
   });
 
   factory LibraryPage.fromJson(Map<String, dynamic> json) => LibraryPage(
@@ -111,7 +144,18 @@ class LibraryPage {
     ).map(LibraryItem.fromJson).toList(growable: false),
     folders: asObjectList(json['folders']),
     hasMore: json['has_more'] == true,
+    // 老服务端不发这一位 —— 那时 `hasQuota` 为假，界面不画那条进度条，
+    // 而不是画一条 0/0
+    usage: LibraryUsage.fromJson(
+      json['usage'] is Map<String, dynamic>
+          ? json['usage'] as Map<String, dynamic>
+          : const {},
+    ),
   );
+
+  /// 占了多少、上限多少。**跟着列表一起回** —— 分成两条路的话，打开资料库
+  /// 要两次往返，而其中一条失败时那一行会空着，用户不知道那是第二个请求。
+  final LibraryUsage usage;
 
   final List<LibraryItem> items;
 

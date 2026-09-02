@@ -860,6 +860,11 @@ abstract interface class CortexApi {
     String? before,
     String? folder,
     String? tab,
+
+    /// `size` = 按大小从大到小。**这一档不翻页** —— 它的用处是「库满了，
+    /// 哪几份最占地方」，翻到第五页时早就不是最占地方的了。服务端因此
+    /// 忽略 `before` 并回 `has_more: false`。
+    String? sort,
   });
 
   /// `POST /library` —— 把一份**已登记的 blob** 收进资料库。
@@ -1200,6 +1205,7 @@ mixin ImagesUnsupported {
     String? before,
     String? folder,
     String? tab,
+    String? sort,
   }) async => const LibraryPage();
 
   Future<LibraryItem> addToLibrary({

@@ -287,6 +287,7 @@ services:
       # 留着是为了**在本机就能复现**「反代不设头」那种部署的样子 ——
       # 那个洞只在开发机上看得见（生产 443 是默认端口，掉了端口也不发作）。
       CORTEX_PUBLIC_URL: ${CORTEX_PUBLIC_URL:-}
+      CORTEX_LIBRARY_QUOTA_BYTES: ${CORTEX_LIBRARY_QUOTA_BYTES:-}
       RUST_LOG: ${RUST_LOG:-cortex_agentd=debug,warn}
     volumes:
       - cortex_dev_bin:/opt/cortex/bin:ro

@@ -19,6 +19,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
+import '../../models/attachment.dart' show formatBytes;
 import '../../models/library_item.dart';
 import '../../state/library_controller.dart';
 import '../../widgets/empty_state.dart';
@@ -49,9 +50,7 @@ class LibraryPageView extends ConsumerWidget {
       children: [
         PanelHeader(
           title: '资料库',
-          subtitle: state.unsupported
-              ? null
-              : '${state.items.length} 项 · agent 随时能取的材料，与某一条对话无关',
+          subtitle: state.unsupported ? null : _subtitle(state),
           leading: onToggleSessions == null
               ? null
               : IconButton(
@@ -61,6 +60,17 @@ class LibraryPageView extends ConsumerWidget {
                   icon: const Icon(Icons.menu_rounded),
                 ),
           actions: [
+            if (!state.unsupported)
+              // 「按大小」。库满了要问的是「哪几份最占地方」，而按时间排的
+              // 列表答不了 —— 一份 300 MB 的日志可能在第八页
+              IconButton(
+                key: const ValueKey('lib:by-size'),
+                onPressed: () => n.setBySize(!state.bySize),
+                iconSize: 18,
+                isSelected: state.bySize,
+                tooltip: state.bySize ? '按时间排' : '按大小排（找出最占地方的）',
+                icon: const Icon(Icons.sort_rounded),
+              ),
             if (!state.unsupported)
               IconButton(
                 key: const ValueKey('lib:refresh'),
@@ -76,6 +86,25 @@ class LibraryPageView extends ConsumerWidget {
         if (!state.unsupported && state.items.isNotEmpty) const _Footnote(),
       ],
     );
+  }
+
+  /// 副标题：几项、占了多少。
+  ///
+  /// # 为什么占用要摆在这儿
+  ///
+  /// 附件与交付物是**自动**收进来的（判据见 `docs/library-content.md`：
+  /// 不判断值不值得收）。那个决定成立的前提是膨胀有办法管 —— 而办法就是
+  /// 「看得见、删得掉」。不画出来的话，用户第一次知道有上限是在它满了、
+  /// 东西静默收不进去的那一刻。
+  ///
+  /// 没有上限（本机开发把 `CORTEX_LIBRARY_QUOTA_BYTES` 设成 0）时只报占用，
+  /// 不报「/ 0」—— 一个分母是 0 的比例只会让人以为坏了。
+  String _subtitle(LibraryState state) {
+    final u = state.usage;
+    final used = formatBytes(u.bytes);
+    final size = u.hasQuota ? '$used / ${formatBytes(u.quotaBytes)}' : used;
+    return '${state.items.length} 项 · $size · agent 随时能取的材料，'
+        '与某一条对话无关';
   }
 
   Widget _body(
