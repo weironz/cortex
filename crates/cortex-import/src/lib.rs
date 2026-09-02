@@ -201,6 +201,8 @@ pub fn requests_for(
             retrieve: false,
             anchor_episode_id: None,
             tool_calls: Vec::new(),
+            // 导进来的历史没有顺序信息（导出文件里就没有），空 = 不知道
+            blocks: Vec::new(),
             models: Vec::new(),
         },
         NewEpisodeRequest {
@@ -214,6 +216,8 @@ pub fn requests_for(
             // 这一条是抽取的开关：服务端拿它把 (user, assistant) 配成一轮
             anchor_episode_id: Some(user_id),
             tool_calls: Vec::new(),
+            // 导进来的历史没有顺序信息（导出文件里就没有），空 = 不知道
+            blocks: Vec::new(),
             // 导入进来的历史**不知道**是谁写的 —— 导出文件里没有这个信息。
             // 留空让界面什么都不画，比猜一个「大概是 GPT-4」诚实
             models: Vec::new(),

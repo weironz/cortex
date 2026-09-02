@@ -14,6 +14,7 @@ import '../models/chat_session.dart';
 import '../models/episode.dart';
 import '../models/project.dart';
 import '../models/tool_call.dart';
+import '../models/turn_block.dart';
 import '../models/workspace.dart';
 import 'app_providers.dart';
 import '../models/assistant.dart';
@@ -1094,6 +1095,16 @@ class ChatController extends Notifier<ChatState> {
             createdAt: answer.occurredAt ?? DateTime.now(),
             attachments: answer.attachments,
             toolCalls: [...e.toolCalls, ...answer.toolCalls],
+            // ⚠️ **拼过工具列表就不能用骨架了。**
+            //
+            // 块里的序号是按 `answer.toolCalls` 数的，而这里在它前面接了
+            // `e.toolCalls`（那是「一轮失败时工具挂在用户消息上」那种情形）
+            // —— 一拼，每个序号都偏了 `e.toolCalls.length`。
+            //
+            // 偏了的表现不是报错，是**气泡里插错了工具**：读 A 文件的那一行
+            // 出现在讲 B 的那段话中间。宁可退回从前的画法（工具挂底下），
+            // 那至少没有说错话
+            blocks: e.toolCalls.isEmpty ? answer.blocks : const [],
             episodeId: answer.id,
             // **取 answer 那条的，不是 e 的** —— e 是用户说的话，
             // 它永远没有模型名
@@ -1337,20 +1348,23 @@ class ChatController extends Notifier<ChatState> {
         // into a single row instead of printing the same tool twice.
         final current = state.streamingTurns[sid];
         if (current == null) return;
-        _putTurn(
-          current.copyWith(
-            toolCalls: ToolCall.merge(
-              current.toolCalls,
-              name,
-              summary,
-              path: path,
-              diff: diff,
-              output: output,
-              phase: phase,
-              subagent: subagent,
-            ),
-          ),
+        final merged = ToolCall.merge(
+          current.toolCalls,
+          name,
+          summary,
+          path: path,
+          diff: diff,
+          output: output,
+          phase: phase,
+          subagent: subagent,
         );
+        // **列表变长了才是「新的一次调用」。** 结果那一半是折进已有那条的
+        // （见 `ToolCall.merge`），不该在骨架里再占一块 —— 占了的话同一次
+        // 调用会在气泡里出现两次
+        final blocks = merged.length > current.toolCalls.length
+            ? [...current.blocks, ToolBlock(merged.length - 1)]
+            : current.blocks;
+        _putTurn(current.copyWith(blocks: blocks, toolCalls: merged));
 
       case ChatConfirmEvent(:final request):
         // Flushed first so any text produced before the agent reached the tool
@@ -1448,7 +1462,25 @@ class ChatController extends Notifier<ChatState> {
     if (turn == null) return;
     // Append, never replace — this is what makes the bubble grow instead of
     // re-laying-out from scratch.
-    _putTurn(turn.copyWith(text: turn.text + chunk, awaitingFirstToken: false));
+    //
+    // 骨架同步长：相邻的增量并进**最后一个文本块**，碰到工具调用才另起。
+    // 顺序只在事件到达这一刻成立 —— 往下任何一层看到的都只是「一段正文」
+    // 和「一个列表」，那正是从前把它丢掉的地方
+    final blocks = [...turn.blocks];
+    if (blocks.isNotEmpty && blocks.last is TextBlock) {
+      blocks[blocks.length - 1] = TextBlock(
+        (blocks.last as TextBlock).text + chunk,
+      );
+    } else {
+      blocks.add(TextBlock(chunk));
+    }
+    _putTurn(
+      turn.copyWith(
+        text: turn.text + chunk,
+        blocks: blocks,
+        awaitingFirstToken: false,
+      ),
+    );
   }
 
   void _onError(String sid, Object error, StackTrace _) {
@@ -1507,6 +1539,9 @@ class ChatController extends Notifier<ChatState> {
       text: turn.text,
       createdAt: turn.startedAt,
       toolCalls: turn.toolCalls,
+      // 在线攒的那份骨架跟着进历史 —— 这一轮跑完之后不刷新页面时，
+      // 气泡不该从「交错」变回「一段长文 + 工具挂底下」
+      blocks: turn.blocks,
       // 这一轮工具画出来的图。**服务端在终帧上带过来的** —— 不带的话
       // 用户看到「画好啦」而屏幕上一张图都没有，要重新拉一次这条会话
       // 才出现（见 `ChatDoneEvent.attachments`）

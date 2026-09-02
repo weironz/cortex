@@ -695,6 +695,18 @@ pub fn episode_dto(e: cortex_store::Episode, replay: Replay) -> EpisodeDto {
         tool_calls: replay.tool_calls,
         // 迁移之前的历史是 NULL，原样塌成空 —— 界面据此什么都不画
         models: e.models.unwrap_or_default(),
+        // 正文与工具的先后顺序。取不出来就给空 —— 空的语义是「不知道」，
+        // 客户端据此退回从前的画法（整段正文 + 工具挂底下），而不是画一个
+        // 顺序错乱的东西。
+        //
+        // ⚠️ **解析失败也给空，不报错。** 这一位是渲染用的锦上添花，
+        // 而 `content` 里以后可能被塞进别的东西；为了一段画不出来的顺序
+        // 让整条历史读不回来，是把「好看」摆在了「读得到」前面。
+        blocks: e
+            .content
+            .get("blocks")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
     }
 }
 

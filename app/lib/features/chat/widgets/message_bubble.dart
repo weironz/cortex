@@ -9,6 +9,7 @@ import '../../../core/motion.dart';
 import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
 import '../../../models/tool_call.dart';
+import '../../../models/turn_block.dart';
 import '../../images/widgets/drawing_placeholder.dart';
 import '../../settings/pages/model_picker.dart';
 import '../../../state/app_providers.dart';
@@ -68,6 +69,7 @@ class MessageBubble extends StatelessWidget {
         : AssistantBlock(
             text: message.text,
             toolCalls: message.toolCalls,
+            blocks: message.blocks,
             attachments: message.attachments,
             createdAt: message.createdAt,
             episodeId: message.episodeId,
@@ -226,6 +228,7 @@ class AssistantBlock extends StatelessWidget {
     super.key,
     required this.text,
     required this.toolCalls,
+    this.blocks = const [],
     this.attachments = const [],
     this.createdAt,
     this.episodeId,
@@ -240,6 +243,10 @@ class AssistantBlock extends StatelessWidget {
 
   final String text;
   final List<ToolCall> toolCalls;
+
+  /// 正文与工具的先后骨架。**空 = 退回从前的画法**（整段正文 + 工具抽屉
+  /// 挂底下）—— 老服务端、导入的历史、加这一位之前落库的会话都是空的。
+  final List<TurnBlock> blocks;
   final List<Attachment> attachments;
   final DateTime? createdAt;
   final String? episodeId;
@@ -340,7 +347,38 @@ class AssistantBlock extends StatelessWidget {
                       const DrawingPlaceholder(),
                       const SizedBox(height: 8),
                     ],
-                    if (text.isNotEmpty)
+                    // ── 有骨架就顺着骨架画 ──
+                    //
+                    // 这是「文字和工具交错」的**全部实现**。从前这里只画
+                    // 一整段 `text`，工具统一挂在下面那个抽屉里 —— 于是
+                    // 一轮二十次调用的回答，读起来是「一大段话，然后二十
+                    // 行工具」，看不出哪句话对应哪次动作。
+                    //
+                    // 2026-09-02 用户实报：「cortex 把所有输出都汇总到底下了」。
+                    if (blocks.isNotEmpty)
+                      for (final b in blocks)
+                        switch (b) {
+                          TextBlock(:final text) when text.trim().isNotEmpty =>
+                            SelectionArea(
+                              child: CortexMarkdown(
+                                text,
+                                onLinkTap: (url) =>
+                                    openExternalLink(context, url),
+                              ),
+                            ),
+                          // 序号越界 = 骨架与工具列表对不上（拼过列表、
+                          // 或者老数据）。**什么都不画**，别画一个占位：
+                          // 正文中间冒出一个「未知工具」比少一行更糟
+                          ToolBlock(:final ordinal)
+                              when ordinal >= 0 && ordinal < toolCalls.length =>
+                            TurnDrawer(
+                              toolCalls: [toolCalls[ordinal]],
+                              streaming: streaming,
+                              initiallyExpanded: true,
+                            ),
+                          _ => const SizedBox.shrink(),
+                        }
+                    else if (text.isNotEmpty)
                       SelectionArea(
                         child: CortexMarkdown(
                           text,
@@ -366,7 +404,10 @@ class AssistantBlock extends StatelessWidget {
                         retryTarget: retryTarget,
                         deterministic: errorIsDeterministic,
                       ),
-                    TurnDrawer(toolCalls: toolCalls, streaming: streaming),
+                    // 骨架已经把工具画在正文中间了，底下不能再画一遍 ——
+                    // 同一次调用出现两次，用户会以为它跑了两回
+                    if (blocks.isEmpty)
+                      TurnDrawer(toolCalls: toolCalls, streaming: streaming),
                     // 这一行动作 + 元信息，贴在回答**底部左侧**。
                     //
                     // 复制原来挂在头部那一行的最右端：离正文最远的那个角，

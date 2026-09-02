@@ -748,6 +748,8 @@ impl Engine {
             text: req.message.clone(),
             occurred_at: Some(chrono::Utc::now().to_rfc3339()),
             attachments: req.attachments.clone(),
+            // 用户说的话里没有工具，顺序无从谈起 —— 空是诚实的
+            blocks: Vec::new(),
             retrieve: true,
             anchor_episode_id: None,
             tool_calls: Vec::new(),
@@ -1017,9 +1019,9 @@ impl Engine {
             .run(&llm, &system_prompt, &mut messages, &host, &atx)
             .await;
         drop(atx);
-        let tool_calls = bridge.await.unwrap_or_else(|e| {
+        let (tool_calls, blocks) = bridge.await.unwrap_or_else(|e| {
             tracing::warn!(error = %e, "工具事件桥接任务异常结束，本轮工具归因未记录");
-            Vec::new()
+            (Vec::new(), Vec::new())
         });
 
         // 这一轮先后是谁写的。**出错那一支留空** —— 半截回答本来就不落库，
@@ -1067,6 +1069,7 @@ impl Engine {
                 retrieve: false,
                 anchor_episode_id: Some(user_id),
                 tool_calls,
+                blocks,
                 models: models.clone(),
             };
             if let Err(e) = self.remote.write_episode(&ep).await {
@@ -1192,14 +1195,28 @@ impl Engine {
 async fn bridge_events(
     arx: &mut mpsc::Receiver<AgentEvent>,
     tx: &crate::runs::RunSink,
-) -> Vec<ToolCallInput> {
+) -> (Vec<ToolCallInput>, Vec<cortex_proto::dto::TurnBlock>) {
     let mut pending_path: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
     let mut recorded = Vec::new();
+    // ★ 正文与工具的**先后骨架**。这座桥是唯一同时看得见两者的地方 ——
+    // 顺序只在这里成立，往下任何一层都只剩「一段正文」和「一个列表」。
+    //
+    // 相邻的 delta 合成一块：模型一个 token 一条事件，不合的话骨架会有
+    // 上万个只装一两个字的块，而它们要跟着 episode 一起进库
+    let mut blocks: Vec<cortex_proto::dto::TurnBlock> = Vec::new();
 
     while let Some(ev) = arx.recv().await {
         let out = match ev {
-            AgentEvent::Delta(text) => ChatEvent::Delta { text },
+            AgentEvent::Delta(text) => {
+                match blocks.last_mut() {
+                    Some(cortex_proto::dto::TurnBlock::Text { text: acc }) => {
+                        acc.push_str(&text);
+                    }
+                    _ => blocks.push(cortex_proto::dto::TurnBlock::Text { text: text.clone() }),
+                }
+                ChatEvent::Delta { text }
+            }
             AgentEvent::ToolCall { name, arguments } => {
                 let path = tool_path(&arguments);
                 pending_path.insert(name.clone(), path.clone());
@@ -1225,6 +1242,11 @@ async fn bridge_events(
                 output,
             } => {
                 let path = pending_path.remove(&name).flatten();
+                // ordinal 就是它在 `recorded` 里的下标 —— 服务端也是按这个
+                // 顺序落 `episode_tool_calls.ordinal` 的，两边同源
+                blocks.push(cortex_proto::dto::TurnBlock::Tool {
+                    ordinal: u32::try_from(recorded.len()).unwrap_or(u32::MAX),
+                });
                 recorded.push(ToolCallInput {
                     name: name.clone(),
                     path: path.clone(),
@@ -1249,7 +1271,7 @@ async fn bridge_events(
         // 「那一轮该记什么，与谁还看着无关」
         tx.send(out).await;
     }
-    recorded
+    (recorded, blocks)
 }
 
 /// 子 agent 内部那个事件，要不要上界面；要的话长什么样。

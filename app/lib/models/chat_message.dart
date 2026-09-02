@@ -1,5 +1,6 @@
 import 'attachment.dart';
 import 'tool_call.dart';
+import 'turn_block.dart';
 
 enum MessageRole { user, assistant }
 
@@ -15,6 +16,7 @@ class ChatMessage {
     required this.text,
     required this.createdAt,
     this.toolCalls = const [],
+    this.blocks = const [],
     this.attachments = const [],
     this.episodeId,
     this.error,
@@ -37,6 +39,10 @@ class ChatMessage {
 
   /// Tools the agent invoked during this turn. Same placement rule as [facts].
   final List<ToolCall> toolCalls;
+
+  /// 正文与工具的先后骨架。空 = 不知道 —— 界面退回从前的画法
+  /// （整段正文，工具挂底下）。见 [TurnBlock]。
+  final List<TurnBlock> blocks;
 
   /// Blobs carried by this message. Only user messages have them today, but the
   /// field is on the base type because `episode_blobs` is not role-scoped.
@@ -72,6 +78,7 @@ class ChatMessage {
   ChatMessage copyWith({
     String? text,
     List<ToolCall>? toolCalls,
+    List<TurnBlock>? blocks,
     List<Attachment>? attachments,
     String? episodeId,
     String? error,
@@ -82,6 +89,7 @@ class ChatMessage {
     text: text ?? this.text,
     createdAt: createdAt,
     toolCalls: toolCalls ?? this.toolCalls,
+    blocks: blocks ?? this.blocks,
     attachments: attachments ?? this.attachments,
     episodeId: episodeId ?? this.episodeId,
     error: error ?? this.error,

@@ -209,6 +209,7 @@ mod tests {
             retrieve: false,
             anchor_episode_id: None,
             tool_calls: Vec::new(),
+            blocks: Vec::new(),
             models: Vec::new(),
         }
     }

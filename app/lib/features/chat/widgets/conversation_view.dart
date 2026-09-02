@@ -348,6 +348,9 @@ class _StreamingBubble extends ConsumerWidget {
     final tools = ref.watch(
       chatControllerProvider.select((s) => s.streaming?.toolCalls ?? const []),
     );
+    final blocks = ref.watch(
+      chatControllerProvider.select((s) => s.streaming?.blocks ?? const []),
+    );
     final queuedAhead = ref.watch(
       chatControllerProvider.select((s) => s.streaming?.queuedAhead),
     );
@@ -355,6 +358,7 @@ class _StreamingBubble extends ConsumerWidget {
     return AssistantBlock(
       text: text,
       toolCalls: tools,
+      blocks: blocks,
       streaming: true,
       queuedAhead: queuedAhead,
     );

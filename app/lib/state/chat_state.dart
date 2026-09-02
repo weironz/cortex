@@ -1,6 +1,7 @@
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../models/tool_call.dart';
+import '../models/turn_block.dart';
 
 /// How many episodes one `GET /sessions/{id}` page holds.
 ///
@@ -28,6 +29,7 @@ class StreamingTurn {
     required this.startedAt,
     this.text = '',
     this.toolCalls = const [],
+    this.blocks = const [],
     this.awaitingFirstToken = true,
     this.queuedAhead,
   });
@@ -39,6 +41,13 @@ class StreamingTurn {
 
   /// Tools the agent invoked (from `tool` events).
   final List<ToolCall> toolCalls;
+
+  /// 正文与工具调用的**先后骨架**。见 [TurnBlock]。
+  ///
+  /// 在线这一半不走线协议：事件本来就按到达顺序来，客户端自己攒得出。
+  /// 落库那一半由 agent 侧同样攒一份随 episode 一起写（`NewEpisodeRequest.blocks`），
+  /// 于是重新打开这条会话时顺序还在。
+  final List<TurnBlock> blocks;
 
   /// True until the first `delta` lands — drives the thinking indicator.
   final bool awaitingFirstToken;
@@ -52,6 +61,7 @@ class StreamingTurn {
   StreamingTurn copyWith({
     String? text,
     List<ToolCall>? toolCalls,
+    List<TurnBlock>? blocks,
     bool? awaitingFirstToken,
     // 这一个要能置回 null（开跑了就不再排队），所以走哨兵而不是 `int?` ——
     // `int?` 的话「不改」和「清掉」在签名上是同一件事
@@ -62,6 +72,7 @@ class StreamingTurn {
     startedAt: startedAt,
     text: text ?? this.text,
     toolCalls: toolCalls ?? this.toolCalls,
+    blocks: blocks ?? this.blocks,
     awaitingFirstToken: awaitingFirstToken ?? this.awaitingFirstToken,
     queuedAhead: queuedAhead == _sentinel
         ? this.queuedAhead

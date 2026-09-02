@@ -746,6 +746,35 @@ pub struct TicketResponse {
 
 // ────────────────────────── episodes ───────────────────────────
 
+/// 一轮回答里的一「块」，按**发生顺序**排。
+///
+/// # 为什么需要它
+///
+/// 从前一轮在线上是两样东西：一整段 `text`，和一个 `tool_calls` 列表。
+/// 两者之间的先后**没有任何地方表示**，于是客户端只能画成「一段长文 +
+/// 底下一堆工具」—— 哪怕模型是每调一个工具就说一句话的。
+///
+/// 2026-09-02 用户实报：「cortex 把所有输出都汇总到底下了」，并指出
+/// Claude Code 是「文字和代码修改交错着输出的」。那不是提示词的差别，
+/// 是**结构**的差别：那边一条 assistant 消息的 `content` 本来就是一个
+/// 数组，文本块与工具块是同一个数组里的兄弟，顺序就是下标。
+///
+/// # 为什么是「骨架」而不是把工具塞进块里
+///
+/// [`Self::Tool`] 只带一个 `ordinal`，指向同一条 episode 的 `tool_calls`
+/// 里那一条 —— 工具的数据一份不复制。两份同源数据要靠人保证一致，而漂了
+/// 之后的表现是「气泡里那一行和抽屉里那一行说的不是一回事」。
+///
+/// 纯追加：老客户端读不到这一位，行为与从前一模一样。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TurnBlock {
+    /// 一段连续的正文。
+    Text { text: String },
+    /// 第 `ordinal` 次工具调用（与 `tool_calls[].ordinal` 对得上）。
+    Tool { ordinal: u32 },
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EpisodeDto {
     pub id: String,
@@ -760,6 +789,12 @@ pub struct EpisodeDto {
     /// 这一轮调用了哪些工具。省略规则同上。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallDto>,
+    /// **正文与工具调用的先后顺序。** 空 = 不知道（这条 episode 是加这一位
+    /// 之前落的库，或者老客户端写的）。见 [`TurnBlock`]。
+    ///
+    /// 空的时候客户端退回从前的画法：整段正文，工具全挂在底下。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<TurnBlock>,
     /// 这条回复**先后**是谁写的，按发生顺序。见 [`ChatEvent::Done`]。
     ///
     /// 空 = 不知道（迁移之前的历史、导入进来的记录）。

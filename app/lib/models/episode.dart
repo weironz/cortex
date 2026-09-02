@@ -1,6 +1,7 @@
 import 'attachment.dart';
 import 'json.dart';
 import 'tool_call.dart';
+import 'turn_block.dart';
 
 /// An append-only archived conversation turn — the provenance target every
 /// memory fact points back at (`GET /episodes/{id}`), and the unit
@@ -14,6 +15,7 @@ class Episode {
     this.occurredAt,
     this.attachments = const [],
     this.toolCalls = const [],
+    this.blocks = const [],
     this.models = const [],
   });
 
@@ -52,6 +54,10 @@ class Episode {
   /// not need pairing.
   final List<ToolCall> toolCalls;
 
+  /// 正文与工具的先后骨架。空 = 不知道（老服务端、导入的历史、
+  /// 加这一位之前落库的会话）—— 那时界面退回从前的画法。
+  final List<TurnBlock> blocks;
+
   factory Episode.fromJson(Map<String, dynamic> json) => Episode(
     id: asString(json['id']),
     sessionId: asString(json['session_id']),
@@ -64,6 +70,9 @@ class Episode {
     toolCalls: asObjectList(
       json['tool_calls'],
     ).map(ToolCall.replayed).toList(growable: false),
+    blocks: asObjectList(
+      json['blocks'],
+    ).map(TurnBlock.fromJson).nonNulls.toList(growable: false),
     models: asStringList(json['models']),
   );
 }

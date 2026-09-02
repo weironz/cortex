@@ -238,7 +238,13 @@ async fn persist(store: &Store, req: &NewEpisodeRequest) -> cortex_core::Result<
         id: episode_id,
         session_id: req.session_id.clone(),
         role,
-        content: serde_json::json!({ "text": req.text }),
+        // ★ 块顺序落在这一列里，**不用加列** —— `content` 本来就是 JSONB，
+        // 注释写着「原始消息，无损保存」，而在此之前它只是 `{"text": …}`
+        // 这么个壳子。
+        //
+        // `text` 那一列照旧单独存：它是全文检索的来源（tsv 从它算），
+        // 而块数组是给渲染用的。两者同源不同用，别合成一个。
+        content: serde_json::json!({ "text": req.text, "blocks": req.blocks }),
         text: Some(req.text.clone()),
         domain: None,
         device_id: crate::state::DEVICE_ID.to_owned(),

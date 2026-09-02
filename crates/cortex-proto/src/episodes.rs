@@ -94,6 +94,12 @@ pub struct NewEpisodeRequest {
     pub anchor_episode_id: Option<String>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallInput>,
+    /// **正文与工具调用的先后顺序。** 见 `dto::TurnBlock`。
+    ///
+    /// 不传 = 老客户端，服务端照旧只存 `text` + `tool_calls`，读回去时
+    /// 这一位是空的，客户端退回从前的画法。**纯追加，不影响任何老路径。**
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<crate::dto::TurnBlock>,
 }
 
 /// `POST /episodes` 的响应。
