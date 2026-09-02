@@ -170,3 +170,9 @@ cortex_mail_from_alias: "Cortex"
 # 留空即用默认值
 cortex_mail_endpoint: ""
 cortex_mail_region: ""
+
+# 开放注册。**`enabled` 这个词本身才算开**，空 = 关（只有管理员账号）。
+# 代码里认的是 `== "enabled"`，填 1 / true 都是关着的，而且不报错。
+#
+# ⚠️ 这个部署的域名是公网可达的 —— 开着就是任何人都能注册。
+cortex_open_registration: "enabled"
