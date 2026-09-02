@@ -55,6 +55,7 @@ import 'auth_controller.dart';
 // 循环 import（chat_controller 也 import 这里）—— Dart 在库这一级允许，
 // 而把 MainView 那套挪去 chat_controller 会让「我在哪个地方」跟对话状态
 // 绑在一起，那正是它当初没塞进 LayoutState 的同一个理由
+import 'chat_state.dart';
 import 'chat_controller.dart';
 import 'remote_attach_controller.dart';
 import 'sandbox_backend_controller.dart';
@@ -767,11 +768,59 @@ class MainViewNotifier extends Notifier<MainView> {
   }
 
   /// 图片页上点「新对话」。
+  ///
+  /// # 已经在一张白纸上就什么都不做
+  ///
+  /// 2026-09-02 用户实报：「输入框没有输入内容，点击新对话，会一直创建空
+  /// 对话」。这一支此前**无条件**建 —— 点五次多五条「新会话」。
+  ///
+  /// 上面 `_enterImages` 的注释早就写着同一件事（「懒建而不是每次都建：
+  /// 每点一次多一条空会话的话，侧栏很快就全是新会话」），只是那条纪律没有
+  /// 跟到按钮这一支上。这是「同一条判据在两处，只有一处照做」那个形状。
+  ///
+  /// 判据是**会话本身还是空的**，不是「有没有点过」：一条已经问过话的会话
+  /// 当然要给新的。手上打了一半还没发的字不算 —— 那些不在 transcript 里，
+  /// 而它们正是用户此刻要用的东西，把它们连同会话一起换掉才是真的丢东西。
   void newImageSession() {
-    _imageSession = ref.read(chatControllerProvider.notifier).createSession();
+    final ctrl = ref.read(chatControllerProvider.notifier);
+    final chat = ref.read(chatControllerProvider);
+    // ⚠️ 判据看的是**当前活动会话**，不是记着的那个 `_imageSession`。
+    //
+    // 第一版看后者，结果第一次点仍然会多建一条：`_imageSession` 只是这个
+    // notifier 的一个字段，notifier 一重建它就没了（重建之后靠设置里那条
+    // 恢复，而恢复是异步的、也可能根本没存过）。而「眼前这条是不是白纸」
+    // 不依赖任何记忆 —— 它就是用户看着的那个东西。
+    final active = chat.activeSessionId;
+    if (active != null && _isBlank(chat, active)) {
+      // 顺手认下它：下次进图片页直接复用，不必再建
+      if (_imageSession != active) {
+        _imageSession = active;
+        unawaited(ref.read(settingsPatcherProvider)(_kImageSession, active));
+      }
+      return;
+    }
+    _imageSession = ctrl.createSession();
     unawaited(
       ref.read(settingsPatcherProvider)(_kImageSession, _imageSession!),
     );
+  }
+
+  /// 这条会话还是一张白纸吗。
+  ///
+  /// 三个条件缺一不可：
+  ///
+  /// * transcript 是空的 —— 一条问过话的会话不是白纸；
+  /// * **没在跑** —— 刚发出去还没落进 transcript 的那一瞬间，消息列表也是
+  ///   空的。只看消息数的话，那一瞬间点「新对话」会把正在生成的那条当成
+  ///   白纸复用掉，而用户看到的是自己的问题被顶掉了；
+  /// * transcript **已经取回来了** —— 没取回来时空列表的意思是「还不知道」，
+  ///   拿它当「空的」会在冷启动恢复到图片页时复用一条其实有内容的会话。
+  bool _isBlank(ChatState chat, String sessionId) {
+    final t = chat.transcripts[sessionId];
+    return t != null &&
+        t.loadedFromServer &&
+        t.messages.isEmpty &&
+        !chat.isRunning(sessionId);
   }
 }
 

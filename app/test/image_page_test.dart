@@ -20,6 +20,7 @@ import 'package:cortex_app/features/images/widgets/image_spec.dart';
 import 'package:cortex_app/models/model_option.dart';
 import 'package:cortex_app/models/model_source.dart';
 import 'package:cortex_app/state/app_providers.dart';
+import 'package:cortex_app/state/chat_controller.dart';
 import 'package:cortex_app/state/model_controller.dart';
 import 'dart:typed_data';
 
@@ -481,6 +482,82 @@ void main() {
       // 画出来就是界面替模型答应了一件它做不到的事
       expect(find.text('质量'), findsNothing);
       expect(find.text('背景'), findsNothing);
+    });
+  });
+
+  /// **点「新对话」不该每点一次多一条空会话。**
+  ///
+  /// 2026-09-02 用户实报：「输入框没有输入内容，点击新对话，会一直创建
+  /// 空对话」。
+  ///
+  /// 这一支此前无条件 `createSession()`。而它上面那个 `_enterImages` 的注释
+  /// 早就写着同一条纪律（「懒建而不是每次都建：每点一次多一条空会话的话，
+  /// 侧栏很快就全是新会话」）—— 只是那条纪律没跟到按钮这一支上。
+  /// 「同一条判据在两处、只有一处照做」这个形状。
+  group('图片页的「新对话」', () {
+    testWidgets('已经在白纸上时，连点五次只有一条', (tester) async {
+      final c = _boot();
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+
+      final before = c.read(chatControllerProvider).sessions.length;
+      final first = c.read(chatControllerProvider).activeSessionId;
+      expect(first, isNotNull, reason: '前提没成立：进图片页之后没有活动会话，下面测不出「会不会多建」');
+
+      for (var i = 0; i < 5; i++) {
+        await tester.tap(find.byKey(const ValueKey('images:new')));
+        await _settle(tester, 4);
+      }
+
+      expect(
+        c.read(chatControllerProvider).sessions.length,
+        before,
+        reason:
+            '连点五次「新对话」多出了会话 —— 而这五次之间一个字都没输入。'
+            '用户看到的是侧栏里一串「新会话」',
+      );
+      expect(
+        c.read(chatControllerProvider).activeSessionId,
+        first,
+        reason: '白纸被换成了另一张白纸 —— 那没有任何意义，还会把已选的规格与草稿丢掉',
+      );
+    });
+
+    /// **负对照。** 这条会话真的被用过之后，「新对话」必须给一条新的 ——
+    /// 否则这个按钮就成了摆设，而用户的下一个提示词会接在上一段对话后面。
+    testWidgets('这条会话问过话之后，「新对话」要真的开新的', (tester) async {
+      final c = _boot();
+      addTearDown(c.dispose);
+      await _pump(tester, c);
+
+      final ctrl = c.read(chatControllerProvider.notifier);
+      final used = c.read(chatControllerProvider).activeSessionId;
+      expect(used, isNotNull, reason: '前提没成立：没有活动会话');
+
+      await ctrl.send('画一只柴犬');
+      await _settle(tester, 20);
+      expect(
+        c.read(chatControllerProvider).transcripts[used!]?.messages,
+        isNotEmpty,
+        reason: '前提没成立：这条会话还是空的，测不出「用过之后会不会开新的」',
+      );
+
+      final before = c.read(chatControllerProvider).sessions.length;
+      await tester.tap(find.byKey(const ValueKey('images:new')));
+      await _settle(tester, 6);
+
+      expect(
+        c.read(chatControllerProvider).sessions.length,
+        before + 1,
+        reason:
+            '用过的会话上点「新对话」没有开新的 —— 那个按钮成了摆设，'
+            '而用户的下一句会接在上一段对话后面',
+      );
+      expect(
+        c.read(chatControllerProvider).activeSessionId,
+        isNot(used),
+        reason: '还停在原来那条上',
+      );
     });
   });
 }
