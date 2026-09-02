@@ -394,76 +394,224 @@ pub async fn add(
     if name.is_empty() || name.chars().count() > 255 {
         return Err(ApiError::bad_request("名字要在 1..255 个字符之间"));
     }
-    let origin = req.origin.as_deref().unwrap_or("uploaded");
-    if !matches!(origin, "uploaded" | "generated") {
-        return Err(ApiError::bad_request("origin 只能是 uploaded 或 generated"));
-    }
+    let origin = match req.origin.as_deref() {
+        None | Some("uploaded") => Origin::Uploaded,
+        Some("generated") => Origin::Generated,
+        Some(_) => {
+            return Err(ApiError::bad_request("origin 只能是 uploaded 或 generated"));
+        }
+    };
 
     // 已经在库里了：**回原来那条，不报错**。用户拖了同一个文件两次不是
-    // 错误，而一条 409 会让界面要为这件事单独写一条文案
+    // 错误，而一条 409 会让界面为这件事单独写一条文案
     if let Some(existing) = fetch_by_hash(store.pool(), &req.blob_hash).await? {
         return Ok(Json(existing));
     }
 
-    let (mime, size_bytes): (String, i64) =
-        sqlx::query_as("SELECT mime, size_bytes FROM blobs WHERE hash = $1")
-            .bind(&req.blob_hash)
-            .fetch_optional(store.pool())
+    // 没登记的 blob 要**当场报错**：这是用户刚点下的一个动作，
+    // 静默成功会让他以为收进去了。自动收那条路不同，见 `collect`
+    if store_blob_missing(store.pool(), &req.blob_hash).await? {
+        return Err(ApiError::bad_request(
+            "这个 blob 还没登记，先走 /blobs 上传",
+        ));
+    }
+
+    let id = collect(&st, store.pool(), &req.blob_hash, name, origin)
+        .await?
+        .ok_or_else(|| ApiError::internal("刚写进去的条目读不回来"))?;
+
+    if let Some(folder) = req.folder_id.as_deref() {
+        sqlx::query("UPDATE library_items SET folder_id = $2 WHERE id = $1")
+            .bind(&id)
+            .bind(folder)
+            .execute(store.pool())
             .await
-            .map_err(|e| ApiError::internal(format!("查 blob 失败：{e}")))?
-            .ok_or_else(|| ApiError::bad_request("这个 blob 还没登记，先走 /blobs 上传"))?;
-
-    let id = cortex_core::Id::new().to_string();
-    // 图片不切分：它没有正文。状态记 unsupported 而不是 ready —— ready 会让
-    // 界面显示「0 段」，读起来像切分丢了东西
-    let extractable = is_extractable(&mime, name);
-    let state = if mime.starts_with("image/") || !extractable {
-        "unsupported"
-    } else {
-        "ready"
-    };
-
-    sqlx::query(
-        "INSERT INTO library_items
-             (id, blob_hash, name, mime, size_bytes, origin, folder_id, chunk_state, chunk_count)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0)",
-    )
-    .bind(&id)
-    .bind(&req.blob_hash)
-    .bind(name)
-    .bind(&mime)
-    .bind(size_bytes)
-    .bind(origin)
-    .bind(req.folder_id.as_deref())
-    .bind(state)
-    .execute(store.pool())
-    .await
-    .map_err(|e| ApiError::internal(format!("写资料库失败：{e}")))?;
-
-    if state == "ready" {
-        let bytes = st
-            .blobs()?
-            .get(&req.blob_hash)
-            .await
-            .map_err(|e| ApiError::internal(format!("取文件字节失败：{e}")))?;
-        // 不是合法 UTF-8 的按「提不出正文」处理，而不是塞一堆替换字符进库：
-        // 那样检索会命中一片乱码，模型读到的是噪声
-        match String::from_utf8(bytes.to_vec()) {
-            Ok(text) => index_chunks(store.pool(), &id, &text).await?,
-            Err(_) => {
-                sqlx::query("UPDATE library_items SET chunk_state = 'unsupported' WHERE id = $1")
-                    .bind(&id)
-                    .execute(store.pool())
-                    .await
-                    .map_err(|e| ApiError::internal(format!("更新状态失败：{e}")))?;
-            }
-        }
+            .map_err(|e| ApiError::internal(format!("归档失败：{e}")))?;
     }
 
     fetch_by_id(store.pool(), &id)
         .await?
         .ok_or_else(|| ApiError::internal("刚写进去的条目读不回来"))
         .map(Json)
+}
+
+/// 这个哈希在 `blobs` 里没有登记过。
+async fn store_blob_missing(pool: &sqlx::PgPool, hash: &str) -> Result<bool, ApiError> {
+    let found: Option<String> = sqlx::query_scalar("SELECT hash FROM blobs WHERE hash = $1")
+        .bind(hash)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| ApiError::internal(format!("查 blob 失败：{e}")))?;
+    Ok(found.is_none())
+}
+
+/// 一份材料是**谁**放进来的。
+///
+/// 界面上是「已上传 / 已生成」两个徽标；数据库那一列有
+/// `CHECK (origin IN ('uploaded', 'generated'))`。做成枚举而不是到处传字符串：
+/// 拼错的话约束会挡下，而自动收那条路上失败只记 WARN —— 材料就静默不进库了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// 用户自己传的、贴的、拖进来的。
+    Uploaded,
+    /// agent 画的、交付的。
+    Generated,
+}
+
+impl Origin {
+    /// 线上写法。**住在枚举旁边**，与 `Risk::as_wire` 同一个理由：
+    /// 加一档时编译器会点出所有没跟上的地方。
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            Self::Uploaded => "uploaded",
+            Self::Generated => "generated",
+        }
+    }
+}
+
+/// 自动起的名字最长多少个字符。
+///
+/// 60 ≈ 列表里那一行的宽度。再长也只是被省略号吃掉，而库里那一列白白变长。
+/// 回填迁移 `20260902000001` 里的 `left(…, 60)` 与这里是同一个数，改要一起改。
+const AUTO_NAME_MAX_CHARS: usize = 60;
+
+/// 自动收进资料库时，这一条叫什么。
+///
+/// # 为什么这条规则只能有一份
+///
+/// 三处要给同一批内容起名：画完的图、发消息带的附件、回填迁移。各写一遍的
+/// 下场不是崩，是**同一份内容从两条路进来叫法不一样** —— 而
+/// `UNIQUE (blob_hash)` 决定先进的那条胜出，于是「名字看起来改不动」。
+///
+/// 按**字符**截而不是字节：`&s[..60]` 在中文上直接 panic（切在码点中间）。
+pub(crate) fn auto_name(hash: &str, label: Option<&str>) -> String {
+    let trimmed = label.unwrap_or("").trim();
+    if trimmed.is_empty() {
+        return format!("cortex-{}", &hash[..8.min(hash.len())]);
+    }
+    if trimmed.chars().count() > AUTO_NAME_MAX_CHARS {
+        return format!(
+            "{}…",
+            trimmed
+                .chars()
+                .take(AUTO_NAME_MAX_CHARS)
+                .collect::<String>()
+        );
+    }
+    trimmed.to_owned()
+}
+
+/// 往 `library_items` 里写一行 —— **整个仓库唯一的那个记录点**。
+///
+/// 三条路都打这儿：HTTP 的 [`add`]、画完图之后（[`crate::image`]）、
+/// 发消息带附件之后（[`crate::episodes`]）。各写一份 INSERT 的下场是
+/// 「某一类材料静默地不进资料库」，而漏改的那一份不会有任何测试红。
+///
+/// 回 `Ok(None)` = **这份内容已经在库里**。那不是错误：内容寻址下同一个
+/// 文件传两次是同一个哈希，而 `UNIQUE (blob_hash)` 说一份内容只有一条。
+/// 当成错的话，日志里会多出一行看着像真错的 WARN。
+///
+/// `chunk_state` 在这里定死，不让调用方传：判据（[`is_extractable`] 加
+/// 「图片没有正文」）只能有一处，两处各判一次漂开之后，表现是同一类文件
+/// 走 HTTP 收进来能被检索、自动收进来查不到。
+///
+/// # Errors
+/// blob 没登记（回 `Ok(None)`，因为 `SELECT` 取不到行 ⇒ 没插进去）、库不可用。
+pub(crate) async fn insert_item(
+    pool: &sqlx::PgPool,
+    blob_hash: &str,
+    name: &str,
+    origin: Origin,
+) -> Result<Option<String>, sqlx::Error> {
+    // mime 与 size 从 `blobs` 那一行取，不让调用方传：传的话两个调用点各自去
+    // 猜，猜错的表现是资料库那一格显示的类型与实际内容不一样
+    let Some((mime, size_bytes)): Option<(String, i64)> =
+        sqlx::query_as("SELECT mime, size_bytes FROM blobs WHERE hash = $1")
+            .bind(blob_hash)
+            .fetch_optional(pool)
+            .await?
+    else {
+        return Ok(None);
+    };
+
+    // 图片不切分：它没有正文。状态记 unsupported 而不是 ready —— ready 会让
+    // 界面显示「0 段」，读起来像切分丢了东西。
+    // 也不记 pending：那一档的意思是「还没轮到它」，而这里永远轮不到，
+    // 界面会一直显示「切分中」
+    let state = if mime.starts_with("image/") || !is_extractable(&mime, name) {
+        "unsupported"
+    } else {
+        "ready"
+    };
+
+    sqlx::query_scalar(
+        "INSERT INTO library_items
+             (id, blob_hash, name, mime, size_bytes, origin, chunk_state, chunk_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
+         ON CONFLICT (blob_hash) DO NOTHING
+         RETURNING id",
+    )
+    .bind(cortex_core::Id::new().to_string())
+    .bind(blob_hash)
+    .bind(name)
+    .bind(&mime)
+    .bind(size_bytes)
+    .bind(origin.as_wire())
+    .bind(state)
+    .fetch_optional(pool)
+    .await
+}
+
+/// 收一份材料进资料库：写行 + 该切分的当场切。
+///
+/// 判据见 `docs/library-content.md`。这里**不判断「这是不是值得收的东西」**：
+/// 漏收补救不了（用户不知道去哪找，甚至不知道有东西没被存），膨胀补救得了
+/// （搜索、配额、删除）。
+///
+/// # Errors
+/// blob 不存在、库不可用、取字节失败。
+pub(crate) async fn collect(
+    st: &AgentState,
+    pool: &sqlx::PgPool,
+    blob_hash: &str,
+    name: &str,
+    origin: Origin,
+) -> Result<Option<String>, ApiError> {
+    let Some(id) = insert_item(pool, blob_hash, name, origin)
+        .await
+        .map_err(|e| ApiError::internal(format!("写资料库失败：{e}")))?
+    else {
+        // 已经在库里，或者 blob 没登记。两种都不该让调用方失败
+        return Ok(None);
+    };
+
+    let state: String = sqlx::query_scalar("SELECT chunk_state FROM library_items WHERE id = $1")
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| ApiError::internal(format!("读切分状态失败：{e}")))?;
+    if state != "ready" {
+        return Ok(Some(id));
+    }
+
+    let bytes = st
+        .blobs()?
+        .get(blob_hash)
+        .await
+        .map_err(|e| ApiError::internal(format!("取文件字节失败：{e}")))?;
+    // 不是合法 UTF-8 的按「提不出正文」处理，而不是塞一堆替换字符进库：
+    // 那样检索会命中一片乱码，模型读到的是噪声
+    match String::from_utf8(bytes.to_vec()) {
+        Ok(text) => index_chunks(pool, &id, &text).await?,
+        Err(_) => {
+            sqlx::query("UPDATE library_items SET chunk_state = 'unsupported' WHERE id = $1")
+                .bind(&id)
+                .execute(pool)
+                .await
+                .map_err(|e| ApiError::internal(format!("更新状态失败：{e}")))?;
+        }
+    }
+    Ok(Some(id))
 }
 
 /// 切分 + 写 tsvector。
@@ -898,5 +1046,234 @@ mod tests {
             "pdf 提取器还没做"
         );
         assert!(!is_extractable("image/png", "a.png"));
+    }
+
+    /// 找 `DATABASE_URL`，**不把 .env 灌进进程环境**（`dotenvy::dotenv()` 会把
+    /// 整份 .env 设成进程环境变量，而同一个进程里别的测试断言的恰是「没设
+    /// 环境变量」的默认值 —— 症状是单跑绿、全量跑把隔壁弄红）。
+    fn database_url() -> Option<String> {
+        if let Ok(url) = std::env::var("DATABASE_URL")
+            && !url.is_empty()
+        {
+            return Some(url);
+        }
+        let iter = dotenvy::dotenv_iter().ok()?;
+        for item in iter {
+            let (k, v) = item.ok()?;
+            if k == "DATABASE_URL" && !v.is_empty() {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// **唯一那个记录点的行为，在真库上。**
+    ///
+    /// `insert_item` 是三条路（HTTP `add`、画完图、发消息带附件）共用的那一句
+    /// INSERT。它错了三条路一起错，所以这条测试盯的东西比看上去多：
+    ///
+    /// 1. `chunk_state` 的判据只有一处 —— 图与提不出正文的落 `unsupported`，
+    ///    文本落 `ready`。**不落 `pending`**：那一档的意思是「还没轮到它」，
+    ///    而自动收这条路上永远不会有第二步来切它，界面会一直显示「切分中」
+    /// 2. 已经在库里回 `Ok(None)` 而不是 `Err` —— 当成错的话，同一份内容被
+    ///    再收一次时日志里会多一行看着像真错的 WARN
+    /// 3. blob 没登记也回 `Ok(None)` 而不是插一行挂空哈希的记录
+    ///
+    /// 连不上 `DATABASE_URL` 时跳过（与 cortex-store 的集成测试同一约定）。
+    #[tokio::test]
+    async fn 唯一那个记录点在真库上的行为() {
+        let Some(url) = database_url() else {
+            eprintln!("跳过：未设置 DATABASE_URL");
+            return;
+        };
+        let admin = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("跳过：连不上数据库（{e}）");
+                return;
+            }
+        };
+
+        // 上一次 panic 留下的 schema（走不到结尾的清理）
+        let stale: Vec<String> = sqlx::query_scalar(
+            "SELECT nspname::text FROM pg_namespace WHERE nspname LIKE 'cortex\\_lib\\_%'",
+        )
+        .fetch_all(&admin)
+        .await
+        .unwrap_or_default();
+        for name in stale {
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP SCHEMA IF EXISTS \"{name}\" CASCADE"
+            )))
+            .execute(&admin)
+            .await;
+        }
+
+        let schema = format!(
+            "cortex_lib_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("时钟不早于 1970")
+                .as_millis()
+        );
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+            .execute(&admin)
+            .await
+            .expect("建临时 schema 不应失败");
+
+        use std::str::FromStr as _;
+        let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+            .expect("DATABASE_URL 应当是合法连接串")
+            .options([("search_path", format!("{schema},public"))]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await
+            .expect("临时 schema 建好后应当能连上");
+        cortex_store::Store::from_pool(pool.clone())
+            .migrate()
+            .await
+            .expect("租户 migration 应当能跑通");
+
+        let png = "1".repeat(64);
+        let md = "2".repeat(64);
+        let zip = "3".repeat(64);
+        for (h, mime) in [
+            (&png, "image/png"),
+            (&md, "text/markdown"),
+            (&zip, "application/zip"),
+        ] {
+            sqlx::query(
+                "INSERT INTO blobs (hash, mime, size_bytes, storage_key)
+                 VALUES ($1, $2, 9, $1)",
+            )
+            .bind(h)
+            .bind(mime)
+            .execute(&pool)
+            .await
+            .expect("造 blob 不应失败");
+        }
+
+        let state_of = async |hash: &str| -> String {
+            sqlx::query_scalar("SELECT chunk_state FROM library_items WHERE blob_hash = $1")
+                .bind(hash)
+                .fetch_one(&pool)
+                .await
+                .expect("读切分状态不应失败")
+        };
+
+        // ── ① 图落 unsupported ──
+        let id = insert_item(&pool, &png, "画出来的图", Origin::Generated)
+            .await
+            .expect("写图那一行不应失败");
+        assert!(id.is_some(), "第一次收就没插进去");
+        assert_eq!(
+            state_of(&png).await,
+            "unsupported",
+            "图落成了别的状态。ready 会让界面显示「0 段」，读起来像切分丢了东西；\
+             pending 更糟 —— 那一档的意思是「还没轮到它」，而永远不会轮到，\
+             界面会一直显示「切分中」"
+        );
+
+        // ── ② 文本落 ready（等着被切）──
+        insert_item(&pool, &md, "接口规范.md", Origin::Uploaded)
+            .await
+            .expect("写文本那一行不应失败");
+        assert_eq!(
+            state_of(&md).await,
+            "ready",
+            "能提出正文的文件没落 ready —— 它就不会被切，而用户看到的是\
+             「收进去了但模型查不到」"
+        );
+
+        // ── ③ 提不出正文的落 unsupported ──
+        insert_item(&pool, &zip, "一堆日志.zip", Origin::Uploaded)
+            .await
+            .expect("写 zip 那一行不应失败");
+        assert_eq!(
+            state_of(&zip).await,
+            "unsupported",
+            "zip 被当成能提出正文了 —— 切出来会是一片乱码，而检索会命中它"
+        );
+
+        // ── ④ 已经在库里回 Ok(None)，不是 Err，也不多一行 ──
+        let again = insert_item(&pool, &png, "换个名字再收一次", Origin::Uploaded)
+            .await
+            .expect("再收一次不该是错误：同一份内容传两次是正常路径");
+        assert!(
+            again.is_none(),
+            "再收一次回了 Some —— 调用方会以为刚插了一行新的"
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM library_items WHERE blob_hash = $1")
+                .bind(&png)
+                .fetch_one(&pool)
+                .await
+                .expect("数行数不应失败");
+        assert_eq!(
+            count, 1,
+            "同一份内容出现了两条 —— 「删哪一张」立刻有了两套答案"
+        );
+        let (name, origin): (String, String) =
+            sqlx::query_as("SELECT name, origin FROM library_items WHERE blob_hash = $1")
+                .bind(&png)
+                .fetch_one(&pool)
+                .await
+                .expect("读名字不应失败");
+        assert_eq!(
+            (name.as_str(), origin.as_str()),
+            ("画出来的图", "generated"),
+            "第二次收把名字或 origin 改掉了 —— DO NOTHING 不是 DO UPDATE，\
+             用户改过的名字会被下一次自动收覆盖"
+        );
+
+        // ── ⑤ blob 没登记：回 Ok(None)，不插挂空哈希的行 ──
+        let ghost = insert_item(&pool, &"9".repeat(64), "根本没上传过", Origin::Uploaded)
+            .await
+            .expect("blob 没登记不该是错误 —— 自动收那条路上它只会变成一行 WARN");
+        assert!(
+            ghost.is_none(),
+            "给一个没登记的哈希插了一行 —— 那一格在界面上长得和正常材料一样，\
+             点开却永远取不到字节"
+        );
+
+        pool.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
+        )))
+        .execute(&admin)
+        .await;
+        admin.close().await;
+    }
+
+    #[test]
+    fn 自动起名的规则() {
+        let h = "abcd1234".repeat(8);
+        assert_eq!(
+            auto_name(&h, None),
+            "cortex-abcd1234",
+            "没有说明时该退回哈希前八位。空名字会被 CHECK 挡下，\
+             而自动收那条路上失败只记 WARN —— 材料就静默不进库了"
+        );
+        assert_eq!(auto_name(&h, Some("   ")), "cortex-abcd1234");
+        assert_eq!(auto_name(&h, Some("  接口规范.md  ")), "接口规范.md");
+
+        // 按**码点**截。`&s[..60]` 在这里会直接 panic（切在四字节字符中间）
+        let long = "🐕".repeat(61);
+        let cut = auto_name(&h, Some(&long));
+        assert_eq!(
+            cut.chars().count(),
+            61,
+            "60 个字 + 一个省略号；按 UTF-16 或字节截的话根本走不到这条断言"
+        );
+        assert!(
+            !cut.contains('\u{FFFD}'),
+            "截在了码点中间，末尾成了替换字符"
+        );
     }
 }

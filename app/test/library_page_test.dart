@@ -99,19 +99,23 @@ void main() {
     await _pump(tester, c);
 
     expect(find.text('资料库还是空的'), findsOneWidget);
-    // ⚠️ 这条断言改过一次。原来它钉的是「拖进对话里」——
-    // 而那条路**不存在**：附件发出去一行都没碰过 library，
-    // 生产上 `library_items` 一直是 0 行。于是这条测试把一句
-    // **做不到的话**钉在了界面上，而它一直是绿的 ——
-    // 2026-09-02 用户实报「生成的图片为什么不会显示在资料库里」
-    // 才翻出来。入口现在真的有了（右键 →「存进资料库」），
-    // 它能不能用由 `save_to_library_test.dart` 盯。
+    // ⚠️ 这条断言改过**两次**，两次都是因为它把一句做不到的话钉在了
+    // 界面上，而它一直是绿的：
+    //
+    // 1. 原文钉的是「拖进对话里」—— 附件那条路一行都没碰过 library，
+    //    生产上 `library_items` 一直是 0 行
+    // 2. 第二版钉的是「右键存进资料库」—— 做到了，但用户当场指出
+    //    「不是多此一举吗，ChatGPT 和 Gemini 都是自动的」
+    //
+    // 现在是服务端在 `POST /episodes` 上自动收。判据见
+    // `docs/library-content.md`；那一半由 Rust 侧的
+    // `library::tests::唯一那个记录点在真库上的行为` 盯着。
     expect(
-      find.textContaining('存进资料库'),
+      find.textContaining('自动'),
       findsOneWidget,
       reason:
-          '材料不是从这一页上传的，是在对话里的文件上右键收进去的 ——'
-          '不说的话，用户在这一页上找不到任何入口，会以为功能没做完',
+          '材料是发消息时自动收进来的 —— 不说的话，用户会在这一页上找'
+          '上传按钮，而这一页根本没有上传入口',
     );
     expect(tester.takeException(), isNull);
   });

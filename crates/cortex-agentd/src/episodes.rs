@@ -120,8 +120,57 @@ pub async fn write(
             ));
         }
     }
-    let ack = write_one(tenant.store()?, &req).await?;
+    let store = tenant.store()?;
+    let ack = write_one(store, &req).await?;
+    // 新写进来的那一轮才收；重放不再收一遍（`insert_item` 本来就幂等，
+    // 但省掉一次没必要的对象存储往返）
+    if !ack.already_existed {
+        collect_attachments(&st, store, &req).await;
+    }
     Ok(Json(ack))
+}
+
+/// 把这一轮带的附件**自动收进资料库**。
+///
+/// # 为什么在服务端做，而不是让客户端收完再调一次 `/library`
+///
+/// CLI 与 Flutter 走完全相同的 HTTP 协议（CLAUDE.md 那条「不走私有捷径」）。
+/// 放在客户端的话，从 CLI 发一个带附件的消息就不会进资料库 —— 而两边行为
+/// 不一样这件事，用户只会当成「资料库时灵时不灵」。
+///
+/// # 为什么在 handler 里而不是 `write_one` 里
+///
+/// 切分要读一遍字节，那要 [`AgentState`] 上的对象存储客户端，而 `write_one`
+/// 刻意与 HTTP 无关（导入那条路也用它）。导入进来的历史附件因此**不自动收** ——
+/// 那是有意的：导入一份 ChatGPT 存档会把几年的一次性截图一次灌进来。
+///
+/// # 为什么失败只记日志
+///
+/// 与 `write_tool_calls` 同一个理由：对话已经写进库了。收不进资料库是一件
+/// 附带的事，让它把整个 `POST /episodes` 弄成 500 的话，客户端会重放整轮，
+/// 而主行已经在库里 —— 换来的是一次 `already_existed` 加上仍然没收进去的附件。
+async fn collect_attachments(st: &AgentState, store: &Store, req: &NewEpisodeRequest) {
+    // 谁放进来的由 **role** 决定，不由文件类型决定：user 那一轮上的附件是
+    // 用户给的，assistant 那一轮上的是 agent 交付的。
+    //
+    // 画出来的图两条路都会碰到（生成时已经以 `generated` 收过），
+    // 而 `insert_item` 的 `ON CONFLICT DO NOTHING` 保证先进的那条胜出 ——
+    // 所以这里不必特判「这张是不是画出来的」
+    let origin = if req.role == "assistant" {
+        crate::library::Origin::Generated
+    } else {
+        crate::library::Origin::Uploaded
+    };
+    for a in dedup_attachments(&req.attachments) {
+        let name = crate::library::auto_name(&a.hash, a.filename.as_deref());
+        if let Err(e) = crate::library::collect(st, store.pool(), &a.hash, &name, origin).await {
+            tracing::warn!(
+                error = %e.message(),
+                hash = %a.hash,
+                "附件进了这一轮，但没收进资料库"
+            );
+        }
+    }
 }
 
 /// 写一轮的**本体**，与 HTTP 无关。
@@ -220,10 +269,12 @@ async fn persist(store: &Store, req: &NewEpisodeRequest) -> cortex_core::Result<
     // 事务持着 advisory lock，纪律要求它短小纯写；一次「这个哈希登记过吗」
     // 是读，放进去等于让所有人的写入排在这次读后面。
     //
-    // ⚠️ 现在带附件的请求**必然被拒**：`/blobs` 那条上传路由还没搬过来，
-    // 于是这一侧的 `blobs` 表里一行都没有。这是对的 —— 不能假装登记过，
-    // 那样 `episode_blobs` 会挂上一个永远取不到字节的哈希。
-    // 它跟 `/blobs` 一起解决，不在这一批。
+    // 未登记的哈希要当场拒，不能假装登记过 —— 那样 `episode_blobs` 会挂上一个
+    // 永远取不到字节的哈希，而那一行在界面上长得与正常附件一模一样。
+    //
+    // （这里曾经写着「带附件的请求**必然被拒**：`/blobs` 那条上传路由还没搬
+    // 过来」—— 那句话早就不成立了，`/blobs` 在 `routes.rs` 里好好地接着。一段
+    // 说反话的注释比没有注释更坏：下一个人会按它去找一个不存在的欠账。）
     let attachments = dedup_attachments(&req.attachments);
     for a in &attachments {
         if store.blob(&a.hash).await.map_err(store_err)?.is_none() {

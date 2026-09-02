@@ -192,54 +192,33 @@ pub async fn generate(
 ///
 /// # 为什么是自动，而不是让用户右键收
 ///
-/// 2026-09-02 用户先问「生成的图片为什么不会显示在资料库里」，
-/// 得到手动入口之后又问「不会自动存吗，ChatGPT 和 Gemini 都是
-/// 自动的吧」—— 他是对的。`library_items.origin` 本来就有
-/// `'generated'` 这一档，而一个只能靠人手动右键才会出现的值，
-/// 等于把建表时就想好的事交给了用户去做。
+/// 2026-09-02 用户先问「生成的图片为什么不会显示在资料库里」，得到手动入口
+/// 之后又问「不会自动存吗，ChatGPT 和 Gemini 都是自动的吧」—— 他是对的。
+/// `library_items.origin` 本来就有 `'generated'` 这一档，而一个只能靠人手动
+/// 右键才会出现的值，等于把建表时就想好的事交给了用户去做。
 ///
-/// “自动收会把库灌满”那个担心针对的是**聊天附件**（随手贴的截图、
-/// 日志），对生成的图不成立：那是用户花了钱、专门叫出来的东西。
-/// 所以只有这一条自动，附件那一条仍然是手动右键。
+/// 判据写在 `docs/library-content.md`：不判断「这是不是值得收的东西」，
+/// 漏收补救不了，膨胀补救得了。
 ///
-/// # 为什么不切分、也不报错
+/// # 为什么走 `library::insert_item` 而不是自己写一句 INSERT
 ///
-/// 图没有正文可切，直接落 `unsupported`（与 [`crate::library::add`]
-/// 同一个判据）。而写不进去**不让整次生成失败** ——
-/// 与上面那条画廊记录同一个理由：图已经画出来也入库了，钱花掉了。
+/// 那是整个仓库唯一的记录点。自己写一份的下场是 `chunk_state` 的判据在两处
+/// 各判一次，漂开之后同一类文件走 HTTP 收进来能被检索、自动收进来查不到。
+///
+/// 图不用走 `library::collect`（那一支会去取字节切分）：图片直接落
+/// `unsupported`，取一遍字节纯属白花一次对象存储的往返。
+///
+/// # Errors
+/// 只有真的写不进去才回 `Err`。**已经在库里回 `Ok`** —— 见 `insert_item`。
 async fn record_in_library(
     pool: &sqlx::PgPool,
     img: &GeneratedImageRef,
     prompt: &str,
 ) -> Result<(), sqlx::Error> {
-    // 名字用画它的那句话：一屏缩略图里「一只戴眼镜的柯基」比
-    // `cortex-3f8a1c2d` 有用得多。按**字符**截而不是字节 ——
-    // `&s[..60]` 在中文上会直接 panic（切在了一个码点中间）
-    let trimmed = prompt.trim();
-    let name = if trimmed.is_empty() {
-        format!("cortex-{}", &img.hash[..8])
-    } else if trimmed.chars().count() > 60 {
-        format!("{}…", trimmed.chars().take(60).collect::<String>())
-    } else {
-        trimmed.to_owned()
-    };
-
-    // `ON CONFLICT DO NOTHING`：同一句提示词画出完全相同的字节时
-    // 哈希也相同，而 `UNIQUE (blob_hash)` 说一份内容只能有一条。
-    // 不写这一句的症状是日志里一行看着像真错的 WARN
-    sqlx::query(
-        "INSERT INTO library_items
-             (id, blob_hash, name, mime, size_bytes, origin, chunk_state, chunk_count)
-         SELECT $1, $2, $3, b.mime, b.size_bytes, 'generated', 'unsupported', 0
-           FROM blobs b WHERE b.hash = $2
-         ON CONFLICT (blob_hash) DO NOTHING",
-    )
-    .bind(cortex_core::Id::new().to_string())
-    .bind(&img.hash)
-    .bind(&name)
-    .execute(pool)
-    .await
-    .map(|_| ())
+    let name = crate::library::auto_name(&img.hash, Some(prompt));
+    crate::library::insert_item(pool, &img.hash, &name, crate::library::Origin::Generated)
+        .await
+        .map(|_| ())
 }
 
 /// 挑一条能生图的来源与一个型号。
