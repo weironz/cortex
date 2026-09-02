@@ -135,7 +135,9 @@ class SessionList extends ConsumerWidget {
       ref.watch(sidebarSortProvider),
       awaiting: ref.watch(awaitingConfirmSessionsProvider),
       finished: state.finished,
-      running: {...state.unfinished, ?state.streaming?.sessionId},
+      // **全部**在跑的，不只是当前这一屏那条 —— 多条会话可以并跑
+      // （2026-09-02），只认当前那条的话，别的会话在跑而侧栏不亮
+      running: {...state.unfinished, ...state.streamingTurns.keys},
     );
     final rows = _rows(sorted, projects, ref.watch(sidebarSectionsProvider));
 
@@ -200,12 +202,13 @@ class SessionList extends ConsumerWidget {
             selected: session.id == state.activeSessionId,
             // 「这个会话正在跑」有两个来源，**两个都要认**：
             //
-            // 1. `state.streaming` —— 此刻这个客户端正连着的那一轮
+            // 1. `state.streamingTurns` —— 此刻这个客户端正连着的那些轮次
+            //    （**复数**：不同会话可以并跑）
             // 2. `state.unfinished` —— 发出去了、还没见到收尾的（用户切走了、
             //    甚至关掉过页面）。第 2 条正是「派出去干活」那个场景的落点，
             //    只认第 1 条的话，人一切走徽章就没了，而活还在干
             streaming:
-                state.streaming?.sessionId == session.id ||
+                state.isRunning(session.id) ||
                 state.unfinished.contains(session.id),
             // 第四状态：**在等你确认**。它必然发生在「在跑」当中（一轮跑到
             // 一半停下来问人），所以行上的优先级要压过 streaming —— 蓝点说

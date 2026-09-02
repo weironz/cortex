@@ -47,8 +47,14 @@ Future<void> _settle(ProviderContainer c) async {
 }
 
 void main() {
-  group('别的会话在流时，白纸上的发送被拒收但不静默', () {
-    test('send 回 false、sendError 说清在哪儿、不建会话不丢转录', () async {
+  group('别的会话在流时', () {
+    /// **照常收下 —— 两条会话可以并跑。**
+    ///
+    /// 这条用例 2026-09-02 之前断言的是相反的行为（拒收）。用户实报：
+    /// 「怎么同时只能运行一个会话，不合理啊」—— 他是对的，而且那纯粹是
+    /// 客户端自己加的限制：服务端那侧的轮次登记簿本来就是
+    /// `HashMap<session_id, Slot>`，两条会话并跑一直是允许的。
+    test('照常收下，两条会话各跑各的', () async {
       final c = _boot();
       addTearDown(c.dispose);
       await _settle(c);
@@ -56,34 +62,57 @@ void main() {
       final ctrl = c.read(chatControllerProvider.notifier);
       // 在会话 A 里开一轮流（mock 数据源会立刻开始流式回答）
       final a = ctrl.createSession();
-      final accepted = await ctrl.send('第一条，占住流');
-      expect(accepted, isTrue, reason: '空闲时发送必须被收下');
+      expect(await ctrl.send('第一条，占住流'), isTrue, reason: '空闲时发送必须被收下');
       expect(
-        c.read(chatControllerProvider).streaming,
+        c.read(chatControllerProvider).streamingTurns[a],
         isNotNull,
-        reason: '前置不成立：mock 的流没有开起来，后面验不到「占线拒收」',
+        reason: '前置不成立：mock 的流没有开起来，后面验不到并跑',
       );
 
-      // 白纸上再发
+      // 白纸上再发 —— 另一条会话
       ctrl.startNewChat();
-      final before = c.read(chatControllerProvider).sessions.length;
-      final second = await ctrl.send('白纸上这条不该被吞');
+      final second = await ctrl.send('白纸上这条该照常发出去');
+      expect(second, isTrue, reason: '别的会话在跑就把这条拒了 —— 那正是用户报的「同时只能运行一个会话」');
 
-      expect(second, isFalse, reason: '占线时必须拒收 —— 收下会两轮并跑');
       final s = c.read(chatControllerProvider);
-      expect(s.sendError, isNotNull, reason: '拒收必须出声。静默 return 正是「消息凭空消失」的那半');
-      expect(
-        s.sessions.length,
-        before,
-        reason: '拒收不该把白纸兑现成一条空会话 —— 那是惰性化要防的形状',
-      );
-      // 占着流的那条会话 A 的转录里，不该混进白纸上这句
+      expect(s.sendError, isNull, reason: '收下了就不该留一条错误横幅');
+      final b = s.activeSessionId!;
+      expect(b, isNot(a), reason: '白纸该兑现成另一条会话');
+      expect(s.streamingTurns.keys.toSet(), {a, b}, reason: '两条会话该各有各的那一轮在跑');
+
+      // ⚠️ **这条不变量不许跟着一起松掉。**
+      // 并跑之后每条流各写各的转录，串台的表现是一句话出现在别人的对话里
       expect(
         (s.transcripts[a]?.messages ?? const []).where(
           (m) => m.text.contains('白纸上这条'),
         ),
         isEmpty,
-        reason: '拒收的消息不许落进别的会话的转录',
+        reason: 'B 的消息落进了 A 的转录 —— 并跑之后这是最容易犯的错',
+      );
+    });
+
+    /// **同一条会话仍然不许并跑，而且拒收必须出声。**
+    ///
+    /// 那条不变量没变：两轮往同一段历史里追加消息、写同一个工作区的文件，
+    /// 谁覆盖谁取决于时序。而「拒收必须出声」是 2026-08-29 那次的收口 ——
+    /// 静默 return 的表现是「发都发不出去，直接静默消失」。
+    test('同一条会话里再发一条，拒收且出声', () async {
+      final c = _boot();
+      addTearDown(c.dispose);
+      await _settle(c);
+
+      final ctrl = c.read(chatControllerProvider.notifier);
+      final a = ctrl.createSession();
+      expect(await ctrl.send('第一条，占住流'), isTrue);
+      expect(c.read(chatControllerProvider).streamingTurns[a], isNotNull);
+
+      // 不切走，就在这条会话里再发
+      final second = await ctrl.send('同一条会话里的第二句');
+      expect(second, isFalse, reason: '同一条会话并跑两轮会让两轮互相覆盖');
+      expect(
+        c.read(chatControllerProvider).sendError,
+        isNotNull,
+        reason: '拒收必须出声。静默 return 正是「消息凭空消失」的那半',
       );
     });
   });

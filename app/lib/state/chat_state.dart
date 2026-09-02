@@ -172,7 +172,7 @@ class ChatState {
     this.sessionsError,
     this.activeSessionId,
     this.transcripts = const {},
-    this.streaming,
+    this.streamingTurns = const {},
     this.sendError,
     this.showArchived = false,
     this.unfinished = const {},
@@ -196,7 +196,26 @@ class ChatState {
   /// Committed messages, keyed by session id.
   final Map<String, Transcript> transcripts;
 
-  final StreamingTurn? streaming;
+  /// **在跑的轮次，按会话分。** 一条会话最多一轮（并跑同一条会话会让两轮
+  /// 往同一段历史里追加、写同一个工作区的文件，谁覆盖谁看时序），但**不同
+  /// 会话之间没有理由互斥**。
+  ///
+  /// 2026-09-02 之前这里是单独一个 `StreamingTurn?` —— 一个客户端同时只能
+  /// 跑一轮。用户实报：「怎么同时只能运行一个会话，不合理啊」。他是对的，
+  /// 而且这纯粹是客户端自己加的限制：服务端那侧的轮次登记簿本来就是
+  /// `HashMap<session_id, Slot>`，两条会话并跑一直是允许的。
+  final Map<String, StreamingTurn> streamingTurns;
+
+  /// **当前这一屏**那条在跑的轮次。绝大多数界面问的是这个。
+  ///
+  /// 留一个派生 getter 而不是让每个调用方自己去查表：换会话时它自动跟着变，
+  /// 而「查表时忘了用哪个 id」是这次改动里最容易犯的错 —— 一个会话的增量
+  /// 画进另一个会话的气泡，不报错，只是内容错了。
+  StreamingTurn? get streaming {
+    final id = activeSessionId;
+    return id == null ? null : streamingTurns[id];
+  }
+
   final String? sendError;
 
   /// Whether archived sessions appear in the sidebar. Also decides the
@@ -264,8 +283,10 @@ class ChatState {
 
   /// True when a stream is running *for the session currently on screen*.
   /// Switching sessions mid-stream should not show a spinner on the new one.
-  bool get isStreamingActive =>
-      streaming != null && streaming!.sessionId == activeSessionId;
+  bool get isStreamingActive => streaming != null;
+
+  /// 这条会话此刻在不在跑 —— 侧栏那些「在跑」的标记问的是这个。
+  bool isRunning(String sessionId) => streamingTurns.containsKey(sessionId);
 
   ChatState copyWith({
     List<ChatSession>? sessions,
@@ -273,7 +294,7 @@ class ChatState {
     Object? sessionsError = _sentinel,
     Object? activeSessionId = _sentinel,
     Map<String, Transcript>? transcripts,
-    Object? streaming = _sentinel,
+    Map<String, StreamingTurn>? streamingTurns,
     Object? sendError = _sentinel,
     bool? showArchived,
     Set<String>? unfinished,
@@ -289,9 +310,7 @@ class ChatState {
         ? this.activeSessionId
         : activeSessionId as String?,
     transcripts: transcripts ?? this.transcripts,
-    streaming: streaming == _sentinel
-        ? this.streaming
-        : streaming as StreamingTurn?,
+    streamingTurns: streamingTurns ?? this.streamingTurns,
     sendError: sendError == _sentinel ? this.sendError : sendError as String?,
     showArchived: showArchived ?? this.showArchived,
     unfinished: unfinished ?? this.unfinished,

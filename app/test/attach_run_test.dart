@@ -78,19 +78,22 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     // 挂上之前不该凭空造出一个「正在生成」——挂不上的话那会是个永远转圈的框
-    expect(c.read(chatControllerProvider).streaming, isNull);
+    expect(c.read(chatControllerProvider).streamingTurns, isEmpty);
 
     api.controller.add(const ChatDeltaEvent('接着写'));
     await Future<void>.delayed(Duration.zero);
 
-    final s = c.read(chatControllerProvider).streaming;
+    // 断言落在**事实来源**上而不是 `streaming` 那个派生 getter：后者问的是
+    // 「当前这一屏那条在不在跑」，而这里要验的是「那一轮真的挂上了」——
+    // 多会话并跑之后（2026-09-02）这两件事不再等价
+    final s = c.read(chatControllerProvider).streamingTurns['S-running'];
     expect(s, isNotNull, reason: '收到第一条事件才建 streaming 状态');
     expect(s!.sessionId, 'S-running');
 
     api.controller.add(const ChatDeltaEvent('完了'));
     await Future<void>.delayed(const Duration(milliseconds: 60));
     expect(
-      c.read(chatControllerProvider).streaming!.text,
+      c.read(chatControllerProvider).streamingTurns['S-running']!.text,
       contains('接着写'),
       reason: '重挂之后的增量要照常追加',
     );
@@ -130,12 +133,25 @@ void main() {
       isNotNull,
       reason: '这条替身的 chat 流不会自己结束，所以此刻必然还在流',
     );
+    // 刚才那一轮跑在哪条会话上 —— 后面要切回来验「同一条不重复挂」
+    final mine = c.read(chatControllerProvider).activeSessionId!;
     final before = api.attachCalls;
 
+    // ⚠️ **切到别的会话现在应该去挂** —— 多会话并跑之后（2026-09-02），
+    // 「手上有一条流」不再是不去挂的理由：那条流是别的会话的，而这一条
+    // 在服务端可能正跑着。挡住它的话，用户打开一个正在跑的会话看到的是
+    // 一片静止的历史，而它其实正在长
     ctrl.selectSession('S-other');
     await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(api.attachCalls, before + 1, reason: '切到别的会话没去挂 —— 那条会话在服务端可能正跑着');
 
-    expect(api.attachCalls, before, reason: '手上已经有一条流的时候不该再去挂 —— 会收到两份同样的事件');
+    // 而**同一条**会话不许重复挂：那才是这道判据真正要防的（收到两份
+    // 同样的事件）。判据从「有没有任何流」收窄成「这一条有没有流」，
+    // 收窄过头就会在这里现形
+    final beforeSame = api.attachCalls;
+    ctrl.selectSession(mine);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(api.attachCalls, beforeSame, reason: '这条会话本地已经有一条流了，再挂一次会收到两份同样的事件');
   });
 
   /// 发出去就记账，收尾就撤账。侧栏那颗点靠它。

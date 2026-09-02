@@ -102,8 +102,11 @@ void main() {
 
     final away = ctrl.createSession();
     await ctrl.send('派出去干个活');
+    // ⚠️ 等的是**那条会话**的轮次，不是 `streaming` 那个派生 getter：
+    // 后者问的是「当前这一屏在不在跑」，而下面正要切走 —— 一切走它就变
+    // null，于是「等那一轮结束」会在 finishLast 之前就当场满足
     await _until(
-      () => container.read(chatControllerProvider).streaming != null,
+      () => container.read(chatControllerProvider).streamingTurns[away] != null,
       reason: '那一轮开始',
     );
 
@@ -113,7 +116,7 @@ void main() {
 
     api.finishLast();
     await _until(
-      () => container.read(chatControllerProvider).streaming == null,
+      () => container.read(chatControllerProvider).streamingTurns[away] == null,
       reason: '那一轮结束',
     );
 

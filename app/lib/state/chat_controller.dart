@@ -27,8 +27,54 @@ import 'confirm_controller.dart';
 import 'project_controller.dart';
 
 /// Owns sessions, transcripts and the in-flight generation.
+/// 一条会话正在跑的那一轮所需要的**每轮一份**的机具。
+///
+/// 2026-09-02 之前这三样（订阅、增量缓冲、两个定时器）都是控制器上的单例，
+/// 于是一个客户端同时只跑得了一轮。用户实报：「怎么同时只能运行一个会话，
+/// 不合理啊」—— 而服务端那侧的轮次登记簿本来就是按会话分槽的。
+///
+/// 收成一个对象而不是四张并行的 map：四张表要靠人保证同增同删，漏一张的
+/// 表现是一个定时器在它那一轮早就结束之后还在跑，而那没有任何症状 ——
+/// 直到它把**另一条**会话判成空转。
+class _LiveTurn {
+  _LiveTurn(this.sessionId);
+
+  final String sessionId;
+  StreamSubscription<ChatEvent>? sub;
+
+  /// 增量攒在这儿，按帧冲。见控制器上那段。
+  final StringBuffer pending = StringBuffer();
+  Timer? flush;
+  Timer? idle;
+
+  void dispose() {
+    flush?.cancel();
+    idle?.cancel();
+    unawaited(sub?.cancel());
+    sub = null;
+  }
+}
+
+/// Owns sessions, transcripts and the in-flight generation.
 class ChatController extends Notifier<ChatState> {
-  StreamSubscription<ChatEvent>? _subscription;
+  /// 在跑的那些轮次，按会话 id。见 [_LiveTurn]。
+  final Map<String, _LiveTurn> _live = {};
+
+  /// 把这一轮写进状态。键取自 `turn.sessionId` —— **不取当前会话**：
+  /// 事件是异步到的，人可能已经切走了，按当前会话写就是把 A 的增量画进 B。
+  void _putTurn(StreamingTurn turn) {
+    state = state.copyWith(
+      streamingTurns: {...state.streamingTurns, turn.sessionId: turn},
+    );
+  }
+
+  /// 这一轮收尾了，从状态里撤掉。
+  void _dropTurn(String sessionId) {
+    if (!state.streamingTurns.containsKey(sessionId)) return;
+    state = state.copyWith(
+      streamingTurns: {...state.streamingTurns}..remove(sessionId),
+    );
+  }
 
   /// Deltas are coalesced into this buffer and flushed on a timer.
   ///
@@ -38,8 +84,6 @@ class ChatController extends Notifier<ChatState> {
   /// typing effect visually identical while cutting rebuild count by ~4× on a
   /// fast stream. The buffer is always flushed before any terminal event, so
   /// no token can be dropped.
-  final StringBuffer _pending = StringBuffer();
-  Timer? _flushTimer;
   static const _flushInterval = Duration(milliseconds: 16);
 
   /// 空转看门狗：这条流上多久没有任何动静就判它死了。
@@ -71,7 +115,6 @@ class ChatController extends Notifier<ChatState> {
   /// 沙箱僵死时先发现的应该是代理，它会把连接断掉并给出一个说得清是谁的
   /// 错的报错。抢在它前面开口，用户拿到的就是一句更含糊的「空转」。
   static const idleTimeout = Duration(seconds: 75);
-  Timer? _idleTimer;
 
   /// 作废序号：换后端时 +1，让在飞的请求的结果（尤其是**尸体**）被丢掉。
   int _requestSeq = 0;
@@ -85,9 +128,10 @@ class ChatController extends Notifier<ChatState> {
   @override
   ChatState build() {
     ref.onDispose(() {
-      _flushTimer?.cancel();
-      _idleTimer?.cancel();
-      _subscription?.cancel();
+      for (final live in _live.values) {
+        live.dispose();
+      }
+      _live.clear();
     });
     // Re-hydrate whenever the data source flips (mock ↔ live).
     //
@@ -284,9 +328,13 @@ class ChatController extends Notifier<ChatState> {
   /// 都是常态而非故障。任何一种弹出错误框，代价是**每打开一个旧会话都弹
   /// 一次**，而它本来什么都不该发生。
   Future<void> _tryAttach(String sessionId) async {
-    // 本地已经有一条流在跑（就是这个会话发起的那条）就别再挂一次 ——
-    // 会收到两份同样的事件
-    if (state.streaming != null) return;
+    // **这个会话**本地已经有一条流在跑就别再挂一次 —— 会收到两份同样的事件。
+    //
+    // ⚠️ 判据是「这条会话」，不是「有没有任何流」。后者在多会话并跑之后
+    // （2026-09-02）会把一条真的需要挂上去的会话挡在门外：另一条会话正在跑，
+    // 而这条刚被打开、服务端那一轮还在跑着 —— 用户看到的是一片静止的历史，
+    // 而它其实正在长
+    if (_live.containsKey(sessionId)) return;
 
     final Stream<ChatEvent> stream;
     try {
@@ -326,26 +374,29 @@ class ChatController extends Notifier<ChatState> {
           firstEvent = null;
           // 重挂拿到的第一条事件就意味着「它确实在跑」。这时才建 streaming
           // 状态，`_onEvent` 后面那一串才有东西可改
+          _live[sessionId] = _LiveTurn(sessionId)..sub = sub;
           state = state.copyWith(
-            streaming: StreamingTurn(
-              messageId: Ulid.generate(),
-              sessionId: sessionId,
-              startedAt: DateTime.now(),
-            ),
+            streamingTurns: {
+              ...state.streamingTurns,
+              sessionId: StreamingTurn(
+                messageId: Ulid.generate(),
+                sessionId: sessionId,
+                startedAt: DateTime.now(),
+              ),
+            },
             sendError: null,
           );
-          _subscription = sub;
         }
-        _onEvent(event);
+        _onEvent(sessionId, event);
       },
       // 挂不上（404 / 旧后端 / 断网）一律当成「没在跑」，见方法文档
       onError: (Object e, StackTrace st) {
         firstEvent?.cancel();
-        if (started) _onError(e, st);
+        if (started) _onError(sessionId, e, st);
       },
       onDone: () {
         firstEvent?.cancel();
-        if (started) _onDone();
+        if (started) _onDone(sessionId);
       },
       cancelOnError: true,
     );
@@ -1077,16 +1128,23 @@ class ChatController extends Notifier<ChatState> {
     final text = rawText.trim();
     // An attachment with no words is a legitimate message ("看这张图")…
     if (text.isEmpty && attachments.isEmpty) return false;
-    // 一次只跑一轮。**拒收必须出声**：这一支从前是静默 return —— 而它
-    // 拦的多半是「在别的会话里还有一轮在跑」，用户眼前（白纸/另一条会话）
-    // 没有任何在跑的迹象，静默就等于把消息凭空吞掉。
-    if (state.streaming != null) {
-      final busyId = state.streaming!.sessionId;
-      final busy = state.sessions.firstWhereOrNull((s) => s.id == busyId);
-      final where = busy == null || busyId == state.activeSessionId
-          ? ''
-          : '（在「${busy.title}」里）';
-      state = state.copyWith(sendError: '上一条回答还在生成$where —— 等它结束，或到那条会话里停掉它。');
+    // **只拦这一条会话自己的那一轮。**
+    //
+    // 2026-09-02 之前这道闸看的是全局：只要**任何**一条会话在跑，别的会话
+    // 连发都发不出去。用户实报：「怎么同时只能运行一个会话，不合理啊」——
+    // 他是对的，而且这纯粹是客户端自己加的限制：服务端那侧的轮次登记簿
+    // (`cortex-local` 的 `runs.rs`) 本来就是 `HashMap<session_id, Slot>`，
+    // 两条会话并跑一直是允许的。
+    //
+    // 同一条会话内部仍然不许并跑，那条不变量没变：两轮往同一段历史里追加
+    // 消息、写同一个工作区的文件，谁覆盖谁取决于时序。
+    //
+    // ⚠️ **拒收必须出声。** 这一支从前是静默 return，症状是 2026-08-29 报的
+    // 「发都发不出去，直接静默消失」。现在它只在**当前这条**会话在跑时触发，
+    // 而那时用户眼前就有转圈，话也说得出口。
+    final activeId = state.activeSessionId;
+    if (activeId != null && state.streamingTurns.containsKey(activeId)) {
+      state = state.copyWith(sendError: '这条会话的上一条回答还在生成 —— 等它结束，或先停掉它。');
       return false;
     }
 
@@ -1121,8 +1179,9 @@ class ChatController extends Notifier<ChatState> {
     );
     // 记下「我发出去了，还没见到收尾」。用于侧栏徽章 —— 用户关掉这个会话
     // 去别处逛的时候，那一格是他唯一的线索。见 `ChatState.unfinished`
+    _live[sessionId] = _LiveTurn(sessionId);
     state = state.copyWith(
-      streaming: turn,
+      streamingTurns: {...state.streamingTurns, sessionId: turn},
       sendError: null,
       unfinished: {...state.unfinished, sessionId},
     );
@@ -1162,15 +1221,17 @@ class ChatController extends Notifier<ChatState> {
       // 听模型的，见服务端 `resolve_image_spec`
       imagePrefs: ref.read(imagePrefsProvider),
     );
-    _subscription = stream.listen(
-      _onEvent,
-      onError: _onError,
-      onDone: _onDone,
+    _live[sessionId]?.sub = stream.listen(
+      // ★ 会话 id 由**这一刻**捕获，不在事件到达时去问「当前是谁」——
+      // 那是这次改动里唯一会静默出错的地方（A 的增量画进 B 的气泡）
+      (event) => _onEvent(sessionId, event),
+      onError: (Object e, StackTrace st) => _onError(sessionId, e, st),
+      onDone: () => _onDone(sessionId),
       cancelOnError: true,
     );
     // 从**发出去**那一刻开始算，不是从第一条事件开始算：一条连上了却一个
     // 字节都不回的流，正是 2026-08-29 那次占线的样子
-    _armIdleWatchdog();
+    _armIdleWatchdog(sessionId);
     return true;
   }
 
@@ -1232,13 +1293,16 @@ class ChatController extends Notifier<ChatState> {
     return null;
   }
 
-  void _onEvent(ChatEvent event) {
-    final turn = state.streaming;
+  /// [sid] 是**这条流属于哪个会话** —— 由订阅那一刻的闭包捕获，不看
+  /// 当前选中的是谁。事件是异步到的，人完全可能已经切走了；按当前会话
+  /// 取轮次的话，A 的增量会画进 B 的气泡，不报错，只是内容错了。
+  void _onEvent(String sid, ChatEvent event) {
+    final turn = state.streamingTurns[sid];
     if (turn == null) return;
     // 收到**任何**东西就把看门狗的表拨回去 —— 包括心跳，那正是长命令期间
     // 唯一会到的东西。放在 switch 之前：终态那两条也会走到这里，而它们
     // 后面的 `_commit` 会把表撤掉，多拨这一次不花钱
-    _armIdleWatchdog();
+    _armIdleWatchdog(sid);
 
     switch (event) {
       // 心跳。判活用完就丢 —— 它不进转录，也不改任何状态
@@ -1249,14 +1313,14 @@ class ChatController extends Notifier<ChatState> {
       // 记下来只为在气泡里说一句话：排队期间流上除了 keepalive 什么都没有，
       // 不说的话屏幕上就是一个转了几分钟的圈
       case ChatQueuedEvent(:final ahead):
-        state = state.copyWith(streaming: turn.copyWith(queuedAhead: ahead));
+        _putTurn(turn.copyWith(queuedAhead: ahead));
 
       case ChatDeltaEvent(:final text):
         if (text.isEmpty) return;
         // 有自己的内容了 = 闸门已经放开。不清的话整轮都挂着「排队中」
-        _leaveQueue();
-        _pending.write(text);
-        _scheduleFlush();
+        _leaveQueue(sid);
+        _live[sid]?.pending.write(text);
+        _scheduleFlush(sid);
 
       case ChatToolEvent(
         :final name,
@@ -1267,14 +1331,14 @@ class ChatController extends Notifier<ChatState> {
         :final phase,
         :final subagent,
       ):
-        _leaveQueue();
-        _flushPending();
+        _leaveQueue(sid);
+        _flushPending(sid);
         // Call and result arrive as two events; [ToolCall.merge] folds them
         // into a single row instead of printing the same tool twice.
-        final current = state.streaming;
+        final current = state.streamingTurns[sid];
         if (current == null) return;
-        state = state.copyWith(
-          streaming: current.copyWith(
+        _putTurn(
+          current.copyWith(
             toolCalls: ToolCall.merge(
               current.toolCalls,
               name,
@@ -1293,7 +1357,7 @@ class ChatController extends Notifier<ChatState> {
         // is on screen while the user decides — the prompt asks them to judge a
         // command, and the model's own reasoning about it is part of the
         // evidence.
-        _flushPending();
+        _flushPending(sid);
         // **Not** terminal. The turn is suspended, not finished: deltas resume
         // once a receipt lands (or the timeout fires and the agent is told
         // nobody answered). Committing here would drop the live bubble and make
@@ -1303,7 +1367,12 @@ class ChatController extends Notifier<ChatState> {
             .offer(request, sessionId: turn.sessionId);
 
       case ChatDoneEvent(:final episodeId, :final models, :final attachments):
-        _commit(episodeId: episodeId, models: models, attachments: attachments);
+        _commit(
+          sid,
+          episodeId: episodeId,
+          models: models,
+          attachments: attachments,
+        );
 
       case ChatErrorEvent(:final message, :final needsReauth):
         // ★ 凭据被拒 —— **摇过期那个铃**，否则没人会去续期。
@@ -1316,7 +1385,7 @@ class ChatController extends Notifier<ChatState> {
         if (needsReauth) {
           unawaited(ref.read(authControllerProvider.notifier).onUnauthorized());
         }
-        _commit(error: message);
+        _commit(sid, error: message);
 
       case ChatUnknownEvent():
         // Forward compatibility: ignore quietly rather than break the turn.
@@ -1325,9 +1394,11 @@ class ChatController extends Notifier<ChatState> {
   }
 
   /// 把空转看门狗的表拨回 [idleTimeout]。发流时上一次，之后每条事件一次。
-  void _armIdleWatchdog() {
-    _idleTimer?.cancel();
-    _idleTimer = Timer(idleTimeout, _onIdleTimeout);
+  void _armIdleWatchdog(String sid) {
+    final live = _live[sid];
+    if (live == null) return;
+    live.idle?.cancel();
+    live.idle = Timer(idleTimeout, () => _onIdleTimeout(sid));
   }
 
   /// 这条流空转到期了。**当成一次连接失败收尾**，不是当成这一轮出错。
@@ -1335,11 +1406,12 @@ class ChatController extends Notifier<ChatState> {
   /// 措辞要如实：断的只是「看着它跑」这条线，服务端那一轮照跑照存档 ——
   /// 剩下那半话由 [_onError] 的 `isUnreachable` 分支补上（它同时会说清
   /// 「已经流回来的文字保留在下面」），所以这里造的异常**不带状态码**。
-  void _onIdleTimeout() {
-    _idleTimer = null;
+  void _onIdleTimeout(String sid) {
+    _live[sid]?.idle = null;
     // 没有在跑的轮次 = 表该撤而没撤干净。什么都不做，别凭空造一条错误
-    if (state.streaming == null) return;
+    if (state.streamingTurns[sid] == null) return;
     _onError(
+      sid,
       CortexApiException(
         '连接空转 —— 已经 ${idleTimeout.inSeconds} 秒没收到任何东西，'
         '连服务端每 15 秒一次的心跳都没有，先把这条流断开。',
@@ -1352,36 +1424,34 @@ class ChatController extends Notifier<ChatState> {
   ///
   /// 幂等且便宜（已经清过就不动状态，免掉一次无谓的重建）—— 所以每条 delta
   /// 都可以无脑调它，不必额外记一个「清过没有」的布尔。
-  void _leaveQueue() {
-    final turn = state.streaming;
+  void _leaveQueue(String sid) {
+    final turn = state.streamingTurns[sid];
     if (turn == null || turn.queuedAhead == null) return;
-    state = state.copyWith(streaming: turn.copyWith(queuedAhead: null));
+    _putTurn(turn.copyWith(queuedAhead: null));
   }
 
-  void _scheduleFlush() {
-    _flushTimer ??= Timer(_flushInterval, () {
-      _flushTimer = null;
-      _flushPending();
+  void _scheduleFlush(String sid) {
+    final live = _live[sid];
+    if (live == null) return;
+    live.flush ??= Timer(_flushInterval, () {
+      _live[sid]?.flush = null;
+      _flushPending(sid);
     });
   }
 
-  void _flushPending() {
-    if (_pending.isEmpty) return;
-    final chunk = _pending.toString();
-    _pending.clear();
-    final turn = state.streaming;
+  void _flushPending(String sid) {
+    final live = _live[sid];
+    if (live == null || live.pending.isEmpty) return;
+    final chunk = live.pending.toString();
+    live.pending.clear();
+    final turn = state.streamingTurns[sid];
     if (turn == null) return;
     // Append, never replace — this is what makes the bubble grow instead of
     // re-laying-out from scratch.
-    state = state.copyWith(
-      streaming: turn.copyWith(
-        text: turn.text + chunk,
-        awaitingFirstToken: false,
-      ),
-    );
+    _putTurn(turn.copyWith(text: turn.text + chunk, awaitingFirstToken: false));
   }
 
-  void _onError(Object error, StackTrace _) {
+  void _onError(String sid, Object error, StackTrace _) {
     var message = error is CortexApiException ? error.message : '$error';
     // 连接断了要**说清哪几步已落盘**，光报「连不上」会让人以为这一轮
     // 整个丢了。事实是：已经流回来的文字就在眼前（_commit 会把它进历史），
@@ -1399,36 +1469,37 @@ class ChatController extends Notifier<ChatState> {
     // ⚠️ 这一位要跟着走到气泡上。丢了的话红框仍会摆出两个点了没用的按钮，
     // 而这次失败明说了「重发不会有不同结果」
     _commit(
+      sid,
       error: message,
       errorIsDeterministic:
           error is CortexApiException && error.isDeterministic,
     );
   }
 
-  void _onDone() {
+  void _onDone(String sid) {
     // A stream that closes without an explicit `done` still has usable text.
-    if (state.streaming != null) _commit();
+    if (state.streamingTurns[sid] != null) _commit(sid);
   }
 
   /// Moves the in-flight turn into the transcript and clears streaming state.
-  void _commit({
+  void _commit(
+    String sid, {
     String? episodeId,
     String? error,
     bool errorIsDeterministic = false,
     List<String> models = const [],
     List<Attachment> attachments = const [],
   }) {
-    _flushTimer?.cancel();
-    _flushTimer = null;
-    _idleTimer?.cancel();
-    _idleTimer = null;
-    _flushPending();
+    _live[sid]?.flush?.cancel();
+    _live[sid]?.flush = null;
+    _live[sid]?.idle?.cancel();
+    _live[sid]?.idle = null;
+    _flushPending(sid);
 
-    final turn = state.streaming;
+    final turn = state.streamingTurns[sid];
     if (turn == null) return;
 
-    _subscription?.cancel();
-    _subscription = null;
+    _live.remove(sid)?.dispose();
 
     final message = ChatMessage(
       id: turn.messageId,
@@ -1458,8 +1529,8 @@ class ChatController extends Notifier<ChatState> {
     if (away && ref.read(notifyPrefsProvider).onFinish) {
       unawaited(playAlert());
     }
+    _dropTurn(sid);
     state = state.copyWith(
-      streaming: null,
       // ⚠️ **不再同时写 `sendError`。**
       //
       // 这个 `error` 上一行已经挂在 `message` 上了，会画成气泡里那条错误行。
@@ -1510,19 +1581,17 @@ class ChatController extends Notifier<ChatState> {
     } on Object catch (e) {
       warning = '（服务端没能确认停止：$e —— 那一轮可能还在跑）';
     }
-    await _subscription?.cancel();
-    _subscription = null;
-    _commit(error: '已停止生成${warning ?? ''}');
+    await _live[turn.sessionId]?.sub?.cancel();
+    _live[turn.sessionId]?.sub = null;
+    _commit(turn.sessionId, error: '已停止生成${warning ?? ''}');
   }
 
-  Future<void> _cancelStream() async {
-    _flushTimer?.cancel();
-    _flushTimer = null;
-    _idleTimer?.cancel();
-    _idleTimer = null;
-    _pending.clear();
-    await _subscription?.cancel();
-    _subscription = null;
+  /// 撤掉在跑的轮次。`sessionId` 为 null = **全部**（换后端、登出那种）。
+  Future<void> _cancelStream([String? sessionId]) async {
+    final ids = sessionId == null ? _live.keys.toList() : [sessionId];
+    for (final id in ids) {
+      _live.remove(id)?.dispose();
+    }
   }
 
   void clearSendError() {
