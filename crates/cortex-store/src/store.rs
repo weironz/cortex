@@ -35,6 +35,39 @@ static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 /// 那条上撞 `relation already exists` —— 而失败点在建号中途。
 static GLOBAL_MIGRATOR: Migrator = sqlx::migrate!("../../migrations-global");
 
+/// 把 `pg_trgm` 钉进 `public` —— 跑租户 migration 前方的不变式。
+///
+/// migrations/20260819000001_search_index.sql 里有
+/// `CREATE EXTENSION IF NOT EXISTS pg_trgm`，而扩展是**数据库级**对象：
+/// 这条语句把它装进执行时的 `current_schema`。生产装配顺序
+/// （`main()` 先迁 `public`）恰好让它是 `public`，但那只是运气 ——
+/// **只要有人先迁一个别的 schema**（自建的测试脚手架、全新库上并行起步的
+/// 多个租户），后来者看到数据库级注册表里已有、跳过，而 `gin_trgm_ops`
+/// 落在那个 first-come 的 schema 里：其余所有人建 trigram 索引时
+/// `search_path` 解析不到，42704 报错（CI PR #17 实测咬到）。
+///
+/// 所以这里在跑租户 migration 之前显式把扩展钉进 `public`，而不靠装配
+/// 顺序的运气。幂等、并发安全；lock 与 CREATE 与 unlock 必须走**同一条
+/// 连接**（advisory lock 是会话级的，换连接放锁等于没放）。
+async fn ensure_search_extensions(pool: &sqlx::PgPool) -> Result<()> {
+    const LOCK_KEY: i64 = 0x6370_7472_676d_0001; // "cptrgm" + 1
+    let mut conn = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(LOCK_KEY)
+        .execute(&mut *conn)
+        .await?;
+    let created = sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public")
+        .execute(&mut *conn)
+        .await;
+    let unlocked = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(LOCK_KEY)
+        .execute(&mut *conn)
+        .await;
+    unlocked?;
+    created?;
+    Ok(())
+}
+
 /// 默认连接池上限。写事务被 advisory lock 串行化，池子不需要很大；
 /// 富余的连接留给读路径（四路召回会并发发多条查询）。
 const DEFAULT_MAX_CONNECTIONS: u32 = 16;
@@ -94,11 +127,14 @@ impl Store {
     /// 把这个租户的 schema 迁到最新。
     ///
     /// 只跑 [`MIGRATOR`]（`migrations/`，每租户一份的记忆表）。
-    /// 全局那套见 [`Self::migrate_global`]。
+    /// 全局那套见 [`Self::migrate_global`]。跑之前先把 `pg_trgm` 钉进
+    /// `public`（[`ensure_search_extensions`]）—— 那不是准备工作，是
+    /// 这套 migration 成立的不变式。
     ///
     /// # Errors
     /// 哪条 migration 跑不过。
     pub async fn migrate(&self) -> Result<()> {
+        ensure_search_extensions(&self.pool).await?;
         MIGRATOR.run(&self.pool).await?;
         Ok(())
     }
