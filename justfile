@@ -273,6 +273,11 @@ dev-web:
     # 叠出一个混版本的应用 —— 2026-08-16 实测用户浏览器里新标题配三版前的
     # 旧逻辑，此后每次修复他一版都没跑到。API 客户端要 SW 没有任何好处。
     # index.html 里另有一段灭杀脚本清掉历史上已经装进浏览器的那个。
+    #
+    # **dev 留在 dart2js、prod 镜像走 wasm-gc（scripts/docker/Dockerfile.web）**：
+    # 前者每轮快十几二十秒（迭代钱），后者首包 4.6MB→1.6MB gz（发行钱）。
+    # 两边的**应用级语义**是同一份源码 —— 只差渲染管线，这是刻意的一笔，
+    # 不是漂移。
     cd app && flutter build web --pwa-strategy=none --dart-define=CORTEX_BASE_URL=
     # `--pwa-strategy=none` 会把 flutter_service_worker.js 写成 **0 字节**，
     # 覆盖掉 web/ 里那份自杀版。空文件也能让旧 SW 失去拦截（无 fetch
