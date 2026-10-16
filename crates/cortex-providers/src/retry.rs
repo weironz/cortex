@@ -203,7 +203,14 @@ impl<P: Provider> ProviderRetry for P {
 
         loop {
             return match operation().await {
-                Ok(result) => Ok(result),
+                Ok(result) => {
+                    // 恢复账：发生过重试才记。缺了这一行，事后翻日志
+                    // 分得清「每步在干什么」，分不清「这趟到底重试了几回」
+                    if attempts > 0 {
+                        tracing::info!(attempts, "重试后成功收口");
+                    }
+                    Ok(result)
+                }
                 Err(error) => {
                     // Auth retry is separate from transient-error retries: we get
                     // at most 1 credential refresh, independent of max_retries.
@@ -255,6 +262,17 @@ impl<P: Provider> ProviderRetry for P {
                             sleep(delay).await;
                         }
                         continue;
+                    }
+
+                    // 耗尽账：把「到底试了几次」写进最后一行，免得事后
+                    // 从散落的每步日志里数。抖动期间「卡了很久」是不是
+                    // 「重试了很多次」由此能当场区分
+                    if attempts > 0 {
+                        tracing::warn!(
+                            attempts,
+                            max_retries = config.max_retries,
+                            "重试耗尽，交还最后一次错误"
+                        );
                     }
 
                     Err(error)
