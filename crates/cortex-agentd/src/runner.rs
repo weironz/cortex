@@ -2199,4 +2199,118 @@ mod tests {
             "回调地址的主机名不在 NO_PROXY 里：{no_proxy}"
         );
     }
+
+    /// §P2-1 的沙箱冷启动实测仪（issue #11 / docs/optimization-review-20261017.md）。
+    ///
+    /// **手动跑，平时 ignore**（要宿主 docker + 本地 `cortex/sandbox:dev` 镜像，
+    /// 会真的启停容器与卷）：
+    ///
+    /// ```bash
+    /// CORTEX_RUN_TTFP_MEASURE=1 cargo test -p cortex-agentd ttfp -- --ignored --nocapture
+    /// ```
+    ///
+    /// 输出按行 `ttfp_ms <kind> <n> <ms>`，三档：
+    ///
+    /// - `cold`：容器与卷都不在 —— 「部署后第一条消息」的那一种
+    /// - `volume_warm`：卷在、容器要新建 —— 空闲回收之后回来的那一种
+    /// - `idempotent`：容器在跑、令牌/镜像都对 —— 第二轮消息起的那一种
+    ///
+    /// 判据在 issue 里：p95 > 3s 才值得做预热池，< 1s 不动。数字落到
+    /// docs/sandbox.md 与 issue 的闭环记录里，这份代码只是产生它们的仪器。
+    #[tokio::test]
+    #[ignore = "手动实测仪：要 docker 与沙箱镜像，平时跑等于砸环境"]
+    async fn ttfp_cold_and_warm_measure() {
+        if std::env::var("CORTEX_RUN_TTFP_MEASURE").is_err() {
+            eprintln!("跳过：设 CORTEX_RUN_TTFP_MEASURE=1 才真的启容器");
+            return;
+        }
+        // 实测在 `cortex-sandbox-net` 里跑（直连组网内 DNS 认容器名），
+        // 所以走的是 same_network=true 的 Direct 分支 —— 与生产的编排一致。
+        let runner = DockerRunner {
+            docker: Docker::connect_with_local_defaults()
+                .expect("实测仪要 docker 真的在，没有就该 CI 之类整轮不动它"),
+            remote: "http://127.0.0.1:8080".into(),
+            same_network: true,
+            relay: "http://127.0.0.1:3129".into(),
+            image: DEFAULT_IMAGE.to_owned(),
+        };
+        let scope = format!("ttfp{}", std::process::id());
+        let container = format!("{NAME_PREFIX}{scope}");
+        let volume = format!("{VOLUME_PREFIX}{scope}");
+        // 用 bollard 清理，不走 docker CLI：实测仪要跑的镜像环境里未必有 CLI，
+        // 而 runner 手上本来就有客户端
+        async fn cleanup(
+            runner: &DockerRunner,
+            container: &str,
+            volume: &str,
+            container_rm: bool,
+            volume_rm: bool,
+        ) {
+            if container_rm {
+                let _ = runner
+                    .docker
+                    .remove_container(
+                        container,
+                        Some(qp::RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await;
+            }
+            if volume_rm {
+                let _ = runner
+                    .docker
+                    .remove_volume(volume, Some(qp::RemoveVolumeOptions { force: true }))
+                    .await;
+            }
+        }
+        let token = "ttfp-measure-token";
+        let spec = "ttfp-measure-spec";
+
+        let mut lines: Vec<String> = Vec::new();
+        // ── cold ×5：每轮先把容器与卷都清掉 ──
+        for n in 1..=5 {
+            cleanup(&runner, &container, &volume, true, true).await;
+            let t = std::time::Instant::now();
+            let handle = runner
+                .ensure(&scope, token, spec)
+                .await
+                .expect("cold ensure 失败就不是慢，是断");
+            let ms = t.elapsed().as_millis();
+            lines.push(format!("ttfp_ms cold {n} {ms}"));
+            assert_eq!(handle.name, container);
+        }
+
+        // ── idempotent ×3：刚 ensure 完立刻再来一次，应当是同一个容器 ──
+        for n in 1..=3 {
+            let t = std::time::Instant::now();
+            let handle = runner
+                .ensure(&scope, token, spec)
+                .await
+                .expect("idempotent ensure 失败就不是慢，是断");
+            let ms = t.elapsed().as_millis();
+            lines.push(format!("ttfp_ms idempotent {n} {ms}"));
+            assert_eq!(handle.name, container, "幂等必须还是同一个容器");
+        }
+
+        // ── volume_warm ×3：卷留着、容器删掉重来 ──
+        for n in 1..=3 {
+            cleanup(&runner, &container, &volume, true, false).await;
+            let t = std::time::Instant::now();
+            let _ = runner
+                .ensure(&scope, token, spec)
+                .await
+                .expect("volume_warm ensure 失败就不是慢，是断");
+            let ms = t.elapsed().as_millis();
+            lines.push(format!("ttfp_ms volume_warm {n} {ms}"));
+        }
+
+        // ── 收尾清场，实测仪不该留下自己的残骸 ──
+        cleanup(&runner, &container, &volume, true, true).await;
+
+        for line in &lines {
+            println!("{line}");
+        }
+    }
 }

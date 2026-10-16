@@ -53,6 +53,9 @@ declare -A EXEMPT=(
     # 也就是 `just dev` 本地构建出来的那个 tag。在 dev 里再写一遍，等于把
     # 同一个字面量放到两个地方，而它们会漂。
     [CORTEX_SANDBOX_IMAGE@docker-compose.dev.yml]="代码默认值就是 just dev 构建的那个 tag"
+    # ignored 手动实测仪的打火石。`#[ignore]` 已经挡住了默认路径，
+    # 透进生产容器等于给一条没人该用的测量路径开灯，与 CORTEX_DEV_LOGIN 同形。
+    [CORTEX_RUN_TTFP_MEASURE]="ignored 手动实测仪的打火石，生产刻意不透"
 )
 
 # ── 代码读了哪些 ──────────────────────────────────────────
