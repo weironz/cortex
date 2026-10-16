@@ -25,6 +25,11 @@ pub mod search;
 pub mod tools;
 pub mod tree;
 pub mod turn;
+mod turn_gate;
+mod turn_history;
+mod turn_host;
+mod turn_tools;
+mod turn_watch;
 pub mod workspace;
 
 /// 这个宿主手上有没有一个**可供执行的地方**，以及它的爆炸半径有多大。
