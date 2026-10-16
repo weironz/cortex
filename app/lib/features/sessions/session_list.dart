@@ -87,30 +87,40 @@ class SessionList extends ConsumerWidget {
     ProjectState projects,
     ChatController controller,
   ) {
-    if (state.sessionsLoading && state.sessions.isEmpty) {
-      return const Center(
-        child: SizedBox(
-          width: 18,
-          height: 18,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
-      );
-    }
+    // 加载 / 错误 / 数据走同一扇门（约定见 state/async_gate.dart），
+    // 不再在这里各自对三个裸字段做合取
+    return ref
+        .watch(sessionListGateProvider)
+        .when(
+          loading: () => const Center(
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+          error: (Object error, StackTrace _) => EmptyState(
+            icon: Icons.cloud_off_rounded,
+            title: '拉不到会话列表',
+            description: '$error',
+            tone: EmptyStateTone.error,
+            action: OutlinedButton.icon(
+              onPressed: controller.loadSessions,
+              icon: const Icon(Icons.refresh_rounded, size: 16),
+              label: const Text('重试'),
+            ),
+          ),
+          data: (_) => _list(context, ref, state, projects, controller),
+        );
+  }
 
-    if (state.sessionsError != null && state.sessions.isEmpty) {
-      return EmptyState(
-        icon: Icons.cloud_off_rounded,
-        title: '拉不到会话列表',
-        description: state.sessionsError,
-        tone: EmptyStateTone.error,
-        action: OutlinedButton.icon(
-          onPressed: controller.loadSessions,
-          icon: const Icon(Icons.refresh_rounded, size: 16),
-          label: const Text('重试'),
-        ),
-      );
-    }
-
+  Widget _list(
+    BuildContext context,
+    WidgetRef ref,
+    ChatState state,
+    ProjectState projects,
+    ChatController controller,
+  ) {
     final sessions = state.visibleSessions;
     // 有项目就得画出来，哪怕一条会话都没有 —— 刚建好的空项目正是要被拖进
     // 东西的那个空篮子，藏掉它等于新建按钮什么也没做
