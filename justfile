@@ -134,13 +134,11 @@ db-reset:
 db-shell:
     docker compose {{ _dev }} exec cortexdb psql -U "${CORTEX_PG_USER:-cortex}" -d "${CORTEX_PG_DB:-cortex}"
 
-# 生成 sqlx 离线查询缓存（.sqlx/），供 CI 在无数据库时编译
-db-prepare:
-    cargo sqlx prepare --workspace -- --all-targets
-
 # ══════════════════════════════════════════════════════════
 #  开发
 # ══════════════════════════════════════════════════════════
+# （曾经有一条 db-prepare 生成 sqlx 离线缓存，2026-10-17 定案不用编译期宏
+#  之后按「死路由陪葬」处理拆掉 —— 裁决全文在 architecture.md 复审记录末节）
 
 # 记忆服务**不在这个仓库里**。它是 Cormex：github.com/weironz/cormex
 #

@@ -2211,3 +2211,37 @@ redact 销毁承诺存在派生数据残留与传播缺失）已于同日全部�
 [roadmap-done.md](roadmap-done.md)。
 
 由复审转入待办的事项见 [roadmap.md](roadmap.md)。
+---
+
+**2026-10-17 · SQL 校验方式定案：运行时 + CI 真库，否决编译期宏（issue #6）**
+
+两份仓库内部文件曾经给出相反的主张，这次并案定案：
+
+- `crates/cortex-store/src/lib.rs`（2026-08-15 写成）：「刻意不用 sqlx 编译期校验宏；代价是列名写错要到跑测试时才发现 —— 集成测试真连数据库覆盖了这一点」
+- `docs/quality-review-20260825.md`：推荐 agentd 全迁 `query!` 宏 + `.sqlx` 离线缓存进 CI
+- `docs/optimization-review-20261017.md` §P0-3：再次推荐迁移，同时记了「schema 每租户一份，宏只认编译时那一个库」的张力
+
+**裁决：采纳 (b) —— 一律运行时 API + 运行时校验进 CI；不迁编译期宏；删除 `just db-prepare`。**
+
+让 (b) 从「有洞」变成「成立」的三个前提，定案日已经全部建好：
+
+| 前提 | 落地 |
+|---|---|
+| CI 有真 Postgres（此前集成测试全年静默空转） | PR #17：postgres service + 缺库 CI 必红 |
+| agentd 有「打一发 HTTP、走一遍真 SQL」的测试（$6 那类唯一现形现场） | PR #16：tests/ 冒烟（注册/登录/续期 + 列表端点） |
+| 运行时校验**确定性抓当场**的实证 | PR #17 首次 CI run 当场红：pg_trgm 跨 schema 竞态 —— 生产靠装配顺序运气躲了三年的洞 |
+
+否决 (a) 的理由，按成本列清：
+
+1. **覆盖不了最危险的洞。** 宏验证只认编译时连的那一片 schema（public + cortex_auth）；仓库真实的漂移类是**每租户一片 schema** 与「新账号 vs 老账号结构差」，那两类只有**请求级 + 运行时**够得着。
+2. **QueryBuilder 无路可走。** gallery.rs 的动态段在 macro 世界里不存在；静态化改写是重写过滤逻辑，不是「迁个宏」。
+3. **159 个静态站点**的机械 churn，换来的是与已经落地的运行时闸**几乎完全重叠**的那半份保证。
+4. `.sqlx` 离线缓存是**第二个数据源**，每条 migration 改完都要记得 regenerate —— `db-prepare` 已经死过一回，这次的死法不会换一种形状。
+
+注意事项，也是 (b) 生效的牙齿，一并写死：
+
+1. **凡带 SQL 的路由，review 时就要配请求级测试**（`crates/cortex-agentd/tests/` 起步就是骨架；加一条用例只有几行）。写错 bind 的感受是 CI 当场红，不是「下游有人撞到」。
+2. 新增无 LIMIT 的 SELECT 走 `lint-sql-limit` 的 baseline 纪律（P2-3 落地）。
+3. 这条裁决**不追溯** quality review：它建议 (a) 时，「建立运行时闸」还不存在，那个推荐本身是对的。
+
+`db-prepare` 自此从 justfile 删掉 —— 「造好了没人调用」的死路由按 CLAUDE.md 第 2 条处理，不陪葬。
