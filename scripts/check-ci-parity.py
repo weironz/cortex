@@ -70,6 +70,7 @@ COVERED = {
     "评测基线文件自检": "evals-baseline",
     "边缘转得到每条路由": "lint-edge",
     "无 LIMIT 的 SELECT 审计": "lint-sql-limit",
+    "unwrap 白名单没长": "lint-unwrap",
     "代码读的环境变量，compose 都设得了": "lint-compose-env",
     "本机 just ci 跑得到 CI 的每一步": "lint-ci-parity",
     # Windows 那条腿。本机（Windows 开发机）上 `cargo test --workspace` 就跑了
