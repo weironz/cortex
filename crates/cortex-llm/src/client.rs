@@ -293,7 +293,8 @@ impl LlmClient {
             .await
     }
 
-    /// 指定模型流式对话。重试与限流退避由 goose 在内部处理。
+    /// 指定模型流式对话。重试与限流退避在 cortex-providers 内部
+    /// （带 tracing 事件），靠这里挂上的 span 归到具体模型名下。
     ///
     /// 带图的消息会先过 [`Self::ensure_can_see`]。
     pub async fn stream_with(
@@ -303,8 +304,15 @@ impl LlmClient {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream> {
+        use tracing::Instrument as _;
+
         self.ensure_can_see(model, messages)?;
-        Ok(self.provider.stream(model, system, messages, tools).await?)
+        let span = tracing::info_span!("llm.stream", model = %model.model_name);
+        Ok(self
+            .provider
+            .stream(model, system, messages, tools)
+            .instrument(span)
+            .await?)
     }
 
     /// 只要文本增量的简化流：丢掉用量、工具调用与 thinking 块。
