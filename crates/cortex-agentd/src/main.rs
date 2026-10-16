@@ -24,59 +24,19 @@
 //! `/chat` 与 `/sandbox/*` 到这儿，其余到 cortexd —— 由 nginx（dev）与
 //! traefik（prod）决定。见 [`routes`] 的模块头。
 
-mod accounts;
-mod assistants;
-mod auth;
-mod blobs;
-mod credentials;
-mod cursor;
-mod delegated_token;
-mod env;
-mod episodes;
-mod error;
-mod export;
-mod fetch;
-mod gallery;
-mod image;
-mod import;
-mod library;
-mod llm;
-mod mailer;
-mod model_pick;
-mod model_roles;
-mod model_sources;
-mod presence;
-mod pricing;
-mod profile;
-mod projects;
-mod quota;
-mod rate_limit;
-mod reaper;
-mod request_tenant;
-mod routes;
-mod runner;
-mod sandbox_proxy;
-mod search;
-mod search_prefs;
-mod search_provider;
-mod sessions;
-mod skills;
-mod snapshot;
-mod snapshot_index;
-mod state;
-mod sync;
-mod sync_bus;
-mod sync_payload;
-mod tunnel;
-mod watch;
-mod ws;
-
+// 模块树住在这个**同包 lib** 里（src/lib.rs）——tests/ 只能 import lib
+// target，而路由层的 HTTP 冒烟测试必须有真 router 可打。这里是装配逻辑，
+// 不再自己声明模块；见 lib.rs 的模块头。
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser;
+use cortex_agentd::{
+    accounts, auth, blobs, credentials, profile, reaper, routes, runner, sandbox_proxy, state,
+    watch,
+};
 
-use crate::state::AgentState;
+use cortex_agentd::state::AgentState;
 
 #[derive(Parser, Debug)]
 #[command(name = "cortex-agentd", version, about = "Cortex 云端 agent 编排")]
