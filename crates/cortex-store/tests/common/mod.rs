@@ -9,10 +9,15 @@
 //! 不用「事务里跑、跑完回滚」那套：并发不漏行的测试必须真提交，
 //! 单事务里根本模拟不出多个并发事务的提交顺序。
 //!
-//! ## 数据库不可用时 skip 而非 fail
+//! ## 数据库不可用时 skip 而非 fail —— 但只在开发机上
 //!
-//! CI 里有真实 Postgres，开发机上可能没起 `docker compose`。
-//! 拿不到数据库时 [`setup`] 返回 `None`，测试直接返回 —— 不是失败。
+//! 开发机上可能没起 `docker compose`，拿不到数据库时 [`setup`] 返回 `None`，
+//! 测试直接返回 —— 不是失败。
+//!
+//! **CI 里反过来：拿不到数据库必须红。** GitHub Actions 恒设 `CI=true`，
+//! 用它区分两种缺法：开发机缺库是「没起环境」，CI 缺库是「这道闸断了
+//! 而绿灯照亮」—— 那就是 2026-08-25 画廊 $6 bug 的成因，比没有测试
+//! 更糟，因为它伪造信心。
 
 #![allow(dead_code)]
 
@@ -120,6 +125,31 @@ pub async fn setup() -> Option<TestDb> {
     setup_upto(None).await
 }
 
+/// 半截迁移路径用的最小保障：把 `pg_trgm` 钉进 `public`。
+///
+/// 全量路径不需要它（`Store::migrate()` 前方的 `ensure_search_extensions`
+/// 已是生产级不变式）。`setup_upto` 自己绕过那条路跑半截，不变式补在这里。
+/// lock / create / unlock 必须走**同一条连接**：advisory lock 是会话级的，
+/// 换连接放锁等于没放，锁会跟到会话结束，后面所有等锁的永久等下去。
+async fn ensure_pg_trgm_in_public(admin: &PgPool) {
+    const LOCK_KEY: i64 = 0x6370_7472_676d_0001; // "cptrgm" + 1，与生产同键
+    let mut conn = admin.acquire().await.expect("拿一条连接不该失败");
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(LOCK_KEY)
+        .execute(&mut *conn)
+        .await
+        .expect("拿 extension 锁不该失败");
+    let created = sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public")
+        .execute(&mut *conn)
+        .await;
+    let unlocked = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(LOCK_KEY)
+        .execute(&mut *conn)
+        .await;
+    unlocked.expect("放 extension 锁不该失败");
+    created.expect("pg_trgm 应当能装进 public");
+}
+
 /// 只跑到某个 migration 版本为止，用于**造存量行**。
 ///
 /// 存在的理由与 [`TestDb::exec_raw`] 同源：有些失效模式要求库先处于一个
@@ -150,7 +180,9 @@ pub async fn setup_upto(max_version: Option<i64>) -> Option<TestDb> {
         return None;
     }
 
-    // `public` 留在 search_path 里是为了让 `vector` 扩展的类型可见；
+    // `public` 留在 search_path 里是为了让 `pg_trgm` 的 `gin_trgm_ops`
+    // 可见；扩展钉在 public 由 `Store::migrate()` 前方的
+    // ensure_search_extensions 保证（CRATE 内部不变式，不经这里的手）。
     // 建表建视图一律落到第一个 schema，也就是本次测试专属的那个。
     let options = PgConnectOptions::from_str(&url)
         .expect("DATABASE_URL 应当是合法的连接串")
@@ -167,6 +199,11 @@ pub async fn setup_upto(max_version: Option<i64>) -> Option<TestDb> {
     // 先在池子上跑 migration 再交给 Store：`Store::pool()` 是 pub(crate)，
     // 集成测试拿不到（那是有意的 —— 写只能走 write_txn）
     if let Some(v) = max_version {
+        // 半截路径不走 `Store::migrate()`，生产那条
+        // ensure_search_extensions 够不着它 —— 同一个不变式在这里补一次：
+        // 先把 pg_trgm 钉进 public，搜索索引那条 migration 才不会在
+        // 全新库 + 并发脚手架下把自己的 opclass 落在别人的 schema 里。
+        ensure_pg_trgm_in_public(&admin).await;
         run_migrations_upto(&pool, v).await;
     }
     let store = Store::from_pool(pool);
@@ -219,6 +256,14 @@ fn database_url() -> Option<String> {
     match std::env::var("DATABASE_URL") {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
+            // GitHub Actions 恒设 CI=true。CI 里缺库不是「跳过」是「闸门断了」，
+            // 必须红 —— 否则这些守「多租户隔离」「同步不漏行」的测试全年空转，
+            // 绿的是假信号（见 docs/quality-review-20260825.md 根因 A）。
+            assert!(
+                std::env::var("CI").is_err(),
+                "CI 环境必须提供 DATABASE_URL（配 postgres service）；\
+                 本地开发缺库跳过是允许的，CI 不行"
+            );
             eprintln!("跳过：未设置 DATABASE_URL");
             None
         }

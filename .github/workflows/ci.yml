@@ -208,16 +208,36 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -D warnings
+      # 集成测试（cortex-store/tests，36+ 条）要真库：多租户隔离、并发
+      # 提交顺序这类承诺，mock 一个都守不住。测试自己按 schema 隔离，
+      # 不碰 service 这个库的默认数据。
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/cortex
 
-    # **这里没有 Postgres，也没有 migration。**
+    # **这里有 Postgres，且必须有。**
     #
-    # 记忆那一半在 2026-08 搬去了 Cormex，连同 `migrations/`。此前这个作业
-    # 还在起 pgvector 容器、跑 `sqlx migrate run` —— 而目录已经不在了，
-    # 于是第一次真推上去就红：`error canonicalizing path migrations`。
-    #
-    # 值得记一笔的是**它为什么拖到今天才红**：拆分那几个提交都在本地验证
-    # （`cargo test` 不碰这一段），而 CI 的这一段只有推上去才跑。
-    # 「本地全绿」与「CI 全绿」是两件事，这一次差在一个已经不存在的目录上。
+    # 2026-08 拆分记忆之后这个作业一度没有库，migrations/ 也短暂不在。
+    # 会话库回来（cortex-store + migrations/）之后忘了把库接回来，
+    # 于是集成测试靠「没 DATABASE_URL 就 eprintln 跳过」在 CI 里**空转**，
+    # 绿的全是假的 —— quality-review-20260825 根因 A。现在：
+    #   1. 这个作业起 postgres service（见下）；
+    #   2. 测试脚手架在 `CI=true` 且缺 DATABASE_URL 时**断言失败**，
+    #      不再静默跳过（crates/cortex-store/tests/common/mod.rs）。
+    # 两条都在，这道闸才是闸。
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cortex
+        ports:
+          - 5432:5432
+        # 没 health check 就等 service 起床，首个取连接的测试会以
+        # 「connection refused」挂掉 —— 而那条错读起来像测试自己的问题
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v5
 
