@@ -1,6 +1,6 @@
 # 无 LIMIT SQL 审计 2026-10-17
 
-issue #13 的落地件。对全仓持久层做静态扫描，55 处不带 LIMIT 的 SELECT
+issue #13 的落地件。对全仓持久层做静态扫描，57 处不带 LIMIT 的 SELECT
 **逐一分类**，结论是：**0 处需要改代码**。防审计过期的闸同时落地
 （`scripts/check-sql-no-limit.py` + baseline，进 `just ci`）。
 
@@ -8,10 +8,10 @@ issue #13 的落地件。对全仓持久层做静态扫描，55 处不带 LIMIT 
 
 `scripts/check-sql-no-limit.py` 扫 `sqlx::query / query_as / query_scalar`
 的 SQL 字面量（cortex-store / cortex-agentd / cortex-local 三个 src），
-带 `LIMIT` / `FETCH FIRST` 的豁免，去重后得 **55 处唯一候选**。逐条人工
+带 `LIMIT` / `FETCH FIRST` 的豁免，去重后得 **57 处唯一候选**（55 + #17 引入的 2 条 advisory lock 探测，A 类补记于此）。逐条人工
 分类，判据只有一个：**结果集行数有没有一个写得出来的上界。**
 
-## A · 主键/唯一键点查（上界 = 1 行） —— 43 处
+## A · 主键/唯一键点查（上界 = 1 行） —— 45 处
 
 WHERE 命中 `PRIMARY KEY` / `UNIQUE` 列，物理上不可能超一行。此类
 **不该**加 `LIMIT 1` —— 语义不变，唯一效果是让读者怀疑存在多行。
@@ -24,7 +24,7 @@ WHERE 命中 `PRIMARY KEY` / `UNIQUE` 列，物理上不可能超一行。此类
 - agentd/library.rs：`fetch_by_id` / `fetch_by_hash`、`chunk_state` 按主键
 - agentd/image.rs / gallery.rs：图像按 id / token / hash
 - agentd/search_prefs.rs / request_tenant.rs：按 id
-- 各处的 `to_regclass` / advisory lock / `SELECT 1`：探测与锁，非数据
+- 各处的 `to_regclass` / advisory lock / `SELECT 1`：探测与锁，非数据（含 store.rs `ensure_search_extensions` 的 lock/unlock 两句）
 
 ## B · 聚合无行集合（count / sum / max） —— 6 处
 
@@ -55,6 +55,6 @@ WHERE 命中 `PRIMARY KEY` / `UNIQUE` 列，物理上不可能超一行。此类
 ## 处置
 
 - 代码改动：**0 行**
-- baseline：`scripts/sql-no-limit.known`（55 条）
+- baseline：`scripts/sql-no-limit.known`（57 条）
 - 闸：`python3 scripts/check-sql-no-limit.py`，进 `just ci` 与 CI scripts 作业
 - baseline 因 `--refresh` 变更时，PR 描述注明新增条目的分类（A/B/C/D）
