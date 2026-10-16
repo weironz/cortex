@@ -154,6 +154,12 @@ jobs:
         # /agents 的当天。理由与前两道闸相同：注释拦不住沉默的形状。
         run: python3 scripts/check-edge-routes.py
 
+      - name: 无 LIMIT 的 SELECT 审计
+        # 2026-10-17 那次全量分类（docs/sql-no-limit-audit-20261017.md）的结论
+        # 是「零处需改」 —— 但只对那一刻成立。baseline 钉住 55 处已分类的，
+        # 漂移即红；理由与上面几道闸同一句：审计文档自己会过期，闸不会。
+        run: python3 scripts/check-sql-no-limit.py
+
       - name: 文档链接指得到
         # 一条断链不报错、不影响构建，只是读文档的人点过去落进 404 ——
         # 而写文档的人永远不会去点自己刚写的链接。
