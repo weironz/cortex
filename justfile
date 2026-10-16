@@ -365,6 +365,11 @@ lint-py:
 lint-edge:
     python3 scripts/check-edge-routes.py
 
+# 2026-10-17 审计（docs/sql-no-limit-audit-20261017.md）的防过期闸：
+# 当时的 55 处无 LIMIT SELECT 全部有上界，baseline 与之一漂移就红。
+lint-sql-limit:
+    python3 scripts/check-sql-no-limit.py
+
 # 基线文件是回归门的全部依据，它自己损坏 / 缺字段的话，门会静静地失效。
 #
 # 真的回归门在 Cormex 那边跑（见 justfile 里「检索评测」那一节），
@@ -399,7 +404,7 @@ lint-compose-env:
 # 依赖链，CI 加了一步而这里没跟上就红（那件事 2026-08-20 与 08-22 各发生过
 # 一次，两次都是本机全绿、推上去才知道）。加 recipe 时连同
 # `scripts/check-ci-parity.py` 的 COVERED 一起改。
-ci: fmt-check lint check test docs-check lint-sh lint-py lint-edge toolchain-check release-check evals-baseline lint-compose-env lint-ci-parity flutter-check
+ci: fmt-check lint check test docs-check lint-sh lint-py lint-edge lint-sql-limit toolchain-check release-check evals-baseline lint-compose-env lint-ci-parity flutter-check
     @echo "全部检查通过"
 
 # ══════════════════════════════════════════════════════════
