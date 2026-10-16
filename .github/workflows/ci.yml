@@ -160,6 +160,12 @@ jobs:
         # 漂移即红；理由与上面几道闸同一句：审计文档自己会过期，闸不会。
         run: python3 scripts/check-sql-no-limit.py
 
+      - name: unwrap 白名单没长
+        # 存量那 29 个文件大多站在已验证的不变式上，不值得机械 churn；
+        # 但口子只收不放 —— 白名单外的文件新增一个生产路径 unwrap/expect
+        # 就红。理由与 check-radii 那句相同：闸盯的是形状，不是内容。
+        run: python3 scripts/check-unwrap.py
+
       - name: 文档链接指得到
         # 一条断链不报错、不影响构建，只是读文档的人点过去落进 404 ——
         # 而写文档的人永远不会去点自己刚写的链接。

@@ -370,6 +370,11 @@ lint-edge:
 lint-sql-limit:
     python3 scripts/check-sql-no-limit.py
 
+# unwrap/expect 防增量闸：不清存量（那批大多站在已验证的不变式上），
+# 白名单外的文件新增一个就红。存量随日常改动收敛，口子只收不放。
+lint-unwrap:
+    python3 scripts/check-unwrap.py
+
 # 基线文件是回归门的全部依据，它自己损坏 / 缺字段的话，门会静静地失效。
 #
 # 真的回归门在 Cormex 那边跑（见 justfile 里「检索评测」那一节），
@@ -404,7 +409,7 @@ lint-compose-env:
 # 依赖链，CI 加了一步而这里没跟上就红（那件事 2026-08-20 与 08-22 各发生过
 # 一次，两次都是本机全绿、推上去才知道）。加 recipe 时连同
 # `scripts/check-ci-parity.py` 的 COVERED 一起改。
-ci: fmt-check lint check test docs-check lint-sh lint-py lint-edge lint-sql-limit toolchain-check release-check evals-baseline lint-compose-env lint-ci-parity flutter-check
+ci: fmt-check lint check test docs-check lint-sh lint-py lint-edge lint-sql-limit lint-unwrap toolchain-check release-check evals-baseline lint-compose-env lint-ci-parity flutter-check
     @echo "全部检查通过"
 
 # ══════════════════════════════════════════════════════════
