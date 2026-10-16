@@ -1706,3 +1706,29 @@ extension _FirstWhereOrNull<E> on Iterable<E> {
 final chatControllerProvider = NotifierProvider<ChatController, ChatState>(
   ChatController.new,
 );
+
+/// 会话列表这一屏的**门**：加载 / 错误 / 数据折回一个 `AsyncValue`。
+///
+/// 这是 `async_gate.dart` 约定的第一个落地实例。存储真相仍是
+/// [ChatState] 里那三个裸字段（[ChatState.sessionsLoading] /
+/// [ChatState.sessionsError] / [ChatState.sessions]）—— 读侧门先行，
+/// 界面从此只认 `gate.when(...)`，不再各自对三个字段做合取；等没有
+/// 人再直接读裸字段，存储真相才换形状。
+///
+/// 「有数据时的刷新与报错」**不进门**：手里有列表时又一次刷新失败不该
+/// 把整屏换成报错页（那是比「按钮还可以再点」更糟的体验），所以 loading
+/// 与 error 只在**列表还是空的**时占住门。
+final sessionListGateProvider = Provider<AsyncValue<List<ChatSession>>>((ref) {
+  final state = ref.watch(
+    chatControllerProvider.select(
+      (s) => (s.sessionsLoading, s.sessionsError, s.sessions),
+    ),
+  );
+  if (state.$1 && state.$3.isEmpty) return const AsyncLoading();
+  final error = state.$2;
+  if (error != null && state.$3.isEmpty) {
+    // 错误本来就带着一句话，没有更值的栈可指 —— Riverpod 自己也这么兜
+    return AsyncError(error, StackTrace.current);
+  }
+  return AsyncData(state.$3);
+});

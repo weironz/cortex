@@ -42,6 +42,7 @@ import '../../../core/theme.dart';
 import '../../../models/model_source.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/model_controller.dart';
+import '../../../widgets/secret_field.dart';
 import '../widgets/model_caps_editor.dart';
 import '../widgets/model_picker_drawer.dart';
 import '../widgets/model_table.dart';
@@ -1062,23 +1063,20 @@ class _DetailState extends State<_Detail> {
   late final _baseUrl = TextEditingController(
     text: widget.source.baseUrl ?? '',
   );
-  bool _reveal = false;
   bool _dirty = false;
 
-  /// 已存过密钥时，密钥框默认是**掩码态**（`●●●●●●●● + 尾四位`），
-  /// 点一下才进入编辑态。
+  /// 密钥框当前在不在「正在改」这一态的**显示镜像** —— 用来换
+  /// 「API 密钥」那一行的说明文案。
   ///
-  /// # 为什么不是一个带 hintText 的空框
-  ///
-  /// 空框的第一读感是「这里没填过东西」—— 实拍反馈里用户就是盯着
-  /// 空白的密钥框怀疑 key 没存上。掩码是**视觉呈现**，不是回显：
-  /// 界面手里从来只有后四位（服务端只回 `key_tail`），点进来编辑时
-  /// 从空白开始重输，与之前的语义完全一致。
+  /// 三态切换的门后来在 [SecretField] 内部掌管（未设 / 掩码 / 正在改，
+  /// 控件文档见 `widgets/secret_field.dart`），这里手里的只是它
+  /// `onEditingChanged` 通知过来的一份镜像：**显示推导，不是状态真相**，
+  /// 改判据不要改在这儿。
   bool _editingKey = false;
 
-  /// 编辑态的焦点。丢焦点且什么都没输时退回掩码态 ——
-  /// 点开又反悔的人不该留下一个看起来「密钥被清空了」的空框。
-  final _keyFocus = FocusNode();
+  /// 给 [SecretField] 的收场信号：保存落库那一帧递增一次，控件比对到
+  /// 变化就退出编辑态（见 SecretField.resetEpoch）。
+  int _keyResetEpoch = 0;
 
   /// 拿哪个型号去验。空 = 让服务端挑第一个开着的。
   String _probe = '';
@@ -1090,35 +1088,11 @@ class _DetailState extends State<_Detail> {
   bool get _hasStoredKey => widget.source.keyTail?.isNotEmpty ?? false;
 
   @override
-  void initState() {
-    super.initState();
-    _keyFocus.addListener(() {
-      if (!_keyFocus.hasFocus &&
-          _editingKey &&
-          _key.text.trim().isEmpty &&
-          mounted) {
-        setState(() => _editingKey = false);
-      }
-    });
-  }
-
-  @override
   void dispose() {
     _key.dispose();
     _label.dispose();
     _baseUrl.dispose();
-    _keyFocus.dispose();
     super.dispose();
-  }
-
-  /// 从掩码态进入编辑态，并直接把光标放进去 ——
-  /// 点了还要再点一次才能打字，是把一次动作拆成了两次。
-  void _beginEditKey() {
-    setState(() => _editingKey = true);
-    // 等编辑态那个 TextField 建出来再要焦点，不然焦点落在空处
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _keyFocus.requestFocus();
-    });
   }
 
   @override
@@ -1127,8 +1101,8 @@ class _DetailState extends State<_Detail> {
     final scheme = theme.colorScheme;
     final s = widget.source;
     final official = widget.data.providerOf(s.provider)?.baseUrl ?? '';
-    // 掩码画不画，这一个 build 里问两次（小字提示 + 输入框本体）——
-    // 算一次存下来，两处引用同一个结论，改判据时不会漏一边
+    // 与 SecretField 内部的同一个判据对齐的一份显示镜像 —— 只驱动
+    // 下面那行小字提示的切换，输入框本体走控件自己的三态
     final masked = _hasStoredKey && !_editingKey;
 
     return ListView(
@@ -1171,60 +1145,18 @@ class _DetailState extends State<_Detail> {
           SettingsField(
             label: 'API 密钥',
             hint: masked ? '点一下换一把新的（存好的那把动不了、也看不见）' : '留空 = 不改动原来那把',
-            child: masked
-                // 掩码态：已存过密钥就**长得像已经填了**，而不是一个空框。
-                // 实拍反馈里用户对着空的密钥框（hint 写「已存 …HE60」）
-                // 判断成「key 没存上」—— 占位灰字传达不了「有」。
-                ? InkWell(
-                    key: const ValueKey('field:api-key-masked'),
-                    borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
-                    onTap: _beginEditKey,
-                    // 键盘也进得来：Tab 到这里按回车 = 点击
-                    onFocusChange: (has) {
-                      if (has) _beginEditKey();
-                    },
-                    child: InputDecorator(
-                      decoration: const InputDecoration(
-                        isDense: true,
-                        border: OutlineInputBorder(),
-                        suffixIcon: Icon(Icons.edit_outlined, size: 18),
-                      ),
-                      child: Text(
-                        // 圆点是**画出来的**，不是真密钥的长度 ——
-                        // 长度本身也是不该泄露的信息。尾四位来自服务端，
-                        // 是界面手里唯一的明文
-                        '●●●●●●●●${s.keyTail}',
-                        style: theme.textTheme.bodyMedium,
-                      ),
-                    ),
-                  )
-                : TextField(
-                    key: const ValueKey('field:api-key'),
-                    controller: _key,
-                    focusNode: _keyFocus,
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    // 默认遮住、可点开：这是一串粘进来的东西，而一次看不见的
-                    // 粘贴迟早会错一次，且症状要到下一次对话才出现
-                    obscureText: !_reveal,
-                    onChanged: (_) => setState(() => _dirty = true),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      border: const OutlineInputBorder(),
-                      // 编辑态从空白开始重输 —— 界面永远拿不到明文，
-                      // 没有「改几个字符」这回事
-                      hintText: _hasStoredKey ? '粘贴新密钥，留空 = 不换' : null,
-                      suffixIcon: IconButton(
-                        onPressed: () => setState(() => _reveal = !_reveal),
-                        iconSize: 18,
-                        icon: Icon(
-                          _reveal
-                              ? Icons.visibility_off_outlined
-                              : Icons.visibility_outlined,
-                        ),
-                      ),
-                    ),
-                  ),
+            // 三态（未设 / 已设但显示掩码 / 正在改）收进共享控件，
+            // 不再在这一页手搓 —— 写漏一个态就是一个病例，见 SecretField 文档
+            child: SecretField(
+              controller: _key,
+              storedTail: s.keyTail,
+              onChanged: (_) => setState(() => _dirty = true),
+              onEditingChanged: (editing) =>
+                  setState(() => _editingKey = editing),
+              resetEpoch: _keyResetEpoch,
+              fieldKey: const ValueKey('field:api-key'),
+              maskedFieldKey: const ValueKey('field:api-key-masked'),
+            ),
           ),
           SettingsField(
             label: 'API 代理地址',
@@ -1428,8 +1360,10 @@ class _DetailState extends State<_Detail> {
       _dirty = false;
       _key.clear();
       // 存完退回掩码态：编辑已经结束，留一个空的编辑框会读成
-      // 「刚存的密钥没了」。没存过 key 的来源没有掩码态，这一位随它去
+      // 「刚存的密钥没了」。没存过 key 的来源没有掩码态，这一位随它去。
+      // 这份镜像跟着收（见字段上的注释），控件那边的这一帧由 resetEpoch 收回
       _editingKey = false;
+      _keyResetEpoch++;
     });
   }
 }
