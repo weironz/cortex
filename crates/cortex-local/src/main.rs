@@ -47,6 +47,14 @@ mod supervise;
 mod terminal;
 mod tunnel;
 mod turn;
+/// 一轮的装配：权限档、能力清单（`Caps`）与 `Turn` 的构造。见模块头。
+mod turn_assemble;
+/// 「agent 事件 → SSE 事件」的翻译，与「要不要摇续期铃」的判断。见模块头。
+mod turn_events;
+/// agent 循环的宿主：`LocalHost` 把工具落到这台机器。见模块头。
+mod turn_host;
+/// 喂给模型的文本：系统提示词、铺成消息的历史、抓回网页的包装。见模块头。
+mod turn_prompt;
 mod workspaces;
 mod ws_proxy;
 
@@ -74,6 +82,13 @@ mod proxy_credential_test;
 /// 终端 WS 的端到端断言（真开端口 —— 升级与 409 只有穿过真 HTTP 栈才测得到）。
 #[cfg(test)]
 mod terminal_routes_test;
+
+/// 一轮装配层的断言：目录给不给、权限档怎么翻译、桌面与容器差在哪。
+#[cfg(test)]
+mod turn_assemble_test;
+/// 系统提示词与历史消息的断言：人设替换、出网说明、历史不带图。
+#[cfg(test)]
+mod turn_prompt_test;
 
 use std::sync::Arc;
 use std::time::Duration;
