@@ -18,6 +18,16 @@ use crate::error::Result;
 use crate::store::Store;
 use crate::tenant::{SchemaName, TenantPools};
 
+/// 观察线：**单租户**迁移慢过这个数，就该把它挪到启动后后台做
+/// （docs/optimization-review-20261017.md §P2-4）。
+///
+/// 线以下的所有耗时按「不是病」记 info，不告警 —— 真正要回答的问题只有
+/// 一个：什么时候「起身一次全库等」不再是小事。答案由这组数给，不是「感觉」。
+pub const MIGRATE_SLOW_TENANT_MS: u128 = 500;
+
+/// 观察线：**全部租户**迁移总时长的同一个信号。
+pub const MIGRATE_SLOW_TOTAL_MS: u128 = 10_000;
+
 /// 一个租户的迁移结果。
 #[derive(Debug)]
 pub struct TenantMigration {
@@ -36,8 +46,13 @@ pub struct TenantMigration {
 /// 不返回 `Err`：单个租户的失败进 [`TenantMigration::failure`]。
 /// 整体失败（连不上数据库）由调用方在建 [`TenantPools`] 时就撞到了。
 pub async fn migrate_all(pools: &TenantPools, schemas: &[SchemaName]) -> Vec<TenantMigration> {
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let mut slowest: (Option<&SchemaName>, u128) = (None, 0);
     let mut out = Vec::with_capacity(schemas.len());
     for schema in schemas {
+        let one = Instant::now();
         let failure = match pools.get(schema).await {
             Err(e) => Some(format!("取不到连接池：{e}")),
             Ok(store) => match store.migrate().await {
@@ -45,15 +60,53 @@ pub async fn migrate_all(pools: &TenantPools, schemas: &[SchemaName]) -> Vec<Ten
                 Err(e) => Some(format!("migration 失败：{e}")),
             },
         };
+        let ms = one.elapsed().as_millis();
         if let Some(why) = &failure {
             // error 而不是 warn：这个租户从现在起是不可用的，
             // 而它在别处的表现只会是零散的 SQL 错误
-            tracing::error!(schema = schema.as_str(), reason = %why, "租户 schema 迁移失败，该用户暂不可用");
+            tracing::error!(schema = schema.as_str(), reason = %why, tenant_ms = ms, "租户 schema 迁移失败，该用户暂不可用");
+        } else if ms >= MIGRATE_SLOW_TENANT_MS {
+            tracing::warn!(
+                schema = schema.as_str(),
+                tenant_ms = ms,
+                line = MIGRATE_SLOW_TENANT_MS,
+                "单租户迁移慢过观察线 —— 临近后台化的信号"
+            );
+        } else {
+            tracing::info!(
+                schema = schema.as_str(),
+                tenant_ms = ms,
+                "租户 schema 迁到最新"
+            );
+        }
+        if ms > slowest.1 {
+            slowest = (Some(schema), ms);
         }
         out.push(TenantMigration {
             schema: schema.clone(),
             failure,
         });
+    }
+
+    let total_ms = started.elapsed().as_millis();
+    let slowest_schema = slowest.0.map_or("-", SchemaName::as_str);
+    if total_ms >= MIGRATE_SLOW_TOTAL_MS {
+        tracing::warn!(
+            total_ms,
+            tenants = schemas.len(),
+            slowest_ms = slowest.1,
+            slowest_schema,
+            line = MIGRATE_SLOW_TOTAL_MS,
+            "全租户迁移总时长慢过观察线 —— 该排期「启动后后台迁移」了（§P2-4）"
+        );
+    } else {
+        tracing::info!(
+            total_ms,
+            tenants = schemas.len(),
+            slowest_ms = slowest.1,
+            slowest_schema,
+            "全租户 schema 迁移完成"
+        );
     }
     out
 }
