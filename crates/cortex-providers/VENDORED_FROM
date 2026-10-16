@@ -1,0 +1,20 @@
+# 取件出处 —— cortex-providers
+#
+# 这份目录是**取件**，不是依赖。机器可读的来历记录如下；为什么这么取、
+# 为什么**刻意不与上游同步**，见 src/lib.rs 的模块文档与 NOTICE —— 那两份
+# 是权威，本文件只是把「从哪儿来」钉成一行能 grep 的事实。
+
+upstream_repo:      https://github.com/block/goose
+upstream_license:   Apache-2.0（Copyright Block, Inc.；署名见 NOTICE 与各文件头）
+source:             crates.io 发行包（**不是** git commit —— 包没有 commit 身份）
+  - goose-providers        0.1.0-alpha.1
+  - goose-provider-types   0.1.0-alpha.1
+vendored_at:        2026-08-19
+vendored_by:        scripts/vendor-providers.py（一次性脚本，留着当记录，不打算再跑）
+sync_policy:        不 再 与 上 游 同 步（有意决策，2026-08-19，见 NOTICE 与本目录 src/lib.rs）
+                    改这份代码按本仓库的判据来；要修供应商缺陷在本地修。
+                    刻意不留「定期同步」流程 —— 没人会执行的流程会让读者
+                    以为这里的改动需要先跟谁对齐。
+local_divergence:   自由的。砍掉 databricks / snowflake / local_inference /
+                    azure_foundry（本仓库没有一条调用链能到达，清单在 lib.rs）；
+                    此后按本仓库判据继续，不维护「本地补丁 vs 上游」的对照。
