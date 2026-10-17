@@ -63,8 +63,21 @@ WORKDIR /build/app
 # **这个值是编译期钉死的，运行期改不了。**
 #
 # 客户端的 `AppConfig.defaultBaseUrl` 是 `String.fromEnvironment`，
-# dart2js 会把它当成常量折叠进 main.dart.js。nginx 启动时替换字符串
-# 那一套在这里行不通 —— 压缩混淆后的 JS 里没有一个稳定的占位符可替。
+# dart2wasm 会把它当成常量折叠进 main.dart.wasm。nginx 启动时替换字符串
+# 那一套在这里行不通 —— 编译产物里没有一个稳定的占位符可替。
+#
+# **为什么是 wasm-gc 而不是 deferred 拆分**（2026-10-17 实测，issue #15）：
+#
+# | 路线 | 首屏过线载荷 |
+# |---|---|
+# | canvaskit（此前默认） | ≈4.6MB gz（engine wasm 2.92 + 应用 js 1.42） |
+# | **wasm-gc（本文件）** | **≈1.6MB gz（main.dart.wasm 1.56 + glue ~15KB）** |
+#
+# 主税是**引擎运行时**（canvaskit.wasm 2.92MB gz），把 chat/terminal/images
+# 按 deferred 拆出去也只能挣回 1MB 以内、且依然越线 —— 数字面前那条宣判
+# 不成立，于是 issue 原判「拆 deferred」让位给「换渲染管线」。代价写在
+# 浏览器兼容面上：wasm-gc 要 2023 年后的现代浏览器（Chrome/Firefox/
+# Safari 都已支持），舍弃的更老浏览器现在什么都看不到。
 #
 # 还有一条更硬的限制：`HttpCortexApi._normalise` 只接受 http:// 或
 # https:// 开头的绝对地址，**相对路径 `/api` 会被拼成 `http:///api`**
@@ -84,18 +97,18 @@ ARG CORTEX_BASE_URL=""
 RUN set -eux; \
     if [ -n "$CORTEX_BASE_URL" ]; then \
         echo "API base 钉为 $CORTEX_BASE_URL"; \
-        flutter build web --release --dart-define=CORTEX_BASE_URL="$CORTEX_BASE_URL"; \
+        flutter build web --wasm --release --dart-define=CORTEX_BASE_URL="$CORTEX_BASE_URL"; \
     else \
         echo "API base 用应用默认值（运行期可在设置面板改）"; \
-        flutter build web --release; \
+        flutter build web --wasm --release; \
     fi
 
 # 构建期就验一次，别等部署完才发现钉错了。
-# dart2js 会把常量原样留在输出里，grep 得到 = 折叠确实发生了
+# dart2js / dart2wasm 都会把常量原样留在输出里，grep 得到 = 折叠确实发生了
 RUN set -eux; \
     if [ -n "$CORTEX_BASE_URL" ]; then \
-        grep -qF "$CORTEX_BASE_URL" build/web/main.dart.js \
-          || { echo "错误：main.dart.js 里找不到 $CORTEX_BASE_URL —— dart-define 没有生效"; exit 1; }; \
+        grep -qF "$CORTEX_BASE_URL" build/web/main.dart.wasm \
+          || { echo "错误：main.dart.wasm 里找不到 $CORTEX_BASE_URL —— dart-define 没有生效"; exit 1; }; \
     fi; \
     test -f build/web/index.html
 
