@@ -36,7 +36,7 @@ for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
         _s.reconfigure(encoding="utf-8", errors="replace")
 
-ROUTES = "crates/cortex-agentd/src/routes.rs"
+ROUTES = "crates/cortex-agentd/src/routes/mod.rs"
 DEV_NGINX = "scripts/docker/nginx.dev.conf.template"
 PROD_COMPOSE = "deploy/docker-compose.yml"
 
