@@ -9,6 +9,7 @@ crates/cortex-agentd/src/model_sources.rs
 crates/cortex-agentd/src/presence.rs
 crates/cortex-agentd/src/profile.rs
 crates/cortex-agentd/src/rate_limit.rs
+crates/cortex-agentd/src/routes/chat.rs
 crates/cortex-agentd/src/sync_bus.rs
 crates/cortex-blob/src/local.rs
 crates/cortex-cli/src/main.rs

@@ -36,6 +36,7 @@ mod confirmations;
 mod delegate;
 mod files;
 #[cfg(test)]
+#[path = "routes_test.rs"]
 mod tests;
 
 use axum::extract::State;

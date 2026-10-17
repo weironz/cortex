@@ -97,11 +97,11 @@ fi
 # 天然被覆盖，剩下的风险只有一个方向：有人把 /memory/search 或 /mcp 也搬
 # 进 agentd，而边缘还在把它们转走。
 #
-# `routes/tests.rs` 里那条测试是这份名单的权威（它断言这些路径 agentd 回 404）。
+# `routes/routes_test.rs` 里那条测试是这份名单的权威（它断言这些路径 agentd 回 404）。
 # 这里比对两者，对不上就红 —— 那正是「搬完了忘了改边缘」的信号。
 if [ "$COMPOSE" = "deploy/docker-compose.yml" ]; then
     # 代码那侧：测试里 `for path in [...]` 的那一行
-    pinned=$(grep -oE 'for path in \[[^]]*\]' crates/cortex-agentd/src/routes/tests.rs |
+    pinned=$(grep -oE 'for path in \[[^]]*\]' crates/cortex-agentd/src/routes/routes_test.rs |
         grep -oE '/[a-z/-]+' | sort -u)
     # 边缘那侧：规则里所有 `!PathPrefix(`/api/x`)` 与 `!Path(`/api/x`)`
     excluded=$(grep -oE '!Path(Prefix)?\(`/api[a-z/-]*`\)' "$COMPOSE" |
@@ -114,13 +114,13 @@ if [ "$COMPOSE" = "deploy/docker-compose.yml" ]; then
             case "$p" in "$e"*) hit=1 ;; esac
         done
         if [ "$hit" -eq 0 ]; then
-            echo "失败 ${COMPOSE} 没把 $p 让给记忆那一侧，而 routes/tests.rs 断言 agentd 不应答它。" >&2
+            echo "失败 ${COMPOSE} 没把 $p 让给记忆那一侧，而 routes/routes_test.rs 断言 agentd 不应答它。" >&2
             echo "  要么在 cortex-agent.rule 里加一条 !PathPrefix(\`/api$p\`)，" >&2
-            echo "  要么它真搬过来了 —— 那就把它从 routes/tests.rs 那条测试的名单里删掉。" >&2
+            echo "  要么它真搬过来了 —— 那就把它从 routes/routes_test.rs 那条测试的名单里删掉。" >&2
             exit 1
         fi
     done
-    echo "✔ 边缘让出的路径覆盖了 routes/tests.rs 钉的那份（$(echo "$pinned" | tr '
+    echo "✔ 边缘让出的路径覆盖了 routes/routes_test.rs 钉的那份（$(echo "$pinned" | tr '
 ' ' '))"
 fi
 
