@@ -227,7 +227,7 @@ pub async fn delete_avatar(
 ///
 /// 第一版想放：`<img src>` 带不了 `Authorization`。但这个问题这套代码
 /// **已经有答案** —— `/auth/ticket` 换一张 60 秒的短票，正是给
-/// 「WebSocket、`<img src>` 这类加不了首部的连接」用的（见 `routes.rs`
+/// 「WebSocket、`<img src>` 这类加不了首部的连接」用的（见 `routes/mod.rs`
 /// 那一行注释）。用它就不必动那份免认证清单。
 ///
 /// 那份清单有一条守卫测试（`the_public_list_stays_short`）盯着，理由写在

@@ -273,7 +273,7 @@ async fn persist(store: &Store, req: &NewEpisodeRequest) -> cortex_core::Result<
     // 永远取不到字节的哈希，而那一行在界面上长得与正常附件一模一样。
     //
     // （这里曾经写着「带附件的请求**必然被拒**：`/blobs` 那条上传路由还没搬
-    // 过来」—— 那句话早就不成立了，`/blobs` 在 `routes.rs` 里好好地接着。一段
+    // 过来」—— 那句话早就不成立了，`/blobs` 在 `routes/mod.rs` 里好好地接着。一段
     // 说反话的注释比没有注释更坏：下一个人会按它去找一个不存在的欠账。）
     let attachments = dedup_attachments(&req.attachments);
     for a in &attachments {

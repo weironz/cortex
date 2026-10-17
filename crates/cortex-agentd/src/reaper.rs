@@ -92,7 +92,7 @@ async fn sweep_once(st: &AgentState) {
                 // 条后台路径手上没有用户凭据」这个旧理由已经不成立了。
                 // 结论没变，换了一个更硬的理由：
                 //
-                // **签发是按作用域复用的**（`routes::delegate_token`）。作废
+                // **签发是按作用域复用的**（`routes::delegate::delegate_token`）。作废
                 // 之后，同一个作用域下一次会拿到一把新令牌，而
                 // `runner::ensure` 的 `token_matches` 认的是容器启动时 env 里
                 // 那把 —— 判否，于是它把容器强制重建。停掉的容器下次本来就要

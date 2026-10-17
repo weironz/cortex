@@ -77,7 +77,7 @@ traefik.http.routers.cortex-agent.rule: >-
 traefik.http.routers.cortex-agent.priority: "200"
 ```
 
-**让出去的名单短且稳定**（`cortex-agentd/src/routes.rs` 有测试钉着 agentd 不
+**让出去的名单短且稳定**（`cortex-agentd/src/routes/tests.rs` 有测试钉着 agentd 不
 应答 `/memory/search` 与 `/mcp`），而 agentd 的路由表还会长 —— 一份会长的清单
 不该由边缘维护。`scripts/check-compose-env.sh` 会比对这两处，对不上就红。
 
