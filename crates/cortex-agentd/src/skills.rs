@@ -52,7 +52,7 @@ const _: () = assert!(
 
 /// `GET /skills/body` 的 query。
 ///
-/// 名字在 query 里而不是路径段 —— 见 `routes.rs` 那条注释。
+/// 名字在 query 里而不是路径段 —— 见 `routes/mod.rs` 那条注释。
 #[derive(serde::Deserialize)]
 pub struct BodyQuery {
     name: String,

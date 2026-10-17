@@ -117,7 +117,7 @@ pub async fn restore(st: &AgentState, owner: &str, scope: &str, snapshot_id: &st
 ///
 /// [`AgentState::tenant_for_user`] 回的是 [`crate::error::ApiError`] ——
 /// 它要决定 HTTP 状态码，而这条路上**没有 HTTP 响应可回**（调用方是
-/// `routes.rs` 里那几个自己造 `Response` 的 handler）。
+/// `routes/files.rs` 里那几个自己造 `Response` 的 handler）。
 ///
 /// 换成 `Unavailable`（503）而不是 `Store`（500）：接不上库是「现在做不了」，
 /// 与 [`Tenant::store`] 在 mock 后端上给出的那一个是同一个语义。

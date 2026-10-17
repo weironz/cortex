@@ -883,11 +883,11 @@ Markdown 转换、图表、页眉页脚这些我们自己写要花很久的部�
 
 | 在哪 | 是什么 |
 |---|---|
-| `tools.rs` `builtin_specs()` | 一个 `vec![]` 字面量，现在是 9 个 `ToolSpec`（2026-08-15 记的是 6 个） |
-| `tools.rs` `execute()` | 一个 `match call.name.as_str()`，每个工具一条臂 |
-| `turn.rs` 三处 | 直接调 `builtin_specs()`，各自再过滤 |
+| `tools/mod.rs` `builtin_specs()` | 一个 `vec![]` 字面量，现在是 9 个 `ToolSpec`（2026-08-15 记的是 6 个） |
+| `tools/mod.rs` `execute()` | 一个 `match call.name.as_str()`，每个工具一条臂 |
+| `turn.rs`×2、`turn_tools.rs`、`turn_assemble.rs`（local） | 直接调 `builtin_specs()`，各自再过滤 |
 
-加一个工具 = 改同一个文件的两处 + 顾到三个调用点。而**由宿主执行的那些**
+加一个工具 = 改同一个文件的两处 + 顾到四个调用点。而**由宿主执行的那些**
 （`web_search`、`library_*`、`mcp_resource`、生图、电脑操作…）根本不进
 `execute`，它们由 agent 循环在更外层按名字拦截分派。也就是说分发早就裂成
 两层了，那本身就是「这里该有一张表」的信号。

@@ -1277,13 +1277,13 @@ agent 的 `generate_image` 工具也是打这条 —— 两处各记一遍的下
 （`cortex-local` 的 `has_skills`），两处消费：`prompt::skills_note` 决定印不印
 那一块，`with_external` 决定摆不摆那个工具。各判各的话，漏掉的那一半不会有
 任何测试红 —— 症状只是「模型看得见技能却取不回来」或者反过来，两种都表现为
-模型胡说。`turn.rs` 的 `技能目录与取正文的工具一起出现一起消失` 钉着它。
+模型胡说。`turn_assemble_test.rs`（cortex-local）的 `技能目录与取正文的工具一起出现一起消失` 钉着它。
 
 ⚠️ **`GET /skills/body` 必须进委托令牌的白名单，`GET /skills` 不能进。**
 前者漏掉的症状实测过：桌面端取得回来，云端会话里 `load_skill` 连吃两个 403，
 而两边跑的是同一份 agent 代码 —— 看起来完全像随机故障。后者放行则等于让容器
 里的不可信代码一次拿走**所有**正文，把分层绕了过去。两条都由
-`routes.rs::a_delegated_credential_is_admitted_only_where_its_scope_reaches` 守。
+`routes/delegate.rs::a_delegated_credential_is_admitted_only_where_its_scope_reaches` 守。
 
 **名字是标识符，不是标签**：数据库上带 UNIQUE。模型在目录里看见名字、
 `load_skill` 拿的也是名字，重名会让那次取回**静默地**取到其中一条，而另一条的

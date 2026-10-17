@@ -654,7 +654,7 @@ mod tests {
         );
     }
 
-    /// 这条钉的是 `routes::delegate_token` 依赖的那个性质。它红了，症状是
+    /// 这条钉的是 `routes::delegate::delegate_token` 依赖的那个性质。它红了，症状是
     /// 真机上「第一轮好使、第二轮 401」：容器的入站认证认的是启动时 env 里
     /// 那把，而我们每轮换了新的。
     #[test]
