@@ -95,6 +95,12 @@ class ImageState {
 class ImageController extends Notifier<ImageState> {
   @override
   ImageState build() {
+    // 换后端 / 换账号（含 access token 过期后的静默续期）要重来一遍：
+    // 画廊跟着账号走。没有这一行，token 过期那一刻在飞的 gallery() 吃到
+    // 401、续期成功、`cortexApiProvider` 换代 —— 而这个 controller 还
+    // 停在旧的错误态上，图片页从此一直转圈，切走再切回来也不会好
+    // （`SkillController.build` 同款，2026-10-22 真机上撞出来的）。
+    ref.watch(cortexApiProvider);
     Future.microtask(refresh);
     return const ImageState(loading: true);
   }

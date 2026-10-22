@@ -460,6 +460,40 @@ void main() {
         reason: '留着的话，用户切到别的文件夹再点「加入文件夹」，加进去的是他现在根本看不见的那几张',
       );
     });
+
+    test('API 换代（token 续期 / 换后端）之后要重发画廊请求', () async {
+      final api = _GalleryApi(all: [_img('IMG-1', _hashA)]);
+      final c = _boot(api);
+      addTearDown(c.dispose);
+      c.listen(imageControllerProvider, (_, _) {}, fireImmediately: true);
+      // 等 build 的 microtask(refresh) 落地
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(api.calls, isNotEmpty, reason: '第一代：controller build 时拉过一次');
+
+      // 模拟 `cortexApiProvider` 换代：续期成功、token 变了，实例整个换掉。
+      // Riverpod 的 updateOverrides 会让所有 watch 了它的 provider 失效——
+      // controller 若依赖它（SkillController 同款），会重建并重发 gallery；
+      // 没有依赖的话，controller 停在旧 state 上，图片页从此一直转圈
+      // （2026-10-22 真机撞的：token 过期那一刻在飞的 gallery() 吃 401、
+      //  续期成功、API 换代，然后再也没有第二次 gallery()）
+      final successor = _GalleryApi(all: [_img('IMG-1', _hashA)]);
+      c.updateOverrides([
+        appConfigProvider.overrideWith(_MockConfig.new),
+        cortexApiProvider.overrideWithValue(successor),
+        settingsReaderProvider.overrideWithValue(
+          () async => const <String, String>{},
+        ),
+        settingsWriterProvider.overrideWithValue((_) async {}),
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      expect(
+        successor.calls,
+        isNotEmpty,
+        reason: 'controller 必须依赖 cortexApiProvider：换代即重建、重发 gallery。'
+            '这个断言红着 = 图片页在 token 过期后会永久转圈',
+      );
+    });
   });
 
   group('放大之后那一排', () {

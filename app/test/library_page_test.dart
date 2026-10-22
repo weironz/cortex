@@ -205,6 +205,32 @@ void main() {
       reason: '「这个部署没有资料库」不是故障 —— 摆成错误会让人去重试一件重试一百次也不会成的事',
     );
   });
+
+  test('API 换代（token 续期 / 换后端）之后要重发资料库请求', () async {
+    final api = _LibApi(items: [_item('L1', 'a.md')]);
+    final c = _boot(api);
+    addTearDown(c.dispose);
+    c.listen(libraryControllerProvider, (_, _) {}, fireImmediately: true);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(api.calls, isNotEmpty, reason: '第一代：controller build 时拉过一次');
+
+    // 模拟 `cortexApiProvider` 换代：静默续期不改变 baseUrl（旧判据就是
+    // 只看 baseUrl/useMock，覆盖不到它），却把 API 实例整个换掉。controller
+    // 必须跟着重来，否则资料库从此一直转圈（与图片页 2026-10-22 同一笔修的）
+    final successor = _LibApi(items: [_item('L1', 'a.md')]);
+    c.updateOverrides([
+      cortexApiProvider.overrideWithValue(successor),
+      appConfigProvider.overrideWith(() => _FixedConfig()),
+    ]);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    expect(
+      successor.calls,
+      isNotEmpty,
+      reason: '旧判据只听 baseUrl/useMock，续期换代（baseUrl 不变、实例已换）'
+          '落在盲区里。这个断言红着 = 资料库在 token 过期后会永久转圈',
+    );
+  });
 }
 
 class _UnsupportedApi extends MockCortexApi {

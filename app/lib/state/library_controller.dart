@@ -102,12 +102,16 @@ class LibraryController extends Notifier<LibraryState> {
   @override
   LibraryState build() {
     // 换后端就换一份资料库 —— 与图片页同一个理由：上一个部署的材料
-    // 留在屏幕上，用户会以为它们跟着账号走
-    ref.listen(appConfigProvider, (previous, next) {
-      if (previous?.baseUrl != next.baseUrl ||
-          previous?.useMock != next.useMock) {
-        Future.microtask(refresh);
-      }
+    // 留在屏幕上，用户会以为它们跟着账号走。
+    //
+    // ⚠️ 监听的是 `cortexApiProvider` 而不是 `appConfigProvider` 的
+    // baseUrl/useMock：token 过期后的静默续期**不改变 baseUrl**，却会把
+    // API 实例整个换掉（见 `cortexApiProvider` 里「token 一换就重建」
+    // 的注释）。只看 baseUrl 的话，续期前在飞的那次 library() 吃了 401
+    // 之后再也不会有第二次 —— 资料库从此一直转圈（图片页 2026-10-22
+    // 撞过同一个坑，两处一起修的）。
+    ref.listen(cortexApiProvider, (_, _) {
+      Future.microtask(refresh);
     });
     Future.microtask(refresh);
     return const LibraryState(loading: true);
