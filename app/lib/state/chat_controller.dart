@@ -1331,7 +1331,41 @@ class ChatController extends Notifier<ChatState> {
         // 有自己的内容了 = 闸门已经放开。不清的话整轮都挂着「排队中」
         _leaveQueue(sid);
         _live[sid]?.pending.write(text);
+        // 这一段的第一滴字 —— 实时速度的计时起点。
+        //
+        // **只写一次**：每滴都写的话，那个速度永远算成「刚刚才开始」，而
+        // 它本该是「这一段到目前为止有多快」。
+        final started = state.streamingTurns[sid];
+        if (started != null && started.roundStartedAt == null) {
+          _putTurn(started.copyWith(roundStartedAt: DateTime.now()));
+        }
         _scheduleFlush(sid);
+
+      // 一次模型调用跑完了。**它合上刚才那一段**：字数对上了 token 数，
+      // 速度才有真值可言（供应商要到这一刻才报数）
+      case ChatUsageEvent():
+        _leaveQueue(sid);
+        // 先把攒着的增量冲出去 —— 否则 `text.length` 比线上少一截，
+        // 学到的「字 / token」比会系统性偏小
+        _flushPending(sid);
+        final current = state.streamingTurns[sid];
+        if (current == null) return;
+        // 子 agent 的用量只进总数。它的字数不在这条正文里、计时起点也不是
+        // 这一段的 —— 跟着它推进 `roundBaseChars`、把 `roundStartedAt` 清掉，
+        // 主 agent 那一段的实时速度会被凭空清零重计，而界面上只是「数字变小」
+        final byMain = event.subagent == null;
+        _putTurn(
+          byMain
+              ? current.copyWith(
+                  usage: current.usage.add(
+                    event,
+                    chars: current.text.length - current.roundBaseChars,
+                  ),
+                  roundBaseChars: current.text.length,
+                  roundStartedAt: null,
+                )
+              : current.copyWith(usage: current.usage.add(event)),
+        );
 
       case ChatToolEvent(
         :final name,
@@ -1564,8 +1598,19 @@ class ChatController extends Notifier<ChatState> {
     if (away && ref.read(notifyPrefsProvider).onFinish) {
       unawaited(playAlert());
     }
+    // 这一轮的用量记在**会话上**，不挂在消息上：历史消息是从服务端重放的，
+    // 那边的 episode 里没有用量（见 `ChatState.turnUsages`）。收尾之后
+    // 状态栏还在，它读的就是这一份
+    final usage = turn.usage.withSteps(turn.toolCalls.length);
     _dropTurn(sid);
     state = state.copyWith(
+      // 这一轮一条用量都没报（供应商不说，或者压根没跑起来）——
+      // **把上一轮那份撤掉**，而不是留着它。留着的话界面顶着一句
+      // 「上一轮的生成速度」，显示的却是更早那一轮的数字：读者没有
+      // 任何办法看出它差了一轮
+      turnUsages: usage.isEmpty
+          ? ({...state.turnUsages}..remove(turn.sessionId))
+          : {...state.turnUsages, turn.sessionId: usage},
       // ⚠️ **不再同时写 `sendError`。**
       //
       // 这个 `error` 上一行已经挂在 `message` 上了，会画成气泡里那条错误行。

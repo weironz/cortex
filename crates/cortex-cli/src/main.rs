@@ -755,6 +755,14 @@ async fn one_turn(
 
     let mut stdout = std::io::stdout();
     let mut wrote_body = false;
+    // 这一轮累计。**与图形界面同一份数** —— CLI 不画状态栏，但一句
+    // 「花了多少」在终端里同样有用（尤其是长工具链跑完之后）
+    let mut used_input = 0i64;
+    let mut used_output = 0i64;
+    // 只有「报了输出 token，且量得出生成耗时」的那几段才进这两个数 ——
+    // 速度的分子分母因此总是同一批 token（见下面累加处）
+    let mut timed_output = 0i64;
+    let mut timed_ms = 0u64;
 
     while let Some(ev) = stream.next().await {
         match ev {
@@ -823,6 +831,37 @@ async fn one_turn(
                 stdout.flush().ok();
                 wrote_body = true;
             }
+            // 用量单独攒着，收尾那行一起报。**不逐条打印**：一轮里每次工具
+            // 调用都来一条，打在正文中间会把流式输出切碎
+            Ok(ChatEvent::Usage {
+                input_tokens,
+                output_tokens,
+                generation_ms: ms,
+                subagent,
+                ..
+            }) => {
+                // 负数不是「花了 −1 个 token」：有的端点拿 -1 表示「没有这一项」。
+                // 照收会让合计少一个，与 Dart 侧 `tokenCount()` 的边界处理对齐
+                if let Some(n) = input_tokens.filter(|n| *n >= 0) {
+                    used_input += i64::from(n);
+                }
+                if let Some(n) = output_tokens.filter(|n| *n >= 0) {
+                    used_output += i64::from(n);
+                    // **速度的分子分母要是同一批 token。** 只发工具调用、没吐
+                    // 正文的那几段 `generation_ms` 是 0（量不出来），而它们的
+                    // 输出 token 是真的 —— 并进分子却不并进分母，算出来会比
+                    // 真实值高好几倍。图形界面那边是同一条判据
+                    // （`TurnUsage.timedOutput`），两边对同一轮必须给出同一个数
+                    //
+                    // 子 agent 那几段也不算速度：它们是**并行**跑的，生成时间
+                    // 互相重叠，加进分母等于把同一段时间算两遍；而终端里
+                    // 看到的正文只有主 agent 那一条
+                    if n > 0 && ms > 0 && subagent.is_none() {
+                        timed_output += i64::from(n);
+                        timed_ms += ms;
+                    }
+                }
+            }
             Ok(ChatEvent::Done {
                 episode_id,
                 models,
@@ -839,7 +878,25 @@ async fn one_turn(
                 } else {
                     format!("  {}", models.join(" → "))
                 };
-                println!("{}", render::dim(&format!("— {episode_id}{who}"), color));
+                // 花了多少。**两个数都给** —— 只报速度的话，用户判断不出
+                // 这一轮是「快但便宜」还是「慢而贵」，而那是两件不同的事
+                let mut spent = String::new();
+                if used_input > 0 || used_output > 0 {
+                    spent.push_str(&format!(
+                        "  ↑{} ↓{}",
+                        render::compact_tokens(used_input),
+                        render::compact_tokens(used_output)
+                    ));
+                }
+                if timed_ms > 0 && timed_output > 0 {
+                    // 分母只含生成那几段（见 `ChatEvent::Usage::generation_ms`）
+                    let tps = timed_output as f64 * 1000.0 / timed_ms as f64;
+                    spent.push_str(&format!("  {tps:.0} tok/s"));
+                }
+                println!(
+                    "{}",
+                    render::dim(&format!("— {episode_id}{who}{spent}"), color)
+                );
             }
             Ok(ChatEvent::Error {
                 message,

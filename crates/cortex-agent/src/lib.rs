@@ -191,6 +191,6 @@ pub use sandbox::{
 };
 pub use tools::{Risk, Sandbox, ToolCall, ToolResult, ToolSpec};
 pub use turn::{
-    AgentEvent, Approval, ApprovalPolicy, ConfirmRequest, DEFAULT_MAX_ROUNDS, Gate, StopReason,
-    ToolHost, Turn, TurnOutcome,
+    AgentEvent, Approval, ApprovalPolicy, ConfirmRequest, DEFAULT_MAX_ROUNDS, Gate, RoundUsage,
+    StopReason, ToolHost, Turn, TurnOutcome,
 };

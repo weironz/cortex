@@ -52,6 +52,16 @@ pub(super) async fn bridge_events(
                     subagent: None,
                 }
             }
+            AgentEvent::Usage(u) => ChatEvent::Usage {
+                model: u.model,
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                cache_read_input_tokens: u.cache_read_input_tokens,
+                cache_write_input_tokens: u.cache_write_input_tokens,
+                generation_ms: u.generation_ms,
+                // 主 agent 自己花的
+                subagent: None,
+            },
             AgentEvent::ToolResult {
                 name,
                 ok,
@@ -94,14 +104,26 @@ pub(super) async fn bridge_events(
 
 /// 子 agent 内部那个事件，要不要上界面；要的话长什么样。
 ///
-/// **只放 `ToolCall` / `ToolResult`，`Delta` 一律丢掉** —— 理由见
+/// **正文与工具行分开对待**：`Delta` 一律丢掉，工具行与用量照送 —— 理由见
 /// `spawn_agents` 里那段。
-pub(super) fn subagent_tool_line(
+pub(super) fn subagent_event(
     ev: &cortex_agent::AgentEvent,
     tag: &cortex_proto::dto::SubagentTag,
 ) -> Option<ChatEvent> {
     match ev {
         cortex_agent::AgentEvent::Delta(_) => None,
+        // 用量要送，而且**带着这个标记**。子 agent 烧的 token 是真实的，
+        // 不计进「这一轮花了多少」就是少算；但它不是这条会话的上下文，
+        // 所以客户端拿它累加总数、不拿它算填充率
+        cortex_agent::AgentEvent::Usage(u) => Some(ChatEvent::Usage {
+            model: u.model.clone(),
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cache_read_input_tokens: u.cache_read_input_tokens,
+            cache_write_input_tokens: u.cache_write_input_tokens,
+            generation_ms: u.generation_ms,
+            subagent: Some(tag.clone()),
+        }),
         cortex_agent::AgentEvent::ToolCall { name, arguments } => Some(ChatEvent::Tool {
             summary: format!("调用 {name}"),
             name: name.clone(),
@@ -233,8 +255,62 @@ mod tests {
 }
 
 #[cfg(test)]
+mod bridge_usage_tests {
+    use super::bridge_events;
+    use cortex_agent::AgentEvent;
+    use cortex_proto::dto::ChatEvent;
+    use tokio::sync::mpsc;
+
+    /// **主 agent 的用量真的过了那座桥。**
+    ///
+    /// 这是整条链上唯一没有别的东西盯着的一环：agent 那边有单测（事件造得
+    /// 对），子 agent 那条有单测（标记带得对），而「主 agent 这条也翻译了
+    /// 吗」只有这里看得见。漏掉的话界面上永远是空的，且**没有任何报错**。
+    #[tokio::test]
+    async fn 主agent的用量过了桥() {
+        let runs = crate::runs::Runs::new();
+        let ticket = runs.enqueue("s1").await.expect("排得进");
+        let permit = ticket.begin().await;
+        let sink = crate::runs::RunSink::new(std::sync::Arc::clone(&ticket.run));
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let bridge = tokio::spawn(async move { bridge_events(&mut rx, &sink).await });
+
+        tx.send(AgentEvent::Usage(cortex_agent::RoundUsage {
+            model: Some("qwen-flash".into()),
+            input_tokens: Some(1200),
+            output_tokens: Some(240),
+            cache_read_input_tokens: Some(1024),
+            cache_write_input_tokens: None,
+            generation_ms: 320,
+        }))
+        .await
+        .expect("送得进去");
+        drop(tx);
+        drop(permit);
+        bridge.await.expect("桥要正常收工");
+
+        let (replay, _rx, _) = runs.attach("s1").await.expect("挂得上");
+        let found = replay.into_iter().find_map(|ev| match ev {
+            ChatEvent::Usage {
+                subagent,
+                input_tokens,
+                generation_ms,
+                ..
+            } => Some((subagent, input_tokens, generation_ms)),
+            _ => None,
+        });
+        let (subagent, input, generation_ms) =
+            found.expect("用量没过桥 —— 状态栏一个数字都画不出来，而界面上不会有任何报错");
+        assert!(subagent.is_none(), "主 agent 自己的用量不该带子 agent 标记");
+        assert_eq!(input, Some(1200));
+        assert_eq!(generation_ms, 320, "速度的分母要原样带过去");
+    }
+}
+
+#[cfg(test)]
 mod subagent_event_tests {
-    use super::{subagent_marker, subagent_tool_line};
+    use super::{subagent_event, subagent_marker};
     use cortex_agent::AgentEvent;
     use cortex_proto::dto::{ChatEvent, SubagentTag, ToolPhase};
 
@@ -257,9 +333,45 @@ mod subagent_event_tests {
     #[test]
     fn 子agent的delta不上界面() {
         assert!(
-            subagent_tool_line(&AgentEvent::Delta("查到了一半…".into()), &tag()).is_none(),
+            subagent_event(&AgentEvent::Delta("查到了一半…".into()), &tag()).is_none(),
             "delta 必须被丢掉 —— 放上去的代价是重放缓冲炸掉，而症状是 attach 卡住"
         );
+    }
+
+    /// 子 agent 的用量**要上界面，而且要带着标记**。
+    ///
+    /// 两个反方向的错都在这里钉着：
+    ///
+    /// * 丢了它 —— 子 agent 烧的 token 是真的，不算进去就是少算一笔账，
+    ///   而界面上看不出来少了；
+    /// * 不带标记 —— 客户端会拿它当主 agent 的上下文，那个百分比就会随着
+    ///   四路并行来回跳，而它本来说的是「你这条对话还能装多少」。
+    #[test]
+    fn 子agent的用量上界面并带标记() {
+        let ev = AgentEvent::Usage(cortex_agent::RoundUsage {
+            model: Some("m".into()),
+            input_tokens: Some(900),
+            output_tokens: Some(88),
+            cache_read_input_tokens: None,
+            cache_write_input_tokens: None,
+            generation_ms: 500,
+        });
+        let Some(ChatEvent::Usage {
+            subagent,
+            output_tokens,
+            generation_ms,
+            ..
+        }) = subagent_event(&ev, &tag())
+        else {
+            panic!("子 agent 的 token 也是钱，丢了就是少算");
+        };
+        assert_eq!(
+            subagent.map(|t| t.index),
+            Some(2),
+            "不带标记的话客户端会拿它算主会话的上下文填充率"
+        );
+        assert_eq!(output_tokens, Some(88));
+        assert_eq!(generation_ms, 500, "速度的分母要原样带过去");
     }
 
     /// 工具行要上，而且**带着是谁干的**。
@@ -275,7 +387,7 @@ mod subagent_event_tests {
             subagent,
             path,
             ..
-        }) = subagent_tool_line(&ev, &tag())
+        }) = subagent_event(&ev, &tag())
         else {
             panic!("工具调用必须上界面 —— 用户想看的正是「它到底在查什么」");
         };
@@ -313,7 +425,7 @@ mod subagent_event_tests {
             diff: None,
             output: Some("文件正文".into()),
         };
-        let Some(ChatEvent::Tool { path, phase, .. }) = subagent_tool_line(&ev, &tag()) else {
+        let Some(ChatEvent::Tool { path, phase, .. }) = subagent_event(&ev, &tag()) else {
             panic!("结果也要上界面 —— 不然那个「进行中」永远撤不掉");
         };
         assert_eq!(phase, ToolPhase::Result);

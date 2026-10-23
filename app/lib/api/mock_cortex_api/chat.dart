@@ -207,11 +207,22 @@ mixin _ChatMock on MockCortexApiBase {
       );
     }
 
+    // 上面那几次工具调用各自是一次模型调用，都花过 token。一条用量事件
+    // 合上**它前面那一段** —— 与真实服务端同一套时序。
+    yield const ChatUsageEvent(
+      model: 'qwen-flash',
+      inputTokens: 1840,
+      outputTokens: 96,
+      cacheReadInputTokens: 1536,
+      generationMs: 380,
+    );
+
     final reply = _composeReply(message);
 
     // Chunk over runes, not code units: slicing a surrogate pair would emit a
     // lone half and render as a replacement glyph mid-stream.
     final runes = reply.runes.toList(growable: false);
+    final startedAt = DateTime.now();
     var i = 0;
     while (i < runes.length) {
       if (_disposed) return;
@@ -223,6 +234,20 @@ mixin _ChatMock on MockCortexApiBase {
         Duration(milliseconds: 9 + _random.nextInt(14)),
       );
     }
+
+    // 用量**由这段流自己的时长推出来**，不是写死的一个漂亮数字：写死的话
+    // 它永远好看，而接上真服务端、那个数第一次动起来时才发现整条路没接上。
+    //
+    // 输出 token 按中文约 0.6 token/字折算 —— 这只影响 mock 里的量级，
+    // 真实数字一律由供应商报。
+    final generatedMs = DateTime.now().difference(startedAt).inMilliseconds;
+    yield ChatUsageEvent(
+      model: 'qwen-flash',
+      inputTokens: 2410 + message.length,
+      outputTokens: (runes.length * 0.6).round().clamp(1, 1 << 20),
+      cacheReadInputTokens: 2048,
+      generationMs: generatedMs,
+    );
 
     yield ChatDoneEvent('epi_${DateTime.now().millisecondsSinceEpoch}');
   }

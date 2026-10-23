@@ -414,6 +414,69 @@ pub enum ChatEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<AttachmentRef>,
     },
+    /// **一次模型调用实际用了多少 token。**
+    ///
+    /// 一轮对话里有几次工具调用就有几条：每跑完一次模型发一条。客户端把它们
+    /// 累加，得到「这一轮花了多少」；拿最后一条的 `input_tokens` 除以模型
+    /// 的上下文窗口，得到「上下文填到哪儿了」。
+    ///
+    /// # 为什么现在才有
+    ///
+    /// 供应商的用量一直随流的**最后一帧**到达 agent（`ProviderUsage`），而
+    /// 那里此前只取走了里面的 `model` 名，token 数被丢掉了 —— 于是界面上
+    /// 一个数字都没有，用户只能看「正在生成」猜它花了多少。
+    ///
+    /// # 全部可选，缺了就是 `None`
+    ///
+    /// 不是每家供应商都报缓存（OpenAI 兼容端点报
+    /// `prompt_tokens_details.cached_tokens`，Anthropic 报
+    /// `cache_read_input_tokens`，也有的什么都不报）。**没报是 `None`，
+    /// 不是 0** —— 客户端据此整项不画，而不是画一句「缓存命中 0%」的假话。
+    ///
+    /// # 它**合上**它之前的那一段正文
+    ///
+    /// 上游一条 `Usage` 对应的正是它前面那批 `Delta`。客户端据此把「刚才那
+    /// 一段」的字数与 token 数对上，算出速度。
+    Usage {
+        /// 这一次实际是哪个模型答的。请求里可能是 `auto`，只有回来的这份
+        /// 是真的 —— 查上下文窗口大小要用它。
+        ///
+        /// `None` = 供应商没报（那时客户端不画上下文百分比，而不是按当前
+        /// 选中项猜一个）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// 总输入，**含**缓存读写的部分。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<i32>,
+        /// 输入里有多少直接来自缓存。是 `input_tokens` 的子集，不是另算的。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input_tokens: Option<i32>,
+        /// 输入里有多少写进了缓存，下次可命中。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_write_input_tokens: Option<i32>,
+        /// 这一段**生成**花掉的毫秒数：第一块内容到最后一块内容。
+        ///
+        /// 不含排队与首字节等待 —— 那些时间没有产出 token，算进分母会让
+        /// 速度变成一个与体感无关的数。但**含思考与工具调用**：供应商报的
+        /// 输出 token 也含它们，只量正文的话分子分母不是同一批 token。
+        ///
+        /// `0` = **量不出来**（整段只收到一块内容，或者什么都没吐）。
+        /// 客户端据此不画速度，而不是画一个无穷大。
+        #[serde(default)]
+        generation_ms: u64,
+        /// 这一次调用是**哪个子 agent** 发的。`None` = 主 agent 自己。
+        ///
+        /// # 为什么要标出来
+        ///
+        /// 子 agent 与主 agent 共用同一个模型客户端，它们烧的 token 也是真金
+        /// 白银，所以总数要算进去。但**上下文填充率不能算**：子 agent 的提示
+        /// 词是一小段任务描述，与这条会话的历史毫无关系 —— 混进去的话那个
+        /// 百分比会在一轮里来回跳，而它本来说的是「你这条对话还能装多少」。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<SubagentTag>,
+    },
     /// 出错。仍以 SSE 事件形式返回，避免流中断后客户端无从判断原因
     Error {
         message: String,

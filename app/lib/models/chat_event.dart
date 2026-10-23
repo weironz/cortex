@@ -56,6 +56,15 @@ sealed class ChatEvent {
           ),
         ),
       ),
+      'usage' => ChatUsageEvent(
+        model: asStringOrNull(json['model']),
+        inputTokens: tokenCount(json['input_tokens']),
+        outputTokens: tokenCount(json['output_tokens']),
+        cacheReadInputTokens: tokenCount(json['cache_read_input_tokens']),
+        cacheWriteInputTokens: tokenCount(json['cache_write_input_tokens']),
+        generationMs: asInt(json['generation_ms']),
+        subagent: SubagentTag.fromJson(json['subagent']),
+      ),
       'done' => ChatDoneEvent(
         asStringOrNull(json['episode_id']),
         models: asStringList(json['models']),
@@ -169,6 +178,75 @@ final class ChatToolEvent extends ChatEvent {
   /// 这次写入改了什么。只随**结果**那条事件到达 —— 调用那一刻还没执行，
   /// 也就还没有改动可言。
   final String? diff;
+}
+
+/// **一次模型调用实际用了多少 token。**
+///
+/// 一轮对话里有几次工具调用就有几条：每跑完一次模型发一条。[ChatDeltaEvent]
+/// 说的是「又多了几个字」，这条说的是「刚才那一段花了多少」—— 两者合起来
+/// 才有速度可言，所以它就是那一批增量的**收束**。
+///
+/// # 全部字段都可选，缺了就是 `null`
+///
+/// 不是每家供应商都报缓存（OpenAI 兼容端点报
+/// `prompt_tokens_details.cached_tokens`，Anthropic 报
+/// `cache_read_input_tokens`，也有的什么都不报）。**没报是 `null`，不是 0**
+/// —— 界面据此整项不画，而不是画一句「缓存命中 0%」的假话。
+///
+/// 老服务端根本不发这个 `type`，会落到 [ChatUnknownEvent] —— 那时界面上
+/// 一个数字都不出现，与这个能力上线之前一模一样。
+final class ChatUsageEvent extends ChatEvent {
+  const ChatUsageEvent({
+    this.model,
+    this.inputTokens,
+    this.outputTokens,
+    this.cacheReadInputTokens,
+    this.cacheWriteInputTokens,
+    this.generationMs = 0,
+    this.subagent,
+  });
+
+  /// 这一次实际是哪个模型答的。查上下文窗口大小要用它 —— 请求里可能是
+  /// `auto`，只有回来的这份是真的。
+  final String? model;
+
+  /// 总输入，**含**缓存的部分。
+  final int? inputTokens;
+  final int? outputTokens;
+
+  /// 输入里有多少直接来自缓存（[inputTokens] 的子集），多少写进了缓存。
+  final int? cacheReadInputTokens;
+  final int? cacheWriteInputTokens;
+
+  /// 这一段**生成**花了多少毫秒：第一块内容到最后一块内容。
+  ///
+  /// 含思考与工具调用（供应商报的输出 token 也含它们），不含排队与首字节
+  /// 等待。`0` = 量不出来（整段只收到一块内容，或者什么都没吐）。界面据此
+  /// 不画速度，而不是画一个无穷大。
+  final int generationMs;
+
+  /// 这一次是哪个子 agent 发的。`null` = 主 agent 自己。
+  ///
+  /// 总数要算上子 agent（那是真花掉的钱），但上下文填充率不能算 ——
+  /// 它的提示词是一小段任务描述，与这条会话的历史无关。
+  final SubagentTag? subagent;
+
+  /// 这一段的生成速度。
+  ///
+  /// `null` = 量不出来（见 [generationMs]）。
+  double? get tokensPerSecond {
+    final out = outputTokens;
+    if (out == null || out <= 0 || generationMs <= 0) return null;
+    return out * 1000 / generationMs;
+  }
+}
+
+/// 供应商报的 token 数。**负数与缺失都当「没报」**。
+///
+/// 有的端点拿 `-1` 表示「这个字段没有」，照收会画出一个负数的 token 计数。
+int? tokenCount(Object? raw) {
+  final n = asIntOrNull(raw);
+  return n == null || n < 0 ? null : n;
 }
 
 /// The turn is **suspended** until this is answered.

@@ -490,7 +490,8 @@ void main() {
       expect(
         successor.calls,
         isNotEmpty,
-        reason: 'controller 必须依赖 cortexApiProvider：换代即重建、重发 gallery。'
+        reason:
+            'controller 必须依赖 cortexApiProvider：换代即重建、重发 gallery。'
             '这个断言红着 = 图片页在 token 过期后会永久转圈',
       );
     });

@@ -177,6 +177,8 @@ void main() {
         // 它自己的契约由 stream_idle_test 守着
         case ChatHeartbeatEvent():
           break;
+        case ChatUsageEvent():
+          break;
         case ChatDoneEvent():
           break;
         case ChatErrorEvent(:final message):
@@ -192,6 +194,15 @@ void main() {
 
     final done = events.whereType<ChatDoneEvent>().single;
     expect(done.episodeId, isNotNull, reason: 'done 必须带回 episode id 供追溯');
+
+    // **用量必须真的到。** 输入框底下那条状态栏的每一个数字都读它 ——
+    // 服务端不报的话，界面上永远是空的，而这里不红就等于没人守这条契约。
+    // 一轮里至少有一次模型调用，也就至少该有一条。
+    expect(
+      events.whereType<ChatUsageEvent>(),
+      isNotEmpty,
+      reason: '服务端一条 usage 都没发：状态栏的速度、token、上下文全都画不出来',
+    );
 
     final rawToolEvents = events.whereType<ChatToolEvent>().length;
     expect(toolCalls, isNotEmpty, reason: '这个问题必须触发一次 write_file');

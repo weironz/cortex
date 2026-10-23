@@ -75,6 +75,77 @@ mod tests {
         );
     }
 
+    /// 用量事件：报了什么就带什么，**没报的键不要上线**。
+    ///
+    /// 线上少一个键 = 客户端解成「不知道」= 那一项不画。带上一个 0 就变成
+    /// 「缓存命中 0%」，而那是另一句话 —— 用户据此会以为缓存坏了。
+    #[test]
+    fn usage_only_carries_what_the_provider_reported() {
+        let ev = super::ChatEvent::Usage {
+            model: Some("qwen-flash".into()),
+            input_tokens: Some(1200),
+            output_tokens: Some(240),
+            cache_read_input_tokens: None,
+            cache_write_input_tokens: None,
+            generation_ms: 320,
+            subagent: None,
+        };
+        let json = serde_json::to_string(&ev).expect("用量事件可序列化");
+        assert!(json.contains(r#""type":"usage""#), "判别式写错了：{json}");
+        assert!(
+            !json.contains("cache_read_input_tokens") && !json.contains("subagent"),
+            "没报的字段不该上线 —— 带上一个 0 会被读成「供应商报了零缓存」，而它其实什么都没说：{json}"
+        );
+
+        // **Dart 客户端**看到不认识的 type 会落到 `ChatUnknownEvent`，安静
+        // 忽略；这里守的是反方向：新客户端读一条**字段最少**的用量事件解不炸。
+        //
+        // ⚠️ Rust CLI 没有这层兜底（`client.rs` 把解码失败当错误、整轮中断），
+        // 所以**命令行客户端与 agentd 必须同一版本线一起换** —— 这是加这个
+        // 变体时的一笔已知代价，不是这里守着的判据
+        let minimal: super::ChatEvent =
+            serde_json::from_str(r#"{"type":"usage","generation_ms":0}"#)
+                .expect("字段最少也要解得出来");
+        match minimal {
+            super::ChatEvent::Usage { input_tokens, .. } => {
+                assert_eq!(input_tokens, None, "缺席 = 供应商没报，不是 0");
+            }
+            other => panic!("解成了别的事件：{other:?}"),
+        }
+
+        // **键名逐个钉住。** Dart 那边按这些蛇形键读
+        // （`tokenCount(json['input_tokens'])` 之类）。改名不会让任何一侧
+        // 编译失败 —— Dart 读到的是 null，界面整项不画，看起来只是「这家
+        // 供应商没报数」。两个客户端各自绿着，而这条链早就断了
+        let full = serde_json::to_string(&super::ChatEvent::Usage {
+            model: Some("m".into()),
+            input_tokens: Some(1),
+            output_tokens: Some(2),
+            cache_read_input_tokens: Some(3),
+            cache_write_input_tokens: Some(4),
+            generation_ms: 5,
+            subagent: Some(super::SubagentTag {
+                index: 1,
+                task: "t".into(),
+            }),
+        })
+        .expect("用量事件可序列化");
+        for key in [
+            r#""model""#,
+            r#""input_tokens""#,
+            r#""output_tokens""#,
+            r#""cache_read_input_tokens""#,
+            r#""cache_write_input_tokens""#,
+            r#""generation_ms""#,
+            r#""subagent""#,
+        ] {
+            assert!(
+                full.contains(key),
+                "线上少了 {key} 这个键 —— Dart 读它，读到 null 就整项不画：{full}"
+            );
+        }
+    }
+
     /// **三态的每个字段都要用 `explicit_option`，一个都不能漏。**
     ///
     /// serde 默认把「字段为 null」与「字段没出现」都解成 `None`，而这三个字段

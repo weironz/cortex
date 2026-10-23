@@ -20,6 +20,7 @@ import 'assistant_chip.dart';
 import 'model_chip.dart';
 import 'message_bubble.dart';
 import 'permission_mode_chip.dart';
+import 'usage_status_bar.dart';
 import '../../../design_system/design_system.dart';
 
 /// Input box.
@@ -618,13 +619,33 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                         // 占位是一份**真的 widget**，读屏会念两遍。
                         // 只在**还没开始聊**的那一屏说 —— 常驻的无动作
                         // 文案会训练人忽略那一整片区域
-                        if (widget.centred && !narrow)
-                          Expanded(
-                            child: Text(
-                              'Cortex 会把这轮对话归档，之后还能搜得到。',
-                              textAlign: TextAlign.center,
-                              style: theme.textTheme.labelSmall,
-                            ),
+                        //
+                        // **居中形态下它照旧占满中间**：白纸状态没有状态栏
+                        // （还没开口，任何数字都是空的），那句话继续独占；
+                        // 开口之后换到钉底形态，这里就让位给右端的状态栏
+                        Expanded(
+                          child: widget.centred && !narrow
+                              ? Text(
+                                  'Cortex 会把这轮对话归档，之后还能搜得到。',
+                                  textAlign: TextAlign.center,
+                                  style: theme.textTheme.labelSmall,
+                                )
+                              : const SizedBox.shrink(),
+                        ),
+                        // 这一轮花了多少 —— 贴在右端，与左边那排「发之前要
+                        // 定的事」在同一条基线上：它们都是这一屏的**元信息**，
+                        // 单独占一行会把输入区顶高一截而什么都不多给。
+                        //
+                        // ⚠️ **白纸上不画**：还没开口时任何数字都是空的，
+                        // 而居中那句归档提示与它**共用中间那段** —— 它俩同时
+                        // 在，窄一点的窗口上会把 chip 行顶溢出（黄条）。
+                        // 嘴一开（会话建出来）就换到钉底形态，从那时起常驻
+                        if (!widget.centred)
+                          UsageStatusBar(
+                            sessionId: sessionId,
+                            // **量了再画**：Row 不截断溢出，画多了是黄条。
+                            // 行宽喂进去，由它按「chips 之外还剩多少」收档
+                            availableWidth: cons.maxWidth,
                           ),
                       ],
                     );

@@ -1049,7 +1049,7 @@ class _SessionTileState extends State<_SessionTile> {
                   decoration: BoxDecoration(
                     color: scheme.onSurface.withValues(alpha: 0.55),
                     // 一条 3px 宽的竖线，半宽 1.5 —— 取最小的 radiusSm(6)
-                    // 会把它变成一颗药丸。这里按短边取半宽
+                    // 会把它变成一颗药丸。这里不走圆角阶，按短边取半宽
                     borderRadius: BorderRadius.circular(1.5),
                   ),
                 ),

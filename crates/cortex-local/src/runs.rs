@@ -88,10 +88,15 @@ impl Run {
     /// 放开的话，一个正在 attach 的订阅者可能拿到一份还没写进这条事件的
     /// 快照，同时又错过这次广播 —— 那条事件就凭空消失了。
     async fn record(&self, ev: &ChatEvent) {
+        // ⚠️ **锁要罩住两步，不只是写缓冲那一步。** 放开的话，一个正好在
+        // 「缓冲写完、广播还没发」之间 `attach` 的订阅者会拿到**含这条事件
+        // 的快照**，然后**再收到这次广播** —— 同一条事件到两遍。Delta 是
+        // 屏幕上重复一段正文，Usage 是 token 数翻倍（而它看起来只是
+        // 「这一轮花得有点多」）。窗口很窄，但不是不存在
+        let mut buf = self.replay.lock().await;
         // 确认是一次性凭据，不进缓冲（见模块文档），但**要广播** ——
         // 正连着的客户端就靠它弹确认框
         if !matches!(ev, ChatEvent::Confirm { .. }) {
-            let mut buf = self.replay.lock().await;
             match (buf.last_mut(), ev) {
                 // 相邻的 Delta 并成一条
                 (Some(ChatEvent::Delta { text: acc }), ChatEvent::Delta { text }) => {
@@ -100,8 +105,10 @@ impl Run {
                 _ => buf.push(ev.clone()),
             }
         }
-        // 没有订阅者时 `send` 回 Err，那是正常的（用户关掉了页面）
+        // 没有订阅者时 `send` 回 Err，那是正常的（用户关掉了页面）。
+        // `broadcast::Sender::send` 是同步的，锁里调它不产生 await 点
         self.tx.send(ev.clone()).ok();
+        drop(buf);
     }
 
     /// 快照 + 订阅，**在同一把锁下**。见 [`Self::record`]。

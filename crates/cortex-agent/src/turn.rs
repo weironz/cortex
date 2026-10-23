@@ -19,6 +19,8 @@
 //! 单价逐轮上涨。没有上限的 agent 循环能在几分钟内烧掉一天的预算。
 //! [`DEFAULT_MAX_ROUNDS`] 把最坏情况钉死在 N+1 次模型调用。
 
+use std::time::Instant;
+
 use cortex_core::{CortexError, Result};
 use cortex_llm::{LlmClient, Message, MessageContent, Tool};
 use futures::StreamExt as _;
@@ -99,6 +101,92 @@ pub enum AgentEvent {
         /// 已经付过代价了。见 [`crate::tools::clip_for_ui`]。
         output: Option<String>,
     },
+    /// 一次模型调用实际花了多少 token。
+    ///
+    /// # 为什么它必须是事件，而不是返回值
+    ///
+    /// 用量随流的**最后一帧**到达（[`cortex_llm::ProviderUsage`]），而这一层
+    /// 只把 `TurnOutcome` 在整轮结束时交出去 —— 一轮对话有几次工具调用就有
+    /// 几次模型调用，只在最后交一次的话，界面上「上下文填到哪儿了」要等到
+    /// 整轮跑完才动一下。发成事件，每跑完一次模型就来一条。
+    ///
+    /// # 与 [`AgentEvent::Delta`] 的关系
+    ///
+    /// 一条 `Usage` **合上**它之前的那一段正文：客户端据此知道「刚才那一段」
+    /// 花了多少 token、用了多久，从而算出速度；下一个 delta 开始新的一段。
+    Usage(RoundUsage),
+}
+
+/// 一次模型调用的真实用量。
+///
+/// **每一项都是供应商报的**，这里不估任何数：供应商没报的字段是 `None`，
+/// 而不是 0 —— 客户端据此不画那一项，而不是画一个「缓存命中 0%」的假话。
+#[derive(Debug, Clone)]
+pub struct RoundUsage {
+    /// 这一次实际是哪个模型答的。请求里可能是 `auto`，只有回来的这份是真的。
+    pub model: Option<String>,
+    /// 总输入，**含**缓存读写的部分（见 `cortex_llm::Usage` 的约定）。
+    pub input_tokens: Option<i32>,
+    pub output_tokens: Option<i32>,
+    pub cache_read_input_tokens: Option<i32>,
+    pub cache_write_input_tokens: Option<i32>,
+    /// 这一段**生成**花了多少毫秒：开始产出内容到最后一块内容。
+    ///
+    /// # 为什么不是整段流的耗时
+    ///
+    /// 整段里含着排队与首字节等待（请求发出去到对端开始应答）—— 那段
+    /// 时间没有产出 token，算进分母会把速度压成一个与体感无关的数。
+    ///
+    /// # 为什么含思考与工具调用
+    ///
+    /// 供应商报的输出 token **包含它们**（OpenAI 的 `completion_tokens`
+    /// 含 reasoning token，Anthropic 的 `output_tokens` 含 thinking）。
+    /// 只量正文字块的话分子分母不是同一批 token，速度会系统性偏高 ——
+    /// 先想十秒再吐两秒的模型，能算出一个高好几倍的数。
+    ///
+    /// `0` = **量不出来**（整段只收到一块内容，或什么都没吐），不是
+    /// 「瞬间完成」。客户端据此不画速度，而不是画一个无穷大。
+    pub generation_ms: u64,
+}
+
+impl RoundUsage {
+    /// 供应商一个 token 数都没报 = 没什么可说的。
+    ///
+    /// 有些端点（自建代理、部分兼容层）压根不返回 usage。那时发一条全是
+    /// `None` 的事件，客户端只能画出几个「—」，不如不发。
+    fn is_empty(&self) -> bool {
+        self.input_tokens.is_none()
+            && self.output_tokens.is_none()
+            && self.cache_read_input_tokens.is_none()
+            && self.cache_write_input_tokens.is_none()
+    }
+}
+
+/// 把供应商报的用量与两个时间戳装成一条事件。
+///
+/// 拎成纯函数是为了可测：真正产生它的是 [`Turn::one_round`]，而那里要一个
+/// 活的 LLM —— 「只有一个增量时耗时应为 0」这类判据在那种测试里钉不住。
+fn round_usage(
+    usage: cortex_llm::Usage,
+    model: Option<String>,
+    first_output: Option<Instant>,
+    last_output: Option<Instant>,
+) -> RoundUsage {
+    RoundUsage {
+        model,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_write_input_tokens: usage.cache_write_input_tokens,
+        generation_ms: match (first_output, last_output) {
+            (Some(first), Some(last)) => {
+                u64::try_from(last.duration_since(first).as_millis()).unwrap_or(u64::MAX)
+            }
+            // 一块内容都没收到（供应商什么都没吐，或者这一轮压根没开始）。
+            // **不是 0 毫秒完成**，是量不出来，所以客户端不画速度
+            _ => 0,
+        },
+    }
 }
 
 // ─────────────────────────── 结果 ───────────────────────────
@@ -534,6 +622,11 @@ impl Turn {
         let mut stream = llm.stream(system, messages, tools).await?;
 
         let mut round = Round::default();
+        // 生成耗时的两端。**从开始产出任何内容到最后一个增量**，理由见
+        // [`RoundUsage::generation_ms`] —— 排队与首字节等待不是生成，
+        // 但思考与工具调用是（它们也计进供应商报的输出 token）
+        let mut first_output: Option<Instant> = None;
+        let mut last_output: Option<Instant> = None;
 
         while let Some(item) = stream.next().await {
             let (msg, usage) = item?;
@@ -547,10 +640,25 @@ impl Turn {
             // 好几条、大多数没有 usage —— 取最后一个非空的
             if let Some(u) = usage {
                 round.model = Some(u.model);
+                // 铺开存着：同一个 `Usage` 另外还要给客户端算速度与上下文，
+                // 而 `ProviderUsage` 的 `stats` 全仓库没人填（见
+                // `cortex-providers` 的 `with_stats`），能用的只有这几个数
+                round.usage = Some(u.usage);
             }
             let Some(msg) = msg else { continue };
 
             for content in msg.content {
+                // 时间戳在这里取，**对每一块内容**，不只对正文。
+                //
+                // 供应商报的 `output_tokens` 含思考与工具调用的 token
+                // （OpenAI 的 `completion_tokens` 含 reasoning，Anthropic 的
+                // `output_tokens` 含 thinking）。只在正文字块上打点的话，
+                // 分子里有那些 token、分母里没有对应的时间 —— 一个先想十秒
+                // 再吐两秒的模型会算出一个高好几倍的速度，而那个数恰恰是
+                // 用户拿来判断「它快不快」的
+                let now = Instant::now();
+                first_output.get_or_insert(now);
+                last_output = Some(now);
                 match content {
                     MessageContent::Text(t) => {
                         if t.text.is_empty() {
@@ -600,6 +708,16 @@ impl Turn {
             ));
         }
 
+        // 用量在**这一段跑完**才发得出来：供应商把它塞在流的最后一帧，
+        // 中途没有数可报。客户端收到它就合上刚才那一段正文。
+        if let Some(usage) = round.usage {
+            let event = round_usage(usage, round.model.clone(), first_output, last_output);
+            if !event.is_empty() {
+                // 发不出去 = 客户端已经走了，而这一轮正在收尾，不值得中断
+                let _ = events.send(AgentEvent::Usage(event)).await;
+            }
+        }
+
         Ok(round)
     }
 }
@@ -619,6 +737,8 @@ struct Round {
     /// `None` = 它没报。**不猜** —— 上游要么如实带出去，
     /// 要么让界面什么都不画。
     model: Option<String>,
+    /// 供应商报的 token 数。`None` = 它没报（不是 0）。
+    usage: Option<cortex_llm::Usage>,
 }
 
 /// 把工具结果封成 MCP 的 `CallToolResult`。
@@ -898,6 +1018,76 @@ mod model_trail_tests {
             got,
             vec!["a"],
             "中间那次没报，不该把它当成「换过模型」而让 a 重复一遍"
+        );
+    }
+}
+
+#[cfg(test)]
+mod usage_event_tests {
+    use super::round_usage;
+    use std::time::{Duration, Instant};
+
+    fn reported() -> cortex_llm::Usage {
+        cortex_llm::Usage::new(Some(1200), Some(240), None).with_cache_tokens(Some(1024), None)
+    }
+
+    /// 速度的分母是**第一块内容到最后一块内容之间**，不是整段流的耗时。
+    ///
+    /// 拿整段来算的话，排队与首字节等待也进了分母，出来的数比体感慢
+    /// 一大截 —— 而用户正是拿这个数判断「它快不快」。
+    #[test]
+    fn 速度的分母只算生成那一段() {
+        let first = Instant::now();
+        let last = first + Duration::from_millis(240);
+        let ev = round_usage(reported(), Some("m".into()), Some(first), Some(last));
+        assert_eq!(ev.generation_ms, 240, "两个增量相隔多久，生成耗时就是多久");
+    }
+
+    /// **只有一块内容时是「量不出来」，不是「瞬间完成」。**
+    ///
+    /// 那一刻首尾是同一个时间点，`generation_ms` 只能是 0；客户端据此
+    /// 不画速度。若这里塞一个编出来的数（比如按字数反推），界面上就会
+    /// 出现一个凭空来的 tok/s。
+    #[test]
+    fn 量不出耗时就是零() {
+        let at = Instant::now();
+        let ev = round_usage(reported(), Some("m".into()), Some(at), Some(at));
+        assert_eq!(ev.generation_ms, 0, "首尾同一刻 = 没有生成区间可言");
+
+        let none = round_usage(reported(), Some("m".into()), None, None);
+        assert_eq!(
+            none.generation_ms, 0,
+            "一块内容都没收到（供应商什么都没吐）同样是量不出来"
+        );
+    }
+
+    /// 供应商没报的字段是 `None`，**不是 0**。
+    ///
+    /// 写成 0 的话，界面上会画出「缓存命中 0%」—— 那读起来是「缓存一次都
+    /// 没命中」，而事实是「这家供应商根本不说」。同一个 0，两种完全不同的
+    /// 事实，用户分不出来。
+    #[test]
+    fn 没报的缓存字段不能写成零() {
+        let ev = round_usage(reported(), Some("m".into()), None, None);
+        assert_eq!(ev.cache_read_input_tokens, Some(1024));
+        assert_eq!(
+            ev.cache_write_input_tokens, None,
+            "只报了读、没报写，写的那个必须是 None"
+        );
+        assert_eq!(ev.input_tokens, Some(1200));
+        assert_eq!(ev.output_tokens, Some(240));
+    }
+
+    /// 一个 token 数都没有 = 这条事件不必发。
+    ///
+    /// 发了的话，界面上是几个「—」。那既不比不画多给信息，还占掉一行。
+    #[test]
+    fn 一个数都没报就不发() {
+        let empty = round_usage(cortex_llm::Usage::default(), None, None, None);
+        assert!(empty.is_empty(), "全空的事件发出去只会画出一排「—」");
+        assert!(
+            !round_usage(reported(), None, None, None).is_empty(),
+            "报了数就得发，哪怕模型名没报"
         );
     }
 }

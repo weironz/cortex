@@ -2,6 +2,7 @@ import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../models/tool_call.dart';
 import '../models/turn_block.dart';
+import '../models/turn_usage.dart';
 
 /// How many episodes one `GET /sessions/{id}` page holds.
 ///
@@ -32,12 +33,29 @@ class StreamingTurn {
     this.blocks = const [],
     this.awaitingFirstToken = true,
     this.queuedAhead,
+    this.usage = const TurnUsage(),
+    this.roundBaseChars = 0,
+    this.roundStartedAt,
   });
 
   final String messageId;
   final String sessionId;
   final DateTime startedAt;
   final String text;
+
+  /// 这一轮的用量账本。每收一条 `usage` 事件长一点。
+  final TurnUsage usage;
+
+  /// [text] 里有多少字是**此前几段**的。当前这一段的字数 = `text.length` 减它。
+  ///
+  /// 一条 `usage` 事件合上一段正文，这个基准跟着挪到那一段的末尾。
+  final int roundBaseChars;
+
+  /// 当前这一段第一个增量到达的时刻。`null` = 这一段还没开始吐字。
+  ///
+  /// 界面用它把「已经吐了多少字」除以「过了多久」得到实时速度 ——
+  /// 供应商要到这一**段**结束才报 token 数，那之前只能按字数推。
+  final DateTime? roundStartedAt;
 
   /// Tools the agent invoked (from `tool` events).
   final List<ToolCall> toolCalls;
@@ -66,6 +84,10 @@ class StreamingTurn {
     // 这一个要能置回 null（开跑了就不再排队），所以走哨兵而不是 `int?` ——
     // `int?` 的话「不改」和「清掉」在签名上是同一件事
     Object? queuedAhead = _sentinel,
+    TurnUsage? usage,
+    int? roundBaseChars,
+    // 同上：一段结束要把它置回 null（这一段不在了）
+    Object? roundStartedAt = _sentinel,
   }) => StreamingTurn(
     messageId: messageId,
     sessionId: sessionId,
@@ -77,6 +99,11 @@ class StreamingTurn {
     queuedAhead: queuedAhead == _sentinel
         ? this.queuedAhead
         : queuedAhead as int?,
+    usage: usage ?? this.usage,
+    roundBaseChars: roundBaseChars ?? this.roundBaseChars,
+    roundStartedAt: roundStartedAt == _sentinel
+        ? this.roundStartedAt
+        : roundStartedAt as DateTime?,
   );
 
   static const Object _sentinel = Object();
@@ -188,6 +215,7 @@ class ChatState {
     this.showArchived = false,
     this.unfinished = const {},
     this.finished = const {},
+    this.turnUsages = const {},
     this.pendingNewChat,
   });
 
@@ -264,6 +292,19 @@ class ChatState {
   /// 打开那个会话就清掉：它的全部意思是「你还没看」。
   final Set<String> finished;
 
+  /// **上一条跑完的轮次**的用量，按会话分。
+  ///
+  /// # 为什么不挂在消息上
+  ///
+  /// 用量只在**这一轮真的跑过**之后才知道，而历史消息是从服务端重放的
+  /// —— 那边的 episode 里没有这一列（它在记忆服务里，见 CLAUDE.md）。
+  /// 挂到 [ChatMessage] 上的话，重开一条旧会话会得到一堆「用量为空」的
+  /// 消息，读起来像「那一轮没花 token」。
+  ///
+  /// 它是**运行期**的记忆：重启应用就没了，而那时界面上也确实不该再显示
+  /// 上一轮的数字 —— 上下文填充率早就不成立了。没有它就不画。
+  final Map<String, TurnUsage> turnUsages;
+
   static const _emptyTranscript = <ChatMessage>[];
 
   Transcript? get activeTranscriptState => transcripts[activeSessionId];
@@ -310,6 +351,7 @@ class ChatState {
     bool? showArchived,
     Set<String>? unfinished,
     Set<String>? finished,
+    Map<String, TurnUsage>? turnUsages,
     Object? pendingNewChat = _sentinel,
   }) => ChatState(
     sessions: sessions ?? this.sessions,
@@ -326,6 +368,7 @@ class ChatState {
     showArchived: showArchived ?? this.showArchived,
     unfinished: unfinished ?? this.unfinished,
     finished: finished ?? this.finished,
+    turnUsages: turnUsages ?? this.turnUsages,
     pendingNewChat: pendingNewChat == _sentinel
         ? this.pendingNewChat
         : pendingNewChat as PendingNewChat?,

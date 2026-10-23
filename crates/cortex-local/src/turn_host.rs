@@ -8,7 +8,7 @@ use cortex_agent::{Approval, ConfirmRequest, ToolHost, Turn};
 use cortex_proto::dto::ChatEvent;
 
 use crate::turn::Todos;
-use crate::turn_events::{subagent_marker, subagent_tool_line};
+use crate::turn_events::{subagent_event, subagent_marker};
 use crate::turn_prompt::render_page;
 /// agent 循环要的宿主能力。
 /// 这一次画图，尺寸听谁的、画几张。
@@ -260,7 +260,7 @@ impl ToolHost for LocalHost {
             let sink = Arc::clone(&self.events);
             async move {
                 let (tx, mut rx) = tokio::sync::mpsc::channel::<cortex_agent::AgentEvent>(64);
-                // **只把工具行送上界面，delta 丢掉。**
+                // **只把工具行与用量送上界面，delta 丢掉。**
                 //
                 // 设计定案见 `docs/controller-worker.md`「子 agent」一节：
                 // 四路并行吐字进同一条流，要么混成谁也读不懂的一团（原来
@@ -272,6 +272,10 @@ impl ToolHost for LocalHost {
                 // 工具行不一样：它本来就是**一次一条**的，四个子 agent 加
                 // 起来也就是几十条，而它恰恰是用户想看的那一半（「它到底
                 // 在查什么」），delta 反而不是。
+                //
+                // 用量也送（带着 `subagent` 标记）：子 agent 烧的 token 是
+                // 真的，不算进去就是少算一笔账。客户端拿它累加总数，但不拿
+                // 它算上下文填充率 —— 那是主 agent 这条会话的事。
                 let tag = cortex_proto::dto::SubagentTag {
                     index: u32::try_from(i + 1).unwrap_or(u32::MAX),
                     task: task.clone(),
@@ -281,7 +285,7 @@ impl ToolHost for LocalHost {
                     let tag = tag.clone();
                     async move {
                         while let Some(ev) = rx.recv().await {
-                            if let Some(out) = subagent_tool_line(&ev, &tag) {
+                            if let Some(out) = subagent_event(&ev, &tag) {
                                 sink.send(out).await;
                             }
                         }

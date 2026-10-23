@@ -227,7 +227,8 @@ void main() {
     expect(
       successor.calls,
       isNotEmpty,
-      reason: '旧判据只听 baseUrl/useMock，续期换代（baseUrl 不变、实例已换）'
+      reason:
+          '旧判据只听 baseUrl/useMock，续期换代（baseUrl 不变、实例已换）'
           '落在盲区里。这个断言红着 = 资料库在 token 过期后会永久转圈',
     );
   });

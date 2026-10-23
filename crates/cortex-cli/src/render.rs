@@ -36,6 +36,20 @@ pub fn prompt(color: bool) -> String {
     wrap("›", &format!("{BOLD}{CYAN}"), color)
 }
 
+/// 把 token 数压成 `12.3k` / `1.2M`。
+///
+/// 七位数原样打出来读不出量级，而「这一轮花了多少」恰恰要一眼看出来。
+#[must_use]
+pub fn compact_tokens(n: i64) -> String {
+    if n.abs() < 1_000 {
+        n.to_string()
+    } else if n.abs() < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    }
+}
+
 #[must_use]
 pub fn status_badge(status: &str, color: bool) -> String {
     if status == "ok" {
