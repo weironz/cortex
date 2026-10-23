@@ -88,3 +88,6 @@ app/.idea/
 
 # 一次性的补丁脚本（写完就删，别进历史）
 .patch_*.py
+
+# Chrome 调试实例的临时 profile（本地验证用，不进仓库）
+.tmp-chrome-profile/
