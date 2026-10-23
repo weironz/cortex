@@ -88,7 +88,6 @@ class _UsageStatusBarState extends ConsumerState<UsageStatusBar> {
     final last = ref.watch(
       chatControllerProvider.select((s) => s.turnUsages[sessionId]),
     );
-    final catalog = ref.watch(modelCatalogProvider).value;
 
     _keepTicking(streaming: turn != null);
 
@@ -98,6 +97,11 @@ class _UsageStatusBarState extends ConsumerState<UsageStatusBar> {
     // 一条数都还没有（本次运行的第一次对话），但这一轮**已经在跑了**：
     // 摆一个走秒的表。空白五秒再冒出一行数字，读起来像「刚才是不是卡了」
     if (known == null && turn == null) return const SizedBox.shrink();
+    // 模型目录**等到要算上下文百分比才去拿**（下面那行 watch 的就是它）：
+    // 一条用量都还没到时目录是白拿的，而它是 autoDispose 的
+    // FutureProvider —— 没人 watch 它就真的不发起请求、不排重试定时器。
+    // 先 watch 的话，一个只为测输入框焦点环的 widget 测试会在销毁时
+    // 留下一个还没到期重试的 Timer（`A Timer is still pending`）
     final usage = known ?? const TurnUsage();
 
     final theme = Theme.of(context);
@@ -111,10 +115,18 @@ class _UsageStatusBarState extends ConsumerState<UsageStatusBar> {
         ? scheme.onSurfaceVariant
         : theme.cortex.foregroundTertiary;
 
-    final window = usage.lastModel == null
+    // 上下文百分比要查模型窗口，才去拿目录（见上面那段「为什么等到这儿」）。
+    // 没有模型名的账本（供应商没报、或用量为空）连这一步都跳过
+    final percent = usage.lastModel == null
         ? null
-        : catalog?.byId(usage.lastModel!)?.context;
-    final percent = contextPercent(usage.lastInput, window);
+        : contextPercent(
+            usage.lastInput,
+            ref
+                .watch(modelCatalogProvider)
+                .value
+                ?.byId(usage.lastModel!)
+                ?.context,
+          );
 
     final items = <Widget>[];
 
@@ -219,7 +231,15 @@ class _UsageStatusBarState extends ConsumerState<UsageStatusBar> {
       );
     }
 
+    // 窗口那一栏在 tooltip 里再说一遍。**有窗口才说**：目录里查不到这个
+    // 模型（新发布的型号、自定义端点）时 percent 本来就是 null，这里不画，
+    // tooltip 也不该引用一个不存在的东西
     if (percent != null) {
+      final window = ref
+          .watch(
+            modelCatalogProvider.select((c) => c.value?.byId(usage.lastModel!)),
+          )
+          ?.context;
       add(
         _stat(
           context,
