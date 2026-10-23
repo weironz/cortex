@@ -12,10 +12,13 @@
 /// 的那一版只有鼠标可达，而一个桌面应用里「Tab 走不到」等于半个功能。
 library;
 
+import 'package:cortex_app/api/mock_cortex_api.dart';
+import 'package:cortex_app/core/app_config.dart';
 import 'package:cortex_app/design_system/design_system.dart';
 import 'package:cortex_app/features/chat/widgets/message_bubble.dart';
 import 'package:cortex_app/features/chat/widgets/message_composer.dart';
 import 'package:cortex_app/models/chat_message.dart';
+import 'package:cortex_app/state/app_providers.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -30,13 +33,40 @@ ChatMessage _user(String text) => ChatMessage(
 );
 
 Future<void> _pump(WidgetTester tester, Widget child) => tester.pumpWidget(
-  ProviderScope(
+  // ⚠️ 不用裸 ProviderScope：`MessageComposer` 里的状态栏 watch 了
+  // chatControllerProvider，而它一活就把真的 auth bootstrap 拉起来 ——
+  // rememberedTokenProvider 留一个 3 秒 timer，CI 上稳定红在
+  // 「A Timer is still pending」（本机因 secure storage 插件缺失时序不同，
+  // 恰好绿 —— 别信本机）。与 send_rejection_test 同款：mock 配置的容器，
+  // bootstrap 在 mock 那条短路，不碰凭据库。
+  UncontrolledProviderScope(
+    container: _container(),
     child: MaterialApp(
       theme: CortexTheme.dark(),
       home: Scaffold(body: SingleChildScrollView(child: child)),
     ),
   ),
 );
+
+ProviderContainer _container() {
+  final c = ProviderContainer(
+    overrides: [
+      appConfigProvider.overrideWith(_MockConfig.new),
+      // **instant：** 不关掉 mock 的假延迟的话，ChatController 的 `_reload`
+      // 会往 `sessionDetail` 排一个 309ms 的 timer —— 树销毁时它还没到期，
+      // 同样是「A Timer is still pending」。这里根本不关心会话数据长什么样
+      cortexApiProvider.overrideWithValue(MockCortexApi(instant: true)),
+    ],
+  );
+  addTearDown(c.dispose);
+  return c;
+}
+
+class _MockConfig extends AppConfigNotifier {
+  @override
+  AppConfig build() =>
+      const AppConfig(useMock: true, baseUrl: 'http://127.0.0.1:8080');
+}
 
 /// 把鼠标挪到某个部件上（桌面端悬停的唯一可靠模拟方式）。
 Future<TestGesture> _hover(WidgetTester tester, Finder target) async {
