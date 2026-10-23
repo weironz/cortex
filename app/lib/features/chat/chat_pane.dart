@@ -318,19 +318,32 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         // 话的会话。它们在用户眼里本来就是同一件事
         if (empty)
           Expanded(
-            child: SingleChildScrollView(
-              child: Center(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 32),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const ConversationHero(),
-                      const SizedBox(height: 22),
-                      composer(centred: true),
-                      const SizedBox(height: 18),
-                      const ConversationPrompts(),
-                    ],
+            // `SingleChildScrollView` 给子项的是**无界高度**约束，`Center`
+            // 在无界约束下会收缩成子项大小 —— 于是「站在页面中央」从来没
+            // 真的发生过：内容挤在上三分之一，底下空出半屏（900px 视口里
+            // 实测顶距 80 / 底距 425）。`ConstrainedBox(minHeight)` 先把
+            // 高度垫到视口那么高，Center 才有可居中的空间；内容真超出
+            // 视口时 minHeight 不起作用，照常滚动。
+            child: LayoutBuilder(
+              builder: (context, constraints) => SingleChildScrollView(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minHeight: constraints.maxHeight,
+                  ),
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 32),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const ConversationHero(),
+                          const SizedBox(height: 22),
+                          composer(centred: true),
+                          const SizedBox(height: 18),
+                          const ConversationPrompts(),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ),
