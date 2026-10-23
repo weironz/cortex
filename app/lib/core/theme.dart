@@ -143,26 +143,27 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     ),
   ];
 
-  /// 圆角阶 —— 2026-08-24 起对齐设计稿的五档体系。
+  /// 圆角阶 —— 2026-10-23 重设计，走 Linear / Raycast 那一路。
   ///
-  /// 主干五档：**窗口 14 / 卡片 13 / 输入框 18 / 行 9 / 胶囊 999**。
-  /// 成体系的意义是不再逐个组件拍脑袋 —— 每一处圆角都答得出
-  /// 「它是五档里的哪一档」。小构件（徽标 7、气泡 11）是主干外的两个
-  /// 辅助档，设计稿里各出现 20/18 次，不是漏网之鱼。
+  /// 主干五档：**窗口 12 / 卡片 12 / 输入框 10 / 行 8 / 胶囊 999**。
+  /// 上一版输入框 18 比对话框还圆 —— 胶囊感是 2021 前后的消费级语言；
+  /// 工具类产品的利落感来自**收窄的圆角**，输入框从 18 收到 10 是这轮
+  /// 观感变化最大的单一改动。成体系的意义不变：每一处圆角都答得出
+  /// 「它是五档里的哪一档」。小构件（徽标 6、气泡 10）是主干外的辅助档。
   ///
   /// 旧的 Sm/Md/Lg/Xl/2xl 命名保留（消费面 40+ 处），**值重定**到新体系：
   /// 改名的收益是零，改值让所有旧调用点一次到位。
-  static const double radiusSm = 7; // 徽标、小按钮（辅助档）
-  static const double radiusMd = 9; // 行、菜单项（=radiusRow）
-  static const double radiusLg = 11; // 气泡、主按钮（辅助档）
-  static const double radiusXl = 13; // 卡片、面板（=radiusCard）
-  static const double radius2xl = 14; // 对话框 = 浮起的窗口（=radiusWindow）
+  static const double radiusSm = 6; // 徽标、小按钮（辅助档）
+  static const double radiusMd = 8; // 行、菜单项（=radiusRow）
+  static const double radiusLg = 10; // 气泡、主按钮（辅助档）
+  static const double radiusXl = 12; // 卡片、面板（=radiusCard）
+  static const double radius2xl = 12; // 对话框 = 浮起的窗口（=radiusWindow）
 
   /// 语义别名 —— 新代码写这几个，读的人不用背数值表。
-  static const double radiusWindow = 14;
-  static const double radiusCard = 13;
-  static const double radiusInput = 18; // 输入框刻意比对话框还圆：胶囊感
-  static const double radiusRow = 9;
+  static const double radiusWindow = 12;
+  static const double radiusCard = 12;
+  static const double radiusInput = 10;
+  static const double radiusRow = 8;
   static const double radiusPill = 999;
 
   @override
@@ -302,25 +303,31 @@ abstract final class CortexTheme {
     onError: Colors.white,
     errorContainer: Color(0xFFF9DEDC),
     onErrorContainer: Color(0xFF410E0B),
-    // ── 中性阶：冷调（设计稿 LIGHT）──
+    // ── 中性阶：锌灰（2026-10-23 重设计，Linear 一路）──
     //
-    // fg #17171A / fg2 #5E5E68 / fg3 见 CortexTokens.foregroundTertiary。
-    // 整套灰往品牌靛蓝的方向统一偏 —— 偏得成体系就不是「没调准」
-    surface: Colors.white,
-    onSurface: Color(0xFF17171A),
-    onSurfaceVariant: Color(0xFF5E5E68),
-    // 边框用**透明度**：sep 7% 黑、sepStrong 11%。
-    // 同一个值在白底、卡片、侧栏上都成立
-    outline: Color(0x1C17171A),
-    outlineVariant: Color(0x1217171A),
-    // fill 阶：#F4F4F7（输入框、chip 底）→ #EDEDF1（按下、第二档）
+    // 上一版整套灰往品牌靛蓝的方向偏（fg #17171A、sb #EFEEF3 都带紫调）。
+    // 这轮去掉色偏：「偏色的灰」与发丝线的语言打架 —— 发丝线要的是
+    // **绝对中性**的灰，任何色偏都会让线看起来脏。画布从纯白降到
+    // #FAFAFA：大面积纯白刺眼，降一档既柔了底色，又保住「白卡片浮在
+    // 灰画布上」的层级位置。文字压到近黑 #09090B —— 上一版与次级灰
+    // 拉不开，「清晰」的第一来源就是主文字够黑。
+    surface: Color(0xFFFAFAFA),
+    onSurface: Color(0xFF09090B),
+    // #545454 严格零色偏（zinc-600 的 #52525B 自带 9 的蓝偏，超发丝线
+    // 的中性预算）：次级文字不需要任何色温
+    onSurfaceVariant: Color(0xFF545454),
+    // 发丝线用**实色**（zinc 系）：透明度造出来的线在不同表面上
+    // 深浅不一，实色线在每个表面上都是同一条线
+    outline: Color(0xFFD4D4D8),
+    outlineVariant: Color(0xFFE8E8EA),
+    // fill 阶：#F4F4F5（输入框、chip 底）→ #EBEBED（按下、第二档）
     surfaceContainerLowest: Colors.white,
-    surfaceContainerLow: Color(0xFFF9F9FB),
-    surfaceContainer: Color(0xFFF6F6F9),
-    surfaceContainerHigh: Color(0xFFF4F4F7),
-    surfaceContainerHighest: Color(0xFFEDEDF1),
-    inverseSurface: Color(0xFF26262C),
-    onInverseSurface: Color(0xFFF9F9FB),
+    surfaceContainerLow: Color(0xFFFCFCFD),
+    surfaceContainer: Color(0xFFFAFAFB),
+    surfaceContainerHigh: Color(0xFFF4F4F5),
+    surfaceContainerHighest: Color(0xFFEBEBED),
+    inverseSurface: Color(0xFF202024),
+    onInverseSurface: Color(0xFFFCFCFD),
   );
 
   static const _darkScheme = ColorScheme(
@@ -337,23 +344,25 @@ abstract final class CortexTheme {
     onError: Color(0xFF3A0A0D),
     errorContainer: Color(0xFF8C1D18),
     onErrorContainer: Color(0xFFF9DEDC),
-    // ── 深色阶照抄设计稿 DARK，层越高越亮 ──
+    // ── 深色阶：锌灰，层越高越亮（2026-10-23 重设计）──
     //
-    // win #1B1B1F → card #26262C → fill #2C2C33 → fill2 #33333B。
-    // 浮起来的东西更亮，不是更暗 —— 反过来做会让弹层看着陷进去
-    surface: Color(0xFF1B1B1F),
-    onSurface: Color(0xFFF2F2F5),
-    onSurfaceVariant: Color(0xFFB4B4BE),
-    // sep 9% 白 / sepStrong 15%
-    outline: Color(0x26FFFFFF),
-    outlineVariant: Color(0x17FFFFFF),
-    surfaceContainerLowest: Color(0xFF17171B),
-    surfaceContainerLow: Color(0xFF232328),
-    surfaceContainer: Color(0xFF26262C),
-    surfaceContainerHigh: Color(0xFF2C2C33),
-    surfaceContainerHighest: Color(0xFF33333B),
-    inverseSurface: Color(0xFFF2F2F5),
-    onInverseSurface: Color(0xFF26262C),
+    // 窗底从 #1B1B1F 压到 #101013、去掉紫调 —— 深色「现代感」的一半
+    // 来自**够黑的底**；上一版偏灰的底逼着浮层一起偏灰，整屏读起来发闷。
+    // 浮起来的东西更亮，不是更暗 —— 反过来做会让弹层看着陷进去。
+    // 发丝线换实色（zinc-700/800），与浅色同一套语言。
+    surface: Color(0xFF101013),
+    onSurface: Color(0xFFFAFAFA),
+    // #A0A0A0 严格零色偏（zinc-400 的 #A1A1AA 自带 9 蓝偏）
+    onSurfaceVariant: Color(0xFFA0A0A0),
+    outline: Color(0xFF3F3F46),
+    outlineVariant: Color(0xFF29292E),
+    surfaceContainerLowest: Color(0xFF0C0C0F),
+    surfaceContainerLow: Color(0xFF151518),
+    surfaceContainer: Color(0xFF1A1A1E),
+    surfaceContainerHigh: Color(0xFF202024),
+    surfaceContainerHighest: Color(0xFF26262B),
+    inverseSurface: Color(0xFFFAFAFA),
+    onInverseSurface: Color(0xFF202024),
   );
 
   static ThemeData _build(
@@ -377,21 +386,24 @@ abstract final class CortexTheme {
       scaffoldBackgroundColor: scheme.surface,
       extensions: [
         CortexTokens(
-          // 侧栏（设计稿 --sb）：浅色 #EFEEF3 带冷紫调，与 macOS 的
-          // sidebar/content 分层观感一致；深色 #232328 比 win 亮一档
-          sidebar: dark ? const Color(0xFF232328) : const Color(0xFFEFEEF3),
-          // 选中/悬停那一项（--sb2）：比 sidebar 再走一档。
+          // 侧栏：锌灰、无色偏（2026-10-23）。上一版 #EFEEF3 的冷紫调
+          // 是旧中性阶的语言，这轮整套灰换锌系 —— 侧栏跟着换，
+          // 否则「唯一偏色的那一块」看起来像没刷新。深色侧栏仍比
+          // 窗底亮一档（分层原则不变），但同步压暗
+          sidebar: dark ? const Color(0xFF17171A) : const Color(0xFFF1F1F3),
+          // 选中/悬停那一项：比 sidebar 再走一档。
           // 差得太小选中态看不出来，差得太大会读成「另一个区域」
           sidebarAccent: dark
-              ? const Color(0xFF2A2A30)
-              : const Color(0xFFE7E6ED),
+              ? const Color(0xFF202024)
+              : const Color(0xFFEBEBED),
           sidebarBorder: dark
-              ? const Color(0xFF2A2A30)
-              : const Color(0xFFE3E2E9),
-          // fg3（--fg3）：浅 #63636C / 深 #9A9AA5。实色，不是透明度
+              ? const Color(0xFF232328)
+              : const Color(0xFFE4E4E7),
+          // fg3：浅 #8D8D8D / 深 #707070。实色、严格零色偏（zinc 系
+          // 的 71717A / 8E8E96 自带 8-9 的蓝偏，超发丝线的中性预算）
           foregroundTertiary: dark
-              ? const Color(0xFF9A9AA5)
-              : const Color(0xFF63636C),
+              ? const Color(0xFF707070)
+              : const Color(0xFF8D8D8D),
           // 反馈三色（--ok / --warn / --del 见 ColorScheme.error）。
           // 浅色取的是**深**的一档（#0F6B32 / #7C500A）：它们大多落在
           // fill 或白底上当文字/描边用，浅色的绿黄在那儿读不出来
@@ -399,7 +411,7 @@ abstract final class CortexTheme {
           warning: dark ? const Color(0xFFFBBF24) : const Color(0xFF7C500A),
           info: dark ? const Color(0xFF60A5FA) : const Color(0xFF2563EB),
           // 悬停垫（--hov）：半透明，叠在任何表面上都成立
-          hover: dark ? const Color(0x0FFFFFFF) : const Color(0x0B17171A),
+          hover: dark ? const Color(0x0DFFFFFF) : const Color(0x0A000000),
           // 品牌色垫底（--accSoft）：浅 10% / 深 18%
           accentSoft: dark ? const Color(0x2E7C82FF) : const Color(0x1A5B62F4),
           // 品牌色文字（--accInk）：链接、彩色数字
@@ -408,36 +420,37 @@ abstract final class CortexTheme {
           accentGradientEnd: dark
               ? const Color(0xFFA78BFA)
               : const Color(0xFF8A62F4),
-          // 三档投影（--sh1/2/3）。CSS 的 `0 Ypx Bpx rgba(...)` 逐项对应
-          // offset.dy / blurRadius / color，没有 spread 那一项
+          // 两档投影：Linear 一路的特征是「浅而克制」—— 浮层靠表面色阶
+          // 分层，投影只负责一点点空间暗示。上一版 0.08/0.12 的浓度在
+          // #FAFAFA 画布上会显脏；降一档，位移也收小
           shadow2: dark
               ? const [
                   BoxShadow(
-                    offset: Offset(0, 4),
-                    blurRadius: 16,
-                    color: Color.fromRGBO(0, 0, 0, 0.45),
+                    offset: Offset(0, 2),
+                    blurRadius: 8,
+                    color: Color.fromRGBO(0, 0, 0, 0.40),
                   ),
                 ]
               : const [
                   BoxShadow(
-                    offset: Offset(0, 4),
-                    blurRadius: 14,
-                    color: Color.fromRGBO(16, 16, 24, 0.08),
+                    offset: Offset(0, 1),
+                    blurRadius: 6,
+                    color: Color.fromRGBO(9, 9, 11, 0.05),
                   ),
                 ],
           shadow3: dark
               ? const [
                   BoxShadow(
-                    offset: Offset(0, 12),
-                    blurRadius: 38,
-                    color: Color.fromRGBO(0, 0, 0, 0.55),
+                    offset: Offset(0, 8),
+                    blurRadius: 28,
+                    color: Color.fromRGBO(0, 0, 0, 0.50),
                   ),
                 ]
               : const [
                   BoxShadow(
-                    offset: Offset(0, 10),
-                    blurRadius: 34,
-                    color: Color.fromRGBO(16, 16, 24, 0.12),
+                    offset: Offset(0, 6),
+                    blurRadius: 24,
+                    color: Color.fromRGBO(9, 9, 11, 0.09),
                   ),
                 ],
         ),
@@ -452,9 +465,12 @@ abstract final class CortexTheme {
         filled: true,
         fillColor: scheme.surfaceContainerHigh,
         hintStyle: TextStyle(color: scheme.onSurfaceVariant),
+        // 2026-10-23 收紧：14/12 → 12/10。上一版的输入框是消费级
+        // 语言（大圆角配大内边距）；工具类产品的输入框要**矮而利落**，
+        // 一眼看到光标位置。填充色阶保持 —— 输入框仍然靠 fill 分层
         contentPadding: const EdgeInsets.symmetric(
-          horizontal: 14,
-          vertical: 12,
+          horizontal: 12,
+          vertical: 10,
         ),
         border: _inputBorder(scheme.outlineVariant),
         enabledBorder: _inputBorder(Colors.transparent),
@@ -466,8 +482,15 @@ abstract final class CortexTheme {
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
           ),
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-          textStyle: const TextStyle(fontWeight: FontWeight.w600),
+          // 2026-10-23 收紧 18/14 → 14/10（≈30%）：M3 出厂的敦实感
+          // 是这套 UI 显旧的第三个来源（前两个：胶囊圆角、偏色灰）。
+          // Linear / Raycast 的按钮是**紧凑**的 —— 高度 ≈ 36 而不是 48
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          textStyle: const TextStyle(
+            fontWeight: FontWeight.w600,
+            // 按钮文字是小字号 + 大写不适用（中文），靠字重与字距
+            letterSpacing: -0.1,
+          ),
         ),
       ),
       iconButtonTheme: IconButtonThemeData(
@@ -518,7 +541,9 @@ abstract final class CortexTheme {
 
   static OutlineInputBorder _inputBorder(Color color, {double width = 1}) =>
       OutlineInputBorder(
-        borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
+        // 输入框专属档 radiusInput（10），不再借用行的 8：
+        // 一档一个语义，读代码的人不用猜
+        borderRadius: BorderRadius.circular(CortexTokens.radiusInput),
         borderSide: BorderSide(color: color, width: width),
       );
 
@@ -528,21 +553,26 @@ abstract final class CortexTheme {
     bool compact = false,
   }) => base
       .copyWith(
+        // 2026-10-23 字阶：「清晰」的一半来自标题层拉得开。titleLarge 收到
+        // 15.5 但字重升到 w700 —— Linear 一路的特征是**小而重**的标题，
+        // 而不是大而中庸；titleSmall 的 0.4 字距是 M3 出厂的「胶囊标签」
+        // 感，收到 0.2
         titleLarge: base.titleLarge?.copyWith(
-          fontSize: 17,
-          fontWeight: FontWeight.w600,
+          fontSize: 15.5,
+          fontWeight: FontWeight.w700,
           letterSpacing: -0.2,
         ),
         titleMedium: base.titleMedium?.copyWith(
-          fontSize: 14.5,
+          fontSize: 14,
           fontWeight: FontWeight.w600,
+          letterSpacing: -0.1,
         ),
         titleSmall: base.titleSmall?.copyWith(
           fontSize: 12,
           fontWeight: FontWeight.w600,
-          letterSpacing: 0.4,
+          letterSpacing: 0.2,
         ),
-        // 紧凑档正文 14px/1.66（设计稿的数）：字小一号，行距**反而放宽**
+        // 紧凑档正文 14px/1.66：字小一号，行距**反而放宽**
         // 一点 —— 小字挤行距是最快变得读不动的组合
         bodyLarge: compact
             ? base.bodyLarge?.copyWith(fontSize: 14, height: 1.66)
