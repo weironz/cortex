@@ -5,7 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/ansi.dart';
 import '../../../core/motion.dart';
 import '../../../models/tool_call.dart';
-import '../../../core/theme.dart';
+import '../../../design_system/design_system.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/chat_controller.dart';
 import '../../workspace/right_rail.dart';
@@ -115,11 +115,8 @@ class _TurnDrawerState extends State<TurnDrawer> {
           AnimatedSize(
             // 展开工具调用列表时下面的内容整块位移 —— 位移正是前庭敏感
             // 最难受的一类，比循环的三个点更该跟着这个开关走
-            duration: motionDuration(
-              context,
-              const Duration(milliseconds: 160),
-            ),
-            curve: Curves.easeOutCubic,
+            duration: CortexMotion.resolve(context, CortexMotion.base),
+            curve: CortexMotion.enter,
             alignment: Alignment.topLeft,
             child: _expanded
                 ? _Panel(
@@ -149,14 +146,19 @@ class _Panel extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.only(top: 8),
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+      margin: const EdgeInsets.only(top: CortexSpace.md),
+      padding: const EdgeInsets.fromLTRB(
+        CortexSpace.lg,
+        CortexSpace.lg,
+        CortexSpace.lg,
+        CortexSpace.sm,
+      ),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
+        borderRadius: BorderRadius.circular(CortexRadius.card),
         // 中性容器而不是 secondary 淡染：这块面板是审计轨迹，不表达任何
         // 状态，彩色边框会让它看起来像一条常驻的提醒（反馈色只在传达
         // 状态时用，不当装饰）
-        border: Border.all(color: scheme.outlineVariant),
+        border: CortexStroke.all(scheme.outlineVariant),
         color: scheme.surfaceContainer,
       ),
       child: child,
@@ -180,11 +182,26 @@ class _Toggle extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
 
-    return InkWell(
+    return CortexHover(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+      builder: (context, hot) => AnimatedContainer(
+        duration: CortexMotion.resolve(context, CortexMotion.instant),
+        padding: const EdgeInsets.symmetric(
+          horizontal: CortexSpace.md,
+          vertical: CortexSpace.xs,
+        ),
+        decoration: BoxDecoration(
+          // 折叠入口画成状态胶囊：面板色垫底 + 发丝线，与工具行的
+          // 胶囊同族，一眼读得出「这是一组过程记录的开关」。
+          // 悬停时边框提亮 —— 这是它「能点」的唯一视觉信号
+          color: scheme.surfaceContainer,
+          borderRadius: BorderRadius.circular(CortexRadius.pill),
+          border: CortexStroke.all(
+            hot
+                ? scheme.onSurface.withValues(alpha: 0.18)
+                : scheme.outlineVariant,
+          ),
+        ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -194,10 +211,10 @@ class _Toggle extends StatelessWidget {
             // 颜色把它与正文分开
             Icon(
               Icons.terminal_rounded,
-              size: 14,
+              size: 13,
               color: scheme.onSurfaceVariant,
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: CortexSpace.sm),
             Text(
               label,
               style: theme.textTheme.labelSmall?.copyWith(
@@ -205,15 +222,79 @@ class _Toggle extends StatelessWidget {
                 fontWeight: FontWeight.w600,
               ),
             ),
-            const SizedBox(width: 2),
+            const SizedBox(width: CortexSpace.xxs),
             AnimatedRotation(
               turns: expanded ? 0.5 : 0,
-              duration: const Duration(milliseconds: 160),
+              duration: CortexMotion.resolve(context, CortexMotion.base),
+              curve: CortexMotion.enter,
               child: Icon(
                 Icons.expand_more_rounded,
-                size: 15,
+                size: 14,
                 color: scheme.onSurfaceVariant,
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 胶囊里那颗「此刻在跑」的呼吸灯。
+///
+/// # 为什么呼吸而不是转圈
+///
+/// 转环（CircularProgressIndicator）是**加载**的语言 —— 它许诺「有进度，
+/// 只是我不知道多少」，而一次工具调用是离散的：发出、等待、返回。
+/// 呼吸的明暗脉冲表达的是「这件事活着、正在等回音」，与 Claude /
+/// DeepSeek 思考面板那颗脉冲灯是同一种语言。
+///
+/// 动效的开关走 [syncLoop]：用户选了「减少动效」时停在全亮的静止点，
+/// 而不是消失（消失 = 「这个状态不存在了」）。
+class _PulseDot extends StatefulWidget {
+  const _PulseDot({super.key, required this.color});
+
+  final Color color;
+
+  @override
+  State<_PulseDot> createState() => _PulseDotState();
+}
+
+class _PulseDotState extends State<_PulseDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    syncLoop(_c, context, reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (context, _) => Container(
+        width: 7,
+        height: 7,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: widget.color.withValues(alpha: 0.30 + 0.70 * _c.value),
+          // 一圈同色淡晕：呼吸的「光」，而不是第二个点
+          boxShadow: [
+            BoxShadow(
+              color: widget.color.withValues(alpha: 0.35 * _c.value),
+              blurRadius: 4,
+              spreadRadius: 0.5,
             ),
           ],
         ),
@@ -275,8 +356,23 @@ class _ToolRowState extends State<ToolRow> {
     // 而层级关系照样一眼看得出。
     final indent = call.subagent == null ? 7.0 : 22.0;
 
-    final row = Padding(
-      padding: EdgeInsets.only(left: indent, bottom: 8),
+    final row = Container(
+      margin: EdgeInsets.only(left: indent, bottom: CortexSpace.sm),
+      padding: const EdgeInsets.symmetric(
+        horizontal: CortexSpace.md,
+        vertical: CortexSpace.xs,
+      ),
+      decoration: BoxDecoration(
+        // ── 状态胶囊 ──
+        //
+        // 面板色垫底 + 发丝线 + 行档圆角：一行一次调用就是一个轻量胶囊，
+        // 与子 agent 的缩进（见上面 indent）叠用 —— 子任务的胶囊整体
+        // 内缩，层级靠位置表达，不靠更深的颜色（深色下颜色越深越
+        // 「陷进去」，正是要避免的方向）
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(CortexRadius.row),
+        border: CortexStroke.all(scheme.outlineVariant),
+      ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -424,18 +520,20 @@ class _ToolRowState extends State<ToolRow> {
                 ),
               ),
             ),
+          // 运行状态点：pending 是呼吸灯（它前面那截转环是「加载」的语言，
+          // 见 _PulseDot）；成功与失败不靠点 —— 失败已有红色图标与红色
+          // 输出，成功什么都不挂（常态不需要状态标记，挂了只会训练人
+          // 忽略它）
           if (call.pending) ...[
             const SizedBox(width: 8),
             Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: SizedBox(
-                width: 9,
-                height: 9,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.4,
-                  // 与 pending 的图标同色（见上面 icon 的注释）
-                  color: scheme.primary,
-                ),
+              padding: const EdgeInsets.only(top: 3),
+              // key 是给测试的锚点：pending 迹象有过一次改头换面
+              // （转环 → 呼吸灯），钉实现细节（`find.byType`）的测试
+              // 跟着碎了一回 —— 钉 key 钉的是「有 pending 迹象」这个意图
+              child: _PulseDot(
+                key: const ValueKey('turn:tool-pulse'),
+                color: scheme.primary,
               ),
             ),
           ],
@@ -458,26 +556,30 @@ class _ToolRowState extends State<ToolRow> {
         children: [
           row,
           Padding(
-            padding: const EdgeInsets.only(left: 27, bottom: 8, right: 4),
+            padding: const EdgeInsets.only(
+              left: 27,
+              bottom: CortexSpace.md,
+              right: CortexSpace.xs,
+            ),
             child: Container(
               width: double.infinity,
               decoration: BoxDecoration(
                 color: scheme.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(CortexTokens.radiusRow),
-                border: Border.all(color: scheme.outlineVariant),
+                borderRadius: BorderRadius.circular(CortexRadius.row),
+                border: CortexStroke.all(scheme.outlineVariant),
               ),
-              padding: const EdgeInsets.all(10),
+              padding: const EdgeInsets.all(CortexSpace.md),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   SelectionArea(
                     child: Text(
                       text,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        fontFamily: 'JetBrains Mono',
-                        fontFamilyFallback: CortexTheme.monoFallback,
-                        height: 1.5,
-                      ),
+                      style: CortexType.mono(
+                        context,
+                        size: 12,
+                        color: scheme.onSurface,
+                      ).copyWith(height: 1.5),
                     ),
                   ),
                   // 「让它自己修」只在**失败**时给。成功那次给一个「修」的

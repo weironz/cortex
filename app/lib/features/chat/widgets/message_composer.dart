@@ -20,7 +20,7 @@ import 'assistant_chip.dart';
 import 'model_chip.dart';
 import 'message_bubble.dart';
 import 'permission_mode_chip.dart';
-import '../../../core/theme.dart';
+import '../../../design_system/design_system.dart';
 
 /// Input box.
 ///
@@ -369,16 +369,25 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
             .addDropped(sessionId ?? widget.ensureSession(), detail.files);
       },
       child: Container(
+        // 钉底形态也是**悬浮式浮条**：不再画那条把输入区与上面的对话
+        // 隔开的顶线 —— 分隔由浮条自身的发丝框与投影承担。一条横贯的
+        // 线把输入框钉成「底栏」，而浮起的胶囊读作「随时可以打字的地方」
         decoration: BoxDecoration(
           color: widget.centred ? Colors.transparent : scheme.surface,
-          // 居中形态没有分隔线：它隔开的是「上面的对话」，而此刻上面没有对话
-          border: widget.centred
-              ? null
-              : Border(top: BorderSide(color: scheme.outlineVariant)),
         ),
         padding: widget.centred
-            ? const EdgeInsets.fromLTRB(20, 4, 20, 4)
-            : const EdgeInsets.fromLTRB(20, 14, 20, 16),
+            ? const EdgeInsets.fromLTRB(
+                CortexSpace.xl,
+                CortexSpace.xs,
+                CortexSpace.xl,
+                CortexSpace.xs,
+              )
+            : const EdgeInsets.fromLTRB(
+                CortexSpace.xl,
+                CortexSpace.md,
+                CortexSpace.xl,
+                CortexSpace.lg,
+              ),
         child: Center(
           child: ConstrainedBox(
             // 与消息列同宽。两条边落在同一条竖线上，是「这些东西属于一起」
@@ -398,32 +407,50 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                     selected: _mentionAt,
                     onPick: _insertMention,
                   ),
-                Container(
+                AnimatedContainer(
+                  // 焦点环的过渡：从发丝线到品牌色是一次**状态切换**，
+                  // 而状态切换要看得见它发生了 —— 直接换色会像闪了一下
+                  duration: CortexMotion.resolve(context, CortexMotion.fast),
+                  curve: CortexMotion.enter,
                   decoration: BoxDecoration(
                     color: _dragging
                         ? scheme.primary.withValues(alpha: 0.06)
                         : scheme.surfaceContainerHigh,
-                    // 输入框是圆角五档里最圆的一档（18，比对话框 14 还圆）：
-                    // 它要读出胶囊感 —— 这一档只给它，别处不用
-                    borderRadius: BorderRadius.circular(
-                      CortexTokens.radiusInput,
-                    ),
+                    borderRadius: BorderRadius.circular(CortexRadius.input),
+                    // 常态发丝线 → 焦点/拖拽时品牌色。焦点环是整屏唯一
+                    // 需要被一眼找到的东西，所以只有它允许用彩色边框
                     border: Border.all(
                       color: _dragging || _focusNode.hasFocus
                           ? scheme.primary
                           : scheme.outlineVariant,
-                      width: _dragging ? 1.5 : 1,
+                      // 焦点环收到与拖拽同一档：两者都是「这里此刻是动作
+                      // 发生处」，不应该一粗一细；常态就退回发丝线
+                      width: _dragging || _focusNode.hasFocus ? 1.5 : 1,
                     ),
+                    // 浮起的空间暗示只给钉底那条 —— 居中形态站在一屏留白
+                    // 正中央，它不需要证明「我浮在什么东西上面」，投影
+                    // 在那儿只是装饰
+                    boxShadow: widget.centred ? null : theme.cortex.shadow2,
                   ),
                   padding: widget.centred
-                      ? const EdgeInsets.fromLTRB(8, 8, 8, 8)
-                      : const EdgeInsets.fromLTRB(6, 4, 6, 4),
+                      ? const EdgeInsets.fromLTRB(
+                          CortexSpace.md,
+                          CortexSpace.md,
+                          CortexSpace.md,
+                          CortexSpace.md,
+                        )
+                      : const EdgeInsets.fromLTRB(
+                          CortexSpace.sm,
+                          CortexSpace.xs,
+                          CortexSpace.sm,
+                          CortexSpace.xs,
+                        ),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
                       Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: IconButton(
+                        padding: const EdgeInsets.only(bottom: CortexSpace.xs),
+                        child: CortexIconButton(
                           // 白纸上也能选文件 —— 会话在选完那一刻兑现
                           onPressed: widget.enabled
                               ? () => ref
@@ -432,9 +459,10 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                                       sessionId ?? widget.ensureSession(),
                                     )
                               : null,
-                          iconSize: 19,
+                          icon: Icons.attach_file_rounded,
+                          size: 18,
+                          box: 30,
                           tooltip: '添加附件（也可以直接拖进来或粘贴）',
-                          icon: const Icon(Icons.attach_file_rounded),
                         ),
                       ),
                       Expanded(
@@ -528,7 +556,7 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                                 enabledBorder: InputBorder.none,
                                 focusedBorder: InputBorder.none,
                                 contentPadding: const EdgeInsets.symmetric(
-                                  vertical: 12,
+                                  vertical: CortexSpace.lg,
                                 ),
                                 hintText: widget.enabled
                                     ? _dragging
@@ -540,9 +568,9 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                           ),
                         ),
                       ),
-                      const SizedBox(width: 6),
+                      const SizedBox(width: CortexSpace.sm),
                       Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
+                        padding: const EdgeInsets.only(bottom: CortexSpace.xs),
                         child: widget.streaming
                             ? _RoundButton(
                                 onPressed: widget.onStop,
@@ -568,7 +596,7 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 7),
+                const SizedBox(height: CortexSpace.sm),
                 // LayoutBuilder 在这里拿得到真实宽度（Column 给的是有界
                 // 约束）；放进 Row 里就拿不到了 —— Row 给非弹性子项的是
                 // 无界宽
@@ -1004,29 +1032,38 @@ class _RoundButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = Theme.of(context).cortex;
+    final enabled = onPressed != null;
     return Tooltip(
       message: tooltip,
-      child: Material(
-        color: accent ? Colors.transparent : background,
-        shape: const CircleBorder(),
-        clipBehavior: Clip.antiAlias,
-        child: Ink(
-          decoration: accent
-              ? BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [background, tokens.accentGradientEnd],
-                  ),
-                )
-              : null,
-          child: InkWell(
-            onTap: onPressed,
-            child: SizedBox(
-              width: 34,
-              height: 34,
-              child: Icon(icon, size: 18, color: foreground),
+      child: MouseRegion(
+        cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onPressed,
+          child: AnimatedContainer(
+            duration: CortexMotion.resolve(context, CortexMotion.instant),
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              // 可发送时：品牌渐变（全产品唯一的一处）。不可发送时：
+              // 中性面板色 + 发丝线 —— 它仍然占着位置，仍然读得出
+              // 「这里是发送键」，只是按不动
+              color: accent ? null : background,
+              gradient: accent
+                  ? LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [background, tokens.accentGradientEnd],
+                    )
+                  : null,
+              shape: BoxShape.circle,
+              border: accent
+                  ? null
+                  : Border.all(
+                      color: Theme.of(context).colorScheme.outlineVariant,
+                    ),
             ),
+            child: Icon(icon, size: 17, color: foreground),
           ),
         ),
       ),

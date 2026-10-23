@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../../core/theme.dart';
+import '../../design_system/design_system.dart';
 import 'highlight_registry.dart';
 import '../../core/motion.dart';
 
@@ -154,19 +154,19 @@ class _CodeBlockState extends State<CodeBlock> {
     final baseStyle = TextStyle(
       fontFamily: 'JetBrains Mono',
       fontFamilyFallback: CortexTheme.monoFallback,
-      fontSize: 12.8,
-      height: 1.55,
+      fontSize: 12.5,
+      height: 1.6,
       color: rootFg,
     );
 
     final label = HighlightRegistry.labelFor(widget.language);
 
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 10),
+      margin: const EdgeInsets.symmetric(vertical: CortexSpace.md),
       decoration: BoxDecoration(
         color: rootBg,
-        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
-        border: Border.all(color: scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(CortexRadius.card),
+        border: CortexStroke.all(scheme.outlineVariant),
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(
@@ -196,7 +196,12 @@ class _CodeBlockState extends State<CodeBlock> {
                   child: SingleChildScrollView(
                     controller: _horizontal,
                     scrollDirection: Axis.horizontal,
-                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+                    padding: const EdgeInsets.fromLTRB(
+                      CortexSpace.lg,
+                      CortexSpace.md,
+                      CortexSpace.lg,
+                      CortexSpace.lg,
+                    ),
                     child: SelectionArea(
                       child: Text.rich(
                         _span(baseStyle, brightness),
@@ -239,39 +244,36 @@ class _Header extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Container(
-      height: 34,
-      padding: const EdgeInsets.only(left: 14, right: 6),
+      height: 32,
+      padding: const EdgeInsets.only(
+        left: CortexSpace.lg,
+        right: CortexSpace.sm,
+      ),
       decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+        border: CortexStroke.bottom(scheme.outlineVariant),
       ),
       child: Row(
         children: [
           Text(
             label,
-            style: TextStyle(
-              fontFamily: 'JetBrains Mono',
-              fontFamilyFallback: CortexTheme.monoFallback,
-              fontSize: 11.5,
-              letterSpacing: 0.3,
+            style: CortexType.mono(
+              context,
+              size: 11.5,
               color: scheme.onSurfaceVariant,
-            ),
+            ).copyWith(letterSpacing: 0.3),
           ),
           if (streaming) ...[
-            const SizedBox(width: 8),
+            const SizedBox(width: CortexSpace.md),
             _StreamingDot(color: scheme.primary),
           ],
           const Spacer(),
-          IconButton(
+          CortexIconButton(
             onPressed: onCopy,
-            iconSize: 15,
-            visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.all(6),
-            constraints: const BoxConstraints(),
+            icon: copied ? Icons.check_rounded : Icons.copy_rounded,
+            size: 14,
+            box: 24,
             tooltip: copied ? '已复制' : '复制代码',
-            icon: Icon(
-              copied ? Icons.check_rounded : Icons.copy_rounded,
-              color: copied ? scheme.secondary : scheme.onSurfaceVariant,
-            ),
+            color: copied ? scheme.secondary : scheme.onSurfaceVariant,
           ),
         ],
       ),

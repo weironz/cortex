@@ -141,7 +141,10 @@ void main() {
         find.textContaining('read_file', findRichText: true),
         findsOneWidget,
       );
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      // pending 迹象：转环已于 2026-10-23 换成呼吸状态点（_PulseDot，
+      // 「加载的进度」换成「活着、在等回音」）。钉 key 不钉类型 ——
+      // 实现再换一次样式，这条测试钉的仍然是「有 pending 迹象」
+      expect(find.byKey(const ValueKey('turn:tool-pulse')), findsOneWidget);
     });
 
     testWidgets('标题给出工具次数', (tester) async {

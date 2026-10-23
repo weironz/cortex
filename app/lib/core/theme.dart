@@ -143,13 +143,15 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
     ),
   ];
 
-  /// 圆角阶 —— 2026-10-23 重设计，走 Linear / Raycast 那一路。
+  /// 圆角阶 —— 2026-10-23 重设计，走 Linear / Vercel / Raycast 那一路。
   ///
-  /// 主干五档：**窗口 12 / 卡片 12 / 输入框 10 / 行 8 / 胶囊 999**。
+  /// 主干五档：**窗口 16 / 卡片 12 / 输入框 8 / 行 8 / 胶囊 999**。
   /// 上一版输入框 18 比对话框还圆 —— 胶囊感是 2021 前后的消费级语言；
-  /// 工具类产品的利落感来自**收窄的圆角**，输入框从 18 收到 10 是这轮
-  /// 观感变化最大的单一改动。成体系的意义不变：每一处圆角都答得出
-  /// 「它是五档里的哪一档」。小构件（徽标 6、气泡 10）是主干外的辅助档。
+  /// 工具类产品的利落感来自**收窄的圆角**。对话框这一阶反而加大到 16：
+  /// 收窄的是**天天在眼前**的东西（输入框、按钮、行），而对话框是一屏
+  /// 只出现一次的浮层 —— 浮层圆一点才读得出「它飘在窗口之上」，
+  /// 贴底的输入条圆一圈则只剩臃肿。成体系的意义不变：每一处圆角都
+  /// 答得出「它是五档里的哪一档」。小构件（徽标 6、气泡 10）是辅助档。
   ///
   /// 旧的 Sm/Md/Lg/Xl/2xl 命名保留（消费面 40+ 处），**值重定**到新体系：
   /// 改名的收益是零，改值让所有旧调用点一次到位。
@@ -157,12 +159,12 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
   static const double radiusMd = 8; // 行、菜单项（=radiusRow）
   static const double radiusLg = 10; // 气泡、主按钮（辅助档）
   static const double radiusXl = 12; // 卡片、面板（=radiusCard）
-  static const double radius2xl = 12; // 对话框 = 浮起的窗口（=radiusWindow）
+  static const double radius2xl = 16; // 对话框 = 浮起的窗口（=radiusWindow）
 
   /// 语义别名 —— 新代码写这几个，读的人不用背数值表。
-  static const double radiusWindow = 12;
+  static const double radiusWindow = 16;
   static const double radiusCard = 12;
-  static const double radiusInput = 10;
+  static const double radiusInput = 8;
   static const double radiusRow = 8;
   static const double radiusPill = 999;
 
@@ -346,21 +348,23 @@ abstract final class CortexTheme {
     onErrorContainer: Color(0xFFF9DEDC),
     // ── 深色阶：锌灰，层越高越亮（2026-10-23 重设计）──
     //
-    // 窗底从 #1B1B1F 压到 #101013、去掉紫调 —— 深色「现代感」的一半
-    // 来自**够黑的底**；上一版偏灰的底逼着浮层一起偏灰，整屏读起来发闷。
-    // 浮起来的东西更亮，不是更暗 —— 反过来做会让弹层看着陷进去。
+    // 窗底从 #1B1B1F 压到 #0C0C0E、去掉紫调 —— 深色「现代感」的一半
+    // 来自**够黑的底**（但绝不是纯黑 #000：纯黑上任何面板色都显得浮白，
+    // 而 OLED 上的纯黑块之间没有层次）。面板落在 #18181B —— 这层微弱的
+    // 色差就是深色下「卡片浮在底板上」的全部表达。浮起来的东西更亮，
+    // 不是更暗 —— 反过来做会让弹层看着陷进去。
     // 发丝线换实色（zinc-700/800），与浅色同一套语言。
-    surface: Color(0xFF101013),
+    surface: Color(0xFF0C0C0E),
     onSurface: Color(0xFFFAFAFA),
     // #A0A0A0 严格零色偏（zinc-400 的 #A1A1AA 自带 9 蓝偏）
     onSurfaceVariant: Color(0xFFA0A0A0),
     outline: Color(0xFF3F3F46),
-    outlineVariant: Color(0xFF29292E),
-    surfaceContainerLowest: Color(0xFF0C0C0F),
-    surfaceContainerLow: Color(0xFF151518),
-    surfaceContainer: Color(0xFF1A1A1E),
-    surfaceContainerHigh: Color(0xFF202024),
-    surfaceContainerHighest: Color(0xFF26262B),
+    outlineVariant: Color(0xFF26262B),
+    surfaceContainerLowest: Color(0xFF08080A),
+    surfaceContainerLow: Color(0xFF121214),
+    surfaceContainer: Color(0xFF18181B),
+    surfaceContainerHigh: Color(0xFF1E1E22),
+    surfaceContainerHighest: Color(0xFF242428),
     inverseSurface: Color(0xFFFAFAFA),
     onInverseSurface: Color(0xFF202024),
   );
@@ -389,15 +393,15 @@ abstract final class CortexTheme {
           // 侧栏：锌灰、无色偏（2026-10-23）。上一版 #EFEEF3 的冷紫调
           // 是旧中性阶的语言，这轮整套灰换锌系 —— 侧栏跟着换，
           // 否则「唯一偏色的那一块」看起来像没刷新。深色侧栏仍比
-          // 窗底亮一档（分层原则不变），但同步压暗
-          sidebar: dark ? const Color(0xFF17171A) : const Color(0xFFF1F1F3),
+          // 窗底（#0C0C0E）亮一档（分层原则不变），但同步压暗
+          sidebar: dark ? const Color(0xFF131316) : const Color(0xFFF1F1F3),
           // 选中/悬停那一项：比 sidebar 再走一档。
           // 差得太小选中态看不出来，差得太大会读成「另一个区域」
           sidebarAccent: dark
-              ? const Color(0xFF202024)
+              ? const Color(0xFF1E1E22)
               : const Color(0xFFEBEBED),
           sidebarBorder: dark
-              ? const Color(0xFF232328)
+              ? const Color(0xFF1F1F23)
               : const Color(0xFFE4E4E7),
           // fg3：浅 #8D8D8D / 深 #707070。实色、严格零色偏（zinc 系
           // 的 71717A / 8E8E96 自带 8-9 的蓝偏，超发丝线的中性预算）
@@ -541,7 +545,7 @@ abstract final class CortexTheme {
 
   static OutlineInputBorder _inputBorder(Color color, {double width = 1}) =>
       OutlineInputBorder(
-        // 输入框专属档 radiusInput（10），不再借用行的 8：
+        // 输入框专属档 radiusInput（8）。值与行档相同但**语义独立**：
         // 一档一个语义，读代码的人不用猜
         borderRadius: BorderRadius.circular(CortexTokens.radiusInput),
         borderSide: BorderSide(color: color, width: width),

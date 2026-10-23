@@ -4,8 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_exception.dart';
 import '../../core/formatting.dart';
-import '../../core/motion.dart';
-import '../../core/theme.dart';
+import '../../design_system/design_system.dart';
 import '../../models/chat_session.dart';
 import '../../models/project.dart';
 import '../../models/session_search_hit.dart';
@@ -977,8 +976,6 @@ class _SessionTile extends StatefulWidget {
 }
 
 class _SessionTileState extends State<_SessionTile> {
-  bool _hovered = false;
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -986,192 +983,202 @@ class _SessionTileState extends State<_SessionTile> {
     final session = widget.session;
 
     final tokens = theme.cortex;
+
     // 「当前在看哪个会话」是**位置**，不是动作 —— 所以用中性的一档，
     // 不用品牌色。此前是 `primary.withValues(alpha: .12)`，于是整条侧栏
     // 常年挂着一块紫，把真正需要注意的东西一起稀释掉了。见 docs/design.md
-    final Color background;
-    if (widget.selected) {
-      background = tokens.sidebarAccent;
-    } else if (_hovered) {
-      // 悬停比选中再浅一档：两者同色的话，鼠标扫过时每一行看起来都像
-      // 被选中了，而真正选中的那一行反而认不出来
-      background = tokens.sidebarAccent.withValues(alpha: 0.55);
-    } else {
-      background = Colors.transparent;
-    }
-
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AnimatedContainer(
-          // 悬停/选中的底色渐变。**这一处此前没读「减少动效」** ——
-          // 那个开关只接了三个循环指示器，于是关掉之后鼠标扫过侧栏
-          // 每一行仍然在渐变，而侧栏正是鼠标经过最频繁的地方
-          duration: motionDuration(context, const Duration(milliseconds: 110)),
-          // 左右各留一点：选中块贴着侧栏两边时，它读成「整条栏换了颜色」
-          // 而不是「这一项被选中了」。上下的 3 给相邻两项一点呼吸 ——
-          // 此前是 2，一列下来是一堵字墙
-          margin: const EdgeInsets.fromLTRB(6, 1, 6, 2),
-          padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
-          decoration: BoxDecoration(
-            color: background,
-            borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
-          ),
-          // 已归档 = **整行**压暗（对齐「关掉的技能整行压暗」的做法）：
-          // 压的是这一行整体 —— 时间戳、徽标、状态点一起退后，而不是给
-          // 标题文字单独调透明度。后者把层级表达混进前景色里，与上面那条
-          // 「前景全实色」互相打架
-          child: Opacity(
-            opacity: session.archived ? 0.45 : 1,
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          // 这里曾有一个「绑定了工作区」的 teal 文件夹小图标。
-                          // 删掉了：对用户它是一个看不懂的绿色徽章（2026-08-24
-                          // 实测反馈原话「绿色图标又是什么」）—— 绑没绑目录是
-                          // 会话**内部**的事，输入框的工作区 chip 与右栏都在
-                          // 说它；左栏一行的职责只有「这是哪条对话、什么状态」。
-                          // 实现细节漏成用户可见的元素，是这个仓库记过的形状
-                          Expanded(
-                            child: Text(
-                              session.title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              // 前景一律实色，选中与否只差字重 —— 层级不靠
-                              // 「更亮一点」表达。透明度分级的下场是同一段字
-                              // 在不同表面上深浅不一，还与禁用态的半透明撞车
-                              //（见 CortexTokens.foregroundTertiary 的注）
-                              style: theme.textTheme.bodyMedium?.copyWith(
-                                fontWeight: widget.selected
-                                    ? FontWeight.w600
-                                    : FontWeight.w400,
-                                color: scheme.onSurface,
-                              ),
+    //
+    // 悬停/选中的底色渐变与「减少动效」开关由 [CortexHover] 与
+    // [CortexMotion.resolve] 承担 —— 这一处此前自己写了一份
+    // `MouseRegion + AnimatedContainer`，于是它成了侧栏里唯一
+    // 不响应键盘焦点的行。
+    return CortexHover(
+      onTap: widget.onTap,
+      builder: (context, hot) => AnimatedContainer(
+        duration: CortexMotion.resolve(context, CortexMotion.fast),
+        curve: CortexMotion.enter,
+        // 左右各留一点：选中块贴着侧栏两边时，它读成「整条栏换了颜色」
+        // 而不是「这一项被选中了」。上下的 1/2 给相邻两项一点呼吸
+        margin: const EdgeInsets.fromLTRB(
+          CortexSpace.sm,
+          1,
+          CortexSpace.sm,
+          CortexSpace.xxs,
+        ),
+        // 行高 ≈ 34：桌面端会话列表是**紧凑**的一列，不是触屏列表。
+        // 上下 6 + 标题 14 + 2 + 时间戳 11 ≈ 33
+        padding: const EdgeInsets.fromLTRB(
+          CortexSpace.md,
+          CortexSpace.sm,
+          CortexSpace.xs,
+          CortexSpace.sm,
+        ),
+        decoration: BoxDecoration(
+          color: widget.selected
+              ? tokens.sidebarAccent
+              : hot
+              // 悬停比选中再浅一档：两者同色的话，鼠标扫过时每一行看起来
+              // 都像被选中了，而真正选中的那一行反而认不出来
+              ? tokens.sidebarAccent.withValues(alpha: 0.55)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(CortexRadius.row),
+        ),
+        // 已归档 = **整行**压暗（对齐「关掉的技能整行压暗」的做法）：
+        // 压的是这一行整体 —— 时间戳、徽标、状态点一起退后，而不是给
+        // 标题文字单独调透明度。后者把层级表达混进前景色里，与上面那条
+        // 「前景全实色」互相打架
+        child: Opacity(
+          opacity: session.archived ? 0.45 : 1,
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        // 这里曾有一个「绑定了工作区」的 teal 文件夹小图标。
+                        // 删掉了：对用户它是一个看不懂的绿色徽章（2026-08-24
+                        // 实测反馈原话「绿色图标又是什么」）—— 绑没绑目录是
+                        // 会话**内部**的事，输入框的工作区 chip 与右栏都在
+                        // 说它；左栏一行的职责只有「这是哪条对话、什么状态」。
+                        // 实现细节漏成用户可见的元素，是这个仓库记过的形状
+                        Expanded(
+                          child: Text(
+                            session.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            // 前景一律实色，选中与否只差字重 —— 层级不靠
+                            // 「更亮一点」表达。透明度分级的下场是同一段字
+                            // 在不同表面上深浅不一，还与禁用态的半透明撞车
+                            //（见 CortexTokens.foregroundTertiary 的注）
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              fontWeight: widget.selected
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                              color: scheme.onSurface,
                             ),
                           ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Text(
+                          formatRelative(session.updatedAt),
+                          style: theme.textTheme.labelSmall,
+                        ),
+                        if (session.archived) ...[
+                          const SizedBox(width: 6),
+                          Text('已归档', style: theme.textTheme.labelSmall),
                         ],
-                      ),
-                      const SizedBox(height: 2),
-                      Row(
-                        children: [
+                        if (session.isLocalDraft) ...[
+                          const SizedBox(width: 6),
                           Text(
-                            formatRelative(session.updatedAt),
-                            style: theme.textTheme.labelSmall,
+                            '未同步',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: scheme.onSurfaceVariant.withValues(
+                                alpha: 0.7,
+                              ),
+                            ),
                           ),
-                          if (session.archived) ...[
-                            const SizedBox(width: 6),
-                            Text('已归档', style: theme.textTheme.labelSmall),
-                          ],
-                          if (session.isLocalDraft) ...[
-                            const SizedBox(width: 6),
-                            Text(
-                              '未同步',
-                              style: theme.textTheme.labelSmall?.copyWith(
-                                color: scheme.onSurfaceVariant.withValues(
-                                  alpha: 0.7,
-                                ),
-                              ),
-                            ),
-                          ],
-                          if (session.hasLocalOverrides) ...[
-                            const SizedBox(width: 6),
-                            Tooltip(
-                              // Said out loud because the alternative is a
-                              // rename that looks saved and silently is not.
-                              message:
-                                  'cortexd 还没有 PATCH /sessions/{id}，'
-                                  '这次改动只存在于本地，重启后会消失。',
-                              child: Text(
-                                '仅本地',
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  // 琥珀 —— 它是「重启会丢」的警告。⚠️ 不用
-                                  // scheme.tertiary：这套主题没定义 tertiary，
-                                  // M3 会静默回落成 teal，把警告画成安心绿
-                                  color: tokens.warning,
-                                ),
-                              ),
-                            ),
-                          ],
                         ],
-                      ),
-                    ],
+                        if (session.hasLocalOverrides) ...[
+                          const SizedBox(width: 6),
+                          Tooltip(
+                            // Said out loud because the alternative is a
+                            // rename that looks saved and silently is not.
+                            message:
+                                'cortexd 还没有 PATCH /sessions/{id}，'
+                                '这次改动只存在于本地，重启后会消失。',
+                            child: Text(
+                              '仅本地',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                // 琥珀 —— 它是「重启会丢」的警告。⚠️ 不用
+                                // scheme.tertiary：这套主题没定义 tertiary，
+                                // M3 会静默回落成 teal，把警告画成安心绿
+                                color: tokens.warning,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              // 琥珀点压过蓝点：等确认必然发生在「在跑」当中，两个都真时
+              // 该喊的是「等你」。外加一圈同色描边把它与蓝点在形状上也
+              // 区分开 —— 色弱视角下「实心点 vs 带环的点」仍然分得出
+              if (widget.awaitingConfirm)
+                Tooltip(
+                  message: '在等你确认才能继续',
+                  child: Container(
+                    width: 8,
+                    height: 8,
+                    margin: const EdgeInsets.only(right: 5),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: tokens.warning, width: 2),
+                    ),
+                  ),
+                )
+              else if (widget.streaming)
+                // 三个状态标记里它此前唯一没有 Tooltip。点本身不识字 ——
+                // 悬停说得出口，人才学得会认它
+                Tooltip(
+                  message: '还在跑，不用等',
+                  child: Container(
+                    width: 6,
+                    height: 6,
+                    margin: const EdgeInsets.only(right: 6),
+                    decoration: BoxDecoration(
+                      color: scheme.primary,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                )
+              // 用勾而不是第二个圆点：两个只有颜色不同的点，在色弱视角下
+              // 与「在跑」分不开，而这两件事的下一步完全相反
+              else if (widget.justFinished)
+                Padding(
+                  padding: const EdgeInsets.only(right: 5),
+                  child: Tooltip(
+                    message: '这一轮跑完了，你还没看',
+                    child: Icon(
+                      Icons.check_circle_rounded,
+                      size: 13,
+                      // 绿 = 完成。此前与 streaming 蓝点同用 primary ——
+                      // 两个下一步完全相反的状态共享同一个色彩通道
+                      color: tokens.success,
+                    ),
                   ),
                 ),
-                // 琥珀点压过蓝点：等确认必然发生在「在跑」当中，两个都真时
-                // 该喊的是「等你」。外加一圈同色描边把它与蓝点在形状上也
-                // 区分开 —— 色弱视角下「实心点 vs 带环的点」仍然分得出
-                if (widget.awaitingConfirm)
-                  Tooltip(
-                    message: '在等你确认才能继续',
-                    child: Container(
-                      width: 8,
-                      height: 8,
-                      margin: const EdgeInsets.only(right: 5),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(color: tokens.warning, width: 2),
-                      ),
-                    ),
-                  )
-                else if (widget.streaming)
-                  // 三个状态标记里它此前唯一没有 Tooltip。点本身不识字 ——
-                  // 悬停说得出口，人才学得会认它
-                  Tooltip(
-                    message: '还在跑，不用等',
-                    child: Container(
-                      width: 6,
-                      height: 6,
-                      margin: const EdgeInsets.only(right: 6),
-                      decoration: BoxDecoration(
-                        color: scheme.primary,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                  )
-                // 用勾而不是第二个圆点：两个只有颜色不同的点，在色弱视角下
-                // 与「在跑」分不开，而这两件事的下一步完全相反
-                else if (widget.justFinished)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 5),
-                    child: Tooltip(
-                      message: '这一轮跑完了，你还没看',
-                      child: Icon(
-                        Icons.check_circle_rounded,
-                        size: 13,
-                        // 绿 = 完成。此前与 streaming 蓝点同用 primary ——
-                        // 两个下一步完全相反的状态共享同一个色彩通道
-                        color: tokens.success,
-                      ),
-                    ),
-                  ),
-                // Kept mounted rather than built on hover: a menu that appears
-                // under the cursor shifts the row's layout the moment the pointer
-                // arrives, which makes the title jitter as the mouse crosses it.
-                Opacity(
-                  opacity: _hovered || widget.selected ? 1 : 0,
-                  child: SessionTileMenu(
-                    archived: session.archived,
-                    enabled: _hovered || widget.selected,
-                    canMove: widget.canMove,
-                    onRename: widget.onRename,
-                    onFork: widget.onFork,
-                    onTogglePin: widget.onTogglePin,
-                    pinned: widget.pinned,
-                    onToggleArchive: widget.onToggleArchive,
-                    onMove: widget.onMove,
-                    onExport: widget.onExport,
-                  ),
+              // Kept mounted rather than built on hover: a menu that appears
+              // under the cursor shifts the row's layout the moment the pointer
+              // arrives, which makes the title jitter as the mouse crosses it.
+              //
+              // 显隐跟着 [CortexHover] 的 hot 走：键盘 Tab 到这一行时
+              // 菜单同样浮现 —— 一个只有鼠标够得着的操作，对桌面应用
+              // 来说是半个功能
+              AnimatedOpacity(
+                duration: CortexMotion.resolve(context, CortexMotion.instant),
+                opacity: hot || widget.selected ? 1 : 0,
+                child: SessionTileMenu(
+                  archived: session.archived,
+                  enabled: hot || widget.selected,
+                  canMove: widget.canMove,
+                  onRename: widget.onRename,
+                  onFork: widget.onFork,
+                  onTogglePin: widget.onTogglePin,
+                  pinned: widget.pinned,
+                  onToggleArchive: widget.onToggleArchive,
+                  onMove: widget.onMove,
+                  onExport: widget.onExport,
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),
@@ -1195,7 +1202,7 @@ class _SessionTileState extends State<_SessionTile> {
 /// # 为什么是公开类型
 ///
 /// **只为了测得到。** 它在真实布局里被一道悬停门挡着
-/// （`_SessionTile` 只在 `_hovered || selected` 时才让它 `enabled`，
+/// （`_SessionTile` 只在 `CortexHover` 的 hot 或选中时才让它 `enabled`，
 /// 平时 opacity 为 0），widget 测试里既点不开也不稳定 —— 而它的全部内容
 /// 都只在弹出之后才存在。公开之后测试直接挂它，跳过那道门。
 class SessionTileMenu extends ConsumerWidget {

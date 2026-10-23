@@ -1,6 +1,14 @@
 import 'package:flutter/material.dart';
 
-/// Consistent 48px header for each of the three panes.
+import '../design_system/design_system.dart';
+
+/// Consistent 44px header for each of the three panes.
+///
+/// # 为什么高度是 44 而不是 M3 的 56
+///
+/// 桌面端顶栏是**一条信息带**，不是一屏的主角。56 是从移动端
+/// `AppBar` 继承来的（那里要留出状态栏与拇指命中区），在桌面上它
+/// 白吃掉一行对话的高度。44 仍然放得下 13.5px 的标题与 11px 的副标题。
 class PanelHeader extends StatelessWidget {
   const PanelHeader({
     super.key,
@@ -21,14 +29,20 @@ class PanelHeader extends StatelessWidget {
     final scheme = theme.colorScheme;
 
     return Container(
-      height: 48,
-      padding: const EdgeInsets.only(left: 14, right: 8),
+      height: 44,
+      padding: const EdgeInsets.only(
+        left: CortexSpace.lg,
+        right: CortexSpace.md,
+      ),
       decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+        border: CortexStroke.bottom(scheme.outlineVariant),
       ),
       child: Row(
         children: [
-          if (leading != null) ...[leading!, const SizedBox(width: 6)],
+          if (leading != null) ...[
+            leading!,
+            const SizedBox(width: CortexSpace.sm),
+          ],
           Expanded(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -36,7 +50,11 @@ class PanelHeader extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: theme.textTheme.titleMedium,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.1,
+                  ),
                   overflow: TextOverflow.ellipsis,
                 ),
                 if (subtitle != null)
@@ -56,6 +74,13 @@ class PanelHeader extends StatelessWidget {
 }
 
 /// Uppercase micro-label used to separate groups inside a pane.
+///
+/// # 为什么是 11px / 0.8 字距 / 第三级前景
+///
+/// 它是**结构标记**，不是内容：一列扫下来，眼睛应该先读到会话标题，
+/// 再在需要定位时看到它。所以它比正文小两档、比正文淡两档，
+/// 靠字距（而不是字号）撑出「这是一个标签」的感觉 —— 中文没有大小写，
+/// 大写那一招在这里不成立。
 class SectionLabel extends StatelessWidget {
   const SectionLabel(this.text, {super.key, this.trailing});
 
@@ -66,7 +91,14 @@ class SectionLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 16, 14, 6),
+      // 上 14 下 2：分组头属于**它下面那一组**，不是上下均分的分隔物。
+      // 均分的话它会读成「两组之间的一条线」
+      padding: const EdgeInsets.fromLTRB(
+        CortexSpace.lg,
+        CortexSpace.lg,
+        CortexSpace.lg,
+        CortexSpace.xxs,
+      ),
       child: Row(
         children: [
           Text(
@@ -74,6 +106,7 @@ class SectionLabel extends StatelessWidget {
             style: theme.textTheme.labelSmall?.copyWith(
               fontWeight: FontWeight.w600,
               letterSpacing: 0.8,
+              color: theme.cortex.foregroundTertiary,
             ),
           ),
           const Spacer(),

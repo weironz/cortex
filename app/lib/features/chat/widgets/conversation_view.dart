@@ -8,7 +8,7 @@ import '../../../state/chat_controller.dart';
 import '../../../state/chat_state.dart';
 import '../../../widgets/empty_state.dart';
 import 'message_bubble.dart';
-import '../../../core/theme.dart';
+import '../../../design_system/design_system.dart';
 
 /// The scrolling transcript.
 ///
@@ -409,21 +409,31 @@ class _JumpToBottom extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Material(
-      elevation: 2,
-      color: scheme.surfaceContainerHigh,
-      shape: CircleBorder(side: BorderSide(color: scheme.outlineVariant)),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: SizedBox(
-          width: 34,
-          height: 34,
-          child: Icon(
-            Icons.arrow_downward_rounded,
-            size: 17,
-            color: scheme.onSurfaceVariant,
+    final tokens = Theme.of(context).cortex;
+    return CortexHover(
+      onTap: onTap,
+      builder: (context, hot) => AnimatedContainer(
+        duration: CortexMotion.resolve(context, CortexMotion.fast),
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          // 浮起的一颗圆钮：面板色 + 发丝线 + 一档投影。悬停时边框提亮 ——
+          // 这颗钮只在用户滚上去之后出现，出现时就得看得出「能点」
+          color: hot
+              ? scheme.surfaceContainerHighest
+              : scheme.surfaceContainerHigh,
+          shape: BoxShape.circle,
+          border: CortexStroke.all(
+            hot
+                ? scheme.onSurface.withValues(alpha: 0.18)
+                : scheme.outlineVariant,
           ),
+          boxShadow: tokens.shadow2,
+        ),
+        child: Icon(
+          Icons.arrow_downward_rounded,
+          size: 16,
+          color: scheme.onSurfaceVariant,
         ),
       ),
     );
@@ -449,24 +459,24 @@ class ConversationHero extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Container(
-            width: 52,
-            height: 52,
+            width: 48,
+            height: 48,
             // 纯色，不渐变（设计稿：渐变**只留发送键一处**）。
             // 渐变一多，「主要动作」就不再突出 —— 头像是身份不是动作
             decoration: BoxDecoration(
               color: scheme.primary,
-              borderRadius: BorderRadius.circular(CortexTokens.radiusXl),
+              borderRadius: BorderRadius.circular(CortexRadius.card),
             ),
             // onPrimary，不写死白色：深色主题下 primary 是**浅**靛，
             // 白色叠上去只有 3.2:1，onPrimary（深靛）才读得清
-            child: Icon(Icons.auto_awesome, color: scheme.onPrimary, size: 25),
+            child: Icon(Icons.auto_awesome, color: scheme.onPrimary, size: 23),
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: CortexSpace.xl),
           // 只写当下真的成立的能力（CLAUDE.md 约束 2）：长期记忆
           // 2026-08-17 已拆去 Cormex，「抽取的事实可追溯、可回放」在
           // 这一侧不再成立 —— 留着就是每次打开都在骗人
           Text('通用 AI Agent', style: theme.textTheme.titleLarge),
-          const SizedBox(height: 7),
+          const SizedBox(height: CortexSpace.sm),
           Text(
             '对话跨设备实时同步；可以调用工具、读写工作区里的文件。',
             textAlign: TextAlign.center,

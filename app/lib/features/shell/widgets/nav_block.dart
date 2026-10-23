@@ -18,7 +18,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../core/theme.dart';
+import '../../../design_system/design_system.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/chat_controller.dart';
 import '../../../state/project_controller.dart';
@@ -34,7 +34,12 @@ class NavBlock extends ConsumerWidget {
     final view = ref.watch(mainViewProvider);
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+      padding: const EdgeInsets.fromLTRB(
+        CortexSpace.md,
+        CortexSpace.md,
+        CortexSpace.md,
+        CortexSpace.xs,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -125,8 +130,6 @@ class _NavItem extends StatefulWidget {
 }
 
 class _NavItemState extends State<_NavItem> {
-  bool _hovered = false;
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -137,43 +140,49 @@ class _NavItemState extends State<_NavItem> {
     final Color background;
     if (widget.selected) {
       background = tokens.sidebarAccent;
-    } else if (_hovered) {
-      background = tokens.sidebarAccent.withValues(alpha: 0.55);
     } else {
       background = Colors.transparent;
     }
 
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: Container(
-          decoration: BoxDecoration(
-            color: background,
-            borderRadius: BorderRadius.circular(CortexTokens.radiusMd),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          child: Row(
-            children: [
-              Icon(
-                widget.icon,
-                size: 16,
-                color: widget.selected
-                    ? theme.colorScheme.onSurface
-                    : tokens.foregroundTertiary,
+    return CortexHover(
+      onTap: widget.onTap,
+      builder: (context, hot) => AnimatedContainer(
+        duration: CortexMotion.resolve(context, CortexMotion.fast),
+        curve: CortexMotion.enter,
+        decoration: BoxDecoration(
+          // 悬停比选中再浅一档：两者同色的话，鼠标扫过时每一行看起来
+          // 都像被选中了，而真正选中的那一行反而认不出来
+          color: widget.selected
+              ? background
+              : hot
+              ? tokens.sidebarAccent.withValues(alpha: 0.55)
+              : background,
+          borderRadius: BorderRadius.circular(CortexRadius.row),
+        ),
+        // 行高 32：桌面端导航是一列**紧凑**的入口，不是触屏列表。
+        // 上下 7 + 16 的图标 ≈ 32
+        padding: const EdgeInsets.symmetric(
+          horizontal: CortexSpace.md,
+          vertical: 7,
+        ),
+        child: Row(
+          children: [
+            Icon(
+              widget.icon,
+              size: 15,
+              color: widget.selected
+                  ? theme.colorScheme.onSurface
+                  : tokens.foregroundTertiary,
+            ),
+            const SizedBox(width: CortexSpace.md),
+            Text(
+              widget.label,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurface,
+                fontWeight: widget.selected ? FontWeight.w600 : null,
               ),
-              const SizedBox(width: 10),
-              Text(
-                widget.label,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurface,
-                  fontWeight: widget.selected ? FontWeight.w600 : null,
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );

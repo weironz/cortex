@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
-import '../../core/theme.dart';
+import '../../design_system/design_system.dart';
 import 'code_block.dart';
 
 /// Markdown renderer for assistant output.
@@ -48,24 +48,48 @@ class CortexMarkdown extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final bodyStyle =
-        theme.textTheme.bodyLarge ?? const TextStyle(fontSize: 15, height: 1.6);
+    // 正文 14 / 行高 1.6 —— 桌面端长文阅读的舒适区。此前取 bodyLarge
+    // （15/1.62），在一屏能放下的对话轮数上偏大：15 是「一篇文章」的字号，
+    // 而对话是一条一条读的
+    final bodyStyle = CortexType.body(
+      context,
+    ).copyWith(color: scheme.onSurface);
 
     return GptMarkdownTheme(
       gptThemeData: GptMarkdownThemeData(
         brightness: theme.brightness,
-        linkColor: scheme.primary,
-        linkHoverColor: scheme.primary,
+        // 链接用 accentInk 而不是 primary：主色是为按钮底调的，
+        // 直接当正文里的文字用对比度不够（见 CortexTokens.accentInk 的注）
+        linkColor: theme.cortex.accentInk,
+        linkHoverColor: theme.cortex.accentInk,
         hrLineColor: scheme.outlineVariant,
         hrLineThickness: 1,
         highlightColor: scheme.surfaceContainerHigh,
-        h1: bodyStyle.copyWith(fontSize: 21, fontWeight: FontWeight.w700),
-        h2: bodyStyle.copyWith(fontSize: 18, fontWeight: FontWeight.w700),
-        h3: bodyStyle.copyWith(fontSize: 16, fontWeight: FontWeight.w600),
-        h4: bodyStyle.copyWith(fontSize: 15, fontWeight: FontWeight.w600),
-        h5: bodyStyle.copyWith(fontSize: 14.5, fontWeight: FontWeight.w600),
+        // 标题阶：h1 21 → h3 16 → h6 14，**每一档都比正文只大一档**。
+        // 对话里的标题是分节，不是文章章节 —— 差三档会让一段回答读起来
+        // 像三个页面拼在一起
+        h1: bodyStyle.copyWith(
+          fontSize: 20,
+          fontWeight: FontWeight.w700,
+          letterSpacing: -0.4,
+          height: 1.4,
+        ),
+        h2: bodyStyle.copyWith(
+          fontSize: 17,
+          fontWeight: FontWeight.w600,
+          letterSpacing: -0.3,
+          height: 1.45,
+        ),
+        h3: bodyStyle.copyWith(
+          fontSize: 15,
+          fontWeight: FontWeight.w600,
+          letterSpacing: -0.2,
+          height: 1.5,
+        ),
+        h4: bodyStyle.copyWith(fontSize: 14.5, fontWeight: FontWeight.w600),
+        h5: bodyStyle.copyWith(fontSize: 14, fontWeight: FontWeight.w600),
         h6: bodyStyle.copyWith(
-          fontSize: 14,
+          fontSize: 13.5,
           fontWeight: FontWeight.w600,
           color: scheme.onSurfaceVariant,
         ),
@@ -95,24 +119,28 @@ class _InlineCode extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 1.5),
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+      padding: const EdgeInsets.symmetric(
+        horizontal: CortexSpace.xs,
+        vertical: 1.5,
+      ),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(CortexTokens.radiusSm),
-        border: Border.all(color: scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(CortexRadius.row),
+        border: CortexStroke.all(scheme.outlineVariant),
       ),
       child: Text(
         text,
         style: style.copyWith(
           fontFamily: 'JetBrains Mono',
           fontFamilyFallback: CortexTheme.monoFallback,
-          fontSize: (style.fontSize ?? 15) * 0.88,
-          color: scheme.brightness == Brightness.dark
-              ? const Color(0xFFE2A2C0)
-              : const Color(0xFFB3305F),
+          fontSize: (style.fontSize ?? 14) * 0.9,
+          // 行内代码用**中性**的深一档，不用彩色：一段中文里嵌三个
+          // 彩色的词，读起来像三处链接。字重与底色已经把它分出来了
+          color: theme.cortex.accentInk,
         ),
       ),
     );
@@ -159,10 +187,10 @@ class _MarkdownTableState extends State<_MarkdownTable> {
     if (columnCount == 0) return const SizedBox.shrink();
 
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 10),
+      margin: const EdgeInsets.symmetric(vertical: CortexSpace.md),
       decoration: BoxDecoration(
-        border: Border.all(color: scheme.outlineVariant),
-        borderRadius: BorderRadius.circular(CortexTokens.radiusLg),
+        border: CortexStroke.all(scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(CortexRadius.card),
       ),
       clipBehavior: Clip.antiAlias,
       child: Scrollbar(

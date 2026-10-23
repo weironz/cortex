@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/formatting.dart';
-import '../../../core/theme.dart';
+import '../../../design_system/design_system.dart';
 import '../../../core/link_launcher.dart';
 import '../../../core/motion.dart';
 import '../../../models/attachment.dart';
@@ -103,117 +103,143 @@ class _UserBubble extends ConsumerWidget {
         kMessageGutter,
         12,
       ),
-      child: Align(
-        alignment: Alignment.centerRight,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: kMessageMaxWidth * 0.82),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              // 放在气泡外面而不是里面：附件是**用户的内容**，被气泡的底色
-              // 罩住一层之后会读成界面的一部分。
-              //
-              // （气泡此前是实心品牌色，那时这条理由更强烈；现在底色淡了，
-              // 但结论不变 —— 一张图不该带着任何界面色。）
-              AttachmentStrip(attachments: message.attachments, alignEnd: true),
-              // A message can legitimately be attachments only — "看这张图" with
-              // a screenshot and nothing else. An empty bubble next to the
-              // image would read as a failed send.
-              if (message.text.isNotEmpty)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 15,
-                    vertical: 11,
-                  ),
-                  decoration: BoxDecoration(
-                    // ── 中性填充，不是实心品牌色 ──
-                    //
-                    // 这里原来是整块 `scheme.primary`。按新规范（见
-                    // docs/design.md）色彩只表达**动作或含义**，而一条
-                    // 用户消息是内容 —— Cherry Studio 的规矩里这一条写得
-                    // 很直接：「不要把 primary 当成通用蓝或装饰色」。
-                    //
-                    // 两家参考产品都是这么做的：助手消息不带气泡（我们
-                    // 已经如此），用户消息用一层很轻的中性底把它与助手的
-                    // 输出分开。一屏对话里因此只剩下真正需要注意的地方
-                    // 才有颜色。
-                    color: scheme.surfaceContainerHigh,
-                    // 气泡归辅助档 radiusLg(11) —— 五档体系里写明
-                    // 「气泡 11」（见 CortexTokens）；Xl(13) 是卡片那一档
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(CortexTokens.radiusLg),
-                      topRight: Radius.circular(CortexTokens.radiusLg),
-                      bottomLeft: Radius.circular(CortexTokens.radiusLg),
-                      // 右下角收窄成一个「尾巴」。这一个不走圆角阶：
-                      // 它不是装饰，是指向发送者的方向
-                      bottomRight: Radius.circular(4),
+      // 整条消息是一个悬停区：动作栏默认半透明，鼠标进来才完全显形。
+      //
+      // 这是 Claude / ChatGPT 的共同做法，理由不是「更干净」而是
+      // **读的顺序**：一屏对话里，动作按钮与正文抢的是同一只眼睛。
+      // 常驻的按钮不会消失，但会让人在读每一条消息时都先扫到它。
+      child: CortexHover(
+        onTap: null,
+        cursor: SystemMouseCursors.basic,
+        builder: (context, hot) => Align(
+          alignment: Alignment.centerRight,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              maxWidth: kMessageMaxWidth * 0.82,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                // 放在气泡外面而不是里面：附件是**用户的内容**，被气泡的底色
+                // 罩住一层之后会读成界面的一部分。
+                //
+                // （气泡此前是实心品牌色，那时这条理由更强烈；现在底色淡了，
+                // 但结论不变 —— 一张图不该带着任何界面色。）
+                AttachmentStrip(
+                  attachments: message.attachments,
+                  alignEnd: true,
+                ),
+                // A message can legitimately be attachments only — "看这张图" with
+                // a screenshot and nothing else. An empty bubble next to the
+                // image would read as a failed send.
+                if (message.text.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 15,
+                      vertical: 11,
                     ),
-                  ),
-                  child: SelectionArea(
-                    child: Text(
-                      message.text,
-                      style: theme.textTheme.bodyLarge?.copyWith(
-                        color: scheme.onSurface,
+                    decoration: BoxDecoration(
+                      // ── 中性填充，不是实心品牌色 ──
+                      //
+                      // 这里原来是整块 `scheme.primary`。按新规范（见
+                      // docs/design.md）色彩只表达**动作或含义**，而一条
+                      // 用户消息是内容 —— Cherry Studio 的规矩里这一条写得
+                      // 很直接：「不要把 primary 当成通用蓝或装饰色」。
+                      //
+                      // 两家参考产品都是这么做的：助手消息不带气泡（我们
+                      // 已经如此），用户消息用一层很轻的中性底把它与助手的
+                      // 输出分开。一屏对话里因此只剩下真正需要注意的地方
+                      // 才有颜色。
+                      color: scheme.surfaceContainerHigh,
+                      // 微卡片收边：发丝线让这块淡色区块在任何底上都有
+                      // 明确的边缘 —— 深色下面板与底板的色微弱，缺了这条线
+                      // 气泡会像「一段没排齐的文字」
+                      border: CortexStroke.all(scheme.outlineVariant),
+                      // 气泡归辅助档 radiusLg —— 五档体系里写明「气泡 10」
+                      // （见 CortexTokens）；Xl 是卡片那一档
+                      borderRadius: const BorderRadius.only(
+                        topLeft: Radius.circular(CortexTokens.radiusLg),
+                        topRight: Radius.circular(CortexTokens.radiusLg),
+                        bottomLeft: Radius.circular(CortexTokens.radiusLg),
+                        // 右下角收窄成一个「尾巴」。这一个不走圆角阶：
+                        // 它不是装饰，是指向发送者的方向
+                        bottomRight: Radius.circular(4),
+                      ),
+                    ),
+                    child: SelectionArea(
+                      child: Text(
+                        message.text,
+                        style: theme.textTheme.bodyLarge?.copyWith(
+                          color: scheme.onSurface,
+                        ),
                       ),
                     ),
                   ),
-                ),
-              const SizedBox(height: 4),
-              // 时间与复制并排，而不是给复制单开一行：这一行本来就在那儿，
-              // 塞进去不占额外高度。自己说过的话同样需要能整段拿走 ——
-              // 拿去重发、拿去贴进别处，都比在气泡里手动划选可靠
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (message.text.isNotEmpty) ...[
-                    _CopyButton(text: message.text, tooltip: '复制这条'),
-                    const SizedBox(width: 4),
-                    // 「改一改再发一次」而不是「编辑」。
-                    //
-                    // 历史是 append-only，这条消息改不掉 —— 它会以新的一轮
-                    // 追加在末尾，旧的那一轮留在原地。叫「编辑」的话，
-                    // 用户会以为上面那句被换掉了，直到他换一台设备回放才发现
-                    // 它还在，而那时他可能已经在里面写过不该留下的东西
-                    _BubbleAction(
-                      icon: Icons.edit_note_rounded,
-                      tooltip: busy ? '这一轮跑完才能改' : '改一改再发一次（原来那条留在历史里）',
-                      onPressed: busy
-                          ? null
-                          : () => ref
-                                .read(composerDraftProvider.notifier)
-                                .offer(message.text),
-                    ),
-                    const SizedBox(width: 4),
-                  ],
-                  _BubbleAction(
-                    icon: Icons.refresh_rounded,
-                    tooltip: busy ? '这一轮跑完才能重发' : '原样再发一次',
-                    onPressed: busy
-                        ? null
-                        : () => ref
-                              .read(chatControllerProvider.notifier)
-                              .resend(message.id),
+                const SizedBox(height: CortexSpace.xs),
+                // 时间与复制并排，而不是给复制单开一行：这一行本来就在那儿，
+                // 塞进去不占额外高度。自己说过的话同样需要能整段拿走 ——
+                // 拿去重发、拿去贴进别处，都比在气泡里手动划选可靠
+                //
+                // 默认半透明、悬停全亮：**半透明而不是隐藏**，因为
+                // 完全隐藏会让这一行在鼠标进出的瞬间改变高度，
+                // 而高度一变，下面所有消息都会跳一下
+                AnimatedOpacity(
+                  duration: CortexMotion.resolve(context, CortexMotion.instant),
+                  opacity: hot ? 1 : 0.45,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (message.text.isNotEmpty) ...[
+                        _CopyButton(text: message.text, tooltip: '复制这条'),
+                        const SizedBox(width: CortexSpace.xs),
+                        // 「改一改再发一次」而不是「编辑」。
+                        //
+                        // 历史是 append-only，这条消息改不掉 —— 它会以新的一轮
+                        // 追加在末尾，旧的那一轮留在原地。叫「编辑」的话，
+                        // 用户会以为上面那句被换掉了，直到他换一台设备回放才发现
+                        // 它还在，而那时他可能已经在里面写过不该留下的东西
+                        _BubbleAction(
+                          icon: Icons.edit_note_rounded,
+                          tooltip: busy ? '这一轮跑完才能改' : '改一改再发一次（原来那条留在历史里）',
+                          onPressed: busy
+                              ? null
+                              : () => ref
+                                    .read(composerDraftProvider.notifier)
+                                    .offer(message.text),
+                        ),
+                        const SizedBox(width: CortexSpace.xs),
+                      ],
+                      _BubbleAction(
+                        icon: Icons.refresh_rounded,
+                        tooltip: busy ? '这一轮跑完才能重发' : '原样再发一次',
+                        onPressed: busy
+                            ? null
+                            : () => ref
+                                  .read(chatControllerProvider.notifier)
+                                  .resend(message.id),
+                      ),
+                      const SizedBox(width: CortexSpace.xs),
+                      _ForkHereButton(episodeId: message.episodeId, busy: busy),
+                      const SizedBox(width: CortexSpace.xs),
+                      Text(
+                        formatRelative(message.createdAt),
+                        style: theme.textTheme.labelSmall,
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 4),
-                  _ForkHereButton(episodeId: message.episodeId, busy: busy),
-                  const SizedBox(width: 4),
-                  Text(
-                    formatRelative(message.createdAt),
-                    style: theme.textTheme.labelSmall,
-                  ),
-                ],
-              ),
-              // Normally empty: `ChatController` carries a turn's attribution
-              // onto the answer, where the drawer belongs. It survives here for
-              // the one case that has no answer — a turn the model failed still
-              // injected memory and may have run tools, and that is precisely
-              // the turn somebody comes back to look at.
-              if (message.toolCalls.isNotEmpty)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TurnDrawer(toolCalls: message.toolCalls),
                 ),
-            ],
+                // Normally empty: `ChatController` carries a turn's attribution
+                // onto the answer, where the drawer belongs. It survives here for
+                // the one case that has no answer — a turn the model failed still
+                // injected memory and may have run tools, and that is precisely
+                // the turn somebody comes back to look at.
+                if (message.toolCalls.isNotEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TurnDrawer(toolCalls: message.toolCalls),
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -282,165 +308,189 @@ class AssistantBlock extends StatelessWidget {
         kMessageGutter,
         12,
       ),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: kMessageMaxWidth),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 21,
-                    height: 21,
-                    // 纯色，不渐变（渐变只留发送键一处 —— 头像是身份不是动作）
-                    decoration: BoxDecoration(
-                      color: scheme.primary,
-                      borderRadius: BorderRadius.circular(
-                        CortexTokens.radiusSm,
-                      ),
-                    ),
-                    // onPrimary，不写死白色：深色主题下 primary 是**浅**靛，
-                    // 白色叠上去只有 3.2:1，onPrimary（深靛）才读得清
-                    child: Icon(
-                      Icons.auto_awesome,
-                      size: 12,
-                      color: scheme.onPrimary,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text('Cortex', style: theme.textTheme.titleSmall),
-                  // 谁写的。**流式过程中不画** —— 那时还不知道，
-                  // 而先画一个再换掉会闪
-                  if (models.isNotEmpty && !streaming) ...[
-                    const SizedBox(width: 8),
-                    Flexible(child: _ModelTrail(models: models)),
-                  ],
-                  if (createdAt != null && !streaming) ...[
-                    const SizedBox(width: 8),
-                    Text(
-                      formatRelative(createdAt),
-                      style: theme.textTheme.labelSmall,
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 6),
-              Padding(
-                padding: const EdgeInsets.only(left: 29),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+      // 与用户消息同一条规矩：整条回答是一个悬停区，底部那行动作
+      // 默认半透明、鼠标进来才全亮。助手消息**没有气泡**（它直接融进
+      // 底板），所以「这一条消息的范围」只能靠一个不可见的悬停区划出来
+      child: CortexHover(
+        onTap: null,
+        cursor: SystemMouseCursors.basic,
+        builder: (context, hot) => Align(
+          alignment: Alignment.centerLeft,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: kMessageMaxWidth),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
                   children: [
-                    AttachmentStrip(attachments: attachments),
-                    // 正在画图 —— 占住那张图**将来的位置**。
-                    //
-                    // 判据是「有一次 generate_image 还没回结果」，而不是
-                    // 「这一轮在跑」：一轮里可能先读文件再画图，前半段画一块
-                    // 空图位是在承诺一件还没发生的事。
-                    //
-                    // 图回来之后这一行会变成 `AttachmentStrip` 里的缩略图，
-                    // 而占位随 pending 消失 —— 两者不会同时出现
-                    for (final _ in toolCalls.where(
-                      (t) => t.name == 'generate_image' && t.pending,
-                    )) ...[
-                      const DrawingPlaceholder(),
-                      const SizedBox(height: 8),
-                    ],
-                    // ── 有骨架就顺着骨架画 ──
-                    //
-                    // 这是「文字和工具交错」的**全部实现**。从前这里只画
-                    // 一整段 `text`，工具统一挂在下面那个抽屉里 —— 于是
-                    // 一轮二十次调用的回答，读起来是「一大段话，然后二十
-                    // 行工具」，看不出哪句话对应哪次动作。
-                    //
-                    // 2026-09-02 用户实报：「cortex 把所有输出都汇总到底下了」。
-                    if (blocks.isNotEmpty)
-                      for (final b in blocks)
-                        switch (b) {
-                          TextBlock(:final text) when text.trim().isNotEmpty =>
-                            SelectionArea(
-                              child: CortexMarkdown(
-                                text,
-                                onLinkTap: (url) =>
-                                    openExternalLink(context, url),
-                              ),
-                            ),
-                          // 序号越界 = 骨架与工具列表对不上（拼过列表、
-                          // 或者老数据）。**什么都不画**，别画一个占位：
-                          // 正文中间冒出一个「未知工具」比少一行更糟
-                          // 直接画那一行，**不裹 TurnDrawer** —— 裹了会带出
-                          // 它那行「本轮工具调用 · N 次」的标题，一轮二十次
-                          // 调用就是二十行「· 1 次」
-                          ToolBlock(:final ordinal)
-                              when ordinal >= 0 && ordinal < toolCalls.length =>
-                            ToolRow(call: toolCalls[ordinal]),
-                          _ => const SizedBox.shrink(),
-                        }
-                    else if (text.isNotEmpty)
-                      SelectionArea(
-                        child: CortexMarkdown(
-                          text,
-                          onLinkTap: (url) => openExternalLink(context, url),
+                    Container(
+                      width: 21,
+                      height: 21,
+                      // 纯色，不渐变（渐变只留发送键一处 —— 头像是身份不是动作）
+                      decoration: BoxDecoration(
+                        color: scheme.primary,
+                        borderRadius: BorderRadius.circular(
+                          CortexTokens.radiusSm,
                         ),
                       ),
-                    if (streaming) ...[
-                      if (text.isEmpty)
-                        // 排队中就把「前面还有几轮」说出来，而不是一个和
-                        // 「等首 token」长得一样的省略号 —— 那两件事在屏幕上
-                        // 分不开的话，用户会以为模型卡住了
-                        if (queuedAhead case final ahead?)
-                          _QueuedNote(ahead: ahead)
-                        else
-                          const _ThinkingIndicator()
-                      else
-                        const _Caret(),
+                      // onPrimary，不写死白色：深色主题下 primary 是**浅**靛，
+                      // 白色叠上去只有 3.2:1，onPrimary（深靛）才读得清
+                      child: Icon(
+                        Icons.auto_awesome,
+                        size: 12,
+                        color: scheme.onPrimary,
+                      ),
+                    ),
+                    const SizedBox(width: CortexSpace.md),
+                    Text('Cortex', style: theme.textTheme.titleSmall),
+                    // 谁写的。**流式过程中不画** —— 那时还不知道，
+                    // 而先画一个再换掉会闪
+                    if (models.isNotEmpty && !streaming) ...[
+                      const SizedBox(width: CortexSpace.md),
+                      Flexible(child: _ModelTrail(models: models)),
                     ],
-                    if (error != null)
-                      _ErrorNote(
-                        error: error!,
-                        busy: busy,
-                        retryTarget: retryTarget,
-                        deterministic: errorIsDeterministic,
+                    if (createdAt != null && !streaming) ...[
+                      const SizedBox(width: CortexSpace.md),
+                      Text(
+                        formatRelative(createdAt),
+                        style: theme.textTheme.labelSmall,
                       ),
-                    // 骨架已经把工具画在正文中间了，底下不能再画一遍 ——
-                    // 同一次调用出现两次，用户会以为它跑了两回
-                    if (blocks.isEmpty)
-                      TurnDrawer(toolCalls: toolCalls, streaming: streaming),
-                    // 这一行动作 + 元信息，贴在回答**底部左侧**。
-                    //
-                    // 复制原来挂在头部那一行的最右端：离正文最远的那个角，
-                    // 而人读完一段回答时视线落在左下。Claude Code / ChatGPT
-                    // 都把它放这儿，不是审美偏好 —— 是「读完之后手往哪儿去」。
-                    //
-                    // 流式期间整行不出现：复制一段还在长的文本，拿到的是
-                    // 半句话，而按钮看不出这一点。
-                    if (!streaming && (text.isNotEmpty || episodeId != null))
-                      Padding(
-                        padding: const EdgeInsets.only(top: 2, left: 2),
-                        child: Row(
-                          children: [
-                            if (text.isNotEmpty) _CopyButton(text: text),
-                            _ForkHereButton(episodeId: episodeId, busy: busy),
-                            if (episodeId != null)
-                              Padding(
-                                padding: const EdgeInsets.only(left: 5),
-                                child: Text(
-                                  'episode ${shortId(episodeId)}',
-                                  style: theme.textTheme.labelSmall?.copyWith(
-                                    fontFamily: 'JetBrains Mono',
-                                    fontFamilyFallback:
-                                        CortexTheme.monoFallback,
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
+                    ],
                   ],
                 ),
-              ),
-            ],
+                const SizedBox(height: CortexSpace.sm),
+                Padding(
+                  padding: const EdgeInsets.only(left: 29),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      AttachmentStrip(attachments: attachments),
+                      // 正在画图 —— 占住那张图**将来的位置**。
+                      //
+                      // 判据是「有一次 generate_image 还没回结果」，而不是
+                      // 「这一轮在跑」：一轮里可能先读文件再画图，前半段画一块
+                      // 空图位是在承诺一件还没发生的事。
+                      //
+                      // 图回来之后这一行会变成 `AttachmentStrip` 里的缩略图，
+                      // 而占位随 pending 消失 —— 两者不会同时出现
+                      for (final _ in toolCalls.where(
+                        (t) => t.name == 'generate_image' && t.pending,
+                      )) ...[
+                        const DrawingPlaceholder(),
+                        const SizedBox(height: CortexSpace.md),
+                      ],
+                      // ── 有骨架就顺着骨架画 ──
+                      //
+                      // 这是「文字和工具交错」的**全部实现**。从前这里只画
+                      // 一整段 `text`，工具统一挂在下面那个抽屉里 —— 于是
+                      // 一轮二十次调用的回答，读起来是「一大段话，然后二十
+                      // 行工具」，看不出哪句话对应哪次动作。
+                      //
+                      // 2026-09-02 用户实报：「cortex 把所有输出都汇总到底下了」。
+                      if (blocks.isNotEmpty)
+                        for (final b in blocks)
+                          switch (b) {
+                            TextBlock(:final text)
+                                when text.trim().isNotEmpty =>
+                              SelectionArea(
+                                child: CortexMarkdown(
+                                  text,
+                                  onLinkTap: (url) =>
+                                      openExternalLink(context, url),
+                                ),
+                              ),
+                            // 序号越界 = 骨架与工具列表对不上（拼过列表、
+                            // 或者老数据）。**什么都不画**，别画一个占位：
+                            // 正文中间冒出一个「未知工具」比少一行更糟
+                            // 直接画那一行，**不裹 TurnDrawer** —— 裹了会带出
+                            // 它那行「本轮工具调用 · N 次」的标题，一轮二十次
+                            // 调用就是二十行「· 1 次」
+                            ToolBlock(:final ordinal)
+                                when ordinal >= 0 &&
+                                    ordinal < toolCalls.length =>
+                              ToolRow(call: toolCalls[ordinal]),
+                            _ => const SizedBox.shrink(),
+                          }
+                      else if (text.isNotEmpty)
+                        SelectionArea(
+                          child: CortexMarkdown(
+                            text,
+                            onLinkTap: (url) => openExternalLink(context, url),
+                          ),
+                        ),
+                      if (streaming) ...[
+                        if (text.isEmpty)
+                          // 排队中就把「前面还有几轮」说出来，而不是一个和
+                          // 「等首 token」长得一样的省略号 —— 那两件事在屏幕上
+                          // 分不开的话，用户会以为模型卡住了
+                          if (queuedAhead case final ahead?)
+                            _QueuedNote(ahead: ahead)
+                          else
+                            const _ThinkingIndicator()
+                        else
+                          const _Caret(),
+                      ],
+                      if (error != null)
+                        _ErrorNote(
+                          error: error!,
+                          busy: busy,
+                          retryTarget: retryTarget,
+                          deterministic: errorIsDeterministic,
+                        ),
+                      // 骨架已经把工具画在正文中间了，底下不能再画一遍 ——
+                      // 同一次调用出现两次，用户会以为它跑了两回
+                      if (blocks.isEmpty)
+                        TurnDrawer(toolCalls: toolCalls, streaming: streaming),
+                      // 这一行动作 + 元信息，贴在回答**底部左侧**。
+                      //
+                      // 复制原来挂在头部那一行的最右端：离正文最远的那个角，
+                      // 而人读完一段回答时视线落在左下。Claude Code / ChatGPT
+                      // 都把它放这儿，不是审美偏好 —— 是「读完之后手往哪儿去」。
+                      //
+                      // 流式期间整行不出现：复制一段还在长的文本，拿到的是
+                      // 半句话，而按钮看不出这一点。
+                      if (!streaming && (text.isNotEmpty || episodeId != null))
+                        AnimatedOpacity(
+                          duration: CortexMotion.resolve(
+                            context,
+                            CortexMotion.instant,
+                          ),
+                          opacity: hot ? 1 : 0.45,
+                          child: Padding(
+                            padding: const EdgeInsets.only(
+                              top: CortexSpace.xxs,
+                              left: CortexSpace.xxs,
+                            ),
+                            child: Row(
+                              children: [
+                                if (text.isNotEmpty) _CopyButton(text: text),
+                                _ForkHereButton(
+                                  episodeId: episodeId,
+                                  busy: busy,
+                                ),
+                                if (episodeId != null)
+                                  Padding(
+                                    padding: const EdgeInsets.only(
+                                      left: CortexSpace.sm,
+                                    ),
+                                    child: Text(
+                                      'episode ${shortId(episodeId)}',
+                                      style: CortexType.mono(
+                                        context,
+                                        size: 11,
+                                        color: theme.cortex.foregroundTertiary,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

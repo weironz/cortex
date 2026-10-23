@@ -4,16 +4,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/attention.dart';
-import '../../core/theme.dart';
+import '../../design_system/design_system.dart';
 
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
+import '../../state/project_controller.dart';
 import '../../state/terminal_panel.dart';
 import '../chat/chat_pane.dart';
 import '../assistants/assistants_page.dart';
 import '../library/library_page.dart';
 import '../images/image_page.dart';
 import '../projects/projects_page.dart';
+import '../settings/settings_sheet.dart';
 import '../sessions/session_list.dart';
 import '../workspace/right_rail.dart';
 import '../workspace/terminal_panel.dart';
@@ -172,14 +174,57 @@ class _AppShellState extends ConsumerState<AppShell> {
         }
 
         return CallbackShortcuts(
-          // ⌘K / Ctrl+K 呼出命令面板。挂在 shell 最外层：焦点在哪
-          // （输入框、列表、设置页）都够得着 —— 命令面板的意义就是
-          // 「不管在哪，两个键到任何地方」
+          // ── 全局快捷键 ──
+          //
+          // 挂在 shell 最外层：焦点在哪（输入框、列表、设置页）都够得着。
+          // 每一条都成对给 Ctrl 与 ⌘ —— 这个产品桌面与 web 同一套代码，
+          // 只给一边等于另一半用户按不动。
+          //
+          // 键位的选择判据是**别的工具已经教过用户**：⌘K 命令面板、
+          // ⌘B 侧栏、⌘, 设置、⌘N 新对话 —— 这四个在 VS Code / Slack /
+          // Linear / macOS 上都是同一个意思。换一个只会让人先试它、
+          // 发现没反应，再去找菜单。
           bindings: {
             const SingleActivator(LogicalKeyboardKey.keyK, control: true): () =>
                 showCommandPalette(context),
             const SingleActivator(LogicalKeyboardKey.keyK, meta: true): () =>
                 showCommandPalette(context),
+            // 侧栏开合。窄屏上它是抽屉，`toggleLeft` 管的是内联那一份 ——
+            // 所以窄屏改用抽屉自己的开关，否则按下去「什么都没发生」
+            const SingleActivator(LogicalKeyboardKey.keyB, control: true): () {
+              if (isMedium) {
+                layoutNotifier.toggleLeft();
+              } else {
+                _scaffoldKey.currentState?.openDrawer();
+              }
+            },
+            const SingleActivator(LogicalKeyboardKey.keyB, meta: true): () {
+              if (isMedium) {
+                layoutNotifier.toggleLeft();
+              } else {
+                _scaffoldKey.currentState?.openDrawer();
+              }
+            },
+            // 设置。macOS 的惯例是 ⌘,（Windows 上是 Ctrl+,）
+            const SingleActivator(
+              LogicalKeyboardKey.comma,
+              control: true,
+            ): () =>
+                showSettingsSheet(context),
+            const SingleActivator(LogicalKeyboardKey.comma, meta: true): () =>
+                showSettingsSheet(context),
+            // 新对话。**不建会话**，与左栏那一行调的是同一个
+            // `startNewChat`（见 nav_block.dart 的注释）
+            const SingleActivator(LogicalKeyboardKey.keyN, control: true): () {
+              ref.read(chatControllerProvider.notifier).startNewChat();
+              ref.read(projectControllerProvider.notifier).select(null);
+              ref.read(mainViewProvider.notifier).go(MainView.chat);
+            },
+            const SingleActivator(LogicalKeyboardKey.keyN, meta: true): () {
+              ref.read(chatControllerProvider.notifier).startNewChat();
+              ref.read(projectControllerProvider.notifier).select(null);
+              ref.read(mainViewProvider.notifier).go(MainView.chat);
+            },
             // Ctrl+` / ⌘` —— 终端。与 VS Code、Cursor、Claude Code 一致：
             // 这个键位在开发者手里已经是肌肉记忆，换一个只会让人先试它
             const SingleActivator(
@@ -462,7 +507,9 @@ class _ResizeHandleState extends State<_ResizeHandle> {
           width: _hit,
           child: Center(
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 120),
+              // 走「减少动效」那道闸：拖拽条变粗是一次位移，
+              // 而位移正是前庭敏感最难受的一类
+              duration: CortexMotion.resolve(context, CortexMotion.instant),
               width: _hot ? 3 : 1,
               color: widget.color,
             ),
@@ -484,16 +531,20 @@ class _SidebarTopRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 6, 8, 0),
+      padding: const EdgeInsets.fromLTRB(
+        CortexSpace.sm,
+        CortexSpace.sm,
+        CortexSpace.sm,
+        0,
+      ),
       child: Row(
         children: [
-          IconButton(
+          CortexIconButton(
             key: const ValueKey('sidebar:collapse'),
             onPressed: ref.read(layoutProvider.notifier).toggleLeft,
-            iconSize: 18,
-            visualDensity: VisualDensity.compact,
+            icon: Icons.menu_open_rounded,
+            size: 17,
             tooltip: '收起侧栏',
-            icon: const Icon(Icons.menu_open_rounded),
           ),
         ],
       ),

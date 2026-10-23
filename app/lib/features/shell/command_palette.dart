@@ -23,7 +23,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/theme.dart';
+import '../../design_system/design_system.dart';
 import '../../state/app_providers.dart';
 import '../../state/chat_controller.dart';
 import '../../state/composer_draft.dart';
@@ -46,12 +46,23 @@ class _Entry {
     required this.icon,
     required this.title,
     this.subtitle,
+    this.shortcut,
     required this.run,
   });
 
   final IconData icon;
   final String title;
   final String? subtitle;
+
+  /// 这一条对应的全局快捷键，画在行尾。
+  ///
+  /// # 为什么要画出来
+  ///
+  /// 命令面板是**发现快捷键的地方**。一个按键只写在文档里，用户永远
+  /// 学不会它 —— 而学会了之后他就再也不会打开这个面板，那正是面板
+  /// 想要的结局。不画的话，面板只是一个更慢的菜单。
+  final String? shortcut;
+
   final void Function(BuildContext context, WidgetRef ref) run;
 }
 
@@ -146,6 +157,7 @@ class _PaletteState extends ConsumerState<_Palette> {
     _Entry(
       icon: Icons.edit_outlined,
       title: '新对话',
+      shortcut: '⌘N',
       run: (context, ref) {
         ref.read(chatControllerProvider.notifier).startNewChat();
         ref.read(mainViewProvider.notifier).go(MainView.chat);
@@ -178,6 +190,7 @@ class _PaletteState extends ConsumerState<_Palette> {
     _Entry(
       icon: Icons.settings_outlined,
       title: '打开设置',
+      shortcut: '⌘,',
       run: (context, ref) => showSettingsSheet(context),
     ),
     _Entry(
@@ -189,6 +202,7 @@ class _PaletteState extends ConsumerState<_Palette> {
     _Entry(
       icon: Icons.view_sidebar_outlined,
       title: '收起 / 展开左栏',
+      shortcut: '⌘B',
       run: (context, ref) => ref.read(layoutProvider.notifier).toggleLeft(),
     ),
   ];
@@ -462,6 +476,20 @@ class _PaletteState extends ConsumerState<_Palette> {
                                         ],
                                       ),
                                     ),
+                                    if (e.shortcut != null) ...[
+                                      const SizedBox(width: 12),
+                                      // 快捷键画在行尾，用等宽 + 第三级前景：
+                                      // 它是**提示**不是内容，一列扫下来
+                                      // 不该与标题抢注意力
+                                      Text(
+                                        e.shortcut!,
+                                        style: CortexType.mono(
+                                          context,
+                                          size: 11,
+                                          color: tokens.foregroundTertiary,
+                                        ),
+                                      ),
+                                    ],
                                   ],
                                 ),
                               ),
