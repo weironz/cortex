@@ -396,10 +396,19 @@ abstract final class CortexTheme {
           // 窗底（#0C0C0E）亮一档（分层原则不变），但同步压暗
           sidebar: dark ? const Color(0xFF131316) : const Color(0xFFF1F1F3),
           // 选中/悬停那一项：比 sidebar 再走一档。
-          // 差得太小选中态看不出来，差得太大会读成「另一个区域」
+          //
+          // ⚠️ **2026-10-23 实测反馈之后加深了。** 上一版浅色是 #EBEBED
+          // （与 sidebar 只差 6 个亮度单位），而悬停是它 55% 的半透明叠色
+          // （差 3）。于是「点一条会话」在屏幕上发生的事是：悬停 238 →
+          // 选中 235 → 鼠标移开回到 241 —— **选中态与悬停态只差 3**，
+          // 肉眼分不出，用户看到的就是「灰色背景一闪而过」。
+          //
+          // 现在浅色 #E4E4E7（差 13）、深色 #26262C（差 20）：选中与悬停
+          // 之间拉开到 7~10，鼠标移开之后那一行仍然明确地亮着。
+          // 仍然**中性**，不是品牌色 —— 「我在哪一条上」是位置不是动作。
           sidebarAccent: dark
-              ? const Color(0xFF1E1E22)
-              : const Color(0xFFEBEBED),
+              ? const Color(0xFF26262C)
+              : const Color(0xFFE4E4E7),
           sidebarBorder: dark
               ? const Color(0xFF1F1F23)
               : const Color(0xFFE4E4E7),

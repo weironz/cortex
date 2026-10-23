@@ -90,6 +90,44 @@ void main() {
         );
       });
 
+      /// ⚠️ **选中态必须与悬停态拉开，否则它就是「一闪而过」。**
+      ///
+      /// 2026-10-23 用户实报：「切换会话时，定位会话的灰色背景只会一闪而过，
+      /// 并不会停留在光标所在会话上」。
+      ///
+      /// 状态层是好的（`activeSessionId` 一直是对的，见
+      /// `session_selection_test.dart`）—— 坏的是**对比度**：上一版浅色
+      /// `sidebarAccent = #EBEBED` 与 sidebar 只差 6，而悬停是它 55% 的
+      /// 叠色（差 3）。于是点下去那一刻屏幕上的变化只有 3 个亮度单位，
+      /// 鼠标一移开又回到 6 —— 人眼读到的就是「亮了一下，没了」。
+      ///
+      /// 这条钉的是**两个差值同时成立**：选中 vs 侧栏要够，选中 vs 悬停
+      /// 也要够。只钉前者的话，悬停调到与选中一样深照样能过，而那时
+      /// 鼠标扫过每一行都像被选中了。
+      test('选中态与悬停态拉得开（否则就是「一闪而过」）', () {
+        final base = _luma(tokens.sidebar);
+        final selected = _luma(tokens.sidebarAccent);
+        // 悬停是 sidebarAccent 在 45% 处叠在 sidebar 上 —— 与
+        // `_SessionTile` 里那个 `withValues(alpha: 0.45)` 是同一个数。
+        // 两处不一致的话这条测试量的不是屏幕上那个颜色
+        final hover = base + (selected - base) * 0.45;
+
+        expect(
+          (selected - base).abs(),
+          greaterThan(10),
+          reason:
+              '选中与侧栏只差 ${(selected - base).abs().toStringAsFixed(1)} 个亮度单位。'
+              '上一版是 6，用户看到的就是「灰色背景一闪而过」',
+        );
+        expect(
+          (selected - hover).abs(),
+          greaterThan(4),
+          reason:
+              '选中与悬停只差 ${(selected - hover).abs().toStringAsFixed(1)}。'
+              '差得太小时，鼠标移开那一刻看起来像「选中态消失了」',
+        );
+      });
+
       test('侧栏与内容区分得开', () {
         expect(
           (_luma(tokens.sidebar) - _luma(scheme.surface)).abs(),

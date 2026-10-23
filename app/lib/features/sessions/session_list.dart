@@ -1007,8 +1007,9 @@ class _SessionTileState extends State<_SessionTile> {
         ),
         // 行高 ≈ 34：桌面端会话列表是**紧凑**的一列，不是触屏列表。
         // 上下 6 + 标题 14 + 2 + 时间戳 11 ≈ 33
-        padding: const EdgeInsets.fromLTRB(
-          CortexSpace.md,
+        padding: EdgeInsets.fromLTRB(
+          // 选中时左边让出 2px 给那条定位线（见下面的 border）
+          CortexSpace.md - (widget.selected ? 2 : 0),
           CortexSpace.sm,
           CortexSpace.xs,
           CortexSpace.sm,
@@ -1019,9 +1020,26 @@ class _SessionTileState extends State<_SessionTile> {
               : hot
               // 悬停比选中再浅一档：两者同色的话，鼠标扫过时每一行看起来
               // 都像被选中了，而真正选中的那一行反而认不出来
-              ? tokens.sidebarAccent.withValues(alpha: 0.55)
+              ? tokens.sidebarAccent.withValues(alpha: 0.45)
               : Colors.transparent,
           borderRadius: BorderRadius.circular(CortexRadius.row),
+          // ── 选中定位线 ──
+          //
+          // 2026-10-23 实测反馈之后加的。只靠底色差表达「我在这一条上」
+          // 在浅色主题里不够：选中与侧栏的亮度差 13，扫一眼能看出，
+          // 但**鼠标移开的瞬间**那一行会看起来像「刚才亮过一下」。
+          //
+          // 一条 2px 的竖线把这件事从「底色略有不同」变成「有一条明确的
+          // 标记」。它仍然是**中性**的（onSurface 而不是品牌色）：
+          // 位置用中性、动作用品牌色，这条判据见 docs/design.md 第九节。
+          border: widget.selected
+              ? Border(
+                  left: BorderSide(
+                    color: scheme.onSurface.withValues(alpha: 0.55),
+                    width: 2,
+                  ),
+                )
+              : null,
         ),
         // 已归档 = **整行**压暗（对齐「关掉的技能整行压暗」的做法）：
         // 压的是这一行整体 —— 时间戳、徽标、状态点一起退后，而不是给
