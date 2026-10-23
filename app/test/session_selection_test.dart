@@ -201,4 +201,58 @@ void main() {
       reason: '悬停态不该与选中态同色，否则鼠标扫过时每一行都像被选中了',
     );
   });
+
+  /// ⚠️ **定位线必须真的画出来。**
+  ///
+  /// 第一版把它写成 `Border(left: BorderSide(width: 2))` 配
+  /// `borderRadius: 8`。那条路走 Flutter 的 `paintNonUniformBorder` →
+  /// `drawDRRect`：画的是「外圆角矩形减去内圆角矩形」，在 8px 圆角上
+  /// 2px 宽的带子被圆角**整个吃掉** —— 截图逐像素扫，选中行左侧一个
+  /// 暗像素都没有，而 `flutter analyze` 与全部测试都是绿的。
+  ///
+  /// 所以这条测试不看 `decoration.border`（那个字段存在不代表画得出来），
+  /// 而是找那个独立的 `Positioned` 条本身。
+  testWidgets('选中行有一条画得出来的定位线', (tester) async {
+    final c = _boot([_s('alpha'), _s('beta')]);
+    addTearDown(c.dispose);
+    await _pump(tester, c);
+
+    c.read(chatControllerProvider.notifier).selectSession('beta');
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    final bar = find.byWidgetPredicate(
+      (w) =>
+          w is Container &&
+          w.constraints?.maxWidth == 3 &&
+          (w.decoration as BoxDecoration?)?.borderRadius != null,
+    );
+    expect(
+      bar,
+      findsOneWidget,
+      reason:
+          '⚠️ 选中行没有定位线。用 `Border(left:)` + `borderRadius` 画的话，'
+          '圆角会把那条带子吃掉 —— 代码在、测试绿、屏幕上什么都没有',
+    );
+
+    final size = tester.getSize(bar);
+    expect(size.width, 3, reason: '定位线宽 3px；更窄的话在 2× 屏上会被抗锯齿抹成一片灰');
+    expect(
+      size.height,
+      greaterThan(10),
+      reason: '定位线短于 10px 就只是一粒点，读不出「这一整行被选中」',
+    );
+
+    // 未选中的行不该有
+    expect(
+      find.byWidgetPredicate(
+        (w) =>
+            w is Container &&
+            w.constraints?.maxWidth == 3 &&
+            (w.decoration as BoxDecoration?)?.borderRadius != null,
+      ),
+      findsOneWidget,
+      reason: '两条会话里只有一条被选中，定位线也就只该有一条',
+    );
+  });
 }
