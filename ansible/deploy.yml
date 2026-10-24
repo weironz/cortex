@@ -225,6 +225,17 @@
               其余功能不受影响。
           when: cortex_sandbox_enabled and sandbox_pull is failed
 
+        # ── rustfs 镜像 ───────────────────────────────────
+        #
+        # agentd 也不会自己 pull。rustfs 2026-10-25 搬回这一栈（此前在
+        # cormex，那台机器重启了就没人拉它）——所以这个镜像**必须真的拉
+        # 下来**，拉不下来就该红，不是警告：没有它，附件/快照全哑，
+        # 而「部署全绿、只是 blobs 一直没在跑」正是这个闸存在的原因。
+        - name: 拉 rustfs 镜像
+          community.docker.docker_image_pull:
+            name: rustfs/rustfs
+            tag: "{{ rustfs_version }}"
+
         # ── 主体 ──────────────────────────────────────────
         #
         # dependencies=false 就是 --no-deps：只动点名的这几个，

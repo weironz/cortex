@@ -30,6 +30,10 @@ deploy_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFxWEymfiOIDKBjdAGZCvewE
 # ── 域名 ──────────────────────────────────────────────────
 # compose 里 `${DOMAIN}` 没有默认值，缺了整份 compose 解析不了
 cortex_domain: cortex.cloudcele.com
+# blobs 的对外域名（traefik 路由 `Host(...)` 的写法在这里）。
+# 浏览器直传连的是它；与 cortex_domain 不同源，所以 rustfs 里的 CORS
+# 只放 cortex_domain 那一处
+cortex_s3_domain: s3.cortex.cloudcele.com
 
 # ⚠️ **刻意留空，别填 https://cortex.cloudcele.com。**
 #
@@ -63,11 +67,14 @@ cortex_pg_user: cortex
 cortex_pg_db: cortex
 
 # ── 对象存储 ──────────────────────────────────────────────
-# ⚠️ rustfs 本身**不在这一栈**，它跟着记忆服务在 /data/cormex。
-# 这里只是从内网连过去，凭据在 .env.secrets 里
+# rustfs 2026-10-25 搬回这一栈（此前在 /data/cormex，机器一重启就没人拉它）。
+# 凭据在 .env.secrets 里，ansible 从不碰
 s3_endpoint: http://cortex-rustfs:9000
 s3_bucket: cortex-blobs
 s3_region: us-east-1
+# rustfs 镜像的版本。**钉死**，与 CORTEX_VERSION 各记各的：
+# 编译期没有它参与，而 latest 会让「线上那台 rustfs 是哪一版」查不清
+rustfs_version: 1.0.0-rc.3
 
 # ── 记忆服务 ──────────────────────────────────────────────
 # 另一个仓库、另一条版本线（github.com/weironz/cormex）
@@ -130,6 +137,7 @@ cortex_backup_dir: /data/cortex/backup
 # 而症状是沉默的：部署全绿，只是那个服务从来没起来过。
 deploy_services:
   - cortexdb
+  - rustfs
   - agentd
   - web
 # 沙箱开着时追加（profile 没激活时 compose 根本不认识 egress）

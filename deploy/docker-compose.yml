@@ -32,6 +32,61 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
+  # ── 对象存储（blobs 的字节住这儿）────────────────────────
+  #
+  # 2026-10-25 从 /data/cormex 那一栈搬回来：Cortex 自成一体，附件、快照、
+  # 生成的图全都落这个桶，它停了这些功能就全静默失败（`/blobs` 答不了、
+  # 备份容器也读不到）。搬回来之前它是 cormex 栈里的一个服务，那台机器一
+  # 重启它就不回来 —— 依赖另一个仓库的部署才会拉起它，而「缺什么补什么」
+  # 的意思正是：这份 compose 自己就该能起一个完整的 Cortex。
+  #
+  # ⚠️ **卷必须 external + 写死名字。** 这个卷 2026-08-08 起就存在，实际叫
+  # `cortex_cortex-prod-rustfs`（cormex 栈用 compose 项目名 `cortex` 时代的
+  # 产物）。不带 external 的话，这一栈（项目名也是 cortex）会复用同名卷，
+  # 数据还在；但哪天有人换项目名去 up，就会**新建空卷** —— 症状不是报错，
+  # 是「桶里的东西突然没了」。
+  rustfs:
+    image: rustfs/rustfs:${RUSTFS_VERSION:?NON-DEFAULT。缺这一行不应该 proceed —— 不写 latest：会漂}
+    container_name: cortex-rustfs
+    restart: unless-stopped
+    logging: *default-logging
+    security_opt:
+      - "no-new-privileges:true"
+    networks: [default, traefik]
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      # 控制台不开。要开就临时改一次，别长期挂着 ——
+      # 它是这个栈里唯一带管理能力的界面
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?凭据在 .env.secrets，ansible 从不碰它}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?凭据在 .env.secrets，ansible 从不碰它}
+      # ★ 精确到来源，**不能留 `*`**。
+      # Web 与 S3 是两个不同的域名，所以浏览器直传是**跨源**的；
+      # 而 `*` 意味着任何网站的 JS 都能拿着用户的浏览器读写这个桶
+      RUSTFS_CORS_ALLOWED_ORIGINS: "https://${DOMAIN:?在 .env 里设 DOMAIN}"
+      RUSTFS_OBS_LOGGER_LEVEL: warn
+      # 单卷。四卷纠删码要求四块独立物理盘，这台机器上没有 ——
+      # 假装有会让 RustFS 拒绝启动（那是正确行为）。
+      # 冗余由「镜像到第二存储」那条路提供，见 docs/operations.md
+      RUSTFS_UNSAFE_BYPASS_DISK_CHECK: "true"
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      # rustfs 的 / 是 S3 XML（404），拿状态码判不了 —— 能建立连接就算活
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/ >/dev/null 2>&1 || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik-network
+      traefik.http.routers.cortex-s3.rule: Host(`${S3_DOMAIN:?s3 的域名，也在 .env}`)
+      traefik.http.routers.cortex-s3.entrypoints: websecure
+      traefik.http.routers.cortex-s3.tls: "true"
+      traefik.http.routers.cortex-s3.tls.certresolver: letsencrypt
+      traefik.http.services.cortex-s3.loadbalancer.server.port: "9000"
+
   egress:
     image: ${CORTEX_REGISTRY:-registry.cn-shenzhen.aliyuncs.com/willspace}/cortex-egress-proxy:${CORTEX_VERSION:?由部署脚本写入，形如 v0.1.0}
     container_name: cortex-egress
@@ -205,6 +260,12 @@ services:
     # 与 cortexd 同样接三张网：traefik 进得来、sandbox 直连容器名、
     # default 提供出网（多网络时默认路由来自非 internal 的那张）
     networks: [default, traefik, sandbox]
+    # 等 rustfs 健康：附件上传是同步路径，agentd 起来时桶还没就绪的话
+    # 第一批 `/blobs` 会 5xx —— 而用户看到的是「附件发不出去」，看不出
+    # 只是冷启动顺序问题。（rustfs 已搬回这一栈，见上面那段注释。）
+    depends_on:
+      rustfs:
+        condition: service_healthy
     environment:
       CORTEX_AGENTD_BIND: 0.0.0.0:8081
       # 这个进程怎么找到记忆服务。同一台机器上走 compose 网络里的服务名。
@@ -571,12 +632,12 @@ networks:
 
 
 volumes:
-  # 记忆服务的三个卷（postgres / rustfs / workspace）不在这里了 ——
-  # 它们跟着记忆服务去了 /data/cormex 那一栈。
-  #
-  # 这里以前还有 `cortex-prod-models`（进程内 ONNX 权重，随 local-embed
-  # 一起去掉）。**已部署的机器上那个卷不会自动删**，确认没在用之后手工清：
-  #     docker volume rm cortex_cortex-prod-models
+  # blobs 的字节。**external + 写死名字**，见上面 rustfs 服务那段注释：
+  # 这个卷从 cormex 时代就在（实际名 `cortex_cortex-prod-rustfs`），
+  # 换项目名去 up 也不许新建空卷
+  rustfs-data:
+    external: true
+    name: cortex_cortex-prod-rustfs
 
   # Cortex 自己那个库的数据。**显式写 `name:`** —— compose 默认加项目名
   # 前缀，而备份脚本与手工运维都按裸名找卷，前缀会让两边指不同的东西。
