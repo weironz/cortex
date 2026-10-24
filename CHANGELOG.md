@@ -10,7 +10,7 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ---
 
-## [0.1.39] - 2026-10-25
+## [0.1.40] - 2026-10-25
 
 修**附件与快照长期不在跑**的问题。
 
@@ -25,8 +25,17 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 - 部署自检、`deploy/.env.example` 同步新增 `RUSTFS_VERSION` 与
   `S3_DOMAIN` 两个必填变量。字段从 `docker-compose.yml` 顶部注释里
   「两个域名」的说法同步成立（区分根域名与 S3 域名）。
+- 顺带修 agentd 那份 `depends_on`（YAML 里写重了同一个键，cortexdb 把
+  rustfs 顶掉了 —— 加 rustfs 的依赖本来就是为了拦「桶还没起来 agentd
+  就先跑」的冷启动失败）。
 - 修 galaxy.ansible.com 持续不可用时部署硬卡在装 collection 上（退到
   从 GitHub tag 装，见 0.1.38 附带那次修复）。
+
+### 与 0.1.39 的关系
+
+0.1.39 的 tag 指到的是「先把 rustfs 搬回来」那一批（compose / ansible /
+清单），但它**还没**带上 `depends_on` 合并那一笔（YAML 里写了同一个键两次）。0.1.40 是它的后续，
+在 0.1.39 的内容之上多这一笔，让部署按既定顺序在节点上走通。
 
 ---
 
