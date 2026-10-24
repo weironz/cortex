@@ -249,3 +249,29 @@ jobs:
 
           # Web 也要真的发得出来（traefik 的路径分流三条都得对）
           curl -fsS https://cortex.cloudcele.com/ | grep -q '<html'
+
+          # ★ **返回 200 不等于页面能启动。**
+          #
+          # wasm-gc 的胶水脚本是 `main.dart.mjs`，浏览器用 `import()` 按
+          # module 加载它，而 module script 的 MIME 在 HTML 规范里是**强校验**
+          # 的：nginx 的 `mime.types` 里没有 `.mjs` 时会回落成
+          # `application/octet-stream`，import() 当场被拒 —— 整页白屏，而
+          # 每一条 HTTP 都是 200、上面那句 `grep '<html'` 也照样过。
+          #
+          # 2026-10-24 就这么白了一整版（0.1.36/0.1.37 都没被抓到）：部署输出
+          # 全绿、版本探针答对了、用户打开是一片空白。**只有真浏览器会说话，
+          # 而这里没有浏览器** —— 所以退一步，钉住那两个文件的 Content-Type，
+          # 它们是浏览器挑渲染管线的全部依据。
+          mjs_type=$(curl -fsSI https://cortex.cloudcele.com/main.dart.mjs \
+                     | tr -d '\r' | grep -i '^content-type:' || true)
+          case "$mjs_type" in
+            *javascript*) ;;
+            *) { echo "main.dart.mjs 的 MIME 不是 JS（${mjs_type:-没有这个头}）——"
+                 echo "浏览器会拒绝 import()，整页白屏（nginx 的 types 里漏了 mjs？）"; exit 1; } ;;
+          esac
+          wasm_type=$(curl -fsSI https://cortex.cloudcele.com/main.dart.wasm \
+                      | tr -d '\r' | grep -i '^content-type:' || true)
+          case "$wasm_type" in
+            *application/wasm*) ;;
+            *) { echo "main.dart.wasm 的 MIME 不是 application/wasm（${wasm_type:-没有这个头}）"; exit 1; } ;;
+          esac
