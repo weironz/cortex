@@ -260,12 +260,6 @@ services:
     # 与 cortexd 同样接三张网：traefik 进得来、sandbox 直连容器名、
     # default 提供出网（多网络时默认路由来自非 internal 的那张）
     networks: [default, traefik, sandbox]
-    # 等 rustfs 健康：附件上传是同步路径，agentd 起来时桶还没就绪的话
-    # 第一批 `/blobs` 会 5xx —— 而用户看到的是「附件发不出去」，看不出
-    # 只是冷启动顺序问题。（rustfs 已搬回这一栈，见上面那段注释。）
-    depends_on:
-      rustfs:
-        condition: service_healthy
     environment:
       CORTEX_AGENTD_BIND: 0.0.0.0:8081
       # 这个进程怎么找到记忆服务。同一台机器上走 compose 网络里的服务名。
@@ -436,6 +430,11 @@ services:
     # 会让它在 postgres 还在初始化的那十几秒里反复重启刷日志
     depends_on:
       cortexdb:
+        condition: service_healthy
+      # 附件上传是**同步**路径：桶还没就绪时第一批 /blobs 会 5xx，
+      # 用户看到的是「附件发不出去」—— 看不出其实是冷启动顺序。
+      # （rustfs 2026-10-25 搬回这一栈，见它上面那段注释。）
+      rustfs:
         condition: service_healthy
     deploy:
       resources:
