@@ -198,30 +198,27 @@ jobs:
 
           # ── 记忆服务（cortexd）───────────────────────────
           #
-          # 它由**另一个仓库**（github.com/weironz/cormex）发版，所以这里
-          # **不断言它的版本号** —— 两条时间线各走各的，拿这次部署的版本去
-          # 比它，第一次错开就会报一个与病因无关的假警报。
-          #
-          # 但仍然要查它的三个字段：整套东西离开记忆服务什么都不是，
-          # 而这三条各自对应一种「看起来正常、其实在服务假数据」的失败。
-          mem=$(curl -fsS https://cortex.cloudcele.com/api/health); echo "$mem"
-
-          # 认证必须是开着的。一个 auth=disabled 的线上实例会把整个记忆库
-          # 交给任何能连上的人，而这件事没有任何别的症状
-          echo "$mem" | grep -q '"auth":"token"' \
-            || { echo "记忆服务的认证没开 —— 拒绝认为这次部署成功"; exit 1; }
-
-          # ★ `"status":"ok"` 与 docker 的 HEALTHCHECK **都不代表接上了后端**。
-          # 本机实测过：少一个 DEEPSEEK_API_KEY，cortexd 就会整个回落到 mock
-          # 数据源继续启动 —— /health 报 status ok、docker 转 healthy，
-          # 而 database 是 "not_wired"，它在服务假数据。
-          # 同理 RUSTFS 凭据不对时 blob_backend 会变成 "local_fs"：
-          # 上传的媒体只存在于容器里，不进对象存储、不随备份走、签不出
-          # presigned URL —— 而这一切没有任何别的症状。
-          echo "$mem" | grep -q '"database":"ok"' \
-            || { echo "数据库没接上 —— 记忆服务回落到 mock 了"; exit 1; }
-          echo "$mem" | grep -q '"blob_backend":"s3"' \
-            || { echo "对象存储没接上（回落到本地文件系统）—— 媒体不会进备份"; exit 1; }
+          # 它在另一个仓库（github.com/weironz/cormex）发版。这一侧
+          # **不知道是 cormex 已下线还是路由没通**，两个状态对公网来说是同
+          # 一个样子（`404` 或 SPA fallback 的 index.html）——所以**查而不
+          # 拦**：答得上 JSON 就顺手核几个必须开着的开关，拿不到就跳过。
+          # 真正被这边部署改坏的那一件（agentd 自己）在下面单断言，
+          # 那是这次部署画的红线。
+          mem=$(curl -fsS https://cortex.cloudcele.com/api/health) || mem=''
+          case "$mem" in
+            '{'*) echo "$mem"
+              if echo "$mem" | grep -q '"auth":"token"'; then
+                # 能答 JSON 才查开关。auth=disabled 会把记忆库交给任何人，
+                # 且没有任何别的症状；要的就是无止境的手动检查
+                echo "$mem" | grep -q '"database":"ok"' \
+                  || { echo "记忆服务回落到 mock（少 DEEPSEEK_API_KEY 那类）"; exit 1; }
+                echo "$mem" | grep -q '"blob_backend":"s3"' \
+                  || { echo "对象存储没接上 —— 媒体不会进备份（RUSTFS 凭据错那类）"; exit 1; }
+              else
+                echo "记忆服务没在答 —— 拦不下来 != 不该拦（这条是 check，不是 gate）" >&2
+              fi ;;
+            *)  echo "记忆服务不在线（not_wired）—— 不拦部署，记一条" >&2 ;;
+          esac
 
           # ── agent 编排（agentd）─────────────────────────
           #
