@@ -219,6 +219,22 @@ impl DelegatedScope {
             // 本身是 POST 上传，`/blobs/{hash}/url` 的预签名 URL 在沙箱里
             // 也用不了（对象存储不可达），都不放。
             (&Method::GET, p) if is_blob_path(p) => true,
+            // 联网检索（`web_search` 工具）与抓正文（`web_fetch`）。
+            //
+            // **漏掉 web_search 的实测表现（2026-10-25）**：云端会话里模型
+            // 调它、403，它老实告诉用户「联网检索失败」，而桌面端同一工具
+            // 好好的 —— 与生图那条同一个「桌面能用、云端不能」的形状。
+            // key 在服务端（这正是这条路的点），容器要的只是让它替自己
+            // 发出去；这里放行不会给沙箱多一样出网能力（它还是只能打
+            // agentd，egress 白名单不因此多一个域名）。
+            //
+            // `POST /fetch` 同一条理由：它把一个 URL 发出去，但出网仍然
+            // 发生在服务端，key 不进容器。
+            (&Method::POST, "/search") => true,
+            (&Method::POST, "/fetch") => true,
+            // 资料库全文检索（`library_search` 工具）。与上面同一条链
+            //（remote.rs → agentd），漏了的表现一样：云端查不到资料库
+            (&Method::POST, "/library/search") => true,
             _ => false,
         }
     }
@@ -382,6 +398,13 @@ mod tests {
             (Method::POST, "/episodes"),
             (Method::GET, "/sessions/01ABC"),
             (Method::GET, "/auth/me"),
+            // 联网检索 / 抓正文 / 资料库检索。2026-10-25 实测漏了
+            // `/search`：云端会话的 web_search 全部 403，模型如实把
+            // 那句报错端给用户 —— 而桌面端同一个工具好好的。那批
+            // 403 就是这一单子比工具目录慢一步的直接账单
+            (Method::POST, "/search"),
+            (Method::POST, "/fetch"),
+            (Method::POST, "/library/search"),
         ] {
             assert!(
                 s.allows(&m, p),
