@@ -16,6 +16,7 @@ import 'widgets/confirm_panel.dart';
 import 'widgets/conversation_view.dart';
 import 'widgets/message_composer.dart';
 import '../../core/theme.dart';
+import '../../core/ui_scale.dart';
 
 /// Centre pane: header, transcript, composer.
 ///
@@ -177,6 +178,24 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     // 在这一栏里按下指针就把键盘要回来（除非焦点已经在栏内）。
     // 探针套在整栏外面，所以「栏内」包括输入框、气泡上的按钮、以及
     // 消息正文的选中区 —— 见 `_reclaimFocus`
+    //
+    // 聊天文字大小在这**一层**落地（改写子树的 textScaler），而不是去改
+    // 气泡的样式：气泡、输入框、确认面板、抽屉里几十处文字各有各的样式，
+    // 逐处乘系数等于埋一个「新加的文字忘了乘」的静默漂移。根上的界面缩放
+    // 在 `app.dart` 已经生效，这里再乘聊天档 —— 最终 = 界面 × 聊天。
+    //
+    // ⚠️ 乘的是**进到这一层之前**的系数（`MediaQuery.textScalerOf`），
+    // 不是直接用界面档：组合关系放在一起，平台自己的文字缩放偏好才不会
+    // 被我们的档位顶掉。
+    final chatFactor =
+        scaleFactorOf(MediaQuery.textScalerOf(context)) *
+        ref.watch(uiScalePrefsProvider.select((s) => s.chat));
+    Widget chatSurface(Widget child) => MediaQuery(
+      data: MediaQuery.of(
+        context,
+      ).copyWith(textScaler: composeTextScaler(chatFactor, 1.0)),
+      child: child,
+    );
     return Listener(
       onPointerDown: _reclaimFocus,
       child: Focus(
@@ -191,6 +210,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           streaming,
           empty,
           composer,
+          chatSurface,
         ),
       ),
     );
@@ -204,6 +224,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
     bool streaming,
     bool empty,
     Widget Function({required bool centred}) composer,
+    Widget Function(Widget child) chatSurface,
   ) {
     final hasSession = sessionId != null;
     return Column(
@@ -331,15 +352,19 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                   child: Center(
                     child: Padding(
                       padding: const EdgeInsets.symmetric(vertical: 32),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const ConversationHero(),
-                          const SizedBox(height: 22),
-                          composer(centred: true),
-                          const SizedBox(height: 18),
-                          const ConversationPrompts(),
-                        ],
+                      // 白纸也是聊天面：招呼与起手式的文字跟着聊天档走，
+                      // 与「开了口之后」的对话区保持同一档
+                      child: chatSurface(
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const ConversationHero(),
+                            const SizedBox(height: 22),
+                            composer(centred: true),
+                            const SizedBox(height: 18),
+                            const ConversationPrompts(),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -350,8 +375,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         else ...[
           // 走到这儿必定有会话：`empty` 为假意味着有轮次或者正在流，
           // 两者都得先有一条会话才谈得上
-          const Expanded(child: ConversationView()),
-          composer(centred: false),
+          Expanded(child: chatSurface(const ConversationView())),
+          chatSurface(composer(centred: false)),
         ],
       ],
     );

@@ -53,7 +53,10 @@ import 'package:flutter_test/flutter_test.dart';
 ///
 /// 尺寸取的是设置窗右侧内容区在 1080p 上的实际大小。给一个过大的画布
 /// 会让溢出类问题测不出来，给一个过小的又会造出实际不存在的溢出。
-Future<Object?> _paint(WidgetTester tester, Widget page) async {
+// Public so sibling tests can paint a settings page under the same fixture
+// (same viewport size, same provider overrides) — divergent fixtures make
+// "renders without exception" assertions disagree for no reason.
+Future<Object?> paintWith(WidgetTester tester, Widget page) async {
   tester.view.physicalSize = const Size(900, 760);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
@@ -138,7 +141,7 @@ Future<void> _paintUnderAppWiring(WidgetTester tester, Widget page) async {
 void main() {
   group('设置页画得出来', () {
     testWidgets('外观 —— 主题与动效两节都在', (tester) async {
-      final err = await _paint(tester, const AppearancePage());
+      final err = await paintWith(tester, const AppearancePage());
 
       expect(err, isNull, reason: '画崩了。这一条正是 2026-08-21 那次「一片空白」会红的地方');
       expect(
@@ -154,7 +157,7 @@ void main() {
     });
 
     testWidgets('外观 —— 「跟随系统」写出了系统此刻的值', (tester) async {
-      await _paint(tester, const AppearancePage());
+      await paintWith(tester, const AppearancePage());
       expect(
         find.textContaining('系统现在：'),
         findsOneWidget,
@@ -196,13 +199,13 @@ void main() {
     });
 
     testWidgets('数据 —— 工作空间与导入两节都在', (tester) async {
-      final err = await _paint(tester, const DataPage());
+      final err = await paintWith(tester, const DataPage());
       expect(err, isNull);
       expect(find.text('导入'), findsOneWidget);
     });
 
     testWidgets('模型服务 —— 默认落在「全部」总览上', (tester) async {
-      final err = await _paint(tester, const ModelPage());
+      final err = await paintWith(tester, const ModelPage());
       expect(err, isNull);
       // 这一页最大的一块是卡片墙。它画崩了的话右侧一片空白，
       // 而左列照常 —— 与 2026-08-21「外观」页那次一模一样的形状
@@ -216,12 +219,12 @@ void main() {
     });
 
     testWidgets('关于', (tester) async {
-      final err = await _paint(tester, const AboutPage());
+      final err = await paintWith(tester, const AboutPage());
       expect(err, isNull);
     });
 
     testWidgets('用量 —— 有数时画得出金额与按模型两节', (tester) async {
-      final err = await _paint(tester, const UsagePage());
+      final err = await paintWith(tester, const UsagePage());
       expect(err, isNull);
       expect(find.text('花费'), findsOneWidget);
       expect(find.text('按模型'), findsOneWidget);
@@ -232,7 +235,7 @@ void main() {
     /// 直接钉住那个踩过的形状：三档选择器**必须**能待在无界的竖直空间里。
     /// 上面那条是端到端的，这条是「为什么」——它红的时候直接指向病灶。
     testWidgets('三档选择器放进 ListView 不炸', (tester) async {
-      final err = await _paint(
+      final err = await paintWith(
         tester,
         ListView(
           children: [

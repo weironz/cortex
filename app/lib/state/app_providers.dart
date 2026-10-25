@@ -44,6 +44,7 @@ import '../models/sync_event.dart';
 import '../core/app_config.dart';
 import '../core/local_llm.dart';
 import '../core/motion.dart';
+import '../core/ui_scale.dart';
 import '../core/settings_store.dart';
 import '../core/local_agent.dart';
 import '../models/account.dart';
@@ -1817,4 +1818,48 @@ class MotionPrefNotifier extends Notifier<MotionPref> {
 
 final motionPrefProvider = NotifierProvider<MotionPrefNotifier, MotionPref>(
   MotionPrefNotifier.new,
+);
+
+/// 界面缩放与聊天文字大小。档位与组合规则见 [UiScale]（core/ui_scale.dart）。
+///
+/// # 为什么两个值合在一个 notifier
+///
+/// 聊天档的语义是「**乘在界面档之上**」—— 两个值要一起读才算得清聊天区
+/// 最终多大。拆成两个的话，改界面档的重建会让聊天档的消费者各自读各自的
+/// 旧值，一帧之内出现「界面变了聊天没跟上」的中间态。
+class UiScaleNotifier extends Notifier<UiScale> {
+  static const String _uiKey = 'ui_scale';
+  static const String _chatKey = 'chat_text_scale';
+
+  @override
+  UiScale build() {
+    Future.microtask(_restore);
+    return const UiScale();
+  }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    final ui = parseScale(saved[_uiKey]) ?? kDefaultScale;
+    final chat = parseScale(saved[_chatKey]) ?? kDefaultScale;
+    if (ui != state.ui || chat != state.chat) {
+      state = UiScale(ui: ui, chat: chat);
+    }
+  }
+
+  void setUi(double v) {
+    if (state.ui == v) return;
+    state = UiScale(ui: v, chat: state.chat);
+    unawaited(ref.read(settingsPatcherProvider)(_uiKey, '$v'));
+  }
+
+  void setChat(double v) {
+    if (state.chat == v) return;
+    state = UiScale(ui: state.ui, chat: v);
+    unawaited(ref.read(settingsPatcherProvider)(_chatKey, '$v'));
+  }
+}
+
+final uiScalePrefsProvider = NotifierProvider<UiScaleNotifier, UiScale>(
+  UiScaleNotifier.new,
 );

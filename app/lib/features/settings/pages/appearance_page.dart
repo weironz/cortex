@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/motion.dart';
+import '../../../core/ui_scale.dart';
 import '../../../state/app_providers.dart';
 import '../widgets/settings_layout.dart';
 
@@ -95,6 +96,49 @@ class _AppearancePageState extends ConsumerState<AppearancePage>
               options: const [
                 (value: false, label: '默认', hint: '为长回答留行距'),
                 (value: true, label: '紧凑', hint: '行高 −6px · 正文 14px'),
+              ],
+            ),
+          ],
+        ),
+        // ── 字体与缩放 ─────────────────────────────────────
+        //
+        // 两个旋钮的分工见 core/ui_scale.dart 头上那段：界面档管**所有**
+        // 文字，聊天档乘在它之上、只管对话区。改动当场生效（textScaler
+        // 是响应式的），落盘在 UiScaleNotifier。
+        SettingsSection(
+          title: '界面缩放',
+          description:
+              '缩放整个应用的文字。当前：${(ref.watch(uiScalePrefsProvider.select((s) => s.ui)) * 100).round()}%',
+          children: [
+            SettingsChoice<double>(
+              value: ref.watch(uiScalePrefsProvider.select((s) => s.ui)),
+              onChanged: ref.read(uiScalePrefsProvider.notifier).setUi,
+              options: [
+                for (final p in kScalePresets)
+                  (
+                    value: p,
+                    label: '${(p * 100).round()}%',
+                    hint: p == kDefaultScale ? '默认' : '',
+                  ),
+              ],
+            ),
+          ],
+        ),
+        SettingsSection(
+          title: '聊天文字大小',
+          description:
+              '相对于界面缩放，调整对话与消息输入框的字号。侧边栏和控件大小保持不变。当前：${(ref.watch(uiScalePrefsProvider.select((s) => s.chat)) * 100).round()}%',
+          children: [
+            SettingsChoice<double>(
+              value: ref.watch(uiScalePrefsProvider.select((s) => s.chat)),
+              onChanged: ref.read(uiScalePrefsProvider.notifier).setChat,
+              options: [
+                for (final p in kScalePresets)
+                  (
+                    value: p,
+                    label: '${(p * 100).round()}%',
+                    hint: p == kDefaultScale ? '默认' : '',
+                  ),
               ],
             ),
           ],

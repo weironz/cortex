@@ -29,7 +29,11 @@ class PanelHeader extends StatelessWidget {
     final scheme = theme.colorScheme;
 
     return Container(
-      height: 44,
+      // ⚠️ **minHeight，不是 height。** 界面缩放（设置 → 外观 → 字体与缩放）
+      // 会让标题与副标题的字号一起长，44px 的固定高度在 150% 档就会竖直
+      // 溢出 —— 那条黄黑纹出现在每个面板的头顶上。让它能长，
+      // 默认档的高度不变（文字 13.5px 时正好也是 44）。
+      constraints: const BoxConstraints(minHeight: 44),
       padding: const EdgeInsets.only(
         left: CortexSpace.lg,
         right: CortexSpace.md,

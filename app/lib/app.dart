@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/motion.dart';
 import 'core/theme.dart';
+import 'core/ui_scale.dart';
 import 'features/auth/login_gate.dart';
 import 'state/app_providers.dart';
 
@@ -16,6 +17,7 @@ class CortexApp extends ConsumerWidget {
     // 一个后代 context 里、可能在另一帧被调的，在里面 `ref.watch`
     // 注册的依赖挂在这个 widget 上却不由它的 build 驱动
     final motion = ref.watch(motionPrefProvider);
+    final uiScale = ref.watch(uiScalePrefsProvider).ui;
 
     return MaterialApp(
       title: 'Cortex',
@@ -31,6 +33,11 @@ class CortexApp extends ConsumerWidget {
       // 以及所有 `reducedMotion(context)` 的调用点）读到的是**同一位**。
       // 另起一套的下场是：用户选了「关闭」，我们的三个点停了，
       // 框架的转场照旧 —— 一个只兑现一半的开关。
+      //
+      // 界面缩放在同一位落地：改写 `textScaler` —— 每一个 Text 的字号都
+      // 过它，效果最接近浏览器那种整页 zoom。图标与固定尺寸控件不跟着长
+      //（它们是形状不是文字），装文字的固定高度容器各自放高（见
+      // `panel_header` 的 minHeight）。
       builder: (context, child) {
         final media = MediaQuery.of(context);
         return MediaQuery(
@@ -38,6 +45,10 @@ class CortexApp extends ConsumerWidget {
             disableAnimations: resolveDisableAnimations(
               motion,
               system: media.disableAnimations,
+            ),
+            textScaler: composeTextScaler(
+              scaleFactorOf(media.textScaler),
+              uiScale,
             ),
           ),
           // 没有路由在建时 child 为 null（`builder` 的约定）
