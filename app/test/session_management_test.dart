@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:cortex_app/app.dart';
 import 'package:cortex_app/core/app_config.dart';
+import 'package:cortex_app/features/sessions/session_list.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/chat_controller.dart';
 import 'package:flutter/material.dart';
@@ -15,7 +16,13 @@ class _MockConfig extends AppConfigNotifier {
 }
 
 Widget _app() => ProviderScope(
-  overrides: [appConfigProvider.overrideWith(_MockConfig.new)],
+  overrides: [
+    appConfigProvider.overrideWith(_MockConfig.new),
+    settingsReaderProvider.overrideWithValue(
+      () async => const <String, String>{},
+    ),
+    settingsWriterProvider.overrideWithValue((_) async {}),
+  ],
   child: const CortexApp(),
 );
 
@@ -46,6 +53,17 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 600));
 
+    // 侧栏导航变高后，列表仍按需构建；像用户一样滚动到最后一条记录。
+    await tester.scrollUntilVisible(
+      find.text('（已归档）上个季度的迁移方案'),
+      150,
+      scrollable: find
+          .descendant(
+            of: find.byType(SessionList),
+            matching: find.byType(Scrollable),
+          )
+          .last,
+    );
     expect(find.text('（已归档）上个季度的迁移方案'), findsOneWidget);
     expect(
       find.text('已归档'),

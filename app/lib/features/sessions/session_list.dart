@@ -1124,18 +1124,19 @@ class _SessionTileState extends State<_SessionTile> {
                   ],
                 ),
                 const SizedBox(height: 2),
-                Row(
+                // 窄侧栏和长时间戳下，状态换行而不是挤出消息行。
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 2,
                   children: [
                     Text(
                       formatRelative(session.updatedAt),
                       style: theme.textTheme.labelSmall,
                     ),
                     if (session.archived) ...[
-                      const SizedBox(width: 6),
                       Text('已归档', style: theme.textTheme.labelSmall),
                     ],
                     if (session.isLocalDraft) ...[
-                      const SizedBox(width: 6),
                       Text(
                         '未同步',
                         style: theme.textTheme.labelSmall?.copyWith(
@@ -1144,7 +1145,6 @@ class _SessionTileState extends State<_SessionTile> {
                       ),
                     ],
                     if (session.hasLocalOverrides) ...[
-                      const SizedBox(width: 6),
                       Tooltip(
                         // Said out loud because the alternative is a
                         // rename that looks saved and silently is not.
