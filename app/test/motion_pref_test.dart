@@ -153,6 +153,44 @@ void main() {
         reason: '不存的话，调成深色的人每次启动都会被白底闪一下，然后自己点回去',
       );
     });
+
+    test('已保存的跟随系统设置在白色默认主题下仍然恢复', () async {
+      final c = ProviderContainer(
+        overrides: [
+          settingsReaderProvider.overrideWithValue(
+            () async => const {'theme_mode': 'system'},
+          ),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      c.read(themeModeProvider);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        c.read(themeModeProvider),
+        ThemeMode.system,
+        reason: '默认浅色不能覆盖用户显式选择的跟随系统',
+      );
+    });
+
+    test('没存过主题时默认使用浅色，而不是跟随系统', () async {
+      final c = ProviderContainer(
+        overrides: [
+          settingsReaderProvider.overrideWithValue(
+            () async => const <String, String>{},
+          ),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      expect(c.read(themeModeProvider), ThemeMode.light);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        c.read(themeModeProvider),
+        ThemeMode.light,
+        reason: '空设置回读后也必须保持现代白色主题',
+      );
+    });
   });
 
   group('三档真的传到了 widget 树里', () {

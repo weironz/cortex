@@ -416,8 +416,10 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                   decoration: BoxDecoration(
                     color: _dragging
                         ? scheme.primary.withValues(alpha: 0.06)
+                        : theme.brightness == Brightness.light
+                        ? scheme.surfaceContainerLow
                         : scheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(CortexRadius.input),
+                    borderRadius: BorderRadius.circular(CortexRadius.card),
                     // 常态发丝线 → 焦点/拖拽时品牌色。焦点环是整屏唯一
                     // 需要被一眼找到的东西，所以只有它允许用彩色边框
                     border: Border.all(
@@ -428,228 +430,233 @@ class _MessageComposerState extends ConsumerState<MessageComposer> {
                       // 发生处」，不应该一粗一细；常态就退回发丝线
                       width: _dragging || _focusNode.hasFocus ? 1.5 : 1,
                     ),
-                    // 浮起的空间暗示只给钉底那条 —— 居中形态站在一屏留白
-                    // 正中央，它不需要证明「我浮在什么东西上面」，投影
-                    // 在那儿只是装饰
-                    boxShadow: widget.centred ? null : theme.cortex.shadow2,
+                    // 浮起的输入区从画布上轻轻托起，承担桌面端的层级感。
+                    boxShadow: theme.cortex.shadow2,
                   ),
-                  padding: widget.centred
-                      ? const EdgeInsets.fromLTRB(
-                          CortexSpace.md,
-                          CortexSpace.md,
-                          CortexSpace.md,
-                          CortexSpace.md,
-                        )
-                      : const EdgeInsets.fromLTRB(
-                          CortexSpace.sm,
-                          CortexSpace.xs,
-                          CortexSpace.sm,
-                          CortexSpace.xs,
-                        ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
+                  padding: const EdgeInsets.fromLTRB(14, 8, 14, 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: CortexSpace.xs),
-                        child: CortexIconButton(
-                          // 白纸上也能选文件 —— 会话在选完那一刻兑现
-                          onPressed: widget.enabled
-                              ? () => ref
-                                    .read(attachmentQueueProvider.notifier)
-                                    .pickAndUpload(
-                                      sessionId ?? widget.ensureSession(),
-                                    )
-                              : null,
-                          icon: Icons.attach_file_rounded,
-                          size: 18,
-                          box: 30,
-                          tooltip: '添加附件（也可以直接拖进来或粘贴）',
-                        ),
-                      ),
-                      Expanded(
-                        child: Shortcuts(
-                          shortcuts: const {
-                            SingleActivator(LogicalKeyboardKey.enter):
-                                _SendIntent(),
-                            SingleActivator(LogicalKeyboardKey.arrowDown):
-                                _MentionMoveIntent(1),
-                            SingleActivator(LogicalKeyboardKey.arrowUp):
-                                _MentionMoveIntent(-1),
-                            SingleActivator(LogicalKeyboardKey.escape):
-                                _MentionDismissIntent(),
-                            // 粘贴要自己接管，因为 TextField 的原生粘贴只认
-                            // 文本 —— 剪贴板里那张图它当作「什么都没有」。
-                            // 两个键位都列上：Windows/Linux 是 Ctrl，macOS 是 ⌘
-                            SingleActivator(
-                              LogicalKeyboardKey.keyV,
-                              control: true,
-                            ): _PasteIntent(),
-                            SingleActivator(
-                              LogicalKeyboardKey.keyV,
-                              meta: true,
-                            ): _PasteIntent(),
-                          },
-                          child: Actions(
-                            actions: {
-                              _SendIntent: CallbackAction<_SendIntent>(
-                                onInvoke: (_) {
-                                  // 引用列表开着时，Enter 是「选中这一条」，
-                                  // 不是「发出去」—— 直接发的话，用户刚打了
-                                  // 一半的路径会被当成正文送走
-                                  final options = _candidates();
-                                  if (_mention != null && options.isNotEmpty) {
-                                    _insertMention(
-                                      options[_mentionAt % options.length],
-                                    );
-                                    return null;
-                                  }
-                                  _submit();
+                      Shortcuts(
+                        shortcuts: const {
+                          SingleActivator(LogicalKeyboardKey.enter):
+                              _SendIntent(),
+                          SingleActivator(LogicalKeyboardKey.arrowDown):
+                              _MentionMoveIntent(1),
+                          SingleActivator(LogicalKeyboardKey.arrowUp):
+                              _MentionMoveIntent(-1),
+                          SingleActivator(LogicalKeyboardKey.escape):
+                              _MentionDismissIntent(),
+                          // 粘贴要自己接管，因为 TextField 的原生粘贴只认
+                          // 文本 —— 剪贴板里那张图它当作「什么都没有」。
+                          // 两个键位都列上：Windows/Linux 是 Ctrl，macOS 是 ⌘
+                          SingleActivator(
+                            LogicalKeyboardKey.keyV,
+                            control: true,
+                          ): _PasteIntent(),
+                          SingleActivator(LogicalKeyboardKey.keyV, meta: true):
+                              _PasteIntent(),
+                        },
+                        child: Actions(
+                          actions: {
+                            _SendIntent: CallbackAction<_SendIntent>(
+                              onInvoke: (_) {
+                                // 引用列表开着时，Enter 是「选中这一条」，
+                                // 不是「发出去」—— 直接发的话，用户刚打了
+                                // 一半的路径会被当成正文送走
+                                final options = _candidates();
+                                if (_mention != null && options.isNotEmpty) {
+                                  _insertMention(
+                                    options[_mentionAt % options.length],
+                                  );
                                   return null;
-                                },
-                              ),
-                              _PasteIntent: CallbackAction<_PasteIntent>(
-                                onInvoke: (_) {
-                                  unawaited(_paste());
-                                  return null;
-                                },
-                              ),
-                              _MentionMoveIntent:
-                                  CallbackAction<_MentionMoveIntent>(
-                                    onInvoke: (intent) {
-                                      final options = _candidates();
-                                      if (_mention == null || options.isEmpty) {
-                                        return null;
+                                }
+                                _submit();
+                                return null;
+                              },
+                            ),
+                            _PasteIntent: CallbackAction<_PasteIntent>(
+                              onInvoke: (_) {
+                                unawaited(_paste());
+                                return null;
+                              },
+                            ),
+                            _MentionMoveIntent:
+                                CallbackAction<_MentionMoveIntent>(
+                                  onInvoke: (intent) {
+                                    final options = _candidates();
+                                    if (_mention == null || options.isEmpty) {
+                                      return null;
+                                    }
+                                    setState(() {
+                                      _mentionAt =
+                                          (_mentionAt + intent.delta) %
+                                          options.length;
+                                      if (_mentionAt < 0) {
+                                        _mentionAt += options.length;
                                       }
-                                      setState(() {
-                                        _mentionAt =
-                                            (_mentionAt + intent.delta) %
-                                            options.length;
-                                        if (_mentionAt < 0) {
-                                          _mentionAt += options.length;
-                                        }
-                                      });
-                                      return null;
-                                    },
-                                  ),
-                              _MentionDismissIntent:
-                                  CallbackAction<_MentionDismissIntent>(
-                                    onInvoke: (_) {
-                                      _setMention(null);
-                                      return null;
-                                    },
-                                  ),
-                            },
-                            child: TextField(
-                              controller: _controller,
-                              focusNode: _focusNode,
-                              enabled: widget.enabled,
-                              maxLines: 8,
-                              // 居中形态给三行的高度：这时它是页面的主体，
-                              // 一行高的输入框在一整屏留白里像个搜索框
-                              minLines: widget.centred ? 3 : 1,
-                              keyboardType: TextInputType.multiline,
-                              textInputAction: TextInputAction.newline,
-                              style: theme.textTheme.bodyLarge,
-                              onTapOutside: (_) {},
-                              decoration: InputDecoration(
-                                filled: false,
-                                border: InputBorder.none,
-                                enabledBorder: InputBorder.none,
-                                focusedBorder: InputBorder.none,
-                                contentPadding: const EdgeInsets.symmetric(
-                                  vertical: CortexSpace.lg,
+                                    });
+                                    return null;
+                                  },
                                 ),
-                                hintText: widget.enabled
-                                    ? _dragging
-                                          ? '松手即可添加附件'
-                                          : '问点什么…（Enter 发送，Shift+Enter 换行）'
-                                    : '先选择或新建一个会话',
+                            _MentionDismissIntent:
+                                CallbackAction<_MentionDismissIntent>(
+                                  onInvoke: (_) {
+                                    _setMention(null);
+                                    return null;
+                                  },
+                                ),
+                          },
+                          child: TextField(
+                            controller: _controller,
+                            focusNode: _focusNode,
+                            enabled: widget.enabled,
+                            maxLines: 8,
+                            // 两行留白容纳输入，避免窄成单行工具条。
+                            minLines: 1,
+                            keyboardType: TextInputType.multiline,
+                            textInputAction: TextInputAction.newline,
+                            style: theme.textTheme.bodyLarge,
+                            onTapOutside: (_) {},
+                            decoration: InputDecoration(
+                              filled: false,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              contentPadding: const EdgeInsets.symmetric(
+                                vertical: CortexSpace.lg,
                               ),
+                              hintText: widget.enabled
+                                  ? _dragging
+                                        ? '松手即可添加附件'
+                                        : '有什么可以帮你的？'
+                                  : '先选择或新建一个会话',
                             ),
                           ),
                         ),
                       ),
-                      const SizedBox(width: CortexSpace.sm),
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: CortexSpace.xs),
-                        child: widget.streaming
-                            ? _RoundButton(
-                                onPressed: widget.onStop,
-                                tooltip: '停止生成',
-                                icon: Icons.stop_rounded,
-                                background: scheme.surfaceContainerHighest,
-                                foreground: scheme.onSurface,
-                              )
-                            : _RoundButton(
-                                onPressed: canSend ? _submit : null,
-                                tooltip: uploading ? '附件还在上传' : '发送',
-                                icon: Icons.arrow_upward_rounded,
-                                // 可发送时带品牌渐变 —— 全产品唯一的一处
-                                accent: canSend,
-                                background: canSend
-                                    ? scheme.primary
-                                    : scheme.surfaceContainerHighest,
-                                foreground: canSend
-                                    ? scheme.onPrimary
-                                    : scheme.onSurfaceVariant,
+                      Row(
+                        children: [
+                          CortexIconButton(
+                            onPressed: widget.enabled
+                                ? () => ref
+                                      .read(attachmentQueueProvider.notifier)
+                                      .pickAndUpload(
+                                        sessionId ?? widget.ensureSession(),
+                                      )
+                                : null,
+                            icon: Icons.attach_file_rounded,
+                            size: 19,
+                            box: 32,
+                            tooltip: '添加附件（也可以直接拖进来或粘贴）',
+                          ),
+                          CortexIconButton(
+                            onPressed: widget.enabled
+                                ? () {
+                                    final value = _controller.value;
+                                    final start = value.selection.isValid
+                                        ? value.selection.start
+                                        : value.text.length;
+                                    final end = value.selection.isValid
+                                        ? value.selection.end
+                                        : value.text.length;
+                                    _controller.value = value.copyWith(
+                                      text: value.text.replaceRange(
+                                        start,
+                                        end,
+                                        '@',
+                                      ),
+                                      selection: TextSelection.collapsed(
+                                        offset: start + 1,
+                                      ),
+                                      composing: TextRange.empty,
+                                    );
+                                    _focusNode.requestFocus();
+                                  }
+                                : null,
+                            icon: Icons.alternate_email_rounded,
+                            size: 19,
+                            box: 32,
+                            tooltip: '引用工作区文件',
+                          ),
+                          const Spacer(),
+                          widget.streaming
+                              ? _RoundButton(
+                                  onPressed: widget.onStop,
+                                  tooltip: '停止生成',
+                                  icon: Icons.stop_rounded,
+                                  background: scheme.surfaceContainerHighest,
+                                  foreground: scheme.onSurface,
+                                )
+                              : _RoundButton(
+                                  onPressed: canSend ? _submit : null,
+                                  tooltip: uploading ? '附件还在上传' : '发送',
+                                  icon: Icons.arrow_upward_rounded,
+                                  // 可发送时带品牌渐变 —— 全产品唯一的一处
+                                  accent: canSend,
+                                  background: canSend
+                                      ? scheme.primary
+                                      : scheme.surfaceContainerHighest,
+                                  foreground: canSend
+                                      ? scheme.onPrimary
+                                      : scheme.onSurfaceVariant,
+                                ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      LayoutBuilder(
+                        builder: (context, cons) {
+                          // 四颗 chip 摊开约 460px。窄过它就收：从前是固定
+                          // flex，放不下直接溢出报黄条
+                          final narrow = cons.maxWidth < 460;
+                          return Row(
+                            children: [
+                              // 「这轮的文件去哪儿」与「谁来把关」是同一类东西：
+                              // 发出去**之前**要定的事。所以它们贴着输入框，而
+                              // 不是挂在顶栏 —— 顶栏那一排是应用级的显示开关
+                              _BeforeSendChips(narrow: narrow),
+                              // 居中于**剩下的那段**，而不是整行。
+                              //
+                              // 这里原本在右边挂一个透明的等宽占位，好让那句话
+                              // 相对整行严格居中。两个 chip 之后那个代价变实了：
+                              // 占位是一份**真的 widget**，读屏会念两遍。
+                              // 只在**还没开始聊**的那一屏说 —— 常驻的无动作
+                              // 文案会训练人忽略那一整片区域
+                              //
+                              // **居中形态下它照旧占满中间**：白纸状态没有状态栏
+                              // （还没开口，任何数字都是空的），那句话继续独占；
+                              // 开口之后换到钉底形态，这里就让位给右端的状态栏
+                              Expanded(
+                                child: widget.centred && !narrow
+                                    ? Text(
+                                        'Cortex 会把这轮对话归档，之后还能搜得到。',
+                                        textAlign: TextAlign.center,
+                                        style: theme.textTheme.labelSmall,
+                                      )
+                                    : const SizedBox.shrink(),
                               ),
+                              // 这一轮花了多少 —— 贴在右端，与左边那排「发之前要
+                              // 定的事」在同一条基线上：它们都是这一屏的**元信息**，
+                              // 单独占一行会把输入区顶高一截而什么都不多给。
+                              //
+                              // ⚠️ **白纸上不画**：还没开口时任何数字都是空的，
+                              // 而居中那句归档提示与它**共用中间那段** —— 它俩同时
+                              // 在，窄一点的窗口上会把 chip 行顶溢出（黄条）。
+                              // 嘴一开（会话建出来）就换到钉底形态，从那时起常驻
+                              if (!widget.centred)
+                                UsageStatusBar(
+                                  sessionId: sessionId,
+                                  // **量了再画**：Row 不截断溢出，画多了是黄条。
+                                  // 行宽喂进去，由它按「chips 之外还剩多少」收档
+                                  availableWidth: cons.maxWidth,
+                                ),
+                            ],
+                          );
+                        },
                       ),
                     ],
                   ),
-                ),
-                const SizedBox(height: CortexSpace.sm),
-                // LayoutBuilder 在这里拿得到真实宽度（Column 给的是有界
-                // 约束）；放进 Row 里就拿不到了 —— Row 给非弹性子项的是
-                // 无界宽
-                LayoutBuilder(
-                  builder: (context, cons) {
-                    // 四颗 chip 摊开约 460px。窄过它就收：从前是固定
-                    // flex，放不下直接溢出报黄条
-                    final narrow = cons.maxWidth < 460;
-                    return Row(
-                      children: [
-                        // 「这轮的文件去哪儿」与「谁来把关」是同一类东西：
-                        // 发出去**之前**要定的事。所以它们贴着输入框，而
-                        // 不是挂在顶栏 —— 顶栏那一排是应用级的显示开关
-                        _BeforeSendChips(narrow: narrow),
-                        // 居中于**剩下的那段**，而不是整行。
-                        //
-                        // 这里原本在右边挂一个透明的等宽占位，好让那句话
-                        // 相对整行严格居中。两个 chip 之后那个代价变实了：
-                        // 占位是一份**真的 widget**，读屏会念两遍。
-                        // 只在**还没开始聊**的那一屏说 —— 常驻的无动作
-                        // 文案会训练人忽略那一整片区域
-                        //
-                        // **居中形态下它照旧占满中间**：白纸状态没有状态栏
-                        // （还没开口，任何数字都是空的），那句话继续独占；
-                        // 开口之后换到钉底形态，这里就让位给右端的状态栏
-                        Expanded(
-                          child: widget.centred && !narrow
-                              ? Text(
-                                  'Cortex 会把这轮对话归档，之后还能搜得到。',
-                                  textAlign: TextAlign.center,
-                                  style: theme.textTheme.labelSmall,
-                                )
-                              : const SizedBox.shrink(),
-                        ),
-                        // 这一轮花了多少 —— 贴在右端，与左边那排「发之前要
-                        // 定的事」在同一条基线上：它们都是这一屏的**元信息**，
-                        // 单独占一行会把输入区顶高一截而什么都不多给。
-                        //
-                        // ⚠️ **白纸上不画**：还没开口时任何数字都是空的，
-                        // 而居中那句归档提示与它**共用中间那段** —— 它俩同时
-                        // 在，窄一点的窗口上会把 chip 行顶溢出（黄条）。
-                        // 嘴一开（会话建出来）就换到钉底形态，从那时起常驻
-                        if (!widget.centred)
-                          UsageStatusBar(
-                            sessionId: sessionId,
-                            // **量了再画**：Row 不截断溢出，画多了是黄条。
-                            // 行宽喂进去，由它按「chips 之外还剩多少」收档
-                            availableWidth: cons.maxWidth,
-                          ),
-                      ],
-                    );
-                  },
                 ),
               ],
             ),

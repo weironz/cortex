@@ -48,12 +48,10 @@ class CortexMarkdown extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    // 正文 14 / 行高 1.6 —— 桌面端长文阅读的舒适区。此前取 bodyLarge
-    // （15/1.62），在一屏能放下的对话轮数上偏大：15 是「一篇文章」的字号，
-    // 而对话是一条一条读的
+    // 正文跟随全局 15px 字阶，并稍微放宽行距以适合桌面端长回答。
     final bodyStyle = CortexType.body(
       context,
-    ).copyWith(color: scheme.onSurface);
+    ).copyWith(color: scheme.onSurface, height: 1.72);
 
     return GptMarkdownTheme(
       gptThemeData: GptMarkdownThemeData(
@@ -70,26 +68,26 @@ class CortexMarkdown extends StatelessWidget {
         // 像三个页面拼在一起
         h1: bodyStyle.copyWith(
           fontSize: 20,
-          fontWeight: FontWeight.w700,
-          letterSpacing: -0.4,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0,
           height: 1.4,
         ),
         h2: bodyStyle.copyWith(
           fontSize: 17,
           fontWeight: FontWeight.w600,
-          letterSpacing: -0.3,
+          letterSpacing: 0,
           height: 1.45,
         ),
         h3: bodyStyle.copyWith(
-          fontSize: 15,
+          fontSize: 16,
           fontWeight: FontWeight.w600,
-          letterSpacing: -0.2,
+          letterSpacing: 0,
           height: 1.5,
         ),
-        h4: bodyStyle.copyWith(fontSize: 14.5, fontWeight: FontWeight.w600),
-        h5: bodyStyle.copyWith(fontSize: 14, fontWeight: FontWeight.w600),
+        h4: bodyStyle.copyWith(fontSize: 15, fontWeight: FontWeight.w600),
+        h5: bodyStyle.copyWith(fontSize: 14.5, fontWeight: FontWeight.w600),
         h6: bodyStyle.copyWith(
-          fontSize: 13.5,
+          fontSize: 14,
           fontWeight: FontWeight.w600,
           color: scheme.onSurfaceVariant,
         ),

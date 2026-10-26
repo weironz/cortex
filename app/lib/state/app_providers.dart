@@ -420,7 +420,7 @@ class LayoutState {
 /// 所以它的上限由窗口宽度定（见 `AppShell`），不在这儿封。
 const double kLeftPaneMin = 200;
 const double kLeftPaneMax = 380;
-const double kLeftPaneDefault = 264;
+const double kLeftPaneDefault = 240;
 
 const double kRightPaneMin = 280;
 const double kRightPaneDefault = 348;
@@ -1713,15 +1713,15 @@ final mcpConfigProvider = FutureProvider<McpConfigView>((ref) async {
 /// 白底闪一下，然后要自己再点回去。而顶栏那个按钮是循环的，
 /// 「回到深色」在最坏情况下要点两下 —— 一个每次启动都要做一遍的动作。
 ///
-/// 与权限档同一套（[settingsPatcherProvider]）：读不出来就是
-/// [ThemeMode.system]，也就是「跟系统走」这个最不冒犯的默认。
+/// 与权限档同一套（[settingsPatcherProvider]）：读不出来时默认浅色，
+/// 让新安装先看到一致、明亮的桌面界面；用户仍可切换到深色或跟随系统。
 class ThemeModeNotifier extends Notifier<ThemeMode> {
   static const String _key = 'theme_mode';
 
   @override
   ThemeMode build() {
     Future.microtask(_restore);
-    return ThemeMode.system;
+    return ThemeMode.light;
   }
 
   Future<void> _restore() async {
@@ -1730,8 +1730,9 @@ class ThemeModeNotifier extends Notifier<ThemeMode> {
     final mode = switch (saved[_key]) {
       'light' => ThemeMode.light,
       'dark' => ThemeMode.dark,
-      // 认不出来（包括没存过、以及文件坏了）一律跟随系统
-      _ => ThemeMode.system,
+      'system' => ThemeMode.system,
+      // 认不出来（包括没存过、以及文件坏了）都用现代白色主题
+      _ => ThemeMode.light,
     };
     if (mode != state) state = mode;
   }

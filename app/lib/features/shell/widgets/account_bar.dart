@@ -20,7 +20,9 @@ import 'update_indicator.dart';
 /// 左栏收起时它跟着一起消失，这是刻意的（两家参考产品都是这样）：
 /// 收起的意思就是整条侧栏都不要了。
 class AccountBar extends ConsumerWidget {
-  const AccountBar({super.key});
+  const AccountBar({super.key, this.compact = false});
+
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -37,27 +39,61 @@ class AccountBar extends ConsumerWidget {
       authDisabled: health?.authDisabled ?? false,
     );
 
+    if (compact) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: _MenuButton(
+          label: label,
+          tooltip: label,
+          avatarText: avatarLetter(label),
+          compact: true,
+        ),
+      );
+    }
+
     return Container(
       decoration: BoxDecoration(
         border: Border(top: BorderSide(color: scheme.outlineVariant)),
       ),
       padding: const EdgeInsets.fromLTRB(8, 6, 6, 6),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: _MenuButton(
-              label: label,
-              // schema 只在排障时有用，所以放 tooltip 而不是正文：
-              // 「我看到的是不是我自己的库」在多租户里是个会被问出口的问题
-              tooltip: account == null
-                  ? label
-                  // 那个 schema 现在装的是**会话**（消息、附件、同步流水），
-                  // 不是记忆 —— 记忆整条拆去了 Cormex，见 CLAUDE.md
-                  : '${account.username}\n数据库 schema：${account.schemaName}',
-              avatarText: avatarLetter(label),
+          TextButton(
+            onPressed: () => showSettingsSheet(context),
+            style: TextButton.styleFrom(
+              foregroundColor: scheme.onSurfaceVariant,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.settings_outlined, size: 18),
+                const SizedBox(width: 12),
+                Text('设置', style: theme.textTheme.bodyMedium),
+                const Spacer(),
+                Text('Ctrl ,', style: theme.textTheme.labelSmall),
+              ],
             ),
           ),
-          const UpdateIndicator(),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Expanded(
+                child: _MenuButton(
+                  label: label,
+                  // schema 只在排障时有用，所以放 tooltip 而不是正文：
+                  // 「我看到的是不是我自己的库」在多租户里是个会被问出口的问题
+                  tooltip: account == null
+                      ? label
+                      // 那个 schema 现在装的是**会话**（消息、附件、同步流水），
+                      // 不是记忆 —— 记忆整条拆去了 Cormex，见 CLAUDE.md
+                      : '${account.username}\n数据库 schema：${account.schemaName}',
+                  avatarText: avatarLetter(label),
+                ),
+              ),
+              const UpdateIndicator(),
+            ],
+          ),
         ],
       ),
     );
@@ -106,11 +142,13 @@ class _MenuButton extends ConsumerWidget {
     required this.label,
     required this.tooltip,
     required this.avatarText,
+    this.compact = false,
   });
 
   final String label;
   final String tooltip;
   final String avatarText;
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -151,9 +189,12 @@ class _MenuButton extends ConsumerWidget {
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
         child: Row(
+          mainAxisAlignment: compact
+              ? MainAxisAlignment.center
+              : MainAxisAlignment.start,
           children: [
             CircleAvatar(
-              radius: 13,
+              radius: 14,
               backgroundColor: scheme.primaryContainer,
               child: Text(
                 avatarText,
@@ -162,14 +203,17 @@ class _MenuButton extends ConsumerWidget {
                 ),
               ),
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                label,
-                style: theme.textTheme.bodyMedium,
-                overflow: TextOverflow.ellipsis,
+            if (!compact) ...[
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  style: theme.textTheme.bodyMedium,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-            ),
+              const Icon(Icons.more_vert, size: 17),
+            ],
           ],
         ),
       ),

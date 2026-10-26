@@ -19,7 +19,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # 必须与根 Cargo.toml 的 [workspace.package] version 一致（`+N` 是 Flutter 的
 # build number，不参与比较）。由 scripts/check-version.sh 在 CI 里把关 ——
 # 这里原本是 Flutter 模板给的 1.0.0，比服务端整整高了一个大版本。
-version: 0.1.42+42
+version: 0.1.43+43
 
 environment:
   sdk: ^3.12.1
@@ -120,6 +120,13 @@ flutter:
     # 缺文件的那几家自动退回首字母圆标，见 `ProviderMark`。
     # 来源与许可写在仓库根的 NOTICE 里。
     - assets/providers/
+    - assets/fonts/OFL-NotoSansSC.txt
+
+  # 界面正文与中文标题共用一份字体，确保 Windows、Web 与 CI 构建观感一致。
+  fonts:
+    - family: NotoSansSC
+      fonts:
+        - asset: assets/fonts/NotoSansSC-VF.ttf
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

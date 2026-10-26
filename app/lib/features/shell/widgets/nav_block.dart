@@ -22,6 +22,7 @@ import '../../../design_system/design_system.dart';
 import '../../../state/app_providers.dart';
 import '../../../state/chat_controller.dart';
 import '../../../state/project_controller.dart';
+import '../command_palette.dart';
 
 class NavBlock extends ConsumerWidget {
   const NavBlock({super.key, this.onNavigated});
@@ -43,6 +44,13 @@ class NavBlock extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          _NavItem(
+            icon: Icons.search_rounded,
+            label: '搜索',
+            shortcut: 'Ctrl K',
+            selected: false,
+            onTap: () => showCommandPalette(context),
+          ),
           // 「新对话」**不是一个地方，是一个动作** —— 所以它不参与
           // 选中态。画成选中会让人以为「我现在在新对话这一页」
           //
@@ -51,12 +59,24 @@ class NavBlock extends ConsumerWidget {
           // 都留下一行自己从没说过话的对话
           _NavItem(
             key: const ValueKey('nav:new'),
-            icon: Icons.edit_outlined,
+            icon: Icons.add_rounded,
             label: '新对话',
+            shortcut: 'Ctrl N',
             selected: false,
             onTap: () {
               ref.read(chatControllerProvider.notifier).startNewChat();
               ref.read(projectControllerProvider.notifier).select(null);
+              ref.read(mainViewProvider.notifier).go(MainView.chat);
+              onNavigated?.call();
+            },
+          ),
+          const SizedBox(height: 2),
+          _NavItem(
+            key: const ValueKey('nav:chat'),
+            icon: Icons.view_agenda_outlined,
+            label: '工作台',
+            selected: view == MainView.chat,
+            onTap: () {
               ref.read(mainViewProvider.notifier).go(MainView.chat);
               onNavigated?.call();
             },
@@ -118,12 +138,14 @@ class _NavItem extends StatefulWidget {
     required this.label,
     required this.selected,
     required this.onTap,
+    this.shortcut,
   });
 
   final IconData icon;
   final String label;
   final bool selected;
   final VoidCallback onTap;
+  final String? shortcut;
 
   @override
   State<_NavItem> createState() => _NavItemState();
@@ -158,30 +180,39 @@ class _NavItemState extends State<_NavItem> {
               ? tokens.sidebarAccent.withValues(alpha: 0.55)
               : background,
           borderRadius: BorderRadius.circular(CortexRadius.row),
+          border: widget.selected
+              ? Border.all(color: theme.cortex.sidebarBorder)
+              : Border.all(color: Colors.transparent),
+          boxShadow: widget.selected ? tokens.shadow2 : null,
         ),
-        // 行高 32：桌面端导航是一列**紧凑**的入口，不是触屏列表。
-        // 上下 7 + 16 的图标 ≈ 32
+        // 导航文字 14px、图标 18px，统一行高与点击区域。
         padding: const EdgeInsets.symmetric(
           horizontal: CortexSpace.md,
-          vertical: 7,
+          vertical: 8,
         ),
         child: Row(
           children: [
             Icon(
               widget.icon,
-              size: 15,
+              size: 18,
               color: widget.selected
-                  ? theme.colorScheme.onSurface
+                  ? theme.colorScheme.primary
                   : tokens.foregroundTertiary,
             ),
-            const SizedBox(width: CortexSpace.md),
-            Text(
-              widget.label,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurface,
-                fontWeight: widget.selected ? FontWeight.w600 : null,
+            const SizedBox(width: CortexSpace.lg),
+            Expanded(
+              child: Text(
+                widget.label,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurface,
+                  fontWeight: widget.selected
+                      ? FontWeight.w600
+                      : FontWeight.w400,
+                ),
               ),
             ),
+            if (widget.shortcut != null)
+              Text(widget.shortcut!, style: theme.textTheme.labelSmall),
           ],
         ),
       ),

@@ -29,7 +29,13 @@ class _MockConfigNotifier extends AppConfigNotifier {
 }
 
 Widget _app() => ProviderScope(
-  overrides: [appConfigProvider.overrideWith(_MockConfigNotifier.new)],
+  overrides: [
+    appConfigProvider.overrideWith(_MockConfigNotifier.new),
+    settingsReaderProvider.overrideWithValue(
+      () async => const <String, String>{},
+    ),
+    settingsWriterProvider.overrideWithValue((_) async {}),
+  ],
   child: const CortexApp(),
 );
 
@@ -58,6 +64,32 @@ void main() {
     // Appears twice by design: the sidebar tile and the chat pane header, since
     // the first session is auto-selected on load.
     expect(find.text('Cortex 记忆注入预算怎么定'), findsNWidgets(2));
+  });
+
+  testWidgets('桌面收起侧栏后保留可导航和展开的图标栏', (tester) async {
+    await boot(tester);
+    await tester.tap(find.byKey(const ValueKey('sidebar:collapse')));
+    await tester.pump(const Duration(milliseconds: 200));
+
+    final rail = find.byKey(const ValueKey('sidebar:rail'));
+    expect(rail, findsOneWidget, reason: '收起后保留图标栏，不能整个消失');
+    expect(tester.getSize(rail).width, 52, reason: '收起态只保留 52px 导航宽度');
+    await tester.tap(find.descendant(of: rail, matching: find.byTooltip('图片')));
+    await tester.pump();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(CortexApp)),
+    );
+    expect(
+      container.read(mainViewProvider),
+      MainView.images,
+      reason: '收起态的导航必须仍然能切换页面',
+    );
+    await tester.pump(const Duration(seconds: 1));
+    await tester.tap(find.byTooltip('展开侧栏'));
+    await tester.pump();
+    expect(rail, findsNothing, reason: '展开后恢复完整的侧栏');
+    expect(find.byKey(const ValueKey('sidebar:collapse')), findsOneWidget);
+    expect(tester.takeException(), isNull, reason: '切换侧栏不得导致布局溢出');
   });
 
   testWidgets('narrow layout collapses the side panes into drawers', (

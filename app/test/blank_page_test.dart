@@ -65,7 +65,7 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('白纸上输入框就在中间，不是先钉底再跳过去', (tester) async {
+  testWidgets('白纸上建议在上方，输入框与对话共用底部位置', (tester) async {
     final c = _boot();
     addTearDown(c.dispose);
     // 白纸 = 没有当前会话
@@ -76,16 +76,19 @@ void main() {
     expect(
       find.byType(ConversationHero),
       findsOneWidget,
-      reason:
-          '居中那一支带着招呼与起手式。判据里多一个 `hasSession` 的话，'
-          '白纸会走钉底那一支 —— 回车之后会话兑现，界面先跳到居中再跳回底部，'
-          '一次发送闪两下，而中间那一帧还是空的',
+      reason: '新对话仍然显示引导内容',
     );
     expect(
       find.byType(ConversationPrompts),
       findsOneWidget,
-      reason: '起手式与居中形态是同一支，它不在就说明走错了分支',
+      reason: '首页应提供可点击的建议',
     );
+    expect(
+      tester.getTopLeft(find.byType(TextField)).dy,
+      greaterThan(tester.getBottomLeft(find.byType(ConversationPrompts)).dy),
+      reason: '输入区应位于建议下方，首次发送不再切换到另一种布局',
+    );
+    expect(tester.takeException(), isNull, reason: '首页不得出现布局溢出');
   });
 
   testWidgets('白纸上就能先定工作区', (tester) async {

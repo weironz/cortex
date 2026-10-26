@@ -166,7 +166,7 @@ abstract final class CortexType {
 
   /// 次要信息：时间戳、模型名、路径、说明。
   static TextStyle secondary(BuildContext context) => body(context).copyWith(
-    fontSize: 12.5,
+    fontSize: 13,
     height: 1.5,
     color: Theme.of(context).colorScheme.onSurfaceVariant,
   );
@@ -184,7 +184,7 @@ abstract final class CortexType {
   static TextStyle sectionTitle(BuildContext context) => Theme.of(context)
       .textTheme
       .titleMedium!
-      .copyWith(fontSize: 15, fontWeight: FontWeight.w600, letterSpacing: -0.3);
+      .copyWith(fontSize: 16, fontWeight: FontWeight.w600, letterSpacing: 0);
 
   /// 等宽：代码、id、路径、工具名。
   static TextStyle mono(

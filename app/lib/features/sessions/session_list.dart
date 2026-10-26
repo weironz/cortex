@@ -1021,6 +1021,10 @@ class _SessionTileState extends State<_SessionTile> {
               ? tokens.sidebarAccent.withValues(alpha: 0.45)
               : Colors.transparent,
           borderRadius: BorderRadius.circular(CortexRadius.row),
+          border: widget.selected
+              ? Border.all(color: theme.cortex.sidebarBorder)
+              : Border.all(color: Colors.transparent),
+          boxShadow: widget.selected ? tokens.shadow2 : null,
         ),
         // ── 选中定位线 ──
         //

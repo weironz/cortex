@@ -231,14 +231,21 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         PanelHeader(
-          title: title ?? 'Cortex',
+          title: title ?? '新对话',
           // 不提「记忆」—— 长期记忆 2026-08-17 整条拆去了 Cormex，界面
           // 只许描述当下真的成立的能力（CLAUDE.md 约束 2）
-          subtitle: hasSession ? null : '通用 AI Agent',
+          subtitle: null,
           // 左栏伸缩，**任何宽度都在**。此前它只在窄屏出现（那时叫
           // 「会话列表」），于是宽屏下根本没有收起侧栏这回事
-          leading: widget.onToggleSessions == null
-              ? null
+          leading:
+              widget.sessionsVisible ||
+                  MediaQuery.sizeOf(context).width >= 900 ||
+                  widget.onToggleSessions == null
+              ? Icon(
+                  Icons.chat_bubble_outline_rounded,
+                  size: 18,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                )
               : IconButton(
                   onPressed: widget.onToggleSessions,
                   iconSize: 19,
@@ -324,46 +331,36 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             ],
           ],
         ),
-        // 还没开口：输入框站在页面中央，上面是那块招呼，下面是几个起手式。
-        // 这是 WorkBuddy / ChatGPT / Claude 都在用的形状，理由是同一个 ——
-        // 空会话里输入框就是全部内容，把它钉在底边等于让用户隔着一整屏
-        // 留白去够它。
-        //
-        // ⚠️ **判据里不能再有 `hasSession`。** 会话惰性化之后（点「新对话」
-        // 不再立刻建会话），白纸上 `activeSessionId` 是 null，于是那一版
-        // 会走进下面的钉底分支 —— 用户看到的是：输入框在底部，敲完回车
-        // 会话兑现的一瞬间跳到居中，然后立刻因为有了消息又跳回底部。
-        // **一次发送闪两下**，而中间那一帧还是空的。
-        //
-        // 现在两种「还没开口」共用同一条路：白纸、以及选中了一条还没说过
-        // 话的会话。它们在用户眼里本来就是同一件事
+        // 首页与对话共用钉底输入区，首次发送不会改变输入位置。
         if (empty)
           Expanded(
-            // `SingleChildScrollView` 给子项的是**无界高度**约束，`Center`
-            // 在无界约束下会收缩成子项大小 —— 于是「站在页面中央」从来没
-            // 真的发生过：内容挤在上三分之一，底下空出半屏（900px 视口里
-            // 实测顶距 80 / 底距 425）。`ConstrainedBox(minHeight)` 先把
-            // 高度垫到视口那么高，Center 才有可居中的空间；内容真超出
-            // 视口时 minHeight 不起作用，照常滚动。
+            // 小窗口与大字号下首页可以滚动，输入区保持在底部。
             child: LayoutBuilder(
               builder: (context, constraints) => SingleChildScrollView(
                 child: ConstrainedBox(
                   constraints: BoxConstraints(minHeight: constraints.maxHeight),
-                  child: Center(
+                  child: Align(
+                    alignment: Alignment.topCenter,
                     child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 32),
+                      padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
                       // 白纸也是聊天面：招呼与起手式的文字跟着聊天档走，
                       // 与「开了口之后」的对话区保持同一档
                       child: chatSurface(
-                        Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const ConversationHero(),
-                            const SizedBox(height: 22),
-                            composer(centred: true),
-                            const SizedBox(height: 18),
-                            const ConversationPrompts(),
-                          ],
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 864),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const ConversationSetup(),
+                              const SizedBox(height: 52),
+                              const ConversationHero(),
+                              const SizedBox(height: 22),
+                              const Padding(
+                                padding: EdgeInsets.symmetric(horizontal: 16),
+                                child: ConversationPrompts(),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -376,8 +373,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
           // 走到这儿必定有会话：`empty` 为假意味着有轮次或者正在流，
           // 两者都得先有一条会话才谈得上
           Expanded(child: chatSurface(const ConversationView())),
-          chatSurface(composer(centred: false)),
         ],
+        chatSurface(composer(centred: false)),
       ],
     );
   }

@@ -33,12 +33,13 @@ class PanelHeader extends StatelessWidget {
       // 会让标题与副标题的字号一起长，44px 的固定高度在 150% 档就会竖直
       // 溢出 —— 那条黄黑纹出现在每个面板的头顶上。让它能长，
       // 默认档的高度不变（文字 13.5px 时正好也是 44）。
-      constraints: const BoxConstraints(minHeight: 44),
+      constraints: const BoxConstraints(minHeight: 48),
       padding: const EdgeInsets.only(
         left: CortexSpace.lg,
         right: CortexSpace.md,
       ),
       decoration: BoxDecoration(
+        color: scheme.surface.withValues(alpha: 0.92),
         border: CortexStroke.bottom(scheme.outlineVariant),
       ),
       child: Row(
@@ -55,9 +56,9 @@ class PanelHeader extends StatelessWidget {
                 Text(
                   title,
                   style: theme.textTheme.titleMedium?.copyWith(
-                    fontSize: 13.5,
+                    fontSize: 14,
                     fontWeight: FontWeight.w600,
-                    letterSpacing: -0.1,
+                    letterSpacing: 0,
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),

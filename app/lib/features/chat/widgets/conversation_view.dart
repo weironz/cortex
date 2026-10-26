@@ -9,6 +9,7 @@ import '../../../state/chat_state.dart';
 import '../../../widgets/empty_state.dart';
 import 'message_bubble.dart';
 import '../../../design_system/design_system.dart';
+import '../../settings/settings_sheet.dart';
 
 /// The scrolling transcript.
 ///
@@ -451,36 +452,23 @@ class ConversationHero extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
 
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 520),
+      constraints: const BoxConstraints(maxWidth: 720),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            width: 48,
-            height: 48,
-            // 纯色，不渐变（设计稿：渐变**只留发送键一处**）。
-            // 渐变一多，「主要动作」就不再突出 —— 头像是身份不是动作
-            decoration: BoxDecoration(
-              color: scheme.primary,
-              borderRadius: BorderRadius.circular(CortexRadius.card),
-            ),
-            // onPrimary，不写死白色：深色主题下 primary 是**浅**靛，
-            // 白色叠上去只有 3.2:1，onPrimary（深靛）才读得清
-            child: Icon(Icons.auto_awesome, color: scheme.onPrimary, size: 23),
+          Text(
+            '你想做点什么？',
+            style: theme.textTheme.titleLarge?.copyWith(height: 1.25),
           ),
-          const SizedBox(height: CortexSpace.xl),
-          // 只写当下真的成立的能力（CLAUDE.md 约束 2）：长期记忆
-          // 2026-08-17 已拆去 Cormex，「抽取的事实可追溯、可回放」在
-          // 这一侧不再成立 —— 留着就是每次打开都在骗人
-          Text('通用 AI Agent', style: theme.textTheme.titleLarge),
           const SizedBox(height: CortexSpace.sm),
           Text(
-            '对话跨设备实时同步；可以调用工具、读写工作区里的文件。',
+            '从一个项目或一个问题开始，也可以用下面的例子体验。',
             textAlign: TextAlign.center,
-            style: theme.textTheme.bodySmall,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
           ),
         ],
       ),
@@ -488,8 +476,43 @@ class ConversationHero extends StatelessWidget {
   }
 }
 
-/// 几个起手式。放在输入框**下面** —— 它们是「不知道说什么时点一个」，
-/// 而不是「先读完再开始打字」。
+class ConversationSetup extends StatelessWidget {
+  const ConversationSetup({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      constraints: const BoxConstraints(minHeight: 64),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(CortexRadius.card),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+        boxShadow: theme.cortex.shadow2,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              '选择模型、智能体和工作区，开始与 Cortex 协作。',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          FilledButton(
+            onPressed: () => showSettingsSheet(context),
+            child: const Text('去设置'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 首页建议使用两列等宽行，窄屏时回到单列。
 class ConversationPrompts extends ConsumerWidget {
   const ConversationPrompts({super.key});
 
@@ -501,20 +524,83 @@ class ConversationPrompts extends ConsumerWidget {
   ];
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) => ConstrainedBox(
-    constraints: const BoxConstraints(maxWidth: 620),
-    child: Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      alignment: WrapAlignment.center,
-      children: [
-        for (final prompt in _prompts)
-          ActionChip(
-            label: Text(prompt),
-            onPressed: () =>
-                ref.read(chatControllerProvider.notifier).send(prompt),
-          ),
-      ],
-    ),
-  );
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: kConversationWidth),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final columns = constraints.maxWidth >= 560 ? 2 : 1;
+          final width = (constraints.maxWidth - (columns - 1) * 8) / columns;
+          return Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final (index, prompt) in _prompts.indexed)
+                SizedBox(
+                  width: width,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      boxShadow: theme.cortex.shadow2,
+                      borderRadius: BorderRadius.circular(CortexRadius.card),
+                    ),
+                    child: Material(
+                      color: theme.colorScheme.surfaceContainerLow,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(CortexRadius.card),
+                        side: BorderSide(
+                          color: theme.colorScheme.outlineVariant,
+                        ),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: InkWell(
+                        onTap: () => ref
+                            .read(chatControllerProvider.notifier)
+                            .send(prompt),
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 34,
+                                height: 34,
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.surfaceContainerHigh,
+                                  borderRadius: BorderRadius.circular(
+                                    CortexRadius.row,
+                                  ),
+                                ),
+                                child: Icon(
+                                  [
+                                    Icons.code,
+                                    Icons.storage_outlined,
+                                    Icons.widgets_outlined,
+                                    Icons.description_outlined,
+                                  ][index],
+                                  size: 18,
+                                  color: theme.colorScheme.primary,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  prompt,
+                                  style: theme.textTheme.bodyMedium?.copyWith(
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
 }

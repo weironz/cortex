@@ -124,7 +124,8 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    final tokens = Theme.of(context).cortex;
+    final theme = Theme.of(context);
+    final tokens = theme.cortex;
     final layout = ref.watch(layoutProvider);
     final layoutNotifier = ref.read(layoutProvider.notifier);
     final term = ref.watch(terminalPanelProvider);
@@ -143,14 +144,16 @@ class _AppShellState extends ConsumerState<AppShell> {
         final showRightInline = isWide && layout.rightPanel != null;
 
         final leftWidth = layout.leftWidth;
+        final leftInset = isMedium
+            ? (showSessionsInline ? leftWidth + _kResizeHandleWidth : 52.0)
+            : 0.0;
         // 右栏能拉到多宽由**这一刻的窗口**说了算，所以在这儿算而不是在
         // notifier 里：把窗口拖窄再拖回来，右栏该回到原来那么宽 ——
         // 存进去的值被小窗口截过一次就再也回不来了
-        final rightMax =
-            (width - (showSessionsInline ? leftWidth : 0) - kChatPaneMin).clamp(
-              kRightPaneMin,
-              double.infinity,
-            );
+        final rightMax = (width - leftInset - kChatPaneMin).clamp(
+          kRightPaneMin,
+          double.infinity,
+        );
         final rightWidth = layout.rightWidth.clamp(kRightPaneMin, rightMax);
 
         // 终端此刻在不在右侧那一列上。
@@ -279,72 +282,92 @@ class _AppShellState extends ConsumerState<AppShell> {
                           onDone: layoutNotifier.persistWidths,
                         ),
                       ],
+                      if (isMedium && !showSessionsInline)
+                        _CollapsedSidebar(onExpand: layoutNotifier.toggleLeft),
                       // 中间那一大栏是哪个「地方」。**只有聊天那一支要顶栏
                       // 那堆参数** —— 画廊没有会话、没有右栏面板，把它硬塞进
                       // 同一个组件里只会多出一串对它无意义的入参
                       Expanded(
-                        child: switch (ref.watch(mainViewProvider)) {
-                          MainView.library => LibraryPageView(
-                            onToggleSessions: isMedium
-                                ? layoutNotifier.toggleLeft
-                                : () => _scaffoldKey.currentState?.openDrawer(),
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            // 内容区用极轻的对角渐变托起层次，保持桌面端的沉稳。
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: [
+                                theme.colorScheme.surface,
+                                theme.colorScheme.surfaceContainerLow,
+                              ],
+                            ),
                           ),
-                          MainView.assistants => AssistantsPage(
-                            onToggleSessions: isMedium
-                                ? layoutNotifier.toggleLeft
-                                : () => _scaffoldKey.currentState?.openDrawer(),
-                            sessionsVisible: showSessionsInline,
-                          ),
-                          MainView.projects => ProjectsPage(
-                            onToggleSessions: isMedium
-                                ? layoutNotifier.toggleLeft
-                                : () => _scaffoldKey.currentState?.openDrawer(),
-                            sessionsVisible: showSessionsInline,
-                          ),
-                          MainView.images => ImagePage(
-                            // 窄屏上左栏是抽屉，画廊里也要有路把它叫出来 ——
-                            // 少了这个按钮，从画廊回会话列表就只剩「从屏幕左缘划」
-                            onToggleSessions: isMedium
-                                ? layoutNotifier.toggleLeft
-                                : () => _scaffoldKey.currentState?.openDrawer(),
-                            sessionsVisible: showSessionsInline,
-                          ),
-                          MainView.chat => ChatPane(
-                            // 同一个按钮、同一句话（「显示/隐藏会话」），但窄到放不下
-                            // 内联时它只能开抽屉 —— 那时「收起」这个状态无处安放。
-                            // 由这里按断点决定它具体做什么，ChatPane 只管画
-                            onToggleSessions: isMedium
-                                ? layoutNotifier.toggleLeft
-                                : () => _scaffoldKey.currentState?.openDrawer(),
-                            sessionsVisible: showSessionsInline,
-                            // 两条路的语义不同，所以显式分开写：
-                            //
-                            // 宽屏：右栏就是 `rightPanel`，点同一个 = 收起。
-                            // 窄屏：右栏是抽屉，开合归 `Scaffold` 管 —— 这里只能
-                            //   「选中」。用 selectRight 的话，连点两次「文件」的
-                            //   第二次会把它置空，而抽屉照样开，里面画的是记忆。
-                            //   顺序也不能反：抽屉的内容取自 `layout.rightPanel`
-                            onSelectPanel: (panel) {
-                              if (isWide) {
-                                layoutNotifier.selectRight(panel);
-                              } else {
+                          child: switch (ref.watch(mainViewProvider)) {
+                            MainView.library => LibraryPageView(
+                              onToggleSessions: isMedium
+                                  ? layoutNotifier.toggleLeft
+                                  : () =>
+                                        _scaffoldKey.currentState?.openDrawer(),
+                            ),
+                            MainView.assistants => AssistantsPage(
+                              onToggleSessions: isMedium
+                                  ? layoutNotifier.toggleLeft
+                                  : () =>
+                                        _scaffoldKey.currentState?.openDrawer(),
+                              sessionsVisible: showSessionsInline,
+                            ),
+                            MainView.projects => ProjectsPage(
+                              onToggleSessions: isMedium
+                                  ? layoutNotifier.toggleLeft
+                                  : () =>
+                                        _scaffoldKey.currentState?.openDrawer(),
+                              sessionsVisible: showSessionsInline,
+                            ),
+                            MainView.images => ImagePage(
+                              // 窄屏上左栏是抽屉，画廊里也要有路把它叫出来 ——
+                              // 少了这个按钮，从画廊回会话列表就只剩「从屏幕左缘划」
+                              onToggleSessions: isMedium
+                                  ? layoutNotifier.toggleLeft
+                                  : () =>
+                                        _scaffoldKey.currentState?.openDrawer(),
+                              sessionsVisible: showSessionsInline,
+                            ),
+                            MainView.chat => ChatPane(
+                              // 同一个按钮、同一句话（「显示/隐藏会话」），但窄到放不下
+                              // 内联时它只能开抽屉 —— 那时「收起」这个状态无处安放。
+                              // 由这里按断点决定它具体做什么，ChatPane 只管画
+                              onToggleSessions: isMedium
+                                  ? layoutNotifier.toggleLeft
+                                  : () =>
+                                        _scaffoldKey.currentState?.openDrawer(),
+                              sessionsVisible: showSessionsInline,
+                              // 两条路的语义不同，所以显式分开写：
+                              //
+                              // 宽屏：右栏就是 `rightPanel`，点同一个 = 收起。
+                              // 窄屏：右栏是抽屉，开合归 `Scaffold` 管 —— 这里只能
+                              //   「选中」。用 selectRight 的话，连点两次「文件」的
+                              //   第二次会把它置空，而抽屉照样开，里面画的是记忆。
+                              //   顺序也不能反：抽屉的内容取自 `layout.rightPanel`
+                              onSelectPanel: (panel) {
+                                if (isWide) {
+                                  layoutNotifier.selectRight(panel);
+                                } else {
+                                  layoutNotifier.showRight(panel);
+                                  showRightRailSheet(context);
+                                }
+                              },
+                              // 「带我去」语义：无论右栏此刻开没开，开着并停在
+                              // 这个面板上。与上面开关语义的差别见 ChatPane 的注释
+                              onOpenPanel: (panel) {
                                 layoutNotifier.showRight(panel);
-                                showRightRailSheet(context);
-                              }
-                            },
-                            // 「带我去」语义：无论右栏此刻开没开，开着并停在
-                            // 这个面板上。与上面开关语义的差别见 ChatPane 的注释
-                            onOpenPanel: (panel) {
-                              layoutNotifier.showRight(panel);
-                              if (!isWide) showRightRailSheet(context);
-                            },
-                            activePanel: showRightInline
-                                ? layout.rightPanel
-                                : null,
-                            onToggleTerminal: toggleTerminal,
-                            terminalActive: terminalUp,
-                          ),
-                        },
+                                if (!isWide) showRightRailSheet(context);
+                              },
+                              activePanel: showRightInline
+                                  ? layout.rightPanel
+                                  : null,
+                              onToggleTerminal: toggleTerminal,
+                              terminalActive: terminalUp,
+                            ),
+                          },
+                        ),
                       ),
                       if (showRightInline) ...[
                         _ResizeHandle(
@@ -375,9 +398,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                       tokens: tokens,
                       visible: terminalUp,
                       full: terminalFull,
-                      leftInset: terminalFull && showSessionsInline
-                          ? leftWidth + _kResizeHandleWidth
-                          : null,
+                      leftInset: terminalFull ? leftInset : null,
                       width: rightWidth,
                     ),
                 ],
@@ -530,12 +551,12 @@ class _SidebarTopRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        CortexSpace.sm,
-        CortexSpace.sm,
-        CortexSpace.sm,
-        0,
+    final theme = Theme.of(context);
+    return Container(
+      constraints: const BoxConstraints(minHeight: 44),
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: theme.cortex.sidebarBorder)),
       ),
       child: Row(
         children: [
@@ -546,6 +567,86 @@ class _SidebarTopRow extends ConsumerWidget {
             size: 17,
             tooltip: '收起侧栏',
           ),
+          const SizedBox(width: 8),
+          Text('Cortex', style: theme.textTheme.titleSmall),
+        ],
+      ),
+    );
+  }
+}
+
+class _CollapsedSidebar extends ConsumerWidget {
+  const _CollapsedSidebar({required this.onExpand});
+
+  final VoidCallback onExpand;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final view = ref.watch(mainViewProvider);
+    Widget button(
+      IconData icon,
+      String label,
+      VoidCallback onTap, {
+      bool selected = false,
+    }) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+        child: IconButton(
+          onPressed: onTap,
+          tooltip: label,
+          style: IconButton.styleFrom(
+            minimumSize: const Size(36, 36),
+            maximumSize: const Size(36, 36),
+            padding: EdgeInsets.zero,
+            backgroundColor: selected ? theme.cortex.sidebarAccent : null,
+            foregroundColor: theme.colorScheme.onSurfaceVariant,
+          ),
+          icon: Icon(icon, size: 19),
+        ),
+      );
+    }
+
+    return Container(
+      key: const ValueKey('sidebar:rail'),
+      width: 52,
+      decoration: BoxDecoration(
+        color: theme.cortex.sidebar,
+        border: Border(right: BorderSide(color: theme.cortex.sidebarBorder)),
+      ),
+      child: Column(
+        children: [
+          SizedBox(
+            height: 44,
+            child: button(Icons.menu_open_rounded, '展开侧栏', onExpand),
+          ),
+          const SizedBox(height: 12),
+          button(Icons.search_rounded, '搜索', () => showCommandPalette(context)),
+          button(Icons.add_rounded, '新对话', () {
+            ref.read(chatControllerProvider.notifier).startNewChat();
+            ref.read(projectControllerProvider.notifier).select(null);
+            ref.read(mainViewProvider.notifier).go(MainView.chat);
+          }),
+          for (final (destination, icon, label) in [
+            (MainView.chat, Icons.view_agenda_outlined, '工作台'),
+            (MainView.projects, Icons.folder_outlined, '项目'),
+            (MainView.assistants, Icons.smart_toy_outlined, '智能体'),
+            (MainView.library, Icons.library_books_outlined, '资料库'),
+            (MainView.images, Icons.image_outlined, '图片'),
+          ])
+            button(
+              icon,
+              label,
+              () => ref.read(mainViewProvider.notifier).go(destination),
+              selected: view == destination,
+            ),
+          const Spacer(),
+          button(
+            Icons.settings_outlined,
+            '设置',
+            () => showSettingsSheet(context),
+          ),
+          const AccountBar(compact: true),
         ],
       ),
     );

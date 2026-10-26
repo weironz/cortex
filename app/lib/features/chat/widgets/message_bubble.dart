@@ -21,11 +21,11 @@ import 'attachment_views.dart';
 import 'turn_drawer.dart';
 
 /// Horizontal padding around the conversation column.
-const kMessageGutter = 28.0;
+const kMessageGutter = 32.0;
 
 /// Upper bound on line length. Long measure hurts readability badly in CJK,
 /// and an ultrawide monitor would otherwise stretch a paragraph across 2000px.
-const kMessageMaxWidth = 760.0;
+const kMessageMaxWidth = 840.0;
 
 /// 整条对话那一列有多宽。**与输入框同宽**。
 ///
@@ -99,9 +99,9 @@ class _UserBubble extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         kMessageGutter,
-        12,
+        16,
         kMessageGutter,
-        12,
+        16,
       ),
       // 整条消息是一个悬停区：动作栏默认半透明，鼠标进来才完全显形。
       //
@@ -135,8 +135,8 @@ class _UserBubble extends ConsumerWidget {
                 if (message.text.isNotEmpty)
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 15,
-                      vertical: 11,
+                      horizontal: 17,
+                      vertical: 13,
                     ),
                     decoration: BoxDecoration(
                       // ── 中性填充，不是实心品牌色 ──
@@ -158,24 +158,24 @@ class _UserBubble extends ConsumerWidget {
                       // 气泡归辅助档 radiusLg —— 五档体系里写明「气泡 10」
                       // （见 CortexTokens）；Xl 是卡片那一档
                       borderRadius: const BorderRadius.only(
-                        topLeft: Radius.circular(CortexTokens.radiusLg),
-                        topRight: Radius.circular(CortexTokens.radiusLg),
-                        bottomLeft: Radius.circular(CortexTokens.radiusLg),
-                        // 右下角收窄成一个「尾巴」。这一个不走圆角阶：
-                        // 它不是装饰，是指向发送者的方向
-                        bottomRight: Radius.circular(4),
+                        topLeft: Radius.circular(CortexTokens.radiusCard),
+                        topRight: Radius.circular(CortexTokens.radiusCard),
+                        bottomLeft: Radius.circular(CortexTokens.radiusCard),
+                        bottomRight: Radius.circular(CortexTokens.radiusSm),
                       ),
+                      boxShadow: theme.cortex.shadow2,
                     ),
                     child: SelectionArea(
                       child: Text(
                         message.text,
                         style: theme.textTheme.bodyLarge?.copyWith(
                           color: scheme.onSurface,
+                          height: 1.55,
                         ),
                       ),
                     ),
                   ),
-                const SizedBox(height: CortexSpace.xs),
+                const SizedBox(height: CortexSpace.sm),
                 // 时间与复制并排，而不是给复制单开一行：这一行本来就在那儿，
                 // 塞进去不占额外高度。自己说过的话同样需要能整段拿走 ——
                 // 拿去重发、拿去贴进别处，都比在气泡里手动划选可靠
@@ -185,7 +185,7 @@ class _UserBubble extends ConsumerWidget {
                 // 而高度一变，下面所有消息都会跳一下
                 AnimatedOpacity(
                   duration: CortexMotion.resolve(context, CortexMotion.instant),
-                  opacity: hot ? 1 : 0.45,
+                  opacity: hot ? 1 : 0.58,
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -304,9 +304,9 @@ class AssistantBlock extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         kMessageGutter,
-        12,
+        16,
         kMessageGutter,
-        12,
+        16,
       ),
       // 与用户消息同一条规矩：整条回答是一个悬停区，底部那行动作
       // 默认半透明、鼠标进来才全亮。助手消息**没有气泡**（它直接融进
@@ -324,24 +324,22 @@ class AssistantBlock extends StatelessWidget {
                 Row(
                   children: [
                     Container(
-                      width: 21,
-                      height: 21,
+                      width: 28,
+                      height: 28,
                       // 纯色，不渐变（渐变只留发送键一处 —— 头像是身份不是动作）
                       decoration: BoxDecoration(
                         color: scheme.primary,
-                        borderRadius: BorderRadius.circular(
-                          CortexTokens.radiusSm,
-                        ),
+                        borderRadius: BorderRadius.circular(CortexRadius.row),
                       ),
                       // onPrimary，不写死白色：深色主题下 primary 是**浅**靛，
                       // 白色叠上去只有 3.2:1，onPrimary（深靛）才读得清
                       child: Icon(
                         Icons.auto_awesome,
-                        size: 12,
+                        size: 15,
                         color: scheme.onPrimary,
                       ),
                     ),
-                    const SizedBox(width: CortexSpace.md),
+                    const SizedBox(width: CortexSpace.lg),
                     Text('Cortex', style: theme.textTheme.titleSmall),
                     // 谁写的。**流式过程中不画** —— 那时还不知道，
                     // 而先画一个再换掉会闪
@@ -358,9 +356,15 @@ class AssistantBlock extends StatelessWidget {
                     ],
                   ],
                 ),
-                const SizedBox(height: CortexSpace.sm),
-                Padding(
-                  padding: const EdgeInsets.only(left: 29),
+                const SizedBox(height: CortexSpace.md),
+                Container(
+                  padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(CortexRadius.card),
+                    border: Border.all(color: scheme.outlineVariant),
+                    boxShadow: theme.cortex.shadow2,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -455,7 +459,7 @@ class AssistantBlock extends StatelessWidget {
                             context,
                             CortexMotion.instant,
                           ),
-                          opacity: hot ? 1 : 0.45,
+                          opacity: hot ? 1 : 0.62,
                           child: Padding(
                             padding: const EdgeInsets.only(
                               top: CortexSpace.xxs,

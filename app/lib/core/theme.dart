@@ -155,17 +155,17 @@ class CortexTokens extends ThemeExtension<CortexTokens> {
   ///
   /// 旧的 Sm/Md/Lg/Xl/2xl 命名保留（消费面 40+ 处），**值重定**到新体系：
   /// 改名的收益是零，改值让所有旧调用点一次到位。
-  static const double radiusSm = 6; // 徽标、小按钮（辅助档）
-  static const double radiusMd = 8; // 行、菜单项（=radiusRow）
-  static const double radiusLg = 10; // 气泡、主按钮（辅助档）
-  static const double radiusXl = 12; // 卡片、面板（=radiusCard）
-  static const double radius2xl = 16; // 对话框 = 浮起的窗口（=radiusWindow）
+  static const double radiusSm = 8; // 徽标、小按钮（辅助档）
+  static const double radiusMd = 10; // 行、菜单项（=radiusRow）
+  static const double radiusLg = 12; // 气泡、主按钮（辅助档）
+  static const double radiusXl = 16; // 卡片、面板（=radiusCard）
+  static const double radius2xl = 20; // 对话框 = 浮起的窗口（=radiusWindow）
 
   /// 语义别名 —— 新代码写这几个，读的人不用背数值表。
-  static const double radiusWindow = 16;
-  static const double radiusCard = 12;
-  static const double radiusInput = 8;
-  static const double radiusRow = 8;
+  static const double radiusWindow = 20;
+  static const double radiusCard = 16;
+  static const double radiusInput = 16;
+  static const double radiusRow = 10;
   static const double radiusPill = 999;
 
   @override
@@ -282,7 +282,7 @@ abstract final class CortexTheme {
   static const _tealDark = Color(0xFF4FD1C5);
 
   /// [compact] 是桌面端的「紧凑」密度档：行高收 −6px（VisualDensity
-  /// vertical −1.5，Material 一档 4px）、正文 14px/1.66。
+  /// vertical −1.5，Material 一档 4px），正文仍保留 16px。
   /// **默认档一个数都不动** —— 长回答需要那个行距。
   static ThemeData light({bool compact = false}) =>
       _build(_lightScheme, Brightness.light, compact: compact);
@@ -305,29 +305,19 @@ abstract final class CortexTheme {
     onError: Colors.white,
     errorContainer: Color(0xFFF9DEDC),
     onErrorContainer: Color(0xFF410E0B),
-    // ── 中性阶：锌灰（2026-10-23 重设计，Linear 一路）──
-    //
-    // 上一版整套灰往品牌靛蓝的方向偏（fg #17171A、sb #EFEEF3 都带紫调）。
-    // 这轮去掉色偏：「偏色的灰」与发丝线的语言打架 —— 发丝线要的是
-    // **绝对中性**的灰，任何色偏都会让线看起来脏。画布从纯白降到
-    // #FAFAFA：大面积纯白刺眼，降一档既柔了底色，又保住「白卡片浮在
-    // 灰画布上」的层级位置。文字压到近黑 #09090B —— 上一版与次级灰
-    // 拉不开，「清晰」的第一来源就是主文字够黑。
-    surface: Color(0xFFFAFAFA),
-    onSurface: Color(0xFF09090B),
-    // #545454 严格零色偏（zinc-600 的 #52525B 自带 9 的蓝偏，超发丝线
-    // 的中性预算）：次级文字不需要任何色温
-    onSurfaceVariant: Color(0xFF545454),
-    // 发丝线用**实色**（zinc 系）：透明度造出来的线在不同表面上
-    // 深浅不一，实色线在每个表面上都是同一条线
-    outline: Color(0xFFD4D4D8),
-    outlineVariant: Color(0xFFE8E8EA),
-    // fill 阶：#F4F4F5（输入框、chip 底）→ #EBEBED（按下、第二档）
+    // 默认浅色使用白色画布，以冷灰蓝表面和边框建立桌面端层次。
+    surface: Colors.white,
+    onSurface: Color(0xFF171A1D),
+    // 文字层级用实色保证跨表面的稳定对比度。
+    onSurfaceVariant: Color(0xFF686B70),
+    outline: Color(0xFFD9E0E7),
+    outlineVariant: Color(0xFFE8EDF2),
+    // 输入区与建议卡片共用柔和填充，按下态再加深一档。
     surfaceContainerLowest: Colors.white,
-    surfaceContainerLow: Color(0xFFFCFCFD),
-    surfaceContainer: Color(0xFFFAFAFB),
-    surfaceContainerHigh: Color(0xFFF4F4F5),
-    surfaceContainerHighest: Color(0xFFEBEBED),
+    surfaceContainerLow: Color(0xFFFCFDFE),
+    surfaceContainer: Color(0xFFF7F9FB),
+    surfaceContainerHigh: Color(0xFFF1F4F7),
+    surfaceContainerHighest: Color(0xFFE8EDF2),
     inverseSurface: Color(0xFF202024),
     onInverseSurface: Color(0xFFFCFCFD),
   );
@@ -378,6 +368,8 @@ abstract final class CortexTheme {
       useMaterial3: true,
       colorScheme: scheme,
       brightness: brightness,
+      fontFamily: 'NotoSansSC',
+      fontFamilyFallback: _cjkFallback,
       // 紧凑档：Material 组件整体收 6px（vertical −1.5 × 4px）。
       // 水平只收一半 —— 行高是这档要省的，左右缩太狠会挤到文案
       visualDensity: compact
@@ -390,33 +382,19 @@ abstract final class CortexTheme {
       scaffoldBackgroundColor: scheme.surface,
       extensions: [
         CortexTokens(
-          // 侧栏：锌灰、无色偏（2026-10-23）。上一版 #EFEEF3 的冷紫调
-          // 是旧中性阶的语言，这轮整套灰换锌系 —— 侧栏跟着换，
-          // 否则「唯一偏色的那一块」看起来像没刷新。深色侧栏仍比
-          // 窗底（#0C0C0E）亮一档（分层原则不变），但同步压暗
-          sidebar: dark ? const Color(0xFF131316) : const Color(0xFFF1F1F3),
-          // 选中/悬停那一项：比 sidebar 再走一档。
-          //
-          // ⚠️ **2026-10-23 实测反馈之后加深了。** 上一版浅色是 #EBEBED
-          // （与 sidebar 只差 6 个亮度单位），而悬停是它 55% 的半透明叠色
-          // （差 3）。于是「点一条会话」在屏幕上发生的事是：悬停 238 →
-          // 选中 235 → 鼠标移开回到 241 —— **选中态与悬停态只差 3**，
-          // 肉眼分不出，用户看到的就是「灰色背景一闪而过」。
-          //
-          // 现在浅色 #E4E4E7（差 13）、深色 #26262C（差 20）：选中与悬停
-          // 之间拉开到 7~10，鼠标移开之后那一行仍然明确地亮着。
-          // 仍然**中性**，不是品牌色 —— 「我在哪一条上」是位置不是动作。
+          // 浅色侧栏用很轻的冷灰，与白色主画布区分但保持通透。
+          sidebar: dark ? const Color(0xFF131316) : const Color(0xFFF7F9FB),
+          // 选中态比悬停更深，鼠标移开后仍能辨认当前位置。
           sidebarAccent: dark
               ? const Color(0xFF26262C)
-              : const Color(0xFFE4E4E7),
+              : const Color(0xFFE8EDF3),
           sidebarBorder: dark
               ? const Color(0xFF1F1F23)
-              : const Color(0xFFE4E4E7),
-          // fg3：浅 #8D8D8D / 深 #707070。实色、严格零色偏（zinc 系
-          // 的 71717A / 8E8E96 自带 8-9 的蓝偏，超发丝线的中性预算）
+              : const Color(0xFFE5EAF0),
+          // 次要信息保持可读，同时与正文拉开层级。
           foregroundTertiary: dark
-              ? const Color(0xFF707070)
-              : const Color(0xFF8D8D8D),
+              ? const Color(0xFF949494)
+              : const Color(0xFF8A8D92),
           // 反馈三色（--ok / --warn / --del 见 ColorScheme.error）。
           // 浅色取的是**深**的一档（#0F6B32 / #7C500A）：它们大多落在
           // fill 或白底上当文字/描边用，浅色的绿黄在那儿读不出来
@@ -433,9 +411,7 @@ abstract final class CortexTheme {
           accentGradientEnd: dark
               ? const Color(0xFFA78BFA)
               : const Color(0xFF8A62F4),
-          // 两档投影：Linear 一路的特征是「浅而克制」—— 浮层靠表面色阶
-          // 分层，投影只负责一点点空间暗示。上一版 0.08/0.12 的浓度在
-          // #FAFAFA 画布上会显脏；降一档，位移也收小
+          // 两档低对比投影只负责把输入区和浮层从画布上轻轻托起。
           shadow2: dark
               ? const [
                   BoxShadow(
@@ -447,8 +423,13 @@ abstract final class CortexTheme {
               : const [
                   BoxShadow(
                     offset: Offset(0, 1),
-                    blurRadius: 6,
-                    color: Color.fromRGBO(9, 9, 11, 0.05),
+                    blurRadius: 4,
+                    color: Color.fromRGBO(31, 41, 55, 0.035),
+                  ),
+                  BoxShadow(
+                    offset: Offset(0, 8),
+                    blurRadius: 22,
+                    color: Color.fromRGBO(31, 41, 55, 0.05),
                   ),
                 ],
           shadow3: dark
@@ -462,8 +443,8 @@ abstract final class CortexTheme {
               : const [
                   BoxShadow(
                     offset: Offset(0, 6),
-                    blurRadius: 24,
-                    color: Color.fromRGBO(9, 9, 11, 0.09),
+                    blurRadius: 30,
+                    color: Color.fromRGBO(31, 41, 55, 0.10),
                   ),
                 ],
         ),
@@ -498,11 +479,11 @@ abstract final class CortexTheme {
           // 2026-10-23 收紧 18/14 → 14/10（≈30%）：M3 出厂的敦实感
           // 是这套 UI 显旧的第三个来源（前两个：胶囊圆角、偏色灰）。
           // Linear / Raycast 的按钮是**紧凑**的 —— 高度 ≈ 36 而不是 48
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
           textStyle: const TextStyle(
             fontWeight: FontWeight.w600,
             // 按钮文字是小字号 + 大写不适用（中文），靠字重与字距
-            letterSpacing: -0.1,
+            letterSpacing: 0,
           ),
         ),
       ),
@@ -566,48 +547,46 @@ abstract final class CortexTheme {
     bool compact = false,
   }) => base
       .copyWith(
-        // 2026-10-23 字阶：「清晰」的一半来自标题层拉得开。titleLarge 收到
-        // 15.5 但字重升到 w700 —— Linear 一路的特征是**小而重**的标题，
-        // 而不是大而中庸；titleSmall 的 0.4 字距是 M3 出厂的「胶囊标签」
-        // 感，收到 0.2
+        // Noto Sans SC 的笔画末端更圆，配合正常字距保持桌面端的清晰度。
         titleLarge: base.titleLarge?.copyWith(
-          fontSize: 15.5,
-          fontWeight: FontWeight.w700,
-          letterSpacing: -0.2,
+          fontSize: 21,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0,
         ),
         titleMedium: base.titleMedium?.copyWith(
-          fontSize: 14,
+          fontSize: 17,
           fontWeight: FontWeight.w600,
-          letterSpacing: -0.1,
+          letterSpacing: 0,
         ),
         titleSmall: base.titleSmall?.copyWith(
-          fontSize: 12,
+          fontSize: 15,
           fontWeight: FontWeight.w600,
-          letterSpacing: 0.2,
+          letterSpacing: 0,
         ),
-        // 紧凑档正文 14px/1.66：字小一号，行距**反而放宽**
-        // 一点 —— 小字挤行距是最快变得读不动的组合
         bodyLarge: compact
-            ? base.bodyLarge?.copyWith(fontSize: 14, height: 1.66)
-            : base.bodyLarge?.copyWith(fontSize: 15, height: 1.62),
-        bodyMedium: base.bodyMedium?.copyWith(fontSize: 14, height: 1.6),
+            ? base.bodyLarge?.copyWith(fontSize: 16, height: 1.5)
+            : base.bodyLarge?.copyWith(fontSize: 16, height: 1.65),
+        bodyMedium: base.bodyMedium?.copyWith(fontSize: 15, height: 1.6),
         bodySmall: base.bodySmall?.copyWith(
-          fontSize: 12.5,
+          fontSize: 14,
           height: 1.5,
           color: scheme.onSurfaceVariant,
         ),
+        labelLarge: base.labelLarge?.copyWith(fontSize: 14, letterSpacing: 0),
+        labelMedium: base.labelMedium?.copyWith(fontSize: 13, letterSpacing: 0),
         labelSmall: base.labelSmall?.copyWith(
-          fontSize: 11,
-          letterSpacing: 0.3,
+          fontSize: 12,
+          letterSpacing: 0.1,
           color: scheme.onSurfaceVariant,
         ),
       )
-      .apply(fontFamilyFallback: _cjkFallback);
+      .apply(fontFamily: 'NotoSansSC', fontFamilyFallback: _cjkFallback);
 
   /// Flutter's default `Roboto` has no CJK coverage; without an explicit
   /// fallback chain, Chinese renders as tofu on Windows in some locales and
   /// picks an inconsistent face on Web.
   static const _cjkFallback = <String>[
+    'Noto Sans SC',
     'Microsoft YaHei UI',
     'Microsoft YaHei',
     'PingFang SC',

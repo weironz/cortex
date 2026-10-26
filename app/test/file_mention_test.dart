@@ -248,6 +248,34 @@ void main() {
       );
     });
 
+    testWidgets('工具栏引用按钮在选区插入 @，保留其余草稿', (tester) async {
+      final api = _TreeApi({
+        '/workspace': [_file('/workspace/README.md')],
+      });
+      await boot(tester, api);
+      await tester.enterText(find.byType(TextField), '看看 这里 的文件');
+      final field = tester.widget<TextField>(find.byType(TextField));
+      field.controller!.selection = const TextSelection(
+        baseOffset: 3,
+        extentOffset: 5,
+      );
+      await tester.tap(find.byTooltip('引用工作区文件'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(field.controller!.text, '看看 @ 的文件', reason: '引用按钮只替换选区，不得覆盖草稿');
+      expect(
+        field.controller!.selection.baseOffset,
+        4,
+        reason: '光标留在 @ 后面，用户可以继续输入路径',
+      );
+      expect(
+        find.text('README.md'),
+        findsOneWidget,
+        reason: '点击引用按钮应打开已有的文件候选列表',
+      );
+    });
+
     testWidgets('邮箱里的 @ 不弹候选', (tester) async {
       final api = _TreeApi({
         '/workspace': [_file('/workspace/README.md')],

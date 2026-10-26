@@ -103,6 +103,14 @@ Licensed under the Apache License, Version 2.0
       任一厂商提出异议时，`ProviderMark` 的首字母圆标兜底就是退路 ——
       删掉对应的 png 即可，不用改一行代码。
 
+  app/assets/fonts/NotoSansSC-VF.ttf
+      Noto Sans SC
+      https://github.com/notofonts/noto-cjk
+      Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved
+      Font Name "Source". Noto is a trademark of Google LLC.
+      Licensed under the SIL Open Font License, Version 1.1.
+      完整许可见 app/assets/fonts/OFL-NotoSansSC.txt。
+
 ═══════════════════════════════════════════════════════════════════════
 明确未取件
 ═══════════════════════════════════════════════════════════════════════

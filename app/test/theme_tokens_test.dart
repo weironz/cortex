@@ -45,12 +45,8 @@ void main() {
         );
       });
 
-      test('外壳是统一的中性灰，不是各偏各的', () {
-        // 2026-10-23 重设计后整套灰换**锌系、零色偏**（Linear 一路）。
-        // 前一版（冷紫调）的理由是「偏得成体系就不是没调准」；这轮
-        // 反过来的理由：发丝线要的是绝对中性的灰，任何色偏都会让
-        // 线看起来脏。所以现在钉的是**色度收紧**（12 → 6），方向
-        // 判断（蓝≥红）保留 —— 那防的是「一个偏蓝一个偏黄」各偏各的
+      test('外壳保持低色度的冷中性灰，接近白色', () {
+        // 允许极轻的冷灰蓝，但不允许某个表面单独偏成高色度背景。
         for (final (label, color) in [
           ('surface', scheme.surface),
           ('surfaceContainer', scheme.surfaceContainer),
@@ -61,15 +57,13 @@ void main() {
         ]) {
           expect(
             _chroma(color),
-            lessThanOrEqualTo(6),
-            reason: '$label 偏出中性范围了 —— 锌灰是一丝不偏，不是一个颜色',
+            lessThanOrEqualTo(8),
+            reason: '$label 色度过高，会让文字和表面显得杂乱',
           );
           expect(
-            (color.b * 255).round(),
-            greaterThanOrEqualTo((color.r * 255).round()),
-            reason:
-                '$label 偏暖了。整套灰要往同一个方向偏，一个偏蓝一个偏黄，'
-                '并排时才真的读成「没调准」',
+            color.b,
+            greaterThanOrEqualTo(color.r),
+            reason: '$label 偏暖，不符合白色与冷中性的外观方向',
           );
         }
       });
