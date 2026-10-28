@@ -1,9 +1,12 @@
 name: CI
 
+# GitHub Actions 免费额度已经用尽，自动触发会造成不可控支出。
+# 后续 CI 只能由人手动触发；日常和发布前的完整检查走：
+#
+#     just workflow-ci
+#
+# 这道约束由 scripts/check-workflow-triggers.py 守着。
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -58,6 +61,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: workflow 只保留手动触发
+        run: python3 scripts/check-workflow-triggers.py
+
       # ⚠️ **不在这里重写命令，调那份脚本。**
       #
       # 这三步原先是 inline 的（bash -n / shellcheck / 变量边界），与
@@ -83,8 +89,8 @@ jobs:
       # 语言不同、语法不同，没有任何一个工具会同时看到它们。漂移的失败方式是
       # `cortex --version` 说一个数、下载页写另一个数，而两边都编译得过。
       #
-      # 放在**每个 PR** 上而不是只放在发布流水线里：发版当天才发现版本对不上，
-      # 意味着要么带着错的版本号发出去，要么临时改一版重来
+      # 放在**每次手动 CI**上而不是只放在发布流水线里：发版当天才发现版本
+      # 对不上，意味着要么带着错的版本号发出去，要么临时改一版重来
       - name: 版本号一致性
         run: bash scripts/check-version.sh
 

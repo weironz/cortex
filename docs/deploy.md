@@ -5,14 +5,15 @@
 整条流水线**为什么这么设计**（以及每条规则背后那次事故）见
 [cd-architecture.md](cd-architecture.md) —— 那一份是写给「想把这套做法搬走的人」的。
 
-> **一句话**：推一个 tag，流水线一路走完 —— 构建、发产物、**上生产**。
-> `release.yml` 的最后一个 job 会调 `deploy.yml`。
+> **一句话**：手动运行 `release.yml` 后，流水线一路走完 —— 构建、发产物、
+> **上生产**。`release.yml` 的最后一个 job 会调 `deploy.yml`。
 >
 > 「哪个版本在线上是人做的决定」这条没变，只是那个决定的落点是
-> **`git tag`**，而不是事后再去点一次按钮。合并到 main 仍然什么都不部署。
+> **手动运行 Release workflow**，而不是 push tag。GitHub Actions 免费额度
+> 已经用尽，push main、PR 和 tag 都不再自动触发。
 >
 > `deploy.yml` 的手动触发保留着，用途是**回退**（把线上换成某个更早的
-> 版本）—— 那与「发新版」是完全不同的一件事，不该只能靠再打一个 tag 来做。
+> 版本）—— 那与「发新版」是完全不同的一件事。
 
 ---
 
@@ -340,12 +341,28 @@ compose 那道闸完全不在这条路上。它真正还挡得住的只有「单
 
 ## 五、部署一次
 
-**正常发版不用做任何事** —— 推 tag 之后 `release.yml` 的 `deploy` job
-自己会调到这里。下面这个入口是给**回退**用的：
+**GitHub 正常发版**在手动运行 `release.yml` 后，由它的 `deploy` job
+自己调到这里。下面的入口用于回退或单独重跑部署：
 
 ```
 GitHub → Actions → Deploy → Run workflow → version = 0.1.0
 ```
+
+本地发布流程默认不部署生产。需要按 Actions 相同路径上线时：
+
+```bash
+just workflow-release vX.Y.Z --deploy
+```
+
+如果 GitHub Release 已经完成、只差生产部署，直接用：
+
+```bash
+just workflow-deploy X.Y.Z
+```
+
+`workflow-deploy` 会从当前 `main` 读取 ansible 编排、从 `vX.Y.Z` tag 读取
+`deploy/docker-compose.yml`，执行 playbook 后再跑与 `deploy.yml` 相同的
+公网健康检查。加 `--dry-run` 只校验 tag、分支和工作区。
 
 > **改过 `deploy/docker-compose.yml` 不用再做任何额外的事。** ansible 每次
 > 部署都把 tag 上那份送过去 —— 这正是这次改造要解决的问题（此前得有人
@@ -354,7 +371,7 @@ GitHub → Actions → Deploy → Run workflow → version = 0.1.0
 也可以从本机跑同一份 playbook：
 
 ```bash
-just node-deploy -e version=0.1.18
+just workflow-deploy 0.1.18
 ```
 
 流水线做的事，逐条都有理由：
@@ -418,7 +435,7 @@ curl -fsS https://cortex.cloudcele.com/api/sandbox/health
 Actions → Deploy → Run workflow → version = <上一个版本>
 ```
 
-也可以从本机：`just node-deploy -e version=<上一个版本>`。
+也可以从本机：`just workflow-deploy <上一个版本>`。
 
 上一版的镜像还在节点本地（playbook 的镜像清理保留最新 3 个**版本**，
 而且 `docker_prune` **不带 `-a`** —— 有 tag 的不会被清掉，就是为了留住这条

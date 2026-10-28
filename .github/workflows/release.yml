@@ -1,11 +1,16 @@
 name: Release
 
 # ══════════════════════════════════════════════════════════
-#  发布流水线 —— 打产物、推镜像、发布 release，**并接着上生产**。
+#  发布流水线 —— 手动打产物、推镜像、发布 release，**并接着上生产**。
 #  最后那一步复用 deploy.yml（见文件末尾 `deploy` 作业里的理由）：
-#  人做的那次决定发生在 `git tag`，不该再要求他事后记得去点一次部署。
+#  人做的那次决定发生在手动运行 Release，不该再要求他事后记得去点一次部署。
 #
-#  触发：推 `v*` tag，或手动 workflow_dispatch（要填 tag）。
+#  触发：**只允许手动 workflow_dispatch**。GitHub Actions 免费额度已经用尽，
+#  push tag 不再触发任何东西。本机备用入口是：
+#
+#      just workflow-release vX.Y.Z
+#
+#  GitHub 手动入口只构建 tag 指向的那一份提交，不允许拿分支 HEAD 冒充 tag。
 #
 #  ── 这个文件被整个重写过，原因值得留着 ────────────────────
 #  上一版从建仓起就在，**一次都没被触发过**，里面有五个只会在
@@ -29,8 +34,6 @@ name: Release
 # ══════════════════════════════════════════════════════════
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -62,6 +65,8 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
 
       # tag 只在这里解析一次，后面全部作业引用这个 output。
       # 刻意不用 `github.ref_name || inputs.tag`：ref_name 在
@@ -70,11 +75,7 @@ jobs:
         id: resolve
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "push" ]; then
-            tag="${GITHUB_REF_NAME}"
-          else
-            tag="${{ inputs.tag }}"
-          fi
+          tag="${{ inputs.tag }}"
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
             || { echo "::error::tag '$tag' 不合法，必须是 vX.Y.Z"; exit 1; }
           echo "tag=$tag"         >> "$GITHUB_OUTPUT"
@@ -115,6 +116,8 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -219,6 +222,8 @@ jobs:
       CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
       # ⚠️ **钉死版本，不用 `channel: stable`。**
       #
       # 这里从前是 `channel: stable`，理由是「CI 与 release 必须用同一个
@@ -317,6 +322,8 @@ jobs:
             dockerfile: scripts/docker/Dockerfile.backup
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -364,7 +371,7 @@ jobs:
           # `denied: unknown manifest class`。
           #
           # 这条是**环境漂移**咬的：0.1.7 发的时候还没事，中间 runner 上的
-          # buildx 升了一版。四个镜像会一起挂，看起来像我们改坏了什么 ——
+          # buildx 升了一版。镜像会一起挂，看起来像我们改坏了什么 ——
           # 实际上本地 `docker build` 一路绿灯，因为它根本不 push。
           provenance: false
           # 只打具体版本，**不打 latest**。生产钉死版本，重启之后
@@ -380,74 +387,9 @@ jobs:
       # 来修 —— 而那时它已经在 registry 里了
       - name: 冒烟
         run: |
-          set -euo pipefail
-          img="registry.cn-shenzhen.aliyuncs.com/willspace/${{ matrix.image }}:v${{ needs.preflight.outputs.version }}"
-          if [ "${{ matrix.image }}" = "cortex-agentd" ]; then
-            # `--version` 不需要 docker、不需要记忆服务，是唯一能在 CI 里
-            # 无依赖执行的真实代码路径。它证明的是**动态链接通的**——
-            # glibc 版本对不上那一类问题会在这里当场炸，而不是等到线上
-            # 起容器时报一句 `GLIBC_2.xx not found`。
-            docker run --rm "$img" --version | tee /tmp/v.txt
-            grep -qF "${{ needs.preflight.outputs.version }}" /tmp/v.txt \
-              || { echo "::error::镜像里的版本不是 ${{ needs.preflight.outputs.version }}"; exit 1; }
-          elif [ "${{ matrix.image }}" = "cortex-sandbox" ]; then
-            # 容器里跑的是 cortex-local。ENTRYPOINT 是 sandbox-entrypoint，
-            # 它最后 `exec cortex-local "$@"` —— 所以 --version 直接透传进去。
-            #
-            # 这一条真机上咬过：入口脚本没被覆盖时 `cortex-local /bin/sh -ec ...`
-            # 退出码 2，而那次失败被回落逻辑吞成一句 WARN
-            docker run --rm "$img" --version
-            # agent 要用的三样，缺一个都是「沙箱起来了但干不了活」
-            docker run --rm --entrypoint /bin/sh "$img" -c 'git --version && python3 -V && node -v'
-          elif [ "${{ matrix.image }}" = "cortex-egress-proxy" ]; then
-            # scratch 镜像：没有 shell，`docker run ... sh -c` 这类招数全部不可用。
-            # 唯一能做的就是真的把它跑起来，看它有没有开始监听。
-            cid=$(docker run -d "$img")
-            for _ in $(seq 1 20); do
-              docker logs "$cid" 2>&1 | grep -q '反向中继就绪' && break
-              sleep 1
-            done
-            docker logs "$cid" 2>&1 | grep -q '出网代理就绪'               || { echo "::error::egress 没有在监听"; docker logs "$cid"; exit 1; }
-            docker rm -f "$cid" >/dev/null
-          elif [ "${{ matrix.image }}" = "cortex-backup" ]; then
-            # 备份容器：**三样工具在不在、版本对不对**。
-            #
-            # 不跑 ENTRYPOINT（那是个常驻守护循环，且没有 OSS 凭据就在
-            # render-config 那步以 78/EX_CONFIG 退出）—— 这里要证明的是
-            # 「镜像装对了」，不是「配置齐了」。
-            #
-            # ⚠️ pg 客户端**必须与生产库同大版本**：pg_basebackup 比服务端
-            # 旧会直接拒（"server version mismatch"），而那件事只在凌晨三点
-            # 的备份里暴露。底座就是 postgres:17-alpine，这一条钉住它没被换掉。
-            docker run --rm --entrypoint /bin/sh "$img" -c '
-              set -e
-              rustic --version
-              env -u RCLONE_VERSION rclone --version | head -1
-              pg_basebackup --version
-              pg_dump --version
-              pg_verifybackup --version
-              pg_basebackup --version | grep -q "PostgreSQL) 17\." \
-                || { echo "::error::pg 客户端不是 17.x，与生产库对不上"; exit 1; }
-              # 编排脚本三个都在且可执行 —— COPY 漏了的话容器起来才发现
-              for f in daemon.sh run.sh render-config.sh; do
-                test -x "/opt/cortex-backup/$f" || { echo "::error::缺 $f"; exit 1; }
-              done
-              # 以 postgres 身份跑，因为 pg_basebackup 写出来的数据目录
-              # 必须属于启动它的那个用户（见 Dockerfile 里那段）
-              test "$(id -un)" = postgres || { echo "::error::默认用户不是 postgres"; exit 1; }
-            '
-          else
-            cid=$(docker run -d -p 18080:80 "$img")
-            for _ in $(seq 1 30); do
-              curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1 && break
-              sleep 1
-            done
-            curl -fsS http://127.0.0.1:18080/healthz
-            # index.html 必须真的发得出来，而且 SPA 回落要生效
-            curl -fsS http://127.0.0.1:18080/ | grep -q '<html'
-            curl -fsS http://127.0.0.1:18080/some/deep/link | grep -q '<html'
-            docker rm -f "$cid" >/dev/null
-          fi
+          bash scripts/smoke-release-image.sh \
+            "registry.cn-shenzhen.aliyuncs.com/willspace/${{ matrix.image }}:v${{ needs.preflight.outputs.version }}" \
+            "${{ needs.preflight.outputs.version }}"
 
   # ══════════════════════════════════════════════════════════
   #  汇总并**直接发布** release
@@ -472,6 +414,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
       # pattern 是必需的，不是洁癖：不给 pattern 时它下载**全部**产物，
       # 而 docker/build-push-action 会顺手上传两个 0 字节的
       # `*.dockerbuild` 溯源记录 —— 那两个下不下来，
@@ -489,107 +433,19 @@ jobs:
           # `bin-*` 回来了，但只有 windows 一个平台
           pattern: "{bin-*,desktop-*}"
 
-      # 逐平台的 .sha256 是构建机上算的，这里汇总成一份。
-      # 先删掉单份的再算，否则 SHA256SUMS 里会混进「校验和文件的校验和」
-      #
-      # *.exe 是 Windows 桌面安装程序。它比别的产物更需要这份校验和：
-      # 它没有代码签名，用户只能靠对哈希确认手上这份就是发布页上那份 ——
-      # 安装说明里让人 `certutil -hashfile` 对的，就是这里生成的东西
-      - name: 汇总校验和
+      # 汇总和清点与 `just workflow-release` 共用一份脚本，避免 Actions
+      # 与本机备用路径对“哪些产物必须有”给出不同答案。
+      - name: 汇总校验和与产物清点
         run: |
-          set -euo pipefail
-          cd dist
-          rm -f ./*.sha256 SHA256SUMS
-          # nullglob：停掉 build job 之后 *.zip 不再有任何匹配，而默认情况下
-          # 未匹配的 glob 会**原样保留**，于是 sha256sum 收到一个字面量
-          # `*.zip` 并以「文件不存在」失败 —— 一个纯粹由「少了一类产物」
-          # 引发的红灯，和校验和本身无关。
-          # 留着 *.zip 这一条是为了恢复 build job 时不用再想起来加回来
-          shopt -s nullglob
-          files=( *.tar.gz *.zip *.exe )
-          [ ${#files[@]} -gt 0 ] || { echo "::error::dist 里一个产物都没有"; exit 1; }
-          sha256sum -- "${files[@]}" > SHA256SUMS
-          cat SHA256SUMS
-
-      # 少一个平台时 release 照样建得出来，只是那个平台的用户下载页上
-      # 没有东西 —— 而没有任何红灯。所以在这里点名清点
-      - name: 产物清点
-        run: |
-          set -euo pipefail
-          cd dist
-          v="${{ needs.preflight.outputs.version }}"
-          miss=0
-          # 这张清单是发版产物的**唯一权威**：少一个必须当场红，
-          # 不能静默发出去。（v0.1.0 删掉 Intel Mac 时漏改过这里，被它拦下了。）
-          #
-          # 0.1.2 的下载页上只有两样可执行产物，都在这里点名。
-          # Flutter Web 的 tar.gz 这一版停发了（见上方被停掉的 job）；
-          # Linux / macOS 裸二进制也只剩 docker 镜像那条路。
-          # 恢复其中任何一样时**必须同步加回这一段** ——
-          # 否则清点照常绿，而下载页上少了东西没有任何提示
-          [ -f "cortex-v$v-x86_64-pc-windows-msvc.zip" ] \
-            || { echo "::error::缺少 Windows 二进制包（CLI + 本地 agent + 编排器）"; miss=1; }
-          [ -f "cortex-desktop-v$v-x86_64-pc-windows-msvc-setup.exe" ] \
-            || { echo "::error::缺少 Windows 桌面安装程序"; miss=1; }
-          exit $miss
+          bash scripts/release-checksums.sh \
+            --dist dist \
+            --version "${{ needs.preflight.outputs.version }}"
 
       - name: 取 CHANGELOG 里这一版的段落
         run: |
-          set -euo pipefail
-          v="${{ needs.preflight.outputs.version }}"
-          # 用 index() 逐字比对，**不用动态正则**。
-          #
-          # 原来这里是 `$0 ~ "^## +\\[?" ver "\\]?"`，它是坏的：awk 把字符串里的
-          # `\[` 当成普通 `[`（gawk 会明说 "escape sequence '\[' treated as plain
-          # '['"），于是那段正则退化成 `^## +[?0.1.0]?` —— 一个**字符组**，
-          # 结果是「任何 `## ` 开头的标题都算命中」。
-          #
-          # 这个 bug 在 v0.1.0 发版时不可见：那时 CHANGELOG 里 `## [0.1.0]`
-          # 恰好是第一个二级标题，抓错也抓到它。加了「未发布」一节之后
-          # 它立刻变成「把未发布的内容当成这一版的发布说明发出去」——
-          # 而 notes.md 非空，`[ -s notes.md ]` 那道检查照样绿。
-          awk -v ver="$v" '
-            !on && (index($0, "## [" ver "]") == 1 ||
-                    index($0, "## "  ver " ") == 1 ||
-                    $0 == "## " ver) { on = 1; print; next }
-            on && index($0, "## ") == 1 { exit }
-            on { print }
-          ' CHANGELOG.md > notes.md
-          [ -s notes.md ] || { echo "::error::CHANGELOG.md 里取不到 $v"; exit 1; }
-          {
-            echo; echo "---"; echo
-            echo '### 服务端（agent 编排）：这一版只发 docker 镜像'
-            echo
-            echo '**从 0.1.2 起不再发裸二进制**（`cortex-vX-<平台>.tar.gz` / `.zip`）。'
-            echo '前期迭代快，四个平台各编一份占掉了整条发版流水线的绝大部分时间。'
-            echo '能力没少 —— 镜像里该有的都在；少的是'
-            echo '「不想用 docker 就下个二进制跑」这条路。要 CLI 又不想要 docker：'
-            echo '`cargo install --git https://github.com/${{ github.repository }} cortex-cli`。'
-            echo
-            echo '```'
-            echo "docker pull registry.cn-shenzhen.aliyuncs.com/willspace/cortex-agentd:v$v"
-            echo "docker pull willdockerhub/cortex-agentd:v$v"
-            echo '```'
-            echo
-            echo '**记忆服务是单独一个产品**，在 [Cormex](https://github.com/weironz/cormex)：'
-            echo '它管存储、检索与 MCP 门面，独立发版、也能单独用。自托管要两个都起 ——'
-            echo '先记忆后 agent（agent 连不上记忆服务时一条对话都开不了）。'
-            echo
-            echo '自托管完整步骤见 [docs/install.md](https://github.com/${{ github.repository }}/blob/v'"$v"'/docs/install.md)。'
-            echo '**第一步一定是生成凭据** —— 没有 `CORTEX_AUTH_TOKEN_SHA256` 时记忆服务拒绝启动。'
-            echo
-            echo '### Windows 桌面端'
-            echo
-            echo '`cortex-desktop-v'"$v"'-x86_64-pc-windows-msvc-setup.exe` 是**客户端 GUI**，'
-            echo '不是服务端 —— 它仍然需要一台记忆服务（地址在装完第一屏里填）。'
-            echo
-            echo '这个安装程序**没有代码签名**，Windows SmartScreen 会拦一次：'
-            echo '点「更多信息」→「仍要运行」。要不要点请自己判断 ——'
-            echo '判断依据是 `SHA256SUMS`，用 `certutil -hashfile <文件> SHA256` 对一遍。'
-            echo 'macOS / Linux 桌面端这一版不发，自己 `flutter build`，理由见 CHANGELOG。'
-            echo
-            echo '产物校验和见 `SHA256SUMS`。'
-          } >> notes.md
+          bash scripts/release-notes.sh \
+            --tag "${{ needs.preflight.outputs.tag }}" \
+            --output notes.md
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -603,9 +459,8 @@ jobs:
 
   # ── 上生产 ────────────────────────────────────────────────
   #
-  # 发版是**一条龙**：构建 → 发产物 → 上生产。人做的那次决定发生在
-  # `git tag`，不该再要求他事后记得去点一次部署 —— 那种「还差最后一步」
-  # 的流程，漏掉的表现是「发了但线上还是旧版」，而它没有任何红灯。
+  # 手动运行 Release 是**一条龙**：构建 → 发产物 → 上生产。人做的那次决定
+  # 发生在 workflow_dispatch，不该再要求事后记得点一次部署。
   #
   # `needs: release` 而不是 `needs: image`：产物没发成功就不该上生产。
   # 那种状态（线上是新版、下载页是旧版）比两者都旧更难解释。

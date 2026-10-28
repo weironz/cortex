@@ -17,17 +17,17 @@
 
 ```
               ┌──────────────────────────────────────────────┐
-  push/PR ───►│  CI (ci.yml)         这次改动本身对不对       │
+ 手动触发 ───►│  CI (ci.yml)         这次改动本身对不对       │
               │  fmt · clippy · 测试 · Flutter · 三平台构建   │
               └──────────────────────────────────────────────┘
-                                  合并到 main：**什么都不部署**
+  push/PR：**不再自动触发**；日常用 `just workflow-ci`
 
               ┌──────────────────────────────────────────────┐
-  git tag ───►│  Release (release.yml)   这一版发得出去吗     │
-   v0.1.20    │                                              │
+ 手动 release►│  release.yml / workflow-release             │
+  v0.1.20    │  这一版发得出去吗                              │
               │  preflight ──┬── build    (Windows 二进制)    │
               │   版本一致   ├── desktop  (Inno 安装程序)     │
-              │   凭据泄漏   └── image ×4 (docker，两个 registry)│
+              │   凭据泄漏   └── image ×5 (docker，两个 registry)│
               │   CHANGELOG        每个产物都被真的运行过一次  │
               │        │                                     │
               │        └──► release  汇总校验和 · 产物清点    │
@@ -55,30 +55,29 @@
 
 | | 触发 | 它回答什么 | 失败的代价 |
 |---|---|---|---|
-| CI | push / PR | 这次改动对不对 | 拦在合并前，最便宜 |
-| Release | 推 `v*` tag | 这一版**发得出去**吗 | 产物已经进 registry，撤不回来 |
+| CI | 手动 workflow_dispatch / `just workflow-ci` | 这次改动对不对 | 拦在合并前，最便宜 |
+| Release | 手动 workflow_dispatch / `just workflow-release v*` | 这一版**发得出去**吗 | 产物已经进 registry，撤不回来 |
 | Deploy | Release 调用 / 手动 | 线上换成这一版 | 用户当场受影响 |
 
 ---
 
-## 二、决定点只有一个：`git tag`
+## 二、决定点是“tag + 手动放行”
 
 早期这里是「发布产出产物，部署**只能手动触发**」，理由是「哪个版本在线上
 是人做的决定，不该是合并的副作用」。前半句对，后半句推错了一步：
 
-**打 tag 本身就是那个决定。** 让人打完 tag 之后再记得去点一次部署，多出来
-的不是安全，是一个会被忘掉的步骤 —— 而忘掉的表现是「发了但线上还是旧版」，
-**没有任何红灯**。
+GitHub Actions 免费额度用尽后，自动化边界又收紧了一层：
 
-所以现在：
+- push main、PR、push `v*` tag 都不再触发 Actions；
+- GitHub 上手动运行 `release.yml`，或本机 `just workflow-release vX.Y.Z`，
+  才会构建并发布产物；
+- GitHub Release 成功后，Actions 会继续部署生产；本机默认停在 Release，
+  追加 `--deploy` 才一条龙上线；
+- 单独上线或回退用 GitHub 手动 `Deploy`、`just workflow-deploy X.Y.Z`。
 
-- `on: push` 到 main —— **什么都不部署**（这一条没变）
-- 推 `v*` tag —— 构建 → 发产物 → **接着上生产**，一条龙
-- `workflow_dispatch` 保留着，但它的用途变成**回退**：把线上换成某个更早的
-  版本。那与「发新版」是完全不同的一件事，不该只能靠再打一个 tag 来做
-
-> **可搬**：把「人的决定」落在一个**不可变、可审计、可回溯**的东西上
-> （tag / release），而不是落在一次点击上。点击留不下痕迹，也会被忘记。
+> **可搬**：版本内容仍然落在不可变、可审计的 tag 上；但是否消耗远端构建
+> 资源和是否改生产，另要一次明确的手动放行。限额和不可逆操作都不该由
+> push 这种高频副作用顺带完成。
 
 ### `needs: release` 而不是 `needs: image`
 
@@ -165,7 +164,7 @@ buildx 默认给镜像挂一份 provenance 证明，结果是一个 OCI index，
 media type**，push 直接 `denied: unknown manifest class`。
 
 这条最难查的地方在于：0.1.7 发的时候还没事，中间 runner 上的 buildx 升了
-一版。四个镜像会一起挂，**看起来像我们改坏了什么** —— 而本地
+一版。镜像会一起挂，**看起来像我们改坏了什么** —— 而本地
 `docker build` 一路绿灯，因为它根本不 push。
 
 > **可搬**：凡是「本地能过、CI 挂」的东西，先怀疑**只有 CI 才走的那一步**

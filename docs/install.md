@@ -52,7 +52,8 @@
 
 ## 这个仓库发的是什么
 
-每个 tag 发四样（见 [release.yml](../.github/workflows/release.yml)）：
+每次手动发布的 GitHub Release 发四样（见
+[release.yml](../.github/workflows/release.yml)）：
 
 | 产物 | 里面是什么 | 谁需要 |
 |---|---|---|

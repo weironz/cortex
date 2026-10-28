@@ -2,16 +2,19 @@
 
 给维护者看的。装软件见 [install.md](install.md)，上线见 [deploy.md](deploy.md)。
 
-> **发布与部署仍然是两件事，但推 tag 会把两件都做掉。**
-> 发布产出产物与镜像，走完之后 `release.yml` 直接调 `deploy.yml` 上生产。
-> 哪个版本在线上仍然是人做的决定 —— 只是那个决定的落点是 **`git tag`**，
-> 不是事后再去点一次按钮。合并到 main 依然什么都不部署。
+> **GitHub Actions 只保留手动触发。** Actions 免费额度已经用尽，push main、
+> PR 和 push tag 都不会再创建运行。日常 CI 用 `just workflow-ci`；GitHub
+> Release 可以手动运行 `release.yml`，也可以完全走本地的
+> `just workflow-release vX.Y.Z`。
 >
-> `deploy.yml` 的手动触发保留着，用途是**回退**。
+> GitHub 手动运行 `release.yml` 时，成功后仍会调用 `deploy.yml` 上生产。
+> 本地 `workflow-release` 默认只构建、推镜像和发布 GitHub Release；追加
+> `--deploy` 才执行生产部署。
 >
-> ⚠️ 这段话此前写的是「部署**只能手动触发**」，而流水线早就改成一条龙了 ——
-> 2026-08-25 核代码时发现它与 [deploy.md](deploy.md) 互相矛盾。
-> 设计上的完整理由见 [cd-architecture.md](cd-architecture.md) 第二节。
+> `deploy.yml` 的手动触发继续保留，用于回退或单独重新部署。
+>
+> `just workflow-ci` 会启动一次性 Postgres 来跑真实集成测试，因此本机
+> 需要 Docker；完成后容器自动删除，不会替换现有开发库。
 
 ---
 
@@ -21,7 +24,7 @@
 |---|---|
 | `Cargo.toml` 的 `[workspace.package] version` | **权威**。`cortexd --version`、`/health` 的 `version` 字段、日志都从它来 |
 | `app/pubspec.yaml` 的 `version`（`+N` 不参与比较） | Flutter 构建 |
-| git tag `vX.Y.Z` | 触发发布；产物文件名从它派生 |
+| git tag `vX.Y.Z` | 版本内容与产物文件名从它派生；发布要再手动放行 |
 | docker 镜像 tag | 从 git tag 派生 |
 
 ```bash
@@ -29,7 +32,7 @@ just version-check              # 仓库内部
 just version-check --tag v0.1.0 # 再比一个 tag
 ```
 
-**这是一道闸，不是提醒。** CI 每个 PR 都跑，发布流水线在编译任何东西之前跑。
+**这是一道闸，不是提醒。** `just workflow-ci` 和发布流水线都会跑。
 放在编译之前是刻意的：版本对不上时最不该发生的事，是先花二十分钟在五个平台上
 编译出一堆名字是错的产物。
 
@@ -96,29 +99,58 @@ just release-package --target x86_64-pc-windows-msvc
 编译得过不等于跑得起来 —— 这个项目在 Dockerfile 里已经踩过一次
 libstdc++ 的坑（构建全绿，启动时 `symbol lookup error`）。
 
-### 4. 推 tag
+### 4. 创建并推送 tag
 
 ```bash
 git tag -a vX.Y.Z -m "vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
+推送 tag **不会再自动触发 Actions**。确认 tag 指向要发布的提交后，二选一：
+
+```bash
+# 本地备用流程：默认不出生产
+just workflow-release vX.Y.Z
+
+# 或手动运行 GitHub Actions
+gh workflow run release.yml -f tag=vX.Y.Z
+```
+
+本地 `workflow-release` 只支持 Windows Git Bash / MSYS2，因为它必须产出当前
+正式发布的 Windows 二进制包和安装程序。它要求：
+
+- `gh auth login` 或 `GH_TOKEN`；
+- 本机已登录 Docker Hub 与阿里云 ACR，或在当前环境设置
+  `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`、
+  `ACR_USERNAME` / `ACR_PASSWORD`；
+- 当前 HEAD 正好是 tag 指向的提交，并且已跟踪文件没有未提交改动。
+
+常用选项：
+
+```bash
+just workflow-release vX.Y.Z --build-only   # 只构建和冒烟，不 push/发布/部署
+just workflow-release vX.Y.Z --skip-images  # 没有 Docker 时只发二进制产物
+just workflow-release vX.Y.Z --deploy       # GitHub Release 成功后部署生产
+just workflow-release vX.Y.Z --dry-run       # 只校验 tag/工作区并打印计划
+```
+
 ### 5. 流水线做什么
 
-`release.yml`：
+手动 `release.yml` 与本地 `just workflow-release` 共用 preflight、二进制打包、
+桌面安装包、镜像冒烟、产物清点和发布说明脚本：
 
 | 作业 | 产出 |
 |---|---|
 | `preflight` | 解析 tag、跑前置闸门。**其它作业全部 needs 它** |
 | `build` | 裸二进制。**自 0.1.2 起只有 Windows**，包含 cortexd + CLI + `cortex-local` |
 | `desktop` | Windows 桌面安装程序（Inno Setup）。**只有 Windows** —— macOS 的 Gatekeeper 是硬拒绝，不是警告 |
-| `image` ×4 | `cortex-agentd`、`cortex-web`、`cortex-sandbox`、`cortex-egress-proxy`，各推 Docker Hub 与阿里云 ACR。**推完必须真的启动一次** |
+| `image` ×5 | `cortex-agentd`、`cortex-web`、`cortex-sandbox`、`cortex-egress-proxy`、`cortex-backup`，各推 Docker Hub 与阿里云 ACR。**推完必须真的启动一次** |
 | `release` | 汇总 `SHA256SUMS`、清点产物是否齐、从 CHANGELOG 取这一版的段落、**直接发布** |
 | `deploy` | **调 `deploy.yml` 把这一版放到生产**，然后验五条硬断言（见下） |
 
-**发版是一条龙：构建 → 发产物 → 上生产。** 人做的那次决定发生在 `git tag`，
-不该再要求他事后记得去点一次部署 —— 那种「还差最后一步」的流程，漏掉的
-表现是「发了，但线上还是旧版」，而它没有任何红灯。
+GitHub 手动 `release.yml` 仍是构建 → 发产物 → 上生产；本地默认只做到
+GitHub Release。需要一条龙时显式追加 `--deploy`，避免“只是补发 release
+附件”的命令顺手改生产。
 
 `deploy` 依赖的是 `release` 而不是 `image`：产物没发成功就不该上生产，
 「线上是新版、下载页是旧版」比两者都旧更难解释。
@@ -206,7 +238,7 @@ git push origin vX.Y.Z
 | 普通推 main 的 CI | rust-cache 恢复 548 MB，`full match: true` | 缓存本身是好的 |
 | 发版的 Windows 二进制 | `No cache found.` → 冷编 14.4 分 | |
 | 发版的桌面安装程序 | 那个作业**根本没配 rust-cache** → 冷编 13.4 分 | 已修 |
-| 四个镜像 | 导入了 manifest，但 `CACHED` 层 **= 0**；仍花 97 秒导出 | |
+| 五个镜像 | 导入了 manifest，但 `CACHED` 层 **= 0**；仍花 97 秒导出 | |
 
 ### 一、tag 读不到别的 tag 的缓存 —— **已修**
 
@@ -228,7 +260,7 @@ GitHub 只让一次运行读「本 ref 的缓存 + 默认分支的缓存」。�
 版本号）。**docker 的层缓存是整层全有或全无**，所以那一层之后的全部重编。
 
 于是「在 CI 里也构建一次镜像、给 tag 那次留一份热缓存」这个想法**买不到东西**：
-main 的缓存再热，第 40 行那个 COPY 也对不上 —— 而代价是每次推送多编四个镜像。
+main 的缓存再热，第 40 行那个 COPY 也对不上 —— 而代价是每次发布多编五个镜像。
 **试过之前先读这一段。**
 
 真正能修它的只有一件事：**让版本号不出现在依赖层的输入里** ——

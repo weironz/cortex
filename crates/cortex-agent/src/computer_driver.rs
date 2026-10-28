@@ -346,7 +346,7 @@ impl FakeComputerDriver {
     pub fn with_observation(self, observation: Observation) -> Self {
         self.observations
             .lock()
-            .expect("fake driver 测试锁不应被毒化")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push_back(observation);
         self
     }
@@ -355,7 +355,7 @@ impl FakeComputerDriver {
     pub fn with_post_observation(self, observation: Observation) -> Self {
         self.post_observations
             .lock()
-            .expect("fake driver 测试锁不应被毒化")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push_back(observation);
         self
     }
@@ -390,7 +390,7 @@ impl ComputerDriver for FakeComputerDriver {
         let observation = self
             .observations
             .lock()
-            .expect("fake driver 测试锁不应被毒化")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop_front()
             .ok_or_else(|| DriverError::Failed("fake observation 已被取走".to_owned()))?;
         if observation.window().id() != window_id {
@@ -410,7 +410,7 @@ impl ComputerDriver for FakeComputerDriver {
         let post_observation = self
             .post_observations
             .lock()
-            .expect("fake driver 测试锁不应被毒化")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop_front()
             .ok_or_else(|| DriverError::Failed("fake post-observation 已被取走".to_owned()))?;
         Receipt::new(

@@ -5,9 +5,10 @@ name: Deploy
 #
 #  **没有 `on: push`**：哪个版本在线上，是人做的决定，不是合并的副作用。
 #
-#  但**打 tag 就是那个决定**，所以 Release 走完之后会自动调这里
+#  但**手动运行 Release 就是那个决定**，所以 Release 走完之后会调这里
 #  （`release.yml` 的 deploy job，走下面的 `workflow_call`）。
-#  发版是一条龙：构建 → 发产物 → 上生产。人做的那次决定发生在 `git tag`。
+#  发版是一条龙：构建 → 发产物 → 上生产。人做的那次决定发生在手动运行
+#  Release，而不是 push tag —— Actions 免费额度用尽后 tag push 不再触发。
 #
 #  `workflow_dispatch` 保留着，用来把线上回退到某个更早的版本 ——
 #  那是与「发新版」完全不同的一件事，不该只能靠再打一个 tag 来做。
@@ -233,84 +234,4 @@ jobs:
       # 更证明不了线上跑的真是这一版
       - name: 验证线上真的在跑这一版
         run: |
-          set -euo pipefail
-
-          # ── 记忆服务（cortexd）───────────────────────────
-          #
-          # 它在另一个仓库（github.com/weironz/cormex）发版。这一侧
-          # **不知道是 cormex 已下线还是路由没通**，两个状态对公网来说是同
-          # 一个样子（`404` 或 SPA fallback 的 index.html）——所以**查而不
-          # 拦**：答得上 JSON 就顺手核几个必须开着的开关，拿不到就跳过。
-          # 真正被这边部署改坏的那一件（agentd 自己）在下面单断言，
-          # 那是这次部署画的红线。
-          mem=$(curl -fsS https://cortex.cloudcele.com/api/health) || mem=''
-          case "$mem" in
-            '{'*) echo "$mem"
-              if echo "$mem" | grep -q '"auth":"token"'; then
-                # 能答 JSON 才查开关。auth=disabled 会把记忆库交给任何人，
-                # 且没有任何别的症状；要的就是无止境的手动检查
-                echo "$mem" | grep -q '"database":"ok"' \
-                  || { echo "记忆服务回落到 mock（少 DEEPSEEK_API_KEY 那类）"; exit 1; }
-                echo "$mem" | grep -q '"blob_backend":"s3"' \
-                  || { echo "对象存储没接上 —— 媒体不会进备份（RUSTFS 凭据错那类）"; exit 1; }
-              else
-                echo "记忆服务没在答 —— 拦不下来 != 不该拦（这条是 check，不是 gate）" >&2
-              fi ;;
-            *)  echo "记忆服务不在线（not_wired）—— 不拦部署，记一条" >&2 ;;
-          esac
-
-          # ── agent 编排（agentd）─────────────────────────
-          #
-          # **这个才是这次部署的版本。** 打的是 `/api/sandbox/health` 而不是
-          # `/api/health`：后者按路径分流归了记忆服务，从公网永远问不到
-          # 这个进程。见 agentd `routes/mod.rs` 里那条路由上的注释。
-          agent=$(curl -fsS https://cortex.cloudcele.com/api/sandbox/health); echo "$agent"
-
-          echo "$agent" | grep -q '"version":"${{ inputs.version }}"' \
-            || { echo "版本不符 —— agentd 报的不是 ${{ inputs.version }}"; exit 1; }
-          echo "$agent" | grep -q '"role":"agent-orchestrator"' \
-            || { echo "/api/sandbox/health 答话的不是 agentd —— traefik 的分流配错了"; exit 1; }
-
-          # **「起来了」不等于「连得上它依赖的东西」。**
-          #
-          # 这条原先断言的是 `memory_reachable:true`。长期记忆 2026-08-17 整条
-          # 拆掉之后 agentd 不再连记忆服务，那个字段也从 /health 里删了 ——
-          # 于是这条断言在 0.1.11 的部署上**必然失败**，而部署本身是成功的。
-          # （`routes/routes_test.rs` 里已经有单元测试钉住「这两个字段不存在」，只有这里漏了。
-          # 能力下线时得把断言一起下线，见 CLAUDE.md 约束 2 的同一个道理。）
-          #
-          # 换成现在真正的那条依赖：agentd → 它自己的库。理由一样硬 ——
-          # 部署用的是 `--no-deps`，它**忽略** depends_on 的健康等待，所以
-          # agentd 确实可能在 postgres 还没接受连接时起来，而它起来第一件事
-          # 就是跑 migration。连不上库的 agentd 一句历史都读不出来。
-          echo "$agent" | grep -q '"database":"ok"' \
-            || { echo "agentd 连不上自己的库 —— 一条会话都读不出来"; exit 1; }
-
-          # Web 也要真的发得出来（traefik 的路径分流三条都得对）
-          curl -fsS https://cortex.cloudcele.com/ | grep -q '<html'
-
-          # ★ **返回 200 不等于页面能启动。**
-          #
-          # wasm-gc 的胶水脚本是 `main.dart.mjs`，浏览器用 `import()` 按
-          # module 加载它，而 module script 的 MIME 在 HTML 规范里是**强校验**
-          # 的：nginx 的 `mime.types` 里没有 `.mjs` 时会回落成
-          # `application/octet-stream`，import() 当场被拒 —— 整页白屏，而
-          # 每一条 HTTP 都是 200、上面那句 `grep '<html'` 也照样过。
-          #
-          # 2026-10-24 就这么白了一整版（0.1.36/0.1.37 都没被抓到）：部署输出
-          # 全绿、版本探针答对了、用户打开是一片空白。**只有真浏览器会说话，
-          # 而这里没有浏览器** —— 所以退一步，钉住那两个文件的 Content-Type，
-          # 它们是浏览器挑渲染管线的全部依据。
-          mjs_type=$(curl -fsSI https://cortex.cloudcele.com/main.dart.mjs \
-                     | tr -d '\r' | grep -i '^content-type:' || true)
-          case "$mjs_type" in
-            *javascript*) ;;
-            *) { echo "main.dart.mjs 的 MIME 不是 JS（${mjs_type:-没有这个头}）——"
-                 echo "浏览器会拒绝 import()，整页白屏（nginx 的 types 里漏了 mjs？）"; exit 1; } ;;
-          esac
-          wasm_type=$(curl -fsSI https://cortex.cloudcele.com/main.dart.wasm \
-                      | tr -d '\r' | grep -i '^content-type:' || true)
-          case "$wasm_type" in
-            *application/wasm*) ;;
-            *) { echo "main.dart.wasm 的 MIME 不是 application/wasm（${wasm_type:-没有这个头}）"; exit 1; } ;;
-          esac
+          bash scripts/verify-production-health.sh "${{ inputs.version }}"

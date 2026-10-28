@@ -391,6 +391,12 @@ evals-baseline:
 lint-ci-parity:
     python3 scripts/check-ci-parity.py
 
+# GitHub Actions 免费额度已经用尽：任何 workflow 都不许再偷偷被 push、
+# PR、tag 或 schedule 触发。手动运行 GitHub Actions 仍可用，日常入口是
+# `just workflow-ci`，发布备用入口是 `just workflow-release`。
+lint-workflows:
+    python3 scripts/check-workflow-triggers.py
+
 # agentd 读的每个环境变量，两份 compose 都得能设它。
 #
 # **与 CI 那一步同一条命令**（ci.yml 的「代码读的环境变量，compose 都设得了」）。
@@ -412,7 +418,7 @@ lint-compose-env:
 # 依赖链，CI 加了一步而这里没跟上就红（那件事 2026-08-20 与 08-22 各发生过
 # 一次，两次都是本机全绿、推上去才知道）。加 recipe 时连同
 # `scripts/check-ci-parity.py` 的 COVERED 一起改。
-ci: fmt-check lint check test docs-check lint-sh lint-py lint-edge lint-sql-limit lint-unwrap toolchain-check release-check evals-baseline lint-compose-env lint-ci-parity flutter-check
+ci: fmt-check lint check test docs-check lint-sh lint-py lint-edge lint-sql-limit lint-unwrap toolchain-check release-check evals-baseline lint-compose-env lint-ci-parity lint-workflows flutter-check
     @echo "全部检查通过"
 
 # ══════════════════════════════════════════════════════════
@@ -670,6 +676,37 @@ toolchain-check:
 #   + 没有未被忽略的凭据文件 + Cargo.lock 同步
 release-check *ARGS:
     bash scripts/release-preflight.sh {{ ARGS }}
+
+# GitHub Actions CI 的本地等价入口。Actions 侧只保留手动触发，因此提交前
+# 和发布前都从这里跑。脚本会起一次性 Postgres，再执行 `ci` 的完整依赖闭包，
+# 避免开发机 `.env` 的库端口与测试库不一致时把集成测试静默跳过。
+workflow-ci:
+    bash scripts/workflow-ci.sh
+
+# GitHub Release workflow 的本地备用入口。
+#
+# 本地发布只支持 Windows Git Bash / MSYS2（当前正式产物是 Windows 二进制
+# 与安装程序），默认执行：本地 CI → preflight → 二进制包 → 桌面安装程序
+# → 五个 Docker 镜像 → SHA256SUMS/发布说明 → GitHub Release。
+#
+#     just workflow-release v0.1.44
+#     just workflow-release v0.1.44 --build-only
+#     just workflow-release v0.1.44 --skip-images
+#     just workflow-release v0.1.44 --deploy
+#
+# `--deploy` 才会在生产执行 ansible；不带它时只发布 GitHub Release。
+workflow-release tag *ARGS:
+    bash scripts/release-workflow-local.sh "{{ tag }}" {{ ARGS }}
+
+# Deploy workflow 的本地备用入口。
+#
+# 部署机制 ansible/ 固定取当前 main，应用 compose 取 vVERSION tag；部署后
+# 复用与 deploy.yml 相同的公网健康断言。可用于手动上线或回滚：
+#
+#     just workflow-deploy 0.1.44
+#     just workflow-deploy 0.1.43 --dry-run
+workflow-deploy version *ARGS:
+    bash scripts/deploy-workflow-local.sh "{{ version }}" {{ ARGS }}
 
 # 本机打一份发布产物出来（跑 --version 冒烟 → 组装 → 压缩 → sha256）
 release-package *ARGS:

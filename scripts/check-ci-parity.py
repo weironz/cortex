@@ -62,6 +62,7 @@ COVERED = {
     "shell 脚本这一关（语法 / shellcheck / 变量边界）": "lint-sh",
     "python 语法检查": "lint-py",
     "版本号一致性": "docs-check",
+    "workflow 只保留手动触发": "lint-workflows",
     "文档链接指得到": "docs-check",
     "圆角走那五阶": "docs-check",
     # 复用早就存在的 `release-check`，而不是另起一条跑同一个脚本的 recipe ——
