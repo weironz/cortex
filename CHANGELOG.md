@@ -10,6 +10,57 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ---
 
+## [0.1.44] - 2026-10-28
+
+受控 Computer Use、本机权限语义和手动发布链路更新。
+
+### 新增
+
+- Windows Computer Use C1：接入 Cua Driver 0.38.0 的 bounded sidecar，
+  开放 `computer_list` / `computer_observe`，返回窗口身份、结构化可访问性信息、
+  截图以及完整性证据。
+- Computer Use 双层安全边界：应用 executable allowlist、稳定窗口身份、
+  Observation frame TTL、一次性元素引用、secure-field handoff、动作后验证协议。
+  本版仍**不开放点击、输入、快捷键、滚动或剪贴板**。
+- 本机桌面应用启动工具：Windows 使用系统 Shell API，macOS 使用 `open`，
+  不经 shell 字符串拼接；浏览器只接受 HTTP(S) URL。
+- GitHub Actions 全部改为手动触发。新增 `just workflow-ci`、
+  `just workflow-release`、`just workflow-deploy`，作为 CI、Release 和生产
+  部署的本地备用流程。
+- 云端沙箱运行时调研：补充 agent 架构、恢复语义、候选底座，以及
+  Docker + gVisor / Cloud Hypervisor 两阶段方案。
+
+### 改进
+
+- “完全放行”在本机现在真实对应当前用户的宿主进程与文件权限；受限模式下
+  单次宿主命令必须带明确理由并经确认。云端 `Bypass` 仍不获得宿主权限。
+- 旧持久化 `bypass` 不再静默继承旧语义，更新后必须重新确认新的完全放行告知。
+- 模型在调用工具前输出的开场正文不再因流式工具帧被丢掉；文本先于工具调用
+  进入界面。
+- Computer Use 能力按 `list_windows` / `observe` / `act` / browser /
+  secure input 等维度如实上报；未配置 Cua、非桌面环境或模型不支持视觉时，
+  不向模型暴露电脑工具。
+
+### 修复
+
+- `computer_list` 与 `computer_observe` 统一经过 ComputerGateway 的
+  Observe 策略、deadline 和身份过滤，避免列表路径绕过运行时策略。
+- 修复无工作区新一轮会话未应用当前权限策略的问题。
+- live Flutter 测试改为检查 `/health` JSON，而不是只探测前端端口，
+  避免静态前端被误判为完整后端。
+
+### 已知限制
+
+- Computer Use 当前仅支持 Windows 本机只读观察；macOS/Linux 写操作、
+  浏览器适配器和云端一次性桌面 VM 尚未开放。
+- Cua 源码嵌入仍受 Visual Studio Spectre-mitigated libraries 前置阻塞；
+  本版验证的是签名发布二进制。
+- Computer Use 的第二台 Windows、DPI/多屏、UAC/锁屏/RDP、真实应用矩阵和
+  长时间 soak 仍未完成，不能据此宣称生产级通用电脑操作。
+- Windows 安装程序仍未代码签名。
+
+---
+
 ## [0.1.43] - 2026-10-27
 
 白色桌面界面与中文排版更新。
