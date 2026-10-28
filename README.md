@@ -193,6 +193,8 @@ app/                 Flutter（桌面 + Web 一套代码）
 | [memory.md](docs/memory.md) | 记忆系统怎么工作（存储模型、双时间轴、检索、同步） |
 | [memory-content.md](docs/memory-content.md) | **记忆体存什么、不存什么**（五类输入 × 三种处理，含业界调研） |
 | [sandbox.md](docs/sandbox.md) | 云端沙箱 agent：隔离、出网、快照、真机实测结论 |
+| [cloud-sandbox-agent-research-2026-10-23.md](docs/cloud-sandbox-agent-research-2026-10-23.md) | 云端沙箱 agent 的候选架构、运行位置、恢复语义与官方资料调研 |
+| [cloud-sandbox-runtime-selection-2026-10-23.md](docs/cloud-sandbox-runtime-selection-2026-10-23.md) | Docker + gVisor 一期与 Cloud Hypervisor 二期方案、验收和回滚边界 |
 | [install.md](docs/install.md) | 拿到产物之后怎么装 |
 | [operations.md](docs/operations.md) | 怎么部署、**本机**备份与恢复演练（含实测 RPO/RTO） |
 | [backup.md](docs/backup.md) | **异地**备份：rustic 备 PG、rclone 备 RustFS → 阿里云 OSS |
