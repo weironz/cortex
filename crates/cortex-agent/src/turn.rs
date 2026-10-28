@@ -283,7 +283,8 @@ impl Turn {
             .exec_policy()
             .clone()
             .with_network(env.network_policy());
-        let specs = tools::builtin_specs();
+        let mut specs = tools::builtin_specs();
+        tools::configure_shell_access(&mut specs, sandbox.exec_policy().access, env);
         Ok(Self {
             sandbox: sandbox.with_exec_policy(exec),
             tools: tools::to_llm_tools(&specs),
@@ -320,7 +321,12 @@ impl Turn {
     /// 见 [`crate::Sandbox::sealed`]。
     #[must_use]
     pub fn sealed() -> Self {
-        let specs = tools::builtin_specs();
+        let mut specs = tools::builtin_specs();
+        tools::configure_shell_access(
+            &mut specs,
+            crate::sandbox::ProcessAccess::Sandboxed,
+            crate::ExecEnvironment::None,
+        );
         Self {
             sandbox: Sandbox::sealed(),
             tools: tools::to_llm_tools(&specs),
@@ -349,7 +355,8 @@ impl Turn {
     /// 分派表，后者是发给模型的 schema，两者漂移就会出现「模型看得见但
     /// 分派不了」或者反过来的「藏起来了却仍能调用」。
     #[must_use]
-    pub fn with_specs(mut self, specs: Vec<ToolSpec>) -> Self {
+    pub fn with_specs(mut self, mut specs: Vec<ToolSpec>) -> Self {
+        tools::configure_shell_access(&mut specs, self.sandbox.exec_policy().access, self.env);
         self.tools = tools::to_llm_tools(&specs);
         self.specs = specs;
         self
@@ -363,7 +370,18 @@ impl Turn {
 
     #[must_use]
     pub fn with_policy(mut self, policy: ApprovalPolicy) -> Self {
+        // 每轮重算，退出完整访问后恢复隔离；容器里的免确认不代表宿主访问。
+        let mut exec = self.sandbox.exec_policy().clone();
+        exec.access =
+            if self.env == crate::ExecEnvironment::LocalMachine && policy.bypasses_everything() {
+                crate::sandbox::ProcessAccess::FullAccess
+            } else {
+                crate::sandbox::ProcessAccess::Sandboxed
+            };
+        self.sandbox = self.sandbox.with_exec_policy(exec);
         self.policy = policy;
+        tools::configure_shell_access(&mut self.specs, self.sandbox.exec_policy().access, self.env);
+        self.tools = tools::to_llm_tools(&self.specs);
         self
     }
 
@@ -450,10 +468,12 @@ impl Turn {
         //
         // 检查放在 run() 而不是构造期：builder 的调用顺序挡不住配置矛盾，
         // 而这里是唯一绕不过去的关口。
-        if attended_conflict(
-            self.sandbox.exec_policy().attended.is_attended(),
-            &self.policy,
-        ) {
+        if self.sandbox.exec_policy().access != crate::sandbox::ProcessAccess::FullAccess
+            && attended_conflict(
+                self.sandbox.exec_policy().attended.is_attended(),
+                &self.policy,
+            )
+        {
             return Err(CortexError::Invalid(
                 "配置矛盾：声明了「有人在场」却又让 Risk::Execute 自动放行。\
                  前者的全部依据就是「每一次执行都经用户当场批准」——\
@@ -501,7 +521,7 @@ impl Turn {
             // 第一次折叠保留最近 2 条（往往正是模型正要引用的），
             // 第二次全折；还不行就按原样失败 —— 说明大的是历史或系统
             // 提示词，那不是这一层能救的（历史侧摘要见 roadmap I3）。
-            let round = {
+            let mut round = {
                 let mut overflow_retries = 0u8;
                 loop {
                     match self.one_round(llm, system, messages, offered, events).await {
@@ -524,6 +544,22 @@ impl Turn {
                     }
                 }
             };
+            // 有些模型即使收到沟通指引，也只回工具调用。依据真实请求补一句
+            // 动作说明，随正文一起流出、回灌和归档；不能只在 UI 临时塞个占位。
+            // 只补首个工具轮次，保留模型自己的开场，也不为纯聊天增加套话。
+            if tool_rounds == 0
+                && tools_enabled
+                && !round.client_gone
+                && reply.trim().is_empty()
+                && round.text.trim().is_empty()
+                && let Some((_, call)) = round.calls.first()
+            {
+                round.text = format!("{}\n\n", tool_opening(&call.name));
+                round.client_gone = events
+                    .send(AgentEvent::Delta(round.text.clone()))
+                    .await
+                    .is_err();
+            }
             reply.push_str(&round.text);
             push_model(&mut models, round.model.clone());
 
@@ -739,6 +775,20 @@ struct Round {
     model: Option<String>,
     /// 供应商报的 token 数。`None` = 它没报（不是 0）。
     usage: Option<cortex_llm::Usage>,
+}
+
+/// 仅描述即将尝试的动作，不根据命令内容猜测目的，也不声称执行已经成功。
+fn tool_opening(name: &str) -> &'static str {
+    match name {
+        "open_application" => "我先尝试打开应用，再查看系统返回的结果。",
+        "shell" | "background_run" => "我先执行需要的命令，再根据返回结果继续处理。",
+        "read_file" | "list_dir" | "glob" | "grep" | "tree" => {
+            "我先查看相关文件和信息，再根据结果继续处理。"
+        }
+        "write_file" | "edit_file" => "我先处理相关文件，完成后说明改动和结果。",
+        "web_search" | "web_fetch" => "我先查找相关资料，再整理结果给你。",
+        _ => "我先调用工具处理这个请求，再根据结果回复你。",
+    }
 }
 
 /// 把工具结果封成 MCP 的 `CallToolResult`。

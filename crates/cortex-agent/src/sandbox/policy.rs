@@ -63,9 +63,18 @@ pub enum NetworkPolicy {
     Allowed,
 }
 
+/// 审批与进程隔离分开：只有本机完整访问或当次批准的宿主执行能退出 OS 沙箱。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProcessAccess {
+    #[default]
+    Sandboxed,
+    FullAccess,
+}
+
 /// 一次执行的沙箱策略。
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
+    pub access: ProcessAccess,
     /// 可读可写。工作区、临时目录、构建缓存。
     pub writable_roots: Vec<PathBuf>,
     /// 只读（含执行）。系统目录、工具链。
@@ -171,6 +180,7 @@ impl SandboxPolicy {
         }
 
         Self {
+            access: ProcessAccess::Sandboxed,
             writable_roots,
             readable_roots,
             network: NetworkPolicy::default(),
@@ -188,6 +198,7 @@ impl SandboxPolicy {
     #[must_use]
     pub const fn sealed() -> Self {
         Self {
+            access: ProcessAccess::Sandboxed,
             writable_roots: Vec::new(),
             readable_roots: Vec::new(),
             network: NetworkPolicy::Denied,

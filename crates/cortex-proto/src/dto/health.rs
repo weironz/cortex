@@ -136,6 +136,17 @@ pub struct Health {
     /// 老服务端不报，那时是 `None`，界面按「没有」处理。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer_use: Option<bool>,
+    /// 电脑操作的细粒度能力。**只有本地 agent 能报。**
+    ///
+    /// [`Self::computer_use`] 是旧客户端的兼容字段，只能回答「这一组有没有
+    /// 编进当前构建」。新客户端必须看这一份：截全屏、列窗口、执行动作、
+    /// 浏览器控制和后台输入是五个不同边界，把它们压成一个 bool 会让界面
+    /// 宣传一个必然失败的能力。
+    ///
+    /// 缺字段表示对端还是旧版本，客户端应回退到 `computer_use`；字段里的
+    /// 每个 bool 都由 agent 的适配层按真实驱动能力填写。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_capabilities: Option<ComputerCapabilities>,
 }
 
 fn role_cortexd() -> String {
@@ -164,4 +175,92 @@ pub struct ServerHealth {
     pub reachable: bool,
     /// 离线队列里还压着多少条没刷出去。
     pub backlog: u64,
+}
+
+/// 本地 agent 对 computer use 的细粒度自报。
+///
+/// 这里没有 `Default = all true` 之类的捷径：缺省值会变成一次静默授权。
+/// 构造方必须逐项说清驱动真的做到了什么。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerCapabilities {
+    /// 能列出当前用户可访问的应用。
+    pub list_apps: bool,
+    /// 能列出窗口及其稳定身份。
+    pub list_windows: bool,
+    /// 能截取显示器或窗口并返回可验证的 frame。
+    pub observe: bool,
+    /// 能向 allowlisted 应用投递点击、输入、按键或滚动。
+    pub act: bool,
+    /// 有独立的浏览器结构化通道，而不是只能操作整屏。
+    pub browser: bool,
+    /// 能在不抢用户焦点的情况下操作已识别窗口。
+    pub background_input: bool,
+    /// 能识别 secure field / UAC / 锁屏等不可自动操作的状态。
+    pub secure_input_detection: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn health_json() -> serde_json::Value {
+        serde_json::json!({
+            "status": "ok",
+            "version": "0.1.0",
+            "role": "local-agent",
+            "protocol": 1,
+            "min_peer_protocol": 1,
+            "computer_use": true,
+            "computer_capabilities": {
+                "list_apps": true,
+                "list_windows": false,
+                "observe": true,
+                "act": false,
+                "browser": false,
+                "background_input": false,
+                "secure_input_detection": true
+            }
+        })
+    }
+
+    #[test]
+    fn computer_capabilities_round_trip_without_relaxing_unknown_fields() {
+        let health: Health = serde_json::from_value(health_json()).expect("细粒度能力必须能解析");
+        let capabilities = health
+            .computer_capabilities
+            .expect("测试 JSON 明确带了能力");
+        assert!(capabilities.list_apps);
+        assert!(!capabilities.list_windows);
+        assert!(capabilities.observe);
+        assert!(!capabilities.act);
+        assert!(!capabilities.browser);
+        assert!(!capabilities.background_input);
+        assert!(capabilities.secure_input_detection);
+
+        let wire = serde_json::to_value(health).expect("健康响应必须能序列化");
+        assert_eq!(
+            wire["computer_capabilities"]["observe"], true,
+            "序列化后必须保留真实的能力边界"
+        );
+        assert_eq!(
+            wire["computer_capabilities"]["act"], false,
+            "不能把 observe 自动升格为 act"
+        );
+    }
+
+    #[test]
+    fn old_health_without_capabilities_stays_compatible() {
+        let mut value = health_json();
+        value
+            .as_object_mut()
+            .expect("测试 JSON 是对象")
+            .remove("computer_capabilities");
+        let health: Health =
+            serde_json::from_value(value).expect("旧 agent 的健康响应必须继续可读");
+        assert_eq!(health.computer_use, Some(true));
+        assert!(
+            health.computer_capabilities.is_none(),
+            "缺字段必须保持 None，不能伪造细粒度能力"
+        );
+    }
 }

@@ -76,6 +76,7 @@ ProviderContainer _boot({
   MockCortexApi? api,
   Map<String, String> settings = const {},
   bool agentCanDoIt = true,
+  ComputerCapabilities? capabilities,
 }) => ProviderContainer(
   overrides: [
     appConfigProvider.overrideWith(_MockConfig.new),
@@ -89,6 +90,7 @@ ProviderContainer _boot({
         database: 'unknown',
         role: HealthStatus.roleLocalAgent,
         computerUse: agentCanDoIt,
+        computerCapabilities: capabilities,
       ),
     ),
   ],
@@ -126,6 +128,64 @@ Future<void> _tick(WidgetTester tester, [int n = 12]) async {
 }
 
 void main() {
+  test('细粒度能力不会被旧 computer_use 布尔夸大', () {
+    final health = HealthStatus.fromJson(const {
+      'status': 'ok',
+      'version': 'test',
+      'database': 'unknown',
+      'role': HealthStatus.roleLocalAgent,
+      'computer_use': true,
+      'computer_capabilities': {
+        'list_apps': true,
+        'list_windows': false,
+        'observe': true,
+        'act': false,
+        'browser': false,
+        'background_input': false,
+        'secure_input_detection': true,
+      },
+    });
+
+    expect(health.computerCapabilities?.listApps, isTrue);
+    expect(health.computerCapabilities?.listWindows, isFalse);
+    expect(health.canObserveComputer, isTrue);
+    expect(
+      health.canActOnComputer,
+      isFalse,
+      reason: 'observe 为 true 不能自动把 act 升格为 true',
+    );
+    expect(health.computerCapabilities?.browser, isFalse);
+    expect(health.computerCapabilities?.backgroundInput, isFalse);
+    expect(health.computerCapabilities?.secureInputDetection, isTrue);
+  });
+
+  test('旧 agent 没有细粒度字段时才回退到旧布尔', () {
+    final legacy = HealthStatus.fromJson(const {
+      'status': 'ok',
+      'version': 'test',
+      'database': 'unknown',
+      'role': HealthStatus.roleLocalAgent,
+      'computer_use': true,
+    });
+    expect(legacy.computerCapabilities, isNull);
+    expect(legacy.canObserveComputer, isTrue);
+    expect(legacy.canActOnComputer, isTrue);
+
+    final malformed = HealthStatus.fromJson(const {
+      'status': 'ok',
+      'version': 'test',
+      'database': 'unknown',
+      'role': HealthStatus.roleLocalAgent,
+      'computer_use': true,
+      'computer_capabilities': 'yes',
+    });
+    expect(
+      malformed.computerCapabilities,
+      isNull,
+      reason: '形状不对时按旧 agent 处理，不能把字符串猜成能力',
+    );
+  });
+
   test('默认关；只有明确存过 true 才开', () async {
     final fresh = _boot();
     addTearDown(fresh.dispose);
@@ -261,6 +321,33 @@ void main() {
       findsOneWidget,
       reason: '得给一条自保的路：权限档留在「每次询问」就能逐次看见它要点哪儿',
     );
+  });
+
+  testWidgets('observe-only 能力不会在设置页冒充鼠标键盘操作', (tester) async {
+    final c = _boot(
+      capabilities: const ComputerCapabilities(
+        listApps: false,
+        listWindows: true,
+        observe: true,
+        act: false,
+        browser: false,
+        backgroundInput: false,
+        secureInputDetection: false,
+      ),
+    );
+    addTearDown(c.dispose);
+
+    await _pump(tester, c);
+    await _tick(tester);
+
+    expect(find.byKey(const ValueKey('computer_use:toggle')), findsOneWidget);
+    expect(find.textContaining('当前版本不会替用户点击或输入'), findsOneWidget);
+    expect(
+      find.textContaining('当前只开放窗口与界面元素观察'),
+      findsOneWidget,
+      reason: 'act=false 时不能继续展示“点击和输入落在真实窗口”的动作告知',
+    );
+    expect(find.textContaining('点击和输入落在真实的窗口上'), findsNothing);
   });
 
   testWidgets('拨开关会存下来', (tester) async {

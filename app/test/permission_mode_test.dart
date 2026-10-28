@@ -9,6 +9,8 @@ library;
 
 import 'package:cortex_app/core/permission_mode.dart';
 import 'package:cortex_app/features/chat/widgets/permission_mode_chip.dart';
+import 'package:cortex_app/features/settings/pages/permissions_page.dart';
+import 'package:cortex_app/models/health_status.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -42,11 +44,23 @@ void main() {
             '的话服务端认不出来，而它的处理是**回落到默认档** —— '
             '于是用户选了「自动改文件」却还在被逐条询问，且没有任何报错',
       );
-      expect(PermissionMode.bypass.wire, 'bypass');
+      expect(PermissionMode.bypass.wire, 'bypass_full_access_v1');
+      expect(
+        PermissionMode.fromWire(PermissionMode.bypass.wire),
+        PermissionMode.bypass,
+        reason: '新客户端完成确认后保存的新线上值必须能恢复',
+      );
     });
 
     test('认不出的取值回落到「问」，不是回落到放行', () {
-      for (final bad in [null, '', 'BYPASS', 'yolo', 'accept-edits']) {
+      for (final bad in [
+        null,
+        '',
+        'BYPASS',
+        'bypass',
+        'yolo',
+        'accept-edits',
+      ]) {
         expect(
           PermissionMode.fromWire(bad),
           PermissionMode.ask,
@@ -129,7 +143,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.text('关掉全部确认？'),
+        find.text('开启完全放行？'),
         findsOneWidget,
         reason:
             '另外两档改的是打扰频率，选错了下一次弹窗就知道了；'
@@ -153,7 +167,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('完全放行'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('我明白，关掉'));
+      await tester.tap(find.text('我明白，开启'));
       await tester.pumpAndSettle();
 
       expect(find.text('完全放行'), findsOneWidget);
@@ -165,5 +179,54 @@ void main() {
             '人三天后就忘了自己关过确认了',
       );
     });
+  });
+
+  group('设置页', () {
+    for (final approve in [false, true]) {
+      testWidgets('完全放行${approve ? '确认后保存' : '取消不生效'}', (tester) async {
+        final saved = <Map<String, String>>[];
+        final container = ProviderContainer(
+          overrides: [
+            settingsReaderProvider.overrideWithValue(() async => {}),
+            settingsWriterProvider.overrideWithValue((value) async {
+              saved.add(Map.of(value));
+            }),
+            healthProvider.overrideWith(
+              (_) async => const HealthStatus(
+                status: 'ok',
+                version: 'test',
+                database: 'unknown',
+                role: HealthStatus.roleLocalAgent,
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(home: Scaffold(body: PermissionsPage())),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('完全放行'));
+        await tester.pumpAndSettle();
+        expect(find.text('开启完全放行？'), findsOneWidget);
+        expect(find.textContaining('不再使用工作区路径围栏或 OS 进程沙箱'), findsOneWidget);
+        expect(container.read(permissionModeProvider), PermissionMode.ask);
+        await tester.tap(find.text(approve ? '我明白，开启' : '算了'));
+        await tester.pumpAndSettle();
+        expect(
+          container.read(permissionModeProvider),
+          approve ? PermissionMode.bypass : PermissionMode.ask,
+          reason: '设置页必须等确认后再更新实际权限',
+        );
+        if (approve) {
+          expect(saved.last['permission_mode'], 'bypass_full_access_v1');
+        } else {
+          expect(saved, isEmpty, reason: '取消不能把放行偏好写入磁盘');
+        }
+      });
+    }
   });
 }

@@ -13,6 +13,7 @@ class HealthStatus {
     this.role = roleCortexd,
     this.server,
     this.computerUse = false,
+    this.computerCapabilities,
     this.sandbox,
   });
 
@@ -43,6 +44,23 @@ class HealthStatus {
   ///
   /// 缺字段读成 `false`：老 agent 上这个能力本来就不存在。
   final bool computerUse;
+
+  /// computer use 的细粒度能力。`null` 表示对端还是旧 agent。
+  ///
+  /// 不能用 [computerUse] 代替这一份：旧 bool 只说明“这一组大概存在”，
+  /// 不能说明能不能列窗口、后台输入或控制浏览器。未知一律按不支持处理。
+  final ComputerCapabilities? computerCapabilities;
+
+  /// 当前连接是否真的能观察屏幕。
+  ///
+  /// 老 agent 没有细粒度字段时回退到旧 bool；新 agent 必须显式报
+  /// `observe=true`，避免把“构建里有几个坐标工具”误当成结构化观察能力。
+  bool get canObserveComputer =>
+      computerUse && (computerCapabilities?.observe ?? true);
+
+  /// 当前连接是否真的能投递输入动作。
+  bool get canActOnComputer =>
+      computerUse && (computerCapabilities?.act ?? true);
 
   /// 这个 agent 进程受什么保护 —— agent 自己实测出来的一句话
   /// （`cortex_agent::status_line_for`）。`null` = 老服务端不报，
@@ -145,8 +163,44 @@ class HealthStatus {
         ? ServerLink.fromJson(json['server'] as Map<String, dynamic>)
         : null,
     computerUse: json['computer_use'] as bool? ?? false,
+    computerCapabilities: json['computer_capabilities'] is Map<String, dynamic>
+        ? ComputerCapabilities.fromJson(
+            json['computer_capabilities'] as Map<String, dynamic>,
+          )
+        : null,
     sandbox: json['sandbox'] as String?,
   );
+}
+
+class ComputerCapabilities {
+  const ComputerCapabilities({
+    this.listApps = false,
+    this.listWindows = false,
+    this.observe = false,
+    this.act = false,
+    this.browser = false,
+    this.backgroundInput = false,
+    this.secureInputDetection = false,
+  });
+
+  final bool listApps;
+  final bool listWindows;
+  final bool observe;
+  final bool act;
+  final bool browser;
+  final bool backgroundInput;
+  final bool secureInputDetection;
+
+  factory ComputerCapabilities.fromJson(Map<String, dynamic> json) =>
+      ComputerCapabilities(
+        listApps: json['list_apps'] == true,
+        listWindows: json['list_windows'] == true,
+        observe: json['observe'] == true,
+        act: json['act'] == true,
+        browser: json['browser'] == true,
+        backgroundInput: json['background_input'] == true,
+        secureInputDetection: json['secure_input_detection'] == true,
+      );
 }
 
 /// 本地 agent 报的「我上游那台怎么样」。

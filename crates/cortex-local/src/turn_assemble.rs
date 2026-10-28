@@ -18,31 +18,10 @@ use cortex_proto::dto::PermissionMode;
 #[must_use]
 pub(super) fn policy_for(
     mode: PermissionMode,
-    env: cortex_agent::ExecEnvironment,
+    _env: cortex_agent::ExecEnvironment,
 ) -> ApprovalPolicy {
-    // ── 容器里的默认档是**免确认** ──
-    //
-    // 与两家云 agent 一致（Claude Code web 在托管容器里默认跳过权限询问），
-    // 但我们的依据要多说一句：他们的前提是「沙箱文件系统从不是 system of
-    // record」—— 权威副本在 git 远端，容器丢了只是浪费一次任务。我们的
-    // `/workspace` 是持久卷、常常是用户唯一一份副本，那个前提不成立。
-    //
-    // 所以这里的依据换成了**另外两条**：越界路径在容器里直接拒（宿主的
-    // 其余部分够不着），以及 `/workspace` 由宿主侧快照 + 卷内 git 兜底
-    // （见 docs/sandbox.md 第三节）。守住数据靠的是那两层，不是弹窗。
-    //
-    // 为什么必须显式处理而不能靠客户端传档：`PermissionMode` 的默认值是
-    // `Ask`，而 Web 客户端不传这个字段是常态。不在这里翻译的话，每一个
-    // 沙箱会话都会卡在一个**没人会去答**的确认上 —— 真机第一次跑就是这样，
-    // 十一次 ping 之后按超时拒绝。
-    //
-    // 用户仍然可以显式要求确认（下面 `Ask` 那一支），只是不再是默认。
-    if env.is_container() && mode == PermissionMode::Ask {
-        return ApprovalPolicy {
-            confirm_at: cortex_agent::Risk::Execute,
-            bypass: true,
-        };
-    }
+    // 显式选档在各环境含义一致。旧客户端缺省的云端兼容只在请求边界处理，
+    // 否则用户主动选 Ask 也会被当成「没传字段」而静默免确认。
     match mode {
         PermissionMode::Ask => ApprovalPolicy {
             confirm_at: cortex_agent::Risk::Write,
@@ -56,7 +35,44 @@ pub(super) fn policy_for(
             confirm_at: cortex_agent::Risk::Write,
             bypass: true,
         },
+        PermissionMode::LegacyBypass => ApprovalPolicy {
+            confirm_at: cortex_agent::Risk::Write,
+            bypass: false,
+        },
     }
+}
+
+/// 老客户端缺省的云端请求保持免确认，显式选择 Ask 时必须真的询问。
+#[must_use]
+pub(super) fn policy_for_request(
+    mode: Option<PermissionMode>,
+    env: cortex_agent::ExecEnvironment,
+) -> ApprovalPolicy {
+    let mode = mode.unwrap_or_else(|| {
+        if env.is_container() {
+            PermissionMode::Bypass
+        } else {
+            PermissionMode::Ask
+        }
+    });
+    policy_for(mode, env)
+}
+
+/// 这一轮是否真的可以挂出电脑操作工具。
+///
+/// 四个条件缺一不可：用户打开开关、构建带桌面驱动、运行在本机交互式桌面，
+/// 以及本轮模型真的能接收图片。最后一个漏掉时，直接调用 HTTP API 的客户端
+/// 能把截图工具交给一个盲模型：每一轮都付截图成本，模型却看不见内容。
+pub(super) fn computer_access_allowed(
+    requested: bool,
+    driver_supported: bool,
+    env: cortex_agent::ExecEnvironment,
+    model_supports_vision: bool,
+) -> bool {
+    requested
+        && driver_supported
+        && env == cortex_agent::ExecEnvironment::LocalMachine
+        && model_supports_vision
 }
 
 /// 这一轮**额外**有哪三样能力。
@@ -78,6 +94,10 @@ pub(super) struct Caps {
     pub(super) has_skills: bool,
     /// 用户开了电脑操作，**且**这个构建与这个执行环境真的做得到。
     pub(super) can_use_computer: bool,
+    /// Cua 只读观察链路已经配置；工具目录只开放 list/observe。
+    pub(super) can_observe_computer: bool,
+    /// 打开应用不需要截图或视觉模型，也不依赖工作区，但必须是本机桌面宿主。
+    pub(super) can_open_application: bool,
     /// 派得出子 agent 不。判据与后台命令同源：**要有工作区**。
     ///
     /// 子 agent 只读，而没绑工作区时可读的范围是空集 —— 派出去的
@@ -139,6 +159,8 @@ impl Caps {
             can_draw,
             has_skills,
             can_use_computer,
+            can_observe_computer,
+            can_open_application,
             can_spawn,
             can_background,
             can_search,
@@ -149,6 +171,8 @@ impl Caps {
         can_draw
             || has_skills
             || can_use_computer
+            || can_observe_computer
+            || can_open_application
             || can_spawn
             || can_background
             || can_search
@@ -218,6 +242,12 @@ fn with_external(
     // 却没有工具，它会承诺一件做不到的事
     if caps.can_use_computer {
         specs.extend(cortex_agent::tools::computer_specs());
+    }
+    if caps.can_observe_computer {
+        specs.extend(cortex_agent::tools::cua_computer_specs());
+    }
+    if caps.can_open_application {
+        specs.push(cortex_agent::tools::application_spec());
     }
     specs.extend(external.iter().cloned());
     // 智能体关掉的那些，**最后统一剔** —— 放在各处 push 之前逐个判的话，

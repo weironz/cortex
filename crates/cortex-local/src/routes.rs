@@ -448,6 +448,10 @@ fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
 /// （CI 上那条用例自己跳过），所以它红了一版都没人看见。
 async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health> {
     let reachable = st.remote.is_reachable().await;
+    let local_desktop = st.engine.exec_env == cortex_agent::ExecEnvironment::LocalMachine;
+    let cua_configured = local_desktop && crate::computer_cua::configured();
+    let computer_capabilities = declared_computer_capabilities(cua_configured);
+    let computer_available = computer_capabilities.is_some();
     Json(cortex_proto::dto::Health {
         status: "ok".into(),
         version: cortex_core::VERSION.into(),
@@ -495,10 +499,24 @@ async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health>
         // **照实报，别乐观。** 界面据此决定摆不摆那个开关，而摆一个打开也
         // 没用的开关比没有它更糟。两个条件缺一不可：这个构建编进了那一组
         //（Linux 上没有），以及跑在桌面端（容器里没有屏幕）
-        computer_use: Some(
-            crate::computer::supported()
-                && st.engine.exec_env == cortex_agent::ExecEnvironment::LocalMachine,
-        ),
+        computer_use: Some(computer_available),
+        // 逐项报真实能力。Cua C1 只允许窗口枚举与观察，写操作仍为 false。
+        // legacy xcap/enigo 写路径尚未经过统一 Gateway，因此不进入生产能力表。
+        computer_capabilities,
+    })
+}
+
+fn declared_computer_capabilities(
+    cua_configured: bool,
+) -> Option<cortex_proto::dto::ComputerCapabilities> {
+    cua_configured.then_some(cortex_proto::dto::ComputerCapabilities {
+        list_apps: false,
+        list_windows: true,
+        observe: true,
+        act: false,
+        browser: false,
+        background_input: false,
+        secure_input_detection: false,
     })
 }
 
@@ -892,6 +910,23 @@ fn forwarded_patch_body(raw: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_never_reports_legacy_computer_write_as_supported() {
+        assert!(
+            declared_computer_capabilities(false).is_none(),
+            "未配置 Cua sidecar 时，legacy xcap/enigo 写路径不能继续以 computer_use 能力暴露"
+        );
+        let cua = declared_computer_capabilities(true).expect("Cua 配置成立时应有能力表");
+        assert!(
+            cua.list_windows && cua.observe && !cua.act,
+            "C1 必须如实报 list/observe=true、act=false"
+        );
+        assert!(
+            !cua.browser && !cua.background_input && !cua.secure_input_detection,
+            "C1 不能把尚未接入的浏览器、后台输入或 secure 检测报成可用"
+        );
+    }
 
     /// **会话字段不许在这一跳被吃掉。**
     ///

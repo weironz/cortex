@@ -22,6 +22,7 @@ import '../../../state/sandbox_backend_controller.dart';
 import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import '../widgets/settings_layout.dart';
+import '../../../widgets/permission_confirmation.dart';
 
 class PermissionsPage extends ConsumerWidget {
   const PermissionsPage({super.key});
@@ -38,12 +39,17 @@ class PermissionsPage extends ConsumerWidget {
         SettingsSection(
           title: '默认权限档',
           description:
-              '新会话从哪一档开始。对话里那颗 chip 仍然能临时改这一轮 —— '
-              '改了不影响这里，下一条新会话照旧从这一档起步。',
+              '与输入框的权限开关同步，并保存为之后轮次的默认值。'
+              '切换不改变已经开始执行的轮次。',
           children: [
             SettingsChoice<PermissionMode>(
               value: mode,
-              onChanged: ref.read(permissionModeProvider.notifier).set,
+              onChanged: (next) async {
+                if (await confirmPermissionChange(context, mode, next) &&
+                    context.mounted) {
+                  ref.read(permissionModeProvider.notifier).set(next);
+                }
+              },
               options: [
                 for (final m in PermissionMode.values)
                   (value: m, label: m.label, hint: m.blurb),
@@ -53,7 +59,9 @@ class PermissionsPage extends ConsumerWidget {
         ),
         SettingsSection(
           title: '这台机器上的沙箱',
-          description: '工具执行受什么保护 —— 由 agent 进程实测得出，不是配置项。',
+          description:
+              '这是可用的沙箱后端；本机选择完全放行后不使用进程沙箱。'
+              '受限命令也可显式申请单次宿主执行，批准范围会显示在确认卡片中。',
           children: [
             SettingsCard(
               child: Row(
@@ -99,26 +107,30 @@ class PermissionsPage extends ConsumerWidget {
     final restricted = ref.watch(sandboxBackendProvider);
     return SettingsSection(
       title: 'Windows 沙箱后端',
-      description: '两档是两种取舍，不是强弱。换档会重启本机 agent。',
+      description: '只影响受限命令。完全放行和获准的单次宿主执行不使用这些后端；换档会重启本机 agent。',
       children: [
         SettingsCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SwitchListTile(
-                key: const ValueKey('sandbox:restricted'),
-                contentPadding: EdgeInsets.zero,
-                value: restricted,
-                onChanged: (v) =>
-                    ref.read(sandboxBackendProvider.notifier).setRestricted(v),
-                title: const Text('受限令牌档（完整工具链）'),
-                subtitle: Text(
-                  '开：cargo 拉依赖 / git / curl 全通，能跑完整构建。'
-                  '关（默认）：AppContainer，读默认拒绝、能防不受信代码偷读，'
-                  '但 dir/vol 与含 cl.exe 的 C/C++ 构建跑不了。',
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: theme.cortex.foregroundTertiary,
-                    height: 1.5,
+              Material(
+                type: MaterialType.transparency,
+                child: SwitchListTile(
+                  key: const ValueKey('sandbox:restricted'),
+                  contentPadding: EdgeInsets.zero,
+                  value: restricted,
+                  onChanged: (v) => ref
+                      .read(sandboxBackendProvider.notifier)
+                      .setRestricted(v),
+                  title: const Text('受限令牌档（完整工具链）'),
+                  subtitle: Text(
+                    '开：cargo 拉依赖 / git / curl 全通，能跑完整构建。'
+                    '关（默认）：AppContainer，读默认拒绝、能防不受信代码偷读，'
+                    '但 dir/vol 与含 cl.exe 的 C/C++ 构建跑不了。',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.cortex.foregroundTertiary,
+                      height: 1.5,
+                    ),
                   ),
                 ),
               ),

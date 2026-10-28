@@ -53,6 +53,17 @@ pub(super) fn system_prompt_for(
     base.push_str(capabilities);
 
     let mut prompt = cortex_agent::workspace::brief(&base, workspace);
+    prompt.push_str("\n\n");
+    prompt.push_str(cortex_agent::prompt::interaction_note());
+    if caps.can_open_application
+        && !assistant.is_some_and(|a| {
+            a.disabled_tools
+                .iter()
+                .any(|name| name == "open_application")
+        })
+    {
+        prompt.push_str("\n\n打开用户本机应用请使用 open_application，它向正常桌面宿主发送打开请求，不经过命令沙箱，也不要求先绑定工作区。不要用 shell、start 或 explorer 来试图绕过应用启动失败。返回 requested 只说明系统接受请求；需要确认窗口或页面内容时，再使用已提供的电脑操作工具。");
+    }
     // 项目指引（AGENTS.md / CLAUDE.md）。跟着工作区走：没绑定就没有
     // 「项目」这个概念。为什么自动读而不问一次，见 `project_guide`
     if let Some(guide) = workspace.and_then(cortex_agent::workspace::project_guide) {
@@ -74,6 +85,10 @@ pub(super) fn system_prompt_for(
         let (w, h) = crate::computer::Computer::screen_size().unwrap_or((1920, 1080));
         prompt.push_str("\n\n");
         prompt.push_str(&cortex_agent::prompt::computer_note(w, h));
+    }
+    if caps.can_observe_computer {
+        prompt.push_str("\n\n");
+        prompt.push_str(cortex_agent::prompt::computer_observation_note());
     }
     // 「做完了要交出去」。与 `deliver_file` 同生共死 —— 判据是同一个
     // `can_deliver`。讲了却没有工具，模型会答应发文件然后什么都不发生；

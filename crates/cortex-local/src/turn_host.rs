@@ -54,6 +54,7 @@ struct SubagentHost;
 impl ToolHost for SubagentHost {}
 
 pub(super) struct LocalHost {
+    pub(super) exec_env: cortex_agent::ExecEnvironment,
     pub(super) events: Arc<crate::runs::RunSink>,
     pub(super) session_id: String,
     pub(super) confirms: Arc<ConfirmRegistry>,
@@ -106,6 +107,15 @@ impl LocalHost {
             .lock()
             .map(|mut d| std::mem::take(&mut *d))
             .unwrap_or_default()
+    }
+
+    /// 本轮结束后关闭平台侧生命周期 session。
+    ///
+    /// Cua 的 snapshot/cursor 权限按 run 隔离；只依赖 `Drop` 不够，因为异步
+    /// `end_session` 在析构里只能尽力而为。正常路径在这里明确 await，abort
+    /// 路径仍由 `Drop` 的 best-effort 清理兜底。
+    pub(super) async fn close_computer(&self) {
+        self.computer.close().await;
     }
 }
 
@@ -161,6 +171,10 @@ fn ext_of(mime: &str) -> &'static str {
 
 #[async_trait::async_trait]
 impl ToolHost for LocalHost {
+    async fn open_application(&self, arguments: &serde_json::Value) -> cortex_agent::ToolResult {
+        crate::app_launcher::open(self.exec_env, arguments).await
+    }
+
     fn granted_roots(&self) -> Vec<std::path::PathBuf> {
         self.grants.get(&self.session_id)
     }

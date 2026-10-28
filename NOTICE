@@ -47,6 +47,10 @@ Licensed under the Apache License, Version 2.0
 
 与上游的分歧（都在源文件里注明了理由）：
 
+  src/formats/openai.rs
+                  流式工具帧同时携带正文时保留文字，并在工具调用前发出。
+                  初始帧与参数续帧都处理，避免模型写了开场说明却被解析器丢掉。
+
   src/images.rs   `candidate_anchors` —— 上游只认 POSIX 绝对路径（只找 `/`），
                   于是 Windows 上粘一个 `D:\pics\shot.png` 图片**静默**不被
                   内联。补了盘符与 UNC 两种起点。上游那 6 条 images 测试在
@@ -81,6 +85,12 @@ Licensed under the Apache License, Version 2.0
 
   crates/cortex-agent/src/sandbox/macos.rs
       sandbox-exec 的调用形状取自 codex-rs/sandboxing/src/seatbelt.rs
+
+  crates/cortex-local/src/app_launcher.rs
+      Windows ShellExecuteExW 的同步调用与进程句柄回收参考
+      codex-rs/windows-sandbox-rs/src/setup.rs（2026-10-27）。
+      Cortex 使用 open 动词启动普通桌面应用，不使用上游安装助手的 runas，
+      并自行限制应用参数和浏览器 URL；不经过受限命令进程。
 
   app/assets/providers/*.png
       供应商品牌标，来自两处：

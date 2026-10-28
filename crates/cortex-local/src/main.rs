@@ -18,10 +18,12 @@
 //! 对话排进本地队列（[`outbox`]），恢复连接后自动补写。
 //! 界面上会明说「记忆未连接」：不说的话，用户只会觉得它突然变笨了。
 
+mod app_launcher;
 mod attach;
 mod attachments;
 mod checkpoint;
 mod computer;
+mod computer_cua;
 mod config;
 /// 工具确认的那本簿子。**唯一的宿主是这里** —— cortexd 不跑 agent，
 /// 容器里那个不问确认（越界路径直接拒绝）。见模块头。
@@ -86,6 +88,8 @@ mod terminal_routes_test;
 /// 一轮装配层的断言：目录给不给、权限档怎么翻译、桌面与容器差在哪。
 #[cfg(test)]
 mod turn_assemble_test;
+#[cfg(test)]
+mod turn_preamble_test;
 /// 系统提示词与历史消息的断言：人设替换、出网说明、历史不带图。
 #[cfg(test)]
 mod turn_prompt_test;

@@ -345,7 +345,7 @@ fn mint_token() -> String {
 /// 合成一个函数就必然要在两种需求里选一个，而选哪个都会在另一处出问题。
 #[must_use]
 pub fn preview_of(arguments: &serde_json::Value) -> String {
-    let rendered = match arguments.as_object() {
+    let mut rendered = match arguments.as_object() {
         // 逐行 `键: 值`，而不是压成一行 JSON：用户要读的是命令本身，
         // 转义过的 JSON 字符串里 `\"` 和 `\n` 会把一条命令读成另一条
         Some(obj) => obj
@@ -360,6 +360,15 @@ pub fn preview_of(arguments: &serde_json::Value) -> String {
             .join("\n"),
         None => arguments.to_string(),
     };
+    if arguments
+        .get("sandbox_permissions")
+        .and_then(|v| v.as_str())
+        == Some("require_escalated")
+    {
+        rendered = format!(
+            "【本次宿主执行】批准后，此命令将不受 OS 进程沙箱保护；只对本次调用生效。\n\n{rendered}"
+        );
+    }
 
     if rendered.chars().count() <= PREVIEW_MAX_CHARS {
         return rendered;
@@ -374,6 +383,27 @@ pub fn preview_of(arguments: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_request_preview_keeps_accepted_arguments_and_scope() {
+        let command = format!("{}END_OF_COMMAND", "x".repeat(5_500));
+        let args = serde_json::json!({
+            "command": command,
+            "sandbox_permissions": "require_escalated",
+            "justification": "这条命令需要宿主权限"
+        });
+        assert!(
+            args.to_string().len() <= 6_000,
+            "测试覆盖分派允许的请求大小"
+        );
+        let preview = preview_of(&args);
+        assert!(preview.contains("END_OF_COMMAND"), "确认不能隐藏命令尾部");
+        assert!(preview.contains("本次宿主执行"), "确认必须明确退出沙箱");
+        assert!(
+            !preview.contains("已截断"),
+            "所有接受的宿主参数必须完整展示"
+        );
+    }
 
     fn meta() -> PendingMeta {
         PendingMeta {

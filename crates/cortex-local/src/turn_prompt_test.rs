@@ -4,6 +4,81 @@
 use crate::turn_assemble::{Caps, chat_turn_for};
 use crate::turn_assemble_test::fake_external;
 use crate::turn_prompt::{history_messages, system_prompt_for};
+
+#[test]
+fn communication_guidance_survives_persona_and_environment_changes() {
+    let assistant = cortex_proto::assistants::AssistantBrief {
+        name: "测试助理".into(),
+        instructions: "你是一位文档编辑。".into(),
+        disabled_tools: vec![],
+    };
+    for env in [
+        cortex_agent::ExecEnvironment::LocalMachine,
+        cortex_agent::ExecEnvironment::Container,
+    ] {
+        for persona in [None, Some(&assistant)] {
+            let prompt = system_prompt_for(
+                "默认人设。",
+                "回答用中文。",
+                env,
+                None,
+                persona,
+                &[],
+                Caps::default(),
+            );
+            assert!(
+                prompt.contains(cortex_agent::prompt::interaction_note()),
+                "更换人设或执行环境不能丢掉开场与进度规则"
+            );
+            assert!(
+                prompt.contains("无需工具的请求直接回答"),
+                "纯聊天不应被迫添加开场"
+            );
+        }
+    }
+}
+
+#[test]
+fn application_tool_and_prompt_follow_capability_and_disabled_list() {
+    for enabled in [false, true] {
+        for disabled in [false, true] {
+            let caps = Caps {
+                can_open_application: enabled,
+                ..Caps::default()
+            };
+            let muted = if disabled {
+                vec!["open_application".to_owned()]
+            } else {
+                vec![]
+            };
+            let assistant = cortex_proto::assistants::AssistantBrief {
+                disabled_tools: muted.clone(),
+                ..Default::default()
+            };
+            let turn = chat_turn_for(8, &[], caps, &muted);
+            let prompt = system_prompt_for(
+                "你是测试助理。",
+                "",
+                cortex_agent::ExecEnvironment::LocalMachine,
+                None,
+                Some(&assistant),
+                &[],
+                caps,
+            );
+            let expected = enabled && !disabled;
+            assert_eq!(
+                turn.tool_names().contains(&"open_application"),
+                expected,
+                "无工作区的应用工具必须跟随能力和禁用清单"
+            );
+            assert_eq!(
+                prompt.contains("open_application"),
+                expected,
+                "禁用工具后提示词不能继续宣传这项能力"
+            );
+        }
+    }
+}
 /// **贴过图的会话，切到看不懂图的模型之后还能继续聊。**
 ///
 /// 这条盯的是 [`history_messages`] 那条不变量，而它挡住的是一整类在
@@ -208,6 +283,32 @@ fn 电脑操作的工具与说明一起出现一起消失() {
         !without.contains("操作这台电脑"),
         "没开的时候印这一段，等于告诉模型一件它做不到的事：{without}"
     );
+}
+
+#[test]
+fn cua_observation_prompt_never_mentions_write_tools() {
+    let prompt = system_prompt_for(
+        "测试",
+        "",
+        cortex_agent::ExecEnvironment::LocalMachine,
+        None,
+        None,
+        &[],
+        Caps {
+            can_observe_computer: true,
+            ..Caps::default()
+        },
+    );
+    assert!(
+        prompt.contains("computer_list") && prompt.contains("computer_observe"),
+        "只读观察说明必须点名真实工具：{prompt}"
+    );
+    for absent in ["`click`", "`type_text`", "`screenshot`", "`scroll`"] {
+        assert!(
+            !prompt.contains(absent),
+            "C1 目录没有 {absent}，提示词不能宣传它：{prompt}"
+        );
+    }
 }
 
 /// 技能目录进提示词，而**正文不进** —— 那正是分层的全部意义。

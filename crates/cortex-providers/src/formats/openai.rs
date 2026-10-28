@@ -1061,6 +1061,13 @@ where
                 yield (None, usage)
             } else if chunk.choices[0].delta.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()) {
                 let mut tool_call_data: ToolCallData = HashMap::new();
+                // 与上游的分歧：同一帧可以同时带正文和工具，不能因走工具分支
+                // 就丢掉开场说明。续帧也可能带正文，收齐后在工具之前一起发出。
+                let (text, signature) = extract_content_and_signature(chunk.choices[0].delta.content.as_ref());
+                let mut tool_text = text.unwrap_or_default();
+                if let Some(signature) = signature {
+                    last_signature = Some(signature);
+                }
 
                 if let Some(tool_calls) = &chunk.choices[0].delta.tool_calls {
                     for (position, tool_call) in tool_calls.iter().enumerate() {
@@ -1093,6 +1100,13 @@ where
                                 }
 
                                 if !tool_chunk.choices.is_empty() {
+                                    let (text, signature) = extract_content_and_signature(tool_chunk.choices[0].delta.content.as_ref());
+                                    if let Some(text) = text {
+                                        tool_text.push_str(&text);
+                                    }
+                                    if let Some(signature) = signature {
+                                        last_signature = Some(signature);
+                                    }
                                     if let Some(details) = &tool_chunk.choices[0].delta.reasoning_details {
                                         accumulated_reasoning.extend(details.iter().cloned());
                                     }
@@ -1142,7 +1156,7 @@ where
                     None
                 };
 
-                let filtered = think_filter.push("");
+                let filtered = think_filter.push(&tool_text);
                 let mut flush_thinking = String::new();
                 if !saw_structured_reasoning {
                     flush_thinking.push_str(&pending_inline_thinking);
@@ -3723,6 +3737,77 @@ data: [DONE]"#;
         let mut messages = std::pin::pin!(response_to_streaming_message(response_stream));
         while let Some(result) = messages.next().await {
             result?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_tool_frames_preserve_preamble_before_calls() -> anyhow::Result<()> {
+        for complete in [false, true] {
+            let initial = json!({
+                "id":"mixed", "model":"test", "choices":[{
+                    "index":0, "delta":{
+                        "content":if complete {"我来打开 Chrome。"} else {"我来打开 "},
+                        "tool_calls":[{
+                            "index":0, "id":"launch", "type":"function",
+                            "function":{"name":"open_application","arguments":if complete {
+                                "{\"application\":\"Chrome\"}"
+                            } else {""}}
+                        }]
+                    }, "finish_reason":if complete {Some("tool_calls")} else {None}
+                }]
+            });
+            let mut lines = vec![Ok(format!("data: {initial}"))];
+            if !complete {
+                let continuation = json!({
+                    "id":"mixed", "model":"test", "choices":[{
+                        "index":0, "delta":{
+                            "content":"Chrome。",
+                            "tool_calls":[{"index":0, "function":{"arguments":"{\"application\":\"Chrome\"}"}}]
+                        }, "finish_reason":"tool_calls"
+                    }]
+                });
+                lines.push(Ok(format!("data: {continuation}")));
+            }
+            lines.push(Ok("data: [DONE]".to_owned()));
+            let mut stream =
+                std::pin::pin!(response_to_streaming_message(tokio_stream::iter(lines)));
+            let mut text = String::new();
+            let mut order = Vec::new();
+            while let Some(item) = stream.next().await {
+                if let (Some(message), _) = item? {
+                    for content in message.content {
+                        match content {
+                            MessageContent::Text(value) => {
+                                text.push_str(&value.text);
+                                order.push("text");
+                            }
+                            MessageContent::ToolRequest(value) => {
+                                let call = value.tool_call.expect("工具参数应保持有效");
+                                assert_eq!(
+                                    call.name, "open_application",
+                                    "不能因保留正文改坏工具名"
+                                );
+                                assert_eq!(
+                                    call.arguments.expect("应保留参数")["application"],
+                                    "Chrome"
+                                );
+                                order.push("tool");
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                text, "我来打开 Chrome。",
+                "初始帧和续帧的正文都不能丢失或重复"
+            );
+            assert_eq!(
+                order,
+                ["text", "tool"],
+                "模型自己的开场应先于完整工具调用发出"
+            );
         }
         Ok(())
     }

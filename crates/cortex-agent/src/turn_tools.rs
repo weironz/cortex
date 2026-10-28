@@ -45,6 +45,25 @@ impl Turn {
             ));
         };
 
+        let host_execution = match host_execution_request(call) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        if host_execution && self.env != crate::ExecEnvironment::LocalMachine {
+            return ToolResult::err(
+                "当前不是本机执行环境，不能申请宿主命令执行；容器会话不能访问用户电脑或服务器宿主。",
+            );
+        }
+        if spec.name == "open_application" && self.env.is_container() {
+            return ToolResult::err("云端容器不能打开用户电脑上的应用。");
+        }
+        // 超出预览长度就拒绝，不能让用户批准一条尾部看不见的宿主命令或 URL。
+        if (host_execution || spec.name == "open_application")
+            && call.arguments.to_string().len() > 6_000
+        {
+            return ToolResult::err("宿主执行参数过长，无法完整展示供确认；请缩短命令或应用地址。");
+        }
+
         // ── 先把本会话已批准的目录挂上，再判越界 ──
         //
         // 顺序不能反：挂上之后，一个落在已批准目录里的路径就是 `Inside`，
@@ -152,6 +171,7 @@ impl Turn {
         // 整个 await 期间这一轮是挂起的 —— 这正是想要的：确认没回来之前，
         // 不该有任何副作用发生，也不该抢先去跑下一个工具
         let gate = match self.policy.decide(&spec.name, spec.risk) {
+            _ if host_execution && !self.policy.bypasses_everything() => Gate::Ask,
             Gate::Ask => Gate::Ask,
             // 风险档说不用问，但越界了 —— 越界必须问，除非**完全放行**档。
             // 那一档的语义就是「什么都不问」，在这里给它开个例外等于
@@ -196,7 +216,9 @@ impl Turn {
         // 被关掉的闸门等于没有闸门。这也是 Claude Code 的粒度。
         //
         // 放在批准**之后**：拒绝的那次绝不能留下痕迹，否则下一次就不问了。
-        if let Some(p) = &outside {
+        if let Some(p) = &outside
+            && !self.policy.bypasses_everything()
+        {
             let dir = if p.is_dir() {
                 p.as_path()
             } else {
@@ -278,6 +300,8 @@ impl Turn {
         } else if spec.name == "todo_write" {
             // 同上：清单跟着会话走，会话是宿主的概念
             host.todo_write(&call.arguments).await
+        } else if spec.name == "open_application" {
+            host.open_application(&call.arguments).await
         } else if tools::is_computer_tool(&spec.name) {
             // 同上：这一组要的是显示与输入子系统，而那是平台相关的东西。
             // 判据用 `is_computer_tool` 而不是在这里再写一遍名字清单 ——
@@ -288,11 +312,14 @@ impl Turn {
             // **重新问一次宿主**，而不是复用上面那份 `sandbox`：刚才那次
             // `grant_root` 之后清单变长了，用旧的一份去执行，症状恰好是
             // 「用户点了允许，然后工具报越界」—— 而他刚亲手批准过
-            tools::execute(
-                &self.sandbox.clone().with_grants(host.granted_roots()),
-                call,
-            )
-            .await
+            let mut sandbox = self.sandbox.clone().with_grants(host.granted_roots());
+            if host_execution {
+                // 只放宽这一条已获批准的命令，不写入会话授权目录或全局环境。
+                let mut policy = sandbox.exec_policy().clone();
+                policy.access = crate::sandbox::ProcessAccess::FullAccess;
+                sandbox = sandbox.with_exec_policy(policy);
+            }
+            tools::execute(&sandbox, call).await
         };
 
         // PostToolUse。**不看结果、不改结果** —— 那一步已经发生了，
@@ -322,6 +349,32 @@ impl Turn {
             result.content.push_str(&nudge);
         }
         result
+    }
+}
+
+fn host_execution_request(call: &ToolCall) -> Result<bool, ToolResult> {
+    if call.name != "shell" {
+        return Ok(false);
+    }
+    match call.arguments.get("sandbox_permissions") {
+        None => Ok(false),
+        Some(serde_json::Value::String(value)) if value == "use_default" => Ok(false),
+        Some(serde_json::Value::String(value)) if value == "require_escalated" => {
+            if call
+                .arguments
+                .get("justification")
+                .and_then(|v| v.as_str())
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
+                return Err(ToolResult::err(
+                    "申请宿主执行必须提供 justification，说明为何需要退出进程沙箱。",
+                ));
+            }
+            Ok(true)
+        }
+        _ => Err(ToolResult::err(
+            "sandbox_permissions 只接受 use_default 或 require_escalated。",
+        )),
     }
 }
 
@@ -462,6 +515,254 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = Turn::on_local_machine(dir.path()).unwrap();
         (dir, t)
+    }
+
+    fn host_write(path: &std::path::Path) -> ToolCall {
+        let command = if cfg!(windows) {
+            format!("echo host>\"{}\"", path.display())
+        } else {
+            format!("printf host > '{}'", path.display())
+        };
+        ToolCall {
+            name: "shell".into(),
+            arguments: serde_json::json!({
+                "command": command,
+                "sandbox_permissions":"require_escalated",
+                "justification":"这次需要在宿主写入测试文件"
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn host_execution_is_approved_once_and_does_not_change_the_next_call() {
+        let (_root, t) = turn();
+        let outside = tempfile::tempdir().expect("临时目录应可建");
+        let marker = outside.path().join("host.txt");
+        let call = host_write(&marker);
+        let denied = SpyHost::new(Approval::Denied);
+        assert!(
+            !t.dispatch_once(&call, &denied).await.ok,
+            "拒绝必须挡住宿主命令"
+        );
+        assert!(!marker.exists(), "拒绝时不能产生副作用");
+        assert_eq!(denied.asked(), 1, "退出沙箱前必须经过确认");
+        let approved = GrantHost::new(Approval::Allow);
+        let result = t.dispatch_once(&call, &approved).await;
+        assert!(
+            result.ok && marker.exists(),
+            "获准后实际走宿主执行：{}",
+            result.content
+        );
+        assert!(
+            approved.granted_roots().is_empty(),
+            "当次宿主执行不能变成永久目录授权"
+        );
+        assert_eq!(
+            t.exec_policy().access,
+            crate::sandbox::ProcessAccess::Sandboxed,
+            "后续调用必须恢复原有进程策略"
+        );
+        let next = t
+            .dispatch_once(
+                &ToolCall {
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path":marker.to_string_lossy()}),
+                },
+                &denied,
+            )
+            .await;
+        assert!(!next.ok, "下一条越界读取不能继承当次宿主授权");
+    }
+
+    #[tokio::test]
+    async fn full_local_access_runs_real_commands_without_persisting_grants() {
+        let (_root, t) = turn();
+        let t = t.with_policy(ApprovalPolicy {
+            confirm_at: Risk::Write,
+            bypass: true,
+        });
+        let outside = tempfile::tempdir().expect("临时目录应可建");
+        let marker = outside.path().join("full.txt");
+        let mut call = host_write(&marker);
+        call.arguments
+            .as_object_mut()
+            .unwrap()
+            .remove("sandbox_permissions");
+        let host = GrantHost::new(Approval::Denied);
+        let result = t.dispatch_once(&call, &host).await;
+        assert!(
+            result.ok && marker.exists(),
+            "完整访问的普通命令应实际退出进程沙箱：{}",
+            result.content
+        );
+        let read = ToolCall {
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path":marker.to_string_lossy()}),
+        };
+        assert!(
+            t.dispatch_once(&read, &host).await.ok,
+            "完整访问的文件工具也能越界"
+        );
+        assert_eq!(host.asked(), 0, "用户已授予完整访问，不得再次要求确认");
+        assert!(
+            host.granted_roots().is_empty(),
+            "完整访问不能污染受限模式的会话授权"
+        );
+        let restricted = t.with_policy(ApprovalPolicy::default());
+        assert!(
+            !restricted.dispatch_once(&read, &host).await.ok,
+            "切回受限档后越界读取必须重新确认"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_bypass_cannot_become_host_execution() {
+        let root = tempfile::tempdir().expect("临时目录应可建");
+        let t = Turn::in_container(root.path())
+            .unwrap()
+            .with_policy(ApprovalPolicy {
+                confirm_at: Risk::Write,
+                bypass: true,
+            });
+        assert_eq!(
+            t.exec_policy().access,
+            crate::sandbox::ProcessAccess::Sandboxed,
+            "云端免确认不等于退出容器内的进程隔离"
+        );
+        let host = SpyHost::new(Approval::Allow);
+        let result = t
+            .dispatch_once(&host_write(&root.path().join("blocked")), &host)
+            .await;
+        assert!(!result.ok, "容器不能申请宿主命令");
+        assert_eq!(host.asked(), 0, "无效权限不能通过用户确认放行");
+        assert!(
+            !root.path().join("blocked").exists(),
+            "容器被拒时不能执行命令"
+        );
+    }
+
+    struct ApplicationHost {
+        answer: Approval,
+        asked: AtomicUsize,
+        launched: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolHost for ApplicationHost {
+        async fn confirm(&self, _: &ConfirmRequest<'_>) -> Approval {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            self.answer
+        }
+        async fn open_application(&self, _: &serde_json::Value) -> ToolResult {
+            self.launched.fetch_add(1, Ordering::SeqCst);
+            ToolResult::ok("requested")
+        }
+    }
+
+    #[tokio::test]
+    async fn application_launch_uses_the_host_gate_without_a_workspace() {
+        let call = ToolCall {
+            name: "open_application".into(),
+            arguments: serde_json::json!({"application":"Chrome"}),
+        };
+        let t = Turn::sealed().with_specs(vec![tools::application_spec()]);
+        let host = ApplicationHost {
+            answer: Approval::Denied,
+            asked: AtomicUsize::new(0),
+            launched: AtomicUsize::new(0),
+        };
+        assert!(
+            !t.dispatch_once(&call, &host).await.ok,
+            "拒绝应挡住宿主应用启动"
+        );
+        assert_eq!(
+            host.launched.load(Ordering::SeqCst),
+            0,
+            "确认之前不能发起系统请求"
+        );
+        let host = ApplicationHost {
+            answer: Approval::Allow,
+            asked: AtomicUsize::new(0),
+            launched: AtomicUsize::new(0),
+        };
+        assert!(
+            t.dispatch_once(&call, &host).await.ok,
+            "无工作区的会话也应能请求打开应用"
+        );
+        assert_eq!(
+            host.asked.load(Ordering::SeqCst),
+            1,
+            "应用启动必须走 Execute 确认"
+        );
+        assert_eq!(
+            host.launched.load(Ordering::SeqCst),
+            1,
+            "应用应交给宿主，不能落进 tools::execute"
+        );
+        let root = tempfile::tempdir().expect("临时目录应可建");
+        let cloud = Turn::in_container(root.path())
+            .unwrap()
+            .with_specs(vec![tools::application_spec()])
+            .with_policy(ApprovalPolicy {
+                confirm_at: Risk::Write,
+                bypass: true,
+            });
+        assert!(
+            !cloud.dispatch_once(&call, &host).await.ok,
+            "即使目录被错误装配，容器也不能启动本机应用"
+        );
+        assert_eq!(
+            host.launched.load(Ordering::SeqCst),
+            1,
+            "被拒的云端请求不能到达宿主"
+        );
+    }
+
+    #[test]
+    fn escalation_requires_explicit_permissions_and_a_reason() {
+        for arguments in [
+            serde_json::json!({"sandbox_permissions":"require_escalated"}),
+            serde_json::json!({"sandbox_permissions":"require_escalated","justification":""}),
+            serde_json::json!({"sandbox_permissions":"full_access"}),
+        ] {
+            assert!(
+                host_execution_request(&ToolCall {
+                    name: "shell".into(),
+                    arguments
+                })
+                .is_err(),
+                "没有明确理由或合法权限的申请必须被拒绝"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_host_requests_are_rejected_before_confirmation_or_execution() {
+        let (_root, turn) = turn();
+        let host = SpyHost::new(Approval::Allow);
+        let call = ToolCall {
+            name: "shell".into(),
+            arguments: serde_json::json!({
+                "command": "x".repeat(6_000),
+                "sandbox_permissions": "require_escalated",
+                "justification": "尾部不能被确认预览截掉"
+            }),
+        };
+        assert!(
+            !turn.dispatch_once(&call, &host).await.ok,
+            "超长宿主命令必须被拒绝"
+        );
+        assert_eq!(host.asked(), 0, "无法完整展示的请求不该让用户批准");
+        let app = Turn::sealed().with_specs(vec![tools::application_spec()]);
+        let call = ToolCall {
+            name: "open_application".into(),
+            arguments: serde_json::json!({"application":"Chrome", "url":"x".repeat(6_000)}),
+        };
+        assert!(
+            !app.dispatch_once(&call, &host).await.ok,
+            "超长应用地址也必须被拒绝"
+        );
+        assert_eq!(host.asked(), 0, "应用请求也不能盲签");
     }
 
     #[tokio::test]

@@ -16,6 +16,11 @@ use crate::turn_gate::{Approval, ConfirmRequest};
 /// 做不到的事。留一个必然失败的能力，比没有这个能力更糟。
 #[async_trait::async_trait]
 pub trait ToolHost: Send + Sync {
+    /// 由本机宿主请求系统打开应用；经过同一权限闸，不借用受限 shell。
+    async fn open_application(&self, _arguments: &serde_json::Value) -> ToolResult {
+        ToolResult::err("当前宿主不提供本机应用启动能力。")
+    }
+
     /// 执行一个来自 MCP server 的工具。
     ///
     /// 连接、子进程、重连都是**有状态**的东西，而 `Turn` 刻意无每轮状态、

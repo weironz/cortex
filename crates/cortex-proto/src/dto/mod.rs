@@ -279,6 +279,27 @@ mod permission_mode_tests {
     use super::PermissionMode;
     use std::str::FromStr as _;
 
+    #[test]
+    fn missing_permission_is_distinct_from_explicit_ask() {
+        let mut json = serde_json::json!({"session_id":"test", "message":"hello"});
+        let old: super::ChatRequest = serde_json::from_value(json.clone()).expect("旧请求可读");
+        assert_eq!(old.permission_mode, None, "缺省不能伪装成用户明确选档");
+        json["permission_mode"] = serde_json::json!("ask");
+        let explicit: super::ChatRequest =
+            serde_json::from_value(json.clone()).expect("显式请求可读");
+        assert_eq!(explicit.permission_mode, Some(PermissionMode::Ask));
+        assert_eq!(
+            serde_json::to_value(explicit).expect("请求可序列化")["permission_mode"],
+            json["permission_mode"],
+            "转发请求不能丢掉用户明确要求的确认策略"
+        );
+        json["permission_mode"] = serde_json::json!("unknown");
+        assert!(
+            serde_json::from_value::<super::ChatRequest>(json).is_err(),
+            "非法权限应被拒绝"
+        );
+    }
+
     /// **认不出的档要报错，不能回落成默认。**
     ///
     /// 回落的后果取决于默认是哪一档，而两个方向都很难看：要么用户以为开了
@@ -334,5 +355,22 @@ mod permission_mode_tests {
             );
             assert_eq!(PermissionMode::from_str(m.as_str()).unwrap(), m);
         }
+
+        let legacy = PermissionMode::from_str("bypass").expect("旧 CLI 值仍须认出");
+        assert_eq!(
+            legacy,
+            PermissionMode::LegacyBypass,
+            "旧值不能解析成新的 FullAccess 模式"
+        );
+        assert_eq!(
+            serde_json::from_str::<PermissionMode>(r#""bypass""#).unwrap(),
+            PermissionMode::LegacyBypass,
+            "旧客户端 JSON 必须安全迁移到 LegacyBypass"
+        );
+        assert_eq!(
+            serde_json::from_str::<PermissionMode>(r#""bypass_full_access_v1""#).unwrap(),
+            PermissionMode::Bypass,
+            "新客户端确认后的扩权档必须使用新的线上值"
+        );
     }
 }

@@ -42,7 +42,15 @@ import '../widgets/settings_layout.dart';
 /// 所以它有且只有这一处定义，[`ComputerUseSection`] 与
 /// `settings_sheet.dart` 的菜单闸都读它。
 final computerUseAvailableProvider = Provider<bool>(
-  (ref) => ref.watch(healthProvider).value?.computerUse == true,
+  (ref) => ref.watch(healthProvider).value?.canObserveComputer == true,
+);
+
+/// 这个部署是否真的能投递鼠标键盘动作。
+///
+/// C1 的 Cua 链路只开放 list/observe。界面必须据细粒度能力换文案，不能把
+/// “可以观察”写成“可以操作”，否则用户会以为 agent 能替自己点按钮。
+final computerActAvailableProvider = Provider<bool>(
+  (ref) => ref.watch(healthProvider).value?.canActOnComputer == true,
 );
 
 class ComputerUseSection extends ConsumerWidget {
@@ -59,6 +67,7 @@ class ComputerUseSection extends ConsumerWidget {
     }
 
     final on = ref.watch(computerUseProvider);
+    final canAct = ref.watch(computerActAvailableProvider);
     // 模型看不懂图 = 这个开关打开也不生效。**必须当场说** ——
     // 不说的话，用户打开它、问一句「看看我屏幕」，得到的是一条英文 400，
     // 而**屏幕已经拍过、也已经发出去了**（截图在工具执行时就拍了）
@@ -66,7 +75,9 @@ class ComputerUseSection extends ConsumerWidget {
 
     return SettingsSection(
       title: '操作这台电脑',
-      description: '让模型看见你的屏幕，并且能动鼠标键盘。',
+      description: canAct
+          ? '让模型看见允许窗口，并且能操作鼠标键盘。'
+          : '让模型观察允许窗口；当前版本不会替用户点击或输入。',
       children: [
         SettingsCard(
           child: Column(
@@ -83,8 +94,11 @@ class ComputerUseSection extends ConsumerWidget {
                         Text(
                           switch ((on, blind)) {
                             (true, true) => '开着，但当前这个模型看不懂图 —— 这一轮不会带上这组工具。',
-                            (true, false) => '开着。每一次操作仍然按你选的权限档来问你。',
-                            _ => '关着。模型看不见屏幕，也动不了鼠标键盘。',
+                            (true, false) when canAct =>
+                              '开着。每一次操作仍然按你选的权限档来问你。',
+                            (true, false) => '开着。当前是只读观察，仍不会点击或输入。',
+                            _ when canAct => '关着。模型看不见屏幕，也动不了鼠标键盘。',
+                            _ => '关着。模型看不见任何允许窗口。',
                           },
                           style: theme.textTheme.labelSmall?.copyWith(
                             color: on && blind
@@ -123,19 +137,26 @@ class ComputerUseSection extends ConsumerWidget {
                     '打开着的邮箱、密码管理器。图会发给模型，发出去就收不回来。',
               ),
               const SizedBox(height: 8),
-              _Point(
-                icon: Icons.mouse_outlined,
-                text:
-                    '点击和输入落在真实的窗口上，不在沙箱里 —— '
-                    '文件工具那道工作区围栏管不到这里。',
-              ),
+              if (canAct)
+                _Point(
+                  icon: Icons.mouse_outlined,
+                  text:
+                      '点击和输入落在真实的窗口上，不在沙箱里 —— '
+                      '文件工具那道工作区围栏管不到这里。',
+                )
+              else
+                _Point(
+                  icon: Icons.visibility_outlined,
+                  text: '当前只开放窗口与界面元素观察，不能点击、输入、发送或修改应用。',
+                ),
               const SizedBox(height: 8),
               _Point(
                 icon: Icons.shield_outlined,
-                text:
-                    '密码、付款、发送这类事它会停下来交回给你，'
-                    '这条写在它的提示词里。但别只靠这一条 —— '
-                    '权限档留在「每次询问」，你就能逐次看见它要点哪儿。',
+                text: canAct
+                    ? '密码、付款、发送这类事它会停下来交回给你，'
+                          '这条写在它的提示词里。但别只靠这一条 —— '
+                          '权限档留在「每次询问」，你就能逐次看见它要点哪儿。'
+                    : '权限档留在「每次询问」，每一轮观察允许窗口前你仍能看见请求。',
               ),
             ],
           ),

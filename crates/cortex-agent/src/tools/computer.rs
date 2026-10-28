@@ -113,6 +113,53 @@ pub fn computer_specs() -> Vec<ToolSpec> {
     ]
 }
 
+/// C1 的只读电脑工具。
+///
+/// 这组工具与 legacy 坐标工具分开：`computer_list` 只返回窗口身份，
+/// `computer_observe` 只观察一个明确窗口并返回带完整性说明的截图与
+/// accessibility 摘要。这里刻意没有 `computer_act`，所以即使模型误以为
+/// 可以操作，它也没有任何写入面。
+#[must_use]
+pub fn cua_computer_specs() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec {
+            name: "computer_list".into(),
+            description: concat!(
+                "列出允许操作的本机应用窗口及其稳定身份。只读。",
+                "每个窗口会同时给出应用身份和 window_id；不要用窗口标题猜应用身份。",
+            )
+            .into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            // 窗口标题本身可能包含文件名、客户名或聊天内容；列表虽只读，
+            // 仍按最高执行风险确认。
+            risk: Risk::Execute,
+            path_arg: None,
+            source: ToolSource::Builtin,
+        },
+        ToolSpec {
+            name: "computer_observe".into(),
+            description: concat!(
+                "观察一个由 computer_list 返回的窗口，返回截图、accessibility 元素，",
+                "以及 elements_complete/truncated 等完整性证据。只读，不能点击或输入。",
+            )
+            .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "window_id": {
+                        "type": "string",
+                        "description": "computer_list 返回的不透明 window_id"
+                    }
+                },
+                "required": ["window_id"]
+            }),
+            risk: Risk::Execute,
+            path_arg: None,
+            source: ToolSource::Builtin,
+        },
+    ]
+}
+
 /// 这个名字是不是电脑操作那一组里的。
 ///
 /// 分派时要用（它们都走 [`crate::ToolHost::computer`]，不走 `tools::execute`）。
@@ -122,6 +169,45 @@ pub fn computer_specs() -> Vec<ToolSpec> {
 pub fn is_computer_tool(name: &str) -> bool {
     matches!(
         name,
-        "screenshot" | "click" | "type_text" | "key" | "scroll"
+        "screenshot"
+            | "click"
+            | "type_text"
+            | "key"
+            | "scroll"
+            | "computer_list"
+            | "computer_observe"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cua_c1_catalog_is_read_only_and_dispatchable() {
+        let specs = cua_computer_specs();
+        let names: Vec<&str> = specs.iter().map(|spec| spec.name.as_ref()).collect();
+        assert_eq!(
+            names,
+            vec!["computer_list", "computer_observe"],
+            "C1 目录只能开放枚举与观察，不能提前宣传写操作"
+        );
+        for spec in &specs {
+            assert_eq!(
+                spec.risk,
+                Risk::Execute,
+                "{} 会暴露窗口标题或屏幕内容，必须经过确认闸",
+                spec.name
+            );
+            assert!(
+                is_computer_tool(&spec.name),
+                "{} 已进入目录却没有宿主分派",
+                spec.name
+            );
+        }
+        assert!(
+            !is_computer_tool("computer_act"),
+            "C1 没有写入工具；让模型看见它的名字就等于承诺一项不存在的能力"
+        );
+    }
 }

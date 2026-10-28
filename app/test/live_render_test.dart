@@ -2,6 +2,7 @@
 library;
 
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:cortex_app/api/http_cortex_api.dart';
 import 'package:cortex_app/core/theme.dart';
@@ -42,16 +43,25 @@ final String? _token = () {
 }();
 
 Future<bool> _daemonUp() async {
+  final client = HttpClient();
   try {
-    final socket = await Socket.connect(
-      '127.0.0.1',
-      5173,
-      timeout: const Duration(milliseconds: 600),
+    final request = await client
+        .getUrl(Uri.parse('$_baseUrl/health'))
+        .timeout(const Duration(milliseconds: 800));
+    final response = await request.close().timeout(
+      const Duration(milliseconds: 800),
     );
-    socket.destroy();
-    return true;
+    if (response.statusCode != HttpStatus.ok) return false;
+    final body = await response
+        .transform(utf8.decoder)
+        .join()
+        .timeout(const Duration(milliseconds: 800));
+    final decoded = jsonDecode(body);
+    return decoded is Map && decoded['status'] is String;
   } on Object {
     return false;
+  } finally {
+    client.close(force: true);
   }
 }
 

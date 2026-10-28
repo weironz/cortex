@@ -15,6 +15,9 @@
 //! 用户唯一想绑的目录。
 
 pub mod background;
+pub mod computer_driver;
+pub mod computer_policy;
+pub mod computer_trace;
 pub mod diff;
 pub mod edit;
 pub mod egress;

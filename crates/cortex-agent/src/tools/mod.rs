@@ -30,16 +30,19 @@ use cortex_core::{CortexError, Result};
 use cortex_llm::Tool;
 use serde::{Deserialize, Serialize};
 
+mod application;
 mod background;
 mod computer;
+pub mod computer_protocol;
 mod fs;
 mod library;
 mod misc;
 mod shell;
 mod web;
 
+pub use application::application_spec;
 pub use background::{background_specs, is_background_tool, spawn_background};
-pub use computer::{computer_specs, is_computer_tool};
+pub use computer::{computer_specs, cua_computer_specs, is_computer_tool};
 pub use library::{is_library_tool, library_specs};
 pub use misc::{
     deliver_spec, image_spec, mcp_resource_spec, readonly_specs, skill_spec, subagent_spec,
@@ -563,6 +566,11 @@ impl Sandbox {
     pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
         match self.classify(rel)? {
             Resolved::Inside(p) => Ok(p),
+            Resolved::Outside(p)
+                if self.exec.access == crate::sandbox::ProcessAccess::FullAccess =>
+            {
+                Ok(p)
+            }
             Resolved::Outside(p) => Err(CortexError::Invalid(format!(
                 "路径 {rel} 越出工作区边界且未获批准（解析到 {}）",
                 p.display()
@@ -746,6 +754,15 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
                     "timeout_ms": {
                         "type": "integer",
                         "description": "可选。超时毫秒数，默认 120000，上限 600000"
+                    },
+                    "sandbox_permissions": {
+                        "type": "string",
+                        "enum": ["use_default", "require_escalated"],
+                        "description": "默认按当前权限档执行。本机受限命令确需退出沙箱时，显式申请 require_escalated，批准后仅放宽这一条命令"
+                    },
+                    "justification": {
+                        "type": "string",
+                        "description": "申请宿主执行时必填：说明为何沙箱内不能完成，以及本次会做什么"
                     }
                 },
                 "required": ["command"]
@@ -755,6 +772,37 @@ pub fn builtin_specs() -> Vec<ToolSpec> {
             source: ToolSource::Builtin,
         },
     ]
+}
+
+pub(crate) fn configure_shell_access(
+    specs: &mut [ToolSpec],
+    access: crate::sandbox::ProcessAccess,
+    env: crate::ExecEnvironment,
+) {
+    if let Some(spec) = specs.iter_mut().find(|spec| spec.name == "shell") {
+        spec.description = if access == crate::sandbox::ProcessAccess::FullAccess {
+            concat!(
+                "执行一条 shell 命令。用户已选择本机完整访问：命令按当前用户权限在宿主执行，",
+                "不经过 OS 进程沙箱，不再询问；这不是管理员提权。",
+                "打开本机应用应优先使用 open_application（目录提供时），不要借 shell 启动 GUI。",
+            )
+            .into()
+        } else if env == crate::ExecEnvironment::LocalMachine {
+            let description = shell::shell_description();
+            format!("{description}。若本机命令确因沙箱权限失败，不要反复换写法；可显式申请 sandbox_permissions=require_escalated 并提供 justification，获准后仅重跑这一条。").into()
+        } else {
+            shell::shell_description()
+        };
+        if env != crate::ExecEnvironment::LocalMachine
+            && let Some(properties) = spec
+                .parameters
+                .get_mut("properties")
+                .and_then(|v| v.as_object_mut())
+        {
+            properties.remove("sandbox_permissions");
+            properties.remove("justification");
+        }
+    }
 }
 
 /// 按名字查一个内置工具的声明。
@@ -1027,6 +1075,7 @@ mod tests {
         all.push(web_fetch_spec());
         all.extend(library_specs());
         all.extend(computer_specs());
+        all.extend(cua_computer_specs());
         all.push(skill_spec());
         for spec in all {
             assert!(

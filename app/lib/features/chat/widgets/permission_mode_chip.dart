@@ -17,6 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/permission_mode.dart';
 import '../../../state/app_providers.dart';
 import '../../../core/theme.dart';
+import '../../../widgets/permission_confirmation.dart';
 
 class PermissionModeChip extends ConsumerWidget {
   const PermissionModeChip({super.key});
@@ -97,41 +98,10 @@ class PermissionModeChip extends ConsumerWidget {
     if (picked == null || picked == current) return;
     if (!context.mounted) return;
 
-    if (picked == PermissionMode.bypass && !await _confirmBypass(context)) {
+    if (!await confirmPermissionChange(context, current, picked)) {
       return;
     }
+    if (!context.mounted) return;
     ref.read(permissionModeProvider.notifier).set(picked);
-  }
-
-  /// 打开完全放行前的那一次确认。
-  ///
-  /// 措辞刻意具体：说「有风险」等于没说，用户要能判断的是**具体会发生什么**。
-  static Future<bool> _confirmBypass(BuildContext context) async {
-    final scheme = Theme.of(context).colorScheme;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        icon: Icon(Icons.lock_open_rounded, color: scheme.error),
-        title: const Text('关掉全部确认？'),
-        content: const Text(
-          'Cortex 将不再就任何操作征求你的同意 —— 包括执行命令，'
-          '以及读写工作区之外的文件。\n\n'
-          '这台机器上没有内核级沙箱，唯一的把关就是你逐条确认。'
-          '关掉之后，agent 的每条命令都是裸跑的。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('算了'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            style: FilledButton.styleFrom(backgroundColor: scheme.error),
-            child: const Text('我明白，关掉'),
-          ),
-        ],
-      ),
-    );
-    return ok ?? false;
   }
 }

@@ -52,6 +52,74 @@ fn a_session_without_a_workspace_still_gets_the_external_tools() {
     );
 }
 
+#[test]
+fn computer_use_requires_all_four_conditions() {
+    let cases = [
+        (
+            false,
+            true,
+            cortex_agent::ExecEnvironment::LocalMachine,
+            true,
+        ),
+        (
+            true,
+            false,
+            cortex_agent::ExecEnvironment::LocalMachine,
+            true,
+        ),
+        (true, true, cortex_agent::ExecEnvironment::Container, true),
+        (
+            true,
+            true,
+            cortex_agent::ExecEnvironment::LocalMachine,
+            false,
+        ),
+    ];
+
+    for (requested, supported, env, supports_vision) in cases {
+        assert!(
+            !computer_access_allowed(requested, supported, env, supports_vision),
+            "电脑操作在 requested={requested}, supported={supported}, env={}, \
+             supports_vision={supports_vision} 时仍被开放",
+            env.as_str()
+        );
+    }
+
+    assert!(
+        computer_access_allowed(
+            true,
+            true,
+            cortex_agent::ExecEnvironment::LocalMachine,
+            true
+        ),
+        "四项条件全部成立时电脑操作应当可用"
+    );
+}
+
+#[test]
+fn cua_observation_catalog_contains_no_legacy_write_tools() {
+    let turn = chat_turn_for(
+        8,
+        &[],
+        Caps {
+            can_observe_computer: true,
+            ..Caps::default()
+        },
+        &[],
+    );
+    let names = turn.tool_names();
+    assert!(
+        names.contains(&"computer_list") && names.contains(&"computer_observe"),
+        "Cua 配置成立时必须出现 list/observe：{names:?}"
+    );
+    for legacy in ["screenshot", "click", "type_text", "key", "scroll"] {
+        assert!(
+            !names.contains(&legacy),
+            "Cua observe-only 目录不能同时暴露 legacy 写操作 {legacy}：{names:?}"
+        );
+    }
+}
+
 /// 生图工具**只在够得着服务端时**才进目录。
 ///
 /// 两个方向都要盯：
@@ -474,6 +542,12 @@ fn each_mode_translates_to_exactly_one_policy() {
 
     let bypass = policy_for(PermissionMode::Bypass, local);
     assert!(bypass.bypass, "完全放行档必须真的什么都不问");
+
+    let legacy = policy_for(PermissionMode::LegacyBypass, local);
+    assert!(
+        !legacy.bypass && legacy.confirm_at == Risk::Write,
+        "旧持久化的 bare bypass 只代表旧语义；升级后必须先落回 Ask，不能静默扩成宿主 FullAccess"
+    );
 }
 
 /// 容器里的**默认**档是免确认，而显式选的档仍然生效。
@@ -487,7 +561,7 @@ fn a_container_defaults_to_no_confirmation_but_still_honours_an_explicit_choice(
     use cortex_agent::Risk;
     let c = cortex_agent::ExecEnvironment::Container;
 
-    let default = policy_for(PermissionMode::Ask, c);
+    let default = policy_for_request(None, c);
     assert!(
         default.bypass,
         concat!(
@@ -495,7 +569,19 @@ fn a_container_defaults_to_no_confirmation_but_still_honours_an_explicit_choice(
             "也答不了容器里弹出来的确认",
         )
     );
-    assert_eq!(default.confirm_at, Risk::Execute);
+    assert_eq!(
+        default.decide("shell", Risk::Execute),
+        cortex_agent::Gate::Allow
+    );
+
+    let ask = policy_for_request(Some(PermissionMode::Ask), c);
+    assert!(!ask.bypass, "显式 Ask 不能误当成旧客户端缺省");
+    assert_eq!(ask.confirm_at, Risk::Write);
+    assert_eq!(ask.decide("shell", Risk::Execute), cortex_agent::Gate::Ask);
+    assert!(
+        !policy_for_request(None, cortex_agent::ExecEnvironment::LocalMachine).bypass,
+        "本机旧客户端缺省仍必须逐条确认"
+    );
 
     // 显式选的档不受影响：用户对一个装着要紧文件的工作区，仍然可以
     // 把确认要回来。砍掉这条能力省不了工程量，只省一个默认值判断

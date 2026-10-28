@@ -27,11 +27,20 @@ pub enum PermissionMode {
     Ask,
     /// 自动改文件：写不问，执行才问。越界仍然问 —— 越界与风险是两件事。
     AcceptEdits,
-    /// 完全放行：一律不问，越界也不问。对齐 "Bypass permissions"。
+    /// 完全放行：本机按当前用户完整权限执行，不经过进程沙箱；云端仍在容器内。
     ///
     /// 默认值刻意不是它：一个从别处抄来的配置、一个忘了传的字段，
     /// 都不该让 agent 静默获得无人值守的执行权。要开就得有人明确选。
+    #[serde(rename = "bypass_full_access_v1")]
     Bypass,
+    /// 旧版本保存的 `bypass`。
+    ///
+    /// 旧语义只是“少弹确认”，升级后却会获得宿主 FullAccess。保留这个输入
+    /// 变体是为了让旧客户端请求仍可识别，但所有策略翻译都必须把它落回 Ask；
+    /// 用户要在当前版本重新确认新的扩权含义后，客户端才会发送
+    /// `bypass_full_access_v1`。
+    #[serde(rename = "bypass")]
+    LegacyBypass,
 }
 
 impl PermissionMode {
@@ -45,7 +54,8 @@ impl PermissionMode {
         match self {
             Self::Ask => "ask",
             Self::AcceptEdits => "accept_edits",
-            Self::Bypass => "bypass",
+            Self::Bypass => "bypass_full_access_v1",
+            Self::LegacyBypass => "bypass_legacy_safe",
         }
     }
 }
@@ -65,9 +75,11 @@ impl std::str::FromStr for PermissionMode {
         match s.trim().replace('-', "_").as_str() {
             "ask" => Ok(Self::Ask),
             "accept_edits" => Ok(Self::AcceptEdits),
-            "bypass" => Ok(Self::Bypass),
+            "bypass_full_access_v1" => Ok(Self::Bypass),
+            "bypass" => Ok(Self::LegacyBypass),
             other => Err(format!(
-                "认不出的权限档 {other:?}，可选：ask / accept-edits / bypass"
+                "认不出的权限档 {other:?}，可选：ask / accept-edits / \
+                 bypass-full-access-v1"
             )),
         }
     }
@@ -156,13 +168,13 @@ pub struct ChatRequest {
     /// （`ExecEnvironment::LocalMachine` 且这个构建编进了那一组）。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub computer_use: bool,
-    /// 这一轮的权限档位。老客户端不传即 [`PermissionMode::Ask`]。
+    /// 这一轮的权限档位。缺省表示旧客户端未明确选择。
     ///
     /// 逐轮带而不是存在会话上：用户在对话框底部随时能改，而改完之后
     /// **下一句**就该按新档位走。存服务端的话，客户端要多一次同步，
     /// 而那次同步失败时用户看到的是「我明明切了档」。
-    #[serde(default)]
-    pub permission_mode: PermissionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
     /// 这一轮如果画图，按什么规格画。`None` = 完全听模型的。
     ///
     /// 与 [`Self::permission_mode`] 同一个路数：逐轮带，用户在图片页底下

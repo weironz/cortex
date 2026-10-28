@@ -73,7 +73,7 @@ use std::sync::OnceLock;
 use cortex_core::{CortexError, Result};
 
 mod policy;
-pub use policy::{NetworkPolicy, SandboxPolicy};
+pub use policy::{NetworkPolicy, ProcessAccess, SandboxPolicy};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -364,6 +364,8 @@ pub(crate) fn command_from_argv(argv: &[String]) -> std::process::Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        // 普通命令不弹控制台窗口；可见应用由宿主的应用启动入口负责。
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
         if let [_, flag, rest] = argv
             && flag.eq_ignore_ascii_case("/c")
         {
@@ -376,7 +378,23 @@ pub(crate) fn command_from_argv(argv: &[String]) -> std::process::Command {
 }
 
 pub fn prepare(policy: &SandboxPolicy, argv: &[String], cwd: &Path) -> Result<Prepared> {
+    if policy.access == ProcessAccess::FullAccess {
+        return prepare_full_access(argv, cwd);
+    }
     prepare_with(capability(), policy, argv, cwd)
+}
+
+fn prepare_full_access(argv: &[String], cwd: &Path) -> Result<Prepared> {
+    if argv.is_empty() {
+        return Err(CortexError::Invalid("命令为空".into()));
+    }
+    let mut command = command_from_argv(argv);
+    command.current_dir(cwd);
+    tracing::warn!(program = %argv[0], "完整访问：按用户授予的权限在宿主执行，不使用 OS 沙箱");
+    Ok(Prepared {
+        command,
+        enforced: false,
+    })
 }
 
 /// 与 [`prepare`] 相同，但**由调用方指定本机的沙箱能力**。
@@ -399,6 +417,9 @@ pub fn prepare_with(
     argv: &[String],
     cwd: &Path,
 ) -> Result<Prepared> {
+    if policy.access == ProcessAccess::FullAccess {
+        return prepare_full_access(argv, cwd);
+    }
     let Some(program) = argv.first() else {
         return Err(CortexError::Invalid("命令为空".into()));
     };

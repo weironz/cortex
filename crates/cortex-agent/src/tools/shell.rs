@@ -30,13 +30,13 @@ fn shell_description_for(cap: &crate::sandbox::Capability) -> std::borrow::Cow<'
     // 有一条测试专门盯着这个（`工具描述里没有被压扁的痕迹`）
     const BASE: &str = concat!(
         "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里：",
-        "只能读写工作区与构建缓存，默认不能联网",
+        "文件访问受工作区与构建缓存规则约束，网络策略由执行环境决定",
     );
     // AppContainer 那一档：读默认拒绝，但 dir/vol 用不了，主目录下的工作区
     // git 也用不了。这些是模型必须知道的，否则它会换十种写法反复撞。
     const APPCONTAINER: &str = concat!(
         "在工作区内执行一条 shell 命令。命令运行在 OS 级沙箱里：",
-        "只能读写工作区与构建缓存，默认不能联网。",
+        "文件访问受工作区与构建缓存规则约束，网络策略由执行环境决定。",
         "⚠ 本机的沙箱是 Windows AppContainer，其中 **`dir` 与 `vol` 用不了**",
         "（会报「拒绝访问」）—— 那是沙箱的限制，不是命令写错了，换写法重试",
         "没有用。要看目录内容请用 `list_dir` 工具，或 cmd 的 `for %f in (*)`。",

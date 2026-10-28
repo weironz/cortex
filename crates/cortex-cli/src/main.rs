@@ -21,8 +21,11 @@ use std::io::{IsTerminal as _, Write as _};
 fn parse_cli_permission_mode(s: &str) -> Result<cortex_proto::dto::PermissionMode, String> {
     use std::str::FromStr as _;
     let mode = cortex_proto::dto::PermissionMode::from_str(s)?;
-    if mode == cortex_proto::dto::PermissionMode::Bypass {
-        return Err("CLI 不接受 bypass（一律不问，越界也不问）。\n\
+    if matches!(
+        mode,
+        cortex_proto::dto::PermissionMode::Bypass | cortex_proto::dto::PermissionMode::LegacyBypass
+    ) {
+        return Err("CLI 不接受完全放行（一律不问，越界也不问）。\n\
              它等于给「无人值守地自动批准任意 shell 命令」开一个命令行开关，\n\
              而那正是这个 CLI 刻意没有 --yes 的原因：这种参数会躺在某个 CI \n\
              脚本的第 200 行，被一个从别处抄来的人复制走。\n\
@@ -738,7 +741,7 @@ async fn one_turn(
             source: None,
             // `--permission-mode`（2026-08-17 补）。收得到 ask 与
             // accept-edits；bypass 被显式拒绝，见 `parse_cli_permission_mode`
-            permission_mode,
+            permission_mode: Some(permission_mode),
             // CLI 不画图 —— 规格面板是图片页那边的东西
             image_prefs: None,
             // 智能体是图形界面上挑的。给 CLI 一个 --agent 要先能列出智能体，

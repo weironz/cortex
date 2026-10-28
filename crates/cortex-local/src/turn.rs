@@ -31,7 +31,10 @@ use crate::remote::Remote;
 use crate::workspaces::Workspaces;
 
 pub(crate) use crate::turn_assemble::turn_for_env;
-use crate::turn_assemble::{Caps, can_generate_images, chat_turn_for, workspace_turn_for};
+use crate::turn_assemble::{
+    Caps, can_generate_images, chat_turn_for, computer_access_allowed, policy_for_request,
+    workspace_turn_for,
+};
 use crate::turn_events::{bridge_events, needs_reauth};
 use crate::turn_host::LocalHost;
 use crate::turn_prompt::{history_messages, system_prompt_for};
@@ -393,6 +396,10 @@ impl Engine {
         // 生图那条路要有服务端才够得着。**在装配工具之前定** ——
         // 目录里摆什么，模型就会去调什么
         let can_draw = can_generate_images(&self.llm);
+        // 这一轮实际用的模型。工具目录必须在它之前定，因为截图只有能接收
+        // 图片的模型才看得见；把这一步留到构造 LocalHost 时再做，会让直接
+        // 调用 HTTP API 的盲模型先拿到一整套电脑工具。
+        let llm = self.llm_for(&req.model, req.source.as_deref());
         // 这一轮有没有技能可用。**一处算完，工具目录与提示词共用它** ——
         // 各算各的话，其中一处漏掉不会有任何测试红（见 `with_external`）
         let catalog: Vec<(&str, &str)> = req
@@ -402,19 +409,20 @@ impl Engine {
             .map(|s| (s.name.as_str(), s.description.as_str()))
             .collect();
         let has_skills = !catalog.is_empty();
-        // 电脑操作要**三个条件同时成立**，缺一不可：
-        //
-        // 1. 用户在设置里打开了（`req.computer_use`）；
-        // 2. 这个构建编进了那一组（Linux 上没有，见 `computer::supported`）；
-        // 3. 跑在**桌面端**（容器里没有屏幕，摆出来就是骗人）。
-        //
-        // 三条写在**一处**：分散判的话，漏掉第三条的表现是云端会话里模型
-        // 答应去点按钮，然后每一次都失败 —— 而用户完全看不出为什么
+        // Cua 只读观察要同时满足：用户明确打开、sidecar 配置有效、跑在本机
+        // 桌面、当前模型能看图。legacy xcap/enigo 写路径尚未接入统一
+        // Gateway，生产目录里始终关闭。
         let caps = Caps {
             can_draw,
             has_skills,
-            can_use_computer: req.computer_use
-                && crate::computer::supported()
+            can_use_computer: false,
+            can_observe_computer: computer_access_allowed(
+                req.computer_use,
+                crate::computer_cua::configured(),
+                self.exec_env,
+                llm.supports_vision(),
+            ),
+            can_open_application: crate::app_launcher::supported()
                 && self.exec_env == cortex_agent::ExecEnvironment::LocalMachine,
             // 与生图同一个判据（有没有可打的服务端）—— 复用而不是各写一遍：
             // 各写各的话，判错的症状是模型调一个必然失败的工具
@@ -446,6 +454,7 @@ impl Engine {
         let subagent_turn = bound.as_deref().and_then(|ws| {
             turn_for_env(self.exec_env, ws).ok().map(|t| {
                 t.with_specs(cortex_agent::tools::readonly_specs())
+                    .with_policy(policy_for_request(req.permission_mode, self.exec_env))
                     // 轮数比主 agent 少：子 agent 的活儿是「查一件事」，
                     // 给它八轮等于允许它自己也陷进一个循环
                     .with_max_rounds(4)
@@ -458,7 +467,7 @@ impl Engine {
                 self.exec_env,
                 ws,
                 self.max_rounds,
-                req.permission_mode,
+                req.permission_mode.unwrap_or_default(),
                 &external,
                 caps,
                 disabled,
@@ -467,10 +476,12 @@ impl Engine {
                 tracing::warn!(workspace = ws, error = %e, "工作区已不可用，本轮降级为纯聊天");
             })
             .ok()
+            .map(|turn| turn.with_policy(policy_for_request(req.permission_mode, self.exec_env)))
         });
         // 没绑工作区那条也要现搭：外来工具是**运行时可变**的（设置页能增删），
         // 而 `Engine.chat_turn` 是启动时那一份，装不下之后加的 server
-        let chat_turn = chat_turn_for(self.max_rounds, &external, caps, disabled);
+        let chat_turn = chat_turn_for(self.max_rounds, &external, caps, disabled)
+            .with_policy(policy_for_request(req.permission_mode, self.exec_env));
         // 这一轮模型手上到底有什么。**排查「它说它不会」时的第一现场** ——
         // 那句话有两种成因（工具真的没摆出来 / 摆了但模型没用），
         // 而没有这一行的话，两者在日志里长得一模一样
@@ -478,6 +489,8 @@ impl Engine {
             can_draw = caps.can_draw,
             has_skills = caps.has_skills,
             computer = caps.can_use_computer,
+            open_application = caps.can_open_application,
+            process_access = ?workspace_turn.as_ref().unwrap_or(&chat_turn).exec_policy().access,
             tools = ?workspace_turn.as_ref().unwrap_or(&chat_turn).tool_names(),
             "本轮工具目录",
         );
@@ -485,7 +498,7 @@ impl Engine {
         // 用 `workspace_turn` 而不是 `bound` 判断：绑过但目录已不可用时上面
         // 降级成了纯聊天，此刻模型手里确实没有文件工具 —— 提示词必须跟着降级，
         // 否则它会照着一个已经不存在的工作区去许诺
-        let system_prompt = system_prompt_for(
+        let mut system_prompt = system_prompt_for(
             self.persona,
             self.capabilities,
             self.exec_env,
@@ -494,6 +507,13 @@ impl Engine {
             &catalog,
             caps,
         );
+        if turn.exec_policy().access == cortex_agent::sandbox::ProcessAccess::FullAccess {
+            system_prompt.push_str("\n\n用户已选择本机完整访问：shell 在宿主按当前用户权限执行，不受 Cortex 进程沙箱和工作区路径围栏限制，不再弹确认；这不是管理员提权。不要把宿主报错未经验证地归因于沙箱。");
+        } else if self.exec_env == cortex_agent::ExecEnvironment::LocalMachine
+            && turn.tool_names().contains(&"shell")
+        {
+            system_prompt.push_str("\n\n命令默认使用进程沙箱。确因沙箱边界失败且任务需要时，shell 可用 sandbox_permissions=require_escalated 并填写 justification 申请本次宿主执行；必须等待用户批准，不要换命令反复碰同一限制或自动重试可能有副作用的命令。");
+        }
 
         // ── 4. agent 循环。工具在**这台机器**上执行 ──
         let (atx, mut arx) = mpsc::channel::<AgentEvent>(64);
@@ -569,8 +589,8 @@ impl Engine {
 
         // ⚠️ **`llm` 要在 host 之前造好**：子 agent 由 host 派出去，
         // 而它们跟主 agent 用同一个模型（见 `LocalHost::llm`）
-        let llm = self.llm_for(&req.model, req.source.as_deref());
         let host = LocalHost {
+            exec_env: self.exec_env,
             events: Arc::clone(tx),
             session_id: req.session_id.clone(),
             confirms: Arc::clone(&self.confirms),
@@ -597,6 +617,7 @@ impl Engine {
         let outcome = turn
             .run(&llm, &system_prompt, &mut messages, &host, &atx)
             .await;
+        host.close_computer().await;
         drop(atx);
         let (tool_calls, blocks) = bridge.await.unwrap_or_else(|e| {
             tracing::warn!(error = %e, "工具事件桥接任务异常结束，本轮工具归因未记录");
