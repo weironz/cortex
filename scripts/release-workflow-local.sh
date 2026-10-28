@@ -168,7 +168,12 @@ if [ "${SKIP_IMAGES}" = 0 ]; then
         fi
 
         log "构建镜像 ${kind}"
-        docker build --platform linux/amd64 \
+        # 阿里云 ACR 不接受 BuildKit 默认附带的 OCI attestation manifest
+        # （`application/vnd.oci.empty.v1+json`）。Actions 侧用
+        # `provenance: false` 处理；本地必须显式关闭 SBOM/provenance 并 load
+        # 成普通单平台镜像，否则 Docker Hub 能推、ACR 会报 unknown manifest。
+        docker buildx build --platform linux/amd64 \
+            --provenance=false --sbom=false --load \
             "${args[@]}" \
             -f "${dockerfile}" \
             -t "${local_image}" .
