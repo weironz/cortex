@@ -1,0 +1,27 @@
+# 凭据不能进入任何镜像构建上下文。
+.env
+.env.*
+secrets.env
+
+# 版本库与本地工具状态。
+.git
+.github
+.claude
+.code-review-graph
+.cortex
+.idea
+.vscode
+
+# 生成物。Dockerfile 在容器内部重新编译，不能把宿主 target/build/dist
+# 几百 MB 到数 GB 的中间产物逐个传给 daemon。
+target
+app/build
+app/.dart_tool
+dist
+data
+
+# 临时运行状态与日志。
+.tmp-chrome-profile
+*.log
+**/__pycache__
+**/.DS_Store
