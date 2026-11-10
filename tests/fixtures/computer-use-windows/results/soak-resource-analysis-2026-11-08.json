@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "scope": "partial_read_only_sampling_of_completed_f4ee6186_driver_fixture_soak",
+  "sampleCount": 216,
+  "firstObservedAt": "2026-11-08T08:41:29.6916716Z",
+  "lastObservedAt": "2026-11-08T12:18:03.8840904Z",
+  "processes": [
+    {
+      "role": "test",
+      "firstPrivateBytes": 7675904,
+      "lastPrivateBytes": 8728576,
+      "maxPrivateBytes": 10244096.0,
+      "firstHandles": 435,
+      "lastHandles": 435,
+      "maxHandles": 441.0
+    },
+    {
+      "role": "driver",
+      "firstPrivateBytes": 28598272,
+      "lastPrivateBytes": 133214208,
+      "maxPrivateBytes": 133214208.0,
+      "firstHandles": 493,
+      "lastHandles": 493,
+      "maxHandles": 509.0
+    },
+    {
+      "role": "fixture",
+      "firstPrivateBytes": 128724992,
+      "lastPrivateBytes": 160731136,
+      "maxPrivateBytes": 160731136.0,
+      "firstHandles": 959,
+      "lastHandles": 874,
+      "maxHandles": 960.0
+    }
+  ],
+  "functionalSoakExitCode": 0,
+  "functionalCycles": 1385,
+  "functionalSessions": 139,
+  "readOnlyRetries": 1,
+  "memorySteadyStateProven": false,
+  "nativeReferenceLeakFoundByStaticAudit": true,
+  "pinnedSourceCommit": "85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19",
+  "growthAttributionToOneCauseProven": false
+}

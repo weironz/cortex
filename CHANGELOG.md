@@ -10,6 +10,101 @@ HTTP / SSE 契约与数据库 schema 都还会不兼容地变** —— 见下面
 
 ---
 
+## [0.1.45] - 2026-11-10
+
+受控 Computer Use、本机权限语义和手动发布链路更新。
+
+### 新增
+
+- Windows Computer Use：接入 Cua Driver 0.38.0 的 bounded sidecar，
+  开放窗口列表、观察、点击、输入、按键、滚动、等待和动作后验证；另有
+  一次性 profile 的隔离 Chromium 浏览器通道。
+- Computer Use 双层安全边界：应用 executable allowlist、稳定窗口身份、
+  Observation frame TTL、一次性元素引用、secure-field handoff、动作后验证协议。
+  高风险与受保护字段仍强制交回用户处理。
+- Computer Use 动作批次收紧为单动作；`verify` 必须证明动作前 false、动作后
+  true，元素条件要求前后 observation 完整，`window_present` 不再能伪造
+  状态改变成功。
+- Windows 通过 UIA `CurrentIsPassword` 直接识别密码字段，扫描有 500 毫秒、
+  2,048 节点和 32 层边界；Unknown 时保守 handoff。真机 smoke 覆盖
+  `PasswordBox=detected`、普通 fixture=`Clean`。
+- 聊天页提供 Computer Use 只读轨迹，可读取经过 DTO 白名单和目录边界校验的
+  后端脱敏历史，并显示来源与缺口。
+- 本机桌面应用启动工具：Windows 使用系统 Shell API，macOS 使用 `open`，
+  不经 shell 字符串拼接；浏览器只接受 HTTP(S) URL。
+- GitHub Actions 全部改为手动触发。新增 `just workflow-ci`、
+  `just workflow-release`、`just workflow-deploy`，作为 CI、Release 和生产
+  部署的本地备用流程。
+- 云端沙箱运行时调研：补充 agent 架构、恢复语义、候选底座，以及
+  Docker + gVisor / Cloud Hypervisor 两阶段方案。
+
+### 改进
+
+- “完全放行”在本机现在真实对应当前用户的宿主进程与文件权限；受限模式下
+  单次宿主命令必须带明确理由并经确认。云端 `Bypass` 仍不获得宿主权限。
+- 旧持久化 `bypass` 不再静默继承旧语义，更新后必须重新确认新的完全放行告知。
+- 模型在调用工具前输出的开场正文不再因流式工具帧被丢掉；文本先于工具调用
+  进入界面。
+- Computer Use 能力按 `list_windows` / `observe` / `act` / browser /
+  secure input 等维度如实上报；未配置 Cua 或非桌面环境时不暴露本机电脑工具。
+  经宿主确认的非视觉模型可使用 AX-only 结构化观察，不会发送截图。
+- Windows 安装包现在同时携带整包 CycloneDX 1.5 SBOM，并在 Release 附件中
+  发布包含 setup.exe 哈希、Git 提交和构建输入指纹的外部 SBOM。
+
+### 修复
+
+- 引入 SQLite 官方 Windows WAL/SHM 恢复修复，避免并发初连偶发 1546；
+  保留已提交的动作记录及跨主体防重派约束。SBOM 记录本地依赖与补丁来源，
+  构建指纹覆盖全部第三方源码。
+
+- 本地 agent 的远端协议检查与账号识别改为并发，Computer Use sidecar
+  就绪握手也改为单一硬 deadline；远端黑洞或 sidecar 状态查询变慢时，不再
+  把创建会话拖成启动超时。
+- Computer Use 的动作后验证必须证明“动作前不成立、动作后成立”，
+  `window_present` 不再能作为状态改变动作的成功证据；一次输入只能绑定一个
+  旧 frame，动作后必须重新观察。
+- 隔离浏览器把元素语义摘要绑定到一次性 ref，快照后改文案、类型或目标值会
+  按 stale ref 失败；自动发现的浏览器也必须通过 Authenticode 校验。
+- 浏览器 ref 现在绑定元素自身、form owner、祖先上下文、`document.baseURI`
+  和 CDP `DOMDebugger` listener 私密摘要；最终复核后、click 前替换 listener
+  以及闭包捕获值不可证明仍是明确剩余风险。
+- Cua sidecar 启动、状态探测、网关超时后的清理和桌面 agent 停止均有界；
+  daemon 意外退出会立即撤销运行状态，快速重启不会遗留两套 sidecar。
+- 应用 allowlist 在运行时复核 Authenticode 发布者；UWP 主机窗口无法唯一
+  映射 package identity 时失败关闭，不再按 PID 选择第一个候选。
+- Computer Use 增加 6 项 agent-loop contract 测试，覆盖批准、拒绝、超时、
+  stale frame/ref、验证失败和 `Cancelled` / `OutcomeUnknown`；测试使用 fake
+  model/driver，不等同于生产 LocalHost 与真实 Cua 全链路。
+- `agent-launch.jsonl` 增加脱敏的 Computer Use sidecar 启动结果与耗时；
+  路径、named pipe、Bearer 样式凭据和 URL 不进入诊断文件，清理失败也单独留痕。
+- `computer_list` 与 `computer_observe` 统一经过 ComputerGateway 的
+  Observe 策略、deadline 和身份过滤，避免列表路径绕过运行时策略。
+- Windows 发布脚本强制 Cua Driver 的 release/hash/Authenticode 校验，
+  并可对 Cortex 入口和 setup.exe 做 Authenticode 签名与时间戳；正式发布
+  在证书缺失时失败。
+- UWP/MSIX 的 `ApplicationFrameHost` 窗口会经子 CoreWindow 反查到已授权
+  package 的 AUMID/file object；计算器 `list -> observe -> click -> verify`
+  真机链路已通过，宿主进程本身不能进入应用 allowlist。
+- 修复无工作区新一轮会话未应用当前权限策略的问题。
+- live Flutter 测试改为检查 `/health` JSON，而不是只探测前端端口，
+  避免静态前端被误判为完整后端。
+
+### 已知限制
+
+- Computer Use 的自动驱动当前只支持 Windows 本机；macOS/Linux 自动操作与
+  云端一次性桌面 VM 尚未开放。
+- Visual Studio Spectre-mitigated libraries 已安装，固定 Cua 版本的上游 SDK
+  `cargo check` 与 embedded `cargo run` 已通过；修改版驱动仍需完成生产签名、
+  哈希固定和 Cortex 接线。
+- Computer Use 的第二台 Windows、负坐标多屏、UAC/锁屏/RDP/睡眠恢复、
+  正式人工审批全链路和签名安装后的干净用户启动仍未完成。0.1.45 最终源码的
+  E2E 与四小时 soak 尚未重跑；旧指纹结果只能作为历史证据，不能据此宣称
+  生产级通用电脑操作。
+- Windows 正式安装包要求代码签名；本机没有签名证书时只能显式生成本地
+  验证包，`--require-signing` 与 `release.yml` 都会拒绝把它当作正式发布。
+
+---
+
 ## [0.1.44] - 2026-10-28
 
 受控 Computer Use、本机权限语义和手动发布链路更新。

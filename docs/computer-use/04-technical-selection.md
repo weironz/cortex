@@ -1,6 +1,9 @@
 # 技术选型
 
-> 结论是“有条件采用”，不是现在就锁定单一供应商。C0 必须用真机数据通过门槛。
+> 本文保留 2026-10-27 的选型阶段结论。Cua 已按“条件性 Go”进入 Cortex
+> 0.1.45 实现，但 C0 十项条件并未全部关闭；第二台 Windows、多屏/负坐标、
+> RDP/锁屏/睡眠、最终四小时 soak 与签名安装验收仍待完成。当前状态见
+> [16-production-hardening-2026-11-02.md](16-production-hardening-2026-11-02.md)。
 
 ## 1. 决策摘要
 
@@ -8,7 +11,7 @@
 |---|---|---|
 | Cortex 工具/agent loop | 现有 `cortex-agent` | 采用 |
 | 策略、审批、trace | Cortex 自有 | 必须自研 |
-| 桌面执行驱动 | Cua Driver embedded Rust SDK | 首要候选，C0 验证 |
+| 桌面执行驱动 | Cua Driver bounded sidecar，冻结 0.38.0 | 条件性采用；最终真机验收未完成 |
 | 浏览器 | Playwright/CDP + accessibility snapshot | 采用 |
 | 用户已登录浏览器 | 显式扩展/daemon，站点 allowlist | 延后到 C2 |
 | 原生 AX | 由驱动提供 UIA/AX/AT-SPI | 必须 |
@@ -61,7 +64,7 @@
 - Cua 更新不能静默替换；升级需跑完整 E2E；
 - 必须验证 Windows 签名、进程身份、安装位置与自动更新。
 
-### C0 通过条件
+### C0 原始通过条件
 
 以下所有条件通过才继续采用：
 
@@ -76,7 +79,8 @@
 9. 单次 observe/act/verify 延迟 P95 达到门槛；
 10. 连续 4 小时 soak 无句柄、内存或输入泄漏。
 
-任一 P0 条件失败，停止推进 C1，转平台适配层方案。
+任一 P0 条件失败，停止推进 C1，转平台适配层方案。当前没有满足“十项全部
+通过”，因此不能把 C0 写成完整 Pass。
 
 ## 4. 备选方案
 
@@ -215,11 +219,12 @@ known AGPL/non-MIT components
 
 ## 9. 最终选型决定
 
-**建议采用 A：Cua Driver embedded + Cortex policy gateway + Playwright。**
+**条件性采用 A：Cua Driver bounded sidecar + Cortex policy gateway +
+隔离浏览器协议。**
 
 这是当前风险最小、复用程度最高、仍能满足平台边界的选型。决定附带三个条件：
 
-1. C0 十个通过条件全部满足；
+1. C0 十个通过条件全部满足后才能进入 GA；当前仍是条件性 Go；
 2. Cua 的核心 Driver 与任何 perception/AGPL 组件在安装包中物理或构建上隔离；
 3. Cortex 永远保留自有 policy、approval、trace、cancel 和 fallback，
    不把生产安全交给驱动默认值。

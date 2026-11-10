@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-09",
+  "version": "0.1.45",
+  "committed": false,
+  "published": false,
+  "source_hash_scope": "selected_native_runtime_and_ledger_files_not_entire_repository",
+  "source_files": [
+    {
+      "path": "NOTICE",
+      "sha256": "9acb8ecb0365d9a2ad5de53c3f626fb62c8baa8764bf1369bf7227986e3ea753"
+    },
+    {
+      "path": "app/lib/core/agent_launch_log.dart",
+      "sha256": "0a498fbce48f266c3a1ffe47a68b12a848c29d5c4454752b02f045dbb8ec2177"
+    },
+    {
+      "path": "app/lib/core/computer_use_runtime_io.dart",
+      "sha256": "edd00307a20cf0ae5449bf687fe321871ec8f4daf1b1e9457e3b916e5739f6c7"
+    },
+    {
+      "path": "app/lib/core/local_agent_io.dart",
+      "sha256": "925295c704016ddd9bddc40eaa8b9ae18692251aae58baca668ed297422728b1"
+    },
+    {
+      "path": "app/test/local_agent_test.dart",
+      "sha256": "2000be515df4021ae92a2e65a214bf2bbc2878500057d74115facceb9de3d3b4"
+    },
+    {
+      "path": "app/test/native_runtime_handoff_test.dart",
+      "sha256": "297f974afa7a98bc7c79f9a83c3183218fc9a74e7017b908100ceb3a0f77d8af"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/NOTICE",
+      "sha256": "14e602f7e10dd998324731e43642a4a6a45cd684b9a8fadb235112455c5fa157"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/src/lib.rs",
+      "sha256": "450bc215014d9122e99d94bd250c2391fb786ab04739ba037a1d97109ed28319"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/src/storage.rs",
+      "sha256": "391903252c4da361aa5191b48bfed77975bdab827fd521e5d1595b5e7166dfdd"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/tests/common/mod.rs",
+      "sha256": "6006f3aed00c8330ae9771d453575c33e37bf8b3ab1871997651a24f5296de9e"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/tests/ledger.rs",
+      "sha256": "8c60151e1baf414a4393fbfadf4515270af95bb8f9d2172f83aa7861449a802f"
+    },
+    {
+      "path": "crates/cortex-local/Cargo.toml",
+      "sha256": "38a92a952d472ab34765aa3b4af11912a3413d723df9a840d080e642a0092199"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_browser.rs",
+      "sha256": "ba960599f42adeb0d3fcd291a829f38c971ab137196d915014ce2121350126c3"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_cua.rs",
+      "sha256": "8f2c32852324197df2854afea56ead9338a110f493eff83d7146b1c32d7e4bc2"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_cua_runtime.rs",
+      "sha256": "a078ffbf05f2549c96ac9b97899bb5790ad0bd80d66a29c641a078604c2d0811"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_cua_transport.rs",
+      "sha256": "8bc1192fe126f0526ef68fef11a3fa522902dc749a5b9d82440e79257f8eb1a2"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_desktop.rs",
+      "sha256": "6df4f7d73ba029540b64d3f5ff3756aeb26375b12cf5cc22d594a2fe89000e77"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_http_fixture_test.rs",
+      "sha256": "370558125e760bf3f5a5033c199e7f46bd9a7c2524b65c721fa3b0646ecc3987"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger.rs",
+      "sha256": "822c86d74f930ad1eace160cc1c918d13251826ea4d70b2c1cdb2d306a506ccf"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_authority.rs",
+      "sha256": "cd85176f66b3765062b3c011fe35ef0272c8c978ab65e5fc959de56dbecaf4e7"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_authority_test.rs",
+      "sha256": "9fc2ab402467375d5c69e11ffb52240a65aa964e384152c6d1b51ff336c97b6a"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_http_fixture_test.rs",
+      "sha256": "0fc01a9f3b44248a53f4d0c344e49b0139c224d667a4b315b57220582e3677b7"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_provision.rs",
+      "sha256": "93e12b3d41aab2b584fc7e8ea55c3649aeb496000cef1d6347a860ccab35f968"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_provision_test.rs",
+      "sha256": "a0baadbb85b82c6470546afb6ac026ffa121e77816efc19568bfde1a595f9f62"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_test.rs",
+      "sha256": "5a624be84e9adeae664f362ef0537be7b9139e5306a386caeb050b36bed562b4"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_owned_job.rs",
+      "sha256": "8c1e0790650d1bcb7387691021d577e4f1dade88c59aa647184902e8cc4856a8"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_owned_job_test.rs",
+      "sha256": "06e5206e607c7dadad8c2ee2e3b5ec3a75b90e4e5e4db96426a91b1d3d3bc843"
+    },
+    {
+      "path": "crates/cortex-local/src/main.rs",
+      "sha256": "1b6160db2afa0e0b3e5d614475d79faf3caa9daed60834852613fe6155784fbb"
+    }
+  ],
+  "smoke_binary_sha256": "dd41b3924fdfc5bdcab3f5adfd11a1d3eaa356e96ed4bcd0d5a4bf0f84f24b9a",
+  "driver_version": "0.38.0",
+  "driver_sha256": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+  "focused_tests": {
+    "desktop": 2,
+    "runtime": 5,
+    "transport": 2,
+    "owned_job": 9,
+    "ignored": 2
+  },
+  "real_metadata": {
+    "exit_code": 0,
+    "seconds": 5.34,
+    "log": "target/native-owned-verified-real-metadata.log",
+    "artifact_directory": "target/native-owned-runtime-01M705GPJ6Q8EV4Y4YFDAEC6CF",
+    "gui_or_input": false
+  },
+  "real_http": {
+    "exit_code": 0,
+    "seconds": 24.41,
+    "scope": "fake_model_remote_automatic_http_approval_real_owner_host_gateway_cua_private_authority",
+    "log": "target/native-owned-verified-real-http.log",
+    "artifact_directory": "target/computer-http-fixture-Hpoq46",
+    "verified_intents": 1,
+    "fences": 0,
+    "pending": false,
+    "original_job_drained": true,
+    "cleanup": {
+      "daemon_socket_closed": true,
+      "daemon_stopped": true,
+      "fixture_stopped": true,
+      "scope": "fake_model_remote_real_http_host_driver",
+      "worker_stopped": true
+    },
+    "trace_http_status": 200,
+    "trace_count": 3
+  },
+  "first_ci": {
+    "exit_code": 101,
+    "log": "target/native-owned-final-workflow-ci.log",
+    "local_passed": 608,
+    "local_failed": 1,
+    "local_ignored": 23,
+    "failure": "health hook asserted ready on first asynchronous 80ms probe",
+    "test_fix": "bounded retry only probe_unavailable; all other readiness failures immediate; production budget unchanged",
+    "focused_regression_passed": true,
+    "focused_regression_log": "target/native-owned-health-hook-workspace-regression.log"
+  },
+  "ci": {
+    "status": "passed",
+    "command": "just workflow-ci",
+    "exit_code": 0,
+    "log": "target/native-owned-verified-workflow-ci.log",
+    "log_sha256": "ba30ac36366ed1a18189fe2fdfd2fbc73f0f52b108265a9d08a98fe0fd31d8bd",
+    "rust_top_level_passed": 2018,
+    "rust_ignored": 32,
+    "local_passed": 611,
+    "local_ignored": 23,
+    "flutter_passed": 1092,
+    "flutter_skipped": 7,
+    "analyzer": "no_issues",
+    "workspace_all_targets_all_features_clippy": "passed",
+    "all_other_gates": "passed"
+  },
+  "recovery_implemented": false,
+  "production_ga": false,
+  "analyzer": {
+    "result": "no_issues",
+    "log": "target/native-owned-flutter-analyze.log"
+  },
+  "raw_flutter_before_current_main_build": {
+    "passed": 1090,
+    "skipped": 26,
+    "failed": 3,
+    "log": "target/native-owned-flutter-full.log",
+    "binary_date": "2026-11-02",
+    "scope": "stale_debug_binary_not_current_source_validation"
+  },
+  "focused_ledger_diagnostic": {
+    "passed": 32,
+    "failed": 3,
+    "ignored": 2,
+    "threads": 32,
+    "log": "target/native-owned-ledger-concurrency-diagnostic.log",
+    "scope": "diagnostic_only_old_test_binary_known_unbounded_cancel_case_excluded",
+    "failures": "three synchronous assertions saw probe_unavailable; original SQL connect intermittency remains unresolved"
+  },
+  "single_connection_validation": {
+    "core_integration_passed": 17,
+    "restart_passed": 2,
+    "restart_ignored": 1,
+    "unit_initial_passed": 3,
+    "unit_initial_failed": 2,
+    "unit_repeat_failed": 2,
+    "unit_later_passed": 5,
+    "local_initial_passed": 34,
+    "local_initial_failed": 2,
+    "local_trace_passed": 36,
+    "local_trace_ignored": 2,
+    "local_threads": 32,
+    "local_trace_log": "target/native-owned-ledger-sql-trace.log",
+    "connection_timeout_root_cause_resolved": false,
+    "previous_real_smoke_predates_this_change": false
+  },
+  "isolated_local_agent": {
+    "passed": 5,
+    "skipped": 0,
+    "log": "target/native-owned-local-agent-isolated.log",
+    "binary_sha256": "6a0401790e33e509363009d5978aff36011edb6d8e4fe3cf912344ade4243e5c",
+    "scope": "before_single_connection_core_change",
+    "startup_limits_unchanged": true
+  },
+  "pre_single_connection_real_http": {
+    "exit_code": 0,
+    "seconds": 42.5,
+    "scope": "fake_model_remote_automatic_http_approval_real_owner_host_gateway_cua_private_authority",
+    "log": "target/native-owned-real-http-desktop-evidence.log",
+    "artifact_directory": "target/computer-http-fixture-87q2Mg",
+    "verified_intents": 1,
+    "fences": 0,
+    "pending": false,
+    "original_job_drained": true,
+    "cleanup_all_passed": true
+  },
+  "ci_history": [
+    {
+      "log": "target/native-owned-final-workflow-ci.log",
+      "exit_code": 101
+    },
+    {
+      "log": "target/native-owned-final-workflow-ci-retry.log",
+      "exit_code": 1
+    },
+    {
+      "log": "target/native-owned-workflow-ci-single-connection.log",
+      "exit_code": 101
+    },
+    {
+      "log": "target/native-owned-workflow-ci-system-temp.log",
+      "exit_code": 101
+    },
+    {
+      "log": "target/native-owned-final-coordinated-workflow-ci.log",
+      "exit_code": 101
+    },
+    {
+      "log": "target/native-owned-final-coordinated-layout-ci.log",
+      "exit_code": 1
+    }
+  ],
+  "real_http_history": [
+    {
+      "exit_code": 0,
+      "seconds": 28.76,
+      "scope": "fake_model_remote_automatic_http_approval_real_owner_host_gateway_cua_private_authority",
+      "log": "target/native-owned-real-http-single-connection.log",
+      "artifact_directory": "target/computer-http-fixture-niM15a",
+      "verified_intents": 1,
+      "fences": 0,
+      "pending": false,
+      "original_job_drained": true,
+      "cleanup_all_passed": true
+    }
+  ],
+  "real_browser": {
+    "exit_code": 0,
+    "seconds": 0.89,
+    "log": "target/native-owned-verified-browser-blank.log",
+    "scope": "signed_browser_isolated_headless_about_blank_observe_original_job_close_no_navigation_or_input"
+  },
+  "main_binary": {
+    "path": "target/debug/cortex-local.exe",
+    "sha256": "bca26b1b19527a92eb5a8427958404ad1778686a7b957e32ec3c364fbe9e8bcd"
+  },
+  "git_head": "4f291914d2bfe1c685b48430214d08b2ed73ba60",
+  "final_ledger_module": {
+    "passed": 39,
+    "ignored": 2,
+    "threads": 32,
+    "log": "target/native-owned-bounded-coordination-ledger.log"
+  },
+  "test_data_location": "runtime_private_temporary_directories_not_build_machine_source_directory",
+  "coordination": "bounded_writer_acl_wait_and_sqlite_close_serialized_with_sidecar_prepare_bind",
+  "final_docs_check": "passed",
+  "diff_check": "passed"
+}

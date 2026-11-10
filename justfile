@@ -343,8 +343,8 @@ flutter-live:
 # 那句话**，而缺的那一样偏偏是最容易在写文档时踩到的
 docs-check:
     bash scripts/check-version.sh
-    python3 scripts/check-doc-links.py
-    python3 scripts/check-radii.py
+    bash scripts/run-python.sh scripts/check-doc-links.py
+    bash scripts/run-python.sh scripts/check-radii.py
 
 # 运维脚本的静态检查。**与 CI 那一步同一条命令**（见 ci.yml 的 shellcheck）。
 #
@@ -355,47 +355,66 @@ docs-check:
 lint-sh:
     bash scripts/lint-sh.sh
 
-# scripts/ 里的 python 语法。与 lint-sh 分开是因为它扫的是另一类文件，
+# scripts/ 里的 python 语法及构建/验收证据回归。与 lint-sh 分开是因为它扫的是另一类文件，
 # 合在一条叫 lint-sh 的 recipe 里，名字就开始骗人了。
 lint-py:
-    python3 -m py_compile scripts/*.py
-    @echo "✔ python 语法通过"
+    bash scripts/lint-py.sh
+
+# Windows 发布前检查 PS 5.1 的原生 UTF-8 JSON 解码，避免中文依赖元数据损坏。
+test-windows-native-json:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/native-json-selftest.ps1
+
+# 只做替身和临时文件回归，不启动 GUI、驱动或真实桌面任务。
+test-windows-fixtures:
+    bash scripts/test-windows-fixtures.sh
+
+# 从已构建的来源绑定验收包运行真实 owned fixture；输出默认使用独立临时目录。
+windows-soak bundle seconds="14400" output="":
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/fixtures/computer-use-windows/soak.ps1 -BundlePath {{ quote(bundle) }} -Seconds {{ quote(seconds) }} -OutputPath {{ quote(output) }}
+
+# 只校验冻结输入，不启动进程，也不产生运行通过结果。
+windows-soak-validate bundle seconds="60" output="":
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/fixtures/computer-use-windows/soak.ps1 -BundlePath {{ quote(bundle) }} -Seconds {{ quote(seconds) }} -OutputPath {{ quote(output) }} -ValidateOnly
+
+# 桌面证据稳定后依次执行 E2E、60 秒和长测；等待超时会明确结束本轮。
+windows-final-run bundle seconds="14400" desktop_timeout="300":
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/fixtures/computer-use-windows/final-run-on-unlock.ps1 -BundlePath {{ quote(bundle) }} -Seconds {{ quote(seconds) }} -DesktopTimeoutSeconds {{ quote(desktop_timeout) }}
 
 # 路由加了、边缘不知道 —— **而症状是 200**。
 #
 # dev 的 nginx 里 API 是枚举的，漏一条就落到 SPA 回落上，回 200 + index.html。
 # 逐条打状态码的那种验证一次都发现不了（见 CLAUDE.md 里 `/api` 前缀那段）。
 lint-edge:
-    python3 scripts/check-edge-routes.py
+    bash scripts/run-python.sh scripts/check-edge-routes.py
 
 # 2026-10-17 审计（docs/sql-no-limit-audit-20261017.md）的防过期闸：
 # 当时的 55 处无 LIMIT SELECT 全部有上界，baseline 与之一漂移就红。
 lint-sql-limit:
-    python3 scripts/check-sql-no-limit.py
+    bash scripts/run-python.sh scripts/check-sql-no-limit.py
 
 # unwrap/expect 防增量闸：不清存量（那批大多站在已验证的不变式上），
 # 白名单外的文件新增一个就红。存量随日常改动收敛，口子只收不放。
 lint-unwrap:
-    python3 scripts/check-unwrap.py
+    bash scripts/run-python.sh scripts/check-unwrap.py
 
 # 基线文件是回归门的全部依据，它自己损坏 / 缺字段的话，门会静静地失效。
 #
 # 真的回归门在 Cormex 那边跑（见 justfile 里「检索评测」那一节），
 # 这里只校验 JSON 的格式 —— 不需要那个 crate，所以本机跑得动。
 evals-baseline:
-    python3 scripts/evals-gate.py verify-baseline scripts/evals-baseline.*.json
+    bash scripts/run-python.sh scripts/evals-gate.py verify-baseline scripts/evals-baseline.*.json
 
 # 闸：CI 跑的每一步，`just ci` 要么也跑，要么在脚本的 EXEMPT 里写清为什么不必。
 #
 # 它自己也在 `ci` 的闭包里 —— 否则这道闸就是它自己要拦的那种东西。
 lint-ci-parity:
-    python3 scripts/check-ci-parity.py
+    bash scripts/run-python.sh scripts/check-ci-parity.py
 
 # GitHub Actions 免费额度已经用尽：任何 workflow 都不许再偷偷被 push、
 # PR、tag 或 schedule 触发。手动运行 GitHub Actions 仍可用，日常入口是
 # `just workflow-ci`，发布备用入口是 `just workflow-release`。
 lint-workflows:
-    python3 scripts/check-workflow-triggers.py
+    bash scripts/run-python.sh scripts/check-workflow-triggers.py
 
 # agentd 读的每个环境变量，两份 compose 都得能设它。
 #
@@ -418,7 +437,7 @@ lint-compose-env:
 # 依赖链，CI 加了一步而这里没跟上就红（那件事 2026-08-20 与 08-22 各发生过
 # 一次，两次都是本机全绿、推上去才知道）。加 recipe 时连同
 # `scripts/check-ci-parity.py` 的 COVERED 一起改。
-ci: fmt-check lint check test docs-check lint-sh lint-py lint-edge lint-sql-limit lint-unwrap toolchain-check release-check evals-baseline lint-compose-env lint-ci-parity lint-workflows flutter-check
+ci: fmt-check lint check test docs-check lint-sh lint-py test-windows-fixtures lint-edge lint-sql-limit lint-unwrap toolchain-check release-check evals-baseline lint-compose-env lint-ci-parity lint-workflows flutter-check
     @echo "全部检查通过"
 
 # ══════════════════════════════════════════════════════════
@@ -656,6 +675,14 @@ prod-bootstrap:
 build:
     cargo build --workspace --release
 
+# 修改版 Cua 的两次独立干净构建比较；只产出调查候选，不执行驱动或更换正式 pin。
+cua-candidate-repro *ARGS:
+    bash scripts/build-cua-candidate-owned.sh {{ ARGS }}
+
+# 离线验收只读长测；短 probe 需显式选择最短时长，趋势不自动证明稳态。
+cua-steady-analyze *ARGS:
+    bash scripts/run-python.sh scripts/analyze-cua-steady.py {{ ARGS }}
+
 # 清理构建产物
 clean:
     cargo clean
@@ -689,10 +716,10 @@ workflow-ci:
 # 与安装程序），默认执行：本地 CI → preflight → 二进制包 → 桌面安装程序
 # → 五个 Docker 镜像 → SHA256SUMS/发布说明 → GitHub Release。
 #
-#     just workflow-release v0.1.44
-#     just workflow-release v0.1.44 --build-only
-#     just workflow-release v0.1.44 --skip-images
-#     just workflow-release v0.1.44 --deploy
+#     just workflow-release v0.1.45
+#     just workflow-release v0.1.45 --build-only
+#     just workflow-release v0.1.45 --skip-images
+#     just workflow-release v0.1.45 --deploy
 #
 # `--deploy` 才会在生产执行 ansible；不带它时只发布 GitHub Release。
 workflow-release tag *ARGS:
@@ -703,7 +730,7 @@ workflow-release tag *ARGS:
 # 部署机制 ansible/ 固定取当前 main，应用 compose 取 vVERSION tag；部署后
 # 复用与 deploy.yml 相同的公网健康断言。可用于手动上线或回滚：
 #
-#     just workflow-deploy 0.1.44
+#     just workflow-deploy 0.1.45
 #     just workflow-deploy 0.1.43 --dry-run
 workflow-deploy version *ARGS:
     bash scripts/deploy-workflow-local.sh "{{ version }}" {{ ARGS }}

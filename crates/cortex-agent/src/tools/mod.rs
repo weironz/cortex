@@ -42,7 +42,10 @@ mod web;
 
 pub use application::application_spec;
 pub use background::{background_specs, is_background_tool, spawn_background};
-pub use computer::{computer_specs, cua_computer_specs, is_computer_tool};
+pub use computer::{
+    browser_specs, computer_specs, cua_computer_act_spec, cua_computer_act_spec_for,
+    cua_computer_specs, cua_computer_specs_for, is_computer_tool,
+};
 pub use library::{is_library_tool, library_specs};
 pub use misc::{
     deliver_spec, image_spec, mcp_resource_spec, readonly_specs, skill_spec, subagent_spec,

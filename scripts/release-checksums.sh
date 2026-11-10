@@ -36,19 +36,16 @@ command -v sha256sum >/dev/null 2>&1 \
     || { echo "找不到 sha256sum" >&2; exit 1; }
 
 cd "${DIST}"
-shopt -s nullglob
-rm -f ./*.sha256 SHA256SUMS
-
-artifacts=( *.tar.gz *.zip *.exe )
-[ "${#artifacts[@]}" -gt 0 ] \
-    || { echo "dist 里一个发布产物都没有" >&2; exit 1; }
-
-miss=0
-[ -f "cortex-v${VERSION}-x86_64-pc-windows-msvc.zip" ] \
-    || { echo "缺少 Windows 二进制包（CLI + 本地 agent + 编排器）" >&2; miss=1; }
-[ -f "cortex-desktop-v${VERSION}-x86_64-pc-windows-msvc-setup.exe" ] \
-    || { echo "缺少 Windows 桌面安装程序" >&2; miss=1; }
-[ "${miss}" = 0 ] || exit 1
+# 开发机 dist 还可能保留旧版本、验收包和日志。发布清单只认当前版本的三件产物，
+# 且不删除已有单文件校验和；缺件时也不覆盖上一份完整清单。
+artifacts=(
+    "cortex-v${VERSION}-x86_64-pc-windows-msvc.zip"
+    "cortex-desktop-v${VERSION}-x86_64-pc-windows-msvc-setup.exe"
+    "cortex-desktop-v${VERSION}-x86_64-pc-windows-msvc-setup.exe.cdx.json"
+)
+for artifact in "${artifacts[@]}"; do
+    [ -f "${artifact}" ] || { echo "缺少发布产物：${artifact}" >&2; exit 1; }
+done
 
 sha256sum -- "${artifacts[@]}" > SHA256SUMS
 cat SHA256SUMS

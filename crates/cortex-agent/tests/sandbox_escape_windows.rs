@@ -332,7 +332,9 @@ mod win {
         let r = shell(
             &sb,
             &format!(
-                "cargo build 2>&1 & echo RC=%errorlevel% & \"{}\" 2>&1",
+                // 外层测试可能用 CARGO_TARGET_DIR 隔离构建目录；被测工作区
+                // 必须自己产出 target，才能同时验证写入、链接和执行。
+                "set CARGO_TARGET_DIR=& cargo build 2>&1 & echo RC=%errorlevel% & \"{}\" 2>&1",
                 exe.display()
             ),
         )

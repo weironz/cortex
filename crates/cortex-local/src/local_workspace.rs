@@ -38,8 +38,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::computer_principal::PrincipalNamespace;
+use crate::runs::run_principal::RunPrincipal;
 use crate::state::LocalState;
 use crate::workspaces::Workspaces;
+use crate::workspaces::principal_key::SessionPrincipalKey;
 
 /// `PUT /local/workspaces/{session_id}` 的请求体。
 #[derive(Debug, Deserialize)]
@@ -71,23 +74,30 @@ pub async fn bind(
     Path(session_id): Path<String>,
     Json(req): Json<BindRequest>,
 ) -> Response {
-    let result = match req.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(raw) => st.engine.workspaces.bind(&session_id, raw).map(Some),
-        // 空串与缺省都按解绑处理：一个被清空的输入框与「解绑」是同一个意图
-        None => st.engine.workspaces.unbind(&session_id).map(|()| None),
+    let principal = match verify_principal(&st, &session_id).await {
+        Ok(v) => v,
+        Err(e) => return cortex_error(e),
     };
-    // 换了工作区，就丢掉这个会话的越界放行清单。
-    //
-    // 那些「可以」是在**上一件事**的语境里给的：用户当时在做项目 A，
-    // 顺手允许了动一下桌面。现在他把会话绑到项目 B —— 没有任何理由认为
-    // 那句允许还算数，而带过去的话，他下一次看到 agent 动桌面时会想不起
-    // 自己什么时候批准过。
-    //
-    // 放在 `result` 之后：绑定失败时什么也不该发生。
-    if result.is_ok() {
-        st.engine.grants.forget(&session_id);
-    }
-    settle(&st, session_id, result).await
+    let key = match principal.session_key() {
+        Ok(v) => v,
+        Err(e) => return cortex_error(e),
+    };
+    let ws = st.engine.workspaces.clone();
+    let grants = st.engine.grants.clone();
+    let result = st
+        .remote
+        .commit_owned(principal.clone(), move || {
+            let result = match req.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(raw) => ws.bind_scoped(&key, raw).map(Some),
+                None => ws.unbind_scoped(&key).map(|()| None),
+            };
+            if result.is_ok() {
+                grants.forget_scoped(&key);
+            }
+            result
+        })
+        .await;
+    settle(&st, &principal, result).await
 }
 
 /// `POST /local/workspaces/{session_id}/auto` —— 在根目录下开一个按日期时间
@@ -107,14 +117,33 @@ pub async fn bind(
 ///
 /// 客户端有两个（Flutter 与 CLI），格式写两遍就会漂成两种。
 pub async fn auto_bind(State(st): State<LocalState>, Path(session_id): Path<String>) -> Response {
-    let result = st.engine.workspaces.auto_bind(&session_id).map(Some);
-    settle(&st, session_id, result).await
+    let principal = match verify_principal(&st, &session_id).await {
+        Ok(v) => v,
+        Err(e) => return cortex_error(e),
+    };
+    let key = match principal.session_key() {
+        Ok(v) => v,
+        Err(e) => return cortex_error(e),
+    };
+    let ws = st.engine.workspaces.clone();
+    let grants = st.engine.grants.clone();
+    let result = st
+        .remote
+        .commit_owned(principal.clone(), move || {
+            let result = ws.auto_bind_scoped(&key).map(Some);
+            if result.is_ok() {
+                grants.forget_scoped(&key);
+            }
+            result
+        })
+        .await;
+    settle(&st, &principal, result).await
 }
 
 /// 绑定结果的共同收尾：同步执行归属，回一个只带 `workspace` 的回执。
 async fn settle(
     st: &LocalState,
-    session_id: String,
+    principal: &RunPrincipal,
     result: cortex_core::Result<Option<String>>,
 ) -> Response {
     match result {
@@ -122,14 +151,35 @@ async fn settle(
         // 原样往上带，别在这里改写成一句通用的 400
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Ok(ws) => {
-            announce_runtime(st, &session_id, ws.is_some()).await;
+            if let Err(error) = announce_runtime(st, principal, ws.is_some()).await {
+                return cortex_error(error);
+            }
             Json(BindAck {
-                session_id,
+                session_id: principal.session_id().to_string(),
                 workspace: ws,
             })
             .into_response()
         }
     }
+}
+
+/// 工作区写入必须先从权威服务证明 session 属于当前账号。
+///
+/// 这里不能相信 URL 里的裸 session id，也不能在共享凭据刚切到 B 时继续使用
+/// 上一次聊天留下的本地绑定。验证结果会同时固定成本轮返回的
+/// `(deployment, user, session)`，后续磁盘写入和远端归属通知都只认这一份。
+async fn verify_principal(st: &LocalState, session_id: &str) -> cortex_core::Result<RunPrincipal> {
+    st.remote.ordinary_principal(session_id).await
+}
+
+fn cortex_error(error: cortex_core::CortexError) -> Response {
+    let status =
+        StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (
+        status,
+        Json(serde_json::json!({ "error": error.to_string() })),
+    )
+        .into_response()
 }
 
 /// `GET /local/workspace-root` 的回执。
@@ -144,11 +194,25 @@ pub struct RootInfo {
 
 /// `GET /local/workspace-root`
 pub async fn get_root(State(st): State<LocalState>) -> Response {
-    Json(RootInfo {
-        root: st.engine.workspaces.root(),
-        folders: st.engine.workspaces.list_folders(),
-    })
-    .into_response()
+    let (owner, credential) = match st.remote.owner_snapshot().await {
+        Ok(v) => v,
+        Err(e) => return cortex_error(e),
+    };
+    let ws = st.engine.workspaces.clone();
+    let selected = owner.clone();
+    match st
+        .remote
+        .commit_owner_snapshot(owner, credential, move || {
+            Ok(RootInfo {
+                root: ws.root_scoped(&selected)?,
+                folders: ws.list_folders_scoped(&selected)?,
+            })
+        })
+        .await
+    {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => cortex_error(e),
+    }
 }
 
 /// `PUT /local/workspace-root` 的请求体。
@@ -159,13 +223,24 @@ pub struct SetRootRequest {
 
 /// `PUT /local/workspace-root` —— 改默认根目录。只校验、不搬迁。
 pub async fn set_root(State(st): State<LocalState>, Json(req): Json<SetRootRequest>) -> Response {
-    match st.engine.workspaces.set_root(&req.path) {
-        Ok(root) => Json(RootInfo {
-            root: Some(root),
-            folders: st.engine.workspaces.list_folders(),
+    let (owner, credential) = match st.remote.owner_snapshot().await {
+        Ok(v) => v,
+        Err(e) => return cortex_error(e),
+    };
+    let ws = st.engine.workspaces.clone();
+    let selected = owner.clone();
+    match st
+        .remote
+        .commit_owner_snapshot(owner, credential, move || {
+            Ok(RootInfo {
+                root: Some(ws.set_root_scoped(&selected, &req.path)?),
+                folders: ws.list_folders_scoped(&selected)?,
+            })
         })
-        .into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        .await
+    {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => cortex_error(e),
     }
 }
 
@@ -192,14 +267,22 @@ pub struct CreateAck {
 
 /// `POST /local/workspaces` —— 在根目录下开一个工作空间目录。
 pub async fn create(State(st): State<LocalState>, Json(req): Json<CreateRequest>) -> Response {
-    let ws = &st.engine.workspaces;
-    let made = match req.project_id.as_deref() {
-        Some(pid) => ws.ensure_project_dir(pid, &req.name),
-        None => ws.create_folder(&req.name),
+    let (owner, credential) = match st.remote.owner_snapshot().await {
+        Ok(v) => v,
+        Err(e) => return cortex_error(e),
     };
-    match made {
+    let ws = st.engine.workspaces.clone();
+    let selected = owner.clone();
+    match st
+        .remote
+        .commit_owner_snapshot(owner, credential, move || match req.project_id.as_deref() {
+            Some(project) => ws.ensure_project_dir_scoped(&selected, project, &req.name),
+            None => ws.create_folder_scoped(&selected, &req.name),
+        })
+        .await
+    {
         Ok(path) => Json(CreateAck { path }).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => cortex_error(e),
     }
 }
 
@@ -219,16 +302,32 @@ pub async fn create(State(st): State<LocalState>, Json(req): Json<CreateRequest>
 ///
 /// 那是一个可恢复的、且不影响本机使用的降级，不值得让绑定本身失败 ——
 /// 尤其考虑到最常见的失败原因就是「此刻没网」，而那时用户往往正想离线干活。
-async fn announce_runtime(st: &LocalState, session_id: &str, bound: bool) {
-    if let Err(e) = st.remote.set_session_runtime(session_id, bound).await {
+async fn announce_runtime(
+    st: &LocalState,
+    principal: &RunPrincipal,
+    bound: bool,
+) -> cortex_core::Result<()> {
+    if principal.key().is_local() {
+        return Ok(());
+    }
+    if let Err(e) = st
+        .remote
+        .pinned_for(principal)
+        .set_session_runtime(principal.session_id(), bound)
+        .await
+    {
+        if matches!(e, cortex_core::CortexError::Unauthorized(_)) {
+            return Err(e);
+        }
         tracing::warn!(
-            session = %session_id, error = %e,
+            session = principal.session_id(), error = %e,
             concat!(
                 "执行归属没同步上去：别的设备会把这个会话当成云端会话。",
                 "本机这侧不受影响 —— 绑定的权威是 workspaces.json",
             )
         );
     }
+    Ok(())
 }
 
 /// 把一段 JSON 里所有会话对象的 `workspace` 换成本地的值。
@@ -240,7 +339,11 @@ async fn announce_runtime(st: &LocalState, session_id: &str, bound: bool) {
 ///
 /// 认不出的形状**原样放行**。这条路上宁可少改一处（症状是界面显示未绑定，
 /// 用户能自己重绑），也不要把一条正常响应弄坏。
-pub fn inject(ws: &Workspaces, body: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn inject_scoped(
+    ws: &Workspaces,
+    namespace: &PrincipalNamespace,
+    body: &[u8],
+) -> Option<Vec<u8>> {
     let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let mut touched = false;
 
@@ -249,21 +352,26 @@ pub fn inject(ws: &Workspaces, body: &[u8]) -> Option<Vec<u8>> {
         .and_then(serde_json::Value::as_array_mut)
     {
         for s in list.iter_mut() {
-            touched |= patch_one(ws, s);
+            touched |= patch_one(ws, namespace, s);
         }
     } else {
-        touched = patch_one(ws, &mut v);
+        touched = patch_one(ws, namespace, &mut v);
     }
 
     touched.then(|| serde_json::to_vec(&v).ok()).flatten()
 }
 
 /// 一个会话对象：认得出 `id` 才动它。
-fn patch_one(ws: &Workspaces, v: &mut serde_json::Value) -> bool {
+fn patch_one(ws: &Workspaces, namespace: &PrincipalNamespace, v: &mut serde_json::Value) -> bool {
     let Some(id) = v.get("id").and_then(serde_json::Value::as_str) else {
         return false;
     };
-    let local = ws.get(id);
+    let Ok(key) =
+        SessionPrincipalKey::from_verified(namespace.deployment_id(), namespace.user_id(), id)
+    else {
+        return false;
+    };
+    let local = ws.get_scoped(&key);
     let Some(obj) = v.as_object_mut() else {
         return false;
     };
@@ -283,6 +391,14 @@ fn patch_one(ws: &Workspaces, v: &mut serde_json::Value) -> bool {
 mod tests {
     use super::*;
 
+    fn namespace() -> PrincipalNamespace {
+        PrincipalNamespace::from_verified("deployment", "user").expect("测试主体合法")
+    }
+
+    fn key(session: &str) -> SessionPrincipalKey {
+        SessionPrincipalKey::from_verified("deployment", "user", session).expect("测试会话合法")
+    }
+
     /// 注入只认「本来就带着 workspace 字段」的会话对象。
     #[test]
     fn a_session_object_gets_the_local_binding() {
@@ -290,10 +406,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ws = Workspaces::load(&dir);
         // 绑一个真目录：校验器会 canonicalize，"." 这类相对路径它直接拒
-        ws.bind("S1", dir.to_str().unwrap()).unwrap();
+        ws.bind_scoped(&key("S1"), dir.to_str().unwrap()).unwrap();
 
         let body = br#"{"id":"S1","title":"x","workspace":null}"#;
-        let out = inject(&ws, body).expect("认得出会话对象就该改");
+        let out = inject_scoped(&ws, &namespace(), body).expect("认得出会话对象就该改");
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert!(
             v["workspace"].is_string(),
@@ -312,13 +428,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ws = Workspaces::load(&dir);
         // 绑一个真目录：校验器会 canonicalize，"." 这类相对路径它直接拒
-        ws.bind("S1", dir.to_str().unwrap()).unwrap();
+        ws.bind_scoped(&key("S1"), dir.to_str().unwrap()).unwrap();
 
         let body = br#"{"sessions":[
             {"id":"S1","workspace":null},
             {"id":"S2","workspace":"/a/path/from/another/device"}
         ]}"#;
-        let out = inject(&ws, body).expect("列表形状要认得出");
+        let out = inject_scoped(&ws, &namespace(), body).expect("列表形状要认得出");
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert!(v["sessions"][0]["workspace"].is_string(), "绑了的要填上");
         assert!(
@@ -334,15 +450,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ws = Workspaces::load(&dir);
         assert!(
-            inject(&ws, br#"{"error":"boom"}"#).is_none(),
+            inject_scoped(&ws, &namespace(), br#"{"error":"boom"}"#).is_none(),
             "没有 id 就别动"
         );
         assert!(
-            inject(&ws, b"not json at all").is_none(),
+            inject_scoped(&ws, &namespace(), b"not json at all").is_none(),
             "不是 JSON 更别动"
         );
         assert!(
-            inject(&ws, br#"{"id":"S1","title":"x"}"#).is_none(),
+            inject_scoped(&ws, &namespace(), br#"{"id":"S1","title":"x"}"#).is_none(),
             "响应本来就没带 workspace 字段时，不该凭空加一个出来"
         );
     }

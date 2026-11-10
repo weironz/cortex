@@ -1,0 +1,16 @@
+{
+  "kind": "upstream_backport_source_provenance",
+  "package": "libsqlite3-sys",
+  "version": "0.37.0",
+  "registryCrateSha256": "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1",
+  "sqliteVersion": "3.51.3",
+  "upstreamSqliteRevision": "7c103a0b7d509dce58aa87518e13213451e5f70938ff08aa55accd645e3b2ff3",
+  "upstreamSqliteSourceSha256": "e6c3639cacac92204ae53906b0881aacfaac5e80695a3b0b0f3636f2b0e13065",
+  "originalAmalgamationSha256": "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5",
+  "patchedAmalgamationSha256": "8eb8665825d55aee8eb65fba61ea37946fe47946c9fcdb5737b2188a8b667ff8",
+  "licenses": [
+    "MIT (Rust bindings)",
+    "SQLite public-domain blessing (amalgamation)"
+  ],
+  "activationEvidence": "Cargo resolved metadata and build source proof; directory presence alone is insufficient"
+}

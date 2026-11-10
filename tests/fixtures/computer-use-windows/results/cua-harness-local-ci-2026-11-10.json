@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "scope": "local_workflow_ci_and_cross_platform_candidate_script_regressions",
+  "command": "just workflow-ci",
+  "exitCode": 0,
+  "logSha256": "e537944aba8f06e9c368846c264b51c7e8eb0ec023916bcd0d4e62098794bc5d",
+  "rust": {
+    "passed": 2124.0,
+    "failed": 0.0,
+    "ignored": 35.0,
+    "targets": 48
+  },
+  "flutterPassed": 1112,
+  "flutterSkipped": 7,
+  "pythonCandidateTests": 45,
+  "pythonAnalyzerTests": 45,
+  "nativePostCi": "Kernel identity checked separately with 30 startups and live rotation probe",
+  "fourHoursPassed": false,
+  "shellcheckLocal": "not_installed_explicit_skip",
+  "head": "4f291914d2bfe1c685b48430214d08b2ed73ba60"
+}

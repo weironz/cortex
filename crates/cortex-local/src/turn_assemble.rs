@@ -60,19 +60,14 @@ pub(super) fn policy_for_request(
 
 /// 这一轮是否真的可以挂出电脑操作工具。
 ///
-/// 四个条件缺一不可：用户打开开关、构建带桌面驱动、运行在本机交互式桌面，
-/// 以及本轮模型真的能接收图片。最后一个漏掉时，直接调用 HTTP API 的客户端
-/// 能把截图工具交给一个盲模型：每一轮都付截图成本，模型却看不见内容。
+/// 用户开关、真实驱动 readiness 与本机执行环境缺一不可。视觉能力由宿主
+/// 单独固定为 typed 感知模式；完整 AX 结构不要求模型能接收图片。
 pub(super) fn computer_access_allowed(
     requested: bool,
     driver_supported: bool,
     env: cortex_agent::ExecEnvironment,
-    model_supports_vision: bool,
 ) -> bool {
-    requested
-        && driver_supported
-        && env == cortex_agent::ExecEnvironment::LocalMachine
-        && model_supports_vision
+    requested && driver_supported && env == cortex_agent::ExecEnvironment::LocalMachine
 }
 
 /// 这一轮**额外**有哪三样能力。
@@ -88,6 +83,10 @@ pub(super) fn computer_access_allowed(
 /// 「真的做得到」时才为真 —— 那正是 CLAUDE.md 约束 2。
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Caps {
+    /// 同 health 的机器权威快照；缺省不得广告电脑写动作。派发时仍重新检查。
+    pub(super) computer_write_readiness: Option<cortex_proto::dto::ComputerWriteReadiness>,
+    /// 从本轮实际 LlmClient 固定，不读取普通请求或模型工具参数。
+    pub(super) perception_mode: cortex_agent::computer_perception::PerceptionMode,
     /// 够得着生图那条路（有服务端）。
     pub(super) can_draw: bool,
     /// 这一轮带了非空的技能目录。
@@ -96,6 +95,9 @@ pub(super) struct Caps {
     pub(super) can_use_computer: bool,
     /// Cua 只读观察链路已经配置；工具目录只开放 list/observe。
     pub(super) can_observe_computer: bool,
+    /// 隔离浏览器已经显式启用、站点 allowlist 非空且宿主找到 Chromium。
+    /// 这是独立的网页结构化通道，不要求 Cua sidecar 或视觉模型。
+    pub(super) can_use_browser: bool,
     /// 打开应用不需要截图或视觉模型，也不依赖工作区，但必须是本机桌面宿主。
     pub(super) can_open_application: bool,
     /// 派得出子 agent 不。判据与后台命令同源：**要有工作区**。
@@ -144,6 +146,10 @@ pub(super) struct Caps {
 }
 
 impl Caps {
+    pub(super) fn computer_writes_ready(self) -> bool {
+        self.computer_write_readiness
+            .is_some_and(cortex_proto::dto::ComputerWriteReadiness::is_ready)
+    }
     /// 有没有任何一样。`with_external` 用它决定要不要重建目录。
     ///
     /// ⚠️ **故意写成解构，不写 `self.x || self.y`。** 那种写法漏掉一个
@@ -156,10 +162,13 @@ impl Caps {
     /// 解构之后，加一个字段就是一个编译错误，落在这里。
     const fn any(self) -> bool {
         let Self {
+            computer_write_readiness: _,
+            perception_mode: _,
             can_draw,
             has_skills,
             can_use_computer,
             can_observe_computer,
+            can_use_browser,
             can_open_application,
             can_spawn,
             can_background,
@@ -172,6 +181,7 @@ impl Caps {
             || has_skills
             || can_use_computer
             || can_observe_computer
+            || can_use_browser
             || can_open_application
             || can_spawn
             || can_background
@@ -240,16 +250,30 @@ fn with_external(
     // ⚠️ 与提示词里那段说明同生共死（同 `has_skills` 那条）：判据是同一个
     // `can_use_computer`。摆了工具不讲坐标系，模型会一直点偏；讲了坐标系
     // 却没有工具，它会承诺一件做不到的事
-    if caps.can_use_computer {
-        specs.extend(cortex_agent::tools::computer_specs());
+    if caps.can_observe_computer && caps.can_use_computer && caps.computer_writes_ready() {
+        specs.push(cortex_agent::tools::cua_computer_act_spec_for(
+            caps.perception_mode,
+        ));
     }
     if caps.can_observe_computer {
-        specs.extend(cortex_agent::tools::cua_computer_specs());
+        specs.extend(cortex_agent::tools::cua_computer_specs_for(
+            caps.perception_mode,
+        ));
+    }
+    if caps.can_use_browser {
+        specs.extend(
+            cortex_agent::tools::browser_specs()
+                .into_iter()
+                .filter(|spec| caps.computer_writes_ready() || spec.name != "computer_browser_act"),
+        );
     }
     if caps.can_open_application {
         specs.push(cortex_agent::tools::application_spec());
     }
     specs.extend(external.iter().cloned());
+    if !caps.computer_writes_ready() {
+        specs.retain(|spec| !matches!(spec.name.as_ref(), "computer_act" | "computer_browser_act"));
+    }
     // 智能体关掉的那些，**最后统一剔** —— 放在各处 push 之前逐个判的话，
     // 加一个工具时漏掉那一处不会有编译错误，症状是「关了却还在」
     if !disabled.is_empty() {

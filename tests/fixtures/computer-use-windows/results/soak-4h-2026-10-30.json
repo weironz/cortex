@@ -1,0 +1,14 @@
+﻿{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-soak",
+    "startedAt":  "2026-10-30T09:54:16.1805315Z",
+    "finishedAt":  "2026-10-30T12:39:07.7463777Z",
+    "durationSeconds":  9891.57,
+    "requestedSeconds":  14400,
+    "intervalMs":  5000,
+    "driverSha256":  "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+    "fixtureExecutable":  "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\target\\cortex-computer-use-windows-fixture.exe",
+    "exitCode":  101,
+    "logTail":  "cargo.exe : warning: linker stdout: 正在创建库 D:\\codes\\cortex\\target\\debug\\deps\\cor\ntex_local-23f0d987dee0727b.lib 和对象 D:\\codes\\cortex\\target\\debug\\deps\\cortex_loc\nal-23f0d987dee0727b.exp\nAt D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\soak.ps1:172 char:9\n+         \u0026 cargo test -p cortex-local `\n+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n    + CategoryInfo          : NotSpecified: (warning: linker...987dee0727b.exp \n   :String) [], RemoteException\n    + FullyQualifiedErrorId : NativeCommandError\n \n  |\n  = note: `#[warn(linker_messages)]` on by default\n\nwarning: `cortex-local` (bin \"cortex-local\" test) generated 1 warning\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s\n     Running unittests src\\main.rs (target\\debug\\deps\\cortex_local-23f0d987dee0\n727b.exe)\n\nrunning 1 test\n\nthread \u0027computer::real::tests::cua_fixture_long_running_soak\u0027 (23132) panicked \nat crates\\cortex-local\\src\\computer.rs:3108:21:\nsoak cycle 885: computer_list failed: 列出可观察窗口失败：computer driver failed: driver \nfailed after authorization: computer driver action timed out after 20s\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest computer::real::tests::cua_fixture_long_running_soak ... FAILED\n\nfailures:\n\nfailures:\n    computer::real::tests::cua_fixture_long_running_soak\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 250 filtered out; finished in 9886.93s\n\nerror: test failed, to rerun pass `-p cortex-local --bin cortex-local`\nCua Driver daemon listening on \\\\.\\pipe\\cortex-soak-8e009ef934744775a9f4791325681253",
+    "failure":  "Cargo soak test exited with code 101."
+}

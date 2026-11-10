@@ -1,0 +1,99 @@
+{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-e2e",
+    "generatedAt":  "2026-10-29T20:01:10.6121587+00:00",
+    "durationMs":  2182,
+    "host":  {
+                 "computerName":  "WILLOPTPC",
+                 "os":  "Microsoft Windows NT 10.0.26300.0",
+                 "sessionId":  2,
+                 "displayCount":  1,
+                 "displays":  [
+                                  {
+                                      "deviceName":  "\\\\.\\DISPLAY1",
+                                      "primary":  true,
+                                      "bounds":  {
+                                                     "y":  0,
+                                                     "width":  2560,
+                                                     "height":  1440,
+                                                     "x":  0
+                                                 }
+                                  }
+                              ]
+             },
+    "execution":  {
+                      "isolation":  "one Windows Job Object per task (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)",
+                      "ui":  "PowerShell + Windows UI Automation",
+                      "appAllowlist":  "exact executable paths plus process-scoped UIA roots",
+                      "resultPolicy":  "only executed checks may pass; unavailable dependencies are skipped with a reason"
+                  },
+    "summary":  {
+                    "total":  1,
+                    "pass":  0,
+                    "fail":  0,
+                    "skipped":  1
+                },
+    "tasks":  [
+                  {
+                      "id":  "notepad-open-read",
+                      "family":  "notepad",
+                      "application":  "Windows Notepad",
+                      "status":  "skipped",
+                      "reason":  "The requested Notepad isolation argument \u0027--new-window\u0027 was not found as a null-delimited token in this packaged binary, so no launch or UI input was attempted.",
+                      "timeoutSeconds":  40,
+                      "allowlist":  [
+                                        "C:\\WINDOWS\\System32\\notepad.exe",
+                                        "C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe\\Notepad\\Notepad.exe"
+                                    ],
+                      "verifier":  null,
+                      "details":  {
+                                      "decision":  "skip",
+                                      "uiLaunchAttempted":  false,
+                                      "inputDelivered":  false,
+                                      "requestedIsolationArgument":  "--new-window",
+                                      "baseline":  {
+                                                       "processNames":  [
+                                                                            "notepad"
+                                                                        ],
+                                                       "processIds":  [
+                                                                          37032
+                                                                      ],
+                                                       "windows":  [
+                                                                       {
+                                                                           "processId":  37032,
+                                                                           "handle":  "0x50616EE",
+                                                                           "title":  "install.ps1 - Notepad"
+                                                                       }
+                                                                   ]
+                                                   },
+                                      "launchContract":  {
+                                                             "packageName":  "Microsoft.WindowsNotepad",
+                                                             "packageVersion":  "11.2607.14.0",
+                                                             "aumid":  "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
+                                                             "executable":  "C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe\\Notepad\\Notepad.exe",
+                                                             "candidateSwitches":  [
+                                                                                       "-n",
+                                                                                       "--new-window"
+                                                                                   ],
+                                                             "foundCandidateSwitches":  [
+
+                                                                                        ],
+                                                             "packagedAppLifecycleMarkers":  {
+                                                                                                 "appInstance":  true,
+                                                                                                 "sessionArgument":  true
+                                                                                             },
+                                                             "stringEncodingsScanned":  [
+                                                                                            "Unicode",
+                                                                                            "ASCII"
+                                                                                        ],
+                                                             "uiLaunchAttempted":  false
+                                                         }
+                                  },
+                      "cleanup":  [
+
+                                  ],
+                      "startedAt":  "2026-10-29T20:01:11.5945291+00:00",
+                      "durationMs":  1009
+                  }
+              ]
+}

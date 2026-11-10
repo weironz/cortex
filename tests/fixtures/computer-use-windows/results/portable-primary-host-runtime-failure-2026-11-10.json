@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "scope": "current_bundle_primary_host_real_fixture_runtime_smoke",
+  "machine": "WILLOPTPC",
+  "status": "failed",
+  "startedAt": "2026-11-09T22:23:49.2816981Z",
+  "finishedAt": "2026-11-09T22:23:57.1308901Z",
+  "testExeSha256": "f43275a745758c77fe746fc35a6e766821e266db7947df364b591f6607cfcd87",
+  "secure": {
+    "name": "computer::real::tests::cua_secure_fixture_requires_handoff_without_input",
+    "status": "failed",
+    "startedAt": "2026-11-09T22:23:54.5464964Z",
+    "exitCode": 101,
+    "harness": {
+      "exitCode": 101,
+      "runningOneLines": 1,
+      "namedPassedLines": 0,
+      "onePassedSummaryLines": 0,
+      "totalRunLines": 1,
+      "totalSummaryLines": 1,
+      "passed": false
+    },
+    "durationSeconds": 2.39,
+    "durationMilliseconds": 2389,
+    "finishedAt": "2026-11-09T22:23:56.9494581Z"
+  },
+  "soak": {
+    "name": "computer::real::tests::cua_fixture_long_running_soak",
+    "status": "not_run"
+  },
+  "diagnostic": [
+    {
+      "panicFile": "computer.rs",
+      "panicLine": 5804,
+      "panicColumn": 17,
+      "missingTrustedHostContext": true
+    }
+  ],
+  "sourceResultPath": "C:\\Users\\willz\\AppData\\Local\\Temp\\portable-primary-host-context-diagnostic-20261110.json",
+  "sourceResultSha256": "50381de6952a5538724c8420af5c5fe5d11db7fe121788d7ce3970eba51ba94a",
+  "rawLogsRetained": false,
+  "secondHostExecuted": false,
+  "productionAccepted": false,
+  "newBundleRuntimeAccepted": false
+}

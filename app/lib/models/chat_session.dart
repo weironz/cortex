@@ -1,4 +1,5 @@
 import 'json.dart';
+import 'message_persistence.dart';
 import 'workspace.dart';
 
 /// A conversation thread (`GET /sessions`).
@@ -18,9 +19,11 @@ class ChatSession {
     this.projectId,
     this.isLocalDraft = false,
     this.hasLocalOverrides = false,
+    this.persistence,
   });
 
   final String id;
+  final MessagePersistence? persistence;
   final String title;
   final DateTime? createdAt;
   final DateTime? updatedAt;
@@ -108,6 +111,7 @@ class ChatSession {
     Object? projectId = _sentinel,
     bool? isLocalDraft,
     bool? hasLocalOverrides,
+    MessagePersistence? persistence,
   }) => ChatSession(
     id: id,
     title: title ?? this.title,
@@ -127,6 +131,7 @@ class ChatSession {
     projectId: projectId == _sentinel ? this.projectId : projectId as String?,
     isLocalDraft: isLocalDraft ?? this.isLocalDraft,
     hasLocalOverrides: hasLocalOverrides ?? this.hasLocalOverrides,
+    persistence: persistence ?? this.persistence,
   );
 
   static const Object _sentinel = Object();
@@ -139,6 +144,7 @@ class ChatSession {
     final root = asStringOrNull(json['workspace']);
     return ChatSession(
       id: asString(json['id']),
+      persistence: MessagePersistence.fromWire(json['persistence']),
       title: asString(json['title'], '未命名会话'),
       titleIsCustom: json['title_is_custom'] == true,
       createdAt: asDateOrNull(json['created_at']),

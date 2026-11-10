@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/api_exception.dart';
 import '../api/cortex_api.dart';
+import '../api/http_cortex_api.dart';
 import '../core/local_agent.dart';
 import '../core/ulid.dart';
 import '../models/attachment.dart';
@@ -12,6 +13,7 @@ import '../models/chat_event.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../models/episode.dart';
+import '../models/message_persistence.dart';
 import '../models/project.dart';
 import '../models/tool_call.dart';
 import '../models/turn_block.dart';
@@ -87,6 +89,9 @@ class ChatController extends Notifier<ChatState> {
   /// no token can be dropped.
   static const _flushInterval = Duration(milliseconds: 16);
 
+  /// `/auth/me` 是主体复核而不是业务数据；卡死时不能永远扣住发送按钮。
+  static const _subjectLookupTimeout = Duration(seconds: 5);
+
   /// 空转看门狗：这条流上多久没有任何动静就判它死了。
   ///
   /// # 为什么必须有它（2026-08-29 的案发现场）
@@ -120,11 +125,24 @@ class ChatController extends Notifier<ChatState> {
   /// 作废序号：换后端时 +1，让在飞的请求的结果（尤其是**尸体**）被丢掉。
   int _requestSeq = 0;
 
+  /// 按 API 换代顺序排队解析主体，避免 A 的 `/auth/me` 晚到时把已经切到 B
+  /// 的状态当成「首次见到主体」。
+  int _nextSubjectEpoch = 0;
+  int _nextSubjectEpochToApply = 0;
+  final Map<int, ({String? deployment, String? userId})> _subjectResults = {};
+  final Map<int, Completer<bool>> _subjectDecisions = {};
+  ({String? deployment, String? userId})? _lastSubject;
+  CortexApi? _subjectApi;
+  Future<void>? _subjectReady;
+
   /// 这个结果是不是已经过期了 —— 每个 `await` 之后、写 state 之前都要问一次。
   ///
   /// 与 [Ref.mounted] 一起判：整个应用退出与「只是换了后端」是两件事，
   /// 而两者都不该让结果落地。
   bool _stale(int seq) => seq != _requestSeq || !ref.mounted;
+
+  bool _requestStillCurrent(int seq, CortexApi api) =>
+      !_stale(seq) && identical(_api, api);
 
   @override
   ChatState build() {
@@ -133,6 +151,10 @@ class ChatController extends Notifier<ChatState> {
         live.dispose();
       }
       _live.clear();
+      for (final decision in _subjectDecisions.values) {
+        if (!decision.isCompleted) decision.complete(false);
+      }
+      _subjectDecisions.clear();
     });
     // Re-hydrate whenever the data source flips (mock ↔ live).
     //
@@ -149,6 +171,11 @@ class ChatController extends Notifier<ChatState> {
     //
     // 这条路径比记忆面板那条命中得更早：会话列表与首个会话的消息是
     // **开机就发**的，凭据一续上（或本地 agent 一就绪）就正好撞上。
+    final initialApi = ref.read(cortexApiProvider);
+    if (!isGateClosed(initialApi)) {
+      unawaited(_startSubjectObservation(initialApi));
+    }
+
     ref.listen(cortexApiProvider, (_, next) {
       _requestSeq++;
       // ★ **凭据没了 ≠ 换了后端。**
@@ -170,13 +197,151 @@ class ChatController extends Notifier<ChatState> {
         unawaited(_cancelStream());
         return;
       }
-      _reload();
+      final requestSeq = _requestSeq;
+      final subjectReady = _startSubjectObservation(next);
+      final transition = _refreshAfterBackendSwap(
+        next,
+        requestSeq: requestSeq,
+        subjectReady: subjectReady,
+      );
+      // `send()` 也必须等完整的主体切换结束，而不只是身份字段返回：
+      // 换账号时 `_reload()` 还要清掉同 session id 的旧缓存；抢在它前面
+      // 发出去会把 B 的消息写进 A 的状态，随后又被刷新清掉。
+      _subjectReady = transition;
+      unawaited(transition);
     });
     Future.microtask(_reload);
     return const ChatState();
   }
 
   CortexApi get _api => ref.read(cortexApiProvider);
+
+  Future<bool> _startSubjectObservation(CortexApi api) {
+    _subjectApi = api;
+    final ready = _observeSubject(api);
+    _subjectReady = ready;
+    unawaited(ready);
+    return ready;
+  }
+
+  /// 主体不是 API 实例。token 正常续期也会换实例（且旧 HTTP client 会被
+  /// dispose），把实例变化当账号变化会把用户刚打的字和项目归属一起清掉。
+  ///
+  /// 身份由「账号 id + 部署」组成：同号续期保留内存态，换号或换部署清掉
+  /// 那些只按 session id 存放、同 id 撞车就会串到另一个主体的缓存。
+  Future<bool> _observeSubject(CortexApi api) async {
+    final epoch = _nextSubjectEpoch++;
+    final backend = api is HttpCortexApiBase
+        ? api.computerTraceBackendIdentity
+        : null;
+    final deployment = (backend?.deployment ?? backend?.endpoint)?.toString();
+
+    String? userId;
+    try {
+      final account = await api.whoAmI().timeout(_subjectLookupTimeout);
+      userId = switch (account?.userId.trim()) {
+        final id? when id.isNotEmpty => id,
+        _ => null,
+      };
+    } on Object {
+      // 身份服务暂时失败不能证明换了人。部署仍可单独证明主体边界变化。
+    }
+    if (!ref.mounted) return false;
+
+    _subjectResults[epoch] = (deployment: deployment, userId: userId);
+    final decision = Completer<bool>();
+    _subjectDecisions[epoch] = decision;
+    while (true) {
+      final next = _subjectResults.remove(_nextSubjectEpochToApply);
+      if (next == null) break;
+      final nextDecision = _subjectDecisions.remove(_nextSubjectEpochToApply);
+      _nextSubjectEpochToApply++;
+
+      final previous = _lastSubject;
+      _lastSubject = next;
+      final changed = previous != null && _subjectChanged(previous, next);
+      if (changed) _clearSubjectScopedState();
+      nextDecision?.complete(changed);
+    }
+    return decision.future;
+  }
+
+  /// API 换代后的刷新分成两条路。
+  ///
+  /// 同账号 token 续期只换了 HTTP 客户端；会话、当前选中项和历史都没有
+  /// 换主体。把整份 `ChatState` 重置会让用户眼前的对话闪空，并且会把已经
+  /// 收到的半截回答丢掉。这里只撤掉旧客户端的订阅，再从新客户端重挂仍在
+  /// 运行的轮次。账号或部署变化仍走完整 `_reload()`，这是隔离边界。
+  Future<void> _refreshAfterBackendSwap(
+    CortexApi api, {
+    required int requestSeq,
+    required Future<bool> subjectReady,
+  }) async {
+    final changed = await subjectReady;
+    if (_stale(requestSeq) || !identical(_api, api)) return;
+    if (changed) {
+      await _reload();
+      return;
+    }
+
+    final running = state.streamingTurns.keys.toList(growable: false);
+    final interruptedTranscripts = state.transcripts.entries
+        .where(
+          (entry) =>
+              entry.value.loading ||
+              entry.value.loadingEarlier ||
+              entry.value.error != null,
+        )
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    await _cancelStream();
+    if (_stale(requestSeq) || !identical(_api, api)) return;
+    for (final sessionId in interruptedTranscripts) {
+      final transcript = state.transcripts[sessionId];
+      if (transcript != null) {
+        _putTranscript(
+          sessionId,
+          transcript.copyWith(
+            loading: false,
+            loadingEarlier: false,
+            error: null,
+          ),
+        );
+      }
+    }
+    await loadSessions();
+    if (_stale(requestSeq) || !identical(_api, api)) return;
+    for (final sessionId in interruptedTranscripts) {
+      unawaited(loadTranscript(sessionId));
+    }
+    for (final sessionId in running) {
+      if (state.streamingTurns.containsKey(sessionId)) {
+        unawaited(_tryAttach(sessionId, recovering: true));
+      }
+    }
+  }
+
+  bool _subjectChanged(
+    ({String? deployment, String? userId}) previous,
+    ({String? deployment, String? userId}) next,
+  ) {
+    // 已经从旧 API 证明过主体，新一代却答不出同一份身份时不能继续沿用
+    // 那些裸 session id 缓存。只有「同账号」被成功证明才叫续期。
+    final userChanged =
+        previous.userId != null && previous.userId != next.userId;
+    final deploymentChanged =
+        previous.deployment != null && previous.deployment != next.deployment;
+    return userChanged || deploymentChanged;
+  }
+
+  void _clearSubjectScopedState() {
+    _pendingProjectAssignment.clear();
+    _cloudByChoice.clear();
+    ref.read(sessionAssistantProvider.notifier).clear();
+    if (state.pendingNewChat != null) {
+      state = state.copyWith(pendingNewChat: null);
+    }
+  }
 
   // -------------------------------------------------------------- lifecycle
 
@@ -328,7 +493,7 @@ class ChatController extends Notifier<ChatState> {
   /// 没在跑（404）、这个后端答不了这条路由（旧 agent）、网络不好 —— 三种
   /// 都是常态而非故障。任何一种弹出错误框，代价是**每打开一个旧会话都弹
   /// 一次**，而它本来什么都不该发生。
-  Future<void> _tryAttach(String sessionId) async {
+  Future<void> _tryAttach(String sessionId, {bool recovering = false}) async {
     // **这个会话**本地已经有一条流在跑就别再挂一次 —— 会收到两份同样的事件。
     //
     // ⚠️ 判据是「这条会话」，不是「有没有任何流」。后者在多会话并跑之后
@@ -340,7 +505,10 @@ class ChatController extends Notifier<ChatState> {
     final Stream<ChatEvent> stream;
     try {
       stream = _api.attachChat(sessionId);
-    } on CortexApiException {
+    } on Object catch (error, stackTrace) {
+      if (recovering && state.streamingTurns.containsKey(sessionId)) {
+        _recoverInterruptedAttach(sessionId, error, stackTrace);
+      }
       return;
     }
 
@@ -355,7 +523,16 @@ class ChatController extends Notifier<ChatState> {
     // 见方法文档那三种。第一条事件到了之后交给全局那条看门狗
     Timer? firstEvent;
     firstEvent = Timer(idleTimeout, () {
-      if (!started) sub.cancel();
+      if (!started) {
+        unawaited(sub.cancel());
+        if (recovering && state.streamingTurns.containsKey(sessionId)) {
+          _recoverInterruptedAttach(
+            sessionId,
+            CortexApiException('断线后重挂没有收到这一轮的任何事件，已经停止等待。'),
+            StackTrace.current,
+          );
+        }
+      }
     });
     sub = stream.listen(
       (event) {
@@ -369,20 +546,21 @@ class ChatController extends Notifier<ChatState> {
         // 让心跳直接落到下面的 `_onEvent`：`streaming` 还是 null，那里会
         // 直接返回，纯 ping 的连接于是被 `firstEvent` 那条定时器静悄悄收掉
         // —— 正是这条路本来的设计（挂不上是常态，不该弹错）。
-        if (!started && event is! ChatHeartbeatEvent) {
+        if (!started && (recovering || event is! ChatHeartbeatEvent)) {
           started = true;
           firstEvent?.cancel();
           firstEvent = null;
           // 重挂拿到的第一条事件就意味着「它确实在跑」。这时才建 streaming
           // 状态，`_onEvent` 后面那一串才有东西可改
           _live[sessionId] = _LiveTurn(sessionId)..sub = sub;
+          final previous = state.streamingTurns[sessionId];
           state = state.copyWith(
             streamingTurns: {
               ...state.streamingTurns,
               sessionId: StreamingTurn(
-                messageId: Ulid.generate(),
+                messageId: previous?.messageId ?? Ulid.generate(),
                 sessionId: sessionId,
-                startedAt: DateTime.now(),
+                startedAt: previous?.startedAt ?? DateTime.now(),
               ),
             },
             sendError: null,
@@ -393,14 +571,50 @@ class ChatController extends Notifier<ChatState> {
       // 挂不上（404 / 旧后端 / 断网）一律当成「没在跑」，见方法文档
       onError: (Object e, StackTrace st) {
         firstEvent?.cancel();
-        if (started) _onError(sessionId, e, st);
+        if (started) {
+          _onError(sessionId, e, st);
+        } else if (recovering && state.streamingTurns.containsKey(sessionId)) {
+          _recoverInterruptedAttach(sessionId, e, st);
+        }
       },
       onDone: () {
         firstEvent?.cancel();
-        if (started) _onDone(sessionId);
+        if (started) {
+          _onDone(sessionId);
+        } else if (recovering && state.streamingTurns.containsKey(sessionId)) {
+          _recoverInterruptedAttach(
+            sessionId,
+            const CortexApiException('断线后重挂在本轮的终态前结束。'),
+            StackTrace.current,
+          );
+        }
       },
       cancelOnError: true,
     );
+  }
+
+  /// 重挂失败时把本地那一轮收成一个明确结果。
+  ///
+  /// 404 表示服务端已经没有这轮可挂：它可能刚完成，于是清掉转圈状态并
+  /// 重新拉服务端历史。其它错误保留已经收到的文字，按普通连接中断收尾，
+  /// 文案会说明服务端那一轮可能仍在运行。两条路都不能让旧 spinner 永久
+  /// 占住输入框。
+  void _recoverInterruptedAttach(
+    String sessionId,
+    Object error,
+    StackTrace stackTrace,
+  ) {
+    if (!ref.mounted || !state.streamingTurns.containsKey(sessionId)) return;
+    if (error is CortexApiException && error.statusCode == 404) {
+      _live.remove(sessionId)?.dispose();
+      _dropTurn(sessionId);
+      state = state.copyWith(
+        unfinished: {...state.unfinished}..remove(sessionId),
+      );
+      unawaited(loadTranscript(sessionId));
+      return;
+    }
+    _onError(sessionId, error, stackTrace);
   }
 
   /// 新建一个本地草稿会话。[projectId] 非空时它属于那个项目。
@@ -636,6 +850,10 @@ class ChatController extends Notifier<ChatState> {
   /// 只在内存里，重启即忘 —— 一个从没发过消息的草稿本来也不会留下。
   final Map<String, String> _pendingProjectAssignment = {};
 
+  @visibleForTesting
+  String? pendingProjectForTest(String sessionId) =>
+      _pendingProjectAssignment[sessionId];
+
   /// 把建会话时选的项目补给服务端。**在这一轮开始之前，而且要等它。**
   ///
   /// # 为什么不能等第一轮跑完
@@ -664,20 +882,24 @@ class ChatController extends Notifier<ChatState> {
   /// 与 [`_ensureLocalWorkspace`] 同样的取舍：分组没存上就发出去，等于把
   /// 文件写进一个用户没打算用的工作区 —— 而那件事**没有任何提示**，
   /// 等他发现时东西已经在另一个卷里了。宁可当场说「没发出去，再试一次」。
-  Future<bool> _flushPendingProject(String sessionId) async {
+  Future<bool> _flushPendingProject(
+    String sessionId, {
+    required CortexApi api,
+    required int requestSeq,
+  }) async {
     final projectId = _pendingProjectAssignment[sessionId];
     if (projectId == null) return true;
     try {
-      final updated = await _api.moveSessionToProject(sessionId, projectId);
+      final updated = await api.moveSessionToProject(sessionId, projectId);
+      if (!_requestStillCurrent(requestSeq, api)) return false;
       _pendingProjectAssignment.remove(sessionId);
-      if (!ref.mounted) return false;
       _replaceSession(
         sessionId,
         (s) => updated.copyWith(isLocalDraft: s.isLocalDraft),
       );
       return true;
     } on Object catch (e) {
-      if (!ref.mounted) return false;
+      if (!_requestStillCurrent(requestSeq, api)) return false;
       state = state.copyWith(
         sendError:
             '这个会话还没归到项目里，先发消息会让文件落进默认工作区。'
@@ -771,7 +993,11 @@ class ChatController extends Notifier<ChatState> {
   /// 文件写去了另一个文件系统，而界面上什么都没说。唯一的例外是**后端根本
   /// 没有这条路由**（对着一个纯 cortexd）：那种情况下「没有本机」是事实，
   /// 不是故障。
-  Future<bool> _ensureLocalWorkspace(String id) async {
+  Future<bool> _ensureLocalWorkspace(
+    String id, {
+    required CortexApi api,
+    required int requestSeq,
+  }) async {
     if (!kLocalAgentSupported || _cloudByChoice.contains(id)) return true;
     final session = state.sessions.firstWhereOrNull((s) => s.id == id);
     if (session == null || !session.isLocalDraft) return true;
@@ -785,9 +1011,14 @@ class ChatController extends Notifier<ChatState> {
       // 按 id 记账、按名字建）
       final project = _projectOf(session.projectId);
       final bound = project == null
-          ? await _api.autoBindLocalWorkspace(id)
-          : await _bindProjectDir(id, project);
-      if (!ref.mounted) return false;
+          ? await api.autoBindLocalWorkspace(id)
+          : await _bindProjectDir(
+              id,
+              project,
+              api: api,
+              requestSeq: requestSeq,
+            );
+      if (!_requestStillCurrent(requestSeq, api)) return false;
       if (bound != null) {
         _replaceSession(
           id,
@@ -796,6 +1027,7 @@ class ChatController extends Notifier<ChatState> {
       }
       return true;
     } on CortexApiException catch (e) {
+      if (!_requestStillCurrent(requestSeq, api)) return false;
       if (e.isUnsupported) return true;
       state = state.copyWith(sendError: '开不出这次对话的工作目录：${e.message}');
       return false;
@@ -810,12 +1042,18 @@ class ChatController extends Notifier<ChatState> {
             .firstWhereOrNull((p) => p.id == id);
 
   /// 建（或找回）项目的本机目录并绑上，回绑定后的规范化路径。
-  Future<String?> _bindProjectDir(String sessionId, Project project) async {
-    final dir = await _api.createLocalWorkspace(
+  Future<String?> _bindProjectDir(
+    String sessionId,
+    Project project, {
+    required CortexApi api,
+    required int requestSeq,
+  }) async {
+    final dir = await api.createLocalWorkspace(
       name: project.name,
       projectId: project.id,
     );
-    return _api.bindLocalWorkspace(sessionId, dir);
+    if (!_requestStillCurrent(requestSeq, api)) return null;
+    return api.bindLocalWorkspace(sessionId, dir);
   }
 
   /// The local agent owns this binding, so ask it first.
@@ -959,7 +1197,10 @@ class ChatController extends Notifier<ChatState> {
       _putTranscript(
         id,
         Transcript(
-          messages: _messagesFromEpisodes(detail.episodes),
+          messages: _messagesFromEpisodes(
+            detail.episodes,
+            persistence: detail.session.persistence,
+          ),
           loadedFromServer: true,
           hasEarlier: detail.hasMore,
           cursor: detail.nextCursor,
@@ -1025,7 +1266,13 @@ class ChatController extends Notifier<ChatState> {
         held.copyWith(
           // Prepend: the page is older than everything already on screen, and
           // each page is itself oldest-first.
-          messages: [..._messagesFromEpisodes(page.episodes), ...held.messages],
+          messages: [
+            ..._messagesFromEpisodes(
+              page.episodes,
+              persistence: page.session.persistence,
+            ),
+            ...held.messages,
+          ],
           loadingEarlier: false,
           hasEarlier: page.hasMore,
           cursor: page.nextCursor,
@@ -1057,7 +1304,10 @@ class ChatController extends Notifier<ChatState> {
   /// follows it. When none follows (the failed-turn case the server's anchoring
   /// exists for) it stays on the user message, where the drawer is still
   /// rendered — that turn is the one an audit most wants to look at.
-  static List<ChatMessage> _messagesFromEpisodes(List<Episode> episodes) {
+  static List<ChatMessage> _messagesFromEpisodes(
+    List<Episode> episodes, {
+    MessagePersistence? persistence,
+  }) {
     final out = <ChatMessage>[];
     for (var i = 0; i < episodes.length; i++) {
       final e = episodes[i];
@@ -1081,6 +1331,7 @@ class ChatController extends Notifier<ChatState> {
           attachments: e.attachments,
           toolCalls: handOff ? const [] : e.toolCalls,
           episodeId: e.id,
+          persistence: persistence,
           models: e.models,
         ),
       );
@@ -1106,6 +1357,7 @@ class ChatController extends Notifier<ChatState> {
             // 那至少没有说错话
             blocks: e.toolCalls.isEmpty ? answer.blocks : const [],
             episodeId: answer.id,
+            persistence: persistence,
             // **取 answer 那条的，不是 e 的** —— e 是用户说的话，
             // 它永远没有模型名
             models: answer.models,
@@ -1139,6 +1391,13 @@ class ChatController extends Notifier<ChatState> {
     final text = rawText.trim();
     // An attachment with no words is a legitimate message ("看这张图")…
     if (text.isEmpty && attachments.isEmpty) return false;
+    final apiAtStart = _api;
+    final requestSeq = _requestSeq;
+    if (identical(_subjectApi, apiAtStart)) {
+      final subjectReady = _subjectReady;
+      if (subjectReady != null) await subjectReady;
+      if (!_requestStillCurrent(requestSeq, apiAtStart)) return false;
+    }
     // **只拦这一条会话自己的那一轮。**
     //
     // 2026-09-02 之前这道闸看的是全局：只要**任何**一条会话在跑，别的会话
@@ -1167,11 +1426,23 @@ class ChatController extends Notifier<ChatState> {
 
     // 工作目录要在**这一轮开始之前**定下来：`routes::chat` 拿「有没有本地
     // 绑定」分流，等 turn 造好再绑就晚了，那一轮已经送去云端了
-    if (!await _ensureLocalWorkspace(sessionId)) return false;
-    if (!ref.mounted) return false;
+    if (!await _ensureLocalWorkspace(
+      sessionId,
+      api: apiAtStart,
+      requestSeq: requestSeq,
+    )) {
+      return false;
+    }
+    if (!_requestStillCurrent(requestSeq, apiAtStart)) return false;
     // 同上：项目决定沙箱容器与工作区卷，服务端在收到 /chat 那一刻就要读到它
-    if (!await _flushPendingProject(sessionId)) return false;
-    if (!ref.mounted) return false;
+    if (!await _flushPendingProject(
+      sessionId,
+      api: apiAtStart,
+      requestSeq: requestSeq,
+    )) {
+      return false;
+    }
+    if (!_requestStillCurrent(requestSeq, apiAtStart)) return false;
 
     final userMessage = ChatMessage(
       id: Ulid.generate(),
@@ -1197,7 +1468,7 @@ class ChatController extends Notifier<ChatState> {
       unfinished: {...state.unfinished, sessionId},
     );
 
-    final stream = _api.chat(
+    final stream = apiAtStart.chat(
       sessionId: sessionId,
       message: text,
       attachments: attachments,
@@ -1414,12 +1685,18 @@ class ChatController extends Notifier<ChatState> {
             .read(confirmControllerProvider.notifier)
             .offer(request, sessionId: turn.sessionId);
 
-      case ChatDoneEvent(:final episodeId, :final models, :final attachments):
+      case ChatDoneEvent(
+        :final episodeId,
+        :final models,
+        :final attachments,
+        :final persistence,
+      ):
         _commit(
           sid,
           episodeId: episodeId,
           models: models,
           attachments: attachments,
+          persistence: persistence,
         );
 
       case ChatErrorEvent(:final message, :final needsReauth):
@@ -1524,7 +1801,7 @@ class ChatController extends Notifier<ChatState> {
     // 服务端那一轮还在自己跑并照常入库 —— 断的只是「看着它跑」这条线。
     // 不说的代价是用户重发一遍，得到两份回答
     if (error is CortexApiException && error.isUnreachable) {
-      final turn = state.streaming;
+      final turn = state.streamingTurns[sid];
       final got = turn != null && turn.text.isNotEmpty;
       message =
           '$message\n'
@@ -1551,6 +1828,7 @@ class ChatController extends Notifier<ChatState> {
   void _commit(
     String sid, {
     String? episodeId,
+    MessagePersistence? persistence,
     String? error,
     bool errorIsDeterministic = false,
     List<String> models = const [],
@@ -1581,6 +1859,7 @@ class ChatController extends Notifier<ChatState> {
       // 才出现（见 `ChatDoneEvent.attachments`）
       attachments: attachments,
       episodeId: episodeId,
+      persistence: persistence,
       error: error,
       errorIsDeterministic: errorIsDeterministic,
       models: models,
@@ -1655,14 +1934,28 @@ class ChatController extends Notifier<ChatState> {
   Future<void> stopGeneration() async {
     final turn = state.streaming;
     if (turn == null) return;
+    final apiAtStart = _api;
+    final requestSeq = _requestSeq;
+    final liveAtStart = _live[turn.sessionId];
+
+    bool stillSameTurn() =>
+        _requestStillCurrent(requestSeq, apiAtStart) &&
+        identical(_live[turn.sessionId], liveAtStart) &&
+        state.streamingTurns[turn.sessionId]?.messageId == turn.messageId;
+
     String? warning;
     try {
-      await _api.stopRun(turn.sessionId);
+      await apiAtStart.stopRun(turn.sessionId);
     } on Object catch (e) {
       warning = '（服务端没能确认停止：$e —— 那一轮可能还在跑）';
     }
-    await _live[turn.sessionId]?.sub?.cancel();
-    _live[turn.sessionId]?.sub = null;
+    if (!stillSameTurn()) return;
+
+    final subscription = liveAtStart?.sub;
+    if (subscription != null) await subscription.cancel();
+    if (!stillSameTurn()) return;
+
+    liveAtStart?.sub = null;
     _commit(turn.sessionId, error: '已停止生成${warning ?? ''}');
   }
 

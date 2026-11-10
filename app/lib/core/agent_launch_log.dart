@@ -62,6 +62,37 @@ class AgentLaunchLog {
   void ready({required String origin, required int ms}) =>
       _append('ready', {'origin': origin, 'ms': ms});
 
+  /// Computer Use 配置准备或 legacy sidecar 的结果。
+  ///
+  /// 准备失败时本地 agent 会继续启动，界面上只会少一组电脑工具；如果
+  /// 这里不落一行，用户看到的是“能聊天但电脑操作消失”，没有任何跨进程证据
+  /// 说明是未配置、驱动错误还是启动超时。只记状态、耗时和经清洗的错误，
+  /// 不记录 allowlist 路径或驱动 socket。prepared 只说明配置就绪，不是 daemon
+  /// 已启动，更不是 Rust Job 已排空；runtimeOwner 只是运行模式元数据。
+  void computerUse({
+    required String outcome,
+    required int ms,
+    String? error,
+    String? runtimeOwner,
+  }) => _append('computer-use', {
+    'outcome': outcome,
+    'ms': ms,
+    'runtime_owner': ?runtimeOwner,
+    if (error != null && error.trim().isNotEmpty)
+      'error': _redactDiagnostic(error.trim()),
+  });
+
+  /// 停止进程或清理 Computer Use 配置时真正发生的失败。
+  ///
+  /// 正常停止路径会逐个隔离清理步骤，让主进程仍然退出；但“已经尽量清理”
+  /// 不等于“已经清理成功”。没有这一条时，孤儿进程、仍在监听的端口或遗留
+  /// allowlist manifest 只会在下一次启动时表现为随机冲突。
+  void cleanupFailed({required String component, required String error}) =>
+      _append('cleanup-failed', {
+        'component': component,
+        'error': _redactDiagnostic(error.trim()),
+      });
+
   /// 子进程退出了。
   ///
   /// [expected] 区分「我们让它退的」（登出、关应用、换地址）与崩溃 ——
@@ -144,6 +175,29 @@ class AgentLaunchLog {
       for (final l in lines.sublist(from))
         l.length > 400 ? '${l.substring(0, 400)}…' : l,
     ];
+  }
+
+  /// 启动错误可能来自 Dart 的 `ProcessException` 或 `FileSystemException`，
+  /// 里面会带驱动、manifest 或状态目录。日志只用于判断失败类别，不能为了
+  /// 诊断把用户路径、命名管道或凭据样式字符串带进跨进程文件。
+  static String _redactDiagnostic(String value) {
+    var safe = value
+        // 合法 Windows 用户名可以含撇号。路径一旦出现就把该行剩余内容全部
+        // 清掉，宁可损失后续诊断文字，也不能从 O'Brien 这类路径漏出后半截。
+        .replaceAll(
+          RegExp(r'(?:[A-Za-z]:\\|\\\\).*', multiLine: true),
+          '<path>',
+        )
+        .replaceAll(
+          RegExp(r'\bBearer\s+[^\s,;]+', caseSensitive: false),
+          'Bearer <redacted>',
+        )
+        .replaceAll(
+          RegExp(r'https?://[^\s,;]+', caseSensitive: false),
+          '<url>',
+        );
+    if (safe.length > 1_000) safe = '${safe.substring(0, 1_000)}…';
+    return safe;
   }
 
   void _append(String ev, Map<String, Object?> fields) {

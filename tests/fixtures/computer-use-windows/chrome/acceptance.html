@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Cortex Chrome Acceptance</title>
+  <style>
+    body { font: 18px "Segoe UI", sans-serif; margin: 40px; color: #172033; }
+    main { width: 720px; }
+    label, input, button, select, a, output { display: block; margin: 12px 0; }
+    input, button, select { min-height: 36px; font: inherit; }
+    button { padding: 4px 18px; }
+    output { min-height: 28px; padding: 8px; background: #eef3ff; }
+    .secure { width: 360px; }
+  </style>
+</head>
+<body>
+  <main aria-label="Cortex Chrome acceptance fixture">
+    <h1>Cortex Chrome Acceptance</h1>
+
+    <label for="messageInput">Message input</label>
+    <input id="messageInput" aria-label="Message input" autocomplete="off">
+
+    <button id="commitButton" type="button" aria-label="Commit message">Commit message</button>
+    <div role="status" aria-live="polite" aria-label="Verification status">
+      <span id="verificationStatus">Ready</span>
+    </div>
+
+    <label>
+      <input id="acceptCheckbox" type="checkbox" aria-label="Accept terms">
+      Accept terms
+    </label>
+    <button id="checkboxButton" type="button" aria-label="Record checkbox state">
+      Record checkbox state
+    </button>
+    <div role="status" aria-live="polite" aria-label="Checkbox status">
+      <span id="checkboxStatus">unchecked</span>
+    </div>
+
+    <label for="secureInput">Password input</label>
+    <input id="secureInput" class="secure" type="password"
+           aria-label="Password input" autocomplete="off">
+
+    <a href="page2.html" aria-label="Open second page">Open second page</a>
+  </main>
+
+  <script>
+    const message = document.getElementById("messageInput");
+    const verification = document.getElementById("verificationStatus");
+    const checkbox = document.getElementById("acceptCheckbox");
+    const checkboxStatus = document.getElementById("checkboxStatus");
+
+    document.getElementById("commitButton").addEventListener("click", () => {
+      verification.textContent = message.value;
+    });
+    document.getElementById("checkboxButton").addEventListener("click", () => {
+      checkboxStatus.textContent = checkbox.checked ? "checked" : "unchecked";
+    });
+  </script>
+</body>
+</html>

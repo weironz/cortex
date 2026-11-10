@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "scope": "matched_toolchain_control_build_only",
+  "baseCommit": "85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19",
+  "toolchain": "1.98.0-x86_64-pc-windows-msvc",
+  "exitCode": 0,
+  "binarySha256": "99daf64d73b961f324d7eea8063aeb3ddf6975ec7197b2a43cce04ac8c9e986e",
+  "binaryBytes": 38471680,
+  "signatureStatus": "NotSigned",
+  "manifestAndLockIdentical": true,
+  "fixedGitBlobsMatched": true,
+  "restoredFiles": [
+    "libs/cua-driver/rust/crates/platform-windows/src/browser_consent_ui.rs",
+    "libs/cua-driver/rust/crates/platform-windows/src/browser_setup_ui.rs",
+    "libs/cua-driver/rust/crates/platform-windows/src/msaa.rs",
+    "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/get_window_state_actions_tests.rs",
+    "libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs",
+    "libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot.rs"
+  ],
+  "unchangedCandidateFiles": 788,
+  "sourceDeltaProofSha256": "4b844458b1e804438a7edea418b05f2f068b6c19b666db3ca72d131dfce9196b",
+  "officialPinReplaced": false,
+  "recordedAt": "2026-11-09T01:03:44.4920256+00:00"
+}

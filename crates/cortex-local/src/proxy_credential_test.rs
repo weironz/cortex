@@ -24,14 +24,19 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
+use axum::extract::State;
 use axum::http::{Request, StatusCode};
-use axum::response::IntoResponse as _;
-use axum::routing::get;
+use axum::response::{IntoResponse as _, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::StreamExt as _;
 use tokio::net::TcpListener;
+use tokio::sync::{Notify, mpsc};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tower::ServiceExt as _;
 
+use crate::computer_principal::PrincipalNamespace;
 use crate::config::LlmRoute;
 use crate::confirm::ConfirmRegistry;
 use crate::outbox::Outbox;
@@ -43,8 +48,17 @@ use crate::workspaces::Workspaces;
 /// 假远端每次收到的 Authorization 头（`None` = 没带）。
 type Seen = Arc<Mutex<Vec<Option<String>>>>;
 
+#[derive(Clone)]
+struct SwitchRemoteState {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
 /// 立一个假 cortexd：记下每个请求的 Authorization，`/auth/me` 回 200、
 /// `/sync` 恒 401（用来验 401 反代回来的形状）。
+///
+/// `T0` 与 `T1` 属于账号 A，`T2` 属于账号 B；其他 token 一律 401。这样既能
+/// 覆盖同账号续期，也能覆盖跨账号切换必须拒绝的路径。
 async fn fake_remote() -> (String, Seen) {
     let seen: Seen = Arc::new(Mutex::new(Vec::new()));
 
@@ -84,9 +98,44 @@ async fn fake_remote() -> (String, Seen) {
             }
         }
     };
+    let principal = {
+        let seen = Arc::clone(&seen);
+        move |headers: axum::http::HeaderMap| {
+            let seen = Arc::clone(&seen);
+            async move {
+                record(&seen, &headers).await;
+                let token = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok());
+                let user_id = match token {
+                    Some("Bearer T0" | "Bearer T1") => "user-a",
+                    Some("Bearer T2") => "user-b",
+                    _ => {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            [("www-authenticate", "Bearer")],
+                            "凭据无效",
+                        )
+                            .into_response();
+                    }
+                };
+                Json(serde_json::json!({
+                    "deployment_id": "a".repeat(64),
+                    "deployment_url": "https://cortex.test/api",
+                    "user_id": user_id,
+                    "session_id": null,
+                    "credential_kind": "access_token",
+                    "expires_in_secs": 899,
+                    "session_binding": "identity"
+                }))
+                .into_response()
+            }
+        }
+    };
 
     let app = Router::new()
         .route("/auth/me", get(me))
+        .route("/auth/computer-use-principal", post(principal))
         .route("/sync", get(denied));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -96,6 +145,86 @@ async fn fake_remote() -> (String, Seen) {
         axum::serve(listener, app).await.ok();
     });
     (format!("http://{addr}"), seen)
+}
+
+async fn switchable_remote() -> (String, SwitchRemoteState) {
+    let controls = SwitchRemoteState {
+        started: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+    };
+    let principal = {
+        move |headers: axum::http::HeaderMap| async move {
+            let token = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok());
+            let user_id = match token {
+                Some("Bearer T0" | "Bearer T1") => "user-a",
+                Some("Bearer T2") => "user-b",
+                _ => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        [("www-authenticate", "Bearer")],
+                        "凭据无效",
+                    )
+                        .into_response();
+                }
+            };
+            Json(serde_json::json!({
+                "deployment_id": "a".repeat(64),
+                "deployment_url": "https://cortex.test/api",
+                "user_id": user_id,
+                "session_id": null,
+                "credential_kind": "access_token",
+                "expires_in_secs": 899,
+                "session_binding": "identity"
+            }))
+            .into_response()
+        }
+    };
+
+    let buffered = {
+        let controls = controls.clone();
+        move || {
+            let controls = controls.clone();
+            async move {
+                controls.started.notify_one();
+                let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
+                tokio::spawn(async move {
+                    controls.release.notified().await;
+                    let _ = tx.send(Ok(Bytes::from_static(b"A-account-secret")));
+                });
+                Response::new(Body::from_stream(UnboundedReceiverStream::new(rx)))
+            }
+        }
+    };
+    let switched_stream = {
+        let controls = controls.clone();
+        move || {
+            let controls = controls.clone();
+            async move {
+                let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
+                let _ = tx.send(Ok(Bytes::from_static(b"A-first")));
+                tokio::spawn(async move {
+                    controls.release.notified().await;
+                    let _ = tx.send(Ok(Bytes::from_static(b"A-second")));
+                });
+                Response::new(Body::from_stream(UnboundedReceiverStream::new(rx)))
+            }
+        }
+    };
+
+    let app = Router::new()
+        .route("/auth/computer-use-principal", post(principal))
+        .route("/buffered", get(buffered))
+        .route("/switched-stream", get(switched_stream));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑不上可切换回环端口");
+    let addr = listener.local_addr().expect("取不到可切换端口");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    (format!("http://{addr}"), controls)
 }
 
 /// 与 `origin_guard_test::state` 同款，但远端指向假 cortexd、入站凭据可配。
@@ -108,6 +237,7 @@ fn state(dir: &Path, remote_base: &str, inbound: Option<&str>) -> LocalState {
         mcp: Arc::new(cortex_mcp::McpHub::empty()),
         mcp_path: Arc::from(dir.join("mcp.json").as_path()),
         runs: crate::runs::Runs::new(),
+        computer_leases: Arc::new(crate::computer_lease::ComputerLeaseRegistry::new()),
         remote: remote.clone(),
         llm: Arc::new(llm),
         confirms: Arc::new(ConfirmRegistry::from_env().expect("默认超时可用")),
@@ -157,6 +287,27 @@ async fn call(
         .expect("Infallible")
 }
 
+fn last_bearer(seen: &Seen) -> Option<String> {
+    seen.lock()
+        .expect("测试内的锁不该中毒")
+        .last()
+        .cloned()
+        .flatten()
+}
+
+fn namespace(user: &str) -> PrincipalNamespace {
+    PrincipalNamespace::from_verified("a".repeat(64), user).expect("测试主体合法")
+}
+
+fn bind_account(remote: &Remote, token: &str, user: &str) -> PrincipalNamespace {
+    let namespace = namespace(user);
+    remote.set_token(Some(token.into()));
+    remote
+        .bind_principal(&namespace)
+        .expect("测试 token 与主体可以原子绑定");
+    namespace
+}
+
 /// **不变式 1：入站凭据永远不出这台机器 —— 轮换后出站的是现值。**
 ///
 /// 复现的正是那条死锁：客户端每个请求都带着钉住的旧凭据，而出站凭据已经
@@ -186,12 +337,7 @@ async fn a_pinned_inbound_credential_is_swapped_for_the_current_outbound_one() {
     let resp = call(&st, "GET", "/auth/me", Some("T0"), "").await;
     assert_eq!(resp.status(), StatusCode::OK, "反代应当把请求送到假远端");
 
-    let got = seen
-        .lock()
-        .expect("测试内的锁不该中毒")
-        .last()
-        .cloned()
-        .flatten();
+    let got = last_bearer(&seen);
     assert_eq!(
         got.as_deref(),
         Some("Bearer T1"),
@@ -201,27 +347,152 @@ async fn a_pinned_inbound_credential_is_swapped_for_the_current_outbound_one() {
     );
 }
 
-/// 出站凭据被清掉（登出后的短暂窗口）时，本机凭据**剥掉且不补** ——
-/// 让远端用自己的话拒绝，而不是带着一把远端不认的本机凭据去挨骂。
+/// 桌面端只会在同一次登录里热推续期 token。若浏览器缓存、账号切换或错误
+/// 回调送来另一个账号的 token，local agent 必须保留原账号并把切换明确拒绝；
+/// 接受它会让正在排队的 A 指令借用 B 的身份执行。
 #[tokio::test]
-async fn with_no_outbound_credential_the_machine_bearer_is_stripped() {
+async fn a_cross_account_credential_is_rejected_and_the_existing_token_is_kept() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let (base, seen) = fake_remote().await;
+    let st = state(dir.path(), &base, Some("T0"));
+
+    let resp = call(
+        &st,
+        "PUT",
+        "/local/credential",
+        Some("T0"),
+        r#"{"token":"T1"}"#,
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "先绑定账号 A 的续期 token"
+    );
+
+    let resp = call(
+        &st,
+        "PUT",
+        "/local/credential",
+        Some("T0"),
+        r#"{"token":"T2"}"#,
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "跨账号热切换必须返回 409，而不是静默替换进程身份"
+    );
+
+    let resp = call(&st, "GET", "/auth/me", Some("T0"), "").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        last_bearer(&seen).as_deref(),
+        Some("Bearer T1"),
+        "拒绝 B 之后仍须使用账号 A 最后一次已验证的 T1"
+    );
+}
+
+/// 严格身份探针失败时不能先写共享状态再回滚：那会产生一段短暂但真实的
+/// 凭据代际变化，足以让运行中的任务误以为账号发生了切换。
+#[tokio::test]
+async fn an_unverified_credential_is_rejected_without_touching_the_current_token() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let (base, seen) = fake_remote().await;
+    let st = state(dir.path(), &base, Some("T0"));
+
+    let resp = call(
+        &st,
+        "PUT",
+        "/local/credential",
+        Some("T0"),
+        r#"{"token":"INVALID"}"#,
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "远端明确不认的 token 必须回 401"
+    );
+
+    let resp = call(&st, "GET", "/auth/me", Some("T0"), "").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        last_bearer(&seen).as_deref(),
+        Some("Bearer T0"),
+        "验证失败不得改变现有出站凭据"
+    );
+}
+
+/// 空 token 是登出入口。除清掉出站 token 外还必须清掉账号租约，否则下一次
+/// 严格验证会把新账号误认成仍在续期的旧账号。
+#[tokio::test]
+async fn an_empty_credential_clears_the_account_binding() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let (base, seen) = fake_remote().await;
+    let st = state(dir.path(), &base, Some("T0"));
+
+    let resp = call(
+        &st,
+        "PUT",
+        "/local/credential",
+        Some("T0"),
+        r#"{"token":"T1"}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        st.remote.current_principal().is_some(),
+        "非空 token 验证成功后必须绑定账号"
+    );
+
+    let resp = call(
+        &st,
+        "PUT",
+        "/local/credential",
+        Some("T0"),
+        r#"{"token":"   "}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        st.remote.current_principal().is_none(),
+        "登出后不能留下可被新账号继承的旧账号绑定"
+    );
+
+    let requests_before = seen.lock().expect("测试内的锁不该中毒").len();
+    let resp = call(&st, "GET", "/auth/me", Some("T0"), "").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "登出清空主体后，账号作用域的兜底代理必须失败关闭"
+    );
+    assert_eq!(
+        seen.lock().expect("测试内的锁不该中毒").len(),
+        requests_before,
+        "没有当前主体时不能仍把请求发到远端"
+    );
+}
+
+/// 出站凭据被清掉（登出后的短暂窗口）时，桌面账号作用域的兜底反代必须
+/// 在本地失败关闭。没有主体就没有可核对的主体代际，继续转发等于把
+/// “当前是谁”交给一条没有身份的快路径猜。
+#[tokio::test]
+async fn with_no_outbound_credential_account_scoped_proxy_fails_closed() {
     let dir = tempfile::tempdir().expect("临时目录");
     let (base, seen) = fake_remote().await;
     let st = state(dir.path(), &base, Some("T0"));
     st.remote.set_token(None);
 
     let resp = call(&st, "GET", "/auth/me", Some("T0"), "").await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let got = seen
-        .lock()
-        .expect("测试内的锁不该中毒")
-        .last()
-        .cloned()
-        .flatten();
     assert_eq!(
-        got, None,
-        "出站凭据已清时必须一个头都不带 —— 带着本机凭据出门，远端的 401 会被\
-         读成「用户凭据失效」而触发一轮毫无意义的续期"
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "没有可用于严格验证的出站凭据时，账号作用域请求必须在本地拒绝"
+    );
+    assert!(
+        seen.lock().expect("测试内的锁不该中毒").is_empty(),
+        "失败关闭不能先发出一次没有主体的远端请求"
     );
 }
 
@@ -277,4 +548,137 @@ async fn a_remote_401_comes_back_without_the_denied_by_marker() {
         "远端 401 反代回来不许带 x-cortex-denied-by —— 那个头是「本机自己拒的」\
          的唯一标记，客户端全靠它分辨「重启 agent 治不治得了」"
     );
+}
+
+#[tokio::test]
+async fn buffered_json_from_a_is_dropped_after_an_a_to_b_to_a_switch() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let (base, controls) = switchable_remote().await;
+    let st = state(dir.path(), &base, Some("T0"));
+    let (account_a, credential, _) = st
+        .remote
+        .verify_current_namespace_binding()
+        .await
+        .expect("初始身份验证");
+    let uri = "/buffered".parse().expect("固定 URI");
+    let forwarding = {
+        let st = st.clone();
+        let account_a = account_a.clone();
+        tokio::spawn(async move {
+            crate::proxy::forward_json_for_namespace(
+                &st,
+                &account_a,
+                &credential,
+                reqwest::Method::GET,
+                &uri,
+                Vec::new(),
+            )
+            .await
+        })
+    };
+
+    controls.started.notified().await;
+    bind_account(&st.remote, "T2", "user-b");
+    bind_account(&st.remote, "T0", "user-a");
+    controls.release.notify_one();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), forwarding)
+        .await
+        .expect("缓冲响应必须及时结束")
+        .expect("转发任务没有 panic");
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "A→B→A 之后，A 的旧缓冲正文不能因为主体名称再次相同而写给新登录"
+    );
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("读取冲突正文");
+    assert!(
+        !String::from_utf8_lossy(&body).contains("A-account-secret"),
+        "失败关闭响应里不能夹带旧账号正文"
+    );
+}
+
+#[tokio::test]
+async fn a_switched_stream_terminates_instead_of_leaking_the_rest_of_a_body() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let (base, controls) = switchable_remote().await;
+    let st = state(dir.path(), &base, Some("T0"));
+    let request = Request::builder()
+        .method("GET")
+        .uri("/switched-stream")
+        .body(Body::empty())
+        .expect("构造流式请求");
+    let response = crate::proxy::forward(State(st.clone()), request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), body.next())
+        .await
+        .expect("首块必须及时到达")
+        .expect("首块前流不能结束")
+        .expect("首块读取失败");
+    assert_eq!(first.as_ref(), b"A-first");
+
+    bind_account(&st.remote, "T2", "user-b");
+    bind_account(&st.remote, "T0", "user-a");
+    controls.release.notify_one();
+
+    let next = tokio::time::timeout(std::time::Duration::from_secs(2), body.next())
+        .await
+        .expect("切换后必须及时终止流")
+        .expect("流不能在没有错误的情况下悄悄成功结束");
+    let error = next.expect_err("A→B→A 之后不得再交出 A-second");
+    assert!(
+        error.to_string().contains("登录账号"),
+        "流终止必须给出可诊断的账号切换错误，实际为 {error}"
+    );
+}
+
+#[tokio::test]
+async fn same_account_token_renewal_does_not_cut_an_inflight_stream() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let (base, controls) = switchable_remote().await;
+    let st = state(dir.path(), &base, Some("T0"));
+    let request = Request::builder()
+        .method("GET")
+        .uri("/switched-stream")
+        .body(Body::empty())
+        .expect("构造流式请求");
+    let response = crate::proxy::forward(State(st.clone()), request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), body.next())
+        .await
+        .expect("首块必须及时到达")
+        .expect("首块前流不能结束")
+        .expect("首块读取失败");
+    assert_eq!(first.as_ref(), b"A-first");
+
+    let account_a = st.remote.current_principal().expect("首块发出时已经绑定 A");
+    let epoch_before = st
+        .remote
+        .principal_epoch_for(&account_a)
+        .expect("A 的主体代际应可读");
+    st.remote
+        .set_token_for_principal("T1".into(), &account_a)
+        .expect("同账号续期应被接受");
+    assert_eq!(
+        st.remote.principal_epoch_for(&account_a),
+        Some(epoch_before),
+        "同一账号换 token 不得推进主体代际"
+    );
+    controls.release.notify_one();
+
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), body.next())
+        .await
+        .expect("续期不能卡住流")
+        .expect("续期后流应继续")
+        .expect("续期后正文不得报错");
+    assert_eq!(
+        second.as_ref(),
+        b"A-second",
+        "同账号续期必须让正在进行的那条流转完"
+    );
+    assert!(body.next().await.is_none(), "上游结束后代理流也应正常结束");
 }

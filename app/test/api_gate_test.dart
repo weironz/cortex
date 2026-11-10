@@ -271,8 +271,16 @@ void main() {
       );
     });
 
-    test('还没钉上时回落到当前值 —— 与钉之前的行为一致', () {
-      expect(apiToken(userToken: 'now', onLocalAgent: true), 'now');
+    test('还没钉上时也使用独立本机控制凭据', () {
+      expect(
+        apiToken(userToken: 'now', onLocalAgent: true),
+        localAgentToken(null),
+      );
+      expect(
+        apiToken(userToken: 'now', onLocalAgent: true),
+        isNot('now'),
+        reason: '本机不能回落到账户token',
+      );
       expect(
         apiToken(userToken: null, onLocalAgent: true),
         isNotEmpty,

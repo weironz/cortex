@@ -1,0 +1,25 @@
+{
+  "memorySteadyStateProven": false,
+  "verifiedCompletedRun": true,
+  "sourceDirectory": "C:\\Users\\willz\\AppData\\Local\\Temp\\CortexReadonlySteady\\steady-repro-b1-4h-c3-20261110",
+  "preservedAtUtc": "2026-11-10T00:04:01.8368692Z",
+  "scope": "completed_candidate_driver_readonly_fixture_4h_not_product_or_memory_acceptance",
+  "copied": {
+    "summary": {
+      "sha256": "60392a7696a51b86cec9fd531aa889558d85aa12d23cd968d942ed051a4bb43c",
+      "path": "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\results\\cua-candidate-c3-4h-2026-11-10\\summary.json"
+    },
+    "samples": {
+      "sha256": "c5245804191ad48059477afdb1490452e64061e8dabe02285018c1533fff7887",
+      "path": "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\results\\cua-candidate-c3-4h-2026-11-10\\samples.jsonl"
+    },
+    "owner": {
+      "sha256": "24517857791fbf0ef44990c36cecca6039bdd6b9e81d5a6c26eeb7b10d35c00b",
+      "path": "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\results\\cua-candidate-c3-4h-2026-11-10\\owner.json"
+    },
+    "analysis": {
+      "sha256": "ee0a3b00e937d5273c28626bf3ff733d72ca3cffbd444d0c7588a491086f6d22",
+      "path": "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\results\\cua-candidate-c3-4h-2026-11-10\\analysis.json"
+    }
+  }
+}

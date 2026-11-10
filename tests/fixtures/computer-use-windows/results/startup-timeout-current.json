@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-11-02T05:56:37.0153980Z",
+  "scenario": "cortex-local startup with unreachable remote",
+  "remote": "http://127.0.0.1:1",
+  "previousObservedSeconds": 4.172,
+  "currentObservedSeconds": 2.133,
+  "addressWritten": true,
+  "exitedBeforeAddress": false,
+  "method": "start cortex-local with a temporary empty MCP config and poll --addr-file every 50 ms"
+}

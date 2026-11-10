@@ -23,6 +23,8 @@ for f in "${SH_FILES[@]}"; do
 done
 echo "✔ bash -n 通过（${#SH_FILES[@]} 个文件）"
 
+bash scripts/run-python.sh scripts/test-release-checksums.py
+
 # 以「shellcheck」开头的注释是**指令**，不是注释。
 #
 # 一句中文注释恰好断行成 `# shellcheck 会挑（SC2086）…`，shellcheck 就
@@ -43,7 +45,7 @@ else
     echo "  装上：winget install koalaman.shellcheck"
 fi
 
-python3 scripts/check-var-boundaries.py
+bash scripts/run-python.sh scripts/check-var-boundaries.py
 
 # ── justfile 里不许有 shebang recipe ──────────────────────
 #

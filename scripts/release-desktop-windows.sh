@@ -6,6 +6,8 @@
 #      scripts/release-desktop-windows.sh
 #      scripts/release-desktop-windows.sh --skip-build   # 用已有的构建产物
 #      scripts/release-desktop-windows.sh --no-exec      # 跳过启动冒烟
+#      scripts/release-desktop-windows.sh --keep-stage  # 保留打包目录供核验
+#      scripts/release-desktop-windows.sh --require-signing
 #
 #  产出：dist/cortex-desktop-vX.Y.Z-x86_64-pc-windows-msvc-setup.exe（+ .sha256）
 #
@@ -76,8 +78,23 @@ VERSION=""
 # 时没有那个 env。**改一处就要改另一处** —— 下面那条断言只保证
 # 「传进去了」，保证不了「传的是对的那个」。
 BASE_URL="${CORTEX_BASE_URL:-https://cortex.cloudcele.com/api}"
+# Pinned external desktop driver. A local unpacked directory can be supplied for
+# an offline/reproducible build; CI otherwise downloads the exact GitHub asset.
+CUA_DRIVER_DIR="${CORTEX_CUA_DRIVER_DIR:-}"
+CUA_DRIVER_VERSION="0.38.0"
+CUA_DRIVER_TAG="cua-driver-rs-v${CUA_DRIVER_VERSION}"
+CUA_DRIVER_ASSET="cua-driver-rs-${CUA_DRIVER_VERSION}-windows-x86_64-binary.zip"
+CUA_DRIVER_ASSET_SHA256="5edaa74d0afa1b55a9668dbc4f32736507bd2bd4d75b18ca1dc8881bb12402b5"
+CUA_DRIVER_EXE_SHA256="ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2"
+SIGN_CERT_SHA1="${CORTEX_WINDOWS_SIGN_CERT_SHA1:-}"
+SIGN_PFX_PATH="${CORTEX_WINDOWS_SIGN_PFX_PATH:-}"
+SIGN_PFX_PASSWORD="${CORTEX_WINDOWS_SIGN_PFX_PASSWORD:-}"
+SIGN_CERT_STORE="${CORTEX_WINDOWS_SIGN_CERT_STORE:-CurrentUser}"
+SIGN_TIMESTAMP_URL="${CORTEX_WINDOWS_TIMESTAMP_URL:-http://timestamp.digicert.com}"
+REQUIRE_SIGNING=0
 SKIP_BUILD=0
 NO_EXEC=0
+KEEP_STAGE=0
 ISCC=""
 
 while [ $# -gt 0 ]; do
@@ -90,8 +107,15 @@ while [ $# -gt 0 ]; do
         --base-url=*) BASE_URL="${1#*=}"; shift ;;
         --iscc)      ISCC="${2:-}"; shift 2 ;;
         --iscc=*)    ISCC="${1#*=}"; shift ;;
+        --sign-cert-sha1)
+                     SIGN_CERT_SHA1="${2:-}"; shift 2 ;;
+        --sign-cert-sha1=*)
+                     SIGN_CERT_SHA1="${1#*=}"; shift ;;
+        --require-signing)
+                     REQUIRE_SIGNING=1; shift ;;
         --skip-build) SKIP_BUILD=1; shift ;;
         --no-exec)   NO_EXEC=1; shift ;;
+        --keep-stage) KEEP_STAGE=1; shift ;;
         -h|--help)   sed -n '2,10p' "$0"; exit 0 ;;
         *) die "未知参数：$1" ;;
     esac
@@ -104,6 +128,76 @@ case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) ;;
     *) die "只能在 Windows（Git Bash / MSYS2）上运行 —— Flutter 的 Windows 桌面端不能交叉构建" ;;
 esac
+
+case "${SIGN_CERT_STORE}" in
+    CurrentUser|LocalMachine) ;;
+    *) die "CORTEX_WINDOWS_SIGN_CERT_STORE 只能是 CurrentUser 或 LocalMachine" ;;
+esac
+
+if [ -n "${SIGN_CERT_SHA1}" ] && [ -n "${SIGN_PFX_PATH}" ]; then
+    die "代码签名证书只能二选一：CORTEX_WINDOWS_SIGN_CERT_SHA1 或 CORTEX_WINDOWS_SIGN_PFX_PATH"
+fi
+if [ "${REQUIRE_SIGNING}" = 1 ] \
+    && [ -z "${SIGN_CERT_SHA1}" ] \
+    && [ -z "${SIGN_PFX_PATH}" ]; then
+    die "生产发布要求代码签名，但没有证书。设置 CORTEX_WINDOWS_SIGN_CERT_SHA1，或设置 CORTEX_WINDOWS_SIGN_PFX_PATH 与 CORTEX_WINDOWS_SIGN_PFX_PASSWORD"
+fi
+
+find_signtool() {
+    local p configured="${CORTEX_WINDOWS_SIGNTOOL_PATH:-}" sdk_root
+    if [ -n "${configured}" ]; then
+        printf '%s' "${configured}"
+        return
+    fi
+    for p in signtool.exe signtool; do
+        if command -v "${p}" >/dev/null 2>&1; then
+            command -v "${p}"
+            return
+        fi
+    done
+    sdk_root="/c/Program Files (x86)/Windows Kits/10/bin"
+    if [ -d "${sdk_root}" ]; then
+        # SDK 的固定路径带空格；命令替换的分词会把一个已安装工具拆成多段。
+        while IFS= read -r p; do
+            [ -x "${p}" ] && { printf '%s' "${p}"; return; }
+        done < <(printf '%s\n' "${sdk_root}"/*/x64/signtool.exe | sort -V -r)
+    fi
+    printf ''
+}
+
+SIGNTOOL=""
+if [ -n "${SIGN_CERT_SHA1}" ] || [ -n "${SIGN_PFX_PATH}" ]; then
+    SIGNTOOL="$(find_signtool)"
+    [ -n "${SIGNTOOL}" ] \
+        || die "找不到 signtool.exe；设置 CORTEX_WINDOWS_SIGNTOOL_PATH 或安装 Windows SDK"
+    if [ -n "${SIGN_PFX_PATH}" ]; then
+        [ -f "${SIGN_PFX_PATH}" ] \
+            || die "代码签名 PFX 不存在：${SIGN_PFX_PATH}"
+    fi
+fi
+
+sign_authenticode() {
+    local file="$1" win_file store_args=() sign_args=()
+    win_file="$(cygpath -w "${file}")"
+    if [ -n "${SIGN_PFX_PATH}" ]; then
+        sign_args=(/f "$(cygpath -w "${SIGN_PFX_PATH}")")
+        if [ -n "${SIGN_PFX_PASSWORD}" ]; then
+            sign_args+=(/p "${SIGN_PFX_PASSWORD}")
+        fi
+        "${SIGNTOOL}" sign "${sign_args[@]}" \
+            /fd SHA256 /tr "${SIGN_TIMESTAMP_URL}" /td SHA256 \
+            "${win_file}"
+    else
+        if [ "${SIGN_CERT_STORE}" = "LocalMachine" ]; then
+            store_args=(/sm)
+        fi
+        "${SIGNTOOL}" sign \
+            "${store_args[@]}" /sha1 "${SIGN_CERT_SHA1}" \
+            /fd SHA256 /tr "${SIGN_TIMESTAMP_URL}" /td SHA256 \
+            "${win_file}"
+    fi
+    "${SIGNTOOL}" verify /pa /all "${win_file}"
+}
 
 # ── 版本号只有一个来源 ────────────────────────────────────
 # 与 release-package.sh 同一条规矩：不传就从 Cargo.toml 现取，
@@ -221,19 +315,23 @@ cp -r "${BUNDLE}"/. "${STAGE}/"
 # 缓存命中率看起来是好的（键对上了、包也下下来了），只是编译产物一个都
 # 用不上 —— 又一个「看起来成功」的浪费。
 #
-# `CARGO_BUILD_TARGET` 认得出来就用它（CI 会设），本机不设时回落到不带
-# target 的老路径 —— 本机上没有第二个作业要对齐，多一层目录只是碍事。
-CARGO_TARGET="${CARGO_BUILD_TARGET:-}"
-if [ -n "${CARGO_TARGET}" ]; then
-    AGENT_EXE="target/${CARGO_TARGET}/release/cortex-local.exe"
-else
-    AGENT_EXE="target/release/cortex-local.exe"
-fi
+# 这个安装包已固定 x86_64 Windows；从同一个 TARGET 变量传给 Cargo，避免
+# 全局 build.target 或旧环境选择另一架构，而脚本却按默认目录捡旧文件。
+CARGO_TARGET="${TARGET}"
 if [ "${SKIP_BUILD}" != "1" ]; then
     log "cargo build --release -p cortex-local${CARGO_TARGET:+ --target ${CARGO_TARGET}}"
-    # 不显式传 --target：`CARGO_BUILD_TARGET` 已经是 cargo 认的环境变量，
-    # 再传一遍只是多一处可能写不一致的地方
-    cargo build --release -p cortex-local         || die "编 cortex-local 失败（原因在上面 cargo 自己的输出里）"
+    cargo build --release -p cortex-local --target "${CARGO_TARGET}" \
+        || die "编 cortex-local 失败（原因在上面 cargo 自己的输出里）"
+fi
+# Cargo metadata 同时识别 CARGO_TARGET_DIR 和 .cargo/config；不能在 C 盘编译后
+# 偷取 D 盘同版本的旧文件。解析失败必须停止，不能用硬编码 target 兜底。
+CARGO_OUTPUT_DIR="$(cargo metadata --offline --no-deps --format-version 1 \
+    | bash scripts/run-python.sh scripts/cargo-target-dir.py)" \
+    || die "无法核对 Cargo 实际产物根，拒绝打包旧 agent"
+if [ -n "${CARGO_TARGET}" ]; then
+    AGENT_EXE="${CARGO_OUTPUT_DIR}/${CARGO_TARGET}/release/cortex-local.exe"
+else
+    AGENT_EXE="${CARGO_OUTPUT_DIR}/release/cortex-local.exe"
 fi
 [ -f "${AGENT_EXE}" ]     || die "找不到 ${AGENT_EXE} —— 没有它，装完的桌面端会把工具跑在服务器上，
    而界面上看不出任何区别。先跑 cargo build --release -p cortex-local"
@@ -251,6 +349,108 @@ case "${AGENT_VER}" in
 esac
 cp "${AGENT_EXE}" "${STAGE}/cortex-local.exe"
 ok "已随包放入 cortex-local.exe"
+
+# ── 2c. 固定并校验 Cua Driver ──────────────────────────────
+#
+# Computer Use 不能依赖用户手工下载一个权限极大的 EXE。这里固定 release、
+# release archive hash 和主程序 hash；只有三者都对上才进入安装包。签名和
+# Cua 自己的第三方 NOTICE 也一起检查/分发。
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print tolower($1)}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print tolower($1)}'
+    else
+        die "找不到 sha256sum/shasum，无法校验 Cua Driver"
+    fi
+}
+
+CUA_CACHE="${OUT_DIR}/.cache/cua-driver-${CUA_DRIVER_VERSION}"
+CUA_EXTRACT="${CUA_CACHE}/windows-x86_64"
+if [ -n "${CUA_DRIVER_DIR}" ]; then
+    CUA_EXTRACT="$(cd "${CUA_DRIVER_DIR}" && pwd)"
+    log "使用本机 Cua Driver 目录：${CUA_EXTRACT}"
+else
+    mkdir -p "${CUA_CACHE}"
+    CUA_ARCHIVE="${CUA_CACHE}/${CUA_DRIVER_ASSET}"
+    if [ ! -f "${CUA_ARCHIVE}" ] \
+        || [ "$(sha256_file "${CUA_ARCHIVE}")" != "${CUA_DRIVER_ASSET_SHA256}" ]; then
+        rm -f "${CUA_ARCHIVE}"
+        command -v curl >/dev/null 2>&1 || die "找不到 curl，无法下载 Cua Driver"
+        CUA_URL="https://github.com/trycua/cua/releases/download/${CUA_DRIVER_TAG}/${CUA_DRIVER_ASSET}"
+        log "下载 Cua Driver ${CUA_DRIVER_VERSION}"
+        curl --fail --location --retry 3 --retry-delay 2 \
+            --output "${CUA_ARCHIVE}" "${CUA_URL}" \
+            || die "下载 Cua Driver 失败：${CUA_URL}"
+    fi
+    [ "$(sha256_file "${CUA_ARCHIVE}")" = "${CUA_DRIVER_ASSET_SHA256}" ] \
+        || die "Cua Driver 压缩包 SHA-256 不匹配：$(sha256_file "${CUA_ARCHIVE}")"
+    rm -rf "${CUA_EXTRACT}"
+    mkdir -p "${CUA_EXTRACT}"
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -q "${CUA_ARCHIVE}" -d "${CUA_EXTRACT}"
+    elif command -v 7z >/dev/null 2>&1; then
+        7z x -y "-o${CUA_EXTRACT}" "${CUA_ARCHIVE}" >/dev/null
+    elif command -v tar >/dev/null 2>&1; then
+        tar -xf "${CUA_ARCHIVE}" -C "${CUA_EXTRACT}"
+    else
+        die "找不到 unzip/7z/tar，无法展开 Cua Driver"
+    fi
+fi
+
+CUA_EXE="${CUA_EXTRACT}/cua-driver.exe"
+[ -f "${CUA_EXE}" ] || die "Cua Driver 目录缺少 cua-driver.exe：${CUA_EXTRACT}"
+[ "$(sha256_file "${CUA_EXE}")" = "${CUA_DRIVER_EXE_SHA256}" ] \
+    || die "cua-driver.exe SHA-256 不匹配：$(sha256_file "${CUA_EXE}")"
+CUA_SIGNATURE="$(powershell -NoProfile -Command \
+    "Import-Module (Join-Path \$env:SystemRoot \
+     'System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1') \
+     -ErrorAction Stop; \
+     \$s=Get-AuthenticodeSignature -LiteralPath '$(cygpath -w "${CUA_EXE}")'; \
+     Write-Output (\$s.Status.ToString() + '|' + \$s.SignerCertificate.Subject)" \
+    2>/dev/null | tr -d '\r' || true)"
+case "${CUA_SIGNATURE}" in
+    Valid*|valid*)
+        if ! printf '%s' "${CUA_SIGNATURE}" | grep -qi 'Cua AI'; then
+            die "cua-driver.exe 签名有效，但签署者不是 Cua AI：${CUA_SIGNATURE}"
+        fi
+        ok "cua-driver.exe 签名有效"
+        ;;
+    *)
+        die "cua-driver.exe 的 Authenticode 签名未通过：${CUA_SIGNATURE:-读取失败}"
+        ;;
+esac
+
+CUA_STAGE="${STAGE}/cua"
+mkdir -p "${CUA_STAGE}"
+# 本机目录模式不会重新校验发布归档；六个文件都必须与已固定的归档逐字节一致，
+# 否则辅助 exe 或 DLL 被替换后，单独校验主驱动仍可能把错误文件打进安装包。
+while read -r expected f; do
+    [ -f "${CUA_EXTRACT}/${f}" ] || die "Cua Driver 发布包缺少 ${f}"
+    actual="$(sha256_file "${CUA_EXTRACT}/${f}")"
+    [ "${actual}" = "${expected}" ] || die "Cua Driver 文件 SHA-256 不匹配：${f}"
+    cp "${CUA_EXTRACT}/${f}" "${CUA_STAGE}/${f}"
+done <<'CUA_FILE_HASHES'
+ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2 cua-driver.exe
+69aa6ea0049ce59dfd14593be77c0632f12f6eda3d4a2f4bab1a00e3a72a9754 cua-driver-uia.exe
+ffaf56a62b0f3bdaf65f2bc30612e5d6ed408362d4868d6f20e8db93be851f0c cua-cursor-theme.exe
+68c5540cc99eeb725352db3f3a944679f9d6e1757923b2d8d8ee441b39cd78d9 cua_driver_sdk.dll
+3306eb003a0c57c0c0f58a488fb9cc052630fb800a0db611d3459a76531aec87 cua_driver_node_runtime.node
+c17169f41da321baa5e7e953323c3ad660b00790176ba381e93189fba3506587 cua_driver_abi.h
+CUA_FILE_HASHES
+cp third_party/cua/LICENSE.md "${CUA_STAGE}/LICENSE.md"
+cp third_party/cua/THIRD_PARTY_NOTICES.md "${CUA_STAGE}/THIRD_PARTY_NOTICES.md"
+cp third_party/cua/SBOM.spdx.json "${CUA_STAGE}/SBOM.spdx.json"
+cp third_party/cua/README.md "${CUA_STAGE}/README.md"
+ok "已随包放入 Cua Driver ${CUA_DRIVER_VERSION} 与许可证/NOTICE"
+
+# 本地 path patch 不再由 registry 提供分发材料；保留其许可和固定补丁来源。
+SQLITE_LICENSE_STAGE="${STAGE}/licenses/libsqlite3-sys"
+mkdir -p "${SQLITE_LICENSE_STAGE}"
+for f in LICENSE README.cortex.md CORTEX-PROVENANCE.json; do
+    [ -f "third_party/libsqlite3-sys/${f}" ] || die "SQLite backport 缺少分发材料：${f}"
+    cp "third_party/libsqlite3-sys/${f}" "${SQLITE_LICENSE_STAGE}/${f}"
+done
 
 # ── 3. 补 MSVC 运行库 ─────────────────────────────────────
 # 见文件头。这三个是实测的 import 闭包（msvcp140 只再依赖另外两个），
@@ -304,6 +504,22 @@ for f in LICENSE NOTICE CHANGELOG.md; do
     cp "${f}" "${STAGE}/${f}"
 done
 
+# ── 4a. 给 Cortex 自己的两个入口签名 ──────────────────────
+#
+# Cua、Chrome/Edge 与 Flutter 依赖保留各自发行者的签名，不能二次签成
+# Cortex。这里只签我们生成并负责更新的两个入口；安装器本身在 ISCC 产出后
+# 再签一次，否则 SmartScreen 看到的仍然是“未知发布者”的壳。
+if [ -n "${SIGNTOOL}" ]; then
+    log "给 cortex_app.exe 与 cortex-local.exe 签代码签名"
+    sign_authenticode "${STAGE}/cortex_app.exe"
+    sign_authenticode "${STAGE}/cortex-local.exe"
+    ok "两个 Cortex 入口的 Authenticode 签名与时间戳已验证"
+elif [ "${REQUIRE_SIGNING}" = 1 ]; then
+    die "生产发布要求签名，但签名工具未初始化"
+else
+    warn "未配置代码签名：这是仅供本机验证的未签名构建"
+fi
+
 # ── 5. 生成「装的是什么」说明 ─────────────────────────────
 #
 # 它有两个身份：安装向导的 InfoBefore 页（装之前先看见），以及装完之后
@@ -312,6 +528,24 @@ done
 # 在 CI 的英文机器上就是一屏乱码
 INFO="${STAGE}/README.txt"
 printf '\xEF\xBB\xBF' > "${INFO}"
+if [ -n "${SIGNTOOL}" ]; then
+    SIGNING_INFO="── 代码签名 ──────────────────────────────────────────────
+这个安装程序和 Cortex 的两个入口已经用 Cortex 发布证书签名并时间戳。
+Windows 应显示可识别的发布者。发布页仍提供 SHA256SUMS；签名证明来源，
+校验和证明下载内容与发布页一致，两者都要看。"
+else
+    SIGNING_INFO="── 关于 Windows 的「未知发布者」警告 ───────────────────
+这是一份未签名的本机验证构建。Windows SmartScreen 会弹一屏蓝底的
+「Windows 已保护你的电脑」。它是警告，不是拒绝：
+点「更多信息」→「仍要运行」即可继续。
+
+生产发布必须使用 release-desktop-windows.sh --require-signing；没有证书时
+流水线应当直接失败，而不是把这份产物当成正式版。
+
+要不要继续，请你自己判断。判断依据是发布页 SHA256SUMS 里的哈希：
+
+    certutil -hashfile <文件名> SHA256"
+fi
 cat >> "${INFO}" <<EOF
 Cortex 桌面端 v${VERSION}（Windows x86_64）
 
@@ -337,17 +571,7 @@ Cortex 桌面端 v${VERSION}（Windows x86_64）
 只想看看界面长什么样：登录屏底部还有「用 Mock 数据源」，
 那是内存夹具，不连任何东西。
 
-── 关于 Windows 的「未知发布者」警告 ───────────────────
-这个安装程序**没有代码签名证书**。Windows SmartScreen 会弹一屏蓝底的
-「Windows 已保护你的电脑」。它是警告，不是拒绝：
-点「更多信息」→「仍要运行」即可继续。
-
-要不要点，请你自己判断，而不是因为这里让你点。判断依据是校验和：
-发布页上的 SHA256SUMS 里有这个文件的哈希，用
-
-    certutil -hashfile <文件名> SHA256
-
-对一遍。对得上，说明你手上这份就是发布页上那一份。
+${SIGNING_INFO}
 
 ── 连不上服务端时会怎样 ────────────────────────────────
 不是「打不开」，是退回上面那个离线形态：对话、工具、命令执行照常，
@@ -368,10 +592,16 @@ Cortex 桌面端 v${VERSION}（Windows x86_64）
 下次一跑又会重建出来。
 
 ── 这一版桌面端不能干什么 ──────────────────────────────
-  * 执行命令要**逐条确认**。这台机器上没有 Linux/macOS 那样的
-    OS 级沙箱（Windows 没有对等物），所以换成由你当场批准放行 ——
-    每跑一条命令都会弹一次，参数原文完整给你看
+  * 受限模式下命令默认使用所选 Windows 沙箱；单次宿主执行需要当场批准。
+    本机选择「完全放行」后，命令按当前用户权限执行，不再使用进程沙箱；
+    电脑操作仍受单独的应用白名单、确认和安全限制约束
   * 只发 Windows。macOS / Linux 桌面端自己 flutter build，理由见 CHANGELOG
+
+── SBOM 与来源信息 ─────────────────────────────────────
+安装目录里的 SBOM.cdx.json 是 CycloneDX 1.5 清单，记录 Rust、Flutter/Dart、
+MSVC 运行库、Cua Driver、Cortex 二进制和安装目录文件的版本与 SHA-256。
+发布页还提供 setup.exe.cdx.json；它补充安装器自身的哈希，并记录 Git 提交、
+工作区是否干净、构建输入指纹和 Flutter 引擎版本。
 
 许可证：Apache-2.0，见 LICENSE 与 NOTICE。
 EOF
@@ -402,6 +632,33 @@ if [ "${NO_EXEC}" = 1 ]; then
 else
     smoke_launch
 fi
+
+generate_sbom() {
+    local output="$1" installer="${2:-}"
+    local args=(
+        -NoProfile
+        -ExecutionPolicy Bypass
+        -File "$(cygpath -w "${SCRIPT_DIR}/generate-windows-sbom.ps1")"
+        -StageDirectory "$(cygpath -w "${STAGE}")"
+        -OutputPath "$(cygpath -w "${output}")"
+        -SourceRoot "$(cygpath -w "${REPO_ROOT}")"
+        -Version "${VERSION}"
+    )
+    if [ -n "${installer}" ]; then
+        args+=(-InstallerPath "$(cygpath -w "${installer}")")
+    fi
+    if [ -n "${CORTEX_SOURCE_FINGERPRINT:-}" ]; then
+        args+=(-SourceFingerprint "${CORTEX_SOURCE_FINGERPRINT}")
+    fi
+    powershell "${args[@]}"
+}
+
+# 先把安装目录的完整清单放进安装包，再把签名后的 setup.exe 哈希写进外部
+# SBOM。两道清单分别回答“安装目录里有什么”和“下载到的安装器是哪一份”。
+SBOM_STAGE="${STAGE}/SBOM.cdx.json"
+log "生成安装目录 CycloneDX SBOM"
+generate_sbom "${SBOM_STAGE}"
+ok "已生成 ${SBOM_STAGE}"
 
 # ── 7. 编译安装程序 ───────────────────────────────────────
 find_iscc() {
@@ -457,21 +714,41 @@ w() { cygpath -w "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"; }
 ARTIFACT="${OUT_DIR}/${NAME}-setup.exe"
 [ -f "${ARTIFACT}" ] || die "ISCC 没有产出 ${ARTIFACT}"
 
+if [ -n "${SIGNTOOL}" ]; then
+    log "给安装程序签代码签名"
+    sign_authenticode "${ARTIFACT}"
+    ok "安装程序 Authenticode 签名与时间戳已验证"
+elif [ "${REQUIRE_SIGNING}" = 1 ]; then
+    die "生产发布要求签名，但安装程序没有签名"
+fi
+
+SBOM_ARTIFACT="${ARTIFACT}.cdx.json"
+log "生成安装器 CycloneDX SBOM"
+generate_sbom "${SBOM_ARTIFACT}" "${ARTIFACT}"
+ok "已生成 ${SBOM_ARTIFACT}"
+
 # 校验和：与 release-package.sh 同规格，逐产物一份。
 # 汇总的 SHA256SUMS 由发布作业统一生成
 if command -v sha256sum >/dev/null 2>&1; then
     ( cd "${OUT_DIR}" && sha256sum "${NAME}-setup.exe" > "${NAME}-setup.exe.sha256" )
+    ( cd "${OUT_DIR}" && sha256sum "${NAME}-setup.exe.cdx.json" > "${NAME}-setup.exe.cdx.json.sha256" )
 elif command -v shasum >/dev/null 2>&1; then
     ( cd "${OUT_DIR}" && shasum -a 256 "${NAME}-setup.exe" > "${NAME}-setup.exe.sha256" )
+    ( cd "${OUT_DIR}" && shasum -a 256 "${NAME}-setup.exe.cdx.json" > "${NAME}-setup.exe.cdx.json.sha256" )
 fi
 
 SIZE="$(du -h "${ARTIFACT}" | cut -f1)"
 ok "产出 ${ARTIFACT}（${SIZE}）"
-rm -rf "${STAGE}"
+if [ "${KEEP_STAGE}" = 1 ]; then
+    log "保留打包目录供核验：${STAGE}"
+else
+    rm -rf "${STAGE}"
+fi
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
     {
         printf 'artifact=%s\n' "${ARTIFACT}"
+        printf 'sbom=%s\n' "${SBOM_ARTIFACT}"
         printf 'name=%s\n' "${NAME}-setup"
     } >> "${GITHUB_OUTPUT}"
 fi

@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "scope": "full_local_ci_real_ephemeral_postgres_windows_with_shellcheck",
+  "completedAtUtc": "2026-11-09T21:24:49.8577205Z",
+  "exitCode": 0,
+  "sourceCount": 2368,
+  "sourceChanged": [],
+  "sourceAdded": [],
+  "sourceSnapshot": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-ci-complete-20261110\\source-inputs.json",
+  "sourceSnapshotSha256": "b375d369b5292ac73f3ab86495b929172fb28e37da555b4281e30d4cd1a03581",
+  "log": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-ci-complete-20261110\\workflow-ci.log",
+  "logSha256": "ca68b937a8bd244d01cb84085ad74b9fe19e82dd5c8d1a5ff421113630327ccd",
+  "rust": {
+    "passed": 2128,
+    "ignored": 35,
+    "targetReports": 52
+  },
+  "flutter": {
+    "skipped": 7,
+    "passed": 1112,
+    "analyzer": "No issues found!"
+  },
+  "pythonRegressionPassed": 107,
+  "clippy": "--workspace --all-targets --all-features -- -D warnings",
+  "shellcheck": {
+    "shellFiles": 48,
+    "passed": true,
+    "executableSha256": "c9e82ada36ef4b8d4caf1f97fa89289048c8f4a33c2c76ffffc88bfe09ff00c5",
+    "temporaryChildPathOnly": true,
+    "source": "https://github.com/koalaman/shellcheck/releases/tag/v0.11.0",
+    "version": "0.11.0",
+    "archiveSha256": "8a4e35ab0b331c85d73567b12f2a444df187f483e5079ceffa6bda1faa2e740e"
+  },
+  "postgres": "real isolated ephemeral Docker container",
+  "productionAcceptance": false,
+  "fourHourDriverRunStillPending": true
+}

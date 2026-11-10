@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "scope": "fake_model_remote_approvals_real_http_engine_localhost_ledger_native_owned_runtime_fixture",
+  "machine": "WILLOPTPC",
+  "status": "passed",
+  "runtimeOwnership": "agent",
+  "startedAt": "2026-11-09T23:07:14.0249242Z",
+  "finishedAt": "2026-11-09T23:08:29.1248402Z",
+  "durationSeconds": 75.1,
+  "tests": {
+    "secure": {
+      "name": "computer::real::tests::cua_secure_fixture_requires_handoff_without_input",
+      "status": "passed",
+      "startedAt": "2026-11-09T23:07:17.7673791Z",
+      "exitCode": 0,
+      "harness": {
+        "exitCode": 0,
+        "runningOneLines": 1,
+        "namedPassedLines": 1,
+        "onePassedSummaryLines": 1,
+        "totalRunLines": 1,
+        "totalSummaryLines": 1,
+        "passed": true
+      },
+      "durationSeconds": 6.137,
+      "durationMilliseconds": 6137,
+      "finishedAt": "2026-11-09T23:07:23.9154989Z"
+    },
+    "soak": {
+      "name": "computer::real::tests::cua_fixture_long_running_soak",
+      "status": "passed",
+      "startedAt": "2026-11-09T23:07:24.3999787Z",
+      "exitCode": 0,
+      "harness": {
+        "exitCode": 0,
+        "runningOneLines": 1,
+        "namedPassedLines": 1,
+        "onePassedSummaryLines": 1,
+        "totalRunLines": 1,
+        "totalSummaryLines": 1,
+        "passed": true
+      },
+      "durationSeconds": 64.626,
+      "durationMilliseconds": 64626,
+      "finishedAt": "2026-11-09T23:08:29.026031Z"
+    }
+  },
+  "testExeSha256": "3d75026b144a88cf4de651216678193fd767afbc86665e5fa518254b6fa5b2b1",
+  "sourceInputsSha256": "1ef8fd1759eb6a67ee8ecc349a730e27dbaa5328e0a09f17b1b890fdc5993e88",
+  "sourceInputsCount": 481,
+  "sourceInputsUnchanged": true,
+  "testProofPath": "C:\\Users\\willz\\AppData\\Local\\Temp\\portable-owned-proof-20261110-final01\\test-artifact-proof.json",
+  "testProofSha256": "039e439fc8755cbccc1ac4702b0859f9f6dec7ad72d253caa303e3687c36921f",
+  "sourceResultPath": "C:\\Users\\willz\\AppData\\Local\\Temp\\portable-owned-primary-host-20261110-final02.json",
+  "sourceResultSha256": "df224452df5128aa6f8aaceec8cb6f52e33cfa5f7f9d7443b86de5412ece419a",
+  "rustAssertionsCovered": [
+    "secure PasswordBox screenshot suppression and PolicyHandoff",
+    "secure zero durable dispatch",
+    "soak real confirmation binding and verified durable input",
+    "fresh observation and independent fixture value witness",
+    "per-run lease release and final original Native Job drained"
+  ],
+  "privateRuntimeDirectoryRemoved": true,
+  "rawLogsRetained": false,
+  "officialCuaPin": "0.38.0",
+  "realUserAccount": false,
+  "humanApproval": false,
+  "secondHostExecuted": false,
+  "fourHourProductSoakPassed": false,
+  "productionAccepted": false
+}

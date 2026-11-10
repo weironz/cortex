@@ -1,0 +1,69 @@
+{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-e2e",
+    "scope":  "harness_only",
+    "scopeDescription":  "PowerShell + UIA/CDP application harness; this report does not represent the Cortex model, confirmation, Gateway or trace path",
+    "generatedAt":  "2026-11-02T09:16:17.5135217+00:00",
+    "durationMs":  1143,
+    "host":  {
+                 "computerName":  "WILLOPTPC",
+                 "os":  "Microsoft Windows NT 10.0.26300.0",
+                 "sessionId":  2,
+                 "desktopLockedAtReport":  true,
+                 "displayCount":  1,
+                 "displays":  [
+                                  {
+                                      "deviceName":  "\\\\.\\DISPLAY1",
+                                      "primary":  true,
+                                      "bounds":  {
+                                                     "y":  0,
+                                                     "width":  2560,
+                                                     "height":  1440,
+                                                     "x":  0
+                                                 }
+                                  }
+                              ]
+             },
+    "execution":  {
+                      "isolation":  "one Windows Job Object per task (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)",
+                      "ui":  "PowerShell + Windows UI Automation",
+                      "appAllowlist":  "exact executable paths plus process-scoped UIA roots",
+                      "resultPolicy":  "only executed checks may pass; unavailable dependencies are skipped with a reason"
+                  },
+    "summary":  {
+                    "total":  1,
+                    "pass":  1,
+                    "fail":  0,
+                    "skipped":  0
+                },
+    "tasks":  [
+                  {
+                      "id":  "fixture-invalid-args",
+                      "family":  "fixture",
+                      "application":  "Cortex fixture",
+                      "status":  "pass",
+                      "reason":  null,
+                      "timeoutSeconds":  15,
+                      "allowlist":  [
+                                        "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\target\\cortex-computer-use-windows-fixture.exe"
+                                    ],
+                      "verifier":  {
+                                       "kind":  "process exit code and observed window lifecycle",
+                                       "expected":  "no main window; exit code 2",
+                                       "actual":  "no main window observed; exit code 2"
+                                   },
+                      "details":  {
+                                      "mainWindowCreated":  false,
+                                      "observedWindows":  [
+
+                                                          ],
+                                      "pid":  98476
+                                  },
+                      "cleanup":  [
+
+                                  ],
+                      "startedAt":  "2026-11-02T09:16:18.4384015+00:00",
+                      "durationMs":  83
+                  }
+              ]
+}

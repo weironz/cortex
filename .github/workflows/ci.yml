@@ -83,7 +83,7 @@ jobs:
         run: bash scripts/lint-sh.sh
 
       - name: python 语法检查
-        run: python3 -m py_compile scripts/*.py
+        run: bash scripts/lint-py.sh
 
       # 版本号在四个地方出现（Cargo.toml / pubspec.yaml / git tag / 镜像 tag），
       # 语言不同、语法不同，没有任何一个工具会同时看到它们。漂移的失败方式是

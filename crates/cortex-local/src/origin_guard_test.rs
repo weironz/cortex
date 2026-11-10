@@ -30,13 +30,14 @@ use crate::workspaces::Workspaces;
 /// 远端指向一个没人监听的端口：这几条断言在**进到 handler 之前**就该有
 /// 结论，所以「转发会失败」正是想要的 —— 一旦哪天守卫失效，请求真的落到
 /// 反代上，测试会因为连不上远端而红，而不是悄悄变绿。
-fn state(dir: &Path, exec_env: cortex_agent::ExecEnvironment) -> LocalState {
+pub(super) fn state(dir: &Path, exec_env: cortex_agent::ExecEnvironment) -> LocalState {
     let remote = Remote::new("http://127.0.0.1:9", None).expect("构造 Remote");
     let llm = crate::llm::build(LlmRoute::Proxy, &remote).expect("Proxy 路由不需要任何 key");
     let engine = Engine {
         mcp: Arc::new(cortex_mcp::McpHub::empty()),
         mcp_path: Arc::from(dir.join("mcp.json").as_path()),
         runs: crate::runs::Runs::new(),
+        computer_leases: Arc::new(crate::computer_lease::ComputerLeaseRegistry::new()),
         remote: remote.clone(),
         llm: Arc::new(llm),
         confirms: Arc::new(ConfirmRegistry::from_env().expect("默认超时可用")),

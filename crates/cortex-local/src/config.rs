@@ -11,10 +11,202 @@ use cortex_core::{CortexError, Result};
 /// 调用点不用改。
 pub use cortex_core::state_dir;
 
+/// 配置按已完成启动认证的 owner 分区；token 刷新不改变 owner，也不搬配置。
+/// 旧共享目录没有可证明的归属，不能靠 last_user 或 _pending 自动认领。
+pub(crate) async fn owner_config_dir(
+    remote: &crate::remote::Remote,
+    fallback: &Path,
+) -> Result<PathBuf> {
+    let Some(authority) = remote.local_authority().cloned() else {
+        // 容器及旧单凭据入口已经在 main 中选择各自的状态目录。
+        return Ok(fallback.to_owned());
+    };
+    tokio::task::spawn_blocking(move || {
+        authority.with_epoch(authority.epoch(), || {
+            let owner = authority.selected_owner().ok_or_else(|| {
+                CortexError::Unauthorized("配置只能在可信 owner 绑定完成后加载".into())
+            })?;
+            let path = config_directory(&authority, &owner)?;
+            crate::local_owner::reject_link(&path.join("hooks.json"))?;
+            Ok(path)
+        })?
+    })
+    .await
+    .map_err(|e| CortexError::Config(format!("配置存储线程异常：{e}")))?
+}
+
+fn config_directory(
+    authority: &crate::local_owner::LocalAuthority,
+    owner: &crate::local_owner::OwnerKey,
+) -> Result<PathBuf> {
+    owner.validate()?;
+    if authority.selected_owner().as_ref() != Some(owner) {
+        return Err(CortexError::Unauthorized(
+            "配置 owner 与本机实例不一致".into(),
+        ));
+    }
+    let root = authority.root().join("config-v1");
+    ensure_config_directory(&root)?;
+    let path = root.join(owner.digest());
+    ensure_config_directory(&path)?;
+    Ok(path)
+}
+
+fn ensure_config_directory(path: &Path) -> Result<()> {
+    crate::local_owner::reject_link(path)?;
+    match std::fs::create_dir(path) {
+        Ok(()) => {
+            #[cfg(unix)]
+            if let Some(parent) = path.parent() {
+                std::fs::File::open(parent)
+                    .and_then(|file| file.sync_all())
+                    .map_err(config_io)?;
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(e) => Err(config_io(e)),
+    }
+}
+
+/// 显式 CORTEX_MCP_CONFIG 保持原路径；路径本身不构成跨 owner 共享许可。
+/// 默认路径也登记，防止 B 用显式路径绕回 A 的私有配置。
+pub(crate) async fn bind_mcp_config_path(
+    remote: &crate::remote::Remote,
+    path: &Path,
+) -> Result<()> {
+    let Some(authority) = remote.local_authority().cloned() else {
+        return Ok(());
+    };
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        authority.with_epoch(authority.epoch(), || {
+            let owner = authority
+                .selected_owner()
+                .ok_or_else(|| CortexError::Unauthorized("MCP 配置缺少可信 owner".into()))?;
+            check_mcp_config_owner(&authority, &owner, &path)
+        })?
+    })
+    .await
+    .map_err(|e| CortexError::Config(format!("配置存储线程异常：{e}")))?
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigFileOwner {
+    version: u32,
+    owner: crate::local_owner::OwnerKey,
+    path: String,
+}
+
+pub(crate) fn check_mcp_config_owner(
+    authority: &crate::local_owner::LocalAuthority,
+    owner: &crate::local_owner::OwnerKey,
+    path: &Path,
+) -> Result<()> {
+    use std::io::Write;
+
+    let directory = config_directory(authority, owner)?;
+    if path == directory.join("mcp.json") {
+        crate::local_owner::reject_link(path)?;
+    }
+    // 先解析已存在的父目录，文件尚未创建时也能固定同一个位置；符号链接别名
+    // 和 Windows 大小写变化不能让另一账号为同一文件重新签一份归属。
+    let identity = config_path_identity(path)?;
+    let bindings = authority.root().join("config-v1").join("path-owners");
+    ensure_config_directory(&bindings)?;
+    let marker = bindings.join(format!(
+        "{}.json",
+        crate::local_owner::secret_digest(&identity)
+    ));
+    crate::local_owner::reject_link(&marker)?;
+    let expected = ConfigFileOwner {
+        version: 1,
+        owner: owner.clone(),
+        path: identity,
+    };
+    if !marker.try_exists().map_err(config_io)? {
+        let mut file = tempfile::NamedTempFile::new_in(&bindings).map_err(config_io)?;
+        let bytes = serde_json::to_vec(&expected)
+            .map_err(|e| CortexError::Config(format!("配置归属无法编码：{e}")))?;
+        file.write_all(&bytes).map_err(config_io)?;
+        file.as_file().sync_all().map_err(config_io)?;
+        match file.persist_noclobber(&marker) {
+            Ok(_) => {
+                #[cfg(unix)]
+                std::fs::File::open(&bindings)
+                    .and_then(|file| file.sync_all())
+                    .map_err(config_io)?;
+            }
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(config_io(e.error)),
+        }
+    }
+    let saved: ConfigFileOwner =
+        serde_json::from_slice(&std::fs::read(&marker).map_err(config_io)?)
+            .map_err(|e| CortexError::Config(format!("MCP 配置归属记录损坏：{e}")))?;
+    if saved.version != 1 || saved.owner != expected.owner || saved.path != expected.path {
+        return Err(CortexError::Unauthorized(
+            "MCP 配置已绑定其他 owner；请为当前 owner 显式指定独立配置文件".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn config_path_identity(path: &Path) -> Result<String> {
+    let absolute = std::path::absolute(path).map_err(config_io)?;
+    let mut existing = absolute.as_path();
+    let mut missing = Vec::new();
+    while !existing.try_exists().map_err(config_io)? {
+        missing.push(
+            existing
+                .file_name()
+                .ok_or_else(|| CortexError::Config("MCP 配置路径没有可解析的父目录".into()))?,
+        );
+        existing = existing
+            .parent()
+            .ok_or_else(|| CortexError::Config("MCP 配置路径没有可解析的父目录".into()))?;
+    }
+    let mut resolved = existing.canonicalize().map_err(config_io)?;
+    for part in missing.into_iter().rev() {
+        resolved.push(part);
+    }
+    let identity = resolved
+        .to_str()
+        .ok_or_else(|| CortexError::Config("MCP 配置路径不是有效 Unicode".into()))?;
+    #[cfg(windows)]
+    let identity = identity.to_lowercase();
+    #[cfg(not(windows))]
+    let identity = identity.to_owned();
+    Ok(identity)
+}
+
+fn config_io(error: std::io::Error) -> CortexError {
+    CortexError::Config(format!("无法建立可信配置作用域：{error}"))
+}
+
+pub(crate) fn load_hooks(path: &Path) -> Vec<cortex_agent::hooks::Hook> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => match serde_json::from_str::<Vec<cortex_agent::hooks::Hook>>(&raw) {
+            Ok(hooks) => hooks,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "hooks.json 解析失败，本次按没有 hooks 处理");
+                Vec::new()
+            }
+        },
+        Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+#[path = "owner_config_test.rs"]
+mod owner_config_test;
+
 /// 记住「上一次是谁在用这台机器」的指针文件。
 ///
 /// 只有一行：user id。离线启动时靠它选目录 —— 一台机器上换账号本来就
 /// 不频繁，而「上一次是谁」在离线时是唯一能拿到的线索。
+#[cfg(test)]
 const LAST_USER_FILE: &str = "last_user";
 
 /// 还不知道自己是谁时先用的目录名。
@@ -22,6 +214,7 @@ const LAST_USER_FILE: &str = "last_user";
 /// 出现的条件很窄：**第一次运行且当时离线**。一旦 `/auth/me` 通了，
 /// 这片目录会被整体改名到那个账号名下（见 [`adopt_pending`]）——
 /// 那是这个进程自己排的队，归属没有歧义。
+#[cfg(test)]
 const PENDING_DIR: &str = "_pending";
 
 /// 这个账号的本地状态目录。
@@ -39,6 +232,7 @@ const PENDING_DIR: &str = "_pending";
 ///
 /// # Errors
 /// 目录建不出来。
+#[cfg(test)]
 pub fn user_dir(base: &Path, user_id: &str) -> Result<PathBuf> {
     // 目录名要进文件系统，只放已知安全的字符。user id 是 ULID，
     // 但这个函数的输入来自网络，**不能假设**
@@ -62,6 +256,7 @@ pub fn user_dir(base: &Path, user_id: &str) -> Result<PathBuf> {
 ///
 /// # Errors
 /// 目录建不出来。
+#[cfg(test)]
 pub fn last_user_dir(base: &Path) -> Result<PathBuf> {
     match std::fs::read_to_string(base.join(LAST_USER_FILE)) {
         Ok(id) if !id.trim().is_empty() => user_dir(base, id.trim()),
@@ -74,6 +269,7 @@ pub fn last_user_dir(base: &Path) -> Result<PathBuf> {
 ///
 /// 写失败只记日志：它只影响**下一次离线启动**选哪片目录，
 /// 而为了记不上这一笔就让这次启动失败是本末倒置。
+#[cfg(test)]
 pub fn remember_user(base: &Path, user_id: &str) {
     if let Err(e) = std::fs::write(base.join(LAST_USER_FILE), user_id) {
         tracing::warn!(error = %e, "记不下当前账号，下次离线启动可能选错目录");
@@ -85,6 +281,7 @@ pub fn remember_user(base: &Path, user_id: &str) {
 /// 只在 `_pending` 存在而目标目录**还不存在**时搬 —— 目标已经有东西说明
 /// 那个账号之前在线用过，两边合并需要逐条判断归属，而这里没有那个信息。
 /// 那种情况下 `_pending` 原地留着，日志里说清楚，不猜。
+#[cfg(test)]
 pub fn adopt_pending(base: &Path, user_id: &str) {
     let pending = base.join("users").join(PENDING_DIR);
     if !pending.exists() {

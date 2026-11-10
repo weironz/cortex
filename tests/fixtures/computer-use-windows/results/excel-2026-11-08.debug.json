@@ -1,0 +1,78 @@
+{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-e2e",
+    "scope":  "harness_only",
+    "scopeDescription":  "PowerShell + UIA/CDP application harness; this report does not represent the Cortex model, confirmation, Gateway or trace path",
+    "generatedAt":  "2026-11-08T08:01:30.1877534+00:00",
+    "durationMs":  14254,
+    "host":  {
+                 "computerName":  "WILLOPTPC",
+                 "os":  "Microsoft Windows NT 10.0.26300.0",
+                 "sessionId":  1,
+                 "desktopLockedAtReport":  false,
+                 "displayCount":  1,
+                 "displays":  [
+                                  {
+                                      "deviceName":  "\\\\.\\DISPLAY1",
+                                      "primary":  true,
+                                      "bounds":  {
+                                                     "y":  0,
+                                                     "width":  2560,
+                                                     "height":  1440,
+                                                     "x":  0
+                                                 }
+                                  }
+                              ]
+             },
+    "execution":  {
+                      "isolation":  "one Windows Job Object per task (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)",
+                      "ui":  "PowerShell + Windows UI Automation",
+                      "appAllowlist":  "exact executable paths plus process-scoped UIA roots",
+                      "resultPolicy":  "only executed checks may pass; unavailable dependencies are skipped with a reason"
+                  },
+    "summary":  {
+                    "total":  1,
+                    "pass":  1,
+                    "fail":  0,
+                    "skipped":  0
+                },
+    "tasks":  [
+                  {
+                      "id":  "excel-edit-save-cell",
+                      "family":  "excel",
+                      "application":  "Microsoft Excel",
+                      "status":  "pass",
+                      "reason":  null,
+                      "timeoutSeconds":  90,
+                      "allowlist":  [
+                                        "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE"
+                                    ],
+                      "verifier":  {
+                                       "kind":  "Excel UI edit plus workbook filesystem verifier",
+                                       "expected":  "cortexexcelcb0c6ea3a6e64c0a8682de65e53198e6",
+                                       "actual":  "cortexexcelcb0c6ea3a6e64c0a8682de65e53198e6"
+                                   },
+                      "details":  {
+                                      "workbook":  "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\artifacts\\excel-666e650469ac4fb3beaa740ac41d2cf8\\acceptance.xlsx",
+                                      "savedValue":  true,
+                                      "editControlBeforeCommit":  "cortexexcelcb0c6ea3a6e64c0a8682de65e53198e6",
+                                      "inputDelivery":  "process-scoped UIA A2 selection, foreground ownership proof, real keyboard text plus Enter, and Ctrl+S; OpenXML was used only to verify the saved file",
+                                      "formulaBarAfterCommit":  "",
+                                      "formulaBarMatched":  false,
+                                      "saveCompletedAt":  "2026-11-08T08:01:40.9658140Z",
+                                      "isolation":  {
+                                                        "processId":  61388,
+                                                        "windowId":  "0x12181C",
+                                                        "windowProcessId":  61388,
+                                                        "commandLine":  "\"C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE\" /x \"D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\artifacts\\excel-666e650469ac4fb3beaa740ac41d2cf8\\acceptance.xlsx\"",
+                                                        "excelEditWindowId":  "0x91832"
+                                                    }
+                                  },
+                      "cleanup":  [
+
+                                  ],
+                      "startedAt":  "2026-11-08T08:01:31.2018132+00:00",
+                      "durationMs":  13085
+                  }
+              ]
+}

@@ -1,5 +1,6 @@
 import 'attachment.dart';
 import 'tool_call.dart';
+import 'message_persistence.dart';
 import 'turn_block.dart';
 
 enum MessageRole { user, assistant }
@@ -19,6 +20,7 @@ class ChatMessage {
     this.blocks = const [],
     this.attachments = const [],
     this.episodeId,
+    this.persistence,
     this.error,
     this.errorIsDeterministic = false,
     this.models = const [],
@@ -59,6 +61,7 @@ class ChatMessage {
 
   /// Server-assigned archival id, available once the turn completes.
   final String? episodeId;
+  final MessagePersistence? persistence;
 
   /// Non-null when the turn failed; rendered inline instead of a bubble body.
   final String? error;
@@ -81,6 +84,7 @@ class ChatMessage {
     List<TurnBlock>? blocks,
     List<Attachment>? attachments,
     String? episodeId,
+    MessagePersistence? persistence,
     String? error,
     bool? errorIsDeterministic,
   }) => ChatMessage(
@@ -92,7 +96,9 @@ class ChatMessage {
     blocks: blocks ?? this.blocks,
     attachments: attachments ?? this.attachments,
     episodeId: episodeId ?? this.episodeId,
+    persistence: persistence ?? this.persistence,
     error: error ?? this.error,
     errorIsDeterministic: errorIsDeterministic ?? this.errorIsDeterministic,
+    models: models,
   );
 }

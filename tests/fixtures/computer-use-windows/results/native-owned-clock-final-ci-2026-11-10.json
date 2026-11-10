@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "scope": "full_local_ci_after_native_owned_fixture_sql_and_handoff_clock_repairs",
+  "completedAtUtc": "2026-11-09T23:43:44.8032399Z",
+  "exitCode": 0,
+  "sourceCount": 2384,
+  "changed": [],
+  "added": [],
+  "rust": {
+    "ignored": 35,
+    "passed": 2132,
+    "reports": 52
+  },
+  "flutter": {
+    "passed": 1113,
+    "skipped": 7
+  },
+  "windowsFixtures": 170,
+  "pythonRegression": 107,
+  "sourceSnapshot": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-ci-owned-handoff-clock-final-20261110\\source-inputs.json",
+  "sourceSnapshotSha256": "0c05afd2a621ae46eac2b3d700a610e6a7f2951866918fd806ea0ad8cb5d1f8b",
+  "log": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-ci-owned-handoff-clock-final-20261110\\workflow-ci.log",
+  "logSha256": "4fd3a507a1b34cd90c7d7446d5b1c30349870aff5e5f9866fbad89e92ac2f3ac",
+  "runtimeFourHourPassed": false,
+  "productionAccepted": false
+}

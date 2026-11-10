@@ -12,6 +12,8 @@ import '../settings/settings_sheet.dart';
 import '../shell/widgets/sync_indicator.dart';
 import 'session_changes_sheet.dart';
 import 'widgets/awaiting_confirm_pill.dart';
+import 'widgets/computer_use_status.dart';
+import 'widgets/computer_use_trace_viewer.dart';
 import 'widgets/confirm_panel.dart';
 import 'widgets/conversation_view.dart';
 import 'widgets/message_composer.dart';
@@ -153,6 +155,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
         // 紧挨着输入框：一轮正在跑时用户的眼睛就在这儿，而且离发送键近到
         // 划不过去。为什么不是模态，见 `ConfirmPanel`
         const ConfirmPanel(),
+        const ComputerUseStatus(),
         MessageComposer(
           // ⚠️ **不能是 `hasSession`。** 惰性建会话之后白纸上没有 id，
           // 那样写会把输入框整个禁用 —— 而白纸恰恰是要在这里开口的地方，
@@ -261,6 +264,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
             // 会话行上那个琥珀点只有翻到那一行才看得见，这颗 pill 保证
             // 「有人在等」这件事在任何滚动位置都可见，点一下直达
             const AwaitingConfirmPill(),
+            const ComputerUseTraceButton(),
             // 工作区那个 chip 搬去了输入框底下（见 `MessageComposer` 里的
             // `_BeforeSendChips`）：它与权限档是同一类东西 —— 发出去**之前**
             // 要定的事。这一排剩下的都是应用级的显示开关，混在一起会让人

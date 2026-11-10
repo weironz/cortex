@@ -1,0 +1,4 @@
+/target/
+/artifacts/
+/results/*.stdout.log
+/results/debug-*.json

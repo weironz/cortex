@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "scope": "canonical_just_windows_soak_entry_real_owned_fixture_60s_and_supervisor",
+  "status": "passed",
+  "portablePath": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-soak-entry-real60s-20261110.json",
+  "portableSha256": "a17ddbfa806962ff611e53f8981da83475b8a2a32bffecd2e47340f635556029",
+  "ownerPath": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-soak-entry-real60s-20261110.json.owner.json",
+  "ownerSha256": "093f9948d76e1c68134cba2b3625fd15162b9e33663615163a9a6de33386534d",
+  "nonce": "a4e3d308cebc4e69934a209458f11919",
+  "requestedSeconds": 60,
+  "tests": {
+    "secure": {
+      "name": "computer::real::tests::cua_secure_fixture_requires_handoff_without_input",
+      "status": "passed",
+      "startedAt": "2026-11-10T00:37:46.4342589Z",
+      "exitCode": 0,
+      "harness": {
+        "exitCode": 0,
+        "runningOneLines": 1,
+        "namedPassedLines": 1,
+        "onePassedSummaryLines": 1,
+        "totalRunLines": 1,
+        "totalSummaryLines": 1,
+        "passed": true
+      },
+      "durationSeconds": 5.211,
+      "durationMilliseconds": 5211,
+      "finishedAt": "2026-11-10T00:37:51.6557087Z"
+    },
+    "soak": {
+      "name": "computer::real::tests::cua_fixture_long_running_soak",
+      "status": "passed",
+      "startedAt": "2026-11-10T00:37:52.1342493Z",
+      "exitCode": 0,
+      "harness": {
+        "exitCode": 0,
+        "runningOneLines": 1,
+        "namedPassedLines": 1,
+        "onePassedSummaryLines": 1,
+        "totalRunLines": 1,
+        "totalSummaryLines": 1,
+        "passed": true
+      },
+      "durationSeconds": 62.266,
+      "durationMilliseconds": 62266,
+      "finishedAt": "2026-11-10T00:38:54.4009672Z"
+    }
+  },
+  "ownerVerified": true,
+  "originalJobDrained": true,
+  "powerRequestReleased": true,
+  "sourceInputsUnchanged": true,
+  "originalInputsUnchanged": true,
+  "frozenInputsUnchanged": true,
+  "toolSourcesUnchanged": true,
+  "validateOnlyNoRuntimeOutputVerified": true,
+  "headlessChecks": 48,
+  "finalRunConsumerAccepted": true,
+  "realUserAccount": false,
+  "humanApproval": false,
+  "productionAccepted": false
+}

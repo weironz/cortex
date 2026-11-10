@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "scope": "integrated_full_local_ci_with_windows_fixture_and_artifact_regressions",
+  "completedAtUtc": "2026-11-09T22:12:55.8133047Z",
+  "exitCode": 0,
+  "sourceCount": 2379,
+  "changed": [],
+  "added": [],
+  "sourceSnapshot": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-ci-second-host-integration-20261110\\source-inputs.json",
+  "sourceSnapshotSha256": "a482099a2c8c468690da44fadca5b584b0224466271c0ba7c51861d14703975b",
+  "log": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-ci-second-host-integration-20261110\\workflow-ci.log",
+  "logSha256": "209400600d4e840c1eb01b0029e8899fae316c31f9be7ab9eabb143ff2ab4c34",
+  "rust": {
+    "ignored": 35,
+    "targetReports": 52,
+    "passed": 2128
+  },
+  "flutter": {
+    "analyzerPassed": true,
+    "skipped": 7,
+    "passed": 1112
+  },
+  "nativeRegression": {
+    "canonicalGitBashPs51": true,
+    "totalChecks": 170,
+    "artifactChecks": 55,
+    "utf8Checks": 18,
+    "desktopScenarios": 48,
+    "desktopAssertions": 97
+  },
+  "pythonRegressionPassed": 107,
+  "shellcheck": {
+    "shellFiles": 49,
+    "version": "0.11.0",
+    "passed": true
+  },
+  "clippyAllFeaturesDenyWarnings": true,
+  "postgres": "isolated real ephemeral Postgres",
+  "productionAccepted": false
+}

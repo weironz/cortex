@@ -1,0 +1,100 @@
+﻿{
+    "suite":  "cortex-computer-use-windows-dpi-permonitorv2",
+    "schemaVersion":  1,
+    "generatedAt":  "2026-10-29T21:07:19.1749402+00:00",
+    "restoredScaleRelative":  0,
+    "results":  [
+                    {
+                        "scale_percent":  100,
+                        "scale_rel":  0,
+                        "process_dpi_awareness":  2,
+                        "window_dpi":  96,
+                        "expected_window_dpi":  96,
+                        "window_bounds":  {
+                                              "height":  428,
+                                              "width":  636,
+                                              "x":  962,
+                                              "y":  481
+                                          },
+                        "screenshot_width":  634,
+                        "screenshot_height":  426,
+                        "geometry_ratio_x":  1,
+                        "geometry_ratio_y":  1,
+                        "set_effect":  "unverifiable",
+                        "click_effect":  "unverifiable",
+                        "click_local_x":  548,
+                        "click_local_y":  171,
+                        "verification_passed":  true,
+                        "status_value":  "Cortex DPI 100 pixel smoke"
+                    },
+                    {
+                        "scale_percent":  125,
+                        "scale_rel":  1,
+                        "process_dpi_awareness":  2,
+                        "window_dpi":  120,
+                        "expected_window_dpi":  120,
+                        "window_bounds":  {
+                                              "height":  536,
+                                              "width":  796,
+                                              "x":  962,
+                                              "y":  481
+                                          },
+                        "screenshot_width":  794,
+                        "screenshot_height":  534,
+                        "geometry_ratio_x":  1.2516,
+                        "geometry_ratio_y":  1.2523,
+                        "set_effect":  "unverifiable",
+                        "click_effect":  "unverifiable",
+                        "click_local_x":  708,
+                        "click_local_y":  177,
+                        "verification_passed":  true,
+                        "status_value":  "Cortex DPI 125 pixel smoke"
+                    },
+                    {
+                        "scale_percent":  150,
+                        "scale_rel":  2,
+                        "process_dpi_awareness":  2,
+                        "window_dpi":  144,
+                        "expected_window_dpi":  144,
+                        "window_bounds":  {
+                                              "height":  645,
+                                              "width":  958,
+                                              "x":  961,
+                                              "y":  481
+                                          },
+                        "screenshot_width":  956,
+                        "screenshot_height":  643,
+                        "geometry_ratio_x":  1.5063,
+                        "geometry_ratio_y":  1.507,
+                        "set_effect":  "unverifiable",
+                        "click_effect":  "unverifiable",
+                        "click_local_x":  869,
+                        "click_local_y":  182,
+                        "verification_passed":  true,
+                        "status_value":  "Cortex DPI 150 pixel smoke"
+                    },
+                    {
+                        "scale_percent":  200,
+                        "scale_rel":  4,
+                        "process_dpi_awareness":  2,
+                        "window_dpi":  192,
+                        "expected_window_dpi":  192,
+                        "window_bounds":  {
+                                              "height":  860,
+                                              "width":  1278,
+                                              "x":  961,
+                                              "y":  481
+                                          },
+                        "screenshot_width":  1276,
+                        "screenshot_height":  858,
+                        "geometry_ratio_x":  2.0094,
+                        "geometry_ratio_y":  2.0093,
+                        "set_effect":  "unverifiable",
+                        "click_effect":  "unverifiable",
+                        "click_local_x":  1189,
+                        "click_local_y":  193,
+                        "verification_passed":  true,
+                        "status_value":  "Cortex DPI 200 pixel smoke"
+                    }
+                ]
+}

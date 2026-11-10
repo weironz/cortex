@@ -1,0 +1,55 @@
+{
+  "status": "local_validation_passed",
+  "scope": "integrated_sqlite_backport_and_sbom_source_hardening",
+  "ci": {
+    "scope": "full_local_ci_frozen_portable_owned_runtime_source",
+    "exitCode": 0,
+    "completedAtUtc": "2026-11-10T02:14:11.9030285Z",
+    "changed": [],
+    "sourceCount": 2430,
+    "log": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-ci-sqlite-backport-integrated-20261110\\workflow-ci.log",
+    "added": []
+  },
+  "ciLogSha256": "5b4e2c6fb2d3d063aed5ba25bcf9f62008f3bbb72478f4cde35febb2fd2502d9",
+  "rust": {
+    "passed": 2134,
+    "ignored": 35,
+    "reports": 52
+  },
+  "flutter": {
+    "skipped": 7,
+    "passed": 1113,
+    "analyzer": "No issues found"
+  },
+  "shortSmoke": {
+    "initialAttempt": "preflight_rejected_empty_worker_environment_before_gui",
+    "realModel": false,
+    "logSha256": "27a653adde8ca61ed17877c0c20cf37957e59fc7383838de66aaa24be0dbe818",
+    "exitCode": 0,
+    "realRemote": false,
+    "scope": "real_http_native_owned_cua_fixture_short_smoke",
+    "humanApproval": false,
+    "longTest": false,
+    "completedAtUtc": "2026-11-10T02:14:34.9767549Z",
+    "driverSha256": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+    "fixtureSha256": "f84d4fe03b660f20bfd20445bdd8a74f724236cf188622265a38ef6a36a6757d"
+  },
+  "shortSmokeTestSeconds": 23.48,
+  "nativeSourceSha256": "8eb8665825d55aee8eb65fba61ea37946fe47946c9fcdb5737b2188a8b667ff8",
+  "cargoLockSha256": "b39bbfd9a27400e2b9df4c9ccc3cdd6aa708ffa93ff7c158cea431c1ab1e46c5",
+  "newRegressionSha256": "410b5d0da20338e0db81b3339c1338ba55e7a92b84b7814b4c5a8c21541636ca",
+  "sbomSelftestChecks": 106,
+  "longTest": "cancelled_by_user_not_completed",
+  "secondWindows": "deferred_by_user_unverified",
+  "newInstallerBuilt": false,
+  "committed": false,
+  "released": false,
+  "productionAccepted": false,
+  "limits": [
+    "real_model_remote_human_approval_not_verified_by_fixture",
+    "long_term_memory_stability_not_proven",
+    "cross_host_display_rdp_sleep_and_installer_lifecycle_not_verified",
+    "formal_signing_not_available"
+  ],
+  "recordedAtUtc": "2026-11-10T02:18:00.8816253Z"
+}

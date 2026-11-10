@@ -1,0 +1,31 @@
+{
+  "scope": "isolated_fixed_regressions_original_red_upstream_backport_green_not_integrated",
+  "mainWorkspaceIntegrated": false,
+  "testSourceSha256": "410b5d0da20338e0db81b3339c1338ba55e7a92b84b7814b4c5a8c21541636ca",
+  "originalRed": {
+    "exitCode": 101,
+    "exactTwoFailures": true,
+    "testSourceSha256": "410b5d0da20338e0db81b3339c1338ba55e7a92b84b7814b4c5a8c21541636ca",
+    "mainWorkspaceModified": false,
+    "completedAtUtc": "2026-11-10T01:11:20.9345406Z",
+    "logSha256": "520667c2ed03307a9780ee69d4c6d1e1359ea327ebcb937791d8d04c889913e0",
+    "sqliteError": "SQLITE_IOERR_TRUNCATE",
+    "scope": "new_windows_regressions_against_original_unpatched_sqlite"
+  },
+  "patchedGreen": {
+    "ignored": 2,
+    "clippyLogSha256": "6cc4b1ef94ffbdee364d835d4e97e9b34976bd54f33b3c2e1dde9ee4e24786fa",
+    "allTargetsClippyPassed": true,
+    "testLogSha256": "ee701f5e081812d7163c39120e3329d6276eb4b9f2d4a67a4e9862f63f5510c8",
+    "failed": 0,
+    "passed": 58,
+    "fmtPassed": true
+  },
+  "diagnosticExampleSourceArchivedOutsideCargoDiscovery": true,
+  "diagnosticSourceArchiveSha256": "bf05c0f41b701a61afd8aa4076a80a513c49c50aebb2137186e17e8956261b43",
+  "registryCrateSha256Verified": "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1",
+  "currentMainSourceInputsSha256": "fc6d1e3201e7b47f24186d6d58c05bc4399a65609be0b20f4955132526d2bbc3",
+  "currentMainValidatedOnly": true,
+  "currentMainValidationStartedProcesses": 0,
+  "observedAtUtc": "2026-11-10T01:14:34.4476652Z"
+}

@@ -40,14 +40,13 @@ VersionInfoDescription=Cortex 桌面端安装程序
 
 ; ── 装在用户目录，不要管理员权限 ──────────────────────────
 ;
-; 这份安装程序**没有代码签名**（理由见 CHANGELOG）。不签名 + 要求提权
-; 意味着用户要连过两关：先是 SmartScreen 的蓝屏，再是 UAC 那个红底的
-; 「未知发布者」。而这个程序装进 %LOCALAPPDATA%\Programs 完全够用 ——
-; 它不注册服务、不写 HKLM、不装驱动，没有任何需要管理员的动作。
+; 正式发布必须由 release-desktop-windows.sh 在编译前后分别给入口与安装器
+; 做 Authenticode 签名和时间戳。本机开发仍可显式产出未签名构建，但
+; `--require-signing` 会在没有证书或 signtool 时直接失败。
 ;
-; 于是 PrivilegesRequired=lowest：全程零 UAC，用户只需要判断一次
-; （SmartScreen 那一次），而不是两次。少一个吓人的弹窗，
-; 就少一个「这软件是不是有问题」的理由。
+; 安装范围仍装在 %LOCALAPPDATA%\Programs：它不注册服务、不写 HKLM、不装
+; 驱动，没有需要管理员的动作。签名解决发布者身份，最低权限解决安装边界，
+; 两件事都要成立。
 PrivilegesRequired=lowest
 DefaultDirName={autopf}\Cortex
 DefaultGroupName=Cortex

@@ -7,6 +7,8 @@ mod attachments;
 mod auth;
 mod blobs;
 mod chat;
+mod computer_principal;
+mod computer_traces;
 mod confirmations;
 mod errors;
 mod health;
@@ -18,6 +20,8 @@ pub use attachments::*;
 pub use auth::*;
 pub use blobs::*;
 pub use chat::*;
+pub use computer_principal::*;
+pub use computer_traces::*;
 pub use confirmations::*;
 pub use errors::*;
 pub use health::*;
@@ -39,6 +43,7 @@ mod tests {
     #[test]
     fn done_carries_what_the_turn_drew() {
         let ev = super::ChatEvent::Done {
+            persistence: None,
             episode_id: "ep1".into(),
             models: vec!["qwen-image".into()],
             attachments: vec![super::AttachmentRef {
@@ -64,6 +69,7 @@ mod tests {
         }
 
         let empty = serde_json::to_string(&super::ChatEvent::Done {
+            persistence: None,
             episode_id: "ep1".into(),
             models: Vec::new(),
             attachments: Vec::new(),

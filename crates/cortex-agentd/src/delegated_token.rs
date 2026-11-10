@@ -438,6 +438,10 @@ mod tests {
             (Method::POST, "/agents/heartbeat"),
             (Method::GET, "/agents"),
             (Method::POST, "/auth/ticket"),
+            // 严格 Computer Use principal 只认用户 access token。把委托凭据
+            // 放进白名单会让不可信沙箱替某个会话取得账号主体，等于抹掉本
+            // 入口与普通兼容认证之间的边界。
+            (Method::POST, "/auth/computer-use-principal"),
             // 写 episode 是 POST；GET 那条是回放别人的对话
             (Method::GET, "/episodes/01ABC"),
             // 多一层路径就是另一个端点

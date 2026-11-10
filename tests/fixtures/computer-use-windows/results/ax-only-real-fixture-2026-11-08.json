@@ -1,0 +1,19 @@
+﻿{
+    "schemaVersion":  1,
+    "scope":  "real_driver_and_owned_fixture_ax_only",
+    "status":  "passed",
+    "testName":  "computer::real::tests::cua_ax_only_fixture_sets_value_clicks_and_verifies_without_images",
+    "testSha256":  "8FB67EA2F1D7474F2CDEF2673442E4082AAD5F5CB830C016CFBA79BA905F8418",
+    "fixtureSha256":  "090A49FB1321451D8C67FDE06E04B712045C68BED922DB55444AEBF05E4A4609",
+    "driverSha256":  "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+    "startedAt":  "2026-11-08T15:33:02.9026865+00:00",
+    "workDirectory":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-ax-smoke-b075b9a862e243c695ab15cce315bd9e",
+    "testExitCode":  0,
+    "testSummaryMatched":  true,
+    "failure":  null,
+    "cleanupErrors":  [
+
+                      ],
+    "finishedAt":  "2026-11-08T15:33:27.8459464+00:00",
+    "durationSeconds":  24.948
+}

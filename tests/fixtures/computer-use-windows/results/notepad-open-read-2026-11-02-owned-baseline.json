@@ -1,0 +1,63 @@
+{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-e2e",
+    "scope":  "harness_only",
+    "scopeDescription":  "PowerShell + UIA/CDP application harness; this report does not represent the Cortex model, confirmation, Gateway or trace path",
+    "generatedAt":  "2026-11-02T08:29:09.5836918+00:00",
+    "durationMs":  10849,
+    "host":  {
+                 "computerName":  "WILLOPTPC",
+                 "os":  "Microsoft Windows NT 10.0.26300.0",
+                 "sessionId":  2,
+                 "displayCount":  1,
+                 "displays":  [
+                                  {
+                                      "deviceName":  "\\\\.\\DISPLAY1",
+                                      "primary":  true,
+                                      "bounds":  {
+                                                     "y":  0,
+                                                     "width":  2560,
+                                                     "height":  1440,
+                                                     "x":  0
+                                                 }
+                                  }
+                              ]
+             },
+    "execution":  {
+                      "isolation":  "one Windows Job Object per task (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)",
+                      "ui":  "PowerShell + Windows UI Automation",
+                      "appAllowlist":  "exact executable paths plus process-scoped UIA roots",
+                      "resultPolicy":  "only executed checks may pass; unavailable dependencies are skipped with a reason"
+                  },
+    "summary":  {
+                    "total":  1,
+                    "pass":  0,
+                    "fail":  1,
+                    "skipped":  0
+                },
+    "tasks":  [
+                  {
+                      "id":  "notepad-open-read",
+                      "family":  "notepad",
+                      "application":  "Windows Notepad",
+                      "status":  "fail",
+                      "reason":  "The isolated Notepad baseline did not settle to one exact process and window.",
+                      "timeoutSeconds":  40,
+                      "allowlist":  [
+                                        "C:\\WINDOWS\\System32\\notepad.exe",
+                                        "C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe\\Notepad\\Notepad.exe"
+                                    ],
+                      "verifier":  null,
+                      "details":  {
+                                      "exceptionType":  "System.Management.Automation.RuntimeException",
+                                      "scriptStackTrace":  "在 Wait-Until、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 564 行\r\n在 Invoke-NotepadAction、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 3854 行\r\n在 Invoke-AcceptanceTask、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 4687 行\r\n在 Invoke-WorkerMode、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 4775 行\r\n在 \u003cScriptBlock\u003e、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 5074 行",
+                                      "failurePosition":  "所在位置 D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1:564 字符: 5\r\n+     throw $FailureMessage\r\n+     ~~~~~~~~~~~~~~~~~~~~~"
+                                  },
+                      "cleanup":  [
+                                      "worker exception captured"
+                                  ],
+                      "startedAt":  "2026-11-02T08:29:10.5035048+00:00",
+                      "durationMs":  9795
+                  }
+              ]
+}

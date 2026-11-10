@@ -1,0 +1,409 @@
+﻿{
+    "schema_version":  1,
+    "scope":  "driver_readonly_fixture_ab",
+    "status":  "PASS",
+    "investigation_only":  true,
+    "product_signature_gate_passed":  false,
+    "memory_steady_state_asserted":  false,
+    "failure_code":  null,
+    "warmup":  3,
+    "observations":  6,
+    "sample_every":  2,
+    "interval_ms":  0,
+    "call_timeout_ms":  20000,
+    "group_timeout_seconds":  120,
+    "post_end_samples":  3,
+    "fixture_sha256":  "090a49fb1321451d8c67fde06e04b712045c68bed922db55444aebf05e4a4609",
+    "fixture_exit_code":  0,
+    "fixture_cleanup_ok":  true,
+    "groups":  [
+                   {
+                       "role":  "official",
+                       "driver_sha256":  "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+                       "status":  "PASS",
+                       "failure_code":  null,
+                       "warmup_completed":  3,
+                       "observations_completed":  6,
+                       "end_session_verified":  true,
+                       "post_end_samples":  3,
+                       "cli_attempts":  12,
+                       "cli_exit_codes":  12,
+                       "cli_zero_exits":  12,
+                       "cli_stdout_chars":  31184,
+                       "cli_stderr_chars":  0,
+                       "observed_elements_total":  54,
+                       "observed_tree_chars_total":  6264,
+                       "warmup_elapsed_ms_total":  3384.9702,
+                       "observation_elapsed_ms_total":  7860.8123000000014,
+                       "cleanup_ok":  true,
+                       "daemon_exit_code":  -1,
+                       "samples":  [
+                                       {
+                                           "phase":  "before_warmup",
+                                           "observations_completed":  0,
+                                           "elapsed_ms":  513.3279,
+                                           "driver":  {
+                                                          "pid":  28120,
+                                                          "private_bytes":  7671808,
+                                                          "handles":  243,
+                                                          "threads":  39,
+                                                          "cpu_ms":  234.375
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  135393280,
+                                                           "handles":  940,
+                                                           "threads":  31,
+                                                           "cpu_ms":  750
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "after_warmup",
+                                           "observations_completed":  0,
+                                           "elapsed_ms":  4178.2584000000006,
+                                           "driver":  {
+                                                          "pid":  28120,
+                                                          "private_bytes":  12046336,
+                                                          "handles":  464,
+                                                          "threads":  44,
+                                                          "cpu_ms":  2875
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  128466944,
+                                                           "handles":  1050,
+                                                           "threads":  32,
+                                                           "cpu_ms":  875
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "observations",
+                                           "observations_completed":  2,
+                                           "elapsed_ms":  6789.2948000000006,
+                                           "driver":  {
+                                                          "pid":  28120,
+                                                          "private_bytes":  11911168,
+                                                          "handles":  465,
+                                                          "threads":  44,
+                                                          "cpu_ms":  4781.25
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  123908096,
+                                                           "handles":  1047,
+                                                           "threads":  32,
+                                                           "cpu_ms":  906.25
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "observations",
+                                           "observations_completed":  4,
+                                           "elapsed_ms":  9684.6393,
+                                           "driver":  {
+                                                          "pid":  28120,
+                                                          "private_bytes":  12148736,
+                                                          "handles":  465,
+                                                          "threads":  44,
+                                                          "cpu_ms":  7125
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  123908096,
+                                                           "handles":  1047,
+                                                           "threads":  32,
+                                                           "cpu_ms":  968.75
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "observations",
+                                           "observations_completed":  6,
+                                           "elapsed_ms":  12455.717900000001,
+                                           "driver":  {
+                                                          "pid":  28120,
+                                                          "private_bytes":  12599296,
+                                                          "handles":  465,
+                                                          "threads":  44,
+                                                          "cpu_ms":  9328.125
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  123920384,
+                                                           "handles":  1048,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1078.125
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "before_end_session",
+                                           "observations_completed":  6,
+                                           "elapsed_ms":  12493.931900000001,
+                                           "driver":  {
+                                                          "pid":  28120,
+                                                          "private_bytes":  12599296,
+                                                          "handles":  465,
+                                                          "threads":  44,
+                                                          "cpu_ms":  9328.125
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  123920384,
+                                                           "handles":  1048,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1078.125
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "after_end_session",
+                                           "observations_completed":  6,
+                                           "elapsed_ms":  13603.7885,
+                                           "driver":  {
+                                                          "pid":  28120,
+                                                          "private_bytes":  12861440,
+                                                          "handles":  465,
+                                                          "threads":  44,
+                                                          "cpu_ms":  9328.125
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  123920384,
+                                                           "handles":  1048,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1078.125
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "after_end_session",
+                                           "observations_completed":  6,
+                                           "elapsed_ms":  14647.9243,
+                                           "driver":  {
+                                                          "pid":  28120,
+                                                          "private_bytes":  12861440,
+                                                          "handles":  465,
+                                                          "threads":  44,
+                                                          "cpu_ms":  9328.125
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  123920384,
+                                                           "handles":  1048,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1078.125
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "after_end_session",
+                                           "observations_completed":  6,
+                                           "elapsed_ms":  15705.512700000001,
+                                           "driver":  {
+                                                          "pid":  28120,
+                                                          "private_bytes":  12861440,
+                                                          "handles":  465,
+                                                          "threads":  44,
+                                                          "cpu_ms":  9328.125
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  123920384,
+                                                           "handles":  1048,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1093.75
+                                                       }
+                                       }
+                                   ]
+                   },
+                   {
+                       "role":  "candidate",
+                       "driver_sha256":  "47179075f4ce1a36bda71e1939ceae0fbc124288923967a9965cd054d8089f5a",
+                       "status":  "PASS",
+                       "failure_code":  null,
+                       "warmup_completed":  3,
+                       "observations_completed":  6,
+                       "end_session_verified":  true,
+                       "post_end_samples":  3,
+                       "cli_attempts":  12,
+                       "cli_exit_codes":  12,
+                       "cli_zero_exits":  12,
+                       "cli_stdout_chars":  31184,
+                       "cli_stderr_chars":  0,
+                       "observed_elements_total":  54,
+                       "observed_tree_chars_total":  6264,
+                       "warmup_elapsed_ms_total":  3215.0064,
+                       "observation_elapsed_ms_total":  7700.2948,
+                       "cleanup_ok":  true,
+                       "daemon_exit_code":  -1,
+                       "samples":  [
+                                       {
+                                           "phase":  "before_warmup",
+                                           "observations_completed":  0,
+                                           "elapsed_ms":  451.6549,
+                                           "driver":  {
+                                                          "pid":  69220,
+                                                          "private_bytes":  7843840,
+                                                          "handles":  243,
+                                                          "threads":  39,
+                                                          "cpu_ms":  234.375
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  123928576,
+                                                           "handles":  1049,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1093.75
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "after_warmup",
+                                           "observations_completed":  0,
+                                           "elapsed_ms":  3829.2161,
+                                           "driver":  {
+                                                          "pid":  69220,
+                                                          "private_bytes":  11206656,
+                                                          "handles":  464,
+                                                          "threads":  44,
+                                                          "cpu_ms":  2890.625
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  125440000,
+                                                           "handles":  1053,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1140.625
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "observations",
+                                           "observations_completed":  2,
+                                           "elapsed_ms":  6602.0228000000006,
+                                           "driver":  {
+                                                          "pid":  69220,
+                                                          "private_bytes":  11857920,
+                                                          "handles":  465,
+                                                          "threads":  44,
+                                                          "cpu_ms":  5156.25
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  125440000,
+                                                           "handles":  1053,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1234.375
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "observations",
+                                           "observations_completed":  4,
+                                           "elapsed_ms":  9250.7054,
+                                           "driver":  {
+                                                          "pid":  69220,
+                                                          "private_bytes":  11735040,
+                                                          "handles":  465,
+                                                          "threads":  44,
+                                                          "cpu_ms":  7218.75
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  125440000,
+                                                           "handles":  1053,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1312.5
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "observations",
+                                           "observations_completed":  6,
+                                           "elapsed_ms":  11920.849600000001,
+                                           "driver":  {
+                                                          "pid":  69220,
+                                                          "private_bytes":  11677696,
+                                                          "handles":  465,
+                                                          "threads":  44,
+                                                          "cpu_ms":  9265.625
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  125440000,
+                                                           "handles":  1053,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1375
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "before_end_session",
+                                           "observations_completed":  6,
+                                           "elapsed_ms":  11953.367400000001,
+                                           "driver":  {
+                                                          "pid":  69220,
+                                                          "private_bytes":  11677696,
+                                                          "handles":  465,
+                                                          "threads":  44,
+                                                          "cpu_ms":  9265.625
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  125440000,
+                                                           "handles":  1053,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1375
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "after_end_session",
+                                           "observations_completed":  6,
+                                           "elapsed_ms":  13046.778900000001,
+                                           "driver":  {
+                                                          "pid":  69220,
+                                                          "private_bytes":  12107776,
+                                                          "handles":  460,
+                                                          "threads":  43,
+                                                          "cpu_ms":  9265.625
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  125440000,
+                                                           "handles":  1049,
+                                                           "threads":  32,
+                                                           "cpu_ms":  1375
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "after_end_session",
+                                           "observations_completed":  6,
+                                           "elapsed_ms":  14105.0741,
+                                           "driver":  {
+                                                          "pid":  69220,
+                                                          "private_bytes":  12107776,
+                                                          "handles":  460,
+                                                          "threads":  43,
+                                                          "cpu_ms":  9265.625
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  125399040,
+                                                           "handles":  1046,
+                                                           "threads":  31,
+                                                           "cpu_ms":  1375
+                                                       }
+                                       },
+                                       {
+                                           "phase":  "after_end_session",
+                                           "observations_completed":  6,
+                                           "elapsed_ms":  15154.1399,
+                                           "driver":  {
+                                                          "pid":  69220,
+                                                          "private_bytes":  12107776,
+                                                          "handles":  460,
+                                                          "threads":  43,
+                                                          "cpu_ms":  9265.625
+                                                      },
+                                           "fixture":  {
+                                                           "pid":  44728,
+                                                           "private_bytes":  125399040,
+                                                           "handles":  1046,
+                                                           "threads":  31,
+                                                           "cpu_ms":  1406.25
+                                                       }
+                                       }
+                                   ]
+                   }
+               ]
+}

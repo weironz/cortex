@@ -6,6 +6,7 @@ import '../../api/api_exception.dart';
 import '../../core/formatting.dart';
 import '../../design_system/design_system.dart';
 import '../../models/chat_session.dart';
+import '../../models/message_persistence.dart';
 import '../../models/project.dart';
 import '../../models/session_search_hit.dart';
 import '../../state/app_providers.dart';
@@ -1226,6 +1227,9 @@ class _SessionTileState extends State<_SessionTile> {
             opacity: hot || widget.selected ? 1 : 0,
             child: SessionTileMenu(
               archived: session.archived,
+              remoteHistoryReady: MessagePersistence.canForkRemote(
+                session.persistence,
+              ),
               enabled: hot || widget.selected,
               canMove: widget.canMove,
               onRename: widget.onRename,
@@ -1275,9 +1279,11 @@ class SessionTileMenu extends ConsumerWidget {
     required this.onToggleArchive,
     required this.onMove,
     required this.onExport,
+    this.remoteHistoryReady = true,
   });
 
   final bool archived;
+  final bool remoteHistoryReady;
   final bool enabled;
   final bool canMove;
   final VoidCallback onRename;
@@ -1344,7 +1350,7 @@ class SessionTileMenu extends ConsumerWidget {
         PopupMenuItem(
           value: 'fork',
           height: 38,
-          enabled: !offline,
+          enabled: !offline && remoteHistoryReady,
           child: const Row(
             children: [
               Icon(Icons.call_split_rounded, size: 15),

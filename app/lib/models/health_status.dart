@@ -60,7 +60,7 @@ class HealthStatus {
 
   /// 当前连接是否真的能投递输入动作。
   bool get canActOnComputer =>
-      computerUse && (computerCapabilities?.act ?? true);
+      computerUse && (computerCapabilities?.canAct ?? true);
 
   /// 这个 agent 进程受什么保护 —— agent 自己实测出来的一句话
   /// （`cortex_agent::status_line_for`）。`null` = 老服务端不报，
@@ -172,34 +172,83 @@ class HealthStatus {
   );
 }
 
+/// 写入的机器级前置状态；ready 仍不能替代驱动能力或既有动作授权。
+enum ComputerWriteReadiness {
+  ready,
+  authorityMissing,
+  provisionIncomplete,
+  ownerMismatch,
+  authorityUnresolved,
+  authorityInvalid,
+  authorityBusy,
+  probeUnavailable,
+  unsupported,
+  unknown;
+
+  static ComputerWriteReadiness fromJson(Object? value) => switch (value) {
+    'ready' => ready,
+    'authority_missing' => authorityMissing,
+    'provision_incomplete' => provisionIncomplete,
+    'owner_mismatch' => ownerMismatch,
+    'authority_unresolved' => authorityUnresolved,
+    'authority_invalid' => authorityInvalid,
+    'authority_busy' => authorityBusy,
+    'probe_unavailable' => probeUnavailable,
+    'unsupported' => unsupported,
+    _ => unknown,
+  };
+}
+
 class ComputerCapabilities {
   const ComputerCapabilities({
     this.listApps = false,
     this.listWindows = false,
     this.observe = false,
+    this.accessibilityOnly = false,
     this.act = false,
     this.browser = false,
     this.backgroundInput = false,
     this.secureInputDetection = false,
+    this.writeReadiness,
   });
 
   final bool listApps;
   final bool listWindows;
   final bool observe;
+
+  /// 后端明确支持无视觉时的结构化观察与元素引用动作。
+  ///
+  /// 这不保证目标的 AX 完整，也不授予输入权限；缺字段时不能根据
+  /// observe/listWindows 猜成支持，否则旧驱动仍可能返回截图。
+  final bool accessibilityOnly;
+
   final bool act;
   final bool browser;
   final bool backgroundInput;
   final bool secureInputDetection;
+
+  /// null 仅表示旧 host 没有该字段，保留旧能力声明而不推定已初始化。
+  /// 显式 null、未知字符串或畸形值都解析成 unknown，保守禁止写入。
+  final ComputerWriteReadiness? writeReadiness;
+
+  bool get canAct =>
+      act &&
+      (writeReadiness == null ||
+          writeReadiness == ComputerWriteReadiness.ready);
 
   factory ComputerCapabilities.fromJson(Map<String, dynamic> json) =>
       ComputerCapabilities(
         listApps: json['list_apps'] == true,
         listWindows: json['list_windows'] == true,
         observe: json['observe'] == true,
+        accessibilityOnly: json['accessibility_only'] == true,
         act: json['act'] == true,
         browser: json['browser'] == true,
         backgroundInput: json['background_input'] == true,
         secureInputDetection: json['secure_input_detection'] == true,
+        writeReadiness: json.containsKey('write_readiness')
+            ? ComputerWriteReadiness.fromJson(json['write_readiness'])
+            : null,
       );
 }
 

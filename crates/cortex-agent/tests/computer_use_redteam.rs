@@ -78,7 +78,7 @@ fn batch(
         observation.window().clone(),
         observation.app().clone(),
         actions,
-        Some(Verification::window_present()),
+        Some(Verification::window_title_contains("动作完成后").expect("测试验证条件应当合法")),
         now,
     )
 }
@@ -272,6 +272,66 @@ fn secure_field_requires_handoff_before_typing() {
     assert!(
         matches!(error, ProtocolError::SecureField { .. }),
         "secure field 必须得到 SecureField，而不是执行后解释；实际为 {error:?}"
+    );
+}
+
+#[test]
+fn observation_level_secure_input_rejects_any_element_target() {
+    let app = app("publisher:bank:bank.exe", "Bank");
+    let mut observation = Observation::new(
+        frame("f-secure-observation", "w1", Duration::ZERO),
+        window("w1", &app, false),
+        vec![ObservedElement::new(
+            ElementRefId::new("ordinary-action").expect("测试 ref 应当合法"),
+            Some("button".to_owned()),
+            Some("继续".to_owned()),
+            false,
+        )],
+        true,
+    )
+    .expect("测试 observation 应当合法");
+    let reference = observation
+        .take_element_ref(0)
+        .expect("普通元素也必须能签发 ref，以证明 observation 级接管");
+    let action_batch = batch(
+        &observation,
+        vec![ComputerAction::TypeText {
+            target: reference,
+            text: "must-not-type".to_owned(),
+        }],
+        Duration::from_secs(1),
+    )
+    .expect("敏感 observation 的动作批次可以构造，拒绝必须发生在授权阶段");
+
+    let error = observation
+        .authorize(&action_batch, Duration::from_secs(1))
+        .expect_err("observation 级 secure_input 不能因为动作带普通 ref 而失效");
+    assert!(
+        matches!(error, ProtocolError::SecureField { reference_id: None }),
+        "observation 级 handoff 必须得到无条件 SecureField；实际为 {error:?}"
+    );
+}
+
+#[test]
+fn multiple_actions_are_rejected_before_authorization() {
+    let app = app("publisher:editor:editor.exe", "Editor");
+    let observation = observation("f-batch", &app, false, false);
+    let error = batch(
+        &observation,
+        vec![
+            ComputerAction::PressKey {
+                keys: "Enter".to_owned(),
+            },
+            ComputerAction::PressKey {
+                keys: "Tab".to_owned(),
+            },
+        ],
+        Duration::from_secs(1),
+    )
+    .expect_err("旧 frame 上连续投递两个状态改变动作必须被拒绝");
+    assert!(
+        matches!(error, ProtocolError::TooManyActions { count: 2, max: 1 }),
+        "动作批次必须严格限制为一个动作；实际为 {error:?}"
     );
 }
 

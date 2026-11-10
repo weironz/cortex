@@ -1405,6 +1405,27 @@ mod tests {
     /// 这条必须打真库：整个正确性在那句 `SUM` 与它前面那个判断上。
     #[tokio::test]
     async fn 配额满了就不再往里收() {
+        const CHILD_ENV: &str = "CORTEX_TEST_QUOTA_ISOLATED_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // 配额来自进程级环境变量；局部锁不能保护同一测试二进制中
+            // 其他模块的读取者。单独进程才能避免污染并行的图片入库测试。
+            let module = module_path!()
+                .split_once("::")
+                .map_or(module_path!(), |(_, tail)| tail);
+            let name = format!("{module}::配额满了就不再往里收");
+            let output = std::process::Command::new(std::env::current_exe().expect("测试程序路径"))
+                .args(["--exact", &name, "--nocapture", "--test-threads=1"])
+                .env(CHILD_ENV, "1")
+                .output()
+                .expect("应能启动隔离的配额测试进程");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("running 1 test"),
+                "隔离配额测试失败或没有运行：\n{stdout}\n{stderr}"
+            );
+            return;
+        }
         let Some(url) = database_url() else {
             eprintln!("跳过：未设置 DATABASE_URL");
             return;
@@ -1473,10 +1494,7 @@ mod tests {
             .expect("造 blob 不应失败");
         }
 
-        // ⚠️ 这个测试改进程级环境变量。**上一次栽在这上面**：三条测试共用
-        // `CORTEX_MCP_CONFIG`，单跑绿、全量跑随机红。这里用同一把锁串起来
-        let _guard = quota_env_guard().await;
-        // SAFETY: 由上面那把锁串行化；同一进程里没有别的读者在并发读它
+        // SAFETY: 本用例在独立进程中单独运行，不会污染其他测试。
         unsafe { std::env::set_var("CORTEX_LIBRARY_QUOTA_BYTES", "1000") };
 
         let first = insert_item(&pool, &a, "第一份", Origin::Uploaded)
@@ -1497,7 +1515,7 @@ mod tests {
         assert_eq!(count, 1, "被拦住的那一份还是写进去了");
 
         // ── 上限为 0 = 不限（本机开发那一档）──
-        // SAFETY: 同上，由那把锁串行化
+        // SAFETY: 同上，测试进程不会并发运行其他用例。
         unsafe { std::env::set_var("CORTEX_LIBRARY_QUOTA_BYTES", "0") };
         let unlimited = insert_item(&pool, &b, "第二份", Origin::Uploaded)
             .await
@@ -1509,7 +1527,6 @@ mod tests {
 
         // SAFETY: 同上
         unsafe { std::env::remove_var("CORTEX_LIBRARY_QUOTA_BYTES") };
-        drop(_guard);
 
         // ── 占用要算得对 ──
         let usage = read_usage_raw(&pool).await.expect("读占用不应失败");
@@ -1523,21 +1540,5 @@ mod tests {
         .execute(&admin)
         .await;
         admin.close().await;
-    }
-
-    /// 改进程级环境变量的测试要排队。
-    ///
-    /// 上一次的教训（`cortex-mcp` 那三条共用 `CORTEX_MCP_CONFIG`）：不串起来
-    /// 的话，症状是单跑绿、全量跑随机红，而失败信息看起来完全像被测的行为
-    /// 坏了。
-    ///
-    /// **用 tokio 的锁而不是 `std::sync::Mutex`**：这把锁要跨 `.await` 拿着
-    /// （中间有好几次数据库往返），而 std 那个拿着不放会把整个 worker 线程
-    /// 堵住 —— clippy 的 `await_holding_lock` 说的就是这件事。
-    /// tokio 的锁也不会毒化，所以不必写 `PoisonError::into_inner`。
-    fn quota_env_guard() -> impl std::future::Future<Output = tokio::sync::MutexGuard<'static, ()>>
-    {
-        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-        LOCK.lock()
     }
 }

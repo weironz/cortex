@@ -59,8 +59,8 @@
 |---|---|---|
 | `cortex-desktop-v<版本>-x86_64-pc-windows-msvc-setup.exe` | 桌面端 GUI **+ `cortex-local`** | 绝大多数人 |
 | `cortex-v<版本>-x86_64-pc-windows-msvc.zip` | `cortex`（CLI）、`cortex-local`、`cortex-agentd` | 要 CLI 或要自己起服务端的 |
-| docker 镜像 ×4 | `cortex-agentd` / `cortex-web` / `cortex-sandbox` / `cortex-egress-proxy` | 自托管服务端的 |
-| `SHA256SUMS` | 上面每一份的校验和 | 所有人。安装包没有代码签名，这是唯一凭据 |
+| docker 镜像 ×5 | `cortex-agentd` / `cortex-web` / `cortex-sandbox` / `cortex-egress-proxy` / `cortex-backup` | 自托管服务端的 |
+| `SHA256SUMS` | 上面每一份的校验和 | 所有人。正式 Windows 安装包另有 Authenticode 签名；校验和与签名都要验证 |
 
 **两个 zip 的名字很像，装的东西完全不重叠**：带 `desktop` 的是 GUI，
 不带的是命令行那三个二进制。
@@ -439,9 +439,17 @@ certutil -hashfile cortex-desktop-v<版本>-x86_64-pc-windows-msvc-setup.exe SHA
 发布页那份」的手段 —— 下一步要跳过一个系统警告，而跳过它的前提是
 你自己已经确认过来源。
 
-### 2. Windows 会拦一次，这是预期的
+### 2. 验证发布者；正式包不应显示未知发布者
 
-**这个安装程序没有代码签名证书。** 双击之后会看到一屏蓝底白字：
+正式 Windows 发布包的 `cortex_app.exe`、`cortex-local.exe` 与 setup.exe
+都带 Authenticode 签名和时间戳。可在 PowerShell 里检查：
+
+```powershell
+Get-AuthenticodeSignature .\cortex-desktop-v<版本>-x86_64-pc-windows-msvc-setup.exe |
+    Format-List Status,SignerCertificate
+```
+
+正式包应显示 `Status: Valid`，且发布者与 Release 说明一致。若出现：
 
 ```
 Windows 已保护你的电脑
@@ -450,19 +458,16 @@ Microsoft Defender SmartScreen 阻止了无法识别的应用启动。
                                     [更多信息]  [不运行]
 ```
 
-点 **「更多信息」**，展开后会多出一个 **「仍要运行」** 按钮，点它即可继续。
-
-**为什么会看到这个**：SmartScreen 拦的不是「有病毒」，是
-「这个发布者我没见过、这个文件我没见过多少次」。代码签名证书（OV 按年
-付费，EV 更贵）能让它闭嘴，而这个项目现在没有。所以它会一直出现，
-直到这个安装程序被足够多的人下载并建立起信誉，或者我们买了证书。
+请先停止安装，重新核对发布页、文件名、SHA-256 和签名。正式发布流水线在
+证书缺失时会直接失败，因此官方安装包不应走到这个警告。开发机显式生成的
+未签名验证包会带 `README.txt` 说明；只应安装你自己构建并核对过哈希的版本。
 
 **为什么这不同于 macOS**：Gatekeeper 对没公证的应用是**硬拒绝** ——
 没有「仍要运行」这条路。SmartScreen 是警告，Gatekeeper 是拒绝。
 这就是为什么 Windows 发安装包而 macOS 不发。
 
-> 该不该点「仍要运行」，请你自己判断，而不是因为这份文档让你点。
-> 判断依据是上一步的校验和。对不上就别装。
+> 不要仅凭「仍要运行」越过一个来源不明的 SmartScreen 警告。
+> 签名或校验和任一不对，就别装。
 
 ### 3. 装到哪
 
@@ -504,6 +509,21 @@ Microsoft Defender SmartScreen 阻止了无法识别的应用启动。
 > 地址与凭据都存在客户端本地，**没有安装期配置** ——
 > 安装程序不问服务器地址，是因为它问了也没用：这个地址在
 > 登录屏上改一次就够了，而装的时候你多半还没有那台服务器。
+
+### 5. Computer Use 的当前安装边界
+
+`0.1.45` 的 Computer Use 只在 **Windows 本机 agent** 上出现，默认关闭：
+
+- Cua 桌面窗口按精确 executable allowlist 工作，Windows UIA 直接读取
+  `IsPassword`；扫描 Unknown 时整窗交给用户；
+- 隔离浏览器使用一次性 profile 和站点 allowlist，不读取日常浏览器资料；
+- 云端会话仍是命令容器，没有可见桌面，也不能借 Docker/gVisor 冒充本机
+  Computer Use。
+
+当前是受控 beta。0.1.45 最终源码的 E2E/四小时 soak、第二台 Windows、
+多屏负坐标、RDP/锁屏/睡眠恢复和签名安装后的完整启动验收尚未全部完成。
+正式 Release 说明不得把这些历史或独立 harness 结果写成 GA；实际门禁见
+[Computer Use 生产硬化状态](computer-use/16-production-hardening-2026-11-02.md)。
 
 ---
 
@@ -620,8 +640,8 @@ cortex doctor
 | `/health` 里 `auth` 是 `disabled` | `.env` 里有 `CORTEX_AUTH=disabled`，或摘要没读到 |
 | 客户端一直 401 | token 不是这台服务端的那一份。重新 `--generate-token` 并两边同时换 |
 | 登录成功，但一发消息就 401 / 404 | 地址填成了记忆服务而不是边缘入口。见 [D-4](#4-第一次打开三条路) |
-| Windows 弹「已保护你的电脑」 | SmartScreen，没有代码签名。见 [D-2](#2-windows-会拦一次这是预期的)。先对校验和再决定 |
+| Windows 弹「已保护你的电脑」 | 正式包应已签名；先停止安装并核对发布者、SHA-256 与来源。见 [D-2](#2-验证发布者正式包不应显示未知发布者) |
 | 桌面端双击之后毫无反应，连窗口都没有 | 缺 MSVC 运行库。安装程序会随包带上 —— 自己 `flutter build` 出来直接跑的，用 `scripts/release-desktop-windows.sh` 打包 |
 | 桌面端说「正在启动 agent」卡住不动 | 多半是某台 MCP server 连上了但不说话。日志最后一行会指向它 |
 | agent 看不见我的文件 | 那个会话没绑工作区，或跑的是云沙箱（容器里的 `/workspace`，不是你的硬盘） |
-| `shell` 在 Windows 上要逐条确认 | 刻意的。Windows 没有 landlock / seatbelt 的对应物，所以换一种保证：人来确认。见 [roadmap](roadmap.md) 的 D0 |
+| `shell` 在 Windows 受限模式请求宿主权限 | 刻意的。普通命令仍受进程边界约束；需要越出边界或打开本机应用时，必须带理由做单次确认。切到“完全放行”后才以当前用户的完整宿主权限执行；云端仍受容器边界约束。 |

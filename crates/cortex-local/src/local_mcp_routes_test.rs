@@ -12,7 +12,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use serde_json::{Value, json};
+use tokio::net::TcpListener;
 use tower::ServiceExt as _;
 
 use crate::config::LlmRoute;
@@ -25,11 +29,16 @@ use crate::workspaces::Workspaces;
 
 fn state(dir: &Path) -> LocalState {
     let remote = Remote::new("http://127.0.0.1:9", None).expect("构造 Remote");
+    state_with_remote(dir, remote)
+}
+
+fn state_with_remote(dir: &Path, remote: Remote) -> LocalState {
     let llm = crate::llm::build(LlmRoute::Proxy, &remote).expect("Proxy 路由不需要任何 key");
     let engine = Engine {
         mcp: Arc::new(cortex_mcp::McpHub::empty()),
         mcp_path: Arc::from(dir.join("mcp.json").as_path()),
         runs: crate::runs::Runs::new(),
+        computer_leases: Arc::new(crate::computer_lease::ComputerLeaseRegistry::new()),
         remote: remote.clone(),
         llm: Arc::new(llm),
         confirms: Arc::new(ConfirmRegistry::from_env().expect("默认超时可用")),
@@ -56,6 +65,52 @@ fn state(dir: &Path) -> LocalState {
         attach: crate::attach::AttachSwitch::default(),
         terminals: crate::terminal::Terminals::default(),
     }
+}
+
+async fn mock_principal(headers: HeaderMap, axum::Json(body): axum::Json<Value>) -> Response {
+    let authenticated = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        == Some("Bearer test-token");
+    if !authenticated {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({ "error": "unknown token" })),
+        )
+            .into_response();
+    }
+    let session_id = body.get("session_id").cloned().unwrap_or(Value::Null);
+    let session_binding = if session_id.is_null() {
+        "identity"
+    } else {
+        "existing"
+    };
+    axum::Json(json!({
+        "deployment_id": "test-deployment",
+        "deployment_url": "https://cortex.test/api",
+        "user_id": "test-user",
+        "session_id": session_id,
+        "credential_kind": "access_token",
+        "expires_in_secs": 899,
+        "session_binding": session_binding
+    }))
+    .into_response()
+}
+
+async fn state_with_principal(dir: &Path) -> (LocalState, tokio::task::JoinHandle<()>) {
+    let app = axum::Router::new().route("/auth/computer-use-principal", post(mock_principal));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("principal 替身可以监听本机端口");
+    let addr = listener.local_addr().expect("principal 替身地址");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("principal 替身可运行");
+    });
+    let remote =
+        Remote::new(format!("http://{addr}"), Some("test-token".into())).expect("构造 Remote");
+    (state_with_remote(dir, remote), server)
 }
 
 /// 一个**立刻**失败的命令。
@@ -331,7 +386,7 @@ async fn 解析会指出这个名字已经被占了() {
 #[tokio::test]
 async fn 没有轮次时列表为空且重挂回_404() {
     let dir = tempfile::tempdir().expect("临时目录");
-    let st = state(dir.path());
+    let (st, server) = state_with_principal(dir.path()).await;
 
     let (status, body) = call(&st, "GET", "/runs", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -346,6 +401,7 @@ async fn 没有轮次时列表为空且重挂回_404() {
         StatusCode::NOT_FOUND,
         "挂一个没在跑的会话该是 404 —— 客户端据此回退到照常拉历史"
     );
+    server.abort();
 }
 
 /// 跑着的那条**列得出来**，而且挂得上。
@@ -355,9 +411,28 @@ async fn 没有轮次时列表为空且重挂回_404() {
 #[tokio::test]
 async fn 跑着的轮次列得出来也挂得上() {
     let dir = tempfile::tempdir().expect("临时目录");
-    let st = state(dir.path());
+    let (st, server) = state_with_principal(dir.path()).await;
 
-    let ticket = st.engine.runs.enqueue("S9").await.expect("排一轮");
+    let (namespace, credential) = st
+        .remote
+        .verify_current_namespace_snapshot()
+        .await
+        .expect("验证当前测试主体");
+    let principal = crate::runs::run_principal::RunPrincipal::from_verified(
+        credential,
+        namespace.deployment_id(),
+        "https://cortex.test/api",
+        namespace.user_id(),
+        "S9",
+        crate::runs::run_principal::SessionBinding::Existing,
+    )
+    .expect("构造测试 principal");
+    let ticket = st
+        .engine
+        .runs
+        .enqueue_verified(principal)
+        .await
+        .expect("排一轮");
     // 许可要留住：drop 掉等于这一轮结束了，而下面要看的正是「跑着的」
     let _permit = ticket.begin().await;
     crate::runs::RunSink::new(std::sync::Arc::clone(&ticket.run))
@@ -396,4 +471,5 @@ async fn 跑着的轮次列得出来也挂得上() {
             .is_some_and(|v| v.starts_with("text/event-stream")),
         "重挂必须是 SSE —— 客户端拿它当流读，回成 JSON 的话它会一直等"
     );
+    server.abort();
 }

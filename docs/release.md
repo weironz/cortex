@@ -85,8 +85,55 @@ CHANGELOG 有这一版的条目、**没有既未被 git 跟踪又未被 gitignor
 bash scripts/release-desktop-windows.sh --version X.Y.Z
 ```
 
+本地和 CI 都显式构建 `x86_64-pc-windows-msvc`，不受全局 `build.target` 或旧环境的
+另一架构影响。agent 的产物根通过 `cargo metadata` 解析，支持 `CARGO_TARGET_DIR`
+与 Cargo 配置的自定义目录；解析失败会停止，不能回落捡默认 `target/release` 的同版本旧文件。
+`--skip-build` 仅复用该产物根下 `x86_64-pc-windows-msvc/release/cortex-local.exe`；
+使用前先执行相同的 `cargo build --release -p cortex-local --target x86_64-pc-windows-msvc`。
+跳过构建与版本号一致都不是源码新鲜度证明，正式产物仍需来源指纹和完整验收。
+
 它在压包之前会**真的启动一次那个 GUI**：Flutter 的 windows 产物不带
 MSVC 运行库，缺了它的症状是装完双击什么都不发生 —— 只有真跑一次才抓得住。
+
+打包时会逐一校验固定版本 Cua Driver 的六个文件及主驱动签名。本机审计可以加
+`--keep-stage` 保留打包目录核对驱动、许可证与 SBOM；`--no-exec` 会跳过 GUI
+启动检查，只适合已经另行验证过的本机构建，不能算作安装包的启动验收。
+
+安装目录会生成 CycloneDX 1.5 `SBOM.cdx.json`，覆盖 Rust、Flutter/Dart、
+MSVC 运行库、Cua Driver、Cortex 二进制及安装目录文件哈希。安装器成功生成后，
+同目录还会产出 `<setup.exe>.cdx.json`，补充签名后安装器的 SHA-256、Git
+提交、工作区改动指纹和 Flutter 引擎版本。Actions 与本机 Release 备用流程
+都会把两份清单纳入产物清点和附件。
+
+Windows 可先执行 `just test-windows-native-json`，验证 PS 5.1 在 936、437、UTF-8
+代码页下完整读取原生 JSON，并在失败后恢复编码。SBOM 的 Cargo 元数据读取使用
+相同入口，解析失败会停止打包。外部传入的来源指纹标为 `external-caller-supplied`，
+其输入范围以调用方随包保存的来源清单为准，不冒充生成器自己计算的工作区指纹。
+
+`just test-windows-fixtures` 还运行桌面证据判定和第二主机 test exe 来源回归，
+全程不启动 GUI 或驱动。Windows 本地 `just ci` 与 Windows Release 作业共用
+`scripts/test-windows-fixtures.sh`；非 Windows 本地运行会明确说明该项不适用。
+
+`release-checksums.sh` 只列出当前版本的 Windows 二进制 ZIP、setup.exe 和
+外部 CycloneDX SBOM；Actions 与本机发布步骤只上传这三项及 `SHA256SUMS`。
+开发机 `dist/` 中保留的旧版本、第二主机验收包和日志不会进入正式 Release。
+已有单文件 `.sha256` 不会被汇总步骤删除。对应行为回归已纳入 `just lint-sh`。
+
+本机检查可以不签名，但正式发布不能。生产命令必须加
+`--require-signing`，且证书和 `signtool.exe` 任一缺失都会在编译前失败：
+
+```bash
+export CORTEX_WINDOWS_SIGN_PFX_PATH='C:\secure\cortex-signing.pfx'
+export CORTEX_WINDOWS_SIGN_PFX_PASSWORD='…'
+bash scripts/release-desktop-windows.sh --version X.Y.Z --require-signing
+```
+
+也可以改用证书库中的 SHA-1 指纹：
+
+```bash
+export CORTEX_WINDOWS_SIGN_CERT_SHA1='…'
+export CORTEX_WINDOWS_SIGN_CERT_STORE='CurrentUser' # 或 LocalMachine
+```
 
 **裸二进制的打包脚本还在**，虽然流水线已经不发它了（见下面的表）：
 
@@ -123,6 +170,8 @@ gh workflow run release.yml -f tag=vX.Y.Z
 - 本机已登录 Docker Hub 与阿里云 ACR，或在当前环境设置
   `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`、
   `ACR_USERNAME` / `ACR_PASSWORD`；
+- 正式发布还必须提供 Windows 代码签名 PFX（路径与密码）或证书库中的
+  SHA-1 指纹；`--build-only` 是唯一允许明确产出未签名验证包的路径；
 - 当前 HEAD 正好是 tag 指向的提交，并且已跟踪文件没有未提交改动。
 
 常用选项：
@@ -143,7 +192,7 @@ just workflow-release vX.Y.Z --dry-run       # 只校验 tag/工作区并打印�
 |---|---|
 | `preflight` | 解析 tag、跑前置闸门。**其它作业全部 needs 它** |
 | `build` | 裸二进制。**自 0.1.2 起只有 Windows**，包含 cortexd + CLI + `cortex-local` |
-| `desktop` | Windows 桌面安装程序（Inno Setup）。**只有 Windows** —— macOS 的 Gatekeeper 是硬拒绝，不是警告 |
+| `desktop` | Windows 桌面安装程序（Inno Setup）。入口与安装器都做 Authenticode 签名与时间戳；证书缺失时作业失败。**只有 Windows** —— macOS 的 Gatekeeper 是硬拒绝，不是警告 |
 | `image` ×5 | `cortex-agentd`、`cortex-web`、`cortex-sandbox`、`cortex-egress-proxy`、`cortex-backup`，各推 Docker Hub 与阿里云 ACR。**推完必须真的启动一次** |
 | `release` | 汇总 `SHA256SUMS`、清点产物是否齐、从 CHANGELOG 取这一版的段落、**直接发布** |
 | `deploy` | **调 `deploy.yml` 把这一版放到生产**，然后验五条硬断言（见下） |
@@ -177,10 +226,34 @@ GitHub Release。需要一条龙时显式追加 `--deploy`，避免“只是补�
 | 版本一致 / CHANGELOG 有条目 / 无疑似凭据文件 | `release-preflight.sh` | 名字是错的产物、忘写变更日志 |
 | 每个二进制真跑一次 `--version` 并核对版本号 | `release-package.sh` | 编得过但跑不起来；**打包到陈旧产物** |
 | 真启动一次 GUI，几秒内没自己退出才算过 | `release-desktop-windows.sh` | 缺 MSVC 运行库（症状是双击之后什么都不发生） |
-| 产物清点 | `release` job | 少一个包而下载页上看不出来 |
+| `cortex_app.exe`、`cortex-local.exe`、setup.exe 的 Authenticode 与时间戳 | `release-desktop-windows.sh --require-signing` | 未签名包、签名链错误、证书缺失或签名后文件被替换 |
+| 安装目录与安装器 SBOM、文件哈希和 provenance | `generate-windows-sbom.ps1` | 依赖清单缺项、安装器哈希不符或构建来源不明 |
+| 产物清点 | `release` job | 少一个包或 SBOM 而下载页上看不出来 |
 
 一道会跑的检查胜过一道没人做的确认。要退回 draft：`release.yml` 最后那个
 `draft: false` 改回 `true`。
+
+---
+
+## Computer Use 0.1.45 发布门
+
+`0.1.45` 的 Windows Computer Use 是受控 beta 候选。发布说明和 Release 附件
+只有在以下证据全部对应同一份最终源码时，才能移除“待验收”标记：
+
+- 完整 Rust/Flutter/analyzer/脚本与版本一致性检查；
+- 真实产品链路：`/chat` -> 工具目录 -> `/confirmations` -> 生产 LocalHost
+  -> `ComputerGateway` -> Cua/浏览器 -> 新 observation -> verifier -> trace；
+- 最终指纹的 20 项 Windows E2E，且区分 `harness_only` 与实际产品链路；
+- 最终指纹的 60 秒冒烟和四小时 soak，核对退出码、前后指纹、fixture 清理前
+  存活、敏感字段接管、cycles、sessions 与重试数；
+- 第二台交互式 Windows、多显示器/负坐标、RDP/锁屏/睡眠恢复；
+- 正式 Windows 代码签名，以及干净测试用户里的安装、启动、Cua ready、
+  `/health`、退出和卸载。
+
+2026-10-30 的 18 PASS / 2 SKIP 是历史 `harness_only` 结果；旧指纹的 60 秒
+和四小时 soak 也不能用于 0.1.45 最终源码。最终重跑完成前，当前工作区不能
+作为 Computer Use GA 发布。发布镜像仍是 **5 个**：`cortex-agentd`、
+`cortex-web`、`cortex-sandbox`、`cortex-egress-proxy`、`cortex-backup`。
 
 ---
 
@@ -279,18 +352,21 @@ main 的缓存再热，第 40 行那个 COPY 也对不上 —— 而代价是每
 
 ---
 
-## 为什么不发桌面安装包
+## 桌面安装包与签名边界
 
 签名与公证是真实成本：
 
 - **macOS** `.dmg` 要 Apple Developer 账号（99 USD/年）+ notarization，
   不公证的话 Gatekeeper 直接拒绝打开
-- **Windows** 不签名的 `.msi` 会被 SmartScreen 拦，OV 证书按年付费
+- **Windows** 不签名的 setup.exe 会触发 SmartScreen；正式流水线因此强制
+  Authenticode 签名与时间戳，本地未签名产物只能作为显式验证包
 - **Linux** `.deb` / `.rpm` 本身不难，但要么自建 apt 源，要么让人手动 `dpkg -i`
 
-**发一个装不上、或者一打开就被系统拦住的安装包，比不发更糟** ——
-它会让第一次接触这个项目的人以为是软件坏了。
-0.1.0 只发二进制、Web 静态产物与 docker 镜像，这三样都不需要代码签名。
+**Windows 已经发布安装包，因此发布门不再接受“签名以后再补”的例外。**
+GitHub `release.yml` 从
+`CORTEX_WINDOWS_SIGN_PFX_BASE64` 与 `CORTEX_WINDOWS_SIGN_PFX_PASSWORD`
+两个仓库 secret 准备临时 PFX，签名完成后立即删除。缺少任一 secret 时，
+`desktop` 作业会在打包前失败。
 
 同理，`cortexd`/`cortex-web` 镜像只有 `linux/amd64`：arm64 那一半只能靠
 QEMU 模拟构建（要编译整个 Rust 依赖树 + 链接预编译的 ONNX Runtime，

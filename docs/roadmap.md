@@ -16,6 +16,11 @@
 
 ## 还剩什么 —— 一眼看完
 
+> 2026-11-10 Computer Use 本次收尾按用户要求继续本机常规 CI/短冒烟，
+> 不再安排长测，第二台 Windows 验收暂缓。两项保留未验收，不作为本次本机工作的阻塞。
+> SQLite Windows backport 已整合，完整本地 CI Rust 2134 / Flutter 1113、真实 HTTP/Cua
+> 短冒烟通过，见 [本机收尾](computer-use/38-sqlite-windows-mapped-shm-2026-11-10.md)；未发版。
+
 > **这一节 2026-08-28 提到了最前面。** 它叫「一眼看完」，而它此前排在
 > 180 行分析之后 —— 一份「接下来做什么」的文档，最该被一眼看到的东西
 > 不该要先翻过三节才见得着。
@@ -26,6 +31,7 @@ I / J 两节 15 条做完之后，这个仓库**没有成建制的缺口了**。
 
 | | 事项 | 为什么还没做 |
 |---|---|---|
+| 5 | **Windows Computer Use 收口** | `0.1.45` 已有 Windows Cua bounded 窗口通道、隔离浏览器、AX-only、动作前后置验证、审计与统一 SBOM。2026-11-09 普通会话 owner/账号隔离及持久派发账本已接入；浏览器严格原 Job 关闭、Native 所有权从 Flutter 移交 Rust、实际 RPC 句柄身份核对已实现。托管真实 HTTP/Cua fixture 回放通过（模型/远端/审批为替身，私有账本 1 verified / 0 fence / 无 pending），完整本地 CI 已通过（Rust 2018 / Flutter 1092），见 [Native 验收](computer-use/25-native-owned-runtime-validation-2026-11-09.md)。旧 18 PASS / 2 SKIP 仅是 harness；冻结指纹 f4ee6186 的四小时功能结果不能覆盖新源码或证明内存稳态。2026-11-10 持久 InputLease/epoch 与用户两步恢复已本地闭环验证（Rust 2096 / Flutter CI 1112，真实恢复后同窗口新 run 成功；远端/模型/审批为替身），见 [恢复验收](computer-use/27-input-epoch-implementation-contract.md)。旧锚原址升级已通过私有 Windows fixture 和完整本地 CI（Rust 2124 / Flutter 1112），见 [升级维护](computer-use/28-legacy-input-upgrade.md)；仍需真实旧安装维护、真实账号和真人审批、修改后 Cua 的正式 pin/内存稳态及最终长测、第二台 Windows、多屏/负坐标、RDP/睡眠恢复、正式签名和安装维护。门禁见 [生产化清单](computer-use/16-production-hardening-2026-11-02.md) |
 | ~~1~~ | ~~删掉直拨路径~~ | **2026-08-30 删掉了，而且没等那一周。**原判据是「`tunnel.count > 0` 且 `direct.last_seen` 在一周前」，量具随 v0.1.28 上生产。第二天去看，那张表**一行都没有** —— 而它零计数时主动不写空事务，所以空表就是「没人接入过」。也就是说 `tunnel > 0` 那个正对照**永远等不到**，判据靠等是满足不了的。改成三条一起看：① 表空且量具确实接上了（两个调用点都在路由里、24 小时零写失败）；② 生产上远程接入**一次都没被启用过**（两个 agent 都不带 `--allow-remote-attach`），而桌面端本来就从不传 `--attach-addr` —— 它**根本产生不出**直拨路，所以「还在走直拨的人」不是一个能靠观察发现的群体，而是手敲过那个参数的人；③ 隧道那条有全链路测试（`tunnel::tests::全链路_…`）每次构建都跑，是能用的替代。删的范围见 [architecture.md](architecture.md) ③ |
 | 2 | ~~E 阶段 1：`Workspace` 成一等对象~~ **改成「把退役做完」** | 2026-08-30 查下去发现它的两条剩余价值已经塌了一条半：`session_events.workspace` **早就在退役**（路径是设备本地状态，HTTP 面的 `workspace_patch` 只允许解绑、明确拒绝绑定；生产库里 `bind_workspace` 一条都没有）。给一个正在被排空的列加结构是反方向。当天做掉的是真正剩下的那件：**分叉会话原本照旧复制它**，成了绕过那道闸把宿主机路径写进库的唯一入口，已堵掉并有测试守着。还剩的只有 `runtime` 一个字段承担两件事（文件在哪 / 谁跑这一轮），纯命名整洁，**不值得一次 schema 迁移** |
 | ~~3~~ | ~~**compose 项目重名**~~ | **2026-08-30 在 Cormex 那边做掉了**（[e36da22](https://github.com/weironz/cormex/commit/e36da22)）。先纠正这一行自己的措辞：它指的是 **compose 项目名**，不是卷。`cortex_` 那层前缀是**项目名留下的症状** —— Cormex 的 dev compose 顶上写着 `name: cortex`，那是拆分前留下的。改成 `cormex` 就完了，一行。⚠️ **生产上那四个卷的名字不能改**：去掉 `external` 或改项目名会让 compose 新建空卷，而症状不是报错，是「数据库突然空了」；那边的 compose 早就 `external: true` + 显式 `name:` 处理好了。这一侧本来就干净（只有一个卷且钉了 `name: cortex-db-data`）。**这个仓库这条到此结束，Cormex 那边的事不在这儿跟进。** |

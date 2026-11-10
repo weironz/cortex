@@ -918,6 +918,258 @@ final computerUseProvider = NotifierProvider<ComputerUseNotifier, bool>(
   ComputerUseNotifier.new,
 );
 
+/// Windows executables the local Computer Use driver may observe or control.
+///
+/// This is separate from the per-turn switch. The allowlist decides the hard
+/// boundary; the switch decides whether a particular conversation may request
+/// those tools at all. Entries are absolute executable paths because a display
+/// name or basename is attacker-controlled.
+class ComputerUseAllowlistNotifier extends Notifier<List<String>> {
+  static const String _key = 'computer_use_allowlist';
+
+  @override
+  List<String> build() {
+    Future.microtask(_restore);
+    return defaultLocalComputerUseAllowlist();
+  }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    final raw = saved[_key];
+    if (raw == null) {
+      state = defaultLocalComputerUseAllowlist();
+      return;
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) {
+        state = const [];
+        return;
+      }
+      state = _normalize(decoded.whereType<String>());
+    } on FormatException {
+      state = const [];
+    }
+  }
+
+  Future<void> save(Iterable<String> entries) async {
+    final next = _normalize(entries);
+    state = next;
+    await ref.read(settingsPatcherProvider)(_key, jsonEncode(next));
+  }
+
+  Future<void> add(String path) => save([...state, path]);
+
+  Future<void> remove(String path) =>
+      save(state.where((entry) => entry != path));
+
+  Future<void> resetToDefaults() => save(defaultLocalComputerUseAllowlist());
+
+  List<String> _normalize(Iterable<String> entries) {
+    final seen = <String>{};
+    return [
+      for (final raw in entries)
+        if (_looksLikeWindowsExecutable(raw) &&
+            seen.add(raw.trim().toLowerCase()))
+          raw.trim(),
+    ];
+  }
+
+  bool _looksLikeWindowsExecutable(String raw) {
+    final path = raw.trim();
+    if (!path.toLowerCase().endsWith('.exe') ||
+        path.contains('\u0000') ||
+        path.contains('\n') ||
+        path.contains('\r')) {
+      return false;
+    }
+    return RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path) || path.startsWith(r'\\');
+  }
+}
+
+final computerUseAllowlistProvider =
+    NotifierProvider<ComputerUseAllowlistNotifier, List<String>>(
+      ComputerUseAllowlistNotifier.new,
+    );
+
+/// Packaged Windows apps need a package identity in addition to an exe path.
+///
+/// Stored wire format:
+/// `aumid|<AUMID>|<absolute exe path>` or
+/// `package-family|<PackageFamily>|<absolute exe path>`.
+class ComputerPackagedAllowlistNotifier extends Notifier<List<String>> {
+  static const String _key = 'computer_packaged_app_allowlist';
+
+  @override
+  List<String> build() {
+    Future.microtask(_restore);
+    return const [];
+  }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    final raw = saved[_key];
+    if (raw == null) {
+      state = const [];
+      return;
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      state = decoded is List
+          ? _normalize(decoded.whereType<String>())
+          : const [];
+    } on FormatException {
+      state = const [];
+    }
+  }
+
+  Future<void> save(Iterable<String> entries) async {
+    final next = _normalize(entries);
+    state = next;
+    await ref.read(settingsPatcherProvider)(_key, jsonEncode(next));
+  }
+
+  Future<void> add({
+    required String kind,
+    required String identity,
+    required String executable,
+  }) => save([
+    ...state,
+    '${kind == 'aumid' ? 'aumid' : 'package-family'}|'
+        '${identity.trim()}|${executable.trim()}',
+  ]);
+
+  Future<void> remove(String entry) =>
+      save(state.where((value) => value != entry));
+
+  List<String> _normalize(Iterable<String> entries) {
+    final seen = <String>{};
+    return [
+      for (final raw in entries)
+        if (_normalizeOne(raw) case final entry?
+            when seen.add(entry.toLowerCase()))
+          entry,
+    ];
+  }
+
+  String? _normalizeOne(String raw) {
+    final parts = raw.split('|');
+    if (parts.length < 3) return null;
+    final kind = parts[0].trim().toLowerCase();
+    final identity = parts[1].trim();
+    final executable = parts.sublist(2).join('|').trim();
+    if (kind != 'aumid' && kind != 'package-family') return null;
+    if (identity.contains('|')) return null;
+    if (executable.contains('|')) return null;
+    if (identity.isEmpty ||
+        identity.length > 512 ||
+        identity.contains(RegExp(r'[\x00-\x1f\r\n]'))) {
+      return null;
+    }
+    if (kind == 'aumid' && !identity.contains('!')) return null;
+    if (kind == 'package-family' && identity.contains('!')) return null;
+    if (!executable.toLowerCase().endsWith('.exe') ||
+        executable.contains('\u0000') ||
+        executable.contains('\n') ||
+        executable.contains('\r') ||
+        executable.contains('|') ||
+        (!RegExp(r'^[A-Za-z]:[\\/]').hasMatch(executable) &&
+            !executable.startsWith(r'\\'))) {
+      return null;
+    }
+    return '$kind|$identity|$executable';
+  }
+}
+
+final computerPackagedAllowlistProvider =
+    NotifierProvider<ComputerPackagedAllowlistNotifier, List<String>>(
+      ComputerPackagedAllowlistNotifier.new,
+    );
+
+/// Sites the isolated Chromium profile may reach.
+///
+/// The browser network proxy enforces this list on every connection. An empty
+/// list disables the browser channel entirely; it never means “all sites”.
+class ComputerBrowserAllowlistNotifier extends Notifier<List<String>> {
+  static const String _key = 'computer_browser_allowlist';
+
+  @override
+  List<String> build() {
+    Future.microtask(_restore);
+    return const [];
+  }
+
+  Future<void> _restore() async {
+    final saved = await ref.read(settingsReaderProvider)();
+    if (!ref.mounted) return;
+    final raw = saved[_key];
+    if (raw == null) {
+      state = const [];
+      return;
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      state = decoded is List
+          ? _normalize(decoded.whereType<String>())
+          : const [];
+    } on FormatException {
+      state = const [];
+    }
+  }
+
+  Future<void> save(Iterable<String> entries) async {
+    final next = _normalize(entries);
+    state = next;
+    await ref.read(settingsPatcherProvider)(_key, jsonEncode(next));
+  }
+
+  Future<void> add(String site) => save([...state, site]);
+
+  Future<void> remove(String site) =>
+      save(state.where((entry) => entry != site));
+
+  List<String> _normalize(Iterable<String> entries) {
+    final seen = <String>{};
+    return [
+      for (final raw in entries)
+        if (_validSite(raw) && seen.add(raw.trim().toLowerCase()))
+          raw.trim().toLowerCase(),
+    ];
+  }
+
+  bool _validSite(String raw) {
+    var value = raw.trim().toLowerCase();
+    if (value.isEmpty ||
+        value.length > 253 ||
+        value.contains(RegExp(r'[\s/?#@]'))) {
+      return false;
+    }
+    value = value.startsWith('*.') ? value.substring(2) : value;
+    final host = value.split(':').first;
+    if (!host.contains('.') ||
+        host == 'localhost' ||
+        host.endsWith('.local') ||
+        host.endsWith('.internal') ||
+        RegExp(r'^[0-9.]+$').hasMatch(host) ||
+        host.contains(':')) {
+      return false;
+    }
+    final colon = value.lastIndexOf(':');
+    if (colon != -1) {
+      final port = int.tryParse(value.substring(colon + 1));
+      if (port == null || port < 1 || port > 65535) return false;
+    }
+    return true;
+  }
+}
+
+final computerBrowserAllowlistProvider =
+    NotifierProvider<ComputerBrowserAllowlistNotifier, List<String>>(
+      ComputerBrowserAllowlistNotifier.new,
+    );
+
 final permissionModeProvider =
     NotifierProvider<PermissionModeNotifier, PermissionMode>(
       PermissionModeNotifier.new,
@@ -1005,7 +1257,9 @@ const _healthyRunThreshold = Duration(seconds: 30);
 /// resolved by aiming at a different daemon, and a stale token by signing in.
 /// Keeping a spent budget across either would mean the fix appears not to work.
 final _agentRestartBudgetProvider = Provider<_RestartBudget>((ref) {
-  ref.watch(authControllerProvider.select((s) => s.token));
+  // 同账号 access token 轮换不是一次新身份，不能顺手清空崩溃预算；
+  // 反过来，登出/重新登录确实换了失败上下文，应当重新计数。
+  ref.watch(authControllerProvider.select((s) => s.phase == AuthPhase.ready));
   ref.watch(appConfigProvider.select((c) => c.baseUrl));
   return _RestartBudget();
 });
@@ -1044,6 +1298,13 @@ class _RestartBudget {
     _lastKick = now;
     _kicks = r.kicks;
     return r.allowed;
+  }
+
+  /// deployment/user 主体已经变化，旧主体的崩溃与 401 预算都失去意义。
+  void resetForIdentityChange() {
+    consecutive = 0;
+    _lastKick = null;
+    _kicks = 0;
   }
 }
 
@@ -1094,12 +1355,71 @@ class _RestartBudget {
 ///
 /// 靠 `invalidate` 触发 onDispose 换不来这个保证：那只是排了一个停止动作，
 /// 我们不知道它什么时候真的停了。
+///
+/// 测试与平台装配共用这一个发现口。生产仍只发现贴着应用发布的那一份；
+/// 测试替换它，是为了实际覆盖 provider 的启动、换代与停止顺序，而不是只测
+/// 一个与线上接线无关的纯函数。
+@visibleForTesting
+final localAgentDiscoveryProvider = Provider<LocalAgent? Function()>(
+  (ref) => discoverLocalAgent,
+);
+
+/// `PUT /local/credential` 对本次 token 切换给出的身份结论。
+enum LocalAgentCredentialPushResult {
+  /// 服务端验明仍是同一个 `(deployment_id, user_id)`，新出站凭据已生效。
+  accepted,
+
+  /// 服务端返回 409：新凭据属于另一个账号，绝不能让旧进程继续服务它。
+  identityChanged,
+
+  /// 网络、鉴权或服务端错误。无法证明身份未变，按失败关闭处理。
+  failed,
+}
+
+@visibleForTesting
+LocalAgentCredentialPushResult agentCredentialPushResultForStatus(int status) {
+  if (status >= 200 && status < 300) {
+    return LocalAgentCredentialPushResult.accepted;
+  }
+  if (status == 409) {
+    return LocalAgentCredentialPushResult.identityChanged;
+  }
+  return LocalAgentCredentialPushResult.failed;
+}
+
+typedef LocalAgentCredentialPush =
+    Future<LocalAgentCredentialPushResult> Function({
+      required String origin,
+      required String inbound,
+      required String? outbound,
+    });
+
+/// 热推凭据的测试缝。默认实现会读取 [httpClientFactoryProvider]；生产不
+/// override，测试则无需真的在 loopback 上起 HTTP 服务。
+@visibleForTesting
+final localAgentCredentialPushProvider = Provider<LocalAgentCredentialPush>(
+  (ref) =>
+      ({
+        required String origin,
+        required String inbound,
+        required String? outbound,
+      }) => _pushAgentCredential(
+        origin: origin,
+        inbound: inbound,
+        outbound: outbound,
+        clientFactory: ref.read(httpClientFactoryProvider),
+      ),
+);
+
 final localAgentHandleProvider = Provider<LocalAgentHandle>(
   (ref) => LocalAgentHandle(),
 );
 
 class LocalAgentHandle {
   LocalAgent? _current;
+  bool _hasBoundCredential = false;
+  String? _outboundCredential;
+  Future<void> _stopTail = Future<void>.value();
 
   /// 这一轮 agent **启动时**钉住的那把本机凭据。
   ///
@@ -1117,17 +1437,88 @@ class LocalAgentHandle {
   // ignore: use_setters_to_change_properties
   void adopt(LocalAgent agent) => _current = agent;
 
+  /// 服务端已确认这把出站凭据属于当前运行中的 agent。
+  ///
+  /// 只保存 token 值用于比较；它本来就已经在内存里，不新增持久化副本。
+  void bindCredential({required String inbound, required String? outbound}) {
+    pinnedCredential = inbound;
+    _outboundCredential = outbound;
+    _hasBoundCredential = true;
+  }
+
+  /// 同账号续期成功。此方法只更新围栏，不碰进程。
+  void acceptOutboundCredential(String? outbound) {
+    if (_current == null) return;
+    _outboundCredential = outbound;
+    _hasBoundCredential = true;
+  }
+
+  /// 当前桌面端 token 是否已被运行中的 agent 接住。
+  ///
+  /// token 一换、推送还在飞时它会立即变成 false；`cortexApiProvider` 据此
+  /// 先用远端直连，绝不能在新凭据尚未验明时继续把请求送进旧账号的 agent。
+  bool acceptsOutboundCredential(String? outbound) =>
+      _current != null &&
+      _hasBoundCredential &&
+      _outboundCredential == outbound;
+
+  /// 让客户端立刻停止把新 token 路由给旧进程。真正是否退出由 [stop] 决定。
+  void invalidateCredential() {
+    _hasBoundCredential = false;
+    _outboundCredential = null;
+  }
+
   void forget(LocalAgent agent) {
-    if (identical(_current, agent)) _current = null;
+    if (identical(_current, agent)) {
+      _current = null;
+      pinnedCredential = null;
+      invalidateCredential();
+    }
   }
 
   /// 停掉并**等它真的停了**。没有 agent 时是 no-op。
   Future<void> stop() async {
     final agent = _current;
     _current = null;
-    if (agent != null) await agent.stop();
+    pinnedCredential = null;
+    invalidateCredential();
+
+    // provider 重建时 onDispose 与新 build 都会请求停止。把动作串成一条
+    // future 链，后来者等待的是同一次真实退出，而不是在旧进程还没死时
+    // 抢先拉起下一份。
+    final stopped = _stopTail.then((_) async {
+      if (agent != null) await agent.stop();
+    });
+    _stopTail = stopped.catchError((Object error, StackTrace stack) {
+      debugPrint('等待本地 agent 停止失败：$error');
+    });
+    await stopped;
+  }
+
+  /// 只停仍由 [expected] 占据当前位置的进程。
+  ///
+  /// onDispose 是异步触发的；若新一轮已经 adopt 了 B，旧闭包晚到的 stop
+  /// 不许误杀 B。
+  Future<void> stopIfCurrent(LocalAgent expected) {
+    if (!identical(_current, expected)) return Future<void>.value();
+    return stop();
   }
 }
+
+class _LocalAgentCredentialRevision extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  void advance() => state++;
+}
+
+/// [LocalAgentHandle] 是可变对象，Riverpod 看不见它内部的围栏变化。
+/// 凭据成功接住或失效时推进这个版本号，让主 API 在同一帧内改道远端或
+/// 回到已验明的本地 agent。
+final _localAgentCredentialRevisionProvider =
+    NotifierProvider<_LocalAgentCredentialRevision, int>(
+      _LocalAgentCredentialRevision.new,
+    );
 
 /// 远端不要凭据时，桌面端与本地 agent 之间的一次性凭据。
 ///
@@ -1137,26 +1528,22 @@ class LocalAgentHandle {
 ///
 /// 两种部署会走到它：离线模式（压根没有 cortexd），以及
 /// `CORTEX_AUTH=disabled` 的自托管（有 cortexd，但它不认证）。
-final String _sessionSecret = () {
+String _newLocalControlSecret() {
   final rng = Random.secure();
   return List.generate(
     32,
     (_) => rng.nextInt(256).toRadixString(16).padLeft(2, '0'),
   ).join();
-}();
+}
 
-/// 桌面端拿什么去认证**本地 agent**。
+final String _sessionSecret = _newLocalControlSecret();
+
+/// 桌面端始终用独立随机凭据控制本地 agent，用户 token 只用于远端账号。
 ///
-/// # 为什么必须是一个函数，而不是在两处各写一遍
-///
-/// 交给 agent 的（`agent.start(token:)`）与发出去的（`HttpCortexApi(token:)`）
-/// 必须是同一个值。写成两处的后果实测过：`CORTEX_AUTH=disabled` 的部署里
-/// 用户的 token 是 `null`，于是 agent 拿到 `_sessionSecret` 并据此认证，
-/// 而客户端一个 Authorization 头都不发 —— **agent 把桌面端 401 挡在门外**，
-/// 界面回到登录页说「凭据已失效，请重新填写 token」，而那个部署根本
-/// 没有 token 这回事，怎么填都没用。
+/// 启动、热更新与本机 HTTP 客户端必须使用同一把控制凭据。它不随账号刷新
+/// 改变，也不会被当成远端 access token；真实启动还会为每个新进程单独签发。
 @visibleForTesting
-String localAgentToken(String? userToken) => userToken ?? _sessionSecret;
+String localAgentToken(String? _) => _sessionSecret;
 
 /// 客户端这一次要发的凭据。[onLocalAgent] 决定它打的是 agent 还是远端。
 ///
@@ -1174,16 +1561,19 @@ String? apiToken({
 
 /// 把轮换过的凭据推给**还在跑的**那个 agent。
 ///
-/// 失败只记日志：agent 手上那把还能用到过期为止，而它写不进去的 episode
-/// 会进 outbox 等重放 —— 为一次推送失败去重启进程（砍断正在跑的轮次）
-/// 是不成比例的。
-Future<void> _pushAgentCredential({
+/// 这里必须返回明确结论。204 表示服务端验明 deployment/user 未变，可以热换；
+/// 409 表示已经切到另一账号；其余失败则无法证明边界仍成立。后两类由调用方
+/// 立刻撤掉本地路由并关闭重起，不能只写一行日志后继续宣称 ready。
+Future<LocalAgentCredentialPushResult> _pushAgentCredential({
   required String origin,
   required String inbound,
   required String? outbound,
+  http.Client Function()? clientFactory,
 }) async {
+  final ownsClient = clientFactory == null;
+  final client = clientFactory?.call() ?? http.Client();
   try {
-    final resp = await http
+    final resp = await client
         .put(
           Uri.parse('$origin/local/credential'),
           headers: {
@@ -1193,11 +1583,12 @@ Future<void> _pushAgentCredential({
           body: jsonEncode({'token': outbound}),
         )
         .timeout(const Duration(seconds: 5));
-    if (resp.statusCode >= 400) {
-      debugPrint('本地 agent 拒绝了新凭据（HTTP ${resp.statusCode}）');
-    }
+    return agentCredentialPushResultForStatus(resp.statusCode);
   } on Object catch (e) {
     debugPrint('新凭据没能推给本地 agent：$e');
+    return LocalAgentCredentialPushResult.failed;
+  } finally {
+    if (ownsClient) client.close();
   }
 }
 
@@ -1215,19 +1606,12 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   final useMock = ref.watch(appConfigProvider.select((c) => c.useMock));
   final baseUrl = ref.watch(appConfigProvider.select((c) => c.baseUrl));
   final offline = ref.watch(appConfigProvider.select((c) => c.offline));
-  // **watch 的是「有没有」，不是「是哪一把」。**
-  //
-  // 原先 watch 的是 token 本身，于是每 15 分钟一次的轮换都会重建这个
-  // provider —— onDispose 里 `agent.stop()`、换一个进程、换一个端口。
-  // 代价不只是浪费：跑着的轮次被拦腰砍断，而旧进程咽气前用一把已经
-  // 退位的凭据答的 401 会被读成「登录失效」。
-  //
-  // 登录 / 登出仍然要重建（那是真的换了身份），所以看的是「有没有」。
-  final hasToken = ref.watch(
-    authControllerProvider.select((s) => s.token != null),
+  // 生命周期看的是「认证门已经为谁打开了」，不是手里有没有一串 token。
+  // 关认证的部署与离线模式都在 ready 且 token 为 null；同一账号续期则
+  // ready 不变、token 值变。前者必须启动，后者不能重启。
+  final authReady = ref.watch(
+    authControllerProvider.select((s) => s.phase == AuthPhase.ready),
   );
-  // 启动要的是**此刻**那把，read 不建立依赖
-  final token = hasToken ? ref.read(authControllerProvider).token : null;
   // **watch 而不是 read**：改了本机模型配置要让 agent 带着新环境重启。
   // read 的话用户会保存、看到成功、然后发现模型还是老的 —— 而那时
   // 界面上没有任何东西提示他需要重启。
@@ -1237,6 +1621,15 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   // 必然变一次（AsyncLoading → AsyncData，跨进程读凭据库），于是无条件
   // watch 的那一版让**每一次冷启动**都白白杀掉一个刚 ready 的 agent。
   final localLlm = offline ? ref.watch(localLlmProvider).value : null;
+  // The sidecar reads executable paths only at process launch. Watching this
+  // provider intentionally restarts the local agent when the user changes the
+  // hard app boundary; leaving it as `read` would show a successful save while
+  // the running driver continued using the old allowlist.
+  final computerUseAllowlist = ref.watch(computerUseAllowlistProvider);
+  final packagedComputerAllowlist = ref.watch(
+    computerPackagedAllowlistProvider,
+  );
+  final browserSiteAllowlist = ref.watch(computerBrowserAllowlistProvider);
   // 关掉认证的部署（`CORTEX_AUTH=disabled`，自托管跑在 127.0.0.1 上的
   // 常见形态）根本没有 token 可拿。
   //
@@ -1248,24 +1641,31 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
   final needsToken = ref.watch(
     authControllerProvider.select((s) => s.health?.requiresToken ?? true),
   );
+  final handle = ref.read(localAgentHandleProvider);
+  // 新身份的第一条规则：旧进程先停。onDispose 只能发出一个不等待的停止，
+  // 所以这里再等同一个 handle 的串行链，确保它返回时旧进程已经咽气。
+  await handle.stop();
   if (useMock || !kLocalAgentSupported) return null;
+  if (!offline && !authReady) return null;
+  final token = authReady ? ref.read(authControllerProvider).token : null;
   // 离线模式：**没有 cortexd**，本地 agent 就是全部 —— 必须起，
   // 而且没有 token 可给（也没人会来校验它）。不放行的话这个模式
   // 什么也不是：没有模型、没有工具、只有一个空界面
   if (!offline && needsToken && token == null) return null;
 
-  final agent = discoverLocalAgent();
+  final agent = ref.read(localAgentDiscoveryProvider)();
   if (agent == null) return null;
 
-  final handle = ref.read(localAgentHandleProvider)..adopt(agent);
+  handle.adopt(agent);
+  // 切号、登出或重启都不能复用旧进程的控制 key；同账号续期只热换出站凭据。
+  final inbound = _newLocalControlSecret();
 
   var disposed = false;
   Timer? restartTimer;
   ref.onDispose(() {
     disposed = true;
     restartTimer?.cancel();
-    handle.forget(agent);
-    unawaited(agent.stop());
+    unawaited(handle.stopIfCurrent(agent));
   });
 
   final budget = ref.read(_agentRestartBudgetProvider);
@@ -1310,6 +1710,70 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
     });
   }
 
+  final pushCredential = ref.read(localAgentCredentialPushProvider);
+  Future<void> credentialQueue = Future<void>.value();
+
+  void advanceCredentialRevision() {
+    if (ref.mounted) {
+      ref.read(_localAgentCredentialRevisionProvider.notifier).advance();
+    }
+  }
+
+  Future<void> applyCredential(String? outbound) async {
+    if (disposed || !ref.mounted) return;
+
+    LocalAgentCredentialPushResult result;
+    try {
+      result = await pushCredential(
+        origin: agent.origin!,
+        inbound: inbound,
+        outbound: outbound,
+      );
+    } on Object catch (e) {
+      debugPrint('新凭据推给本地 agent 时异常：$e');
+      result = LocalAgentCredentialPushResult.failed;
+    }
+    if (disposed || !ref.mounted) return;
+
+    if (result == LocalAgentCredentialPushResult.accepted) {
+      // 推送期间可能又换了 token。只把服务端真正确认过的那把标成可用；
+      // 更新那一把会由串行队列里的下一项验证。
+      if (ref.read(authControllerProvider).token == outbound) {
+        handle.acceptOutboundCredential(outbound);
+        advanceCredentialRevision();
+      }
+      return;
+    }
+
+    // 409 与任何无法判定的失败都必须失败关闭。先撤掉路由，再等待进程
+    // 退出，最后 invalidate；不是一个只写日志的旁路。
+    handle.invalidateCredential();
+    advanceCredentialRevision();
+    if (result == LocalAgentCredentialPushResult.identityChanged) {
+      budget.resetForIdentityChange();
+      debugPrint('本地 agent 的 deployment/user 已变化 —— 停旧进程后按新账号重起');
+    } else {
+      debugPrint('本地 agent 没接住新凭据 —— 停旧进程后重试');
+    }
+    try {
+      await handle.stopIfCurrent(agent);
+    } on Object catch (e) {
+      // 停止清理本身失败时，凭据路由已经在上文撤掉；仍要继续 invalidate，
+      // 让下一次装配走重试路径，而不是让一个失败把凭据队列永久卡死。
+      debugPrint('停止旧本地 agent 失败，保持远端路由并重试装配：$e');
+    }
+    if (disposed || !ref.mounted) return;
+    ref.invalidateSelf();
+  }
+
+  void enqueueCredential(String? outbound) {
+    credentialQueue = credentialQueue
+        .catchError((Object error, StackTrace stack) {
+          debugPrint('本地 agent 凭据队列上一项异常：$error');
+        })
+        .then((_) => applyCredential(outbound));
+  }
+
   try {
     final origin = await agent.start(
       remote: baseUrl,
@@ -1319,7 +1783,8 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
       //
       // 走 `_localAgentToken` 而不是在这里写 `token ?? _sessionSecret`：
       // `cortexApiProvider` 那侧必须发同一个值，见那个函数的文档
-      token: localAgentToken(token),
+      token: inbound,
+      userToken: token,
       // 离线模式必须本地直连模型：代理那条路要经 cortexd，而它不存在。
       // 传 null 表示「不干预」，让 agent 自己按环境变量决定
       llmRoute: offline ? 'direct' : null,
@@ -1327,6 +1792,9 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
       // 开关（见 `remoteAttachProvider`）。存这一份是为了让「我开过了」
       // 活过一次重启，而不是让它成为第二个真相
       allowRemoteAttach: await _savedRemoteAttach(ref),
+      computerUseAllowlist: computerUseAllowlist,
+      packagedComputerAllowlist: packagedComputerAllowlist,
+      browserSiteAllowlist: browserSiteAllowlist,
       // 注入的环境变量，两个来源合一：
       //   - 本机模型配置（仅离线模式；连着服务器时模型是 cortexd 的事）
       //   - Windows 沙箱后端选择（任何模式都可能选受限令牌档）
@@ -1344,24 +1812,60 @@ final localAgentOriginProvider = FutureProvider<String?>((ref) async {
         '退出，code=$code${logTail.isEmpty ? '' : '\n$logTail'}',
       ),
     );
-    debugPrint('本地 agent 已就绪：$origin（工具在本机执行）');
-    // 入站凭据钉死在这一刻 —— 之后 `cortexApiProvider` 一直用它去打
-    // 这个 agent，与用户 token 轮不轮换无关。见 `pinnedCredential`
-    final inbound = localAgentToken(token);
-    handle.pinnedCredential = inbound;
-    // 出站那把跟着轮换，热替换而不是重启进程
-    ref.listen(authControllerProvider.select((s) => s.token), (_, next) {
-      unawaited(
-        _pushAgentCredential(origin: origin, inbound: inbound, outbound: next),
+
+    // provider 可能在 `start` 的 await 期间被 deployment 变化取代。此时
+    // 不能把刚拉起来的孤儿 agent 登记成 ready。
+    if (disposed || !ref.mounted) {
+      await handle.stopIfCurrent(agent);
+      return null;
+    }
+
+    final initialOutbound = ref.read(authControllerProvider).token;
+    LocalAgentCredentialPushResult initialResult;
+    try {
+      initialResult = await pushCredential(
+        origin: origin,
+        inbound: inbound,
+        outbound: initialOutbound,
       );
+    } on Object catch (e) {
+      debugPrint('启动后验证本地 agent 凭据时异常：$e');
+      initialResult = LocalAgentCredentialPushResult.failed;
+    }
+    if (disposed || !ref.mounted) {
+      await handle.stopIfCurrent(agent);
+      return null;
+    }
+    if (initialResult != LocalAgentCredentialPushResult.accepted) {
+      handle.invalidateCredential();
+      advanceCredentialRevision();
+      if (initialResult == LocalAgentCredentialPushResult.identityChanged) {
+        budget.resetForIdentityChange();
+      }
+      await handle.stopIfCurrent(agent);
+      scheduleRestart(
+        initialResult == LocalAgentCredentialPushResult.identityChanged
+            ? '凭据主体与启动身份不一致'
+            : '启动后的凭据验证失败',
+      );
+      return null;
+    }
+
+    // 只有服务端验明 deployment/user 之后，客户端才把请求路由进这个
+    // agent。入站凭据钉死在这一刻；出站凭据随同账号续期热替换。
+    handle.bindCredential(inbound: inbound, outbound: initialOutbound);
+    advanceCredentialRevision();
+    debugPrint('本地 agent 已就绪：$origin（工具在本机执行）');
+
+    // 出站那把跟着轮换。204 不重启；409 或失败会走上面的失败围栏。
+    ref.listen(authControllerProvider.select((s) => s.token), (_, next) {
+      enqueueCredential(next);
     });
     // start 与挂监听之间用户可能正好续期过一次；补推一次现值，
     // 差一次推送的后果是 agent 拿着已过期的凭据去写 episode
     final now = ref.read(authControllerProvider).token;
-    if (now != token) {
-      unawaited(
-        _pushAgentCredential(origin: origin, inbound: inbound, outbound: now),
-      );
+    if (now != initialOutbound) {
+      enqueueCredential(now);
     }
     return origin;
   } on LocalAgentException catch (e) {
@@ -1454,6 +1958,10 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
   }
 
   final token = ref.watch(authControllerProvider.select((s) => s.token));
+  // handle 本身可变，Riverpod 看不见凭据围栏内部的状态变化；这个版本号
+  // 会在服务端接受新凭据、或推送失败撤下旧 agent 时推进，让主 API 在同一帧
+  // 内改道远端或回到已验明的本地 agent。
+  ref.watch(_localAgentCredentialRevisionProvider);
 
   // 本地 agent 起好之后指向它，否则指向远端 —— 两侧说同一套协议
   // （agent 把自己不处理的原样反代），所以下游分辨不出区别，
@@ -1476,20 +1984,23 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
   // （见 `MemoryController.build` 里那段）。在这里改成「等」会把一个
   // 只影响头两秒的问题，换成一个在无 agent 平台上永远转圈的问题。
   final agentOrigin = ref.watch(localAgentOriginProvider);
-  final origin = agentOrigin.value ?? config.baseUrl;
+  final handle = ref.read(localAgentHandleProvider);
+  final onLocalAgent =
+      agentOrigin.value != null && handle.acceptsOutboundCredential(token);
+  final origin = onLocalAgent ? agentOrigin.value! : config.baseUrl;
 
   final api = HttpCortexApi(
     baseUrl: origin,
     // 打的是本机 agent 时，把**用户配的那个地址**一并交给它 ——
     // 连不上时那句话要说得出「你配的是哪儿、这个 127.0.0.1 又是谁」
-    frontsDeployment: agentOrigin.value == null ? null : config.baseUrl,
+    frontsDeployment: onLocalAgent ? config.baseUrl : null,
     // 打到 agent 时用**它认的那把**，见 `apiToken`
     // 打到 agent 时用**钉住的那把**：它认的是自己启动时那个值，
     // 而 `token` 每 15 分钟就换一次
     token: apiToken(
       userToken: token,
-      onLocalAgent: agentOrigin.value != null,
-      pinned: ref.read(localAgentHandleProvider).pinnedCredential,
+      onLocalAgent: onLocalAgent,
+      pinned: handle.pinnedCredential,
     ),
     // 生产恒 null（HttpCortexApi 自建）。这个口子只为测试存在：没有它，
     // 下面 onUnauthorized 闭包的接线（资格审查用哪边的 token）从测试里
@@ -1540,7 +2051,13 @@ final cortexApiProvider = Provider<CortexApi>((ref) {
     // 不是自愈，是把一次故障变成永动机（见 _RestartBudget.allowKick）。
     onLocalAgentRejected: () {
       if (!ref.mounted) return;
-      if (agentOrigin.value == null) return;
+      // 旧实例可能在凭据换代后才收到这条 401。只有当前 token 仍被这个
+      // agent 接住时，才允许把“入站错位”作为重启理由。
+      if (!handle.acceptsOutboundCredential(
+        ref.read(authControllerProvider).token,
+      )) {
+        return;
+      }
       if (!ref.read(_agentRestartBudgetProvider).allowKick(DateTime.now())) {
         debugPrint(
           '本机 agent 30 秒内第 3 次拒绝入站凭据 —— 不再重启。'

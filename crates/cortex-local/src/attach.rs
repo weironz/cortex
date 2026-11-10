@@ -47,6 +47,12 @@ pub struct AttachSwitch {
     generation: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
+/// 仅代表本次请求已通过接入 key 校验；不能从请求参数或布尔值构造。
+/// 路由仍必须按 attach_allows 限制接入面，不能据此开放本机配置端点。
+pub(crate) struct AttachAdmission {
+    _private: (),
+}
+
 impl Default for AttachSwitch {
     fn default() -> Self {
         Self::new(false)
@@ -54,6 +60,13 @@ impl Default for AttachSwitch {
 }
 
 impl AttachSwitch {
+    pub(crate) fn admit(&self, supplied: &str) -> Option<AttachAdmission> {
+        let current = self.read();
+        current
+            .as_deref()
+            .filter(|expected| crate::routes::bytes_eq(expected.as_bytes(), supplied.as_bytes()))
+            .map(|_| AttachAdmission { _private: () })
+    }
     /// `on` 通常来自 `--allow-remote-attach`。
     #[must_use]
     pub fn new(on: bool) -> Self {

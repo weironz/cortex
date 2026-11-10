@@ -1,4 +1,6 @@
 import '../core/permission_mode.dart';
+import '../core/computer_trace_api.dart';
+import '../core/computer_input_recovery_api.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -46,6 +48,8 @@ import 'sse.dart';
 
 part 'http_cortex_api/core.dart';
 part 'http_cortex_api/chat.dart';
+part 'http_cortex_api/computer_traces.dart';
+part 'http_cortex_api/computer_input_recovery.dart';
 part 'http_cortex_api/sessions.dart';
 part 'http_cortex_api/projects.dart';
 part 'http_cortex_api/assistants.dart';
@@ -64,6 +68,8 @@ part 'http_cortex_api/sync.dart';
 class HttpCortexApi extends HttpCortexApiBase
     with
         _CoreEndpoints,
+        _ComputerTraceEndpoints,
+        _ComputerInputRecoveryEndpoints,
         _ChatEndpoints,
         _SessionsEndpoints,
         _ProjectsEndpoints,
@@ -107,6 +113,51 @@ abstract class HttpCortexApiBase implements CortexApi {
        _client = client ?? createHttpClient();
 
   final Uri _base;
+
+  /// 仅用于隔离本机审计状态；不把带凭据或查询串的地址存进身份键。
+  ({Uri endpoint, Uri? deployment})? get computerTraceBackendIdentity {
+    try {
+      final deployment = frontsDeployment == null
+          ? null
+          : _normalise(frontsDeployment!);
+      if (!_safeTraceIdentityUri(_base) ||
+          (deployment != null && !_safeTraceIdentityUri(deployment))) {
+        return null;
+      }
+      return (endpoint: _base, deployment: deployment);
+    } on FormatException {
+      return null;
+    }
+  }
+
+  bool computerTraceMatchesDeployment(String configured) {
+    final backend = computerTraceBackendIdentity;
+    if (backend == null) return false;
+    try {
+      final expected = _normalise(configured);
+      return _safeTraceIdentityUri(expected) &&
+          (backend.deployment ?? backend.endpoint) == expected;
+    } on FormatException {
+      return false;
+    }
+  }
+
+  static bool _safeTraceIdentityUri(Uri uri) =>
+      uri.userInfo.isEmpty && !uri.hasQuery && !uri.hasFragment;
+
+  /// 身份隔离不能使用会把任意 JSON 值转为字符串的通用展示模型。
+  Future<String?> computerTraceVerifiedUserId() async {
+    final json = await _getJson('/auth/me');
+    final value = json['user_id'];
+    if (value is! String ||
+        value.isEmpty ||
+        value.length > 512 ||
+        value.trim() != value ||
+        RegExp(r'[\x00-\x1f\x7f]').hasMatch(value)) {
+      return null;
+    }
+    return value;
+  }
 
   final http.Client _client;
 
@@ -597,6 +648,7 @@ abstract class HttpCortexApiBase implements CortexApi {
   Future<Map<String, dynamic>> _getJson(
     String path, [
     Map<String, String>? query,
+    Object? Function(String)? decoder,
   ]) async {
     final http.Response response;
     try {
@@ -616,7 +668,7 @@ abstract class HttpCortexApiBase implements CortexApi {
         retryable: _unwrapRetryable(utf8.decode(response.bodyBytes)),
       );
     }
-    return _decodeObject(path, utf8.decode(response.bodyBytes));
+    return _decodeObject(path, utf8.decode(response.bodyBytes), decoder);
   }
 
   /// The ticket is stripped from the reported URL — this string reaches logs
@@ -654,10 +706,14 @@ abstract class HttpCortexApiBase implements CortexApi {
   ///
   /// The exception was technically accurate and told the user nothing about
   /// what to do.
-  Map<String, dynamic> _decodeObject(String what, String body) {
+  Map<String, dynamic> _decodeObject(
+    String what,
+    String body, [
+    Object? Function(String)? decoder,
+  ]) {
     final Object? decoded;
     try {
-      decoded = jsonDecode(body);
+      decoded = decoder == null ? jsonDecode(body) : decoder(body);
     } on FormatException {
       throw CortexApiException(_notJsonMessage(what, body));
     }

@@ -1,0 +1,151 @@
+{
+  "date": "2026-11-10",
+  "scope": "windows_user_recovery_local_validation_not_production_ga",
+  "committed": false,
+  "published": false,
+  "production_ga": false,
+  "source_hash_scope": "selected_modules_and_manifests_not_entire_repository",
+  "source_files": {
+    "Cargo.lock": "21a6c0fcb7314a06819ca836801d657f050d0f36a6ac472dace4cddd829a134a",
+    "Cargo.toml": "4ea0169ee9d4177908c2a4136d2632cd7660ea57f4667cf0f086795778eb3c32",
+    "app/lib/api/http_cortex_api.dart": "ab877546366dbbb4db5519012466adb1d1bd92607e601fedd1ffa2ded0968897",
+    "app/lib/api/http_cortex_api/computer_input_recovery.dart": "bdb6d9cc5235be431a66f1f59675f1e3f71e0a47f33dcc752b3b2564049779e4",
+    "app/lib/core/computer_input_recovery_api.dart": "b48e4e7bf30390ffc07ba7d546d7dada64446700c2feccd3f8932ef51d5aa075",
+    "app/lib/features/settings/pages/computer_input_recovery_section.dart": "2adb93ebeac74ce1ac43c44704f1ba4cae3e133cf3ee0b10094e45405330ab6c",
+    "app/lib/features/settings/pages/computer_use_section.dart": "c6b95b88385b03749620755949018adb036a4fc9cedf8e112b59cf1534c9b5a8",
+    "app/test/computer_input_recovery_test.dart": "5189360d9bfb46becf3287cfe2153b72a79966ae0440f8ea3527604d8af99a77",
+    "app/test/computer_input_recovery_widget_test.dart": "13532bad0d5072d93c97cc630c11ae8b2014e5e5016a1ffae712faa454a86914",
+    "app/test/local_agent_test.dart": "7dbfb7ad3b330584921f07b36b53186ead6788e82a6b249d9ec21a5f74469d00",
+    "crates/computer-dispatch-ledger/src/epoch.rs": "e7a25ee6becd5afda67275f51098915d9d511d5c41fcfb1676324aafa81ad1d6",
+    "crates/computer-dispatch-ledger/src/epoch_storage.rs": "ecd8836d325b4652c87b8a2980da3e4cd7817b5410b12c97b636b66d928a3736",
+    "crates/computer-dispatch-ledger/src/lib.rs": "0e551e70b926a7f7577e0e059524ebe49287d8a7bf59c2f0cd7632ef8de67918",
+    "crates/computer-dispatch-ledger/src/storage.rs": "e2c0c80692c695e3d9d6b083a787c66f1924a0f9ed008ccd3b8b508aa4a14258",
+    "crates/computer-dispatch-ledger/tests/epoch_recovery.rs": "d8051b10a059bdfe7091b0e94f48de3d1709bd0999387826f2d4d7552ed34034",
+    "crates/cortex-agent/src/computer_dispatch.rs": "82a23eab879aae8f8f61b58750d57278c19ba3b276c3f4af58bcf6f9b8427ef1",
+    "crates/cortex-agent/src/computer_driver.rs": "6b34a5b71d59c43c363c6212890e3f6d3b21a4da87f419f0776bedad4b91fab8",
+    "crates/cortex-agent/tests/sandbox_restricted_windows.rs": "a2f8ef31113e796d818273f01f079cdd7245f6a2e5799bdfc4ca0f0f36defdca",
+    "crates/cortex-local/src/computer.rs": "c360d789fcc5405ab143f77588a119fc5efb06bdfa930b863ec83ca6248aca30",
+    "crates/cortex-local/src/computer_browser.rs": "eadb99ba753098a6bff27678947434d705305564bd5e9a830e888e06ca12d490",
+    "crates/cortex-local/src/computer_browser_owned_job_test.rs": "37e5aec55a9e6c2069d15443c40fb7804c7b10c8551ff3eca61fd2f32df9d391",
+    "crates/cortex-local/src/computer_cua.rs": "1fc5815ac795da46509b8ccaec8c5246469c1019a9fb3fe4775b90257799888e",
+    "crates/cortex-local/src/computer_cua_runtime.rs": "1c0efec75359d75e56a49eebec1e25fa9e6db522890233dcbc85c516238b1d31",
+    "crates/cortex-local/src/computer_cua_transport.rs": "d14bc7dc797d71c0fe8aeb68c4043def8c3c80e6f27b7f9e97ecebb9e990eaaa",
+    "crates/cortex-local/src/computer_http_fixture_test.rs": "30c8d42de2690c68ad7c2da8ad7baa1a5c456a3a603dfdcb607a337cb6583cb3",
+    "crates/cortex-local/src/computer_input.rs": "22d42b1ab379449ed4432447ff57638fa83a6b45bc840a353be9571800db1124",
+    "crates/cortex-local/src/computer_input_lease.rs": "ddad7bddc9c7d8928f1885dbabf8508b65c429911ac93cd3dc3192c91605ec8f",
+    "crates/cortex-local/src/computer_input_test.rs": "9406319a6c50d3865d2cc28cb01c5c06bbb39e4b716361e2a1ddd77a98c4e4dd",
+    "crates/cortex-local/src/computer_lease.rs": "735367f9b699c1764d69321d435504e976afbbfca6b6b52c7de563d877b48e5a",
+    "crates/cortex-local/src/computer_lease_recovery_test.rs": "da2b1ca2642786c911632462021dab04099277d6dde7c19d92ffe805e32819c3",
+    "crates/cortex-local/src/computer_ledger.rs": "2fa7674ed14b43e351ee98d1fc13c7ef48312044479ffca77094c9ced32a915f",
+    "crates/cortex-local/src/computer_ledger_authority.rs": "2f4c6160b7c75cec71500fb8c7da7932f0682616ff8a96fe8034a866eb867d37",
+    "crates/cortex-local/src/computer_ledger_authority_test.rs": "4fccf613f3a12471363b8852ea56125c4bb65a7c3860f61f7b66cb634e2e0444",
+    "crates/cortex-local/src/computer_ledger_host_test.rs": "acd441178224a926718f55a84ba088a14c45a8622dd9bdf117956216f6c73281",
+    "crates/cortex-local/src/computer_ledger_http_fixture.rs": "fb678dab0f8a6df7c2957ef4f3fbc10be398557866e3c93f019b5fa27e961062",
+    "crates/cortex-local/src/computer_ledger_pending_test.rs": "da7999e5d618b5d58388f04cabe157f490be3f340d99480b6c28d1cce16fc91b",
+    "crates/cortex-local/src/computer_ledger_provision.rs": "8c996efb98b00d2b53e07391c65427fb0df00f82db4f6e3299f619af49a2c95e",
+    "crates/cortex-local/src/computer_ledger_provision_test.rs": "e362adfc8dfddba9f272f3842c0721675b290d7da59dc89e5eb74848305db148",
+    "crates/cortex-local/src/computer_ledger_recovery.rs": "8f3a7896fdfbb51dc3ee337039f025a69e3a6b8c9c8f8af7a006adb5f3a34cb2",
+    "crates/cortex-local/src/computer_ledger_test.rs": "e2dd73523b8eff4e198e235a25de7ef550dcfb946e8ce7cbac3bf3b783caad51",
+    "crates/cortex-local/src/computer_ledger_unix.rs": "cc20423c06a2d6ab044ff6eb9fe5f13de8e9d249b396d20db102e62a81c99d96",
+    "crates/cortex-local/src/computer_ledger_windows.rs": "d638ef7dee73f7af4f6be184393e334bfe239b58cc2db8047d5008fd5150d61b",
+    "crates/cortex-local/src/computer_owned_job.rs": "21c207055051d5871bf8de656e093780aa57840d090e9b73eb922f5026fc4972",
+    "crates/cortex-local/src/computer_recovery.rs": "0c38308600c7a638320512b89d6b41b1bc7ca2a020f38b6cfcd5ac05b05b91a7",
+    "crates/cortex-local/src/computer_recovery_test.rs": "670ea17f153d3fcdf97c86a28788c12c7c7a2982edba5c037121100826a4d9fe",
+    "crates/cortex-local/src/confirmation_routes_test.rs": "9e98be6c99cc5a4b890f57052b6f63c5711bd6b2a11ca4a66686332646100915",
+    "crates/cortex-local/src/main.rs": "86f69e190230edc72c9fadd8483ff1bda12b4e2cee759e95e5b89a8e6e8448b0",
+    "crates/cortex-local/src/remote.rs": "c98f50c1ebc76b486da86de831db7dc272573713e8754434cad5e6194dbc6689",
+    "crates/cortex-local/src/routes.rs": "7e7d3512f731b03ebb855535ea3af1bfc4b8d650ff1e76d61e9bdfb94f78bcc0"
+  },
+  "test_binary": {
+    "binary": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-input-recovery-nvme-20261110\\debug\\deps\\cortex_local-ab17042e4ad5294e.exe",
+    "sha256": "1fc423f73e1485ac2a501b5ddf87d79fd87acb82d067d3ceb1075f702165433e",
+    "scope": "final-source two-step Cua recovery smoke",
+    "started_utc": "2026-11-09T17:27:48.4508230Z"
+  },
+  "build": {
+    "target_dir": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-input-recovery-nvme-20261110",
+    "dev_debug": 1,
+    "test_debug": 1,
+    "jobs": 4,
+    "scope": "task_local_cache_no_repository_build_configuration_change"
+  },
+  "ci": {
+    "command": "just workflow-ci",
+    "exit_code": 0,
+    "log": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-input-recovery-nvme-20261110\\workflow-ci-verified.log",
+    "rust": {
+      "passed": 2096,
+      "failed": 0,
+      "ignored": 35,
+      "cargo_targets": 48,
+      "scope": "last_result_per_cargo_target_excludes_nested_children"
+    },
+    "flutter_ci": {
+      "passed": 1112,
+      "skipped": 7
+    },
+    "analyzer_clean": true,
+    "strict_clippy": true,
+    "isolated_postgres": true
+  },
+  "flutter_full": {
+    "passed": 1113,
+    "skipped": 26,
+    "failed": 0,
+    "log": "app/build/input-recovery-flutter-full-nvme.log"
+  },
+  "real_recovery": {
+    "passed": true,
+    "seconds": 44.58,
+    "scope": "synthetic_model_remote_and_automatic_approval_real_http_host_gateway_cua_owned_fixture",
+    "artifact_directory": "target/computer-http-fixture-nZHaSs",
+    "log": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-input-recovery-nvme-20261110\\real-recovery-final.log",
+    "states": [
+      [
+        1,
+        "unknown"
+      ],
+      [
+        2,
+        "verified"
+      ]
+    ],
+    "recoveries": [
+      [
+        1,
+        2,
+        "committed",
+        "unknown"
+      ]
+    ],
+    "epoch": 2,
+    "phase": "active",
+    "fences": 0,
+    "pending": false,
+    "runtime_generation": 1,
+    "new_run_same_window_verified": true,
+    "native_pid_and_endpoint_rotated": true,
+    "original_jobs_closed_and_drained": 2,
+    "cleanup": {
+      "daemon_socket_closed": true,
+      "daemon_stopped": true,
+      "fixture_stopped": true,
+      "recovery": true,
+      "scope": "fake_model_remote_real_http_host_driver",
+      "system_temp_preserved": "\\\\?\\C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-http-fixture-temp-gTgkqS",
+      "worker_stopped": true
+    }
+  },
+  "driver_pin": {
+    "version": "0.38.0",
+    "sha256": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2"
+  },
+  "remaining": [
+    "trusted legacy anchor/schema upgrade",
+    "real account and human UI acceptance",
+    "patched driver pin and final soak/memory gate",
+    "installer/upgrade/uninstall acceptance",
+    "second Windows host and display/RDP/sleep matrix",
+    "formal signing certificate"
+  ]
+}

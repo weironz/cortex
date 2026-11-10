@@ -20,10 +20,10 @@ use thiserror::Error;
 
 /// 单个动作批次的上限。
 ///
-/// 四步足够覆盖「聚焦、输入、提交、确认」这类常见短链路，又能在界面变化时
-/// 尽早停下来重新观察。批次越长，中间某一步已经失败却继续把后续输入投到新
-/// 焦点上的风险越大。
-pub const MAX_ACTIONS_PER_BATCH: usize = 4;
+/// 一个批次只允许一个状态改变动作。界面可能在每一步之后改变焦点、布局或
+/// 元素语义；继续用旧 frame 投递后续动作，会把“点击触发对话框”误解成
+/// “继续点击原按钮”。任何后续动作都必须重新 observe 并取得新 frame。
+pub const MAX_ACTIONS_PER_BATCH: usize = 1;
 
 /// 默认 frame 寿命。
 pub const DEFAULT_FRAME_TTL: Duration = Duration::from_secs(5);
@@ -34,6 +34,14 @@ pub const DEFAULT_FRAME_TTL: Duration = Duration::from_secs(5);
 pub const MAX_FRAME_TTL: Duration = Duration::from_secs(10);
 
 const MAX_IDENTIFIER_LEN: usize = 256;
+/// 单次输入文本的上限。
+///
+/// 动作批次本身只有一步，若文本没有独立上限，一次 `type_text` 仍可把任意
+/// 大小内容送进桌面。这里取一个足够覆盖普通表单和短文档的值，同时把模型、
+/// 确认预览和驱动调用都限制在可审计的范围内。
+pub const MAX_TYPED_TEXT_CHARS: usize = 4_096;
+/// Cua 当前接受的最大滚动刻度数。
+pub const MAX_SCROLL_AMOUNT: u16 = 50;
 
 /// 协议拒绝的原因。
 ///
@@ -53,7 +61,7 @@ pub enum ProtocolError {
     #[error("frame {frame_id} 已过期，必须重新 observe")]
     StaleFrame { frame_id: FrameId },
 
-    #[error("frame {frame_id} 的签发时间晚于当前授权时间")]
+    #[error("frame {frame_id} 的签发时间晚于当前时间")]
     FrameNotYetValid { frame_id: FrameId },
 
     #[error("frame {frame_id} 已经消费过，必须重新 observe")]
@@ -116,6 +124,24 @@ pub enum ProtocolError {
 
     #[error("验证条件不合法：{reason}")]
     InvalidVerification { reason: &'static str },
+
+    #[error("window_present 不能证明状态改变动作；验证条件必须在动作前不成立、动作后成立")]
+    WindowPresentCannotVerifyStateChange,
+
+    #[error("验证条件在动作前已经成立，无法证明动作造成了状态改变")]
+    VerificationPreconditionAlreadySatisfied,
+
+    #[error(
+        "{stage} observation {frame_id} 的元素树不完整（total={total_elements}, returned={returned_elements}, elements_complete={elements_complete}, truncated={truncated}），不能把“未找到”解释为 false"
+    )]
+    IncompleteObservationForVerification {
+        stage: &'static str,
+        frame_id: FrameId,
+        total_elements: usize,
+        returned_elements: usize,
+        elements_complete: bool,
+        truncated: bool,
+    },
 
     #[error("observation 里有重复的元素引用 {reference_id}")]
     DuplicateReference { reference_id: ElementRefId },
@@ -224,6 +250,7 @@ pub struct AppIdentity {
     kind: AppIdentityKind,
     stable_id: String,
     display_name: String,
+    publisher_verified: bool,
 }
 
 impl AppIdentity {
@@ -236,7 +263,19 @@ impl AppIdentity {
             kind,
             stable_id: validate_identifier("app_id", stable_id.into())?,
             display_name: validate_identifier("app_display_name", display_name.into())?,
+            publisher_verified: false,
         })
+    }
+
+    /// 标记平台已经验证过发行者身份。
+    ///
+    /// 这个位不改变 `stable_id`，也不参与 `same_app`：授权仍绑定完整稳定
+    /// 身份。它只是把“签名验证过”的证据带给 UI 与 trace，避免平台层
+    /// 私藏一份无法审计的布尔值。
+    #[must_use]
+    pub const fn with_publisher_verified(mut self, verified: bool) -> Self {
+        self.publisher_verified = verified;
+        self
     }
 
     #[must_use]
@@ -252,6 +291,11 @@ impl AppIdentity {
     #[must_use]
     pub fn display_name(&self) -> &str {
         &self.display_name
+    }
+
+    #[must_use]
+    pub const fn publisher_verified(&self) -> bool {
+        self.publisher_verified
     }
 
     /// 比较安全身份，不把可变的展示名当成授权依据。
@@ -386,6 +430,7 @@ pub struct FrameRef {
     window_id: WindowId,
     issued_at: Duration,
     expires_at: Duration,
+    capture_id: Option<String>,
 }
 
 impl FrameRef {
@@ -406,7 +451,18 @@ impl FrameRef {
             window_id,
             issued_at,
             expires_at,
+            capture_id: None,
         })
+    }
+
+    /// 绑定驱动签发的截图凭据。
+    ///
+    /// Cua 的 `capture_id` 会绑定目标窗口、几何和会话代际，并只能消费一次。
+    /// 视觉坐标动作把它一并送给驱动，平台便不必只靠进程内时间猜测坐标属于
+    /// 哪张截图。
+    pub fn with_capture_id(mut self, capture_id: impl Into<String>) -> Result<Self, ProtocolError> {
+        self.capture_id = Some(validate_identifier("capture_id", capture_id.into())?);
+        Ok(self)
     }
 
     #[must_use]
@@ -430,9 +486,22 @@ impl FrameRef {
     }
 
     #[must_use]
+    pub fn capture_id(&self) -> Option<&str> {
+        self.capture_id.as_deref()
+    }
+
+    #[must_use]
     pub fn is_expired_at(&self, now: Duration) -> bool {
         now >= self.expires_at
     }
+}
+
+/// Cua 原生树的位置，保留结构而不向 AX-only 暴露视觉坐标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AxNodePosition {
+    pub index: usize,
+    pub parent_index: Option<usize>,
+    pub depth: usize,
 }
 
 /// 一次观察里看到的元素。
@@ -442,9 +511,12 @@ impl FrameRef {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObservedElement {
     reference_id: ElementRefId,
+    ax_node: Option<AxNodePosition>,
     role: Option<String>,
     label: Option<String>,
+    value: Option<String>,
     secure: bool,
+    actions: Vec<String>,
     reference_taken: bool,
 }
 
@@ -458,13 +530,45 @@ impl ObservedElement {
     ) -> Self {
         Self {
             reference_id,
+            ax_node: None,
             role,
             // secure field 的 label 有时由平台把 value 当 accessible name
             // 暴露出来；入口处直接丢弃，避免后续日志或模型摘要把它带出去。
             label: if secure { None } else { label },
+            value: None,
             secure,
+            actions: Vec::new(),
             reference_taken: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_ax_node(mut self, index: usize, parent_index: Option<usize>, depth: usize) -> Self {
+        self.ax_node = Some(AxNodePosition {
+            index,
+            parent_index,
+            depth,
+        });
+        self
+    }
+
+    #[must_use]
+    pub const fn ax_node(&self) -> Option<AxNodePosition> {
+        self.ax_node
+    }
+
+    #[must_use]
+    pub fn with_actions(mut self, actions: impl IntoIterator<Item = String>) -> Self {
+        self.actions = actions.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_value(mut self, value: Option<String>) -> Self {
+        if !self.secure {
+            self.value = value;
+        }
+        self
     }
 
     #[must_use]
@@ -483,8 +587,18 @@ impl ObservedElement {
     }
 
     #[must_use]
+    pub fn value(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+
+    #[must_use]
     pub const fn is_secure(&self) -> bool {
         self.secure
+    }
+
+    #[must_use]
+    pub fn actions(&self) -> &[String] {
+        &self.actions
     }
 }
 
@@ -665,6 +779,15 @@ impl ObservationCompleteness {
         self.truncated
     }
 
+    /// 元素树是否可以支持“未找到=false”的判断。
+    ///
+    /// `elements_complete` 是驱动自报值；这里再把总数与返回数对齐，避免
+    /// 新旧驱动字段组合出“自报完整、实际截断”的矛盾状态。
+    #[must_use]
+    pub const fn element_tree_complete(&self) -> bool {
+        self.elements_complete && !self.truncated && self.total_elements == self.returned_elements
+    }
+
     #[must_use]
     pub fn truncation_reason(&self) -> Option<&str> {
         self.truncation_reason.as_deref()
@@ -676,6 +799,37 @@ impl ObservationCompleteness {
     }
 }
 
+/// 原生完整树的只读文本。没有 ref，也不参与结构化元素验证。
+///
+/// Cua 0.38 的 Markdown 不转义标签内的引号/换行，不能反解析成可信节点。
+#[derive(PartialEq, Eq)]
+pub struct ReadonlyAxText {
+    text: String,
+    complete: bool,
+}
+
+impl fmt::Debug for ReadonlyAxText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReadonlyAxText")
+            .field("chars", &self.text.chars().count())
+            .field("complete", &self.complete)
+            .finish()
+    }
+}
+
+impl ReadonlyAxText {
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.complete
+    }
+}
+
 /// 一次完整观察。
 #[derive(PartialEq, Eq)]
 pub struct Observation {
@@ -684,6 +838,7 @@ pub struct Observation {
     elements: Vec<ObservedElement>,
     secure_input: bool,
     capture: Option<ObservationCapture>,
+    readonly_ax_text: Option<ReadonlyAxText>,
     completeness: ObservationCompleteness,
     used: bool,
 }
@@ -698,6 +853,7 @@ impl fmt::Debug for Observation {
             .field("element_count", &self.elements.len())
             .field("secure_input", &self.secure_input)
             .field("capture", &self.capture)
+            .field("readonly_ax_text", &self.readonly_ax_text)
             .field("completeness", &self.completeness)
             .field("used", &self.used)
             .finish()
@@ -736,6 +892,7 @@ impl Observation {
             elements,
             secure_input,
             capture: None,
+            readonly_ax_text: None,
             completeness: ObservationCompleteness::new(element_count, element_count, true, false),
             used: false,
         })
@@ -745,6 +902,22 @@ impl Observation {
     pub fn with_capture(mut self, capture: ObservationCapture) -> Self {
         self.capture = Some(capture);
         self
+    }
+
+    /// 全文只属于当前 observation；敏感观察不保留这条未逐字段脱敏的通道。
+    #[must_use]
+    pub fn with_readonly_ax_text(mut self, text: impl Into<String>, complete: bool) -> Self {
+        let text = text.into();
+        self.readonly_ax_text = (!self.secure_input
+            && !self.elements.iter().any(ObservedElement::is_secure)
+            && !text.trim().is_empty())
+        .then_some(ReadonlyAxText { text, complete });
+        self
+    }
+
+    #[must_use]
+    pub const fn readonly_ax_text(&self) -> Option<&ReadonlyAxText> {
+        self.readonly_ax_text.as_ref()
     }
 
     pub fn with_completeness(
@@ -759,6 +932,13 @@ impl Observation {
         if completeness.total_elements < completeness.returned_elements {
             return Err(ProtocolError::InvalidObservationCompleteness {
                 reason: "total_elements 不能小于 returned_elements",
+            });
+        }
+        if completeness.elements_complete
+            && completeness.total_elements != completeness.returned_elements
+        {
+            return Err(ProtocolError::InvalidObservationCompleteness {
+                reason: "elements_complete=true 时 total_elements 必须等于 returned_elements",
             });
         }
         if completeness.truncated && completeness.elements_complete {
@@ -856,11 +1036,15 @@ impl Observation {
         self.used = true;
         self.validate_identity(batch)?;
 
+        // observation 级 secure 标记可能来自 UIA 对整页的保守判断。只要它
+        // 为真，任何目标形式（元素、视觉坐标或无目标键盘）都不能由模型继续
+        // 自动输入，不能因为动作恰好带了一个“普通”元素 ref 就绕过接管。
+        if self.secure_input {
+            return Err(ProtocolError::SecureField { reference_id: None });
+        }
+
         for action in &batch.actions {
             let Some(reference) = action.element_ref() else {
-                if self.secure_input {
-                    return Err(ProtocolError::SecureField { reference_id: None });
-                }
                 continue;
             };
 
@@ -898,7 +1082,7 @@ impl Observation {
                     reference_id: reference.reference_id.clone(),
                 });
             }
-            if self.secure_input || observed.secure {
+            if self.window.secure || observed.secure {
                 return Err(ProtocolError::SecureField {
                     reference_id: Some(reference.reference_id.clone()),
                 });
@@ -906,6 +1090,86 @@ impl Observation {
         }
 
         Ok(())
+    }
+
+    /// 消费一帧来做隔离浏览器导航。
+    ///
+    /// 导航不是通用桌面输入，因此不塞进 [`ComputerAction`]。它仍必须绑定
+    /// 同一套 frame/window/app 身份，并在驱动派发前消费一次；驱动返回的新
+    /// observation 继续走 [`verify_post_observation`]。
+    pub fn authorize_navigation(
+        &mut self,
+        frame_id: &FrameId,
+        window_id: &WindowId,
+        app: &AppIdentity,
+        now: Duration,
+    ) -> Result<(), ProtocolError> {
+        if self.used {
+            return Err(ProtocolError::FrameAlreadyUsed {
+                frame_id: self.frame.id.clone(),
+            });
+        }
+        if self.frame.is_expired_at(now) {
+            return Err(ProtocolError::StaleFrame {
+                frame_id: self.frame.id.clone(),
+            });
+        }
+        if now < self.frame.issued_at {
+            return Err(ProtocolError::FrameNotYetValid {
+                frame_id: self.frame.id.clone(),
+            });
+        }
+        self.used = true;
+        if self.frame.id != *frame_id {
+            return Err(ProtocolError::FrameMismatch {
+                expected_frame_id: self.frame.id.clone(),
+                actual_frame_id: frame_id.clone(),
+            });
+        }
+        if self.window.id != *window_id {
+            return Err(ProtocolError::WindowMismatch {
+                frame_id: self.frame.id.clone(),
+                expected_window_id: self.window.id.clone(),
+                actual_window_id: window_id.clone(),
+            });
+        }
+        if !self.window.app.same_app(app) {
+            return Err(ProtocolError::AppMismatch {
+                window_id: self.window.id.clone(),
+                expected_app_id: self.window.app.stable_id.clone(),
+                actual_app_id: app.stable_id.clone(),
+            });
+        }
+        if self.secure_input || self.window.secure {
+            return Err(ProtocolError::SecureField { reference_id: None });
+        }
+        Ok(())
+    }
+
+    /// observation 是否要求把这一批动作交给用户。
+    ///
+    /// observation 级 `secure_input` 是整页保守判断，适用于任何动作形式；
+    /// 元素级 `secure` 再作为额外的精确检查。视觉坐标和无目标键盘没有
+    /// 元素 ref，只要 observation 已标记敏感，也必须接管。
+    #[must_use]
+    pub fn requires_secure_handoff(&self, batch: &ActionBatch) -> bool {
+        if self.window.secure || self.secure_input {
+            return true;
+        }
+        for action in &batch.actions {
+            let Some(reference) = action.element_ref() else {
+                continue;
+            };
+            if self
+                .elements
+                .iter()
+                .find(|element| element.reference_id == reference.reference_id)
+                .is_some_and(|element| element.secure)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     fn validate_identity(&self, batch: &ActionBatch) -> Result<(), ProtocolError> {
@@ -980,6 +1244,10 @@ pub enum ComputerAction {
         target: ElementRef,
         text: String,
     },
+    SetValue {
+        target: ElementRef,
+        text: String,
+    },
     PressKey {
         keys: String,
     },
@@ -994,7 +1262,7 @@ impl ComputerAction {
     fn element_ref(&self) -> Option<&ElementRef> {
         match self {
             Self::Click { target, .. } | Self::Scroll { target, .. } => target.element_ref(),
-            Self::TypeText { target, .. } => Some(target),
+            Self::TypeText { target, .. } | Self::SetValue { target, .. } => Some(target),
             Self::PressKey { .. } => None,
         }
     }
@@ -1011,6 +1279,22 @@ impl ComputerAction {
                 kind: "type_text",
                 reason: "text 不能为空",
             }),
+            Self::TypeText { text, .. } if text.chars().count() > MAX_TYPED_TEXT_CHARS => {
+                Err(ProtocolError::InvalidAction {
+                    kind: "type_text",
+                    reason: "text 超过单次输入上限",
+                })
+            }
+            Self::SetValue { text, .. } if text.is_empty() => Err(ProtocolError::InvalidAction {
+                kind: "set_value",
+                reason: "text 不能为空",
+            }),
+            Self::SetValue { text, .. } if text.chars().count() > MAX_TYPED_TEXT_CHARS => {
+                Err(ProtocolError::InvalidAction {
+                    kind: "set_value",
+                    reason: "text 超过单次输入上限",
+                })
+            }
             Self::PressKey { keys } if keys.trim().is_empty() => {
                 Err(ProtocolError::InvalidAction {
                     kind: "press_key",
@@ -1021,6 +1305,12 @@ impl ComputerAction {
                 kind: "scroll",
                 reason: "amount 必须大于 0",
             }),
+            Self::Scroll { amount, .. } if *amount > MAX_SCROLL_AMOUNT => {
+                Err(ProtocolError::InvalidAction {
+                    kind: "scroll",
+                    reason: "amount 超过驱动上限",
+                })
+            }
             _ => Ok(()),
         }
     }
@@ -1083,19 +1373,137 @@ impl Verification {
             condition: VerificationCondition::ElementLabelContains { role, text },
         })
     }
+
+    pub fn element_value_equals(
+        role: impl Into<String>,
+        label: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, ProtocolError> {
+        let role = role.into();
+        let label = label.into();
+        let value = value.into();
+        if role.trim().is_empty() || label.trim().is_empty() || value.is_empty() {
+            return Err(ProtocolError::InvalidVerification {
+                reason: "元素 role、label 与 value 都不能为空",
+            });
+        }
+        Ok(Self {
+            condition: VerificationCondition::ElementValueEquals { role, label, value },
+        })
+    }
+
+    fn is_window_present(&self) -> bool {
+        matches!(&self.condition, VerificationCondition::WindowPresent)
+    }
+
+    /// 元素条件需要完整元素树；窗口标题直接来自窗口身份，不依赖元素列表。
+    fn requires_complete_element_tree(&self) -> bool {
+        matches!(
+            &self.condition,
+            VerificationCondition::ElementPresent { .. }
+                | VerificationCondition::ElementLabelContains { .. }
+                | VerificationCondition::ElementValueEquals { .. }
+        )
+    }
+
+    fn validate_element_tree(
+        &self,
+        observation: &Observation,
+        stage: &'static str,
+    ) -> Result<(), ProtocolError> {
+        if !self.requires_complete_element_tree()
+            || observation.completeness().element_tree_complete()
+        {
+            return Ok(());
+        }
+        let completeness = observation.completeness();
+        Err(ProtocolError::IncompleteObservationForVerification {
+            stage,
+            frame_id: observation.frame().id().clone(),
+            total_elements: completeness.total_elements(),
+            returned_elements: completeness.returned_elements(),
+            elements_complete: completeness.elements_complete(),
+            truncated: completeness.truncated(),
+        })
+    }
+
+    /// 校验这个条件能否证明一次状态改变。
+    ///
+    /// `window_present` 恒定成立，不能证明任何输入产生了效果；其余条件
+    /// 必须先在动作前的 observation 上为 false。动作后是否已经变为 true
+    /// 由 [`Self::matches_transition`] 做第二次检查。
+    pub fn validate_transition_precondition(
+        &self,
+        before: &Observation,
+    ) -> Result<(), ProtocolError> {
+        if self.is_window_present() {
+            return Err(ProtocolError::WindowPresentCannotVerifyStateChange);
+        }
+        self.validate_element_tree(before, "动作前")?;
+        let (already_satisfied, _) = self.matches(before);
+        if already_satisfied {
+            return Err(ProtocolError::VerificationPreconditionAlreadySatisfied);
+        }
+        Ok(())
+    }
+
+    /// 用动作前后的两份 observation 证明一个状态迁移。
+    ///
+    /// 返回值的 bool 只表示后置条件是否成立；调用方必须先通过
+    /// `Result`，因此即使页面完全没变化，也不可能只因条件在动作前就成立
+    /// 而得到成功。evidence 同时保留动作前、动作后的检查结果，方便审计和
+    /// 失败重规划。
+    pub fn matches_transition(
+        &self,
+        before: &Observation,
+        after: &Observation,
+    ) -> Result<(bool, String), ProtocolError> {
+        self.validate_transition_precondition(before)?;
+        self.validate_element_tree(after, "动作后")?;
+        let (_, before_evidence) = self.matches(before);
+        let (after_passed, after_evidence) = self.matches(after);
+        Ok((
+            after_passed,
+            format!("动作前：{before_evidence}；动作后：{after_evidence}"),
+        ))
+    }
+
+    /// 在当前 observation 上计算这个条件。
+    ///
+    /// `computer_wait` 要轮询同一窗口，但这里刻意不把 observation 的
+    /// freshness、window/app 身份或 frame TTL 一起塞进来：那些检查属于调用方，
+    /// 而且等待场景还没有“动作前 frame”可比较。调用方必须先确认 observation
+    /// 就是目标窗口，再把结果交给模型。
+    #[must_use]
+    pub fn matches(&self, observation: &Observation) -> (bool, String) {
+        evaluate_verification(&self.condition, observation)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum VerificationCondition {
     WindowPresent,
-    WindowTitleContains { text: String },
-    ElementPresent { role: String, label: String },
-    ElementLabelContains { role: String, text: String },
+    WindowTitleContains {
+        text: String,
+    },
+    ElementPresent {
+        role: String,
+        label: String,
+    },
+    ElementLabelContains {
+        role: String,
+        text: String,
+    },
+    ElementValueEquals {
+        role: String,
+        label: String,
+        value: String,
+    },
 }
 
 /// 已校验的动作批次。
 ///
-/// 构造器要求显式 frame/window/app，并且只允许最多
+/// 构造器要求显式 frame/window/app，并且只允许
 /// [`MAX_ACTIONS_PER_BATCH`] 个动作。真正消费 frame 的入口是
 /// [`Observation::authorize`]。
 #[derive(Debug, PartialEq, Eq)]
@@ -1173,6 +1581,9 @@ impl ActionBatch {
                 });
             }
         }
+        if verification.is_window_present() {
+            return Err(ProtocolError::WindowPresentCannotVerifyStateChange);
+        }
 
         Ok(Self {
             frame,
@@ -1203,76 +1614,255 @@ impl ActionBatch {
         &self.actions
     }
 
-    /// 用驱动回执和动作后的 observation 完成自动验证。
+    /// 在把批次交给驱动前验证状态迁移条件。
     ///
-    /// 这里只计算可机器检查的结果；验证失败不是协议错误，而是
-    /// [`VerificationReport::passed`] 为 false。调用方应返回新 frame 与失败证据，
-    /// 不应原批重试。
-    pub fn verify(
+    /// Gateway 持有动作前的 observation 时必须先调用这里。失败不会消耗
+    /// frame，也不会触达驱动；模型可以用同一帧重新规划出可证明状态变化的
+    /// verification。
+    pub fn validate_verification_before(&self, before: &Observation) -> Result<(), ProtocolError> {
+        self.verification.validate_transition_precondition(before)
+    }
+
+    /// 用同一份动作前 observation 完成状态迁移验证。
+    ///
+    /// 这是状态改变动作唯一的验证入口：条件必须在动作前不成立，动作后
+    /// 成立，而且元素条件要求前后两份 observation 都有完整元素树。
+    pub fn verify_transition_with_post_observation(
         self,
+        before: &Observation,
         receipt: Receipt,
         now: Duration,
-    ) -> Result<VerificationReport, ProtocolError> {
-        if receipt.batch_frame_id != self.frame.id {
-            return Err(ProtocolError::ReceiptFrameMismatch {
-                batch_frame_id: self.frame.id,
-                receipt_frame_id: receipt.batch_frame_id,
-            });
-        }
-        if receipt.completed_actions != self.actions.len() {
-            return Err(ProtocolError::ReceiptActionCountMismatch {
-                completed: receipt.completed_actions,
-                expected: self.actions.len(),
-            });
-        }
+    ) -> Result<(VerificationReport, Observation), ProtocolError> {
+        verify_transition_observation(
+            VerificationBinding {
+                frame: &self.frame,
+                window: &self.window,
+                app: &self.app,
+                expected_actions: self.actions.len(),
+            },
+            &self.verification,
+            before,
+            receipt,
+            now,
+        )
+    }
+}
 
-        let post = receipt.post_observation;
-        if post.used {
-            return Err(ProtocolError::PostObservationAlreadyUsed {
-                frame_id: post.frame.id,
-            });
-        }
-        if post.frame.is_expired_at(now) {
+/// 浏览器导航的独立批次。
+///
+/// 它和 [`ActionBatch`] 共用同一个动作后验证器，但类型上刻意不混入
+/// `ComputerAction`：Cua 窗口驱动没有“导航网页”这个能力，模型也不能把
+/// 一条 URL 伪装成普通按键交给别的桌面窗口。
+#[derive(Debug, PartialEq, Eq)]
+pub struct NavigationBatch {
+    frame: FrameRef,
+    window: WindowRef,
+    app: AppIdentity,
+    url: String,
+    verification: Verification,
+}
+
+impl NavigationBatch {
+    pub fn new(
+        frame: FrameRef,
+        window: WindowRef,
+        app: AppIdentity,
+        url: impl Into<String>,
+        verification: Option<Verification>,
+        now: Duration,
+    ) -> Result<Self, ProtocolError> {
+        if frame.is_expired_at(now) {
             return Err(ProtocolError::StaleFrame {
-                frame_id: post.frame.id,
+                frame_id: frame.id.clone(),
             });
         }
-        if post.frame.id == self.frame.id {
-            return Err(ProtocolError::PostObservationNotFresh {
-                frame_id: post.frame.id,
-            });
-        }
-        if post.frame.issued_at < self.frame.issued_at {
-            return Err(ProtocolError::PostObservationPredatesAction {
-                frame_id: post.frame.id,
-            });
-        }
-        if post.window.id != self.window.id {
+        if frame.window_id != window.id {
             return Err(ProtocolError::WindowMismatch {
-                frame_id: post.frame.id,
-                expected_window_id: self.window.id,
-                actual_window_id: post.window.id,
+                frame_id: frame.id,
+                expected_window_id: frame.window_id,
+                actual_window_id: window.id,
             });
         }
-        if !post.window.app.same_app(&self.app) {
+        if !window.app.same_app(&app) {
             return Err(ProtocolError::AppMismatch {
-                window_id: post.window.id,
-                expected_app_id: self.app.stable_id,
-                actual_app_id: post.window.app.stable_id,
+                window_id: window.id,
+                expected_app_id: window.app.stable_id().to_owned(),
+                actual_app_id: app.stable_id().to_owned(),
             });
         }
-        if post.secure_input {
-            return Err(ProtocolError::SecureField { reference_id: None });
+        let url = url.into();
+        if url.trim().is_empty() {
+            return Err(ProtocolError::InvalidAction {
+                kind: "navigate",
+                reason: "url 不能为空",
+            });
         }
-
-        let post_frame_id = post.frame.id.clone();
-        let (passed, evidence) = evaluate_verification(&self.verification.condition, &post);
-        Ok(VerificationReport {
-            post_frame_id,
-            passed,
-            evidence,
+        if url.chars().count() > 2_048 || url.chars().any(char::is_control) {
+            return Err(ProtocolError::InvalidAction {
+                kind: "navigate",
+                reason: "url 过长或包含控制字符",
+            });
+        }
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err(ProtocolError::InvalidAction {
+                kind: "navigate",
+                reason: "只接受 http/https URL",
+            });
+        }
+        let verification = verification.ok_or(ProtocolError::MissingVerification)?;
+        if verification.is_window_present() {
+            return Err(ProtocolError::WindowPresentCannotVerifyStateChange);
+        }
+        Ok(Self {
+            frame,
+            window,
+            app,
+            url,
+            verification,
         })
     }
+
+    #[must_use]
+    pub const fn frame(&self) -> &FrameRef {
+        &self.frame
+    }
+
+    #[must_use]
+    pub const fn window(&self) -> &WindowRef {
+        &self.window
+    }
+
+    #[must_use]
+    pub const fn app(&self) -> &AppIdentity {
+        &self.app
+    }
+
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// 在导航驱动被调用前验证状态迁移条件。
+    pub fn validate_verification_before(&self, before: &Observation) -> Result<(), ProtocolError> {
+        self.verification.validate_transition_precondition(before)
+    }
+
+    /// 用导航前后的 observation 证明页面状态确实发生了变化。
+    pub fn verify_transition_with_post_observation(
+        self,
+        before: &Observation,
+        receipt: Receipt,
+        now: Duration,
+    ) -> Result<(VerificationReport, Observation), ProtocolError> {
+        verify_transition_observation(
+            VerificationBinding {
+                frame: &self.frame,
+                window: &self.window,
+                app: &self.app,
+                expected_actions: 1,
+            },
+            &self.verification,
+            before,
+            receipt,
+            now,
+        )
+    }
+}
+
+struct VerificationBinding<'a> {
+    frame: &'a FrameRef,
+    window: &'a WindowRef,
+    app: &'a AppIdentity,
+    expected_actions: usize,
+}
+
+fn verify_transition_observation(
+    binding: VerificationBinding<'_>,
+    verification: &Verification,
+    before: &Observation,
+    receipt: Receipt,
+    now: Duration,
+) -> Result<(VerificationReport, Observation), ProtocolError> {
+    let post = validate_receipt_and_post(
+        binding.frame,
+        binding.window,
+        binding.app,
+        binding.expected_actions,
+        receipt,
+        now,
+    )?;
+    let post_frame_id = post.frame.id.clone();
+    let (passed, evidence) = verification.matches_transition(before, &post)?;
+    let report = VerificationReport {
+        post_frame_id,
+        passed,
+        evidence,
+    };
+    Ok((report, post))
+}
+
+fn validate_receipt_and_post(
+    frame: &FrameRef,
+    window: &WindowRef,
+    app: &AppIdentity,
+    expected_actions: usize,
+    receipt: Receipt,
+    now: Duration,
+) -> Result<Observation, ProtocolError> {
+    if receipt.batch_frame_id != frame.id {
+        return Err(ProtocolError::ReceiptFrameMismatch {
+            batch_frame_id: frame.id.clone(),
+            receipt_frame_id: receipt.batch_frame_id,
+        });
+    }
+    if receipt.completed_actions != expected_actions {
+        return Err(ProtocolError::ReceiptActionCountMismatch {
+            completed: receipt.completed_actions,
+            expected: expected_actions,
+        });
+    }
+
+    let post = receipt.post_observation;
+    if post.used {
+        return Err(ProtocolError::PostObservationAlreadyUsed {
+            frame_id: post.frame.id,
+        });
+    }
+    if post.frame.is_expired_at(now) {
+        return Err(ProtocolError::StaleFrame {
+            frame_id: post.frame.id,
+        });
+    }
+    if now < post.frame.issued_at {
+        return Err(ProtocolError::FrameNotYetValid {
+            frame_id: post.frame.id,
+        });
+    }
+    if post.frame.id == frame.id {
+        return Err(ProtocolError::PostObservationNotFresh {
+            frame_id: post.frame.id,
+        });
+    }
+    if post.frame.issued_at < frame.issued_at {
+        return Err(ProtocolError::PostObservationPredatesAction {
+            frame_id: post.frame.id,
+        });
+    }
+    if post.window.id != window.id {
+        return Err(ProtocolError::WindowMismatch {
+            frame_id: post.frame.id,
+            expected_window_id: window.id.clone(),
+            actual_window_id: post.window.id,
+        });
+    }
+    if !post.window.app.same_app(app) {
+        return Err(ProtocolError::AppMismatch {
+            window_id: post.window.id,
+            expected_app_id: app.stable_id.clone(),
+            actual_app_id: post.window.app.stable_id,
+        });
+    }
+    Ok(post)
 }
 
 fn evaluate_verification(condition: &VerificationCondition, post: &Observation) -> (bool, String) {
@@ -1324,6 +1914,22 @@ fn evaluate_verification(condition: &VerificationCondition, post: &Observation) 
                     if passed { "存在" } else { "不存在" },
                     role,
                     text
+                ),
+            )
+        }
+        VerificationCondition::ElementValueEquals { role, label, value } => {
+            let passed = post.elements.iter().any(|element| {
+                element.role.as_deref() == Some(role.as_str())
+                    && element.label.as_deref() == Some(label.as_str())
+                    && element.value.as_deref() == Some(value.as_str())
+            });
+            (
+                passed,
+                format!(
+                    "新观察里{}角色为 {:?}、标签为 {:?} 且 value 等于期望值的元素",
+                    if passed { "存在" } else { "不存在" },
+                    role,
+                    label
                 ),
             )
         }
@@ -1425,6 +2031,73 @@ mod tests {
     }
 
     #[test]
+    fn navigation_uses_a_consumed_frame_and_requires_a_fresh_verified_observation() {
+        let mut pre = observation("nav-1");
+        let pre_frame = pre.frame().clone();
+        let pre_window = pre.window().clone();
+        let pre_app = pre.app().clone();
+        let navigation = NavigationBatch::new(
+            pre_frame.clone(),
+            pre_window.clone(),
+            pre_app.clone(),
+            "https://example.com/",
+            Some(Verification::window_title_contains("Example").expect("测试条件合法")),
+            Duration::ZERO,
+        )
+        .expect("导航批次应当合法");
+        navigation
+            .validate_verification_before(&pre)
+            .expect("导航前标题条件必须不成立");
+        pre.authorize_navigation(
+            navigation.frame().id(),
+            navigation.window().id(),
+            navigation.app(),
+            Duration::from_millis(1),
+        )
+        .expect("导航必须在派发前消费 frame");
+        assert!(pre.is_used(), "导航不能保留可重放的旧 frame");
+
+        let post_window =
+            WindowRef::new(pre_window.id().clone(), pre_app).with_title("Example Domain");
+        let post = Observation::new(
+            frame("nav-2", "w1", Duration::from_secs(1), DEFAULT_FRAME_TTL),
+            post_window,
+            Vec::new(),
+            false,
+        )
+        .expect("动作后 observation 应当合法");
+        let receipt =
+            Receipt::new(pre_frame.id().clone(), 1, Some(post)).expect("导航 receipt 应当合法");
+        let (report, post) = navigation
+            .verify_transition_with_post_observation(&pre, receipt, Duration::from_secs(2))
+            .expect("导航前后的 observation 必须可验证");
+        assert!(report.passed(), "标题条件应当成立");
+        assert!(
+            report.evidence().contains("动作前") && report.evidence().contains("动作后"),
+            "导航验证证据必须同时覆盖前后两份 observation：{}",
+            report.evidence()
+        );
+        assert_ne!(
+            post.frame().id(),
+            pre_frame.id(),
+            "动作后的验证必须绑定新 frame"
+        );
+
+        let unsafe_navigation = NavigationBatch::new(
+            frame("nav-3", "w1", Duration::ZERO, DEFAULT_FRAME_TTL),
+            WindowRef::new(WindowId::new("w1").expect("测试 window id 应当合法"), app()),
+            app(),
+            "file:///C:/Windows/win.ini",
+            Some(Verification::window_title_contains("Example").expect("测试验证条件应当合法")),
+            Duration::ZERO,
+        );
+        assert!(
+            unsafe_navigation.is_err(),
+            "导航协议本身也不能把 file/javascript 协议交给某个宽松驱动"
+        );
+    }
+
+    #[test]
     fn observation_preserves_capture_bounds_and_truncation_evidence() {
         let frame = frame("f1", "w1", Duration::ZERO, DEFAULT_FRAME_TTL);
         let window = WindowRef::new(WindowId::new("w1").expect("测试 window id 应当合法"), app())
@@ -1501,13 +2174,170 @@ mod tests {
         );
     }
 
+    #[test]
+    fn complete_element_tree_requires_all_reported_elements() {
+        let frame = frame("f1", "w1", Duration::ZERO, DEFAULT_FRAME_TTL);
+        let window = WindowRef::new(WindowId::new("w1").expect("测试 window id 应当合法"), app());
+        let observation = Observation::new(
+            frame,
+            window,
+            vec![ObservedElement::new(
+                ElementRefId::new("e1").expect("测试 ref 应当合法"),
+                Some("text".to_owned()),
+                Some("状态".to_owned()),
+                false,
+            )],
+            false,
+        )
+        .expect("测试 observation 应当合法");
+        let error = observation
+            .with_completeness(ObservationCompleteness::new(2, 1, true, false))
+            .expect_err("自报完整但总元素数多于返回数时必须拒绝");
+        assert!(
+            matches!(error, ProtocolError::InvalidObservationCompleteness { .. }),
+            "元素数量矛盾必须得到类型化错误，实际为 {error:?}"
+        );
+    }
+
+    #[test]
+    fn element_transition_rejects_truncated_before_observation() {
+        let window = WindowRef::new(WindowId::new("w1").expect("测试 window id 应当合法"), app())
+            .with_title("前帧");
+        let before = Observation::new(
+            frame("f-before", "w1", Duration::ZERO, DEFAULT_FRAME_TTL),
+            window,
+            Vec::new(),
+            false,
+        )
+        .expect("测试 observation 应当合法")
+        .with_completeness(ObservationCompleteness::new(10, 0, false, true))
+        .expect("截断 observation 的字段应当自洽");
+        let batch = ActionBatch::new(
+            before.frame().clone(),
+            before.window().clone(),
+            before.app().clone(),
+            vec![press_key()],
+            Some(Verification::element_present("text", "已保存").expect("测试验证条件应当合法")),
+            Duration::from_secs(1),
+        )
+        .expect("测试批次应当合法");
+
+        let error = batch
+            .validate_verification_before(&before)
+            .expect_err("截断树中的未找到不能当作验证前置条件为 false");
+        assert!(
+            matches!(
+                error,
+                ProtocolError::IncompleteObservationForVerification {
+                    stage: "动作前",
+                    ..
+                }
+            ),
+            "实际得到 {error:?}"
+        );
+    }
+
+    #[test]
+    fn element_transition_rejects_truncated_after_observation() {
+        let before = observation("f-before");
+        let batch = ActionBatch::new(
+            before.frame().clone(),
+            before.window().clone(),
+            before.app().clone(),
+            vec![press_key()],
+            Some(Verification::element_present("text", "已保存").expect("测试验证条件应当合法")),
+            Duration::from_secs(1),
+        )
+        .expect("测试批次应当合法");
+        let after_window =
+            WindowRef::new(WindowId::new("w1").expect("测试 window id 应当合法"), app());
+        let after = Observation::new(
+            frame("f-after", "w1", Duration::from_secs(1), DEFAULT_FRAME_TTL),
+            after_window,
+            vec![ObservedElement::new(
+                ElementRefId::new("e-status").expect("测试 ref 应当合法"),
+                Some("text".to_owned()),
+                Some("已保存".to_owned()),
+                false,
+            )],
+            false,
+        )
+        .expect("测试 post-observation 应当合法")
+        .with_completeness(ObservationCompleteness::new(10, 1, false, true))
+        .expect("截断 post-observation 的字段应当自洽");
+        let receipt = Receipt::new(batch.frame().id().clone(), 1, Some(after))
+            .expect("带 post-observation 的 receipt 应当合法");
+
+        let error = batch
+            .verify_transition_with_post_observation(&before, receipt, Duration::from_secs(2))
+            .expect_err("截断树中偶然出现的元素不能证明动作成功");
+        assert!(
+            matches!(
+                error,
+                ProtocolError::IncompleteObservationForVerification {
+                    stage: "动作后",
+                    ..
+                }
+            ),
+            "实际得到 {error:?}"
+        );
+    }
+
+    #[test]
+    fn window_title_transition_does_not_require_element_tree_coverage() {
+        let before_window =
+            WindowRef::new(WindowId::new("w1").expect("测试 window id 应当合法"), app())
+                .with_title("导航前");
+        let before = Observation::new(
+            frame("f-before", "w1", Duration::ZERO, DEFAULT_FRAME_TTL),
+            before_window,
+            Vec::new(),
+            false,
+        )
+        .expect("测试 observation 应当合法")
+        .with_completeness(ObservationCompleteness::new(10, 0, false, true))
+        .expect("截断 observation 的字段应当自洽");
+        let batch = ActionBatch::new(
+            before.frame().clone(),
+            before.window().clone(),
+            before.app().clone(),
+            vec![press_key()],
+            Some(Verification::window_title_contains("Example").expect("测试标题条件应当合法")),
+            Duration::from_secs(1),
+        )
+        .expect("测试批次应当合法");
+        let after_window =
+            WindowRef::new(WindowId::new("w1").expect("测试 window id 应当合法"), app())
+                .with_title("Example Domain");
+        let after = Observation::new(
+            frame("f-after", "w1", Duration::from_secs(1), DEFAULT_FRAME_TTL),
+            after_window,
+            Vec::new(),
+            false,
+        )
+        .expect("测试 post-observation 应当合法")
+        .with_completeness(ObservationCompleteness::new(10, 0, false, true))
+        .expect("截断 post-observation 的字段应当自洽");
+        let receipt = Receipt::new(batch.frame().id().clone(), 1, Some(after))
+            .expect("带 post-observation 的 receipt 应当合法");
+
+        let (report, _) = batch
+            .verify_transition_with_post_observation(&before, receipt, Duration::from_secs(2))
+            .expect("窗口标题验证不依赖元素树覆盖");
+        assert!(
+            report.passed(),
+            "窗口标题已经从不匹配变为匹配，验证必须通过：{}",
+            report.evidence()
+        );
+    }
+
     fn press_batch(observation: &Observation, actions: Vec<ComputerAction>) -> ActionBatch {
         ActionBatch::new(
             observation.frame().clone(),
             observation.window().clone(),
             observation.app().clone(),
             actions,
-            Some(Verification::window_present()),
+            Some(Verification::window_title_contains("动作完成后").expect("测试验证条件应当合法")),
             Duration::from_secs(1),
         )
         .expect("测试动作批次应当合法")
@@ -1560,7 +2390,7 @@ mod tests {
             observation.window().clone(),
             observation.app().clone(),
             vec![press_key()],
-            Some(Verification::window_present()),
+            Some(Verification::window_title_contains("动作完成后").expect("测试验证条件应当合法")),
             Duration::from_secs(9),
         )
         .expect("批次自身只需要 frame 未过期");
@@ -1668,7 +2498,7 @@ mod tests {
     #[test]
     fn action_count_is_capped() {
         let observation = observation("f1");
-        let actions = (0..=MAX_ACTIONS_PER_BATCH).map(|_| press_key()).collect();
+        let actions = vec![press_key(), press_key()];
         let error = ActionBatch::new(
             observation.frame().clone(),
             observation.window().clone(),
@@ -1681,6 +2511,109 @@ mod tests {
         assert!(
             matches!(error, ProtocolError::TooManyActions { .. }),
             "动作过多必须得到 TooManyActions，实际为 {error:?}"
+        );
+        assert_eq!(
+            MAX_ACTIONS_PER_BATCH, 1,
+            "一个批次只能有一个状态改变动作，后续动作必须重新 observe"
+        );
+    }
+
+    #[test]
+    fn state_change_verification_must_not_already_hold_before_action() {
+        let mut before = observation("f-before");
+        before.window.title = Some("Example Domain".to_owned());
+        let batch = ActionBatch::new(
+            before.frame().clone(),
+            before.window().clone(),
+            before.app().clone(),
+            vec![press_key()],
+            Some(Verification::window_title_contains("Example").expect("测试条件应当合法")),
+            Duration::from_secs(1),
+        )
+        .expect("验证强度必须在 Gateway 前置门禁阶段判断");
+
+        let error = batch
+            .validate_verification_before(&before)
+            .expect_err("动作前已经成立的条件不能证明动作造成变化");
+        assert!(
+            matches!(
+                error,
+                ProtocolError::VerificationPreconditionAlreadySatisfied
+            ),
+            "实际得到 {error:?}"
+        );
+    }
+
+    #[test]
+    fn window_present_is_rejected_for_state_change_verification() {
+        let before = observation("f-before");
+        let error = ActionBatch::new(
+            before.frame().clone(),
+            before.window().clone(),
+            before.app().clone(),
+            vec![press_key()],
+            Some(Verification::window_present()),
+            Duration::from_secs(1),
+        )
+        .expect_err("window_present 恒定成立，不能进入任何状态改变批次");
+        assert!(
+            matches!(error, ProtocolError::WindowPresentCannotVerifyStateChange),
+            "实际得到 {error:?}"
+        );
+    }
+
+    #[test]
+    fn typed_text_and_scroll_amount_are_bounded() {
+        let mut observation = observation("f1");
+        observation.elements.push(ObservedElement::new(
+            ElementRefId::new("e1").expect("测试 ref 应当合法"),
+            Some("textbox".to_owned()),
+            Some("内容".to_owned()),
+            false,
+        ));
+        let reference = observation.take_element_ref(0).expect("签发元素引用");
+        let too_much_text = ActionBatch::new(
+            observation.frame().clone(),
+            observation.window().clone(),
+            observation.app().clone(),
+            vec![ComputerAction::TypeText {
+                target: reference,
+                text: "a".repeat(MAX_TYPED_TEXT_CHARS + 1),
+            }],
+            Some(Verification::window_present()),
+            Duration::from_secs(1),
+        )
+        .expect_err("超长输入必须在派发前拒绝");
+        assert!(
+            matches!(
+                too_much_text,
+                ProtocolError::InvalidAction {
+                    kind: "type_text",
+                    ..
+                }
+            ),
+            "实际得到 {too_much_text:?}"
+        );
+
+        let too_much_scroll = ActionBatch::new(
+            observation.frame().clone(),
+            observation.window().clone(),
+            observation.app().clone(),
+            vec![ComputerAction::Scroll {
+                target: ActionTarget::Visual { x: 1, y: 1 },
+                direction: ScrollDirection::Down,
+                amount: MAX_SCROLL_AMOUNT + 1,
+            }],
+            Some(Verification::window_present()),
+            Duration::from_secs(1),
+        )
+        .expect_err("超过驱动上限的滚动必须在派发前拒绝");
+        assert!(
+            matches!(
+                too_much_scroll,
+                ProtocolError::InvalidAction { kind: "scroll", .. }
+            ),
+            "实际得到 {too_much_scroll:?}"
         );
     }
 
@@ -1739,6 +2672,40 @@ mod tests {
     }
 
     #[test]
+    fn observation_secure_input_rejects_an_element_action() {
+        let mut observation = Observation::new(
+            frame("f1", "w1", Duration::ZERO, DEFAULT_FRAME_TTL),
+            WindowRef::new(WindowId::new("w1").expect("测试 window id 应当合法"), app()),
+            vec![ObservedElement::new(
+                ElementRefId::new("ordinary-button").expect("测试 ref 应当合法"),
+                Some("button".to_owned()),
+                Some("继续".to_owned()),
+                false,
+            )],
+            true,
+        )
+        .expect("测试 observation 应当合法");
+        let reference = observation
+            .take_element_ref(0)
+            .expect("普通元素也必须能签发 ref，以验证 observation 级 handoff");
+        let batch = press_batch(
+            &observation,
+            vec![ComputerAction::TypeText {
+                target: reference,
+                text: "blocked".to_owned(),
+            }],
+        );
+
+        let error = observation
+            .authorize(&batch, Duration::from_secs(1))
+            .expect_err("observation 级 secure_input 必须无条件阻断元素动作");
+        assert!(
+            matches!(error, ProtocolError::SecureField { reference_id: None }),
+            "实际得到 {error:?}"
+        );
+    }
+
+    #[test]
     fn receipt_requires_a_fresh_post_observation() {
         let before = observation("f-before");
         let batch = press_batch(&before, vec![press_key()]);
@@ -1753,7 +2720,7 @@ mod tests {
         let receipt = Receipt::new(batch.frame().id().clone(), 1, Some(same_frame))
             .expect("receipt 可以携带一个尚未验证的新观察");
         let error = batch
-            .verify(receipt, Duration::from_secs(1))
+            .verify_transition_with_post_observation(&before, receipt, Duration::from_secs(1))
             .expect_err("动作前后 frame 相同不能视为已重新观察");
         assert!(
             matches!(error, ProtocolError::PostObservationNotFresh { .. }),
@@ -1763,14 +2730,20 @@ mod tests {
 
     #[test]
     fn post_observation_cannot_predate_the_action_frame() {
-        let before = frame("f-before", "w1", Duration::from_secs(5), DEFAULT_FRAME_TTL);
         let window = WindowRef::new(WindowId::new("w1").expect("测试 window id 应当合法"), app());
+        let before = Observation::new(
+            frame("f-before", "w1", Duration::from_secs(5), DEFAULT_FRAME_TTL),
+            window.clone(),
+            Vec::new(),
+            false,
+        )
+        .expect("动作前 observation 应当合法");
         let batch = ActionBatch::new(
-            before,
+            before.frame().clone(),
             window,
             app(),
             vec![press_key()],
-            Some(Verification::window_present()),
+            Some(Verification::window_title_contains("动作完成后").expect("测试验证条件应当合法")),
             Duration::from_secs(6),
         )
         .expect("动作批次应当合法");
@@ -1789,7 +2762,7 @@ mod tests {
         let receipt = Receipt::new(batch.frame().id().clone(), 1, Some(stale_post))
             .expect("receipt 构造不负责判断时间");
         let error = batch
-            .verify(receipt, Duration::from_secs(5))
+            .verify_transition_with_post_observation(&before, receipt, Duration::from_secs(5))
             .expect_err("动作前生成的新 ID 截图不能冒充动作后观察");
         assert!(
             matches!(error, ProtocolError::PostObservationPredatesAction { .. }),
@@ -1799,7 +2772,8 @@ mod tests {
 
     #[test]
     fn verification_runs_against_the_post_observation() {
-        let before = observation("f-before");
+        let mut before = observation("f-before");
+        before.window.title = Some("待保存".to_owned());
         let batch = ActionBatch::new(
             before.frame().clone(),
             before.window().clone(),
@@ -1828,9 +2802,9 @@ mod tests {
         let receipt = Receipt::new(batch.frame().id().clone(), 1, Some(post))
             .expect("带 post-observation 的 receipt 应当合法");
 
-        let report = batch
-            .verify(receipt, Duration::from_secs(2))
-            .expect("验证应当运行");
+        let (report, post_observation) = batch
+            .verify_transition_with_post_observation(&before, receipt, Duration::from_secs(2))
+            .expect("状态迁移验证应当运行");
         assert!(
             report.passed(),
             "新 frame 中出现了目标元素，验证应当通过：{}",
@@ -1840,6 +2814,44 @@ mod tests {
             report.post_frame_id().to_string(),
             "f-after",
             "验证报告必须把证据绑定到动作后的新 frame"
+        );
+        assert_eq!(
+            post_observation.frame().id().to_string(),
+            "f-after",
+            "验证与返回给宿主的 observation 必须是同一帧"
+        );
+    }
+
+    #[test]
+    fn wait_verification_evaluates_the_supplied_observation() {
+        let window = WindowRef::new(WindowId::new("w1").expect("测试 window id 应当合法"), app());
+        let observation = Observation::new(
+            frame("f-wait", "w1", Duration::ZERO, DEFAULT_FRAME_TTL),
+            window,
+            vec![
+                ObservedElement::new(
+                    ElementRefId::new("status").expect("测试 ref 应当合法"),
+                    Some("Edit".to_owned()),
+                    Some("Status".to_owned()),
+                    false,
+                )
+                .with_value(Some("Ready".to_owned())),
+            ],
+            false,
+        )
+        .expect("等待条件使用的 observation 应当合法");
+        let ready = Verification::element_value_equals("Edit", "Status", "Ready")
+            .expect("验证条件应当合法");
+        let pending =
+            Verification::element_value_equals("Edit", "Status", "Done").expect("验证条件应当合法");
+
+        assert!(
+            ready.matches(&observation).0,
+            "等待条件必须直接在调用方给出的新 observation 上计算"
+        );
+        assert!(
+            !pending.matches(&observation).0,
+            "值不一致时轮询不能把 Ready 误报成 Done"
         );
     }
 }

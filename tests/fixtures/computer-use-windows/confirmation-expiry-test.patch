@@ -1,0 +1,26 @@
+diff --git a/crates/cortex-local/src/confirmation_routes_test.rs b/crates/cortex-local/src/confirmation_routes_test.rs
+--- a/crates/cortex-local/src/confirmation_routes_test.rs
++++ b/crates/cortex-local/src/confirmation_routes_test.rs
+@@ -271,7 +271,7 @@ async fn confirmation_list_hides_expired_items_without_affecting_other_sessions() {
+     let dir = tempfile::tempdir().expect("创建隔离测试目录");
+     let remote_base = fake_remote().await;
+     let mut st = state(dir.path(), &remote_base, "token-alice-1");
+-    let registry = Arc::new(ConfirmRegistry::new(Duration::from_millis(50)));
++    let registry = Arc::new(ConfirmRegistry::new(Duration::from_secs(60)));
+     Arc::get_mut(&mut st.engine)
+         .expect("测试开始前独占引擎")
+         .confirms = Arc::clone(&registry);
+@@ -282,7 +282,12 @@ async fn confirmation_list_hides_expired_items_without_affecting_other_sessions() {
+     let expired = registry
+         .open_scoped(pending_meta("session-a"), &lease_a)
+         .expect("登记会过期的确认项");
+-    tokio::time::sleep(Duration::from_millis(60)).await;
++    // 只推进旧待办的截止时间；HTTP 探测不能挤占新待办的 50 毫秒窗口。
++    // 发请求前恢复真实时钟，避免等待 loopback I/O 时自动推进到新截止时间。
++    tokio::time::pause();
++    tokio::time::advance(Duration::from_secs(61)).await;
++    tokio::time::resume();
++
+     let principal_b = principal_for_session("alice", "session-b", 0);
+     let lease_b = registry
+         .issue_lease(&principal_b, "run-b")

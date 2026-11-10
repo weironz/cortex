@@ -1,0 +1,286 @@
+{
+    "schema_version":  2,
+    "scope":  "driver_readonly_fixture_candidate_steady",
+    "status":  "PASS",
+    "phase":  "completed",
+    "run_name":  "repro-b1-4h-c3-20261110",
+    "harness_pid":  49560,
+    "owner_run_id":  "6e177fde242a46e68636af4fd0b6bacc",
+    "output_directory":  "C:\\Users\\willz\\AppData\\Local\\Temp\\CortexReadonlySteady\\steady-repro-b1-4h-c3-20261110",
+    "investigation_only":  true,
+    "product_signature_gate_passed":  false,
+    "memory_steady_state_asserted":  false,
+    "failure_code":  null,
+    "cleanup_failure_code":  null,
+    "plan":  {
+                 "duration_ms":  14400000,
+                 "warmup":  25,
+                 "session_ms":  600000,
+                 "session_observations":  200,
+                 "max_sessions":  128,
+                 "minimum_rotations":  2,
+                 "interval_ms":  1000,
+                 "call_ms":  20000,
+                 "sample_ms":  30000,
+                 "setup_ms":  360000,
+                 "cleanup_ms":  120000,
+                 "post_end_samples":  3,
+                 "post_end_interval_ms":  1000,
+                 "manifest_seconds":  14940
+             },
+    "warmup_completed":  25,
+    "observations_completed":  5956,
+    "sessions_attempted":  30,
+    "sessions_started":  30,
+    "sessions_ended":  30,
+    "rotations":  29,
+    "session_end_attempts":  30,
+    "max_seen_snapshots":  200,
+    "post_end_samples":  3,
+    "cli_attempts":  6042,
+    "cli_exit_codes":  6042,
+    "cli_zero_exits":  6042,
+    "cli_stdout_chars":  20165173,
+    "cli_stderr_chars":  0,
+    "observed_elements_total":  35886,
+    "observed_tree_chars_total":  4157463,
+    "warmup_elapsed_ms_total":  31246.947200000002,
+    "observation_elapsed_ms_total":  7946971.245000001,
+    "steady_elapsed_ms":  14400867,
+    "samples_written":  558,
+    "elapsed_ms":  14462749,
+    "daemon_pid":  38388,
+    "daemon_start_utc_ticks":  639298512431014783,
+    "daemon_exit_code":  -1,
+    "fixture_pid":  76244,
+    "fixture_start_utc_ticks":  639298512426515659,
+    "fixture_exit_code":  0,
+    "candidate_sha256":  "a91f793a8ce7c095ba6afcbed38043278b6ceb8e3df08dc9d8a936ee27626d56",
+    "fixture_sha256":  "090a49fb1321451d8c67fde06e04b712045c68bed922db55444aebf05e4a4609",
+    "daemon_cleanup_ok":  true,
+    "fixture_cleanup_ok":  true,
+    "fixture_copy_removed":  true,
+    "step_sequence":  261917,
+    "active_step":  null,
+    "last_step":  {
+                      "stage":  "Persist",
+                      "step":  "Persist",
+                      "started_ms":  14462772,
+                      "ended_ms":  14462795,
+                      "elapsed_ms":  23,
+                      "succeeded":  true
+                  },
+    "stage_timings":  {
+                          "Check":  {
+                                        "calls":  30539,
+                                        "total_ms":  956334,
+                                        "max_ms":  723,
+                                        "last_ms":  26,
+                                        "failures":  0
+                                    },
+                          "Measure":  {
+                                          "calls":  558,
+                                          "total_ms":  14948,
+                                          "max_ms":  57,
+                                          "last_ms":  23,
+                                          "failures":  0
+                                      },
+                          "Persist":  {
+                                          "calls":  558,
+                                          "total_ms":  17936,
+                                          "max_ms":  1474,
+                                          "last_ms":  23,
+                                          "failures":  0
+                                      },
+                          "Call":  {
+                                       "calls":  6041,
+                                       "total_ms":  7992362,
+                                       "max_ms":  5811,
+                                       "last_ms":  59,
+                                       "failures":  0
+                                   },
+                          "Wait":  {
+                                       "calls":  5984,
+                                       "total_ms":  6045312,
+                                       "max_ms":  1653,
+                                       "last_ms":  1014,
+                                       "failures":  0
+                                   }
+                      },
+    "step_timings":  {
+                         "Check.daemon.Identity":  {
+                                                       "calls":  30539,
+                                                       "total_ms":  24600,
+                                                       "max_ms":  8,
+                                                       "last_ms":  1,
+                                                       "failures":  0
+                                                   },
+                         "Check.daemon.ImagePath":  {
+                                                        "calls":  30539,
+                                                        "total_ms":  21179,
+                                                        "max_ms":  6,
+                                                        "last_ms":  0,
+                                                        "failures":  0
+                                                    },
+                         "Check.Cancel":  {
+                                              "calls":  30539,
+                                              "total_ms":  25632,
+                                              "max_ms":  683,
+                                              "last_ms":  0,
+                                              "failures":  0
+                                          },
+                         "Check.Desktop":  {
+                                               "calls":  30539,
+                                               "total_ms":  332641,
+                                               "max_ms":  39,
+                                               "last_ms":  9,
+                                               "failures":  0
+                                           },
+                         "Check.fixture.Identity":  {
+                                                        "calls":  30539,
+                                                        "total_ms":  25527,
+                                                        "max_ms":  11,
+                                                        "last_ms":  1,
+                                                        "failures":  0
+                                                    },
+                         "Check.fixture.ImagePath":  {
+                                                         "calls":  30539,
+                                                         "total_ms":  20866,
+                                                         "max_ms":  6,
+                                                         "last_ms":  1,
+                                                         "failures":  0
+                                                     },
+                         "Check.FixtureWindows":  {
+                                                      "calls":  30539,
+                                                      "total_ms":  290582,
+                                                      "max_ms":  38,
+                                                      "last_ms":  9,
+                                                      "failures":  0
+                                                  },
+                         "Check":  {
+                                       "calls":  30539,
+                                       "total_ms":  956334,
+                                       "max_ms":  723,
+                                       "last_ms":  26,
+                                       "failures":  0
+                                   },
+                         "Measure.daemon.Identity":  {
+                                                         "calls":  558,
+                                                         "total_ms":  391,
+                                                         "max_ms":  3,
+                                                         "last_ms":  1,
+                                                         "failures":  0
+                                                     },
+                         "Measure.daemon.ImagePath":  {
+                                                          "calls":  558,
+                                                          "total_ms":  377,
+                                                          "max_ms":  3,
+                                                          "last_ms":  0,
+                                                          "failures":  0
+                                                      },
+                         "Measure.daemon.Metrics":  {
+                                                        "calls":  558,
+                                                        "total_ms":  5162,
+                                                        "max_ms":  21,
+                                                        "last_ms":  8,
+                                                        "failures":  0
+                                                    },
+                         "Measure.fixture.Identity":  {
+                                                          "calls":  558,
+                                                          "total_ms":  385,
+                                                          "max_ms":  3,
+                                                          "last_ms":  1,
+                                                          "failures":  0
+                                                      },
+                         "Measure.fixture.ImagePath":  {
+                                                           "calls":  558,
+                                                           "total_ms":  358,
+                                                           "max_ms":  3,
+                                                           "last_ms":  0,
+                                                           "failures":  0
+                                                       },
+                         "Measure.fixture.Metrics":  {
+                                                         "calls":  558,
+                                                         "total_ms":  5081,
+                                                         "max_ms":  18,
+                                                         "last_ms":  8,
+                                                         "failures":  0
+                                                     },
+                         "Measure":  {
+                                         "calls":  558,
+                                         "total_ms":  14948,
+                                         "max_ms":  57,
+                                         "last_ms":  23,
+                                         "failures":  0
+                                     },
+                         "Persist.Samples":  {
+                                                 "calls":  558,
+                                                 "total_ms":  3526,
+                                                 "max_ms":  751,
+                                                 "last_ms":  1,
+                                                 "failures":  0
+                                             },
+                         "Persist.Progress":  {
+                                                  "calls":  558,
+                                                  "total_ms":  13296,
+                                                  "max_ms":  1134,
+                                                  "last_ms":  19,
+                                                  "failures":  0
+                                              },
+                         "Persist":  {
+                                         "calls":  558,
+                                         "total_ms":  17936,
+                                         "max_ms":  1474,
+                                         "last_ms":  23,
+                                         "failures":  0
+                                     },
+                         "Call.start_session":  {
+                                                    "calls":  30,
+                                                    "total_ms":  1689,
+                                                    "max_ms":  101,
+                                                    "last_ms":  59,
+                                                    "failures":  0
+                                                },
+                         "Call.get_window_state":  {
+                                                       "calls":  5981,
+                                                       "total_ms":  7989005,
+                                                       "max_ms":  5811,
+                                                       "last_ms":  1142,
+                                                       "failures":  0
+                                                   },
+                         "Wait":  {
+                                      "calls":  5984,
+                                      "total_ms":  6045312,
+                                      "max_ms":  1653,
+                                      "last_ms":  1014,
+                                      "failures":  0
+                                  },
+                         "Call.end_session":  {
+                                                  "calls":  30,
+                                                  "total_ms":  1668,
+                                                  "max_ms":  64,
+                                                  "last_ms":  59,
+                                                  "failures":  0
+                                              }
+                     },
+    "deadline_crossings":  [
+
+                           ],
+    "deadline_diagnostics":  null,
+    "slow_steps":  [
+                       {
+                           "stage":  "Call",
+                           "step":  "Call.get_window_state",
+                           "started_ms":  13113633,
+                           "ended_ms":  13119444,
+                           "elapsed_ms":  5811,
+                           "succeeded":  true
+                       }
+                   ],
+    "step_journal":  {
+                         "writes":  7198,
+                         "errors":  0,
+                         "last_io_ms":  11,
+                         "drained":  true
+                     }
+}

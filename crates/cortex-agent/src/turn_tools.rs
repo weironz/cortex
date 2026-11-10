@@ -58,10 +58,14 @@ impl Turn {
             return ToolResult::err("云端容器不能打开用户电脑上的应用。");
         }
         // 超出预览长度就拒绝，不能让用户批准一条尾部看不见的宿主命令或 URL。
-        if (host_execution || spec.name == "open_application")
+        if (host_execution
+            || matches!(
+                spec.name.as_ref(),
+                "open_application" | "computer_act" | "computer_browser_act"
+            ))
             && call.arguments.to_string().len() > 6_000
         {
-            return ToolResult::err("宿主执行参数过长，无法完整展示供确认；请缩短命令或应用地址。");
+            return ToolResult::err("操作参数过长，无法完整展示供确认；请缩短参数后重试。");
         }
 
         // ── 先把本会话已批准的目录挂上，再判越界 ──
@@ -171,6 +175,24 @@ impl Turn {
         // 整个 await 期间这一轮是挂起的 —— 这正是想要的：确认没回来之前，
         // 不该有任何副作用发生，也不该抢先去跑下一个工具
         let gate = match self.policy.decide(&spec.name, spec.risk) {
+            // 真实桌面输入不能继承“完全放行”的无确认语义。它和 shell 的
+            // 进程沙箱是不同边界：一次点击可能落在付款、发送或权限窗口，
+            // 即使命令执行已经全放行，也必须让用户看见这次动作批次。
+            _ if spec.name == "computer_act" => Gate::Ask,
+            // 浏览器写动作也可能提交或发送数据；在动作级策略前取得真实
+            // 用户授权。单独导航仍走原有策略与站点 allowlist。
+            _ if spec.name == "computer_browser_act"
+                && !call
+                    .arguments
+                    .get("actions")
+                    .and_then(|a| a.as_array())
+                    .is_some_and(|a| {
+                        a.len() == 1
+                            && a[0].get("type").and_then(|t| t.as_str()) == Some("navigate")
+                    }) =>
+            {
+                Gate::Ask
+            }
             _ if host_execution && !self.policy.bypasses_everything() => Gate::Ask,
             Gate::Ask => Gate::Ask,
             // 风险档说不用问，但越界了 —— 越界必须问，除非**完全放行**档。
@@ -179,6 +201,9 @@ impl Turn {
             Gate::Allow if outside.is_some() && !self.policy.bypasses_everything() => Gate::Ask,
             Gate::Allow => Gate::Allow,
         };
+        // 模型的 tool_call id 可能在下一次响应中复用，不能作为操作身份。
+        // 一次派发在询问前发号，确认与宿主执行共享它；恢复必须读取持久记录。
+        let operation_id = cortex_core::Id::new();
         let approval = match gate {
             Gate::Allow => Approval::Allow,
             // 本轮已经问过一次而没有人回答，不再问第二次。见 [`ConfirmState`]
@@ -189,6 +214,7 @@ impl Turn {
             Gate::Ask => {
                 let answer = host
                     .confirm(&ConfirmRequest {
+                        operation_id: &operation_id,
                         tool: &spec.name,
                         risk: spec.risk,
                         arguments: &call.arguments,
@@ -307,7 +333,15 @@ impl Turn {
             // 判据用 `is_computer_tool` 而不是在这里再写一遍名字清单 ——
             // 写两遍的话，加第六个工具时漏掉这里不会有任何编译错误，
             // 症状是那个工具被当成文件工具丢进 `tools::execute`
-            host.computer(&spec.name, &call.arguments).await
+            host.computer(
+                &spec.name,
+                &call.arguments,
+                &crate::ComputerInvocation::new(
+                    &operation_id,
+                    gate == Gate::Ask && approval == Approval::Allow,
+                ),
+            )
+            .await
         } else {
             // **重新问一次宿主**，而不是复用上面那份 `sandbox`：刚才那次
             // `grant_root` 之后清单变长了，用旧的一份去执行，症状恰好是
@@ -508,6 +542,32 @@ mod tests {
             *self.last_tool.lock().unwrap() = Some(req.tool.to_string());
             *self.last_args.lock().unwrap() = Some(req.arguments.clone());
             self.answer
+        }
+    }
+
+    struct ComputerSpyHost {
+        answer: Approval,
+        asked: AtomicUsize,
+        called: AtomicUsize,
+        approved_by_user: std::sync::Mutex<Option<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolHost for ComputerSpyHost {
+        async fn confirm(&self, _: &ConfirmRequest<'_>) -> Approval {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            self.answer
+        }
+
+        async fn computer(
+            &self,
+            _: &str,
+            _: &serde_json::Value,
+            invocation: &crate::ComputerInvocation<'_>,
+        ) -> ToolResult {
+            self.called.fetch_add(1, Ordering::SeqCst);
+            *self.approved_by_user.lock().unwrap() = Some(invocation.approved_by_user());
+            ToolResult::ok("computer called")
         }
     }
 
@@ -715,6 +775,167 @@ mod tests {
             host.launched.load(Ordering::SeqCst),
             1,
             "被拒的云端请求不能到达宿主"
+        );
+    }
+
+    #[tokio::test]
+    async fn computer_act_is_confirmed_even_in_full_access_mode() {
+        let turn = Turn::sealed()
+            .with_specs(vec![tools::cua_computer_act_spec()])
+            .with_policy(ApprovalPolicy {
+                confirm_at: Risk::Write,
+                bypass: true,
+            });
+        let call = ToolCall {
+            name: "computer_act".into(),
+            arguments: serde_json::json!({
+                "frame_id": "frame",
+                "actions": [],
+                "verify": {"kind": "window_present"}
+            }),
+        };
+
+        let denied = ComputerSpyHost {
+            answer: Approval::Denied,
+            asked: AtomicUsize::new(0),
+            called: AtomicUsize::new(0),
+            approved_by_user: std::sync::Mutex::new(None),
+        };
+        assert!(
+            !turn.dispatch_once(&call, &denied).await.ok,
+            "完全放行不能让真实桌面输入静默执行"
+        );
+        assert_eq!(denied.asked.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            denied.called.load(Ordering::SeqCst),
+            0,
+            "拒绝后不能触达 computer host"
+        );
+
+        let allowed = ComputerSpyHost {
+            answer: Approval::Allow,
+            asked: AtomicUsize::new(0),
+            called: AtomicUsize::new(0),
+            approved_by_user: std::sync::Mutex::new(None),
+        };
+        assert!(
+            turn.dispatch_once(&call, &allowed).await.ok,
+            "用户明确批准后应进入动作级 Computer Policy"
+        );
+        assert_eq!(allowed.asked.load(Ordering::SeqCst), 1);
+        assert_eq!(allowed.called.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *allowed.approved_by_user.lock().unwrap(),
+            Some(true),
+            "完全放行下也必须把这次用户批准传给动作级策略"
+        );
+    }
+
+    #[tokio::test]
+    async fn isolated_browser_tools_are_dispatched_to_the_computer_host() {
+        let turn = Turn::sealed().with_specs(tools::browser_specs());
+        let host = ComputerSpyHost {
+            answer: Approval::Allow,
+            asked: AtomicUsize::new(0),
+            called: AtomicUsize::new(0),
+            approved_by_user: std::sync::Mutex::new(None),
+        };
+        let result = turn
+            .dispatch_once(
+                &ToolCall {
+                    name: "computer_browser_open".into(),
+                    arguments: serde_json::json!({}),
+                },
+                &host,
+            )
+            .await;
+        assert!(
+            result.ok,
+            "浏览器工具必须由宿主执行，不能落进 filesystem/shell：{}",
+            result.content
+        );
+        assert_eq!(
+            host.called.load(Ordering::SeqCst),
+            1,
+            "获批后必须恰好触达一次 computer host"
+        );
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_browser_action_is_not_reported_as_user_approved() {
+        let turn = Turn::sealed()
+            .with_specs(tools::browser_specs())
+            .with_policy(ApprovalPolicy {
+                confirm_at: Risk::Write,
+                bypass: true,
+            });
+        let host = ComputerSpyHost {
+            answer: Approval::Allow,
+            asked: AtomicUsize::new(0),
+            called: AtomicUsize::new(0),
+            approved_by_user: std::sync::Mutex::new(None),
+        };
+        let call = ToolCall {
+            name: "computer_browser_act".into(),
+            arguments: serde_json::json!({"frame_id":"frame", "actions":[{"type":"navigate","url":"https://example.com"}], "verify":{}}),
+        };
+        assert!(
+            turn.dispatch_once(&call, &host).await.ok,
+            "浏览器动作应交由宿主进一步判定"
+        );
+        assert_eq!(host.asked.load(Ordering::SeqCst), 0, "此场景不应产生确认");
+        assert_eq!(
+            *host.approved_by_user.lock().unwrap(),
+            Some(false),
+            "未提问不能冒充用户批准"
+        );
+        let oversized = ToolCall {
+            name: "computer_browser_act".into(),
+            arguments: serde_json::json!({"frame_id":"frame", "actions":[{"text":"x".repeat(6000)}], "verify":{}}),
+        };
+        assert!(
+            !turn.dispatch_once(&oversized, &host).await.ok,
+            "超出预览上限的动作应在分派前拒绝"
+        );
+        assert_eq!(
+            host.called.load(Ordering::SeqCst),
+            1,
+            "超长动作不能触达宿主"
+        );
+
+        let write = ToolCall {
+            name: "computer_browser_act".into(),
+            arguments: serde_json::json!({"frame_id":"frame", "actions":[{"type":"click"}], "verify":{}}),
+        };
+        assert!(
+            turn.dispatch_once(&write, &host).await.ok,
+            "用户批准后浏览器写动作应交给宿主"
+        );
+        assert_eq!(
+            host.asked.load(Ordering::SeqCst),
+            1,
+            "即使完全放行也必须确认浏览器写动作"
+        );
+        assert_eq!(
+            *host.approved_by_user.lock().unwrap(),
+            Some(true),
+            "只有明确批准才传递用户授权"
+        );
+        let denied = ComputerSpyHost {
+            answer: Approval::Denied,
+            asked: AtomicUsize::new(0),
+            called: AtomicUsize::new(0),
+            approved_by_user: std::sync::Mutex::new(None),
+        };
+        assert!(
+            !turn.dispatch_once(&write, &denied).await.ok,
+            "用户拒绝后浏览器写动作必须失败"
+        );
+        assert_eq!(denied.asked.load(Ordering::SeqCst), 1, "必须展示确认");
+        assert_eq!(
+            denied.called.load(Ordering::SeqCst),
+            0,
+            "拒绝后不能触达浏览器宿主"
         );
     }
 
@@ -1389,5 +1610,65 @@ mod tests {
         );
         assert!(r.ok, "不问就该直接执行：{}", r.content);
         drop(dir);
+    }
+}
+#[cfg(test)]
+mod computer_invocation_tests {
+    use crate::tools::{self, ToolCall, ToolResult};
+    use crate::{Approval, ComputerInvocation, ConfirmRequest, ToolHost, Turn};
+    use std::sync::Mutex;
+
+    struct CorrelatedHost(Mutex<Vec<(char, cortex_core::Id)>>);
+
+    #[async_trait::async_trait]
+    impl ToolHost for CorrelatedHost {
+        async fn confirm(&self, request: &ConfirmRequest<'_>) -> Approval {
+            self.0
+                .lock()
+                .expect("记录询问")
+                .push(('a', *request.operation_id));
+            Approval::Allow
+        }
+
+        async fn computer(
+            &self,
+            _: &str,
+            _: &serde_json::Value,
+            invocation: &ComputerInvocation<'_>,
+        ) -> ToolResult {
+            assert!(
+                invocation.approved_by_user(),
+                "电脑写动作必须保留实际询问结果"
+            );
+            self.0
+                .lock()
+                .expect("记录派发")
+                .push(('b', *invocation.operation_id()));
+            ToolResult::ok("captured")
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmation_and_dispatch_share_one_host_operation_id() {
+        let turn = Turn::sealed().with_specs(vec![tools::cua_computer_act_spec()]);
+        let host = CorrelatedHost(Mutex::new(Vec::new()));
+        let call = ToolCall {
+            name: "computer_act".into(),
+            arguments: serde_json::json!({"frame_id":"frame", "actions":[], "verify":{"kind":"window_present"}}),
+        };
+        for _ in 0..2 {
+            assert!(
+                turn.dispatch_once(&call, &host).await.ok,
+                "已批准的测试调用应到达宿主"
+            );
+        }
+        let records = host.0.lock().expect("读取关联记录");
+        assert_eq!(records.len(), 4, "每次调用恰好询问和派发各一次");
+        assert_eq!(records[0].1, records[1].1, "询问与派发不能各自重新发号");
+        assert_eq!(records[2].1, records[3].1, "第二次调用也应保留同一上下文");
+        assert_ne!(
+            records[0].1, records[2].1,
+            "相同参数的独立调用必须有独立操作身份"
+        );
     }
 }

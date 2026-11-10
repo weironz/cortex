@@ -868,8 +868,8 @@ async fn one_turn(
             Ok(ChatEvent::Done {
                 episode_id,
                 models,
-                // CLI 不画图，附件只在图形界面上有意义
-                attachments: _,
+                // CLI 不画图；保存状态与附件由图形客户端展示。
+                ..
             }) => {
                 if wrote_body {
                     println!();

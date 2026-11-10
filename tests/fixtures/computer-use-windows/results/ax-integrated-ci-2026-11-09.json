@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "scope": "main_worktree_full_local_ci",
+  "command": "just workflow-ci",
+  "exitCode": 0,
+  "rustSuites": 43,
+  "rustPassed": 1887,
+  "rustFailed": 0,
+  "rustIgnored": 25,
+  "flutterPassed": 1058,
+  "flutterSkipped": 7,
+  "analyzer": "No issues found",
+  "clippy": "workspace_all_targets_all_features_D_warnings",
+  "status": "passed",
+  "realCuaFixtureResult": "ax-only-integrated-fixture-2026-11-09.json",
+  "logSha256": "8e81b176d484253a7d3cc3d4bbdcd6ba760dbb66bc8b4590d5a111556ff1d44c",
+  "recordedAt": "2026-11-08T16:08:46.5230830+00:00"
+}

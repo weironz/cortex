@@ -39,3 +39,10 @@ Justfile text eol=lf
 *.jpg binary
 *.ico binary
 *.zst binary
+
+# 取件和验收原始记录以字节哈希校验，检出时不能改换行。
+# 上游空白与 patch 的上下文空行必须原样保留，不套本仓库的空白风格。
+third_party/libsqlite3-sys/** -text -whitespace
+tests/fixtures/computer-use-windows/*.patch -text -whitespace
+tests/fixtures/computer-use-windows/results/** -text -whitespace
+third_party/cua/** -text -whitespace

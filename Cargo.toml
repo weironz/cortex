@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/computer-dispatch-ledger",
     "crates/cortex-core",
     "crates/cortex-llm",
     "crates/cortex-agent",
@@ -19,7 +20,7 @@ members = [
 [workspace.package]
 # 版本号的权威所在。app/pubspec.yaml、git tag、docker 镜像 tag 都必须跟它一致，
 # 由 `just version-check`（= scripts/check-version.sh）在 CI 与发布流水线里把关。
-version = "0.1.44"
+version = "0.1.45"
 edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0"
@@ -40,6 +41,7 @@ repository = "https://github.com/weironz/cortex"
 # 换来的是两个产品可以独立发版，而开源那一半不被私有这一半的节奏绑住。
 
 [workspace.dependencies]
+computer-dispatch-ledger = { path = "crates/computer-dispatch-ledger" }
 cortex-core = { path = "crates/cortex-core" }
 cortex-import = { path = "crates/cortex-import" }
 cortex-llm = { path = "crates/cortex-llm" }
@@ -156,6 +158,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
+
+[patch.crates-io]
+# SQLite 官方 Windows WAL/SHM 恢复修复；保留 SQLx 0.9 所需的 0.37 API。
+libsqlite3-sys = { path = "third_party/libsqlite3-sys" }
 
 [profile.release]
 lto = "thin"

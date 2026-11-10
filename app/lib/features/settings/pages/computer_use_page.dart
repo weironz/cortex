@@ -28,13 +28,14 @@ class ComputerUsePage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // ⚠️ 与设置目录里那一项**同一个判据**（见 computerUseAvailableProvider）。
+    // ⚠️ 与设置目录里那一项**同一个判据**。本机 agent 即使驱动暂时不可用，
+    // 也要允许进入这里修复 allowlist / 查看安装状态。
     //
     // 正常情况下走不到 else：做不到时菜单里根本没有这一项，进不来。
     // 但这一支不能省 —— 判据是异步的（/health 还没回来时是 false），
     // 而用户可能正停在这一页上：那时菜单项会消失，`settings_sheet` 把选中
     // 项回落到第一页，中间有一帧会画这里。空白比一句说明难懂得多。
-    if (!ref.watch(computerUseAvailableProvider)) {
+    if (!ref.watch(computerUseSettingsAvailableProvider)) {
       return _Unavailable();
     }
 

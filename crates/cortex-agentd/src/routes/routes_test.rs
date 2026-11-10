@@ -23,7 +23,7 @@ fn probe_path(pattern: &str) -> String {
 
 /// 一个真的开着认证的 router，外加那把能进去的 token。
 pub(super) fn app_with_token() -> (Router, String) {
-    let (token, digest_hex) = crate::auth::generate();
+    let (_, digest_hex) = crate::auth::generate();
     let raw = hex::decode(&digest_hex).expect("生成的摘要应当是合法十六进制");
     let digest: [u8; 32] = raw.try_into().expect("SHA-256 应当是 32 字节");
     let st = AgentState::new(
@@ -41,6 +41,13 @@ pub(super) fn app_with_token() -> (Router, String) {
         // **不接对象存储**，理由与上面那两个 None 同源：blob 端点因此
         // 回 501，而这一组断言只问「是不是 401」，501 与 401 不是一回事
         None,
+    );
+    // 路由清单里现在包含一个严格只认 access token 的端点。给扫面用一把
+    // 真在 AccessBook 里的票，否则它会按设计在 handler 再拒一次 PSK，而
+    // 那不是全量清单测试要混淆的中间件边界。
+    let token = st.access_book().issue_for_test(
+        "01ROUTEINVENTORY0000000000",
+        std::time::Duration::from_secs(60),
     );
     (router(st), token)
 }

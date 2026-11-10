@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-11-08T08:09:41.8793966Z",
+  "scenario": "cortex-local startup with unreachable remote",
+  "remote": "http://127.0.0.1:1",
+  "samplesSeconds": [
+    3.755,
+    2.06,
+    2.083
+  ],
+  "previousObservedSeconds": 4.172,
+  "exeSha256": "b0090332495026bc46924ccf03ed61d08c64414b768be2f67ea02b7c9b2e0d81",
+  "isolatedState": true,
+  "allAddressFilesWritten": true,
+  "method": "temporary working directory and LOCALAPPDATA, empty MCP config, poll address file every 50 ms"
+}

@@ -121,6 +121,23 @@ Licensed under the Apache License, Version 2.0
       Licensed under the SIL Open Font License, Version 1.1.
       完整许可见 app/assets/fonts/OFL-NotoSansSC.txt。
 
+───────────────────────────────────────────────────────────────────────
+Cua Driver
+https://github.com/trycua/cua
+Copyright (c) 2025 Cua AI, Inc.
+Licensed under the MIT License
+───────────────────────────────────────────────────────────────────────
+
+  third_party/cua/LICENSE.md
+  third_party/cua/THIRD_PARTY_NOTICES.md
+
+Windows 桌面安装包随附 Cua Driver 0.38.0 的外部二进制。该二进制只在
+`cua-driver-rs-v0.38.0` 固定 release、压缩包 SHA-256 和
+`cua-driver.exe` SHA-256 都通过后才会进入产物；运行松紧、应用 allowlist、
+审批、动作后验证和审计仍由 Cortex 控制。Cua 的许可证、其内嵌第三方项目
+名单、MIT 全文与 SPDX 2.3 SBOM 在 `third_party/cua/`，并由桌面打包脚本
+复制进安装目录。
+
 ═══════════════════════════════════════════════════════════════════════
 明确未取件
 ═══════════════════════════════════════════════════════════════════════
@@ -134,3 +151,52 @@ Licensed under the Apache License, Version 2.0
 ═══════════════════════════════════════════════════════════════════════
 
 Apache License 2.0 全文见 http://www.apache.org/licenses/LICENSE-2.0
+
+持久派发接线候选（尚待主线整合）
+--------------------------------
+crates/computer-dispatch-ledger 的 SQLx 连接池装配改编自 Goose
+dafdbb7364cb8f145a71e2fd4e080136e225ad14 的 SessionStorage::create_pool
+（Apache-2.0）；完整来源与许可证保存在该 crate 的 NOTICE / LICENSE-APACHE。
+
+cortex-local/src/computer_ledger_authority.rs 与 computer_ledger_windows.rs
+的协调租约、no-reparse 锁文件及句柄持有模式改编自 Cua
+85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19：
+history.rs::WriterLease、perception_client/containment/windows.rs::AclLease。
+Copyright (c) 2025 Cua AI, Inc.（MIT）；完整许可见
+crates/computer-dispatch-ledger/LICENSE-MIT-CUA。
+适配改用标准库独占文件锁，并增加永久私有 owner/DACL、固定机器目录、
+祖先/文件身份及 anchor/pending 检查。没有移植自动 ACL journal 恢复，
+没有用进程 lease 的释放代替持久 Unknown fence 的恢复授权。
+
+严格 owned-browser Job 基础组件
+-------------------------------
+crates/cortex-local/src/computer_owned_job.rs 改编自 OpenAI Codex
+codex-rs/utils/pty/src/win/job.rs，参考 checkout
+5f49aba876922d6f2f55caa153bbb0ed1b46feba；所取文件 SHA-256：
+112293607f90d6614ffab4c5499a0bbeff743e3b1e4885739ccff41c47d48d43。
+Copyright OpenAI，Apache License 2.0；完整许可见仓库根 LICENSE。
+适配 std::process::Command/windows-sys；仅保留禁止 breakaway 的
+suspended -> assign -> resume 路径，移除分配失败继续运行和保留子孙的兼容入口。
+新增原 Job 句柄 accounting 排空检查、密封状态及单次不可复制的实例绑定证明。
+Drop 只尽力清理，不提供排空证明或 Ledger 恢复授权。
+
+Native owned daemon 的实际句柄 RPC
+--------------------------------
+crates/cortex-local/src/computer_cua_transport.rs 的逐行 JSON framing、
+DaemonRequest 字段与 structuredContent/image 映射改编自 Cua
+85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19 的
+cua-driver-core/src/daemon.rs 与 cua-driver/src/cli.rs。
+Copyright (c) 2025 Cua AI, Inc.，MIT；完整许可见 third_party/cua/LICENSE.md。
+适配为 Tokio named-pipe client，在实际发送请求的同一个句柄上检查内核 server
+PID 及原 Job membership；新增帧大小限制、取消边界与发送前 admission 检查。
+
+SQLite Windows WAL 恢复 backport
+--------------------------------
+third_party/libsqlite3-sys 收录 libsqlite3-sys 0.37.0 的 Rust 绑定与 SQLite 3.51.3。
+Rust 绑定为 MIT，完整版权与许可见该目录 LICENSE；SQLite amalgamation 保留原
+public-domain blessing。SQLite Windows SHM 恢复修改取自官方 check-in
+7c103a0b7d509dce58aa87518e13213451e5f70938ff08aa55accd645e3b2ff3：
+https://sqlite.org/src/info/7c103a0b7d509dce58aa87518e13213451e5f70938ff08aa55accd645e3b2ff3
+保留 winZeroSharedMemory 与 winLockSharedMemory 的上游实现，未改 Rust API。
+原 crate 校验和、原版/修复 C 源码哈希见 CORTEX-PROVENANCE.json。
+目录存在不表示产物启用；实际依赖以 Cargo 解析结果、构建记录及 SBOM 为准。

@@ -1,0 +1,62 @@
+{
+  "recordedAt": "2026-11-08T18:08:03.0325992+08:00",
+  "status": "regression_reproduced_not_fixed",
+  "scope": "headless_engine_and_actual_router_no_model_no_cua",
+  "sourceFiles": [
+    {
+      "path": "crates/cortex-local/src/turn.rs",
+      "sha256": "9ea1b017236b12a46d3ea80674759c502b53feb65df1146c00c07e5e93d6eb20",
+      "matchesMain": true
+    },
+    {
+      "path": "crates/cortex-local/src/routes.rs",
+      "sha256": "12e4850e6b487f5aa11181f8784d2e3dfb8a14c2625d9a1b5374de2738570e57",
+      "matchesMain": true
+    },
+    {
+      "path": "crates/cortex-local/src/remote.rs",
+      "sha256": "22d7e44cfc53f2c21355d28a7d9272ad5622842f5b7c0416b7b40bc2ae2c3ab6",
+      "matchesMain": true
+    }
+  ],
+  "sourceRoot": "target/computer-use-integration-ced41f2f4cb34f43b70d341c62d1521e",
+  "cases": [
+    {
+      "test": "ordinary_chat_without_token_is_currently_rejected_even_without_computer_use",
+      "computerUse": [
+        false,
+        true
+      ],
+      "outcome": "terminal_sse_error_needs_reauth",
+      "testResult": "passed_characterization"
+    },
+    {
+      "test": "direct_chat_with_valid_local_inbound_auth_still_hits_remote_principal_regression",
+      "standaloneDirect": true,
+      "localInboundAuth": "valid_synthetic_test_token",
+      "remoteAccessToken": "absent",
+      "computerUse": false,
+      "httpStatus": 200,
+      "outcome": "terminal_sse_error_needs_reauth",
+      "testResult": "passed_characterization"
+    }
+  ],
+  "candidateChecks": {
+    "agentUnitPassed": 215,
+    "agentIntegrationPassed": 55,
+    "agentIgnored": 2,
+    "localPassed": 469,
+    "localIgnored": 16,
+    "failures": 0,
+    "clippy": "passed_all_targets_D_warnings",
+    "isWorkspaceFullCi": false
+  },
+  "candidatePatch": "tests/fixtures/computer-use-windows/windows-computer-candidate.patch",
+  "patchSha256": "ef2ac1f17fa08cff8cbc89137ae6b099a8c9ed1b4ff99518b440bab4ad682b25",
+  "limitations": [
+    "diagnostic tests prove rejection, not a successful chat fix",
+    "metadata and approvals are not yet connected to durable ledger permits",
+    "new candidate is not the running four-hour binary",
+    "candidate aggregate patch contains the two earlier deferred patches and both diagnostic tests"
+  ]
+}

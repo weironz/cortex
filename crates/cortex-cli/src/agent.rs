@@ -31,6 +31,7 @@
 //! 根本跑不到清理代码的路径。留下的孤儿不是「多一个闲置进程」：
 //! 它绑着端口、握着 token、**能执行命令**。
 
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -60,6 +61,12 @@ const POLL: Duration = Duration::from_millis(120);
 /// agent 拿不到 token，也连不上正确的远端。
 const TOKEN_ENV: &str = "CORTEX_TOKEN";
 
+fn configure_auth_environment(command: &mut Command, token: Option<&str>) {
+    // CLI 新建的是单凭据实例，不能继承另一个桌面进程的控制 key 或出站账号。
+    command.env_remove("CORTEX_INBOUND_TOKEN");
+    command.env(TOKEN_ENV, token.unwrap_or(""));
+}
+
 /// 拉起本地 agent 的命令行参数。
 ///
 /// 抽成纯函数只为**能测**：漏传 `--remote` 的后果是 agent 去连它自己的默认
@@ -87,6 +94,47 @@ fn spawn_args(addr_file: &std::path::Path, remote: &str, parent_pid: u32) -> Vec
     ]
 }
 
+/// 进程内锁不能保护两个 agent；pid 也挡不住同一 CLI 进程多次拉起实例。
+/// 因此每次都独占一个新目录，失败或退出后也保留，避免误删未重放的离线队列。
+fn private_state_dir(base: &Path, parent_pid: u32) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(base.is_absolute(), "CLI 本地状态根必须是绝对路径");
+    let instances = base.join("cli-instances");
+    std::fs::create_dir_all(&instances)?;
+    let dir = instances.join(format!("{parent_pid}-{}", cortex_core::Id::new()));
+    // 不能用 create_dir_all：名字万一碰撞也必须失败，不能复用已有实例的数据。
+    std::fs::create_dir(&dir)?;
+    Ok(dir)
+}
+
+/// 只构造命令、不启动进程，才能验证完整的子进程环境且不改全局 env。
+fn spawn_command(
+    exe: &Path,
+    base: &Path,
+    remote: &str,
+    token: Option<&str>,
+    parent_pid: u32,
+    explicit_mcp_config: Option<&str>,
+) -> anyhow::Result<(Command, PathBuf)> {
+    let dir = private_state_dir(base, parent_pid)?;
+    let addr_file = dir.join(format!("cli-{parent_pid}.{}", cortex_core::ADDR_FILE_EXT));
+    let mut command = Command::new(exe);
+    command
+        .args(spawn_args(&addr_file, remote, parent_pid))
+        .env(cortex_core::state_dir::LOCAL_STATE_DIR_ENV, &dir)
+        // 只隔离运行时状态，不挪 HOME/LOCALAPPDATA 或 CLI 登录的存放位置。
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_auth_environment(&mut command, token);
+    // config_path 的显式非空路径优先，空白值等同未配置。私有状态根会改变
+    // 默认的账号目录，因此未显式指定时把用户配置锚回原 base/mcp.json。
+    // 不复制、不读取配置内容，避免把配置中的凭据带进另一份状态。
+    match explicit_mcp_config.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(path) => command.env("CORTEX_MCP_CONFIG", path),
+        None => command.env("CORTEX_MCP_CONFIG", base.join("mcp.json")),
+    };
+    Ok((command, addr_file))
+}
+
 /// 找一个能用的本地 agent；没有就拉一个起来。
 ///
 /// 返回 `None` 表示这一次用不上它 —— 调用方回落到用户给的 `--server`。
@@ -98,9 +146,8 @@ fn spawn_args(addr_file: &std::path::Path, remote: &str, parent_pid: u32) -> Vec
 /// 见 [`cortex_core::live_file`]），里面有实际地址、它连的 remote、
 /// 以及凭据指纹。
 ///
-/// 不复用的后果不是「多一个进程」：同机两个实例会抢同一份 `workspaces.json`
-/// 与 `outbox.mark`，而那两个文件只有进程内 `Mutex`，**没有文件锁** ——
-/// 工作区绑定后写的赢，队列高水位互相覆盖会导致漏重放。
+/// 身份不匹配时不能强行复用，新实例的状态必须放进独占目录：`workspaces.json`
+/// 与 `outbox.mark` 只有进程内 `Mutex`，共用目录会让队列高水位互相覆盖。
 ///
 /// # 为什么复用前要比对 remote 与凭据指纹
 ///
@@ -121,7 +168,15 @@ fn spawn_args(addr_file: &std::path::Path, remote: &str, parent_pid: u32) -> Vec
 #[must_use]
 pub async fn ensure_running(remote: &str, token: Option<&str>) -> Option<String> {
     let want_fp = token.map(cortex_core::token_fingerprint);
-    let dir = cortex_core::state_dir().ok()?;
+    let dir = match cortex_core::state_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!(
+                "本地状态目录不可用（{error}）—— 这一次直连 cortexd，工具会动它那台机器的目录"
+            );
+            return None;
+        }
+    };
 
     if let Some(addr) = find_live(&dir, remote, want_fp.as_deref()).await {
         return Some(addr);
@@ -142,25 +197,23 @@ pub async fn ensure_running(remote: &str, token: Option<&str>) -> Option<String>
     };
     eprintln!("正在启动本地 agent（{}）…", exe.display());
 
-    // 握手文件名带 pid：同机可能有好几个 CLI 在跑，共用一个名字会让它们
-    // 读到别人的地址
-    let addr_file = dir.join(format!(
-        "cli-{}.{}",
+    let mcp_config = std::env::var("CORTEX_MCP_CONFIG").ok();
+    let (mut cmd, addr_file) = match spawn_command(
+        &exe,
+        &dir,
+        remote,
+        token,
         std::process::id(),
-        cortex_core::ADDR_FILE_EXT
-    ));
-    let _ = std::fs::remove_file(&addr_file);
-
-    let mut cmd = Command::new(&exe);
-    cmd.args(spawn_args(&addr_file, remote, std::process::id()))
-        // 它的日志走 stderr，与 CLI 的输出混在一起会把对话冲得七零八落。
-        // 丢掉而不是转存文件：手工排查时直接自己跑一次 `cortex-local` 就有了，
-        // 而一个没人会去看的日志文件只是又一件要清理的东西
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(t) = token {
-        cmd.env(TOKEN_ENV, t);
-    }
+        mcp_config.as_deref(),
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!(
+                "建不出 CLI 私有状态目录（{error}）—— 这一次直连 cortexd，工具会动它那台机器的目录"
+            );
+            return None;
+        }
+    };
     if let Err(e) = cmd.spawn() {
         eprintln!("拉不起本地 agent（{e}）—— 这一次直连 cortexd，工具会动它那台机器的目录");
         return None;
@@ -505,6 +558,244 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_desktop_control_token_mismatch_spawns_into_separate_state() {
+        let remote = "https://test.example";
+        let control_fp = cortex_core::token_fingerprint("test-desktop-control");
+        let outbound_fp = cortex_core::token_fingerprint("test-cli-outbound");
+        let base = live_dir("127.0.0.1:1", remote, Some(&control_fp));
+        let desktop = base.path().join("users").join("test-user");
+        std::fs::create_dir_all(&desktop).expect("应能创建桌面的测试账号目录");
+        std::fs::write(desktop.join("workspaces.json"), "desktop-bindings")
+            .expect("应能写入桌面绑定哨兵");
+        std::fs::write(desktop.join("outbox.mark"), "17").expect("应能写入桌面游标哨兵");
+
+        assert_eq!(
+            find_live(base.path(), remote, Some(&outbound_fp)).await,
+            None,
+            "桌面控制凭据不能被当成 CLI 的出站账号凭据"
+        );
+        assert!(
+            cortex_core::live_file(base.path(), 4242).exists(),
+            "身份不匹配不能删除桌面仍在使用的存活指针"
+        );
+        let (command, addr_file) = spawn_command(
+            Path::new("not-executed"),
+            base.path(),
+            remote,
+            Some("test-cli-outbound"),
+            4242,
+            None,
+        )
+        .expect("身份不匹配后应能准备独占状态目录");
+        let instance = PathBuf::from(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == cortex_core::state_dir::LOCAL_STATE_DIR_ENV)
+                .and_then(|(_, value)| value)
+                .expect("新实例必须显式覆盖状态目录"),
+        );
+        assert_eq!(
+            instance.parent(),
+            Some(base.path().join("cli-instances").as_path())
+        );
+        assert_eq!(addr_file.parent(), Some(instance.as_path()));
+        let private_user = instance.join("users").join("test-user");
+        std::fs::create_dir_all(&private_user).expect("应能创建私有账号状态");
+        std::fs::write(private_user.join("workspaces.json"), "cli-bindings")
+            .expect("应能写入 CLI 绑定");
+        std::fs::write(private_user.join("outbox.mark"), "3").expect("应能写入 CLI 游标");
+        drop(command);
+        assert_eq!(
+            std::fs::read_to_string(desktop.join("workspaces.json")).expect("桌面绑定不能被覆盖"),
+            "desktop-bindings"
+        );
+        assert_eq!(
+            std::fs::read_to_string(desktop.join("outbox.mark")).expect("桌面游标不能被覆盖"),
+            "17"
+        );
+        assert_eq!(
+            std::fs::read_to_string(private_user.join("outbox.mark"))
+                .expect("销毁命令不能删除可能含离线数据的实例目录"),
+            "3"
+        );
+    }
+
+    #[test]
+    fn repeated_starts_in_the_same_pid_have_unique_state_and_handshakes() {
+        let base = tempfile::tempdir().expect("应能创建实例测试根");
+        let mut states = std::collections::HashSet::new();
+        let mut handshakes = std::collections::HashSet::new();
+        for _ in 0..16 {
+            let (command, addr_file) = spawn_command(
+                Path::new("not-executed"),
+                base.path(),
+                "https://test.example",
+                None,
+                4242,
+                None,
+            )
+            .expect("每次构造命令都应分配独占目录");
+            let dir = addr_file.parent().expect("握手文件必须在实例目录里");
+            assert!(
+                dir.is_dir() && dir.is_absolute(),
+                "状态覆盖必须是已经创建的绝对路径"
+            );
+            let name = dir
+                .file_name()
+                .expect("实例目录必须有名字")
+                .to_string_lossy();
+            let id = name.strip_prefix("4242-").expect("目录必须带父 pid");
+            id.parse::<cortex_core::Id>()
+                .expect("同 pid 的唯一部分必须是合法 ULID");
+            assert!(
+                states.insert(dir.to_path_buf()),
+                "同 pid 多次启动不能共享状态"
+            );
+            assert!(
+                handshakes.insert(addr_file.clone()),
+                "同 pid 多次启动不能读错握手文件"
+            );
+            let args: Vec<_> = command.get_args().collect();
+            let addr_index = args
+                .iter()
+                .position(|arg| *arg == "--addr-file")
+                .expect("需要握手参数");
+            assert_eq!(args[addr_index + 1], addr_file.as_os_str());
+        }
+        assert_eq!(states.len(), 16);
+        assert_eq!(
+            std::fs::read_dir(base.path().join("cli-instances"))
+                .expect("实例目录应全部保留")
+                .count(),
+            16,
+            "构造后丢弃命令也不能自动删除状态目录"
+        );
+    }
+
+    #[test]
+    fn new_instance_environment_is_explicit_and_does_not_relocate_user_configuration() {
+        use std::ffi::OsStr;
+
+        let base = tempfile::tempdir().expect("应能创建环境隔离测试根");
+        for token in [Some("test-cli-account"), None] {
+            let (command, addr_file) = spawn_command(
+                Path::new("not-executed"),
+                base.path(),
+                "https://test.example",
+                token,
+                4242,
+                None,
+            )
+            .expect("应能构造命令而不启动任何进程");
+            let env: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+            assert_eq!(
+                env.get(OsStr::new("CORTEX_INBOUND_TOKEN")),
+                Some(&None),
+                "不能继承桌面控制 key"
+            );
+            assert_eq!(
+                env.get(OsStr::new(TOKEN_ENV)),
+                Some(&Some(OsStr::new(token.unwrap_or("")))),
+                "无 CLI 凭据时也必须显式清空出站账号"
+            );
+            assert_eq!(
+                env.get(OsStr::new(cortex_core::state_dir::LOCAL_STATE_DIR_ENV)),
+                Some(&Some(addr_file.parent().expect("应有实例根").as_os_str())),
+                "环境中的状态目录必须与本次握手文件属于同一个实例"
+            );
+            for name in [
+                "HOME",
+                "LOCALAPPDATA",
+                "XDG_DATA_HOME",
+                "USERPROFILE",
+                "CORTEX_CLI_HOME",
+            ] {
+                assert!(
+                    !env.contains_key(OsStr::new(name)),
+                    "不能通过覆盖 {name} 丢掉用户配置语义"
+                );
+            }
+            assert!(
+                command
+                    .get_args()
+                    .all(|arg| !arg.to_string_lossy().contains("test-cli-account")),
+                "凭据不能出现在命令行中"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_mcp_path_wins_and_blank_values_keep_the_original_base_config() {
+        use std::ffi::OsStr;
+
+        let base = tempfile::tempdir().expect("应能创建 MCP 路径测试根");
+        let config = base.path().join("mcp.json");
+        std::fs::write(&config, r#"{"mcpServers":{}}"#).expect("应能写入无凭据的测试配置");
+        for explicit in [None, Some(""), Some(" \n\t "), Some(" custom/mcp.json ")] {
+            let (command, addr_file) = spawn_command(
+                Path::new("not-executed"),
+                base.path(),
+                "https://test.example",
+                None,
+                4242,
+                explicit,
+            )
+            .expect("选择 MCP 路径不能依赖读取其内容");
+            let expected = match explicit.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(path) => PathBuf::from(path),
+                None => config.clone(),
+            };
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(key, _)| *key == OsStr::new("CORTEX_MCP_CONFIG"))
+                    .and_then(|(_, value)| value),
+                Some(expected.as_os_str()),
+                "必须保持 config_path 的显式优先与空值语义"
+            );
+            assert!(
+                !addr_file
+                    .parent()
+                    .expect("应有私有根")
+                    .join("mcp.json")
+                    .exists(),
+                "不能复制用户配置到实例目录"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(config).expect("原始配置必须仍在"),
+            r#"{"mcpServers":{}}"#
+        );
+    }
+
+    #[test]
+    fn private_state_creation_errors_never_reuse_the_base() {
+        let base = tempfile::tempdir().expect("应能创建失败场景测试根");
+        let blocker = base.path().join("cli-instances");
+        std::fs::write(&blocker, "preserve").expect("应能创建目录冲突文件");
+        assert!(
+            spawn_command(
+                Path::new("not-executed"),
+                base.path(),
+                "https://test.example",
+                None,
+                4242,
+                None
+            )
+            .is_err(),
+            "无法分配私有目录时不能继续用共享 base 构造命令"
+        );
+        assert_eq!(
+            std::fs::read_to_string(blocker).expect("冲突文件不能被删除"),
+            "preserve"
+        );
+        assert!(
+            private_state_dir(Path::new("relative-state"), 4242).is_err(),
+            "子进程覆盖必须始终是绝对路径"
+        );
+    }
+
     /// 陈旧指针（进程早没了）被跳过，并顺手清掉。
     #[tokio::test]
     async fn a_stale_pointer_is_skipped_and_swept() {
@@ -520,5 +811,36 @@ mod tests {
                 "进程等一次探活超时",
             )
         );
+    }
+}
+#[cfg(test)]
+mod isolated_auth_environment_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn spawned_agent_does_not_inherit_desktop_control_or_another_account() {
+        for token in [Some("test-cli-account"), None] {
+            let mut command = Command::new("not-executed");
+            configure_auth_environment(&mut command, token);
+            let inherited_control = command
+                .get_envs()
+                .find(|(name, _)| *name == OsStr::new("CORTEX_INBOUND_TOKEN"))
+                .map(|(_, value)| value);
+            assert_eq!(
+                inherited_control,
+                Some(None),
+                "单凭据CLI实例必须显式移除父进程设备控制key"
+            );
+            let outbound = command
+                .get_envs()
+                .find(|(name, _)| *name == OsStr::new(TOKEN_ENV))
+                .and_then(|(_, value)| value);
+            assert_eq!(
+                outbound,
+                Some(OsStr::new(token.unwrap_or(""))),
+                "没有CLI凭据也必须清空继承账号"
+            );
+        }
     }
 }

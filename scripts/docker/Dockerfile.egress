@@ -30,6 +30,10 @@ WORKDIR /build
 # 这里的收益比那两个还大：这个 crate 只依赖 tokio + tracing，
 # 依赖层几乎永远命中。
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+# path 补丁在工作区解析时就需要完整源码，依赖层与正式构建共用这一份。
+COPY third_party/libsqlite3-sys/ third_party/libsqlite3-sys/
+# Cargo 先解析整个 workspace，依赖层也必须带齐所有成员清单。
+COPY crates/computer-dispatch-ledger/Cargo.toml crates/computer-dispatch-ledger/
 COPY crates/cortex-core/Cargo.toml         crates/cortex-core/
 COPY crates/cortex-llm/Cargo.toml          crates/cortex-llm/
 COPY crates/cortex-agent/Cargo.toml        crates/cortex-agent/
@@ -40,6 +44,9 @@ COPY crates/cortex-local/Cargo.toml        crates/cortex-local/
 COPY crates/cortex-cli/Cargo.toml          crates/cortex-cli/
 COPY crates/cortex-egress-proxy/Cargo.toml crates/cortex-egress-proxy/
 COPY crates/cortex-agentd/Cargo.toml      crates/cortex-agentd/
+COPY crates/cortex-store/Cargo.toml       crates/cortex-store/
+COPY crates/cortex-mcp/Cargo.toml         crates/cortex-mcp/
+COPY crates/cortex-providers/Cargo.toml   crates/cortex-providers/
 
 RUN set -eux; \
     for d in crates/*/ evals/; do \

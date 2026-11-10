@@ -15,7 +15,9 @@
 //! 用户唯一想绑的目录。
 
 pub mod background;
+pub mod computer_dispatch;
 pub mod computer_driver;
+pub mod computer_perception;
 pub mod computer_policy;
 pub mod computer_trace;
 pub mod diff;
@@ -31,6 +33,8 @@ pub mod turn;
 mod turn_gate;
 mod turn_history;
 mod turn_host;
+
+pub use turn_host::ComputerInvocation;
 mod turn_tools;
 mod turn_watch;
 pub mod workspace;

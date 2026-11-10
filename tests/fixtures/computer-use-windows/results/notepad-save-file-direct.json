@@ -1,0 +1,351 @@
+{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-e2e",
+    "generatedAt":  "2026-10-29T23:33:55.3101524+00:00",
+    "durationMs":  14223,
+    "host":  {
+                 "computerName":  "WILLOPTPC",
+                 "os":  "Microsoft Windows NT 10.0.26300.0",
+                 "sessionId":  2,
+                 "displayCount":  1,
+                 "displays":  [
+                                  {
+                                      "deviceName":  "\\\\.\\DISPLAY1",
+                                      "primary":  true,
+                                      "bounds":  {
+                                                     "y":  0,
+                                                     "width":  2560,
+                                                     "height":  1440,
+                                                     "x":  0
+                                                 }
+                                  }
+                              ]
+             },
+    "execution":  {
+                      "isolation":  "one Windows Job Object per task (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)",
+                      "ui":  "PowerShell + Windows UI Automation",
+                      "appAllowlist":  "exact executable paths plus process-scoped UIA roots",
+                      "resultPolicy":  "only executed checks may pass; unavailable dependencies are skipped with a reason"
+                  },
+    "summary":  {
+                    "total":  1,
+                    "pass":  0,
+                    "fail":  0,
+                    "skipped":  1
+                },
+    "tasks":  [
+                  {
+                      "id":  "notepad-save-file",
+                      "family":  "notepad",
+                      "application":  "Windows Notepad",
+                      "status":  "skipped",
+                      "reason":  "The exact Save As path was not uniquely provable: The exact Save As file-name control was not committed: expected \u0027D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\artifacts\\notepad-b594c0ffb85240669c69f0b0baf2437c\\acceptance.txt\u0027, native=\u0027\u0027, UIA=\u0027\u0027.",
+                      "timeoutSeconds":  45,
+                      "allowlist":  [
+                                        "C:\\WINDOWS\\System32\\notepad.exe",
+                                        "C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe\\Notepad\\Notepad.exe"
+                                    ],
+                      "verifier":  null,
+                      "details":  {
+                                      "decision":  "skip",
+                                      "addButtonInputSent":  true,
+                                      "documentInputSent":  true,
+                                      "saveDialog":  {
+                                                         "fileDialog":  {
+                                                                            "dialogHandle":  "0x36E1648",
+                                                                            "dialogClassName":  "#32770",
+                                                                            "resolutionAttempts":  1,
+                                                                            "resolutionMilliseconds":  1587,
+                                                                            "fileNameControl":  {
+                                                                                                    "source":  "SaveAs/FileNameControlHost/Edit",
+                                                                                                    "controlId":  1001,
+                                                                                                    "className":  "Edit",
+                                                                                                    "handle":  "0x14360D7C",
+                                                                                                    "runtimeId":  "42.339086716",
+                                                                                                    "bounds":  {
+                                                                                                                   "x":  359,
+                                                                                                                   "y":  689,
+                                                                                                                   "width":  1028,
+                                                                                                                   "height":  19
+                                                                                                               },
+                                                                                                    "parentHandle":  "0x2E10902",
+                                                                                                    "parentAutomationId":  "FileNameControlHost",
+                                                                                                    "hostRuntimeId":  "42.48302338",
+                                                                                                    "hostBounds":  {
+                                                                                                                       "x":  356,
+                                                                                                                       "y":  686,
+                                                                                                                       "width":  1051,
+                                                                                                                       "height":  25
+                                                                                                                   },
+                                                                                                    "hostRawControls":  [
+                                                                                                                            {
+                                                                                                                                "controlType":  "ControlType.Pane",
+                                                                                                                                "name":  "Notepad seed 2f5a1eea7004438890bbec.txt",
+                                                                                                                                "automationId":  "1001",
+                                                                                                                                "className":  "Edit",
+                                                                                                                                "runtimeId":  "42.339086716",
+                                                                                                                                "nativeWindowHandle":  "0x14360D7C",
+                                                                                                                                "patterns":  [
+
+                                                                                                                                             ]
+                                                                                                                            }
+                                                                                                                        ],
+                                                                                                    "dialogFileNameCandidates":  [
+                                                                                                                                     {
+                                                                                                                                         "controlType":  "ControlType.Pane",
+                                                                                                                                         "name":  "文件名:",
+                                                                                                                                         "automationId":  "FileNameControlHost",
+                                                                                                                                         "className":  "AppControlHost",
+                                                                                                                                         "runtimeId":  "42.48302338",
+                                                                                                                                         "nativeWindowHandle":  "0x2E10902",
+                                                                                                                                         "patterns":  [
+
+                                                                                                                                                      ]
+                                                                                                                                     },
+                                                                                                                                     {
+                                                                                                                                         "controlType":  "ControlType.Pane",
+                                                                                                                                         "name":  "Notepad seed 2f5a1eea7004438890bbec.txt",
+                                                                                                                                         "automationId":  "1001",
+                                                                                                                                         "className":  "Edit",
+                                                                                                                                         "runtimeId":  "42.339086716",
+                                                                                                                                         "nativeWindowHandle":  "0x14360D7C",
+                                                                                                                                         "patterns":  [
+
+                                                                                                                                                      ]
+                                                                                                                                     },
+                                                                                                                                     {
+                                                                                                                                         "controlType":  "ControlType.Pane",
+                                                                                                                                         "name":  "地址: 文档",
+                                                                                                                                         "automationId":  "1001",
+                                                                                                                                         "className":  "ToolbarWindow32",
+                                                                                                                                         "runtimeId":  "42.11149546",
+                                                                                                                                         "nativeWindowHandle":  "0xAA20EA",
+                                                                                                                                         "patterns":  [
+
+                                                                                                                                                      ]
+                                                                                                                                     }
+                                                                                                                                 ],
+                                                                                                    "uiaControlType":  "ControlType.Pane",
+                                                                                                    "inputPattern":  "exact RuntimeId field click + foreground keyboard input"
+                                                                                                },
+                                                                            "openControl":  {
+                                                                                                "controlId":  1,
+                                                                                                "className":  "Button",
+                                                                                                "handle":  "0xA770F62",
+                                                                                                "uiaControlType":  "ControlType.Pane",
+                                                                                                "invokePattern":  "exact HWND BM_CLICK"
+                                                                                            },
+                                                                            "cancelControl":  {
+                                                                                                  "controlId":  2,
+                                                                                                  "className":  "Button",
+                                                                                                  "handle":  "0xEE40DE4",
+                                                                                                  "uiaControlType":  "ControlType.Pane",
+                                                                                                  "invokePattern":  "exact HWND BM_CLICK"
+                                                                                              }
+                                                                        },
+                                                         "fixturePath":  "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\artifacts\\notepad-b594c0ffb85240669c69f0b0baf2437c\\acceptance.txt",
+                                                         "fileNameReadBack":  null,
+                                                         "submission":  null,
+                                                         "dialogStillOpen":  false,
+                                                         "fixtureExists":  false,
+                                                         "cleanup":  "closed exact file dialog 0x36E1648"
+                                                     },
+                                      "tabSession":  {
+                                                         "baseline":  {
+                                                                          "processId":  37032,
+                                                                          "windowId":  "0x50616EE",
+                                                                          "windowTitle":  "install.ps1 - Notepad",
+                                                                          "tabsBefore":  [
+                                                                                             {
+                                                                                                 "index":  0,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   138614828,
+                                                                                                                   4,
+                                                                                                                   3
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.138614828.4.3",
+                                                                                                 "name":  "Microsoft.PowerShell_profile.ps1. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  false,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.138614828.4.4"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "Microsoft.PowerShell_profile.ps1"
+                                                                                                                ]
+                                                                                             },
+                                                                                             {
+                                                                                                 "index":  1,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   138614828,
+                                                                                                                   4,
+                                                                                                                   5
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.138614828.4.5",
+                                                                                                 "name":  "mica-需求.txt. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  false,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.138614828.4.6"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "mica-需求.txt"
+                                                                                                                ]
+                                                                                             },
+                                                                                             {
+                                                                                                 "index":  2,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   138614828,
+                                                                                                                   4,
+                                                                                                                   7
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.138614828.4.7",
+                                                                                                 "name":  "install.ps1. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  true,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.138614828.4.8"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "install.ps1"
+                                                                                                                ]
+                                                                                             }
+                                                                                         ],
+                                                                          "activeTabRuntimeId":  "42.138614828.4.7",
+                                                                          "addButton":  {
+                                                                                            "automationId":  "AddButton",
+                                                                                            "className":  "Button",
+                                                                                            "runtimeId":  "42.138614828.4.16"
+                                                                                        },
+                                                                          "baselineDocumentRuntimeId":  "42.18095942"
+                                                                      },
+                                                         "newTab":  {
+                                                                        "tab":  {
+                                                                                    "runtimeId":  "42.138614828.4.601",
+                                                                                    "nameAfterAdd":  "无标题. 未修改。",
+                                                                                    "selected":  true,
+                                                                                    "uniqueNewTab":  true,
+                                                                                    "uniqueActive":  true
+                                                                                },
+                                                                        "invokeCloseSupported":  true,
+                                                                        "blankDocumentRuntimeId":  "42.144507510"
+                                                                    }
+                                                     },
+                                      "baselineRestoration":  {
+                                                                  "closeMenuItem":  {
+                                                                                        "fileMenuRuntimeId":  "42.6365290.4.29",
+                                                                                        "closeItemName":  "关闭选项卡",
+                                                                                        "closeItemAcceleratorKey":  "Ctrl+W",
+                                                                                        "closeItemRuntimeId":  "42.6365290.4.235"
+                                                                                    },
+                                                                  "discardButton":  {
+                                                                                        "automationId":  "SecondaryButton",
+                                                                                        "name":  "不保存",
+                                                                                        "runtimeId":  "42.22881390.4.608"
+                                                                                    },
+                                                                  "tabRuntimeId":  "42.138614828.4.601",
+                                                                  "tabsAfterClose":  [
+                                                                                         {
+                                                                                             "index":  0,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               138614828,
+                                                                                                               4,
+                                                                                                               3
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.138614828.4.3",
+                                                                                             "name":  "Microsoft.PowerShell_profile.ps1. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  false,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.138614828.4.4"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "Microsoft.PowerShell_profile.ps1"
+                                                                                                            ]
+                                                                                         },
+                                                                                         {
+                                                                                             "index":  1,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               138614828,
+                                                                                                               4,
+                                                                                                               5
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.138614828.4.5",
+                                                                                             "name":  "mica-需求.txt. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  false,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.138614828.4.6"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "mica-需求.txt"
+                                                                                                            ]
+                                                                                         },
+                                                                                         {
+                                                                                             "index":  2,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               138614828,
+                                                                                                               4,
+                                                                                                               7
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.138614828.4.7",
+                                                                                             "name":  "install.ps1. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  true,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.138614828.4.8"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "install.ps1"
+                                                                                                            ]
+                                                                                         }
+                                                                                     ],
+                                                                  "activeDocumentRuntimeId":  "42.18095942",
+                                                                  "userWindowPreserved":  true,
+                                                                  "userTabsPreserved":  true
+                                                              }
+                                  },
+                      "cleanup":  [
+                                      "closed exact new TabItem through File/Close Tab and restored baseline tabs"
+                                  ],
+                      "startedAt":  "2026-10-29T23:33:56.3188308+00:00",
+                      "durationMs":  12966
+                  }
+              ]
+}

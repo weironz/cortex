@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "scope": "matched_toolchain_readonly_fixture_ab_analysis",
+  "sourceReport": "cua-matched-ab-200-2026-11-09.json",
+  "sourceSha256": "93a665abc6bef95e8c86c49d083e62f08470a67f040ffb148130fd8be8b6d6b7",
+  "memorySteadyStateProven": false,
+  "toolchainMatched": true,
+  "metrics": [
+    {
+      "group": "matched_control",
+      "driverSha256": "99daf64d73b961f324d7eea8063aeb3ddf6975ec7197b2a43cce04ac8c9e986e",
+      "observations": 200,
+      "baselineMiB": 14.629,
+      "endMiB": 29.176,
+      "growthMiB": 14.547,
+      "postEndMiB": 29.176,
+      "slopeKiBPerObservation": 73.509,
+      "handlesStart": 479,
+      "handlesEnd": 481,
+      "meanObservationMs": 2153.56,
+      "cleanup": true,
+      "sessionEnded": true
+    },
+    {
+      "group": "candidate",
+      "driverSha256": "47179075f4ce1a36bda71e1939ceae0fbc124288923967a9965cd054d8089f5a",
+      "observations": 200,
+      "baselineMiB": 11.949,
+      "endMiB": 12.484,
+      "growthMiB": 0.535,
+      "postEndMiB": 12.688,
+      "slopeKiBPerObservation": 3.531,
+      "handlesStart": 479,
+      "handlesEnd": 481,
+      "meanObservationMs": 2184.53,
+      "cleanup": true,
+      "sessionEnded": true
+    }
+  ],
+  "recordedAt": "2026-11-09T01:13:37.2679385+00:00"
+}

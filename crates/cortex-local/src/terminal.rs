@@ -44,11 +44,14 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
+use crate::remote::Remote;
+use crate::runs::run_principal::RunPrincipal;
 use crate::state::LocalState;
+use crate::workspaces::principal_key::SessionPrincipalKey;
 
 /// 还没收到 resize 之前用的初始尺寸。客户端连上后第一次布局就会发真值，
 /// 这里只要「不至于把首屏输出折得没法看」。
@@ -69,7 +72,7 @@ const INITIAL_SIZE: PtySize = PtySize {
 /// 「这台机器怎么越来越慢」。
 #[derive(Clone, Default)]
 pub struct Terminals {
-    live: Arc<Mutex<HashMap<String, usize>>>,
+    live: Arc<Mutex<HashMap<SessionPrincipalKey, usize>>>,
 }
 
 /// 多到该看一眼日志的数目。
@@ -84,23 +87,31 @@ impl Terminals {
     /// **不提供显式的 release**，因为销账时机与「那条连接结束」必须严格
     /// 一致 —— 手动销账漏一条提前 return 的路，计数就永远偏高，
     /// 而那正是这本簿子唯一的用处。
-    pub fn open(&self, session_id: &str) -> Slot {
+    pub fn open(&self, key: &SessionPrincipalKey) -> Slot {
         let mut n = 0;
         if let Ok(mut map) = self.live.lock() {
-            let e = map.entry(session_id.to_string()).or_insert(0);
+            let e = map.entry(key.clone()).or_insert(0);
             *e += 1;
             n = *e;
         }
-        tracing::debug!(session = %session_id, live = n, "开了一个终端");
+        tracing::debug!(
+            deployment = ?key.deployment_id(),
+            user = ?key.user_id(),
+            session = key.session_id(),
+            live = n,
+            "开了一个终端"
+        );
         if n >= NOISY {
             tracing::warn!(
-                session = %session_id,
+                deployment = ?key.deployment_id(),
+                user = ?key.user_id(),
+                session = key.session_id(),
                 live = n,
                 "这个会话同时开着很多终端 —— 上限已取消，这条只是让失控看得见"
             );
         }
         Slot {
-            id: session_id.to_string(),
+            key: key.clone(),
             live: Arc::clone(&self.live),
         }
     }
@@ -112,19 +123,19 @@ impl Terminals {
     /// public 方法在这儿，下一个人会以为它是某处依赖的接口。
     #[cfg(test)]
     #[must_use]
-    pub fn live_for(&self, session_id: &str) -> usize {
+    pub fn live_for(&self, key: &SessionPrincipalKey) -> usize {
         self.live
             .lock()
             .ok()
-            .and_then(|m| m.get(session_id).copied())
+            .and_then(|m| m.get(key).copied())
             .unwrap_or(0)
     }
 }
 
 /// 一个终端的账，drop 即销。
 pub struct Slot {
-    id: String,
-    live: Arc<Mutex<HashMap<String, usize>>>,
+    key: SessionPrincipalKey,
+    live: Arc<Mutex<HashMap<SessionPrincipalKey, usize>>>,
 }
 
 impl Drop for Slot {
@@ -133,17 +144,23 @@ impl Drop for Slot {
             // 归零就把这条整个删掉：留着一堆 `= 0` 的条目，等于按会话数
             // 泄漏内存，而会话是能一直加的
             let mut left = 0;
-            if let Some(n) = map.get_mut(&self.id) {
+            if let Some(n) = map.get_mut(&self.key) {
                 *n = n.saturating_sub(1);
                 left = *n;
                 if *n == 0 {
-                    map.remove(&self.id);
+                    map.remove(&self.key);
                 }
             }
             // 与开的那条配对。**一直减不回 0 就是账漏了** —— 而账漏的
             // 唯一后果就是上面那条 WARN 早晚会在没人多开的时候响，
             // 到那时这两条日志是唯一能对上的东西
-            tracing::debug!(session = %self.id, left, "关掉一个终端");
+            tracing::debug!(
+                deployment = ?self.key.deployment_id(),
+                user = ?self.key.user_id(),
+                session = self.key.session_id(),
+                left,
+                "关掉一个终端"
+            );
         }
     }
 }
@@ -327,19 +344,62 @@ pub async fn ws(
         )
             .into_response();
     }
-    // 记一笔账。**不再拦**（上限已取消，见模块头）—— 它只让「开了多少个」
-    // 在日志里看得见
-    let slot = st.terminals.open(&session_id);
-    let Some(cwd) = working_dir(st.engine.workspaces.get(&session_id)) else {
+
+    // 必须在启动 PTY、返回 101 之前证明这个远端已存在的 session 属于当前
+    // 严格验证出的账号。不能把客户端生成、可能跨账号重复的裸 session id
+    // 当成租户边界。
+    let (principal, session_key) = match verify_terminal_principal(&st, &session_id).await {
+        Ok(values) => values,
+        Err(error) => return terminal_principal_response(error),
+    };
+
+    let Some(cwd) = working_dir(st.engine.workspaces.get_scoped(&session_key)) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "拿不到主目录，不知道该在哪儿起 shell",
         )
             .into_response();
     };
+
+    // 先订阅凭据代际，再做最后一次检查。这样切换若发生在这两步之间，pump
+    // 一开始仍会看到 watch 的待处理变化；若它发生在订阅之前，下面的
+    // principal 代际检查会直接拒绝。
+    let credential_changes = st.remote.token_generation();
+    if let Err(error) = ensure_terminal_principal_current(&st, &principal) {
+        return terminal_principal_response(error);
+    }
+
+    // 记一笔账。**不再拦**（上限已取消，见模块头）—— 它只让「开了多少个」
+    // 在日志里看得见。key 必须包含 deployment/user，否则 A/B 复用同一个
+    // session id 时会共享同一格计数。
+    let slot = st.terminals.open(&session_key);
     let shell = default_shell();
-    match spawn_shell(&shell, &cwd, INITIAL_SIZE) {
-        Ok((sess, output)) => upgrade.on_upgrade(move |sock| pump(sock, sess, output, slot)),
+    let spawn_cwd = cwd.clone();
+    let spawn_program = shell.clone();
+    match st
+        .remote
+        .commit_owned(principal.clone(), move || {
+            spawn_shell(&spawn_program, &spawn_cwd, INITIAL_SIZE)
+                .map_err(cortex_core::CortexError::Other)
+        })
+        .await
+    {
+        Ok((sess, output)) => {
+            let remote = st.remote.clone();
+            upgrade.on_upgrade(move |sock| {
+                pump(
+                    sock,
+                    sess,
+                    output,
+                    slot,
+                    PumpPrincipal {
+                        remote,
+                        credential_changes,
+                        context: principal,
+                    },
+                )
+            })
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("起不了 {shell}（cwd={}）：{e}", cwd.display()),
@@ -348,27 +408,107 @@ pub async fn ws(
     }
 }
 
+/// 严格验证一个远端已存在的 session，并确认验证期间账号没有切换。
+///
+/// 这里刻意不复用 `/chat` 的“新 session 允许 identity-only fallback”入口：
+/// 终端是已经打开会话的附属能力，404 必须当场失败，不能把一个不存在的
+/// session 猜成当前账号的新会话后开出本机 shell。
+async fn verify_terminal_principal(
+    st: &LocalState,
+    session_id: &str,
+) -> cortex_core::Result<(RunPrincipal, SessionPrincipalKey)> {
+    let principal = st.remote.control_principal(session_id).await?;
+    ensure_terminal_principal_current(st, &principal)?;
+    let session_key = principal.session_key()?;
+    Ok((principal, session_key))
+}
+
+fn ensure_terminal_principal_current(
+    st: &LocalState,
+    principal: &RunPrincipal,
+) -> cortex_core::Result<()> {
+    if !st.remote.run_is_current(principal) {
+        return Err(cortex_core::CortexError::Unauthorized(
+            "终端验证期间账号或凭据已切换，请重新打开终端".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn terminal_principal_response(error: cortex_core::CortexError) -> Response {
+    let (status, message) = match error {
+        cortex_core::CortexError::Unauthorized(_) => {
+            (StatusCode::UNAUTHORIZED, "无法证明当前账号拥有这个会话终端")
+        }
+        cortex_core::CortexError::Invalid(_) => {
+            (StatusCode::BAD_REQUEST, "终端请求的会话主体不合法")
+        }
+        cortex_core::CortexError::NotFound { .. } => {
+            (StatusCode::NOT_FOUND, "找不到这个会话对应的终端")
+        }
+        cortex_core::CortexError::Unavailable(_) => {
+            (StatusCode::SERVICE_UNAVAILABLE, "暂时无法验证终端所属账号")
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "终端账号检查失败"),
+    };
+    let mut response = (status, message).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response
+}
+
 /// 双向搬运，直到 shell 退出或连接断开。结束时收掉子进程、归还席位。
+struct PumpPrincipal {
+    remote: Remote,
+    credential_changes: tokio::sync::watch::Receiver<u64>,
+    context: RunPrincipal,
+}
+
 async fn pump(
     mut sock: WebSocket,
     mut sess: PtySession,
     mut output: tokio::sync::mpsc::Receiver<Vec<u8>>,
     slot: Slot,
+    mut principal: PumpPrincipal,
 ) {
+    // watch 是升级前建立的；这里再无条件读一次当前绑定，覆盖“订阅后、
+    // pump 被调度前”刚好发生切换的窗口。账号切换时旧 PTY 一帧都不再转发。
+    if !principal.remote.run_is_current(&principal.context) {
+        let _ = sock
+            .send(Message::Close(Some(CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: "账号已切换，终端已关闭".into(),
+            })))
+            .await;
+        sess.shutdown();
+        return;
+    }
+
     // 「shell 自己退了」在 Windows 上只能靠轮询（见 child_exited 的文档）。
     // 半秒一次：用户敲 exit 到页签显示「已退出」之间最多半秒，感知不到；
     // 而每条终端连接半秒一次 try_wait 的代价约等于零
     let mut child_poll = tokio::time::interval(Duration::from_millis(500));
-    let exited = loop {
+    let close = loop {
         tokio::select! {
+            biased;
+            // 账号切换比输出更优先：新账号不能继续看到或操作旧账号的 shell。
+            // 同账号 token 续期也会推进代际，但 principal 不变时必须继续运行。
+            changed = principal.credential_changes.changed() => {
+                if changed.is_err()
+                    || !principal.remote.run_is_current(&principal.context)
+                {
+                    break Some((axum::extract::ws::close_code::POLICY, "账号已切换，终端已关闭"));
+                }
+            }
             out = output.recv() => match out {
                 Some(bytes) => {
                     if sock.send(Message::Binary(bytes.into())).await.is_err() {
-                        break false;
+                        break None;
                     }
                 }
                 // unix 上的「shell 退了」：master 读到 EOF
-                None => break true,
+                None => break Some((axum::extract::ws::close_code::NORMAL, "shell 已退出")),
             },
             _ = child_poll.tick() => {
                 if sess.child_exited() {
@@ -379,7 +519,7 @@ async fn pump(
                             break;
                         }
                     }
-                    break true;
+                    break Some((axum::extract::ws::close_code::NORMAL, "shell 已退出"));
                 }
             }
             msg = sock.recv() => match msg {
@@ -387,17 +527,17 @@ async fn pump(
                 Some(Ok(Message::Text(t))) => apply_control(&sess, &t),
                 // Ping/Pong 由 axum 自动答
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break false,
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break None,
             },
         }
     };
-    if exited {
+    if let Some((code, reason)) = close {
         // 带原因关闭 —— 客户端据此显示「shell 已退出」而不是「连接断了」：
         // 前者点重开就好，后者要去怀疑 agent 本身
         let _ = sock
             .send(Message::Close(Some(CloseFrame {
-                code: axum::extract::ws::close_code::NORMAL,
-                reason: "shell 已退出".into(),
+                code,
+                reason: reason.into(),
             })))
             .await;
     }
@@ -431,6 +571,11 @@ fn apply_control(sess: &PtySession, raw: &str) {
 mod tests {
     use super::*;
 
+    fn key(user: &str, session_id: &str) -> SessionPrincipalKey {
+        SessionPrincipalKey::from_verified("deployment-a", user, session_id)
+            .expect("测试主体 key 合法")
+    }
+
     /// **多开不再被拦，但要记得清清楚楚。**
     ///
     /// 上限 2026-08-26 取消了（理由见模块头：界面上了多标签，而客户端
@@ -442,16 +587,25 @@ mod tests {
     #[test]
     fn 同一会话开几个都放行_但账要记准() {
         let terminals = Terminals::default();
+        let s1_a = key("user-a", "s1");
+        let s1_b = key("user-b", "s1");
+        let s2_a = key("user-a", "s2");
 
-        let a = terminals.open("s1");
-        let b = terminals.open("s1");
-        let c = terminals.open("s2");
-        assert_eq!(terminals.live_for("s1"), 2, "同会话第二个必须放行");
-        assert_eq!(terminals.live_for("s2"), 1, "别的会话各记各的");
+        let a = terminals.open(&s1_a);
+        let b = terminals.open(&s1_a);
+        let c = terminals.open(&s2_a);
+        let same_id_other_account = terminals.open(&s1_b);
+        assert_eq!(terminals.live_for(&s1_a), 2, "同会话第二个必须放行");
+        assert_eq!(terminals.live_for(&s2_a), 1, "别的会话各记各的");
+        assert_eq!(
+            terminals.live_for(&s1_b),
+            1,
+            "另一个账号复用同一个裸 session id 时，计数和清理必须各走各的 key"
+        );
 
         drop(b);
         assert_eq!(
-            terminals.live_for("s1"),
+            terminals.live_for(&s1_a),
             1,
             concat!(
                 "账是 RAII 的：连接结束（Slot drop）就该销掉，",
@@ -461,12 +615,14 @@ mod tests {
 
         drop(a);
         drop(c);
-        assert_eq!(terminals.live_for("s1"), 0);
+        drop(same_id_other_account);
+        assert_eq!(terminals.live_for(&s1_a), 0);
         assert_eq!(
-            terminals.live_for("s2"),
+            terminals.live_for(&s2_a),
             0,
             "归零的会话要从簿子里整个删掉 —— 留着一堆 0 等于按会话数漏内存"
         );
+        assert_eq!(terminals.live_for(&s1_b), 0);
     }
 
     /// shell 真的起得来、收得掉，且整个过程**有界**。

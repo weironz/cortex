@@ -39,6 +39,7 @@ import '../../state/chat_controller.dart';
 import '../../state/composer_draft.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/panel_header.dart';
+import '../chat/widgets/computer_use_status.dart';
 import '../chat/widgets/confirm_panel.dart';
 import '../chat/widgets/conversation_view.dart';
 import '../chat/widgets/message_composer.dart';
@@ -310,6 +311,7 @@ class _ImagePageState extends ConsumerState<ImagePage> {
         // 与 `ChatPane` 共用这一摞。确认弹层挂在这儿而不是别处：一轮正在跑
         // 时用户的眼睛就在输入框上，离发送键近到划不过去
         const ConfirmPanel(),
+        const ComputerUseStatus(),
         MessageComposer(
           enabled: sessionId != null,
           sessionId: sessionId,

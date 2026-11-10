@@ -1,0 +1,565 @@
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/browser_consent_ui.rs b/libs/cua-driver/rust/crates/platform-windows/src/browser_consent_ui.rs
+index 38099eb..0806679 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/browser_consent_ui.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/browser_consent_ui.rs
+@@ -27,21 +27,9 @@ fn refusal(code: BrowserRefusalCode, message: impl Into<String>) -> BrowserRefus
+     BrowserRefusal::new(code, message)
+ }
+ 
+-fn release_nodes(nodes: &[UiaNode]) {
+-    for node in nodes.iter().filter(|node| node.element_ptr != 0) {
+-        unsafe { drop(IUIAutomationElement::from_raw(node.element_ptr as *mut _)) };
+-    }
+-}
+-
+ // Own references before crossing the blocking-task boundary, including cancellation.
+ struct ConsentNodes(Vec<UiaNode>);
+ 
+-impl Drop for ConsentNodes {
+-    fn drop(&mut self) {
+-        release_nodes(&self.0);
+-    }
+-}
+-
+ fn is_in_web_content(nodes: &[UiaNode], node: &UiaNode) -> bool {
+     let mut parent = node.parent_element_index;
+     for _ in 0..nodes.len() {
+@@ -416,7 +404,6 @@ pub fn dismiss(pid: u32, hwnd: u64) -> Result<bool, BrowserRefusal> {
+         let tree = crate::uia::walk_tree(hwnd, None);
+         let prompt_present = native_prompt_surface_present(&tree.nodes);
+         if !prompt_present {
+-            release_nodes(&tree.nodes);
+             return Ok(dismissed);
+         }
+         let cancel = exact_cancel_button(&tree.nodes);
+@@ -428,7 +415,7 @@ pub fn dismiss(pid: u32, hwnd: u64) -> Result<bool, BrowserRefusal> {
+             )),
+             Err(error) => Err(error),
+         };
+-        release_nodes(&tree.nodes);
++
+         invoked?;
+         dismissed = true;
+         if Instant::now() >= deadline {
+@@ -516,6 +503,7 @@ mod tests {
+             enabled: None,
+             selected: None,
+             element_ptr: 0,
++            native_ref: Default::default(),
+             center_x: 0,
+             center_y: 0,
+             rect: None,
+@@ -623,6 +611,8 @@ mod tests {
+             }));
+             let mut element = node("Button", "Allow", &["Invoke"]);
+             element.element_ptr = ptr as usize;
++            element.native_ref =
++                unsafe { crate::uia::native_ref::NativeRef::from_raw(ptr as usize) };
+             let owned = ConsentNodes(vec![element]);
+             ready_tx.send(()).unwrap();
+             finish_rx.recv().unwrap();
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/browser_setup_ui.rs b/libs/cua-driver/rust/crates/platform-windows/src/browser_setup_ui.rs
+index 91bbe5c..c4afeee 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/browser_setup_ui.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/browser_setup_ui.rs
+@@ -31,12 +31,6 @@ fn refusal(code: BrowserRefusalCode, message: impl Into<String>) -> BrowserRefus
+     BrowserRefusal::new(code, message)
+ }
+ 
+-fn release_nodes(nodes: &[UiaNode]) {
+-    for node in nodes.iter().filter(|node| node.element_ptr != 0) {
+-        unsafe { drop(IUIAutomationElement::from_raw(node.element_ptr as *mut _)) };
+-    }
+-}
+-
+ /// Browser chrome only: tab strip, toolbar, omnibox, and the active tab's
+ /// `Document` node without its renderer-owned descendants. Tab topology and
+ /// the committed setup URL are native facts, so reading them must not depend
+@@ -209,7 +203,7 @@ fn stable_native_tab_count(hwnd: u64, initial_count: usize) -> Result<usize, Bro
+         let current = match native_nodes(hwnd) {
+             Ok(nodes) => {
+                 let current = native_tab_count(&nodes);
+-                release_nodes(&nodes);
++
+                 current
+             }
+             Err(_) => 0,
+@@ -435,7 +429,7 @@ impl SetupUiHandle {
+             },
+             _ => false,
+         };
+-        release_nodes(&tree.nodes);
++
+         if restored {
+             self.enabled_remote_debugging = false;
+         }
+@@ -472,7 +466,7 @@ impl SetupUiHandle {
+         }
+         let proven = native_nodes(self.hwnd).is_ok_and(|nodes| {
+             let proven = setup_page_proven(&nodes, self.descriptor);
+-            release_nodes(&nodes);
++
+             proven
+         });
+         if !proven {
+@@ -500,7 +494,7 @@ impl SetupUiHandle {
+         }
+         let proven = native_nodes(self.hwnd).is_ok_and(|nodes| {
+             let proven = setup_page_proven(&nodes, self.descriptor);
+-            release_nodes(&nodes);
++
+             proven
+         });
+         Some(
+@@ -559,7 +553,7 @@ fn set_remote_debugging(
+     let initial_native = native_nodes(hwnd)?;
+     let setup_page_active = needs_setup_page_renderer(&initial_native, descriptor);
+     let initial_tab_count = native_tab_count(&initial_native);
+-    release_nodes(&initial_native);
++
+     // Only the setup page's own checkbox needs renderer-owned nodes. Any other
+     // active page is left unread, so an unresponsive renderer cannot stall
+     // setup or cleanup before the dedicated setup tab exists.
+@@ -581,7 +575,6 @@ fn set_remote_debugging(
+             enable_attempted: false,
+         },
+         Ok(None) => {
+-            release_nodes(&initial);
+             let tab_count_before = stable_native_tab_count(hwnd, initial_tab_count)?;
+ 
+             let mut handle = SetupUiHandle {
+@@ -601,7 +594,6 @@ fn set_remote_debugging(
+             let new_tab_button = match exact_native_new_tab_button(&tab_tree) {
+                 Ok(Some(element)) => element,
+                 Ok(None) => {
+-                    release_nodes(&tab_tree);
+                     return Err(handle.abort(refusal(
+                         BrowserRefusalCode::BrowserWrongTargetRefused,
+                         format!(
+@@ -611,15 +603,13 @@ fn set_remote_debugging(
+                     )));
+                 }
+                 Err(error) => {
+-                    release_nodes(&tab_tree);
+                     return Err(handle.abort(error));
+                 }
+             };
+             if let Err(error) = unsafe { invoke(new_tab_button, "native new-tab button") } {
+-                release_nodes(&tab_tree);
+                 return Err(handle.abort(error));
+             }
+-            release_nodes(&tab_tree);
++
+             handle.opened_setup_page = true;
+ 
+             let deadline = Instant::now() + Duration::from_secs(3);
+@@ -629,7 +619,7 @@ fn set_remote_debugging(
+                 if tab_count_after == tab_count_before + 1 {
+                     break tree;
+                 }
+-                release_nodes(&tree);
++
+                 if Instant::now() >= deadline {
+                     return Err(handle.abort(refusal(
+                         BrowserRefusalCode::BrowserWrongTargetRefused,
+@@ -644,7 +634,6 @@ fn set_remote_debugging(
+             let omnibox = match unique_native_actionable(&created, "Edit", "set_value") {
+                 Ok(Some(element)) => element,
+                 Ok(None) => {
+-                    release_nodes(&created);
+                     return Err(handle.abort(refusal(
+                         BrowserRefusalCode::BrowserWrongTargetRefused,
+                         format!(
+@@ -654,15 +643,13 @@ fn set_remote_debugging(
+                     )));
+                 }
+                 Err(error) => {
+-                    release_nodes(&created);
+                     return Err(handle.abort(error));
+                 }
+             };
+             if let Err(error) = unsafe { set_value(omnibox, descriptor.setup_url) } {
+-                release_nodes(&created);
+                 return Err(handle.abort(error));
+             }
+-            release_nodes(&created);
++
+             created = match native_nodes(hwnd) {
+                 Ok(nodes) => nodes,
+                 Err(error) => return Err(handle.abort(error)),
+@@ -679,14 +666,12 @@ fn set_remote_debugging(
+                     element
+                 }
+                 Ok(_) => {
+-                    release_nodes(&created);
+                     return Err(handle.abort(refusal(
+                         BrowserRefusalCode::BrowserWrongTargetRefused,
+                         "the unique native address field did not retain the exact setup URL",
+                     )));
+                 }
+                 Err(error) => {
+-                    release_nodes(&created);
+                     return Err(handle.abort(error));
+                 }
+             };
+@@ -697,20 +682,16 @@ fn set_remote_debugging(
+                 &mut handle.injected_global_input,
+                 &mut handle.focused_setup_address_field,
+             ) {
+-                release_nodes(&created);
+                 return Err(handle.abort(error));
+             }
+-            release_nodes(&created);
++
+             handle
+         }
+         Err(error) => {
+-            release_nodes(&initial);
+             return Err(error);
+         }
+     };
+-    if !handle.opened_setup_page {
+-        release_nodes(&initial);
+-    }
++    if !handle.opened_setup_page {}
+ 
+     let deadline = Instant::now() + EXISTING_PROFILE_SETUP_READY_TIMEOUT;
+     loop {
+@@ -732,16 +713,15 @@ fn set_remote_debugging(
+                     Ok(_) => Ok(false),
+                     Err(error) => Err(error),
+                 };
+-                release_nodes(&tree.nodes);
++
+                 match outcome {
+                     Ok(true) => return Ok(handle),
+                     Ok(false) => handle.enable_attempted = true,
+                     Err(error) => return Err(handle.abort(error)),
+                 }
+             }
+-            Ok(None) => release_nodes(&tree.nodes),
++            Ok(None) => {}
+             Err(error) => {
+-                release_nodes(&tree.nodes);
+                 return Err(handle.abort(error));
+             }
+         }
+@@ -794,6 +774,7 @@ mod tests {
+             enabled: None,
+             selected: None,
+             element_ptr: 7,
++            native_ref: Default::default(),
+             center_x: 0,
+             center_y: 0,
+             rect: None,
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/msaa.rs b/libs/cua-driver/rust/crates/platform-windows/src/msaa.rs
+index 0c18576..b64a639 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/msaa.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/msaa.rs
+@@ -168,12 +168,9 @@ unsafe fn walk(
+     let has_content = name.is_some();
+ 
+     if is_actionable || has_content {
+-        // Retain the IAccessible pointer for the cache. Mirror what the UIA
+-        // walker does: clone, get raw, forget the local — the cache's Drop
+-        // releases via IUnknown.
+-        let retained: IAccessible = acc.clone();
+-        let ptr = retained.as_raw() as usize;
+-        std::mem::forget(retained);
++        // 节点先拥有引用；快照只借用节点，并为自己取得独立引用。
++        let native_ref = crate::uia::native_ref::NativeRef::from_interface(acc);
++        let ptr = native_ref.as_ptr();
+ 
+         let (center_x, center_y) = rect
+             .map(|(l, t, r, b)| ((l + r) / 2, (t + b) / 2))
+@@ -193,6 +190,7 @@ unsafe fn walk(
+                 enabled: None,
+                 selected: None,
+                 element_ptr: ptr,
++                native_ref,
+                 center_x,
+                 center_y,
+                 rect,
+@@ -213,6 +211,7 @@ unsafe fn walk(
+                 enabled: None,
+                 selected: None,
+                 element_ptr: ptr,
++                native_ref,
+                 center_x: 0,
+                 center_y: 0,
+                 rect,
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/get_window_state_actions_tests.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/get_window_state_actions_tests.rs
+index 1690dc3..7a5be1e 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/get_window_state_actions_tests.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_/get_window_state_actions_tests.rs
+@@ -13,6 +13,7 @@ fn node(actions: Vec<String>) -> UiaNode {
+         enabled: Some(true),
+         selected: None,
+         element_ptr: 0,
++        native_ref: Default::default(),
+         center_x: 0,
+         center_y: 0,
+         rect: None,
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
+index 11c6b16..7081613 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
+@@ -41,52 +41,9 @@ pub const DEFAULT_MAX_DEPTH: usize = 25;
+ /// Default cap; callers can override via [`walk_tree_bounded`].
+ pub const DEFAULT_MAX_TOTAL_ELEMENTS: usize = 5000;
+ 
+-/// A single node in the accessibility tree.
+-///
+-/// Same shape for the UIA primary path AND the MSAA fallback (used for
+-/// SAL/VCL window classes — see `msaa.rs`). MSAA-only fields use the
+-/// `_ptr is IAccessible` / `msaa_role = Some(...)` discriminator.
+-#[derive(Clone)]
+-pub struct UiaNode {
+-    pub element_index: Option<usize>,
+-    pub control_type: String,
+-    pub name: Option<String>,
+-    pub value: Option<String>,
+-    pub automation_id: Option<String>,
+-    pub help_text: Option<String>,
+-    pub actions: Vec<String>,
+-    /// Enabled state reported by UIA. `None` is reserved for fallback
+-    /// backends that cannot establish it.
+-    pub enabled: Option<bool>,
+-    /// Toggle/selection state when the element exposes one of those patterns.
+-    pub selected: Option<bool>,
+-    /// Raw COM pointer (IUIAutomationElement for UIA path, IAccessible for
+-    /// MSAA path) as usize. Retained — `Snapshots` Drop releases it via
+-    /// the `kind`-appropriate vtable.
+-    pub element_ptr: usize,
+-    /// Screen-coordinate center, captured at walk time to avoid later COM calls.
+-    pub center_x: i32,
+-    pub center_y: i32,
+-    /// Full screen-coord rect (left, top, right, bottom). Available for
+-    /// elements that report a meaningful bounding box. Used by the click
+-    /// tool when `action:"expand"` needs the right-edge offset.
+-    pub rect: Option<(i32, i32, i32, i32)>,
+-    /// MSAA role code (e.g. 0x38 = `ROLE_SYSTEM_BUTTONDROPDOWN`). `Some`
+-    /// iff this node came from the MSAA walker — the click tool checks
+-    /// this to route `action:"expand"` to a right-edge SendInput click
+-    /// instead of an unsupported UIA pattern lookup.
+-    pub msaa_role: Option<i32>,
+-    /// Depth in the rendered markdown tree (matches the `lines` indent
+-    /// level). Defaults to 0 when the node came from a builder that
+-    /// doesn't track depth.
+-    pub depth: usize,
+-    /// `element_index` of the nearest actionable ancestor, if any.
+-    /// Mirrors the markdown's parent-of-this-row.
+-    pub parent_element_index: Option<usize>,
+-    /// True when this node is below a UIA Document control. Browser-owned
+-    /// consent chrome must never match renderer-controlled descendants.
+-    pub in_web_content: bool,
+-}
++pub(crate) mod native_ref;
++mod node;
++pub use node::UiaNode;
+ 
+ pub struct UiaTreeResult {
+     pub tree_markdown: String,
+@@ -178,20 +135,6 @@ fn exact_menu_path_matches(nodes: &[UiaNode], path: &[String]) -> Vec<usize> {
+         .collect()
+ }
+ 
+-unsafe fn release_walk_nodes(nodes: Vec<UiaNode>) {
+-    use windows::Win32::UI::Accessibility::IAccessible;
+-    for node in nodes {
+-        if node.element_ptr == 0 {
+-            continue;
+-        }
+-        if node.msaa_role.is_some() {
+-            drop(IAccessible::from_raw(node.element_ptr as *mut _));
+-        } else {
+-            drop(IUIAutomationElement::from_raw(node.element_ptr as *mut _));
+-        }
+-    }
+-}
+-
+ unsafe fn invoke_menu_element(element_ptr: usize, final_segment: bool) -> Result<(), String> {
+     let element =
+         std::mem::ManuallyDrop::new(IUIAutomationElement::from_raw(element_ptr as *mut _));
+@@ -232,11 +175,11 @@ pub fn invoke_menu_path(hwnd: u64, path: &[String]) -> Result<(), String> {
+         let target_index = match matches.as_slice() {
+             [index] => *index,
+             [] => {
+-                unsafe { release_walk_nodes(result.nodes) };
++                drop(result.nodes);
+                 return Err(format!("menu path segment {depth} was not found"));
+             }
+             _ => {
+-                unsafe { release_walk_nodes(result.nodes) };
++                drop(result.nodes);
+                 return Err(format!("menu path segment {depth} is ambiguous"));
+             }
+         };
+@@ -250,7 +193,7 @@ pub fn invoke_menu_path(hwnd: u64, path: &[String]) -> Result<(), String> {
+         } else {
+             unsafe { invoke_menu_element(target.element_ptr, depth + 1 == path.len()) }.err()
+         };
+-        unsafe { release_walk_nodes(result.nodes) };
++        drop(result.nodes);
+         if let Some(error) = error {
+             return Err(format!("menu path segment {depth}: {error}"));
+         }
+@@ -754,7 +697,7 @@ pub fn walk_native_tree(hwnd: u64) -> Result<Vec<UiaNode>, String> {
+         match walked {
+             Ok(()) => Ok(nodes),
+             Err(error) => {
+-                release_walk_nodes(nodes);
++                drop(nodes);
+                 Err(error)
+             }
+         }
+@@ -839,9 +782,8 @@ fn emit_cached_node(
+ 
+     let mut emitted_parent: Option<usize> = parent_index;
+     if is_actionable || has_content {
+-        let retained: IUIAutomationElement = element.clone();
+-        let ptr = retained.as_raw() as usize;
+-        std::mem::forget(retained);
++        let native_ref = native_ref::NativeRef::from_interface(element);
++        let ptr = native_ref.as_ptr();
+ 
+         let node = if is_actionable {
+             let idx = *counter;
+@@ -859,6 +801,7 @@ fn emit_cached_node(
+                 enabled,
+                 selected,
+                 element_ptr: ptr,
++                native_ref,
+                 center_x,
+                 center_y,
+                 rect,
+@@ -879,6 +822,7 @@ fn emit_cached_node(
+                 enabled,
+                 selected,
+                 element_ptr: ptr,
++                native_ref,
+                 center_x: 0,
+                 center_y: 0,
+                 rect: None,
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/native_ref.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/native_ref.rs
+new file mode 100644
+index 0000000..d58e8c5
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/native_ref.rs
+@@ -0,0 +1,51 @@
++use std::mem::ManuallyDrop;
++use windows::core::{IUnknown, Interface};
++
++/// 节点拥有的一个 COM 引用；裸指针只是借用视图，不能代替拥有者。
++/// 用 IUnknown 的公共 ABI 处理 UIA/MSAA，沿用原有 MTA worker 的传递约定。
++#[derive(Debug, Default)]
++pub(crate) struct NativeRef {
++    ptr: usize,
++}
++
++impl NativeRef {
++    pub(crate) fn from_interface<T: Interface>(element: &T) -> Self {
++        // clone 在交出局部包装之前取得独立引用，错误或截断也由节点自动归还。
++        unsafe { Self::from_raw(element.clone().into_raw() as usize) }
++    }
++
++    /// 接管已有引用，不执行 AddRef；空指针表示没有本机元素的元数据行。
++    ///
++    /// # Safety
++    /// 非空指针必须是带有一个可转移引用的活 COM 接口；调用后原拥有者不得再 Release。
++    pub(crate) unsafe fn from_raw(ptr: usize) -> Self {
++        Self { ptr }
++    }
++
++    pub(crate) fn as_ptr(&self) -> usize {
++        self.ptr
++    }
++
++    pub(crate) fn into_raw(mut self) -> usize {
++        std::mem::replace(&mut self.ptr, 0)
++    }
++}
++
++impl Clone for NativeRef {
++    fn clone(&self) -> Self {
++        if self.ptr == 0 {
++            return Self::default();
++        }
++        // ManuallyDrop 只借用本引用；复制出的 IUnknown 才是新增的拥有者。
++        let borrowed = unsafe { ManuallyDrop::new(IUnknown::from_raw(self.ptr as *mut _)) };
++        unsafe { Self::from_raw((*borrowed).clone().into_raw() as usize) }
++    }
++}
++
++impl Drop for NativeRef {
++    fn drop(&mut self) {
++        if self.ptr != 0 {
++            unsafe { drop(IUnknown::from_raw(self.ptr as *mut _)) };
++        }
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/node.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/node.rs
+new file mode 100644
+index 0000000..d325b8e
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/node.rs
+@@ -0,0 +1,45 @@
++/// A single node in the accessibility tree.
++///
++/// Same shape for the UIA primary path AND the MSAA fallback (used for
++/// SAL/VCL window classes — see `msaa.rs`). MSAA-only fields use the
++/// `_ptr is IAccessible` / `msaa_role = Some(...)` discriminator.
++#[derive(Clone)]
++pub struct UiaNode {
++    pub element_index: Option<usize>,
++    pub control_type: String,
++    pub name: Option<String>,
++    pub value: Option<String>,
++    pub automation_id: Option<String>,
++    pub help_text: Option<String>,
++    pub actions: Vec<String>,
++    /// Enabled state reported by UIA. `None` is reserved for fallback
++    /// backends that cannot establish it.
++    pub enabled: Option<bool>,
++    /// Toggle/selection state when the element exposes one of those patterns.
++    pub selected: Option<bool>,
++    /// 本节点引用的借用视图；生命周期由 native_ref 维护，调用者不得手工 Release。
++    pub element_ptr: usize,
++    pub(crate) native_ref: super::native_ref::NativeRef,
++    /// Screen-coordinate center, captured at walk time to avoid later COM calls.
++    pub center_x: i32,
++    pub center_y: i32,
++    /// Full screen-coord rect (left, top, right, bottom). Available for
++    /// elements that report a meaningful bounding box. Used by the click
++    /// tool when `action:"expand"` needs the right-edge offset.
++    pub rect: Option<(i32, i32, i32, i32)>,
++    /// MSAA role code (e.g. 0x38 = `ROLE_SYSTEM_BUTTONDROPDOWN`). `Some`
++    /// iff this node came from the MSAA walker — the click tool checks
++    /// this to route `action:"expand"` to a right-edge SendInput click
++    /// instead of an unsupported UIA pattern lookup.
++    pub msaa_role: Option<i32>,
++    /// Depth in the rendered markdown tree (matches the `lines` indent
++    /// level). Defaults to 0 when the node came from a builder that
++    /// doesn't track depth.
++    pub depth: usize,
++    /// `element_index` of the nearest actionable ancestor, if any.
++    /// Mirrors the markdown's parent-of-this-row.
++    pub parent_element_index: Option<usize>,
++    /// True when this node is below a UIA Document control. Browser-owned
++    /// consent chrome must never match renderer-controlled descendants.
++    pub in_web_content: bool,
++}
+diff --git a/libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot.rs b/libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot.rs
+index 5f2e69a..0e486c8 100644
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot.rs
+@@ -106,7 +106,8 @@ impl UiaSnapshot {
+                 .iter()
+                 .filter(|node| node.element_index.is_some())
+                 .map(|node| RetainedElement {
+-                    ptr: node.element_ptr,
++                    // 转换可重复、可提前丢弃，不能偷走节点拥有的同一个引用。
++                    ptr: node.native_ref.clone().into_raw(),
+                     kind,
+                     center: (node.center_x, node.center_y),
+                     rect: node.rect,

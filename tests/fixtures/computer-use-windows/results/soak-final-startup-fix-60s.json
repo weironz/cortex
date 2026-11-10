@@ -1,0 +1,22 @@
+﻿{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-soak",
+    "startedAt":  "2026-11-02T05:49:47.9050984Z",
+    "finishedAt":  "2026-11-02T05:51:08.9816149Z",
+    "durationSeconds":  81.08,
+    "requestedSeconds":  60,
+    "intervalMs":  5000,
+    "driverSha256":  "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+    "fixtureExecutable":  "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\target\\cortex-computer-use-soak-fixture.exe",
+    "fixtureSha256":  "efd056dc99e99821b5c6efcc340bd60751da9940d68e3f98fd2fe9657a0a414f",
+    "fixtureExitedBeforeCleanup":  false,
+    "fixtureExitCodeBeforeCleanup":  null,
+    "fixtureExitTimeBeforeCleanup":  null,
+    "fixtureInspectionError":  null,
+    "secureFixturePassed":  true,
+    "sourceFingerprintBefore":  "2cb12cdc9dca4be25bead6bfde1ebe7cafeec7758993ae41de48515f52a03fd1",
+    "sourceFingerprintAfter":  "2cb12cdc9dca4be25bead6bfde1ebe7cafeec7758993ae41de48515f52a03fd1",
+    "sourceUnchanged":  true,
+    "exitCode":  0,
+    "logTail":  "cargo.exe : warning: linker stdout: 正在创建库 D:\\codes\\cortex\\target\\debug\\deps\\cortex_local-23f0d987dee0727b.lib 和对象 D:\\co\ndes\\cortex\\target\\debug\\deps\\cortex_local-23f0d987dee0727b.exp\nAt D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\soak.ps1:249 char:9\n+         \u0026 cargo test -p cortex-local --bin cortex-local `\n+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n    + CategoryInfo          : NotSpecified: (warning: linker...987dee0727b.exp:String) [], RemoteException\n    + FullyQualifiedErrorId : NativeCommandError\n \n  |\n  = note: `#[warn(linker_messages)]` on by default\n\nwarning: `cortex-local` (bin \"cortex-local\" test) generated 1 warning\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s\n     Running unittests src\\main.rs (target\\debug\\deps\\cortex_local-23f0d987dee0727b.exe)\n\nrunning 1 test\ntest computer::real::tests::cua_secure_fixture_requires_handoff_without_input ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 450 filtered out; finished in 12.66s\n\ncargo.exe : warning: linker stdout: 正在创建库 D:\\codes\\cortex\\target\\debug\\deps\\cortex_local-23f0d987dee0727b.lib 和对象 D:\\co\ndes\\cortex\\target\\debug\\deps\\cortex_local-23f0d987dee0727b.exp\nAt D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\soak.ps1:269 char:9\n+         \u0026 cargo test -p cortex-local --bin cortex-local `\n+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n    + CategoryInfo          : NotSpecified: (warning: linker...987dee0727b.exp:String) [], RemoteException\n    + FullyQualifiedErrorId : NativeCommandError\n \n  |\n  = note: `#[warn(linker_messages)]` on by default\n\nwarning: `cortex-local` (bin \"cortex-local\" test) generated 1 warning\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.42s\n     Running unittests src\\main.rs (target\\debug\\deps\\cortex_local-23f0d987dee0727b.exe)\n\nrunning 1 test\ntest computer::real::tests::cua_fixture_long_running_soak ... Cortex Computer Use soak passed: 7 cycles, 1 Cua sessions, 0 read-only retries, 60 seconds\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 450 filtered out; finished in 63.71s\n\nCua Driver daemon listening on \\\\.\\pipe\\cortex-soak-e6b2e4f0b7494bf28b1200fb64d7dc35"
+}

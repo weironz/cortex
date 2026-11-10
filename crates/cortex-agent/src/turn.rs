@@ -45,7 +45,7 @@ pub const DEFAULT_MAX_ROUNDS: usize = 8;
 ///
 /// 不截断的话，一个 `read_file` 读到大文件就能把上下文撑爆，而且是在
 /// **每一个**后续轮次里重复付费 —— 工具结果一旦进 history 就永远在那儿。
-pub(crate) const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
+pub const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
 
 /// 撞上轮次上限后、最后一次调用前塞给模型的提醒。
 ///
@@ -447,6 +447,8 @@ impl Turn {
         host: &dyn ToolHost,
         events: &mpsc::Sender<AgentEvent>,
     ) -> Result<TurnOutcome> {
+        let perception_mode = crate::computer_perception::PerceptionMode::for_model(llm);
+        perception_mode.filter_model_tool_images(messages);
         // ── 「有人在场」这四个字必须当真 ──
         //
         // 它的全部依据是「每一次执行都经用户当场批准」。两者之一不成立时，
@@ -636,7 +638,12 @@ impl Turn {
                     .await
                     .ok();
 
-                responses = responses.with_tool_response(id, Ok(to_mcp_result(result)));
+                responses = responses.with_tool_response(
+                    id,
+                    Ok(to_mcp_result(
+                        perception_mode.filter_named_tool_result(&call.name, result),
+                    )),
+                );
             }
             messages.push(responses);
 

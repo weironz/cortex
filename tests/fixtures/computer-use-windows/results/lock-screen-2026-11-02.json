@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-11-02T09:32:27.5667452+00:00",
+  "foregroundProcess": "LockApp.exe",
+  "foregroundPid": 40140,
+  "desktopLocked": true,
+  "productProbe": {
+    "test": "computer_cua::platform::tests::windows_locked_session_is_rejected",
+    "status": "pass",
+    "testExe": "D:\\codes\\cortex\\target\\release\\deps\\cortex_local-e2cd1fc4d652cffa.exe",
+    "testExeSha256": "d4ef6a35f7a0fa6fb22cc393b7e302d3cb00dd37b2f0ac90d39d5e1c4ee7a2ea",
+    "behaviour": "list/observe/act fail closed before Cua session or input"
+  },
+  "uiHarness": {
+    "path": "tests/fixtures/computer-use-windows/results/latest.json",
+    "scope": "harness_only",
+    "desktopLockedAtReport": true,
+    "pass": 17,
+    "fail": 0,
+    "skipped": 3,
+    "skips": [
+      "notepad-save-file",
+      "excel-edit-save-cell",
+      "multi-monitor-negative-origin"
+    ]
+  },
+  "limitation": "This proves locked-session rejection and harness behaviour. It does not prove unlock recovery, old-frame rejection after recovery, RDP, sleep resume, or product approval/Gateway path."
+}

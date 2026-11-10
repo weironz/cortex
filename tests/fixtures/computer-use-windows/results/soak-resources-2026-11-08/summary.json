@@ -1,0 +1,10 @@
+﻿{
+    "schemaVersion":  1,
+    "scope":  "read-only process resource sampling; no desktop actions",
+    "startedAt":  "2026-11-08T08:41:29.6516165Z",
+    "finishedAt":  "2026-11-08T12:18:03.8861336Z",
+    "samples":  216,
+    "endReason":  "test_exited",
+    "failure":  null,
+    "note":  "Observation starts when this script runs, not when the soak started. These samples do not prove absence of leaks or a passing soak."
+}

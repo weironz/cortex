@@ -32,6 +32,7 @@
 
 mod agents;
 mod chat;
+mod computer_principal;
 mod confirmations;
 mod delegate;
 mod files;
@@ -49,6 +50,7 @@ use crate::state::AgentState;
 
 use self::agents::{agent_tunnel, heartbeat, list_agents};
 use self::chat::{attach_run, chat};
+use self::computer_principal::computer_use_principal;
 use self::confirmations::confirmations;
 use self::delegate::{delegate, revoke_delegation};
 use self::files::{
@@ -94,6 +96,22 @@ macro_rules! protected_routes {
     };
 }
 
+/// 严格 principal 的成功与错误响应都可能带账号边界信息，全部禁止缓存。
+///
+/// 只在 handler 成功分支加首部不够：401、404、422 恰好是最容易把「哪个账号
+/// 存在、哪个会话属于谁」暴露给共享代理的响应。
+async fn no_store_principal_response(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 protected_routes! {
     state;
     // ── 身份 ──
@@ -102,6 +120,12 @@ protected_routes! {
     // 要求带着凭据才能登录是个死循环。
     "/auth/me" [GET] => get(crate::accounts::whoami),
     "/auth/usage" [GET] => get(crate::accounts::usage),
+    // local agent 在把 Computer Use 动作或 trace 绑定到账号前调用。它虽然
+    // 在受保护侧，handler 仍会丢掉前置中间件接受的 PSK / ticket / delegated
+    // 兼容凭据，只认服务端 access 簿子；请求体只有 session_id。
+    "/auth/computer-use-principal" [POST] => post(computer_use_principal)
+        .layer(axum::extract::DefaultBodyLimit::max(4 * 1024))
+        .layer(axum::middleware::from_fn(no_store_principal_response)),
     // 改口令**要凭据**，与 login/refresh 那几条相反：它不是「还没有凭据时
     // 做的事」，而是「已经是本人才能做的事」。handler 里还要再验一次旧口令
     "/auth/password" [POST] => post(crate::accounts::change_password),

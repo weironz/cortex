@@ -21,8 +21,12 @@
 //! 等于静默丢掉一轮对话 —— 正是这个队列存在的理由。所以中间损坏一律
 //! 报错，让人去看，而不是自作主张地跳过去。
 
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::fs::File;
+#[cfg(test)]
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader};
+#[cfg(test)]
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use cortex_core::{CortexError, Result};
@@ -66,6 +70,7 @@ impl Outbox {
     /// # Errors
     /// 序列化失败、文件打不开、写失败。任何一种都必须让调用方知道 ——
     /// 「排队失败」被吞掉的话，用户以为这一轮存下了，其实没有。
+    #[cfg(test)]
     pub fn push(&self, req: &NewEpisodeRequest) -> Result<u64> {
         let mut line = serde_json::to_string(req)
             .map_err(|e| CortexError::Invalid(format!("序列化待重放的 episode 失败：{e}")))?;
@@ -139,6 +144,7 @@ impl Outbox {
     /// 而直接覆写有一个「旧值没了新值还没落」的窗口 —— 崩在那里
     /// 会让高水位归零，于是整个队列重放一遍。幂等兜得住，但那是
     /// 一次可以避免的全量重放。
+    #[cfg(test)]
     pub fn commit(&self, seq: u64) -> Result<()> {
         let tmp = self.mark.with_extension("mark.tmp");
         std::fs::write(&tmp, seq.to_string()).map_err(|e| self.io_err("写高水位", e))?;

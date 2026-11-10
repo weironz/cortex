@@ -10,9 +10,15 @@
 /// 界面上「已停止生成」那几个字在两种实现下一模一样。
 library;
 
+import 'dart:async';
+
 import 'package:cortex_app/api/api_exception.dart';
+import 'package:cortex_app/api/cortex_api.dart';
 import 'package:cortex_app/api/mock_cortex_api.dart';
 import 'package:cortex_app/core/app_config.dart';
+import 'package:cortex_app/models/account.dart';
+import 'package:cortex_app/models/chat_session.dart';
+import 'package:cortex_app/models/session_detail.dart';
 import 'package:cortex_app/state/app_providers.dart';
 import 'package:cortex_app/state/chat_controller.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -42,6 +48,66 @@ class _StopSpy extends MockCortexApi {
   }
 }
 
+class _TurnStopApi extends MockCortexApi {
+  _TurnStopApi({
+    required this.account,
+    required this.sessionId,
+    this.blockStop = false,
+  }) : super(instant: true);
+
+  final Account account;
+  final String sessionId;
+  final bool blockStop;
+  final Completer<void> stopGate = Completer<void>();
+
+  int stopCalls = 0;
+  int identityCalls = 0;
+
+  @override
+  Future<Account?> whoAmI() async {
+    identityCalls++;
+    return account;
+  }
+
+  @override
+  Future<List<ChatSession>> sessions({
+    bool includeArchived = false,
+    String? projectId,
+  }) async => [
+    ChatSession(
+      id: sessionId,
+      title: '会话 $sessionId',
+      updatedAt: DateTime.utc(2026, 8, 12),
+    ),
+  ];
+
+  @override
+  Future<SessionDetail> sessionDetail(
+    String id, {
+    int? limit,
+    String? before,
+  }) async => SessionDetail(
+    session: ChatSession(
+      id: id,
+      title: '会话 $id',
+      updatedAt: DateTime.utc(2026, 8, 12),
+    ),
+    episodes: const [],
+  );
+
+  @override
+  Future<void> stopRun(String sessionId) async {
+    stopCalls++;
+    if (blockStop) await stopGate.future;
+  }
+}
+
+class _ApiSlot {
+  _ApiSlot(this.current);
+
+  CortexApi current;
+}
+
 Future<void> _until(
   bool Function() condition, {
   String reason = '',
@@ -59,6 +125,17 @@ ProviderContainer _boot(_StopSpy api) {
     overrides: [
       appConfigProvider.overrideWith(_MockConfig.new),
       cortexApiProvider.overrideWithValue(api),
+    ],
+  );
+  addTearDown(container.dispose);
+  return container;
+}
+
+ProviderContainer _bootSwappable(_ApiSlot slot) {
+  final container = ProviderContainer(
+    overrides: [
+      appConfigProvider.overrideWith(_MockConfig.new),
+      cortexApiProvider.overrideWith((ref) => slot.current),
     ],
   );
   addTearDown(container.dispose);
@@ -130,6 +207,76 @@ void main() {
           '掐不掉就得说掐不掉。写一句干净的「已停止」是第二个谎 —— '
           '用户会以为它停了，而它在继续改他的文件',
     );
+  });
+
+  test('A 的迟到 stop 不得收掉 B 的同一 session_id 新轮次', () async {
+    const id = 'ses_shared';
+    final account = const Account(
+      userId: 'user-a',
+      username: 'A',
+      schemaName: 'user_a',
+    );
+    final first = _TurnStopApi(
+      account: account,
+      sessionId: id,
+      blockStop: true,
+    );
+    final second = _TurnStopApi(
+      account: const Account(
+        userId: 'user-b',
+        username: 'B',
+        schemaName: 'user_b',
+      ),
+      sessionId: id,
+    );
+    final slot = _ApiSlot(first);
+    final container = _bootSwappable(slot);
+    final chat = container.read(chatControllerProvider.notifier);
+
+    await _until(
+      () => container.read(chatControllerProvider).activeSessionId == id,
+      reason: 'A 打开同一 session_id',
+    );
+
+    unawaited_(chat.send('A 的轮次'));
+    await _until(
+      () => container.read(chatControllerProvider).streaming != null,
+      reason: 'A 开始流式输出',
+    );
+    final aTurn = container.read(chatControllerProvider).streaming!;
+
+    final stopping = chat.stopGeneration();
+    await _until(() => first.stopCalls == 1, reason: 'A 的 stop 请求已发出');
+
+    slot.current = second;
+    container.invalidate(cortexApiProvider);
+    container.read(cortexApiProvider);
+    await _until(
+      () =>
+          !container.read(chatControllerProvider).sessionsLoading &&
+          container.read(chatControllerProvider).activeSessionId == id,
+      reason: 'B 载入同一 session_id',
+    );
+
+    unawaited_(chat.send('B 的轮次'));
+    await _until(
+      () =>
+          container.read(chatControllerProvider).streaming != null &&
+          container.read(chatControllerProvider).streaming!.messageId !=
+              aTurn.messageId,
+      reason: 'B 开始自己的新轮次',
+    );
+    final bTurn = container.read(chatControllerProvider).streaming!;
+
+    first.stopGate.complete();
+    await stopping;
+
+    expect(
+      container.read(chatControllerProvider).streaming?.messageId,
+      bTurn.messageId,
+      reason: 'A 的 stop 返回时只能处理它启动时捕获的 A live turn',
+    );
+    expect(second.stopCalls, 0, reason: '迟到 stop 不能改发或补发到当前 API 的 B 会话');
   });
 }
 

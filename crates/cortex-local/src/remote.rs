@@ -12,6 +12,10 @@ use cortex_core::{CortexError, Result};
 use cortex_proto::episodes::{EpisodeAck, NewEpisodeRequest};
 use cortex_proto::llm::{GeneratedImages, LlmStreamRequest};
 
+use crate::computer_principal::PrincipalNamespace;
+use crate::local_owner::{LocalAuthority, OwnerKey};
+use crate::runs::run_principal::{CredentialSnapshot, RunPrincipal, SessionBinding};
+
 /// 写入与检索的超时。
 ///
 /// 比 `/llm/stream` 短得多：这两条是「查库 + 算一次向量」，秒级就该回。
@@ -40,16 +44,103 @@ const BLOB_HEADER_TIMEOUT: Duration = Duration::from_secs(15);
 /// 不受这里影响；而协议不兼容那种情况远端是活着的，2 秒绰绰有余。
 const STARTUP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// 严格 Computer Use principal 验证的超时。
+///
+/// 这条请求挡在 run 入队之前；远端黑洞不能让它无限期占住发消息按钮。
+const PRINCIPAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 无账号、公开服务、可信账号离线与凭据拒绝不可混为一个降级分支。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteAuthState {
+    Unresolved,
+    NoToken,
+    PublicService,
+    Verified,
+    OfflineBound,
+    Rejected,
+}
+
+#[derive(Clone)]
+struct CredentialState {
+    token: Option<String>,
+    generation: u64,
+    /// 只在**认证主体变化**时推进。A→B→A 也必须得到一个新值，否则只比较
+    /// `(deployment, user)` 会让旧响应在切回 A 后重新看似合法。
+    ///
+    /// 这不是 `generation`：同账号 token 续期会推进凭据代际，但不应切断
+    /// 正在传输的旧流；账号登出或切换则必须当场切断。
+    principal_epoch: u64,
+    /// 这个进程已经由严格入口绑定的账号。`None` 表示还没完成首次验证；
+    /// 一旦有值，后续热更新只能换同一账号的新 token。
+    principal: Option<PrincipalNamespace>,
+}
+
+/// 一次已经通过远端严格验证、但尚未提交的凭据更新。
+///
+/// `credential.generation()` 是从网络验证开始前冻结的本地代际。提交时必须
+/// 在同一把写锁内比较它；否则请求返回前发生的 logout、另一账号登录或另一
+/// 次 token 续期都可能被一个迟到结果悄悄覆盖。
+pub(crate) struct VerifiedIdentityToken {
+    principal: PrincipalNamespace,
+    credential: CredentialSnapshot,
+}
+
+fn replace_principal(state: &mut CredentialState, next: Option<PrincipalNamespace>) {
+    if state.principal != next {
+        state.principal = next;
+        state.principal_epoch = state.principal_epoch.wrapping_add(1);
+    }
+}
+
+tokio::task_local! {
+    /// 当前 run 的不可变凭据快照。
+    ///
+    /// `Remote` 会被克隆进 LocalHost、附件、记忆写入以及 LLM provider。
+    /// 只给某一个克隆加字段覆盖不了 provider 里早已克隆好的那一份，所以运行
+    /// 任务还需要一层 task-local：只要请求是在这一轮任务里发出，就必须用
+    /// 入队时冻结的 token，而不是进程共享的「当前 token」。
+    static RUN_CREDENTIAL: CredentialSnapshot;
+
+    /// 当前 run 的完整权威主体。同账号续期时用共享状态里的新 token；
+    /// 共享主体一旦不再匹配，就按失败关闭处理。
+    static RUN_PRINCIPAL: RunPrincipal;
+}
+
+/// 只给凭据传播单元测试冻结出站凭据。
+///
+/// 生产路径持有完整 [`RunPrincipal`]；单独的 token 快照无法参与同账号账号
+/// 租约核对，因此这个兼容辅助函数不能进入生产二进制。
+#[cfg(test)]
+pub(crate) async fn with_run_credential<F, T>(credential: CredentialSnapshot, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    RUN_CREDENTIAL.scope(credential, future).await
+}
+
+/// 在一轮任务的作用域里冻结完整 principal。
+pub(crate) async fn with_run_principal<F, T>(principal: RunPrincipal, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    RUN_PRINCIPAL.scope(principal, future).await
+}
+
 /// 远端 cortexd 的句柄。克隆代价低（内部 `Arc`）。
 #[derive(Clone)]
 pub struct Remote {
+    local_authority: Option<Arc<LocalAuthority>>,
+    remote_auth: Arc<RwLock<RemoteAuthState>>,
     http: reqwest::Client,
     base: String,
-    /// 出站凭据，**可热替换**。见 [`Remote::set_token`]。
+    /// 进程当前的出站凭据，**可热替换**。见 [`Remote::set_token`]。
     ///
-    /// 共享一格而不是各克隆一份：`Remote` 被克隆进 `LocalState`、进每一个
-    /// 轮次的 host —— 各存各的话，换了凭据只有换的那一份知道。
-    token: Arc<RwLock<Option<String>>>,
+    /// token 与 generation 必须同一个锁里更新。分成两个字段读取时，
+    /// 「A 的 token + B 的代号」会让排队围栏把一次账号切换误判成无事发生。
+    credential: Arc<RwLock<CredentialState>>,
+    /// 显式绑定到某个 run 的凭据。普通 `Remote` 是 `None`，仍跟随热替换；
+    /// 由 [`Self::pinned_for`] 克隆出来的是固定快照。
+    pinned_credential: Option<CredentialSnapshot>,
     /// 凭据换过几次。**只用来叫醒等着的人**，值本身没有意义。
     ///
     /// 存在的理由见 [`Self::token_generation`]：有一条路在 401 之后要睡
@@ -64,8 +155,18 @@ impl std::fmt::Debug for Remote {
         f.debug_struct("Remote")
             .field("base", &self.base)
             .field("token", &self.read_token().map(|_| "<已设置>"))
+            .field("pinned", &self.pinned_credential.is_some())
             .finish()
     }
+}
+
+/// 保留消息身份；同文的两条合法消息不能在合并 pending 时被当成重复。
+#[derive(Debug)]
+pub struct RemoteHistoryEpisode {
+    pub id: String,
+    pub is_user: bool,
+    pub text: String,
+    pub occurred_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// `/sessions/{id}` 那一次请求带回来的、这一轮要用的东西。
@@ -74,13 +175,449 @@ impl std::fmt::Debug for Remote {
 /// 分两次请求去拿是每轮多一次往返，而这两样本来就在同一个响应里。
 #[derive(Debug, Default)]
 pub struct RemoteSession {
-    /// `(是不是用户说的, 正文)`，按时间正序。
-    pub turns: Vec<(bool, String)>,
+    /// 保留服务端顺序；无可解析时间的消息交给宿主稳定合并。
+    pub episodes: Vec<RemoteHistoryEpisode>,
     /// 容器工作区卷里的子目录名。`None` = 卷根（默认）。
     pub container_workspace: Option<String>,
 }
 
 impl Remote {
+    async fn check_response(&self, response: reqwest::Response) -> Result<reqwest::Response> {
+        checked(response).await
+    }
+
+    pub(crate) fn with_local_authority(mut self, authority: Arc<LocalAuthority>) -> Self {
+        self.local_authority = Some(authority);
+        self
+    }
+
+    pub(crate) fn local_authority(&self) -> Option<&Arc<LocalAuthority>> {
+        self.local_authority.as_ref()
+    }
+
+    pub(crate) fn reject_run_credential(&self, principal: &RunPrincipal) {
+        self.reject_credential_snapshot(principal.credential());
+    }
+
+    fn reject_credential_snapshot(&self, credential: &CredentialSnapshot) {
+        let state = self.credential.read().expect("凭据锁可用");
+        // 新 token 的失败验证或旧 token 的迟到 401 都不能撤销已完成 CAS 的凭据。
+        if state.generation == credential.generation()
+            && state.principal_epoch == credential.principal_epoch()
+            && state.token.as_deref() == credential.bearer_token()
+        {
+            self.set_auth_state(RemoteAuthState::Rejected);
+            let generation = state.generation;
+            drop(state);
+            self.token_generation.send_replace(generation);
+        }
+    }
+
+    pub(crate) fn auth_state(&self) -> RemoteAuthState {
+        self.remote_auth.read().expect("认证状态锁可用").clone()
+    }
+
+    fn set_auth_state(&self, state: RemoteAuthState) {
+        *self.remote_auth.write().expect("认证状态锁可用") = state;
+    }
+
+    /// 启动不再以宽松 whoami/last_user 选择私有资源。离线绑定只接受受保护记录中
+    /// 与当前完整 token 摘要及部署地址完全匹配的先前严格验证结果。
+    async fn select_local_owner(&self) -> Result<()> {
+        let authority = self.local_authority.as_ref().expect("已注册 owner").clone();
+        tokio::task::spawn_blocking(move || {
+            authority.with_epoch(authority.epoch(), || authority.select_local())?
+        })
+        .await
+        .map_err(|e| CortexError::Config(format!("owner 存储线程异常：{e}")))?
+    }
+
+    pub(crate) async fn bootstrap_owner(&self) -> Result<RemoteAuthState> {
+        let authority = self
+            .local_authority
+            .as_ref()
+            .ok_or_else(|| CortexError::Config("缺少本机 owner 注册".into()))?;
+        let health_credential = self.credential_snapshot().ok();
+        let health = async {
+            let request = self.http.get(self.url("/health"));
+            let request = match &health_credential {
+                Some(credential) => {
+                    request.bearer_auth(credential.bearer_token().expect("已冻结账号凭据"))
+                }
+                None => request,
+            };
+            let resp = request
+                .timeout(STARTUP_PROBE_TIMEOUT)
+                .send()
+                .await
+                .map_err(map_offline_transport)?;
+            if matches!(resp.status().as_u16(), 401 | 403)
+                && let Some(credential) = &health_credential
+            {
+                self.reject_credential_snapshot(credential);
+            }
+            let value: serde_json::Value = self
+                .check_response(resp)
+                .await?
+                .json()
+                .await
+                .map_err(|e| CortexError::Invalid(format!("远端协议响应不合法：{e}")))?;
+            let peer: cortex_proto::dto::PeerProtocol = serde_json::from_value(value.clone())
+                .map_err(|e| CortexError::Invalid(e.to_string()))?;
+            cortex_proto::check_peer(peer.protocol, peer.min_peer_protocol, "远端 cortexd")
+                .map_err(CortexError::Config)?;
+            Ok::<_, CortexError>(value.get("auth").and_then(|v| v.as_str()) == Some("disabled"))
+        }
+        .await;
+        let public = match health {
+            Ok(public) => public,
+            Err(e) if transport_unavailable(&e) => false,
+            Err(e) => return Err(public_request_error(e)),
+        };
+        if public {
+            self.select_local_owner().await?;
+            self.set_auth_state(RemoteAuthState::PublicService);
+            return Ok(self.auth_state());
+        }
+        let Some(token) = self.read_token() else {
+            self.select_local_owner().await?;
+            self.set_auth_state(RemoteAuthState::NoToken);
+            return Ok(self.auth_state());
+        };
+        match self.verify_current_namespace_binding_with_source().await {
+            Ok((_ns, _credential, _epoch)) => {
+                self.remember_current_account().await?;
+                self.set_auth_state(RemoteAuthState::Verified);
+            }
+            Err(e) if transport_unavailable(&e) => {
+                let Some(OwnerKey::Account {
+                    deployment_id,
+                    user_id,
+                }) = authority.cached_account(self.base(), &token)
+                else {
+                    return Err(CortexError::Unauthorized(
+                        "首次离线或凭据与受保护账号绑定不匹配，不能借 last_user 续跑".into(),
+                    ));
+                };
+                let namespace = PrincipalNamespace::from_verified(deployment_id, user_id)
+                    .map_err(CortexError::Unauthorized)?;
+                self.bind_verified_namespace(&namespace, &self.credential_snapshot()?)?;
+                self.remember_current_account().await?;
+                self.set_auth_state(RemoteAuthState::OfflineBound);
+            }
+            Err(e) => return Err(public_request_error(e)),
+        }
+        Ok(self.auth_state())
+    }
+
+    pub(crate) async fn ordinary_principal(&self, session: &str) -> Result<RunPrincipal> {
+        let Some(authority) = &self.local_authority else {
+            return self.verify_current_session_principal_bound(session).await;
+        };
+        authority.require_caller()?;
+        match self.auth_state() {
+            RemoteAuthState::NoToken | RemoteAuthState::PublicService => {
+                self.local_context(session)
+            }
+            RemoteAuthState::Verified | RemoteAuthState::OfflineBound => {
+                match self
+                    .verify_current_session_principal_bound_with_source(session)
+                    .await
+                {
+                    Ok(principal) => {
+                        self.set_auth_state(RemoteAuthState::Verified);
+                        Ok(principal)
+                    }
+                    Err(e) if transport_unavailable(&e) => {
+                        let principal = self.control_principal(session).await?;
+                        if authority
+                            .journal
+                            .episodes(&principal.key().owner()?, session)
+                            .is_empty()
+                        {
+                            return Err(CortexError::Unauthorized(
+                                "离线账号只能续跑同 owner 已有本机会话".into(),
+                            ));
+                        }
+                        self.set_auth_state(RemoteAuthState::OfflineBound);
+                        Ok(principal)
+                    }
+                    // HTTP 拒绝只在发送快照仍是当前凭据时撤销；绑定 CAS 失败
+                    // 或旧请求的迟到响应不能反过来冻结后来完成的登录。
+                    Err(e) => Err(public_request_error(e)),
+                }
+            }
+            _ => Err(CortexError::Unauthorized(
+                "远端认证未通过，不能降级为 Local owner".into(),
+            )),
+        }
+    }
+
+    pub(crate) async fn principal_for_chat(
+        &self,
+        session: &str,
+        computer_use: bool,
+    ) -> Result<RunPrincipal> {
+        if computer_use {
+            if let Some(authority) = &self.local_authority {
+                authority.require_caller()?;
+            }
+            self.verify_current_session_principal_bound(session).await
+        } else {
+            self.ordinary_principal(session).await
+        }
+    }
+
+    fn local_context(&self, session: &str) -> Result<RunPrincipal> {
+        let authority = self
+            .local_authority
+            .as_ref()
+            .ok_or_else(|| CortexError::Unauthorized("缺少本机 owner".into()))?;
+        authority.with_epoch(authority.epoch(), || ())?;
+        RunPrincipal::for_local(
+            authority.owner(),
+            CredentialSnapshot::without_token(
+                self.current_credential_generation(),
+                authority.epoch(),
+            ),
+            session,
+        )
+    }
+
+    /// 安全收尾只验证本机控制权与既有绑定，不在断网时再请求远端权限。
+    pub(crate) async fn control_principal(&self, session: &str) -> Result<RunPrincipal> {
+        let Some(authority) = &self.local_authority else {
+            return self
+                .verify_current_existing_session_principal_bound(session)
+                .await;
+        };
+        authority.require_caller()?;
+        if matches!(authority.selected_owner(), Some(OwnerKey::Local { .. })) {
+            return self.local_context(session);
+        }
+        let namespace = self
+            .current_principal()
+            .ok_or_else(|| CortexError::Unauthorized("没有已绑定账号，不能猜测任务归属".into()))?;
+        RunPrincipal::from_verified(
+            self.credential_snapshot()?,
+            namespace.deployment_id(),
+            self.base(),
+            namespace.user_id(),
+            session,
+            SessionBinding::Existing,
+        )
+        .map(RunPrincipal::without_computer_authority)
+    }
+
+    pub(crate) async fn owner_snapshot(&self) -> Result<(OwnerKey, CredentialSnapshot)> {
+        if self.local_authority.is_some() {
+            let context = self.control_principal("owner-control").await?;
+            return Ok((context.key().owner()?, context.credential().clone()));
+        }
+        let (ns, credential) = self.verify_current_namespace_snapshot().await?;
+        Ok((
+            OwnerKey::account(ns.deployment_id(), ns.user_id())?,
+            credential,
+        ))
+    }
+
+    pub(crate) fn run_is_current(&self, principal: &RunPrincipal) -> bool {
+        self.auth_state() != RemoteAuthState::Rejected
+            && self.with_owned_principal(principal, || ()).is_ok()
+    }
+
+    /// 副作用提交前与切号使用同一凭据读锁；不能在落盘后才发现 epoch 已变化。
+    pub(crate) fn with_owned_principal<T>(
+        &self,
+        principal: &RunPrincipal,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        if principal.key().is_local() {
+            let state = self.credential.read().expect("凭据锁可用");
+            let authority = self
+                .local_authority
+                .as_ref()
+                .ok_or_else(|| CortexError::Unauthorized("缺少 owner".into()))?;
+            if principal.key().owner()? != authority.owner()
+                || state.generation != principal.credential().generation()
+            {
+                return Err(CortexError::Unauthorized(
+                    "本机 owner 或凭据代际已变化".into(),
+                ));
+            }
+            return authority.with_epoch(principal.credential().principal_epoch(), action);
+        }
+        let namespace = principal.verified_namespace()?;
+        self.with_bound_principal(namespace, principal.credential().principal_epoch(), || {
+            match &self.local_authority {
+                Some(authority) => authority.with_epoch(authority.epoch(), action),
+                None => Ok(action()),
+            }
+        })?
+    }
+
+    pub(crate) fn with_owner_snapshot<T>(
+        &self,
+        owner: &OwnerKey,
+        credential: &CredentialSnapshot,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let principal = match owner {
+            OwnerKey::Local { .. } => {
+                RunPrincipal::for_local(owner.clone(), credential.clone(), "owner-control")?
+            }
+            OwnerKey::Account {
+                deployment_id,
+                user_id,
+            } => RunPrincipal::from_verified(
+                credential.clone(),
+                deployment_id,
+                self.base(),
+                user_id,
+                "owner-control",
+                SessionBinding::Existing,
+            )?,
+        };
+        self.with_owned_principal(&principal, action)
+    }
+
+    /// 恢复确认不能沿用同账号 token 轮换前的代际；核对与副作用共持同一凭据读锁。
+    pub(crate) fn with_exact_computer_credential<T>(
+        &self,
+        namespace: &PrincipalNamespace,
+        credential: &CredentialSnapshot,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let state = self
+            .credential
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // 401 的撤销只写认证状态，不一定更换 token；读锁要覆盖整个提交，
+        // 不能只在锁外看一次 Rejected 后让撤销与恢复擦肩而过。
+        let authentication = self.remote_auth.read().expect("认证状态锁可用");
+        if state.principal.as_ref() != Some(namespace)
+            || state.principal_epoch != credential.principal_epoch()
+            || state.generation != credential.generation()
+            || state.token.as_deref() != credential.bearer_token()
+            || state.token.is_none()
+            || matches!(*authentication, RemoteAuthState::Rejected)
+        {
+            return Err(CortexError::Unauthorized(
+                "恢复确认的账号或凭据代际已变化".into(),
+            ));
+        }
+        match &self.local_authority {
+            Some(authority) => authority.with_epoch(authority.epoch(), action),
+            None => Ok(action()),
+        }
+    }
+
+    /// 文件 I/O 与提交时的 owner/epoch 读锁一起移入阻塞池。读锁不能只在
+    /// spawn 前检查，否则排队等磁盘期间恰好切号仍会写入旧主体的资源。
+    pub(crate) async fn commit_owned<T, F>(&self, principal: RunPrincipal, action: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        let remote = self.clone();
+        tokio::task::spawn_blocking(move || remote.with_owned_principal(&principal, action)?)
+            .await
+            .map_err(|e| CortexError::Config(format!("owner 提交线程异常：{e}")))?
+    }
+
+    pub(crate) async fn commit_owner_snapshot<T, F>(
+        &self,
+        owner: OwnerKey,
+        credential: CredentialSnapshot,
+        action: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
+    {
+        let remote = self.clone();
+        tokio::task::spawn_blocking(move || {
+            remote.with_owner_snapshot(&owner, &credential, action)?
+        })
+        .await
+        .map_err(|e| CortexError::Config(format!("owner 提交线程异常：{e}")))?
+    }
+
+    pub(crate) async fn remember_current_account(&self) -> Result<()> {
+        let Some(authority) = &self.local_authority else {
+            return Ok(());
+        };
+        let authority = authority.clone();
+        let namespace = self
+            .current_principal()
+            .ok_or_else(|| CortexError::Unauthorized("没有严格绑定的账号".into()))?;
+        let credential = self.credential_snapshot()?;
+        let owner = OwnerKey::account(namespace.deployment_id(), namespace.user_id())?;
+        let token = credential.bearer_token().expect("账号凭据存在").to_owned();
+        let base = self.base().to_owned();
+        self.commit_owner_snapshot(owner.clone(), credential, move || {
+            authority.remember_account(&base, owner, &token)
+        })
+        .await?;
+        self.set_auth_state(RemoteAuthState::Verified);
+        Ok(())
+    }
+
+    pub(crate) async fn flush_owned_journal(&self) -> Result<()> {
+        let Some(authority) = &self.local_authority else {
+            return Ok(());
+        };
+        match self.auth_state() {
+            RemoteAuthState::NoToken | RemoteAuthState::PublicService => return Ok(()),
+            RemoteAuthState::Verified | RemoteAuthState::OfflineBound => {}
+            _ => {
+                return Err(CortexError::Unauthorized(
+                    "账号同步已冻结，需严格同账号续期后恢复".into(),
+                ));
+            }
+        }
+        authority.with_epoch(authority.epoch(), || ())?;
+        let _writer = authority.journal.replay.lock().await;
+        let (namespace, credential) = self.verify_current_namespace_snapshot().await?;
+        let owner = OwnerKey::account(namespace.deployment_id(), namespace.user_id())?;
+        if authority.selected_owner().as_ref() != Some(&owner) {
+            return Err(CortexError::Unauthorized(
+                "同步主体与本机控制实例的固定 owner 不一致".into(),
+            ));
+        }
+        for mut episode in authority.journal.pending(&owner) {
+            self.with_owner_snapshot(&owner, &credential, || ())?;
+            episode.retrieve = false;
+            let ack = match self
+                .pinned_for_credential(credential.clone())
+                .write_episode(&episode)
+                .await
+            {
+                Ok(ack) => ack,
+                Err(error) => {
+                    if matches!(error, CortexError::Unauthorized(_)) {
+                        self.reject_credential_snapshot(&credential);
+                    }
+                    return Err(error);
+                }
+            };
+            if ack.episode_id != episode.id {
+                return Err(CortexError::Invalid(
+                    "远端 ack 的 episode id 与持久正文不一致".into(),
+                ));
+            }
+            let authority = authority.clone();
+            let ack_owner = owner.clone();
+            let id = episode.id.clone();
+            self.commit_owner_snapshot(owner.clone(), credential.clone(), move || {
+                authority.journal.acknowledge(&ack_owner, &id)
+            })
+            .await?;
+        }
+        self.set_auth_state(RemoteAuthState::Verified);
+        Ok(())
+    }
+
     /// # Errors
     /// HTTP 客户端构造失败（TLS 后端不可用之类）。
     pub fn new(base: impl Into<String>, token: Option<String>) -> Result<Self> {
@@ -110,9 +647,17 @@ impl Remote {
             .build()
             .map_err(|e| CortexError::Config(format!("HTTP 客户端构造失败：{e}")))?;
         Ok(Self {
+            local_authority: None,
+            remote_auth: Arc::new(RwLock::new(RemoteAuthState::Unresolved)),
             http,
             base: base.into().trim_end_matches('/').to_string(),
-            token: Arc::new(RwLock::new(token)),
+            credential: Arc::new(RwLock::new(CredentialState {
+                token: token.filter(|t| !t.trim().is_empty()),
+                generation: 0,
+                principal_epoch: 0,
+                principal: None,
+            })),
+            pinned_credential: None,
             token_generation: Arc::new(tokio::sync::watch::channel(0).0),
         })
     }
@@ -128,6 +673,18 @@ impl Remote {
     /// 泄露给调用方，而这个进程里的调用方全都会跨 `.await`。
     #[must_use]
     pub fn token(&self) -> Option<String> {
+        if let Ok(principal) = RUN_PRINCIPAL.try_with(Clone::clone) {
+            return self
+                .run_credential(&principal)
+                .and_then(|snapshot| snapshot.bearer_token().map(str::to_owned));
+        }
+        if let Some(snapshot) = &self.pinned_credential {
+            // pin 的是完整快照；显式无账号也不能借用 task-local 或后来登录的凭据。
+            return snapshot.bearer_token().map(str::to_owned);
+        }
+        if let Ok(snapshot) = RUN_CREDENTIAL.try_with(Clone::clone) {
+            return snapshot.bearer_token().map(str::to_owned);
+        }
         self.read_token()
     }
 
@@ -140,16 +697,210 @@ impl Remote {
     /// 用一把已经退位的凭据答 401，而客户端把那个 401 读成「你的登录失效了」
     /// 并把用户踢回登录页。一次凭据轮换本该是无事发生的。
     pub fn set_token(&self, token: Option<String>) {
-        let mut g = self
-            .token
+        let token = token.filter(|t| !t.trim().is_empty());
+        {
+            let state = self.credential.read().expect("凭据锁可用");
+            // Flutter 在无账号启动后也会例行推一次 None。这不是登出，不能
+            // 退役 Local owner，也不能推进 generation 撤销它已有的 run。
+            if token.is_none() && state.token.is_none() && state.principal.is_none() {
+                return;
+            }
+        }
+        if let Some(authority) = &self.local_authority {
+            // 未验证的替换/登出必须退役控制租约；不能把 A 的钥匙变成 B 的钥匙。
+            authority.retire();
+        }
+        let mut state = self
+            .credential
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *g = token.filter(|t| !t.trim().is_empty());
+        state.token = token;
+        state.generation = state.generation.wrapping_add(1);
+        // 兼容入口没有证明新 token 属于哪个账号，不能沿用旧绑定。
+        // 严格桌面热更新走 `set_token_for_principal`。
+        replace_principal(&mut state, None);
+        let generation = state.generation;
         // 先放锁再叫人：唤醒的那一方第一件事就是读凭据，
         // 在锁里叫等于让它立刻撞上自己这把写锁
-        drop(g);
-        self.token_generation
-            .send_modify(|n| *n = n.wrapping_add(1));
+        drop(state);
+        self.token_generation.send_replace(generation);
+    }
+
+    /// 把一个刚由远端验证出的账号主体绑定到本进程。
+    ///
+    /// 绑定和“验证时使用的是哪一份凭据”必须在同一把写锁里核对。否则会
+    /// 出现 A 的验证已经返回、用户恰好切到 B、随后却把 A 的主体写到 B 的
+    /// token 旁边的撕裂状态。已经绑定同一账号时允许采用当前 token，这是
+    /// 15 分钟续期；主体一旦不同则失败关闭。
+    fn bind_verified_namespace(
+        &self,
+        namespace: &PrincipalNamespace,
+        verified_credential: &CredentialSnapshot,
+    ) -> Result<(CredentialSnapshot, u64)> {
+        let mut state = self
+            .credential
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(bound) = &state.principal {
+            if bound != namespace {
+                return Err(CortexError::Unauthorized(
+                    "验证期间登录账号已经切换；请退出当前会话后重新登录".into(),
+                ));
+            }
+            if state.principal_epoch != verified_credential.principal_epoch() {
+                return Err(CortexError::Unauthorized(
+                    "验证期间账号发生过切换；迟到的身份结果不会重新绑定旧作用域".into(),
+                ));
+            }
+            let token = state.token.clone().ok_or_else(|| {
+                CortexError::Unauthorized("已绑定账号没有可用的 access token".into())
+            })?;
+            return Ok((
+                CredentialSnapshot::new(token, state.generation, state.principal_epoch),
+                state.principal_epoch,
+            ));
+        }
+
+        if state.generation != verified_credential.generation()
+            || state.token.as_deref() != verified_credential.bearer_token()
+        {
+            return Err(CortexError::Unauthorized(
+                "账号验证期间凭据已经切换；本次请求没有获得旧账号的本地权限".into(),
+            ));
+        }
+        replace_principal(&mut state, Some(namespace.clone()));
+        Ok((
+            CredentialSnapshot::new(
+                verified_credential
+                    .bearer_token()
+                    .expect("刚校验过 token 必不为空")
+                    .to_owned(),
+                verified_credential.generation(),
+                state.principal_epoch,
+            ),
+            state.principal_epoch,
+        ))
+    }
+
+    /// 把已经严格验证过的 run 主体绑定到本进程，并返回仍有效的最新凭据。
+    fn bind_verified_principal(&self, principal: &RunPrincipal) -> Result<CredentialSnapshot> {
+        self.bind_verified_namespace(principal.verified_namespace()?, principal.credential())
+            .map(|(credential, _)| credential)
+    }
+
+    /// 在凭据读锁内确认主体并执行一个纯同步动作。
+    ///
+    /// 账号切换走写锁，因此授权检查和动作之间不会插进一次 A→B 更新。
+    /// 这个入口只接受同步闭包，不能把 `await` 塞在读锁里。
+    pub(crate) fn with_bound_principal<T>(
+        &self,
+        expected: &PrincipalNamespace,
+        expected_epoch: u64,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let state = self
+            .credential
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.principal.as_ref() != Some(expected)
+            || state.principal_epoch != expected_epoch
+            || state.token.is_none()
+        {
+            return Err(CortexError::Unauthorized(
+                "动作执行前登录账号已经切换，请重试".into(),
+            ));
+        }
+        Ok(operation())
+    }
+
+    /// 仅供不经过网络主体的生命周期单元测试绑定测试账号。
+    #[cfg(test)]
+    pub(crate) fn bind_principal(&self, principal: &PrincipalNamespace) -> Result<()> {
+        let credential = self.credential_snapshot()?;
+        self.bind_verified_namespace(principal, &credential)?;
+        Ok(())
+    }
+
+    /// 提交一次已严格验证的凭据更新，并按验证开始时的代际做 compare-and-swap。
+    pub(crate) fn commit_verified_identity_token(
+        &self,
+        verified: VerifiedIdentityToken,
+    ) -> Result<()> {
+        let mut state = self
+            .credential
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.generation != verified.credential.generation()
+            || state.principal_epoch != verified.credential.principal_epoch()
+        {
+            return Err(CortexError::Unauthorized(
+                "账号验证返回前凭据或主体代际已经发生变化；迟到的验证结果不会覆盖当前登录状态"
+                    .into(),
+            ));
+        }
+        if self.local_authority.is_some() && state.principal.is_none() {
+            return Err(CortexError::Unauthorized(
+                "账号建立需要新的 owner 控制实例，不能认领 Local 历史".into(),
+            ));
+        }
+        if let Some(bound) = &state.principal
+            && bound != &verified.principal
+        {
+            return Err(CortexError::Unauthorized(
+                "新 token 属于另一个账号；本机 agent 只能在同一账号内热更新".into(),
+            ));
+        }
+        let token = verified
+            .credential
+            .bearer_token()
+            .ok_or_else(|| CortexError::Invalid("新 access token 不能为空".into()))?;
+        state.token = Some(token.to_owned());
+        state.generation = state.generation.wrapping_add(1);
+        replace_principal(&mut state, Some(verified.principal));
+        let generation = state.generation;
+        drop(state);
+        self.token_generation.send_replace(generation);
+        Ok(())
+    }
+
+    /// 仅供不经过网络验证的生命周期单元测试模拟同账号续期。
+    #[cfg(test)]
+    pub(crate) fn set_token_for_principal(
+        &self,
+        token: String,
+        principal: &PrincipalNamespace,
+    ) -> Result<()> {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(CortexError::Invalid("新 access token 不能为空".into()));
+        }
+        let mut state = self
+            .credential
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(bound) = &state.principal
+            && bound != principal
+        {
+            return Err(CortexError::Unauthorized(
+                "新 token 属于另一个账号；本机 agent 只能在同一账号内热更新".into(),
+            ));
+        }
+        state.token = Some(token.to_owned());
+        state.generation = state.generation.wrapping_add(1);
+        replace_principal(&mut state, Some(principal.clone()));
+        let generation = state.generation;
+        drop(state);
+        self.token_generation.send_replace(generation);
+        Ok(())
+    }
+
+    #[must_use]
+    pub(crate) fn current_principal(&self) -> Option<PrincipalNamespace> {
+        self.credential
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .principal
+            .clone()
     }
 
     /// 订阅「凭据换了」。见 `crate::tunnel` 里那处 `select!`。
@@ -169,17 +920,513 @@ impl Remote {
         // 中毒了也要把值读出来：写路径只是替换一个 String，不存在
         // 「被看到的中间状态」；这里因为中毒而返回 None，等于让 agent
         // 在一次无关的 panic 之后**静默失去凭据**，那才是真的坏
-        self.token
+        self.credential
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .token
             .clone()
     }
 
     fn auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.read_token() {
+        let snapshot = if let Ok(principal) = RUN_PRINCIPAL.try_with(Clone::clone) {
+            // verified run 先核对本进程仍绑定同一个账号。同账号续期用共享
+            // 新 token；主体不一致时返回 None，绝不回落到旧 token。
+            self.run_credential(&principal)
+        } else {
+            // 显式 pin 对容器及其它不拥有宿主 principal 的调用仍是更强的边界。
+            self.pinned_credential
+                .clone()
+                .or_else(|| RUN_CREDENTIAL.try_with(Clone::clone).ok())
+                .or_else(|| self.credential_snapshot().ok())
+        };
+        let token = snapshot
+            .as_ref()
+            .and_then(CredentialSnapshot::bearer_token)
+            .map(str::to_owned);
+        match token {
             Some(t) => rb.bearer_auth(t),
             None => rb,
         }
+    }
+
+    fn run_credential(&self, principal: &RunPrincipal) -> Option<CredentialSnapshot> {
+        let Ok(namespace) = principal.verified_namespace() else {
+            // 容器没有宿主账号；它只使用入队时固定的 delegated token。
+            return Some(principal.credential().clone());
+        };
+        let state = self
+            .credential
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.principal.as_ref() != Some(namespace)
+            || state.principal_epoch != principal.credential().principal_epoch()
+        {
+            return None;
+        }
+        let token = state.token.clone()?;
+        Some(CredentialSnapshot::new(
+            token,
+            state.generation,
+            state.principal_epoch,
+        ))
+    }
+
+    /// 原子读取当前 token 与代号。
+    ///
+    /// 后续严格验证、ticket 和整轮 outbound 都只认这一份快照。空凭据不能
+    /// 假装成一把可用 token。
+    pub(crate) fn credential_snapshot(&self) -> Result<CredentialSnapshot> {
+        let state = self
+            .credential
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let token = state.token.clone().ok_or_else(|| {
+            CortexError::Unauthorized("没有可用于严格验证的登录 access token".into())
+        })?;
+        Ok(CredentialSnapshot::new(
+            token,
+            state.generation,
+            state.principal_epoch,
+        ))
+    }
+
+    #[must_use]
+    pub(crate) fn current_credential_generation(&self) -> u64 {
+        self.credential
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation
+    }
+
+    /// 当前账号是否仍是指定主体、且自调用方观察到该主体以来没有经历
+    /// 登出或 A→B→A。读锁内一次完成比较，避免拆成多次读取形成撕裂窗口。
+    #[must_use]
+    pub(crate) fn principal_is_current(
+        &self,
+        expected: &PrincipalNamespace,
+        expected_epoch: u64,
+    ) -> bool {
+        let state = self
+            .credential
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.principal.as_ref() == Some(expected)
+            && state.principal_epoch == expected_epoch
+            && state.token.is_some()
+    }
+
+    /// 在同一把读锁下核对账号、登录代际并取最新凭据。
+    /// 同账号续期可更新 token，登出或 A→B→A 不能把旧请求重新激活。
+    pub(crate) fn credential_snapshot_for_principal(
+        &self,
+        expected: &PrincipalNamespace,
+        expected_epoch: u64,
+    ) -> Result<CredentialSnapshot> {
+        let state = self
+            .credential
+            .read()
+            .map_err(|_| CortexError::Unauthorized("登录凭据状态不可用，本轮没有入队".into()))?;
+        if state.principal.as_ref() != Some(expected) || state.principal_epoch != expected_epoch {
+            return Err(CortexError::Unauthorized(
+                "验证期间登录上下文已变更，请重新发送".into(),
+            ));
+        }
+        let token = state
+            .token
+            .clone()
+            .ok_or_else(|| CortexError::Unauthorized("验证期间已退出登录，本轮没有入队".into()))?;
+        Ok(CredentialSnapshot::new(
+            token,
+            state.generation,
+            state.principal_epoch,
+        ))
+    }
+
+    /// 测试入口：为已经在当前主体上发起的工作冻结账号代际。
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn principal_epoch_for(&self, expected: &PrincipalNamespace) -> Option<u64> {
+        let state = self
+            .credential
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.principal.as_ref() == Some(expected) && state.token.is_some())
+            .then_some(state.principal_epoch)
+    }
+
+    /// 给某个 run 用的固定凭据 Remote。
+    pub(crate) fn pinned_for(&self, principal: &RunPrincipal) -> Self {
+        self.pinned_for_credential(principal.credential().clone())
+    }
+
+    pub(crate) fn pinned_for_credential(&self, credential: CredentialSnapshot) -> Self {
+        let mut pinned = self.clone();
+        pinned.pinned_credential = Some(credential);
+        pinned
+    }
+
+    /// 入队前严格验证 token、账号、部署与 session 作用域。
+    ///
+    /// 这条路径只读一次共享凭据，然后所有网络请求都用该快照。即使验证
+    /// 过程中桌面端把共享 token 从 A 切到 B，返回的 principal 仍属于 A，
+    /// ticket 也继续固定 A；切换后 ticket 会在 `begin` 的代号围栏处失败关闭。
+    ///
+    /// 新会话第一轮允许 session 尚不存在。session 端点明确回 404 时，客户端
+    /// 用**同一把 token 快照**再做一次 identity-only 验证；只有这次验证也
+    /// 成功，才把本地已知的 session id 标成 `New`。其他 4xx、5xx 或网络
+    /// 错误都不能触发这条 fallback。
+    #[cfg(test)]
+    pub(crate) async fn verify_current_session_principal(
+        &self,
+        session_id: &str,
+    ) -> Result<RunPrincipal> {
+        let credential = self.credential_snapshot()?;
+        self.verify_session_principal_with(&credential, session_id)
+            .await
+    }
+
+    /// 验证会话语义，并在同一凭据代际内把主体绑定到本进程。
+    ///
+    /// `/chat` 与工作区写入都必须走这里。验证完成后才单独 bind 的旧写法会
+    /// 在 A 验证返回、用户切到 B 的窗口里把 A 写到 B 的 token 旁。
+    pub(crate) async fn verify_current_session_principal_bound(
+        &self,
+        session_id: &str,
+    ) -> Result<RunPrincipal> {
+        self.verify_current_session_principal_bound_with_source(session_id)
+            .await
+            .map_err(public_request_error)
+    }
+
+    async fn verify_current_session_principal_bound_with_source(
+        &self,
+        session_id: &str,
+    ) -> Result<RunPrincipal> {
+        let credential = self.credential_snapshot()?;
+        let mut principal = self
+            .verify_session_principal_with_source(&credential, session_id)
+            .await?;
+        let credential = self.bind_verified_principal(&principal)?;
+        principal.renew_credential(credential);
+        Ok(principal)
+    }
+
+    /// 只验证一个远端已经存在的 session。
+    ///
+    /// trace 读取不能用 [`Self::verify_current_session_principal`]：那条入口为
+    /// 新会话首轮允许 404 后做 identity-only fallback。若把同一行为用于只读
+    /// 历史，一个不存在或已删除的 session 就会被降格成当前账号的 identity，
+    /// 从而查询该账号在该 id 下残留的旧审计。这里只请求一次 session
+    /// principal，404 原样上抛，并明确拒绝任何非 `Existing` 返回。
+    pub(crate) async fn verify_current_existing_session_principal(
+        &self,
+        session_id: &str,
+    ) -> Result<RunPrincipal> {
+        let credential = self.credential_snapshot()?;
+        let response = self
+            .request_session_principal(&credential, session_id)
+            .await
+            .map_err(public_request_error)?;
+        let principal = self.session_principal_from_response(&credential, session_id, response)?;
+        if principal.binding() != SessionBinding::Existing {
+            return Err(CortexError::Unauthorized(
+                "Computer Use trace 只能读取远端已存在的 session".into(),
+            ));
+        }
+        Ok(principal)
+    }
+
+    /// 验证一个已存在的 session，并把验证主体和当前凭据原子绑定。
+    pub(crate) async fn verify_current_existing_session_principal_bound(
+        &self,
+        session_id: &str,
+    ) -> Result<RunPrincipal> {
+        let mut principal = self
+            .verify_current_existing_session_principal(session_id)
+            .await?;
+        let credential = self.bind_verified_principal(&principal)?;
+        principal.renew_credential(credential);
+        Ok(principal)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn verify_session_principal_with(
+        &self,
+        credential: &CredentialSnapshot,
+        session_id: &str,
+    ) -> Result<RunPrincipal> {
+        self.verify_session_principal_with_source(credential, session_id)
+            .await
+            .map_err(public_request_error)
+    }
+
+    async fn verify_session_principal_with_source(
+        &self,
+        credential: &CredentialSnapshot,
+        session_id: &str,
+    ) -> Result<RunPrincipal> {
+        // session 404 后还需 identity 验证，两段共享总预算。
+        // 给每次 HTTP 各十秒，会在新会话入口重新累加成二十秒。
+        with_principal_deadline(self.verify_session_principal_inner(credential, session_id)).await
+    }
+
+    async fn verify_session_principal_inner(
+        &self,
+        credential: &CredentialSnapshot,
+        session_id: &str,
+    ) -> Result<RunPrincipal> {
+        let response = match self.request_session_principal(credential, session_id).await {
+            Ok(response) => response,
+            Err(CortexError::NotFound { .. }) => {
+                let identity = self.request_identity_principal(credential).await?;
+                return self.new_session_principal_from_identity(credential, session_id, identity);
+            }
+            Err(error) => return Err(error),
+        };
+        self.session_principal_from_response(credential, session_id, response)
+    }
+
+    fn session_principal_from_response(
+        &self,
+        credential: &CredentialSnapshot,
+        session_id: &str,
+        response: WirePrincipalResponse,
+    ) -> Result<RunPrincipal> {
+        let binding = match response.session_binding {
+            Some(WireSessionBinding::Existing) => {
+                if response.session_id.as_deref() != Some(session_id) {
+                    return Err(CortexError::Unauthorized(
+                        "Computer Use principal 返回了别的 session".into(),
+                    ));
+                }
+                SessionBinding::Existing
+            }
+            Some(WireSessionBinding::New) => {
+                if let Some(returned) = response.session_id.as_deref()
+                    && returned != session_id
+                {
+                    return Err(CortexError::Unauthorized(
+                        "新会话 principal 返回了不匹配的 session".into(),
+                    ));
+                }
+                SessionBinding::New
+            }
+            Some(WireSessionBinding::Identity) => {
+                return Err(CortexError::Unauthorized(
+                    "session 作用域验证只返回了 identity".into(),
+                ));
+            }
+            // 给尚未发送 `session_binding` 的已升级部署留一条严格旧兼容：
+            // 必须回同一个 session。新会话不能靠这条旧兼容猜。
+            None if response.session_id.as_deref() == Some(session_id) => SessionBinding::Existing,
+            None => {
+                return Err(CortexError::Unauthorized(
+                    "Computer Use principal 缺少 session_binding，无法安全判断新会话".into(),
+                ));
+            }
+        };
+        RunPrincipal::from_verified(
+            credential.clone(),
+            response.deployment_id,
+            response.deployment_url,
+            response.user_id,
+            session_id,
+            binding,
+        )
+    }
+
+    fn new_session_principal_from_identity(
+        &self,
+        credential: &CredentialSnapshot,
+        session_id: &str,
+        response: WirePrincipalResponse,
+    ) -> Result<RunPrincipal> {
+        self.validate_identity_response(&response)?;
+        RunPrincipal::from_verified(
+            credential.clone(),
+            response.deployment_id,
+            response.deployment_url,
+            response.user_id,
+            session_id,
+            SessionBinding::New,
+        )
+    }
+
+    /// 只验证当前 token 属于哪个部署/账号。
+    ///
+    /// `GET /runs`、`GET /runs/{id}` 与 `DELETE /runs/{id}` 只知道 session，
+    /// 无法从设备级入站 token 推导账号；它们先用这条身份探针收窄到当前主体。
+    #[cfg(test)]
+    pub(crate) async fn verify_current_identity(&self) -> Result<PrincipalNamespace> {
+        let credential = self.credential_snapshot()?;
+        let namespace = self.verify_identity_with(&credential).await?;
+        if self.current_credential_generation() != credential.generation() {
+            return Err(CortexError::Unauthorized(
+                "账号验证期间凭据已经切换，请重试".into(),
+            ));
+        }
+        Ok(namespace)
+    }
+
+    /// 验证当前账号，并返回一次不可分割的 `(主体, 凭据快照)`。
+    ///
+    /// 路由随后只使用这份快照发起代理请求或筛选进程内状态，不能再二次读取
+    /// “当前 token”。同账号轮换会返回更新后的 token；切换到另一账号会让
+    /// 这里失败，而不是拼出 A 主体 + B token。
+    pub(crate) async fn verify_current_namespace_snapshot(
+        &self,
+    ) -> Result<(PrincipalNamespace, CredentialSnapshot)> {
+        let (namespace, credential, _) = self.verify_current_namespace_binding().await?;
+        Ok((namespace, credential))
+    }
+
+    /// 验证当前账号时一并冻结 principal 代际，供流式代理逐块核对。
+    pub(crate) async fn verify_current_namespace_binding(
+        &self,
+    ) -> Result<(PrincipalNamespace, CredentialSnapshot, u64)> {
+        self.verify_current_namespace_binding_with_source()
+            .await
+            .map_err(public_request_error)
+    }
+
+    async fn verify_current_namespace_binding_with_source(
+        &self,
+    ) -> Result<(PrincipalNamespace, CredentialSnapshot, u64)> {
+        let credential = self.credential_snapshot()?;
+        let namespace = self.verify_identity_with(&credential).await?;
+        let (credential, principal_epoch) =
+            self.bind_verified_namespace(&namespace, &credential)?;
+        Ok((namespace, credential, principal_epoch))
+    }
+
+    /// 验证一把尚未写入共享状态的新 token 属于哪个部署与账号。
+    ///
+    /// `/local/credential` 在调用 `set_token_for_principal` 之前用它完成
+    /// 账号切换检查；验证失败时现有 token 与正在运行的任务完全不受影响。
+    pub(crate) async fn verify_identity_token(
+        &self,
+        token: String,
+    ) -> Result<VerifiedIdentityToken> {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(CortexError::Invalid("新 access token 不能为空".into()));
+        }
+        let (baseline_generation, baseline_principal_epoch) = {
+            let state = self
+                .credential
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (state.generation, state.principal_epoch)
+        };
+        let credential = CredentialSnapshot::new(
+            token.to_owned(),
+            baseline_generation,
+            baseline_principal_epoch,
+        );
+        let principal = self
+            .verify_identity_with(&credential)
+            .await
+            .map_err(public_request_error)?;
+        Ok(VerifiedIdentityToken {
+            principal,
+            credential,
+        })
+    }
+
+    async fn verify_identity_with(
+        &self,
+        credential: &CredentialSnapshot,
+    ) -> Result<PrincipalNamespace> {
+        let response = self.request_identity_principal(credential).await?;
+        self.validate_identity_response(&response)?;
+        PrincipalNamespace::from_verified(response.deployment_id, response.user_id)
+            .map_err(|error| CortexError::Unauthorized(format!("Computer Use 主体不合法：{error}")))
+    }
+
+    fn validate_identity_response(&self, response: &WirePrincipalResponse) -> Result<()> {
+        if response.session_id.is_some() {
+            return Err(CortexError::Unauthorized(
+                "identity 验证意外返回了 session".into(),
+            ));
+        }
+        match response.session_binding {
+            Some(WireSessionBinding::Identity) | None => {}
+            Some(WireSessionBinding::Existing | WireSessionBinding::New) => {
+                return Err(CortexError::Unauthorized(
+                    "identity 验证返回了 session binding".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn request_session_principal(
+        &self,
+        credential: &CredentialSnapshot,
+        session_id: &str,
+    ) -> Result<WirePrincipalResponse> {
+        // 已部署的 agentd 对请求体启用了 deny_unknown_fields，只接受这一个
+        // 字段。新会话能力由 404 后一次独立 identity 请求完成，不能把扩展
+        // 字段塞进第一请求，否则已有 session 也会在旧服务上得到 422。
+        self.post_principal(credential, &WireSessionPrincipalRequest { session_id })
+            .await
+    }
+
+    async fn request_identity_principal(
+        &self,
+        credential: &CredentialSnapshot,
+    ) -> Result<WirePrincipalResponse> {
+        self.post_principal(
+            credential,
+            &WireIdentityPrincipalRequest {
+                session_id: None,
+                allow_new_session: false,
+            },
+        )
+        .await
+    }
+
+    async fn post_principal<P>(
+        &self,
+        credential: &CredentialSnapshot,
+        request: &P,
+    ) -> Result<WirePrincipalResponse>
+    where
+        P: serde::Serialize + ?Sized,
+    {
+        let resp = self
+            .http
+            .post(self.url("/auth/computer-use-principal"))
+            .bearer_auth(credential.bearer_token().ok_or_else(|| {
+                CortexError::Unauthorized("严格 principal 验证缺少 access token".into())
+            })?)
+            .timeout(PRINCIPAL_TIMEOUT)
+            .json(request)
+            .send()
+            .await
+            .map_err(map_offline_transport)?;
+        if matches!(resp.status().as_u16(), 401 | 403) {
+            self.reject_credential_snapshot(credential);
+        }
+        let response: WirePrincipalResponse = self
+            .check_response(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|error| {
+                CortexError::Unauthorized(format!("解析 Computer Use principal 失败：{error}"))
+            })?;
+        if response.credential_kind != cortex_proto::dto::ComputerUseCredentialKind::AccessToken {
+            return Err(CortexError::Unauthorized(
+                "Computer Use principal 不是由用户 access token 证明的".into(),
+            ));
+        }
+        if response.expires_in_secs == 0 {
+            return Err(CortexError::Unauthorized(
+                "Computer Use principal 对应的 access token 已过期".into(),
+            ));
+        }
+        Ok(response)
     }
 
     #[must_use]
@@ -196,7 +1443,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        let resp = checked(resp).await?;
+        let resp = self.check_response(resp).await?;
         resp.json()
             .await
             .map_err(|e| CortexError::Invalid(format!("解析 /episodes 响应失败：{e}")))
@@ -239,7 +1486,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        let resp = checked(resp).await?;
+        let resp = self.check_response(resp).await?;
         resp.json()
             .await
             .map_err(|e| CortexError::Invalid(format!("解析 /llm/image 响应失败：{e}")))
@@ -266,7 +1513,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        let resp = checked(resp).await?;
+        let resp = self.check_response(resp).await?;
         resp.json()
             .await
             .map_err(|e| CortexError::Invalid(format!("解析技能正文失败：{e}")))
@@ -295,7 +1542,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        let resp = checked(resp).await?;
+        let resp = self.check_response(resp).await?;
         resp.json()
             .await
             .map_err(|e| CortexError::Invalid(format!("解析搜索结果失败：{e}")))
@@ -311,7 +1558,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        let resp = checked(resp).await?;
+        let resp = self.check_response(resp).await?;
         resp.json()
             .await
             .map_err(|e| CortexError::Invalid(format!("解析抓取结果失败：{e}")))
@@ -333,7 +1580,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        let resp = checked(resp).await?;
+        let resp = self.check_response(resp).await?;
         resp.json()
             .await
             .map_err(|e| CortexError::Invalid(format!("解析检索结果失败：{e}")))
@@ -362,7 +1609,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        let resp = checked(resp).await?;
+        let resp = self.check_response(resp).await?;
         resp.json()
             .await
             .map_err(|e| CortexError::Invalid(format!("解析正文失败：{e}")))
@@ -393,7 +1640,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        checked(resp)
+        self.check_response(resp)
             .await?
             .json()
             .await
@@ -412,7 +1659,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        checked(resp).await
+        self.check_response(resp).await
     }
 
     /// 远端讲的协议能不能对话。
@@ -434,12 +1681,13 @@ impl Remote {
             .timeout(STARTUP_PROBE_TIMEOUT)
             .send()
             .await
-            .map_err(map_transport)?;
-        let peer: cortex_proto::dto::PeerProtocol = checked(resp)
-            .await?
-            .json()
-            .await
-            .map_err(|e| CortexError::Unavailable(format!("解析远端 /health 失败：{e}")))?;
+            .map_err(map_offline_transport)?;
+        let peer: cortex_proto::dto::PeerProtocol =
+            self.check_response(resp)
+                .await?
+                .json()
+                .await
+                .map_err(|e| CortexError::Unavailable(format!("解析远端 /health 失败：{e}")))?;
         Ok(cortex_proto::check_peer(
             peer.protocol,
             peer.min_peer_protocol,
@@ -456,6 +1704,7 @@ impl Remote {
     /// # Errors
     /// 远端不可达，或响应不是能解析的 JSON。离线是**正常情况**，
     /// 调用方据此回落到上一次记住的账号（见 `config::user_dir`）。
+    #[cfg(test)]
     pub async fn whoami(&self) -> Result<String> {
         let resp = self
             .auth(self.http.get(self.url("/auth/me")))
@@ -467,7 +1716,8 @@ impl Remote {
         struct Me {
             user_id: String,
         }
-        let me: Me = checked(resp)
+        let me: Me = self
+            .check_response(resp)
             .await?
             .json()
             .await
@@ -491,7 +1741,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        checked(resp).await.map(|_| ())
+        self.check_response(resp).await.map(|_| ())
     }
 
     /// 声明这个会话的**执行归属**。
@@ -512,7 +1762,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        checked(resp).await.map(|_| ())
+        self.check_response(resp).await.map(|_| ())
     }
 
     /// 把一份字节登记成 blob（`POST /blobs`），回它的哈希。
@@ -534,7 +1784,7 @@ impl Remote {
             .send()
             .await
             .map_err(map_transport)?;
-        let resp = checked(resp).await?;
+        let resp = self.check_response(resp).await?;
         let dto: serde_json::Value = resp
             .json()
             .await
@@ -568,7 +1818,7 @@ impl Remote {
             .await
             .map_err(|_| CortexError::Unavailable("等附件响应头超时".into()))?
             .map_err(map_transport)?;
-        checked(resp).await
+        self.check_response(resp).await
     }
 
     /// 取这个会话最近的若干轮，用来铺当前这一轮的上下文。
@@ -597,14 +1847,23 @@ impl Remote {
             .query(&[("limit", limit.to_string())])
             .send()
             .await
-            .map_err(map_transport)?;
-        let detail: cortex_proto::dto::SessionDetail = checked(resp)
+            .map_err(|error| {
+                // 只有 owner 宿主会消费这个来源并回读同 owner journal；其他
+                // 调用方仍得到原有 Unavailable/503，不改变公共错误映射。
+                if self.local_authority.is_some() {
+                    map_offline_transport(error)
+                } else {
+                    map_transport(error)
+                }
+            })?;
+        let detail: cortex_proto::dto::SessionDetail = self
+            .check_response(resp)
             .await?
             .json()
             .await
             .map_err(|e| CortexError::Invalid(format!("解析会话详情失败：{e}")))?;
         let container_workspace = detail.session.container_workspace.clone();
-        let turns = detail
+        let episodes = detail
             .episodes
             .into_iter()
             .filter_map(|e| {
@@ -612,17 +1871,25 @@ impl Remote {
                 // 前缀缓存，也贵）—— 只加一行**确定性**注记，让模型知道
                 // 「那一轮带过什么文件、工作区里那个文件是哪来的」
                 let note = crate::attachments::history_note(&e.attachments);
-                match e.role.as_str() {
+                let (is_user, text) = match e.role.as_str() {
                     // tool / system 是内部记录，塞进上下文既占预算，
                     // 又让模型以为那是用户说的话
-                    "user" => Some((true, format!("{}{note}", e.text.unwrap_or_default()))),
-                    "assistant" => Some((false, e.text.unwrap_or_default())),
-                    _ => None,
-                }
+                    "user" => (true, format!("{}{note}", e.text.unwrap_or_default())),
+                    "assistant" => (false, e.text.unwrap_or_default()),
+                    _ => return None,
+                };
+                Some(RemoteHistoryEpisode {
+                    id: e.id,
+                    is_user,
+                    text,
+                    occurred_at: chrono::DateTime::parse_from_rfc3339(&e.occurred_at)
+                        .ok()
+                        .map(|time| time.with_timezone(&chrono::Utc)),
+                })
             })
             .collect();
         Ok(RemoteSession {
-            turns,
+            episodes,
             container_workspace,
         })
     }
@@ -655,13 +1922,136 @@ impl Remote {
     }
 }
 
-/// 传输层失败 → `Unavailable`，**不是** `Provider`。
+#[derive(serde::Serialize)]
+struct WireSessionPrincipalRequest<'a> {
+    session_id: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct WireIdentityPrincipalRequest {
+    session_id: Option<&'static str>,
+    allow_new_session: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct WirePrincipalResponse {
+    deployment_id: String,
+    deployment_url: String,
+    user_id: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    credential_kind: cortex_proto::dto::ComputerUseCredentialKind,
+    expires_in_secs: u64,
+    #[serde(default)]
+    session_binding: Option<WireSessionBinding>,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireSessionBinding {
+    Identity,
+    Existing,
+    New,
+}
+
+/// 只在决定 owner 离线回退之前保留来源，不能从可显示文案反推授权分支。
+/// 公共边界再还原成既有 Unavailable；HTTP 错误从不带这个类型。
+#[derive(Debug)]
+enum OfflineFailure {
+    Transport(reqwest::Error),
+    PrincipalDeadline,
+}
+
+impl std::fmt::Display for OfflineFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(error) => write!(f, "连不上 cortexd：{error}"),
+            Self::PrincipalDeadline => write!(
+                f,
+                "远端会话主体验证超过 {} 秒，请检查连接后重试",
+                PRINCIPAL_TIMEOUT.as_secs()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OfflineFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+            Self::PrincipalDeadline => None,
+        }
+    }
+}
+
+fn map_offline_transport(error: reqwest::Error) -> CortexError {
+    CortexError::Other(anyhow::Error::new(OfflineFailure::Transport(error)))
+}
+
+fn public_request_error(error: CortexError) -> CortexError {
+    match error {
+        CortexError::Other(source) if source.is::<OfflineFailure>() => {
+            CortexError::Unavailable(source.to_string())
+        }
+        error => error,
+    }
+}
+
+/// 传输层失败与共享总截止超时才允许可信 owner 回退。
 ///
 /// 这个区分是离线队列的开关：调用方据此判断「远端连不上，排队」还是
 /// 「远端说我错了，别重试」。混成一类的话，一个 400（比如附件没登记）
 /// 会被永远重放下去，而队列头堵死意味着后面全部对话都灌不回去。
+pub(crate) fn transport_unavailable(error: &CortexError) -> bool {
+    matches!(error, CortexError::Other(source) if source.is::<OfflineFailure>())
+}
+
 fn map_transport(e: reqwest::Error) -> CortexError {
     CortexError::Unavailable(format!("连不上 cortexd：{e}"))
+}
+
+async fn with_principal_deadline<T>(
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::time::timeout(PRINCIPAL_TIMEOUT, future)
+        .await
+        .map_err(|_| CortexError::Other(anyhow::Error::new(OfflineFailure::PrincipalDeadline)))?
+}
+
+#[cfg(test)]
+mod principal_deadline_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn session_and_identity_phases_share_one_deadline() {
+        let start = tokio::time::Instant::now();
+        let result = with_principal_deadline(async {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            Ok(())
+        })
+        .await;
+        assert!(
+            result.as_ref().is_err_and(transport_unavailable),
+            "两段各未满十秒，但总计超时必须拒绝"
+        );
+        assert_eq!(
+            start.elapsed(),
+            PRINCIPAL_TIMEOUT,
+            "身份回落不能额外延长入口预算"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn both_phases_can_complete_within_the_shared_budget() {
+        let result = with_principal_deadline(async {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            Ok(7)
+        })
+        .await;
+        assert_eq!(result.unwrap(), 7, "共享预算不能拒绝及时完成的验证");
+    }
 }
 
 /// 非 2xx 一律带上响应体 —— cortexd 的错误消息是写给人看的，
@@ -715,6 +2105,10 @@ fn classify(status: reqwest::StatusCode, detail: String) -> CortexError {
     }
     CortexError::Invalid(format!("cortexd {status}：{detail}"))
 }
+
+#[cfg(test)]
+#[path = "remote_owner_test.rs"]
+mod owner_regression_tests;
 
 #[cfg(test)]
 mod tests {
@@ -780,8 +2174,742 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_pinned_remote_never_observes_a_later_account_switch() {
+        let remote = Remote::new("http://127.0.0.1:1", Some("account-a-token".into())).unwrap();
+        let principal =
+            RunPrincipal::for_test("deployment", "user-a", "session", "account-a-token", 0);
+        let pinned = remote.pinned_for(&principal);
+
+        remote.set_token(Some("account-b-token".into()));
+
+        assert_eq!(
+            pinned.token().as_deref(),
+            Some("account-a-token"),
+            "A run 的 Remote 克隆重读了共享 token，已经会拿 B 的凭据出站"
+        );
+        assert_eq!(
+            remote.token().as_deref(),
+            Some("account-b-token"),
+            "未 pin 的主进程 Remote 仍应跟随热替换"
+        );
+        assert_ne!(
+            remote.current_credential_generation(),
+            principal.credential().generation(),
+            "账号切换必须推进凭据代号，排队 ticket 才能失败关闭"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_run_scope_pins_every_clone_including_the_llm_provider() {
+        let provider_remote =
+            Remote::new("http://127.0.0.1:1", Some("account-a-token".into())).unwrap();
+        let unrelated_clone = provider_remote.clone();
+        let principal =
+            RunPrincipal::for_test("deployment", "user-a", "session", "account-a-token", 0);
+        provider_remote.set_token(Some("account-b-token".into()));
+
+        let observed = with_run_credential(principal.credential().clone(), async move {
+            unrelated_clone.token()
+        })
+        .await;
+
+        assert_eq!(
+            observed.as_deref(),
+            Some("account-a-token"),
+            "LLM provider 里更早克隆的 Remote 在 A run 内也必须使用 A 快照"
+        );
+        assert_eq!(
+            provider_remote.token().as_deref(),
+            Some("account-b-token"),
+            "run 作用域不能反向改写共享的当前凭据"
+        );
+    }
+
     use super::*;
+    use std::sync::Arc;
+
+    use axum::Router;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode as AxumStatusCode, header::AUTHORIZATION};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::{get, post};
     use reqwest::StatusCode;
+    use serde_json::{Value, json};
+    use tokio::net::TcpListener;
+    use tokio::sync::{Mutex as AsyncMutex, Notify};
+
+    /// 请求实际经过 reqwest 和 loopback HTTP；服务端只记录测试凭据首部。
+    struct CredentialProbe {
+        remote: Remote,
+        seen: Arc<AsyncMutex<Vec<Option<String>>>>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl CredentialProbe {
+        async fn new() -> Self {
+            let seen = Arc::new(AsyncMutex::new(Vec::new()));
+            let app = Router::new()
+                .route(
+                    "/auth/me",
+                    get(
+                        |State(seen): State<Arc<AsyncMutex<Vec<Option<String>>>>>,
+                         headers: HeaderMap| async move {
+                            seen.lock()
+                                .await
+                                .push(headers.get(AUTHORIZATION).map(|value| {
+                                    value.to_str().expect("测试首部应为 ASCII").to_owned()
+                                }));
+                            axum::Json(json!({"user_id": "test-user"}))
+                        },
+                    ),
+                )
+                .with_state(Arc::clone(&seen));
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("应能绑定测试 HTTP 端口");
+            let base = format!("http://{}", listener.local_addr().expect("应有监听地址"));
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let credentials = crate::local_credentials::AgentCredentials::new(
+                None,
+                Some("test-inbound-device-only".into()),
+            )
+            .expect("独立本机控制凭据应合法");
+            Self {
+                remote: Remote::new(base, credentials.outbound).expect("应能创建测试 Remote"),
+                seen,
+                server,
+            }
+        }
+
+        fn login(&self, user: &str, token: &str) {
+            let namespace = PrincipalNamespace::from_verified("test-deployment", user)
+                .expect("测试账号 namespace 应合法");
+            self.remote
+                .set_token_for_principal(token.to_owned(), &namespace)
+                .expect("应能模拟当前测试账号登录或同账号续期");
+        }
+
+        async fn assert_authorization(&self, remote: &Remote, expected: Option<&str>) {
+            let token = remote.token();
+            remote.whoami().await.expect("应能完成真实 HTTP 探针");
+            let mut seen = self.seen.lock().await;
+            assert_eq!(seen.len(), 1, "每次探针必须真正到达 HTTP 服务端一次");
+            let authorization = seen.pop().expect("应已记录本次 HTTP 首部");
+            assert_eq!(
+                authorization,
+                expected.map(|token| format!("Bearer {token}")),
+                "HTTP Authorization 必须遵循完整快照优先级，不能带入新账号或设备控制 key"
+            );
+            assert_eq!(
+                token.as_deref(),
+                expected,
+                "token() 必须与实际 HTTP auth() 一致，显式空快照不能继续读取其他凭据"
+            );
+        }
+    }
+
+    impl Drop for CredentialProbe {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_credential_none_keeps_no_account_after_another_login() {
+        let probe = CredentialProbe::new().await;
+        assert!(
+            probe.remote.credential_snapshot().is_err(),
+            "生产严格快照仍应拒绝无账号凭据"
+        );
+        let pinned = probe
+            .remote
+            .pinned_for_credential(CredentialSnapshot::without_token_for_test());
+        probe.login("user-b", "test-account-b");
+
+        probe.assert_authorization(&pinned, None).await;
+        probe
+            .assert_authorization(&probe.remote, Some("test-account-b"))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn pinned_credential_overrides_task_local_even_when_empty() {
+        let probe = CredentialProbe::new().await;
+        let empty = probe
+            .remote
+            .pinned_for_credential(CredentialSnapshot::without_token_for_test());
+        let account_a = probe
+            .remote
+            .pinned_for_credential(CredentialSnapshot::for_test("test-account-a", 0));
+        probe.login("user-b", "test-account-b");
+
+        with_run_credential(
+            CredentialSnapshot::for_test("test-inbound-device-only", 0),
+            async {
+                probe.assert_authorization(&empty, None).await;
+                probe
+                    .assert_authorization(&account_a, Some("test-account-a"))
+                    .await;
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pinned_credential_respects_the_active_run_principal() {
+        let probe = CredentialProbe::new().await;
+        let empty = probe
+            .remote
+            .pinned_for_credential(CredentialSnapshot::without_token_for_test());
+        let account_a = probe
+            .remote
+            .pinned_for_credential(CredentialSnapshot::for_test("test-account-a", 0));
+        probe.login("user-b", "test-account-b");
+        let principal = RunPrincipal::from_verified(
+            probe.remote.credential_snapshot().expect("应有 B 凭据"),
+            "test-deployment",
+            "https://test.example",
+            "user-b",
+            "session",
+            SessionBinding::Existing,
+        )
+        .expect("测试 run principal 应合法");
+        probe.login("user-b", "test-account-b-renewed");
+
+        with_run_credential(
+            CredentialSnapshot::for_test("test-inbound-device-only", 0),
+            with_run_principal(principal, async {
+                for remote in [&empty, &account_a] {
+                    probe
+                        .assert_authorization(remote, Some("test-account-b-renewed"))
+                        .await;
+                }
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pinned_credential_never_bypasses_a_rejected_run_principal() {
+        let probe = CredentialProbe::new().await;
+        let empty = probe
+            .remote
+            .pinned_for_credential(CredentialSnapshot::without_token_for_test());
+        let account_a = probe
+            .remote
+            .pinned_for_credential(CredentialSnapshot::for_test("test-account-a", 0));
+        probe.login("user-a", "test-account-a");
+        let principal = RunPrincipal::from_verified(
+            probe.remote.credential_snapshot().expect("应有 A 凭据"),
+            "test-deployment",
+            "https://test.example",
+            "user-a",
+            "session",
+            SessionBinding::Existing,
+        )
+        .expect("测试 run principal 应合法");
+        probe.remote.set_token(None);
+        probe.login("user-b", "test-account-b");
+
+        with_run_credential(
+            CredentialSnapshot::for_test("test-inbound-device-only", 0),
+            with_run_principal(principal, async {
+                for remote in [&empty, &account_a] {
+                    probe.assert_authorization(remote, None).await;
+                }
+            }),
+        )
+        .await;
+    }
+
+    #[derive(Clone, Copy)]
+    enum MockPrincipalMode {
+        Existing,
+        ExistingReportedAsNew,
+        NewAfterIdentity,
+        IdentityRejected,
+        SessionUnprocessable,
+        IdentityLeaksSession,
+        PausedIdentity,
+    }
+
+    #[derive(Clone)]
+    struct RecordedPrincipalRequest {
+        authorization: Option<String>,
+        body: Value,
+    }
+
+    #[derive(Clone)]
+    struct MockPrincipalState {
+        mode: MockPrincipalMode,
+        requests: Arc<AsyncMutex<Vec<RecordedPrincipalRequest>>>,
+        session_seen: Arc<Notify>,
+        release_session: Arc<Notify>,
+    }
+
+    async fn serve_principal_mock(
+        mode: MockPrincipalMode,
+    ) -> (String, MockPrincipalState, tokio::task::JoinHandle<()>) {
+        let state = MockPrincipalState {
+            mode,
+            requests: Arc::default(),
+            session_seen: Arc::default(),
+            release_session: Arc::default(),
+        };
+        let app = Router::new()
+            .route("/auth/computer-use-principal", post(mock_principal))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("principal 替身可以监听本机端口");
+        let addr = listener.local_addr().expect("principal 替身地址");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("principal 替身可运行");
+        });
+        (format!("http://{addr}"), state, server)
+    }
+
+    async fn mock_principal(
+        State(state): State<MockPrincipalState>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<Value>,
+    ) -> Response {
+        state.requests.lock().await.push(RecordedPrincipalRequest {
+            authorization: headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned),
+            body: body.clone(),
+        });
+        let session_id = body.get("session_id").and_then(Value::as_str);
+        match state.mode {
+            MockPrincipalMode::Existing if session_id.is_some() => (
+                AxumStatusCode::OK,
+                axum::Json(json!({
+                    "deployment_id": "deployment-a",
+                    "deployment_url": "https://cortex.test/api",
+                    "user_id": "user-a",
+                    "session_id": session_id,
+                    "credential_kind": "access_token",
+                    "expires_in_secs": 899
+                })),
+            )
+                .into_response(),
+            MockPrincipalMode::ExistingReportedAsNew if session_id.is_some() => (
+                AxumStatusCode::OK,
+                axum::Json(json!({
+                    "deployment_id": "deployment-a",
+                    "deployment_url": "https://cortex.test/api",
+                    "user_id": "user-a",
+                    "session_id": session_id,
+                    "credential_kind": "access_token",
+                    "expires_in_secs": 899,
+                    "session_binding": "new"
+                })),
+            )
+                .into_response(),
+            MockPrincipalMode::NewAfterIdentity if session_id.is_some() => {
+                state.session_seen.notify_one();
+                state.release_session.notified().await;
+                (
+                    AxumStatusCode::NOT_FOUND,
+                    axum::Json(json!({"error": "目标会话不存在"})),
+                )
+                    .into_response()
+            }
+            MockPrincipalMode::NewAfterIdentity
+                if body == json!({"session_id": null, "allow_new_session": false}) =>
+            {
+                identity_response(Some("identity")).into_response()
+            }
+            MockPrincipalMode::PausedIdentity => {
+                state.session_seen.notify_one();
+                state.release_session.notified().await;
+                identity_response(Some("identity")).into_response()
+            }
+            MockPrincipalMode::IdentityRejected if session_id.is_some() => (
+                AxumStatusCode::NOT_FOUND,
+                axum::Json(json!({"error": "目标会话不存在"})),
+            )
+                .into_response(),
+            MockPrincipalMode::IdentityRejected => (
+                AxumStatusCode::UNAUTHORIZED,
+                axum::Json(json!({"error": "identity 被拒"})),
+            )
+                .into_response(),
+            MockPrincipalMode::SessionUnprocessable if session_id.is_some() => (
+                AxumStatusCode::UNPROCESSABLE_ENTITY,
+                axum::Json(json!({"error": "旧服务不接受扩展字段"})),
+            )
+                .into_response(),
+            MockPrincipalMode::IdentityLeaksSession if session_id.is_some() => (
+                AxumStatusCode::NOT_FOUND,
+                axum::Json(json!({"error": "目标会话不存在"})),
+            )
+                .into_response(),
+            MockPrincipalMode::IdentityLeaksSession => (
+                AxumStatusCode::OK,
+                axum::Json(json!({
+                    "deployment_id": "deployment-a",
+                    "deployment_url": "https://cortex.test/api",
+                    "user_id": "user-a",
+                    "session_id": "new-session",
+                    "credential_kind": "access_token",
+                    "expires_in_secs": 899,
+                    "session_binding": "new"
+                })),
+            )
+                .into_response(),
+            _ => (
+                AxumStatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({"error": "替代服务收到非预期请求"})),
+            )
+                .into_response(),
+        }
+    }
+
+    fn identity_response(session_binding: Option<&str>) -> (AxumStatusCode, axum::Json<Value>) {
+        let mut body = json!({
+            "deployment_id": "deployment-a",
+            "deployment_url": "https://cortex.test/api",
+            "user_id": "user-a",
+            "session_id": null,
+            "credential_kind": "access_token",
+            "expires_in_secs": 899
+        });
+        if let Some(binding) = session_binding {
+            body["session_binding"] = json!(binding);
+        }
+        (AxumStatusCode::OK, axum::Json(body))
+    }
+
+    #[tokio::test]
+    async fn existing_session_uses_the_legacy_request_shape() {
+        let (base, state, server) = serve_principal_mock(MockPrincipalMode::Existing).await;
+        let remote = Remote::new(base, Some("account-a-token".into())).unwrap();
+
+        let principal = remote
+            .verify_current_session_principal("session-a")
+            .await
+            .expect("旧 agentd 的合法请求形状仍应支持");
+
+        assert_eq!(principal.binding(), SessionBinding::Existing);
+        assert_eq!(principal.session_id(), "session-a");
+        let requests = state.requests.lock().await;
+        assert_eq!(requests.len(), 1, "已有 session 只能发一次 principal 请求");
+        assert_eq!(
+            requests[0].body,
+            json!({"session_id": "session-a"}),
+            "旧 agentd 启用了 deny_unknown_fields，首个请求不能夹带扩展字段"
+        );
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer account-a-token")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn existing_only_principal_never_falls_back_to_identity() {
+        let (base, state, server) = serve_principal_mock(MockPrincipalMode::IdentityRejected).await;
+        let remote = Remote::new(base, Some("account-a-token".into())).unwrap();
+
+        let error = remote
+            .verify_current_existing_session_principal("missing-session")
+            .await
+            .expect_err("不存在的 session 不能被降格成当前账号的 identity");
+
+        assert!(matches!(error, CortexError::NotFound { .. }));
+        assert_eq!(
+            state.requests.lock().await.len(),
+            1,
+            "trace 读取只能请求一次 session principal，禁止 identity fallback"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn existing_only_principal_rejects_a_new_binding() {
+        let (base, state, server) =
+            serve_principal_mock(MockPrincipalMode::ExistingReportedAsNew).await;
+        let remote = Remote::new(base, Some("account-a-token".into())).unwrap();
+
+        let error = remote
+            .verify_current_existing_session_principal("session-a")
+            .await
+            .expect_err("session 查询返回 new binding 时必须拒绝");
+
+        assert!(matches!(error, CortexError::Unauthorized(_)));
+        assert_eq!(state.requests.lock().await.len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_missing_session_falls_back_to_identity_with_the_same_token_snapshot() {
+        let (base, state, server) = serve_principal_mock(MockPrincipalMode::NewAfterIdentity).await;
+        let remote = Remote::new(base, Some("account-a-token".into())).unwrap();
+        let verifying = remote.clone();
+        let pending = tokio::spawn(async move {
+            verifying
+                .verify_current_session_principal("new-session")
+                .await
+        });
+
+        state.session_seen.notified().await;
+        remote.set_token(Some("account-b-token".into()));
+        state.release_session.notify_one();
+        let principal = pending
+            .await
+            .expect("验证任务没有 panic")
+            .expect("404 后严格身份验证应得到新会话主体");
+
+        assert_eq!(principal.binding(), SessionBinding::New);
+        assert_eq!(principal.session_id(), "new-session");
+        assert_eq!(
+            principal
+                .verified_namespace()
+                .expect("新会话仍必须有权威主体")
+                .user_id(),
+            "user-a",
+            "共享 token 在 404 后切到 B，fallback 也不能重读共享状态"
+        );
+        let requests = state.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].body,
+            json!({"session_id": "new-session"}),
+            "session 验证必须保持旧服务可读的精确形状"
+        );
+        assert_eq!(
+            requests[1].body,
+            json!({"session_id": null, "allow_new_session": false}),
+            "只有明确 404 才允许发 identity-only 请求"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.authorization.as_deref() == Some("Bearer account-a-token")),
+            "两次请求必须共用 A 的不可变 token 快照"
+        );
+        assert_eq!(
+            remote.token().as_deref(),
+            Some("account-b-token"),
+            "验证不能反向改写共享 token"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn atomic_bind_rejects_a_token_switch_after_identity_verification() {
+        let (base, state, server) = serve_principal_mock(MockPrincipalMode::NewAfterIdentity).await;
+        let remote = Remote::new(base, Some("account-a-token".into())).unwrap();
+        let verifying = remote.clone();
+        let pending = tokio::spawn(async move {
+            verifying
+                .verify_current_session_principal_bound("new-session")
+                .await
+        });
+
+        state.session_seen.notified().await;
+        remote.set_token(Some("account-b-token".into()));
+        state.release_session.notify_one();
+        let error = pending
+            .await
+            .expect("验证任务没有 panic")
+            .expect_err("A 的验证结果不能在切换到 B 后绑定到当前进程");
+
+        assert!(
+            matches!(error, CortexError::Unauthorized(_)),
+            "验证与绑定之间发生账号切换必须以未授权失败关闭，实际为 {error:?}"
+        );
+        assert!(
+            remote.current_principal().is_none(),
+            "失败关闭不能留下任何旧账号主体"
+        );
+        assert_eq!(
+            remote.token().as_deref(),
+            Some("account-b-token"),
+            "失败关闭不能回滚或覆盖用户刚设置的 B token"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_late_identity_result_cannot_restore_a_after_logout_or_switch() {
+        let (base, state, server) = serve_principal_mock(MockPrincipalMode::PausedIdentity).await;
+        let remote = Remote::new(base, Some("account-a-token".into())).unwrap();
+        let verifying = remote.clone();
+        let pending = tokio::spawn(async move {
+            verifying
+                .verify_identity_token("account-a-renewed-token".into())
+                .await
+        });
+
+        state.session_seen.notified().await;
+        remote.set_token(Some("account-b-token".into()));
+        state.release_session.notify_one();
+        let verified = pending
+            .await
+            .expect("验证任务没有 panic")
+            .expect("远端对 A 续期 token 的验证本身可以成功");
+        let error = remote
+            .commit_verified_identity_token(verified)
+            .expect_err("迟到验证不能覆盖已经切到的 B");
+
+        assert!(
+            matches!(error, CortexError::Unauthorized(_)),
+            "账号代际已经变化时，迟到结果必须以未授权失败关闭，实际为 {error:?}"
+        );
+        assert_eq!(
+            remote.token().as_deref(),
+            Some("account-b-token"),
+            "迟到结果不得把当前凭据改回 A"
+        );
+        assert!(
+            remote.current_principal().is_none(),
+            "迟到结果不得重新建立 A 的本地主体"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn credential_cas_rejects_a_stale_principal_epoch_even_at_the_same_generation() {
+        let remote = Remote::new("http://127.0.0.1:1", Some("account-a-old-token".into())).unwrap();
+        let account_a = PrincipalNamespace::from_verified("deployment", "user-a").unwrap();
+        let account_b = PrincipalNamespace::from_verified("deployment", "user-b").unwrap();
+        remote.bind_principal(&account_a).unwrap();
+        let baseline = remote.credential_snapshot().expect("读取 A 的验证基线");
+        let verified = VerifiedIdentityToken {
+            principal: account_a.clone(),
+            credential: baseline.clone(),
+        };
+
+        // 直接推进主体代际但不推进 token generation，单独证明 commit 的
+        // epoch CAS 不是被 generation 比较顺带保护到的。
+        {
+            let mut state = remote
+                .credential
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            replace_principal(&mut state, None);
+            replace_principal(&mut state, Some(account_b));
+            replace_principal(&mut state, Some(account_a.clone()));
+            assert_eq!(state.generation, baseline.generation());
+            assert_ne!(state.principal_epoch, baseline.principal_epoch());
+        }
+
+        let error = remote
+            .commit_verified_identity_token(verified)
+            .expect_err("主体 epoch 已变化时，迟到的验证结果必须失败关闭");
+        assert!(matches!(error, CortexError::Unauthorized(_)));
+        assert_eq!(
+            remote.current_principal().as_ref(),
+            Some(&account_a),
+            "失败提交不能把主体回滚到验证开始时的旧 epoch"
+        );
+        assert_eq!(
+            remote.token().as_deref(),
+            Some("account-a-old-token"),
+            "失败提交不能替换当前 token"
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_bind_accepts_a_verified_same_account_token_refresh() {
+        let (base, _, server) = serve_principal_mock(MockPrincipalMode::Existing).await;
+        let remote = Remote::new(base, Some("account-a-old-token".into())).unwrap();
+        let first = remote
+            .verify_current_session_principal_bound("session-a")
+            .await
+            .expect("旧 token 的验证和绑定应成功");
+        let namespace = first
+            .verified_namespace()
+            .expect("已有会话有权威主体")
+            .clone();
+
+        remote
+            .set_token_for_principal("account-a-new-token".into(), &namespace)
+            .expect("同账号 token 续期应成功");
+        let refreshed = remote
+            .verify_current_session_principal_bound("session-a")
+            .await
+            .expect("新 token 再次通过远端验证后应能续用同一主体");
+
+        assert_eq!(
+            refreshed.verified_namespace().expect("仍是同一主体"),
+            &namespace,
+            "同账号续期不能改变 deployment/user 主体"
+        );
+        assert_eq!(
+            refreshed.credential().generation(),
+            remote.current_credential_generation(),
+            "principal 必须冻结绑定后的当前凭据代际"
+        );
+        assert_eq!(
+            refreshed.credential().bearer_token(),
+            Some("account-a-new-token"),
+            "续期后运行凭据必须使用新 token，而不是验证前的旧快照"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn identity_failure_never_creates_a_new_session_principal() {
+        let (base, state, server) = serve_principal_mock(MockPrincipalMode::IdentityRejected).await;
+        let remote = Remote::new(base, Some("account-a-token".into())).unwrap();
+
+        let error = remote
+            .verify_current_session_principal("new-session")
+            .await
+            .expect_err("identity 被拒时不能猜成合法新会话");
+
+        assert!(matches!(error, CortexError::Unauthorized(_)));
+        assert_eq!(
+            state.requests.lock().await.len(),
+            2,
+            "证据应来自一次 404 加一次 identity 请求"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn non_404_session_failure_never_falls_back_to_identity() {
+        let (base, state, server) =
+            serve_principal_mock(MockPrincipalMode::SessionUnprocessable).await;
+        let remote = Remote::new(base, Some("account-a-token".into())).unwrap();
+
+        let error = remote
+            .verify_current_session_principal("session-a")
+            .await
+            .expect_err("422 不允许被解释成 session 不存在");
+
+        assert!(matches!(error, CortexError::Invalid(_)));
+        assert_eq!(
+            state.requests.lock().await.len(),
+            1,
+            "401/403/422/5xx 与网络错误都不能触发 identity fallback"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn identity_response_cannot_smuggle_a_session_back_in() {
+        let (base, state, server) =
+            serve_principal_mock(MockPrincipalMode::IdentityLeaksSession).await;
+        let remote = Remote::new(base, Some("account-a-token".into())).unwrap();
+
+        let error = remote
+            .verify_current_session_principal("new-session")
+            .await
+            .expect_err("identity 响应含 session 时必须拒绝");
+
+        assert!(matches!(error, CortexError::Unauthorized(_)));
+        assert_eq!(state.requests.lock().await.len(), 2);
+        server.abort();
+    }
 
     /// 四档的分界。**这是契约**：调用方按种类决定排队重试、当场放弃、
     /// 还是去换一把凭据。

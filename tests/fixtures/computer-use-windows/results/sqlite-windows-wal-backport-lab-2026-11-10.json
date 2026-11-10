@@ -1,0 +1,1899 @@
+{
+  "scope": "upstream_sqlite_windows_mapped_shm_backport_isolated_validation_not_integrated",
+  "observedAtUtc": "2026-11-10T01:02:38.3232636Z",
+  "mainWorkspacePatchIntegrated": false,
+  "latestFullCi": {
+    "sourceChanged": [],
+    "sqliteExtendedCode": 1546,
+    "failure": "concurrent_processes_get_only_one_permit",
+    "stage": "connect",
+    "exitCode": 101,
+    "sqliteErrorName": "SQLITE_IOERR_TRUNCATE",
+    "logSha256": "5a7a455a4cdf6952981b5296c2607874535883cd4f2c99cd40dba39b5e51200f",
+    "sourceCount": 2399
+  },
+  "upstream": {
+    "provenance": {
+      "upstreamCommit": "7c103a0b7d509dce58aa87518e13213451e5f70938ff08aa55accd645e3b2ff3",
+      "scope": "isolated_lab_only_upstream_backport",
+      "upstreamSourceSha256": "e6c3639cacac92204ae53906b0881aacfaac5e80695a3b0b0f3636f2b0e13065",
+      "originalRegistryVersion": "0.37.0",
+      "originalAmalgamationSha256": "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5",
+      "patchedAmalgamationSha256": "8eb8665825d55aee8eb65fba61ea37946fe47946c9fcdb5737b2188a8b667ff8",
+      "mainWorkspaceModified": false,
+      "sqliteVersion": "3.51.3"
+    },
+    "checkin": "https://sqlite.org/src/info/7c103a0b7d509dce58aa87518e13213451e5f70938ff08aa55accd645e3b2ff3",
+    "forum": "https://sqlite.org/forum/info/ba7afbd0e81501118563617430fe06d0aca052e55ece2b0d457f8e16fcf85bba"
+  },
+  "unchangedOriginalTwenty": {
+    "sourceModified": false,
+    "executable": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-input-recovery-nvme-20261110\\debug\\deps\\restart-b52c486f9b1019ec.exe",
+    "observedAtUtc": "2026-11-10T00:48:44.3297695Z",
+    "runs": [
+      {
+        "iteration": 1,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 120
+      },
+      {
+        "iteration": 2,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 90
+      },
+      {
+        "iteration": 3,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 4,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 88
+      },
+      {
+        "iteration": 5,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 94
+      },
+      {
+        "iteration": 6,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 94
+      },
+      {
+        "iteration": 7,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 81
+      },
+      {
+        "iteration": 8,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 88
+      },
+      {
+        "iteration": 9,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 10,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 90
+      },
+      {
+        "iteration": 11,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 134
+      },
+      {
+        "iteration": 12,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 116
+      },
+      {
+        "iteration": 13,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 14,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 15,
+        "exitCode": 101,
+        "originalJobDrained": true,
+        "ioErrTruncate": true,
+        "diskIoError": true,
+        "passedExactOne": false,
+        "elapsedMs": 94
+      },
+      {
+        "iteration": 16,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 87
+      },
+      {
+        "iteration": 17,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 80
+      },
+      {
+        "iteration": 18,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 87
+      },
+      {
+        "iteration": 19,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 20,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "diskIoError": false,
+        "passedExactOne": true,
+        "elapsedMs": 83
+      }
+    ],
+    "executableSha256": "cdb98142c21c35707d87a94c603da7d05d9a320fb0949c7d7de8fbca309dc03a",
+    "scope": "unchanged_compiled_ledger_concurrent_open_test_repetition"
+  },
+  "deterministicOriginal": {
+    "scope": "isolated_ledger_windows_mapped_shm_current_and_stale",
+    "variant": "baseline",
+    "runId": "80c31aebee6e4c79a01d291d73d595eb",
+    "executableSha256": "59c5bb99dd2647c0b44f0c9e616847cc357e7ba0b1434cdd2a0c5675b130ceec",
+    "mainWorkspaceModified": false,
+    "result": [
+      {
+        "staleShm": false,
+        "observed": {
+          "exitCode": 2,
+          "originalJobDrained": true,
+          "ioErrTruncate": true,
+          "persistentAndCrossSubjectFenceVerified": false
+        },
+        "expectedSatisfied": true
+      },
+      {
+        "staleShm": true,
+        "observed": {
+          "exitCode": 2,
+          "originalJobDrained": true,
+          "ioErrTruncate": true,
+          "persistentAndCrossSubjectFenceVerified": false
+        },
+        "expectedSatisfied": true
+      }
+    ],
+    "completedAtUtc": "2026-11-10T00:57:37.8409654Z"
+  },
+  "deterministicPatched": {
+    "scope": "isolated_ledger_windows_mapped_shm_current_and_stale",
+    "variant": "patched",
+    "runId": "41ef4fd24a6d41fabd06bb1234ef44b2",
+    "executableSha256": "0bc61c252b9a673b841f0849bd19e413e1f91e78103968eba09594751da39a23",
+    "mainWorkspaceModified": false,
+    "result": [
+      {
+        "staleShm": false,
+        "observed": {
+          "exitCode": 0,
+          "originalJobDrained": true,
+          "ioErrTruncate": false,
+          "persistentAndCrossSubjectFenceVerified": true
+        },
+        "expectedSatisfied": true
+      },
+      {
+        "staleShm": true,
+        "observed": {
+          "exitCode": 0,
+          "originalJobDrained": true,
+          "ioErrTruncate": false,
+          "persistentAndCrossSubjectFenceVerified": true
+        },
+        "expectedSatisfied": true
+      }
+    ],
+    "completedAtUtc": "2026-11-10T00:57:50.9041696Z"
+  },
+  "patchedLedgerSuite": {
+    "passed": 56,
+    "ignored": 2,
+    "logSha256": "7bfc1290069f82d89c4e89f56eae25249d336916f5612c1844da083839279c79",
+    "reportCount": 5
+  },
+  "patchedConcurrentTwoHundred": {
+    "scope": "isolated_upstream_backport_ledger_concurrent_open_repetition",
+    "executableSha256": "ce0b0dd9599c751375853279a8f7c5fac7205fedcc397103e9969ca4872ec1bb",
+    "mainWorkspaceModified": false,
+    "runs": [
+      {
+        "iteration": 1,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 116
+      },
+      {
+        "iteration": 2,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 97
+      },
+      {
+        "iteration": 3,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 90
+      },
+      {
+        "iteration": 4,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 5,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 90
+      },
+      {
+        "iteration": 6,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 7,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 111
+      },
+      {
+        "iteration": 8,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 88
+      },
+      {
+        "iteration": 9,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 10,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 84
+      },
+      {
+        "iteration": 11,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 89
+      },
+      {
+        "iteration": 12,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 102
+      },
+      {
+        "iteration": 13,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 90
+      },
+      {
+        "iteration": 14,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 88
+      },
+      {
+        "iteration": 15,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 83
+      },
+      {
+        "iteration": 16,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 17,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 106
+      },
+      {
+        "iteration": 18,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 83
+      },
+      {
+        "iteration": 19,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 83
+      },
+      {
+        "iteration": 20,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 85
+      },
+      {
+        "iteration": 21,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 84
+      },
+      {
+        "iteration": 22,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 77
+      },
+      {
+        "iteration": 23,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 94
+      },
+      {
+        "iteration": 24,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 79
+      },
+      {
+        "iteration": 25,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 94
+      },
+      {
+        "iteration": 26,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 89
+      },
+      {
+        "iteration": 27,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 124
+      },
+      {
+        "iteration": 28,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 78
+      },
+      {
+        "iteration": 29,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 80
+      },
+      {
+        "iteration": 30,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 102
+      },
+      {
+        "iteration": 31,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 83
+      },
+      {
+        "iteration": 32,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 101
+      },
+      {
+        "iteration": 33,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 34,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 80
+      },
+      {
+        "iteration": 35,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 80
+      },
+      {
+        "iteration": 36,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 37,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 105
+      },
+      {
+        "iteration": 38,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 84
+      },
+      {
+        "iteration": 39,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 85
+      },
+      {
+        "iteration": 40,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 79
+      },
+      {
+        "iteration": 41,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 88
+      },
+      {
+        "iteration": 42,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 79
+      },
+      {
+        "iteration": 43,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 121
+      },
+      {
+        "iteration": 44,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 45,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 88
+      },
+      {
+        "iteration": 46,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 83
+      },
+      {
+        "iteration": 47,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 120
+      },
+      {
+        "iteration": 48,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 78
+      },
+      {
+        "iteration": 49,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 80
+      },
+      {
+        "iteration": 50,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 79
+      },
+      {
+        "iteration": 51,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 52,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 79
+      },
+      {
+        "iteration": 53,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 79
+      },
+      {
+        "iteration": 54,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 88
+      },
+      {
+        "iteration": 55,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 81
+      },
+      {
+        "iteration": 56,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 82
+      },
+      {
+        "iteration": 57,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 85
+      },
+      {
+        "iteration": 58,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 126
+      },
+      {
+        "iteration": 59,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 60,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 61,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 82
+      },
+      {
+        "iteration": 62,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 103
+      },
+      {
+        "iteration": 63,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 64,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 65,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 89
+      },
+      {
+        "iteration": 66,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 82
+      },
+      {
+        "iteration": 67,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 87
+      },
+      {
+        "iteration": 68,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 81
+      },
+      {
+        "iteration": 69,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 87
+      },
+      {
+        "iteration": 70,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 105
+      },
+      {
+        "iteration": 71,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 95
+      },
+      {
+        "iteration": 72,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 79
+      },
+      {
+        "iteration": 73,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 74,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 75,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 79
+      },
+      {
+        "iteration": 76,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 87
+      },
+      {
+        "iteration": 77,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 80
+      },
+      {
+        "iteration": 78,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 90
+      },
+      {
+        "iteration": 79,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 80,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 81,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 82,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 83,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 78
+      },
+      {
+        "iteration": 84,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 81
+      },
+      {
+        "iteration": 85,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 85
+      },
+      {
+        "iteration": 86,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 77
+      },
+      {
+        "iteration": 87,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 79
+      },
+      {
+        "iteration": 88,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 79
+      },
+      {
+        "iteration": 89,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 90,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 84
+      },
+      {
+        "iteration": 91,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 98
+      },
+      {
+        "iteration": 92,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 93,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 94,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 95,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 96,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 87
+      },
+      {
+        "iteration": 97,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 83
+      },
+      {
+        "iteration": 98,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 99,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 78
+      },
+      {
+        "iteration": 100,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 98
+      },
+      {
+        "iteration": 101,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 78
+      },
+      {
+        "iteration": 102,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 123
+      },
+      {
+        "iteration": 103,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 107
+      },
+      {
+        "iteration": 104,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 108
+      },
+      {
+        "iteration": 105,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 110
+      },
+      {
+        "iteration": 106,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 108
+      },
+      {
+        "iteration": 107,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 90
+      },
+      {
+        "iteration": 108,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 82
+      },
+      {
+        "iteration": 109,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 90
+      },
+      {
+        "iteration": 110,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 111,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 112,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 109
+      },
+      {
+        "iteration": 113,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 90
+      },
+      {
+        "iteration": 114,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 115,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 116,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 80
+      },
+      {
+        "iteration": 117,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 104
+      },
+      {
+        "iteration": 118,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 80
+      },
+      {
+        "iteration": 119,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 89
+      },
+      {
+        "iteration": 120,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 121,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 122,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 110
+      },
+      {
+        "iteration": 123,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 107
+      },
+      {
+        "iteration": 124,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 108
+      },
+      {
+        "iteration": 125,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 108
+      },
+      {
+        "iteration": 126,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 127,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 96
+      },
+      {
+        "iteration": 128,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 104
+      },
+      {
+        "iteration": 129,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 105
+      },
+      {
+        "iteration": 130,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 84
+      },
+      {
+        "iteration": 131,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 132
+      },
+      {
+        "iteration": 132,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 94
+      },
+      {
+        "iteration": 133,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 134,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 178
+      },
+      {
+        "iteration": 135,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 89
+      },
+      {
+        "iteration": 136,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 100
+      },
+      {
+        "iteration": 137,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 106
+      },
+      {
+        "iteration": 138,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 139,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 98
+      },
+      {
+        "iteration": 140,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 81
+      },
+      {
+        "iteration": 141,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 89
+      },
+      {
+        "iteration": 142,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 143,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 82
+      },
+      {
+        "iteration": 144,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 85
+      },
+      {
+        "iteration": 145,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 110
+      },
+      {
+        "iteration": 146,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 81
+      },
+      {
+        "iteration": 147,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 90
+      },
+      {
+        "iteration": 148,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 149,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 150,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 92
+      },
+      {
+        "iteration": 151,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 173
+      },
+      {
+        "iteration": 152,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 102
+      },
+      {
+        "iteration": 153,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 87
+      },
+      {
+        "iteration": 154,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 88
+      },
+      {
+        "iteration": 155,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 156,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 139
+      },
+      {
+        "iteration": 157,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 158,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 79
+      },
+      {
+        "iteration": 159,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 83
+      },
+      {
+        "iteration": 160,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 84
+      },
+      {
+        "iteration": 161,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 82
+      },
+      {
+        "iteration": 162,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 102
+      },
+      {
+        "iteration": 163,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 164,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 165,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 166,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 106
+      },
+      {
+        "iteration": 167,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 94
+      },
+      {
+        "iteration": 168,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 169,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 170,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 81
+      },
+      {
+        "iteration": 171,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 90
+      },
+      {
+        "iteration": 172,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 106
+      },
+      {
+        "iteration": 173,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 83
+      },
+      {
+        "iteration": 174,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 175,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 82
+      },
+      {
+        "iteration": 176,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 102
+      },
+      {
+        "iteration": 177,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 93
+      },
+      {
+        "iteration": 178,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 107
+      },
+      {
+        "iteration": 179,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 83
+      },
+      {
+        "iteration": 180,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 85
+      },
+      {
+        "iteration": 181,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 182,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 98
+      },
+      {
+        "iteration": 183,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 107
+      },
+      {
+        "iteration": 184,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 81
+      },
+      {
+        "iteration": 185,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 87
+      },
+      {
+        "iteration": 186,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 108
+      },
+      {
+        "iteration": 187,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 108
+      },
+      {
+        "iteration": 188,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 91
+      },
+      {
+        "iteration": 189,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 107
+      },
+      {
+        "iteration": 190,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 106
+      },
+      {
+        "iteration": 191,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 81
+      },
+      {
+        "iteration": 192,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 102
+      },
+      {
+        "iteration": 193,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 106
+      },
+      {
+        "iteration": 194,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 83
+      },
+      {
+        "iteration": 195,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 102
+      },
+      {
+        "iteration": 196,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 84
+      },
+      {
+        "iteration": 197,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 198,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 86
+      },
+      {
+        "iteration": 199,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 82
+      },
+      {
+        "iteration": 200,
+        "exitCode": 0,
+        "originalJobDrained": true,
+        "ioErrTruncate": false,
+        "passedExactOne": true,
+        "elapsedMs": 80
+      }
+    ],
+    "observedAtUtc": "2026-11-10T00:59:49.0541702Z"
+  },
+  "limits": [
+    "isolated_crate_only",
+    "not_current_cortex_binary",
+    "not_latest_full_ci_passed",
+    "does_not_explain_prior_125_second_host_failure",
+    "not_production_acceptance"
+  ]
+}

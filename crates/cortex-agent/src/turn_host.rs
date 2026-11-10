@@ -5,6 +5,34 @@
 use crate::tools::{ToolResult, ToolSpec};
 use crate::turn_gate::{Approval, ConfirmRequest};
 
+/// agent 为同一次电脑工具调用保留的关联上下文。
+///
+/// 关联 ID 不是权限凭据。宿主还必须把它与自己的账号、run、审批回执和参数
+/// 绑定；不能根据模型填写的 ID 或这个布尔值恢复一次已消费的授权。
+pub struct ComputerInvocation<'a> {
+    operation_id: &'a cortex_core::Id,
+    approved_by_user: bool,
+}
+
+impl<'a> ComputerInvocation<'a> {
+    pub(crate) const fn new(operation_id: &'a cortex_core::Id, approved_by_user: bool) -> Self {
+        Self {
+            operation_id,
+            approved_by_user,
+        }
+    }
+
+    #[must_use]
+    pub const fn operation_id(&self) -> &'a cortex_core::Id {
+        self.operation_id
+    }
+
+    #[must_use]
+    pub const fn approved_by_user(&self) -> bool {
+        self.approved_by_user
+    }
+}
+
 /// agent 循环需要、但工具层给不了的能力。
 ///
 /// 这些能力有一个共同点：它们是**有状态**的（连接、子进程、等待用户），
@@ -86,7 +114,12 @@ pub trait ToolHost: Send + Sync {
     /// 容器里的 agent 没有屏幕，Linux 上的构建也没编这一组进去。假装成功的
     /// 后果比别处更重：模型会接着说「我已经点了确认」，而用户屏幕上什么都
     /// 没发生 —— 它会照着一个虚构的状态一路走下去。
-    async fn computer(&self, _tool: &str, _arguments: &serde_json::Value) -> ToolResult {
+    async fn computer(
+        &self,
+        _tool: &str,
+        _arguments: &serde_json::Value,
+        _invocation: &ComputerInvocation<'_>,
+    ) -> ToolResult {
         ToolResult::err(
             "这个 agent 进程操作不了电脑（容器里没有屏幕，Linux 构建也没编进这一组）。\
              不要假设点击已经发生 —— 告诉用户这条路在当前环境下不可用。",

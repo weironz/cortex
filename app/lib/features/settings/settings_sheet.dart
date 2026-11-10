@@ -176,7 +176,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       icon: Icons.desktop_windows_outlined,
       page: const ComputerUsePage(),
       group: _NavGroup.tools,
-      gate: computerUseAvailableProvider,
+      gate: computerUseSettingsAvailableProvider,
     ),
     (
       label: '外观',

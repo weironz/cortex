@@ -401,6 +401,9 @@ pub enum ChatEvent {
     },
     /// 结束，带上本轮 episode id 供追溯
     Done {
+        /// 本机可靠提交后的保存位置：local_only / pending / remote。缺省兼容旧宿主。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persistence: Option<String>,
         episode_id: String,
         /// 这一轮**先后**用过哪些模型，按发生顺序。
         ///

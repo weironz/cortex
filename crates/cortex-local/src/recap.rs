@@ -28,6 +28,8 @@ use std::sync::{Arc, Mutex};
 
 use cortex_core::history::HistoryTurn;
 
+use crate::runs::run_principal::RunPrincipalKey;
+
 /// 摘要的目标长度（字符）。
 ///
 /// 300 字：够写下「聊了什么、定了什么、还欠着什么」，又小到每轮重付
@@ -45,20 +47,20 @@ const MAX_SOURCE_CHARS: usize = 12_000;
 /// 键里带条数是缓存的判据：**丢掉的条数没变 = 丢掉的内容没变**，
 /// 直接复用。变了才重摘。
 #[derive(Clone, Default)]
-pub struct Recaps(Arc<Mutex<HashMap<String, (usize, String)>>>);
+pub struct Recaps(Arc<Mutex<HashMap<RunPrincipalKey, (usize, String)>>>);
 
 impl Recaps {
     /// 取这条会话已经摘好的那段（如果丢的条数没变过）。
     #[must_use]
-    pub fn get(&self, session_id: &str, dropped: usize) -> Option<String> {
+    pub fn get(&self, key: &RunPrincipalKey, dropped: usize) -> Option<String> {
         let g = self.0.lock().ok()?;
-        let (at, text) = g.get(session_id)?;
+        let (at, text) = g.get(key)?;
         (*at == dropped).then(|| text.clone())
     }
 
-    fn put(&self, session_id: &str, dropped: usize, text: String) {
+    fn put(&self, key: &RunPrincipalKey, dropped: usize, text: String) {
         if let Ok(mut g) = self.0.lock() {
-            g.insert(session_id.to_string(), (dropped, text));
+            g.insert(key.clone(), (dropped, text));
         }
     }
 }
@@ -69,13 +71,13 @@ impl Recaps {
 pub async fn summarise_dropped(
     llm: &cortex_llm::LlmClient,
     recaps: &Recaps,
-    session_id: &str,
+    principal_key: &RunPrincipalKey,
     dropped_turns: &[HistoryTurn],
 ) -> Option<String> {
     if dropped_turns.is_empty() {
         return None;
     }
-    if let Some(cached) = recaps.get(session_id, dropped_turns.len()) {
+    if let Some(cached) = recaps.get(principal_key, dropped_turns.len()) {
         return Some(cached);
     }
 
@@ -108,14 +110,14 @@ pub async fn summarise_dropped(
                 // 空回复当失败：一段空摘要进上下文只会占一行，
                 // 还让人以为「早期对话里什么都没有」
                 tracing::warn!(
-                    session = session_id,
+                    session = principal_key.session_id(),
                     "早期对话的摘要是空的，本轮按没有摘要处理"
                 );
                 return None;
             }
-            recaps.put(session_id, dropped_turns.len(), text.clone());
+            recaps.put(principal_key, dropped_turns.len(), text.clone());
             tracing::info!(
-                session = session_id,
+                session = principal_key.session_id(),
                 dropped = dropped_turns.len(),
                 chars = text.chars().count(),
                 "早期对话已摘成一段"
@@ -124,7 +126,11 @@ pub async fn summarise_dropped(
         }
         Err(e) => {
             // **不让整轮失败**：摘要是锦上添花，而用户只是想说句话
-            tracing::warn!(error = %e, session = session_id, "摘不出早期对话，本轮按没有摘要处理");
+            tracing::warn!(
+                error = %e,
+                session = principal_key.session_id(),
+                "摘不出早期对话，本轮按没有摘要处理"
+            );
             None
         }
     }
@@ -157,6 +163,7 @@ fn render_source(turns: &[HistoryTurn]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runs::run_principal::RunPrincipal;
 
     fn turn(is_user: bool, text: &str) -> HistoryTurn {
         HistoryTurn {
@@ -165,16 +172,34 @@ mod tests {
         }
     }
 
+    fn key(user: &str, session: &str) -> RunPrincipalKey {
+        RunPrincipal::for_test("deployment", user, session, "token", 1)
+            .key()
+            .clone()
+    }
+
     #[test]
     fn 缓存按丢掉的条数认() {
         let r = Recaps::default();
-        r.put("s1", 10, "早期讲了 A".into());
-        assert_eq!(r.get("s1", 10).as_deref(), Some("早期讲了 A"));
+        let s1 = key("user", "s1");
+        let s2 = key("user", "s2");
+        r.put(&s1, 10, "早期讲了 A".into());
+        assert_eq!(r.get(&s1, 10).as_deref(), Some("早期讲了 A"));
         assert!(
-            r.get("s1", 11).is_none(),
+            r.get(&s1, 11).is_none(),
             "又多丢了一条就得重摘 —— 复用旧的会让新掉出去的那一轮悄悄失踪"
         );
-        assert!(r.get("s2", 10).is_none(), "别的会话不共用");
+        assert!(r.get(&s2, 10).is_none(), "别的会话不共用");
+        assert!(
+            r.get(
+                &RunPrincipal::for_test("deployment", "other-user", "s1", "token", 1)
+                    .key()
+                    .clone(),
+                10
+            )
+            .is_none(),
+            "同一个 session id 在另一个账号下也必须重新摘要"
+        );
     }
 
     #[test]

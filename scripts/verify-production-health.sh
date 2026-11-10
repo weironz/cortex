@@ -2,8 +2,8 @@
 # 部署后验证公网真的在运行指定版本。
 #
 # 用法：
-#   scripts/verify-production-health.sh 0.1.44
-#   CORTEX_PUBLIC_BASE_URL=https://example.com scripts/verify-production-health.sh 0.1.44
+#   scripts/verify-production-health.sh 0.1.45
+#   CORTEX_PUBLIC_BASE_URL=https://example.com scripts/verify-production-health.sh 0.1.45
 #
 # deploy.yml 与 scripts/deploy-workflow-local.sh 共用这一份断言，避免
 # Actions 和本机部署对“什么算上线成功”给出不同答案。

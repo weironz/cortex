@@ -1,0 +1,239 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "Cortex redistributed Cua Driver 0.38.0 for Windows x64",
+  "documentNamespace": "https://github.com/weironz/cortex/spdx/cua-driver-0.38.0-windows-x86_64",
+  "creationInfo": {
+    "created": "2026-10-30T00:00:00Z",
+    "creators": [
+      "Tool: Cortex release-desktop-windows.sh"
+    ]
+  },
+  "packages": [
+    {
+      "name": "Cua Driver",
+      "SPDXID": "SPDXRef-Package-CuaDriver",
+      "versionInfo": "cua-driver-rs-v0.38.0",
+      "downloadLocation": "https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.38.0",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2025 Cua AI, Inc.",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "5edaa74d0afa1b55a9668dbc4f32736507bd2bd4d75b18ca1dc8881bb12402b5"
+        }
+      ],
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:github/trycua/cua@cua-driver-rs-v0.38.0"
+        }
+      ]
+    },
+    {
+      "name": "trope-cua",
+      "SPDXID": "SPDXRef-Package-trope-cua",
+      "versionInfo": "embedded in Cua Driver 0.38.0",
+      "downloadLocation": "https://github.com/voctory/trope-cua",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2026 Victor Vannara"
+    },
+    {
+      "name": "Interface-Agent",
+      "SPDXID": "SPDXRef-Package-Interface-Agent",
+      "versionInfo": "embedded in Cua Driver 0.38.0",
+      "downloadLocation": "https://github.com/francedot/Interface-Agent",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2024 Francesco Bonacci"
+    },
+    {
+      "name": "yabai",
+      "SPDXID": "SPDXRef-Package-yabai",
+      "versionInfo": "embedded in Cua Driver 0.38.0; macOS-only component",
+      "downloadLocation": "https://github.com/koekeishiya/yabai",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2019 Asmund Vikane"
+    },
+    {
+      "name": "QuickJS-ng",
+      "SPDXID": "SPDXRef-Package-QuickJS-ng",
+      "versionInfo": "embedded through rquickjs-sys in Cua Driver 0.38.0",
+      "downloadLocation": "https://github.com/quickjs-ng/quickjs",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2017-2026 Fabrice Bellard and contributors"
+    },
+    {
+      "name": "rquickjs",
+      "SPDXID": "SPDXRef-Package-rquickjs",
+      "versionInfo": "embedded in Cua Driver 0.38.0",
+      "downloadLocation": "https://github.com/DelSkayn/rquickjs",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2020 Mees Delzenne and contributors"
+    },
+    {
+      "name": "T3 Code",
+      "SPDXID": "SPDXRef-Package-T3Code",
+      "versionInfo": "selected source-level portions embedded in Cua Driver 0.38.0",
+      "downloadLocation": "https://github.com/pingdotgg/t3code",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2026 T3 Tools Inc."
+    }
+  ],
+  "files": [
+    {
+      "fileName": "cua_driver_abi.h",
+      "SPDXID": "SPDXRef-File-cua-driver-abi",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "c17169f41da321baa5e7e953323c3ad660b00790176ba381e93189fba3506587"
+        }
+      ],
+      "licenseConcluded": "MIT",
+      "copyrightText": "Copyright (c) 2025 Cua AI, Inc."
+    },
+    {
+      "fileName": "cua_driver_node_runtime.node",
+      "SPDXID": "SPDXRef-File-cua-driver-node-runtime",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "3306eb003a0c57c0c0f58a488fb9cc052630fb800a0db611d3459a76531aec87"
+        }
+      ],
+      "licenseConcluded": "MIT",
+      "copyrightText": "Copyright (c) 2025 Cua AI, Inc."
+    },
+    {
+      "fileName": "cua_driver_sdk.dll",
+      "SPDXID": "SPDXRef-File-cua-driver-sdk",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "68c5540cc99eeb725352db3f3a944679f9d6e1757923b2d8d8ee441b39cd78d9"
+        }
+      ],
+      "licenseConcluded": "MIT",
+      "copyrightText": "Copyright (c) 2025 Cua AI, Inc."
+    },
+    {
+      "fileName": "cua-cursor-theme.exe",
+      "SPDXID": "SPDXRef-File-cua-cursor-theme",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "ffaf56a62b0f3bdaf65f2bc30612e5d6ed408362d4868d6f20e8db93be851f0c"
+        }
+      ],
+      "licenseConcluded": "MIT",
+      "copyrightText": "Copyright (c) 2025 Cua AI, Inc."
+    },
+    {
+      "fileName": "cua-driver-uia.exe",
+      "SPDXID": "SPDXRef-File-cua-driver-uia",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "69aa6ea0049ce59dfd14593be77c0632f12f6eda3d4a2f4bab1a00e3a72a9754"
+        }
+      ],
+      "licenseConcluded": "MIT",
+      "copyrightText": "Copyright (c) 2025 Cua AI, Inc."
+    },
+    {
+      "fileName": "cua-driver.exe",
+      "SPDXID": "SPDXRef-File-cua-driver",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2"
+        }
+      ],
+      "licenseConcluded": "MIT",
+      "copyrightText": "Copyright (c) 2025 Cua AI, Inc."
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-CuaDriver"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-CuaDriver",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-trope-cua"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-CuaDriver",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-Interface-Agent"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-CuaDriver",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-yabai"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-CuaDriver",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-QuickJS-ng"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-CuaDriver",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-rquickjs"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-CuaDriver",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-T3Code"
+    },
+    {
+      "spdxElementId": "SPDXRef-File-cua-driver-abi",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-Package-CuaDriver"
+    },
+    {
+      "spdxElementId": "SPDXRef-File-cua-driver-node-runtime",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-Package-CuaDriver"
+    },
+    {
+      "spdxElementId": "SPDXRef-File-cua-driver-sdk",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-Package-CuaDriver"
+    },
+    {
+      "spdxElementId": "SPDXRef-File-cua-cursor-theme",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-Package-CuaDriver"
+    },
+    {
+      "spdxElementId": "SPDXRef-File-cua-driver-uia",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-Package-CuaDriver"
+    },
+    {
+      "spdxElementId": "SPDXRef-File-cua-driver",
+      "relationshipType": "CONTAINED_BY",
+      "relatedSpdxElement": "SPDXRef-Package-CuaDriver"
+    }
+  ]
+}

@@ -53,47 +53,76 @@ fn a_session_without_a_workspace_still_gets_the_external_tools() {
 }
 
 #[test]
-fn computer_use_requires_all_four_conditions() {
-    let cases = [
-        (
-            false,
-            true,
-            cortex_agent::ExecEnvironment::LocalMachine,
-            true,
-        ),
-        (
-            true,
-            false,
-            cortex_agent::ExecEnvironment::LocalMachine,
-            true,
-        ),
-        (true, true, cortex_agent::ExecEnvironment::Container, true),
-        (
-            true,
-            true,
-            cortex_agent::ExecEnvironment::LocalMachine,
-            false,
-        ),
-    ];
-
-    for (requested, supported, env, supports_vision) in cases {
+fn computer_use_requires_requested_ready_local_host() {
+    for (requested, ready, env) in [
+        (false, true, cortex_agent::ExecEnvironment::LocalMachine),
+        (true, false, cortex_agent::ExecEnvironment::LocalMachine),
+        (true, true, cortex_agent::ExecEnvironment::Container),
+        (true, true, cortex_agent::ExecEnvironment::None),
+    ] {
         assert!(
-            !computer_access_allowed(requested, supported, env, supports_vision),
-            "电脑操作在 requested={requested}, supported={supported}, env={}, \
-             supports_vision={supports_vision} 时仍被开放",
-            env.as_str()
+            !computer_access_allowed(requested, ready, env),
+            "缺少用户授权、真实 readiness 或本机环境时必须关闭目录：{requested}/{ready}/{env:?}"
         );
     }
-
     assert!(
-        computer_access_allowed(
-            true,
-            true,
-            cortex_agent::ExecEnvironment::LocalMachine,
-            true
-        ),
-        "四项条件全部成立时电脑操作应当可用"
+        computer_access_allowed(true, true, cortex_agent::ExecEnvironment::LocalMachine),
+        "完整 AX 路径不应再要求模型能看图片；视觉动作另由 typed 模式限制"
     );
+}
+
+#[test]
+fn ax_only_real_readiness_offers_ref_actions_without_visual_schemas() {
+    use cortex_agent::computer_perception::PerceptionMode;
+    for mode in [PerceptionMode::AccessibilityOnly, PerceptionMode::Visual] {
+        let available =
+            computer_access_allowed(true, true, cortex_agent::ExecEnvironment::LocalMachine);
+        let caps = Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
+            perception_mode: mode,
+            can_observe_computer: available,
+            can_use_computer: available,
+            can_use_browser: true,
+            ..Caps::default()
+        };
+        let turn = chat_turn_for(8, &[], caps, &[]);
+        for name in [
+            "computer_list",
+            "computer_observe",
+            "computer_act",
+            "computer_wait",
+            "computer_browser_act",
+        ] {
+            assert!(
+                turn.tool_names().contains(&name),
+                "真实 readiness 已满足时必须提供 {name}：{mode:?}"
+            );
+        }
+        for legacy in ["screenshot", "click", "type_text", "key", "scroll"] {
+            assert!(
+                !turn.tool_names().contains(&legacy),
+                "目录不应开放 legacy 工具 {legacy}"
+            );
+        }
+        let spec = cortex_agent::tools::cua_computer_act_spec_for(mode);
+        let schema = spec.parameters.to_string();
+        assert!(schema.contains("\"ref\""), "两种模式都必须保留控件 ref");
+        assert_eq!(
+            schema.contains("\"visual\""),
+            mode.allows_images(),
+            "视觉 schema 必须与宿主模式一致"
+        );
+        assert_eq!(
+            schema.contains("\"x\""),
+            mode.allows_images(),
+            "AX-only 不得提供坐标字段"
+        );
+        assert_eq!(
+            schema.contains("\"y\""),
+            mode.allows_images(),
+            "AX-only 不得提供坐标字段"
+        );
+    }
 }
 
 #[test]
@@ -102,6 +131,7 @@ fn cua_observation_catalog_contains_no_legacy_write_tools() {
         8,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_observe_computer: true,
             ..Caps::default()
         },
@@ -109,13 +139,47 @@ fn cua_observation_catalog_contains_no_legacy_write_tools() {
     );
     let names = turn.tool_names();
     assert!(
-        names.contains(&"computer_list") && names.contains(&"computer_observe"),
-        "Cua 配置成立时必须出现 list/observe：{names:?}"
+        names.contains(&"computer_list")
+            && names.contains(&"computer_observe")
+            && names.contains(&"computer_wait"),
+        "Cua 配置成立时必须出现 list/observe/wait：{names:?}"
     );
     for legacy in ["screenshot", "click", "type_text", "key", "scroll"] {
         assert!(
             !names.contains(&legacy),
             "Cua observe-only 目录不能同时暴露 legacy 写操作 {legacy}：{names:?}"
+        );
+    }
+}
+
+#[test]
+fn isolated_browser_catalog_follows_its_own_capability() {
+    let turn = chat_turn_for(
+        8,
+        &[],
+        Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
+            can_use_browser: true,
+            ..Caps::default()
+        },
+        &[],
+    );
+    let names = turn.tool_names();
+    for browser_tool in [
+        "computer_browser_open",
+        "computer_browser_observe",
+        "computer_browser_act",
+        "computer_browser_wait",
+    ] {
+        assert!(
+            names.contains(&browser_tool),
+            "浏览器能力成立时必须出现 {browser_tool}：{names:?}"
+        );
+    }
+    for cua_tool in ["computer_list", "computer_observe", "computer_act"] {
+        assert!(
+            !names.contains(&cua_tool),
+            "没有 Cua 能力时不能顺手开放 {cua_tool}：{names:?}"
         );
     }
 }
@@ -133,6 +197,7 @@ fn 生图工具跟着能不能够到服务端走() {
         8,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_draw: true,
             ..Caps::default()
         },
@@ -196,6 +261,7 @@ fn 后台命令要有工作区才给() {
         8,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_background: true,
             ..Caps::default()
         },
@@ -228,6 +294,7 @@ fn 联网检索够得着才给且关得掉() {
         8,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_search: true,
             ..Caps::default()
         },
@@ -243,6 +310,7 @@ fn 联网检索够得着才给且关得掉() {
         8,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_search: true,
             ..Caps::default()
         },
@@ -309,6 +377,7 @@ fn 资料库工具跟着能不能够到服务端走() {
         8,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_use_library: true,
             ..Caps::default()
         },
@@ -365,6 +434,7 @@ fn 技能目录与取正文的工具一起出现一起消失() {
         8,
         &external,
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             has_skills: true,
             ..Caps::default()
         },
@@ -603,4 +673,102 @@ fn the_default_mode_is_the_cautious_one() {
             "拿到无人值守的执行权",
         )
     );
+}
+// 直接检查 Turn 实际交给 provider 的目录，避免只测独立 schema helper。
+#[tokio::test]
+async fn ax_only_actual_turn_catalog_follows_selected_model_capability() {
+    use cortex_agent::computer_perception::PerceptionMode;
+    use cortex_llm::{LlmClient, Message, MessageStream, ModelConfig, Provider, ProviderError};
+    use std::sync::{Arc, Mutex};
+    struct Capture(Mutex<Vec<serde_json::Value>>);
+    #[async_trait::async_trait]
+    impl Provider for Capture {
+        fn get_name(&self) -> &str {
+            "headless-catalog"
+        }
+        async fn stream(
+            &self,
+            _: &ModelConfig,
+            _: &str,
+            _: &[Message],
+            tools: &[cortex_llm::Tool],
+        ) -> Result<MessageStream, ProviderError> {
+            *self.0.lock().expect("目录记录锁") = tools
+                .iter()
+                .map(|t| serde_json::to_value(t).expect("工具可序列化"))
+                .collect();
+            Ok(Box::pin(futures::stream::once(async {
+                Ok((Some(Message::assistant().with_text("完成")), None))
+            })))
+        }
+    }
+    struct NoIoHost;
+    #[async_trait::async_trait]
+    impl cortex_agent::ToolHost for NoIoHost {}
+    for (provider_id, model_name, visual) in [
+        ("deepseek", "deepseek-chat", false),
+        ("anthropic", "claude-opus-5", true),
+    ] {
+        let provider = Arc::new(Capture(Mutex::new(vec![])));
+        let model = ModelConfig::new(model_name);
+        let llm = LlmClient::from_provider(provider.clone(), provider_id, model.clone(), model);
+        let ready =
+            computer_access_allowed(true, true, cortex_agent::ExecEnvironment::LocalMachine);
+        let turn = chat_turn_for(
+            3,
+            &[],
+            Caps {
+                computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
+                perception_mode: PerceptionMode::for_model(&llm),
+                can_use_computer: ready,
+                can_observe_computer: ready,
+                ..Caps::default()
+            },
+            &[],
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        turn.run(
+            &llm,
+            "测试",
+            &mut vec![Message::user().with_text("检查真实目录")],
+            &NoIoHost,
+            &tx,
+        )
+        .await
+        .expect("只检查目录的模型闭环应完成");
+        let tools = provider.0.lock().expect("目录记录锁");
+        let act = tools
+            .iter()
+            .find(|t| t["name"] == "computer_act")
+            .expect("真实 readiness 下必须提供结构化动作");
+        let schema = act["inputSchema"].to_string();
+        assert_eq!(
+            schema.contains("\"press_key\""),
+            visual,
+            "当前 AX 无焦点凭据，实际目录不能开放无目标按键"
+        );
+        assert!(schema.contains("\"ref\""), "真实目录必须含 ref");
+        assert_eq!(
+            schema.contains("\"visual\""),
+            visual,
+            "真实目录不能给文本模型视觉目标"
+        );
+        assert_eq!(
+            schema.contains("\"x\""),
+            visual,
+            "真实目录坐标必须由实际模型能力控制"
+        );
+        assert_eq!(
+            schema.contains("\"y\""),
+            visual,
+            "真实目录坐标必须由实际模型能力控制"
+        );
+        assert!(
+            tools.iter().all(|t| !matches!(
+                t["name"].as_str(),
+                Some("screenshot" | "click" | "scroll" | "key" | "type_text")
+            )),
+            "实际目录不能出现 legacy 键鼠/截图"
+        );
+    }
 }

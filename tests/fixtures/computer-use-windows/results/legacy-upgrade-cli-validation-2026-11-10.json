@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "scope": "parser_only_no_maintenance",
+  "binary": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-input-recovery-nvme-20261110\\debug\\cortex-local.exe",
+  "sha256": "654446d464f59767abfd83c2952b5193aa9556384ca7a5fef6d549f133637909",
+  "helpExitCode": 0,
+  "arbitraryRootExitCode": 2,
+  "maintenanceExecuted": false,
+  "realHklmOrProgramDataModified": false
+}

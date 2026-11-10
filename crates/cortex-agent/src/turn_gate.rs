@@ -51,6 +51,8 @@ impl Approval {
 /// 怎么问出去、凭什么信回来的答案，由实现 [`crate::turn::ToolHost`] 的人决定。
 #[derive(Debug, Clone, Copy)]
 pub struct ConfirmRequest<'a> {
+    /// 在询问之前由 agent 生成，同一次派发使用同一个值。
+    pub operation_id: &'a cortex_core::Id,
     pub tool: &'a str,
     pub risk: Risk,
     /// 模型给的原始参数。**必须原样交给用户看** —— 对 `shell` 来说，

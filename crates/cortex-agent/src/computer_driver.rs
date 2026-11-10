@@ -20,12 +20,14 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::computer_dispatch::{AuthorizedDispatch, DispatchOutcome, DurableDispatch};
+use crate::computer_perception::PerceptionMode;
 use crate::computer_policy::{
     ComputerActionClass, ComputerPolicy, ComputerPolicyDecision, ComputerPolicyRequest,
 };
 use crate::tools::computer_protocol::{
-    ActionBatch, AppIdentity, Observation, ProtocolError, Receipt, VerificationReport, WindowId,
-    WindowRef,
+    ActionBatch, AppIdentity, NavigationBatch, Observation, ProtocolError, Receipt,
+    VerificationReport, WindowId, WindowRef,
 };
 
 /// 平台无关的 Computer 驱动接口。
@@ -42,6 +44,17 @@ pub trait ComputerDriver: Send + Sync {
 
     /// 执行已授权动作批次，并返回带 post-observation 的 receipt。
     async fn act(&self, batch: &ActionBatch) -> Result<Receipt, DriverError>;
+
+    /// 在专用的结构化浏览器里导航。
+    ///
+    /// 默认拒绝，因为普通窗口/桌面驱动没有可验证的“网页 URL”语义。只有
+    /// 隔离浏览器适配器覆盖它；这样新增浏览器能力不会逼 Cua 适配器把 URL
+    /// 误投成普通按键或输入。
+    async fn navigate(&self, _url: &str) -> Result<Observation, DriverError> {
+        Err(DriverError::Failed(
+            "当前 computer driver 不支持隔离浏览器导航".to_owned(),
+        ))
+    }
 }
 
 /// 驱动层失败。
@@ -53,6 +66,18 @@ pub enum DriverError {
     #[error("computer driver action was cancelled")]
     Cancelled,
 
+    /// 已由驱动证明在任何输入副作用之前拒绝。
+    #[error("computer driver rejected the action before input dispatch: {0}")]
+    PreDispatchRejected(String),
+
+    /// 调用中断发生在输入可能已经离开宿主之后。
+    ///
+    /// 与 [`Self::Cancelled`] 区分开：后者能够确认请求还没派发；这里只能确认
+    /// “不知道是否执行”。上层必须重新观察桌面，绝不能把超时或 kill CLI
+    /// 当成动作没有发生。
+    #[error("computer driver outcome is unknown and may have executed: {0}")]
+    OutcomeUnknown(String),
+
     #[error("computer driver failed: {0}")]
     Failed(String),
 }
@@ -63,6 +88,12 @@ pub enum DriverError {
 /// 驱动失败要看驱动状态，验证失败要带着新 frame 和证据交给上层。
 #[derive(Debug, Error)]
 pub enum GatewayError {
+    #[error("write dispatch requires a durable ledger authority")]
+    DurableAuthorityRequired,
+    #[error("durable prepare refused before driver dispatch: {0}")]
+    DurablePrepare(String),
+    #[error("durable finish is unknown; resource remains fenced: {0}")]
+    DurableFinish(String),
     #[error("computer policy denied the request")]
     PolicyDenied,
 
@@ -75,11 +106,18 @@ pub enum GatewayError {
     #[error("driver returned a window/app identity other than the one that was requested")]
     DriverIdentityMismatch,
 
-    #[error("verification time cannot precede authorization time")]
+    #[error(
+        "clock moved backwards after dispatch; the action may have executed, re-observe before deciding whether to retry"
+    )]
     ClockWentBackwards,
 
     #[error("protocol rejected the request before driver dispatch: {0}")]
     Protocol(#[from] ProtocolError),
+
+    #[error(
+        "action was dispatched but post-observation was rejected; re-observe before deciding whether to retry: {0}"
+    )]
+    PostActionProtocol(#[source] ProtocolError),
 
     #[error("driver failed after authorization: {0}")]
     Driver(#[from] DriverError),
@@ -108,7 +146,10 @@ pub struct GatewayTimeouts {
 impl Default for GatewayTimeouts {
     fn default() -> Self {
         Self {
-            list: Duration::from_secs(10),
+            // 列表读取会包含 sidecar 冷启动和会话建立。Cua adapter 的单次 CLI
+            // 本身已有 20 秒超时；Gateway 若只等 10 秒，会先杀掉一个仍在自己
+            // 有效预算内的工作，形成高负载下的假失败。
+            list: Duration::from_secs(30),
             // C0 真机首次 Chrome 观察约 7.2s；给慢机器留出余量，同时仍有限。
             observe: Duration::from_secs(30),
             act: Duration::from_secs(30),
@@ -150,11 +191,23 @@ impl ComputerActionRequest {
         self.externally_tainted = true;
         self
     }
+
+    /// 同 [`Self::externally_tainted`]，但只在调用方给出明确证据时打开。
+    ///
+    /// UIA 元素身份本身不是外部指令；把所有元素动作都标成污染会让普通
+    /// 文本框也在默认策略下被接管。视觉坐标和文本内容才是不可信输入。
+    #[must_use]
+    pub const fn externally_tainted_if(mut self, tainted: bool) -> Self {
+        self.externally_tainted = tainted;
+        self
+    }
 }
 
 /// 驱动前置策略与网关持有的驱动。
 #[derive(Debug)]
 pub struct ComputerGateway<D> {
+    dispatch: Option<std::sync::Arc<dyn DurableDispatch>>,
+    perception_mode: PerceptionMode,
     policy: ComputerPolicy,
     driver: D,
     timeouts: GatewayTimeouts,
@@ -167,14 +220,22 @@ where
     #[must_use]
     pub const fn new(policy: ComputerPolicy, driver: D) -> Self {
         Self {
+            dispatch: None,
             policy,
             driver,
+            perception_mode: PerceptionMode::Visual,
             timeouts: GatewayTimeouts {
-                list: Duration::from_secs(10),
+                list: Duration::from_secs(30),
                 observe: Duration::from_secs(30),
                 act: Duration::from_secs(30),
             },
         }
+    }
+
+    #[must_use]
+    pub const fn with_perception_mode(mut self, mode: PerceptionMode) -> Self {
+        self.perception_mode = mode;
+        self
     }
 
     #[must_use]
@@ -186,6 +247,13 @@ where
     #[must_use]
     pub fn driver(&self) -> &D {
         &self.driver
+    }
+
+    /// 写动作没有可信持久 authority 时失败关闭；只读观察仍无需打开账本。
+    #[must_use]
+    pub fn with_dispatch(mut self, dispatch: std::sync::Arc<dyn DurableDispatch>) -> Self {
+        self.dispatch = Some(dispatch);
+        self
     }
 
     fn evaluate(
@@ -269,48 +337,212 @@ where
     /// `ConfirmOnce` / `ConfirmEveryTime` 不在这里自动放行：宿主完成确认后，
     /// 应把 one-time 层写入 policy，再重新调用本方法。
     ///
-    /// 两个时间分开传入：`authorized_at` 校验动作前 frame，`verified_at`
-    /// 校验动作后新 frame。拿动作前时间校验 post-observation 会把一次慢动作
-    /// 误判为“新 frame 早已过期”。
+    /// `clock` 必须与驱动签发 frame 使用同一个单调逻辑时钟域。授权前和驱动
+    /// 返回后分别取样；复用动作前的时间会让已过期的动作后 frame 漏过校验。
+    /// 测试可以注入确定性的逻辑时钟，而不需要等待真实时间流逝。
     pub async fn act(
         &self,
         observation: &mut Observation,
         batch: ActionBatch,
         request: ComputerActionRequest,
-        authorized_at: Duration,
-        verified_at: Duration,
+        clock: impl Fn() -> Duration + Send + Sync,
     ) -> Result<VerificationReport, GatewayError> {
-        if verified_at < authorized_at {
-            return Err(GatewayError::ClockWentBackwards);
-        }
+        self.act_with_post_observation(observation, batch, request, clock)
+            .await
+            .map(|(report, _)| report)
+    }
 
+    /// 与 [`Self::act`] 相同，但把动作后的 observation 一并交还。
+    ///
+    /// 工具循环需要把新截图和元素引用立即还给模型；丢弃后再调用一次
+    /// `observe` 会重复截图，也可能看到比验证时更晚的状态。因此这一版让
+    /// “验证所用帧”和“模型下一轮看到的帧”严格是同一帧。
+    pub async fn act_with_post_observation(
+        &self,
+        observation: &mut Observation,
+        batch: ActionBatch,
+        request: ComputerActionRequest,
+        clock: impl Fn() -> Duration + Send + Sync,
+    ) -> Result<(VerificationReport, Observation), GatewayError> {
+        self.perception_mode.validate_batch(&batch)?;
+        self.perception_mode.validate_observation(observation)?;
         self.evaluate(
             batch.app().stable_id(),
             request.action,
-            request.secure_field || observation.secure_input(),
+            request.secure_field || observation.requires_secure_handoff(&batch),
             request.externally_tainted,
         )?;
 
+        // verification 是执行前的门禁，而不是执行后的说明文字。先确认
+        // 条件在动作前不成立，再消费 frame；这样弱条件或 window_present
+        // 不会先把 frame 用掉，更不会触达驱动。
+        batch
+            .validate_verification_before(observation)
+            .map_err(GatewayError::Protocol)?;
+
+        let authorized_at = clock();
         observation
             .authorize(&batch, authorized_at)
             .map_err(GatewayError::Protocol)?;
-        let receipt = tokio::time::timeout(self.timeouts.act, self.driver.act(&batch))
+        let permit = self
+            .dispatch
+            .as_ref()
+            .ok_or(GatewayError::DurableAuthorityRequired)?
+            .prepare(AuthorizedDispatch::new(
+                "act",
+                batch.app().stable_id().to_owned(),
+                batch.window().id().to_string(),
+                batch.frame().id().to_string(),
+            ))
+            .await
+            .map_err(GatewayError::DurablePrepare)?;
+        let send_authority = permit.send_authority();
+        let result = async {
+            // prepare 可能等待磁盘/跨进程写锁；取得 Permit 不能延长旧 frame 的寿命。
+            let dispatch_at = clock();
+            if dispatch_at < authorized_at {
+                return Err(GatewayError::ClockWentBackwards);
+            }
+            if batch.frame().is_expired_at(dispatch_at) {
+                return Err(GatewayError::Protocol(ProtocolError::StaleFrame {
+                    frame_id: batch.frame().id().clone(),
+                }));
+            }
+            let receipt = tokio::time::timeout(
+                self.timeouts.act,
+                crate::computer_dispatch::permit_scope(send_authority, self.driver.act(&batch)),
+            )
             .await
             .map_err(|_| GatewayError::DriverDeadline {
                 operation: "computer_act",
                 timeout: self.timeouts.act,
             })?
             .map_err(GatewayError::Driver)?;
-        let report = batch
-            .verify(receipt, verified_at)
-            .map_err(GatewayError::Protocol)?;
-        if !report.passed() {
-            return Err(GatewayError::VerificationFailed {
-                frame_id: report.post_frame_id().to_string(),
-                evidence: report.evidence().to_owned(),
-            });
+            let verified_at = clock();
+            if verified_at < authorized_at {
+                return Err(GatewayError::ClockWentBackwards);
+            }
+            let (report, post_observation) = batch
+                .verify_transition_with_post_observation(observation, receipt, verified_at)
+                .map_err(GatewayError::PostActionProtocol)?;
+            self.perception_mode
+                .validate_observation(&post_observation)
+                .map_err(GatewayError::PostActionProtocol)?;
+            if !report.passed() {
+                return Err(GatewayError::VerificationFailed {
+                    frame_id: report.post_frame_id().to_string(),
+                    evidence: report.evidence().to_owned(),
+                });
+            }
+            Ok((report, post_observation))
         }
-        Ok(report)
+        .await;
+        let outcome = if result.is_ok() {
+            DispatchOutcome::Verified
+        } else {
+            DispatchOutcome::Unknown
+        };
+        permit
+            .finish(outcome)
+            .await
+            .map_err(GatewayError::DurableFinish)?;
+        result
+    }
+
+    /// 授权、执行并验证一次隔离浏览器导航。
+    ///
+    /// 顺序仍是 policy -> frame authorize -> driver navigate -> verification。
+    /// 导航 URL 的站点 allowlist 由浏览器驱动在真正派发前检查；这里再保证
+    /// 它不能绕过 gate、frame TTL 或动作后新 observation。
+    pub async fn navigate(
+        &self,
+        observation: &mut Observation,
+        batch: NavigationBatch,
+        request: ComputerActionRequest,
+        clock: impl Fn() -> Duration + Send + Sync,
+    ) -> Result<(VerificationReport, Observation), GatewayError> {
+        self.evaluate(
+            batch.app().stable_id(),
+            request.action,
+            request.secure_field || observation.secure_input() || observation.window().is_secure(),
+            request.externally_tainted,
+        )?;
+        batch
+            .validate_verification_before(observation)
+            .map_err(GatewayError::Protocol)?;
+        let authorized_at = clock();
+        observation
+            .authorize_navigation(
+                batch.frame().id(),
+                batch.window().id(),
+                batch.app(),
+                authorized_at,
+            )
+            .map_err(GatewayError::Protocol)?;
+        let permit = self
+            .dispatch
+            .as_ref()
+            .ok_or(GatewayError::DurableAuthorityRequired)?
+            .prepare(AuthorizedDispatch::new(
+                "navigate",
+                batch.app().stable_id().to_owned(),
+                batch.window().id().to_string(),
+                batch.frame().id().to_string(),
+            ))
+            .await
+            .map_err(GatewayError::DurablePrepare)?;
+        let send_authority = permit.send_authority();
+        let result = async {
+            let dispatch_at = clock();
+            if dispatch_at < authorized_at {
+                return Err(GatewayError::ClockWentBackwards);
+            }
+            if batch.frame().is_expired_at(dispatch_at) {
+                return Err(GatewayError::Protocol(ProtocolError::StaleFrame {
+                    frame_id: batch.frame().id().clone(),
+                }));
+            }
+            let post = tokio::time::timeout(
+                self.timeouts.act,
+                crate::computer_dispatch::permit_scope(
+                    send_authority,
+                    self.driver.navigate(batch.url()),
+                ),
+            )
+            .await
+            .map_err(|_| GatewayError::DriverDeadline {
+                operation: "computer_browser_navigate",
+                timeout: self.timeouts.act,
+            })?
+            .map_err(GatewayError::Driver)?;
+            let verified_at = clock();
+            if verified_at < authorized_at {
+                return Err(GatewayError::ClockWentBackwards);
+            }
+            let receipt = Receipt::new(batch.frame().id().clone(), 1, Some(post))
+                .map_err(GatewayError::PostActionProtocol)?;
+            let (report, post_observation) = batch
+                .verify_transition_with_post_observation(observation, receipt, verified_at)
+                .map_err(GatewayError::PostActionProtocol)?;
+            if !report.passed() {
+                return Err(GatewayError::VerificationFailed {
+                    frame_id: report.post_frame_id().to_string(),
+                    evidence: report.evidence().to_owned(),
+                });
+            }
+            Ok((report, post_observation))
+        }
+        .await;
+        let outcome = if result.is_ok() {
+            DispatchOutcome::Verified
+        } else {
+            DispatchOutcome::Unknown
+        };
+        permit
+            .finish(outcome)
+            .await
+            .map_err(GatewayError::DurableFinish)?;
+        result
     }
 }
 

@@ -3,13 +3,15 @@
 
 use std::sync::Arc;
 
-use crate::confirm::{ConfirmRegistry, PendingMeta, preview_of};
+use crate::confirm::{ConfirmRegistry, ConfirmationLease, PendingMeta, preview_of};
 use cortex_agent::{Approval, ConfirmRequest, ToolHost, Turn};
 use cortex_proto::dto::ChatEvent;
 
+use crate::runs::run_principal::RunPrincipalKey;
 use crate::turn::Todos;
 use crate::turn_events::{subagent_event, subagent_marker};
 use crate::turn_prompt::render_page;
+use crate::workspaces::principal_key::SessionPrincipalKey;
 /// agent 循环要的宿主能力。
 /// 这一次画图，尺寸听谁的、画几张。
 ///
@@ -57,6 +59,14 @@ pub(super) struct LocalHost {
     pub(super) exec_env: cortex_agent::ExecEnvironment,
     pub(super) events: Arc<crate::runs::RunSink>,
     pub(super) session_id: String,
+    /// 这一轮唯一的缓存作用域。todo、background 与后续确认 lease 都必须
+    /// 使用它，不能退回裸 session id。
+    pub(super) principal_key: RunPrincipalKey,
+    /// 本机这一轮确认项的授权租约。容器没有宿主账号租约，确认按拒绝
+    /// 失败关闭，绝不能回落到只凭 session id 的旧路径。
+    pub(super) confirmation_lease: Option<ConfirmationLease>,
+    /// 桌面 workspace/grant 的作用域。云端容器没有宿主主体，这里是 None。
+    pub(super) session_key: Option<SessionPrincipalKey>,
     pub(super) confirms: Arc<ConfirmRegistry>,
     pub(super) grants: crate::grants::Grants,
     /// 与 `Engine` 里那份是同一个 —— 目录从它来，执行也回到它。
@@ -115,7 +125,9 @@ impl LocalHost {
     /// `end_session` 在析构里只能尽力而为。正常路径在这里明确 await，abort
     /// 路径仍由 `Drop` 的 best-effort 清理兜底。
     pub(super) async fn close_computer(&self) {
-        self.computer.close().await;
+        if let Err(error) = self.computer.close().await {
+            tracing::warn!(%error, "电脑操作关闭后状态仍未知");
+        }
     }
 }
 
@@ -176,7 +188,9 @@ impl ToolHost for LocalHost {
     }
 
     fn granted_roots(&self) -> Vec<std::path::PathBuf> {
-        self.grants.get(&self.session_id)
+        self.session_key
+            .as_ref()
+            .map_or_else(Vec::new, |key| self.grants.get_scoped(key))
     }
 
     /// 派给那台 MCP server。
@@ -199,8 +213,11 @@ impl ToolHost for LocalHost {
         &self,
         tool: &str,
         arguments: &serde_json::Value,
+        invocation: &cortex_agent::ComputerInvocation<'_>,
     ) -> cortex_agent::ToolResult {
-        self.computer.call(tool, arguments).await
+        self.computer
+            .call_with_invocation(tool, arguments, invocation)
+            .await
     }
 
     /// 取一份技能的正文 —— 转给服务端。
@@ -216,7 +233,7 @@ impl ToolHost for LocalHost {
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        match self.todos.set(&self.session_id, content) {
+        match self.todos.set(&self.principal_key, content) {
             Err(e) => cortex_agent::ToolResult::err(e),
             Ok(0) => cortex_agent::ToolResult::ok("清单已清空"),
             Ok(n) => cortex_agent::ToolResult::ok(format!(
@@ -695,7 +712,9 @@ impl ToolHost for LocalHost {
     }
 
     fn grant_root(&self, dir: &std::path::Path) {
-        self.grants.add(&self.session_id, dir);
+        if let Some(key) = &self.session_key {
+            self.grants.add_scoped(key, dir);
+        }
     }
 
     /// 问用户准不准。逻辑与 cortexd 完全一致 —— 用的就是同一份
@@ -710,16 +729,46 @@ impl ToolHost for LocalHost {
         // 越界的绝对路径原样带上：用户判断「准不准」的依据里，
         // 「这在工作区外」与「这条命令是什么」同样重要
         let scope = req.scope.map(|p| p.display().to_string());
-        let pending = self.confirms.open(PendingMeta {
-            session_id: self.session_id.clone(),
-            tool: req.tool.to_string(),
-            risk,
-            preview: preview.clone(),
-            scope: scope.clone(),
-            // 改动预览：确认框里先看见要写什么，再决定按不按允许。
-            // 这正是「盲签」被治掉的那一处
-            diff: req.diff.map(str::to_string),
-        });
+        let Some(lease) = &self.confirmation_lease else {
+            tracing::warn!(
+                tool = req.tool,
+                session = %self.session_id,
+                "这一轮没有账号确认租约，按拒绝处理"
+            );
+            self.computer
+                .record_confirmation_outcome(req.tool, req.arguments, Approval::Denied);
+            return Approval::Denied;
+        };
+        let pending = match self.confirms.open_scoped(
+            PendingMeta {
+                session_id: self.session_id.clone(),
+                tool: req.tool.to_string(),
+                risk,
+                preview: preview.clone(),
+                scope: scope.clone(),
+                // 改动预览：确认框里先看见要写什么，再决定按不按允许。
+                // 这正是「盲签」被治掉的那一处
+                diff: req.diff.map(str::to_string),
+            },
+            lease,
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(
+                    tool = req.tool,
+                    session = %self.session_id,
+                    run_id = lease.run_id(),
+                    %error,
+                    "确认租约已失效，按拒绝处理"
+                );
+                self.computer.record_confirmation_outcome(
+                    req.tool,
+                    req.arguments,
+                    Approval::Denied,
+                );
+                return Approval::Denied;
+            }
+        };
 
         let ask = ChatEvent::Confirm {
             token: pending.token().to_string(),
@@ -732,8 +781,6 @@ impl ToolHost for LocalHost {
             // 补拉走 GET /confirmations，两条都要带
             diff: req.diff.map(str::to_string),
         };
-        self.events.send(ask).await;
-
         // ── 不再因为「此刻没人连着」就放弃 ──
         //
         // 上一版这里做两件事：发不出去就当没人答，以及等待期间客户端一断开
@@ -746,7 +793,29 @@ impl ToolHost for LocalHost {
         //
         // 剩下的保护是超时（`ConfirmRegistry::timeout`），它本来就在，
         // 且不依赖任何关于「谁还看着」的猜测。
-        pending.wait(std::future::pending()).await
+        // 事件投递等待锁时，重连客户端仍可通过列表答复；超时不能因为投递
+        // 卡住而延长。两条路径共享登记时的同一个单调截止时间。
+        // 不保存 token 原文；仅在确认确实返回 Allow 后生成不可逆的审批关联。
+        let confirmation_token = pending.token().to_owned();
+        let approval = pending.wait_with_delivery(self.events.send(ask)).await;
+        if approval.is_allowed()
+            && let Err(error) = self.computer.record_approved_invocation(
+                *req.operation_id,
+                req.tool,
+                req.arguments,
+                &confirmation_token,
+            )
+        {
+            tracing::warn!(%error, "电脑调用与审批无法绑定，按拒绝处理");
+            self.computer
+                .record_confirmation_outcome(req.tool, req.arguments, Approval::Denied);
+            return Approval::Denied;
+        }
+        if !approval.is_allowed() {
+            self.computer
+                .record_confirmation_outcome(req.tool, req.arguments, approval);
+        }
+        approval
     }
 }
 

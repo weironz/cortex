@@ -189,6 +189,9 @@ pub struct ComputerCapabilities {
     pub list_windows: bool,
     /// 能截取显示器或窗口并返回可验证的 frame。
     pub observe: bool,
+    /// 支持无图像的结构化观察与引用动作；旧宿主缺字段时不得推定支持。
+    #[serde(default)]
+    pub accessibility_only: bool,
     /// 能向 allowlisted 应用投递点击、输入、按键或滚动。
     pub act: bool,
     /// 有独立的浏览器结构化通道，而不是只能操作整屏。
@@ -197,6 +200,32 @@ pub struct ComputerCapabilities {
     pub background_input: bool,
     /// 能识别 secure field / UAC / 锁屏等不可自动操作的状态。
     pub secure_input_detection: bool,
+    /// 写入的机器级前置状态，不替代 principal、策略、审批或目标授权。
+    /// 老后端缺字段为 None，不能据此声称权威已 provision。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_readiness: Option<ComputerWriteReadiness>,
+}
+
+/// 有界、无凭据的机器可读原因；Ready 只是派发前置条件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerWriteReadiness {
+    Ready,
+    AuthorityMissing,
+    ProvisionIncomplete,
+    OwnerMismatch,
+    AuthorityUnresolved,
+    AuthorityInvalid,
+    AuthorityBusy,
+    ProbeUnavailable,
+    Unsupported,
+    #[serde(other)]
+    Unknown,
+}
+impl ComputerWriteReadiness {
+    pub const fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
 }
 
 #[cfg(test)]

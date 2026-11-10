@@ -1,0 +1,19 @@
+﻿{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-soak",
+    "startedAt":  "2026-11-01T18:03:42.6301508Z",
+    "finishedAt":  "2026-11-01T18:21:07.1106594Z",
+    "durationSeconds":  1044.48,
+    "requestedSeconds":  14400,
+    "intervalMs":  5000,
+    "driverSha256":  "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+    "fixtureExecutable":  "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\target\\cortex-computer-use-soak-fixture.exe",
+    "fixtureSha256":  "efd056dc99e99821b5c6efcc340bd60751da9940d68e3f98fd2fe9657a0a414f",
+    "secureFixturePassed":  true,
+    "sourceFingerprintBefore":  "2fc0c86fcb5a62113cda9efe5095d8a5ba8bec80aed21f90791a779d4ae4614c",
+    "sourceFingerprintAfter":  "2fc0c86fcb5a62113cda9efe5095d8a5ba8bec80aed21f90791a779d4ae4614c",
+    "sourceUnchanged":  true,
+    "exitCode":  101,
+    "logTail":  "cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.46s\n所在位置 D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\soak.ps1:225 字符: 9\n+         \u0026 cargo test -p cortex-local --bin cortex-local `\n+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.46s:String) [], RemoteException\n    + FullyQualifiedErrorId : NativeCommandError\n \n     Running unittests src\\main.rs (target\\debug\\deps\\cortex_local-23f0d987dee0727b.exe)\n\nrunning 1 test\ntest computer::real::tests::cua_secure_fixture_requires_handoff_without_input ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 291 filtered out; finished in 11.23s\n\ncargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s\n所在位置 D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\soak.ps1:245 字符: 9\n+         \u0026 cargo test -p cortex-local --bin cortex-local `\n+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.45s:String) [], RemoteException\n    + FullyQualifiedErrorId : NativeCommandError\n \n     Running unittests src\\main.rs (target\\debug\\deps\\cortex_local-23f0d987dee0727b.exe)\n\nrunning 1 test\n\nthread \u0027computer::real::tests::cua_fixture_long_running_soak\u0027 (59484) panicked at crates\\cortex-local\\src\\computer.rs:4\n091:29:\nsoak cycle 82: fixture window missing from {\"windows\":[]}\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest computer::real::tests::cua_fixture_long_running_soak ... FAILED\n\nfailures:\n\nfailures:\n    computer::real::tests::cua_fixture_long_running_soak\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 291 filtered out; finished in 1026.65s\n\nerror: test failed, to rerun pass `-p cortex-local --bin cortex-local`\nCua Driver daemon listening on \\\\.\\pipe\\cortex-soak-966a65b9469f4298827c029fc473687f",
+    "failure":  "Cargo soak test exited with code 101."
+}

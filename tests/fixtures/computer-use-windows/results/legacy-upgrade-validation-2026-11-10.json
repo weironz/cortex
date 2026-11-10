@@ -1,0 +1,143 @@
+{
+  "schema": 1,
+  "recordedAt": "2026-11-09T18:16:23.165150+00:00",
+  "phase": "legacy_schema1_to_input_epoch_upgrade",
+  "scope": "private_windows_ntfs_sqlite_fixture_and_local_workflow_ci",
+  "productionMaintenanceExecuted": false,
+  "realHklmOrProgramDataModified": false,
+  "powerLossOrRegistryFlushFailureSimulated": false,
+  "head": "4f291914d2bfe1c685b48430214d08b2ed73ba60",
+  "dirtyWorktree": true,
+  "sourceScope": "20 selected source and manifest hashes; not a whole-repository signature",
+  "sources": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "4ea0169ee9d4177908c2a4136d2632cd7660ea57f4667cf0f086795778eb3c32"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "21a6c0fcb7314a06819ca836801d657f050d0f36a6ac472dace4cddd829a134a"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/Cargo.toml",
+      "sha256": "3e183b0c4ae2a8089e9858b800bf9a5b8f12a70ebd76425e356e0950e3ce3123"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/src/lib.rs",
+      "sha256": "9f7ded91d48f77f515d4886c8e154f9a0c73b25e5c874e369167617283766abe"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/src/storage.rs",
+      "sha256": "cb6ad191832af2acb01ee6fb41b96c166ffcf014e3b08c742e8cfc16ca34a9e6"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/src/epoch_storage.rs",
+      "sha256": "ecd8836d325b4652c87b8a2980da3e4cd7817b5410b12c97b636b66d928a3736"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/tests/epoch_recovery.rs",
+      "sha256": "f0d332ae03ea3a0483ab2b80b3a8cf94b7207ecc7f61955af1bf9b88785eafbd"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/tests/fixtures/schema1.sql",
+      "sha256": "adb79e9f485836a0d8014591ead52c85ef222dc870a33013b056d268c61320bc"
+    },
+    {
+      "path": "crates/cortex-local/src/main.rs",
+      "sha256": "2a9499f665035251fbe83fe2d7c736768a317b70535a83b3251aa0c90d4a3a78"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger.rs",
+      "sha256": "2fa7674ed14b43e351ee98d1fc13c7ef48312044479ffca77094c9ced32a915f"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_authority.rs",
+      "sha256": "9c2c617ad6f11eec51ae1355a5c346d43f00f386da116030ff1930fc97d5a3cf"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_windows.rs",
+      "sha256": "be1682c9225917ad1ec8a38ded2c5c121015bd180020254c3a2f1faaace73fa1"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_install_windows.rs",
+      "sha256": "2616d2aeea46adc15a315c003556f05390e39df8c3bc3382524ac3da9821f25d"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_install_codec.rs",
+      "sha256": "ffdc55c0dd190f10a33e076a074f94fda6fead17798d4a950a5cdab9529598c0"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_install_codec_test.rs",
+      "sha256": "9668310e105f14f93028a635b62396dcc115399ef13763a569232777e945f8c8"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_provision.rs",
+      "sha256": "4d6a19674ae9a6f326fdecfd81d204abdf9f120817a07805423a838c1929aaec"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_upgrade.rs",
+      "sha256": "7cda4d6438cf629facf85f2de17e1e1fd09cc8d3b83b25a8243e8ade9cf7a300"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_upgrade_test.rs",
+      "sha256": "497e91a4135dc8e8a2bd8d5619d8324fa58a9db1f5a5885c1bfe63d23166d3cf"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_upgrade_session.rs",
+      "sha256": "c9f0b8257a3563d3d4b59db7011a79bec31c183a45b2dd5621d651f2163947ec"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_upgrade_session_test.rs",
+      "sha256": "d72aeebb24e750cc73ad4d5f63d3b3eb5c09c87308effa47823d01ec90668ef4"
+    }
+  ],
+  "ci": {
+    "command": "just workflow-ci",
+    "exitCode": 0,
+    "log": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-input-recovery-nvme-20261110\\workflow-ci-legacy-upgrade-verified.log",
+    "logSha256": "b6cc36ccf0b6c1e451b205a692ab45a744066674265aee77acfe41ea7abab2cf",
+    "rust": {
+      "passed": 2124,
+      "failed": 0,
+      "ignored": 35
+    },
+    "cargoTargets": 48,
+    "cortexLocal": {
+      "passed": 685,
+      "failed": 0,
+      "ignored": 25
+    },
+    "flutter": {
+      "passed": 1112,
+      "skipped": 7
+    },
+    "flutterAnalyzer": "no_issues",
+    "strictWorkspaceClippy": "passed"
+  },
+  "testBinaries": {
+    "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-input-recovery-nvme-20261110\\debug\\deps\\epoch_recovery-39667ccde5ebe520.exe": "6fee1a55c17368e11ec8e01d703e804fa32c277b129d9b5a9df5d64f685797b6",
+    "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-input-recovery-nvme-20261110\\debug\\deps\\cortex_local-ab17042e4ad5294e.exe": "0231f535b2abe91c7189e4d04762f555fee6b76bd3d732710e962668ccff6bd8"
+  },
+  "selectedRegressions": {
+    "core": {
+      "passed": 56,
+      "ignored": 2
+    },
+    "hostLedger": {
+      "passed": 80,
+      "ignored": 3
+    },
+    "installationCodec": 7,
+    "legacySession": 11,
+    "upgradeCoordinator": 6,
+    "interruptionBoundaries": 7,
+    "partialAnchorPrefixes": 6
+  },
+  "limitations": [
+    "Fixture uses test provision proof, not real elevated OS maintenance authorization",
+    "No claim of real power-loss or storage fault atomicity",
+    "Legacy unresolved histories remain blocked and are never cleared by upgrade",
+    "Real installed-version upgrade and human maintenance acceptance remain pending",
+    "Earlier recovery evidence is historical and is not rebound to these new sources"
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "scope": "same_frozen_backend_real_owned_host_fixture_10m_diagnostic_replay",
+  "status": "passed",
+  "machine": "WILLOPTPC",
+  "startedAt": "2026-11-09T23:49:54.7197125Z",
+  "finishedAt": "2026-11-10T00:00:06.4759432Z",
+  "tests": {
+    "secure": {
+      "name": "computer::real::tests::cua_secure_fixture_requires_handoff_without_input",
+      "status": "passed",
+      "startedAt": "2026-11-09T23:49:58.5494514Z",
+      "exitCode": 0,
+      "harness": {
+        "exitCode": 0,
+        "runningOneLines": 1,
+        "namedPassedLines": 1,
+        "onePassedSummaryLines": 1,
+        "totalRunLines": 1,
+        "totalSummaryLines": 1,
+        "passed": true
+      },
+      "durationSeconds": 5.105,
+      "durationMilliseconds": 5105,
+      "finishedAt": "2026-11-09T23:50:03.6658205Z"
+    },
+    "soak": {
+      "name": "computer::real::tests::cua_fixture_long_running_soak",
+      "status": "passed",
+      "startedAt": "2026-11-09T23:50:04.1431702Z",
+      "exitCode": 0,
+      "harness": {
+        "exitCode": 0,
+        "runningOneLines": 1,
+        "namedPassedLines": 1,
+        "onePassedSummaryLines": 1,
+        "totalRunLines": 1,
+        "totalSummaryLines": 1,
+        "passed": true
+      },
+      "durationSeconds": 602.239,
+      "durationMilliseconds": 602239,
+      "finishedAt": "2026-11-10T00:00:06.3825765Z"
+    }
+  },
+  "sourceResult": "C:\\Users\\willz\\AppData\\Local\\Temp\\portable-owned-180s-redacted-diagnostic-20261110\\retry10m-result.json",
+  "sourceResultSha256": "74a71b1cb2e335cf4cdb66e2eb4e2f25a437294acfba278adac0cbad358154f1",
+  "artifactSha256": "8d9cc9ea8bda6b8932fb67b8bc3e075b07b3f9836da85f7e4ec63e6760fe586a",
+  "prior125sFailureReproduced": false,
+  "priorFailureRootCauseConfirmed": false,
+  "productionAccepted": false,
+  "fourHourHostPassed": false
+}

@@ -1,0 +1,32 @@
+{
+  "scope": "original_host_four_hour_cancelled_by_user",
+  "reason": "User requested no long tests and expedited closure",
+  "originalOwnerReport": {
+    "powerRequestReleased": true,
+    "startedAtUtc": "2026-11-10T00:05:08.8917919Z",
+    "sourceChanged": [],
+    "state": "terminal_requires_result_audit",
+    "childPid": 52436,
+    "finishedAtUtc": "2026-11-10T01:58:07.2603953Z",
+    "schema": 1,
+    "exitCode": -1,
+    "ownerPid": 10320,
+    "originalJobDrained": true,
+    "ownerRunId": "1d28be36ff75467c922ef72b62b8f9db",
+    "failure": null,
+    "productionAccepted": false
+  },
+  "productionAccepted": false,
+  "fourHourCompleted": false,
+  "request": {
+    "childPid": 52436,
+    "ownerRunId": "1d28be36ff75467c922ef72b62b8f9db",
+    "state": "user_requested_cancellation",
+    "ownerPid": 10320,
+    "reason": "No long tests; expedite closure",
+    "completionClaimed": false,
+    "requestedAtUtc": "2026-11-10T01:58:06.4959812Z"
+  },
+  "secondHost": "deferred_by_user_unverified",
+  "state": "cancelled_by_user"
+}

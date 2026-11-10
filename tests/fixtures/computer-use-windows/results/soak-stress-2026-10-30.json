@@ -1,0 +1,13 @@
+﻿{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-soak",
+    "startedAt":  "2026-10-30T06:34:23.6776310Z",
+    "finishedAt":  "2026-10-30T06:40:04.7827014Z",
+    "durationSeconds":  341.11,
+    "requestedSeconds":  300,
+    "intervalMs":  1000,
+    "driverSha256":  "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+    "fixtureExecutable":  "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\target\\cortex-computer-use-windows-fixture.exe",
+    "exitCode":  0,
+    "logTail":  "cargo.exe :    Compiling cortex-local v0.1.44 (D:\\codes\\cortex\\crates\\cortex-lo\ncal)\nAt D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\soak.ps1:156 char:9\n+         \u0026 cargo test -p cortex-local `\n+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n    + CategoryInfo          : NotSpecified: (   Compiling co...s\\cortex-local) \n   :String) [], RemoteException\n    + FullyQualifiedErrorId : NativeCommandError\n \nwarning: linker stdout: 正在创建库 D:\\codes\\cortex\\target\\debug\\deps\\cortex_local-23\nf0d987dee0727b.lib 和对象 D:\\codes\\cortex\\target\\debug\\deps\\cortex_local-23f0d987d\nee0727b.exp\n  |\n  = note: `#[warn(linker_messages)]` on by default\n\nwarning: `cortex-local` (bin \"cortex-local\" test) generated 1 warning\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 36.42s\n     Running unittests src\\main.rs (target\\debug\\deps\\cortex_local-23f0d987dee0\n727b.exe)\n\nrunning 1 test\ntest computer::real::tests::cua_fixture_long_running_soak ... Cortex Computer Use soak passed: 42 cycles, 3 Cua sessions, 300 seconds\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 249 filtered out; finished in 302.73s\n\nCua Driver daemon listening on \\\\.\\pipe\\cortex-soak-f7469f527a994ee1a3a38474654cbad1"
+}

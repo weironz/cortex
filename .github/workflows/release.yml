@@ -266,17 +266,67 @@ jobs:
       # 这条断言抓的就是它）。这一步依赖 runner 有可用的桌面会话 ——
       # 本机验证过，CI 上没有。真在这里挂了而产物本身没问题，
       # 用 --no-exec 关掉它，但那意味着这份产物从没被运行过。
+      - name: Windows 原生 JSON、桌面判定与验收产物来源回归
+        shell: bash
+        run: bash scripts/test-windows-fixtures.sh
+
+      - name: 准备代码签名证书
+        shell: bash
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.CORTEX_WINDOWS_SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.CORTEX_WINDOWS_SIGN_PFX_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGN_PFX_BASE64}" ]; then
+            echo "::error::缺少 CORTEX_WINDOWS_SIGN_PFX_BASE64；生产 Windows 安装包不能继续未签名发布"
+            exit 1
+          fi
+          if [ -z "${SIGN_PFX_PASSWORD}" ]; then
+            echo "::error::缺少 CORTEX_WINDOWS_SIGN_PFX_PASSWORD；签名证书无法导入"
+            exit 1
+          fi
+          pfx="${RUNNER_TEMP}/cortex-signing.pfx"
+          umask 077
+          printf '%s' "${SIGN_PFX_BASE64}" | base64 --decode > "${pfx}"
+          test -s "${pfx}"
+          printf 'CORTEX_WINDOWS_SIGN_PFX_PATH=%s\n' \
+            "$(cygpath -w "${pfx}")" >> "${GITHUB_ENV}"
+
       - name: 打包
         shell: bash
+        env:
+          CORTEX_WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.CORTEX_WINDOWS_SIGN_PFX_PASSWORD }}
         run: |
           bash scripts/release-desktop-windows.sh \
-            --version "${{ needs.preflight.outputs.version }}"
+            --version "${{ needs.preflight.outputs.version }}" \
+            --require-signing
+
+      - name: 验证安装包签名
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifact = Get-ChildItem -LiteralPath "${env:GITHUB_WORKSPACE}\dist" `
+            -Filter '*-setup.exe' |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $artifact) { throw '找不到 setup.exe' }
+          $signature = Get-AuthenticodeSignature -LiteralPath $artifact.FullName
+          if ($signature.Status -ne 'Valid') {
+            throw "setup.exe Authenticode 签名无效：$($signature.Status) $($signature.StatusMessage)"
+          }
+          Write-Output "setup.exe signer: $($signature.SignerCertificate.Subject)"
+
+      - name: 删除临时签名证书
+        if: always()
+        shell: bash
+        run: rm -f "${RUNNER_TEMP}/cortex-signing.pfx"
 
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-windows
           path: |
             dist/*-setup.exe
+            dist/*-setup.exe.cdx.json
             dist/*.sha256
           if-no-files-found: error
 
@@ -455,7 +505,11 @@ jobs:
           # 把关下沉成了流水线里那四道会跑的检查
           draft: false
           body_path: notes.md
-          files: dist/*
+          files: |
+            dist/cortex-v${{ needs.preflight.outputs.version }}-x86_64-pc-windows-msvc.zip
+            dist/cortex-desktop-v${{ needs.preflight.outputs.version }}-x86_64-pc-windows-msvc-setup.exe
+            dist/cortex-desktop-v${{ needs.preflight.outputs.version }}-x86_64-pc-windows-msvc-setup.exe.cdx.json
+            dist/SHA256SUMS
 
   # ── 上生产 ────────────────────────────────────────────────
   #

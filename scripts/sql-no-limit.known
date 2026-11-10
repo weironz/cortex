@@ -5,6 +5,9 @@ crates/cortex-agentd/src/accounts.rs	SELECT password_hash FROM cortex_auth.users
 crates/cortex-agentd/src/accounts.rs	SELECT user_id, family_id, rotated_at IS NOT NULL AS rotated, COALESCE(rotated_at > now() 
 crates/cortex-agentd/src/accounts.rs	SELECT username, schema_name FROM cortex_auth.users WHERE id = $1
 crates/cortex-agentd/src/assistants.rs	SELECT id, name, description, instructions, icon, model, source, disabled_tools, created_a
+crates/cortex-agentd/src/deployment.rs	SELECT count(*) FROM deployment_identity
+crates/cortex-agentd/src/deployment.rs	SELECT deployment_id FROM deployment_identity
+crates/cortex-agentd/src/deployment.rs	SELECT pg_advisory_xact_lock($1)
 crates/cortex-agentd/src/gallery.rs	SELECT b.mime FROM generated_images g JOIN blobs b ON b.hash = g.blob_hash WHERE g.id = $1
 crates/cortex-agentd/src/gallery.rs	SELECT g.blob_hash, b.mime, b.size_bytes FROM generated_images g JOIN blobs b ON b.hash = 
 crates/cortex-agentd/src/gallery.rs	SELECT nspname::text FROM pg_namespace WHERE nspname LIKE 'cortex\\_gal\\_%'
@@ -34,6 +37,7 @@ crates/cortex-agentd/src/profile.rs	SELECT username, nickname, avatar_mime, avat
 crates/cortex-agentd/src/quota.rs	SELECT -- ::bigint 是必需的：`sum(bigint)` 在 Postgres 里返回 -- **numeric**，而按 i64 取会在解码时 panic ——
 crates/cortex-agentd/src/quota.rs	SELECT COALESCE(model, '') AS model, own_key, -- ::bigint 见 quota_status 里那段：sum(bigint) 是
 crates/cortex-agentd/src/request_tenant.rs	SELECT schema_name FROM cortex_auth.users WHERE id = $1
+crates/cortex-agentd/src/request_tenant.rs	SELECT schema_name FROM cortex_auth.users WHERE id = $1 AND disabled_at IS NULL
 crates/cortex-agentd/src/search_prefs.rs	SELECT provider, ciphertext, key_tail, base_url, max_results, depth, cutoff_limit, exclude
 crates/cortex-agentd/src/skills.rs	SELECT id, name, description, instructions, enabled, created_at, updated_at FROM skills OR
 crates/cortex-agentd/src/skills.rs	SELECT name, instructions FROM skills WHERE name = $1 AND enabled

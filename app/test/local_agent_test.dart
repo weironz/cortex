@@ -5,6 +5,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:cortex_app/core/computer_use_runtime_io.dart';
 import 'package:cortex_app/core/local_agent.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -61,7 +62,7 @@ void main() {
             '{"type":"http","url":"http://127.0.0.1:${mute.port}/mcp"}}}',
           );
 
-        final agent = LocalAgent(executable: exe!, stateDir: stateDir.path);
+        final agent = _isolatedAgent(executable: exe!, stateDir: stateDir);
         addTearDown(agent.stop);
 
         final started = DateTime.now();
@@ -99,7 +100,7 @@ void main() {
         final stateDir = Directory.systemTemp.createTempSync('cortex-agent-');
         addTearDown(() => stateDir.deleteSync(recursive: true));
 
-        final agent = LocalAgent(executable: exe!, stateDir: stateDir.path);
+        final agent = _isolatedAgent(executable: exe!, stateDir: stateDir);
         addTearDown(agent.stop);
 
         // ⚠️ **把 MCP 指到一份空配置上。**
@@ -118,16 +119,27 @@ void main() {
         // A remote that will never answer. The agent must still come up —
         // its whole offline story depends on that, and it means this test
         // needs no cortexd.
+        final startedAt = DateTime.now();
         final origin = await agent.start(
           remote: 'http://127.0.0.1:1',
           token: 'test-token-not-a-real-credential',
           extraEnv: {'CORTEX_MCP_CONFIG': emptyMcp.path},
         );
+        final waited = DateTime.now().difference(startedAt);
 
         expect(
           origin,
           startsWith('http://127.0.0.1:'),
           reason: '必须绑在 loopback 上 —— 它能执行命令，绑到别处等于把同网段放进来',
+        );
+        expect(
+          waited,
+          lessThan(const Duration(seconds: 8)),
+          reason:
+              '死远端的 /health 与 /auth/me 必须并发探测；'
+              '这里保留宽松的整机冒烟上界，防止探测或进程启动退化成'
+              '桌面端 20 秒的启动超时；并发行为本身由 Rust 交叉等待测试确定。'
+              '本次耗时 $waited',
         );
         expect(
           origin,
@@ -141,6 +153,11 @@ void main() {
         expect(res.statusCode, 200);
         final body = jsonDecode(res.body) as Map<String, dynamic>;
         expect(body['role'], 'local-agent');
+        expect(
+          File('${stateDir.path}/rust-state/owner-v1/owner.json').existsSync(),
+          isTrue,
+          reason: '真实 exe 必须在本例私有 Rust 状态目录建立 owner，不能借真实用户缓存',
+        );
         expect(
           (body['server'] as Map)['reachable'],
           false,
@@ -160,7 +177,7 @@ void main() {
         addTearDown(() => stateDir.deleteSync(recursive: true));
 
         const secret = 'zzz-secret-must-not-appear-in-argv';
-        final agent = LocalAgent(executable: exe!, stateDir: stateDir.path);
+        final agent = _isolatedAgent(executable: exe!, stateDir: stateDir);
         addTearDown(agent.stop);
         await agent.start(remote: 'http://127.0.0.1:1', token: secret);
 
@@ -206,13 +223,13 @@ void main() {
 
         final stateDir = Directory.systemTemp.createTempSync('cortex-agent-');
         addTearDown(() => stateDir.deleteSync(recursive: true));
-        final agent = LocalAgent(executable: exe!, stateDir: stateDir.path);
+        final agent = _isolatedAgent(executable: exe!, stateDir: stateDir);
         addTearDown(agent.stop);
 
         final err = await agent
             .start(
               remote: 'http://127.0.0.1:${fake.port}',
-              token: 't',
+              token: 'protocol-test-local-control-capability',
               timeout: const Duration(seconds: 15),
             )
             .then<Object?>((_) => null, onError: (Object e) => e);
@@ -243,9 +260,9 @@ void main() {
       final stateDir = Directory.systemTemp.createTempSync('cortex-agent-');
       addTearDown(() => stateDir.deleteSync(recursive: true));
 
-      final agent = LocalAgent(
+      final agent = _isolatedAgent(
         executable: '${stateDir.path}${Platform.pathSeparator}nope.exe',
-        stateDir: stateDir.path,
+        stateDir: stateDir,
       );
       expect(
         () => agent.start(remote: 'http://127.0.0.1:1', token: 't'),
@@ -256,16 +273,87 @@ void main() {
   });
 }
 
-/// The debug build, which is what a developer has locally. Release too, in case
-/// this runs right after packaging.
+/// 仍启动真实 exe，但只有本例配置能进入子进程；临时 Dart stateDir 本身
+/// 不会决定 Rust 的 owner/MCP/hooks 目录，必须显式传入原生状态覆盖。
+LocalAgent _isolatedAgent({
+  required String executable,
+  required Directory stateDir,
+}) {
+  final root = stateDir.absolute;
+  final profile = Directory('${root.path}/profile')..createSync();
+  final local = Directory('${profile.path}/local')..createSync();
+  final roaming = Directory('${profile.path}/roaming')..createSync();
+  final home = Directory('${profile.path}/home')..createSync();
+  final temp = Directory('${root.path}/temp')..createSync();
+  final rust = Directory('${root.path}/rust-state')..createSync();
+  final emptyMcp = File('${root.path}/isolated-mcp.json')
+    ..writeAsStringSync('{"mcpServers":{}}');
+  // 阻断 dotenv 向父目录搜索，不能从 app/ 或仓库的 .env 取真实配置。
+  File('${root.path}/.env').writeAsStringSync('');
+  return LocalAgent.forTesting(
+    executable: executable,
+    stateDir: root.path,
+    computerUseFactory: ComputerUseRuntime.new,
+    startProcess: (exe, args, {environment, workingDirectory}) => Process.start(
+      exe,
+      args,
+      workingDirectory: root.path,
+      includeParentEnvironment: false,
+      environment: {
+        // Windows 的 ACL 子进程与动态库查找仍需基本 OS 环境，不复制用户配置。
+        for (final key in [
+          'SystemRoot',
+          'WINDIR',
+          'SystemDrive',
+          'COMSPEC',
+          'PATH',
+          'PATHEXT',
+          'NUMBER_OF_PROCESSORS',
+          'PROCESSOR_ARCHITECTURE',
+        ])
+          key: ?Platform.environment[key],
+        'LOCALAPPDATA': local.path,
+        'APPDATA': roaming.path,
+        'USERPROFILE': profile.path,
+        'HOME': home.path,
+        'XDG_DATA_HOME': local.path,
+        'TEMP': temp.path,
+        'TMP': temp.path,
+        'TMPDIR': temp.path,
+        'CORTEX_LOCAL_STATE_DIR': rust.path,
+        // 装死 MCP 用例仍传自己的 mock 配置；其余用例默认只读空表。
+        'CORTEX_MCP_CONFIG': environment?['CORTEX_MCP_CONFIG'] ?? emptyMcp.path,
+        'CORTEX_LOCAL_LLM': 'proxy',
+        'CORTEX_EXEC_ENV': 'local-machine',
+        'CORTEX_TOKEN': environment?['CORTEX_TOKEN'] ?? '',
+        'CORTEX_INBOUND_TOKEN': environment!['CORTEX_INBOUND_TOKEN']!,
+      },
+    ),
+  );
+}
+
+/// 显式 target 只验证该目录里的普通主程序，避免误用旧构建或把缺构建变成跳过。
 String? _findAgent() {
   final name = Platform.isWindows ? 'cortex-local.exe' : 'cortex-local';
+  final configuredTarget = Platform.environment['CARGO_TARGET_DIR'];
+  if (configuredTarget != null && configuredTarget.trim().isEmpty) {
+    throw StateError('CARGO_TARGET_DIR 已设置但为空，无法确定要验证的普通主程序。');
+  }
+  // 未设置时仍从 app/ 的上一级 target 查找，保持原来的 debug/release 顺序。
+  final target = Directory(
+    configuredTarget ?? '..${Platform.pathSeparator}target',
+  ).absolute.path;
   for (final profile in ['debug', 'release']) {
-    // Tests run with CWD = app/, so the workspace target/ is one level up.
     final p =
-        '..${Platform.pathSeparator}target'
-        '${Platform.pathSeparator}$profile${Platform.pathSeparator}$name';
+        '$target${Platform.pathSeparator}$profile'
+        '${Platform.pathSeparator}$name';
     if (File(p).existsSync()) return File(p).absolute.path;
+  }
+  if (configuredTarget != null) {
+    throw StateError(
+      'CARGO_TARGET_DIR=$target 中找不到普通主程序 '
+      'debug/$name 或 release/$name；不会回退默认 target 或跳过真实 exe 测试。',
+    );
   }
   return null;
 }

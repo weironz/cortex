@@ -1,0 +1,43 @@
+{
+  "base_commit": "85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19",
+  "sdk_version": "0.38.0",
+  "files": [
+    {
+      "path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs",
+      "git_blob": "896e77dd0ea47e03ea8c1f6907b119d5932d950b",
+      "sha256": "22eb32ec0db56272cbc757d66ee9a5bd0a797daa8109785797155562f117fa42"
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver-core/src/tool_schema.rs",
+      "git_blob": "e60d3e26c78deea710f4ecbd86804cd3a784ed93",
+      "sha256": "0df8c43130ea07a62982d9a8e9a05e5320430a073f863dda0853dcd6e131a0e3"
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs",
+      "git_blob": "afef86dc4e5476f5aa7276095b212dd85d9f8897",
+      "sha256": "c962f921faca4ac2a2075ba146dc21ad093f1fb1fef602ffe51fb32b547ca2f1"
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver-core/src/action_record.rs",
+      "git_blob": "424a9061cd9fdad0f58a0de4afddee90393b4685",
+      "sha256": "f5dfd87ab03ad6ed840b4bcd1ff50db8cdc8d8cc86176a581ea288169c7174af"
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs",
+      "git_blob": "63733f8950eb317dc23891454273c021aa77e590",
+      "sha256": "1637123a7c7187ad1bfa4cdd0272b6bc4b0ca1e45e29e2909842ce881fc0eb79"
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver-contract/src/outputs.rs",
+      "git_blob": "de182f9142b63d6dade1d34428373acf30b27e80",
+      "sha256": "857469514dc98680c6b7d81f8e704f7ec50275152953bcb67731ae939b716f18"
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver/src/cli.rs",
+      "git_blob": "409870928897a609d6550827cd88431eee425e1d",
+      "sha256": "14807408314da92279b74917bc82330e6c6d4fe4b6f89154de70ab4ef680ea88"
+    }
+  ],
+  "fixture_source": "tests/fixtures/computer-use-windows/src/Program.cs",
+  "fixture_source_sha256": "b88d57bd23c6e64fc9b009e5f84a35e60678a5061e60c67477d05804a4e7fbff"
+}

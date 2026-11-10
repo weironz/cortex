@@ -137,6 +137,46 @@ impl AgentState {
         self.tenant_on(schema).await
     }
 
+    /// 严格身份路径专用的租户解析。
+    ///
+    /// 与 [`Self::tenant_for_user`] 的区别只有一条，但这条不能由调用方自己
+    /// 补：账号必须真实存在且未被停用。`resolve_schema` 的「查不到就回
+    /// public」是旧预共享 token 的兼容语义，严格 Computer Use 绝不能落到
+    /// 那里；一旦回落，未知主体就会读到 1 号租户。
+    ///
+    /// 这个函数仍然复用 [`Self::tenant_on`] 与 `TenantPools` 的物理隔离链，
+    /// 不在这里另造一套池或 schema 拼接。
+    pub async fn tenant_for_active_user(&self, user_id: &str) -> Result<Tenant, ApiError> {
+        if self.public_store().is_none() {
+            return Err(ApiError::unsupported(
+                "这个部署没有接数据库（CORTEX_DATABASE_URL 为空）",
+            ));
+        }
+        let acc = self
+            .accounts()
+            .map_err(|_| ApiError::internal("严格身份路径缺少全局账号池"))?;
+        // `users.id` 是主键，点查至多一行；停用条件只减少命中数。
+        let schema_name: Option<String> = sqlx::query_scalar(
+            "SELECT schema_name FROM cortex_auth.users
+              WHERE id = $1 AND disabled_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_optional(&acc.pool)
+        .await
+        .map_err(|e| ApiError::internal(format!("严格解析活跃用户租户失败：{e}")))?;
+        let Some(schema_name) = schema_name else {
+            return Err(ApiError::unauthorized(
+                "Computer Use 主体验证失败：用户不存在或已停用",
+            ));
+        };
+        let schema = SchemaName::new(&schema_name).map_err(|e| {
+            ApiError::internal(format!(
+                "活跃用户 {user_id} 的 schema 名不合法（{schema_name}）：{e}"
+            ))
+        })?;
+        self.tenant_on(schema).await
+    }
+
     /// schema 名 → 真的连上去的 `Tenant`。两条解析路的共同尾巴。
     ///
     /// 抽出来是因为「`public` 复用启动时那个池」这一条**两边都要记得**，

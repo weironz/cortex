@@ -1,0 +1,551 @@
+{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-e2e",
+    "scope":  "harness_only",
+    "scopeDescription":  "PowerShell + UIA/CDP application harness; this report does not represent the Cortex model, confirmation, Gateway or trace path",
+    "generatedAt":  "2026-11-02T08:31:06.6622913+00:00",
+    "durationMs":  24401,
+    "host":  {
+                 "computerName":  "WILLOPTPC",
+                 "os":  "Microsoft Windows NT 10.0.26300.0",
+                 "sessionId":  2,
+                 "displayCount":  1,
+                 "displays":  [
+                                  {
+                                      "deviceName":  "\\\\.\\DISPLAY1",
+                                      "primary":  true,
+                                      "bounds":  {
+                                                     "y":  0,
+                                                     "width":  2560,
+                                                     "height":  1440,
+                                                     "x":  0
+                                                 }
+                                  }
+                              ]
+             },
+    "execution":  {
+                      "isolation":  "one Windows Job Object per task (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)",
+                      "ui":  "PowerShell + Windows UI Automation",
+                      "appAllowlist":  "exact executable paths plus process-scoped UIA roots",
+                      "resultPolicy":  "only executed checks may pass; unavailable dependencies are skipped with a reason"
+                  },
+    "summary":  {
+                    "total":  1,
+                    "pass":  0,
+                    "fail":  0,
+                    "skipped":  1
+                },
+    "tasks":  [
+                  {
+                      "id":  "notepad-save-file",
+                      "family":  "notepad",
+                      "application":  "Windows Notepad",
+                      "status":  "skipped",
+                      "reason":  "The exact Save As path was not uniquely provable: Could not prove foreground ownership for pid 99780, hwnd 5508194.",
+                      "timeoutSeconds":  45,
+                      "allowlist":  [
+                                        "C:\\WINDOWS\\System32\\notepad.exe",
+                                        "C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe\\Notepad\\Notepad.exe"
+                                    ],
+                      "verifier":  null,
+                      "details":  {
+                                      "decision":  "skip",
+                                      "addButtonInputSent":  true,
+                                      "documentInputSent":  true,
+                                      "saveDialog":  {
+                                                         "fileDialog":  null,
+                                                         "fixturePath":  "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\artifacts\\notepad-eb749359bcd747bdacef6f413877b5a0\\acceptance.txt",
+                                                         "fileNameReadBack":  null,
+                                                         "submission":  null,
+                                                         "dialogStillOpen":  false,
+                                                         "fixtureExists":  false,
+                                                         "cleanup":  "file dialog already closed"
+                                                     },
+                                      "tabSession":  {
+                                                         "baseline":  {
+                                                                          "processId":  99780,
+                                                                          "windowId":  "0x540C62",
+                                                                          "windowTitle":  "baseline.txt - Notepad",
+                                                                          "tabsBefore":  [
+                                                                                             {
+                                                                                                 "index":  0,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   3152926,
+                                                                                                                   4,
+                                                                                                                   2
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.3152926.4.2",
+                                                                                                 "name":  "Microsoft.PowerShell_profile.ps1. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  false,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.3152926.4.1"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "Microsoft.PowerShell_profile.ps1"
+                                                                                                                ]
+                                                                                             },
+                                                                                             {
+                                                                                                 "index":  1,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   3152926,
+                                                                                                                   4,
+                                                                                                                   4
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.3152926.4.4",
+                                                                                                 "name":  "mica-需求.txt. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  false,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.3152926.4.3"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "mica-需求.txt"
+                                                                                                                ]
+                                                                                             },
+                                                                                             {
+                                                                                                 "index":  2,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   3152926,
+                                                                                                                   4,
+                                                                                                                   6
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.3152926.4.6",
+                                                                                                 "name":  "install.ps1. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  false,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.3152926.4.5"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "install.ps1"
+                                                                                                                ]
+                                                                                             },
+                                                                                             {
+                                                                                                 "index":  3,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   3152926,
+                                                                                                                   4,
+                                                                                                                   8
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.3152926.4.8",
+                                                                                                 "name":  "无标题. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  false,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.3152926.4.7"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "无标题"
+                                                                                                                ]
+                                                                                             },
+                                                                                             {
+                                                                                                 "index":  4,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   3152926,
+                                                                                                                   4,
+                                                                                                                   10
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.3152926.4.10",
+                                                                                                 "name":  "baseline.txt. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  false,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.3152926.4.9"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "baseline.txt"
+                                                                                                                ]
+                                                                                             },
+                                                                                             {
+                                                                                                 "index":  5,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   3152926,
+                                                                                                                   4,
+                                                                                                                   12
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.3152926.4.12",
+                                                                                                 "name":  "baseline.txt. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  false,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.3152926.4.11"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "baseline.txt"
+                                                                                                                ]
+                                                                                             },
+                                                                                             {
+                                                                                                 "index":  6,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   3152926,
+                                                                                                                   4,
+                                                                                                                   14
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.3152926.4.14",
+                                                                                                 "name":  "baseline.txt. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  false,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.3152926.4.13"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "baseline.txt"
+                                                                                                                ]
+                                                                                             },
+                                                                                             {
+                                                                                                 "index":  7,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   3152926,
+                                                                                                                   4,
+                                                                                                                   16
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.3152926.4.16",
+                                                                                                 "name":  "baseline.txt. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  false,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.3152926.4.15"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "baseline.txt"
+                                                                                                                ]
+                                                                                             },
+                                                                                             {
+                                                                                                 "index":  8,
+                                                                                                 "runtimeId":  [
+                                                                                                                   42,
+                                                                                                                   3152926,
+                                                                                                                   4,
+                                                                                                                   20
+                                                                                                               ],
+                                                                                                 "runtimeIdKey":  "42.3152926.4.20",
+                                                                                                 "name":  "baseline.txt. 未修改。",
+                                                                                                 "automationId":  "",
+                                                                                                 "className":  "ListViewItem",
+                                                                                                 "selected":  true,
+                                                                                                 "enabled":  true,
+                                                                                                 "offscreen":  false,
+                                                                                                 "itemStatus":  "",
+                                                                                                 "labelCount":  1,
+                                                                                                 "labelRuntimeIds":  [
+                                                                                                                         "42.3152926.4.17"
+                                                                                                                     ],
+                                                                                                 "labelNames":  [
+                                                                                                                    "baseline.txt"
+                                                                                                                ]
+                                                                                             }
+                                                                                         ],
+                                                                          "activeTabRuntimeId":  "42.3152926.4.20",
+                                                                          "addButton":  {
+                                                                                            "automationId":  "AddButton",
+                                                                                            "className":  "Button",
+                                                                                            "runtimeId":  "42.3152926.4.23"
+                                                                                        },
+                                                                          "baselineDocumentRuntimeId":  "42.3546482"
+                                                                      },
+                                                         "newTab":  {
+                                                                        "tab":  {
+                                                                                    "runtimeId":  "42.3152926.4.66",
+                                                                                    "nameAfterAdd":  "无标题. 未修改。",
+                                                                                    "selected":  true,
+                                                                                    "uniqueNewTab":  true,
+                                                                                    "uniqueActive":  true
+                                                                                },
+                                                                        "invokeCloseSupported":  true,
+                                                                        "blankDocumentRuntimeId":  "42.18419288"
+                                                                    }
+                                                     },
+                                      "baselineRestoration":  {
+                                                                  "closeMenuItem":  {
+                                                                                        "fileMenuRuntimeId":  "42.988864.4.27",
+                                                                                        "closeItemName":  "关闭选项卡",
+                                                                                        "closeItemAcceleratorKey":  "Ctrl+W",
+                                                                                        "closeItemRuntimeId":  "42.661104.4.100"
+                                                                                    },
+                                                                  "discardButton":  {
+                                                                                        "automationId":  "SecondaryButton",
+                                                                                        "name":  "不保存",
+                                                                                        "runtimeId":  "42.7212126.4.119"
+                                                                                    },
+                                                                  "tabRuntimeId":  "42.3152926.4.66",
+                                                                  "tabsAfterClose":  [
+                                                                                         {
+                                                                                             "index":  0,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               3152926,
+                                                                                                               4,
+                                                                                                               2
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.3152926.4.2",
+                                                                                             "name":  "Microsoft.PowerShell_profile.ps1. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  false,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.3152926.4.1"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "Microsoft.PowerShell_profile.ps1"
+                                                                                                            ]
+                                                                                         },
+                                                                                         {
+                                                                                             "index":  1,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               3152926,
+                                                                                                               4,
+                                                                                                               4
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.3152926.4.4",
+                                                                                             "name":  "mica-需求.txt. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  false,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.3152926.4.3"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "mica-需求.txt"
+                                                                                                            ]
+                                                                                         },
+                                                                                         {
+                                                                                             "index":  2,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               3152926,
+                                                                                                               4,
+                                                                                                               6
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.3152926.4.6",
+                                                                                             "name":  "install.ps1. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  false,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.3152926.4.5"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "install.ps1"
+                                                                                                            ]
+                                                                                         },
+                                                                                         {
+                                                                                             "index":  3,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               3152926,
+                                                                                                               4,
+                                                                                                               8
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.3152926.4.8",
+                                                                                             "name":  "无标题. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  false,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.3152926.4.7"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "无标题"
+                                                                                                            ]
+                                                                                         },
+                                                                                         {
+                                                                                             "index":  4,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               3152926,
+                                                                                                               4,
+                                                                                                               10
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.3152926.4.10",
+                                                                                             "name":  "baseline.txt. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  false,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.3152926.4.9"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "baseline.txt"
+                                                                                                            ]
+                                                                                         },
+                                                                                         {
+                                                                                             "index":  5,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               3152926,
+                                                                                                               4,
+                                                                                                               12
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.3152926.4.12",
+                                                                                             "name":  "baseline.txt. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  false,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.3152926.4.11"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "baseline.txt"
+                                                                                                            ]
+                                                                                         },
+                                                                                         {
+                                                                                             "index":  6,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               3152926,
+                                                                                                               4,
+                                                                                                               14
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.3152926.4.14",
+                                                                                             "name":  "baseline.txt. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  false,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.3152926.4.13"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "baseline.txt"
+                                                                                                            ]
+                                                                                         },
+                                                                                         {
+                                                                                             "index":  7,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               3152926,
+                                                                                                               4,
+                                                                                                               16
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.3152926.4.16",
+                                                                                             "name":  "baseline.txt. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  false,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.3152926.4.15"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "baseline.txt"
+                                                                                                            ]
+                                                                                         },
+                                                                                         {
+                                                                                             "index":  8,
+                                                                                             "runtimeId":  [
+                                                                                                               42,
+                                                                                                               3152926,
+                                                                                                               4,
+                                                                                                               20
+                                                                                                           ],
+                                                                                             "runtimeIdKey":  "42.3152926.4.20",
+                                                                                             "name":  "baseline.txt. 未修改。",
+                                                                                             "automationId":  "",
+                                                                                             "className":  "ListViewItem",
+                                                                                             "selected":  true,
+                                                                                             "enabled":  true,
+                                                                                             "offscreen":  false,
+                                                                                             "itemStatus":  "",
+                                                                                             "labelCount":  1,
+                                                                                             "labelRuntimeIds":  [
+                                                                                                                     "42.3152926.4.17"
+                                                                                                                 ],
+                                                                                             "labelNames":  [
+                                                                                                                "baseline.txt"
+                                                                                                            ]
+                                                                                         }
+                                                                                     ],
+                                                                  "activeDocumentRuntimeId":  "42.3546482",
+                                                                  "userWindowPreserved":  true,
+                                                                  "userTabsPreserved":  true
+                                                              }
+                                  },
+                      "cleanup":  [
+                                      "closed exact new TabItem through File/Close Tab and restored baseline tabs",
+                                      "closed main window"
+                                  ],
+                      "startedAt":  "2026-11-02T08:31:07.5990611+00:00",
+                      "durationMs":  23325
+                  }
+              ]
+}

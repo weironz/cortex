@@ -1,0 +1,94 @@
+[
+  {
+    "scale_percent": 100,
+    "scale_rel": 0,
+    "window_bounds": {
+      "height": 428,
+      "width": 636,
+      "x": 962,
+      "y": 481
+    },
+    "screenshot_width": 634,
+    "screenshot_height": 426,
+    "geometry_ratio_x": 1.0,
+    "geometry_ratio_y": 1.0,
+    "set_effect": "unverifiable",
+    "set_route": "accessibility",
+    "click_effect": "unverifiable",
+    "click_route": "accessibility",
+    "click_local_x": 548,
+    "click_local_y": 171,
+    "verification_passed": true,
+    "status_value": "Cortex DPI 100 pixel smoke",
+    "fixture_dpi_awareness": "system"
+  },
+  {
+    "scale_percent": 125,
+    "scale_rel": 1,
+    "window_bounds": {
+      "height": 535,
+      "width": 794,
+      "x": 964,
+      "y": 483
+    },
+    "screenshot_width": 792,
+    "screenshot_height": 533,
+    "geometry_ratio_x": 1.2484,
+    "geometry_ratio_y": 1.25,
+    "set_effect": "unverifiable",
+    "set_route": "accessibility",
+    "click_effect": "unverifiable",
+    "click_route": "accessibility",
+    "click_local_x": 685,
+    "click_local_y": 213,
+    "verification_passed": true,
+    "status_value": "Cortex DPI 125 pixel smoke",
+    "fixture_dpi_awareness": "system"
+  },
+  {
+    "scale_percent": 150,
+    "scale_rel": 2,
+    "window_bounds": {
+      "height": 642,
+      "width": 954,
+      "x": 963,
+      "y": 483
+    },
+    "screenshot_width": 952,
+    "screenshot_height": 640,
+    "geometry_ratio_x": 1.5,
+    "geometry_ratio_y": 1.5,
+    "set_effect": "unverifiable",
+    "set_route": "accessibility",
+    "click_effect": "unverifiable",
+    "click_route": "accessibility",
+    "click_local_x": 822,
+    "click_local_y": 257,
+    "verification_passed": true,
+    "status_value": "Cortex DPI 150 pixel smoke",
+    "fixture_dpi_awareness": "system"
+  },
+  {
+    "scale_percent": 200,
+    "scale_rel": 4,
+    "window_bounds": {
+      "height": 856,
+      "width": 1272,
+      "x": 964,
+      "y": 482
+    },
+    "screenshot_width": 1270,
+    "screenshot_height": 854,
+    "geometry_ratio_x": 2.0,
+    "geometry_ratio_y": 2.0,
+    "set_effect": "unverifiable",
+    "set_route": "accessibility",
+    "click_effect": "unverifiable",
+    "click_route": "accessibility",
+    "click_local_x": 1096,
+    "click_local_y": 342,
+    "verification_passed": true,
+    "status_value": "Cortex DPI 200 pixel smoke",
+    "fixture_dpi_awareness": "system"
+  }
+]

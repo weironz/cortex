@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "scope": "fake_model_remote_real_http_host_driver",
+  "status": "passed_twice",
+  "testBinarySha256": "abf4611ad362445f263427335966797f468e362243233f77108dbe57e33652d8",
+  "driverSha256": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+  "fixtureSha256": "090a49fb1321451d8c67fde06e04b712045c68bed922db55444aebf05e4a4609",
+  "approvalMethod": "automated_http_allow",
+  "realModelVerified": false,
+  "humanUiVerified": false,
+  "rootCauseOfEarlierTraceTimeoutProven": false,
+  "attempts": [
+    {
+      "case": "first_pass",
+      "testPassed": 1,
+      "failed": 0,
+      "durationSeconds": 20.75,
+      "traceHttpStatus": 200,
+      "traceCount": 3,
+      "verificationCount": 1,
+      "cleanup": {
+        "daemon_socket_closed": true,
+        "daemon_stopped": true,
+        "fixture_stopped": true,
+        "scope": "fake_model_remote_real_http_host_driver",
+        "worker_stopped": true
+      },
+      "logSha256": "a05487c0c0f0825bcb10fc1e0de31236777b0a5007dc286cc688089e1d38ccc6"
+    },
+    {
+      "case": "repeat",
+      "testPassed": 1,
+      "failed": 0,
+      "durationSeconds": 19.47,
+      "traceHttpStatus": 200,
+      "traceCount": 3,
+      "verificationCount": 1,
+      "cleanup": {
+        "daemon_socket_closed": true,
+        "daemon_stopped": true,
+        "fixture_stopped": true,
+        "scope": "fake_model_remote_real_http_host_driver",
+        "worker_stopped": true
+      },
+      "logSha256": "27717027dbf1fa72519cab60950330c704fe2623eab3df03de119c7bc20dced5"
+    }
+  ],
+  "recordedAt": "2026-11-09T00:59:22.2770908+00:00"
+}

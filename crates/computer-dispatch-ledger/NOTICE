@@ -1,0 +1,34 @@
+Computer Dispatch Ledger candidate
+SPDX-License-Identifier: Apache-2.0
+
+此候选的持久连接策略最初改编自 goose 的连接池装配：
+  D:/codes/_ref/goose/crates/goose/src/session/session_manager.rs
+  SessionStorage::create_pool (lines 902-915 in the inspected checkout)
+  https://github.com/aaif-goose/goose/blob/dafdbb7364cb8f145a71e2fd4e080136e225ad14/crates/goose/src/session/session_manager.rs
+  inspected commit: dafdbb7364cb8f145a71e2fd4e080136e225ad14
+  upstream license: Apache-2.0, complete text in LICENSE-APACHE.
+原函数没有单独版权头；不移除上游授权说明。改动包括：禁止自动创建已有库、
+显式逐连接 FULL、连接策略复核、即时事务、独立 schema 和 fail-closed 错误处理。
+串行 worker 现持有单条 SQLx SQLite 连接；不再沿用上游连接池和后台归还任务。
+本候选没有复制 goose 其他 session 逻辑。
+
+资源持有和权限随对象存活的思路参考 Cua（没有移植其平台锁或 ACL 实现）：
+  D:/codes/_ref/cua/libs/cua-driver/rust/crates/cua-driver-core/src/history.rs
+  WriterLease::acquire
+  D:/codes/_ref/cua/libs/cua-driver/rust/crates/cua-driver-core/src/perception_client/containment/windows.rs
+  AclLease::acquire
+  https://github.com/trycua/cua/tree/85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19/libs/cua-driver/rust/crates/cua-driver-core/src
+  inspected commit: 85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19
+  MIT License
+  Copyright (c) 2025 Cua AI, Inc.
+  Complete upstream MIT notice and permission text in LICENSE-MIT-CUA.
+持久 fence 不随 Permit Drop 或进程退出删除；不能把进程级 WriterLease 的
+崩溃自动释放性质当成未知外部副作用已经结束的证明。
+
+本 NOTICE 仅属于独立候选，不修改 Cortex 主工作区 NOTICE。合入时主线维护者需
+随实际搬入的模块一起保留这些来源及许可证文件。
+
+垂直接线补充：上面的“未移植平台实现”描述仅针对本独立存储 crate。
+同候选的 cortex-local/src/computer_ledger_authority.rs、computer_ledger_windows.rs
+现已改编 Cua 的 WriterLease / Windows AclLease 的安全打开、no-reparse 与
+句柄持有模式。完整来源、适配差异及 MIT 许可同时列于候选根 NOTICE。

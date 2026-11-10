@@ -165,6 +165,11 @@ class SessionAssistantNotifier extends Notifier<Map<String, String>> {
     }
     state = next;
   }
+
+  /// 账号或部署主体换代时，同 id 的会话已经不是原来那条了。
+  void clear() {
+    if (state.isNotEmpty) state = const {};
+  }
 }
 
 final sessionAssistantProvider =

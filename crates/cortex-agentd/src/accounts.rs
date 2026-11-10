@@ -697,6 +697,37 @@ pub struct AccessBook {
     inner: std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
 }
 
+/// 一次严格 access-token 验证的结果。
+///
+/// 与兼容用的 [`AccessBook::resolve`] 分开，是为了让 Computer Use 入口能拿到
+/// 同一个检查时刻里的用户与到期时间，而不是先解析用户、再另做一次可能已过期
+/// 的判断。字段私有，避免调用方把一个未经簿子验证的 grant 拼出来。
+#[derive(Debug, Clone)]
+pub struct AccessGrant {
+    user_id: String,
+    expires_at: std::time::Instant,
+}
+
+impl AccessGrant {
+    #[must_use]
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    /// 响应组装时还剩多少整秒。调用方不得把它当作新的绝对到期时间。
+    #[must_use]
+    pub fn expires_in_secs(&self) -> u64 {
+        self.expires_at
+            .saturating_duration_since(std::time::Instant::now())
+            .as_secs()
+    }
+
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        std::time::Instant::now() < self.expires_at
+    }
+}
+
 impl AccessBook {
     fn issue(&self, user_id: &str, ttl: std::time::Duration) -> String {
         let mut buf = [0u8; 32];
@@ -711,7 +742,25 @@ impl AccessBook {
         token
     }
 
+    /// 严格解析 access token，并在同一时刻一起判断存在性与过期。
+    ///
+    /// Computer Use 只能走这一条。PSK、delegated token 与 ticket 都不在这本
+    /// 簿子里，因此调用方无需知道当前请求还经过了哪一层兼容认证。
+    #[must_use]
+    pub fn strict_resolve(&self, token: &str) -> Option<AccessGrant> {
+        let now = std::time::Instant::now();
+        let g = self.inner.lock().expect("access 簿子的锁不该中毒");
+        let (user_id, expires_at) = g.get(token)?;
+        (*expires_at > now).then(|| AccessGrant {
+            user_id: user_id.clone(),
+            expires_at: *expires_at,
+        })
+    }
+
     /// 这个 token 属于谁。过期或不认识都返回 `None`。
+    ///
+    /// 这是给既有兼容路径使用的包装；严格入口要用 [`Self::strict_resolve`]
+    /// 取得凭据类别与到期信息。
     /// 只给测试用的签发口。
     ///
     /// `issue` 是私有的（签发要走完整的登录流程），但认证中间件那条不变式
@@ -722,9 +771,7 @@ impl AccessBook {
     }
 
     pub fn resolve(&self, token: &str) -> Option<String> {
-        let g = self.inner.lock().expect("access 簿子的锁不该中毒");
-        let (user, exp) = g.get(token)?;
-        (*exp > std::time::Instant::now()).then(|| user.clone())
+        self.strict_resolve(token).map(|grant| grant.user_id)
     }
 }
 
@@ -1314,6 +1361,7 @@ mod live_rotation_tests {
         let accounts = Accounts {
             pool,
             tenants: std::sync::Arc::new(cortex_store::TenantPools::new(&url)),
+            deployment_id: "0".repeat(64),
         };
         let access = AccessBook::default();
         let replay = std::sync::Arc::new(ReplayCache::default());

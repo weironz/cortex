@@ -24,6 +24,7 @@ pub mod blobs;
 pub mod credentials;
 pub mod cursor;
 pub mod delegated_token;
+pub mod deployment;
 pub mod env;
 pub mod episodes;
 pub mod error;

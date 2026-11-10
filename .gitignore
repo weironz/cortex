@@ -91,3 +91,6 @@ app/.idea/
 
 # Chrome 调试实例的临时 profile（本地验证用，不进仓库）
 .tmp-chrome-profile/
+
+# 测试生成的机器 authority、账本与锁文件，含私有密钥材料，不能进入版本库。
+/tmp/

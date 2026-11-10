@@ -43,6 +43,7 @@ fn application_tool_and_prompt_follow_capability_and_disabled_list() {
     for enabled in [false, true] {
         for disabled in [false, true] {
             let caps = Caps {
+                computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
                 can_open_application: enabled,
                 ..Caps::default()
             };
@@ -159,6 +160,7 @@ fn 交付的工具与说明一起出现一起消失() {
         8,
         &external,
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_deliver: true,
             ..Caps::default()
         },
@@ -179,6 +181,7 @@ fn 交付的工具与说明一起出现一起消失() {
         None,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_deliver: true,
             ..Caps::default()
         },
@@ -213,8 +216,8 @@ fn 交付的工具与说明一起出现一起消失() {
 /// 与技能那条同一个形状，但后果更重：这一组没有围栏（它动的是用户整台
 /// 机器）。两个方向的症状都不报错 ——
 ///
-/// - 有工具没说明 → 模型不知道要先截图、不知道坐标能直接用，于是每一次
-///   都点偏，而它看不出为什么；
+/// - 有工具没说明 → 模型不知道先观察、不知道 frame/ref 一次性，动作会
+///   绕到旧坐标或 shell，跳过安全闸；
 /// - 有说明没工具 → 它承诺去点某个按钮，然后发现自己没有手。
 #[test]
 fn 电脑操作的工具与说明一起出现一起消失() {
@@ -223,7 +226,16 @@ fn 电脑操作的工具与说明一起出现一起消失() {
     let external = [fake_external("docs", "search")];
 
     let off = chat_turn_for(8, &external, Caps::default(), &[]);
-    for t in ["screenshot", "click", "type_text", "key", "scroll"] {
+    for t in [
+        "screenshot",
+        "click",
+        "type_text",
+        "key",
+        "scroll",
+        "computer_list",
+        "computer_observe",
+        "computer_act",
+    ] {
         assert!(
             !off.tool_names().contains(&t),
             "没开电脑操作时不该有 {t}：这一组没有围栏，默认摆出来等于默认开着。实际：{:?}",
@@ -235,16 +247,29 @@ fn 电脑操作的工具与说明一起出现一起消失() {
         8,
         &external,
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_use_computer: true,
+            can_observe_computer: true,
             ..Caps::default()
         },
         &[],
     );
-    for t in ["screenshot", "click", "type_text", "key", "scroll"] {
+    for t in [
+        "computer_list",
+        "computer_observe",
+        "computer_act",
+        "computer_wait",
+    ] {
         assert!(
             on.tool_names().contains(&t),
-            "开了就得五个都在，少一个模型会绕路（比如没有 scroll 就狂点滚动条）。实际：{:?}",
+            "新电脑操作目录必须同时有观察和写工具：{t} 缺失，实际 {:?}",
             on.tool_names()
+        );
+    }
+    for legacy in ["screenshot", "click", "type_text", "key", "scroll"] {
+        assert!(
+            !on.tool_names().contains(&legacy),
+            "生产目录不能再暴露没有统一安全闸的 legacy 工具 {legacy}"
         );
     }
 
@@ -257,14 +282,19 @@ fn 电脑操作的工具与说明一起出现一起消失() {
         None,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
+            perception_mode: cortex_agent::computer_perception::PerceptionMode::Visual,
             can_use_computer: true,
+            can_observe_computer: true,
             can_deliver: false,
             ..Caps::default()
         },
     );
     assert!(
-        with_note.contains("先 `screenshot`") && with_note.contains("密码"),
-        "开了工具就必须讲坐标系与「哪些不许代做」：{with_note}"
+        with_note.contains("先调用 `computer_list`")
+            && with_note.contains("`computer_act`")
+            && with_note.contains("密码"),
+        "开了工具就必须讲 frame/ref、验证与「哪些不许代做」：{with_note}"
     );
     let without = system_prompt_for(
         "底座",
@@ -274,7 +304,9 @@ fn 电脑操作的工具与说明一起出现一起消失() {
         None,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_use_computer: false,
+            can_observe_computer: false,
             can_deliver: false,
             ..Caps::default()
         },
@@ -295,12 +327,15 @@ fn cua_observation_prompt_never_mentions_write_tools() {
         None,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_observe_computer: true,
             ..Caps::default()
         },
     );
     assert!(
-        prompt.contains("computer_list") && prompt.contains("computer_observe"),
+        prompt.contains("computer_list")
+            && prompt.contains("computer_observe")
+            && prompt.contains("computer_wait"),
         "只读观察说明必须点名真实工具：{prompt}"
     );
     for absent in ["`click`", "`type_text`", "`screenshot`", "`scroll`"] {
@@ -309,6 +344,35 @@ fn cua_observation_prompt_never_mentions_write_tools() {
             "C1 目录没有 {absent}，提示词不能宣传它：{prompt}"
         );
     }
+}
+
+#[test]
+fn isolated_browser_prompt_matches_the_structured_channel() {
+    let prompt = system_prompt_for(
+        "测试",
+        "",
+        cortex_agent::ExecEnvironment::LocalMachine,
+        None,
+        None,
+        &[],
+        Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
+            can_use_browser: true,
+            ..Caps::default()
+        },
+    );
+    assert!(
+        prompt.contains("computer_browser_open")
+            && prompt.contains("一次性")
+            && prompt.contains("site allowlist")
+            && prompt.contains("不会读取用户日常 Chrome/Edge")
+            && prompt.contains("verification_passed=true"),
+        "浏览器提示词必须讲清隔离 profile、站点边界与动作后验证：{prompt}"
+    );
+    assert!(
+        !prompt.contains("先调用 `computer_list`"),
+        "只有浏览器能力时不能宣传不存在的 Cua 窗口工具：{prompt}"
+    );
 }
 
 /// 技能目录进提示词，而**正文不进** —— 那正是分层的全部意义。
@@ -322,6 +386,7 @@ fn 提示词里只有技能的名字与说明没有正文() {
         None,
         &[("周报", "按公司模板写周报")],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_use_computer: false,
             can_deliver: false,
             ..Caps::default()
@@ -349,6 +414,7 @@ fn 提示词里只有技能的名字与说明没有正文() {
         None,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_use_computer: false,
             can_deliver: false,
             ..Caps::default()
@@ -382,6 +448,7 @@ fn a_persona_replaces_the_default_one() {
         Some(&chef),
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_use_computer: false,
             can_deliver: false,
             ..Caps::default()
@@ -427,6 +494,7 @@ fn an_empty_persona_falls_back_to_the_default() {
             agent,
             &[],
             Caps {
+                computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
                 can_use_computer: false,
                 can_deliver: false,
                 ..Caps::default()
@@ -454,6 +522,7 @@ fn only_the_container_prompt_mentions_the_egress_proxy() {
         None,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_use_computer: false,
             can_deliver: false,
             ..Caps::default()
@@ -480,6 +549,7 @@ fn only_the_container_prompt_mentions_the_egress_proxy() {
             None,
             &[],
             Caps {
+                computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
                 can_use_computer: false,
                 can_deliver: false,
                 ..Caps::default()
@@ -512,6 +582,7 @@ fn shell_方言说明会进到提示词里() {
         None,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_use_computer: false,
             can_deliver: false,
             ..Caps::default()
@@ -546,6 +617,7 @@ fn the_egress_note_is_appended_and_leaves_the_workspace_brief_intact() {
         None,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_use_computer: false,
             can_deliver: false,
             ..Caps::default()
@@ -567,6 +639,7 @@ fn the_egress_note_is_appended_and_leaves_the_workspace_brief_intact() {
         None,
         &[],
         Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
             can_use_computer: false,
             can_deliver: false,
             ..Caps::default()
@@ -575,5 +648,41 @@ fn the_egress_note_is_appended_and_leaves_the_workspace_brief_intact() {
     assert!(
         unbound.contains("只有那个目录本身"),
         "没绑工作区时 brief 那句「绑完也只有那个目录」不能被这次改动挤掉：{unbound}"
+    );
+}
+
+#[test]
+fn ax_only_prompt_explains_missing_visual_evidence_and_handoff() {
+    let prompt = system_prompt_for(
+        "测试",
+        "",
+        cortex_agent::ExecEnvironment::LocalMachine,
+        None,
+        None,
+        &[],
+        Caps {
+            computer_write_readiness: Some(cortex_proto::dto::ComputerWriteReadiness::Ready),
+            can_observe_computer: true,
+            can_use_computer: true,
+            perception_mode: cortex_agent::computer_perception::PerceptionMode::AccessibilityOnly,
+            ..Caps::default()
+        },
+    );
+    for text in [
+        "AX 结构模式",
+        "本轮没有图片",
+        "交还用户",
+        "verification_passed=true",
+        "审批",
+        "一次性 ref",
+    ] {
+        assert!(
+            prompt.contains(text),
+            "AX 模式提示词必须说明 {text}：{prompt}"
+        );
+    }
+    assert!(
+        !prompt.contains("才使用同一张截图"),
+        "无视觉模型不能被提示使用截图坐标"
     );
 }

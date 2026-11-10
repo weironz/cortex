@@ -46,9 +46,10 @@ PendingConfirmation _request({
   String? sessionId = 's1',
   Duration remaining = const Duration(seconds: 180),
   String preview = _dangerousCommand,
+  String tool = 'shell',
 }) => PendingConfirmation(
   token: token,
-  tool: 'shell',
+  tool: tool,
   risk: 'execute',
   preview: preview,
   deadline: DateTime.now().add(remaining),
@@ -406,6 +407,40 @@ void main() {
         find.textContaining('按拒绝处理'),
         findsOneWidget,
         reason: '沉默即拒绝这件事必须写出来 —— 它同时是「走开也是安全的」这个保证',
+      );
+      container.dispose();
+    });
+
+    testWidgets('桌面动作使用专用文案，拒绝等于把控制权交回用户', (tester) async {
+      final container = _boot(_ConfirmApi());
+      container
+          .read(confirmControllerProvider.notifier)
+          .offer(
+            _request(
+              tool: 'computer_act',
+              preview:
+                  'frame_id: cua:1\n'
+                  'actions: [{"kind":"click","target":{"kind":"visual","x":20,"y":30}}]\n'
+                  'verify: {"kind":"element_present","role":"Button","label":"保存完成"}',
+            ),
+          );
+
+      await tester.pumpWidget(_host(container));
+      await tester.pump();
+
+      expect(find.text('确认真实桌面动作'), findsOneWidget);
+      expect(find.textContaining('作用于本机真实窗口'), findsOneWidget);
+      expect(find.text('交给我操作'), findsOneWidget);
+      expect(find.text('允许这一步'), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is SelectableText &&
+              widget.data != null &&
+              widget.data!.contains('actions:'),
+        ),
+        findsOneWidget,
+        reason: '桌面确认必须完整显示那一个动作与验证条件，不能只给一个工具名',
       );
       container.dispose();
     });

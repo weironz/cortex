@@ -1,0 +1,375 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-09",
+  "version": "0.1.45",
+  "committed": false,
+  "published": false,
+  "ci": {
+    "command": "just workflow-ci",
+    "exit_code": 0,
+    "log": "target/owned-browser-integrated-workflow-ci.log",
+    "log_sha256": "2f858c4955bbd9268e1089e71845cd6f71ac9092387e729f915edc40b62e25c9",
+    "rust_top_level_passed": 2001,
+    "rust_ignored": 31,
+    "local_passed": 599,
+    "local_ignored": 22,
+    "flutter_passed": 1083,
+    "flutter_skipped": 7,
+    "analyzer": "no_issues",
+    "workspace_all_targets_all_features_clippy": "passed"
+  },
+  "binary": {
+    "path": "target/debug/deps/cortex_local-d28ed32a247e2597.exe",
+    "sha256": "19f1272402bf0c31564dc293f5db9eb62ccc9d4b7504c3fe98e33d8939368c25"
+  },
+  "owned_job_tests": {
+    "main_passed": 11,
+    "main_ignored": 2,
+    "candidate_with_existing_guards_passed": 14,
+    "log": "target/owned-browser-integrated-job-tests.log",
+    "patch_sha256": "1d3b8de3bd21c3fab208cc595fcf74e1b62c568f4c61e84a97c253da7e53c0e9"
+  },
+  "real_headless_browser": {
+    "log": "target/owned-browser-real-blank-smoke.log",
+    "exit_code": 0,
+    "seconds": 0.94,
+    "url": "about:blank",
+    "signed_executable_checked": true,
+    "isolated_profile": true,
+    "navigation_or_input": false,
+    "dispatch_epoch": 0,
+    "original_job_drain_verified": true,
+    "idempotent_close_verified": true,
+    "profile_cleanup_verified": true
+  },
+  "real_native_regression": {
+    "scope": "fake_model_remote_automatic_http_allow_real_owner_host_gateway_cua_private_sqlite_authority",
+    "log": "target/owned-browser-integrated-native-regression.log",
+    "exit_code": 0,
+    "seconds": 27.57,
+    "artifact_directory": "target/computer-http-fixture-ngqz9R",
+    "authority": {
+      "authority_root": "D:\\codes\\cortex\\target\\http-ledger-fixture-MXJ2RH\\authority",
+      "scope": "cfg_test_private_authority_real_dispatch"
+    },
+    "sqlite_read_only": {
+      "verified_intents": 1,
+      "fences": 0,
+      "pending": false
+    },
+    "trace_http": 200,
+    "trace_count": 3,
+    "cleanup": {
+      "daemon_socket_closed": true,
+      "daemon_stopped": true,
+      "fixture_stopped": true,
+      "scope": "fake_model_remote_real_http_host_driver",
+      "worker_stopped": true
+    }
+  },
+  "recovery_implemented": false,
+  "native_daemon_owned_by_rust": false,
+  "actual_programdata_hklm_provision_executed": false,
+  "signing_executed": false,
+  "limitations": [
+    "Job关闭证明不授予Ledger恢复权限；Unknown/epoch/input lease未实现",
+    "Native daemon仍由Flutter持有，外部/旧Job没有可用排空证明",
+    "真实浏览器仅空页兼容验证，旧直接driver写入ignored未验收",
+    "真实账号/真人审批/安装维护/正式签名/最终长跑和第二主机等门仍未关闭",
+    "保留前序SQLite初始化PoolTimedOut未定位风险"
+  ],
+  "source_files": [
+    {
+      "path": "app/lib/features/settings/pages/computer_use_section.dart",
+      "sha256": "4ec8fbc9b058c41b81d17d6c9ebf0a126058a0f51048ac1fcc6f7e0b44edfce6"
+    },
+    {
+      "path": "app/lib/models/health_status.dart",
+      "sha256": "6278040ad53914f9beb1d2f788e2c9d80b46c73794b63f7b3f9d0ad2bd078917"
+    },
+    {
+      "path": "app/test/computer_use_test.dart",
+      "sha256": "a71d604e342ca7d6160a8c21de39057975fca033fe30fcb4c484263d53710178"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "21a6c0fcb7314a06819ca836801d657f050d0f36a6ac472dace4cddd829a134a"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "4ea0169ee9d4177908c2a4136d2632cd7660ea57f4667cf0f086795778eb3c32"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/Cargo.toml",
+      "sha256": "3e183b0c4ae2a8089e9858b800bf9a5b8f12a70ebd76425e356e0950e3ce3123"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/LICENSE-APACHE",
+      "sha256": "276907a476b8790c650f7a7584b5bd194303bdacb269edf130b51c3cf2a7365d"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/LICENSE-MIT-CUA",
+      "sha256": "d0a32419a44fa38d5023d1431dfcbedd1457eb5e7b2e6c7c87ca064facb41b41"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/NOTICE",
+      "sha256": "fec6c26452e32f86144682b089b3261cf2528ccba070b63ac521612c036f63a7"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/src/lib.rs",
+      "sha256": "f9624411b2d513eabafae00cce84933cbba2884d0f0659b0827b2e99e2f87533"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/src/storage.rs",
+      "sha256": "81e82dbcdecbe2237e7b640f247a5369568bddc4e2756157378a4c03e0c6141f"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/tests/common/mod.rs",
+      "sha256": "0548a87c72fa140cbc8d97e1147ee30b0393db0eac2f772880553cd382b554d2"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/tests/ledger.rs",
+      "sha256": "7109c12c74f8673e3bd6c4345a50f7ef003654ad7d1a28694ffbd2310f8c8bd6"
+    },
+    {
+      "path": "crates/computer-dispatch-ledger/tests/restart.rs",
+      "sha256": "6b9ad8d14a9c5eae4b901c4dbeeb4d7a738d28b9cbf34982c7aa7ae43038ef57"
+    },
+    {
+      "path": "crates/cortex-agent/src/computer_dispatch.rs",
+      "sha256": "ec4c3078875f92edae4caa61d1a2aeb63dd5c49cf5813d8f73211f2a46e950c8"
+    },
+    {
+      "path": "crates/cortex-agent/src/computer_driver.rs",
+      "sha256": "07517b86ca1e62f40c305b8b28584168c7a07d424dcb6514ce22075c1eeb4409"
+    },
+    {
+      "path": "crates/cortex-agent/src/lib.rs",
+      "sha256": "456ae3fcbb347a5b90f7a1a6544ff8240a099910229de114a25fe6b69c1580e6"
+    },
+    {
+      "path": "crates/cortex-agent/tests/computer_ax_only.rs",
+      "sha256": "b405fa69666a4736cfa0f0691bff0f4277b7f731ea8c1a61478c67a557c7e8be"
+    },
+    {
+      "path": "crates/cortex-agent/tests/computer_gateway_fake_driver.rs",
+      "sha256": "970f859190194f35c382d416242885784bb66362d9ffb116f2894807009c0479"
+    },
+    {
+      "path": "crates/cortex-agent/tests/support/dispatch.rs",
+      "sha256": "43f840e6f7483f059d92e27d795b7a79a63a62952a712f74525982628b33f1ab"
+    },
+    {
+      "path": "crates/cortex-cli/src/main.rs",
+      "sha256": "d6cb9eb24fbf57992d8435db1b873e844064cf2db12fc9a32f01f6b68d9f603a"
+    },
+    {
+      "path": "crates/cortex-local/Cargo.toml",
+      "sha256": "77ac8f516367468302b440ec790d067dccc72094e04a90f95d5646e306c9ed20"
+    },
+    {
+      "path": "crates/cortex-local/src/attach.rs",
+      "sha256": "e6871f3e2806bebb0e2b2b6c2dccabd658a90611d1b2dc1e014ac19c3ac6846a"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_browser_owned_job_test.rs",
+      "sha256": "7c26d0867af3f11fd50867cce46409e82f8af439a6019eef461da9f54099ba16"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_browser.rs",
+      "sha256": "ba960599f42adeb0d3fcd291a829f38c971ab137196d915014ce2121350126c3"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_cua.rs",
+      "sha256": "bb51a64ce9014e6797eca130491d6ec228bb3e4f4616cddd1dca8407b8cc6f0b"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_http_fixture_test.rs",
+      "sha256": "6667277db4e65cb8b504c179211ea26ba02db6a7610aa06e9e0d9dffa18d142f"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_authority_test.rs",
+      "sha256": "dd492efdc885a01b55b82f85766e5aa27a6717756a1d27c1c961036743ffae8b"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_authority.rs",
+      "sha256": "2c141ac0b791286b7b35acd7939fb3f43b042f488e519737031c9d7703f932c9"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_host_test.rs",
+      "sha256": "a4819a3647d866f42a7a1e1d3054f33aee2d8c2c7e38407d60c5dbefa0fe0a59"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_http_fixture_test.rs",
+      "sha256": "7e41f19f0b67eada28d16b6d5ce72156f1114fc77e692fe7288005041881f34a"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_http_fixture.rs",
+      "sha256": "a6238b9dd97872b083f067aa6349175cf1023252b8b83dbde2062be75081233b"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_install_windows.rs",
+      "sha256": "f4c64388dcb773f861d3222c850797837e7449407947b95ba04040d14f1f0923"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_provision_test.rs",
+      "sha256": "345f174ed9de3d7357c9fb1f8da938a84d772e0b59373aa266b9c6edd88e4a82"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_provision.rs",
+      "sha256": "93e12b3d41aab2b584fc7e8ea55c3649aeb496000cef1d6347a860ccab35f968"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_test.rs",
+      "sha256": "8d5a7d0f6aaba465038ebbeb77ab556c7dd610b1a430c85b03ebb7be8be96a6b"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_unix.rs",
+      "sha256": "2fcdeaadc8b762c545bf6e7586db37f1dd17572aa029c5f0e4fc0545d92f5f54"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger_windows.rs",
+      "sha256": "6208596fc9d96474b242bf417235fb5ea84006bbe33ed739ae4e2dfb97ca95d5"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_ledger.rs",
+      "sha256": "be67104af3239f035862cafcfbc91e7192e079349f3c5601a521e41e166c6413"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_owned_job_test.rs",
+      "sha256": "798d4e7c3bc700bb60ab6fd9370ab770d1e1756c03504def389081776eaa803e"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_owned_job.rs",
+      "sha256": "676d0ac24a52a8fb3dc1102fa47b6b9b5de7c920b08f828732997b18a8b8d46c"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_post_action.rs",
+      "sha256": "f959580fb18229dafb3a2d48fc34d4a08672bbfcd5ad605c84861aa78a0ece70"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_product_path_test.rs",
+      "sha256": "500111592acc6b792d429e468f06517bb4e1497b5e767c314be070c1932c335b"
+    },
+    {
+      "path": "crates/cortex-local/src/computer.rs",
+      "sha256": "1f0f076802ce68a153156c949060bc223d90cd530c6dbafe2bc289cb9426fd89"
+    },
+    {
+      "path": "crates/cortex-local/src/config.rs",
+      "sha256": "4a6d40464f42963c5c8665e04d29af1b87a327b1b6ebdf3692a78219e8e05c07"
+    },
+    {
+      "path": "crates/cortex-local/src/confirm.rs",
+      "sha256": "10bdf4d524e9b939e2482682b6a84a2e5d865fc2b65b34193e61befe21f5835d"
+    },
+    {
+      "path": "crates/cortex-local/src/confirmation_routes_test.rs",
+      "sha256": "d3b2c01053b4fbf5748d2b9dbffb201dbe7d29c0a24733c207cc8e58e0885729"
+    },
+    {
+      "path": "crates/cortex-local/src/local_mcp.rs",
+      "sha256": "42f09cc98ee5bfd8c33c1632fda744a35d8d2fad315b59f66b7f72b76593c9bf"
+    },
+    {
+      "path": "crates/cortex-local/src/local_owner.rs",
+      "sha256": "6f7a6c1cef87d541254caaf732b6d37ca1c8f2f4792c3ae986cf8187b5ef411b"
+    },
+    {
+      "path": "crates/cortex-local/src/local_workspace_routes_test.rs",
+      "sha256": "6cd05a59ad517f1ae26aa245f828643936bace5f05989a0a2cd66e1894f4534e"
+    },
+    {
+      "path": "crates/cortex-local/src/local_workspace.rs",
+      "sha256": "ca7dec7d1d8e105d9a5e4a6b4e9d6665ce501724d2502b38b30ae3933f508772"
+    },
+    {
+      "path": "crates/cortex-local/src/main.rs",
+      "sha256": "bc621209993004a645a93f961ef5221ed29d07ec53d1595e0d5d4965669edbf7"
+    },
+    {
+      "path": "crates/cortex-local/src/ordinary_owner_test.rs",
+      "sha256": "d53feba73aef5e95c72b7ad879a4bde2b28326a03d899c5a3e9da487dad5638a"
+    },
+    {
+      "path": "crates/cortex-local/src/owner_config_test.rs",
+      "sha256": "db83ecde900b84341928f10e20816d4560f2836638e97648d1a83b6421d28fbb"
+    },
+    {
+      "path": "crates/cortex-local/src/owner_journal.rs",
+      "sha256": "12ff2e5c01484c6275c97f980ffb995ddcc90b41e94deddedca357f40317fa14"
+    },
+    {
+      "path": "crates/cortex-local/src/read_only_probe.rs",
+      "sha256": "3e2d56af2683b7f293d7b0383dd3e41f82c6ce900a9355007b26f380e1a20e06"
+    },
+    {
+      "path": "crates/cortex-local/src/remote_owner_test.rs",
+      "sha256": "5d79345222e3ca84a234be39b92eb5df729fdf034b4742fdd892f64c20d4edda"
+    },
+    {
+      "path": "crates/cortex-local/src/remote.rs",
+      "sha256": "c1d5499e892ceb5bb961eed500be27f4ae528463b5030acdc0d184f00e75bbc5"
+    },
+    {
+      "path": "crates/cortex-local/src/routes.rs",
+      "sha256": "ed9307b949465657bddae4208b4cb3bb42460938666445926fa93e4afbbd7a49"
+    },
+    {
+      "path": "crates/cortex-local/src/run_principal.rs",
+      "sha256": "679ec88b9d3712970687bf6e451d3067075029c36826c83741974dd44bff385c"
+    },
+    {
+      "path": "crates/cortex-local/src/runs.rs",
+      "sha256": "8863f3b15415f6b38d33e1341d20a395e5bed11228fac57871d785f138a847aa"
+    },
+    {
+      "path": "crates/cortex-local/src/terminal.rs",
+      "sha256": "375e528f9002e0df017ce9600c79114746a552be067a66a075b9f168d73e93d3"
+    },
+    {
+      "path": "crates/cortex-local/src/turn_assemble_test.rs",
+      "sha256": "45f81e9fb0eda24a3974a4d11e32c688808bfac9d5c7828ffee98a7b5e7f21e7"
+    },
+    {
+      "path": "crates/cortex-local/src/turn_assemble.rs",
+      "sha256": "96834b852795c1713f325f4154a907f4344cf10077f7c47eb82e5536ae740621"
+    },
+    {
+      "path": "crates/cortex-local/src/turn_prompt_test.rs",
+      "sha256": "d095531501a8cb03b2bba630c44e9ce92f97de1bf0909839e8007801865fef17"
+    },
+    {
+      "path": "crates/cortex-local/src/turn_prompt.rs",
+      "sha256": "134e1ce78f34f1f2a1ce800ca66684ed85e8a42e30dab2a1033d6455b4645628"
+    },
+    {
+      "path": "crates/cortex-local/src/turn.rs",
+      "sha256": "a8f4adb6555c1cd7b1f648b2522a16f069bd29a53c62e5404b18f413ffe120b4"
+    },
+    {
+      "path": "crates/cortex-local/src/workspaces.rs",
+      "sha256": "af18735168a10d08badb6674b727a752c7b847f8632e8d25275a1e42e1eb7736"
+    },
+    {
+      "path": "crates/cortex-proto/src/dto/chat.rs",
+      "sha256": "bdf0156ccc3e77e3de08af1da59390252390b34c8b764748d7da5af74ac1aaaa"
+    },
+    {
+      "path": "crates/cortex-proto/src/dto/health.rs",
+      "sha256": "cc85993ffbb389b9b4cea7c9d518c6affac07cfa2f24e536d8a39d90546d5572"
+    },
+    {
+      "path": "crates/cortex-proto/src/dto/mod.rs",
+      "sha256": "6ffd164339ec972b9a36657d92fdbfda9153ed8f047ab6a017ec1a38ac14a743"
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "3c63df0442e508e4857e618995f67e293cf7c0650d698b7c1a95acfc02e3348a"
+    },
+    {
+      "path": "scripts/release-desktop-windows.sh",
+      "sha256": "baf13a5c346307953179d4e36394ae4c07baab076c1a7bc02fedba7507a52d9c"
+    }
+  ]
+}

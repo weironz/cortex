@@ -259,6 +259,14 @@ pub enum CredentialKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActionSummary {
+    /// 一批动作的脱敏摘要。
+    ///
+    /// 当前生产协议每批只允许一个动作；保留 `Batch` 形态是为了兼容历史 trace、
+    /// 测试注入和将来的原子快捷键组。一个 receipt 与一份新 observation 仍是
+    /// 唯一验证单元，不能给每个子动作伪造独立执行证据。
+    Batch {
+        actions: Vec<ActionSummary>,
+    },
     Click {
         target_ref: String,
         button: PointerButton,
@@ -275,6 +283,9 @@ pub enum ActionSummary {
         target_ref: String,
         direction: ScrollDirection,
         amount: u32,
+    },
+    Navigate {
+        url_hash: ArtifactHash,
     },
     PasteClipboard {
         target_ref: String,
@@ -299,6 +310,11 @@ pub enum ActionSummary {
 }
 
 impl ActionSummary {
+    #[must_use]
+    pub fn batch(actions: Vec<Self>) -> Self {
+        Self::Batch { actions }
+    }
+
     #[must_use]
     pub fn click(target_ref: impl Into<String>, button: PointerButton) -> Self {
         Self::Click {
@@ -337,6 +353,12 @@ impl ActionSummary {
             direction,
             amount,
         }
+    }
+
+    /// 记录一次浏览器导航，只保留规范化 URL 的 hash。
+    #[must_use]
+    pub fn navigate(url_hash: ArtifactHash) -> Self {
+        Self::Navigate { url_hash }
     }
 
     /// 记录一次粘贴，但立即丢弃 clipboard 内容。
@@ -805,6 +827,9 @@ pub enum TraceError {
     #[error("该策略要求用户确认，但 trace 中没有 Approved 决定")]
     ConfirmationRequired,
 
+    #[error("本次策略判定已有确认结果，不能覆盖")]
+    ConfirmationAlreadyRecorded,
+
     #[error("策略结果为 HandoffToUser/Deny，不能在 trace 中记录为已执行")]
     ActionNotPermitted,
 
@@ -944,6 +969,9 @@ impl ComputerTraceRecorder {
             .pending_policy
             .as_mut()
             .ok_or(TraceError::PolicyRequired)?;
+        if pending.confirmation.is_some() {
+            return Err(TraceError::ConfirmationAlreadyRecorded);
+        }
         pending.confirmation = Some(confirmation.decision);
         Ok(self.push(TraceEventKind::Confirmation { confirmation }))
     }
@@ -1111,6 +1139,64 @@ mod tests {
 
     fn click() -> ActionSummary {
         ActionSummary::click("element-17", PointerButton::Left)
+    }
+
+    #[test]
+    fn confirmation_required_action_cannot_be_recorded_without_approval() {
+        let mut recorder = ComputerTraceRecorder::new(metadata());
+        recorder
+            .record_observation(observation("frame-before"))
+            .expect("必须先观察");
+        recorder
+            .record_policy_decision(click(), TracePolicyDecision::ConfirmEveryTime)
+            .expect("记录确认策略");
+        assert!(
+            recorder.record_action(click()).is_err(),
+            "缺少用户批准时不能记录动作"
+        );
+        recorder
+            .record_confirmation(ConfirmationRecord::new(
+                ArtifactHash::new("preview-hash"),
+                ConfirmationDecision::Rejected,
+            ))
+            .expect("记录拒绝");
+        assert!(
+            recorder.record_action(click()).is_err(),
+            "用户拒绝后不能记录动作"
+        );
+        assert!(
+            recorder
+                .record_confirmation(ConfirmationRecord::new(
+                    ArtifactHash::new("preview-hash"),
+                    ConfirmationDecision::Approved,
+                ))
+                .is_err(),
+            "同一次拒绝不能被后续批准覆盖"
+        );
+        assert!(
+            recorder.record_action(click()).is_err(),
+            "拒绝后仍不能记录动作"
+        );
+        recorder
+            .abort(TraceAbortReason::PolicyDenied)
+            .expect("拒绝后终止当前 trace");
+        let mut recorder = ComputerTraceRecorder::new(metadata());
+        recorder
+            .record_observation(observation("frame-new"))
+            .expect("新尝试重新观察");
+        recorder
+            .record_policy_decision(click(), TracePolicyDecision::ConfirmEveryTime)
+            .expect("记录新策略");
+        recorder
+            .record_confirmation(ConfirmationRecord::new(
+                ArtifactHash::new("new-preview-hash"),
+                ConfirmationDecision::Approved,
+            ))
+            .expect("新尝试获得批准");
+        assert!(
+            recorder.record_action(click()).is_ok(),
+            "实际批准后才能记录动作"
+        );
     }
 
     #[test]

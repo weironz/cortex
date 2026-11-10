@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "scope": "readonly_candidate_run_integrity_and_descriptive_trends",
+  "previewOnly": false,
+  "completedRunVerified": true,
+  "integrityErrors": [],
+  "memorySteadyStateProven": false,
+  "productionAcceptance": false,
+  "observedSteadyMs": 180044,
+  "requiredSteadyMs": 180000,
+  "largestGap": {
+    "ms": 32214,
+    "fromSequence": 3,
+    "toSequence": 4
+  },
+  "driver": {
+    "private_bytes": {
+      "wholeSeries": {
+        "points": 6,
+        "slopePoints": 6,
+        "start": 11669504,
+        "end": 13533184,
+        "min": 11669504,
+        "max": 13586432,
+        "delta": 1863680,
+        "theilSenUnitsPerHour": 33583716.374408714
+      },
+      "lastHalf": {
+        "points": 3,
+        "slopePoints": 3,
+        "start": 13586432,
+        "end": 13533184,
+        "min": 13533184,
+        "max": 13586432,
+        "delta": -53248,
+        "theilSenUnitsPerHour": -3027365.761212887
+      }
+    },
+    "handles": {
+      "wholeSeries": {
+        "points": 6,
+        "slopePoints": 6,
+        "start": 408,
+        "end": 408,
+        "min": 407,
+        "max": 408,
+        "delta": 0,
+        "theilSenUnitsPerHour": 0.0
+      },
+      "lastHalf": {
+        "points": 3,
+        "slopePoints": 3,
+        "start": 408,
+        "end": 408,
+        "min": 408,
+        "max": 408,
+        "delta": 0,
+        "theilSenUnitsPerHour": 0.0
+      }
+    }
+  },
+  "interpretation": "趋势仅描述该工作负载；完整运行不等于内存稳态或全产品通过。",
+  "inputs": {
+    "samplesSha256": "ad0f541d8da3d31799c98487328c28d93e1140df2f66abdad17519f25ed15d71",
+    "summarySha256": "51b05888793f4ae9bf5bc1052238a602dfce393944d8b7f47a462df1c2c7355e",
+    "analyzerSha256": "56b45a1532e1607393079c52c5055363b9ee343f6cfdc346a2322b4a7f9f89e2"
+  }
+}

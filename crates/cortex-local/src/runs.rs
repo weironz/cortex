@@ -33,8 +33,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use cortex_core::Id;
 use cortex_proto::dto::ChatEvent;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, broadcast};
+
+#[path = "run_principal.rs"]
+pub(crate) mod run_principal;
+
+use run_principal::{RunPrincipal, RunPrincipalKey};
+
+use crate::confirm::ConfirmationLease;
+use crate::remote::Remote;
 
 /// 跑完之后这条记录还留多久。
 ///
@@ -56,6 +66,17 @@ const BROADCAST_CAP: usize = 256;
 
 /// 一轮的实时状态。
 pub struct Run {
+    /// 这条 run 从入队起固定的主体 key。
+    principal_key: RunPrincipalKey,
+    /// 这条 run 所属的登录作用域。A→B→A 的账号名虽然相同，代际不同；
+    /// 旧 run 可以继续收尾，却不能重新挂到新登录的 A 上。
+    principal_epoch: u64,
+    /// 这轮稳定 id。Computer Use trace 与确认租约必须共用它，避免同一轮在
+    /// 两套审计里出现无法关联的两个随机标识。
+    run_id: String,
+    /// 本机确认租约。停止或 task 结束时主动撤销，不能让一个已结束的 run
+    /// 继续留下可批准的待办。
+    confirmation_lease: Mutex<Option<ConfirmationLease>>,
     /// 开始时间。界面拿它显示「已经跑了 3 分钟」。
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// 跑完的时间。`None` = 还在跑。
@@ -71,15 +92,46 @@ pub struct Run {
 }
 
 impl Run {
-    fn new() -> Self {
+    fn new(principal_key: RunPrincipalKey, principal_epoch: u64, run_id: String) -> Self {
         let (tx, _) = broadcast::channel(BROADCAST_CAP);
         Self {
+            principal_key,
+            principal_epoch,
+            run_id,
+            confirmation_lease: Mutex::new(None),
             started_at: chrono::Utc::now(),
             finished_at: Mutex::new(None),
             replay: Mutex::new(Vec::new()),
             tx,
             abort: Mutex::new(None),
         }
+    }
+
+    #[must_use]
+    pub fn principal_key(&self) -> &RunPrincipalKey {
+        &self.principal_key
+    }
+
+    #[must_use]
+    pub fn principal_epoch(&self) -> u64 {
+        self.principal_epoch
+    }
+
+    #[must_use]
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub async fn set_confirmation_lease(&self, lease: ConfirmationLease) {
+        *self.confirmation_lease.lock().await = Some(lease);
+    }
+
+    pub async fn confirmation_lease(&self) -> Option<ConfirmationLease> {
+        self.confirmation_lease.lock().await.clone()
+    }
+
+    pub async fn clear_confirmation_lease(&self) {
+        self.confirmation_lease.lock().await.take();
     }
 
     /// 记一条事件并广播出去。
@@ -165,7 +217,10 @@ struct Slot {
 /// 这个进程上所有轮次。
 #[derive(Clone, Default)]
 pub struct Runs {
-    inner: Arc<Mutex<HashMap<String, Slot>>>,
+    inner: Arc<Mutex<HashMap<RunPrincipalKey, Slot>>>,
+    /// 生产路径由 `Engine::chat` 在首次入队前绑定。Attach/stop 只拿到
+    /// session id，必须先用这个 Remote 的当前 token 快照向远端验证主体。
+    remote: Arc<Mutex<Option<Remote>>>,
 }
 
 /// 这个会话排队的已经太多了。
@@ -186,29 +241,83 @@ pub struct Ticket {
     pub run: Arc<Run>,
     /// 前面还有几轮。0 = 立刻就能跑。
     pub ahead: usize,
-    session_id: String,
+    principal: RunPrincipal,
     gate: Arc<Semaphore>,
     waiting: Arc<AtomicUsize>,
     runs: Runs,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RunFenceError {
+    CredentialChanged,
+    PrincipalMissing,
+}
+
 impl Ticket {
+    #[must_use]
+    pub fn principal(&self) -> &RunPrincipal {
+        &self.principal
+    }
+
     /// 等到轮到自己，然后把这一轮登记成「当前在跑的」。
     ///
     /// 返回的许可**必须一直持有到这一轮彻底结束**（包括 episode 落库）——
     /// 提前 drop 等于放下一轮进来，而它读历史时会读不到上一轮的结果。
-    pub async fn begin(&self) -> OwnedSemaphorePermit {
+    ///
+    /// 拿到闸门之后**再**检查凭据代号。检查必须放在 acquire 后面：一条票
+    /// 可能排几十分钟，入队时正确不代表轮到它时仍正确。代号变过时，只有共享
+    /// 状态仍由严格入口绑定到票据同一账号才允许继续；切到另一个账号或清空
+    /// 账号租约都必须失败关闭。
+    pub async fn begin_checked(&self) -> std::result::Result<OwnedSemaphorePermit, RunFenceError> {
         let permit = Arc::clone(&self.gate)
             .acquire_owned()
             .await
             .expect("闸门不会被 close —— 没有任何地方调 Semaphore::close");
         self.waiting.fetch_sub(1, Ordering::SeqCst);
+        if let Some(remote) = self.runs.remote().await
+            && remote.current_credential_generation() != self.principal.credential().generation()
+        {
+            let same_account = self
+                .principal
+                .key()
+                .verified_namespace()
+                .is_some_and(|expected| {
+                    remote.principal_is_current(
+                        expected,
+                        self.principal.credential().principal_epoch(),
+                    )
+                });
+            if !same_account {
+                return Err(RunFenceError::CredentialChanged);
+            }
+        }
+        if self.principal.key().is_local()
+            && let Some(remote) = self.runs.remote().await
+            && !remote.run_is_current(&self.principal)
+        {
+            return Err(RunFenceError::CredentialChanged);
+        }
         // 轮到自己了才成为「当前在跑的」，见 `Slot::latest` 的文档
         let mut map = self.runs.inner.lock().await;
-        if let Some(slot) = map.get_mut(&self.session_id) {
-            slot.latest = Arc::clone(&self.run);
-        }
-        permit
+        let Some(slot) = map.get_mut(self.principal.key()) else {
+            return Err(RunFenceError::PrincipalMissing);
+        };
+        debug_assert_eq!(
+            slot.latest.principal_key(),
+            self.principal.key(),
+            "map key 与 Run 内置主体漂移会让 attach/stop 看错账号"
+        );
+        slot.latest = Arc::clone(&self.run);
+        Ok(permit)
+    }
+
+    /// 旧单元测试和少数不需要凭据围栏的纯队列测试使用。
+    ///
+    /// 生产调用必须走 [`Self::begin_checked`]；`expect` 在这里只是把
+    /// 「Runs 内部状态损坏」明确暴露成测试失败，不能掩盖成成功。
+    #[cfg(test)]
+    pub async fn begin(&self) -> OwnedSemaphorePermit {
+        self.begin_checked().await.expect("测试队列的凭据围栏一致")
     }
 }
 
@@ -216,6 +325,14 @@ impl Runs {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub async fn bind_remote(&self, remote: Remote) {
+        *self.remote.lock().await = Some(remote);
+    }
+
+    async fn remote(&self) -> Option<Remote> {
+        self.remote.lock().await.clone()
     }
 
     /// 排一轮。**同一个会话已经在跑就排到它后面，而不是拒绝。**
@@ -232,17 +349,35 @@ impl Runs {
     ///
     /// # Errors
     /// 排队的已经到 [`MAX_QUEUED`] 条。
-    pub async fn enqueue(&self, session_id: &str) -> Result<Ticket, QueueFull> {
+    #[cfg(test)]
+    pub async fn enqueue_verified(&self, principal: RunPrincipal) -> Result<Ticket, QueueFull> {
+        let run_id = Id::new().to_string();
+        self.enqueue_verified_with_run_id(principal, run_id).await
+    }
+
+    /// 使用调用方已经签发的稳定 run id 入队。
+    ///
+    /// 本机确认租约需要在把 task 放进队列之前绑定同一个 run id；分两次
+    /// 生成会让 Computer Use trace、确认记录和停止目标各指向不同的轮次。
+    pub async fn enqueue_verified_with_run_id(
+        &self,
+        principal: RunPrincipal,
+        run_id: String,
+    ) -> Result<Ticket, QueueFull> {
         let mut map = self.inner.lock().await;
         self.sweep(&mut map);
-        let run = Arc::new(Run::new());
+        let run = Arc::new(Run::new(
+            principal.key().clone(),
+            principal.credential().principal_epoch(),
+            run_id,
+        ));
         // 这个会话第一次出现：开一把满的闸门，于是下面那段对「第一条」和
         // 「第五条」是同一段代码 —— 两条分支各算一次 `ahead` 的话，
         // 其中一条迟早算错，而算错的表现只是界面上多写/少写一个数字，
         // 不会有任何测试红
-        if !map.contains_key(session_id) {
+        if !map.contains_key(principal.key()) {
             map.insert(
-                session_id.to_owned(),
+                principal.key().clone(),
                 Slot {
                     latest: Arc::clone(&run),
                     gate: Arc::new(Semaphore::new(1)),
@@ -250,7 +385,7 @@ impl Runs {
                 },
             );
         }
-        let slot = &map[session_id];
+        let slot = &map[principal.key()];
 
         // 前面还有几轮：正在跑的那一个（许可被占着）+ 已经在等的那些。
         //
@@ -266,26 +401,69 @@ impl Runs {
         Ok(Ticket {
             run,
             ahead: running + waiting,
-            session_id: session_id.to_owned(),
+            principal,
             gate: Arc::clone(&slot.gate),
             waiting: Arc::clone(&slot.waiting),
             runs: self.clone(),
         })
     }
 
+    /// 纯队列测试的兼容入口。生产 `Engine::chat` 必须走
+    /// [`Self::enqueue_verified`]，不能从 session id 猜账号。
+    #[cfg(test)]
+    pub async fn enqueue(&self, session_id: &str) -> Result<Ticket, QueueFull> {
+        let principal =
+            RunPrincipal::for_test("test-deployment", "test-user", session_id, "test-token", 0);
+        self.enqueue_verified(principal).await
+    }
+
     /// 挂上一个还在跑（或刚跑完不久）的轮次。
+    ///
+    /// 生产路由必须用 [`Self::attach_verified`]；这个按 session 猜主体的入口
+    /// 只保留给单元测试。
+    #[cfg(test)]
     pub async fn attach(
         &self,
         session_id: &str,
     ) -> Option<(Vec<ChatEvent>, broadcast::Receiver<ChatEvent>, bool)> {
+        let (key, principal_epoch) = match self.resolve_current_key(session_id).await {
+            Some(value) => value,
+            None => return None,
+        };
+        self.attach_verified(&key, principal_epoch).await
+    }
+
+    pub async fn attach_verified(
+        &self,
+        key: &RunPrincipalKey,
+        principal_epoch: u64,
+    ) -> Option<(Vec<ChatEvent>, broadcast::Receiver<ChatEvent>, bool)> {
         let run = {
             let mut map = self.inner.lock().await;
             self.sweep(&mut map);
-            Arc::clone(&map.get(session_id)?.latest)
+            Arc::clone(&map.get(key)?.latest)
         };
+        if run.principal_epoch() != principal_epoch {
+            return None;
+        }
         let running = run.is_running().await;
         let (replay, rx) = run.attach().await;
         Some((replay, rx, running))
+    }
+
+    pub async fn confirmation_lease(
+        &self,
+        key: &RunPrincipalKey,
+        principal_epoch: u64,
+    ) -> Option<ConfirmationLease> {
+        let run = {
+            let map = self.inner.lock().await;
+            Arc::clone(&map.get(key)?.latest)
+        };
+        if run.principal_epoch() != principal_epoch {
+            return None;
+        }
+        run.confirmation_lease().await
     }
 
     /// 掐掉这个会话正在跑的那一轮。返回 `false` = 本来就没有在跑的。
@@ -309,14 +487,28 @@ impl Runs {
     ///
     /// 闸门的许可被那个 task 持有，`abort` 之后它被 drop —— 于是排在后面的
     /// 下一轮自动开始。这正是想要的：用户停掉的是**这一条**，不是整个队列。
+    ///
+    /// 生产路由必须用 [`Self::stop_verified`]；这个按 session 猜主体的入口
+    /// 只保留给单元测试。
+    #[cfg(test)]
     pub async fn stop(&self, session_id: &str) -> bool {
+        let Some((key, principal_epoch)) = self.resolve_current_key(session_id).await else {
+            return false;
+        };
+        self.stop_verified(&key, principal_epoch).await
+    }
+
+    pub async fn stop_verified(&self, key: &RunPrincipalKey, principal_epoch: u64) -> bool {
         let run = {
             let map = self.inner.lock().await;
-            match map.get(session_id) {
+            match map.get(key) {
                 Some(slot) => Arc::clone(&slot.latest),
                 None => return false,
             }
         };
+        if run.principal_epoch() != principal_epoch {
+            return false;
+        }
         if !run.is_running().await {
             return false;
         }
@@ -328,8 +520,8 @@ impl Runs {
         RunSink::new(run)
             .send(ChatEvent::Error {
                 message: concat!(
-                    "已停止。这一轮没有写进历史 —— 半截回答留着会被当成事实。",
-                    "已经改过的文件不会退回去。",
+                    "已请求停止。这一轮没有写进历史 —— 半截回答留着会被当成事实。",
+                    "已经发出的操作可能仍在执行，已经改过的文件不会退回去。",
                 )
                 .into(),
                 needs_reauth: false,
@@ -338,20 +530,58 @@ impl Runs {
         true
     }
 
-    /// 现在有哪些在跑。
-    pub async fn running(&self) -> Vec<RunSummary> {
+    /// 只列出已经由调用方严格验证过的主体名下的轮次。
+    ///
+    /// 路由会先取得一次不可分割的 `(主体, 凭据)` 快照，再把这里的结果和
+    /// 当前绑定放在同一道身份复核之后返回。这里**不能再次验证当前 token**：
+    /// 两次网络验证之间若发生 A→B→A，第二次可能返回 B 的列表，而最终校验
+    /// 又看到 A，形成跨账号泄漏。
+    pub async fn running_for(
+        &self,
+        namespace: &impl crate::workspaces::principal_key::WorkspaceOwner,
+        principal_epoch: u64,
+    ) -> Vec<RunSummary> {
+        let Ok(owner) = namespace.workspace_owner() else {
+            return Vec::new();
+        };
         let map = self.inner.lock().await;
         let mut out = Vec::new();
         for (id, slot) in map.iter() {
-            if slot.latest.is_running().await {
+            if !id.belongs_to_owner(&owner) {
+                continue;
+            }
+            if slot.latest.principal_epoch() == principal_epoch && slot.latest.is_running().await {
                 out.push(RunSummary {
-                    session_id: id.clone(),
+                    session_id: id.session_id().to_owned(),
                     started_at: slot.latest.started_at.to_rfc3339(),
                 });
             }
         }
         out.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         out
+    }
+
+    /// 测试便利入口：先按当前 token 验证主体，再走生产同款筛选。
+    #[cfg(test)]
+    pub async fn running(&self) -> Vec<RunSummary> {
+        let namespace = match self.remote().await {
+            Some(remote) => match remote.verify_current_identity().await {
+                Ok(identity) => identity,
+                Err(error) => {
+                    tracing::warn!(error = %error, "无法验证当前 Computer Use 主体，运行列表按空返回");
+                    return Vec::new();
+                }
+            },
+            None => return Vec::new(),
+        };
+        let Some(principal_epoch) = self
+            .remote()
+            .await
+            .and_then(|remote| remote.principal_epoch_for(&namespace))
+        else {
+            return Vec::new();
+        };
+        self.running_for(&namespace, principal_epoch).await
     }
 
     /// 清掉留够了时间的已完成记录。
@@ -365,7 +595,7 @@ impl Runs {
     /// 清掉整个 slot 等于扔掉那把闸门，于是下一条消息会新建一把空的 ——
     /// 两轮就此并跑，而这正是这个模块存在的理由。所以先看闸门和等待数，
     /// 再看时间。
-    fn sweep(&self, map: &mut HashMap<String, Slot>) {
+    fn sweep(&self, map: &mut HashMap<RunPrincipalKey, Slot>) {
         map.retain(|_, slot| {
             if slot.gate.available_permits() == 0 || slot.waiting.load(Ordering::SeqCst) > 0 {
                 return true;
@@ -376,6 +606,43 @@ impl Runs {
                 .try_lock()
                 .is_ok_and(|f| f.is_none_or(|t| t.elapsed() < KEEP_FINISHED))
         });
+    }
+
+    #[cfg(test)]
+    async fn resolve_current_key(&self, session_id: &str) -> Option<(RunPrincipalKey, u64)> {
+        if let Some(remote) = self.remote().await {
+            return remote
+                .verify_current_session_principal(session_id)
+                .await
+                .map(|principal| {
+                    (
+                        principal.key().clone(),
+                        principal.credential().principal_epoch(),
+                    )
+                })
+                .map_err(|error| {
+                    tracing::warn!(
+                        error = %error,
+                        session = session_id,
+                        "当前凭据无法严格验证这个会话，拒绝 attach/stop"
+                    );
+                })
+                .ok();
+        }
+
+        // 单元测试里没有远端。只在「这个 session 恰好只有一个主体」时
+        // 回退；出现 A/B 同 session 后必须显式走 attach_verified，绝不猜。
+        #[cfg(test)]
+        {
+            let map = self.inner.lock().await;
+            let mut matches = map.keys().filter(|key| key.session_id() == session_id);
+            let first = matches.next()?.clone();
+            if matches.next().is_none() {
+                let slot = map.get(&first)?;
+                return Some((first, slot.latest.principal_epoch()));
+            }
+        }
+        None
     }
 }
 
@@ -406,6 +673,11 @@ impl RunSink {
         let terminal = matches!(ev, ChatEvent::Done { .. } | ChatEvent::Error { .. });
         self.run.record(&ev).await;
         if terminal {
+            tracing::info!(
+                run_id = self.run.run_id(),
+                "轮次进入终态，释放关联的确认租约"
+            );
+            self.run.clear_confirmation_lease().await;
             self.run.finish().await;
         }
     }
@@ -414,6 +686,71 @@ impl RunSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::computer_principal::PrincipalNamespace;
+    use axum::Router;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
+    use axum::routing::post;
+    use serde_json::{Value, json};
+    use tokio::net::TcpListener;
+
+    #[derive(Clone)]
+    struct PrincipalServer;
+
+    async fn principal_for_token(
+        State(_): State<PrincipalServer>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<Value>,
+    ) -> (StatusCode, axum::Json<Value>) {
+        let authorization = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let user_id = if authorization == "Bearer account-a-token" {
+            "user-a"
+        } else if authorization == "Bearer account-b-token" {
+            "user-b"
+        } else {
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(json!({"error": "未知 token"})),
+            );
+        };
+        let session_id = body.get("session_id").cloned().unwrap_or(Value::Null);
+        let binding = if session_id.is_null() {
+            "identity"
+        } else {
+            "existing"
+        };
+        (
+            StatusCode::OK,
+            axum::Json(json!({
+                "deployment_id": "deployment",
+                "deployment_url": "https://cortex.test/api",
+                "user_id": user_id,
+                "session_id": session_id,
+                "credential_kind": "access_token",
+                "expires_in_secs": 899,
+                "session_binding": binding
+            })),
+        )
+    }
+
+    async fn serve_principal() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route("/auth/computer-use-principal", post(principal_for_token))
+            .with_state(PrincipalServer);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("principal 替身可以监听本机端口");
+        let addr = listener.local_addr().expect("principal 替身地址");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("principal 替身可运行");
+        });
+        (format!("http://{addr}"), server)
+    }
 
     fn delta(s: &str) -> ChatEvent {
         ChatEvent::Delta { text: s.into() }
@@ -542,6 +879,7 @@ mod tests {
         // 第一轮结束（发 done 只是让 `is_running` 转假；真正放开闸门的是 drop 许可）
         RunSink::new(first)
             .send(ChatEvent::Done {
+                persistence: None,
                 episode_id: "e1".into(),
                 models: Vec::new(),
                 attachments: Vec::new(),
@@ -649,6 +987,7 @@ mod tests {
         let sink = RunSink::new(run);
         sink.send(delta("答完了")).await;
         sink.send(ChatEvent::Done {
+            persistence: None,
             episode_id: "e1".into(),
             models: Vec::new(),
             attachments: Vec::new(),
@@ -662,6 +1001,253 @@ mod tests {
             runs.running().await.is_empty(),
             "「正在跑」的列表里不该有它"
         );
+    }
+
+    #[tokio::test]
+    async fn account_a_and_b_can_reuse_one_session_id_without_crossing_runs() {
+        let runs = Runs::new();
+        let a = RunPrincipal::for_test("deployment", "user-a", "same-session", "token-a", 1);
+        let b = RunPrincipal::for_test("deployment", "user-b", "same-session", "token-b", 1);
+        let ticket_a = runs.enqueue_verified(a.clone()).await.expect("A 可入队");
+        let ticket_b = runs.enqueue_verified(b.clone()).await.expect("B 可入队");
+
+        assert_eq!(ticket_a.ahead, 0);
+        assert_eq!(
+            ticket_b.ahead, 0,
+            "主体不同即使 session 相同也不能互相排队或共享闸门"
+        );
+        assert!(
+            runs.attach_verified(a.key(), a.credential().principal_epoch())
+                .await
+                .is_some(),
+            "A 必须能挂到自己的 run"
+        );
+        assert!(
+            runs.attach_verified(b.key(), b.credential().principal_epoch())
+                .await
+                .is_some(),
+            "B 必须能挂到自己的 run"
+        );
+        assert!(
+            !Arc::ptr_eq(&ticket_a.run, &ticket_b.run),
+            "同 session 的两个账号绝不能挂到同一个 Run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_a_login_cannot_attach_stop_or_list_the_previous_a_run() {
+        let runs = Runs::new();
+        let old = RunPrincipal::for_test_with_epoch(
+            "deployment",
+            "user-a",
+            "same-session",
+            "old-a-token",
+            0,
+            1,
+        );
+        let ticket = runs
+            .enqueue_verified(old.clone())
+            .await
+            .expect("旧 A 可入队");
+        let permit = ticket.begin_checked().await.expect("旧 A 可起跑");
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            std::future::pending::<()>().await;
+        });
+        ticket.run.set_abort(task.abort_handle()).await;
+
+        let new_a_epoch = old.credential().principal_epoch() + 2;
+        let namespace = old.verified_namespace().expect("旧 A 有主体");
+        assert!(
+            runs.attach_verified(old.key(), new_a_epoch).await.is_none(),
+            "同名 A 的新登录作用域不能挂到旧登录的 run"
+        );
+        assert!(
+            !runs.stop_verified(old.key(), new_a_epoch).await,
+            "同名 A 的新登录作用域不能停止旧登录的 run"
+        );
+        assert!(
+            runs.running_for(namespace, new_a_epoch).await.is_empty(),
+            "新的 A 登录作用域不能从运行列表看到旧登录的 run"
+        );
+        assert!(
+            runs.attach_verified(old.key(), old.credential().principal_epoch())
+                .await
+                .is_some(),
+            "测试中的旧 run 本身仍应存在，失败结果不能来自记录已丢失"
+        );
+
+        assert!(
+            runs.stop_verified(old.key(), old.credential().principal_epoch())
+                .await,
+            "测试结束时应通过原 epoch 正常回收旧 run"
+        );
+        task.await.expect_err("旧 A 的占位 task 应被 abort");
+    }
+
+    #[tokio::test]
+    async fn public_attach_stop_and_running_follow_the_verified_principal() {
+        let (base, server) = serve_principal().await;
+        let remote = Remote::new(base, Some("account-a-token".into())).unwrap();
+        let runs = Runs::new();
+        runs.bind_remote(remote.clone()).await;
+        let namespace_a =
+            PrincipalNamespace::from_verified("deployment", "user-a").expect("A 主体合法");
+        remote.bind_principal(&namespace_a).expect("绑定 A");
+        let credential_a = remote.credential_snapshot().expect("读取 A 凭据快照");
+        let a = RunPrincipal::for_test_with_epoch(
+            "deployment",
+            "user-a",
+            "same-session",
+            "account-a-token",
+            credential_a.generation(),
+            credential_a.principal_epoch(),
+        );
+        let ticket_a = runs.enqueue_verified(a).await.expect("A 可入队");
+        let permit_a = ticket_a.begin_checked().await.expect("A 可起跑");
+        let task_a = tokio::spawn(async move {
+            let _permit = permit_a;
+            std::future::pending::<()>().await;
+        });
+        ticket_a.run.set_abort(task_a.abort_handle()).await;
+        RunSink::new(Arc::clone(&ticket_a.run))
+            .send(delta("A 的内容"))
+            .await;
+
+        // 公共路由只给 session id；先绑定 A 后，它必须用当前严格主体收窄，
+        // 不能因为 A/B 用了同一个 id 就挑中任意一条。
+        let (replay_a, _, running_a) = runs
+            .attach("same-session")
+            .await
+            .expect("A 应挂到自己的 run");
+        assert!(running_a);
+        assert!(
+            matches!(&replay_a[..], [ChatEvent::Delta { text }] if text == "A 的内容"),
+            "A 的 attach 拿到了 B: {replay_a:?}"
+        );
+        assert_eq!(
+            runs.running().await.len(),
+            1,
+            "运行列表也只能包含当前 A 的那一条，不能暴露 B"
+        );
+        assert!(runs.stop("same-session").await, "A 应能停止自己的 run");
+        task_a.await.expect_err("A 的占位 task 应被 abort");
+
+        remote.set_token(Some("account-b-token".into()));
+        let namespace_b = remote
+            .verify_current_identity()
+            .await
+            .expect("B token 应验证出新主体");
+        assert_eq!(namespace_b.user_id(), "user-b");
+        let credential_b = remote.credential_snapshot().expect("读取 B 凭据快照");
+        let b = RunPrincipal::for_test_with_epoch(
+            "deployment",
+            "user-b",
+            "same-session",
+            "account-b-token",
+            credential_b.generation(),
+            credential_b.principal_epoch(),
+        );
+        let ticket_b = runs.enqueue_verified(b).await.expect("B 可入队");
+        let permit_b = ticket_b.begin_checked().await.expect("B 可起跑");
+        let task_b = tokio::spawn(async move {
+            let _permit = permit_b;
+            std::future::pending::<()>().await;
+        });
+        ticket_b.run.set_abort(task_b.abort_handle()).await;
+        RunSink::new(Arc::clone(&ticket_b.run))
+            .send(delta("B 的内容"))
+            .await;
+        let (replay_b, _, running_b) = runs
+            .attach("same-session")
+            .await
+            .expect("切到 B 后应挂到 B 的 run");
+        assert!(running_b);
+        assert!(
+            matches!(&replay_b[..], [ChatEvent::Delta { text }] if text == "B 的内容"),
+            "B 的 attach 拿到了 A: {replay_b:?}"
+        );
+        assert!(runs.stop("same-session").await, "B 应能停止自己的 run");
+        task_b.await.expect_err("B 的占位 task 应被 abort");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_queued_run_fails_closed_when_the_shared_credential_changes() {
+        let remote = Remote::new("http://127.0.0.1:1", Some("account-a-token".into())).unwrap();
+        let runs = Runs::new();
+        runs.bind_remote(remote.clone()).await;
+        let a = RunPrincipal::for_test(
+            "deployment",
+            "user-a",
+            "session",
+            "account-a-token",
+            remote.current_credential_generation(),
+        );
+        let ticket = runs.enqueue_verified(a).await.expect("A 可入队");
+
+        remote.set_token(Some("account-b-token".into()));
+
+        assert!(
+            matches!(
+                ticket.begin_checked().await,
+                Err(RunFenceError::CredentialChanged)
+            ),
+            "A 排队期间切到 B 后，旧 ticket 不能再开始"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unbound_token_rotation_fails_closed() {
+        let remote = Remote::new("http://127.0.0.1:1", Some("account-a-old".into())).unwrap();
+        let runs = Runs::new();
+        runs.bind_remote(remote.clone()).await;
+        let a = RunPrincipal::for_test(
+            "deployment",
+            "user-a",
+            "session",
+            "account-a-old",
+            remote.current_credential_generation(),
+        );
+        let ticket = runs.enqueue_verified(a).await.expect("A 可入队");
+
+        remote.set_token(Some("account-a-renewed".into()));
+
+        assert!(
+            matches!(
+                ticket.begin_checked().await,
+                Err(RunFenceError::CredentialChanged)
+            ),
+            "绕过严格账号验证、清掉主体租约的 token 替换不能被旧票据继承"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_verified_same_account_rotation_can_start_the_queued_ticket() {
+        let remote = Remote::new("http://127.0.0.1:1", Some("account-a-old".into())).unwrap();
+        let account = PrincipalNamespace::from_verified("deployment", "user-a").unwrap();
+        remote.bind_principal(&account).unwrap();
+        let runs = Runs::new();
+        runs.bind_remote(remote.clone()).await;
+        let credential = remote.credential_snapshot().expect("读取 A 凭据快照");
+        let a = RunPrincipal::for_test_with_epoch(
+            "deployment",
+            "user-a",
+            "session",
+            "account-a-old",
+            credential.generation(),
+            credential.principal_epoch(),
+        );
+        let ticket = runs.enqueue_verified(a).await.expect("A 可入队");
+
+        remote
+            .set_token_for_principal("account-a-renewed".into(), &account)
+            .expect("同账号续期应被接受");
+
+        let _permit = ticket
+            .begin_checked()
+            .await
+            .expect("严格验证过的同账号续期不应误杀排队中的 A 任务");
     }
 }
 
@@ -725,6 +1311,7 @@ mod stop_tests {
         let permit = ticket.begin().await;
         RunSink::new(Arc::clone(&ticket.run))
             .send(ChatEvent::Done {
+                persistence: None,
                 episode_id: "e1".into(),
                 models: Vec::new(),
                 attachments: Vec::new(),

@@ -149,6 +149,9 @@ pub struct Accounts {
     pub pool: sqlx::PgPool,
     /// 按用户取租户库
     pub tenants: Arc<cortex_store::TenantPools>,
+    /// 由数据库持久化的部署身份。所有 Computer Use principal 都以它为准；
+    /// 地址、hostname 与端口都不能替代。
+    pub(crate) deployment_id: String,
 }
 
 impl Accounts {
@@ -178,13 +181,23 @@ impl Accounts {
             .connect_with(options)
             .await
             .map_err(|e| cortex_core::CortexError::Store(format!("连 cortex_auth 失败：{e}")))?;
+        let deployment_id = crate::deployment::load_or_create(&pool).await?;
 
         let me = Self {
             pool,
             tenants: Arc::new(cortex_store::TenantPools::new(database_url)),
+            deployment_id,
         };
         me.migrate_tenants().await;
         Ok(me)
+    }
+
+    /// 当前部署的持久随机身份。
+    ///
+    /// 这是授权身份；`CORTEX_PUBLIC_URL` 和请求 Host 都只用于连接与展示。
+    #[must_use]
+    pub fn deployment_id(&self) -> &str {
+        &self.deployment_id
     }
 
     /// 把**已有的每个租户** schema 迁到最新。
@@ -627,6 +640,7 @@ mod migrate_tenants_tests {
         let accounts = Accounts {
             pool,
             tenants: Arc::new(cortex_store::TenantPools::new(&url)),
+            deployment_id: "0".repeat(64),
         };
         accounts.migrate_tenants().await;
 

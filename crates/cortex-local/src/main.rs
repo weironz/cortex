@@ -1,9 +1,8 @@
 //! cortex-local —— 本地 agent。
 //!
-//! 形态 = **cortexd 去掉数据库**。agent 循环、工具、沙箱都在这里跑，
-//! 记忆仍然只有远端 cortexd 一个权威副本。
+//! 本机与容器复用同一份 agent 循环；工具、沙箱和确认由此处的宿主装配。
 //!
-//! # 它对客户端讲的是与 cortexd **完全相同**的协议
+//! # 客户端只使用同一套 HTTP/SSE 协议
 //!
 //! `/chat`、`/confirmations`、`/health` 由它自己处理；其余路径原样反代给
 //! 远端。于是 Flutter 与 CLI 只要把 base URL 从远端改成 `127.0.0.1:PORT`，
@@ -12,30 +11,62 @@
 //! 另一条路是让客户端知道「聊天走这个地址、历史走那个地址」。那要改两个
 //! 客户端、两套配置、两处错误处理，而收益是零。
 //!
-//! # 连不上 cortexd 时
+//! # 普通本机会话与离线续聊
 //!
-//! 循环、工具、shell 照常 —— 这时候它就是一个没有记忆的编码 agent。
-//! 对话排进本地队列（[`outbox`]），恢复连接后自动补写。
-//! 界面上会明说「记忆未连接」：不说的话，用户只会觉得它突然变笨了。
+//! 独立控制 capability 建立本机 owner；普通会话可以只保存本机。账号离线
+//! 记录保持原 owner，客户端明确显示保存位置。旧的无 owner outbox 不自动
+//! 收编，本机历史不因以后登录而上传；Computer Use 仍要求严格远端主体。
 
 mod app_launcher;
 mod attach;
 mod attachments;
 mod checkpoint;
 mod computer;
+mod computer_browser;
 mod computer_cua;
+#[cfg(windows)]
+mod computer_cua_runtime;
+#[cfg(windows)]
+mod computer_cua_transport;
+#[cfg(windows)]
+mod computer_desktop;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod computer_dispatch;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod computer_input;
+mod computer_lease;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod computer_ledger;
+#[cfg(windows)]
+mod computer_owned_job;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod computer_post_action;
+mod computer_principal;
+#[cfg(windows)]
+mod computer_recovery;
+mod computer_trace_gap;
+mod computer_traces;
 mod config;
 /// 工具确认的那本簿子。**唯一的宿主是这里** —— cortexd 不跑 agent，
 /// 容器里那个不问确认（越界路径直接拒绝）。见模块头。
 mod confirm;
+#[cfg(test)]
+mod confirmation_routes_test;
 mod grants;
 mod llm;
+mod local_credentials;
 mod local_import;
 mod local_mcp;
+mod local_owner;
 mod local_workspace;
+#[cfg(test)]
+mod ordinary_owner_test;
 mod outbox;
+mod owner_journal;
 mod provider;
 mod proxy;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod read_only_probe;
 mod recap;
 mod remote;
 mod routes;
@@ -64,6 +95,10 @@ mod ws_proxy;
 #[cfg(test)]
 mod attach_routes_test;
 
+/// 本机 agent 名册与心跳的跨账号隔离。
+#[cfg(test)]
+mod agent_state_principal_test;
+
 /// 四条本地工作空间路由的端到端断言（不开端口，见文件头）。
 #[cfg(test)]
 mod local_workspace_routes_test;
@@ -85,6 +120,12 @@ mod proxy_credential_test;
 #[cfg(test)]
 mod terminal_routes_test;
 
+/// 真实 HTTP/LocalHost/Cua 链路；GUI 用例默认 ignored，只允许独占 fixture。
+#[cfg(all(test, windows))]
+mod computer_http_fixture_test;
+/// Computer Use 产品链路：目录、确认、Gateway、驱动、验证和 trace 同一条链。
+#[cfg(test)]
+mod computer_product_path_test;
 /// 一轮装配层的断言：目录给不给、权限档怎么翻译、桌面与容器差在哪。
 #[cfg(test)]
 mod turn_assemble_test;
@@ -107,6 +148,60 @@ use crate::remote::Remote;
 use crate::state::LocalState;
 use crate::turn::Engine;
 use crate::workspaces::Workspaces;
+
+/// 发送一拍严格账号名册。
+///
+/// 先验证当前 token 的 `(deployment_id, user_id)`，再从复合主体绑定表中过滤。
+/// 发送时固定验证所用的凭据快照；即使共享 token 恰好在此刻从 A 切到 B，
+/// 这一拍也只会用 A 的 token 发送 A 的会话，绝不会把 A 的旧快照套到 B 的
+/// 连接上。若代际已经变化，调用方得到错误并按失败关闭处理。
+async fn heartbeat_once(
+    state: &LocalState,
+    agent_id: &str,
+    machine_hint: &str,
+    attach: Option<cortex_proto::presence::AttachOffer>,
+) -> cortex_core::Result<cortex_proto::presence::HeartbeatAck> {
+    let roster = routes::verified_agent_roster(state).await?;
+    let generation = roster.credential().generation();
+    if state.remote.current_credential_generation() != generation {
+        return Err(cortex_core::CortexError::Unauthorized(
+            "本机 agent 心跳发送前账号凭据已切换".into(),
+        ));
+    }
+
+    let heartbeat = cortex_proto::presence::AgentHeartbeat {
+        agent_id: agent_id.to_owned(),
+        machine_hint: machine_hint.to_owned(),
+        sessions: roster.sessions().to_vec(),
+        attach,
+    };
+    let pinned_remote = state
+        .remote
+        .pinned_for_credential(roster.credential().clone());
+    let ack = pinned_remote.heartbeat(&heartbeat).await?;
+
+    if state.remote.current_credential_generation() != generation {
+        return Err(cortex_core::CortexError::Unauthorized(
+            "本机 agent 心跳发送期间账号凭据已切换".into(),
+        ));
+    }
+    Ok(ack)
+}
+
+/// 启动时的两个远端探测互不依赖，必须并发。
+///
+/// 协议检查失败要阻止启动，账号识别失败却允许回落到上次目录；两者结论不同，
+/// 但执行顺序没有因果关系。串行时远端黑洞会先耗完 `/health` 的预算，再耗完
+/// `/auth/me` 的预算，桌面端看到的是本地 agent 迟迟没有报地址。并发后最坏
+/// 只承担一次探测预算。
+#[cfg(test)]
+async fn startup_probes<P, I>(protocol: P, identity: I) -> (P::Output, I::Output)
+where
+    P: std::future::Future,
+    I: std::future::Future,
+{
+    tokio::join!(protocol, identity)
+}
 
 /// 系统提示词。
 ///
@@ -147,6 +242,8 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 #[derive(Parser, Debug)]
 #[command(name = "cortex-local", version, about = "Cortex 本地 agent")]
 struct Args {
+    #[command(subcommand)]
+    maintenance: Option<MaintenanceCommand>,
     /// 监听地址。**默认只绑 loopback** —— 它能跑 shell，
     /// 绑到 0.0.0.0 等于把同网段的任何人放进你的文件系统
     #[arg(long, env = "CORTEX_LOCAL_BIND", default_value = "127.0.0.1:8090")]
@@ -156,10 +253,13 @@ struct Args {
     #[arg(long, env = "CORTEX_REMOTE", default_value = "http://127.0.0.1:8080")]
     remote: String,
 
-    /// 访问 cortexd 的 token。**同一个 token 也用于校验入站请求** ——
-    /// 本地 agent 本来就持有它，不引入第二个秘密
+    /// 访问远端 Cortex 的 token；未传独立入站凭据的旧 CLI 仍复用它。
     #[arg(long, env = "CORTEX_TOKEN")]
     token: Option<String>,
+
+    /// 本机控制凭据。桌面端传进程级随机值，不能拿它访问远端账号。
+    #[arg(long, env = "CORTEX_INBOUND_TOKEN")]
+    inbound_token: Option<String>,
 
     /// 监护人的 pid。它一消失，本进程跟着退。见 [`supervise`]。
     ///
@@ -268,6 +368,57 @@ struct Args {
     allow_remote_attach: bool,
 }
 
+#[derive(clap::Subcommand, Debug)]
+enum MaintenanceCommand {
+    /// 一次性建立机器电脑写入权威；要求同一 OS owner 的管理员令牌，不启动 agent。
+    ProvisionComputerLedger {
+        /// 目标宿主的精确 SID，必须等于当前安装进程的 SID；不自动接管其他用户。
+        #[arg(long)]
+        owner_sid: String,
+    },
+    /// 原址升级干净旧电脑账本；不会处理 Unknown、清 fence 或自动提权。
+    UpgradeComputerLedger {
+        /// 必须与已有安装 owner 和当前提升进程相同。
+        #[arg(long)]
+        owner_sid: String,
+    },
+}
+
+async fn run_maintenance(command: MaintenanceCommand) -> anyhow::Result<()> {
+    match command {
+        MaintenanceCommand::UpgradeComputerLedger { owner_sid } => {
+            #[cfg(windows)]
+            {
+                let result = computer_ledger::provision::upgrade(owner_sid)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                println!("{}", serde_json::to_string(&result)?);
+                Ok(())
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = owner_sid;
+                anyhow::bail!("computer ledger upgrade 仅支持 Windows")
+            }
+        }
+        MaintenanceCommand::ProvisionComputerLedger { owner_sid } => {
+            #[cfg(windows)]
+            {
+                let result = computer_ledger::provision::run(owner_sid)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                println!("{}", serde_json::to_string(&result)?);
+                Ok(())
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = owner_sid;
+                anyhow::bail!("computer ledger provision 仅支持 Windows")
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // ── `.env` 只在**开发机**上读 ──
@@ -291,7 +442,18 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+    if let Some(command) = args.maintenance.take() {
+        if args.exec_env != cortex_agent::ExecEnvironment::LocalMachine
+            || args.sandbox_probe
+            || args.win_restricted_exec.is_some()
+            || args.win_sandbox_exec.is_some()
+            || args.self_check
+        {
+            anyhow::bail!("provision 不能与容器/沙箱 helper/self-check 模式混用");
+        }
+        return run_maintenance(command).await;
+    }
 
     // ── 探针模式：不建任何东西，做完就退 ──────────────────────
     //
@@ -352,62 +514,57 @@ async fn main() -> anyhow::Result<()> {
     let dir = config::state_dir()?;
     let route = LlmRoute::from_env()?;
 
-    let remote = Remote::new(&args.remote, args.token.clone())?;
-
-    // ── 协议握手：不兼容就**不启动** ──────────────────────────
-    //
-    // 从 0.1.4 起，桌面端里的这个进程与远端 cortexd 各自独立升级。
-    // 两侧对不上时降级运行的表现是「某个功能悄悄不对」，而那比
-    // 「起不来并说清原因」难查一个量级。
-    //
-    // 连不上**不算**不兼容：离线是本地 agent 明确支持的形态
-    // （对话照常、写入排进 outbox）。因为网络不好就拒绝启动，
-    // 等于把一次断网变成「装了个用不了的东西」。见 `Remote::protocol_check`
-    match remote.protocol_check().await {
-        Ok(Ok(())) => tracing::info!(protocol = cortex_proto::PROTOCOL_VERSION, "协议握手通过"),
-        Ok(Err(msg)) => anyhow::bail!("与远端 cortexd 的协议不兼容：{msg}"),
-        Err(e) => tracing::warn!(
-            error = %e,
-            "握不上远端，跳过协议检查照常启动 —— 离线可用是刻意的"
-        ),
-    }
-
-    // ── 本地状态按账号分目录 ─────────────────────────────
-    //
-    // 原先是每设备一份。一台机器上换个账号，A 断网期间排的队会被 B
-    // 登录后冲进 B 的记忆库 —— 而重放时没有任何提示：那些 episode
-    // 长得和 B 自己写的一模一样。
-    //
-    // 只有远端知道这把 token 是谁的，所以要问一次。离线问不到就用
-    // 「上一次是谁」——一台机器上换账号本来就不频繁，而离线时那是唯一
-    // 能拿到的线索
-    let user_dir = match remote.whoami().await {
-        Ok(user_id) => {
-            config::adopt_pending(&dir, &user_id);
-            config::remember_user(&dir, &user_id);
-            let d = config::user_dir(&dir, &user_id)?;
-            tracing::info!(user = %user_id, dir = %d.display(), "本地状态目录");
-            d
+    let credentials =
+        local_credentials::AgentCredentials::new(args.token.clone(), args.inbound_token.clone())?;
+    let inbound_token_fp = credentials.inbound_fingerprint();
+    let authority = if args.exec_env == cortex_agent::ExecEnvironment::LocalMachine
+        && args.inbound_token.is_some()
+        && credentials.inbound != credentials.outbound
+    {
+        Some(
+            local_owner::LocalAuthority::open(
+                &dir,
+                credentials.inbound.as_deref().expect("显式入站凭据存在"),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let mut remote = Remote::new(&args.remote, credentials.outbound)?;
+    let user_dir = if let Some(authority) = authority {
+        let owner_dir = authority.root().to_path_buf();
+        remote = remote.with_local_authority(authority);
+        let auth = remote.bootstrap_owner().await?;
+        tracing::info!(?auth, "本机 owner 已建立，账号状态已分类");
+        owner_dir
+    } else {
+        // 容器与旧单凭据账号仍走原执行边界，但不再读取 last_user 或认领 _pending。
+        match remote.protocol_check().await {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => anyhow::bail!("协议不兼容：{message}"),
+            Err(error) if remote::transport_unavailable(&error) => {}
+            Err(error) => return Err(error.into()),
         }
-        Err(e) => {
-            let d = config::last_user_dir(&dir)?;
-            tracing::warn!(
-                error = %e, dir = %d.display(),
-                "问不到远端这把凭据属于谁，先用上一次那个账号的目录"
-            );
-            d
-        }
+        let path = if args.exec_env.is_container() {
+            dir.join("container")
+        } else {
+            let (ns, _) = remote.verify_current_namespace_snapshot().await?;
+            dir.join("accounts-v1")
+                .join(local_owner::OwnerKey::account(ns.deployment_id(), ns.user_id())?.digest())
+        };
+        std::fs::create_dir_all(&path)?;
+        path
     };
 
     let outbox = Outbox::new(&user_dir);
-    let workspaces = match args.default_workspace.as_deref() {
-        // 不合格就**启动失败**，不静默降级：沙箱里没有工作区等于没有能力，
-        // 而那会以「用起来发现什么都干不了」的方式暴露 —— 最难查的一种
-        Some(raw) => Workspaces::load(&user_dir)
-            .with_default_root(raw)
-            .with_context(|| format!("默认工作区 {raw:?} 不合格"))?,
-        None => Workspaces::load(&user_dir),
-    };
+    let workspace_dir = user_dir.clone();
+    let default_workspace = args.default_workspace.clone();
+    let workspaces = tokio::task::spawn_blocking(move || match default_workspace.as_deref() {
+        Some(raw) => Workspaces::load(&workspace_dir).with_default_root(raw),
+        None => Ok(Workspaces::load(&workspace_dir)),
+    })
+    .await??;
     let llm = llm::build(route, &remote)?;
 
     // 取本机这个模型自己的窗口，而不是抄一个常量：本地 agent 用的模型
@@ -424,11 +581,13 @@ async fn main() -> anyhow::Result<()> {
     // **读哪一个**由执行环境决定，见 `cortex_mcp::config_path`：桌面端读
     // 用户目录下的 `mcp.json`，容器里读工作区根上的 `.mcp.json`（连文件名
     // 都跟 Claude Code 的项目作用域一样，仓库里那份直接就生效）。
+    let owner_config_dir = config::owner_config_dir(&remote, &user_dir).await?;
     let mcp_path = cortex_mcp::config_path(
         args.exec_env,
-        &user_dir,
+        &owner_config_dir,
         workspaces.default_root().map(std::path::Path::new),
     );
+    config::bind_mcp_config_path(&remote, &mcp_path).await?;
     tracing::debug!(path = %mcp_path.display(), "MCP 配置");
     let mcp_cfg = cortex_mcp::McpConfig::load(&mcp_path)?;
     // ⚠️ **在后台连，不挡启动。**
@@ -465,22 +624,9 @@ async fn main() -> anyhow::Result<()> {
     // 与 `.mcp.json` 那条边界同一个理由，而且更硬 —— hook 是一条不过
     // 权限闸门的 shell 命令：clone 一个陌生仓库、绑上工作区，它自带的
     // hooks 会在第一次写文件时就跑起来，没人点过同意。
-    let hooks_path = user_dir.join("hooks.json");
-    let hooks = match std::fs::read_to_string(&hooks_path) {
-        Ok(raw) => match serde_json::from_str::<Vec<cortex_agent::hooks::Hook>>(&raw) {
-            Ok(h) => {
-                tracing::info!(count = h.len(), path = %hooks_path.display(), "读到 hooks");
-                h
-            }
-            // 解析失败**说出来**：一份写坏的 hooks.json 静默变成「没有
-            // hooks」的话，用户以为规矩生效了，而它一条都没跑
-            Err(e) => {
-                tracing::warn!(path = %hooks_path.display(), error = %e, "hooks.json 解析失败，本次按没有 hooks 处理");
-                Vec::new()
-            }
-        },
-        Err(_) => Vec::new(),
-    };
+    let hooks_path = owner_config_dir.join("hooks.json");
+    let hooks = config::load_hooks(&hooks_path);
+    tracing::info!(count = hooks.len(), path = %hooks_path.display(), "已加载当前 owner 的 hooks");
     for st in mcp.status().await {
         if st.connected {
             tracing::info!(server = %st.name, tools = st.tools.len(), "MCP 已接入");
@@ -493,6 +639,7 @@ async fn main() -> anyhow::Result<()> {
         mcp,
         mcp_path: Arc::from(mcp_path.as_path()),
         runs: runs::Runs::new(),
+        computer_leases: std::sync::Arc::new(computer_lease::ComputerLeaseRegistry::new()),
         remote: remote.clone(),
         llm: Arc::new(llm),
         confirms: Arc::new(ConfirmRegistry::from_env()?),
@@ -528,7 +675,7 @@ async fn main() -> anyhow::Result<()> {
         //
         // 桌面端离线模式传的正是 `token ?? ''` —— 结果是它被自己拉起的
         // agent 全程 401，而日志里没有任何一行说明为什么
-        inbound_token: args.token.clone().filter(|t| !t.trim().is_empty()),
+        inbound_token: credentials.inbound,
         attach: attach::AttachSwitch::new(args.allow_remote_attach),
         terminals: terminal::Terminals::default(),
     };
@@ -598,7 +745,7 @@ async fn main() -> anyhow::Result<()> {
     let app = routes::router(state.clone());
 
     if args.exec_env == cortex_agent::ExecEnvironment::LocalMachine {
-        let engine = Arc::clone(&engine);
+        let heartbeat_state = state.clone();
         // 机器名给人看，用来在别的设备上认出「是哪一台」。
         //
         // 拿不到 hostname 时回落到一个**明显是回落**的字符串，而不是编一个
@@ -654,7 +801,7 @@ async fn main() -> anyhow::Result<()> {
             state.attach.clone(),
         );
         // 绑定一变就补一条心跳，不等这一轮的 30 秒睡完，见 `Workspaces::changed`
-        let bindings_changed = engine.workspaces.changed();
+        let bindings_changed = heartbeat_state.engine.workspaces.changed();
         // 开关一拨也补一条 —— 同一个理由，而这一条更贴脸：用户在这台机器上
         // 按下开关，转头去手机上看，那边最长 30 秒仍然说「接不进来」。
         //
@@ -662,24 +809,24 @@ async fn main() -> anyhow::Result<()> {
         // 实测 0.5 秒）。它守的是**没有隧道**那条路：只走直拨的内网、
         // 以及灰度期还不支持隧道的老 agentd
         let mut attach_switched = state.attach.generation();
+        // 账号切换后立即重新验证并换名册，不能等错账号的心跳一直跑到下一轮。
+        let mut credential_changed = heartbeat_state.remote.token_generation();
         tokio::spawn(async move {
             // 默认间隔在服务端第一次回执之前用；之后按它说的走
             let mut interval = std::time::Duration::from_secs(30);
             loop {
-                let hb = cortex_proto::presence::AgentHeartbeat {
-                    agent_id: agent_id.clone(),
-                    machine_hint: machine_hint.clone(),
-                    sessions: engine.workspaces.bound_sessions(),
-                    attach: attach_offer(),
-                };
-                match engine.remote.heartbeat(&hb).await {
+                match heartbeat_once(&heartbeat_state, &agent_id, &machine_hint, attach_offer())
+                    .await
+                {
                     // TTL 的三分之一 —— 掉一条心跳还来得及补上第二条，
                     // 而服务端的 TTL 本身就是间隔的三倍（见 presence 模块）
                     Ok(ack) => interval = std::time::Duration::from_secs((ack.ttl_secs / 3).max(5)),
                     // **只 debug 不 warn。** 名册是锦上添花：报不上去不影响任何
                     // 一轮对话，而每 30 秒一条 WARN 会把日志淹掉，
                     // 于是真正要紧的那条也没人看了
-                    Err(e) => tracing::debug!(error = %e, "心跳没报上去（名册这一轮不更新）"),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "心跳没报上去（名册这一轮不更新）");
+                    }
                 }
                 // 睡到下一轮，**或者**绑定变了就立刻醒。用户刚在这台机器上绑好
                 // 一个会话就去 Web 上打开它是最常见的动作，而名册只认上一条心跳
@@ -690,6 +837,12 @@ async fn main() -> anyhow::Result<()> {
                     () = bindings_changed.notified() => {}
                     r = attach_switched.changed() => {
                         // 发送端没了 = 进程在退出，别忙着再报一条
+                        if r.is_err() {
+                            return;
+                        }
+                    }
+                    r = credential_changed.changed() => {
+                        // 发送端没了 = 进程在退出；否则立即用新账号重验名册。
                         if r.is_err() {
                             return;
                         }
@@ -717,10 +870,7 @@ async fn main() -> anyhow::Result<()> {
     let pointer = cortex_core::LivePointer {
         addr: actual.to_string(),
         remote: remote.base().to_string(),
-        token_fp: remote
-            .token()
-            .as_deref()
-            .map(cortex_core::token_fingerprint),
+        token_fp: inbound_token_fp,
     };
     match serde_json::to_string(&pointer) {
         Ok(json) => {
@@ -734,9 +884,12 @@ async fn main() -> anyhow::Result<()> {
     supervise::exit_with_parent(args.parent_pid);
     tracing::info!(bind = %actual, "本地 agent 已就绪");
 
-    axum::serve(listener, app)
-        .await
-        .context("HTTP 服务异常退出")?;
+    let server_result = axum::serve(listener, app).await;
+    #[cfg(windows)]
+    if let Err(error) = computer_cua_runtime::shutdown_all().await {
+        tracing::warn!(%error, "Native owned runtime 未确认关闭，保留隔离");
+    }
+    server_result.context("HTTP 服务异常退出")?;
     Ok(())
 }
 
@@ -757,6 +910,43 @@ fn write_addr_file(path: &std::path::Path, addr: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 两个启动探测必须真正并发，而不是靠外层 timeout 把串行等待伪装成
+    /// “最多两秒”。交叉等待在串行执行时必然死锁，因此这条测试能确定性地区分
+    /// join 与顺序 await。
+    #[tokio::test]
+    async fn startup_remote_probes_cross_wait_concurrently() {
+        let (protocol_ready, wait_identity) = tokio::sync::oneshot::channel::<()>();
+        let (identity_ready, wait_protocol) = tokio::sync::oneshot::channel::<()>();
+
+        let protocol = async move {
+            protocol_ready
+                .send(())
+                .expect("identity probe must still wait");
+            wait_identity
+                .await
+                .expect("identity probe releases protocol");
+            1_u8
+        };
+        let identity = async move {
+            identity_ready
+                .send(())
+                .expect("protocol probe must still wait");
+            wait_protocol
+                .await
+                .expect("protocol probe releases identity");
+            2_u8
+        };
+
+        let (protocol, identity) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            startup_probes(protocol, identity),
+        )
+        .await
+        .expect("串行执行会让两个探测互相等待；启动路径必须并发");
+        assert_eq!(protocol, 1);
+        assert_eq!(identity, 2);
+    }
 
     /// **安全不变量 4：开关文案必须说破「远程侧可经模型触发本机执行」。**
     ///

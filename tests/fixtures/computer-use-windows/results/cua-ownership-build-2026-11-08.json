@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "scope": "isolated_driver_build_only",
+  "baseCommit": "85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19",
+  "candidateVersion": "0.38.0-uia-ownership-candidate.1",
+  "exitCode": 0,
+  "binarySha256": "47179075f4ce1a36bda71e1939ceae0fbc124288923967a9965cd054d8089f5a",
+  "binaryBytes": 38469632,
+  "signatureStatus": "NotSigned",
+  "lockSha256Before": "56fab67bb0a0d93eeb7fe71783ed876617462a255a95290f53db322003e94fb0",
+  "lockSha256After": "56fab67bb0a0d93eeb7fe71783ed876617462a255a95290f53db322003e94fb0",
+  "changedManifestsOrLocks": [],
+  "officialPinReplaced": false,
+  "runtimeAbVerified": false,
+  "recordedAt": "2026-11-08T15:59:19.4009543+00:00"
+}

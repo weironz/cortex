@@ -1,4 +1,4 @@
-//! MCP server 的增删查改。**设备本地状态**，与工作区绑定同类。
+//! MCP server 的增删查改。**当前 owner 的本机状态**，与工作区绑定同类。
 //!
 //! # 为什么这几条只有本地 agent 有
 //!
@@ -98,7 +98,7 @@ fn view_of(name: &str, sc: &ServerConfig, st: Option<&ServerStatus>) -> ServerVi
 /// 读配置 + 逐台状态。
 async fn view(st: &LocalState) -> Result<McpView, cortex_core::CortexError> {
     let path = st.engine.mcp_path.clone();
-    let cfg = McpConfig::load(&path)?;
+    let cfg = with_config(st, McpConfig::load).await?;
     let statuses = st.engine.mcp.status().await;
 
     let servers = cfg
@@ -114,6 +114,29 @@ async fn view(st: &LocalState) -> Result<McpView, cortex_core::CortexError> {
         path: path.display().to_string(),
         servers,
     })
+}
+
+/// 配置路径在启动时冻结；读写与 owner/epoch 复核在同一提交临界区，不能在
+/// 退役后继续保存配置，也不能用另一个 owner 的旧配置补齐私密 env/headers。
+async fn with_config<T, F>(st: &LocalState, action: F) -> cortex_core::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&std::path::Path) -> cortex_core::Result<T> + Send + 'static,
+{
+    let path = st.engine.mcp_path.clone();
+    if let Some(authority) = st.remote.local_authority().cloned() {
+        let (owner, credential) = st.remote.owner_snapshot().await?;
+        st.remote
+            .commit_owner_snapshot(owner.clone(), credential, move || {
+                crate::config::check_mcp_config_owner(&authority, &owner, &path)?;
+                action(&path)
+            })
+            .await
+    } else {
+        tokio::task::spawn_blocking(move || action(&path))
+            .await
+            .map_err(|e| cortex_core::CortexError::Config(format!("MCP 配置线程异常：{e}")))?
+    }
 }
 
 fn bad(e: &impl std::fmt::Display) -> Response {
@@ -133,7 +156,8 @@ pub async fn list(State(st): State<LocalState>) -> Response {
 /// 只落盘不重连的话，界面显示「已添加」而模型手上没有那些工具，直到下次
 /// 重启 —— 那正是这一整轮要消灭的那种沉默。
 async fn commit(st: &LocalState, cfg: &McpConfig) -> Response {
-    if let Err(e) = cfg.save(&st.engine.mcp_path) {
+    let saved = cfg.clone();
+    if let Err(e) = with_config(st, move |path| saved.save(path)).await {
         return bad(&e);
     }
     st.engine.mcp.reload(cfg).await;
@@ -177,7 +201,7 @@ pub async fn upsert(
             .into_response();
     }
 
-    let mut cfg = match McpConfig::load(&st.engine.mcp_path) {
+    let mut cfg = match with_config(&st, McpConfig::load).await {
         Ok(c) => c,
         Err(e) => return bad(&e),
     };
@@ -230,7 +254,7 @@ fn carry(
 
 /// `DELETE /local/mcp/servers/{name}`
 pub async fn remove(State(st): State<LocalState>, Path(name): Path<String>) -> Response {
-    let mut cfg = match McpConfig::load(&st.engine.mcp_path) {
+    let mut cfg = match with_config(&st, McpConfig::load).await {
         Ok(c) => c,
         Err(e) => return bad(&e),
     };
@@ -245,7 +269,7 @@ pub async fn remove(State(st): State<LocalState>, Path(name): Path<String>) -> R
 /// 用户手编过文件之后要有一条路能生效，否则「配置文件在哪」这个信息就是
 /// 假的：告诉了他位置，却要他重启才算数。
 pub async fn reload(State(st): State<LocalState>) -> Response {
-    let cfg = match McpConfig::load(&st.engine.mcp_path) {
+    let cfg = match with_config(&st, McpConfig::load).await {
         Ok(c) => c,
         Err(e) => return bad(&e),
     };
@@ -286,7 +310,10 @@ pub async fn parse(State(st): State<LocalState>, Json(req): Json<ParseRequest>) 
         Ok(c) => c,
         Err(e) => return bad(&e),
     };
-    let existing = McpConfig::load(&st.engine.mcp_path).unwrap_or_default();
+    let existing = match with_config(&st, McpConfig::load).await {
+        Ok(config) => config,
+        Err(error) => return bad(&error),
+    };
 
     let out: Vec<ParsedServer> = parsed
         .servers

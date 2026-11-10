@@ -1,0 +1,298 @@
+{
+  "schema": 1,
+  "scope": "kernel_process_identity_candidate_rotation_probe",
+  "summary": {
+    "schema_version": 2,
+    "scope": "driver_readonly_fixture_candidate_steady",
+    "status": "PASS",
+    "phase": "completed",
+    "run_name": "repro-b1-kernel-probe-c-20261110",
+    "harness_pid": 30956,
+    "owner_run_id": "ba6614e740934877ac3ca2b04090e84b",
+    "output_directory": "C:\\Users\\willz\\AppData\\Local\\Temp\\CortexReadonlySteady\\steady-repro-b1-kernel-probe-c-20261110",
+    "investigation_only": true,
+    "product_signature_gate_passed": false,
+    "memory_steady_state_asserted": false,
+    "failure_code": null,
+    "cleanup_failure_code": null,
+    "plan": {
+      "duration_ms": 60000,
+      "warmup": 3,
+      "session_ms": 600000,
+      "session_observations": 10,
+      "max_sessions": 128,
+      "minimum_rotations": 2,
+      "interval_ms": 1000,
+      "call_ms": 20000,
+      "sample_ms": 30000,
+      "setup_ms": 360000,
+      "cleanup_ms": 120000,
+      "post_end_samples": 3,
+      "post_end_interval_ms": 1000,
+      "manifest_seconds": 600
+    },
+    "warmup_completed": 3,
+    "observations_completed": 26,
+    "sessions_attempted": 3,
+    "sessions_started": 3,
+    "sessions_ended": 3,
+    "rotations": 2,
+    "session_end_attempts": 3,
+    "max_seen_snapshots": 10,
+    "post_end_samples": 3,
+    "cli_attempts": 36,
+    "cli_exit_codes": 36,
+    "cli_zero_exits": 36,
+    "cli_stdout_chars": 99275,
+    "cli_stderr_chars": 0,
+    "observed_elements_total": 174,
+    "observed_tree_chars_total": 20184,
+    "warmup_elapsed_ms_total": 3413.2526,
+    "observation_elapsed_ms_total": 31269.159700000004,
+    "steady_elapsed_ms": 60082,
+    "samples_written": 14,
+    "elapsed_ms": 70476,
+    "daemon_pid": 14960,
+    "daemon_start_utc_ticks": 639298510769233625,
+    "daemon_exit_code": -1,
+    "fixture_pid": 58132,
+    "fixture_start_utc_ticks": 639298510764504654,
+    "fixture_exit_code": 0,
+    "candidate_sha256": "a91f793a8ce7c095ba6afcbed38043278b6ceb8e3df08dc9d8a936ee27626d56",
+    "fixture_sha256": "090a49fb1321451d8c67fde06e04b712045c68bed922db55444aebf05e4a4609",
+    "daemon_cleanup_ok": true,
+    "fixture_cleanup_ok": true,
+    "fixture_copy_removed": true,
+    "step_sequence": 1591,
+    "active_step": null,
+    "last_step": {
+      "stage": "Persist",
+      "step": "Persist",
+      "started_ms": 70503,
+      "ended_ms": 70520,
+      "elapsed_ms": 17,
+      "succeeded": true
+    },
+    "stage_timings": {
+      "Check": {
+        "calls": 173,
+        "total_ms": 5246,
+        "max_ms": 88,
+        "last_ms": 28,
+        "failures": 0
+      },
+      "Measure": {
+        "calls": 14,
+        "total_ms": 377,
+        "max_ms": 38,
+        "last_ms": 25,
+        "failures": 0
+      },
+      "Persist": {
+        "calls": 14,
+        "total_ms": 274,
+        "max_ms": 33,
+        "last_ms": 17,
+        "failures": 0
+      },
+      "Call": {
+        "calls": 35,
+        "total_ms": 35098,
+        "max_ms": 1323,
+        "last_ms": 54,
+        "failures": 0
+      },
+      "Wait": {
+        "calls": 32,
+        "total_ms": 31294,
+        "max_ms": 1025,
+        "last_ms": 1006,
+        "failures": 0
+      }
+    },
+    "step_timings": {
+      "Check.daemon.Identity": {
+        "calls": 173,
+        "total_ms": 132,
+        "max_ms": 9,
+        "last_ms": 1,
+        "failures": 0
+      },
+      "Check.daemon.ImagePath": {
+        "calls": 173,
+        "total_ms": 116,
+        "max_ms": 3,
+        "last_ms": 1,
+        "failures": 0
+      },
+      "Check.Cancel": {
+        "calls": 173,
+        "total_ms": 128,
+        "max_ms": 3,
+        "last_ms": 1,
+        "failures": 0
+      },
+      "Check.Desktop": {
+        "calls": 173,
+        "total_ms": 1829,
+        "max_ms": 19,
+        "last_ms": 10,
+        "failures": 0
+      },
+      "Check.fixture.Identity": {
+        "calls": 173,
+        "total_ms": 134,
+        "max_ms": 4,
+        "last_ms": 1,
+        "failures": 0
+      },
+      "Check.fixture.ImagePath": {
+        "calls": 173,
+        "total_ms": 122,
+        "max_ms": 3,
+        "last_ms": 1,
+        "failures": 0
+      },
+      "Check.FixtureWindows": {
+        "calls": 173,
+        "total_ms": 1600,
+        "max_ms": 16,
+        "last_ms": 8,
+        "failures": 0
+      },
+      "Check": {
+        "calls": 173,
+        "total_ms": 5246,
+        "max_ms": 88,
+        "last_ms": 28,
+        "failures": 0
+      },
+      "Measure.daemon.Identity": {
+        "calls": 14,
+        "total_ms": 9,
+        "max_ms": 1,
+        "last_ms": 1,
+        "failures": 0
+      },
+      "Measure.daemon.ImagePath": {
+        "calls": 14,
+        "total_ms": 8,
+        "max_ms": 1,
+        "last_ms": 0,
+        "failures": 0
+      },
+      "Measure.daemon.Metrics": {
+        "calls": 14,
+        "total_ms": 130,
+        "max_ms": 16,
+        "last_ms": 9,
+        "failures": 0
+      },
+      "Measure.fixture.Identity": {
+        "calls": 14,
+        "total_ms": 11,
+        "max_ms": 2,
+        "last_ms": 1,
+        "failures": 0
+      },
+      "Measure.fixture.ImagePath": {
+        "calls": 14,
+        "total_ms": 8,
+        "max_ms": 1,
+        "last_ms": 0,
+        "failures": 0
+      },
+      "Measure.fixture.Metrics": {
+        "calls": 14,
+        "total_ms": 134,
+        "max_ms": 17,
+        "last_ms": 9,
+        "failures": 0
+      },
+      "Measure": {
+        "calls": 14,
+        "total_ms": 377,
+        "max_ms": 38,
+        "last_ms": 25,
+        "failures": 0
+      },
+      "Persist.Samples": {
+        "calls": 14,
+        "total_ms": 43,
+        "max_ms": 20,
+        "last_ms": 1,
+        "failures": 0
+      },
+      "Persist.Progress": {
+        "calls": 14,
+        "total_ms": 191,
+        "max_ms": 19,
+        "last_ms": 13,
+        "failures": 0
+      },
+      "Persist": {
+        "calls": 14,
+        "total_ms": 274,
+        "max_ms": 33,
+        "last_ms": 17,
+        "failures": 0
+      },
+      "Call.start_session": {
+        "calls": 3,
+        "total_ms": 192,
+        "max_ms": 83,
+        "last_ms": 52,
+        "failures": 0
+      },
+      "Call.get_window_state": {
+        "calls": 29,
+        "total_ms": 34733,
+        "max_ms": 1323,
+        "last_ms": 1156,
+        "failures": 0
+      },
+      "Wait": {
+        "calls": 32,
+        "total_ms": 31294,
+        "max_ms": 1025,
+        "last_ms": 1006,
+        "failures": 0
+      },
+      "Call.end_session": {
+        "calls": 3,
+        "total_ms": 173,
+        "max_ms": 63,
+        "last_ms": 54,
+        "failures": 0
+      }
+    },
+    "deadline_crossings": [],
+    "deadline_diagnostics": null,
+    "slow_steps": [],
+    "step_journal": {
+      "writes": 35,
+      "errors": 0,
+      "last_io_ms": 9,
+      "drained": true
+    }
+  },
+  "owner": {
+    "source_changed": false,
+    "log": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-owned-steady-c1fb47d3f8114376a8f6c841c01b9792\\child.log",
+    "run_id": "ba6614e740934877ac3ca2b04090e84b",
+    "original_job_drained": true,
+    "sources": {
+      "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\readonly-ab\\cua-readonly-ab.ps1": "63d26430d53b30d41f1b9437e31a5b2ff9c0c07a44f01d876bcde68086ca2993",
+      "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\readonly-ab\\run-owned-steady.ps1": "729a2f89be20d733ff0d1236c831cea9d78791713fd9bfd8bf58620a5c8eeb28",
+      "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\readonly-ab\\owned-job.cs": "3d9dae299f9336a3e47a25bbdfc4077c7dd961b9e9399299a190d3d87b248386",
+      "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\readonly-ab\\cua-readonly-steady.ps1": "bc4c2dc1afa51dff4e5f5a6774e22c08507fbb90af10688c28e9ee6d1f51cfa6"
+    },
+    "scope": "owned_cua_steady_wrapper",
+    "helper_sha256": "3d9dae299f9336a3e47a25bbdfc4077c7dd961b9e9399299a190d3d87b248386",
+    "schema": 2,
+    "child_pid": 30956,
+    "child_exit_code": 0
+  },
+  "fourHoursPassed": false,
+  "memorySteadyStateProven": false
+}

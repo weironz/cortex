@@ -129,9 +129,11 @@ mod win {
         // CARGO_TERM_COLOR=never：CI 全局设了 always，颜色码会夹在
         // `Downloaded` 与 `anyhow` 之间（ESC[0m），子串匹配就断不上 ——
         // 值是对的、匹配的形状错了。锁死成 never，本机与 CI 才看同一份输出。
+        // 产物断言固定在本测试工作区；外层 CI 的 CARGO_TARGET_DIR 不是沙箱的写权限。
+        // 只指定本次输出位置，不设置 CARGO_HOME 或跳过真实的新依赖下载。
         let r = shell(
             &sb,
-            r"set CARGO_TERM_COLOR=never& cargo build 2>&1 & echo RC=%errorlevel% & .\target\debug\h.exe 2>&1",
+            r"set CARGO_TERM_COLOR=never& cargo build --target-dir .\target 2>&1 & echo RC=%errorlevel% & .\target\debug\h.exe 2>&1",
         )
         .await;
         let built = root.join("target/debug/h.exe").exists();

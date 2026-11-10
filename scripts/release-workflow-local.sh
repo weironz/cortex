@@ -3,11 +3,11 @@
 #
 # 用法：
 #
-#   scripts/release-workflow-local.sh v0.1.44
-#   scripts/release-workflow-local.sh v0.1.44 --build-only
-#   scripts/release-workflow-local.sh v0.1.44 --skip-images
-#   scripts/release-workflow-local.sh v0.1.44 --deploy
-#   scripts/release-workflow-local.sh v0.1.44 --dry-run
+#   scripts/release-workflow-local.sh v0.1.45
+#   scripts/release-workflow-local.sh v0.1.45 --build-only
+#   scripts/release-workflow-local.sh v0.1.45 --skip-images
+#   scripts/release-workflow-local.sh v0.1.45 --deploy
+#   scripts/release-workflow-local.sh v0.1.45 --dry-run
 #
 # 默认行为：
 #   1. 跑 just ci；
@@ -133,7 +133,13 @@ log "打包 Windows 二进制"
 bash scripts/release-package.sh --target "${target}" --version "${VERSION}"
 
 log "构建 Windows 桌面安装程序"
-bash scripts/release-desktop-windows.sh --version "${VERSION}"
+desktop_args=(--version "${VERSION}")
+# `--build-only` 是本机验证，可以明确产出未签名包；只要这条命令会继续
+# 创建 GitHub Release，就必须和托管 runner 走同一个签名硬闸。
+if [ "${BUILD_ONLY}" = 0 ]; then
+    desktop_args+=(--require-signing)
+fi
+bash scripts/release-desktop-windows.sh "${desktop_args[@]}"
 
 if [ "${SKIP_IMAGES}" = 0 ]; then
     [ "${BUILD_ONLY}" = 0 ] || warn "--build-only：镜像只做本地构建与冒烟"
@@ -216,7 +222,10 @@ if gh release view "${TAG}" >/dev/null 2>&1; then
 fi
 
 log "创建 GitHub Release ${TAG}"
-gh release create "${TAG}" dist/* \
+# 文件名由 release-checksums.sh 的固定清单产生，不再上传整个开发产物目录。
+mapfile -t release_assets < <(awk '{ sub(/^\*/, "", $2); print "dist/" $2 }' dist/SHA256SUMS)
+release_assets+=(dist/SHA256SUMS)
+gh release create "${TAG}" "${release_assets[@]}" \
     --verify-tag \
     --title "Cortex ${TAG}" \
     --notes-file notes.md

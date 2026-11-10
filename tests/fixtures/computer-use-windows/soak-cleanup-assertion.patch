@@ -1,0 +1,17 @@
+diff --git a/crates/cortex-local/src/computer.rs b/crates/cortex-local/src/computer.rs
+--- a/crates/cortex-local/src/computer.rs
++++ b/crates/cortex-local/src/computer.rs
+@@ -5955,7 +5955,12 @@
+                     )
+                     .await;
+                 }
+-                let _ = computer.close().await;
++                // 不能把 end_session 清理失败的长跑也写成通过。
++                if let Err(error) = computer.close().await {
++                    panic!(
++                        "soak session {sessions} after cycle {cycle}: cleanup failed: {error}"
++                    );
++                }
+             }
+ 
+             println!(

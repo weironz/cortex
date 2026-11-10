@@ -82,6 +82,7 @@ class _ConfirmCard extends ConsumerWidget {
     );
     final elsewhere =
         request.sessionId != null && request.sessionId != activeSessionId;
+    final computerTool = _isComputerTool(request.tool);
     final otherTitle = elsewhere
         ? ref.watch(
             // `select` down to the title string: the sessions list changes on
@@ -159,11 +160,17 @@ class _ConfirmCard extends ConsumerWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.gpp_maybe_outlined, size: 18, color: accent),
+              Icon(
+                computerTool
+                    ? Icons.desktop_windows_outlined
+                    : Icons.gpp_maybe_outlined,
+                size: 18,
+                color: accent,
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  '需要你确认：${request.tool}',
+                  computerTool ? '确认真实桌面动作' : '需要你确认：${request.tool}',
                   style: theme.textTheme.titleSmall?.copyWith(
                     color: scheme.onErrorContainer,
                     fontWeight: FontWeight.w700,
@@ -181,6 +188,18 @@ class _ConfirmCard extends ConsumerWidget {
               '来自另一个会话：${otherTitle ?? request.sessionId}',
               style: theme.textTheme.labelSmall?.copyWith(
                 color: scheme.onErrorContainer.withValues(alpha: 0.85),
+              ),
+            ),
+          ],
+          if (computerTool) ...[
+            const SizedBox(height: 8),
+            Text(
+              '这一步会作用于本机真实窗口。请核对应用、窗口和动作；'
+              '密码、付款、提权和 UAC 应由你亲自完成。',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onErrorContainer,
+                fontWeight: FontWeight.w600,
+                height: 1.45,
               ),
             ),
           ],
@@ -258,7 +277,7 @@ class _ConfirmCard extends ConsumerWidget {
                 onPressed: busy
                     ? null
                     : () => controller.answer(request.token, allow: false),
-                child: const Text('拒绝'),
+                child: Text(computerTool ? '交给我操作' : '拒绝'),
               ),
               const SizedBox(width: 8),
               FilledButton.tonal(
@@ -269,7 +288,13 @@ class _ConfirmCard extends ConsumerWidget {
                   backgroundColor: scheme.error,
                   foregroundColor: scheme.onError,
                 ),
-                child: Text(busy ? '发送中…' : '允许执行'),
+                child: Text(
+                  busy
+                      ? '发送中…'
+                      : computerTool
+                      ? '允许这一步'
+                      : '允许执行',
+                ),
               ),
             ],
           ),
@@ -278,6 +303,14 @@ class _ConfirmCard extends ConsumerWidget {
     );
   }
 }
+
+bool _isComputerTool(String name) => const {
+  'computer_act',
+  'click',
+  'type_text',
+  'key',
+  'scroll',
+}.contains(name);
 
 /// The command itself.
 ///

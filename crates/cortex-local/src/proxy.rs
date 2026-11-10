@@ -19,11 +19,13 @@
 //! 本地这个进程的状态（含队列积压），转发过去就成了远端的状态。
 
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{Json, Request, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
-use futures::TryStreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 
+use crate::computer_principal::PrincipalNamespace;
+use crate::runs::run_principal::{CredentialSnapshot, RunPrincipal};
 use crate::state::LocalState;
 
 /// 逐跳首部 —— 按 RFC 9110 §7.6.1，这些**不能**转发。
@@ -73,12 +75,87 @@ pub fn is_machine_bearer(
     }
 }
 
+#[derive(Clone)]
+struct ExpectedPrincipal {
+    namespace: PrincipalNamespace,
+    epoch: u64,
+}
+
 /// 转发一次请求。
 ///
 /// 响应体**流式**转回，不缓冲：`/blobs/{hash}` 可能是几十兆的视频，
 /// 而 `/sync` 在大补拉时也不小。缓冲会让内存占用随最大的那个文件走。
 pub async fn forward(State(st): State<LocalState>, req: Request) -> Response {
+    let bearer = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let account_scoped = st.engine.exec_env == cortex_agent::ExecEnvironment::LocalMachine
+        && (bearer.is_none()
+            || is_machine_bearer(
+                bearer,
+                st.inbound_token.as_deref(),
+                st.attach.key().as_deref(),
+            ));
+
+    if account_scoped {
+        // 兜底路由不能只拿“当前 token”就转发：A 切到 B 后，旧请求可能
+        // 用 A 的 body 落到 B 的远端状态。先做一次严格身份探针，并把主体
+        // 代际一起冻结；响应头和每个流式分块都要重新核对。
+        match st.remote.verify_current_namespace_binding().await {
+            Ok((namespace, credential, epoch)) => {
+                let expected = ExpectedPrincipal { namespace, epoch };
+                forward_with_credential(st, req, Some(credential), Some(expected)).await
+            }
+            Err(error) => cortex_error_response(error),
+        }
+    } else {
+        // 容器请求的身份由 agentd 和一次性容器边界持有；本机凭据之外的
+        // bearer 也按既有契约原样透传。不能把容器里的委托 token 误当成
+        // 桌面 access token 去查 Computer Use 主体。
+        let credential = st.remote.credential_snapshot().ok();
+        forward_with_credential(st, req, credential, None).await
+    }
+}
+
+/// 转发一条已经由远端严格验证过主体的请求。
+///
+/// 请求全程只使用验证时的凭据快照，响应返回前还会确认共享登录仍绑定同一
+/// `(deployment, user)`。同账号 token 续期可以继续；A 切到 B 时这条响应
+/// 失败关闭，不能把旧主体的内容交给 B 的界面。
+pub async fn forward_for_principal(
+    State(st): State<LocalState>,
+    req: Request,
+    principal: RunPrincipal,
+) -> Response {
+    let Some(namespace) = principal.key().verified_namespace().cloned() else {
+        return namespace_changed();
+    };
+    let epoch = principal.credential().principal_epoch();
+    if !st.remote.principal_is_current(&namespace, epoch) {
+        return namespace_changed();
+    }
+    let expected = ExpectedPrincipal { namespace, epoch };
+    forward_with_credential(
+        st,
+        req,
+        Some(principal.credential().clone()),
+        Some(expected),
+    )
+    .await
+}
+
+async fn forward_with_credential(
+    st: LocalState,
+    req: Request,
+    outbound_credential: Option<CredentialSnapshot>,
+    expected_principal: Option<ExpectedPrincipal>,
+) -> Response {
     let (parts, body) = req.into_parts();
+    if !principal_is_current(&st, expected_principal.as_ref()) {
+        return namespace_changed();
+    }
     let path_and_query = parts
         .uri
         .path_and_query()
@@ -116,7 +193,9 @@ pub async fn forward(State(st): State<LocalState>, req: Request) -> Response {
     // 补上是为了让「客户端只配一个本地地址」真的成立：不补的话，
     // 用户得在客户端里配一个远端的 token，而那正是反代要省掉的事
     if !headers.contains_key(header::AUTHORIZATION)
-        && let Some(t) = st.remote.token()
+        && let Some(t) = outbound_credential
+            .as_ref()
+            .and_then(CredentialSnapshot::bearer_token)
         && let Ok(v) = format!("Bearer {t}").parse()
     {
         headers.insert(header::AUTHORIZATION, v);
@@ -135,6 +214,9 @@ pub async fn forward(State(st): State<LocalState>, req: Request) -> Response {
 
     match upstream {
         Ok(resp) => {
+            if !principal_is_current(&st, expected_principal.as_ref()) {
+                return namespace_changed();
+            }
             let status = StatusCode::from_u16(resp.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut out = Response::builder().status(status);
@@ -143,7 +225,20 @@ pub async fn forward(State(st): State<LocalState>, req: Request) -> Response {
                     out = out.header(k, v);
                 }
             }
-            let body = Body::from_stream(resp.bytes_stream());
+            // 响应头合法不代表后续正文仍属于同一登录。流可以传几十分钟，
+            // 所以每一块在交给客户端前都要重新核对 principal 代际；
+            // A→B→A 也不能靠主体名称再次相同而复活旧流。
+            let guard_state = st.clone();
+            let guarded = resp.bytes_stream().map(move |item| {
+                if !principal_is_current(&guard_state, expected_principal.as_ref()) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "登录账号在流式响应期间发生变化，旧账号正文已终止",
+                    ));
+                }
+                item.map_err(|error| std::io::Error::other(error.to_string()))
+            });
+            let body = Body::from_stream(guarded);
             out.body(body)
                 .unwrap_or_else(|e| internal(&format!("组装转发响应失败：{e}")))
         }
@@ -158,17 +253,63 @@ pub async fn forward(State(st): State<LocalState>, req: Request) -> Response {
     }
 }
 
+fn principal_is_current(st: &LocalState, expected: Option<&ExpectedPrincipal>) -> bool {
+    expected.is_none_or(|expected| {
+        st.remote
+            .principal_is_current(&expected.namespace, expected.epoch)
+    })
+}
+
+fn namespace_changed() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "登录账号在请求期间已经切换，旧账号的响应已丢弃；请重新发起操作。"
+        })),
+    )
+        .into_response()
+}
+
 fn internal(msg: &str) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, msg.to_string()).into_response()
 }
 
-/// 转发一次由本地构造的请求（不是原样透传）。给拦截后重写过 body 的路径用。
-pub async fn forward_json(
+/// 转发一次由本地构造、且主体已经严格验证的 JSON 请求。
+///
+/// 用同一份验证快照发送，响应回来时再按已验证 `(deployment, user)` 注入本地
+/// workspace。裸 session id 在这里只用于页面标识，不能决定读取哪个账号的状态。
+pub async fn forward_json_for_principal(
     st: &LocalState,
+    principal: &RunPrincipal,
     method: reqwest::Method,
     uri: &Uri,
     body: Vec<u8>,
 ) -> Response {
+    let Some(namespace) = principal.key().verified_namespace() else {
+        return internal("桌面 JSON 转发缺少严格验证主体");
+    };
+    forward_json_for_namespace(st, namespace, principal.credential(), method, uri, body).await
+}
+
+/// 转发一条只要求当前账号、不针对具体 session 的已验明 JSON 请求。
+///
+/// 列表和搜索必须先拿到当前 `(deployment, user)`；本机 workspace 注入再按
+/// 响应里的每个 session id 构造同一主体的复合 key。
+pub async fn forward_json_for_namespace(
+    st: &LocalState,
+    namespace: &PrincipalNamespace,
+    credential: &CredentialSnapshot,
+    method: reqwest::Method,
+    uri: &Uri,
+    body: Vec<u8>,
+) -> Response {
+    let expected = ExpectedPrincipal {
+        namespace: namespace.clone(),
+        epoch: credential.principal_epoch(),
+    };
+    if !principal_is_current(st, Some(&expected)) {
+        return namespace_changed();
+    }
     let path_and_query = uri
         .path_and_query()
         .map_or_else(|| uri.path().to_string(), ToString::to_string);
@@ -177,19 +318,29 @@ pub async fn forward_json(
         .request(method, st.remote.url(&path_and_query))
         .header(header::CONTENT_TYPE, "application/json")
         .body(body);
-    if let Some(t) = st.remote.token() {
+    if let Some(t) = credential.bearer_token() {
         rb = rb.bearer_auth(t);
     }
     match rb.send().await {
         Ok(resp) => {
+            if !principal_is_current(st, Some(&expected)) {
+                return namespace_changed();
+            }
             let status = StatusCode::from_u16(resp.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let bytes = resp.bytes().await.unwrap_or_default();
+            // 响应头来自 A 不代表读完正文时仍是 A。尤其是大回放与附件，
+            // `bytes().await` 期间发生 A→B→A 时，旧主体正文绝不能注入后交给
+            // 当前界面。
+            if !principal_is_current(st, Some(&expected)) {
+                return namespace_changed();
+            }
             // 会话对象里的 workspace 权威在**这台机器**上，回来的路上换成本地的值。
             // 不换的话，绑定成功之后界面立刻显示「未绑定」—— 因为 cortexd
             // 那侧存的永远是 null（本地 agent 转发时就把它抹成 null 了）
-            let bytes = crate::local_workspace::inject(&st.engine.workspaces, &bytes)
-                .map_or(bytes, axum::body::Bytes::from);
+            let bytes =
+                crate::local_workspace::inject_scoped(&st.engine.workspaces, namespace, &bytes)
+                    .map_or(bytes, axum::body::Bytes::from);
             let mut out = Response::builder()
                 .status(status)
                 .header(header::CONTENT_TYPE, "application/json");
@@ -205,6 +356,16 @@ pub async fn forward_json(
         )
             .into_response(),
     }
+}
+
+fn cortex_error_response(error: cortex_core::CortexError) -> Response {
+    let status =
+        StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (
+        status,
+        Json(serde_json::json!({ "error": error.to_string() })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

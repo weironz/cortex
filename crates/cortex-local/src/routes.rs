@@ -4,8 +4,10 @@
 //! 就完事了。只有三条路径本地自己答，其余全部反代（见 [`crate::proxy`]）。
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::computer_principal::PrincipalNamespace;
 use crate::confirm::AnswerOutcome;
 use axum::{
     Json, Router,
@@ -29,6 +31,7 @@ use crate::local_import;
 use crate::local_mcp;
 use crate::local_workspace;
 use crate::proxy;
+use crate::runs::run_principal::{CredentialSnapshot, RunPrincipal};
 use crate::state::LocalState;
 use crate::ws_proxy;
 
@@ -40,6 +43,18 @@ use crate::ws_proxy;
 /// 反过来的话，cortexd 每加一个端点，本地 agent 都要跟着加一行，
 /// 忘了就是「装了本地 agent 之后某个功能不见了」，而那是个静默的功能缺失。
 pub fn router(state: LocalState) -> Router {
+    router_with_computer_trace_root(state, crate::computer_traces::configured_root())
+}
+
+/// 路由构造的显式 trace 根目录版本。
+///
+/// 生产入口只从受控环境或 state 目录取根；测试传临时目录，才能在不修改
+/// 进程级环境变量的情况下走过真实路由和路径边界。
+pub(crate) fn router_with_computer_trace_root(
+    state: LocalState,
+    trace_root: Option<PathBuf>,
+) -> Router {
+    let history_root = trace_root;
     Router::new()
         .route("/health", get(health))
         // controller 经**反向隧道**来拉这台机器的名册状态。见 `agent_state`
@@ -97,6 +112,70 @@ pub fn router(state: LocalState) -> Router {
             put(local_mcp::upsert).delete(local_mcp::remove),
         )
         .route("/local/mcp/reload", post(local_mcp::reload))
+        // trace 文件在这台机器上。session id 只用于过滤，不参与路径拼接。
+        .route(
+            "/local/computer-traces/{session_id}",
+            get({
+                let history_root = history_root.clone();
+                move |State(st): State<LocalState>,
+                      Path(session_id): Path<String>,
+                      Query(query): Query<crate::computer_traces::TraceQuery>| {
+                    let history_root = history_root.clone();
+                    async move {
+                        if let Some(response) =
+                            crate::computer_traces::validate_session_id(&session_id)
+                        {
+                            return response;
+                        }
+                        let principal = match st
+                            .remote
+                            .verify_current_existing_session_principal_bound(&session_id)
+                            .await
+                        {
+                            Ok(principal) => principal,
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    session = %session_id,
+                                    "Computer Use trace 读取被严格主体检查拒绝"
+                                );
+                                return computer_trace_principal_error(error);
+                            }
+                        };
+                        let Ok(namespace) = principal.verified_namespace().cloned() else {
+                            return computer_trace_principal_error(
+                                cortex_core::CortexError::Unauthorized(
+                                    "当前运行没有可读取本机 trace 的账号主体".into(),
+                                ),
+                            );
+                        };
+                        let trace_session_id = session_id.clone();
+                        let response = crate::computer_traces::history_base(
+                            history_root,
+                            namespace.clone(),
+                            session_id,
+                            query.include_denials,
+                        )
+                        .await;
+                        match st.remote.with_bound_principal(
+                            &namespace,
+                            principal.credential().principal_epoch(),
+                            || (),
+                        ) {
+                            Ok(()) => response,
+                            Err(error) => {
+                                tracing::warn!(
+                                    session = %trace_session_id,
+                                    %error,
+                                    "Computer Use trace 读取期间账号已切换，拒绝返回旧主体结果"
+                                );
+                                computer_trace_principal_error(error)
+                            }
+                        }
+                    }
+                }
+            }),
+        )
         // 解析与落盘刻意分成两条：加一台 server = 在这台机器上跑任意进程，
         // 中间必须有一屏让用户看到那条命令行原文。见 local_mcp::parse
         .route("/local/mcp/parse", post(local_mcp::parse))
@@ -113,6 +192,7 @@ pub fn router(state: LocalState) -> Router {
         // WebSocket 升级走不了普通反代（那条路把 `upgrade` 头当逐跳首部剥了）。
         // 见 [`crate::ws_proxy`]
         .route("/ws", get(ws_proxy::handler))
+        .merge(computer_recovery_routes())
         .fallback(any(proxy::forward))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         // **在认证外面**：不认证的那种形态（`CORTEX_AUTH=disabled` 的本机
@@ -122,6 +202,50 @@ pub fn router(state: LocalState) -> Router {
             deny_browser_origin,
         ))
         .with_state(state)
+}
+
+fn computer_recovery_routes() -> Router<LocalState> {
+    #[cfg(windows)]
+    {
+        crate::computer_recovery::router()
+    }
+    #[cfg(not(windows))]
+    {
+        Router::new()
+    }
+}
+
+fn computer_trace_principal_error(error: cortex_core::CortexError) -> Response {
+    let (status, message) = match error {
+        cortex_core::CortexError::Unauthorized(_) => (
+            StatusCode::UNAUTHORIZED,
+            "无法证明当前账号拥有这个 Computer Use trace",
+        ),
+        cortex_core::CortexError::Invalid(_) => {
+            (StatusCode::BAD_REQUEST, "Computer Use trace 请求主体不合法")
+        }
+        cortex_core::CortexError::NotFound { .. } => (
+            StatusCode::NOT_FOUND,
+            "找不到这个 Computer Use trace 对应的会话",
+        ),
+        cortex_core::CortexError::Unavailable(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "暂时无法验证 Computer Use trace 的账号主体",
+        ),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Computer Use trace 账号检查失败",
+        ),
+    };
+    let mut response = (
+        status,
+        Json(cortex_proto::dto::ErrorBody::deterministic(message)),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response
 }
 
 /// 带 `Origin` 的请求一律拒 —— **只在本机形态上**。
@@ -195,11 +319,14 @@ async fn deny_browser_origin(State(st): State<LocalState>, req: Request, next: N
 ///
 /// 一张票都不带则照样拦下 —— 那必然不是真客户端，没必要为它跟远端建一条
 /// 注定失败的连接。
-async fn require_auth(State(st): State<LocalState>, req: Request, next: Next) -> Response {
+async fn require_auth(State(st): State<LocalState>, mut req: Request, next: Next) -> Response {
     if req.uri().path() == "/health" {
         return next.run(req).await;
     }
     let Some(expected) = st.inbound_token.as_deref() else {
+        if st.remote.local_authority().is_some() {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
         return next.run(req).await;
     };
     let bearer = req
@@ -210,14 +337,35 @@ async fn require_auth(State(st): State<LocalState>, req: Request, next: Next) ->
     // 入站那把：全套权限（换凭据、绑目录、改 MCP……）
     let full = bearer.is_some_and(|t| bytes_eq(t.as_bytes(), expected.as_bytes()));
     // 远程接入那把：**只在接入面上有效**。见 `attach_allows`
-    let attach = st
-        .attach
-        .key()
-        .as_deref()
-        .is_some_and(|k| bearer.is_some_and(|t| bytes_eq(t.as_bytes(), k.as_bytes())))
-        && attach_allows(req.method(), req.uri().path());
-    let ok = full || attach || (req.uri().path() == "/ws" && carries_ticket(req.uri().query()));
+    let attach = if attach_allows(req.method(), req.uri().path()) {
+        bearer.and_then(|key| st.attach.admit(key))
+    } else {
+        None
+    };
+    let ok = full
+        || attach.is_some()
+        || (req.uri().path() == "/ws" && carries_ticket(req.uri().query()));
     if ok {
+        if full && let Some(authority) = st.remote.local_authority() {
+            let caller = match authority.authenticate(bearer.expect("完整入站校验已通过"))
+            {
+                Ok(caller) => caller,
+                Err(error) => return cortex_error_response(error),
+            };
+            req.extensions_mut().insert(caller.clone());
+            return crate::local_owner::with_caller(caller, next.run(req)).await;
+        }
+        if let Some(admission) = attach
+            && let Some(authority) = st.remote.local_authority()
+        {
+            // 只在上面允许的接入端点传递本次准入，不把 attach key 当成本机控制 key。
+            let caller = match authority.attach_caller(admission) {
+                Ok(caller) => caller,
+                Err(error) => return cortex_error_response(error),
+            };
+            req.extensions_mut().insert(caller.clone());
+            return crate::local_owner::with_caller(caller, next.run(req)).await;
+        }
         next.run(req).await
     } else {
         // ── 这个头是给客户端分辨「谁拒的」用的，**不能省** ──
@@ -256,11 +404,114 @@ async fn require_auth(State(st): State<LocalState>, req: Request, next: Next) ->
 ///
 /// 出站心跳**留着**：没有隧道的部署（灰度期的老 worker、只走直拨的内网）
 /// 仍然靠它。两条路都写进名册的同一张表，后到的覆盖先到的。
-async fn agent_state(State(st): State<LocalState>) -> Json<cortex_proto::presence::AgentState> {
-    Json(cortex_proto::presence::AgentState {
+async fn agent_state(State(st): State<LocalState>) -> Response {
+    let state = match verified_agent_roster(&st).await {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "严格账号验证失败，拒绝返回本机 agent 名册"
+            );
+            return agent_roster_error_response(error);
+        }
+    };
+
+    let mut response = Json(cortex_proto::presence::AgentState {
         machine_hint: crate::state::hostname_or_fallback(),
-        sessions: st.engine.workspaces.bound_sessions(),
+        sessions: state.sessions().to_vec(),
     })
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response
+}
+
+/// 一份已经和当前严格验证主体绑定的本机名册。
+///
+/// `sessions` 只从复合主体 key 中筛选，不再经过只接收裸 session id 的
+/// 旧接口。凭据快照用于心跳发送时固定 token，避免验证的是 A、发送却读到
+/// 刚切过去的 B。
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedAgentRoster {
+    credential: CredentialSnapshot,
+    sessions: Vec<String>,
+}
+
+impl VerifiedAgentRoster {
+    pub(crate) fn credential(&self) -> &CredentialSnapshot {
+        &self.credential
+    }
+
+    pub(crate) fn sessions(&self) -> &[String] {
+        &self.sessions
+    }
+}
+
+/// 严格验证当前账号，并生成只属于它的本机绑定名册。
+///
+/// 这张名册既供隧道 controller 拉取，也供出站心跳使用。返回前必须再次核对
+/// 凭据代际；验证期间发生 A→B 切换时，即使远端已经回了 A，也不能把这份
+/// A 名册交给当前调用方。旧版裸 `bound_sessions()` 和 `bound_scoped_sessions()`
+/// 都没有这个原子边界，因此这里不经过它们。
+pub(crate) async fn verified_agent_roster(
+    st: &LocalState,
+) -> cortex_core::Result<VerifiedAgentRoster> {
+    let (namespace, credential) = st.remote.verify_current_namespace_snapshot().await?;
+
+    let sessions =
+        bound_session_ids_for_namespace(st.engine.workspaces.bound_scoped_sessions(), &namespace);
+    ensure_roster_credential_unchanged(st, &credential)?;
+
+    Ok(VerifiedAgentRoster {
+        credential,
+        sessions,
+    })
+}
+
+fn bound_session_ids_for_namespace(
+    mut bindings: Vec<crate::workspaces::principal_key::SessionPrincipalKey>,
+    namespace: &PrincipalNamespace,
+) -> Vec<String> {
+    bindings.retain(|binding| {
+        binding.deployment_id() == Some(namespace.deployment_id())
+            && binding.user_id() == Some(namespace.user_id())
+    });
+    let mut sessions: Vec<_> = bindings
+        .into_iter()
+        .map(|binding| binding.session_id().to_owned())
+        .collect();
+    sessions.sort_unstable();
+    sessions.dedup();
+    sessions
+}
+
+fn ensure_roster_credential_unchanged(
+    st: &LocalState,
+    credential: &CredentialSnapshot,
+) -> cortex_core::Result<()> {
+    if st.remote.current_credential_generation() != credential.generation() {
+        return Err(cortex_core::CortexError::Unauthorized(
+            "本机 agent 名册验证期间账号凭据已切换，请重试".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn agent_roster_error_response(error: cortex_core::CortexError) -> Response {
+    let status =
+        StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut response = (
+        status,
+        Json(serde_json::json!({
+            "error": "无法验证当前账号，本机 agent 名册已关闭"
+        })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response
 }
 
 /// 远程接入那把钥匙够得到哪些路由。**白名单 + 默认拒绝。**
@@ -327,10 +578,44 @@ fn attach_allows(method: &axum::http::Method, path: &str) -> bool {
 async fn set_credential(
     State(st): State<LocalState>,
     Json(body): Json<CredentialUpdate>,
-) -> StatusCode {
-    st.remote.set_token(body.token);
+) -> Result<StatusCode, StatusCode> {
+    let Some(token) = body.token.filter(|token| !token.trim().is_empty()) else {
+        // 登出/撤掉凭据时不能继续沿用旧账号绑定；正在跑的任务会收到代际
+        // 变化并失败关闭。
+        if let Some(principal) = st.remote.current_principal() {
+            st.engine.confirms.revoke_principal(&principal);
+        }
+        st.remote.set_token(None);
+        return Ok(StatusCode::NO_CONTENT);
+    };
+    let verified = st
+        .remote
+        .verify_identity_token(token)
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = %error, "新 access token 未通过严格账号验证，保留原凭据");
+            match error {
+                cortex_core::CortexError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+                cortex_core::CortexError::Unavailable(_) => StatusCode::BAD_GATEWAY,
+                cortex_core::CortexError::Invalid(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            }
+        })?;
+    st.remote
+        .commit_verified_identity_token(verified)
+        .map_err(|error| {
+            tracing::warn!(error = %error, "拒绝提交迟到的凭据验证结果");
+            StatusCode::CONFLICT
+        })?;
+    st.remote
+        .remember_current_account()
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = %error, "凭据已更新，但可信离线绑定未保存");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     // 不回声任何凭据内容：这条响应会进代理日志
-    StatusCode::NO_CONTENT
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `GET /local/attach` —— 现在开着没有。
@@ -430,7 +715,7 @@ fn carries_ticket(query: Option<&str>) -> bool {
 /// 朴素的 `==` 在第一个不同的字节处就返回，逐字节的耗时差异理论上可被
 /// 用来一位一位地把 token 试出来。本机 loopback 上噪声极大、实际不可行，
 /// 但这是一行代码的事，而「实际不可行」是个会随环境变化的判断。
-fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -447,10 +732,11 @@ fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
 /// 与部署流水线各拿旧名字判了一次。前者只在有编好的二进制的开发机上跑
 /// （CI 上那条用例自己跳过），所以它红了一版都没人看见。
 async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health> {
-    let reachable = st.remote.is_reachable().await;
     let local_desktop = st.engine.exec_env == cortex_agent::ExecEnvironment::LocalMachine;
-    let cua_configured = local_desktop && crate::computer_cua::configured();
-    let computer_capabilities = declared_computer_capabilities(cua_configured);
+    let (reachable, (cua_configured, cua_actions, browser_ready), write_readiness) =
+        health_probes(st.remote.is_reachable(), local_desktop).await;
+    let computer_capabilities =
+        declared_computer_capabilities(cua_configured, cua_actions, browser_ready, write_readiness);
     let computer_available = computer_capabilities.is_some();
     Json(cortex_proto::dto::Health {
         status: "ok".into(),
@@ -506,18 +792,117 @@ async fn health(State(st): State<LocalState>) -> Json<cortex_proto::dto::Health>
     })
 }
 
+pub(crate) async fn health_probes(
+    remote: impl std::future::Future<Output = bool>,
+    local_desktop: bool,
+) -> (
+    bool,
+    (bool, bool, bool),
+    cortex_proto::dto::ComputerWriteReadiness,
+) {
+    tokio::join!(
+        remote,
+        computer_surface(local_desktop),
+        computer_write_readiness(local_desktop)
+    )
+}
+
 fn declared_computer_capabilities(
     cua_configured: bool,
+    cua_actions: bool,
+    browser_ready: bool,
+    write_readiness: cortex_proto::dto::ComputerWriteReadiness,
 ) -> Option<cortex_proto::dto::ComputerCapabilities> {
-    cua_configured.then_some(cortex_proto::dto::ComputerCapabilities {
+    (cua_configured || browser_ready).then_some(cortex_proto::dto::ComputerCapabilities {
         list_apps: false,
-        list_windows: true,
-        observe: true,
-        act: false,
-        browser: false,
-        background_input: false,
-        secure_input_detection: false,
+        list_windows: cua_configured,
+        observe: cua_configured || browser_ready,
+        accessibility_only: cua_configured || browser_ready,
+        act: (cua_actions || browser_ready) && write_readiness.is_ready(),
+        browser: browser_ready && write_readiness.is_ready(),
+        background_input: cua_actions && write_readiness.is_ready(),
+        // 桌面路径现在直接读取 Windows UIA `IsPassword`；浏览器快照也会做
+        // DOM type/autocomplete/label 的正向与保守联合判断。
+        secure_input_detection: cua_configured || browser_ready,
+        write_readiness: Some(write_readiness),
     })
+}
+
+pub(crate) async fn computer_write_readiness(
+    local_desktop: bool,
+) -> cortex_proto::dto::ComputerWriteReadiness {
+    if !local_desktop {
+        return cortex_proto::dto::ComputerWriteReadiness::Unsupported;
+    }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        crate::computer_ledger::readiness().await
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        cortex_proto::dto::ComputerWriteReadiness::Unsupported
+    }
+}
+
+/// 目录只在一轮开始时构造，不能让正常的冷盘检查被 health 的短等待截成
+/// 整轮不可输入。等待仍复用同一探针，且与驱动准备并行；输入时另取 Permit。
+pub(crate) async fn computer_catalog_write_readiness(
+    local_desktop: bool,
+) -> cortex_proto::dto::ComputerWriteReadiness {
+    use cortex_proto::dto::ComputerWriteReadiness;
+    if !local_desktop {
+        return ComputerWriteReadiness::Unsupported;
+    }
+    tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            let status = computer_write_readiness(local_desktop).await;
+            if status != ComputerWriteReadiness::ProbeUnavailable {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or(ComputerWriteReadiness::ProbeUnavailable)
+}
+
+#[cfg(test)]
+tokio::task_local! {pub(crate) static TEST_COMPUTER_SURFACE:(bool,bool,bool);}
+async fn computer_surface(local_desktop: bool) -> (bool, bool, bool) {
+    #[cfg(test)]
+    if let Ok(surface) = TEST_COMPUTER_SURFACE.try_with(|value| *value) {
+        return surface;
+    }
+    if !local_desktop {
+        return (false, false, false);
+    }
+    // 已有的 Cua status 探针也包含签名/文件 IO；放在阻塞线程的独立 runtime，
+    // health 所在线程只等待结果。这里不增加任何 driver 探测种类。
+    static SURFACE: std::sync::OnceLock<
+        std::sync::Arc<crate::read_only_probe::ReadOnlyProbe<(bool, bool, bool)>>,
+    > = std::sync::OnceLock::new();
+    SURFACE
+        .get_or_init(|| std::sync::Arc::new(crate::read_only_probe::ReadOnlyProbe::new()))
+        .read(|| {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(_) => return (false, false, false),
+            };
+            runtime.block_on(async {
+                let configured =
+                    crate::computer_cua::runtime_ready().await && crate::computer_cua::configured();
+                (
+                    configured,
+                    configured && crate::computer_cua::actions_enabled(),
+                    crate::computer_browser::runtime_ready(),
+                )
+            })
+        })
+        .await
+        .unwrap_or_default()
 }
 
 /// 流式对话。**循环与工具跑在本机。**
@@ -559,7 +944,30 @@ async fn chat(State(st): State<LocalState>, req: Request) -> Response {
     // 离线唯一能给的东西，而用户是**显式**选进这个模式的：他已经接受了
     // 「这段时间不会有记忆」，「也够不到云端工作区」是同一个代价，
     // 由界面上那条常驻横幅统一说明，不逐轮重复。
-    if !st.standalone_llm && st.engine.workspaces.get(&parsed.session_id).is_none() {
+    let verified_principal = if st.engine.exec_env == cortex_agent::ExecEnvironment::LocalMachine {
+        let result = st
+            .remote
+            .principal_for_chat(&parsed.session_id, parsed.computer_use)
+            .await;
+        match result {
+            Ok(principal) => Some(principal),
+            Err(error) => return cortex_error_response(error),
+        }
+    } else {
+        None
+    };
+    let has_local_workspace = verified_principal.as_ref().is_some_and(|principal| {
+        principal
+            .session_key()
+            .ok()
+            .and_then(|key| st.engine.workspaces.get_scoped(&key))
+            .is_some()
+    });
+    if let Some(ref principal) = verified_principal
+        && !principal.key().is_local()
+        && !st.standalone_llm
+        && !has_local_workspace
+    {
         // 这个会话不在这台机器上。把原样的请求送回**部署入口** —— 那边知道
         // 该进哪个沙箱（或者告诉我们这个会话钉在别处）。
         //
@@ -567,7 +975,7 @@ async fn chat(State(st): State<LocalState>, req: Request) -> Response {
         // 拆成 cortexd + agentd 之后 `/chat` 归 agentd，而只有边缘知道这件事。
         let mut fwd = Request::from_parts(parts, axum::body::Body::from(bytes));
         *fwd.uri_mut() = "/chat".parse().expect("常量路径可解析");
-        let resp = proxy::forward(State(st.clone()), fwd).await;
+        let resp = proxy::forward_for_principal(State(st.clone()), fwd, principal.clone()).await;
 
         // ── 404 = 数据源指错了地方，不是「会话不存在」──
         //
@@ -600,7 +1008,9 @@ async fn chat(State(st): State<LocalState>, req: Request) -> Response {
         return resp;
     }
 
-    chat_here(st, parsed).await.into_response()
+    chat_here(st, parsed, verified_principal)
+        .await
+        .into_response()
 }
 
 /// 请求体上限。**与 cortexd 那侧无关**：这里挡的是「本地 agent 被同机某个
@@ -615,10 +1025,53 @@ fn bad_request(message: String) -> Response {
         .into_response()
 }
 
+async fn verify_principal(st: &LocalState, session_id: &str) -> cortex_core::Result<RunPrincipal> {
+    st.remote.ordinary_principal(session_id).await
+}
+
+/// 验证一个远端已经存在的 session，并把验证出的账号固定到本进程。
+///
+/// 回放、停止和确认历史都不能走允许 404 后按 identity 新建的入口。否则
+/// 同一个 session id 在新账号下会被误认为“新会话”，进而读取或操作旧账号
+/// 留在本机同一路径名下的状态。
+async fn verify_existing_principal(
+    st: &LocalState,
+    session_id: &str,
+) -> cortex_core::Result<RunPrincipal> {
+    st.remote.control_principal(session_id).await
+}
+
+async fn verify_current_namespace(
+    st: &LocalState,
+) -> cortex_core::Result<(PrincipalNamespace, CredentialSnapshot)> {
+    st.remote.verify_current_namespace_snapshot().await
+}
+
+fn cortex_error_response(error: cortex_core::CortexError) -> Response {
+    let status =
+        StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (
+        status,
+        Json(serde_json::json!({ "error": error.to_string() })),
+    )
+        .into_response()
+}
+
 /// 在这台机器上跑这一轮。
-async fn chat_here(st: LocalState, req: ChatRequest) -> Response {
-    match st.engine.chat(req).await {
-        Ok((replay, rx)) => sse(replay, rx).into_response(),
+async fn chat_here(st: LocalState, req: ChatRequest, principal: Option<RunPrincipal>) -> Response {
+    let guard_principal = principal.clone();
+    let result = match principal {
+        Some(principal) => st.engine.chat_with_verified_principal(req, principal).await,
+        None => st.engine.chat(req).await,
+    };
+    match result {
+        Ok((replay, rx)) => match guard_principal {
+            Some(principal) => {
+                sse_guarded(replay, rx, owner_guard_stream(st.remote.clone(), principal))
+                    .into_response()
+            }
+            None => sse(replay, rx).into_response(),
+        },
         // 409 而不是 400：请求本身没问题，是**这个会话此刻的状态**不允许。
         //
         // 「已经有一轮在跑」现在不再走到这里 —— 它排队（见 `runs::Runs::enqueue`）。
@@ -645,6 +1098,17 @@ fn sse(
     replay: Vec<ChatEvent>,
     rx: tokio::sync::broadcast::Receiver<ChatEvent>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    sse_guarded(replay, rx, futures::stream::empty())
+}
+
+fn sse_guarded<G>(
+    replay: Vec<ChatEvent>,
+    rx: tokio::sync::broadcast::Receiver<ChatEvent>,
+    account_guard: G,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
+where
+    G: Stream<Item = ChatEvent> + Send + 'static,
+{
     use tokio_stream::wrappers::BroadcastStream;
 
     let live = BroadcastStream::new(rx).filter_map(|r| match r {
@@ -658,6 +1122,13 @@ fn sse(
                 needs_reauth: false,
             })
         }
+    });
+    let events = futures::stream::iter(replay).chain(live);
+    // guard 必须优先轮询。普通 `select` 在两个分支同时 ready 时的顺序不
+    // 稳定；账号已经切到 B 时，一条尚未发出的 A replay 可能抢在 guard 的
+    // Error 前面进入 HTTP body。总是先 poll guard，切号时才有确定顺序。
+    let guarded = futures::stream::select_with_strategy(account_guard, events, |_: &mut ()| {
+        futures::stream::PollNext::Left
     });
 
     // ── 终态事件之后**把流关掉** ──
@@ -680,7 +1151,7 @@ fn sse(
     //
     // `unfold` 的状态是「内层流还在不在」：发完终态那条就把它丢掉，
     // 于是下一次 poll 立刻结束，一次都不会再去等广播。
-    let inner = Box::pin(futures::stream::iter(replay).chain(live));
+    let inner = Box::pin(guarded);
     let stopping = futures::stream::unfold(Some(inner), |state| async move {
         let mut inner = state?;
         let ev = futures::StreamExt::next(&mut inner).await?;
@@ -705,6 +1176,76 @@ fn sse(
     )
 }
 
+/// 重挂中的流在账号切换时必须结束，不能继续把 A 的后续事件交给已经登入 B
+/// 的 HTTP 连接。同账号 token 续期保持同一个 principal，因此不会误伤正常轮换。
+#[cfg(test)]
+fn principal_guard_stream(
+    remote: crate::remote::Remote,
+    expected: PrincipalNamespace,
+    expected_epoch: u64,
+) -> impl Stream<Item = ChatEvent> + Send + 'static {
+    let changes = remote.token_generation();
+    futures::stream::unfold(false, move |finished| {
+        let remote = remote.clone();
+        let mut changes = changes.clone();
+        let expected = expected.clone();
+        async move {
+            if finished {
+                return None;
+            }
+            loop {
+                if !remote.principal_is_current(&expected, expected_epoch) {
+                    return Some((
+                        ChatEvent::Error {
+                            message: "登录账号在挂载期间已经切换，旧账号的事件流已关闭。".into(),
+                            needs_reauth: true,
+                        },
+                        true,
+                    ));
+                }
+                if changes.changed().await.is_err() {
+                    return Some((
+                        ChatEvent::Error {
+                            message: "本机凭据通道已经关闭，事件流已结束。".into(),
+                            needs_reauth: true,
+                        },
+                        true,
+                    ));
+                }
+            }
+        }
+    })
+}
+
+fn owner_guard_stream(
+    remote: crate::remote::Remote,
+    principal: RunPrincipal,
+) -> impl Stream<Item = ChatEvent> {
+    let changes = remote.token_generation();
+    futures::stream::unfold(
+        (remote, principal, changes, false),
+        |(remote, principal, mut changes, finished)| async move {
+            if finished {
+                return None;
+            }
+            loop {
+                if !remote.run_is_current(&principal) || changes.has_changed().is_err() {
+                    return Some((
+                        ChatEvent::Error {
+                            message: "本机 owner 或账号代际已变化，事件流已关闭".into(),
+                            needs_reauth: true,
+                        },
+                        (remote, principal, changes, true),
+                    ));
+                }
+                if changes.changed().await.is_err() {
+                    continue;
+                }
+            }
+        },
+    )
+}
+
 /// `DELETE /runs/{session_id}` —— 掐掉这个会话正在跑的那一轮。
 ///
 /// # 为什么必须有这条
@@ -716,7 +1257,33 @@ fn sse(
 /// 404 = 这个会话现在没有在跑的轮次。**不是错误**：用户点得快一点、或者那一轮
 /// 刚好自己结束了，都会走到这里，客户端按「已经停了」处理即可。
 async fn stop_run(State(st): State<LocalState>, Path(session_id): Path<String>) -> Response {
-    if st.engine.runs.stop(&session_id).await {
+    let principal = match verify_existing_principal(&st, &session_id).await {
+        Ok(principal) => principal,
+        Err(error) => return cortex_error_response(error),
+    };
+    // 验证返回、真正 abort 之前仍可能切号。这里操作的两个 Tokio mutex
+    // 都只做内存状态变更、不等待 I/O；用 blocking executor 把它们压进同一次
+    // 账号读锁，确保 B 的写入不能插在“确认还是 A”和“abort A”之间。
+    let (stopped, confirmation_lease) = match st.remote.with_owned_principal(&principal, || {
+        futures::executor::block_on(async {
+            let key = principal.key();
+            let principal_epoch = principal.credential().principal_epoch();
+            let lease = st
+                .engine
+                .runs
+                .confirmation_lease(key, principal_epoch)
+                .await;
+            let stopped = st.engine.runs.stop_verified(key, principal_epoch).await;
+            (stopped, lease)
+        })
+    }) {
+        Ok(result) => result,
+        Err(error) => return cortex_error_response(error),
+    };
+    if stopped {
+        if let Some(lease) = &confirmation_lease {
+            st.engine.confirms.revoke_lease(lease);
+        }
         StatusCode::NO_CONTENT.into_response()
     } else {
         (
@@ -728,8 +1295,23 @@ async fn stop_run(State(st): State<LocalState>, Path(session_id): Path<String>) 
 }
 
 /// `GET /runs` —— 这个进程上还在跑的那些轮次。
-async fn list_runs(State(st): State<LocalState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "runs": st.engine.runs.running().await }))
+async fn list_runs(State(st): State<LocalState>) -> Response {
+    let (namespace, credential) = match st.remote.owner_snapshot().await {
+        Ok(values) => values,
+        Err(error) => return cortex_error_response(error),
+    };
+    let runs = st
+        .engine
+        .runs
+        .running_for(&namespace, credential.principal_epoch())
+        .await;
+    if let Err(error) = st
+        .remote
+        .with_owner_snapshot(&namespace, &credential, || ())
+    {
+        return cortex_error_response(error);
+    }
+    Json(serde_json::json!({ "runs": runs })).into_response()
 }
 
 /// `GET /runs/{session_id}` —— 挂上一个正在跑（或刚跑完）的轮次。
@@ -742,8 +1324,29 @@ async fn list_runs(State(st): State<LocalState>) -> Json<serde_json::Value> {
 /// 404 = 这个会话此刻没有轮次（没跑、或者跑完超过保留期）。那不是错误，
 /// 客户端按「照常拉历史」处理。
 async fn attach_run(State(st): State<LocalState>, Path(session_id): Path<String>) -> Response {
-    match st.engine.runs.attach(&session_id).await {
-        Some((replay, rx, _running)) => sse(replay, rx).into_response(),
+    let principal = match verify_existing_principal(&st, &session_id).await {
+        Ok(principal) => principal,
+        Err(error) => return cortex_error_response(error),
+    };
+    // attach 会复制 replay 快照。复制本身没有任何网络 await，把主体复核和
+    // 快照放在同一把账号读锁内，A→B 切换不能插进这两步。快照随后交给
+    // guard 优先的 SSE；若在响应开始前又切号，guard 会先发 Error 并丢弃
+    // 尚未轮询的 replay。
+    let attached = match st.remote.with_owned_principal(&principal, || {
+        futures::executor::block_on(
+            st.engine
+                .runs
+                .attach_verified(principal.key(), principal.credential().principal_epoch()),
+        )
+    }) {
+        Ok(attached) => attached,
+        Err(error) => return cortex_error_response(error),
+    };
+    match attached {
+        Some((replay, rx, _running)) => {
+            sse_guarded(replay, rx, owner_guard_stream(st.remote.clone(), principal))
+                .into_response()
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "这个会话现在没有正在跑的轮次。" })),
@@ -762,21 +1365,77 @@ async fn attach_run(State(st): State<LocalState>, Path(session_id): Path<String>
 ///
 /// 查不到一律 404，且**不加区分**：伪造、已被答过、超时作废三种混在一起。
 /// 分开报会让「猜一个 token 试试」变成一个可用的探测口。
+async fn confirmation_owner_snapshot(
+    st: &LocalState,
+    session: Option<&str>,
+) -> cortex_core::Result<(crate::local_owner::OwnerKey, CredentialSnapshot)> {
+    if st.remote.local_authority().is_none()
+        && let Some(session) = session
+    {
+        let principal = verify_existing_principal(st, session).await?;
+        return Ok((principal.key().owner()?, principal.credential().clone()));
+    }
+    st.remote.owner_snapshot().await
+}
+
 async fn answer_confirmation(
     State(st): State<LocalState>,
+    Query(q): Query<PendingQuery>,
     Json(receipt): Json<ConfirmReceipt>,
 ) -> Response {
+    let (owner, credential) = match confirmation_owner_snapshot(&st, q.session_id.as_deref()).await
+    {
+        Ok(v) => v,
+        Err(e) => return cortex_error_response(e),
+    };
+    let epoch = credential.principal_epoch();
     let approval = match receipt.decision {
         ConfirmDecision::Allow => cortex_agent::Approval::Allow,
         ConfirmDecision::Deny => cortex_agent::Approval::Denied,
     };
-    match st.engine.confirms.answer(&receipt.token, approval) {
-        AnswerOutcome::Accepted => Json(ConfirmAck { accepted: true }).into_response(),
-        AnswerOutcome::Unknown => (
-            axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "没有这条待确认项" })),
+    if matches!(approval, cortex_agent::Approval::Allow) {
+        let pending = st
+            .engine
+            .confirms
+            .pending_for_owner(&owner, epoch, q.session_id.as_deref());
+        if let Some(item) = pending.iter().find(|p| p.token == receipt.token)
+            && (item.tool.starts_with("computer")
+                || item.tool.starts_with("browser")
+                || item.tool.starts_with("cua"))
+        {
+            let proof = match st
+                .remote
+                .verify_current_existing_session_principal_bound(&item.session_id)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => return cortex_error_response(e),
+            };
+            if proof.key().owner().ok().as_ref() != Some(&owner)
+                || proof.credential().principal_epoch() != epoch
+            {
+                return cortex_error_response(cortex_core::CortexError::Unauthorized(
+                    "CU Allow 不属于当前严格账号租约".into(),
+                ));
+            }
+        }
+    }
+    match st.remote.with_owner_snapshot(&owner, &credential, || {
+        st.engine.confirms.answer_for_owner(
+            &owner,
+            epoch,
+            q.session_id.as_deref(),
+            &receipt.token,
+            approval,
+        )
+    }) {
+        Ok(AnswerOutcome::Accepted) => Json(ConfirmAck { accepted: true }).into_response(),
+        Ok(AnswerOutcome::Unknown) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":"没有这条待确认项"})),
         )
             .into_response(),
+        Err(e) => cortex_error_response(e),
     }
 }
 
@@ -791,11 +1450,22 @@ async fn answer_confirmation(
 async fn list_confirmations(
     State(st): State<LocalState>,
     Query(q): Query<PendingQuery>,
-) -> Json<PendingConfirmations> {
-    let mut pending = st.engine.confirms.pending(q.session_id.as_deref());
-    // 先问的排前面
-    pending.sort_by(|a, b| a.asked_at.cmp(&b.asked_at));
-    Json(PendingConfirmations { pending })
+) -> Response {
+    let (owner, credential) = match confirmation_owner_snapshot(&st, q.session_id.as_deref()).await
+    {
+        Ok(v) => v,
+        Err(e) => return cortex_error_response(e),
+    };
+    match st.remote.with_owner_snapshot(&owner, &credential, || {
+        st.engine.confirms.pending_for_owner(
+            &owner,
+            credential.principal_epoch(),
+            q.session_id.as_deref(),
+        )
+    }) {
+        Ok(pending) => Json(PendingConfirmations { pending }).into_response(),
+        Err(e) => cortex_error_response(e),
+    }
 }
 
 /// `GET /sessions` —— 原样转发，但把每条的 `workspace` 换成本地绑定。
@@ -804,13 +1474,102 @@ async fn list_confirmations(
 /// 见 [`crate::local_workspace`]。
 async fn list_sessions(State(st): State<LocalState>, req: Request) -> Response {
     let (parts, _) = req.into_parts();
-    proxy::forward_json(&st, reqwest::Method::GET, &parts.uri, Vec::new()).await
+    if st.remote.local_authority().is_some() {
+        let (owner, credential) = match st.remote.owner_snapshot().await {
+            Ok(v) => v,
+            Err(e) => return cortex_error_response(e),
+        };
+        if matches!(owner, crate::local_owner::OwnerKey::Local { .. })
+            || st.remote.auth_state() == crate::remote::RemoteAuthState::OfflineBound
+        {
+            let authority = st.remote.local_authority().expect("已检查 owner");
+            return match st.remote.with_owner_snapshot(&owner, &credential, || {
+                authority.journal.sessions_json(&owner)
+            }) {
+                Ok(mut body) => {
+                    if let Some(query) = parts.uri.query() {
+                        let terms: Vec<_> = url::form_urlencoded::parse(query.as_bytes())
+                            .filter(|(k, _)| k == "q" || k == "query")
+                            .map(|(_, v)| v.into_owned())
+                            .collect();
+                        if let Some(items) = body["sessions"].as_array_mut() {
+                            items.retain(|item| terms.iter().all(|q| item.to_string().contains(q)));
+                        }
+                    }
+                    Json(body).into_response()
+                }
+                Err(e) => cortex_error_response(e),
+            };
+        }
+    }
+    let (namespace, credential) = match verify_current_namespace(&st).await {
+        Ok(values) => values,
+        Err(error) => return cortex_error_response(error),
+    };
+    proxy::forward_json_for_namespace(
+        &st,
+        &namespace,
+        &credential,
+        reqwest::Method::GET,
+        &parts.uri,
+        Vec::new(),
+    )
+    .await
 }
 
 /// `GET /sessions/search` —— 原样转给远端，连查询串一起。
 async fn search_sessions(State(st): State<LocalState>, req: Request) -> Response {
     let (parts, _) = req.into_parts();
-    proxy::forward_json(&st, reqwest::Method::GET, &parts.uri, Vec::new()).await
+    if st.remote.local_authority().is_some() {
+        let (owner, credential) = match st.remote.owner_snapshot().await {
+            Ok(v) => v,
+            Err(e) => return cortex_error_response(e),
+        };
+        if matches!(owner, crate::local_owner::OwnerKey::Local { .. })
+            || st.remote.auth_state() == crate::remote::RemoteAuthState::OfflineBound
+        {
+            let authority = st.remote.local_authority().expect("已检查 owner");
+            return match st.remote.with_owner_snapshot(&owner, &credential, || {
+                let query = parts
+                    .uri
+                    .query()
+                    .and_then(|q| {
+                        url::form_urlencoded::parse(q.as_bytes())
+                            .find(|(k, _)| k == "q")
+                            .map(|(_, v)| v.into_owned())
+                    })
+                    .unwrap_or_default();
+                authority.journal.search_json(&owner, &query)
+            }) {
+                Ok(mut body) => {
+                    if let Some(query) = parts.uri.query() {
+                        let terms: Vec<_> = url::form_urlencoded::parse(query.as_bytes())
+                            .filter(|(k, _)| k == "q" || k == "query")
+                            .map(|(_, v)| v.into_owned())
+                            .collect();
+                        if let Some(items) = body["sessions"].as_array_mut() {
+                            items.retain(|item| terms.iter().all(|q| item.to_string().contains(q)));
+                        }
+                    }
+                    Json(body).into_response()
+                }
+                Err(e) => cortex_error_response(e),
+            };
+        }
+    }
+    let (namespace, credential) = match verify_current_namespace(&st).await {
+        Ok(values) => values,
+        Err(error) => return cortex_error_response(error),
+    };
+    proxy::forward_json_for_namespace(
+        &st,
+        &namespace,
+        &credential,
+        reqwest::Method::GET,
+        &parts.uri,
+        Vec::new(),
+    )
+    .await
 }
 
 /// `PATCH /sessions/{id}` —— 把 `workspace` 那一项**拦在本地**。
@@ -826,18 +1585,71 @@ async fn search_sessions(State(st): State<LocalState>, req: Request) -> Response
 /// 其余字段（标题、归档）照常转发 —— 那些是真正跨设备的会话属性。
 async fn patch_session(State(st): State<LocalState>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
+    let Some(session_id) = parts.uri.path().rsplit('/').next().map(ToString::to_string) else {
+        return (StatusCode::BAD_REQUEST, "路径里没有会话 id").into_response();
+    };
+    if st.remote.local_authority().is_some() {
+        let principal = match st.remote.control_principal(&session_id).await {
+            Ok(v) => v,
+            Err(e) => return cortex_error_response(e),
+        };
+        if principal.key().is_local()
+            || st.remote.auth_state() == crate::remote::RemoteAuthState::OfflineBound
+        {
+            let authority = st.remote.local_authority().expect("已检查 owner");
+            let owner = match principal.key().owner() {
+                Ok(v) => v,
+                Err(e) => return cortex_error_response(e),
+            };
+            if parts.method == axum::http::Method::GET {
+                return match st.remote.with_owned_principal(&principal, || {
+                    authority.journal.session_json(&owner, &session_id)
+                }) {
+                    Ok(Ok(mut value)) => {
+                        value["workspace"] = serde_json::json!(
+                            principal
+                                .session_key()
+                                .ok()
+                                .and_then(|key| st.engine.workspaces.get_scoped(&key))
+                        );
+                        Json(value).into_response()
+                    }
+                    Ok(Err(e)) | Err(e) => cortex_error_response(e),
+                };
+            }
+            if parts.method != axum::http::Method::PATCH {
+                return StatusCode::METHOD_NOT_ALLOWED.into_response();
+            }
+        }
+    }
     if parts.method != axum::http::Method::PATCH {
         // GET /sessions/{id} 是回放，权威在远端 —— 但**除了 workspace**。
         // 走带缓冲的那条转发，好在回来的路上把绑定换成本地的值
         // （`proxy::forward` 是流式的，注入不了）
         if parts.method == axum::http::Method::GET {
-            return proxy::forward_json(&st, reqwest::Method::GET, &parts.uri, Vec::new()).await;
+            let principal = match verify_existing_principal(&st, &session_id).await {
+                Ok(principal) => principal,
+                Err(error) => return cortex_error_response(error),
+            };
+            return proxy::forward_json_for_principal(
+                &st,
+                &principal,
+                reqwest::Method::GET,
+                &parts.uri,
+                Vec::new(),
+            )
+            .await;
         }
         return proxy::forward(State(st), Request::from_parts(parts, body)).await;
     }
 
-    let Some(session_id) = parts.uri.path().rsplit('/').next().map(ToString::to_string) else {
-        return (StatusCode::BAD_REQUEST, "路径里没有会话 id").into_response();
+    let principal = match verify_principal(&st, &session_id).await {
+        Ok(principal) => principal,
+        Err(error) => return cortex_error_response(error),
+    };
+    let session_key = match principal.session_key() {
+        Ok(key) => key,
+        Err(error) => return cortex_error_response(error),
     };
 
     let bytes = match axum::body::to_bytes(body, 64 * 1024).await {
@@ -851,16 +1663,35 @@ async fn patch_session(State(st): State<LocalState>, req: Request) -> Response {
 
     // 先处理工作区。失败就整条请求失败 —— 用户点了个目录，
     // 结果标题改成功了而目录没绑上，界面上没有任何地方能反映这件事
-    if let Some(ws) = &patch.workspace {
-        let outcome = match ws {
-            Some(raw) => st.engine.workspaces.bind(&session_id, raw).map(|_| ()),
-            None => st.engine.workspaces.unbind(&session_id),
-        };
-        if let Err(e) = outcome {
-            return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    if let Some(workspace) = &patch.workspace {
+        let ws = st.engine.workspaces.clone();
+        let grants = st.engine.grants.clone();
+        let target = workspace.clone();
+        let key = session_key.clone();
+        let result = st
+            .remote
+            .commit_owned(principal.clone(), move || {
+                match target {
+                    Some(raw) => {
+                        ws.bind_scoped(&key, &raw)?;
+                    }
+                    None => ws.unbind_scoped(&key)?,
+                }
+                grants.forget_scoped(&key);
+                Ok(())
+            })
+            .await;
+        if let Err(e) = result {
+            return cortex_error_response(e);
         }
     }
 
+    if principal.key().is_local() {
+        if patch.workspace.is_none() {
+            return bad_request("本机最小会话当前只支持工作区 PATCH".into());
+        }
+        return Json(serde_json::json!({"id":session_id,"workspace":st.engine.workspaces.get_scoped(&session_key),"runtime":"local"})).into_response();
+    }
     // 转发时把 workspace 改写成 **null**，而不是删掉它。
     //
     // 删掉的话，一次「只绑目录」的请求转过去就是个空 patch，cortexd 会回
@@ -870,8 +1701,9 @@ async fn patch_session(State(st): State<LocalState>, req: Request) -> Response {
     // 改成 null 同时也是**语义上正确**的：本地 agent 在场时工具跑在这台机器上，
     // 服务端那侧的工作区就该是空的。留一个陈旧的服务器路径，会让直连 cortexd
     // 的 Web 客户端以为它能在那个目录里执行东西。
-    proxy::forward_json(
+    proxy::forward_json_for_principal(
         &st,
+        &principal,
         reqwest::Method::PATCH,
         &parts.uri,
         forwarded_patch_body(&bytes),
@@ -914,17 +1746,56 @@ mod tests {
     #[test]
     fn health_never_reports_legacy_computer_write_as_supported() {
         assert!(
-            declared_computer_capabilities(false).is_none(),
+            declared_computer_capabilities(
+                false,
+                false,
+                false,
+                cortex_proto::dto::ComputerWriteReadiness::Ready
+            )
+            .is_none(),
             "未配置 Cua sidecar 时，legacy xcap/enigo 写路径不能继续以 computer_use 能力暴露"
         );
-        let cua = declared_computer_capabilities(true).expect("Cua 配置成立时应有能力表");
+        let cua = declared_computer_capabilities(
+            true,
+            false,
+            false,
+            cortex_proto::dto::ComputerWriteReadiness::Ready,
+        )
+        .expect("Cua 配置成立时应有能力表");
         assert!(
             cua.list_windows && cua.observe && !cua.act,
             "C1 必须如实报 list/observe=true、act=false"
         );
+        let writable = declared_computer_capabilities(
+            true,
+            true,
+            false,
+            cortex_proto::dto::ComputerWriteReadiness::Ready,
+        )
+        .expect("写配置成立时应有能力表");
         assert!(
-            !cua.browser && !cua.background_input && !cua.secure_input_detection,
-            "C1 不能把尚未接入的浏览器、后台输入或 secure 检测报成可用"
+            writable.list_windows && writable.observe && writable.act && writable.background_input,
+            "显式写配置必须把 act=true 报到 health，让界面与模型看到同一能力"
+        );
+        assert!(
+            !cua.browser && !cua.background_input && cua.secure_input_detection,
+            "Cua ready 时必须报告 Windows UIA 敏感字段检测；浏览器与输入仍分开报告"
+        );
+        let browser = declared_computer_capabilities(
+            false,
+            false,
+            true,
+            cortex_proto::dto::ComputerWriteReadiness::Ready,
+        )
+        .expect("只启用隔离浏览器时也必须报告 computer_use");
+        assert!(
+            browser.browser
+                && browser.observe
+                && browser.act
+                && browser.secure_input_detection
+                && !browser.list_windows
+                && !browser.background_input,
+            "浏览器能力必须与 Cua 窗口能力分开报告，不能靠一个 bool 冒充"
         );
     }
 
@@ -1075,6 +1946,7 @@ mod attach_tests {
             (Method::POST, "/local/mcp/reload"),
             (Method::POST, "/local/import/run"),
             (Method::GET, "/local/workspace-root"),
+            (Method::GET, "/local/computer-traces/01ABC"),
             // 在别人机器上开一个任意 shell —— 比上面哪一条都更是机器主人的权限
             (Method::GET, "/local/terminal/01ABC"),
         ] {
@@ -1198,6 +2070,7 @@ mod sse_tests {
 
         sink.send(ChatEvent::Delta { text: "好".into() }).await;
         sink.send(ChatEvent::Done {
+            persistence: None,
             episode_id: "e1".into(),
             models: Vec::new(),
             attachments: Vec::new(),
@@ -1223,6 +2096,111 @@ mod sse_tests {
         assert!(
             text.contains(r#""type":"done""#),
             "终态那条本身必须发出去，不能连它一起截掉：{text}"
+        );
+    }
+
+    /// 账号在响应开始前切走时，guard 必须先于 replay 发出终态。
+    ///
+    /// 真正的 attach 已经复制了 A 的 replay 快照；如果普通 `select` 先
+    /// 轮询数据分支，A 的第一段正文会进入 HTTP body，之后才出现切号错误。
+    /// 这里把切号卡在 `sse_guarded` 第一次 poll 之前，钉住“零条旧账号内容”。
+    #[tokio::test]
+    async fn an_account_switch_wins_over_queued_replay() {
+        let remote =
+            crate::remote::Remote::new("http://127.0.0.1:1", Some("account-a-token".into()))
+                .expect("构造 Remote");
+        let namespace =
+            PrincipalNamespace::from_verified("deployment", "user-a").expect("测试主体合法");
+        remote
+            .bind_principal(&namespace)
+            .expect("测试账号可以原子绑定");
+        let expected_epoch = remote
+            .credential_snapshot()
+            .expect("已绑定账号应能读取凭据快照")
+            .principal_epoch();
+        let guard = principal_guard_stream(remote.clone(), namespace, expected_epoch);
+
+        // 订阅已经建立后再切号。guard 的第一次 poll 必须看到当前主体不是 A。
+        remote.set_token(Some("account-b-token".into()));
+        let (_tx, rx) = tokio::sync::broadcast::channel::<ChatEvent>(4);
+        let body = sse_guarded(
+            vec![ChatEvent::Delta {
+                text: "账号 A 的私有回放".into(),
+            }],
+            rx,
+            guard,
+        )
+        .into_response()
+        .into_body();
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(2),
+            axum::body::to_bytes(body, 64 * 1024),
+        )
+        .await
+        .expect("切号后 SSE 必须立刻结束")
+        .expect("读取 SSE 失败");
+        let text = String::from_utf8_lossy(&bytes);
+
+        text.find("登录账号在挂载期间已经切换")
+            .expect("切号终态必须进入 SSE");
+        assert!(
+            !text.contains("账号 A 的私有回放"),
+            "账号切走之后仍发出了旧账号 replay：{text}"
+        );
+        assert!(
+            text.starts_with("data:"),
+            "SSE body 的第一段必须就是切号终态数据帧：{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_to_b_to_a_cannot_replay_the_previous_login_scope() {
+        let remote =
+            crate::remote::Remote::new("http://127.0.0.1:1", Some("account-a-token".into()))
+                .expect("构造 Remote");
+        let account_a =
+            PrincipalNamespace::from_verified("deployment", "user-a").expect("测试主体合法");
+        let account_b =
+            PrincipalNamespace::from_verified("deployment", "user-b").expect("测试主体合法");
+        remote
+            .bind_principal(&account_a)
+            .expect("测试账号可以原子绑定");
+        let expected_epoch = remote
+            .credential_snapshot()
+            .expect("已绑定账号应能读取凭据快照")
+            .principal_epoch();
+        let guard = principal_guard_stream(remote.clone(), account_a.clone(), expected_epoch);
+
+        remote.set_token(Some("account-b-token".into()));
+        remote.bind_principal(&account_b).expect("绑定 B");
+        remote.set_token(Some("account-a-new-token".into()));
+        remote.bind_principal(&account_a).expect("重新绑定 A");
+
+        let (_tx, rx) = tokio::sync::broadcast::channel::<ChatEvent>(4);
+        let body = sse_guarded(
+            vec![ChatEvent::Delta {
+                text: "旧 A 登录作用域的私有回放".into(),
+            }],
+            rx,
+            guard,
+        )
+        .into_response()
+        .into_body();
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(2),
+            axum::body::to_bytes(body, 64 * 1024),
+        )
+        .await
+        .expect("A→B→A 后 SSE 必须立刻结束")
+        .expect("读取 SSE 失败");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("登录账号在挂载期间已经切换"),
+            "旧登录作用域必须收到错误终态：{text}"
+        );
+        assert!(
+            !text.contains("旧 A 登录作用域的私有回放"),
+            "A→B→A 后仍发出了旧 replay：{text}"
         );
     }
 }

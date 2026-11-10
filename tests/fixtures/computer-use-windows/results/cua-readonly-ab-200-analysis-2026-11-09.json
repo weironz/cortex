@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "scope": "driver_readonly_fixture_ab_analysis",
+  "sourceReport": "cua-readonly-ab-200-2026-11-09.json",
+  "sourceSha256": "13a065fc0e22f74f70f63b500d2c012eb18c5a281484f1df4e32bdf82f44feda",
+  "memorySteadyStateProven": false,
+  "toolchainMatched": false,
+  "metrics": [
+    {
+      "group": "official",
+      "warmup": 25,
+      "observations": 200,
+      "baselineMiB": 13.891,
+      "endMiB": 30.137,
+      "growthMiB": 16.246,
+      "postEndMiB": 30.141,
+      "slopeKiBPerObservation": 79.007,
+      "handlesStart": 464,
+      "handlesEnd": 467,
+      "meanObservationMs": 1510.44,
+      "cleanup": true,
+      "sessionEnded": true
+    },
+    {
+      "group": "candidate",
+      "warmup": 25,
+      "observations": 200,
+      "baselineMiB": 12.371,
+      "endMiB": 13.797,
+      "growthMiB": 1.426,
+      "postEndMiB": 13.879,
+      "slopeKiBPerObservation": 3.14,
+      "handlesStart": 464,
+      "handlesEnd": 472,
+      "meanObservationMs": 1539.54,
+      "cleanup": true,
+      "sessionEnded": true
+    }
+  ],
+  "recordedAt": "2026-11-08T16:29:51.7016236+00:00"
+}

@@ -95,8 +95,8 @@ void main() {
     expect(apiToken(userToken: 'real', onLocalAgent: false), 'real');
     expect(
       apiToken(userToken: 'real', onLocalAgent: true),
-      'real',
-      reason: '有用户 token 时两条路一致 —— 本机那把只是没有 token 时的替补',
+      localAgentToken(null),
+      reason: '本机始终使用独立控制凭据，账号token只交给远端',
     );
   });
 }

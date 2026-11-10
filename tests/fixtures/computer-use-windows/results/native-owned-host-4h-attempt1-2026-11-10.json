@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "scope": "actual_native_owned_http_host_fixture_4h_attempt1",
+  "status": "failed",
+  "requiredSeconds": 14400,
+  "secure": {
+    "name": "computer::real::tests::cua_secure_fixture_requires_handoff_without_input",
+    "status": "passed",
+    "startedAt": "2026-11-09T23:37:11.8289187Z",
+    "exitCode": 0,
+    "harness": {
+      "exitCode": 0,
+      "runningOneLines": 1,
+      "namedPassedLines": 1,
+      "onePassedSummaryLines": 1,
+      "totalRunLines": 1,
+      "totalSummaryLines": 1,
+      "passed": true
+    },
+    "durationSeconds": 5.021,
+    "durationMilliseconds": 5021,
+    "finishedAt": "2026-11-09T23:37:16.8598392Z"
+  },
+  "soak": {
+    "name": "computer::real::tests::cua_fixture_long_running_soak",
+    "status": "failed",
+    "startedAt": "2026-11-09T23:37:17.366306Z",
+    "exitCode": 101,
+    "harness": {
+      "exitCode": 101,
+      "runningOneLines": 1,
+      "namedPassedLines": 0,
+      "onePassedSummaryLines": 0,
+      "totalRunLines": 1,
+      "totalSummaryLines": 1,
+      "passed": false
+    },
+    "durationSeconds": 125.06,
+    "durationMilliseconds": 125060,
+    "finishedAt": "2026-11-09T23:39:22.4272737Z"
+  },
+  "owner": {
+    "powerRequestReleased": true,
+    "startedAtUtc": "2026-11-09T23:37:07.5521016Z",
+    "sourceChanged": [],
+    "state": "terminal_requires_result_audit",
+    "childPid": 30940,
+    "finishedAtUtc": "2026-11-09T23:39:23.8504945Z",
+    "schema": 1,
+    "exitCode": 1,
+    "ownerPid": 11056,
+    "originalJobDrained": true,
+    "ownerRunId": "d74d2d25e81842c080f20947741b88a5",
+    "failure": null,
+    "productionAccepted": false
+  },
+  "diagnostics": [
+    {
+      "file": "test-3bf30e3b79f547759806dec05c9bc6cf.log",
+      "totalBytes": 1297,
+      "inspectedBytes": 1297,
+      "panic": true,
+      "panicFile": "computer_http_fixture_test.rs",
+      "panicLine": 644,
+      "panicColumn": 5,
+      "timedOut": false,
+      "accessDenied": false,
+      "missingRuntime": false,
+      "handoff": false,
+      "missingTrustedHostContext": false,
+      "portableContractTags": []
+    },
+    {
+      "file": "test-534147bd3f8b4b89a5e0305d05d142d0.log",
+      "totalBytes": 199,
+      "inspectedBytes": 199,
+      "panic": false,
+      "panicFile": null,
+      "panicLine": null,
+      "panicColumn": null,
+      "timedOut": false,
+      "accessDenied": false,
+      "missingRuntime": false,
+      "handoff": false,
+      "missingTrustedHostContext": false,
+      "portableContractTags": []
+    }
+  ],
+  "resultPath": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-native-owned-host-4h-20261110\\result.json",
+  "resultSha256": "16b24a410c53845ac7de6e71d64a6f04035cb9dc219bd1b0050c19260a932410",
+  "ownerPath": "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-native-owned-host-4h-20261110\\owner-result.json",
+  "productionAccepted": false
+}

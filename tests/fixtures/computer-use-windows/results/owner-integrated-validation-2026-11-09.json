@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-09",
+  "version": "0.1.45",
+  "scope": "fake_model_remote_real_http_host_driver_with_real_local_owner",
+  "committed": false,
+  "published": false,
+  "workspace_ci": {
+    "command": "just workflow-ci",
+    "exit_code": 0,
+    "log": "target/owner-integrated-workflow-ci-final.log",
+    "log_sha256": "60efa2e8b38f0a42b999a26182e9c0a420520891aa954b0dbfd37b7848d13736",
+    "rust_passed": 1928,
+    "rust_ignored": 26,
+    "flutter_passed": 1068,
+    "flutter_skipped": 7,
+    "flutter_analyzer": "no_issues",
+    "all_feature_clippy": "passed",
+    "note": "完整CI后仅调整HTTP fixture测试装配；生产源码未再改变，后续local测试和clippy覆盖此测试调整"
+  },
+  "post_ci_local": {
+    "command": "cargo test -p cortex-local --all-features",
+    "passed": 550,
+    "ignored": 18,
+    "exit_code": 0,
+    "all_target_all_feature_clippy": "passed",
+    "headless_http_contracts_passed": 4
+  },
+  "real_fixture": {
+    "binary": "target/debug/deps/cortex_local-768f28f472c783ed.exe",
+    "binary_sha256": "56811848c8f4211b4a8dc5964bc798b8c7aa36d63069742adaeab36579375b5e",
+    "driver_version": "0.38.0",
+    "driver_sha256": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+    "real_owner_bootstrap": true,
+    "real_inbound_caller": true,
+    "remote_persistence_ack_asserted": true,
+    "automatic_http_approval": true,
+    "runs": [
+      {
+        "artifact_directory": "target/computer-http-fixture-LIzAIG",
+        "exit_code": 0,
+        "seconds": 21.34,
+        "trace_http_status": 200,
+        "trace_count": 3,
+        "passed_verifications": 1,
+        "cleanup": {
+          "daemon_socket_closed": true,
+          "daemon_stopped": true,
+          "fixture_stopped": true,
+          "scope": "fake_model_remote_real_http_host_driver",
+          "worker_stopped": true
+        }
+      },
+      {
+        "artifact_directory": "target/computer-http-fixture-4qsR8X",
+        "exit_code": 0,
+        "seconds": 20.1,
+        "trace_http_status": 200,
+        "trace_count": 3,
+        "passed_verifications": 1,
+        "cleanup": {
+          "daemon_socket_closed": true,
+          "daemon_stopped": true,
+          "fixture_stopped": true,
+          "scope": "fake_model_remote_real_http_host_driver",
+          "worker_stopped": true
+        }
+      }
+    ],
+    "initial_failure": {
+      "artifact_directory": "target/computer-http-fixture-81IMSL",
+      "exit_code": 101,
+      "cause": "fake_existing_principal_with_404_history",
+      "product_check_weakened": false,
+      "cleanup": {
+        "daemon_socket_closed": true,
+        "daemon_stopped": true,
+        "fixture_stopped": true,
+        "scope": "fake_model_remote_real_http_host_driver",
+        "worker_stopped": true
+      }
+    }
+  },
+  "source_files": [
+    {
+      "path": "app/lib/features/chat/widgets/message_bubble.dart",
+      "sha256": "ec1bc06877788ac1e8ca06663fd856fbbf80d9e11fd5cecdf7a31a856d1b3fb4"
+    },
+    {
+      "path": "app/lib/features/sessions/session_list.dart",
+      "sha256": "3b270d7ab1abaa1f3bb5ac3624785b8ba16224bb4b0d5a060344bf3ee70adf52"
+    },
+    {
+      "path": "app/lib/models/chat_event.dart",
+      "sha256": "24f45b15c77fc3c240dff8b813100ffb339f5bb95bd7926445a2eaaec0b5d047"
+    },
+    {
+      "path": "app/lib/models/chat_message.dart",
+      "sha256": "08fc4c5a1690dc190a67ff4dbe66e5f9856832b86dc013f61bd95625ec56911d"
+    },
+    {
+      "path": "app/lib/models/chat_session.dart",
+      "sha256": "32d2698121d46406552088da0ec63b24c695fcf9bbdbade50f0cca6e91a26912"
+    },
+    {
+      "path": "app/lib/models/message_persistence.dart",
+      "sha256": "e068a135d2513a29f6b748d7b222d3325019f18fc4dbf570511508f09e2f5d51"
+    },
+    {
+      "path": "app/lib/state/app_providers.dart",
+      "sha256": "f3eadc120320da7de2e82d4e8756e4757c9063cd5fd8fc5b20fd6ded664a16b3"
+    },
+    {
+      "path": "app/lib/state/chat_controller.dart",
+      "sha256": "3d613b928f907777dcb2853ba48f5dbe2e0829f682974302ce856687fd8591f7"
+    },
+    {
+      "path": "app/test/local_agent_lifecycle_test.dart",
+      "sha256": "ff332766d699746b9ee3ee488e7cdfe75b79a58234e8e249c1a4584f5635a94f"
+    },
+    {
+      "path": "app/test/message_persistence_test.dart",
+      "sha256": "a0fd7045bd219f0a8d62de79f7ca79651ecc17c83f3b397e50a38e721aba808d"
+    },
+    {
+      "path": "crates/cortex-cli/src/main.rs",
+      "sha256": "d6cb9eb24fbf57992d8435db1b873e844064cf2db12fc9a32f01f6b68d9f603a"
+    },
+    {
+      "path": "crates/cortex-local/src/attach.rs",
+      "sha256": "e6871f3e2806bebb0e2b2b6c2dccabd658a90611d1b2dc1e014ac19c3ac6846a"
+    },
+    {
+      "path": "crates/cortex-local/src/computer_http_fixture_test.rs",
+      "sha256": "db278f3e00f66a65a4851de707c64dfa916e51eceaf69e4dde5a3501464f2e98"
+    },
+    {
+      "path": "crates/cortex-local/src/config.rs",
+      "sha256": "4a6d40464f42963c5c8665e04d29af1b87a327b1b6ebdf3692a78219e8e05c07"
+    },
+    {
+      "path": "crates/cortex-local/src/confirm.rs",
+      "sha256": "10bdf4d524e9b939e2482682b6a84a2e5d865fc2b65b34193e61befe21f5835d"
+    },
+    {
+      "path": "crates/cortex-local/src/confirmation_routes_test.rs",
+      "sha256": "d3b2c01053b4fbf5748d2b9dbffb201dbe7d29c0a24733c207cc8e58e0885729"
+    },
+    {
+      "path": "crates/cortex-local/src/local_mcp.rs",
+      "sha256": "42f09cc98ee5bfd8c33c1632fda744a35d8d2fad315b59f66b7f72b76593c9bf"
+    },
+    {
+      "path": "crates/cortex-local/src/local_owner.rs",
+      "sha256": "6f7a6c1cef87d541254caaf732b6d37ca1c8f2f4792c3ae986cf8187b5ef411b"
+    },
+    {
+      "path": "crates/cortex-local/src/local_workspace_routes_test.rs",
+      "sha256": "7747d2e6ad961a08eff4c0627cb94321e08a01e04c9ef962b056bb75ff5f6619"
+    },
+    {
+      "path": "crates/cortex-local/src/local_workspace.rs",
+      "sha256": "ca7dec7d1d8e105d9a5e4a6b4e9d6665ce501724d2502b38b30ae3933f508772"
+    },
+    {
+      "path": "crates/cortex-local/src/main.rs",
+      "sha256": "8c28008b26f83baca56f875a31d2e8fa0f2770266240d671b2278597b83865d7"
+    },
+    {
+      "path": "crates/cortex-local/src/ordinary_owner_test.rs",
+      "sha256": "d53feba73aef5e95c72b7ad879a4bde2b28326a03d899c5a3e9da487dad5638a"
+    },
+    {
+      "path": "crates/cortex-local/src/owner_config_test.rs",
+      "sha256": "db83ecde900b84341928f10e20816d4560f2836638e97648d1a83b6421d28fbb"
+    },
+    {
+      "path": "crates/cortex-local/src/owner_journal.rs",
+      "sha256": "12ff2e5c01484c6275c97f980ffb995ddcc90b41e94deddedca357f40317fa14"
+    },
+    {
+      "path": "crates/cortex-local/src/remote_owner_test.rs",
+      "sha256": "5d79345222e3ca84a234be39b92eb5df729fdf034b4742fdd892f64c20d4edda"
+    },
+    {
+      "path": "crates/cortex-local/src/remote.rs",
+      "sha256": "c1d5499e892ceb5bb961eed500be27f4ae528463b5030acdc0d184f00e75bbc5"
+    },
+    {
+      "path": "crates/cortex-local/src/routes.rs",
+      "sha256": "d336edd21ede06e1fc8d26b37d890945f692287e7bb4880c336491944e8e0811"
+    },
+    {
+      "path": "crates/cortex-local/src/run_principal.rs",
+      "sha256": "679ec88b9d3712970687bf6e451d3067075029c36826c83741974dd44bff385c"
+    },
+    {
+      "path": "crates/cortex-local/src/runs.rs",
+      "sha256": "8863f3b15415f6b38d33e1341d20a395e5bed11228fac57871d785f138a847aa"
+    },
+    {
+      "path": "crates/cortex-local/src/terminal.rs",
+      "sha256": "375e528f9002e0df017ce9600c79114746a552be067a66a075b9f168d73e93d3"
+    },
+    {
+      "path": "crates/cortex-local/src/turn.rs",
+      "sha256": "a9754c4fb6b4fcb336dcc6c546b5b64655812480bd6f059cb2667faa5739c7d2"
+    },
+    {
+      "path": "crates/cortex-local/src/workspaces.rs",
+      "sha256": "af18735168a10d08badb6674b727a752c7b847f8632e8d25275a1e42e1eb7736"
+    },
+    {
+      "path": "crates/cortex-proto/src/dto/chat.rs",
+      "sha256": "bdf0156ccc3e77e3de08af1da59390252390b34c8b764748d7da5af74ac1aaaa"
+    },
+    {
+      "path": "crates/cortex-proto/src/dto/mod.rs",
+      "sha256": "6ffd164339ec972b9a36657d92fdbfda9153ed8f047ab6a017ec1a38ac14a743"
+    }
+  ],
+  "limitations": [
+    "模型及远端授权服务为fake；HTTP审批为自动Allow，不是真人审批或真实账号验收",
+    "不是安装包或已部署产品验收",
+    "持久派发账本尚未集成；正式签名、最终源码长跑及第二主机等门仍未关闭",
+    "两次成功不能证明此前其他trace读回超时的根因已关闭"
+  ]
+}

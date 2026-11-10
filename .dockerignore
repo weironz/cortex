@@ -19,6 +19,7 @@ app/build
 app/.dart_tool
 dist
 data
+tmp
 
 # 临时运行状态与日志。
 .tmp-chrome-profile

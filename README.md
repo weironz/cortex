@@ -40,18 +40,24 @@ Cortex 是一个通用 AI Agent。
 
 ## 状态
 
-**v0.1.9。**
+**v0.1.45。**
 
 现在能做的：
 
 - **三端**：CLI / Windows 桌面端 / Web，同一套 HTTP·SSE·WS 协议
 - **agent 动的是你自己的文件** —— 循环跑在本机（`cortex-local`），
-  绑一个本地目录就能读写、跑命令、看 diff。Windows 上没有内核沙箱，
-  所以换一种保证：**逐条确认**
+  绑一个本地目录就能读写、跑命令、看 diff。Windows 本地默认走受限进程
+  路径；受限模式需要宿主权限时按单次请求和理由确认，“完全放行”才以当前
+  用户的完整文件和进程权限执行
 - **Web 端也能动手** —— 一次性容器工作区，跨会话保留，能上传、能整包拿走；
   容器只能访问放行清单内的外网
 - **离线也能用** —— 没有服务器时真模型、真工具、真读写你的文件，
   界面上一直挂着「这些对话没有进记忆」，不装作有
+- **Windows 本机 Computer Use（受控 beta）** —— 默认关闭；按精确应用
+  allowlist 观察和操作本机窗口，另有一次性 profile 的隔离浏览器。Cua 写动作
+  必须绑定最新 frame、单动作迁移验证和机器可检查的新 observation
+- **Windows 发布可核验** —— 安装目录与 Release 附件各有一份 CycloneDX 1.5
+  SBOM，记录依赖、文件哈希、安装器哈希和构建来源
 - **多用户** —— 账号密码登录，按 schema 隔离，配额与自带 API key
 - **我们也是 MCP 客户端** —— 接第三方 server（stdio / HTTP），
   配置格式与 Claude Code 通用，外来工具默认走最高风险档
@@ -68,6 +74,7 @@ Cortex 是一个通用 AI Agent。
 | 移动端 | 桌面与 Web 先跑通；移动端是采集端，可后置 |
 | macOS / Linux 桌面产物 | 只发 Windows 安装包，那两个平台自己 `flutter build` |
 | 语音转录 | 三条路都堵，缺口在上游，见 [roadmap](docs/roadmap.md) |
+| Computer Use 生产 GA | Windows 本机主路径已接入，但最终源码的 E2E/四小时 soak、第二台 Windows、多屏负坐标、RDP/锁屏/睡眠、正式签名安装与安装后启动仍未闭环；当前不能把历史 harness 或旧指纹长跑当成 GA 证据 |
 | 生成 Word / PPT / Excel | 挂一个 Office 类 MCP server 就有，我们不自己写。**但桌面端安装包不带 node / python**，得自己装一个 —— 理由与做法见 [install.md](docs/install.md#挂连接器mcp-server要先有-node-或-python) |
 | 从 Web 挂到在线的本地 agent | 机制已经有了（`/runs` 重放 + 广播），只差一个入口 |
 

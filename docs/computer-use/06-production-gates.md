@@ -1,5 +1,9 @@
 # 生产门槛、威胁模型与评测
 
+> 这是生产门禁定义，不是通过记录。2026-11-02 的当前实现、已验证范围和
+> 尚未关闭的真机门槛见
+> [16-production-hardening-2026-11-02.md](16-production-hardening-2026-11-02.md)。
+
 ## 1. 资产
 
 | 资产 | 风险 |
@@ -39,7 +43,7 @@
 | 默认关闭 | 新安装与损坏设置都不出现工具 |
 | app allowlist | 未授权应用不能 observe/act，Block 优先 |
 | stale frame | frame/ref/window 不匹配时拒绝 |
-| secure field | 密码/验证码/支付字段自动 handoff |
+| secure field | Windows 直接读取 UIA `IsPassword`，扫描 Unknown 保守 handoff；浏览器识别密码/支付与不可信控件 |
 | consequential action | 本地 policy 分类，不能由 prompt 放宽 |
 | prompt injection | 外部文本只能作为数据，不能产生 permission |
 | cancel | 按键、鼠标、driver call 和后续 tool 全部停止 |
@@ -207,29 +211,34 @@ P95 目标：
 
 ## 7. 安全 review checklist
 
-- [ ] 应用身份不能只靠显示名/文件名；
-- [ ] Block 优先于 Allow；
-- [ ] 管理员 requirement 不可由用户放宽；
-- [ ] 屏幕/AX/网页文本是否始终按数据封装；
-- [ ] 是否有“读不可信内容后直接发送”的 taint 路径；
-- [ ] 敏感字段识别和 handoff 有 UI 与测试；
-- [ ] confirmation preview 与实际动作绑定同一 hash；
-- [ ] 长 URL/参数有长度上限，避免确认预览截断；
-- [ ] cancel/watchdog 有 OS 级真机测试；
-- [ ] trace 默认不保存密钥、全文输入和原始截图；
+- [x] 应用身份不能只靠显示名/文件名；
+- [x] Block 优先于 Allow；
+- [x] 管理员 requirement 不可由用户放宽；
+- [x] 屏幕/AX/网页文本按外部数据处理，动作风险不能由它们产生授权；
+- [x] 从外部文本到 Transmit/Commit 等敏感动作时只收紧策略，并有红队测试；
+- [x] 浏览器 ref 有元素/form owner/祖先/baseURI 与 DOMDebugger listener 摘要；
+- [ ] 浏览器“最终复核后、click 前替换 listener”和闭包捕获值已可证明；
+- [x] Windows 常见敏感字段有 UIA `IsPassword`、Unknown fail-closed 和 handoff 测试；
+- [ ] 自绘控件/第三方 UIA provider 错报 `false` 的残余漏判已消险；
+- [ ] confirmation preview 与实际 action/frame 绑定，并有预览长度上限；
+- [x] 长 URL/参数在进入确认和驱动前有长度上限；
+- [x] cancel/watchdog 有真机失败路径测试；
+- [x] trace 默认不保存密钥、全文输入和原始截图；
 - [ ] 云端 VM 无用户 profile、无默认网络出口；
-- [ ] 第三方 driver/perception 的许可证与 SBOM 完整；
+- [x] Cua 固定版本的许可证与驱动级 SBOM 已核对；
+- [x] 整份桌面安装包（Flutter/Rust/MSVC/Cua）的统一 SBOM 已生成，并通过
+  CycloneDX 1.5 JSON Schema 校验；
 - [ ] 安装器签名、更新回滚、旧版本兼容已验证。
 
 ## 8. GA 发布 gate
 
 必须全部满足：
 
-1. C0 driver 选型已完成并被记录；
+1. C0 已记录**条件性 Go**，且十项真机/SBOM/恢复条件全部关闭；
 2. Windows GA，macOS/云端按文档支持矩阵标记；
 3. 所有 P0 policy tests、真机 E2E、soak 通过；
 4. injection red-team 无高危越权；
-5. app identity、secure field、high-risk action 无已知绕过；
+5. app identity、secure field、high-risk action 无未披露的生产阻断；
 6. cancel、panic、sleep、driver crash 后无输入残留；
 7. 发布包签名、notarization（macOS）、SBOM、NOTICE 完整；
 8. trace/删除/企业导出满足隐私评审；

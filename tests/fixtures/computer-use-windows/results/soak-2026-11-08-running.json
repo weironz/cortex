@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "status": "running",
+  "recordedAt": "2026-11-08T08:17:45.8011399Z",
+  "supervisorPid": 58544,
+  "soakScriptPid": 61836,
+  "driverPid": 33492,
+  "fixturePid": 28120,
+  "testPid": 53104,
+  "testStartedAt": "2026-11-08T16:17:04.800681+08:00",
+  "expectedFinishAfter": "2026-11-08T20:17:04.800681+08:00",
+  "logs": "target/final-acceptance-d8f33a0568de487f830c8a2e77b16c31",
+  "temporaryLogs": "C:/Users/willz/AppData/Local/Temp/cortex-soak-fd617414a11d4c73b38b150d9e4101ea",
+  "resultPath": "tests/fixtures/computer-use-windows/results/soak-0.1.45-lockguard-4h.json",
+  "sourceFingerprint": "f4ee6186ffb9781af6294cf158e8a842f6ad17fb7c4b07a37a84d4e0b4c82570",
+  "scope": "backend_and_fixture",
+  "note": "Process IDs and timestamps are a running snapshot, not a passing result."
+}

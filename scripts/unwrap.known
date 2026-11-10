@@ -14,9 +14,7 @@ crates/cortex-agentd/src/sync_bus.rs
 crates/cortex-blob/src/local.rs
 crates/cortex-cli/src/main.rs
 crates/cortex-llm/examples/base_url_probe.rs
-crates/cortex-local/src/confirm.rs
 crates/cortex-local/src/routes.rs
-crates/cortex-local/src/runs.rs
 crates/cortex-providers/src/anthropic.rs
 crates/cortex-providers/src/api_client.rs
 crates/cortex-providers/src/canonical/name_builder.rs

@@ -8,6 +8,7 @@ import '../../../core/link_launcher.dart';
 import '../../../core/motion.dart';
 import '../../../models/attachment.dart';
 import '../../../models/chat_message.dart';
+import '../../../models/message_persistence.dart';
 import '../../../models/tool_call.dart';
 import '../../../models/turn_block.dart';
 import '../../images/widgets/drawing_placeholder.dart';
@@ -73,6 +74,7 @@ class MessageBubble extends StatelessWidget {
             attachments: message.attachments,
             createdAt: message.createdAt,
             episodeId: message.episodeId,
+            persistence: message.persistence,
             error: message.error,
             errorIsDeterministic: message.errorIsDeterministic,
             busy: busy,
@@ -219,7 +221,11 @@ class _UserBubble extends ConsumerWidget {
                                   .resend(message.id),
                       ),
                       const SizedBox(width: CortexSpace.xs),
-                      _ForkHereButton(episodeId: message.episodeId, busy: busy),
+                      _ForkHereButton(
+                        episodeId: message.episodeId,
+                        busy: busy,
+                        persistence: message.persistence,
+                      ),
                       const SizedBox(width: CortexSpace.xs),
                       Text(
                         formatRelative(message.createdAt),
@@ -258,6 +264,7 @@ class AssistantBlock extends StatelessWidget {
     this.attachments = const [],
     this.createdAt,
     this.episodeId,
+    this.persistence,
     this.error,
     this.errorIsDeterministic = false,
     this.streaming = false,
@@ -276,6 +283,7 @@ class AssistantBlock extends StatelessWidget {
   final List<Attachment> attachments;
   final DateTime? createdAt;
   final String? episodeId;
+  final MessagePersistence? persistence;
   final String? error;
 
   /// 这次失败是确定性的 —— 红框里不给出路按钮。见 [`_ErrorNote`]。
@@ -465,13 +473,31 @@ class AssistantBlock extends StatelessWidget {
                               top: CortexSpace.xxs,
                               left: CortexSpace.xxs,
                             ),
-                            child: Row(
+                            child: Wrap(
+                              crossAxisAlignment: WrapCrossAlignment.center,
                               children: [
                                 if (text.isNotEmpty) _CopyButton(text: text),
                                 _ForkHereButton(
                                   episodeId: episodeId,
                                   busy: busy,
+                                  persistence: persistence,
                                 ),
+                                if (persistence != null)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: CortexSpace.xs,
+                                    ),
+                                    child: Text(
+                                      persistence!.label,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall
+                                          ?.copyWith(
+                                            color:
+                                                theme.cortex.foregroundTertiary,
+                                          ),
+                                    ),
+                                  ),
                                 if (episodeId != null)
                                   Padding(
                                     padding: const EdgeInsets.only(
@@ -823,12 +849,17 @@ class _CaretState extends State<_Caret> with SingleTickerProviderStateMixin {
 /// 客户端本地 id —— 那时按钮停用，tooltip 说清等一会儿，而不是把一个
 /// 服务端不认识的 id 发过去换一条 400。
 class _ForkHereButton extends ConsumerWidget {
-  const _ForkHereButton({required this.episodeId, required this.busy});
+  const _ForkHereButton({
+    required this.episodeId,
+    required this.busy,
+    this.persistence,
+  });
 
   final String? episodeId;
 
   /// 这个会话有一轮在跑。跑着的时候历史还在长，「到这里」指不稳。
   final bool busy;
+  final MessagePersistence? persistence;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -837,11 +868,14 @@ class _ForkHereButton extends ConsumerWidget {
     // 一处，正是 roadmap 表里「判据两处」的镜像形状（评审抓到的）。
     // 历史的权威在服务器上，离线时按下去只会走一遍网络失败再弹错。
     final offline = ref.watch(appConfigProvider).offline;
-    final enabled = !busy && !offline && episodeId != null;
+    final remoteReady = MessagePersistence.canForkRemote(persistence);
+    final enabled = !busy && !offline && episodeId != null && remoteReady;
     return _BubbleAction(
       icon: Icons.call_split_rounded,
       tooltip: offline
           ? '离线时不能分叉 —— 历史的权威在服务器上'
+          : !remoteReady
+          ? '等待远端确认保存后再分叉'
           : busy
           ? '这一轮跑完才能分叉'
           : episodeId == null

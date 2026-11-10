@@ -1,0 +1,744 @@
+--- a/crates/cortex-agent/src/lib.rs
++++ b/crates/cortex-agent/src/lib.rs
+@@ -31,6 +31,8 @@
+ mod turn_gate;
+ mod turn_history;
+ mod turn_host;
++
++pub use turn_host::ComputerInvocation;
+ mod turn_tools;
+ mod turn_watch;
+ pub mod workspace;
+--- a/crates/cortex-agent/src/turn_gate.rs
++++ b/crates/cortex-agent/src/turn_gate.rs
+@@ -51,6 +51,8 @@
+ /// 怎么问出去、凭什么信回来的答案，由实现 [`crate::turn::ToolHost`] 的人决定。
+ #[derive(Debug, Clone, Copy)]
+ pub struct ConfirmRequest<'a> {
++    /// 在询问之前由 agent 生成，同一次派发使用同一个值。
++    pub operation_id: &'a cortex_core::Id,
+     pub tool: &'a str,
+     pub risk: Risk,
+     /// 模型给的原始参数。**必须原样交给用户看** —— 对 `shell` 来说，
+--- a/crates/cortex-agent/src/turn_host.rs
++++ b/crates/cortex-agent/src/turn_host.rs
+@@ -4,6 +4,34 @@
+ 
+ use crate::tools::{ToolResult, ToolSpec};
+ use crate::turn_gate::{Approval, ConfirmRequest};
++
++/// agent 为同一次电脑工具调用保留的关联上下文。
++///
++/// 关联 ID 不是权限凭据。宿主还必须把它与自己的账号、run、审批回执和参数
++/// 绑定；不能根据模型填写的 ID 或这个布尔值恢复一次已消费的授权。
++pub struct ComputerInvocation<'a> {
++    operation_id: &'a cortex_core::Id,
++    approved_by_user: bool,
++}
++
++impl<'a> ComputerInvocation<'a> {
++    pub(crate) const fn new(operation_id: &'a cortex_core::Id, approved_by_user: bool) -> Self {
++        Self {
++            operation_id,
++            approved_by_user,
++        }
++    }
++
++    #[must_use]
++    pub const fn operation_id(&self) -> &'a cortex_core::Id {
++        self.operation_id
++    }
++
++    #[must_use]
++    pub const fn approved_by_user(&self) -> bool {
++        self.approved_by_user
++    }
++}
+ 
+ /// agent 循环需要、但工具层给不了的能力。
+ ///
+@@ -90,7 +118,7 @@
+         &self,
+         _tool: &str,
+         _arguments: &serde_json::Value,
+-        _approved_by_user: bool,
++        _invocation: &ComputerInvocation<'_>,
+     ) -> ToolResult {
+         ToolResult::err(
+             "这个 agent 进程操作不了电脑（容器里没有屏幕，Linux 构建也没编进这一组）。\
+--- a/crates/cortex-agent/src/turn_tools.rs
++++ b/crates/cortex-agent/src/turn_tools.rs
+@@ -201,6 +201,9 @@
+             Gate::Allow if outside.is_some() && !self.policy.bypasses_everything() => Gate::Ask,
+             Gate::Allow => Gate::Allow,
+         };
++        // 模型的 tool_call id 可能在下一次响应中复用，不能作为操作身份。
++        // 一次派发在询问前发号，确认与宿主执行共享它；恢复必须读取持久记录。
++        let operation_id = cortex_core::Id::new();
+         let approval = match gate {
+             Gate::Allow => Approval::Allow,
+             // 本轮已经问过一次而没有人回答，不再问第二次。见 [`ConfirmState`]
+@@ -211,6 +214,7 @@
+             Gate::Ask => {
+                 let answer = host
+                     .confirm(&ConfirmRequest {
++                        operation_id: &operation_id,
+                         tool: &spec.name,
+                         risk: spec.risk,
+                         arguments: &call.arguments,
+@@ -332,7 +336,10 @@
+             host.computer(
+                 &spec.name,
+                 &call.arguments,
+-                gate == Gate::Ask && approval == Approval::Allow,
++                &crate::ComputerInvocation::new(
++                    &operation_id,
++                    gate == Gate::Ask && approval == Approval::Allow,
++                ),
+             )
+             .await
+         } else {
+@@ -556,10 +563,10 @@
+             &self,
+             _: &str,
+             _: &serde_json::Value,
+-            approved_by_user: bool,
++            invocation: &crate::ComputerInvocation<'_>,
+         ) -> ToolResult {
+             self.called.fetch_add(1, Ordering::SeqCst);
+-            *self.approved_by_user.lock().unwrap() = Some(approved_by_user);
++            *self.approved_by_user.lock().unwrap() = Some(invocation.approved_by_user());
+             ToolResult::ok("computer called")
+         }
+     }
+@@ -1605,3 +1612,63 @@
+         drop(dir);
+     }
+ }
++#[cfg(test)]
++mod computer_invocation_tests {
++    use crate::tools::{self, ToolCall, ToolResult};
++    use crate::{Approval, ComputerInvocation, ConfirmRequest, ToolHost, Turn};
++    use std::sync::Mutex;
++
++    struct CorrelatedHost(Mutex<Vec<(char, cortex_core::Id)>>);
++
++    #[async_trait::async_trait]
++    impl ToolHost for CorrelatedHost {
++        async fn confirm(&self, request: &ConfirmRequest<'_>) -> Approval {
++            self.0
++                .lock()
++                .expect("记录询问")
++                .push(('a', *request.operation_id));
++            Approval::Allow
++        }
++
++        async fn computer(
++            &self,
++            _: &str,
++            _: &serde_json::Value,
++            invocation: &ComputerInvocation<'_>,
++        ) -> ToolResult {
++            assert!(
++                invocation.approved_by_user(),
++                "电脑写动作必须保留实际询问结果"
++            );
++            self.0
++                .lock()
++                .expect("记录派发")
++                .push(('b', *invocation.operation_id()));
++            ToolResult::ok("captured")
++        }
++    }
++
++    #[tokio::test]
++    async fn confirmation_and_dispatch_share_one_host_operation_id() {
++        let turn = Turn::sealed().with_specs(vec![tools::cua_computer_act_spec()]);
++        let host = CorrelatedHost(Mutex::new(Vec::new()));
++        let call = ToolCall {
++            name: "computer_act".into(),
++            arguments: serde_json::json!({"frame_id":"frame", "actions":[], "verify":{"kind":"window_present"}}),
++        };
++        for _ in 0..2 {
++            assert!(
++                turn.dispatch_once(&call, &host).await.ok,
++                "已批准的测试调用应到达宿主"
++            );
++        }
++        let records = host.0.lock().expect("读取关联记录");
++        assert_eq!(records.len(), 4, "每次调用恰好询问和派发各一次");
++        assert_eq!(records[0].1, records[1].1, "询问与派发不能各自重新发号");
++        assert_eq!(records[2].1, records[3].1, "第二次调用也应保留同一上下文");
++        assert_ne!(
++            records[0].1, records[2].1,
++            "相同参数的独立调用必须有独立操作身份"
++        );
++    }
++}
+--- a/crates/cortex-local/src/computer.rs
++++ b/crates/cortex-local/src/computer.rs
+@@ -98,6 +98,7 @@
+     /// 的任务里。存一个就得配一把锁再加一层 `spawn_blocking`，换来的只是省掉
+     /// 几毫秒的初始化 —— 而这一组工具本来就是「点一下、等界面反应」的节奏。
+     pub struct Computer {
++        dispatch_correlation: crate::computer_dispatch::DispatchCorrelation,
+         /// 上一次截屏的缩放比例。点击时用它把图上坐标换回真实像素。
+         ///
+         /// ⚠️ **没截过图就点，是模型的错误用法**，这里得说清楚而不是猜一个
+@@ -238,6 +239,7 @@
+             trace_root: Option<PathBuf>,
+         ) -> Self {
+             Self {
++                dispatch_correlation: crate::computer_dispatch::DispatchCorrelation::default(),
+                 last: Arc::new(std::sync::Mutex::new(None)),
+                 cua: tokio::sync::OnceCell::new(),
+                 browser: tokio::sync::OnceCell::new(),
+@@ -284,6 +286,38 @@
+                 "Computer Use 工具调用超出本轮上限"
+             );
+             false
++        }
++
++        pub(crate) fn record_approved_invocation(
++            &self,
++            operation_id: cortex_core::Id,
++            tool: &str,
++            args: &serde_json::Value,
++            confirmation_token: &str,
++        ) -> Result<(), String> {
++            if !is_computer_tool(tool) {
++                return Ok(());
++            }
++            self.dispatch_correlation
++                .record_approved(operation_id, tool, args, confirmation_token)
++        }
++
++        pub(crate) async fn call_with_invocation(
++            &self,
++            tool: &str,
++            args: &serde_json::Value,
++            invocation: &cortex_agent::ComputerInvocation<'_>,
++        ) -> ToolResult {
++            let binding = match self.dispatch_correlation.bind(invocation, tool, args) {
++                Ok(binding) => binding,
++                Err(error) => return ToolResult::err(error),
++            };
++            crate::computer_dispatch::CURRENT_DISPATCH
++                .scope(
++                    binding,
++                    self.call(tool, args, invocation.approved_by_user()),
++                )
++                .await
+         }
+ 
+         pub async fn call(
+@@ -5955,7 +5989,10 @@
+                     )
+                     .await;
+                 }
+-                let _ = computer.close().await;
++                // 不能把 end_session 清理失败的长跑也写成通过。
++                if let Err(error) = computer.close().await {
++                    panic!("soak session {sessions} after cycle {cycle}: cleanup failed: {error}");
++                }
+             }
+ 
+             println!(
+@@ -6013,6 +6050,25 @@
+             None
+         }
+ 
++        pub(crate) fn record_approved_invocation(
++            &self,
++            _operation_id: cortex_core::Id,
++            _tool: &str,
++            _args: &serde_json::Value,
++            _confirmation_token: &str,
++        ) -> Result<(), String> {
++            Ok(())
++        }
++
++        pub(crate) async fn call_with_invocation(
++            &self,
++            tool: &str,
++            args: &serde_json::Value,
++            invocation: &cortex_agent::ComputerInvocation<'_>,
++        ) -> ToolResult {
++            self.call(tool, args, invocation.approved_by_user()).await
++        }
++
+         pub async fn call(
+             &self,
+             _tool: &str,
+--- /dev/null
++++ b/crates/cortex-local/src/computer_dispatch.rs
+@@ -0,0 +1,311 @@
++//! 电脑工具的调用与真实审批关联。ID 只作关联，不替代账号、策略或持久派发闸。
++//!
++//! 模型返回的 tool_call id 会被供应商复用；操作 ID 必须来自 agent，在询问
++//! 之前生成。同一次调用不能消费另一次调用的审批，也不能用同一个上下文重放。
++
++use std::collections::{HashMap, HashSet};
++use std::sync::Mutex;
++
++use cortex_agent::ComputerInvocation;
++use cortex_core::Id;
++use serde_json::Value;
++use sha2::{Digest, Sha256};
++
++const MAX_OPERATIONS: usize = 64;
++
++tokio::task_local! {
++    /// 由宿主建立，只在本次调用的 future 中有效，模型参数不能写入。
++    pub(crate) static CURRENT_DISPATCH: DispatchBinding;
++}
++
++/// 原始审批 token 和输入文本都不进入派发关联。
++pub(crate) struct DispatchBinding {
++    pub(crate) operation_id: [u8; 16],
++    pub(crate) approval_id: [u8; 16],
++    pub(crate) arguments_hash: [u8; 32],
++    pub(crate) user_confirmed: bool,
++}
++
++impl std::fmt::Debug for DispatchBinding {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("DispatchBinding")
++            .field("operation_id", &self.operation_id)
++            .field("approval_id", &self.approval_id)
++            .field("arguments_hash", &self.arguments_hash)
++            .field("user_confirmed", &self.user_confirmed)
++            .finish()
++    }
++}
++
++struct ApprovedCall {
++    tool: String,
++    arguments_hash: [u8; 32],
++    approval_id: [u8; 16],
++}
++
++#[derive(Default)]
++struct State {
++    pending: HashMap<Id, ApprovedCall>,
++    consumed: HashSet<Id>,
++}
++
++#[derive(Default)]
++pub(crate) struct DispatchCorrelation(Mutex<State>);
++
++impl DispatchCorrelation {
++    pub(crate) fn record_approved(
++        &self,
++        operation_id: Id,
++        tool: &str,
++        args: &Value,
++        confirmation_token: &str,
++    ) -> Result<(), String> {
++        if confirmation_token.len() < 32 {
++            return Err("审批关联缺少宿主生成的回执".to_owned());
++        }
++        let approval = ApprovedCall {
++            tool: tool.to_owned(),
++            arguments_hash: arguments_hash(args)?,
++            approval_id: short_hash(
++                b"cortex-computer-confirmation-v1\0",
++                confirmation_token.as_bytes(),
++            ),
++        };
++        let mut state = self.0.lock().map_err(|_| "审批关联锁已失效")?;
++        if state.consumed.contains(&operation_id) || state.pending.contains_key(&operation_id) {
++            return Err("操作已登记或已消费；不能替换它的审批".to_owned());
++        }
++        if state.pending.len() + state.consumed.len() >= MAX_OPERATIONS {
++            return Err("本轮审批关联已达上限".to_owned());
++        }
++        state.pending.insert(operation_id, approval);
++        Ok(())
++    }
++
++    pub(crate) fn bind(
++        &self,
++        invocation: &ComputerInvocation<'_>,
++        tool: &str,
++        args: &Value,
++    ) -> Result<DispatchBinding, String> {
++        self.bind_parts(
++            *invocation.operation_id(),
++            invocation.approved_by_user(),
++            tool,
++            args,
++        )
++    }
++
++    fn bind_parts(
++        &self,
++        operation_id: Id,
++        user_confirmed: bool,
++        tool: &str,
++        args: &Value,
++    ) -> Result<DispatchBinding, String> {
++        let arguments_hash = arguments_hash(args)?;
++        let mut state = self.0.lock().map_err(|_| "审批关联锁已失效")?;
++        if state.consumed.contains(&operation_id) {
++            return Err("同一操作上下文已经消费；不能再次派发".to_owned());
++        }
++        let approval = state.pending.remove(&operation_id);
++        if state.pending.len() + state.consumed.len() >= MAX_OPERATIONS {
++            return Err("本轮操作关联已达上限".to_owned());
++        }
++        state.consumed.insert(operation_id);
++        let approval_id = match (user_confirmed, approval) {
++            (true, Some(approved))
++                if approved.tool == tool && approved.arguments_hash == arguments_hash =>
++            {
++                approved.approval_id
++            }
++            (false, None) => short_hash(
++                b"cortex-computer-policy-correlation-v1\0",
++                operation_id.to_string().as_bytes(),
++            ),
++            _ => return Err("调用与实际审批回执不一致；没有派发电脑动作".to_owned()),
++        };
++        Ok(DispatchBinding {
++            operation_id: short_hash(
++                b"cortex-computer-operation-v1\0",
++                operation_id.to_string().as_bytes(),
++            ),
++            approval_id,
++            arguments_hash,
++            user_confirmed,
++        })
++    }
++}
++
++fn short_hash(domain: &[u8], bytes: &[u8]) -> [u8; 16] {
++    let mut hasher = Sha256::new();
++    hasher.update(domain);
++    hasher.update(bytes);
++    let hash = hasher.finalize();
++    let mut result = [0; 16];
++    result.copy_from_slice(&hash[..16]);
++    result
++}
++
++fn arguments_hash(value: &Value) -> Result<[u8; 32], String> {
++    // 不依赖 serde_json 是否启用了 preserve_order，键顺序不改变一次审批的含义。
++    fn canonical(value: &Value, depth: usize) -> Result<Value, String> {
++        if depth > 64 {
++            return Err("电脑工具参数嵌套过深".to_owned());
++        }
++        match value {
++            Value::Object(map) => {
++                let mut keys: Vec<_> = map.keys().collect();
++                keys.sort_unstable();
++                let mut result = serde_json::Map::new();
++                for key in keys {
++                    result.insert(key.clone(), canonical(&map[key], depth + 1)?);
++                }
++                Ok(Value::Object(result))
++            }
++            Value::Array(values) => values
++                .iter()
++                .map(|value| canonical(value, depth + 1))
++                .collect::<Result<Vec<_>, _>>()
++                .map(Value::Array),
++            _ => Ok(value.clone()),
++        }
++    }
++    let encoded = serde_json::to_vec(&canonical(value, 0)?).map_err(|_| "电脑工具参数无法编码")?;
++    let mut hash = Sha256::new();
++    hash.update(b"cortex-computer-arguments-v1\0");
++    hash.update(encoded);
++    Ok(hash.finalize().into())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    const TOKEN: &str = "test-only-confirmation-token-32-bytes-long";
++
++    #[test]
++    fn missing_actual_confirmation_cannot_be_replaced_by_a_boolean() {
++        let tracker = DispatchCorrelation::default();
++        let id = Id::new();
++        assert!(
++            tracker
++                .bind_parts(id, true, "computer_act", &json!({}))
++                .is_err(),
++            "只有布尔批准，没有真实回执时必须拒绝"
++        );
++    }
++
++    #[test]
++    fn changed_parameters_consume_and_reject_the_receipt() {
++        let tracker = DispatchCorrelation::default();
++        let id = Id::new();
++        tracker
++            .record_approved(id, "computer_act", &json!({"text":"approved"}), TOKEN)
++            .unwrap();
++        assert!(
++            tracker
++                .bind_parts(id, true, "computer_act", &json!({"text":"changed"}))
++                .is_err(),
++            "换参数不能借用审批"
++        );
++        assert!(
++            tracker
++                .bind_parts(id, true, "computer_act", &json!({"text":"approved"}))
++                .is_err(),
++            "失配后的回执不能再次使用"
++        );
++    }
++
++    #[test]
++    fn distinct_host_operations_do_not_alias_receipts() {
++        let tracker = DispatchCorrelation::default();
++        for _ in 0..2 {
++            let id = Id::new();
++            tracker
++                .record_approved(id, "computer_act", &json!({}), TOKEN)
++                .unwrap();
++            assert!(
++                tracker
++                    .bind_parts(id, true, "computer_act", &json!({}))
++                    .is_ok(),
++                "独立操作不应串用或阻断新的宿主审批"
++            );
++            assert!(
++                tracker
++                    .bind_parts(id, true, "computer_act", &json!({}))
++                    .is_err(),
++                "同一个宿主操作不能重放"
++            );
++        }
++    }
++
++    #[test]
++    fn different_tool_cannot_consume_the_receipt() {
++        let tracker = DispatchCorrelation::default();
++        let id = Id::new();
++        tracker
++            .record_approved(id, "computer_act", &json!({}), TOKEN)
++            .unwrap();
++        assert!(
++            tracker
++                .bind_parts(id, true, "computer_browser_act", &json!({}))
++                .is_err(),
++            "审批必须绑定原工具"
++        );
++    }
++
++    #[test]
++    fn a_new_operation_cannot_borrow_an_earlier_receipt() {
++        let tracker = DispatchCorrelation::default();
++        tracker
++            .record_approved(Id::new(), "computer_act", &json!({}), TOKEN)
++            .unwrap();
++        assert!(
++            tracker
++                .bind_parts(Id::new(), true, "computer_act", &json!({}))
++                .is_err(),
++            "即使参数相同，新操作也不能消费旧审批"
++        );
++    }
++
++    #[test]
++    fn pending_and_consumed_operations_share_the_bound() {
++        let tracker = DispatchCorrelation::default();
++        let ids: Vec<_> = (0..MAX_OPERATIONS).map(|_| Id::new()).collect();
++        for id in &ids {
++            tracker
++                .record_approved(*id, "computer_act", &json!({}), TOKEN)
++                .unwrap();
++        }
++        assert!(
++            tracker
++                .bind_parts(Id::new(), false, "computer_observe", &json!({}))
++                .is_err(),
++            "新调用不能绕过待确认项占用的上限"
++        );
++        assert!(
++            tracker
++                .bind_parts(ids[0], true, "computer_act", &json!({}))
++                .is_ok(),
++            "消费已登记项不应再占用一个名额"
++        );
++    }
++
++    #[test]
++    fn canonical_objects_match_but_array_order_does_not() {
++        let a: Value = serde_json::from_str(r#"{"z":1,"a":{"y":2,"x":3}}"#).unwrap();
++        let b: Value = serde_json::from_str(r#"{"a":{"x":3,"y":2},"z":1}"#).unwrap();
++        assert_eq!(
++            arguments_hash(&a).unwrap(),
++            arguments_hash(&b).unwrap(),
++            "对象键顺序不能改变审批摘要"
++        );
++        assert_ne!(
++            arguments_hash(&json!([1, 2])).unwrap(),
++            arguments_hash(&json!([2, 1])).unwrap(),
++            "动作数组顺序必须保留"
++        );
++    }
++}
+--- a/crates/cortex-local/src/computer_product_path_test.rs
++++ b/crates/cortex-local/src/computer_product_path_test.rs
+@@ -504,7 +504,13 @@
+ 
+ #[async_trait]
+ impl ToolHost for FakeProductHost {
+-    async fn computer(&self, tool: &str, arguments: &Value, approved_by_user: bool) -> ToolResult {
++    async fn computer(
++        &self,
++        tool: &str,
++        arguments: &Value,
++        invocation: &cortex_agent::ComputerInvocation<'_>,
++    ) -> ToolResult {
++        let approved_by_user = invocation.approved_by_user();
+         self.computer_calls
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner)
+--- a/crates/cortex-local/src/confirmation_routes_test.rs
++++ b/crates/cortex-local/src/confirmation_routes_test.rs
+@@ -269,7 +269,7 @@
+     let dir = tempfile::tempdir().expect("创建隔离测试目录");
+     let remote_base = fake_remote().await;
+     let mut st = state(dir.path(), &remote_base, "token-alice-1");
+-    let registry = Arc::new(ConfirmRegistry::new(Duration::from_millis(50)));
++    let registry = Arc::new(ConfirmRegistry::new(Duration::from_secs(60)));
+     Arc::get_mut(&mut st.engine)
+         .expect("测试开始前独占引擎")
+         .confirms = Arc::clone(&registry);
+@@ -281,7 +281,12 @@
+     let expired = registry
+         .open_scoped(pending_meta("session-a"), &lease_a)
+         .expect("登记会过期的确认项");
+-    tokio::time::sleep(Duration::from_millis(60)).await;
++    // 只推进旧待办的截止时间；HTTP 探测不能挤占新待办的 50 毫秒窗口。
++    // 发请求前恢复真实时钟，避免等待 loopback I/O 时自动推进到新截止时间。
++    tokio::time::pause();
++    tokio::time::advance(Duration::from_secs(61)).await;
++    tokio::time::resume();
++
+     let principal_b = principal_for_session("alice", "session-b", 0);
+     let lease_b = registry
+         .issue_lease(&principal_b, "run-b")
+--- a/crates/cortex-local/src/local_workspace_routes_test.rs
++++ b/crates/cortex-local/src/local_workspace_routes_test.rs
+@@ -652,3 +652,63 @@
+ 
+     server.abort();
+ }
++// 现状刻画：普通会话不能被 Computer Use 的严格远端认证隐式接管。
++// 暂留在隔离候选中，兼容性修复后必须改为真正成功的普通会话验收。
++#[tokio::test]
++async fn ordinary_chat_without_token_is_currently_rejected_even_without_computer_use() {
++    let dir = tempfile::tempdir().expect("创建隔离状态目录");
++    let st = state(dir.path(), "http://127.0.0.1:1", None);
++    for computer_use in [false, true] {
++        let req = serde_json::from_value(json!({
++            "session_id": format!("principal-compat-{computer_use}"),
++            "message": "hello",
++            "computer_use": computer_use
++        }))
++        .expect("普通会话探针请求应合法");
++        let (events, mut rx) = st.engine.chat(req).await.expect("拒绝发生在队列上限之前");
++        assert!(
++            matches!(
++                events.as_slice(),
++                [cortex_proto::dto::ChatEvent::Error {
++                    needs_reauth: true,
++                    ..
++                }]
++            ),
++            "当前缺少 access token 时，两种请求都会在入队之前返回重新认证错误"
++        );
++        assert!(
++            matches!(
++                rx.recv().await,
++                Err(tokio::sync::broadcast::error::RecvError::Closed)
++            ),
++            "入口拒绝后不能留下假装仍在工作的事件流"
++        );
++    }
++}
++#[tokio::test]
++async fn direct_chat_with_valid_local_inbound_auth_still_hits_remote_principal_regression() {
++    let dir = tempfile::tempdir().expect("创建隔离直连状态目录");
++    let mut st = state(dir.path(), "http://127.0.0.1:1", None);
++    st.standalone_llm = true;
++    st.inbound_token = Some("local-test-device-secret-00000000".to_owned());
++    let response = crate::routes::router(st).oneshot(
++        Request::post("/chat")
++            .header(AUTHORIZATION, "Bearer local-test-device-secret-00000000")
++            .header("content-type", "application/json")
++            .body(Body::from(json!({"session_id":"direct-compat-probe", "message":"hello", "computer_use":false}).to_string()))
++            .expect("构造本机直连 HTTP 请求")
++    ).await.expect("本地 Router 应能处理请求");
++    assert_eq!(
++        response.status(),
++        StatusCode::OK,
++        "本机入站认证与直连分流本身已通过"
++    );
++    let body = to_bytes(response.into_body(), 8192)
++        .await
++        .expect("读取终态 SSE");
++    let text = std::str::from_utf8(&body).expect("SSE 应为 UTF-8");
++    assert!(
++        text.contains("\"needs_reauth\":true"),
++        "现状：已通过本机入站认证的普通直连请求仍被远端主体验证拒绝"
++    );
++}
+--- a/crates/cortex-local/src/main.rs
++++ b/crates/cortex-local/src/main.rs
+@@ -25,6 +25,8 @@
+ mod computer;
+ mod computer_browser;
+ mod computer_cua;
++#[cfg(any(target_os = "windows", target_os = "macos"))]
++mod computer_dispatch;
+ mod computer_lease;
+ #[cfg(any(target_os = "windows", target_os = "macos"))]
+ mod computer_post_action;
+--- a/crates/cortex-local/src/turn_host.rs
++++ b/crates/cortex-local/src/turn_host.rs
+@@ -213,9 +213,11 @@
+         &self,
+         tool: &str,
+         arguments: &serde_json::Value,
+-        approved_by_user: bool,
++        invocation: &cortex_agent::ComputerInvocation<'_>,
+     ) -> cortex_agent::ToolResult {
+-        self.computer.call(tool, arguments, approved_by_user).await
++        self.computer
++            .call_with_invocation(tool, arguments, invocation)
++            .await
+     }
+ 
+     /// 取一份技能的正文 —— 转给服务端。
+@@ -793,7 +795,22 @@
+         // 且不依赖任何关于「谁还看着」的猜测。
+         // 事件投递等待锁时，重连客户端仍可通过列表答复；超时不能因为投递
+         // 卡住而延长。两条路径共享登记时的同一个单调截止时间。
++        // 不保存 token 原文；仅在确认确实返回 Allow 后生成不可逆的审批关联。
++        let confirmation_token = pending.token().to_owned();
+         let approval = pending.wait_with_delivery(self.events.send(ask)).await;
++        if approval.is_allowed()
++            && let Err(error) = self.computer.record_approved_invocation(
++                *req.operation_id,
++                req.tool,
++                req.arguments,
++                &confirmation_token,
++            )
++        {
++            tracing::warn!(%error, "电脑调用与审批无法绑定，按拒绝处理");
++            self.computer
++                .record_confirmation_outcome(req.tool, req.arguments, Approval::Denied);
++            return Approval::Denied;
++        }
+         if !approval.is_allowed() {
+             self.computer
+                 .record_confirmation_outcome(req.tool, req.arguments, approval);

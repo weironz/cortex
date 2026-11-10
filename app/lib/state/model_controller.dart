@@ -147,11 +147,13 @@ final selectedModelProvider =
 ///
 /// `true` / `false` / `null`（目录里没有它，或者还没拉到）。
 ///
-/// # 为什么 `null` 按「能」处理
+/// # 附件输入为什么保留 `null`
 ///
 /// 与服务端 `LlmClient::ensure_can_see` 同一条约定：**只在显式声明不支持时
 /// 拒绝**。不知道不等于不行 —— 按「不行」处理的话，一个目录不全的自建部署
 /// 会永远用不了任何要看图的功能，而用户完全查不出为什么。
+/// Computer Use 会主动观察窗口，另由 [computerUseEffectiveProvider]
+/// 要求已知视觉支持或后端明确报告的无视觉结构化通道。
 final selectedModelVisionProvider = Provider.autoDispose<bool?>((ref) {
   final pick = ref.watch(selectedModelProvider);
   final catalog = ref.watch(modelCatalogProvider).value;
@@ -193,27 +195,19 @@ final anySeeingModelProvider = Provider.autoDispose<bool>((ref) {
   return catalog.models.any((m) => m.vision != false);
 });
 
-/// 这一轮**真的**能操作电脑吗 —— 开关 × 模型看不看得懂图。
+/// 这一轮是否请求 Computer Use —— 用户开关与可用的观察通道。
 ///
-/// # 为什么要把这两件事合成一个值
+/// 已知视觉模型可以请求这组工具，但实际模型能否使用图像与坐标仍由后端
+/// 确认。视觉未知或明确不支持时，只接受后端明确报告且可观察的无视觉
+/// 结构化通道，不能从旧 observe/listWindows 推断不会输出截图。
 ///
-/// 因为它有**两个消费者**（发出去那一轮、设置页那一节），而两处各判一次的话
-/// 漏掉的那一处不会有任何测试红。这是这个仓库反复吃过的形状。
-///
-/// # ⚠️ 模型看不懂图时**不能发**，这不只是体验问题
-///
-/// 截图是在工具执行时才拍的：等模型那侧回一句 400 时，屏幕已经拍过、
-/// 也已经发给供应商了。也就是说——用一个看不懂图的模型开着这个开关，
-/// 代价是**白白泄露一次屏幕**，换来一条看不懂的报错。
-///
-/// 实测过：DeepSeek 那几个（这套 dev 部署的全部）都不支持图，那一轮的结局是
-/// `Bad request (400): This model does not support image`，而截图早就发出去了。
-///
-/// `vision == null`（目录里没有它）按**能**处理，与服务端
-/// `ensure_can_see` 同一条约定：不知道不等于不行。
+/// 只派生请求值，不回写用户偏好；这也不把 observe 权限升格为 act。
 final computerUseEffectiveProvider = Provider.autoDispose<bool>((ref) {
   if (!ref.watch(computerUseProvider)) return false;
-  return ref.watch(selectedModelVisionProvider) != false;
+  if (ref.watch(selectedModelVisionProvider) == true) return true;
+  final health = ref.watch(healthProvider).value;
+  return health?.canObserveComputer == true &&
+      health?.computerCapabilities?.accessibilityOnly == true;
 });
 
 /// 当前选择在界面上该显示成什么。

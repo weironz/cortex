@@ -1,0 +1,88 @@
+{
+    "schema":  1,
+    "observedAtUtc":  "2026-11-09T21:11:05.4339770Z",
+    "scope":  "local_unsigned_package_static_validation_no_gui_no_install_no_publish",
+    "buildExitCode":  0,
+    "originalJobDrained":  true,
+    "sourceChanged":  [
+
+                      ],
+    "sourceFingerprint":  "aff68b14d1454700fd9a20149119854f1ba538a72ea371bb7e4a1ac87c760bea",
+    "sourceFingerprintScope":  "external-caller-supplied; selected_runtime_packaging_sources manifest in output/source-inputs.json",
+    "outputDirectory":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-desktop-local-verification-20261110-sbomfix-final",
+    "setupPath":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-desktop-local-verification-20261110-sbomfix-final\\cortex-desktop-v0.1.45-x86_64-pc-windows-msvc-setup.exe",
+    "setupBytes":  50458861,
+    "setupSha256":  "335ac88b3ec8874def5ef2abaee7ee280e06cd34f11e6a155398d8a5caa49ffe",
+    "agentSha256":  "3aceb373840bdba202f46c6a2c08e98109ca50bd8a5176714a9bd6156e2afb60",
+    "agentMatchesActualCargoRoot":  true,
+    "officialCuaPinUnchanged":  true,
+    "cuaFiles":  [
+                     {
+                         "name":  "cua-cursor-theme.exe",
+                         "sha256":  "ffaf56a62b0f3bdaf65f2bc30612e5d6ed408362d4868d6f20e8db93be851f0c"
+                     },
+                     {
+                         "name":  "cua-driver-uia.exe",
+                         "sha256":  "69aa6ea0049ce59dfd14593be77c0632f12f6eda3d4a2f4bab1a00e3a72a9754"
+                     },
+                     {
+                         "name":  "cua-driver.exe",
+                         "sha256":  "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2"
+                     },
+                     {
+                         "name":  "cua_driver_abi.h",
+                         "sha256":  "c17169f41da321baa5e7e953323c3ad660b00790176ba381e93189fba3506587"
+                     },
+                     {
+                         "name":  "cua_driver_node_runtime.node",
+                         "sha256":  "3306eb003a0c57c0c0f58a488fb9cc052630fb800a0db611d3459a76531aec87"
+                     },
+                     {
+                         "name":  "cua_driver_sdk.dll",
+                         "sha256":  "68c5540cc99eeb725352db3f3a944679f9d6e1757923b2d8d8ee441b39cd78d9"
+                     }
+                 ],
+    "signatures":  [
+                       {
+                           "name":  "cortex_app.exe",
+                           "status":  "NotSigned"
+                       },
+                       {
+                           "name":  "cortex-local.exe",
+                           "status":  "NotSigned"
+                       },
+                       {
+                           "name":  "cua\\cua-driver.exe",
+                           "status":  "Valid"
+                       },
+                       {
+                           "name":  "setup.exe",
+                           "status":  "NotSigned"
+                       }
+                   ],
+    "stageSbom":  {
+                      "cargoPackages":  408,
+                      "path":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-desktop-local-verification-20261110-sbomfix-final\\cortex-desktop-v0.1.45-x86_64-pc-windows-msvc\\SBOM.cdx.json",
+                      "sha256":  "f2db1a657083531c33c4f821a938ce860320fbfcd0f9bc869c522373e8329722",
+                      "components":  618,
+                      "verifiedFileHashes":  71
+                  },
+    "installerSbom":  {
+                          "path":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-desktop-local-verification-20261110-sbomfix-final\\cortex-desktop-v0.1.45-x86_64-pc-windows-msvc-setup.exe.cdx.json",
+                          "sha256":  "d6481c768afbc5cbf11838686fb86d7aa34ae50d886d6723e38111dd2f3a605a",
+                          "components":  620,
+                          "setupHashVerified":  true
+                      },
+    "regression":  {
+                       "pythonChecks":  107,
+                       "manualWorkflowTriggersOnly":  true,
+                       "nativeUtf8Checks":  18,
+                       "diffCheck":  true,
+                       "docsCheck":  true,
+                       "ciParity":  true
+                   },
+    "guiSmokeVerified":  false,
+    "installed":  false,
+    "productionAccepted":  false,
+    "candidateDriverIntegrated":  false
+}

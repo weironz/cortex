@@ -1,0 +1,119 @@
+﻿{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-portable-second-host-smoke",
+    "status":  "passed",
+    "startedAt":  "2026-11-08T09:04:47.4338996Z",
+    "finishedAt":  "2026-11-08T09:05:58.5147640Z",
+    "machine":  "WILLOPTPC",
+    "os":  {
+               "versionString":  "Microsoft Windows NT 10.0.26300.0",
+               "productName":  "Windows 10 Pro",
+               "displayVersion":  "26H2",
+               "buildNumber":  "26300",
+               "updateBuildRevision":  9818
+           },
+    "osArchitecture":  "AMD64",
+    "powershellVersion":  "5.1.26100.9818",
+    "requestedSeconds":  60,
+    "intervalMs":  5000,
+    "inputs":  {
+                   "test":  {
+                                "path":  "D:\\codes\\cortex\\dist\\cortex-computer-use-second-host-v0.1.45\\cortex-local-tests.exe",
+                                "expectedSha256":  "d4ef6a35f7a0fa6fb22cc393b7e302d3cb00dd37b2f0ac90d39d5e1c4ee7a2ea",
+                                "sha256":  "d4ef6a35f7a0fa6fb22cc393b7e302d3cb00dd37b2f0ac90d39d5e1c4ee7a2ea",
+                                "executionPath":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-second-host-773868de2f9a434eb43693e79b95d5cc\\tests\\cortex-local-tests.exe",
+                                "executionSha256":  "d4ef6a35f7a0fa6fb22cc393b7e302d3cb00dd37b2f0ac90d39d5e1c4ee7a2ea"
+                            },
+                   "fixture":  {
+                                   "path":  "D:\\codes\\cortex\\dist\\cortex-computer-use-second-host-v0.1.45\\cortex-computer-use-soak-fixture.exe",
+                                   "expectedSha256":  "fa799e33de8061893740375a352967df00d2c3fb8d52fc243c442ea366c14629",
+                                   "sha256":  "fa799e33de8061893740375a352967df00d2c3fb8d52fc243c442ea366c14629",
+                                   "executionPath":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-second-host-773868de2f9a434eb43693e79b95d5cc\\fixture\\cortex-computer-use-soak-fixture.exe",
+                                   "executionSha256":  "fa799e33de8061893740375a352967df00d2c3fb8d52fc243c442ea366c14629"
+                               },
+                   "vcRuntime":  {
+                                     "path":  "D:\\codes\\cortex\\dist\\cortex-computer-use-second-host-v0.1.45\\vcruntime140.dll",
+                                     "expectedSha256":  "184146852727a9db4eea06178716bec3cdbb1015c911f6b0f915b184ad7775b2",
+                                     "sha256":  "184146852727a9db4eea06178716bec3cdbb1015c911f6b0f915b184ad7775b2",
+                                     "executionPath":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-second-host-773868de2f9a434eb43693e79b95d5cc\\tests\\vcruntime140.dll",
+                                     "executionSha256":  "184146852727a9db4eea06178716bec3cdbb1015c911f6b0f915b184ad7775b2"
+                                 },
+                   "cua":  {
+                               "cua-driver.exe":  {
+                                                      "path":  "D:\\codes\\cortex\\dist\\cortex-computer-use-second-host-v0.1.45\\cua\\cua-driver.exe",
+                                                      "sha256":  "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+                                                      "executionPath":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-second-host-773868de2f9a434eb43693e79b95d5cc\\cua\\cua-driver.exe",
+                                                      "executionSha256":  "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2"
+                                                  },
+                               "cua-driver-uia.exe":  {
+                                                          "path":  "D:\\codes\\cortex\\dist\\cortex-computer-use-second-host-v0.1.45\\cua\\cua-driver-uia.exe",
+                                                          "sha256":  "69aa6ea0049ce59dfd14593be77c0632f12f6eda3d4a2f4bab1a00e3a72a9754",
+                                                          "executionPath":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-second-host-773868de2f9a434eb43693e79b95d5cc\\cua\\cua-driver-uia.exe",
+                                                          "executionSha256":  "69aa6ea0049ce59dfd14593be77c0632f12f6eda3d4a2f4bab1a00e3a72a9754"
+                                                      },
+                               "cua-cursor-theme.exe":  {
+                                                            "path":  "D:\\codes\\cortex\\dist\\cortex-computer-use-second-host-v0.1.45\\cua\\cua-cursor-theme.exe",
+                                                            "sha256":  "ffaf56a62b0f3bdaf65f2bc30612e5d6ed408362d4868d6f20e8db93be851f0c",
+                                                            "executionPath":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-second-host-773868de2f9a434eb43693e79b95d5cc\\cua\\cua-cursor-theme.exe",
+                                                            "executionSha256":  "ffaf56a62b0f3bdaf65f2bc30612e5d6ed408362d4868d6f20e8db93be851f0c"
+                                                        },
+                               "cua_driver_sdk.dll":  {
+                                                          "path":  "D:\\codes\\cortex\\dist\\cortex-computer-use-second-host-v0.1.45\\cua\\cua_driver_sdk.dll",
+                                                          "sha256":  "68c5540cc99eeb725352db3f3a944679f9d6e1757923b2d8d8ee441b39cd78d9",
+                                                          "executionPath":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-second-host-773868de2f9a434eb43693e79b95d5cc\\cua\\cua_driver_sdk.dll",
+                                                          "executionSha256":  "68c5540cc99eeb725352db3f3a944679f9d6e1757923b2d8d8ee441b39cd78d9"
+                                                      },
+                               "cua_driver_node_runtime.node":  {
+                                                                    "path":  "D:\\codes\\cortex\\dist\\cortex-computer-use-second-host-v0.1.45\\cua\\cua_driver_node_runtime.node",
+                                                                    "sha256":  "3306eb003a0c57c0c0f58a488fb9cc052630fb800a0db611d3459a76531aec87",
+                                                                    "executionPath":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-second-host-773868de2f9a434eb43693e79b95d5cc\\cua\\cua_driver_node_runtime.node",
+                                                                    "executionSha256":  "3306eb003a0c57c0c0f58a488fb9cc052630fb800a0db611d3459a76531aec87"
+                                                                },
+                               "cua_driver_abi.h":  {
+                                                        "path":  "D:\\codes\\cortex\\dist\\cortex-computer-use-second-host-v0.1.45\\cua\\cua_driver_abi.h",
+                                                        "sha256":  "c17169f41da321baa5e7e953323c3ad660b00790176ba381e93189fba3506587",
+                                                        "executionPath":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-second-host-773868de2f9a434eb43693e79b95d5cc\\cua\\cua_driver_abi.h",
+                                                        "executionSha256":  "c17169f41da321baa5e7e953323c3ad660b00790176ba381e93189fba3506587"
+                                                    }
+                           }
+               },
+    "tests":  {
+                  "secure":  {
+                                 "name":  "computer::real::tests::cua_secure_fixture_requires_handoff_without_input",
+                                 "status":  "passed",
+                                 "startedAt":  "2026-11-08T09:04:52.8455300Z",
+                                 "exitCode":  0,
+                                 "harness":  {
+                                                 "exitCode":  0,
+                                                 "runningOneLines":  1,
+                                                 "namedPassedLines":  1,
+                                                 "onePassedSummaryLines":  1,
+                                                 "totalRunLines":  1,
+                                                 "totalSummaryLines":  1,
+                                                 "passed":  true
+                                             },
+                                 "durationSeconds":  2.527,
+                                 "durationMilliseconds":  2526,
+                                 "finishedAt":  "2026-11-08T09:04:55.3841932Z"
+                             },
+                  "soak":  {
+                               "name":  "computer::real::tests::cua_fixture_long_running_soak",
+                               "status":  "passed",
+                               "startedAt":  "2026-11-08T09:04:55.8648704Z",
+                               "exitCode":  0,
+                               "harness":  {
+                                               "exitCode":  0,
+                                               "runningOneLines":  1,
+                                               "namedPassedLines":  1,
+                                               "onePassedSummaryLines":  1,
+                                               "totalRunLines":  1,
+                                               "totalSummaryLines":  1,
+                                               "passed":  true
+                                           },
+                               "durationSeconds":  62.283,
+                               "durationMilliseconds":  62283,
+                               "finishedAt":  "2026-11-08T09:05:58.1485763Z"
+                           }
+              },
+    "durationSeconds":  71.081
+}

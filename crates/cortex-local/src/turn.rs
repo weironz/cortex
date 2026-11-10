@@ -1,33 +1,24 @@
-//! 本地跑一轮对话。
+//! 本机与容器共用唯一 Turn、LocalHost、Runs 和确认簿。
 //!
-//! 与 cortexd 的 `run_turn` 是同一套步骤，只是记忆那几步换成了 HTTP：
-//!
-//! | | cortexd | 本地 agent |
-//! |---|---|---|
-//! | 写 user episode + 检索 + 归因 | 一段事务 | `POST /episodes` 一次请求 |
-//! | 渲染注入块 | `injection::render_turn_block` | **同一个函数**（`cortex-core`） |
-//! | agent 循环 | `Turn::run` | **同一个** `Turn::run` |
-//! | 工具执行 | 服务器上的目录 | **你的机器上的目录** ← 这一格是全部意义 |
-//! | 写 assistant episode + 抽取 | 一段事务 + spawn | `POST /episodes` 一次请求 |
-//!
-//! # 连不上 cortexd 时会怎样
-//!
-//! 循环、工具、shell、LLM（直连模式下）**照常**。变的只有两件事：
-//! 这一轮没有记忆注入（检索要远端），以及两条 episode 排进
-//! [`crate::outbox`] 等联网后重放。界面上要明说第一件事 ——
-//! 不说的话，用户会以为 agent 突然变笨了。
+//! 普通本机轮次由实际入站 capability 及受保护记录建立 owner；CU 另取新鲜的
+//! 严格远端 session 证明。Local 消息先可靠写入 journal，且永不自动上传；
+//! Account 消息固定账号归属，先本机提交，再有序同步。旧无主体 outbox 只隔离。
 
 use std::sync::Arc;
 
-use crate::confirm::ConfirmRegistry;
+use crate::confirm::{ConfirmRegistry, ConfirmationLease};
 use cortex_agent::AgentEvent;
 use cortex_core::{CortexError, Id, Result};
 use cortex_proto::dto::{ChatEvent, ChatRequest};
 use cortex_proto::episodes::NewEpisodeRequest;
 use tokio::sync::mpsc;
 
+use crate::computer_principal::PrincipalNamespace;
 use crate::outbox::Outbox;
 use crate::remote::Remote;
+use crate::remote::with_run_principal;
+use crate::runs::RunFenceError;
+use crate::runs::run_principal::{RunPrincipal, RunPrincipalKey};
 use crate::workspaces::Workspaces;
 
 pub(crate) use crate::turn_assemble::turn_for_env;
@@ -38,6 +29,96 @@ use crate::turn_assemble::{
 use crate::turn_events::{bridge_events, needs_reauth};
 use crate::turn_host::LocalHost;
 use crate::turn_prompt::{history_messages, system_prompt_for};
+
+static LEGACY_OUTBOX_FENCE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// task 无论正常结束、出错还是被 stop 的 `abort` 掉，都要收回确认租约。
+///
+/// `Drop` 里只做同步的撤销，不能依赖在 abort 路径上执行某段 `async` 收尾；
+/// 那一路已经被取消，任何 await 都不会再回来。
+struct ConfirmationLeaseGuard {
+    confirms: Arc<ConfirmRegistry>,
+    lease: ConfirmationLease,
+}
+
+impl Drop for ConfirmationLeaseGuard {
+    fn drop(&mut self) {
+        self.confirms.revoke_lease(&self.lease);
+    }
+}
+
+/// 运行中的一轮也受入队时的凭据代际约束。
+///
+/// ticket 的 `begin_checked` 只能在起跑那一刻拦住排队期间发生的切换；
+/// 起跑之后再换账号，若继续 await，A 虽然仍拿固定 A token，却会继续在
+/// 用户已经切走的账号上下文里执行本地工具。这里在代际通知一到就 drop
+/// 整个 `run_turn` future。已经派出去的外部进程按现有停止语义处理：能取消
+/// 的立即取消，不能取消的已在注释与用户文案里如实说明。
+async fn run_until_credential_change<F>(
+    remote: Remote,
+    mut changes: tokio::sync::watch::Receiver<u64>,
+    expected_generation: u64,
+    expected_principal_epoch: u64,
+    expected_principal: Option<PrincipalNamespace>,
+    future: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    let still_bound = || {
+        let local_current = remote.local_authority().is_none_or(|authority| {
+            let epoch = if expected_principal.is_none() {
+                expected_principal_epoch
+            } else {
+                authority.epoch()
+            };
+            authority.with_epoch(epoch, || ()).is_ok()
+                && (expected_principal.is_some()
+                    || remote.current_credential_generation() == expected_generation)
+        });
+        local_current
+            && remote.auth_state() != crate::remote::RemoteAuthState::Rejected
+            && expected_principal.as_ref().is_none_or(|expected| {
+                remote.principal_is_current(expected, expected_principal_epoch)
+            })
+    };
+    if *changes.borrow() != expected_generation && !still_bound() {
+        return Err(CortexError::Unauthorized(
+            "这一轮的账号已经切换，任务在启动前被取消".into(),
+        ));
+    }
+    if !still_bound() {
+        return Err(CortexError::Unauthorized(
+            "这一轮所属的账号作用域已经失效，任务在启动前被取消".into(),
+        ));
+    }
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            biased;
+            changed = changes.changed() => {
+                if changed.is_ok() && still_bound() {
+                    // 同账号只是换了 access token；继续原 run，出站请求会在
+                    // `Remote::auth` 中采用同一个账号的新 token。
+                    continue;
+                }
+                return if changed.is_ok() {
+                    Err(CortexError::Unauthorized(
+                        "这一轮运行期间账号已经切换，任务已取消；\
+                         已经发出的工具操作可能仍会完成，请检查目标应用或终端。"
+                            .into(),
+                    ))
+                } else {
+                    Err(CortexError::Unavailable(
+                        "账号凭据更新监听通道意外关闭，任务按失败关闭处理".into(),
+                    ))
+                };
+            }
+            outcome = &mut future => return outcome,
+        }
+    }
+}
 
 /// 容器里单轮的 wall-clock 上限。**只在容器模式生效。**
 ///
@@ -76,6 +157,9 @@ pub struct Engine {
     /// 放 `Engine` 而不是 `LocalState`：它与一轮的生命周期同生共死，
     /// 而 `Engine` 正是「跑一轮所需的全部依赖」。
     pub runs: crate::runs::Runs,
+    /// Windows 桌面的进程级窗口 lease。所有并行 turn 共享，
+    /// 防止两轮同时驱动同一个顶层窗口。
+    pub computer_leases: Arc<crate::computer_lease::ComputerLeaseRegistry>,
     pub max_rounds: usize,
     /// 用户配的 hooks（`~/.cortex/hooks.json`）。启动时读一次。
     pub hooks: Arc<[cortex_agent::hooks::Hook]>,
@@ -105,6 +189,25 @@ pub struct Engine {
     /// 越界路径问不问（容器里直接拒），以及 `.attended()` 该不该开
     /// （容器里没人坐在屏幕前）。
     pub exec_env: cortex_agent::ExecEnvironment,
+}
+
+/// 在真正入队前失败时仍返回一条可关闭的 SSE 事件流。
+///
+/// `/chat` 的返回类型在路由层已经是 SSE；把账号验证错误伪装成 409/队列满
+/// 会让用户去等一个根本不存在的队列位置。这里直接发终态 Error，后续流立即
+/// 结束，也不会创建 Run、驱动 socket 或写 trace。
+fn rejected_chat(
+    error: CortexError,
+) -> (Vec<ChatEvent>, tokio::sync::broadcast::Receiver<ChatEvent>) {
+    let needs_reauth = matches!(error, CortexError::Unauthorized(_));
+    let (_tx, rx) = tokio::sync::broadcast::channel(1);
+    (
+        vec![ChatEvent::Error {
+            message: error.to_string(),
+            needs_reauth,
+        }],
+        rx,
+    )
 }
 
 impl Engine {
@@ -179,7 +282,158 @@ impl Engine {
         req: ChatRequest,
     ) -> Result<(Vec<ChatEvent>, tokio::sync::broadcast::Receiver<ChatEvent>), crate::runs::QueueFull>
     {
-        let ticket = self.runs.enqueue(&req.session_id).await?;
+        // Attach/stop 的 HTTP 路由只带 session id，不带账号字段。登记簿保存
+        // 这个 Remote 后，两条旧路由就能先 snap 当前 token、向远端验证主体，
+        // 再用 `(principal, session)` 查找；设备级入站 token 不再是一条身份。
+        let principal = match self.exec_env {
+            cortex_agent::ExecEnvironment::LocalMachine => {
+                match self
+                    .remote
+                    .principal_for_chat(&req.session_id, req.computer_use)
+                    .await
+                {
+                    Ok(principal) => principal,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            session = %req.session_id,
+                            "Computer Use 主体验证失败，拒绝在无账号边界时起跑"
+                        );
+                        return Ok(rejected_chat(error));
+                    }
+                }
+            }
+            // 云端的一次性容器本身就是租户边界；delegated token 按设计
+            // 不能获得宿主 Computer Use principal。仍固定当前 token 快照，
+            // 防止容器进程内热换 token 时跨到下一账号。
+            cortex_agent::ExecEnvironment::Container => {
+                let credential = match self.remote.credential_snapshot() {
+                    Ok(credential) => credential,
+                    Err(error) => return Ok(rejected_chat(error)),
+                };
+                match RunPrincipal::for_container(
+                    credential,
+                    self.remote.base(),
+                    req.session_id.clone(),
+                ) {
+                    Ok(principal) => principal,
+                    Err(error) => return Ok(rejected_chat(error)),
+                }
+            }
+            cortex_agent::ExecEnvironment::None => {
+                return Ok(rejected_chat(CortexError::Config(
+                    "当前执行环境没有可验证的运行主体".into(),
+                )));
+            }
+        };
+        self.enqueue_chat_with_principal(req, principal).await
+    }
+
+    /// 复用同一 HTTP 请求刚完成的严格验证，避免路由和 engine 串行各问一次。
+    /// 只接受宿主内部的类型化结果，仍在入队前检查 session、主体和登录代际。
+    pub(crate) async fn chat_with_verified_principal(
+        self: &Arc<Self>,
+        req: ChatRequest,
+        principal: RunPrincipal,
+    ) -> Result<(Vec<ChatEvent>, tokio::sync::broadcast::Receiver<ChatEvent>), crate::runs::QueueFull>
+    {
+        if let Some(authority) = self.remote.local_authority()
+            && let Err(error) = authority.require_caller()
+        {
+            return Ok(rejected_chat(error));
+        }
+        if self.exec_env != cortex_agent::ExecEnvironment::LocalMachine
+            || principal.session_id() != req.session_id
+            || (req.computer_use && principal.computer_namespace().is_err())
+        {
+            return Ok(rejected_chat(CortexError::Unauthorized(
+                "已有主体验证不属于这次本机会话请求".into(),
+            )));
+        }
+        self.enqueue_chat_with_principal(req, principal).await
+    }
+
+    async fn enqueue_chat_with_principal(
+        self: &Arc<Self>,
+        req: ChatRequest,
+        mut principal: RunPrincipal,
+    ) -> Result<(Vec<ChatEvent>, tokio::sync::broadcast::Receiver<ChatEvent>), crate::runs::QueueFull>
+    {
+        self.runs.bind_remote(self.remote.clone()).await;
+        if self.exec_env == cortex_agent::ExecEnvironment::LocalMachine
+            && principal.key().is_local()
+            && !self.remote.run_is_current(&principal)
+        {
+            return Ok(rejected_chat(CortexError::Unauthorized(
+                "本机 owner 已变化".into(),
+            )));
+        }
+        if self.exec_env == cortex_agent::ExecEnvironment::LocalMachine
+            && !principal.key().is_local()
+        {
+            let namespace = match principal.verified_namespace() {
+                Ok(namespace) => namespace,
+                Err(error) => return Ok(rejected_chat(error)),
+            };
+            let current = match self.remote.credential_snapshot_for_principal(
+                namespace,
+                principal.credential().principal_epoch(),
+            ) {
+                Ok(current) => current,
+                Err(error) => return Ok(rejected_chat(error)),
+            };
+            principal.renew_credential(current);
+        }
+        if self.exec_env != cortex_agent::ExecEnvironment::LocalMachine
+            && self.remote.current_credential_generation() != principal.credential().generation()
+        {
+            // 同账号刷新不应该让用户重发；主体已严格核对，当前 token 可以
+            // 原子替换票据快照。若进程绑定已经变化，则继续失败关闭。
+            let current = match self.remote.credential_snapshot() {
+                Ok(current) => current,
+                Err(error) => return Ok(rejected_chat(error)),
+            };
+            if let Ok(namespace) = principal.verified_namespace()
+                && self.remote.current_principal().as_ref() != Some(namespace)
+            {
+                return Ok(rejected_chat(CortexError::Unauthorized(
+                    "验证账号期间登录账号已切换；这一轮没有入队，请重新登录".into(),
+                )));
+            }
+            principal.renew_credential(current);
+        }
+        tracing::info!(
+            session = principal.session_id(),
+            deployment_url = principal.deployment_url(),
+            binding = ?principal.binding(),
+            credential_generation = principal.credential().generation(),
+            "Computer Use run principal 已验证并冻结"
+        );
+
+        let run_id = Id::new().to_string();
+        let confirmation_lease = if self.exec_env == cortex_agent::ExecEnvironment::LocalMachine {
+            Some(
+                match self.confirms.issue_lease(&principal, run_id.clone()) {
+                    Ok(lease) => lease,
+                    Err(error) => return Ok(rejected_chat(error)),
+                },
+            )
+        } else {
+            None
+        };
+        let ticket = match self
+            .runs
+            .enqueue_verified_with_run_id(principal.clone(), run_id.clone())
+            .await
+        {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                if let Some(lease) = &confirmation_lease {
+                    self.confirms.revoke_lease(lease);
+                }
+                return Err(error);
+            }
+        };
         // 先订阅再起 task：反过来的话，任务开头那几条事件会发在订阅之前。
         //
         // 直接问这张票自己的 `run`，不走 `runs.attach(session_id)` —— 那条路给的是
@@ -189,7 +443,18 @@ impl Engine {
         let tx = Arc::new(crate::runs::RunSink::new(Arc::clone(&ticket.run)));
         let engine = Arc::clone(self);
         let run = Arc::clone(&ticket.run);
+        let task_principal = ticket.principal().clone();
+        if let Some(lease) = &confirmation_lease {
+            run.set_confirmation_lease(lease.clone()).await;
+        }
         let handle = tokio::spawn(async move {
+            let _confirmation_guard =
+                confirmation_lease
+                    .as_ref()
+                    .map(|lease| ConfirmationLeaseGuard {
+                        confirms: Arc::clone(&engine.confirms),
+                        lease: lease.clone(),
+                    });
             // 排队要说一声：这条流在轮到自己之前只有 keepalive，
             // 不说的话界面上就是一个转了三分钟的圈，与卡死一模一样
             if ticket.ahead > 0 {
@@ -200,8 +465,43 @@ impl Engine {
             }
             // 许可要活到这一轮**彻底**结束（含 episode 落库）：提前放开等于
             // 让下一轮开始读历史，而那时上一轮的结果还没进去
-            let _permit = ticket.begin().await;
-            let run = engine.run_turn(req, &tx);
+            let _permit = match ticket.begin_checked().await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    let message = match error {
+                        RunFenceError::CredentialChanged => {
+                            "排队期间登录凭据已经切换。为避免 A 的指令借用 B 的权限，\
+                             这一轮没有执行，请用当前账号重新发送。"
+                        }
+                        RunFenceError::PrincipalMissing => {
+                            "这一轮的账号作用域已经失效，未执行，请重新发送。"
+                        }
+                    };
+                    tx.send(ChatEvent::Error {
+                        message: message.into(),
+                        needs_reauth: true,
+                    })
+                    .await;
+                    return;
+                }
+            };
+            let credential_changes = engine.remote.token_generation();
+            let run = engine.run_turn(
+                req,
+                &tx,
+                &task_principal,
+                &run_id,
+                confirmation_lease.clone(),
+            );
+            let run = with_run_principal(task_principal.clone(), run);
+            let run = run_until_credential_change(
+                engine.remote.clone(),
+                credential_changes,
+                task_principal.credential().generation(),
+                task_principal.credential().principal_epoch(),
+                task_principal.key().verified_namespace().cloned(),
+                run,
+            );
             // ── 容器里给单轮一个 wall-clock 上限 ──
             //
             // 空闲回收（cortexd 侧，30 分钟）的活跃信号是「令牌多久没被用过」，
@@ -262,7 +562,12 @@ impl Engine {
     ///
     /// 名字与历史来自**同一次** `/sessions/{id}` —— 单独再打一次只为拿一个
     /// 字符串是每轮多一次往返。函数名说两件事，因为它做两件事。
-    async fn load_session_context(&self, session_id: &str) -> SessionContext {
+    async fn load_session_context(
+        &self,
+        remote: &Remote,
+        principal: &RunPrincipal,
+    ) -> Result<SessionContext> {
+        let session_id = principal.session_id();
         use cortex_core::history::{HistoryTurn, fit_history, history_budget};
 
         let budget = history_budget(self.context_window);
@@ -270,38 +575,80 @@ impl Engine {
         // 把全部原文都拉过网络。200 轮在任何合理预算下都绰绰有余
         const MAX_TURNS: i64 = 200;
 
-        let fetched = match self.remote.session_history(session_id, MAX_TURNS).await {
-            Ok(t) => t,
-            // 会话还不存在 —— 这是新会话第一轮的正常形态，不是失败
-            Err(CortexError::NotFound { .. }) => {
-                tracing::debug!(session = session_id, "会话还没有历史（新会话的第一轮）");
-                crate::remote::RemoteSession::default()
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, session = session_id, "读会话历史失败，本轮按无历史处理");
-                crate::remote::RemoteSession::default()
+        let mut fetched = if principal.key().is_local() {
+            self.remote
+                .local_authority()
+                .ok_or_else(|| CortexError::Unauthorized("缺少本机 owner".into()))?
+                .journal
+                .history(&principal.key().owner()?, session_id)
+        } else {
+            match remote.session_history(session_id, MAX_TURNS).await {
+                Ok(session) => session,
+                Err(CortexError::NotFound { .. })
+                    if principal.binding() == crate::runs::run_principal::SessionBinding::New
+                        || self.exec_env.is_container() =>
+                {
+                    crate::remote::RemoteSession::default()
+                }
+                Err(e)
+                    if crate::remote::transport_unavailable(&e)
+                        && self.remote.local_authority().is_some() =>
+                {
+                    self.remote
+                        .local_authority()
+                        .ok_or_else(|| CortexError::Unauthorized("缺少本机 owner".into()))?
+                        .journal
+                        .history(&principal.key().owner()?, session_id)
+                }
+                Err(e) => {
+                    if matches!(e, CortexError::Unauthorized(_)) {
+                        self.remote.reject_run_credential(principal);
+                    }
+                    return Err(e);
+                }
             }
         };
+        // 远端成功或合法新会话 404 也可能尚未看见本机已提交的 pending 正文。
+        // 先合并同 owner/session 的未同步记录再裁上下文，不能把 HTTP 可达当作已同步。
+        if !principal.key().is_local()
+            && let Some(authority) = self.remote.local_authority()
+        {
+            let pending = authority.journal.pending(&principal.key().owner()?);
+            merge_pending_history(&mut fetched, pending, session_id);
+        }
         // 连不上时工作区名也拿不到，于是回落到卷根 —— 与「没有历史」同一类
         // 降级。**不能改成让整轮失败**：那会让一次网络抖动变成「文件工具没了」。
-        SessionContext {
+        Ok(SessionContext {
             history: fit_history(
                 fetched
-                    .turns
+                    .episodes
                     .into_iter()
-                    .map(|(is_user, text)| HistoryTurn { is_user, text })
+                    .map(|episode| HistoryTurn {
+                        is_user: episode.is_user,
+                        text: episode.text,
+                    })
                     .collect(),
                 budget,
             ),
             container_workspace: fetched.container_workspace,
-        }
+        })
     }
 
     async fn run_turn(
         self: &Arc<Self>,
         req: ChatRequest,
         tx: &Arc<crate::runs::RunSink>,
+        principal: &RunPrincipal,
+        run_id: &str,
+        confirmation_lease: Option<ConfirmationLease>,
     ) -> Result<()> {
+        let remote = self.remote.pinned_for(principal);
+        let principal_key = principal.key().clone();
+        let session_key = if self.exec_env == cortex_agent::ExecEnvironment::LocalMachine {
+            Some(principal.session_key()?)
+        } else {
+            None
+        };
         // ── 0. 取会话历史 ──
         //
         // **在写本轮 user episode 之前取**，这样远端给回来的就是干净的
@@ -310,7 +657,7 @@ impl Engine {
         //
         // 本地 agent 没有数据库，这里必须问远端。代价是：**离线时没有历史**，
         // 与「离线时没有记忆」是同一类降级，UI 上已有那句提示。
-        let ctx = self.load_session_context(&req.session_id).await;
+        let ctx = self.load_session_context(&remote, principal).await?;
         let history = ctx.history;
 
         // ── 1. 写 user episode（顺带检索 + 归因）──
@@ -337,15 +684,7 @@ impl Engine {
         // 落库。**这是会话历史，不是记忆** —— 2026-08-17 之前这一步还会顺带
         // 拿回「这一轮命中了哪些记忆」并渲染成注入块，那条路连同长期记忆一起
         // 去掉了（理由见 `cortex_agent::turn::ToolHost` 的文档）。
-        match self.remote.write_episode(&user_req).await {
-            Ok(_) => {}
-            // 连不上 → 排队。**明说**，别让用户以为这一轮丢了
-            Err(e @ CortexError::Unavailable(_)) => {
-                tracing::warn!(error = %e, "写不进去，这一轮先排队");
-                self.queue_offline(&user_req, tx, &e).await?;
-            }
-            Err(e) => return Err(e),
-        }
+        let mut persistence = self.persist_episode(&remote, principal, &user_req).await?;
 
         let user_content = req.message.clone();
 
@@ -370,11 +709,13 @@ impl Engine {
                             workspace = name, error = %e,
                             "容器工作区子目录不可用，本轮回落到卷根"
                         );
-                        self.workspaces.get(&req.session_id)
+                        self.workspaces.default_root().map(ToOwned::to_owned)
                     }
                 }
             }
-            _ => self.workspaces.get(&req.session_id),
+            _ => session_key
+                .as_ref()
+                .and_then(|key| self.workspaces.get_scoped(key)),
         };
 
         // ── 3.5 附件投放：图片进多模态块，小文本进上下文，其余落工作区 ──
@@ -386,7 +727,7 @@ impl Engine {
             Vec::new()
         } else {
             crate::attachments::place(
-                &self.remote,
+                &remote,
                 &req.attachments,
                 bound.as_deref().map(std::path::Path::new),
                 self.llm.supports_vision(),
@@ -400,6 +741,7 @@ impl Engine {
         // 图片的模型才看得见；把这一步留到构造 LocalHost 时再做，会让直接
         // 调用 HTTP API 的盲模型先拿到一整套电脑工具。
         let llm = self.llm_for(&req.model, req.source.as_deref());
+        let perception_mode = cortex_agent::computer_perception::PerceptionMode::for_model(&llm);
         // 这一轮有没有技能可用。**一处算完，工具目录与提示词共用它** ——
         // 各算各的话，其中一处漏掉不会有任何测试红（见 `with_external`）
         let catalog: Vec<(&str, &str)> = req
@@ -410,18 +752,41 @@ impl Engine {
             .collect();
         let has_skills = !catalog.is_empty();
         // Cua 只读观察要同时满足：用户明确打开、sidecar 配置有效、跑在本机
-        // 桌面、当前模型能看图。legacy xcap/enigo 写路径尚未接入统一
+        // 桌面。完整 AX 观察也可服务文本模型；legacy 写路径尚未接入统一
         // Gateway，生产目录里始终关闭。
+        let local_computer =
+            req.computer_use && self.exec_env == cortex_agent::ExecEnvironment::LocalMachine;
+        let (cua_runtime_ready, computer_write_readiness) = tokio::join!(
+            async {
+                if local_computer {
+                    crate::computer_cua::runtime_ready().await
+                } else {
+                    false
+                }
+            },
+            crate::routes::computer_catalog_write_readiness(local_computer),
+        );
+        // 结构化浏览器不依赖 Cua sidecar，也不要求模型能看图；它仍需用户
+        // 显式开启 computer_use、运行在本机，并由管理员配置非空站点 allowlist。
+        let browser_ready = req.computer_use
+            && self.exec_env == cortex_agent::ExecEnvironment::LocalMachine
+            && crate::computer_browser::runtime_ready();
         let caps = Caps {
+            computer_write_readiness: Some(computer_write_readiness),
+            perception_mode,
             can_draw,
             has_skills,
-            can_use_computer: false,
+            can_use_computer: computer_access_allowed(
+                req.computer_use,
+                cua_runtime_ready && crate::computer_cua::actions_enabled(),
+                self.exec_env,
+            ),
             can_observe_computer: computer_access_allowed(
                 req.computer_use,
-                crate::computer_cua::configured(),
+                cua_runtime_ready && crate::computer_cua::configured(),
                 self.exec_env,
-                llm.supports_vision(),
             ),
+            can_use_browser: browser_ready,
             can_open_application: crate::app_launcher::supported()
                 && self.exec_env == cortex_agent::ExecEnvironment::LocalMachine,
             // 与生图同一个判据（有没有可打的服务端）—— 复用而不是各写一遍：
@@ -489,6 +854,7 @@ impl Engine {
             can_draw = caps.can_draw,
             has_skills = caps.has_skills,
             computer = caps.can_use_computer,
+            browser = caps.can_use_browser,
             open_application = caps.can_open_application,
             process_access = ?workspace_turn.as_ref().unwrap_or(&chat_turn).exec_policy().access,
             tools = ?workspace_turn.as_ref().unwrap_or(&chat_turn).tool_names(),
@@ -535,7 +901,7 @@ impl Engine {
             if let Some(recap) = crate::recap::summarise_dropped(
                 &self.llm,
                 &self.recaps,
-                &req.session_id,
+                &principal_key,
                 &history.dropped_turns,
             )
             .await
@@ -559,7 +925,7 @@ impl Engine {
         // 任务清单：作为独立 user 消息插在本轮用户原话**之前**。
         // 不进 system prompt —— 那会打穿前缀缓存（清单每轮都在变）；
         // 不落库 —— 历史从 episode 重放，这条每轮现插，永远是最新值
-        if let Some(todo) = self.todos.get(&req.session_id) {
+        if let Some(todo) = self.todos.get(&principal_key) {
             messages.push(cortex_llm::Message::user().with_text(format!(
                 "[当前任务清单 —— 你自己用 todo_write 维护的，完成一步就更新]
 {todo}"
@@ -589,19 +955,43 @@ impl Engine {
 
         // ⚠️ **`llm` 要在 host 之前造好**：子 agent 由 host 派出去，
         // 而它们跟主 agent 用同一个模型（见 `LocalHost::llm`）
+        let computer =
+            if req.computer_use && self.exec_env == cortex_agent::ExecEnvironment::LocalMachine {
+                crate::computer::Computer::for_verified_run(
+                    Arc::clone(&self.computer_leases),
+                    run_id.to_owned(),
+                    req.session_id.clone(),
+                    principal.computer_namespace()?.clone(),
+                )
+                .map_err(|error| {
+                    CortexError::Config(format!("无法建立 Computer Use 审计作用域：{error}"))
+                })?
+            } else {
+                // 云端容器没有宿主 Computer Use；`for_run` 在这里只会得到
+                // fail-closed 的占位对象，不会获得本地窗口能力。
+                crate::computer::Computer::for_run(
+                    Arc::clone(&self.computer_leases),
+                    run_id.to_owned(),
+                    req.session_id.clone(),
+                )
+            }
+            .with_perception_mode(perception_mode);
         let host = LocalHost {
             exec_env: self.exec_env,
             events: Arc::clone(tx),
             session_id: req.session_id.clone(),
+            principal_key: principal_key.clone(),
+            confirmation_lease,
+            session_key,
             confirms: Arc::clone(&self.confirms),
             mcp: Arc::clone(&self.mcp),
             grants: self.grants.clone(),
-            remote: self.remote.clone(),
+            remote: remote.clone(),
             image_prefs: req.image_prefs.clone(),
-            computer: crate::computer::Computer::new(),
+            computer,
             drawn: std::sync::Mutex::new(Vec::new()),
             todos: self.todos.clone(),
-            background: self.background.for_session(&req.session_id),
+            background: self.background.for_session(&principal_key),
             hooks: Arc::clone(&self.hooks),
             llm: Arc::new(llm.clone()),
             subagent_turn: subagent_turn.map(Arc::new),
@@ -672,13 +1062,7 @@ impl Engine {
                 blocks,
                 models: models.clone(),
             };
-            if let Err(e) = self.remote.write_episode(&ep).await {
-                if matches!(e, CortexError::Unavailable(_)) {
-                    self.queue_offline(&ep, tx, &e).await?;
-                } else {
-                    return Err(e);
-                }
-            }
+            persistence = self.persist_episode(&remote, principal, &ep).await?;
         }
 
         // ── 6. 容器模式：给这一轮的文件改动打一个 git 检查点 ──
@@ -702,6 +1086,7 @@ impl Engine {
         // 带上模型名，让**当前这一轮**立刻就能标出来 —— 不带的话要刷新
         // 一次才看得到，而那条流本来就要送 Done，顺路带上是零成本
         tx.send(ChatEvent::Done {
+            persistence,
             episode_id: assistant_id,
             models,
             // 这一轮画出来的图。不带的话，用户看到「画好啦」而屏幕上
@@ -712,76 +1097,76 @@ impl Engine {
         Ok(())
     }
 
-    /// 排进本地队列，并把「记忆未连接」这件事**明确告诉用户**。
-    ///
-    /// 不告诉的后果是最坏的一种：一切看起来正常，只是 agent 想不起任何事，
-    /// 而用户唯一能得出的结论是「这东西不好用」。
-    async fn queue_offline(
+    /// 正文先可靠存本机，再按固定账号顺序同步。Local/public 没有远端映射，
+    /// 因而绝不把本机 session id 当作登录后可自动上传的账号资源。
+    async fn persist_episode(
         &self,
-        ep: &NewEpisodeRequest,
-        tx: &crate::runs::RunSink,
-        cause: &CortexError,
-    ) -> Result<()> {
-        self.outbox.push(ep)?;
-        tx.send(ChatEvent::Error {
-            // 这一轮**照常跑完了**，只是没写进记忆。摇续期那个铃没有意义，
-            // 而且会让用户以为是登录出了问题
-            needs_reauth: false,
-            message: format!(
-                "记忆未连接（{cause}）。这一轮照常执行，但**没有注入记忆**；\
-                 对话已排进本地队列，恢复连接后会自动补写。当前待补 {} 条。",
-                self.outbox.backlog()
-            ),
-        })
-        .await;
-        Ok(())
+        remote: &Remote,
+        principal: &RunPrincipal,
+        episode: &NewEpisodeRequest,
+    ) -> Result<Option<String>> {
+        let Some(authority) = self.remote.local_authority() else {
+            remote.write_episode(episode).await?;
+            return Ok(None);
+        };
+        let owner = principal.key().owner()?;
+        let writer = authority.clone();
+        let saved_owner = owner.clone();
+        let saved_episode = episode.clone();
+        self.remote
+            .commit_owned(principal.clone(), move || {
+                writer.journal.save(&saved_owner, &saved_episode)
+            })
+            .await?;
+        if principal.key().is_local() {
+            return Ok(Some("local_only".into()));
+        }
+        match self.remote.flush_owned_journal().await {
+            Ok(()) => {
+                if authority
+                    .journal
+                    .pending(&owner)
+                    .iter()
+                    .any(|item| item.id == episode.id)
+                {
+                    return Ok(Some("pending".into()));
+                }
+                Ok(Some("remote".into()))
+            }
+            Err(CortexError::Unavailable(_)) => Ok(Some("pending".into())),
+            Err(e) => {
+                if matches!(e, CortexError::Unauthorized(_)) {
+                    self.remote.reject_run_credential(principal);
+                }
+                Err(CortexError::Unauthorized(format!(
+                    "正文已保存在同 owner 本机 journal，远端未确认；{e}"
+                )))
+            }
+        }
     }
 
-    /// 把队列里积压的灌回远端。启动时与恢复连接时各跑一次。
+    /// 隔离旧版留下的设备级 outbox。
     ///
-    /// 遇到**不可重试**的错误（4xx，比如附件没登记）时**跳过并前进**：
-    /// 停在那里会让队列头堵死，后面全部对话永远灌不回去 —— 一条坏记录
-    /// 换掉整个队列，代价完全不成比例。跳过的那条会 WARN 出来。
+    /// 新轮次不再往这里写。旧条目只有 episode 正文和 session id，没有账号
+    /// 或 credential generation；同一进程后来切到 B 后，任何「顺手重放」
+    /// 都会把 A 的正文写成 B 的记录。当前 token 不能补回缺失的原主体，
+    /// 所以这些条目必须留给能按原身份重新验证的迁移工具。
     pub async fn flush_outbox(&self) -> Result<()> {
+        self.remote.flush_owned_journal().await?;
         let pending = self.outbox.pending()?;
         if pending.is_empty() {
             return Ok(());
         }
-        tracing::info!(count = pending.len(), "开始把本地队列灌回 cortexd");
-
-        let mut flushed = 0u64;
-        for q in pending {
-            match self.remote.write_episode(&q.request).await {
-                Ok(ack) => {
-                    if ack.already_existed {
-                        tracing::debug!(seq = q.seq, "这一条远端已有，跳过（幂等重放）");
-                    }
-                    flushed = q.seq;
-                }
-                // 连不上 —— 停在这里，下次再来。**不推进高水位**
-                Err(e @ CortexError::Unavailable(_)) => {
-                    tracing::warn!(error = %e, seq = q.seq, "灌回中断，剩下的下次再来");
-                    break;
-                }
-                // 远端说这条本身有问题。重试多少次都一样
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        seq = q.seq,
-                        episode = %q.request.id,
-                        "这一条被 cortexd 拒绝且不可重试，跳过 —— \
-                         停在这里会让整个队列永远灌不回去"
-                    );
-                    flushed = q.seq;
-                }
-            }
-        }
-        if flushed > 0 {
-            self.outbox.commit(flushed)?;
-            tracing::info!(
-                upto = flushed,
-                backlog = self.outbox.backlog(),
-                "队列已推进"
+        if !LEGACY_OUTBOX_FENCE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let first_seq = pending.first().map(|queued| queued.seq);
+            let first_episode = pending.first().map(|queued| queued.request.id.to_string());
+            tracing::warn!(
+                count = pending.len(),
+                first_seq,
+                first_episode = first_episode.as_deref(),
+                "检测到旧版设备级 outbox。条目没有账号与 credential generation，\
+                 当前 token 可能已经属于另一个账号，因此拒绝自动重放；\
+                 等迁移工具能按原主体重新验证后再处理"
             );
         }
         Ok(())
@@ -789,6 +1174,143 @@ impl Engine {
 }
 
 /// 一轮对话开始前从远端取回来的会话上下文。
+fn merge_pending_history(
+    history: &mut crate::remote::RemoteSession,
+    pending: Vec<NewEpisodeRequest>,
+    session_id: &str,
+) {
+    let mut seen = std::collections::HashSet::new();
+    history
+        .episodes
+        .retain(|episode| seen.insert(episode.id.clone()));
+    for episode in pending {
+        if episode.session_id != session_id
+            || !matches!(episode.role.as_str(), "user" | "assistant")
+            || !seen.insert(episode.id.clone())
+        {
+            continue;
+        }
+        history.episodes.push(crate::remote::RemoteHistoryEpisode {
+            text: crate::owner_journal::history_text(&episode),
+            id: episode.id,
+            is_user: episode.role == "user",
+            occurred_at: episode
+                .occurred_at
+                .as_deref()
+                .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+                .map(|date| date.with_timezone(&chrono::Utc)),
+        });
+    }
+    // 都有时间证据才跨来源排序；旧数据缺日期时保留既有正序，再接 journal 正序。
+    if history
+        .episodes
+        .iter()
+        .all(|episode| episode.occurred_at.is_some())
+    {
+        history.episodes.sort_by_key(|episode| episode.occurred_at);
+    }
+}
+
+#[cfg(test)]
+mod pending_history_tests {
+    use super::*;
+    use crate::remote::{RemoteHistoryEpisode, RemoteSession};
+
+    fn pending(id: &str, session: &str, text: &str, at: Option<&str>) -> NewEpisodeRequest {
+        serde_json::from_value(serde_json::json!({"id":id,"session_id":session,"role":"user","text":text,"occurred_at":at}))
+            .expect("合规的待同步 episode")
+    }
+
+    fn remote(id: &str, text: &str, at: Option<&str>) -> RemoteHistoryEpisode {
+        RemoteHistoryEpisode {
+            id: id.into(),
+            is_user: true,
+            text: text.into(),
+            occurred_at: at
+                .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+                .map(|date| date.with_timezone(&chrono::Utc)),
+        }
+    }
+
+    #[test]
+    fn pending_is_not_lost_when_remote_history_succeeds_or_is_new() {
+        for remote_present in [false, true] {
+            let mut history = RemoteSession::default();
+            if remote_present {
+                history.episodes.push(remote("remote", "旧消息", None));
+            }
+            merge_pending_history(
+                &mut history,
+                vec![pending("pending", "s", "本机已保存的上一轮", None)],
+                "s",
+            );
+            assert!(
+                history
+                    .episodes
+                    .iter()
+                    .any(|episode| episode.id == "pending"),
+                "远端200或合法新会话空历史都不能丢掉已提交的 pending 正文"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_uses_episode_identity_not_repeated_text_or_other_session() {
+        let mut history = RemoteSession {
+            episodes: vec![remote("remote", "重复正文", None)],
+            ..Default::default()
+        };
+        merge_pending_history(
+            &mut history,
+            vec![
+                pending("remote", "s", "重复正文", None),
+                pending("different-id", "s", "重复正文", None),
+                pending("other", "other-session", "不能读到", None),
+            ],
+            "s",
+        );
+        assert_eq!(
+            history
+                .episodes
+                .iter()
+                .map(|episode| episode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["remote", "different-id"],
+            "ACK丢失同id去重，但不同id的合法重复文字必须保留，其他session不得混入"
+        );
+    }
+
+    #[test]
+    fn merged_timeline_keeps_pending_between_remote_messages() {
+        let mut history = RemoteSession {
+            episodes: vec![
+                remote("first", "先前", Some("2026-01-01T00:00:00Z")),
+                remote("last", "另一设备后来的消息", Some("2026-01-01T00:00:02Z")),
+            ],
+            ..Default::default()
+        };
+        merge_pending_history(
+            &mut history,
+            vec![pending(
+                "middle",
+                "s",
+                "离线消息",
+                Some("2026-01-01T00:00:01Z"),
+            )],
+            "s",
+        );
+        assert_eq!(
+            history
+                .episodes
+                .iter()
+                .map(|episode| episode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "middle", "last"],
+            "不能把发生在中间的已保存消息挪到远端最新消息之后"
+        );
+    }
+}
+
 struct SessionContext {
     history: cortex_core::history::FittedHistory,
     /// 容器工作区卷里的子目录名。`None` = 卷根（默认，也是桌面端唯一的情况）。
@@ -798,12 +1320,16 @@ struct SessionContext {
 /// 会话 → 后台命令簿。见 `Engine::background`。
 #[derive(Clone, Default)]
 pub struct BackgroundBooks(
-    Arc<std::sync::Mutex<std::collections::HashMap<String, cortex_agent::background::Tasks>>>,
+    Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<RunPrincipalKey, cortex_agent::background::Tasks>,
+        >,
+    >,
 );
 
 impl BackgroundBooks {
     /// 拿这条会话那本（没有就开一本）。
-    fn for_session(&self, session_id: &str) -> cortex_agent::background::Tasks {
+    fn for_session(&self, key: &RunPrincipalKey) -> cortex_agent::background::Tasks {
         let mut m = match self.0.lock() {
             Ok(m) => m,
             // 锁坏了（另一个线程 panic 过）就给一本新的：后台任务不是
@@ -811,13 +1337,13 @@ impl BackgroundBooks {
             // 是把一次可恢复的意外升级成事故
             Err(_) => return cortex_agent::background::Tasks::default(),
         };
-        m.entry(session_id.to_string()).or_default().clone()
+        m.entry(key.clone()).or_default().clone()
     }
 }
 
 /// 会话 → 任务清单。见 `Engine::todos`。
 #[derive(Clone, Default)]
-pub struct Todos(Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>);
+pub struct Todos(Arc<std::sync::Mutex<std::collections::HashMap<RunPrincipalKey, String>>>);
 
 impl Todos {
     /// `todo_write` 的正文上限。清单是**每轮**都注入上下文的常驻开销，
@@ -825,15 +1351,15 @@ impl Todos {
     /// 该让模型写进文件里
     const MAX_CHARS: usize = 5_000;
 
-    pub fn get(&self, session_id: &str) -> Option<String> {
+    pub fn get(&self, key: &RunPrincipalKey) -> Option<String> {
         self.0
             .lock()
             .ok()
-            .and_then(|m| m.get(session_id).cloned())
+            .and_then(|m| m.get(key).cloned())
             .filter(|s| !s.trim().is_empty())
     }
 
-    pub(crate) fn set(&self, session_id: &str, content: &str) -> Result<usize, String> {
+    pub(crate) fn set(&self, key: &RunPrincipalKey, content: &str) -> Result<usize, String> {
         let n = content.chars().count();
         if n > Self::MAX_CHARS {
             return Err(format!(
@@ -843,11 +1369,241 @@ impl Todos {
         }
         if let Ok(mut m) = self.0.lock() {
             if content.trim().is_empty() {
-                m.remove(session_id);
+                m.remove(key);
             } else {
-                m.insert(session_id.to_string(), content.to_string());
+                m.insert(key.clone(), content.to_string());
             }
         }
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod credential_fence_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_switch_cancels_an_already_running_turn() {
+        let remote = Remote::new("http://127.0.0.1:1", Some("account-a-token".into())).unwrap();
+        let account = PrincipalNamespace::from_verified("deployment", "user-a").unwrap();
+        remote.bind_principal(&account).unwrap();
+        let changes = remote.token_generation();
+        let expected = *changes.borrow();
+        let expected_epoch = remote
+            .credential_snapshot()
+            .expect("已绑定账号应能读取凭据快照")
+            .principal_epoch();
+        let turn_dropped = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&turn_dropped);
+        let verifier = remote.clone();
+        let running = tokio::spawn(async move {
+            run_until_credential_change(
+                verifier,
+                changes,
+                expected,
+                expected_epoch,
+                Some(account),
+                async move {
+                    let _drop_flag = DropFlag(flag);
+                    std::future::pending::<Result<()>>().await
+                },
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        remote.set_token(Some("account-b-token".into()));
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), running)
+            .await
+            .expect("凭据切换必须立即唤醒运行中的 turn")
+            .expect("监听任务没有 panic")
+            .expect_err("运行中切换账号必须取消原 turn");
+
+        assert!(matches!(error, CortexError::Unauthorized(_)));
+        assert!(
+            turn_dropped.load(Ordering::SeqCst),
+            "run_turn future 必须真的被 drop，而不是只在旁边报一条错误"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_account_token_refresh_does_not_cancel_a_running_turn() {
+        let remote = Remote::new("http://127.0.0.1:1", Some("account-a-old-token".into())).unwrap();
+        let account = PrincipalNamespace::from_verified("deployment", "user-a").unwrap();
+        remote.bind_principal(&account).unwrap();
+        let changes = remote.token_generation();
+        let expected = *changes.borrow();
+        let expected_epoch = remote
+            .credential_snapshot()
+            .expect("已绑定账号应能读取凭据快照")
+            .principal_epoch();
+        let (release, wait_release) = tokio::sync::oneshot::channel::<()>();
+        let running = tokio::spawn({
+            let remote = remote.clone();
+            let account = account.clone();
+            async move {
+                run_until_credential_change(
+                    remote,
+                    changes,
+                    expected,
+                    expected_epoch,
+                    Some(account),
+                    async move {
+                        wait_release.await.expect("测试会主动放行");
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        });
+
+        tokio::task::yield_now().await;
+        remote
+            .set_token_for_principal("account-a-new-token".into(), &account)
+            .expect("同账号续期必须被接受");
+        assert!(!running.is_finished(), "同账号刷新不应把正在运行的一轮取消");
+        release.send(()).expect("运行中的任务仍在等待");
+        running
+            .await
+            .expect("监听任务没有 panic")
+            .expect("同账号续期后原任务应正常结束");
+    }
+
+    #[tokio::test]
+    async fn a_to_b_to_a_cannot_revive_the_previous_login_scope() {
+        let remote = Remote::new("http://127.0.0.1:1", Some("account-a-old-token".into())).unwrap();
+        let account_a = PrincipalNamespace::from_verified("deployment", "user-a").unwrap();
+        let account_b = PrincipalNamespace::from_verified("deployment", "user-b").unwrap();
+        remote.bind_principal(&account_a).unwrap();
+        let changes = remote.token_generation();
+        let expected_generation = *changes.borrow();
+        let expected_epoch = remote
+            .credential_snapshot()
+            .expect("已绑定账号应能读取凭据快照")
+            .principal_epoch();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let running = tokio::spawn({
+            let remote = remote.clone();
+            let started = Arc::clone(&started);
+            let dropped = Arc::clone(&dropped);
+            let account_a = account_a.clone();
+            async move {
+                run_until_credential_change(
+                    remote,
+                    changes,
+                    expected_generation,
+                    expected_epoch,
+                    Some(account_a),
+                    async move {
+                        let _drop_flag = DropFlag(dropped);
+                        started.notify_one();
+                        std::future::pending::<Result<()>>().await
+                    },
+                )
+                .await
+            }
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+            .await
+            .expect("原 A 任务应先开始运行");
+        remote.set_token(Some("account-b-token".into()));
+        remote.bind_principal(&account_b).unwrap();
+        remote.set_token(Some("account-a-new-token".into()));
+        remote.bind_principal(&account_a).unwrap();
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), running)
+            .await
+            .expect("A→B→A 必须立即唤醒旧轮次")
+            .expect("监听任务没有 panic")
+            .expect_err("账号名恢复成 A 也不能让旧登录作用域复活");
+        assert!(matches!(error, CortexError::Unauthorized(_)));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "旧登录作用域的 run future 必须真的被 drop"
+        );
+    }
+}
+
+#[cfg(test)]
+mod principal_scoped_books {
+    use super::*;
+
+    fn key(user: &str, token: &str, generation: u64) -> RunPrincipalKey {
+        RunPrincipal::for_test("deployment", user, "shared-session", token, generation)
+            .key()
+            .clone()
+    }
+
+    #[test]
+    fn todo_lists_are_isolated_by_account_and_survive_same_account_renewal() {
+        let books = Todos::default();
+        let a_old = key("user-a", "a-old", 1);
+        let a_new = key("user-a", "a-new", 2);
+        let b = key("user-b", "b-token", 1);
+
+        books
+            .set(&a_old, "- [ ] A 的任务")
+            .expect("A 的任务清单应能写入");
+        books
+            .set(&b, "- [ ] B 的任务")
+            .expect("B 的任务清单应能写入");
+
+        assert_eq!(
+            books.get(&a_old).as_deref(),
+            Some("- [ ] A 的任务"),
+            "A 读回了错误的任务清单"
+        );
+        assert_eq!(
+            books.get(&a_new).as_deref(),
+            Some("- [ ] A 的任务"),
+            "同一账号续期后不应丢失原任务清单"
+        );
+        assert_eq!(
+            books.get(&b).as_deref(),
+            Some("- [ ] B 的任务"),
+            "同一个 session id 在 B 账号下读到了 A 的清单"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_tasks_are_isolated_by_account_and_survive_same_account_renewal() {
+        let books = BackgroundBooks::default();
+        let a_old = key("user-a", "a-old", 1);
+        let a_new = key("user-a", "a-new", 2);
+        let b = key("user-b", "b-token", 1);
+        let task = tokio::spawn(std::future::pending::<()>());
+
+        books
+            .for_session(&a_old)
+            .open("job-a", "keep-running", task.abort_handle())
+            .expect("A 的后台任务应能登记");
+
+        assert!(
+            books.for_session(&a_old).get("job-a").is_some(),
+            "A 读取不到自己的后台任务"
+        );
+        assert!(
+            books.for_session(&a_new).get("job-a").is_some(),
+            "同一账号续期后不应丢失原后台任务簿"
+        );
+        assert!(
+            books.for_session(&b).get("job-a").is_none(),
+            "同一个 session id 在 B 账号下读到了 A 的后台任务"
+        );
+
+        task.abort();
     }
 }

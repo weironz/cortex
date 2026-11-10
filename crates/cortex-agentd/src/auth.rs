@@ -301,6 +301,11 @@ pub async fn require(State(st): State<AgentState>, req: Request, next: Next) -> 
         return next.run(req).await;
     }
 
+    // 严格 principal 的路由级 `no-store` 只能覆盖已经进入 handler 的响应。
+    // 无效 access token 与越权委托凭据会在本中间件提前返回，因此这里也必须
+    // 给同一条路径的拒绝响应封口；否则未知 token 的 401 仍可能被共享代理缓存。
+    let principal_route = req.uri().path() == "/auth/computer-use-principal";
+
     // 1) 常规路径：Authorization: Bearer
     let bearer = req
         .headers()
@@ -349,13 +354,20 @@ pub async fn require(State(st): State<AgentState>, req: Request, next: Next) -> 
                 owner = %scope.owner, session = %scope.session_id, %method, %path,
                 "委托令牌够不到这条路由"
             );
-            return (
+            let mut response = (
                 StatusCode::FORBIDDEN,
                 axum::Json(cortex_proto::dto::ErrorBody::new(format!(
                     "这把委托凭据不允许访问 {method} {path}"
                 ))),
             )
                 .into_response();
+            if principal_route {
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("no-store"),
+                );
+            }
+            return response;
         }
     }
 
@@ -369,7 +381,7 @@ pub async fn require(State(st): State<AgentState>, req: Request, next: Next) -> 
     // 不区分「没带凭据」与「凭据不对」：分开报等于给暴力破解一个进度条。
     // WWW-Authenticate 照给 —— 那是 401 的标准形状，客户端据此知道该带什么
     tracing::debug!(path = %req.uri().path(), "未通过认证");
-    (
+    let mut response = (
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, "Bearer realm=\"cortexd\"")],
         axum::Json(cortex_proto::dto::ErrorBody::new(
@@ -377,7 +389,14 @@ pub async fn require(State(st): State<AgentState>, req: Request, next: Next) -> 
              或对加不了请求头的连接使用 POST /auth/ticket 换到的 ?ticket=",
         )),
     )
-        .into_response()
+        .into_response();
+    if principal_route {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
+    response
 }
 
 /// 从查询串里取 `ticket=`。

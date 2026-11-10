@@ -1,0 +1,106 @@
+{
+  "date": "2026-11-09",
+  "scope": "input_epoch_backend_wip_not_production_recovery",
+  "source_hash_scope": "selected_26_modules_not_entire_workspace",
+  "source_files": {
+    "crates/computer-dispatch-ledger/src/lib.rs": "0e551e70b926a7f7577e0e059524ebe49287d8a7bf59c2f0cd7632ef8de67918",
+    "crates/computer-dispatch-ledger/src/epoch.rs": "e7a25ee6becd5afda67275f51098915d9d511d5c41fcfb1676324aafa81ad1d6",
+    "crates/computer-dispatch-ledger/src/epoch_storage.rs": "ecd8836d325b4652c87b8a2980da3e4cd7817b5410b12c97b636b66d928a3736",
+    "crates/computer-dispatch-ledger/src/storage.rs": "e2c0c80692c695e3d9d6b083a787c66f1924a0f9ed008ccd3b8b508aa4a14258",
+    "crates/computer-dispatch-ledger/tests/epoch_recovery.rs": "d8051b10a059bdfe7091b0e94f48de3d1709bd0999387826f2d4d7552ed34034",
+    "crates/cortex-agent/src/computer_dispatch.rs": "82a23eab879aae8f8f61b58750d57278c19ba3b276c3f4af58bcf6f9b8427ef1",
+    "crates/cortex-agent/src/computer_driver.rs": "6b34a5b71d59c43c363c6212890e3f6d3b21a4da87f419f0776bedad4b91fab8",
+    "crates/cortex-local/src/main.rs": "40a6c807c76ddd4ebd9753268914c346274b686e6cc2706afd3bef907fa92157",
+    "crates/cortex-local/src/computer_input.rs": "fcd32298a7b4dd754fb07dfde23d4ec126c9003d219980358587f4eed6a91305",
+    "crates/cortex-local/src/computer_input_test.rs": "f80928fae5af49b04af2d95e3ed2adf10baeb12eb3b33679a50049bea31cfb3f",
+    "crates/cortex-local/src/computer_input_lease.rs": "ddad7bddc9c7d8928f1885dbabf8508b65c429911ac93cd3dc3192c91605ec8f",
+    "crates/cortex-local/src/computer_owned_job.rs": "21c207055051d5871bf8de656e093780aa57840d090e9b73eb922f5026fc4972",
+    "crates/cortex-local/src/computer_cua_runtime.rs": "c7ef70fc3a703a2da9d52995282c486d0641e60bcf7110903554ba53be919a7a",
+    "crates/cortex-local/src/computer_cua_transport.rs": "d14bc7dc797d71c0fe8aeb68c4043def8c3c80e6f27b7f9e97ecebb9e990eaaa",
+    "crates/cortex-local/src/computer_cua.rs": "1fc5815ac795da46509b8ccaec8c5246469c1019a9fb3fe4775b90257799888e",
+    "crates/cortex-local/src/computer_browser.rs": "eadb99ba753098a6bff27678947434d705305564bd5e9a830e888e06ca12d490",
+    "crates/cortex-local/src/computer_browser_owned_job_test.rs": "37e5aec55a9e6c2069d15443c40fb7804c7b10c8551ff3eca61fd2f32df9d391",
+    "crates/cortex-local/src/computer_ledger.rs": "6825cf26d64d6d9657102b698eddfa7fe1fe277235dd320c08a6b7d1db3d8a2f",
+    "crates/cortex-local/src/computer_ledger_test.rs": "9d0cc99b9a8bddc046b02d593498b53a1f38a3a23b8eb4ca187363268862857c",
+    "crates/cortex-local/src/computer_ledger_authority.rs": "003529a5baf57a55d284061b2629daae211f4cf7a11aa29b622a6833c7c8733b",
+    "crates/cortex-local/src/computer_ledger_windows.rs": "d638ef7dee73f7af4f6be184393e334bfe239b58cc2db8047d5008fd5150d61b",
+    "crates/cortex-local/src/computer_ledger_unix.rs": "cc20423c06a2d6ab044ff6eb9fe5f13de8e9d249b396d20db102e62a81c99d96",
+    "crates/cortex-local/src/computer_ledger_provision.rs": "8c996efb98b00d2b53e07391c65427fb0df00f82db4f6e3299f619af49a2c95e",
+    "crates/cortex-local/src/computer_ledger_provision_test.rs": "e362adfc8dfddba9f272f3842c0721675b290d7da59dc89e5eb74848305db148",
+    "crates/cortex-local/src/computer_ledger_authority_test.rs": "4fccf613f3a12471363b8852ea56125c4bb65a7c3860f61f7b66cb634e2e0444",
+    "crates/cortex-local/src/computer_http_fixture_test.rs": "370558125e760bf3f5a5033c199e7f46bd9a7c2524b65c721fa3b0646ecc3987"
+  },
+  "test_binary_sha256": "3ae3d25495645fff87261904b032a4eebb3cee90bbb294105d432f71cc2b551c",
+  "core": {
+    "passed": 50,
+    "ignored": 2
+  },
+  "agent_send_authority": {
+    "passed": 2
+  },
+  "agent_unit_full": {
+    "passed": 220,
+    "failed": 0,
+    "ignored": 0,
+    "log": "target/input-epoch-agent-full.log"
+  },
+  "agent_gateway_fake": {
+    "passed": 27,
+    "failed": 0,
+    "log": "target/input-epoch-agent-gateway.log"
+  },
+  "driver_pin": {
+    "version": "0.38.0",
+    "sha256": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2"
+  },
+  "local_full": {
+    "passed": 630,
+    "failed": 0,
+    "ignored": 24,
+    "log": "target/input-epoch-fourth-local-full.log"
+  },
+  "real_http": {
+    "passed": true,
+    "seconds": 32.07,
+    "scope": "fake_model_remote_automatic_approval_real_http_owner_host_gateway_cua_private_authority",
+    "artifact_directory": "target/computer-http-fixture-FBBu8d",
+    "log": "target/input-epoch-real-http.log",
+    "ledger": {
+      "states": {
+        "verified": 1
+      },
+      "fences": 0,
+      "pending": false,
+      "epoch": 1,
+      "phase": "active"
+    },
+    "original_jobs_closed_and_drained": true,
+    "cleanup": {
+      "daemon_socket_closed": true,
+      "daemon_stopped": true,
+      "fixture_stopped": true,
+      "scope": "fake_model_remote_real_http_host_driver",
+      "worker_stopped": true
+    }
+  },
+  "real_browser": {
+    "passed": true,
+    "seconds": 0.74,
+    "scope": "signed_isolated_headless_about_blank_observation_and_job_close_only",
+    "log": "target/input-epoch-real-browser-blank.log"
+  },
+  "strict_ci_passed": false,
+  "compile_check": {
+    "exit_code": 0,
+    "command": "cargo check --workspace --all-targets --all-features",
+    "log": "target/input-epoch-final-check.log",
+    "warnings": "production recovery flow not wired; dead code remains"
+  },
+  "format_check_passed": true,
+  "documentation_check_passed": true,
+  "user_recovery_api_ui_implemented": false,
+  "trusted_legacy_anchor_upgrade_implemented": false,
+  "production_ga": false,
+  "committed": false,
+  "published": false
+}

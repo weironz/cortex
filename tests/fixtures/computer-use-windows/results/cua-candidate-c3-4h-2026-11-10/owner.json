@@ -1,0 +1,17 @@
+{
+    "source_changed":  false,
+    "log":  "C:\\Users\\willz\\AppData\\Local\\Temp\\cortex-owned-steady-7fd5be5570144e08b9ca83a373609469\\child.log",
+    "run_id":  "6e177fde242a46e68636af4fd0b6bacc",
+    "original_job_drained":  true,
+    "sources":  {
+                    "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\readonly-ab\\cua-readonly-ab.ps1":  "63d26430d53b30d41f1b9437e31a5b2ff9c0c07a44f01d876bcde68086ca2993",
+                    "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\readonly-ab\\run-owned-steady.ps1":  "729a2f89be20d733ff0d1236c831cea9d78791713fd9bfd8bf58620a5c8eeb28",
+                    "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\readonly-ab\\owned-job.cs":  "3d9dae299f9336a3e47a25bbdfc4077c7dd961b9e9399299a190d3d87b248386",
+                    "D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\readonly-ab\\cua-readonly-steady.ps1":  "bc4c2dc1afa51dff4e5f5a6774e22c08507fbb90af10688c28e9ee6d1f51cfa6"
+                },
+    "scope":  "owned_cua_steady_wrapper",
+    "helper_sha256":  "3d9dae299f9336a3e47a25bbdfc4077c7dd961b9e9399299a190d3d87b248386",
+    "schema":  2,
+    "child_pid":  49560,
+    "child_exit_code":  0
+}

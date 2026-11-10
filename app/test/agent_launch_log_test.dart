@@ -73,6 +73,61 @@ void main() {
     }
   });
 
+  test('prepared 只记录配置准备与托管模式，不冒充 daemon ready', () {
+    log.computerUse(outcome: 'prepared', ms: 12, runtimeOwner: 'agent');
+    final row = read().single;
+    expect(row['ev'], 'computer-use');
+    expect(row['outcome'], 'prepared');
+    expect(row['runtime_owner'], 'agent');
+    expect(row['ms'], 12);
+    expect(
+      row.keys,
+      unorderedEquals(['t', 'ev', 'outcome', 'ms', 'runtime_owner']),
+    );
+    expect(row.containsKey('pid'), isFalse, reason: '准备配置不证明 daemon 或 Job 已就绪');
+  });
+
+  test('Computer Use sidecar 结果记录耗时与错误，但不记录路径', () {
+    log.computerUse(
+      outcome: 'failed',
+      ms: 4001,
+      error:
+          "无法读取 'C:\\Users\\O'Brien\\Secret Folder\\manifest.json'；"
+          r'pipe=\\.\pipe\cortex-cua-secret；'
+          'Bearer secret-token；https://example.test/?q=private',
+    );
+
+    final row = read().single;
+    expect(row['ev'], 'computer-use');
+    expect(row['outcome'], 'failed');
+    expect(row['ms'], 4001);
+    final error = row['error']! as String;
+    expect(error, contains('<path>'));
+    expect(error, isNot(contains("O'Brien")));
+    expect(error, isNot(contains('Brien')));
+    expect(error, isNot(contains('cortex-cua-secret')));
+    expect(error, isNot(contains('secret-token')));
+    expect(error, isNot(contains('example.test')));
+    expect(
+      row.keys,
+      unorderedEquals(['t', 'ev', 'outcome', 'ms', 'error']),
+      reason: '诊断记录不能偷偷带出 allowlist、socket 或驱动路径',
+    );
+  });
+
+  test('清理失败单独落盘，并保持错误脱敏', () {
+    log.cleanupFailed(
+      component: 'computer-use',
+      error: r'命名管道 \\.\pipe\cortex-secret 仍有进程占用',
+    );
+
+    final row = read().single;
+    expect(row['ev'], 'cleanup-failed');
+    expect(row['component'], 'computer-use');
+    expect(row['error'], contains('<path>'));
+    expect(row['error'], isNot(contains('cortex-secret')));
+  });
+
   test('stderr 尾部只留最后几行，且超长的一行会截断', () {
     final many = List.generate(40, (i) => 'line$i').join('\n');
     log.exited(code: 101, expected: false, tail: '$many\n${'x' * 900}');

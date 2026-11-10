@@ -1,0 +1,62 @@
+{
+    "schemaVersion":  1,
+    "suite":  "cortex-computer-use-windows-e2e",
+    "scope":  "harness_only",
+    "scopeDescription":  "PowerShell + UIA/CDP application harness; this report does not represent the Cortex model, confirmation, Gateway or trace path",
+    "generatedAt":  "2026-11-02T08:34:12.4998826+00:00",
+    "durationMs":  10041,
+    "host":  {
+                 "computerName":  "WILLOPTPC",
+                 "os":  "Microsoft Windows NT 10.0.26300.0",
+                 "sessionId":  2,
+                 "displayCount":  1,
+                 "displays":  [
+                                  {
+                                      "deviceName":  "\\\\.\\DISPLAY1",
+                                      "primary":  true,
+                                      "bounds":  {
+                                                     "y":  0,
+                                                     "width":  2560,
+                                                     "height":  1440,
+                                                     "x":  0
+                                                 }
+                                  }
+                              ]
+             },
+    "execution":  {
+                      "isolation":  "one Windows Job Object per task (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)",
+                      "ui":  "PowerShell + Windows UI Automation",
+                      "appAllowlist":  "exact executable paths plus process-scoped UIA roots",
+                      "resultPolicy":  "only executed checks may pass; unavailable dependencies are skipped with a reason"
+                  },
+    "summary":  {
+                    "total":  1,
+                    "pass":  0,
+                    "fail":  1,
+                    "skipped":  0
+                },
+    "tasks":  [
+                  {
+                      "id":  "excel-edit-save-cell",
+                      "family":  "excel",
+                      "application":  "Microsoft Excel",
+                      "status":  "fail",
+                      "reason":  "Excel foreground-proven keyboard edit or save failed: 使用“1”个参数调用“SendVirtualKey”时发生异常:“SendInput could not deliver every keyboard event.”\n在 Assert-ForegroundOwnership、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 1163 行\r\n在 Invoke-ExcelAction、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 4511 行\r\n在 Invoke-AcceptanceTask、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 4758 行\r\n在 Invoke-WorkerMode、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 4840 行\r\n在 \u003cScriptBlock\u003e、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 5139 行",
+                      "timeoutSeconds":  90,
+                      "allowlist":  [
+                                        "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE"
+                                    ],
+                      "verifier":  null,
+                      "details":  {
+                                      "exceptionType":  "System.Management.Automation.RuntimeException",
+                                      "scriptStackTrace":  "在 Invoke-ExcelAction、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 4627 行\r\n在 Invoke-AcceptanceTask、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 4758 行\r\n在 Invoke-WorkerMode、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 4840 行\r\n在 \u003cScriptBlock\u003e、D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1 中: 第 5139 行",
+                                      "failurePosition":  "所在位置 D:\\codes\\cortex\\tests\\fixtures\\computer-use-windows\\e2e.ps1:4625 字符: 17\r\n+                 throw (\r\n+                 ~~~~~~~"
+                                  },
+                      "cleanup":  [
+                                      "worker exception captured"
+                                  ],
+                      "startedAt":  "2026-11-02T08:34:13.4563448+00:00",
+                      "durationMs":  8940
+                  }
+              ]
+}

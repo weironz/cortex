@@ -56,6 +56,8 @@ declare -A EXEMPT=(
     # ignored 手动实测仪的打火石。`#[ignore]` 已经挡住了默认路径，
     # 透进生产容器等于给一条没人该用的测量路径开灯，与 CORTEX_DEV_LOGIN 同形。
     [CORTEX_RUN_TTFP_MEASURE]="ignored 手动实测仪的打火石，生产刻意不透"
+    # 仅测试二进制用来识别独立的配额测试子进程，生产不读取。
+    [CORTEX_TEST_QUOTA_ISOLATED_CHILD]="测试子进程标记，生产刻意不透"
 )
 
 # ── 代码读了哪些 ──────────────────────────────────────────

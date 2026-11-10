@@ -2,8 +2,8 @@
 # Deploy workflow 的本机备用入口。
 #
 # 用法：
-#   scripts/deploy-workflow-local.sh 0.1.44
-#   scripts/deploy-workflow-local.sh 0.1.44 --dry-run
+#   scripts/deploy-workflow-local.sh 0.1.45
+#   scripts/deploy-workflow-local.sh 0.1.45 --dry-run
 #
 # 部署机制取自当前默认分支 main；tag 上那份 deploy/docker-compose.yml 被
 # 单独取出。与 deploy.yml 相同，ansible/ 和应用版本是两条独立时间线。

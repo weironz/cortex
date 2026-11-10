@@ -22,12 +22,19 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{HeaderMap, Request, StatusCode, header};
 use cortex_agentd::runner::{DirEntry, SandboxHandle, SandboxRunner};
 use cortex_agentd::state::{Accounts, AgentState};
 use cortex_agentd::{auth::AuthMode, routes};
 use cortex_core::Result;
 use tower::ServiceExt as _;
+
+/// 同一个测试二进制里的多个用例会并行调用 [`app`]。
+///
+/// migration 不是可并发启动的幂等操作：两个连接同时初始化公共 schema 时，
+/// 一个会看到另一个尚未提交的中间状态，表现为用户名冲突或 `public` 不存在。
+/// 这里只串行化装配阶段；拿到 router 后各用例仍然并行执行。
+static APP_SETUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 被调到就 panic 的 Runner。冒烟不碰沙箱；碰到就是装配漏了。
 struct PanicRunner;
@@ -80,6 +87,10 @@ pub struct TestApp {
     pub router: Router,
     pub store: cortex_store::Store,
     pub accounts: cortex_agentd::state::Accounts,
+    pub state: AgentState,
+    /// 用 `AuthMode::Token` 装配时，可绕过前置中间件、但不能通过严格
+    /// Computer Use principal 校验的预共享 token。
+    pub psk: Option<String>,
 }
 
 impl TestApp {
@@ -130,7 +141,21 @@ fn database_url() -> Option<String> {
 /// `public` 里的，顺序反了会炸在「type ulid does not exist」这种看着像
 /// 数据库坏掉的错上。
 pub async fn app() -> Option<TestApp> {
+    let (psk, auth) = test_auth_mode();
+    app_with_auth(Some(psk), auth).await
+}
+
+/// 用 `AuthMode::Disabled` 装配的同一个真库 router。
+///
+/// 部分严格认证用例必须证明：前置中间件即使整层短路，handler 自己仍会
+/// fail closed，而不是把 disabled 当成匿名 owner。
+pub async fn app_with_disabled_auth() -> Option<TestApp> {
+    app_with_auth(None, AuthMode::Disabled).await
+}
+
+async fn app_with_auth(psk: Option<String>, auth: AuthMode) -> Option<TestApp> {
     let url = database_url()?;
+    let _setup = APP_SETUP_LOCK.lock().await;
     let store = cortex_store::Store::connect(&url)
         .await
         .expect("连得上测试库");
@@ -151,14 +176,16 @@ pub async fn app() -> Option<TestApp> {
         None,
         // AuthMode::Disabled 的话中间件整层短路，连「匿名被拒」都验不到；
         // 给一把没人知道的 digest，门是真的在
-        test_auth_mode(),
+        auth,
         None,
     );
 
     Some(TestApp {
-        router: routes::router(st),
+        router: routes::router(st.clone()),
         store,
         accounts,
+        state: st,
+        psk,
     })
 }
 
@@ -172,11 +199,11 @@ fn set_open_registration_once() {
     });
 }
 
-fn test_auth_mode() -> AuthMode {
-    let (_plain, digest_hex) = cortex_agentd::auth::generate();
+fn test_auth_mode() -> (String, AuthMode) {
+    let (plain, digest_hex) = cortex_agentd::auth::generate();
     let raw = hex::decode(digest_hex).expect("摘要应当是合法十六进制");
     let digest: [u8; 32] = raw.try_into().expect("SHA-256 应当是 32 字节");
-    AuthMode::Token { digest }
+    (plain, AuthMode::Token { digest })
 }
 
 impl TestApp {
@@ -189,6 +216,19 @@ impl TestApp {
         bearer: Option<&str>,
         body: Option<serde_json::Value>,
     ) -> (StatusCode, serde_json::Value) {
+        let (status, _headers, json) = self.call_with_headers(method, path, bearer, body).await;
+        (status, json)
+    }
+
+    /// 与 [`Self::call`] 相同，但保留响应首部，供 `no-store` 一类安全
+    /// 合同断言使用。
+    pub async fn call_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        bearer: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, HeaderMap, serde_json::Value) {
         let mut req = Request::builder().method(method).uri(path);
         if let Some(t) = bearer {
             req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
@@ -208,6 +248,7 @@ impl TestApp {
             .await
             .expect("router 的错误类型是 Infallible");
         let status = resp.status();
+        let headers = resp.headers().clone();
         let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
             .await
             .expect("读响应体不该失败");
@@ -216,7 +257,7 @@ impl TestApp {
         } else {
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
         };
-        (status, json)
+        (status, headers, json)
     }
 
     pub async fn get(&self, path: &str, bearer: Option<&str>) -> (StatusCode, serde_json::Value) {

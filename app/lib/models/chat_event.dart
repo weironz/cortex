@@ -1,5 +1,6 @@
 import 'attachment.dart';
 import 'json.dart';
+import 'message_persistence.dart';
 import 'pending_confirmation.dart';
 
 /// One decoded frame of the `POST /chat` SSE stream.
@@ -67,6 +68,7 @@ sealed class ChatEvent {
       ),
       'done' => ChatDoneEvent(
         asStringOrNull(json['episode_id']),
+        persistence: MessagePersistence.fromWire(json['persistence']),
         models: asStringList(json['models']),
         attachments: asObjectList(
           json['attachments'],
@@ -265,10 +267,12 @@ final class ChatConfirmEvent extends ChatEvent {
 final class ChatDoneEvent extends ChatEvent {
   const ChatDoneEvent(
     this.episodeId, {
+    this.persistence,
     this.models = const [],
     this.attachments = const [],
   });
   final String? episodeId;
+  final MessagePersistence? persistence;
 
   /// 这一轮**先后**是谁写的，按发生顺序。
   ///
