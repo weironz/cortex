@@ -122,6 +122,10 @@ Windows 可先执行 `just test-windows-native-json`，验证 PS 5.1 在 936、4
 本机检查可以不签名，但正式发布不能。生产命令必须加
 `--require-signing`，且证书和 `signtool.exe` 任一缺失都会在编译前失败：
 
+> 2026-11-10 维护者明确授权 0.1.45 临时未签名发布，按本机未签名构建路径完成后
+> 手动上传，并在 Release 说明中告知签名与验收边界。这是本次显式例外，
+> 不改变默认 `workflow-release` 的签名门禁。
+
 ```bash
 export CORTEX_WINDOWS_SIGN_PFX_PATH='C:\secure\cortex-signing.pfx'
 export CORTEX_WINDOWS_SIGN_PFX_PASSWORD='…'

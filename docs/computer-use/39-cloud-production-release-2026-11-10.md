@@ -50,3 +50,6 @@ Git 保留上游源码、补丁及原始验收记录的字节，避免跨平台�
 
 上一版 0.1.44 仍可通过同一 `just workflow-deploy 0.1.44` 流程回退。
 本轮本机验证明细见 [38](38-sqlite-windows-mapped-shm-2026-11-10.md)。
+
+后续同日维护者另行授权的 Windows 临时未签名发布已完成，见
+[40](40-windows-unsigned-release-2026-11-10.md)，不改变本次云端部署的验收范围。

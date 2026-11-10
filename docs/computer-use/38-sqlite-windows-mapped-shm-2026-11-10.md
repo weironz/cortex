@@ -15,7 +15,8 @@
 
 机器可读记录见 [本机收尾结果](../../tests/fixtures/computer-use-windows/results/sqlite-integrated-local-closure-2026-11-10.json)。
 以上是发版前本机收尾记录。随后用户授权云端发布，源码和标签已推送、生产更新到 0.1.45，
-见 [39](39-cloud-production-release-2026-11-10.md)。Windows 安装包未重建或发布，旧包不包含最新改动。
+见 [39](39-cloud-production-release-2026-11-10.md)。该次云端发布当时未更新 Windows 包；
+后续已按维护者授权完成 [临时未签名发布](40-windows-unsigned-release-2026-11-10.md)。
 长测按用户要求取消、第二台 Windows 暂缓，不能当作通过；内存稳态、正式签名、
 真实账号与真人审批及完整安装维护仍未构成生产全面验收。
 

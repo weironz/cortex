@@ -12,7 +12,9 @@
 
 > 2026-11-10 云端生产已更新至 0.1.45，API/Web、数据库、运行镜像身份与未授权
 > principal 拒绝检查通过，来源标签 `v0.1.45` / `903a0c7`。
-> Windows 安装包未发布；见 [云端发布记录](39-cloud-production-release-2026-11-10.md)。
+> Windows 临时未签名版也已按维护者授权发布，见
+> [Windows 发布记录](40-windows-unsigned-release-2026-11-10.md)；
+> [云端发布记录](39-cloud-production-release-2026-11-10.md)。完整安装与长测门槛仍未关闭。
 
 > 2026-11-10 用户明确暂缓第二台 Windows 验收：保留“未执行、未验收”，
 > 不再索取主机别名，也不作为当前本机验证的阻塞；不能计作生产门禁通过。
@@ -286,7 +288,8 @@ SBOM 不能替代代码签名或干净机器安装验收。
 | [36-cua-c3-four-hour-audit-2026-11-10.md](36-cua-c3-four-hour-audit-2026-11-10.md) | C3 只读候选四小时完整性/清理通过，保留内存正趋势；宿主125秒故障根因未确认，增强诊断长测进行中 |
 | [37-canonical-owned-soak-entry-2026-11-10.md](37-canonical-owned-soak-entry-2026-11-10.md) | justfile/旧 soak 入口迁移、可校验监督证据、有界解锁等待；48项无GUI回归与实际60秒通过 |
 | [38-sqlite-windows-mapped-shm-2026-11-10.md](38-sqlite-windows-mapped-shm-2026-11-10.md) | Windows SQLite 1546 backport 已整合；完整本地 CI 2134/1113 与真实 HTTP/Cua 短冒烟通过，长测取消、第二主机暂缓 |
-| [39-cloud-production-release-2026-11-10.md](39-cloud-production-release-2026-11-10.md) | 0.1.45 云端生产部署、公网与镜像身份核对，Windows 安装包未发布 |
+| [39-cloud-production-release-2026-11-10.md](39-cloud-production-release-2026-11-10.md) | 0.1.45 云端生产部署、公网与镜像身份核对；该次部署当时未包含 Windows 安装包 |
+| [40-windows-unsigned-release-2026-11-10.md](40-windows-unsigned-release-2026-11-10.md) | 维护者授权的 Windows 0.1.45 未签名发布、来源/SBOM/下载哈希核对及未验收边界 |
 | [poc-cua-2026-10-27.md](poc-cua-2026-10-27.md) | Cua 0.38.0 Windows 真机结果、性能数据与条件性 go/no-go |
 
 ## 原则
