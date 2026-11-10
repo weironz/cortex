@@ -19,7 +19,9 @@
 > 2026-11-10 Computer Use 本次收尾按用户要求继续本机常规 CI/短冒烟，
 > 不再安排长测，第二台 Windows 验收暂缓。两项保留未验收，不作为本次本机工作的阻塞。
 > SQLite Windows backport 已整合，完整本地 CI Rust 2134 / Flutter 1113、真实 HTTP/Cua
-> 短冒烟通过，见 [本机收尾](computer-use/38-sqlite-windows-mapped-shm-2026-11-10.md)；未发版。
+> 短冒烟通过，见 [本机收尾](computer-use/38-sqlite-windows-mapped-shm-2026-11-10.md)。
+> 随后云端生产已发布 0.1.45，API/Web 与运行镜像身份核对通过；
+> [发布记录](computer-use/39-cloud-production-release-2026-11-10.md)。Windows 安装包未发布。
 
 > **这一节 2026-08-28 提到了最前面。** 它叫「一眼看完」，而它此前排在
 > 180 行分析之后 —— 一份「接下来做什么」的文档，最该被一眼看到的东西
