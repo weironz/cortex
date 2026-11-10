@@ -1,6 +1,6 @@
 //! 旧 trace 无法表达结果时的保守不完整标记。
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::OpenOptionsExt as _;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt as _;

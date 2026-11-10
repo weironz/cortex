@@ -20,7 +20,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
+#[cfg(windows)]
+use std::io::{Seek, SeekFrom};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -273,6 +275,7 @@ fn browser_executable_from_env() -> Result<ValidatedBrowserExecutable, String> {
     Err("Cortex 隔离浏览器目前只支持 Windows".to_owned())
 }
 
+#[cfg(windows)]
 fn validate_browser_executable(path: &Path) -> Result<ValidatedBrowserExecutable, String> {
     if !path.is_file() {
         return Err(format!("浏览器可执行文件不存在：{}", path.display()));

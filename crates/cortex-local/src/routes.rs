@@ -876,33 +876,40 @@ async fn computer_surface(local_desktop: bool) -> (bool, bool, bool) {
     if !local_desktop {
         return (false, false, false);
     }
-    // 已有的 Cua status 探针也包含签名/文件 IO；放在阻塞线程的独立 runtime，
-    // health 所在线程只等待结果。这里不增加任何 driver 探测种类。
-    static SURFACE: std::sync::OnceLock<
-        std::sync::Arc<crate::read_only_probe::ReadOnlyProbe<(bool, bool, bool)>>,
-    > = std::sync::OnceLock::new();
-    SURFACE
-        .get_or_init(|| std::sync::Arc::new(crate::read_only_probe::ReadOnlyProbe::new()))
-        .read(|| {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(_) => return (false, false, false),
-            };
-            runtime.block_on(async {
-                let configured =
-                    crate::computer_cua::runtime_ready().await && crate::computer_cua::configured();
-                (
-                    configured,
-                    configured && crate::computer_cua::actions_enabled(),
-                    crate::computer_browser::runtime_ready(),
-                )
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        (false, false, false)
+    }
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        // 已有的 Cua status 探针也包含签名/文件 IO；放在阻塞线程的独立 runtime，
+        // health 所在线程只等待结果。这里不增加任何 driver 探测种类。
+        static SURFACE: std::sync::OnceLock<
+            std::sync::Arc<crate::read_only_probe::ReadOnlyProbe<(bool, bool, bool)>>,
+        > = std::sync::OnceLock::new();
+        SURFACE
+            .get_or_init(|| std::sync::Arc::new(crate::read_only_probe::ReadOnlyProbe::new()))
+            .read(|| {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(_) => return (false, false, false),
+                };
+                runtime.block_on(async {
+                    let configured = crate::computer_cua::runtime_ready().await
+                        && crate::computer_cua::configured();
+                    (
+                        configured,
+                        configured && crate::computer_cua::actions_enabled(),
+                        crate::computer_browser::runtime_ready(),
+                    )
+                })
             })
-        })
-        .await
-        .unwrap_or_default()
+            .await
+            .unwrap_or_default()
+    }
 }
 
 /// 流式对话。**循环与工具跑在本机。**
